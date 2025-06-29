@@ -1,7 +1,7 @@
 //! # Audio Samples
 //!
 //! A high-performance audio processing library for Rust with Python bindings.
-//! 
+//!
 //! This library provides a comprehensive set of tools for working with audio data,
 //! including type-safe sample format conversions, statistical analysis, and various
 //! audio processing operations.
@@ -26,35 +26,32 @@
 //!
 //! assert_eq!(audio.sample_rate(), 44100);
 //! assert_eq!(audio.channels(), 1);
-//! assert_eq!(audio.duration_samples(), 5);
+//! assert_eq!(audio.samples_per_channel(), 5);
 //! ```
 
 use bytemuck::NoUninit;
 use i24::I24DiskMethods;
 use num_traits::{ToBytes, Zero};
 mod error;
-mod operations;
-// mod spectral;
-// mod conversion;
-// mod generation;
-// mod harmonics;
-// mod io;
-// mod mag_scaling;
-// mod phase;
-// mod pitch;
-// mod resampling;
-// mod utils;
-// mod python;
+pub mod operations;
+#[cfg(feature = "python")]
+pub mod python;
 mod repr;
-use std::{fmt::Debug, ops::{Add, Div, Mul, Sub}};
+use std::{
+    fmt::Debug,
+    ops::{Add, Div, Mul, Sub},
+};
 
 /// Re-export i24 for dependent crates to use.
 pub use i24::i24 as I24;
 
 // Re-exports for public API
+pub use crate::error::{AudioSampleError, AudioSampleResult};
+pub use crate::operations::{
+    AudioChannelOps, AudioEditing, AudioProcessing, AudioSamplesOperations, AudioStatistics,
+    AudioTransforms, AudioTypeConversion, NormalizationMethod,
+};
 pub use crate::repr::AudioSamples;
-pub use crate::operations::{AudioSamplesOperations, NormalizationMethod};
-pub use crate::error::{AudioSampleResult, AudioSampleError};
 
 /// Array of supported audio sample data types as string identifiers
 pub const SUPPORTED_DTYPES: [&str; 5] = ["i16", "I24", "i32", "f32", "f64"];
@@ -74,7 +71,7 @@ pub enum ChannelLayout {
 ///
 /// This trait provides a unified interface for working with different audio sample formats
 /// including integers (i16, i32), 24-bit integers (I24), and floating-point (f32, f64).
-/// 
+///
 /// All implementors support:
 /// - Type-safe conversions between all supported formats
 /// - Arithmetic operations (Add, Sub, Mul, Div)
@@ -123,7 +120,7 @@ pub trait AudioSample:
     fn into_inner(self) -> Self {
         self
     }
-    
+
     const MAX: Self;
     const MIN: Self;
     const BITS: u8;
@@ -144,7 +141,7 @@ pub trait AudioSample:
 /// ## Example
 /// ```rust
 /// use audio_samples::ConvertTo;
-/// 
+///
 /// let sample_i16: i16 = 16384;  // Half of i16::MAX
 /// let sample_f32: f32 = sample_i16.convert_to().unwrap();
 /// assert!((sample_f32 - 0.5).abs() < 1e-4);  // Should be approximately 0.5
@@ -181,7 +178,9 @@ macro_rules! impl_int_to_int_conversion {
                     (*self as i64) << SHIFT as u8
                 } else if SHIFT < 0 {
                     (*self as i64) >> (-SHIFT) as u8
-                } else {unreachable!("Due to if and else if above")} as $to)
+                } else {
+                    unreachable!("Due to if and else if above")
+                } as $to)
             }
         }
     };
@@ -683,7 +682,7 @@ mod conversion_tests {
         assert_eq!(small_value_to_i16, 0);
 
         let small_value_to_i32: i32 = small_value.convert_to().unwrap();
-        assert_eq!(small_value_to_i32, 2147);  // 1.0e-6 * 2147483647 rounded to nearest
+        assert_eq!(small_value_to_i32, 2147); // 1.0e-6 * 2147483647 rounded to nearest
 
         // Test values near 0.5
         let half_f32: f32 = 0.5;
@@ -931,5 +930,15 @@ mod conversion_tests {
             }
         }
     }
+}
 
+// Python module export - this must be at the crate root for maturin
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+#[cfg(feature = "python")]
+#[pymodule]
+fn audio_samples(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
+    // Delegate to the actual implementation in the python module
+    python::register_module(_py, m)
 }

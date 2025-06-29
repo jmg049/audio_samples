@@ -1,13 +1,13 @@
-//! Module for the representation of audio samples. 
+//! Module for the representation of audio samples.
 //! In essence, an enhanced wrapper around `ndarray` to represent audio samples and their operations.
 use ndarray::{Array1, Array2};
 
-use crate::{operations::{AudioSamplesOperations, NormalizationMethod}, AudioSample, ChannelLayout};
+use crate::{AudioSample, ChannelLayout};
 
 /// Internal representation of audio data
 #[derive(Debug, Clone, PartialEq)]
-enum AudioData<T: AudioSample> {
-    Mono(Array1<T>), // Single channel audio samples
+pub(crate) enum AudioData<T: AudioSample> {
+    Mono(Array1<T>),         // Single channel audio samples
     MultiChannel(Array2<T>), // Multi-channel audio samples where each row is a channel
 }
 
@@ -15,7 +15,7 @@ enum AudioData<T: AudioSample> {
 /// This struct contains both the audio data and metadata like sample rate, channel information, etc.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioSamples<T: AudioSample> {
-    data: AudioData<T>,
+    pub(crate) data: AudioData<T>,
     sample_rate: u32,
     layout: ChannelLayout,
 }
@@ -72,7 +72,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns the number of samples per channel
-    pub fn duration_samples(&self) -> usize {
+    pub fn samples_per_channel(&self) -> usize {
         match &self.data {
             AudioData::Mono(arr) => arr.len(),
             AudioData::MultiChannel(arr) => arr.ncols(),
@@ -81,17 +81,21 @@ impl<T: AudioSample> AudioSamples<T> {
 
     /// Returns the duration in seconds
     pub fn duration_seconds(&self) -> f64 {
-        self.duration_samples() as f64 / self.sample_rate as f64
+        self.samples_per_channel() as f64 / self.sample_rate as f64
     }
 
     /// Returns the total number of samples across all channels
     pub fn total_samples(&self) -> usize {
-        self.channels() * self.duration_samples()
+        self.channels() * self.samples_per_channel()
     }
 
     /// Returns the number of bytes per sample for type T
     pub fn bytes_per_sample(&self) -> usize {
         std::mem::size_of::<T>()
+    }
+
+    pub fn sample_type() -> &'static str {
+        std::any::type_name::<T>()
     }
 
     /// Returns the channel layout
@@ -110,9 +114,9 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns the peak (maximum absolute value) of the audio samples in the native type
-    pub fn peak_native(&self) -> T 
-    where 
-        T: PartialOrd + Copy + std::ops::Sub<Output = T>
+    pub fn peak_native(&self) -> T
+    where
+        T: PartialOrd + Copy + std::ops::Sub<Output = T>,
     {
         match &self.data {
             AudioData::Mono(arr) => {
@@ -128,60 +132,55 @@ impl<T: AudioSample> AudioSamples<T> {
                     .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                     .unwrap_or(T::default())
             }
-            AudioData::MultiChannel(arr) => {
-                arr.iter()
-                    .map(|&sample| {
-                        if sample < T::default() {
-                            T::default() - sample
-                        } else {
-                            sample
-                        }
-                    })
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .unwrap_or(T::default())
-            }
+            AudioData::MultiChannel(arr) => arr
+                .iter()
+                .map(|&sample| {
+                    if sample < T::default() {
+                        T::default() - sample
+                    } else {
+                        sample
+                    }
+                })
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(T::default()),
         }
     }
 
     /// Returns the minimum value in the audio samples
-    pub fn min_native(&self) -> T 
-    where 
-        T: PartialOrd + Copy
+    pub fn min_native(&self) -> T
+    where
+        T: PartialOrd + Copy,
     {
         match &self.data {
-            AudioData::Mono(arr) => {
-                arr.iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-                    .unwrap_or(T::default())
-            }
-            AudioData::MultiChannel(arr) => {
-                arr.iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-                    .unwrap_or(T::default())
-            }
+            AudioData::Mono(arr) => arr
+                .iter()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .copied()
+                .unwrap_or(T::default()),
+            AudioData::MultiChannel(arr) => arr
+                .iter()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .copied()
+                .unwrap_or(T::default()),
         }
     }
 
     /// Returns the maximum value in the audio samples
-    pub fn max_native(&self) -> T 
-    where 
-        T: PartialOrd + Copy
+    pub fn max_native(&self) -> T
+    where
+        T: PartialOrd + Copy,
     {
         match &self.data {
-            AudioData::Mono(arr) => {
-                arr.iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-                    .unwrap_or(T::default())
-            }
-            AudioData::MultiChannel(arr) => {
-                arr.iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-                    .unwrap_or(T::default())
-            }
+            AudioData::Mono(arr) => arr
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .copied()
+                .unwrap_or(T::default()),
+            AudioData::MultiChannel(arr) => arr
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .copied()
+                .unwrap_or(T::default()),
         }
     }
 
@@ -218,172 +217,6 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 }
 
-impl<T: AudioSample> AudioSamplesOperations for AudioSamples<T> {
-    fn normalize<U: AudioSample>(&mut self, min: U, max: U, method: Option<NormalizationMethod>) -> () {
-        todo!()
-    }
-
-    fn scale<U: AudioSample>(&mut self, factor: U) -> () {
-        todo!()
-    }
-
-    fn as_type<O: AudioSample>(&self) -> AudioSamples<O> {
-        todo!("Type conversion not yet implemented - requires per-type implementations")
-    }
-
-    fn to_type<O: AudioSample>(self) -> AudioSamples<O> {
-        todo!("Type conversion not yet implemented - requires per-type implementations")
-    }
-
-    fn peak<U: AudioSample>(&self) -> U {
-        todo!("Statistical methods need to be implemented with type-specific conversions")
-    }
-
-    fn rms<U: AudioSample>(&self) -> U {
-        todo!("Statistical methods need to be implemented with type-specific conversions")
-    }
-
-    fn min<U: AudioSample>(&self) -> U {
-        todo!("Statistical methods need to be implemented with type-specific conversions")
-    }
-
-    fn max<U: AudioSample>(&self) -> U {
-        todo!("Statistical methods need to be implemented with type-specific conversions")
-    }
-
-    fn variance<U: AudioSample>(&self) -> U {
-        todo!("Statistical methods need to be implemented with type-specific conversions")
-    }
-
-    fn zero_crossing_rate(&self) -> f64 {
-        todo!()
-    }
-
-    fn cross_correlation<U: AudioSample>(&self, other: &Self, lag: usize) -> U {
-        todo!()
-    }
-
-    fn autocorrelation<U: AudioSample>(&self, lag: usize) -> U {
-        todo!()
-    }
-
-    fn zero_crossings<U: AudioSample>(&self) -> usize {
-        todo!()
-    }
-
-    fn mu_compress<U: AudioSample>(&mut self, mu: U) -> () {
-        todo!()
-    }
-
-    fn mu_expand<U: AudioSample>(&mut self, mu: U) -> () {
-        todo!()
-    }
-
-    fn stft() {
-        todo!()
-    }
-
-    fn istft() {
-        todo!()
-    }
-
-    fn fft() {
-        todo!()
-    }
-
-    fn ifft() {
-        todo!()
-    }
-
-    fn spectrogram() {
-        todo!()
-    }
-
-    fn mel_spectrogram() {
-        todo!()
-    }
-
-    fn mfcc() {
-        todo!()
-    }
-
-    fn chroma() {
-        todo!()
-    }
-
-    fn gammatone_spectrogram() {
-        todo!()
-    }
-
-    fn apply_window<U: AudioSample>(&mut self, window: &[U]) -> () {
-        todo!()
-    }
-
-    fn apply_filter<U: AudioSample>(&mut self, filter: &[U]) -> () {
-        todo!()
-    }
-
-    fn vad(&self, threshold: f64) -> Vec<bool> {
-        todo!()
-    }
-
-    fn resample<U: AudioSample>(&self, new_sample_rate: usize) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn time_stretch<U: AudioSample>(&self, factor: f64) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn pitch_shift<U: AudioSample>(&self, semitones: f64) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn fade_in<U: AudioSample>(&mut self, duration: f64) -> () {
-        todo!()
-    }
-
-    fn fade_out<U: AudioSample>(&mut self, duration: f64) -> () {
-        todo!()
-    }
-
-    fn reverse<U: AudioSample>(&self) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn trim<U: AudioSample>(&mut self, start: f64, end: f64) -> () {
-        todo!()
-    }
-
-    fn pad<U: AudioSample>(&mut self, duration: f64, pad_value: U) -> () {
-        todo!()
-    }
-
-    fn split<U: AudioSample>(&self, duration: f64) -> Vec<AudioSamples<U>> {
-        todo!()
-    }
-
-    fn concatenate<U: AudioSample>(&self, others: &[AudioSamples<U>]) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn mix<U: AudioSample>(&self, others: &[AudioSamples<U>]) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn mono<U: AudioSample>(&self) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn stereo<U: AudioSample>(&self) -> AudioSamples<U> {
-        todo!()
-    }
-
-    fn into_channels<U: AudioSample>(&self, channels: usize) -> AudioSamples<U> {
-        todo!()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,10 +226,10 @@ mod tests {
     fn test_new_mono_audio_samples() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let audio = AudioSamples::new_mono(data.clone(), 44100);
-        
+
         assert_eq!(audio.sample_rate(), 44100);
         assert_eq!(audio.channels(), 1);
-        assert_eq!(audio.duration_samples(), 5);
+        assert_eq!(audio.samples_per_channel(), 5);
         assert!(audio.is_mono());
         assert!(!audio.is_multi_channel());
         assert_eq!(audio.as_mono().unwrap(), &data);
@@ -406,10 +239,10 @@ mod tests {
     fn test_new_multi_channel_audio_samples() {
         let data = array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]]; // 2 channels, 3 samples each
         let audio = AudioSamples::new_multi_channel(data.clone(), 48000);
-        
+
         assert_eq!(audio.sample_rate(), 48000);
         assert_eq!(audio.channels(), 2);
-        assert_eq!(audio.duration_samples(), 3);
+        assert_eq!(audio.samples_per_channel(), 3);
         assert_eq!(audio.total_samples(), 6);
         assert!(!audio.is_mono());
         assert!(audio.is_multi_channel());
@@ -420,12 +253,12 @@ mod tests {
     fn test_zeros_construction() {
         let mono_audio = AudioSamples::<f32>::zeros_mono(100, 44100);
         assert_eq!(mono_audio.channels(), 1);
-        assert_eq!(mono_audio.duration_samples(), 100);
+        assert_eq!(mono_audio.samples_per_channel(), 100);
         assert_eq!(mono_audio.sample_rate(), 44100);
-        
+
         let multi_audio = AudioSamples::<f32>::zeros_multi(2, 50, 48000);
         assert_eq!(multi_audio.channels(), 2);
-        assert_eq!(multi_audio.duration_samples(), 50);
+        assert_eq!(multi_audio.samples_per_channel(), 50);
         assert_eq!(multi_audio.total_samples(), 100);
         assert_eq!(multi_audio.sample_rate(), 48000);
     }
@@ -434,7 +267,7 @@ mod tests {
     fn test_duration_seconds() {
         let audio = AudioSamples::<f32>::zeros_mono(44100, 44100);
         assert!((audio.duration_seconds() - 1.0).abs() < 1e-6);
-        
+
         let audio2 = AudioSamples::<f32>::zeros_multi(2, 22050, 44100);
         assert!((audio2.duration_seconds() - 0.5).abs() < 1e-6);
     }
@@ -443,7 +276,7 @@ mod tests {
     fn test_native_statistics() {
         let data = array![-3.0f32, -1.0, 0.0, 2.0, 4.0];
         let audio = AudioSamples::new_mono(data, 44100);
-        
+
         assert_eq!(audio.min_native(), -3.0);
         assert_eq!(audio.max_native(), 4.0);
         assert_eq!(audio.peak_native(), 4.0); // abs(-3) = 3, abs(4) = 4, so peak is 4
@@ -453,7 +286,7 @@ mod tests {
     fn test_multi_channel_statistics() {
         let data = array![[-2.0f32, 1.0], [3.0, -4.0]]; // 2 channels, 2 samples each
         let audio = AudioSamples::new_multi_channel(data, 44100);
-        
+
         assert_eq!(audio.min_native(), -4.0);
         assert_eq!(audio.max_native(), 3.0);
         assert_eq!(audio.peak_native(), 4.0); // abs(-4) = 4 is the largest absolute value

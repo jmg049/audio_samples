@@ -1,21 +1,26 @@
 [package]
 name = "audio_samples"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "audio_samples"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bytemuck = "1.23.1"
 colored = "3.0.0"
 ndarray = "0.16.1"
 num-traits = "0.2.19"
-numpy = "0.25.0"
-pyo3 = "0.25.0"
+numpy = { version = "0.24.0", optional = true }
+pyo3 = { version = "0.24.0", features = ["multiple-pymethods"], optional = true }
 thiserror = "2.0.12"
 tracing = "0.1.41"
-i24 = { path = "../i24", features = ["pyo3", "alloc"] }
 approx_eq = "0.1.8"
+rustfft = "6.2"
+num-complex = "0.4"
+i24 = { version = "2.1.0", features = ["alloc"] }
+
+[features]
+default = ["python"]
+python = ["dep:pyo3", "dep:numpy", "i24/pyo3"]
