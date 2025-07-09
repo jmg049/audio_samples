@@ -2,6 +2,15 @@
 name = "audio_samples"
 version = "0.1.0"
 edition = "2024"
+authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/jmg049/audio_samples"
+repository = "https://github.com/jmg049/audio_samples"
+documentation = "https://docs.rs/audio_samples"
+
+keywords = ["audio", "dsp", "signal processing"]
+categories = ["encoding"]
 
 [lib]
 name = "audio_samples"
