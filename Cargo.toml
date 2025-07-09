@@ -10,7 +10,7 @@ repository = "https://github.com/jmg049/audio_samples"
 documentation = "https://docs.rs/audio_samples"
 description = "A high-performance audio processing library for Rust with Python bindings."
 
-keywords = ["audio", "dsp", "signal processing"]
+keywords = ["audio", "dsp"]
 categories = ["encoding"]
 
 [lib]
