@@ -37,6 +37,7 @@ pub mod operations;
 #[cfg(feature = "python")]
 pub mod python;
 mod repr;
+pub mod resampling;
 use std::{
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},

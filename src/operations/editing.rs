@@ -8,7 +8,7 @@ use super::traits::AudioEditing;
 use super::types::FadeCurve;
 use crate::repr::AudioData;
 use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples};
-use ndarray::{concatenate, s, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate, s};
 use num_traits::{Float, FromPrimitive, ToPrimitive, Zero};
 
 /// Helper function to convert seconds to samples
@@ -657,7 +657,7 @@ mod tests {
         if let AudioData::Mono(arr) = &audio.data {
             assert_eq!(arr[0], 0.0); // Should start at 0
             assert!(arr[220] > 0.0 && arr[220] < 1.0); // Should be partially faded (middle of fade)
-                                                       // The fade applies to indices 0..441, so arr[440] should be close to but not exactly 1.0
+            // The fade applies to indices 0..441, so arr[440] should be close to but not exactly 1.0
             assert!(arr[440] > 0.99); // Should be nearly full at end of fade
         }
 

@@ -476,6 +476,40 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessin
 
         Ok(())
     }
+
+    /// Resamples audio to a new sample rate using high-quality algorithms.
+    fn resample(
+        &self,
+        target_sample_rate: usize,
+        quality: super::types::ResamplingQuality,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized,
+        T: num_traits::Float
+            + num_traits::FromPrimitive
+            + num_traits::ToPrimitive
+            + crate::ConvertTo<f64>,
+        f64: crate::ConvertTo<T>,
+    {
+        crate::resampling::resample(self, target_sample_rate, quality)
+    }
+
+    /// Resamples audio by a specific ratio.
+    fn resample_by_ratio(
+        &self,
+        ratio: f64,
+        quality: super::types::ResamplingQuality,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized,
+        T: num_traits::Float
+            + num_traits::FromPrimitive
+            + num_traits::ToPrimitive
+            + crate::ConvertTo<f64>,
+        f64: crate::ConvertTo<T>,
+    {
+        crate::resampling::resample_by_ratio(self, ratio, quality)
+    }
 }
 
 // Helper methods for the AudioProcessing implementation

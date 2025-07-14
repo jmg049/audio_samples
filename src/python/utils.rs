@@ -30,7 +30,7 @@ pub fn convert_numpy_to_audio_samples(
 ) -> PyResult<crate::python::AudioSamplesData> {
     use crate::python::AudioSamplesData;
 
-    // let target_type = 
+    // let target_type =
 
     // Try f64 (preserve as f64)
     if let Ok(array_f64) = py_array.extract::<PyReadonlyArray1<f64>>() {
@@ -150,8 +150,8 @@ pub fn convert_audio_samples_to_numpy(
     target_type: Option<crate::python::conversions::TargetType>,
     copy: bool,
 ) -> PyResult<PyObject> {
-    use crate::python::conversions::TargetType;
     use crate::python::AudioSamplesData;
+    use crate::python::conversions::TargetType;
 
     // If no target type specified, preserve the original type
     let target = if let Some(t) = target_type {

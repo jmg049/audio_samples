@@ -4,12 +4,12 @@
 //! spectral transformations, returning NumPy arrays for efficient integration
 //! with the Python scientific ecosystem.
 
-use super::{utils::*, PyAudioSamples};
-use crate::operations::{
-    types::{SpectrogramScale, WindowType},
-    AudioTransforms,
-};
+use super::{PyAudioSamples, utils::*};
 use crate::AudioSamples;
+use crate::operations::{
+    AudioTransforms,
+    types::{SpectrogramScale, WindowType},
+};
 use num_complex::Complex;
 use pyo3::prelude::*;
 

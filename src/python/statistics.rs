@@ -3,7 +3,7 @@
 //! This module provides Python access to statistical analysis operations
 //! for audio data, including RMS, variance, zero crossings, and correlation analysis.
 
-use super::{utils::*, PyAudioSamples};
+use super::{PyAudioSamples, utils::*};
 use crate::operations::{AudioStatistics, AudioTypeConversion};
 use pyo3::prelude::*;
 

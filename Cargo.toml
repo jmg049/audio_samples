@@ -30,7 +30,8 @@ approx_eq = "0.1.8"
 rustfft = "6.2"
 num-complex = "0.4"
 i24 = { version = "2.1.0", features = ["alloc"] }
+rubato =  "0.16.2"
 
 [features]
-default = ["python"]
+default = []
 python = ["dep:pyo3", "dep:numpy", "i24/pyo3"]

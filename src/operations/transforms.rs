@@ -10,7 +10,7 @@ use crate::repr::AudioData;
 use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples};
 use ndarray::{Array1, Array2};
 use num_traits::{Float, FromPrimitive, ToPrimitive};
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
 impl<T: AudioSample + ToPrimitive + FromPrimitive + Float> AudioTransforms<T> for AudioSamples<T> {
@@ -1166,7 +1166,14 @@ mod tests {
                         1e-10 // Absolute tolerance for very small values
                     };
 
-                    assert!(diff <= tolerance, "FFT/IFFT round-trip error too large: orig={}, recon={}, diff={}, tolerance={}", orig_val, recon_val, diff, tolerance);
+                    assert!(
+                        diff <= tolerance,
+                        "FFT/IFFT round-trip error too large: orig={}, recon={}, diff={}, tolerance={}",
+                        orig_val,
+                        recon_val,
+                        diff,
+                        tolerance
+                    );
                 }
             }
             _ => panic!("Expected mono audio"),

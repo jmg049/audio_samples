@@ -4,7 +4,7 @@
 //! following pandas-style conventions. Methods ending with '_' modify the object
 //! in-place, while methods without '_' return new objects.
 
-use super::{utils::*, PyAudioSamples};
+use super::{PyAudioSamples, utils::*};
 use crate::operations::{AudioProcessing, NormalizationMethod};
 use pyo3::prelude::*;
 
@@ -131,7 +131,11 @@ impl PyAudioSamples {
     /// high_pass = np.array([1, -1])  # Simple difference filter
     /// audio.apply_filter_(high_pass, mode='same')
     /// ```
-    pub(crate) fn apply_filter_inplace_impl(&mut self, coeffs: &Bound<PyAny>, mode: &str) -> PyResult<()> {
+    pub(crate) fn apply_filter_inplace_impl(
+        &mut self,
+        coeffs: &Bound<PyAny>,
+        mode: &str,
+    ) -> PyResult<()> {
         validate_string_param("mode", mode, &["full", "same", "valid"])?;
 
         // Convert numpy array to Vec<f64>

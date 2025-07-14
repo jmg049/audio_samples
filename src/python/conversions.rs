@@ -3,7 +3,7 @@
 //! This module provides efficient type conversions between different audio
 //! sample formats with optimized memory sharing where possible.
 
-use super::{utils::*, PyAudioSamples};
+use super::{PyAudioSamples, utils::*};
 use crate::operations::{AudioStatistics, AudioTypeConversion};
 use numpy::PyArrayDescr;
 use pyo3::prelude::*;

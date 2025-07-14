@@ -12,7 +12,9 @@ pub enum AudioSampleError {
     ///
     /// Contains the sample value, source type, target type, and reason for failure.
     /// This typically happens when values are out of range for the target type.
-    #[error("Audio sample conversion error: Failed to convert {0} from type {1} to type {2}:\nReason: {3}")]
+    #[error(
+        "Audio sample conversion error: Failed to convert {0} from type {1} to type {2}:\nReason: {3}"
+    )]
     ConversionError(String, String, String, String),
 
     /// Error that occurs when an invalid range is provided.
@@ -32,4 +34,22 @@ pub enum AudioSampleError {
     /// This happens when window length doesn't match audio length, etc.
     #[error("Dimension mismatch error: {0}")]
     DimensionMismatch(String),
+
+    /// Error that occurs when invalid input is provided to an operation.
+    ///
+    /// This includes cases like empty audio data, invalid file formats, etc.
+    #[error("Invalid input error: {msg}")]
+    InvalidInput { msg: String },
+
+    /// Error that occurs during audio processing operations.
+    ///
+    /// This includes resampling errors, filter failures, etc.
+    #[error("Processing error: {msg}")]
+    ProcessingError { msg: String },
+
+    /// Error that occurs when a feature is not enabled.
+    ///
+    /// This happens when trying to use optional functionality that wasn't compiled in.
+    #[error("Feature '{feature}' is not enabled. Please enable the feature and recompile.")]
+    FeatureNotEnabled { feature: String },
 }

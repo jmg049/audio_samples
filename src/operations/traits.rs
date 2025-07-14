@@ -197,6 +197,61 @@ pub trait AudioProcessing<T: AudioSample> {
     /// * `min_val` - Minimum allowed value
     /// * `max_val` - Maximum allowed value
     fn clip(&mut self, min_val: T, max_val: T) -> AudioSampleResult<()>;
+
+    /// Resamples audio to a new sample rate using high-quality algorithms.
+    ///
+    /// This method provides a convenient interface to rubato's resampling capabilities
+    /// with different quality/performance trade-offs.
+    ///
+    /// # Arguments
+    /// * `target_sample_rate` - Desired output sample rate in Hz
+    /// * `quality` - Quality/performance trade-off setting
+    ///
+    /// # Returns
+    /// A new AudioSamples instance with the target sample rate
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The resampling feature is not enabled
+    /// - The resampling parameters are invalid
+    /// - The input audio is empty
+    /// - Rubato encounters an internal error
+    fn resample(
+        &self,
+        target_sample_rate: usize,
+        quality: ResamplingQuality,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized,
+        T: num_traits::Float
+            + num_traits::FromPrimitive
+            + num_traits::ToPrimitive
+            + crate::ConvertTo<f64>,
+        f64: crate::ConvertTo<T>;
+
+    /// Resamples audio by a specific ratio.
+    ///
+    /// # Arguments
+    /// * `ratio` - Resampling ratio (output_rate / input_rate)
+    /// * `quality` - Quality/performance trade-off setting
+    ///
+    /// # Returns
+    /// A new AudioSamples instance resampled by the given ratio
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The resampling feature is not enabled
+    /// - The ratio is invalid (≤ 0)
+    /// - The input audio is empty
+    /// - Rubato encounters an internal error
+    fn resample_by_ratio(&self, ratio: f64, quality: ResamplingQuality) -> AudioSampleResult<Self>
+    where
+        Self: Sized,
+        T: num_traits::Float
+            + num_traits::FromPrimitive
+            + num_traits::ToPrimitive
+            + crate::ConvertTo<f64>,
+        f64: crate::ConvertTo<T>;
 }
 
 /// Frequency domain analysis and spectral transformations.
@@ -394,7 +449,6 @@ pub trait AudioEditing<T: AudioSample> {
     fn reverse_in_place(&mut self) -> AudioSampleResult<()>
     where
         Self: Sized;
-
 
     /// Extracts a segment of audio between start and end times.
     ///

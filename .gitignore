@@ -75,3 +75,13 @@ docs/_build/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+!.gitignore
+
+\.*
+
+!README.md
+**/*.md
+
+results/
+scripts/

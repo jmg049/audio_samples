@@ -12,7 +12,7 @@
 //! - **Zero-copy Where Possible**: Efficient memory sharing with NumPy arrays
 //! - **Type Safety**: Rust's type system ensures safe operations across the Python boundary
 
-use crate::{operations::AudioTypeConversion, AudioSamples, I24};
+use crate::{AudioSamples, I24, operations::AudioTypeConversion};
 use numpy::PyArrayDescr;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
@@ -33,7 +33,6 @@ pub(crate) enum AudioSamplesData {
     /// 64-bit floating-point samples (maximum precision)
     F64(AudioSamples<f64>),
 }
-
 
 // Import submodules
 mod conversions;
@@ -177,7 +176,7 @@ impl PyAudioSamples {
 
     /// Get the current data type of the audio samples.
     #[getter]
-    fn dtype<'py>(&'py self, py:  Python<'py>) -> PyResult<Bound<'py, PyArrayDescr>> {
+    fn dtype<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDescr>> {
         // Convert the internal data type to a NumPy dtype
         let dtype: Bound<'_, PyArrayDescr> = match &self.data {
             AudioSamplesData::I16(_) => numpy::PyArrayDescr::new(py, "int16"),
@@ -274,7 +273,8 @@ impl PyAudioSamples {
             self.length(),
             self.sample_rate(),
             self.duration(),
-            self.dtype(py).unwrap_or(PyArrayDescr::new(py, "object").unwrap())
+            self.dtype(py)
+                .unwrap_or(PyArrayDescr::new(py, "object").unwrap())
         )
     }
 
@@ -285,7 +285,8 @@ impl PyAudioSamples {
             self.channels(),
             self.duration(),
             self.sample_rate(),
-            self.dtype(py).unwrap_or(PyArrayDescr::new(py, "object").unwrap())
+            self.dtype(py)
+                .unwrap_or(PyArrayDescr::new(py, "object").unwrap())
         )
     }
 
@@ -529,7 +530,11 @@ impl PyAudioSamples {
     /// Mix multiple audio sources together.
     #[staticmethod]
     #[pyo3(signature = (sources, *, weights=None, normalize=false))]
-    fn mix(sources: &Bound<PyAny>, weights: Option<Vec<f64>>, normalize: bool) -> PyResult<PyAudioSamples> {
+    fn mix(
+        sources: &Bound<PyAny>,
+        weights: Option<Vec<f64>>,
+        normalize: bool,
+    ) -> PyResult<PyAudioSamples> {
         // Extract list of PyAudioSamples from Python list
         let py_list = sources.downcast::<pyo3::types::PyList>()?;
         let mut source_copies = Vec::new();
@@ -544,7 +549,13 @@ impl PyAudioSamples {
     /// Cross-fade between two audio sources.
     #[staticmethod]
     #[pyo3(signature = (audio1, audio2, duration, *, curve="linear", offset=0.0))]
-    fn crossfade(audio1: &PyAudioSamples, audio2: &PyAudioSamples, duration: f64, curve: &str, offset: f64) -> PyResult<PyAudioSamples> {
+    fn crossfade(
+        audio1: &PyAudioSamples,
+        audio2: &PyAudioSamples,
+        duration: f64,
+        curve: &str,
+        offset: f64,
+    ) -> PyResult<PyAudioSamples> {
         PyAudioSamples::crossfade_impl(audio1, audio2, duration, curve, offset)
     }
 
@@ -697,49 +708,105 @@ impl PyAudioSamples {
 
     /// Compute the Short-Time Fourier Transform (STFT).
     #[pyo3(signature = (*, window_size=1024, hop_size=None, window="hanning"), name = "stft")]
-    fn stft(&self, py: Python, window_size: usize, hop_size: Option<usize>, window: &str) -> PyResult<PyObject> {
+    fn stft(
+        &self,
+        py: Python,
+        window_size: usize,
+        hop_size: Option<usize>,
+        window: &str,
+    ) -> PyResult<PyObject> {
         self.stft_impl(py, window_size, hop_size, window)
     }
 
     /// Compute the inverse Short-Time Fourier Transform (ISTFT).
     #[pyo3(signature = (stft_data, *, hop_size=512, window="hanning"), name = "istft")]
-    fn istft(&self, stft_data: &Bound<PyAny>, hop_size: usize, window: &str) -> PyResult<PyAudioSamples> {
+    fn istft(
+        &self,
+        stft_data: &Bound<PyAny>,
+        hop_size: usize,
+        window: &str,
+    ) -> PyResult<PyAudioSamples> {
         self.istft_impl(stft_data, hop_size, window)
     }
 
     /// Compute a spectrogram of the audio signal.
     #[pyo3(signature = (*, window_size=1024, hop_size=None, window="hanning", scale="linear", power=2.0), name = "spectrogram")]
-    fn spectrogram(&self, py: Python, window_size: usize, hop_size: Option<usize>, window: &str, scale: &str, power: f64) -> PyResult<PyObject> {
+    fn spectrogram(
+        &self,
+        py: Python,
+        window_size: usize,
+        hop_size: Option<usize>,
+        window: &str,
+        scale: &str,
+        power: f64,
+    ) -> PyResult<PyObject> {
         self.spectrogram_impl(py, window_size, hop_size, window, scale, power)
     }
 
     /// Compute a mel-scale spectrogram.
     #[pyo3(signature = (*, n_mels=128, fmin=0.0, fmax=None, window_size=None, hop_size=None), name = "mel_spectrogram")]
-    fn mel_spectrogram(&self, py: Python, n_mels: Option<usize>, fmin: Option<f64>, fmax: Option<f64>, window_size: Option<usize>, hop_size: Option<usize>) -> PyResult<PyObject> {
+    fn mel_spectrogram(
+        &self,
+        py: Python,
+        n_mels: Option<usize>,
+        fmin: Option<f64>,
+        fmax: Option<f64>,
+        window_size: Option<usize>,
+        hop_size: Option<usize>,
+    ) -> PyResult<PyObject> {
         self.mel_spectrogram_impl(py, n_mels, fmin, fmax, window_size, hop_size)
     }
 
     /// Compute Mel-Frequency Cepstral Coefficients (MFCCs).
     #[pyo3(signature = (*, n_mfcc=13, n_mels=128, fmin=0.0, fmax=None, window_size=None, hop_size=None), name = "mfcc")]
-    fn mfcc(&self, py: Python, n_mfcc: Option<usize>, n_mels: Option<usize>, fmin: Option<f64>, fmax: Option<f64>, window_size: Option<usize>, hop_size: Option<usize>) -> PyResult<PyObject> {
+    fn mfcc(
+        &self,
+        py: Python,
+        n_mfcc: Option<usize>,
+        n_mels: Option<usize>,
+        fmin: Option<f64>,
+        fmax: Option<f64>,
+        window_size: Option<usize>,
+        hop_size: Option<usize>,
+    ) -> PyResult<PyObject> {
         self.mfcc_impl(py, n_mfcc, n_mels, fmin, fmax, window_size, hop_size)
     }
 
     /// Compute a gammatone filter bank spectrogram.
     #[pyo3(signature = (*, n_filters=64, fmin=50.0, fmax=None, window_size=None, hop_size=None), name = "gammatone_spectrogram")]
-    fn gammatone_spectrogram(&self, py: Python, n_filters: Option<usize>, fmin: Option<f64>, fmax: Option<f64>, window_size: Option<usize>, hop_size: Option<usize>) -> PyResult<PyObject> {
+    fn gammatone_spectrogram(
+        &self,
+        py: Python,
+        n_filters: Option<usize>,
+        fmin: Option<f64>,
+        fmax: Option<f64>,
+        window_size: Option<usize>,
+        hop_size: Option<usize>,
+    ) -> PyResult<PyObject> {
         self.gammatone_spectrogram_impl(py, n_filters, fmin, fmax, window_size, hop_size)
     }
 
     /// Compute a chromagram (pitch class profile).
     #[pyo3(signature = (*, n_chroma=12, window_size=1024, hop_size=None), name = "chroma")]
-    fn chroma(&self, py: Python, n_chroma: Option<usize>, window_size: Option<usize>, hop_size: Option<usize>) -> PyResult<PyObject> {
+    fn chroma(
+        &self,
+        py: Python,
+        n_chroma: Option<usize>,
+        window_size: Option<usize>,
+        hop_size: Option<usize>,
+    ) -> PyResult<PyObject> {
         self.chroma_impl(py, n_chroma, window_size, hop_size)
     }
 
     /// Compute the power spectral density using Welch's method.
     #[pyo3(signature = (*, window_size=1024, overlap=0.5, window="hanning"), name = "power_spectral_density")]
-    fn power_spectral_density(&self, py: Python, window_size: Option<usize>, overlap: Option<f64>, window: Option<&str>) -> PyResult<PyObject> {
+    fn power_spectral_density(
+        &self,
+        py: Python,
+        window_size: Option<usize>,
+        overlap: Option<f64>,
+        window: Option<&str>,
+    ) -> PyResult<PyObject> {
         self.power_spectral_density_impl(py, window_size, overlap, window)
     }
 }

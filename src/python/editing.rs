@@ -4,8 +4,8 @@
 //! following pandas-style conventions. Some operations are inherently functional
 //! (like reverse, trim) while others support both modes (like fade operations).
 
-use super::{utils::*, PyAudioSamples};
-use crate::operations::{types::FadeCurve, AudioEditing, AudioProcessing};
+use super::{PyAudioSamples, utils::*};
+use crate::operations::{AudioEditing, AudioProcessing, types::FadeCurve};
 use pyo3::prelude::*;
 
 impl PyAudioSamples {
@@ -57,7 +57,7 @@ impl PyAudioSamples {
     }
 
     /// Reverse the order of audio samples in-place.
-    /// 
+    ///
     /// This operation modifies the original object directly.
     /// /// # Examples
     /// ```python
@@ -71,7 +71,8 @@ impl PyAudioSamples {
     /// # Should go from 1 to 0 instead of 0 to 1
     /// ```
     pub(crate) fn reverse_inplace_impl(&mut self) -> PyResult<()> {
-        self.mutate_inner(|inner| inner.reverse_in_place()).map_err(map_error)?;
+        self.mutate_inner(|inner| inner.reverse_in_place())
+            .map_err(map_error)?;
         Ok(())
     }
 
