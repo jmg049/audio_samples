@@ -7,13 +7,20 @@
 use super::traits::AudioTransforms;
 use super::types::{SpectrogramScale, WindowType};
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples};
+use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, I24, ConvertTo};
 use ndarray::{Array1, Array2};
 use num_traits::{Float, FromPrimitive, ToPrimitive};
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive + Float> AudioTransforms<T> for AudioSamples<T> {
+impl<T: AudioSample + ToPrimitive + FromPrimitive + Float> AudioTransforms<T> for AudioSamples<T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
     /// Computes the Fast Fourier Transform of the audio samples.
     ///
     /// Converts the time-domain signal to frequency domain using rustfft.

@@ -7,12 +7,20 @@
 use super::traits::{AudioProcessing, AudioStatistics};
 use super::types::NormalizationMethod;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples};
+use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo, I24};
 use ndarray::Axis;
 use num_traits::{Float, FromPrimitive, ToPrimitive, Zero};
 
 impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessing<T>
     for AudioSamples<T>
+
+    where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<f64>: AudioTypeConversion<T>,
 {
     /// Normalizes audio samples using the specified method and range.
     ///
@@ -485,11 +493,11 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessin
     ) -> AudioSampleResult<Self>
     where
         Self: Sized,
-        T: num_traits::Float
-            + num_traits::FromPrimitive
+        T:  num_traits::FromPrimitive
             + num_traits::ToPrimitive
             + crate::ConvertTo<f64>,
         f64: crate::ConvertTo<T>,
+        AudioSamples<f64>: AudioTypeConversion<T>,
     {
         crate::resampling::resample(self, target_sample_rate, quality)
     }

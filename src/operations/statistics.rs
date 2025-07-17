@@ -6,11 +6,17 @@
 
 use super::traits::AudioStatistics;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleResult, AudioSamples};
+use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
 use ndarray::Axis;
 use num_traits::{FromPrimitive, ToPrimitive};
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive> AudioStatistics<T> for AudioSamples<T> {
+impl<T: AudioSample + ToPrimitive + FromPrimitive> AudioStatistics<T> for AudioSamples<T> 
+    where         i16: ConvertTo<T>,
+        I24: ConvertTo<T>,
+        i32: ConvertTo<T>,
+        f32: ConvertTo<T>,
+        f64: ConvertTo<T>,
+{
     /// Returns the peak (maximum absolute value) in the audio samples.
     ///
     /// Leverages the existing optimized `peak_native()` implementation.

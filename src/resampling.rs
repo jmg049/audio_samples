@@ -2,8 +2,7 @@
 //! Uses rubato for high-quality resampling.
 
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, operations::traits::AudioTypeConversion,
-    operations::types::ResamplingQuality,
+    operations::{traits::AudioTypeConversion, types::ResamplingQuality}, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24
 };
 
 use rubato::{FftFixedInOut, Resampler, SincFixedIn, SincInterpolationType, WindowFunction};
@@ -43,11 +42,15 @@ pub fn resample<T>(
 ) -> AudioSampleResult<AudioSamples<T>>
 where
     T: crate::AudioSample
-        + num_traits::Float
         + num_traits::FromPrimitive
         + num_traits::ToPrimitive
         + crate::ConvertTo<f64>,
-    f64: crate::ConvertTo<T>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<f64>: AudioTypeConversion<T>,
 {
     if audio.total_samples() == 0 {
         return Err(AudioSampleError::InvalidInput {
@@ -327,11 +330,15 @@ pub fn resample_by_ratio<T>(
 ) -> AudioSampleResult<AudioSamples<T>>
 where
     T: crate::AudioSample
-        + num_traits::Float
         + num_traits::FromPrimitive
         + num_traits::ToPrimitive
         + crate::ConvertTo<f64>,
-    f64: crate::ConvertTo<T>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<f64>: AudioTypeConversion<T>,
 {
     if ratio <= 0.0 {
         return Err(AudioSampleError::InvalidInput {
@@ -345,13 +352,12 @@ where
     resample(audio, target_sample_rate, quality)
 }
 
-
 #[cfg(test)]
 
 mod tests {
     use super::*;
     use crate::AudioSamples;
-    use ndarray::{array, Array1};
+    use ndarray::{Array1, array};
 
     #[test]
     fn test_resample_mono() {

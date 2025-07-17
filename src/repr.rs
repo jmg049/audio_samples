@@ -6,7 +6,7 @@ use crate::{AudioSample, ChannelLayout};
 
 /// Internal representation of audio data
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AudioData<T: AudioSample> {
+pub enum AudioData<T: AudioSample> {
     Mono(Array1<T>),         // Single channel audio samples
     MultiChannel(Array2<T>), // Multi-channel audio samples where each row is a channel
 }
@@ -21,6 +21,15 @@ pub struct AudioSamples<T: AudioSample> {
 }
 
 impl<T: AudioSample> AudioSamples<T> {
+    /// Creates a new AudioSamples with the given data and sample rate
+    pub fn new(data: AudioData<T>, sample_rate: u32) -> Self {
+        Self {
+            data,
+            sample_rate,
+            layout: ChannelLayout::Interleaved, // Default layout, can be changed later
+        }
+    }
+
     /// Creates a new mono AudioSamples with the given data and sample rate
     pub fn new_mono(data: Array1<T>, sample_rate: u32) -> Self {
         Self {

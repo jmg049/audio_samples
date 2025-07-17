@@ -7,9 +7,9 @@
 use super::traits::AudioEditing;
 use super::types::FadeCurve;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples};
+use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
 use ndarray::{Array1, Array2, Axis, concatenate, s};
-use num_traits::{Float, FromPrimitive, ToPrimitive, Zero};
+use num_traits::{Float, FromPrimitive, One, ToPrimitive, Zero};
 
 /// Helper function to convert seconds to samples
 fn seconds_to_samples(seconds: f64, sample_rate: u32) -> usize {
@@ -56,8 +56,14 @@ fn apply_fade_curve(curve: &FadeCurve, position: f64) -> f64 {
     }
 }
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEditing<T>
+impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + One + Copy> AudioEditing<T>
     for AudioSamples<T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
 {
     /// Reverses the order of audio samples.
     fn reverse(&self) -> Self
@@ -344,14 +350,16 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
                 if let AudioData::Mono(result_arr) = &mut result.data {
                     // Start with first source * weight
                     if let AudioData::Mono(_first_arr) = &first.data {
-                        let weight = T::from(mix_weights[0]).unwrap_or(T::zero());
+                        let weight =
+                            <f64 as ConvertTo<T>>::convert_to(&mix_weights[0]).unwrap_or(T::zero());
                         result_arr.mapv_inplace(|x| x * weight);
                     }
 
                     // Add remaining sources
                     for (i, source) in sources.iter().skip(1).enumerate() {
                         if let AudioData::Mono(source_arr) = &source.data {
-                            let weight = T::from(mix_weights[i + 1]).unwrap_or(T::zero());
+                            let weight = <f64 as ConvertTo<T>>::convert_to(&mix_weights[i + 1])
+                                .unwrap_or(T::zero());
                             for (r, s) in result_arr.iter_mut().zip(source_arr.iter()) {
                                 *r = *r + *s * weight;
                             }
@@ -365,14 +373,16 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
                 if let AudioData::MultiChannel(result_arr) = &mut result.data {
                     // Start with first source * weight
                     if let AudioData::MultiChannel(_first_arr) = &first.data {
-                        let weight = T::from(mix_weights[0]).unwrap_or(T::zero());
+                        let weight =
+                            <f64 as ConvertTo<T>>::convert_to(&mix_weights[0]).unwrap_or(T::zero());
                         result_arr.mapv_inplace(|x| x * weight);
                     }
 
                     // Add remaining sources
                     for (i, source) in sources.iter().skip(1).enumerate() {
                         if let AudioData::MultiChannel(source_arr) = &source.data {
-                            let weight = T::from(mix_weights[i + 1]).unwrap_or(T::zero());
+                            let weight = <f64 as ConvertTo<T>>::convert_to(&mix_weights[i + 1])
+                                .unwrap_or(T::zero());
                             for (r, s) in result_arr.iter_mut().zip(source_arr.iter()) {
                                 *r = *r + *s * weight;
                             }
@@ -401,7 +411,7 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
                 for i in 0..actual_fade_samples {
                     let position = i as f64 / actual_fade_samples as f64;
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = T::from(gain).unwrap_or(T::zero());
+                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
                     arr[i] = arr[i] * gain_t;
                 }
             }
@@ -409,7 +419,7 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
                 for i in 0..actual_fade_samples {
                     let position = i as f64 / actual_fade_samples as f64;
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = T::from(gain).unwrap_or(T::zero());
+                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
                     for channel in 0..arr.nrows() {
                         arr[[channel, i]] = arr[[channel, i]] * gain_t;
                     }
@@ -438,7 +448,7 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
                 for i in 0..actual_fade_samples {
                     let position = 1.0 - (i as f64 / actual_fade_samples as f64);
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = T::from(gain).unwrap_or(T::zero());
+                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
                     arr[start_sample + i] = arr[start_sample + i] * gain_t;
                 }
             }
@@ -446,7 +456,7 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
                 for i in 0..actual_fade_samples {
                     let position = 1.0 - (i as f64 / actual_fade_samples as f64);
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = T::from(gain).unwrap_or(T::zero());
+                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
                     for channel in 0..arr.nrows() {
                         arr[[channel, start_sample + i]] =
                             arr[[channel, start_sample + i]] * gain_t;
@@ -503,15 +513,21 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
     where
         Self: Sized,
     {
+        let threshold = <T as ConvertTo<f32>>::convert_to(&threshold).unwrap_or(0.0f32);
         match &self.data {
             AudioData::Mono(arr) => {
                 // Find first non-silent sample
-                let start = arr.iter().position(|&x| x.abs() > threshold).unwrap_or(0);
+                let start = arr
+                    .iter()
+                    .position(|&x| <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs() > threshold)
+                    .unwrap_or(0);
 
                 // Find last non-silent sample
                 let end = arr
                     .iter()
-                    .rposition(|&x| x.abs() > threshold)
+                    .rposition(|&x| {
+                        <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs() > threshold
+                    })
                     .map(|pos| pos + 1)
                     .unwrap_or(arr.len());
 
@@ -527,13 +543,21 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float + Copy> AudioEd
             AudioData::MultiChannel(arr) => {
                 // Find first non-silent frame (any channel above threshold)
                 let start = (0..arr.ncols())
-                    .find(|&col| arr.column(col).iter().any(|&x| x.abs() > threshold))
+                    .find(|&col| {
+                        arr.column(col).iter().any(|&x| {
+                            <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs().abs() > threshold
+                        })
+                    })
                     .unwrap_or(0);
 
                 // Find last non-silent frame
                 let end = (0..arr.ncols())
                     .rev()
-                    .find(|&col| arr.column(col).iter().any(|&x| x.abs() > threshold))
+                    .find(|&col| {
+                        arr.column(col).iter().any(|&x| {
+                            <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs().abs() > threshold
+                        })
+                    })
                     .map(|col| col + 1)
                     .unwrap_or(arr.ncols());
 

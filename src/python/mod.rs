@@ -837,6 +837,7 @@ impl PyAudioSamples {
 #[pyfunction(name = "from_numpy")]
 #[pyo3(signature = (array, sample_rate, *, copy=true))]
 fn from_numpy(array: &Bound<PyAny>, sample_rate: u32, copy: bool) -> PyResult<PyAudioSamples> {
+    let _ = copy; // TODO: Implement copy parameter
     let data = convert_numpy_to_audio_samples(array, sample_rate, None)?;
     Ok(PyAudioSamples { data })
 }

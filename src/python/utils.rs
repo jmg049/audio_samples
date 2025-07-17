@@ -352,6 +352,18 @@ pub fn map_error(error: AudioSampleError) -> PyErr {
         AudioSampleError::DimensionMismatch(msg) => {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Dimension mismatch: {}", msg))
         }
+        AudioSampleError::InvalidInput { msg } => {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid input: {}", msg))
+        }
+        AudioSampleError::ProcessingError { msg } => {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Processing error: {}", msg))
+        }
+        AudioSampleError::FeatureNotEnabled { feature } => {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Feature '{}' is not enabled",
+                feature
+            ))
+        }
     }
 }
 

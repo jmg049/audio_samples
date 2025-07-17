@@ -5,7 +5,7 @@
 //! and can be implemented independently.
 
 use super::types::*;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo};
+use crate::{AudioSample, I24, AudioSampleResult, AudioSamples, ConvertTo};
 use ndarray::Array2;
 
 // Complex numbers using num-complex crate
@@ -18,7 +18,14 @@ pub use num_complex::Complex;
 ///
 /// All methods return values in the native sample type `T` for consistency
 /// with the underlying data representation.
-pub trait AudioStatistics<T: AudioSample> {
+pub trait AudioStatistics<T: AudioSample> 
+    where         
+        i16: ConvertTo<T>,
+        I24: ConvertTo<T>,
+        i32: ConvertTo<T>,
+        f32: ConvertTo<T>,
+        f64: ConvertTo<T>,
+{
     /// Returns the peak (maximum absolute value) in the audio samples.
     ///
     /// This is useful for preventing clipping and measuring signal levels.
@@ -102,7 +109,13 @@ pub trait AudioStatistics<T: AudioSample> {
 ///
 /// Most methods modify the audio in-place for efficiency and return
 /// a Result to indicate success or failure.
-pub trait AudioProcessing<T: AudioSample> {
+pub trait AudioProcessing<T: AudioSample> 
+    where         i16: ConvertTo<T>,
+        I24: ConvertTo<T>,
+        i32: ConvertTo<T>,
+        f32: ConvertTo<T>,
+        f64: ConvertTo<T>,
+{
     /// Normalizes audio samples using the specified method and range.
     ///
     /// # Arguments
@@ -222,9 +235,7 @@ pub trait AudioProcessing<T: AudioSample> {
         quality: ResamplingQuality,
     ) -> AudioSampleResult<Self>
     where
-        Self: Sized,
-        T: num_traits::Float
-            + num_traits::FromPrimitive
+        Self: Sized, T : num_traits::FromPrimitive
             + num_traits::ToPrimitive
             + crate::ConvertTo<f64>,
         f64: crate::ConvertTo<T>;
@@ -247,8 +258,7 @@ pub trait AudioProcessing<T: AudioSample> {
     fn resample_by_ratio(&self, ratio: f64, quality: ResamplingQuality) -> AudioSampleResult<Self>
     where
         Self: Sized,
-        T: num_traits::Float
-            + num_traits::FromPrimitive
+        T: num_traits::FromPrimitive
             + num_traits::ToPrimitive
             + crate::ConvertTo<f64>,
         f64: crate::ConvertTo<T>;
@@ -261,7 +271,13 @@ pub trait AudioProcessing<T: AudioSample> {
 ///
 /// Complex numbers are used for frequency domain representations,
 /// and ndarray is used for efficient matrix operations on spectrograms.
-pub trait AudioTransforms<T: AudioSample> {
+pub trait AudioTransforms<T: AudioSample>
+    where         i16: ConvertTo<T>,
+        I24: ConvertTo<T>,
+        i32: ConvertTo<T>,
+        f32: ConvertTo<T>,
+        f64: ConvertTo<T>,
+{
     /// Computes the Fast Fourier Transform of the audio samples.
     ///
     /// Returns complex frequency domain representation where the real and
@@ -437,7 +453,13 @@ pub trait AudioTransforms<T: AudioSample> {
 /// This trait provides methods for cutting, pasting, mixing, and modifying
 /// audio samples in the time domain. Most operations create new AudioSamples
 /// instances rather than modifying in-place to preserve the original data.
-pub trait AudioEditing<T: AudioSample> {
+pub trait AudioEditing<T: AudioSample>
+    where         i16: ConvertTo<T>,
+        I24: ConvertTo<T>,
+        i32: ConvertTo<T>,
+        f32: ConvertTo<T>,
+        f64: ConvertTo<T>,
+{
     /// Reverses the order of audio samples.
     ///
     /// Creates a new AudioSamples instance with time-reversed content.
@@ -544,7 +566,13 @@ pub trait AudioEditing<T: AudioSample> {
 ///
 /// This trait provides methods for converting between different channel
 /// configurations and manipulating multi-channel audio.
-pub trait AudioChannelOps<T: AudioSample> {
+pub trait AudioChannelOps<T: AudioSample> 
+    where         i16: ConvertTo<T>,
+        I24: ConvertTo<T>,
+        i32: ConvertTo<T>,
+        f32: ConvertTo<T>,
+        f64: ConvertTo<T>,
+{
     /// Converts multi-channel audio to mono using specified method.
     ///
     /// # Arguments
@@ -607,7 +635,13 @@ pub trait AudioChannelOps<T: AudioSample> {
 /// This trait provides safe conversion between different audio sample types
 /// while preserving audio quality and handling potential conversion errors.
 /// Leverages the existing ConvertTo trait system for type safety.
-pub trait AudioTypeConversion<T: AudioSample> {
+pub trait AudioTypeConversion<T: AudioSample> 
+    where         i16: ConvertTo<T>,
+        I24: ConvertTo<T>,
+        i32: ConvertTo<T>,
+        f32: ConvertTo<T>,
+        f64: ConvertTo<T>,
+{
     /// Converts to different sample type, borrowing the original.
     ///
     /// Uses the existing ConvertTo trait system for type-safe conversions.
@@ -667,9 +701,13 @@ pub trait AudioSamplesOperations<T: AudioSample>:
     + AudioEditing<T>
     + AudioChannelOps<T>
     + AudioTypeConversion<T>
-{
-    // No additional methods - just combines all focused traits
-}
+    where i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+
+{}
 
 // Blanket implementation for the unified trait
 impl<T: AudioSample, A> AudioSamplesOperations<T> for A where
@@ -678,6 +716,10 @@ impl<T: AudioSample, A> AudioSamplesOperations<T> for A where
         + AudioTransforms<T>
         + AudioEditing<T>
         + AudioChannelOps<T>
-        + AudioTypeConversion<T>
-{
-}
+        + AudioTypeConversion<T>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{}

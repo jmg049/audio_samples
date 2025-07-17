@@ -44,12 +44,12 @@ pub mod traits;
 pub mod types;
 
 // Implementation modules (will be created as needed)
+pub mod channels;
+pub mod conversions;
 pub mod editing;
 pub mod processing;
 pub mod statistics;
 pub mod transforms;
-// pub mod channels;
-pub mod conversions;
 
 // Re-export main traits for convenience
 pub use traits::{
@@ -62,6 +62,3 @@ pub use types::{
     ChannelConversionMethod, FadeCurve, MonoConversionMethod, NormalizationMethod,
     StereoConversionMethod, WindowType,
 };
-
-// Note: Individual trait implementations will be added in separate modules
-// as they are implemented. For now, only trait definitions are available.

@@ -30,7 +30,6 @@
 //! ```
 
 use bytemuck::NoUninit;
-use i24::I24DiskMethods;
 use num_traits::{ToBytes, Zero};
 mod error;
 pub mod operations;
@@ -43,6 +42,7 @@ use std::{
     ops::{Add, Div, Mul, Sub},
 };
 
+pub use i24::I24DiskMethods;
 /// Re-export i24 for dependent crates to use.
 pub use i24::i24 as I24;
 
@@ -106,6 +106,8 @@ pub trait AudioSample:
     + PartialEq
     + Zero
     + ToBytes
+    + serde::Serialize
+    + serde::Deserialize<'static>
 {
     #[inline]
     fn to_bytes<'a>(self) -> Vec<u8> {
