@@ -46,19 +46,29 @@ pub mod types;
 // Implementation modules (will be created as needed)
 pub mod channels;
 pub mod conversions;
+pub mod dynamic_range;
 pub mod editing;
+pub mod iir_filtering;
+pub mod onset_detection;
+pub mod parametric_eq;
+pub mod peak_picking;
+pub mod pitch_analysis;
 pub mod processing;
 pub mod statistics;
 pub mod transforms;
 
 // Re-export main traits for convenience
 pub use traits::{
-    AudioChannelOps, AudioEditing, AudioProcessing, AudioSamplesOperations, AudioStatistics,
-    AudioTransforms, AudioTypeConversion,
+    AudioChannelOps, AudioDynamicRange, AudioEditing, AudioIirFiltering, AudioParametricEq,
+    AudioPitchAnalysis, AudioProcessing, AudioSamplesOperations, AudioStatistics, AudioTransforms,
+    AudioTypeConversion,
 };
 
 // Re-export supporting types
 pub use types::{
-    ChannelConversionMethod, FadeCurve, MonoConversionMethod, NormalizationMethod,
-    StereoConversionMethod, WindowType,
+    AdaptiveThresholdConfig, AdaptiveThresholdMethod, ChannelConversionMethod, CompressorConfig,
+    ComplexOnsetConfig, CqtConfig, DynamicRangeMethod, EqBand, EqBandType, FadeCurve, FilterResponse, IirFilterDesign,
+    IirFilterType, KneeType, LimiterConfig, MonoConversionMethod, NormalizationMethod,
+    OnsetConfig, ParametricEq, PeakPickingConfig, PitchDetectionMethod, SideChainConfig, 
+    SpectralFluxConfig, SpectralFluxMethod, StereoConversionMethod, WindowType,
 };

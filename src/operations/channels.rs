@@ -13,8 +13,9 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<f32>: AudioTypeConversion<T>,
     AudioSamples<f64>: AudioTypeConversion<T>,
-    T: FromPrimitive + ToPrimitive + Zero + One
+    T: FromPrimitive + ToPrimitive + Zero + One,
 {
     fn to_mono(&self, method: super::MonoConversionMethod) -> crate::AudioSampleResult<Self>
     where

@@ -4,23 +4,24 @@
 //! signal processing operations including normalization, filtering, compression,
 //! and envelope operations using efficient ndarray operations.
 
-use super::traits::{AudioProcessing, AudioStatistics};
 use super::types::NormalizationMethod;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo, I24};
+use crate::{
+    AudioProcessing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
+    AudioStatistics, AudioTypeConversion, ConvertTo, I24,
+};
 use ndarray::Axis;
-use num_traits::{Float, FromPrimitive, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessing<T>
-    for AudioSamples<T>
-
-    where
+impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero> AudioProcessing<T> for AudioSamples<T>
+where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<f64>: AudioTypeConversion<T>,
+    Self: AudioTypeConversion<T>,
+    AudioSamples<f32>: AudioTypeConversion<T>,
 {
     /// Normalizes audio samples using the specified method and range.
     ///
@@ -44,7 +45,8 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessin
                 // Avoid division by zero
                 if current_min == current_max {
                     // All values are the same, set to middle of target range
-                    let middle = min + (max - min) / T::from(2.0).unwrap();
+                    let middle =
+                        min + (max - min) / <f64 as ConvertTo<T>>::convert_to(&2.0).unwrap();
                     match &mut self.data {
                         AudioData::Mono(arr) => arr.fill(middle),
                         AudioData::MultiChannel(arr) => arr.fill(middle),
@@ -72,16 +74,28 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessin
                 if peak == T::zero() {
                     return Ok(()); // No scaling needed for zero signal
                 }
+                let min_f64 = min.to_f64().unwrap_or(0.0).abs();
+                let max_f64 = max.to_f64().unwrap_or(0.0).abs();
 
-                let target_peak = T::max(min.abs(), max.abs());
-                let scale_factor = target_peak / peak;
+                let target_peak = min_f64.max(max_f64);
+                let scale_factor = target_peak / peak.to_f64().unwrap_or(1.0);
 
                 match &mut self.data {
                     AudioData::Mono(arr) => {
-                        arr.mapv_inplace(|x| x * scale_factor);
+                        arr.mapv_inplace(|x| {
+                            <f64 as ConvertTo<T>>::convert_to(
+                                &(x.convert_to().unwrap_or(0.0) * scale_factor),
+                            )
+                            .unwrap_or(T::zero())
+                        });
                     }
                     AudioData::MultiChannel(arr) => {
-                        arr.mapv_inplace(|x| x * scale_factor);
+                        arr.mapv_inplace(|x| {
+                            <f64 as ConvertTo<T>>::convert_to(
+                                &(x.convert_to().unwrap_or(0.0) * scale_factor),
+                            )
+                            .unwrap_or(T::zero())
+                        });
                     }
                 }
             }
@@ -493,11 +507,8 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessin
     ) -> AudioSampleResult<Self>
     where
         Self: Sized,
-        T:  num_traits::FromPrimitive
-            + num_traits::ToPrimitive
-            + crate::ConvertTo<f64>,
+        T: num_traits::FromPrimitive + num_traits::ToPrimitive + crate::ConvertTo<f64>,
         f64: crate::ConvertTo<T>,
-        AudioSamples<f64>: AudioTypeConversion<T>,
     {
         crate::resampling::resample(self, target_sample_rate, quality)
     }
@@ -510,10 +521,7 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessin
     ) -> AudioSampleResult<Self>
     where
         Self: Sized,
-        T: num_traits::Float
-            + num_traits::FromPrimitive
-            + num_traits::ToPrimitive
-            + crate::ConvertTo<f64>,
+        T: num_traits::FromPrimitive + num_traits::ToPrimitive + crate::ConvertTo<f64>,
         f64: crate::ConvertTo<T>,
     {
         crate::resampling::resample_by_ratio(self, ratio, quality)
@@ -521,7 +529,7 @@ impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioProcessin
 }
 
 // Helper methods for the AudioProcessing implementation
-impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + Float> AudioSamples<T> {
+impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero> AudioSamples<T> {
     /// Computes the mean value of all samples.
     fn compute_mean(&self) -> T {
         match &self.data {
@@ -632,6 +640,8 @@ mod tests {
     use super::*;
     use approx_eq::assert_approx_eq;
     use ndarray::array;
+
+    use crate::AudioProcessing;
 
     #[test]
     fn test_normalize_min_max() {

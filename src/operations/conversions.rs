@@ -8,7 +8,7 @@ use super::traits::AudioTypeConversion;
 use crate::repr::AudioData;
 use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
 
-impl<T: AudioSample> AudioTypeConversion<T> for AudioSamples<T> 
+impl<T: AudioSample> AudioTypeConversion<T> for AudioSamples<T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
