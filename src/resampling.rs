@@ -2,7 +2,8 @@
 //! Uses rubato for high-quality resampling.
 
 use crate::{
-    operations::{traits::AudioTypeConversion, types::ResamplingQuality}, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24
+    AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24,
+    operations::{traits::AudioTypeConversion, types::ResamplingQuality},
 };
 
 use rubato::{FftFixedInOut, Resampler, SincFixedIn, SincInterpolationType, WindowFunction};
@@ -50,7 +51,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<f64>: AudioTypeConversion<T>,
+    AudioSamples<f32>: AudioTypeConversion<T>,
 {
     if audio.total_samples() == 0 {
         return Err(AudioSampleError::InvalidInput {
@@ -65,13 +66,13 @@ where
     }
 
     // Convert to f64 for processing (rubato works with f64)
-    let input_f64 = audio.as_type::<f64>()?;
+    let input_f32 = audio.as_type::<f32>()?;
 
     // Resample using appropriate quality settings
     let resampled_f64 = match quality {
-        ResamplingQuality::Fast => resample_fast(&input_f64, target_sample_rate)?,
-        ResamplingQuality::Medium => resample_medium(&input_f64, target_sample_rate)?,
-        ResamplingQuality::High => resample_high(&input_f64, target_sample_rate)?,
+        ResamplingQuality::Fast => resample_fast(&input_f32, target_sample_rate)?,
+        ResamplingQuality::Medium => resample_medium(&input_f32, target_sample_rate)?,
+        ResamplingQuality::High => resample_high(&input_f32, target_sample_rate)?,
     };
 
     // Convert back to original type
@@ -81,14 +82,14 @@ where
 /// Fast resampling using linear interpolation.
 /// Good for real-time applications where speed is critical.
 fn resample_fast(
-    audio: &AudioSamples<f64>,
+    audio: &AudioSamples<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f64>> {
+) -> AudioSampleResult<AudioSamples<f32>> {
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.channels();
 
     // Create resampler
-    let mut resampler = FftFixedInOut::<f64>::new(
+    let mut resampler = FftFixedInOut::<f32>::new(
         input_sample_rate,
         target_sample_rate,
         usize::min(audio.samples_per_channel(), 1024),
@@ -104,14 +105,14 @@ fn resample_fast(
 /// Medium quality resampling with balanced speed/quality.
 /// Good general-purpose resampling for most applications.
 fn resample_medium(
-    audio: &AudioSamples<f64>,
+    audio: &AudioSamples<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f64>> {
+) -> AudioSampleResult<AudioSamples<f32>> {
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.channels();
 
     // Create resampler with medium settings
-    let mut resampler = SincFixedIn::<f64>::new(
+    let mut resampler = SincFixedIn::<f32>::new(
         target_sample_rate as f64 / input_sample_rate as f64,
         2.0, // Oversampling factor
         rubato::SincInterpolationParameters {
@@ -134,14 +135,14 @@ fn resample_medium(
 /// High quality resampling with maximum quality.
 /// Best for offline processing where quality is paramount.
 fn resample_high(
-    audio: &AudioSamples<f64>,
+    audio: &AudioSamples<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f64>> {
+) -> AudioSampleResult<AudioSamples<f32>> {
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.channels();
 
     // Create high-quality resampler
-    let mut resampler = SincFixedIn::<f64>::new(
+    let mut resampler = SincFixedIn::<f32>::new(
         target_sample_rate as f64 / input_sample_rate as f64,
         2.0, // Oversampling factor
         rubato::SincInterpolationParameters {
@@ -162,15 +163,15 @@ fn resample_high(
 }
 
 /// Helper function to perform resampling with an FFT-based resampler.
-fn resample_with_resampler<R: Resampler<f64>>(
-    audio: &AudioSamples<f64>,
+fn resample_with_resampler<R: Resampler<f32>>(
+    audio: &AudioSamples<f32>,
     resampler: &mut R,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f64>> {
+) -> AudioSampleResult<AudioSamples<f32>> {
     let channels = audio.channels();
 
     // Prepare input data - rubato expects Vec<Vec<f64>> (channels x samples)
-    let mut input_data: Vec<Vec<f64>> = Vec::with_capacity(channels);
+    let mut input_data: Vec<Vec<f32>> = Vec::with_capacity(channels);
 
     if audio.is_mono() {
         let mono_data = audio.as_mono().ok_or(AudioSampleError::InvalidInput {
@@ -185,7 +186,7 @@ fn resample_with_resampler<R: Resampler<f64>>(
             })?;
 
         for ch in 0..channels {
-            let channel_data: Vec<f64> = multi_data.row(ch).to_vec();
+            let channel_data: Vec<f32> = multi_data.row(ch).to_vec();
             input_data.push(channel_data);
         }
     }
@@ -204,14 +205,14 @@ fn resample_with_resampler<R: Resampler<f64>>(
 
 /// Helper function to perform resampling with a sinc-based resampler.
 fn resample_with_sinc_resampler(
-    audio: &AudioSamples<f64>,
-    resampler: &mut SincFixedIn<f64>,
+    audio: &AudioSamples<f32>,
+    resampler: &mut SincFixedIn<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f64>> {
+) -> AudioSampleResult<AudioSamples<f32>> {
     let channels = audio.channels();
 
     // Prepare input data
-    let mut input_data: Vec<Vec<f64>> = Vec::with_capacity(channels);
+    let mut input_data: Vec<Vec<f32>> = Vec::with_capacity(channels);
 
     if audio.is_mono() {
         let mono_data = audio.as_mono().ok_or(AudioSampleError::InvalidInput {
@@ -226,20 +227,20 @@ fn resample_with_sinc_resampler(
             })?;
 
         for ch in 0..channels {
-            let channel_data: Vec<f64> = multi_data.row(ch).to_vec();
+            let channel_data: Vec<f32> = multi_data.row(ch).to_vec();
             input_data.push(channel_data);
         }
     }
 
     // For SincFixedIn, we need to process in chunks
     let chunk_size = resampler.input_frames_max();
-    let mut output_chunks: Vec<Vec<Vec<f64>>> = Vec::new();
+    let mut output_chunks: Vec<Vec<Vec<f32>>> = Vec::new();
 
     for chunk_start in (0..input_data[0].len()).step_by(chunk_size) {
         let chunk_end = (chunk_start + chunk_size).min(input_data[0].len());
 
         // Extract chunk for each channel
-        let mut chunk_data: Vec<Vec<f64>> = Vec::with_capacity(channels);
+        let mut chunk_data: Vec<Vec<f32>> = Vec::with_capacity(channels);
         for ch in 0..channels {
             chunk_data.push(input_data[ch][chunk_start..chunk_end].to_vec());
         }
@@ -262,7 +263,7 @@ fn resample_with_sinc_resampler(
         });
     }
 
-    let mut combined_output: Vec<Vec<f64>> = vec![Vec::new(); channels];
+    let mut combined_output: Vec<Vec<f32>> = vec![Vec::new(); channels];
     for chunk in output_chunks {
         for (ch, channel_data) in chunk.into_iter().enumerate() {
             combined_output[ch].extend(channel_data);
@@ -274,9 +275,9 @@ fn resample_with_sinc_resampler(
 
 /// Helper function to create AudioSamples from channel data.
 fn create_audio_samples_from_channels(
-    channel_data: Vec<Vec<f64>>,
+    channel_data: Vec<Vec<f32>>,
     sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f64>> {
+) -> AudioSampleResult<AudioSamples<f32>> {
     if channel_data.is_empty() {
         return Err(AudioSampleError::InvalidInput {
             msg: "No channel data provided".to_string(),
@@ -338,7 +339,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<f64>: AudioTypeConversion<T>,
+    AudioSamples<f32>: AudioTypeConversion<T>,
 {
     if ratio <= 0.0 {
         return Err(AudioSampleError::InvalidInput {
@@ -364,8 +365,8 @@ mod tests {
         // Create a suitable mono signal at 44.1 kHz
         // at least 1024 samples to ensure chunking works
         let samples = (0..1024)
-            .map(|x| (x as f64 * 2.0 * std::f64::consts::PI * 440.0 / 44100.0).sin())
-            .collect::<Vec<f64>>();
+            .map(|x| (x as f32 * 2.0 * std::f32::consts::PI * 440.0 / 44100.0).sin())
+            .collect::<Vec<f32>>();
 
         let data = Array1::from_vec(samples);
 
@@ -382,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_resample_by_ratio() {
-        let data = array![1.0f64, 0.0, -1.0, 0.0];
+        let data = array![1.0f32, 0.0, -1.0, 0.0];
         let audio = AudioSamples::new_mono(data, 44100);
 
         // Upsample by 2x
@@ -396,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_no_resampling_needed() {
-        let data = array![1.0f64, 0.0, -1.0];
+        let data = array![1.0f32, 0.0, -1.0];
         let audio = AudioSamples::new_mono(data.clone(), 44100);
 
         // "Resample" to same rate
@@ -411,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_invalid_ratio() {
-        let data = array![1.0f64, 0.0];
+        let data = array![1.0f32, 0.0];
         let audio = AudioSamples::new_mono(data, 44100);
 
         let result = resample_by_ratio(&audio, -1.0, ResamplingQuality::Fast);
