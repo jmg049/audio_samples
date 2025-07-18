@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audio Samples Rs</title>
+    <meta name="description" content="A lightweight site built for the AudioSamples Rust crate." />
+
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+
+  <body>
+    <header>
+      <div class="header-content">
+        <h1><a href="&#x2F;">Audio Samples Rs</a></h1>
+        <div class="theme-controls">
+          <select id="theme-select" class="theme-select" aria-label="Select theme">
+            <option value="modern">Modern</option>
+            <option value="minimal">Minimal</option>
+            <option value="academic">Academic</option>
+            <option value="retro">Retro</option>
+            <option value="high-contrast">High Contrast</option>
+          </select>
+          <button id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode">
+            <span class="theme-toggle-light">☀️</span>
+            <span class="theme-toggle-dark">🌙</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      
+  <section class="hero">
+    <h2>Welcome to Audio Samples Rs</h2>
+    <p>A lightweight site built for the AudioSamples Rust crate.</p>
+  </section>
+
+  <section class="posts">
+    <h2>Recent Posts</h2>
+    
+    
+      <div class="post-list">
+        
+          <article class="post-preview">
+            <header>
+              <h3><a href="&#x2F;posts&#x2F;part-i&#x2F;">I: AudioSamples - The Need for a Fresh Take on Audio Processing</a></h3>
+              <div class="post-meta">
+                <time datetime="2025-07-18">
+                  July 18, 2025
+                </time>
+                
+              </div>
+            </header>
+            
+            
+            
+            <footer>
+              <a href="&#x2F;posts&#x2F;part-i&#x2F;" class="read-more">Read more →</a>
+            </footer>
+          </article>
+        
+      </div>
+    
+  </section>
+
+    </main>
+
+    <footer>
+      <small>&copy; 2025 Jack Geraghty</small>
+    </footer>
+    
+    <script>
+      (function() {
+        const toggle = document.getElementById('theme-toggle');
+        const select = document.getElementById('theme-select');
+        const html = document.documentElement;
+        const themeKey = 'theme-variant';
+        const darkKey = 'theme-dark';
+        
+        // Check localStorage or system preference
+        const storedTheme = localStorage.getItem(themeKey) || 'modern';
+        const storedDark = localStorage.getItem(darkKey);
+        const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const isDark = storedDark === 'true' || (!storedDark && systemDark);
+        
+        // Set initial theme
+        const initialTheme = isDark ? storedTheme + ' dark' : storedTheme;
+        html.setAttribute('data-theme', initialTheme);
+        select.value = storedTheme;
+        
+        // Theme variant selector
+        select.addEventListener('change', () => {
+          const newTheme = select.value;
+          const currentDark = html.getAttribute('data-theme').includes('dark');
+          const newFullTheme = currentDark ? newTheme + ' dark' : newTheme;
+          html.setAttribute('data-theme', newFullTheme);
+          localStorage.setItem(themeKey, newTheme);
+        });
+        
+        // Dark mode toggle
+        toggle.addEventListener('click', () => {
+          const currentTheme = html.getAttribute('data-theme');
+          const currentVariant = currentTheme.replace(' dark', '');
+          const isDark = currentTheme.includes('dark');
+          const newTheme = isDark ? currentVariant : currentVariant + ' dark';
+          html.setAttribute('data-theme', newTheme);
+          localStorage.setItem(darkKey, (!isDark).toString());
+        });
+      })();
+    </script>
+  </body>
+</html>

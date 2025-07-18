@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <h2>Welcome to {{ config.title }}</h2>
+    <p>{{ config.description }}</p>
+  </section>
+
+  <section class="posts">
+    <h2>Recent Posts</h2>
+    {% set posts_section = get_section(path="posts/_index.md") %}
+    {% if posts_section.pages %}
+      <div class="post-list">
+        {% for page in posts_section.pages %}
+          <article class="post-preview">
+            <header>
+              <h3><a href="{{ page.permalink }}">{{ page.title }}</a></h3>
+              <div class="post-meta">
+                <time datetime="{{ page.date | date(format='%Y-%m-%d') }}">
+                  {{ page.date | date(format="%B %d, %Y") }}
+                </time>
+                {% if page.taxonomies.tags %}
+                  <div class="tags">
+                    {% for tag in page.taxonomies.tags %}
+                      <span class="tag">{{ tag }}</span>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+              </div>
+            </header>
+            
+            {% if page.summary %}
+              <div class="excerpt">
+                {{ page.summary | safe }}
+              </div>
+            {% endif %}
+            
+            <footer>
+              <a href="{{ page.permalink }}" class="read-more">Read more →</a>
+            </footer>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p>No posts yet. Come back soon!</p>
+    {% endif %}
+  </section>
+{% endblock %}
