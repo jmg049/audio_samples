@@ -118,9 +118,7 @@ pub fn adaptive_threshold(
         let threshold = match config.method {
             AdaptiveThresholdMethod::Delta => {
                 // Delta-based: threshold = local_max - delta
-                let local_max = window
-                    .iter()
-                    .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+                let local_max = window.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
                 local_max - config.delta
             }
             AdaptiveThresholdMethod::Percentile => {
@@ -129,9 +127,7 @@ pub fn adaptive_threshold(
             }
             AdaptiveThresholdMethod::Combined => {
                 // Combined: max(delta_threshold, percentile_threshold)
-                let local_max = window
-                    .iter()
-                    .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+                let local_max = window.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
                 let delta_threshold = local_max - config.delta;
                 let percentile_threshold = percentile(window, config.percentile);
                 delta_threshold.max(percentile_threshold)
@@ -213,7 +209,8 @@ pub fn pick_peaks(
 
     // Normalization
     if config.normalize_onset_strength {
-        processed_strength = normalize_onset_strength(&processed_strength, config.normalization_method)?;
+        processed_strength =
+            normalize_onset_strength(&processed_strength, config.normalization_method)?;
     }
 
     // Step 2: Compute adaptive threshold
@@ -221,12 +218,12 @@ pub fn pick_peaks(
 
     // Step 3: Find candidate peaks (local maxima above threshold)
     let mut candidates = Vec::new();
-    
+
     for i in 1..processed_strength.len() - 1 {
         let current = processed_strength[i];
         let prev = processed_strength[i - 1];
         let next = processed_strength[i + 1];
-        
+
         // Check if it's a local maximum above threshold
         if current > prev && current > next && current > thresholds[i] {
             candidates.push((i, current));
@@ -274,10 +271,10 @@ pub fn apply_pre_emphasis(signal: &[f64], coeff: f64) -> AudioSampleResult<Vec<f
     }
 
     let mut filtered = Vec::with_capacity(signal.len());
-    
+
     // First sample unchanged
     filtered.push(signal[0]);
-    
+
     // Apply pre-emphasis filter
     for i in 1..signal.len() {
         filtered.push(signal[i] - coeff * signal[i - 1]);
@@ -332,11 +329,11 @@ pub fn apply_median_filter(signal: &[f64], filter_length: usize) -> AudioSampleR
         // Determine window bounds
         let start = i.saturating_sub(half_length);
         let end = (i + half_length + 1).min(signal.len());
-        
+
         // Extract window and compute median
         let mut window: Vec<f64> = signal[start..end].to_vec();
         window.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         let median = window[window.len() / 2];
         filtered.push(median);
     }
@@ -372,11 +369,11 @@ pub fn normalize_onset_strength(
             let max_abs = onset_strength
                 .iter()
                 .fold(0.0f64, |acc, &x| acc.max(x.abs()));
-            
+
             if max_abs == 0.0 {
                 return Ok(onset_strength.to_vec());
             }
-            
+
             let normalized = onset_strength.iter().map(|&x| x / max_abs).collect();
             Ok(normalized)
         }
@@ -388,11 +385,11 @@ pub fn normalize_onset_strength(
             let max_val = onset_strength
                 .iter()
                 .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
-            
+
             if (max_val - min_val).abs() < f64::EPSILON {
                 return Ok(onset_strength.to_vec());
             }
-            
+
             let normalized = onset_strength
                 .iter()
                 .map(|&x| (x - min_val) / (max_val - min_val))
@@ -405,12 +402,13 @@ pub fn normalize_onset_strength(
             let variance = onset_strength
                 .iter()
                 .map(|&x| (x - mean).powi(2))
-                .sum::<f64>() / onset_strength.len() as f64;
-            
+                .sum::<f64>()
+                / onset_strength.len() as f64;
+
             if variance == 0.0 {
                 return Ok(onset_strength.to_vec());
             }
-            
+
             let std_dev = variance.sqrt();
             let normalized = onset_strength
                 .iter()
@@ -559,7 +557,7 @@ fn apply_moving_average(signal: &[f64], window_size: usize) -> AudioSampleResult
     for i in 0..signal.len() {
         let start = i.saturating_sub(half_window);
         let end = (i + half_window + 1).min(signal.len());
-        
+
         let sum: f64 = signal[start..end].iter().sum();
         let average = sum / (end - start) as f64;
         smoothed.push(average);
@@ -610,16 +608,16 @@ fn percentile(values: &[f64], percentile: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::types::{AdaptiveThresholdMethod, NormalizationMethod};
+    use crate::operations::types::NormalizationMethod;
 
     #[test]
     fn test_adaptive_threshold_delta() {
         let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
         let config = AdaptiveThresholdConfig::delta(0.1, 3);
-        
+
         let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
         assert_eq!(thresholds.len(), onset_strength.len());
-        
+
         // All thresholds should be above minimum
         for &threshold in &thresholds {
             assert!(threshold >= config.min_threshold);
@@ -630,10 +628,10 @@ mod tests {
     fn test_adaptive_threshold_percentile() {
         let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
         let config = AdaptiveThresholdConfig::percentile(0.8, 3);
-        
+
         let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
         assert_eq!(thresholds.len(), onset_strength.len());
-        
+
         // Thresholds should be within bounds
         for &threshold in &thresholds {
             assert!(threshold >= config.min_threshold);
@@ -645,7 +643,7 @@ mod tests {
     fn test_adaptive_threshold_combined() {
         let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
         let config = AdaptiveThresholdConfig::combined(0.1, 0.8, 3);
-        
+
         let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
         assert_eq!(thresholds.len(), onset_strength.len());
     }
@@ -654,19 +652,19 @@ mod tests {
     fn test_pick_peaks_basic() {
         let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
         let mut config = PeakPickingConfig::new();
-        
+
         // Configure for small test data
         config.adaptive_threshold.window_size = 3; // Small window for 7 samples
         config.min_peak_separation = 1; // Allow adjacent peaks for testing
         config.pre_emphasis = false; // Disable to avoid edge effects
         config.median_filter = false; // Disable to avoid smoothing
         config.normalize_onset_strength = false; // Keep original values
-        
+
         let peaks = pick_peaks(&onset_strength, &config).unwrap();
-        
+
         // Should detect some peaks (indices 2 and 5 should be peaks: 0.8 and 0.9)
         assert!(!peaks.is_empty());
-        
+
         // All peaks should be valid indices
         for &peak in &peaks {
             assert!(peak < onset_strength.len());
@@ -678,9 +676,9 @@ mod tests {
         let onset_strength = vec![0.1, 0.5, 0.6, 0.7, 0.2, 0.8, 0.1];
         let mut config = PeakPickingConfig::new();
         config.min_peak_separation = 3;
-        
+
         let peaks = pick_peaks(&onset_strength, &config).unwrap();
-        
+
         // Check minimum separation constraint
         for i in 1..peaks.len() {
             assert!(peaks[i] - peaks[i - 1] >= config.min_peak_separation);
@@ -691,13 +689,13 @@ mod tests {
     fn test_pre_emphasis() {
         let signal = vec![1.0, 2.0, 3.0, 2.0, 1.0];
         let coeff = 0.97;
-        
+
         let filtered = apply_pre_emphasis(&signal, coeff).unwrap();
         assert_eq!(filtered.len(), signal.len());
-        
+
         // First sample should be unchanged
         assert_eq!(filtered[0], signal[0]);
-        
+
         // Check pre-emphasis formula
         for i in 1..signal.len() {
             let expected = signal[i] - coeff * signal[i - 1];
@@ -709,9 +707,9 @@ mod tests {
     fn test_median_filter() {
         let signal = vec![1.0, 5.0, 2.0, 8.0, 3.0]; // Contains outlier
         let filtered = apply_median_filter(&signal, 3).unwrap();
-        
+
         assert_eq!(filtered.len(), signal.len());
-        
+
         // Median filter should reduce the outlier effect
         assert!(filtered[1] < signal[1]); // Outlier should be reduced
     }
@@ -719,10 +717,11 @@ mod tests {
     #[test]
     fn test_normalize_onset_strength_peak() {
         let onset_strength = vec![0.1, 0.5, 1.0, 0.3];
-        let normalized = normalize_onset_strength(&onset_strength, NormalizationMethod::Peak).unwrap();
-        
+        let normalized =
+            normalize_onset_strength(&onset_strength, NormalizationMethod::Peak).unwrap();
+
         assert_eq!(normalized.len(), onset_strength.len());
-        
+
         // Maximum absolute value should be 1.0
         let max_abs = normalized.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
         assert!((max_abs - 1.0f64).abs() < 1e-10);
@@ -731,14 +730,17 @@ mod tests {
     #[test]
     fn test_normalize_onset_strength_minmax() {
         let onset_strength = vec![0.1, 0.5, 1.0, 0.3];
-        let normalized = normalize_onset_strength(&onset_strength, NormalizationMethod::MinMax).unwrap();
-        
+        let normalized =
+            normalize_onset_strength(&onset_strength, NormalizationMethod::MinMax).unwrap();
+
         assert_eq!(normalized.len(), onset_strength.len());
-        
+
         // Range should be [0, 1]
         let min_val = normalized.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
-        let max_val = normalized.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
-        
+        let max_val = normalized
+            .iter()
+            .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+
         assert!(min_val >= 0.0);
         assert!(max_val <= 1.0);
         assert!((max_val - 1.0).abs() < 1e-10);
@@ -749,9 +751,9 @@ mod tests {
     fn test_smooth_onset_strength() {
         let onset_strength = vec![0.1, 0.9, 0.1, 0.8, 0.2]; // Noisy signal
         let smoothed = smooth_onset_strength(&onset_strength, 3, 3).unwrap();
-        
+
         assert_eq!(smoothed.len(), onset_strength.len());
-        
+
         // Smoothed signal should have less variation
         let original_std = standard_deviation(&onset_strength);
         let smoothed_std = standard_deviation(&smoothed);
@@ -762,12 +764,12 @@ mod tests {
     fn test_temporal_constraints() {
         let candidates = vec![(1, 0.8), (2, 0.6), (5, 0.9), (6, 0.7)];
         let min_separation = 2;
-        
+
         let selected = apply_temporal_constraints(&candidates, min_separation).unwrap();
-        
+
         // Should select peaks with highest strength that satisfy constraints
         assert!(!selected.is_empty());
-        
+
         // Check separation constraint
         for i in 1..selected.len() {
             assert!(selected[i] - selected[i - 1] >= min_separation);
@@ -777,11 +779,11 @@ mod tests {
     #[test]
     fn test_percentile() {
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        
+
         assert_eq!(percentile(&values, 0.0), 1.0);
         assert_eq!(percentile(&values, 1.0), 5.0);
         assert_eq!(percentile(&values, 0.5), 3.0);
-        
+
         // Test interpolation
         let p25 = percentile(&values, 0.25);
         assert!(p25 > 1.0 && p25 < 3.0);
@@ -792,15 +794,19 @@ mod tests {
         // Empty input
         let empty: Vec<f64> = vec![];
         let config = AdaptiveThresholdConfig::new();
-        
+
         assert!(adaptive_threshold(&empty, &config).unwrap().is_empty());
-        assert!(pick_peaks(&empty, &PeakPickingConfig::new()).unwrap().is_empty());
-        
+        assert!(
+            pick_peaks(&empty, &PeakPickingConfig::new())
+                .unwrap()
+                .is_empty()
+        );
+
         // Single sample
         let single = vec![1.0];
         let thresholds = adaptive_threshold(&single, &config).unwrap();
         assert_eq!(thresholds.len(), 1);
-        
+
         // All zeros
         let zeros = vec![0.0, 0.0, 0.0];
         let normalized = normalize_onset_strength(&zeros, NormalizationMethod::Peak).unwrap();
@@ -813,17 +819,17 @@ mod tests {
         let mut config = AdaptiveThresholdConfig::new();
         config.delta = -0.1;
         assert!(config.validate().is_err());
-        
+
         // Invalid percentile
         config = AdaptiveThresholdConfig::new();
         config.percentile = 1.5;
         assert!(config.validate().is_err());
-        
+
         // Invalid window size
         config = AdaptiveThresholdConfig::new();
         config.window_size = 0;
         assert!(config.validate().is_err());
-        
+
         // Invalid threshold bounds
         config = AdaptiveThresholdConfig::new();
         config.min_threshold = 0.5;
@@ -834,7 +840,7 @@ mod tests {
     #[test]
     fn test_peak_picking_presets() {
         let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
-        
+
         // Test different presets
         let configs = vec![
             PeakPickingConfig::new(),
@@ -842,7 +848,7 @@ mod tests {
             PeakPickingConfig::speech(),
             PeakPickingConfig::drums(),
         ];
-        
+
         for config in configs {
             let peaks = pick_peaks(&onset_strength, &config).unwrap();
             // All presets should produce valid results
@@ -855,7 +861,8 @@ mod tests {
     // Helper function for testing
     fn standard_deviation(values: &[f64]) -> f64 {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let variance =
+            values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
         variance.sqrt()
     }
 }

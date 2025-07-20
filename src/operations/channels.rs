@@ -139,7 +139,7 @@ where
                     ));
                 }
 
-                let mut data_f64_samples = self.to_f64()?;
+                let mut data_f64_samples = self.as_f64()?;
                 let data_f64: &mut ndarray::ArrayBase<
                     ndarray::OwnedRepr<f64>,
                     ndarray::Dim<[usize; 2]>,
@@ -185,7 +185,7 @@ where
                     ));
                 }
 
-                let mut data_f64_samples = self.to_f64()?;
+                let mut data_f64_samples = self.as_f64()?;
                 let data_f64: &mut ndarray::ArrayBase<
                     ndarray::OwnedRepr<f64>,
                     ndarray::Dim<[usize; 2]>,

@@ -2,7 +2,7 @@
 //! Uses rubato for high-quality resampling.
 
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24,
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24,
     operations::{traits::AudioTypeConversion, types::ResamplingQuality},
 };
 
@@ -42,16 +42,13 @@ pub fn resample<T>(
     quality: ResamplingQuality,
 ) -> AudioSampleResult<AudioSamples<T>>
 where
-    T: crate::AudioSample
-        + num_traits::FromPrimitive
-        + num_traits::ToPrimitive
-        + crate::ConvertTo<f64>,
+    T: AudioSample,
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<f32>: AudioTypeConversion<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     if audio.total_samples() == 0 {
         return Err(AudioSampleError::InvalidInput {
@@ -81,10 +78,18 @@ where
 
 /// Fast resampling using linear interpolation.
 /// Good for real-time applications where speed is critical.
-fn resample_fast(
+fn resample_fast<T: AudioSample>(
     audio: &AudioSamples<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f32>> {
+) -> AudioSampleResult<AudioSamples<T>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.channels();
 
@@ -104,10 +109,18 @@ fn resample_fast(
 
 /// Medium quality resampling with balanced speed/quality.
 /// Good general-purpose resampling for most applications.
-fn resample_medium(
+fn resample_medium<T: AudioSample>(
     audio: &AudioSamples<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f32>> {
+) -> AudioSampleResult<AudioSamples<T>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.channels();
 
@@ -134,10 +147,18 @@ fn resample_medium(
 
 /// High quality resampling with maximum quality.
 /// Best for offline processing where quality is paramount.
-fn resample_high(
+fn resample_high<T: AudioSample>(
     audio: &AudioSamples<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f32>> {
+) -> AudioSampleResult<AudioSamples<T>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.channels();
 
@@ -163,11 +184,19 @@ fn resample_high(
 }
 
 /// Helper function to perform resampling with an FFT-based resampler.
-fn resample_with_resampler<R: Resampler<f32>>(
+fn resample_with_resampler<R: Resampler<f32>, T: AudioSample>(
     audio: &AudioSamples<f32>,
     resampler: &mut R,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f32>> {
+) -> AudioSampleResult<AudioSamples<T>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
     let channels = audio.channels();
 
     // Prepare input data - rubato expects Vec<Vec<f64>> (channels x samples)
@@ -204,11 +233,19 @@ fn resample_with_resampler<R: Resampler<f32>>(
 }
 
 /// Helper function to perform resampling with a sinc-based resampler.
-fn resample_with_sinc_resampler(
+fn resample_with_sinc_resampler<T: AudioSample>(
     audio: &AudioSamples<f32>,
     resampler: &mut SincFixedIn<f32>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f32>> {
+) -> AudioSampleResult<AudioSamples<T>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
     let channels = audio.channels();
 
     // Prepare input data
@@ -266,7 +303,7 @@ fn resample_with_sinc_resampler(
     let mut combined_output: Vec<Vec<f32>> = vec![Vec::new(); channels];
     for chunk in output_chunks {
         for (ch, channel_data) in chunk.into_iter().enumerate() {
-            combined_output[ch].extend(channel_data);
+            combined_output[ch].extend(channel_data.into_iter());
         }
     }
 
@@ -274,10 +311,18 @@ fn resample_with_sinc_resampler(
 }
 
 /// Helper function to create AudioSamples from channel data.
-fn create_audio_samples_from_channels(
+fn create_audio_samples_from_channels<T: AudioSample>(
     channel_data: Vec<Vec<f32>>,
     sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<f32>> {
+) -> AudioSampleResult<AudioSamples<T>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
     if channel_data.is_empty() {
         return Err(AudioSampleError::InvalidInput {
             msg: "No channel data provided".to_string(),
@@ -288,26 +333,28 @@ fn create_audio_samples_from_channels(
 
     if channels == 1 {
         // Mono case
-        let mono_array = ndarray::Array1::from_vec(channel_data.into_iter().next().unwrap());
+        let mut converted_channels: Vec<T> = Vec::with_capacity(channel_data[0].len());
+        for sample in &channel_data[0] {
+            converted_channels.push(sample.convert_to()?);
+        }
+
+        let mono_array = ndarray::Array1::from_vec(converted_channels);
         Ok(AudioSamples::new_mono(mono_array, sample_rate as u32))
     } else {
         // Multi-channel case
         let samples_per_channel = channel_data[0].len();
 
         // Create interleaved data
-        let mut interleaved = Vec::with_capacity(channels * samples_per_channel);
+        let mut interleaved: Vec<T> = Vec::with_capacity(channels * samples_per_channel);
         for sample_idx in 0..samples_per_channel {
             for ch in 0..channels {
-                interleaved.push(channel_data[ch][sample_idx]);
+                interleaved.push(channel_data[ch][sample_idx].convert_to()?);
             }
         }
 
         // Reshape to (channels, samples_per_channel)
-        let array = ndarray::Array2::from_shape_vec(
-            (channels, samples_per_channel),
-            channel_data.into_iter().flatten().collect(),
-        )
-        .map_err(|e| AudioSampleError::InvalidInput {
+        let array = ndarray::Array2::from_shape_vec((channels, samples_per_channel), interleaved)
+            .map_err(|e| AudioSampleError::InvalidInput {
             msg: format!("Failed to create multi-channel array: {}", e),
         })?;
 
@@ -330,16 +377,13 @@ pub fn resample_by_ratio<T>(
     quality: ResamplingQuality,
 ) -> AudioSampleResult<AudioSamples<T>>
 where
-    T: crate::AudioSample
-        + num_traits::FromPrimitive
-        + num_traits::ToPrimitive
-        + crate::ConvertTo<f64>,
+    T: AudioSample,
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<f32>: AudioTypeConversion<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     if ratio <= 0.0 {
         return Err(AudioSampleError::InvalidInput {
