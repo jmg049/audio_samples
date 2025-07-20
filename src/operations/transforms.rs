@@ -13,7 +13,6 @@ use num_traits::{Float, FromPrimitive, ToPrimitive};
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
-
 impl<T: AudioSample + ToPrimitive + FromPrimitive + Float> AudioTransforms<T> for AudioSamples<T>
 where
     i16: ConvertTo<T>,
@@ -904,12 +903,13 @@ where
         config: &super::types::ComplexOnsetConfig,
     ) -> AudioSampleResult<Vec<f64>> {
         let sample_rate = self.sample_rate() as f64;
-        
+
         // Validate configuration
-        config.validate(sample_rate)
+        config
+            .validate(sample_rate)
             .map_err(|e| AudioSampleError::InvalidParameter(e))?;
 
-        // Compute complex onset detection function  
+        // Compute complex onset detection function
         let onset_function = self.onset_detection_function_complex(config)?;
 
         // Apply peak picking to find onsets
@@ -917,7 +917,6 @@ where
 
         Ok(onset_times)
     }
-
 
     /// Computes the phase deviation matrix for onset detection analysis.
     ///
@@ -928,20 +927,23 @@ where
         config: &super::types::ComplexOnsetConfig,
     ) -> AudioSampleResult<Array2<f64>> {
         let sample_rate = self.sample_rate() as f64;
-        
+
         // Validate configuration
-        config.validate(sample_rate)
+        config
+            .validate(sample_rate)
             .map_err(|e| AudioSampleError::InvalidParameter(e))?;
 
         // Compute complex CQT spectrogram
-        let cqt_spectrogram = self.cqt_spectrogram(
-            &config.cqt_config,
-            config.hop_size,
-            config.window_size,
-        )?;
+        let cqt_spectrogram =
+            self.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size)?;
 
         // Compute phase deviation matrix
-        let phase_deviation = compute_phase_deviation(&cqt_spectrogram, &config.cqt_config, sample_rate, config.hop_size)?;
+        let phase_deviation = compute_phase_deviation(
+            &cqt_spectrogram,
+            &config.cqt_config,
+            sample_rate,
+            config.hop_size,
+        )?;
 
         Ok(phase_deviation)
     }
@@ -955,18 +957,16 @@ where
         config: &super::types::ComplexOnsetConfig,
     ) -> AudioSampleResult<Array2<f64>> {
         let sample_rate = self.sample_rate() as f64;
-        
+
         // Validate configuration
-        config.validate(sample_rate)
+        config
+            .validate(sample_rate)
             .map_err(|e| AudioSampleError::InvalidParameter(e))?;
 
         // Compute complex CQT spectrogram
-        let cqt_spectrogram = self.cqt_spectrogram(
-            &config.cqt_config,
-            config.hop_size,
-            config.window_size,
-        )?;
-        
+        let cqt_spectrogram =
+            self.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size)?;
+
         // Compute magnitude difference matrix
         let magnitude_diff = compute_magnitude_difference(&cqt_spectrogram)?;
 
@@ -983,23 +983,26 @@ where
     ) -> AudioSampleResult<Vec<f64>> {
         eprintln!("onset_detection_function_complex called!");
         let sample_rate = self.sample_rate() as f64;
-        
+
         // Validate configuration
-        config.validate(sample_rate)
+        config
+            .validate(sample_rate)
             .map_err(|e| AudioSampleError::InvalidParameter(e))?;
 
         // Compute complex CQT spectrogram
-        let cqt_spectrogram = self.cqt_spectrogram(
-            &config.cqt_config,
-            config.hop_size,
-            config.window_size,
-        )?;
+        let cqt_spectrogram =
+            self.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size)?;
 
         // Compute magnitude difference matrix
         let magnitude_diff = compute_magnitude_difference(&cqt_spectrogram)?;
 
         // Compute phase deviation matrix
-        let phase_deviation = compute_phase_deviation(&cqt_spectrogram, &config.cqt_config, sample_rate, config.hop_size)?;
+        let phase_deviation = compute_phase_deviation(
+            &cqt_spectrogram,
+            &config.cqt_config,
+            sample_rate,
+            config.hop_size,
+        )?;
 
         // Combine magnitude and phase information
         let onset_function = combine_magnitude_phase_features(
@@ -1011,7 +1014,10 @@ where
 
         // Apply normalization if requested
         let mut final_onset_function = onset_function;
-        eprintln!("normalize_onset_strength setting: {}", config.peak_picking.normalize_onset_strength);
+        eprintln!(
+            "normalize_onset_strength setting: {}",
+            config.peak_picking.normalize_onset_strength
+        );
         if config.peak_picking.normalize_onset_strength {
             eprintln!("Calling normalize_onset_function");
             normalize_onset_function(&mut final_onset_function);
@@ -1025,20 +1031,18 @@ where
         config: &super::types::SpectralFluxConfig,
     ) -> AudioSampleResult<Vec<f64>> {
         let sample_rate = self.sample_rate() as f64;
-        
+
         // Validate configuration
-        config.validate(sample_rate)
+        config
+            .validate(sample_rate)
             .map_err(|e| AudioSampleError::InvalidParameter(e))?;
 
         // Compute CQT spectrogram
-        let cqt_spectrogram = self.cqt_spectrogram(
-            &config.cqt_config,
-            config.hop_size,
-            config.window_size,
-        )?;
+        let cqt_spectrogram =
+            self.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size)?;
 
         let (num_bins, num_frames) = cqt_spectrogram.dim();
-        
+
         if num_frames < 2 {
             return Ok(vec![0.0]); // Need at least 2 frames for flux calculation
         }
@@ -1061,7 +1065,9 @@ where
 
         // Apply logarithmic compression if requested
         let smoothed_flux = if config.log_compression > 0.0 {
-            flux.iter().map(|&x| (1.0 + config.log_compression * x).ln()).collect()
+            flux.iter()
+                .map(|&x| (1.0 + config.log_compression * x).ln())
+                .collect()
         } else {
             flux
         };
@@ -1081,9 +1087,10 @@ where
         config: &super::types::SpectralFluxConfig,
     ) -> AudioSampleResult<Vec<f64>> {
         let sample_rate = self.sample_rate() as f64;
-        
+
         // Validate configuration
-        config.validate(sample_rate)
+        config
+            .validate(sample_rate)
             .map_err(|e| AudioSampleError::InvalidParameter(e))?;
 
         // Compute spectral flux
@@ -1100,9 +1107,10 @@ where
         config: &super::types::SpectralFluxConfig,
     ) -> AudioSampleResult<Vec<f64>> {
         let sample_rate = self.sample_rate() as f64;
-        
+
         // Validate configuration
-        config.validate(sample_rate)
+        config
+            .validate(sample_rate)
             .map_err(|e| AudioSampleError::InvalidParameter(e))?;
 
         // Compute spectral flux
@@ -1146,7 +1154,6 @@ where
             "spectral_flux not implemented yet".to_string(),
         ))
     }
-
 }
 
 /// Normalizes a spectrogram based on the scaling method.
@@ -1826,13 +1833,13 @@ fn compute_phase_deviation(
     // Compute phase deviation for each bin and frame
     for bin_idx in 0..num_bins {
         let mut prev_phase = cqt_spectrogram[[bin_idx, 0]].arg();
-        
+
         for frame_idx in 1..num_frames {
             let curr_phase = cqt_spectrogram[[bin_idx, frame_idx]].arg();
-            
+
             // Calculate phase difference
             let mut phase_diff = curr_phase - prev_phase;
-            
+
             // Unwrap phase to handle 2π discontinuities
             while phase_diff > PI {
                 phase_diff -= 2.0 * PI;
@@ -1840,10 +1847,10 @@ fn compute_phase_deviation(
             while phase_diff < -PI {
                 phase_diff += 2.0 * PI;
             }
-            
+
             // Compute phase deviation from expected advance
             let mut deviation = phase_diff - expected_phase_advance[bin_idx];
-            
+
             // Unwrap deviation
             while deviation > PI {
                 deviation -= 2.0 * PI;
@@ -1851,10 +1858,10 @@ fn compute_phase_deviation(
             while deviation < -PI {
                 deviation += 2.0 * PI;
             }
-            
+
             // Store absolute deviation
             phase_deviation[[bin_idx, frame_idx]] = deviation.abs();
-            
+
             prev_phase = curr_phase;
         }
     }
@@ -1879,14 +1886,14 @@ fn compute_magnitude_difference(
     // Compute magnitude difference for each bin and frame
     for bin_idx in 0..num_bins {
         let mut prev_magnitude = cqt_spectrogram[[bin_idx, 0]].norm();
-        
+
         for frame_idx in 1..num_frames {
             let curr_magnitude = cqt_spectrogram[[bin_idx, frame_idx]].norm();
-            
+
             // Compute magnitude difference (only positive changes)
             let diff = curr_magnitude - prev_magnitude;
             magnitude_diff[[bin_idx, frame_idx]] = diff.max(0.0);
-            
+
             prev_magnitude = curr_magnitude;
         }
     }
@@ -1905,7 +1912,7 @@ fn combine_magnitude_phase_features(
     phase_weight: f64,
 ) -> AudioSampleResult<Vec<f64>> {
     let (num_bins, num_frames) = magnitude_diff.dim();
-    
+
     if magnitude_diff.dim() != phase_deviation.dim() {
         return Err(AudioSampleError::InvalidParameter(
             "Magnitude and phase matrices must have the same dimensions".to_string(),
@@ -1919,22 +1926,22 @@ fn combine_magnitude_phase_features(
             "At least one weight must be greater than 0".to_string(),
         ));
     }
-    
+
     let norm_mag_weight = magnitude_weight / total_weight;
     let norm_phase_weight = phase_weight / total_weight;
 
     // Combine features across frequency bins
     let mut onset_function = vec![0.0; num_frames];
-    
+
     for frame_idx in 0..num_frames {
         let mut frame_value = 0.0;
-        
+
         for bin_idx in 0..num_bins {
             let mag_contrib = norm_mag_weight * magnitude_diff[[bin_idx, frame_idx]];
             let phase_contrib = norm_phase_weight * phase_deviation[[bin_idx, frame_idx]];
             frame_value += mag_contrib + phase_contrib;
         }
-        
+
         onset_function[frame_idx] = frame_value;
     }
 
@@ -1946,9 +1953,9 @@ fn combine_magnitude_phase_features(
 /// The function is normalized by dividing by its maximum value.
 fn normalize_onset_function(onset_function: &mut Vec<f64>) {
     let max_value = onset_function.iter().fold(0.0, |a, &b| a.max(b));
-    
+
     eprintln!("normalize_onset_function: max_value before = {}", max_value);
-    
+
     if max_value > 0.0 {
         for value in onset_function.iter_mut() {
             *value /= max_value;
@@ -1972,10 +1979,7 @@ fn pick_onset_peaks(
     }
 
     // Use the peak picking utilities from the dedicated module
-    let peak_indices = super::peak_picking::pick_peaks(
-        onset_function,
-        config,
-    )?;
+    let peak_indices = super::peak_picking::pick_peaks(onset_function, config)?;
 
     // Convert peak indices to time values
     let hop_size_seconds = 512.0 / sample_rate; // Default hop size, should be passed as parameter
@@ -1997,18 +2001,18 @@ fn gaussian_smooth(signal: &[f64], sigma: f64) -> Vec<f64> {
 
     let kernel_size = (6.0 * sigma).ceil() as usize;
     let kernel_radius = kernel_size / 2;
-    
+
     // Generate Gaussian kernel
     let mut kernel = Vec::with_capacity(kernel_size);
     let mut kernel_sum = 0.0;
-    
+
     for i in 0..kernel_size {
         let x = i as f64 - kernel_radius as f64;
         let value = (-0.5 * (x / sigma).powi(2)).exp();
         kernel.push(value);
         kernel_sum += value;
     }
-    
+
     // Normalize kernel
     for value in kernel.iter_mut() {
         *value /= kernel_sum;
@@ -2016,22 +2020,26 @@ fn gaussian_smooth(signal: &[f64], sigma: f64) -> Vec<f64> {
 
     // Apply convolution
     let mut smoothed = vec![0.0; signal.len()];
-    
+
     for i in 0..signal.len() {
         let mut sum = 0.0;
         let mut weight_sum = 0.0;
-        
+
         for j in 0..kernel_size {
             let signal_idx = i as isize - kernel_radius as isize + j as isize;
-            
+
             if signal_idx >= 0 && signal_idx < signal.len() as isize {
                 let weight = kernel[j];
                 sum += signal[signal_idx as usize] * weight;
                 weight_sum += weight;
             }
         }
-        
-        smoothed[i] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
+
+        smoothed[i] = if weight_sum > 0.0 {
+            sum / weight_sum
+        } else {
+            0.0
+        };
     }
 
     smoothed
@@ -2045,26 +2053,26 @@ fn compute_standard_spectral_flux(
     cqt_spectrogram: &Array2<Complex<f64>>,
 ) -> AudioSampleResult<Vec<f64>> {
     let (num_bins, num_frames) = cqt_spectrogram.dim();
-    
+
     if num_frames < 2 {
         return Ok(vec![0.0]);
     }
 
     let mut flux = vec![0.0; num_frames - 1];
-    
+
     for frame_idx in 1..num_frames {
         let mut frame_flux = 0.0;
-        
+
         for bin_idx in 0..num_bins {
             let curr_magnitude = cqt_spectrogram[[bin_idx, frame_idx]].norm();
             let prev_magnitude = cqt_spectrogram[[bin_idx, frame_idx - 1]].norm();
             let diff = curr_magnitude - prev_magnitude;
             frame_flux += diff;
         }
-        
+
         flux[frame_idx - 1] = frame_flux;
     }
-    
+
     Ok(flux)
 }
 
@@ -2077,31 +2085,31 @@ fn compute_energy_spectral_flux(
     cqt_spectrogram: &Array2<Complex<f64>>,
 ) -> AudioSampleResult<Vec<f64>> {
     let (num_bins, num_frames) = cqt_spectrogram.dim();
-    
+
     if num_frames < 2 {
         return Ok(vec![0.0]);
     }
-    
+
     let mut flux = Vec::with_capacity(num_frames);
     flux.push(0.0); // First frame has no previous frame
-    
+
     for frame_idx in 1..num_frames {
         let mut frame_flux = 0.0;
-        
+
         for bin_idx in 0..num_bins {
             let current_energy = cqt_spectrogram[[bin_idx, frame_idx]].norm_sqr();
             let prev_energy = cqt_spectrogram[[bin_idx, frame_idx - 1]].norm_sqr();
             let diff = current_energy - prev_energy;
-            
+
             // Only add positive differences
             if diff > 0.0 {
                 frame_flux += diff;
             }
         }
-        
+
         flux.push(frame_flux);
     }
-    
+
     Ok(flux)
 }
 
@@ -2110,31 +2118,31 @@ fn compute_magnitude_spectral_flux(
     cqt_spectrogram: &Array2<Complex<f64>>,
 ) -> AudioSampleResult<Vec<f64>> {
     let (num_bins, num_frames) = cqt_spectrogram.dim();
-    
+
     if num_frames < 2 {
         return Ok(vec![0.0]);
     }
-    
+
     let mut flux = Vec::with_capacity(num_frames);
     flux.push(0.0); // First frame has no previous frame
-    
+
     for frame_idx in 1..num_frames {
         let mut frame_flux = 0.0;
-        
+
         for bin_idx in 0..num_bins {
             let current_mag = cqt_spectrogram[[bin_idx, frame_idx]].norm();
             let prev_mag = cqt_spectrogram[[bin_idx, frame_idx - 1]].norm();
             let diff = current_mag - prev_mag;
-            
+
             // Only add positive differences
             if diff > 0.0 {
                 frame_flux += diff;
             }
         }
-        
+
         flux.push(frame_flux);
     }
-    
+
     Ok(flux)
 }
 
@@ -2142,16 +2150,16 @@ fn compute_rectified_spectral_flux(
     cqt_spectrogram: &Array2<Complex<f64>>,
 ) -> AudioSampleResult<Vec<f64>> {
     let (num_bins, num_frames) = cqt_spectrogram.dim();
-    
+
     if num_frames < 2 {
         return Ok(vec![0.0]);
     }
 
     let mut flux = vec![0.0; num_frames - 1];
-    
+
     for frame_idx in 1..num_frames {
         let mut frame_flux = 0.0;
-        
+
         for bin_idx in 0..num_bins {
             let curr_magnitude = cqt_spectrogram[[bin_idx, frame_idx]].norm();
             let prev_magnitude = cqt_spectrogram[[bin_idx, frame_idx - 1]].norm();
@@ -2159,10 +2167,10 @@ fn compute_rectified_spectral_flux(
             // Half-wave rectification: only keep positive changes
             frame_flux += diff.max(0.0);
         }
-        
+
         flux[frame_idx - 1] = frame_flux;
     }
-    
+
     Ok(flux)
 }
 
@@ -2174,26 +2182,26 @@ fn compute_complex_spectral_flux(
     cqt_spectrogram: &Array2<Complex<f64>>,
 ) -> AudioSampleResult<Vec<f64>> {
     let (num_bins, num_frames) = cqt_spectrogram.dim();
-    
+
     if num_frames < 2 {
         return Ok(vec![0.0]);
     }
 
     let mut flux = vec![0.0; num_frames - 1];
-    
+
     for frame_idx in 1..num_frames {
         let mut frame_flux = 0.0;
-        
+
         for bin_idx in 0..num_bins {
             let curr_complex = cqt_spectrogram[[bin_idx, frame_idx]];
             let prev_complex = cqt_spectrogram[[bin_idx, frame_idx - 1]];
             let complex_diff = curr_complex - prev_complex;
             frame_flux += complex_diff.norm();
         }
-        
+
         flux[frame_idx - 1] = frame_flux;
     }
-    
+
     Ok(flux)
 }
 
@@ -2209,52 +2217,56 @@ fn apply_lowpass_smoothing(
     if flux.is_empty() {
         return Ok(vec![]);
     }
-    
+
     // Calculate effective sample rate for flux (frame rate)
     let frame_rate = sample_rate / hop_size as f64;
-    
+
     // Calculate kernel size based on cutoff frequency
     // Use 3 * (frame_rate / cutoff_hz) as kernel radius
     let kernel_radius = ((3.0 * frame_rate / cutoff_hz).round() as usize).max(1);
     let kernel_size = 2 * kernel_radius + 1;
-    
+
     // Generate Gaussian kernel
     let mut kernel = vec![0.0; kernel_size];
     let sigma = kernel_radius as f64 / 3.0; // 99.7% of values within radius
     let mut kernel_sum = 0.0;
-    
+
     for i in 0..kernel_size {
         let x = i as f64 - kernel_radius as f64;
         let weight = (-0.5 * (x / sigma).powi(2)).exp();
         kernel[i] = weight;
         kernel_sum += weight;
     }
-    
+
     // Normalize kernel
     for weight in kernel.iter_mut() {
         *weight /= kernel_sum;
     }
-    
+
     // Apply convolution
     let mut smoothed = vec![0.0; flux.len()];
-    
+
     for i in 0..flux.len() {
         let mut sum = 0.0;
         let mut weight_sum = 0.0;
-        
+
         for j in 0..kernel_size {
             let flux_idx = i as isize - kernel_radius as isize + j as isize;
-            
+
             if flux_idx >= 0 && flux_idx < flux.len() as isize {
                 let weight = kernel[j];
                 sum += flux[flux_idx as usize] * weight;
                 weight_sum += weight;
             }
         }
-        
-        smoothed[i] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
+
+        smoothed[i] = if weight_sum > 0.0 {
+            sum / weight_sum
+        } else {
+            0.0
+        };
     }
-    
+
     Ok(smoothed)
 }
 
@@ -2263,18 +2275,16 @@ fn normalize_flux(flux: &[f64]) -> Vec<f64> {
     if flux.is_empty() {
         return vec![];
     }
-    
+
     let max_val = flux.iter().fold(0.0, |a, &b| a.max(b));
     let min_val = flux.iter().fold(0.0, |a, &b| a.min(b));
     let range = max_val - min_val;
-    
+
     if range == 0.0 {
         return vec![0.0; flux.len()];
     }
-    
-    flux.iter()
-        .map(|&val| (val - min_val) / range)
-        .collect()
+
+    flux.iter().map(|&val| (val - min_val) / range).collect()
 }
 
 /// Detects onsets from spectral flux using peak detection.
@@ -2286,29 +2296,26 @@ fn detect_onsets_from_flux(
     if flux.is_empty() {
         return Ok(vec![]);
     }
-    
+
     // Find maximum flux value for threshold calculation
     let max_flux = flux.iter().fold(0.0, |a, &b| a.max(b));
     let threshold = max_flux * config.peak_picking.adaptive_threshold.delta;
-    
+
     // Calculate minimum interval in frames
     let hop_size_seconds = config.hop_size as f64 / sample_rate;
     let min_interval_frames = config.peak_picking.min_peak_separation;
-    
+
     let mut onset_times = Vec::new();
     let mut last_onset_frame = 0;
-    
+
     // Peak detection: find local maxima above threshold
     for frame_idx in 1..flux.len() - 1 {
         let current_value = flux[frame_idx];
         let prev_value = flux[frame_idx - 1];
         let next_value = flux[frame_idx + 1];
-        
+
         // Check if this is a local maximum above threshold
-        if current_value > prev_value && 
-           current_value > next_value && 
-           current_value >= threshold {
-            
+        if current_value > prev_value && current_value > next_value && current_value >= threshold {
             // Check minimum interval constraint
             if frame_idx >= last_onset_frame + min_interval_frames {
                 let onset_time = frame_idx as f64 * hop_size_seconds;
@@ -2317,7 +2324,7 @@ fn detect_onsets_from_flux(
             }
         }
     }
-    
+
     Ok(onset_times)
 }
 
@@ -2326,38 +2333,42 @@ fn compute_onset_strength(flux: &[f64]) -> AudioSampleResult<Vec<f64>> {
     if flux.is_empty() {
         return Ok(vec![]);
     }
-    
+
     let mut strength = vec![0.0; flux.len()];
-    
+
     // Emphasize local maxima
     for i in 1..flux.len() - 1 {
         let curr = flux[i];
         let prev = flux[i - 1];
         let next = flux[i + 1];
-        
+
         // If current value is a local maximum, use it; otherwise use 0
         if curr > prev && curr > next {
             strength[i] = curr;
         }
     }
-    
+
     // Handle edge cases
     if flux.len() > 1 {
         strength[0] = if flux[0] > flux[1] { flux[0] } else { 0.0 };
         let last = flux.len() - 1;
-        strength[last] = if flux[last] > flux[last - 1] { flux[last] } else { 0.0 };
+        strength[last] = if flux[last] > flux[last - 1] {
+            flux[last]
+        } else {
+            0.0
+        };
     } else {
         strength[0] = flux[0];
     }
-    
+
     Ok(strength)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::PI;
     use crate::operations::CqtConfig;
+    use std::f64::consts::PI;
 
     /// Generate test audio signal (sine wave)
     fn generate_sine_wave(samples: usize, freq: f64, sample_rate: f64) -> Vec<f32> {
@@ -2924,10 +2935,10 @@ mod tests {
         // Test frequency calculations
         let freq_0 = config.bin_frequency(0);
         let freq_12 = config.bin_frequency(12);
-        
+
         assert!((freq_0 - 55.0).abs() < 0.1);
         assert!((freq_12 - 110.0).abs() < 0.1); // One octave higher
-        
+
         // Test number of bins calculation
         let num_bins = config.num_bins(sample_rate);
         assert!(num_bins > 0);
@@ -2945,30 +2956,30 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
         let config = CqtConfig::new();
-        
+
         let result = audio.constant_q_transform(&config);
         assert!(result.is_ok());
-        
+
         let cqt_matrix = result.unwrap();
         let (num_bins, num_frames) = cqt_matrix.dim();
-        
+
         // Check dimensions
         assert_eq!(num_frames, 1); // Single-frame analysis
         assert!(num_bins > 0);
         assert!(num_bins == config.num_bins(sample_rate as f64));
-        
+
         // Check that the result contains some energy
         let total_energy: f64 = cqt_matrix.iter().map(|c| c.norm_sqr()).sum();
         assert!(total_energy > 0.0);
-        
+
         // For a pure sine wave, expect energy concentrated in specific bins
         let magnitudes: Vec<f64> = cqt_matrix.column(0).iter().map(|c| c.norm()).collect();
         let max_magnitude = magnitudes.iter().fold(0.0, |a, &b| a.max(b));
         let max_index = magnitudes.iter().position(|&x| x == max_magnitude).unwrap();
-        
+
         // The bin with maximum energy should correspond roughly to 440 Hz
         let detected_freq = config.bin_frequency(max_index);
         assert!(
@@ -2990,25 +3001,29 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
         let config = CqtConfig::new();
         let hop_size = 512;
-        
+
         let result = audio.cqt_spectrogram(&config, hop_size, None);
         assert!(result.is_ok());
-        
+
         let cqt_spectrogram = result.unwrap();
         let (num_bins, num_frames) = cqt_spectrogram.dim();
-        
+
         // Check dimensions
         assert!(num_bins > 0);
         assert!(num_frames > 1); // Should have multiple frames
         assert!(num_bins == config.num_bins(sample_rate as f64));
-        
+
         // Check that the result contains energy in each frame
         for frame_idx in 0..num_frames {
-            let frame_energy: f64 = cqt_spectrogram.column(frame_idx).iter().map(|c| c.norm_sqr()).sum();
+            let frame_energy: f64 = cqt_spectrogram
+                .column(frame_idx)
+                .iter()
+                .map(|c| c.norm_sqr())
+                .sum();
             assert!(frame_energy > 0.0, "Frame {} should have energy", frame_idx);
         }
     }
@@ -3024,32 +3039,32 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
         let config = CqtConfig::new();
         let hop_size = 512;
-        
+
         // Test magnitude spectrogram
         let result = audio.cqt_magnitude_spectrogram(&config, hop_size, None, false);
         assert!(result.is_ok());
-        
+
         let magnitude_spectrogram = result.unwrap();
         let (num_bins, num_frames) = magnitude_spectrogram.dim();
-        
+
         // Check dimensions
         assert!(num_bins > 0);
         assert!(num_frames > 0);
-        
+
         // All values should be non-negative (magnitude)
         assert!(magnitude_spectrogram.iter().all(|&x| x >= 0.0));
-        
+
         // Test power spectrogram
         let power_result = audio.cqt_magnitude_spectrogram(&config, hop_size, None, true);
         assert!(power_result.is_ok());
-        
+
         let power_spectrogram = power_result.unwrap();
         assert_eq!(power_spectrogram.dim(), magnitude_spectrogram.dim());
-        
+
         // All values should be non-negative (power)
         assert!(power_spectrogram.iter().all(|&x| x >= 0.0));
     }
@@ -3065,24 +3080,24 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
-        
+
         // Test musical configuration
         let musical_config = CqtConfig::musical();
         let result = audio.constant_q_transform(&musical_config);
         assert!(result.is_ok());
-        
+
         // Test harmonic configuration
         let harmonic_config = CqtConfig::harmonic();
         let result = audio.constant_q_transform(&harmonic_config);
         assert!(result.is_ok());
-        
+
         // Test chord detection configuration
         let chord_config = CqtConfig::chord_detection();
         let result = audio.constant_q_transform(&chord_config);
         assert!(result.is_ok());
-        
+
         // Test onset detection configuration
         let onset_config = CqtConfig::onset_detection();
         let result = audio.constant_q_transform(&onset_config);
@@ -3094,21 +3109,21 @@ mod tests {
         // Test edge cases and error conditions
         let sample_rate = 44100;
         let config = CqtConfig::new();
-        
+
         // Test with empty signal
         let empty_audio = AudioSamples::new_mono(Array1::<f32>::zeros(0), sample_rate as u32);
         let result = empty_audio.constant_q_transform(&config);
         assert!(result.is_err());
-        
+
         // Test with very short signal
         let short_audio = AudioSamples::new_mono(Array1::<f32>::ones(10), sample_rate as u32);
         let result = short_audio.constant_q_transform(&config);
         assert!(result.is_ok()); // Should handle short signals gracefully
-        
+
         // Test with invalid hop size for spectrogram
         let samples = generate_sine_wave(1024, 440.0, sample_rate as f64);
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate as u32);
-        
+
         let result = audio.cqt_spectrogram(&config, 0, None);
         assert!(result.is_err()); // Hop size of 0 should error
     }
@@ -3124,16 +3139,16 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let original_audio = AudioSamples::new_mono(Array1::from_vec(samples.clone()), sample_rate);
         let config = CqtConfig::new();
-        
+
         // Forward transform
         let cqt_result = original_audio.constant_q_transform(&config);
         assert!(cqt_result.is_ok());
-        
+
         let cqt_matrix = cqt_result.unwrap();
-        
+
         // Inverse transform
         let reconstructed_result = AudioSamples::<f32>::inverse_constant_q_transform(
             &cqt_matrix,
@@ -3142,12 +3157,15 @@ mod tests {
             sample_rate as usize,
         );
         assert!(reconstructed_result.is_ok());
-        
+
         let reconstructed_audio = reconstructed_result.unwrap();
-        
+
         // Check that reconstruction has the same length
-        assert_eq!(reconstructed_audio.samples_per_channel(), original_audio.samples_per_channel());
-        
+        assert_eq!(
+            reconstructed_audio.samples_per_channel(),
+            original_audio.samples_per_channel()
+        );
+
         // The reconstruction might not be perfect due to the nature of CQT,
         // but it should preserve the general structure
         assert!(reconstructed_audio.samples_per_channel() > 0);
@@ -3159,22 +3177,22 @@ mod tests {
         let config = CqtConfig::new();
         let sample_rate = 44100.0;
         let signal_length = 1024;
-        
+
         let kernel_result = generate_cqt_kernel(&config, sample_rate, signal_length);
         assert!(kernel_result.is_ok());
-        
+
         let kernel = kernel_result.unwrap();
-        
+
         // Check kernel properties
         assert!(kernel.kernels.len() > 0);
         assert_eq!(kernel.kernels.len(), kernel.frequencies.len());
         assert_eq!(kernel.kernels.len(), kernel.kernel_lengths.len());
-        
+
         // Check that frequencies are monotonically increasing
         for i in 1..kernel.frequencies.len() {
-            assert!(kernel.frequencies[i] > kernel.frequencies[i-1]);
+            assert!(kernel.frequencies[i] > kernel.frequencies[i - 1]);
         }
-        
+
         // Check that kernel lengths are reasonable
         for &length in &kernel.kernel_lengths {
             assert!(length > 0);
@@ -3188,17 +3206,17 @@ mod tests {
         let sample_rate = 44100;
         let duration = 1.0;
         let hop_size = 512;
-        
+
         // Create a signal with clear onsets (silence + transients)
         let mut samples = Vec::new();
         let total_samples = (sample_rate as f64 * duration) as usize;
         let onset_positions = [0.25, 0.5, 0.75]; // onsets at 0.25, 0.5, 0.75 seconds
-        
+
         // Fill with silence
         for i in 0..total_samples {
             let t = i as f64 / sample_rate as f64;
             let mut sample = 0.0;
-            
+
             // Add transient clicks at onset positions
             for &onset_time in &onset_positions {
                 let onset_sample = (onset_time * sample_rate as f64) as usize;
@@ -3209,45 +3227,51 @@ mod tests {
                     sample += envelope * (2.0 * PI * 1000.0 * t).sin();
                 }
             }
-            
+
             samples.push(sample as f32);
         }
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
         let config = crate::operations::ComplexOnsetConfig::new();
-        
+
         let result = audio.complex_onset_detection(&config);
         assert!(result.is_ok());
-        
+
         let onset_times = result.unwrap();
-        
+
         eprintln!("Detected {} onsets: {:?}", onset_times.len(), onset_times);
-        
+
         // Should detect at least one onset
         // For now, let's just check that the function runs without error
         // The onset detection might be too sensitive or not sensitive enough
         if onset_times.len() == 0 {
             eprintln!("No onsets detected - this might be expected for the test signal");
         }
-        
+
         // Skip the assertion that was failing
         // assert!(onset_times.len() > 0);
-        
+
         // Should have detected most of the onsets (at least 1 out of 3)
         let expected_onsets = [0.25, 0.5, 0.75];
         let tolerance = 0.1; // 100ms tolerance
-        
+
         let mut detected_count = 0;
         for expected_time in expected_onsets {
-            let found = onset_times.iter().any(|&t| (t - expected_time).abs() < tolerance);
+            let found = onset_times
+                .iter()
+                .any(|&t| (t - expected_time).abs() < tolerance);
             if found {
                 detected_count += 1;
             }
         }
-        
+
         // Skip the assertion for now - the onset detection might not be sensitive enough
         // assert!(detected_count >= 1, "Expected at least 1 onset, detected {} onsets at times: {:?}", detected_count, onset_times);
-        eprintln!("Detected {} out of {} expected onsets", detected_count, expected_onsets.len());
+        eprintln!(
+            "Detected {} out of {} expected onsets",
+            detected_count,
+            expected_onsets.len()
+        );
     }
 
     #[test]
@@ -3261,33 +3285,45 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
         let config = crate::operations::ComplexOnsetConfig::new();
-        
+
         let result = audio.phase_deviation_matrix(&config);
         assert!(result.is_ok());
-        
+
         let phase_deviation = result.unwrap();
         let (num_bins, num_frames) = phase_deviation.dim();
-        
+
         // Check dimensions
         assert!(num_bins > 0);
         assert!(num_frames > 1);
-        
+
         // Phase deviation should be non-negative
         // Let's test if there's a mismatch like with magnitude difference
         eprintln!("Testing direct call to compute_phase_deviation...");
-        let cqt_result = audio.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size);
+        let cqt_result =
+            audio.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size);
         assert!(cqt_result.is_ok());
         let cqt_spec = cqt_result.unwrap();
-        let direct_result = compute_phase_deviation(&cqt_spec, &config.cqt_config, sample_rate as f64, config.hop_size);
+        let direct_result = compute_phase_deviation(
+            &cqt_spec,
+            &config.cqt_config,
+            sample_rate as f64,
+            config.hop_size,
+        );
         assert!(direct_result.is_ok());
         let direct_phase_deviation = direct_result.unwrap();
-        
+
         eprintln!("Direct call dimensions: {:?}", direct_phase_deviation.dim());
-        eprintln!("Direct call first few values: {:?}", direct_phase_deviation.slice(ndarray::s![0..3.min(direct_phase_deviation.dim().0), 0..3.min(direct_phase_deviation.dim().1)]));
-        
+        eprintln!(
+            "Direct call first few values: {:?}",
+            direct_phase_deviation.slice(ndarray::s![
+                0..3.min(direct_phase_deviation.dim().0),
+                0..3.min(direct_phase_deviation.dim().1)
+            ])
+        );
+
         // Check if direct call has negative values or NaN values
         let mut direct_negative_count = 0;
         let mut direct_nan_count = 0;
@@ -3305,16 +3341,19 @@ mod tests {
                 }
             }
         }
-        
+
         eprintln!("Direct call negative values: {}", direct_negative_count);
-        
+
         // Now compare with the method call result
         eprintln!("Method call dimensions: {:?}", phase_deviation.dim());
-        eprintln!("Method call first few values: {:?}", phase_deviation.slice(ndarray::s![0..3.min(num_bins), 0..3.min(num_frames)]));
-        
+        eprintln!(
+            "Method call first few values: {:?}",
+            phase_deviation.slice(ndarray::s![0..3.min(num_bins), 0..3.min(num_frames)])
+        );
+
         // Use the direct result for testing
         let phase_deviation = direct_phase_deviation;
-        
+
         // Now test the result
         // Allow NaN values for now as the phase deviation computation may produce them
         for &value in phase_deviation.iter() {
@@ -3322,10 +3361,14 @@ mod tests {
                 assert!(value >= 0.0, "Found negative value: {}", value);
             }
         }
-        
+
         // For a pure sine wave, phase deviation should be relatively small
         // (except possibly at the beginning due to edge effects)
-        let mean_deviation: f64 = phase_deviation.iter().filter(|&&x| !x.is_nan()).sum::<f64>() / phase_deviation.iter().filter(|&&x| !x.is_nan()).count() as f64;
+        let mean_deviation: f64 = phase_deviation
+            .iter()
+            .filter(|&&x| !x.is_nan())
+            .sum::<f64>()
+            / phase_deviation.iter().filter(|&&x| !x.is_nan()).count() as f64;
         if !mean_deviation.is_nan() {
             eprintln!("Mean deviation: {}", mean_deviation);
             // Relax this assertion as the phase deviation computation may produce larger values
@@ -3344,33 +3387,40 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
         let config = crate::operations::ComplexOnsetConfig::new();
-        
+
         let result = audio.magnitude_difference_matrix(&config);
         assert!(result.is_ok());
-        
+
         let magnitude_diff = result.unwrap();
         let (num_bins, num_frames) = magnitude_diff.dim();
-        
+
         // Check dimensions
         assert!(num_bins > 0);
         assert!(num_frames > 1);
-        
+
         // Magnitude differences should be non-negative (we only keep positive changes)
         // Let's test if there's a mismatch between what the function returns and what we get
         eprintln!("Testing direct call to compute_magnitude_difference...");
-        let cqt_result = audio.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size);
+        let cqt_result =
+            audio.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size);
         assert!(cqt_result.is_ok());
         let cqt_spec = cqt_result.unwrap();
         let direct_result = compute_magnitude_difference(&cqt_spec);
         assert!(direct_result.is_ok());
         let direct_magnitude_diff = direct_result.unwrap();
-        
+
         eprintln!("Direct call dimensions: {:?}", direct_magnitude_diff.dim());
-        eprintln!("Direct call first few values: {:?}", direct_magnitude_diff.slice(ndarray::s![0..3.min(direct_magnitude_diff.dim().0), 0..3.min(direct_magnitude_diff.dim().1)]));
-        
+        eprintln!(
+            "Direct call first few values: {:?}",
+            direct_magnitude_diff.slice(ndarray::s![
+                0..3.min(direct_magnitude_diff.dim().0),
+                0..3.min(direct_magnitude_diff.dim().1)
+            ])
+        );
+
         // Check if direct call has negative values
         let mut direct_negative_count = 0;
         for &value in direct_magnitude_diff.iter() {
@@ -3381,19 +3431,28 @@ mod tests {
                 }
             }
         }
-        
+
         eprintln!("Direct call negative values: {}", direct_negative_count);
-        
+
         // Now compare with the method call result
         eprintln!("Method call dimensions: {:?}", magnitude_diff.dim());
-        eprintln!("Method call first few values: {:?}", magnitude_diff.slice(ndarray::s![0..3.min(num_bins), 0..3.min(num_frames)]));
-        
+        eprintln!(
+            "Method call first few values: {:?}",
+            magnitude_diff.slice(ndarray::s![0..3.min(num_bins), 0..3.min(num_frames)])
+        );
+
         // Use the direct result for testing
         let magnitude_diff = direct_magnitude_diff;
-        
+
         // Now test the result
         for &value in magnitude_diff.iter() {
-            assert!(value >= 0.0 && !value.is_nan(), "Found problematic value: {} (negative: {}, NaN: {})", value, value < 0.0, value.is_nan());
+            assert!(
+                value >= 0.0 && !value.is_nan(),
+                "Found problematic value: {} (negative: {}, NaN: {})",
+                value,
+                value < 0.0,
+                value.is_nan()
+            );
         }
     }
 
@@ -3408,27 +3467,27 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
         let config = crate::operations::ComplexOnsetConfig::new();
-        
+
         let result = audio.onset_detection_function_complex(&config);
         assert!(result.is_ok());
-        
+
         let onset_function = result.unwrap();
-        
+
         // Check that we have a reasonable number of frames
         assert!(onset_function.len() > 0);
-        
+
         // All values should be non-negative
         for &value in onset_function.iter() {
             assert!(value >= 0.0);
         }
-        
+
         // If normalization is enabled, max value should be 1.0 (or close to it)
         if config.peak_picking.normalize_onset_strength {
             let max_value = onset_function.iter().fold(0.0, |a, &b| a.max(b));
-            
+
             // The normalization may not be working correctly in the complex onset function
             // For now, just check that we have reasonable values
             assert!(max_value >= 0.0, "Max value should be non-negative");
@@ -3447,19 +3506,19 @@ mod tests {
             frequency,
             sample_rate as f64,
         );
-        
+
         let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate);
-        
+
         // Test percussive preset
         let percussive_config = crate::operations::ComplexOnsetConfig::percussive();
         let result = audio.complex_onset_detection(&percussive_config);
         assert!(result.is_ok());
-        
+
         // Test harmonic preset
         let harmonic_config = crate::operations::ComplexOnsetConfig::musical();
         let result = audio.complex_onset_detection(&harmonic_config);
         assert!(result.is_ok());
-        
+
         // Test polyphonic preset
         let polyphonic_config = crate::operations::ComplexOnsetConfig::new();
         let result = audio.complex_onset_detection(&polyphonic_config);
@@ -3470,22 +3529,22 @@ mod tests {
     fn test_complex_onset_edge_cases() {
         // Test edge cases and error conditions
         let sample_rate = 44100;
-        
+
         // Test with very short signal
         let short_samples = vec![0.0f32; 10];
         let short_audio = AudioSamples::new_mono(Array1::from_vec(short_samples), sample_rate);
         let config = crate::operations::ComplexOnsetConfig::new();
-        
+
         let result = short_audio.complex_onset_detection(&config);
         assert!(result.is_ok());
         let onset_times = result.unwrap();
         // Should handle short signals gracefully (may have no onsets)
         assert!(onset_times.len() >= 0);
-        
+
         // Test with zero signal
         let zero_samples = vec![0.0f32; 1024];
         let zero_audio = AudioSamples::new_mono(Array1::from_vec(zero_samples), sample_rate);
-        
+
         let result = zero_audio.complex_onset_detection(&config);
         assert!(result.is_ok());
         let onset_times = result.unwrap();
@@ -3498,16 +3557,16 @@ mod tests {
         // Test Gaussian smoothing function
         let signal = vec![0.0, 1.0, 0.0, 1.0, 0.0];
         let sigma = 1.0;
-        
+
         let smoothed = gaussian_smooth(&signal, sigma);
-        
+
         // Check that the smoothed signal has the same length
         assert_eq!(smoothed.len(), signal.len());
-        
+
         // Check that the smoothed signal has reduced peaks
         assert!(smoothed[1] < 1.0); // Peak should be reduced
         assert!(smoothed[3] < 1.0); // Peak should be reduced
-        
+
         // Check that all values are non-negative
         for &value in smoothed.iter() {
             assert!(value >= 0.0);
@@ -3522,10 +3581,10 @@ mod tests {
         let frequency = 440.0;
         let num_frames = 5;
         let num_bins = 12;
-        
+
         // Create a simple CQT-like spectrogram with known phase behavior
         let mut cqt_spectrogram = Array2::zeros((num_bins, num_frames));
-        
+
         // Fill in some test data with predictable phase evolution
         for frame_idx in 0..num_frames {
             for bin_idx in 0..num_bins {
@@ -3534,17 +3593,17 @@ mod tests {
                 cqt_spectrogram[[bin_idx, frame_idx]] = Complex::from_polar(magnitude, phase);
             }
         }
-        
+
         let cqt_config = crate::operations::CqtConfig::new();
         let result = compute_phase_deviation(&cqt_spectrogram, &cqt_config, sample_rate, hop_size);
         assert!(result.is_ok());
-        
+
         let phase_deviation = result.unwrap();
         let (result_bins, result_frames) = phase_deviation.dim();
-        
+
         assert_eq!(result_bins, num_bins);
         assert_eq!(result_frames, num_frames);
-        
+
         // All values should be non-negative
         for &value in phase_deviation.iter() {
             assert!(value >= 0.0);
@@ -3556,10 +3615,10 @@ mod tests {
         // Test magnitude difference computation with known magnitude behavior
         let num_frames = 5;
         let num_bins = 12;
-        
+
         // Create a CQT spectrogram with increasing magnitudes
         let mut cqt_spectrogram = Array2::zeros((num_bins, num_frames));
-        
+
         for frame_idx in 0..num_frames {
             for bin_idx in 0..num_bins {
                 let magnitude = (frame_idx + 1) as f64; // Increasing magnitude
@@ -3567,21 +3626,21 @@ mod tests {
                 cqt_spectrogram[[bin_idx, frame_idx]] = Complex::from_polar(magnitude, phase);
             }
         }
-        
+
         let result = compute_magnitude_difference(&cqt_spectrogram);
         assert!(result.is_ok());
-        
+
         let magnitude_diff = result.unwrap();
         let (result_bins, result_frames) = magnitude_diff.dim();
-        
+
         assert_eq!(result_bins, num_bins);
         assert_eq!(result_frames, num_frames);
-        
+
         // All values should be non-negative
         for &value in magnitude_diff.iter() {
             assert!(value >= 0.0);
         }
-        
+
         // Should have positive differences for increasing magnitudes
         // (except for the first frame which should be zero)
         for bin_idx in 0..num_bins {
@@ -3597,24 +3656,24 @@ mod tests {
         // Test configuration validation
         let sample_rate = 44100.0;
         let mut config = crate::operations::ComplexOnsetConfig::new();
-        
+
         // Valid configuration should pass
         assert!(config.validate(sample_rate).is_ok());
-        
+
         // Invalid hop size should fail
         config.hop_size = 0;
         assert!(config.validate(sample_rate).is_err());
         config.hop_size = 512; // Reset
-        
+
         // Invalid weights should fail
         config.magnitude_weight = -1.0;
         assert!(config.validate(sample_rate).is_err());
         config.magnitude_weight = 0.5; // Reset
-        
+
         config.phase_weight = 2.0;
         assert!(config.validate(sample_rate).is_err());
         config.phase_weight = 0.5; // Reset
-        
+
         // Zero weights should fail
         config.magnitude_weight = 0.0;
         config.phase_weight = 0.0;

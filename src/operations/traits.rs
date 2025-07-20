@@ -5,7 +5,7 @@
 //! and can be implemented independently.
 
 use super::types::*;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{AudioSample, AudioSampleResult, AudioSamples, CastFrom, ConvertTo, I24};
 use ndarray::Array2;
 
 // Complex numbers using num-complex crate
@@ -25,6 +25,8 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    T: CastFrom<i16> + CastFrom<I24> + CastFrom<i32> + CastFrom<f32> + CastFrom<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Returns the peak (maximum absolute value) in the audio samples.
     ///
@@ -41,18 +43,18 @@ where
     ///
     /// RMS is useful for measuring average signal power/energy and
     /// provides a perceptually relevant measure of loudness.
-    fn rms(&self) -> T;
+    fn rms(&self) -> AudioSampleResult<f64>;
 
     /// Computes the statistical variance of the audio samples.
     ///
     /// Variance measures the spread of sample values around the mean.
-    fn variance(&self) -> T;
+    fn variance(&self) -> AudioSampleResult<f64>;
 
     /// Computes the standard deviation of the audio samples.
     ///
     /// Standard deviation is the square root of variance and provides
     /// a measure of signal variability in the same units as the samples.
-    fn std_dev(&self) -> T;
+    fn std_dev(&self) -> AudioSampleResult<f64>;
 
     /// Counts the number of zero crossings in the audio signal.
     ///
@@ -116,6 +118,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Normalizes audio samples using the specified method and range.
     ///
@@ -854,7 +857,7 @@ where
     ///
     /// let config = SpectralFluxConfig::musical();
     /// let flux = audio.spectral_flux(&config)?;
-    /// 
+    ///
     /// // Find peaks in flux for onset detection
     /// let onsets = detect_onsets_from_flux(&flux, &config);
     /// ```
@@ -904,7 +907,7 @@ where
     ///
     /// let config = SpectralFluxConfig::percussive();
     /// let onsets = audio.detect_onsets(&config)?;
-    /// 
+    ///
     /// println!("Detected {} onsets", onsets.len());
     /// for (i, onset_time) in onsets.iter().enumerate() {
     ///     println!("Onset {}: {:.3} seconds", i + 1, onset_time);
@@ -962,14 +965,14 @@ where
     ///
     /// let config = SpectralFluxConfig::new();
     /// let strength = audio.onset_strength(&config)?;
-    /// 
+    ///
     /// // Find the time of maximum onset strength
     /// let max_idx = strength.iter()
     ///     .enumerate()
     ///     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
     ///     .map(|(i, _)| i)
     ///     .unwrap();
-    /// 
+    ///
     /// let time_of_max = max_idx as f64 * config.hop_size as f64 / sample_rate as f64;
     /// println!("Strongest onset at {:.3} seconds", time_of_max);
     /// ```
@@ -1030,7 +1033,7 @@ where
     /// let audio = AudioSamples::new_mono(samples, 44100);
     /// let config = OnsetConfig::musical();
     /// let onset_times = audio.detect_onsets(&config)?;
-    /// 
+    ///
     /// println!("Detected {} onsets", onset_times.len());
     /// for (i, &time) in onset_times.iter().enumerate() {
     ///     println!("Onset {}: {:.3}s", i + 1, time);
@@ -1086,7 +1089,7 @@ where
     /// let audio = AudioSamples::new_mono(samples, 44100);
     /// let config = OnsetConfig::percussive();
     /// let (times, odf) = audio.onset_detection_function(&config)?;
-    /// 
+    ///
     /// // Find the frame with maximum onset strength
     /// let max_idx = odf.iter().position(|&x| x == odf.iter().fold(0.0, |a, &b| a.max(b))).unwrap();
     /// println!("Strongest onset at {:.3}s with strength {:.3}", times[max_idx], odf[max_idx]);
@@ -1158,7 +1161,7 @@ where
     /// let audio = AudioSamples::new_mono(samples, 44100);
     /// let config = CqtConfig::onset_detection();
     /// let (times, flux) = audio.spectral_flux(&config, 512, SpectralFluxMethod::Energy)?;
-    /// 
+    ///
     /// // Analyze spectral flux characteristics
     /// let mean_flux = flux.iter().sum::<f64>() / flux.len() as f64;
     /// println!("Mean spectral flux: {:.3}", mean_flux);
@@ -2146,30 +2149,36 @@ where
     /// Converts to the highest precision floating-point format.
     ///
     /// This is useful when maximum precision is needed for processing.
-    fn to_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
+    fn as_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
     where
         T: ConvertTo<f64>;
 
     /// Converts to single precision floating-point format.
     ///
     /// Good balance between precision and memory usage.
-    fn to_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
+    fn as_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
     where
         T: ConvertTo<f32>;
 
     /// Converts to 32-bit integer format.
     ///
     /// Highest precision integer format, useful for high-quality processing.
-    fn to_i32(&self) -> AudioSampleResult<AudioSamples<i32>>
+    fn as_i32(&self) -> AudioSampleResult<AudioSamples<i32>>
     where
         T: ConvertTo<i32>;
 
     /// Converts to 16-bit integer format (most common).
     ///
     /// Standard format for CD audio and many audio files.
-    fn to_i16(&self) -> AudioSampleResult<AudioSamples<i16>>
+    fn as_i16(&self) -> AudioSampleResult<AudioSamples<i16>>
     where
         T: ConvertTo<i16>;
+
+    /// Converts to 24-bit integer format.
+    ///
+    fn as_i24(&self) -> AudioSampleResult<AudioSamples<I24>>
+    where
+        T: ConvertTo<I24>;
 }
 
 /// Unified trait that combines all audio processing capabilities.

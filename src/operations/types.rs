@@ -1651,9 +1651,9 @@ impl OnsetConfig {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256, // Higher time resolution for drums
             window_size: None,
-            threshold: 0.5, // Higher threshold for cleaner detection
+            threshold: 0.5,           // Higher threshold for cleaner detection
             min_onset_interval: 0.03, // 30ms for rapid percussion
-            pre_emphasis: 0.3, // Emphasize high frequencies
+            pre_emphasis: 0.3,        // Emphasize high frequencies
             adaptive_threshold: true,
             median_filter_length: 3,
             adaptive_threshold_multiplier: 2.0,
@@ -1672,9 +1672,9 @@ impl OnsetConfig {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
             window_size: None,
-            threshold: 0.25, // Lower threshold for musical content
+            threshold: 0.25,         // Lower threshold for musical content
             min_onset_interval: 0.1, // 100ms for musical phrasing
-            pre_emphasis: 0.1, // Light pre-emphasis
+            pre_emphasis: 0.1,       // Light pre-emphasis
             adaptive_threshold: true,
             median_filter_length: 7,
             adaptive_threshold_multiplier: 1.2,
@@ -1693,9 +1693,9 @@ impl OnsetConfig {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256, // Good time resolution for speech
             window_size: None,
-            threshold: 0.2, // Low threshold for speech dynamics
+            threshold: 0.2,           // Low threshold for speech dynamics
             min_onset_interval: 0.08, // 80ms for speech rate
-            pre_emphasis: 0.05, // Minimal pre-emphasis
+            pre_emphasis: 0.05,       // Minimal pre-emphasis
             adaptive_threshold: true,
             median_filter_length: 9,
             adaptive_threshold_multiplier: 1.1,

@@ -6,17 +6,30 @@
 
 use super::traits::AudioStatistics;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom,
+    CastInto, ConvertTo, I24,
+};
 use ndarray::Axis;
-use num_traits::{FromPrimitive, ToPrimitive};
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive> AudioStatistics<T> for AudioSamples<T>
+impl<T: AudioSample> AudioStatistics<T> for AudioSamples<T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    T: CastInto<i16>
+        + CastInto<I24>
+        + CastInto<i32>
+        + CastInto<f32>
+        + CastInto<f64>
+        + CastFrom<i16>
+        + CastFrom<I24>
+        + CastFrom<i32>
+        + CastFrom<f32>
+        + CastFrom<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Returns the peak (maximum absolute value) in the audio samples.
     ///
@@ -43,37 +56,41 @@ where
     ///
     /// Uses efficient vectorized operations via ndarray to compute RMS.
     /// RMS = sqrt(mean(x^2)) where x is the audio signal.
-    fn rms(&self) -> T {
+    fn rms(&self) -> AudioSampleResult<f64> {
         match &self.data {
             AudioData::Mono(arr) => {
                 // Use ndarray's efficient operations for vectorized computation
-                let sum_of_squares = arr
-                    .mapv(|x| {
-                        // Convert to f64 for precision during intermediate calculations
-                        let val = x.to_f64().unwrap_or(0.0);
-                        val * val
+                let sum_of_squares: f64 = arr
+                    .iter()
+                    .map(|x| {
+                        let x: f64 = x.cast_into();
+                        x * x
                     })
                     .sum();
 
                 let mean_square = sum_of_squares / arr.len() as f64;
-                let rms_f64 = mean_square.sqrt();
 
+                let rms: f64 = mean_square.cast_into();
+                let rms = rms.sqrt();
                 // Convert back to the original type
-                T::from_f64(rms_f64).unwrap_or_else(|| T::default())
+                Ok(rms)
             }
             AudioData::MultiChannel(arr) => {
                 // Compute RMS across all samples in all channels
-                let sum_of_squares = arr
-                    .mapv(|x| {
-                        let val = x.to_f64().unwrap_or(0.0);
-                        val * val
+                let sum_of_squares: f64 = arr
+                    .iter()
+                    .map(|x| {
+                        let x: f64 = x.cast_into();
+                        x * x
                     })
                     .sum();
 
-                let mean_square = sum_of_squares / (arr.len()) as f64;
-                let rms_f64 = mean_square.sqrt();
+                let mean_square = sum_of_squares / arr.len() as f64;
 
-                T::from_f64(rms_f64).unwrap_or_else(|| T::default())
+                let rms: f64 = mean_square.cast_into();
+                let rms = rms.sqrt();
+                // Convert back to the original type
+                Ok(rms)
             }
         }
     }
@@ -82,47 +99,56 @@ where
     ///
     /// Variance = mean((x - mean(x))^2)
     /// Uses efficient ndarray operations for vectorized computation.
-    fn variance(&self) -> T {
+    fn variance(&self) -> AudioSampleResult<f64> {
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.is_empty() {
-                    return T::default();
+                    return Err(AudioSampleError::ProcessingError {
+                        msg: "Cannot compute variance on empty audio data".to_string(),
+                    });
                 }
 
                 // Compute mean first
-                let sum = arr.mapv(|x| x.to_f64().unwrap_or(0.0)).sum();
+                let sum = arr.sum();
+                let sum: f64 = sum.cast_into();
                 let mean = sum / arr.len() as f64;
 
                 // Compute variance using the standard formula
-                let variance_sum = arr
-                    .mapv(|x| {
-                        let val = x.to_f64().unwrap_or(0.0);
-                        let diff = val - mean;
+                let variance_sum: f64 = arr
+                    .iter()
+                    .map(|&x| {
+                        let x: f64 = x.cast_into();
+                        let diff = x - mean;
                         diff * diff
                     })
                     .sum();
 
                 let variance_f64 = variance_sum / arr.len() as f64;
-                T::from_f64(variance_f64).unwrap_or_else(|| T::default())
+                Ok(variance_f64)
             }
             AudioData::MultiChannel(arr) => {
                 if arr.is_empty() {
-                    return T::default();
+                    return Err(AudioSampleError::ProcessingError {
+                        msg: "Cannot compute variance on empty audio data".to_string(),
+                    });
                 }
 
-                let sum = arr.mapv(|x| x.to_f64().unwrap_or(0.0)).sum();
+                let sum = arr.sum();
+                let sum: f64 = sum.cast_into();
+
                 let mean = sum / arr.len() as f64;
 
-                let variance_sum = arr
-                    .mapv(|x| {
-                        let val = x.to_f64().unwrap_or(0.0);
-                        let diff = val - mean;
+                let variance_sum: f64 = arr
+                    .iter()
+                    .map(|x| {
+                        let x: f64 = x.cast_into();
+                        let diff = x - mean;
                         diff * diff
                     })
                     .sum();
 
                 let variance_f64 = variance_sum / arr.len() as f64;
-                T::from_f64(variance_f64).unwrap_or_else(|| T::default())
+                Ok(variance_f64)
             }
         }
     }
@@ -130,9 +156,8 @@ where
     /// Computes the standard deviation of the audio samples.
     ///
     /// Standard deviation is the square root of variance.
-    fn std_dev(&self) -> T {
-        let variance_f64 = self.variance().to_f64().unwrap_or(0.0);
-        T::from_f64(variance_f64.sqrt()).unwrap_or_else(|| T::default())
+    fn std_dev(&self) -> AudioSampleResult<f64> {
+        Ok(self.variance()?.sqrt())
     }
 
     /// Counts the number of zero crossings in the audio signal.
@@ -148,8 +173,8 @@ where
 
                 let mut crossings = 0;
                 for i in 1..arr.len() {
-                    let prev = arr[i - 1].to_f64().unwrap_or(0.0);
-                    let curr = arr[i].to_f64().unwrap_or(0.0);
+                    let prev = arr[i - 1].convert_to().unwrap_or(0.0);
+                    let curr = arr[i].convert_to().unwrap_or(0.0);
 
                     // Check for sign change (zero crossing)
                     if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
@@ -168,8 +193,8 @@ where
                     }
 
                     for i in 1..channel.len() {
-                        let prev = channel[i - 1].to_f64().unwrap_or(0.0);
-                        let curr = channel[i].to_f64().unwrap_or(0.0);
+                        let prev = channel[i - 1].convert_to().unwrap_or(0.0);
+                        let curr = channel[i].convert_to().unwrap_or(0.0);
 
                         if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
                             total_crossings += 1;
@@ -211,7 +236,7 @@ where
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
 
                 // Convert to f64 for precision
-                let signal: Vec<f64> = arr.iter().map(|&x| x.to_f64().unwrap_or(0.0)).collect();
+                let signal: Vec<f64> = arr.iter().map(|&x| x.convert_to().unwrap_or(0.0)).collect();
 
                 // Compute autocorrelation for each lag
                 for lag in 0..=effective_max_lag {
@@ -224,7 +249,7 @@ where
 
                     // Normalize by the number of overlapping samples
                     correlation /= count as f64;
-                    correlations.push(T::from_f64(correlation).unwrap_or_else(|| T::default()));
+                    correlations.push(T::convert_from(correlation).unwrap_or_default());
                 }
 
                 Ok(correlations)
@@ -242,7 +267,7 @@ where
 
                 let signal: Vec<f64> = first_channel
                     .iter()
-                    .map(|&x| x.to_f64().unwrap_or(0.0))
+                    .map(|&x| x.convert_to().unwrap_or(0.0))
                     .collect();
 
                 for lag in 0..=effective_max_lag {
@@ -254,7 +279,7 @@ where
                     }
 
                     correlation /= count as f64;
-                    correlations.push(T::from_f64(correlation).unwrap_or_else(|| T::default()));
+                    correlations.push(T::convert_from(correlation).unwrap_or_default());
                 }
 
                 Ok(correlations)
@@ -288,8 +313,14 @@ where
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
 
                 // Convert to f64 for precision
-                let signal1: Vec<f64> = arr1.iter().map(|&x| x.to_f64().unwrap_or(0.0)).collect();
-                let signal2: Vec<f64> = arr2.iter().map(|&x| x.to_f64().unwrap_or(0.0)).collect();
+                let signal1: Vec<f64> = arr1
+                    .iter()
+                    .map(|&x| x.convert_to().unwrap_or(0.0))
+                    .collect();
+                let signal2: Vec<f64> = arr2
+                    .iter()
+                    .map(|&x| x.convert_to().unwrap_or(0.0))
+                    .collect();
 
                 for lag in 0..=effective_max_lag {
                     let mut correlation = 0.0;
@@ -300,7 +331,7 @@ where
                     }
 
                     correlation /= count as f64;
-                    correlations.push(T::from_f64(correlation).unwrap_or_else(|| T::default()));
+                    correlations.push(T::convert_from(correlation).unwrap_or_default());
                 }
 
                 Ok(correlations)
@@ -319,8 +350,10 @@ where
                 let effective_max_lag = max_lag.min(n1.min(n2) - 1);
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
 
-                let signal1: Vec<f64> = ch1.iter().map(|&x| x.to_f64().unwrap_or(0.0)).collect();
-                let signal2: Vec<f64> = ch2.iter().map(|&x| x.to_f64().unwrap_or(0.0)).collect();
+                let signal1: Vec<f64> =
+                    ch1.iter().map(|&x| x.convert_to().unwrap_or(0.0)).collect();
+                let signal2: Vec<f64> =
+                    ch2.iter().map(|&x| x.convert_to().unwrap_or(0.0)).collect();
 
                 for lag in 0..=effective_max_lag {
                     let mut correlation = 0.0;
@@ -331,7 +364,7 @@ where
                     }
 
                     correlation /= count as f64;
-                    correlations.push(T::from_f64(correlation).unwrap_or_else(|| T::default()));
+                    correlations.push(T::convert_from(correlation).unwrap_or_default());
                 }
 
                 Ok(correlations)
@@ -374,8 +407,6 @@ where
     }
 }
 
-// Note: Conversions are handled by the ToPrimitive and FromPrimitive traits from num_traits
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,9 +430,9 @@ mod tests {
         let data = array![1.0f32, -1.0, 1.0, -1.0];
         let audio = AudioSamples::new_mono(data, 44100);
 
-        let rms = audio.rms();
+        let rms = audio.rms().expect("Failed to compute RMS");
         // RMS of [1, -1, 1, -1] = sqrt((1^2 + 1^2 + 1^2 + 1^2)/4) = sqrt(1) = 1.0
-        assert_approx_eq!(rms as f64, 1.0, 1e-6);
+        assert_approx_eq!(rms, 1.0, 1e-6);
     }
 
     #[test]
@@ -409,12 +440,12 @@ mod tests {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let audio = AudioSamples::new_mono(data, 44100);
 
-        let variance = audio.variance();
-        let std_dev = audio.std_dev();
+        let variance = audio.variance().expect("Failed to compute variance");
+        let std_dev = audio.std_dev().expect("Failed to compute std_dev");
 
         // Mean = 3.0, variance = mean((1-3)^2 + (2-3)^2 + ... + (5-3)^2) = mean(4+1+0+1+4) = 2.0
-        assert_approx_eq!(variance as f64, 2.0, 1e-6);
-        assert_approx_eq!(std_dev as f64, 2.0_f64.sqrt(), 1e-6);
+        assert_approx_eq!(variance, 2.0, 1e-6);
+        assert_approx_eq!(std_dev, 2.0_f64.sqrt(), 1e-6);
     }
 
     #[test]
@@ -471,8 +502,8 @@ mod tests {
         let data = array![[1.0f32, 2.0], [-1.0, 1.0]]; // 2 channels, 2 samples each
         let audio = AudioSamples::new_multi_channel(data, 44100);
 
-        let rms = audio.rms();
-        let variance = audio.variance();
+        let rms = audio.rms().expect("Failed to compute RMS");
+        let variance = audio.variance().expect("Failed to compute variance");
         let crossings = audio.zero_crossings();
 
         // Should compute across all samples
@@ -495,7 +526,7 @@ mod tests {
         let single_audio = AudioSamples::new_mono(single_data, 44100);
 
         assert_eq!(single_audio.zero_crossings(), 0);
-        assert_eq!(single_audio.rms(), 1.0);
+        assert_eq!(single_audio.rms().expect("Failed to compute RMS"), 1.0);
     }
 
     #[test]

@@ -89,7 +89,7 @@ where
     ///
     /// This is useful when maximum precision is needed for processing.
     /// Uses optimized vectorized conversion.
-    fn to_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
+    fn as_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
     where
         T: ConvertTo<f64>,
     {
@@ -100,7 +100,7 @@ where
     ///
     /// Good balance between precision and memory usage.
     /// Uses optimized vectorized conversion.
-    fn to_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
+    fn as_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
     where
         T: ConvertTo<f32>,
     {
@@ -111,7 +111,7 @@ where
     ///
     /// Highest precision integer format, useful for high-quality processing.
     /// Uses optimized vectorized conversion.
-    fn to_i32(&self) -> AudioSampleResult<AudioSamples<i32>>
+    fn as_i32(&self) -> AudioSampleResult<AudioSamples<i32>>
     where
         T: ConvertTo<i32>,
     {
@@ -122,11 +122,22 @@ where
     ///
     /// Standard format for CD audio and many audio files.
     /// Uses optimized vectorized conversion.
-    fn to_i16(&self) -> AudioSampleResult<AudioSamples<i16>>
+    fn as_i16(&self) -> AudioSampleResult<AudioSamples<i16>>
     where
         T: ConvertTo<i16>,
     {
         self.as_type::<i16>()
+    }
+
+    /// Converts to 24-bit integer format (CD Quality).
+    ///
+    /// Standard format for CD audio and many audio files.
+    /// Uses optimized vectorized conversion.
+    fn as_i24(&self) -> AudioSampleResult<AudioSamples<I24>>
+    where
+        T: ConvertTo<I24>,
+    {
+        self.as_type::<I24>()
     }
 }
 
@@ -201,9 +212,9 @@ mod tests {
         let audio_i16 = AudioSamples::new_mono(data, 44100);
 
         // Test convenience methods
-        let audio_f32 = audio_i16.to_f32().unwrap();
-        let audio_f64 = audio_i16.to_f64().unwrap();
-        let audio_i32 = audio_i16.to_i32().unwrap();
+        let audio_f32 = audio_i16.as_f32().unwrap();
+        let audio_f64 = audio_i16.as_f64().unwrap();
+        let audio_i32 = audio_i16.as_i32().unwrap();
 
         assert_eq!(audio_f32.channels(), 1);
         assert_eq!(audio_f64.channels(), 1);

@@ -66,9 +66,9 @@ pub use traits::{
 
 // Re-export supporting types
 pub use types::{
-    AdaptiveThresholdConfig, AdaptiveThresholdMethod, ChannelConversionMethod, CompressorConfig,
-    ComplexOnsetConfig, CqtConfig, DynamicRangeMethod, EqBand, EqBandType, FadeCurve, FilterResponse, IirFilterDesign,
-    IirFilterType, KneeType, LimiterConfig, MonoConversionMethod, NormalizationMethod,
-    OnsetConfig, ParametricEq, PeakPickingConfig, PitchDetectionMethod, SideChainConfig, 
-    SpectralFluxConfig, SpectralFluxMethod, StereoConversionMethod, WindowType,
+    AdaptiveThresholdConfig, AdaptiveThresholdMethod, ChannelConversionMethod, ComplexOnsetConfig,
+    CompressorConfig, CqtConfig, DynamicRangeMethod, EqBand, EqBandType, FadeCurve, FilterResponse,
+    IirFilterDesign, IirFilterType, KneeType, LimiterConfig, MonoConversionMethod,
+    NormalizationMethod, OnsetConfig, ParametricEq, PeakPickingConfig, PitchDetectionMethod,
+    SideChainConfig, SpectralFluxConfig, SpectralFluxMethod, StereoConversionMethod, WindowType,
 };

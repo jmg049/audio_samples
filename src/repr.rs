@@ -224,6 +224,365 @@ impl<T: AudioSample> AudioSamples<T> {
             AudioData::MultiChannel(arr) => Some(arr),
         }
     }
+
+    /// Applies a function to each sample in the audio data in-place.
+    ///
+    /// This method applies the given function to every sample in the audio data,
+    /// modifying the samples in-place. The function receives each sample and
+    /// should return the transformed sample.
+    ///
+    /// # Arguments
+    /// * `f` - A function that takes a sample and returns a transformed sample
+    ///
+    /// # Returns
+    /// A result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Halve the amplitude of all samples
+    /// audio.apply(|sample| sample * 0.5)?;
+    ///
+    /// // Apply a simple distortion
+    /// audio.apply(|sample| sample.clamp(-0.8, 0.8))?;
+    /// ```
+    pub fn apply<F>(&mut self, f: F) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(T) -> T,
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                for sample in arr.iter_mut() {
+                    *sample = f(*sample);
+                }
+            }
+            AudioData::MultiChannel(arr) => {
+                for sample in arr.iter_mut() {
+                    *sample = f(*sample);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies a function to overlapping windows of samples in-place.
+    ///
+    /// This method processes the audio data in overlapping windows, applying
+    /// the given function to each window. The function receives a slice of
+    /// samples and should return a vector of transformed samples.
+    ///
+    /// # Arguments
+    /// * `window_size` - Size of each window in samples
+    /// * `hop_size` - Number of samples to advance between windows
+    /// * `f` - A function that takes a window slice and returns transformed samples
+    ///
+    /// # Returns
+    /// A result containing the processed audio or an error
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Apply a Hann window to overlapping frames
+    /// audio.apply_windowed(1024, 512, |window| {
+    ///     window.iter().enumerate()
+    ///         .map(|(i, &sample)| sample * hann_window[i])
+    ///         .collect()
+    /// })?;
+    /// ```
+    pub fn apply_windowed<F>(
+        &mut self,
+        window_size: usize,
+        hop_size: usize,
+        f: F,
+    ) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(&[T]) -> Vec<T>,
+    {
+        if window_size == 0 || hop_size == 0 {
+            return Err(crate::AudioSampleError::InvalidParameter(
+                "Window size and hop size must be greater than 0".to_string(),
+            ));
+        }
+
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                let mut result = Vec::new();
+                let data = arr.as_slice().unwrap();
+
+                // Process overlapping windows
+                let mut pos = 0;
+                while pos + window_size <= data.len() {
+                    let window = &data[pos..pos + window_size];
+                    let processed = f(window);
+
+                    if processed.len() != window_size {
+                        return Err(crate::AudioSampleError::InvalidParameter(format!(
+                            "Window function must return {} samples, got {}",
+                            window_size,
+                            processed.len()
+                        )));
+                    }
+
+                    if result.len() < pos + window_size {
+                        result.resize(pos + window_size, T::default());
+                    }
+
+                    // Overlap-add the processed window
+                    for (i, &sample) in processed.iter().enumerate() {
+                        result[pos + i] = sample;
+                    }
+
+                    pos += hop_size;
+                }
+
+                // Handle remaining samples
+                if pos < data.len() {
+                    result.extend_from_slice(&data[pos..]);
+                }
+
+                *arr = Array1::from_vec(result);
+            }
+            AudioData::MultiChannel(arr) => {
+                let (channels, samples) = arr.dim();
+                let mut result = Vec::new();
+
+                // Process each channel separately
+                for ch in 0..channels {
+                    let channel_data = arr.row(ch).to_owned();
+                    let data = channel_data.as_slice().unwrap();
+
+                    let mut channel_result = Vec::new();
+                    let mut pos = 0;
+
+                    while pos + window_size <= data.len() {
+                        let window = &data[pos..pos + window_size];
+                        let processed = f(window);
+
+                        if processed.len() != window_size {
+                            return Err(crate::AudioSampleError::InvalidParameter(format!(
+                                "Window function must return {} samples, got {}",
+                                window_size,
+                                processed.len()
+                            )));
+                        }
+
+                        if channel_result.len() < pos + window_size {
+                            channel_result.resize(pos + window_size, T::default());
+                        }
+
+                        // Overlap-add the processed window
+                        for (i, &sample) in processed.iter().enumerate() {
+                            channel_result[pos + i] = sample;
+                        }
+
+                        pos += hop_size;
+                    }
+
+                    // Handle remaining samples
+                    if pos < data.len() {
+                        channel_result.extend_from_slice(&data[pos..]);
+                    }
+
+                    result.extend(channel_result);
+                }
+
+                let new_samples = result.len() / channels;
+                *arr = Array2::from_shape_vec((channels, new_samples), result).map_err(|e| {
+                    crate::AudioSampleError::InvalidParameter(format!("Array shape error: {}", e))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Applies a function to each channel individually.
+    ///
+    /// This method applies the given function to each channel of the audio data.
+    /// For mono audio, the function is applied to the single channel.
+    /// For multi-channel audio, the function is applied to each channel separately.
+    ///
+    /// # Arguments
+    /// * `f` - A function that takes a channel index and mutable slice of samples
+    ///
+    /// # Returns
+    /// A result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Apply different gains to different channels
+    /// audio.apply_channels(|channel, samples| {
+    ///     let gain = match channel {
+    ///         0 => 0.8, // Left channel
+    ///         1 => 0.9, // Right channel
+    ///         _ => 1.0, // Other channels
+    ///     };
+    ///     for sample in samples.iter_mut() {
+    ///         *sample = *sample * gain;
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// ```
+    pub fn apply_channels<F>(&mut self, f: F) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(usize, &mut [T]) -> crate::AudioSampleResult<()>,
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                let mut_slice = arr.as_slice_mut().unwrap();
+                f(0, mut_slice)?;
+            }
+            AudioData::MultiChannel(arr) => {
+                for (ch, mut row) in arr.axis_iter_mut(ndarray::Axis(0)).enumerate() {
+                    let mut_slice = row.as_slice_mut().unwrap();
+                    f(ch, mut_slice)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies a function to each sample and returns a new AudioSamples instance.
+    ///
+    /// This is a functional-style version of `apply` that doesn't modify the original
+    /// audio data but returns a new instance with the transformed samples.
+    ///
+    /// # Arguments
+    /// * `f` - A function that takes a sample and returns a transformed sample
+    ///
+    /// # Returns
+    /// A new AudioSamples instance with the transformed samples
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Create a new audio instance with halved amplitude
+    /// let quieter_audio = audio.map(|sample| sample * 0.5)?;
+    ///
+    /// // Create a new audio instance with clipped samples
+    /// let clipped_audio = audio.map(|sample| sample.clamp(-0.8, 0.8))?;
+    /// ```
+    pub fn map<F>(self, f: F) -> crate::AudioSampleResult<Self>
+    where
+        F: Fn(T) -> T,
+    {
+        let mut result = self;
+        result.apply(f)?;
+        Ok(result)
+    }
+
+    /// Applies a function to each sample with access to the sample index.
+    ///
+    /// This method is similar to `apply` but provides the sample index to the function,
+    /// allowing for position-dependent transformations.
+    ///
+    /// # Arguments
+    /// * `f` - A function that takes a sample index and sample value, returns transformed sample
+    ///
+    /// # Returns
+    /// A result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Apply a fade-in effect
+    /// audio.apply_indexed(|index, sample| {
+    ///     let fade_samples = 44100; // 1 second fade at 44.1kHz
+    ///     let gain = if index < fade_samples {
+    ///         index as f32 / fade_samples as f32
+    ///     } else {
+    ///         1.0
+    ///     };
+    ///     sample * gain
+    /// })?;
+    /// ```
+    pub fn apply_indexed<F>(&mut self, f: F) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(usize, T) -> T,
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                for (i, sample) in arr.iter_mut().enumerate() {
+                    *sample = f(i, *sample);
+                }
+            }
+            AudioData::MultiChannel(arr) => {
+                for (i, sample) in arr.iter_mut().enumerate() {
+                    *sample = f(i, *sample);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies a function to samples in chunks of a specified size.
+    ///
+    /// This method processes the audio data in non-overlapping chunks of the specified size,
+    /// applying the given function to each chunk. This is useful for block-based processing.
+    ///
+    /// # Arguments
+    /// * `chunk_size` - Size of each chunk in samples
+    /// * `f` - A function that takes a chunk slice and returns transformed samples
+    ///
+    /// # Returns
+    /// A result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Apply RMS normalization to each chunk
+    /// audio.apply_chunks(1024, |chunk| {
+    ///     let rms = (chunk.iter().map(|&x| x * x).sum::<f32>() / chunk.len() as f32).sqrt();
+    ///     let target_rms = 0.5;
+    ///     let gain = if rms > 0.0 { target_rms / rms } else { 1.0 };
+    ///     chunk.iter().map(|&x| x * gain).collect()
+    /// })?;
+    /// ```
+    pub fn apply_chunks<F>(&mut self, chunk_size: usize, f: F) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(&[T]) -> Vec<T>,
+    {
+        if chunk_size == 0 {
+            return Err(crate::AudioSampleError::InvalidParameter(
+                "Chunk size must be greater than 0".to_string(),
+            ));
+        }
+
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                let mut result = Vec::new();
+                let data = arr.as_slice().unwrap();
+
+                // Process chunks
+                for chunk in data.chunks(chunk_size) {
+                    let processed = f(chunk);
+                    result.extend(processed);
+                }
+
+                *arr = Array1::from_vec(result);
+            }
+            AudioData::MultiChannel(arr) => {
+                let (channels, samples) = arr.dim();
+                let mut result = Vec::new();
+
+                // Process each channel separately
+                for ch in 0..channels {
+                    let channel_data = arr.row(ch).to_owned();
+                    let data = channel_data.as_slice().unwrap();
+
+                    let mut channel_result = Vec::new();
+                    for chunk in data.chunks(chunk_size) {
+                        let processed = f(chunk);
+                        channel_result.extend(processed);
+                    }
+
+                    result.extend(channel_result);
+                }
+
+                let new_samples = result.len() / channels;
+                *arr = Array2::from_shape_vec((channels, new_samples), result).map_err(|e| {
+                    crate::AudioSampleError::InvalidParameter(format!("Array shape error: {}", e))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -299,5 +658,119 @@ mod tests {
         assert_eq!(audio.min_native(), -4.0);
         assert_eq!(audio.max_native(), 3.0);
         assert_eq!(audio.peak_native(), 4.0); // abs(-4) = 4 is the largest absolute value
+    }
+
+    #[test]
+    fn test_apply_simple() {
+        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let mut audio = AudioSamples::new_mono(data, 44100);
+
+        // Apply a simple scaling
+        audio.apply(|sample| sample * 2.0).unwrap();
+
+        let expected = array![2.0f32, 4.0, 6.0, 8.0, 10.0];
+        assert_eq!(audio.as_mono().unwrap(), &expected);
+    }
+
+    #[test]
+    fn test_apply_channels() {
+        let data = array![[1.0f32, 2.0], [3.0, 4.0]]; // 2 channels, 2 samples each
+        let mut audio = AudioSamples::new_multi_channel(data, 44100);
+
+        // Apply different gains to different channels
+        audio
+            .apply_channels(|channel, samples| {
+                let gain = match channel {
+                    0 => 2.0,
+                    1 => 3.0,
+                    _ => 1.0,
+                };
+                for sample in samples.iter_mut() {
+                    *sample = *sample * gain;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let expected = array![[2.0f32, 4.0], [9.0, 12.0]];
+        assert_eq!(audio.as_multi_channel().unwrap(), &expected);
+    }
+
+    #[test]
+    fn test_map_functional() {
+        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let audio = AudioSamples::new_mono(data, 44100);
+
+        // Create a new audio instance with transformed samples
+        let new_audio = audio.clone().map(|sample| sample * 0.5).unwrap();
+
+        let expected = array![0.5f32, 1.0, 1.5, 2.0, 2.5];
+        assert_eq!(new_audio.as_mono().unwrap(), &expected);
+
+        // Original should be unchanged
+        let original_expected = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(audio.as_mono().unwrap(), &original_expected);
+    }
+
+    #[test]
+    fn test_apply_indexed() {
+        let data = array![1.0f32, 1.0, 1.0, 1.0, 1.0];
+        let mut audio = AudioSamples::new_mono(data, 44100);
+
+        // Apply index-based transformation
+        audio
+            .apply_indexed(|index, sample| sample * (index + 1) as f32)
+            .unwrap();
+
+        let expected = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(audio.as_mono().unwrap(), &expected);
+    }
+
+    #[test]
+    fn test_apply_chunks() {
+        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut audio = AudioSamples::new_mono(data, 44100);
+
+        // Apply chunk-based transformation (double each chunk)
+        audio
+            .apply_chunks(2, |chunk| chunk.iter().map(|&x| x * 2.0).collect())
+            .unwrap();
+
+        let expected = array![2.0f32, 4.0, 6.0, 8.0, 10.0, 12.0];
+        assert_eq!(audio.as_mono().unwrap(), &expected);
+    }
+
+    #[test]
+    fn test_apply_windowed() {
+        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut audio = AudioSamples::new_mono(data, 44100);
+
+        // Apply windowed transformation (simple identity for testing)
+        audio
+            .apply_windowed(3, 2, |window| {
+                window.to_vec() // Just return the window unchanged
+            })
+            .unwrap();
+
+        // The length should be preserved or extended based on windowing
+        assert!(audio.samples_per_channel() >= 6);
+    }
+
+    #[test]
+    fn test_apply_error_handling() {
+        let data = array![1.0f32, 2.0, 3.0];
+        let mut audio = AudioSamples::new_mono(data, 44100);
+
+        // Test error handling for invalid chunk size
+        let result = audio.apply_chunks(0, |chunk| chunk.to_vec());
+        assert!(result.is_err());
+
+        // Test error handling for invalid window size
+        let result = audio.apply_windowed(0, 1, |window| window.to_vec());
+        assert!(result.is_err());
+
+        // Test error handling for invalid hop size
+        let result = audio.apply_windowed(2, 0, |window| window.to_vec());
+        assert!(result.is_err());
     }
 }

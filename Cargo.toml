@@ -32,7 +32,15 @@ num-complex = "0.4"
 i24 = { path = "../i24", features = ["alloc", "serde"] }
 rubato =  "0.16.2"
 serde = "1.0.219"
+rayon = { version = "1.10", optional = true }
+indicatif = { version = "0.18", optional = true }
+tokio = { version = "1.0", features = ["rt", "time"], optional = true }
+num_cpus = { version = "1.16", optional = true }
+futures = { version = "0.3", optional = true }
 
 [features]
-default = []
+default = ["batch-processing"]
 python = ["dep:pyo3", "dep:numpy", "i24/pyo3"]
+batch-processing = []
+parallel-processing = ["dep:rayon", "dep:num_cpus", "batch-processing"]
+progress-tracking = ["dep:indicatif", "batch-processing"]

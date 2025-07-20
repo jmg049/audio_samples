@@ -37,6 +37,7 @@ pub mod operations;
 pub mod python;
 mod repr;
 pub mod resampling;
+mod utils;
 use std::{
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},
@@ -53,6 +54,18 @@ pub use crate::operations::{
     AudioTransforms, AudioTypeConversion, NormalizationMethod,
 };
 pub use crate::repr::AudioSamples;
+
+#[cfg(feature = "batch-processing")]
+pub mod batch;
+
+#[cfg(feature = "batch-processing")]
+pub use crate::batch::{
+    BatchBuilder,
+    traits::{BatchOperation, BatchProcessor},
+};
+
+#[cfg(feature = "parallel-processing")]
+pub use crate::batch::parallel::{ParallelProcessor, optimal_chunk_size};
 
 /// Array of supported audio sample data types as string identifiers
 pub const SUPPORTED_DTYPES: [&str; 5] = ["i16", "I24", "i32", "f32", "f64"];
@@ -94,6 +107,8 @@ pub trait AudioSample:
     + ConvertTo<I24>
     + ConvertTo<f32>
     + ConvertTo<f64>
+    + Into<Self>
+    + From<Self>
     + Sync
     + Send
     + Debug
@@ -108,6 +123,12 @@ pub trait AudioSample:
     + ToBytes
     + serde::Serialize
     + serde::Deserialize<'static>
+    + CastFrom<i16>
+    + CastFrom<I24>
+    + CastFrom<i32>
+    + CastFrom<f32>
+    + CastFrom<f64>
+    + CastFrom<usize>
 {
     #[inline]
     fn to_bytes<'a>(self) -> Vec<u8> {
@@ -127,6 +148,18 @@ pub trait AudioSample:
     const MAX: Self;
     const MIN: Self;
     const BITS: u8;
+}
+
+pub trait CastFrom<S>: Sized {
+    fn cast_from(value: S) -> Self;
+}
+
+pub trait CastInto<T>: Sized
+where
+    T: AudioSample,
+    Self: AudioSample + CastFrom<T>,
+{
+    fn cast_into(self) -> T;
 }
 
 /// Trait for converting one sample type to another with proper scaling.
@@ -151,6 +184,15 @@ pub trait AudioSample:
 /// ```
 pub trait ConvertTo<T: AudioSample> {
     fn convert_to(&self) -> AudioSampleResult<T>;
+
+    /// Convert from another audio sample type to this type.
+    /// This is a convenience method that calls `convert_to` on the source value.
+    fn convert_from<F: AudioSample + ConvertTo<T>>(source: F) -> AudioSampleResult<T>
+    where
+        F: ConvertTo<T>,
+    {
+        source.convert_to()
+    }
 }
 
 // ========================
@@ -196,12 +238,14 @@ macro_rules! impl_i24_conversion {
             #[inline(always)]
             fn convert_to(&self) -> AudioSampleResult<$to> {
                 const SHIFT: i8 = $to_bits - 24;
+                let val = self.to_i32();
+
                 Ok(if SHIFT > 0 {
-                    (self.to_i32() as i64) << SHIFT as u8
+                    (val as i64) << SHIFT as u8
                 } else if SHIFT < 0 {
-                    (self.to_i32() as i64) >> (-SHIFT) as u8
+                    (val as i64) >> (-SHIFT) as u8
                 } else {
-                    self.to_i32() as i64
+                    val as i64
                 } as $to)
             }
         }
@@ -255,10 +299,12 @@ macro_rules! impl_i24_to_float_conversion {
             #[inline(always)]
             fn convert_to(&self) -> AudioSampleResult<$to> {
                 let val = self.to_i32();
+                let min_val = I24::MIN.to_i32();
+                let max_val = I24::MAX.to_i32();
                 if val < 0 {
-                    Ok((val as $to) / (-(I24::MIN.to_i32() as $to)))
+                    Ok((val as $to) / (-(min_val as $to)))
                 } else {
-                    Ok((val as $to) / (I24::MAX.to_i32() as $to))
+                    Ok((val as $to) / (max_val as $to))
                 }
             }
         }
@@ -403,6 +449,158 @@ impl_float_to_i24_conversion!(f64);
 // Float to float conversions
 impl_float_to_float_conversion!(f32, f64);
 impl_float_to_float_conversion!(f64, f32);
+
+macro_rules! impl_cast_from {
+    ($src:ty => [$($dst:ty),+]) => {
+        $(
+            impl CastFrom<$src> for $dst {
+                fn cast_from(value: $src) -> Self {
+                    value as $dst
+                }
+            }
+        )+
+    };
+}
+
+impl_cast_from!(i16 => [i16, i32, f32, f64]);
+impl_cast_from!(i32 => [i16, i32, f32, f64]);
+impl_cast_from!(f64 => [i16, i32, f32, f64]);
+impl_cast_from!(f32 => [i16, i32, f32, f64]);
+
+impl CastFrom<usize> for i16 {
+    fn cast_from(value: usize) -> Self {
+        if value > i16::MAX as usize {
+            i16::MAX
+        } else {
+            value as i16
+        }
+    }
+}
+
+impl CastFrom<usize> for I24 {
+    fn cast_from(value: usize) -> Self {
+        if value > I24::MAX.to_i32() as usize {
+            I24::MAX
+        } else {
+            I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
+        }
+    }
+}
+
+impl CastFrom<usize> for i32 {
+    fn cast_from(value: usize) -> Self {
+        if value > i32::MAX as usize {
+            i32::MAX
+        } else {
+            value as i32
+        }
+    }
+}
+
+impl CastFrom<usize> for f32 {
+    fn cast_from(value: usize) -> Self {
+        value as f32
+    }
+}
+impl CastFrom<usize> for f64 {
+    fn cast_from(value: usize) -> Self {
+        value as f64
+    }
+}
+
+impl CastFrom<I24> for i16 {
+    fn cast_from(value: I24) -> Self {
+        value.to_i32() as i16
+    }
+}
+
+impl CastFrom<I24> for I24 {
+    fn cast_from(value: I24) -> Self {
+        value
+    }
+}
+
+impl CastFrom<I24> for i32 {
+    fn cast_from(value: I24) -> Self {
+        value.to_i32()
+    }
+}
+
+impl CastFrom<I24> for f32 {
+    fn cast_from(value: I24) -> Self {
+        value.to_i32() as f32
+    }
+}
+
+impl CastFrom<I24> for f64 {
+    fn cast_from(value: I24) -> Self {
+        value.to_i32() as f64
+    }
+}
+impl CastFrom<i16> for I24 {
+    fn cast_from(value: i16) -> Self {
+        I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
+    }
+}
+
+impl CastFrom<i32> for I24 {
+    fn cast_from(value: i32) -> Self {
+        I24::try_from_i32(value).unwrap_or(I24::MIN)
+    }
+}
+
+impl CastFrom<f32> for I24 {
+    fn cast_from(value: f32) -> Self {
+        I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
+    }
+}
+
+impl CastFrom<f64> for I24 {
+    fn cast_from(value: f64) -> Self {
+        I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
+    }
+}
+
+macro_rules! impl_cast_into {
+    ($src:ty => [$($dst:ty),+]) => {
+        $(
+            impl CastInto<$dst> for $src {
+                fn cast_into(self) -> $dst {
+                    <$dst>::cast_from(self)
+                }
+            }
+        )+
+    };
+}
+
+impl_cast_into!(i16 => [i16, i32, f32, f64]);
+impl_cast_into!(i32 => [i16, i32, f32, f64]);
+impl_cast_into!(f64 => [i16, i32, f32, f64]);
+impl_cast_into!(f32 => [i16, i32, f32, f64]);
+
+impl CastInto<I24> for i16 {
+    fn cast_into(self) -> I24 {
+        I24::cast_from(self)
+    }
+}
+
+impl CastInto<I24> for i32 {
+    fn cast_into(self) -> I24 {
+        I24::cast_from(self)
+    }
+}
+
+impl CastInto<I24> for f32 {
+    fn cast_into(self) -> I24 {
+        I24::cast_from(self)
+    }
+}
+
+impl CastInto<I24> for f64 {
+    fn cast_into(self) -> I24 {
+        I24::cast_from(self)
+    }
+}
 
 #[cfg(test)]
 mod conversion_tests {
@@ -844,6 +1042,42 @@ mod conversion_tests {
         // Print the difference to help debug
         println!("DEBUG: Difference: {}", (i24_to_f64 - expected_f64).abs());
         assert_approx_eq!(i24_to_f64, expected_f64, 1e-4);
+    }
+
+    // Tests for convert_from functionality
+    #[test]
+    fn convert_from_tests() {
+        // Test i16::convert_from with different source types
+        let f32_source: f32 = 0.5;
+        let i16_result: i16 = i16::convert_from(f32_source).unwrap();
+        assert_eq!(i16_result, 16384); // 0.5 * 32767 rounded
+
+        let i32_source: i32 = 65536;
+        let i16_result: i16 = i16::convert_from(i32_source).unwrap();
+        assert_eq!(i16_result, 1); // 65536 >> 16 = 1
+
+        // Test f32::convert_from with different source types
+        let i16_source: i16 = 16384;
+        let f32_result: f32 = f32::convert_from(i16_source).unwrap();
+        assert_approx_eq!(f32_result as f64, 0.5, 1e-4);
+
+        let i32_source: i32 = i32::MAX / 2;
+        let f32_result: f32 = f32::convert_from(i32_source).unwrap();
+        assert_approx_eq!(f32_result as f64, 0.5, 1e-4);
+
+        // Test I24::convert_from
+        let i16_source: i16 = 4660; // 0x1234
+        let i24_result: I24 = I24::convert_from(i16_source).unwrap();
+        assert_eq!(i24_result.to_i32(), 4660 << 8); // Should be shifted left by 8 bits
+
+        // Test with zero values
+        let zero_f32: f32 = 0.0;
+        let zero_i16: i16 = i16::convert_from(zero_f32).unwrap();
+        assert_eq!(zero_i16, 0);
+
+        let zero_i16_source: i16 = 0;
+        let zero_f32_result: f32 = f32::convert_from(zero_i16_source).unwrap();
+        assert_approx_eq!(zero_f32_result as f64, 0.0, 1e-10);
     }
 
     // Tests for round trip conversions

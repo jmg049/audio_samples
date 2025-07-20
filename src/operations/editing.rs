@@ -9,7 +9,6 @@ use super::types::FadeCurve;
 use crate::repr::AudioData;
 use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
 use ndarray::{Array1, Array2, Axis, concatenate, s};
-use num_traits::{Float, FromPrimitive, One, ToPrimitive, Zero};
 
 /// Helper function to convert seconds to samples
 fn seconds_to_samples(seconds: f64, sample_rate: u32) -> usize {
@@ -56,8 +55,7 @@ fn apply_fade_curve(curve: &FadeCurve, position: f64) -> f64 {
     }
 }
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive + Zero + One + Copy> AudioEditing<T>
-    for AudioSamples<T>
+impl<T: AudioSample> AudioEditing<T> for AudioSamples<T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -411,7 +409,7 @@ where
                 for i in 0..actual_fade_samples {
                     let position = i as f64 / actual_fade_samples as f64;
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
+                    let gain_t: T = T::convert_from(gain)?;
                     arr[i] = arr[i] * gain_t;
                 }
             }
@@ -419,7 +417,8 @@ where
                 for i in 0..actual_fade_samples {
                     let position = i as f64 / actual_fade_samples as f64;
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
+                    let gain_t: T = T::convert_from(gain)?;
+
                     for channel in 0..arr.nrows() {
                         arr[[channel, i]] = arr[[channel, i]] * gain_t;
                     }
@@ -448,7 +447,8 @@ where
                 for i in 0..actual_fade_samples {
                     let position = 1.0 - (i as f64 / actual_fade_samples as f64);
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
+                    let gain_t: T = T::convert_from(gain)?;
+
                     arr[start_sample + i] = arr[start_sample + i] * gain_t;
                 }
             }
@@ -456,7 +456,7 @@ where
                 for i in 0..actual_fade_samples {
                     let position = 1.0 - (i as f64 / actual_fade_samples as f64);
                     let gain = apply_fade_curve(&curve, position);
-                    let gain_t = <f64 as ConvertTo<T>>::convert_to(&gain).unwrap_or(T::one());
+                    let gain_t: T = T::convert_from(gain)?;
                     for channel in 0..arr.nrows() {
                         arr[[channel, start_sample + i]] =
                             arr[[channel, start_sample + i]] * gain_t;
