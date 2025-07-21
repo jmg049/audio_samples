@@ -297,7 +297,7 @@ pub struct IirFilterDesign {
 
 impl IirFilterDesign {
     /// Create a simple Butterworth low-pass filter design.
-    pub fn butterworth_lowpass(order: usize, cutoff_frequency: f64) -> Self {
+    pub const fn butterworth_lowpass(order: usize, cutoff_frequency: f64) -> Self {
         Self {
             filter_type: IirFilterType::Butterworth,
             response: FilterResponse::LowPass,
@@ -311,7 +311,7 @@ impl IirFilterDesign {
     }
 
     /// Create a simple Butterworth high-pass filter design.
-    pub fn butterworth_highpass(order: usize, cutoff_frequency: f64) -> Self {
+    pub const fn butterworth_highpass(order: usize, cutoff_frequency: f64) -> Self {
         Self {
             filter_type: IirFilterType::Butterworth,
             response: FilterResponse::HighPass,
@@ -325,7 +325,11 @@ impl IirFilterDesign {
     }
 
     /// Create a simple Butterworth band-pass filter design.
-    pub fn butterworth_bandpass(order: usize, low_frequency: f64, high_frequency: f64) -> Self {
+    pub const fn butterworth_bandpass(
+        order: usize,
+        low_frequency: f64,
+        high_frequency: f64,
+    ) -> Self {
         Self {
             filter_type: IirFilterType::Butterworth,
             response: FilterResponse::BandPass,
@@ -339,7 +343,7 @@ impl IirFilterDesign {
     }
 
     /// Create a Chebyshev Type I filter design.
-    pub fn chebyshev_i(
+    pub const fn chebyshev_i(
         response: FilterResponse,
         order: usize,
         cutoff_frequency: f64,
@@ -413,7 +417,7 @@ impl EqBand {
     /// * `frequency` - Center frequency in Hz
     /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
     /// * `q_factor` - Quality factor (bandwidth control)
-    pub fn peak(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
+    pub const fn peak(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
         Self {
             band_type: EqBandType::Peak,
             frequency,
@@ -429,7 +433,7 @@ impl EqBand {
     /// * `frequency` - Corner frequency in Hz
     /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
     /// * `q_factor` - Shelf slope control
-    pub fn low_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
+    pub const fn low_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
         Self {
             band_type: EqBandType::LowShelf,
             frequency,
@@ -445,7 +449,7 @@ impl EqBand {
     /// * `frequency` - Corner frequency in Hz
     /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
     /// * `q_factor` - Shelf slope control
-    pub fn high_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
+    pub const fn high_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
         Self {
             band_type: EqBandType::HighShelf,
             frequency,
@@ -460,7 +464,7 @@ impl EqBand {
     /// # Arguments
     /// * `frequency` - Cutoff frequency in Hz
     /// * `q_factor` - Filter resonance (typically 0.707 for Butterworth)
-    pub fn low_pass(frequency: f64, q_factor: f64) -> Self {
+    pub const fn low_pass(frequency: f64, q_factor: f64) -> Self {
         Self {
             band_type: EqBandType::LowPass,
             frequency,
@@ -475,7 +479,7 @@ impl EqBand {
     /// # Arguments
     /// * `frequency` - Cutoff frequency in Hz
     /// * `q_factor` - Filter resonance (typically 0.707 for Butterworth)
-    pub fn high_pass(frequency: f64, q_factor: f64) -> Self {
+    pub const fn high_pass(frequency: f64, q_factor: f64) -> Self {
         Self {
             band_type: EqBandType::HighPass,
             frequency,
@@ -491,7 +495,7 @@ impl EqBand {
     }
 
     /// Check if this EQ band is enabled.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 
@@ -535,7 +539,7 @@ pub struct ParametricEq {
 
 impl ParametricEq {
     /// Create a new empty parametric EQ.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             bands: Vec::new(),
             output_gain_db: 0.0,
@@ -583,7 +587,7 @@ impl ParametricEq {
     }
 
     /// Check if the EQ is bypassed.
-    pub fn is_bypassed(&self) -> bool {
+    pub const fn is_bypassed(&self) -> bool {
         self.bypassed
     }
 
@@ -683,7 +687,7 @@ pub struct SideChainConfig {
 
 impl SideChainConfig {
     /// Create a new disabled side-chain configuration.
-    pub fn disabled() -> Self {
+    pub const fn disabled() -> Self {
         Self {
             enabled: false,
             high_pass_freq: None,
@@ -694,7 +698,7 @@ impl SideChainConfig {
     }
 
     /// Create a new enabled side-chain configuration with default settings.
-    pub fn enabled() -> Self {
+    pub const fn enabled() -> Self {
         Self {
             enabled: true,
             high_pass_freq: Some(100.0),
@@ -792,7 +796,7 @@ pub struct CompressorConfig {
 
 impl CompressorConfig {
     /// Create a new compressor configuration with default settings.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             threshold_db: -12.0,
             ratio: 4.0,
@@ -808,7 +812,7 @@ impl CompressorConfig {
     }
 
     /// Create a vocal compressor preset.
-    pub fn vocal() -> Self {
+    pub const fn vocal() -> Self {
         Self {
             threshold_db: -18.0,
             ratio: 3.0,
@@ -824,7 +828,7 @@ impl CompressorConfig {
     }
 
     /// Create a drum compressor preset.
-    pub fn drum() -> Self {
+    pub const fn drum() -> Self {
         Self {
             threshold_db: -8.0,
             ratio: 6.0,
@@ -840,7 +844,7 @@ impl CompressorConfig {
     }
 
     /// Create a bus compressor preset.
-    pub fn bus() -> Self {
+    pub const fn bus() -> Self {
         Self {
             threshold_db: -20.0,
             ratio: 2.0,
@@ -930,7 +934,7 @@ pub struct LimiterConfig {
 
 impl LimiterConfig {
     /// Create a new limiter configuration with default settings.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             ceiling_db: -0.1,
             attack_ms: 0.5,
@@ -945,7 +949,7 @@ impl LimiterConfig {
     }
 
     /// Create a transparent limiter preset.
-    pub fn transparent() -> Self {
+    pub const fn transparent() -> Self {
         Self {
             ceiling_db: -0.1,
             attack_ms: 0.1,
@@ -960,7 +964,7 @@ impl LimiterConfig {
     }
 
     /// Create a mastering limiter preset.
-    pub fn mastering() -> Self {
+    pub const fn mastering() -> Self {
         Self {
             ceiling_db: -0.3,
             attack_ms: 1.0,
@@ -975,7 +979,7 @@ impl LimiterConfig {
     }
 
     /// Create a broadcast limiter preset.
-    pub fn broadcast() -> Self {
+    pub const fn broadcast() -> Self {
         Self {
             ceiling_db: -1.0,
             attack_ms: 0.5,
@@ -1058,7 +1062,7 @@ impl CqtConfig {
     /// - Quality factor of 1.0
     /// - Hanning window
     /// - 0.01 sparsity threshold
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             bins_per_octave: 12,
             fmin: 55.0, // A1
@@ -1074,7 +1078,7 @@ impl CqtConfig {
     ///
     /// Uses 12 bins per octave for chromatic scale analysis,
     /// starting from C1 (32.7 Hz) for full piano range coverage.
-    pub fn musical() -> Self {
+    pub const fn musical() -> Self {
         Self {
             bins_per_octave: 12,
             fmin: 32.7, // C1
@@ -1090,7 +1094,7 @@ impl CqtConfig {
     ///
     /// Uses 24 bins per octave for quarter-tone resolution,
     /// providing detailed harmonic analysis capabilities.
-    pub fn harmonic() -> Self {
+    pub const fn harmonic() -> Self {
         Self {
             bins_per_octave: 24,
             fmin: 55.0, // A1
@@ -1106,7 +1110,7 @@ impl CqtConfig {
     ///
     /// Uses settings that balance frequency resolution with computational
     /// efficiency for real-time chord detection applications.
-    pub fn chord_detection() -> Self {
+    pub const fn chord_detection() -> Self {
         Self {
             bins_per_octave: 12,
             fmin: 82.4,         // E2 (lowest guitar string)
@@ -1122,7 +1126,7 @@ impl CqtConfig {
     ///
     /// Uses lower Q factor for better time resolution,
     /// suitable for detecting note onsets and transients.
-    pub fn onset_detection() -> Self {
+    pub const fn onset_detection() -> Self {
         Self {
             bins_per_octave: 12,
             fmin: 55.0, // A1
@@ -1313,7 +1317,7 @@ impl AdaptiveThresholdConfig {
     /// - Delta method with 0.05 delta value
     /// - Window size of 1024 samples (about 23ms at 44.1kHz)
     /// - Reasonable min/max threshold bounds
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             method: AdaptiveThresholdMethod::Delta,
             delta: 0.05,
@@ -1329,7 +1333,7 @@ impl AdaptiveThresholdConfig {
     /// # Arguments
     /// * `delta` - Delta value for threshold computation
     /// * `window_size` - Size of local window in samples
-    pub fn delta(delta: f64, window_size: usize) -> Self {
+    pub const fn delta(delta: f64, window_size: usize) -> Self {
         Self {
             method: AdaptiveThresholdMethod::Delta,
             delta,
@@ -1345,7 +1349,7 @@ impl AdaptiveThresholdConfig {
     /// # Arguments
     /// * `percentile` - Percentile value (0.0-1.0)
     /// * `window_size` - Size of local window in samples
-    pub fn percentile(percentile: f64, window_size: usize) -> Self {
+    pub const fn percentile(percentile: f64, window_size: usize) -> Self {
         Self {
             method: AdaptiveThresholdMethod::Percentile,
             delta: 0.05,
@@ -1362,7 +1366,7 @@ impl AdaptiveThresholdConfig {
     /// * `delta` - Delta value for delta component
     /// * `percentile` - Percentile value for percentile component
     /// * `window_size` - Size of local window in samples
-    pub fn combined(delta: f64, percentile: f64, window_size: usize) -> Self {
+    pub const fn combined(delta: f64, percentile: f64, window_size: usize) -> Self {
         Self {
             method: AdaptiveThresholdMethod::Combined,
             delta,
@@ -1455,7 +1459,7 @@ impl PeakPickingConfig {
     /// - Pre-emphasis enabled with moderate coefficient
     /// - Median filtering enabled with small kernel
     /// - Peak normalization enabled
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             adaptive_threshold: AdaptiveThresholdConfig::new(),
             min_peak_separation: 512,
@@ -1475,7 +1479,7 @@ impl PeakPickingConfig {
     /// - Longer minimum separation to avoid over-detection
     /// - Strong pre-emphasis for transient enhancement
     /// - Median filtering for noise reduction
-    pub fn music() -> Self {
+    pub const fn music() -> Self {
         Self {
             adaptive_threshold: AdaptiveThresholdConfig::combined(0.03, 0.85, 2048),
             min_peak_separation: 1024,
@@ -1495,7 +1499,7 @@ impl PeakPickingConfig {
     /// - Shorter minimum separation for rapid speech
     /// - Moderate pre-emphasis
     /// - Smaller median filter to preserve speech transients
-    pub fn speech() -> Self {
+    pub const fn speech() -> Self {
         Self {
             adaptive_threshold: AdaptiveThresholdConfig::delta(0.07, 1024),
             min_peak_separation: 256,
@@ -1515,7 +1519,7 @@ impl PeakPickingConfig {
     /// - Very short minimum separation for rapid sequences
     /// - Strong pre-emphasis for transient enhancement
     /// - No median filtering to preserve sharp transients
-    pub fn drums() -> Self {
+    pub const fn drums() -> Self {
         Self {
             adaptive_threshold: AdaptiveThresholdConfig::percentile(0.95, 512),
             min_peak_separation: 128,
@@ -1625,7 +1629,7 @@ impl OnsetConfig {
     /// - Moderate threshold (0.3)
     /// - 50ms minimum onset interval
     /// - Adaptive thresholding enabled
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -1646,7 +1650,7 @@ impl OnsetConfig {
     /// - Higher threshold for cleaner detection
     /// - Shorter minimum interval for rapid percussion
     /// - Pre-emphasis to highlight transients
-    pub fn percussive() -> Self {
+    pub const fn percussive() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256, // Higher time resolution for drums
@@ -1667,7 +1671,7 @@ impl OnsetConfig {
     /// - Moderate threshold for good sensitivity
     /// - Longer minimum interval for typical musical phrasing
     /// - Less pre-emphasis for tonal content
-    pub fn musical() -> Self {
+    pub const fn musical() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -1688,7 +1692,7 @@ impl OnsetConfig {
     /// - Low threshold for speech dynamics
     /// - Moderate minimum interval for speech rate
     /// - Minimal pre-emphasis for speech clarity
-    pub fn speech() -> Self {
+    pub const fn speech() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256, // Good time resolution for speech
@@ -1909,7 +1913,7 @@ pub struct SpectralFluxConfig {
 
 impl SpectralFluxConfig {
     /// Create a new spectral flux configuration with default settings.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -1922,7 +1926,7 @@ impl SpectralFluxConfig {
     }
 
     /// Create configuration optimized for percussive onset detection.
-    pub fn percussive() -> Self {
+    pub const fn percussive() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256,
@@ -1935,7 +1939,7 @@ impl SpectralFluxConfig {
     }
 
     /// Create configuration optimized for musical onset detection.
-    pub fn musical() -> Self {
+    pub const fn musical() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -1948,7 +1952,7 @@ impl SpectralFluxConfig {
     }
 
     /// Create configuration optimized for complex domain onset detection.
-    pub fn complex() -> Self {
+    pub const fn complex() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -2018,7 +2022,7 @@ pub struct ComplexOnsetConfig {
 
 impl ComplexOnsetConfig {
     /// Create a new complex onset configuration with default settings.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -2033,7 +2037,7 @@ impl ComplexOnsetConfig {
     }
 
     /// Create configuration optimized for percussive onset detection.
-    pub fn percussive() -> Self {
+    pub const fn percussive() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256,
@@ -2048,7 +2052,7 @@ impl ComplexOnsetConfig {
     }
 
     /// Create configuration optimized for musical onset detection.
-    pub fn musical() -> Self {
+    pub const fn musical() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -2063,7 +2067,7 @@ impl ComplexOnsetConfig {
     }
 
     /// Create configuration optimized for speech onset detection.
-    pub fn speech() -> Self {
+    pub const fn speech() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256,

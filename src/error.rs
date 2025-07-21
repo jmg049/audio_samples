@@ -52,4 +52,15 @@ pub enum AudioSampleError {
     /// This happens when trying to use optional functionality that wasn't compiled in.
     #[error("Feature '{feature}' is not enabled. Please enable the feature and recompile.")]
     FeatureNotEnabled { feature: String },
+
+    /// Error that occurs when trying to get an ndarray as a slice (slice mut).
+    ///
+    /// This typically happens when the ndarray is not contiguous and not in standard order
+    #[error("Array layout error: {message}")]
+    ArrayLayoutError { message: String },
+
+    /// Error that can be used to indicate that the error originates from an Option type.
+    ///
+    #[error("Option error: {message}")]
+    OptionError { message: String },
 }

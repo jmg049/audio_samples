@@ -6,21 +6,26 @@
 
 use super::traits::AudioTransforms;
 use super::types::{SpectrogramScale, WindowType};
+use crate::operations::{
+    CqtConfig, OnsetConfig, PeakPickingConfig, SpectralFluxConfig, SpectralFluxMethod,
+};
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 use ndarray::{Array1, Array2};
-use num_traits::{Float, FromPrimitive, ToPrimitive};
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive + Float> AudioTransforms<T> for AudioSamples<T>
+impl<T: AudioSample> AudioTransforms<T> for AudioSamples<T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: ConvertTo<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Computes the Fast Fourier Transform of the audio samples.
     ///
@@ -32,7 +37,10 @@ where
                 // Convert samples to complex numbers
                 let mut buffer: Vec<Complex<f64>> = arr
                     .iter()
-                    .map(|&x| Complex::new(x.to_f64().unwrap_or(0.0), 0.0))
+                    .map(|&x| {
+                        let x: f64 = x.cast_into();
+                        Complex::new(x, 0.0)
+                    })
                     .collect();
 
                 // Create FFT planner and plan
@@ -49,7 +57,10 @@ where
                 let first_channel = arr.row(0);
                 let mut buffer: Vec<Complex<f64>> = first_channel
                     .iter()
-                    .map(|&x| Complex::new(x.to_f64().unwrap_or(0.0), 0.0))
+                    .map(|&x| {
+                        let x: f64 = x.cast_into();
+                        Complex::new(x, 0.0)
+                    })
                     .collect();
 
                 let mut planner = FftPlanner::new();
@@ -86,13 +97,11 @@ where
 
         // Extract real parts and normalize by length
         let len = buffer.len() as f64;
-        let real_samples: Vec<T> = buffer
-            .iter()
-            .map(|c| {
-                let real_val = c.re / len; // Normalize by length
-                T::from_f64(real_val).unwrap_or(T::zero())
-            })
-            .collect();
+        let mut real_samples: Vec<T> = Vec::with_capacity(buffer.len());
+        for c in buffer {
+            let real_val = c.re / len; // Normalize by length
+            real_samples.push(real_val.convert_to()?);
+        }
 
         // Create new AudioSamples with same metadata as original
         match &self.data {
@@ -174,7 +183,8 @@ where
                 .iter()
                 .zip(window.iter())
                 .map(|(&sample, &w)| {
-                    let windowed = sample.to_f64().unwrap_or(0.0) * w;
+                    let windowed: f64 = sample.cast_into();
+                    let windowed = windowed * w;
                     Complex::new(windowed, 0.0)
                 })
                 .collect();
@@ -253,11 +263,11 @@ where
         }
 
         // Convert to AudioSamples
-        let samples: Vec<T> = output
-            .iter()
-            .map(|&x| T::from_f64(x).unwrap_or(T::zero()))
-            .collect();
-
+        let mut samples: Vec<T> = Vec::with_capacity(output_length);
+        for sample in output {
+            let converted: T = sample.convert_to()?;
+            samples.push(converted);
+        }
         let arr = Array1::from_vec(samples);
         Ok(AudioSamples::new_mono(arr, sample_rate as u32))
     }
@@ -352,7 +362,10 @@ where
                     }
                     SpectrogramScale::Mel => {
                         // This case is handled above with early return
-                        unreachable!()
+                        return Err(AudioSampleError::InvalidParameter(
+                                "Mel scaling requires mel_spectrogram method - use mel_spectrogram() directly"
+                                    .to_string(),
+                            ));
                     }
                 };
 
@@ -692,11 +705,13 @@ where
             let end = start + window_size;
 
             // Extract frame
-            let frame: Vec<f64> = samples[start..end]
-                .iter()
-                .map(|&s| s.to_f64().unwrap_or(0.0))
-                .collect();
+            let mut frame: Vec<f64> = Vec::with_capacity(end - start);
 
+            for i in start..end {
+                if i < samples.len() {
+                    frame.push(samples[i].convert_to()?);
+                }
+            }
             // Apply each gammatone filter and compute energy
             for (filter_idx, filter_coeffs) in filter_bank.iter().enumerate() {
                 let filtered_output = apply_gammatone_filter(&frame, filter_coeffs);
@@ -721,7 +736,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Get mono samples as f64 for processing
         let samples = self.to_mono_samples_f64()?;
@@ -765,7 +780,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate_f64)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         if cqt_matrix.is_empty() {
             return Err(AudioSampleError::InvalidParameter(
@@ -780,10 +795,11 @@ where
         let reconstructed = apply_inverse_cqt_kernel(cqt_matrix, &dual_kernel, signal_length)?;
 
         // Convert back to original sample type
-        let reconstructed_samples: Vec<T> = reconstructed
-            .iter()
-            .map(|&x| T::from_f64(x).unwrap_or(T::zero()))
-            .collect();
+        let mut reconstructed_samples: Vec<T> = Vec::with_capacity(reconstructed.len());
+        for sample in reconstructed {
+            let converted: T = sample.convert_to()?;
+            reconstructed_samples.push(converted);
+        }
 
         let arr = Array1::from_vec(reconstructed_samples);
         Ok(AudioSamples::new_mono(arr, sample_rate as u32))
@@ -791,7 +807,7 @@ where
 
     fn cqt_spectrogram(
         &self,
-        config: &super::types::CqtConfig,
+        config: &CqtConfig,
         hop_size: usize,
         window_size: Option<usize>,
     ) -> AudioSampleResult<Array2<Complex<f64>>> {
@@ -800,7 +816,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         if hop_size == 0 {
             return Err(AudioSampleError::InvalidParameter(
@@ -818,11 +834,14 @@ where
         }
 
         // Calculate effective window size
-        let effective_window_size = window_size.unwrap_or_else(|| {
-            // Auto-calculate window size based on lowest frequency
-            let min_period = sample_rate / config.fmin;
-            (min_period * 4.0) as usize // 4 periods for good frequency resolution
-        });
+        let effective_window_size = match window_size {
+            Some(size) => size,
+            None => {
+                // Auto-calculate window size based on lowest frequency
+                let min_period = sample_rate / config.fmin;
+                (min_period * 4.0) as usize // 4 periods for good frequency resolution
+            }
+        };
 
         // Generate CQT kernel for the window size
         let kernel = generate_cqt_kernel(config, sample_rate, effective_window_size)?;
@@ -907,7 +926,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Compute complex onset detection function
         let onset_function = self.onset_detection_function_complex(config)?;
@@ -931,7 +950,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Compute complex CQT spectrogram
         let cqt_spectrogram =
@@ -961,7 +980,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Compute complex CQT spectrogram
         let cqt_spectrogram =
@@ -987,7 +1006,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Compute complex CQT spectrogram
         let cqt_spectrogram =
@@ -1035,13 +1054,13 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Compute CQT spectrogram
         let cqt_spectrogram =
             self.cqt_spectrogram(&config.cqt_config, config.hop_size, config.window_size)?;
 
-        let (num_bins, num_frames) = cqt_spectrogram.dim();
+        let (_num_bins, num_frames) = cqt_spectrogram.dim();
 
         if num_frames < 2 {
             return Ok(vec![0.0]); // Need at least 2 frames for flux calculation
@@ -1091,7 +1110,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Compute spectral flux
         let flux = self.spectral_flux(&config.cqt_config, config.hop_size, config.flux_method)?;
@@ -1111,7 +1130,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Compute spectral flux
         let flux = self.spectral_flux(&config.cqt_config, config.hop_size, config.flux_method)?;
@@ -1123,36 +1142,27 @@ where
     }
 
     // Placeholder implementations for methods not yet implemented
-    fn detect_onsets(&self, config: &super::types::OnsetConfig) -> AudioSampleResult<Vec<f64>> {
-        // This will be implemented in the onset_detection.rs module
-        // For now, return an error
-        Err(AudioSampleError::InvalidParameter(
-            "detect_onsets not implemented yet".to_string(),
-        ))
+    fn detect_onsets(&self, _config: &OnsetConfig) -> AudioSampleResult<Vec<f64>> {
+        // TODO!
+        todo!()
     }
 
     fn onset_detection_function(
         &self,
-        config: &super::types::OnsetConfig,
+        _config: &OnsetConfig,
     ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
-        // This will be implemented in the onset_detection.rs module
-        // For now, return an error
-        Err(AudioSampleError::InvalidParameter(
-            "onset_detection_function not implemented yet".to_string(),
-        ))
+        // TODO!
+        todo!()
     }
 
     fn spectral_flux(
         &self,
-        config: &super::types::CqtConfig,
-        hop_size: usize,
-        method: super::types::SpectralFluxMethod,
+        _config: &CqtConfig,
+        _hop_size: usize,
+        _method: SpectralFluxMethod,
     ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
-        // This will be implemented in the onset_detection.rs module
-        // For now, return an error
-        Err(AudioSampleError::InvalidParameter(
-            "spectral_flux not implemented yet".to_string(),
-        ))
+        // TODO!
+        todo!()
     }
 }
 
@@ -1168,7 +1178,12 @@ fn normalize_spectrogram(
     match scale {
         SpectrogramScale::Linear => {
             // Normalize to [0, 1] range
-            if let Some(&max_val) = spectrogram.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
+            if let Some(&max_val) = spectrogram.iter().max_by(|a, b| {
+                match a.partial_cmp(b) {
+                    Some(order) => order,
+                    None => std::cmp::Ordering::Equal, // Handle NaN gracefully
+                }
+            }) {
                 if max_val > 0.0 {
                     *spectrogram /= max_val;
                 }
@@ -1177,7 +1192,7 @@ fn normalize_spectrogram(
         SpectrogramScale::Log => {
             // Log scale is already in dB, just ensure reasonable range
             // Clamp to [-100, +50] dB range
-            spectrogram.mapv_inplace(|x| x.max(-100.0).min(50.0));
+            spectrogram.mapv_inplace(|x| x.clamp(-100.0, 50.0));
         }
         SpectrogramScale::Mel => {
             // Mel scaling normalization will be implemented in Phase 3
@@ -1367,10 +1382,14 @@ fn apply_gammatone_filter(signal: &[f64], filter_coeffs: &[f64]) -> Vec<f64> {
     // Use circular convolution to maintain output length
     let mut output = vec![0.0; signal_len];
 
-    for i in 0..signal_len {
-        for j in 0..filter_len.min(signal_len) {
+    for (i, out) in output.iter_mut().enumerate().take(signal_len) {
+        for (j, coeff) in filter_coeffs
+            .iter()
+            .enumerate()
+            .take(filter_len.min(signal_len))
+        {
             let signal_idx = (i + signal_len - j) % signal_len;
-            output[i] += signal[signal_idx] * filter_coeffs[j];
+            *out += signal[signal_idx] * coeff;
         }
     }
 
@@ -1525,11 +1544,11 @@ fn compute_dct_type2(input: &[f64], n_mfcc: usize) -> Vec<f64> {
     let n_input = input.len();
     let mut dct_output = vec![0.0; n_mfcc];
 
-    for k in 0..n_mfcc {
+    for (k, dct_out) in dct_output.iter_mut().enumerate().take(n_mfcc) {
         let mut sum = 0.0;
-        for n in 0..n_input {
+        for (n, inp) in input.iter().enumerate().take(n_input) {
             let cos_term = (PI * k as f64 * (2.0 * n as f64 + 1.0) / (2.0 * n_input as f64)).cos();
-            sum += input[n] * cos_term;
+            sum += inp * cos_term;
         }
 
         // Apply normalization factor
@@ -1539,7 +1558,7 @@ fn compute_dct_type2(input: &[f64], n_mfcc: usize) -> Vec<f64> {
             (2.0 / n_input as f64).sqrt()
         };
 
-        dct_output[k] = sum * norm_factor;
+        *dct_out = sum * norm_factor;
     }
 
     dct_output
@@ -1553,8 +1572,6 @@ fn compute_dct_type2(input: &[f64], n_mfcc: usize) -> Vec<f64> {
 struct CqtKernel {
     /// Complex kernel coefficients for each frequency bin
     kernels: Vec<Vec<Complex<f64>>>,
-    /// Frequency bins (center frequencies)
-    frequencies: Vec<f64>,
     /// Kernel lengths for each frequency bin
     kernel_lengths: Vec<usize>,
     /// FFT size used for convolution
@@ -1566,7 +1583,7 @@ struct CqtKernel {
 /// Creates a bank of complex exponential kernels with logarithmically spaced
 /// center frequencies and constant Q factor.
 fn generate_cqt_kernel(
-    config: &super::types::CqtConfig,
+    config: &CqtConfig,
     sample_rate: f64,
     signal_length: usize,
 ) -> AudioSampleResult<CqtKernel> {
@@ -1616,7 +1633,6 @@ fn generate_cqt_kernel(
 
     Ok(CqtKernel {
         kernels,
-        frequencies,
         kernel_lengths,
         fft_size,
     })
@@ -1630,15 +1646,15 @@ fn generate_cqt_kernel_bin(
     _bandwidth: f64,
     kernel_length: usize,
     sample_rate: f64,
-    window_type: &super::types::WindowType,
+    window_type: &WindowType,
 ) -> AudioSampleResult<Vec<Complex<f64>>> {
     let mut kernel = Vec::with_capacity(kernel_length);
 
     // Generate window coefficients
-    let window = generate_window(kernel_length, window_type.clone());
+    let window = generate_window(kernel_length, *window_type);
 
     // Generate complex exponential kernel
-    for n in 0..kernel_length {
+    for (n, w) in window.iter().enumerate().take(kernel_length) {
         let t = n as f64 / sample_rate;
         let phase = 2.0 * PI * center_freq * t;
 
@@ -1646,7 +1662,7 @@ fn generate_cqt_kernel_bin(
         let exponential = Complex::new(phase.cos(), phase.sin());
 
         // Apply window function
-        let windowed = exponential * window[n];
+        let windowed = exponential * w;
 
         kernel.push(windowed);
     }
@@ -1657,13 +1673,13 @@ fn generate_cqt_kernel_bin(
 /// Applies sparsity threshold to reduce kernel size.
 ///
 /// Sets coefficients below the threshold to zero to create sparse kernels.
-fn apply_sparsity_threshold(kernel: &mut Vec<Complex<f64>>, threshold: f64) {
+fn apply_sparsity_threshold(kernel: &mut [Complex<f64>], threshold: f64) {
     if threshold <= 0.0 {
         return;
     }
 
     // Find maximum magnitude in kernel
-    let max_magnitude = kernel.iter().map(|&c| c.norm()).fold(0.0, |a, b| a.max(b));
+    let max_magnitude: f64 = kernel.iter().map(|&c| c.norm()).fold(0.0, |a, b| a.max(b));
 
     if max_magnitude == 0.0 {
         return;
@@ -1680,7 +1696,7 @@ fn apply_sparsity_threshold(kernel: &mut Vec<Complex<f64>>, threshold: f64) {
 }
 
 /// Normalizes a kernel to unit energy.
-fn normalize_kernel(kernel: &mut Vec<Complex<f64>>) {
+fn normalize_kernel(kernel: &mut [Complex<f64>]) {
     let energy: f64 = kernel.iter().map(|c| c.norm_sqr()).sum();
 
     if energy > 0.0 {
@@ -1951,8 +1967,8 @@ fn combine_magnitude_phase_features(
 /// Normalizes the onset detection function to the range [0, 1].
 ///
 /// The function is normalized by dividing by its maximum value.
-fn normalize_onset_function(onset_function: &mut Vec<f64>) {
-    let max_value = onset_function.iter().fold(0.0, |a, &b| a.max(b));
+fn normalize_onset_function(onset_function: &mut [f64]) {
+    let max_value: f64 = onset_function.iter().fold(0.0, |a, &b| a.max(b));
 
     eprintln!("normalize_onset_function: max_value before = {}", max_value);
 
@@ -1960,7 +1976,7 @@ fn normalize_onset_function(onset_function: &mut Vec<f64>) {
         for value in onset_function.iter_mut() {
             *value /= max_value;
         }
-        let new_max = onset_function.iter().fold(0.0, |a, &b| a.max(b));
+        let new_max: f64 = onset_function.iter().fold(0.0, |a, &b| a.max(b));
         eprintln!("normalize_onset_function: max_value after = {}", new_max);
     }
 }
@@ -1971,7 +1987,7 @@ fn normalize_onset_function(onset_function: &mut Vec<f64>) {
 /// identify the most likely onset locations.
 fn pick_onset_peaks(
     onset_function: &[f64],
-    config: &crate::operations::PeakPickingConfig,
+    config: &PeakPickingConfig,
     sample_rate: f64,
 ) -> AudioSampleResult<Vec<f64>> {
     if onset_function.is_empty() {
@@ -1994,7 +2010,7 @@ fn pick_onset_peaks(
 /// Applies Gaussian smoothing to a signal using a specified standard deviation.
 ///
 /// The smoothing helps reduce noise and spurious peaks in the onset detection function.
-fn gaussian_smooth(signal: &[f64], sigma: f64) -> Vec<f64> {
+pub fn gaussian_smooth(signal: &[f64], sigma: f64) -> Vec<f64> {
     if sigma <= 0.0 {
         return signal.to_vec();
     }
@@ -2021,16 +2037,15 @@ fn gaussian_smooth(signal: &[f64], sigma: f64) -> Vec<f64> {
     // Apply convolution
     let mut smoothed = vec![0.0; signal.len()];
 
-    for i in 0..signal.len() {
+    for (i, sig) in signal.iter().enumerate().take(kernel_size) {
         let mut sum = 0.0;
         let mut weight_sum = 0.0;
 
-        for j in 0..kernel_size {
+        for (j, &weight) in kernel.iter().enumerate() {
             let signal_idx = i as isize - kernel_radius as isize + j as isize;
 
             if signal_idx >= 0 && signal_idx < signal.len() as isize {
-                let weight = kernel[j];
-                sum += signal[signal_idx as usize] * weight;
+                sum += sig * weight;
                 weight_sum += weight;
             }
         }
@@ -2049,7 +2064,7 @@ fn gaussian_smooth(signal: &[f64], sigma: f64) -> Vec<f64> {
 ///
 /// Standard spectral flux: SF[n] = Σ(|X[k,n]| - |X[k,n-1]|)
 /// Measures the sum of magnitude differences for all frequency bins.
-fn compute_standard_spectral_flux(
+pub fn compute_standard_spectral_flux(
     cqt_spectrogram: &Array2<Complex<f64>>,
 ) -> AudioSampleResult<Vec<f64>> {
     let (num_bins, num_frames) = cqt_spectrogram.dim();
@@ -2208,7 +2223,7 @@ fn compute_complex_spectral_flux(
 /// Applies low-pass smoothing to spectral flux values.
 ///
 /// Uses a simple Gaussian kernel for smoothing to reduce noise.
-fn apply_lowpass_smoothing(
+pub fn apply_lowpass_smoothing(
     flux: &[f64],
     cutoff_hz: f64,
     sample_rate: f64,
@@ -2231,10 +2246,10 @@ fn apply_lowpass_smoothing(
     let sigma = kernel_radius as f64 / 3.0; // 99.7% of values within radius
     let mut kernel_sum = 0.0;
 
-    for i in 0..kernel_size {
+    for (i, k) in kernel.iter_mut().enumerate().take(kernel_size) {
         let x = i as f64 - kernel_radius as f64;
-        let weight = (-0.5 * (x / sigma).powi(2)).exp();
-        kernel[i] = weight;
+        let weight: f64 = (-0.5 * (x / sigma).powi(2)).exp();
+        *k = weight;
         kernel_sum += weight;
     }
 
@@ -2246,16 +2261,16 @@ fn apply_lowpass_smoothing(
     // Apply convolution
     let mut smoothed = vec![0.0; flux.len()];
 
-    for i in 0..flux.len() {
+    for (i, flx) in flux.iter().enumerate().take(flux.len()) {
         let mut sum = 0.0;
         let mut weight_sum = 0.0;
 
-        for j in 0..kernel_size {
+        for (j, kern) in kernel.iter().enumerate().take(kernel_size) {
             let flux_idx = i as isize - kernel_radius as isize + j as isize;
 
             if flux_idx >= 0 && flux_idx < flux.len() as isize {
-                let weight = kernel[j];
-                sum += flux[flux_idx as usize] * weight;
+                let weight = kern;
+                sum += flx * weight;
                 weight_sum += weight;
             }
         }
@@ -2271,13 +2286,13 @@ fn apply_lowpass_smoothing(
 }
 
 /// Normalizes spectral flux values to [0, 1] range.
-fn normalize_flux(flux: &[f64]) -> Vec<f64> {
+pub fn normalize_flux(flux: &[f64]) -> Vec<f64> {
     if flux.is_empty() {
         return vec![];
     }
 
-    let max_val = flux.iter().fold(0.0, |a, &b| a.max(b));
-    let min_val = flux.iter().fold(0.0, |a, &b| a.min(b));
+    let max_val: f64 = flux.iter().fold(0.0, |a, b| a.max(*b));
+    let min_val: f64 = flux.iter().fold(0.0, |a, b| a.min(*b));
     let range = max_val - min_val;
 
     if range == 0.0 {
@@ -2288,9 +2303,9 @@ fn normalize_flux(flux: &[f64]) -> Vec<f64> {
 }
 
 /// Detects onsets from spectral flux using peak detection.
-fn detect_onsets_from_flux(
+pub fn detect_onsets_from_flux(
     flux: &[f64],
-    config: &super::types::SpectralFluxConfig,
+    config: &SpectralFluxConfig,
     sample_rate: f64,
 ) -> AudioSampleResult<Vec<f64>> {
     if flux.is_empty() {
@@ -2298,7 +2313,7 @@ fn detect_onsets_from_flux(
     }
 
     // Find maximum flux value for threshold calculation
-    let max_flux = flux.iter().fold(0.0, |a, &b| a.max(b));
+    let max_flux: f64 = flux.iter().fold(0.0, |a, &b| a.max(b));
     let threshold = max_flux * config.peak_picking.adaptive_threshold.delta;
 
     // Calculate minimum interval in frames
@@ -2882,7 +2897,7 @@ mod tests {
         // Check that filters are roughly triangular (have a peak)
         for filter_idx in 0..n_filters {
             let filter_values: Vec<f64> = filter_bank.row(filter_idx).to_vec();
-            let max_val = filter_values.iter().fold(0.0, |a, &b| a.max(b));
+            let max_val: f64 = filter_values.iter().fold(0.0, |a, &b| a.max(b));
             assert!(max_val > 0.0, "Filter {} should have a peak", filter_idx);
         }
     }
@@ -2977,7 +2992,7 @@ mod tests {
 
         // For a pure sine wave, expect energy concentrated in specific bins
         let magnitudes: Vec<f64> = cqt_matrix.column(0).iter().map(|c| c.norm()).collect();
-        let max_magnitude = magnitudes.iter().fold(0.0, |a, &b| a.max(b));
+        let max_magnitude: f64 = magnitudes.iter().fold(0.0, |a, &b| a.max(b));
         let max_index = magnitudes.iter().position(|&x| x == max_magnitude).unwrap();
 
         // The bin with maximum energy should correspond roughly to 440 Hz
@@ -3185,13 +3200,7 @@ mod tests {
 
         // Check kernel properties
         assert!(kernel.kernels.len() > 0);
-        assert_eq!(kernel.kernels.len(), kernel.frequencies.len());
         assert_eq!(kernel.kernels.len(), kernel.kernel_lengths.len());
-
-        // Check that frequencies are monotonically increasing
-        for i in 1..kernel.frequencies.len() {
-            assert!(kernel.frequencies[i] > kernel.frequencies[i - 1]);
-        }
 
         // Check that kernel lengths are reasonable
         for &length in &kernel.kernel_lengths {
@@ -3486,7 +3495,7 @@ mod tests {
 
         // If normalization is enabled, max value should be 1.0 (or close to it)
         if config.peak_picking.normalize_onset_strength {
-            let max_value = onset_function.iter().fold(0.0, |a, &b| a.max(b));
+            let max_value: f64 = onset_function.iter().fold(0.0, |a, &b| a.max(b));
 
             // The normalization may not be working correctly in the complex onset function
             // For now, just check that we have reasonable values
@@ -3538,8 +3547,6 @@ mod tests {
         let result = short_audio.complex_onset_detection(&config);
         assert!(result.is_ok());
         let onset_times = result.unwrap();
-        // Should handle short signals gracefully (may have no onsets)
-        assert!(onset_times.len() >= 0);
 
         // Test with zero signal
         let zero_samples = vec![0.0f32; 1024];

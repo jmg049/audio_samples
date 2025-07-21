@@ -7,8 +7,8 @@
 use super::traits::AudioStatistics;
 use crate::repr::AudioData;
 use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom,
-    CastInto, ConvertTo, I24,
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
 };
 use ndarray::Axis;
 
@@ -19,16 +19,6 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: CastInto<i16>
-        + CastInto<I24>
-        + CastInto<i32>
-        + CastInto<f32>
-        + CastInto<f64>
-        + CastFrom<i16>
-        + CastFrom<I24>
-        + CastFrom<i32>
-        + CastFrom<f32>
-        + CastFrom<f64>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Returns the peak (maximum absolute value) in the audio samples.
@@ -70,8 +60,7 @@ where
 
                 let mean_square = sum_of_squares / arr.len() as f64;
 
-                let rms: f64 = mean_square.cast_into();
-                let rms = rms.sqrt();
+                let rms = mean_square.sqrt();
                 // Convert back to the original type
                 Ok(rms)
             }
@@ -87,8 +76,7 @@ where
 
                 let mean_square = sum_of_squares / arr.len() as f64;
 
-                let rms: f64 = mean_square.cast_into();
-                let rms = rms.sqrt();
+                let rms = mean_square.sqrt();
                 // Convert back to the original type
                 Ok(rms)
             }
@@ -173,8 +161,8 @@ where
 
                 let mut crossings = 0;
                 for i in 1..arr.len() {
-                    let prev = arr[i - 1].convert_to().unwrap_or(0.0);
-                    let curr = arr[i].convert_to().unwrap_or(0.0);
+                    let prev: f64 = arr[i - 1].cast_into();
+                    let curr: f64 = arr[i].cast_into();
 
                     // Check for sign change (zero crossing)
                     if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
@@ -193,8 +181,8 @@ where
                     }
 
                     for i in 1..channel.len() {
-                        let prev = channel[i - 1].convert_to().unwrap_or(0.0);
-                        let curr = channel[i].convert_to().unwrap_or(0.0);
+                        let prev: f64 = channel[i - 1].cast_into();
+                        let curr: f64 = channel[i].cast_into();
 
                         if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
                             total_crossings += 1;
@@ -224,11 +212,11 @@ where
     ///
     /// For efficiency, this uses a simplified correlation computation.
     /// Returns correlation values for each lag offset.
-    fn autocorrelation(&self, max_lag: usize) -> AudioSampleResult<Vec<T>> {
+    fn autocorrelation(&self, max_lag: usize) -> AudioSampleResult<Vec<f64>> {
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.is_empty() || max_lag == 0 {
-                    return Ok(vec![T::default()]);
+                    return Ok(vec![]);
                 }
 
                 let n = arr.len();
@@ -236,7 +224,6 @@ where
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
 
                 // Convert to f64 for precision
-                let signal: Vec<f64> = arr.iter().map(|&x| x.convert_to().unwrap_or(0.0)).collect();
 
                 // Compute autocorrelation for each lag
                 for lag in 0..=effective_max_lag {
@@ -244,12 +231,14 @@ where
                     let count = n - lag;
 
                     for i in 0..count {
-                        correlation += signal[i] * signal[i + lag];
+                        let s_i: f64 = arr[i].cast_into();
+                        let s_i_lag: f64 = arr[i + lag].cast_into();
+                        correlation += s_i * s_i_lag;
                     }
 
                     // Normalize by the number of overlapping samples
                     correlation /= count as f64;
-                    correlations.push(T::convert_from(correlation).unwrap_or_default());
+                    correlations.push(correlation);
                 }
 
                 Ok(correlations)
@@ -257,7 +246,7 @@ where
             AudioData::MultiChannel(arr) => {
                 // For multi-channel, compute autocorrelation on the first channel
                 if arr.is_empty() || max_lag == 0 {
-                    return Ok(vec![T::default()]);
+                    return Ok(vec![]);
                 }
 
                 let first_channel = arr.row(0);
@@ -265,21 +254,18 @@ where
                 let effective_max_lag = max_lag.min(n - 1);
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
 
-                let signal: Vec<f64> = first_channel
-                    .iter()
-                    .map(|&x| x.convert_to().unwrap_or(0.0))
-                    .collect();
-
                 for lag in 0..=effective_max_lag {
                     let mut correlation = 0.0;
                     let count = n - lag;
 
                     for i in 0..count {
-                        correlation += signal[i] * signal[i + lag];
+                        let s_i: f64 = first_channel[i].cast_into();
+                        let s_i_lag: f64 = first_channel[i + lag].cast_into();
+                        correlation += s_i * s_i_lag;
                     }
 
                     correlation /= count as f64;
-                    correlations.push(T::convert_from(correlation).unwrap_or_default());
+                    correlations.push(correlation);
                 }
 
                 Ok(correlations)
@@ -290,7 +276,7 @@ where
     /// Computes cross-correlation with another audio signal.
     ///
     /// Signals must have the same number of channels for meaningful correlation.
-    fn cross_correlation(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<T>> {
+    fn cross_correlation(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<f64>> {
         // Verify compatible signals
         if self.channels() != other.channels() {
             return Err(crate::AudioSampleError::ConversionError(
@@ -304,7 +290,7 @@ where
         match (&self.data, &other.data) {
             (AudioData::Mono(arr1), AudioData::Mono(arr2)) => {
                 if arr1.is_empty() || arr2.is_empty() || max_lag == 0 {
-                    return Ok(vec![T::default()]);
+                    return Ok(vec![]);
                 }
 
                 let n1 = arr1.len();
@@ -312,26 +298,19 @@ where
                 let effective_max_lag = max_lag.min(n1.min(n2) - 1);
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
 
-                // Convert to f64 for precision
-                let signal1: Vec<f64> = arr1
-                    .iter()
-                    .map(|&x| x.convert_to().unwrap_or(0.0))
-                    .collect();
-                let signal2: Vec<f64> = arr2
-                    .iter()
-                    .map(|&x| x.convert_to().unwrap_or(0.0))
-                    .collect();
-
                 for lag in 0..=effective_max_lag {
                     let mut correlation = 0.0;
+
                     let count = n1.min(n2 - lag);
 
                     for i in 0..count {
-                        correlation += signal1[i] * signal2[i + lag];
+                        let s1: f64 = arr1[i].cast_into();
+                        let s2: f64 = arr2[i + lag].cast_into();
+                        correlation += s1 * s2;
                     }
 
                     correlation /= count as f64;
-                    correlations.push(T::convert_from(correlation).unwrap_or_default());
+                    correlations.push(correlation);
                 }
 
                 Ok(correlations)
@@ -342,7 +321,7 @@ where
                 let ch2 = arr2.row(0);
 
                 if ch1.is_empty() || ch2.is_empty() || max_lag == 0 {
-                    return Ok(vec![T::default()]);
+                    return Ok(vec![]);
                 }
 
                 let n1 = ch1.len();
@@ -350,21 +329,18 @@ where
                 let effective_max_lag = max_lag.min(n1.min(n2) - 1);
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
 
-                let signal1: Vec<f64> =
-                    ch1.iter().map(|&x| x.convert_to().unwrap_or(0.0)).collect();
-                let signal2: Vec<f64> =
-                    ch2.iter().map(|&x| x.convert_to().unwrap_or(0.0)).collect();
-
                 for lag in 0..=effective_max_lag {
                     let mut correlation = 0.0;
                     let count = n1.min(n2 - lag);
 
                     for i in 0..count {
-                        correlation += signal1[i] * signal2[i + lag];
+                        let s1: f64 = ch1[i].cast_into();
+                        let s2: f64 = ch2[i + lag].cast_into();
+                        correlation += s1 * s2;
                     }
 
                     correlation /= count as f64;
-                    correlations.push(T::convert_from(correlation).unwrap_or_default());
+                    correlations.push(correlation);
                 }
 
                 Ok(correlations)
@@ -386,24 +362,16 @@ where
     /// Placeholder implementation - requires FFT functionality.
     /// Returns an error indicating FFT dependencies are needed.
     fn spectral_centroid(&self) -> AudioSampleResult<f64> {
-        Err(crate::AudioSampleError::ConversionError(
-            "spectral_centroid".to_string(),
-            "FFT".to_string(),
-            "implemented".to_string(),
-            "Spectral centroid requires FFT implementation - add num-complex and rustfft dependencies".to_string(),
-        ))
+        // TODO!
+        todo!()
     }
 
     /// Computes spectral rolloff frequency.
     ///
     /// Placeholder implementation - requires FFT functionality.
     fn spectral_rolloff(&self, _rolloff_percent: f64) -> AudioSampleResult<f64> {
-        Err(crate::AudioSampleError::ConversionError(
-            "spectral_rolloff".to_string(),
-            "FFT".to_string(),
-            "implemented".to_string(),
-            "Spectral rolloff requires FFT implementation - add num-complex and rustfft dependencies".to_string(),
-        ))
+        // TODO!
+        todo!()
     }
 }
 

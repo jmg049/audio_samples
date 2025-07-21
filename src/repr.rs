@@ -2,7 +2,7 @@
 //! In essence, an enhanced wrapper around `ndarray` to represent audio samples and their operations.
 use ndarray::{Array1, Array2};
 
-use crate::{AudioSample, ChannelLayout};
+use crate::{AudioSample, AudioSampleError, ChannelLayout};
 
 /// Internal representation of audio data
 #[derive(Debug, Clone, PartialEq)]
@@ -22,7 +22,7 @@ pub struct AudioSamples<T: AudioSample> {
 
 impl<T: AudioSample> AudioSamples<T> {
     /// Creates a new AudioSamples with the given data and sample rate
-    pub fn new(data: AudioData<T>, sample_rate: u32) -> Self {
+    pub const fn new(data: AudioData<T>, sample_rate: u32) -> Self {
         Self {
             data,
             sample_rate,
@@ -31,7 +31,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Creates a new mono AudioSamples with the given data and sample rate
-    pub fn new_mono(data: Array1<T>, sample_rate: u32) -> Self {
+    pub const fn new_mono(data: Array1<T>, sample_rate: u32) -> Self {
         Self {
             data: AudioData::Mono(data),
             sample_rate,
@@ -41,7 +41,7 @@ impl<T: AudioSample> AudioSamples<T> {
 
     /// Creates a new multi-channel AudioSamples with the given data and sample rate
     /// The data should be arranged with each row representing a channel
-    pub fn new_multi_channel(data: Array2<T>, sample_rate: u32) -> Self {
+    pub const fn new_multi_channel(data: Array2<T>, sample_rate: u32) -> Self {
         Self {
             data: AudioData::MultiChannel(data),
             sample_rate,
@@ -68,7 +68,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns the sample rate in Hz
-    pub fn sample_rate(&self) -> u32 {
+    pub const fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
@@ -99,7 +99,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns the number of bytes per sample for type T
-    pub fn bytes_per_sample(&self) -> usize {
+    pub const fn bytes_per_sample(&self) -> usize {
         std::mem::size_of::<T>()
     }
 
@@ -108,17 +108,17 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns the channel layout
-    pub fn layout(&self) -> ChannelLayout {
+    pub const fn layout(&self) -> ChannelLayout {
         self.layout
     }
 
     /// Returns true if this is mono audio
-    pub fn is_mono(&self) -> bool {
+    pub const fn is_mono(&self) -> bool {
         matches!(self.data, AudioData::Mono(_))
     }
 
     /// Returns true if this is multi-channel audio
-    pub fn is_multi_channel(&self) -> bool {
+    pub const fn is_multi_channel(&self) -> bool {
         matches!(self.data, AudioData::MultiChannel(_))
     }
 
@@ -194,7 +194,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns a reference to the underlying mono array, if this is mono audio
-    pub fn as_mono(&self) -> Option<&Array1<T>> {
+    pub const fn as_mono(&self) -> Option<&Array1<T>> {
         match &self.data {
             AudioData::Mono(arr) => Some(arr),
             AudioData::MultiChannel(_) => None,
@@ -202,7 +202,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns a reference to the underlying multi-channel array, if this is multi-channel audio
-    pub fn as_multi_channel(&self) -> Option<&Array2<T>> {
+    pub const fn as_multi_channel(&self) -> Option<&Array2<T>> {
         match &self.data {
             AudioData::Mono(_) => None,
             AudioData::MultiChannel(arr) => Some(arr),
@@ -210,7 +210,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns a mutable reference to the underlying mono array, if this is mono audio
-    pub fn as_mono_mut(&mut self) -> Option<&mut Array1<T>> {
+    pub const fn as_mono_mut(&mut self) -> Option<&mut Array1<T>> {
         match &mut self.data {
             AudioData::Mono(arr) => Some(arr),
             AudioData::MultiChannel(_) => None,
@@ -218,7 +218,7 @@ impl<T: AudioSample> AudioSamples<T> {
     }
 
     /// Returns a mutable reference to the underlying multi-channel array, if this is multi-channel audio
-    pub fn as_multi_channel_mut(&mut self) -> Option<&mut Array2<T>> {
+    pub const fn as_multi_channel_mut(&mut self) -> Option<&mut Array2<T>> {
         match &mut self.data {
             AudioData::Mono(_) => None,
             AudioData::MultiChannel(arr) => Some(arr),
@@ -305,7 +305,9 @@ impl<T: AudioSample> AudioSamples<T> {
         match &mut self.data {
             AudioData::Mono(arr) => {
                 let mut result = Vec::new();
-                let data = arr.as_slice().unwrap();
+                let data = arr.as_slice().ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Mono samples must be contiguous".to_string(),
+                })?;
 
                 // Process overlapping windows
                 let mut pos = 0;
@@ -341,13 +343,18 @@ impl<T: AudioSample> AudioSamples<T> {
                 *arr = Array1::from_vec(result);
             }
             AudioData::MultiChannel(arr) => {
-                let (channels, samples) = arr.dim();
+                let (channels, _) = arr.dim();
                 let mut result = Vec::new();
 
                 // Process each channel separately
                 for ch in 0..channels {
                     let channel_data = arr.row(ch).to_owned();
-                    let data = channel_data.as_slice().unwrap();
+                    let data =
+                        channel_data
+                            .as_slice()
+                            .ok_or(AudioSampleError::ArrayLayoutError {
+                                message: "Multi-channel samples must be contiguous".to_string(),
+                            })?;
 
                     let mut channel_result = Vec::new();
                     let mut pos = 0;
@@ -427,12 +434,20 @@ impl<T: AudioSample> AudioSamples<T> {
     {
         match &mut self.data {
             AudioData::Mono(arr) => {
-                let mut_slice = arr.as_slice_mut().unwrap();
+                let mut_slice = arr
+                    .as_slice_mut()
+                    .ok_or(AudioSampleError::ArrayLayoutError {
+                        message: "Mono samples must be contiguous".to_string(),
+                    })?;
                 f(0, mut_slice)?;
             }
             AudioData::MultiChannel(arr) => {
                 for (ch, mut row) in arr.axis_iter_mut(ndarray::Axis(0)).enumerate() {
-                    let mut_slice = row.as_slice_mut().unwrap();
+                    let mut_slice =
+                        row.as_slice_mut()
+                            .ok_or(AudioSampleError::ArrayLayoutError {
+                                message: "Multi-channel samples must be contiguous".to_string(),
+                            })?;
                     f(ch, mut_slice)?;
                 }
             }
@@ -546,7 +561,9 @@ impl<T: AudioSample> AudioSamples<T> {
         match &mut self.data {
             AudioData::Mono(arr) => {
                 let mut result = Vec::new();
-                let data = arr.as_slice().unwrap();
+                let data = arr.as_slice().ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Mono samples must be contiguous".to_string(),
+                })?;
 
                 // Process chunks
                 for chunk in data.chunks(chunk_size) {
@@ -557,13 +574,18 @@ impl<T: AudioSample> AudioSamples<T> {
                 *arr = Array1::from_vec(result);
             }
             AudioData::MultiChannel(arr) => {
-                let (channels, samples) = arr.dim();
+                let (channels, _) = arr.dim();
                 let mut result = Vec::new();
 
                 // Process each channel separately
                 for ch in 0..channels {
                     let channel_data = arr.row(ch).to_owned();
-                    let data = channel_data.as_slice().unwrap();
+                    let data =
+                        channel_data
+                            .as_slice()
+                            .ok_or(AudioSampleError::ArrayLayoutError {
+                                message: "Multi-channel samples must be contiguous".to_string(),
+                            })?;
 
                     let mut channel_result = Vec::new();
                     for chunk in data.chunks(chunk_size) {

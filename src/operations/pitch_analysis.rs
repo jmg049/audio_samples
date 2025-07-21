@@ -6,7 +6,10 @@
 use super::traits::AudioPitchAnalysis;
 use super::types::PitchDetectionMethod;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 use ndarray::Array1;
 
 impl<T: AudioSample> AudioPitchAnalysis<T> for AudioSamples<T>
@@ -16,7 +19,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: ConvertTo<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     fn detect_pitch_yin(
         &self,
@@ -24,7 +27,7 @@ where
         min_frequency: f64,
         max_frequency: f64,
     ) -> AudioSampleResult<Option<f64>> {
-        if threshold < 0.0 || threshold > 1.0 {
+        if !(0.0..=1.0).contains(&threshold) {
             return Err(AudioSampleError::InvalidParameter(
                 "Threshold must be between 0.0 and 1.0".to_string(),
             ));
@@ -109,17 +112,13 @@ where
             let time_seconds = start as f64 / sample_rate;
 
             // Create temporary AudioSamples for this window
-            let window_data: Vec<T> = window
-                .iter()
-                .map(|&x| {
-                    // Convert f64 back to T using the existing conversion system
-                    x.convert_to().unwrap_or_else(|_| {
-                        // Fallback to zero value
-                        let zero_f64 = 0.0f64;
-                        zero_f64.convert_to().unwrap()
-                    })
-                })
-                .collect();
+            let mut window_data = Vec::with_capacity(window.len());
+
+            for x in window {
+                // Convert f64 to T using the existing conversion system
+                window_data.push(x.convert_to()?);
+            }
+
             let window_audio =
                 AudioSamples::new_mono(Array1::from(window_data), self.sample_rate());
 
@@ -195,7 +194,7 @@ where
             ));
         }
 
-        if tolerance < 0.0 || tolerance > 1.0 {
+        if !(0.0..=1.0).contains(&tolerance) {
             return Err(AudioSampleError::InvalidParameter(
                 "Tolerance must be between 0.0 and 1.0".to_string(),
             ));
@@ -282,8 +281,15 @@ where
         let (key_index, &max_energy) = chroma_sum
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap();
+            .max_by(|a, b| {
+                match a.1.partial_cmp(b.1) {
+                    Some(order) => order,
+                    None => std::cmp::Ordering::Equal, // Handle NaN cases
+                }
+            })
+            .ok_or(AudioSampleError::ArrayLayoutError {
+                message: "Failed to find key with max energy".to_string(),
+            })?;
 
         // Calculate confidence as the ratio of max energy to total energy
         let total_energy: f64 = chroma_sum.iter().sum();
@@ -301,7 +307,7 @@ where
 ///
 /// YIN uses a difference function and cumulative mean normalized difference
 /// to find the most likely fundamental period in the signal.
-fn yin_pitch_detection(
+pub fn yin_pitch_detection(
     samples: &[f64],
     min_tau: usize,
     max_tau: usize,
@@ -342,12 +348,12 @@ fn yin_pitch_detection(
             let mut min_val = cmnd[tau];
 
             // Search in a small neighborhood
-            let start = (tau.saturating_sub(5)).max(min_tau);
+            let start = tau.saturating_sub(5).max(min_tau);
             let end = (tau + 5).min(max_tau);
 
-            for t in start..=end {
-                if cmnd[t] < min_val {
-                    min_val = cmnd[t];
+            for (t, &val) in cmnd.iter().enumerate().skip(start).take(end - start + 1) {
+                if val < min_val {
+                    min_val = val;
                     min_tau = t;
                 }
             }
@@ -447,7 +453,12 @@ fn compute_chroma(samples: &[f64], sample_rate: f64) -> AudioSampleResult<Vec<f6
 
 impl<T: AudioSample> AudioSamples<T>
 where
-    T: ConvertTo<f64>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Helper method to convert to mono f64 samples for processing.
     pub fn to_mono_samples_f64(&self) -> AudioSampleResult<Vec<f64>> {
@@ -464,8 +475,9 @@ where
 
                 for channel in 0..num_channels {
                     for sample in 0..num_samples {
-                        mono_samples[sample] +=
-                            samples[[channel, sample]].convert_to().unwrap_or(0.0);
+                        let x = samples[[channel, sample]];
+                        let x: f64 = x.convert_to()?;
+                        mono_samples[sample] += x;
                     }
                 }
 

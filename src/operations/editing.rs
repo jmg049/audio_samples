@@ -7,7 +7,10 @@
 use super::traits::AudioEditing;
 use super::types::FadeCurve;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 use ndarray::{Array1, Array2, Axis, concatenate, s};
 
 /// Helper function to convert seconds to samples
@@ -62,6 +65,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Reverses the order of audio samples.
     fn reverse(&self) -> Self
@@ -92,12 +96,24 @@ where
             AudioData::Mono(arr) => {
                 // Reverse the 1D array in place
                 arr.swap_axes(0, 0); // No-op, just to indicate in-place operation
-                arr.as_slice_mut().unwrap().reverse();
+                return {
+                    arr.as_slice_mut()
+                        .ok_or(AudioSampleError::ArrayLayoutError {
+                            message: "Mono samples must be contiguous".to_string(),
+                        })?
+                        .reverse();
+                    Ok(())
+                };
             }
             AudioData::MultiChannel(arr) => {
                 // Reverse along the time axis (axis 1)
                 for mut channel in arr.axis_iter_mut(Axis(0)) {
-                    channel.as_slice_mut().unwrap().reverse();
+                    channel
+                        .as_slice_mut()
+                        .ok_or(AudioSampleError::ArrayLayoutError {
+                            message: "Multi-channel samples must be contiguous".to_string(),
+                        })?
+                        .reverse();
                 }
             }
         }
@@ -257,16 +273,13 @@ where
 
         match &first.data {
             AudioData::Mono(_) => {
-                let arrays: Vec<_> = segments
-                    .iter()
-                    .map(|s| {
-                        if let AudioData::Mono(arr) = &s.data {
-                            arr.view()
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                    .collect();
+                let mut arrays: Vec<_> = Vec::with_capacity(segments.len());
+                for segment in segments {
+                    let segment = segment.as_mono().ok_or(AudioSampleError::InvalidInput {
+                        msg: "Expected mono audio data".to_string(),
+                    })?;
+                    arrays.push(segment.view());
+                }
 
                 let concatenated = concatenate(Axis(0), &arrays).map_err(|e| {
                     AudioSampleError::InvalidParameter(format!("Concatenation failed: {}", e))
@@ -275,16 +288,17 @@ where
                 Ok(AudioSamples::new_mono(concatenated, first.sample_rate()))
             }
             AudioData::MultiChannel(_) => {
-                let arrays: Vec<_> = segments
-                    .iter()
-                    .map(|s| {
-                        if let AudioData::MultiChannel(arr) = &s.data {
-                            arr.view()
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                    .collect();
+                let mut arrays: Vec<_> = Vec::with_capacity(segments.len());
+
+                for segment in segments {
+                    let segment =
+                        segment
+                            .as_multi_channel()
+                            .ok_or(AudioSampleError::InvalidInput {
+                                msg: "Expected multi-channel audio data".to_string(),
+                            })?;
+                    arrays.push(segment.view());
+                }
 
                 let concatenated = concatenate(Axis(1), &arrays).map_err(|e| {
                     AudioSampleError::InvalidParameter(format!("Concatenation failed: {}", e))
@@ -348,16 +362,14 @@ where
                 if let AudioData::Mono(result_arr) = &mut result.data {
                     // Start with first source * weight
                     if let AudioData::Mono(_first_arr) = &first.data {
-                        let weight =
-                            <f64 as ConvertTo<T>>::convert_to(&mix_weights[0]).unwrap_or(T::zero());
+                        let weight: T = T::convert_from(mix_weights[0])?;
                         result_arr.mapv_inplace(|x| x * weight);
                     }
 
                     // Add remaining sources
                     for (i, source) in sources.iter().skip(1).enumerate() {
                         if let AudioData::Mono(source_arr) = &source.data {
-                            let weight = <f64 as ConvertTo<T>>::convert_to(&mix_weights[i + 1])
-                                .unwrap_or(T::zero());
+                            let weight: T = T::convert_from(mix_weights[i + 1])?;
                             for (r, s) in result_arr.iter_mut().zip(source_arr.iter()) {
                                 *r = *r + *s * weight;
                             }
@@ -371,16 +383,14 @@ where
                 if let AudioData::MultiChannel(result_arr) = &mut result.data {
                     // Start with first source * weight
                     if let AudioData::MultiChannel(_first_arr) = &first.data {
-                        let weight =
-                            <f64 as ConvertTo<T>>::convert_to(&mix_weights[0]).unwrap_or(T::zero());
+                        let weight: T = T::convert_from(mix_weights[0])?;
                         result_arr.mapv_inplace(|x| x * weight);
                     }
 
                     // Add remaining sources
                     for (i, source) in sources.iter().skip(1).enumerate() {
                         if let AudioData::MultiChannel(source_arr) = &source.data {
-                            let weight = <f64 as ConvertTo<T>>::convert_to(&mix_weights[i + 1])
-                                .unwrap_or(T::zero());
+                            let weight: T = T::convert_from(mix_weights[i + 1])?;
                             for (r, s) in result_arr.iter_mut().zip(source_arr.iter()) {
                                 *r = *r + *s * weight;
                             }
@@ -513,62 +523,101 @@ where
     where
         Self: Sized,
     {
-        let threshold = <T as ConvertTo<f32>>::convert_to(&threshold).unwrap_or(0.0f32);
+        let threshold: f32 = threshold.convert_to()?;
         match &self.data {
             AudioData::Mono(arr) => {
                 // Find first non-silent sample
-                let start = arr
-                    .iter()
-                    .position(|&x| <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs() > threshold)
-                    .unwrap_or(0);
+                let mut start = 0;
 
-                // Find last non-silent sample
-                let end = arr
-                    .iter()
-                    .rposition(|&x| {
-                        <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs() > threshold
-                    })
-                    .map(|pos| pos + 1)
-                    .unwrap_or(arr.len());
-
-                if start >= end {
-                    // All samples are below threshold, return minimal audio
-                    let minimal = Array1::from_elem(1, T::zero());
-                    return Ok(AudioSamples::new_mono(minimal, self.sample_rate()));
+                for (idx, sample) in arr.iter().enumerate() {
+                    match sample.convert_to() {
+                        Ok(value) => {
+                            let value: f32 = value;
+                            if value.abs() > threshold {
+                                start = idx; // Include this sample
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            return Err(AudioSampleError::ConversionError(
+                                sample.to_string(),
+                                "T".to_string(),
+                                "f32".to_string(),
+                                "Failed to convert sample to f32".to_string(),
+                            ));
+                        }
+                    }
                 }
 
-                let trimmed = arr.slice(s![start..end]).to_owned();
-                Ok(AudioSamples::new_mono(trimmed, self.sample_rate()))
+                // Find last non-silent sample
+                for (idx, sample) in arr.iter().enumerate().rev() {
+                    match sample.convert_to() {
+                        Ok(value) => {
+                            let value: f32 = value;
+                            if value.abs() > threshold {
+                                return Ok(AudioSamples::new_mono(
+                                    arr.slice(s![start..=idx]).to_owned(),
+                                    self.sample_rate(),
+                                ));
+                            }
+                        }
+                        Err(_) => {
+                            return Err(AudioSampleError::ConversionError(
+                                sample.to_string(),
+                                "T".to_string(),
+                                "f32".to_string(),
+                                "Failed to convert sample to f32".to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                // If we reach here, all samples are below threshold, so return minimal audio
+                Ok(AudioSamples::zeros_mono(arr.len(), self.sample_rate()))
             }
             AudioData::MultiChannel(arr) => {
                 // Find first non-silent frame (any channel above threshold)
-                let start = (0..arr.ncols())
-                    .find(|&col| {
-                        arr.column(col).iter().any(|&x| {
-                            <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs().abs() > threshold
-                        })
-                    })
-                    .unwrap_or(0);
+                let mut start = 0;
 
-                // Find last non-silent frame
-                let end = (0..arr.ncols())
-                    .rev()
-                    .find(|&col| {
-                        arr.column(col).iter().any(|&x| {
-                            <T as ConvertTo<f32>>::convert_to(&x).unwrap().abs().abs() > threshold
-                        })
-                    })
-                    .map(|col| col + 1)
-                    .unwrap_or(arr.ncols());
-
-                if start >= end {
-                    // All samples are below threshold, return minimal audio
-                    let minimal = Array2::from_elem((arr.nrows(), 1), T::zero());
-                    return Ok(AudioSamples::new_multi_channel(minimal, self.sample_rate()));
+                for (idx, col) in arr.axis_iter(Axis(1)).enumerate() {
+                    if col.iter().any(|&x| {
+                        match x.convert_to() {
+                            Ok(value) => {
+                                let value: f32 = value;
+                                value.abs() > threshold
+                            }
+                            Err(_) => false, // If conversion fails, treat as silent
+                        }
+                    }) {
+                        start = idx; // Include this frame
+                        break;
+                    }
                 }
 
-                let trimmed = arr.slice(s![.., start..end]).to_owned();
-                Ok(AudioSamples::new_multi_channel(trimmed, self.sample_rate()))
+                // Find last non-silent frame
+                for (idx, col) in arr.axis_iter(Axis(1)).enumerate().rev() {
+                    if col.iter().any(|&x| {
+                        match x.convert_to() {
+                            Ok(value) => {
+                                let value: f32 = value;
+                                value.abs() > threshold
+                            }
+                            Err(_) => false, // If conversion fails, treat as silent
+                        }
+                    }) {
+                        return Ok(AudioSamples::new_multi_channel(
+                            arr.slice(s![.., start..=idx]).to_owned(),
+                            self.sample_rate(),
+                        ));
+                    }
+                }
+
+                // If we reach here, all frames are below threshold, so return minimal audio
+                Ok(AudioSamples::zeros_multi(
+                    arr.nrows(),
+                    arr.len(),
+                    self.sample_rate(),
+                ))
             }
         }
     }

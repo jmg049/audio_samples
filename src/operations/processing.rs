@@ -8,7 +8,7 @@ use super::types::NormalizationMethod;
 use crate::repr::AudioData;
 use crate::{
     AudioProcessing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    AudioStatistics, AudioTypeConversion, CastFrom, CastInto, ConvertTo, I24,
+    AudioStatistics, AudioTypeConversion, ConvertTo, I24,
 };
 use ndarray::Axis;
 
@@ -20,16 +20,6 @@ where
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
     AudioSamples<T>: AudioTypeConversion<T>,
-    T: CastInto<i16>
-        + CastInto<I24>
-        + CastInto<i32>
-        + CastInto<f32>
-        + CastInto<f64>
-        + CastFrom<i16>
-        + CastFrom<I24>
-        + CastFrom<i32>
-        + CastFrom<f32>
-        + CastFrom<f64>,
 {
     /// Normalizes audio samples using the specified method and range.
     ///
@@ -77,32 +67,33 @@ where
 
             NormalizationMethod::Peak => {
                 // Peak normalization: scale by peak value
-                let peak = self.peak();
+                let peak: T = self.peak();
                 if peak == T::zero() {
                     return Ok(()); // No scaling needed for zero signal
                 }
-                let min_f64: f64 = min.convert_to().unwrap_or(0.0f64).abs();
-                let max_f64: f64 = max.convert_to().unwrap_or(0.0f64).abs();
+                let min: f64 = min.convert_to()?;
+                let min = min.abs();
+                let max: f64 = max.convert_to()?;
+                let max = max.abs();
 
-                let target_peak: f64 = min_f64.max(max_f64);
-                let scale_factor = target_peak / peak.convert_to().unwrap_or(1.0f64);
+                let target_peak: f64 = min.max(max);
+                let peak: f64 = peak.convert_to()?;
+                let scale_factor = target_peak / peak;
 
                 match &mut self.data {
                     AudioData::Mono(arr) => {
-                        arr.mapv_inplace(|x| {
-                            <f64 as ConvertTo<T>>::convert_to(
-                                &(x.convert_to().unwrap_or(0.0) * scale_factor),
-                            )
-                            .unwrap_or(T::zero())
-                        });
+                        for x in arr.iter_mut() {
+                            let _x: f64 = x.convert_to()?;
+                            let _x = _x * scale_factor;
+                            *x = T::convert_from(_x)?;
+                        }
                     }
                     AudioData::MultiChannel(arr) => {
-                        arr.mapv_inplace(|x| {
-                            <f64 as ConvertTo<T>>::convert_to(
-                                &(x.convert_to().unwrap_or(0.0) * scale_factor),
-                            )
-                            .unwrap_or(T::zero())
-                        });
+                        for x in arr.iter_mut() {
+                            let _x: f64 = x.convert_to()?;
+                            let _x = _x * scale_factor;
+                            *x = T::convert_from(_x)?;
+                        }
                     }
                 }
             }
@@ -113,10 +104,18 @@ where
 
                 match &mut self.data {
                     AudioData::Mono(arr) => {
-                        arr.mapv_inplace(|x| x - mean);
+                        arr.mapv_inplace(|x| {
+                            let x: f64 = x.cast_into();
+                            let diff = x - mean;
+                            T::cast_from(diff)
+                        });
                     }
                     AudioData::MultiChannel(arr) => {
-                        arr.mapv_inplace(|x| x - mean);
+                        arr.mapv_inplace(|x| {
+                            let x: f64 = x.cast_into();
+                            let diff = x - mean;
+                            T::cast_from(diff)
+                        });
                     }
                 }
             }
@@ -127,10 +126,18 @@ where
 
                 match &mut self.data {
                     AudioData::Mono(arr) => {
-                        arr.mapv_inplace(|x| x - median);
+                        arr.mapv_inplace(|x| {
+                            let x: f64 = x.cast_into();
+                            let diff = x - median;
+                            T::cast_from(diff)
+                        });
                     }
                     AudioData::MultiChannel(arr) => {
-                        arr.mapv_inplace(|x| x - median);
+                        arr.mapv_inplace(|x| {
+                            let x: f64 = x.cast_into();
+                            let diff = x - median;
+                            T::cast_from(diff)
+                        });
                     }
                 }
             }
@@ -140,23 +147,39 @@ where
                 let mean = self.compute_mean()?;
                 let std_dev = self.compute_std_dev()?;
 
-                if std_dev == T::zero() {
+                if std_dev == 0.0f64 {
                     // All values are the same, just subtract mean
                     match &mut self.data {
                         AudioData::Mono(arr) => {
-                            arr.mapv_inplace(|x| x - mean);
+                            arr.mapv_inplace(|x| {
+                                let x: f64 = x.cast_into();
+                                let diff = x - mean;
+                                T::cast_from(diff)
+                            });
                         }
                         AudioData::MultiChannel(arr) => {
-                            arr.mapv_inplace(|x| x - mean);
+                            arr.mapv_inplace(|x| {
+                                let x: f64 = x.cast_into();
+                                let diff = x - mean;
+                                T::cast_from(diff)
+                            });
                         }
                     }
                 } else {
                     match &mut self.data {
                         AudioData::Mono(arr) => {
-                            arr.mapv_inplace(|x| (x - mean) / std_dev);
+                            arr.mapv_inplace(|x| {
+                                let x: f64 = x.cast_into();
+                                let diff = x - mean;
+                                T::cast_from(diff / std_dev)
+                            });
                         }
                         AudioData::MultiChannel(arr) => {
-                            arr.mapv_inplace(|x| (x - mean) / std_dev);
+                            arr.mapv_inplace(|x| {
+                                let x: f64 = x.cast_into();
+                                let diff = x - mean;
+                                T::cast_from(diff / std_dev)
+                            });
                         }
                     }
                 }
@@ -189,10 +212,18 @@ where
 
         match &mut self.data {
             AudioData::Mono(arr) => {
-                arr.mapv_inplace(|x| x - mean);
+                arr.mapv_inplace(|x| {
+                    let x: f64 = x.cast_into();
+                    let diff = x - mean;
+                    T::cast_from(diff)
+                });
             }
             AudioData::MultiChannel(arr) => {
-                arr.mapv_inplace(|x| x - mean);
+                arr.mapv_inplace(|x| {
+                    let x: f64 = x.cast_into();
+                    let diff = x - mean;
+                    T::cast_from(diff)
+                });
             }
         }
         Ok(())
@@ -527,16 +558,7 @@ where
         &self,
         target_sample_rate: usize,
         quality: super::types::ResamplingQuality,
-    ) -> AudioSampleResult<Self>
-    where
-        Self: Sized,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
-        AudioSamples<T>: AudioTypeConversion<T>,
-    {
+    ) -> AudioSampleResult<Self> {
         crate::resampling::resample(self, target_sample_rate, quality)
     }
 
@@ -545,16 +567,7 @@ where
         &self,
         ratio: f64,
         quality: super::types::ResamplingQuality,
-    ) -> AudioSampleResult<Self>
-    where
-        Self: Sized,
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
-        AudioSamples<T>: AudioTypeConversion<T>,
-    {
+    ) -> AudioSampleResult<Self> {
         crate::resampling::resample_by_ratio(self, ratio, quality)
     }
 }
@@ -570,39 +583,29 @@ where
     AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Computes the mean value of all samples.
-    fn compute_mean(&self) -> AudioSampleResult<T> {
+    fn compute_mean(&self) -> AudioSampleResult<f64> {
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.is_empty() {
-                    return Ok(T::zero());
+                    return Ok(0.0);
                 }
                 let sum = arr.sum();
-                let sum: f64 = sum.convert_to()?; // Convert to f64 for division
-                // Convert the final result back to T.
-                // Under the AudioSamples assumptions, which means we will have already verified that T has a valid value for the given sample type,
-                // T in any case is :
-                // (a) convertible to/from f64 (and any other supported type), and
-                // (b) therefore equivalent, an audio sample represented as f64 is equivalent to the same sample represented as i16 (WITHIN SUPPORTED RANGE)
-                Ok((sum / arr.len() as f64).convert_to()?)
+                let sum: f64 = T::cast_into(sum);
+                Ok(sum / arr.len() as f64)
             }
             AudioData::MultiChannel(arr) => {
                 if arr.is_empty() {
-                    return Ok(T::zero());
+                    return Ok(0.0);
                 }
                 let sum = arr.sum();
-                let sum: f64 = sum.convert_to()?; // Convert to f64 for division
-                // Convert the final result back to T.
-                // Under the AudioSamples assumptions, which means we will have already verified that T has a valid value for the given sample type,
-                // T in any case is :
-                // (a) convertible to/from f64 (and any other supported type), and
-                // (b) therefore equivalent, an audio sample represented as f64 is equivalent to the same sample represented as i16 (WITHIN SUPPORTED RANGE)
-                Ok((sum / arr.len() as f64).convert_to()?)
+                let sum: f64 = T::cast_into(sum);
+                Ok(sum / arr.len() as f64)
             }
         }
     }
 
     /// Computes the median value of all samples.
-    fn compute_median(&self) -> AudioSampleResult<T>
+    fn compute_median(&self) -> AudioSampleResult<f64>
     where
         i16: ConvertTo<T>,
         I24: ConvertTo<T>,
@@ -614,43 +617,55 @@ where
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.is_empty() {
-                    return Ok(T::zero());
+                    return Ok(0.0);
                 }
                 let mut values: Vec<T> = arr.clone().into_raw_vec_and_offset().0;
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                values.sort_by(|a, b| {
+                    match a.partial_cmp(b) {
+                        Some(order) => order,
+                        None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
+                    }
+                });
 
                 let median = if values.len() % 2 == 0 {
                     let mid = values.len() / 2;
-                    (<T as ConvertTo<f64>>::convert_to(&(values[mid - 1] + values[mid]))? / 2.0f64)
-                        .convert_to()?
+                    let median = values[mid - 1] + values[mid];
+                    let _median: f64 = median.cast_into();
+                    _median / 2.0f64
                 } else {
-                    values[values.len() / 2]
+                    let median: f64 = values[values.len() / 2].cast_into();
+                    median
                 };
 
                 Ok(median)
             }
             AudioData::MultiChannel(arr) => {
                 if arr.is_empty() {
-                    return Ok(T::zero());
+                    return Ok(0.0);
                 }
                 let mut values: Vec<T> = arr.clone().into_raw_vec_and_offset().0;
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                values.sort_by(|a, b| {
+                    match a.partial_cmp(b) {
+                        Some(order) => order,
+                        None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
+                    }
+                });
 
                 let median = if values.len() % 2 == 0 {
                     let mid = values.len() / 2;
-                    (<T as ConvertTo<f64>>::convert_to(&(values[mid - 1] + values[mid]))? / 2.0f64)
-                        .convert_to()?
+                    let median = values[mid - 1] + values[mid];
+                    let _median: f64 = median.cast_into();
+                    _median / 2.0f64
                 } else {
-                    values[values.len() / 2]
+                    values[values.len() / 2].cast_into()
                 };
-
-                Ok(T::convert_from(median).unwrap_or(T::zero()))
+                Ok(median)
             }
         }
     }
 
     /// Computes the standard deviation of all samples.
-    fn compute_std_dev(&self) -> AudioSampleResult<T>
+    fn compute_std_dev(&self) -> AudioSampleResult<f64>
     where
         i16: ConvertTo<T>,
         I24: ConvertTo<T>,
@@ -659,45 +674,42 @@ where
         f64: ConvertTo<T>,
         AudioSamples<T>: AudioTypeConversion<T>,
     {
-        let mean = self.compute_mean()?;
+        let mean: f64 = self.compute_mean()?;
 
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.len() <= 1 {
-                    return Ok(T::zero());
+                    return Ok(0.0);
                 }
 
                 let variance_sum = arr
                     .mapv(|x| {
-                        let val = x;
+                        let val: f64 = x.cast_into();
                         let diff = val - mean;
                         diff * diff
                     })
                     .sum();
 
-                let variance_sum: f64 = variance_sum.convert_to()?;
-                let variance: f64 = variance_sum / arr.len() as f64;
+                let variance = variance_sum / arr.len() as f64;
                 let variance_sqrt = variance.sqrt();
-                let variance: T = T::convert_from(variance_sqrt)?;
-                Ok(variance)
+                Ok(variance_sqrt)
             }
             AudioData::MultiChannel(arr) => {
                 if arr.len() <= 1 {
-                    return Ok(T::zero());
+                    return Ok(0.0);
                 }
 
                 let variance_sum = arr
                     .mapv(|x| {
-                        let diff = x - mean;
+                        let val: f64 = x.cast_into();
+                        let diff = val - mean;
                         diff * diff
                     })
                     .sum();
 
-                let variance_sum: f64 = variance_sum.convert_to()?;
-                let variance: f64 = variance_sum / arr.len() as f64;
+                let variance = variance_sum / arr.len() as f64;
                 let variance_sqrt = variance.sqrt();
-                let variance: T = T::convert_from(variance_sqrt)?;
-                Ok(variance)
+                Ok(variance_sqrt)
             }
         }
     }

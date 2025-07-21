@@ -6,7 +6,10 @@
 use super::traits::AudioIirFiltering;
 use super::types::{FilterResponse, IirFilterDesign, IirFilterType};
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 use std::f64::consts::PI;
 
 /// IIR filter implementation with internal state.
@@ -86,6 +89,13 @@ impl IirFilter {
         input.iter().map(|&x| self.process_sample(x)).collect()
     }
 
+    /// Process a vector of samples through the filter in-place.
+    pub fn process_samples_in_place(&mut self, input: &mut [f64]) {
+        input.iter_mut().for_each(|x| {
+            *x = self.process_sample(*x);
+        });
+    }
+
     /// Reset the filter's internal state.
     pub fn reset(&mut self) {
         self.x_delays.fill(0.0);
@@ -136,7 +146,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: ConvertTo<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     fn apply_iir_filter(
         &mut self,
@@ -156,10 +166,7 @@ where
                 let output_samples = filter.process_samples(&input_samples);
 
                 for (i, &output) in output_samples.iter().enumerate() {
-                    samples[i] = output.convert_to().unwrap_or_else(|_| {
-                        let zero: f64 = 0.0;
-                        zero.convert_to().unwrap()
-                    });
+                    samples[i] = output.convert_to()?;
                 }
             }
             AudioData::MultiChannel(samples) => {
@@ -174,11 +181,8 @@ where
 
                     let output_samples = filter.process_samples(&input_samples);
 
-                    for (i, &output) in output_samples.iter().enumerate() {
-                        samples[[channel, i]] = output.convert_to().unwrap_or_else(|_| {
-                            let zero: f64 = 0.0;
-                            zero.convert_to().unwrap()
-                        });
+                    for (i, output) in output_samples.iter().enumerate() {
+                        samples[[channel, i]] = output.convert_to()?;
                     }
 
                     // Reset filter state for next channel
@@ -237,7 +241,7 @@ where
     fn frequency_response(
         &self,
         frequencies: &[f64],
-        sample_rate: f64,
+        _sample_rate: f64,
     ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
         // For now, return a placeholder implementation
         // In a full implementation, this would store the current filter state
@@ -393,8 +397,8 @@ fn design_butterworth_lowpass(
         // Simple approximation - not correct for actual use
         b_coeffs[0] = 1.0;
         a_coeffs[0] = 1.0;
-        for i in 1..=order {
-            a_coeffs[i] = 0.1 * (i as f64);
+        for (i, coeff) in a_coeffs.iter_mut().enumerate().take(order + 1).skip(1) {
+            *coeff = 0.1 * (i as f64);
         }
 
         Ok((b_coeffs, a_coeffs))
@@ -432,8 +436,8 @@ fn design_butterworth_highpass(
 
         b_coeffs[0] = 1.0;
         a_coeffs[0] = 1.0;
-        for i in 1..=order {
-            a_coeffs[i] = 0.1 * (i as f64);
+        for (i, coeff) in a_coeffs.iter_mut().enumerate().take(order + 1).skip(1) {
+            *coeff = 0.1 * (i as f64);
         }
 
         Ok((b_coeffs, a_coeffs))

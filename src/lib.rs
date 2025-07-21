@@ -1,3 +1,32 @@
+// Correctness and logic
+#![warn(clippy::unit_cmp)] // Detects comparing unit types
+#![warn(clippy::match_same_arms)] // Duplicate match arms
+#![warn(clippy::unreachable)] // Detects unreachable code
+
+// Performance-focused
+#![warn(clippy::inefficient_to_string)] // `format!("{}", x)` vs `x.to_string()`
+#![warn(clippy::map_clone)] // Cloning inside `map()` unnecessarily
+#![warn(clippy::unnecessary_to_owned)] // Detects redundant `.to_owned()` or `.clone()`
+#![warn(clippy::large_stack_arrays)] // Helps avoid stack overflows
+#![warn(clippy::box_collection)] // Warns on boxed `Vec`, `String`, etc.
+#![warn(clippy::vec_box)] // Avoids using `Vec<Box<T>>` when unnecessary
+#![warn(clippy::needless_collect)] // Avoids `.collect().iter()` chains
+
+// Style and idiomatic Rust
+#![warn(clippy::redundant_clone)] // Detects unnecessary `.clone()`
+#![warn(clippy::identity_op)] // e.g., `x + 0`, `x * 1`
+#![warn(clippy::needless_return)] // Avoids `return` at the end of functions
+#![warn(clippy::let_unit_value)] // Avoids binding `()` to variables
+#![warn(clippy::manual_map)] // Use `.map()` instead of manual `match`
+#![warn(clippy::unwrap_used)] // Avoids using `unwrap()`
+#![warn(clippy::panic)] // Avoids using `panic!` in production code
+
+// Maintainability
+#![warn(clippy::missing_panics_doc)] // Docs for functions that might panic
+#![warn(clippy::missing_safety_doc)] // Docs for `unsafe` functions
+#![warn(clippy::missing_const_for_fn)] // Suggests making eligible functions `const`
+#![allow(clippy::too_many_arguments)] // Allow functions with many parameters (very few and far between)
+
 //! # Audio Samples
 //!
 //! A high-performance audio processing library for Rust with Python bindings.
@@ -30,14 +59,16 @@
 //! ```
 
 use bytemuck::NoUninit;
-use num_traits::{ToBytes, Zero};
+use num_traits::{FromPrimitive, ToBytes, Zero};
 mod error;
+
 pub mod operations;
 #[cfg(feature = "python")]
 pub mod python;
 mod repr;
+
 pub mod resampling;
-mod utils;
+pub mod utils;
 use std::{
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},
@@ -55,18 +86,6 @@ pub use crate::operations::{
 };
 pub use crate::repr::AudioSamples;
 
-#[cfg(feature = "batch-processing")]
-pub mod batch;
-
-#[cfg(feature = "batch-processing")]
-pub use crate::batch::{
-    BatchBuilder,
-    traits::{BatchOperation, BatchProcessor},
-};
-
-#[cfg(feature = "parallel-processing")]
-pub use crate::batch::parallel::{ParallelProcessor, optimal_chunk_size};
-
 /// Array of supported audio sample data types as string identifiers
 pub const SUPPORTED_DTYPES: [&str; 5] = ["i16", "I24", "i32", "f32", "f64"];
 
@@ -80,6 +99,15 @@ pub enum ChannelLayout {
     /// Samples from each channel are stored in separate contiguous blocks (LLL...RRR...)
     /// This format is often preferred for digital signal processing
     NonInterleaved,
+}
+
+pub trait Castable:
+    CastInto<i16> + CastInto<I24> + CastInto<i32> + CastInto<f32> + CastInto<f64>
+{
+}
+impl<T> Castable for T where
+    T: CastInto<i16> + CastInto<I24> + CastInto<i32> + CastInto<f32> + CastInto<f64>
+{
 }
 /// Core trait defining the interface for audio sample types.
 ///
@@ -123,15 +151,13 @@ pub trait AudioSample:
     + ToBytes
     + serde::Serialize
     + serde::Deserialize<'static>
-    + CastFrom<i16>
-    + CastFrom<I24>
-    + CastFrom<i32>
-    + CastFrom<f32>
-    + CastFrom<f64>
     + CastFrom<usize>
+    + FromPrimitive
+    + ToString
+    + Castable
 {
     #[inline]
-    fn to_bytes<'a>(self) -> Vec<u8> {
+    fn to_bytes(self) -> Vec<u8> {
         self.to_ne_bytes().as_ref().to_vec()
     }
 
@@ -156,8 +182,7 @@ pub trait CastFrom<S>: Sized {
 
 pub trait CastInto<T>: Sized
 where
-    T: AudioSample,
-    Self: AudioSample + CastFrom<T>,
+    Self: CastFrom<T>,
 {
     fn cast_into(self) -> T;
 }
@@ -179,7 +204,10 @@ where
 /// use audio_samples::ConvertTo;
 ///
 /// let sample_i16: i16 = 16384;  // Half of i16::MAX
-/// let sample_f32: f32 = sample_i16.convert_to().unwrap();
+/// let sample_f32: f32 = sample_i16.convert_to() {
+///     Ok(sample) => sample,
+///     Err(e) => panic!("Conversion failed: {}", e),
+/// };
 /// assert!((sample_f32 - 0.5).abs() < 1e-4);  // Should be approximately 0.5
 /// ```
 pub trait ConvertTo<T: AudioSample> {
@@ -187,10 +215,7 @@ pub trait ConvertTo<T: AudioSample> {
 
     /// Convert from another audio sample type to this type.
     /// This is a convenience method that calls `convert_to` on the source value.
-    fn convert_from<F: AudioSample + ConvertTo<T>>(source: F) -> AudioSampleResult<T>
-    where
-        F: ConvertTo<T>,
-    {
+    fn convert_from<F: AudioSample + ConvertTo<T>>(source: F) -> AudioSampleResult<T> {
         source.convert_to()
     }
 }
@@ -482,7 +507,10 @@ impl CastFrom<usize> for I24 {
         if value > I24::MAX.to_i32() as usize {
             I24::MAX
         } else {
-            I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
+            match I24::try_from_i32(value as i32) {
+                Some(x) => x,
+                None => I24::MIN, // If conversion fails, return minimum value
+            }
         }
     }
 }
@@ -539,7 +567,10 @@ impl CastFrom<I24> for f64 {
 }
 impl CastFrom<i16> for I24 {
     fn cast_from(value: i16) -> Self {
-        I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
+        match I24::try_from_i32(value as i32) {
+            Some(x) => x,
+            None => I24::MIN, // If conversion fails, return minimum value
+        }
     }
 }
 
@@ -577,6 +608,36 @@ impl_cast_into!(i16 => [i16, i32, f32, f64]);
 impl_cast_into!(i32 => [i16, i32, f32, f64]);
 impl_cast_into!(f64 => [i16, i32, f32, f64]);
 impl_cast_into!(f32 => [i16, i32, f32, f64]);
+
+impl CastInto<i16> for I24 {
+    fn cast_into(self) -> i16 {
+        self.to_i32() as i16
+    }
+}
+
+impl CastInto<I24> for I24 {
+    fn cast_into(self) -> I24 {
+        self
+    }
+}
+
+impl CastInto<i32> for I24 {
+    fn cast_into(self) -> i32 {
+        self.to_i32()
+    }
+}
+
+impl CastInto<f32> for I24 {
+    fn cast_into(self) -> f32 {
+        self.to_i32() as f32
+    }
+}
+
+impl CastInto<f64> for I24 {
+    fn cast_into(self) -> f64 {
+        self.to_i32() as f64
+    }
+}
 
 impl CastInto<I24> for i16 {
     fn cast_into(self) -> I24 {

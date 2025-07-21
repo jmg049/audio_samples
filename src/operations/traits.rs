@@ -5,7 +5,7 @@
 //! and can be implemented independently.
 
 use super::types::*;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, CastFrom, ConvertTo, I24};
+use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
 use ndarray::Array2;
 
 // Complex numbers using num-complex crate
@@ -25,7 +25,6 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: CastFrom<i16> + CastFrom<I24> + CastFrom<i32> + CastFrom<f32> + CastFrom<f64>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Returns the peak (maximum absolute value) in the audio samples.
@@ -75,7 +74,7 @@ where
     ///
     /// # Arguments
     /// * `max_lag` - Maximum lag to compute (in samples)
-    fn autocorrelation(&self, max_lag: usize) -> AudioSampleResult<Vec<T>>;
+    fn autocorrelation(&self, max_lag: usize) -> AudioSampleResult<Vec<f64>>;
 
     /// Computes cross-correlation with another audio signal.
     ///
@@ -85,7 +84,7 @@ where
     /// # Arguments
     /// * `other` - The other audio signal to correlate with
     /// * `max_lag` - Maximum lag to compute (in samples)
-    fn cross_correlation(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<T>>;
+    fn cross_correlation(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<f64>>;
 
     /// Computes the spectral centroid (brightness measure).
     ///
@@ -113,6 +112,7 @@ where
 /// a Result to indicate success or failure.
 pub trait AudioProcessing<T: AudioSample>
 where
+    Self: Sized,
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
@@ -237,13 +237,7 @@ where
         &self,
         target_sample_rate: usize,
         quality: ResamplingQuality,
-    ) -> AudioSampleResult<Self>
-    where
-        Self: Sized,
-        T: num_traits::FromPrimitive + num_traits::ToPrimitive + crate::ConvertTo<f64>,
-        f64: crate::ConvertTo<T>,
-        AudioSamples<T>: AudioTypeConversion<T>,
-        AudioSamples<f64>: AudioTypeConversion<T>;
+    ) -> AudioSampleResult<Self>;
 
     /// Resamples audio by a specific ratio.
     ///
@@ -260,13 +254,7 @@ where
     /// - The ratio is invalid (≤ 0)
     /// - The input audio is empty
     /// - Rubato encounters an internal error
-    fn resample_by_ratio(&self, ratio: f64, quality: ResamplingQuality) -> AudioSampleResult<Self>
-    where
-        Self: Sized,
-        T: num_traits::FromPrimitive + num_traits::ToPrimitive + crate::ConvertTo<f64>,
-        f64: crate::ConvertTo<T>,
-        AudioSamples<T>: AudioTypeConversion<T>,
-        AudioSamples<f64>: AudioTypeConversion<T>;
+    fn resample_by_ratio(&self, ratio: f64, quality: ResamplingQuality) -> AudioSampleResult<Self>;
 }
 
 /// Frequency domain analysis and spectral transformations.
@@ -1186,6 +1174,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Detects the fundamental frequency using the YIN algorithm.
     ///
@@ -1327,6 +1316,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Apply an IIR filter using the specified design parameters.
     ///
@@ -1467,6 +1457,8 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+    AudioSamples<T>: AudioChannelOps<T>,
 {
     /// Apply a parametric EQ to the audio signal.
     ///
@@ -1640,6 +1632,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Apply compression to the audio signal.
     ///
@@ -1946,6 +1939,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Reverses the order of audio samples.
     ///
@@ -2060,6 +2054,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Converts multi-channel audio to mono using specified method.
     ///
@@ -2135,14 +2130,14 @@ where
     ///
     /// Uses the existing ConvertTo trait system for type-safe conversions.
     /// The original AudioSamples instance remains unchanged.
-    fn as_type<O: AudioSample>(&self) -> AudioSampleResult<AudioSamples<O>>
+    fn as_type<O: AudioSample + ConvertTo<T>>(&self) -> AudioSampleResult<AudioSamples<O>>
     where
         T: ConvertTo<O>;
 
     /// Converts to different sample type, consuming the original.
     ///
     /// More efficient than as_type when the original is no longer needed.
-    fn to_type<O: AudioSample>(self) -> AudioSampleResult<AudioSamples<O>>
+    fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSampleResult<AudioSamples<O>>
     where
         T: ConvertTo<O>;
 
@@ -2206,6 +2201,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
 }
 
@@ -2227,5 +2223,6 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
 }
