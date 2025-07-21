@@ -4,7 +4,10 @@
 //! of audio signals, such as sample rate, fundamental frequency, and
 //! silence regions.
 
-use crate::{AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo, I24};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 use rustfft::{FftPlanner, num_complex::Complex};
 
 /// Attempts to detect the sample rate of an audio signal based on its content.
@@ -32,11 +35,26 @@ where
 
     // Use the first channel for analysis
     let data = match audio_f64.as_mono() {
-        Some(mono) => mono.as_slice().unwrap().to_vec(),
+        Some(mono) => mono
+            .as_slice()
+            .ok_or(AudioSampleError::ArrayLayoutError {
+                message: "Mono samples must be contiguous".to_string(),
+            })?
+            .to_vec(),
         None => {
             // Use the first channel of multi-channel audio
-            let multi = audio_f64.as_multi_channel().unwrap();
-            multi.row(0).as_slice().unwrap().to_vec()
+            let multi = audio_f64
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be multi-channel".to_string(),
+                })?;
+            multi
+                .row(0)
+                .as_slice()
+                .ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Multi-channel samples must be contiguous".to_string(),
+                })?
+                .to_vec()
         }
     };
 
@@ -76,11 +94,26 @@ where
 
     // Use the first channel for analysis
     let data = match audio_f64.as_mono() {
-        Some(mono) => mono.as_slice().unwrap().to_vec(),
+        Some(mono) => mono
+            .as_slice()
+            .ok_or(AudioSampleError::ArrayLayoutError {
+                message: "Mono samples must be contiguous".to_string(),
+            })?
+            .to_vec(),
         None => {
             // Use the first channel of multi-channel audio
-            let multi = audio_f64.as_multi_channel().unwrap();
-            multi.row(0).as_slice().unwrap().to_vec()
+            let multi = audio_f64
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be multi-channel".to_string(),
+                })?;
+            multi
+                .row(0)
+                .as_slice()
+                .ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Multi-channel samples must be contiguous".to_string(),
+                })?
+                .to_vec()
         }
     };
 
@@ -108,21 +141,19 @@ where
 pub fn detect_silence_regions<T: AudioSample>(
     audio: &AudioSamples<T>,
     threshold: T,
-) -> Vec<(f64, f64)> {
+) -> AudioSampleResult<Vec<(f64, f64)>> {
     let mut silence_regions = Vec::new();
     let mut in_silence = false;
     let mut silence_start = 0;
 
     let sample_rate = audio.sample_rate() as f64;
     let samples_per_second = sample_rate;
+    let threshold: f64 = threshold.cast_into();
 
     // Helper function to check if a sample is below threshold (absolute value)
     let is_below_threshold = |sample: T| -> bool {
-        let abs_val = if sample < T::default() {
-            T::default() - sample
-        } else {
-            sample
-        };
+        let abs_val: f64 = sample.cast_into();
+        let abs_val = abs_val.abs();
         abs_val < threshold
     };
 
@@ -134,13 +165,11 @@ pub fn detect_silence_regions<T: AudioSample>(
                         silence_start = i;
                         in_silence = true;
                     }
-                } else {
-                    if in_silence {
-                        let start_time = silence_start as f64 / samples_per_second;
-                        let end_time = i as f64 / samples_per_second;
-                        silence_regions.push((start_time, end_time));
-                        in_silence = false;
-                    }
+                } else if in_silence {
+                    let start_time = silence_start as f64 / samples_per_second;
+                    let end_time = i as f64 / samples_per_second;
+                    silence_regions.push((start_time, end_time));
+                    in_silence = false;
                 }
             }
 
@@ -153,7 +182,11 @@ pub fn detect_silence_regions<T: AudioSample>(
         }
         None => {
             // Multi-channel analysis - consider it silence only if ALL channels are below threshold
-            let multi = audio.as_multi_channel().unwrap();
+            let multi = audio
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be multi-channel".to_string(),
+                })?;
             for i in 0..multi.ncols() {
                 let all_below_threshold =
                     (0..multi.nrows()).all(|ch| is_below_threshold(multi[(ch, i)]));
@@ -163,13 +196,11 @@ pub fn detect_silence_regions<T: AudioSample>(
                         silence_start = i;
                         in_silence = true;
                     }
-                } else {
-                    if in_silence {
-                        let start_time = silence_start as f64 / samples_per_second;
-                        let end_time = i as f64 / samples_per_second;
-                        silence_regions.push((start_time, end_time));
-                        in_silence = false;
-                    }
+                } else if in_silence {
+                    let start_time = silence_start as f64 / samples_per_second;
+                    let end_time = i as f64 / samples_per_second;
+                    silence_regions.push((start_time, end_time));
+                    in_silence = false;
                 }
             }
 
@@ -182,7 +213,7 @@ pub fn detect_silence_regions<T: AudioSample>(
         }
     }
 
-    silence_regions
+    Ok(silence_regions)
 }
 
 /// Detects the dynamic range of an audio signal.
@@ -209,11 +240,25 @@ where
     let audio_f64 = audio.as_f64()?;
 
     let data: Vec<f64> = match audio_f64.as_mono() {
-        Some(mono) => mono.as_slice().unwrap().to_vec(),
+        Some(mono) => mono
+            .as_slice()
+            .ok_or(AudioSampleError::ArrayLayoutError {
+                message: "Mono samples must be contiguous".to_string(),
+            })?
+            .to_vec(),
         None => {
             // Flatten multi-channel audio
-            let multi = audio_f64.as_multi_channel().unwrap();
-            multi.as_slice().unwrap().to_vec()
+            let multi = audio_f64
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be mult-channel".to_string(),
+                })?;
+            multi
+                .as_slice()
+                .ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Multi-channels must be contiguous".to_string(),
+                })?
+                .to_vec()
         }
     };
 
@@ -251,7 +296,7 @@ where
 pub fn detect_clipping<T: AudioSample>(
     audio: &AudioSamples<T>,
     threshold_ratio: f64,
-) -> Vec<(f64, f64)>
+) -> AudioSampleResult<Vec<(f64, f64)>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -267,37 +312,30 @@ where
     let sample_rate = audio.sample_rate() as f64;
 
     // Determine clipping thresholds
-    let max_val = T::MAX;
-    let min_val = T::MIN;
+    let max_val: f64 = T::MAX.cast_into();
+    let min_val: f64 = T::MIN.cast_into();
 
-    // Convert to f64 for threshold calculation
-    let max_f64 = max_val.convert_to().unwrap_or(1.0);
-    let min_f64 = min_val.convert_to().unwrap_or(-1.0);
-
-    let upper_threshold = max_f64 * threshold_ratio;
-    let lower_threshold = min_f64 * threshold_ratio;
+    let upper_threshold: T = T::cast_from(max_val * threshold_ratio);
+    let lower_threshold: T = T::cast_from(min_val * threshold_ratio);
 
     // TODO: Make constant function
-    let is_clipped = |sample: T| -> bool {
-        let sample_f64 = sample.convert_to().unwrap_or(0.0);
-        sample_f64 >= upper_threshold || sample_f64 <= lower_threshold
+    let is_clipped = |sample: T| -> AudioSampleResult<bool> {
+        Ok(sample >= upper_threshold || sample <= lower_threshold)
     };
 
     match audio.as_mono() {
         Some(mono) => {
             for (i, &sample) in mono.iter().enumerate() {
-                if is_clipped(sample) {
+                if is_clipped(sample)? {
                     if !in_clipped {
                         clipped_start = i;
                         in_clipped = true;
                     }
-                } else {
-                    if in_clipped {
-                        let start_time = clipped_start as f64 / sample_rate;
-                        let end_time = i as f64 / sample_rate;
-                        clipped_regions.push((start_time, end_time));
-                        in_clipped = false;
-                    }
+                } else if in_clipped {
+                    let start_time = clipped_start as f64 / sample_rate;
+                    let end_time = i as f64 / sample_rate;
+                    clipped_regions.push((start_time, end_time));
+                    in_clipped = false;
                 }
             }
 
@@ -310,22 +348,30 @@ where
         }
         None => {
             // Multi-channel analysis - consider it clipped if ANY channel is clipped
-            let multi = audio.as_multi_channel().unwrap();
+            let multi = audio
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be mono or multi-channel".to_string(),
+                })?;
             for i in 0..multi.ncols() {
-                let any_clipped = (0..multi.nrows()).any(|ch| is_clipped(multi[(ch, i)]));
+                let mut any_clipped = false;
+                for ch in 0..multi.nrows() {
+                    if is_clipped(multi[(ch, i)])? {
+                        any_clipped = true;
+                        break;
+                    }
+                }
 
                 if any_clipped {
                     if !in_clipped {
                         clipped_start = i;
                         in_clipped = true;
                     }
-                } else {
-                    if in_clipped {
-                        let start_time = clipped_start as f64 / sample_rate;
-                        let end_time = i as f64 / sample_rate;
-                        clipped_regions.push((start_time, end_time));
-                        in_clipped = false;
-                    }
+                } else if in_clipped {
+                    let start_time = clipped_start as f64 / sample_rate;
+                    let end_time = i as f64 / sample_rate;
+                    clipped_regions.push((start_time, end_time));
+                    in_clipped = false;
                 }
             }
 
@@ -338,7 +384,7 @@ where
         }
     }
 
-    clipped_regions
+    Ok(clipped_regions)
 }
 
 // Helper functions
@@ -447,7 +493,8 @@ mod tests {
         let data = array![0.0f32, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0];
         let audio = AudioSamples::new_mono(data, 10); // 10 Hz sample rate for easy calculation
 
-        let silence_regions = detect_silence_regions(&audio, 0.5);
+        let silence_regions =
+            detect_silence_regions(&audio, 0.5).expect("Failed to detect silence");
 
         assert!(!silence_regions.is_empty());
         // First silence region should be at the beginning
@@ -474,7 +521,7 @@ mod tests {
         let data = array![0.5f32, 1.0, 1.0, 1.0, 0.5, -1.0, -1.0, 0.0];
         let audio = AudioSamples::new_mono(data, 8); // 8 Hz sample rate for easy calculation
 
-        let clipped_regions = detect_clipping(&audio, 0.99);
+        let clipped_regions = detect_clipping(&audio, 0.99).expect("Failed to detect clipping");
 
         assert!(!clipped_regions.is_empty());
     }

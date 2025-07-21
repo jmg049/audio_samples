@@ -8,7 +8,10 @@
 use super::traits::AudioDynamicRange;
 use super::types::{CompressorConfig, DynamicRangeMethod, KneeType, LimiterConfig};
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 use std::collections::VecDeque;
 
 /// Envelope follower for attack and release processing.
@@ -16,7 +19,7 @@ use std::collections::VecDeque;
 /// This struct implements a first-order RC-style envelope follower
 /// with separate attack and release time constants.
 #[derive(Debug, Clone)]
-struct EnvelopeFollower {
+pub struct EnvelopeFollower {
     /// Current envelope value
     envelope: f64,
     /// Attack coefficient (0.0 to 1.0)
@@ -41,7 +44,7 @@ impl EnvelopeFollower {
     /// * `release_ms` - Release time in milliseconds
     /// * `sample_rate` - Sample rate in Hz
     /// * `detection_method` - Detection method (RMS, Peak, or Hybrid)
-    fn new(
+    pub fn new(
         attack_ms: f64,
         release_ms: f64,
         sample_rate: f64,
@@ -86,7 +89,7 @@ impl EnvelopeFollower {
     ///
     /// # Returns
     /// Envelope value
-    fn process(&mut self, input: f64, detection_method: DynamicRangeMethod) -> f64 {
+    pub fn process(&mut self, input: f64, detection_method: DynamicRangeMethod) -> f64 {
         let detector_value = match detection_method {
             DynamicRangeMethod::Peak => input.abs(),
             DynamicRangeMethod::Rms => {
@@ -103,7 +106,7 @@ impl EnvelopeFollower {
                 }
 
                 // Calculate RMS
-                if self.rms_window.len() > 0 {
+                if !self.rms_window.is_empty() {
                     (self.rms_sum / self.rms_window.len() as f64).sqrt()
                 } else {
                     0.0
@@ -124,7 +127,7 @@ impl EnvelopeFollower {
                     }
                 }
 
-                let rms = if self.rms_window.len() > 0 {
+                let rms = if !self.rms_window.is_empty() {
                     (self.rms_sum / self.rms_window.len() as f64).sqrt()
                 } else {
                     0.0
@@ -147,7 +150,7 @@ impl EnvelopeFollower {
     }
 
     /// Reset the envelope follower state.
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.envelope = 0.0;
         self.detector_state = 0.0;
         self.rms_window.clear();
@@ -160,7 +163,7 @@ impl EnvelopeFollower {
 /// This struct provides a delay buffer that allows the processor to
 /// "look ahead" at upcoming samples to prevent peaks before they occur.
 #[derive(Debug, Clone)]
-struct LookaheadBuffer {
+pub struct LookaheadBuffer {
     /// Circular buffer for samples
     buffer: Vec<f64>,
     /// Write position in buffer
@@ -178,7 +181,7 @@ impl LookaheadBuffer {
     ///
     /// # Arguments
     /// * `lookahead_samples` - Number of samples to look ahead
-    fn new(lookahead_samples: usize) -> Self {
+    pub fn new(lookahead_samples: usize) -> Self {
         let size = lookahead_samples.max(1);
         Self {
             buffer: vec![0.0; size],
@@ -196,7 +199,7 @@ impl LookaheadBuffer {
     ///
     /// # Returns
     /// Delayed sample (or 0.0 if buffer not full yet)
-    fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: f64) -> f64 {
         // For a lookahead buffer, we need to return the oldest sample
         // when the buffer is full, otherwise return 0.0
 
@@ -230,12 +233,12 @@ impl LookaheadBuffer {
     ///
     /// # Returns
     /// Current sample value
-    fn peek(&self) -> f64 {
+    pub fn peek(&self) -> f64 {
         self.buffer[self.write_pos]
     }
 
     /// Reset the buffer.
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.buffer.fill(0.0);
         self.write_pos = 0;
         self.read_pos = 0;
@@ -360,7 +363,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: ConvertTo<f64> + num_traits::NumCast,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     fn apply_compressor(
         &mut self,
@@ -370,7 +373,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Calculate lookahead buffer size
         let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
@@ -389,7 +392,7 @@ where
 
                 // Process each sample
                 for &sample in samples.iter() {
-                    let sample_f64: f64 = sample.convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = sample.convert_to()?;
 
                     // Get envelope level
                     let envelope = envelope_follower.process(sample_f64, config.detection_method);
@@ -409,7 +412,7 @@ where
 
                 // Apply gain reductions with lookahead
                 for i in 0..samples.len() {
-                    let sample_f64: f64 = samples[i].convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = samples[i].convert_to()?;
                     let delayed_sample = lookahead_buffer.process(sample_f64);
 
                     if i >= lookahead_samples {
@@ -418,11 +421,7 @@ where
                         let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                         let output_sample = delayed_sample * gain_linear * makeup_gain;
-                        samples[i - lookahead_samples] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        samples[i - lookahead_samples] = output_sample.convert_to()?;
                     }
                 }
 
@@ -440,10 +439,7 @@ where
                             let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                             let output_sample = delayed_sample * gain_linear * makeup_gain;
-                            samples[sample_idx] = output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                            samples[sample_idx] = output_sample.convert_to()?;
                         }
                     }
                 }
@@ -466,8 +462,7 @@ where
 
                     // Process each sample
                     for sample_idx in 0..num_samples {
-                        let sample_f64: f64 =
-                            samples[[channel, sample_idx]].convert_to().unwrap_or(0.0);
+                        let sample_f64: f64 = samples[[channel, sample_idx]].convert_to()?;
 
                         // Get envelope level
                         let envelope =
@@ -488,8 +483,7 @@ where
 
                     // Apply gain reductions with lookahead
                     for sample_idx in 0..num_samples {
-                        let sample_f64: f64 =
-                            samples[[channel, sample_idx]].convert_to().unwrap_or(0.0);
+                        let sample_f64: f64 = samples[[channel, sample_idx]].convert_to()?;
                         let delayed_sample = lookahead_buffer.process(sample_f64);
 
                         if sample_idx >= lookahead_samples {
@@ -499,10 +493,7 @@ where
 
                             let output_sample = delayed_sample * gain_linear * makeup_gain;
                             samples[[channel, sample_idx - lookahead_samples]] =
-                                output_sample.convert_to().unwrap_or_else(|_| {
-                                    let zero: f64 = 0.0;
-                                    zero.convert_to().unwrap()
-                                });
+                                output_sample.convert_to()?;
                         }
                     }
 
@@ -520,11 +511,7 @@ where
                                 let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                                 let output_sample = delayed_sample * gain_linear * makeup_gain;
-                                samples[[channel, sample_idx]] =
-                                    output_sample.convert_to().unwrap_or_else(|_| {
-                                        let zero: f64 = 0.0;
-                                        zero.convert_to().unwrap()
-                                    });
+                                samples[[channel, sample_idx]] = output_sample.convert_to()?;
                             }
                         }
                     }
@@ -539,7 +526,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Calculate lookahead buffer size
         let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
@@ -558,7 +545,7 @@ where
 
                 // Process each sample
                 for &sample in samples.iter() {
-                    let sample_f64: f64 = sample.convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = sample.convert_to()?;
 
                     // Get envelope level
                     let envelope = envelope_follower.process(sample_f64, config.detection_method);
@@ -577,7 +564,7 @@ where
 
                 // Apply gain reductions with lookahead
                 for i in 0..samples.len() {
-                    let sample_f64: f64 = samples[i].convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = samples[i].convert_to()?;
                     let delayed_sample = lookahead_buffer.process(sample_f64);
 
                     if i >= lookahead_samples {
@@ -585,11 +572,7 @@ where
                         let gain_linear = db_to_linear(-gain_reduction_db);
 
                         let output_sample = delayed_sample * gain_linear;
-                        samples[i - lookahead_samples] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        samples[i - lookahead_samples] = output_sample.convert_to()?;
                     }
                 }
 
@@ -606,10 +589,7 @@ where
                             let gain_linear = db_to_linear(-gain_reduction_db);
 
                             let output_sample = delayed_sample * gain_linear;
-                            samples[sample_idx] = output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                            samples[sample_idx] = output_sample.convert_to()?;
                         }
                     }
                 }
@@ -632,8 +612,7 @@ where
 
                     // Process each sample
                     for sample_idx in 0..num_samples {
-                        let sample_f64: f64 =
-                            samples[[channel, sample_idx]].convert_to().unwrap_or(0.0);
+                        let sample_f64: f64 = samples[[channel, sample_idx]].convert_to()?;
 
                         // Get envelope level
                         let envelope =
@@ -653,8 +632,7 @@ where
 
                     // Apply gain reductions with lookahead
                     for sample_idx in 0..num_samples {
-                        let sample_f64: f64 =
-                            samples[[channel, sample_idx]].convert_to().unwrap_or(0.0);
+                        let sample_f64: f64 = samples[[channel, sample_idx]].convert_to()?;
                         let delayed_sample = lookahead_buffer.process(sample_f64);
 
                         if sample_idx >= lookahead_samples {
@@ -663,10 +641,7 @@ where
 
                             let output_sample = delayed_sample * gain_linear;
                             samples[[channel, sample_idx - lookahead_samples]] =
-                                output_sample.convert_to().unwrap_or_else(|_| {
-                                    let zero: f64 = 0.0;
-                                    zero.convert_to().unwrap()
-                                });
+                                output_sample.convert_to()?;
                         }
                     }
 
@@ -683,11 +658,7 @@ where
                                 let gain_linear = db_to_linear(-gain_reduction_db);
 
                                 let output_sample = delayed_sample * gain_linear;
-                                samples[[channel, sample_idx]] =
-                                    output_sample.convert_to().unwrap_or_else(|_| {
-                                        let zero: f64 = 0.0;
-                                        zero.convert_to().unwrap()
-                                    });
+                                samples[[channel, sample_idx]] = output_sample.convert_to()?;
                             }
                         }
                     }
@@ -707,7 +678,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         if !config.side_chain.enabled {
             return Err(AudioSampleError::InvalidParameter(
@@ -741,7 +712,7 @@ where
 
                 // Process sidechain signal to get gain reductions
                 for &sc_sample in sc_samples.iter() {
-                    let sc_f64: f64 = sc_sample.convert_to().unwrap_or(0.0);
+                    let sc_f64: f64 = sc_sample.convert_to()?;
 
                     // Mix between internal and external sidechain
                     let envelope = envelope_follower.process(sc_f64, config.detection_method);
@@ -761,7 +732,7 @@ where
 
                 // Apply gain reductions to main signal
                 for i in 0..main_samples.len() {
-                    let sample_f64: f64 = main_samples[i].convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = main_samples[i].convert_to()?;
                     let delayed_sample = lookahead_buffer.process(sample_f64);
 
                     if i >= lookahead_samples {
@@ -770,11 +741,7 @@ where
                         let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                         let output_sample = delayed_sample * gain_linear * makeup_gain;
-                        main_samples[i - lookahead_samples] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        main_samples[i - lookahead_samples] = output_sample.convert_to()?;
                     }
                 }
 
@@ -789,11 +756,7 @@ where
                         let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                         let output_sample = delayed_sample * gain_linear * makeup_gain;
-                        main_samples[sample_idx] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        main_samples[sample_idx] = output_sample.convert_to()?;
                     }
                 }
             }
@@ -817,7 +780,7 @@ where
         // Validate configuration
         config
             .validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         if !config.side_chain.enabled {
             return Err(AudioSampleError::InvalidParameter(
@@ -847,7 +810,7 @@ where
 
                 // Process sidechain signal to get gain reductions
                 for &sc_sample in sc_samples.iter() {
-                    let sc_f64: f64 = sc_sample.convert_to().unwrap_or(0.0);
+                    let sc_f64: f64 = sc_sample.convert_to()?;
 
                     let envelope = envelope_follower.process(sc_f64, config.detection_method);
                     let envelope_db = linear_to_db(envelope);
@@ -865,7 +828,7 @@ where
 
                 // Apply gain reductions to main signal
                 for i in 0..main_samples.len() {
-                    let sample_f64: f64 = main_samples[i].convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = main_samples[i].convert_to()?;
                     let delayed_sample = lookahead_buffer.process(sample_f64);
 
                     if i >= lookahead_samples {
@@ -873,11 +836,7 @@ where
                         let gain_linear = db_to_linear(-gain_reduction_db);
 
                         let output_sample = delayed_sample * gain_linear;
-                        main_samples[i - lookahead_samples] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        main_samples[i - lookahead_samples] = output_sample.convert_to()?;
                     }
                 }
 
@@ -891,11 +850,7 @@ where
                         let gain_linear = db_to_linear(-gain_reduction_db);
 
                         let output_sample = delayed_sample * gain_linear;
-                        main_samples[sample_idx] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        main_samples[sample_idx] = output_sample.convert_to()?;
                     }
                 }
             }
@@ -950,7 +905,7 @@ where
                 let mut gain_reductions = Vec::with_capacity(samples.len());
 
                 for &sample in samples.iter() {
-                    let sample_f64: f64 = sample.convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = sample.convert_to()?;
                     let envelope = envelope_follower.process(sample_f64, config.detection_method);
                     let envelope_db = linear_to_db(envelope);
 
@@ -980,7 +935,7 @@ where
                 let mut gain_reductions = Vec::with_capacity(num_samples);
 
                 for sample_idx in 0..num_samples {
-                    let sample_f64: f64 = samples[[0, sample_idx]].convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = samples[[0, sample_idx]].convert_to()?;
                     let envelope = envelope_follower.process(sample_f64, config.detection_method);
                     let envelope_db = linear_to_db(envelope);
 
@@ -1021,7 +976,7 @@ where
                 );
 
                 for sample in samples.iter_mut() {
-                    let sample_f64: f64 = sample.convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = sample.convert_to()?;
                     let envelope = envelope_follower.process(sample_f64, DynamicRangeMethod::Peak);
                     let envelope_db = linear_to_db(envelope);
 
@@ -1036,10 +991,7 @@ where
                     let gain_linear = db_to_linear(-gain_reduction_db);
                     let output_sample = sample_f64 * gain_linear;
 
-                    *sample = output_sample.convert_to().unwrap_or_else(|_| {
-                        let zero: f64 = 0.0;
-                        zero.convert_to().unwrap()
-                    });
+                    *sample = output_sample.convert_to()?;
                 }
             }
             AudioData::MultiChannel(samples) => {
@@ -1055,8 +1007,7 @@ where
                     );
 
                     for sample_idx in 0..num_samples {
-                        let sample_f64: f64 =
-                            samples[[channel, sample_idx]].convert_to().unwrap_or(0.0);
+                        let sample_f64: f64 = samples[[channel, sample_idx]].convert_to()?;
                         let envelope =
                             envelope_follower.process(sample_f64, DynamicRangeMethod::Peak);
                         let envelope_db = linear_to_db(envelope);
@@ -1072,11 +1023,7 @@ where
                         let gain_linear = db_to_linear(-gain_reduction_db);
                         let output_sample = sample_f64 * gain_linear;
 
-                        samples[[channel, sample_idx]] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        samples[[channel, sample_idx]] = output_sample.convert_to()?;
                     }
                 }
             }
@@ -1105,7 +1052,7 @@ where
                 );
 
                 for sample in samples.iter_mut() {
-                    let sample_f64: f64 = sample.convert_to().unwrap_or(0.0);
+                    let sample_f64: f64 = sample.convert_to()?;
                     let envelope = envelope_follower.process(sample_f64, DynamicRangeMethod::Rms);
                     let envelope_db = linear_to_db(envelope);
 
@@ -1120,10 +1067,7 @@ where
                     let gain_linear = db_to_linear(-gain_change_db); // Negative because we're reducing level
                     let output_sample = sample_f64 * gain_linear;
 
-                    *sample = output_sample.convert_to().unwrap_or_else(|_| {
-                        let zero: f64 = 0.0;
-                        zero.convert_to().unwrap()
-                    });
+                    *sample = output_sample.convert_to()?;
                 }
             }
             AudioData::MultiChannel(samples) => {
@@ -1139,8 +1083,7 @@ where
                     );
 
                     for sample_idx in 0..num_samples {
-                        let sample_f64: f64 =
-                            samples[[channel, sample_idx]].convert_to().unwrap_or(0.0);
+                        let sample_f64: f64 = samples[[channel, sample_idx]].convert_to()?;
                         let envelope =
                             envelope_follower.process(sample_f64, DynamicRangeMethod::Rms);
                         let envelope_db = linear_to_db(envelope);
@@ -1156,11 +1099,7 @@ where
                         let gain_linear = db_to_linear(-gain_change_db); // Negative because we're reducing level
                         let output_sample = sample_f64 * gain_linear;
 
-                        samples[[channel, sample_idx]] =
-                            output_sample.convert_to().unwrap_or_else(|_| {
-                                let zero: f64 = 0.0;
-                                zero.convert_to().unwrap()
-                            });
+                        samples[[channel, sample_idx]] = output_sample.convert_to()?;
                     }
                 }
             }

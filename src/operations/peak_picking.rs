@@ -260,7 +260,7 @@ pub fn pick_peaks(
 ///
 /// Filtered signal with enhanced transients
 pub fn apply_pre_emphasis(signal: &[f64], coeff: f64) -> AudioSampleResult<Vec<f64>> {
-    if coeff < 0.0 || coeff > 1.0 {
+    if !(0.0..=1.0).contains(&coeff) {
         return Err(AudioSampleError::InvalidParameter(
             "Pre-emphasis coefficient must be between 0.0 and 1.0".to_string(),
         ));
@@ -332,8 +332,12 @@ pub fn apply_median_filter(signal: &[f64], filter_length: usize) -> AudioSampleR
 
         // Extract window and compute median
         let mut window: Vec<f64> = signal[start..end].to_vec();
-        window.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
+        window.sort_by(|a, b| {
+            match a.partial_cmp(b) {
+                Some(order) => order,
+                None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
+            }
+        });
         let median = window[window.len() / 2];
         filtered.push(median);
     }
@@ -425,7 +429,12 @@ pub fn normalize_onset_strength(
         NormalizationMethod::Median => {
             // Median normalization: subtract median
             let mut sorted = onset_strength.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| {
+                match a.partial_cmp(b) {
+                    Some(order) => order,
+                    None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
+                }
+            });
             let median = sorted[sorted.len() / 2];
             let normalized = onset_strength.iter().map(|&x| x - median).collect();
             Ok(normalized)
@@ -464,7 +473,12 @@ fn apply_temporal_constraints(
 
     // Sort candidates by strength (descending)
     let mut sorted_candidates = candidates.to_vec();
-    sorted_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    sorted_candidates.sort_by(|a, b| {
+        match b.1.partial_cmp(&a.1) {
+            Some(order) => order,
+            None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
+        }
+    });
 
     let mut selected_peaks = Vec::new();
 
@@ -586,7 +600,12 @@ fn percentile(values: &[f64], percentile: f64) -> f64 {
     }
 
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| {
+        match a.partial_cmp(b) {
+            Some(order) => order,
+            None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
+        }
+    });
 
     let n = sorted.len();
     if n == 1 {

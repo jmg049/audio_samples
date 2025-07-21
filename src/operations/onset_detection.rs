@@ -60,20 +60,23 @@
 use super::peak_picking::pick_peaks;
 use super::traits::AudioTransforms;
 use super::types::{ComplexOnsetConfig, OnsetConfig, SpectralFluxConfig, SpectralFluxMethod};
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::operations::CqtConfig;
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 use ndarray::Array2;
-use num_traits::{Float, FromPrimitive, ToPrimitive};
 use rustfft::num_complex::Complex;
 use std::f64::consts::PI;
 
-impl<T: AudioSample + ToPrimitive + FromPrimitive + Float> AudioSamples<T>
+impl<T: AudioSample> AudioSamples<T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: ConvertTo<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Detects note onsets using energy-based spectral analysis.
     ///
@@ -170,7 +173,7 @@ where
     /// let config = OnsetConfig::musical();
     /// let (times, odf) = audio.onset_detection_function(&config)?;
     ///
-    /// // Find the frame with maximum onset strength
+    /// Find the frame with maximum onset strength
     /// let max_idx = odf.iter().position(|&x| x == odf.iter().fold(0.0, |a, &b| a.max(b))).unwrap();
     /// println!("Strongest onset at {:.3}s with strength {:.3}", times[max_idx], odf[max_idx]);
     /// ```
@@ -281,7 +284,7 @@ where
     /// ```
     pub fn spectral_flux(
         &self,
-        config: &super::types::CqtConfig,
+        config: &CqtConfig,
         hop_size: usize,
         method: SpectralFluxMethod,
     ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
@@ -487,10 +490,14 @@ where
         })?;
 
         // Compute complex CQT spectrogram
-        let window_size = config.window_size.unwrap_or_else(|| {
-            let min_period = sample_rate / config.cqt_config.fmin;
-            (min_period * 4.0) as usize
-        });
+        let window_size = match config.window_size {
+            Some(x) => x,
+            None => {
+                // Default window size based on minimum period of lowest frequency
+                let min_period = sample_rate / config.cqt_config.fmin;
+                (min_period * 4.0) as usize
+            }
+        };
 
         let complex_spectrogram =
             self.cqt_spectrogram(&config.cqt_config, config.hop_size, Some(window_size))?;
@@ -561,10 +568,15 @@ where
         })?;
 
         // Compute magnitude spectrogram
-        let window_size = config.window_size.unwrap_or_else(|| {
-            let min_period = sample_rate / config.cqt_config.fmin;
-            (min_period * 4.0) as usize
-        });
+
+        let window_size = match config.window_size {
+            Some(x) => x,
+            None => {
+                // Default window size based on minimum period of lowest frequency
+                let min_period = sample_rate / config.cqt_config.fmin;
+                (min_period * 4.0) as usize
+            }
+        };
 
         let magnitude_spectrogram = self.cqt_magnitude_spectrogram(
             &config.cqt_config,
@@ -817,7 +829,10 @@ fn apply_median_filter(signal: &[f64], filter_length: usize) -> AudioSampleResul
         let end = (i + half_length + 1).min(signal.len());
 
         let mut window: Vec<f64> = signal[start..end].to_vec();
-        window.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        window.sort_by(|a, b| match a.partial_cmp(b) {
+            Some(order) => order,
+            None => std::cmp::Ordering::Equal, // Handle NaN values
+        });
 
         let median = window[window.len() / 2];
         filtered.push(median);

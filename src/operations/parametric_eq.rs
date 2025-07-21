@@ -7,7 +7,10 @@ use super::iir_filtering::IirFilter;
 use super::traits::AudioParametricEq;
 use super::types::{EqBand, EqBandType, ParametricEq};
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{
+    AudioChannelOps, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
+    AudioTypeConversion, ConvertTo, I24,
+};
 use std::f64::consts::PI;
 
 impl<T: AudioSample> AudioParametricEq<T> for AudioSamples<T>
@@ -17,7 +20,8 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    T: ConvertTo<f64> + num_traits::NumCast,
+    AudioSamples<T>: AudioTypeConversion<T>,
+    AudioSamples<T>: AudioChannelOps<T>,
 {
     fn apply_parametric_eq(
         &mut self,
@@ -30,7 +34,7 @@ where
 
         // Validate the EQ configuration
         eq.validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Apply each enabled band in sequence
         for band in &eq.bands {
@@ -55,7 +59,7 @@ where
 
         // Validate band parameters
         band.validate(sample_rate)
-            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+            .map_err(AudioSampleError::InvalidParameter)?;
 
         // Design the filter based on band type
         let (b_coeffs, a_coeffs) = design_eq_band_filter(band, sample_rate)?;
@@ -63,38 +67,63 @@ where
 
         // Apply filter to audio data
         match &mut self.data {
-            AudioData::Mono(samples) => {
-                let input_samples: Vec<f64> = samples
-                    .iter()
-                    .map(|&x| x.convert_to().unwrap_or(0.0))
-                    .collect();
+            AudioData::Mono(_) => {
+                let mut working_samples = self.as_type::<f64>()?;
+                let mono_self = match self.as_mono_mut() {
+                    Some(working) => working,
+                    None => {
+                        return Err(AudioSampleError::ArrayLayoutError {
+                            message: "Mono samples must be contiguous".to_string(),
+                        });
+                    }
+                };
 
-                let output_samples = filter.process_samples(&input_samples);
+                let working_samples =
+                    working_samples
+                        .as_mono_mut()
+                        .ok_or(AudioSampleError::OptionError {
+                            message: "Failed to get mono data. Underlying data is not mono."
+                                .to_string(),
+                        })?;
 
-                for (i, &output) in output_samples.iter().enumerate() {
-                    samples[i] = output.convert_to().unwrap_or_else(|_| {
-                        let zero: f64 = 0.0;
-                        zero.convert_to().unwrap()
-                    });
+                let working_samples =
+                    working_samples
+                        .as_slice_mut()
+                        .ok_or(AudioSampleError::ArrayLayoutError {
+                            message: "Mono samples must be contiguous".to_string(),
+                        })?;
+
+                filter.process_samples_in_place(working_samples);
+
+                for (i, output) in working_samples.iter_mut().enumerate() {
+                    mono_self[i] = T::convert_from(*output)?;
                 }
             }
             AudioData::MultiChannel(samples) => {
                 let num_channels = samples.nrows();
-                let num_samples = samples.ncols();
-
                 // Process each channel independently
                 for channel in 0..num_channels {
-                    let input_samples: Vec<f64> = (0..num_samples)
-                        .map(|i| samples[[channel, i]].convert_to().unwrap_or(0.0))
-                        .collect();
+                    let mut working_samples = self.as_type::<f64>()?;
 
-                    let output_samples = filter.process_samples(&input_samples);
+                    let multi_self = match self.as_multi_channel_mut() {
+                        Some(working) => working,
+                        None => {
+                            return Err(AudioSampleError::ArrayLayoutError {
+                                message: "Multi-channel samples must be contiguous".to_string(),
+                            });
+                        }
+                    };
+                    let working_samples = working_samples.as_multi_channel_mut().ok_or(AudioSampleError::OptionError { message: "Failed to get multi-channel data. Underlying data is not multi-channel.".to_string() })?;
+                    let working_samples = working_samples.as_slice_mut().ok_or(
+                        AudioSampleError::ArrayLayoutError {
+                            message: "Multi-channel samples must be contiguous".to_string(),
+                        },
+                    )?;
 
-                    for (i, &output) in output_samples.iter().enumerate() {
-                        samples[[channel, i]] = output.convert_to().unwrap_or_else(|_| {
-                            let zero: f64 = 0.0;
-                            zero.convert_to().unwrap()
-                        });
+                    filter.process_samples_in_place(working_samples);
+
+                    for (i, output) in working_samples.iter().enumerate() {
+                        multi_self[[channel, i]] = output.convert_to()?;
                     }
 
                     // Reset filter state for next channel
@@ -406,41 +435,39 @@ fn design_bandstop_filter(
 }
 
 /// Convert dB to linear gain.
-fn db_to_linear(db: f64) -> f64 {
+pub fn db_to_linear(db: f64) -> f64 {
     10.0_f64.powf(db / 20.0)
 }
 
 /// Convert linear gain to dB.
-fn linear_to_db(linear: f64) -> f64 {
+pub fn linear_to_db(linear: f64) -> f64 {
     20.0 * linear.log10()
 }
 
 impl<T: AudioSample> AudioSamples<T>
 where
-    T: ConvertTo<f64> + num_traits::NumCast,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Apply a linear gain to all samples.
     fn apply_linear_gain(&mut self, gain: f64) -> AudioSampleResult<()> {
         match &mut self.data {
             AudioData::Mono(samples) => {
                 for sample in samples.iter_mut() {
-                    let value: f64 = sample.convert_to().unwrap_or(0.0);
+                    let value: f64 = sample.convert_to()?;
                     let scaled = value * gain;
-                    *sample = scaled.convert_to().unwrap_or_else(|_| {
-                        let zero: f64 = 0.0;
-                        zero.convert_to().unwrap()
-                    });
+                    *sample = scaled.convert_to()?;
                 }
             }
             AudioData::MultiChannel(samples) => {
                 for sample in samples.iter_mut() {
-                    let value: f64 = sample.convert_to().unwrap_or(0.0);
+                    let value: f64 = sample.convert_to()?;
                     let scaled = value * gain;
-                    *sample = scaled.convert_to().unwrap_or_else(|_| {
-                        let zero: f64 = 0.0;
-                        zero.convert_to().unwrap()
-                    });
+                    *sample = scaled.convert_to()?;
                 }
             }
         }

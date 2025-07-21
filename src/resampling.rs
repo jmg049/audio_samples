@@ -277,10 +277,10 @@ where
         let chunk_end = (chunk_start + chunk_size).min(input_data[0].len());
 
         // Extract chunk for each channel
-        let mut chunk_data: Vec<Vec<f32>> = Vec::with_capacity(channels);
-        for ch in 0..channels {
-            chunk_data.push(input_data[ch][chunk_start..chunk_end].to_vec());
-        }
+        let chunk_data: Vec<Vec<f32>> = input_data
+            .iter()
+            .map(|ch_data| ch_data[chunk_start..chunk_end].to_vec())
+            .collect();
 
         // Resample this chunk
         match resampler.process(&chunk_data, None) {
@@ -346,9 +346,10 @@ where
 
         // Create interleaved data
         let mut interleaved: Vec<T> = Vec::with_capacity(channels * samples_per_channel);
+
         for sample_idx in 0..samples_per_channel {
-            for ch in 0..channels {
-                interleaved.push(channel_data[ch][sample_idx].convert_to()?);
+            for channel_samples in &channel_data {
+                interleaved.push(channel_samples[sample_idx].convert_to()?);
             }
         }
 

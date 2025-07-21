@@ -1,10 +1,8 @@
-use ndarray::{Array1, Axis};
-use num_traits::{FromPrimitive, One, ToPrimitive, Zero};
-
 use crate::{
     AudioChannelOps, AudioEditing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    AudioTypeConversion, ConvertTo, I24, repr::AudioData,
+    AudioTypeConversion, ConvertTo, I24, operations::MonoConversionMethod, repr::AudioData,
 };
+use ndarray::{Array1, Axis};
 
 impl<T: AudioSample> AudioChannelOps<T> for AudioSamples<T>
 where
@@ -13,16 +11,14 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<f32>: AudioTypeConversion<T>,
-    AudioSamples<f64>: AudioTypeConversion<T>,
-    T: FromPrimitive + ToPrimitive + Zero + One,
+    AudioSamples<T>: AudioTypeConversion<T>,
 {
-    fn to_mono(&self, method: super::MonoConversionMethod) -> crate::AudioSampleResult<Self>
+    fn to_mono(&self, method: MonoConversionMethod) -> AudioSampleResult<Self>
     where
         Self: Sized,
     {
         match method {
-            super::MonoConversionMethod::Average => match &self.data {
+            MonoConversionMethod::Average => match &self.data {
                 AudioData::Mono(_) => Ok(AudioSamples::new(self.data.clone(), self.sample_rate())),
                 AudioData::MultiChannel(data) => {
                     let mono_data = data.mean_axis(Axis(0)).ok_or_else(|| {
@@ -33,24 +29,24 @@ where
                     Ok(AudioSamples::new_mono(mono_data, self.sample_rate()))
                 }
             },
-            super::MonoConversionMethod::Left => match &self.data {
+            MonoConversionMethod::Left => match &self.data {
                 AudioData::Mono(_) => Ok(AudioSamples::new(self.data.clone(), self.sample_rate())),
                 AudioData::MultiChannel(data) => {
                     let left_channel = data.index_axis(Axis(0), 0).to_owned();
                     Ok(AudioSamples::new_mono(left_channel, self.sample_rate()))
                 }
             },
-            super::MonoConversionMethod::Right => match &self.data {
+            MonoConversionMethod::Right => match &self.data {
                 AudioData::Mono(_) => Ok(AudioSamples::new(self.data.clone(), self.sample_rate())),
                 AudioData::MultiChannel(data) => {
                     let right_channel = data.index_axis(Axis(0), 1).to_owned();
                     Ok(AudioSamples::new_mono(right_channel, self.sample_rate()))
                 }
             },
-            super::MonoConversionMethod::Weighted(items) => {
+            MonoConversionMethod::Weighted(_items) => {
                 todo!()
             }
-            super::MonoConversionMethod::Center => {
+            MonoConversionMethod::Center => {
                 todo!()
             }
         }
@@ -70,9 +66,10 @@ where
         }
     }
 
+    /// TODO!
     fn to_channels(
         &self,
-        target_channels: usize,
+        _target_channels: usize,
         method: super::ChannelConversionMethod,
     ) -> crate::AudioSampleResult<Self>
     where
@@ -81,7 +78,7 @@ where
         match method {
             super::ChannelConversionMethod::Repeat => todo!(),
             super::ChannelConversionMethod::Smart => todo!(),
-            super::ChannelConversionMethod::Custom(items) => todo!(),
+            super::ChannelConversionMethod::Custom(_items) => todo!(),
         }
     }
 
@@ -138,36 +135,28 @@ where
                         "Panning requires stereo audio".to_string(),
                     ));
                 }
-
-                let mut data_f64_samples = self.as_f64()?;
-                let data_f64: &mut ndarray::ArrayBase<
-                    ndarray::OwnedRepr<f64>,
-                    ndarray::Dim<[usize; 2]>,
-                > = match &mut data_f64_samples.data {
-                    AudioData::Mono(_) => {
-                        return Err(AudioSampleError::InvalidParameter(
-                            "Cannot pan mono audio".to_string(),
-                        ));
-                    }
-                    AudioData::MultiChannel(data_f64) => data_f64,
-                };
-
                 // left
                 {
-                    let left = &mut data_f64.index_axis_mut(Axis(0), 0);
+                    let left = &mut data.index_axis_mut(Axis(0), 0);
                     let left_gain = 1.0 - pan_value.clamp(-1.0, 1.0);
-                    left.mapv_inplace(|x| x * left_gain);
+                    left.mapv_inplace(|x| {
+                        let x: f64 = x.cast_into();
+                        let diff = x * left_gain;
+                        T::cast_from(diff)
+                    });
                 }
 
                 // right
                 {
-                    let right = &mut data_f64.index_axis_mut(Axis(0), 1);
+                    let right = &mut data.index_axis_mut(Axis(0), 1);
                     let right_gain = 1.0 + pan_value.clamp(-1.0, 1.0);
-                    right.mapv_inplace(|x| x * right_gain);
+                    right.mapv_inplace(|x| {
+                        let x: f64 = x.cast_into();
+                        let diff = x * right_gain;
+                        T::cast_from(diff)
+                    });
                 }
 
-                let converted = data_f64_samples.to_type::<T>()?;
-                *self = converted;
                 Ok(())
             }
         }
@@ -185,35 +174,28 @@ where
                     ));
                 }
 
-                let mut data_f64_samples = self.as_f64()?;
-                let data_f64: &mut ndarray::ArrayBase<
-                    ndarray::OwnedRepr<f64>,
-                    ndarray::Dim<[usize; 2]>,
-                > = match &mut data_f64_samples.data {
-                    AudioData::Mono(_) => {
-                        return Err(AudioSampleError::InvalidParameter(
-                            "Cannot balance mono audio".to_string(),
-                        ));
-                    }
-                    AudioData::MultiChannel(data_f64) => data_f64,
-                };
-
                 // left
                 {
-                    let left = &mut data_f64.index_axis_mut(Axis(0), 0);
+                    let left = &mut data.index_axis_mut(Axis(0), 0);
                     let left_gain = 1.0 - balance.clamp(-1.0, 1.0);
-                    left.mapv_inplace(|x| x * left_gain);
+                    left.mapv_inplace(|x| {
+                        let x: f64 = x.cast_into();
+                        let diff = x * left_gain;
+                        T::cast_from(diff)
+                    });
                 }
 
                 // right
                 {
-                    let right = &mut data_f64.index_axis_mut(Axis(0), 1);
+                    let right = &mut data.index_axis_mut(Axis(0), 1);
                     let right_gain = 1.0 + balance.clamp(-1.0, 1.0);
-                    right.mapv_inplace(|x| x * right_gain);
+                    right.mapv_inplace(|x| {
+                        let x: f64 = x.cast_into();
+                        let diff = x * right_gain;
+                        T::cast_from(diff)
+                    });
                 }
 
-                let converted = data_f64_samples.to_type::<T>()?;
-                *self = converted;
                 Ok(())
             }
         }

@@ -332,7 +332,7 @@ where
 
     for i in 0..num_samples {
         let t = i as f64 / sample_rate_f64;
-        let frequency = start_freq + freq_rate * t;
+        // let frequency = start_freq + freq_rate * t;
         let phase = 2.0 * PI * (start_freq * t + 0.5 * freq_rate * t * t);
         let sample = amplitude * phase.sin();
         samples.push(sample.convert_to()?);

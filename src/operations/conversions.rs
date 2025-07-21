@@ -4,9 +4,11 @@
 //! vectorized type conversions using ndarray's mapv functionality and the
 //! existing ConvertTo trait system.
 
+use ndarray::{Array1, Array2};
+
 use super::traits::AudioTypeConversion;
 use crate::repr::AudioData;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24};
 
 impl<T: AudioSample> AudioTypeConversion<T> for AudioSamples<T>
 where
@@ -32,24 +34,31 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    fn as_type<O: AudioSample>(&self) -> AudioSampleResult<AudioSamples<O>>
+    fn as_type<O: AudioSample + ConvertTo<T>>(&self) -> AudioSampleResult<AudioSamples<O>>
     where
         T: ConvertTo<O>,
     {
         match &self.data {
             AudioData::Mono(arr) => {
                 // Use ndarray's mapv for efficient vectorized conversion
-                let converted_data = arr.mapv(|sample| {
-                    sample.convert_to().unwrap() // Safe because ConvertTo is in trait bounds
-                });
+                let mut converted_data = Vec::with_capacity(arr.len());
+                for sample in arr.iter() {
+                    converted_data.push(sample.convert_to()?);
+                }
+                let converted_data = Array1::from(converted_data);
 
                 Ok(AudioSamples::new_mono(converted_data, self.sample_rate()))
             }
             AudioData::MultiChannel(arr) => {
                 // Use ndarray's mapv for efficient vectorized conversion of multi-channel data
-                let converted_data = arr.mapv(|sample| {
-                    sample.convert_to().unwrap() // Safe because ConvertTo is in trait bounds
-                });
+                let shape: &[usize] = arr.shape();
+                let mut converted_data = Vec::with_capacity(shape[0] * shape[1]);
+                for sample in arr.iter() {
+                    converted_data.push(sample.convert_to()?);
+                }
+                let converted_data =
+                    Array2::from_shape_vec((shape[0], shape[1]), converted_data)
+                        .map_err(|e| AudioSampleError::DimensionMismatch(e.to_string()))?;
 
                 Ok(AudioSamples::new_multi_channel(
                     converted_data,
@@ -76,7 +85,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    fn to_type<O: AudioSample>(self) -> AudioSampleResult<AudioSamples<O>>
+    fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSampleResult<AudioSamples<O>>
     where
         T: ConvertTo<O>,
     {
