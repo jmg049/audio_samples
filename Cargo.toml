@@ -34,9 +34,13 @@ rubato =  "0.16.2"
 serde = "1.0.219"
 rayon = { version = "1.10", optional = true }
 indicatif = { version = "0.18", optional = true }
-tokio = { version = "1.0", features = ["rt", "time"], optional = true }
+tokio = { version = "1.0", features = ["rt", "time", "net", "io-util"], optional = true }
+tokio-util = { version = "0.7", optional = true }
 num_cpus = { version = "1.16", optional = true }
 futures = { version = "0.3", optional = true }
+crossbeam = { version = "0.8", optional = true }
+cpal = { version = "0.15", optional = true }
+parking_lot = { version = "0.12", optional = true }
 
 [features]
 default = ["batch-processing"]
@@ -44,3 +48,6 @@ python = ["dep:pyo3", "dep:numpy", "i24/pyo3"]
 batch-processing = []
 parallel-processing = ["dep:rayon", "dep:num_cpus", "batch-processing"]
 progress-tracking = ["dep:indicatif", "batch-processing"]
+streaming = ["dep:tokio", "dep:tokio-util", "dep:crossbeam", "dep:futures"]
+playback = ["dep:cpal", "dep:parking_lot"]
+realtime = ["streaming", "playback"]

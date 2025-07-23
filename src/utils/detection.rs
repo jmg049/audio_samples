@@ -9,6 +9,9 @@ use crate::{
     I24,
 };
 use rustfft::{FftPlanner, num_complex::Complex};
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 /// Attempts to detect the sample rate of an audio signal based on its content.
 ///
@@ -385,6 +388,595 @@ where
     }
 
     Ok(clipped_regions)
+}
+
+// ========================
+// Enhanced Format Detection
+// ========================
+
+/// Audio format information detected from files or streams.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioFormat {
+    pub format_type: AudioFormatType,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub bit_depth: u16,
+    pub codec: Option<String>,
+    pub duration_samples: Option<u64>,
+    pub container_format: Option<String>,
+}
+
+/// Supported audio format types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormatType {
+    Wav,
+    Flac,
+    Mp3,
+    Aac,
+    Ogg,
+    Raw,
+    Unknown,
+}
+
+impl AudioFormatType {
+    /// Get common file extensions for this format.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Wav => &["wav", "wave"],
+            Self::Flac => &["flac"],
+            Self::Mp3 => &["mp3"],
+            Self::Aac => &["aac", "m4a"],
+            Self::Ogg => &["ogg", "oga"],
+            Self::Raw => &["raw", "pcm"],
+            Self::Unknown => &[],
+        }
+    }
+
+    /// Get MIME type for this format.
+    pub fn mime_type(&self) -> &'static str {
+        match self {
+            Self::Wav => "audio/wav",
+            Self::Flac => "audio/flac",
+            Self::Mp3 => "audio/mpeg",
+            Self::Aac => "audio/aac",
+            Self::Ogg => "audio/ogg",
+            Self::Raw => "audio/raw",
+            Self::Unknown => "application/octet-stream",
+        }
+    }
+}
+
+/// Detect audio format from file path and/or content.
+pub fn detect_audio_format<P: AsRef<Path>>(path: P) -> AudioSampleResult<AudioFormat> {
+    let path = path.as_ref();
+
+    // First try to detect from file extension
+    let format_type = detect_format_from_extension(path);
+
+    // Then try to detect from file content if we can read it
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let detected_format = detect_format_from_header(&mut file)?;
+        Ok(detected_format)
+    } else {
+        // Fallback to extension-based detection with defaults
+        Ok(AudioFormat {
+            format_type,
+            sample_rate: 44100,
+            channels: 2,
+            bit_depth: 16,
+            codec: None,
+            duration_samples: None,
+            container_format: None,
+        })
+    }
+}
+
+/// Detect format from file extension.
+pub fn detect_format_from_extension<P: AsRef<Path>>(path: P) -> AudioFormatType {
+    let path = path.as_ref();
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    match extension.as_str() {
+        "wav" | "wave" => AudioFormatType::Wav,
+        "flac" => AudioFormatType::Flac,
+        "mp3" => AudioFormatType::Mp3,
+        "aac" | "m4a" => AudioFormatType::Aac,
+        "ogg" | "oga" => AudioFormatType::Ogg,
+        "raw" | "pcm" => AudioFormatType::Raw,
+        _ => AudioFormatType::Unknown,
+    }
+}
+
+/// Detect format from file header/magic bytes.
+pub fn detect_format_from_header<R: Read + Seek>(reader: &mut R) -> AudioSampleResult<AudioFormat> {
+    let mut header = [0u8; 12];
+    reader
+        .read_exact(&mut header)
+        .map_err(|e| AudioSampleError::InvalidInput {
+            msg: format!("Failed to read header: {}", e),
+        })?;
+
+    // Reset to beginning
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| AudioSampleError::InvalidInput {
+            msg: format!("Failed to seek: {}", e),
+        })?;
+
+    // Check magic bytes/signatures
+    if &header[0..4] == b"RIFF" && &header[8..12] == b"WAVE" {
+        parse_wav_header(reader)
+    } else if &header[0..4] == b"fLaC" {
+        parse_flac_header(reader)
+    } else if header[0] == 0xFF && (header[1] & 0xE0) == 0xE0 {
+        // MP3 frame header
+        parse_mp3_header(reader)
+    } else if &header[0..4] == b"OggS" {
+        parse_ogg_header(reader)
+    } else {
+        // Unknown format, return basic info
+        Ok(AudioFormat {
+            format_type: AudioFormatType::Unknown,
+            sample_rate: 44100,
+            channels: 2,
+            bit_depth: 16,
+            codec: None,
+            duration_samples: None,
+            container_format: None,
+        })
+    }
+}
+
+/// Detect bit depth from raw audio stream analysis.
+pub fn detect_bit_depth<T: AudioSample>(audio: &AudioSamples<T>) -> AudioSampleResult<u16>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
+    let audio_f64 = audio.as_f64()?;
+
+    let data: Vec<f64> = match audio_f64.as_mono() {
+        Some(mono) => mono
+            .as_slice()
+            .ok_or(AudioSampleError::ArrayLayoutError {
+                message: "Mono samples must be contiguous".to_string(),
+            })?
+            .to_vec(),
+        None => {
+            // Flatten multi-channel audio
+            let multi = audio_f64
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be multi-channel".to_string(),
+                })?;
+            multi
+                .as_slice()
+                .ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Multi-channel samples must be contiguous".to_string(),
+                })?
+                .to_vec()
+        }
+    };
+
+    if data.is_empty() {
+        return Ok(16); // Default
+    }
+
+    // Analyze quantization patterns to estimate bit depth
+    let unique_values: std::collections::HashSet<_> = data
+        .iter()
+        .map(|&x| (x * 65536.0) as i32) // Scale to detect quantization
+        .collect();
+
+    let unique_count = unique_values.len();
+    let _total_samples = data.len();
+
+    // Estimate bit depth based on unique value distribution
+    let estimated_bits = if unique_count < 256 {
+        8
+    } else if unique_count < 65536 {
+        16
+    } else if unique_count < 16777216 {
+        24
+    } else {
+        32
+    };
+
+    Ok(estimated_bits)
+}
+
+/// Detect channel configuration from audio stream.
+pub fn detect_channel_config<T: AudioSample>(audio: &AudioSamples<T>) -> ChannelConfiguration {
+    let channels = audio.channels();
+
+    match channels {
+        1 => ChannelConfiguration::Mono,
+        2 => {
+            // Could be stereo or dual mono - analyze correlation
+            if let Some(multi) = audio.as_multi_channel() {
+                if multi.nrows() >= 2 {
+                    let left = multi.row(0);
+                    let right = multi.row(1);
+
+                    // Calculate correlation between channels
+                    let correlation = calculate_channel_correlation(
+                        left.as_slice().unwrap_or(&[]),
+                        right.as_slice().unwrap_or(&[]),
+                    );
+
+                    if correlation > 0.95 {
+                        ChannelConfiguration::DualMono
+                    } else {
+                        ChannelConfiguration::Stereo
+                    }
+                } else {
+                    ChannelConfiguration::Stereo
+                }
+            } else {
+                ChannelConfiguration::Stereo
+            }
+        }
+        3 => ChannelConfiguration::Surround3_0,
+        4 => ChannelConfiguration::Surround4_0,
+        5 => ChannelConfiguration::Surround5_0,
+        6 => ChannelConfiguration::Surround5_1,
+        8 => ChannelConfiguration::Surround7_1,
+        _ => ChannelConfiguration::Other(channels),
+    }
+}
+
+/// Channel configuration types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelConfiguration {
+    Mono,
+    Stereo,
+    DualMono,
+    Surround3_0,
+    Surround4_0,
+    Surround5_0,
+    Surround5_1,
+    Surround7_1,
+    Other(usize),
+}
+
+// ========================
+// Metadata Extraction
+// ========================
+
+/// Audio metadata extracted from files or streams.
+#[derive(Debug, Clone, Default)]
+pub struct AudioMetadata {
+    pub format_info: Option<AudioFormat>,
+    pub duration_seconds: Option<f64>,
+    pub file_size_bytes: Option<u64>,
+    pub bitrate_kbps: Option<u32>,
+    pub quality_metrics: QualityMetrics,
+    pub tags: HashMap<String, String>,
+}
+
+/// Quality metrics for audio analysis.
+#[derive(Debug, Clone, Default)]
+pub struct QualityMetrics {
+    pub peak_amplitude: f64,
+    pub rms_amplitude: f64,
+    pub dynamic_range_db: f64,
+    pub thd_plus_n_percent: Option<f64>,
+    pub snr_db: Option<f64>,
+    pub bit_depth_effective: Option<u16>,
+    pub frequency_response_range: Option<(f64, f64)>,
+    pub clipping_detected: bool,
+    pub noise_floor_db: Option<f64>,
+}
+
+/// Extract comprehensive metadata from audio file.
+pub fn extract_audio_metadata<P: AsRef<Path>>(path: P) -> AudioSampleResult<AudioMetadata> {
+    let path = path.as_ref();
+    let mut metadata = AudioMetadata::default();
+
+    // Get file size
+    if let Ok(file_metadata) = path.metadata() {
+        metadata.file_size_bytes = Some(file_metadata.len());
+    }
+
+    // Detect format
+    metadata.format_info = Some(detect_audio_format(path)?);
+
+    // Calculate duration if we have format info
+    if let Some(ref format) = metadata.format_info {
+        if let Some(duration_samples) = format.duration_samples {
+            metadata.duration_seconds = Some(duration_samples as f64 / format.sample_rate as f64);
+        }
+
+        // Estimate bitrate
+        if let (Some(duration), Some(file_size)) =
+            (metadata.duration_seconds, metadata.file_size_bytes)
+        {
+            if duration > 0.0 {
+                let bitrate = (file_size * 8) as f64 / duration / 1000.0; // kbps
+                metadata.bitrate_kbps = Some(bitrate as u32);
+            }
+        }
+    }
+
+    Ok(metadata)
+}
+
+/// Calculate quality metrics from audio samples.
+pub fn calculate_quality_metrics<T: AudioSample>(
+    audio: &AudioSamples<T>,
+) -> AudioSampleResult<QualityMetrics>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
+    let mut metrics = QualityMetrics::default();
+
+    // Basic dynamic range analysis
+    let (peak, rms, dynamic_range) = detect_dynamic_range(audio)?;
+    metrics.peak_amplitude = peak;
+    metrics.rms_amplitude = rms;
+    metrics.dynamic_range_db = dynamic_range;
+
+    // Clipping detection
+    let clipped_regions = detect_clipping(audio, 0.99)?;
+    metrics.clipping_detected = !clipped_regions.is_empty();
+
+    // Effective bit depth
+    metrics.bit_depth_effective = Some(detect_bit_depth(audio)?);
+
+    // Estimate noise floor
+    metrics.noise_floor_db = estimate_noise_floor(audio)?;
+
+    // Frequency response analysis
+    metrics.frequency_response_range = estimate_frequency_range(audio)?;
+
+    Ok(metrics)
+}
+
+/// Estimate noise floor of audio signal.
+fn estimate_noise_floor<T: AudioSample>(audio: &AudioSamples<T>) -> AudioSampleResult<Option<f64>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
+    let audio_f64 = audio.as_f64()?;
+
+    let data: Vec<f64> = match audio_f64.as_mono() {
+        Some(mono) => mono
+            .as_slice()
+            .ok_or(AudioSampleError::ArrayLayoutError {
+                message: "Mono samples must be contiguous".to_string(),
+            })?
+            .to_vec(),
+        None => {
+            // Use first channel
+            let multi = audio_f64
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be multi-channel".to_string(),
+                })?;
+            multi
+                .row(0)
+                .as_slice()
+                .ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Multi-channel samples must be contiguous".to_string(),
+                })?
+                .to_vec()
+        }
+    };
+
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    // Find quietest regions (bottom 10th percentile)
+    let mut sorted_abs: Vec<f64> = data.iter().map(|&x| x.abs()).collect();
+    sorted_abs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let percentile_10 = sorted_abs.len() / 10;
+    if percentile_10 > 0 {
+        let noise_level = sorted_abs[percentile_10];
+        if noise_level > 0.0 {
+            let noise_floor_db = 20.0 * noise_level.log10();
+            return Ok(Some(noise_floor_db));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Estimate frequency response range.
+fn estimate_frequency_range<T: AudioSample>(
+    audio: &AudioSamples<T>,
+) -> AudioSampleResult<Option<(f64, f64)>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
+    let audio_f64 = audio.as_f64()?;
+
+    let data: Vec<f64> = match audio_f64.as_mono() {
+        Some(mono) => mono
+            .as_slice()
+            .ok_or(AudioSampleError::ArrayLayoutError {
+                message: "Mono samples must be contiguous".to_string(),
+            })?
+            .to_vec(),
+        None => {
+            // Use first channel
+            let multi = audio_f64
+                .as_multi_channel()
+                .ok_or(AudioSampleError::InvalidInput {
+                    msg: "Audio must be multi-channel".to_string(),
+                })?;
+            multi
+                .row(0)
+                .as_slice()
+                .ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Multi-channel samples must be contiguous".to_string(),
+                })?
+                .to_vec()
+        }
+    };
+
+    if data.len() < 1024 {
+        return Ok(None); // Too short for meaningful analysis
+    }
+
+    // Compute spectrum
+    let spectrum = compute_spectrum(&data)?;
+    let sample_rate = audio.sample_rate() as f64;
+    let nyquist = sample_rate / 2.0;
+
+    // Find frequency range with significant energy
+    let threshold = spectrum.iter().fold(0.0_f64, |acc, &x| acc.max(x)) * 0.01; // 1% of peak
+
+    let mut low_freq = None;
+    let mut high_freq = None;
+
+    for (i, &energy) in spectrum.iter().enumerate() {
+        if energy > threshold {
+            let freq = (i as f64 / spectrum.len() as f64) * nyquist;
+            if low_freq.is_none() {
+                low_freq = Some(freq);
+            }
+            high_freq = Some(freq);
+        }
+    }
+
+    if let (Some(low), Some(high)) = (low_freq, high_freq) {
+        Ok(Some((low, high)))
+    } else {
+        Ok(None)
+    }
+}
+
+// ========================
+// Format-specific parsers
+// ========================
+
+fn parse_wav_header<R: Read + Seek>(reader: &mut R) -> AudioSampleResult<AudioFormat> {
+    let mut buffer = [0u8; 44]; // Standard WAV header size
+    reader
+        .read_exact(&mut buffer)
+        .map_err(|e| AudioSampleError::InvalidInput {
+            msg: format!("Failed to read WAV header: {}", e),
+        })?;
+
+    // Parse WAV header fields
+    let sample_rate = u32::from_le_bytes([buffer[24], buffer[25], buffer[26], buffer[27]]);
+    let channels = u16::from_le_bytes([buffer[22], buffer[23]]);
+    let bits_per_sample = u16::from_le_bytes([buffer[34], buffer[35]]);
+
+    // Calculate duration from chunk size
+    let data_size = u32::from_le_bytes([buffer[40], buffer[41], buffer[42], buffer[43]]);
+    let bytes_per_sample = (bits_per_sample / 8) as u32;
+    let duration_samples = if bytes_per_sample > 0 {
+        Some((data_size / bytes_per_sample / channels as u32) as u64)
+    } else {
+        None
+    };
+
+    Ok(AudioFormat {
+        format_type: AudioFormatType::Wav,
+        sample_rate,
+        channels,
+        bit_depth: bits_per_sample,
+        codec: Some("PCM".to_string()),
+        duration_samples,
+        container_format: Some("RIFF".to_string()),
+    })
+}
+
+fn parse_flac_header<R: Read + Seek>(_reader: &mut R) -> AudioSampleResult<AudioFormat> {
+    // Simplified FLAC header parsing - real implementation would be more complex
+    Ok(AudioFormat {
+        format_type: AudioFormatType::Flac,
+        sample_rate: 44100, // Default, should parse from STREAMINFO
+        channels: 2,
+        bit_depth: 16,
+        codec: Some("FLAC".to_string()),
+        duration_samples: None,
+        container_format: Some("FLAC".to_string()),
+    })
+}
+
+fn parse_mp3_header<R: Read + Seek>(_reader: &mut R) -> AudioSampleResult<AudioFormat> {
+    // Simplified MP3 header parsing
+    Ok(AudioFormat {
+        format_type: AudioFormatType::Mp3,
+        sample_rate: 44100,
+        channels: 2,
+        bit_depth: 16, // MP3 is lossy, but equivalent to ~16-bit
+        codec: Some("MP3".to_string()),
+        duration_samples: None,
+        container_format: Some("MPEG".to_string()),
+    })
+}
+
+fn parse_ogg_header<R: Read + Seek>(_reader: &mut R) -> AudioSampleResult<AudioFormat> {
+    // Simplified OGG header parsing
+    Ok(AudioFormat {
+        format_type: AudioFormatType::Ogg,
+        sample_rate: 44100,
+        channels: 2,
+        bit_depth: 16,
+        codec: Some("Vorbis".to_string()),
+        duration_samples: None,
+        container_format: Some("OGG".to_string()),
+    })
+}
+
+fn calculate_channel_correlation<T: AudioSample>(left: &[T], right: &[T]) -> f64 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+
+    let left_f64: Vec<f64> = left.iter().map(|&x| x.cast_into()).collect();
+    let right_f64: Vec<f64> = right.iter().map(|&x| x.cast_into()).collect();
+
+    // Calculate Pearson correlation coefficient
+    let n = left_f64.len() as f64;
+    let mean_left = left_f64.iter().sum::<f64>() / n;
+    let mean_right = right_f64.iter().sum::<f64>() / n;
+
+    let numerator: f64 = left_f64
+        .iter()
+        .zip(right_f64.iter())
+        .map(|(&l, &r)| (l - mean_left) * (r - mean_right))
+        .sum();
+
+    let sum_sq_left: f64 = left_f64.iter().map(|&l| (l - mean_left).powi(2)).sum();
+
+    let sum_sq_right: f64 = right_f64.iter().map(|&r| (r - mean_right).powi(2)).sum();
+
+    let denominator = (sum_sq_left * sum_sq_right).sqrt();
+
+    if denominator > 0.0 {
+        numerator / denominator
+    } else {
+        0.0
+    }
 }
 
 // Helper functions

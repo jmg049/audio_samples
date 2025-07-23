@@ -69,6 +69,13 @@ mod repr;
 
 pub mod resampling;
 pub mod utils;
+
+// Streaming and playback modules
+#[cfg(feature = "streaming")]
+pub mod streaming;
+
+#[cfg(feature = "playback")]
+pub mod playback;
 use std::{
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},
