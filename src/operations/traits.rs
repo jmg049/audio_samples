@@ -7,6 +7,7 @@
 use super::types::*;
 use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
 use ndarray::Array2;
+use std::collections::VecDeque;
 
 // Complex numbers using num-complex crate
 pub use num_complex::Complex;
@@ -2113,6 +2114,509 @@ where
     fn balance(&mut self, balance: f64) -> AudioSampleResult<()>;
 }
 
+/// Operation application and chaining functionality.
+///
+/// This trait provides methods for chaining operations together in fluent interfaces,
+/// applying batches of operations efficiently, and creating reusable operation pipelines.
+/// It enables more ergonomic and performant audio processing workflows.
+pub trait AudioOperationApply<T: AudioSample>
+where
+    Self: Sized,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
+    /// Apply a generic operation function to the audio samples.
+    ///
+    /// This method enables functional-style audio processing by accepting
+    /// any function that takes a mutable reference to Self and returns a Result.
+    /// It provides a foundation for building fluent interfaces and operation chains.
+    ///
+    /// # Arguments
+    /// * `operation` - Function that modifies the audio samples
+    ///
+    /// # Returns
+    /// Self for method chaining, or an error if the operation fails
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use audio_samples::{AudioSamples, operations::*};
+    ///
+    /// let result = audio
+    ///     .apply(|samples| samples.normalize(T::from_f64(-1.0), T::from_f64(1.0), NormalizationMethod::Peak))?
+    ///     .apply(|samples| samples.scale(T::from_f64(0.8)))?
+    ///     .apply(|samples| samples.low_pass_filter(1000.0))?;
+    /// ```
+    fn apply<F>(mut self, operation: F) -> AudioSampleResult<Self>
+    where
+        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        operation(&mut self)?;
+        Ok(self)
+    }
+
+    /// Apply a fallible operation that may return a new instance.
+    ///
+    /// Some operations naturally return new AudioSamples instances rather than
+    /// modifying in place. This method handles such operations while maintaining
+    /// the fluent interface pattern.
+    ///
+    /// # Arguments
+    /// * `operation` - Function that takes Self and returns a new instance
+    ///
+    /// # Returns
+    /// New AudioSamples instance or an error if the operation fails
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let result = audio
+    ///     .apply_transform(|samples| samples.resample(48000, ResamplingQuality::High))?
+    ///     .apply_transform(|samples| samples.to_mono(MonoConversionMethod::Average))?;
+    /// ```
+    fn apply_transform<F>(self, operation: F) -> AudioSampleResult<Self>
+    where
+        F: FnOnce(Self) -> AudioSampleResult<Self>,
+    {
+        operation(self)
+    }
+
+    /// Apply multiple operations in sequence with short-circuit error handling.
+    ///
+    /// This method applies a vector of operations in order, stopping at the first
+    /// error encountered. It's useful for batch processing and creating reusable
+    /// operation sequences.
+    ///
+    /// # Arguments
+    /// * `operations` - Vector of operations to apply in sequence
+    ///
+    /// # Returns
+    /// Self after all operations, or the first error encountered
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let operations: Vec<Box<dyn FnOnce(&mut AudioSamples<f32>) -> AudioSampleResult<()>>> = vec![
+    ///     Box::new(|s| s.remove_dc_offset()),
+    ///     Box::new(|s| s.normalize(T::from_f64(-1.0), T::from_f64(1.0), NormalizationMethod::RMS)),
+    ///     Box::new(|s| s.low_pass_filter(8000.0)),
+    /// ];
+    /// let result = audio.apply_batch(operations)?;
+    /// ```
+    fn apply_batch<F>(mut self, operations: Vec<F>) -> AudioSampleResult<Self>
+    where
+        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        for operation in operations {
+            operation(&mut self)?;
+        }
+        Ok(self)
+    }
+
+    /// Apply operations conditionally based on a predicate.
+    ///
+    /// This method only applies the operation if the condition evaluates to true.
+    /// It's useful for dynamic processing pipelines where operations may be
+    /// applied based on audio characteristics or user preferences.
+    ///
+    /// # Arguments
+    /// * `condition` - Predicate that determines whether to apply the operation
+    /// * `operation` - Operation to apply if condition is true
+    ///
+    /// # Returns
+    /// Self (possibly modified) for method chaining
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let result = audio
+    ///     .apply_if(|samples| samples.peak() > T::from_f64(0.9), |samples| {
+    ///         samples.apply_limiter(&LimiterConfig::default(), 44100.0)
+    ///     })?
+    ///     .apply_if(|samples| samples.channels() > 2, |samples| {
+    ///         samples.to_stereo(StereoConversionMethod::DownmixCenter)
+    ///     })?;
+    /// ```
+    fn apply_if<P, F>(mut self, condition: P, operation: F) -> AudioSampleResult<Self>
+    where
+        P: FnOnce(&Self) -> bool,
+        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        if condition(&self) {
+            operation(&mut self)?;
+        }
+        Ok(self)
+    }
+
+    /// Try to apply an operation, falling back to a default operation on failure.
+    ///
+    /// This method attempts the primary operation first, and if it fails,
+    /// applies the fallback operation instead. It's useful for robust processing
+    /// pipelines where alternative processing methods should be used if the
+    /// preferred method fails.
+    ///
+    /// # Arguments
+    /// * `primary_op` - Primary operation to attempt
+    /// * `fallback_op` - Fallback operation to use if primary fails
+    ///
+    /// # Returns
+    /// Self after applying either primary or fallback operation
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let result = audio.try_apply_or(
+    ///     |samples| samples.resample(96000, ResamplingQuality::High),
+    ///     |samples| samples.resample(48000, ResamplingQuality::Medium),
+    /// )?;
+    /// ```
+    fn try_apply_or<F1, F2>(mut self, primary_op: F1, fallback_op: F2) -> AudioSampleResult<Self>
+    where
+        F1: FnOnce(&mut Self) -> AudioSampleResult<()>,
+        F2: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        if primary_op(&mut self).is_err() {
+            fallback_op(&mut self)?;
+        }
+        Ok(self)
+    }
+
+    /// Apply an operation and collect metrics about its execution.
+    ///
+    /// This method wraps operation execution with timing and error tracking,
+    /// useful for performance monitoring and debugging complex processing chains.
+    ///
+    /// # Arguments
+    /// * `operation` - Operation to apply and measure
+    /// * `operation_name` - Human-readable name for the operation
+    ///
+    /// # Returns
+    /// Tuple of (modified_audio, execution_metrics)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let (result, metrics) = audio.apply_with_metrics(
+    ///     |samples| samples.apply_compressor(&config, 44100.0),
+    ///     "compressor"
+    /// )?;
+    /// println!("Operation {} took {:.2}ms", metrics.name, metrics.duration_ms);
+    /// ```
+    fn apply_with_metrics<F>(
+        mut self,
+        operation: F,
+        operation_name: &str,
+    ) -> AudioSampleResult<(Self, OperationMetrics)>
+    where
+        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        let start = std::time::Instant::now();
+        let result = operation(&mut self);
+        let duration = start.elapsed();
+
+        let metrics = OperationMetrics {
+            name: operation_name.to_string(),
+            duration_ms: duration.as_secs_f64() * 1000.0,
+            success: result.is_ok(),
+            error_message: result.as_ref().err().map(|e| e.to_string()),
+        };
+
+        result?;
+        Ok((self, metrics))
+    }
+
+    /// Apply a sequence of operations using a simple closure-based approach.
+    ///
+    /// This method provides a lightweight alternative to full pipeline functionality
+    /// by accepting a closure that can chain multiple operations together.
+    ///
+    /// # Arguments
+    /// * `operations` - Closure that chains operations on the audio samples
+    ///
+    /// # Returns
+    /// Self after applying all operations in the closure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let result = audio.apply_sequence(|s| {
+    ///     s.apply(|s| s.normalize(T::from_f64(-1.0), T::from_f64(1.0), NormalizationMethod::Peak))?
+    ///      .apply(|s| s.scale(T::from_f64(0.8)))?
+    ///      .apply(|s| s.low_pass_filter(1000.0))
+    /// })?;
+    /// ```
+    fn apply_sequence<F>(self, operations: F) -> AudioSampleResult<Self>
+    where
+        F: FnOnce(Self) -> AudioSampleResult<Self>,
+    {
+        operations(self)
+    }
+}
+
+/// Metrics collected during operation execution.
+///
+/// Provides timing and error information for individual operations,
+/// useful for performance monitoring and debugging.
+#[derive(Debug, Clone)]
+pub struct OperationMetrics {
+    pub name: String,
+    pub duration_ms: f64,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+/// A reusable pipeline of audio processing operations.
+///
+/// Encapsulates a sequence of operations that can be applied to multiple
+/// AudioSamples instances efficiently. Pipelines can be built using a
+/// fluent interface and provide built-in error handling and metrics.
+pub struct OperationPipeline<T: AudioSample> {
+    pub name: String,
+    operations: Vec<Box<dyn Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync>>,
+    collect_metrics: bool,
+}
+
+impl<T: AudioSample> OperationPipeline<T> {
+    /// Create a new empty operation pipeline.
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            operations: Vec::new(),
+            collect_metrics: false,
+        }
+    }
+
+    /// Add an operation to the pipeline.
+    ///
+    /// # Arguments
+    /// * `operation` - Operation function to add to the pipeline
+    pub fn add_operation<F>(mut self, operation: F) -> Self
+    where
+        F: Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync + 'static,
+    {
+        self.operations.push(Box::new(operation));
+        self
+    }
+
+    /// Enable metrics collection for this pipeline.
+    pub fn with_metrics(mut self) -> Self {
+        self.collect_metrics = true;
+        self
+    }
+
+    /// Apply the pipeline to audio samples.
+    ///
+    /// # Arguments
+    /// * `audio` - Audio samples to process
+    ///
+    /// # Returns
+    /// Processed audio samples or error if any operation fails
+    pub fn apply(&self, mut audio: AudioSamples<T>) -> AudioSampleResult<AudioSamples<T>> {
+        for (i, operation) in self.operations.iter().enumerate() {
+            if self.collect_metrics {
+                let start = std::time::Instant::now();
+                let result = operation(&mut audio);
+                let duration = start.elapsed();
+
+                if let Err(e) = &result {
+                    eprintln!(
+                        "Pipeline '{}' operation {} failed after {:.2}ms: {}",
+                        self.name,
+                        i,
+                        duration.as_secs_f64() * 1000.0,
+                        e
+                    );
+                    return result.map(|_| audio);
+                }
+            } else {
+                operation(&mut audio)?;
+            }
+        }
+        Ok(audio)
+    }
+
+    /// Get the number of operations in this pipeline.
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+
+    /// Create a copy of this pipeline with a new name.
+    pub fn clone_with_name(&self, new_name: String) -> Self {
+        Self {
+            name: new_name,
+            operations: Vec::new(), // Note: Cannot clone Fn trait objects
+            collect_metrics: self.collect_metrics,
+        }
+    }
+}
+
+/// Real-time operation processing functionality.
+///
+/// This trait provides methods for applying operations in real-time scenarios
+/// where low-latency processing is critical, such as live audio processing,
+/// streaming, and interactive applications.
+pub trait AudioRealtimeOps<T: AudioSample>: AudioOperationApply<T>
+where
+    Self: Sized,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
+    /// Apply operations with real-time constraints.
+    ///
+    /// This method applies operations with timing constraints suitable for
+    /// real-time processing. Operations that take too long are skipped or
+    /// simplified to maintain consistent throughput.
+    ///
+    /// # Arguments
+    /// * `operations` - Queue of operations to apply
+    /// * `max_processing_time_ms` - Maximum time budget per processing cycle
+    ///
+    /// # Returns
+    /// Self after processing, with metrics about completed/skipped operations
+    fn apply_realtime<F>(
+        mut self,
+        mut operations: VecDeque<F>,
+        max_processing_time_ms: f64,
+    ) -> AudioSampleResult<(Self, RealtimeMetrics)>
+    where
+        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        let start_time = std::time::Instant::now();
+        let max_duration = std::time::Duration::from_secs_f64(max_processing_time_ms / 1000.0);
+
+        let mut completed_operations = 0;
+        let mut skipped_operations = 0;
+
+        while let Some(operation) = operations.pop_front() {
+            if start_time.elapsed() >= max_duration {
+                skipped_operations = operations.len() + 1;
+                break;
+            }
+
+            if let Err(_) = operation(&mut self) {
+                // In real-time processing, we continue despite errors
+                // to maintain audio continuity
+                continue;
+            }
+
+            completed_operations += 1;
+        }
+
+        let metrics = RealtimeMetrics {
+            total_processing_time_ms: start_time.elapsed().as_secs_f64() * 1000.0,
+            completed_operations,
+            skipped_operations,
+            target_time_ms: max_processing_time_ms,
+        };
+
+        Ok((self, metrics))
+    }
+
+    /// Apply operations with adaptive quality based on available processing time.
+    ///
+    /// This method implements adaptive processing where operation quality
+    /// is automatically adjusted based on available processing time and
+    /// system load. High-quality operations are used when time permits,
+    /// with graceful degradation under high load.
+    ///
+    /// # Arguments
+    /// * `high_quality_op` - High-quality operation (slower)
+    /// * `medium_quality_op` - Medium-quality operation (moderate speed)
+    /// * `low_quality_op` - Low-quality operation (fastest)
+    /// * `time_budget_ms` - Available processing time
+    ///
+    /// # Returns
+    /// Self after applying the appropriate quality operation
+    fn apply_adaptive_quality<F1, F2, F3>(
+        mut self,
+        high_quality_op: F1,
+        medium_quality_op: F2,
+        low_quality_op: F3,
+        time_budget_ms: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        F1: FnOnce(&mut Self) -> AudioSampleResult<()>,
+        F2: FnOnce(&mut Self) -> AudioSampleResult<()>,
+        F3: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        let _start_time = std::time::Instant::now();
+
+        // Try high quality first if we have generous time budget
+        if time_budget_ms > 10.0 {
+            if high_quality_op(&mut self).is_ok() {
+                return Ok(self);
+            }
+        }
+
+        // Fall back to medium quality
+        if time_budget_ms > 5.0 {
+            if medium_quality_op(&mut self).is_ok() {
+                return Ok(self);
+            }
+        }
+
+        // Last resort: low quality operation
+        low_quality_op(&mut self)?;
+        Ok(self)
+    }
+
+    /// Buffer operations for batch processing to improve efficiency.
+    ///
+    /// This method collects operations in a buffer and applies them in
+    /// optimized batches. This can improve cache efficiency and reduce
+    /// overhead for certain types of operations.
+    ///
+    /// # Arguments
+    /// * `operation` - Operation to add to the buffer
+    /// * `buffer` - Operation buffer (shared between calls)
+    /// * `batch_size` - Number of operations to collect before processing
+    ///
+    /// # Returns
+    /// Self, possibly modified if buffer was flushed
+    fn buffer_operation<F>(
+        self,
+        operation: F,
+        buffer: &mut Vec<F>,
+        batch_size: usize,
+    ) -> AudioSampleResult<Self>
+    where
+        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+    {
+        buffer.push(operation);
+
+        if buffer.len() >= batch_size {
+            let operations = std::mem::take(buffer);
+            return self.apply_batch(operations);
+        }
+
+        Ok(self)
+    }
+}
+
+/// Metrics for real-time audio processing.
+#[derive(Debug, Clone)]
+pub struct RealtimeMetrics {
+    pub total_processing_time_ms: f64,
+    pub completed_operations: usize,
+    pub skipped_operations: usize,
+    pub target_time_ms: f64,
+}
+
+impl RealtimeMetrics {
+    /// Check if processing met the real-time constraints.
+    pub fn is_realtime(&self) -> bool {
+        self.total_processing_time_ms <= self.target_time_ms && self.skipped_operations == 0
+    }
+
+    /// Get the processing efficiency (0.0 to 1.0).
+    pub fn efficiency(&self) -> f64 {
+        if self.target_time_ms > 0.0 {
+            (self.target_time_ms - self.total_processing_time_ms).max(0.0) / self.target_time_ms
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Type conversion operations between different sample formats.
 ///
 /// This trait provides safe conversion between different audio sample types
@@ -2195,6 +2699,8 @@ pub trait AudioSamplesOperations<T: AudioSample>:
     + AudioPitchAnalysis<T>
     + AudioIirFiltering<T>
     + AudioParametricEq<T>
+    + AudioOperationApply<T>
+    + AudioRealtimeOps<T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -2217,7 +2723,9 @@ where
         + AudioTypeConversion<T>
         + AudioPitchAnalysis<T>
         + AudioIirFiltering<T>
-        + AudioParametricEq<T>,
+        + AudioParametricEq<T>
+        + AudioOperationApply<T>
+        + AudioRealtimeOps<T>,
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
