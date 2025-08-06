@@ -36,7 +36,10 @@ pub(crate) enum AudioSamplesData {
 
 // Import submodules
 mod conversions;
+// mod dynamic_range;  // Temporarily disabled due to missing types
 mod editing;
+// mod iir_filtering;  // Temporarily disabled due to missing types
+// mod parametric_eq;  // Temporarily disabled due to missing types
 mod processing;
 mod statistics;
 mod transforms;
@@ -809,6 +812,82 @@ impl PyAudioSamples {
     ) -> PyResult<PyObject> {
         self.power_spectral_density_impl(py, window_size, overlap, window)
     }
+
+    // =====================
+    // Dynamic Range Methods - TEMPORARILY DISABLED
+    // =====================
+    // These methods will be re-enabled once the corresponding Rust traits 
+    // and types are properly implemented.
+
+    // ====================
+    // IIR Filtering Methods - TEMPORARILY DISABLED
+    // ====================
+    // These methods will be re-enabled once the corresponding Rust traits 
+    // and types are properly implemented.
+
+    // =======================
+    // Parametric EQ Methods - TEMPORARILY DISABLED
+    // =======================
+    // These methods will be re-enabled once the corresponding Rust traits 
+    // and types are properly implemented.
+
+    // ========================
+    // Enhanced Channel Methods
+    // ========================
+
+    /// Pan stereo audio left or right.
+    #[pyo3(signature = (position,), name = "pan")]
+    fn pan(&self, position: f64) -> PyResult<PyAudioSamples> {
+        self.pan_impl(position)
+    }
+
+    /// Pan stereo audio left or right in-place.
+    #[pyo3(signature = (position,), name = "pan_")]
+    fn pan_in_place(&mut self, position: f64) -> PyResult<()> {
+        self.pan_in_place_impl(position)
+    }
+
+    /// Adjust stereo balance between left and right channels.
+    #[pyo3(signature = (balance,), name = "balance")]
+    fn balance(&self, balance: f64) -> PyResult<PyAudioSamples> {
+        self.balance_impl(balance)
+    }
+
+    /// Adjust stereo balance between left and right channels in-place.
+    #[pyo3(signature = (balance,), name = "balance_")]
+    fn balance_in_place(&mut self, balance: f64) -> PyResult<()> {
+        self.balance_in_place_impl(balance)
+    }
+
+    /// Convert to mono by mixing all channels with equal weights.
+    #[pyo3(signature = (), name = "to_mono")]
+    fn to_mono(&self) -> PyResult<PyAudioSamples> {
+        self.to_mono_impl()
+    }
+
+    /// Convert mono audio to stereo by duplicating the channel.
+    #[pyo3(signature = (), name = "to_stereo")]
+    fn to_stereo(&self) -> PyResult<PyAudioSamples> {
+        self.to_stereo_impl()
+    }
+
+    /// Extract a specific channel as mono audio.
+    #[pyo3(signature = (channel_index,), name = "extract_channel")]
+    fn extract_channel(&self, channel_index: usize) -> PyResult<PyAudioSamples> {
+        self.extract_channel_impl(channel_index)
+    }
+
+    /// Swap left and right channels (for stereo audio).
+    #[pyo3(signature = (), name = "swap_channels")]
+    fn swap_channels(&self) -> PyResult<PyAudioSamples> {
+        self.swap_channels_impl()
+    }
+
+    /// Swap left and right channels in-place (for stereo audio).
+    #[pyo3(signature = (), name = "swap_channels_")]
+    fn swap_channels_in_place(&mut self) -> PyResult<()> {
+        self.swap_channels_in_place_impl()
+    }
 }
 
 /// Factory Functions
@@ -1175,6 +1254,151 @@ impl PyAudioSamples {
         self.data = AudioSamplesData::F64(f64_audio);
         Ok(())
     }
+
+    /// Helper method: apply operation to mutable inner data 
+    pub(crate) fn with_inner_mut<F, T>(&mut self, f: F) -> Result<T, crate::AudioSampleError>
+    where
+        F: Fn(&mut AudioSamples<f64>) -> Result<T, crate::AudioSampleError>,
+    {
+        let mut f64_audio = self.as_f64()?;
+        let result = f(&mut f64_audio)?;
+        self.data = AudioSamplesData::F64(f64_audio);
+        Ok(result)
+    }
+
+    // Enhanced Channel Operations Implementation
+    /// Pan stereo audio left or right.
+    pub(crate) fn pan_impl(&self, position: f64) -> PyResult<PyAudioSamples> {
+        use crate::operations::AudioChannelOps;
+        
+        if position < -1.0 || position > 1.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Pan position must be between -1.0 (left) and 1.0 (right)"
+            ));
+        }
+
+        let mut f64_audio = self.as_f64().map_err(utils::map_error)?;
+        f64_audio.pan(position).map_err(utils::map_error)?;
+        Ok(PyAudioSamples::from_inner(f64_audio))
+    }
+
+    pub(crate) fn pan_in_place_impl(&mut self, position: f64) -> PyResult<()> {
+        use crate::operations::AudioChannelOps;
+        
+        if position < -1.0 || position > 1.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Pan position must be between -1.0 (left) and 1.0 (right)"
+            ));
+        }
+
+        self.with_inner_mut(|inner| {
+            inner.pan(position)?;
+            Ok(())
+        })
+        .map_err(utils::map_error)
+    }
+
+    /// Adjust stereo balance between left and right channels.
+    pub(crate) fn balance_impl(&self, balance: f64) -> PyResult<PyAudioSamples> {
+        use crate::operations::AudioChannelOps;
+        
+        if balance < -1.0 || balance > 1.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Balance must be between -1.0 (left) and 1.0 (right)"
+            ));
+        }
+
+        let mut f64_audio = self.as_f64().map_err(utils::map_error)?;
+        f64_audio.balance(balance).map_err(utils::map_error)?;
+        Ok(PyAudioSamples::from_inner(f64_audio))
+    }
+
+    pub(crate) fn balance_in_place_impl(&mut self, balance: f64) -> PyResult<()> {
+        use crate::operations::AudioChannelOps;
+        
+        if balance < -1.0 || balance > 1.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Balance must be between -1.0 (left) and 1.0 (right)"
+            ));
+        }
+
+        self.with_inner_mut(|inner| {
+            inner.balance(balance)?;
+            Ok(())
+        })
+        .map_err(utils::map_error)
+    }
+
+    /// Convert to mono by mixing all channels with equal weights.
+    pub(crate) fn to_mono_impl(&self) -> PyResult<PyAudioSamples> {
+        use crate::operations::{AudioChannelOps, types::MonoConversionMethod};
+        
+        let mono = self
+            .with_inner(|inner| inner.to_mono(MonoConversionMethod::Average))
+            .map_err(utils::map_error)?;
+        Ok(PyAudioSamples::from_inner(mono))
+    }
+
+    /// Convert mono audio to stereo by duplicating the channel.
+    pub(crate) fn to_stereo_impl(&self) -> PyResult<PyAudioSamples> {
+        use crate::operations::{AudioChannelOps, types::StereoConversionMethod};
+        
+        let stereo = self
+            .with_inner(|inner| inner.to_stereo(StereoConversionMethod::Duplicate))
+            .map_err(utils::map_error)?;
+        Ok(PyAudioSamples::from_inner(stereo))
+    }
+
+    /// Extract a specific channel as mono audio.
+    pub(crate) fn extract_channel_impl(&self, channel_index: usize) -> PyResult<PyAudioSamples> {
+        use crate::operations::AudioChannelOps;
+        
+        if channel_index >= self.channels() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Channel index {} out of range (0-{})", channel_index, self.channels() - 1)
+            ));
+        }
+
+        let channel = self
+            .with_inner(|inner| inner.extract_channel(channel_index))
+            .map_err(utils::map_error)?;
+        Ok(PyAudioSamples::from_inner(channel))
+    }
+
+    /// Swap left and right channels (for stereo audio).
+    pub(crate) fn swap_channels_impl(&self) -> PyResult<PyAudioSamples> {
+        use crate::operations::AudioChannelOps;
+        
+        if self.channels() != 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Channel swapping requires exactly 2 channels (stereo audio)"
+            ));
+        }
+
+        let mut f64_audio = self.as_f64().map_err(utils::map_error)?;
+        f64_audio.swap_channels(0, 1).map_err(utils::map_error)?;
+        Ok(PyAudioSamples::from_inner(f64_audio))
+    }
+
+    pub(crate) fn swap_channels_in_place_impl(&mut self) -> PyResult<()> {
+        use crate::operations::AudioChannelOps;
+        
+        if self.channels() != 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Channel swapping requires exactly 2 channels (stereo audio)"
+            ));
+        }
+
+        self.with_inner_mut(|inner| {
+            inner.swap_channels(0, 1)?;
+            Ok(())
+        })
+        .map_err(utils::map_error)
+    }
+
+    // Note: Enhanced processing operations like normalize_advanced, apply_window, 
+    // convolve, and fft_convolve are not implemented in the current operations module.
+    // These would need to be added to the Rust operations traits first.
 
     // Statistics and conversion method implementations are defined in their respective submodules
 }
