@@ -164,7 +164,7 @@ mod tests {
         let audio_i16 = audio_f32.as_type::<i16>().unwrap();
 
         assert_eq!(audio_i16.sample_rate(), 44100);
-        assert_eq!(audio_i16.channels(), 1);
+        assert_eq!(audio_i16.num_channels(), 1);
         assert_eq!(audio_i16.samples_per_channel(), 5);
 
         // Check specific conversions
@@ -184,7 +184,7 @@ mod tests {
         let audio_f32 = audio_i16.as_type::<f32>().unwrap();
 
         assert_eq!(audio_f32.sample_rate(), 48000);
-        assert_eq!(audio_f32.channels(), 2);
+        assert_eq!(audio_f32.num_channels(), 2);
         assert_eq!(audio_f32.samples_per_channel(), 3);
 
         // Check specific conversions
@@ -205,7 +205,7 @@ mod tests {
         // Test consuming conversion
         let audio_i16 = audio_f32.to_type::<i16>().unwrap();
 
-        assert_eq!(audio_i16.channels(), 1);
+        assert_eq!(audio_i16.num_channels(), 1);
         assert_eq!(audio_i16.samples_per_channel(), 3);
 
         // Verify conversion accuracy
@@ -225,9 +225,9 @@ mod tests {
         let audio_f64 = audio_i16.as_f64().unwrap();
         let audio_i32 = audio_i16.as_i32().unwrap();
 
-        assert_eq!(audio_f32.channels(), 1);
-        assert_eq!(audio_f64.channels(), 1);
-        assert_eq!(audio_i32.channels(), 1);
+        assert_eq!(audio_f32.num_channels(), 1);
+        assert_eq!(audio_f64.num_channels(), 1);
+        assert_eq!(audio_i32.num_channels(), 1);
 
         // Verify sample rate preservation
         assert_eq!(audio_f32.sample_rate(), 44100);
@@ -245,7 +245,7 @@ mod tests {
         let audio_round_trip = audio_i16.as_type::<f32>().unwrap();
 
         // Verify structure preservation
-        assert_eq!(audio_round_trip.channels(), 1);
+        assert_eq!(audio_round_trip.num_channels(), 1);
         assert_eq!(audio_round_trip.samples_per_channel(), 5);
         assert_eq!(audio_round_trip.sample_rate(), 44100);
 

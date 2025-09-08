@@ -22,32 +22,59 @@ bytemuck = "1.23.1"
 colored = "3.0.0"
 ndarray = "0.16.1"
 num-traits = "0.2.19"
-numpy = { version = "0.25.0", optional = true }
-pyo3 = { version = "0.25.1", features = ["multiple-pymethods"], optional = true }
+numpy = { version = "0.26.0", optional = true }
+pyo3 = { version = "0.26.0", features = [
+    "multiple-pymethods",
+], optional = true }
 thiserror = "2.0.12"
 tracing = "0.1.41"
 approx_eq = "0.1.8"
 rustfft = "6.2"
 num-complex = "0.4"
-i24 = { path = "../i24", features = ["alloc", "serde"] }
-rubato =  "0.16.2"
+i24 = { git = "https://github.com/jmg049/i24", branch = "development", features = [
+    "std",
+    "alloc",
+    "serde",
+] }
+rubato = "0.16.2"
 serde = "1.0.219"
 rayon = { version = "1.10", optional = true }
 indicatif = { version = "0.18", optional = true }
-tokio = { version = "1.0", features = ["rt", "time", "net", "io-util"], optional = true }
+tokio = { version = "1.0", features = [
+    "rt",
+    "time",
+    "net",
+    "io-util",
+    "rt-multi-thread",
+], optional = true }
 tokio-util = { version = "0.7", optional = true }
 num_cpus = { version = "1.16", optional = true }
 futures = { version = "0.3", optional = true }
 crossbeam = { version = "0.8", optional = true }
-cpal = { version = "0.15", optional = true }
+cpal = { version = "0.16", optional = true }
 parking_lot = { version = "0.12", optional = true }
 
 [features]
-default = ["batch-processing"]
-python = ["dep:pyo3", "dep:numpy", "i24/pyo3"]
+default = [
+    # "batch-processing",
+    # "python",
+    # "progress-tracking",
+    # "streaming",
+    # "playback",
+]
+python = ["dep:pyo3", "dep:numpy", "i24/pyo3", "streaming", "playback"]
 batch-processing = []
 parallel-processing = ["dep:rayon", "dep:num_cpus", "batch-processing"]
 progress-tracking = ["dep:indicatif", "batch-processing"]
-streaming = ["dep:tokio", "dep:tokio-util", "dep:crossbeam", "dep:futures"]
+streaming = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:crossbeam",
+    "dep:futures",
+    "dep:parking_lot",
+]
 playback = ["dep:cpal", "dep:parking_lot"]
 realtime = ["streaming", "playback"]
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["macros", "rt", "time"] }

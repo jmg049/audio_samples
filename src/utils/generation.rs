@@ -437,7 +437,7 @@ mod tests {
         let audio = sine_wave::<f32>(440.0, 1.0, 44100, 1.0).unwrap();
 
         assert_eq!(audio.sample_rate(), 44100);
-        assert_eq!(audio.channels(), 1);
+        assert_eq!(audio.num_channels(), 1);
         assert_eq!(audio.samples_per_channel(), 44100);
 
         // Check that the peak is approximately 1.0
@@ -450,7 +450,7 @@ mod tests {
         let audio = white_noise::<f32>(1.0, 44100, 1.0).unwrap();
 
         assert_eq!(audio.sample_rate(), 44100);
-        assert_eq!(audio.channels(), 1);
+        assert_eq!(audio.num_channels(), 1);
         assert_eq!(audio.samples_per_channel(), 44100);
 
         // Check that we have some variation in the signal

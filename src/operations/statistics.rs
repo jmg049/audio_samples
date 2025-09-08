@@ -278,7 +278,7 @@ where
     /// Signals must have the same number of channels for meaningful correlation.
     fn cross_correlation(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<f64>> {
         // Verify compatible signals
-        if self.channels() != other.channels() {
+        if self.num_channels() != other.num_channels() {
             return Err(crate::AudioSampleError::ConversionError(
                 "Incompatible".to_string(),
                 "cross_correlation".to_string(),

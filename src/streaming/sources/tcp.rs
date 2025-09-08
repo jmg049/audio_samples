@@ -9,8 +9,6 @@ use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-#[cfg(feature = "streaming")]
 use tokio::{
     io::{AsyncReadExt, BufReader},
     net::TcpStream,
@@ -90,7 +88,7 @@ impl TcpConfig {
 
 /// State of the TCP connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TcpState {
+pub enum TcpState {
     Disconnected,
     Connecting,
     Connected,
@@ -105,11 +103,7 @@ pub struct TcpStreamSource<T: AudioSample> {
     config: TcpConfig,
     state: TcpState,
 
-    #[cfg(feature = "streaming")]
     connection: Option<BufReader<TcpStream>>,
-
-    #[cfg(not(feature = "streaming"))]
-    connection: Option<()>,
 
     format_info: AudioFormatInfo,
     metrics: Arc<Mutex<SourceMetrics>>,
@@ -126,7 +120,13 @@ pub struct TcpStreamSource<T: AudioSample> {
     phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: AudioSample> TcpStreamSource<T> {
+impl<T: AudioSample> TcpStreamSource<T>
+where
+    i16: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
     /// Create a new TCP streaming source.
     pub fn new(config: TcpConfig) -> Self {
         let format_info = config.expected_format.clone().unwrap_or_else(|| {
@@ -193,7 +193,6 @@ impl<T: AudioSample> TcpStreamSource<T> {
         self.reconnect_attempts
     }
 
-    #[cfg(feature = "streaming")]
     /// Establish connection to the TCP server.
     async fn connect(&mut self) -> StreamResult<()> {
         if matches!(self.state, TcpState::Connected) {
@@ -243,15 +242,6 @@ impl<T: AudioSample> TcpStreamSource<T> {
         }
     }
 
-    #[cfg(not(feature = "streaming"))]
-    /// Establish connection to the TCP server (no-op without streaming feature).
-    async fn connect(&mut self) -> StreamResult<()> {
-        Err(StreamError::InvalidConfig(
-            "TCP streaming requires 'streaming' feature".to_string(),
-        ))
-    }
-
-    #[cfg(feature = "streaming")]
     /// Read raw data from the TCP stream.
     async fn read_raw_data(&mut self, buf: &mut [u8]) -> StreamResult<usize> {
         if self.connection.is_none() {
@@ -291,14 +281,6 @@ impl<T: AudioSample> TcpStreamSource<T> {
                 duration: self.config.read_timeout,
             }),
         }
-    }
-
-    #[cfg(not(feature = "streaming"))]
-    /// Read raw data from the TCP stream (no-op without streaming feature).
-    async fn read_raw_data(&mut self, _buf: &mut [u8]) -> StreamResult<usize> {
-        Err(StreamError::InvalidConfig(
-            "TCP streaming requires 'streaming' feature".to_string(),
-        ))
     }
 
     /// Attempt to reconnect if enabled and within retry limits.
@@ -368,7 +350,7 @@ impl<T: AudioSample> TcpStreamSource<T> {
                         StreamError::InvalidConfig("Invalid 16-bit sample data".to_string())
                     })?;
                     let value = i16::from_ne_bytes(bytes);
-                    value.convert_to::<T>().map_err(StreamError::Audio)?
+                    value.convert_to().map_err(StreamError::Audio)?
                 }
                 32 => {
                     let bytes: [u8; 4] = chunk.try_into().map_err(|_| {
@@ -380,7 +362,7 @@ impl<T: AudioSample> TcpStreamSource<T> {
                         T::cast_from(value)
                     } else {
                         let value = i32::from_ne_bytes(bytes);
-                        value.convert_to::<T>().map_err(StreamError::Audio)?
+                        value.convert_to().map_err(StreamError::Audio)?
                     }
                 }
                 64 => {
@@ -388,7 +370,7 @@ impl<T: AudioSample> TcpStreamSource<T> {
                         StreamError::InvalidConfig("Invalid 64-bit sample data".to_string())
                     })?;
                     let value = f64::from_ne_bytes(bytes);
-                    value.convert_to::<T>().map_err(StreamError::Audio)?
+                    value.convert_to().map_err(StreamError::Audio)?
                 }
                 _ => {
                     return Err(StreamError::InvalidConfig(format!(
@@ -404,7 +386,13 @@ impl<T: AudioSample> TcpStreamSource<T> {
     }
 }
 
-impl<T: AudioSample> AudioSource<T> for TcpStreamSource<T> {
+impl<T: AudioSample> AudioSource<T> for TcpStreamSource<T>
+where
+    i16: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
     async fn next_chunk(&mut self) -> StreamResult<Option<AudioSamples<T>>> {
         if !self.is_active {
             return Ok(None);
@@ -451,7 +439,7 @@ impl<T: AudioSample> AudioSource<T> for TcpStreamSource<T> {
             .map_err(|e| StreamError::InvalidConfig(e.to_string()))?;
 
         let audio_samples =
-            AudioSamples::new(array, self.format_info.sample_rate).map_err(StreamError::Audio)?;
+            AudioSamples::new_multi_channel(array, self.format_info.sample_rate as u32);
 
         // Update metrics
         {

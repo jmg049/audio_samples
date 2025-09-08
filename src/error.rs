@@ -6,7 +6,7 @@ use thiserror::Error;
 pub type AudioSampleResult<T> = Result<T, AudioSampleError>;
 
 /// Error types that can occur during audio sample operations.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum AudioSampleError {
     /// Error that occurs when converting between audio sample types fails.
     ///

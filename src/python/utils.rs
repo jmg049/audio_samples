@@ -4,6 +4,8 @@
 //! AudioSamples, optimizing for zero-copy operations where possible and
 //! providing clear error mappings between Rust and Python.
 
+use crate::python::conversions::TargetType;
+use crate::python::{AudioSamplesData, PyAudioSamples, from_numpy};
 use crate::{AudioSampleError, AudioSamples};
 use ndarray::{Array1, Array2};
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
@@ -143,16 +145,13 @@ pub fn convert_numpy_to_audio_samples(
 /// * `copy` - Force a copy even if sharing is possible
 ///
 /// # Returns
-/// PyObject containing the NumPy array
+/// Py<PyAny> containing the NumPy array
 pub fn convert_audio_samples_to_numpy(
     py: Python,
-    audio_data: &crate::python::AudioSamplesData,
-    target_type: Option<crate::python::conversions::TargetType>,
+    audio_data: &AudioSamplesData,
+    target_type: Option<TargetType>,
     copy: bool,
-) -> PyResult<PyObject> {
-    use crate::python::AudioSamplesData;
-    use crate::python::conversions::TargetType;
-
+) -> PyResult<Py<PyAny>> {
     // If no target type specified, preserve the original type
     let target = if let Some(t) = target_type {
         t
@@ -180,7 +179,7 @@ fn convert_to_numpy_f64(
     py: Python,
     audio_data: &crate::python::AudioSamplesData,
     _force_copy: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use crate::operations::AudioTypeConversion;
     use crate::python::AudioSamplesData;
 
@@ -190,13 +189,13 @@ fn convert_to_numpy_f64(
             // Already f64, can potentially share memory
             audio.clone()
         }
-        AudioSamplesData::F32(audio) => audio.to_f64().map_err(map_error)?,
-        AudioSamplesData::I32(audio) => audio.to_f64().map_err(map_error)?,
-        AudioSamplesData::I16(audio) => audio.to_f64().map_err(map_error)?,
-        AudioSamplesData::I24(audio) => audio.to_f64().map_err(map_error)?,
+        AudioSamplesData::F32(audio) => audio.as_f64().map_err(map_error)?,
+        AudioSamplesData::I32(audio) => audio.as_f64().map_err(map_error)?,
+        AudioSamplesData::I16(audio) => audio.as_f64().map_err(map_error)?,
+        AudioSamplesData::I24(audio) => audio.as_f64().map_err(map_error)?,
     };
 
-    match f64_audio.channels() {
+    match f64_audio.num_channels() {
         1 => {
             let mono_data = f64_audio.as_mono().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Expected mono audio data")
@@ -219,7 +218,7 @@ fn convert_to_numpy_f32(
     py: Python,
     audio_data: &crate::python::AudioSamplesData,
     _force_copy: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use crate::operations::AudioTypeConversion;
     use crate::python::AudioSamplesData;
 
@@ -229,13 +228,13 @@ fn convert_to_numpy_f32(
             // Already f32, can potentially share memory
             audio.clone()
         }
-        AudioSamplesData::F64(audio) => audio.to_f32().map_err(map_error)?,
-        AudioSamplesData::I32(audio) => audio.to_f32().map_err(map_error)?,
-        AudioSamplesData::I16(audio) => audio.to_f32().map_err(map_error)?,
-        AudioSamplesData::I24(audio) => audio.to_f32().map_err(map_error)?,
+        AudioSamplesData::F64(audio) => audio.as_f32().map_err(map_error)?,
+        AudioSamplesData::I32(audio) => audio.as_f32().map_err(map_error)?,
+        AudioSamplesData::I16(audio) => audio.as_f32().map_err(map_error)?,
+        AudioSamplesData::I24(audio) => audio.as_f32().map_err(map_error)?,
     };
 
-    match f32_audio.channels() {
+    match f32_audio.num_channels() {
         1 => {
             let mono_data = f32_audio.as_mono().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Expected audio data")
@@ -258,7 +257,7 @@ fn convert_to_numpy_i32(
     py: Python,
     audio_data: &crate::python::AudioSamplesData,
     _force_copy: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use crate::operations::AudioTypeConversion;
     use crate::python::AudioSamplesData;
 
@@ -268,13 +267,13 @@ fn convert_to_numpy_i32(
             // Already i32, can potentially share memory
             audio.clone()
         }
-        AudioSamplesData::I24(audio) => audio.to_i32().map_err(map_error)?,
-        AudioSamplesData::F64(audio) => audio.to_i32().map_err(map_error)?,
-        AudioSamplesData::F32(audio) => audio.to_i32().map_err(map_error)?,
-        AudioSamplesData::I16(audio) => audio.to_i32().map_err(map_error)?,
+        AudioSamplesData::I24(audio) => audio.as_i32().map_err(map_error)?,
+        AudioSamplesData::F64(audio) => audio.as_i32().map_err(map_error)?,
+        AudioSamplesData::F32(audio) => audio.as_i32().map_err(map_error)?,
+        AudioSamplesData::I16(audio) => audio.as_i32().map_err(map_error)?,
     };
 
-    match i32_audio.channels() {
+    match i32_audio.num_channels() {
         1 => {
             let mono_data = i32_audio.as_mono().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Expected audio data")
@@ -297,7 +296,7 @@ fn convert_to_numpy_i16(
     py: Python,
     audio_data: &crate::python::AudioSamplesData,
     _force_copy: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use crate::operations::AudioTypeConversion;
     use crate::python::AudioSamplesData;
 
@@ -307,13 +306,13 @@ fn convert_to_numpy_i16(
             // Already i16, can potentially share memory
             audio.clone()
         }
-        AudioSamplesData::F64(audio) => audio.to_i16().map_err(map_error)?,
-        AudioSamplesData::F32(audio) => audio.to_i16().map_err(map_error)?,
-        AudioSamplesData::I32(audio) => audio.to_i16().map_err(map_error)?,
-        AudioSamplesData::I24(audio) => audio.to_i16().map_err(map_error)?,
+        AudioSamplesData::F64(audio) => audio.as_i16().map_err(map_error)?,
+        AudioSamplesData::F32(audio) => audio.as_i16().map_err(map_error)?,
+        AudioSamplesData::I32(audio) => audio.as_i16().map_err(map_error)?,
+        AudioSamplesData::I24(audio) => audio.as_i16().map_err(map_error)?,
     };
 
-    match i16_audio.channels() {
+    match i16_audio.num_channels() {
         1 => {
             let mono_data = i16_audio.as_mono().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Expected audio data")
@@ -364,6 +363,15 @@ pub fn map_error(error: AudioSampleError) -> PyErr {
                 feature
             ))
         }
+        AudioSampleError::ArrayLayoutError { message } => {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Array layout error: {}",
+                message
+            ))
+        }
+        AudioSampleError::OptionError { message } => {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Option error: {}", message))
+        }
     }
 }
 
@@ -380,13 +388,13 @@ pub fn validate_string_param(param_name: &str, value: &str, allowed: &[&str]) ->
 }
 
 /// Helper to create a Python list from a Rust vector.
-pub fn vec_to_pylist_f64(py: Python, vec: Vec<f64>) -> PyResult<PyObject> {
+pub fn vec_to_pylist_f64(py: Python, vec: Vec<f64>) -> PyResult<Py<PyAny>> {
     let py_list = PyList::new(py, vec)?;
     Ok(py_list.into())
 }
 
 /// Helper to create a 2D NumPy array from a Rust Array2.
-pub fn array2_to_numpy<T>(py: Python, array: Array2<T>) -> PyResult<PyObject>
+pub fn array2_to_numpy<T>(py: Python, array: Array2<T>) -> PyResult<Py<PyAny>>
 where
     T: numpy::Element + Copy,
 {
@@ -395,7 +403,7 @@ where
 }
 
 /// Helper to create a 1D NumPy array from a Rust Array1.
-pub fn array1_to_numpy<T>(py: Python, array: Array1<T>) -> PyResult<PyObject>
+pub fn array1_to_numpy<T>(py: Python, array: Array1<T>) -> PyResult<Py<PyAny>>
 where
     T: numpy::Element + Copy,
 {

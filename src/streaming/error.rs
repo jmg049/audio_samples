@@ -1,7 +1,7 @@
 //! Error types for streaming operations.
 
 use crate::AudioSampleError;
-use std::fmt;
+use std::time::Duration;
 
 /// Streaming-specific error types.
 #[derive(Debug, thiserror::Error)]
@@ -38,8 +38,11 @@ pub enum StreamError {
     UnexpectedEnd(String),
 
     /// Timeout during stream operation
-    #[error("Operation timed out after {duration_ms}ms")]
-    Timeout { duration_ms: u64 },
+    #[error("Operation '{operation}' timed out after {}ms", duration.as_millis())]
+    Timeout {
+        operation: String,
+        duration: Duration,
+    },
 
     /// Protocol-specific errors
     #[error("Protocol error: {protocol} - {details}")]
@@ -53,6 +56,13 @@ pub enum StreamError {
     ResourceAllocation {
         resource: &'static str,
         reason: String,
+    },
+
+    /// Connection-related errors
+    #[error("Connection error during {operation}: {source}")]
+    Connection {
+        operation: String,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -82,8 +92,11 @@ impl StreamError {
     }
 
     /// Create a timeout error
-    pub fn timeout(duration_ms: u64) -> Self {
-        Self::Timeout { duration_ms }
+    pub fn timeout(operation: impl Into<String>, duration: Duration) -> Self {
+        Self::Timeout {
+            operation: operation.into(),
+            duration,
+        }
     }
 
     /// Create a protocol error
@@ -109,6 +122,51 @@ impl StreamError {
     /// Check if this is a fatal error that should terminate the stream
     pub fn is_fatal(&self) -> bool {
         !self.is_recoverable()
+    }
+}
+
+impl Clone for StreamError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Audio(err) => Self::Audio(err.clone()),
+            Self::Network(err) => Self::Network(std::io::Error::new(err.kind(), err.to_string())),
+            Self::Buffer { operation, details } => Self::Buffer {
+                operation,
+                details: details.clone(),
+            },
+            Self::FormatMismatch { expected, actual } => Self::FormatMismatch {
+                expected: expected.clone(),
+                actual: actual.clone(),
+            },
+            Self::InvalidConfig(msg) => Self::InvalidConfig(msg.clone()),
+            Self::Sync(msg) => Self::Sync(msg.clone()),
+            Self::UnexpectedEnd(msg) => Self::UnexpectedEnd(msg.clone()),
+            Self::Timeout {
+                operation,
+                duration,
+            } => Self::Timeout {
+                operation: operation.clone(),
+                duration: *duration,
+            },
+            Self::Protocol { protocol, details } => Self::Protocol {
+                protocol,
+                details: details.clone(),
+            },
+            Self::ResourceAllocation { resource, reason } => Self::ResourceAllocation {
+                resource,
+                reason: reason.clone(),
+            },
+            Self::Connection {
+                operation,
+                source: _,
+            } => Self::Connection {
+                operation: operation.clone(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Cloned connection error",
+                )),
+            },
+        }
     }
 }
 

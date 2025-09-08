@@ -1,10 +1,41 @@
 //! Core traits for audio playback functionality.
+//!
+//! This module defines the fundamental traits that establish contracts between
+//! different components of the playback system. These traits enable:
+//!
+//! - **Device Abstraction**: Common interface for audio devices across platforms
+//! - **Playback Control**: Standard transport control operations  
+//! - **Audio Sink**: Interface for receiving and processing audio data
+//! - **Format Negotiation**: Automatic format matching between sources and devices
+//!
+//! # Core Traits
+//!
+//! ## [`AudioDevice`]
+//! Represents a physical or virtual audio output device. Provides device
+//! information, supported formats, and configuration capabilities.
+//!
+//! ## [`PlaybackController`]
+//! Standard transport controls (play, pause, stop, seek) with async support
+//! for non-blocking operation in real-time applications.
+//!
+//! ## [`PlaybackSink`]
+//! Interface for components that can receive and output audio data. Enables
+//! modular audio routing and processing chains.
+//!
+//! # Design Philosophy
+//!
+//! These traits follow the principle of separation of concerns:
+//! - **Device management** is separate from **playback control**
+//! - **Audio processing** is separate from **device output**
+//! - **Format negotiation** is separate from **data routing**
+//!
+//! This enables flexible composition of playback systems with different
+//! capabilities while maintaining clean, testable interfaces.
 
 use super::error::{PlaybackError, PlaybackResult};
 use crate::{AudioSample, AudioSamples};
 use std::time::Duration;
 
-#[cfg(feature = "playback")]
 use cpal::{StreamConfig, SupportedStreamConfig};
 
 /// Represents an audio output device capability.
@@ -281,108 +312,5 @@ impl PlaybackMetrics {
         } else {
             0.0
         }
-    }
-}
-
-/// Configuration for playback behavior.
-#[derive(Debug, Clone)]
-pub struct PlaybackConfig {
-    /// Target audio format
-    pub format: AudioFormatSpec,
-
-    /// Buffer size in samples
-    pub buffer_size: usize,
-
-    /// Maximum latency acceptable (milliseconds)
-    pub max_latency_ms: u32,
-
-    /// Whether to automatically recover from errors
-    pub auto_recovery: bool,
-
-    /// Maximum number of recovery attempts
-    pub max_recovery_attempts: usize,
-
-    /// Initial volume (0.0 to 1.0)
-    pub volume: f64,
-
-    /// Whether to start with looping enabled
-    pub loop_enabled: bool,
-
-    /// Preferred audio device (None = use default)
-    pub preferred_device: Option<String>,
-}
-
-impl Default for PlaybackConfig {
-    fn default() -> Self {
-        Self {
-            format: AudioFormatSpec::cd_quality(),
-            buffer_size: 1024,
-            max_latency_ms: 50,
-            auto_recovery: true,
-            max_recovery_attempts: 3,
-            volume: 0.8,
-            loop_enabled: false,
-            preferred_device: None,
-        }
-    }
-}
-
-impl PlaybackConfig {
-    /// Create configuration optimized for low latency
-    pub fn low_latency() -> Self {
-        Self {
-            format: AudioFormatSpec::new(48000, 2, SampleFormat::F32),
-            buffer_size: 256,
-            max_latency_ms: 10,
-            auto_recovery: true,
-            max_recovery_attempts: 5,
-            volume: 0.8,
-            loop_enabled: false,
-            preferred_device: None,
-        }
-    }
-
-    /// Create configuration optimized for high quality
-    pub fn high_quality() -> Self {
-        Self {
-            format: AudioFormatSpec::new(96000, 2, SampleFormat::F32),
-            buffer_size: 2048,
-            max_latency_ms: 100,
-            auto_recovery: true,
-            max_recovery_attempts: 3,
-            volume: 0.8,
-            loop_enabled: false,
-            preferred_device: None,
-        }
-    }
-
-    /// Set target format
-    pub fn with_format(mut self, format: AudioFormatSpec) -> Self {
-        self.format = format;
-        self
-    }
-
-    /// Set buffer size
-    pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
-        self.buffer_size = buffer_size;
-        self
-    }
-
-    /// Set maximum latency
-    pub fn with_max_latency(mut self, latency_ms: u32) -> Self {
-        self.max_latency_ms = latency_ms;
-        self
-    }
-
-    /// Set initial volume
-    pub fn with_volume(mut self, volume: f64) -> Self {
-        self.volume = volume.clamp(0.0, 1.0);
-        self
-    }
-
-    /// Set preferred device
-    pub fn with_device(mut self, device_name: impl Into<String>) -> Self {
-        self.preferred_device = Some(device_name.into());
-        self
     }
 }

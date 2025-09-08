@@ -595,7 +595,7 @@ where
 
 /// Detect channel configuration from audio stream.
 pub fn detect_channel_config<T: AudioSample>(audio: &AudioSamples<T>) -> ChannelConfiguration {
-    let channels = audio.channels();
+    let channels = audio.num_channels();
 
     match channels {
         1 => ChannelConfiguration::Mono,

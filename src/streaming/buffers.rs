@@ -5,7 +5,7 @@ use crate::{AudioSample, AudioSamples};
 use std::collections::VecDeque;
 
 #[cfg(feature = "streaming")]
-use crossbeam::queue::{ArrayQueue, SegQueue};
+use crossbeam::queue::SegQueue;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -82,7 +82,7 @@ impl<T: AudioSample> CircularBuffer<T> {
 
     /// Push a new audio chunk into the buffer.
     pub fn push(&mut self, chunk: AudioSamples<T>) -> StreamResult<()> {
-        let chunk_samples = chunk.samples_per_channel() * chunk.channels();
+        let chunk_samples = chunk.samples_per_channel() * chunk.num_channels();
 
         // Check if adding this chunk would exceed limits
         if self.buffer.len() >= self.config.max_chunks
@@ -91,7 +91,7 @@ impl<T: AudioSample> CircularBuffer<T> {
             if self.config.drop_on_overflow {
                 // Drop oldest chunk to make room
                 if let Some(dropped) = self.buffer.pop_front() {
-                    self.total_samples -= dropped.samples_per_channel() * dropped.channels();
+                    self.total_samples -= dropped.samples_per_channel() * dropped.num_channels();
                 }
                 self.overrun_count += 1;
             } else {
@@ -113,7 +113,7 @@ impl<T: AudioSample> CircularBuffer<T> {
     /// Pop the next audio chunk from the buffer.
     pub fn pop(&mut self) -> Option<AudioSamples<T>> {
         if let Some(chunk) = self.buffer.pop_front() {
-            let chunk_samples = chunk.samples_per_channel() * chunk.channels();
+            let chunk_samples = chunk.samples_per_channel() * chunk.num_channels();
             self.total_samples -= chunk_samples;
             self.last_access = Instant::now();
             Some(chunk)
@@ -188,7 +188,7 @@ impl<T: AudioSample> CircularBuffer<T> {
             || self.total_samples > self.config.max_samples
         {
             if let Some(dropped) = self.buffer.pop_front() {
-                self.total_samples -= dropped.samples_per_channel() * dropped.channels();
+                self.total_samples -= dropped.samples_per_channel() * dropped.num_channels();
                 self.overrun_count += 1;
             } else {
                 break;
@@ -245,7 +245,7 @@ impl<T: AudioSample> StreamBuffer<T> {
 
     /// Push a chunk into the buffer (non-blocking).
     pub fn try_push(&self, chunk: AudioSamples<T>) -> StreamResult<()> {
-        let chunk_samples = chunk.samples_per_channel() * chunk.channels();
+        let chunk_samples = chunk.samples_per_channel() * chunk.num_channels();
 
         // Check current buffer level
         {
@@ -263,7 +263,7 @@ impl<T: AudioSample> StreamBuffer<T> {
 
                 // Try to drop an item to make room
                 if let Some(dropped) = self.queue.pop() {
-                    let dropped_samples = dropped.samples_per_channel() * dropped.channels();
+                    let dropped_samples = dropped.samples_per_channel() * dropped.num_channels();
                     stats.current_chunks -= 1;
                     stats.current_samples -= dropped_samples;
                     stats.overrun_count += 1;
@@ -283,7 +283,7 @@ impl<T: AudioSample> StreamBuffer<T> {
     /// Pop a chunk from the buffer (non-blocking).
     pub fn try_pop(&self) -> Option<AudioSamples<T>> {
         if let Some(chunk) = self.queue.pop() {
-            let chunk_samples = chunk.samples_per_channel() * chunk.channels();
+            let chunk_samples = chunk.samples_per_channel() * chunk.num_channels();
 
             {
                 let mut stats = self.stats.lock().unwrap();

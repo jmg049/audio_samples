@@ -19,7 +19,7 @@ impl PyAudioSamples {
             crate::python::AudioSamplesData::I16(audio) => audio.peak() as f64,
             crate::python::AudioSamplesData::I24(audio) => {
                 // Convert to f64 for statistics since I24 doesn't implement needed traits
-                match audio.to_f64() {
+                match audio.as_f64() {
                     Ok(f64_audio) => f64_audio.peak(),
                     Err(_) => 0.0, // Fallback value
                 }
@@ -45,7 +45,7 @@ impl PyAudioSamples {
             crate::python::AudioSamplesData::I16(audio) => audio.min() as f64,
             crate::python::AudioSamplesData::I24(audio) => {
                 // Convert to f64 for statistics since I24 doesn't implement needed traits
-                match audio.to_f64() {
+                match audio.as_f64() {
                     Ok(f64_audio) => f64_audio.min(),
                     Err(_) => 0.0, // Fallback value
                 }
@@ -71,7 +71,7 @@ impl PyAudioSamples {
             crate::python::AudioSamplesData::I16(audio) => audio.max() as f64,
             crate::python::AudioSamplesData::I24(audio) => {
                 // Convert to f64 for statistics since I24 doesn't implement needed traits
-                match audio.to_f64() {
+                match audio.as_f64() {
                     Ok(f64_audio) => f64_audio.max(),
                     Err(_) => 0.0, // Fallback value
                 }
@@ -96,7 +96,7 @@ impl PyAudioSamples {
     /// rms = audio.rms()  # Should be approximately 0.707 for unit sine
     /// ```
     pub(crate) fn rms_impl(&self) -> f64 {
-        self.with_inner(|inner| Ok(inner.rms()))
+        self.with_inner(|inner| inner.rms())
             .map_err(map_error)
             .unwrap_or(0.0)
     }
@@ -114,7 +114,7 @@ impl PyAudioSamples {
     /// var = audio.variance()  # Should be close to 0.01 for std=0.1
     /// ```
     pub(crate) fn variance_impl(&self) -> f64 {
-        self.with_inner(|inner| Ok(inner.variance()))
+        self.with_inner(|inner| inner.variance())
             .map_err(map_error)
             .unwrap_or(0.0)
     }
@@ -133,7 +133,7 @@ impl PyAudioSamples {
     /// std = audio.std_dev()  # Should be close to 0.1
     /// ```
     pub(crate) fn std_dev_impl(&self) -> f64 {
-        self.with_inner(|inner| Ok(inner.std_dev()))
+        self.with_inner(|inner| inner.std_dev())
             .map_err(map_error)
             .unwrap_or(0.0)
     }
@@ -207,7 +207,7 @@ impl PyAudioSamples {
         py: Python,
         max_lag: Option<usize>,
         normalize: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let actual_max_lag = max_lag.unwrap_or(self.length() / 4);
         let autocorr = self
             .with_inner(|inner| inner.autocorrelation(actual_max_lag))
@@ -258,7 +258,7 @@ impl PyAudioSamples {
         other: &PyAudioSamples,
         max_lag: Option<usize>,
         normalize: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Check compatibility
         if self.sample_rate() != other.sample_rate() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(

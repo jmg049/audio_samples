@@ -84,7 +84,7 @@ impl PyAudioSamples {
         py: Python,
         dtype: &Bound<PyAny>,
         copy: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         use crate::operations::AudioTypeConversion;
         use crate::python::AudioSamplesData;
 
@@ -127,40 +127,40 @@ impl PyAudioSamples {
             (TargetType::F64, _) => {
                 let f64_audio = match &self.data {
                     AudioSamplesData::F64(audio) => audio.clone(),
-                    AudioSamplesData::F32(audio) => audio.to_f64().map_err(map_error)?,
-                    AudioSamplesData::I32(audio) => audio.to_f64().map_err(map_error)?,
-                    AudioSamplesData::I16(audio) => audio.to_f64().map_err(map_error)?,
-                    AudioSamplesData::I24(audio) => audio.to_f64().map_err(map_error)?,
+                    AudioSamplesData::F32(audio) => audio.as_f64().map_err(map_error)?,
+                    AudioSamplesData::I32(audio) => audio.as_f64().map_err(map_error)?,
+                    AudioSamplesData::I16(audio) => audio.as_f64().map_err(map_error)?,
+                    AudioSamplesData::I24(audio) => audio.as_f64().map_err(map_error)?,
                 };
                 AudioSamplesData::F64(f64_audio)
             }
             (TargetType::F32, _) => {
                 let f32_audio = match &self.data {
                     AudioSamplesData::F32(audio) => audio.clone(),
-                    AudioSamplesData::F64(audio) => audio.to_f32().map_err(map_error)?,
-                    AudioSamplesData::I32(audio) => audio.to_f32().map_err(map_error)?,
-                    AudioSamplesData::I16(audio) => audio.to_f32().map_err(map_error)?,
-                    AudioSamplesData::I24(audio) => audio.to_f32().map_err(map_error)?,
+                    AudioSamplesData::F64(audio) => audio.as_f32().map_err(map_error)?,
+                    AudioSamplesData::I32(audio) => audio.as_f32().map_err(map_error)?,
+                    AudioSamplesData::I16(audio) => audio.as_f32().map_err(map_error)?,
+                    AudioSamplesData::I24(audio) => audio.as_f32().map_err(map_error)?,
                 };
                 AudioSamplesData::F32(f32_audio)
             }
             (TargetType::I32, _) => {
                 let i32_audio = match &self.data {
                     AudioSamplesData::I32(audio) => audio.clone(),
-                    AudioSamplesData::I24(audio) => audio.to_i32().map_err(map_error)?,
-                    AudioSamplesData::F64(audio) => audio.to_i32().map_err(map_error)?,
-                    AudioSamplesData::F32(audio) => audio.to_i32().map_err(map_error)?,
-                    AudioSamplesData::I16(audio) => audio.to_i32().map_err(map_error)?,
+                    AudioSamplesData::I24(audio) => audio.as_i32().map_err(map_error)?,
+                    AudioSamplesData::F64(audio) => audio.as_i32().map_err(map_error)?,
+                    AudioSamplesData::F32(audio) => audio.as_i32().map_err(map_error)?,
+                    AudioSamplesData::I16(audio) => audio.as_i32().map_err(map_error)?,
                 };
                 AudioSamplesData::I32(i32_audio)
             }
             (TargetType::I16, _) => {
                 let i16_audio = match &self.data {
                     AudioSamplesData::I16(audio) => audio.clone(),
-                    AudioSamplesData::F64(audio) => audio.to_i16().map_err(map_error)?,
-                    AudioSamplesData::F32(audio) => audio.to_i16().map_err(map_error)?,
-                    AudioSamplesData::I32(audio) => audio.to_i16().map_err(map_error)?,
-                    AudioSamplesData::I24(audio) => audio.to_i16().map_err(map_error)?,
+                    AudioSamplesData::F64(audio) => audio.as_i16().map_err(map_error)?,
+                    AudioSamplesData::F32(audio) => audio.as_i16().map_err(map_error)?,
+                    AudioSamplesData::I32(audio) => audio.as_i16().map_err(map_error)?,
+                    AudioSamplesData::I24(audio) => audio.as_i16().map_err(map_error)?,
                 };
                 AudioSamplesData::I16(i16_audio)
             }
@@ -181,10 +181,10 @@ impl PyAudioSamples {
     /// # Examples
     /// ```python
     /// # Convert any type to maximum precision
-    /// high_precision = audio.to_f64()
+    /// high_precision = audio.as_f64()
     ///
     /// # Useful before complex processing
-    /// processed = audio.to_f64().normalize().apply_filter(coeffs)
+    /// processed = audio.as_f64().normalize().apply_filter(coeffs)
     /// ```
     pub(crate) fn to_f64_impl(&self) -> PyResult<PyAudioSamples> {
         use crate::operations::AudioTypeConversion;
@@ -193,16 +193,16 @@ impl PyAudioSamples {
         let f64_data = match &self.data {
             AudioSamplesData::F64(audio) => AudioSamplesData::F64(audio.clone()),
             AudioSamplesData::F32(audio) => {
-                AudioSamplesData::F64(audio.to_f64().map_err(map_error)?)
+                AudioSamplesData::F64(audio.as_f64().map_err(map_error)?)
             }
             AudioSamplesData::I32(audio) => {
-                AudioSamplesData::F64(audio.to_f64().map_err(map_error)?)
+                AudioSamplesData::F64(audio.as_f64().map_err(map_error)?)
             }
             AudioSamplesData::I16(audio) => {
-                AudioSamplesData::F64(audio.to_f64().map_err(map_error)?)
+                AudioSamplesData::F64(audio.as_f64().map_err(map_error)?)
             }
             AudioSamplesData::I24(audio) => {
-                AudioSamplesData::F64(audio.to_f64().map_err(map_error)?)
+                AudioSamplesData::F64(audio.as_f64().map_err(map_error)?)
             }
         };
         Ok(PyAudioSamples::from_data(f64_data))
@@ -219,10 +219,10 @@ impl PyAudioSamples {
     /// # Examples
     /// ```python
     /// # Reduce memory usage while maintaining good precision
-    /// efficient = audio.to_f32()
+    /// efficient = audio.as_f32()
     ///
     /// # Good for most audio processing tasks
-    /// processed = audio.to_f32().normalize().scale(0.5)
+    /// processed = audio.as_f32().normalize().scale(0.5)
     /// ```
     pub(crate) fn to_f32_impl(&self) -> PyResult<PyAudioSamples> {
         use crate::operations::AudioTypeConversion;
@@ -231,16 +231,16 @@ impl PyAudioSamples {
         let f32_data = match &self.data {
             AudioSamplesData::F32(audio) => AudioSamplesData::F32(audio.clone()),
             AudioSamplesData::F64(audio) => {
-                AudioSamplesData::F32(audio.to_f32().map_err(map_error)?)
+                AudioSamplesData::F32(audio.as_f32().map_err(map_error)?)
             }
             AudioSamplesData::I32(audio) => {
-                AudioSamplesData::F32(audio.to_f32().map_err(map_error)?)
+                AudioSamplesData::F32(audio.as_f32().map_err(map_error)?)
             }
             AudioSamplesData::I16(audio) => {
-                AudioSamplesData::F32(audio.to_f32().map_err(map_error)?)
+                AudioSamplesData::F32(audio.as_f32().map_err(map_error)?)
             }
             AudioSamplesData::I24(audio) => {
-                AudioSamplesData::F32(audio.to_f32().map_err(map_error)?)
+                AudioSamplesData::F32(audio.as_f32().map_err(map_error)?)
             }
         };
         Ok(PyAudioSamples::from_data(f32_data))
@@ -257,10 +257,10 @@ impl PyAudioSamples {
     /// # Examples
     /// ```python
     /// # High precision integer representation
-    /// int32_audio = audio.to_i32()
+    /// int32_audio = audio.as_i32()
     ///
     /// # Useful for certain DSP algorithms that work with integers
-    /// integer_processed = audio.to_i32().apply_filter(int_coeffs)
+    /// integer_processed = audio.as_i32().apply_filter(int_coeffs)
     /// ```
     pub(crate) fn to_i32_impl(&self) -> PyResult<PyAudioSamples> {
         use crate::operations::AudioTypeConversion;
@@ -269,16 +269,16 @@ impl PyAudioSamples {
         let i32_data = match &self.data {
             AudioSamplesData::I32(audio) => AudioSamplesData::I32(audio.clone()),
             AudioSamplesData::I24(audio) => {
-                AudioSamplesData::I32(audio.to_i32().map_err(map_error)?)
+                AudioSamplesData::I32(audio.as_i32().map_err(map_error)?)
             }
             AudioSamplesData::F64(audio) => {
-                AudioSamplesData::I32(audio.to_i32().map_err(map_error)?)
+                AudioSamplesData::I32(audio.as_i32().map_err(map_error)?)
             }
             AudioSamplesData::F32(audio) => {
-                AudioSamplesData::I32(audio.to_i32().map_err(map_error)?)
+                AudioSamplesData::I32(audio.as_i32().map_err(map_error)?)
             }
             AudioSamplesData::I16(audio) => {
-                AudioSamplesData::I32(audio.to_i32().map_err(map_error)?)
+                AudioSamplesData::I32(audio.as_i32().map_err(map_error)?)
             }
         };
         Ok(PyAudioSamples::from_data(i32_data))
@@ -295,10 +295,10 @@ impl PyAudioSamples {
     /// # Examples
     /// ```python
     /// # Standard CD quality format
-    /// cd_quality = audio.to_i16()
+    /// cd_quality = audio.as_i16()
     ///
     /// # Prepare for saving to WAV file
-    /// final_audio = processed_audio.normalize().to_i16()
+    /// final_audio = processed_audio.normalize().as_i16()
     /// ```
     pub(crate) fn to_i16_impl(&self) -> PyResult<PyAudioSamples> {
         use crate::operations::AudioTypeConversion;
@@ -307,16 +307,16 @@ impl PyAudioSamples {
         let i16_data = match &self.data {
             AudioSamplesData::I16(audio) => AudioSamplesData::I16(audio.clone()),
             AudioSamplesData::F64(audio) => {
-                AudioSamplesData::I16(audio.to_i16().map_err(map_error)?)
+                AudioSamplesData::I16(audio.as_i16().map_err(map_error)?)
             }
             AudioSamplesData::F32(audio) => {
-                AudioSamplesData::I16(audio.to_i16().map_err(map_error)?)
+                AudioSamplesData::I16(audio.as_i16().map_err(map_error)?)
             }
             AudioSamplesData::I32(audio) => {
-                AudioSamplesData::I16(audio.to_i16().map_err(map_error)?)
+                AudioSamplesData::I16(audio.as_i16().map_err(map_error)?)
             }
             AudioSamplesData::I24(audio) => {
-                AudioSamplesData::I16(audio.to_i16().map_err(map_error)?)
+                AudioSamplesData::I16(audio.as_i16().map_err(map_error)?)
             }
         };
         Ok(PyAudioSamples::from_data(i16_data))
@@ -335,7 +335,7 @@ impl PyAudioSamples {
     ///
     /// # Conditional conversion
     /// if audio.dtype != 'f32':
-    ///     audio = audio.to_f32()
+    ///     audio = audio.as_f32()
     /// ```
     pub(crate) fn dtype_impl(&self) -> &'static str {
         match &self.data {
@@ -363,13 +363,13 @@ impl PyAudioSamples {
     /// ```python
     /// # Check if we can safely convert to i16 without significant loss
     /// if audio.can_convert_lossless('i16'):
-    ///     audio_i16 = audio.to_i16()
+    ///     audio_i16 = audio.as_i16()
     /// else:
     ///     print("Conversion to i16 would cause significant data loss")
     ///
     /// # Check with custom tolerance
     /// if audio.can_convert_lossless('f32', tolerance=1e-6):
-    ///     audio_f32 = audio.to_f32()
+    ///     audio_f32 = audio.as_f32()
     /// ```
     pub(crate) fn can_convert_lossless_impl(
         &self,
@@ -394,7 +394,7 @@ impl PyAudioSamples {
             }
             AudioSamplesData::I24(audio) => {
                 // Convert to f64 for statistics since I24 doesn't implement needed traits
-                let f64_audio = audio.to_f64().map_err(map_error)?;
+                let f64_audio = audio.as_f64().map_err(map_error)?;
                 (f64_audio.peak(), f64_audio.min(), f64_audio.max())
             }
         };
@@ -459,7 +459,7 @@ impl PyAudioSamples {
         &self,
         py: Python,
         target_dtype: &str,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         use crate::operations::AudioTypeConversion;
         use crate::python::AudioSamplesData;
 
@@ -481,40 +481,40 @@ impl PyAudioSamples {
             let converted_f64 = match target_dtype {
                 "f64" => match &self.data {
                     AudioSamplesData::F64(audio) => audio.clone(),
-                    AudioSamplesData::F32(audio) => audio.to_f64().map_err(map_error)?,
-                    AudioSamplesData::I32(audio) => audio.to_f64().map_err(map_error)?,
-                    AudioSamplesData::I16(audio) => audio.to_f64().map_err(map_error)?,
-                    AudioSamplesData::I24(audio) => audio.to_f64().map_err(map_error)?,
+                    AudioSamplesData::F32(audio) => audio.as_f64().map_err(map_error)?,
+                    AudioSamplesData::I32(audio) => audio.as_f64().map_err(map_error)?,
+                    AudioSamplesData::I16(audio) => audio.as_f64().map_err(map_error)?,
+                    AudioSamplesData::I24(audio) => audio.as_f64().map_err(map_error)?,
                 },
                 "f32" => {
                     let f32_audio = match &self.data {
                         AudioSamplesData::F32(audio) => audio.clone(),
-                        AudioSamplesData::F64(audio) => audio.to_f32().map_err(map_error)?,
-                        AudioSamplesData::I32(audio) => audio.to_f32().map_err(map_error)?,
-                        AudioSamplesData::I16(audio) => audio.to_f32().map_err(map_error)?,
-                        AudioSamplesData::I24(audio) => audio.to_f32().map_err(map_error)?,
+                        AudioSamplesData::F64(audio) => audio.as_f32().map_err(map_error)?,
+                        AudioSamplesData::I32(audio) => audio.as_f32().map_err(map_error)?,
+                        AudioSamplesData::I16(audio) => audio.as_f32().map_err(map_error)?,
+                        AudioSamplesData::I24(audio) => audio.as_f32().map_err(map_error)?,
                     };
-                    f32_audio.to_f64().map_err(map_error)?
+                    f32_audio.as_f64().map_err(map_error)?
                 }
                 "i32" => {
                     let i32_audio = match &self.data {
                         AudioSamplesData::I32(audio) => audio.clone(),
-                        AudioSamplesData::I24(audio) => audio.to_i32().map_err(map_error)?,
-                        AudioSamplesData::F64(audio) => audio.to_i32().map_err(map_error)?,
-                        AudioSamplesData::F32(audio) => audio.to_i32().map_err(map_error)?,
-                        AudioSamplesData::I16(audio) => audio.to_i32().map_err(map_error)?,
+                        AudioSamplesData::I24(audio) => audio.as_i32().map_err(map_error)?,
+                        AudioSamplesData::F64(audio) => audio.as_i32().map_err(map_error)?,
+                        AudioSamplesData::F32(audio) => audio.as_i32().map_err(map_error)?,
+                        AudioSamplesData::I16(audio) => audio.as_i32().map_err(map_error)?,
                     };
-                    i32_audio.to_f64().map_err(map_error)?
+                    i32_audio.as_f64().map_err(map_error)?
                 }
                 "i16" => {
                     let i16_audio = match &self.data {
                         AudioSamplesData::I16(audio) => audio.clone(),
-                        AudioSamplesData::F64(audio) => audio.to_i16().map_err(map_error)?,
-                        AudioSamplesData::F32(audio) => audio.to_i16().map_err(map_error)?,
-                        AudioSamplesData::I32(audio) => audio.to_i16().map_err(map_error)?,
-                        AudioSamplesData::I24(audio) => audio.to_i16().map_err(map_error)?,
+                        AudioSamplesData::F64(audio) => audio.as_i16().map_err(map_error)?,
+                        AudioSamplesData::F32(audio) => audio.as_i16().map_err(map_error)?,
+                        AudioSamplesData::I32(audio) => audio.as_i16().map_err(map_error)?,
+                        AudioSamplesData::I24(audio) => audio.as_i16().map_err(map_error)?,
                     };
-                    i16_audio.to_f64().map_err(map_error)?
+                    i16_audio.as_f64().map_err(map_error)?
                 }
                 _ => unreachable!(),
             };
@@ -578,10 +578,10 @@ impl PyAudioSamples {
         // Get length and data from original audio (convert to f64 for comparison)
         let orig_f64 = match &self.data {
             AudioSamplesData::F64(audio) => audio.clone(),
-            AudioSamplesData::F32(audio) => audio.to_f64().map_err(map_error)?,
-            AudioSamplesData::I32(audio) => audio.to_f64().map_err(map_error)?,
-            AudioSamplesData::I16(audio) => audio.to_f64().map_err(map_error)?,
-            AudioSamplesData::I24(audio) => audio.to_f64().map_err(map_error)?,
+            AudioSamplesData::F32(audio) => audio.as_f64().map_err(map_error)?,
+            AudioSamplesData::I32(audio) => audio.as_f64().map_err(map_error)?,
+            AudioSamplesData::I16(audio) => audio.as_f64().map_err(map_error)?,
+            AudioSamplesData::I24(audio) => audio.as_f64().map_err(map_error)?,
         };
 
         // Ensure same length for comparison
@@ -595,7 +595,7 @@ impl PyAudioSamples {
         }
 
         // Get data arrays for comparison
-        let orig_data = match orig_f64.channels() {
+        let orig_data = match orig_f64.num_channels() {
             1 => {
                 let mono = orig_f64.as_mono().ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("Expected mono audio")
@@ -610,7 +610,7 @@ impl PyAudioSamples {
             }
         };
 
-        let conv_data = match converted.channels() {
+        let conv_data = match converted.num_channels() {
             1 => {
                 let mono = converted.as_mono().ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("Expected mono audio")
