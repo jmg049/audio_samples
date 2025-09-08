@@ -91,13 +91,17 @@ where
     AudioSamples<T>: AudioTypeConversion<T>,
 {
     let input_sample_rate = audio.sample_rate() as usize;
-    let channels = audio.channels();
+    let channels = audio.num_channels();
 
     // Create resampler
     let mut resampler = FftFixedInOut::<f32>::new(
         input_sample_rate,
         target_sample_rate,
-        usize::min(audio.samples_per_channel(), 1024),
+        if audio.samples_per_channel() < 4096 {
+            audio.samples_per_channel()
+        } else {
+            4096
+        },
         channels,
     )
     .map_err(|e| AudioSampleError::ProcessingError {
@@ -122,7 +126,7 @@ where
     AudioSamples<T>: AudioTypeConversion<T>,
 {
     let input_sample_rate = audio.sample_rate() as usize;
-    let channels = audio.channels();
+    let channels = audio.num_channels();
 
     // Create resampler with medium settings
     let mut resampler = SincFixedIn::<f32>::new(
@@ -135,7 +139,11 @@ where
             oversampling_factor: 256,
             window: WindowFunction::BlackmanHarris2,
         },
-        usize::min(audio.samples_per_channel(), 1024),
+        if audio.samples_per_channel() < 4096 {
+            audio.samples_per_channel()
+        } else {
+            4096
+        },
         channels,
     )
     .map_err(|e| AudioSampleError::ProcessingError {
@@ -160,7 +168,7 @@ where
     AudioSamples<T>: AudioTypeConversion<T>,
 {
     let input_sample_rate = audio.sample_rate() as usize;
-    let channels = audio.channels();
+    let channels = audio.num_channels();
 
     // Create high-quality resampler
     let mut resampler = SincFixedIn::<f32>::new(
@@ -173,7 +181,11 @@ where
             oversampling_factor: 512,                    // Higher oversampling
             window: WindowFunction::BlackmanHarris2,
         },
-        usize::min(audio.samples_per_channel(), 2048),
+        if audio.samples_per_channel() < 8192 {
+            audio.samples_per_channel()
+        } else {
+            8192
+        },
         channels,
     )
     .map_err(|e| AudioSampleError::ProcessingError {
@@ -197,7 +209,7 @@ where
     f64: ConvertTo<T>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
-    let channels = audio.channels();
+    let channels = audio.num_channels();
 
     // Prepare input data - rubato expects Vec<Vec<f64>> (channels x samples)
     let mut input_data: Vec<Vec<f32>> = Vec::with_capacity(channels);
@@ -246,7 +258,7 @@ where
     f64: ConvertTo<T>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
-    let channels = audio.channels();
+    let channels = audio.num_channels();
 
     // Prepare input data
     let mut input_data: Vec<Vec<f32>> = Vec::with_capacity(channels);
@@ -271,24 +283,52 @@ where
 
     // For SincFixedIn, we need to process in chunks
     let chunk_size = resampler.input_frames_max();
+    let input_length = input_data[0].len();
     let mut output_chunks: Vec<Vec<Vec<f32>>> = Vec::new();
 
-    for chunk_start in (0..input_data[0].len()).step_by(chunk_size) {
-        let chunk_end = (chunk_start + chunk_size).min(input_data[0].len());
+    // If input is smaller than chunk size, pad it to minimum required size
+    if input_length < chunk_size {
+        // Pad each channel to chunk_size
+        for channel in &mut input_data {
+            channel.resize(chunk_size, 0.0);
+        }
 
-        // Extract chunk for each channel
-        let chunk_data: Vec<Vec<f32>> = input_data
-            .iter()
-            .map(|ch_data| ch_data[chunk_start..chunk_end].to_vec())
-            .collect();
-
-        // Resample this chunk
-        match resampler.process(&chunk_data, None) {
+        // Process the single padded chunk
+        match resampler.process(&input_data, None) {
             Ok(output_chunk) => output_chunks.push(output_chunk),
             Err(e) => {
                 return Err(AudioSampleError::ProcessingError {
-                    msg: format!("Chunk resampling failed: {}", e),
+                    msg: format!("Single chunk resampling failed: {}", e),
                 });
+            }
+        }
+    } else {
+        // Process in chunks as normal
+        for chunk_start in (0..input_length).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size).min(input_length);
+            let actual_chunk_size = chunk_end - chunk_start;
+
+            // Extract chunk for each channel
+            let mut chunk_data: Vec<Vec<f32>> = input_data
+                .iter()
+                .map(|ch_data| ch_data[chunk_start..chunk_end].to_vec())
+                .collect();
+
+            // If this chunk is smaller than required (last chunk), pad it
+            if actual_chunk_size < chunk_size {
+                for channel in &mut chunk_data {
+                    channel.resize(chunk_size, 0.0);
+                }
+            }
+
+            // Resample this chunk
+            match resampler.process(&chunk_data, None) {
+                Ok(output_chunk) => output_chunks.push(output_chunk),
+                Err(e) => {
+                    return Err(AudioSampleError::ProcessingError {
+                        msg: format!("Chunk resampling failed: {}", e),
+                    });
+                }
             }
         }
     }
@@ -421,7 +461,7 @@ mod tests {
         let resampled = resample(&audio, 48000, ResamplingQuality::Medium).unwrap();
 
         assert_eq!(resampled.sample_rate(), 48000);
-        assert_eq!(resampled.channels(), 1);
+        assert_eq!(resampled.num_channels(), 1);
         println!("Resampled samples: {:?}", resampled);
         assert!(resampled.samples_per_channel() > 0);
     }

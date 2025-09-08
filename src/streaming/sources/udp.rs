@@ -6,7 +6,7 @@ use crate::streaming::{
 };
 use crate::{AudioSample, AudioSamples, ConvertTo};
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -222,7 +222,7 @@ impl PacketBuffer {
 
 /// State of the UDP connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UdpState {
+pub enum UdpState {
     Unbound,
     Bound,
     Error,
@@ -261,7 +261,13 @@ pub struct UdpStreamSource<T: AudioSample> {
     phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: AudioSample> UdpStreamSource<T> {
+impl<T: AudioSample> UdpStreamSource<T>
+where
+    i16: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
     /// Create a new UDP streaming source.
     pub fn new(config: UdpConfig) -> Self {
         let format_info = config.expected_format.clone().unwrap_or_else(|| {
@@ -361,12 +367,24 @@ impl<T: AudioSample> UdpStreamSource<T> {
             if let Some(group) = self.config.multicast_group {
                 socket
                     .join_multicast_v4(
-                        group.ip().try_into().map_err(|_| {
+                        match group.ip() {
+                            std::net::IpAddr::V4(addr) => Ok(addr),
+                            std::net::IpAddr::V6(_) => Err(StreamError::InvalidConfig(
+                                "IPv6 multicast not supported".to_string(),
+                            )),
+                        }
+                        .map_err(|_| {
                             StreamError::InvalidConfig(
                                 "Invalid multicast group address".to_string(),
                             )
                         })?,
-                        self.config.local_address.ip().try_into().map_err(|_| {
+                        match self.config.local_address.ip() {
+                            std::net::IpAddr::V4(addr) => Ok(addr),
+                            std::net::IpAddr::V6(_) => Err(StreamError::InvalidConfig(
+                                "IPv6 interface not supported for multicast".to_string(),
+                            )),
+                        }
+                        .map_err(|_| {
                             StreamError::InvalidConfig(
                                 "Invalid local address for multicast".to_string(),
                             )
@@ -485,7 +503,7 @@ impl<T: AudioSample> UdpStreamSource<T> {
                         StreamError::InvalidConfig("Invalid 16-bit sample data".to_string())
                     })?;
                     let value = i16::from_ne_bytes(bytes);
-                    value.convert_to::<T>().map_err(StreamError::Audio)?
+                    value.convert_to().map_err(StreamError::Audio)?
                 }
                 32 => {
                     let bytes: [u8; 4] = chunk.try_into().map_err(|_| {
@@ -497,7 +515,7 @@ impl<T: AudioSample> UdpStreamSource<T> {
                         T::cast_from(value)
                     } else {
                         let value = i32::from_ne_bytes(bytes);
-                        value.convert_to::<T>().map_err(StreamError::Audio)?
+                        value.convert_to().map_err(StreamError::Audio)?
                     }
                 }
                 64 => {
@@ -505,7 +523,7 @@ impl<T: AudioSample> UdpStreamSource<T> {
                         StreamError::InvalidConfig("Invalid 64-bit sample data".to_string())
                     })?;
                     let value = f64::from_ne_bytes(bytes);
-                    value.convert_to::<T>().map_err(StreamError::Audio)?
+                    value.convert_to().map_err(StreamError::Audio)?
                 }
                 _ => {
                     return Err(StreamError::InvalidConfig(format!(
@@ -521,7 +539,13 @@ impl<T: AudioSample> UdpStreamSource<T> {
     }
 }
 
-impl<T: AudioSample> AudioSource<T> for UdpStreamSource<T> {
+impl<T: AudioSample> AudioSource<T> for UdpStreamSource<T>
+where
+    i16: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
     async fn next_chunk(&mut self) -> StreamResult<Option<AudioSamples<T>>> {
         if !self.is_active {
             return Ok(None);
@@ -600,7 +624,7 @@ impl<T: AudioSample> AudioSource<T> for UdpStreamSource<T> {
             .map_err(|e| StreamError::InvalidConfig(e.to_string()))?;
 
         let audio_samples =
-            AudioSamples::new(array, self.format_info.sample_rate).map_err(StreamError::Audio)?;
+            AudioSamples::new_multi_channel(array, self.format_info.sample_rate as u32);
 
         // Update metrics
         {

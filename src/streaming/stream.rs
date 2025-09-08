@@ -3,16 +3,12 @@
 use super::{
     buffers::{BufferConfig, CircularBuffer},
     error::{StreamError, StreamResult},
-    traits::{AudioFormatInfo, AudioSource, StreamConfig, StreamProcessor, StreamSink},
+    traits::{AudioFormatInfo, AudioSource, StreamConfig},
 };
 use crate::{AudioSample, AudioSamples};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "streaming")]
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::{sleep, timeout},
-};
 
 /// Represents the current state of an audio stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +127,7 @@ impl<T: AudioSample> AudioStream<T> {
     }
 
     /// Start the stream with the given source.
-    pub async fn start_with_source<S>(&mut self, mut source: S) -> StreamResult<()>
+    pub async fn start_with_source<S>(&mut self, source: S) -> StreamResult<()>
     where
         S: AudioSource<T> + 'static,
     {
@@ -187,7 +183,8 @@ impl<T: AudioSample> AudioStream<T> {
         match result {
             Ok(()) => {
                 self.stats.chunks_written += 1;
-                self.stats.bytes_processed += self.buffer.sample_count() * std::mem::size_of::<T>();
+                self.stats.bytes_processed +=
+                    (self.buffer.sample_count() * std::mem::size_of::<T>()) as u64;
             }
             Err(ref e)
                 if matches!(
@@ -320,7 +317,7 @@ impl<T: AudioSample> AudioStream<T> {
 }
 
 /// Statistics for monitoring stream performance.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct StreamStats {
     pub start_time: Instant,
     pub chunks_written: u64,
@@ -331,6 +328,22 @@ pub struct StreamStats {
     pub errors: u64,
     pub recovery_attempts: u64,
     pub average_latency_ms: f64,
+}
+
+impl Default for StreamStats {
+    fn default() -> Self {
+        Self {
+            start_time: Instant::now(),
+            chunks_written: 0,
+            chunks_read: 0,
+            bytes_processed: 0,
+            underruns: 0,
+            overruns: 0,
+            errors: 0,
+            recovery_attempts: 0,
+            average_latency_ms: 0.0,
+        }
+    }
 }
 
 impl StreamStats {

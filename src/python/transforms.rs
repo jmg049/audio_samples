@@ -58,7 +58,12 @@ impl PyAudioSamples {
     /// frequencies = np.fft.fftfreq(len(spectrum), 1/44100)
     /// # Should show peak at 440 Hz
     /// ```
-    pub(crate) fn fft_impl(&self, py: Python, _n: Option<usize>, _axis: i32) -> PyResult<PyObject> {
+    pub(crate) fn fft_impl(
+        &self,
+        py: Python,
+        _n: Option<usize>,
+        _axis: i32,
+    ) -> PyResult<Py<PyAny>> {
         let fft_result = self.with_inner(|inner| inner.fft()).map_err(map_error)?;
 
         // Convert Vec<Complex<f64>> to numpy array
@@ -126,7 +131,7 @@ impl PyAudioSamples {
         window_size: usize,
         hop_size: Option<usize>,
         window: &str,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let actual_hop_size = parse_hop_size(hop_size, window_size);
         let window_type = Self::parse_window_type_impl(window)?;
 
@@ -210,7 +215,7 @@ impl PyAudioSamples {
         window: &str,
         scale: &str,
         power: f64,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         validate_string_param("scale", scale, &["linear", "log", "mel"])?;
 
         let actual_hop_size = parse_hop_size(hop_size, window_size);
@@ -289,7 +294,7 @@ impl PyAudioSamples {
         fmax: Option<f64>,
         window_size: Option<usize>,
         hop_size: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let actual_n_mels = n_mels.unwrap_or(128);
         let actual_fmin = fmin.unwrap_or(0.0);
         let actual_fmax = parse_fmax(fmax, self.sample_rate());
@@ -344,7 +349,7 @@ impl PyAudioSamples {
         fmax: Option<f64>,
         _window_size: Option<usize>,
         _hop_size: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let actual_n_mfcc = n_mfcc.unwrap_or(13);
         let actual_n_mels = n_mels.unwrap_or(128);
         let actual_fmin = fmin.unwrap_or(0.0);
@@ -388,7 +393,7 @@ impl PyAudioSamples {
         fmax: Option<f64>,
         window_size: Option<usize>,
         hop_size: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let actual_n_filters = n_filters.unwrap_or(64);
         let actual_fmin = fmin.unwrap_or(80.0);
         let actual_fmax = parse_fmax(fmax, self.sample_rate());
@@ -437,7 +442,7 @@ impl PyAudioSamples {
         n_chroma: Option<usize>,
         window_size: Option<usize>,
         hop_size: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let actual_n_chroma = n_chroma.unwrap_or(12);
         let actual_window_size = window_size.unwrap_or(1024);
         let _actual_hop_size = parse_hop_size(hop_size, actual_window_size);
@@ -477,7 +482,7 @@ impl PyAudioSamples {
         window_size: Option<usize>,
         overlap: Option<f64>,
         _window: Option<&str>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let actual_window_size = window_size.unwrap_or(1024);
         let actual_overlap = overlap.unwrap_or(0.5);
 

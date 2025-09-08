@@ -264,7 +264,7 @@ where
                     "All segments must have the same sample rate".to_string(),
                 ));
             }
-            if segment.channels() != first.channels() {
+            if segment.num_channels() != first.num_channels() {
                 return Err(AudioSampleError::InvalidParameter(
                     "All segments must have the same number of channels".to_string(),
                 ));
@@ -331,7 +331,7 @@ where
                     "All sources must have the same sample rate".to_string(),
                 ));
             }
-            if source.channels() != first.channels() {
+            if source.num_channels() != first.num_channels() {
                 return Err(AudioSampleError::InvalidParameter(
                     "All sources must have the same number of channels".to_string(),
                 ));

@@ -9,7 +9,6 @@ use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(feature = "playback")]
 use cpal::{
     Device, Host, StreamConfig, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait},
@@ -20,7 +19,6 @@ use cpal::{
 /// The DeviceManager provides a unified interface for discovering,
 /// querying, and managing audio output devices across different platforms.
 pub struct DeviceManager {
-    #[cfg(feature = "playback")]
     host: Host,
 
     #[cfg(not(feature = "playback"))]
@@ -33,7 +31,6 @@ pub struct DeviceManager {
 impl DeviceManager {
     /// Create a new device manager instance.
     pub fn new() -> PlaybackResult<Self> {
-        #[cfg(feature = "playback")]
         {
             let host = cpal::default_host();
             let manager = Self {
@@ -59,7 +56,6 @@ impl DeviceManager {
 
     /// Get the default output device.
     pub fn default_output_device(&self) -> PlaybackResult<Option<DeviceHandle>> {
-        #[cfg(feature = "playback")]
         {
             let cached_default = self.default_output_device.lock().clone();
             if let Some(device) = cached_default {
@@ -85,8 +81,7 @@ impl DeviceManager {
     }
 
     /// Get all available output devices.
-    pub fn output_devices(&self) -> PlaybackResult<Vec<DeviceHandle>> {
-        #[cfg(feature = "playback")]
+    pub fn output_devices(&mut self) -> PlaybackResult<Vec<DeviceHandle>> {
         {
             let cached = self.cached_devices.read().clone();
             if !cached.is_empty() {
@@ -109,7 +104,7 @@ impl DeviceManager {
     }
 
     /// Find a device by name.
-    pub fn find_device_by_name(&self, name: &str) -> PlaybackResult<Option<DeviceHandle>> {
+    pub fn find_device_by_name(&mut self, name: &str) -> PlaybackResult<Option<DeviceHandle>> {
         let devices = self.output_devices()?;
         Ok(devices
             .into_iter()
@@ -118,7 +113,7 @@ impl DeviceManager {
 
     /// Find the best device for the given format.
     pub fn find_best_device(
-        &self,
+        &mut self,
         desired_format: &AudioFormatSpec,
     ) -> PlaybackResult<Option<DeviceHandle>> {
         let devices = self.output_devices()?;
@@ -147,7 +142,6 @@ impl DeviceManager {
 
     /// Refresh the device cache.
     pub fn refresh_devices(&mut self) -> PlaybackResult<()> {
-        #[cfg(feature = "playback")]
         {
             let mut devices = Vec::new();
 
@@ -185,12 +179,12 @@ impl DeviceManager {
     }
 
     /// Get the number of available devices.
-    pub fn device_count(&self) -> PlaybackResult<usize> {
+    pub fn device_count(&mut self) -> PlaybackResult<usize> {
         Ok(self.output_devices()?.len())
     }
 
     /// Check if any devices are available.
-    pub fn has_devices(&self) -> PlaybackResult<bool> {
+    pub fn has_devices(&mut self) -> PlaybackResult<bool> {
         Ok(self.device_count()? > 0)
     }
 }
@@ -204,7 +198,6 @@ impl Default for DeviceManager {
 /// A handle to an audio output device.
 #[derive(Clone)]
 pub struct DeviceHandle {
-    #[cfg(feature = "playback")]
     device: Arc<Device>,
 
     #[cfg(not(feature = "playback"))]
@@ -217,7 +210,7 @@ pub struct DeviceHandle {
 
 impl DeviceHandle {
     /// Create a new device handle.
-    #[cfg(feature = "playback")]
+
     pub fn new(device: Device) -> PlaybackResult<Self> {
         let name = device.name().map_err(|e| PlaybackError::DeviceQuery {
             operation: "get name".to_string(),
@@ -342,7 +335,7 @@ impl DeviceHandle {
     }
 
     /// Get the underlying CPAL device.
-    #[cfg(feature = "playback")]
+
     pub fn cpal_device(&self) -> &Device {
         &self.device
     }
@@ -453,7 +446,6 @@ impl AudioDevice for DeviceHandle {
     }
 
     fn is_available(&self) -> bool {
-        #[cfg(feature = "playback")]
         {
             // Try to query device name as a simple availability check
             self.device.name().is_ok()

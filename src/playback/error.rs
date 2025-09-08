@@ -71,6 +71,56 @@ pub enum PlaybackError {
     /// Volume or gain out of valid range
     #[error("Volume out of range: {volume}, valid range: {min} to {max}")]
     VolumeOutOfRange { volume: f64, min: f64, max: f64 },
+
+    /// Buffer overflow during write operations
+    #[error("Buffer overflow: requested {requested} samples, available {available}")]
+    BufferOverflow { requested: usize, available: usize },
+
+    /// Stream creation failed
+    #[error("Stream creation failed: {source}")]
+    StreamCreation {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Stream control operation failed
+    #[error("Stream control operation '{operation}' failed: {source}")]
+    StreamControl {
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// No audio devices available
+    #[error("No audio devices available")]
+    NoDevicesAvailable,
+
+    /// Device enumeration failed
+    #[error("Device enumeration failed: {source}")]
+    DeviceEnumeration {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Device query operation failed
+    #[error("Device query operation '{operation}' failed: {source}")]
+    DeviceQuery {
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Feature not enabled at compile time
+    #[error("Feature '{feature}' not enabled for operation: {operation}")]
+    FeatureNotEnabled { feature: String, operation: String },
+
+    /// Effects processing error
+    #[error("Effects processing error: {0}")]
+    EffectsProcessing(String),
+
+    /// Invalid configuration
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl PlaybackError {

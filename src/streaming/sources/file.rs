@@ -4,7 +4,7 @@ use crate::streaming::{
     error::{StreamError, StreamResult},
     traits::{AudioFormatInfo, AudioSource, SourceMetrics},
 };
-use crate::{AudioSample, AudioSampleError, AudioSamples};
+use crate::{AudioSample, AudioSamples};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -256,7 +256,10 @@ impl<T: AudioSample> FileStreamSource<T> {
             .map_err(|e| StreamError::InvalidConfig(e.to_string()))?
         };
 
-        AudioSamples::new(data, self.format_info.sample_rate).map_err(StreamError::Audio)
+        Ok(AudioSamples::new_multi_channel(
+            data,
+            self.format_info.sample_rate as u32,
+        ))
     }
 }
 

@@ -1,3 +1,28 @@
+//! Channel manipulation operations for AudioSamples.
+//!
+//! This module implements the AudioChannelOps trait, providing comprehensive
+//! channel manipulation operations including mono/stereo conversions, channel
+//! mixing, and multi-channel audio processing using efficient ndarray operations.
+//!
+//! ## Supported Operations
+//!
+//! - **Mono Conversion**: Convert multi-channel audio to mono using various methods
+//! - **Stereo Conversion**: Convert mono audio to stereo with configurable panning
+//! - **Channel Extraction**: Extract specific channels from multi-channel audio
+//! - **Channel Mixing**: Combine channels with custom weighting factors
+//!
+//! ## Conversion Methods
+//!
+//! ### Mono Conversion
+//! - `Average`: Simple arithmetic mean of all channels
+//! - `LeftOnly`: Use only the left channel (channel 0)
+//! - `RightOnly`: Use only the right channel (channel 1)
+//! - `WeightedMix`: Custom weighted combination of channels
+//!
+//! ### Stereo Conversion
+//! - `Duplicate`: Copy mono signal to both left and right channels
+//! - `Pan`: Position mono signal in stereo field with configurable balance
+
 use crate::{
     AudioChannelOps, AudioEditing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
     AudioTypeConversion, ConvertTo, I24, operations::MonoConversionMethod, repr::AudioData,
@@ -86,11 +111,11 @@ where
     where
         Self: Sized,
     {
-        if channel_index >= self.channels() {
+        if channel_index >= self.num_channels() {
             return Err(crate::AudioSampleError::InvalidParameter(format!(
                 "Channel index {} out of bounds for {} channels",
                 channel_index,
-                self.channels()
+                self.num_channels()
             )));
         }
         match &self.data {
@@ -106,12 +131,12 @@ where
     }
 
     fn swap_channels(&mut self, channel1: usize, channel2: usize) -> AudioSampleResult<()> {
-        if channel1 >= self.channels() || channel2 >= self.channels() {
+        if channel1 >= self.num_channels() || channel2 >= self.num_channels() {
             return Err(AudioSampleError::InvalidParameter(format!(
                 "Channel indices {} and {} out of bounds for {} channels",
                 channel1,
                 channel2,
-                self.channels()
+                self.num_channels()
             )));
         }
 

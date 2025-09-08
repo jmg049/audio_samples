@@ -76,14 +76,16 @@ pub mod streaming;
 
 #[cfg(feature = "playback")]
 pub mod playback;
+
+#[cfg(all(feature = "streaming", feature = "playback"))]
+pub mod streaming_playback;
 use std::{
     fmt::Debug,
     ops::{Add, Div, Mul, Sub},
 };
 
-pub use i24::I24DiskMethods;
 /// Re-export i24 for dependent crates to use.
-pub use i24::i24 as I24;
+pub use i24::I24;
 
 // Re-exports for public API
 pub use crate::error::{AudioSampleError, AudioSampleResult};
@@ -91,7 +93,7 @@ pub use crate::operations::{
     AudioChannelOps, AudioEditing, AudioProcessing, AudioSamplesOperations, AudioStatistics,
     AudioTransforms, AudioTypeConversion, NormalizationMethod,
 };
-pub use crate::repr::AudioSamples;
+pub use crate::repr::{AudioData, AudioSamples};
 
 /// Array of supported audio sample data types as string identifiers
 pub const SUPPORTED_DTYPES: [&str; 5] = ["i16", "I24", "i32", "f32", "f64"];

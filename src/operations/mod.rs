@@ -26,8 +26,8 @@
 //! let audio = AudioSamples::new_mono(data, 44100);
 //!
 //! // Statistical analysis
-//! let peak = audio.peak();
-//! let rms = audio.rms();
+//! let peak = audio.peak(); // Returns f32 directly
+//! let rms = audio.rms()?;  // Returns Result<f64>
 //!
 //! // Signal processing
 //! let mut audio_copy = audio.clone();

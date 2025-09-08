@@ -1,14 +1,8 @@
 //! Core traits for streaming audio processing.
 
 use super::error::{StreamError, StreamResult};
-use crate::{AudioSample, AudioSampleResult, AudioSamples};
+use crate::{AudioSample, AudioSamples};
 use std::time::Duration;
-
-#[cfg(feature = "streaming")]
-use futures::Stream;
-
-#[cfg(feature = "streaming")]
-use tokio::sync::mpsc;
 
 /// Represents an audio source that can provide streaming audio data.
 ///
@@ -19,7 +13,9 @@ pub trait AudioSource<T: AudioSample>: Send + Sync {
     ///
     /// Returns `None` when the stream ends naturally, or an error
     /// if something goes wrong that could potentially be recovered from.
-    async fn next_chunk(&mut self) -> StreamResult<Option<AudioSamples<T>>>;
+    fn next_chunk(
+        &mut self,
+    ) -> impl std::future::Future<Output = StreamResult<Option<AudioSamples<T>>>> + Send;
 
     /// Get information about the audio format this source provides.
     fn format_info(&self) -> AudioFormatInfo;
@@ -32,11 +28,16 @@ pub trait AudioSource<T: AudioSample>: Send + Sync {
     /// Returns `Ok(actual_position)` if seeking succeeded, where
     /// `actual_position` may differ from the requested position.
     /// Returns an error if seeking is not supported or fails.
-    async fn seek(&mut self, position: Duration) -> StreamResult<Duration> {
+    fn seek(
+        &mut self,
+        position: Duration,
+    ) -> impl std::future::Future<Output = StreamResult<Duration>> + Send {
         let _ = position;
-        Err(StreamError::InvalidConfig(
-            "Seeking not supported".to_string(),
-        ))
+        async move {
+            Err(StreamError::InvalidConfig(
+                "Seeking not supported".to_string(),
+            ))
+        }
     }
 
     /// Get the estimated duration of the stream (if known).

@@ -37,7 +37,7 @@ where
     f64: ConvertTo<T>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
-    if a.channels() != b.channels() || a.samples_per_channel() != b.samples_per_channel() {
+    if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
         return Err(AudioSampleError::InvalidParameter(
             "Signals must have the same dimensions for correlation".to_string(),
         ));
@@ -111,7 +111,7 @@ where
     f64: ConvertTo<T>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
-    if a.channels() != b.channels() || a.samples_per_channel() != b.samples_per_channel() {
+    if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
         return Err(AudioSampleError::InvalidParameter(
             "Signals must have the same dimensions for MSE".to_string(),
         ));
@@ -185,7 +185,7 @@ where
     f64: ConvertTo<T>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
-    if signal.channels() != noise.channels()
+    if signal.num_channels() != noise.num_channels()
         || signal.samples_per_channel() != noise.samples_per_channel()
     {
         return Err(AudioSampleError::InvalidParameter(
@@ -254,7 +254,7 @@ where
     f64: ConvertTo<T>,
     AudioSamples<T>: AudioTypeConversion<T>,
 {
-    if reference.channels() != signal.channels() {
+    if reference.num_channels() != signal.num_channels() {
         return Err(AudioSampleError::InvalidParameter(
             "Signals must have the same number of channels for alignment".to_string(),
         ));
