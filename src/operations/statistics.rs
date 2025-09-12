@@ -214,9 +214,12 @@ where
 
     /// Computes the autocorrelation function up to max_lag samples.
     ///
-    /// For efficiency, this uses a simplified correlation computation.
+    /// Uses FFT-based correlation for O(n log n) performance instead of O(n²).
+    /// Formula: autocorr(x) = IFFT(FFT(x) * conj(FFT(x)))
     /// Returns correlation values for each lag offset.
     fn autocorrelation(&self, max_lag: usize) -> AudioSampleResult<Vec<f64>> {
+        use rustfft::{FftPlanner, num_complex::Complex};
+        
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.is_empty() || max_lag == 0 {
@@ -225,24 +228,43 @@ where
 
                 let n = arr.len();
                 let effective_max_lag = max_lag.min(n - 1);
+                
+                // For FFT-based correlation, we need to pad to 2*n-1 to avoid circular correlation
+                let fft_size = (2 * n - 1).next_power_of_two();
+                
+                // Convert to f64 and pad with zeros
+                let mut padded_signal: Vec<Complex<f64>> = Vec::with_capacity(fft_size);
+                for &sample in arr.iter() {
+                    let sample: f64 = sample.cast_into();
+                    padded_signal.push(Complex::new(sample, 0.0));
+                }
+                // Pad with zeros
+                padded_signal.resize(fft_size, Complex::new(0.0, 0.0));
+                
+                // Compute FFT
+                let mut planner = FftPlanner::new();
+                let fft = planner.plan_fft_forward(fft_size);
+                fft.process(&mut padded_signal);
+                
+                // Compute power spectrum: FFT(x) * conj(FFT(x))
+                for sample in padded_signal.iter_mut() {
+                    *sample = *sample * sample.conj();
+                }
+                
+                // Compute inverse FFT
+                let ifft = planner.plan_fft_inverse(fft_size);
+                ifft.process(&mut padded_signal);
+                
+                // Extract autocorrelation values and normalize
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
-
-                // Convert to f64 for precision
-
-                // Compute autocorrelation for each lag
+                let fft_size_f64 = fft_size as f64;
+                
                 for lag in 0..=effective_max_lag {
-                    let mut correlation = 0.0;
-                    let count = n - lag;
-
-                    for i in 0..count {
-                        let s_i: f64 = arr[i].cast_into();
-                        let s_i_lag: f64 = arr[i + lag].cast_into();
-                        correlation += s_i * s_i_lag;
-                    }
-
-                    // Normalize by the number of overlapping samples
-                    correlation /= count as f64;
-                    correlations.push(correlation);
+                    // IFFT result is scaled by fft_size, and we normalize by number of overlaps
+                    let correlation = padded_signal[lag].re / fft_size_f64;
+                    let overlap_count = n - lag;
+                    let normalized_correlation = correlation / overlap_count as f64;
+                    correlations.push(normalized_correlation);
                 }
 
                 Ok(correlations)
@@ -256,20 +278,40 @@ where
                 let first_channel = arr.row(0);
                 let n = first_channel.len();
                 let effective_max_lag = max_lag.min(n - 1);
+                
+                let fft_size = (2 * n - 1).next_power_of_two();
+                
+                // Convert first channel to complex and pad
+                let mut padded_signal: Vec<Complex<f64>> = Vec::with_capacity(fft_size);
+                for &sample in first_channel.iter() {
+                    let sample: f64 = sample.cast_into();
+                    padded_signal.push(Complex::new(sample, 0.0));
+                }
+                padded_signal.resize(fft_size, Complex::new(0.0, 0.0));
+                
+                // FFT-based autocorrelation
+                let mut planner = FftPlanner::new();
+                let fft = planner.plan_fft_forward(fft_size);
+                fft.process(&mut padded_signal);
+                
+                // Power spectrum
+                for sample in padded_signal.iter_mut() {
+                    *sample = *sample * sample.conj();
+                }
+                
+                // Inverse FFT
+                let ifft = planner.plan_fft_inverse(fft_size);
+                ifft.process(&mut padded_signal);
+                
+                // Extract and normalize correlations
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
-
+                let fft_size_f64 = fft_size as f64;
+                
                 for lag in 0..=effective_max_lag {
-                    let mut correlation = 0.0;
-                    let count = n - lag;
-
-                    for i in 0..count {
-                        let s_i: f64 = first_channel[i].cast_into();
-                        let s_i_lag: f64 = first_channel[i + lag].cast_into();
-                        correlation += s_i * s_i_lag;
-                    }
-
-                    correlation /= count as f64;
-                    correlations.push(correlation);
+                    let correlation = padded_signal[lag].re / fft_size_f64;
+                    let overlap_count = n - lag;
+                    let normalized_correlation = correlation / overlap_count as f64;
+                    correlations.push(normalized_correlation);
                 }
 
                 Ok(correlations)
