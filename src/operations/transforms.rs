@@ -17,6 +17,40 @@ use crate::{
 use ndarray::{Array1, Array2};
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+/// Cache key for window functions that handles f64 parameters.
+/// 
+/// Since WindowType contains f64 values that don't implement Hash and Eq,
+/// we need a custom key type that converts f64 to a hashable representation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum WindowCacheKey {
+    Rectangular,
+    Hanning,
+    Hamming, 
+    Blackman,
+    Kaiser { beta_bits: u64 },
+    Gaussian { std_bits: u64 },
+}
+
+impl From<WindowType> for WindowCacheKey {
+    fn from(window_type: WindowType) -> Self {
+        match window_type {
+            WindowType::Rectangular => WindowCacheKey::Rectangular,
+            WindowType::Hanning => WindowCacheKey::Hanning,
+            WindowType::Hamming => WindowCacheKey::Hamming,
+            WindowType::Blackman => WindowCacheKey::Blackman,
+            WindowType::Kaiser { beta } => WindowCacheKey::Kaiser { 
+                beta_bits: beta.to_bits() 
+            },
+            WindowType::Gaussian { std } => WindowCacheKey::Gaussian { 
+                std_bits: std.to_bits() 
+            },
+        }
+    }
+}
 
 impl<T: AudioSample> AudioTransforms<T> for AudioSamples<T>
 where
@@ -192,8 +226,8 @@ where
             ));
         }
 
-        // Generate window function
-        let window = generate_window(window_size, window_type);
+        // Generate window function (cached for performance)
+        let window = generate_window_cached(window_size, window_type);
 
         // For real-valued signals, we only need positive frequencies
         let num_positive_freqs = window_size / 2 + 1;
@@ -258,8 +292,8 @@ where
         let mut output = vec![0.0f64; output_length];
         let mut window_sum = vec![0.0f64; output_length];
 
-        // Generate window function
-        let window = generate_window(window_size, window_type);
+        // Generate window function (cached for performance)
+        let window = generate_window_cached(window_size, window_type);
 
         // Setup inverse FFT planner
         let mut planner = FftPlanner::new();
@@ -1234,10 +1268,56 @@ fn normalize_spectrogram(
     Ok(())
 }
 
-/// Generate window function coefficients.
+/// Cached window function storage for performance optimization.
+/// 
+/// Uses a global cache to avoid recomputing expensive trigonometric operations
+/// for common window types and sizes.
+lazy_static! {
+    static ref WINDOW_CACHE: Mutex<HashMap<(usize, WindowCacheKey), Vec<f64>>> = 
+        Mutex::new(HashMap::new());
+}
+
+/// Generate window function coefficients with caching for performance.
 ///
-/// Supports various window types for spectral analysis.
-fn generate_window(size: usize, window_type: WindowType) -> Vec<f64> {
+/// Supports various window types for spectral analysis. Frequently used
+/// window functions are cached to avoid expensive recomputation of 
+/// trigonometric functions.
+///
+/// # Arguments
+/// * `size` - Window size in samples
+/// * `window_type` - Type of window function
+///
+/// # Returns  
+/// Vector of window coefficients, cached for future use
+fn generate_window_cached(size: usize, window_type: WindowType) -> Vec<f64> {
+    let cache_key = WindowCacheKey::from(window_type);
+    
+    // Check cache first
+    if let Ok(cache) = WINDOW_CACHE.try_lock() {
+        if let Some(cached_window) = cache.get(&(size, cache_key.clone())) {
+            return cached_window.clone();
+        }
+    }
+
+    // Generate window if not cached
+    let window = generate_window_uncached(size, window_type);
+
+    // Cache the result
+    if let Ok(mut cache) = WINDOW_CACHE.try_lock() {
+        // Limit cache size to prevent unbounded growth
+        if cache.len() < 100 {  // Allow up to 100 cached windows
+            cache.insert((size, cache_key), window.clone());
+        }
+    }
+
+    window
+}
+
+/// Generate window function coefficients without caching (internal).
+///
+/// This is the actual implementation that computes window functions.
+/// Used internally by the cached version.
+fn generate_window_uncached(size: usize, window_type: WindowType) -> Vec<f64> {
     match window_type {
         WindowType::Rectangular => vec![1.0; size],
         WindowType::Hanning => (0..size)
@@ -1680,8 +1760,8 @@ fn generate_cqt_kernel_bin(
 ) -> AudioSampleResult<Vec<Complex<f64>>> {
     let mut kernel = Vec::with_capacity(kernel_length);
 
-    // Generate window coefficients
-    let window = generate_window(kernel_length, *window_type);
+    // Generate window coefficients (cached for performance)  
+    let window = generate_window_cached(kernel_length, *window_type);
 
     // Generate complex exponential kernel
     for (n, w) in window.iter().enumerate().take(kernel_length) {
