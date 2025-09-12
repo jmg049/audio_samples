@@ -266,67 +266,89 @@ impl<T: AudioSample> AudioSamples<T> {
     {
         match &self.data {
             AudioData::Mono(arr) => {
-                arr.iter()
-                    .map(|&sample| {
-                        // Simple absolute value: if sample < 0, return -sample, else sample
-                        if sample < T::default() {
-                            T::default() - sample
-                        } else {
-                            sample
-                        }
-                    })
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .unwrap_or(T::default())
-            }
-            AudioData::MultiChannel(arr) => arr
-                .iter()
-                .map(|&sample| {
-                    if sample < T::default() {
-                        T::default() - sample
+                if arr.is_empty() {
+                    return T::default();
+                }
+                
+                // Use ndarray's vectorized operations for SIMD-optimized absolute value and max
+                let abs_values = arr.mapv(|x| {
+                    // Manual absolute value that works with existing trait bounds
+                    if x < T::default() {
+                        T::default() - x
                     } else {
-                        sample
+                        x
                     }
+                });
+                
+                // Use ndarray's efficient fold operation instead of iterator chains
+                abs_values.fold(T::default(), |acc, &x| {
+                    if x > acc { x } else { acc }
                 })
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or(T::default()),
+            }
+            AudioData::MultiChannel(arr) => {
+                if arr.is_empty() {
+                    return T::default();
+                }
+                
+                // Vectorized absolute value and max across entire multi-channel array
+                let abs_values = arr.mapv(|x| {
+                    if x < T::default() {
+                        T::default() - x
+                    } else {
+                        x
+                    }
+                });
+                
+                abs_values.fold(T::default(), |acc, &x| {
+                    if x > acc { x } else { acc }
+                })
+            }
         }
     }
 
-    /// Returns the minimum value in the audio samples
+    /// Returns the minimum value in the audio samples using vectorized operations
     pub fn min_native(&self) -> T
     where
         T: PartialOrd + Copy,
     {
         match &self.data {
-            AudioData::Mono(arr) => arr
-                .iter()
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .copied()
-                .unwrap_or(T::default()),
-            AudioData::MultiChannel(arr) => arr
-                .iter()
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .copied()
-                .unwrap_or(T::default()),
+            AudioData::Mono(arr) => {
+                if arr.is_empty() {
+                    return T::default();
+                }
+                // Use ndarray's efficient fold operation for vectorized minimum finding
+                arr.fold(arr[0], |acc, &x| if x < acc { x } else { acc })
+            }
+            AudioData::MultiChannel(arr) => {
+                if arr.is_empty() {
+                    return T::default();
+                }
+                // Vectorized minimum across entire multi-channel array
+                arr.fold(arr[[0, 0]], |acc, &x| if x < acc { x } else { acc })
+            }
         }
     }
 
-    /// Returns the maximum value in the audio samples
+    /// Returns the maximum value in the audio samples using vectorized operations
     pub fn max_native(&self) -> T
     where
         T: PartialOrd + Copy,
     {
         match &self.data {
-            AudioData::Mono(arr) => arr
-                .iter()
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .copied()
-                .unwrap_or(T::default()),
-            AudioData::MultiChannel(arr) => arr
-                .iter()
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .copied()
-                .unwrap_or(T::default()),
+            AudioData::Mono(arr) => {
+                if arr.is_empty() {
+                    return T::default();
+                }
+                // Use ndarray's efficient fold operation for vectorized maximum finding
+                arr.fold(arr[0], |acc, &x| if x > acc { x } else { acc })
+            }
+            AudioData::MultiChannel(arr) => {
+                if arr.is_empty() {
+                    return T::default();
+                }
+                // Vectorized maximum across entire multi-channel array
+                arr.fold(arr[[0, 0]], |acc, &x| if x > acc { x } else { acc })
+            }
         }
     }
 
