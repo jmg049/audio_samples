@@ -799,6 +799,91 @@ impl<T: AudioSample> AudioSamples<T> {
         Ok(())
     }
 
+    /// SIMD-optimized channel processing for operations that can be vectorized.
+    ///
+    /// This function uses ndarray's vectorized operations to process multi-channel
+    /// audio data efficiently. Best suited for simple mathematical operations that
+    /// can benefit from SIMD instructions.
+    ///
+    /// # Arguments  
+    /// * `f` - A function that takes a channel index and returns a transformation function
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Apply channel-specific gain using vectorized operations
+    /// audio.apply_channels_simd(|channel| {
+    ///     let gain = if channel == 0 { 0.8 } else { 0.6 };
+    ///     move |sample| sample * gain
+    /// })?;
+    /// ```
+    pub fn apply_channels_simd<F, G>(&mut self, f: F) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(usize) -> G,
+        G: Fn(T) -> T,
+        T: Copy + Send + Sync,
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                // For mono, apply the transformation from channel 0
+                let transform = f(0);
+                arr.mapv_inplace(transform);
+            }
+            AudioData::MultiChannel(arr) => {
+                // Process each channel with vectorized operations
+                for (ch, mut row) in arr.axis_iter_mut(ndarray::Axis(0)).enumerate() {
+                    let transform = f(ch);
+                    row.mapv_inplace(transform);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Parallel SIMD channel processing for maximum performance on multi-core systems.
+    ///
+    /// Uses rayon for parallel processing combined with vectorized operations.
+    /// Most effective for multi-channel audio with computationally intensive operations.
+    ///
+    /// # Arguments
+    /// * `f` - A function that takes a channel index and returns a transformation function
+    ///
+    /// # Example  
+    /// ```rust,ignore
+    /// // Process each channel in parallel with vectorized operations
+    /// audio.apply_channels_parallel_simd(|channel| {
+    ///     move |sample| expensive_processing_function(sample, channel)
+    /// })?;
+    /// ```
+    #[cfg(feature = "parallel-processing")]
+    pub fn apply_channels_parallel_simd<F, G>(&mut self, f: F) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(usize) -> G + Send + Sync,
+        G: Fn(T) -> T + Send + Sync,
+        T: Copy + Send + Sync,
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                // For mono, apply the transformation from channel 0  
+                let transform = f(0);
+                arr.mapv_inplace(transform);
+            }
+            AudioData::MultiChannel(arr) => {
+                use rayon::prelude::*;
+                
+                // Process channels in parallel with vectorized operations per channel
+                arr.axis_iter_mut(ndarray::Axis(0))
+                   .into_par_iter()
+                   .enumerate()
+                   .try_for_each(|(ch, mut row)| -> crate::AudioSampleResult<()> {
+                       let transform = f(ch);
+                       row.mapv_inplace(transform);
+                       Ok(())
+                   })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Applies a function to each sample and returns a new AudioSamples instance.
     ///
     /// This is a functional-style version of `apply` that doesn't modify the original
