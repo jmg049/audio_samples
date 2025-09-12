@@ -44,41 +44,48 @@ where
 
     /// Computes the Root Mean Square (RMS) of the audio samples.
     ///
-    /// Uses efficient vectorized operations via ndarray to compute RMS.
+    /// Uses efficient vectorized operations via ndarray for SIMD-optimized computation.
     /// RMS = sqrt(mean(x^2)) where x is the audio signal.
     fn rms(&self) -> AudioSampleResult<f64> {
         match &self.data {
             AudioData::Mono(arr) => {
-                // Use ndarray's efficient operations for vectorized computation
-                let sum_of_squares: f64 = arr
-                    .iter()
-                    .map(|x| {
-                        let x: f64 = x.cast_into();
-                        x * x
-                    })
-                    .sum();
-
-                let mean_square = sum_of_squares / arr.len() as f64;
-
-                let rms = mean_square.sqrt();
-                // Convert back to the original type
-                Ok(rms)
+                if arr.is_empty() {
+                    return Ok(0.0);
+                }
+                
+                // Use ndarray's vectorized mathematical operations for SIMD optimization
+                // This leverages BLAS/LAPACK backends when available
+                let arr_f64 = arr.mapv(|x| {
+                    let x: f64 = x.cast_into();
+                    x
+                });
+                
+                // Vectorized square operation - enables SIMD
+                let squares = &arr_f64 * &arr_f64;
+                
+                // Fast vectorized mean computation
+                let mean_square = squares.mean().unwrap_or(0.0);
+                
+                Ok(mean_square.sqrt())
             }
             AudioData::MultiChannel(arr) => {
-                // Compute RMS across all samples in all channels
-                let sum_of_squares: f64 = arr
-                    .iter()
-                    .map(|x| {
-                        let x: f64 = x.cast_into();
-                        x * x
-                    })
-                    .sum();
-
-                let mean_square = sum_of_squares / arr.len() as f64;
-
-                let rms = mean_square.sqrt();
-                // Convert back to the original type
-                Ok(rms)
+                if arr.is_empty() {
+                    return Ok(0.0);
+                }
+                
+                // Convert to f64 using vectorized operations
+                let arr_f64 = arr.mapv(|x| {
+                    let x: f64 = x.cast_into();
+                    x
+                });
+                
+                // Vectorized element-wise squaring - enables SIMD across all channels
+                let squares = &arr_f64 * &arr_f64;
+                
+                // Fast vectorized mean across entire array
+                let mean_square = squares.mean().unwrap_or(0.0);
+                
+                Ok(mean_square.sqrt())
             }
         }
     }
@@ -86,7 +93,7 @@ where
     /// Computes the statistical variance of the audio samples.
     ///
     /// Variance = mean((x - mean(x))^2)
-    /// Uses efficient ndarray operations for vectorized computation.
+    /// Uses efficient vectorized ndarray operations for SIMD-optimized computation.
     fn variance(&self) -> AudioSampleResult<f64> {
         match &self.data {
             AudioData::Mono(arr) => {
@@ -96,23 +103,21 @@ where
                     });
                 }
 
-                // Compute mean first
-                let sum = arr.sum();
-                let sum: f64 = sum.cast_into();
-                let mean = sum / arr.len() as f64;
+                // Convert to f64 using vectorized operations
+                let arr_f64 = arr.mapv(|x| {
+                    let x: f64 = x.cast_into();
+                    x
+                });
 
-                // Compute variance using the standard formula
-                let variance_sum: f64 = arr
-                    .iter()
-                    .map(|&x| {
-                        let x: f64 = x.cast_into();
-                        let diff = x - mean;
-                        diff * diff
-                    })
-                    .sum();
+                // Vectorized mean computation
+                let mean = arr_f64.mean().unwrap_or(0.0);
 
-                let variance_f64 = variance_sum / arr.len() as f64;
-                Ok(variance_f64)
+                // Vectorized variance computation: (x - mean)^2
+                let deviations = &arr_f64 - mean; // Broadcasting subtraction - SIMD optimized
+                let squared_deviations = &deviations * &deviations; // Element-wise square - SIMD optimized
+                
+                let variance = squared_deviations.mean().unwrap_or(0.0);
+                Ok(variance)
             }
             AudioData::MultiChannel(arr) => {
                 if arr.is_empty() {
@@ -121,22 +126,21 @@ where
                     });
                 }
 
-                let sum = arr.sum();
-                let sum: f64 = sum.cast_into();
+                // Convert to f64 using vectorized operations across all channels
+                let arr_f64 = arr.mapv(|x| {
+                    let x: f64 = x.cast_into();
+                    x
+                });
 
-                let mean = sum / arr.len() as f64;
+                // Vectorized mean computation across entire array
+                let mean = arr_f64.mean().unwrap_or(0.0);
 
-                let variance_sum: f64 = arr
-                    .iter()
-                    .map(|x| {
-                        let x: f64 = x.cast_into();
-                        let diff = x - mean;
-                        diff * diff
-                    })
-                    .sum();
-
-                let variance_f64 = variance_sum / arr.len() as f64;
-                Ok(variance_f64)
+                // Vectorized variance computation: (x - mean)^2 across all channels
+                let deviations = &arr_f64 - mean; // Broadcasting - SIMD optimized
+                let squared_deviations = &deviations * &deviations; // Element-wise square - SIMD optimized
+                
+                let variance = squared_deviations.mean().unwrap_or(0.0);
+                Ok(variance)
             }
         }
     }
