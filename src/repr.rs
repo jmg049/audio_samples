@@ -419,29 +419,196 @@ impl<T: AudioSample> AudioSamples<T> {
         Ok(())
     }
 
-    /// Applies a function to overlapping windows of samples in-place.
+    /// Applies a function to overlapping windows of samples in-place with optimized memory usage.
     ///
     /// This method processes the audio data in overlapping windows, applying
-    /// the given function to each window. The function receives a slice of
-    /// samples and should return a vector of transformed samples.
+    /// the given function to each window. Uses pre-allocated buffers to avoid
+    /// memory allocations during processing for real-time performance.
     ///
     /// # Arguments
     /// * `window_size` - Size of each window in samples
     /// * `hop_size` - Number of samples to advance between windows
-    /// * `f` - A function that takes a window slice and returns transformed samples
+    /// * `f` - A function that takes input window slice and output buffer slice
     ///
     /// # Returns
     /// A result containing the processed audio or an error
     ///
     /// # Example
     /// ```rust,ignore
-    /// // Apply a Hann window to overlapping frames
-    /// audio.apply_windowed(1024, 512, |window| {
-    ///     window.iter().enumerate()
-    ///         .map(|(i, &sample)| sample * hann_window[i])
-    ///         .collect()
+    /// // Apply a Hann window to overlapping frames (zero-allocation version)
+    /// audio.apply_windowed_inplace(1024, 512, |input, output| {
+    ///     for (i, (&sample, out)) in input.iter().zip(output.iter_mut()).enumerate() {
+    ///         *out = sample * hann_window[i];
+    ///     }
     /// })?;
     /// ```
+    pub fn apply_windowed_inplace<F>(
+        &mut self,
+        window_size: usize,
+        hop_size: usize,
+        f: F,
+    ) -> crate::AudioSampleResult<()>
+    where
+        F: Fn(&[T], &mut [T]),
+    {
+        if window_size == 0 || hop_size == 0 {
+            return Err(crate::AudioSampleError::InvalidParameter(
+                "Window size and hop size must be greater than 0".to_string(),
+            ));
+        }
+
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                let data = arr.as_slice().ok_or(AudioSampleError::ArrayLayoutError {
+                    message: "Mono samples must be contiguous".to_string(),
+                })?;
+
+                // Pre-calculate output size to avoid reallocations
+                let num_windows = if data.len() >= window_size {
+                    (data.len() - window_size) / hop_size + 1
+                } else {
+                    0
+                };
+                
+                if num_windows == 0 {
+                    return Ok(()); // No processing needed
+                }
+
+                let output_len = (num_windows - 1) * hop_size + window_size;
+                let mut result = vec![T::default(); output_len];
+                let mut overlap_count = vec![0usize; output_len];
+                
+                // Pre-allocate working buffer for window processing
+                let mut window_buffer = vec![T::default(); window_size];
+
+                // Process each window with pre-allocated buffers
+                let mut pos = 0;
+                while pos + window_size <= data.len() {
+                    let window = &data[pos..pos + window_size];
+                    
+                    // Process window in-place to avoid allocation
+                    f(window, &mut window_buffer);
+
+                    // Overlap-add with pre-allocated result buffer
+                    for (i, &processed_sample) in window_buffer.iter().enumerate() {
+                        if pos + i < result.len() {
+                            result[pos + i] = result[pos + i] + processed_sample;
+                            overlap_count[pos + i] += 1;
+                        }
+                    }
+
+                    pos += hop_size;
+                }
+
+                // Normalize by overlap count
+                for (sample, &count) in result.iter_mut().zip(overlap_count.iter()) {
+                    if count > 1 {
+                        // For overlapping regions, average the contributions
+                        *sample = *sample / T::cast_from(count);
+                    }
+                }
+
+                // Handle any remaining samples that weren't windowed
+                if pos < data.len() && result.len() < data.len() {
+                    result.extend_from_slice(&data[result.len()..]);
+                }
+
+                *arr = Array1::from_vec(result);
+                Ok(())
+            }
+            AudioData::MultiChannel(arr) => {
+                let (channels, samples_per_channel) = arr.dim();
+                
+                // Pre-calculate dimensions
+                let num_windows = if samples_per_channel >= window_size {
+                    (samples_per_channel - window_size) / hop_size + 1
+                } else {
+                    0
+                };
+                
+                if num_windows == 0 {
+                    return Ok(()); // No processing needed
+                }
+
+                let output_len = (num_windows - 1) * hop_size + window_size;
+                let mut result = vec![T::default(); channels * output_len];
+                let mut overlap_count = vec![0usize; output_len];
+                
+                // Pre-allocate working buffers (reused across channels)
+                let mut window_buffer = vec![T::default(); window_size];
+                let mut channel_buffer = vec![T::default(); samples_per_channel];
+
+                // Process each channel with optimized memory usage
+                for ch in 0..channels {
+                    // Extract channel data without cloning the entire row
+                    for (i, &sample) in arr.row(ch).iter().enumerate() {
+                        channel_buffer[i] = sample;
+                    }
+                    
+                    overlap_count.fill(0); // Reset overlap count for this channel
+                    
+                    let mut pos = 0;
+                    while pos + window_size <= samples_per_channel {
+                        let window = &channel_buffer[pos..pos + window_size];
+                        
+                        // Process window in-place
+                        f(window, &mut window_buffer);
+
+                        // Overlap-add to result buffer
+                        let channel_offset = ch * output_len;
+                        for (i, &processed_sample) in window_buffer.iter().enumerate() {
+                            if pos + i < output_len {
+                                let result_idx = channel_offset + pos + i;
+                                result[result_idx] = result[result_idx] + processed_sample;
+                                overlap_count[pos + i] += 1;
+                            }
+                        }
+
+                        pos += hop_size;
+                    }
+
+                    // Normalize by overlap count for this channel
+                    let channel_offset = ch * output_len;
+                    for (i, &count) in overlap_count.iter().enumerate() {
+                        if count > 1 && channel_offset + i < result.len() {
+                            result[channel_offset + i] = result[channel_offset + i] / T::cast_from(count);
+                        }
+                    }
+
+                    // Handle remaining samples for this channel
+                    if pos < samples_per_channel && output_len < samples_per_channel {
+                        let remaining_start = output_len;
+                        let channel_offset = ch * samples_per_channel;
+                        
+                        // Extend result if needed
+                        while result.len() < (ch + 1) * samples_per_channel {
+                            result.push(T::default());
+                        }
+                        
+                        // Copy remaining samples
+                        for (i, &sample) in channel_buffer[remaining_start..].iter().enumerate() {
+                            if channel_offset + remaining_start + i < result.len() {
+                                result[channel_offset + remaining_start + i] = sample;
+                            }
+                        }
+                    }
+                }
+
+                let final_samples_per_channel = result.len() / channels;
+                *arr = Array2::from_shape_vec((channels, final_samples_per_channel), result)
+                    .map_err(|e| {
+                        crate::AudioSampleError::InvalidParameter(format!("Array shape error: {}", e))
+                    })?;
+                
+                Ok(())
+            }
+        }
+    }
+
+    /// Legacy windowed operation with allocation per window (deprecated).
+    ///
+    /// This method is kept for backward compatibility but allocates memory
+    /// for each window. Use `apply_windowed_inplace` for better performance.
     pub fn apply_windowed<F>(
         &mut self,
         window_size: usize,
