@@ -48,11 +48,13 @@ pub mod channels;
 pub mod conversions;
 pub mod dynamic_range;
 pub mod editing;
+pub mod fft_backends;
 pub mod iir_filtering;
 pub mod onset_detection;
 pub mod parametric_eq;
 pub mod peak_picking;
 pub mod pitch_analysis;
+pub mod plotting;
 pub mod processing;
 pub mod statistics;
 pub mod transforms;
@@ -60,15 +62,16 @@ pub mod transforms;
 // Re-export main traits for convenience
 pub use traits::{
     AudioChannelOps, AudioDynamicRange, AudioEditing, AudioIirFiltering, AudioParametricEq,
-    AudioPitchAnalysis, AudioProcessing, AudioSamplesOperations, AudioStatistics, AudioTransforms,
-    AudioTypeConversion,
+    AudioPitchAnalysis, AudioPlottingUtils, AudioProcessing, AudioSamplesOperations,
+    AudioStatistics, AudioTransforms, AudioTypeConversion,
 };
 
 // Re-export supporting types
 pub use types::{
     AdaptiveThresholdConfig, AdaptiveThresholdMethod, ChannelConversionMethod, ComplexOnsetConfig,
     CompressorConfig, CqtConfig, DynamicRangeMethod, EqBand, EqBandType, FadeCurve, FilterResponse,
-    IirFilterDesign, IirFilterType, KneeType, LimiterConfig, MonoConversionMethod,
-    NormalizationMethod, OnsetConfig, ParametricEq, PeakPickingConfig, PitchDetectionMethod,
-    SideChainConfig, SpectralFluxConfig, SpectralFluxMethod, StereoConversionMethod, WindowType,
+    IirFilterDesign, IirFilterType, KneeType, LimiterConfig, MonoConversionMethod, NoiseColor,
+    NormalizationMethod, OnsetConfig, ParametricEq, PeakPickingConfig, PerturbationConfig,
+    PerturbationMethod, PitchDetectionMethod, SideChainConfig, SpectralFluxConfig,
+    SpectralFluxMethod, StereoConversionMethod, WindowType,
 };

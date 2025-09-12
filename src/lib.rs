@@ -90,8 +90,8 @@ pub use i24::I24;
 // Re-exports for public API
 pub use crate::error::{AudioSampleError, AudioSampleResult};
 pub use crate::operations::{
-    AudioChannelOps, AudioEditing, AudioProcessing, AudioSamplesOperations, AudioStatistics,
-    AudioTransforms, AudioTypeConversion, NormalizationMethod,
+    AudioChannelOps, AudioEditing, AudioPlottingUtils, AudioProcessing, AudioSamplesOperations,
+    AudioStatistics, AudioTransforms, AudioTypeConversion, NormalizationMethod,
 };
 pub use crate::repr::{AudioData, AudioSamples};
 
@@ -351,7 +351,7 @@ macro_rules! impl_float_to_int_conversion {
         impl ConvertTo<$to> for $from {
             #[inline(always)]
             fn convert_to(&self) -> AudioSampleResult<$to> {
-                let clamped = self.clamp(-1.0, 1.0);
+                let clamped = *self; // self.clamp(-1.0, 1.0);
                 if clamped < 0.0 {
                     Ok((clamped * (-(<$to>::MIN as $from))).round() as $to)
                 } else {
@@ -368,7 +368,7 @@ macro_rules! impl_float_to_i24_conversion {
         impl ConvertTo<I24> for $from {
             #[inline(always)]
             fn convert_to(&self) -> AudioSampleResult<I24> {
-                let clamped = self.clamp(-1.0, 1.0);
+                let clamped = *self; // self.clamp(-1.0, 1.0);
                 let scaled_val = if clamped < 0.0 {
                     (clamped * (-(I24::MIN.to_i32() as $from))).round() as i32
                 } else {
@@ -675,8 +675,8 @@ impl CastInto<I24> for f64 {
 #[cfg(test)]
 mod conversion_tests {
     use super::*;
-
     use approx_eq::assert_approx_eq;
+    use i24::i24;
     use std::fs::File;
     use std::io::BufRead;
     use std::path::Path;
@@ -763,7 +763,7 @@ mod conversion_tests {
         assert_eq!(min_i16_to_i32, i32::MIN);
 
         let min_i16_to_i24: I24 = min_i16.convert_to().unwrap();
-        let expected_i24_min = I24!(i32::MIN >> 8);
+        let expected_i24_min = i24!(i32::MIN >> 8);
         assert_eq!(min_i16_to_i24.to_i32(), expected_i24_min.to_i32());
 
         // Test maximum value
@@ -1067,7 +1067,7 @@ mod conversion_tests {
     #[test]
     fn i24_conversion_tests() {
         // Create an I24 with a known value
-        let i24_value = I24!(4660 << 8); //  So converting back to i16 gives 4660
+        let i24_value = i24!(4660 << 8); //  So converting back to i16 gives 4660
         println!(
             "DEBUG: Created I24 value from 4660 << 8 = {}",
             i24_value.to_i32()

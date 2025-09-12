@@ -9,6 +9,9 @@ use crate::python::{AudioSamplesData, PyAudioSamples, utils as py_utils};
 use crate::utils;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use pyo3::wrap_pyfunction;
+use numpy;
+use ndarray;
 
 // =====================
 // Signal Generation Functions
@@ -791,6 +794,207 @@ fn py_align_signals(
     Ok(dict.into())
 }
 
+// =====================
+// Librosa Compatibility Functions  
+// =====================
+
+/// Convert power spectrogram to decibel (dB) scale.
+///
+/// Similar to librosa.power_to_db() for converting power spectrograms to dB scale.
+///
+/// # Arguments  
+/// * `S` - NumPy array containing power spectrogram values
+/// * `ref_val` - Reference power (default: 1.0)
+/// * `amin` - Minimum threshold for avoiding log(0) (default: 1e-10)
+/// * `top_db` - Threshold the output at top_db below the maximum (optional)
+///
+/// # Returns
+/// NumPy array with values converted to dB scale
+///
+/// # Examples
+/// ```python
+/// import numpy as np
+/// import audio_samples as aus
+///
+/// # Convert power spectrogram to dB
+/// S = np.abs(D) ** 2  # Power spectrogram from STFT
+/// S_db = aus.power_to_db(S, ref_val=np.max(S))
+///
+/// # With top_db threshold
+/// S_db = aus.power_to_db(S, ref_val=np.max(S), top_db=80.0)
+/// ```
+#[pyfunction(name = "power_to_db")]  
+#[pyo3(signature = (S, *, ref_val=1.0, amin=1e-10, top_db=None))]
+fn py_power_to_db(
+    py: Python,
+    S: &Bound<PyAny>,
+    ref_val: f64,
+    amin: f64,
+    top_db: Option<f64>,
+) -> PyResult<Py<PyAny>> {
+    // Convert NumPy array to ndarray
+    if let Ok(array) = S.extract::<numpy::PyReadonlyArray2<f64>>() {
+        let arr = array.as_array();
+        let mut result = arr.mapv(|x| 10.0 * (x.max(amin) / ref_val).log10());
+        
+        // Apply top_db threshold if specified
+        if let Some(threshold) = top_db {
+            let max_val = result.fold(f64::NEG_INFINITY, |max, &x| x.max(max));
+            result.mapv_inplace(|x| x.max(max_val - threshold));
+        }
+        
+        py_utils::array2_to_numpy(py, result)
+    } else if let Ok(array) = S.extract::<numpy::PyReadonlyArray1<f64>>() {
+        let arr = array.as_array();  
+        let mut result = arr.mapv(|x| 10.0 * (x.max(amin) / ref_val).log10());
+        
+        // Apply top_db threshold if specified
+        if let Some(threshold) = top_db {
+            let max_val = result.fold(f64::NEG_INFINITY, |max, &x| x.max(max));
+            result.mapv_inplace(|x| x.max(max_val - threshold));
+        }
+        
+        py_utils::array1_to_numpy(py, result)
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Input must be a NumPy array of floats"
+        ))
+    }
+}
+
+/// Convert amplitude spectrogram to decibel (dB) scale.
+///
+/// Similar to librosa.amplitude_to_db() for converting amplitude spectrograms to dB scale.
+///
+/// # Arguments
+/// * `S` - NumPy array containing amplitude spectrogram values  
+/// * `ref_val` - Reference amplitude (default: 1.0)
+/// * `amin` - Minimum threshold for avoiding log(0) (default: 1e-5)
+/// * `top_db` - Threshold the output at top_db below the maximum (optional)
+///
+/// # Returns
+/// NumPy array with values converted to dB scale
+///
+/// # Examples
+/// ```python
+/// import numpy as np
+/// import audio_samples as aus
+///
+/// # Convert amplitude spectrogram to dB
+/// D = audio.stft(n_fft=2048, hop_length=512)
+/// magnitude = np.abs(D)
+/// magnitude_db = aus.amplitude_to_db(magnitude, ref_val=np.max(magnitude))
+/// ```
+#[pyfunction(name = "amplitude_to_db")]
+#[pyo3(signature = (S, *, ref_val=1.0, amin=1e-5, top_db=None))]
+fn py_amplitude_to_db(
+    py: Python,
+    S: &Bound<PyAny>,
+    ref_val: f64,
+    amin: f64, 
+    top_db: Option<f64>,
+) -> PyResult<Py<PyAny>> {
+    // Convert NumPy array to ndarray
+    if let Ok(array) = S.extract::<numpy::PyReadonlyArray2<f64>>() {
+        let arr = array.as_array();
+        let mut result = arr.mapv(|x| 20.0 * (x.max(amin) / ref_val).log10());
+        
+        // Apply top_db threshold if specified
+        if let Some(threshold) = top_db {
+            let max_val = result.fold(f64::NEG_INFINITY, |max, &x| x.max(max));
+            result.mapv_inplace(|x| x.max(max_val - threshold));
+        }
+        
+        py_utils::array2_to_numpy(py, result)
+    } else if let Ok(array) = S.extract::<numpy::PyReadonlyArray1<f64>>() {
+        let arr = array.as_array();
+        let mut result = arr.mapv(|x| 20.0 * (x.max(amin) / ref_val).log10());
+        
+        // Apply top_db threshold if specified  
+        if let Some(threshold) = top_db {
+            let max_val = result.fold(f64::NEG_INFINITY, |max, &x| x.max(max));
+            result.mapv_inplace(|x| x.max(max_val - threshold));
+        }
+        
+        py_utils::array1_to_numpy(py, result)
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Input must be a NumPy array of floats"
+        ))
+    }
+}
+
+/// Generate frequency axis for FFT results.
+///
+/// Similar to numpy.fft.fftfreq() and librosa's frequency utilities.
+///
+/// # Arguments
+/// * `n` - Length of the FFT (number of frequency bins)
+/// * `sr` - Sample rate in Hz
+/// * `n_fft` - FFT window size (optional, defaults to 2*(n-1) for compatibility)
+///
+/// # Returns
+/// NumPy array of frequency values in Hz
+///
+/// # Examples  
+/// ```python
+/// import audio_samples as aus
+///
+/// # Get frequency axis for STFT result
+/// D = audio.stft(n_fft=2048, hop_length=512)
+/// freqs = aus.fft_frequencies(n=D.shape[0], sr=44100, n_fft=2048)
+/// ```
+#[pyfunction(name = "fft_frequencies")]
+#[pyo3(signature = (n, sr, *, n_fft=None))]
+fn py_fft_frequencies(py: Python, n: usize, sr: f64, n_fft: Option<usize>) -> PyResult<Py<PyAny>> {
+    let actual_n_fft = n_fft.unwrap_or(2 * (n - 1));
+    let frequencies: Vec<f64> = (0..n)
+        .map(|i| (i as f64) * sr / (actual_n_fft as f64))
+        .collect();
+    
+    let freq_array = ndarray::Array1::from(frequencies);
+    py_utils::array1_to_numpy(py, freq_array)
+}
+
+/// Generate time axis for STFT frames.
+///
+/// Similar to librosa.times_like() for generating time coordinates of STFT frames.
+///
+/// # Arguments
+/// * `n_frames` - Number of time frames
+/// * `sr` - Sample rate in Hz  
+/// * `hop_length` - Number of samples between frames
+/// * `n_fft` - FFT window size (optional, for centering calculation)
+///
+/// # Returns
+/// NumPy array of time values in seconds
+///
+/// # Examples
+/// ```python
+/// import audio_samples as aus
+///
+/// # Get time axis for STFT result
+/// D = audio.stft(n_fft=2048, hop_length=512)
+/// times = aus.frames_to_time(n_frames=D.shape[1], sr=44100, hop_length=512)
+/// ```
+#[pyfunction(name = "frames_to_time")]
+#[pyo3(signature = (n_frames, sr, hop_length, *, n_fft=None))]
+fn py_frames_to_time(py: Python, n_frames: usize, sr: f64, hop_length: usize, n_fft: Option<usize>) -> PyResult<Py<PyAny>> {
+    // Center frames if n_fft provided (librosa default behavior)
+    let offset = if let Some(fft_size) = n_fft { 
+        (fft_size / 2) as f64 
+    } else { 
+        0.0 
+    };
+    
+    let times: Vec<f64> = (0..n_frames)
+        .map(|i| (offset + (i * hop_length) as f64) / sr)
+        .collect();
+    
+    let time_array = ndarray::Array1::from(times);
+    py_utils::array1_to_numpy(py, time_array)
+}
+
 /// Register all utility functions with the Python module.
 pub fn register_functions(m: &Bound<PyModule>) -> PyResult<()> {
     // Signal generation functions
@@ -817,6 +1021,12 @@ pub fn register_functions(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_mse, m)?)?;
     m.add_function(wrap_pyfunction!(py_snr, m)?)?;
     m.add_function(wrap_pyfunction!(py_align_signals, m)?)?;
+
+    // Librosa compatibility functions
+    m.add_function(wrap_pyfunction!(py_power_to_db, m)?)?;
+    m.add_function(wrap_pyfunction!(py_amplitude_to_db, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fft_frequencies, m)?)?;
+    m.add_function(wrap_pyfunction!(py_frames_to_time, m)?)?;
 
     Ok(())
 }

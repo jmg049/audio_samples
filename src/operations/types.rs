@@ -2128,3 +2128,249 @@ impl Default for ComplexOnsetConfig {
         Self::new()
     }
 }
+
+/// Noise color types for audio perturbation.
+///
+/// Different noise colors have different spectral characteristics:
+/// - White noise: Equal power across all frequencies
+/// - Pink noise: Equal power per octave (1/f spectrum)
+/// - Brown noise: Power decreases at -6dB per octave (1/f² spectrum)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoiseColor {
+    /// White noise - equal power across all frequencies
+    White,
+    /// Pink noise - equal power per octave
+    Pink,
+    /// Brown (red) noise - 1/f² spectrum
+    Brown,
+}
+
+/// Perturbation methods for audio data augmentation.
+///
+/// Each variant defines a specific type of perturbation that can be applied
+/// to audio samples for data augmentation, robustness testing, or creative effects.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PerturbationMethod {
+    /// Gaussian noise injection with specified signal-to-noise ratio.
+    ///
+    /// Adds colored Gaussian noise to achieve the target SNR relative to
+    /// the input signal's RMS level.
+    ///
+    /// # Arguments
+    /// * `target_snr_db` - Target signal-to-noise ratio in dB
+    /// * `noise_color` - Color/spectrum of the noise to add
+    GaussianNoise {
+        target_snr_db: f64,
+        noise_color: NoiseColor,
+    },
+    /// Random gain adjustment within specified dB range.
+    ///
+    /// Applies uniform random gain scaling to all channels.
+    /// Positive values boost, negative values attenuate.
+    ///
+    /// # Arguments
+    /// * `min_gain_db` - Minimum gain in dB
+    /// * `max_gain_db` - Maximum gain in dB
+    RandomGain {
+        min_gain_db: f64,
+        max_gain_db: f64,
+    },
+    /// High-pass filtering to remove low-frequency content.
+    ///
+    /// Applies a high-pass filter to simulate microphone rumble removal
+    /// or other high-pass effects commonly found in audio processing chains.
+    ///
+    /// # Arguments
+    /// * `cutoff_hz` - Cutoff frequency in Hz
+    /// * `slope_db_per_octave` - Filter slope (None = default 6dB/octave)
+    HighPassFilter {
+        cutoff_hz: f64,
+        slope_db_per_octave: Option<f64>,
+    },
+    /// Pitch shifting for data augmentation.
+    ///
+    /// Shifts the pitch of the audio signal by the specified number of semitones
+    /// while attempting to maintain the original duration.
+    ///
+    /// # Arguments
+    /// * `semitones` - Pitch shift in semitones (positive = higher, negative = lower)
+    /// * `preserve_formants` - Whether to attempt formant preservation (basic implementation)
+    PitchShift {
+        semitones: f64,
+        preserve_formants: bool,
+    },
+}
+
+impl PerturbationMethod {
+    /// Create a Gaussian noise perturbation configuration.
+    ///
+    /// # Arguments
+    /// * `target_snr_db` - Target signal-to-noise ratio in dB
+    /// * `noise_color` - Color/spectrum of the noise
+    pub const fn gaussian_noise(target_snr_db: f64, noise_color: NoiseColor) -> Self {
+        Self::GaussianNoise {
+            target_snr_db,
+            noise_color,
+        }
+    }
+
+    /// Create a random gain perturbation configuration.
+    ///
+    /// # Arguments
+    /// * `min_gain_db` - Minimum gain in dB
+    /// * `max_gain_db` - Maximum gain in dB
+    pub const fn random_gain(min_gain_db: f64, max_gain_db: f64) -> Self {
+        Self::RandomGain {
+            min_gain_db,
+            max_gain_db,
+        }
+    }
+
+    /// Create a high-pass filter perturbation configuration.
+    ///
+    /// # Arguments
+    /// * `cutoff_hz` - Cutoff frequency in Hz
+    pub const fn high_pass_filter(cutoff_hz: f64) -> Self {
+        Self::HighPassFilter {
+            cutoff_hz,
+            slope_db_per_octave: None,
+        }
+    }
+
+    /// Create a high-pass filter perturbation with custom slope.
+    ///
+    /// # Arguments
+    /// * `cutoff_hz` - Cutoff frequency in Hz
+    /// * `slope_db_per_octave` - Filter slope in dB per octave
+    pub const fn high_pass_filter_with_slope(cutoff_hz: f64, slope_db_per_octave: f64) -> Self {
+        Self::HighPassFilter {
+            cutoff_hz,
+            slope_db_per_octave: Some(slope_db_per_octave),
+        }
+    }
+
+    /// Create a pitch shift perturbation configuration.
+    ///
+    /// # Arguments
+    /// * `semitones` - Pitch shift in semitones
+    /// * `preserve_formants` - Whether to preserve formants
+    pub const fn pitch_shift(semitones: f64, preserve_formants: bool) -> Self {
+        Self::PitchShift {
+            semitones,
+            preserve_formants,
+        }
+    }
+
+    /// Validate the perturbation method parameters.
+    ///
+    /// # Arguments
+    /// * `sample_rate` - Sample rate in Hz (for frequency validation)
+    ///
+    /// # Returns
+    /// Result indicating whether the parameters are valid
+    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+        match self {
+            Self::GaussianNoise { target_snr_db, .. } => {
+                if *target_snr_db < -60.0 || *target_snr_db > 60.0 {
+                    return Err("Target SNR should be between -60 and 60 dB".to_string());
+                }
+            }
+            Self::RandomGain { min_gain_db, max_gain_db } => {
+                if min_gain_db >= max_gain_db {
+                    return Err("Minimum gain must be less than maximum gain".to_string());
+                }
+                if min_gain_db < &-40.0 || *max_gain_db > 20.0 {
+                    return Err("Gain range should be reasonable (-40 to +20 dB)".to_string());
+                }
+            }
+            Self::HighPassFilter { cutoff_hz, slope_db_per_octave } => {
+                let nyquist = sample_rate / 2.0;
+                if *cutoff_hz <= 0.0 || *cutoff_hz >= nyquist {
+                    return Err(format!(
+                        "Cutoff frequency must be between 0 and {} Hz",
+                        nyquist
+                    ));
+                }
+                if let Some(slope) = slope_db_per_octave {
+                    if *slope < 0.0 || *slope > 48.0 {
+                        return Err("Filter slope should be between 0 and 48 dB/octave".to_string());
+                    }
+                }
+            }
+            Self::PitchShift { semitones, .. } => {
+                if semitones.abs() > 12.0 {
+                    return Err("Pitch shift should be within ±12 semitones".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Configuration for audio perturbation operations.
+///
+/// This struct defines how audio samples should be perturbed for data augmentation,
+/// robustness testing, or creative effects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerturbationConfig {
+    /// The perturbation method to apply
+    pub method: PerturbationMethod,
+    /// Optional random seed for deterministic perturbation
+    /// If None, uses thread-local random number generator
+    pub seed: Option<u64>,
+}
+
+impl PerturbationConfig {
+    /// Create a new perturbation configuration.
+    ///
+    /// # Arguments
+    /// * `method` - The perturbation method to apply
+    pub const fn new(method: PerturbationMethod) -> Self {
+        Self {
+            method,
+            seed: None,
+        }
+    }
+
+    /// Create a new perturbation configuration with a specific seed.
+    ///
+    /// # Arguments
+    /// * `method` - The perturbation method to apply
+    /// * `seed` - Random seed for deterministic results
+    pub const fn with_seed(method: PerturbationMethod, seed: u64) -> Self {
+        Self {
+            method,
+            seed: Some(seed),
+        }
+    }
+
+    /// Set the random seed for deterministic perturbation.
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = Some(seed);
+    }
+
+    /// Clear the random seed to use non-deterministic perturbation.
+    pub fn clear_seed(&mut self) {
+        self.seed = None;
+    }
+
+    /// Validate the perturbation configuration.
+    ///
+    /// # Arguments
+    /// * `sample_rate` - Sample rate in Hz
+    ///
+    /// # Returns
+    /// Result indicating whether the configuration is valid
+    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+        self.method.validate(sample_rate)
+    }
+}
+
+impl Default for PerturbationConfig {
+    fn default() -> Self {
+        Self::new(PerturbationMethod::GaussianNoise {
+            target_snr_db: 20.0,
+            noise_color: NoiseColor::White,
+        })
+    }
+}
