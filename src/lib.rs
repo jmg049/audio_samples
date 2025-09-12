@@ -488,6 +488,7 @@ macro_rules! impl_cast_from {
     ($src:ty => [$($dst:ty),+]) => {
         $(
             impl CastFrom<$src> for $dst {
+                #[inline]
                 fn cast_from(value: $src) -> Self {
                     value as $dst
                 }
@@ -502,6 +503,7 @@ impl_cast_from!(f64 => [i16, i32, f32, f64]);
 impl_cast_from!(f32 => [i16, i32, f32, f64]);
 
 impl CastFrom<usize> for i16 {
+    #[inline]
     fn cast_from(value: usize) -> Self {
         if value > i16::MAX as usize {
             i16::MAX
@@ -512,6 +514,7 @@ impl CastFrom<usize> for i16 {
 }
 
 impl CastFrom<usize> for I24 {
+    #[inline]
     fn cast_from(value: usize) -> Self {
         if value > I24::MAX.to_i32() as usize {
             I24::MAX
@@ -525,6 +528,7 @@ impl CastFrom<usize> for I24 {
 }
 
 impl CastFrom<usize> for i32 {
+    #[inline]
     fn cast_from(value: usize) -> Self {
         if value > i32::MAX as usize {
             i32::MAX
@@ -535,46 +539,54 @@ impl CastFrom<usize> for i32 {
 }
 
 impl CastFrom<usize> for f32 {
+    #[inline]
     fn cast_from(value: usize) -> Self {
         value as f32
     }
 }
 impl CastFrom<usize> for f64 {
+    #[inline]
     fn cast_from(value: usize) -> Self {
         value as f64
     }
 }
 
 impl CastFrom<I24> for i16 {
+    #[inline]
     fn cast_from(value: I24) -> Self {
         value.to_i32() as i16
     }
 }
 
 impl CastFrom<I24> for I24 {
+    #[inline]
     fn cast_from(value: I24) -> Self {
         value
     }
 }
 
 impl CastFrom<I24> for i32 {
+    #[inline]
     fn cast_from(value: I24) -> Self {
         value.to_i32()
     }
 }
 
 impl CastFrom<I24> for f32 {
+    #[inline]
     fn cast_from(value: I24) -> Self {
         value.to_i32() as f32
     }
 }
 
 impl CastFrom<I24> for f64 {
+    #[inline]
     fn cast_from(value: I24) -> Self {
         value.to_i32() as f64
     }
 }
 impl CastFrom<i16> for I24 {
+    #[inline]
     fn cast_from(value: i16) -> Self {
         match I24::try_from_i32(value as i32) {
             Some(x) => x,
@@ -584,18 +596,21 @@ impl CastFrom<i16> for I24 {
 }
 
 impl CastFrom<i32> for I24 {
+    #[inline]
     fn cast_from(value: i32) -> Self {
         I24::try_from_i32(value).unwrap_or(I24::MIN)
     }
 }
 
 impl CastFrom<f32> for I24 {
+    #[inline]
     fn cast_from(value: f32) -> Self {
         I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
     }
 }
 
 impl CastFrom<f64> for I24 {
+    #[inline]
     fn cast_from(value: f64) -> Self {
         I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
     }
@@ -605,6 +620,7 @@ macro_rules! impl_cast_into {
     ($src:ty => [$($dst:ty),+]) => {
         $(
             impl CastInto<$dst> for $src {
+                #[inline]
                 fn cast_into(self) -> $dst {
                     <$dst>::cast_from(self)
                 }
