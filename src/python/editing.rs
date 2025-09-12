@@ -5,7 +5,7 @@
 //! (like reverse, trim) while others support both modes (like fade operations).
 
 use super::{PyAudioSamples, utils::*};
-use crate::operations::{AudioEditing, AudioProcessing, types::FadeCurve};
+use crate::operations::{AudioEditing, AudioProcessing, types::{FadeCurve, PerturbationConfig, PerturbationMethod, NoiseColor}};
 use pyo3::prelude::*;
 
 impl PyAudioSamples {
@@ -19,6 +19,63 @@ impl PyAudioSamples {
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Invalid fade curve: '{}'. Valid options: 'linear', 'exponential', 'logarithmic', 'smoothstep'",
                 curve
+            ))),
+        }
+    }
+
+    /// Parse noise color from string
+    pub(crate) fn parse_noise_color_impl(noise_color: &str) -> PyResult<NoiseColor> {
+        match noise_color.to_lowercase().as_str() {
+            "white" => Ok(NoiseColor::White),
+            "pink" => Ok(NoiseColor::Pink),
+            "brown" | "red" => Ok(NoiseColor::Brown),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid noise color: '{}'. Valid options: 'white', 'pink', 'brown'",
+                noise_color
+            ))),
+        }
+    }
+
+    /// Parse perturbation method from string and arguments
+    pub(crate) fn parse_perturbation_method_impl(
+        method: &str,
+        target_snr_db: Option<f64>,
+        noise_color: Option<&str>,
+        min_gain_db: Option<f64>,
+        max_gain_db: Option<f64>,
+        cutoff_hz: Option<f64>,
+        slope_db_per_octave: Option<f64>,
+        semitones: Option<f64>,
+        preserve_formants: Option<bool>,
+    ) -> PyResult<PerturbationMethod> {
+        match method.to_lowercase().as_str() {
+            "gaussian_noise" | "noise" => {
+                let snr = target_snr_db.unwrap_or(20.0);
+                let color_str = noise_color.unwrap_or("white");
+                let color = Self::parse_noise_color_impl(color_str)?;
+                Ok(PerturbationMethod::gaussian_noise(snr, color))
+            },
+            "random_gain" | "gain" => {
+                let min = min_gain_db.unwrap_or(-3.0);
+                let max = max_gain_db.unwrap_or(3.0);
+                Ok(PerturbationMethod::random_gain(min, max))
+            },
+            "high_pass_filter" | "highpass" | "hpf" => {
+                let cutoff = cutoff_hz.unwrap_or(80.0);
+                if let Some(slope) = slope_db_per_octave {
+                    Ok(PerturbationMethod::high_pass_filter_with_slope(cutoff, slope))
+                } else {
+                    Ok(PerturbationMethod::high_pass_filter(cutoff))
+                }
+            },
+            "pitch_shift" | "pitch" => {
+                let shift = semitones.unwrap_or(0.0);
+                let formants = preserve_formants.unwrap_or(false);
+                Ok(PerturbationMethod::pitch_shift(shift, formants))
+            },
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid perturbation method: '{}'. Valid options: 'gaussian_noise', 'random_gain', 'high_pass_filter', 'pitch_shift'",
+                method
             ))),
         }
     }
@@ -417,6 +474,121 @@ impl PyAudioSamples {
         };
 
         Ok(PyAudioSamples::from_inner(result))
+    }
+
+    // ==========================================
+    // PERTURBATION OPERATIONS (data augmentation)
+    // ==========================================
+
+    /// Apply perturbation to audio samples for data augmentation (in-place).
+    ///
+    /// # Arguments
+    /// * `method` - Perturbation method ('gaussian_noise', 'random_gain', 'high_pass_filter', 'pitch_shift')
+    /// * `seed` - Optional random seed for deterministic results
+    /// * `target_snr_db` - Target SNR in dB (for gaussian_noise, default: 20.0)
+    /// * `noise_color` - Noise color ('white', 'pink', 'brown', default: 'white')
+    /// * `min_gain_db` - Minimum gain in dB (for random_gain, default: -3.0)
+    /// * `max_gain_db` - Maximum gain in dB (for random_gain, default: 3.0)
+    /// * `cutoff_hz` - Cutoff frequency in Hz (for high_pass_filter, default: 80.0)
+    /// * `slope_db_per_octave` - Filter slope (for high_pass_filter, optional)
+    /// * `semitones` - Pitch shift in semitones (for pitch_shift, default: 0.0)
+    /// * `preserve_formants` - Whether to preserve formants (for pitch_shift, default: False)
+    ///
+    /// # Examples
+    /// ```python
+    /// # Add white noise at 20dB SNR with deterministic seed
+    /// audio.perturb_('gaussian_noise', seed=12345, target_snr_db=20.0)
+    ///
+    /// # Apply random gain between -2dB and +2dB
+    /// audio.perturb_('random_gain', min_gain_db=-2.0, max_gain_db=2.0)
+    ///
+    /// # High-pass filter to remove rumble
+    /// audio.perturb_('high_pass_filter', cutoff_hz=80.0)
+    ///
+    /// # Pitch shift up by 2 semitones
+    /// audio.perturb_('pitch_shift', semitones=2.0)
+    /// ```
+    pub(crate) fn perturb_inplace_impl(
+        &mut self,
+        method: &str,
+        seed: Option<u64>,
+        target_snr_db: Option<f64>,
+        noise_color: Option<&str>,
+        min_gain_db: Option<f64>,
+        max_gain_db: Option<f64>,
+        cutoff_hz: Option<f64>,
+        slope_db_per_octave: Option<f64>,
+        semitones: Option<f64>,
+        preserve_formants: Option<bool>,
+    ) -> PyResult<()> {
+        let perturbation_method = Self::parse_perturbation_method_impl(
+            method,
+            target_snr_db,
+            noise_color,
+            min_gain_db,
+            max_gain_db,
+            cutoff_hz,
+            slope_db_per_octave,
+            semitones,
+            preserve_formants,
+        )?;
+
+        let config = if let Some(seed_val) = seed {
+            PerturbationConfig::with_seed(perturbation_method, seed_val)
+        } else {
+            PerturbationConfig::new(perturbation_method)
+        };
+
+        self.mutate_inner(|inner| inner.perturb_(&config))
+            .map_err(map_error)?;
+        Ok(())
+    }
+
+    /// Apply perturbation to audio samples for data augmentation (functional).
+    ///
+    /// Returns a new AudioSamples object with perturbation applied.
+    /// 
+    /// # Arguments
+    /// Same as `perturb_` method
+    ///
+    /// # Returns
+    /// New AudioSamples object with perturbation applied
+    ///
+    /// # Examples
+    /// ```python
+    /// # Create perturbed copy with pink noise
+    /// noisy = audio.perturb('gaussian_noise', noise_color='pink', target_snr_db=15.0)
+    ///
+    /// # Apply deterministic random gain
+    /// gained = audio.perturb('random_gain', seed=42, min_gain_db=-1.0, max_gain_db=1.0)
+    /// ```
+    pub(crate) fn perturb_impl(
+        &self,
+        method: &str,
+        seed: Option<u64>,
+        target_snr_db: Option<f64>,
+        noise_color: Option<&str>,
+        min_gain_db: Option<f64>,
+        max_gain_db: Option<f64>,
+        cutoff_hz: Option<f64>,
+        slope_db_per_octave: Option<f64>,
+        semitones: Option<f64>,
+        preserve_formants: Option<bool>,
+    ) -> PyResult<PyAudioSamples> {
+        let mut result = self.copy();
+        result.perturb_inplace_impl(
+            method,
+            seed,
+            target_snr_db,
+            noise_color,
+            min_gain_db,
+            max_gain_db,
+            cutoff_hz,
+            slope_db_per_octave,
+            semitones,
+            preserve_formants,
+        )?;
+        Ok(result)
     }
 
     /// Cross-fade between two audio sources.

@@ -2042,6 +2042,82 @@ where
     fn trim_silence(&self, threshold: T) -> AudioSampleResult<Self>
     where
         Self: Sized;
+
+    /// Applies perturbation to audio samples for data augmentation.
+    ///
+    /// Creates a new AudioSamples instance with the specified perturbation applied.
+    /// This method preserves the original audio data while creating a modified copy.
+    ///
+    /// # Arguments
+    /// * `config` - Perturbation configuration specifying method and parameters
+    ///
+    /// # Returns
+    /// A new AudioSamples instance with perturbation applied
+    ///
+    /// # Errors
+    /// Returns an error if the perturbation configuration is invalid or if the
+    /// perturbation operation fails (e.g., insufficient memory, invalid parameters).
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use audio_samples::{AudioSamples, operations::*};
+    /// use audio_samples::operations::types::*;
+    ///
+    /// let audio = AudioSamples::new_mono(samples, 44100);
+    /// 
+    /// // Add white noise at 20dB SNR
+    /// let noise_config = PerturbationConfig::new(
+    ///     PerturbationMethod::gaussian_noise(20.0, NoiseColor::White)
+    /// );
+    /// let noisy_audio = audio.perturb(&noise_config)?;
+    ///
+    /// // Apply random gain with deterministic seed
+    /// let gain_config = PerturbationConfig::with_seed(
+    ///     PerturbationMethod::random_gain(-3.0, 3.0),
+    ///     12345
+    /// );
+    /// let gained_audio = audio.perturb(&gain_config)?;
+    /// ```
+    fn perturb(&self, config: &super::types::PerturbationConfig) -> AudioSampleResult<Self>
+    where
+        Self: Sized;
+
+    /// Applies perturbation to audio samples in place.
+    ///
+    /// Modifies the current AudioSamples instance by applying the specified perturbation.
+    /// This method is more memory-efficient as it doesn't create a copy.
+    ///
+    /// # Arguments
+    /// * `config` - Perturbation configuration specifying method and parameters
+    ///
+    /// # Returns
+    /// Result indicating success or failure of the perturbation operation
+    ///
+    /// # Errors
+    /// Returns an error if the perturbation configuration is invalid or if the
+    /// perturbation operation fails.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use audio_samples::{AudioSamples, operations::*};
+    /// use audio_samples::operations::types::*;
+    ///
+    /// let mut audio = AudioSamples::new_mono(samples, 44100);
+    /// 
+    /// // Apply high-pass filter in place
+    /// let filter_config = PerturbationConfig::new(
+    ///     PerturbationMethod::high_pass_filter(80.0)
+    /// );
+    /// audio.perturb_(&filter_config)?;
+    ///
+    /// // Apply pitch shift with seed
+    /// let pitch_config = PerturbationConfig::with_seed(
+    ///     PerturbationMethod::pitch_shift(2.0, false),
+    ///     54321
+    /// );
+    /// audio.perturb_(&pitch_config)?;
+    /// ```
+    fn perturb_(&mut self, config: &super::types::PerturbationConfig) -> AudioSampleResult<()>;
 }
 
 /// Channel manipulation and spatial audio operations.
@@ -2678,6 +2754,26 @@ where
     fn as_i24(&self) -> AudioSampleResult<AudioSamples<I24>>
     where
         T: ConvertTo<I24>;
+}
+
+/// Utilities for plotting audio data.
+///
+/// Actual plotting functionality is implemented separately.
+/// Allows the use of common plotting utilities across Rust and Python
+pub trait AudioPlottingUtils<T: AudioSample>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
+    /// Generate time axis values for plotting.
+    fn time_axis(&self, step: Option<f64>) -> Vec<f64>;
+    /// Seconds from 0 to duration with ~target_ticks "nice" spacing (1–2–5).
+    fn time_ticks_seconds(&self, target_ticks: usize) -> Vec<f64>;
+    fn frequency_axis(&self) -> Vec<T>;
 }
 
 /// Unified trait that combines all audio processing capabilities.

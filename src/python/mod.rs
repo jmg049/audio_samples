@@ -248,9 +248,10 @@
 
 use crate::operations::types::ResamplingQuality;
 use crate::operations::{MonoConversionMethod, StereoConversionMethod};
-use crate::{AudioChannelOps, AudioProcessing, AudioSampleError};
+use crate::{AudioChannelOps, AudioPlottingUtils, AudioProcessing, AudioSampleError};
 use crate::{AudioData, AudioSamples, I24, operations::AudioTypeConversion};
-use numpy::{PyArrayDescr, PyArrayMethods};
+use num_format::{Locale, ToFormattedString};
+use numpy::{PyArray, PyArrayDescr, PyArrayMethods};
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -386,6 +387,18 @@ impl PyAudioSamples {
         }
     }
 
+    /// Alias for `channels` property.
+    #[getter]
+    fn num_channels(&self) -> usize {
+        self.channels()
+    }
+
+    /// Total number of samples in the audio (all channels).
+    #[getter]
+    fn total_samples(&self) -> usize {
+        self.length() * self.channels()
+    }
+
     /// Duration in seconds.
     #[getter]
     fn duration(&self) -> f64 {
@@ -410,15 +423,15 @@ impl PyAudioSamples {
         }
     }
 
-    /// Shape of the audio data as (channels, samples_per_channel).
+    /// Shape of the audio data as (samples_per_channel, channels).
     #[getter]
     fn shape(&self) -> (usize, usize) {
         match &self.data {
-            AudioSamplesData::I16(inner) => (inner.num_channels(), inner.samples_per_channel()),
-            AudioSamplesData::I24(inner) => (inner.num_channels(), inner.samples_per_channel()),
-            AudioSamplesData::I32(inner) => (inner.num_channels(), inner.samples_per_channel()),
-            AudioSamplesData::F32(inner) => (inner.num_channels(), inner.samples_per_channel()),
-            AudioSamplesData::F64(inner) => (inner.num_channels(), inner.samples_per_channel()),
+            AudioSamplesData::I16(inner) => (inner.samples_per_channel(), inner.num_channels()),
+            AudioSamplesData::I24(inner) => (inner.samples_per_channel(), inner.num_channels()),
+            AudioSamplesData::I32(inner) => (inner.samples_per_channel(), inner.num_channels()),
+            AudioSamplesData::F32(inner) => (inner.samples_per_channel(), inner.num_channels()),
+            AudioSamplesData::F64(inner) => (inner.samples_per_channel(), inner.num_channels()),
         }
     }
 
@@ -434,6 +447,37 @@ impl PyAudioSamples {
             AudioSamplesData::F64(_) => numpy::PyArrayDescr::new(py, "float64"),
         }?;
         Ok(dtype)
+    }
+
+    #[pyo3(signature = (step = None))]
+    fn time_axis<'py>(
+        &'py self,
+        py: Python<'py>,
+        step: Option<f64>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let time_axis: Vec<f64> = match &self.data {
+            AudioSamplesData::I16(inner) => inner.time_axis(step),
+            AudioSamplesData::I24(inner) => inner.time_axis(step),
+            AudioSamplesData::I32(inner) => inner.time_axis(step),
+            AudioSamplesData::F32(inner) => inner.time_axis(step),
+            AudioSamplesData::F64(inner) => inner.time_axis(step),
+        };
+        Ok(PyList::new(py, time_axis)?.into())
+    }
+
+    fn time_ticks_seconds<'py>(
+        &'py self,
+        py: Python<'py>,
+        step: usize,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let time_ticks_seconds: Vec<f64> = match &self.data {
+            AudioSamplesData::I16(inner) => inner.time_ticks_seconds(step),
+            AudioSamplesData::I24(inner) => inner.time_ticks_seconds(step),
+            AudioSamplesData::I32(inner) => inner.time_ticks_seconds(step),
+            AudioSamplesData::F32(inner) => inner.time_ticks_seconds(step),
+            AudioSamplesData::F64(inner) => inner.time_ticks_seconds(step),
+        };
+        Ok(PyList::new(py, time_ticks_seconds)?.into())
     }
 
     fn sample_type<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDescr>> {
@@ -695,12 +739,6 @@ impl PyAudioSamples {
         self.view_as_impl(target_dtype)
     }
 
-    /// Test method to verify methods can be added.
-    #[pyo3(name = "test_method")]
-    fn test_method(&self) -> f64 {
-        42.0
-    }
-
     // Audio Editing Methods
     /// Reverse the order of audio samples.
     #[pyo3(name = "reverse")]
@@ -766,6 +804,109 @@ impl PyAudioSamples {
     #[pyo3(signature = (duration, *, curve="linear"))]
     fn fade_out(&self, duration: f64, curve: &str) -> PyResult<PyAudioSamples> {
         self.fade_out_impl(duration, curve)
+    }
+
+    // Perturbation Methods - Dual Mode (in-place and functional)
+    /// Apply perturbation to audio samples for data augmentation (in-place).
+    ///
+    /// # Arguments
+    /// * `method` - Perturbation method ('gaussian_noise', 'random_gain', 'high_pass_filter', 'pitch_shift')
+    /// * `seed` - Optional random seed for deterministic results
+    /// * `target_snr_db` - Target SNR in dB (for gaussian_noise, default: 20.0)
+    /// * `noise_color` - Noise color ('white', 'pink', 'brown', default: 'white')
+    /// * `min_gain_db` - Minimum gain in dB (for random_gain, default: -3.0)
+    /// * `max_gain_db` - Maximum gain in dB (for random_gain, default: 3.0)
+    /// * `cutoff_hz` - Cutoff frequency in Hz (for high_pass_filter, default: 80.0)
+    /// * `slope_db_per_octave` - Filter slope (for high_pass_filter, optional)
+    /// * `semitones` - Pitch shift in semitones (for pitch_shift, default: 0.0)
+    /// * `preserve_formants` - Whether to preserve formants (for pitch_shift, default: False)
+    ///
+    /// # Examples
+    /// ```python
+    /// # Add white noise at 20dB SNR with deterministic seed
+    /// audio.perturb_('gaussian_noise', seed=12345, target_snr_db=20.0)
+    ///
+    /// # Apply random gain between -2dB and +2dB  
+    /// audio.perturb_('random_gain', min_gain_db=-2.0, max_gain_db=2.0)
+    ///
+    /// # High-pass filter to remove rumble
+    /// audio.perturb_('high_pass_filter', cutoff_hz=80.0)
+    ///
+    /// # Pitch shift up by 2 semitones
+    /// audio.perturb_('pitch_shift', semitones=2.0)
+    /// ```
+    #[pyo3(signature = (method, *, seed=None, target_snr_db=None, noise_color=None, min_gain_db=None, max_gain_db=None, cutoff_hz=None, slope_db_per_octave=None, semitones=None, preserve_formants=None))]
+    fn perturb_(
+        &mut self,
+        method: &str,
+        seed: Option<u64>,
+        target_snr_db: Option<f64>,
+        noise_color: Option<&str>,
+        min_gain_db: Option<f64>,
+        max_gain_db: Option<f64>,
+        cutoff_hz: Option<f64>,
+        slope_db_per_octave: Option<f64>,
+        semitones: Option<f64>,
+        preserve_formants: Option<bool>,
+    ) -> PyResult<()> {
+        self.perturb_inplace_impl(
+            method,
+            seed,
+            target_snr_db,
+            noise_color,
+            min_gain_db,
+            max_gain_db,
+            cutoff_hz,
+            slope_db_per_octave,
+            semitones,
+            preserve_formants,
+        )
+    }
+
+    /// Apply perturbation to audio samples for data augmentation (functional).
+    ///
+    /// Returns a new AudioSamples object with perturbation applied.
+    ///
+    /// # Arguments
+    /// Same as `perturb_` method
+    ///
+    /// # Returns
+    /// New AudioSamples object with perturbation applied
+    ///
+    /// # Examples
+    /// ```python
+    /// # Create perturbed copy with pink noise
+    /// noisy = audio.perturb('gaussian_noise', noise_color='pink', target_snr_db=15.0)
+    ///
+    /// # Apply deterministic random gain
+    /// gained = audio.perturb('random_gain', seed=42, min_gain_db=-1.0, max_gain_db=1.0)
+    /// ```
+    #[pyo3(signature = (method, *, seed=None, target_snr_db=None, noise_color=None, min_gain_db=None, max_gain_db=None, cutoff_hz=None, slope_db_per_octave=None, semitones=None, preserve_formants=None))]
+    fn perturb(
+        &self,
+        method: &str,
+        seed: Option<u64>,
+        target_snr_db: Option<f64>,
+        noise_color: Option<&str>,
+        min_gain_db: Option<f64>,
+        max_gain_db: Option<f64>,
+        cutoff_hz: Option<f64>,
+        slope_db_per_octave: Option<f64>,
+        semitones: Option<f64>,
+        preserve_formants: Option<bool>,
+    ) -> PyResult<PyAudioSamples> {
+        self.perturb_impl(
+            method,
+            seed,
+            target_snr_db,
+            noise_color,
+            min_gain_db,
+            max_gain_db,
+            cutoff_hz,
+            slope_db_per_octave,
+            semitones,
+            preserve_formants,
+        )
     }
 
     // Static Methods for Audio Editing
@@ -1104,15 +1245,29 @@ impl PyAudioSamples {
     }
 
     /// Compute the Short-Time Fourier Transform (STFT).
-    #[pyo3(signature = (*, window_size=1024, hop_size=None, window="hanning"), name = "stft")]
+    #[pyo3(signature = (*, n_fft=None, hop_length=None, win_length=None, window="hann", center=true, window_size=None, hop_size=None), name = "stft")]
     fn stft(
         &self,
         py: Python,
-        window_size: usize,
-        hop_size: Option<usize>,
+        n_fft: Option<usize>,
+        hop_length: Option<usize>,
+        win_length: Option<usize>,
         window: &str,
+        center: bool,
+        // Legacy parameters for backward compatibility
+        window_size: Option<usize>,
+        hop_size: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        self.stft_impl(py, window_size, hop_size, window)
+        self.stft_impl(
+            py,
+            n_fft,
+            hop_length,
+            win_length,
+            window,
+            center,
+            window_size,
+            hop_size,
+        )
     }
 
     /// Compute the inverse Short-Time Fourier Transform (ISTFT).
@@ -1127,17 +1282,63 @@ impl PyAudioSamples {
     }
 
     /// Compute a spectrogram of the audio signal.
-    #[pyo3(signature = (*, window_size=1024, hop_size=None, window="hanning", scale="linear", power=2.0), name = "spectrogram")]
+    #[pyo3(signature = (*, n_fft=None, hop_length=None, win_length=None, window="hann", scale="linear", power=2.0, window_size=None, hop_size=None), name = "spectrogram")]
     fn spectrogram(
         &self,
         py: Python,
-        window_size: usize,
-        hop_size: Option<usize>,
+        n_fft: Option<usize>,
+        hop_length: Option<usize>,
+        win_length: Option<usize>,
         window: &str,
         scale: &str,
         power: f64,
+        // Legacy parameters for backward compatibility
+        window_size: Option<usize>,
+        hop_size: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        self.spectrogram_impl(py, window_size, hop_size, window, scale, power)
+        self.spectrogram_impl(
+            py,
+            n_fft,
+            hop_length,
+            win_length,
+            window,
+            scale,
+            power,
+            window_size,
+            hop_size,
+        )
+    }
+
+    /// Compute power spectrogram in dB scale - one-liner solution.
+    #[pyo3(signature = (*, n_fft=None, hop_length=None, win_length=None, window="hann", center=true, ref_val=1.0, amin=1e-10, top_db=80.0, window_size=None, hop_size=None), name = "spectrogram_db")]
+    fn spectrogram_db(
+        &self,
+        py: Python,
+        n_fft: Option<usize>,
+        hop_length: Option<usize>,
+        win_length: Option<usize>,
+        window: &str,
+        center: bool,
+        ref_val: f64,
+        amin: f64,
+        top_db: f64,
+        // Legacy parameters for backward compatibility
+        window_size: Option<usize>,
+        hop_size: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        self.spectrogram_db_impl(
+            py,
+            n_fft,
+            hop_length,
+            win_length,
+            window,
+            center,
+            ref_val,
+            amin,
+            top_db,
+            window_size,
+            hop_size,
+        )
     }
 
     /// Compute a mel-scale spectrogram.
@@ -1326,6 +1527,75 @@ impl PyAudioSamples {
     fn swap_channels_in_place(&mut self) -> PyResult<()> {
         self.swap_channels_in_place_impl()
     }
+
+    /// Apply an AudioSamples method to a specific channel (functional version).
+    ///
+    /// This returns a new AudioSamples object with the function applied to the specified channel.
+    /// Supports method chaining within the lambda function for fluent API usage.
+    ///
+    /// # Arguments
+    /// * `channel_index` - Zero-based index of the channel to process
+    /// * `func` - Python function that takes an AudioSamples object and returns a modified AudioSamples object
+    ///
+    /// # Examples
+    /// ```python
+    /// import audio_samples as aus
+    /// import numpy as np
+    ///
+    /// # Create stereo audio
+    /// stereo = aus.from_numpy(np.random.randn(2, 44100), sample_rate=44100)
+    ///
+    /// # Method chaining - this achieves the desired fluent API:
+    /// filtered = stereo.apply_to_channel(0, lambda ch: ch.high_pass_filter(3000).normalize().scale(0.8))
+    ///
+    /// # Apply different processing to different channels
+    /// processed = stereo.apply_to_channel(0, lambda ch: ch.high_pass_filter(4000).normalize())
+    /// processed = processed.apply_to_channel(1, lambda ch: ch.low_pass_filter(2000).scale(0.5))
+    ///
+    /// # Single operations
+    /// quieter = stereo.apply_to_channel(1, lambda ch: ch.scale(0.5))
+    /// ```
+    #[pyo3(signature = (channel_index, func), name = "apply_to_channel")]
+    fn apply_to_channel(
+        &self,
+        channel_index: usize,
+        func: &Bound<PyAny>,
+    ) -> PyResult<PyAudioSamples> {
+        self.apply_to_channel_impl(channel_index, func)
+    }
+
+    /// Apply an AudioSamples method to a specific channel (in-place version).
+    ///
+    /// This modifies the current AudioSamples object by applying the function to the specified channel.
+    /// Supports method chaining within the lambda function for fluent API usage.
+    ///
+    /// # Arguments
+    /// * `channel_index` - Zero-based index of the channel to process
+    /// * `func` - Python function that takes an AudioSamples object and returns a modified AudioSamples object
+    ///
+    /// # Examples
+    /// ```python
+    /// # Method chaining - this achieves the desired fluent API:
+    /// stereo.apply_to_channel_(0, lambda ch: ch.high_pass_filter(3000).normalize().scale(0.8))
+    ///
+    /// # Multiple operations on different channels
+    /// stereo.apply_to_channel_(0, lambda ch: ch.high_pass_filter(4000).normalize())
+    /// stereo.apply_to_channel_(1, lambda ch: ch.low_pass_filter(2000).scale(0.5))
+    ///
+    /// # Traditional function approach also works
+    /// def apply_processing(channel):
+    ///     return channel.high_pass_filter(3000).fade_in(0.1).clip(-0.8, 0.8)
+    ///
+    /// stereo.apply_to_channel_(0, apply_processing)
+    /// ```
+    #[pyo3(signature = (channel_index, func), name = "apply_to_channel_")]
+    fn apply_to_channel_in_place(
+        &mut self,
+        channel_index: usize,
+        func: &Bound<PyAny>,
+    ) -> PyResult<()> {
+        self.apply_to_channel_in_place_impl(channel_index, func)
+    }
 }
 
 /// Factory Functions
@@ -1357,6 +1627,69 @@ fn from_numpy(array: &Bound<PyAny>, sample_rate: u32, copy: bool) -> PyResult<Py
     let _ = copy; // TODO: Implement copy parameter
     let data = convert_numpy_to_audio_samples(array, sample_rate, None)?;
     Ok(PyAudioSamples { data })
+}
+
+/// Test function to verify registration is working
+#[pyfunction]
+pub fn test_debug_function() -> String {
+    "Debug function is working!".to_string()
+}
+
+/// FFT cache metrics functions for debugging and verification
+#[pyfunction]
+pub fn get_fft_cache_metrics() -> (usize, usize, usize, f64) {
+    // Cache metrics temporarily disabled during optimization refactoring
+    (0, 0, 0, 0.0)
+}
+
+#[pyfunction]
+pub fn reset_fft_cache_metrics() {
+    // Cache metrics temporarily disabled during optimization refactoring
+    // No-op for now
+}
+
+#[pyfunction(name = "to_tensor", signature = (audio, *, device=None, copy=false))]
+pub fn to_tensor(
+    py: Python,
+    audio: &PyAudioSamples,
+    device: Option<String>,
+    copy: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    let numpy_array = audio.numpy(py, None, copy.unwrap_or(false))?;
+    let torch = py.import("torch")?;
+
+    let device = device.unwrap_or_else(|| "cpu".to_string());
+
+    if device != "cpu" && !device.starts_with("cuda") {
+        return Err(PyErr::new::<PyValueError, _>(
+            "Invalid device specified. Use 'cpu' or 'cuda[:N]' where N is the GPU index.",
+        ));
+    }
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("device", device.clone())?;
+    let tensor = torch.call_method("from_numpy", (numpy_array,), Some(&kwargs))?;
+    Ok(tensor.into())
+}
+
+#[pyfunction(name = "to_gpu", signature = (audio, *, device = None, copy=false))]
+pub fn to_gpu(
+    py: Python,
+    audio: &PyAudioSamples,
+    device: Option<String>,
+    copy: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    to_tensor(py, audio, Some(device.unwrap_or("cuda".to_string())), copy)
+}
+
+#[pyfunction(name = "from_tensor", signature = (tensor, sample_rate, *, copy=false))]
+pub fn from_tensor(
+    tensor: &Bound<PyAny>,
+    sample_rate: u32,
+    copy: bool,
+) -> PyResult<PyAudioSamples> {
+    let array = tensor.call_method0("cpu")?.call_method0("numpy")?;
+    from_numpy(&array, sample_rate, copy)
 }
 
 /// Create AudioSamples filled with zeros.
@@ -1684,6 +2017,7 @@ fn available_operations(py: Python) -> PyResult<Py<PyAny>> {
             "trim_silence",
             "fade_in",
             "fade_out",
+            "perturb",
             "concatenate",
             "mix",
             "crossfade",
@@ -1715,6 +2049,7 @@ fn available_operations(py: Python) -> PyResult<Py<PyAny>> {
             "to_stereo",
             "extract_channel",
             "swap_channels",
+            "apply_to_channel",
         ],
     )?;
 
@@ -1787,6 +2122,11 @@ pub fn register_module(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(library_info, m)?)?;
     m.add_function(wrap_pyfunction!(available_operations, m)?)?;
 
+    // Debug and FFT cache functions
+    m.add_function(wrap_pyfunction!(test_debug_function, m)?)?;
+    m.add_function(wrap_pyfunction!(get_fft_cache_metrics, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_fft_cache_metrics, m)?)?;
+
     // Register streaming submodule (if feature enabled)
     #[cfg(feature = "streaming")]
     {
@@ -1840,26 +2180,28 @@ pub fn register_module(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
         "mse",
         "snr",
         "align_signals",
+        "power_to_db",
+        "amplitude_to_db",
+        "fft_frequencies",
+        "frames_to_time",
+        "to_tensor",
+        "to_gpu",
+        "from_tensor",
+        "reset_fft_cache_metrics",
+        "get_fft_cache_metrics",
         "info",
         "available_operations",
         "__version__",
         "SUPPORTED_DTYPES",
     ];
 
-    // Add submodules to __all__ if they exist
-    #[cfg(feature = "streaming")]
     all_items.push("streaming");
-
-    #[cfg(feature = "playback")]
     all_items.push("playback");
 
     m.add("__all__", all_items)?;
 
     // Documentation
-    m.add(
-        "__doc__",
-        "High-performance audio processing library with pandas-like API",
-    )?;
+    m.add("__doc__", "High-performance audio processing library")?;
 
     Ok(())
 }
@@ -2052,6 +2394,109 @@ impl PyAudioSamples {
         self.with_inner_mut(|inner| {
             inner.swap_channels(0, 1)?;
             Ok(())
+        })
+        .map_err(utils::map_error)
+    }
+
+    /// Apply a function to a specific channel (functional version).
+    pub(crate) fn apply_to_channel_impl(
+        &self,
+        channel_index: usize,
+        func: &Bound<PyAny>,
+    ) -> PyResult<PyAudioSamples> {
+        if channel_index >= self.channels() {
+            return Err(PyErr::new::<PyValueError, _>(format!(
+                "Channel index {} out of range (0-{})",
+                channel_index,
+                self.channels() - 1
+            )));
+        }
+
+        // Create a copy to work with - this is expected for functional version
+        let mut result = self.copy();
+        result.apply_to_channel_in_place_impl(channel_index, func)?;
+        Ok(result)
+    }
+
+    /// Apply a function to a specific channel using Rust's apply_channels (in-place version).
+    pub(crate) fn apply_to_channel_in_place_impl(
+        &mut self,
+        channel_index: usize,
+        func: &Bound<PyAny>,
+    ) -> PyResult<()> {
+        if channel_index >= self.channels() {
+            return Err(PyErr::new::<PyValueError, _>(format!(
+                "Channel index {} out of range (0-{})",
+                channel_index,
+                self.channels() - 1
+            )));
+        }
+
+        // We need to extract the channel to pass to the function, but then we'll replace it directly
+        let original_length = self.length();
+        let sample_rate = self.sample_rate(); // Get sample rate outside the closure
+
+        // Use apply_channels to process the specific channel directly
+        self.with_inner_mut(|inner| {
+            inner.apply_channels(|ch_idx, samples| {
+                if ch_idx == channel_index {
+                    // Create a temporary mono AudioSamples from this channel's data
+                    let channel_data = samples.to_vec(); // Copy current channel data
+                    let temp_audio = crate::AudioSamples::<f64>::new_mono(
+                        ndarray::Array1::from_vec(channel_data),
+                        sample_rate,
+                    );
+                    let temp_py_audio = PyAudioSamples::from_inner(temp_audio);
+
+                    // Apply the function
+                    let processed_result = func.call1((temp_py_audio,)).map_err(|e| {
+                        AudioSampleError::ProcessingError {
+                            msg: format!("Python function call failed: {}", e),
+                        }
+                    })?;
+                    let processed_channel: PyAudioSamples =
+                        processed_result.extract().map_err(|e| {
+                            AudioSampleError::ProcessingError {
+                                msg: format!("Failed to extract processed channel: {}", e),
+                            }
+                        })?;
+
+                    // Validate the processed channel
+                    if processed_channel.length() != original_length {
+                        return Err(AudioSampleError::ProcessingError {
+                            msg: format!(
+                                "Processed channel length {} doesn't match original length {}",
+                                processed_channel.length(),
+                                original_length
+                            ),
+                        });
+                    }
+
+                    // Get the processed data and replace the current samples directly
+                    let processed_f64 = processed_channel.as_f64()?;
+                    let processed_data = processed_f64.as_mono().ok_or_else(|| {
+                        AudioSampleError::ProcessingError {
+                            msg: "Processed channel should be mono".to_string(),
+                        }
+                    })?;
+
+                    if samples.len() != processed_data.len() {
+                        return Err(AudioSampleError::ProcessingError {
+                            msg: format!(
+                                "Sample count mismatch: {} vs {}",
+                                samples.len(),
+                                processed_data.len()
+                            ),
+                        });
+                    }
+
+                    // Replace the samples in-place - this is the key optimization
+                    for (dest, &src) in samples.iter_mut().zip(processed_data.iter()) {
+                        *dest = src;
+                    }
+                }
+                Ok(())
+            })
         })
         .map_err(utils::map_error)
     }
@@ -2804,6 +3249,8 @@ impl PyAudioSamples {
     fn repr_impl(&self, detailed: bool) -> String {
         let channels = self.channels();
         let length = self.length();
+        let total_samples = length * channels;
+
         let sample_rate = self.sample_rate();
         let duration = length as f64 / sample_rate as f64;
         let dtype = self.sample_type_string();
@@ -2811,19 +3258,31 @@ impl PyAudioSamples {
         // Format the metadata
         let metadata = if detailed {
             format!(
-                "AudioSamples(channels={}, length={}, sample_rate={}, duration={:.3}s, dtype={})",
-                channels, length, sample_rate, duration, dtype
+                "AudioSamples(channels={}, samples_per_channel={}, total_samples={} sample_rate={}, duration={:.3}s, dtype={})",
+                channels,
+                length,
+                total_samples.to_formatted_string(&Locale::en),
+                sample_rate,
+                duration,
+                dtype
             )
         } else {
             format!(
-                "AudioSamples({} ch, {:.3}s @ {}Hz, {})",
-                channels, duration, sample_rate, dtype
+                "AudioSamples({} ch, {} Total Samples, {:.3}s @ {}Hz, {})",
+                channels,
+                total_samples.to_formatted_string(&Locale::en),
+                duration,
+                sample_rate,
+                dtype
             )
         };
 
         // Get the sample values formatted as a string
         let sample_values = self.format_sample_values();
 
+        if !detailed {
+            return format!("{}", metadata);
+        }
         // Combine metadata and values
         format!("{}\n{}", metadata, sample_values)
     }
@@ -2997,48 +3456,4 @@ impl PyAudioSamples {
             AudioSamplesData::I24(_) => "int24",
         }
     }
-}
-
-#[pyfunction(name = "to_tensor", signature = (audio, *, device=None, copy=false))]
-pub fn to_tensor(
-    py: Python,
-    audio: &PyAudioSamples,
-    device: Option<String>,
-    copy: Option<bool>,
-) -> PyResult<Py<PyAny>> {
-    let numpy_array = audio.numpy(py, None, copy.unwrap_or(false))?;
-    let torch = py.import("torch")?;
-
-    let device = device.unwrap_or_else(|| "cpu".to_string());
-
-    if device != "cpu" && !device.starts_with("cuda") {
-        return Err(PyErr::new::<PyValueError, _>(
-            "Invalid device specified. Use 'cpu' or 'cuda[:N]' where N is the GPU index.",
-        ));
-    }
-
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("device", device.clone())?;
-    let tensor = torch.call_method("from_numpy", (numpy_array,), Some(&kwargs))?;
-    Ok(tensor.into())
-}
-
-#[pyfunction(name = "to_gpu", signature = (audio, *, device = None, copy=false))]
-pub fn to_gpu(
-    py: Python,
-    audio: &PyAudioSamples,
-    device: Option<String>,
-    copy: Option<bool>,
-) -> PyResult<Py<PyAny>> {
-    to_tensor(py, audio, Some(device.unwrap_or("cuda".to_string())), copy)
-}
-
-#[pyfunction(name = "from_tensor", signature = (tensor, sample_rate, *, copy=false))]
-pub fn from_tensor(
-    tensor: &Bound<PyAny>,
-    sample_rate: u32,
-    copy: bool,
-) -> PyResult<PyAudioSamples> {
-    let array = tensor.call_method0("cpu")?.call_method0("numpy")?;
-    from_numpy(&array, sample_rate, copy)
 }

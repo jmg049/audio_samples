@@ -138,21 +138,50 @@ where
             ));
         }
 
-        // Get samples based on channel configuration
-        let samples = match &self.data {
-            AudioData::Mono(arr) => arr.to_vec(),
-            AudioData::MultiChannel(arr) => arr.row(0).to_vec(), // Use first channel
+        // Get samples based on channel configuration and convert to f64
+        let mut samples_f64: Vec<f64> = match &self.data {
+            AudioData::Mono(arr) => arr.iter().map(|&x| x.cast_into()).collect(),
+            AudioData::MultiChannel(arr) => arr.row(0).iter().map(|&x| x.cast_into()).collect(),
         };
 
-        if samples.len() < window_size {
+        // Apply librosa-style centering (padding)
+        let pad_width = window_size / 2;
+        let mut centered_samples = Vec::with_capacity(samples_f64.len() + 2 * pad_width);
+        
+        // Reflect padding on the left - librosa style (don't repeat boundary)
+        for i in 0..pad_width {
+            let reflect_idx = pad_width - i;
+            if reflect_idx < samples_f64.len() {
+                centered_samples.push(samples_f64[reflect_idx]);
+            } else {
+                centered_samples.push(0.0);
+            }
+        }
+        
+        // Add original samples
+        centered_samples.extend_from_slice(&samples_f64);
+        
+        // Reflect padding on the right - librosa style (don't repeat boundary)
+        for i in 1..=pad_width {
+            let reflect_idx = samples_f64.len() - 1 - i;
+            if reflect_idx >= 0 && reflect_idx < samples_f64.len() {
+                centered_samples.push(samples_f64[reflect_idx]);
+            } else {
+                centered_samples.push(0.0);
+            }
+        }
+        
+        samples_f64 = centered_samples;
+
+        if samples_f64.len() < window_size {
             return Err(AudioSampleError::DimensionMismatch(
                 "Audio length is shorter than window size".to_string(),
             ));
         }
 
-        // Calculate number of frames
-        let num_frames = if samples.len() >= window_size {
-            (samples.len() - window_size) / hop_size + 1
+        // Calculate number of frames (librosa-compatible)
+        let num_frames = if samples_f64.len() >= window_size {
+            (samples_f64.len() - window_size) / hop_size + 1
         } else {
             0
         };
@@ -166,34 +195,37 @@ where
         // Generate window function
         let window = generate_window(window_size, window_type);
 
-        // Initialize STFT matrix: frequency bins × time frames
-        let mut stft_matrix = Array2::zeros((window_size, num_frames));
+        // For real-valued signals, we only need positive frequencies
+        let num_positive_freqs = window_size / 2 + 1;
+        
+        // Initialize STFT matrix: frequency bins × time frames (only positive frequencies)
+        let mut stft_matrix = Array2::zeros((num_positive_freqs, num_frames));
 
-        // Setup FFT planner
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(window_size);
+        // Setup real FFT planner for efficiency
+        let mut real_planner = realfft::RealFftPlanner::new();
+        let r2c = real_planner.plan_fft_forward(window_size);
+        
+        // Pre-allocate buffers
+        let mut real_input = vec![0.0f64; window_size];
+        let mut complex_output = vec![Complex::new(0.0, 0.0); num_positive_freqs];
 
         // Process each frame
         for frame_idx in 0..num_frames {
             let start = frame_idx * hop_size;
             let end = start + window_size;
 
-            // Extract windowed frame
-            let mut frame_buffer: Vec<Complex<f64>> = samples[start..end]
-                .iter()
-                .zip(window.iter())
-                .map(|(&sample, &w)| {
-                    let windowed: f64 = sample.cast_into();
-                    let windowed = windowed * w;
-                    Complex::new(windowed, 0.0)
-                })
-                .collect();
+            // Extract and window the frame (real-valued)
+            for (i, (&sample, &w)) in samples_f64[start..end].iter().zip(window.iter()).enumerate() {
+                real_input[i] = sample * w;
+            }
 
-            // Apply FFT
-            fft.process(&mut frame_buffer);
+            // Apply real FFT (more efficient than complex FFT for real signals)
+            r2c.process(&mut real_input, &mut complex_output).map_err(|_| {
+                AudioSampleError::InvalidParameter("Real FFT processing failed".to_string())
+            })?;
 
-            // Store in STFT matrix
-            for (freq_idx, &value) in frame_buffer.iter().enumerate() {
+            // Store in STFT matrix (only positive frequencies)
+            for (freq_idx, &value) in complex_output.iter().enumerate() {
                 stft_matrix[[freq_idx, frame_idx]] = value;
             }
         }
@@ -354,11 +386,9 @@ where
                 let scaled_power = match scale {
                     SpectrogramScale::Linear => power,
                     SpectrogramScale::Log => {
-                        // Convert to dB with floor to prevent log(0)
-                        // Use a small epsilon to avoid log(0) and ensure minimum value
+                        // Convert to dB with epsilon to prevent log(0) - librosa style
                         let power_safe = power.max(1e-10);
-                        let power_db = 10.0 * power_safe.log10(); // 10*log10 for power
-                        power_db.max(-100.0) // Floor at -100 dB
+                        10.0 * power_safe.log10() // 10*log10 for power, no artificial floor
                     }
                     SpectrogramScale::Mel => {
                         // This case is handled above with early return

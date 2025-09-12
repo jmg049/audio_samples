@@ -82,7 +82,23 @@ where
         Self: Sized,
     {
         match method {
-            super::StereoConversionMethod::Duplicate => self.repeat(2),
+            super::StereoConversionMethod::Duplicate => match &self.data {
+                AudioData::Mono(mono_data) => {
+                    let stereo_data =
+                        ndarray::stack(Axis(0), &[mono_data.view(), mono_data.view()]).map_err(
+                            |e| AudioSampleError::ProcessingError {
+                                msg: format!("Failed to duplicate mono to stereo: {}", e),
+                            },
+                        )?;
+                    Ok(AudioSamples::new(
+                        AudioData::MultiChannel(stereo_data),
+                        self.sample_rate(),
+                    ))
+                }
+                AudioData::MultiChannel(_) => {
+                    Ok(AudioSamples::new(self.data.clone(), self.sample_rate()))
+                }
+            },
             super::StereoConversionMethod::Pan(_) => {
                 todo!()
             }

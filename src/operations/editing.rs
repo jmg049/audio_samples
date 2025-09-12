@@ -5,13 +5,16 @@
 //! and envelope operations using efficient ndarray operations.
 
 use super::traits::AudioEditing;
-use super::types::FadeCurve;
+use super::types::{FadeCurve, NoiseColor, PerturbationConfig, PerturbationMethod};
 use crate::repr::AudioData;
+use crate::utils::generation::{white_noise, pink_noise};
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
     I24,
 };
 use ndarray::{Array1, Array2, Axis, concatenate, s};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 
 /// Helper function to convert seconds to samples
 fn seconds_to_samples(seconds: f64, sample_rate: u32) -> usize {
@@ -621,6 +624,391 @@ where
             }
         }
     }
+
+    /// Applies perturbation to audio samples for data augmentation.
+    fn perturb(&self, config: &PerturbationConfig) -> AudioSampleResult<Self>
+    where
+        Self: Sized,
+    {
+        let mut cloned = self.clone();
+        cloned.perturb_(config)?;
+        Ok(cloned)
+    }
+
+    /// Applies perturbation to audio samples in place.
+    fn perturb_(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()> {
+        config.validate(self.sample_rate() as f64).map_err(|e| AudioSampleError::InvalidParameter(e))?;
+        
+        // Apply perturbation based on seed or use thread-local randomness
+        if let Some(seed) = config.seed {
+            let mut rng = StdRng::seed_from_u64(seed);
+            apply_perturbation_with_rng(self, &config.method, &mut rng)
+        } else {
+            let mut rng = rand::thread_rng();
+            apply_perturbation_with_rng(self, &config.method, &mut rng)
+        }
+    }
+}
+
+/// Apply perturbation with a given RNG
+fn apply_perturbation_with_rng<T: AudioSample, R: Rng>(
+    audio: &mut AudioSamples<T>,
+    method: &PerturbationMethod,
+    rng: &mut R,
+) -> AudioSampleResult<()>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    T: ConvertTo<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
+    match method {
+        PerturbationMethod::GaussianNoise { target_snr_db, noise_color } => {
+            apply_gaussian_noise_(audio, *target_snr_db, *noise_color, rng)
+        }
+        PerturbationMethod::RandomGain { min_gain_db, max_gain_db } => {
+            apply_random_gain_(audio, *min_gain_db, *max_gain_db, rng)
+        }
+        PerturbationMethod::HighPassFilter { cutoff_hz, slope_db_per_octave } => {
+            apply_high_pass_filter_(audio, *cutoff_hz, *slope_db_per_octave)
+        }
+        PerturbationMethod::PitchShift { semitones, preserve_formants } => {
+            apply_pitch_shift_(audio, *semitones, *preserve_formants)
+        }
+    }
+}
+
+/// Helper function to generate brown noise
+fn generate_brown_noise<T: AudioSample, R: Rng>(
+    duration: f64,
+    sample_rate: u32,
+    amplitude: f64,
+    rng: &mut R,
+) -> AudioSampleResult<Array1<T>>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
+    let num_samples = (duration * sample_rate as f64) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+    let mut brown_state = 0.0;
+
+    for _ in 0..num_samples {
+        let white = (rng.gen_range(0.0..1.0) - 0.5) * 2.0;
+        brown_state = (brown_state + white * 0.02_f64).clamp(-1.0, 1.0);
+        let sample = amplitude * brown_state;
+        samples.push(sample.convert_to()?);
+    }
+
+    Ok(Array1::from_vec(samples))
+}
+
+/// Calculate RMS (Root Mean Square) of audio samples
+fn calculate_rms<T: AudioSample>(audio: &AudioSamples<T>) -> AudioSampleResult<f64>
+where
+    T: ConvertTo<f64>,
+{
+    let mut sum_squares = 0.0;
+    let mut total_samples = 0;
+
+    match &audio.data {
+        AudioData::Mono(arr) => {
+            for sample in arr.iter() {
+                let sample_f64: f64 = sample.convert_to()?;
+                sum_squares += sample_f64 * sample_f64;
+                total_samples += 1;
+            }
+        }
+        AudioData::MultiChannel(arr) => {
+            for sample in arr.iter() {
+                let sample_f64: f64 = sample.convert_to()?;
+                sum_squares += sample_f64 * sample_f64;
+                total_samples += 1;
+            }
+        }
+    }
+
+    if total_samples > 0 {
+        Ok((sum_squares / total_samples as f64).sqrt())
+    } else {
+        Ok(0.0)
+    }
+}
+
+/// Apply Gaussian noise to audio samples
+fn apply_gaussian_noise_<T: AudioSample, R: Rng>(
+    audio: &mut AudioSamples<T>,
+    target_snr_db: f64,
+    noise_color: NoiseColor,
+    rng: &mut R,
+) -> AudioSampleResult<()>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    T: ConvertTo<f64>,
+    AudioSamples<T>: AudioTypeConversion<T>,
+{
+    // Calculate signal RMS
+    let signal_rms = calculate_rms(audio)?;
+    if signal_rms == 0.0 {
+        return Ok(()); // No signal, no noise needed
+    }
+
+    // Calculate target noise RMS from SNR
+    let target_noise_rms = signal_rms / 10.0_f64.powf(target_snr_db / 20.0);
+    
+    let duration = audio.duration_seconds();
+    
+    // Generate noise based on color
+    let noise_audio: AudioSamples<T> = match noise_color {
+        NoiseColor::White => {
+            let mut noise = white_noise(duration, audio.sample_rate(), target_noise_rms)?;
+            // Use custom RNG for deterministic results
+            apply_custom_noise_to_audio(&mut noise, target_noise_rms, rng)?;
+            noise
+        }
+        NoiseColor::Pink => {
+            let mut noise = pink_noise(duration, audio.sample_rate(), target_noise_rms)?;
+            apply_custom_noise_to_audio(&mut noise, target_noise_rms, rng)?;
+            noise
+        }
+        NoiseColor::Brown => {
+            match &audio.data {
+                AudioData::Mono(_) => {
+                    let noise_array = generate_brown_noise(duration, audio.sample_rate(), target_noise_rms, rng)?;
+                    AudioSamples::new_mono(noise_array, audio.sample_rate())
+                }
+                AudioData::MultiChannel(arr) => {
+                    let mut noise_arrays = Vec::new();
+                    for _ in 0..arr.nrows() {
+                        let noise_array = generate_brown_noise(duration, audio.sample_rate(), target_noise_rms, rng)?;
+                        noise_arrays.push(noise_array);
+                    }
+                    let noise_2d = Array2::from_shape_vec((arr.nrows(), noise_arrays[0].len()), 
+                        noise_arrays.into_iter().flat_map(|arr| arr.into_iter()).collect()).unwrap();
+                    AudioSamples::new_multi_channel(noise_2d, audio.sample_rate())
+                }
+            }
+        }
+    };
+
+    // Add noise to signal
+    match (&mut audio.data, &noise_audio.data) {
+        (AudioData::Mono(signal), AudioData::Mono(noise)) => {
+            for (s, n) in signal.iter_mut().zip(noise.iter()) {
+                let signal_f64: f64 = s.convert_to()?;
+                let noise_f64: f64 = n.convert_to()?;
+                *s = (signal_f64 + noise_f64).convert_to()?;
+            }
+        }
+        (AudioData::MultiChannel(signal), AudioData::MultiChannel(noise)) => {
+            for (s, n) in signal.iter_mut().zip(noise.iter()) {
+                let signal_f64: f64 = s.convert_to()?;
+                let noise_f64: f64 = n.convert_to()?;
+                *s = (signal_f64 + noise_f64).convert_to()?;
+            }
+        }
+        _ => return Err(AudioSampleError::InvalidInput {
+            msg: "Channel mismatch between signal and noise".to_string(),
+        }),
+    }
+
+    Ok(())
+}
+
+/// Helper to apply custom noise generation using provided RNG
+fn apply_custom_noise_to_audio<T: AudioSample, R: Rng>(
+    noise: &mut AudioSamples<T>,
+    amplitude: f64,
+    rng: &mut R,
+) -> AudioSampleResult<()>
+where
+    f64: ConvertTo<T>,
+{
+    match &mut noise.data {
+        AudioData::Mono(arr) => {
+            for sample in arr.iter_mut() {
+                let random_value = (rng.gen_range(0.0..1.0) - 0.5) * 2.0;
+                *sample = (amplitude * random_value).convert_to()?;
+            }
+        }
+        AudioData::MultiChannel(arr) => {
+            for sample in arr.iter_mut() {
+                let random_value = (rng.gen_range(0.0..1.0) - 0.5) * 2.0;
+                *sample = (amplitude * random_value).convert_to()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply random gain to audio samples
+fn apply_random_gain_<T: AudioSample, R: Rng>(
+    audio: &mut AudioSamples<T>,
+    min_gain_db: f64,
+    max_gain_db: f64,
+    rng: &mut R,
+) -> AudioSampleResult<()>
+where
+    T: ConvertTo<f64>,
+    f64: ConvertTo<T>,
+{
+    let gain_db = rng.gen_range(min_gain_db..=max_gain_db);
+    let gain_linear = 10.0_f64.powf(gain_db / 20.0);
+
+    match &mut audio.data {
+        AudioData::Mono(arr) => {
+            for sample in arr.iter_mut() {
+                let sample_f64: f64 = sample.convert_to()?;
+                *sample = (sample_f64 * gain_linear).convert_to()?;
+            }
+        }
+        AudioData::MultiChannel(arr) => {
+            for sample in arr.iter_mut() {
+                let sample_f64: f64 = sample.convert_to()?;
+                *sample = (sample_f64 * gain_linear).convert_to()?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply high-pass filter to audio samples (simple implementation)
+fn apply_high_pass_filter_<T: AudioSample>(
+    audio: &mut AudioSamples<T>,
+    cutoff_hz: f64,
+    _slope_db_per_octave: Option<f64>,
+) -> AudioSampleResult<()>
+where
+    T: ConvertTo<f64>,
+    f64: ConvertTo<T>,
+{
+    let sample_rate = audio.sample_rate() as f64;
+    let rc = 1.0 / (2.0 * std::f64::consts::PI * cutoff_hz);
+    let dt = 1.0 / sample_rate;
+    let alpha = rc / (rc + dt);
+
+    match &mut audio.data {
+        AudioData::Mono(arr) => {
+            if arr.len() > 0 {
+                let mut prev_input: f64 = arr[0].convert_to()?;
+                let mut prev_output = 0.0;
+
+                for sample in arr.iter_mut() {
+                    let current_input: f64 = sample.convert_to()?;
+                    let output = alpha * (prev_output + current_input - prev_input);
+                    *sample = output.convert_to()?;
+                    
+                    prev_input = current_input;
+                    prev_output = output;
+                }
+            }
+        }
+        AudioData::MultiChannel(arr) => {
+            for mut channel in arr.axis_iter_mut(Axis(0)) {
+                if channel.len() > 0 {
+                    let mut prev_input: f64 = channel[0].convert_to()?;
+                    let mut prev_output = 0.0;
+
+                    for sample in channel.iter_mut() {
+                        let current_input: f64 = sample.convert_to()?;
+                        let output = alpha * (prev_output + current_input - prev_input);
+                        *sample = output.convert_to()?;
+                        
+                        prev_input = current_input;
+                        prev_output = output;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply pitch shift to audio samples (basic implementation)
+fn apply_pitch_shift_<T: AudioSample>(
+    audio: &mut AudioSamples<T>,
+    semitones: f64,
+    _preserve_formants: bool,
+) -> AudioSampleResult<()>
+where
+    T: ConvertTo<f64>,
+    f64: ConvertTo<T>,
+{
+    if semitones == 0.0 {
+        return Ok(());
+    }
+
+    let pitch_ratio = 2.0_f64.powf(semitones / 12.0);
+    
+    // Simple time-domain pitch shifting using interpolation
+    match &mut audio.data {
+        AudioData::Mono(arr) => {
+            let original_data: Vec<f64> = arr.iter()
+                .map(|&x| x.convert_to())
+                .collect::<Result<Vec<_>, _>>()?;
+                
+            for (i, sample) in arr.iter_mut().enumerate() {
+                let source_index = i as f64 * pitch_ratio;
+                let index_floor = source_index.floor() as usize;
+                let index_frac = source_index - source_index.floor();
+                
+                if index_floor < original_data.len() {
+                    let interpolated = if index_floor + 1 < original_data.len() {
+                        original_data[index_floor] * (1.0 - index_frac) + 
+                        original_data[index_floor + 1] * index_frac
+                    } else {
+                        original_data[index_floor]
+                    };
+                    *sample = interpolated.convert_to()?;
+                } else {
+                    *sample = T::convert_from(0.0)?;
+                }
+            }
+        }
+        AudioData::MultiChannel(arr) => {
+            let original_data: Vec<Vec<f64>> = arr.outer_iter()
+                .map(|channel| {
+                    channel.iter()
+                        .map(|&x| x.convert_to())
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+                
+            for (ch_idx, mut channel) in arr.axis_iter_mut(Axis(0)).enumerate() {
+                for (i, sample) in channel.iter_mut().enumerate() {
+                    let source_index = i as f64 * pitch_ratio;
+                    let index_floor = source_index.floor() as usize;
+                    let index_frac = source_index - source_index.floor();
+                    
+                    if index_floor < original_data[ch_idx].len() {
+                        let interpolated = if index_floor + 1 < original_data[ch_idx].len() {
+                            original_data[ch_idx][index_floor] * (1.0 - index_frac) + 
+                            original_data[ch_idx][index_floor + 1] * index_frac
+                        } else {
+                            original_data[ch_idx][index_floor]
+                        };
+                        *sample = interpolated.convert_to()?;
+                    } else {
+                        *sample = T::convert_from(0.0)?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -799,5 +1187,115 @@ mod tests {
             // 1.0*0.5 + 2.0*0.3 + 3.0*0.2 = 0.5 + 0.6 + 0.6 = 1.7
             assert!((arr[0] - 1.7).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn test_perturbation_gaussian_noise() {
+        use crate::operations::types::*;
+
+        let samples = Array1::from(vec![1.0f32; 1000]);
+        let audio = AudioSamples::new_mono(samples, 44100);
+
+        let config = PerturbationConfig::with_seed(
+            PerturbationMethod::gaussian_noise(20.0, NoiseColor::White),
+            12345,
+        );
+
+        let noisy_audio = audio.perturb(&config).unwrap();
+
+        // The original signal should be different from the noisy signal
+        if let (AudioData::Mono(original), AudioData::Mono(noisy)) = (&audio.data, &noisy_audio.data) {
+            assert_ne!(original[0], noisy[0]);
+            assert_eq!(original.len(), noisy.len());
+        }
+    }
+
+    #[test]
+    fn test_perturbation_random_gain() {
+        use crate::operations::types::*;
+
+        let samples = Array1::from(vec![1.0f32; 100]);
+        let mut audio = AudioSamples::new_mono(samples, 44100);
+
+        let config = PerturbationConfig::with_seed(
+            PerturbationMethod::random_gain(-3.0, 3.0),
+            54321,
+        );
+
+        let original_sample = if let AudioData::Mono(arr) = &audio.data {
+            arr[0]
+        } else {
+            panic!("Expected mono audio");
+        };
+
+        audio.perturb_(&config).unwrap();
+
+        let gained_sample = if let AudioData::Mono(arr) = &audio.data {
+            arr[0]
+        } else {
+            panic!("Expected mono audio");
+        };
+
+        // Sample should be modified by gain
+        assert_ne!(original_sample, gained_sample);
+    }
+
+    #[test]
+    fn test_perturbation_high_pass_filter() {
+        use crate::operations::types::*;
+
+        let samples = Array1::from(vec![1.0f32; 100]);
+        let mut audio = AudioSamples::new_mono(samples, 44100);
+
+        let config = PerturbationConfig::new(
+            PerturbationMethod::high_pass_filter(80.0),
+        );
+
+        audio.perturb_(&config).unwrap();
+
+        // After high-pass filtering, the signal should be modified
+        // This is more of a smoke test to ensure no crashes
+        if let AudioData::Mono(arr) = &audio.data {
+            assert_eq!(arr.len(), 100);
+        }
+    }
+
+    #[test]
+    fn test_perturbation_deterministic() {
+        use crate::operations::types::*;
+
+        let samples = Array1::from(vec![1.0f32; 100]);
+        let audio = AudioSamples::new_mono(samples.clone(), 44100);
+
+        let config = PerturbationConfig::with_seed(
+            PerturbationMethod::random_gain(-1.0, 1.0),
+            42,
+        );
+
+        let result1 = audio.perturb(&config).unwrap();
+        let result2 = audio.perturb(&config).unwrap();
+
+        // Results should be identical due to fixed seed
+        if let (AudioData::Mono(arr1), AudioData::Mono(arr2)) = (&result1.data, &result2.data) {
+            for (a, b) in arr1.iter().zip(arr2.iter()) {
+                assert_eq!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn test_perturbation_validation() {
+        use crate::operations::types::*;
+
+        let samples = Array1::from(vec![1.0f32; 100]);
+        let mut audio = AudioSamples::new_mono(samples, 44100);
+
+        // Test invalid high-pass filter cutoff
+        let invalid_config = PerturbationConfig::new(
+            PerturbationMethod::high_pass_filter(50000.0), // Above Nyquist frequency
+        );
+
+        let result = audio.perturb_(&invalid_config);
+        assert!(result.is_err());
     }
 }
