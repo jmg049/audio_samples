@@ -3,8 +3,7 @@
 //! This module provides functions for generating various types of audio signals
 //! for testing, synthesis, and audio processing applications.
 
-use crate::operations::traits::AudioTypeConversion;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo, I24};
 use ndarray::Array1;
 use std::f64::consts::PI;
 
@@ -30,7 +29,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -43,7 +42,7 @@ where
         samples.push(sample.convert_to()?);
     }
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates a cosine wave with the specified parameters.
@@ -68,7 +67,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -82,7 +81,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates white noise with the specified parameters.
@@ -107,7 +106,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -120,7 +119,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates pink noise with the specified parameters.
@@ -145,7 +144,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -171,7 +170,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates a square wave with the specified parameters.
@@ -196,7 +195,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -211,7 +210,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates a sawtooth wave with the specified parameters.
@@ -236,7 +235,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -251,7 +250,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates a triangle wave with the specified parameters.
@@ -276,7 +275,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -295,7 +294,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates a chirp (frequency sweep) signal.
@@ -322,7 +321,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
@@ -339,7 +338,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates an impulse (delta function) signal.
@@ -364,7 +363,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let mut samples = vec![0.0.convert_to()?; num_samples];
@@ -376,7 +375,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 /// Generates silence (zeros) with the specified duration.
@@ -397,13 +396,13 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let num_samples = (duration * sample_rate as f64) as usize;
     let samples = vec![0.0.convert_to()?; num_samples];
 
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array, sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), sample_rate))
 }
 
 // Note: We need to add rand as a dependency for noise generation
@@ -430,6 +429,7 @@ mod rand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operations::traits::AudioStatistics;
     use approx_eq::assert_approx_eq;
 
     #[test]
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(audio.samples_per_channel(), 44100);
 
         // Check that the peak is approximately 1.0
-        let peak = audio.peak_native();
+        let peak = audio.peak();
         assert!(peak > 0.9 && peak <= 1.0);
     }
 
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(audio.samples_per_channel(), 44100);
 
         // Check that the peak is approximately 1.0
-        let peak = audio.peak_native();
+        let peak = audio.peak();
         assert!(peak > 0.9 && peak <= 1.0);
     }
 }

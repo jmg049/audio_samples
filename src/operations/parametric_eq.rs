@@ -3,14 +3,15 @@
 //! This module provides parametric EQ functionality with support for
 //! multiple band types including peaks, shelves, and filters.
 
-use super::iir_filtering::IirFilter;
-use super::traits::AudioParametricEq;
-use super::types::{EqBand, EqBandType, ParametricEq};
+use crate::operations::iir_filtering::IirFilter;
+use crate::operations::traits::AudioParametricEq;
+use crate::operations::types::{EqBand, EqBandType, ParametricEq};
 use crate::repr::AudioData;
 use crate::{
-    AudioChannelOps, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    AudioTypeConversion, ConvertTo, I24,
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
 };
+
 use std::f64::consts::PI;
 
 impl<T: AudioSample> AudioParametricEq<T> for AudioSamples<T>
@@ -20,8 +21,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
-    AudioSamples<T>: AudioChannelOps<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     fn apply_parametric_eq(
         &mut self,
@@ -451,7 +451,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Apply a linear gain to all samples.
     fn apply_linear_gain(&mut self, gain: f64) -> AudioSampleResult<()> {
@@ -478,7 +478,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::AudioParametricEq;
+    use crate::operations::traits::AudioParametricEq;
     use ndarray::Array1;
     use std::f64::consts::PI;
 
@@ -499,7 +499,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
 
         // Apply peak filter at 880Hz with +6dB gain
         let result = audio.apply_peak_filter(880.0, 6.0, 2.0, sample_rate);
@@ -524,7 +524,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
 
         // Apply low shelf filter at 500Hz with -3dB gain
         let result = audio.apply_low_shelf(500.0, -3.0, 0.707, sample_rate);
@@ -549,7 +549,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
 
         // Apply high shelf filter at 2000Hz with +4dB gain
         let result = audio.apply_high_shelf(2000.0, 4.0, 0.707, sample_rate);
@@ -574,7 +574,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
 
         // Apply 3-band EQ: low shelf at 200Hz (-2dB), mid peak at 1kHz (+3dB), high shelf at 4kHz (+1dB)
         let result =
@@ -587,8 +587,10 @@ mod tests {
     #[test]
     fn test_parametric_eq_configuration() {
         let sample_rate = 44100.0;
-        let mut audio =
-            AudioSamples::new_mono(Array1::from(vec![1.0f32, 0.0, -1.0]), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(
+            Array1::from(vec![1.0f32, 0.0, -1.0]).into(),
+            sample_rate as u32,
+        );
 
         let mut eq = ParametricEq::new();
         eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));
@@ -641,8 +643,10 @@ mod tests {
     #[test]
     fn test_parametric_eq_bypass() {
         let sample_rate = 44100.0;
-        let mut audio =
-            AudioSamples::new_mono(Array1::from(vec![1.0f32, 0.5, -0.5]), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(
+            Array1::from(vec![1.0f32, 0.5, -0.5]).into(),
+            sample_rate as u32,
+        );
         let original_samples = audio.data.clone();
 
         let mut eq = ParametricEq::new();

@@ -3,6 +3,24 @@
 //! This module contains all the configuration types, enums, and helper structures
 //! used by the audio processing traits.
 
+/// Pad side enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadSide {
+    Left,
+    Right,
+}
+
+impl PadSide {
+    /// Create PadSide from &str
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "left" => Some(PadSide::Left),
+            "right" => Some(PadSide::Right),
+            _ => None,
+        }
+    }
+}
+
 /// Methods for normalizing audio sample values.
 ///
 /// Different normalization methods are appropriate for different audio processing scenarios.
@@ -48,7 +66,7 @@ pub enum WindowType {
 /// Fade curve shapes for envelope operations.
 ///
 /// Different curves provide different perceptual characteristics for fades.
-#[derive(Debug, Clone, PartialEq, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum FadeCurve {
     /// Linear fade - constant rate of change.
     Linear,
@@ -2171,10 +2189,7 @@ pub enum PerturbationMethod {
     /// # Arguments
     /// * `min_gain_db` - Minimum gain in dB
     /// * `max_gain_db` - Maximum gain in dB
-    RandomGain {
-        min_gain_db: f64,
-        max_gain_db: f64,
-    },
+    RandomGain { min_gain_db: f64, max_gain_db: f64 },
     /// High-pass filtering to remove low-frequency content.
     ///
     /// Applies a high-pass filter to simulate microphone rumble removal
@@ -2275,7 +2290,10 @@ impl PerturbationMethod {
                     return Err("Target SNR should be between -60 and 60 dB".to_string());
                 }
             }
-            Self::RandomGain { min_gain_db, max_gain_db } => {
+            Self::RandomGain {
+                min_gain_db,
+                max_gain_db,
+            } => {
                 if min_gain_db >= max_gain_db {
                     return Err("Minimum gain must be less than maximum gain".to_string());
                 }
@@ -2283,7 +2301,10 @@ impl PerturbationMethod {
                     return Err("Gain range should be reasonable (-40 to +20 dB)".to_string());
                 }
             }
-            Self::HighPassFilter { cutoff_hz, slope_db_per_octave } => {
+            Self::HighPassFilter {
+                cutoff_hz,
+                slope_db_per_octave,
+            } => {
                 let nyquist = sample_rate / 2.0;
                 if *cutoff_hz <= 0.0 || *cutoff_hz >= nyquist {
                     return Err(format!(
@@ -2326,10 +2347,7 @@ impl PerturbationConfig {
     /// # Arguments
     /// * `method` - The perturbation method to apply
     pub const fn new(method: PerturbationMethod) -> Self {
-        Self {
-            method,
-            seed: None,
-        }
+        Self { method, seed: None }
     }
 
     /// Create a new perturbation configuration with a specific seed.

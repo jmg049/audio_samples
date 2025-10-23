@@ -57,6 +57,7 @@
 //! - Dixon, S. "Onset detection revisited." DAFx 2006.
 //! - Duxbury, C., et al. "Complex domain onset detection for musical signals." DAFx 2003.
 
+use super::beats::ProgressCallback;
 use super::peak_picking::pick_peaks;
 use super::traits::AudioTransforms;
 use super::types::{ComplexOnsetConfig, OnsetConfig, SpectralFluxConfig, SpectralFluxMethod};
@@ -65,6 +66,7 @@ use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
     I24,
 };
+
 use ndarray::Array2;
 use rustfft::num_complex::Complex;
 use std::f64::consts::PI;
@@ -663,6 +665,143 @@ where
 
         Ok(onset_times)
     }
+
+    pub fn onset_strength_envelope(
+        &self,
+        config: &OnsetConfig,
+        log_compression: Option<f64>,
+    ) -> AudioSampleResult<Vec<f64>> {
+        self.onset_strength_envelope_with_progress(config, log_compression, None)
+    }
+
+    /// Compute onset strength envelope with optional progress reporting.
+    pub fn onset_strength_envelope_with_progress(
+        &self,
+        config: &OnsetConfig,
+        log_compression: Option<f64>,
+        progress_callback: Option<&ProgressCallback>,
+    ) -> AudioSampleResult<Vec<f64>> {
+        if let Some(_callback) = progress_callback {
+            // Use callback if needed
+        }
+
+        let (_times, odf) = self.onset_detection_function(config)?;
+
+        if let Some(callback) = progress_callback {
+            callback(super::beats::ProgressPhase::OnsetEnvelope);
+        }
+
+        // Simple moving average smoothing
+        let window = config.window_size.unwrap_or(3);
+        let mut smoothed = vec![0.0; odf.len()];
+        for (i, _) in odf.iter().enumerate() {
+            let start = i.saturating_sub(window);
+            let end = (i + window + 1).min(odf.len());
+            let mut acc = 0.0;
+            for j in start..end {
+                acc += odf[j];
+            }
+            smoothed[i] = acc / (end - start) as f64;
+
+            // Report progress for smoothing (15-35% of total range)
+            if let Some(callback) = progress_callback {
+                if i % (odf.len() / 10).max(1) == 0 {
+                    let _progress = 15 + (20 * i / odf.len().max(1));
+                    let frac = i as f64 / odf.len() as f64;
+                    callback(super::beats::ProgressPhase::Forward(frac));
+                }
+            }
+        }
+
+        if let Some(callback) = progress_callback {
+            callback(super::beats::ProgressPhase::BeatTrackingStart);
+        }
+
+        let compression = match log_compression {
+            Some(c) => c,
+            None => 0.5,
+        };
+
+        let env: Vec<f64> = smoothed
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                // Report progress for compression (35-50% of total range)
+                if let Some(callback) = progress_callback {
+                    if i % (smoothed.len() / 10).max(1) == 0 {
+                        let _progress = 35 + (15 * i / smoothed.len().max(1));
+                        let frac = i as f64 / smoothed.len() as f64;
+                        callback(super::beats::ProgressPhase::Backward(frac));
+                    }
+                }
+                (1.0 + compression * x).ln()
+            })
+            .collect();
+
+        if let Some(callback) = progress_callback {
+            callback(super::beats::ProgressPhase::BeatDetectionComplete);
+        }
+
+        Ok(env)
+    }
+
+    /// Computes spectral flux for onset detection using the specified method.
+    ///
+    /// This method provides a unified interface for computing spectral flux with different
+    /// algorithms and configurations optimized for onset detection applications.
+    pub fn spectral_flux_onset(
+        &self,
+        config: &SpectralFluxConfig,
+    ) -> AudioSampleResult<Vec<f64>> {
+        let sample_rate = self.sample_rate() as f64;
+        config.validate(sample_rate).map_err(|e| {
+            AudioSampleError::InvalidParameter(format!("Invalid spectral flux config: {}", e))
+        })?;
+
+        // Compute spectral flux using the configured method
+        let (_time_frames, flux) =
+            self.spectral_flux(&config.cqt_config, config.hop_size, config.flux_method)?;
+
+        // Apply optional post-processing
+        let mut processed_flux = flux;
+
+        // Apply rectification if configured
+        if config.rectify {
+            processed_flux = processed_flux.into_iter().map(|x| x.max(0.0)).collect();
+        }
+
+        // Apply logarithmic compression if configured
+        if config.log_compression > 0.0 {
+            processed_flux = processed_flux
+                .into_iter()
+                .map(|x| (1.0 + config.log_compression * x).ln())
+                .collect();
+        }
+
+        Ok(processed_flux)
+    }
+
+    /// Computes onset strength function from spectral flux for peak detection.
+    ///
+    /// This method processes the raw spectral flux to produce an onset strength
+    /// function that emphasizes likely onset locations using smoothing and
+    /// enhancement techniques.
+    pub fn onset_strength(
+        &self,
+        config: &SpectralFluxConfig,
+    ) -> AudioSampleResult<Vec<f64>> {
+        let sample_rate = self.sample_rate() as f64;
+        config.validate(sample_rate).map_err(|e| {
+            AudioSampleError::InvalidParameter(format!("Invalid spectral flux config: {}", e))
+        })?;
+
+        // Compute spectral flux
+        let (_time_frames, flux) =
+            self.spectral_flux(&config.cqt_config, config.hop_size, config.flux_method)?;
+
+        // Compute onset strength by emphasizing peaks
+        compute_onset_strength(&flux)
+    }
 }
 
 /// Compute energy-based spectral flux from magnitude spectrogram.
@@ -805,6 +944,42 @@ fn compute_rectified_complex_flux(
     Ok((time_frames, flux))
 }
 
+/// Computes onset strength function from spectral flux by emphasizing local maxima.
+fn compute_onset_strength(flux: &[f64]) -> AudioSampleResult<Vec<f64>> {
+    if flux.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut strength = vec![0.0; flux.len()];
+
+    // Emphasize local maxima
+    for i in 1..flux.len() - 1 {
+        let curr = flux[i];
+        let prev = flux[i - 1];
+        let next = flux[i + 1];
+
+        // If current value is a local maximum, use it; otherwise use 0
+        if curr > prev && curr > next {
+            strength[i] = curr;
+        }
+    }
+
+    // Handle edge cases
+    if flux.len() > 1 {
+        strength[0] = if flux[0] > flux[1] { flux[0] } else { 0.0 };
+        let last = flux.len() - 1;
+        strength[last] = if flux[last] > flux[last - 1] {
+            flux[last]
+        } else {
+            0.0
+        };
+    } else {
+        strength[0] = flux[0];
+    }
+
+    Ok(strength)
+}
+
 /// Apply median filter to a signal.
 fn apply_median_filter(signal: &[f64], filter_length: usize) -> AudioSampleResult<Vec<f64>> {
     if filter_length == 0 || filter_length % 2 == 0 {
@@ -869,7 +1044,7 @@ mod tests {
     fn test_energy_based_onset_detection() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         let config = OnsetConfig::percussive();
         let result = audio.detect_onsets(&config);
@@ -891,7 +1066,7 @@ mod tests {
     fn test_onset_detection_function() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 2, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         let config = OnsetConfig::musical();
         let result = audio.onset_detection_function(&config);
@@ -915,7 +1090,7 @@ mod tests {
     fn test_spectral_flux_methods() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         let config = super::super::types::CqtConfig::onset_detection();
         let hop_size = 512;
@@ -941,7 +1116,7 @@ mod tests {
     fn test_complex_onset_detection() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 2, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         let config = ComplexOnsetConfig::musical();
         let result = audio.complex_onset_detection(&config);
@@ -962,7 +1137,7 @@ mod tests {
     fn test_phase_deviation_matrix() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         let config = ComplexOnsetConfig::new();
         let result = audio.phase_deviation_matrix(&config);
@@ -987,7 +1162,7 @@ mod tests {
     fn test_magnitude_difference_matrix() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         let config = ComplexOnsetConfig::new();
         let result = audio.magnitude_difference_matrix(&config);
@@ -1012,7 +1187,7 @@ mod tests {
     fn test_spectral_flux_onset_detection() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 2, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         let config = SpectralFluxConfig::percussive();
         let result = audio.detect_onsets_spectral_flux(&config);
@@ -1055,7 +1230,7 @@ mod tests {
     fn test_preset_configurations() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
 
         // Test OnsetConfig presets
         let onset_configs = vec![
@@ -1102,7 +1277,7 @@ mod tests {
         // Test with very short signal
         let sample_rate = 44100;
         let short_signal = vec![1.0f32, 2.0, 3.0];
-        let audio = AudioSamples::new_mono(Array1::from_vec(short_signal), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(short_signal).into(), sample_rate);
 
         let config = OnsetConfig::new();
         let result = audio.detect_onsets(&config);
@@ -1117,7 +1292,7 @@ mod tests {
 
         // Test with empty signal
         let empty_signal: Vec<f64> = vec![];
-        let audio = AudioSamples::new_mono(Array1::from_vec(empty_signal), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(empty_signal).into(), sample_rate);
 
         let result = audio.detect_onsets(&config);
         assert!(result.is_err()); // Should error on empty signal

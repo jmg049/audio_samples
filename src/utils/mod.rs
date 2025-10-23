@@ -126,6 +126,146 @@ pub use comparison::*;
 pub use detection::*;
 pub use generation::*;
 
-// Re-export existing utils from the parent module
-// Note: Cannot glob-import a module into itself, so we'll define the compatibility exports individually
-// pub use super::utils_old::*;
+use crate::{AudioSample, AudioSampleError, AudioSampleResult, I24};
+
+/// Converts a byte slice into a single audio sample of type T.
+pub fn audio_sample_from_bytes<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<T> {
+    let sample_size = std::mem::size_of::<T>();
+    if bytes.len() != sample_size {
+        return Err(AudioSampleError::InvalidInput {
+            msg: format!(
+                "Data length {} does not match sample size {}",
+                bytes.len(),
+                sample_size
+            ),
+        });
+    }
+
+    match sample_size {
+        1 => {
+            let array: [u8; 1] = bytes.try_into().unwrap();
+            Ok(unsafe { std::mem::transmute_copy(&array) })
+        }
+        2 => {
+            let array: [u8; 2] = bytes.try_into().unwrap();
+            Ok(unsafe { std::mem::transmute_copy(&array) })
+        }
+        3 => {
+            let array: [u8; 3] = bytes.try_into().unwrap();
+            let i24 = I24::from_le_bytes(array);
+            match T::cast_from(i24) {
+                val => Ok(val),
+            }
+        }
+        4 => {
+            let array: [u8; 4] = bytes.try_into().unwrap();
+            Ok(unsafe { std::mem::transmute_copy(&array) })
+        }
+        8 => {
+            let array: [u8; 8] = bytes.try_into().unwrap();
+            Ok(unsafe { std::mem::transmute_copy(&array) })
+        }
+        _ => Err(AudioSampleError::InvalidInput {
+            msg: format!("Unsupported sample size: {}", sample_size),
+        }),
+    }
+}
+
+/// Convert bytes to aligned samples, creating a Vec when alignment is required
+pub fn bytes_to_samples_aligned<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<Vec<T>> {
+    let sample_size = std::mem::size_of::<T>();
+    if bytes.len() % sample_size != 0 {
+        return Err(AudioSampleError::InvalidInput {
+            msg: "Data size is not a multiple of sample size".to_string(),
+        });
+    }
+
+    let samples = if T::BITS != 24 {
+        let num_samples = bytes.len() / sample_size;
+        let ptr = bytes.as_ptr();
+        let alignment = std::mem::align_of::<T>();
+
+        if ptr as usize % alignment == 0 {
+            // Safe to cast directly if aligned
+            let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, num_samples) };
+            slice.to_vec()
+        } else {
+            // Need to copy data to ensure alignment
+            let mut result = Vec::<T>::with_capacity(num_samples);
+            unsafe {
+                let mut byte_ptr = ptr;
+                for _ in 0..num_samples {
+                    // Read sample bytes into an aligned buffer
+                    let mut sample_bytes = [0u8; 8]; // Max size for any AudioSample
+                    std::ptr::copy_nonoverlapping(byte_ptr, sample_bytes.as_mut_ptr(), sample_size);
+                    let sample = std::ptr::read(sample_bytes.as_ptr() as *const T);
+                    result.push(sample);
+                    byte_ptr = byte_ptr.add(sample_size);
+                }
+            }
+            result
+        }
+    } else {
+        // Handle I24 case
+        let i24_samples =
+            I24::read_i24s_le_slice(bytes).ok_or_else(|| AudioSampleError::InvalidInput {
+                msg: "Invalid I24 data alignment or size".to_string(),
+            })?;
+
+        let mut result = Vec::<T>::with_capacity(i24_samples.len());
+        for i24_sample in i24_samples {
+            // Safe conversion since T should be I24 when T::BITS == 24
+            let sample = unsafe { std::ptr::read(i24_sample as *const I24 as *const T) };
+            result.push(sample);
+        }
+        result
+    };
+
+    Ok(samples)
+}
+
+/// Convert bytes to samples with alignment checking (unsafe but fast when aligned)
+pub unsafe fn bytes_to_samples_unchecked<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<&[T]> {
+    let sample_size = std::mem::size_of::<T>();
+    if bytes.len() % sample_size != 0 {
+        return Err(AudioSampleError::InvalidInput {
+            msg: "Data size is not a multiple of sample size".to_string(),
+        });
+    }
+
+    let slice = if T::BITS != 24 {
+        let num_samples = bytes.len() / sample_size;
+        let ptr = bytes.as_ptr();
+        let alignment = std::mem::align_of::<T>();
+
+        // Check alignment before proceeding
+        if ptr as usize % alignment != 0 {
+            return Err(AudioSampleError::InvalidInput {
+                msg: format!(
+                    "Data is not properly aligned for type {} (requires {}-byte alignment)",
+                    std::any::type_name::<T>(),
+                    alignment
+                ),
+            });
+        }
+
+        unsafe { std::slice::from_raw_parts(ptr as *const T, num_samples) }
+    } else {
+        let samples =
+            I24::read_i24s_le_slice(bytes).ok_or_else(|| AudioSampleError::InvalidInput {
+                msg: "Invalid I24 data alignment or size".to_string(),
+            })?;
+
+        // For I24, we can safely cast since I24 has the same memory layout
+        let num_samples = samples.len();
+        let ptr = samples.as_ptr() as *const T;
+        unsafe { std::slice::from_raw_parts(ptr, num_samples) }
+    };
+
+    Ok(slice)
+}
+
+/// Helper function to convert seconds to samples
+pub fn seconds_to_samples(seconds: f64, sample_rate: u32) -> usize {
+    (seconds * sample_rate as f64) as usize
+}

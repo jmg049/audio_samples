@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -15,7 +15,7 @@ categories = ["encoding"]
 
 [lib]
 name = "audio_samples"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 bytemuck = "1.23.1"
@@ -32,14 +32,10 @@ approx_eq = "0.1.8"
 rustfft = "6.2"
 realfft = "3.4"
 num-complex = "0.4"
-fftw-sys = { version = "0.4", features = ["intel-mkl"], optional = true }
-intel-mkl-src = { version = "0.8", optional = true }
-i24 = { git = "https://github.com/jmg049/i24", branch = "development", features = [
-    "std",
-    "alloc",
-    "serde",
-] }
-rubato = "0.16.2"
+fftw-sys = { version = "0.4.0", features = ["intel-mkl"], optional = true }
+intel-mkl-src = { version = "0.8.0", optional = true }
+i24 = { path = "/home/jmg/code/rust/i24", features = ["std", "alloc", "serde"] }
+rubato = { version = "0.16.2" }
 serde = "1.0.219"
 lazy_static = "1.4"
 rayon = { version = "1.10", optional = true }
@@ -58,34 +54,15 @@ crossbeam = { version = "0.8", optional = true }
 cpal = { version = "0.16", optional = true }
 parking_lot = { version = "0.12", optional = true }
 num-format = "0.4.4"
-rand = "0.8"
+rand = "0.9.2"
+wide = { version = "0.7", optional = true }
+plotters = "0.3.7"
 
 [features]
-default = [
-    # "batch-processing",
-    # "python",
-    # "progress-tracking",
-    # "streaming",
-    # "playback",
-]
-python = ["dep:pyo3", "dep:numpy", "i24/pyo3", "streaming", "playback"]
-batch-processing = []
-parallel-processing = ["dep:rayon", "dep:num_cpus", "batch-processing"]
-progress-tracking = ["dep:indicatif", "batch-processing"]
-streaming = [
-    "dep:tokio",
-    "dep:tokio-util",
-    "dep:crossbeam",
-    "dep:futures",
-    "dep:parking_lot",
-]
-playback = ["dep:cpal", "dep:parking_lot"]
-realtime = ["streaming", "playback"]
-mkl = ["dep:fftw-sys", "dep:intel-mkl-src"]
-
-[dev-dependencies]
-tokio = { version = "1.0", features = ["macros", "rt", "time"] }
-
-[[bin]]
-name = "size_aware_fft_benchmark"
-path = "benches/size_aware_fft_benchmark.rs"
+default = ["operations", "mkl"]
+python = ["dep:pyo3", "dep:numpy", "i24/pyo3"]
+parallel-processing = ["dep:rayon", "dep:num_cpus"]
+progress-tracking = ["dep:indicatif"]
+mkl = ["fftw-sys/intel-mkl"]
+simd = ["dep:wide"]
+operations = []

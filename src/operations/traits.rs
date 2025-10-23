@@ -5,7 +5,7 @@
 //! and can be implemented independently.
 
 use super::types::*;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24};
+use crate::{AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo, I24};
 use ndarray::Array2;
 use std::collections::VecDeque;
 
@@ -26,24 +26,32 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Returns the peak (maximum absolute value) in the audio samples.
     ///
     /// This is useful for preventing clipping and measuring signal levels.
     fn peak(&self) -> T;
 
+    /// Alias for peak to match common terminology
+    fn amplitude(&self) -> T {
+        self.peak()
+    }
+
     /// Returns the minimum value in the audio samples.
-    fn min(&self) -> T;
+    fn min_sample(&self) -> T;
 
     /// Returns the maximum value in the audio samples.
-    fn max(&self) -> T;
+    fn max_sample(&self) -> T;
+
+    /// Computes the mean (average) of the audio samples.
+    fn mean(&self) -> T;
 
     /// Computes the Root Mean Square (RMS) of the audio samples.
     ///
     /// RMS is useful for measuring average signal power/energy and
     /// provides a perceptually relevant measure of loudness.
-    fn rms(&self) -> AudioSampleResult<f64>;
+    fn rms(&self) -> f64;
 
     /// Computes the statistical variance of the audio samples.
     ///
@@ -119,7 +127,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Normalizes audio samples using the specified method and range.
     ///
@@ -138,7 +146,7 @@ where
     ///
     /// # Arguments
     /// * `factor` - Scaling factor (1.0 = no change, 2.0 = double amplitude)
-    fn scale(&mut self, factor: T) -> AudioSampleResult<()>;
+    fn scale(&mut self, factor: T);
 
     /// Applies a windowing function to the audio samples.
     ///
@@ -317,6 +325,7 @@ where
         hop_size: usize,
         window_type: WindowType,
         sample_rate: usize,
+        center: bool,
     ) -> AudioSampleResult<Self>
     where
         Self: Sized;
@@ -597,570 +606,6 @@ where
         window_size: Option<usize>,
         power: bool,
     ) -> AudioSampleResult<Array2<f64>>;
-
-    /// Performs complex domain onset detection using both magnitude and phase information.
-    ///
-    /// This method uses the Constant-Q Transform (CQT) to extract both magnitude and phase
-    /// features from the audio signal, then combines them to detect note onsets with higher
-    /// accuracy than magnitude-only methods. The approach is particularly effective for
-    /// polyphonic music and complex timbres.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The complex domain onset detection function combines magnitude and phase features:
-    ///
-    /// **Magnitude-based detection:**
-    /// ```text
-    /// M[k,n] = |X[k,n]| - |X[k,n-1]|
-    /// ```
-    /// where `X[k,n]` is the complex CQT coefficient at frequency bin `k` and time frame `n`.
-    ///
-    /// **Phase-based detection (Phase Deviation):**
-    /// ```text
-    /// Φ[k,n] = |φ[k,n] - φ[k,n-1] - 2πf[k]/fs|
-    /// ```
-    /// where:
-    /// - `φ[k,n] = arg(X[k,n])` is the phase of the complex coefficient
-    /// - `f[k]` is the center frequency of bin `k`
-    /// - `fs` is the sample rate
-    ///
-    /// **Combined onset detection function:**
-    /// ```text
-    /// O[n] = Σ_k [w_m * max(0, M[k,n]) + w_p * max(0, Φ[k,n])]
-    /// ```
-    /// where `w_m` and `w_p` are the magnitude and phase weights respectively.
-    ///
-    /// # Applications
-    ///
-    /// - **Music transcription**: Accurate note onset detection for transcription systems
-    /// - **Beat tracking**: Rhythmic analysis and tempo estimation
-    /// - **Audio segmentation**: Structural analysis of musical content
-    /// - **Performance analysis**: Timing analysis of musical performances
-    /// - **Audio effects**: Onset-triggered processing and effects
-    ///
-    /// # Arguments
-    /// * `config` - Complex onset detection configuration parameters
-    ///
-    /// # Returns
-    /// Vector of onset times in seconds where onsets were detected
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::ComplexOnsetConfig;
-    ///
-    /// let config = ComplexOnsetConfig::percussive();
-    /// let onset_times = audio.complex_onset_detection(&config)?;
-    /// println!("Detected {} onsets", onset_times.len());
-    /// ```
-    fn complex_onset_detection(
-        &self,
-        config: &super::types::ComplexOnsetConfig,
-    ) -> AudioSampleResult<Vec<f64>>;
-
-    /// Computes the phase deviation matrix for onset detection analysis.
-    ///
-    /// Phase deviation measures the amount by which the phase of each frequency bin
-    /// deviates from the expected phase evolution based on the bin's center frequency.
-    /// Large phase deviations often indicate transient events like note onsets.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// For each frequency bin `k` and time frame `n`, the phase deviation is:
-    /// ```text
-    /// PD[k,n] = |φ[k,n] - φ[k,n-1] - 2πf[k]H/fs|
-    /// ```
-    /// where:
-    /// - `φ[k,n] = arg(X[k,n])` is the instantaneous phase
-    /// - `f[k]` is the center frequency of bin `k`
-    /// - `H` is the hop size in samples
-    /// - `fs` is the sample rate
-    ///
-    /// The expected phase advance `2πf[k]H/fs` represents the phase change
-    /// for a pure sinusoid at frequency `f[k]` over `H` samples.
-    ///
-    /// # Applications
-    ///
-    /// - **Transient detection**: Identifying sharp attacks and percussive events
-    /// - **Onset detection**: Phase-based component of onset detection
-    /// - **Audio analysis**: Understanding spectral phase behavior
-    /// - **Research**: Investigating phase coherence in audio signals
-    ///
-    /// # Arguments
-    /// * `config` - Complex onset detection configuration parameters
-    ///
-    /// # Returns
-    /// 2D array with dimensions `(num_bins, num_frames)` containing phase deviation values
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = ComplexOnsetConfig::new();
-    /// let phase_deviation = audio.phase_deviation_matrix(&config)?;
-    /// let (num_bins, num_frames) = phase_deviation.dim();
-    /// ```
-    fn phase_deviation_matrix(
-        &self,
-        config: &super::types::ComplexOnsetConfig,
-    ) -> AudioSampleResult<Array2<f64>>;
-
-    /// Computes the magnitude difference matrix for onset detection analysis.
-    ///
-    /// Magnitude difference measures the change in spectral magnitude between
-    /// consecutive frames. Positive changes (increases in magnitude) are often
-    /// associated with note onsets and spectral attacks.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// For each frequency bin `k` and time frame `n`, the magnitude difference is:
-    /// ```text
-    /// MD[k,n] = |X[k,n]| - |X[k,n-1]|
-    /// ```
-    /// where `X[k,n]` is the complex CQT coefficient.
-    ///
-    /// Only positive differences are typically used for onset detection:
-    /// ```text
-    /// MD_positive[k,n] = max(0, MD[k,n])
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Onset detection**: Magnitude-based component of onset detection
-    /// - **Spectral analysis**: Understanding spectral energy changes
-    /// - **Audio segmentation**: Identifying regions of spectral change
-    /// - **Dynamics analysis**: Measuring amplitude variations over time
-    ///
-    /// # Arguments
-    /// * `config` - Complex onset detection configuration parameters
-    ///
-    /// # Returns
-    /// 2D array with dimensions `(num_bins, num_frames)` containing magnitude difference values
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = ComplexOnsetConfig::new();
-    /// let magnitude_diff = audio.magnitude_difference_matrix(&config)?;
-    /// let (num_bins, num_frames) = magnitude_diff.dim();
-    /// ```
-    fn magnitude_difference_matrix(
-        &self,
-        config: &super::types::ComplexOnsetConfig,
-    ) -> AudioSampleResult<Array2<f64>>;
-
-    /// Computes the combined onset detection function from magnitude and phase information.
-    ///
-    /// This function combines magnitude difference and phase deviation matrices
-    /// according to the specified weights to produce a single onset detection function.
-    /// The resulting function has peaks at likely onset locations.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The combined onset detection function is computed as:
-    /// ```text
-    /// ODF[n] = Σ_k [w_m * MD[k,n] + w_p * PD[k,n]]
-    /// ```
-    /// where:
-    /// - `MD[k,n]` is the magnitude difference matrix
-    /// - `PD[k,n]` is the phase deviation matrix
-    /// - `w_m` and `w_p` are the magnitude and phase weights
-    ///
-    /// Optional normalization can be applied:
-    /// ```text
-    /// ODF_normalized[n] = ODF[n] / max(ODF)
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Onset detection**: Primary function for onset detection algorithms
-    /// - **Beat tracking**: Input for beat tracking and tempo estimation
-    /// - **Visualization**: Plotting onset strength over time
-    /// - **Analysis**: Understanding the distribution of onsets in audio
-    ///
-    /// # Arguments
-    /// * `config` - Complex onset detection configuration parameters
-    ///
-    /// # Returns
-    /// Vector of onset detection function values, one per time frame
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = ComplexOnsetConfig::new();
-    /// let odf = audio.onset_detection_function(&config)?;
-    /// let max_value = odf.iter().fold(0.0, |a, &b| a.max(b));
-    /// ```
-    fn onset_detection_function_complex(
-        &self,
-        config: &super::types::ComplexOnsetConfig,
-    ) -> AudioSampleResult<Vec<f64>>;
-
-    /// Computes spectral flux for onset detection.
-    ///
-    /// Spectral flux measures the rate of change of the magnitude spectrum
-    /// between consecutive frames, which is effective for detecting note onsets
-    /// and transients in audio signals.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// Different spectral flux variants are computed as follows:
-    ///
-    /// ## Standard Spectral Flux:
-    /// ```text
-    /// SF[n] = Σ(|X[k,n]| - |X[k,n-1]|)
-    /// ```
-    /// Measures the sum of magnitude differences for all frequency bins.
-    /// Sensitive to both increases and decreases in energy.
-    ///
-    /// ## Rectified Spectral Flux:
-    /// ```text
-    /// SF[n] = Σ H(|X[k,n]| - |X[k,n-1]|)
-    /// ```
-    /// Where H is the Heaviside step function (half-wave rectification).
-    /// Only considers positive changes (increases in energy).
-    ///
-    /// ## Complex Spectral Flux:
-    /// ```text
-    /// SF[n] = Σ |X[k,n] - X[k,n-1]|
-    /// ```
-    /// Uses both magnitude and phase information by working with complex values.
-    /// Provides more detailed onset detection by considering spectral phase changes.
-    ///
-    /// # Applications
-    ///
-    /// - **Note onset detection**: Identifying when musical notes begin
-    /// - **Transient detection**: Finding percussive events and attacks
-    /// - **Rhythm analysis**: Detecting beats and rhythmic patterns
-    /// - **Audio segmentation**: Dividing audio into meaningful segments
-    /// - **Music information retrieval**: Extracting temporal features
-    ///
-    /// # Arguments
-    /// * `config` - Spectral flux configuration parameters
-    ///
-    /// # Returns
-    /// Vector of spectral flux values over time, with length equal to the
-    /// number of frames in the CQT spectrogram minus 1 (since flux requires
-    /// consecutive frame comparison).
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::SpectralFluxConfig;
-    ///
-    /// let config = SpectralFluxConfig::musical();
-    /// let flux = audio.spectral_flux(&config)?;
-    ///
-    /// // Find peaks in flux for onset detection
-    /// let onsets = detect_onsets_from_flux(&flux, &config);
-    /// ```
-    fn spectral_flux_onset(
-        &self,
-        config: &super::types::SpectralFluxConfig,
-    ) -> AudioSampleResult<Vec<f64>>;
-
-    /// Detects onsets from spectral flux values.
-    ///
-    /// Analyzes the spectral flux time series to detect onset events using
-    /// peak detection with configurable threshold and minimum interval constraints.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The onset detection process involves:
-    ///
-    /// 1. **Peak Detection**: Find local maxima in the flux time series
-    /// 2. **Threshold Application**: Filter peaks above relative threshold
-    /// 3. **Temporal Filtering**: Enforce minimum time between onsets
-    ///
-    /// Peak detection uses:
-    /// ```text
-    /// onset_strength[n] = flux[n] if flux[n] > threshold * max(flux) and
-    ///                                flux[n] > flux[n-1] and
-    ///                                flux[n] > flux[n+1]
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Beat tracking**: Foundation for tempo and rhythm analysis
-    /// - **Music transcription**: Identifying note boundaries for transcription
-    /// - **Audio analysis**: Segmenting audio into meaningful events
-    /// - **Real-time processing**: Live onset detection for interactive systems
-    ///
-    /// # Arguments
-    /// * `config` - Spectral flux configuration with threshold and timing parameters
-    ///
-    /// # Returns
-    /// Vector of onset times in seconds, sorted in ascending order.
-    /// Each onset represents a detected musical event or transient.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::SpectralFluxConfig;
-    ///
-    /// let config = SpectralFluxConfig::percussive();
-    /// let onsets = audio.detect_onsets(&config)?;
-    ///
-    /// println!("Detected {} onsets", onsets.len());
-    /// for (i, onset_time) in onsets.iter().enumerate() {
-    ///     println!("Onset {}: {:.3} seconds", i + 1, onset_time);
-    /// }
-    /// ```
-    fn detect_onsets_spectral_flux(
-        &self,
-        config: &super::types::SpectralFluxConfig,
-    ) -> AudioSampleResult<Vec<f64>>;
-
-    /// Computes onset strength function from spectral flux.
-    ///
-    /// Transforms raw spectral flux values into an onset strength function
-    /// that emphasizes likely onset locations while suppressing noise.
-    /// This provides a smoother representation suitable for further analysis.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The onset strength function applies:
-    ///
-    /// 1. **Optional Smoothing**: Low-pass filtering to reduce noise
-    /// 2. **Peak Enhancement**: Emphasize local maxima
-    /// 3. **Normalization**: Scale to [0, 1] range if enabled
-    ///
-    /// For smoothing (if enabled):
-    /// ```text
-    /// smoothed_flux[n] = LPF(flux[n], cutoff_frequency)
-    /// ```
-    ///
-    /// Peak enhancement uses local maximum detection:
-    /// ```text
-    /// strength[n] = flux[n] if flux[n] > flux[n-1] and flux[n] > flux[n+1],
-    ///               else 0
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Onset visualization**: Creating onset strength plots
-    /// - **Adaptive thresholding**: Dynamic threshold adjustment
-    /// - **Multi-scale analysis**: Analyzing onsets at different time scales
-    /// - **Machine learning**: Feature extraction for onset detection models
-    ///
-    /// # Arguments
-    /// * `config` - Spectral flux configuration with smoothing parameters
-    ///
-    /// # Returns
-    /// Vector of onset strength values over time, with the same length as
-    /// the input spectral flux. Values are normalized to [0, 1] if enabled
-    /// in the configuration.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::SpectralFluxConfig;
-    ///
-    /// let config = SpectralFluxConfig::new();
-    /// let strength = audio.onset_strength(&config)?;
-    ///
-    /// // Find the time of maximum onset strength
-    /// let max_idx = strength.iter()
-    ///     .enumerate()
-    ///     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-    ///     .map(|(i, _)| i)
-    ///     .unwrap();
-    ///
-    /// let time_of_max = max_idx as f64 * config.hop_size as f64 / sample_rate as f64;
-    /// println!("Strongest onset at {:.3} seconds", time_of_max);
-    /// ```
-    fn onset_strength(
-        &self,
-        config: &super::types::SpectralFluxConfig,
-    ) -> AudioSampleResult<Vec<f64>>;
-
-    /// Detects onsets in audio using energy-based spectral flux analysis.
-    ///
-    /// This method implements energy-based onset detection using the Constant-Q Transform (CQT)
-    /// to analyze spectral energy changes over time. Onsets are detected by identifying
-    /// significant increases in spectral energy between consecutive frames.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The energy-based onset detection function is computed as:
-    /// ```text
-    /// ∆E[n] = Σ(max(0, |X[k,n]|² - |X[k,n-1]|²)) for all frequency bins k
-    /// ```
-    ///
-    /// Where:
-    /// - `X[k,n]` is the CQT magnitude at frequency bin k and time frame n
-    /// - The sum is over all frequency bins in the CQT
-    /// - Only positive energy increases are considered (rectified flux)
-    ///
-    /// The algorithm then applies:
-    /// 1. **Adaptive thresholding**: Threshold = median(∆E) × multiplier
-    /// 2. **Peak picking**: Find local maxima in the onset detection function
-    /// 3. **Temporal constraints**: Enforce minimum time between onsets
-    /// 4. **Pre-emphasis**: Optional high-frequency emphasis to highlight transients
-    ///
-    /// # Applications
-    ///
-    /// - **Music analysis**: Detecting note onsets for rhythm analysis
-    /// - **Beat tracking**: Identifying rhythmic events for tempo estimation
-    /// - **Segmentation**: Splitting audio into musical events or phrases
-    /// - **Synchronization**: Aligning audio with scores or other media
-    /// - **Feature extraction**: Extracting rhythmic features for classification
-    ///
-    /// # Arguments
-    /// * `config` - Onset detection configuration parameters
-    ///
-    /// # Returns
-    /// Vector of onset times in seconds, sorted in ascending order
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - The configuration is invalid for the current sample rate
-    /// - The audio signal is too short for analysis
-    /// - The CQT computation fails
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::OnsetConfig;
-    ///
-    /// let audio = AudioSamples::new_mono(samples, 44100);
-    /// let config = OnsetConfig::musical();
-    /// let onset_times = audio.detect_onsets(&config)?;
-    ///
-    /// println!("Detected {} onsets", onset_times.len());
-    /// for (i, &time) in onset_times.iter().enumerate() {
-    ///     println!("Onset {}: {:.3}s", i + 1, time);
-    /// }
-    /// ```
-    fn detect_onsets(&self, config: &super::types::OnsetConfig) -> AudioSampleResult<Vec<f64>>;
-
-    /// Computes the energy-based onset detection function.
-    ///
-    /// This method computes the onset detection function (ODF) using energy-based
-    /// spectral flux analysis without performing peak picking. The ODF represents
-    /// the likelihood of an onset at each time frame.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The onset detection function is computed as:
-    /// ```text
-    /// ODF[n] = Σ(max(0, |X[k,n]|² - |X[k,n-1]|²)) for all frequency bins k
-    /// ```
-    ///
-    /// With optional pre-emphasis:
-    /// ```text
-    /// ODF[n] = Σ(max(0, |X[k,n]|² - |X[k,n-1]|²) × (1 + α × k/K)) for all bins k
-    /// ```
-    /// where α is the pre-emphasis factor and K is the total number of bins.
-    ///
-    /// # Applications
-    ///
-    /// - **Custom thresholding**: Apply your own onset detection logic
-    /// - **Visualization**: Plot the onset detection function over time
-    /// - **Research**: Analyze the characteristics of different onset types
-    /// - **Multi-modal analysis**: Combine with other onset detection methods
-    ///
-    /// # Arguments
-    /// * `config` - Onset detection configuration parameters
-    ///
-    /// # Returns
-    /// Tuple of (time_frames, onset_detection_function) where:
-    /// - `time_frames`: Vector of time values in seconds for each frame
-    /// - `onset_detection_function`: Vector of ODF values (non-negative)
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - The configuration is invalid for the current sample rate
-    /// - The audio signal is too short for analysis
-    /// - The CQT computation fails
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::OnsetConfig;
-    ///
-    /// let audio = AudioSamples::new_mono(samples, 44100);
-    /// let config = OnsetConfig::percussive();
-    /// let (times, odf) = audio.onset_detection_function(&config)?;
-    ///
-    /// // Find the frame with maximum onset strength
-    /// let max_idx = odf.iter().position(|&x| x == odf.iter().fold(0.0, |a, &b| a.max(b))).unwrap();
-    /// println!("Strongest onset at {:.3}s with strength {:.3}", times[max_idx], odf[max_idx]);
-    /// ```
-    fn onset_detection_function(
-        &self,
-        config: &super::types::OnsetConfig,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
-
-    /// Computes the spectral flux using different methods.
-    ///
-    /// Spectral flux measures the rate of change in the magnitude spectrum
-    /// between consecutive frames. This is a fundamental building block for
-    /// onset detection and can be computed using various methods.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// Different flux methods use different formulas:
-    ///
-    /// **Energy flux**:
-    /// ```text
-    /// Flux[n] = Σ(max(0, |X[k,n]|² - |X[k,n-1]|²)) for all bins k
-    /// ```
-    ///
-    /// **Magnitude flux**:
-    /// ```text
-    /// Flux[n] = Σ(max(0, |X[k,n]| - |X[k,n-1]|)) for all bins k
-    /// ```
-    ///
-    /// **Complex flux**:
-    /// ```text
-    /// Flux[n] = Σ(|X[k,n] - X[k,n-1]|) for all bins k
-    /// ```
-    ///
-    /// **Rectified complex flux**:
-    /// ```text
-    /// Flux[n] = Σ(max(0, Re(X[k,n] - X[k,n-1]))) for all bins k
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Onset detection**: Foundation for various onset detection algorithms
-    /// - **Novelty detection**: Identifying novel events in audio
-    /// - **Segmentation**: Detecting boundaries between different audio sections
-    /// - **Feature extraction**: Computing spectral change features
-    ///
-    /// # Arguments
-    /// * `config` - CQT configuration for spectral analysis
-    /// * `hop_size` - Hop size between frames in samples
-    /// * `method` - Spectral flux method to use
-    ///
-    /// # Returns
-    /// Tuple of (time_frames, spectral_flux) where:
-    /// - `time_frames`: Vector of time values in seconds for each frame
-    /// - `spectral_flux`: Vector of spectral flux values
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - The configuration is invalid for the current sample rate
-    /// - The hop size is zero
-    /// - The audio signal is too short for analysis
-    /// - The CQT computation fails
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::{CqtConfig, SpectralFluxMethod};
-    ///
-    /// let audio = AudioSamples::new_mono(samples, 44100);
-    /// let config = CqtConfig::onset_detection();
-    /// let (times, flux) = audio.spectral_flux(&config, 512, SpectralFluxMethod::Energy)?;
-    ///
-    /// // Analyze spectral flux characteristics
-    /// let mean_flux = flux.iter().sum::<f64>() / flux.len() as f64;
-    /// println!("Mean spectral flux: {:.3}", mean_flux);
-    /// ```
-    fn spectral_flux(
-        &self,
-        config: &super::types::CqtConfig,
-        hop_size: usize,
-        method: super::types::SpectralFluxMethod,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
 }
 
 /// Pitch detection and fundamental frequency analysis.
@@ -1175,7 +620,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Detects the fundamental frequency using the YIN algorithm.
     ///
@@ -1317,7 +762,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Apply an IIR filter using the specified design parameters.
     ///
@@ -1458,8 +903,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
-    AudioSamples<T>: AudioChannelOps<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T> + AudioChannelOps<T>,
 {
     /// Apply a parametric EQ to the audio signal.
     ///
@@ -1633,7 +1077,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Apply compression to the audio signal.
     ///
@@ -1940,12 +1384,12 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Reverses the order of audio samples.
     ///
     /// Creates a new AudioSamples instance with time-reversed content.
-    fn reverse(&self) -> Self
+    fn reverse(&self) -> AudioSamples<T>
     where
         Self: Sized;
 
@@ -1962,7 +1406,7 @@ where
     ///
     /// # Errors
     /// Returns an error if start >= end or if times are out of bounds.
-    fn trim(&self, start_seconds: f64, end_seconds: f64) -> AudioSampleResult<Self>
+    fn trim(&self, start_seconds: f64, end_seconds: f64) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized;
 
@@ -1977,7 +1421,16 @@ where
         pad_start_seconds: f64,
         pad_end_seconds: f64,
         pad_value: T,
-    ) -> AudioSampleResult<Self>
+    ) -> AudioSampleResult<AudioSamples<T>>
+    where
+        Self: Sized;
+
+    fn pad_to_duration(
+        &self,
+        target_duration_seconds: f64,
+        pad_value: T,
+        pad_side: PadSide,
+    ) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized;
 
@@ -1987,7 +1440,7 @@ where
     ///
     /// # Arguments
     /// * `segment_duration_seconds` - Duration of each segment
-    fn split(&self, segment_duration_seconds: f64) -> AudioSampleResult<Vec<Self>>
+    fn split(&self, segment_duration_seconds: f64) -> AudioSampleResult<Vec<AudioSamples<T>>>
     where
         Self: Sized;
 
@@ -1997,7 +1450,7 @@ where
     ///
     /// # Arguments
     /// * `segments` - Audio segments to concatenate in order
-    fn concatenate(segments: &[Self]) -> AudioSampleResult<Self>
+    fn concatenate(segments: &[Self]) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized;
 
@@ -2009,7 +1462,7 @@ where
     /// # Arguments
     /// * `sources` - Audio sources to mix
     /// * `weights` - Optional mixing weights (defaults to equal weighting)
-    fn mix(sources: &[Self], weights: Option<&[f64]>) -> AudioSampleResult<Self>
+    fn mix(sources: &[Self], weights: Option<&[f64]>) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized;
 
@@ -2031,7 +1484,7 @@ where
     ///
     /// # Arguments
     /// * `count` - Number of repetitions (total length = original × count)
-    fn repeat(&self, count: usize) -> AudioSampleResult<Self>
+    fn repeat(&self, count: usize) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized;
 
@@ -2039,7 +1492,12 @@ where
     ///
     /// # Arguments
     /// * `threshold` - Amplitude threshold below which samples are considered silence
-    fn trim_silence(&self, threshold: T) -> AudioSampleResult<Self>
+    ///
+    /// # Returns
+    /// A new AudioSamples instance with leading and trailing silence removed
+    /// # Errors
+    /// Returns an error if the operation fails for any reason
+    fn trim_silence(&self, threshold: T) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized;
 
@@ -2064,7 +1522,7 @@ where
     /// use audio_samples::operations::types::*;
     ///
     /// let audio = AudioSamples::new_mono(samples, 44100);
-    /// 
+    ///
     /// // Add white noise at 20dB SNR
     /// let noise_config = PerturbationConfig::new(
     ///     PerturbationMethod::gaussian_noise(20.0, NoiseColor::White)
@@ -2078,7 +1536,7 @@ where
     /// );
     /// let gained_audio = audio.perturb(&gain_config)?;
     /// ```
-    fn perturb(&self, config: &super::types::PerturbationConfig) -> AudioSampleResult<Self>
+    fn perturb(&self, config: &PerturbationConfig) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized;
 
@@ -2103,7 +1561,7 @@ where
     /// use audio_samples::operations::types::*;
     ///
     /// let mut audio = AudioSamples::new_mono(samples, 44100);
-    /// 
+    ///
     /// // Apply high-pass filter in place
     /// let filter_config = PerturbationConfig::new(
     ///     PerturbationMethod::high_pass_filter(80.0)
@@ -2117,7 +1575,12 @@ where
     /// );
     /// audio.perturb_(&pitch_config)?;
     /// ```
-    fn perturb_(&mut self, config: &super::types::PerturbationConfig) -> AudioSampleResult<()>;
+    fn perturb_(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()>;
+
+    /// Stacks multiple mono audio samples into a multi-channel audio sample.
+    fn stack(sources: &[Self]) -> AudioSampleResult<AudioSamples<T>>
+    where
+        Self: Sized;
 }
 
 /// Channel manipulation and spatial audio operations.
@@ -2131,7 +1594,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Converts multi-channel audio to mono using specified method.
     ///
@@ -2146,19 +1609,6 @@ where
     /// # Arguments
     /// * `method` - Method for creating stereo from mono
     fn to_stereo(&self, method: StereoConversionMethod) -> AudioSampleResult<Self>
-    where
-        Self: Sized;
-
-    /// Converts audio to specified number of channels.
-    ///
-    /// # Arguments
-    /// * `target_channels` - Desired number of output channels
-    /// * `method` - Method for channel conversion
-    fn to_channels(
-        &self,
-        target_channels: usize,
-        method: ChannelConversionMethod,
-    ) -> AudioSampleResult<Self>
     where
         Self: Sized;
 
@@ -2188,6 +1638,19 @@ where
     /// # Arguments
     /// * `balance` - Balance adjustment (-1.0 = left only, 0.0 = equal, 1.0 = right only)
     fn balance(&mut self, balance: f64) -> AudioSampleResult<()>;
+
+    fn apply_to_channel<F>(&mut self, channel_index: usize, func: F) -> AudioSampleResult<()>
+    where
+        F: FnMut(T) -> T,
+        Self: Sized;
+
+    fn interleave_channels(channels: &[Self]) -> AudioSampleResult<Self>
+    where
+        Self: Sized;
+
+    fn deinterleave_channels(&self) -> AudioSampleResult<Vec<Self>>
+    where
+        Self: Sized;
 }
 
 /// Operation application and chaining functionality.
@@ -2483,7 +1946,7 @@ impl<T: AudioSample> OperationPipeline<T> {
     ///
     /// # Returns
     /// Processed audio samples or error if any operation fails
-    pub fn apply(&self, mut audio: AudioSamples<T>) -> AudioSampleResult<AudioSamples<T>> {
+    pub fn apply<'a>(&'a self, mut audio: AudioSamples<T>) -> AudioSampleResult<AudioSamples<T>> {
         for (i, operation) in self.operations.iter().enumerate() {
             if self.collect_metrics {
                 let start = std::time::Instant::now();
@@ -2693,69 +2156,6 @@ impl RealtimeMetrics {
     }
 }
 
-/// Type conversion operations between different sample formats.
-///
-/// This trait provides safe conversion between different audio sample types
-/// while preserving audio quality and handling potential conversion errors.
-/// Leverages the existing ConvertTo trait system for type safety.
-pub trait AudioTypeConversion<T: AudioSample>
-where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-{
-    /// Converts to different sample type, borrowing the original.
-    ///
-    /// Uses the existing ConvertTo trait system for type-safe conversions.
-    /// The original AudioSamples instance remains unchanged.
-    fn as_type<O: AudioSample + ConvertTo<T>>(&self) -> AudioSampleResult<AudioSamples<O>>
-    where
-        T: ConvertTo<O>;
-
-    /// Converts to different sample type, consuming the original.
-    ///
-    /// More efficient than as_type when the original is no longer needed.
-    fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSampleResult<AudioSamples<O>>
-    where
-        T: ConvertTo<O>;
-
-    /// Converts to the highest precision floating-point format.
-    ///
-    /// This is useful when maximum precision is needed for processing.
-    fn as_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
-    where
-        T: ConvertTo<f64>;
-
-    /// Converts to single precision floating-point format.
-    ///
-    /// Good balance between precision and memory usage.
-    fn as_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
-    where
-        T: ConvertTo<f32>;
-
-    /// Converts to 32-bit integer format.
-    ///
-    /// Highest precision integer format, useful for high-quality processing.
-    fn as_i32(&self) -> AudioSampleResult<AudioSamples<i32>>
-    where
-        T: ConvertTo<i32>;
-
-    /// Converts to 16-bit integer format (most common).
-    ///
-    /// Standard format for CD audio and many audio files.
-    fn as_i16(&self) -> AudioSampleResult<AudioSamples<i16>>
-    where
-        T: ConvertTo<i16>;
-
-    /// Converts to 24-bit integer format.
-    ///
-    fn as_i24(&self) -> AudioSampleResult<AudioSamples<I24>>
-    where
-        T: ConvertTo<I24>;
-}
-
 /// Utilities for plotting audio data.
 ///
 /// Actual plotting functionality is implemented separately.
@@ -2767,13 +2167,27 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Generate time axis values for plotting.
     fn time_axis(&self, step: Option<f64>) -> Vec<f64>;
     /// Seconds from 0 to duration with ~target_ticks "nice" spacing (1–2–5).
     fn time_ticks_seconds(&self, target_ticks: usize) -> Vec<f64>;
     fn frequency_axis(&self) -> Vec<T>;
+    /// Plot waveform with default options
+    fn plot_waveform(&self) -> crate::operations::plotting::PlotResult<()>;
+    /// Plot waveform with custom options
+    fn plot_waveform_with_options(
+        &self,
+        options: crate::operations::plotting::WaveformPlotOptions,
+    ) -> crate::operations::plotting::PlotResult<()>;
+    /// Plot spectrogram with default options
+    fn plot_spectrogram(&self) -> crate::operations::plotting::PlotResult<()>;
+    /// Plot spectrogram with custom options
+    fn plot_spectrogram_with_options(
+        &self,
+        options: crate::operations::plotting::SpectrogramPlotOptions,
+    ) -> crate::operations::plotting::PlotResult<()>;
 }
 
 /// Unified trait that combines all audio processing capabilities.
@@ -2803,7 +2217,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
 }
 
@@ -2827,6 +2241,6 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
 }

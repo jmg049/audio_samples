@@ -5,8 +5,8 @@
 //! detection methods. The implementations focus on mathematical correctness
 //! and professional audio quality.
 
-use super::traits::AudioDynamicRange;
-use super::types::{CompressorConfig, DynamicRangeMethod, KneeType, LimiterConfig};
+use crate::operations::traits::AudioDynamicRange;
+use crate::operations::types::{CompressorConfig, DynamicRangeMethod, KneeType, LimiterConfig};
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn test_compressor_basic() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         let config = CompressorConfig::new();
         let result = audio.apply_compressor(&config, 44100.0);
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn test_limiter_basic() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         let config = LimiterConfig::new();
         let result = audio.apply_limiter(&config, 44100.0);
@@ -1140,7 +1140,7 @@ mod tests {
     #[test]
     fn test_compression_curve() {
         let data = Array1::from_vec(vec![0.1f32, 0.2, 0.3, 0.4, 0.5]);
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data.into(), 44100);
 
         let config = CompressorConfig::new();
         let input_levels = vec![-40.0, -30.0, -20.0, -10.0, 0.0];
@@ -1166,7 +1166,7 @@ mod tests {
     #[test]
     fn test_gain_reduction() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data.into(), 44100);
 
         let config = CompressorConfig::new();
         let result = audio.get_gain_reduction(&config, 44100.0);
@@ -1184,7 +1184,7 @@ mod tests {
     #[test]
     fn test_gate_basic() {
         let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         let result = audio.apply_gate(-20.0, 10.0, 1.0, 10.0, 44100.0);
 
@@ -1194,7 +1194,7 @@ mod tests {
     #[test]
     fn test_expander_basic() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         let result = audio.apply_expander(-20.0, 2.0, 1.0, 10.0, 44100.0);
 
@@ -1302,7 +1302,7 @@ mod tests {
             vec![0.1f32, 0.8, 0.2, 0.9, 0.1, 0.2f32, 0.7, 0.3, 0.8, 0.2],
         )
         .unwrap();
-        let mut audio = AudioSamples::new_multi_channel(data, 44100);
+        let mut audio = AudioSamples::new_multi_channel(data.into(), 44100);
 
         let config = CompressorConfig::new();
         let result = audio.apply_compressor(&config, 44100.0);
@@ -1317,7 +1317,7 @@ mod tests {
             vec![0.1f32, 0.8, 0.2, 0.9, 0.1, 0.2f32, 0.7, 0.3, 0.8, 0.2],
         )
         .unwrap();
-        let mut audio = AudioSamples::new_multi_channel(data, 44100);
+        let mut audio = AudioSamples::new_multi_channel(data.into(), 44100);
 
         let config = LimiterConfig::new();
         let result = audio.apply_limiter(&config, 44100.0);
@@ -1328,7 +1328,7 @@ mod tests {
     #[test]
     fn test_compressor_presets() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         // Test different presets
         let vocal_config = CompressorConfig::vocal();
@@ -1344,7 +1344,7 @@ mod tests {
     #[test]
     fn test_limiter_presets() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         // Test different presets
         let transparent_config = LimiterConfig::transparent();

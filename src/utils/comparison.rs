@@ -35,7 +35,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
         return Err(AudioSampleError::InvalidParameter(
@@ -48,7 +48,7 @@ where
 
     match (a_f64.as_mono(), b_f64.as_mono()) {
         (Some(a_mono), Some(b_mono)) => {
-            let corr = correlation_1d(a_mono, b_mono)?;
+            let corr = correlation_1d(&a_mono.to_owned(), &b_mono.to_owned())?;
             Ok(corr)
         }
         (Some(_), None) | (None, Some(_)) => Err(AudioSampleError::InvalidParameter(
@@ -109,7 +109,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
         return Err(AudioSampleError::InvalidParameter(
@@ -121,7 +121,7 @@ where
     let b_f64 = b.as_f64()?;
 
     match (a_f64.as_mono(), b_f64.as_mono()) {
-        (Some(a_mono), Some(b_mono)) => mse_1d(a_mono, b_mono),
+        (Some(a_mono), Some(b_mono)) => mse_1d(&a_mono.to_owned(), &b_mono.to_owned()),
         (Some(_), None) | (None, Some(_)) => Err(AudioSampleError::InvalidParameter(
             "Signals must have the same channel configuration".to_string(),
         )),
@@ -183,7 +183,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     if signal.num_channels() != noise.num_channels()
         || signal.samples_per_channel() != noise.samples_per_channel()
@@ -252,7 +252,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     if reference.num_channels() != signal.num_channels() {
         return Err(AudioSampleError::InvalidParameter(
@@ -329,7 +329,7 @@ where
                     })?[..mono.len() - best_offset],
                 );
                 let aligned_array = Array1::from_vec(aligned_data);
-                AudioSamples::new_mono(aligned_array, signal.sample_rate())
+                AudioSamples::new_mono(aligned_array.into(), signal.sample_rate())
             }
             None => {
                 let multi = signal
@@ -357,7 +357,7 @@ where
                 .map_err(|e| {
                     AudioSampleError::InvalidParameter(format!("Array shape error: {}", e))
                 })?;
-                AudioSamples::new_multi_channel(aligned_array, signal.sample_rate())
+                AudioSamples::new_multi_channel(aligned_array.into(), signal.sample_rate())
             }
         }
     } else {

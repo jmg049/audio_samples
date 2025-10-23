@@ -39,13 +39,8 @@
 //! # }
 //! ```
 
-// Public module declarations
-pub mod traits;
-pub mod types;
-
-// Implementation modules (will be created as needed)
+pub mod beats;
 pub mod channels;
-pub mod conversions;
 pub mod dynamic_range;
 pub mod editing;
 pub mod fft_backends;
@@ -57,21 +52,30 @@ pub mod pitch_analysis;
 pub mod plotting;
 pub mod processing;
 pub mod statistics;
+pub mod traits;
 pub mod transforms;
+pub mod types;
 
 // Re-export main traits for convenience
 pub use traits::{
     AudioChannelOps, AudioDynamicRange, AudioEditing, AudioIirFiltering, AudioParametricEq,
-    AudioPitchAnalysis, AudioPlottingUtils, AudioProcessing, AudioSamplesOperations,
-    AudioStatistics, AudioTransforms, AudioTypeConversion,
+    AudioPlottingUtils, AudioProcessing, AudioSamplesOperations, AudioStatistics, AudioTransforms,
+};
+
+// Re-export builder types
+pub use processing::ProcessingBuilder;
+
+// Re-export plotting types and functions
+pub use plotting::{
+    ComparisonPlotOptions, PlotResult, SpectrogramPlotOptions, WaveformPlotOptions,
+    plot_comparison, plot_difference, plot_spectrogram, plot_waveform, time_ticks_seconds,
 };
 
 // Re-export supporting types
 pub use types::{
-    AdaptiveThresholdConfig, AdaptiveThresholdMethod, ChannelConversionMethod, ComplexOnsetConfig,
-    CompressorConfig, CqtConfig, DynamicRangeMethod, EqBand, EqBandType, FadeCurve, FilterResponse,
-    IirFilterDesign, IirFilterType, KneeType, LimiterConfig, MonoConversionMethod, NoiseColor,
-    NormalizationMethod, OnsetConfig, ParametricEq, PeakPickingConfig, PerturbationConfig,
-    PerturbationMethod, PitchDetectionMethod, SideChainConfig, SpectralFluxConfig,
-    SpectralFluxMethod, StereoConversionMethod, WindowType,
+    ChannelConversionMethod, CqtConfig, MonoConversionMethod, NormalizationMethod, OnsetConfig,
+    PeakPickingConfig, ResamplingQuality, SpectralFluxConfig, SpectralFluxMethod,
+    StereoConversionMethod,
 };
+
+pub use beats::*;
