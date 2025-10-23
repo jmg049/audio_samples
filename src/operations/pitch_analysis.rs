@@ -3,13 +3,14 @@
 //! This module provides robust pitch detection algorithms including YIN and
 //! autocorrelation-based methods, as well as harmonic analysis and key estimation.
 
-use super::traits::AudioPitchAnalysis;
-use super::types::PitchDetectionMethod;
+use crate::operations::traits::AudioPitchAnalysis;
+use crate::operations::types::PitchDetectionMethod;
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24,
+    I24, iterators::AudioSampleIterators,
 };
+
 use ndarray::Array1;
 
 impl<T: AudioSample> AudioPitchAnalysis<T> for AudioSamples<T>
@@ -19,7 +20,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     fn detect_pitch_yin(
         &self,
@@ -120,7 +121,7 @@ where
             }
 
             let window_audio =
-                AudioSamples::new_mono(Array1::from(window_data), self.sample_rate());
+                AudioSamples::new_mono(Array1::from(window_data).into(), self.sample_rate());
 
             let frequency = match method {
                 PitchDetectionMethod::Yin => {
@@ -245,6 +246,7 @@ where
             ));
         }
 
+        // TODO: Implement a full key estimation algorithm.
         // This is a simplified key estimation using chromagram
         // In a full implementation, this would use more sophisticated methods
 
@@ -368,7 +370,7 @@ pub fn yin_pitch_detection(
 /// Simple autocorrelation-based pitch detection.
 ///
 /// Finds the lag with maximum autocorrelation within the specified range.
-fn autocorr_pitch_detection(samples: &[f64], min_tau: usize, max_tau: usize) -> Option<f64> {
+pub fn autocorr_pitch_detection(samples: &[f64], min_tau: usize, max_tau: usize) -> Option<f64> {
     let n = samples.len();
     if max_tau >= n / 2 {
         return None;
@@ -397,7 +399,7 @@ fn autocorr_pitch_detection(samples: &[f64], min_tau: usize, max_tau: usize) -> 
 }
 
 /// Compute power spectrum using FFT.
-fn compute_power_spectrum(samples: &[f64]) -> AudioSampleResult<Vec<f64>> {
+pub fn compute_power_spectrum(samples: &[f64]) -> AudioSampleResult<Vec<f64>> {
     use rustfft::{FftPlanner, num_complex::Complex};
 
     let n = samples.len();
@@ -423,7 +425,7 @@ fn compute_power_spectrum(samples: &[f64]) -> AudioSampleResult<Vec<f64>> {
 /// Compute chroma features (simplified version).
 ///
 /// This is a basic implementation that maps frequency bins to chroma classes.
-fn compute_chroma(samples: &[f64], sample_rate: f64) -> AudioSampleResult<Vec<f64>> {
+pub fn compute_chroma(samples: &[f64], sample_rate: f64) -> AudioSampleResult<Vec<f64>> {
     let spectrum = compute_power_spectrum(samples)?;
     let n = samples.len();
     let freq_resolution = sample_rate / n as f64;
@@ -458,7 +460,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Helper method to convert to mono f64 samples for processing.
     pub fn to_mono_samples_f64(&self) -> AudioSampleResult<Vec<f64>> {
@@ -467,21 +469,20 @@ where
                 .iter()
                 .map(|&x| x.convert_to().unwrap_or(0.0))
                 .collect(),
-            AudioData::MultiChannel(samples) => {
+            AudioData::MultiChannel(_) => {
                 // Average all channels to create mono
-                let num_channels = samples.nrows();
-                let num_samples = samples.ncols();
+                let num_samples = self.samples_per_channel();
                 let mut mono_samples = vec![0.0; num_samples];
 
-                for channel in 0..num_channels {
-                    for sample in 0..num_samples {
-                        let x = samples[[channel, sample]];
-                        let x: f64 = x.convert_to()?;
-                        mono_samples[sample] += x;
+                for channel in self.channels() {
+                    for (i, sample) in channel.into_iter().enumerate() {
+                        let x: f64 = sample.convert_to()?;
+                        mono_samples[i] += x;
                     }
                 }
 
                 // Average the channels
+                let num_channels = self.num_channels();
                 for sample in &mut mono_samples {
                     *sample /= num_channels as f64;
                 }
@@ -497,7 +498,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::AudioPitchAnalysis;
+    use crate::operations::traits::AudioPitchAnalysis;
     use ndarray::Array1;
     use std::f64::consts::PI;
 
@@ -516,7 +517,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
 
         // Test YIN pitch detection
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
@@ -542,7 +543,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
 
         // Test autocorrelation pitch detection
         let detected_pitch = audio.detect_pitch_autocorr(80.0, 1000.0).unwrap();
@@ -568,7 +569,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
 
         // Test pitch tracking
         let window_size = 2048;
@@ -617,7 +618,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
 
         // Test harmonic analysis
         let harmonics = audio.harmonic_analysis(frequency, 5, 0.1).unwrap();
@@ -638,7 +639,7 @@ mod tests {
     #[test]
     fn test_silence_detection() {
         // Test with silence (should return None)
-        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(44100), 44100);
+        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(44100).into(), 44100);
 
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
         assert!(detected_pitch.is_none());
@@ -665,7 +666,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
 
         // YIN should be more robust to noise
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
@@ -678,7 +679,7 @@ mod tests {
 
     #[test]
     fn test_parameter_validation() {
-        let audio = AudioSamples::new_mono(Array1::from(vec![1.0f32, 2.0, 3.0]), 44100);
+        let audio = AudioSamples::new_mono(Array1::from(vec![1.0f32, 2.0, 3.0]).into(), 44100);
 
         // Test invalid threshold
         assert!(audio.detect_pitch_yin(-0.1, 80.0, 1000.0).is_err());

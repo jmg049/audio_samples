@@ -4,22 +4,20 @@
 //! time-domain audio editing operations including cutting, pasting, mixing,
 //! and envelope operations using efficient ndarray operations.
 
-use super::traits::AudioEditing;
-use super::types::{FadeCurve, NoiseColor, PerturbationConfig, PerturbationMethod};
+use crate::operations::traits::AudioEditing;
+use crate::operations::types::{
+    FadeCurve, NoiseColor, PadSide, PerturbationConfig, PerturbationMethod,
+};
 use crate::repr::AudioData;
-use crate::utils::generation::{white_noise, pink_noise};
+use crate::seconds_to_samples;
+use crate::utils::{pink_noise, white_noise};
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24,
+    I24, iterators::AudioSampleIterators,
 };
-use ndarray::{Array1, Array2, Axis, concatenate, s};
-use rand::{Rng, SeedableRng};
+use ndarray::{Array1, Array2, Axis, s};
 use rand::rngs::StdRng;
-
-/// Helper function to convert seconds to samples
-fn seconds_to_samples(seconds: f64, sample_rate: u32) -> usize {
-    (seconds * sample_rate as f64) as usize
-}
+use rand::{Rng, SeedableRng};
 
 /// Validates time bounds for trim operations
 fn validate_time_bounds(start: f64, end: f64, duration: f64) -> AudioSampleResult<()> {
@@ -71,7 +69,7 @@ where
     AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Reverses the order of audio samples.
-    fn reverse(&self) -> Self
+    fn reverse(&self) -> AudioSamples<T>
     where
         Self: Sized,
     {
@@ -79,12 +77,12 @@ where
             AudioData::Mono(arr) => {
                 // Reverse the 1D array using ndarray's reverse slicing
                 let reversed = arr.slice(s![..;-1]).to_owned();
-                AudioSamples::new_mono(reversed, self.sample_rate())
+                AudioSamples::new_mono(reversed.into(), self.sample_rate())
             }
             AudioData::MultiChannel(arr) => {
                 // Reverse along the time axis (axis 1)
                 let reversed = arr.slice(s![.., ..;-1]).to_owned();
-                AudioSamples::new_multi_channel(reversed, self.sample_rate())
+                AudioSamples::new_multi_channel(reversed.into(), self.sample_rate())
             }
         }
     }
@@ -124,7 +122,7 @@ where
     }
 
     /// Extracts a segment of audio between start and end times.
-    fn trim(&self, start_seconds: f64, end_seconds: f64) -> AudioSampleResult<Self>
+    fn trim(&self, start_seconds: f64, end_seconds: f64) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized,
     {
@@ -144,7 +142,7 @@ where
                     )));
                 }
                 let trimmed = arr.slice(s![start_sample..end_sample]).to_owned();
-                Ok(AudioSamples::new_mono(trimmed, self.sample_rate()))
+                Ok(AudioSamples::new_mono(trimmed.into(), self.sample_rate()))
             }
             AudioData::MultiChannel(arr) => {
                 if end_sample > arr.ncols() {
@@ -155,7 +153,10 @@ where
                     )));
                 }
                 let trimmed = arr.slice(s![.., start_sample..end_sample]).to_owned();
-                Ok(AudioSamples::new_multi_channel(trimmed, self.sample_rate()))
+                Ok(AudioSamples::new_multi_channel(
+                    trimmed.into(),
+                    self.sample_rate(),
+                ))
             }
         }
     }
@@ -166,7 +167,7 @@ where
         pad_start_seconds: f64,
         pad_end_seconds: f64,
         pad_value: T,
-    ) -> AudioSampleResult<Self>
+    ) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized,
     {
@@ -189,7 +190,7 @@ where
                     .slice_mut(s![start_samples..start_samples + arr.len()])
                     .assign(arr);
 
-                Ok(AudioSamples::new_mono(padded, self.sample_rate()))
+                Ok(AudioSamples::new_mono(padded.into(), self.sample_rate()))
             }
             AudioData::MultiChannel(arr) => {
                 let total_length = start_samples + arr.ncols() + end_samples;
@@ -200,13 +201,49 @@ where
                     .slice_mut(s![.., start_samples..start_samples + arr.ncols()])
                     .assign(arr);
 
-                Ok(AudioSamples::new_multi_channel(padded, self.sample_rate()))
+                Ok(AudioSamples::new_multi_channel(
+                    padded.into(),
+                    self.sample_rate(),
+                ))
             }
         }
     }
 
+    fn pad_to_duration(
+        &self,
+        target_duration_seconds: f64,
+        pad_value: T,
+        pad_side: PadSide,
+    ) -> AudioSampleResult<AudioSamples<T>>
+    where
+        Self: Sized,
+    {
+        let current_duration = self.duration_seconds();
+
+        if target_duration_seconds <= current_duration {
+            return Ok(self.clone());
+        }
+
+        let total_target_samples = seconds_to_samples(target_duration_seconds, self.sample_rate());
+        let current_samples = self.samples_per_channel();
+        let total_padding_samples = total_target_samples - current_samples;
+
+        let (pad_start_samples, pad_end_samples) = match pad_side {
+            PadSide::Left => (total_padding_samples, 0),
+            PadSide::Right => (0, total_padding_samples),
+        };
+
+        let padded = self.pad(
+            pad_start_samples as f64 / self.sample_rate() as f64,
+            pad_end_samples as f64 / self.sample_rate() as f64,
+            pad_value,
+        )?;
+
+        Ok(padded)
+    }
+
     /// Splits audio into segments of specified duration.
-    fn split(&self, segment_duration_seconds: f64) -> AudioSampleResult<Vec<Self>>
+    fn split(&self, segment_duration_seconds: f64) -> AudioSampleResult<Vec<AudioSamples<T>>>
     where
         Self: Sized,
     {
@@ -234,11 +271,14 @@ where
             match &self.data {
                 AudioData::Mono(arr) => {
                     let segment = arr.slice(s![start..end]).to_owned();
-                    segments.push(AudioSamples::new_mono(segment, self.sample_rate()));
+                    segments.push(AudioSamples::new_mono(segment.into(), self.sample_rate()));
                 }
                 AudioData::MultiChannel(arr) => {
                     let segment = arr.slice(s![.., start..end]).to_owned();
-                    segments.push(AudioSamples::new_multi_channel(segment, self.sample_rate()));
+                    segments.push(AudioSamples::new_multi_channel(
+                        segment.into(),
+                        self.sample_rate(),
+                    ));
                 }
             }
 
@@ -249,7 +289,7 @@ where
     }
 
     /// Concatenates multiple audio segments into one.
-    fn concatenate(segments: &[Self]) -> AudioSampleResult<Self>
+    fn concatenate(segments: &[Self]) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized,
     {
@@ -276,47 +316,129 @@ where
 
         match &first.data {
             AudioData::Mono(_) => {
-                let mut arrays: Vec<_> = Vec::with_capacity(segments.len());
-                for segment in segments {
+                let mut all_samples = Vec::new();
+                for segment in segments.iter() {
                     let segment = segment.as_mono().ok_or(AudioSampleError::InvalidInput {
                         msg: "Expected mono audio data".to_string(),
                     })?;
-                    arrays.push(segment.view());
+                    all_samples.extend_from_slice(segment.as_slice().ok_or(
+                        AudioSampleError::InvalidInput {
+                            msg: "Mono samples must be contiguous".to_string(),
+                        },
+                    )?);
                 }
 
-                let concatenated = concatenate(Axis(0), &arrays).map_err(|e| {
-                    AudioSampleError::InvalidParameter(format!("Concatenation failed: {}", e))
-                })?;
-
-                Ok(AudioSamples::new_mono(concatenated, first.sample_rate()))
+                let concatenated = Array1::from_vec(all_samples);
+                Ok(AudioSamples::new_mono(
+                    concatenated.into(),
+                    first.sample_rate(),
+                ))
             }
             AudioData::MultiChannel(_) => {
-                let mut arrays: Vec<_> = Vec::with_capacity(segments.len());
+                let num_channels = first.num_channels();
+                let mut total_samples = 0;
 
-                for segment in segments {
-                    let segment =
-                        segment
-                            .as_multi_channel()
-                            .ok_or(AudioSampleError::InvalidInput {
-                                msg: "Expected multi-channel audio data".to_string(),
-                            })?;
-                    arrays.push(segment.view());
+                // Calculate total length
+                for segment in segments.iter() {
+                    total_samples += segment.samples_per_channel();
                 }
 
-                let concatenated = concatenate(Axis(1), &arrays).map_err(|e| {
-                    AudioSampleError::InvalidParameter(format!("Concatenation failed: {}", e))
-                })?;
+                // Create concatenated array
+                let mut concatenated_data = Vec::with_capacity(num_channels * total_samples);
+
+                // For each channel, concatenate all segments
+                for (channel_idx, _) in first.channels().enumerate() {
+                    for segment in segments.iter() {
+                        let segment_multi =
+                            segment
+                                .as_multi_channel()
+                                .ok_or(AudioSampleError::InvalidInput {
+                                    msg: "Expected multi-channel audio data".to_string(),
+                                })?;
+                        let channel_data = segment_multi.row(channel_idx);
+                        concatenated_data.extend_from_slice(channel_data.as_slice().ok_or(
+                            AudioSampleError::InvalidInput {
+                                msg: "Multi-channel samples must be contiguous".to_string(),
+                            },
+                        )?);
+                    }
+                }
+
+                let concatenated =
+                    Array2::from_shape_vec((num_channels, total_samples), concatenated_data)
+                        .map_err(|e| {
+                            AudioSampleError::InvalidParameter(format!("Array shape error: {}", e))
+                        })?;
 
                 Ok(AudioSamples::new_multi_channel(
-                    concatenated,
+                    concatenated.into(),
                     first.sample_rate(),
                 ))
             }
         }
     }
 
+    fn stack(sources: &[Self]) -> AudioSampleResult<AudioSamples<T>>
+    where
+        Self: Sized,
+    {
+        if sources.is_empty() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Cannot stack empty source list".to_string(),
+            ));
+        }
+
+        if sources.len() == 1 {
+            return Ok(sources[0].clone());
+        }
+
+        // Validate all sources have the same sample rate and length
+        let first: AudioSamples<T> = sources[0].clone();
+        if first.is_multi_channel() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Stacking is only supported for mono sources".to_string(),
+            ));
+        }
+
+        for (idx, source) in sources.iter().enumerate().skip(1) {
+            if source.is_multi_channel() {
+                return Err(AudioSampleError::InvalidParameter(format!(
+                    "Stacking is only supported for mono sources. Audio at index {} is not mono",
+                    idx
+                )));
+            }
+
+            if source.sample_rate() != first.sample_rate() {
+                return Err(AudioSampleError::InvalidParameter(
+                    "All sources must have the same sample rate".to_string(),
+                ));
+            }
+            if source.samples_per_channel() != first.samples_per_channel() {
+                return Err(AudioSampleError::InvalidParameter(
+                    "All sources must have the same length".to_string(),
+                ));
+            }
+        }
+
+        // Create stacked array
+
+        let num_sources = sources.len();
+        let num_samples = first.samples_per_channel();
+        let mut stacked = Array2::zeros((num_sources, num_samples));
+        for (i, source) in sources.iter().enumerate() {
+            if let AudioData::Mono(arr) = &source.data {
+                stacked.slice_mut(s![i, ..]).assign(&arr.view());
+            }
+        }
+
+        Ok(AudioSamples::new_multi_channel(
+            stacked.into(),
+            first.sample_rate(),
+        ))
+    }
+
     /// Mixes multiple audio sources together.
-    fn mix(sources: &[Self], weights: Option<&[f64]>) -> AudioSampleResult<Self>
+    fn mix(sources: &[Self], weights: Option<&[f64]>) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized,
     {
@@ -327,7 +449,8 @@ where
         }
 
         // Validate all sources have the same properties
-        let first = &sources[0];
+        let first: AudioSamples<T> = sources[0].clone();
+
         for source in sources.iter().skip(1) {
             if source.sample_rate() != first.sample_rate() {
                 return Err(AudioSampleError::InvalidParameter(
@@ -363,7 +486,6 @@ where
             AudioData::Mono(_) => {
                 let mut result = first.clone();
                 if let AudioData::Mono(result_arr) = &mut result.data {
-                    // Start with first source * weight
                     if let AudioData::Mono(_first_arr) = &first.data {
                         let weight: T = T::convert_from(mix_weights[0])?;
                         result_arr.mapv_inplace(|x| x * weight);
@@ -383,6 +505,7 @@ where
             }
             AudioData::MultiChannel(_) => {
                 let mut result = first.clone();
+
                 if let AudioData::MultiChannel(result_arr) = &mut result.data {
                     // Start with first source * weight
                     if let AudioData::MultiChannel(_first_arr) = &first.data {
@@ -482,7 +605,7 @@ where
     }
 
     /// Repeats the audio signal a specified number of times.
-    fn repeat(&self, count: usize) -> AudioSampleResult<Self>
+    fn repeat(&self, count: usize) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized,
     {
@@ -504,7 +627,7 @@ where
                     let end = start + arr.len();
                     repeated.slice_mut(s![start..end]).assign(arr);
                 }
-                Ok(AudioSamples::new_mono(repeated, self.sample_rate()))
+                Ok(AudioSamples::new_mono(repeated.into(), self.sample_rate()))
             }
             AudioData::MultiChannel(arr) => {
                 let mut repeated = Array2::zeros((arr.nrows(), arr.ncols() * count));
@@ -514,7 +637,7 @@ where
                     repeated.slice_mut(s![.., start..end]).assign(arr);
                 }
                 Ok(AudioSamples::new_multi_channel(
-                    repeated,
+                    repeated.into(),
                     self.sample_rate(),
                 ))
             }
@@ -522,7 +645,7 @@ where
     }
 
     /// Crops audio to remove silence from beginning and end.
-    fn trim_silence(&self, threshold: T) -> AudioSampleResult<Self>
+    fn trim_silence(&self, threshold: T) -> AudioSampleResult<AudioSamples<T>>
     where
         Self: Sized,
     {
@@ -559,7 +682,7 @@ where
                             let value: f32 = value;
                             if value.abs() > threshold {
                                 return Ok(AudioSamples::new_mono(
-                                    arr.slice(s![start..=idx]).to_owned(),
+                                    arr.slice(s![start..=idx]).to_owned().into(),
                                     self.sample_rate(),
                                 ));
                             }
@@ -609,7 +732,7 @@ where
                         }
                     }) {
                         return Ok(AudioSamples::new_multi_channel(
-                            arr.slice(s![.., start..=idx]).to_owned(),
+                            arr.slice(s![.., start..=idx]).to_owned().into(),
                             self.sample_rate(),
                         ));
                     }
@@ -626,30 +749,28 @@ where
     }
 
     /// Applies perturbation to audio samples for data augmentation.
-    fn perturb(&self, config: &PerturbationConfig) -> AudioSampleResult<Self>
-    where
-        Self: Sized,
-    {
-        let mut cloned = self.clone();
-        cloned.perturb_(config)?;
-        Ok(cloned)
+    fn perturb(&self, config: &PerturbationConfig) -> AudioSampleResult<AudioSamples<T>> {
+        let mut owned = self.clone();
+        owned.perturb_(config)?;
+        Ok(owned)
     }
 
     /// Applies perturbation to audio samples in place.
     fn perturb_(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()> {
-        config.validate(self.sample_rate() as f64).map_err(|e| AudioSampleError::InvalidParameter(e))?;
-        
+        config
+            .validate(self.sample_rate() as f64)
+            .map_err(|e| AudioSampleError::InvalidParameter(e))?;
+
         // Apply perturbation based on seed or use thread-local randomness
         if let Some(seed) = config.seed {
             let mut rng = StdRng::seed_from_u64(seed);
             apply_perturbation_with_rng(self, &config.method, &mut rng)
         } else {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             apply_perturbation_with_rng(self, &config.method, &mut rng)
         }
     }
 }
-
 /// Apply perturbation with a given RNG
 fn apply_perturbation_with_rng<T: AudioSample, R: Rng>(
     audio: &mut AudioSamples<T>,
@@ -663,21 +784,25 @@ where
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
     T: ConvertTo<f64>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     match method {
-        PerturbationMethod::GaussianNoise { target_snr_db, noise_color } => {
-            apply_gaussian_noise_(audio, *target_snr_db, *noise_color, rng)
-        }
-        PerturbationMethod::RandomGain { min_gain_db, max_gain_db } => {
-            apply_random_gain_(audio, *min_gain_db, *max_gain_db, rng)
-        }
-        PerturbationMethod::HighPassFilter { cutoff_hz, slope_db_per_octave } => {
-            apply_high_pass_filter_(audio, *cutoff_hz, *slope_db_per_octave)
-        }
-        PerturbationMethod::PitchShift { semitones, preserve_formants } => {
-            apply_pitch_shift_(audio, *semitones, *preserve_formants)
-        }
+        PerturbationMethod::GaussianNoise {
+            target_snr_db,
+            noise_color,
+        } => apply_gaussian_noise_(audio, *target_snr_db, *noise_color, rng),
+        PerturbationMethod::RandomGain {
+            min_gain_db,
+            max_gain_db,
+        } => apply_random_gain_(audio, *min_gain_db, *max_gain_db, rng),
+        PerturbationMethod::HighPassFilter {
+            cutoff_hz,
+            slope_db_per_octave,
+        } => apply_high_pass_filter_(audio, *cutoff_hz, *slope_db_per_octave),
+        PerturbationMethod::PitchShift {
+            semitones,
+            preserve_formants,
+        } => apply_pitch_shift_(audio, *semitones, *preserve_formants),
     }
 }
 
@@ -700,7 +825,7 @@ where
     let mut brown_state = 0.0;
 
     for _ in 0..num_samples {
-        let white = (rng.gen_range(0.0..1.0) - 0.5) * 2.0;
+        let white = (rng.random_range(0.0..1.0) - 0.5) * 2.0;
         brown_state = (brown_state + white * 0.02_f64).clamp(-1.0, 1.0);
         let sample = amplitude * brown_state;
         samples.push(sample.convert_to()?);
@@ -755,7 +880,7 @@ where
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
     T: ConvertTo<f64>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
 {
     // Calculate signal RMS
     let signal_rms = calculate_rms(audio)?;
@@ -765,9 +890,9 @@ where
 
     // Calculate target noise RMS from SNR
     let target_noise_rms = signal_rms / 10.0_f64.powf(target_snr_db / 20.0);
-    
+
     let duration = audio.duration_seconds();
-    
+
     // Generate noise based on color
     let noise_audio: AudioSamples<T> = match noise_color {
         NoiseColor::White => {
@@ -781,45 +906,49 @@ where
             apply_custom_noise_to_audio(&mut noise, target_noise_rms, rng)?;
             noise
         }
-        NoiseColor::Brown => {
-            match &audio.data {
-                AudioData::Mono(_) => {
-                    let noise_array = generate_brown_noise(duration, audio.sample_rate(), target_noise_rms, rng)?;
-                    AudioSamples::new_mono(noise_array, audio.sample_rate())
-                }
-                AudioData::MultiChannel(arr) => {
-                    let mut noise_arrays = Vec::new();
-                    for _ in 0..arr.nrows() {
-                        let noise_array = generate_brown_noise(duration, audio.sample_rate(), target_noise_rms, rng)?;
-                        noise_arrays.push(noise_array);
-                    }
-                    let noise_2d = Array2::from_shape_vec((arr.nrows(), noise_arrays[0].len()), 
-                        noise_arrays.into_iter().flat_map(|arr| arr.into_iter()).collect()).unwrap();
-                    AudioSamples::new_multi_channel(noise_2d, audio.sample_rate())
-                }
+        NoiseColor::Brown => match &audio.data {
+            AudioData::Mono(_) => {
+                let noise_array =
+                    generate_brown_noise(duration, audio.sample_rate(), target_noise_rms, rng)?;
+                AudioSamples::new_mono(noise_array.into(), audio.sample_rate())
             }
-        }
+            AudioData::MultiChannel(arr) => {
+                let mut noise_arrays = Vec::new();
+                for _ in 0..arr.nrows() {
+                    let noise_array =
+                        generate_brown_noise(duration, audio.sample_rate(), target_noise_rms, rng)?;
+                    noise_arrays.push(noise_array);
+                }
+                let noise_2d = Array2::from_shape_vec(
+                    (arr.nrows(), noise_arrays[0].len()),
+                    noise_arrays
+                        .into_iter()
+                        .flat_map(|arr| arr.into_iter())
+                        .collect(),
+                )
+                .unwrap();
+                AudioSamples::new_multi_channel(noise_2d.into(), audio.sample_rate())
+            }
+        },
     };
 
     // Add noise to signal
     match (&mut audio.data, &noise_audio.data) {
         (AudioData::Mono(signal), AudioData::Mono(noise)) => {
             for (s, n) in signal.iter_mut().zip(noise.iter()) {
-                let signal_f64: f64 = s.convert_to()?;
-                let noise_f64: f64 = n.convert_to()?;
-                *s = (signal_f64 + noise_f64).convert_to()?;
+                *s = *s + *n
             }
         }
         (AudioData::MultiChannel(signal), AudioData::MultiChannel(noise)) => {
             for (s, n) in signal.iter_mut().zip(noise.iter()) {
-                let signal_f64: f64 = s.convert_to()?;
-                let noise_f64: f64 = n.convert_to()?;
-                *s = (signal_f64 + noise_f64).convert_to()?;
+                *s = *s + *n
             }
         }
-        _ => return Err(AudioSampleError::InvalidInput {
-            msg: "Channel mismatch between signal and noise".to_string(),
-        }),
+        _ => {
+            return Err(AudioSampleError::InvalidInput {
+                msg: "Channel mismatch between signal and noise".to_string(),
+            });
+        }
     }
 
     Ok(())
@@ -837,13 +966,13 @@ where
     match &mut noise.data {
         AudioData::Mono(arr) => {
             for sample in arr.iter_mut() {
-                let random_value = (rng.gen_range(0.0..1.0) - 0.5) * 2.0;
+                let random_value = (rng.random_range(0.0..1.0) - 0.5) * 2.0;
                 *sample = (amplitude * random_value).convert_to()?;
             }
         }
         AudioData::MultiChannel(arr) => {
             for sample in arr.iter_mut() {
-                let random_value = (rng.gen_range(0.0..1.0) - 0.5) * 2.0;
+                let random_value = (rng.random_range(0.0..1.0) - 0.5) * 2.0;
                 *sample = (amplitude * random_value).convert_to()?;
             }
         }
@@ -862,7 +991,7 @@ where
     T: ConvertTo<f64>,
     f64: ConvertTo<T>,
 {
-    let gain_db = rng.gen_range(min_gain_db..=max_gain_db);
+    let gain_db = rng.random_range(min_gain_db..=max_gain_db);
     let gain_linear = 10.0_f64.powf(gain_db / 20.0);
 
     match &mut audio.data {
@@ -908,7 +1037,7 @@ where
                     let current_input: f64 = sample.convert_to()?;
                     let output = alpha * (prev_output + current_input - prev_input);
                     *sample = output.convert_to()?;
-                    
+
                     prev_input = current_input;
                     prev_output = output;
                 }
@@ -924,7 +1053,7 @@ where
                         let current_input: f64 = sample.convert_to()?;
                         let output = alpha * (prev_output + current_input - prev_input);
                         *sample = output.convert_to()?;
-                        
+
                         prev_input = current_input;
                         prev_output = output;
                     }
@@ -951,23 +1080,24 @@ where
     }
 
     let pitch_ratio = 2.0_f64.powf(semitones / 12.0);
-    
+
     // Simple time-domain pitch shifting using interpolation
     match &mut audio.data {
         AudioData::Mono(arr) => {
-            let original_data: Vec<f64> = arr.iter()
+            let original_data: Vec<f64> = arr
+                .iter()
                 .map(|&x| x.convert_to())
                 .collect::<Result<Vec<_>, _>>()?;
-                
+
             for (i, sample) in arr.iter_mut().enumerate() {
                 let source_index = i as f64 * pitch_ratio;
                 let index_floor = source_index.floor() as usize;
                 let index_frac = source_index - source_index.floor();
-                
+
                 if index_floor < original_data.len() {
                     let interpolated = if index_floor + 1 < original_data.len() {
-                        original_data[index_floor] * (1.0 - index_frac) + 
-                        original_data[index_floor + 1] * index_frac
+                        original_data[index_floor] * (1.0 - index_frac)
+                            + original_data[index_floor + 1] * index_frac
                     } else {
                         original_data[index_floor]
                     };
@@ -978,24 +1108,26 @@ where
             }
         }
         AudioData::MultiChannel(arr) => {
-            let original_data: Vec<Vec<f64>> = arr.outer_iter()
+            let original_data: Vec<Vec<f64>> = arr
+                .outer_iter()
                 .map(|channel| {
-                    channel.iter()
+                    channel
+                        .iter()
                         .map(|&x| x.convert_to())
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-                
+
             for (ch_idx, mut channel) in arr.axis_iter_mut(Axis(0)).enumerate() {
                 for (i, sample) in channel.iter_mut().enumerate() {
                     let source_index = i as f64 * pitch_ratio;
                     let index_floor = source_index.floor() as usize;
                     let index_frac = source_index - source_index.floor();
-                    
+
                     if index_floor < original_data[ch_idx].len() {
                         let interpolated = if index_floor + 1 < original_data[ch_idx].len() {
-                            original_data[ch_idx][index_floor] * (1.0 - index_frac) + 
-                            original_data[ch_idx][index_floor + 1] * index_frac
+                            original_data[ch_idx][index_floor] * (1.0 - index_frac)
+                                + original_data[ch_idx][index_floor + 1] * index_frac
                         } else {
                             original_data[ch_idx][index_floor]
                         };
@@ -1021,7 +1153,7 @@ mod tests {
     #[test]
     fn test_reverse_mono_audio() {
         let samples = Array1::from(vec![1.0f32, 2.0, 3.0, 4.0, 5.0]);
-        let audio = AudioSamples::new_mono(samples, 44100);
+        let audio = AudioSamples::new_mono(samples.into(), 44100);
 
         let reversed = audio.reverse();
 
@@ -1038,7 +1170,7 @@ mod tests {
     #[test]
     fn test_trim_with_time_bounds() {
         let samples = Array1::from(vec![1.0f32; 44100]); // 1 second at 44.1kHz
-        let audio = AudioSamples::new_mono(samples, 44100);
+        let audio = AudioSamples::new_mono(samples.into(), 44100);
 
         let trimmed = audio.trim(0.25, 0.75).unwrap();
 
@@ -1049,7 +1181,7 @@ mod tests {
     #[test]
     fn test_pad_with_silence() {
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let audio = AudioSamples::new_mono(samples, 44100);
+        let audio = AudioSamples::new_mono(samples.into(), 44100);
 
         let padded = audio.pad(0.1, 0.1, 0.0).unwrap(); // 0.1s = 4410 samples each side
 
@@ -1067,7 +1199,7 @@ mod tests {
     #[test]
     fn test_split_into_segments() {
         let samples = Array1::from(vec![1.0f32; 8820]); // 0.2 seconds at 44.1kHz
-        let audio = AudioSamples::new_mono(samples, 44100);
+        let audio = AudioSamples::new_mono(samples.into(), 44100);
 
         let segments = audio.split(0.05).unwrap(); // Split into 0.05s segments
 
@@ -1079,8 +1211,8 @@ mod tests {
     fn test_concatenate_segments() {
         let samples1 = Array1::from(vec![1.0f32; 1000]);
         let samples2 = Array1::from(vec![2.0f32; 1000]);
-        let audio1 = AudioSamples::new_mono(samples1, 44100);
-        let audio2 = AudioSamples::new_mono(samples2, 44100);
+        let audio1 = AudioSamples::new_mono(samples1.into(), 44100);
+        let audio2 = AudioSamples::new_mono(samples2.into(), 44100);
 
         let concatenated = AudioSamples::concatenate(&[audio1, audio2]).unwrap();
 
@@ -1096,8 +1228,8 @@ mod tests {
     fn test_mix_two_sources() {
         let samples1 = Array1::from(vec![1.0f32; 1000]);
         let samples2 = Array1::from(vec![2.0f32; 1000]);
-        let audio1 = AudioSamples::new_mono(samples1, 44100);
-        let audio2 = AudioSamples::new_mono(samples2, 44100);
+        let audio1 = AudioSamples::new_mono(samples1.into(), 44100);
+        let audio2 = AudioSamples::new_mono(samples2.into(), 44100);
 
         let mixed = AudioSamples::mix(&[audio1, audio2], None).unwrap();
 
@@ -1110,7 +1242,7 @@ mod tests {
     #[test]
     fn test_fade_operations() {
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let mut audio = AudioSamples::new_mono(samples, 44100);
+        let mut audio = AudioSamples::new_mono(samples.into(), 44100);
 
         // Test fade in
         audio.fade_in(0.01, FadeCurve::Linear).unwrap(); // 0.01s fade = 441 samples
@@ -1124,7 +1256,7 @@ mod tests {
 
         // Reset and test fade out
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let mut audio = AudioSamples::new_mono(samples, 44100);
+        let mut audio = AudioSamples::new_mono(samples.into(), 44100);
 
         audio.fade_out(0.01, FadeCurve::Linear).unwrap();
 
@@ -1140,7 +1272,7 @@ mod tests {
     #[test]
     fn test_repeat_audio() {
         let samples = Array1::from(vec![1.0f32, 2.0]);
-        let audio = AudioSamples::new_mono(samples, 44100);
+        let audio = AudioSamples::new_mono(samples.into(), 44100);
 
         let repeated = audio.repeat(3).unwrap();
 
@@ -1159,7 +1291,7 @@ mod tests {
         for i in 400..600 {
             samples[i] = 1.0;
         }
-        let audio = AudioSamples::new_mono(Array1::from(samples), 44100);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), 44100);
 
         let trimmed = audio.trim_silence(0.1).unwrap();
 
@@ -1176,9 +1308,9 @@ mod tests {
         let samples1 = Array1::from(vec![1.0f32; 100]);
         let samples2 = Array1::from(vec![2.0f32; 100]);
         let samples3 = Array1::from(vec![3.0f32; 100]);
-        let audio1 = AudioSamples::new_mono(samples1, 44100);
-        let audio2 = AudioSamples::new_mono(samples2, 44100);
-        let audio3 = AudioSamples::new_mono(samples3, 44100);
+        let audio1 = AudioSamples::new_mono(samples1.into(), 44100);
+        let audio2 = AudioSamples::new_mono(samples2.into(), 44100);
+        let audio3 = AudioSamples::new_mono(samples3.into(), 44100);
 
         let weights = vec![0.5, 0.3, 0.2];
         let mixed = AudioSamples::mix(&[audio1, audio2, audio3], Some(&weights)).unwrap();
@@ -1194,7 +1326,7 @@ mod tests {
         use crate::operations::types::*;
 
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let audio = AudioSamples::new_mono(samples, 44100);
+        let audio = AudioSamples::new_mono(samples.into(), 44100);
 
         let config = PerturbationConfig::with_seed(
             PerturbationMethod::gaussian_noise(20.0, NoiseColor::White),
@@ -1204,7 +1336,9 @@ mod tests {
         let noisy_audio = audio.perturb(&config).unwrap();
 
         // The original signal should be different from the noisy signal
-        if let (AudioData::Mono(original), AudioData::Mono(noisy)) = (&audio.data, &noisy_audio.data) {
+        if let (AudioData::Mono(original), AudioData::Mono(noisy)) =
+            (&audio.data, &noisy_audio.data)
+        {
             assert_ne!(original[0], noisy[0]);
             assert_eq!(original.len(), noisy.len());
         }
@@ -1215,12 +1349,10 @@ mod tests {
         use crate::operations::types::*;
 
         let samples = Array1::from(vec![1.0f32; 100]);
-        let mut audio = AudioSamples::new_mono(samples, 44100);
+        let mut audio = AudioSamples::new_mono(samples.into(), 44100);
 
-        let config = PerturbationConfig::with_seed(
-            PerturbationMethod::random_gain(-3.0, 3.0),
-            54321,
-        );
+        let config =
+            PerturbationConfig::with_seed(PerturbationMethod::random_gain(-3.0, 3.0), 54321);
 
         let original_sample = if let AudioData::Mono(arr) = &audio.data {
             arr[0]
@@ -1245,11 +1377,9 @@ mod tests {
         use crate::operations::types::*;
 
         let samples = Array1::from(vec![1.0f32; 100]);
-        let mut audio = AudioSamples::new_mono(samples, 44100);
+        let mut audio = AudioSamples::new_mono(samples.into(), 44100);
 
-        let config = PerturbationConfig::new(
-            PerturbationMethod::high_pass_filter(80.0),
-        );
+        let config = PerturbationConfig::new(PerturbationMethod::high_pass_filter(80.0));
 
         audio.perturb_(&config).unwrap();
 
@@ -1262,15 +1392,10 @@ mod tests {
 
     #[test]
     fn test_perturbation_deterministic() {
-        use crate::operations::types::*;
-
         let samples = Array1::from(vec![1.0f32; 100]);
-        let audio = AudioSamples::new_mono(samples.clone(), 44100);
+        let audio = AudioSamples::new_mono(samples.into(), 44100);
 
-        let config = PerturbationConfig::with_seed(
-            PerturbationMethod::random_gain(-1.0, 1.0),
-            42,
-        );
+        let config = PerturbationConfig::with_seed(PerturbationMethod::random_gain(-1.0, 1.0), 42);
 
         let result1 = audio.perturb(&config).unwrap();
         let result2 = audio.perturb(&config).unwrap();
@@ -1285,10 +1410,8 @@ mod tests {
 
     #[test]
     fn test_perturbation_validation() {
-        use crate::operations::types::*;
-
         let samples = Array1::from(vec![1.0f32; 100]);
-        let mut audio = AudioSamples::new_mono(samples, 44100);
+        let mut audio = AudioSamples::new_mono(samples.into(), 44100);
 
         // Test invalid high-pass filter cutoff
         let invalid_config = PerturbationConfig::new(

@@ -8,6 +8,7 @@ use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
     I24,
 };
+
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -32,7 +33,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let audio_f64 = audio.as_f64()?;
 
@@ -91,7 +92,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let audio_f64 = audio.as_f64()?;
 
@@ -141,8 +142,8 @@ where
 ///
 /// # Returns
 /// A vector of (start_time, end_time) tuples representing silence regions in seconds
-pub fn detect_silence_regions<T: AudioSample>(
-    audio: &AudioSamples<T>,
+pub fn detect_silence_regions<'a, T: AudioSample>(
+    audio: &'a AudioSamples<T>,
     threshold: T,
 ) -> AudioSampleResult<Vec<(f64, f64)>> {
     let mut silence_regions = Vec::new();
@@ -238,7 +239,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let audio_f64 = audio.as_f64()?;
 
@@ -296,8 +297,8 @@ where
 ///
 /// # Returns
 /// A vector of (start_time, end_time) tuples representing clipped regions in seconds
-pub fn detect_clipping<T: AudioSample>(
-    audio: &AudioSamples<T>,
+pub fn detect_clipping<'a, T: AudioSample>(
+    audio: &'a AudioSamples<T>,
     threshold_ratio: f64,
 ) -> AudioSampleResult<Vec<(f64, f64)>>
 where
@@ -306,7 +307,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let mut clipped_regions = Vec::new();
     let mut in_clipped = false;
@@ -539,7 +540,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let audio_f64 = audio.as_f64()?;
 
@@ -594,7 +595,9 @@ where
 }
 
 /// Detect channel configuration from audio stream.
-pub fn detect_channel_config<T: AudioSample>(audio: &AudioSamples<T>) -> ChannelConfiguration {
+pub fn detect_channel_config<'a, T: AudioSample>(
+    audio: &'a AudioSamples<T>,
+) -> ChannelConfiguration {
     let channels = audio.num_channels();
 
     match channels {
@@ -719,7 +722,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let mut metrics = QualityMetrics::default();
 
@@ -753,7 +756,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let audio_f64 = audio.as_f64()?;
 
@@ -811,7 +814,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     let audio_f64 = audio.as_f64()?;
 
@@ -1083,7 +1086,7 @@ mod tests {
     fn test_detect_silence_regions() {
         // Create a signal with silence regions
         let data = array![0.0f32, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0];
-        let audio = AudioSamples::new_mono(data, 10); // 10 Hz sample rate for easy calculation
+        let audio = AudioSamples::new_mono(data.into(), 10); // 10 Hz sample rate for easy calculation
 
         let silence_regions =
             detect_silence_regions(&audio, 0.5).expect("Failed to detect silence");
@@ -1111,7 +1114,7 @@ mod tests {
     fn test_detect_clipping() {
         // Create a signal with clipping
         let data = array![0.5f32, 1.0, 1.0, 1.0, 0.5, -1.0, -1.0, 0.0];
-        let audio = AudioSamples::new_mono(data, 8); // 8 Hz sample rate for easy calculation
+        let audio = AudioSamples::new_mono(data.into(), 8); // 8 Hz sample rate for easy calculation
 
         let clipped_regions = detect_clipping(&audio, 0.99).expect("Failed to detect clipping");
 

@@ -3,13 +3,16 @@
 //! This module implements the AudioProcessing trait, providing comprehensive
 //! signal processing operations including normalization, filtering, compression,
 //! and envelope operations using efficient ndarray operations.
+//!
+//! Also provides a fluent builder API for chaining processing operations.
 
-use super::types::NormalizationMethod;
+use crate::operations::types::NormalizationMethod;
 use crate::repr::AudioData;
 use crate::{
     AudioProcessing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
     AudioStatistics, AudioTypeConversion, ConvertTo, I24,
 };
+
 use ndarray::Axis;
 
 impl<T: AudioSample> AudioProcessing<T> for AudioSamples<T>
@@ -19,7 +22,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Normalizes audio samples using the specified method and range.
     ///
@@ -37,8 +40,8 @@ where
         match method {
             NormalizationMethod::MinMax => {
                 // Min-Max normalization: scale to [min, max] range
-                let current_min = self.min_native();
-                let current_max = self.max_native();
+                let current_min = self.min_sample();
+                let current_max = self.max_sample();
 
                 // Avoid division by zero
                 if current_min == current_max {
@@ -100,7 +103,7 @@ where
 
             NormalizationMethod::Mean => {
                 // Mean normalization: subtract mean to center around zero
-                let mean = self.compute_mean()?;
+                let mean = self.compute_mean();
 
                 match &mut self.data {
                     AudioData::Mono(arr) => {
@@ -144,8 +147,8 @@ where
 
             NormalizationMethod::ZScore => {
                 // Z-Score normalization: zero mean, unit variance
-                let mean = self.compute_mean()?;
-                let std_dev = self.compute_std_dev()?;
+                let mean = self.compute_mean();
+                let std_dev = self.compute_std_dev();
 
                 if std_dev == 0.0f64 {
                     // All values are the same, just subtract mean
@@ -192,7 +195,7 @@ where
     /// Scales all audio samples by a constant factor.
     ///
     /// This is equivalent to adjusting the volume/amplitude of the signal.
-    fn scale(&mut self, factor: T) -> AudioSampleResult<()> {
+    fn scale(&mut self, factor: T) {
         match &mut self.data {
             AudioData::Mono(arr) => {
                 arr.mapv_inplace(|x| x * factor);
@@ -201,14 +204,13 @@ where
                 arr.mapv_inplace(|x| x * factor);
             }
         }
-        Ok(())
     }
 
     /// Removes DC offset by subtracting the mean value.
     ///
     /// This centers the audio around zero and removes any constant bias.
     fn remove_dc_offset(&mut self) -> AudioSampleResult<()> {
-        let mean = self.compute_mean()?;
+        let mean = self.compute_mean();
 
         match &mut self.data {
             AudioData::Mono(arr) => {
@@ -336,9 +338,6 @@ where
                     }
                     arr[i] = sum;
                 }
-
-                // Truncate array to output length
-                *arr = arr.slice(ndarray::s![..output_len]).to_owned();
             }
             AudioData::MultiChannel(arr) => {
                 if arr.ncols() < filter_coeffs.len() {
@@ -367,7 +366,7 @@ where
                     }
                 }
 
-                *arr = output;
+                *arr = output.into();
             }
         }
         Ok(())
@@ -580,46 +579,39 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
     /// Computes the mean value of all samples.
-    fn compute_mean(&self) -> AudioSampleResult<f64> {
+    fn compute_mean(&self) -> f64 {
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.is_empty() {
-                    return Ok(0.0);
+                    return 0.0;
                 }
                 let sum = arr.sum();
                 let sum: f64 = T::cast_into(sum);
-                Ok(sum / arr.len() as f64)
+                sum / arr.len() as f64
             }
             AudioData::MultiChannel(arr) => {
                 if arr.is_empty() {
-                    return Ok(0.0);
+                    return 0.0;
                 }
                 let sum = arr.sum();
                 let sum: f64 = T::cast_into(sum);
-                Ok(sum / arr.len() as f64)
+                sum / arr.len() as f64
             }
         }
     }
 
     /// Computes the median value of all samples.
-    fn compute_median(&self) -> AudioSampleResult<f64>
-    where
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
-        AudioSamples<T>: AudioTypeConversion<T>,
-    {
+    fn compute_median(&self) -> AudioSampleResult<f64> {
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.is_empty() {
                     return Ok(0.0);
                 }
-                let mut values: Vec<T> = arr.clone().into_raw_vec_and_offset().0;
+
+                let mut values: Vec<T> = arr.to_owned().into_raw_vec_and_offset().0;
                 values.sort_by(|a, b| {
                     match a.partial_cmp(b) {
                         Some(order) => order,
@@ -630,8 +622,8 @@ where
                 let median = if values.len() % 2 == 0 {
                     let mid = values.len() / 2;
                     let median = values[mid - 1] + values[mid];
-                    let _median: f64 = median.cast_into();
-                    _median / 2.0f64
+                    let median: f64 = median.cast_into();
+                    median / 2.0f64
                 } else {
                     let median: f64 = values[values.len() / 2].cast_into();
                     median
@@ -643,7 +635,7 @@ where
                 if arr.is_empty() {
                     return Ok(0.0);
                 }
-                let mut values: Vec<T> = arr.clone().into_raw_vec_and_offset().0;
+                let mut values: Vec<T> = arr.to_owned().into_raw_vec_and_offset().0;
                 values.sort_by(|a, b| {
                     match a.partial_cmp(b) {
                         Some(order) => order,
@@ -654,8 +646,8 @@ where
                 let median = if values.len() % 2 == 0 {
                     let mid = values.len() / 2;
                     let median = values[mid - 1] + values[mid];
-                    let _median: f64 = median.cast_into();
-                    _median / 2.0f64
+                    let median: f64 = median.cast_into();
+                    median / 2.0f64
                 } else {
                     values[values.len() / 2].cast_into()
                 };
@@ -665,21 +657,13 @@ where
     }
 
     /// Computes the standard deviation of all samples.
-    fn compute_std_dev(&self) -> AudioSampleResult<f64>
-    where
-        i16: ConvertTo<T>,
-        I24: ConvertTo<T>,
-        i32: ConvertTo<T>,
-        f32: ConvertTo<T>,
-        f64: ConvertTo<T>,
-        AudioSamples<T>: AudioTypeConversion<T>,
-    {
-        let mean: f64 = self.compute_mean()?;
+    fn compute_std_dev(&self) -> f64 {
+        let mean: f64 = self.compute_mean();
 
         match &self.data {
             AudioData::Mono(arr) => {
                 if arr.len() <= 1 {
-                    return Ok(0.0);
+                    return 0.0;
                 }
 
                 let variance_sum = arr
@@ -692,11 +676,11 @@ where
 
                 let variance = variance_sum / arr.len() as f64;
                 let variance_sqrt = variance.sqrt();
-                Ok(variance_sqrt)
+                variance_sqrt
             }
             AudioData::MultiChannel(arr) => {
                 if arr.len() <= 1 {
-                    return Ok(0.0);
+                    return 0.0;
                 }
 
                 let variance_sum = arr
@@ -709,9 +693,152 @@ where
 
                 let variance = variance_sum / arr.len() as f64;
                 let variance_sqrt = variance.sqrt();
-                Ok(variance_sqrt)
+                variance_sqrt
             }
         }
+    }
+}
+
+/// Builder for fluent audio processing operations.
+///
+/// This builder allows chaining multiple processing operations together
+/// and applying them all at once, providing a more ergonomic API for
+/// complex processing chains.
+///
+/// # Example
+/// ```rust,ignore
+/// audio.processing()
+///     .normalize(-1.0, 1.0, NormalizationMethod::Peak)
+///     .scale(0.5)
+///     .clip(-0.8, 0.8)
+///     .apply()?;
+/// ```
+pub struct ProcessingBuilder<'a, T: AudioSample> {
+    audio: &'a mut AudioSamples<T>,
+    operations: Vec<Box<dyn FnOnce(&mut AudioSamples<T>) -> AudioSampleResult<()> + 'a>>,
+}
+
+impl<'a, T: AudioSample> ProcessingBuilder<'a, T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
+{
+    /// Creates a new ProcessingBuilder for the given audio samples.
+    pub fn new(audio: &'a mut AudioSamples<T>) -> Self {
+        Self {
+            audio,
+            operations: Vec::new(),
+        }
+    }
+
+    /// Adds a normalization operation to the processing chain.
+    pub fn normalize(mut self, min: T, max: T, method: NormalizationMethod) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.normalize(min, max, method)));
+        self
+    }
+
+    /// Adds a scaling operation to the processing chain.
+    pub fn scale(mut self, factor: T) -> Self {
+        self.operations.push(Box::new(move |audio| {
+            audio.scale(factor);
+            Ok(())
+        }));
+        self
+    }
+
+    /// Adds a clipping operation to the processing chain.
+    pub fn clip(mut self, min_val: T, max_val: T) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.clip(min_val, max_val)));
+        self
+    }
+
+    /// Adds a DC offset removal operation to the processing chain.
+    pub fn remove_dc_offset(mut self) -> Self {
+        self.operations
+            .push(Box::new(|audio| audio.remove_dc_offset()));
+        self
+    }
+
+    /// Adds a windowing operation to the processing chain.
+    pub fn apply_window(mut self, window: Vec<T>) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.apply_window(&window)));
+        self
+    }
+
+    /// Adds a filter operation to the processing chain.
+    pub fn apply_filter(mut self, filter_coeffs: Vec<T>) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.apply_filter(&filter_coeffs)));
+        self
+    }
+
+    /// Adds a μ-law compression operation to the processing chain.
+    pub fn mu_compress(mut self, mu: T) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.mu_compress(mu)));
+        self
+    }
+
+    /// Adds a μ-law expansion operation to the processing chain.
+    pub fn mu_expand(mut self, mu: T) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.mu_expand(mu)));
+        self
+    }
+
+    /// Adds a low-pass filter operation to the processing chain.
+    pub fn low_pass_filter(mut self, cutoff_hz: f64) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.low_pass_filter(cutoff_hz)));
+        self
+    }
+
+    /// Adds a high-pass filter operation to the processing chain.
+    pub fn high_pass_filter(mut self, cutoff_hz: f64) -> Self {
+        self.operations
+            .push(Box::new(move |audio| audio.high_pass_filter(cutoff_hz)));
+        self
+    }
+
+    /// Adds a band-pass filter operation to the processing chain.
+    pub fn band_pass_filter(mut self, low_hz: f64, high_hz: f64) -> Self {
+        self.operations.push(Box::new(move |audio| {
+            audio.band_pass_filter(low_hz, high_hz)
+        }));
+        self
+    }
+
+    /// Applies all queued operations to the audio samples.
+    ///
+    /// This consumes the builder and executes all operations in the order
+    /// they were added. If any operation fails, the error is returned and
+    /// subsequent operations are not executed.
+    ///
+    /// # Returns
+    /// - `Ok(())` if all operations succeed
+    /// - `Err(AudioSampleError)` if any operation fails
+    pub fn apply(self) -> AudioSampleResult<()> {
+        for operation in self.operations {
+            operation(self.audio)?;
+        }
+        Ok(())
+    }
+
+    /// Returns the number of operations queued in this builder.
+    pub fn len(&self) -> usize {
+        self.operations.len()
+    }
+
+    /// Returns true if no operations are queued.
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
     }
 }
 
@@ -726,20 +853,20 @@ mod tests {
     #[test]
     fn test_normalize_min_max() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio: AudioSamples<f32> = AudioSamples::new_mono(data.into(), 44100);
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::MinMax)
             .unwrap();
 
-        assert_approx_eq!(audio.min() as f64, -1.0);
-        assert_approx_eq!(audio.max() as f64, 1.0);
+        assert_approx_eq!(audio.min_sample() as f64, -1.0);
+        assert_approx_eq!(audio.max_sample() as f64, 1.0);
     }
 
     #[test]
     fn test_normalize_peak() {
         let data = array![-2.0f32, 1.0, 3.0, -1.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::Peak)
@@ -751,9 +878,9 @@ mod tests {
     #[test]
     fn test_scale() {
         let data = array![1.0f32, 2.0, 3.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
-        audio.scale(2.0).unwrap();
+        audio.scale(2.0);
 
         let expected = array![2.0f32, 4.0, 6.0];
         match &audio.data {
@@ -769,18 +896,18 @@ mod tests {
     #[test]
     fn test_remove_dc_offset() {
         let data = array![3.0f32, 4.0, 5.0]; // Mean = 4.0
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         audio.remove_dc_offset().unwrap();
 
-        let mean = audio.compute_mean().expect("Mean calculation failed");
+        let mean = audio.compute_mean();
         assert_approx_eq!(mean as f64, 0.0, 1e-6);
     }
 
     #[test]
     fn test_clip() {
         let data = array![-3.0f32, -1.0, 0.0, 1.0, 3.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         audio.clip(-2.0, 2.0).unwrap();
 
@@ -798,7 +925,7 @@ mod tests {
     #[test]
     fn test_apply_window() {
         let data = array![1.0f32, 1.0, 1.0, 1.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
         let window = [0.5f32, 1.0, 1.0, 0.5];
 
         audio.apply_window(&window).unwrap();
@@ -817,29 +944,139 @@ mod tests {
     #[test]
     fn test_multi_channel_normalize() {
         let data = array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
-        let mut audio = AudioSamples::new_multi_channel(data, 44100);
+        let mut audio: AudioSamples<f32> = AudioSamples::new_multi_channel(data.into(), 44100);
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::MinMax)
             .unwrap();
 
-        assert_approx_eq!(audio.min() as f64, -1.0);
-        assert_approx_eq!(audio.max() as f64, 1.0);
+        assert_approx_eq!(audio.min_sample() as f64, -1.0);
+        assert_approx_eq!(audio.max_sample() as f64, 1.0);
     }
 
     #[test]
     fn test_normalize_zscore() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::ZScore)
             .unwrap();
 
         // After Z-score normalization, mean should be ~0 and std dev should be ~1
-        let mean = audio.compute_mean().expect("Mean calculation failed");
-        let std_dev = audio.compute_std_dev().expect("Std dev calculation failed");
+        let mean = audio.compute_mean();
+        let std_dev = audio.compute_std_dev();
         assert_approx_eq!(mean as f64, 0.0, 1e-6);
         assert_approx_eq!(std_dev as f64, 1.0, 1e-6);
+    }
+
+    // Tests for ProcessingBuilder
+    #[test]
+    fn test_processing_builder_basic() {
+        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
+
+        // Test builder creation and basic operations
+        audio.processing().scale(2.0).apply().unwrap();
+
+        let expected = array![2.0f32, 4.0, 6.0, 8.0, 10.0];
+        match &audio.data {
+            AudioData::Mono(arr) => {
+                for (actual, expected) in arr.iter().zip(expected.iter()) {
+                    assert_approx_eq!(*actual as f64, *expected as f64, 1e-6);
+                }
+            }
+            _ => panic!("Expected mono data"),
+        }
+    }
+
+    #[test]
+    fn test_processing_builder_chaining() {
+        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
+
+        // Test chaining multiple operations
+        audio
+            .processing()
+            .scale(2.0)
+            .clip(-5.0, 5.0)
+            .apply()
+            .unwrap();
+
+        // All values should be doubled and within [-5, 5]
+        let expected = array![2.0f32, 4.0, 5.0, 5.0, 5.0]; // Last two clipped to 5.0
+        match &audio.data {
+            AudioData::Mono(arr) => {
+                for (actual, expected) in arr.iter().zip(expected.iter()) {
+                    assert_approx_eq!(*actual as f64, *expected as f64, 1e-6);
+                }
+            }
+            _ => panic!("Expected mono data"),
+        }
+    }
+
+    #[test]
+    fn test_processing_builder_normalize() {
+        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
+
+        audio
+            .processing()
+            .normalize(-1.0, 1.0, NormalizationMethod::MinMax)
+            .apply()
+            .unwrap();
+
+        assert_approx_eq!(audio.min_sample() as f64, -1.0, 1e-6);
+        assert_approx_eq!(audio.max_sample() as f64, 1.0, 1e-6);
+    }
+
+    #[test]
+    fn test_processing_builder_empty() {
+        let data = array![1.0f32, 2.0, 3.0];
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
+
+        let builder = audio.processing();
+        assert!(builder.is_empty());
+        assert_eq!(builder.len(), 0);
+
+        // Applying empty builder should succeed
+        builder.apply().unwrap();
+    }
+
+    #[test]
+    fn test_processing_builder_error_handling() {
+        let data = array![1.0f32, 2.0, 3.0];
+        let mut audio = AudioSamples::new_mono(data.into(), 44100);
+
+        // Test that invalid operations return errors
+        let result = audio
+            .processing()
+            .normalize(1.0, -1.0, NormalizationMethod::Peak) // Invalid range
+            .apply();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_processing_builder_multi_channel() {
+        let data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(data.into(), 44100);
+
+        audio.processing().scale(0.5).apply().unwrap();
+
+        let expected = array![[0.5f32, 1.0], [1.5, 2.0]];
+        match &audio.data {
+            AudioData::MultiChannel(arr) => {
+                for (actual_row, expected_row) in arr
+                    .axis_iter(ndarray::Axis(0))
+                    .zip(expected.axis_iter(ndarray::Axis(0)))
+                {
+                    for (actual, expected) in actual_row.iter().zip(expected_row.iter()) {
+                        assert_approx_eq!(*actual as f64, *expected as f64, 1e-6);
+                    }
+                }
+            }
+            _ => panic!("Expected multi-channel data"),
+        }
     }
 }

@@ -3,13 +3,14 @@
 //! This module provides robust IIR filter implementations including
 //! Butterworth and Chebyshev filters with various response types.
 
-use super::traits::AudioIirFiltering;
-use super::types::{FilterResponse, IirFilterDesign, IirFilterType};
+use crate::operations::traits::AudioIirFiltering;
+use crate::operations::types::{FilterResponse, IirFilterDesign, IirFilterType};
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24,
+    I24, iterators::AudioSampleIterators,
 };
+
 use std::f64::consts::PI;
 
 /// IIR filter implementation with internal state.
@@ -169,20 +170,18 @@ where
                     samples[i] = output.convert_to()?;
                 }
             }
-            AudioData::MultiChannel(samples) => {
-                let num_channels = samples.nrows();
-                let num_samples = samples.ncols();
-
+            AudioData::MultiChannel(_) => {
                 // Process each channel independently
-                for channel in 0..num_channels {
-                    let input_samples: Vec<f64> = (0..num_samples)
-                        .map(|i| samples[[channel, i]].convert_to().unwrap_or(0.0))
+                for channel in self.channels_mut() {
+                    let input_samples: Vec<f64> = channel
+                        .iter()
+                        .map(|sample| sample.convert_to().unwrap_or(0.0))
                         .collect();
 
                     let output_samples = filter.process_samples(&input_samples);
 
-                    for (i, output) in output_samples.iter().enumerate() {
-                        samples[[channel, i]] = output.convert_to()?;
+                    for (sample, output) in channel.iter_mut().zip(output_samples.iter()) {
+                        *sample = output.convert_to()?;
                     }
 
                     // Reset filter state for next channel
@@ -482,7 +481,7 @@ fn design_butterworth_bandpass(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::AudioIirFiltering;
+    use crate::operations::traits::AudioIirFiltering;
     use ndarray::Array1;
     use std::f64::consts::PI;
 
@@ -513,7 +512,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
 
         // Apply Butterworth low-pass filter with cutoff at 1000 Hz
         let result = audio.butterworth_lowpass(2, 1000.0, sample_rate);
@@ -538,7 +537,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
 
         // Apply Butterworth high-pass filter with cutoff at 500 Hz
         let result = audio.butterworth_highpass(2, 500.0, sample_rate);
@@ -563,7 +562,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
 
         // Apply Butterworth band-pass filter from 500 Hz to 2000 Hz
         let result = audio.butterworth_bandpass(2, 500.0, 2000.0, sample_rate);
@@ -596,7 +595,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut audio = AudioSamples::new_multi_channel(stereo_data, sample_rate as u32);
+        let mut audio = AudioSamples::new_multi_channel(stereo_data.into(), sample_rate as u32);
 
         // Apply low-pass filter to stereo signal
         let result = audio.butterworth_lowpass(2, 2000.0, sample_rate);
@@ -608,8 +607,10 @@ mod tests {
     #[test]
     fn test_filter_design_validation() {
         let sample_rate = 44100.0;
-        let mut audio =
-            AudioSamples::new_mono(Array1::from(vec![1.0f32, 0.0, -1.0]), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(
+            Array1::from(vec![1.0f32, 0.0, -1.0]).into(),
+            sample_rate as u32,
+        );
 
         // Test invalid cutoff frequencies
         assert!(audio.butterworth_lowpass(2, 0.0, sample_rate).is_err());
