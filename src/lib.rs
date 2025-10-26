@@ -1,4 +1,5 @@
 #![cfg_attr(feature = "simd", feature(portable_simd))]
+#![feature(const_type_name)]
 // Correctness and logic
 #![warn(clippy::unit_cmp)] // Detects comparing unit types
 #![warn(clippy::match_same_arms)] // Duplicate match arms

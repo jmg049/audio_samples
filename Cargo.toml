@@ -40,13 +40,7 @@ serde = "1.0.219"
 lazy_static = "1.4"
 rayon = { version = "1.10", optional = true }
 indicatif = { version = "0.18", optional = true }
-tokio = { version = "1.0", features = [
-    "rt",
-    "time",
-    "net",
-    "io-util",
-    "rt-multi-thread",
-], optional = true }
+tokio = { version = "1.0", features = ["rt", "time", "net", "io-util", "rt-multi-thread", "full"], optional = true }
 tokio-util = { version = "0.7", optional = true }
 num_cpus = { version = "1.16", optional = true }
 futures = { version = "0.3", optional = true }
@@ -56,7 +50,11 @@ parking_lot = { version = "0.12", optional = true }
 num-format = "0.4.4"
 rand = "0.9.2"
 wide = { version = "0.7", optional = true }
-plotters = "0.3.7"
+plotly = "0.9.0"
+plotly_static = { version = "0.1.0", features = ["chromedriver", "webdriver_download"], optional = true }
+serde_json = { version = "1.0", optional = true }
+plotview-rs = { version = "0.1.0", path = "../../gtk_plotly_renderer" }
+anyhow = "1.0.100"
 
 [features]
 default = ["operations", "mkl"]
@@ -66,3 +64,5 @@ progress-tracking = ["dep:indicatif"]
 mkl = ["fftw-sys/intel-mkl"]
 simd = ["dep:wide"]
 operations = []
+static-plots = ["dep:plotly_static", "dep:serde_json"]
+tokio = ["dep:tokio"]

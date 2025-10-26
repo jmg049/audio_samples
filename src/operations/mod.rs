@@ -65,15 +65,23 @@ pub use traits::{
 // Re-export builder types
 pub use processing::ProcessingBuilder;
 
-// Re-export plotting types and functions
+// Re-export plotting types and functions (composable API)
 pub use plotting::{
-    ComparisonPlotOptions, PlotResult, SpectrogramPlotOptions, WaveformPlotOptions,
-    plot_comparison, plot_difference, plot_spectrogram, plot_waveform, time_ticks_seconds,
+    // Core plotting API
+    PlotComposer, PlotElement, PlotBounds, PlotMetadata, LayoutConfig,
+    AudioPlotBuilders, PlotTheme, PlotResult,
+
+    // Styling and configuration
+    ColorPalette, LineStyle, LineStyleType, MarkerStyle, MarkerShape,
+    SpectrogramConfig, OnsetConfig, BeatConfig, PitchDetectionMethod,
+
+    // Plot elements
+    WaveformPlot, SpectrogramPlot, OnsetMarkers, BeatMarkers, PitchContour, PowerSpectrumPlot,
 };
 
 // Re-export supporting types
 pub use types::{
-    ChannelConversionMethod, CqtConfig, MonoConversionMethod, NormalizationMethod, OnsetConfig,
+    ChannelConversionMethod, CqtConfig, MonoConversionMethod, NormalizationMethod,
     PeakPickingConfig, ResamplingQuality, SpectralFluxConfig, SpectralFluxMethod,
     StereoConversionMethod,
 };

@@ -46,9 +46,13 @@ where
     where
         Self: Sized,
     {
+        if self.num_channels() == 1 {
+            return Ok(AudioSamples::new(self.data.clone(), self.sample_rate()));
+        }
+
         match method {
             MonoConversionMethod::Average => match &self.data {
-                AudioData::Mono(_) => Ok(AudioSamples::new(self.data.clone(), self.sample_rate())),
+                AudioData::Mono(_) => unreachable!("Already checked for mono above"),
                 AudioData::MultiChannel(data) => {
                     let mono_data = data.mean_axis(Axis(0)).ok_or_else(|| {
                         AudioSampleError::ProcessingError {
@@ -59,7 +63,7 @@ where
                 }
             },
             MonoConversionMethod::Left => match &self.data {
-                AudioData::Mono(_) => Ok(AudioSamples::new(self.data.clone(), self.sample_rate())),
+                AudioData::Mono(_) => unreachable!("Already checked for mono above"),
                 AudioData::MultiChannel(data) => {
                     let left_channel = data.index_axis(Axis(0), 0).to_owned();
                     Ok(AudioSamples::new_mono(
@@ -69,7 +73,7 @@ where
                 }
             },
             MonoConversionMethod::Right => match &self.data {
-                AudioData::Mono(_) => Ok(AudioSamples::new(self.data.clone(), self.sample_rate())),
+                AudioData::Mono(_) => unreachable!("Already checked for mono above"),
                 AudioData::MultiChannel(data) => {
                     let right_channel = data.index_axis(Axis(0), 1).to_owned();
                     Ok(AudioSamples::new_mono(

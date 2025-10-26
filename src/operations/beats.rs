@@ -1,6 +1,6 @@
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24,
-    operations::OnsetConfig,
+    operations::types::OnsetConfig,
 };
 
 /// Progress callback function type for beat tracking operations.

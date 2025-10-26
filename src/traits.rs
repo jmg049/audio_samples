@@ -130,6 +130,9 @@ pub trait AudioSample:
     const MIN: Self;
     /// Bit depth of this sample type.
     const BITS: u8;
+    /// Label used for plotting and display purposes.
+    const LABEL: &'static str = std::any::type_name::<Self>();
+
 }
 
 /// Trait for converting one sample type to another with proper scaling.
@@ -1193,34 +1196,89 @@ where
     /// Converts to the highest precision floating-point format.
     ///
     /// This is useful when maximum precision is needed for processing.
+    /// Uses optimized vectorized conversion.
     fn as_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
     where
-        T: ConvertTo<f64>;
+        T: ConvertTo<f64>,
+    {
+        self.as_type::<f64>()
+    }
 
     /// Converts to single precision floating-point format.
     ///
     /// Good balance between precision and memory usage.
+    /// Uses optimized vectorized conversion.
     fn as_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
     where
-        T: ConvertTo<f32>;
+        T: ConvertTo<f32>,
+    {
+        self.as_type::<f32>()
+    }
 
     /// Converts to 32-bit integer format.
     ///
     /// Highest precision integer format, useful for high-quality processing.
+    /// Uses optimized vectorized conversion.
     fn as_i32(&self) -> AudioSampleResult<AudioSamples<i32>>
     where
-        T: ConvertTo<i32>;
+        T: ConvertTo<i32>,
+    {
+        self.as_type::<i32>()
+    }
 
     /// Converts to 16-bit integer format (most common).
     ///
     /// Standard format for CD audio and many audio files.
+    /// Uses optimized vectorized conversion.
     fn as_i16(&self) -> AudioSampleResult<AudioSamples<i16>>
     where
-        T: ConvertTo<i16>;
+        T: ConvertTo<i16>,
+    {
+        self.as_type::<i16>()
+    }
 
-    /// Converts to 24-bit integer format.
+    /// Converts to 24-bit integer format (CD Quality).
     ///
+    /// Standard format for CD audio and many audio files.
+    /// Uses optimized vectorized conversion.
     fn as_i24(&self) -> AudioSampleResult<AudioSamples<I24>>
     where
-        T: ConvertTo<I24>;
+        T: ConvertTo<I24>,
+    {
+        self.as_type::<I24>()
+    }
+
+    fn cast_as<O: AudioSample + CastFrom<T>>(&self) -> AudioSampleResult<AudioSamples<O>>;
+
+    fn cast_to<O: AudioSample + CastFrom<T>>(self) -> AudioSampleResult<AudioSamples<O>>;
+
+    fn cast_as_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
+    where
+        f32: CastFrom<T>,
+    {
+        self.cast_as::<f32>()
+    }
+
+    fn cast_to_f32(self) -> AudioSampleResult<AudioSamples<f32>>
+    where
+        f32: CastFrom<T>,
+        Self: Sized,
+    {
+        self.cast_to::<f32>()
+    }
+
+    fn cast_as_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
+    where
+        f64: CastFrom<T>,
+    {
+        self.cast_as::<f64>()
+    }
+
+    fn cast_to_f64(self) -> AudioSampleResult<AudioSamples<f64>>
+    where
+        f64: CastFrom<T>,
+        Self: Sized,
+    {
+        self.cast_to::<f64>()
+    }
 }

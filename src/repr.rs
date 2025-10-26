@@ -1130,6 +1130,18 @@ impl<T: AudioSample> AudioSamples<T> {
         })
     }
 
+    pub fn map_into<O: AudioSample, F>(&self, f: F) -> AudioSampleResult<AudioSamples<O>>
+    where
+        F: Fn(T) -> O,
+    {
+        let new_data: AudioData<O> = self.data.mapv(f);
+        Ok(AudioSamples {
+            data: new_data,
+            sample_rate: self.sample_rate,
+            layout: self.layout,
+        })
+    }
+
     /// Applies a function to each sample with access to the sample index.
     ///
     /// This method is similar to `apply` but provides the sample index to the function,
@@ -1211,7 +1223,7 @@ impl<T: AudioSample> AudioSamples<T> {
     /// ```
     pub fn try_convert<U: AudioSample>(self) -> ChainableResult<AudioSamples<U>>
     where
-        T: crate::ConvertTo<U>,
+        T: ConvertTo<U>,
     {
         ChainableResult::ok(self.convert_to())
     }
