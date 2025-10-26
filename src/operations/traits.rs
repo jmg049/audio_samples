@@ -2174,20 +2174,22 @@ where
     /// Seconds from 0 to duration with ~target_ticks "nice" spacing (1–2–5).
     fn time_ticks_seconds(&self, target_ticks: usize) -> Vec<f64>;
     fn frequency_axis(&self) -> Vec<T>;
-    /// Plot waveform with default options
-    fn plot_waveform(&self) -> crate::operations::plotting::PlotResult<()>;
-    /// Plot waveform with custom options
-    fn plot_waveform_with_options(
-        &self,
-        options: crate::operations::plotting::WaveformPlotOptions,
-    ) -> crate::operations::plotting::PlotResult<()>;
-    /// Plot spectrogram with default options
-    fn plot_spectrogram(&self) -> crate::operations::plotting::PlotResult<()>;
-    /// Plot spectrogram with custom options
-    fn plot_spectrogram_with_options(
-        &self,
-        options: crate::operations::plotting::SpectrogramPlotOptions,
-    ) -> crate::operations::plotting::PlotResult<()>;
+    /// Create a quick analysis plot with waveform and spectrum
+    fn quick_plot(&self) -> super::PlotResult<()>
+    where
+        Self: crate::operations::plotting::AudioPlotBuilders<T>
+    {
+        let waveform = self.waveform_plot(None);
+        let spectrum = self.power_spectrum_plot(None, None, None, None, None)?;
+
+        let plot = crate::operations::plotting::PlotComposer::new()
+            .add_element(waveform)
+            .add_element(spectrum)
+            .with_layout(crate::operations::plotting::LayoutConfig::VerticalStack)
+            .with_title("Audio Analysis");
+
+        plot.render_to_file("audio_analysis.png")
+    }
 }
 
 /// Unified trait that combines all audio processing capabilities.

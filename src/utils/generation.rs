@@ -20,9 +20,8 @@ use std::f64::consts::PI;
 pub fn sine_wave<T: AudioSample>(
     frequency: f64,
     duration: f64,
-    sample_rate: u32,
     amplitude: f64,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<T>> // todo! Unncessary result
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -31,18 +30,16 @@ where
     f64: ConvertTo<T>,
     for<'b> AudioSamples<T>: AudioTypeConversion<T>,
 {
-    let num_samples = (duration * sample_rate as f64) as usize;
+    let num_samples = (duration * frequency as f64) as usize;
     let mut samples = Vec::with_capacity(num_samples);
 
-    let sample_rate_f64 = sample_rate as f64;
-
     for i in 0..num_samples {
-        let t = i as f64 / sample_rate_f64;
+        let t = i as f64 / frequency;
         let sample = amplitude * (2.0 * PI * frequency * t).sin();
         samples.push(sample.convert_to()?);
     }
     let array = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(array.into(), sample_rate))
+    Ok(AudioSamples::new_mono(array.into(), frequency as u32))
 }
 
 /// Generates a cosine wave with the specified parameters.
