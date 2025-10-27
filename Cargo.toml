@@ -34,7 +34,7 @@ realfft = "3.4"
 num-complex = "0.4"
 fftw-sys = { version = "0.4.0", features = ["intel-mkl"], optional = true }
 intel-mkl-src = { version = "0.8.0", optional = true }
-i24 = { path = "/home/jmg/code/rust/i24", features = ["std", "alloc", "serde"] }
+i24 = {version = "2.2.0", features = ["alloc", "std", "serde"]}
 rubato = { version = "0.16.2" }
 serde = "1.0.219"
 lazy_static = "1.4"
@@ -50,11 +50,11 @@ parking_lot = { version = "0.12", optional = true }
 num-format = "0.4.4"
 rand = "0.9.2"
 wide = { version = "0.7", optional = true }
-plotly = "0.9.0"
+plotly = "0.13.5"
 plotly_static = { version = "0.1.0", features = ["chromedriver", "webdriver_download"], optional = true }
 serde_json = { version = "1.0", optional = true }
-plotview-rs = { version = "0.1.0", path = "../../gtk_plotly_renderer" }
 anyhow = "1.0.100"
+plotview-rs = { git = "https://github.com/jmg049/plotview-rs.git", version = "0.1.0" }
 
 [features]
 default = ["operations", "mkl"]
