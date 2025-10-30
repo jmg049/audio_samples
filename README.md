@@ -1,53 +1,111 @@
-<div align="center">
+# audio_samples
 
-# Audio Sample Processing & Conversion Library
+A high-performance audio processing library for Rust that provides type-safe sample format conversions, statistical analysis, and various audio processing operations.
 
-<img src="logo.png" alt="audio_samples Logo" width="200"/>
+## Overview
 
-[![Crates.io](https://img.shields.io/crates/v/audio_samples.svg)](https://crates.io/crates/audio_samples) [![Docs.rs](https://docs.rs/audio_sample/badge.svg)](https://docs.rs/audio_samples) ![MSRV: 1.70+](https://img.shields.io/badge/MSRV-1.70+-blue) [![Python](https://img.shields.io/badge/Python-3.8+-blue)](https://pypi.org/project/audio-samples/)
+`audio_samples` is a comprehensive Rust library designed for efficient audio data manipulation, supporting a wide range of audio processing tasks with a focus on performance, type safety, and flexible design.
 
-</div>
+### Key Features
 
-A high-performance audio processing library for Rust with Python bindings, providing type-safe audio sample conversions, comprehensive statistical analysis, real-time streaming, and professional audio processing capabilities.
+- **Type-safe audio sample conversions** between `i16`, `I24`, `i32`, `f32`, and `f64`
+- **High-performance operations** leveraging `ndarray` for efficient computation
+- **Comprehensive metadata tracking** (sample rate, channels, duration)
+- **Flexible data structures** supporting both mono and multi-channel audio
+- **Modular feature system** with fine-grained optional components
+- **Advanced error handling** with chainable result types
 
-## Quick Start
+### Installation
 
-### Rust
+Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-audio_samples = "0.1"
+audio_samples = "1.0.0"
 ```
 
+Select features as needed:
+
+```toml
+audio_samples = { version = "1.0.0", features = ["full"] }
+```
+
+### Feature Flags
+
+- `core-ops` (default): Basic audio operations
+- `fft`: Spectral analysis and Fast Fourier Transform
+- `plotting`: Visualization capabilities
+- `resampling`: Advanced audio resampling
+- `parallel-processing`: Parallel computation using Rayon
+- `full`: Enables all features
+
+## Quick Examples
+
+### Basic Audio Creation and Manipulation
+
 ```rust
-use audio_samples::{AudioSamples, operations::*};
+use audio_samples::AudioSamples;
 use ndarray::array;
 
-// Create and process audio data
+// Create mono audio with sample rate
 let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
 let audio = AudioSamples::new_mono(data, 44100);
 
-// Statistical analysis
-let peak = audio.peak(); // Returns f32 directly
-let rms = audio.rms()?;  // Returns Result<f64>
-
-// Type conversion
-let audio_i16 = audio.as_type::<i16>()?;
+assert_eq!(audio.sample_rate(), 44100);
+assert_eq!(audio.channels(), 1);
 ```
 
-## Features Overview
+### Chainable Processing with Error Handling
 
-### Core Audio Processing
+```rust
+let result = audio
+    .try_apply(|sample| sample * 0.5)
+    .chain(|_| audio.try_apply(|sample| sample.clamp(-1.0, 1.0)))
+    .map(|_| audio.samples_per_channel())
+    .into_result();
+```
 
-- **Type-safe conversions** between all major audio formats (i16, I24, i32, f32, f64)
-- **Statistical analysis** (RMS, peak, variance, zero-crossing rate, autocorrelation)
-- **Audio processing** (normalization, filtering, effects, dynamic range control)
-- **Spectral analysis** (FFT, transforms, frequency domain operations)
-- **Multi-channel support** with flexible channel layouts
+### Beat Detection with Progress Tracking
 
-### Real-time Capabilities
+```rust
+let beat_tracker = audio.detect_beats_with_progress(
+    &BeatConfig::new(120.0).with_tolerance(0.1),
+    Some(0.5), // log compression
+    Some(&progress_callback)
+)?;
 
-- **Streaming audio** from TCP/UDP sources with adaptive buffering
-- **Real-time playback** with low-latency audio output
-- **Signal generation** (sine, square, sawtooth, noise, chirps)
-- **Effects processing** (reverb, delay, compression, EQ)
+println!("Detected tempo: {} BPM", beat_tracker.tempo_bpm);
+```
+
+## Supported Sample Types
+
+- `i16`
+- `I24`
+- `i32`
+- `f32`
+- `f64`
+
+## Performance Considerations
+
+- Uses `ndarray` for efficient computation
+- Optional SIMD and parallel processing support
+- Zero-cost abstractions for audio metadata tracking
+
+## Error Handling
+
+Implements a `ChainableResult` type for:
+- Fluent method chaining
+- Improved error handling ergonomics
+- Built-in logging capabilities
+
+## Documentation
+
+Full API documentation is available at [docs.rs/audio_samples](https://docs.rs/audio_samples)
+
+## License
+
+MIT License
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
