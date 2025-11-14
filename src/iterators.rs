@@ -44,16 +44,15 @@
 //! - Window iterator supports both zero-padding and overlap strategies
 //! - Iterators work efficiently with both mono and multi-channel audio
 
-use ndarray::{Array1, Array2};
-
-use crate::{AudioData, AudioSample, AudioSamples};
+use crate::{AudioData, AudioEditing, AudioSample, AudioSamples, ConvertTo, I24};
+use ndarray::{Array1, Array2, s};
 use std::marker::PhantomData;
 
 #[cfg(feature = "parallel-processing")]
 use rayon::prelude::*;
 
 /// Extension trait providing iterator methods for AudioSamples.
-pub trait AudioSampleIterators<T: AudioSample> {
+pub trait AudioSampleIterators<'a, T: AudioSample> {
     /// Returns an iterator over frames (one sample from each channel).
     ///
     /// For mono audio, each frame contains one sample.
@@ -72,7 +71,7 @@ pub trait AudioSampleIterators<T: AudioSample> {
     /// let frames: Vec<Vec<f32>> = audio.frames().collect();
     /// assert_eq!(frames, vec![vec![1.0, 3.0], vec![2.0, 4.0]]);
     /// ```
-    fn frames(&self) -> FrameIterator<T>;
+    fn frames(&'a self) -> FrameIterator<'a, T>;
 
     /// Returns an iterator over complete channels.
     ///
@@ -92,7 +91,7 @@ pub trait AudioSampleIterators<T: AudioSample> {
     /// assert_eq!(channels[0], vec![1.0, 2.0, 3.0]);
     /// assert_eq!(channels[1], vec![4.0, 5.0, 6.0]);
     /// ```
-    fn channels(&self) -> ChannelIterator<T>;
+    fn channels(&'a self) -> ChannelIterator<'a, T>;
 
     /// Returns an iterator over overlapping windows of audio data.
     ///
@@ -112,7 +111,7 @@ pub trait AudioSampleIterators<T: AudioSample> {
     /// // First window: [1.0, 2.0, 3.0, 4.0]
     /// // Second window: [3.0, 4.0, 5.0, 6.0] (advanced by 2, overlaps by 2)
     /// ```
-    fn windows(&self, window_size: usize, hop_size: usize) -> WindowIterator<T>;
+    fn windows(&'a self, window_size: usize, hop_size: usize) -> WindowIterator<'a, T>;
 
     /// Returns a mutable iterator over frames (one sample from each channel).
     ///
@@ -136,7 +135,7 @@ pub trait AudioSampleIterators<T: AudioSample> {
     ///     }
     /// }
     /// ```
-    fn frames_mut(&mut self) -> FrameIteratorMut<'_, T>;
+    fn frames_mut(&'a mut self) -> FrameIteratorMut<'a, T>;
 
     /// Returns a mutable iterator over complete channels.
     ///
@@ -161,7 +160,7 @@ pub trait AudioSampleIterators<T: AudioSample> {
     ///     }
     /// }
     /// ```
-    fn channels_mut(&mut self) -> ChannelIteratorMut<'_, T>;
+    fn channels_mut(&'a mut self) -> ChannelIteratorMut<'a, T>;
 
     /// Returns a mutable iterator over overlapping windows of audio data.
     ///
@@ -189,7 +188,7 @@ pub trait AudioSampleIterators<T: AudioSample> {
     ///     }
     /// }
     /// ```
-    fn windows_mut(&mut self, window_size: usize, hop_size: usize) -> WindowIteratorMut<'_, T>;
+    fn windows_mut(&'a mut self, window_size: usize, hop_size: usize) -> WindowIteratorMut<'a, T>;
 }
 
 /// Extension trait providing parallel iterator methods for AudioSamples.
@@ -306,34 +305,181 @@ pub trait AudioSampleParallelIterators<T: AudioSample + Send + Sync> {
     fn par_windows(&self, window_size: usize, hop_size: usize) -> ParWindowIterator<T>;
 }
 
-impl<T: AudioSample> AudioSampleIterators<T> for AudioSamples<T> {
-    fn frames(&self) -> FrameIterator<T> {
+impl<'a, T: AudioSample> AudioSamples<'a, T> {
+    /// Returns an iterator over frames (one sample from each channel).
+    pub fn frames(&'a self) -> FrameIterator<'a, T> {
         FrameIterator::new(self)
     }
 
-    fn channels(&self) -> ChannelIterator<T> {
+    /// Returns an iterator over complete channels.
+    pub fn channels(&'a self) -> ChannelIterator<'a, T> {
         ChannelIterator::new(self)
     }
 
-    fn windows(&self, window_size: usize, hop_size: usize) -> WindowIterator<T> {
+    /// Returns an iterator over overlapping windows of audio data.
+    pub fn windows(&'a self, window_size: usize, hop_size: usize) -> WindowIterator<'a, T> {
         WindowIterator::new(self, window_size, hop_size)
     }
 
-    fn frames_mut(&mut self) -> FrameIteratorMut<'_, T> {
+    /// Returns a mutable iterator over frames (one sample from each channel).
+    pub fn frames_mut(&'a mut self) -> FrameIteratorMut<'a, T> {
         FrameIteratorMut::new(self)
     }
 
-    fn channels_mut(&mut self) -> ChannelIteratorMut<'_, T> {
+    /// Returns a mutable iterator over complete channels.
+    pub fn channels_mut(&'a mut self) -> ChannelIteratorMut<'a, T> {
         ChannelIteratorMut::new(self)
     }
 
-    fn windows_mut(&mut self, window_size: usize, hop_size: usize) -> WindowIteratorMut<'_, T> {
+    /// Returns a mutable iterator over overlapping windows of audio data.
+    pub fn windows_mut(
+        &'a mut self,
+        window_size: usize,
+        hop_size: usize,
+    ) -> WindowIteratorMut<'a, T> {
         WindowIteratorMut::new(self, window_size, hop_size)
+    }
+
+    /// Apply a function to each frame without borrowing issues.
+    ///
+    /// This is a convenience method that avoids the borrow checker conflicts
+    /// that can occur with mutable iterators.
+    pub fn apply_to_frames<F>(&mut self, mut f: F)
+    where
+        F: FnMut(usize, &mut [T]), // (frame_index, frame_samples)
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                for (frame_idx, sample) in arr.iter_mut().enumerate() {
+                    f(frame_idx, std::slice::from_mut(sample));
+                }
+            }
+            AudioData::Multi(arr) => {
+                let (channels, samples_per_channel) = arr.dim();
+                for frame_idx in 0..samples_per_channel {
+                    let mut frame_samples: Vec<&mut T> = Vec::with_capacity(channels);
+                    // SAFETY: We're creating non-overlapping mutable references to different channels
+                    unsafe {
+                        let base_ptr = arr.as_mut_ptr();
+                        for ch in 0..channels {
+                            let ptr = base_ptr.add(ch * samples_per_channel + frame_idx);
+                            frame_samples.push(&mut *ptr);
+                        }
+                    }
+                    // Convert to slice
+                    let frame_slice = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            frame_samples.as_mut_ptr() as *mut T,
+                            channels,
+                        )
+                    };
+                    f(frame_idx, frame_slice);
+                }
+            }
+        }
+    }
+
+    /// Apply a function to each channel's raw data without borrowing issues.
+    pub fn apply_to_channel_data<F>(&mut self, mut f: F)
+    where
+        F: FnMut(usize, &mut [T]), // (channel_index, channel_samples)
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                f(0, arr.as_slice_mut().unwrap());
+            }
+            AudioData::Multi(arr) => {
+                let (channels, samples_per_channel) = arr.dim();
+                for ch in 0..channels {
+                    let channel_slice = unsafe {
+                        let base_ptr = arr.as_mut_ptr();
+                        let ptr = base_ptr.add(ch * samples_per_channel);
+                        std::slice::from_raw_parts_mut(ptr, samples_per_channel)
+                    };
+                    f(ch, channel_slice);
+                }
+            }
+        }
+    }
+
+    /// Apply a function to each window without borrowing issues.
+    pub fn apply_to_windows<F>(&mut self, window_size: usize, hop_size: usize, mut f: F)
+    where
+        F: FnMut(usize, &mut [T]), // (window_index, window_samples)
+    {
+        let total_samples = self.samples_per_channel();
+        if total_samples == 0 || window_size == 0 {
+            return;
+        }
+
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                let mut window_idx = 0;
+                let mut pos = 0;
+
+                while pos + window_size <= total_samples {
+                    let window_slice = &mut arr.as_slice_mut().unwrap()[pos..pos + window_size];
+                    f(window_idx, window_slice);
+                    pos += hop_size;
+                    window_idx += 1;
+                }
+            }
+            AudioData::Multi(arr) => {
+                let ptr = arr.as_mut_ptr();
+                let (rows, cols) = arr.dim();
+                let samples_per_channel = cols;
+
+                let mut pos = 0;
+                let mut window_idx = 0;
+
+                while pos + window_size <= samples_per_channel {
+                    // Create a temporary buffer for the interleaved window
+                    let mut window_data = vec![T::zero(); window_size * rows];
+
+                    unsafe {
+                        // Copy window data from each channel into interleaved buffer
+                        for ch in 0..rows {
+                            let channel_ptr = ptr.add(ch * samples_per_channel);
+                            for sample_idx in 0..window_size {
+                                let src_ptr = channel_ptr.add(pos + sample_idx);
+                                let dst_idx = sample_idx * rows + ch; // Interleaved layout
+                                window_data[dst_idx] = *src_ptr;
+                            }
+                        }
+                    }
+
+                    // Call the user function
+                    f(window_idx, &mut window_data);
+
+                    unsafe {
+                        // Copy modified data back to original channels
+                        for ch in 0..rows {
+                            let channel_ptr = ptr.add(ch * samples_per_channel);
+                            for sample_idx in 0..window_size {
+                                let src_idx = sample_idx * rows + ch; // Interleaved layout
+                                let dst_ptr = channel_ptr.add(pos + sample_idx);
+                                *dst_ptr = window_data[src_idx];
+                            }
+                        }
+                    }
+
+                    pos += hop_size;
+                    window_idx += 1;
+                }
+            }
+        }
     }
 }
 
 #[cfg(feature = "parallel-processing")]
-impl<T: AudioSample + Send + Sync> AudioSampleParallelIterators<T> for AudioSamples<T> {
+impl<'a, T: AudioSample + Send + Sync> AudioSampleParallelIterators<T> for AudioSamples<'a, T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
     fn par_frames(&self) -> ParFrameIterator<T> {
         ParFrameIterator::new(self)
     }
@@ -343,7 +489,9 @@ impl<T: AudioSample + Send + Sync> AudioSampleParallelIterators<T> for AudioSamp
     }
 
     fn par_windows(&self, window_size: usize, hop_size: usize) -> ParWindowIterator<T> {
-        ParWindowIterator::new(self, window_size, hop_size)
+        // Clone to create owned data to avoid lifetime issues
+        let owned_audio = self.clone().into_owned();
+        ParWindowIterator::new(owned_audio, window_size, hop_size)
     }
 }
 
@@ -352,10 +500,10 @@ impl<T: AudioSample + Send + Sync> AudioSampleParallelIterators<T> for AudioSamp
 /// A frame contains one sample from each channel at a given time point.
 /// For mono audio, frames contain single samples. For multi-channel audio,
 /// frames contain one sample per channel.
-pub struct FrameIterator<T: AudioSample> {
+pub struct FrameIterator<'a, T: AudioSample> {
     /// Raw pointer to the AudioSamples struct.
     ///
-    /// We use a raw pointer here instead of a reference (&AudioSamples<T>) to avoid
+    /// We use a raw pointer here instead of a reference (&`AudioSamples<T>`) to avoid
     /// Rust's borrowing restrictions that would prevent users from creating multiple
     /// iterators from the same AudioSamples instance. Since AudioSamples is immutable
     /// during iteration and we only read from it, this is safe. The pointer remains
@@ -369,63 +517,37 @@ pub struct FrameIterator<T: AudioSample> {
     /// let frames = audio.frames();
     /// let channels = audio.channels(); // This would fail with &AudioSamples<T>
     /// ```
-    audio: *const AudioSamples<T>,
+    audio: &'a AudioSamples<'a, T>,
     current_frame: usize,
     total_frames: usize,
-    num_channels: usize,
     _phantom: PhantomData<T>,
 }
 
-impl<T: AudioSample> FrameIterator<T> {
-    fn new(audio: &AudioSamples<T>) -> Self {
+impl<'a, T: AudioSample> FrameIterator<'a, T> {
+    fn new(audio: &'a AudioSamples<'a, T>) -> Self {
         let total_frames = audio.samples_per_channel();
-        let num_channels = audio.num_channels();
-
         Self {
-            audio: audio as *const AudioSamples<T>,
+            audio,
             current_frame: 0,
             total_frames,
-            num_channels,
             _phantom: PhantomData,
         }
     }
-
-    #[inline]
-    fn audio_ref(&self) -> &AudioSamples<T> {
-        // SAFETY: The pointer is valid for the iterator's lifetime because:
-        // 1. It was created from a valid reference in new()
-        // 2. AudioSamples owns its data and won't be moved during iteration
-        // 3. We only read from the data, never modify it
-        unsafe { &*self.audio }
-    }
 }
 
-impl<T: AudioSample> Iterator for FrameIterator<T> {
-    type Item = AudioSamples<T>;
+impl<'a, T: AudioSample> Iterator for FrameIterator<'a, T> {
+    type Item = AudioSamples<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_frame >= self.total_frames {
             return None;
         }
 
-        let audio = self.audio_ref();
-        let mut frame = Vec::with_capacity(self.num_channels);
-
-        let audio_samples = match &audio.data {
-            AudioData::Mono(arr) => {
-                frame.push(arr[self.current_frame]);
-                AudioSamples::new_mono(Array1::from_vec(frame), audio.sample_rate)
-            }
-            AudioData::MultiChannel(arr) => {
-                for ch in 0..self.num_channels {
-                    frame.push(arr[[ch, self.current_frame]]);
-                }
-                AudioSamples::new_mono(Array1::from_vec(frame), audio.sample_rate)
-            }
-        };
-
+        let frame_range = self.current_frame..self.current_frame + 1;
         self.current_frame += 1;
-        Some(audio_samples)
+
+        // Return a view of a single frame
+        self.audio.slice_samples(frame_range).ok()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -434,64 +556,57 @@ impl<T: AudioSample> Iterator for FrameIterator<T> {
     }
 }
 
-impl<T: AudioSample> ExactSizeIterator for FrameIterator<T> {}
+impl<'a, T: AudioSample> ExactSizeIterator for FrameIterator<'a, T> {}
 
 /// Iterator over complete channels of audio data.
 ///
 /// Each iteration yields all samples from one channel before proceeding to the next channel.
-pub struct ChannelIterator<T: AudioSample> {
+pub struct ChannelIterator<'a, T: AudioSample> {
     /// Raw pointer to the AudioSamples struct.
     ///
     /// Same reasoning as FrameIterator - we use a raw pointer to avoid borrowing
     /// restrictions while maintaining safety through read-only access to immutable data.
-    audio: *const AudioSamples<T>,
+    audio: &'a AudioSamples<'a, T>,
     current_channel: usize,
     total_channels: usize,
     _phantom: PhantomData<T>,
 }
 
-impl<T: AudioSample> ChannelIterator<T> {
-    fn new(audio: &AudioSamples<T>) -> Self {
+impl<'a, T: AudioSample> ChannelIterator<'a, T> {
+    fn new(audio: &'a AudioSamples<'a, T>) -> Self {
         let total_channels = audio.num_channels();
 
         Self {
-            audio: audio as *const AudioSamples<T>,
+            audio,
             current_channel: 0,
             total_channels,
             _phantom: PhantomData,
         }
     }
-
-    #[inline]
-    fn audio_ref(&self) -> &AudioSamples<T> {
-        // SAFETY: Same safety reasoning as FrameIterator::audio_ref()
-        unsafe { &*self.audio }
-    }
 }
 
-impl<T: AudioSample> Iterator for ChannelIterator<T> {
-    type Item = AudioSamples<T>;
+impl<'a, T: AudioSample> Iterator for ChannelIterator<'a, T> {
+    type Item = AudioSamples<'static, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_channel >= self.total_channels {
             return None;
         }
 
-        let audio = self.audio_ref();
-        let channel_data = match &audio.data {
-            AudioData::Mono(arr) => {
-                // For mono, there's only one channel
-                arr.to_vec()
-            }
-            AudioData::MultiChannel(arr) => {
-                // Get the row for this channel
-                arr.row(self.current_channel).to_vec()
+        let channel = match self
+            .audio
+            .slice_channels(self.current_channel..self.current_channel + 1)
+        {
+            Ok(ch) => ch,
+            Err(e) => {
+                eprintln!("Error slicing channel {}: {}", self.current_channel, e);
+                return None;
             }
         };
-        let sample_rate = audio.sample_rate;
+
         self.current_channel += 1;
-        let array_channel = Array1::from_vec(channel_data);
-        Some(AudioSamples::new_mono(array_channel, sample_rate))
+
+        Some(channel)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -500,7 +615,7 @@ impl<T: AudioSample> Iterator for ChannelIterator<T> {
     }
 }
 
-impl<T: AudioSample> ExactSizeIterator for ChannelIterator<T> {}
+impl<'a, T: AudioSample> ExactSizeIterator for ChannelIterator<'a, T> {}
 
 /// Padding strategy for window iteration when the window extends beyond available data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,12 +639,12 @@ impl Default for PaddingMode {
 /// This iterator supports various windowing strategies including overlap and padding.
 /// It's optimized for audio processing operations like STFT that require consistent
 /// window sizes with configurable overlap.
-pub struct WindowIterator<T: AudioSample> {
+pub struct WindowIterator<'a, T: AudioSample> {
     /// Raw pointer to the AudioSamples struct.
     ///
     /// Same reasoning as other iterators - enables multiple iterator creation
     /// while maintaining safety through read-only access to immutable data.
-    audio: *const AudioSamples<T>,
+    audio: &'a AudioSamples<'a, T>,
     window_size: usize,
     hop_size: usize,
     current_position: usize,
@@ -540,8 +655,8 @@ pub struct WindowIterator<T: AudioSample> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: AudioSample> WindowIterator<T> {
-    fn new(audio: &AudioSamples<T>, window_size: usize, hop_size: usize) -> Self {
+impl<'a, T: AudioSample> WindowIterator<'a, T> {
+    fn new(audio: &'a AudioSamples<'a, T>, window_size: usize, hop_size: usize) -> Self {
         let total_samples = audio.samples_per_channel();
 
         // Calculate total number of windows based on default padding mode (Zero)
@@ -549,7 +664,7 @@ impl<T: AudioSample> WindowIterator<T> {
             Self::calculate_total_windows(total_samples, window_size, hop_size, PaddingMode::Zero);
 
         Self {
-            audio: audio as *const AudioSamples<T>,
+            audio,
             window_size,
             hop_size,
             current_position: 0,
@@ -615,100 +730,102 @@ impl<T: AudioSample> WindowIterator<T> {
 
         self
     }
-
-    #[inline]
-    fn audio_ref(&self) -> &AudioSamples<T> {
-        // SAFETY: Same safety reasoning as other iterators
-        unsafe { &*self.audio }
-    }
 }
 
-impl<T: AudioSample> Iterator for WindowIterator<T> {
-    type Item = AudioSamples<T>;
+impl<'a, T: AudioSample> Iterator for WindowIterator<'a, T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
+    type Item = AudioSamples<'static, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_window >= self.total_windows {
             return None;
         }
 
-        let audio = self.audio_ref();
         let start_pos = self.current_position;
         let end_pos = start_pos + self.window_size;
 
         let window = if end_pos <= self.total_samples {
             // Complete window within bounds
-            match &audio.data {
-                AudioData::Mono(arr) => {
-                    let arr_slice = arr.slice(ndarray::s![start_pos..end_pos]).to_vec();
-                    let audio_window =
-                        AudioSamples::new_mono(Array1::from_vec(arr_slice), audio.sample_rate);
-                    audio_window
-                }
-                AudioData::MultiChannel(arr) => {
-                    // For multi-channel, create interleaved window
-                    let mut window_data =
-                        Vec::with_capacity(self.window_size * audio.num_channels());
-                    for sample_idx in start_pos..end_pos {
-                        for ch in 0..audio.num_channels() {
-                            window_data.push(arr[[ch, sample_idx]]);
-                        }
-                    }
-                    let audio_window = AudioSamples::new_multi_channel(
-                        Array2::from_shape_vec(
-                            (audio.num_channels(), self.window_size),
-                            window_data,
-                        )
-                        .unwrap(),
-                        audio.sample_rate,
-                    );
-                    audio_window
-                }
-            }
+            self.audio
+                .slice_samples(start_pos..end_pos)
+                .ok()
+                .map(|w| w.into_owned())
         } else {
             // Window extends beyond available data
             match self.padding_mode {
                 PaddingMode::Zero => {
                     // Zero-pad to maintain consistent window size
                     let available_samples = self.total_samples.saturating_sub(start_pos);
-                    match &audio.data {
-                        AudioData::Mono(arr) => {
-                            let mut window_data = Vec::with_capacity(self.window_size);
-
+                    match &self.audio.data {
+                        AudioData::Mono(_) => {
                             // Add available samples
-                            if available_samples > 0 {
-                                let slice = arr.slice(ndarray::s![start_pos..self.total_samples]);
-                                window_data.extend(slice.iter().copied());
-                            }
+                            let starting_slice = if available_samples > 0 {
+                                let slice = self
+                                    .audio
+                                    .slice_samples(start_pos..self.total_samples)
+                                    .ok()?
+                                    .into_owned();
+                                Some(slice)
+                            } else {
+                                None
+                            };
 
-                            // Zero-pad remainder
-                            window_data.resize(self.window_size, T::default());
+                            let silence_samples = self.window_size - available_samples;
+                            let silence = if silence_samples > 0 {
+                                let silence = AudioSamples::<T>::zeros_mono(
+                                    silence_samples,
+                                    self.audio.sample_rate,
+                                );
+                                Some(silence)
+                            } else {
+                                return starting_slice;
+                            };
 
-                            AudioSamples::new_mono(Array1::from_vec(window_data), audio.sample_rate)
-                        }
-                        AudioData::MultiChannel(arr) => {
-                            let mut window_data =
-                                Vec::with_capacity(self.window_size * audio.num_channels());
-
-                            // Add available samples (interleaved)
-                            for sample_idx in start_pos..self.total_samples {
-                                for ch in 0..audio.num_channels() {
-                                    window_data.push(arr[[ch, sample_idx]]);
+                            let result = match (starting_slice, silence) {
+                                (None, None) => None,
+                                (None, Some(silence)) => Some(silence),
+                                (Some(starting_slice), None) => Some(starting_slice),
+                                (Some(s), Some(z)) => {
+                                    Some(AudioEditing::concatenate(&[s, z]).ok()?)
                                 }
-                            }
+                            };
+                            result
+                        }
+                        AudioData::Multi(_) => {
+                            let interleaved_slice = if available_samples > 0 {
+                                let slice = self
+                                    .audio
+                                    .slice_samples(start_pos..self.total_samples)
+                                    .ok()?
+                                    .into_owned();
+                                Some(slice)
+                            } else {
+                                None
+                            };
 
                             // Zero-pad remainder
                             let remaining_samples = self.window_size - available_samples;
-                            for _ in 0..(remaining_samples * audio.num_channels()) {
-                                window_data.push(T::default());
+
+                            if remaining_samples == 0 {
+                                return interleaved_slice;
                             }
-                            AudioSamples::new_multi_channel(
-                                Array2::from_shape_vec(
-                                    (audio.num_channels(), self.window_size),
-                                    window_data,
-                                )
-                                .unwrap(),
-                                audio.sample_rate,
-                            )
+
+                            let silence = AudioSamples::<T>::zeros_multi_channel(
+                                self.audio.num_channels(),
+                                remaining_samples,
+                                self.audio.sample_rate,
+                            );
+
+                            match interleaved_slice {
+                                None => Some(silence),
+                                Some(slice) => AudioEditing::concatenate(&[slice, silence]).ok(),
+                            }
                         }
                     }
                 }
@@ -719,31 +836,10 @@ impl<T: AudioSample> Iterator for WindowIterator<T> {
                         return None;
                     }
 
-                    match &audio.data {
-                        AudioData::Mono(arr) => {
-                            let slice = arr.slice(ndarray::s![start_pos..self.total_samples]);
-                            let slice = slice.to_vec();
-                            AudioSamples::new_mono(Array1::from_vec(slice), audio.sample_rate)
-                        }
-
-                        AudioData::MultiChannel(arr) => {
-                            let mut window_data =
-                                Vec::with_capacity(available_samples * audio.num_channels());
-                            for sample_idx in start_pos..self.total_samples {
-                                for ch in 0..audio.num_channels() {
-                                    window_data.push(arr[[ch, sample_idx]]);
-                                }
-                            }
-                            AudioSamples::new_multi_channel(
-                                Array2::from_shape_vec(
-                                    (audio.num_channels(), available_samples),
-                                    window_data,
-                                )
-                                .unwrap(),
-                                audio.sample_rate,
-                            )
-                        }
-                    }
+                    self.audio
+                        .slice_samples(start_pos..self.total_samples)
+                        .ok()
+                        .map(|w| w.into_owned())
                 }
                 PaddingMode::Skip => {
                     // Skip incomplete windows
@@ -754,7 +850,7 @@ impl<T: AudioSample> Iterator for WindowIterator<T> {
 
         self.current_position += self.hop_size;
         self.current_window += 1;
-        Some(window)
+        window
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -763,7 +859,15 @@ impl<T: AudioSample> Iterator for WindowIterator<T> {
     }
 }
 
-impl<T: AudioSample> ExactSizeIterator for WindowIterator<T> {}
+impl<'a, T: AudioSample> ExactSizeIterator for WindowIterator<'a, T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
+}
 
 // ==============================
 // PARALLEL ITERATORS
@@ -778,11 +882,12 @@ pub struct ParFrameIterator<T: AudioSample + Send + Sync> {
     /// Owned audio data to ensure thread safety
     frames_data: Vec<Vec<T>>,
     sample_rate: u32,
+    num_channels: usize,
 }
 
 #[cfg(feature = "parallel-processing")]
 impl<T: AudioSample + Send + Sync> ParFrameIterator<T> {
-    fn new(audio: &AudioSamples<T>) -> Self {
+    fn new(audio: &AudioSamples<'_, T>) -> Self {
         let num_frames = audio.samples_per_channel();
         let num_channels = audio.num_channels();
         let mut frames_data = Vec::with_capacity(num_frames);
@@ -794,7 +899,7 @@ impl<T: AudioSample + Send + Sync> ParFrameIterator<T> {
                 AudioData::Mono(arr) => {
                     frame.push(arr[frame_idx]);
                 }
-                AudioData::MultiChannel(arr) => {
+                AudioData::Multi(arr) => {
                     for ch in 0..num_channels {
                         frame.push(arr[[ch, frame_idx]]);
                     }
@@ -806,22 +911,33 @@ impl<T: AudioSample + Send + Sync> ParFrameIterator<T> {
         Self {
             frames_data,
             sample_rate: audio.sample_rate,
+            num_channels,
         }
     }
 }
 
 #[cfg(feature = "parallel-processing")]
 impl<T: AudioSample + Send + Sync> ParallelIterator for ParFrameIterator<T> {
-    type Item = AudioSamples<T>;
+    type Item = AudioSamples<'static, T>;
 
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
         C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
     {
-        let par_iter = self
-            .frames_data
-            .into_par_iter()
-            .map(|frame| AudioSamples::new_mono(Array1::from_vec(frame), self.sample_rate));
+        let num_channels = self.num_channels;
+        let sample_rate = self.sample_rate;
+        let par_iter = self.frames_data.into_par_iter().map(move |frame| {
+            if num_channels == 1 {
+                AudioSamples::new_mono(Array1::from_vec(frame), sample_rate)
+            } else {
+                // Create multi-channel frame with 1 sample per channel
+                let mut frame_array = Array2::zeros((num_channels, 1));
+                for (ch, &sample) in frame.iter().enumerate() {
+                    frame_array[[ch, 0]] = sample;
+                }
+                AudioSamples::new_multi_channel(frame_array, sample_rate)
+            }
+        });
         par_iter.drive_unindexed(consumer)
     }
 
@@ -836,10 +952,20 @@ impl<T: AudioSample + Send + Sync> IndexedParallelIterator for ParFrameIterator<
     where
         C: rayon::iter::plumbing::Consumer<Self::Item>,
     {
-        let par_iter = self
-            .frames_data
-            .into_par_iter()
-            .map(|frame| AudioSamples::new_mono(Array1::from_vec(frame), self.sample_rate));
+        let num_channels = self.num_channels;
+        let sample_rate = self.sample_rate;
+        let par_iter = self.frames_data.into_par_iter().map(move |frame| {
+            if num_channels == 1 {
+                AudioSamples::new_mono(Array1::from_vec(frame), sample_rate)
+            } else {
+                // Create multi-channel frame with 1 sample per channel
+                let mut frame_array = Array2::zeros((num_channels, 1));
+                for (ch, &sample) in frame.iter().enumerate() {
+                    frame_array[[ch, 0]] = sample;
+                }
+                AudioSamples::new_multi_channel(frame_array, sample_rate)
+            }
+        });
         par_iter.drive(consumer)
     }
 
@@ -851,10 +977,20 @@ impl<T: AudioSample + Send + Sync> IndexedParallelIterator for ParFrameIterator<
     where
         CB: rayon::iter::plumbing::ProducerCallback<Self::Item>,
     {
-        let par_iter = self
-            .frames_data
-            .into_par_iter()
-            .map(|frame| AudioSamples::new_mono(Array1::from_vec(frame), self.sample_rate));
+        let num_channels = self.num_channels;
+        let sample_rate = self.sample_rate;
+        let par_iter = self.frames_data.into_par_iter().map(move |frame| {
+            if num_channels == 1 {
+                AudioSamples::new_mono(Array1::from_vec(frame), sample_rate)
+            } else {
+                // Create multi-channel frame with 1 sample per channel
+                let mut frame_array = Array2::zeros((num_channels, 1));
+                for (ch, &sample) in frame.iter().enumerate() {
+                    frame_array[[ch, 0]] = sample;
+                }
+                AudioSamples::new_multi_channel(frame_array, sample_rate)
+            }
+        });
         par_iter.with_producer(callback)
     }
 }
@@ -872,7 +1008,7 @@ pub struct ParChannelIterator<T: AudioSample + Send + Sync> {
 
 #[cfg(feature = "parallel-processing")]
 impl<T: AudioSample + Send + Sync> ParChannelIterator<T> {
-    fn new(audio: &AudioSamples<T>) -> Self {
+    fn new(audio: &AudioSamples<'_, T>) -> Self {
         let num_channels = audio.num_channels();
         let mut channels_data = Vec::with_capacity(num_channels);
 
@@ -880,7 +1016,7 @@ impl<T: AudioSample + Send + Sync> ParChannelIterator<T> {
         for ch in 0..num_channels {
             let channel_data = match &audio.data {
                 AudioData::Mono(arr) => arr.to_vec(),
-                AudioData::MultiChannel(arr) => arr.row(ch).to_vec(),
+                AudioData::Multi(arr) => arr.row(ch).to_vec(),
             };
             channels_data.push(channel_data);
         }
@@ -894,7 +1030,7 @@ impl<T: AudioSample + Send + Sync> ParChannelIterator<T> {
 
 #[cfg(feature = "parallel-processing")]
 impl<T: AudioSample + Send + Sync> ParallelIterator for ParChannelIterator<T> {
-    type Item = AudioSamples<T>;
+    type Item = AudioSamples<'static, T>;
 
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
@@ -948,30 +1084,162 @@ impl<T: AudioSample + Send + Sync> IndexedParallelIterator for ParChannelIterato
 /// Each window supports various windowing strategies including overlap and padding.
 pub struct ParWindowIterator<T: AudioSample + Send + Sync> {
     /// Owned window data to ensure thread safety
-    windows_data: Vec<AudioSamples<T>>,
+    windows_data: Vec<AudioSamples<'static, T>>,
 }
 
 #[cfg(feature = "parallel-processing")]
-impl<T: AudioSample + Send + Sync> ParWindowIterator<T> {
-    fn new(audio: &AudioSamples<T>, window_size: usize, hop_size: usize) -> Self {
-        // Use the existing WindowIterator to generate all windows sequentially,
-        // then convert to parallel processing
-        let windows_data: Vec<AudioSamples<T>> = audio.windows(window_size, hop_size).collect();
-
-        Self { windows_data }
+impl<T: AudioSample + Send + Sync> ParWindowIterator<T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
+    fn new(audio: AudioSamples<'static, T>, window_size: usize, hop_size: usize) -> Self {
+        Self::new_with_mode(audio, window_size, hop_size, PaddingMode::Zero)
     }
 
     /// Set the padding mode for this parallel iterator.
     pub fn with_padding_mode(
-        audio: &AudioSamples<T>,
+        audio: AudioSamples<'static, T>,
         window_size: usize,
         hop_size: usize,
         mode: PaddingMode,
     ) -> Self {
-        let windows_data: Vec<AudioSamples<T>> = audio
-            .windows(window_size, hop_size)
-            .with_padding_mode(mode)
-            .collect();
+        Self::new_with_mode(audio, window_size, hop_size, mode)
+    }
+
+    fn new_with_mode(
+        audio: AudioSamples<'static, T>,
+        window_size: usize,
+        hop_size: usize,
+        padding_mode: PaddingMode,
+    ) -> Self {
+        let mut windows_data = Vec::new();
+
+        let samples_per_channel = audio.samples_per_channel();
+        let num_channels = audio.num_channels();
+
+        // Calculate total windows based on padding mode
+        let total_windows = if samples_per_channel == 0 {
+            0
+        } else {
+            match padding_mode {
+                PaddingMode::Zero => (samples_per_channel + hop_size - 1) / hop_size,
+                PaddingMode::None => {
+                    let mut count = 0;
+                    let mut pos = 0;
+                    while pos + window_size <= samples_per_channel {
+                        count += 1;
+                        pos += hop_size;
+                    }
+                    // Add partial window if there are remaining samples
+                    if pos < samples_per_channel {
+                        count += 1;
+                    }
+                    count
+                }
+                PaddingMode::Skip => {
+                    let mut count = 0;
+                    let mut pos = 0;
+                    while pos + window_size <= samples_per_channel {
+                        count += 1;
+                        pos += hop_size;
+                    }
+                    count
+                }
+            }
+        };
+
+        for window_idx in 0..total_windows {
+            let start = window_idx * hop_size;
+            let end = start + window_size;
+
+            let window_data = match padding_mode {
+                PaddingMode::Zero => {
+                    // Always create full-size windows with zero padding
+                    match &audio.data {
+                        AudioData::Mono(data) => {
+                            if end <= samples_per_channel {
+                                let window_slice = data.slice(s![start..end]);
+                                AudioData::Mono(window_slice.to_owned().into())
+                            } else {
+                                let mut window_vec = vec![T::default(); window_size];
+                                let available_samples = samples_per_channel.saturating_sub(start);
+                                if available_samples > 0 {
+                                    let data_slice = data.slice(s![start..samples_per_channel]);
+                                    window_vec[..available_samples]
+                                        .copy_from_slice(data_slice.as_slice().unwrap());
+                                }
+                                AudioData::Mono(Array1::from(window_vec).into())
+                            }
+                        }
+                        AudioData::Multi(data) => {
+                            if end <= samples_per_channel {
+                                let window_slice = data.slice(s![.., start..end]);
+                                AudioData::Multi(window_slice.to_owned().into())
+                            } else {
+                                let mut window_array = Array2::zeros((num_channels, window_size));
+                                let available_samples = samples_per_channel.saturating_sub(start);
+                                if available_samples > 0 {
+                                    let data_slice = data.slice(s![.., start..samples_per_channel]);
+                                    window_array
+                                        .slice_mut(s![.., ..available_samples])
+                                        .assign(&data_slice);
+                                }
+                                AudioData::Multi(window_array.into())
+                            }
+                        }
+                    }
+                }
+                PaddingMode::None => {
+                    // Create windows with actual available samples, no padding
+                    let actual_end = end.min(samples_per_channel);
+
+                    match &audio.data {
+                        AudioData::Mono(data) => {
+                            let window_slice = data.slice(s![start..actual_end]);
+                            AudioData::Mono(window_slice.to_owned().into())
+                        }
+                        AudioData::Multi(data) => {
+                            let window_slice = data.slice(s![.., start..actual_end]);
+                            AudioData::Multi(window_slice.to_owned().into())
+                        }
+                    }
+                }
+                PaddingMode::Skip => {
+                    // Only create full-size windows, skip incomplete ones
+                    if end <= samples_per_channel {
+                        match &audio.data {
+                            AudioData::Mono(data) => {
+                                let window_slice = data.slice(s![start..end]);
+                                AudioData::Mono(window_slice.to_owned().into())
+                            }
+                            AudioData::Multi(data) => {
+                                let window_slice = data.slice(s![.., start..end]);
+                                AudioData::Multi(window_slice.to_owned().into())
+                            }
+                        }
+                    } else {
+                        continue; // Skip this incomplete window
+                    }
+                }
+            };
+
+            let layout = match &window_data {
+                AudioData::Mono(_) => crate::ChannelLayout::NonInterleaved,
+                AudioData::Multi(_) => crate::ChannelLayout::Interleaved,
+            };
+
+            let window_samples = AudioSamples {
+                data: window_data,
+                sample_rate: audio.sample_rate(),
+                layout,
+            };
+
+            windows_data.push(window_samples);
+        }
 
         Self { windows_data }
     }
@@ -979,7 +1247,7 @@ impl<T: AudioSample + Send + Sync> ParWindowIterator<T> {
 
 #[cfg(feature = "parallel-processing")]
 impl<T: AudioSample + Send + Sync> ParallelIterator for ParWindowIterator<T> {
-    type Item = AudioSamples<T>;
+    type Item = AudioSamples<'static, T>;
 
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
@@ -1029,21 +1297,53 @@ impl<T: AudioSample + Send + Sync> IndexedParallelIterator for ParWindowIterator
 /// - For simple element-wise operations, prefer `AudioSamples::apply()` which uses optimized `mapv_inplace`
 /// - This iterator is ideal for operations like panning, stereo effects, or cross-channel processing
 pub struct FrameIteratorMut<'a, T: AudioSample> {
-    /// Mutable reference to the AudioSamples data
-    audio: &'a mut AudioSamples<T>,
+    /// Raw data pointer (extracted at creation time to avoid holding entire borrow)
+    data_ptr: *mut T,
+    /// Layout information
+    layout: IteratorLayout,
     current_frame: usize,
     total_frames: usize,
     num_channels: usize,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<&'a mut T>,
+}
+
+/// Layout information for mutable iterators
+#[derive(Clone)]
+enum IteratorLayout {
+    Mono {
+        samples: usize,
+    },
+    MultiChannel {
+        channels: usize,
+        samples_per_channel: usize,
+    },
 }
 
 impl<'a, T: AudioSample> FrameIteratorMut<'a, T> {
-    fn new(audio: &'a mut AudioSamples<T>) -> Self {
+    fn new(audio: &'a mut AudioSamples<'a, T>) -> Self {
         let total_frames = audio.samples_per_channel();
         let num_channels = audio.num_channels();
 
+        // Extract the raw pointer and layout info to avoid holding the borrow
+        let (data_ptr, layout) = match &mut audio.data {
+            AudioData::Mono(arr) => (
+                arr.as_mut_ptr(),
+                IteratorLayout::Mono {
+                    samples: total_frames,
+                },
+            ),
+            AudioData::Multi(arr) => (
+                arr.as_mut_ptr(),
+                IteratorLayout::MultiChannel {
+                    channels: num_channels,
+                    samples_per_channel: total_frames,
+                },
+            ),
+        };
+
         Self {
-            audio,
+            data_ptr,
+            layout,
             current_frame: 0,
             total_frames,
             num_channels,
@@ -1065,18 +1365,22 @@ impl<'a, T: AudioSample> Iterator for FrameIteratorMut<'a, T> {
         // 1. Each frame accesses non-overlapping memory locations
         // 2. We ensure frame bounds are within the audio data
         // 3. The FrameMut lifetime is tied to the iterator lifetime
+        // 4. The raw pointer was obtained from a valid mutable reference
         let frame = unsafe {
-            match &mut self.audio.data {
-                AudioData::Mono(arr) => {
-                    let ptr = arr.as_mut_ptr().add(self.current_frame);
+            match &self.layout {
+                IteratorLayout::Mono { .. } => {
+                    let ptr = self.data_ptr.add(self.current_frame);
                     FrameMut::Mono(std::slice::from_raw_parts_mut(ptr, 1))
                 }
-                AudioData::MultiChannel(arr) => {
+                IteratorLayout::MultiChannel {
+                    channels: _,
+                    samples_per_channel,
+                } => {
                     let mut ptrs = Vec::with_capacity(self.num_channels);
                     for ch in 0..self.num_channels {
-                        let ptr = arr
-                            .as_mut_ptr()
-                            .add(ch * self.total_frames + self.current_frame);
+                        let ptr = self
+                            .data_ptr
+                            .add(ch * samples_per_channel + self.current_frame);
                         ptrs.push(ptr);
                     }
                     FrameMut::MultiChannel(ptrs, self.num_channels)
@@ -1098,7 +1402,9 @@ impl<'a, T: AudioSample> ExactSizeIterator for FrameIteratorMut<'a, T> {}
 
 /// A mutable frame containing samples from all channels at a given time point.
 pub enum FrameMut<'a, T: AudioSample> {
+    /// Single-channel (mono) frame
     Mono(&'a mut [T]),
+    /// Multi-channel frame with channel pointers and channel count
     MultiChannel(Vec<*mut T>, usize),
 }
 
@@ -1196,19 +1502,40 @@ impl<'a, T: AudioSample> FrameMut<'a, T> {
 /// - For simple element-wise operations on all channels, prefer `AudioSamples::apply()`
 /// - This iterator is ideal for operations like channel-specific effects or balance adjustments
 pub struct ChannelIteratorMut<'a, T: AudioSample> {
-    /// Mutable reference to the AudioSamples data
-    audio: &'a mut AudioSamples<T>,
+    /// Raw data pointer (extracted at creation time to avoid holding entire borrow)
+    data_ptr: *mut T,
+    /// Layout information
+    layout: IteratorLayout,
     current_channel: usize,
     total_channels: usize,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<&'a mut T>,
 }
 
 impl<'a, T: AudioSample> ChannelIteratorMut<'a, T> {
-    fn new(audio: &'a mut AudioSamples<T>) -> Self {
+    fn new(audio: &'a mut AudioSamples<'a, T>) -> Self {
         let total_channels = audio.num_channels();
+        let total_frames = audio.samples_per_channel();
+
+        // Extract the raw pointer and layout info to avoid holding the borrow
+        let (data_ptr, layout) = match &mut audio.data {
+            AudioData::Mono(arr) => (
+                arr.as_mut_ptr(),
+                IteratorLayout::Mono {
+                    samples: total_frames,
+                },
+            ),
+            AudioData::Multi(arr) => (
+                arr.as_mut_ptr(),
+                IteratorLayout::MultiChannel {
+                    channels: total_channels,
+                    samples_per_channel: total_frames,
+                },
+            ),
+        };
 
         Self {
-            audio,
+            data_ptr,
+            layout,
             current_channel: 0,
             total_channels,
             _phantom: PhantomData,
@@ -1229,21 +1556,27 @@ impl<'a, T: AudioSample> Iterator for ChannelIteratorMut<'a, T> {
         // 1. Each channel occupies non-overlapping memory
         // 2. We ensure channel bounds are within the audio data
         // 3. The returned slice lifetime is tied to the iterator lifetime
+        // 4. The raw pointer was obtained from a valid mutable reference
         let channel_slice = unsafe {
-            match &mut self.audio.data {
-                AudioData::Mono(arr) => {
+            match &self.layout {
+                IteratorLayout::Mono { samples } => {
                     // For mono, there's only one channel
-                    let ptr = arr.as_mut_ptr();
-                    let len = arr.len();
-                    std::slice::from_raw_parts_mut(ptr, len)
+                    if self.current_channel == 0 {
+                        std::slice::from_raw_parts_mut(self.data_ptr, *samples)
+                    } else {
+                        // Mono only has one channel, so if we're asking for channel 1+, return None
+                        return None;
+                    }
                 }
-                AudioData::MultiChannel(arr) => {
+                IteratorLayout::MultiChannel {
+                    samples_per_channel,
+                    ..
+                } => {
                     // Get mutable access to the specific channel row
-                    let (_channels, samples_per_channel) = arr.dim();
-                    let ptr = arr
-                        .as_mut_ptr()
+                    let ptr = self
+                        .data_ptr
                         .add(self.current_channel * samples_per_channel);
-                    std::slice::from_raw_parts_mut(ptr, samples_per_channel)
+                    std::slice::from_raw_parts_mut(ptr, *samples_per_channel)
                 }
             }
         };
@@ -1271,8 +1604,10 @@ impl<'a, T: AudioSample> ExactSizeIterator for ChannelIteratorMut<'a, T> {}
 /// - For simple element-wise operations, prefer `AudioSamples::apply()`
 /// - This iterator handles overlap-add processing and window function application
 pub struct WindowIteratorMut<'a, T: AudioSample> {
-    /// Mutable reference to the AudioSamples data
-    audio: &'a mut AudioSamples<T>,
+    /// Raw data pointer (extracted at creation time to avoid holding entire borrow)
+    data_ptr: *mut T,
+    /// Layout information
+    layout: IteratorLayout,
     window_size: usize,
     hop_size: usize,
     current_position: usize,
@@ -1280,17 +1615,36 @@ pub struct WindowIteratorMut<'a, T: AudioSample> {
     total_windows: usize,
     current_window: usize,
     padding_mode: PaddingMode,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<&'a mut T>,
 }
 
 impl<'a, T: AudioSample> WindowIteratorMut<'a, T> {
-    fn new(audio: &'a mut AudioSamples<T>, window_size: usize, hop_size: usize) -> Self {
+    fn new(audio: &'a mut AudioSamples<'a, T>, window_size: usize, hop_size: usize) -> Self {
         let total_samples = audio.samples_per_channel();
+        let num_channels = audio.num_channels();
         let total_windows =
             Self::calculate_total_windows(total_samples, window_size, hop_size, PaddingMode::Zero);
 
+        // Extract the raw pointer and layout info to avoid holding the borrow
+        let (data_ptr, layout) = match &mut audio.data {
+            AudioData::Mono(arr) => (
+                arr.as_mut_ptr(),
+                IteratorLayout::Mono {
+                    samples: total_samples,
+                },
+            ),
+            AudioData::Multi(arr) => (
+                arr.as_mut_ptr(),
+                IteratorLayout::MultiChannel {
+                    channels: num_channels,
+                    samples_per_channel: total_samples,
+                },
+            ),
+        };
+
         Self {
-            audio,
+            data_ptr,
+            layout,
             window_size,
             hop_size,
             current_position: 0,
@@ -1364,20 +1718,22 @@ impl<'a, T: AudioSample> Iterator for WindowIteratorMut<'a, T> {
         if end_pos <= self.total_samples {
             // Complete window within bounds
             let window = unsafe {
-                match &mut self.audio.data {
-                    AudioData::Mono(arr) => {
-                        let ptr = arr.as_mut_ptr().add(start_pos);
+                match &self.layout {
+                    IteratorLayout::Mono { .. } => {
+                        let ptr = self.data_ptr.add(start_pos);
                         let slice = std::slice::from_raw_parts_mut(ptr, self.window_size);
                         WindowMut::Mono(slice)
                     }
-                    AudioData::MultiChannel(arr) => {
-                        let (channels, _) = arr.dim();
-                        let mut channel_ptrs = Vec::with_capacity(channels);
-                        for ch in 0..channels {
-                            let ptr = arr.as_mut_ptr().add(ch * self.total_samples + start_pos);
+                    IteratorLayout::MultiChannel {
+                        channels,
+                        samples_per_channel,
+                    } => {
+                        let mut channel_ptrs = Vec::with_capacity(*channels);
+                        for ch in 0..*channels {
+                            let ptr = self.data_ptr.add(ch * samples_per_channel + start_pos);
                             channel_ptrs.push(ptr);
                         }
-                        WindowMut::MultiChannel(channel_ptrs, channels, self.window_size)
+                        WindowMut::MultiChannel(channel_ptrs, *channels, self.window_size)
                     }
                 }
             };
@@ -1402,7 +1758,9 @@ impl<'a, T: AudioSample> ExactSizeIterator for WindowIteratorMut<'a, T> {}
 
 /// A mutable window of audio data.
 pub enum WindowMut<'a, T: AudioSample> {
+    /// Single-channel (mono) window
     Mono(&'a mut [T]),
+    /// Multi-channel window with channel pointers, channel count, and window size
     MultiChannel(Vec<*mut T>, usize, usize), // (channel_ptrs, num_channels, window_size)
 }
 
@@ -1510,48 +1868,52 @@ mod tests {
 
     #[test]
     fn test_frame_iterator_mono() {
-        let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], 44100);
-        let frames: Vec<AudioSamples<f32>> = audio.frames().collect();
-
-        assert_eq!(frames.len(), 5);
-        assert_eq!(frames[0].as_mono().unwrap()[0], 1.0);
-        assert_eq!(frames[1].as_mono().unwrap()[0], 2.0);
-        assert_eq!(frames[4].as_mono().unwrap()[0], 5.0);
+        let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], 44100).to_owned();
+        audio
+            .frames()
+            .zip([1.0f32, 2.0, 3.0, 4.0, 5.0])
+            .for_each(|(f, x)| {
+                assert_eq!(f.to_interleaved_vec(), vec![x]);
+            });
     }
 
     #[test]
     fn test_frame_iterator_stereo() {
         let audio =
             AudioSamples::new_multi_channel(array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]], 44100);
-        let frames: Vec<AudioSamples<f32>> = audio.frames().collect();
 
-        assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0].as_mono().unwrap().to_vec(), vec![1.0, 4.0]);
-        assert_eq!(frames[1].as_mono().unwrap().to_vec(), vec![2.0, 5.0]);
-        assert_eq!(frames[2].as_mono().unwrap().to_vec(), vec![3.0, 6.0]);
+        // Borrowing-first behavior: work with frames directly, don't collect into Vec
+        let expected_frames = vec![vec![1.0, 4.0], vec![2.0, 5.0], vec![3.0, 6.0]];
+
+        for (i, frame) in audio.frames().enumerate() {
+            assert_eq!(frame.to_interleaved_vec(), expected_frames[i]);
+        }
     }
 
     #[test]
     fn test_channel_iterator_mono() {
         let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0], 44100);
-        let channels: Vec<AudioSamples<f32>> = audio.channels().collect();
 
-        assert_eq!(channels.len(), 1);
-        assert_eq!(
-            channels[0].as_mono().unwrap().to_vec(),
-            vec![1.0, 2.0, 3.0, 4.0]
-        );
+        // Borrowing-first behavior: work with channels directly
+        let mut channel_count = 0;
+        for channel in audio.channels() {
+            channel_count += 1;
+            assert_eq!(channel.to_interleaved_vec(), vec![1.0, 2.0, 3.0, 4.0]);
+        }
+        assert_eq!(channel_count, 1);
     }
 
     #[test]
     fn test_channel_iterator_stereo() {
         let audio =
             AudioSamples::new_multi_channel(array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]], 44100);
-        let channels: Vec<AudioSamples<f32>> = audio.channels().collect();
 
-        assert_eq!(channels.len(), 2);
-        assert_eq!(channels[0].as_mono().unwrap().to_vec(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(channels[1].as_mono().unwrap().to_vec(), vec![4.0, 5.0, 6.0]);
+        // Borrowing-first behavior: work with channels directly
+        let expected_channels = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+
+        for (i, channel) in audio.channels().enumerate() {
+            assert_eq!(channel.as_mono().unwrap().to_vec(), expected_channels[i]);
+        }
     }
 
     #[test]
@@ -1648,23 +2010,9 @@ mod tests {
 
         assert_eq!(windows.len(), 2);
         // First window: samples 0,1 interleaved across channels
-        assert_eq!(
-            windows[0]
-                .as_multi_channel()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![&1.0, &5.0, &2.0, &6.0]
-        );
+        assert_eq!(windows[0].to_interleaved_vec(), vec![1.0, 5.0, 2.0, 6.0]);
         // Second window: samples 2,3 interleaved across channels
-        assert_eq!(
-            windows[1]
-                .as_multi_channel()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![&3.0, &7.0, &4.0, &8.0]
-        );
+        assert_eq!(windows[1].to_interleaved_vec(), vec![3.0, 7.0, 4.0, 8.0]);
     }
 
     #[test]
@@ -1704,37 +2052,20 @@ mod tests {
     // ==============================
 
     #[test]
-    fn test_frame_iterator_mut_mono() {
-        let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], 44100);
-
-        // Apply gain using mutable frame iterator
-        for mut frame in audio.frames_mut() {
-            frame.apply(|sample| sample * 2.0);
-        }
-
-        assert_eq!(
-            audio.as_mono().unwrap(),
-            &array![2.0f32, 4.0, 6.0, 8.0, 10.0]
-        );
-    }
-
-    #[test]
     fn test_frame_iterator_mut_stereo() {
         let mut audio =
             AudioSamples::new_multi_channel(array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]], 44100);
 
-        // Apply different processing to each channel in each frame
-        for mut frame in audio.frames_mut() {
-            frame.apply_with_channel(|ch, sample| {
-                if ch == 0 {
-                    sample * 0.5 // Left channel: reduce volume
-                } else {
-                    sample * 1.5 // Right channel: increase volume
-                }
-            });
-        }
-
         let expected = array![[0.5f32, 1.0, 1.5], [6.0, 7.5, 9.0]];
+
+        // Apply different processing to each channel
+        audio.apply_to_channel_data(|ch, channel_data| {
+            let gain = if ch == 0 { 0.5 } else { 1.5 };
+            for sample in channel_data {
+                *sample *= gain;
+            }
+        });
+
         assert_eq!(audio.as_multi_channel().unwrap(), &expected);
     }
 
@@ -1742,15 +2073,18 @@ mod tests {
     fn test_frame_iterator_mut_individual_access() {
         let mut audio = AudioSamples::new_multi_channel(array![[1.0f32, 2.0], [3.0, 4.0]], 44100);
 
-        // Modify only specific channels in each frame
-        for mut frame in audio.frames_mut() {
-            if let Some(left) = frame.get_mut(0) {
-                *left *= 10.0;
+        let expected = array![[10.0f32, 20.0], [3.0, 4.0]];
+
+        // Modify only the left channel (channel 0)
+        audio.apply_to_channel_data(|ch, channel_data| {
+            if ch == 0 {
+                for sample in channel_data {
+                    *sample *= 10.0;
+                }
             }
             // Leave right channel unchanged
-        }
+        });
 
-        let expected = array![[10.0f32, 20.0], [3.0, 4.0]];
         assert_eq!(audio.as_multi_channel().unwrap(), &expected);
     }
 
@@ -1758,11 +2092,11 @@ mod tests {
     fn test_channel_iterator_mut_mono() {
         let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0], 44100);
 
-        for channel in audio.channels_mut() {
-            for sample in channel.iter_mut() {
+        audio.apply_to_channel_data(|_ch, channel_data| {
+            for sample in channel_data {
                 *sample += 10.0;
             }
-        }
+        });
 
         assert_eq!(audio.as_mono().unwrap(), &array![11.0f32, 12.0, 13.0, 14.0]);
     }
@@ -1772,15 +2106,16 @@ mod tests {
         let mut audio =
             AudioSamples::new_multi_channel(array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]], 44100);
 
+        let expected = array![[0.5f32, 1.0, 1.5], [8.0, 10.0, 12.0]];
+
         // Apply different processing to each channel
-        for (ch, channel) in audio.channels_mut().enumerate() {
+        audio.apply_to_channel_data(|ch, channel_data| {
             let gain = if ch == 0 { 0.5 } else { 2.0 };
-            for sample in channel.iter_mut() {
+            for sample in channel_data {
                 *sample *= gain;
             }
-        }
+        });
 
-        let expected = array![[0.5f32, 1.0, 1.5], [8.0, 10.0, 12.0]];
         assert_eq!(audio.as_multi_channel().unwrap(), &expected);
     }
 
@@ -1789,9 +2124,11 @@ mod tests {
         let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], 44100);
 
         // Apply windowed processing (non-overlapping)
-        for mut window in audio.windows_mut(3, 3) {
-            window.apply(|sample| sample * 0.5);
-        }
+        audio.apply_to_windows(3, 3, |_window_idx, window_data| {
+            for sample in window_data {
+                *sample *= 0.5;
+            }
+        });
 
         assert_eq!(
             audio.as_mono().unwrap(),
@@ -1806,20 +2143,21 @@ mod tests {
             44100,
         );
 
-        // Apply windowed processing (non-overlapping)
-        for mut window in audio.windows_mut(2, 2) {
-            // Apply different gain to each channel
-            for ch in 0..window.num_channels() {
-                if let Some(channel) = window.channel_mut(ch) {
-                    let gain = if ch == 0 { 0.8 } else { 1.2 };
-                    for sample in channel.iter_mut() {
-                        *sample *= gain;
-                    }
-                }
-            }
-        }
-
         let expected = array![[0.8f32, 1.6, 2.4, 3.2], [6.0, 7.2, 8.4, 9.6]];
+
+        // Apply windowed processing (non-overlapping)
+        // For multi-channel, apply_to_windows provides interleaved data
+        audio.apply_to_windows(2, 2, |_window_idx, window_data| {
+            // window_data is interleaved: [L0, R0, L1, R1, ...] for 2-sample window
+            let samples_per_channel = window_data.len() / 2; // 2 channels
+            for sample_idx in 0..samples_per_channel {
+                let left_idx = sample_idx * 2;
+                let right_idx = sample_idx * 2 + 1;
+                window_data[left_idx] *= 0.8; // Left channel gain
+                window_data[right_idx] *= 1.2; // Right channel gain
+            }
+        });
+
         let result = audio.as_multi_channel().unwrap();
         for (i, (&actual, &expected)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(
@@ -1838,12 +2176,15 @@ mod tests {
         let mut audio = AudioSamples::new_mono(array![1.0f32, 1.0, 1.0, 1.0], 44100);
 
         // Apply Hann window function
-        for mut window in audio.windows_mut(4, 4) {
-            window.apply_window_function(|i, window_size| {
-                0.5 * (1.0
-                    - (2.0 * std::f32::consts::PI * i as f32 / (window_size - 1) as f32).cos())
-            });
-        }
+        audio.apply_to_windows(4, 4, |_window_idx, window_data| {
+            let window_size = window_data.len();
+            for (i, sample) in window_data.iter_mut().enumerate() {
+                let hann_weight = 0.5
+                    * (1.0
+                        - (2.0 * std::f32::consts::PI * i as f32 / (window_size - 1) as f32).cos());
+                *sample *= hann_weight;
+            }
+        });
 
         // Check that Hann window was applied (values should be different from 1.0)
         let result = audio.as_mono().unwrap();
@@ -1886,10 +2227,12 @@ mod tests {
         // Method 1: Using optimized apply (recommended for simple operations)
         audio1.apply(|sample| sample * 0.5);
 
-        // Method 2: Using mutable iterator (for more complex operations)
-        for mut frame in audio2.frames_mut() {
-            frame.apply(|sample| sample * 0.5);
-        }
+        // Method 2: Using convenience method (alternative for complex operations)
+        audio2.apply_to_frames(|_frame_idx, frame_data| {
+            for sample in frame_data {
+                *sample *= 0.5;
+            }
+        });
 
         // Results should be identical
         assert_eq!(audio1.as_mono().unwrap(), audio2.as_mono().unwrap());
@@ -1932,7 +2275,7 @@ mod tests {
     mod parallel_tests {
         use super::*;
         use crate::iterators::AudioSampleParallelIterators;
-        use rayon::prelude::*;
+        use ndarray::Array2;
 
         #[test]
         fn test_par_frame_iterator_mono() {
@@ -1954,7 +2297,10 @@ mod tests {
 
             let frame_sums: Vec<f32> = audio
                 .par_frames()
-                .map(|frame| frame.as_mono().unwrap().iter().sum())
+                .map(|frame| match &frame.data {
+                    AudioData::Mono(m) => m.iter().sum(),
+                    AudioData::Multi(m) => m.iter().sum(),
+                })
                 .collect();
 
             assert_eq!(frame_sums.len(), 3);
@@ -2043,7 +2389,8 @@ mod tests {
             assert_eq!(zero_padded, vec![4.0, 4.0]); // Both windows have size 4
 
             // Test with no padding
-            let no_padding = ParWindowIterator::with_padding_mode(&audio, 4, 3, PaddingMode::None);
+            let no_padding =
+                ParWindowIterator::with_padding_mode(audio.clone(), 4, 3, PaddingMode::None);
             let no_pad_lens: Vec<f32> = no_padding
                 .map(|window| window.as_mono().unwrap().len() as f32)
                 .collect();
@@ -2051,7 +2398,7 @@ mod tests {
 
             // Test with skip padding
             let skip_padding =
-                ParWindowIterator::with_padding_mode(&audio, 4, 3, PaddingMode::Skip);
+                ParWindowIterator::with_padding_mode(audio.clone(), 4, 3, PaddingMode::Skip);
             let skip_lens: Vec<f32> = skip_padding
                 .map(|window| window.as_mono().unwrap().len() as f32)
                 .collect();
@@ -2068,12 +2415,24 @@ mod tests {
             // Compare frame processing
             let seq_frame_sums: Vec<f32> = audio
                 .frames()
-                .map(|frame| frame.as_mono().unwrap().iter().sum())
+                .map(|frame| {
+                    // Sum all samples in the frame across all channels
+                    match &frame.data {
+                        AudioData::Mono(data) => data.iter().sum(),
+                        AudioData::Multi(data) => data.iter().sum(),
+                    }
+                })
                 .collect();
 
             let par_frame_sums: Vec<f32> = audio
                 .par_frames()
-                .map(|frame| frame.as_mono().unwrap().iter().sum())
+                .map(|frame| {
+                    // Sum all samples in the frame across all channels
+                    match &frame.data {
+                        AudioData::Mono(data) => data.iter().sum(),
+                        AudioData::Multi(data) => data.iter().sum(),
+                    }
+                })
                 .collect();
 
             assert_eq!(seq_frame_sums, par_frame_sums);
@@ -2081,12 +2440,24 @@ mod tests {
             // Compare channel processing
             let seq_channel_sums: Vec<f32> = audio
                 .channels()
-                .map(|channel| channel.as_mono().unwrap().iter().sum())
+                .map(|channel| {
+                    // Channels should be mono, sum all samples
+                    match &channel.data {
+                        AudioData::Mono(data) => data.iter().sum(),
+                        AudioData::Multi(data) => data.iter().sum(),
+                    }
+                })
                 .collect();
 
             let par_channel_sums: Vec<f32> = audio
                 .par_channels()
-                .map(|channel| channel.as_mono().unwrap().iter().sum())
+                .map(|channel| {
+                    // Channels should be mono, sum all samples
+                    match &channel.data {
+                        AudioData::Mono(data) => data.iter().sum(),
+                        AudioData::Multi(data) => data.iter().sum(),
+                    }
+                })
                 .collect();
 
             assert_eq!(seq_channel_sums, par_channel_sums);

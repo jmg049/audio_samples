@@ -78,10 +78,10 @@ docs/_build/
 
 !.gitignore
 
-\.*
-
-!README.md
-**/*.md
+# !README.md
+# !ARCHITECTURE.md
+# !STYLE_GUIDE.md
+# **/*.md
 
 results/
 scripts/

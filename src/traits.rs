@@ -1,22 +1,30 @@
 use bytemuck::NoUninit;
-use num_traits::{FromPrimitive, Num, One, ToBytes, Zero};
+use ndarray::ScalarOperand;
+use num_traits::{FromPrimitive, Num, NumCast, One, Signed, ToBytes, Zero};
 use serde::{Deserialize, Serialize};
 
 use crate::{AudioSampleError, AudioSampleResult, AudioSamples, I24};
 use std::fmt::{Debug, Display};
-use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::ops::{
+    Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign,
+};
 
+/// Trait for casting from one type to another.
 pub trait CastFrom<S>: Sized {
+    /// Cast from the source type to Self.
     fn cast_from(value: S) -> Self;
 }
 
+/// Trait for casting into another type.
 pub trait CastInto<T>: Sized
 where
     Self: CastFrom<T>,
 {
+    /// Cast self into the target type.
     fn cast_into(self) -> T;
 }
 
+/// Trait for types that can be cast to all audio sample types.
 pub trait Castable:
     CastInto<i16> + CastInto<I24> + CastInto<i32> + CastInto<f32> + CastInto<f64>
 {
@@ -47,23 +55,31 @@ where
 
 /// Core trait defining the interface for audio sample types.
 ///
-/// This trait provides a unified interface for working with different audio sample formats
-/// including integers (i16, i32), 24-bit integers (I24), and floating-point (f32, f64).
+/// Provides a unified interface for working with different audio sample formats
+/// including integers, 24-bit integers, and floating-point values. Ensures type-safe
+/// conversions and arithmetic operations across all supported sample formats.
 ///
 /// All implementors support:
 /// - Type-safe conversions between all supported formats
 /// - Arithmetic operations (Add, Sub, Mul, Div)
 /// - Serialization to byte arrays
-/// - Safe memory layout guarantees
+/// - Safe memory layout guarantees for audio processing
 ///
-/// ## Supported Types
+/// # Required Methods
+/// This trait is implemented automatically for types that satisfy the
+/// comprehensive bounds listed below. No manual implementation is required.
+///
+/// # Supported Types
 /// - `i16`: 16-bit signed integer samples (most common for audio files)
 /// - `I24`: 24-bit signed integer samples (professional audio)
 /// - `i32`: 32-bit signed integer samples (high precision)
 /// - `f32`: 32-bit floating-point samples (normalized -1.0 to 1.0)
 /// - `f64`: 64-bit floating-point samples (highest precision)
 ///
-/// I hate this trait so much (jmg049), but it is necessary. So much is saying "I am a numeric primitive that you can do basic operations on (+, -, *, /, neg, one, zero) and be copied around safely (literally restating the gurantee of primitives)".
+/// # Safety
+/// Implementors must ensure proper numeric behavior and memory safety
+/// for all required trait bounds, particularly for byte serialization
+/// and numeric conversions.
 pub trait AudioSample:
     // Standard library traits
     Copy
@@ -76,9 +92,15 @@ pub trait AudioSample:
     + PartialEq
     + PartialOrd
     + Add<Output = Self>
+    + AddAssign<Self>
     + Sub<Output = Self>
+    + SubAssign<Self>
     + Mul<Output = Self>
+    + MulAssign<Self>
     + Div<Output = Self>
+    + DivAssign<Self>
+    + Rem<Output = Self>
+    + RemAssign<Self>
     + Neg<Output = Self>
     + Into<Self>
     + From<Self>
@@ -93,6 +115,9 @@ pub trait AudioSample:
     + Serialize // serde trait for serialization
     + Deserialize<'static> //serde trait for deserialisation // Need to make these optional. 
     + FromPrimitive // num-traits trait for conversion from primitive types
+    + Signed // num-traits trait for signed types
+    + NumCast // num-traits trait for casting between numeric types
+    + ScalarOperand // ndarray trait for scalar operations
 
     // Library-specific traits. Most of which are below.
     // They define how to convert between types depending on the context.
@@ -159,6 +184,7 @@ pub trait AudioSample:
 /// assert!((sample_f32 - 0.5).abs() < 1e-4);  // Should be approximately 0.5
 /// ```
 pub trait ConvertTo<T: AudioSample> {
+    /// Convert this sample to another audio sample type.
     fn convert_to(&self) -> AudioSampleResult<T>;
 
     /// Convert from another audio sample type to this type.
@@ -1170,7 +1196,7 @@ mod conversion_tests {
 /// This trait provides safe conversion between different audio sample types
 /// while preserving audio quality and handling potential conversion errors.
 /// Leverages the existing ConvertTo trait system for type safety.
-pub trait AudioTypeConversion<T: AudioSample>
+pub trait AudioTypeConversion<'a, T: AudioSample>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -1178,26 +1204,28 @@ where
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
 {
+    // -----
+    // IN DOMAIN CONVERSIONS
+    // -----
+
     /// Converts to different sample type, borrowing the original.
     ///
     /// Uses the existing ConvertTo trait system for type-safe conversions.
     /// The original AudioSamples instance remains unchanged.
-    fn as_type<O: AudioSample + ConvertTo<T>>(&self) -> AudioSampleResult<AudioSamples<O>>
+    fn as_type<O>(&self) -> AudioSampleResult<AudioSamples<'static, O>>
     where
-        T: ConvertTo<O>;
+        T: ConvertTo<O>,
+        O: AudioSample + ConvertTo<T>;
 
     /// Converts to different sample type, consuming the original.
     ///
     /// More efficient than as_type when the original is no longer needed.
-    fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSampleResult<AudioSamples<O>>
+    fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSampleResult<AudioSamples<'static, O>>
     where
         T: ConvertTo<O>;
 
     /// Converts to the highest precision floating-point format.
-    ///
-    /// This is useful when maximum precision is needed for processing.
-    /// Uses optimized vectorized conversion.
-    fn as_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
+    fn as_f64(&self) -> AudioSampleResult<AudioSamples<'static, f64>>
     where
         T: ConvertTo<f64>,
     {
@@ -1205,10 +1233,7 @@ where
     }
 
     /// Converts to single precision floating-point format.
-    ///
-    /// Good balance between precision and memory usage.
-    /// Uses optimized vectorized conversion.
-    fn as_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
+    fn as_f32(&self) -> AudioSampleResult<AudioSamples<'static, f32>>
     where
         T: ConvertTo<f32>,
     {
@@ -1216,10 +1241,7 @@ where
     }
 
     /// Converts to 32-bit integer format.
-    ///
-    /// Highest precision integer format, useful for high-quality processing.
-    /// Uses optimized vectorized conversion.
-    fn as_i32(&self) -> AudioSampleResult<AudioSamples<i32>>
+    fn as_i32(&self) -> AudioSampleResult<AudioSamples<'static, i32>>
     where
         T: ConvertTo<i32>,
     {
@@ -1227,10 +1249,8 @@ where
     }
 
     /// Converts to 16-bit integer format (most common).
-    ///
     /// Standard format for CD audio and many audio files.
-    /// Uses optimized vectorized conversion.
-    fn as_i16(&self) -> AudioSampleResult<AudioSamples<i16>>
+    fn as_i16(&self) -> AudioSampleResult<AudioSamples<'static, i16>>
     where
         T: ConvertTo<i16>,
     {
@@ -1238,28 +1258,93 @@ where
     }
 
     /// Converts to 24-bit integer format (CD Quality).
-    ///
     /// Standard format for CD audio and many audio files.
-    /// Uses optimized vectorized conversion.
-    fn as_i24(&self) -> AudioSampleResult<AudioSamples<I24>>
+    fn as_i24(&self) -> AudioSampleResult<AudioSamples<'static, I24>>
     where
         T: ConvertTo<I24>,
     {
         self.as_type::<I24>()
     }
 
-    fn cast_as<O: AudioSample + CastFrom<T>>(&self) -> AudioSampleResult<AudioSamples<O>>;
+    // -----
+    // Out OF DOMAIN CONVERSIONS
 
-    fn cast_to<O: AudioSample + CastFrom<T>>(self) -> AudioSampleResult<AudioSamples<O>>;
+    // These conversions do traditional casting without audio-specific scaling.
+    // For example, PCM_16 to f32 would map -32768..32767 to -1.0..1.0 with the in-domain conversions
+    // whereas out-of-domain casting would just cast -32768 to -32768.0f32 etc.
+    // -----
 
-    fn cast_as_f32(&self) -> AudioSampleResult<AudioSamples<f32>>
+    /// Converts to different sample type, borrowing the original.
+    fn cast_as<O>(&self) -> AudioSampleResult<AudioSamples<'static, O>>
+    where
+        O: AudioSample + CastFrom<T>;
+
+    /// Converts to different sample type, consuming the original.
+    fn cast_to<O>(self) -> AudioSampleResult<AudioSamples<'static, O>>
+    where
+        O: AudioSample + CastFrom<T>;
+
+    /// Casts audio samples to i16 format.
+    fn cast_as_i16(&self) -> AudioSampleResult<AudioSamples<'static, i16>>
+    where
+        i16: CastFrom<T>,
+    {
+        self.cast_as::<i16>()
+    }
+
+    /// Converts audio samples to i16 format.
+    fn cast_to_i16(self) -> AudioSampleResult<AudioSamples<'static, i16>>
+    where
+        i16: CastFrom<T>,
+        Self: Sized,
+    {
+        self.cast_to::<i16>()
+    }
+
+    /// Casts audio samples to I24 format.
+    fn cast_as_i24(&self) -> AudioSampleResult<AudioSamples<'static, I24>>
+    where
+        I24: CastFrom<T>,
+    {
+        self.cast_as::<I24>()
+    }
+
+    /// Converts audio samples to I24 format.
+    fn cast_to_i24(self) -> AudioSampleResult<AudioSamples<'static, I24>>
+    where
+        I24: CastFrom<T>,
+        Self: Sized,
+    {
+        self.cast_to::<I24>()
+    }
+
+    /// Casts audio samples to i32 format.
+    fn cast_as_i32(&self) -> AudioSampleResult<AudioSamples<'static, i32>>
+    where
+        i32: CastFrom<T>,
+    {
+        self.cast_as::<i32>()
+    }
+
+    /// Converts audio samples to i32 format.
+    fn cast_to_i32(self) -> AudioSampleResult<AudioSamples<'static, i32>>
+    where
+        i32: CastFrom<T>,
+        Self: Sized,
+    {
+        self.cast_to::<i32>()
+    }
+
+    /// Casts audio samples to f32 format.
+    fn cast_as_f32(&self) -> AudioSampleResult<AudioSamples<'static, f32>>
     where
         f32: CastFrom<T>,
     {
         self.cast_as::<f32>()
     }
 
-    fn cast_to_f32(self) -> AudioSampleResult<AudioSamples<f32>>
+    /// Converts audio samples to f32 format.
+    fn cast_to_f32(self) -> AudioSampleResult<AudioSamples<'static, f32>>
     where
         f32: CastFrom<T>,
         Self: Sized,
@@ -1267,18 +1352,12 @@ where
         self.cast_to::<f32>()
     }
 
-    fn cast_as_f64(&self) -> AudioSampleResult<AudioSamples<f64>>
-    where
-        f64: CastFrom<T>,
-    {
-        self.cast_as::<f64>()
-    }
-
-    fn cast_to_f64(self) -> AudioSampleResult<AudioSamples<f64>>
+    /// Casts audio samples to f64 format.
+    fn cast_as_f64(&self) -> AudioSampleResult<AudioSamples<'static, f64>>
     where
         f64: CastFrom<T>,
         Self: Sized,
     {
-        self.cast_to::<f64>()
+        self.cast_as::<f64>()
     }
 }

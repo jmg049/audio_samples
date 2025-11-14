@@ -126,7 +126,7 @@ pub use comparison::*;
 pub use detection::*;
 pub use generation::*;
 
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, I24};
+use crate::{AudioSample, AudioSampleError, AudioSampleResult, I24, RealFloat, to_precision};
 
 /// Converts a byte slice into a single audio sample of type T.
 pub fn audio_sample_from_bytes<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<T> {
@@ -143,26 +143,44 @@ pub fn audio_sample_from_bytes<T: AudioSample>(bytes: &[u8]) -> AudioSampleResul
 
     match sample_size {
         1 => {
-            let array: [u8; 1] = bytes.try_into().unwrap();
+            let array: [u8; 1] = bytes
+                .try_into()
+                .map_err(|_| AudioSampleError::InvalidInput {
+                    msg: "Failed to convert bytes to array".to_string(),
+                })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
         2 => {
-            let array: [u8; 2] = bytes.try_into().unwrap();
+            let array: [u8; 2] = bytes
+                .try_into()
+                .map_err(|_| AudioSampleError::InvalidInput {
+                    msg: "Failed to convert bytes to array".to_string(),
+                })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
         3 => {
-            let array: [u8; 3] = bytes.try_into().unwrap();
+            let array: [u8; 3] = bytes
+                .try_into()
+                .map_err(|_| AudioSampleError::InvalidInput {
+                    msg: "Failed to convert bytes to array".to_string(),
+                })?;
             let i24 = I24::from_le_bytes(array);
-            match T::cast_from(i24) {
-                val => Ok(val),
-            }
+            Ok(T::cast_from(i24))
         }
         4 => {
-            let array: [u8; 4] = bytes.try_into().unwrap();
+            let array: [u8; 4] = bytes
+                .try_into()
+                .map_err(|_| AudioSampleError::InvalidInput {
+                    msg: "Failed to convert bytes to array".to_string(),
+                })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
         8 => {
-            let array: [u8; 8] = bytes.try_into().unwrap();
+            let array: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_| AudioSampleError::InvalidInput {
+                    msg: "Failed to convert bytes to array".to_string(),
+                })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
         _ => Err(AudioSampleError::InvalidInput {
@@ -174,7 +192,7 @@ pub fn audio_sample_from_bytes<T: AudioSample>(bytes: &[u8]) -> AudioSampleResul
 /// Convert bytes to aligned samples, creating a Vec when alignment is required
 pub fn bytes_to_samples_aligned<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<Vec<T>> {
     let sample_size = std::mem::size_of::<T>();
-    if bytes.len() % sample_size != 0 {
+    if !bytes.len().is_multiple_of(sample_size) {
         return Err(AudioSampleError::InvalidInput {
             msg: "Data size is not a multiple of sample size".to_string(),
         });
@@ -185,7 +203,7 @@ pub fn bytes_to_samples_aligned<T: AudioSample>(bytes: &[u8]) -> AudioSampleResu
         let ptr = bytes.as_ptr();
         let alignment = std::mem::align_of::<T>();
 
-        if ptr as usize % alignment == 0 {
+        if (ptr as usize).is_multiple_of(alignment) {
             // Safe to cast directly if aligned
             let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, num_samples) };
             slice.to_vec()
@@ -225,9 +243,18 @@ pub fn bytes_to_samples_aligned<T: AudioSample>(bytes: &[u8]) -> AudioSampleResu
 }
 
 /// Convert bytes to samples with alignment checking (unsafe but fast when aligned)
+///
+/// # Safety
+/// The caller must ensure that:
+/// - `bytes` points to valid, properly aligned memory for type `T`
+/// - The memory region represents valid samples of type `T`
+/// - The byte slice length is a multiple of `size_of::<T>()`
+/// - The data is not mutated elsewhere while the returned slice is borrowed
+///
+/// Undefined behaviour results if these conditions are not met.
 pub unsafe fn bytes_to_samples_unchecked<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<&[T]> {
     let sample_size = std::mem::size_of::<T>();
-    if bytes.len() % sample_size != 0 {
+    if !bytes.len().is_multiple_of(sample_size) {
         return Err(AudioSampleError::InvalidInput {
             msg: "Data size is not a multiple of sample size".to_string(),
         });
@@ -239,7 +266,7 @@ pub unsafe fn bytes_to_samples_unchecked<T: AudioSample>(bytes: &[u8]) -> AudioS
         let alignment = std::mem::align_of::<T>();
 
         // Check alignment before proceeding
-        if ptr as usize % alignment != 0 {
+        if !(ptr as usize).is_multiple_of(alignment) {
             return Err(AudioSampleError::InvalidInput {
                 msg: format!(
                     "Data is not properly aligned for type {} (requires {}-byte alignment)",
@@ -266,6 +293,24 @@ pub unsafe fn bytes_to_samples_unchecked<T: AudioSample>(bytes: &[u8]) -> AudioS
 }
 
 /// Helper function to convert seconds to samples
-pub fn seconds_to_samples(seconds: f64, sample_rate: u32) -> usize {
-    (seconds * sample_rate as f64) as usize
+/// Converts time in seconds to number of samples at given sample rate
+///
+/// # Arguments
+/// - `seconds`: Duration in seconds
+/// - `sample_rate`: Sampling frequency in Hz
+///
+/// # Returns
+/// Number of samples representing the specified duration
+///
+/// # Panics
+/// Panics if the computed sample count cannot be converted to `usize`,
+/// typically when the result would overflow or is infinite/NaN.
+pub fn seconds_to_samples<F: RealFloat>(seconds: F, sample_rate: u32) -> usize {
+    (seconds * to_precision::<F, _>(sample_rate))
+        .to_usize()
+        .expect("Invalid sample rate")
+}
+
+pub fn samples_to_seconds<F: RealFloat>(num_samples: usize, sample_rate: u32) -> F {
+    to_precision::<F, _>(num_samples) / to_precision::<F, _>(sample_rate)
 }

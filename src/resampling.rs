@@ -3,9 +3,10 @@
 
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    operations::{types::ResamplingQuality, traits::AudioChannelOps},
+    I24, RealFloat,
+    operations::{traits::AudioChannelOps, types::ResamplingQuality},
+    to_precision,
 };
-use i24::I24;
 use rubato::{FftFixedInOut, Resampler, SincFixedIn, SincInterpolationType, WindowFunction};
 
 const FAST_BLOCK: usize = 4096;
@@ -52,7 +53,7 @@ pub fn resample<T>(
     audio: &AudioSamples<T>,
     target_sample_rate: usize,
     quality: ResamplingQuality,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     T: AudioSample,
     i16: ConvertTo<T>,
@@ -60,7 +61,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     if audio.total_samples() == 0 {
         return Err(AudioSampleError::InvalidInput {
@@ -92,14 +93,14 @@ where
 fn resample_fast<T: AudioSample>(
     audio: &AudioSamples<f64>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.num_channels();
@@ -123,14 +124,14 @@ where
 fn resample_medium<T: AudioSample>(
     audio: &AudioSamples<f64>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.num_channels();
@@ -161,14 +162,14 @@ where
 fn resample_high<T: AudioSample>(
     audio: &AudioSamples<f64>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     let input_sample_rate = audio.sample_rate() as usize;
     let channels = audio.num_channels();
@@ -225,14 +226,14 @@ fn resample_with_resampler<R: Resampler<f64>, T: AudioSample>(
     audio: &AudioSamples<f64>,
     resampler: &mut R,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     // Extract channel data directly for f64 AudioSamples
     let input_data = extract_channel_data_f64(audio)?;
@@ -254,14 +255,14 @@ fn resample_with_sinc_resampler<T: AudioSample>(
     audio: &AudioSamples<f64>,
     resampler: &mut SincFixedIn<f64>,
     target_sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     let channels = audio.num_channels();
 
@@ -349,15 +350,15 @@ where
 fn convert_channel_data_to_audio_samples<T: AudioSample>(
     channel_data: Vec<Vec<f64>>,
     sample_rate: usize,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
-    AudioSamples<T>: AudioChannelOps<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    for<'a> AudioSamples<'a, T>: AudioChannelOps<T>,
 {
     if channel_data.is_empty() {
         return Err(AudioSampleError::InvalidInput {
@@ -391,11 +392,11 @@ where
 ///
 /// # Returns
 /// A new AudioSamples instance resampled by the given ratio
-pub fn resample_by_ratio<T>(
+pub fn resample_by_ratio<T, F: RealFloat>(
     audio: &AudioSamples<T>,
-    ratio: f64,
+    ratio: F,
     quality: ResamplingQuality,
-) -> AudioSampleResult<AudioSamples<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     T: AudioSample,
     i16: ConvertTo<T>,
@@ -403,16 +404,19 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
-    if ratio <= 0.0 {
+    if ratio <= F::zero() {
         return Err(AudioSampleError::InvalidInput {
             msg: format!("Invalid resampling ratio: {}", ratio),
         });
     }
 
-    let input_sample_rate = audio.sample_rate() as f64;
-    let target_sample_rate = (input_sample_rate * ratio).round() as usize;
+    let input_sample_rate = to_precision::<F, _>(audio.sample_rate);
+    let target_sample_rate = (input_sample_rate * ratio)
+        .round()
+        .to_usize()
+        .expect("Should not fail");
 
     resample(audio, target_sample_rate, quality)
 }
@@ -433,7 +437,7 @@ mod tests {
 
         let data = Array1::from_vec(samples);
 
-        let audio = AudioSamples::new_mono(data.into(), 44100);
+        let audio = AudioSamples::new_mono(data, 44100);
         println!("Original samples: {:?}", audio);
         // Resample to 48 kHz
         let resampled = resample(&audio, 48000, ResamplingQuality::Medium).unwrap();
@@ -447,7 +451,7 @@ mod tests {
     #[test]
     fn test_resample_by_ratio() {
         let data = array![1.0f32, 0.0, -1.0, 0.0];
-        let audio = AudioSamples::new_mono(data.into(), 44100);
+        let audio = AudioSamples::new_mono(data, 44100);
 
         // Upsample by 2x
         let upsampled = resample_by_ratio(&audio, 2.0, ResamplingQuality::Fast).unwrap();
@@ -476,7 +480,7 @@ mod tests {
     #[test]
     fn test_invalid_ratio() {
         let data = array![1.0f32, 0.0];
-        let audio = AudioSamples::new_mono(data.into(), 44100);
+        let audio = AudioSamples::new_mono(data, 44100);
 
         let result = resample_by_ratio(&audio, -1.0, ResamplingQuality::Fast);
         assert!(result.is_err());

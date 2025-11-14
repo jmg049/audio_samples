@@ -3,10 +3,14 @@
 //! This module contains all the configuration types, enums, and helper structures
 //! used by the audio processing traits.
 
+use crate::{AudioSampleError, AudioSampleResult, RealFloat, to_precision};
+
 /// Pad side enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PadSide {
+    /// Pad on the left side
     Left,
+    /// Pad on the right side
     Right,
 }
 
@@ -48,7 +52,7 @@ pub enum NormalizationMethod {
 /// Different window types provide different trade-offs between frequency resolution
 /// and spectral leakage in FFT-based analysis.
 #[derive(Debug, Clone, PartialEq, Copy)]
-pub enum WindowType {
+pub enum WindowType<F: RealFloat> {
     /// Rectangular window (no windowing) - best frequency resolution but high leakage.
     Rectangular,
     /// Hanning window - good general-purpose window with moderate leakage.
@@ -58,16 +62,22 @@ pub enum WindowType {
     /// Blackman window - low leakage but wider main lobe.
     Blackman,
     /// Kaiser window - parameterizable trade-off between resolution and leakage.
-    Kaiser { beta: f64 },
+    Kaiser {
+        /// Beta parameter controlling the trade-off between main lobe width and side lobe level
+        beta: F,
+    },
     /// Gaussian window - smooth roll-off with parameterizable width.
-    Gaussian { std: f64 },
+    Gaussian {
+        /// Standard deviation parameter controlling the window width
+        std: F,
+    },
 }
 
 /// Fade curve shapes for envelope operations.
 ///
 /// Different curves provide different perceptual characteristics for fades.
 #[derive(Debug, Clone, Copy)]
-pub enum FadeCurve {
+pub enum FadeCurve<F: RealFloat> {
     /// Linear fade - constant rate of change.
     Linear,
     /// Exponential fade - faster change at the beginning.
@@ -77,12 +87,12 @@ pub enum FadeCurve {
     /// Smooth step fade - S-curve with smooth transitions.
     SmoothStep,
     /// Custom fade curve defined by a function.
-    Custom(fn(f64) -> f64),
+    Custom(fn(F) -> F),
 }
 
 /// Methods for converting multi-channel audio to mono.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MonoConversionMethod {
+pub enum MonoConversionMethod<F: RealFloat> {
     /// Average all channels equally.
     Average,
     /// Use left channel only (for stereo input).
@@ -90,18 +100,18 @@ pub enum MonoConversionMethod {
     /// Use right channel only (for stereo input).
     Right,
     /// Use weighted average with custom weights per channel.
-    Weighted(Vec<f64>),
+    Weighted(Vec<F>),
     /// Use center channel if available, otherwise average L/R.
     Center,
 }
 
 /// Methods for converting mono audio to stereo.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StereoConversionMethod {
+pub enum StereoConversionMethod<F: RealFloat> {
     /// Duplicate mono signal to both left and right channels.
     Duplicate,
-    /// Pan the mono signal (0.0 = center, -1.0 = left, 1.0 = right).
-    Pan(f64),
+    /// Pan the mono signal (F::zero() = center, -F::one() = left, F::one() = right).
+    Pan(F),
     /// Use as left channel, fill right with silence.
     Left,
     /// Use as right channel, fill left with silence.
@@ -110,14 +120,14 @@ pub enum StereoConversionMethod {
 
 /// Methods for converting between arbitrary channel counts.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ChannelConversionMethod {
+pub enum ChannelConversionMethod<F: RealFloat> {
     /// Repeat existing channels cyclically to reach target count.
     Repeat,
     /// Smart conversion: average down for fewer channels, duplicate for more.
     Smart,
     /// Custom mapping matrix where each row defines the weights for an output channel.
     /// Matrix dimensions should be [output_channels x input_channels].
-    Custom(Vec<Vec<f64>>),
+    Custom(Vec<Vec<F>>),
 }
 
 /// Voice Activity Detection (VAD) methods.
@@ -203,13 +213,13 @@ pub enum PitchShiftMethod {
 
 /// Spectral analysis parameters.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SpectralParams {
+pub struct SpectralParams<F: RealFloat> {
     /// FFT window size in samples.
     pub window_size: usize,
     /// Hop size in samples (overlap = window_size - hop_size).
     pub hop_size: usize,
     /// Window function to apply.
-    pub window_type: WindowType,
+    pub window_type: WindowType<F>,
     /// Whether to apply zero-padding.
     pub zero_pad: bool,
 }
@@ -294,7 +304,7 @@ pub enum FilterResponse {
 /// Comprehensive parameters for designing IIR filters with various
 /// characteristics and specifications.
 #[derive(Debug, Clone, PartialEq)]
-pub struct IirFilterDesign {
+pub struct IirFilterDesign<F: RealFloat> {
     /// Type of IIR filter (Butterworth, Chebyshev, etc.)
     pub filter_type: IirFilterType,
     /// Response type (low-pass, high-pass, etc.)
@@ -302,20 +312,20 @@ pub struct IirFilterDesign {
     /// Filter order (number of poles)
     pub order: usize,
     /// Cutoff frequency in Hz (for low-pass/high-pass)
-    pub cutoff_frequency: Option<f64>,
+    pub cutoff_frequency: Option<F>,
     /// Lower cutoff frequency in Hz (for band-pass/band-stop)
-    pub low_frequency: Option<f64>,
+    pub low_frequency: Option<F>,
     /// Upper cutoff frequency in Hz (for band-pass/band-stop)
-    pub high_frequency: Option<f64>,
+    pub high_frequency: Option<F>,
     /// Passband ripple in dB (for Chebyshev Type I and Elliptic)
-    pub passband_ripple: Option<f64>,
+    pub passband_ripple: Option<F>,
     /// Stopband attenuation in dB (for Chebyshev Type II and Elliptic)
-    pub stopband_attenuation: Option<f64>,
+    pub stopband_attenuation: Option<F>,
 }
 
-impl IirFilterDesign {
+impl<F: RealFloat> IirFilterDesign<F> {
     /// Create a simple Butterworth low-pass filter design.
-    pub const fn butterworth_lowpass(order: usize, cutoff_frequency: f64) -> Self {
+    pub const fn butterworth_lowpass(order: usize, cutoff_frequency: F) -> Self {
         Self {
             filter_type: IirFilterType::Butterworth,
             response: FilterResponse::LowPass,
@@ -329,7 +339,7 @@ impl IirFilterDesign {
     }
 
     /// Create a simple Butterworth high-pass filter design.
-    pub const fn butterworth_highpass(order: usize, cutoff_frequency: f64) -> Self {
+    pub const fn butterworth_highpass(order: usize, cutoff_frequency: F) -> Self {
         Self {
             filter_type: IirFilterType::Butterworth,
             response: FilterResponse::HighPass,
@@ -343,11 +353,7 @@ impl IirFilterDesign {
     }
 
     /// Create a simple Butterworth band-pass filter design.
-    pub const fn butterworth_bandpass(
-        order: usize,
-        low_frequency: f64,
-        high_frequency: f64,
-    ) -> Self {
+    pub const fn butterworth_bandpass(order: usize, low_frequency: F, high_frequency: F) -> Self {
         Self {
             filter_type: IirFilterType::Butterworth,
             response: FilterResponse::BandPass,
@@ -364,8 +370,8 @@ impl IirFilterDesign {
     pub const fn chebyshev_i(
         response: FilterResponse,
         order: usize,
-        cutoff_frequency: f64,
-        passband_ripple: f64,
+        cutoff_frequency: F,
+        passband_ripple: F,
     ) -> Self {
         Self {
             filter_type: IirFilterType::ChebyshevI,
@@ -414,28 +420,28 @@ pub enum EqBandType {
 /// Represents a single band in a parametric equalizer with
 /// frequency, gain, and Q (quality factor) parameters.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EqBand {
+pub struct EqBand<F: RealFloat> {
     /// Type of EQ band (peak, shelf, etc.)
     pub band_type: EqBandType,
     /// Center frequency in Hz (for peak/notch) or corner frequency (for shelves)
-    pub frequency: f64,
+    pub frequency: F,
     /// Gain in dB (positive for boost, negative for cut)
-    pub gain_db: f64,
+    pub gain_db: F,
     /// Quality factor (bandwidth control)
     /// Higher Q = narrower bandwidth, Lower Q = wider bandwidth
-    pub q_factor: f64,
+    pub q_factor: F,
     /// Whether this band is enabled/active
     pub enabled: bool,
 }
 
-impl EqBand {
+impl<F: RealFloat> EqBand<F> {
     /// Create a new peak/notch EQ band.
     ///
     /// # Arguments
     /// * `frequency` - Center frequency in Hz
     /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
     /// * `q_factor` - Quality factor (bandwidth control)
-    pub const fn peak(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
+    pub const fn peak(frequency: F, gain_db: F, q_factor: F) -> Self {
         Self {
             band_type: EqBandType::Peak,
             frequency,
@@ -451,7 +457,7 @@ impl EqBand {
     /// * `frequency` - Corner frequency in Hz
     /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
     /// * `q_factor` - Shelf slope control
-    pub const fn low_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
+    pub const fn low_shelf(frequency: F, gain_db: F, q_factor: F) -> Self {
         Self {
             band_type: EqBandType::LowShelf,
             frequency,
@@ -467,7 +473,7 @@ impl EqBand {
     /// * `frequency` - Corner frequency in Hz
     /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
     /// * `q_factor` - Shelf slope control
-    pub const fn high_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
+    pub const fn high_shelf(frequency: F, gain_db: F, q_factor: F) -> Self {
         Self {
             band_type: EqBandType::HighShelf,
             frequency,
@@ -482,11 +488,11 @@ impl EqBand {
     /// # Arguments
     /// * `frequency` - Cutoff frequency in Hz
     /// * `q_factor` - Filter resonance (typically 0.707 for Butterworth)
-    pub const fn low_pass(frequency: f64, q_factor: f64) -> Self {
+    pub fn low_pass(frequency: F, q_factor: F) -> Self {
         Self {
             band_type: EqBandType::LowPass,
             frequency,
-            gain_db: 0.0,
+            gain_db: F::zero(),
             q_factor,
             enabled: true,
         }
@@ -497,11 +503,11 @@ impl EqBand {
     /// # Arguments
     /// * `frequency` - Cutoff frequency in Hz
     /// * `q_factor` - Filter resonance (typically 0.707 for Butterworth)
-    pub const fn high_pass(frequency: f64, q_factor: f64) -> Self {
+    pub fn high_pass(frequency: F, q_factor: F) -> Self {
         Self {
             band_type: EqBandType::HighPass,
             frequency,
-            gain_db: 0.0,
+            gain_db: F::zero(),
             q_factor,
             enabled: true,
         }
@@ -518,23 +524,28 @@ impl EqBand {
     }
 
     /// Validate the EQ band parameters.
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
-        let nyquist = sample_rate / 2.0;
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
+        let nyquist = sample_rate / to_precision(2.0);
 
-        if self.frequency <= 0.0 || self.frequency >= nyquist {
-            return Err(format!(
+        if self.frequency <= F::zero() || self.frequency >= nyquist {
+            return Err(AudioSampleError::InvalidParameter(format!(
                 "Frequency {} Hz is out of range (0, {})",
                 self.frequency, nyquist
+            )));
+        }
+
+        if self.q_factor <= F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Q factor must be positive".to_string(),
             ));
         }
 
-        if self.q_factor <= 0.0 {
-            return Err("Q factor must be greater than 0".to_string());
-        }
-
         // Check reasonable gain limits
-        if self.gain_db.abs() > 40.0 {
-            return Err("Gain should be within ±40 dB for practical use".to_string());
+        if self.gain_db.abs() > to_precision(40.0) {
+            return Err(AudioSampleError::InvalidParameter(format!(
+                "Gain {} dB is out of reasonable range (-40, 40)",
+                self.gain_db
+            )));
         }
 
         Ok(())
@@ -546,32 +557,32 @@ impl EqBand {
 /// A complete parametric EQ consisting of multiple bands that can be
 /// applied to audio signals for frequency shaping.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ParametricEq {
+pub struct ParametricEq<F: RealFloat> {
     /// Vector of EQ bands
-    pub bands: Vec<EqBand>,
+    pub bands: Vec<EqBand<F>>,
     /// Overall output gain in dB
-    pub output_gain_db: f64,
+    pub output_gain_db: F,
     /// Whether the EQ is bypassed
     pub bypassed: bool,
 }
 
-impl ParametricEq {
+impl<F: RealFloat> ParametricEq<F> {
     /// Create a new empty parametric EQ.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bands: Vec::new(),
-            output_gain_db: 0.0,
+            output_gain_db: F::zero(),
             bypassed: false,
         }
     }
 
     /// Add an EQ band to the parametric EQ.
-    pub fn add_band(&mut self, band: EqBand) {
+    pub fn add_band(&mut self, band: EqBand<F>) {
         self.bands.push(band);
     }
 
     /// Remove an EQ band by index.
-    pub fn remove_band(&mut self, index: usize) -> Option<EqBand> {
+    pub fn remove_band(&mut self, index: usize) -> Option<EqBand<F>> {
         if index < self.bands.len() {
             Some(self.bands.remove(index))
         } else {
@@ -580,12 +591,12 @@ impl ParametricEq {
     }
 
     /// Get a reference to an EQ band by index.
-    pub fn get_band(&self, index: usize) -> Option<&EqBand> {
+    pub fn get_band(&self, index: usize) -> Option<&EqBand<F>> {
         self.bands.get(index)
     }
 
     /// Get a mutable reference to an EQ band by index.
-    pub fn get_band_mut(&mut self, index: usize) -> Option<&mut EqBand> {
+    pub fn get_band_mut(&mut self, index: usize) -> Option<&mut EqBand<F>> {
         self.bands.get_mut(index)
     }
 
@@ -595,7 +606,7 @@ impl ParametricEq {
     }
 
     /// Set the overall output gain.
-    pub fn set_output_gain(&mut self, gain_db: f64) {
+    pub fn set_output_gain(&mut self, gain_db: F) {
         self.output_gain_db = gain_db;
     }
 
@@ -610,44 +621,65 @@ impl ParametricEq {
     }
 
     /// Validate all EQ bands.
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         for (i, band) in self.bands.iter().enumerate() {
-            band.validate(sample_rate)
-                .map_err(|e| format!("Band {}: {}", i, e))?;
+            match band.validate(sample_rate) {
+                Ok(_) => {}
+                Err(er) => {
+                    return Err(AudioSampleError::InvalidParameter(format!(
+                        "Band {}/{} validation error: {}",
+                        i,
+                        self.bands.len(),
+                        er
+                    )));
+                }
+            }
         }
         Ok(())
     }
 
     /// Create a common 3-band EQ (low shelf, mid peak, high shelf).
     pub fn three_band(
-        low_freq: f64,
-        low_gain: f64,
-        mid_freq: f64,
-        mid_gain: f64,
-        mid_q: f64,
-        high_freq: f64,
-        high_gain: f64,
+        low_freq: F,
+        low_gain: F,
+        mid_freq: F,
+        mid_gain: F,
+        mid_q: F,
+        high_freq: F,
+        high_gain: F,
     ) -> Self {
         let mut eq = Self::new();
-        eq.add_band(EqBand::low_shelf(low_freq, low_gain, 0.707));
+        eq.add_band(EqBand::low_shelf(low_freq, low_gain, to_precision(0.707)));
         eq.add_band(EqBand::peak(mid_freq, mid_gain, mid_q));
-        eq.add_band(EqBand::high_shelf(high_freq, high_gain, 0.707));
+        eq.add_band(EqBand::high_shelf(
+            high_freq,
+            high_gain,
+            to_precision(0.707),
+        ));
         eq
     }
 
     /// Create a common 5-band EQ.
     pub fn five_band() -> Self {
         let mut eq = Self::new();
-        eq.add_band(EqBand::low_shelf(100.0, 0.0, 0.707));
-        eq.add_band(EqBand::peak(300.0, 0.0, 1.0));
-        eq.add_band(EqBand::peak(1000.0, 0.0, 1.0));
-        eq.add_band(EqBand::peak(3000.0, 0.0, 1.0));
-        eq.add_band(EqBand::high_shelf(8000.0, 0.0, 0.707));
+        eq.add_band(EqBand::low_shelf(
+            to_precision(100.0),
+            F::zero(),
+            to_precision(0.707),
+        ));
+        eq.add_band(EqBand::peak(to_precision(300.0), F::zero(), F::one()));
+        eq.add_band(EqBand::peak(to_precision(1000.0), F::zero(), F::one()));
+        eq.add_band(EqBand::peak(to_precision(3000.0), F::zero(), F::one()));
+        eq.add_band(EqBand::high_shelf(
+            to_precision(8000.0),
+            F::zero(),
+            to_precision(0.707),
+        ));
         eq
     }
 }
 
-impl Default for ParametricEq {
+impl<F: RealFloat> Default for ParametricEq<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -686,43 +718,43 @@ pub enum DynamicRangeMethod {
 ///
 /// Allows external control signals to drive the compressor/limiter.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SideChainConfig {
+pub struct SideChainConfig<F: RealFloat> {
     /// Whether side-chain processing is enabled
     pub enabled: bool,
     /// High-pass filter frequency for side-chain signal (Hz)
     /// Helps reduce low-frequency pumping effects
-    pub high_pass_freq: Option<f64>,
+    pub high_pass_freq: Option<F>,
     /// Low-pass filter frequency for side-chain signal (Hz)
     /// Focuses compression on specific frequency ranges
-    pub low_pass_freq: Option<f64>,
+    pub low_pass_freq: Option<F>,
     /// Pre-emphasis for side-chain signal (dB)
     /// Emphasizes specific frequencies in the control signal
-    pub pre_emphasis_db: f64,
-    /// Mix between internal and external side-chain signal (0.0-1.0)
-    /// 0.0 = internal only, 1.0 = external only
-    pub external_mix: f64,
+    pub pre_emphasis_db: F,
+    /// Mix between internal and external side-chain signal (F::zero()-F::one())
+    /// F::zero() = internal only, F::one() = external only
+    pub external_mix: F,
 }
 
-impl SideChainConfig {
+impl<F: RealFloat> SideChainConfig<F> {
     /// Create a new disabled side-chain configuration.
-    pub const fn disabled() -> Self {
+    pub fn disabled() -> Self {
         Self {
             enabled: false,
             high_pass_freq: None,
             low_pass_freq: None,
-            pre_emphasis_db: 0.0,
-            external_mix: 0.0,
+            pre_emphasis_db: F::zero(),
+            external_mix: F::zero(),
         }
     }
 
     /// Create a new enabled side-chain configuration with default settings.
-    pub const fn enabled() -> Self {
+    pub fn enabled() -> Self {
         Self {
             enabled: true,
-            high_pass_freq: Some(100.0),
+            high_pass_freq: Some(to_precision(100.0)),
             low_pass_freq: None,
-            pre_emphasis_db: 0.0,
-            external_mix: 1.0,
+            pre_emphasis_db: F::zero(),
+            external_mix: F::one(),
         }
     }
 
@@ -737,41 +769,45 @@ impl SideChainConfig {
     }
 
     /// Set high-pass filter frequency for side-chain signal.
-    pub fn set_high_pass(&mut self, freq: f64) {
+    pub fn set_high_pass(&mut self, freq: F) {
         self.high_pass_freq = Some(freq);
     }
 
     /// Set low-pass filter frequency for side-chain signal.
-    pub fn set_low_pass(&mut self, freq: f64) {
+    pub fn set_low_pass(&mut self, freq: F) {
         self.low_pass_freq = Some(freq);
     }
 
     /// Validate side-chain configuration.
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         if let Some(hp_freq) = self.high_pass_freq {
-            if hp_freq <= 0.0 || hp_freq >= sample_rate / 2.0 {
-                return Err(
+            if hp_freq <= F::zero() || hp_freq >= sample_rate / to_precision(2.0) {
+                return Err(AudioSampleError::InvalidParameter(
                     "High-pass frequency must be between 0 and Nyquist frequency".to_string(),
-                );
+                ));
             }
         }
 
         if let Some(lp_freq) = self.low_pass_freq {
-            if lp_freq <= 0.0 || lp_freq >= sample_rate / 2.0 {
-                return Err(
-                    "Low-pass frequency must be between 0 and Nyquist frequency".to_string()
-                );
+            if lp_freq <= F::zero() || lp_freq >= sample_rate / to_precision(2.0) {
+                return Err(AudioSampleError::InvalidParameter(
+                    "Low-pass frequency must be between 0 and Nyquist frequency".to_string(),
+                ));
             }
         }
 
         if let (Some(hp), Some(lp)) = (self.high_pass_freq, self.low_pass_freq) {
             if hp >= lp {
-                return Err("High-pass frequency must be less than low-pass frequency".to_string());
+                return Err(AudioSampleError::InvalidParameter(
+                    "High-pass frequency must be less than low-pass frequency".to_string(),
+                ));
             }
         }
 
-        if self.external_mix < 0.0 || self.external_mix > 1.0 {
-            return Err("External mix must be between 0.0 and 1.0".to_string());
+        if self.external_mix < F::zero() || self.external_mix > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "External mix must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
         Ok(())
@@ -782,138 +818,150 @@ impl SideChainConfig {
 ///
 /// Controls how the compressor responds to signal levels above the threshold.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CompressorConfig {
+pub struct CompressorConfig<F: RealFloat> {
     /// Threshold level in dB (typically -40 to 0 dB)
     /// Signal levels above this will be compressed
-    pub threshold_db: f64,
-    /// Compression ratio (1.0 = no compression, >1.0 = compression)
+    pub threshold_db: F,
+    /// Compression ratio (F::one() = no compression, >F::one() = compression)
     /// Higher values provide more aggressive compression
-    pub ratio: f64,
+    pub ratio: F,
     /// Attack time in milliseconds (0.1 to 100 ms typical)
     /// How quickly the compressor responds to signals above threshold
-    pub attack_ms: f64,
+    pub attack_ms: F,
     /// Release time in milliseconds (10 to 1000 ms typical)
     /// How quickly the compressor stops compressing when signal drops below threshold
-    pub release_ms: f64,
+    pub release_ms: F,
     /// Makeup gain in dB (-20 to +20 dB typical)
     /// Gain applied after compression to restore loudness
-    pub makeup_gain_db: f64,
+    pub makeup_gain_db: F,
     /// Knee type for compression curve
     pub knee_type: KneeType,
     /// Knee width in dB (0.1 to 10 dB for soft knee)
     /// Controls the transition smoothness around the threshold
-    pub knee_width_db: f64,
+    pub knee_width_db: F,
     /// Detection method for compression
     pub detection_method: DynamicRangeMethod,
     /// Side-chain configuration
-    pub side_chain: SideChainConfig,
+    pub side_chain: SideChainConfig<F>,
     /// Lookahead time in milliseconds (0 to 10 ms typical)
     /// Allows the compressor to "see" upcoming peaks
-    pub lookahead_ms: f64,
+    pub lookahead_ms: F,
 }
 
-impl CompressorConfig {
+impl<F: RealFloat> CompressorConfig<F> {
     /// Create a new compressor configuration with default settings.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            threshold_db: -12.0,
-            ratio: 4.0,
-            attack_ms: 5.0,
-            release_ms: 50.0,
-            makeup_gain_db: 0.0,
+            threshold_db: to_precision(-12.0),
+            ratio: to_precision(4.0),
+            attack_ms: to_precision(5.0),
+            release_ms: to_precision(50.0),
+            makeup_gain_db: F::zero(),
             knee_type: KneeType::Soft,
-            knee_width_db: 2.0,
+            knee_width_db: to_precision(2.0),
             detection_method: DynamicRangeMethod::Rms,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 0.0,
+            lookahead_ms: F::zero(),
         }
     }
 
     /// Create a vocal compressor preset.
-    pub const fn vocal() -> Self {
+    pub fn vocal() -> Self {
         Self {
-            threshold_db: -18.0,
-            ratio: 3.0,
-            attack_ms: 2.0,
-            release_ms: 100.0,
-            makeup_gain_db: 3.0,
+            threshold_db: to_precision(-18.0),
+            ratio: to_precision(3.0),
+            attack_ms: to_precision(2.0),
+            release_ms: to_precision(100.0),
+            makeup_gain_db: to_precision(3.0),
             knee_type: KneeType::Soft,
-            knee_width_db: 4.0,
+            knee_width_db: to_precision(4.0),
             detection_method: DynamicRangeMethod::Rms,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 0.0,
+            lookahead_ms: F::zero(),
         }
     }
 
     /// Create a drum compressor preset.
-    pub const fn drum() -> Self {
+    pub fn drum() -> Self {
         Self {
-            threshold_db: -8.0,
-            ratio: 6.0,
-            attack_ms: 0.1,
-            release_ms: 20.0,
-            makeup_gain_db: 2.0,
+            threshold_db: to_precision(-8.0),
+            ratio: to_precision(6.0),
+            attack_ms: to_precision(0.1),
+            release_ms: to_precision(20.0),
+            makeup_gain_db: to_precision(2.0),
             knee_type: KneeType::Hard,
-            knee_width_db: 0.5,
+            knee_width_db: to_precision(0.5),
             detection_method: DynamicRangeMethod::Peak,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 0.0,
+            lookahead_ms: F::zero(),
         }
     }
 
     /// Create a bus compressor preset.
-    pub const fn bus() -> Self {
+    pub fn bus() -> Self {
         Self {
-            threshold_db: -20.0,
-            ratio: 2.0,
-            attack_ms: 10.0,
-            release_ms: 200.0,
-            makeup_gain_db: 1.0,
+            threshold_db: to_precision(-20.0),
+            ratio: to_precision(2.0),
+            attack_ms: to_precision(10.0),
+            release_ms: to_precision(200.0),
+            makeup_gain_db: F::one(),
             knee_type: KneeType::Soft,
-            knee_width_db: 6.0,
+            knee_width_db: to_precision(6.0),
             detection_method: DynamicRangeMethod::Rms,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 0.0,
+            lookahead_ms: F::zero(),
         }
     }
 
     /// Validate compressor configuration.
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
-        if self.threshold_db > 0.0 {
-            return Err("Threshold should be negative (below 0 dB)".to_string());
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
+        if self.threshold_db > F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Threshold should be negative (below 0 dB)".to_string(),
+            ));
         }
 
-        if self.ratio < 1.0 {
-            return Err("Ratio must be >= 1.0".to_string());
+        if self.ratio < F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Ratio must be F::one() or greater".to_string(),
+            ));
         }
 
-        if self.attack_ms < 0.01 || self.attack_ms > 1000.0 {
-            return Err("Attack time must be between 0.01 and 1000 ms".to_string());
+        if self.attack_ms < to_precision(0.01) || self.attack_ms > to_precision(1000.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Attack time must be between 0.01 and 1000 ms".to_string(),
+            ));
         }
 
-        if self.release_ms < 1.0 || self.release_ms > 10000.0 {
-            return Err("Release time must be between 1.0 and 10000 ms".to_string());
+        if self.release_ms < F::one() || self.release_ms > to_precision(10000.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Release time must be between F::one() and 10000 ms".to_string(),
+            ));
         }
 
-        if self.makeup_gain_db.abs() > 40.0 {
-            return Err("Makeup gain should be within ±40 dB".to_string());
+        if self.makeup_gain_db.abs() > to_precision(40.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Makeup gain must be between -40.0 and +40.0 dB".to_string(),
+            ));
         }
 
-        if self.knee_width_db < 0.0 || self.knee_width_db > 20.0 {
-            return Err("Knee width must be between 0.0 and 20.0 dB".to_string());
+        if self.knee_width_db < F::zero() || self.knee_width_db > to_precision(20.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Knee width must be between F::zero() and 20.0 dB".to_string(),
+            ));
         }
 
-        if self.lookahead_ms < 0.0 || self.lookahead_ms > 20.0 {
-            return Err("Lookahead time must be between 0.0 and 20.0 ms".to_string());
+        if self.lookahead_ms < F::zero() || self.lookahead_ms > to_precision(20.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Lookahead time must be between F::zero() and 20.0 ms".to_string(),
+            ));
         }
 
-        self.side_chain.validate(sample_rate)?;
-
-        Ok(())
+        self.side_chain.validate(sample_rate)
     }
 }
 
-impl Default for CompressorConfig {
+impl<F: RealFloat> Default for CompressorConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -923,123 +971,131 @@ impl Default for CompressorConfig {
 ///
 /// Controls how the limiter prevents signal levels from exceeding the ceiling.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LimiterConfig {
+pub struct LimiterConfig<F: RealFloat> {
     /// Ceiling level in dB (typically -0.1 to -3.0 dB)
     /// Absolute maximum level that the limiter will allow
-    pub ceiling_db: f64,
+    pub ceiling_db: F,
     /// Attack time in milliseconds (0.01 to 10 ms typical)
     /// How quickly the limiter responds to signals approaching the ceiling
-    pub attack_ms: f64,
+    pub attack_ms: F,
     /// Release time in milliseconds (10 to 1000 ms typical)
     /// How quickly the limiter stops limiting when signal drops below ceiling
-    pub release_ms: f64,
+    pub release_ms: F,
     /// Knee type for limiting curve
     pub knee_type: KneeType,
     /// Knee width in dB (0.1 to 5 dB for soft knee)
     /// Controls the transition smoothness around the ceiling
-    pub knee_width_db: f64,
+    pub knee_width_db: F,
     /// Detection method for limiting
     pub detection_method: DynamicRangeMethod,
     /// Side-chain configuration
-    pub side_chain: SideChainConfig,
+    pub side_chain: SideChainConfig<F>,
     /// Lookahead time in milliseconds (0.1 to 10 ms typical)
     /// Allows the limiter to prevent peaks before they occur
-    pub lookahead_ms: f64,
+    pub lookahead_ms: F,
     /// Whether to apply ISP (Inter-Sample Peak) limiting
     /// Prevents aliasing and inter-sample peaks in the digital domain
     pub isp_limiting: bool,
 }
 
-impl LimiterConfig {
+impl<F: RealFloat> LimiterConfig<F> {
     /// Create a new limiter configuration with default settings.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            ceiling_db: -0.1,
-            attack_ms: 0.5,
-            release_ms: 50.0,
+            ceiling_db: to_precision(-0.1),
+            attack_ms: to_precision(0.5),
+            release_ms: to_precision(50.0),
             knee_type: KneeType::Soft,
-            knee_width_db: 1.0,
+            knee_width_db: F::one(),
             detection_method: DynamicRangeMethod::Peak,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 2.0,
+            lookahead_ms: to_precision(2.0),
             isp_limiting: true,
         }
     }
 
     /// Create a transparent limiter preset.
-    pub const fn transparent() -> Self {
+    pub fn transparent() -> Self {
         Self {
-            ceiling_db: -0.1,
-            attack_ms: 0.1,
-            release_ms: 100.0,
+            ceiling_db: to_precision(-0.1),
+            attack_ms: to_precision(0.1),
+            release_ms: to_precision(100.0),
             knee_type: KneeType::Soft,
-            knee_width_db: 2.0,
+            knee_width_db: to_precision(2.0),
             detection_method: DynamicRangeMethod::Peak,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 5.0,
+            lookahead_ms: to_precision(5.0),
             isp_limiting: true,
         }
     }
 
     /// Create a mastering limiter preset.
-    pub const fn mastering() -> Self {
+    pub fn mastering() -> Self {
         Self {
-            ceiling_db: -0.3,
-            attack_ms: 1.0,
-            release_ms: 200.0,
+            ceiling_db: to_precision(-0.3),
+            attack_ms: F::one(),
+            release_ms: to_precision(200.0),
             knee_type: KneeType::Soft,
-            knee_width_db: 3.0,
+            knee_width_db: to_precision(3.0),
             detection_method: DynamicRangeMethod::Hybrid,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 10.0,
+            lookahead_ms: to_precision(10.0),
             isp_limiting: true,
         }
     }
 
     /// Create a broadcast limiter preset.
-    pub const fn broadcast() -> Self {
+    pub fn broadcast() -> Self {
         Self {
-            ceiling_db: -1.0,
-            attack_ms: 0.5,
-            release_ms: 50.0,
+            ceiling_db: -F::one(),
+            attack_ms: to_precision(0.5),
+            release_ms: to_precision(50.0),
             knee_type: KneeType::Hard,
-            knee_width_db: 0.5,
+            knee_width_db: to_precision(0.5),
             detection_method: DynamicRangeMethod::Peak,
             side_chain: SideChainConfig::disabled(),
-            lookahead_ms: 2.0,
+            lookahead_ms: to_precision(2.0),
             isp_limiting: true,
         }
     }
 
     /// Validate limiter configuration.
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
-        if self.ceiling_db > 0.0 {
-            return Err("Ceiling should be negative (below 0 dB)".to_string());
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
+        if self.ceiling_db > F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Ceiling should be negative (below 0 dB)".to_string(),
+            ));
         }
 
-        if self.attack_ms < 0.001 || self.attack_ms > 100.0 {
-            return Err("Attack time must be between 0.001 and 100 ms".to_string());
+        if self.attack_ms < to_precision(0.001) || self.attack_ms > to_precision(100.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Attack time must be between 0.001 and 100 ms".to_string(),
+            ));
         }
 
-        if self.release_ms < 1.0 || self.release_ms > 10000.0 {
-            return Err("Release time must be between 1.0 and 10000 ms".to_string());
+        if self.release_ms < F::one() || self.release_ms > to_precision(10000.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Release time must be between F::one() and 10000 ms".to_string(),
+            ));
         }
 
-        if self.knee_width_db < 0.0 || self.knee_width_db > 10.0 {
-            return Err("Knee width must be between 0.0 and 10.0 dB".to_string());
+        if self.knee_width_db < F::zero() || self.knee_width_db > to_precision(10.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Knee width must be between F::zero() and 10.0 dB".to_string(),
+            ));
         }
 
-        if self.lookahead_ms < 0.0 || self.lookahead_ms > 20.0 {
-            return Err("Lookahead time must be between 0.0 and 20.0 ms".to_string());
+        if self.lookahead_ms < F::zero() || self.lookahead_ms > to_precision(20.0) {
+            return Err(AudioSampleError::InvalidParameter(
+                "Lookahead time must be between F::zero() and 20.0 ms".to_string(),
+            ));
         }
 
-        self.side_chain.validate(sample_rate)?;
-
-        Ok(())
+        self.side_chain.validate(sample_rate)
     }
 }
 
-impl Default for LimiterConfig {
+impl<F: RealFloat> Default for LimiterConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -1050,44 +1106,44 @@ impl Default for LimiterConfig {
 /// The CQT provides logarithmic frequency spacing that aligns with musical
 /// intervals, making it ideal for music analysis and harmonic detection.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CqtConfig {
+pub struct CqtConfig<F: RealFloat> {
     /// Number of frequency bins per octave (typically 12-24 for musical analysis)
     /// Higher values provide better frequency resolution but increase computation
     pub bins_per_octave: usize,
     /// Minimum frequency in Hz (typically 55 Hz for A1 or 27.5 Hz for A0)
-    pub fmin: f64,
+    pub fmin: F,
     /// Maximum frequency in Hz (None = Nyquist frequency)
     /// Should be less than or equal to sample_rate / 2
-    pub fmax: Option<f64>,
+    pub fmax: Option<F>,
     /// Quality factor controlling frequency resolution vs time resolution
     /// Higher Q = better frequency resolution, lower Q = better time resolution
-    pub q_factor: f64,
+    pub q_factor: F,
     /// Window function applied to each frequency bin
-    pub window_type: WindowType,
-    /// Sparsity threshold for kernel optimization (0.0 to 1.0)
+    pub window_type: WindowType<F>,
+    /// Sparsity threshold for kernel optimization (F::zero() to F::one())
     /// Smaller values = more sparse kernels = faster computation
-    pub sparsity_threshold: f64,
+    pub sparsity_threshold: F,
     /// Whether to normalize the CQT output
     pub normalize: bool,
 }
 
-impl CqtConfig {
+impl<F: RealFloat> CqtConfig<F> {
     /// Create a new CQT configuration with default settings.
     ///
     /// Default configuration suitable for general musical analysis:
     /// - 12 bins per octave (chromatic scale)
     /// - 55 Hz minimum frequency (A1)
-    /// - Quality factor of 1.0
+    /// - Quality factor of F::one()
     /// - Hanning window
     /// - 0.01 sparsity threshold
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bins_per_octave: 12,
-            fmin: 55.0, // A1
-            fmax: None, // Will be set to Nyquist frequency
-            q_factor: 1.0,
+            fmin: to_precision(55.0), // A1
+            fmax: None,               // Will be set to Nyquist frequency
+            q_factor: F::one(),
             window_type: WindowType::Hanning,
-            sparsity_threshold: 0.01,
+            sparsity_threshold: to_precision(0.01),
             normalize: true,
         }
     }
@@ -1096,14 +1152,14 @@ impl CqtConfig {
     ///
     /// Uses 12 bins per octave for chromatic scale analysis,
     /// starting from C1 (32.7 Hz) for full piano range coverage.
-    pub const fn musical() -> Self {
+    pub fn musical() -> Self {
         Self {
             bins_per_octave: 12,
-            fmin: 32.7, // C1
+            fmin: to_precision(32.7), // C1
             fmax: None,
-            q_factor: 1.0,
+            q_factor: F::one(),
             window_type: WindowType::Hanning,
-            sparsity_threshold: 0.01,
+            sparsity_threshold: to_precision(0.01),
             normalize: true,
         }
     }
@@ -1112,14 +1168,14 @@ impl CqtConfig {
     ///
     /// Uses 24 bins per octave for quarter-tone resolution,
     /// providing detailed harmonic analysis capabilities.
-    pub const fn harmonic() -> Self {
+    pub fn harmonic() -> Self {
         Self {
             bins_per_octave: 24,
-            fmin: 55.0, // A1
+            fmin: to_precision(55.0), // A1
             fmax: None,
-            q_factor: 1.0,
+            q_factor: F::one(),
             window_type: WindowType::Hanning,
-            sparsity_threshold: 0.005, // Lower threshold for better precision
+            sparsity_threshold: to_precision(0.005),
             normalize: true,
         }
     }
@@ -1128,14 +1184,14 @@ impl CqtConfig {
     ///
     /// Uses settings that balance frequency resolution with computational
     /// efficiency for real-time chord detection applications.
-    pub const fn chord_detection() -> Self {
+    pub fn chord_detection() -> Self {
         Self {
             bins_per_octave: 12,
-            fmin: 82.4,         // E2 (lowest guitar string)
-            fmax: Some(2093.0), // C7 (high piano range)
-            q_factor: 0.8,      // Slightly lower Q for faster response
+            fmin: to_precision(82.4),
+            fmax: Some(to_precision(2093.0)),
+            q_factor: to_precision(0.8), // Slightly lower Q for faster response
             window_type: WindowType::Hanning,
-            sparsity_threshold: 0.02,
+            sparsity_threshold: to_precision(0.02),
             normalize: true,
         }
     }
@@ -1144,14 +1200,14 @@ impl CqtConfig {
     ///
     /// Uses lower Q factor for better time resolution,
     /// suitable for detecting note onsets and transients.
-    pub const fn onset_detection() -> Self {
+    pub fn onset_detection() -> Self {
         Self {
             bins_per_octave: 12,
-            fmin: 55.0, // A1
+            fmin: to_precision(55.0), // A1
             fmax: None,
-            q_factor: 0.5, // Lower Q for better time resolution
+            q_factor: to_precision(0.5), // Lower Q for better time resolution
             window_type: WindowType::Hanning,
-            sparsity_threshold: 0.02,
+            sparsity_threshold: to_precision(0.02),
             normalize: true,
         }
     }
@@ -1161,7 +1217,7 @@ impl CqtConfig {
     /// # Arguments
     /// * `fmin` - Minimum frequency in Hz
     /// * `fmax` - Maximum frequency in Hz (None for Nyquist)
-    pub fn set_frequency_range(&mut self, fmin: f64, fmax: Option<f64>) {
+    pub fn set_frequency_range(&mut self, fmin: F, fmax: Option<F>) {
         self.fmin = fmin;
         self.fmax = fmax;
     }
@@ -1178,7 +1234,7 @@ impl CqtConfig {
     ///
     /// # Arguments
     /// * `q_factor` - Quality factor (higher = better frequency resolution)
-    pub fn set_q_factor(&mut self, q_factor: f64) {
+    pub fn set_q_factor(&mut self, q_factor: F) {
         self.q_factor = q_factor;
     }
 
@@ -1189,8 +1245,8 @@ impl CqtConfig {
     ///
     /// # Returns
     /// The effective maximum frequency (either fmax or Nyquist frequency)
-    pub fn effective_fmax(&self, sample_rate: f64) -> f64 {
-        self.fmax.unwrap_or(sample_rate / 2.0)
+    pub fn effective_fmax(&self, sample_rate: F) -> F {
+        self.fmax.unwrap_or(sample_rate / to_precision(2.0))
     }
 
     /// Calculate the total number of CQT bins.
@@ -1200,10 +1256,13 @@ impl CqtConfig {
     ///
     /// # Returns
     /// Number of frequency bins in the CQT
-    pub fn num_bins(&self, sample_rate: f64) -> usize {
+    pub fn num_bins(&self, sample_rate: F) -> usize {
         let fmax = self.effective_fmax(sample_rate);
         let octaves = (fmax / self.fmin).log2();
-        (octaves * self.bins_per_octave as f64).ceil() as usize
+        (octaves * to_precision::<F, _>(self.bins_per_octave))
+            .ceil()
+            .to_usize()
+            .expect(" self.bins_per_octave).unwrap()).ceil().to_usize( is a valid float to cast to")
     }
 
     /// Calculate the center frequency for a given bin index.
@@ -1213,8 +1272,10 @@ impl CqtConfig {
     ///
     /// # Returns
     /// Center frequency in Hz for the specified bin
-    pub fn bin_frequency(&self, bin_index: usize) -> f64 {
-        self.fmin * 2.0_f64.powf(bin_index as f64 / self.bins_per_octave as f64)
+    pub fn bin_frequency(&self, bin_index: usize) -> F {
+        self.fmin
+            * to_precision::<F, _>(2.0)
+                .powf(to_precision::<F, _>(bin_index) / to_precision::<F, _>(self.bins_per_octave))
     }
 
     /// Calculate the bandwidth for a given bin index.
@@ -1224,7 +1285,7 @@ impl CqtConfig {
     ///
     /// # Returns
     /// Bandwidth in Hz for the specified bin
-    pub fn bin_bandwidth(&self, bin_index: usize) -> f64 {
+    pub fn bin_bandwidth(&self, bin_index: usize) -> F {
         let center_freq = self.bin_frequency(bin_index);
         center_freq / self.q_factor
     }
@@ -1236,47 +1297,63 @@ impl CqtConfig {
     ///
     /// # Returns
     /// Result indicating whether the configuration is valid
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         if self.bins_per_octave == 0 {
-            return Err("Bins per octave must be greater than 0".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Bins per octave must be greater than 0".to_string(),
+            ));
         }
 
-        if self.fmin <= 0.0 {
-            return Err("Minimum frequency must be greater than 0".to_string());
+        if self.fmin <= F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Minimum frequency must be greater than 0".to_string(),
+            ));
         }
 
-        let nyquist = sample_rate / 2.0;
+        let nyquist = sample_rate / to_precision(2.0);
         if self.fmin >= nyquist {
-            return Err("Minimum frequency must be less than Nyquist frequency".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Minimum frequency must be less than Nyquist frequency".to_string(),
+            ));
         }
 
         if let Some(fmax) = self.fmax {
             if fmax <= self.fmin {
-                return Err("Maximum frequency must be greater than minimum frequency".to_string());
+                return Err(AudioSampleError::InvalidParameter(
+                    "Maximum frequency must be greater than minimum frequency".to_string(),
+                ));
             }
             if fmax > nyquist {
-                return Err("Maximum frequency cannot exceed Nyquist frequency".to_string());
+                return Err(AudioSampleError::InvalidParameter(
+                    "Maximum frequency must be less than or equal to Nyquist frequency".to_string(),
+                ));
             }
         }
 
-        if self.q_factor <= 0.0 {
-            return Err("Quality factor must be greater than 0".to_string());
+        if self.q_factor <= F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Quality factor must be greater than 0".to_string(),
+            ));
         }
 
-        if self.sparsity_threshold < 0.0 || self.sparsity_threshold > 1.0 {
-            return Err("Sparsity threshold must be between 0.0 and 1.0".to_string());
+        if self.sparsity_threshold < F::zero() || self.sparsity_threshold > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Sparsity threshold must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
         // Check that we have at least one bin
         if self.num_bins(sample_rate) == 0 {
-            return Err("Configuration results in zero CQT bins".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "CQT configuration results in zero frequency bins".to_string(),
+            ));
         }
 
         Ok(())
     }
 }
 
-impl Default for CqtConfig {
+impl<F: RealFloat> Default for CqtConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -1308,41 +1385,41 @@ pub enum AdaptiveThresholdMethod {
 /// local characteristics of the onset strength function to improve detection
 /// accuracy across varying signal conditions.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AdaptiveThresholdConfig {
+pub struct AdaptiveThresholdConfig<F: RealFloat> {
     /// Method for computing adaptive threshold
     pub method: AdaptiveThresholdMethod,
     /// Delta value for delta-based thresholding (typical range: 0.01-0.1)
     /// Larger values = fewer false positives but may miss weak onsets
-    pub delta: f64,
-    /// Percentile value for percentile-based thresholding (0.0-1.0)
+    pub delta: F,
+    /// Percentile value for percentile-based thresholding (F::zero()-F::one())
     /// Higher percentiles = more conservative thresholding
-    pub percentile: f64,
+    pub percentile: F,
     /// Size of local window for adaptive computation (in samples)
     /// Larger windows = more stable but less responsive thresholds
     pub window_size: usize,
     /// Minimum threshold value to prevent over-sensitivity
     /// Ensures threshold never drops below this absolute minimum
-    pub min_threshold: f64,
+    pub min_threshold: F,
     /// Maximum threshold value to prevent under-sensitivity
     /// Ensures threshold never exceeds this absolute maximum
-    pub max_threshold: f64,
+    pub max_threshold: F,
 }
 
-impl AdaptiveThresholdConfig {
+impl<F: RealFloat> AdaptiveThresholdConfig<F> {
     /// Create a new adaptive threshold configuration with default settings.
     ///
     /// Default configuration suitable for general onset detection:
     /// - Delta method with 0.05 delta value
     /// - Window size of 1024 samples (about 23ms at 44.1kHz)
     /// - Reasonable min/max threshold bounds
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             method: AdaptiveThresholdMethod::Delta,
-            delta: 0.05,
-            percentile: 0.9,
+            delta: crate::to_precision(0.05),
+            percentile: crate::to_precision(0.9),
             window_size: 1024,
-            min_threshold: 0.01,
-            max_threshold: 1.0,
+            min_threshold: crate::to_precision(0.01),
+            max_threshold: F::one(),
         }
     }
 
@@ -1351,30 +1428,30 @@ impl AdaptiveThresholdConfig {
     /// # Arguments
     /// * `delta` - Delta value for threshold computation
     /// * `window_size` - Size of local window in samples
-    pub const fn delta(delta: f64, window_size: usize) -> Self {
+    pub fn delta(delta: F, window_size: usize) -> Self {
         Self {
             method: AdaptiveThresholdMethod::Delta,
             delta,
-            percentile: 0.9,
+            percentile: crate::to_precision(0.9),
             window_size,
-            min_threshold: 0.01,
-            max_threshold: 1.0,
+            min_threshold: crate::to_precision(0.01),
+            max_threshold: F::one(),
         }
     }
 
     /// Create a percentile-based adaptive threshold configuration.
     ///
     /// # Arguments
-    /// * `percentile` - Percentile value (0.0-1.0)
+    /// * `percentile` - Percentile value (F::zero()-F::one())
     /// * `window_size` - Size of local window in samples
-    pub const fn percentile(percentile: f64, window_size: usize) -> Self {
+    pub fn percentile(percentile: F, window_size: usize) -> Self {
         Self {
             method: AdaptiveThresholdMethod::Percentile,
-            delta: 0.05,
+            delta: crate::to_precision(0.05),
             percentile,
             window_size,
-            min_threshold: 0.01,
-            max_threshold: 1.0,
+            min_threshold: crate::to_precision(0.01),
+            max_threshold: F::one(),
         }
     }
 
@@ -1384,54 +1461,64 @@ impl AdaptiveThresholdConfig {
     /// * `delta` - Delta value for delta component
     /// * `percentile` - Percentile value for percentile component
     /// * `window_size` - Size of local window in samples
-    pub const fn combined(delta: f64, percentile: f64, window_size: usize) -> Self {
+    pub fn combined(delta: F, percentile: F, window_size: usize) -> Self {
         Self {
             method: AdaptiveThresholdMethod::Combined,
             delta,
             percentile,
             window_size,
-            min_threshold: 0.01,
-            max_threshold: 1.0,
+            min_threshold: crate::to_precision(0.01),
+            max_threshold: F::one(),
         }
     }
 
     /// Set the minimum threshold value.
-    pub fn set_min_threshold(&mut self, min_threshold: f64) {
+    pub fn set_min_threshold(&mut self, min_threshold: F) {
         self.min_threshold = min_threshold;
     }
 
     /// Set the maximum threshold value.
-    pub fn set_max_threshold(&mut self, max_threshold: f64) {
+    pub fn set_max_threshold(&mut self, max_threshold: F) {
         self.max_threshold = max_threshold;
     }
 
     /// Validate the adaptive threshold configuration.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.delta < 0.0 {
-            return Err("Delta must be non-negative".to_string());
+    pub fn validate(&self) -> AudioSampleResult<()> {
+        if self.delta < F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Delta must be non-negative".to_string(),
+            ));
         }
 
-        if self.percentile < 0.0 || self.percentile > 1.0 {
-            return Err("Percentile must be between 0.0 and 1.0".to_string());
+        if self.percentile < F::zero() || self.percentile > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Percentile must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
         if self.window_size == 0 {
-            return Err("Window size must be greater than 0".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Window size must be greater than 0".to_string(),
+            ));
         }
 
-        if self.min_threshold < 0.0 {
-            return Err("Minimum threshold must be non-negative".to_string());
+        if self.min_threshold < F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Minimum threshold must be non-negative".to_string(),
+            ));
         }
 
         if self.max_threshold <= self.min_threshold {
-            return Err("Maximum threshold must be greater than minimum threshold".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Maximum threshold must be greater than minimum threshold".to_string(),
+            ));
         }
 
         Ok(())
     }
 }
 
-impl Default for AdaptiveThresholdConfig {
+impl<F: RealFloat> Default for AdaptiveThresholdConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -1443,18 +1530,18 @@ impl Default for AdaptiveThresholdConfig {
 /// exceed a threshold. Temporal constraints ensure detected peaks are
 /// separated by minimum time intervals and can include smoothing.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PeakPickingConfig {
+pub struct PeakPickingConfig<F: RealFloat> {
     /// Adaptive threshold configuration
-    pub adaptive_threshold: AdaptiveThresholdConfig,
+    pub adaptive_threshold: AdaptiveThresholdConfig<F>,
     /// Minimum time separation between peaks (in samples)
     /// Prevents detecting multiple peaks for the same onset event
     pub min_peak_separation: usize,
     /// Enable pre-emphasis to enhance transient detection
     /// Applies high-pass filtering to emphasize onset characteristics
     pub pre_emphasis: bool,
-    /// Pre-emphasis coefficient (0.0-1.0) for high-pass filtering
+    /// Pre-emphasis coefficient (F::zero()-F::one()) for high-pass filtering
     /// Higher values = stronger emphasis on transients
-    pub pre_emphasis_coeff: f64,
+    pub pre_emphasis_coeff: F,
     /// Enable median filtering for onset strength smoothing
     /// Reduces noise while preserving peak structure
     pub median_filter: bool,
@@ -1468,7 +1555,7 @@ pub struct PeakPickingConfig {
     pub normalization_method: NormalizationMethod,
 }
 
-impl PeakPickingConfig {
+impl<F: RealFloat> PeakPickingConfig<F> {
     /// Create a new peak picking configuration with default settings.
     ///
     /// Default configuration optimized for general onset detection:
@@ -1477,12 +1564,12 @@ impl PeakPickingConfig {
     /// - Pre-emphasis enabled with moderate coefficient
     /// - Median filtering enabled with small kernel
     /// - Peak normalization enabled
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             adaptive_threshold: AdaptiveThresholdConfig::new(),
             min_peak_separation: 512,
             pre_emphasis: true,
-            pre_emphasis_coeff: 0.97,
+            pre_emphasis_coeff: to_precision(0.97),
             median_filter: true,
             median_filter_length: 3,
             normalize_onset_strength: true,
@@ -1497,12 +1584,16 @@ impl PeakPickingConfig {
     /// - Longer minimum separation to avoid over-detection
     /// - Strong pre-emphasis for transient enhancement
     /// - Median filtering for noise reduction
-    pub const fn music() -> Self {
+    pub fn music() -> Self {
         Self {
-            adaptive_threshold: AdaptiveThresholdConfig::combined(0.03, 0.85, 2048),
+            adaptive_threshold: AdaptiveThresholdConfig::combined(
+                to_precision(0.03),
+                to_precision(0.85),
+                2048,
+            ),
             min_peak_separation: 1024,
             pre_emphasis: true,
-            pre_emphasis_coeff: 0.95,
+            pre_emphasis_coeff: to_precision(0.95),
             median_filter: true,
             median_filter_length: 5,
             normalize_onset_strength: true,
@@ -1517,12 +1608,12 @@ impl PeakPickingConfig {
     /// - Shorter minimum separation for rapid speech
     /// - Moderate pre-emphasis
     /// - Smaller median filter to preserve speech transients
-    pub const fn speech() -> Self {
+    pub fn speech() -> Self {
         Self {
-            adaptive_threshold: AdaptiveThresholdConfig::delta(0.07, 1024),
+            adaptive_threshold: AdaptiveThresholdConfig::delta(to_precision(0.07), 1024),
             min_peak_separation: 256,
             pre_emphasis: true,
-            pre_emphasis_coeff: 0.98,
+            pre_emphasis_coeff: to_precision(0.98),
             median_filter: true,
             median_filter_length: 3,
             normalize_onset_strength: true,
@@ -1537,12 +1628,12 @@ impl PeakPickingConfig {
     /// - Very short minimum separation for rapid sequences
     /// - Strong pre-emphasis for transient enhancement
     /// - No median filtering to preserve sharp transients
-    pub const fn drums() -> Self {
+    pub fn drums() -> Self {
         Self {
-            adaptive_threshold: AdaptiveThresholdConfig::percentile(0.95, 512),
+            adaptive_threshold: AdaptiveThresholdConfig::percentile(to_precision(0.95), 512),
             min_peak_separation: 128,
             pre_emphasis: true,
-            pre_emphasis_coeff: 0.93,
+            pre_emphasis_coeff: to_precision(0.93),
             median_filter: false,
             median_filter_length: 3,
             normalize_onset_strength: true,
@@ -1556,12 +1647,12 @@ impl PeakPickingConfig {
     }
 
     /// Set the minimum peak separation in milliseconds.
-    pub fn set_min_peak_separation_ms(&mut self, ms: f64, sample_rate: f64) {
-        self.min_peak_separation = (ms * sample_rate / 1000.0) as usize;
+    pub fn set_min_peak_separation_ms(&mut self, ms: F, sample_rate: F) {
+        self.min_peak_separation = (ms * sample_rate / to_precision(1000.0)).to_usize().expect("Given positive ms and sample rate this value will always be >= 0 which can be fast to a usize");
     }
 
     /// Enable or disable pre-emphasis.
-    pub fn set_pre_emphasis(&mut self, enabled: bool, coeff: f64) {
+    pub fn set_pre_emphasis(&mut self, enabled: bool, coeff: F) {
         self.pre_emphasis = enabled;
         self.pre_emphasis_coeff = coeff;
     }
@@ -1573,26 +1664,32 @@ impl PeakPickingConfig {
     }
 
     /// Validate the peak picking configuration.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> AudioSampleResult<()> {
         self.adaptive_threshold.validate()?;
 
         if self.min_peak_separation == 0 {
-            return Err("Minimum peak separation must be greater than 0".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Minimum peak separation must be greater than 0".to_string(),
+            ));
         }
 
-        if self.pre_emphasis_coeff < 0.0 || self.pre_emphasis_coeff > 1.0 {
-            return Err("Pre-emphasis coefficient must be between 0.0 and 1.0".to_string());
+        if self.pre_emphasis_coeff < F::zero() || self.pre_emphasis_coeff > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Pre-emphasis coefficient must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
         if self.median_filter_length == 0 || self.median_filter_length % 2 == 0 {
-            return Err("Median filter length must be odd and greater than 0".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Median filter length must be a positive odd integer".to_string(),
+            ));
         }
 
         Ok(())
     }
 }
 
-impl Default for PeakPickingConfig {
+impl<F: RealFloat> Default for PeakPickingConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -1604,26 +1701,26 @@ impl Default for PeakPickingConfig {
 /// such as note onsets, drum hits, or other transient events. The energy-based
 /// method analyzes changes in spectral energy over time to identify onsets.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OnsetConfig {
+pub struct OnsetConfig<F: RealFloat> {
     /// CQT configuration for spectral analysis
     /// Uses CqtConfig::onset_detection() by default for optimal time resolution
-    pub cqt_config: CqtConfig,
+    pub cqt_config: CqtConfig<F>,
     /// Hop size for frame-based analysis in samples
     /// Smaller values provide better time resolution but increase computation
     pub hop_size: usize,
     /// Window size for CQT analysis in samples (None = auto-calculate)
     /// If None, calculated as 4 periods of the minimum frequency
     pub window_size: Option<usize>,
-    /// Threshold for onset detection (0.0 to 1.0)
+    /// Threshold for onset detection (F::zero() to F::one())
     /// Higher values = fewer, more confident onsets
     /// Lower values = more onsets, potentially including false positives
-    pub threshold: f64,
+    pub threshold: F,
     /// Minimum time between onsets in seconds
     /// Prevents detection of spurious onsets too close together
-    pub min_onset_interval: f64,
-    /// Pre-emphasis factor for spectral flux (0.0 to 1.0)
+    pub min_onset_interval: F,
+    /// Pre-emphasis factor for spectral flux (F::zero() to F::one())
     /// Emphasizes high-frequency content which often carries onset information
-    pub pre_emphasis: f64,
+    pub pre_emphasis: F,
     /// Whether to use adaptive thresholding
     /// Adapts threshold based on local energy characteristics
     pub adaptive_threshold: bool,
@@ -1632,12 +1729,12 @@ pub struct OnsetConfig {
     pub median_filter_length: usize,
     /// Multiplier for adaptive threshold
     /// threshold = median_value * adaptive_threshold_multiplier
-    pub adaptive_threshold_multiplier: f64,
+    pub adaptive_threshold_multiplier: F,
     /// Peak picking configuration for onset detection
-    pub peak_picking: PeakPickingConfig,
+    pub peak_picking: PeakPickingConfig<F>,
 }
 
-impl OnsetConfig {
+impl<F: RealFloat> OnsetConfig<F> {
     /// Create a new onset detection configuration with default settings.
     ///
     /// Default configuration suitable for general onset detection:
@@ -1647,17 +1744,18 @@ impl OnsetConfig {
     /// - Moderate threshold (0.3)
     /// - 50ms minimum onset interval
     /// - Adaptive thresholding enabled
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
             window_size: None,
-            threshold: 0.3,
-            min_onset_interval: 0.05, // 50ms
-            pre_emphasis: 0.0,
+            threshold: to_precision(0.3),
+
+            min_onset_interval: to_precision(0.05),
+            pre_emphasis: to_precision(F::zero()),
             adaptive_threshold: true,
             median_filter_length: 5,
-            adaptive_threshold_multiplier: 1.5,
+            adaptive_threshold_multiplier: to_precision(1.5),
             peak_picking: PeakPickingConfig::new(),
         }
     }
@@ -1668,17 +1766,17 @@ impl OnsetConfig {
     /// - Higher threshold for cleaner detection
     /// - Shorter minimum interval for rapid percussion
     /// - Pre-emphasis to highlight transients
-    pub const fn percussive() -> Self {
+    pub fn percussive() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256, // Higher time resolution for drums
             window_size: None,
-            threshold: 0.5,           // Higher threshold for cleaner detection
-            min_onset_interval: 0.03, // 30ms for rapid percussion
-            pre_emphasis: 0.3,        // Emphasize high frequencies
+            threshold: to_precision(0.5), // Higher threshold for cleaner detection
+            min_onset_interval: to_precision(0.03), // 30ms for rapid percussion
+            pre_emphasis: to_precision(0.3), // Emphasize high frequencies
             adaptive_threshold: true,
             median_filter_length: 3,
-            adaptive_threshold_multiplier: 2.0,
+            adaptive_threshold_multiplier: to_precision(2.0),
             peak_picking: PeakPickingConfig::drums(),
         }
     }
@@ -1689,17 +1787,17 @@ impl OnsetConfig {
     /// - Moderate threshold for good sensitivity
     /// - Longer minimum interval for typical musical phrasing
     /// - Less pre-emphasis for tonal content
-    pub const fn musical() -> Self {
+    pub fn musical() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
             window_size: None,
-            threshold: 0.25,         // Lower threshold for musical content
-            min_onset_interval: 0.1, // 100ms for musical phrasing
-            pre_emphasis: 0.1,       // Light pre-emphasis
+            threshold: to_precision(0.25), // Lower threshold for musical content
+            min_onset_interval: to_precision(0.1), // 100ms for musical phrasing
+            pre_emphasis: to_precision(0.1), // Light pre-emphasis
             adaptive_threshold: true,
             median_filter_length: 7,
-            adaptive_threshold_multiplier: 1.2,
+            adaptive_threshold_multiplier: to_precision(1.2),
             peak_picking: PeakPickingConfig::music(),
         }
     }
@@ -1710,17 +1808,17 @@ impl OnsetConfig {
     /// - Low threshold for speech dynamics
     /// - Moderate minimum interval for speech rate
     /// - Minimal pre-emphasis for speech clarity
-    pub const fn speech() -> Self {
+    pub fn speech() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256, // Good time resolution for speech
             window_size: None,
-            threshold: 0.2,           // Low threshold for speech dynamics
-            min_onset_interval: 0.08, // 80ms for speech rate
-            pre_emphasis: 0.05,       // Minimal pre-emphasis
+            threshold: to_precision(0.2), // Low threshold for speech dynamics
+            min_onset_interval: to_precision(0.08), // 80ms for speech rate
+            pre_emphasis: to_precision(0.05), // Minimal pre-emphasis
             adaptive_threshold: true,
             median_filter_length: 9,
-            adaptive_threshold_multiplier: 1.1,
+            adaptive_threshold_multiplier: to_precision(1.1),
             peak_picking: PeakPickingConfig::speech(),
         }
     }
@@ -1736,17 +1834,17 @@ impl OnsetConfig {
     /// Set the onset detection threshold.
     ///
     /// # Arguments
-    /// * `threshold` - Threshold value (0.0 to 1.0)
-    pub fn set_threshold(&mut self, threshold: f64) {
-        self.threshold = threshold.clamp(0.0, 1.0);
+    /// * `threshold` - Threshold value (F::zero() to F::one())
+    pub fn set_threshold(&mut self, threshold: F) {
+        self.threshold = threshold.clamp(F::zero(), F::one());
     }
 
     /// Set the minimum time between onsets.
     ///
     /// # Arguments
     /// * `interval_seconds` - Minimum interval in seconds (must be > 0)
-    pub fn set_min_onset_interval(&mut self, interval_seconds: f64) {
-        self.min_onset_interval = interval_seconds.max(0.001); // At least 1ms
+    pub fn set_min_onset_interval(&mut self, interval_seconds: F) {
+        self.min_onset_interval = interval_seconds.max(to_precision(0.001)); // At least 1ms
     }
 
     /// Enable or disable adaptive thresholding.
@@ -1760,9 +1858,9 @@ impl OnsetConfig {
     /// Set the pre-emphasis factor for spectral flux.
     ///
     /// # Arguments
-    /// * `pre_emphasis` - Pre-emphasis factor (0.0 to 1.0)
-    pub fn set_pre_emphasis(&mut self, pre_emphasis: f64) {
-        self.pre_emphasis = pre_emphasis.clamp(0.0, 1.0);
+    /// * `pre_emphasis` - Pre-emphasis factor (F::zero() to F::one())
+    pub fn set_pre_emphasis(&mut self, pre_emphasis: F) {
+        self.pre_emphasis = pre_emphasis.clamp(F::zero(), F::one());
     }
 
     /// Calculate the effective window size for CQT analysis.
@@ -1772,11 +1870,13 @@ impl OnsetConfig {
     ///
     /// # Returns
     /// Window size in samples
-    pub fn effective_window_size(&self, sample_rate: f64) -> usize {
+    pub fn effective_window_size(&self, sample_rate: F) -> usize {
         self.window_size.unwrap_or_else(|| {
             // Auto-calculate based on lowest frequency (4 periods for good resolution)
             let min_period = sample_rate / self.cqt_config.fmin;
-            (min_period * 4.0) as usize
+            (min_period * to_precision(4.0))
+                .to_usize()
+                .expect("Should be castable to usize")
         })
     }
 
@@ -1787,8 +1887,8 @@ impl OnsetConfig {
     ///
     /// # Returns
     /// Time resolution in seconds
-    pub fn time_resolution(&self, sample_rate: f64) -> f64 {
-        self.hop_size as f64 / sample_rate
+    pub fn time_resolution(&self, sample_rate: F) -> F {
+        to_precision::<F, _>(self.hop_size) / sample_rate
     }
 
     /// Convert onset time from frames to seconds.
@@ -1799,8 +1899,8 @@ impl OnsetConfig {
     ///
     /// # Returns
     /// Time in seconds
-    pub fn frame_to_seconds(&self, frame_index: usize, sample_rate: f64) -> f64 {
-        (frame_index * self.hop_size) as f64 / sample_rate
+    pub fn frame_to_seconds(&self, frame_index: usize, sample_rate: F) -> F {
+        (to_precision::<F, _>(frame_index) * to_precision::<F, _>(self.hop_size)) / sample_rate
     }
 
     /// Convert onset time from seconds to frames.
@@ -1811,8 +1911,10 @@ impl OnsetConfig {
     ///
     /// # Returns
     /// Frame index
-    pub fn seconds_to_frame(&self, time_seconds: f64, sample_rate: f64) -> usize {
-        ((time_seconds * sample_rate) / self.hop_size as f64).round() as usize
+    pub fn seconds_to_frame(&self, time_seconds: F, sample_rate: F) -> usize {
+        ((time_seconds * sample_rate) / to_precision::<F, _>(self.hop_size).round())
+            .to_usize()
+            .expect("Should be castable to usize")
     }
 
     /// Validate the onset detection configuration.
@@ -1822,61 +1924,73 @@ impl OnsetConfig {
     ///
     /// # Returns
     /// Result indicating whether the configuration is valid
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         // Validate CQT configuration
         self.cqt_config.validate(sample_rate)?;
 
         // Validate hop size
         if self.hop_size == 0 {
-            return Err("Hop size must be greater than 0".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Hop size must be greater than 0".to_string(),
+            ));
         }
 
         // Validate threshold
-        if self.threshold < 0.0 || self.threshold > 1.0 {
-            return Err("Threshold must be between 0.0 and 1.0".to_string());
+        if self.threshold < F::zero() || self.threshold > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Threshold must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
         // Validate minimum onset interval
-        if self.min_onset_interval <= 0.0 {
-            return Err("Minimum onset interval must be greater than 0".to_string());
+        if self.min_onset_interval <= F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Minimum onset interval must be greater than 0".to_string(),
+            ));
         }
 
         // Validate pre-emphasis
-        if self.pre_emphasis < 0.0 || self.pre_emphasis > 1.0 {
-            return Err("Pre-emphasis must be between 0.0 and 1.0".to_string());
+        if self.pre_emphasis < F::zero() || self.pre_emphasis > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Pre-emphasis factor must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
         // Validate window size if specified
         if let Some(window_size) = self.window_size {
             if window_size == 0 {
-                return Err("Window size must be greater than 0".to_string());
+                return Err(AudioSampleError::InvalidParameter(
+                    "Window size must be greater than 0".to_string(),
+                ));
             }
         }
 
         // Validate adaptive threshold parameters
         if self.adaptive_threshold {
             if self.median_filter_length == 0 {
-                return Err("Median filter length must be greater than 0".to_string());
+                return Err(AudioSampleError::InvalidParameter(
+                    "Median filter length must be greater than 0".to_string(),
+                ));
             }
-            if self.adaptive_threshold_multiplier <= 0.0 {
-                return Err("Adaptive threshold multiplier must be greater than 0".to_string());
-            }
+            if self.adaptive_threshold_multiplier <= F::zero() {}
         }
 
         // Check that time resolution is reasonable
         let time_resolution = self.time_resolution(sample_rate);
-        if time_resolution > 0.1 {
-            return Err(format!(
+        if time_resolution > to_precision(0.1) {
+            return Err(AudioSampleError::InvalidParameter(format!(
                 "Time resolution ({:.3}s) is too low. Consider reducing hop size.",
                 time_resolution
-            ));
+                    .to_f64()
+                    .expect("We know this is at least a f32, so f64 conversion is safe")
+            )));
         }
 
         Ok(())
     }
 }
 
-impl Default for OnsetConfig {
+impl<F: RealFloat> Default for OnsetConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -1889,11 +2003,11 @@ impl Default for OnsetConfig {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SpectralFluxMethod {
     /// Simple energy-based flux: sum of positive energy differences
-    /// ∆E[n] = Σ(max(0, |X[k,n]|² - |X[k,n-1]|²)) for all frequency bins k
+    /// ∆E\[n\] = Σ(max(0, |X\[k,n\]|² - |X\[k,n-1\]|²)) for all frequency bins k
     /// Good for general onset detection, especially percussive events
     Energy,
     /// Magnitude-based flux: sum of positive magnitude differences
-    /// ∆M[n] = Σ(max(0, |X[k,n]| - |X[k,n-1]|)) for all frequency bins k
+    /// ∆M\[n\] = Σ(max(0, |X\[k,n\]| - |X\[k,n-1\]|)) for all frequency bins k
     /// More sensitive to subtle onsets, good for tonal instruments
     Magnitude,
     /// Complex domain flux: uses phase information
@@ -1911,9 +2025,9 @@ pub enum SpectralFluxMethod {
 /// between consecutive frames, providing effective onset detection for
 /// both percussive and tonal instruments.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SpectralFluxConfig {
+pub struct SpectralFluxConfig<F: RealFloat> {
     /// CQT configuration for spectral analysis
-    pub cqt_config: CqtConfig,
+    pub cqt_config: CqtConfig<F>,
     /// Hop size for frame-based analysis in samples
     pub hop_size: usize,
     /// Window size for CQT analysis in samples (None = auto-calculate)
@@ -1921,17 +2035,17 @@ pub struct SpectralFluxConfig {
     /// Spectral flux method to use
     pub flux_method: SpectralFluxMethod,
     /// Peak picking configuration for onset detection
-    pub peak_picking: PeakPickingConfig,
+    pub peak_picking: PeakPickingConfig<F>,
     /// Apply rectification to spectral flux (keep only positive values)
     pub rectify: bool,
     /// Logarithmic compression factor for spectral flux
     /// flux_compressed = log(1 + C * flux) where C is this parameter
-    pub log_compression: f64,
+    pub log_compression: F,
 }
 
-impl SpectralFluxConfig {
+impl<F: RealFloat> SpectralFluxConfig<F> {
     /// Create a new spectral flux configuration with default settings.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -1939,12 +2053,12 @@ impl SpectralFluxConfig {
             flux_method: SpectralFluxMethod::Energy,
             peak_picking: PeakPickingConfig::new(),
             rectify: true,
-            log_compression: 100.0,
+            log_compression: to_precision(100.0),
         }
     }
 
     /// Create configuration optimized for percussive onset detection.
-    pub const fn percussive() -> Self {
+    pub fn percussive() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256,
@@ -1952,12 +2066,12 @@ impl SpectralFluxConfig {
             flux_method: SpectralFluxMethod::Energy,
             peak_picking: PeakPickingConfig::drums(),
             rectify: true,
-            log_compression: 1000.0,
+            log_compression: to_precision(1000.0),
         }
     }
 
     /// Create configuration optimized for musical onset detection.
-    pub const fn musical() -> Self {
+    pub fn musical() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -1965,12 +2079,12 @@ impl SpectralFluxConfig {
             flux_method: SpectralFluxMethod::Magnitude,
             peak_picking: PeakPickingConfig::music(),
             rectify: true,
-            log_compression: 100.0,
+            log_compression: to_precision(100.0),
         }
     }
 
     /// Create configuration optimized for complex domain onset detection.
-    pub const fn complex() -> Self {
+    pub fn complex() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
@@ -1978,34 +2092,40 @@ impl SpectralFluxConfig {
             flux_method: SpectralFluxMethod::Complex,
             peak_picking: PeakPickingConfig::new(),
             rectify: false,
-            log_compression: 100.0,
+            log_compression: to_precision(100.0),
         }
     }
 
     /// Validate the spectral flux configuration.
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         self.cqt_config.validate(sample_rate)?;
         self.peak_picking.validate()?;
 
         if self.hop_size == 0 {
-            return Err("Hop size must be greater than 0".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Hop size must be greater than 0".to_string(),
+            ));
         }
 
         if let Some(window_size) = self.window_size {
             if window_size == 0 {
-                return Err("Window size must be greater than 0".to_string());
+                return Err(AudioSampleError::InvalidParameter(
+                    "Window size must be greater than 0".to_string(),
+                ));
             }
         }
 
-        if self.log_compression < 0.0 {
-            return Err("Log compression factor must be non-negative".to_string());
+        if self.log_compression < F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Log compression factor must be non-negative".to_string(),
+            ));
         }
 
         Ok(())
     }
 }
 
-impl Default for SpectralFluxConfig {
+impl<F: RealFloat> Default for SpectralFluxConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -2017,131 +2137,143 @@ impl Default for SpectralFluxConfig {
 /// from the CQT to provide more accurate onset detection than magnitude-only
 /// methods, especially for polyphonic music and complex timbres.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ComplexOnsetConfig {
+pub struct ComplexOnsetConfig<F: RealFloat> {
     /// CQT configuration for spectral analysis
-    pub cqt_config: CqtConfig,
+    pub cqt_config: CqtConfig<F>,
     /// Hop size for frame-based analysis in samples
     pub hop_size: usize,
     /// Window size for CQT analysis in samples (None = auto-calculate)
     pub window_size: Option<usize>,
     /// Peak picking configuration for onset detection
-    pub peak_picking: PeakPickingConfig,
-    /// Weight for magnitude-based detection (0.0-1.0)
-    pub magnitude_weight: f64,
-    /// Weight for phase-based detection (0.0-1.0)
-    pub phase_weight: f64,
+    pub peak_picking: PeakPickingConfig<F>,
+    /// Weight for magnitude-based detection (F::zero()-F::one())
+    pub magnitude_weight: F,
+    /// Weight for phase-based detection (F::zero()-F::one())
+    pub phase_weight: F,
     /// Apply magnitude rectification (keep only positive changes)
     pub magnitude_rectify: bool,
     /// Apply phase rectification (keep only positive phase deviations)
     pub phase_rectify: bool,
     /// Logarithmic compression factor for combined onset function
-    pub log_compression: f64,
+    pub log_compression: F,
 }
 
-impl ComplexOnsetConfig {
+impl<F: RealFloat> ComplexOnsetConfig<F> {
     /// Create a new complex onset configuration with default settings.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
             window_size: None,
             peak_picking: PeakPickingConfig::new(),
-            magnitude_weight: 0.7,
-            phase_weight: 0.3,
+            magnitude_weight: to_precision(0.7),
+            phase_weight: to_precision(0.3),
             magnitude_rectify: true,
             phase_rectify: true,
-            log_compression: 100.0,
+            log_compression: to_precision(100.0),
         }
     }
 
     /// Create configuration optimized for percussive onset detection.
-    pub const fn percussive() -> Self {
+    pub fn percussive() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256,
             window_size: None,
             peak_picking: PeakPickingConfig::drums(),
-            magnitude_weight: 0.8,
-            phase_weight: 0.2,
+            magnitude_weight: to_precision(0.8),
+            phase_weight: to_precision(0.2),
             magnitude_rectify: true,
             phase_rectify: true,
-            log_compression: 1000.0,
+            log_compression: to_precision(1000.0),
         }
     }
 
     /// Create configuration optimized for musical onset detection.
-    pub const fn musical() -> Self {
+    pub fn musical() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 512,
             window_size: None,
             peak_picking: PeakPickingConfig::music(),
-            magnitude_weight: 0.6,
-            phase_weight: 0.4,
+            magnitude_weight: to_precision(0.6),
+            phase_weight: to_precision(0.4),
             magnitude_rectify: true,
             phase_rectify: true,
-            log_compression: 100.0,
+            log_compression: to_precision(100.0),
         }
     }
 
     /// Create configuration optimized for speech onset detection.
-    pub const fn speech() -> Self {
+    pub fn speech() -> Self {
         Self {
             cqt_config: CqtConfig::onset_detection(),
             hop_size: 256,
             window_size: None,
             peak_picking: PeakPickingConfig::speech(),
-            magnitude_weight: 0.5,
-            phase_weight: 0.5,
+            magnitude_weight: to_precision(0.5),
+            phase_weight: to_precision(0.5),
             magnitude_rectify: true,
             phase_rectify: false,
-            log_compression: 50.0,
+            log_compression: to_precision(50.0),
         }
     }
 
     /// Set the magnitude and phase weights.
-    pub fn set_weights(&mut self, magnitude_weight: f64, phase_weight: f64) {
-        self.magnitude_weight = magnitude_weight.clamp(0.0, 1.0);
-        self.phase_weight = phase_weight.clamp(0.0, 1.0);
+    pub fn set_weights(&mut self, magnitude_weight: F, phase_weight: F) {
+        self.magnitude_weight = magnitude_weight.clamp(F::zero(), F::one());
+        self.phase_weight = phase_weight.clamp(F::zero(), F::one());
     }
 
     /// Validate the complex onset configuration.
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         self.cqt_config.validate(sample_rate)?;
         self.peak_picking.validate()?;
 
         if self.hop_size == 0 {
-            return Err("Hop size must be greater than 0".to_string());
+            return Err(AudioSampleError::InvalidParameter(
+                "Hop size must be greater than 0".to_string(),
+            ));
         }
 
         if let Some(window_size) = self.window_size {
             if window_size == 0 {
-                return Err("Window size must be greater than 0".to_string());
+                return Err(AudioSampleError::InvalidParameter(
+                    "Window size must be greater than 0".to_string(),
+                ));
             }
         }
 
-        if self.magnitude_weight < 0.0 || self.magnitude_weight > 1.0 {
-            return Err("Magnitude weight must be between 0.0 and 1.0".to_string());
+        if self.magnitude_weight < F::zero() || self.magnitude_weight > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Magnitude weight must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
-        if self.phase_weight < 0.0 || self.phase_weight > 1.0 {
-            return Err("Phase weight must be between 0.0 and 1.0".to_string());
+        if self.phase_weight < F::zero() || self.phase_weight > F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Phase weight must be between F::zero() and F::one()".to_string(),
+            ));
         }
 
         // Both weights cannot be zero
-        if self.magnitude_weight == 0.0 && self.phase_weight == 0.0 {
-            return Err("Both magnitude and phase weights cannot be zero".to_string());
+        if self.magnitude_weight == F::zero() && self.phase_weight == F::one() {
+            return Err(AudioSampleError::InvalidParameter(
+                "At least one of magnitude or phase weight must be greater than 0".to_string(),
+            ));
         }
 
-        if self.log_compression < 0.0 {
-            return Err("Log compression factor must be non-negative".to_string());
+        if self.log_compression < F::zero() {
+            return Err(AudioSampleError::InvalidParameter(
+                "Log compression factor must be non-negative".to_string(),
+            ));
         }
 
         Ok(())
     }
 }
 
-impl Default for ComplexOnsetConfig {
+impl<F: RealFloat> Default for ComplexOnsetConfig<F> {
     fn default() -> Self {
         Self::new()
     }
@@ -2168,7 +2300,7 @@ pub enum NoiseColor {
 /// Each variant defines a specific type of perturbation that can be applied
 /// to audio samples for data augmentation, robustness testing, or creative effects.
 #[derive(Debug, Clone, PartialEq)]
-pub enum PerturbationMethod {
+pub enum PerturbationMethod<F: RealFloat> {
     /// Gaussian noise injection with specified signal-to-noise ratio.
     ///
     /// Adds colored Gaussian noise to achieve the target SNR relative to
@@ -2178,7 +2310,9 @@ pub enum PerturbationMethod {
     /// * `target_snr_db` - Target signal-to-noise ratio in dB
     /// * `noise_color` - Color/spectrum of the noise to add
     GaussianNoise {
-        target_snr_db: f64,
+        /// Target signal-to-noise ratio in dB
+        target_snr_db: F,
+        /// Color/spectrum of the noise to add
         noise_color: NoiseColor,
     },
     /// Random gain adjustment within specified dB range.
@@ -2189,7 +2323,12 @@ pub enum PerturbationMethod {
     /// # Arguments
     /// * `min_gain_db` - Minimum gain in dB
     /// * `max_gain_db` - Maximum gain in dB
-    RandomGain { min_gain_db: f64, max_gain_db: f64 },
+    RandomGain {
+        /// Minimum gain in dB
+        min_gain_db: F,
+        /// Maximum gain in dB
+        max_gain_db: F,
+    },
     /// High-pass filtering to remove low-frequency content.
     ///
     /// Applies a high-pass filter to simulate microphone rumble removal
@@ -2199,8 +2338,10 @@ pub enum PerturbationMethod {
     /// * `cutoff_hz` - Cutoff frequency in Hz
     /// * `slope_db_per_octave` - Filter slope (None = default 6dB/octave)
     HighPassFilter {
-        cutoff_hz: f64,
-        slope_db_per_octave: Option<f64>,
+        /// Cutoff frequency in Hz
+        cutoff_hz: F,
+        /// Filter slope in dB per octave (None = default 6dB/octave)
+        slope_db_per_octave: Option<F>,
     },
     /// Pitch shifting for data augmentation.
     ///
@@ -2211,18 +2352,20 @@ pub enum PerturbationMethod {
     /// * `semitones` - Pitch shift in semitones (positive = higher, negative = lower)
     /// * `preserve_formants` - Whether to attempt formant preservation (basic implementation)
     PitchShift {
-        semitones: f64,
+        /// Pitch shift in semitones (positive = higher, negative = lower)
+        semitones: F,
+        /// Whether to attempt formant preservation (basic implementation)
         preserve_formants: bool,
     },
 }
 
-impl PerturbationMethod {
+impl<F: RealFloat> PerturbationMethod<F> {
     /// Create a Gaussian noise perturbation configuration.
     ///
     /// # Arguments
     /// * `target_snr_db` - Target signal-to-noise ratio in dB
     /// * `noise_color` - Color/spectrum of the noise
-    pub const fn gaussian_noise(target_snr_db: f64, noise_color: NoiseColor) -> Self {
+    pub const fn gaussian_noise(target_snr_db: F, noise_color: NoiseColor) -> Self {
         Self::GaussianNoise {
             target_snr_db,
             noise_color,
@@ -2234,7 +2377,7 @@ impl PerturbationMethod {
     /// # Arguments
     /// * `min_gain_db` - Minimum gain in dB
     /// * `max_gain_db` - Maximum gain in dB
-    pub const fn random_gain(min_gain_db: f64, max_gain_db: f64) -> Self {
+    pub const fn random_gain(min_gain_db: F, max_gain_db: F) -> Self {
         Self::RandomGain {
             min_gain_db,
             max_gain_db,
@@ -2245,7 +2388,7 @@ impl PerturbationMethod {
     ///
     /// # Arguments
     /// * `cutoff_hz` - Cutoff frequency in Hz
-    pub const fn high_pass_filter(cutoff_hz: f64) -> Self {
+    pub const fn high_pass_filter(cutoff_hz: F) -> Self {
         Self::HighPassFilter {
             cutoff_hz,
             slope_db_per_octave: None,
@@ -2257,7 +2400,7 @@ impl PerturbationMethod {
     /// # Arguments
     /// * `cutoff_hz` - Cutoff frequency in Hz
     /// * `slope_db_per_octave` - Filter slope in dB per octave
-    pub const fn high_pass_filter_with_slope(cutoff_hz: f64, slope_db_per_octave: f64) -> Self {
+    pub const fn high_pass_filter_with_slope(cutoff_hz: F, slope_db_per_octave: F) -> Self {
         Self::HighPassFilter {
             cutoff_hz,
             slope_db_per_octave: Some(slope_db_per_octave),
@@ -2269,7 +2412,7 @@ impl PerturbationMethod {
     /// # Arguments
     /// * `semitones` - Pitch shift in semitones
     /// * `preserve_formants` - Whether to preserve formants
-    pub const fn pitch_shift(semitones: f64, preserve_formants: bool) -> Self {
+    pub const fn pitch_shift(semitones: F, preserve_formants: bool) -> Self {
         Self::PitchShift {
             semitones,
             preserve_formants,
@@ -2283,11 +2426,13 @@ impl PerturbationMethod {
     ///
     /// # Returns
     /// Result indicating whether the parameters are valid
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         match self {
             Self::GaussianNoise { target_snr_db, .. } => {
-                if *target_snr_db < -60.0 || *target_snr_db > 60.0 {
-                    return Err("Target SNR should be between -60 and 60 dB".to_string());
+                if *target_snr_db < to_precision(-60.0) || *target_snr_db > to_precision(60.0) {
+                    return Err(AudioSampleError::InvalidParameter(
+                        "Target SNR should be between -60 and 60 dB".to_string(),
+                    ));
                 }
             }
             Self::RandomGain {
@@ -2295,32 +2440,40 @@ impl PerturbationMethod {
                 max_gain_db,
             } => {
                 if min_gain_db >= max_gain_db {
-                    return Err("Minimum gain must be less than maximum gain".to_string());
+                    return Err(AudioSampleError::InvalidParameter(
+                        "Minimum gain must be less than maximum gain".to_string(),
+                    ));
                 }
-                if min_gain_db < &-40.0 || *max_gain_db > 20.0 {
-                    return Err("Gain range should be reasonable (-40 to +20 dB)".to_string());
+                if *min_gain_db < to_precision(-40.0) || *max_gain_db > to_precision(20.0) {
+                    return Err(AudioSampleError::InvalidParameter(
+                        "Gain values should be between -40 dB and +20 dB".to_string(),
+                    ));
                 }
             }
             Self::HighPassFilter {
                 cutoff_hz,
                 slope_db_per_octave,
             } => {
-                let nyquist = sample_rate / 2.0;
-                if *cutoff_hz <= 0.0 || *cutoff_hz >= nyquist {
-                    return Err(format!(
-                        "Cutoff frequency must be between 0 and {} Hz",
+                let nyquist = sample_rate / to_precision(2.0);
+                if *cutoff_hz <= F::zero() || *cutoff_hz >= nyquist {
+                    return Err(AudioSampleError::InvalidParameter(format!(
+                        "Cutoff frequency must be between 0 and Nyquist ({:.1} Hz)",
                         nyquist
-                    ));
+                    )));
                 }
                 if let Some(slope) = slope_db_per_octave {
-                    if *slope < 0.0 || *slope > 48.0 {
-                        return Err("Filter slope should be between 0 and 48 dB/octave".to_string());
+                    if *slope < F::zero() || *slope > to_precision(48.0) {
+                        return Err(AudioSampleError::InvalidParameter(
+                            "Slope must be between 0 and 48 dB/octave".to_string(),
+                        ));
                     }
                 }
             }
             Self::PitchShift { semitones, .. } => {
-                if semitones.abs() > 12.0 {
-                    return Err("Pitch shift should be within ±12 semitones".to_string());
+                if semitones.abs() > to_precision(12.0) {
+                    return Err(AudioSampleError::InvalidParameter(
+                        "Pitch shift should be between -12 and +12 semitones".to_string(),
+                    ));
                 }
             }
         }
@@ -2333,20 +2486,20 @@ impl PerturbationMethod {
 /// This struct defines how audio samples should be perturbed for data augmentation,
 /// robustness testing, or creative effects.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PerturbationConfig {
+pub struct PerturbationConfig<F: RealFloat> {
     /// The perturbation method to apply
-    pub method: PerturbationMethod,
+    pub method: PerturbationMethod<F>,
     /// Optional random seed for deterministic perturbation
     /// If None, uses thread-local random number generator
     pub seed: Option<u64>,
 }
 
-impl PerturbationConfig {
+impl<F: RealFloat> PerturbationConfig<F> {
     /// Create a new perturbation configuration.
     ///
     /// # Arguments
     /// * `method` - The perturbation method to apply
-    pub const fn new(method: PerturbationMethod) -> Self {
+    pub const fn new(method: PerturbationMethod<F>) -> Self {
         Self { method, seed: None }
     }
 
@@ -2355,7 +2508,7 @@ impl PerturbationConfig {
     /// # Arguments
     /// * `method` - The perturbation method to apply
     /// * `seed` - Random seed for deterministic results
-    pub const fn with_seed(method: PerturbationMethod, seed: u64) -> Self {
+    pub const fn with_seed(method: PerturbationMethod<F>, seed: u64) -> Self {
         Self {
             method,
             seed: Some(seed),
@@ -2379,15 +2532,15 @@ impl PerturbationConfig {
     ///
     /// # Returns
     /// Result indicating whether the configuration is valid
-    pub fn validate(&self, sample_rate: f64) -> Result<(), String> {
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         self.method.validate(sample_rate)
     }
 }
 
-impl Default for PerturbationConfig {
+impl<F: RealFloat> Default for PerturbationConfig<F> {
     fn default() -> Self {
         Self::new(PerturbationMethod::GaussianNoise {
-            target_snr_db: 20.0,
+            target_snr_db: to_precision(20.0),
             noise_color: NoiseColor::White,
         })
     }

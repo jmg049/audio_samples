@@ -6,8 +6,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{AudioSampleError, AudioSampleResult};
+use crate::{AudioSampleError, AudioSampleResult, RealFloat, to_precision};
 use num_complex::Complex;
+#[cfg(feature = "fft")]
 use realfft::{RealFftPlanner, RealToComplex};
 
 /// FFT backend selection strategies
@@ -21,19 +22,19 @@ pub enum FftBackend {
 }
 
 /// Automatic backend selection based on audio duration and processing requirements
-pub fn select_fft_backend(duration_seconds: f64, total_samples: usize) -> FftBackend {
+pub fn select_fft_backend<F: RealFloat>(duration_seconds: F, total_samples: usize) -> FftBackend {
     select_fft_backend_with_sample_rate(duration_seconds, total_samples, None)
 }
 
 /// Advanced backend selection with sample rate awareness
-pub fn select_fft_backend_with_sample_rate(
-    duration_seconds: f64,
+pub fn select_fft_backend_with_sample_rate<F: RealFloat>(
+    duration_seconds: F,
     total_samples: usize,
     sample_rate: Option<u32>,
 ) -> FftBackend {
     // Adaptive thresholds based on sample rate and processing characteristics
     let (duration_threshold, samples_threshold) =
-        calculate_adaptive_thresholds(sample_rate, total_samples);
+        calculate_adaptive_thresholds(sample_rate, total_samples, duration_seconds);
 
     #[cfg(feature = "mkl")]
     {
@@ -56,7 +57,11 @@ pub fn select_fft_backend_with_sample_rate(
 /// Calculate optimal thresholds based on audio characteristics
 ///
 /// Determined via trial and error when testing
-fn calculate_adaptive_thresholds(sample_rate: Option<u32>, total_samples: usize) -> (f64, usize) {
+fn calculate_adaptive_thresholds<F: RealFloat>(
+    sample_rate: Option<u32>,
+    total_samples: usize,
+    duration_seconds: F,
+) -> (F, usize) {
     // Base thresholds optimized for different sample rates
     let (base_duration, base_samples) = match sample_rate {
         Some(sr) => match sr {
@@ -73,26 +78,36 @@ fn calculate_adaptive_thresholds(sample_rate: Option<u32>, total_samples: usize)
         },
         // No sample rate info: use conservative defaults
         None => {
-            // Estimate sample rate from total samples and use conservative thresholds
-            if total_samples < 50_000 {
-                (2.0, 32_000) // Likely low sample rate
-            } else if total_samples < 200_000 {
-                (3.0, 132_300) // Likely standard sample rate  
+            // When no sample rate is provided, be more conservative about switching to MKL
+            // Estimate based on duration vs samples ratio to infer sample rate
+            let estimated_sr = if duration_seconds > F::zero() {
+                (to_precision::<F, _>(total_samples) / duration_seconds)
+                    .to_u32()
+                    .unwrap_or(44100)
             } else {
-                (4.0, 200_000) // Likely high sample rate or long duration
+                44100 // Default assumption
+            };
+
+            match estimated_sr {
+                sr if sr <= 16000 => (5.0, 80_000),  // Low sample rate
+                sr if sr <= 32000 => (5.0, 160_000), // Medium sample rate
+                sr if sr <= 44100 => (5.0, 220_500), // CD quality (~5s at 44.1kHz)
+                sr if sr <= 48000 => (5.0, 240_000), // High quality (~5s at 48kHz)
+                sr if sr <= 96000 => (5.0, 480_000), // Very high quality (~5s at 96kHz)
+                _ => (5.0, 500_000),                 // Ultra high quality
             }
         }
     };
-
+    let base_duration = to_precision::<F, _>(base_duration);
     // Additional adjustments based on total samples for very large files
     let adjusted_duration = if total_samples > 5_000_000 {
         // >5M samples (~113s at 44.1kHz)
         // For extremely large files, switch to MKL earlier
-        base_duration * 0.7
+        base_duration * to_precision::<F, _>(0.7)
     } else if total_samples > 1_000_000 {
         // >1M samples (~23s at 44.1kHz)
         // For large files, slightly earlier switch
-        base_duration * 0.8
+        base_duration * to_precision::<F, _>(0.8)
     } else {
         base_duration
     };
@@ -101,27 +116,25 @@ fn calculate_adaptive_thresholds(sample_rate: Option<u32>, total_samples: usize)
 }
 
 /// Trait for FFT backend implementations
-pub trait FftBackendImpl {
+pub trait FftBackendImpl<F: RealFloat> {
     /// Performs real-to-complex FFT
-    fn compute_real_fft(
-        &mut self,
-        input: &[f64],
-        output: &mut [Complex<f64>],
-    ) -> AudioSampleResult<()>;
+    fn compute_real_fft(&mut self, input: &[F], output: &mut [Complex<F>])
+    -> AudioSampleResult<()>;
+}
 
-    /// Returns the expected output size for given input size
-    fn output_size(input_size: usize) -> usize {
-        input_size / 2 + 1
-    }
+/// Returns the expected output size for given input size
+pub(crate) fn output_size(input_size: usize) -> usize {
+    input_size / 2 + 1
 }
 
 /// RealFFT backend implementation
-pub struct RealFftBackend {
-    planner: RealFftPlanner<f64>,
-    cached_plans: HashMap<usize, Arc<dyn RealToComplex<f64>>>,
+pub struct RealFftBackend<F: RealFloat> {
+    planner: RealFftPlanner<F>,
+    cached_plans: HashMap<usize, Arc<dyn RealToComplex<F>>>,
 }
 
-impl RealFftBackend {
+impl<F: RealFloat> RealFftBackend<F> {
+    /// Creates a new real FFT backend with an empty plan cache.
     pub fn new() -> Self {
         Self {
             planner: RealFftPlanner::new(),
@@ -129,7 +142,7 @@ impl RealFftBackend {
         }
     }
 
-    fn get_or_create_plan(&mut self, size: usize) -> std::sync::Arc<dyn RealToComplex<f64>> {
+    fn get_or_create_plan(&mut self, size: usize) -> std::sync::Arc<dyn RealToComplex<F>> {
         if let Some(plan) = self.cached_plans.get(&size) {
             plan.clone()
         } else {
@@ -140,22 +153,22 @@ impl RealFftBackend {
     }
 }
 
-impl Default for RealFftBackend {
+impl<F: RealFloat> Default for RealFftBackend<F> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FftBackendImpl for RealFftBackend {
+impl<F: RealFloat> FftBackendImpl<F> for RealFftBackend<F> {
     fn compute_real_fft(
         &mut self,
-        input: &[f64],
-        output: &mut [Complex<f64>],
+        input: &[F],
+        output: &mut [Complex<F>],
     ) -> AudioSampleResult<()> {
         let plan = self.get_or_create_plan(input.len());
 
         // RealFFT requires mutable input, so we need to copy
-        let mut input_copy: Vec<f64> = input.to_vec();
+        let mut input_copy: Vec<F> = input.to_vec();
 
         plan.process(&mut input_copy, output)
             .map_err(|e| AudioSampleError::ProcessingError {
@@ -180,15 +193,16 @@ struct MklPlan {
 
 #[cfg(feature = "mkl")]
 impl MklFftBackend {
+    /// Creates a new MKL FFT backend with an empty plan cache.
     pub fn new() -> AudioSampleResult<Self> {
         Ok(Self {
             cached_plans: HashMap::new(),
         })
     }
 
-    fn get_or_create_plan(&mut self, size: usize) -> AudioSampleResult<&MklPlan> {
+    fn get_or_create_plan<F: RealFloat>(&mut self, size: usize) -> AudioSampleResult<&MklPlan> {
         if !self.cached_plans.contains_key(&size) {
-            let output_size = Self::output_size(size);
+            let output_size = output_size(size);
 
             // Create FFTW plan for real-to-complex FFT
             let plan = unsafe {
@@ -261,13 +275,13 @@ impl Drop for MklFftBackend {
 }
 
 #[cfg(feature = "mkl")]
-impl FftBackendImpl for MklFftBackend {
+impl<F: RealFloat> FftBackendImpl<F> for MklFftBackend {
     fn compute_real_fft(
         &mut self,
-        input: &[f64],
-        output: &mut [Complex<f64>],
+        input: &[F],
+        output: &mut [Complex<F>],
     ) -> AudioSampleResult<()> {
-        let plan_info = self.get_or_create_plan(input.len())?;
+        let plan_info = self.get_or_create_plan::<F>(input.len())?;
 
         if output.len() != plan_info.output_size {
             return Err(AudioSampleError::DimensionMismatch(format!(
@@ -279,8 +293,7 @@ impl FftBackendImpl for MklFftBackend {
 
         unsafe {
             // Allocate aligned input and output arrays
-            let input_ptr =
-                fftw_sys::fftw_malloc(std::mem::size_of::<f64>() * input.len()) as *mut f64;
+            let input_ptr = fftw_sys::fftw_malloc(std::mem::size_of::<F>() * input.len()) as *mut F;
             let output_ptr =
                 fftw_sys::fftw_malloc(std::mem::size_of::<fftw_sys::fftw_complex>() * output.len())
                     as *mut fftw_sys::fftw_complex;
@@ -300,14 +313,21 @@ impl FftBackendImpl for MklFftBackend {
             // Copy input data
             std::ptr::copy_nonoverlapping(input.as_ptr(), input_ptr, input.len());
 
+            let input_ptr =
+                fftw_sys::fftw_malloc(std::mem::size_of::<f64>() * input.len()) as *mut f64;
             // Execute FFT with the cached plan but new data
             fftw_sys::fftw_execute_dft_r2c(plan_info.plan, input_ptr, output_ptr);
 
             // Convert FFTW complex format to num_complex format
             // FFTW uses [f64; 2] where [0] is real, [1] is imaginary
             for (i, out_val) in output.iter_mut().enumerate() {
+                use crate::to_precision;
+
                 let complex_val = std::slice::from_raw_parts(output_ptr.add(i) as *const f64, 2);
-                *out_val = Complex::new(complex_val[0], complex_val[1]);
+                *out_val = Complex::new(
+                    to_precision::<F, _>(complex_val[0]),
+                    to_precision::<F, _>(complex_val[1]),
+                );
             }
 
             // Free allocated memory
@@ -320,13 +340,22 @@ impl FftBackendImpl for MklFftBackend {
 }
 
 /// Unified FFT backend that automatically selects the optimal implementation
-pub enum UnifiedFftBackend {
-    RealFFT(RealFftBackend),
+pub enum UnifiedFftBackend<F: RealFloat> {
+    /// RealFFT backend using the realfft crate
+    RealFFT(RealFftBackend<F>),
+    /// Intel MKL backend for optimized performance
     #[cfg(feature = "mkl")]
     IntelMKL(MklFftBackend),
 }
 
-impl UnifiedFftBackend {
+impl<F: RealFloat> UnifiedFftBackend<F> {
+    /// Creates a new unified FFT backend using the specified implementation.
+    ///
+    /// # Arguments
+    /// * `backend` - The FFT backend type to use
+    ///
+    /// # Returns
+    /// A new `UnifiedFftBackend` instance
     pub fn new(backend: FftBackend) -> AudioSampleResult<Self> {
         match backend {
             FftBackend::RealFFT => Ok(Self::RealFFT(RealFftBackend::new())),
@@ -335,11 +364,28 @@ impl UnifiedFftBackend {
         }
     }
 
-    pub fn auto_select(duration_seconds: f64, total_samples: usize) -> AudioSampleResult<Self> {
+    /// Automatically selects the optimal FFT backend based on audio characteristics.
+    ///
+    /// # Arguments
+    /// * `duration_seconds` - Duration of the audio in seconds
+    /// * `total_samples` - Total number of samples in the audio
+    ///
+    /// # Returns
+    /// A new `UnifiedFftBackend` instance with the optimal backend selected
+    pub fn auto_select(duration_seconds: F, total_samples: usize) -> AudioSampleResult<Self> {
         let backend = select_fft_backend(duration_seconds, total_samples);
         Self::new(backend)
     }
 
+    /// Automatically selects the optimal FFT backend considering sample rate.
+    ///
+    /// # Arguments
+    /// * `duration_seconds` - Duration of the audio in seconds
+    /// * `total_samples` - Total number of samples in the audio
+    /// * `sample_rate` - Optional sample rate for additional optimization hints
+    ///
+    /// # Returns
+    /// A new `UnifiedFftBackend` instance with the optimal backend selected
     pub fn auto_select_with_sample_rate(
         duration_seconds: f64,
         total_samples: usize,
@@ -351,11 +397,11 @@ impl UnifiedFftBackend {
     }
 }
 
-impl FftBackendImpl for UnifiedFftBackend {
+impl<F: RealFloat> FftBackendImpl<F> for UnifiedFftBackend<F> {
     fn compute_real_fft(
         &mut self,
-        input: &[f64],
-        output: &mut [Complex<f64>],
+        input: &[F],
+        output: &mut [Complex<F>],
     ) -> AudioSampleResult<()> {
         match self {
             Self::RealFFT(backend) => backend.compute_real_fft(input, output),
@@ -392,8 +438,8 @@ mod tests {
 
     #[test]
     fn test_output_size_calculation() {
-        assert_eq!(RealFftBackend::output_size(1024), 513);
-        assert_eq!(RealFftBackend::output_size(2048), 1025);
-        assert_eq!(RealFftBackend::output_size(512), 257);
+        assert_eq!(output_size(1024), 513);
+        assert_eq!(output_size(2048), 1025);
+        assert_eq!(output_size(512), 257);
     }
 }

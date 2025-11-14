@@ -4,10 +4,41 @@
 //! `AudioSamplesOperations` trait. Each trait has a single responsibility
 //! and can be implemented independently.
 
-use super::types::*;
-use crate::{AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo, I24};
+#[cfg(feature = "resampling")]
+use crate::operations::ResamplingQuality;
+#[cfg(feature = "spectral-analysis")]
+use crate::operations::{
+    CqtConfig,
+    types::{SpectrogramScale, WindowType},
+};
+use crate::{
+    AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom, CastInto,
+    ConvertTo, I24, NormalizationMethod, RealFloat,
+    operations::{
+        MonoConversionMethod, StereoConversionMethod,
+        types::{
+            CompressorConfig, EqBand, FadeCurve, FilterResponse, IirFilterDesign, LimiterConfig,
+            PadSide, ParametricEq, PerturbationConfig, PitchDetectionMethod,
+        },
+    },
+    to_precision,
+};
+#[cfg(feature = "spectral-analysis")]
 use ndarray::Array2;
-use std::collections::VecDeque;
+
+#[cfg(feature = "spectral-analysis")]
+use rustfft::FftNum;
+
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+
+#[cfg(feature = "spectral-analysis")]
+use std::num::NonZeroUsize;
+
+#[cfg(feature = "spectral-analysis")]
+use ndarray::Zip;
 
 // Complex numbers using num-complex crate
 pub use num_complex::Complex;
@@ -19,14 +50,14 @@ pub use num_complex::Complex;
 ///
 /// All methods return values in the native sample type `T` for consistency
 /// with the underlying data representation.
-pub trait AudioStatistics<T: AudioSample>
+pub trait AudioStatistics<'a, T: AudioSample>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     /// Returns the peak (maximum absolute value) in the audio samples.
     ///
@@ -45,24 +76,32 @@ where
     fn max_sample(&self) -> T;
 
     /// Computes the mean (average) of the audio samples.
-    fn mean(&self) -> T;
+    fn mean<F>(&'a self) -> Option<F>
+    where
+        F: RealFloat;
 
     /// Computes the Root Mean Square (RMS) of the audio samples.
     ///
     /// RMS is useful for measuring average signal power/energy and
     /// provides a perceptually relevant measure of loudness.
-    fn rms(&self) -> f64;
+    fn rms<F>(&self) -> Option<F>
+    where
+        F: RealFloat;
 
     /// Computes the statistical variance of the audio samples.
     ///
     /// Variance measures the spread of sample values around the mean.
-    fn variance(&self) -> AudioSampleResult<f64>;
+    fn variance<F>(&'a self) -> Option<F>
+    where
+        F: RealFloat;
 
     /// Computes the standard deviation of the audio samples.
     ///
     /// Standard deviation is the square root of variance and provides
     /// a measure of signal variability in the same units as the samples.
-    fn std_dev(&self) -> AudioSampleResult<f64>;
+    fn std_dev<F>(&'a self) -> Option<F>
+    where
+        F: RealFloat;
 
     /// Counts the number of zero crossings in the audio signal.
     ///
@@ -74,7 +113,9 @@ where
     ///
     /// This normalizes the zero crossing count by the signal duration,
     /// making it independent of audio length.
-    fn zero_crossing_rate(&self) -> f64;
+    fn zero_crossing_rate<F>(&self) -> F
+    where
+        F: RealFloat;
 
     /// Computes the autocorrelation function up to max_lag samples.
     ///
@@ -83,7 +124,10 @@ where
     ///
     /// # Arguments
     /// * `max_lag` - Maximum lag to compute (in samples)
-    fn autocorrelation(&self, max_lag: usize) -> AudioSampleResult<Vec<f64>>;
+    #[cfg(feature = "fft")]
+    fn autocorrelation<F>(&self, max_lag: usize) -> Option<Vec<F>>
+    where
+        F: RealFloat;
 
     /// Computes cross-correlation with another audio signal.
     ///
@@ -93,14 +137,19 @@ where
     /// # Arguments
     /// * `other` - The other audio signal to correlate with
     /// * `max_lag` - Maximum lag to compute (in samples)
-    fn cross_correlation(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<f64>>;
+    fn cross_correlation<F>(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<F>>
+    where
+        F: RealFloat;
 
     /// Computes the spectral centroid (brightness measure).
     ///
     /// The spectral centroid represents the "center of mass" of the spectrum
     /// and is often used as a measure of brightness or timbre.
     /// Requires FFT computation internally.
-    fn spectral_centroid(&self) -> AudioSampleResult<f64>;
+    #[cfg(feature = "fft")]
+    fn spectral_centroid<F: RealFloat + ConvertTo<T>>(&self) -> AudioSampleResult<F>
+    where
+        T: ConvertTo<F>;
 
     /// Computes spectral rolloff frequency.
     ///
@@ -109,7 +158,13 @@ where
     ///
     /// # Arguments
     /// * `rolloff_percent` - Percentage of energy (0.0 to 1.0, typically 0.85)
-    fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64>;
+    #[cfg(feature = "fft")]
+    fn spectral_rolloff<F: RealFloat + ConvertTo<T>>(
+        &self,
+        rolloff_percent: F,
+    ) -> AudioSampleResult<F>
+    where
+        T: ConvertTo<F>;
 }
 
 /// Signal processing operations for audio manipulation.
@@ -127,7 +182,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Normalizes audio samples using the specified method and range.
     ///
@@ -190,7 +245,10 @@ where
     ///
     /// # Arguments
     /// * `cutoff_hz` - Cutoff frequency in Hz
-    fn low_pass_filter(&mut self, cutoff_hz: f64) -> AudioSampleResult<()>;
+    fn low_pass_filter<F>(&mut self, cutoff_hz: F) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: CastFrom<F> + ConvertTo<F>;
 
     /// Applies a high-pass filter with the specified cutoff frequency.
     ///
@@ -198,7 +256,10 @@ where
     ///
     /// # Arguments
     /// * `cutoff_hz` - Cutoff frequency in Hz
-    fn high_pass_filter(&mut self, cutoff_hz: f64) -> AudioSampleResult<()>;
+    fn high_pass_filter<F>(&mut self, cutoff_hz: F) -> AudioSampleResult<()>
+    where
+        T: CastFrom<F> + ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Applies a band-pass filter between low and high frequencies.
     ///
@@ -207,7 +268,10 @@ where
     /// # Arguments
     /// * `low_hz` - Lower cutoff frequency in Hz
     /// * `high_hz` - Upper cutoff frequency in Hz
-    fn band_pass_filter(&mut self, low_hz: f64, high_hz: f64) -> AudioSampleResult<()>;
+    fn band_pass_filter<F>(&mut self, low_hz: F, high_hz: F) -> AudioSampleResult<()>
+    where
+        T: CastFrom<F> + ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Removes DC offset by subtracting the mean value.
     ///
@@ -242,6 +306,7 @@ where
     /// - The resampling parameters are invalid
     /// - The input audio is empty
     /// - Rubato encounters an internal error
+    #[cfg(feature = "resampling")]
     fn resample(
         &self,
         target_sample_rate: usize,
@@ -263,7 +328,10 @@ where
     /// - The ratio is invalid (≤ 0)
     /// - The input audio is empty
     /// - Rubato encounters an internal error
-    fn resample_by_ratio(&self, ratio: f64, quality: ResamplingQuality) -> AudioSampleResult<Self>;
+    #[cfg(feature = "resampling")]
+    fn resample_by_ratio<F>(&self, ratio: F, quality: ResamplingQuality) -> AudioSampleResult<Self>
+    where
+        F: RealFloat;
 }
 
 /// Frequency domain analysis and spectral transformations.
@@ -273,6 +341,7 @@ where
 ///
 /// Complex numbers are used for frequency domain representations,
 /// and ndarray is used for efficient matrix operations on spectrograms.
+#[cfg(feature = "spectral-analysis")]
 pub trait AudioTransforms<T: AudioSample>
 where
     i16: ConvertTo<T>,
@@ -285,14 +354,30 @@ where
     ///
     /// Returns complex frequency domain representation where the real and
     /// imaginary parts represent the magnitude and phase at each frequency bin.
-    fn fft(&self) -> AudioSampleResult<Vec<Complex<f64>>>;
+    fn fft<F>(&self) -> AudioSampleResult<Vec<Complex<F>>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
+
+    /// Compute FFT with additional information.
+    fn fft_info<F>(
+        &self,
+        n_fft: Option<usize>,
+        window: Option<WindowType<F>>,
+        normalise: bool,
+    ) -> AudioSampleResult<(Vec<F>, Vec<F>, Vec<Complex<F>>)>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes the inverse FFT from frequency domain back to time domain.
     ///
     /// # Arguments
     /// * `spectrum` - Complex frequency domain data
-    fn ifft(&self, spectrum: &[Complex<f64>]) -> AudioSampleResult<Self>
+    fn ifft<F>(&self, spectrum: &[Complex<F>]) -> AudioSampleResult<Self>
     where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
         Self: Sized;
 
     /// Computes the Short-Time Fourier Transform (STFT).
@@ -304,13 +389,15 @@ where
     /// * `window_size` - Size of each analysis window in samples
     /// * `hop_size` - Number of samples between successive windows
     /// * `window_type` - Window function to apply to each frame
-    fn stft(
+    fn stft<F>(
         &self,
         window_size: usize,
         hop_size: usize,
-        window_type: WindowType,
-    ) -> AudioSampleResult<Array2<Complex<f64>>>;
-
+        window_type: WindowType<F>,
+    ) -> AudioSampleResult<Array2<Complex<F>>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
     /// Computes the inverse STFT to reconstruct time domain signal.
     ///
     /// Reconstructs a time-domain signal from its STFT representation.
@@ -320,14 +407,16 @@ where
     /// * `hop_size` - Hop size used in the original STFT
     /// * `window_type` - Window type used in the original STFT
     /// * `sample_rate` - Sample rate for the reconstructed signal
-    fn istft(
-        stft_matrix: &Array2<Complex<f64>>,
+    fn istft<F>(
+        stft_matrix: &Array2<Complex<F>>,
         hop_size: usize,
-        window_type: WindowType,
+        window_type: WindowType<F>,
         sample_rate: usize,
         center: bool,
     ) -> AudioSampleResult<Self>
     where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
         Self: Sized;
 
     /// Computes the magnitude spectrogram (|STFT|^2) with scaling options.
@@ -341,14 +430,17 @@ where
     /// * `window_type` - Window function to apply to each frame
     /// * `scale` - Scaling method to apply (Linear, Log, or Mel)
     /// * `normalize` - Whether to normalize the result
-    fn spectrogram(
+    fn spectrogram<F>(
         &self,
         window_size: usize,
         hop_size: usize,
-        window_type: WindowType,
+        window_type: WindowType<F>,
         scale: SpectrogramScale,
         normalize: bool,
-    ) -> AudioSampleResult<Array2<f64>>;
+    ) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes mel-scaled spectrogram for perceptual analysis.
     ///
@@ -361,14 +453,17 @@ where
     /// * `fmax` - Maximum frequency in Hz
     /// * `window_size` - Size of each analysis window in samples
     /// * `hop_size` - Number of samples between successive windows
-    fn mel_spectrogram(
+    fn mel_spectrogram<F>(
         &self,
         n_mels: usize,
-        fmin: f64,
-        fmax: f64,
+        fmin: F,
+        fmax: F,
         window_size: usize,
         hop_size: usize,
-    ) -> AudioSampleResult<Array2<f64>>;
+    ) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes Mel-Frequency Cepstral Coefficients (MFCC).
     ///
@@ -380,13 +475,16 @@ where
     /// * `n_mels` - Number of mel frequency bands (intermediate step)
     /// * `fmin` - Minimum frequency in Hz
     /// * `fmax` - Maximum frequency in Hz
-    fn mfcc(
+    fn mfcc<F>(
         &self,
         n_mfcc: usize,
         n_mels: usize,
-        fmin: f64,
-        fmax: f64,
-    ) -> AudioSampleResult<Array2<f64>>;
+        fmin: F,
+        fmax: F,
+    ) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes chromagram (pitch class profile).
     ///
@@ -395,7 +493,10 @@ where
     ///
     /// # Arguments
     /// * `n_chroma` - Number of chroma bins (typically 12)
-    fn chroma(&self, n_chroma: usize) -> AudioSampleResult<Array2<f64>>;
+    fn chroma<F>(&self, n_chroma: usize) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes the power spectral density using Welch's method.
     ///
@@ -405,11 +506,14 @@ where
     /// # Arguments
     /// * `window_size` - Size of each segment for averaging
     /// * `overlap` - Overlap between segments (0.0 to 1.0)
-    fn power_spectral_density(
+    fn power_spectral_density<F>(
         &self,
         window_size: usize,
-        overlap: f64,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>; // (frequencies, psd)
+        overlap: F,
+    ) -> AudioSampleResult<(Vec<F>, Vec<F>)>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>; // (frequencies, psd)
 
     /// Computes gammatone-filtered spectrogram for auditory modeling.
     ///
@@ -442,14 +546,17 @@ where
     /// * `fmax` - Maximum frequency in Hz (typically sample_rate/2)
     /// * `window_size` - Size of analysis windows in samples
     /// * `hop_size` - Number of samples between successive windows
-    fn gammatone_spectrogram(
+    fn gammatone_spectrogram<F>(
         &self,
         n_filters: usize,
-        fmin: f64,
-        fmax: f64,
+        fmin: F,
+        fmax: F,
         window_size: usize,
         hop_size: usize,
-    ) -> AudioSampleResult<Array2<f64>>;
+    ) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes the Constant-Q Transform (CQT) of the audio signal.
     ///
@@ -494,10 +601,13 @@ where
     /// let config = CqtConfig::musical();
     /// let cqt = audio.constant_q_transform(&config)?;
     /// ```
-    fn constant_q_transform(
+    fn constant_q_transform<F>(
         &self,
-        config: &super::types::CqtConfig,
-    ) -> AudioSampleResult<Array2<Complex<f64>>>;
+        config: &CqtConfig<F>,
+    ) -> AudioSampleResult<Array2<Complex<F>>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes the inverse Constant-Q Transform (iCQT) to reconstruct time-domain signal.
     ///
@@ -527,13 +637,15 @@ where
     /// let cqt = audio.constant_q_transform(&config)?;
     /// let reconstructed = AudioSamples::inverse_constant_q_transform(&cqt, &config, original_length)?;
     /// ```
-    fn inverse_constant_q_transform(
-        cqt_matrix: &Array2<Complex<f64>>,
-        config: &super::types::CqtConfig,
+    fn inverse_constant_q_transform<F>(
+        cqt_matrix: &Array2<Complex<F>>,
+        config: &CqtConfig<F>,
         signal_length: usize,
-        sample_rate: usize,
+        sample_rate: F,
     ) -> AudioSampleResult<Self>
     where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
         Self: Sized;
 
     /// Computes the CQT spectrogram for time-frequency analysis.
@@ -562,7 +674,7 @@ where
     /// * `window_size` - Size of analysis windows in samples (None = auto-calculated)
     ///
     /// # Returns
-    /// Complex-valued CQT spectrogram as `Array2<Complex<f64>>` with dimensions
+    /// Complex-valued CQT spectrogram as `Array2<Complex<F>>` with dimensions
     /// `(num_bins, num_frames)` where num_frames depends on signal length and hop_size
     ///
     /// # Example
@@ -571,12 +683,15 @@ where
     /// let hop_size = 512;
     /// let cqt_spectrogram = audio.cqt_spectrogram(&config, hop_size, None)?;
     /// ```
-    fn cqt_spectrogram(
+    fn cqt_spectrogram<F>(
         &self,
-        config: &super::types::CqtConfig,
+        config: &CqtConfig<F>,
         hop_size: usize,
         window_size: Option<usize>,
-    ) -> AudioSampleResult<Array2<Complex<f64>>>;
+    ) -> AudioSampleResult<Array2<Complex<F>>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes the magnitude CQT spectrogram for visualization and analysis.
     ///
@@ -590,7 +705,7 @@ where
     /// * `power` - Whether to return power (magnitude²) instead of magnitude
     ///
     /// # Returns
-    /// Real-valued magnitude CQT spectrogram as `Array2<f64>` with dimensions
+    /// Real-valued magnitude CQT spectrogram as `Array2<F>` with dimensions
     /// `(num_bins, num_frames)`
     ///
     /// # Example
@@ -599,13 +714,61 @@ where
     /// let hop_size = 512;
     /// let magnitude_spectrogram = audio.cqt_magnitude_spectrogram(&config, hop_size, None, false)?;
     /// ```
-    fn cqt_magnitude_spectrogram(
+    fn cqt_magnitude_spectrogram<F>(
         &self,
-        config: &super::types::CqtConfig,
+        config: &CqtConfig<F>,
         hop_size: usize,
         window_size: Option<usize>,
         power: bool,
-    ) -> AudioSampleResult<Array2<f64>>;
+    ) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
+
+    /// Separate a complex-valued spectrogram D into its magnitude (S) and phase (P) components, so that D = S * P.
+    fn magphase<F>(
+        complex_spect: &Array2<Complex<F>>,
+        power: Option<NonZeroUsize>,
+    ) -> (Array2<F>, Array2<Complex<F>>)
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
+        // Magnitude: elementwise absolute value
+
+        let mut mag = complex_spect.mapv(|x| x.norm());
+
+        // zeros_to_ones: 1.0 where mag == 0, else 0.0
+        let zeros_to_ones = mag.mapv(|x| if x == F::zero() { F::one() } else { F::zero() });
+
+        // mag_nonzero = mag + zeros_to_ones
+        let mag_nonzero = &mag + &zeros_to_ones;
+
+        // Compute phase = D / mag_nonzero, but handle zeros separately
+        let mut phase = complex_spect.clone();
+
+        let power = match power {
+            Some(p) => crate::to_precision(p.get() as f64),
+            None => F::one(),
+        };
+
+        // Perform elementwise division for real and imaginary parts
+        Zip::from(&mut phase)
+            .and(&mag_nonzero)
+            .and(&zeros_to_ones)
+            .for_each(|p, &m_nz, &z| {
+                let div = Complex {
+                    re: p.re / m_nz + z, // add 1.0 if originally zero
+                    im: p.im / m_nz,
+                };
+                *p = div;
+            });
+
+        // Raise magnitude to the given power
+        mag.mapv_inplace(|x| x.powf(power));
+
+        (mag, phase)
+    }
 }
 
 /// Pitch detection and fundamental frequency analysis.
@@ -620,7 +783,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Detects the fundamental frequency using the YIN algorithm.
     ///
@@ -648,12 +811,15 @@ where
     /// # Returns
     /// * `Some(frequency)` - Detected fundamental frequency in Hz
     /// * `None` - No reliable pitch detected
-    fn detect_pitch_yin(
+    fn detect_pitch_yin<F>(
         &self,
-        threshold: f64,
-        min_frequency: f64,
-        max_frequency: f64,
-    ) -> AudioSampleResult<Option<f64>>;
+        threshold: F,
+        min_frequency: F,
+        max_frequency: F,
+    ) -> AudioSampleResult<Option<F>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Detects pitch using autocorrelation method.
     ///
@@ -667,11 +833,14 @@ where
     /// # Returns
     /// * `Some(frequency)` - Detected fundamental frequency in Hz
     /// * `None` - No reliable pitch detected
-    fn detect_pitch_autocorr(
+    fn detect_pitch_autocorr<F>(
         &self,
-        min_frequency: f64,
-        max_frequency: f64,
-    ) -> AudioSampleResult<Option<f64>>;
+        min_frequency: F,
+        max_frequency: F,
+    ) -> AudioSampleResult<Option<F>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Tracks pitch over time using a sliding window analysis.
     ///
@@ -689,15 +858,18 @@ where
     /// # Returns
     /// Vector of (time_seconds, frequency_hz) pairs, where frequency
     /// is None if no pitch was detected in that window.
-    fn track_pitch(
+    fn track_pitch<F>(
         &self,
         window_size: usize,
         hop_size: usize,
         method: PitchDetectionMethod,
-        threshold: f64,
-        min_frequency: f64,
-        max_frequency: f64,
-    ) -> AudioSampleResult<Vec<(f64, Option<f64>)>>;
+        threshold: F,
+        min_frequency: F,
+        max_frequency: F,
+    ) -> AudioSampleResult<Vec<(F, Option<F>)>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Computes the harmonic-to-noise ratio (HNR).
     ///
@@ -710,11 +882,14 @@ where
     ///
     /// # Returns
     /// HNR value in dB. Higher values indicate stronger harmonic structure.
-    fn harmonic_to_noise_ratio(
+    fn harmonic_to_noise_ratio<F>(
         &self,
-        fundamental_freq: f64,
+        fundamental_freq: F,
         num_harmonics: usize,
-    ) -> AudioSampleResult<f64>;
+    ) -> AudioSampleResult<F>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Performs harmonic analysis by detecting harmonics of a fundamental frequency.
     ///
@@ -728,12 +903,15 @@ where
     ///
     /// # Returns
     /// Vector of harmonic magnitudes normalized to the fundamental (index 0).
-    fn harmonic_analysis(
+    fn harmonic_analysis<F>(
         &self,
-        fundamental_freq: f64,
+        fundamental_freq: F,
         num_harmonics: usize,
-        tolerance: f64,
-    ) -> AudioSampleResult<Vec<f64>>;
+        tolerance: F,
+    ) -> AudioSampleResult<Vec<F>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Estimates the key/pitch class of musical audio.
     ///
@@ -747,7 +925,10 @@ where
     /// # Returns
     /// Tuple of (key_index, confidence) where key_index is 0-11 for
     /// C, C#, D, D#, E, F, F#, G, G#, A, A#, B and confidence is 0.0-1.0
-    fn estimate_key(&self, window_size: usize, hop_size: usize) -> AudioSampleResult<(usize, f64)>;
+    fn estimate_key<F>(&self, window_size: usize, hop_size: usize) -> AudioSampleResult<(usize, F)>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 }
 
 /// IIR (Infinite Impulse Response) filtering operations.
@@ -762,7 +943,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Apply an IIR filter using the specified design parameters.
     ///
@@ -785,11 +966,14 @@ where
     /// let mut audio = AudioSamples::new_mono(samples, 44100);
     /// audio.apply_iir_filter(&design, 44100)?;
     /// ```
-    fn apply_iir_filter(
+    fn apply_iir_filter<F>(
         &mut self,
-        design: &super::types::IirFilterDesign,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        design: &IirFilterDesign<F>,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a simple Butterworth low-pass filter.
     ///
@@ -803,12 +987,15 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn butterworth_lowpass(
+    fn butterworth_lowpass<F>(
         &mut self,
         order: usize,
-        cutoff_frequency: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        cutoff_frequency: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a simple Butterworth high-pass filter.
     ///
@@ -822,12 +1009,15 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn butterworth_highpass(
+    fn butterworth_highpass<F>(
         &mut self,
         order: usize,
-        cutoff_frequency: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        cutoff_frequency: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a simple Butterworth band-pass filter.
     ///
@@ -842,13 +1032,16 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn butterworth_bandpass(
+    fn butterworth_bandpass<F>(
         &mut self,
         order: usize,
-        low_frequency: f64,
-        high_frequency: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        low_frequency: F,
+        high_frequency: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a Chebyshev Type I filter.
     ///
@@ -864,14 +1057,17 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn chebyshev_i(
+    fn chebyshev_i<F>(
         &mut self,
         order: usize,
-        cutoff_frequency: f64,
-        passband_ripple: f64,
-        sample_rate: f64,
-        response: super::types::FilterResponse,
-    ) -> AudioSampleResult<()>;
+        cutoff_frequency: F,
+        passband_ripple: F,
+        sample_rate: F,
+        response: FilterResponse,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Get the frequency response of the current filter.
     ///
@@ -884,11 +1080,14 @@ where
     ///
     /// # Returns
     /// Tuple of (magnitude_response, phase_response) vectors
-    fn frequency_response(
+    fn frequency_response<F>(
         &self,
-        frequencies: &[f64],
-        sample_rate: f64,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
+        frequencies: &[F],
+        sample_rate: F,
+    ) -> AudioSampleResult<(Vec<F>, Vec<F>)>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 }
 
 /// Parametric equalization operations.
@@ -903,7 +1102,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T> + AudioChannelOps<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T> + AudioChannelOps<T>,
 {
     /// Apply a parametric EQ to the audio signal.
     ///
@@ -930,11 +1129,14 @@ where
     /// let mut audio = AudioSamples::new_mono(samples, 44100);
     /// audio.apply_parametric_eq(&eq, 44100.0)?;
     /// ```
-    fn apply_parametric_eq(
+    fn apply_parametric_eq<F>(
         &mut self,
-        eq: &super::types::ParametricEq,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        eq: &ParametricEq<F>,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a single EQ band to the audio signal.
     ///
@@ -947,11 +1149,10 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_eq_band(
-        &mut self,
-        band: &super::types::EqBand,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+    fn apply_eq_band<F>(&mut self, band: &EqBand<F>, sample_rate: F) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a peak/notch filter at the specified frequency.
     ///
@@ -966,13 +1167,16 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_peak_filter(
+    fn apply_peak_filter<F>(
         &mut self,
-        frequency: f64,
-        gain_db: f64,
-        q_factor: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        frequency: F,
+        gain_db: F,
+        q_factor: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a low shelf filter.
     ///
@@ -987,13 +1191,16 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_low_shelf(
+    fn apply_low_shelf<F>(
         &mut self,
-        frequency: f64,
-        gain_db: f64,
-        q_factor: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        frequency: F,
+        gain_db: F,
+        q_factor: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Apply a high shelf filter.
     ///
@@ -1008,13 +1215,16 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_high_shelf(
+    fn apply_high_shelf<F>(
         &mut self,
-        frequency: f64,
-        gain_db: f64,
-        q_factor: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        frequency: F,
+        gain_db: F,
+        q_factor: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Create and apply a common 3-band EQ (low shelf, mid peak, high shelf).
     ///
@@ -1033,17 +1243,20 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_three_band_eq(
+    fn apply_three_band_eq<F>(
         &mut self,
-        low_freq: f64,
-        low_gain: f64,
-        mid_freq: f64,
-        mid_gain: f64,
-        mid_q: f64,
-        high_freq: f64,
-        high_gain: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        low_freq: F,
+        low_gain: F,
+        mid_freq: F,
+        mid_gain: F,
+        mid_q: F,
+        high_freq: F,
+        high_gain: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Get the combined frequency response of a parametric EQ.
     ///
@@ -1057,12 +1270,15 @@ where
     ///
     /// # Returns
     /// Tuple of (magnitude_response, phase_response) vectors
-    fn eq_frequency_response(
+    fn eq_frequency_response<F>(
         &self,
-        eq: &super::types::ParametricEq,
-        frequencies: &[f64],
-        sample_rate: f64,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
+        eq: &ParametricEq<F>,
+        frequencies: &[F],
+        sample_rate: F,
+    ) -> AudioSampleResult<(Vec<F>, Vec<F>)>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 }
 
 /// Dynamic range processing operations.
@@ -1077,7 +1293,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Apply compression to the audio signal.
     ///
@@ -1121,11 +1337,14 @@ where
     /// let mut audio = AudioSamples::new_mono(samples, 44100);
     /// audio.apply_compressor(&config, 44100.0)?;
     /// ```
-    fn apply_compressor(
+    fn apply_compressor<F>(
         &mut self,
-        config: &super::types::CompressorConfig,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        config: &CompressorConfig<F>,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Apply limiting to the audio signal.
     ///
@@ -1169,11 +1388,14 @@ where
     /// let mut audio = AudioSamples::new_mono(samples, 44100);
     /// audio.apply_limiter(&config, 44100.0)?;
     /// ```
-    fn apply_limiter(
+    fn apply_limiter<F>(
         &mut self,
-        config: &super::types::LimiterConfig,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        config: &LimiterConfig<F>,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Apply compression with external side-chain input.
     ///
@@ -1207,13 +1429,15 @@ where
     /// let sidechain = AudioSamples::new_mono(sidechain_samples, 44100);
     /// audio.apply_compressor_sidechain(&config, &sidechain, 44100.0)?;
     /// ```
-    fn apply_compressor_sidechain(
+    fn apply_compressor_sidechain<F>(
         &mut self,
-        config: &super::types::CompressorConfig,
+        config: &CompressorConfig<F>,
         sidechain_signal: &Self,
-        sample_rate: f64,
+        sample_rate: F,
     ) -> AudioSampleResult<()>
     where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
         Self: Sized;
 
     /// Apply limiting with external side-chain input.
@@ -1235,13 +1459,15 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_limiter_sidechain(
+    fn apply_limiter_sidechain<F>(
         &mut self,
-        config: &super::types::LimiterConfig,
+        config: &LimiterConfig<F>,
         sidechain_signal: &Self,
-        sample_rate: f64,
+        sample_rate: F,
     ) -> AudioSampleResult<()>
     where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
         Self: Sized;
 
     /// Analyze the compression curve characteristics.
@@ -1264,12 +1490,15 @@ where
     /// let input_levels = vec![-40.0, -30.0, -20.0, -10.0, 0.0];
     /// let output_levels = audio.get_compression_curve(&config, &input_levels, 44100.0)?;
     /// ```
-    fn get_compression_curve(
+    fn get_compression_curve<F>(
         &self,
-        config: &super::types::CompressorConfig,
-        input_levels_db: &[f64],
-        sample_rate: f64,
-    ) -> AudioSampleResult<Vec<f64>>;
+        config: &CompressorConfig<F>,
+        input_levels_db: &[F],
+        sample_rate: F,
+    ) -> AudioSampleResult<Vec<F>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Track gain reduction over time.
     ///
@@ -1290,11 +1519,14 @@ where
     /// let gain_reduction = audio.get_gain_reduction(&config, 44100.0)?;
     /// let max_reduction = gain_reduction.iter().fold(0.0, |a, &b| a.max(b));
     /// ```
-    fn get_gain_reduction(
+    fn get_gain_reduction<F>(
         &self,
-        config: &super::types::CompressorConfig,
-        sample_rate: f64,
-    ) -> AudioSampleResult<Vec<f64>>;
+        config: &CompressorConfig<F>,
+        sample_rate: F,
+    ) -> AudioSampleResult<Vec<F>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Apply gate processing to the audio signal.
     ///
@@ -1325,14 +1557,17 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_gate(
+    fn apply_gate<F>(
         &mut self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        threshold_db: F,
+        ratio: F,
+        attack_ms: F,
+        release_ms: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Apply expansion to the audio signal.
     ///
@@ -1362,14 +1597,17 @@ where
     ///
     /// # Returns
     /// Result indicating success or failure
-    fn apply_expander(
+    fn apply_expander<F>(
         &mut self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()>;
+        threshold_db: F,
+        ratio: F,
+        attack_ms: F,
+        release_ms: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 }
 
 /// Time-domain editing and manipulation operations.
@@ -1377,19 +1615,19 @@ where
 /// This trait provides methods for cutting, pasting, mixing, and modifying
 /// audio samples in the time domain. Most operations create new AudioSamples
 /// instances rather than modifying in-place to preserve the original data.
-pub trait AudioEditing<T: AudioSample>
+pub trait AudioEditing<'a, T: AudioSample>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Reverses the order of audio samples.
     ///
     /// Creates a new AudioSamples instance with time-reversed content.
-    fn reverse(&self) -> AudioSamples<T>
+    fn reverse<'b>(&self) -> AudioSamples<'b, T>
     where
         Self: Sized;
 
@@ -1406,9 +1644,11 @@ where
     ///
     /// # Errors
     /// Returns an error if start >= end or if times are out of bounds.
-    fn trim(&self, start_seconds: f64, end_seconds: f64) -> AudioSampleResult<AudioSamples<T>>
-    where
-        Self: Sized;
+    fn trim<'b, F: RealFloat>(
+        &self,
+        start_seconds: F,
+        end_seconds: F,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>;
 
     /// Adds padding/silence to the beginning and/or end of the audio.
     ///
@@ -1416,23 +1656,26 @@ where
     /// * `pad_start_seconds` - Duration to pad at the beginning
     /// * `pad_end_seconds` - Duration to pad at the end
     /// * `pad_value` - Value to use for padding (typically zero for silence)
-    fn pad(
+    fn pad<'b, F: RealFloat>(
         &self,
-        pad_start_seconds: f64,
-        pad_end_seconds: f64,
+        pad_start_seconds: F,
+        pad_end_seconds: F,
         pad_value: T,
-    ) -> AudioSampleResult<AudioSamples<T>>
-    where
-        Self: Sized;
+    ) -> AudioSampleResult<AudioSamples<'b, T>>;
 
-    fn pad_to_duration(
+    fn pad_samples_right<'b>(
         &self,
-        target_duration_seconds: f64,
+        target_num_samples: usize,
+        pad_value: T,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>;
+
+    /// Pad audio to a target duration.
+    fn pad_to_duration<'b, F: RealFloat>(
+        &self,
+        target_duration_seconds: F,
         pad_value: T,
         pad_side: PadSide,
-    ) -> AudioSampleResult<AudioSamples<T>>
-    where
-        Self: Sized;
+    ) -> AudioSampleResult<AudioSamples<'b, T>>;
 
     /// Splits audio into segments of specified duration.
     ///
@@ -1440,9 +1683,10 @@ where
     ///
     /// # Arguments
     /// * `segment_duration_seconds` - Duration of each segment
-    fn split(&self, segment_duration_seconds: f64) -> AudioSampleResult<Vec<AudioSamples<T>>>
-    where
-        Self: Sized;
+    fn split<'b, F: RealFloat>(
+        &self,
+        segment_duration_seconds: F,
+    ) -> AudioSampleResult<Vec<AudioSamples<'b, T>>>;
 
     /// Concatenates multiple audio segments into one.
     ///
@@ -1450,7 +1694,7 @@ where
     ///
     /// # Arguments
     /// * `segments` - Audio segments to concatenate in order
-    fn concatenate(segments: &[Self]) -> AudioSampleResult<AudioSamples<T>>
+    fn concatenate<'b>(segments: &[Self]) -> AudioSampleResult<AudioSamples<'b, T>>
     where
         Self: Sized;
 
@@ -1462,8 +1706,13 @@ where
     /// # Arguments
     /// * `sources` - Audio sources to mix
     /// * `weights` - Optional mixing weights (defaults to equal weighting)
-    fn mix(sources: &[Self], weights: Option<&[f64]>) -> AudioSampleResult<AudioSamples<T>>
+    fn mix<'b, F>(
+        sources: &[Self],
+        weights: Option<&[F]>,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>
     where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
         Self: Sized;
 
     /// Applies fade-in envelope over specified duration.
@@ -1471,35 +1720,40 @@ where
     /// # Arguments
     /// * `duration_seconds` - Duration of the fade-in
     /// * `curve` - Shape of the fade curve
-    fn fade_in(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()>;
+    fn fade_in<F>(&mut self, duration_seconds: F, curve: FadeCurve<F>) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Applies fade-out envelope over specified duration.
     ///
     /// # Arguments
     /// * `duration_seconds` - Duration of the fade-out
     /// * `curve` - Shape of the fade curve
-    fn fade_out(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()>;
+    fn fade_out<F>(&mut self, duration_seconds: F, curve: FadeCurve<F>) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Repeats the audio signal a specified number of times.
     ///
     /// # Arguments
     /// * `count` - Number of repetitions (total length = original × count)
-    fn repeat(&self, count: usize) -> AudioSampleResult<AudioSamples<T>>
-    where
-        Self: Sized;
+    fn repeat<'b>(&self, count: usize) -> AudioSampleResult<AudioSamples<'b, T>>;
 
     /// Crops audio to remove silence from beginning and end.
     ///
     /// # Arguments
-    /// * `threshold` - Amplitude threshold below which samples are considered silence
+    /// * `threshold_db` - db threshold below which samples are considered silence
     ///
     /// # Returns
     /// A new AudioSamples instance with leading and trailing silence removed
     /// # Errors
     /// Returns an error if the operation fails for any reason
-    fn trim_silence(&self, threshold: T) -> AudioSampleResult<AudioSamples<T>>
+    fn trim_silence<'b, F>(&self, threshold_db: F) -> AudioSampleResult<AudioSamples<'b, T>>
     where
-        Self: Sized;
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Applies perturbation to audio samples for data augmentation.
     ///
@@ -1536,9 +1790,13 @@ where
     /// );
     /// let gained_audio = audio.perturb(&gain_config)?;
     /// ```
-    fn perturb(&self, config: &PerturbationConfig) -> AudioSampleResult<AudioSamples<T>>
+    fn perturb<'b, F>(
+        &self,
+        config: &PerturbationConfig<F>,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>
     where
-        Self: Sized;
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Applies perturbation to audio samples in place.
     ///
@@ -1575,12 +1833,25 @@ where
     /// );
     /// audio.perturb_(&pitch_config)?;
     /// ```
-    fn perturb_(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()>;
+    fn perturb_<F>(&mut self, config: &PerturbationConfig<F>) -> AudioSampleResult<()>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Stacks multiple mono audio samples into a multi-channel audio sample.
-    fn stack(sources: &[Self]) -> AudioSampleResult<AudioSamples<T>>
+    fn stack<'b>(sources: &[Self]) -> AudioSampleResult<AudioSamples<'b, T>>
     where
         Self: Sized;
+
+    /// Trim silence anywhere in the audio.
+    fn trim_all_silence<'b, F>(
+        &self,
+        threshold_db: F,
+        min_silence_duration_seconds: F,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>
+    where
+        T: ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 }
 
 /// Channel manipulation and spatial audio operations.
@@ -1594,31 +1865,46 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Converts multi-channel audio to mono using specified method.
     ///
     /// # Arguments
     /// * `method` - Method for combining channels into mono
-    fn to_mono(&self, method: MonoConversionMethod) -> AudioSampleResult<Self>
+    fn to_mono<'b, F>(
+        &self,
+        method: MonoConversionMethod<F>,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>
     where
-        Self: Sized;
+        T: CastFrom<F> + ConvertTo<F>,
+        F: RealFloat + ConvertTo<T>;
 
     /// Converts mono audio to stereo using specified method.
     ///
     /// # Arguments
     /// * `method` - Method for creating stereo from mono
-    fn to_stereo(&self, method: StereoConversionMethod) -> AudioSampleResult<Self>
+    fn to_stereo<'b, F>(
+        &self,
+        method: StereoConversionMethod<F>,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>
     where
-        Self: Sized;
+        T: CastFrom<F> + ConvertTo<F>,
+        F: RealFloat + CastInto<T> + ConvertTo<T>;
 
     /// Extracts a specific channel from multi-channel audio.
     ///
     /// # Arguments
     /// * `channel_index` - Zero-based index of channel to extract
-    fn extract_channel(&self, channel_index: usize) -> AudioSampleResult<Self>
-    where
-        Self: Sized;
+    fn extract_channel<'b>(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'b, T>>;
+
+    /// Borrows a specific channel from multi-channel audio.
+    ///
+    /// # Arguments
+    /// * `channel_index` - Zero-based index of channel to borrow
+    ///
+    /// # Returns
+    /// AudioSamples with a borrowed representation of the specified channel from self.
+    fn borrow_channel(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'_, T>>;
 
     /// Swaps two channels in multi-channel audio.
     ///
@@ -1631,26 +1917,33 @@ where
     ///
     /// # Arguments
     /// * `pan_value` - Pan position (-1.0 = full left, 0.0 = center, 1.0 = full right)
-    fn pan(&mut self, pan_value: f64) -> AudioSampleResult<()>;
+    fn pan<F>(&mut self, pan_value: F) -> AudioSampleResult<()>
+    where
+        T: CastFrom<F> + ConvertTo<F>,
+        F: RealFloat + CastInto<T> + ConvertTo<T>;
 
     /// Adjusts balance between left and right channels.
     ///
     /// # Arguments
     /// * `balance` - Balance adjustment (-1.0 = left only, 0.0 = equal, 1.0 = right only)
-    fn balance(&mut self, balance: f64) -> AudioSampleResult<()>;
+    fn balance<F>(&mut self, balance: F) -> AudioSampleResult<()>
+    where
+        T: CastFrom<F> + ConvertTo<F>,
+        F: RealFloat + CastInto<T> + ConvertTo<T>;
 
+    /// Apply a function to a specific channel.
     fn apply_to_channel<F>(&mut self, channel_index: usize, func: F) -> AudioSampleResult<()>
     where
         F: FnMut(T) -> T,
         Self: Sized;
 
-    fn interleave_channels(channels: &[Self]) -> AudioSampleResult<Self>
-    where
-        Self: Sized;
+    /// Interleave multiple channels into one audio sample.
+    fn interleave_channels<'b>(
+        channels: &[AudioSamples<'_, T>],
+    ) -> AudioSampleResult<AudioSamples<'b, T>>;
 
-    fn deinterleave_channels(&self) -> AudioSampleResult<Vec<Self>>
-    where
-        Self: Sized;
+    /// Deinterleave audio into separate channel samples.
+    fn deinterleave_channels<'b>(&self) -> AudioSampleResult<Vec<AudioSamples<'b, T>>>;
 }
 
 /// Operation application and chaining functionality.
@@ -1838,21 +2131,22 @@ where
     /// )?;
     /// println!("Operation {} took {:.2}ms", metrics.name, metrics.duration_ms);
     /// ```
-    fn apply_with_metrics<F>(
+    fn apply_with_metrics<F, Fl>(
         mut self,
         operation: F,
         operation_name: &str,
-    ) -> AudioSampleResult<(Self, OperationMetrics)>
+    ) -> AudioSampleResult<(Self, OperationMetrics<Fl>)>
     where
         F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+        Fl: RealFloat,
     {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let result = operation(&mut self);
         let duration = start.elapsed();
 
-        let metrics = OperationMetrics {
+        let metrics: OperationMetrics<Fl> = OperationMetrics {
             name: operation_name.to_string(),
-            duration_ms: duration.as_secs_f64() * 1000.0,
+            duration_ms: to_precision(duration.as_secs_f64() * 1000.0),
             success: result.is_ok(),
             error_message: result.as_ref().err().map(|e| e.to_string()),
         };
@@ -1893,10 +2187,14 @@ where
 /// Provides timing and error information for individual operations,
 /// useful for performance monitoring and debugging.
 #[derive(Debug, Clone)]
-pub struct OperationMetrics {
+pub struct OperationMetrics<F> {
+    /// Name of the operation that was executed
     pub name: String,
-    pub duration_ms: f64,
+    /// Duration of the operation in milliseconds
+    pub duration_ms: F,
+    /// Whether the operation completed successfully
     pub success: bool,
+    /// Error message if the operation failed, None if successful
     pub error_message: Option<String>,
 }
 
@@ -1906,6 +2204,7 @@ pub struct OperationMetrics {
 /// AudioSamples instances efficiently. Pipelines can be built using a
 /// fluent interface and provide built-in error handling and metrics.
 pub struct OperationPipeline<T: AudioSample> {
+    /// Name of the operation pipeline
     pub name: String,
     operations: Vec<Box<dyn Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync>>,
     collect_metrics: bool,
@@ -1946,10 +2245,13 @@ impl<T: AudioSample> OperationPipeline<T> {
     ///
     /// # Returns
     /// Processed audio samples or error if any operation fails
-    pub fn apply<'a>(&'a self, mut audio: AudioSamples<T>) -> AudioSampleResult<AudioSamples<T>> {
+    pub fn apply<'a>(
+        &'a self,
+        mut audio: AudioSamples<'a, T>,
+    ) -> AudioSampleResult<AudioSamples<'a, T>> {
         for (i, operation) in self.operations.iter().enumerate() {
             if self.collect_metrics {
-                let start = std::time::Instant::now();
+                let start = Instant::now();
                 let result = operation(&mut audio);
                 let duration = start.elapsed();
 
@@ -2011,16 +2313,19 @@ where
     ///
     /// # Returns
     /// Self after processing, with metrics about completed/skipped operations
-    fn apply_realtime<F>(
+    fn apply_realtime<Fun, F>(
         mut self,
-        mut operations: VecDeque<F>,
-        max_processing_time_ms: f64,
-    ) -> AudioSampleResult<(Self, RealtimeMetrics)>
+        mut operations: VecDeque<Fun>,
+        max_processing_time_ms: F,
+    ) -> AudioSampleResult<(Self, RealtimeMetrics<F>)>
     where
-        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
+        Fun: FnOnce(&mut Self) -> AudioSampleResult<()>,
+        F: RealFloat,
     {
-        let start_time = std::time::Instant::now();
-        let max_duration = std::time::Duration::from_secs_f64(max_processing_time_ms / 1000.0);
+        let start_time = Instant::now();
+        let max_duration = Duration::from_secs_f64(
+            max_processing_time_ms.to_f64().expect("Should be safe") / 1000.0,
+        );
 
         let mut completed_operations = 0;
         let mut skipped_operations = 0;
@@ -2040,8 +2345,10 @@ where
             completed_operations += 1;
         }
 
-        let metrics = RealtimeMetrics {
-            total_processing_time_ms: start_time.elapsed().as_secs_f64() * 1000.0,
+        let metrics: RealtimeMetrics<F> = RealtimeMetrics {
+            total_processing_time_ms: to_precision::<F, _>(
+                start_time.elapsed().as_secs_f64() * 1000.0,
+            ),
             completed_operations,
             skipped_operations,
             target_time_ms: max_processing_time_ms,
@@ -2065,12 +2372,12 @@ where
     ///
     /// # Returns
     /// Self after applying the appropriate quality operation
-    fn apply_adaptive_quality<F1, F2, F3>(
+    fn apply_adaptive_quality<F1, F2, F3, Fl: RealFloat>(
         mut self,
         high_quality_op: F1,
         medium_quality_op: F2,
         low_quality_op: F3,
-        time_budget_ms: f64,
+        time_budget_ms: Fl,
     ) -> AudioSampleResult<Self>
     where
         F1: FnOnce(&mut Self) -> AudioSampleResult<()>,
@@ -2080,14 +2387,14 @@ where
         let _start_time = std::time::Instant::now();
 
         // Try high quality first if we have generous time budget
-        if time_budget_ms > 10.0 {
+        if time_budget_ms > to_precision::<Fl, _>(10.0) {
             if high_quality_op(&mut self).is_ok() {
                 return Ok(self);
             }
         }
 
         // Fall back to medium quality
-        if time_budget_ms > 5.0 {
+        if time_budget_ms > to_precision::<Fl, _>(5.0) {
             if medium_quality_op(&mut self).is_ok() {
                 return Ok(self);
             }
@@ -2133,33 +2440,36 @@ where
 
 /// Metrics for real-time audio processing.
 #[derive(Debug, Clone)]
-pub struct RealtimeMetrics {
-    pub total_processing_time_ms: f64,
+pub struct RealtimeMetrics<F> {
+    /// Total time spent processing audio in milliseconds
+    pub total_processing_time_ms: F,
+    /// Number of operations that completed within the time constraint
     pub completed_operations: usize,
+    /// Number of operations that were skipped due to time constraints
     pub skipped_operations: usize,
-    pub target_time_ms: f64,
+    /// Target processing time in milliseconds to maintain real-time performance
+    pub target_time_ms: F,
 }
 
-impl RealtimeMetrics {
+impl<F: RealFloat> RealtimeMetrics<F> {
     /// Check if processing met the real-time constraints.
     pub fn is_realtime(&self) -> bool {
         self.total_processing_time_ms <= self.target_time_ms && self.skipped_operations == 0
     }
 
     /// Get the processing efficiency (0.0 to 1.0).
-    pub fn efficiency(&self) -> f64 {
-        if self.target_time_ms > 0.0 {
-            (self.target_time_ms - self.total_processing_time_ms).max(0.0) / self.target_time_ms
+    pub fn efficiency(&self) -> F {
+        if self.target_time_ms > F::zero() {
+            (self.target_time_ms - self.total_processing_time_ms).max(F::zero())
+                / self.target_time_ms
         } else {
-            0.0
+            F::zero()
         }
     }
 }
 
 /// Utilities for plotting audio data.
-///
-/// Actual plotting functionality is implemented separately.
-/// Allows the use of common plotting utilities across Rust and Python
+#[cfg(feature = "plotting")]
 pub trait AudioPlottingUtils<T: AudioSample>
 where
     i16: ConvertTo<T>,
@@ -2167,20 +2477,24 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Generate time axis values for plotting.
-    fn time_axis(&self, step: Option<f64>) -> Vec<f64>;
+    fn time_axis<F>(&self, step: Option<F>) -> Vec<F>;
     /// Seconds from 0 to duration with ~target_ticks "nice" spacing (1–2–5).
-    fn time_ticks_seconds(&self, target_ticks: usize) -> Vec<f64>;
+    fn time_ticks_seconds<F>(&self, target_ticks: usize) -> Vec<F>;
+    /// Generate frequency axis values for frequency domain plotting.
     fn frequency_axis(&self) -> Vec<T>;
     /// Create a quick analysis plot with waveform and spectrum
-    fn quick_plot(&self) -> super::PlotResult<()>
+    #[cfg(feature = "spectral-analysis")]
+    fn quick_plot<F>(&self) -> super::PlotResult<()>
     where
-        Self: crate::operations::plotting::AudioPlotBuilders<T>
+        Self: crate::operations::plotting::AudioPlotBuilders<T>,
+        F: RealFloat + ConvertTo<T>,
+        T: CastFrom<F> + ConvertTo<F>,
     {
-        let waveform = self.waveform_plot(None);
-        let spectrum = self.power_spectrum_plot(None, None, None, None, None)?;
+        let waveform = self.waveform_plot::<F>(None)?;
+        let spectrum = self.power_spectrum_plot::<F>(None, None, None, None, None)?;
 
         let plot = crate::operations::plotting::PlotComposer::new()
             .add_element(waveform)
@@ -2200,14 +2514,15 @@ where
 ///
 /// This trait is automatically implemented for any type that implements
 /// all the constituent traits.
+// Without spectral analysis
+#[cfg(not(feature = "spectral-analysis"))]
 pub trait AudioSamplesOperations<T: AudioSample>:
     AudioStatistics<T>
     + AudioProcessing<T>
-    + AudioTransforms<T>
     + AudioDynamicRange<T>
-    + AudioEditing<T>
+    + for<'a> AudioEditing<'a, T>
     + AudioChannelOps<T>
-    + AudioTypeConversion<T>
+    + for<'a> AudioTypeConversion<'a, T>
     + AudioPitchAnalysis<T>
     + AudioIirFiltering<T>
     + AudioParametricEq<T>
@@ -2219,20 +2534,46 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
 }
 
-// Blanket implementation for the unified trait
+// With spectral analysis
+#[cfg(feature = "spectral-analysis")]
+/// Comprehensive trait combining all audio processing operations (spectral analysis version).
+pub trait AudioSamplesOperations<T: AudioSample>:
+    for<'a> AudioStatistics<'a, T>
+    + AudioProcessing<T>
+    + AudioTransforms<T>
+    + AudioDynamicRange<T>
+    + for<'a> AudioEditing<'a, T>
+    + AudioChannelOps<T>
+    + for<'a> AudioTypeConversion<'a, T>
+    + AudioPitchAnalysis<T>
+    + AudioIirFiltering<T>
+    + AudioParametricEq<T>
+    + AudioOperationApply<T>
+    + AudioRealtimeOps<T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+{
+}
+
+// Blanket implementation for the unified trait (without spectral analysis)
+#[cfg(not(feature = "spectral-analysis"))]
 impl<T: AudioSample, A> AudioSamplesOperations<T> for A
 where
-    A: AudioStatistics<T>
+    A: for<'a> AudioStatistics<'a, T>
         + AudioProcessing<T>
-        + AudioTransforms<T>
         + AudioDynamicRange<T>
-        + AudioEditing<T>
+        + for<'a> AudioEditing<'a, T>
         + AudioChannelOps<T>
-        + AudioTypeConversion<T>
+        + for<'a> AudioTypeConversion<'a, T>
         + AudioPitchAnalysis<T>
         + AudioIirFiltering<T>
         + AudioParametricEq<T>
@@ -2243,6 +2584,31 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<T>: AudioTypeConversion<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+{
+}
+
+// Blanket implementation for the unified trait (with spectral analysis)
+#[cfg(feature = "spectral-analysis")]
+impl<T: AudioSample, A> AudioSamplesOperations<T> for A
+where
+    A: for<'a> AudioStatistics<'a, T>
+        + AudioProcessing<T>
+        + AudioTransforms<T>
+        + AudioDynamicRange<T>
+        + for<'a> AudioEditing<'a, T>
+        + AudioChannelOps<T>
+        + for<'a> AudioTypeConversion<'a, T>
+        + AudioPitchAnalysis<T>
+        + AudioIirFiltering<T>
+        + AudioParametricEq<T>
+        + AudioOperationApply<T>
+        + AudioRealtimeOps<T>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
 }
