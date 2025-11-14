@@ -8,36 +8,37 @@ use crate::operations::types::{FilterResponse, IirFilterDesign, IirFilterType};
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, iterators::AudioSampleIterators,
+    I24, RealFloat, to_precision,
 };
 
-use std::f64::consts::PI;
+use ndarray::Axis;
+use num_complex::Complex;
 
 /// IIR filter implementation with internal state.
 ///
 /// This structure represents an IIR filter with its coefficients and
 /// internal state for recursive filtering operations.
 #[derive(Debug, Clone)]
-pub struct IirFilter {
+pub struct IirFilter<F: RealFloat> {
     /// Feed-forward coefficients (b coefficients)
-    pub b_coeffs: Vec<f64>,
+    pub b_coeffs: Vec<F>,
     /// Feed-back coefficients (a coefficients)
-    pub a_coeffs: Vec<f64>,
+    pub a_coeffs: Vec<F>,
     /// Input delay line (x[n-1], x[n-2], ...)
-    pub x_delays: Vec<f64>,
+    pub x_delays: Vec<F>,
     /// Output delay line (y[n-1], y[n-2], ...)
-    pub y_delays: Vec<f64>,
+    pub y_delays: Vec<F>,
 }
 
-impl IirFilter {
+impl<F: RealFloat> IirFilter<F> {
     /// Create a new IIR filter with the given coefficients.
     ///
     /// # Arguments
     /// * `b_coeffs` - Feed-forward coefficients
-    /// * `a_coeffs` - Feed-back coefficients (a[0] should be 1.0)
-    pub fn new(b_coeffs: Vec<f64>, a_coeffs: Vec<f64>) -> Self {
-        let x_delays = vec![0.0; b_coeffs.len().saturating_sub(1)];
-        let y_delays = vec![0.0; a_coeffs.len().saturating_sub(1)];
+    /// * `a_coeffs` - Feed-back coefficients (a\[0\] should be 1.0)
+    pub fn new(b_coeffs: Vec<F>, a_coeffs: Vec<F>) -> Self {
+        let x_delays = vec![F::zero(); b_coeffs.len().saturating_sub(1)];
+        let y_delays = vec![F::zero(); a_coeffs.len().saturating_sub(1)];
 
         Self {
             b_coeffs,
@@ -50,9 +51,9 @@ impl IirFilter {
     /// Process a single sample through the filter.
     ///
     /// Applies the difference equation:
-    /// y[n] = (b[0]*x[n] + b[1]*x[n-1] + ... + b[M]*x[n-M])
-    ///        - (a[1]*y[n-1] + a[2]*y[n-2] + ... + a[N]*y[n-N])
-    pub fn process_sample(&mut self, input: f64) -> f64 {
+    /// y\[n\] = (b\[0\]*x\[n\] + b\[1\]*x\[n-1\] + ... + b\[M\]*x\[n-M\])
+    ///        - (a\[1\]*y\[n-1\] + a\[2\]*y\[n-2\] + ... + a\[N\]*y\[n-N\])
+    pub fn process_sample(&mut self, input: F) -> F {
         // Compute feed-forward part
         let mut output = self.b_coeffs[0] * input;
         for i in 0..self.x_delays.len() {
@@ -86,12 +87,12 @@ impl IirFilter {
     }
 
     /// Process a vector of samples through the filter.
-    pub fn process_samples(&mut self, input: &[f64]) -> Vec<f64> {
+    pub fn process_samples(&mut self, input: &[F]) -> Vec<F> {
         input.iter().map(|&x| self.process_sample(x)).collect()
     }
 
     /// Process a vector of samples through the filter in-place.
-    pub fn process_samples_in_place(&mut self, input: &mut [f64]) {
+    pub fn process_samples_in_place(&mut self, input: &mut [F]) {
         input.iter_mut().for_each(|x| {
             *x = self.process_sample(*x);
         });
@@ -99,35 +100,32 @@ impl IirFilter {
 
     /// Reset the filter's internal state.
     pub fn reset(&mut self) {
-        self.x_delays.fill(0.0);
-        self.y_delays.fill(0.0);
+        self.x_delays.fill(F::zero());
+        self.y_delays.fill(F::zero());
     }
 
     /// Get the frequency response at specified frequencies.
     ///
     /// Returns (magnitude, phase) response vectors.
-    pub fn frequency_response(
-        &self,
-        frequencies: &[f64],
-        sample_rate: f64,
-    ) -> (Vec<f64>, Vec<f64>) {
+    pub fn frequency_response(&self, frequencies: &[F], sample_rate: F) -> (Vec<F>, Vec<F>) {
         let mut magnitudes = Vec::new();
         let mut phases = Vec::new();
 
         for &freq in frequencies {
-            let omega = 2.0 * PI * freq / sample_rate;
-            let z = num_complex::Complex::new(0.0, omega).exp();
+            let omega = to_precision::<F, _>(2.0) * F::PI() * freq / sample_rate;
+            let z = Complex::new(F::zero(), omega).exp();
 
             // Compute numerator (B(z))
-            let mut numerator = num_complex::Complex::new(0.0, 0.0);
+            let mut numerator = Complex::new(F::zero(), F::zero());
             for (i, &b) in self.b_coeffs.iter().enumerate() {
-                numerator += b * z.powf(-(i as f64));
+                let term = z.powf(-(to_precision::<F, _>(i)));
+                numerator += term * b;
             }
 
             // Compute denominator (A(z))
-            let mut denominator = num_complex::Complex::new(0.0, 0.0);
+            let mut denominator = num_complex::Complex::new(F::zero(), F::zero());
             for (i, &a) in self.a_coeffs.iter().enumerate() {
-                denominator += a * z.powf(-(i as f64));
+                denominator += z.powf(-(to_precision::<F, _>(i))) * a;
             }
 
             // H(z) = B(z) / A(z)
@@ -140,28 +138,32 @@ impl IirFilter {
     }
 }
 
-impl<T: AudioSample> AudioIirFiltering<T> for AudioSamples<T>
+impl<'a, T: AudioSample> AudioIirFiltering<T> for AudioSamples<'a, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<T>: AudioTypeConversion<T>,
+    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
-    fn apply_iir_filter(
+    fn apply_iir_filter<F>(
         &mut self,
-        design: &IirFilterDesign,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()> {
+        design: &IirFilterDesign<F>,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
         let (b_coeffs, a_coeffs) = design_iir_filter(design, sample_rate)?;
         let mut filter = IirFilter::new(b_coeffs, a_coeffs);
 
         match &mut self.data {
             AudioData::Mono(samples) => {
-                let input_samples: Vec<f64> = samples
+                let input_samples: Vec<F> = samples
                     .iter()
-                    .map(|&x| x.convert_to().unwrap_or(0.0))
+                    .map(|&x| x.convert_to().unwrap_or_default())
                     .collect();
 
                 let output_samples = filter.process_samples(&input_samples);
@@ -170,12 +172,13 @@ where
                     samples[i] = output.convert_to()?;
                 }
             }
-            AudioData::MultiChannel(_) => {
+            AudioData::Multi(data) => {
                 // Process each channel independently
-                for channel in self.channels_mut() {
-                    let input_samples: Vec<f64> = channel
+                for ch_idx in 0..data.dim().0 {
+                    let mut channel = data.index_axis_mut(Axis(0), ch_idx);
+                    let input_samples: Vec<F> = channel
                         .iter()
-                        .map(|sample| sample.convert_to().unwrap_or(0.0))
+                        .map(|sample| sample.convert_to().unwrap_or_default())
                         .collect();
 
                     let output_samples = filter.process_samples(&input_samples);
@@ -193,69 +196,92 @@ where
         Ok(())
     }
 
-    fn butterworth_lowpass(
+    fn butterworth_lowpass<F>(
         &mut self,
         order: usize,
-        cutoff_frequency: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()> {
+        cutoff_frequency: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
         let design = IirFilterDesign::butterworth_lowpass(order, cutoff_frequency);
         self.apply_iir_filter(&design, sample_rate)
     }
 
-    fn butterworth_highpass(
+    fn butterworth_highpass<F>(
         &mut self,
         order: usize,
-        cutoff_frequency: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()> {
+        cutoff_frequency: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
         let design = IirFilterDesign::butterworth_highpass(order, cutoff_frequency);
         self.apply_iir_filter(&design, sample_rate)
     }
 
-    fn butterworth_bandpass(
+    fn butterworth_bandpass<F>(
         &mut self,
         order: usize,
-        low_frequency: f64,
-        high_frequency: f64,
-        sample_rate: f64,
-    ) -> AudioSampleResult<()> {
+        low_frequency: F,
+        high_frequency: F,
+        sample_rate: F,
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
         let design = IirFilterDesign::butterworth_bandpass(order, low_frequency, high_frequency);
         self.apply_iir_filter(&design, sample_rate)
     }
 
-    fn chebyshev_i(
+    fn chebyshev_i<F>(
         &mut self,
         order: usize,
-        cutoff_frequency: f64,
-        passband_ripple: f64,
-        sample_rate: f64,
+        cutoff_frequency: F,
+        passband_ripple: F,
+        sample_rate: F,
         response: FilterResponse,
-    ) -> AudioSampleResult<()> {
+    ) -> AudioSampleResult<()>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
         let design =
             IirFilterDesign::chebyshev_i(response, order, cutoff_frequency, passband_ripple);
         self.apply_iir_filter(&design, sample_rate)
     }
 
-    fn frequency_response(
+    fn frequency_response<F>(
         &self,
-        frequencies: &[f64],
-        _sample_rate: f64,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+        frequencies: &[F],
+        _sample_rate: F,
+    ) -> AudioSampleResult<(Vec<F>, Vec<F>)>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
         // For now, return a placeholder implementation
         // In a full implementation, this would store the current filter state
         // and return its frequency response
-        Ok((vec![1.0; frequencies.len()], vec![0.0; frequencies.len()]))
+        Ok((
+            vec![F::one(); frequencies.len()],
+            vec![F::zero(); frequencies.len()],
+        ))
     }
 }
 
 /// Design an IIR filter based on the given specifications.
 ///
 /// Returns the (b_coeffs, a_coeffs) for the designed filter.
-fn design_iir_filter(
-    design: &IirFilterDesign,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+fn design_iir_filter<F: RealFloat>(
+    design: &IirFilterDesign<F>,
+    sample_rate: F,
+) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     match design.filter_type {
         IirFilterType::Butterworth => design_butterworth_filter(design, sample_rate),
         IirFilterType::ChebyshevI => design_chebyshev_i_filter(design, sample_rate),
@@ -266,11 +292,11 @@ fn design_iir_filter(
 }
 
 /// Design a Butterworth filter.
-fn design_butterworth_filter(
-    design: &IirFilterDesign,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
-    let nyquist = sample_rate / 2.0;
+fn design_butterworth_filter<F: RealFloat>(
+    design: &IirFilterDesign<F>,
+    sample_rate: F,
+) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
+    let nyquist = sample_rate / to_precision::<F, _>(2.0);
 
     match design.response {
         FilterResponse::LowPass => {
@@ -280,7 +306,7 @@ fn design_butterworth_filter(
                 )
             })?;
 
-            if cutoff <= 0.0 || cutoff >= nyquist {
+            if cutoff <= F::zero() || cutoff >= nyquist {
                 return Err(AudioSampleError::InvalidParameter(
                     "Cutoff frequency must be between 0 and Nyquist frequency".to_string(),
                 ));
@@ -295,7 +321,7 @@ fn design_butterworth_filter(
                 )
             })?;
 
-            if cutoff <= 0.0 || cutoff >= nyquist {
+            if cutoff <= F::zero() || cutoff >= nyquist {
                 return Err(AudioSampleError::InvalidParameter(
                     "Cutoff frequency must be between 0 and Nyquist frequency".to_string(),
                 ));
@@ -315,7 +341,7 @@ fn design_butterworth_filter(
                 )
             })?;
 
-            if low_freq <= 0.0 || high_freq >= nyquist || low_freq >= high_freq {
+            if low_freq <= F::zero() || high_freq >= nyquist || low_freq >= high_freq {
                 return Err(AudioSampleError::InvalidParameter(
                     "Invalid frequency range for band-pass filter".to_string(),
                 ));
@@ -330,11 +356,11 @@ fn design_butterworth_filter(
 }
 
 /// Design a Chebyshev Type I filter.
-fn design_chebyshev_i_filter(
-    design: &IirFilterDesign,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
-    let _nyquist = sample_rate / 2.0;
+fn design_chebyshev_i_filter<F: RealFloat>(
+    design: &IirFilterDesign<F>,
+    sample_rate: F,
+) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
+    let _nyquist = sample_rate / to_precision::<F, _>(2.0);
     let _ripple = design.passband_ripple.ok_or_else(|| {
         AudioSampleError::InvalidParameter(
             "Passband ripple required for Chebyshev Type I filter".to_string(),
@@ -349,11 +375,11 @@ fn design_chebyshev_i_filter(
 }
 
 /// Design a Butterworth low-pass filter using bilinear transform.
-fn design_butterworth_lowpass(
+fn design_butterworth_lowpass<F: RealFloat>(
     order: usize,
-    cutoff_freq: f64,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+    cutoff_freq: F,
+    sample_rate: F,
+) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     if order == 0 {
         return Err(AudioSampleError::InvalidParameter(
             "Filter order must be greater than 0".to_string(),
@@ -361,12 +387,13 @@ fn design_butterworth_lowpass(
     }
 
     // Pre-warp the cutoff frequency for bilinear transform
-    let wc = 2.0 * sample_rate * (PI * cutoff_freq / sample_rate).tan();
+    let wc = to_precision::<F, _>(2.0) * sample_rate * (F::PI() * cutoff_freq / sample_rate).tan();
 
     // Generate analog Butterworth poles
     let mut poles = Vec::new();
     for k in 0..order {
-        let angle = PI * (2.0 * k as f64 + 1.0) / (2.0 * order as f64);
+        let angle = F::PI() * (to_precision::<F, _>(2.0) * to_precision::<F, _>(k) + F::one())
+            / (to_precision::<F, _>(2.0) * to_precision::<F, _>(order));
         let real = -wc * angle.sin();
         let imag = wc * angle.cos();
         poles.push(num_complex::Complex::new(real, imag));
@@ -378,26 +405,30 @@ fn design_butterworth_lowpass(
 
     // For a simple 2nd-order Butterworth low-pass filter
     if order == 2 {
-        let k = wc / (2.0 * sample_rate);
+        let k = wc / (to_precision::<F, _>(2.0) * sample_rate);
         let k2 = k * k;
-        let sqrt2 = 2.0_f64.sqrt();
-        let norm = 1.0 + sqrt2 * k + k2;
+        let sqrt2 = to_precision::<F, _>(2.0).sqrt();
+        let norm = F::one() + sqrt2 * k + k2;
 
-        let b_coeffs = vec![k2 / norm, 2.0 * k2 / norm, k2 / norm];
-        let a_coeffs = vec![1.0, (2.0 * k2 - 2.0) / norm, (1.0 - sqrt2 * k + k2) / norm];
+        let b_coeffs = vec![k2 / norm, to_precision::<F, _>(2.0) * k2 / norm, k2 / norm];
+        let a_coeffs = vec![
+            F::one(),
+            (to_precision::<F, _>(2.0) * k2 - to_precision::<F, _>(2.0)) / norm,
+            (F::one() - sqrt2 * k + k2) / norm,
+        ];
 
         Ok((b_coeffs, a_coeffs))
     } else {
         // For other orders, use a simplified approach
         // This is not mathematically correct but serves as a placeholder
-        let mut b_coeffs = vec![0.0; order + 1];
-        let mut a_coeffs = vec![0.0; order + 1];
+        let mut b_coeffs = vec![F::zero(); order + 1];
+        let mut a_coeffs = vec![F::zero(); order + 1];
 
         // Simple approximation - not correct for actual use
-        b_coeffs[0] = 1.0;
-        a_coeffs[0] = 1.0;
+        b_coeffs[0] = F::one();
+        a_coeffs[0] = F::one();
         for (i, coeff) in a_coeffs.iter_mut().enumerate().take(order + 1).skip(1) {
-            *coeff = 0.1 * (i as f64);
+            *coeff = to_precision::<F, _>(0.1) * to_precision(i);
         }
 
         Ok((b_coeffs, a_coeffs))
@@ -405,11 +436,11 @@ fn design_butterworth_lowpass(
 }
 
 /// Design a Butterworth high-pass filter.
-fn design_butterworth_highpass(
+fn design_butterworth_highpass<F: RealFloat>(
     order: usize,
-    cutoff_freq: f64,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+    cutoff_freq: F,
+    sample_rate: F,
+) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     if order == 0 {
         return Err(AudioSampleError::InvalidParameter(
             "Filter order must be greater than 0".to_string(),
@@ -418,25 +449,34 @@ fn design_butterworth_highpass(
 
     // For a simple 2nd-order Butterworth high-pass filter
     if order == 2 {
-        let wc = 2.0 * sample_rate * (PI * cutoff_freq / sample_rate).tan();
-        let k = wc / (2.0 * sample_rate);
+        let wc =
+            to_precision::<F, _>(2.0) * sample_rate * (F::PI() * cutoff_freq / sample_rate).tan();
+        let k = wc / (to_precision::<F, _>(2.0) * sample_rate);
         let k2 = k * k;
-        let sqrt2 = 2.0_f64.sqrt();
-        let norm = 1.0 + sqrt2 * k + k2;
+        let sqrt2 = to_precision::<F, _>(2.0).sqrt();
+        let norm = F::one() + sqrt2 * k + k2;
 
-        let b_coeffs = vec![1.0 / norm, -2.0 / norm, 1.0 / norm];
-        let a_coeffs = vec![1.0, (2.0 * k2 - 2.0) / norm, (1.0 - sqrt2 * k + k2) / norm];
+        let b_coeffs = vec![
+            F::one() / norm,
+            to_precision::<F, _>(-2.0) / norm,
+            F::one() / norm,
+        ];
+        let a_coeffs = vec![
+            F::one(),
+            (to_precision::<F, _>(2.0) * k2 - to_precision::<F, _>(2.0)) / norm,
+            (F::one() - sqrt2 * k + k2) / norm,
+        ];
 
         Ok((b_coeffs, a_coeffs))
     } else {
         // Simplified placeholder implementation
-        let mut b_coeffs = vec![0.0; order + 1];
-        let mut a_coeffs = vec![0.0; order + 1];
+        let mut b_coeffs = vec![F::zero(); order + 1];
+        let mut a_coeffs = vec![F::zero(); order + 1];
 
-        b_coeffs[0] = 1.0;
-        a_coeffs[0] = 1.0;
+        b_coeffs[0] = F::one();
+        a_coeffs[0] = F::one();
         for (i, coeff) in a_coeffs.iter_mut().enumerate().take(order + 1).skip(1) {
-            *coeff = 0.1 * (i as f64);
+            *coeff = to_precision::<F, _>(0.1) * to_precision::<F, _>(i);
         }
 
         Ok((b_coeffs, a_coeffs))
@@ -444,12 +484,12 @@ fn design_butterworth_highpass(
 }
 
 /// Design a Butterworth band-pass filter.
-fn design_butterworth_bandpass(
+fn design_butterworth_bandpass<F: RealFloat>(
     order: usize,
-    low_freq: f64,
-    high_freq: f64,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+    low_freq: F,
+    high_freq: F,
+    sample_rate: F,
+) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     if order == 0 {
         return Err(AudioSampleError::InvalidParameter(
             "Filter order must be greater than 0".to_string(),
@@ -464,15 +504,16 @@ fn design_butterworth_bandpass(
     let bandwidth = high_freq - low_freq;
 
     // Simple approximation
-    let mut b_coeffs = vec![0.0; order + 1];
-    let mut a_coeffs = vec![0.0; order + 1];
+    let mut b_coeffs = vec![F::zero(); order + 1];
+    let mut a_coeffs = vec![F::zero(); order + 1];
 
     b_coeffs[0] = bandwidth / sample_rate;
-    a_coeffs[0] = 1.0;
-    a_coeffs[1] = -2.0 * (2.0 * PI * center_freq / sample_rate).cos();
+    a_coeffs[0] = F::one();
+    a_coeffs[1] = to_precision::<F, _>(-2.0)
+        * (to_precision::<F, _>(2.0) * F::PI() * center_freq / sample_rate).cos();
 
     if order > 1 {
-        a_coeffs[2] = 0.9;
+        a_coeffs[2] = to_precision::<F, _>(0.9);
     }
 
     Ok((b_coeffs, a_coeffs))

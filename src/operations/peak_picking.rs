@@ -53,11 +53,10 @@
 //! - Bello, J.P., et al. "A tutorial on onset detection in music signals." IEEE TSALP 2005.
 //! - Böck, S., et al. "Evaluating the online capabilities of onset detection methods." ISMIR 2012.
 //! - Dixon, S. "Onset detection revisited." DAFx 2006.
-
 use crate::operations::types::{
     AdaptiveThresholdConfig, AdaptiveThresholdMethod, NormalizationMethod, PeakPickingConfig,
 };
-use crate::{AudioSampleError, AudioSampleResult};
+use crate::{AudioSampleError, AudioSampleResult, RealFloat, to_precision};
 
 /// Compute adaptive threshold for onset strength function.
 ///
@@ -93,13 +92,11 @@ use crate::{AudioSampleError, AudioSampleResult};
 /// let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
 /// assert_eq!(thresholds.len(), onset_strength.len());
 /// ```
-pub fn adaptive_threshold(
-    onset_strength: &[f64],
-    config: &AdaptiveThresholdConfig,
-) -> AudioSampleResult<Vec<f64>> {
-    config.validate().map_err(|e| {
-        AudioSampleError::InvalidParameter(format!("Invalid adaptive threshold config: {}", e))
-    })?;
+pub fn adaptive_threshold<F: RealFloat>(
+    onset_strength: &[F],
+    config: &AdaptiveThresholdConfig<F>,
+) -> AudioSampleResult<Vec<F>> {
+    config.validate()?;
 
     if onset_strength.is_empty() {
         return Ok(Vec::new());
@@ -118,7 +115,7 @@ pub fn adaptive_threshold(
         let threshold = match config.method {
             AdaptiveThresholdMethod::Delta => {
                 // Delta-based: threshold = local_max - delta
-                let local_max = window.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+                let local_max = window.iter().fold(F::neg_infinity(), |acc, &x| acc.max(x));
                 local_max - config.delta
             }
             AdaptiveThresholdMethod::Percentile => {
@@ -127,7 +124,7 @@ pub fn adaptive_threshold(
             }
             AdaptiveThresholdMethod::Combined => {
                 // Combined: max(delta_threshold, percentile_threshold)
-                let local_max = window.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+                let local_max = window.iter().fold(F::neg_infinity(), |acc, &x| acc.max(x));
                 let delta_threshold = local_max - config.delta;
                 let percentile_threshold = percentile(window, config.percentile);
                 delta_threshold.max(percentile_threshold)
@@ -177,14 +174,14 @@ pub fn adaptive_threshold(
 /// use audio_samples::operations::{PeakPickingConfig};
 /// use audio_samples::operations::peak_picking::pick_peaks;
 ///
-/// let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+/// let onset_strength = vec![0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
 /// let config = PeakPickingConfig::new();
 /// let peaks = pick_peaks(&onset_strength, &config).unwrap();
 /// // peaks contains indices of detected onset locations
 /// ```
-pub fn pick_peaks(
-    onset_strength: &[f64],
-    config: &PeakPickingConfig,
+pub fn pick_peaks<F: RealFloat>(
+    onset_strength: &[F],
+    config: &PeakPickingConfig<F>,
 ) -> AudioSampleResult<Vec<usize>> {
     config.validate().map_err(|e| {
         AudioSampleError::InvalidParameter(format!("Invalid peak picking config: {}", e))
@@ -259,8 +256,8 @@ pub fn pick_peaks(
 /// # Returns
 ///
 /// Filtered signal with enhanced transients
-pub fn apply_pre_emphasis(signal: &[f64], coeff: f64) -> AudioSampleResult<Vec<f64>> {
-    if !(0.0..=1.0).contains(&coeff) {
+pub fn apply_pre_emphasis<F: RealFloat>(signal: &[F], coeff: F) -> AudioSampleResult<Vec<F>> {
+    if !(F::zero()..=F::one()).contains(&coeff) {
         return Err(AudioSampleError::InvalidParameter(
             "Pre-emphasis coefficient must be between 0.0 and 1.0".to_string(),
         ));
@@ -307,7 +304,10 @@ pub fn apply_pre_emphasis(signal: &[f64], coeff: f64) -> AudioSampleResult<Vec<f
 /// # Returns
 ///
 /// Filtered signal with reduced noise
-pub fn apply_median_filter(signal: &[f64], filter_length: usize) -> AudioSampleResult<Vec<f64>> {
+pub fn apply_median_filter<F: RealFloat>(
+    signal: &[F],
+    filter_length: usize,
+) -> AudioSampleResult<Vec<F>> {
     if filter_length == 0 || filter_length % 2 == 0 {
         return Err(AudioSampleError::InvalidParameter(
             "Median filter length must be odd and greater than 0".to_string(),
@@ -331,7 +331,7 @@ pub fn apply_median_filter(signal: &[f64], filter_length: usize) -> AudioSampleR
         let end = (i + half_length + 1).min(signal.len());
 
         // Extract window and compute median
-        let mut window: Vec<f64> = signal[start..end].to_vec();
+        let mut window: Vec<F> = signal[start..end].to_vec();
         window.sort_by(|a, b| {
             match a.partial_cmp(b) {
                 Some(order) => order,
@@ -359,10 +359,10 @@ pub fn apply_median_filter(signal: &[f64], filter_length: usize) -> AudioSampleR
 /// # Returns
 ///
 /// Normalized onset strength function
-pub fn normalize_onset_strength(
-    onset_strength: &[f64],
+pub fn normalize_onset_strength<F: RealFloat>(
+    onset_strength: &[F],
     method: NormalizationMethod,
-) -> AudioSampleResult<Vec<f64>> {
+) -> AudioSampleResult<Vec<F>> {
     if onset_strength.is_empty() {
         return Ok(Vec::new());
     }
@@ -372,9 +372,9 @@ pub fn normalize_onset_strength(
             // Peak normalization: divide by maximum absolute value
             let max_abs = onset_strength
                 .iter()
-                .fold(0.0f64, |acc, &x| acc.max(x.abs()));
+                .fold(F::zero(), |acc, &x| acc.max(x.abs()));
 
-            if max_abs == 0.0 {
+            if max_abs == F::zero() {
                 return Ok(onset_strength.to_vec());
             }
 
@@ -385,12 +385,12 @@ pub fn normalize_onset_strength(
             // Min-max normalization: scale to [0, 1]
             let min_val = onset_strength
                 .iter()
-                .fold(f64::INFINITY, |acc, &x| acc.min(x));
+                .fold(F::infinity(), |acc, &x| acc.min(x));
             let max_val = onset_strength
                 .iter()
-                .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+                .fold(F::neg_infinity(), |acc, &x| acc.max(x));
 
-            if (max_val - min_val).abs() < f64::EPSILON {
+            if (max_val - min_val).abs() < F::epsilon() {
                 return Ok(onset_strength.to_vec());
             }
 
@@ -402,14 +402,15 @@ pub fn normalize_onset_strength(
         }
         NormalizationMethod::ZScore => {
             // Z-score normalization: zero mean, unit variance
-            let mean = onset_strength.iter().sum::<f64>() / onset_strength.len() as f64;
+            let mean = onset_strength.iter().fold(F::zero(), |acc: F, x| acc + *x)
+                / to_precision::<F, _>(onset_strength.len());
             let variance = onset_strength
                 .iter()
                 .map(|&x| (x - mean).powi(2))
-                .sum::<f64>()
-                / onset_strength.len() as f64;
+                .fold(F::zero(), |acc, x| acc + x)
+                / to_precision::<F, _>(onset_strength.len());
 
-            if variance == 0.0 {
+            if variance == F::zero() {
                 return Ok(onset_strength.to_vec());
             }
 
@@ -422,7 +423,8 @@ pub fn normalize_onset_strength(
         }
         NormalizationMethod::Mean => {
             // Mean normalization: subtract mean
-            let mean = onset_strength.iter().sum::<f64>() / onset_strength.len() as f64;
+            let mean = onset_strength.iter().fold(F::zero(), |acc: F, x| acc + *x)
+                / to_precision::<F, _>(onset_strength.len());
             let normalized = onset_strength.iter().map(|&x| x - mean).collect();
             Ok(normalized)
         }
@@ -463,8 +465,8 @@ pub fn normalize_onset_strength(
 /// # Returns
 ///
 /// Vector of peak indices that satisfy temporal constraints
-fn apply_temporal_constraints(
-    candidates: &[(usize, f64)],
+fn apply_temporal_constraints<F: RealFloat>(
+    candidates: &[(usize, F)],
     min_separation: usize,
 ) -> AudioSampleResult<Vec<usize>> {
     if candidates.is_empty() {
@@ -594,9 +596,9 @@ fn apply_moving_average(signal: &[f64], window_size: usize) -> AudioSampleResult
 /// # Returns
 ///
 /// The percentile value
-fn percentile(values: &[f64], percentile: f64) -> f64 {
+fn percentile<F: RealFloat>(values: &[F], percentile: F) -> F {
     if values.is_empty() {
-        return 0.0;
+        return F::zero();
     }
 
     let mut sorted = values.to_vec();
@@ -612,15 +614,15 @@ fn percentile(values: &[f64], percentile: f64) -> f64 {
         return sorted[0];
     }
 
-    let index = percentile * (n - 1) as f64;
-    let lower = index.floor() as usize;
-    let upper = index.ceil() as usize;
+    let index = percentile * to_precision::<F, _>(n - 1);
+    let lower = index.floor().to_usize().expect("should not fail");
+    let upper = index.ceil().to_usize().expect("should not fail");
 
     if lower == upper {
         sorted[lower]
     } else {
-        let weight = index - lower as f64;
-        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+        let weight = index - to_precision::<F, _>(lower);
+        sorted[lower] * (F::one() - weight) + sorted[upper] * weight
     }
 }
 
@@ -706,8 +708,8 @@ mod tests {
 
     #[test]
     fn test_pre_emphasis() {
-        let signal = vec![1.0, 2.0, 3.0, 2.0, 1.0];
-        let coeff = 0.97;
+        let signal: Vec<f64> = vec![1.0, 2.0, 3.0, 2.0, 1.0];
+        let coeff: f64 = 0.97;
 
         let filtered = apply_pre_emphasis(&signal, coeff).unwrap();
         assert_eq!(filtered.len(), signal.len());
@@ -724,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_median_filter() {
-        let signal = vec![1.0, 5.0, 2.0, 8.0, 3.0]; // Contains outlier
+        let signal: Vec<f64> = vec![1.0, 5.0, 2.0, 8.0, 3.0]; // Contains outlier
         let filtered = apply_median_filter(&signal, 3).unwrap();
 
         assert_eq!(filtered.len(), signal.len());
@@ -735,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_normalize_onset_strength_peak() {
-        let onset_strength = vec![0.1, 0.5, 1.0, 0.3];
+        let onset_strength: Vec<f64> = vec![0.1, 0.5, 1.0, 0.3];
         let normalized =
             normalize_onset_strength(&onset_strength, NormalizationMethod::Peak).unwrap();
 
@@ -748,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_normalize_onset_strength_minmax() {
-        let onset_strength = vec![0.1, 0.5, 1.0, 0.3];
+        let onset_strength: Vec<f64> = vec![0.1, 0.5, 1.0, 0.3];
         let normalized =
             normalize_onset_strength(&onset_strength, NormalizationMethod::MinMax).unwrap();
 

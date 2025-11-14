@@ -164,12 +164,10 @@ pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSample
 ///
 /// Routes to the appropriate SIMD conversion function based on types.
 #[cfg(feature = "simd")]
-pub fn convert_simd<T: AudioSample, U: AudioSample>(
-    input: &[T],
-    output: &mut [U],
-) -> AudioSampleResult<()>
+pub fn convert_simd<T, U>(input: &[T], output: &mut [U]) -> AudioSampleResult<()>
 where
-    T: ConvertTo<U>,
+    T: AudioSample + ConvertTo<U>,
+    U: AudioSample,
 {
     use std::any::TypeId;
 
@@ -210,12 +208,10 @@ where
 }
 
 /// Optimized scalar conversion with manual loop unrolling.
-pub fn convert_scalar_unrolled<T: AudioSample, U: AudioSample>(
-    input: &[T],
-    output: &mut [U],
-) -> AudioSampleResult<()>
+pub fn convert_scalar_unrolled<T, U>(input: &[T], output: &mut [U]) -> AudioSampleResult<()>
 where
-    T: ConvertTo<U>,
+    T: AudioSample + ConvertTo<U>,
+    U: AudioSample,
 {
     if input.len() != output.len() {
         return Err(AudioSampleError::InvalidParameter(
@@ -248,12 +244,10 @@ where
 ///
 /// Automatically chooses between SIMD and scalar implementations based on
 /// feature flags and runtime detection.
-pub fn convert<T: AudioSample, U: AudioSample>(
-    input: &[T],
-    output: &mut [U],
-) -> AudioSampleResult<()>
+pub fn convert<T, U>(input: &[T], output: &mut [U]) -> AudioSampleResult<()>
 where
-    T: ConvertTo<U>,
+    T: AudioSample + ConvertTo<U>,
+    U: AudioSample,
 {
     #[cfg(feature = "simd")]
     {
@@ -293,7 +287,7 @@ mod tests {
         let input = vec![0.5f32, -0.3, 0.8, 1.0, -1.0, 0.0, 0.1, -0.1, 0.25];
         let mut output = vec![0i16; 9];
 
-        simd::convert_f32_to_i16_simd(&input, &mut output).unwrap();
+        convert_f32_to_i16_simd(&input, &mut output).unwrap();
 
         // Verify conversion accuracy
         assert_eq!(output[0], 16383); // 0.5 * 32767 = 16383.5 -> 16383
@@ -307,7 +301,7 @@ mod tests {
         let input = vec![16383i16, -9830, 26214, 32767, -32768, 0, 3276, -3276];
         let mut output = vec![0.0f32; 8];
 
-        simd::convert_i16_to_f32_simd(&input, &mut output).unwrap();
+        convert_i16_to_f32_simd(&input, &mut output).unwrap();
 
         // Verify conversion accuracy using approx_eq
         use approx_eq::assert_approx_eq;

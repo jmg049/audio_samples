@@ -12,7 +12,6 @@
 //! - [`transforms`] - FFT and spectral analysis
 //! - [`editing`] - Time-domain editing operations
 //! - [`channels`] - Channel manipulation operations
-//! - [`conversions`] - Type conversion operations
 //! - [`types`] - Supporting types and enums
 //!
 //! ## Quick Start
@@ -39,44 +38,76 @@
 //! # }
 //! ```
 
+#[cfg(feature = "beat-detection")]
+/// Beat tracking and tempo analysis operations.
 pub mod beats;
 pub mod channels;
 pub mod dynamic_range;
 pub mod editing;
+#[cfg(feature = "fft")]
 pub mod fft_backends;
 pub mod iir_filtering;
+#[cfg(feature = "spectral-analysis")]
 pub mod onset_detection;
 pub mod parametric_eq;
 pub mod peak_picking;
+#[cfg(feature = "spectral-analysis")]
 pub mod pitch_analysis;
+#[cfg(feature = "plotting")]
 pub mod plotting;
 pub mod processing;
 pub mod statistics;
 pub mod traits;
+#[cfg(feature = "spectral-analysis")]
 pub mod transforms;
 pub mod types;
 
 // Re-export main traits for convenience
 pub use traits::{
     AudioChannelOps, AudioDynamicRange, AudioEditing, AudioIirFiltering, AudioParametricEq,
-    AudioPlottingUtils, AudioProcessing, AudioSamplesOperations, AudioStatistics, AudioTransforms,
+    AudioProcessing, AudioSamplesOperations, AudioStatistics,
 };
+
+#[cfg(feature = "spectral-analysis")]
+pub use traits::AudioTransforms;
+
+#[cfg(feature = "plotting")]
+pub use traits::AudioPlottingUtils;
 
 // Re-export builder types
 pub use processing::ProcessingBuilder;
 
 // Re-export plotting types and functions (composable API)
+#[cfg(feature = "plotting")]
 pub use plotting::{
-    // Core plotting API
-    PlotComposer, PlotElement, PlotBounds, PlotMetadata, LayoutConfig,
-    AudioPlotBuilders, PlotTheme, PlotResult,
-
+    AudioPlotBuilders,
+    BeatConfig,
+    BeatMarkers,
     // Styling and configuration
-    ColorPalette, LineStyle, LineStyleType, MarkerStyle, MarkerShape,
-    SpectrogramConfig, OnsetConfig, BeatConfig, PitchDetectionMethod,
+    ColorPalette,
+    LayoutConfig,
+    LineStyle,
+    LineStyleType,
+    MarkerShape,
+    MarkerStyle,
+    OnsetConfig,
+    OnsetMarkers,
+    PitchContour,
+    PitchDetectionMethod,
 
+    PlotBounds,
+    // Core plotting API
+    PlotComposer,
+    PlotElement,
+    PlotMetadata,
+    PlotResult,
+
+    PlotTheme,
+    PowerSpectrumPlot,
+    SpectrogramConfig,
+    SpectrogramPlot,
     // Plot elements
-    WaveformPlot, SpectrogramPlot, OnsetMarkers, BeatMarkers, PitchContour, PowerSpectrumPlot,
+    WaveformPlot,
 };
 
 // Re-export supporting types
@@ -86,4 +117,5 @@ pub use types::{
     StereoConversionMethod,
 };
 
+#[cfg(feature = "beat-detection")]
 pub use beats::*;

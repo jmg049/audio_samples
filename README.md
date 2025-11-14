@@ -1,106 +1,355 @@
-# audio_samples
+<div align="center">
+
+# AudioSamples
+
+## Fast, simple, and expressive audio in Rust
+
+<img src="logo.png" title="AudioSamples Logo -- Ferrous' Mustachioed Cousin From East Berlin, Eisenhaltig" width="200"/>
+
+[![Crates.io][crate-img]][crate] [![Docs.rs][docs-img]][docs] [![License: MIT][license-img]][license]
+</div>
 
 A high-performance audio processing library for Rust that provides type-safe sample format conversions, statistical analysis, and various audio processing operations.
 
+Core building block of the wider [AudioRs](link_to_website_in_development) ecosystem.
+
 ## Overview
 
-`audio_samples` is a comprehensive Rust library designed for efficient audio data manipulation, supporting a wide range of audio processing tasks with a focus on performance, type safety, and flexible design.
+<!-- This section is reserved for the project's purpose and motivation. -->
+<!-- The author will fill this in later. -->
 
-### Key Features
+## Installation
 
-- **Type-safe audio sample conversions** between `i16`, `I24`, `i32`, `f32`, and `f64`
-- **High-performance operations** leveraging `ndarray` for efficient computation
-- **Comprehensive metadata tracking** (sample rate, channels, duration)
-- **Flexible data structures** supporting both mono and multi-channel audio
-- **Modular feature system** with fine-grained optional components
-- **Advanced error handling** with chainable result types
-
-### Installation
-
-Add the following to your `Cargo.toml`:
+Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 audio_samples = "1.0.0"
 ```
 
-Select features as needed:
+or more easily with:
+
+```bash
+cargo add audio_samples
+```
+
+
+For specific features, enable only what you need:
 
 ```toml
+[dependencies]
+audio_samples = { version = "1.0.0", features = ["fft", "plotting"] }
+```
+
+Or enable everything:
+
+```toml
+[dependencies]
 audio_samples = { version = "1.0.0", features = ["full"] }
 ```
 
-### Feature Flags
+## Features
 
-- `core-ops` (default): Basic audio operations
-- `fft`: Spectral analysis and Fast Fourier Transform
-- `plotting`: Visualization capabilities
-- `resampling`: Advanced audio resampling
-- `parallel-processing`: Parallel computation using Rayon
-- `full`: Enables all features
+The library uses a modular feature system to keep dependencies minimal:
 
-## Quick Examples
+- **`core-ops`** (default) - Basic audio operations and statistics
+- **`fft`** - Fast Fourier Transform and spectral analysis
+- **`plotting`** - Audio visualization capabilities
+- **`resampling`** - High-quality audio resampling
+- **`parallel-processing`** - Multi-threaded processing with Rayon
+- **`simd`** - SIMD acceleration for supported operations
+- **`beat-detection`** - Tempo and beat tracking (requires `fft`)
+- **`full`** - Enables all features
 
-### Basic Audio Creation and Manipulation
+## Full Examples
+
+A range of examples demonstrating this crate and its companion [audio_io](https://ghithub.com/jmg049/audio_io) crate can be found at [here]().
+
+- [DTMF tone generation and decoding]()
+- [Basic synthesizer]()
+- [Silence Trimming CLI tool]()
+- [Audio file information CLI tool]()
+
+## Available Operations
+
+The library organizes functionality into focused traits:
+
+### Core Audio Operations (`core-ops`)
+
+- **Statistics** (`AudioStatistics`) - Peak, RMS, mean, variance, zero-crossings, autocorrelation
+- **Processing** (`AudioProcessing`) - Normalize, scale, clip, filtering, compression, DC removal
+- **Channel Operations** (`AudioChannelOps`) - Mono/stereo conversion, channel extraction, pan, balance
+- **Editing** (`AudioEditing`) - Trim, pad, reverse, fade, split, concatenate, mix
+
+### Signal Processing Features
+
+- **IIR Filtering** (`AudioIirFiltering`) - Biquad filters, shelving, peaking
+- **Parametric EQ** (`AudioParametricEq`) - Multi-band equalizer with adjustable Q
+- **Dynamic Range** (`AudioDynamicRange`) - Compression, limiting, expansion, gating
+
+### Advanced Analysis (Optional Features)
+
+- **Spectral Analysis** (`AudioTransforms`) - FFT, STFT, spectrogram, mel-spectrogram, MFCC, CQT
+- **Pitch Analysis** (`AudioPitchAnalysis`) - Fundamental frequency, harmonic analysis
+- **Beat Detection** - Tempo analysis and beat tracking
+- **Plotting** (`AudioPlottingUtils`) - Waveform, spectrogram, and frequency domain visualization
+
+## Quick Start
+
+### Creating Audio Data
 
 ```rust
 use audio_samples::AudioSamples;
 use ndarray::array;
 
-// Create mono audio with sample rate
-let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+// Create mono audio
+let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
 let audio = AudioSamples::new_mono(data, 44100);
 
-assert_eq!(audio.sample_rate(), 44100);
-assert_eq!(audio.channels(), 1);
+// Create stereo audio
+let stereo_data = array![
+    [0.1f32, 0.5, -0.3],  // Left channel
+    [0.8f32, -0.2, 0.4]   // Right channel
+];
+let stereo_audio = AudioSamples::new_multi_channel(stereo_data, 44100);
 ```
 
-### Chainable Processing with Error Handling
+### Basic Statistics
 
 ```rust
+use audio_samples::AudioStatistics;
+
+// Simple statistics (no Result needed)
+let peak = audio.peak();
+let min = audio.min_sample();
+let max = audio.max_sample();
+let mean = audio.mean();
+
+// More complex statistics (return Result)
+let rms = audio.rms()?;
+let variance = audio.variance()?;
+let zero_crossings = audio.zero_crossings();
+```
+
+### Processing Operations
+
+```rust
+use audio_samples::{AudioProcessing, NormalizationMethod};
+
+let mut audio = AudioSamples::new_mono(data, 44100);
+
+// Basic processing (in-place)
+audio.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
+audio.scale(0.5); // Reduce volume by half
+audio.remove_dc_offset();
+```
+
+### Type Conversions
+
+```rust
+// Convert between sample types
+let audio_f32 = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], 44100);
+let audio_i16 = audio_f32.as_type::<i16>()?;
+let audio_f64 = audio_f32.as_type::<f64>()?;
+```
+
+### Iterating Over Audio Data
+
+```rust
+use audio_samples::AudioSampleIterators;
+
+// Iterate by frames (one sample from each channel)
+for frame in audio.frames() {
+    println!("Frame: {:?}", frame);
+}
+
+// Iterate by channels
+for channel in audio.channels() {
+    println!("Channel: {:?}", channel);
+}
+
+// Windowed iteration for analysis
+for window in audio.windows(1024, 512) {
+    // Process 1024-sample windows with 50% overlap
+    let window_rms = window.rms()?;
+    println!("Window RMS: {:.3}", window_rms);
+}
+```
+
+## Builder Pattern for Complex Processing
+
+For more complex operations, use the fluent builder API:
+
+```rust
+use audio_samples::{AudioSamples, NormalizationMethod};
+
+let mut audio = AudioSamples::new_mono(data, 44100);
+
+// Chain multiple operations
+audio.processing()
+    .normalize(-1.0, 1.0, NormalizationMethod::Peak)
+    .scale(0.8)
+    .remove_dc_offset()
+    .apply()?;
+```
+
+## Advanced: Chainable Results
+
+For functional-style error handling, the library provides chainable results:
+
+```rust
+use audio_samples::{ChainableResult, IntoChainable};
+
 let result = audio
-    .try_apply(|sample| sample * 0.5)
-    .chain(|_| audio.try_apply(|sample| sample.clamp(-1.0, 1.0)))
-    .map(|_| audio.samples_per_channel())
-    .into_result();
+    .rms()
+    .into_chainable()
+    .chain(|rms| {
+        println!("RMS: {:.3}", rms);
+        audio.variance()
+    })
+    .chain(|variance| {
+        println!("Variance: {:.3}", variance);
+        Ok(variance.sqrt())
+    })
+    .into_result()?;
 ```
 
-### Beat Detection with Progress Tracking
+*Note: This chainable style is not typical Rust. Most Rust code uses the `?` operator for explicit error handling. The chainable API is provided for domain-specific workflows where fluent composition is valuable.*
+
+## Core Type System
+
+### Supported Sample Types
+
+- `i16` - 16-bit signed integer
+- `I24` - 24-bit signed integer (from `i24` crate)
+- `i32` - 32-bit signed integer
+- `f32` - 32-bit floating point
+- `f64` - 64-bit floating point
+
+### Type System Traits
+
+The library provides a rich trait system for working with different audio sample types:
+
+#### `AudioSample` Trait
+
+Core trait that all audio sample types implement. Provides common operations and constraints needed for audio processing.
+
+#### Conversion Traits
+
+- **`ConvertTo<T>`** - Type-safe conversions between audio sample types with proper scaling
+  - `i16 -> f32`: Normalized to -1.0 to 1.0 range
+  - `f32 -> i16`: Scaled and clamped to integer range
+  - Handles bit depth differences automatically
+
+- **`CastFrom<T>` / `CastInto<T>`** - Direct type casting without audio-specific scaling
+  - For computational operations where you need the raw numeric value
+  - Example: `i16` sample `1334` casts to `f32` as `1334.0` (not normalized)
+  - Use when you need to work with samples as regular numbers, not audio values
 
 ```rust
-let beat_tracker = audio.detect_beats_with_progress(
-    &BeatConfig::new(120.0).with_tolerance(0.1),
-    Some(0.5), // log compression
-    Some(&progress_callback)
-)?;
+// Audio conversion (proper scaling)
+let audio_f32: f32 = audio_i16.convert_to()?; // -1.0 to 1.0 range
 
-println!("Detected tempo: {} BPM", beat_tracker.tempo_bpm);
+// Direct casting (raw numeric value)
+let numeric_f32: f32 = audio_i16.cast_into(); // 1334 becomes 1334.0
 ```
 
-## Supported Sample Types
+## Zero-Copy Views
 
-- `i16`
-- `I24`
-- `i32`
-- `f32`
-- `f64`
+The library provides efficient view types for working with audio data without allocation:
 
-## Performance Considerations
+### `AudioView<T>` - Read-only Views
 
-- Uses `ndarray` for efficient computation
-- Optional SIMD and parallel processing support
-- Zero-cost abstractions for audio metadata tracking
+- Zero-allocation access to audio data
+- Supports all analysis operations
+- Can be converted between compatible sample types
 
-## Error Handling
+### `AudioViewMut<T>` - Mutable Views
 
-Implements a `ChainableResult` type for:
-- Fluent method chaining
-- Improved error handling ergonomics
-- Built-in logging capabilities
+- In-place modifications without allocation
+- Useful for processing pipelines
+
+### Zero-Copy Type Views
+
+- Convert between types with same memory layout (e.g., `i32` ↔ `f32`)
+- No data copying when types have compatible bit patterns
+
+```rust
+use audio_samples::{AudioSamples, AudioView};
+
+let audio = AudioSamples::new_mono(data, 44100);
+
+// Create read-only view
+let view = audio.as_view();
+let peak = view.peak(); // No allocation
+
+// Zero-copy type conversion for same-layout types
+let view_f32 = audio_i32.try_as_type_view::<f32>().unwrap();
+```
+
+## Utility Functions
+
+The `utils` module provides convenient functions for common audio tasks:
+
+### Signal Generation (`utils::generation`)
+
+- **Test Signals**: `generate_sine()`, `generate_white_noise()`, `generate_chirp()`
+- **Complex Signals**: `generate_multi_tone()` for multiple frequencies
+- **Calibration**: Known reference signals for testing
+
+### Audio Analysis (`utils::detection`)
+
+- **Format Detection**: `detect_sample_rate()`, `detect_channel_layout()`
+- **Content Analysis**: `detect_speech_activity()`, `detect_silence_ratio()`
+- **Quality Metrics**: `estimate_dynamic_range()`
+
+### Audio Comparison (`utils::comparison`)
+
+- **Similarity**: `compute_similarity()`, `cross_correlate()`
+- **Quality**: `signal_to_noise_ratio()`, `total_harmonic_distortion()`
+- **Perceptual**: `perceptual_audio_distance()`
+
+```rust
+use audio_samples::utils::*;
+
+// Generate test signal
+let test_tone = generation::generate_sine(440.0, 44100, 1.0);
+
+// Analyze audio content
+let has_speech = detection::detect_speech_activity(&audio)?;
+let snr = comparison::signal_to_noise_ratio(&signal, &noise)?;
+```
+
+## Development
+
+### Building
+
+```bash
+cargo build                    # Core features only
+cargo build --features full    # All features
+cargo build --features fft     # Specific features
+```
+
+### Testing
+
+```bash
+cargo test                     # Core tests
+cargo test --features full     # All tests
+cargo clippy                   # Linting
+cargo fmt                      # Code formatting
+```
+
+### Examples
+
+```bash
+cargo run --example iterators_demo
+cargo run --example processing_builder_demo --features full
+cargo run --example beat_tracking_with_progress --features full
+```
 
 ## Documentation
 
-Full API documentation is available at [docs.rs/audio_samples](https://docs.rs/audio_samples)
+Full API documentation is available at [docs.rs/audio_samples](https://docs.rs/audio_samples).
 
 ## License
 
@@ -109,3 +358,12 @@ MIT License
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+[crate]: https://crates.io/crates/audio_samples  
+[crate-img]: https://img.shields.io/crates/v/audio_samples?style=for-the-badge&color=009E73&label=crates.io
+
+[docs]: https://docs.rs/audio_samples  
+[docs-img]: https://img.shields.io/badge/docs.rs-online-009E73?style=for-the-badge&labelColor=gray
+
+[license-img]: https://img.shields.io/crates/l/audio_samples?style=for-the-badge&label=license&labelColor=gray  
+[license]: https://github.com/jmg049/audio_samples/blob/main/LICENSE
