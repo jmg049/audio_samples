@@ -9,7 +9,7 @@ use crate::operations::types::{EqBand, EqBandType, ParametricEq};
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, RealFloat, to_precision,
+    I24, LayoutError, ParameterError, RealFloat, to_precision,
 };
 
 impl<'a, T: AudioSample> AudioParametricEq<T> for AudioSamples<'a, T>
@@ -76,26 +76,28 @@ where
                 let mono_self = match self.as_mono_mut() {
                     Some(working) => working,
                     None => {
-                        return Err(AudioSampleError::ArrayLayoutError {
-                            message: "Mono samples must be contiguous".to_string(),
-                        });
+                        return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
+                            operation: "parametric EQ".to_string(),
+                            layout_type: "non-contiguous mono samples".to_string(),
+                        }));
                     }
                 };
 
                 let working_samples =
                     working_samples
                         .as_mono_mut()
-                        .ok_or(AudioSampleError::OptionError {
-                            message: "Failed to get mono data. Underlying data is not mono."
-                                .to_string(),
-                        })?;
+                        .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                            "audio_format",
+                            "Failed to get mono data. Underlying data is not mono.",
+                        )))?;
 
                 let working_samples =
                     working_samples
                         .as_slice_mut()
-                        .ok_or(AudioSampleError::ArrayLayoutError {
-                            message: "Mono samples must be contiguous".to_string(),
-                        })?;
+                        .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
+                            operation: "parametric EQ".to_string(),
+                            layout_type: "non-contiguous mono samples".to_string(),
+                        }))?;
 
                 filter.process_samples_in_place(working_samples);
 
@@ -112,17 +114,23 @@ where
                     let multi_self = match self.as_multi_channel_mut() {
                         Some(working) => working,
                         None => {
-                            return Err(AudioSampleError::ArrayLayoutError {
-                                message: "Multi-channel samples must be contiguous".to_string(),
-                            });
+                            return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
+                                operation: "parametric EQ".to_string(),
+                                layout_type: "non-contiguous multi-channel samples".to_string(),
+                            }));
                         }
                     };
-                    let working_samples = working_samples.as_multi_channel_mut().ok_or(AudioSampleError::OptionError { message: "Failed to get multi-channel data. Underlying data is not multi-channel.".to_string() })?;
-                    let working_samples = working_samples.as_slice_mut().ok_or(
-                        AudioSampleError::ArrayLayoutError {
-                            message: "Multi-channel samples must be contiguous".to_string(),
-                        },
-                    )?;
+                    let working_samples = working_samples.as_multi_channel_mut().ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "audio_format",
+                        "Failed to get multi-channel data. Underlying data is not multi-channel."
+                    )))?;
+                    let working_samples =
+                        working_samples
+                            .as_slice_mut()
+                            .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
+                                operation: "parametric EQ".to_string(),
+                                layout_type: "non-contiguous multi-channel samples".to_string(),
+                            }))?;
 
                     filter.process_samples_in_place(working_samples);
 

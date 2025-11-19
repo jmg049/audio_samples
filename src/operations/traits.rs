@@ -26,6 +26,7 @@ use crate::{
 #[cfg(feature = "spectral-analysis")]
 use ndarray::Array2;
 
+use rand::distr::{Distribution, StandardUniform};
 #[cfg(feature = "spectral-analysis")]
 use rustfft::FftNum;
 
@@ -42,6 +43,11 @@ use ndarray::Zip;
 
 // Complex numbers using num-complex crate
 pub use num_complex::Complex;
+
+// Type aliases for complex types to satisfy clippy::type_complexity
+type FftInfoResult<F> = AudioSampleResult<(Vec<F>, Vec<F>, Vec<Complex<F>>)>;
+type RealtimeOperation<T> =
+    Box<dyn Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync>;
 
 /// Statistical analysis operations for audio data.
 ///
@@ -266,9 +272,9 @@ where
     /// Only frequencies within the specified range will pass through.
     ///
     /// # Arguments
-    /// * `low_hz` - Lower cutoff frequency in Hz
-    /// * `high_hz` - Upper cutoff frequency in Hz
-    fn band_pass_filter<F>(&mut self, low_hz: F, high_hz: F) -> AudioSampleResult<()>
+    /// * `low_cutoff_hz` - Lower cutoff frequency in Hz
+    /// * `high_cutoff_hz` - Upper cutoff frequency in Hz
+    fn band_pass_filter<F>(&mut self, low_cutoff_hz: F, high_cutoff_hz: F) -> AudioSampleResult<()>
     where
         T: CastFrom<F> + ConvertTo<F>,
         F: RealFloat + ConvertTo<T>;
@@ -365,7 +371,7 @@ where
         n_fft: Option<usize>,
         window: Option<WindowType<F>>,
         normalise: bool,
-    ) -> AudioSampleResult<(Vec<F>, Vec<F>, Vec<Complex<F>>)>
+    ) -> FftInfoResult<F>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>;
@@ -1663,6 +1669,7 @@ where
         pad_value: T,
     ) -> AudioSampleResult<AudioSamples<'b, T>>;
 
+    /// Pad samples to the right to reach a target number of samples.
     fn pad_samples_right<'b>(
         &self,
         target_num_samples: usize,
@@ -1694,7 +1701,7 @@ where
     ///
     /// # Arguments
     /// * `segments` - Audio segments to concatenate in order
-    fn concatenate<'b>(segments: &[Self]) -> AudioSampleResult<AudioSamples<'b, T>>
+    fn concatenate(segments: &[Self]) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         Self: Sized;
 
@@ -1706,10 +1713,10 @@ where
     /// # Arguments
     /// * `sources` - Audio sources to mix
     /// * `weights` - Optional mixing weights (defaults to equal weighting)
-    fn mix<'b, F>(
+    fn mix<F>(
         sources: &[Self],
         weights: Option<&[F]>,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>
+    ) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
@@ -1739,7 +1746,7 @@ where
     ///
     /// # Arguments
     /// * `count` - Number of repetitions (total length = original × count)
-    fn repeat<'b>(&self, count: usize) -> AudioSampleResult<AudioSamples<'b, T>>;
+    fn repeat(&self, count: usize) -> AudioSampleResult<AudioSamples<'static, T>>;
 
     /// Crops audio to remove silence from beginning and end.
     ///
@@ -1750,7 +1757,7 @@ where
     /// A new AudioSamples instance with leading and trailing silence removed
     /// # Errors
     /// Returns an error if the operation fails for any reason
-    fn trim_silence<'b, F>(&self, threshold_db: F) -> AudioSampleResult<AudioSamples<'b, T>>
+    fn trim_silence<F>(&self, threshold_db: F) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>;
@@ -1796,7 +1803,8 @@ where
     ) -> AudioSampleResult<AudioSamples<'b, T>>
     where
         T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        F: RealFloat + ConvertTo<T>,
+        StandardUniform: Distribution<F>;
 
     /// Applies perturbation to audio samples in place.
     ///
@@ -1836,19 +1844,20 @@ where
     fn perturb_<F>(&mut self, config: &PerturbationConfig<F>) -> AudioSampleResult<()>
     where
         T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        F: RealFloat + ConvertTo<T>,
+        StandardUniform: Distribution<F>;
 
     /// Stacks multiple mono audio samples into a multi-channel audio sample.
-    fn stack<'b>(sources: &[Self]) -> AudioSampleResult<AudioSamples<'b, T>>
+    fn stack(sources: &[Self]) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         Self: Sized;
 
     /// Trim silence anywhere in the audio.
-    fn trim_all_silence<'b, F>(
+    fn trim_all_silence<F>(
         &self,
         threshold_db: F,
         min_silence_duration_seconds: F,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>
+    ) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>;
@@ -1871,10 +1880,10 @@ where
     ///
     /// # Arguments
     /// * `method` - Method for combining channels into mono
-    fn to_mono<'b, F>(
+    fn to_mono<F>(
         &self,
         method: MonoConversionMethod<F>,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>
+    ) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         T: CastFrom<F> + ConvertTo<F>,
         F: RealFloat + ConvertTo<T>;
@@ -1883,10 +1892,10 @@ where
     ///
     /// # Arguments
     /// * `method` - Method for creating stereo from mono
-    fn to_stereo<'b, F>(
+    fn to_stereo<F>(
         &self,
         method: StereoConversionMethod<F>,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>
+    ) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         T: CastFrom<F> + ConvertTo<F>,
         F: RealFloat + CastInto<T> + ConvertTo<T>;
@@ -1895,7 +1904,7 @@ where
     ///
     /// # Arguments
     /// * `channel_index` - Zero-based index of channel to extract
-    fn extract_channel<'b>(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'b, T>>;
+    fn extract_channel(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'static, T>>;
 
     /// Borrows a specific channel from multi-channel audio.
     ///
@@ -1938,12 +1947,12 @@ where
         Self: Sized;
 
     /// Interleave multiple channels into one audio sample.
-    fn interleave_channels<'b>(
+    fn interleave_channels(
         channels: &[AudioSamples<'_, T>],
-    ) -> AudioSampleResult<AudioSamples<'b, T>>;
+    ) -> AudioSampleResult<AudioSamples<'static, T>>;
 
     /// Deinterleave audio into separate channel samples.
-    fn deinterleave_channels<'b>(&self) -> AudioSampleResult<Vec<AudioSamples<'b, T>>>;
+    fn deinterleave_channels(&self) -> AudioSampleResult<Vec<AudioSamples<'static, T>>>;
 }
 
 /// Operation application and chaining functionality.
@@ -2206,7 +2215,7 @@ pub struct OperationMetrics<F> {
 pub struct OperationPipeline<T: AudioSample> {
     /// Name of the operation pipeline
     pub name: String,
-    operations: Vec<Box<dyn Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync>>,
+    operations: Vec<RealtimeOperation<T>>,
     collect_metrics: bool,
 }
 
@@ -2233,7 +2242,7 @@ impl<T: AudioSample> OperationPipeline<T> {
     }
 
     /// Enable metrics collection for this pipeline.
-    pub fn with_metrics(mut self) -> Self {
+    pub const fn with_metrics(mut self) -> Self {
         self.collect_metrics = true;
         self
     }
@@ -2336,7 +2345,7 @@ where
                 break;
             }
 
-            if let Err(_) = operation(&mut self) {
+            if operation(&mut self).is_err() {
                 // In real-time processing, we continue despite errors
                 // to maintain audio continuity
                 continue;
@@ -2387,17 +2396,13 @@ where
         let _start_time = std::time::Instant::now();
 
         // Try high quality first if we have generous time budget
-        if time_budget_ms > to_precision::<Fl, _>(10.0) {
-            if high_quality_op(&mut self).is_ok() {
-                return Ok(self);
-            }
+        if time_budget_ms > to_precision::<Fl, _>(10.0) && high_quality_op(&mut self).is_ok() {
+            return Ok(self);
         }
 
         // Fall back to medium quality
-        if time_budget_ms > to_precision::<Fl, _>(5.0) {
-            if medium_quality_op(&mut self).is_ok() {
-                return Ok(self);
-            }
+        if time_budget_ms > to_precision::<Fl, _>(5.0) && medium_quality_op(&mut self).is_ok() {
+            return Ok(self);
         }
 
         // Last resort: low quality operation

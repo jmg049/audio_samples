@@ -6,7 +6,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{AudioSampleError, AudioSampleResult, RealFloat, to_precision};
+use crate::{
+    AudioSampleError, AudioSampleResult, LayoutError, ProcessingError, RealFloat, to_precision,
+};
 use num_complex::Complex;
 #[cfg(feature = "fft")]
 use realfft::{RealFftPlanner, RealToComplex};
@@ -123,7 +125,7 @@ pub trait FftBackendImpl<F: RealFloat> {
 }
 
 /// Returns the expected output size for given input size
-pub(crate) fn output_size(input_size: usize) -> usize {
+pub(crate) const fn output_size(input_size: usize) -> usize {
     input_size / 2 + 1
 }
 
@@ -170,10 +172,12 @@ impl<F: RealFloat> FftBackendImpl<F> for RealFftBackend<F> {
         // RealFFT requires mutable input, so we need to copy
         let mut input_copy: Vec<F> = input.to_vec();
 
-        plan.process(&mut input_copy, output)
-            .map_err(|e| AudioSampleError::ProcessingError {
-                msg: format!("RealFFT error: {:?}", e),
-            })
+        plan.process(&mut input_copy, output).map_err(|e| {
+            AudioSampleError::Processing(ProcessingError::algorithm_failure(
+                "realfft",
+                format!("RealFFT error: {:?}", e),
+            ))
+        })
     }
 }
 
@@ -200,8 +204,8 @@ impl MklFftBackend {
         })
     }
 
-    fn get_or_create_plan<F: RealFloat>(&mut self, size: usize) -> AudioSampleResult<&MklPlan> {
-        if !self.cached_plans.contains_key(&size) {
+    fn get_or_create_plan(&mut self, size: usize) -> AudioSampleResult<&MklPlan> {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.cached_plans.entry(size) {
             let output_size = output_size(size);
 
             // Create FFTW plan for real-to-complex FFT
@@ -218,9 +222,12 @@ impl MklFftBackend {
                     if !output.is_null() {
                         fftw_sys::fftw_free(output as *mut std::ffi::c_void);
                     }
-                    return Err(AudioSampleError::ProcessingError {
-                        msg: "Failed to allocate FFTW memory".to_string(),
-                    });
+                    return Err(AudioSampleError::Processing(
+                        ProcessingError::algorithm_failure(
+                            "fftw",
+                            "Failed to allocate FFTW memory",
+                        ),
+                    ));
                 }
 
                 let plan = fftw_sys::fftw_plan_dft_r2c_1d(
@@ -234,22 +241,21 @@ impl MklFftBackend {
                 fftw_sys::fftw_free(output as *mut std::ffi::c_void);
 
                 if plan.is_null() {
-                    return Err(AudioSampleError::ProcessingError {
-                        msg: "Failed to create FFTW plan".to_string(),
-                    });
+                    return Err(AudioSampleError::Processing(
+                        ProcessingError::algorithm_failure("fftw", "Failed to create FFTW plan"),
+                    ));
                 }
 
                 plan
             };
 
-            self.cached_plans.insert(
-                size,
-                MklPlan {
-                    plan,
-                    input_size: size,
-                    output_size,
-                },
-            );
+            let mkl_plan = MklPlan {
+                plan,
+                input_size: size,
+                output_size,
+            };
+
+            e.insert(mkl_plan);
         }
 
         Ok(&self.cached_plans[&size])
@@ -281,19 +287,19 @@ impl<F: RealFloat> FftBackendImpl<F> for MklFftBackend {
         input: &[F],
         output: &mut [Complex<F>],
     ) -> AudioSampleResult<()> {
-        let plan_info = self.get_or_create_plan::<F>(input.len())?;
+        let plan_info = self.get_or_create_plan(input.len())?;
 
         if output.len() != plan_info.output_size {
-            return Err(AudioSampleError::DimensionMismatch(format!(
-                "Output size mismatch: expected {}, got {}",
-                plan_info.output_size,
-                output.len()
+            return Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
+                format!("FFT output size {}", plan_info.output_size),
+                format!("provided output size {}", output.len()),
+                "FFT computation",
             )));
         }
 
         unsafe {
             // Allocate aligned input and output arrays
-            let input_ptr = fftw_sys::fftw_malloc(std::mem::size_of::<F>() * input.len()) as *mut F;
+            let input_ptr = fftw_sys::fftw_malloc(std::mem::size_of_val(input)) as *mut F;
             let output_ptr =
                 fftw_sys::fftw_malloc(std::mem::size_of::<fftw_sys::fftw_complex>() * output.len())
                     as *mut fftw_sys::fftw_complex;
@@ -305,9 +311,12 @@ impl<F: RealFloat> FftBackendImpl<F> for MklFftBackend {
                 if !output_ptr.is_null() {
                     fftw_sys::fftw_free(output_ptr as *mut std::ffi::c_void);
                 }
-                return Err(AudioSampleError::ProcessingError {
-                    msg: "Failed to allocate aligned FFTW memory".to_string(),
-                });
+                return Err(AudioSampleError::Processing(
+                    ProcessingError::algorithm_failure(
+                        "fftw",
+                        "Failed to allocate aligned FFTW memory",
+                    ),
+                ));
             }
 
             // Copy input data
@@ -342,7 +351,7 @@ impl<F: RealFloat> FftBackendImpl<F> for MklFftBackend {
 /// Unified FFT backend that automatically selects the optimal implementation
 pub enum UnifiedFftBackend<F: RealFloat> {
     /// RealFFT backend using the realfft crate
-    RealFFT(RealFftBackend<F>),
+    RealFFT(Box<RealFftBackend<F>>),
     /// Intel MKL backend for optimized performance
     #[cfg(feature = "mkl")]
     IntelMKL(MklFftBackend),
@@ -358,7 +367,7 @@ impl<F: RealFloat> UnifiedFftBackend<F> {
     /// A new `UnifiedFftBackend` instance
     pub fn new(backend: FftBackend) -> AudioSampleResult<Self> {
         match backend {
-            FftBackend::RealFFT => Ok(Self::RealFFT(RealFftBackend::new())),
+            FftBackend::RealFFT => Ok(Self::RealFFT(Box::default())),
             #[cfg(feature = "mkl")]
             FftBackend::IntelMKL => Ok(Self::IntelMKL(MklFftBackend::new()?)),
         }

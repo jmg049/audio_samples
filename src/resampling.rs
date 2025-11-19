@@ -3,7 +3,7 @@
 
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, RealFloat,
+    I24, ParameterError, ProcessingError, RealFloat,
     operations::{traits::AudioChannelOps, types::ResamplingQuality},
     to_precision,
 };
@@ -14,8 +14,7 @@ const HIGH_BLOCK: usize = 8192;
 
 fn block_size(quality: ResamplingQuality, input_len: usize) -> usize {
     let target = match quality {
-        ResamplingQuality::Fast => FAST_BLOCK,
-        ResamplingQuality::Medium => FAST_BLOCK,
+        ResamplingQuality::Fast | ResamplingQuality::Medium => FAST_BLOCK,
         ResamplingQuality::High => HIGH_BLOCK,
     };
     input_len.min(target)
@@ -64,9 +63,10 @@ where
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     if audio.total_samples() == 0 {
-        return Err(AudioSampleError::InvalidInput {
-            msg: "Cannot resample empty audio".to_string(),
-        });
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio",
+            "Cannot resample empty audio",
+        )));
     }
 
     let input_sample_rate = audio.sample_rate() as usize;
@@ -112,11 +112,14 @@ where
         block_size(ResamplingQuality::Fast, audio.samples_per_channel()),
         channels,
     )
-    .map_err(|e| AudioSampleError::ProcessingError {
-        msg: format!("Failed to create fast resampler: {}", e),
+    .map_err(|e| {
+        AudioSampleError::Processing(ProcessingError::algorithm_failure(
+            "fast_resampler",
+            format!("Failed to create fast resampler: {}", e),
+        ))
     })?;
 
-    resample_with_resampler(&audio, &mut resampler, target_sample_rate)
+    resample_with_resampler(audio, &mut resampler, target_sample_rate)
 }
 
 /// Medium quality resampling with balanced speed/quality.
@@ -150,8 +153,11 @@ where
         block_size(ResamplingQuality::Medium, audio.samples_per_channel()),
         channels,
     )
-    .map_err(|e| AudioSampleError::ProcessingError {
-        msg: format!("Failed to create medium quality resampler: {}", e),
+    .map_err(|e| {
+        AudioSampleError::Processing(ProcessingError::algorithm_failure(
+            "medium_resampler",
+            format!("Failed to create medium quality resampler: {}", e),
+        ))
     })?;
 
     resample_with_sinc_resampler(audio, &mut resampler, target_sample_rate)
@@ -188,8 +194,11 @@ where
         block_size(ResamplingQuality::High, audio.samples_per_channel()),
         channels,
     )
-    .map_err(|e| AudioSampleError::ProcessingError {
-        msg: format!("Failed to create high quality resampler: {}", e),
+    .map_err(|e| {
+        AudioSampleError::Processing(ProcessingError::algorithm_failure(
+            "high_resampler",
+            format!("Failed to create high quality resampler: {}", e),
+        ))
     })?;
 
     resample_with_sinc_resampler(audio, &mut resampler, target_sample_rate)
@@ -201,16 +210,18 @@ fn extract_channel_data_f64(audio: &AudioSamples<f64>) -> AudioSampleResult<Vec<
     let mut input_data: Vec<Vec<f64>> = Vec::with_capacity(channels);
 
     if audio.is_mono() {
-        let mono_data = audio.as_mono().ok_or(AudioSampleError::InvalidInput {
-            msg: "Failed to get mono data".to_string(),
-        })?;
+        let mono_data =
+            audio
+                .as_mono()
+                .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Failed to get mono data",
+                )))?;
         input_data.push(mono_data.to_vec());
     } else {
-        let multi_data = audio
-            .as_multi_channel()
-            .ok_or(AudioSampleError::InvalidInput {
-                msg: "Failed to get multi-channel data".to_string(),
-            })?;
+        let multi_data = audio.as_multi_channel().ok_or(AudioSampleError::Parameter(
+            ParameterError::invalid_value("audio_format", "Failed to get multi-channel data"),
+        ))?;
 
         for ch in 0..channels {
             let channel_data: Vec<f64> = multi_data.row(ch).to_vec();
@@ -239,12 +250,12 @@ where
     let input_data = extract_channel_data_f64(audio)?;
 
     // Perform resampling
-    let output_data =
-        resampler
-            .process(&input_data, None)
-            .map_err(|e| AudioSampleError::ProcessingError {
-                msg: format!("Resampling failed: {}", e),
-            })?;
+    let output_data = resampler.process(&input_data, None).map_err(|e| {
+        AudioSampleError::Processing(ProcessingError::algorithm_failure(
+            "resampler",
+            format!("Resampling failed: {}", e),
+        ))
+    })?;
 
     // Convert output back to AudioSamples format using interleave_channels
     convert_channel_data_to_audio_samples(output_data, target_sample_rate)
@@ -290,12 +301,15 @@ where
         match resampler.process(&chunk_data, None) {
             Ok(output_chunk) => output_chunks.push(output_chunk),
             Err(e) => {
-                return Err(AudioSampleError::ProcessingError {
-                    msg: format!(
-                        "Single chunk resampling failed (input_len={}, chunk_size={}, channels={}): {}",
-                        input_length, chunk_size, channels, e
+                return Err(AudioSampleError::Processing(
+                    ProcessingError::algorithm_failure(
+                        "resampler",
+                        format!(
+                            "Single chunk resampling failed (input_len={}, chunk_size={}, channels={}): {}",
+                            input_length, chunk_size, channels, e
+                        ),
                     ),
-                });
+                ));
             }
         }
     } else {
@@ -318,12 +332,15 @@ where
             match resampler.process(&chunk_data, None) {
                 Ok(output_chunk) => output_chunks.push(output_chunk),
                 Err(e) => {
-                    return Err(AudioSampleError::ProcessingError {
-                        msg: format!(
-                            "Chunk resampling failed (chunk_start={}, chunk_size={}, actual_size={}, channels={}): {}",
-                            chunk_start, chunk_size, actual_chunk_size, channels, e
+                    return Err(AudioSampleError::Processing(
+                        ProcessingError::algorithm_failure(
+                            "resampler",
+                            format!(
+                                "Chunk resampling failed (chunk_start={}, chunk_size={}, actual_size={}, channels={}): {}",
+                                chunk_start, chunk_size, actual_chunk_size, channels, e
+                            ),
                         ),
-                    });
+                    ));
                 }
             }
         }
@@ -331,9 +348,9 @@ where
 
     // Concatenate all output chunks
     if output_chunks.is_empty() {
-        return Err(AudioSampleError::ProcessingError {
-            msg: "No output chunks produced".to_string(),
-        });
+        return Err(AudioSampleError::Processing(
+            ProcessingError::algorithm_failure("resampler", "No output chunks produced"),
+        ));
     }
 
     let mut combined_output: Vec<Vec<f64>> = vec![Vec::new(); channels];
@@ -361,9 +378,10 @@ where
     for<'a> AudioSamples<'a, T>: AudioChannelOps<T>,
 {
     if channel_data.is_empty() {
-        return Err(AudioSampleError::InvalidInput {
-            msg: "No channel data provided".to_string(),
-        });
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "channel_data",
+            "No channel data provided",
+        )));
     }
 
     // Convert each channel's data to AudioSamples<T> directly
@@ -375,7 +393,7 @@ where
             converted_data.push(sample.convert_to()?);
         }
         let mono_array = ndarray::Array1::from_vec(converted_data);
-        let audio_sample = AudioSamples::new_mono(mono_array.into(), sample_rate as u32);
+        let audio_sample = AudioSamples::new_mono(mono_array, sample_rate as u32);
         channel_samples.push(audio_sample);
     }
 
@@ -392,6 +410,10 @@ where
 ///
 /// # Returns
 /// A new AudioSamples instance resampled by the given ratio
+///
+/// # Panics
+///
+/// Panics if target sample rate calculation results in a value that cannot be converted to usize.
 pub fn resample_by_ratio<T, F: RealFloat>(
     audio: &AudioSamples<T>,
     ratio: F,
@@ -407,9 +429,10 @@ where
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     if ratio <= F::zero() {
-        return Err(AudioSampleError::InvalidInput {
-            msg: format!("Invalid resampling ratio: {}", ratio),
-        });
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "ratio",
+            format!("Invalid resampling ratio: {}", ratio),
+        )));
     }
 
     let input_sample_rate = to_precision::<F, _>(audio.sample_rate);

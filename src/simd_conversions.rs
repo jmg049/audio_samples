@@ -6,7 +6,7 @@
 #[cfg(feature = "simd")]
 use wide::f32x8;
 
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, ConvertTo};
+use crate::{AudioSample, AudioSampleError, AudioSampleResult, ConvertTo, ParameterError};
 
 /// SIMD-optimized f32 to i16 conversion.
 ///
@@ -15,9 +15,10 @@ use crate::{AudioSample, AudioSampleError, AudioSampleResult, ConvertTo};
 #[cfg(feature = "simd")]
 pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSampleResult<()> {
     if input.len() != output.len() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Input and output slices must have same length".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "slice_lengths",
+            "Input and output slices must have same length",
+        )));
     }
 
     let chunks = input.len() / 8;
@@ -69,9 +70,10 @@ pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSample
 #[cfg(feature = "simd")]
 pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSampleResult<()> {
     if input.len() != output.len() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Input and output slices must have same length".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "slice_lengths",
+            "Input and output slices must have same length",
+        )));
     }
 
     let chunks = input.len() / 8;
@@ -115,9 +117,10 @@ pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSample
 #[cfg(feature = "simd")]
 pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSampleResult<()> {
     if input.len() != output.len() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Input and output slices must have same length".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "slice_lengths",
+            "Input and output slices must have same length",
+        )));
     }
 
     let chunks = input.len() / 8;
@@ -214,9 +217,10 @@ where
     U: AudioSample,
 {
     if input.len() != output.len() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Input and output slices must have same length".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "slice_lengths",
+            "Input and output slices must have same length",
+        )));
     }
 
     let chunks = input.len() / 4;

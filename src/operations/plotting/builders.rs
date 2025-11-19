@@ -286,10 +286,12 @@ impl<F: RealFloat> PitchContour<F> {
 
         let bounds = PlotBounds::new(x_min, x_max, y_min, y_max);
 
-        let mut metadata = PlotMetadata::default();
-        metadata.legend_label = Some("Pitch".to_string());
-        metadata.y_label = Some("Frequency (Hz)".to_string());
-        metadata.z_order = 8;
+        let metadata = PlotMetadata {
+            legend_label: Some("Pitch".to_string()),
+            y_label: Some("Frequency (Hz)".to_string()),
+            z_order: 8,
+            ..Default::default()
+        };
 
         Self {
             time_axis,
@@ -336,35 +338,35 @@ impl<F: RealFloat> PlotElement<F> for PitchContour<F> {
                 trace = trace.name(name);
             }
 
-            traces.push(PlotTrace::Scatter(*trace));
+            traces.push(PlotTrace::Scatter(Box::new(*trace)));
         }
 
         // If show_confidence is enabled and confidence data is available, add confidence visualization
-        if self.show_confidence {
-            if let Some(ref confidence_data) = self.confidence {
-                let (conf_x_data, conf_y_data): (Vec<F>, Vec<F>) = self
-                    .time_axis
-                    .iter()
-                    .zip(confidence_data.iter())
-                    .map(|(&t, &conf)| (t, conf))
-                    .unzip();
+        if self.show_confidence
+            && let Some(ref confidence_data) = self.confidence
+        {
+            let (conf_x_data, conf_y_data): (Vec<F>, Vec<F>) = self
+                .time_axis
+                .iter()
+                .zip(confidence_data.iter())
+                .map(|(&t, &conf)| (t, conf))
+                .unzip();
 
-                if !conf_x_data.is_empty() {
-                    let confidence_trace = Scatter::new(conf_x_data, conf_y_data)
-                        .mode(Mode::Lines)
-                        .line(
-                            Line::new()
-                                .color(format!("{}80", self.line_style.color)) // Semi-transparent version
-                                .width(
-                                    (self.line_style.width * to_precision::<F, _>(0.5))
-                                        .to_f64()
-                                        .expect("Should not fail"),
-                                ),
-                        )
-                        .name("Pitch Confidence");
+            if !conf_x_data.is_empty() {
+                let confidence_trace = Scatter::new(conf_x_data, conf_y_data)
+                    .mode(Mode::Lines)
+                    .line(
+                        Line::new()
+                            .color(format!("{}80", self.line_style.color)) // Semi-transparent version
+                            .width(
+                                (self.line_style.width * to_precision::<F, _>(0.5))
+                                    .to_f64()
+                                    .expect("Should not fail"),
+                            ),
+                    )
+                    .name("Pitch Confidence");
 
-                    traces.push(PlotTrace::Scatter(*confidence_trace));
-                }
+                traces.push(PlotTrace::Scatter(Box::new(*confidence_trace)));
             }
         }
 
@@ -406,11 +408,11 @@ where
             .map_into(|x| to_precision::<F, _>(x))
             .to_interleaved_vec();
         let style = style.unwrap_or_default();
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-
-        // Set y-axis label based on sample type
-        metadata.y_label = Some(format!("Amplitude ({})", T::LABEL));
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some(format!("Amplitude ({})", T::LABEL)),
+            ..Default::default()
+        };
 
         Ok(WaveformPlot::new(
             time_data,
@@ -486,10 +488,12 @@ where
             .map(|i| to_precision::<F, _>(i) * sample_rate / to_precision::<F, _>(n_fft))
             .collect();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-        metadata.y_label = Some("Frequency (Hz)".to_string());
-        metadata.title = Some("Spectrogram".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some("Frequency (Hz)".to_string()),
+            title: Some("Spectrogram".to_string()),
+            ..Default::default()
+        };
 
         // Create a temporary config for the existing SpectrogramPlot::new signature
         let config = SpectrogramConfig {
@@ -563,17 +567,19 @@ where
             })
             .collect();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Frequency (Hz)".to_string());
-        metadata.y_label = Some(
-            if db_scale {
-                "Magnitude (dB)"
-            } else {
-                "Magnitude"
-            }
-            .to_string(),
-        );
-        metadata.title = Some("Power Spectrum".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Frequency (Hz)".to_string()),
+            y_label: Some(
+                if db_scale {
+                    "Magnitude (dB)"
+                } else {
+                    "Magnitude"
+                }
+                .to_string(),
+            ),
+            title: Some("Power Spectrum".to_string()),
+            ..Default::default()
+        };
 
         Ok(PowerSpectrumPlot::new(
             frequencies,
@@ -605,7 +611,6 @@ where
         let hop_length = hop_length.unwrap_or(n_fft / 4);
         let window = window.unwrap_or(WindowType::Hanning);
         let f_min = f_min.unwrap_or_default();
-        let f_max = f_max;
         let colormap = colormap.unwrap_or(ColorPalette::Viridis);
         let db_range = db_range.unwrap_or((to_precision::<F, _>(-80.0), F::zero()));
 
@@ -630,10 +635,12 @@ where
             .map(|i| to_precision::<F, _>(i)) // Mel bins are numbered, not frequency
             .collect();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-        metadata.y_label = Some("Mel Frequency".to_string());
-        metadata.title = Some("Mel Spectrogram".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some("Mel Frequency".to_string()),
+            title: Some("Mel Spectrogram".to_string()),
+            ..Default::default()
+        };
 
         // Create a temporary config for the existing SpectrogramPlot::new signature
         let config = SpectrogramConfig {
@@ -817,17 +824,19 @@ where
                 (frequencies, complex_values)
             };
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Frequency (Hz)".to_string());
-        metadata.y_label = Some(
-            if config.db_scale {
-                "Magnitude (dB)"
-            } else {
-                "Magnitude"
-            }
-            .to_string(),
-        );
-        metadata.title = Some("Complex Spectrum".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Frequency (Hz)".to_string()),
+            y_label: Some(
+                if config.db_scale {
+                    "Magnitude (dB)"
+                } else {
+                    "Magnitude"
+                }
+                .to_string(),
+            ),
+            title: Some("Complex Spectrum".to_string()),
+            ..Default::default()
+        };
 
         Ok(ComplexSpectrumPlot::new(
             filtered_frequencies,
@@ -867,16 +876,18 @@ where
         // Take only positive frequencies
         let complex_values = fft_result[0..n_bins].to_vec();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Frequency (Hz)".to_string());
-        metadata.y_label = Some(match phase_mode {
-            PhaseDisplayMode::Degrees | PhaseDisplayMode::UnwrappedDegrees => {
-                "Phase (degrees)".to_string()
-            }
-            _ => "Phase (radians)".to_string(),
-        });
-        metadata.title = Some("Phase Spectrum".to_string());
-        metadata.legend_label = Some("Phase".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Frequency (Hz)".to_string()),
+            y_label: Some(match phase_mode {
+                PhaseDisplayMode::Degrees | PhaseDisplayMode::UnwrappedDegrees => {
+                    "Phase (degrees)".to_string()
+                }
+                _ => "Phase (radians)".to_string(),
+            }),
+            title: Some("Phase Spectrum".to_string()),
+            legend_label: Some("Phase".to_string()),
+            ..Default::default()
+        };
 
         Ok(PhaseSpectrumPlot::new(
             frequencies,
@@ -993,10 +1004,12 @@ where
             }
         }
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Frequency (Hz)".to_string());
-        metadata.y_label = Some("Magnitude (dB)".to_string());
-        metadata.title = Some("Peak Frequency Detection".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Frequency (Hz)".to_string()),
+            y_label: Some("Magnitude (dB)".to_string()),
+            title: Some("Peak Frequency Detection".to_string()),
+            ..Default::default()
+        };
 
         Ok(PeakFrequencyPlot::new(
             frequencies,
@@ -1039,17 +1052,19 @@ where
             .map(|_| vec![F::zero(); time_axis.len()])
             .collect();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-        metadata.y_label = Some(
-            if config.show_magnitude {
-                "Magnitude (dB)"
-            } else {
-                "Phase"
-            }
-            .to_string(),
-        );
-        metadata.title = Some("Frequency Bin Tracking".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some(
+                if config.show_magnitude {
+                    "Magnitude (dB)"
+                } else {
+                    "Phase"
+                }
+                .to_string(),
+            ),
+            title: Some("Frequency Bin Tracking".to_string()),
+            ..Default::default()
+        };
 
         Ok(FrequencyBinPlot::new(
             time_axis,
@@ -1172,10 +1187,12 @@ where
             })
             .collect();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-        metadata.y_label = Some("Magnitude (dB)".to_string());
-        metadata.title = Some("Spectral Peaks Over Time".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some("Magnitude (dB)".to_string()),
+            title: Some("Spectral Peaks Over Time".to_string()),
+            ..Default::default()
+        };
 
         Ok(FrequencyBinPlot::new(
             time_axis,
@@ -1214,11 +1231,13 @@ where
         // Take only positive frequencies
         let complex_values = fft_result[0..n_bins].to_vec();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Frequency (Hz)".to_string());
-        metadata.y_label = Some("Group Delay (samples)".to_string());
-        metadata.title = Some("Group Delay".to_string());
-        metadata.legend_label = Some("Group Delay".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Frequency (Hz)".to_string()),
+            y_label: Some("Group Delay (samples)".to_string()),
+            title: Some("Group Delay".to_string()),
+            legend_label: Some("Group Delay".to_string()),
+            ..Default::default()
+        };
 
         Ok(GroupDelayPlot::new(
             frequencies,
@@ -1263,10 +1282,12 @@ where
         // Placeholder: create empty magnitude data
         let magnitude_data = Array2::<F>::zeros((n_freq_bins, n_windows));
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-        metadata.y_label = Some("Frequency (Hz)".to_string());
-        metadata.title = Some("FFT Waterfall".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some("Frequency (Hz)".to_string()),
+            title: Some("FFT Waterfall".to_string()),
+            ..Default::default()
+        };
 
         Ok(FftWaterfallPlot::new(
             time_axis,
@@ -1318,10 +1339,12 @@ where
             })
             .collect();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Frequency (Hz)".to_string());
-        metadata.y_label = Some("Magnitude (dB)".to_string());
-        metadata.title = Some("Window Function Comparison".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Frequency (Hz)".to_string()),
+            y_label: Some("Magnitude (dB)".to_string()),
+            title: Some("Window Function Comparison".to_string()),
+            ..Default::default()
+        };
 
         Ok(WindowComparisonPlot::new(
             frequencies,
@@ -1357,11 +1380,13 @@ where
             .map(|_| Complex::new(F::zero(), F::zero()))
             .collect();
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-        metadata.y_label = Some("Frequency (Hz)".to_string());
-        metadata.title = Some("Instantaneous Frequency".to_string());
-        metadata.legend_label = Some("Instantaneous Frequency".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some("Frequency (Hz)".to_string()),
+            title: Some("Instantaneous Frequency".to_string()),
+            legend_label: Some("Instantaneous Frequency".to_string()),
+            ..Default::default()
+        };
 
         Ok(InstantaneousFrequencyPlot::new(
             time_axis,
@@ -1562,11 +1587,11 @@ pub fn freq_plot<F: RealFloat, T: AudioSample>(
     // Instead of normalizing to ±1.0, preserve the actual sample values
     let amplitude_data: Vec<F> = data.into_iter().map(|x| to_precision::<F, _>(x)).collect();
     let style = style.unwrap_or_default();
-    let mut metadata = PlotMetadata::default();
-    metadata.x_label = Some("Time (s)".to_string());
-
-    // Set y-axis label based on sample type
-    metadata.y_label = Some(format!("Amplitude"));
+    let metadata = PlotMetadata {
+        x_label: Some("Time (s)".to_string()),
+        y_label: Some("Amplitude".to_string()),
+        ..Default::default()
+    };
 
     WaveformPlot::new(time_data, amplitude_data, style, metadata)
 }

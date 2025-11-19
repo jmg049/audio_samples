@@ -5,6 +5,7 @@
 
 use super::core::*;
 use super::elements::*;
+use crate::ParameterError;
 use crate::RealFloat;
 use crate::operations::types::WindowType;
 use crate::to_precision;
@@ -46,7 +47,7 @@ impl<F: RealFloat> PlotComposer<F> {
     }
 
     /// Set the layout configuration
-    pub fn with_layout(mut self, layout: LayoutConfig) -> Self {
+    pub const fn with_layout(mut self, layout: LayoutConfig) -> Self {
         self.layout = layout;
         self
     }
@@ -64,7 +65,7 @@ impl<F: RealFloat> PlotComposer<F> {
     }
 
     /// Set the output size
-    pub fn with_size(mut self, size: (u32, u32)) -> Self {
+    pub const fn with_size(mut self, size: (u32, u32)) -> Self {
         self.size = size;
         self
     }
@@ -84,16 +85,19 @@ impl<F: RealFloat> PlotComposer<F> {
         let plot = self.create_plotly_plot()?;
 
         // Convert plot to JSON for plotly_static
-        let plot_json =
-            serde_json::to_value(&plot).map_err(|e| crate::AudioSampleError::InvalidInput {
-                msg: format!("Failed to serialize plot for PNG export: {}", e),
-            })?;
+        let plot_json = serde_json::to_value(&plot).map_err(|e| {
+            crate::AudioSampleError::Parameter(ParameterError::invalid_value(
+                "plot_data",
+                format!("Failed to serialize plot for PNG export: {}", e),
+            ))
+        })?;
 
         // Create static exporter
         let mut exporter = StaticExporterBuilder::default().build().map_err(|e| {
-            crate::AudioSampleError::InvalidInput {
-                msg: format!("Failed to create static exporter: {}", e),
-            }
+            crate::AudioSampleError::Parameter(ParameterError::invalid_value(
+                "exporter",
+                format!("Failed to create static exporter: {}", e),
+            ))
         })?;
 
         // Export PNG directly to file
@@ -107,8 +111,11 @@ impl<F: RealFloat> PlotComposer<F> {
                 height as usize,
                 1.0,
             )
-            .map_err(|e| crate::AudioSampleError::InvalidInput {
-                msg: format!("Failed to export PNG: {}", e),
+            .map_err(|e| {
+                crate::AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "png_export",
+                    format!("Failed to export PNG: {}", e),
+                ))
             })?;
 
         Ok(())
@@ -121,16 +128,19 @@ impl<F: RealFloat> PlotComposer<F> {
         let plot = self.create_plotly_plot()?;
 
         // Convert plot to JSON for plotly_static
-        let plot_json =
-            serde_json::to_value(&plot).map_err(|e| crate::AudioSampleError::InvalidInput {
-                msg: format!("Failed to serialize plot for SVG export: {}", e),
-            })?;
+        let plot_json = serde_json::to_value(&plot).map_err(|e| {
+            crate::AudioSampleError::Parameter(ParameterError::invalid_value(
+                "plot_data",
+                format!("Failed to serialize plot for SVG export: {}", e),
+            ))
+        })?;
 
         // Create static exporter
         let mut exporter = StaticExporterBuilder::default().build().map_err(|e| {
-            crate::AudioSampleError::InvalidInput {
-                msg: format!("Failed to create static exporter: {}", e),
-            }
+            crate::AudioSampleError::Parameter(ParameterError::invalid_value(
+                "exporter",
+                format!("Failed to create static exporter: {}", e),
+            ))
         })?;
 
         // Export to SVG
@@ -142,13 +152,19 @@ impl<F: RealFloat> PlotComposer<F> {
                 height as usize,
                 1.0,
             )
-            .map_err(|e| crate::AudioSampleError::InvalidInput {
-                msg: format!("Failed to export SVG: {}", e),
+            .map_err(|e| {
+                crate::AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "svg_export",
+                    format!("Failed to export SVG: {}", e),
+                ))
             })?;
 
         // Write to file
-        std::fs::write(path, svg_data).map_err(|e| crate::AudioSampleError::InvalidInput {
-            msg: format!("Failed to write SVG file: {}", e),
+        std::fs::write(path, svg_data).map_err(|e| {
+            crate::AudioSampleError::Parameter(ParameterError::invalid_value(
+                "file_path",
+                format!("Failed to write SVG file: {}", e),
+            ))
         })?;
 
         Ok(())
@@ -156,7 +172,7 @@ impl<F: RealFloat> PlotComposer<F> {
 
     /// Render to a file - automatically detects format from extension
     pub fn render_to_file(&self, path: &str) -> PlotResult<()> {
-        let ext = path.split('.').last().unwrap_or("");
+        let ext = path.split('.').next_back().unwrap_or("");
 
         #[cfg(feature = "static-plots")]
         {
@@ -215,9 +231,9 @@ impl<F: RealFloat> PlotComposer<F> {
     /// Create a Plotly plot from the composed elements
     fn create_plotly_plot(&self) -> PlotResult<Plot> {
         if self.elements.is_empty() {
-            return Err(crate::AudioSampleError::InvalidInput {
-                msg: "No plot elements to render".to_string(),
-            });
+            return Err(crate::AudioSampleError::Parameter(
+                ParameterError::invalid_value("plot_elements", "No plot elements to render"),
+            ));
         }
 
         let mut plot = Plot::new();
@@ -228,9 +244,12 @@ impl<F: RealFloat> PlotComposer<F> {
             LayoutConfig::HorizontalStack => self.create_horizontal_stack_plot(&mut plot)?,
             LayoutConfig::Grid { rows, cols } => self.create_grid_plot(&mut plot, rows, cols)?,
             LayoutConfig::Custom(_) => {
-                return Err(crate::AudioSampleError::InvalidInput {
-                    msg: "Custom layouts not yet implemented".to_string(),
-                });
+                return Err(crate::AudioSampleError::Parameter(
+                    ParameterError::invalid_value(
+                        "layout_config",
+                        "Custom layouts not yet implemented",
+                    ),
+                ));
             }
         }
 
@@ -268,12 +287,24 @@ impl<F: RealFloat> PlotComposer<F> {
         }
         combined_bounds = combined_bounds.with_margin(to_precision::<F, _>(0.05));
         let x_axis_range = AxisRange::new(
-            combined_bounds.x_min.to_f64().unwrap(),
-            combined_bounds.x_max.to_f64().unwrap(),
+            combined_bounds
+                .x_min
+                .to_f64()
+                .expect("Float conversion should not fail"),
+            combined_bounds
+                .x_max
+                .to_f64()
+                .expect("Float conversion should not fail"),
         );
         let y_axis_range = AxisRange::new(
-            combined_bounds.y_min.to_f64().unwrap(),
-            combined_bounds.y_max.to_f64().unwrap(),
+            combined_bounds
+                .y_min
+                .to_f64()
+                .expect("Float conversion should not fail"),
+            combined_bounds
+                .y_max
+                .to_f64()
+                .expect("Float conversion should not fail"),
         );
         let x_axis = self.theme.create_axis("Time (s)").range(x_axis_range);
         let y_axis = self.theme.create_axis("Amplitude").range(y_axis_range);
@@ -322,7 +353,7 @@ impl<F: RealFloat> PlotComposer<F> {
                     .columns(1)
                     .pattern(GridPattern::Independent),
             )
-            .title(self.title.as_ref().map(|t| t.as_str()).unwrap_or(""))
+            .title(self.title.as_deref().unwrap_or(""))
             .width(self.size.0 as usize)
             .height(self.size.1 as usize);
 
@@ -384,15 +415,18 @@ impl<F: RealFloat> PlotComposer<F> {
 
         let max_subplots = rows * cols;
         if self.elements.len() > max_subplots {
-            return Err(crate::AudioSampleError::InvalidInput {
-                msg: format!(
-                    "Too many elements ({}) for grid layout ({}x{} = {} max)",
-                    self.elements.len(),
-                    rows,
-                    cols,
-                    max_subplots
+            return Err(crate::AudioSampleError::Parameter(
+                ParameterError::invalid_value(
+                    "grid_elements",
+                    format!(
+                        "Too many elements ({}) for grid layout ({}x{} = {} max)",
+                        self.elements.len(),
+                        rows,
+                        cols,
+                        max_subplots
+                    ),
                 ),
-            });
+            ));
         }
 
         // Sort elements by z-order
@@ -530,9 +564,11 @@ pub mod presets {
             style: LineStyleType::Solid,
         };
 
-        let mut metadata = PlotMetadata::default();
-        metadata.x_label = Some("Time (s)".to_string());
-        metadata.y_label = Some("Amplitude".to_string());
+        let metadata = PlotMetadata {
+            x_label: Some("Time (s)".to_string()),
+            y_label: Some("Amplitude".to_string()),
+            ..Default::default()
+        };
 
         (style, metadata)
     }

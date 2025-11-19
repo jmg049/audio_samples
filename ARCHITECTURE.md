@@ -1,6 +1,6 @@
 # AudioSamples Architecture
 
-This document provides detailed information on how the audio_samples crate is architected from its most fundamental building blocks up to the highest-level API. The architecture follows core principles of **type safety**, **zero-allocation efficiency**, **trait-based composition**, and **modular feature design**.
+This document provides detailed information on how the audio_samples crate is architected from its building blocks up to the highest-level API. The architecture follows core principles of **type safety**, **zero-allocation efficiency**, **trait-based composition**, and **modular feature design**.
 
 ## Core Design Principles
 
@@ -11,10 +11,11 @@ All audio data is strongly typed with the sample format (`i16`, `I24`, `i32`, `f
 ### 2. Zero-Allocation Efficiency
 
 The library leverages `ndarray`'s view system to enable zero-allocation access patterns wherever possible. Operations prefer in-place modifications and views over copying data.
+The library adds several wrappers, ``MonoRepr/MultiRepr`` and ``MonoData/MultiData``, around `ndarray` arrays to facilitate owned and borrowed data automatically. The end user should never have to deal with these wrappers. The top layer of the wrappers is the ``AudioSamples<'_, T: AudioSample>`` struct. This is the entry point for a user and the impl blocks for ``AudioSamples`` connect to the right backend wrapper.
 
 ### 3. Trait-Based Composition
 
-Functionality is organized into focused, composable traits rather than monolithic implementations. Each trait handles a specific aspect of audio processing with clear separation of concerns.
+Functionality is organized into focused, composable traits rather than monolithic implementations. Each trait handles a specific aspect of audio processing with clear separation of concerns. Traits also allow for easy feature-gating.
 
 ### 4. Metadata Integration
 
@@ -33,7 +34,7 @@ The `AudioSample` trait is the foundation of the entire type system. It defines 
 **Supported Types:**
 
 - `i16`: 16-bit signed integer samples (most common for audio files)
-- `I24`: 24-bit signed integer samples (professional audio)
+- `I24`: 24-bit signed integer samples (professional audio) -- **Always use the re-export of ``I24`` from the crate.**
 - `i32`: 32-bit signed integer samples (high precision)
 - `f32`: 32-bit floating-point samples (normalized -1.0 to 1.0)
 - `f64`: 64-bit floating-point samples (highest precision)
@@ -66,7 +67,7 @@ The `ConvertTo<T>` trait provides audio-aware conversions between different samp
 **Design Patterns:**
 
 - Returns `AudioSampleResult<T>` to handle conversion failures
-- Uses macro-generated implementations for consistency
+- Uses macro-generated implementations for consistency and to cut down on manual code.
 - Maintains mathematical precision across format boundaries
 - Handles edge cases like range overflows gracefully
 
@@ -88,18 +89,17 @@ The casting trait family provides raw numeric conversions without audio-specific
 
 **Design Patterns:**
 
-Sometimes you just need to cast an int to a float.
+Sometimes you just need to cast an int to a float and back again. These traits **DO NOT** perform any audio-specific scaling/conversions.
 
 - `CastFrom<S>`: Cast from source type to Self
 - `CastInto<T>`: Cast self into target type
 - `Castable`: Marker trait for types that can cast to all audio formats
 
-
 **API Contracts:**
 
 - Casting preserves numeric values without audio scaling
 - Out-of-range values are clamped to target type's limits
-- No error handling - assumes well-formed input
+- No error handling - assumes well-formed input. If something like this fails then things are bad.
 
 ### AudioSamples<'_, T: AudioSample> (repr.rs)
 
@@ -124,13 +124,13 @@ pub struct AudioSamples<'a, T: AudioSample> {
 
 - Mono audio: 1D arrays via `MonoData<'a, T>`
 - Multi-channel audio: 2D arrays via `MultiData<'a, T>` with channels as rows
-- Both support borrowed (`ArrayView`) and owned (`Array`) data
+- Both support borrowed and owned data
 
 **API Contracts:**
 
 - Sample rate must be positive
 - Channel layout must match data dimensions
-- Lifetime safety ensured through Rust's borrow checker
+- Lifetime safety ensured through Rust's borrow checker. But at the user level of the API, unless they are really concerned with lifetime management and reuse in their program, lifetimes should not be a concern.
 - Metadata consistency maintained across operations
 
 ### AudioSamples Iteration (iterators.rs)
@@ -159,7 +159,7 @@ Provides multiple iteration patterns for efficient audio processing:
 
 ### AudioSamples Conversion (conversions.rs)
 
-Implements the `AudioTypeConversion` trait for safe type transformations:
+Implements the `AudioTypeConversion` trait for safe type transformations on ``AudioSamples``:
 
 **In-Domain Conversions:**
 
@@ -188,6 +188,8 @@ Provides supporting functionality organized by purpose:
 - `detection.rs`: Feature detection algorithms
 - `comparison.rs`: Audio comparison and similarity metrics
 
+In future, this may become a more general ``algorithms`` module.
+
 **Design Patterns:**
 
 - Pure functions where possible
@@ -214,6 +216,8 @@ pub enum AudioSampleError {
     InternalError(String),
 }
 ```
+
+Needs reviewing though. Consistency in the error messages would be nice and maybe split things into more granular errors.
 
 **Error Handling Strategy:**
 
@@ -351,7 +355,6 @@ let combined = audio1.concatenate(&audio2)?;   // Join audio
 - `pad()`: Add silence or repeat edge samples
 - `reverse()`: Reverse audio timeline
 - `concatenate()`: Join multiple audio clips
-- `insert_silence()`: Add silence at specific points
 - `repeat()`: Loop audio content
 
 **API Contracts**:
@@ -378,7 +381,8 @@ let extracted = multi_audio.extract_channel(0)?;
 
 - `to_mono()`: Multiple mono conversion strategies
 - `to_stereo()`: Stereo expansion from mono
-- `extract_channel()`: Extract specific channels
+- `extract_channel()`: Extract a specific channel. allocates a new ``AudioSamples`` for the extracted channel
+- `borrow_channel()`: Borrows a specific channel. Does not allocate a new ``AudioSamples`` for the extracted channel, it just borrows the data.
 - `mix_channels()`: Custom channel mixing
 - `swap_channels()`: Channel reordering
 
@@ -398,14 +402,12 @@ let extracted = multi_audio.extract_channel(0)?;
 ```rust
 let filtered = audio.lowpass_filter(cutoff_hz, q_factor)?;
 let shaped = audio.highpass_filter(cutoff_hz, q_factor)?;
-let custom = audio.biquad_filter(coefficients)?;
 ```
 
 **Filter Types**:
 
 - `lowpass_filter()`, `highpass_filter()`: Basic frequency separation
 - `bandpass_filter()`, `bandstop_filter()`: Band-limited filtering
-- `biquad_filter()`: Custom biquad coefficients
 - `butterworth_filter()`: Smooth response filters
 
 #### `AudioParametricEq` (parametric_eq.rs)
@@ -467,7 +469,6 @@ let limited = audio.limiter(LimiterConfig::new(-1.0, 0.001, 0.05))?;
 
 ```rust
 let resampled = audio.resample(48000, ResamplingQuality::VeryHigh)?;
-let converted = audio.resample_to_target_rate(target_audio.sample_rate())?;
 ```
 
 **Quality Levels**:
@@ -532,55 +533,6 @@ let plot = PlotComposer::new()
 - Thread-safe plot composition
 - Graceful fallbacks for missing features
 
-### SIMD Conversions (simd_conversions.rs)
-
-**Purpose**: Vectorized high-performance sample format conversions (requires `simd`).
-
-**Optimization Strategy**:
-
-- Process 8 samples simultaneously using AVX2 instructions
-- Automatic fallback to scalar operations for remainder samples
-- Platform-specific optimizations with consistent API
-
-**Key Functions**:
-
-```rust
-convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSampleResult<()>
-convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSampleResult<()>
-```
-
-**Performance Benefits**:
-
-- Up to 8x speedup for bulk conversions
-- Maintains numerical precision of scalar operations
-- Zero-allocation implementation
-- Automatic SIMD capability detection
-
-### Realtime (realtime.rs)
-
-**Purpose**: Real-time audio processing capabilities with low-latency guarantees.
-
-**Key Features**:
-
-- Lock-free data structures for audio threading
-- Configurable buffer sizes for latency control
-- Real-time safe memory allocation patterns
-- Integration with real-time audio frameworks
-
-**Core Types**:
-
-- `RealtimeProcessor`: Non-blocking audio processing
-- `AudioBuffer`: Circular buffer for streaming
-- `LatencyMeasurement`: Performance monitoring
-- `ProcessingCallback`: User-defined processing functions
-
-**Design Patterns**:
-
-- No heap allocation in audio callback
-- Pre-allocated buffer pools
-- Atomic operations for thread communication
-- Graceful degradation under load
-
 ## API Design Contracts
 
 ### Error Handling Strategy
@@ -592,7 +544,7 @@ convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSampleResult<
 
 ### Memory Management
 
-1. **Zero-allocation views**: Use `ArrayView` for read-only access
+1. **Zero-allocation views**: Borrow AudioSamples when possible
 2. **In-place operations**: Prefer modification over copying
 3. **Owned data when needed**: Automatic conversion from borrowed to owned
 4. **Memory safety**: Rust's ownership system prevents data races
@@ -610,5 +562,3 @@ convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSampleResult<
 2. **SIMD optimization**: Automatic vectorization where beneficial
 3. **Cache efficiency**: ndarray layouts optimized for memory access
 4. **Scalable algorithms**: Linear complexity for core operations
-
-This architecture provides a foundation for high-performance, type-safe audio processing while maintaining ergonomic APIs and flexible feature composition.

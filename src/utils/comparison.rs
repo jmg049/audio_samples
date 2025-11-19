@@ -5,7 +5,7 @@
 
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24,
+    I24, LayoutError, ParameterError, RealFloat, repr::MultiData, to_precision,
 };
 use ndarray::{Array1, ArrayView1};
 
@@ -21,72 +21,74 @@ use ndarray::{Array1, ArrayView1};
 /// * `b` - Second audio signal
 ///
 /// # Returns
-/// Correlation coefficient as f64
+/// to_precision::<F, _>(Correlation coefficient)
 ///
 /// # Errors
 /// Returns an error if the signals have different lengths or channels.
-pub fn correlation<T: AudioSample>(
-    a: &AudioSamples<T>,
-    b: &AudioSamples<T>,
-) -> AudioSampleResult<f64>
+pub fn correlation<T, F>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<F>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    F: RealFloat + ConvertTo<T>,
+    T: AudioSample + ConvertTo<F>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Signals must have the same dimensions for correlation".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_signals",
+            "Signals must have the same dimensions for correlation",
+        )));
     }
 
-    let a_f64 = a.as_f64()?;
-    let b_f64 = b.as_f64()?;
+    let a_f = a.as_float()?;
+    let b_f = b.as_float()?;
 
-    match (a_f64.as_mono(), b_f64.as_mono()) {
+    match (a_f.as_mono(), b_f.as_mono()) {
         (Some(a_mono), Some(b_mono)) => {
             let corr = correlation_1d(&a_mono.view(), &b_mono.view())?;
             Ok(corr)
         }
-        (Some(_), None) | (None, Some(_)) => Err(AudioSampleError::InvalidParameter(
-            "Signals must have the same channel configuration".to_string(),
-        )),
+        (Some(_), None) | (None, Some(_)) => {
+            Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Signals must have the same channel configuration",
+            )))
+        }
         (None, None) => {
             // Multi-channel correlation - compute average correlation across channels
-            let a_multi = a_f64
-                .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
-            let b_multi = b_f64
-                .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
+            let a_multi = a_f.as_multi_channel().ok_or(AudioSampleError::Parameter(
+                ParameterError::invalid_value("audio_format", "Must be multi-channel audio"),
+            ))?;
+            let b_multi = b_f.as_multi_channel().ok_or(AudioSampleError::Parameter(
+                ParameterError::invalid_value("audio_format", "Must be multi-channel audio"),
+            ))?;
 
             let mut correlations = Vec::new();
             for i in 0..a_multi.nrows() {
                 let a_channel = a_multi.row(i);
                 let b_channel = b_multi.row(i);
                 let corr = correlation_1d_slice(
-                    a_channel
-                        .as_slice()
-                        .ok_or(AudioSampleError::ArrayLayoutError {
-                            message: "Multi-channel samples must be contiguous".to_string(),
-                        })?,
-                    b_channel
-                        .as_slice()
-                        .ok_or(AudioSampleError::ArrayLayoutError {
-                            message: "Multi-channel samples must be contiguous".to_string(),
-                        })?,
+                    a_channel.as_slice().ok_or(AudioSampleError::Layout(
+                        LayoutError::NonContiguous {
+                            operation: "signal processing".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        },
+                    ))?,
+                    b_channel.as_slice().ok_or(AudioSampleError::Layout(
+                        LayoutError::NonContiguous {
+                            operation: "signal processing".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        },
+                    ))?,
                 )?;
                 correlations.push(corr);
             }
 
-            Ok(correlations.iter().sum::<f64>() / correlations.len() as f64)
+            Ok(correlations.iter().fold(F::zero(), |acc, x| acc + *x)
+                / to_precision::<F, _>(correlations.len()))
         }
     }
 }
@@ -101,63 +103,67 @@ where
 /// * `b` - Second audio signal
 ///
 /// # Returns
-/// MSE value as f64
-pub fn mse<T: AudioSample>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<f64>
+/// to_precision::<F, _>(MSE value)
+pub fn mse<T, F>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<F>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    F: RealFloat + ConvertTo<T>,
+    T: AudioSample + ConvertTo<F>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Signals must have the same dimensions for MSE".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_signals",
+            "Signals must have the same dimensions for MSE",
+        )));
     }
 
-    let a_f64 = a.as_f64()?;
-    let b_f64 = b.as_f64()?;
+    let a_f = a.as_float()?;
+    let b_f = b.as_float()?;
 
-    match (a_f64.as_mono(), b_f64.as_mono()) {
+    match (a_f.as_mono(), b_f.as_mono()) {
         (Some(a_mono), Some(b_mono)) => mse_1d(&a_mono.view(), &b_mono.view()),
-        (Some(_), None) | (None, Some(_)) => Err(AudioSampleError::InvalidParameter(
-            "Signals must have the same channel configuration".to_string(),
-        )),
+        (Some(_), None) | (None, Some(_)) => {
+            Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Signals must have the same channel configuration",
+            )))
+        }
         (None, None) => {
             // Multi-channel MSE - compute average MSE across channels
-            let a_multi = a_f64
-                .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
-            let b_multi = b_f64
-                .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
+            let a_multi = a_f.as_multi_channel().ok_or(AudioSampleError::Parameter(
+                ParameterError::invalid_value("audio_format", "Must be multi-channel audio"),
+            ))?;
+            let b_multi = b_f.as_multi_channel().ok_or(AudioSampleError::Parameter(
+                ParameterError::invalid_value("audio_format", "Must be multi-channel audio"),
+            ))?;
 
             let mut mses = Vec::new();
             for i in 0..a_multi.nrows() {
                 let a_channel = a_multi.row(i);
                 let b_channel = b_multi.row(i);
                 let mse = mse_1d_slice(
-                    a_channel
-                        .as_slice()
-                        .ok_or(AudioSampleError::ArrayLayoutError {
-                            message: "Multi-channel samples must be contiguous".to_string(),
-                        })?,
-                    b_channel
-                        .as_slice()
-                        .ok_or(AudioSampleError::ArrayLayoutError {
-                            message: "Multi-channel samples must be contiguous".to_string(),
-                        })?,
+                    a_channel.as_slice().ok_or(AudioSampleError::Layout(
+                        LayoutError::NonContiguous {
+                            operation: "signal processing".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        },
+                    ))?,
+                    b_channel.as_slice().ok_or(AudioSampleError::Layout(
+                        LayoutError::NonContiguous {
+                            operation: "signal processing".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        },
+                    ))?,
                 )?;
                 mses.push(mse);
             }
 
-            Ok(mses.iter().sum::<f64>() / mses.len() as f64)
+            Ok(mses.iter().fold(F::zero(), |acc, x| acc + *x) / to_precision::<F, _>(mses.len()))
         }
     }
 }
@@ -173,60 +179,81 @@ where
 ///
 /// # Returns
 /// SNR value in dB
-pub fn snr<T: AudioSample>(
-    signal: &AudioSamples<T>,
-    noise: &AudioSamples<T>,
-) -> AudioSampleResult<f64>
+pub fn snr<T, F>(signal: &AudioSamples<T>, noise: &AudioSamples<T>) -> AudioSampleResult<F>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    F: RealFloat + ConvertTo<T>,
+    T: AudioSample + ConvertTo<F>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     if signal.num_channels() != noise.num_channels()
         || signal.samples_per_channel() != noise.samples_per_channel()
     {
-        return Err(AudioSampleError::InvalidParameter(
-            "Signal and noise must have the same dimensions for SNR".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_signals",
+            "Signal and noise must have the same dimensions for SNR",
+        )));
     }
 
-    let signal_f64 = signal.as_f64()?;
-    let noise_f64 = noise.as_f64()?;
+    let signal_f = signal.as_float()?;
+    let noise_f: AudioSamples<'static, F> = noise.as_float()?;
 
     // Calculate signal power
-    let signal_power = match signal_f64.as_mono() {
-        Some(mono) => mono.iter().map(|&x| x * x).sum::<f64>() / mono.len() as f64,
+    let signal_power = match signal_f.as_mono() {
+        Some(mono) => {
+            mono.iter()
+                .map(|&x| x * x)
+                .fold(F::zero(), |acc, x| acc + x)
+                / to_precision::<F, _>(mono.len())
+        }
         None => {
-            let multi = signal_f64
-                .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
-            multi.iter().map(|&x| x * x).sum::<f64>() / multi.len() as f64
+            let multi: &MultiData<'static, F> =
+                signal_f
+                    .as_multi_channel()
+                    .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "audio_format",
+                        "Must be multi-channel audio",
+                    )))?;
+            multi
+                .iter()
+                .map(|&x| x * x)
+                .fold(F::zero(), |acc, x| acc + x)
+                / to_precision::<F, _>(multi.len())
         }
     };
 
     // Calculate noise power
-    let noise_power = match noise_f64.as_mono() {
-        Some(mono) => mono.iter().map(|&x| x * x).sum::<f64>() / mono.len() as f64,
+    let noise_power = match noise_f.as_mono() {
+        Some(mono) => {
+            mono.iter()
+                .map(|x| *x * *x)
+                .fold(F::zero(), |acc, x| acc + x)
+                / to_precision::<F, _>(mono.len())
+        }
         None => {
-            let multi = noise_f64
+            let multi = noise_f
                 .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
-            multi.iter().map(|&x| x * x).sum::<f64>() / multi.len() as f64
+                .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Must be multi-channel audio",
+                )))?;
+            multi
+                .iter()
+                .map(|&x| x * x)
+                .fold(F::zero(), |acc, x| acc + x)
+                / to_precision::<F, _>(multi.len())
         }
     };
 
-    if noise_power == 0.0 {
-        return Ok(f64::INFINITY);
+    if noise_power == F::zero() {
+        return Ok(F::infinity());
     }
 
-    let snr_db = 10.0 * (signal_power / noise_power).log10();
+    let snr_db = to_precision::<F, _>(10.0) * (signal_power / noise_power).log10();
     Ok(snr_db)
 }
 
@@ -242,7 +269,7 @@ where
 /// # Returns
 /// A tuple of (aligned_signal, offset_samples) where offset_samples is the
 /// number of samples by which the signal was shifted.
-pub fn align_signals<T: AudioSample>(
+pub fn align_signals<T, F>(
     reference: &AudioSamples<'_, T>,
     signal: &AudioSamples<'_, T>,
 ) -> AudioSampleResult<(AudioSamples<'static, T>, usize)>
@@ -252,55 +279,67 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    F: RealFloat + ConvertTo<T>,
+    T: AudioSample + ConvertTo<F>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     if reference.num_channels() != signal.num_channels() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Signals must have the same number of channels for alignment".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_channels",
+            "Signals must have the same number of channels for alignment",
+        )));
     }
 
     let sample_rate = signal.sample_rate();
-    let ref_f64 = reference.as_f64()?;
-    let sig_f64 = signal.as_f64()?;
+    let ref_f = reference.as_float()?;
+    let sig_f = signal.as_float()?;
 
     // For simplicity, we'll work with the first channel for mono or the average for multi-channel
-    let (ref_data, sig_data) = match (ref_f64.as_mono(), sig_f64.as_mono()) {
+    let (ref_data, sig_data) = match (ref_f.as_mono(), sig_f.as_mono()) {
         (Some(ref_mono), Some(sig_mono)) => (ref_mono.to_vec(), sig_mono.to_vec()),
         (None, None) => {
             // Average across channels for multi-channel signals
-            let ref_multi = ref_f64
-                .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
-            let sig_multi = sig_f64
-                .as_multi_channel()
-                .ok_or(AudioSampleError::InvalidInput {
-                    msg: "Must be multi-channel audio".to_string(),
-                })?;
+            let ref_multi = ref_f.as_multi_channel().ok_or(AudioSampleError::Parameter(
+                ParameterError::invalid_value("audio_format", "Must be multi-channel audio"),
+            ))?;
+            let sig_multi = sig_f.as_multi_channel().ok_or(AudioSampleError::Parameter(
+                ParameterError::invalid_value("audio_format", "Must be multi-channel audio"),
+            ))?;
 
-            let ref_avg: Vec<f64> = (0..ref_multi.ncols())
-                .map(|i| ref_multi.column(i).iter().sum::<f64>() / ref_multi.nrows() as f64)
+            let ref_avg: Vec<F> = (0..ref_multi.ncols())
+                .map(|i| {
+                    ref_multi
+                        .column(i)
+                        .iter()
+                        .fold(F::zero(), |acc, x| acc + *x)
+                        / to_precision::<F, _>(ref_multi.nrows())
+                })
                 .collect();
 
-            let sig_avg: Vec<f64> = (0..sig_multi.ncols())
-                .map(|i| sig_multi.column(i).iter().sum::<f64>() / sig_multi.nrows() as f64)
+            let sig_avg: Vec<F> = (0..sig_multi.ncols())
+                .map(|i| {
+                    sig_multi
+                        .column(i)
+                        .iter()
+                        .fold(F::zero(), |acc, x| acc + *x)
+                        / to_precision::<F, _>(sig_multi.nrows())
+                })
                 .collect();
 
             (ref_avg, sig_avg)
         }
         _ => {
-            return Err(AudioSampleError::InvalidParameter(
-                "Signals must have the same channel configuration".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Signals must have the same channel configuration",
+            )));
         }
     };
 
     // Find the best alignment using cross-correlation
     let max_offset = ref_data.len().min(sig_data.len()) / 2;
     let mut best_offset = 0;
-    let mut best_correlation = f64::NEG_INFINITY;
+    let mut best_correlation = F::neg_infinity();
 
     for offset in 0..max_offset {
         let correlation = if offset < sig_data.len() {
@@ -310,7 +349,7 @@ where
                 &sig_data[offset..offset + end],
             )?
         } else {
-            0.0
+            F::zero()
         };
 
         if correlation > best_correlation {
@@ -325,29 +364,33 @@ where
             Some(mono) => {
                 let mut aligned_data = vec![T::default(); best_offset];
                 aligned_data.extend_from_slice(
-                    &mono.as_slice().ok_or(AudioSampleError::ArrayLayoutError {
-                        message: "Mono samples must be contiguous".to_string(),
-                    })?[..mono.len() - best_offset],
+                    &mono.as_slice().ok_or(AudioSampleError::Layout(
+                        LayoutError::NonContiguous {
+                            operation: "signal alignment".to_string(),
+                            layout_type: "non-contiguous mono samples".to_string(),
+                        },
+                    ))?[..mono.len() - best_offset],
                 );
                 let aligned_array = Array1::from_vec(aligned_data);
-                AudioSamples::new_mono(aligned_array.into(), sample_rate)
+                AudioSamples::new_mono(aligned_array, sample_rate)
             }
             None => {
                 let multi = signal
                     .as_multi_channel()
-                    .ok_or(AudioSampleError::InvalidInput {
-                        msg: "Must be multi-channel audio".to_string(),
-                    })?;
+                    .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "audio_format",
+                        "Must be multi-channel audio",
+                    )))?;
                 let mut aligned_data = Vec::new();
                 for i in 0..multi.nrows() {
                     let mut row = vec![T::default(); best_offset];
                     row.extend_from_slice(
-                        &multi
-                            .row(i)
-                            .as_slice()
-                            .ok_or(AudioSampleError::ArrayLayoutError {
-                                message: "Multi-channel samples must be contiguous".to_string(),
-                            })?[..multi.ncols() - best_offset],
+                        &multi.row(i).as_slice().ok_or(AudioSampleError::Layout(
+                            LayoutError::NonContiguous {
+                                operation: "signal alignment".to_string(),
+                                layout_type: "non-contiguous multi-channel samples".to_string(),
+                            },
+                        ))?[..multi.ncols() - best_offset],
                     );
                     aligned_data.push(row);
                 }
@@ -356,9 +399,12 @@ where
                     aligned_data.into_iter().flatten().collect(),
                 )
                 .map_err(|e| {
-                    AudioSampleError::InvalidParameter(format!("Array shape error: {}", e))
+                    AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "array_shape",
+                        format!("Array shape error: {}", e),
+                    ))
                 })?;
-                AudioSamples::new_multi_channel(aligned_array.into(), sample_rate)
+                AudioSamples::new_multi_channel(aligned_array, sample_rate)
             }
         }
     } else {
@@ -369,31 +415,36 @@ where
 }
 
 // Helper functions for 1D correlation and MSE
-fn correlation_1d(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> AudioSampleResult<f64> {
+fn correlation_1d<F: RealFloat>(a: &ArrayView1<F>, b: &ArrayView1<F>) -> AudioSampleResult<F> {
     correlation_1d_slice(
-        a.as_slice().ok_or(AudioSampleError::ArrayLayoutError {
-            message: "Mono samples must be contiguous".to_string(),
-        })?,
-        b.as_slice().ok_or(AudioSampleError::ArrayLayoutError {
-            message: "Mono samples must be contiguous".to_string(),
-        })?,
+        a.as_slice()
+            .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "correlation calculation".to_string(),
+                layout_type: "non-contiguous mono samples".to_string(),
+            }))?,
+        b.as_slice()
+            .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "correlation calculation".to_string(),
+                layout_type: "non-contiguous mono samples".to_string(),
+            }))?,
     )
 }
 
-fn correlation_1d_slice(a: &[f64], b: &[f64]) -> AudioSampleResult<f64> {
+fn correlation_1d_slice<F: RealFloat>(a: &[F], b: &[F]) -> AudioSampleResult<F> {
     if a.len() != b.len() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Arrays must have the same length for correlation".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "array_length",
+            "Arrays must have the same length for correlation",
+        )));
     }
 
-    let n = a.len() as f64;
-    let mean_a = a.iter().sum::<f64>() / n;
-    let mean_b = b.iter().sum::<f64>() / n;
+    let n = to_precision::<F, _>(a.len());
+    let mean_a = a.iter().fold(F::zero(), |acc, x| acc + *x) / n;
+    let mean_b = b.iter().fold(F::zero(), |acc, x| acc + *x) / n;
 
-    let mut num = 0.0;
-    let mut den_a = 0.0;
-    let mut den_b = 0.0;
+    let mut num = F::zero();
+    let mut den_a = F::zero();
+    let mut den_b = F::zero();
 
     for (&x, &y) in a.iter().zip(b.iter()) {
         let dx = x - mean_a;
@@ -404,43 +455,45 @@ fn correlation_1d_slice(a: &[f64], b: &[f64]) -> AudioSampleResult<f64> {
     }
 
     let denominator = (den_a * den_b).sqrt();
-    if denominator == 0.0 {
-        Ok(0.0)
+    if denominator == F::zero() {
+        Ok(F::zero())
     } else {
         Ok(num / denominator)
     }
 }
 
-fn mse_1d(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> AudioSampleResult<f64> {
+fn mse_1d<F: RealFloat>(a: &ArrayView1<F>, b: &ArrayView1<F>) -> AudioSampleResult<F> {
     if a.len() != b.len() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Arrays must have the same length for MSE".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "array_length",
+            "Arrays must have the same length for MSE",
+        )));
     }
 
-    let n = a.len() as f64;
-    let sum_squared_diff: f64 = a
+    let n = to_precision::<F, _>(a.len());
+    let sum_squared_diff: F = a
         .iter()
         .zip(b.iter())
         .map(|(&x, &y)| (x - y) * (x - y))
-        .sum();
+        .fold(F::zero(), |acc, val| acc + val);
 
     Ok(sum_squared_diff / n)
 }
 
-fn mse_1d_slice(a: &[f64], b: &[f64]) -> AudioSampleResult<f64> {
+fn mse_1d_slice<F: RealFloat>(a: &[F], b: &[F]) -> AudioSampleResult<F> {
     if a.len() != b.len() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Arrays must have the same length for MSE".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "array_length",
+            "Arrays must have the same length for MSE",
+        )));
     }
-    let n = a.len() as f64;
+    let n = to_precision::<F, _>(a.len());
 
-    let sum_squared_diff: f64 = a
+    let sum_squared_diff: F = a
         .iter()
         .zip(b.iter())
         .map(|(&x, &y)| (x - y) * (x - y))
-        .sum::<f64>()
+        .fold(F::zero(), |acc, val| acc + val)
         / n;
 
     Ok(sum_squared_diff)
@@ -480,7 +533,7 @@ mod tests {
         let audio2 = AudioSamples::new_mono(data, 44100);
 
         let mse_val = mse(&audio1, &audio2).unwrap();
-        assert_approx_eq!(mse_val, 0.0, 1e-10);
+        assert_approx_eq!(mse_val, 0.0_f64, 1e-10);
     }
 
     #[test]
@@ -490,8 +543,8 @@ mod tests {
         let signal = AudioSamples::new_mono(signal_data, 44100);
         let noise = AudioSamples::new_mono(noise_data, 44100);
 
-        let snr_val = snr(&signal, &noise).unwrap();
-        assert!(snr_val > 0.0); // Signal should have higher power than noise
+        let snr_val: f64 = snr(&signal, &noise).unwrap();
+        assert!(snr_val > 0.0_f64); // Signal should have higher power than noise
     }
 
     #[test]
@@ -500,7 +553,7 @@ mod tests {
         let reference = AudioSamples::new_mono(data.clone(), 44100);
         let signal = AudioSamples::new_mono(data, 44100);
 
-        let (aligned, offset) = align_signals(&reference, &signal).unwrap();
+        let (aligned, offset) = align_signals::<f32, f64>(&reference, &signal).unwrap();
         assert_eq!(offset, 0);
         assert_eq!(aligned.samples_per_channel(), signal.samples_per_channel());
     }
