@@ -126,66 +126,75 @@ pub use comparison::*;
 pub use detection::*;
 pub use generation::*;
 
-use crate::{AudioSample, AudioSampleError, AudioSampleResult, I24, RealFloat, to_precision};
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, I24, ParameterError, RealFloat, to_precision,
+};
 
 /// Converts a byte slice into a single audio sample of type T.
 pub fn audio_sample_from_bytes<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<T> {
     let sample_size = std::mem::size_of::<T>();
     if bytes.len() != sample_size {
-        return Err(AudioSampleError::InvalidInput {
-            msg: format!(
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "input",
+            format!(
                 "Data length {} does not match sample size {}",
                 bytes.len(),
                 sample_size
             ),
-        });
+        )));
     }
 
     match sample_size {
         1 => {
-            let array: [u8; 1] = bytes
-                .try_into()
-                .map_err(|_| AudioSampleError::InvalidInput {
-                    msg: "Failed to convert bytes to array".to_string(),
-                })?;
+            let array: [u8; 1] = bytes.try_into().map_err(|_| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "input",
+                    "Failed to convert bytes to array",
+                ))
+            })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
         2 => {
-            let array: [u8; 2] = bytes
-                .try_into()
-                .map_err(|_| AudioSampleError::InvalidInput {
-                    msg: "Failed to convert bytes to array".to_string(),
-                })?;
+            let array: [u8; 2] = bytes.try_into().map_err(|_| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "input",
+                    "Failed to convert bytes to array",
+                ))
+            })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
         3 => {
-            let array: [u8; 3] = bytes
-                .try_into()
-                .map_err(|_| AudioSampleError::InvalidInput {
-                    msg: "Failed to convert bytes to array".to_string(),
-                })?;
+            let array: [u8; 3] = bytes.try_into().map_err(|_| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "input",
+                    "Failed to convert bytes to array",
+                ))
+            })?;
             let i24 = I24::from_le_bytes(array);
             Ok(T::cast_from(i24))
         }
         4 => {
-            let array: [u8; 4] = bytes
-                .try_into()
-                .map_err(|_| AudioSampleError::InvalidInput {
-                    msg: "Failed to convert bytes to array".to_string(),
-                })?;
+            let array: [u8; 4] = bytes.try_into().map_err(|_| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "input",
+                    "Failed to convert bytes to array",
+                ))
+            })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
         8 => {
-            let array: [u8; 8] = bytes
-                .try_into()
-                .map_err(|_| AudioSampleError::InvalidInput {
-                    msg: "Failed to convert bytes to array".to_string(),
-                })?;
+            let array: [u8; 8] = bytes.try_into().map_err(|_| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "input",
+                    "Failed to convert bytes to array",
+                ))
+            })?;
             Ok(unsafe { std::mem::transmute_copy(&array) })
         }
-        _ => Err(AudioSampleError::InvalidInput {
-            msg: format!("Unsupported sample size: {}", sample_size),
-        }),
+        _ => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "input",
+            format!("Unsupported sample size: {}", sample_size),
+        ))),
     }
 }
 
@@ -193,9 +202,10 @@ pub fn audio_sample_from_bytes<T: AudioSample>(bytes: &[u8]) -> AudioSampleResul
 pub fn bytes_to_samples_aligned<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<Vec<T>> {
     let sample_size = std::mem::size_of::<T>();
     if !bytes.len().is_multiple_of(sample_size) {
-        return Err(AudioSampleError::InvalidInput {
-            msg: "Data size is not a multiple of sample size".to_string(),
-        });
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "input",
+            "Data size is not a multiple of sample size",
+        )));
     }
 
     let samples = if T::BITS != 24 {
@@ -225,10 +235,12 @@ pub fn bytes_to_samples_aligned<T: AudioSample>(bytes: &[u8]) -> AudioSampleResu
         }
     } else {
         // Handle I24 case
-        let i24_samples =
-            I24::read_i24s_le_slice(bytes).ok_or_else(|| AudioSampleError::InvalidInput {
-                msg: "Invalid I24 data alignment or size".to_string(),
-            })?;
+        let i24_samples = I24::read_i24s_le_slice(bytes).ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "input",
+                "Invalid I24 data alignment or size",
+            ))
+        })?;
 
         let mut result = Vec::<T>::with_capacity(i24_samples.len());
         for i24_sample in i24_samples {
@@ -255,9 +267,10 @@ pub fn bytes_to_samples_aligned<T: AudioSample>(bytes: &[u8]) -> AudioSampleResu
 pub unsafe fn bytes_to_samples_unchecked<T: AudioSample>(bytes: &[u8]) -> AudioSampleResult<&[T]> {
     let sample_size = std::mem::size_of::<T>();
     if !bytes.len().is_multiple_of(sample_size) {
-        return Err(AudioSampleError::InvalidInput {
-            msg: "Data size is not a multiple of sample size".to_string(),
-        });
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "input",
+            "Data size is not a multiple of sample size",
+        )));
     }
 
     let slice = if T::BITS != 24 {
@@ -267,21 +280,24 @@ pub unsafe fn bytes_to_samples_unchecked<T: AudioSample>(bytes: &[u8]) -> AudioS
 
         // Check alignment before proceeding
         if !(ptr as usize).is_multiple_of(alignment) {
-            return Err(AudioSampleError::InvalidInput {
-                msg: format!(
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "data_alignment",
+                format!(
                     "Data is not properly aligned for type {} (requires {}-byte alignment)",
                     std::any::type_name::<T>(),
                     alignment
                 ),
-            });
+            )));
         }
 
         unsafe { std::slice::from_raw_parts(ptr as *const T, num_samples) }
     } else {
-        let samples =
-            I24::read_i24s_le_slice(bytes).ok_or_else(|| AudioSampleError::InvalidInput {
-                msg: "Invalid I24 data alignment or size".to_string(),
-            })?;
+        let samples = I24::read_i24s_le_slice(bytes).ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "input",
+                "Invalid I24 data alignment or size",
+            ))
+        })?;
 
         // For I24, we can safely cast since I24 has the same memory layout
         let num_samples = samples.len();
@@ -311,6 +327,7 @@ pub fn seconds_to_samples<F: RealFloat>(seconds: F, sample_rate: u32) -> usize {
         .expect("Invalid sample rate")
 }
 
+/// Converts a number of samples to duration in seconds.
 pub fn samples_to_seconds<F: RealFloat>(num_samples: usize, sample_rate: u32) -> F {
     to_precision::<F, _>(num_samples) / to_precision::<F, _>(sample_rate)
 }

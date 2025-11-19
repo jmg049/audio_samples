@@ -10,7 +10,7 @@ use crate::operations::types::{SpectrogramScale, WindowType};
 use crate::repr::AudioData;
 use crate::{
     AudioEditing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    AudioTypeConversion, ConvertTo, I24, RealFloat, to_precision,
+    AudioTypeConversion, ConvertTo, I24, LayoutError, ParameterError, RealFloat, to_precision,
 };
 
 use lazy_static::lazy_static;
@@ -83,7 +83,7 @@ where
                     .iter()
                     .map(|&x| {
                         let x_converted: F = x.convert_to()?;
-                        Ok(Complex::new(x_converted, F::zero()))
+                        Ok::<Complex<F>, AudioSampleError>(Complex::new(x_converted, F::zero()))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 // Create FFT planner and plan
@@ -102,7 +102,7 @@ where
                     .iter()
                     .map(|&x| {
                         let x_converted: F = x.convert_to()?;
-                        Ok(Complex::new(x_converted, F::zero()))
+                        Ok::<Complex<F>, AudioSampleError>(Complex::new(x_converted, F::zero()))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -152,9 +152,11 @@ where
             let win = generate_window_cached(n_fft, w);
 
             if win.len() != samples.len() {
-                return Err(AudioSampleError::DimensionMismatch(
-                    "Window length does not match number of samples".to_string(),
-                ));
+                return Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
+                    "window length",
+                    "number of samples",
+                    "apply_window",
+                )));
             }
             samples.apply_with_index(|idx, x| x * win[idx]);
         }
@@ -170,7 +172,7 @@ where
             let max_val = mag.iter().cloned().fold(F::zero(), F::max);
             if max_val > F::zero() {
                 for m in &mut mag {
-                    *m = *m / max_val;
+                    *m /= max_val;
                 }
             }
         }
@@ -190,9 +192,10 @@ where
         Self: Sized,
     {
         if spectrum.is_empty() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Empty spectrum".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "spectrum",
+                "Empty spectrum",
+            )));
         }
 
         // Copy spectrum for processing
@@ -215,7 +218,7 @@ where
 
         // Create new AudioSamples with same metadata as original
         let arr = Array1::from_vec(real_samples);
-        let owned = AudioSamples::new_mono(arr.into(), self.sample_rate());
+        let owned = AudioSamples::new_mono(arr, self.sample_rate());
         // Convert the owned static lifetime to match Self's lifetime
         // Since the owned data has 'static lifetime, it can be safely cast to any shorter lifetime
         let result: Self = unsafe { std::mem::transmute(owned) };
@@ -236,23 +239,28 @@ where
         T: ConvertTo<F>,
     {
         if window_size == 0 || hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Window size and hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Window size and hop size must be greater than 0",
+            )));
         }
 
         if hop_size > window_size {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size cannot be larger than window size".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size cannot be larger than window size",
+            )));
         }
 
         // Check if window size is larger than audio length
         let audio_length = self.samples_per_channel();
         if window_size > audio_length {
-            return Err(AudioSampleError::InvalidParameter(format!(
-                "Window size ({}) cannot be larger than audio length ({})",
-                window_size, audio_length
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                format!(
+                    "Window size ({}) cannot be larger than audio length ({})",
+                    window_size, audio_length
+                ),
             )));
         }
 
@@ -291,9 +299,10 @@ where
         samples_f = centered_samples;
 
         if samples_f.len() < window_size {
-            return Err(AudioSampleError::DimensionMismatch(
-                "Audio length is shorter than window size".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "window_size",
+                "Audio length is shorter than window size",
+            )));
         }
 
         // Calculate number of frames (librosa-compatible)
@@ -304,9 +313,10 @@ where
         };
 
         if num_frames == 0 {
-            return Err(AudioSampleError::DimensionMismatch(
-                "No frames can be extracted".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frames",
+                "No frames can be extracted",
+            )));
         }
 
         // Generate window function (cached for performance)
@@ -342,7 +352,10 @@ where
             // Apply real FFT (more efficient than complex FFT for real signals)
             r2c.process(&mut real_input, &mut complex_output)
                 .map_err(|_| {
-                    AudioSampleError::InvalidParameter("Real FFT processing failed".to_string())
+                    AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Real FFT processing failed",
+                    ))
                 })?;
 
             // Store in STFT matrix (only positive frequencies)
@@ -397,20 +410,20 @@ where
                 .expect("IFFT failed");
             let inv_scale = F::one() / to_precision::<F, _>(fft_size as f64);
             for s in real_buffer.iter_mut() {
-                *s = *s * inv_scale;
+                *s *= inv_scale;
             }
             let start = frame_idx * hop_size;
             for i in 0..fft_size {
                 let w = window[i];
-                output[start + i] = output[start + i] + real_buffer[i] * w;
-                window_sum[start + i] = window_sum[start + i] + w * w;
+                output[start + i] += real_buffer[i] * w;
+                window_sum[start + i] += w * w;
             }
         }
 
         // Normalise
         for i in 0..output_length {
             if window_sum[i] > F::zero() {
-                output[i] = output[i] / window_sum[i];
+                output[i] /= window_sum[i];
             }
         }
 
@@ -429,9 +442,12 @@ where
             .collect::<Result<Vec<T>, _>>()?;
         let arr = Array1::from_vec(samples);
 
-        let owned: AudioSamples<'static, T> =
-            AudioSamples::new_mono(arr.into(), sample_rate as u32);
-        Ok(unsafe { std::mem::transmute(owned) })
+        let owned: AudioSamples<'static, T> = AudioSamples::new_mono(arr, sample_rate as u32);
+        Ok(unsafe {
+            std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
+                owned,
+            )
+        })
     }
 
     /// Computes the magnitude spectrogram (|STFT|^2) with scaling options.
@@ -486,23 +502,25 @@ where
     {
         // Input validation
         if window_size == 0 || hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Window size and hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Window size and hop size must be greater than 0",
+            )));
         }
 
         if hop_size > window_size {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size cannot be larger than window size".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size cannot be larger than window size",
+            )));
         }
 
         // For mel scaling, redirect to mel_spectrogram (will be implemented in Phase 3)
         if scale == SpectrogramScale::Mel {
-            return Err(AudioSampleError::InvalidParameter(
-                "Mel scaling requires mel_spectrogram method - use mel_spectrogram() directly"
-                    .to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Mel scaling requires mel_spectrogram method - use mel_spectrogram() directly",
+            )));
         }
 
         // Compute STFT using existing implementation
@@ -528,10 +546,10 @@ where
                     }
                     SpectrogramScale::Mel => {
                         // This case is handled above with early return
-                        return Err(AudioSampleError::InvalidParameter(
-                                "Mel scaling requires mel_spectrogram method - use mel_spectrogram() directly"
-                                    .to_string(),
-                            ));
+                        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                            "parameter",
+                            "Mel scaling requires mel_spectrogram method - use mel_spectrogram() directly",
+                        )));
                     }
                 };
 
@@ -597,28 +615,32 @@ where
     {
         // Input validation
         if n_mels == 0 || window_size == 0 || hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Number of mels, window size, and hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Number of mels, window size, and hop size must be greater than 0",
+            )));
         }
 
         if fmin < F::zero() || fmax <= fmin {
-            return Err(AudioSampleError::InvalidParameter(
-                "Frequency range must be positive and fmax > fmin".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Frequency range must be positive and fmax > fmin",
+            )));
         }
 
         if hop_size > window_size {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size cannot be larger than window size".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size cannot be larger than window size",
+            )));
         }
 
         let sample_rate = to_precision::<F, _>(to_precision::<F, _>(self.sample_rate));
         if fmax > sample_rate / to_precision::<F, _>(2.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Maximum frequency cannot exceed Nyquist frequency".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Maximum frequency cannot exceed Nyquist frequency",
+            )));
         }
 
         // Step 1: Compute power spectrogram using existing STFT
@@ -725,15 +747,17 @@ where
     {
         // Input validation
         if n_mfcc == 0 || n_mels == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Number of MFCC and mel bands must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Number of MFCC and mel bands must be greater than 0",
+            )));
         }
 
         if n_mfcc > n_mels {
-            return Err(AudioSampleError::InvalidParameter(
-                "Number of MFCC coefficients cannot exceed number of mel bands".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Number of MFCC coefficients cannot exceed number of mel bands",
+            )));
         }
 
         // Use reasonable default window parameters for MFCC computation
@@ -770,9 +794,10 @@ where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        Err(AudioSampleError::InvalidParameter(
-            "chroma not yet implemented".to_string(),
-        ))
+        Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "parameter",
+            "chroma not yet implemented",
+        )))
     }
 
     fn power_spectral_density<F>(
@@ -784,9 +809,10 @@ where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        Err(AudioSampleError::InvalidParameter(
-            "power_spectral_density not yet implemented".to_string(),
-        ))
+        Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "parameter",
+            "power_spectral_density not yet implemented",
+        )))
     }
 
     /// Computes gammatone-filtered spectrogram for auditory modeling.
@@ -826,28 +852,32 @@ where
     {
         // Input validation
         if n_filters == 0 || window_size == 0 || hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Number of filters, window size, and hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Number of filters, window size, and hop size must be greater than 0",
+            )));
         }
 
         if fmin <= F::zero() || fmax <= fmin {
-            return Err(AudioSampleError::InvalidParameter(
-                "Frequency range must be positive and fmax > fmin".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Frequency range must be positive and fmax > fmin",
+            )));
         }
 
         if hop_size > window_size {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size cannot be larger than window size".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size cannot be larger than window size",
+            )));
         }
 
         let sample_rate = to_precision::<F, _>(self.sample_rate);
         if fmax > sample_rate / to_precision::<F, _>(2.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Maximum frequency cannot exceed Nyquist frequency".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Maximum frequency cannot exceed Nyquist frequency",
+            )));
         }
 
         // Get samples based on channel configuration
@@ -857,9 +887,10 @@ where
         };
 
         if samples.len() < window_size {
-            return Err(AudioSampleError::DimensionMismatch(
-                "Audio length is shorter than window size".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "window_size",
+                "Audio length is shorter than window size",
+            )));
         }
 
         // Calculate number of frames
@@ -870,9 +901,10 @@ where
         };
 
         if num_frames == 0 {
-            return Err(AudioSampleError::DimensionMismatch(
-                "No frames can be extracted".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frames",
+                "No frames can be extracted",
+            )));
         }
 
         // Generate ERB-spaced center frequencies
@@ -934,9 +966,10 @@ where
         let samples = self.to_mono_float_samples()?;
 
         if samples.is_empty() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Cannot compute CQT on empty signal".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Cannot compute CQT on empty signal",
+            )));
         }
 
         // Generate CQT kernel
@@ -973,9 +1006,10 @@ where
         config.validate(sample_rate)?;
 
         if cqt_matrix.is_empty() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Cannot compute inverse CQT on empty matrix".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Cannot compute inverse CQT on empty matrix",
+            )));
         }
 
         // Generate dual frame (reconstruction kernel)
@@ -993,12 +1027,16 @@ where
 
         let arr = Array1::from_vec(reconstructed_samples);
         let owned: AudioSamples<'static, T> = AudioSamples::new_mono(
-            arr.into(),
+            arr,
             sample_rate
                 .to_u32()
                 .expect("Sample rate in should be a non-zero positive u32, now just casting back"),
         );
-        Ok(unsafe { std::mem::transmute(owned) })
+        Ok(unsafe {
+            std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
+                owned,
+            )
+        })
     }
 
     fn cqt_spectrogram<F>(
@@ -1017,18 +1055,20 @@ where
         config.validate(sample_rate)?;
 
         if hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size must be greater than 0",
+            )));
         }
 
         // Get mono samples as f64 for processing
         let samples = self.to_mono_float_samples()?;
 
         if samples.is_empty() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Cannot compute CQT spectrogram on empty signal".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Cannot compute CQT spectrogram on empty signal",
+            )));
         }
 
         // Calculate effective window size
@@ -1131,10 +1171,9 @@ fn normalize_spectrogram<F: RealFloat>(
                     Some(order) => order,
                     None => std::cmp::Ordering::Equal, // Handle NaN gracefully
                 }
-            }) {
-                if max_val > F::zero() {
-                    spectrogram.mapv_inplace(|x| x / max_val);
-                }
+            }) && max_val > F::zero()
+            {
+                spectrogram.mapv_inplace(|x| x / max_val);
             }
         }
         SpectrogramScale::Log => {
@@ -1146,9 +1185,10 @@ fn normalize_spectrogram<F: RealFloat>(
         }
         SpectrogramScale::Mel => {
             // Mel scaling normalization will be implemented in Phase 3
-            return Err(AudioSampleError::InvalidParameter(
-                "Mel scale normalization not yet implemented".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Mel scale normalization not yet implemented",
+            )));
         }
     }
     Ok(())
@@ -1179,13 +1219,13 @@ fn generate_window_cached<F: RealFloat>(size: usize, window_type: WindowType<F>)
     let cache_key = WindowCacheKey::from(window_type);
 
     // Check cache first
-    if let Ok(cache) = WINDOW_CACHE.try_lock() {
-        if let Some(cached_window) = cache.get(&(size, cache_key.clone())) {
-            return cached_window
-                .iter()
-                .map(|&v| to_precision::<F, _>(v))
-                .collect();
-        }
+    if let Ok(cache) = WINDOW_CACHE.try_lock()
+        && let Some(cached_window) = cache.get(&(size, cache_key.clone()))
+    {
+        return cached_window
+            .iter()
+            .map(|&v| to_precision::<F, _>(v))
+            .collect();
     }
 
     // Generate window if not cached
@@ -1397,7 +1437,7 @@ fn generate_gammatone_filter<F: RealFloat>(
         .unwrap_or(F::zero());
     if energy > F::zero() {
         let norm_factor = F::one() / energy.sqrt();
-        filter.iter_mut().for_each(|x| *x = *x * norm_factor);
+        filter.iter_mut().for_each(|x| *x *= norm_factor);
     }
 
     filter
@@ -1425,7 +1465,7 @@ fn apply_gammatone_filter<F: RealFloat>(signal: &[F], filter_coeffs: &[F]) -> Ve
             .take(filter_len.min(signal_len))
         {
             let signal_idx = (i + signal_len - j) % signal_len;
-            *out = *out + signal[signal_idx] * *coeff;
+            *out += signal[signal_idx] * *coeff;
         }
     }
 
@@ -1594,7 +1634,7 @@ fn compute_dct_type2<F: RealFloat>(input: &[F], n_mfcc: usize) -> Vec<F> {
                 * (two * to_precision::<F, _>(n as f64) + F::one())
                 / (two * n_input_f))
                 .cos();
-            sum = sum + (*inp * cos_term);
+            sum += *inp * cos_term;
         }
 
         // Apply normalization factor
@@ -1759,7 +1799,7 @@ fn normalize_kernel<F: RealFloat>(kernel: &mut [Complex<F>]) {
     if energy > F::zero() {
         let norm_factor = F::one() / energy.sqrt();
         for coefficient in kernel.iter_mut() {
-            *coefficient = *coefficient * norm_factor;
+            *coefficient *= norm_factor;
         }
     }
 }
@@ -1883,6 +1923,10 @@ fn apply_inverse_cqt_kernel<F: RealFloat>(
 /// Applies Gaussian smoothing to a signal using a specified standard deviation.
 ///
 /// The smoothing helps reduce noise and spurious peaks in the onset detection function.
+///
+/// # Panics
+///
+/// Panics if kernel size calculation results in a value that cannot be converted to usize.
 pub fn gaussian_smooth<F: RealFloat>(signal: &[F], sigma: F) -> Vec<F> {
     if sigma <= F::zero() {
         return signal.to_vec();
@@ -2157,7 +2201,8 @@ mod tests {
         );
         assert!(result.is_err());
         match result.unwrap_err() {
-            AudioSampleError::InvalidParameter(_) => {}
+            AudioSampleError::Parameter(ParameterError::InvalidValue { parameter, .. })
+                if parameter == "parameter" => {}
             _ => panic!("Expected InvalidParameter error for mel scaling"),
         }
     }

@@ -10,7 +10,7 @@ use crate::operations::types::{CompressorConfig, DynamicRangeMethod, KneeType, L
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, RealFloat, to_precision,
+    I24, ParameterError, RealFloat, to_precision,
 };
 use std::collections::VecDeque;
 
@@ -44,6 +44,10 @@ impl<F: RealFloat> EnvelopeFollower<F> {
     /// * `release_ms` - Release time in milliseconds
     /// * `sample_rate` - Sample rate in Hz
     /// * `detection_method` - Detection method (RMS, Peak, or Hybrid)
+    ///
+    /// # Panics
+    ///
+    /// Panics if floating point calculations overflow during window size conversion.
     pub fn new(
         attack_ms: F,
         release_ms: F,
@@ -101,10 +105,10 @@ impl<F: RealFloat> EnvelopeFollower<F> {
                 self.rms_sum += sample_squared;
 
                 // Remove old samples if window is full
-                if self.rms_window.len() > self.rms_window_size {
-                    if let Some(old_sample) = self.rms_window.pop_front() {
-                        self.rms_sum -= old_sample;
-                    }
+                if self.rms_window.len() > self.rms_window_size
+                    && let Some(old_sample) = self.rms_window.pop_front()
+                {
+                    self.rms_sum -= old_sample;
                 }
 
                 // Calculate RMS
@@ -123,10 +127,10 @@ impl<F: RealFloat> EnvelopeFollower<F> {
                 self.rms_window.push_back(sample_squared);
                 self.rms_sum += sample_squared;
 
-                if self.rms_window.len() > self.rms_window_size {
-                    if let Some(old_sample) = self.rms_window.pop_front() {
-                        self.rms_sum -= old_sample;
-                    }
+                if self.rms_window.len() > self.rms_window_size
+                    && let Some(old_sample) = self.rms_window.pop_front()
+                {
+                    self.rms_sum -= old_sample;
                 }
 
                 let rms = if !self.rms_window.is_empty() {
@@ -249,7 +253,11 @@ impl<F: RealFloat> LookaheadBuffer<F> {
 }
 
 /// Convert time in milliseconds to sample count.
-fn ms_to_samples<F: RealFloat>(ms: F, sample_rate: F) -> usize {
+///
+/// # Panics
+///
+/// Panics if the conversion from floating point to usize fails.
+pub fn ms_to_samples<F: RealFloat>(ms: F, sample_rate: F) -> usize {
     (ms * to_precision::<F, _>(0.001) * sample_rate)
         .round()
         .to_usize()
@@ -257,7 +265,7 @@ fn ms_to_samples<F: RealFloat>(ms: F, sample_rate: F) -> usize {
 }
 
 /// Convert linear amplitude to decibels.
-fn linear_to_db<F: RealFloat>(linear: F) -> F {
+pub fn linear_to_db<F: RealFloat>(linear: F) -> F {
     if linear > F::zero() {
         to_precision::<F, _>(20.0) * linear.log10()
     } else {
@@ -266,7 +274,7 @@ fn linear_to_db<F: RealFloat>(linear: F) -> F {
 }
 
 /// Convert decibels to linear amplitude.
-fn db_to_linear<F: RealFloat>(db: F) -> F {
+pub fn db_to_linear<F: RealFloat>(db: F) -> F {
     to_precision::<F, _>(10.0).powf(db / to_precision::<F, _>(20.0))
 }
 
@@ -281,7 +289,7 @@ fn db_to_linear<F: RealFloat>(db: F) -> F {
 ///
 /// # Returns
 /// Gain reduction in dB (positive values indicate reduction)
-fn calculate_compression_gain<F: RealFloat>(
+pub fn calculate_compression_gain<F: RealFloat>(
     input_level_db: F,
     threshold_db: F,
     ratio: F,
@@ -327,7 +335,7 @@ fn calculate_compression_gain<F: RealFloat>(
 ///
 /// # Returns
 /// Gain reduction in dB (positive values indicate reduction)
-fn calculate_limiting_gain<F: RealFloat>(
+pub fn calculate_limiting_gain<F: RealFloat>(
     input_level_db: F,
     ceiling_db: F,
     knee_type: KneeType,
@@ -694,9 +702,10 @@ where
         config.validate(sample_rate)?;
 
         if !config.side_chain.enabled {
-            return Err(AudioSampleError::InvalidParameter(
-                "Side-chain is not enabled in configuration".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "side_chain_config",
+                "Side-chain is not enabled in configuration",
+            )));
         }
 
         // For now, implement basic side-chain by using the sidechain signal for detection
@@ -707,9 +716,10 @@ where
         match (&mut self.data, &sidechain_signal.data) {
             (AudioData::Mono(main_samples), AudioData::Mono(sc_samples)) => {
                 if main_samples.len() != sc_samples.len() {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Main signal and sidechain signal must have the same length".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "signal_lengths",
+                        "Main signal and sidechain signal must have the same length",
+                    )));
                 }
 
                 let mut envelope_follower = EnvelopeFollower::new(
@@ -774,10 +784,10 @@ where
                 }
             }
             _ => {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Side-chain processing with multi-channel audio not yet implemented"
-                        .to_string(),
-                ));
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Side-chain processing with multi-channel audio not yet implemented",
+                )));
             }
         }
 
@@ -797,18 +807,20 @@ where
         // Validate configuration
         config.validate(sample_rate)?;
         if !config.side_chain.enabled {
-            return Err(AudioSampleError::InvalidParameter(
-                "Side-chain is not enabled in configuration".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "side_chain_config",
+                "Side-chain is not enabled in configuration",
+            )));
         }
 
         // Similar to compressor sidechain but with limiting gain calculation
         match (&mut self.data, &sidechain_signal.data) {
             (AudioData::Mono(main_samples), AudioData::Mono(sc_samples)) => {
                 if main_samples.len() != sc_samples.len() {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Main signal and sidechain signal must have the same length".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "signal_lengths",
+                        "Main signal and sidechain signal must have the same length",
+                    )));
                 }
 
                 let mut envelope_follower = EnvelopeFollower::new(
@@ -869,10 +881,10 @@ where
                 }
             }
             _ => {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Side-chain processing with multi-channel audio not yet implemented"
-                        .to_string(),
-                ));
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Side-chain processing with multi-channel audio not yet implemented",
+                )));
             }
         }
 

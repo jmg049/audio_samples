@@ -8,13 +8,15 @@ use crate::{
     to_precision,
 };
 use ndarray::Array1;
+use rand::distr::StandardUniform;
 
 /// Builder for creating mono audio samples through method chaining.
-pub struct MonoSampleBuilder<T: AudioSample> {
-    samples: Vec<AudioSamples<'static, T>>,
+#[derive(Debug, Clone, Default)]
+pub struct MonoSampleBuilder<'a, T: AudioSample> {
+    samples: Vec<AudioSamples<'a, T>>,
 }
 
-impl<T> MonoSampleBuilder<T>
+impl<T> MonoSampleBuilder<'_, T>
 where
     T: AudioSample,
     i16: ConvertTo<T>,
@@ -24,15 +26,15 @@ where
     f64: ConvertTo<T>,
 {
     /// Creates a new empty builder.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             samples: Vec::new(),
         }
     }
 
     /// Adds an existing sample to the builder.
-    pub fn add_sample(mut self, sample: AudioSamples<'static, T>) -> Self {
-        self.samples.push(sample);
+    pub fn add_sample(mut self, sample: AudioSamples<'_, T>) -> Self {
+        self.samples.push(sample.into_owned());
         self
     }
 
@@ -149,6 +151,10 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated sine wave. If the conversion fails (it shouldn't), default values are used.
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
 pub fn sine_wave<T, F>(
     frequency: F,
     duration: F,
@@ -174,11 +180,15 @@ where
     for i in 0..num_samples {
         let t = to_precision::<F, _>(i) / sample_rate;
         let sample = amplitude * (two_pi_frrq * t).sin();
-        samples.push(sample.convert_to().unwrap_or_default());
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate.to_u32().unwrap_or(44100))
+    AudioSamples::new_mono(array, sample_rate.to_u32().unwrap_or(44100))
 }
 
 /// Generates a cosine wave with the specified parameters.
@@ -191,6 +201,10 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated cosine wave. If the conversion fails (it shouldn't), default values are used.
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
 pub fn cosine_wave<T, F>(
     frequency: F,
     duration: F,
@@ -214,11 +228,15 @@ where
     for i in 0..num_samples {
         let t = to_precision::<F, _>(i) / sample_rate;
         let sample = amplitude * (two_pi_freq * t).cos();
-        samples.push(sample.convert_to().unwrap_or_default());
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate.to_u32().unwrap_or(44100))
+    AudioSamples::new_mono(array, sample_rate.to_u32().unwrap_or(44100))
 }
 
 /// Generates brown noise with the specified parameters.
@@ -234,6 +252,10 @@ where
 /// # Returns
 /// `Ok(brown_noise)` containing an Array1 instance with the generated brown noise.
 ///
+/// # Panics
+///
+/// Panics if sample conversion fails.
+///
 /// # Examples
 /// ```
 /// use audio_samples::brown_noise;
@@ -244,8 +266,9 @@ where
 pub fn brown_noise<T, F>(
     duration: F,
     sample_rate: u32,
+    step: F,
     amplitude: F,
-) -> AudioSampleResult<Array1<T>>
+) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -254,23 +277,31 @@ where
     f64: ConvertTo<T>,
     T: AudioSample + ConvertTo<F>,
     F: RealFloat + ConvertTo<T>,
+    StandardUniform: rand::distr::Distribution<F>,
 {
     let num_samples = (duration * to_precision::<F, _>(sample_rate))
         .to_usize()
         .unwrap_or(0);
 
     let mut samples = Vec::with_capacity(num_samples);
-    let mut brown_state = 0.0;
+    let mut brown_state = F::zero();
 
     for _ in 0..num_samples {
-        let white = (rand::random::<f64>() - 0.5) * 2.0;
-        brown_state += (brown_state + white * 0.02_f64).clamp(-1.0, 1.0);
+        let white = (rand::random::<F>() - to_precision::<F, _>(0.5)) * to_precision::<F, _>(2.0);
+        brown_state += white * step;
+        brown_state = brown_state.clamp(-F::one(), F::one());
+
         let b_state: F = to_precision::<F, _>(brown_state);
         let sample = amplitude * b_state;
-        samples.push(sample.convert_to().unwrap_or_default());
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
     }
 
-    Ok(Array1::from_vec(samples))
+    let arr = Array1::from_vec(samples);
+    Ok(AudioSamples::new_mono(arr, sample_rate))
 }
 
 /// Generates white noise with the specified parameters.
@@ -284,7 +315,11 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated white noise. If the conversion fails (it shouldn't), default values are used.
-pub fn white_noise<'b, T, F>(duration: F, sample_rate: u32, amplitude: F) -> AudioSamples<'b, T>
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
+pub fn white_noise<T, F>(duration: F, sample_rate: u32, amplitude: F) -> AudioSamples<'static, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -304,11 +339,15 @@ where
         let random_value = (rand::random::<f64>() - 0.5) * 2.0;
         let random_value: F = to_precision::<F, _>(random_value);
         let sample = amplitude * random_value;
-        samples.push(sample.convert_to().unwrap_or_default());
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate)
+    AudioSamples::new_mono(array, sample_rate)
 }
 
 /// Generates pink noise with the specified parameters.
@@ -322,7 +361,11 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated pink noise. If the conversion fails (it shouldn't), default values are used.
-pub fn pink_noise<'b, T, F>(duration: F, sample_rate: u32, amplitude: F) -> AudioSamples<'b, T>
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
+pub fn pink_noise<T, F>(duration: F, sample_rate: u32, amplitude: F) -> AudioSamples<'static, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -354,11 +397,15 @@ where
         let pink: F = to_precision::<F, _>(pink * 0.11);
 
         let sample = amplitude * pink;
-        samples.push(sample.convert_to().unwrap_or_default());
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate)
+    AudioSamples::new_mono(array, sample_rate)
 }
 
 /// Generates a square wave with the specified parameters.
@@ -371,7 +418,11 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated square wave. If the conversion fails (it shouldn't), default values are used.
-pub fn square_wave<'b, T, F>(
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
+pub fn square_wave<T, F>(
     frequency: F,
     duration: F,
     sample_rate: u32,
@@ -390,20 +441,32 @@ where
     let num_samples = (duration * sample_rate).to_usize().unwrap_or(0);
     let mut samples = Vec::with_capacity(num_samples);
 
-    let period = sample_rate / frequency;
+    let phase_inc = frequency / sample_rate;
+    let mut phase = F::zero();
 
-    for i in 0..num_samples {
-        let phase = (to_precision::<F, _>(i) % period) / period;
+    for _ in 0..num_samples {
+        // Use accumulated phase directly
         let sample = if phase < to_precision::<F, _>(0.5) {
             amplitude
         } else {
             -amplitude
         };
-        samples.push(sample.convert_to().unwrap_or_default());
+
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
+
+        // Update phase and wrap
+        phase += phase_inc;
+        if phase >= F::one() {
+            phase -= F::one();
+        }
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate.to_u32().unwrap_or(44100))
+    AudioSamples::new_mono(array, sample_rate.to_u32().unwrap_or(44100))
 }
 
 /// Generates a sawtooth wave with the specified parameters.
@@ -416,6 +479,10 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated sawtooth wave. If the conversion fails (it shouldn't), default values are used.
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
 pub fn sawtooth_wave<T, F>(
     frequency: F,
     duration: F,
@@ -431,21 +498,34 @@ where
     T: AudioSample + ConvertTo<F>,
     F: RealFloat + ConvertTo<T>,
 {
-    let sample_rate = to_precision::<F, _>(sample_rate);
-    let num_samples = (duration * sample_rate).to_usize().unwrap_or(0);
+    let sr_f = to_precision::<F, _>(sample_rate);
+    let freq_f = to_precision::<F, _>(frequency);
+
+    let num_samples = (duration * sr_f).to_usize().unwrap_or(0);
     let mut samples = Vec::with_capacity(num_samples);
 
-    let period = sample_rate / frequency;
-    let two = to_precision::<F, _>(2.0);
+    // sawtooth: phase in [0,1), increment per sample
+    let mut phase = F::zero();
+    let phase_inc = freq_f / sr_f;
 
-    for i in 0..num_samples {
-        let phase = (to_precision::<F, _>(i) % period) / period;
-        let sample = amplitude * (two * phase - F::one());
-        samples.push(sample.convert_to().unwrap_or_default());
+    for _ in 0..num_samples {
+        // sawtooth: -1 to +1 linear ramp
+        let sample = amplitude * (phase * to_precision::<F, _>(2.0) - F::one());
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
+
+        // update phase
+        phase += phase_inc;
+        if phase >= F::one() {
+            phase -= F::one();
+        }
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate.to_u32().unwrap_or(44100))
+    AudioSamples::new_mono(array, sample_rate)
 }
 
 /// Generates a triangle wave with the specified parameters.
@@ -458,12 +538,16 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated triangle wave. If the conversion fails (it shouldn't), default values are used.
-pub fn triangle_wave<'b, T, F>(
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
+pub fn triangle_wave<T, F>(
     frequency: F,
     duration: F,
     sample_rate: u32,
     amplitude: F,
-) -> AudioSamples<'b, T>
+) -> AudioSamples<'static, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -473,24 +557,39 @@ where
     T: AudioSample + ConvertTo<F>,
     F: RealFloat + ConvertTo<T>,
 {
-    let sample_rate = to_precision::<F, _>(sample_rate);
-    let num_samples = (duration * sample_rate).to_usize().unwrap_or(0);
+    let sr_f = to_precision::<F, _>(sample_rate);
+    let freq_f = to_precision::<F, _>(frequency);
+
+    let num_samples = (duration * sr_f).to_usize().unwrap_or(0);
     let mut samples = Vec::with_capacity(num_samples);
 
-    let period = sample_rate / frequency;
+    let mut phase = F::zero();
+    let phase_inc = freq_f / sr_f;
 
-    for i in 0..num_samples {
-        let phase = (to_precision::<F, _>(i) % period) / period;
+    for _ in 0..num_samples {
+        // triangle: ramp up then down
         let sample = if phase < to_precision::<F, _>(0.5) {
+            // rising edge: -1 -> +1
             amplitude * (to_precision::<F, _>(4.0) * phase - F::one())
         } else {
+            // falling edge: +1 -> -1
             amplitude * (to_precision::<F, _>(3.0) - to_precision::<F, _>(4.0) * phase)
         };
-        samples.push(sample.convert_to().unwrap_or_default());
+
+        samples.push(
+            sample
+                .convert_to()
+                .expect("Sample conversion should not fail"),
+        );
+
+        phase += phase_inc;
+        if phase >= F::one() {
+            phase -= F::one();
+        }
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate.to_u32().unwrap_or(44100))
+    AudioSamples::new_mono(array, sample_rate)
 }
 
 /// Generates a chirp (frequency sweep) signal.
@@ -504,13 +603,17 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated chirp signal. If the conversion fails (it shouldn't), default values are used.
-pub fn chirp<'b, T, F>(
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
+pub fn chirp<T, F>(
     start_freq: F,
     end_freq: F,
     duration: F,
     sample_rate: u32,
     amplitude: F,
-) -> AudioSamples<'b, T>
+) -> AudioSamples<'static, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -524,19 +627,34 @@ where
         .to_usize()
         .unwrap_or(0);
     let mut samples = Vec::with_capacity(num_samples);
+
+    let sr_f = to_precision::<F, _>(sample_rate);
+    let f0 = to_precision::<F, _>(start_freq);
+    let f1 = to_precision::<F, _>(end_freq);
+    let duration_f = to_precision::<F, _>(duration);
+    let k = (f1 - f0) / duration_f; // linear frequency slope
+    let mut phase = F::zero(); // radians, unwrapped
+
     let two_pi = to_precision::<F, _>(2.0) * F::PI();
-    let freq_rate = (end_freq - start_freq) / duration;
-    let sample_rate = to_precision::<F, _>(sample_rate);
     for i in 0..num_samples {
-        let t = to_precision::<F, _>(i) / sample_rate;
-        // let frequency = start_freq + freq_rate * t;
-        let phase = two_pi * (start_freq * t + to_precision::<F, _>(0.5) * freq_rate * t * t);
-        let sample = amplitude * phase.sin();
-        samples.push(sample.convert_to().unwrap_or_default());
+        let t = to_precision::<F, _>(i) / sr_f;
+
+        // Instantaneous frequency: f(t) = f0 + k t
+        let freq = f0 + k * t;
+
+        // Phase increment = 2π f(t) / sample_rate
+        let phase_inc = two_pi * freq / sr_f;
+
+        // Update phase
+        phase += phase_inc;
+
+        // Compute sample
+        let value = amplitude * phase.sin();
+        samples.push(value.convert_to().expect("Conversion should not fail"));
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate.to_u32().unwrap_or(44100))
+    AudioSamples::new_mono(array, sample_rate)
 }
 
 /// Generates an impulse (delta function) signal.
@@ -549,6 +667,10 @@ where
 ///
 /// # Returns
 /// An AudioSamples instance containing the generated impulse signal. If the conversion fails (it shouldn't), default values are used.
+///
+/// # Panics
+///
+/// Panics if sample conversion fails.
 pub fn impulse<T, F>(
     duration: F,
     sample_rate: u32,
@@ -567,18 +689,21 @@ where
     let num_samples = (duration * to_precision::<F, _>(sample_rate))
         .to_usize()
         .unwrap_or(0);
-    let mut samples = vec![0.0.convert_to().unwrap_or_default(); num_samples];
+    let mut samples =
+        vec![0.0.convert_to().expect("Sample conversion should not fail"); num_samples];
 
     let impulse_sample = (position * to_precision::<F, _>(sample_rate))
         .to_usize()
         .unwrap_or(0);
 
     if impulse_sample < num_samples {
-        samples[impulse_sample] = amplitude.convert_to().unwrap_or_default();
+        samples[impulse_sample] = amplitude
+            .convert_to()
+            .expect("Sample conversion should not fail");
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate)
+    AudioSamples::new_mono(array, sample_rate)
 }
 
 /// Generates silence (zeros) with the specified duration.
@@ -606,7 +731,7 @@ where
     let samples = vec![T::zero(); num_samples];
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array.into(), sample_rate)
+    AudioSamples::new_mono(array, sample_rate)
 }
 
 #[cfg(test)]

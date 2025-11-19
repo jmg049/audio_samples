@@ -3,7 +3,8 @@ use ndarray::ScalarOperand;
 use num_traits::{FromPrimitive, Num, NumCast, One, Signed, ToBytes, Zero};
 use serde::{Deserialize, Serialize};
 
-use crate::{AudioSampleError, AudioSampleResult, AudioSamples, I24};
+use crate::error::ConversionError;
+use crate::{AudioSampleError, AudioSampleResult, AudioSamples, I24, RealFloat};
 use std::fmt::{Debug, Display};
 use std::ops::{
     Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign,
@@ -263,11 +264,13 @@ macro_rules! impl_i24_conversion {
                 };
                 match I24::try_from_i32(result) {
                     Some(x) => Ok(x),
-                    None => Err(AudioSampleError::ConversionError(
-                        format!("{:?}", self),
-                        stringify!($from).to_string(),
-                        "I24".to_string(),
-                        "Value out of range for I24".to_string(),
+                    None => Err(AudioSampleError::Conversion(
+                        ConversionError::audio_conversion(
+                            format!("{:?}", self),
+                            stringify!($from).to_string(),
+                            "I24".to_string(),
+                            "Value out of range for I24".to_string(),
+                        ),
                     )),
                 }
             }
@@ -341,11 +344,13 @@ macro_rules! impl_float_to_i24_conversion {
                 };
                 match I24::try_from_i32(scaled_val) {
                     Some(x) => Ok(x),
-                    None => Err(AudioSampleError::ConversionError(
-                        format!("{:?}", self),
-                        stringify!($from).to_string(),
-                        "I24".to_string(),
-                        "Value out of range for I24".to_string(),
+                    None => Err(AudioSampleError::Conversion(
+                        ConversionError::audio_conversion(
+                            format!("{:?}", self),
+                            stringify!($from).to_string(),
+                            "I24".to_string(),
+                            "Value out of range for I24".to_string(),
+                        ),
                     )),
                 }
             }
@@ -1212,10 +1217,26 @@ where
     ///
     /// Uses the existing ConvertTo trait system for type-safe conversions.
     /// The original AudioSamples instance remains unchanged.
+    ///
+    /// **Note**: This method allocates new memory despite the `as_` prefix.
+    /// Consider using `to_format` for clearer naming in new code.
     fn as_type<O>(&self) -> AudioSampleResult<AudioSamples<'static, O>>
     where
         T: ConvertTo<O>,
         O: AudioSample + ConvertTo<T>;
+
+    /// Converts to different sample type with clearer naming, borrowing the original.
+    ///
+    /// This is a more clearly named alternative to `as_type` that indicates
+    /// memory allocation will occur. Uses audio-aware conversion (e.g., f32 ↔ i16
+    /// uses normalized scaling).
+    fn to_format<O>(&self) -> AudioSampleResult<AudioSamples<'static, O>>
+    where
+        T: ConvertTo<O>,
+        O: AudioSample + ConvertTo<T>,
+    {
+        self.as_type::<O>()
+    }
 
     /// Converts to different sample type, consuming the original.
     ///
@@ -1223,6 +1244,31 @@ where
     fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSampleResult<AudioSamples<'static, O>>
     where
         T: ConvertTo<O>;
+
+    /// Converts to different sample type with clearer naming, consuming the original.
+    ///
+    /// This is a more clearly named alternative to `to_type` that follows
+    /// Rust's `into_*` convention for consuming conversions.
+    /// Uses audio-aware conversion (e.g., f32 ↔ i16 uses normalized scaling).
+    fn into_format<O: AudioSample + ConvertTo<T>>(
+        self,
+    ) -> AudioSampleResult<AudioSamples<'static, O>>
+    where
+        T: ConvertTo<O>,
+        Self: Sized,
+    {
+        self.to_type::<O>()
+    }
+
+    /// Converts audio samples to a floating-point type.
+    fn as_float<F>(&self) -> AudioSampleResult<AudioSamples<'static, F>>
+    where
+        F: RealFloat,
+        T: ConvertTo<F>,
+        F: ConvertTo<T>,
+    {
+        self.as_type::<F>()
+    }
 
     /// Converts to the highest precision floating-point format.
     fn as_f64(&self) -> AudioSampleResult<AudioSamples<'static, f64>>
@@ -1274,12 +1320,24 @@ where
     // whereas out-of-domain casting would just cast -32768 to -32768.0f32 etc.
     // -----
 
-    /// Converts to different sample type, borrowing the original.
+    /// Casts to different sample type without audio-aware scaling, borrowing the original.
+    ///
+    /// This performs raw numeric casting without the audio-specific scaling
+    /// used by `as_type`/`to_format`. For example, casting i16(-32768) to f32
+    /// gives -32768.0f32, not -1.0f32.
+    ///
+    /// Use this when you need raw numeric values, not normalized audio samples.
     fn cast_as<O>(&self) -> AudioSampleResult<AudioSamples<'static, O>>
     where
         O: AudioSample + CastFrom<T>;
 
-    /// Converts to different sample type, consuming the original.
+    /// Casts to different sample type without audio-aware scaling, consuming the original.
+    ///
+    /// This performs raw numeric casting without the audio-specific scaling
+    /// used by `to_type`/`into_format`. For example, casting i16(-32768) to f32
+    /// gives -32768.0f32, not -1.0f32.
+    ///
+    /// Use this when you need raw numeric values, not normalized audio samples.
     fn cast_to<O>(self) -> AudioSampleResult<AudioSamples<'static, O>>
     where
         O: AudioSample + CastFrom<T>;

@@ -1,6 +1,6 @@
 use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24, RealFloat,
-    operations::types::OnsetConfig, to_precision,
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, I24, ParameterError,
+    RealFloat, operations::types::OnsetConfig, to_precision,
 };
 
 /// Beat tracking results containing tempo and beat timestamps.
@@ -72,13 +72,13 @@ impl<F: RealFloat> ProgressPhase<F> {
 ///
 /// # Returns
 /// Vector of beat timestamps in seconds
-pub fn track_beats(
-    onset_env: &[f64],
-    tempo_bpm: f64,
-    sample_rate: f64,
-    tolerance_seconds: Option<f64>,
+pub fn track_beats<F: RealFloat>(
+    onset_env: &[F],
+    tempo_bpm: F,
+    sample_rate: F,
+    tolerance_seconds: Option<F>,
     hop_size: Option<usize>,
-) -> AudioSampleResult<Vec<f64>> {
+) -> AudioSampleResult<Vec<F>> {
     track_beats_with_progress(
         onset_env,
         tempo_bpm,
@@ -106,6 +106,10 @@ fn find_peak_in_window<F: RealFloat>(onset_env: &[F], start: isize, end: isize) 
 }
 
 /// Track beats with optional progress reporting.
+///
+/// # Panics
+///
+/// Panics if floating point calculations overflow during frame conversion.
 pub fn track_beats_with_progress<F: RealFloat>(
     onset_env: &[F],
     tempo_bpm: F,
@@ -116,15 +120,17 @@ pub fn track_beats_with_progress<F: RealFloat>(
 ) -> AudioSampleResult<Vec<F>> {
     // --- Validation ---
     if onset_env.is_empty() {
-        return Err(AudioSampleError::InvalidInput {
-            msg: "Onset envelope is empty".to_string(),
-        });
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "onset_env",
+            "Onset envelope is empty",
+        )));
     }
 
     if tempo_bpm <= F::zero() {
-        return Err(AudioSampleError::InvalidInput {
-            msg: format!("Invalid tempo: {}", tempo_bpm),
-        });
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "tempo_bpm",
+            format!("Invalid tempo: {}", tempo_bpm),
+        )));
     }
 
     if let Some(callback) = progress_callback {
@@ -253,13 +259,13 @@ impl<F: RealFloat> BeatConfig<F> {
     }
 
     /// Set the tolerance for beat tracking (as a fraction of inter-beat interval).
-    pub fn with_tolerance(mut self, tolerance: F) -> Self {
+    pub const fn with_tolerance(mut self, tolerance: F) -> Self {
         self.tolerance = Some(tolerance);
         self
     }
 
     /// Set the onset detection configuration.
-    pub fn with_onset_config(mut self, config: OnsetConfig<F>) -> Self {
+    pub const fn with_onset_config(mut self, config: OnsetConfig<F>) -> Self {
         self.onset_config = config;
         self
     }

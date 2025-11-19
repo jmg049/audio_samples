@@ -114,8 +114,8 @@ use crate::operations::fft_backends::{FftBackendImpl, UnifiedFftBackend};
 use crate::operations::traits::AudioStatistics;
 use crate::repr::AudioData;
 use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, RealFloat, to_precision,
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
+    ConversionError, ConvertTo, I24, ParameterError, RealFloat, to_precision,
 };
 use ndarray::{Array1, Axis};
 #[cfg(feature = "fft")]
@@ -305,7 +305,7 @@ where
                 let mut sum_sq = F::zero();
                 for &x in arr {
                     let x = to_precision::<F, T>(x);
-                    sum_sq = sum_sq + x * x;
+                    sum_sq += x * x;
                 }
                 let mean_square = sum_sq / to_precision::<F, usize>(arr.len());
                 Some(mean_square.sqrt())
@@ -318,7 +318,7 @@ where
                 let mut sum_sq = F::zero();
                 for &x in arr {
                     let x = to_precision::<F, T>(x);
-                    sum_sq = sum_sq + x * x;
+                    sum_sq += x * x;
                 }
                 let mean_square = sum_sq / to_precision::<F, usize>(arr.len());
                 Some(mean_square.sqrt())
@@ -568,7 +568,7 @@ where
 
                 // Compute power spectrum: FFT(x) * conj(FFT(x))
                 for sample in padded_signal.iter_mut() {
-                    *sample = *sample * sample.conj();
+                    *sample *= sample.conj();
                 }
 
                 // Compute inverse FFT
@@ -579,9 +579,11 @@ where
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
                 let fft_size = to_precision(fft_size);
 
-                for lag in 0..=effective_max_lag {
+                for (lag, &signal_value) in
+                    padded_signal.iter().enumerate().take(effective_max_lag + 1)
+                {
                     // IFFT result is scaled by fft_size, and we normalize by number of overlaps
-                    let correlation = padded_signal[lag].re / fft_size;
+                    let correlation = signal_value.re / fft_size;
                     let overlap_count = n - lag;
                     let normalized_correlation = correlation / to_precision::<F, _>(overlap_count);
                     correlations.push(normalized_correlation);
@@ -616,7 +618,7 @@ where
 
                 // Power spectrum
                 for sample in padded_signal.iter_mut() {
-                    *sample = *sample * sample.conj();
+                    *sample *= sample.conj();
                 }
 
                 // Inverse FFT
@@ -627,8 +629,10 @@ where
                 let mut correlations = Vec::with_capacity(effective_max_lag + 1);
                 let fft_size = to_precision(fft_size);
 
-                for lag in 0..=effective_max_lag {
-                    let correlation = padded_signal[lag].re / fft_size;
+                for (lag, &signal_value) in
+                    padded_signal.iter().enumerate().take(effective_max_lag + 1)
+                {
+                    let correlation = signal_value.re / fft_size;
                     let overlap_count = n - lag;
                     let normalized_correlation = correlation / to_precision::<F, _>(overlap_count);
                     correlations.push(normalized_correlation);
@@ -677,23 +681,28 @@ where
     ) -> AudioSampleResult<Vec<F>> {
         // Verify compatible signals
         if self.num_channels() != other.num_channels() {
-            return Err(crate::AudioSampleError::InvalidInput {
-                msg: "Signals must have the same number of channels for cross-correlation"
-                    .to_string(),
-            });
+            return Err(crate::AudioSampleError::Parameter(
+                ParameterError::invalid_value(
+                    "channels",
+                    "Signals must have the same number of channels for cross-correlation",
+                ),
+            ));
         }
 
         match (&self.data, &other.data) {
             (AudioData::Mono(arr1), AudioData::Mono(arr2)) => {
                 if arr1.is_empty() || arr2.is_empty() || max_lag == 0 {
-                    return Err(crate::AudioSampleError::InvalidInput {
-                        msg: format!(
-                            "One of the signals is empty or max_lag is zero -- arr1 = {} arr2 = {} max_lag = {}",
-                            arr1.len(),
-                            arr2.len(),
-                            max_lag
+                    return Err(crate::AudioSampleError::Parameter(
+                        ParameterError::invalid_value(
+                            "input_data",
+                            format!(
+                                "One of the signals is empty or max_lag is zero -- arr1 = {} arr2 = {} max_lag = {}",
+                                arr1.len(),
+                                arr2.len(),
+                                max_lag
+                            ),
                         ),
-                    });
+                    ));
                 }
 
                 let n1 = arr1.len();
@@ -724,9 +733,12 @@ where
                 let ch2 = arr2.row(0);
 
                 if ch1.is_empty() || ch2.is_empty() || max_lag == 0 {
-                    return Err(crate::AudioSampleError::InvalidInput {
-                        msg: "One of the channels is empty or max_lag is zero".to_string(),
-                    });
+                    return Err(crate::AudioSampleError::Parameter(
+                        ParameterError::invalid_value(
+                            "input_data",
+                            "One of the channels is empty or max_lag is zero",
+                        ),
+                    ));
                 }
 
                 let n1 = ch1.len();
@@ -752,11 +764,13 @@ where
             }
             _ => {
                 // Mixed mono/multi-channel case - not supported
-                Err(crate::AudioSampleError::ConversionError(
-                    "Mixed".to_string(),
-                    "cross_correlation".to_string(),
-                    "compatible".to_string(),
-                    "Cannot correlate mono and multi-channel signals".to_string(),
+                Err(crate::AudioSampleError::Conversion(
+                    ConversionError::audio_conversion(
+                        "Mixed",
+                        "cross_correlation",
+                        "compatible",
+                        "Cannot correlate mono and multi-channel signals",
+                    ),
                 ))
             }
         }
@@ -891,12 +905,13 @@ where
         T: ConvertTo<F>,
     {
         if rolloff_percent <= F::zero() || rolloff_percent >= F::one() {
-            return Err(AudioSampleError::ProcessingError {
-                msg: format!(
-                    "rolloff_percent must be between 0.0 and 1.0, got {}",
-                    rolloff_percent
-                ),
-            });
+            return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+                "rolloff_percent",
+                rolloff_percent.to_string(),
+                "0.0",
+                "1.0",
+                "rolloff_percent must be between 0.0 and 1.0",
+            )));
         }
 
         match &self.data {

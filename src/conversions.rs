@@ -81,7 +81,7 @@ use ndarray::{Array1, Array2};
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom,
-    ConvertTo, I24,
+    ConvertTo, I24, LayoutError,
 };
 
 impl<'a, T: AudioSample> AudioTypeConversion<'a, T> for AudioSamples<'a, T>
@@ -129,8 +129,13 @@ where
                     .iter()
                     .map(|s| s.convert_to())
                     .collect::<Result<Vec<_>, _>>()?;
-                let converted = ndarray::Array2::from_shape_vec(shape, converted_vec)
-                    .map_err(|e| AudioSampleError::DimensionMismatch(e.to_string()))?;
+                let converted =
+                    ndarray::Array2::from_shape_vec(shape, converted_vec).map_err(|e| {
+                        AudioSampleError::Layout(LayoutError::IncompatibleFormat {
+                            operation: "array conversion".to_string(),
+                            reason: e.to_string(),
+                        })
+                    })?;
                 Ok(AudioSamples::new_multi_channel(converted, sample_rate))
             }
         }
@@ -175,9 +180,12 @@ where
                     .collect::<Result<Vec<O>, AudioSampleError>>()?;
 
                 let converted_data: Array2<O> =
-                    Array2::from_shape_vec((shape[0], shape[1]), converted_data)
-                        .map_err(|e| AudioSampleError::DimensionMismatch(e.to_string()))?
-                        .into();
+                    Array2::from_shape_vec((shape[0], shape[1]), converted_data).map_err(|e| {
+                        AudioSampleError::Layout(LayoutError::IncompatibleFormat {
+                            operation: "array conversion".to_string(),
+                            reason: e.to_string(),
+                        })
+                    })?;
 
                 Ok(AudioSamples::new_multi_channel(converted_data, sample_rate))
             }

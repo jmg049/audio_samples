@@ -8,7 +8,7 @@ use crate::operations::types::PitchDetectionMethod;
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, RealFloat, to_precision,
+    I24, ParameterError, RealFloat, to_precision,
 };
 
 use ndarray::Array1;
@@ -33,15 +33,17 @@ where
         T: ConvertTo<F>,
     {
         if !(F::zero()..=F::one()).contains(&threshold) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Threshold must be between 0.0 and 1.0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "threshold",
+                "Threshold must be between 0.0 and 1.0",
+            )));
         }
 
         if min_frequency <= F::zero() || max_frequency <= min_frequency {
-            return Err(AudioSampleError::InvalidParameter(
-                "Invalid frequency range".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frequency_range",
+                "Invalid frequency range",
+            )));
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
@@ -70,9 +72,10 @@ where
         T: ConvertTo<F>,
     {
         if min_frequency <= F::one() || max_frequency <= min_frequency {
-            return Err(AudioSampleError::InvalidParameter(
-                "Invalid frequency range".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frequency_range",
+                "Invalid frequency range",
+            )));
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
@@ -105,9 +108,10 @@ where
         T: ConvertTo<F>,
     {
         if window_size == 0 || hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Window size and hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "window_and_hop_size",
+                "Window size and hop size must be greater than 0",
+            )));
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
@@ -133,7 +137,7 @@ where
             }
 
             let window_audio =
-                AudioSamples::new_mono(Array1::from(window_data).into(), self.sample_rate());
+                AudioSamples::new_mono(Array1::from(window_data), self.sample_rate());
 
             let frequency = match method {
                 PitchDetectionMethod::Yin => {
@@ -161,9 +165,10 @@ where
         T: ConvertTo<F>,
     {
         if fundamental_freq <= F::zero() || num_harmonics == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Invalid fundamental frequency or number of harmonics".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "harmonics_config",
+                "Invalid fundamental frequency or number of harmonics",
+            )));
         }
 
         let samples = self.to_mono_float_samples()?;
@@ -210,15 +215,17 @@ where
         T: ConvertTo<F>,
     {
         if fundamental_freq <= F::zero() || num_harmonics == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Invalid fundamental frequency or number of harmonics".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "harmonics_config",
+                "Invalid fundamental frequency or number of harmonics",
+            )));
         }
 
         if !(F::zero()..=F::one()).contains(&tolerance) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Tolerance must be between 0.0 and 1.0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "tolerance",
+                "Tolerance must be between 0.0 and 1.0",
+            )));
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
@@ -265,9 +272,10 @@ where
         T: ConvertTo<F>,
     {
         if window_size == 0 || hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Window size and hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "window_and_hop_size",
+                "Window size and hop size must be greater than 0",
+            )));
         }
 
         // Krumhansl-Schmuckler key-finding algorithm implementation
@@ -567,6 +575,10 @@ fn calculate_correlation<F: RealFloat>(chroma: &[F], profile: &[f64; 12], tonic:
 /// Compute chroma features (simplified version).
 ///
 /// This is a basic implementation that maps frequency bins to chroma classes.
+///
+/// # Panics
+///
+/// Panics if MIDI note calculation results in a value that cannot be converted to i32.
 pub fn compute_chroma<F: RealFloat>(samples: &[F], sample_rate: F) -> AudioSampleResult<Vec<F>> {
     let spectrum = compute_power_spectrum(samples)?;
     let n = samples.len();

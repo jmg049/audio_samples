@@ -8,7 +8,7 @@ use crate::operations::types::{FilterResponse, IirFilterDesign, IirFilterType};
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, RealFloat, to_precision,
+    I24, ParameterError, RealFloat, to_precision,
 };
 
 use ndarray::Axis;
@@ -285,9 +285,10 @@ fn design_iir_filter<F: RealFloat>(
     match design.filter_type {
         IirFilterType::Butterworth => design_butterworth_filter(design, sample_rate),
         IirFilterType::ChebyshevI => design_chebyshev_i_filter(design, sample_rate),
-        _ => Err(AudioSampleError::InvalidParameter(
-            "Filter type not yet implemented".to_string(),
-        )),
+        _ => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "filter_type",
+            "Filter type not yet implemented",
+        ))),
     }
 }
 
@@ -301,57 +302,67 @@ fn design_butterworth_filter<F: RealFloat>(
     match design.response {
         FilterResponse::LowPass => {
             let cutoff = design.cutoff_frequency.ok_or_else(|| {
-                AudioSampleError::InvalidParameter(
-                    "Cutoff frequency required for low-pass filter".to_string(),
-                )
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency required for low-pass filter",
+                ))
             })?;
 
             if cutoff <= F::zero() || cutoff >= nyquist {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Cutoff frequency must be between 0 and Nyquist frequency".to_string(),
-                ));
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency must be between 0 and Nyquist frequency",
+                )));
             }
 
             design_butterworth_lowpass(design.order, cutoff, sample_rate)
         }
         FilterResponse::HighPass => {
             let cutoff = design.cutoff_frequency.ok_or_else(|| {
-                AudioSampleError::InvalidParameter(
-                    "Cutoff frequency required for high-pass filter".to_string(),
-                )
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency required for high-pass filter",
+                ))
             })?;
 
             if cutoff <= F::zero() || cutoff >= nyquist {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Cutoff frequency must be between 0 and Nyquist frequency".to_string(),
-                ));
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency must be between 0 and Nyquist frequency",
+                )));
             }
 
             design_butterworth_highpass(design.order, cutoff, sample_rate)
         }
         FilterResponse::BandPass => {
             let low_freq = design.low_frequency.ok_or_else(|| {
-                AudioSampleError::InvalidParameter(
-                    "Low frequency required for band-pass filter".to_string(),
-                )
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "low_frequency",
+                    "Low frequency required for band-pass filter",
+                ))
             })?;
             let high_freq = design.high_frequency.ok_or_else(|| {
-                AudioSampleError::InvalidParameter(
-                    "High frequency required for band-pass filter".to_string(),
-                )
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "high_frequency",
+                    "High frequency required for band-pass filter",
+                ))
             })?;
 
             if low_freq <= F::zero() || high_freq >= nyquist || low_freq >= high_freq {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Invalid frequency range for band-pass filter".to_string(),
-                ));
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "frequency_range",
+                    "Invalid frequency range for band-pass filter",
+                )));
             }
 
             design_butterworth_bandpass(design.order, low_freq, high_freq, sample_rate)
         }
-        FilterResponse::BandStop => Err(AudioSampleError::InvalidParameter(
-            "Band-stop Butterworth filter not yet implemented".to_string(),
-        )),
+        FilterResponse::BandStop => {
+            Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "filter_response",
+                "Band-stop Butterworth filter not yet implemented",
+            )))
+        }
     }
 }
 
@@ -362,16 +373,18 @@ fn design_chebyshev_i_filter<F: RealFloat>(
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     let _nyquist = sample_rate / to_precision::<F, _>(2.0);
     let _ripple = design.passband_ripple.ok_or_else(|| {
-        AudioSampleError::InvalidParameter(
-            "Passband ripple required for Chebyshev Type I filter".to_string(),
-        )
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "passband_ripple",
+            "Passband ripple required for Chebyshev Type I filter",
+        ))
     })?;
 
     // Simplified implementation - in a full implementation, this would
     // compute the Chebyshev polynomials and design the filter accordingly
-    Err(AudioSampleError::InvalidParameter(
-        "Chebyshev Type I filter not yet fully implemented".to_string(),
-    ))
+    Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+        "filter_design",
+        "Chebyshev Type I filter not yet fully implemented",
+    )))
 }
 
 /// Design a Butterworth low-pass filter using bilinear transform.
@@ -381,9 +394,10 @@ fn design_butterworth_lowpass<F: RealFloat>(
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     if order == 0 {
-        return Err(AudioSampleError::InvalidParameter(
-            "Filter order must be greater than 0".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "filter_order",
+            "Filter order must be greater than 0",
+        )));
     }
 
     // Pre-warp the cutoff frequency for bilinear transform
@@ -442,9 +456,10 @@ fn design_butterworth_highpass<F: RealFloat>(
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     if order == 0 {
-        return Err(AudioSampleError::InvalidParameter(
-            "Filter order must be greater than 0".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "filter_order",
+            "Filter order must be greater than 0",
+        )));
     }
 
     // For a simple 2nd-order Butterworth high-pass filter
@@ -491,9 +506,10 @@ fn design_butterworth_bandpass<F: RealFloat>(
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     if order == 0 {
-        return Err(AudioSampleError::InvalidParameter(
-            "Filter order must be greater than 0".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "filter_order",
+            "Filter order must be greater than 0",
+        )));
     }
 
     // Simplified implementation - cascade low-pass and high-pass

@@ -12,7 +12,8 @@ use crate::operations::types::NormalizationMethod;
 use crate::repr::AudioData;
 use crate::{
     AudioProcessing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    AudioStatistics, AudioTypeConversion, CastFrom, ConvertTo, I24, RealFloat, to_precision,
+    AudioStatistics, AudioTypeConversion, CastFrom, ConversionError, ConvertTo, I24, LayoutError,
+    ParameterError, RealFloat, to_precision,
 };
 
 use ndarray::Axis;
@@ -59,9 +60,12 @@ where
     fn normalize(&mut self, min: T, max: T, method: NormalizationMethod) -> AudioSampleResult<()> {
         // Validate input range
         if min >= max {
-            return Err(AudioSampleError::InvalidRange(format!(
-                "Invalid normalization range: min ({:?}) >= max ({:?})",
-                min, max
+            return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+                "normalization_range",
+                format!("min ({:?}) >= max ({:?})", min, max),
+                format!("{:?}", min),
+                format!("{:?}", max),
+                "min value must be less than max value for normalization",
             )));
         }
 
@@ -320,9 +324,12 @@ where
     /// ```
     fn clip(&mut self, min_val: T, max_val: T) -> AudioSampleResult<()> {
         if min_val > max_val {
-            return Err(AudioSampleError::InvalidRange(format!(
-                "Invalid clipping range: min ({:?}) > max ({:?})",
-                min_val, max_val
+            return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+                "clipping_range",
+                format!("min ({:?}) > max ({:?})", min_val, max_val),
+                format!("{:?}", min_val),
+                format!("{:?}", max_val),
+                "min value must be less than or equal to max value for clipping",
             )));
         }
 
@@ -383,31 +390,31 @@ where
         match &mut self.data {
             AudioData::Mono(arr) => {
                 if window.len() != arr.len() {
-                    return Err(AudioSampleError::DimensionMismatch(format!(
-                        "Window length ({}) doesn't match audio length ({})",
-                        window.len(),
-                        arr.len()
+                    return Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
+                        format!("window length ({})", window.len()),
+                        format!("audio length ({})", arr.len()),
+                        "apply_window",
                     )));
                 }
 
                 for (sample, &win_coeff) in arr.iter_mut().zip(window.iter()) {
-                    *sample = *sample * win_coeff;
+                    *sample *= win_coeff;
                 }
             }
             AudioData::Multi(arr) => {
                 let num_samples = arr.ncols();
                 if window.len() != num_samples {
-                    return Err(AudioSampleError::DimensionMismatch(format!(
-                        "Window length ({}) doesn't match audio length ({})",
-                        window.len(),
-                        num_samples
+                    return Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
+                        format!("window length ({})", window.len()),
+                        format!("audio length ({})", num_samples),
+                        "apply_window",
                     )));
                 }
 
                 // Apply window to each channel
                 for mut channel in arr.axis_iter_mut(Axis(0)) {
                     for (sample, &win_coeff) in channel.iter_mut().zip(window.iter()) {
-                        *sample = *sample * win_coeff;
+                        *sample *= win_coeff;
                     }
                 }
             }
@@ -420,17 +427,19 @@ where
     /// This implements basic FIR filtering using direct convolution.
     fn apply_filter(&mut self, filter_coeffs: &[T]) -> AudioSampleResult<()> {
         if filter_coeffs.is_empty() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Filter coefficients cannot be empty".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "filter_coeffs",
+                "Filter coefficients cannot be empty",
+            )));
         }
 
         match &mut self.data {
             AudioData::Mono(arr) => {
                 if arr.len() < filter_coeffs.len() {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Audio length must be at least as long as filter length".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "audio_length",
+                        "Audio length must be at least as long as filter length",
+                    )));
                 }
 
                 let input = arr.to_vec(); // Copy original data
@@ -441,16 +450,17 @@ where
                 for i in 0..output_len {
                     let mut sum = T::zero();
                     for j in 0..filter_len {
-                        sum = sum + input[i + j] * filter_coeffs[j];
+                        sum += input[i + j] * filter_coeffs[j];
                     }
                     arr[i] = sum;
                 }
             }
             AudioData::Multi(arr) => {
                 if arr.ncols() < filter_coeffs.len() {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Audio length must be at least as long as filter length".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "audio_length",
+                        "Audio length must be at least as long as filter length",
+                    )));
                 }
 
                 let filter_len = filter_coeffs.len();
@@ -467,7 +477,7 @@ where
                     for i in 0..output_len {
                         let mut sum = T::zero();
                         for j in 0..filter_len {
-                            sum = sum + input_channel[i + j] * filter_coeffs[j];
+                            sum += input_channel[i + j] * filter_coeffs[j];
                         }
                         output_channel[i] = sum;
                     }
@@ -488,11 +498,13 @@ where
             let x: f64 = match x.convert_to() {
                 Ok(val) => val,
                 Err(e) => {
-                    return Err(AudioSampleError::ConversionError(
-                        e.to_string(),
-                        "f64".to_string(),
-                        std::any::type_name::<T>().to_string(),
-                        "mu_compress".to_string(),
+                    return Err(AudioSampleError::Conversion(
+                        ConversionError::audio_conversion(
+                            e.to_string(),
+                            "f64",
+                            std::any::type_name::<T>(),
+                            "mu_compress conversion failed",
+                        ),
                     ));
                 }
             };
@@ -560,9 +572,10 @@ where
         let normalized_cutoff = cutoff_hz / sample_rate;
 
         if normalized_cutoff >= to_precision::<F, _>(0.5) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Cutoff frequency must be less than Nyquist frequency".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "cutoff_hz",
+                "Cutoff frequency must be less than Nyquist frequency",
+            )));
         }
 
         // Simple single-pole low-pass filter coefficient
@@ -609,9 +622,10 @@ where
         let normalized_cutoff = cutoff_hz / sample_rate;
 
         if normalized_cutoff >= to_precision::<F, _>(0.5) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Cutoff frequency must be less than Nyquist frequency".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "cutoff_hz",
+                "Cutoff frequency must be less than Nyquist frequency",
+            )));
         }
 
         // Simple high-pass filter using RC circuit model
@@ -653,20 +667,21 @@ where
     }
 
     /// Applies a band-pass filter between low and high frequencies.
-    fn band_pass_filter<F>(&mut self, low_hz: F, high_hz: F) -> AudioSampleResult<()>
+    fn band_pass_filter<F>(&mut self, low_cutoff_hz: F, high_cutoff_hz: F) -> AudioSampleResult<()>
     where
         F: RealFloat + ConvertTo<T>,
         T: CastFrom<F> + ConvertTo<F>,
     {
-        if low_hz >= high_hz {
-            return Err(AudioSampleError::InvalidParameter(
-                "Low frequency must be less than high frequency".to_string(),
-            ));
+        if low_cutoff_hz >= high_cutoff_hz {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frequency_range",
+                "Low frequency must be less than high frequency",
+            )));
         }
 
         // Apply high-pass filter first, then low-pass
-        self.high_pass_filter(low_hz)?;
-        self.low_pass_filter(high_hz)?;
+        self.high_pass_filter(low_cutoff_hz)?;
+        self.low_pass_filter(high_cutoff_hz)?;
 
         Ok(())
     }
@@ -679,7 +694,11 @@ where
         quality: ResamplingQuality,
     ) -> AudioSampleResult<Self> {
         let resampled = crate::resampling::resample(self, target_sample_rate, quality)?;
-        Ok(unsafe { std::mem::transmute(resampled) })
+        Ok(unsafe {
+            std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
+                resampled,
+            )
+        })
     }
 
     /// Resamples audio by a specific ratio.
@@ -690,7 +709,11 @@ where
         quality: ResamplingQuality,
     ) -> AudioSampleResult<Self> {
         let resampled = crate::resampling::resample_by_ratio(self, ratio, quality)?;
-        Ok(unsafe { std::mem::transmute(resampled) })
+        Ok(unsafe {
+            std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
+                resampled,
+            )
+        })
     }
 }
 
@@ -742,7 +765,7 @@ where
                     }
                 });
 
-                let median = if values.len() % 2 == 0 {
+                let median = if values.len().is_multiple_of(2) {
                     let mid = values.len() / 2;
                     let median = values[mid - 1] + values[mid];
                     let median: f64 = median.cast_into();
@@ -766,7 +789,7 @@ where
                     }
                 });
 
-                let median = if values.len() % 2 == 0 {
+                let median = if values.len().is_multiple_of(2) {
                     let mid = values.len() / 2;
                     let median = values[mid - 1] + values[mid];
                     let median: f64 = median.cast_into();
@@ -798,8 +821,8 @@ where
                     .sum();
 
                 let variance = variance_sum / arr.len() as f64;
-                let variance_sqrt = variance.sqrt();
-                variance_sqrt
+
+                variance.sqrt()
             }
             AudioData::Multi(arr) => {
                 if arr.len() <= 1 {
@@ -815,8 +838,8 @@ where
                     .sum();
 
                 let variance = variance_sum / arr.len() as f64;
-                let variance_sqrt = variance.sqrt();
-                variance_sqrt
+
+                variance.sqrt()
             }
         }
     }
@@ -836,9 +859,13 @@ where
 ///     .clip(-0.8, 0.8)
 ///     .apply()?;
 /// ```
+type ProcessingOperation<'a, T> =
+    Box<dyn FnOnce(&mut AudioSamples<'a, T>) -> AudioSampleResult<()> + 'a>;
+
+/// A builder for chaining multiple audio processing operations.
 pub struct ProcessingBuilder<'a, T: AudioSample> {
     audio: &'a mut AudioSamples<'a, T>,
-    operations: Vec<Box<dyn FnOnce(&mut AudioSamples<'a, T>) -> AudioSampleResult<()> + 'a>>,
+    operations: Vec<ProcessingOperation<'a, T>>,
 }
 
 impl<'a, T: AudioSample> ProcessingBuilder<'a, T>
@@ -931,9 +958,9 @@ where
     }
 
     /// Adds a band-pass filter operation to the processing chain.
-    pub fn band_pass_filter(mut self, low_hz: f64, high_hz: f64) -> Self {
+    pub fn band_pass_filter(mut self, low_cutoff_hz: f64, high_cutoff_hz: f64) -> Self {
         self.operations.push(Box::new(move |audio| {
-            audio.band_pass_filter(low_hz, high_hz)
+            audio.band_pass_filter(low_cutoff_hz, high_cutoff_hz)
         }));
         self
     }

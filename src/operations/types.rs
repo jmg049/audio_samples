@@ -3,7 +3,9 @@
 //! This module contains all the configuration types, enums, and helper structures
 //! used by the audio processing traits.
 
-use crate::{AudioSampleError, AudioSampleResult, RealFloat, to_precision};
+use std::str::FromStr;
+
+use crate::{AudioSampleError, AudioSampleResult, ParameterError, RealFloat, to_precision};
 
 /// Pad side enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,13 +16,17 @@ pub enum PadSide {
     Right,
 }
 
-impl PadSide {
-    /// Create PadSide from &str
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for PadSide {
+    type Err = crate::AudioSampleError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "left" => Some(PadSide::Left),
-            "right" => Some(PadSide::Right),
-            _ => None,
+            "left" => Ok(PadSide::Left),
+            "right" => Ok(PadSide::Right),
+            _ => Err(AudioSampleError::Parameter(ParameterError::InvalidValue {
+                parameter: s.to_string(),
+                reason: "Expected 'left' or 'right'".to_string(),
+            })),
         }
     }
 }
@@ -514,7 +520,7 @@ impl<F: RealFloat> EqBand<F> {
     }
 
     /// Enable or disable this EQ band.
-    pub fn set_enabled(&mut self, enabled: bool) {
+    pub const fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
@@ -528,23 +534,30 @@ impl<F: RealFloat> EqBand<F> {
         let nyquist = sample_rate / to_precision(2.0);
 
         if self.frequency <= F::zero() || self.frequency >= nyquist {
-            return Err(AudioSampleError::InvalidParameter(format!(
-                "Frequency {} Hz is out of range (0, {})",
-                self.frequency, nyquist
+            return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+                "frequency",
+                format!("{} Hz", self.frequency),
+                "0",
+                format!("{}", nyquist),
+                "Frequency must be between 0 and Nyquist frequency",
             )));
         }
 
         if self.q_factor <= F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Q factor must be positive".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "q_factor",
+                "Q factor must be positive",
+            )));
         }
 
         // Check reasonable gain limits
         if self.gain_db.abs() > to_precision(40.0) {
-            return Err(AudioSampleError::InvalidParameter(format!(
-                "Gain {} dB is out of reasonable range (-40, 40)",
-                self.gain_db
+            return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+                "gain_db",
+                format!("{} dB", self.gain_db),
+                "-40",
+                "40",
+                "Gain must be within reasonable range",
             )));
         }
 
@@ -601,17 +614,17 @@ impl<F: RealFloat> ParametricEq<F> {
     }
 
     /// Get the number of bands in the EQ.
-    pub fn band_count(&self) -> usize {
+    pub const fn band_count(&self) -> usize {
         self.bands.len()
     }
 
     /// Set the overall output gain.
-    pub fn set_output_gain(&mut self, gain_db: F) {
+    pub const fn set_output_gain(&mut self, gain_db: F) {
         self.output_gain_db = gain_db;
     }
 
     /// Enable or disable the EQ (bypass).
-    pub fn set_bypassed(&mut self, bypassed: bool) {
+    pub const fn set_bypassed(&mut self, bypassed: bool) {
         self.bypassed = bypassed;
     }
 
@@ -626,11 +639,9 @@ impl<F: RealFloat> ParametricEq<F> {
             match band.validate(sample_rate) {
                 Ok(_) => {}
                 Err(er) => {
-                    return Err(AudioSampleError::InvalidParameter(format!(
-                        "Band {}/{} validation error: {}",
-                        i,
-                        self.bands.len(),
-                        er
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "band",
+                        format!("Band {}/{} validation error: {}", i, self.bands.len(), er),
                     )));
                 }
             }
@@ -759,55 +770,59 @@ impl<F: RealFloat> SideChainConfig<F> {
     }
 
     /// Enable side-chain processing.
-    pub fn enable(&mut self) {
+    pub const fn enable(&mut self) {
         self.enabled = true;
     }
 
     /// Disable side-chain processing.
-    pub fn disable(&mut self) {
+    pub const fn disable(&mut self) {
         self.enabled = false;
     }
 
     /// Set high-pass filter frequency for side-chain signal.
-    pub fn set_high_pass(&mut self, freq: F) {
+    pub const fn set_high_pass(&mut self, freq: F) {
         self.high_pass_freq = Some(freq);
     }
 
     /// Set low-pass filter frequency for side-chain signal.
-    pub fn set_low_pass(&mut self, freq: F) {
+    pub const fn set_low_pass(&mut self, freq: F) {
         self.low_pass_freq = Some(freq);
     }
 
     /// Validate side-chain configuration.
     pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
-        if let Some(hp_freq) = self.high_pass_freq {
-            if hp_freq <= F::zero() || hp_freq >= sample_rate / to_precision(2.0) {
-                return Err(AudioSampleError::InvalidParameter(
-                    "High-pass frequency must be between 0 and Nyquist frequency".to_string(),
-                ));
-            }
+        if let Some(hp_freq) = self.high_pass_freq
+            && (hp_freq <= F::zero() || hp_freq >= sample_rate / to_precision(2.0))
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "high_pass_freq",
+                "High-pass frequency must be between 0 and Nyquist frequency",
+            )));
         }
 
-        if let Some(lp_freq) = self.low_pass_freq {
-            if lp_freq <= F::zero() || lp_freq >= sample_rate / to_precision(2.0) {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Low-pass frequency must be between 0 and Nyquist frequency".to_string(),
-                ));
-            }
+        if let Some(lp_freq) = self.low_pass_freq
+            && (lp_freq <= F::zero() || lp_freq >= sample_rate / to_precision(2.0))
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "low_pass_freq",
+                "Low-pass frequency must be between 0 and Nyquist frequency",
+            )));
         }
 
-        if let (Some(hp), Some(lp)) = (self.high_pass_freq, self.low_pass_freq) {
-            if hp >= lp {
-                return Err(AudioSampleError::InvalidParameter(
-                    "High-pass frequency must be less than low-pass frequency".to_string(),
-                ));
-            }
+        if let (Some(hp), Some(lp)) = (self.high_pass_freq, self.low_pass_freq)
+            && (hp >= lp)
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "high_pass_freq",
+                "High-pass frequency must be less than low-pass frequency",
+            )));
         }
 
         if self.external_mix < F::zero() || self.external_mix > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "External mix must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "external_mix",
+                "External mix must be between F::zero() and F::one()",
+            )));
         }
 
         Ok(())
@@ -916,45 +931,52 @@ impl<F: RealFloat> CompressorConfig<F> {
     /// Validate compressor configuration.
     pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         if self.threshold_db > F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Threshold should be negative (below 0 dB)".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "threshold_db",
+                "Threshold should be negative (below 0 dB)",
+            )));
         }
 
         if self.ratio < F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Ratio must be F::one() or greater".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "ratio",
+                "Ratio must be F::one() or greater",
+            )));
         }
 
         if self.attack_ms < to_precision(0.01) || self.attack_ms > to_precision(1000.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Attack time must be between 0.01 and 1000 ms".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Attack time must be between 0.01 and 1000 ms",
+            )));
         }
 
         if self.release_ms < F::one() || self.release_ms > to_precision(10000.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Release time must be between F::one() and 10000 ms".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Release time must be between F::one() and 10000 ms",
+            )));
         }
 
         if self.makeup_gain_db.abs() > to_precision(40.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Makeup gain must be between -40.0 and +40.0 dB".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Makeup gain must be between -40.0 and +40.0 dB",
+            )));
         }
 
         if self.knee_width_db < F::zero() || self.knee_width_db > to_precision(20.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Knee width must be between F::zero() and 20.0 dB".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Knee width must be between F::zero() and 20.0 dB",
+            )));
         }
 
         if self.lookahead_ms < F::zero() || self.lookahead_ms > to_precision(20.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Lookahead time must be between F::zero() and 20.0 ms".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Lookahead time must be between F::zero() and 20.0 ms",
+            )));
         }
 
         self.side_chain.validate(sample_rate)
@@ -1062,33 +1084,38 @@ impl<F: RealFloat> LimiterConfig<F> {
     /// Validate limiter configuration.
     pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         if self.ceiling_db > F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Ceiling should be negative (below 0 dB)".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Ceiling should be negative (below 0 dB)",
+            )));
         }
 
         if self.attack_ms < to_precision(0.001) || self.attack_ms > to_precision(100.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Attack time must be between 0.001 and 100 ms".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Attack time must be between 0.001 and 100 ms",
+            )));
         }
 
         if self.release_ms < F::one() || self.release_ms > to_precision(10000.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Release time must be between F::one() and 10000 ms".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Release time must be between F::one() and 10000 ms",
+            )));
         }
 
         if self.knee_width_db < F::zero() || self.knee_width_db > to_precision(10.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Knee width must be between F::zero() and 10.0 dB".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Knee width must be between F::zero() and 10.0 dB",
+            )));
         }
 
         if self.lookahead_ms < F::zero() || self.lookahead_ms > to_precision(20.0) {
-            return Err(AudioSampleError::InvalidParameter(
-                "Lookahead time must be between F::zero() and 20.0 ms".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Lookahead time must be between F::zero() and 20.0 ms",
+            )));
         }
 
         self.side_chain.validate(sample_rate)
@@ -1217,7 +1244,7 @@ impl<F: RealFloat> CqtConfig<F> {
     /// # Arguments
     /// * `fmin` - Minimum frequency in Hz
     /// * `fmax` - Maximum frequency in Hz (None for Nyquist)
-    pub fn set_frequency_range(&mut self, fmin: F, fmax: Option<F>) {
+    pub const fn set_frequency_range(&mut self, fmin: F, fmax: Option<F>) {
         self.fmin = fmin;
         self.fmax = fmax;
     }
@@ -1226,7 +1253,7 @@ impl<F: RealFloat> CqtConfig<F> {
     ///
     /// # Arguments
     /// * `bins_per_octave` - Number of frequency bins per octave
-    pub fn set_bins_per_octave(&mut self, bins_per_octave: usize) {
+    pub const fn set_bins_per_octave(&mut self, bins_per_octave: usize) {
         self.bins_per_octave = bins_per_octave;
     }
 
@@ -1234,7 +1261,7 @@ impl<F: RealFloat> CqtConfig<F> {
     ///
     /// # Arguments
     /// * `q_factor` - Quality factor (higher = better frequency resolution)
-    pub fn set_q_factor(&mut self, q_factor: F) {
+    pub const fn set_q_factor(&mut self, q_factor: F) {
         self.q_factor = q_factor;
     }
 
@@ -1256,13 +1283,17 @@ impl<F: RealFloat> CqtConfig<F> {
     ///
     /// # Returns
     /// Number of frequency bins in the CQT
+    ///
+    /// # Panics
+    ///
+    /// Panics if the octaves calculation results in a value that cannot be converted to usize.
     pub fn num_bins(&self, sample_rate: F) -> usize {
         let fmax = self.effective_fmax(sample_rate);
         let octaves = (fmax / self.fmin).log2();
         (octaves * to_precision::<F, _>(self.bins_per_octave))
             .ceil()
             .to_usize()
-            .expect(" self.bins_per_octave).unwrap()).ceil().to_usize( is a valid float to cast to")
+            .expect("octaves * self.bins_per_octave is a valid float to cast to")
     }
 
     /// Calculate the center frequency for a given bin index.
@@ -1299,54 +1330,62 @@ impl<F: RealFloat> CqtConfig<F> {
     /// Result indicating whether the configuration is valid
     pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         if self.bins_per_octave == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Bins per octave must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Bins per octave must be greater than 0",
+            )));
         }
 
         if self.fmin <= F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Minimum frequency must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Minimum frequency must be greater than 0",
+            )));
         }
 
         let nyquist = sample_rate / to_precision(2.0);
         if self.fmin >= nyquist {
-            return Err(AudioSampleError::InvalidParameter(
-                "Minimum frequency must be less than Nyquist frequency".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Minimum frequency must be less than Nyquist frequency",
+            )));
         }
 
         if let Some(fmax) = self.fmax {
             if fmax <= self.fmin {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Maximum frequency must be greater than minimum frequency".to_string(),
-                ));
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "parameter",
+                    "Maximum frequency must be greater than minimum frequency",
+                )));
             }
             if fmax > nyquist {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Maximum frequency must be less than or equal to Nyquist frequency".to_string(),
-                ));
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "parameter",
+                    "Maximum frequency must be less than or equal to Nyquist frequency",
+                )));
             }
         }
 
         if self.q_factor <= F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Quality factor must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Quality factor must be greater than 0",
+            )));
         }
 
         if self.sparsity_threshold < F::zero() || self.sparsity_threshold > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Sparsity threshold must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Sparsity threshold must be between F::zero() and F::one()",
+            )));
         }
 
         // Check that we have at least one bin
         if self.num_bins(sample_rate) == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "CQT configuration results in zero frequency bins".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "CQT configuration results in zero frequency bins",
+            )));
         }
 
         Ok(())
@@ -1473,45 +1512,50 @@ impl<F: RealFloat> AdaptiveThresholdConfig<F> {
     }
 
     /// Set the minimum threshold value.
-    pub fn set_min_threshold(&mut self, min_threshold: F) {
+    pub const fn set_min_threshold(&mut self, min_threshold: F) {
         self.min_threshold = min_threshold;
     }
 
     /// Set the maximum threshold value.
-    pub fn set_max_threshold(&mut self, max_threshold: F) {
+    pub const fn set_max_threshold(&mut self, max_threshold: F) {
         self.max_threshold = max_threshold;
     }
 
     /// Validate the adaptive threshold configuration.
     pub fn validate(&self) -> AudioSampleResult<()> {
         if self.delta < F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Delta must be non-negative".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Delta must be non-negative",
+            )));
         }
 
         if self.percentile < F::zero() || self.percentile > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Percentile must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Percentile must be between F::zero() and F::one()",
+            )));
         }
 
         if self.window_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Window size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Window size must be greater than 0",
+            )));
         }
 
         if self.min_threshold < F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Minimum threshold must be non-negative".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Minimum threshold must be non-negative",
+            )));
         }
 
         if self.max_threshold <= self.min_threshold {
-            return Err(AudioSampleError::InvalidParameter(
-                "Maximum threshold must be greater than minimum threshold".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Maximum threshold must be greater than minimum threshold",
+            )));
         }
 
         Ok(())
@@ -1642,23 +1686,27 @@ impl<F: RealFloat> PeakPickingConfig<F> {
     }
 
     /// Set the minimum peak separation in samples.
-    pub fn set_min_peak_separation(&mut self, samples: usize) {
+    pub const fn set_min_peak_separation(&mut self, samples: usize) {
         self.min_peak_separation = samples;
     }
 
     /// Set the minimum peak separation in milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the millisecond to sample conversion results in a value that cannot be converted to usize.
     pub fn set_min_peak_separation_ms(&mut self, ms: F, sample_rate: F) {
-        self.min_peak_separation = (ms * sample_rate / to_precision(1000.0)).to_usize().expect("Given positive ms and sample rate this value will always be >= 0 which can be fast to a usize");
+        self.min_peak_separation = (ms * sample_rate / to_precision(1000.0)).to_usize().expect("Given positive ms and sample rate this value will always be >= 0 which can be cast to a usize");
     }
 
     /// Enable or disable pre-emphasis.
-    pub fn set_pre_emphasis(&mut self, enabled: bool, coeff: F) {
+    pub const fn set_pre_emphasis(&mut self, enabled: bool, coeff: F) {
         self.pre_emphasis = enabled;
         self.pre_emphasis_coeff = coeff;
     }
 
     /// Enable or disable median filtering.
-    pub fn set_median_filter(&mut self, enabled: bool, length: usize) {
+    pub const fn set_median_filter(&mut self, enabled: bool, length: usize) {
         self.median_filter = enabled;
         self.median_filter_length = length;
     }
@@ -1668,21 +1716,24 @@ impl<F: RealFloat> PeakPickingConfig<F> {
         self.adaptive_threshold.validate()?;
 
         if self.min_peak_separation == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Minimum peak separation must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Minimum peak separation must be greater than 0",
+            )));
         }
 
         if self.pre_emphasis_coeff < F::zero() || self.pre_emphasis_coeff > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Pre-emphasis coefficient must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Pre-emphasis coefficient must be between F::zero() and F::one()",
+            )));
         }
 
-        if self.median_filter_length == 0 || self.median_filter_length % 2 == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Median filter length must be a positive odd integer".to_string(),
-            ));
+        if self.median_filter_length == 0 || self.median_filter_length.is_multiple_of(2) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Median filter length must be a positive odd integer",
+            )));
         }
 
         Ok(())
@@ -1827,7 +1878,7 @@ impl<F: RealFloat> OnsetConfig<F> {
     ///
     /// # Arguments
     /// * `hop_size` - Hop size in samples (must be > 0)
-    pub fn set_hop_size(&mut self, hop_size: usize) {
+    pub const fn set_hop_size(&mut self, hop_size: usize) {
         self.hop_size = hop_size;
     }
 
@@ -1851,7 +1902,7 @@ impl<F: RealFloat> OnsetConfig<F> {
     ///
     /// # Arguments
     /// * `enabled` - Whether to use adaptive thresholding
-    pub fn set_adaptive_threshold(&mut self, enabled: bool) {
+    pub const fn set_adaptive_threshold(&mut self, enabled: bool) {
         self.adaptive_threshold = enabled;
     }
 
@@ -1870,6 +1921,10 @@ impl<F: RealFloat> OnsetConfig<F> {
     ///
     /// # Returns
     /// Window size in samples
+    ///
+    /// # Panics
+    ///
+    /// Panics if the minimum period calculation results in a value that cannot be converted to usize.
     pub fn effective_window_size(&self, sample_rate: F) -> usize {
         self.window_size.unwrap_or_else(|| {
             // Auto-calculate based on lowest frequency (4 periods for good resolution)
@@ -1911,6 +1966,10 @@ impl<F: RealFloat> OnsetConfig<F> {
     ///
     /// # Returns
     /// Frame index
+    ///
+    /// # Panics
+    ///
+    /// Panics if the time to frame conversion results in a value that cannot be converted to usize.
     pub fn seconds_to_frame(&self, time_seconds: F, sample_rate: F) -> usize {
         ((time_seconds * sample_rate) / to_precision::<F, _>(self.hop_size).round())
             .to_usize()
@@ -1924,65 +1983,75 @@ impl<F: RealFloat> OnsetConfig<F> {
     ///
     /// # Returns
     /// Result indicating whether the configuration is valid
+    ///
+    /// # Panics
+    ///
+    /// Panics if time resolution conversion to f64 fails.
     pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
         // Validate CQT configuration
         self.cqt_config.validate(sample_rate)?;
 
         // Validate hop size
         if self.hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size must be greater than 0",
+            )));
         }
 
         // Validate threshold
         if self.threshold < F::zero() || self.threshold > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Threshold must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Threshold must be between F::zero() and F::one()",
+            )));
         }
 
         // Validate minimum onset interval
         if self.min_onset_interval <= F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Minimum onset interval must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Minimum onset interval must be greater than 0",
+            )));
         }
 
         // Validate pre-emphasis
         if self.pre_emphasis < F::zero() || self.pre_emphasis > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Pre-emphasis factor must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Pre-emphasis factor must be between F::zero() and F::one()",
+            )));
         }
 
         // Validate window size if specified
-        if let Some(window_size) = self.window_size {
-            if window_size == 0 {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Window size must be greater than 0".to_string(),
-                ));
-            }
+        if let Some(window_size) = self.window_size
+            && (window_size == 0)
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Window size must be greater than 0",
+            )));
         }
 
         // Validate adaptive threshold parameters
-        if self.adaptive_threshold {
-            if self.median_filter_length == 0 {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Median filter length must be greater than 0".to_string(),
-                ));
-            }
-            if self.adaptive_threshold_multiplier <= F::zero() {}
+        if self.adaptive_threshold && self.median_filter_length == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Median filter length must be greater than 0",
+            )));
         }
 
         // Check that time resolution is reasonable
         let time_resolution = self.time_resolution(sample_rate);
         if time_resolution > to_precision(0.1) {
-            return Err(AudioSampleError::InvalidParameter(format!(
-                "Time resolution ({:.3}s) is too low. Consider reducing hop size.",
-                time_resolution
-                    .to_f64()
-                    .expect("We know this is at least a f32, so f64 conversion is safe")
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                format!(
+                    "Time resolution ({:.3}s) is too low. Consider reducing hop size.",
+                    time_resolution
+                        .to_f64()
+                        .expect("We know this is at least a f32, so f64 conversion is safe")
+                ),
             )));
         }
 
@@ -2102,23 +2171,26 @@ impl<F: RealFloat> SpectralFluxConfig<F> {
         self.peak_picking.validate()?;
 
         if self.hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size must be greater than 0",
+            )));
         }
 
-        if let Some(window_size) = self.window_size {
-            if window_size == 0 {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Window size must be greater than 0".to_string(),
-                ));
-            }
+        if let Some(window_size) = self.window_size
+            && (window_size == 0)
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Window size must be greater than 0",
+            )));
         }
 
         if self.log_compression < F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Log compression factor must be non-negative".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Log compression factor must be non-negative",
+            )));
         }
 
         Ok(())
@@ -2231,42 +2303,48 @@ impl<F: RealFloat> ComplexOnsetConfig<F> {
         self.peak_picking.validate()?;
 
         if self.hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Hop size must be greater than 0",
+            )));
         }
 
-        if let Some(window_size) = self.window_size {
-            if window_size == 0 {
-                return Err(AudioSampleError::InvalidParameter(
-                    "Window size must be greater than 0".to_string(),
-                ));
-            }
+        if let Some(window_size) = self.window_size
+            && (window_size == 0)
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Window size must be greater than 0",
+            )));
         }
 
         if self.magnitude_weight < F::zero() || self.magnitude_weight > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Magnitude weight must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Magnitude weight must be between F::zero() and F::one()",
+            )));
         }
 
         if self.phase_weight < F::zero() || self.phase_weight > F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Phase weight must be between F::zero() and F::one()".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Phase weight must be between F::zero() and F::one()",
+            )));
         }
 
         // Both weights cannot be zero
-        if self.magnitude_weight == F::zero() && self.phase_weight == F::one() {
-            return Err(AudioSampleError::InvalidParameter(
-                "At least one of magnitude or phase weight must be greater than 0".to_string(),
-            ));
+        if self.magnitude_weight == F::zero() && self.phase_weight == F::zero() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "At least one of magnitude or phase weight must be greater than 0",
+            )));
         }
 
         if self.log_compression < F::zero() {
-            return Err(AudioSampleError::InvalidParameter(
-                "Log compression factor must be non-negative".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Log compression factor must be non-negative",
+            )));
         }
 
         Ok(())
@@ -2430,9 +2508,10 @@ impl<F: RealFloat> PerturbationMethod<F> {
         match self {
             Self::GaussianNoise { target_snr_db, .. } => {
                 if *target_snr_db < to_precision(-60.0) || *target_snr_db > to_precision(60.0) {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Target SNR should be between -60 and 60 dB".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Target SNR should be between -60 and 60 dB",
+                    )));
                 }
             }
             Self::RandomGain {
@@ -2440,14 +2519,16 @@ impl<F: RealFloat> PerturbationMethod<F> {
                 max_gain_db,
             } => {
                 if min_gain_db >= max_gain_db {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Minimum gain must be less than maximum gain".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Minimum gain must be less than maximum gain",
+                    )));
                 }
                 if *min_gain_db < to_precision(-40.0) || *max_gain_db > to_precision(20.0) {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Gain values should be between -40 dB and +20 dB".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Gain values should be between -40 dB and +20 dB",
+                    )));
                 }
             }
             Self::HighPassFilter {
@@ -2456,24 +2537,29 @@ impl<F: RealFloat> PerturbationMethod<F> {
             } => {
                 let nyquist = sample_rate / to_precision(2.0);
                 if *cutoff_hz <= F::zero() || *cutoff_hz >= nyquist {
-                    return Err(AudioSampleError::InvalidParameter(format!(
-                        "Cutoff frequency must be between 0 and Nyquist ({:.1} Hz)",
-                        nyquist
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        format!(
+                            "Cutoff frequency must be between 0 and Nyquist ({:.1} Hz)",
+                            nyquist
+                        ),
                     )));
                 }
-                if let Some(slope) = slope_db_per_octave {
-                    if *slope < F::zero() || *slope > to_precision(48.0) {
-                        return Err(AudioSampleError::InvalidParameter(
-                            "Slope must be between 0 and 48 dB/octave".to_string(),
-                        ));
-                    }
+                if let Some(slope) = slope_db_per_octave
+                    && (*slope < F::zero() || *slope > to_precision(48.0))
+                {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Slope must be between 0 and 48 dB/octave",
+                    )));
                 }
             }
             Self::PitchShift { semitones, .. } => {
                 if semitones.abs() > to_precision(12.0) {
-                    return Err(AudioSampleError::InvalidParameter(
-                        "Pitch shift should be between -12 and +12 semitones".to_string(),
-                    ));
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Pitch shift should be between -12 and +12 semitones",
+                    )));
                 }
             }
         }
@@ -2516,12 +2602,12 @@ impl<F: RealFloat> PerturbationConfig<F> {
     }
 
     /// Set the random seed for deterministic perturbation.
-    pub fn set_seed(&mut self, seed: u64) {
+    pub const fn set_seed(&mut self, seed: u64) {
         self.seed = Some(seed);
     }
 
     /// Clear the random seed to use non-deterministic perturbation.
-    pub fn clear_seed(&mut self) {
+    pub const fn clear_seed(&mut self) {
         self.seed = None;
     }
 

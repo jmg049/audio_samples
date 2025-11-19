@@ -56,7 +56,7 @@
 use crate::operations::types::{
     AdaptiveThresholdConfig, AdaptiveThresholdMethod, NormalizationMethod, PeakPickingConfig,
 };
-use crate::{AudioSampleError, AudioSampleResult, RealFloat, to_precision};
+use crate::{AudioSampleError, AudioSampleResult, ParameterError, RealFloat, to_precision};
 
 /// Compute adaptive threshold for onset strength function.
 ///
@@ -184,7 +184,10 @@ pub fn pick_peaks<F: RealFloat>(
     config: &PeakPickingConfig<F>,
 ) -> AudioSampleResult<Vec<usize>> {
     config.validate().map_err(|e| {
-        AudioSampleError::InvalidParameter(format!("Invalid peak picking config: {}", e))
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "peak_picking_config",
+            format!("Invalid peak picking config: {}", e),
+        ))
     })?;
 
     if onset_strength.is_empty() {
@@ -258,9 +261,10 @@ pub fn pick_peaks<F: RealFloat>(
 /// Filtered signal with enhanced transients
 pub fn apply_pre_emphasis<F: RealFloat>(signal: &[F], coeff: F) -> AudioSampleResult<Vec<F>> {
     if !(F::zero()..=F::one()).contains(&coeff) {
-        return Err(AudioSampleError::InvalidParameter(
-            "Pre-emphasis coefficient must be between 0.0 and 1.0".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "pre_emphasis_coefficient",
+            "Pre-emphasis coefficient must be between 0.0 and 1.0",
+        )));
     }
 
     if signal.is_empty() {
@@ -308,10 +312,11 @@ pub fn apply_median_filter<F: RealFloat>(
     signal: &[F],
     filter_length: usize,
 ) -> AudioSampleResult<Vec<F>> {
-    if filter_length == 0 || filter_length % 2 == 0 {
-        return Err(AudioSampleError::InvalidParameter(
-            "Median filter length must be odd and greater than 0".to_string(),
-        ));
+    if filter_length == 0 || filter_length.is_multiple_of(2) {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "filter_length",
+            "Median filter length must be odd and greater than 0",
+        )));
     }
 
     if signal.is_empty() {
@@ -554,9 +559,10 @@ pub fn smooth_onset_strength(
 /// Smoothed signal
 fn apply_moving_average(signal: &[f64], window_size: usize) -> AudioSampleResult<Vec<f64>> {
     if window_size == 0 {
-        return Err(AudioSampleError::InvalidParameter(
-            "Window size must be greater than 0".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "window_size",
+            "Window size must be greater than 0",
+        )));
     }
 
     if signal.is_empty() {

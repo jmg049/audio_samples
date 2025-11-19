@@ -44,7 +44,7 @@ impl<F: RealFloat> PlotBounds<F> {
     /// * `x_max` - Maximum x-coordinate
     /// * `y_min` - Minimum y-coordinate
     /// * `y_max` - Maximum y-coordinate
-    pub fn new(x_min: F, x_max: F, y_min: F, y_max: F) -> Self {
+    pub const fn new(x_min: F, x_max: F, y_min: F, y_max: F) -> Self {
         Self {
             x_min,
             x_max,
@@ -84,7 +84,7 @@ impl<F: RealFloat> PlotBounds<F> {
 }
 
 /// Metadata about a plot element
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlotMetadata {
     /// Optional title for the plot
     pub title: Option<String>,
@@ -98,40 +98,28 @@ pub struct PlotMetadata {
     pub z_order: i32,
 }
 
-impl Default for PlotMetadata {
-    fn default() -> Self {
-        Self {
-            title: None,
-            x_label: None,
-            y_label: None,
-            legend_label: None,
-            z_order: 0,
-        }
-    }
-}
-
 /// Enum for different types of plotly traces
 #[derive(Debug)]
 pub enum PlotTrace<F: RealFloat> {
     /// A scatter plot trace for line/point plots
-    Scatter(Scatter<F, F>),
+    Scatter(Box<Scatter<F, F>>),
     /// A heatmap trace for 2D data visualization
-    HeatMap(HeatMap<f64, f64, f64>),
+    HeatMap(Box<HeatMap<f64, f64, f64>>),
 }
 
 impl<F: RealFloat> PlotTrace<F> {
     /// Add this trace to a plotly Plot
     pub fn add_to_plot(self, plot: &mut Plot) {
         match self {
-            PlotTrace::Scatter(trace) => plot.add_trace(Box::new(trace)),
-            PlotTrace::HeatMap(trace) => plot.add_trace(Box::new(trace)),
+            PlotTrace::Scatter(trace) => plot.add_trace(trace),
+            PlotTrace::HeatMap(trace) => plot.add_trace(trace),
         }
     }
 
     /// Set the x-axis reference for this trace
     pub fn x_axis(self, axis_ref: &str) -> Self {
         match self {
-            PlotTrace::Scatter(trace) => PlotTrace::Scatter(*trace.x_axis(axis_ref)),
+            PlotTrace::Scatter(trace) => PlotTrace::Scatter(Box::new(*trace.x_axis(axis_ref))),
             PlotTrace::HeatMap(trace) => PlotTrace::HeatMap(trace), // HeatMaps don't support axis references the same way
         }
     }
@@ -139,7 +127,7 @@ impl<F: RealFloat> PlotTrace<F> {
     /// Set the y-axis reference for this trace
     pub fn y_axis(self, axis_ref: &str) -> Self {
         match self {
-            PlotTrace::Scatter(trace) => PlotTrace::Scatter(*trace.y_axis(axis_ref)),
+            PlotTrace::Scatter(trace) => PlotTrace::Scatter(Box::new(*trace.y_axis(axis_ref))),
             PlotTrace::HeatMap(trace) => PlotTrace::HeatMap(trace), // HeatMaps don't support axis references the same way
         }
     }
@@ -268,12 +256,8 @@ impl ColorPalette {
     ///
     /// # Returns
     /// A Plotly ColorScale corresponding to this palette
-    pub fn to_plotly_colorscale(&self) -> ColorScale {
-        match self {
-            ColorPalette::Viridis => ColorScale::Palette(ColorScalePalette::Viridis),
-            // Use Viridis for all others since they're not available
-            _ => ColorScale::Palette(ColorScalePalette::Viridis),
-        }
+    pub const fn to_plotly_colorscale(&self) -> ColorScale {
+        ColorScale::Palette(ColorScalePalette::Viridis)
     }
 }
 
@@ -329,6 +313,10 @@ impl<F: RealFloat> LineStyle<F> {
     }
 
     /// Converts this line style to a Plotly Line object.
+    ///
+    /// # Panics
+    ///
+    /// Panics if width cannot be converted to f64.
     pub fn to_plotly_line(&self) -> Line {
         Line::new()
             .color(self.color.clone())
@@ -381,6 +369,10 @@ impl<F: RealFloat> Default for MarkerStyle<F> {
 
 impl<F: RealFloat> MarkerStyle<F> {
     /// Converts this marker style to a Plotly Marker object.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size cannot be converted to usize.
     pub fn to_plotly_marker(&self) -> Marker {
         let symbol = match self.shape {
             MarkerShape::Circle => MarkerSymbol::Circle,
@@ -576,6 +568,10 @@ impl<F: RealFloat> PlotTheme<F> {
     ///
     /// # Returns
     /// A Plotly Layout configured with this theme
+    ///
+    /// # Panics
+    ///
+    /// Panics if font size cannot be converted to usize.
     pub fn to_plotly_layout(&self, title: Option<&str>) -> Layout {
         let mut layout = Layout::new()
             .font(
@@ -608,6 +604,10 @@ impl<F: RealFloat> PlotTheme<F> {
     ///
     /// # Returns
     /// A Plotly Axis configured with this theme
+    ///
+    /// # Panics
+    ///
+    /// Panics if label font size cannot be converted to usize.
     pub fn create_axis(&self, title: &str) -> Axis {
         Axis::new()
             .title(
@@ -703,9 +703,10 @@ impl<F: RealFloat> PlotTheme<F> {
 }
 
 /// Phase display mode for complex spectrum analysis
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum PhaseDisplayMode {
     /// Wrapped phase (-π to π)
+    #[default]
     Wrapped,
     /// Unwrapped phase (continuous)
     Unwrapped,
@@ -715,27 +716,16 @@ pub enum PhaseDisplayMode {
     UnwrappedDegrees,
 }
 
-impl Default for PhaseDisplayMode {
-    fn default() -> Self {
-        Self::Wrapped
-    }
-}
-
 /// Frequency axis scaling options
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum FrequencyAxisScale {
     /// Linear frequency scale
+    #[default]
     Linear,
     /// Logarithmic frequency scale
     Logarithmic,
     /// Mel frequency scale
     Mel,
-}
-
-impl Default for FrequencyAxisScale {
-    fn default() -> Self {
-        Self::Linear
-    }
 }
 
 /// Configuration for complex spectrum plots

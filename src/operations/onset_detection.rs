@@ -81,7 +81,7 @@ use crate::operations::types::{
 };
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, RealFloat, to_precision,
+    I24, ParameterError, RealFloat, to_precision,
 };
 use ndarray::Array2;
 
@@ -320,9 +320,10 @@ where
         config.validate(sample_rate)?;
 
         if hop_size == 0 {
-            return Err(AudioSampleError::InvalidParameter(
-                "Hop size must be greater than 0".to_string(),
-            ));
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                "Hop size must be greater than 0",
+            )));
         }
 
         match method {
@@ -509,6 +510,10 @@ where
     /// # Returns
     ///
     /// 2D array with dimensions (num_bins, num_frames) containing phase deviation values
+    ///
+    /// # Panics
+    ///
+    /// Panics if the minimum period calculation results in a value that cannot be converted to usize.
     pub fn phase_deviation_matrix<F>(
         &self,
         config: &ComplexOnsetConfig<F>,
@@ -594,6 +599,10 @@ where
     /// # Returns
     ///
     /// 2D array with dimensions (num_bins, num_frames) containing magnitude difference values
+    ///
+    /// # Panics
+    ///
+    /// Panics if the minimum period calculation results in a value that cannot be converted to usize.
     pub fn magnitude_difference_matrix<F>(
         &self,
         config: &ComplexOnsetConfig<F>,
@@ -751,18 +760,19 @@ where
         for (i, _) in odf.iter().enumerate() {
             let start = i.saturating_sub(window);
             let end = (i + window + 1).min(odf.len());
-            let mut acc = F::zero();
-            for j in start..end {
-                acc += odf[j];
-            }
+            let acc: F = odf
+                .iter()
+                .skip(start)
+                .take(end - start)
+                .fold(F::zero(), |acc, x| acc + *x);
             smoothed[i] = acc / to_precision(end - start);
 
             // Report progress for smoothing
-            if let Some(callback) = progress_callback {
-                if i % (odf.len() / 10).max(1) == 0 {
-                    let frac = to_precision::<F, usize>(i) / to_precision::<F, usize>(odf.len());
-                    callback(ProgressPhase::Forward(frac));
-                }
+            if let Some(callback) = progress_callback
+                && i % (odf.len() / 10).max(1) == 0
+            {
+                let frac = to_precision::<F, usize>(i) / to_precision::<F, usize>(odf.len());
+                callback(ProgressPhase::Forward(frac));
             }
         }
 
@@ -773,11 +783,11 @@ where
             .enumerate()
             .map(|(i, &x)| {
                 // Report progress for compression
-                if let Some(callback) = progress_callback {
-                    if i % (smoothed.len() / 10).max(1) == 0 {
-                        let frac = to_precision::<F, _>(i) / to_precision::<F, _>(smoothed.len());
-                        callback(ProgressPhase::Backward(frac));
-                    }
+                if let Some(callback) = progress_callback
+                    && i % (smoothed.len() / 10).max(1) == 0
+                {
+                    let frac = to_precision::<F, _>(i) / to_precision::<F, _>(smoothed.len());
+                    callback(ProgressPhase::Backward(frac));
                 }
                 (F::one() + compression * x).ln()
             })
@@ -995,9 +1005,10 @@ fn compute_rectified_complex_flux<F: RealFloat + Copy>(
 /// Computes onset strength function from spectral flux by emphasizing local maxima.
 fn compute_onset_strength<F: RealFloat>(flux: &[F]) -> AudioSampleResult<Vec<F>> {
     if flux.is_empty() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Flux array cannot be empty".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "flux_array",
+            "Flux array cannot be empty",
+        )));
     }
 
     let mut strength = vec![F::zero(); flux.len()];
@@ -1039,16 +1050,18 @@ fn apply_median_filter<F: RealFloat>(
     signal: &[F],
     filter_length: usize,
 ) -> AudioSampleResult<Vec<F>> {
-    if filter_length == 0 || filter_length % 2 == 0 {
-        return Err(AudioSampleError::InvalidParameter(
-            "Median filter length must be odd and greater than 0".to_string(),
-        ));
+    if filter_length == 0 || filter_length.is_multiple_of(2) {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "filter_length",
+            "Median filter length must be odd and greater than 0",
+        )));
     }
 
     if signal.is_empty() {
-        return Err(AudioSampleError::InvalidParameter(
-            "Signal cannot be empty".to_string(),
-        ));
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "signal",
+            "Signal cannot be empty",
+        )));
     }
 
     if filter_length == 1 {

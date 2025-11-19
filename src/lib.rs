@@ -2,8 +2,9 @@
 #![feature(const_type_name)]
 // Correctness and logic
 #![warn(clippy::unit_cmp)] // Detects comparing unit types
-#![warn(clippy::match_same_arms)] // Duplicate match arms
-#![warn(clippy::unreachable)] // Detects unreachable code
+#![warn(clippy::match_same_arms)]
+// Duplicate match arms
+// #![warn(clippy::unreachable)] // Detects unreachable code
 
 // Performance-focused
 #![warn(clippy::inefficient_to_string)] // `format!("{}", x)` vs `x.to_string()`
@@ -21,7 +22,6 @@
 #![warn(clippy::let_unit_value)] // Avoids binding `()` to variables
 #![warn(clippy::manual_map)] // Use `.map()` instead of manual `match`
 #![warn(clippy::unwrap_used)] // Avoids using `unwrap()`
-#![warn(clippy::panic)] // Avoids using `panic!` in production code
 
 // Maintainability
 #![warn(clippy::missing_panics_doc)] // Docs for functions that might panic
@@ -29,13 +29,11 @@
 #![warn(clippy::missing_const_for_fn)] // Suggests making eligible functions `const`
 #![allow(clippy::too_many_arguments)]
 // Allow functions with many parameters (very few and far between)
-// #![deny(missing_docs)] // Documentation is a must for release
+#![deny(missing_docs)] // Documentation is a must for release
 
 //! # AudioSamples
 //!
 //! A high-performance audio processing library for Rust that provides type-safe sample format conversions, statistical analysis, and various audio processing operations.
-//!
-//! Core building block of the wider [AudioRs](link_to_website_in_development) ecosystem.
 //!
 //! ## Overview
 //!
@@ -48,7 +46,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! audio_samples = "1.0.0"
+//! audio_samples = "0.10.0"
 //! ```
 //!
 //! or more easily with:
@@ -60,14 +58,14 @@
 //!
 //! ```toml
 //! [dependencies]
-//! audio_samples = { version = "1.0.0", features = ["fft", "plotting"] }
+//! audio_samples = { version = "0.10.0", features = ["fft", "plotting"] }
 //! ```
 //!
 //! Or enable everything:
 //!
 //! ```toml
 //! [dependencies]
-//! audio_samples = { version = "1.0.0", features = ["full"] }
+//! audio_samples = { version = "0.10.0", features = ["full"] }
 //! ```
 //!
 //! ## Features
@@ -82,6 +80,27 @@
 //! - **`simd`** - SIMD acceleration for supported operations
 //! - **`beat-detection`** - Tempo and beat tracking (requires `fft`)
 //! - **`full`** - Enables all features
+//!
+//! ## Error Handling
+//!
+//! The library uses a hierarchical error system designed for precise error handling:
+//!
+//! ```rust
+//! use audio_samples::{AudioSampleError, ConversionError, ParameterError};
+//!
+//! match audio_result {
+//!     Ok(samples) => { /* process samples */ }
+//!     Err(AudioSampleError::Conversion(err)) => {
+//!         eprintln!("Conversion failed: {}", err);
+//!     }
+//!     Err(AudioSampleError::Parameter(err)) => {
+//!         eprintln!("Invalid parameter: {}", err);
+//!     }
+//!     Err(other_err) => {
+//!         eprintln!("Other error: {}", other_err);
+//!     }
+//! }
+//! ```
 //!
 //! ## Full Examples
 //!
@@ -215,21 +234,6 @@
 //!     .apply()?;
 //! ```
 //!
-//! ## Error Handling
-//!
-//! The library uses standard Rust error handling with `Result<T, AudioSampleError>`:
-//!
-//! ```rust
-//! use audio_samples::{AudioSampleResult, AudioSamples};
-//!
-//! fn process_audio() -> AudioSampleResult<f64> {
-//!     let audio = AudioSamples::new_mono(/* ... */, 44100);
-//!     let rms = audio.rms()?;
-//!     let variance = audio.variance()?;
-//!     Ok(variance.sqrt())
-//! }
-//! ```
-//!
 //! ## Core Type System
 //!
 //! ### Supported Sample Types
@@ -270,18 +274,8 @@
 //! - **Complex Signals**: `generate_multi_tone()` for multiple frequencies
 //! - **Calibration**: Known reference signals for testing
 //!
-//! ### Audio Analysis (`utils::detection`)
 //!
-//! - **Format Detection**: `detect_sample_rate()`, `detect_channel_layout()`
-//! - **Content Analysis**: `detect_speech_activity()`, `detect_silence_ratio()`
-//! - **Quality Metrics**: `estimate_dynamic_range()`
-//!
-//! ### Audio Comparison (`utils::comparison`)
-//!
-//! - **Similarity**: `compute_similarity()`, `cross_correlate()`
-//! - **Quality**: `signal_to_noise_ratio()`, `total_harmonic_distortion()`
-//! - **Perceptual**: `perceptual_audio_distance()`
-//!
+
 //! ```rust
 //! use audio_samples::utils::*;
 //!
@@ -292,34 +286,6 @@
 //! let has_speech = detection::detect_speech_activity(&audio)?;
 //! let snr = comparison::signal_to_noise_ratio(&signal, &noise)?;
 //! ```
-//!
-//! ## Development
-//!
-//! ### Building
-//!
-//! ```bash
-//! cargo build                    # Core features only
-//! cargo build --features full    # All features
-//! cargo build --features fft     # Specific features
-//! ```
-//!
-//! ### Testing
-//!
-//! ```bash
-//! cargo test                     # Core tests
-//! cargo test --features full     # All tests
-//! cargo clippy                   # Linting
-//! cargo fmt                      # Code formatting
-//! ```
-//!
-//! ### Examples
-//!
-//! ```bash
-//! cargo run --example iterators_demo
-//! cargo run --example processing_builder_demo --features full
-//! cargo run --example beat_tracking_with_progress --features full
-//! ```
-//!
 //! ## Documentation
 //!
 //! Full API documentation is available at [docs.rs/audio_samples](https://docs.rs/audio_samples).
@@ -350,7 +316,10 @@ pub mod utils;
 
 use std::fmt::Debug;
 
-pub use crate::error::{AudioSampleError, AudioSampleResult};
+pub use crate::error::{
+    AudioSampleError, AudioSampleResult, ConversionError, FeatureError, LayoutError,
+    ParameterError, ProcessingError,
+};
 pub use crate::iterators::{
     AudioSampleIterators, ChannelIterator, ChannelIteratorMut, FrameIterator, FrameIteratorMut,
     FrameMut, PaddingMode, WindowIterator, WindowIteratorMut, WindowMut,

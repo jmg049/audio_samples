@@ -109,7 +109,7 @@ impl<F: RealFloat, T: AudioSample> PlotElement<F> for WaveformPlot<F, T> {
             trace = trace.name(name);
         }
 
-        vec![PlotTrace::Scatter(*trace)]
+        vec![PlotTrace::Scatter(Box::new(*trace))]
     }
 }
 
@@ -193,7 +193,7 @@ impl<F: RealFloat> PlotElement<F> for SpectrogramPlot<F> {
             heatmap = heatmap.name(title);
         }
 
-        vec![PlotTrace::HeatMap(*heatmap)]
+        vec![PlotTrace::HeatMap(Box::new(*heatmap))]
     }
 }
 
@@ -229,9 +229,11 @@ impl<F: RealFloat> OnsetMarkers<F> {
 
         let bounds = PlotBounds::new(x_min, x_max, y_range.0, y_range.1);
 
-        let mut metadata = PlotMetadata::default();
-        metadata.legend_label = Some("Onsets".to_string());
-        metadata.z_order = 10; // Draw on top
+        let metadata = PlotMetadata {
+            legend_label: Some("Onsets".to_string()),
+            z_order: 10,
+            ..Default::default()
+        }; // Draw on top
 
         Self {
             onset_times,
@@ -256,7 +258,7 @@ impl<F: RealFloat> PlotElement<F> for OnsetMarkers<F> {
         let mut traces: Vec<PlotTrace<F>> = Vec::new();
 
         // Add vertical lines for onset times
-        if let Some(_) = &self.config.line_style {
+        if self.config.line_style.is_some() {
             for &time in &self.onset_times {
                 let line_trace =
                     Scatter::new(vec![time, time], vec![self.bounds.y_min, self.bounds.y_max])
@@ -264,7 +266,7 @@ impl<F: RealFloat> PlotElement<F> for OnsetMarkers<F> {
                         .line(Line::new().color(self.config.marker_style.color.clone()))
                         .show_legend(false);
 
-                traces.push(PlotTrace::Scatter(*line_trace));
+                traces.push(PlotTrace::Scatter(Box::new(*line_trace)));
             }
         }
 
@@ -296,7 +298,7 @@ impl<F: RealFloat> PlotElement<F> for OnsetMarkers<F> {
                 marker_trace = marker_trace.name(name);
             }
 
-            traces.push(PlotTrace::Scatter(*marker_trace));
+            traces.push(PlotTrace::Scatter(Box::new(*marker_trace)));
         }
 
         traces
@@ -335,13 +337,15 @@ impl<F: RealFloat> BeatMarkers<F> {
 
         let bounds = PlotBounds::new(x_min, x_max, y_range.0, y_range.1);
 
-        let mut metadata = PlotMetadata::default();
-        metadata.legend_label = if let Some(bpm) = tempo_bpm {
-            Some(format!("Beats ({:.1} BPM)", bpm))
-        } else {
-            Some("Beats".to_string())
-        };
-        metadata.z_order = 9; // Draw below onsets but above waveform
+        let metadata = PlotMetadata {
+            legend_label: if let Some(bpm) = tempo_bpm {
+                Some(format!("Beats ({:.1} BPM)", bpm))
+            } else {
+                Some("Beats".to_string())
+            },
+            z_order: 9,
+            ..Default::default()
+        }; // Draw below onsets but above waveform
 
         Self {
             beat_times,
@@ -366,7 +370,7 @@ impl<F: RealFloat> PlotElement<F> for BeatMarkers<F> {
         let mut traces: Vec<PlotTrace<F>> = Vec::new();
 
         // Add vertical lines for beat times
-        if let Some(_) = &self.config.line_style {
+        if self.config.line_style.is_some() {
             for &time in &self.beat_times {
                 let line_trace =
                     Scatter::new(vec![time, time], vec![self.bounds.y_min, self.bounds.y_max])
@@ -374,7 +378,7 @@ impl<F: RealFloat> PlotElement<F> for BeatMarkers<F> {
                         .line(Line::new().color(self.config.marker_style.color.clone()))
                         .show_legend(false);
 
-                traces.push(PlotTrace::Scatter(*line_trace));
+                traces.push(PlotTrace::Scatter(Box::new(*line_trace)));
             }
         }
 
@@ -394,10 +398,10 @@ impl<F: RealFloat> PlotElement<F> for BeatMarkers<F> {
             if let Some(ref name) = self.metadata.legend_label {
                 marker_trace = marker_trace.name(name);
             } else if let Some(bpm) = self.tempo_bpm {
-                marker_trace = marker_trace.name(&format!("Beats ({:.1} BPM)", bpm));
+                marker_trace = marker_trace.name(format!("Beats ({:.1} BPM)", bpm));
             }
 
-            traces.push(PlotTrace::Scatter(*marker_trace));
+            traces.push(PlotTrace::Scatter(Box::new(*marker_trace)));
         }
 
         traces
@@ -468,7 +472,7 @@ impl<F: RealFloat, T: AudioSample> PlotElement<F> for PowerSpectrumPlot<F, T> {
             trace = trace.name(name);
         }
 
-        vec![PlotTrace::Scatter(*trace)]
+        vec![PlotTrace::Scatter(Box::new(*trace))]
     }
 }
 
@@ -563,10 +567,10 @@ impl<F: RealFloat> PlotElement<F> for ComplexSpectrumPlot<F> {
             .map(|c| {
                 let phase = c.arg();
                 match self.config.phase_mode {
-                    PhaseDisplayMode::Wrapped => phase,
-                    PhaseDisplayMode::Unwrapped => phase, // TODO: Implement unwrapping
-                    PhaseDisplayMode::Degrees => phase.to_degrees(),
-                    PhaseDisplayMode::UnwrappedDegrees => phase.to_degrees(), // TODO: Implement unwrapping
+                    PhaseDisplayMode::Wrapped | PhaseDisplayMode::Unwrapped => phase, // TODO: Implement unwrapping
+                    PhaseDisplayMode::Degrees | PhaseDisplayMode::UnwrappedDegrees => {
+                        phase.to_degrees()
+                    } // TODO: Implement unwrapping
                 }
             })
             .collect();
@@ -577,7 +581,7 @@ impl<F: RealFloat> PlotElement<F> for ComplexSpectrumPlot<F> {
             .line(self.config.magnitude_style.to_plotly_line())
             .name("Magnitude");
 
-        traces.push(PlotTrace::Scatter(*mag_trace));
+        traces.push(PlotTrace::Scatter(Box::new(*mag_trace)));
 
         // Phase trace (if not split view)
         if !self.config.split_view {
@@ -586,7 +590,7 @@ impl<F: RealFloat> PlotElement<F> for ComplexSpectrumPlot<F> {
                 .line(self.config.phase_style.to_plotly_line())
                 .name("Phase");
 
-            traces.push(PlotTrace::Scatter(*phase_trace));
+            traces.push(PlotTrace::Scatter(Box::new(*phase_trace)));
         }
 
         traces
@@ -627,10 +631,10 @@ impl<F: RealFloat> PhaseSpectrumPlot<F> {
             .map(|c| {
                 let phase = c.arg();
                 match phase_mode {
-                    PhaseDisplayMode::Wrapped => phase,
-                    PhaseDisplayMode::Unwrapped => phase, // TODO: Implement unwrapping
-                    PhaseDisplayMode::Degrees => phase.to_degrees(),
-                    PhaseDisplayMode::UnwrappedDegrees => phase.to_degrees(), // TODO: Implement unwrapping
+                    PhaseDisplayMode::Wrapped | PhaseDisplayMode::Unwrapped => phase, // TODO: Implement unwrapping
+                    PhaseDisplayMode::Degrees | PhaseDisplayMode::UnwrappedDegrees => {
+                        phase.to_degrees()
+                    } // TODO: Implement unwrapping
                 }
             })
             .collect();
@@ -670,7 +674,7 @@ impl<F: RealFloat> PlotElement<F> for PhaseSpectrumPlot<F> {
             trace = trace.name(name);
         }
 
-        vec![PlotTrace::Scatter(*trace)]
+        vec![PlotTrace::Scatter(Box::new(*trace))]
     }
 }
 
@@ -748,7 +752,7 @@ impl<F: RealFloat> PlotElement<F> for PeakFrequencyPlot<F> {
             .line(self.base_style.to_plotly_line())
             .name("Spectrum");
 
-        traces.push(PlotTrace::Scatter(*base_trace));
+        traces.push(PlotTrace::Scatter(Box::new(*base_trace)));
 
         // Peak markers
         if !self.peak_frequencies.is_empty() {
@@ -758,7 +762,7 @@ impl<F: RealFloat> PlotElement<F> for PeakFrequencyPlot<F> {
                     .marker(self.peak_marker_style.to_plotly_marker())
                     .name("Peaks");
 
-            traces.push(PlotTrace::Scatter(*peak_trace));
+            traces.push(PlotTrace::Scatter(Box::new(*peak_trace)));
         }
 
         traces
@@ -855,7 +859,7 @@ impl<F: RealFloat> PlotElement<F> for FrequencyBinPlot<F> {
                 .line(style.to_plotly_line())
                 .name(&label);
 
-            traces.push(PlotTrace::Scatter(*trace));
+            traces.push(PlotTrace::Scatter(Box::new(*trace)));
         }
 
         traces
@@ -939,7 +943,7 @@ impl<F: RealFloat> PlotElement<F> for GroupDelayPlot<F> {
             trace = trace.name(name);
         }
 
-        vec![PlotTrace::Scatter(*trace)]
+        vec![PlotTrace::Scatter(Box::new(*trace))]
     }
 }
 
@@ -1025,7 +1029,7 @@ impl<F: RealFloat> PlotElement<F> for FftWaterfallPlot<F> {
 
         // convert back to F
 
-        vec![PlotTrace::HeatMap(*heatmap)]
+        vec![PlotTrace::HeatMap(Box::new(*heatmap))]
     }
 }
 
@@ -1109,7 +1113,7 @@ impl<F: RealFloat> PlotElement<F> for WindowComparisonPlot<F> {
                 .line(style.to_plotly_line())
                 .name(window_name);
 
-            traces.push(PlotTrace::Scatter(*trace));
+            traces.push(PlotTrace::Scatter(Box::new(*trace)));
         }
 
         traces
@@ -1199,6 +1203,6 @@ impl<F: RealFloat> PlotElement<F> for InstantaneousFrequencyPlot<F> {
             trace = trace.name(name);
         }
 
-        vec![PlotTrace::Scatter(*trace)]
+        vec![PlotTrace::Scatter(Box::new(*trace))]
     }
 }
