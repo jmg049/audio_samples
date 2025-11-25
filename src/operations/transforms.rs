@@ -6,8 +6,9 @@
 
 use crate::operations::CqtConfig;
 use crate::operations::traits::AudioTransforms;
-use crate::operations::types::{SpectrogramScale, WindowType};
+use crate::operations::types::{ChromaConfig, ChromaMethod, SpectrogramScale, WindowType};
 use crate::repr::AudioData;
+use crate::utils::audio_math::{hz_to_mel, mel_to_hz};
 use crate::{
     AudioEditing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
     AudioTypeConversion, ConvertTo, I24, LayoutError, ParameterError, RealFloat, to_precision,
@@ -15,6 +16,7 @@ use crate::{
 
 use lazy_static::lazy_static;
 use ndarray::{Array1, Array2, ArrayBase, OwnedRepr};
+use num_traits::FloatConst;
 use rustfft::FftNum;
 #[cfg(feature = "fft")]
 use rustfft::{FftPlanner, num_complex::Complex};
@@ -71,46 +73,86 @@ where
     ///
     /// Converts the time-domain signal to frequency domain using rustfft.
     /// Returns complex frequency domain representation.
-    fn fft<F>(&self) -> AudioSampleResult<Vec<Complex<F>>>
+    fn fft<F>(&self) -> AudioSampleResult<Array2<Complex<F>>>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
+        // For real inputs we only need the positive-frequency bins (n/2 + 1).
         match &self.data {
             AudioData::Mono(arr) => {
-                // Convert samples to complex numbers
-                let mut buffer: Vec<Complex<F>> = arr
-                    .iter()
-                    .map(|&x| {
-                        let x_converted: F = x.convert_to()?;
-                        Ok::<Complex<F>, AudioSampleError>(Complex::new(x_converted, F::zero()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                // Create FFT planner and plan
-                let mut planner = FftPlanner::new();
-                let fft = planner.plan_fft_forward(buffer.len());
+                let n = arr.len();
+                if n == 0 {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Cannot compute FFT on empty signal",
+                    )));
+                }
 
-                // Execute FFT
-                fft.process(&mut buffer);
+                // Prepare real input buffer
+                let mut real_input: Vec<F> = arr.iter().map(|&x| x.convert_to()).collect();
 
-                Ok(buffer)
+                // Number of positive frequency bins for real FFT
+                let num_positive = n / 2 + 1;
+
+                // Prepare complex output buffer
+                let mut complex_output = vec![Complex::new(F::zero(), F::zero()); num_positive];
+
+                // Use real FFT planner for efficiency
+                let mut real_planner = realfft::RealFftPlanner::<F>::new();
+                let r2c = real_planner.plan_fft_forward(n);
+                r2c.process(&mut real_input, &mut complex_output)
+                    .map_err(|_| {
+                        AudioSampleError::Parameter(ParameterError::invalid_value(
+                            "parameter",
+                            "Real FFT processing failed",
+                        ))
+                    })?;
+
+                // Pack into Array2 with shape (1, num_positive)
+                let array_buffer = Array2::from_shape_vec((1, num_positive), complex_output)?;
+                Ok(array_buffer)
             }
             AudioData::Multi(arr) => {
-                // For multi-channel, take the first channel
-                let first_channel = arr.row(0);
-                let mut buffer: Vec<Complex<F>> = first_channel
-                    .iter()
-                    .map(|&x| {
-                        let x_converted: F = x.convert_to()?;
-                        Ok::<Complex<F>, AudioSampleError>(Complex::new(x_converted, F::zero()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let n = arr.ncols();
+                if n == 0 {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Cannot compute FFT on empty signal",
+                    )));
+                }
 
-                let mut planner = FftPlanner::new();
-                let fft = planner.plan_fft_forward(buffer.len());
-                fft.process(&mut buffer);
+                let num_positive = n / 2 + 1;
+                let mut array_buffer: Array2<Complex<F>> =
+                    Array2::zeros((arr.nrows(), num_positive));
 
-                Ok(buffer)
+                let mut real_planner = realfft::RealFftPlanner::<F>::new();
+                let r2c = real_planner.plan_fft_forward(n);
+
+                // Reusable buffers
+                let mut real_input = vec![F::zero(); n];
+                let mut complex_output = vec![Complex::new(F::zero(), F::zero()); num_positive];
+
+                for ch in 0..arr.nrows() {
+                    let channel = arr.row(ch);
+                    for (i, &x) in channel.iter().enumerate() {
+                        real_input[i] = x.convert_to();
+                    }
+
+                    r2c.process(&mut real_input, &mut complex_output)
+                        .map_err(|_| {
+                            AudioSampleError::Parameter(ParameterError::invalid_value(
+                                "parameter",
+                                "Real FFT processing failed",
+                            ))
+                        })?;
+
+                    for (idx, &val) in complex_output.iter().enumerate() {
+                        array_buffer[[ch, idx]] = val;
+                    }
+                }
+
+                Ok(array_buffer)
             }
         }
     }
@@ -132,21 +174,29 @@ where
         n_fft: Option<usize>,
         window: Option<WindowType<F>>,
         normalise: bool,
-    ) -> AudioSampleResult<(Vec<F>, Vec<F>, Vec<Complex<F>>)>
+    ) -> AudioSampleResult<(Vec<F>, Vec<F>, Array2<Complex<F>>)>
     where
-        F: RealFloat + FftNum + ConvertTo<T>,
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
+        i16: ConvertTo<F>,
+        I24: ConvertTo<F>,
+        i32: ConvertTo<F>,
+        f32: ConvertTo<F>,
+        f64: ConvertTo<F>,
+        for<'c> AudioSamples<'c, F>: AudioTypeConversion<'c, F>,
     {
         let n_fft = n_fft.unwrap_or(self.len());
-        let samples: AudioSamples<'_, T> = if self.len() < n_fft {
-            AudioEditing::pad_samples_right(self, n_fft, T::zero())?
-        } else if self.len() > n_fft {
-            // truncate such that there are n_fft samples
-            self.slice_samples(..n_fft)?
-        } else {
-            self.clone().into_owned()
+        // Prepare samples: pad or truncate to n_fft
+        let samples = match self.len().cmp(&n_fft) {
+            std::cmp::Ordering::Less => AudioEditing::pad_samples_right(self, n_fft, T::zero())?,
+            std::cmp::Ordering::Greater => {
+                // truncate such that there are n_fft samples
+                self.slice_samples(..n_fft)?
+            }
+            std::cmp::Ordering::Equal => self.clone().into_owned(),
         };
-        let mut samples: AudioSamples<'_, F> = samples.as_type()?;
+
+        let mut samples = samples.to_type::<F>();
         // Apply window if requested
         if let Some(w) = window {
             let win = generate_window_cached(n_fft, w);
@@ -161,8 +211,8 @@ where
             samples.apply_with_index(|idx, x| x * win[idx]);
         }
 
-        // Raw FFT
-        let fft_result = self.fft()?;
+        // Raw FFT on the (potentially windowed) samples
+        let fft_result: Array2<Complex<F>> = samples.fft()?;
 
         // Magnitude spectrum
         let mut mag: Vec<F> = fft_result.iter().map(|c: &Complex<F>| c.norm()).collect();
@@ -185,7 +235,7 @@ where
     /// Computes the inverse FFT from frequency domain back to time domain.
     ///
     /// Reconstructs time-domain signal from complex frequency spectrum.
-    fn ifft<F>(&self, spectrum: &[Complex<F>]) -> AudioSampleResult<Self>
+    fn ifft<F>(&self, spectrum: &Array2<Complex<F>>) -> AudioSampleResult<Self>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
@@ -198,31 +248,71 @@ where
             )));
         }
 
-        // Copy spectrum for processing
-        let mut buffer = spectrum.to_vec();
+        let num_ffts = spectrum.nrows();
 
-        // Create inverse FFT planner and plan
-        let mut planner = FftPlanner::new();
-        let ifft = planner.plan_fft_inverse(buffer.len());
+        // run inverse FFT for each row (channel)
 
-        // Execute inverse FFT
-        ifft.process(&mut buffer);
+        let mut channels = Vec::with_capacity(num_ffts);
+        let buf_size = spectrum.ncols();
+        for ch in 0..num_ffts {
+            let mut buffer: Vec<Complex<F>> = spectrum.row(ch).to_vec();
 
-        // Extract real parts and normalize by length
-        let len = to_precision::<F, _>(buffer.len() as f64);
-        let mut real_samples: Vec<T> = Vec::with_capacity(buffer.len());
-        for c in buffer {
-            let real_val = c.re / len; // Normalize by length
-            real_samples.push(real_val.convert_to()?);
+            // Create inverse FFT planner and plan
+            let mut planner = FftPlanner::new();
+            let ifft = planner.plan_fft_inverse(buffer.len());
+
+            // Execute inverse FFT
+            ifft.process(&mut buffer);
+
+            // Extract real parts and normalize by length
+            let len = to_precision::<F, _>(buffer.len() as f64);
+            let mut real_samples: Vec<T> = Vec::with_capacity(buffer.len());
+            for c in buffer {
+                let real_val = c.re / len; // Normalize by length
+                real_samples.push(real_val.convert_to());
+            }
+
+            channels.push(real_samples);
         }
 
-        // Create new AudioSamples with same metadata as original
-        let arr = Array1::from_vec(real_samples);
-        let owned = AudioSamples::new_mono(arr, self.sample_rate());
-        // Convert the owned static lifetime to match Self's lifetime
-        // Since the owned data has 'static lifetime, it can be safely cast to any shorter lifetime
-        let result: Self = unsafe { std::mem::transmute(owned) };
-        Ok(result)
+        match channels.len() {
+            1 => {
+                let arr = Array1::from_vec(channels.into_iter().next().unwrap());
+                Ok(AudioSamples::new_mono(arr, self.sample_rate()))
+            }
+            n => {
+                let mut multi_arr = Array2::zeros((n, buf_size));
+                for (ch, samples) in channels.into_iter().enumerate() {
+                    for (i, &s) in samples.iter().enumerate() {
+                        multi_arr[[ch, i]] = s;
+                    }
+                }
+                Ok(AudioSamples::new_multi_channel(
+                    multi_arr,
+                    self.sample_rate(),
+                ))
+            }
+        }
+
+        // // Create inverse FFT planner and plan
+        // let mut planner = FftPlanner::new();
+        // let ifft = planner.plan_fft_inverse(buffer.len());
+
+        // // Execute inverse FFT
+        // ifft.process(&mut buffer);
+
+        // // Extract real parts and normalize by length
+        // let len = to_precision::<F, _>(buffer.len() as f64);
+        // let mut real_samples: Vec<T> = Vec::with_capacity(buffer.len());
+        // for c in buffer {
+        //     let real_val = c.re / len; // Normalize by length
+        //     real_samples.push(real_val.convert_to());
+        // }
+
+        // // Create new AudioSamples with same metadata as original
+        // let arr = Array1::from_vec(real_samples);
+        // let owned = AudioSamples::new_mono(arr, self.sample_rate());
+        // Ok(owned)
     }
 
     /// Computes the Short-Time Fourier Transform (STFT).
@@ -266,15 +356,12 @@ where
 
         // Get samples based on channel configuration and convert to F
         let mut samples_f: Vec<F> = match &self.data {
-            AudioData::Mono(arr) => arr
-                .iter()
-                .map(|&x| x.convert_to())
-                .collect::<Result<Vec<_>, _>>()?,
+            AudioData::Mono(arr) => arr.iter().map(|&x| x.convert_to()).collect::<Vec<_>>(),
             AudioData::Multi(arr) => arr
                 .row(0)
                 .iter()
                 .map(|&x| x.convert_to())
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Vec<_>>(),
         };
 
         // Apply librosa-style centering (padding)
@@ -436,13 +523,13 @@ where
         };
 
         // Convert to AudioSamples
-        let samples: Vec<T> = final_output
-            .into_iter()
-            .map(|s| s.convert_to())
-            .collect::<Result<Vec<T>, _>>()?;
+        let samples: Vec<T> = final_output.into_iter().map(|s| s.convert_to()).collect();
         let arr = Array1::from_vec(samples);
 
-        let owned: AudioSamples<'static, T> = AudioSamples::new_mono(arr, sample_rate as u32);
+        let owned: AudioSamples<'static, T> = AudioSamples::new_mono(
+            arr,
+            std::num::NonZeroU32::new(sample_rate as u32).expect("sample_rate should be non-zero"),
+        );
         Ok(unsafe {
             std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
                 owned,
@@ -635,7 +722,7 @@ where
             )));
         }
 
-        let sample_rate = to_precision::<F, _>(to_precision::<F, _>(self.sample_rate));
+        let sample_rate = to_precision::<F, _>(to_precision::<F, _>(self.sample_rate.get()));
         if fmax > sample_rate / to_precision::<F, _>(2.0) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "parameter",
@@ -647,7 +734,7 @@ where
         let stft_matrix = self.stft(window_size, hop_size, WindowType::Hanning)?;
         let (freq_bins, time_frames) = stft_matrix.dim();
 
-        // Convert STFT to power spectrogram
+        // Convert STFT to power spectrogram (|STFT|^2)
         let mut power_spectrogram = Array2::zeros((freq_bins, time_frames));
         for freq_idx in 0..freq_bins {
             for time_idx in 0..time_frames {
@@ -662,6 +749,7 @@ where
             generate_mel_filter_bank(n_mels, window_size, sample_rate, fmin, fmax);
 
         // Step 3: Apply mel filters to power spectrogram
+        // Return raw mel band energies (power) - non-negative values.
         let mut mel_spectrogram = Array2::zeros((n_mels, time_frames));
 
         for mel_idx in 0..n_mels {
@@ -679,14 +767,8 @@ where
                     mel_energy += filter_weight * power;
                 }
 
-                // Step 4: Convert to log scale (dB) with floor to prevent log(0)
-                let log_mel_energy = if mel_energy > to_precision::<F, _>(1e-10) {
-                    to_precision::<F, _>(10.0) * mel_energy.log10() // 10*log10 for power
-                } else {
-                    to_precision::<F, _>(-100.0) // Floor at -100 dB
-                };
-
-                mel_spectrogram[[mel_idx, time_idx]] = log_mel_energy;
+                // Store non-negative mel energy (power)
+                mel_spectrogram[[mel_idx, time_idx]] = mel_energy;
             }
         }
 
@@ -768,17 +850,24 @@ where
         let mel_spec = self.mel_spectrogram(n_mels, fmin, fmax, window_size, hop_size)?;
         let (n_mel_bands, time_frames) = mel_spec.dim();
 
-        // Step 2: Apply DCT to each time frame
+        // Step 2: Apply DCT to each time frame. First convert mel energies to log (dB).
         let mut mfcc_matrix = Array2::zeros((n_mfcc, time_frames));
 
         for time_idx in 0..time_frames {
-            // Extract mel energies for this time frame
-            let mel_frame: Vec<F> = (0..n_mel_bands)
-                .map(|mel_idx| mel_spec[[mel_idx, time_idx]])
-                .collect();
+            // Extract mel energies for this time frame and convert to log dB
+            let mut log_mel_frame: Vec<F> = Vec::with_capacity(n_mel_bands);
+            for mel_idx in 0..n_mel_bands {
+                let mel_energy = mel_spec[[mel_idx, time_idx]];
+                let log_val = if mel_energy > to_precision::<F, _>(1e-10) {
+                    to_precision::<F, _>(10.0) * mel_energy.log10()
+                } else {
+                    to_precision::<F, _>(-100.0)
+                };
+                log_mel_frame.push(log_val);
+            }
 
             // Apply DCT to decorrelate mel features
-            let mfcc_frame = compute_dct_type2(&mel_frame, n_mfcc);
+            let mfcc_frame = compute_dct_type2(&log_mel_frame, n_mfcc);
 
             // Store in output matrix
             for mfcc_idx in 0..n_mfcc {
@@ -794,10 +883,105 @@ where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "parameter",
-            "chroma not yet implemented",
-        )))
+        // Default parameters for chroma calculation
+        let n_chroma = _n_chroma;
+        if n_chroma == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "n_chroma must be > 0",
+            )));
+        }
+
+        // Use reasonable defaults similar to MFCC/stft
+        let window_size = 2048usize;
+        let hop_size = 512usize;
+
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
+
+        // Compute STFT (positive frequencies × time_frames)
+        let stft_matrix = self.stft(window_size, hop_size, WindowType::Hanning)?;
+        let (num_freqs, num_frames) = stft_matrix.dim();
+
+        // Initialize chroma matrix (n_chroma × time_frames)
+        let mut chroma = Array2::<F>::zeros((n_chroma, num_frames));
+
+        // For each frequency bin, map to chroma class and accumulate power
+        for freq_idx in 0..num_freqs {
+            // frequency in Hz for this bin
+            let freq = to_precision::<F, _>(freq_idx as f64) * sample_rate
+                / to_precision::<F, _>(window_size as f64);
+
+            if freq <= F::zero() {
+                continue;
+            }
+
+            // Compute pitch class index relative to A4 = 440 Hz
+            let ratio = freq / to_precision::<F, _>(440.0);
+            // k = round(12 * log2(freq/440))
+            let kf = (to_precision::<F, _>(12.0) * ratio.log2()).round();
+            // convert to isize safely
+            let k_i = kf.to_i64().unwrap_or(0);
+            // Map so that A (440 Hz) -> class 9 (C=0)
+            let class = (((k_i + 9) % (n_chroma as i64)) + (n_chroma as i64)) % (n_chroma as i64);
+            let class_usize = class as usize;
+
+            for frame_idx in 0..num_frames {
+                let complex_val = stft_matrix[[freq_idx, frame_idx]];
+                let power = complex_val.norm_sqr();
+                chroma[[class_usize, frame_idx]] += power;
+            }
+        }
+
+        // Normalize per time frame to [0, 1]
+        for frame_idx in 0..num_frames {
+            let mut max_val = F::zero();
+            for ch in 0..n_chroma {
+                let v = chroma[[ch, frame_idx]];
+                if v > max_val {
+                    max_val = v;
+                }
+            }
+            if max_val > F::zero() {
+                for ch in 0..n_chroma {
+                    chroma[[ch, frame_idx]] /= max_val;
+                }
+            }
+        }
+
+        Ok(chroma)
+    }
+
+    fn chromagram<F>(&self, cfg: &ChromaConfig<F>) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
+        // Validate configuration
+        if cfg.n_chroma == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "n_chroma",
+                "n_chroma must be > 0",
+            )));
+        }
+
+        if cfg.window_size == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "window_size",
+                "window_size must be > 0",
+            )));
+        }
+
+        if cfg.hop_size == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                "hop_size must be > 0",
+            )));
+        }
+
+        match cfg.method {
+            ChromaMethod::Stft => self.chromagram_stft(cfg),
+            ChromaMethod::Cqt => self.chromagram_cqt(cfg),
+        }
     }
 
     fn power_spectral_density<F>(
@@ -809,10 +993,31 @@ where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "parameter",
-            "power_spectral_density not yet implemented",
-        )))
+        // For now compute PSD from a full-signal FFT (positive frequency bins)
+        let fft_res = self.fft::<F>()?;
+        let (num_ch, num_bins) = fft_res.dim();
+
+        // Number of samples used to compute FFT (samples per channel)
+        let n = self.samples_per_channel();
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
+
+        // Frequencies in Hz for positive bins
+        let freqs: Vec<F> = (0..num_bins)
+            .map(|i| to_precision::<F, _>(i as f64) * sample_rate / to_precision::<F, _>(n as f64))
+            .collect();
+
+        // PSD: average power across channels for each bin
+        let mut psd: Vec<F> = vec![F::zero(); num_bins];
+        for b in 0..num_bins {
+            let mut acc = F::zero();
+            for ch in 0..num_ch {
+                let c = fft_res[[ch, b]];
+                acc += c.norm_sqr();
+            }
+            psd[b] = acc / to_precision::<F, _>(num_ch as f64);
+        }
+
+        Ok((freqs, psd))
     }
 
     /// Computes gammatone-filtered spectrogram for auditory modeling.
@@ -872,7 +1077,7 @@ where
             )));
         }
 
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
         if fmax > sample_rate / to_precision::<F, _>(2.0) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "parameter",
@@ -927,7 +1132,7 @@ where
 
             for i in start..end {
                 if i < samples.len() {
-                    frame.push(samples[i].convert_to()?);
+                    frame.push(samples[i].convert_to());
                 }
             }
             // Apply each gammatone filter and compute energy
@@ -957,7 +1162,7 @@ where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
 
         // Validate configuration
         config.validate(sample_rate)?;
@@ -1021,17 +1226,19 @@ where
         // Convert back to original sample type
         let mut reconstructed_samples: Vec<T> = Vec::with_capacity(reconstructed.len());
         for sample in reconstructed {
-            let converted: T = sample.convert_to()?;
+            let converted: T = sample.convert_to();
             reconstructed_samples.push(converted);
         }
 
         let arr = Array1::from_vec(reconstructed_samples);
-        let owned: AudioSamples<'static, T> = AudioSamples::new_mono(
-            arr,
-            sample_rate
-                .to_u32()
-                .expect("Sample rate in should be a non-zero positive u32, now just casting back"),
-        );
+        let owned: AudioSamples<'static, T> =
+            AudioSamples::new_mono(
+                arr,
+                std::num::NonZeroU32::new(sample_rate.to_u32().expect(
+                    "Sample rate in should be a non-zero positive u32, now just casting back",
+                ))
+                .expect("sample_rate should be non-zero"),
+            );
         Ok(unsafe {
             std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
                 owned,
@@ -1049,7 +1256,7 @@ where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
 
         // Validate configuration
         config.validate(sample_rate)?;
@@ -1151,6 +1358,137 @@ where
         }
 
         Ok(magnitude_spectrogram)
+    }
+
+}
+
+impl<T: AudioSample> AudioSamples<'_, T>
+where
+    Self: AudioTransforms<T>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+{
+    /// Helper method for STFT-based chromagram computation.
+    fn chromagram_stft<F>(&self, cfg: &ChromaConfig<F>) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
+        let sample_rate = cfg.sample_rate.map(|sr| to_precision::<F, _>(sr))
+            .unwrap_or_else(|| to_precision::<F, _>(self.sample_rate.get()));
+
+        // Compute STFT (positive frequencies × time_frames)
+        let stft_matrix = self.stft(cfg.window_size, cfg.hop_size, WindowType::Hanning)?;
+        let (num_freqs, num_frames) = stft_matrix.dim();
+
+        // Initialize chroma matrix (n_chroma × time_frames)
+        let mut chroma = Array2::<F>::zeros((cfg.n_chroma, num_frames));
+
+        // For each frequency bin, map to chroma class and accumulate power
+        for freq_idx in 0..num_freqs {
+            // frequency in Hz for this bin
+            let freq = to_precision::<F, _>(freq_idx as f64) * sample_rate
+                / to_precision::<F, _>(cfg.window_size as f64);
+
+            if freq <= F::zero() {
+                continue;
+            }
+
+            // Compute pitch class index relative to A4 = 440 Hz
+            let ratio = freq / to_precision::<F, _>(440.0);
+            // k = round(12 * log2(freq/440))
+            let kf = (to_precision::<F, _>(12.0) * ratio.log2()).round();
+            // convert to isize safely
+            let k_i = kf.to_i64().unwrap_or(0);
+            // Map so that A (440 Hz) -> class 9 (C=0)
+            let class = (((k_i + 9) % (cfg.n_chroma as i64)) + (cfg.n_chroma as i64)) % (cfg.n_chroma as i64);
+            let class_usize = class as usize;
+
+            for frame_idx in 0..num_frames {
+                let complex_val = stft_matrix[[freq_idx, frame_idx]];
+                let power = complex_val.norm_sqr();
+                chroma[[class_usize, frame_idx]] += power;
+            }
+        }
+
+        // Apply normalization if requested
+        if cfg.norm {
+            normalize_chroma_frames(&mut chroma, cfg.n_chroma, num_frames);
+        }
+
+        Ok(chroma)
+    }
+
+    /// Helper method for CQT-based chromagram computation.
+    fn chromagram_cqt<F>(&self, cfg: &ChromaConfig<F>) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
+        let sample_rate = cfg.sample_rate.map(|sr| to_precision::<F, _>(sr))
+            .unwrap_or_else(|| to_precision::<F, _>(self.sample_rate.get()));
+
+        // Create CQT configuration
+        // For chromagram, we want frequencies covering the audible range with good resolution
+        let cqt_config = CqtConfig::<F> {
+            fmin: to_precision(55.0),   // A1 (low end)
+            fmax: Some(sample_rate / to_precision(2.0)), // Nyquist frequency
+            bins_per_octave: cfg.n_chroma,
+            q_factor: to_precision(1.0), // Standard Q factor
+            window_type: WindowType::Hanning,
+            sparsity_threshold: to_precision(0.01),
+            normalize: true,
+        };
+
+        // Compute CQT magnitude spectrogram
+        let cqt_magnitude = self.cqt_magnitude_spectrogram(&cqt_config, cfg.hop_size, Some(cfg.window_size), false)?;
+        let (num_cqt_bins, num_frames) = cqt_magnitude.dim();
+
+        // Initialize chroma matrix (n_chroma × time_frames)
+        let mut chroma = Array2::<F>::zeros((cfg.n_chroma, num_frames));
+
+        // Map CQT bins to chroma bins (sum across octaves)
+        for cqt_bin in 0..num_cqt_bins {
+            let chroma_bin = cqt_bin % cfg.n_chroma;
+
+            for frame_idx in 0..num_frames {
+                let magnitude = cqt_magnitude[[cqt_bin, frame_idx]];
+                let power = magnitude * magnitude; // Convert magnitude to power
+                chroma[[chroma_bin, frame_idx]] += power;
+            }
+        }
+
+        // Apply normalization if requested
+        if cfg.norm {
+            normalize_chroma_frames(&mut chroma, cfg.n_chroma, num_frames);
+        }
+
+        Ok(chroma)
+    }
+
+}
+
+/// Normalize chroma vectors per time frame.
+fn normalize_chroma_frames<F>(chroma: &mut Array2<F>, n_chroma: usize, num_frames: usize)
+where
+    F: RealFloat,
+{
+    for frame_idx in 0..num_frames {
+        let mut max_val = F::zero();
+        for ch in 0..n_chroma {
+            let v = chroma[[ch, frame_idx]];
+            if v > max_val {
+                max_val = v;
+            }
+        }
+        if max_val > F::zero() {
+            for ch in 0..n_chroma {
+                chroma[[ch, frame_idx]] /= max_val;
+            }
+        }
     }
 }
 
@@ -1260,26 +1598,28 @@ fn generate_window_uncached<F: RealFloat>(size: usize, window_type: WindowType<F
             .map(|i| {
                 let n: F = to_precision::<F, _>(i);
                 let n_max: F = to_precision::<F, _>(size - 1);
-                let two_pi: F = to_precision::<F, _>(2.0) * F::PI();
-                to_precision::<F, _>(0.5) * (F::one() - (two_pi * n / n_max).cos())
+                let two_pi: F = to_precision::<F, _>(2.0) * <F as FloatConst>::PI();
+                to_precision::<F, _>(0.5) * (F::one() - num_traits::Float::cos(two_pi * n / n_max))
             })
             .collect(),
         WindowType::Hamming => (0..size)
             .map(|i| {
                 let n: F = to_precision::<F, _>(i);
                 let n_max: F = to_precision::<F, _>(size - 1);
-                let two_pi: F = to_precision::<F, _>(2.0) * F::PI();
-                to_precision::<F, _>(0.54) - to_precision::<F, _>(0.46) * (two_pi * n / n_max).cos()
+                let two_pi: F = to_precision::<F, _>(2.0) * <F as FloatConst>::PI();
+                to_precision::<F, _>(0.54)
+                    - to_precision::<F, _>(0.46) * num_traits::Float::cos(two_pi * n / n_max)
             })
             .collect(),
         WindowType::Blackman => (0..size)
             .map(|i| {
                 let n: F = to_precision::<F, _>(i);
                 let n_max: F = to_precision::<F, _>(size - 1);
-                let four_pi: F = to_precision::<F, _>(4.0) * F::PI();
-                let two_pi: F = to_precision::<F, _>(2.0) * F::PI();
-                to_precision::<F, _>(0.42) - to_precision::<F, _>(0.5) * (two_pi * n / n_max).cos()
-                    + to_precision::<F, _>(0.08) * (four_pi * n / n_max).cos()
+                let four_pi: F = to_precision::<F, _>(4.0) * <F as FloatConst>::PI();
+                let two_pi: F = to_precision::<F, _>(2.0) * <F as FloatConst>::PI();
+                to_precision::<F, _>(0.42)
+                    - to_precision::<F, _>(0.5) * num_traits::Float::cos(two_pi * n / n_max)
+                    + to_precision::<F, _>(0.08) * num_traits::Float::cos(four_pi * n / n_max)
             })
             .collect(),
         WindowType::Kaiser { beta } => {
@@ -1422,7 +1762,7 @@ fn generate_gammatone_filter<F: RealFloat>(
             // 4th order gammatone: t³ * exp(-2πERBt) * cos(2πft)
             let t_cubed = t * t * t;
             let decay = (decay_coeff * t).exp();
-            let oscillation = (osc_coeff * t).cos();
+            let oscillation = num_traits::Float::cos(osc_coeff * t);
 
             let coefficient = t_cubed * decay * oscillation;
             filter.push(coefficient);
@@ -1472,35 +1812,6 @@ fn apply_gammatone_filter<F: RealFloat>(signal: &[F], filter_coeffs: &[F]) -> Ve
     output
 }
 
-/// Converts frequency in Hz to mel scale.
-///
-/// Mel scale provides perceptually uniform frequency spacing for human hearing.
-/// Formula: mel = 2595 * log10(1 + f/700)
-///
-/// # Arguments
-/// * `freq_hz` - Frequency in Hz
-///
-/// # Returns
-/// Frequency in mel scale
-fn hz_to_mel<F: RealFloat>(freq_hz: F) -> F {
-    // 2595.0 * (F::one() + freq_hz / 700.0).log10()
-    to_precision::<F, _>(2595.0) * (F::one() + freq_hz / to_precision::<F, _>(700.0)).log10()
-}
-
-/// Converts mel scale value back to frequency in Hz.
-///
-/// Inverse of hz_to_mel: f = 700 * (10^(mel/2595) - 1)
-///
-/// # Arguments
-/// * `mel` - Frequency in mel scale
-///
-/// # Returns
-/// Frequency in Hz
-fn mel_to_hz<F: RealFloat>(mel: F) -> F {
-    // 700.0 * (10.0_f64.powf(mel / 2595.0) - F::one())
-    to_precision::<F, _>(700.0)
-        * (to_precision::<F, _>(10.0).powf(mel / to_precision::<F, _>(2595.0)) - F::one())
-}
 
 /// Generates mel-spaced center frequencies for mel filter bank.
 ///
@@ -1622,18 +1933,18 @@ fn generate_mel_filter_bank<F: RealFloat>(
 fn compute_dct_type2<F: RealFloat>(input: &[F], n_mfcc: usize) -> Vec<F> {
     let n_input = input.len();
     let mut dct_output = vec![F::zero(); n_mfcc];
-    let pi = F::PI();
+    let pi = <F as FloatConst>::PI();
     let two = to_precision::<F, _>(2.0);
     let n_input_f = to_precision::<F, _>(n_input as f64);
 
     for (k, dct_out) in dct_output.iter_mut().enumerate().take(n_mfcc) {
         let mut sum = F::zero();
         for (n, inp) in input.iter().enumerate().take(n_input) {
-            let cos_term = (pi
-                * to_precision::<F, _>(k as f64)
-                * (two * to_precision::<F, _>(n as f64) + F::one())
-                / (two * n_input_f))
-                .cos();
+            let cos_term = num_traits::Float::cos(
+                pi * to_precision::<F, _>(k as f64)
+                    * (two * to_precision::<F, _>(n as f64) + F::one())
+                    / (two * n_input_f),
+            );
             sum += *inp * cos_term;
         }
 
@@ -1740,7 +2051,7 @@ fn generate_cqt_kernel_bin<F: RealFloat>(
     // Generate window coefficients (cached for performance)
     let window = generate_window_cached::<F>(kernel_length, window_type);
 
-    let pi = F::PI();
+    let pi = <F as FloatConst>::PI();
     let two = to_precision::<F, _>(2.0);
     let sample_rate_f = to_precision::<F, _>(sample_rate);
     // Generate complex exponential kernel
@@ -1749,7 +2060,8 @@ fn generate_cqt_kernel_bin<F: RealFloat>(
         let phase = two * pi * center_freq * t;
 
         // Complex exponential: e^(i*2*π*f*t)
-        let exponential = Complex::new(phase.cos(), phase.sin());
+        let exponential =
+            Complex::new(num_traits::Float::cos(phase), num_traits::Float::sin(phase));
 
         // Apply window function
         let windowed = exponential * *w;
@@ -2016,6 +2328,7 @@ pub fn compute_standard_spectral_flux<F: RealFloat>(
 mod tests {
     use super::*;
     use crate::operations::CqtConfig;
+    use crate::sample_rate;
     use std::f64::consts::PI;
 
     /// Generate test audio signal (sine wave)
@@ -2048,9 +2361,9 @@ mod tests {
         // Test FFT with a simple sine wave
         let sample_rate = 44100;
         let samples = generate_sine_wave(1024, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
-        let fft_result: Vec<Complex<f32>> = audio.fft().unwrap();
+        let fft_result: Array2<Complex<f32>> = audio.fft().unwrap();
         assert_eq!(fft_result.len(), 1024);
 
         // Check that we get complex numbers
@@ -2062,10 +2375,11 @@ mod tests {
         // Test round-trip with realistic audio length (1 second)
         let sample_rate = 44100;
         let samples = generate_sine_wave(sample_rate, 440.0, sample_rate as f64);
-        let original = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate as u32);
+        let original =
+            AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         // FFT -> IFFT
-        let fft_result: Vec<Complex<f32>> = original.fft().unwrap();
+        let fft_result: Array2<Complex<f32>> = original.fft().unwrap();
         let reconstructed = original.ifft(&fft_result).unwrap();
 
         // Compare original and reconstructed (allowing for small numerical errors)
@@ -2105,7 +2419,7 @@ mod tests {
         let sample_rate = 44100;
         let samples = generate_sine_wave(8192, 440.0, sample_rate as f64); // ~185ms
         let audio: AudioSamples<'_, f32> =
-            AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+            AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let window_size = 1024;
         let hop_size = 512; // 50% overlap
@@ -2125,7 +2439,7 @@ mod tests {
         // Test linear scale spectrogram with realistic audio
         let sample_rate = 44100;
         let samples = generate_sine_wave(2048, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let window_size = 512;
         let hop_size = 256;
@@ -2168,7 +2482,7 @@ mod tests {
         // Test log scale spectrogram (dB)
         let sample_rate = 44100;
         let samples = generate_sine_wave(1024, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let result = audio.spectrogram(512, 256, WindowType::Hanning, SpectrogramScale::Log, false);
         assert!(result.is_ok());
@@ -2190,7 +2504,7 @@ mod tests {
         // Test that mel scale returns appropriate error until implemented
         let sample_rate = 44100;
         let samples = generate_sine_wave(1024, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let result = audio.spectrogram(
             512,
@@ -2222,11 +2536,10 @@ mod tests {
             stereo_data[[1, i]] = sample;
         }
 
-        let audio = AudioSamples::new_multi_channel(stereo_data.into(), sample_rate);
+        let audio = AudioSamples::new_multi_channel(stereo_data.into(), sample_rate!(44100));
 
-        // Should use first channel for FFT
         let fft_result = audio.fft::<f32>().unwrap();
-        assert_eq!(fft_result.len(), 1024);
+        assert_eq!(fft_result.dim(), (2, 1024));
     }
 
     #[test]
@@ -2235,7 +2548,7 @@ mod tests {
         let sample_rate = 44100;
         let samples = generate_sine_wave(2048, 440.0, sample_rate as f64);
         let audio: AudioSamples<'static, f32> =
-            AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+            AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let window_size = 1024;
         let hop_size = 512;
@@ -2261,20 +2574,15 @@ mod tests {
     fn test_edge_cases() {
         let sample_rate = 44100;
 
-        // Test empty audio
-        let empty_audio: AudioSamples<f32> =
-            AudioSamples::new_mono(Array1::from_vec(vec![]).into(), sample_rate);
-        assert!(empty_audio.fft::<f32>().is_ok()); // Empty should work
-
         // Test single sample
         let single_sample =
-            AudioSamples::new_mono(Array1::from_vec(vec![1.0f32]).into(), sample_rate);
+            AudioSamples::new_mono(Array1::from_vec(vec![1.0f32]).into(), sample_rate!(44100));
         let fft_result = single_sample.fft::<f32>().unwrap();
         assert_eq!(fft_result.len(), 1);
 
         // Test STFT with invalid parameters
         let samples = generate_sine_wave(1024, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         // Window size larger than audio
         assert!(audio.stft(2048, 512, WindowType::<f32>::Hanning).is_err());
@@ -2287,11 +2595,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "data must not be empty")]
+    fn test_empty_audio_rejected() {
+        // Empty audio should be rejected at construction time
+        let _empty_audio: AudioSamples<f32> =
+            AudioSamples::new_mono(Array1::from_vec(vec![]).into(), sample_rate!(44100));
+    }
+
+    #[test]
     fn test_istft_reconstruction() {
         // Test STFT -> ISTFT round-trip with simple signal
         let sample_rate = 44100;
         let samples = generate_sine_wave(2048, 440.0, sample_rate as f64); // Shorter signal
-        let original = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate as u32);
+        let original =
+            AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let window_size = 512; // Smaller window
         let hop_size = 256; // 50% overlap
@@ -2352,7 +2669,7 @@ mod tests {
         // Test gammatone spectrogram with realistic audio
         let sample_rate = 44100;
         let samples = generate_sine_wave(4096, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let n_filters = 32;
         let fmin = 100.0;
@@ -2409,7 +2726,7 @@ mod tests {
         // Test mel spectrogram with realistic audio
         let sample_rate = 44100;
         let samples = generate_sine_wave(4096, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let n_mels = 40;
         let fmin = 80.0;
@@ -2449,7 +2766,7 @@ mod tests {
         // Test MFCC computation with realistic audio
         let sample_rate = 44100;
         let samples = generate_sine_wave(8192, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let n_mfcc = 13;
         let n_mels = 40;
@@ -2617,7 +2934,7 @@ mod tests {
             sample_rate as f64,
         );
 
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
         let config = CqtConfig::new();
 
         let result = audio.constant_q_transform(&config);
@@ -2662,7 +2979,7 @@ mod tests {
             sample_rate as f64,
         );
 
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
         let config = CqtConfig::new();
         let hop_size = 512;
 
@@ -2700,7 +3017,7 @@ mod tests {
             sample_rate as f64,
         );
 
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
         let config = CqtConfig::<f32>::new();
         let hop_size = 512;
 
@@ -2741,7 +3058,7 @@ mod tests {
             sample_rate as f64,
         );
 
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         // Test musical configuration
         let musical_config = CqtConfig::<f32>::musical();
@@ -2770,24 +3087,26 @@ mod tests {
         let sample_rate = 44100;
         let config = CqtConfig::<f32>::new();
 
-        // Test with empty signal
-        let empty_audio =
-            AudioSamples::new_mono(Array1::<f32>::zeros(0).into(), sample_rate as u32);
-        let result = empty_audio.constant_q_transform(&config);
-        assert!(result.is_err());
-
         // Test with very short signal
         let short_audio =
-            AudioSamples::new_mono(Array1::<f32>::ones(10).into(), sample_rate as u32);
+            AudioSamples::new_mono(Array1::<f32>::ones(10).into(), sample_rate!(44100));
         let result = short_audio.constant_q_transform(&config);
         assert!(result.is_ok()); // Should handle short signals gracefully
 
         // Test with invalid hop size for spectrogram
         let samples = generate_sine_wave(1024, 440.0, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let result = audio.cqt_spectrogram(&config, 0, None);
         assert!(result.is_err()); // Hop size of 0 should error
+    }
+
+    #[test]
+    #[should_panic(expected = "data must not be empty")]
+    fn test_cqt_empty_audio_rejected() {
+        // Empty audio should be rejected at construction time
+        let _empty_audio =
+            AudioSamples::new_mono(Array1::<f32>::zeros(0).into(), sample_rate!(44100));
     }
 
     #[test]
@@ -2802,8 +3121,10 @@ mod tests {
             sample_rate as f64,
         );
 
-        let original_audio =
-            AudioSamples::new_mono(Array1::from_vec(samples.clone()).into(), sample_rate);
+        let original_audio = AudioSamples::new_mono(
+            Array1::from_vec(samples.clone()).into(),
+            sample_rate!(44100),
+        );
         let config = CqtConfig::<f32>::new();
 
         // Forward transform

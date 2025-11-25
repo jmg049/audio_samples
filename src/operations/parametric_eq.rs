@@ -3,16 +3,19 @@
 //! This module provides parametric EQ functionality with support for
 //! multiple band types including peaks, shelves, and filters.
 
+use num_traits::FloatConst;
+
 use crate::operations::iir_filtering::IirFilter;
 use crate::operations::traits::AudioParametricEq;
 use crate::operations::types::{EqBand, EqBandType, ParametricEq};
 use crate::repr::AudioData;
+use crate::utils::audio_math::db_to_amplitude as db_to_linear;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
     I24, LayoutError, ParameterError, RealFloat, to_precision,
 };
 
-impl<'a, T: AudioSample> AudioParametricEq<T> for AudioSamples<'a, T>
+impl<'a, T: AudioSample> AudioParametricEq<'a, T> for AudioSamples<'a, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -72,7 +75,7 @@ where
         // Apply filter to audio data
         match &mut self.data {
             AudioData::Mono(_) => {
-                let mut working_samples = self.as_type::<F>()?;
+                let mut working_samples = self.to_format::<F>();
                 let mono_self = match self.as_mono_mut() {
                     Some(working) => working,
                     None => {
@@ -91,25 +94,18 @@ where
                             "Failed to get mono data. Underlying data is not mono.",
                         )))?;
 
-                let working_samples =
-                    working_samples
-                        .as_slice_mut()
-                        .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
-                            operation: "parametric EQ".to_string(),
-                            layout_type: "non-contiguous mono samples".to_string(),
-                        }))?;
-
+                let working_samples = working_samples.as_slice_mut();
                 filter.process_samples_in_place(working_samples);
 
                 for (i, output) in working_samples.iter_mut().enumerate() {
-                    mono_self[i] = T::convert_from(*output)?;
+                    mono_self[i] = T::convert_from(*output);
                 }
             }
             AudioData::Multi(samples) => {
                 let num_channels = samples.nrows();
                 // Process each channel independently
                 for channel in 0..num_channels {
-                    let mut working_samples = self.as_type::<F>()?;
+                    let mut working_samples = self.to_format::<F>();
 
                     let multi_self = match self.as_multi_channel_mut() {
                         Some(working) => working,
@@ -135,7 +131,7 @@ where
                     filter.process_samples_in_place(working_samples);
 
                     for (i, output) in working_samples.iter().enumerate() {
-                        multi_self[[channel, i]] = output.convert_to()?;
+                        multi_self[[channel, i]] = output.convert_to();
                     }
 
                     // Reset filter state for next channel
@@ -284,9 +280,9 @@ fn design_peak_filter<F: RealFloat>(
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     let a = to_precision::<F, _>(10.04).powf(gain_db / to_precision::<F, _>(40.0)); // sqrt of linear gain
-    let omega = to_precision::<F, _>(2.0) * F::PI() * frequency / sample_rate;
-    let sin_omega = omega.sin();
-    let cos_omega = omega.cos();
+    let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * frequency / sample_rate;
+    let sin_omega = num_traits::Float::sin(omega);
+    let cos_omega = num_traits::Float::cos(omega);
     let alpha = sin_omega / (to_precision::<F, _>(2.0) * q_factor);
 
     // RBJ peak filter coefficients
@@ -312,9 +308,9 @@ fn design_low_shelf_filter<F: RealFloat>(
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     let a = to_precision::<F, _>(10.0).powf(gain_db / to_precision::<F, _>(40.0)); // sqrt of linear gain
-    let omega = to_precision::<F, _>(2.0) * F::PI() * frequency / sample_rate;
-    let sin_omega = omega.sin();
-    let cos_omega = omega.cos();
+    let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * frequency / sample_rate;
+    let sin_omega = num_traits::Float::sin(omega);
+    let cos_omega = num_traits::Float::cos(omega);
     let alpha = sin_omega / (to_precision::<F, _>(2.0) * q_factor);
     let sqrt_2a = (to_precision::<F, _>(2.0) * a).sqrt();
 
@@ -341,9 +337,9 @@ fn design_high_shelf_filter<F: RealFloat>(
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
     let a = to_precision::<F, _>(10.0).powf(gain_db / to_precision::<F, _>(40.0)); // sqrt of linear gain
-    let omega = to_precision::<F, _>(2.0) * F::PI() * frequency / sample_rate;
-    let sin_omega = omega.sin();
-    let cos_omega = omega.cos();
+    let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * frequency / sample_rate;
+    let sin_omega = num_traits::Float::sin(omega);
+    let cos_omega = num_traits::Float::cos(omega);
     let alpha = sin_omega / (to_precision::<F, _>(2.0) * q_factor);
     let sqrt_2a = (to_precision::<F, _>(2.0) * a).sqrt();
 
@@ -368,9 +364,9 @@ fn design_lowpass_filter<F: RealFloat>(
     q_factor: F,
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
-    let omega = to_precision::<F, _>(2.0) * F::PI() * frequency / sample_rate;
-    let sin_omega = omega.sin();
-    let cos_omega = omega.cos();
+    let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * frequency / sample_rate;
+    let sin_omega = num_traits::Float::sin(omega);
+    let cos_omega = num_traits::Float::cos(omega);
     let alpha = sin_omega / (to_precision::<F, _>(2.0) * q_factor);
 
     // RBJ low-pass filter coefficients
@@ -394,9 +390,9 @@ fn design_highpass_filter<F: RealFloat>(
     q_factor: F,
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
-    let omega = to_precision::<F, _>(2.0) * F::PI() * frequency / sample_rate;
-    let sin_omega = omega.sin();
-    let cos_omega = omega.cos();
+    let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * frequency / sample_rate;
+    let sin_omega = num_traits::Float::sin(omega);
+    let cos_omega = num_traits::Float::cos(omega);
     let alpha = sin_omega / (to_precision::<F, _>(2.0) * q_factor);
 
     // RBJ high-pass filter coefficients
@@ -420,9 +416,9 @@ fn design_bandpass_filter<F: RealFloat>(
     q_factor: F,
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
-    let omega = to_precision::<F, _>(2.0) * F::PI() * frequency / sample_rate;
-    let sin_omega = omega.sin();
-    let cos_omega = omega.cos();
+    let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * frequency / sample_rate;
+    let sin_omega = num_traits::Float::sin(omega);
+    let cos_omega = num_traits::Float::cos(omega);
     let alpha = sin_omega / (to_precision::<F, _>(2.0) * q_factor);
 
     // RBJ band-pass filter coefficients
@@ -446,9 +442,9 @@ fn design_bandstop_filter<F: RealFloat>(
     q_factor: F,
     sample_rate: F,
 ) -> AudioSampleResult<(Vec<F>, Vec<F>)> {
-    let omega = to_precision::<F, _>(2.0) * F::PI() * frequency / sample_rate;
-    let sin_omega = omega.sin();
-    let cos_omega = omega.cos();
+    let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * frequency / sample_rate;
+    let sin_omega = num_traits::Float::sin(omega);
+    let cos_omega = num_traits::Float::cos(omega);
     let alpha = sin_omega / (to_precision::<F, _>(2.0) * q_factor);
 
     // RBJ band-stop filter coefficients
@@ -466,17 +462,8 @@ fn design_bandstop_filter<F: RealFloat>(
     Ok((b_coeffs, a_coeffs))
 }
 
-/// Convert dB to linear gain.
-pub fn db_to_linear<F: RealFloat>(db: F) -> F {
-    to_precision::<F, _>(10.0).powf(db / to_precision::<F, _>(20.0))
-}
 
-/// Convert linear gain to dB.
-pub fn linear_to_db<F: RealFloat>(linear: F) -> F {
-    to_precision::<F, _>(20.0) * linear.log10()
-}
-
-impl<'a, T: AudioSample> AudioSamples<'a, T>
+impl<T: AudioSample> AudioSamples<'_, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -494,16 +481,16 @@ where
         match &mut self.data {
             AudioData::Mono(samples) => {
                 for sample in samples.iter_mut() {
-                    let value: F = sample.convert_to()?;
+                    let value: F = sample.convert_to();
                     let scaled = value * gain;
-                    *sample = scaled.convert_to()?;
+                    *sample = scaled.convert_to();
                 }
             }
             AudioData::Multi(samples) => {
                 for sample in samples.iter_mut() {
-                    let value: F = sample.convert_to()?;
+                    let value: F = sample.convert_to();
                     let scaled = value * gain;
-                    *sample = scaled.convert_to()?;
+                    *sample = scaled.convert_to();
                 }
             }
         }
@@ -515,8 +502,10 @@ where
 mod tests {
     use super::*;
     use crate::operations::traits::AudioParametricEq;
+    use crate::sample_rate;
     use ndarray::Array1;
     use std::f64::consts::PI;
+    use crate::utils::audio_math::amplitude_to_db as linear_to_db;
 
     #[test]
     fn test_peak_filter() {
@@ -535,10 +524,10 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Apply peak filter at 880Hz with +6dB gain
-        let result = audio.apply_peak_filter(880.0, 6.0, 2.0, sample_rate);
+        let result = audio.apply_peak_filter(880.0, 6.0, 2.0, 44100.0);
         assert!(result.is_ok());
 
         // The 880Hz component should be boosted
@@ -560,10 +549,10 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Apply low shelf filter at 500Hz with -3dB gain
-        let result = audio.apply_low_shelf(500.0, -3.0, 0.707, sample_rate);
+        let result = audio.apply_low_shelf(500.0, -3.0, 0.707, 44100.0);
         assert!(result.is_ok());
 
         // Low frequencies should be attenuated
@@ -585,10 +574,10 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Apply high shelf filter at 2000Hz with +4dB gain
-        let result = audio.apply_high_shelf(2000.0, 4.0, 0.707, sample_rate);
+        let result = audio.apply_high_shelf(2000.0, 4.0, 0.707, 44100.0);
         assert!(result.is_ok());
 
         // High frequencies should be boosted
@@ -610,11 +599,10 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Apply 3-band EQ: low shelf at 200Hz (-2dB), mid peak at 1kHz (+3dB), high shelf at 4kHz (+1dB)
-        let result =
-            audio.apply_three_band_eq(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0, sample_rate);
+        let result = audio.apply_three_band_eq(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0, 44100.0);
         assert!(result.is_ok());
 
         // Should apply all three bands
@@ -622,10 +610,9 @@ mod tests {
 
     #[test]
     fn test_parametric_eq_configuration() {
-        let sample_rate = 44100.0;
         let mut audio = AudioSamples::new_mono(
             Array1::from(vec![1.0f32, 0.0, -1.0]).into(),
-            sample_rate as u32,
+            sample_rate!(44100),
         );
 
         let mut eq = ParametricEq::new();
@@ -633,7 +620,7 @@ mod tests {
         eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707));
         eq.set_output_gain(1.0);
 
-        let result = audio.apply_parametric_eq(&eq, sample_rate);
+        let result = audio.apply_parametric_eq(&eq, 44100.0);
         assert!(result.is_ok());
 
         // Check EQ configuration
@@ -678,10 +665,9 @@ mod tests {
 
     #[test]
     fn test_parametric_eq_bypass() {
-        let sample_rate = 44100.0;
         let mut audio = AudioSamples::new_mono(
             Array1::from(vec![1.0f32, 0.5, -0.5]).into(),
-            sample_rate as u32,
+            sample_rate!(44100),
         );
         let original_samples = audio.data.clone();
 
@@ -689,7 +675,7 @@ mod tests {
         eq.add_band(EqBand::peak(1000.0, 10.0, 2.0)); // Large gain
         eq.set_bypassed(true);
 
-        let result = audio.apply_parametric_eq(&eq, sample_rate);
+        let result = audio.apply_parametric_eq(&eq, 44100.0);
         assert!(result.is_ok());
 
         // Audio should be unchanged when bypassed

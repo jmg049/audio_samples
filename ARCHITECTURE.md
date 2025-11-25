@@ -1,21 +1,29 @@
 # AudioSamples Architecture
 
-This document provides detailed information on how the audio_samples crate is architected from its building blocks up to the highest-level API. The architecture follows core principles of **type safety**, **zero-allocation efficiency**, **trait-based composition**, and **modular feature design**.
+This document provides detailed information on how the audio_samples crate is architected from its building blocks up to the highest-level API.
+The architecture follows core principles of **type safety**, **zero-allocation efficiency**, **trait-based composition**, and **modular feature design**.
 
 ## Core Design Principles
 
 ### 1. Type Safety Through Strong Typing
 
-All audio data is strongly typed with the sample format (`i16`, `I24`, `i32`, `f32`, `f64`), ensuring mathematical operations are performed with appropriate precision and range. The type system prevents common audio processing errors like mixing incompatible sample formats.
+All audio data is strongly typed with the sample format (`i16`, `I24`, `i32`, `f32`, `f64`), ensuring mathematical operations are performed with appropriate precision and range.
+The type system prevents common audio processing errors like mixing incompatible sample formats.
 
 ### 2. Zero-Allocation Efficiency
 
-The library leverages `ndarray`'s view system to enable zero-allocation access patterns wherever possible. Operations prefer in-place modifications and views over copying data.
-The library adds several wrappers, ``MonoRepr/MultiRepr`` and ``MonoData/MultiData``, around `ndarray` arrays to facilitate owned and borrowed data automatically. The end user should never have to deal with these wrappers. The top layer of the wrappers is the ``AudioSamples<'_, T: AudioSample>`` struct. This is the entry point for a user and the impl blocks for ``AudioSamples`` connect to the right backend wrapper.
+The library leverages `ndarray`'s view system to enable zero-allocation access patterns wherever possible.
+Operations prefer in-place modifications and views over copying data.
+The library adds several wrappers, ``MonoRepr/MultiRepr`` and ``MonoData/MultiData``, around `ndarray` arrays to facilitate owned and borrowed data automatically.
+ The end user should never have to deal with these wrappers.
+The top layer of the wrappers is the ``AudioSamples<'_, T: AudioSample>`` struct.
+This is the entry point for a user and the impl blocks for ``AudioSamples`` connect to the right backend wrapper.
 
 ### 3. Trait-Based Composition
 
-Functionality is organized into focused, composable traits rather than monolithic implementations. Each trait handles a specific aspect of audio processing with clear separation of concerns. Traits also allow for easy feature-gating.
+Functionality is organized into focused, composable traits rather than monolithic implementations.
+Each trait handles a specific aspect of audio processing with clear separation of concerns.
+Traits also allow for easy feature-gating.
 
 ### 4. Metadata Integration
 
@@ -29,7 +37,8 @@ The library uses cargo features extensively to keep dependencies minimal, allowi
 
 ### AudioSample (./traits.rs)
 
-The `AudioSample` trait is the foundation of the entire type system. It defines the interface for all supported audio sample formats:
+The `AudioSample` trait is the foundation of the entire type system.
+It defines the interface for all supported audio sample formats:
 
 **Supported Types:**
 
@@ -66,7 +75,7 @@ The `ConvertTo<T>` trait provides audio-aware conversions between different samp
 
 **Design Patterns:**
 
-- Returns `AudioSampleResult<T>` to handle conversion failures
+- Returns `T`, designed not to fail.
 - Uses macro-generated implementations for consistency and to cut down on manual code.
 - Maintains mathematical precision across format boundaries
 - Handles edge cases like range overflows gracefully
@@ -89,7 +98,8 @@ The casting trait family provides raw numeric conversions without audio-specific
 
 **Design Patterns:**
 
-Sometimes you just need to cast an int to a float and back again. These traits **DO NOT** perform any audio-specific scaling/conversions.
+Sometimes you just need to cast an int to a float and back again.
+These traits **DO NOT** perform any audio-specific scaling/conversions.
 
 - `CastFrom<S>`: Cast from source type to Self
 - `CastInto<T>`: Cast self into target type
@@ -99,7 +109,9 @@ Sometimes you just need to cast an int to a float and back again. These traits *
 
 - Casting preserves numeric values without audio scaling
 - Out-of-range values are clamped to target type's limits
-- No error handling - assumes well-formed input. If something like this fails then things are bad.
+- No error handling - assumes well-formed input.
+
+If something like this fails then things are bad.
 
 ### AudioSamples<'_, T: AudioSample> (repr.rs)
 
@@ -130,7 +142,8 @@ pub struct AudioSamples<'a, T: AudioSample> {
 
 - Sample rate must be positive
 - Channel layout must match data dimensions
-- Lifetime safety ensured through Rust's borrow checker. But at the user level of the API, unless they are really concerned with lifetime management and reuse in their program, lifetimes should not be a concern.
+- Lifetime safety ensured through Rust's borrow checker.
+But at the user level of the API, unless they are really concerned with lifetime management and reuse in their program, lifetimes should not be a concern.
 - Metadata consistency maintained across operations
 
 ### AudioSamples Iteration (iterators.rs)
@@ -163,7 +176,7 @@ Implements the `AudioTypeConversion` trait for safe type transformations on ``Au
 
 **In-Domain Conversions:**
 
-- `as_type<O>()`: Borrows original, returns new type
+- `to_format<O>()`: Borrows original, returns new type
 - `to_type<O>()`: Consumes original, returns new type
 - Convenience methods: `as_f32()`, `as_i16()`, `as_i24()`, etc.
 - Uses `ConvertTo` trait for audio-aware scaling
@@ -217,7 +230,8 @@ pub enum AudioSampleError {
 }
 ```
 
-Needs reviewing though. Consistency in the error messages would be nice and maybe split things into more granular errors.
+Needs reviewing though.
+Consistency in the error messages would be nice and maybe split things into more granular errors.
 
 **Error Handling Strategy:**
 
@@ -230,7 +244,8 @@ Needs reviewing though. Consistency in the error messages would be nice and mayb
 
 ### The `operations` Module (./operations)
 
-The operations module organizes audio processing functionality into focused, composable traits. Each trait addresses a specific domain of audio processing:
+The operations module organizes audio processing functionality into focused, composable traits.
+Each trait addresses a specific domain of audio processing:
 
 #### Core Organization
 
@@ -249,7 +264,7 @@ The operations module organizes audio processing functionality into focused, com
 
 ```rust
 let peak = audio.peak();          // Returns T directly
-let rms: f64 = audio.rms()?;      // Returns Result<f64>
+let rms: f64 = audio.rms();      // Returns f64
 let crossings = audio.zero_crossings(); // Signal analysis
 ```
 
@@ -264,8 +279,7 @@ let crossings = audio.zero_crossings(); // Signal analysis
 
 **API Contracts**:
 
-- Simple measures return values directly (never fail)
-- Complex computations return `Result` types
+- Leverages invariants provided by AudioSamples around non-empty audio to guarantee a value.
 - Generic over float types for numerical operations
 - Consistent behavior across mono and multi-channel audio
 
@@ -381,8 +395,10 @@ let extracted = multi_audio.extract_channel(0)?;
 
 - `to_mono()`: Multiple mono conversion strategies
 - `to_stereo()`: Stereo expansion from mono
-- `extract_channel()`: Extract a specific channel. allocates a new ``AudioSamples`` for the extracted channel
-- `borrow_channel()`: Borrows a specific channel. Does not allocate a new ``AudioSamples`` for the extracted channel, it just borrows the data.
+- `extract_channel()`: Extract a specific channel.
+allocates a new ``AudioSamples`` for the extracted channel
+- `borrow_channel()`: Borrows a specific channel.
+Does not allocate a new ``AudioSamples`` for the extracted channel, it just borrows the data.
 - `mix_channels()`: Custom channel mixing
 - `swap_channels()`: Channel reordering
 
@@ -551,7 +567,7 @@ let plot = PlotComposer::new()
 
 ### Type System Guarantees
 
-1. **Sample format safety**: Strong typing prevents format mix-ups
+1 .**Sample format safety**: Strong typing prevents format mix-ups
 2. **Lifetime correctness**: Borrowed data cannot outlive its source
 3. **Feature consistency**: Trait bounds enforce feature requirements
 4. **Conversion validity**: Type-safe conversions with error handling

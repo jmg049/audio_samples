@@ -9,6 +9,12 @@ use crate::{
     CastInto, ConvertTo, I24, LayoutError, ParameterError, RealFloat, to_precision,
 };
 
+#[cfg(feature = "statistics")]
+use crate::operations::traits::AudioVoiceActivityDetection;
+
+#[cfg(feature = "statistics")]
+use crate::operations::types::VadConfig;
+
 #[cfg(feature = "fft")]
 use num_complex::Complex;
 #[cfg(feature = "fft")]
@@ -36,7 +42,7 @@ where
     f64: ConvertTo<T>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
-    let audio_f64 = audio.as_f64()?;
+    let audio_f64 = audio.as_f64();
 
     // Use the first channel for analysis
     let data = match audio_f64.as_mono() {
@@ -68,7 +74,7 @@ where
 
     // Look for high-frequency cutoff patterns that might indicate resampling
     let spectrum = compute_spectrum(&data)?;
-    let nyquist_freq = audio.sample_rate() as f64 / 2.0;
+    let nyquist_freq = audio.sample_rate().get() as f64 / 2.0;
 
     // Analyze the spectrum for sharp cutoffs that might indicate resampling
     let detected_rate = analyze_spectrum_for_cutoff(&spectrum, nyquist_freq);
@@ -98,7 +104,7 @@ where
     f64: ConvertTo<T>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
-    let audio_f64 = audio.as_f64()?;
+    let audio_f64 = audio.as_f64();
 
     // Use the first channel for analysis
     let data = match audio_f64.as_mono() {
@@ -133,7 +139,7 @@ where
     }
 
     // Use autocorrelation method for fundamental frequency detection
-    let fundamental = detect_fundamental_autocorrelation(&data, audio.sample_rate() as f64)?;
+    let fundamental = detect_fundamental_autocorrelation(&data, audio.sample_rate().get() as f64)?;
 
     Ok(fundamental)
 }
@@ -161,7 +167,7 @@ where
     let mut in_silence = false;
     let mut silence_start = 0;
 
-    let sample_rate = to_precision::<F, _>(audio.sample_rate());
+    let sample_rate = to_precision::<F, _>(audio.sample_rate().get());
     let samples_per_second = sample_rate;
     let threshold: F = to_precision::<F, _>(threshold);
 
@@ -229,6 +235,31 @@ where
     Ok(silence_regions)
 }
 
+/// Compute a per-frame voice/speech activity mask using the configured VAD.
+///
+/// This is a convenience wrapper around [`AudioVoiceActivityDetection::voice_activity_mask`].
+///
+/// Returns one boolean decision per analysis frame.
+#[cfg(feature = "statistics")]
+pub fn detect_voice_activity_mask<T: AudioSample, F: RealFloat>(
+    audio: &AudioSamples<'_, T>,
+    config: &VadConfig<F>,
+) -> AudioSampleResult<Vec<bool>> {
+    audio.voice_activity_mask(config)
+}
+
+/// Compute contiguous speech regions as `(start_sample, end_sample)` pairs.
+///
+/// This is a convenience wrapper around [`AudioVoiceActivityDetection::speech_regions`].
+/// `end_sample` is exclusive.
+#[cfg(feature = "statistics")]
+pub fn detect_speech_regions<T: AudioSample, F: RealFloat>(
+    audio: &AudioSamples<'_, T>,
+    config: &VadConfig<F>,
+) -> AudioSampleResult<Vec<(usize, usize)>> {
+    audio.speech_regions(config)
+}
+
 /// Detects the dynamic range of an audio signal.
 ///
 /// This function analyzes the amplitude distribution of the signal
@@ -250,7 +281,7 @@ where
     f64: ConvertTo<T>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
-    let audio_f = audio.as_float::<F>()?;
+    let audio_f = audio.as_float::<F>();
 
     let data: Vec<F> = match audio_f.as_mono() {
         Some(mono) => mono
@@ -328,7 +359,7 @@ where
     let mut in_clipped = false;
     let mut clipped_start = 0;
 
-    let sample_rate = to_precision::<F, _>(audio.sample_rate());
+    let sample_rate = to_precision::<F, _>(audio.sample_rate().get());
 
     // Determine clipping thresholds
     let max_val: F = to_precision::<F, _>(T::MAX);
@@ -415,7 +446,7 @@ where
     f64: ConvertTo<T>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
-    let audio = audio.as_float()?;
+    let audio = audio.as_float();
 
     let data: Vec<F> = match audio.as_mono() {
         Some(mono) => mono
@@ -474,7 +505,7 @@ where
     f64: ConvertTo<T>,
     for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
-    let audio = audio.as_float()?;
+    let audio = audio.as_float();
 
     let data: Vec<F> = match audio.as_mono() {
         Some(mono) => mono
@@ -506,7 +537,7 @@ where
 
     // Compute spectrum
     let spectrum = compute_spectrum(&data)?;
-    let sample_rate = to_precision::<F, _>(audio.sample_rate());
+    let sample_rate = to_precision::<F, _>(audio.sample_rate().get());
     let nyquist = sample_rate / to_precision::<F, _>(2.0);
 
     // Find frequency range with significant energy
@@ -550,8 +581,7 @@ pub fn compute_spectrum<F: RealFloat>(data: &[F]) -> AudioSampleResult<Vec<F>> {
 /// Analyzes a frequency spectrum for potential cutoff frequencies that might indicate resampling.
 ///
 /// # Panics
-///
-/// Panics if bin index calculation results in a value that cannot be converted to usize.
+/// Panics if internal float-to-`usize` conversion fails (e.g. if `nyquist_freq` is non-finite).
 pub fn analyze_spectrum_for_cutoff<F: RealFloat>(spectrum: &[F], nyquist_freq: F) -> Option<u32> {
     // Look for sharp cutoffs that might indicate resampling
     let len = spectrum.len();
@@ -592,8 +622,7 @@ pub fn analyze_spectrum_for_cutoff<F: RealFloat>(spectrum: &[F], nyquist_freq: F
 /// Detects the fundamental frequency using autocorrelation analysis.
 ///
 /// # Panics
-///
-/// Panics if minimum period calculation results in a value that cannot be converted to usize.
+/// Panics if internal float-to-`usize` conversions fail (e.g. if `sample_rate` is non-finite).
 pub fn detect_fundamental_autocorrelation<F: RealFloat>(
     data: &[F],
     sample_rate: F,
@@ -649,6 +678,7 @@ pub fn detect_fundamental_autocorrelation<F: RealFloat>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample_rate;
     use ndarray::array;
     use std::f64::consts::PI;
 
@@ -656,7 +686,7 @@ mod tests {
     fn test_detect_silence_regions() {
         // Create a signal with silence regions
         let data = array![0.0f32, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0];
-        let audio: AudioSamples<'_, f32> = AudioSamples::new_mono(data, 10); // 10 Hz sample rate for easy calculation
+        let audio: AudioSamples<'_, f32> = AudioSamples::new_mono(data, sample_rate!(10)); // 10 Hz sample rate for easy calculation
 
         let silence_regions: Vec<(f32, f32)> =
             detect_silence_regions(&audio, 0.5_f32).expect("Failed to detect silence");
@@ -671,7 +701,7 @@ mod tests {
     fn test_detect_dynamic_range() {
         // Create a signal with known dynamic range
         let data = array![0.1f32, 0.5, 1.0, 0.2, 0.8];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let (peak, rms, dynamic_range): (f32, f32, f32) = detect_dynamic_range(&audio).unwrap();
 
@@ -684,7 +714,7 @@ mod tests {
     fn test_detect_clipping() {
         // Create a signal with clipping
         let data = array![0.5f32, 1.0, 1.0, 1.0, 0.5, -1.0, -1.0, 0.0];
-        let audio = AudioSamples::new_mono(data, 8); // 8 Hz sample rate for easy calculation
+        let audio = AudioSamples::new_mono(data, sample_rate!(8)); // 8 Hz sample rate for easy calculation
 
         let clipped_regions = detect_clipping(&audio, 0.99).expect("Failed to detect clipping");
 
@@ -706,7 +736,7 @@ mod tests {
             .collect();
 
         let data = ndarray::Array1::from_vec(samples);
-        let audio = AudioSamples::new_mono(data, sample_rate as u32);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let detected_freq = detect_fundamental_frequency(&audio).unwrap();
 

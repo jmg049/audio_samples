@@ -4,6 +4,7 @@
 //! used by the audio processing traits.
 
 use std::str::FromStr;
+use std::marker::PhantomData;
 
 use crate::{AudioSampleError, AudioSampleResult, ParameterError, RealFloat, to_precision};
 
@@ -147,6 +148,154 @@ pub enum VadMethod {
     Combined,
     /// Spectral-based detection using spectral features.
     Spectral,
+}
+
+/// Multi-channel handling policy for Voice Activity Detection (VAD).
+///
+/// This determines how VAD decisions are produced for multi-channel audio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VadChannelPolicy {
+    /// Average all channels to a mono signal and run VAD once.
+    AverageToMono,
+    /// Run VAD per-channel and mark speech if any channel is active.
+    AnyChannel,
+    /// Run VAD per-channel and mark speech only if all channels are active.
+    AllChannels,
+    /// Run VAD on a specific channel index.
+    Channel(usize),
+}
+
+/// Configuration for Voice Activity Detection (VAD).
+///
+/// The VAD implementation is frame-based: it produces a boolean decision per frame
+/// of length `frame_size` with step `hop_size`.
+///
+/// Defaults are chosen to work reasonably well for general audio, but you should
+/// tune thresholds for your content and sample format.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VadConfig<F: RealFloat> {
+    /// VAD method to use.
+    pub method: VadMethod,
+    /// Frame size in samples.
+    pub frame_size: usize,
+    /// Hop size in samples (frame step).
+    pub hop_size: usize,
+    /// Whether to include a final partial frame (zero-padded).
+    pub pad_end: bool,
+    /// Policy for multi-channel audio.
+    pub channel_policy: VadChannelPolicy,
+
+    /// Energy threshold in dBFS (RMS). Typical values: `-60.0` (very sensitive) to `-30.0`.
+    pub energy_threshold_db: F,
+    /// Minimum acceptable zero crossing rate (ZCR), expressed as crossings per sample in `[0, 1]`.
+    pub zcr_min: F,
+    /// Maximum acceptable zero crossing rate (ZCR), expressed as crossings per sample in `[0, 1]`.
+    pub zcr_max: F,
+
+    /// Minimum number of consecutive speech frames to keep a speech region.
+    pub min_speech_frames: usize,
+    /// Minimum number of consecutive non-speech frames to keep a silence region.
+    /// Shorter silence gaps are filled as speech.
+    pub min_silence_frames: usize,
+    /// Hangover in frames: keep speech active for this many frames after energy drops.
+    pub hangover_frames: usize,
+    /// Majority-vote smoothing window in frames (1 = no smoothing).
+    pub smooth_frames: usize,
+
+    /// Lower bound of the speech band in Hz (used by `VadMethod::Spectral`).
+    pub speech_band_low_hz: F,
+    /// Upper bound of the speech band in Hz (used by `VadMethod::Spectral`).
+    pub speech_band_high_hz: F,
+    /// Threshold on speech-band energy ratio (used by `VadMethod::Spectral`).
+    pub spectral_ratio_threshold: F,
+}
+
+impl<F: RealFloat> VadConfig<F> {
+    /// Create a new VAD configuration with sensible defaults.
+    pub fn new() -> Self {
+        Self {
+            method: VadMethod::Combined,
+            frame_size: 1024,
+            hop_size: 512,
+            pad_end: false,
+            channel_policy: VadChannelPolicy::AverageToMono,
+            energy_threshold_db: to_precision(-40.0),
+            zcr_min: to_precision(0.005),
+            zcr_max: to_precision(0.25),
+            min_speech_frames: 3,
+            min_silence_frames: 2,
+            hangover_frames: 3,
+            smooth_frames: 3,
+            speech_band_low_hz: to_precision(300.0),
+            speech_band_high_hz: to_precision(3400.0),
+            spectral_ratio_threshold: to_precision(0.5),
+        }
+    }
+
+    /// Create an energy-only VAD configuration.
+    pub fn energy_only() -> Self {
+        Self {
+            method: VadMethod::Energy,
+            ..Self::new()
+        }
+    }
+
+    /// Validate configuration parameters.
+    pub fn validate(&self) -> AudioSampleResult<()> {
+        if self.frame_size == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frame_size",
+                "must be > 0",
+            )));
+        }
+        if self.hop_size == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                "must be > 0",
+            )));
+        }
+        if self.hop_size > self.frame_size {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                "must be <= frame_size",
+            )));
+        }
+        if self.smooth_frames == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "smooth_frames",
+                "must be >= 1",
+            )));
+        }
+        if self.zcr_min < F::zero() || self.zcr_max > F::one() || self.zcr_min > self.zcr_max {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "zcr_*",
+                "expected 0 <= zcr_min <= zcr_max <= 1",
+            )));
+        }
+        if self.speech_band_low_hz <= F::zero()
+            || self.speech_band_high_hz <= F::zero()
+            || self.speech_band_low_hz >= self.speech_band_high_hz
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "speech_band_*",
+                "expected 0 < low_hz < high_hz",
+            )));
+        }
+        if self.spectral_ratio_threshold < F::zero() || self.spectral_ratio_threshold > F::one() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "spectral_ratio_threshold",
+                "expected 0 <= threshold <= 1",
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+impl<F: RealFloat> Default for VadConfig<F> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Filter types for digital signal processing.
@@ -2629,5 +2778,659 @@ impl<F: RealFloat> Default for PerturbationConfig<F> {
             target_snr_db: to_precision(20.0),
             noise_color: NoiseColor::White,
         })
+    }
+}
+
+/// Supported serialization formats for AudioSamples.
+///
+/// This enum defines the various file formats that can be used for saving and
+/// loading AudioSamples data, focusing on data analysis and interchange formats
+/// rather than traditional audio file formats like WAV or MP3.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerializationFormat {
+    /// Plain text format with configurable delimiter.
+    /// Saves samples as human-readable text with metadata header.
+    Text {
+        /// Character used to separate values
+        delimiter: TextDelimiter,
+    },
+    /// NumPy binary format (.npy) for single arrays.
+    /// Compatible with NumPy's save/load functions.
+    Numpy,
+    /// NumPy compressed format (.npz) for multiple arrays with metadata.
+    /// Uses ZIP compression to reduce file size.
+    NumpyCompressed {
+        /// Compression level (0-9, where 9 is maximum compression)
+        compression_level: u32,
+    },
+    /// JSON format with full metadata preservation.
+    /// Human-readable but larger file sizes.
+    Json,
+    /// CSV (Comma-Separated Values) format with headers.
+    /// Compatible with spreadsheet applications and data analysis tools.
+    Csv,
+    /// Custom binary format with configurable endianness.
+    /// Compact and fast but specific to this library.
+    Binary {
+        /// Byte order for multi-byte values
+        endian: Endianness,
+    },
+    /// MessagePack binary format for efficient serialization.
+    /// Compact binary format with wide language support.
+    MessagePack,
+    /// CBOR (Concise Binary Object Representation) format.
+    /// Standardized binary format (RFC 7049).
+    Cbor,
+}
+
+/// Text delimiters for plain text serialization formats.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDelimiter {
+    /// Space character separator
+    Space,
+    /// Tab character separator
+    Tab,
+    /// Comma separator
+    Comma,
+    /// Newline separator (each sample on a new line)
+    Newline,
+    /// Custom character separator
+    Custom(char),
+}
+
+/// Byte order specification for binary formats.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endianness {
+    /// Little-endian byte order (least significant byte first)
+    Little,
+    /// Big-endian byte order (most significant byte first)
+    Big,
+    /// Native byte order of the current platform
+    Native,
+}
+
+/// Configuration for serialization operations.
+///
+/// This struct provides fine-grained control over how AudioSamples are
+/// serialized to and deserialized from various file formats.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone)]
+pub struct SerializationConfig<F: RealFloat> {
+    /// Format to use for serialization
+    pub format: SerializationFormat,
+    /// Whether to include metadata (sample rate, channel info, etc.)
+    pub include_metadata: bool,
+    /// Floating point precision for text-based formats
+    /// None uses default precision for the type
+    pub precision: Option<usize>,
+    /// Compression level for formats that support it (0-9)
+    pub compression_level: Option<u32>,
+    /// Custom headers/attributes to include in supported formats
+    pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Whether to normalize data before serialization
+    pub normalize_before_save: bool,
+    /// Normalization method if normalize_before_save is true
+    pub normalization_method: NormalizationMethod,
+    /// Whether to validate data integrity after round-trip
+    pub validate_roundtrip: bool,
+    /// Floating point type for precision calculations
+    pub _phantom: std::marker::PhantomData<F>,
+}
+
+#[cfg(feature = "serialization")]
+impl<F: RealFloat> SerializationConfig<F> {
+    /// Create a new serialization configuration with default settings.
+    pub const fn new(format: SerializationFormat) -> Self {
+        Self {
+            format,
+            include_metadata: true,
+            precision: None,
+            compression_level: None,
+            custom_headers: None,
+            normalize_before_save: false,
+            normalization_method: NormalizationMethod::Peak,
+            validate_roundtrip: false,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Create a configuration optimized for CSV export.
+    pub const fn csv() -> Self {
+        Self::new(SerializationFormat::Csv)
+            .with_precision(6)
+            .with_metadata(true)
+    }
+
+    /// Create a configuration optimized for JSON export with metadata.
+    pub const fn json() -> Self {
+        Self::new(SerializationFormat::Json)
+            .with_precision(8)
+            .with_metadata(true)
+    }
+
+    /// Create a configuration optimized for NumPy compatibility.
+    pub const fn numpy() -> Self {
+        Self::new(SerializationFormat::Numpy).with_metadata(false) // NumPy format doesn't support metadata natively
+    }
+
+    /// Create a configuration optimized for compressed NumPy format.
+    pub const fn numpy_compressed(compression_level: u32) -> Self {
+        Self::new(SerializationFormat::NumpyCompressed { compression_level }).with_metadata(true)
+    }
+
+    /// Create a configuration optimized for binary format.
+    pub const fn binary(endian: Endianness) -> Self {
+        Self::new(SerializationFormat::Binary { endian }).with_metadata(true)
+    }
+
+    /// Create a configuration optimized for MessagePack format.
+    pub const fn messagepack() -> Self {
+        Self::new(SerializationFormat::MessagePack).with_metadata(true)
+    }
+
+    /// Create a configuration optimized for CBOR format.
+    pub const fn cbor() -> Self {
+        Self::new(SerializationFormat::Cbor).with_metadata(true)
+    }
+
+    /// Set whether to include metadata in the serialized output.
+    pub const fn with_metadata(mut self, include: bool) -> Self {
+        self.include_metadata = include;
+        self
+    }
+
+    /// Set the floating point precision for text-based formats.
+    pub const fn with_precision(mut self, precision: usize) -> Self {
+        self.precision = Some(precision);
+        self
+    }
+
+    /// Set the compression level for compressible formats.
+    pub fn with_compression(mut self, level: u32) -> Self {
+        self.compression_level = Some(level.min(9));
+        self
+    }
+
+    /// Add custom headers to the serialized data.
+    pub fn with_custom_headers(
+        mut self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.custom_headers = Some(headers);
+        self
+    }
+
+    /// Enable normalization before saving.
+    pub const fn with_normalization(mut self, method: NormalizationMethod) -> Self {
+        self.normalize_before_save = true;
+        self.normalization_method = method;
+        self
+    }
+
+    /// Enable validation of round-trip serialization accuracy.
+    pub const fn with_validation(mut self, validate: bool) -> Self {
+        self.validate_roundtrip = validate;
+        self
+    }
+
+    /// Validate the serialization configuration.
+    pub fn validate(&self) -> AudioSampleResult<()> {
+        if let Some(precision) = self.precision
+            && (precision == 0 || precision > 17)
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "precision",
+                "Precision must be between 1 and 17 digits",
+            )));
+        }
+
+        if let Some(compression) = self.compression_level
+            && compression > 9
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "compression_level",
+                "Compression level must be between 0 and 9",
+            )));
+        }
+
+        // Validate format-specific constraints
+        match self.format {
+            SerializationFormat::NumpyCompressed { compression_level } => {
+                if compression_level > 9 {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "compression_level",
+                        "NumPy compression level must be between 0 and 9",
+                    )));
+                }
+            }
+            SerializationFormat::Text { delimiter } => {
+                if matches!(delimiter, TextDelimiter::Custom('\0')) {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "delimiter",
+                        "Null character is not a valid delimiter",
+                    )));
+                }
+            }
+            _ => {} // Other formats don't have specific constraints
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serialization")]
+impl<F: RealFloat> Default for SerializationConfig<F> {
+    fn default() -> Self {
+        Self::new(SerializationFormat::Json)
+    }
+}
+
+/// Configuration for Harmonic/Percussive Source Separation (HPSS).
+///
+/// HPSS separates audio into harmonic and percussive components using
+/// STFT magnitude median filtering. Harmonic components are enhanced
+/// by median filtering along the time axis, while percussive components
+/// are enhanced by median filtering along the frequency axis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HpssConfig<F: RealFloat> {
+    /// STFT window size in samples
+    /// Larger windows provide better frequency resolution but lower time resolution
+    pub win_size: usize,
+    /// STFT hop size in samples
+    /// Smaller hop sizes provide better time resolution but increase computation
+    pub hop_size: usize,
+    /// Harmonic median filter kernel size (along time axis)
+    /// Larger values strengthen harmonic separation but may blur transients
+    pub median_filter_harmonic: usize,
+    /// Percussive median filter kernel size (along frequency axis)
+    /// Larger values strengthen percussive separation but may blur tonal content
+    pub median_filter_percussive: usize,
+    /// Soft masking parameter (0.0 = hard mask, 1.0 = completely soft)
+    /// Soft masking provides smoother component separation but less isolation
+    pub mask_softness: F,
+}
+
+impl<F: RealFloat> HpssConfig<F> {
+    /// Create a new HPSS configuration with default settings.
+    ///
+    /// Default configuration suitable for general harmonic/percussive separation:
+    /// - 2048 sample window (good frequency resolution)
+    /// - 512 sample hop size (good time resolution)
+    /// - Harmonic kernel: 17 (enhances sustained tones)
+    /// - Percussive kernel: 17 (enhances transients)
+    /// - Moderate soft masking (0.3)
+    pub fn new() -> Self {
+        Self {
+            win_size: 2048,
+            hop_size: 512,
+            median_filter_harmonic: 17,
+            median_filter_percussive: 17,
+            mask_softness: to_precision(0.3),
+        }
+    }
+
+    /// Create configuration optimized for musical content.
+    ///
+    /// Uses larger filters for stronger separation, suitable for complex musical material:
+    /// - Larger harmonic kernel for better tonal separation
+    /// - Larger percussive kernel for cleaner transient isolation
+    /// - Softer masking for more musical results
+    pub fn musical() -> Self {
+        Self {
+            win_size: 2048,
+            hop_size: 512,
+            median_filter_harmonic: 31,
+            median_filter_percussive: 31,
+            mask_softness: to_precision(0.5),
+        }
+    }
+
+    /// Create configuration optimized for percussive content.
+    ///
+    /// Uses asymmetric filters favoring percussive separation:
+    /// - Moderate harmonic filtering
+    /// - Strong percussive filtering
+    /// - Harder masking for cleaner drum isolation
+    pub fn percussive() -> Self {
+        Self {
+            win_size: 2048,
+            hop_size: 256,  // Better time resolution for transients
+            median_filter_harmonic: 17,
+            median_filter_percussive: 51,  // Stronger percussive filtering
+            mask_softness: to_precision(0.1),  // Harder masking
+        }
+    }
+
+    /// Create configuration optimized for harmonic content.
+    ///
+    /// Uses asymmetric filters favoring harmonic separation:
+    /// - Strong harmonic filtering
+    /// - Moderate percussive filtering
+    /// - Harder masking for cleaner tonal isolation
+    pub fn harmonic() -> Self {
+        Self {
+            win_size: 4096,  // Better frequency resolution for harmonics
+            hop_size: 512,
+            median_filter_harmonic: 51,  // Stronger harmonic filtering
+            median_filter_percussive: 17,
+            mask_softness: to_precision(0.1),  // Harder masking
+        }
+    }
+
+    /// Create configuration for real-time processing.
+    ///
+    /// Uses smaller window and filter sizes for lower latency:
+    /// - Smaller window for reduced latency
+    /// - Smaller hop size for responsiveness
+    /// - Smaller filters for faster processing
+    pub fn realtime() -> Self {
+        Self {
+            win_size: 1024,
+            hop_size: 256,
+            median_filter_harmonic: 11,
+            median_filter_percussive: 11,
+            mask_softness: to_precision(0.3),
+        }
+    }
+
+    /// Set STFT parameters.
+    ///
+    /// # Arguments
+    /// * `win_size` - Window size in samples (should be power of 2)
+    /// * `hop_size` - Hop size in samples (typically win_size/4)
+    pub const fn set_stft_params(&mut self, win_size: usize, hop_size: usize) {
+        self.win_size = win_size;
+        self.hop_size = hop_size;
+    }
+
+    /// Set median filter sizes.
+    ///
+    /// # Arguments
+    /// * `harmonic` - Harmonic filter size (odd numbers recommended)
+    /// * `percussive` - Percussive filter size (odd numbers recommended)
+    pub const fn set_filter_sizes(&mut self, harmonic: usize, percussive: usize) {
+        self.median_filter_harmonic = harmonic;
+        self.median_filter_percussive = percussive;
+    }
+
+    /// Set mask softness parameter.
+    ///
+    /// # Arguments
+    /// * `softness` - Softness value (0.0 = hard mask, 1.0 = completely soft)
+    pub fn set_mask_softness(&mut self, softness: F) {
+        self.mask_softness = softness.clamp(F::zero(), F::one());
+    }
+
+    /// Validate HPSS configuration.
+    ///
+    /// # Arguments
+    /// * `sample_rate` - Sample rate in Hz
+    ///
+    /// # Returns
+    /// Result indicating whether the configuration is valid
+    pub fn validate(&self, sample_rate: F) -> AudioSampleResult<()> {
+        // Validate window size
+        if self.win_size == 0 || !self.win_size.is_power_of_two() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "win_size",
+                "Window size must be a positive power of 2",
+            )));
+        }
+
+        // Validate hop size
+        if self.hop_size == 0 || self.hop_size > self.win_size {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                "Hop size must be positive and not larger than window size",
+            )));
+        }
+
+        // Validate median filter sizes
+        if self.median_filter_harmonic == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "median_filter_harmonic",
+                "Harmonic median filter size must be greater than 0",
+            )));
+        }
+
+        if self.median_filter_percussive == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "median_filter_percussive",
+                "Percussive median filter size must be greater than 0",
+            )));
+        }
+
+        // Validate mask softness
+        if self.mask_softness < F::zero() || self.mask_softness > F::one() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "mask_softness",
+                "Mask softness must be between 0.0 and 1.0",
+            )));
+        }
+
+        // Check reasonable parameter ranges
+        if self.win_size > 16384 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "win_size",
+                "Window size should not exceed 16384 samples for practical processing",
+            )));
+        }
+
+        if self.median_filter_harmonic > 101 || self.median_filter_percussive > 101 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "median_filter_size",
+                "Median filter sizes should not exceed 101 for practical processing",
+            )));
+        }
+
+        // Validate minimum frequency resolution
+        let freq_resolution = sample_rate / to_precision::<F, _>(self.win_size);
+        if freq_resolution > to_precision(50.0) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "win_size",
+                format!("Window too small, frequency resolution ({:.1} Hz) is too low", freq_resolution),
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Calculate the number of frequency bins for this configuration.
+    pub const fn num_freq_bins(&self) -> usize {
+        self.win_size / 2 + 1
+    }
+
+    /// Calculate the frequency resolution in Hz.
+    pub fn freq_resolution(&self, sample_rate: F) -> F {
+        sample_rate / to_precision::<F, _>(self.win_size)
+    }
+
+    /// Calculate the time resolution in seconds.
+    pub fn time_resolution(&self, sample_rate: F) -> F {
+        to_precision::<F, _>(self.hop_size) / sample_rate
+    }
+}
+
+impl<F: RealFloat> Default for HpssConfig<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Method for computing chromagram features.
+///
+/// Chromagram can be computed using different spectral representations:
+/// - STFT: Standard Short-Time Fourier Transform based approach
+/// - CQT: Constant-Q Transform based approach (better frequency resolution for low frequencies)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
+pub enum ChromaMethod {
+    /// Use Short-Time Fourier Transform for chromagram computation
+    #[default]
+    Stft,
+    /// Use Constant-Q Transform for chromagram computation
+    Cqt,
+}
+
+
+/// Configuration for chromagram (chroma vector) computation.
+///
+/// Chromagram represents the distribution of energy across pitch classes,
+/// providing a harmonic representation that is invariant to octave shifts.
+/// Each bin represents a semitone in the 12-tone equal temperament scale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChromaConfig<F: RealFloat> {
+    /// Method for computing the underlying spectral representation
+    pub method: ChromaMethod,
+    /// Number of chroma bins (typically 12 for Western music)
+    pub n_chroma: usize,
+    /// STFT window size in samples (used when method = Stft)
+    /// Larger windows provide better frequency resolution
+    pub window_size: usize,
+    /// STFT hop size in samples (used when method = Stft)
+    /// Smaller hop sizes provide better time resolution
+    pub hop_size: usize,
+    /// Sample rate override (if None, uses audio's sample rate)
+    pub sample_rate: Option<usize>,
+    /// Whether to normalize chroma vectors per time frame
+    /// When true, each time frame is normalized to sum to 1.0
+    pub norm: bool,
+    /// Phantom data to bind the float type parameter
+    _phantom: PhantomData<F>,
+}
+
+impl<F: RealFloat> ChromaConfig<F> {
+    /// Create a new chroma configuration with default settings.
+    ///
+    /// Default configuration suitable for general chromagram analysis:
+    /// - STFT method
+    /// - 12 chroma bins (standard semitones)
+    /// - 2048 sample window (good frequency resolution)
+    /// - 512 sample hop size (good time resolution)
+    /// - Frame normalization enabled
+    pub const fn new() -> Self {
+        Self {
+            method: ChromaMethod::Stft,
+            n_chroma: 12,
+            window_size: 2048,
+            hop_size: 512,
+            sample_rate: None,
+            norm: true,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Create configuration optimized for STFT-based chromagram.
+    ///
+    /// Uses STFT with parameters optimized for harmonic content analysis.
+    pub const fn stft() -> Self {
+        Self {
+            method: ChromaMethod::Stft,
+            n_chroma: 12,
+            window_size: 2048,
+            hop_size: 512,
+            sample_rate: None,
+            norm: true,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Create configuration optimized for CQT-based chromagram.
+    ///
+    /// Uses Constant-Q Transform which provides better frequency resolution
+    /// for lower frequencies, making it ideal for harmonic analysis.
+    pub const fn cqt() -> Self {
+        Self {
+            method: ChromaMethod::Cqt,
+            n_chroma: 12,
+            window_size: 2048,  // Used for CQT kernel calculation
+            hop_size: 512,
+            sample_rate: None,
+            norm: true,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Create configuration for high-resolution chromagram analysis.
+    ///
+    /// Uses larger windows for better frequency resolution.
+    pub const fn high_resolution() -> Self {
+        Self {
+            method: ChromaMethod::Stft,
+            n_chroma: 12,
+            window_size: 4096,
+            hop_size: 1024,
+            sample_rate: None,
+            norm: true,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Create configuration for real-time chromagram analysis.
+    ///
+    /// Uses smaller windows for lower latency.
+    pub const fn realtime() -> Self {
+        Self {
+            method: ChromaMethod::Stft,
+            n_chroma: 12,
+            window_size: 1024,
+            hop_size: 256,
+            sample_rate: None,
+            norm: true,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the number of chroma bins.
+    pub const fn with_n_chroma(mut self, n_chroma: usize) -> Self {
+        self.n_chroma = n_chroma;
+        self
+    }
+
+    /// Set the window size for STFT.
+    pub const fn with_window_size(mut self, window_size: usize) -> Self {
+        self.window_size = window_size;
+        self
+    }
+
+    /// Set the hop size.
+    pub const fn with_hop_size(mut self, hop_size: usize) -> Self {
+        self.hop_size = hop_size;
+        self
+    }
+
+    /// Set the sample rate override.
+    pub const fn with_sample_rate(mut self, sample_rate: usize) -> Self {
+        self.sample_rate = Some(sample_rate);
+        self
+    }
+
+    /// Set the normalization option.
+    pub const fn with_norm(mut self, norm: bool) -> Self {
+        self.norm = norm;
+        self
+    }
+
+    /// Calculate the number of time frames for given audio length.
+    pub const fn num_frames(&self, num_samples: usize) -> usize {
+        if num_samples <= self.window_size {
+            1
+        } else {
+            (num_samples - self.window_size) / self.hop_size + 1
+        }
+    }
+
+    /// Calculate the time resolution in seconds.
+    pub fn time_resolution(&self, sample_rate: F) -> F {
+        to_precision::<F, _>(self.hop_size) / sample_rate
+    }
+}
+
+impl<F: RealFloat> Default for ChromaConfig<F> {
+    fn default() -> Self {
+        Self::new()
     }
 }
