@@ -71,7 +71,7 @@ enum ProgressPhase<F> {
 }
 
 #[cfg(not(feature = "beat-detection"))]
-type ProgressCallback = Option<Box<dyn Fn(ProgressPhase)>>;
+type ProgressCallback<F> = dyn Fn(ProgressPhase<F>);
 
 use crate::operations::CqtConfig;
 use crate::operations::peak_picking::pick_peaks;
@@ -794,7 +794,7 @@ where
             .collect();
 
         if let Some(callback) = progress_callback {
-            callback(ProgressPhase::Complete);
+            callback(ProgressPhase::BeatDetectionComplete);
         }
 
         Ok(env)

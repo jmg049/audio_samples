@@ -300,11 +300,19 @@
 //!
 mod error;
 
-#[cfg(feature = "core-ops")]
+#[cfg(any(
+    feature = "core-ops",
+    feature = "statistics",
+    feature = "processing",
+    feature = "editing",
+    feature = "channels"
+))]
 pub mod operations;
 
 pub mod conversions;
 pub mod iterators;
+#[cfg(any(feature = "statistics", feature = "processing"))]
+pub mod minimal;
 // pub mod realtime;
 mod repr;
 #[cfg(feature = "resampling")]
@@ -324,11 +332,20 @@ pub use crate::iterators::{
     AudioSampleIterators, ChannelIterator, ChannelIteratorMut, FrameIterator, FrameIteratorMut,
     FrameMut, PaddingMode, WindowIterator, WindowIteratorMut, WindowMut,
 };
+#[cfg(feature = "statistics")]
+pub use crate::operations::AudioStatistics;
+
+#[cfg(feature = "processing")]
+pub use crate::operations::{AudioProcessing, NormalizationMethod};
+
+#[cfg(feature = "editing")]
+pub use crate::operations::AudioEditing;
+
+#[cfg(feature = "channels")]
+pub use crate::operations::AudioChannelOps;
+
 #[cfg(feature = "core-ops")]
-pub use crate::operations::{
-    AudioChannelOps, AudioEditing, AudioProcessing, AudioSamplesOperations, AudioStatistics,
-    NormalizationMethod,
-};
+pub use crate::operations::AudioSamplesOperations;
 
 #[cfg(feature = "spectral-analysis")]
 pub use crate::operations::AudioTransforms;
@@ -336,10 +353,16 @@ pub use crate::operations::AudioTransforms;
 #[cfg(feature = "plotting")]
 pub use crate::operations::AudioPlottingUtils;
 pub use crate::repr::{AudioData, AudioSamples, StereoAudioSamples};
+#[cfg(feature = "fixed-size-audio")]
+pub use crate::repr::FixedSizeAudioSamples;
 pub use crate::traits::{
     AudioSample, AudioSampleFamily, AudioTypeConversion, CastFrom, CastInto, Castable, ConvertTo,
 };
-pub use crate::utils::*;
+pub use crate::utils::{comparison, detection, generation::{silence, sine_wave, cosine_wave, sawtooth_wave, square_wave, chirp, triangle_wave}, samples_to_seconds, seconds_to_samples};
+
+// Re-export noise generation functions with feature gating
+#[cfg(feature = "random-generation")]
+pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
 
 pub use i24::I24; // Re-export I24 type that has the AudioSample implementation
 

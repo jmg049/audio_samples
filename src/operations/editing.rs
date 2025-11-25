@@ -4,21 +4,27 @@
 //! time-domain audio editing operations including cutting, pasting, mixing,
 //! and envelope operations using efficient ndarray operations.
 
+#[cfg(feature = "random-generation")]
+use crate::brown_noise;
 use crate::operations::traits::AudioEditing;
 use crate::operations::types::{
     FadeCurve, NoiseColor, PadSide, PerturbationConfig, PerturbationMethod,
 };
 use crate::repr::AudioData;
-use crate::utils::{pink_noise, white_noise};
+use crate::seconds_to_samples;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioStatistics,
     AudioTypeConversion, ConvertTo, I24, LayoutError, ParameterError, ProcessingError, RealFloat,
     samples_to_seconds, to_precision,
 };
-use crate::{brown_noise, seconds_to_samples};
+#[cfg(feature = "random-generation")]
+use crate::{pink_noise, white_noise};
 use ndarray::{Array1, Array2, Axis, s};
+#[cfg(feature = "random-generation")]
 use rand::distr::StandardUniform;
+#[cfg(feature = "random-generation")]
 use rand::rngs::StdRng;
+#[cfg(feature = "random-generation")]
 use rand::{Rng, SeedableRng};
 
 /// Validates time bounds for trim operations
@@ -105,12 +111,7 @@ where
                 // Reverse the 1D array in place
                 arr.swap_axes(0, 0); // No-op, just to indicate in-place operation
                 return {
-                    arr.as_slice_mut()
-                        .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
-                            operation: "array access".to_string(),
-                            layout_type: "Mono samples must be contiguous".to_string(),
-                        }))?
-                        .reverse();
+                    arr.as_slice_mut().reverse();
                     Ok(())
                 };
             }
@@ -264,10 +265,10 @@ where
     }
 
     /// Splits audio into segments of specified duration.
-    fn split<'b, F: RealFloat>(
+    fn split<F: RealFloat>(
         &self,
         segment_duration_seconds: F,
-    ) -> AudioSampleResult<Vec<AudioSamples<'b, T>>> {
+    ) -> AudioSampleResult<Vec<AudioSamples<'static, T>>> {
         if segment_duration_seconds <= F::zero() {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "parameter",
@@ -309,8 +310,9 @@ where
     }
 
     /// Concatenates multiple audio segments into one.
-    fn concatenate(segments: &[Self]) -> AudioSampleResult<AudioSamples<'static, T>>
+    fn concatenate<'b>(segments: &'b [AudioSamples<'b, T>]) -> AudioSampleResult<AudioSamples<'b, T>>
     where
+        'b : 'a,
         Self: Sized,
     {
         if segments.is_empty() {
@@ -345,7 +347,9 @@ where
             true => {
                 let mut all_samples = Vec::new();
                 for segment in segments.iter() {
-                    let segment = segment.as_mono().ok_or(AudioSampleError::Parameter(
+                    let owned_segment = segment.clone().into_owned();
+                    
+                    let segment = owned_segment.as_mono().ok_or(AudioSampleError::Parameter(
                         ParameterError::invalid_value("input", "Expected mono audio data"),
                     ))?;
                     all_samples.extend_from_slice(segment.as_slice().ok_or(
@@ -375,8 +379,11 @@ where
                 // For each channel, concatenate all segments
                 for channel_idx in 0..num_channels {
                     for segment in segments.iter() {
+                        
+                        let owned_segment = segment.clone().into_owned();
+                        
                         let segment_multi =
-                            segment
+                            owned_segment
                                 .as_multi_channel()
                                 .ok_or(AudioSampleError::Parameter(
                                     ParameterError::invalid_value(
@@ -410,6 +417,8 @@ where
             }
         }
     }
+
+
 
     fn stack(sources: &[Self]) -> AudioSampleResult<AudioSamples<'static, T>> {
         if sources.is_empty() {
@@ -801,6 +810,7 @@ where
     }
 
     /// Applies perturbation to audio samples for data augmentation.
+    #[cfg(feature = "random-generation")]
     fn perturb<'b, F>(
         &self,
         config: &PerturbationConfig<F>,
@@ -816,6 +826,7 @@ where
     }
 
     /// Applies perturbation to audio samples in place.
+    #[cfg(feature = "random-generation")]
     fn perturb_<F>(&mut self, config: &PerturbationConfig<F>) -> AudioSampleResult<()>
     where
         F: RealFloat + ConvertTo<T>,
@@ -948,9 +959,117 @@ where
             }
         }
     }
+    
+    fn concatenate_owned<'b>(
+        segments: Vec<AudioSamples<'_, T>>,
+    ) -> AudioSampleResult<AudioSamples<'b, T>> 
+        where Self: Sized {
+                    if segments.is_empty() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "parameter",
+                "Cannot concatenate empty segment list",
+            )));
+        }
+
+        // Validate all segments have the same sample rate and channel count
+        let first_sample_rate = segments[0].sample_rate();
+        let first_num_channels = segments[0].num_channels();
+        for segment in segments.iter().skip(1) {
+            if segment.sample_rate() != first_sample_rate {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "parameter",
+                    "All segments must have the same sample rate",
+                )));
+            }
+            if segment.num_channels() != first_num_channels {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "parameter",
+                    "All segments must have the same number of channels",
+                )));
+            }
+        }
+
+        let first_sample_rate = segments[0].sample_rate();
+        let first_is_mono = segments[0].is_mono();
+
+        match first_is_mono {
+            true => {
+                let mut all_samples = Vec::new();
+                for segment in segments.iter() {
+                    let owned_segment = segment.clone().into_owned();
+                    
+                    let segment = owned_segment.as_mono().ok_or(AudioSampleError::Parameter(
+                        ParameterError::invalid_value("input", "Expected mono audio data"),
+                    ))?;
+                    all_samples.extend_from_slice(segment.as_slice().ok_or(
+                        AudioSampleError::Parameter(ParameterError::invalid_value(
+                            "input",
+                            "Mono samples must be contiguous",
+                        )),
+                    )?);
+                }
+
+                let concatenated = Array1::from_vec(all_samples);
+                Ok(AudioSamples::new_mono(concatenated, first_sample_rate))
+            }
+            false => {
+                let num_channels = segments[0].num_channels();
+                let mut total_samples = 0;
+
+                // Calculate total length
+                for segment in segments.iter() {
+                    total_samples += segment.samples_per_channel();
+                }
+
+                // Create concatenated array
+                let mut concatenated_data: Vec<T> =
+                    Vec::with_capacity(num_channels * total_samples);
+
+                // For each channel, concatenate all segments
+                for channel_idx in 0..num_channels {
+                    for segment in segments.iter() {
+                        
+                        let owned_segment = segment.clone().into_owned();
+                        
+                        let segment_multi =
+                            owned_segment
+                                .as_multi_channel()
+                                .ok_or(AudioSampleError::Parameter(
+                                    ParameterError::invalid_value(
+                                        "input",
+                                        "Expected multi-channel audio data",
+                                    ),
+                                ))?;
+                        let channel_data = segment_multi.row(channel_idx);
+                        concatenated_data.extend_from_slice(channel_data.as_slice().ok_or(
+                            AudioSampleError::Parameter(ParameterError::invalid_value(
+                                "input",
+                                "Multi-channel samples must be contiguous",
+                            )),
+                        )?);
+                    }
+                }
+
+                let concatenated =
+                    Array2::from_shape_vec((num_channels, total_samples), concatenated_data)
+                        .map_err(|e| {
+                            AudioSampleError::Parameter(ParameterError::invalid_value(
+                                "parameter",
+                                format!("Array shape error: {}", e),
+                            ))
+                        })?;
+
+                Ok(AudioSamples::new_multi_channel(
+                    concatenated,
+                    first_sample_rate,
+                ))
+            }
+        }
+    }
 }
 
 /// Apply perturbation with a given RNG
+#[cfg(feature = "random-generation")]
 fn apply_perturbation_with_rng<T, R, F>(
     audio: &mut AudioSamples<T>,
     method: &PerturbationMethod<F>,
@@ -1004,6 +1123,7 @@ where
 }
 
 /// Apply Gaussian noise to audio samples
+#[cfg(feature = "random-generation")]
 fn apply_gaussian_noise_<T, R, F>(
     audio: &mut AudioSamples<T>,
     target_snr_db: F,
@@ -1098,6 +1218,7 @@ where
 }
 
 /// Helper to apply custom noise generation using provided RNG
+#[cfg(feature = "random-generation")]
 fn apply_custom_noise_to_audio<T, R, F>(
     noise: &mut AudioSamples<T>,
     amplitude: F,
@@ -1128,6 +1249,7 @@ where
 }
 
 /// Apply random gain to audio samples
+#[cfg(feature = "random-generation")]
 fn apply_random_gain_<T, R, F>(
     audio: &mut AudioSamples<T>,
     min_gain_db: F,
@@ -1378,8 +1500,8 @@ mod tests {
         let samples2 = Array1::from(vec![2.0f32; 1000]);
         let audio1 = AudioSamples::new_mono(samples1.into(), 44100);
         let audio2 = AudioSamples::new_mono(samples2.into(), 44100);
-
-        let concatenated = AudioSamples::concatenate(&[audio1, audio2]).unwrap();
+        let audio= &[audio1, audio2];
+        let concatenated = AudioSamples::concatenate(audio).unwrap();
 
         assert_eq!(concatenated.samples_per_channel(), 2000);
 

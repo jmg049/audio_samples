@@ -2631,3 +2631,252 @@ impl<F: RealFloat> Default for PerturbationConfig<F> {
         })
     }
 }
+
+/// Supported serialization formats for AudioSamples.
+///
+/// This enum defines the various file formats that can be used for saving and
+/// loading AudioSamples data, focusing on data analysis and interchange formats
+/// rather than traditional audio file formats like WAV or MP3.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerializationFormat {
+    /// Plain text format with configurable delimiter.
+    /// Saves samples as human-readable text with metadata header.
+    Text {
+        /// Character used to separate values
+        delimiter: TextDelimiter,
+    },
+    /// NumPy binary format (.npy) for single arrays.
+    /// Compatible with NumPy's save/load functions.
+    Numpy,
+    /// NumPy compressed format (.npz) for multiple arrays with metadata.
+    /// Uses ZIP compression to reduce file size.
+    NumpyCompressed {
+        /// Compression level (0-9, where 9 is maximum compression)
+        compression_level: u32,
+    },
+    /// JSON format with full metadata preservation.
+    /// Human-readable but larger file sizes.
+    Json,
+    /// CSV (Comma-Separated Values) format with headers.
+    /// Compatible with spreadsheet applications and data analysis tools.
+    Csv,
+    /// Custom binary format with configurable endianness.
+    /// Compact and fast but specific to this library.
+    Binary {
+        /// Byte order for multi-byte values
+        endian: Endianness,
+    },
+    /// MessagePack binary format for efficient serialization.
+    /// Compact binary format with wide language support.
+    MessagePack,
+    /// CBOR (Concise Binary Object Representation) format.
+    /// Standardized binary format (RFC 7049).
+    Cbor,
+}
+
+/// Text delimiters for plain text serialization formats.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDelimiter {
+    /// Space character separator
+    Space,
+    /// Tab character separator
+    Tab,
+    /// Comma separator
+    Comma,
+    /// Newline separator (each sample on a new line)
+    Newline,
+    /// Custom character separator
+    Custom(char),
+}
+
+/// Byte order specification for binary formats.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endianness {
+    /// Little-endian byte order (least significant byte first)
+    Little,
+    /// Big-endian byte order (most significant byte first)
+    Big,
+    /// Native byte order of the current platform
+    Native,
+}
+
+/// Configuration for serialization operations.
+///
+/// This struct provides fine-grained control over how AudioSamples are
+/// serialized to and deserialized from various file formats.
+#[cfg(feature = "serialization")]
+#[derive(Debug, Clone)]
+pub struct SerializationConfig<F: RealFloat> {
+    /// Format to use for serialization
+    pub format: SerializationFormat,
+    /// Whether to include metadata (sample rate, channel info, etc.)
+    pub include_metadata: bool,
+    /// Floating point precision for text-based formats
+    /// None uses default precision for the type
+    pub precision: Option<usize>,
+    /// Compression level for formats that support it (0-9)
+    pub compression_level: Option<u32>,
+    /// Custom headers/attributes to include in supported formats
+    pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Whether to normalize data before serialization
+    pub normalize_before_save: bool,
+    /// Normalization method if normalize_before_save is true
+    pub normalization_method: NormalizationMethod,
+    /// Whether to validate data integrity after round-trip
+    pub validate_roundtrip: bool,
+    /// Floating point type for precision calculations
+    pub _phantom: std::marker::PhantomData<F>,
+}
+
+#[cfg(feature = "serialization")]
+impl<F: RealFloat> SerializationConfig<F> {
+    /// Create a new serialization configuration with default settings.
+    pub fn new(format: SerializationFormat) -> Self {
+        Self {
+            format,
+            include_metadata: true,
+            precision: None,
+            compression_level: None,
+            custom_headers: None,
+            normalize_before_save: false,
+            normalization_method: NormalizationMethod::Peak,
+            validate_roundtrip: false,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Create a configuration optimized for CSV export.
+    pub fn csv() -> Self {
+        Self::new(SerializationFormat::Csv)
+            .with_precision(6)
+            .with_metadata(true)
+    }
+
+    /// Create a configuration optimized for JSON export with metadata.
+    pub fn json() -> Self {
+        Self::new(SerializationFormat::Json)
+            .with_precision(8)
+            .with_metadata(true)
+    }
+
+    /// Create a configuration optimized for NumPy compatibility.
+    pub fn numpy() -> Self {
+        Self::new(SerializationFormat::Numpy)
+            .with_metadata(false) // NumPy format doesn't support metadata natively
+    }
+
+    /// Create a configuration optimized for compressed NumPy format.
+    pub fn numpy_compressed(compression_level: u32) -> Self {
+        Self::new(SerializationFormat::NumpyCompressed { compression_level })
+            .with_metadata(true)
+    }
+
+    /// Create a configuration optimized for binary format.
+    pub fn binary(endian: Endianness) -> Self {
+        Self::new(SerializationFormat::Binary { endian })
+            .with_metadata(true)
+    }
+
+    /// Create a configuration optimized for MessagePack format.
+    pub fn messagepack() -> Self {
+        Self::new(SerializationFormat::MessagePack)
+            .with_metadata(true)
+    }
+
+    /// Create a configuration optimized for CBOR format.
+    pub fn cbor() -> Self {
+        Self::new(SerializationFormat::Cbor)
+            .with_metadata(true)
+    }
+
+    /// Set whether to include metadata in the serialized output.
+    pub fn with_metadata(mut self, include: bool) -> Self {
+        self.include_metadata = include;
+        self
+    }
+
+    /// Set the floating point precision for text-based formats.
+    pub fn with_precision(mut self, precision: usize) -> Self {
+        self.precision = Some(precision);
+        self
+    }
+
+    /// Set the compression level for compressible formats.
+    pub fn with_compression(mut self, level: u32) -> Self {
+        self.compression_level = Some(level.min(9));
+        self
+    }
+
+    /// Add custom headers to the serialized data.
+    pub fn with_custom_headers(mut self, headers: std::collections::HashMap<String, String>) -> Self {
+        self.custom_headers = Some(headers);
+        self
+    }
+
+    /// Enable normalization before saving.
+    pub fn with_normalization(mut self, method: NormalizationMethod) -> Self {
+        self.normalize_before_save = true;
+        self.normalization_method = method;
+        self
+    }
+
+    /// Enable validation of round-trip serialization accuracy.
+    pub fn with_validation(mut self, validate: bool) -> Self {
+        self.validate_roundtrip = validate;
+        self
+    }
+
+    /// Validate the serialization configuration.
+    pub fn validate(&self) -> AudioSampleResult<()> {
+        if let Some(precision) = self.precision {
+            if precision == 0 || precision > 17 {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "precision",
+                    "Precision must be between 1 and 17 digits",
+                )));
+            }
+        }
+
+        if let Some(compression) = self.compression_level {
+            if compression > 9 {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "compression_level",
+                    "Compression level must be between 0 and 9",
+                )));
+            }
+        }
+
+        // Validate format-specific constraints
+        match self.format {
+            SerializationFormat::NumpyCompressed { compression_level } => {
+                if compression_level > 9 {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "compression_level",
+                        "NumPy compression level must be between 0 and 9",
+                    )));
+                }
+            }
+            SerializationFormat::Text { delimiter } => {
+                if matches!(delimiter, TextDelimiter::Custom('\0')) {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "delimiter",
+                        "Null character is not a valid delimiter",
+                    )));
+                }
+            }
+            _ => {} // Other formats don't have specific constraints
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "serialization")]
+impl<F: RealFloat> Default for SerializationConfig<F> {
+    fn default() -> Self {
+        Self::new(SerializationFormat::Json)
+    }
+}

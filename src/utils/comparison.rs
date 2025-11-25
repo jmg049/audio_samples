@@ -511,7 +511,7 @@ mod tests {
         let audio1 = AudioSamples::new_mono(data.clone(), 44100);
         let audio2 = AudioSamples::new_mono(data, 44100);
 
-        let corr = correlation(&audio1, &audio2).unwrap();
+        let corr: f64 = correlation(&audio1, &audio2).unwrap();
         assert_approx_eq!(corr, 1.0, 1e-10);
     }
 
@@ -522,7 +522,7 @@ mod tests {
         let audio1 = AudioSamples::new_mono(data1, 44100);
         let audio2 = AudioSamples::new_mono(data2, 44100);
 
-        let corr = correlation(&audio1, &audio2).unwrap();
+        let corr: f64 = correlation(&audio1, &audio2).unwrap();
         assert_approx_eq!(corr, -1.0, 1e-10);
     }
 

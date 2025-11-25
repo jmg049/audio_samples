@@ -56,6 +56,8 @@ pub mod pitch_analysis;
 #[cfg(feature = "plotting")]
 pub mod plotting;
 pub mod processing;
+#[cfg(feature = "serialization")]
+pub mod serialization;
 pub mod statistics;
 pub mod traits;
 #[cfg(feature = "spectral-analysis")]
@@ -63,16 +65,29 @@ pub mod transforms;
 pub mod types;
 
 // Re-export main traits for convenience
-pub use traits::{
-    AudioChannelOps, AudioDynamicRange, AudioEditing, AudioIirFiltering, AudioParametricEq,
-    AudioProcessing, AudioSamplesOperations, AudioStatistics,
-};
+#[cfg(feature = "statistics")]
+pub use traits::AudioStatistics;
+
+#[cfg(feature = "processing")]
+pub use traits::AudioProcessing;
+
+#[cfg(feature = "editing")]
+pub use traits::AudioEditing;
+
+#[cfg(feature = "channels")]
+pub use traits::AudioChannelOps;
+
+#[cfg(feature = "core-ops")]
+pub use traits::{AudioDynamicRange, AudioIirFiltering, AudioParametricEq, AudioSamplesOperations};
 
 #[cfg(feature = "spectral-analysis")]
 pub use traits::AudioTransforms;
 
 #[cfg(feature = "plotting")]
 pub use traits::AudioPlottingUtils;
+
+#[cfg(feature = "serialization")]
+pub use traits::AudioSamplesSerialise;
 
 // Re-export builder types
 pub use processing::ProcessingBuilder;
@@ -116,6 +131,9 @@ pub use types::{
     PeakPickingConfig, ResamplingQuality, SpectralFluxConfig, SpectralFluxMethod,
     StereoConversionMethod,
 };
+
+#[cfg(feature = "serialization")]
+pub use types::{SerializationConfig, SerializationFormat, TextDelimiter, Endianness};
 
 #[cfg(feature = "beat-detection")]
 pub use beats::*;

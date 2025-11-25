@@ -5,19 +5,16 @@
 
 use super::core::*;
 use super::elements::*;
+use crate::AudioSampleError;
 use crate::ParameterError;
 use crate::RealFloat;
 use crate::operations::types::WindowType;
 use crate::to_precision;
-#[cfg(feature = "plotting")]
 use plotly::Plot;
 use plotly::layout::AxisRange;
-#[cfg(feature = "plotting")]
 use plotly::layout::{GridPattern, Layout, LayoutGrid, RowOrder};
-// #[cfg(feature = "plotting")]
-// use plotview_rs::ViewerArgs;
-// #[cfg(feature = "plotting")]
-// use plotview_rs::ViewerHandle;
+use html_view;
+
 
 /// Main compositor for combining and rendering plot elements
 pub struct PlotComposer<F: RealFloat> {
@@ -120,6 +117,7 @@ impl<F: RealFloat> PlotComposer<F> {
 
         Ok(())
     }
+    
     #[cfg(feature = "static-plots")]
     /// Render to an SVG file (vector graphics)
     pub fn render_to_svg(&self, path: &str, width: u32, height: u32) -> PlotResult<()> {
@@ -208,13 +206,22 @@ impl<F: RealFloat> PlotComposer<F> {
     }
 
     /// Show the plot in browser (interactive)
-    pub fn show(&self, _blocking: bool) -> PlotResult<()> {
-        let _plot = self.create_plotly_plot()?;
+    pub fn show(&self, blocking: bool) -> PlotResult<()> {
+        let plot = self.create_plotly_plot()?;
         println!(
             "Plot ready to display with title: {}",
             self.get_display_title()
         );
-        // TODO: Implement actual viewer when plotview_rs is available
+        
+        match blocking {
+            true => {
+                html_view::show(plot.to_html()).map_err(|e| AudioSampleError::Plotting(crate::error::PlottingError::HtmlViewError(e)))?;
+            }
+            false => {
+                todo!();
+            }
+        }
+
         Ok(())
     }
 

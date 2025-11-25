@@ -76,7 +76,7 @@
 //!
 //! These methods are available on all `AudioSamples` instances without additional imports.
 
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 
 use crate::repr::AudioData;
 use crate::{
@@ -118,8 +118,11 @@ where
             AudioData::Mono(arr) => {
                 let converted: ndarray::Array1<O> = arr
                     .iter()
-                    .map(|s| s.convert_to())
-                    .collect::<Result<Vec<_>, _>>()?
+                    .map(|s| {
+                        let o: O = unsafe{s.unchecked_convert_to()};
+                        o
+                    })
+                    .collect::<Vec<_>>()
                     .into();
                 Ok(AudioSamples::new_mono(converted, sample_rate))
             }
@@ -127,8 +130,11 @@ where
                 let shape = arr.raw_dim();
                 let converted_vec = arr
                     .iter()
-                    .map(|s| s.convert_to())
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|s| {
+                        let o: O = unsafe{s.unchecked_convert_to()};
+                        o
+                    })
+                    .collect::<Vec<_>>();
                 let converted =
                     ndarray::Array2::from_shape_vec(shape, converted_vec).map_err(|e| {
                         AudioSampleError::Layout(LayoutError::IncompatibleFormat {
@@ -167,17 +173,22 @@ where
             AudioData::Mono(arr) => {
                 let converted_data = arr
                     .iter()
-                    .map(|sample| sample.convert_to())
-                    .collect::<Result<Vec<O>, AudioSampleError>>()?;
-                let converted_data: Array1<O> = Array1::from(converted_data);
+                    .map(|sample| {
+                        let o: O = unsafe{sample.unchecked_convert_to()};
+                        o
+                    })
+                    .collect::<Vec<O>>().into();
                 Ok(AudioSamples::new_mono(converted_data, sample_rate))
             }
             AudioData::Multi(arr) => {
                 let shape: &[usize] = arr.shape();
                 let converted_data = arr
                     .iter()
-                    .map(|sample| sample.convert_to())
-                    .collect::<Result<Vec<O>, AudioSampleError>>()?;
+                    .map(|sample| {
+                        let o: O = unsafe{sample.unchecked_convert_to()};
+                        o
+                    })
+                    .collect::<Vec<O>>();
 
                 let converted_data: Array2<O> =
                     Array2::from_shape_vec((shape[0], shape[1]), converted_data).map_err(|e| {

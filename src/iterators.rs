@@ -44,11 +44,11 @@
 //! - Window iterator supports both zero-padding and overlap strategies
 //! - Iterators work efficiently with both mono and multi-channel audio
 
-use crate::{
-    AudioData, AudioEditing, AudioSample, AudioSampleError, AudioSamples, ConvertTo, I24,
-    LayoutError,
-};
-use ndarray::{Array1, Array2, s};
+use crate::{AudioData, AudioSample, AudioSampleError, AudioSamples, ConvertTo, I24, LayoutError};
+use ndarray::{s, Array1, Array2};
+
+#[cfg(feature = "editing")]
+use crate::AudioEditing;
 use std::marker::PhantomData;
 
 #[cfg(feature = "parallel-processing")]
@@ -391,12 +391,7 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     {
         match &mut self.data {
             AudioData::Mono(arr) => {
-                let slice = arr.as_slice_mut().ok_or_else(|| {
-                    AudioSampleError::Layout(LayoutError::NonContiguous {
-                        operation: "mono iterator access".to_string(),
-                        layout_type: "non-contiguous mono data".to_string(),
-                    })
-                })?;
+                let slice = arr.as_slice_mut();
                 f(0, slice);
             }
             AudioData::Multi(arr) => {
@@ -425,21 +420,8 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     {
         match &mut self.data {
             AudioData::Mono(arr) => {
-                if let Some(slice) = arr.as_slice_mut() {
-                    f(0, slice);
-                } else {
-                    // Fall back to element-wise access for non-contiguous arrays
-                    let len = arr.len();
-                    let mut temp_vec: Vec<T> = Vec::with_capacity(len);
-                    temp_vec.extend(arr.view().iter().copied());
-                    f(0, &mut temp_vec);
-                    // Copy back the modified values
-                    for (i, &val) in temp_vec.iter().enumerate() {
-                        if let Ok(element) = arr.try_get_mut(i) {
-                            *element = val;
-                        }
-                    }
-                }
+                let slice = arr.as_slice_mut();
+                f(0, slice);
             }
             AudioData::Multi(arr) => {
                 let (channels, samples_per_channel) = arr.dim();
@@ -471,23 +453,9 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
                 let mut pos = 0;
 
                 while pos + window_size <= total_samples {
-                    if let Some(slice) = arr.as_slice_mut() {
-                        let window_slice = &mut slice[pos..pos + window_size];
-                        f(window_idx, window_slice);
-                    } else {
-                        // Fall back to element-wise access for non-contiguous arrays
-                        let mut temp_vec: Vec<T> = Vec::with_capacity(window_size);
-                        for i in pos..pos + window_size {
-                            temp_vec.push(arr.view()[i]);
-                        }
-                        f(window_idx, &mut temp_vec);
-                        // Copy back the modified values
-                        for (i, &val) in temp_vec.iter().enumerate() {
-                            if let Ok(element) = arr.try_get_mut(pos + i) {
-                                *element = val;
-                            }
-                        }
-                    }
+                    let slice = arr.as_slice_mut();
+                    let window_slice = &mut slice[pos..pos + window_size];
+                    f(window_idx, window_slice);
                     pos += hop_size;
                     window_idx += 1;
                 }
@@ -855,7 +823,8 @@ where
                                 (None, Some(silence)) => Some(silence),
                                 (Some(starting_slice), None) => Some(starting_slice),
                                 (Some(s), Some(z)) => {
-                                    Some(AudioEditing::concatenate(&[s, z]).ok()?)
+                                    let slices = vec![s, z];
+                                    Some(AudioSamples::concatenate_owned(slices).ok()?)
                                 }
                             }
                         }
@@ -886,7 +855,9 @@ where
 
                             match interleaved_slice {
                                 None => Some(silence),
-                                Some(slice) => AudioEditing::concatenate(&[slice, silence]).ok(),
+                                Some(slice) => {
+                                    AudioSamples::concatenate_owned(vec![slice, silence]).ok()
+                                }
                             }
                         }
                     }
@@ -1936,7 +1907,7 @@ mod tests {
 
     #[test]
     fn test_frame_iterator_mono() {
-        let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], 44100).to_owned();
+        let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], 44100);
         audio
             .frames()
             .zip([1.0f32, 2.0, 3.0, 4.0, 5.0])

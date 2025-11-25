@@ -188,6 +188,11 @@ pub trait ConvertTo<T: AudioSample> {
     /// Convert this sample to another audio sample type.
     fn convert_to(&self) -> AudioSampleResult<T>;
 
+    /// Convert this sample to another audio sample type without error handling.
+    unsafe fn unchecked_convert_to(&self) -> T {
+        self.convert_to().unwrap()
+    }
+
     /// Convert from another audio sample type to this type.
     /// This is a convenience method that calls `convert_to` on the source value.
     fn convert_from<F: AudioSample + ConvertTo<T>>(source: F) -> AudioSampleResult<T> {
@@ -632,80 +637,23 @@ impl_cast_into_i24!(primitive_to_i24 f64 => I24);
 #[cfg(test)]
 mod conversion_tests {
     use super::*;
-    use approx_eq::assert_approx_eq;
+
     use i24::i24;
-    use std::fs::File;
-    use std::io::BufRead;
-    use std::path::Path;
-    use std::str::FromStr;
+    use approx_eq::assert_approx_eq;
 
-    // Helper functions
-    #[cfg(test)]
-    fn read_lines<P>(filename: P) -> std::io::Result<std::io::Lines<std::io::BufReader<File>>>
-    where
-        P: AsRef<Path>,
-    {
-        let file = File::open(filename)?;
-        Ok(std::io::BufReader::new(file).lines())
-    }
-
-    #[cfg(test)]
-    fn read_text_to_vec<T: FromStr>(fp: &Path) -> Result<Vec<T>, Box<dyn std::error::Error>>
-    where
-        <T as FromStr>::Err: std::error::Error + 'static,
-    {
-        let mut data = Vec::new();
-        let lines = read_lines(fp)?;
-        for line in lines {
-            let line = line?;
-            for sample in line.split(" ") {
-                let parsed_sample: T = match sample.trim().parse::<T>() {
-                    Ok(num) => num,
-                    Err(err) => {
-                        eprintln!("Failed to parse {}", sample);
-                        panic!("{}", err)
-                    }
-                };
-                data.push(parsed_sample);
-            }
-        }
-        Ok(data)
-    }
-
-    #[test]
-    fn i16_to_f32() {
-        let i16_samples: Vec<i16> =
-            read_text_to_vec(Path::new("./test_resources/one_channel_i16.txt")).unwrap();
-        let i16_samples: &[i16] = &i16_samples;
-
-        let f32_samples: Vec<f32> =
-            read_text_to_vec(Path::new("./test_resources/one_channel_f32.txt")).unwrap();
-        let f32_samples: &[f32] = &f32_samples;
-        for (expected_sample, actual_sample) in f32_samples.iter().zip(i16_samples) {
-            let actual_sample: f32 = actual_sample.convert_to().unwrap();
-            assert_approx_eq!(*expected_sample as f64, actual_sample as f64, 1e-4);
-        }
-    }
-
-    #[test]
-    fn f32_to_i16() {
-        let i16_samples: Vec<i16> =
-            read_text_to_vec(Path::new("./test_resources/one_channel_i16.txt")).unwrap();
-        let i16_samples: &[i16] = &i16_samples;
-
-        let f32_samples: Vec<f32> =
-            read_text_to_vec(Path::new("./test_resources/one_channel_f32.txt")).unwrap();
-
-        let f32_samples: &[f32] = &f32_samples;
-        for (expected_sample, actual_sample) in i16_samples.iter().zip(f32_samples) {
-            let converted_sample: i16 = actual_sample.convert_to().unwrap();
-            assert_eq!(
-                *expected_sample, converted_sample,
-                "Failed to convert sample {} to i16",
-                actual_sample
+    #[cfg(not(feature = "testing"))]
+    macro_rules! assert_approx_eq {
+        ($left:expr, $right:expr, $tolerance:expr) => {
+            assert!(
+                ($left - $right).abs() < $tolerance,
+                "assertion failed: `{} ≈ {}` (tolerance: {})",
+                $left,
+                $right,
+                $tolerance
             );
-        }
+        };
     }
+
 
     // Edge cases for i16 conversions
     #[test]

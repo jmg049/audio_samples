@@ -69,7 +69,19 @@ pub enum AudioSampleError {
     /// Errors related to missing or disabled features.
     #[error(transparent)]
     Feature(#[from] FeatureError),
-    // All deprecated variants have been completely migrated to new error types
+
+    #[cfg(feature = "plotting")]
+    /// Errors related to plotting operations.
+    /// This variant is only available when the "plotting" feature is enabled.
+    #[error(transparent)]
+    Plotting(#[from] PlottingError),
+
+    #[cfg(feature = "serialization")]
+    /// Errors related to serialization and deserialization operations.
+    /// This variant is only available when the "serialization" feature is enabled.
+    #[error(transparent)]
+    Serialization(#[from] SerializationError),
+
 }
 
 /// Errors that occur during type conversion and casting operations.
@@ -313,6 +325,108 @@ pub enum FeatureError {
     },
 }
 
+#[cfg(feature = "plotting")]
+/// Errors related to plotting operations.
+#[derive(Error, Clone, Debug)]
+pub enum PlottingError {
+    
+    /// Failed to create a plot due to invalid data or configuration.
+    #[error("Failed to create plot: {reason}")]
+    PlotCreation {
+        /// Detailed reason for the plot creation failure.
+        reason: String,
+    },
+
+    /// Rendering the plot to a file or display failed.
+    #[error("Failed to render plot: {reason}")]
+    PlotRendering {
+        /// Detailed reason for the rendering failure.
+        reason: String,
+    },
+
+    #[error("html_view error: {0}")]
+    HtmlViewError(#[from] html_view::ViewerError)
+
+}
+
+#[cfg(feature = "serialization")]
+/// Errors related to serialization and deserialization operations.
+///
+/// This covers failures in data format conversion, I/O operations,
+/// and format-specific encoding/decoding issues.
+#[derive(Error, Debug, Clone)]
+pub enum SerializationError {
+    /// Failed to serialize audio data to the specified format.
+    #[error("Failed to serialize to {format}: {reason}")]
+    SerializationFailed {
+        /// The target format that failed
+        format: String,
+        /// Detailed reason for the serialization failure
+        reason: String,
+    },
+
+    /// Failed to deserialize audio data from the specified format.
+    #[error("Failed to deserialize from {format}: {reason}")]
+    DeserializationFailed {
+        /// The source format that failed to deserialize
+        format: String,
+        /// Detailed reason for the deserialization failure
+        reason: String,
+    },
+
+    /// Input/output error during file operations.
+    #[error("IO error during {operation}: {reason}")]
+    IoError {
+        /// The I/O operation that failed
+        operation: String,
+        /// Detailed explanation of the I/O failure
+        reason: String,
+    },
+
+    /// The requested format is not supported for the operation.
+    #[error("Unsupported format {format} for {operation}")]
+    UnsupportedFormat {
+        /// The unsupported format
+        format: String,
+        /// The operation that doesn't support this format
+        operation: String,
+    },
+
+    /// Failed to automatically detect the file format.
+    #[error("Format detection failed: {reason}")]
+    FormatDetectionFailed {
+        /// Reason why format detection failed
+        reason: String,
+    },
+
+    /// Data validation failed after serialization round-trip.
+    #[error("Data validation failed after round-trip: {reason}")]
+    ValidationFailed {
+        /// Details about what validation failed
+        reason: String,
+    },
+
+    /// The file header or metadata is invalid or corrupted.
+    #[error("Invalid or corrupted {component}: {reason}")]
+    InvalidHeader {
+        /// The component that has invalid data (e.g., "header", "metadata")
+        component: String,
+        /// Details about the invalid data
+        reason: String,
+    },
+
+    /// A required dependency for the format is not available.
+    #[error("Missing dependency '{dependency}' for {format} format: {reason}")]
+    MissingDependency {
+        /// The missing dependency
+        dependency: String,
+        /// The format that requires this dependency
+        format: String,
+        /// Additional context about the dependency requirement
+        reason: String,
+    },
+}
+
 // Convenience constructors for common error patterns
 impl ConversionError {
     /// Create a new audio conversion error.
@@ -442,6 +556,141 @@ impl FeatureError {
     }
 }
 
+// Conversion traits for easier error creation
+impl From<&str> for ParameterError {
+    fn from(msg: &str) -> Self {
+        Self::InvalidValue {
+            parameter: "unknown".to_string(),
+            reason: msg.to_string(),
+        }
+    }
+}
+
+impl From<String> for ParameterError {
+    fn from(msg: String) -> Self {
+        Self::InvalidValue {
+            parameter: "unknown".to_string(),
+            reason: msg,
+        }
+    }
+}
+
+impl From<&str> for ProcessingError {
+    fn from(msg: &str) -> Self {
+        Self::AlgorithmFailure {
+            algorithm: "unknown".to_string(),
+            reason: msg.to_string(),
+        }
+    }
+}
+
+impl From<String> for ProcessingError {
+    fn from(msg: String) -> Self {
+        Self::AlgorithmFailure {
+            algorithm: "unknown".to_string(),
+            reason: msg,
+        }
+    }
+}
+
+#[cfg(feature = "serialization")]
+impl SerializationError {
+    /// Create a new serialization failed error.
+    pub fn serialization_failed<F, R>(format: F, reason: R) -> Self
+    where
+        F: ToString,
+        R: ToString,
+    {
+        Self::SerializationFailed {
+            format: format.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Create a new deserialization failed error.
+    pub fn deserialization_failed<F, R>(format: F, reason: R) -> Self
+    where
+        F: ToString,
+        R: ToString,
+    {
+        Self::DeserializationFailed {
+            format: format.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Create a new I/O error.
+    pub fn io_error<O, R>(operation: O, reason: R) -> Self
+    where
+        O: ToString,
+        R: ToString,
+    {
+        Self::IoError {
+            operation: operation.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Create a new unsupported format error.
+    pub fn unsupported_format<F, O>(format: F, operation: O) -> Self
+    where
+        F: ToString,
+        O: ToString,
+    {
+        Self::UnsupportedFormat {
+            format: format.to_string(),
+            operation: operation.to_string(),
+        }
+    }
+
+    /// Create a new format detection failed error.
+    pub fn format_detection_failed<R>(reason: R) -> Self
+    where
+        R: ToString,
+    {
+        Self::FormatDetectionFailed {
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Create a new validation failed error.
+    pub fn validation_failed<R>(reason: R) -> Self
+    where
+        R: ToString,
+    {
+        Self::ValidationFailed {
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Create a new invalid header error.
+    pub fn invalid_header<C, R>(component: C, reason: R) -> Self
+    where
+        C: ToString,
+        R: ToString,
+    {
+        Self::InvalidHeader {
+            component: component.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Create a new missing dependency error.
+    pub fn missing_dependency<D, F, R>(dependency: D, format: F, reason: R) -> Self
+    where
+        D: ToString,
+        F: ToString,
+        R: ToString,
+    {
+        Self::MissingDependency {
+            dependency: dependency.to_string(),
+            format: format.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,50 +780,51 @@ mod tests {
         ];
 
         for error in errors {
-            match error {
-                AudioSampleError::Conversion(_) => { /* handle conversion */ }
-                AudioSampleError::Parameter(_) => { /* handle parameter */ }
-                AudioSampleError::Layout(_) => { /* handle layout */ }
-                AudioSampleError::Processing(_) => { /* handle processing */ }
-                AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+            #[cfg(feature = "plotting")]
+            {
+                match error {
+                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
+                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
+                    AudioSampleError::Layout(_) => { /* handle layout */ }
+                    AudioSampleError::Processing(_) => { /* handle processing */ }
+                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                    AudioSampleError::Plotting(_) => { /* handle plotting */ }
+                    #[cfg(feature = "serialization")]
+                    AudioSampleError::Serialization(_) => { /* handle serialization */ }
+                }
             }
-        }
-    }
-}
-
-// Conversion traits for easier error creation
-impl From<&str> for ParameterError {
-    fn from(msg: &str) -> Self {
-        Self::InvalidValue {
-            parameter: "unknown".to_string(),
-            reason: msg.to_string(),
-        }
-    }
-}
-
-impl From<String> for ParameterError {
-    fn from(msg: String) -> Self {
-        Self::InvalidValue {
-            parameter: "unknown".to_string(),
-            reason: msg,
-        }
-    }
-}
-
-impl From<&str> for ProcessingError {
-    fn from(msg: &str) -> Self {
-        Self::AlgorithmFailure {
-            algorithm: "unknown".to_string(),
-            reason: msg.to_string(),
-        }
-    }
-}
-
-impl From<String> for ProcessingError {
-    fn from(msg: String) -> Self {
-        Self::AlgorithmFailure {
-            algorithm: "unknown".to_string(),
-            reason: msg,
+            #[cfg(all(not(feature = "plotting"), not(feature = "serialization")))]
+            {
+                match error {
+                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
+                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
+                    AudioSampleError::Layout(_) => { /* handle layout */ }
+                    AudioSampleError::Processing(_) => { /* handle processing */ }
+                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                }
+            }
+            #[cfg(all(not(feature = "plotting"), feature = "serialization"))]
+            {
+                match error {
+                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
+                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
+                    AudioSampleError::Layout(_) => { /* handle layout */ }
+                    AudioSampleError::Processing(_) => { /* handle processing */ }
+                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                    AudioSampleError::Serialization(_) => { /* handle serialization */ }
+                }
+            }
+            #[cfg(all(feature = "plotting", not(feature = "serialization")))]
+            {
+                match error {
+                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
+                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
+                    AudioSampleError::Layout(_) => { /* handle layout */ }
+                    AudioSampleError::Processing(_) => { /* handle processing */ }
+                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                    AudioSampleError::Plotting(_) => { /* handle plotting */ }
+                }
+            }
         }
     }
 }

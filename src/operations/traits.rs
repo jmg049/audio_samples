@@ -6,14 +6,17 @@
 
 #[cfg(feature = "resampling")]
 use crate::operations::ResamplingQuality;
+#[cfg(feature = "processing")]
+use crate::operations::types::NormalizationMethod;
 #[cfg(feature = "spectral-analysis")]
 use crate::operations::{
     CqtConfig,
     types::{SpectrogramScale, WindowType},
 };
+
 use crate::{
     AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom, CastInto,
-    ConvertTo, I24, NormalizationMethod, RealFloat,
+    ConvertTo, I24, RealFloat,
     operations::{
         MonoConversionMethod, StereoConversionMethod,
         types::{
@@ -26,6 +29,7 @@ use crate::{
 #[cfg(feature = "spectral-analysis")]
 use ndarray::Array2;
 
+#[cfg(feature = "random-generation")]
 use rand::distr::{Distribution, StandardUniform};
 #[cfg(feature = "spectral-analysis")]
 use rustfft::FftNum;
@@ -45,7 +49,9 @@ use ndarray::Zip;
 pub use num_complex::Complex;
 
 // Type aliases for complex types to satisfy clippy::type_complexity
+#[cfg(feature = "spectral-analysis")]
 type FftInfoResult<F> = AudioSampleResult<(Vec<F>, Vec<F>, Vec<Complex<F>>)>;
+
 type RealtimeOperation<T> =
     Box<dyn Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync>;
 
@@ -194,11 +200,12 @@ where
     ///
     /// # Arguments
     /// * `min` - Target minimum value
-    /// * `max` - Target maximum value  
+    /// * `max` - Target maximum value
     /// * `method` - Normalization method to use
     ///
     /// # Errors
     /// Returns an error if min >= max or if the method cannot be applied.
+    #[cfg(feature = "processing")]
     fn normalize(&mut self, min: T, max: T, method: NormalizationMethod) -> AudioSampleResult<()>;
 
     /// Scales all audio samples by a constant factor.
@@ -1690,20 +1697,28 @@ where
     ///
     /// # Arguments
     /// * `segment_duration_seconds` - Duration of each segment
-    fn split<'b, F: RealFloat>(
+    fn split<F: RealFloat>(
         &self,
         segment_duration_seconds: F,
-    ) -> AudioSampleResult<Vec<AudioSamples<'b, T>>>;
+    ) -> AudioSampleResult<Vec<AudioSamples<'static, T>>>;
 
-    /// Concatenates multiple audio segments into one.
+    /// Concatenates multiple possible borrowed, audio segments into one.
     ///
     /// All segments must have the same sample rate and channel configuration.
     ///
     /// # Arguments
     /// * `segments` - Audio segments to concatenate in order
-    fn concatenate(segments: &[Self]) -> AudioSampleResult<AudioSamples<'static, T>>
+    fn concatenate<'b>(segments: &'b [AudioSamples<'b, T>]) -> AudioSampleResult<AudioSamples<'b, T>>
     where
+        'b: 'a,
         Self: Sized;
+
+    /// Concatenates multiple owned audio segments into one.
+    fn concatenate_owned<'b>(
+        segments: Vec<AudioSamples<'_, T>>,
+    ) -> AudioSampleResult<AudioSamples<'b, T>> 
+        where Self: Sized;
+
 
     /// Mixes multiple audio sources together.
     ///
@@ -1797,6 +1812,7 @@ where
     /// );
     /// let gained_audio = audio.perturb(&gain_config)?;
     /// ```
+    #[cfg(feature = "random-generation")]
     fn perturb<'b, F>(
         &self,
         config: &PerturbationConfig<F>,
@@ -1841,6 +1857,7 @@ where
     /// );
     /// audio.perturb_(&pitch_config)?;
     /// ```
+    #[cfg(feature = "random-generation")]
     fn perturb_<F>(&mut self, config: &PerturbationConfig<F>) -> AudioSampleResult<()>
     where
         T: ConvertTo<F>,
@@ -2511,6 +2528,323 @@ where
     }
 }
 
+/// Serialization and deserialization operations for audio samples.
+///
+/// This trait provides methods for saving and loading AudioSamples to/from
+/// various file formats including text-based formats (CSV, JSON, TXT),
+/// binary formats (NumPy, MessagePack, CBOR), and compressed formats.
+///
+/// The focus is on data analysis and interchange formats rather than
+/// traditional audio file formats like WAV or MP3. This enables seamless
+/// integration with data science workflows, Python NumPy/SciPy, and other
+/// audio analysis tools.
+///
+/// # Format Support
+///
+/// - **Text formats**: CSV, JSON, plain text with configurable delimiters
+/// - **Binary formats**: NumPy (.npy), MessagePack, CBOR, custom binary
+/// - **Compressed formats**: NumPy compressed (.npz), gzip compression
+/// - **Metadata preservation**: Sample rate, channel information, custom attributes
+///
+/// # Example Usage
+///
+/// ```rust,ignore
+/// use audio_samples::{AudioSamples, operations::*};
+/// use audio_samples::operations::types::{SerializationFormat, SerializationConfig};
+///
+/// let audio = AudioSamples::new_mono(samples, 44100);
+///
+/// // Save to JSON with metadata
+/// audio.save_to_file("audio_data.json")?;
+///
+/// // Save to NumPy format
+/// let config = SerializationConfig::numpy();
+/// audio.save_with_config("audio_data.npy", &config)?;
+///
+/// // Load from file with automatic format detection
+/// let loaded = AudioSamples::load_from_file("audio_data.json")?;
+/// ```
+#[cfg(feature = "serialization")]
+pub trait AudioSamplesSerialise<T: AudioSample>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+{
+    /// Save audio samples to a file with automatic format detection from extension.
+    ///
+    /// The file format is automatically determined based on the file extension:
+    /// - `.json` → JSON format with metadata
+    /// - `.csv` → CSV format with headers
+    /// - `.npy` → NumPy binary format
+    /// - `.npz` → NumPy compressed format
+    /// - `.txt` → Plain text with space delimiters
+    /// - `.bin` → Custom binary format
+    /// - `.msgpack` → MessagePack format
+    /// - `.cbor` → CBOR format
+    ///
+    /// # Arguments
+    /// * `path` - File path with extension indicating desired format
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Errors
+    /// - `SerializationError::UnsupportedFormat` if extension is not recognized
+    /// - `SerializationError::IoError` for file I/O failures
+    /// - `SerializationError::SerializationFailed` for format-specific errors
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// audio.save_to_file("data/audio_analysis.json")?;
+    /// audio.save_to_file("output.npy")?;
+    /// ```
+    fn save_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> AudioSampleResult<()>;
+
+    /// Save audio samples with explicit format configuration.
+    ///
+    /// Provides fine-grained control over the serialization process including
+    /// precision, compression, metadata inclusion, and format-specific options.
+    ///
+    /// # Arguments
+    /// * `path` - Output file path
+    /// * `config` - Serialization configuration specifying format and options
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let config = SerializationConfig::json()
+    ///     .with_precision(6)
+    ///     .with_metadata(true);
+    /// audio.save_with_config("analysis.json", &config)?;
+    /// ```
+    fn save_with_config<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        config: &crate::operations::types::SerializationConfig<f64>,
+    ) -> AudioSampleResult<()>;
+
+    /// Load audio samples from a file with automatic format detection.
+    ///
+    /// Attempts to detect the file format using:
+    /// 1. File extension hints
+    /// 2. Magic number/header detection
+    /// 3. Content analysis for text formats
+    ///
+    /// # Arguments
+    /// * `path` - Input file path
+    ///
+    /// # Returns
+    /// New AudioSamples instance loaded from the file
+    ///
+    /// # Errors
+    /// - `SerializationError::FormatDetectionFailed` if format cannot be determined
+    /// - `SerializationError::IoError` for file I/O failures
+    /// - `SerializationError::DeserializationFailed` for parsing errors
+    /// - `SerializationError::InvalidHeader` for corrupted files
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let audio: AudioSamples<f32> = AudioSamples::load_from_file("data.json")?;
+    /// ```
+    fn load_from_file<P: AsRef<std::path::Path>>(path: P) -> AudioSampleResult<AudioSamples<'static, T>>;
+
+    /// Load audio samples with explicit format configuration.
+    ///
+    /// Uses the specified configuration to parse the file, bypassing automatic
+    /// format detection. Useful when the automatic detection fails or when
+    /// specific parsing options are required.
+    ///
+    /// # Arguments
+    /// * `path` - Input file path
+    /// * `config` - Deserialization configuration specifying format and options
+    ///
+    /// # Returns
+    /// New AudioSamples instance loaded from the file
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let config = SerializationConfig::csv();
+    /// let audio = AudioSamples::load_with_config("data.csv", &config)?;
+    /// ```
+    fn load_with_config<P: AsRef<std::path::Path>>(
+        path: P,
+        config: &crate::operations::types::SerializationConfig<f64>,
+    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+
+    /// Serialize audio samples to bytes in memory.
+    ///
+    /// Converts the audio data to the specified format and returns the
+    /// serialized bytes. Useful for network transmission, caching, or
+    /// embedding in other data structures.
+    ///
+    /// # Arguments
+    /// * `format` - Target serialization format
+    ///
+    /// # Returns
+    /// Vector of bytes containing the serialized audio data
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let json_bytes = audio.serialize_to_bytes(SerializationFormat::Json)?;
+    /// let numpy_bytes = audio.serialize_to_bytes(SerializationFormat::Numpy)?;
+    /// ```
+    fn serialize_to_bytes(
+        &self,
+        format: crate::operations::types::SerializationFormat,
+    ) -> AudioSampleResult<Vec<u8>>;
+
+    /// Deserialize audio samples from bytes in memory.
+    ///
+    /// Parses audio data from the provided byte array using the specified format.
+    /// The inverse operation of `serialize_to_bytes`.
+    ///
+    /// # Arguments
+    /// * `data` - Byte array containing serialized audio data
+    /// * `format` - Format of the serialized data
+    ///
+    /// # Returns
+    /// New AudioSamples instance deserialized from the bytes
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let audio = AudioSamples::deserialize_from_bytes(&bytes, SerializationFormat::Json)?;
+    /// ```
+    fn deserialize_from_bytes(
+        data: &[u8],
+        format: crate::operations::types::SerializationFormat,
+    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+
+    /// Get an estimate of the serialized size for a format.
+    ///
+    /// Provides an approximation of how many bytes the audio data will
+    /// occupy when serialized to the specified format. Useful for memory
+    /// planning and storage estimation.
+    ///
+    /// # Arguments
+    /// * `format` - Target serialization format
+    ///
+    /// # Returns
+    /// Estimated size in bytes
+    ///
+    /// # Note
+    /// The estimate may not be exact, especially for compressed formats
+    /// where the final size depends on data compressibility.
+    fn estimate_serialized_size(
+        &self,
+        format: crate::operations::types::SerializationFormat,
+    ) -> AudioSampleResult<usize>;
+
+    /// List all supported formats for serialization.
+    ///
+    /// Returns a vector of all serialization formats that are available
+    /// for saving audio data. The availability depends on enabled cargo features.
+    ///
+    /// # Returns
+    /// Vector of supported serialization formats
+    fn supported_serialization_formats() -> Vec<crate::operations::types::SerializationFormat>;
+
+    /// List all supported formats for deserialization.
+    ///
+    /// Returns a vector of all formats that can be loaded. Usually identical
+    /// to serialization formats, but may differ if some formats are write-only.
+    ///
+    /// # Returns
+    /// Vector of supported deserialization formats
+    fn supported_deserialization_formats() -> Vec<crate::operations::types::SerializationFormat>;
+
+    /// Auto-detect format from file extension or magic bytes.
+    ///
+    /// Analyzes the file to determine its format using:
+    /// 1. File extension mapping
+    /// 2. Magic number detection in file headers
+    /// 3. Content structure analysis for text formats
+    ///
+    /// # Arguments
+    /// * `path` - File path to analyze
+    ///
+    /// # Returns
+    /// Detected serialization format
+    ///
+    /// # Errors
+    /// - `SerializationError::FormatDetectionFailed` if format cannot be determined
+    /// - `SerializationError::IoError` if file cannot be accessed
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let format = AudioSamples::<f32>::detect_format("data.json")?;
+    /// assert_eq!(format, SerializationFormat::Json);
+    /// ```
+    fn detect_format<P: AsRef<std::path::Path>>(
+        path: P,
+    ) -> AudioSampleResult<crate::operations::types::SerializationFormat>;
+
+    /// Validate serialization round-trip accuracy.
+    ///
+    /// Serializes the audio data to the specified format, then deserializes
+    /// it back and compares with the original. Useful for testing data integrity
+    /// and format compatibility.
+    ///
+    /// # Arguments
+    /// * `format` - Format to test
+    /// * `tolerance` - Acceptable difference threshold for floating-point comparison
+    ///
+    /// # Returns
+    /// Result indicating whether round-trip was successful within tolerance
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// audio.validate_round_trip(SerializationFormat::Json, 1e-6)?;
+    /// ```
+    fn validate_round_trip(
+        &self,
+        format: crate::operations::types::SerializationFormat,
+        tolerance: f64,
+    ) -> AudioSampleResult<()>;
+
+    /// Export metadata as a separate JSON file.
+    ///
+    /// Saves audio metadata (sample rate, channel count, duration, custom attributes)
+    /// to a JSON file alongside the main audio data. Useful when using binary
+    /// formats that don't support metadata natively.
+    ///
+    /// # Arguments
+    /// * `path` - Output file path for metadata JSON
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// audio.save_to_file("data.npy")?;
+    /// audio.export_metadata("data_metadata.json")?;
+    /// ```
+    fn export_metadata<P: AsRef<std::path::Path>>(&self, path: P) -> AudioSampleResult<()>;
+
+    /// Import metadata from a JSON file.
+    ///
+    /// Loads metadata from a JSON file and applies it to the current AudioSamples
+    /// instance. Useful when loading binary formats that don't preserve metadata.
+    ///
+    /// # Arguments
+    /// * `path` - Input file path for metadata JSON
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let mut audio = AudioSamples::load_from_file("data.npy")?;
+    /// audio.import_metadata("data_metadata.json")?;
+    /// ```
+    fn import_metadata<P: AsRef<std::path::Path>>(&mut self, path: P) -> AudioSampleResult<()>;
+}
+
 /// Unified trait that combines all audio processing capabilities.
 ///
 /// This trait extends all the focused traits, providing a single interface
@@ -2519,10 +2853,10 @@ where
 ///
 /// This trait is automatically implemented for any type that implements
 /// all the constituent traits.
-// Without spectral analysis
-#[cfg(not(feature = "spectral-analysis"))]
+// Without spectral analysis, without serialization
+#[cfg(all(not(feature = "spectral-analysis"), not(feature = "serialization")))]
 pub trait AudioSamplesOperations<T: AudioSample>:
-    AudioStatistics<T>
+    for<'a> AudioStatistics<'a, T>
     + AudioProcessing<T>
     + AudioDynamicRange<T>
     + for<'a> AudioEditing<'a, T>
@@ -2543,8 +2877,33 @@ where
 {
 }
 
-// With spectral analysis
-#[cfg(feature = "spectral-analysis")]
+// Without spectral analysis, with serialization
+#[cfg(all(not(feature = "spectral-analysis"), feature = "serialization"))]
+pub trait AudioSamplesOperations<T: AudioSample>:
+    for<'a> AudioStatistics<'a, T>
+    + AudioProcessing<T>
+    + AudioDynamicRange<T>
+    + for<'a> AudioEditing<'a, T>
+    + AudioChannelOps<T>
+    + for<'a> AudioTypeConversion<'a, T>
+    + AudioPitchAnalysis<T>
+    + AudioIirFiltering<T>
+    + AudioParametricEq<T>
+    + AudioOperationApply<T>
+    + AudioRealtimeOps<T>
+    + AudioSamplesSerialise<T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+{
+}
+
+// With spectral analysis, without serialization
+#[cfg(all(feature = "spectral-analysis", not(feature = "serialization")))]
 /// Comprehensive trait combining all audio processing operations (spectral analysis version).
 pub trait AudioSamplesOperations<T: AudioSample>:
     for<'a> AudioStatistics<'a, T>
@@ -2569,8 +2928,35 @@ where
 {
 }
 
-// Blanket implementation for the unified trait (without spectral analysis)
-#[cfg(not(feature = "spectral-analysis"))]
+// With spectral analysis, with serialization
+#[cfg(all(feature = "spectral-analysis", feature = "serialization"))]
+/// Comprehensive trait combining all audio processing operations (full feature version).
+pub trait AudioSamplesOperations<T: AudioSample>:
+    for<'a> AudioStatistics<'a, T>
+    + AudioProcessing<T>
+    + AudioTransforms<T>
+    + AudioDynamicRange<T>
+    + for<'a> AudioEditing<'a, T>
+    + AudioChannelOps<T>
+    + for<'a> AudioTypeConversion<'a, T>
+    + AudioPitchAnalysis<T>
+    + AudioIirFiltering<T>
+    + AudioParametricEq<T>
+    + AudioOperationApply<T>
+    + AudioRealtimeOps<T>
+    + AudioSamplesSerialise<T>
+where
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+{
+}
+
+// Blanket implementation for the unified trait (without spectral analysis, without serialization)
+#[cfg(all(not(feature = "spectral-analysis"), not(feature = "serialization")))]
 impl<T: AudioSample, A> AudioSamplesOperations<T> for A
 where
     A: for<'a> AudioStatistics<'a, T>
@@ -2593,8 +2979,33 @@ where
 {
 }
 
-// Blanket implementation for the unified trait (with spectral analysis)
-#[cfg(feature = "spectral-analysis")]
+// Blanket implementation for the unified trait (without spectral analysis, with serialization)
+#[cfg(all(not(feature = "spectral-analysis"), feature = "serialization"))]
+impl<T: AudioSample, A> AudioSamplesOperations<T> for A
+where
+    A: for<'a> AudioStatistics<'a, T>
+        + AudioProcessing<T>
+        + AudioDynamicRange<T>
+        + for<'a> AudioEditing<'a, T>
+        + AudioChannelOps<T>
+        + for<'a> AudioTypeConversion<'a, T>
+        + AudioPitchAnalysis<T>
+        + AudioIirFiltering<T>
+        + AudioParametricEq<T>
+        + AudioOperationApply<T>
+        + AudioRealtimeOps<T>
+        + AudioSamplesSerialise<T>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+{
+}
+
+// Blanket implementation for the unified trait (with spectral analysis, without serialization)
+#[cfg(all(feature = "spectral-analysis", not(feature = "serialization")))]
 impl<T: AudioSample, A> AudioSamplesOperations<T> for A
 where
     A: for<'a> AudioStatistics<'a, T>
@@ -2609,6 +3020,32 @@ where
         + AudioParametricEq<T>
         + AudioOperationApply<T>
         + AudioRealtimeOps<T>,
+    i16: ConvertTo<T>,
+    I24: ConvertTo<T>,
+    i32: ConvertTo<T>,
+    f32: ConvertTo<T>,
+    f64: ConvertTo<T>,
+    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+{
+}
+
+// Blanket implementation for the unified trait (with spectral analysis, with serialization)
+#[cfg(all(feature = "spectral-analysis", feature = "serialization"))]
+impl<T: AudioSample, A> AudioSamplesOperations<T> for A
+where
+    A: for<'a> AudioStatistics<'a, T>
+        + AudioProcessing<T>
+        + AudioTransforms<T>
+        + AudioDynamicRange<T>
+        + for<'a> AudioEditing<'a, T>
+        + AudioChannelOps<T>
+        + for<'a> AudioTypeConversion<'a, T>
+        + AudioPitchAnalysis<T>
+        + AudioIirFiltering<T>
+        + AudioParametricEq<T>
+        + AudioOperationApply<T>
+        + AudioRealtimeOps<T>
+        + AudioSamplesSerialise<T>,
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,

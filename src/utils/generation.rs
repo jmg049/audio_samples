@@ -4,19 +4,25 @@
 //! for testing, synthesis, and audio processing applications.
 
 use crate::{
-    AudioEditing, AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24, RealFloat,
-    to_precision,
+    AudioSample, AudioSampleResult, AudioSamples, ConvertTo, I24, RealFloat, to_precision,
 };
+
+#[cfg(feature = "editing")]
+use crate::AudioEditing;
 use ndarray::Array1;
+#[cfg(feature = "random-generation")]
 use rand::distr::StandardUniform;
 
 /// Builder for creating mono audio samples through method chaining.
+
+#[cfg(feature = "editing")]
 #[derive(Debug, Clone, Default)]
 pub struct MonoSampleBuilder<'a, T: AudioSample> {
     samples: Vec<AudioSamples<'a, T>>,
 }
 
-impl<T> MonoSampleBuilder<'_, T>
+#[cfg(feature = "editing")]
+impl<'a, T> MonoSampleBuilder<'a, T>
 where
     T: AudioSample,
     i16: ConvertTo<T>,
@@ -44,7 +50,7 @@ where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::sine_wave::<T, F>(
+        self.add_sample(sine_wave::<T, F>(
             frequency,
             duration,
             sample_rate,
@@ -58,7 +64,7 @@ where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::cosine_wave::<T, F>(
+        self.add_sample(cosine_wave::<T, F>(
             frequency,
             duration,
             sample_rate,
@@ -67,21 +73,23 @@ where
     }
 
     /// Adds white noise to the audio builder.
+    #[cfg(feature = "random-generation")]
     pub fn white_noise<F>(self, duration: F, sample_rate: u32, amplitude: F) -> Self
     where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::white_noise::<T, F>(duration, sample_rate, amplitude))
+        self.add_sample(white_noise::<T, F>(duration, sample_rate, amplitude))
     }
 
     /// Adds pink noise to the audio builder.
+    #[cfg(feature = "random-generation")]
     pub fn pink_noise<F>(self, duration: F, sample_rate: u32, amplitude: F) -> Self
     where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::pink_noise::<T, F>(duration, sample_rate, amplitude))
+        self.add_sample(pink_noise::<T, F>(duration, sample_rate, amplitude))
     }
 
     /// Adds a sawtooth wave to the audio builder.
@@ -90,7 +98,7 @@ where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::sawtooth_wave::<T, F>(
+        self.add_sample(sawtooth_wave::<T, F>(
             frequency,
             duration,
             sample_rate,
@@ -104,7 +112,7 @@ where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::square_wave::<T, F>(
+        self.add_sample(square_wave::<T, F>(
             frequency,
             duration,
             sample_rate,
@@ -118,7 +126,7 @@ where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::triangle_wave::<T, F>(
+        self.add_sample(triangle_wave::<T, F>(
             frequency,
             duration,
             sample_rate,
@@ -132,12 +140,13 @@ where
         T: ConvertTo<F>,
         F: RealFloat + ConvertTo<T>,
     {
-        self.add_sample(super::silence::<T, F>(duration, sample_rate))
+        self.add_sample(silence::<T, F>(duration, sample_rate))
     }
 
     /// Finalises the builder and returns a single concatenated audio sample.
-    pub fn build(self) -> AudioSampleResult<AudioSamples<'static, T>> {
-        AudioEditing::concatenate(&self.samples)
+    pub fn build(self) -> AudioSampleResult<AudioSamples<'static, T>>
+    {
+        AudioSamples::concatenate_owned(self.samples)
     }
 }
 
@@ -263,6 +272,7 @@ where
 /// let noise = brown_noise::<f32, f32>(1.0, 44100, 0.5).unwrap();
 /// assert!(noise.len() > 0);
 /// ```
+#[cfg(feature = "random-generation")]
 pub fn brown_noise<T, F>(
     duration: F,
     sample_rate: u32,
@@ -319,6 +329,7 @@ where
 /// # Panics
 ///
 /// Panics if sample conversion fails.
+#[cfg(feature = "random-generation")]
 pub fn white_noise<T, F>(duration: F, sample_rate: u32, amplitude: F) -> AudioSamples<'static, T>
 where
     i16: ConvertTo<T>,
@@ -365,6 +376,7 @@ where
 /// # Panics
 ///
 /// Panics if sample conversion fails.
+#[cfg(feature = "random-generation")]
 pub fn pink_noise<T, F>(duration: F, sample_rate: u32, amplitude: F) -> AudioSamples<'static, T>
 where
     i16: ConvertTo<T>,
@@ -738,6 +750,7 @@ where
 mod tests {
     use super::*;
     use crate::operations::traits::AudioStatistics;
+    #[cfg(feature = "testing")]
     use approx_eq::assert_approx_eq;
 
     #[test]
@@ -754,6 +767,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "random-generation")]
     fn test_white_noise_generation() {
         let audio = white_noise::<f32, f64>(1.0f64, 44100, 1.0);
 
@@ -803,7 +817,10 @@ mod tests {
         assert_eq!(non_zero_count, 1);
 
         // Check that the impulse is at the right position (sample 5)
+        #[cfg(feature = "testing")]
         assert_approx_eq!(mono[5].into(), 1.0, 1e-6);
+        #[cfg(not(feature = "testing"))]
+        assert!((mono[5] as f64 - 1.0).abs() < 1e-6);
     }
 
     #[test]

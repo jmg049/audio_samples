@@ -114,8 +114,8 @@ use crate::operations::fft_backends::{FftBackendImpl, UnifiedFftBackend};
 use crate::operations::traits::AudioStatistics;
 use crate::repr::AudioData;
 use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
-    ConversionError, ConvertTo, I24, ParameterError, RealFloat, to_precision,
+    AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConversionError, ConvertTo,
+    I24, ParameterError, RealFloat, to_precision,
 };
 use ndarray::{Array1, Axis};
 #[cfg(feature = "fft")]
@@ -860,10 +860,16 @@ where
                 fft_backend.compute_real_fft(&input, &mut fft_output)?;
 
                 // Compute power spectrum
-                let power_spectrum: Vec<F> = if cfg!(feature = "parallel-processing") {
-                    fft_output.par_iter().map(|c| c.norm_sqr()).collect()
-                } else {
-                    fft_output.iter().map(|c| c.norm_sqr()).collect()
+                let power_spectrum: Vec<F> = {
+                    #[cfg(feature = "parallel-processing")]
+                    {
+                        use rayon::prelude::*;
+                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
+                    }
+                    #[cfg(not(feature = "parallel-processing"))]
+                    {
+                        fft_output.iter().map(|c| c.norm_sqr()).collect()
+                    }
                 };
 
                 // Generate frequency bins
@@ -905,13 +911,15 @@ where
         T: ConvertTo<F>,
     {
         if rolloff_percent <= F::zero() || rolloff_percent >= F::one() {
-            return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
-                "rolloff_percent",
-                rolloff_percent.to_string(),
-                "0.0",
-                "1.0",
-                "rolloff_percent must be between 0.0 and 1.0",
-            )));
+            return Err(crate::AudioSampleError::Parameter(
+                ParameterError::out_of_range(
+                    "rolloff_percent",
+                    rolloff_percent.to_string(),
+                    "0.0",
+                    "1.0",
+                    "rolloff_percent must be between 0.0 and 1.0",
+                ),
+            ));
         }
 
         match &self.data {

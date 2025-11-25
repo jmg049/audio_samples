@@ -121,10 +121,8 @@ pub mod comparison;
 pub mod detection;
 pub mod generation;
 
-// Re-export common utilities
-pub use comparison::*;
-pub use detection::*;
-pub use generation::*;
+// Re-export utility modules (not individual functions)
+// Modules are already public above, no need for additional re-exports
 
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, I24, ParameterError, RealFloat, to_precision,

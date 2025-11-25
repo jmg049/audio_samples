@@ -7,9 +7,7 @@ use super::core::*;
 use super::elements::*;
 use crate::AudioTypeConversion;
 
-#[cfg(feature = "spectral-analysis")]
 use crate::CastFrom;
-#[cfg(feature = "spectral-analysis")]
 use crate::RealFloat;
 use crate::operations::MonoConversionMethod;
 #[cfg(any(feature = "fft", feature = "spectral-analysis"))]
@@ -1409,82 +1407,96 @@ where
     f64: ConvertTo<T>,
     T: ConvertTo<f64>,
     f64: CastFrom<T>,
-    for<'c> AudioSamples<'c, T>: AudioStatistics<T>,
+    for<'c> AudioSamples<'c, T>: AudioStatistics<'c, T>,
 {
-    fn waveform_plot(&self, style: Option<LineStyle>) -> WaveformPlot<T> {
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+    fn waveform_plot<F>(&self, style: Option<LineStyle<F>>) -> AudioSampleResult<WaveformPlot<F, T>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: CastFrom<F> + ConvertTo<F>
+    {
+        let sample_rate = self.sample_rate as f64;
         let samples_per_channel = self.samples_per_channel();
 
         // Generate time axis
-        let time_data: Vec<f64> = (0..samples_per_channel)
-            .map(|i| to_precision::<F, _>(i) / sample_rate)
+        let time_data: Vec<F> = (0..samples_per_channel)
+            .map(|i| to_precision::<F, _>(i as f64) / to_precision::<F, _>(sample_rate))
             .collect();
 
         let audio_samples = self
-            .to_mono(MonoConversionMethod::Average)
+            .to_mono(MonoConversionMethod::<f64>::Average)
             .unwrap()
             .cast_as_f64()
             .expect("Failed to cast to f64 -- better handling in future");
 
         // Extract amplitude data preserving native sample ranges
-        let amplitude_data: Vec<f64> = audio_samples.to_interleaved_vec();
+        let amplitude_f64: Vec<f64> = audio_samples.to_interleaved_vec();
+        let amplitude_data: Vec<F> = amplitude_f64.into_iter().map(to_precision::<F, _>).collect();
         let style = style.unwrap_or_default();
         let mut metadata = PlotMetadata::default();
         metadata.x_label = Some("Time (s)".to_string());
         metadata.y_label = Some(format!("Amplitude ({})", T::LABEL));
 
-        WaveformPlot::new(time_data, amplitude_data, style, metadata)
+        Ok(WaveformPlot::new(time_data, amplitude_data, style, metadata))
     }
 
-    fn waveform_plot_with_metadata(
+    fn waveform_plot_with_metadata<F>(
         &self,
-        style: LineStyle,
+        style: LineStyle<F>,
         metadata: PlotMetadata,
-    ) -> WaveformPlot<T> {
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+    ) -> AudioSampleResult<WaveformPlot<F, T>>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: CastFrom<F> + ConvertTo<F>
+    {
+        let sample_rate = self.sample_rate as f64;
         let samples_per_channel = self.samples_per_channel();
 
-        let time_data: Vec<f64> = (0..samples_per_channel)
-            .map(|i| to_precision::<F, _>(i) / sample_rate)
+        let time_data: Vec<F> = (0..samples_per_channel)
+            .map(|i| to_precision::<F, _>(i as f64) / to_precision::<F, _>(sample_rate))
             .collect();
 
         let audio_samples = self
-            .to_mono(MonoConversionMethod::Average)
+            .to_mono(MonoConversionMethod::<f64>::Average)
             .unwrap()
             .cast_as_f64()
             .expect("Failed to cast to f64 -- better handling in future");
-        let amplitude_data: Vec<f64> = audio_samples.to_interleaved_vec();
+        let amplitude_f64: Vec<f64> = audio_samples.to_interleaved_vec();
+        let amplitude_data: Vec<F> = amplitude_f64.into_iter().map(to_precision::<F, _>).collect();
 
-        WaveformPlot::new(time_data, amplitude_data, style, metadata)
+        Ok(WaveformPlot::new(time_data, amplitude_data, style, metadata))
     }
 
-    fn onset_markers(
+    fn onset_markers<F>(
         &self,
-        marker_style: Option<MarkerStyle>,
-        line_style: Option<LineStyle>,
+        marker_style: Option<MarkerStyle<F>>,
+        line_style: Option<LineStyle<F>>,
         show_strength: Option<bool>,
-        threshold: Option<f64>,
-    ) -> AudioSampleResult<OnsetMarkers> {
+        threshold: Option<F>,
+    ) -> AudioSampleResult<OnsetMarkers<F>>
+    where
+        F: RealFloat
+    {
         // Apply defaults
         let marker_style = marker_style.unwrap_or_else(|| MarkerStyle {
             color: "#d62728".to_string(), // Red
-            size: 8.0,
+            size: to_precision::<F, _>(8.0),
             shape: MarkerShape::Triangle,
             fill: true,
         });
         let line_style = line_style.or_else(|| {
             Some(LineStyle {
                 color: "#d62728".to_string(), // Red
-                width: 1.0,
+                width: to_precision::<F, _>(1.0),
                 style: LineStyleType::Dashed,
             })
         });
         let show_strength = show_strength.unwrap_or(true);
-        let _threshold = threshold.unwrap_or(0.1);
+        let _threshold = threshold.unwrap_or_else(|| to_precision::<F, _>(0.1));
 
         let peak = self.peak();
         let peak_f64: f64 = peak.cast_into();
-        let y_range = (-peak_f64, peak_f64);
+        let peak_f: F = to_precision::<F, _>(peak_f64);
+        let y_range = (-peak_f, peak_f);
 
         let config = OnsetConfig {
             marker_style,
@@ -1496,12 +1508,15 @@ where
         Ok(OnsetMarkers::new(Vec::new(), None, config, y_range))
     }
 
-    fn beat_markers(
+    fn beat_markers<F>(
         &self,
-        marker_style: Option<MarkerStyle>,
-        line_style: Option<LineStyle>,
+        marker_style: Option<MarkerStyle<F>>,
+        line_style: Option<LineStyle<F>>,
         show_tempo: Option<bool>,
-    ) -> AudioSampleResult<BeatMarkers> {
+    ) -> AudioSampleResult<BeatMarkers<F>>
+    where
+        F: RealFloat
+    {
         let marker_style = marker_style.unwrap_or_else(|| MarkerStyle {
             color: "#2ca02c".to_string(), // Green
             size: to_precision::<F, _>(10.0),
@@ -1511,7 +1526,7 @@ where
         let line_style = line_style.or_else(|| {
             Some(LineStyle {
                 color: "#2ca02c".to_string(), // Green
-                width: 2.0,
+                width: to_precision::<F, _>(2.0),
                 style: LineStyleType::Solid,
             })
         });
@@ -1519,7 +1534,8 @@ where
 
         let peak = self.peak();
         let peak_f64: f64 = peak.cast_into();
-        let y_range = (-peak_f64, peak_f64);
+        let peak_f: F = to_precision::<F, _>(peak_f64);
+        let y_range = (-peak_f, peak_f);
 
         let config = BeatConfig {
             marker_style,
@@ -1530,20 +1546,23 @@ where
         Ok(BeatMarkers::new(Vec::new(), None, config, y_range))
     }
 
-    fn pitch_contour(
+    fn pitch_contour<F>(
         &self,
-        line_style: Option<LineStyle>,
+        line_style: Option<LineStyle<F>>,
         show_confidence: Option<bool>,
-        freq_range: Option<(f64, f64)>,
+        freq_range: Option<(F, F)>,
         _method: Option<PitchDetectionMethod>,
-    ) -> AudioSampleResult<PitchContour> {
+    ) -> AudioSampleResult<PitchContour<F>>
+    where
+        F: RealFloat
+    {
         let line_style = line_style.unwrap_or_else(|| LineStyle {
             color: "#ff00ff".to_string(), // Magenta
-            width: 2.0,
+            width: to_precision::<F, _>(2.0),
             style: LineStyleType::Solid,
         });
         let show_confidence = show_confidence.unwrap_or(false);
-        let freq_range = freq_range.unwrap_or((80.0, 2000.0));
+        let freq_range = freq_range.unwrap_or((to_precision::<F, _>(80.0), to_precision::<F, _>(2000.0)));
 
         Ok(PitchContour::new(
             Vec::new(),

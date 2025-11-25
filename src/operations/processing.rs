@@ -11,9 +11,10 @@ use crate::operations::ResamplingQuality;
 use crate::operations::types::NormalizationMethod;
 use crate::repr::AudioData;
 use crate::{
-    AudioProcessing, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    AudioStatistics, AudioTypeConversion, CastFrom, ConversionError, ConvertTo, I24, LayoutError,
-    ParameterError, RealFloat, to_precision,
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom,
+    ConversionError, ConvertTo, I24, LayoutError, ParameterError, RealFloat,
+    operations::traits::{AudioProcessing, AudioStatistics},
+    to_precision,
 };
 
 use ndarray::Axis;
@@ -442,18 +443,23 @@ where
                     )));
                 }
 
-                let input = arr.to_vec(); // Copy original data
                 let filter_len = filter_coeffs.len();
-                let output_len = input.len() - filter_len + 1;
+                let output_len = arr.len() - filter_len + 1;
 
-                // Perform convolution
+                // Create output buffer to avoid overwriting input during convolution
+                let mut output = ndarray::Array1::zeros(output_len);
+
+                // Perform convolution using array views (no vector allocation)
                 for i in 0..output_len {
                     let mut sum = T::zero();
                     for j in 0..filter_len {
-                        sum += input[i + j] * filter_coeffs[j];
+                        sum += arr[i + j] * filter_coeffs[j];
                     }
-                    arr[i] = sum;
+                    output[i] = sum;
                 }
+
+                // Replace the original data with the filtered output
+                *arr = output.into();
             }
             AudioData::Multi(arr) => {
                 if arr.ncols() < filter_coeffs.len() {
@@ -470,7 +476,7 @@ where
                 // Create output buffer
                 let mut output = ndarray::Array2::zeros((num_channels, output_len));
 
-                // Apply filter to each channel
+                // Apply filter to each channel using views (no vector allocation)
                 for (ch, mut output_channel) in output.axis_iter_mut(Axis(0)).enumerate() {
                     let input_channel = arr.row(ch);
 
@@ -494,71 +500,44 @@ where
         let mu_f64: f64 = mu.convert_to()?;
         let mu_plus_one: f64 = mu_f64 + 1.0;
 
-        let mu_fn = |x: T| {
-            let x: f64 = match x.convert_to() {
-                Ok(val) => val,
-                Err(e) => {
-                    return Err(AudioSampleError::Conversion(
-                        ConversionError::audio_conversion(
-                            e.to_string(),
-                            "f64",
-                            std::any::type_name::<T>(),
-                            "mu_compress conversion failed",
-                        ),
-                    ));
-                }
-            };
+        self.apply_with_error(|x: T| {
+            let x: f64 = x.convert_to().map_err(|e| {
+                AudioSampleError::Conversion(ConversionError::audio_conversion(
+                    e.to_string(),
+                    std::any::type_name::<T>(),
+                    "f64",
+                    "mu_compress conversion failed",
+                ))
+            })?;
             let sign = if x >= 0.0 { 1.0 } else { -1.0 };
             let abs_x = x.abs();
             let compressed = sign * (mu_plus_one.ln() + mu_f64 * abs_x).ln() / mu_plus_one.ln();
-            T::convert_from(compressed)
-        };
-
-        match &mut self.data {
-            AudioData::Mono(arr) => {
-                for x in arr.iter_mut() {
-                    *x = mu_fn(*x)?;
-                }
-                Ok(())
-            }
-            AudioData::Multi(arr) => {
-                for x in arr.iter_mut() {
-                    *x = mu_fn(*x)?;
-                }
-                Ok(())
-            }
-        }
+            T::convert_from(compressed).map_err(|e| {
+                AudioSampleError::Conversion(ConversionError::audio_conversion(
+                    e.to_string(),
+                    std::any::type_name::<T>(),
+                    "f64",
+                    "mu_compress result conversion failed",
+                ))
+            })
+        })
     }
 
     /// Applies μ-law expansion (decompression) to the audio samples.
     ///
-    /// Fist the mu value is converted to f64, then the expansion is applied.
+    /// First the mu value is converted to f64, then the expansion is applied.
     /// Second, the result is converted back to T.
     fn mu_expand(&mut self, mu: T) -> AudioSampleResult<()> {
         let mu: f64 = mu.convert_to()?;
         let mu_plus_one = mu + 1.0;
 
-        match &mut self.data {
-            AudioData::Mono(arr) => {
-                for x in arr.iter_mut() {
-                    let x_f64: f64 = x.convert_to()?;
-                    let sign = if x_f64 >= 0.0 { 1.0 } else { -1.0 };
-                    let abs_x = x_f64.abs();
-                    let expanded = sign * (mu_plus_one.powf(abs_x) - 1.0) / mu;
-                    *x = T::convert_from(expanded)?;
-                }
-            }
-            AudioData::Multi(arr) => {
-                for x in arr.iter_mut() {
-                    let x_f64: f64 = x.convert_to()?;
-                    let sign = if x_f64 >= 0.0 { 1.0 } else { -1.0 };
-                    let abs_x = x_f64.abs();
-                    let expanded = sign * (mu_plus_one.powf(abs_x) - 1.0) / mu;
-                    *x = T::convert_from(expanded)?;
-                }
-            }
-        }
-        Ok(())
+        self.apply_with_error(|x: T| {
+            let x_f64: f64 = x.convert_to()?;
+            let sign = if x_f64 >= 0.0 { 1.0 } else { -1.0 };
+            let abs_x = x_f64.abs();
+            let expanded = sign * (mu_plus_one.powf(abs_x) - 1.0) / mu;
+            T::convert_from(expanded)
+        })
     }
 
     /// Applies a low-pass filter with the specified cutoff frequency.
@@ -757,47 +736,44 @@ where
                     return Ok(0.0);
                 }
 
-                let mut values: Vec<T> = arr.to_owned().into_raw_vec_and_offset().0;
-                values.sort_by(|a, b| {
-                    match a.partial_cmp(b) {
-                        Some(order) => order,
-                        None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
-                    }
-                });
+                // Collect all values into a vector only once, directly from the iterator
+                let mut values: Vec<f64> = arr.iter().map(|&x| unsafe { x.unchecked_convert_to() }).collect();
+                let mid = values.len() / 2;
+                let _ = values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
 
-                let median = if values.len().is_multiple_of(2) {
-                    let mid = values.len() / 2;
-                    let median = values[mid - 1] + values[mid];
-                    let median: f64 = median.cast_into();
-                    median / 2.0f64
+                if values.len() % 2 == 1 {
+                    Ok(values[mid])
                 } else {
-                    let median: f64 = values[values.len() / 2].cast_into();
-                    median
-                };
-
-                Ok(median)
+                    // For even length, need the max element in the left partition
+                    let max_left = values[..mid]
+                        .iter()
+                        .max_by(|a, b| a.total_cmp(b))
+                        .copied()
+                        .unwrap();
+                    Ok((max_left + values[mid]) / 2.0)
+                }
             }
             AudioData::Multi(arr) => {
                 if arr.is_empty() {
                     return Ok(0.0);
                 }
-                let mut values: Vec<T> = arr.to_owned().into_raw_vec_and_offset().0;
-                values.sort_by(|a, b| {
-                    match a.partial_cmp(b) {
-                        Some(order) => order,
-                        None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
-                    }
-                });
 
-                let median = if values.len().is_multiple_of(2) {
-                    let mid = values.len() / 2;
-                    let median = values[mid - 1] + values[mid];
-                    let median: f64 = median.cast_into();
-                    median / 2.0f64
+                // Collect all values directly from the flattened iterator
+                let mut values: Vec<f64> = arr.iter().map(|&x| unsafe { x.unchecked_convert_to() }).collect();
+                let mid = values.len() / 2;
+                let _ = values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+
+                if values.len() % 2 == 1 {
+                    Ok(values[mid])
                 } else {
-                    values[values.len() / 2].cast_into()
-                };
-                Ok(median)
+                    // For even length, need the max element in the left partition
+                    let max_left = values[..mid]
+                        .iter()
+                        .max_by(|a, b| a.total_cmp(b))
+                        .copied()
+                        .unwrap();
+                    Ok((max_left + values[mid]) / 2.0)
+                }
             }
         }
     }
@@ -843,6 +819,75 @@ where
             }
         }
     }
+
+    /// Applies a fallible function to all samples in the audio data.
+    /// This is a helper method for operations that can fail.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// // Apply a conversion that might fail
+    /// audio.apply_with_error(|sample| {
+    ///     if sample > max_value {
+    ///         Err(AudioSampleError::Parameter(/* error */))
+    ///     } else {
+    ///         Ok(sample * 2.0)
+    ///     }
+    /// })?;
+    /// ```
+    pub fn apply_with_error<F>(&mut self, f: F) -> AudioSampleResult<()>
+    where
+        F: Fn(T) -> AudioSampleResult<T>,
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                for x in arr.iter_mut() {
+                    *x = f(*x)?;
+                }
+                Ok(())
+            }
+            AudioData::Multi(arr) => {
+                for x in arr.iter_mut() {
+                    *x = f(*x)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Applies a fallible function that uses an accumulator pattern.
+    /// Useful for operations that need to maintain state across samples.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// let mut state = 0.0;
+    /// audio.try_fold(|acc, sample| {
+    ///     *acc += sample.abs();
+    ///     if *acc > threshold {
+    ///         Err(AudioSampleError::Parameter(/* error */))
+    ///     } else {
+    ///         Ok(sample)
+    ///     }
+    /// })?;
+    /// ```
+    pub fn try_fold<F, Acc>(&mut self, mut acc: Acc, mut f: F) -> AudioSampleResult<Acc>
+    where
+        F: FnMut(&mut Acc, T) -> AudioSampleResult<T>,
+    {
+        match &mut self.data {
+            AudioData::Mono(arr) => {
+                for x in arr.iter_mut() {
+                    *x = f(&mut acc, *x)?;
+                }
+                Ok(acc)
+            }
+            AudioData::Multi(arr) => {
+                for x in arr.iter_mut() {
+                    *x = f(&mut acc, *x)?;
+                }
+                Ok(acc)
+            }
+        }
+    }
 }
 
 /// Builder for fluent audio processing operations.
@@ -881,11 +926,20 @@ where
     pub fn new(audio: &'a mut AudioSamples<'a, T>) -> Self {
         Self {
             audio,
-            operations: Vec::new(),
+            operations: Vec::with_capacity(4), // Pre-allocate for common use cases
+        }
+    }
+
+    /// Creates a new ProcessingBuilder with a specific initial capacity.
+    pub fn with_capacity(audio: &'a mut AudioSamples<'a, T>, capacity: usize) -> Self {
+        Self {
+            audio,
+            operations: Vec::with_capacity(capacity),
         }
     }
 
     /// Adds a normalization operation to the processing chain.
+    #[cfg(feature = "processing")]
     pub fn normalize(mut self, min: T, max: T, method: NormalizationMethod) -> Self {
         self.operations
             .push(Box::new(move |audio| audio.normalize(min, max, method)));

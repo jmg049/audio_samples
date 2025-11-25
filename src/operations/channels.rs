@@ -24,10 +24,9 @@
 //! - `Pan`: Position mono signal in stereo field with configurable balance
 
 use crate::{
-    AudioChannelOps, AudioData, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    AudioTypeConversion, CastFrom, CastInto, ConvertTo, I24, ParameterError, ProcessingError,
-    RealFloat,
-    operations::{StereoConversionMethod, types::MonoConversionMethod},
+    AudioData, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
+    CastFrom, CastInto, ConvertTo, I24, ParameterError, ProcessingError, RealFloat,
+    operations::{StereoConversionMethod, traits::AudioChannelOps, types::MonoConversionMethod},
     repr::MonoData,
     to_precision,
 };

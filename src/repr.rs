@@ -136,7 +136,9 @@
 //!
 //! [`AudioSample`]: crate::AudioSample
 use ndarray::iter::AxisIterMut;
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis};
+use ndarray::{
+    Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis, Ix1, Ix2, SliceArg,
+};
 use std::any::TypeId;
 use std::fmt::Display;
 use std::ops::{Bound, Deref, DerefMut, Index, IndexMut, Neg, RangeBounds};
@@ -148,10 +150,10 @@ use crate::{
     ConvertTo, I24, LayoutError, ParameterError, RealFloat, to_precision,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct MonoData<'a, T: AudioSample>(MonoRepr<'a, T>);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct MultiData<'a, T: AudioSample>(MultiRepr<'a, T>);
 
 // For MonoData
@@ -160,6 +162,7 @@ impl<'a, T: AudioSample> Index<usize> for MonoData<'a, T> {
     fn index(&self, idx: usize) -> &Self::Output {
         match &self.0 {
             MonoRepr::Borrowed(arr) => &arr[idx],
+            MonoRepr::BorrowedMut(arr) => &arr[idx],
             MonoRepr::Owned(arr) => &arr[idx],
         }
     }
@@ -167,9 +170,11 @@ impl<'a, T: AudioSample> Index<usize> for MonoData<'a, T> {
 
 impl<'a, T: AudioSample> IndexMut<usize> for MonoData<'a, T> {
     fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
+        self.promote();
         match &mut self.0 {
-            MonoRepr::Borrowed(_arr) => panic!("Cannot mutably index borrowed audio data"),
+            MonoRepr::BorrowedMut(arr) => &mut arr[idx],
             MonoRepr::Owned(arr) => &mut arr[idx],
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 }
@@ -180,6 +185,7 @@ impl<'a, T: AudioSample> Index<(usize, usize)> for MultiData<'a, T> {
     fn index(&self, (ch, s): (usize, usize)) -> &Self::Output {
         match &self.0 {
             MultiRepr::Borrowed(arr) => &arr[[ch, s]],
+            MultiRepr::BorrowedMut(arr) => &arr[[ch, s]],
             MultiRepr::Owned(arr) => &arr[[ch, s]],
         }
     }
@@ -187,9 +193,11 @@ impl<'a, T: AudioSample> Index<(usize, usize)> for MultiData<'a, T> {
 
 impl<'a, T: AudioSample> IndexMut<(usize, usize)> for MultiData<'a, T> {
     fn index_mut(&mut self, (ch, s): (usize, usize)) -> &mut Self::Output {
+        self.promote();
         match &mut self.0 {
-            MultiRepr::Borrowed(_) => panic!("Cannot mutably index borrowed multi-channel data"),
+            MultiRepr::BorrowedMut(arr) => &mut arr[[ch, s]],
             MultiRepr::Owned(arr) => &mut arr[[ch, s]],
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 }
@@ -200,6 +208,7 @@ impl<'a, T: AudioSample> Index<[usize; 2]> for MultiData<'a, T> {
     fn index(&self, index: [usize; 2]) -> &Self::Output {
         match &self.0 {
             MultiRepr::Borrowed(arr) => &arr[index],
+            MultiRepr::BorrowedMut(arr) => &arr[index],
             MultiRepr::Owned(arr) => &arr[index],
         }
     }
@@ -207,22 +216,26 @@ impl<'a, T: AudioSample> Index<[usize; 2]> for MultiData<'a, T> {
 
 impl<'a, T: AudioSample> IndexMut<[usize; 2]> for MultiData<'a, T> {
     fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
+        self.promote();
         match &mut self.0 {
-            MultiRepr::Borrowed(_) => panic!("Cannot mutably index borrowed multi-channel data"),
+            MultiRepr::BorrowedMut(arr) => &mut arr[index],
             MultiRepr::Owned(arr) => &mut arr[index],
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum MonoRepr<'a, T: AudioSample> {
     Borrowed(ArrayView1<'a, T>),
+    BorrowedMut(ArrayViewMut1<'a, T>),
     Owned(Array1<T>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum MultiRepr<'a, T: AudioSample> {
     Borrowed(ArrayView2<'a, T>),
+    BorrowedMut(ArrayViewMut2<'a, T>),
     Owned(Array2<T>),
 }
 
@@ -231,7 +244,14 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
     fn as_view(&self) -> ArrayView1<'_, T> {
         match &self.0 {
             MonoRepr::Borrowed(v) => *v,
+            MonoRepr::BorrowedMut(v) => v.view(),
             MonoRepr::Owned(a) => a.view(),
+        }
+    }
+
+    pub fn promote(&mut self) {
+        if let MonoRepr::Borrowed(v) = &self.0 {
+            self.0 = MonoRepr::Owned(v.to_owned());
         }
     }
 
@@ -243,12 +263,29 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         MonoData(MonoRepr::Borrowed(view))
     }
 
+    /// Create MonoData from an ArrayViewMut1 (borrowed data)
+    pub const fn from_view_mut<'b>(view: ArrayViewMut1<'b, T>) -> Self
+    where
+        'b: 'a,
+    {
+        MonoData(MonoRepr::BorrowedMut(view))
+    }
+
+    /// Create MonoData from an owned Array1 (owned data)
+    pub const fn from_owned(array: Array1<T>) -> Self {
+        MonoData(MonoRepr::Owned(array))
+    }
+
     #[inline]
+    /// Get a mutable view of the audio data, converting to owned if necessary.
     fn to_mut(&mut self) -> ArrayViewMut1<'_, T> {
-        if let MonoRepr::Borrowed(v) = &self.0 {
+        if let MonoRepr::Borrowed(v) = self.0 {
+            // Convert borrowed to owned for mutability
             self.0 = MonoRepr::Owned(v.to_owned());
         }
+
         match &mut self.0 {
+            MonoRepr::BorrowedMut(view) => view.view_mut(), // If the data  is already mutable borrowed then we do not need to convert to owned, this variant says "we have mutable access"
             MonoRepr::Owned(a) => a.view_mut(),
             _ => unreachable!(),
         }
@@ -257,6 +294,7 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
     fn into_owned<'b>(self) -> MonoData<'b, T> {
         match self.0 {
             MonoRepr::Borrowed(v) => MonoData(MonoRepr::Owned(v.to_owned())),
+            MonoRepr::BorrowedMut(v) => MonoData(MonoRepr::Owned(v.to_owned())),
             MonoRepr::Owned(a) => MonoData(MonoRepr::Owned(a)),
         }
     }
@@ -264,15 +302,6 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
     // Delegation methods for ndarray operations
     #[inline]
     pub fn len(&self) -> usize {
-        self.as_view().len()
-    }
-    #[inline]
-    /// Returns the number of samples (length) in mono audio data.
-    ///
-    /// # Deprecated
-    /// This method is deprecated due to confusing naming. Use `len()` instead.
-    #[deprecated(since = "0.10.0", note = "Use `len()` instead for clarity")]
-    pub fn ncols(&self) -> usize {
         self.as_view().len()
     }
 
@@ -295,89 +324,53 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         self.iter().fold(init, f)
     }
 
+    /// Returns a slice view of the audio data based on the provided slicing information.
     pub fn slice<I>(&self, info: I) -> ArrayView1<'_, T>
     where
-        I: ndarray::SliceArg<ndarray::Ix1, OutDim = ndarray::Ix1>,
+        I: SliceArg<Ix1, OutDim = Ix1>,
     {
         match &self.0 {
             MonoRepr::Borrowed(v) => v.slice(info),
+            MonoRepr::BorrowedMut(v) => v.slice(info),
             MonoRepr::Owned(a) => a.slice(info),
         }
     }
 
+    /// Returns a mutable slice view of the audio data based on the provided slicing information.
+    /// NOTE: This function promotes to owned data if the current representation is borrowed.
     pub fn slice_mut<I>(&mut self, info: I) -> ArrayViewMut1<'_, T>
     where
-        I: ndarray::SliceArg<ndarray::Ix1, OutDim = ndarray::Ix1>,
+        I: ndarray::SliceArg<Ix1, OutDim = Ix1>,
     {
+        if let MonoRepr::Borrowed(v) = self.0 {
+            // Convert borrowed to owned for mutability
+            self.0 = MonoRepr::Owned(v.to_owned());
+        }
+
         match &mut self.0 {
-            MonoRepr::Borrowed(_) => panic!("Cannot get mutable slice from borrowed data"),
+            MonoRepr::BorrowedMut(a) => a.slice_mut(info),
             MonoRepr::Owned(a) => a.slice_mut(info),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
-    /// Safe alternative to `slice_mut` that returns a Result instead of panicking.
-    pub fn try_slice_mut<I>(&mut self, info: I) -> crate::AudioSampleResult<ArrayViewMut1<'_, T>>
-    where
-        I: ndarray::SliceArg<ndarray::Ix1, OutDim = ndarray::Ix1>,
-    {
-        match &mut self.0 {
-            MonoRepr::Borrowed(_) => Err(crate::AudioSampleError::Layout(
-                LayoutError::borrowed_mutation(
-                    "slice_mut",
-                    "Cannot get mutable slice from borrowed data",
-                ),
-            )),
-            MonoRepr::Owned(a) => Ok(a.slice_mut(info)),
-        }
-    }
-
-    pub fn iter(&self) -> ndarray::iter::Iter<'_, T, ndarray::Ix1> {
+    pub fn iter(&self) -> ndarray::iter::Iter<'_, T, Ix1> {
         match &self.0 {
             MonoRepr::Borrowed(v) => v.iter(),
+            MonoRepr::BorrowedMut(v) => v.iter(),
             MonoRepr::Owned(a) => a.iter(),
         }
     }
 
-    pub fn iter_mut(&mut self) -> ndarray::iter::IterMut<'_, T, ndarray::Ix1> {
+    pub fn iter_mut(&mut self) -> ndarray::iter::IterMut<'_, T, Ix1> {
+        if let MonoRepr::Borrowed(a) = &mut self.0 {
+            self.0 = MonoRepr::Owned(a.to_owned());
+        }
+
         match &mut self.0 {
-            MonoRepr::Borrowed(_) => panic!("Cannot mutably iterate over borrowed data"),
+            MonoRepr::BorrowedMut(b) => b.iter_mut(),
             MonoRepr::Owned(a) => a.iter_mut(),
-        }
-    }
-
-    /// Safe alternative to `iter_mut` that returns a Result instead of panicking.
-    pub fn try_iter_mut(
-        &mut self,
-    ) -> crate::AudioSampleResult<ndarray::iter::IterMut<'_, T, ndarray::Ix1>> {
-        match &mut self.0 {
-            MonoRepr::Borrowed(_) => Err(crate::AudioSampleError::Layout(
-                LayoutError::borrowed_mutation(
-                    "iter_mut",
-                    "Cannot mutably iterate over borrowed data",
-                ),
-            )),
-            MonoRepr::Owned(a) => Ok(a.iter_mut()),
-        }
-    }
-
-    /// Safe alternative to mutable indexing that returns a Result instead of panicking.
-    pub fn try_get_mut(&mut self, idx: usize) -> crate::AudioSampleResult<&mut T> {
-        match &mut self.0 {
-            MonoRepr::Borrowed(_) => Err(crate::AudioSampleError::Layout(
-                LayoutError::borrowed_mutation(
-                    "get_mut",
-                    "Cannot mutably index borrowed audio data",
-                ),
-            )),
-            MonoRepr::Owned(arr) => {
-                let len = arr.len();
-                arr.get_mut(idx).ok_or_else(|| {
-                    AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "index",
-                        format!("Index {} is out of bounds for array of length {}", idx, len),
-                    ))
-                })
-            }
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
@@ -392,16 +385,23 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         // For 1D arrays, swap_axes is a no-op
     }
 
-    pub fn as_slice_mut(&mut self) -> Option<&mut [T]> {
+    pub fn as_slice_mut(&mut self) -> &mut [T] {
+        self.promote();
         match &mut self.0 {
-            MonoRepr::Borrowed(_) => None, // Cannot get mutable slice from borrowed data
-            MonoRepr::Owned(a) => a.as_slice_mut(),
+            MonoRepr::BorrowedMut(a) => a
+                .as_slice_mut()
+                .expect("Structures backing audio samples should be contiguous in memory"),
+            MonoRepr::Owned(a) => a
+                .as_slice_mut()
+                .expect("Structures backing audio samples should be contiguous in memory"),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
     pub fn as_slice(&self) -> Option<&[T]> {
         match &self.0 {
             MonoRepr::Borrowed(v) => v.as_slice(),
+            MonoRepr::BorrowedMut(v) => v.as_slice(),
             MonoRepr::Owned(a) => a.as_slice(),
         }
     }
@@ -413,6 +413,7 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
     pub fn shape(&self) -> &[usize] {
         match &self.0 {
             MonoRepr::Borrowed(v) => v.shape(),
+            MonoRepr::BorrowedMut(v) => v.shape(),
             MonoRepr::Owned(a) => a.shape(),
         }
     }
@@ -443,6 +444,10 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
     pub fn into_raw_vec_and_offset(self) -> (Vec<T>, usize) {
         match self.0 {
             MonoRepr::Borrowed(v) => {
+                let (vec, offset) = v.to_owned().into_raw_vec_and_offset();
+                (vec, offset.unwrap_or(0))
+            }
+            MonoRepr::BorrowedMut(v) => {
                 let (vec, offset) = v.to_owned().into_raw_vec_and_offset();
                 (vec, offset.unwrap_or(0))
             }
@@ -481,24 +486,43 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
     #[inline]
     fn as_view(&self) -> ArrayView2<'_, T> {
         match &self.0 {
-            MultiRepr::Borrowed(v) => *v,
+            MultiRepr::Borrowed(a) => *a,
+            MultiRepr::BorrowedMut(a) => a.view(),
             MultiRepr::Owned(a) => a.view(),
         }
     }
-    #[inline]
-    fn to_mut(&mut self) -> ArrayViewMut2<'_, T> {
+
+    fn promote(&mut self) {
         if let MultiRepr::Borrowed(v) = &self.0 {
             self.0 = MultiRepr::Owned(v.to_owned());
         }
+    }
+
+    pub const fn from_view<'b>(view: ArrayView2<'b, T>) -> Self
+    where
+        'b: 'a,
+    {
+        MultiData(MultiRepr::Borrowed(view))
+    }
+
+    pub const fn from_owned(array: Array2<T>) -> Self {
+        MultiData(MultiRepr::Owned(array))
+    }
+
+    #[inline]
+    fn to_mut(&mut self) -> ArrayViewMut2<'_, T> {
+        self.promote();
         match &mut self.0 {
+            MultiRepr::BorrowedMut(a) => a.view_mut(),
             MultiRepr::Owned(a) => a.view_mut(),
-            _ => unreachable!(),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
     #[inline]
     fn into_owned<'b>(self) -> MultiData<'b, T> {
         match self.0 {
             MultiRepr::Borrowed(v) => MultiData(MultiRepr::Owned(v.to_owned())),
+            MultiRepr::BorrowedMut(v) => MultiData(MultiRepr::Owned(v.to_owned())),
             MultiRepr::Owned(a) => MultiData(MultiRepr::Owned(a)),
         }
     }
@@ -532,7 +556,8 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
 
     pub fn index_axis(&self, axis: Axis, index: usize) -> ArrayView1<'_, T> {
         match &self.0 {
-            MultiRepr::Borrowed(v) => v.index_axis(axis, index),
+            MultiRepr::Borrowed(a) => a.index_axis(axis, index),
+            MultiRepr::BorrowedMut(a) => a.index_axis(axis, index),
             MultiRepr::Owned(a) => a.index_axis(axis, index),
         }
     }
@@ -540,6 +565,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
     pub fn column(&self, index: usize) -> ArrayView1<'_, T> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.column(index),
+            MultiRepr::BorrowedMut(v) => v.column(index),
             MultiRepr::Owned(a) => a.column(index),
         }
     }
@@ -550,6 +576,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
     {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.slice(info),
+            MultiRepr::BorrowedMut(v) => v.slice(info),
             MultiRepr::Owned(a) => a.slice(info),
         }
     }
@@ -558,25 +585,12 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
     where
         I: ndarray::SliceArg<ndarray::Ix2, OutDim = ndarray::Ix2>,
     {
-        match &mut self.0 {
-            MultiRepr::Borrowed(_) => panic!("Cannot get mutable slice from borrowed data"),
-            MultiRepr::Owned(a) => a.slice_mut(info),
-        }
-    }
+        self.promote();
 
-    /// Safe alternative to `slice_mut` that returns a Result instead of panicking.
-    pub fn try_slice_mut<I>(&mut self, info: I) -> crate::AudioSampleResult<ArrayViewMut2<'_, T>>
-    where
-        I: ndarray::SliceArg<ndarray::Ix2, OutDim = ndarray::Ix2>,
-    {
         match &mut self.0 {
-            MultiRepr::Borrowed(_) => Err(crate::AudioSampleError::Layout(
-                LayoutError::borrowed_mutation(
-                    "slice_mut",
-                    "Cannot get mutable slice from borrowed data",
-                ),
-            )),
-            MultiRepr::Owned(a) => Ok(a.slice_mut(info)),
+            MultiRepr::BorrowedMut(a) => a.slice_mut(info),
+            MultiRepr::Owned(a) => a.slice_mut(info),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
@@ -584,23 +598,32 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         self.as_view()
     }
 
+    pub fn view_mut(&mut self) -> ArrayViewMut2<'_, T> {
+        self.promote();
+        match &mut self.0 {
+            MultiRepr::BorrowedMut(a) => a.view_mut(),
+            MultiRepr::Owned(a) => a.view_mut(),
+            _ => unreachable!("Self should have been converted to owned by now"),
+        }
+    }
+
     pub fn swap_axes(&mut self, a: usize, b: usize) {
         self.to_mut().swap_axes(a, b);
     }
 
     pub fn index_axis_mut(&mut self, axis: Axis, index: usize) -> ArrayViewMut1<'_, T> {
-        if let MultiRepr::Borrowed(v) = &self.0 {
-            self.0 = MultiRepr::Owned(v.to_owned());
-        }
+        self.promote();
         match &mut self.0 {
+            MultiRepr::BorrowedMut(a) => a.index_axis_mut(axis, index),
             MultiRepr::Owned(a) => a.index_axis_mut(axis, index),
-            _ => unreachable!(),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
     pub fn shape(&self) -> &[usize] {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.shape(),
+            MultiRepr::BorrowedMut(v) => v.shape(),
             MultiRepr::Owned(a) => a.shape(),
         }
     }
@@ -612,73 +635,37 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         self.to_mut().mapv_inplace(f);
     }
 
-    pub fn axis_iter_mut(&mut self, axis: Axis) -> AxisIterMut<'_, T, ndarray::Ix1> {
-        if let MultiRepr::Borrowed(v) = &self.0 {
-            self.0 = MultiRepr::Owned(v.to_owned());
-        }
+    pub fn axis_iter_mut(&mut self, axis: Axis) -> AxisIterMut<'_, T, Ix1> {
+        self.promote();
         match &mut self.0 {
+            MultiRepr::BorrowedMut(a) => a.axis_iter_mut(axis),
             MultiRepr::Owned(a) => a.axis_iter_mut(axis),
-            _ => unreachable!(),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
     pub fn row(&self, index: usize) -> ArrayView1<'_, T> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.row(index),
+            MultiRepr::BorrowedMut(v) => v.row(index),
             MultiRepr::Owned(a) => a.row(index),
         }
     }
 
-    pub fn iter(&self) -> ndarray::iter::Iter<'_, T, ndarray::Ix2> {
+    pub fn iter(&self) -> ndarray::iter::Iter<'_, T, Ix2> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.iter(),
+            MultiRepr::BorrowedMut(v) => v.iter(),
             MultiRepr::Owned(a) => a.iter(),
         }
     }
 
-    pub fn iter_mut(&mut self) -> ndarray::iter::IterMut<'_, T, ndarray::Ix2> {
+    pub fn iter_mut(&mut self) -> ndarray::iter::IterMut<'_, T, Ix2> {
+        self.promote();
         match &mut self.0 {
-            MultiRepr::Borrowed(_) => panic!("Cannot mutably iterate over borrowed data"),
+            MultiRepr::BorrowedMut(a) => a.iter_mut(),
             MultiRepr::Owned(a) => a.iter_mut(),
-        }
-    }
-
-    /// Safe alternative to `iter_mut` that returns a Result instead of panicking.
-    pub fn try_iter_mut(
-        &mut self,
-    ) -> crate::AudioSampleResult<ndarray::iter::IterMut<'_, T, ndarray::Ix2>> {
-        match &mut self.0 {
-            MultiRepr::Borrowed(_) => Err(crate::AudioSampleError::Layout(
-                LayoutError::borrowed_mutation(
-                    "iter_mut",
-                    "Cannot mutably iterate over borrowed data",
-                ),
-            )),
-            MultiRepr::Owned(a) => Ok(a.iter_mut()),
-        }
-    }
-
-    /// Safe alternative to mutable indexing that returns a Result instead of panicking.
-    pub fn try_get_mut(&mut self, idx: (usize, usize)) -> crate::AudioSampleResult<&mut T> {
-        match &mut self.0 {
-            MultiRepr::Borrowed(_) => Err(crate::AudioSampleError::Layout(
-                LayoutError::borrowed_mutation(
-                    "get_mut",
-                    "Cannot mutably index borrowed multi-channel data",
-                ),
-            )),
-            MultiRepr::Owned(arr) => {
-                let shape = arr.shape().to_owned();
-                arr.get_mut(idx).ok_or_else(|| {
-                    AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "index",
-                        format!(
-                            "Index {:?} is out of bounds for array with shape {:?}",
-                            idx, shape
-                        ),
-                    ))
-                })
-            }
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
@@ -705,33 +692,33 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
     pub fn as_slice(&self) -> Option<&[T]> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.as_slice(),
+            MultiRepr::BorrowedMut(v) => v.as_slice(),
             MultiRepr::Owned(a) => a.as_slice(),
         }
     }
 
     pub fn outer_iter(&mut self) -> ndarray::iter::AxisIterMut<'_, T, ndarray::Ix1> {
-        if let MultiRepr::Borrowed(v) = &self.0 {
-            self.0 = MultiRepr::Owned(v.to_owned());
-        }
+        self.promote();
         match &mut self.0 {
+            MultiRepr::BorrowedMut(a) => a.outer_iter_mut(),
             MultiRepr::Owned(a) => a.outer_iter_mut(),
-            _ => unreachable!(),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
     pub fn as_slice_mut(&mut self) -> Option<&mut [T]> {
-        if let MultiRepr::Borrowed(v) = &self.0 {
-            self.0 = MultiRepr::Owned(v.to_owned());
-        }
+        self.promote();
         match &mut self.0 {
+            MultiRepr::BorrowedMut(a) => a.as_slice_mut(),
             MultiRepr::Owned(a) => a.as_slice_mut(),
-            _ => unreachable!(),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
     pub fn axis_iter(&self, axis: ndarray::Axis) -> ndarray::iter::AxisIter<'_, T, ndarray::Ix1> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.axis_iter(axis),
+            MultiRepr::BorrowedMut(v) => v.axis_iter(axis),
             MultiRepr::Owned(a) => a.axis_iter(axis),
         }
     }
@@ -741,25 +728,25 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
     }
 
     pub fn row_mut(&mut self, index: usize) -> ndarray::ArrayViewMut1<'_, T> {
-        if let MultiRepr::Borrowed(v) = &self.0 {
-            self.0 = MultiRepr::Owned(v.to_owned());
-        }
+        self.promote();
         match &mut self.0 {
+            MultiRepr::BorrowedMut(a) => a.row_mut(index),
             MultiRepr::Owned(a) => a.row_mut(index),
-            _ => unreachable!(),
+            _ => unreachable!("Self should have been converted to owned by now"),
         }
     }
 
-    pub fn fill(&mut self, value: T)
-    where
-        T: Clone,
-    {
+    pub fn fill(&mut self, value: T) {
         self.to_mut().fill(value);
     }
 
     pub fn into_raw_vec_and_offset(self) -> (Vec<T>, usize) {
         match self.0 {
             MultiRepr::Borrowed(v) => {
+                let (vec, offset) = v.to_owned().into_raw_vec_and_offset();
+                (vec, offset.unwrap_or(0))
+            }
+            MultiRepr::BorrowedMut(v) => {
                 let (vec, offset) = v.to_owned().into_raw_vec_and_offset();
                 (vec, offset.unwrap_or(0))
             }
@@ -823,7 +810,7 @@ impl<'a, T: AudioSample> IntoIterator for &'a MultiData<'_, T> {
 ///     array![[0.1, 0.2], [0.3, 0.4]]
 /// ));
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum AudioData<'a, T: AudioSample> {
     /// Single-channel audio data
     Mono(MonoData<'a, T>),
@@ -842,6 +829,15 @@ impl<T: AudioSample> AudioData<'static, T> {
         match self {
             AudioData::Mono(m) => m.mean(),
             AudioData::Multi(m) => m.mean(),
+        }
+    }
+}
+
+impl<T: AudioSample> Clone for AudioData<'_, T> {
+    fn clone(&self) -> Self {
+        match self {
+            AudioData::Mono(m) => AudioData::Mono(MonoData::from_owned(m.as_view().to_owned())),
+            AudioData::Multi(m) => AudioData::Multi(MultiData::from_owned(m.as_view().to_owned())),
         }
     }
 }
@@ -884,8 +880,8 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
     #[inline]
     pub fn len(&self) -> usize {
         match self {
-            AudioData::Mono(m) => m.as_view().len(),
-            AudioData::Multi(m) => m.as_view().len(),
+            AudioData::Mono(m) => m.len(),
+            AudioData::Multi(m) => m.len(),
         }
     }
     /// Returns the number of channels in the audio data.
@@ -893,7 +889,7 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
     pub fn num_channels(&self) -> usize {
         match self {
             AudioData::Mono(_) => 1,
-            AudioData::Multi(m) => m.as_view().shape()[0],
+            AudioData::Multi(m) => m.shape()[0],
         }
     }
     /// Returns true if the audio data contains no samples.
@@ -949,7 +945,7 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
     pub fn as_slice(&self) -> Option<&[T]> {
         match &self {
             AudioData::Mono(m) => m.as_slice(),
-            AudioData::Multi(_) => None,
+            AudioData::Multi(m) => m.as_slice(),
         }
     }
 
@@ -1181,11 +1177,11 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
     {
         match self {
             AudioData::Mono(m) => {
-                let out = m.as_view().mapv(|x| x.convert_to().unwrap_or_default());
+                let out = m.as_view().mapv(|x| x.convert_to().expect("AudioSample <-> AudioSample conversions can fail in theory, but nearly impossible in practice."));
                 AudioData::Mono(MonoData(MonoRepr::Owned(out)))
             }
             AudioData::Multi(m) => {
-                let out = m.as_view().mapv(|x| x.convert_to().unwrap_or_default());
+                let out = m.as_view().mapv(|x| x.convert_to().expect("AudioSample <-> AudioSample conversions can fail in theory, but nearly impossible in practice."));
                 AudioData::Multi(MultiData(MultiRepr::Owned(out)))
             }
         }
@@ -1195,6 +1191,7 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
         match self {
             AudioData::Mono(m) => match m.0 {
                 MonoRepr::Borrowed(v) => v.to_owned().to_vec(),
+                MonoRepr::BorrowedMut(v) => v.to_owned().to_vec(),
                 MonoRepr::Owned(a) => a.to_vec(),
             },
             AudioData::Multi(m) => {
@@ -1235,9 +1232,9 @@ impl<'a, T: AudioSample> From<ArrayView1<'a, T>> for AudioData<'a, T> {
         AudioData::Mono(MonoData(MonoRepr::Borrowed(arr)))
     }
 }
-impl<'a, T: AudioSample> From<ArrayViewMut1<'_, T>> for AudioData<'a, T> {
-    fn from(arr: ArrayViewMut1<'_, T>) -> Self {
-        AudioData::Mono(MonoData(MonoRepr::Owned(arr.to_owned())))
+impl<'a, T: AudioSample> From<ArrayViewMut1<'a, T>> for AudioData<'a, T> {
+    fn from(arr: ArrayViewMut1<'a, T>) -> Self {
+        AudioData::Mono(MonoData(MonoRepr::BorrowedMut(arr)))
     }
 }
 
@@ -1249,7 +1246,7 @@ impl<'a, T: AudioSample> From<ArrayView2<'a, T>> for AudioData<'a, T> {
 
 impl<'a, T: AudioSample> From<ArrayViewMut2<'a, T>> for AudioData<'a, T> {
     fn from(arr: ArrayViewMut2<'a, T>) -> Self {
-        AudioData::Multi(MultiData(MultiRepr::Owned(arr.to_owned())))
+        AudioData::Multi(MultiData(MultiRepr::BorrowedMut(arr)))
     }
 }
 
@@ -1467,7 +1464,7 @@ where
 /// let stereo_audio = AudioSamples::new_multi_channel(stereo_data, 48000);
 /// assert_eq!(stereo_audio.num_channels(), 2);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct AudioSamples<'a, T: AudioSample> {
     /// The audio sample data.
     pub data: AudioData<'a, T>,
@@ -2383,6 +2380,82 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
             AudioData::Multi(arr) => Some(arr),
         }
     }
+
+    /// Creates a new mono AudioSamples from a slice.
+    pub fn new_mono_from_slice(slice: &'a [T], sample_rate: u32) -> Self {
+        let arr = ArrayView1::from(slice);
+        let mono_data = MonoData::from_view(arr);
+        let audio_data = AudioData::Mono(mono_data);
+        AudioSamples {
+            data: audio_data,
+            sample_rate,
+            layout: ChannelLayout::NonInterleaved,
+        }
+    }
+
+    /// Creates a new mono AudioSamples from a slice.
+    pub fn new_mono_from_mut_slice(slice: &'a mut [T], sample_rate: u32) -> Self {
+        let arr = ArrayViewMut1::from(slice);
+        let mono_data = MonoData::from_view_mut(arr);
+        let audio_data = AudioData::Mono(mono_data);
+        AudioSamples {
+            data: audio_data,
+            sample_rate,
+            layout: ChannelLayout::NonInterleaved,
+        }
+    }
+
+    /// Creates a new multi-channel AudioSamples from a slice.
+    pub fn new_multi_channel_from_slice(slice: &'a [T], channels: usize, sample_rate: u32) -> Self {
+        let total_samples = slice.len();
+        assert!(
+            total_samples.is_multiple_of(channels),
+            "Slice length must be divisible by number of channels"
+        );
+        let samples_per_channel = total_samples / channels;
+        let arr = ArrayView2::from_shape((channels, samples_per_channel), slice).unwrap();
+        let multi_data = MultiData::from_view(arr);
+        let audio_data = AudioData::Multi(multi_data);
+        AudioSamples {
+            data: audio_data,
+            sample_rate,
+            layout: ChannelLayout::Interleaved,
+        }
+    }
+}
+
+impl<'a, T: AudioSample> Clone for AudioSamples<'a, T> {
+    fn clone(&self) -> Self {
+        AudioSamples {
+            data: self.data.clone(),
+            sample_rate: self.sample_rate,
+            layout: self.layout,
+        }
+    }
+}
+
+impl<'a, T: AudioSample> TryFrom<(u32, u32, Vec<T>)> for AudioSamples<'a, T> {
+    type Error = AudioSampleError;
+    /// Create AudioSamples from a sample rate and a vector of samples (assumed mono).
+    fn try_from((n_channels, sample_rate, samples): (u32, u32, Vec<T>)) -> Result<Self, Self::Error> {
+        match n_channels {
+            1 => {
+                let arr = Array1::from(samples);
+                Ok(AudioSamples::new_mono(arr, n_channels))
+            }
+            _ => {
+                let shape = (n_channels as usize, samples.len() / n_channels as usize);
+                let arr = match Array2::from_shape_vec(shape, samples) {
+                    Ok(arr) => arr,
+                    Err(e) => {return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "samples",
+                        format!("Failed to reshape samples into {} channels: {}", n_channels, e),
+                    )));}
+                };
+                Ok(AudioSamples::new_multi_channel(arr, sample_rate ))
+            }
+        }
+    }
 }
 
 // ========================
@@ -2808,6 +2881,50 @@ impl<T: AudioSample> TryFrom<AudioSamples<'static, T>> for StereoAudioSamples<'s
 impl<T: AudioSample> From<StereoAudioSamples<'static, T>> for AudioSamples<'static, T> {
     fn from(stereo: StereoAudioSamples<'static, T>) -> Self {
         stereo.0
+    }
+}
+
+#[cfg(feature = "fixed-size-audio")]
+/// Fixed-size audio samples buffer for stack-allocated audio data.
+///
+/// This type provides a way to work with audio samples that have a compile-time
+/// known maximum size, allowing for stack allocation and zero-copy operations.
+pub struct FixedSizeAudioSamples<T: AudioSample, const N: usize> {
+    /// The underlying audio samples
+    pub samples: AudioSamples<'static, T>,
+}
+
+#[cfg(feature = "fixed-size-audio")]
+impl<T: AudioSample, const N: usize> FixedSizeAudioSamples<T, N> {
+    /// Create a fixed-size audio buffer from a 1D array
+    pub fn from_1d(data: [T; N], sample_rate: u32) -> Self {
+        let array = Array1::from_vec(data.to_vec());
+        let mono_data = MonoData::from_owned(array);
+        let audio_data = AudioData::Mono(mono_data);
+        let audio = AudioSamples::from_owned(audio_data, sample_rate);
+        Self { samples: audio }
+    }
+
+    /// Get the maximum capacity of this buffer
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+
+    /// Unsafe because it does have debug assertions to ensure the two AudioSamples have matching sample rates and channel counts.
+    /// The caller is responsible for ensuring these conditions are met.
+    pub unsafe fn swap_samples(&mut self, other: &mut Self) {
+        debug_assert_eq!(
+            self.samples.sample_rate(),
+            other.samples.sample_rate(),
+            "Sample rates must match for swap"
+        );
+        debug_assert_eq!(
+            self.samples.num_channels(),
+            other.samples.num_channels(),
+            "Number of channels must match for swap"
+        );
+
+        std::mem::swap(&mut self.samples, &mut other.samples);
     }
 }
 

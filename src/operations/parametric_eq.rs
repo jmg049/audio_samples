@@ -91,14 +91,7 @@ where
                             "Failed to get mono data. Underlying data is not mono.",
                         )))?;
 
-                let working_samples =
-                    working_samples
-                        .as_slice_mut()
-                        .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
-                            operation: "parametric EQ".to_string(),
-                            layout_type: "non-contiguous mono samples".to_string(),
-                        }))?;
-
+                let working_samples = working_samples.as_slice_mut();
                 filter.process_samples_in_place(working_samples);
 
                 for (i, output) in working_samples.iter_mut().enumerate() {

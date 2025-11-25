@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-audio_samples = "1.0.0"
+audio_samples = "0.11.0"
 ```
 
 or more easily with:
@@ -38,14 +38,14 @@ For specific features, enable only what you need:
 
 ```toml
 [dependencies]
-audio_samples = { version = "1.0.0", features = ["fft", "plotting"] }
+audio_samples = { version = "0.11.0", features = ["fft", "plotting"] }
 ```
 
 Or enable everything:
 
 ```toml
 [dependencies]
-audio_samples = { version = "1.0.0", features = ["full"] }
+audio_samples = { version = "0.11.0", features = ["full"] }
 ```
 
 ## Features
@@ -63,7 +63,7 @@ The library uses a modular feature system to keep dependencies minimal:
 
 ## Full Examples
 
-A range of examples demonstrating this crate and its companion [audio_io](https://ghithub.com/jmg049/audio_io) crate can be found at [here]().
+A range of examples demonstrating this crate and its companion [audio_io](https://github.com/jmg049/audio_io) crate can be found at [here]().
 
 - [DTMF tone generation and decoding]()
 - [Basic synthesizer]()
@@ -119,7 +119,6 @@ let stereo_audio = AudioSamples::new_multi_channel(stereo_data, 44100);
 ```rust
 use audio_samples::AudioStatistics;
 
-// Simple statistics (no Result needed)
 let peak = audio.peak();
 let min = audio.min_sample();
 let max = audio.max_sample();
