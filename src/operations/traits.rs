@@ -1,19 +1,24 @@
 //! Core trait definitions for audio processing operations.
-//!
-//! This module defines the focused traits that replace the monolithic
-//! `AudioSamplesOperations` trait. Each trait has a single responsibility
-//! and can be implemented independently.
 
+#[cfg(feature = "plotting")]
+#[cfg(feature = "spectral-analysis")]
+use crate::operations::AudioPlotBuilders;
 #[cfg(feature = "resampling")]
 use crate::operations::ResamplingQuality;
+#[cfg(feature = "processing")]
+use crate::operations::types::NormalizationMethod;
+
+#[cfg(feature = "spectral-analysis")]
+use crate::operations::types::ChromaConfig;
 #[cfg(feature = "spectral-analysis")]
 use crate::operations::{
     CqtConfig,
     types::{SpectrogramScale, WindowType},
 };
+
 use crate::{
     AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom, CastInto,
-    ConvertTo, I24, NormalizationMethod, RealFloat,
+    ConvertTo, I24, RealFloat,
     operations::{
         MonoConversionMethod, StereoConversionMethod,
         types::{
@@ -21,19 +26,22 @@ use crate::{
             PadSide, ParametricEq, PerturbationConfig, PitchDetectionMethod,
         },
     },
-    to_precision,
 };
+
+#[cfg(feature = "statistics")]
+use crate::operations::types::VadConfig;
 #[cfg(feature = "spectral-analysis")]
 use ndarray::Array2;
 
+#[cfg(feature = "random-generation")]
 use rand::distr::{Distribution, StandardUniform};
+
 #[cfg(feature = "spectral-analysis")]
 use rustfft::FftNum;
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+#[cfg(feature = "plotting")]
+#[cfg(feature = "spectral-analysis")]
+use std::path::Path;
 
 #[cfg(feature = "spectral-analysis")]
 use std::num::NonZeroUsize;
@@ -45,9 +53,8 @@ use ndarray::Zip;
 pub use num_complex::Complex;
 
 // Type aliases for complex types to satisfy clippy::type_complexity
-type FftInfoResult<F> = AudioSampleResult<(Vec<F>, Vec<F>, Vec<Complex<F>>)>;
-type RealtimeOperation<T> =
-    Box<dyn Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync>;
+#[cfg(feature = "spectral-analysis")]
+type FftInfoResult<F> = AudioSampleResult<(Vec<F>, Vec<F>, Array2<Complex<F>>)>;
 
 /// Statistical analysis operations for audio data.
 ///
@@ -63,7 +70,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Returns the peak (maximum absolute value) in the audio samples.
     ///
@@ -82,7 +89,9 @@ where
     fn max_sample(&self) -> T;
 
     /// Computes the mean (average) of the audio samples.
-    fn mean<F>(&'a self) -> Option<F>
+    ///
+    /// Always returns a value as audio samples cannot not be empty if properly contructed.
+    fn mean<F>(&self) -> F
     where
         F: RealFloat;
 
@@ -90,14 +99,18 @@ where
     ///
     /// RMS is useful for measuring average signal power/energy and
     /// provides a perceptually relevant measure of loudness.
-    fn rms<F>(&self) -> Option<F>
+    ///
+    /// Always returns a value as audio samples cannot not be empty if properly contructed.
+    fn rms<F>(&self) -> F
     where
         F: RealFloat;
 
     /// Computes the statistical variance of the audio samples.
     ///
     /// Variance measures the spread of sample values around the mean.
-    fn variance<F>(&'a self) -> Option<F>
+    ///
+    /// Always returns a value as audio samples cannot not be empty if properly contructed.
+    fn variance<F>(&self) -> F
     where
         F: RealFloat;
 
@@ -105,7 +118,9 @@ where
     ///
     /// Standard deviation is the square root of variance and provides
     /// a measure of signal variability in the same units as the samples.
-    fn std_dev<F>(&'a self) -> Option<F>
+    ///
+    /// Always returns a value as audio samples cannot not be empty if properly contructed.
+    fn std_dev<F>(&self) -> F
     where
         F: RealFloat;
 
@@ -173,6 +188,31 @@ where
         T: ConvertTo<F>;
 }
 
+/// Voice Activity Detection (VAD) operations.
+///
+/// This trait provides frame-based voice/speech activity detection for audio.
+/// It returns a boolean decision per frame (see [`VadConfig`]) and can also
+/// derive contiguous speech regions in sample indices.
+#[cfg(feature = "statistics")]
+pub trait AudioVoiceActivityDetection<'a, T: AudioSample> {
+    /// Compute a per-frame speech activity mask.
+    ///
+    /// The returned vector has one entry per analysis frame.
+    fn voice_activity_mask<F: RealFloat>(
+        &self,
+        config: &VadConfig<F>,
+    ) -> AudioSampleResult<Vec<bool>>;
+
+    /// Compute contiguous speech regions as `(start_sample, end_sample)` pairs.
+    ///
+    /// Indices are in samples-per-channel units (i.e., frame boundaries are derived
+    /// from `config.hop_size` / `config.frame_size`). `end_sample` is exclusive.
+    fn speech_regions<F: RealFloat>(
+        &self,
+        config: &VadConfig<F>,
+    ) -> AudioSampleResult<Vec<(usize, usize)>>;
+}
+
 /// Signal processing operations for audio manipulation.
 ///
 /// This trait provides methods for common audio processing tasks including
@@ -194,11 +234,14 @@ where
     ///
     /// # Arguments
     /// * `min` - Target minimum value
-    /// * `max` - Target maximum value  
+    /// * `max` - Target maximum value
+    /// * `max` - Target maximum value
     /// * `method` - Normalization method to use
     ///
     /// # Errors
     /// Returns an error if min >= max or if the method cannot be applied.
+    #[cfg(feature = "processing")]
+    #[cfg(feature = "processing")]
     fn normalize(&mut self, min: T, max: T, method: NormalizationMethod) -> AudioSampleResult<()>;
 
     /// Scales all audio samples by a constant factor.
@@ -313,11 +356,14 @@ where
     /// - The input audio is empty
     /// - Rubato encounters an internal error
     #[cfg(feature = "resampling")]
-    fn resample(
+    fn resample<F>(
         &self,
         target_sample_rate: usize,
         quality: ResamplingQuality,
-    ) -> AudioSampleResult<Self>;
+    ) -> AudioSampleResult<Self>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 
     /// Resamples audio by a specific ratio.
     ///
@@ -337,7 +383,8 @@ where
     #[cfg(feature = "resampling")]
     fn resample_by_ratio<F>(&self, ratio: F, quality: ResamplingQuality) -> AudioSampleResult<Self>
     where
-        F: RealFloat;
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>;
 }
 
 /// Frequency domain analysis and spectral transformations.
@@ -360,7 +407,11 @@ where
     ///
     /// Returns complex frequency domain representation where the real and
     /// imaginary parts represent the magnitude and phase at each frequency bin.
-    fn fft<F>(&self) -> AudioSampleResult<Vec<Complex<F>>>
+    ///
+    /// The output is a 2D array with shape (1, num_bins) for single-channel audio.
+    /// And (num_channels, num_bins) for multi-channel audio. Each row represents
+    /// the FFT of a channel.
+    fn fft<F>(&self) -> AudioSampleResult<Array2<Complex<F>>>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>;
@@ -374,13 +425,19 @@ where
     ) -> FftInfoResult<F>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
+        T: ConvertTo<F>,
+        i16: ConvertTo<F>,
+        I24: ConvertTo<F>,
+        i32: ConvertTo<F>,
+        f32: ConvertTo<F>,
+        f64: ConvertTo<F>,
+        for<'b> AudioSamples<'b, F>: AudioTypeConversion<'b, F>;
 
     /// Computes the inverse FFT from frequency domain back to time domain.
     ///
     /// # Arguments
     /// * `spectrum` - Complex frequency domain data
-    fn ifft<F>(&self, spectrum: &[Complex<F>]) -> AudioSampleResult<Self>
+    fn ifft<F>(&self, spectrum: &Array2<Complex<F>>) -> AudioSampleResult<Self>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
@@ -413,6 +470,15 @@ where
     /// * `hop_size` - Hop size used in the original STFT
     /// * `window_type` - Window type used in the original STFT
     /// * `sample_rate` - Sample rate for the reconstructed signal
+    /// * `center` - Whether the original signal was centered with padding
+    ///
+    /// # Returns
+    ///
+    /// Reconstructed time-domain audio samples
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reconstruction fails due to mismatched parameters.
     fn istft<F>(
         stft_matrix: &Array2<Complex<F>>,
         hop_size: usize,
@@ -500,6 +566,47 @@ where
     /// # Arguments
     /// * `n_chroma` - Number of chroma bins (typically 12)
     fn chroma<F>(&self, n_chroma: usize) -> AudioSampleResult<Array2<F>>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
+
+    /// Computes chromagram features with configurable parameters and methods.
+    ///
+    /// Chromagram represents the distribution of energy across pitch classes,
+    /// providing a harmonic representation that is invariant to octave shifts.
+    /// This method provides full control over the computation including choice
+    /// between STFT and CQT methods.
+    ///
+    /// # Arguments
+    /// * `cfg` - Configuration specifying method, window parameters, and normalization
+    ///
+    /// # Returns
+    /// A 2D array with shape `(n_chroma, n_frames)` where each column represents
+    /// the chroma vector for one time frame.
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// use audio_samples::{AudioSamples, AudioTransforms};
+    /// use audio_samples::operations::types::{ChromaConfig, ChromaMethod};
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let audio = AudioSamples::from_mono(&[0.1, 0.2, 0.3, 0.4], 44100)?;
+    ///
+    /// // Basic chromagram with STFT
+    /// let config = ChromaConfig::stft();
+    /// let chroma = audio.chromagram::<f64>(&config)?;
+    ///
+    /// // High resolution chromagram
+    /// let config = ChromaConfig::high_resolution();
+    /// let chroma = audio.chromagram::<f64>(&config)?;
+    ///
+    /// // CQT-based chromagram
+    /// let config = ChromaConfig::cqt();
+    /// let chroma = audio.chromagram::<f64>(&config)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn chromagram<F>(&self, cfg: &ChromaConfig<F>) -> AudioSampleResult<Array2<F>>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>;
@@ -1101,14 +1208,14 @@ where
 /// This trait provides methods for applying parametric EQ to audio signals.
 /// Parametric EQ allows precise frequency shaping with adjustable frequency,
 /// gain, and Q (bandwidth) parameters for each band.
-pub trait AudioParametricEq<T: AudioSample>
+pub trait AudioParametricEq<'a, T: AudioSample>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T> + AudioChannelOps<T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T> + AudioChannelOps<T>,
 {
     /// Apply a parametric EQ to the audio signal.
     ///
@@ -1628,7 +1735,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     /// Reverses the order of audio samples.
     ///
@@ -1690,19 +1797,31 @@ where
     ///
     /// # Arguments
     /// * `segment_duration_seconds` - Duration of each segment
-    fn split<'b, F: RealFloat>(
+    fn split<F: RealFloat>(
         &self,
         segment_duration_seconds: F,
-    ) -> AudioSampleResult<Vec<AudioSamples<'b, T>>>;
+    ) -> AudioSampleResult<Vec<AudioSamples<'static, T>>>;
 
-    /// Concatenates multiple audio segments into one.
+    /// Concatenates multiple possible borrowed, audio segments into one.
+    /// Concatenates multiple possible borrowed, audio segments into one.
     ///
     /// All segments must have the same sample rate and channel configuration.
     ///
     /// # Arguments
     /// * `segments` - Audio segments to concatenate in order
-    fn concatenate(segments: &[Self]) -> AudioSampleResult<AudioSamples<'static, T>>
+    fn concatenate<'b>(
+        segments: &'b [AudioSamples<'b, T>],
+    ) -> AudioSampleResult<AudioSamples<'b, T>>
     where
+        'b: 'a,
+        Self: Sized;
+
+    /// Concatenates multiple owned audio segments into one.
+    fn concatenate_owned<'b>(
+        segments: Vec<AudioSamples<'_, T>>,
+    ) -> AudioSampleResult<AudioSamples<'b, T>>
+    where
+        'b: 'a,
         Self: Sized;
 
     /// Mixes multiple audio sources together.
@@ -1797,6 +1916,8 @@ where
     /// );
     /// let gained_audio = audio.perturb(&gain_config)?;
     /// ```
+    #[cfg(feature = "random-generation")]
+    #[cfg(feature = "random-generation")]
     fn perturb<'b, F>(
         &self,
         config: &PerturbationConfig<F>,
@@ -1841,6 +1962,8 @@ where
     /// );
     /// audio.perturb_(&pitch_config)?;
     /// ```
+    #[cfg(feature = "random-generation")]
+    #[cfg(feature = "random-generation")]
     fn perturb_<F>(&mut self, config: &PerturbationConfig<F>) -> AudioSampleResult<()>
     where
         T: ConvertTo<F>,
@@ -1900,6 +2023,40 @@ where
         T: CastFrom<F> + ConvertTo<F>,
         F: RealFloat + CastInto<T> + ConvertTo<T>;
 
+    /// Duplicates mono audio to N channels.
+    ///
+    /// This is a convenience method for creating multi-channel audio from mono
+    /// by copying the same signal to all channels.
+    ///
+    /// # Arguments
+    /// * `n_channels` - Number of output channels (must be >= 1)
+    ///
+    /// # Returns
+    /// Multi-channel audio with the mono signal duplicated to all channels.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The input is not mono
+    /// - `n_channels` is 0
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::AudioChannelOps;
+    /// use ndarray::Array1;
+    ///
+    /// let mono = AudioSamples::new_mono(Array1::from(vec![0.1f32, 0.2, 0.3]), sample_rate!(44100));
+    /// let stereo = mono.duplicate_to_channels(2).unwrap();
+    /// assert_eq!(stereo.num_channels(), 2);
+    ///
+    /// let surround = mono.duplicate_to_channels(6).unwrap(); // 5.1 surround
+    /// assert_eq!(surround.num_channels(), 6);
+    /// ```
+    fn duplicate_to_channels(
+        &self,
+        n_channels: usize,
+    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+
     /// Extracts a specific channel from multi-channel audio.
     ///
     /// # Arguments
@@ -1955,524 +2112,6 @@ where
     fn deinterleave_channels(&self) -> AudioSampleResult<Vec<AudioSamples<'static, T>>>;
 }
 
-/// Operation application and chaining functionality.
-///
-/// This trait provides methods for chaining operations together in fluent interfaces,
-/// applying batches of operations efficiently, and creating reusable operation pipelines.
-/// It enables more ergonomic and performant audio processing workflows.
-pub trait AudioOperationApply<T: AudioSample>
-where
-    Self: Sized,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-{
-    /// Apply a generic operation function to the audio samples.
-    ///
-    /// This method enables functional-style audio processing by accepting
-    /// any function that takes a mutable reference to Self and returns a Result.
-    /// It provides a foundation for building fluent interfaces and operation chains.
-    ///
-    /// # Arguments
-    /// * `operation` - Function that modifies the audio samples
-    ///
-    /// # Returns
-    /// Self for method chaining, or an error if the operation fails
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    ///
-    /// let result = audio
-    ///     .apply(|samples| samples.normalize(T::from_f64(-1.0), T::from_f64(1.0), NormalizationMethod::Peak))?
-    ///     .apply(|samples| samples.scale(T::from_f64(0.8)))?
-    ///     .apply(|samples| samples.low_pass_filter(1000.0))?;
-    /// ```
-    fn apply<F>(mut self, operation: F) -> AudioSampleResult<Self>
-    where
-        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
-    {
-        operation(&mut self)?;
-        Ok(self)
-    }
-
-    /// Apply a fallible operation that may return a new instance.
-    ///
-    /// Some operations naturally return new AudioSamples instances rather than
-    /// modifying in place. This method handles such operations while maintaining
-    /// the fluent interface pattern.
-    ///
-    /// # Arguments
-    /// * `operation` - Function that takes Self and returns a new instance
-    ///
-    /// # Returns
-    /// New AudioSamples instance or an error if the operation fails
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let result = audio
-    ///     .apply_transform(|samples| samples.resample(48000, ResamplingQuality::High))?
-    ///     .apply_transform(|samples| samples.to_mono(MonoConversionMethod::Average))?;
-    /// ```
-    fn apply_transform<F>(self, operation: F) -> AudioSampleResult<Self>
-    where
-        F: FnOnce(Self) -> AudioSampleResult<Self>,
-    {
-        operation(self)
-    }
-
-    /// Apply multiple operations in sequence with short-circuit error handling.
-    ///
-    /// This method applies a vector of operations in order, stopping at the first
-    /// error encountered. It's useful for batch processing and creating reusable
-    /// operation sequences.
-    ///
-    /// # Arguments
-    /// * `operations` - Vector of operations to apply in sequence
-    ///
-    /// # Returns
-    /// Self after all operations, or the first error encountered
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let operations: Vec<Box<dyn FnOnce(&mut AudioSamples<f32>) -> AudioSampleResult<()>>> = vec![
-    ///     Box::new(|s| s.remove_dc_offset()),
-    ///     Box::new(|s| s.normalize(T::from_f64(-1.0), T::from_f64(1.0), NormalizationMethod::RMS)),
-    ///     Box::new(|s| s.low_pass_filter(8000.0)),
-    /// ];
-    /// let result = audio.apply_batch(operations)?;
-    /// ```
-    fn apply_batch<F>(mut self, operations: Vec<F>) -> AudioSampleResult<Self>
-    where
-        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
-    {
-        for operation in operations {
-            operation(&mut self)?;
-        }
-        Ok(self)
-    }
-
-    /// Apply operations conditionally based on a predicate.
-    ///
-    /// This method only applies the operation if the condition evaluates to true.
-    /// It's useful for dynamic processing pipelines where operations may be
-    /// applied based on audio characteristics or user preferences.
-    ///
-    /// # Arguments
-    /// * `condition` - Predicate that determines whether to apply the operation
-    /// * `operation` - Operation to apply if condition is true
-    ///
-    /// # Returns
-    /// Self (possibly modified) for method chaining
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let result = audio
-    ///     .apply_if(|samples| samples.peak() > T::from_f64(0.9), |samples| {
-    ///         samples.apply_limiter(&LimiterConfig::default(), 44100.0)
-    ///     })?
-    ///     .apply_if(|samples| samples.channels() > 2, |samples| {
-    ///         samples.to_stereo(StereoConversionMethod::DownmixCenter)
-    ///     })?;
-    /// ```
-    fn apply_if<P, F>(mut self, condition: P, operation: F) -> AudioSampleResult<Self>
-    where
-        P: FnOnce(&Self) -> bool,
-        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
-    {
-        if condition(&self) {
-            operation(&mut self)?;
-        }
-        Ok(self)
-    }
-
-    /// Try to apply an operation, falling back to a default operation on failure.
-    ///
-    /// This method attempts the primary operation first, and if it fails,
-    /// applies the fallback operation instead. It's useful for robust processing
-    /// pipelines where alternative processing methods should be used if the
-    /// preferred method fails.
-    ///
-    /// # Arguments
-    /// * `primary_op` - Primary operation to attempt
-    /// * `fallback_op` - Fallback operation to use if primary fails
-    ///
-    /// # Returns
-    /// Self after applying either primary or fallback operation
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let result = audio.try_apply_or(
-    ///     |samples| samples.resample(96000, ResamplingQuality::High),
-    ///     |samples| samples.resample(48000, ResamplingQuality::Medium),
-    /// )?;
-    /// ```
-    fn try_apply_or<F1, F2>(mut self, primary_op: F1, fallback_op: F2) -> AudioSampleResult<Self>
-    where
-        F1: FnOnce(&mut Self) -> AudioSampleResult<()>,
-        F2: FnOnce(&mut Self) -> AudioSampleResult<()>,
-    {
-        if primary_op(&mut self).is_err() {
-            fallback_op(&mut self)?;
-        }
-        Ok(self)
-    }
-
-    /// Apply an operation and collect metrics about its execution.
-    ///
-    /// This method wraps operation execution with timing and error tracking,
-    /// useful for performance monitoring and debugging complex processing chains.
-    ///
-    /// # Arguments
-    /// * `operation` - Operation to apply and measure
-    /// * `operation_name` - Human-readable name for the operation
-    ///
-    /// # Returns
-    /// Tuple of (modified_audio, execution_metrics)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let (result, metrics) = audio.apply_with_metrics(
-    ///     |samples| samples.apply_compressor(&config, 44100.0),
-    ///     "compressor"
-    /// )?;
-    /// println!("Operation {} took {:.2}ms", metrics.name, metrics.duration_ms);
-    /// ```
-    fn apply_with_metrics<F, Fl>(
-        mut self,
-        operation: F,
-        operation_name: &str,
-    ) -> AudioSampleResult<(Self, OperationMetrics<Fl>)>
-    where
-        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
-        Fl: RealFloat,
-    {
-        let start = Instant::now();
-        let result = operation(&mut self);
-        let duration = start.elapsed();
-
-        let metrics: OperationMetrics<Fl> = OperationMetrics {
-            name: operation_name.to_string(),
-            duration_ms: to_precision(duration.as_secs_f64() * 1000.0),
-            success: result.is_ok(),
-            error_message: result.as_ref().err().map(|e| e.to_string()),
-        };
-
-        result?;
-        Ok((self, metrics))
-    }
-
-    /// Apply a sequence of operations using a simple closure-based approach.
-    ///
-    /// This method provides a lightweight alternative to full pipeline functionality
-    /// by accepting a closure that can chain multiple operations together.
-    ///
-    /// # Arguments
-    /// * `operations` - Closure that chains operations on the audio samples
-    ///
-    /// # Returns
-    /// Self after applying all operations in the closure
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let result = audio.apply_sequence(|s| {
-    ///     s.apply(|s| s.normalize(T::from_f64(-1.0), T::from_f64(1.0), NormalizationMethod::Peak))?
-    ///      .apply(|s| s.scale(T::from_f64(0.8)))?
-    ///      .apply(|s| s.low_pass_filter(1000.0))
-    /// })?;
-    /// ```
-    fn apply_sequence<F>(self, operations: F) -> AudioSampleResult<Self>
-    where
-        F: FnOnce(Self) -> AudioSampleResult<Self>,
-    {
-        operations(self)
-    }
-}
-
-/// Metrics collected during operation execution.
-///
-/// Provides timing and error information for individual operations,
-/// useful for performance monitoring and debugging.
-#[derive(Debug, Clone)]
-pub struct OperationMetrics<F> {
-    /// Name of the operation that was executed
-    pub name: String,
-    /// Duration of the operation in milliseconds
-    pub duration_ms: F,
-    /// Whether the operation completed successfully
-    pub success: bool,
-    /// Error message if the operation failed, None if successful
-    pub error_message: Option<String>,
-}
-
-/// A reusable pipeline of audio processing operations.
-///
-/// Encapsulates a sequence of operations that can be applied to multiple
-/// AudioSamples instances efficiently. Pipelines can be built using a
-/// fluent interface and provide built-in error handling and metrics.
-pub struct OperationPipeline<T: AudioSample> {
-    /// Name of the operation pipeline
-    pub name: String,
-    operations: Vec<RealtimeOperation<T>>,
-    collect_metrics: bool,
-}
-
-impl<T: AudioSample> OperationPipeline<T> {
-    /// Create a new empty operation pipeline.
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            operations: Vec::new(),
-            collect_metrics: false,
-        }
-    }
-
-    /// Add an operation to the pipeline.
-    ///
-    /// # Arguments
-    /// * `operation` - Operation function to add to the pipeline
-    pub fn add_operation<F>(mut self, operation: F) -> Self
-    where
-        F: Fn(&mut AudioSamples<T>) -> AudioSampleResult<()> + Send + Sync + 'static,
-    {
-        self.operations.push(Box::new(operation));
-        self
-    }
-
-    /// Enable metrics collection for this pipeline.
-    pub const fn with_metrics(mut self) -> Self {
-        self.collect_metrics = true;
-        self
-    }
-
-    /// Apply the pipeline to audio samples.
-    ///
-    /// # Arguments
-    /// * `audio` - Audio samples to process
-    ///
-    /// # Returns
-    /// Processed audio samples or error if any operation fails
-    pub fn apply<'a>(
-        &'a self,
-        mut audio: AudioSamples<'a, T>,
-    ) -> AudioSampleResult<AudioSamples<'a, T>> {
-        for (i, operation) in self.operations.iter().enumerate() {
-            if self.collect_metrics {
-                let start = Instant::now();
-                let result = operation(&mut audio);
-                let duration = start.elapsed();
-
-                if let Err(e) = &result {
-                    eprintln!(
-                        "Pipeline '{}' operation {} failed after {:.2}ms: {}",
-                        self.name,
-                        i,
-                        duration.as_secs_f64() * 1000.0,
-                        e
-                    );
-                    return result.map(|_| audio);
-                }
-            } else {
-                operation(&mut audio)?;
-            }
-        }
-        Ok(audio)
-    }
-
-    /// Get the number of operations in this pipeline.
-    pub fn operation_count(&self) -> usize {
-        self.operations.len()
-    }
-
-    /// Create a copy of this pipeline with a new name.
-    pub fn clone_with_name(&self, new_name: String) -> Self {
-        Self {
-            name: new_name,
-            operations: Vec::new(), // Note: Cannot clone Fn trait objects
-            collect_metrics: self.collect_metrics,
-        }
-    }
-}
-
-/// Real-time operation processing functionality.
-///
-/// This trait provides methods for applying operations in real-time scenarios
-/// where low-latency processing is critical, such as live audio processing,
-/// streaming, and interactive applications.
-pub trait AudioRealtimeOps<T: AudioSample>: AudioOperationApply<T>
-where
-    Self: Sized,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-{
-    /// Apply operations with real-time constraints.
-    ///
-    /// This method applies operations with timing constraints suitable for
-    /// real-time processing. Operations that take too long are skipped or
-    /// simplified to maintain consistent throughput.
-    ///
-    /// # Arguments
-    /// * `operations` - Queue of operations to apply
-    /// * `max_processing_time_ms` - Maximum time budget per processing cycle
-    ///
-    /// # Returns
-    /// Self after processing, with metrics about completed/skipped operations
-    fn apply_realtime<Fun, F>(
-        mut self,
-        mut operations: VecDeque<Fun>,
-        max_processing_time_ms: F,
-    ) -> AudioSampleResult<(Self, RealtimeMetrics<F>)>
-    where
-        Fun: FnOnce(&mut Self) -> AudioSampleResult<()>,
-        F: RealFloat,
-    {
-        let start_time = Instant::now();
-        let max_duration = Duration::from_secs_f64(
-            max_processing_time_ms.to_f64().expect("Should be safe") / 1000.0,
-        );
-
-        let mut completed_operations = 0;
-        let mut skipped_operations = 0;
-
-        while let Some(operation) = operations.pop_front() {
-            if start_time.elapsed() >= max_duration {
-                skipped_operations = operations.len() + 1;
-                break;
-            }
-
-            if operation(&mut self).is_err() {
-                // In real-time processing, we continue despite errors
-                // to maintain audio continuity
-                continue;
-            }
-
-            completed_operations += 1;
-        }
-
-        let metrics: RealtimeMetrics<F> = RealtimeMetrics {
-            total_processing_time_ms: to_precision::<F, _>(
-                start_time.elapsed().as_secs_f64() * 1000.0,
-            ),
-            completed_operations,
-            skipped_operations,
-            target_time_ms: max_processing_time_ms,
-        };
-
-        Ok((self, metrics))
-    }
-
-    /// Apply operations with adaptive quality based on available processing time.
-    ///
-    /// This method implements adaptive processing where operation quality
-    /// is automatically adjusted based on available processing time and
-    /// system load. High-quality operations are used when time permits,
-    /// with graceful degradation under high load.
-    ///
-    /// # Arguments
-    /// * `high_quality_op` - High-quality operation (slower)
-    /// * `medium_quality_op` - Medium-quality operation (moderate speed)
-    /// * `low_quality_op` - Low-quality operation (fastest)
-    /// * `time_budget_ms` - Available processing time
-    ///
-    /// # Returns
-    /// Self after applying the appropriate quality operation
-    fn apply_adaptive_quality<F1, F2, F3, Fl: RealFloat>(
-        mut self,
-        high_quality_op: F1,
-        medium_quality_op: F2,
-        low_quality_op: F3,
-        time_budget_ms: Fl,
-    ) -> AudioSampleResult<Self>
-    where
-        F1: FnOnce(&mut Self) -> AudioSampleResult<()>,
-        F2: FnOnce(&mut Self) -> AudioSampleResult<()>,
-        F3: FnOnce(&mut Self) -> AudioSampleResult<()>,
-    {
-        let _start_time = std::time::Instant::now();
-
-        // Try high quality first if we have generous time budget
-        if time_budget_ms > to_precision::<Fl, _>(10.0) && high_quality_op(&mut self).is_ok() {
-            return Ok(self);
-        }
-
-        // Fall back to medium quality
-        if time_budget_ms > to_precision::<Fl, _>(5.0) && medium_quality_op(&mut self).is_ok() {
-            return Ok(self);
-        }
-
-        // Last resort: low quality operation
-        low_quality_op(&mut self)?;
-        Ok(self)
-    }
-
-    /// Buffer operations for batch processing to improve efficiency.
-    ///
-    /// This method collects operations in a buffer and applies them in
-    /// optimized batches. This can improve cache efficiency and reduce
-    /// overhead for certain types of operations.
-    ///
-    /// # Arguments
-    /// * `operation` - Operation to add to the buffer
-    /// * `buffer` - Operation buffer (shared between calls)
-    /// * `batch_size` - Number of operations to collect before processing
-    ///
-    /// # Returns
-    /// Self, possibly modified if buffer was flushed
-    fn buffer_operation<F>(
-        self,
-        operation: F,
-        buffer: &mut Vec<F>,
-        batch_size: usize,
-    ) -> AudioSampleResult<Self>
-    where
-        F: FnOnce(&mut Self) -> AudioSampleResult<()>,
-    {
-        buffer.push(operation);
-
-        if buffer.len() >= batch_size {
-            let operations = std::mem::take(buffer);
-            return self.apply_batch(operations);
-        }
-
-        Ok(self)
-    }
-}
-
-/// Metrics for real-time audio processing.
-#[derive(Debug, Clone)]
-pub struct RealtimeMetrics<F> {
-    /// Total time spent processing audio in milliseconds
-    pub total_processing_time_ms: F,
-    /// Number of operations that completed within the time constraint
-    pub completed_operations: usize,
-    /// Number of operations that were skipped due to time constraints
-    pub skipped_operations: usize,
-    /// Target processing time in milliseconds to maintain real-time performance
-    pub target_time_ms: F,
-}
-
-impl<F: RealFloat> RealtimeMetrics<F> {
-    /// Check if processing met the real-time constraints.
-    pub fn is_realtime(&self) -> bool {
-        self.total_processing_time_ms <= self.target_time_ms && self.skipped_operations == 0
-    }
-
-    /// Get the processing efficiency (0.0 to 1.0).
-    pub fn efficiency(&self) -> F {
-        if self.target_time_ms > F::zero() {
-            (self.target_time_ms - self.total_processing_time_ms).max(F::zero())
-                / self.target_time_ms
-        } else {
-            F::zero()
-        }
-    }
-}
-
 /// Utilities for plotting audio data.
 #[cfg(feature = "plotting")]
 pub trait AudioPlottingUtils<T: AudioSample>
@@ -2492,73 +2131,386 @@ where
     fn frequency_axis(&self) -> Vec<T>;
     /// Create a quick analysis plot with waveform and spectrum
     #[cfg(feature = "spectral-analysis")]
-    fn quick_plot<F>(&self) -> super::PlotResult<()>
+    fn quick_plot<F, P: AsRef<Path>>(&self, save_to: Option<P>) -> super::PlotResult<()>
     where
-        Self: crate::operations::plotting::AudioPlotBuilders<T>,
+        Self: AudioPlotBuilders<T>,
         F: RealFloat + ConvertTo<T>,
         T: CastFrom<F> + ConvertTo<F>,
     {
+        use std::path::PathBuf;
+
+        use crate::operations::{LayoutConfig, PlotComposer};
+
         let waveform = self.waveform_plot::<F>(None)?;
         let spectrum = self.power_spectrum_plot::<F>(None, None, None, None, None)?;
 
-        let plot = crate::operations::plotting::PlotComposer::new()
+        let plot = PlotComposer::new()
             .add_element(waveform)
             .add_element(spectrum)
-            .with_layout(crate::operations::plotting::LayoutConfig::VerticalStack)
+            .with_layout(LayoutConfig::VerticalStack)
             .with_title("Audio Analysis");
 
-        plot.render_to_file("audio_analysis.png")
+        match save_to {
+            None => plot.show(true),
+            Some(p) => {
+                let out_path: PathBuf = p.as_ref().into();
+                plot.render_to_file(out_path, true)
+            }
+        }
     }
 }
 
-/// Unified trait that combines all audio processing capabilities.
+/// Serialization and deserialization operations for audio samples.
 ///
-/// This trait extends all the focused traits, providing a single interface
-/// for comprehensive audio processing. Use individual traits when you only
-/// need specific functionality for better compile times and clearer dependencies.
+/// This trait provides methods for saving and loading AudioSamples to/from
+/// various file formats including text-based formats (CSV, JSON, TXT),
+/// binary formats (NumPy, MessagePack, CBOR), and compressed formats.
 ///
-/// This trait is automatically implemented for any type that implements
-/// all the constituent traits.
-// Without spectral analysis
-#[cfg(not(feature = "spectral-analysis"))]
-pub trait AudioSamplesOperations<T: AudioSample>:
-    AudioStatistics<T>
-    + AudioProcessing<T>
-    + AudioDynamicRange<T>
-    + for<'a> AudioEditing<'a, T>
-    + AudioChannelOps<T>
-    + for<'a> AudioTypeConversion<'a, T>
-    + AudioPitchAnalysis<T>
-    + AudioIirFiltering<T>
-    + AudioParametricEq<T>
-    + AudioOperationApply<T>
-    + AudioRealtimeOps<T>
+/// The focus is on data analysis and interchange formats rather than
+/// traditional audio file formats like WAV or MP3. This enables seamless
+/// integration with data science workflows, Python NumPy/SciPy, and other
+/// audio analysis tools.
+///
+/// # Format Support
+///
+/// - **Text formats**: CSV, JSON, plain text with configurable delimiters
+/// - **Binary formats**: NumPy (.npy), MessagePack, CBOR, custom binary
+/// - **Compressed formats**: NumPy compressed (.npz), gzip compression
+/// - **Metadata preservation**: Sample rate, channel information, custom attributes
+///
+/// # Example Usage
+///
+/// ```rust,ignore
+/// use audio_samples::{AudioSamples, operations::*};
+/// use audio_samples::operations::types::{SerializationFormat, SerializationConfig};
+///
+/// let audio = AudioSamples::new_mono(samples, 44100);
+///
+/// // Save to JSON with metadata
+/// audio.save_to_file("audio_data.json")?;
+///
+/// // Save to NumPy format
+/// let config = SerializationConfig::numpy();
+/// audio.save_with_config("audio_data.npy", &config)?;
+///
+/// // Load from file with automatic format detection
+/// let loaded = AudioSamples::load_from_file("audio_data.json")?;
+/// ```
+#[cfg(feature = "serialization")]
+pub trait AudioSamplesSerialise<T: AudioSample>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
+    /// Save audio samples to a file with automatic format detection from extension.
+    ///
+    /// The file format is automatically determined based on the file extension:
+    /// - `.json` → JSON format with metadata
+    /// - `.csv` → CSV format with headers
+    /// - `.npy` → NumPy binary format
+    /// - `.npz` → NumPy compressed format
+    /// - `.txt` → Plain text with space delimiters
+    /// - `.bin` → Custom binary format
+    /// - `.msgpack` → MessagePack format
+    /// - `.cbor` → CBOR format
+    ///
+    /// # Arguments
+    /// * `path` - File path with extension indicating desired format
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Errors
+    /// - `SerializationError::UnsupportedFormat` if extension is not recognized
+    /// - `SerializationError::IoError` for file I/O failures
+    /// - `SerializationError::SerializationFailed` for format-specific errors
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// audio.save_to_file("data/audio_analysis.json")?;
+    /// audio.save_to_file("output.npy")?;
+    /// ```
+    fn save_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> AudioSampleResult<()>;
+
+    /// Save audio samples with explicit format configuration.
+    ///
+    /// Provides fine-grained control over the serialization process including
+    /// precision, compression, metadata inclusion, and format-specific options.
+    ///
+    /// # Arguments
+    /// * `path` - Output file path
+    /// * `config` - Serialization configuration specifying format and options
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let config = SerializationConfig::json()
+    ///     .with_precision(6)
+    ///     .with_metadata(true);
+    /// audio.save_with_config("analysis.json", &config)?;
+    /// ```
+    fn save_with_config<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        config: &crate::operations::types::SerializationConfig<f64>,
+    ) -> AudioSampleResult<()>;
+
+    /// Load audio samples from a file with automatic format detection.
+    ///
+    /// Attempts to detect the file format using:
+    /// 1. File extension hints
+    /// 2. Magic number/header detection
+    /// 3. Content analysis for text formats
+    ///
+    /// # Arguments
+    /// * `path` - Input file path
+    ///
+    /// # Returns
+    /// New AudioSamples instance loaded from the file
+    ///
+    /// # Errors
+    /// - `SerializationError::FormatDetectionFailed` if format cannot be determined
+    /// - `SerializationError::IoError` for file I/O failures
+    /// - `SerializationError::DeserializationFailed` for parsing errors
+    /// - `SerializationError::InvalidHeader` for corrupted files
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let audio: AudioSamples<f32> = AudioSamples::load_from_file("data.json")?;
+    /// ```
+    fn load_from_file<P: AsRef<std::path::Path>>(
+        path: P,
+    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+
+    /// Load audio samples with explicit format configuration.
+    ///
+    /// Uses the specified configuration to parse the file, bypassing automatic
+    /// format detection. Useful when the automatic detection fails or when
+    /// specific parsing options are required.
+    ///
+    /// # Arguments
+    /// * `path` - Input file path
+    /// * `config` - Deserialization configuration specifying format and options
+    ///
+    /// # Returns
+    /// New AudioSamples instance loaded from the file
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let config = SerializationConfig::csv();
+    /// let audio = AudioSamples::load_with_config("data.csv", &config)?;
+    /// ```
+    fn load_with_config<P: AsRef<std::path::Path>>(
+        path: P,
+        config: &crate::operations::types::SerializationConfig<f64>,
+    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+
+    /// Serialize audio samples to bytes in memory.
+    ///
+    /// Converts the audio data to the specified format and returns the
+    /// serialized bytes. Useful for network transmission, caching, or
+    /// embedding in other data structures.
+    ///
+    /// # Arguments
+    /// * `format` - Target serialization format
+    ///
+    /// # Returns
+    /// Vector of bytes containing the serialized audio data
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let json_bytes = audio.serialize_to_bytes(SerializationFormat::Json)?;
+    /// let numpy_bytes = audio.serialize_to_bytes(SerializationFormat::Numpy)?;
+    /// ```
+    fn serialize_to_bytes(
+        &self,
+        format: crate::operations::types::SerializationFormat,
+    ) -> AudioSampleResult<Vec<u8>>;
+
+    /// Deserialize audio samples from bytes in memory.
+    ///
+    /// Parses audio data from the provided byte array using the specified format.
+    /// The inverse operation of `serialize_to_bytes`.
+    ///
+    /// # Arguments
+    /// * `data` - Byte array containing serialized audio data
+    /// * `format` - Format of the serialized data
+    ///
+    /// # Returns
+    /// New AudioSamples instance deserialized from the bytes
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let audio = AudioSamples::deserialize_from_bytes(&bytes, SerializationFormat::Json)?;
+    /// ```
+    fn deserialize_from_bytes(
+        data: &[u8],
+        format: crate::operations::types::SerializationFormat,
+    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+
+    /// Get an estimate of the serialized size for a format.
+    ///
+    /// Provides an approximation of how many bytes the audio data will
+    /// occupy when serialized to the specified format. Useful for memory
+    /// planning and storage estimation.
+    ///
+    /// # Arguments
+    /// * `format` - Target serialization format
+    ///
+    /// # Returns
+    /// Estimated size in bytes
+    ///
+    /// # Note
+    /// The estimate may not be exact, especially for compressed formats
+    /// where the final size depends on data compressibility.
+    fn estimate_serialized_size(
+        &self,
+        format: crate::operations::types::SerializationFormat,
+    ) -> AudioSampleResult<usize>;
+
+    /// List all supported formats for serialization.
+    ///
+    /// Returns a vector of all serialization formats that are available
+    /// for saving audio data. The availability depends on enabled cargo features.
+    ///
+    /// # Returns
+    /// Vector of supported serialization formats
+    fn supported_serialization_formats() -> Vec<crate::operations::types::SerializationFormat>;
+
+    /// List all supported formats for deserialization.
+    ///
+    /// Returns a vector of all formats that can be loaded. Usually identical
+    /// to serialization formats, but may differ if some formats are write-only.
+    ///
+    /// # Returns
+    /// Vector of supported deserialization formats
+    fn supported_deserialization_formats() -> Vec<crate::operations::types::SerializationFormat>;
+
+    /// Auto-detect format from file extension or magic bytes.
+    ///
+    /// Analyzes the file to determine its format using:
+    /// 1. File extension mapping
+    /// 2. Magic number detection in file headers
+    /// 3. Content structure analysis for text formats
+    ///
+    /// # Arguments
+    /// * `path` - File path to analyze
+    ///
+    /// # Returns
+    /// Detected serialization format
+    ///
+    /// # Errors
+    /// - `SerializationError::FormatDetectionFailed` if format cannot be determined
+    /// - `SerializationError::IoError` if file cannot be accessed
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let format = AudioSamples::<f32>::detect_format("data.json")?;
+    /// assert_eq!(format, SerializationFormat::Json);
+    /// ```
+    fn detect_format<P: AsRef<std::path::Path>>(
+        path: P,
+    ) -> AudioSampleResult<crate::operations::types::SerializationFormat>;
+
+    /// Validate serialization round-trip accuracy.
+    ///
+    /// Serializes the audio data to the specified format, then deserializes
+    /// it back and compares with the original. Useful for testing data integrity
+    /// and format compatibility.
+    ///
+    /// # Arguments
+    /// * `format` - Format to test
+    /// * `tolerance` - Acceptable difference threshold for floating-point comparison
+    ///
+    /// # Returns
+    /// Result indicating whether round-trip was successful within tolerance
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// audio.validate_round_trip(SerializationFormat::Json, 1e-6)?;
+    /// ```
+    fn validate_round_trip(
+        &self,
+        format: crate::operations::types::SerializationFormat,
+        tolerance: f64,
+    ) -> AudioSampleResult<()>;
+
+    /// Export metadata as a separate JSON file.
+    ///
+    /// Saves audio metadata (sample rate, channel count, duration, custom attributes)
+    /// to a JSON file alongside the main audio data. Useful when using binary
+    /// formats that don't support metadata natively.
+    ///
+    /// # Arguments
+    /// * `path` - Output file path for metadata JSON
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// audio.save_to_file("data.npy")?;
+    /// audio.export_metadata("data_metadata.json")?;
+    /// ```
+    fn export_metadata<P: AsRef<std::path::Path>>(&self, path: P) -> AudioSampleResult<()>;
+
+    /// Import metadata from a JSON file.
+    ///
+    /// Loads metadata from a JSON file and applies it to the current AudioSamples
+    /// instance. Useful when loading binary formats that don't preserve metadata.
+    ///
+    /// # Arguments
+    /// * `path` - Input file path for metadata JSON
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let mut audio = AudioSamples::load_from_file("data.npy")?;
+    /// audio.import_metadata("data_metadata.json")?;
+    /// ```
+    fn import_metadata<P: AsRef<std::path::Path>>(&mut self, path: P) -> AudioSampleResult<()>;
 }
 
-// With spectral analysis
-#[cfg(feature = "spectral-analysis")]
-/// Comprehensive trait combining all audio processing operations (spectral analysis version).
-pub trait AudioSamplesOperations<T: AudioSample>:
-    for<'a> AudioStatistics<'a, T>
-    + AudioProcessing<T>
-    + AudioTransforms<T>
-    + AudioDynamicRange<T>
-    + for<'a> AudioEditing<'a, T>
-    + AudioChannelOps<T>
-    + for<'a> AudioTypeConversion<'a, T>
-    + AudioPitchAnalysis<T>
-    + AudioIirFiltering<T>
-    + AudioParametricEq<T>
-    + AudioOperationApply<T>
-    + AudioRealtimeOps<T>
+/// Audio decomposition operations for separating signals into components.
+///
+/// This trait provides methods for separating audio signals into different
+/// components based on their spectral or temporal characteristics. These
+/// decomposition techniques are fundamental in music information retrieval,
+/// audio analysis, and preprocessing for machine learning applications.
+///
+/// # Available Decomposition Methods
+///
+/// - **HPSS (Harmonic/Percussive Source Separation)**: Separates audio into
+///   harmonic (tonal, sustained) and percussive (transient, attack) components
+///   using STFT magnitude median filtering.
+///
+/// # Example Usage
+///
+/// ```rust,ignore
+/// use audio_samples::{AudioSamples, operations::AudioDecomposition};
+/// use audio_samples::operations::types::HpssConfig;
+/// use ndarray::array;
+///
+/// let audio = AudioSamples::new_mono(samples, 44100);
+/// let config = HpssConfig::new();
+///
+/// // Separate into harmonic and percussive components
+/// let (harmonic, percussive) = audio.hpss(&config)?;
+///
+/// // Process components separately
+/// let drums_isolated = percussive.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
+/// let melody_isolated = harmonic.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
+/// ```
+#[cfg(feature = "hpss")]
+pub trait AudioDecomposition<T: AudioSample>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -2567,53 +2519,67 @@ where
     f64: ConvertTo<T>,
     for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
-}
-
-// Blanket implementation for the unified trait (without spectral analysis)
-#[cfg(not(feature = "spectral-analysis"))]
-impl<T: AudioSample, A> AudioSamplesOperations<T> for A
-where
-    A: for<'a> AudioStatistics<'a, T>
-        + AudioProcessing<T>
-        + AudioDynamicRange<T>
-        + for<'a> AudioEditing<'a, T>
-        + AudioChannelOps<T>
-        + for<'a> AudioTypeConversion<'a, T>
-        + AudioPitchAnalysis<T>
-        + AudioIirFiltering<T>
-        + AudioParametricEq<T>
-        + AudioOperationApply<T>
-        + AudioRealtimeOps<T>,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
-{
-}
-
-// Blanket implementation for the unified trait (with spectral analysis)
-#[cfg(feature = "spectral-analysis")]
-impl<T: AudioSample, A> AudioSamplesOperations<T> for A
-where
-    A: for<'a> AudioStatistics<'a, T>
-        + AudioProcessing<T>
-        + AudioTransforms<T>
-        + AudioDynamicRange<T>
-        + for<'a> AudioEditing<'a, T>
-        + AudioChannelOps<T>
-        + for<'a> AudioTypeConversion<'a, T>
-        + AudioPitchAnalysis<T>
-        + AudioIirFiltering<T>
-        + AudioParametricEq<T>
-        + AudioOperationApply<T>
-        + AudioRealtimeOps<T>,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
-{
+    /// Separate audio into harmonic and percussive components using HPSS.
+    ///
+    /// Harmonic/Percussive Source Separation (HPSS) uses Short-Time Fourier Transform
+    /// (STFT) magnitude median filtering to separate audio signals based on their
+    /// spectral characteristics:
+    ///
+    /// - **Harmonic components**: Sustained tonal content (vocals, sustained instruments)
+    /// - **Percussive components**: Transient content (drums, attacks, onsets)
+    ///
+    /// The algorithm works by:
+    /// 1. Computing the STFT magnitude spectrogram
+    /// 2. Applying median filtering along time axis (enhances harmonic content)
+    /// 3. Applying median filtering along frequency axis (enhances percussive content)
+    /// 4. Creating separation masks based on the filtered spectrograms
+    /// 5. Reconstructing time-domain signals using inverse STFT
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - HPSS configuration parameters controlling window size,
+    ///   hop size, median filter sizes, and mask softness
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing `(harmonic_component, percussive_component)` as separate
+    /// AudioSamples instances with the same sample rate as the input.
+    ///
+    /// # Errors
+    ///
+    /// - `AudioSampleError::Parameter` if configuration parameters are invalid
+    /// - `AudioSampleError::Parameter` if signal is too short for the specified window size
+    /// - `AudioSampleError::Layout` if STFT/ISTFT operations fail
+    ///
+    /// # Performance Notes
+    ///
+    /// - Computational complexity is O(N log N) due to FFT operations
+    /// - Memory usage scales with window size and signal length
+    /// - Consider using smaller window/hop sizes for real-time applications
+    /// - Enable `parallel-processing` feature for multi-threaded acceleration
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use audio_samples::operations::{AudioDecomposition, HpssConfig};
+    ///
+    /// let config = HpssConfig::musical(); // Optimized for musical content
+    /// let (harmonic, percussive) = audio.hpss(&config)?;
+    ///
+    /// // Harmonic component contains vocals, sustained instruments
+    /// // Percussive component contains drums, attacks, transients
+    /// ```
+    ///
+    /// # References
+    ///
+    /// - Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering"
+    /// - Müller, M. (2015). "Fundamentals of Music Processing", Section 8.4
+    fn hpss<F: RealFloat>(
+        &self,
+        config: &crate::operations::types::HpssConfig<F>,
+    ) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)>
+    where
+        F: FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
+        for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T> + AudioTransforms<T>;
 }

@@ -8,7 +8,7 @@ readme = "README.md"
 homepage = "https://github.com/jmg049/audio_samples"
 repository = "https://github.com/jmg049/audio_samples"
 documentation = "https://docs.rs/audio_samples"
-description = "A high-performance audio processing library for Rust"
+description = "A typed audio processing library for Rust that treats audio as a first-class, invariant-preserving object rather than an unstructured numeric buffer."
 
 keywords = ["audio", "dsp", "api"]
 categories = ["encoding", "multimedia", "science"]
@@ -24,14 +24,21 @@ ndarray = "0.17.1"
 num-traits = "0.2.19"
 thiserror = "2.0.12"
 tracing = "0.1.41"
-approx_eq = "0.1.8"
 num-complex = "0.4"
-i24 = {version = "2.2.5", features = ["alloc","num-cast", "ndarray" ,"std", "serde"]}
+i24 = {version = "2.2.7", features = ["alloc","num-cast", "ndarray" ,"std", "serde"]}
+
 serde = "1.0.219"
 lazy_static = "1.4"
-num-format = "0.4.4"
-rand = "0.9.2"
-anyhow = "1.0.100"
+num-format = { version = "0.4.4", optional = true }
+rand = { version = "0.9.2", optional = true }
+
+# Serialization dependencies (gated behind "serialization" feature)
+serde_json = { version = "1.0", optional = true }
+csv = { version = "1.3", optional = true }
+rmp-serde = { version = "1.3", optional = true }
+serde_cbor = { version = "0.11", optional = true }
+flate2 = { version = "1.0", optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
 
 # FFT dependencies (gated behind "fft" feature)
 rustfft = { version = "6.2", optional = true }
@@ -43,7 +50,7 @@ intel-mkl-src = { version = "0.8.0", optional = true }
 plotly = { version = "0.13.5", optional = true }
 # plotview-rs = { path = "/home/jmg/code/rust/plotview-rs/", optional = true }
 plotly_static = { version = "0.1.0", features = ["chromedriver", "webdriver_download"], optional = true }
-serde_json = { version = "1.0", optional = true }
+html_view = { version = "0.1.0", optional = true }
 
 # Resampling dependencies (gated behind "resampling" feature)
 rubato = { version = "0.16.2", optional = true }
@@ -59,31 +66,49 @@ paste = "1.0.15"
 # Minimal core (no heavy dependencies)
 default = ["full"]
 
-# Core audio operations (no FFT/plotting/resampling)
-core-ops = []
+# Core operation categories
+statistics = []                   # Basic stats: peak, rms, mean
+processing = []                   # Basic processing: normalize, scale, clip
+editing = ["random-generation"]   # Time operations: trim, pad, reverse (includes noise)
+channels = []                     # Channel operations: mono/stereo conversion
 
-# All 
+# Advanced categories
+statistics-advanced = ["statistics", "fft"]      # Autocorr, spectral analysis
+processing-advanced = ["processing"]             # Filtering, compression
+
+# Minimal focused API
+minimal = ["statistics", "processing"]
+
+# Core audio operations (no FFT/plotting/resampling)
+core-ops = ["statistics", "processing", "editing", "channels"]
+
+fixed-size-audio = [] # Support for fixed-size audio buffers (no heap allocation)
+# All
 full = [
     "core-ops",
     "fft",
     "plotting",
     "resampling",
+    "serialization",
     "static-plots",
     "parallel-processing",
-    "simd",
     "mkl",
     "progress-tracking",
-    "beat-detection"
+    "beat-detection",
+    "chroma"
 ]
 
 # Major functionality groups
 fft = ["core-ops", "dep:rustfft", "dep:realfft"]
-plotting = ["core-ops", "dep:plotly"]
+plotting = ["core-ops", "dep:plotly", "dep:html_view"]
 resampling = ["core-ops", "dep:rubato"]
+serialization = ["core-ops", "dep:serde_json", "dep:csv", "dep:rmp-serde", "dep:serde_cbor", "dep:flate2", "dep:chrono"]
 
 # FFT-dependent features (require fft)
 spectral-analysis = ["fft"]
 beat-detection = ["fft", "spectral-analysis"]
+hpss = ["spectral-analysis"]
+chroma = ["spectral-analysis"]
 
 # Plotting sub-features (require plotting)
 static-plots = ["plotting", "dep:plotly_static", "dep:serde_json"]
@@ -94,7 +119,94 @@ simd = ["dep:wide"]
 mkl = ["fft", "dep:fftw-sys", "dep:intel-mkl-src"]
 progress-tracking = ["dep:indicatif"]
 
+# Utility features
+formatting = ["dep:num-format"]
+random-generation = ["dep:rand"]
+utilities-full = ["formatting", "random-generation"]
+
 # Convenience feature groups
 full-analysis = ["spectral-analysis", "beat-detection", "plotting"]
 operations = ["core-ops", "spectral-analysis", "plotting", "resampling"]
 
+python = ["i24/pyo3"]
+
+[dev-dependencies]
+approx_eq = "0.1.8"
+clap = { version = "4.5.53", features = ["derive"] }
+dtmf_tones = "1.0.1"
+rand = "0.9"
+criterion = { version = "0.8.1", features = ["html_reports"] }
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }
+
+[[bench]]
+name = "beats"
+path = "benches/beats.rs"
+harness = false
+
+[[bench]]
+name = "channels"
+path = "benches/channels.rs"
+harness = false
+
+[[bench]]
+name = "conversion"
+path = "benches/conversion.rs"
+harness = false
+
+[[bench]]
+name = "detection"
+path = "benches/detection.rs"
+harness = false
+
+[[bench]]
+name = "editing"
+path = "benches/editing.rs"
+harness = false
+
+[[bench]]
+name = "iir_filtering"
+path = "benches/iir_filtering.rs"
+harness = false
+
+[[bench]]
+name = "onset"
+path = "benches/onset.rs"
+harness = false
+
+[[bench]]
+name = "parametric_eq"
+path = "benches/parametric_eq.rs"
+harness = false
+
+[[bench]]
+name = "processing"
+path = "benches/processing.rs"
+harness = false
+
+[[bench]]
+name = "resampling"
+path = "benches/resampling.rs"
+harness = false
+
+[[bench]]
+name = "serialization"
+path = "benches/serialization.rs"
+harness = false
+
+[[bench]]
+name = "statistics"
+path = "benches/statistics.rs"
+harness = false
+
+[[bench]]
+name = "transforms"
+path = "benches/transforms.rs"
+harness = false
+
+[[bench]]
+name = "vad"
+path = "benches/vad.rs"
+harness = false

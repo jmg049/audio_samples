@@ -505,7 +505,7 @@ impl<F: RealFloat> Default for OnsetConfig<F> {
 
 /// Configuration for beat tracking overlays
 #[derive(Debug, Clone)]
-pub struct BeatConfig<F: RealFloat> {
+pub struct BeatPlotConfig<F: RealFloat> {
     /// Style for beat markers
     pub marker_style: MarkerStyle<F>,
     /// Optional line style for connecting beat markers
@@ -514,7 +514,27 @@ pub struct BeatConfig<F: RealFloat> {
     pub show_tempo: bool,
 }
 
-impl<F: RealFloat> Default for BeatConfig<F> {
+impl<F: RealFloat> BeatPlotConfig<F> {
+    /// Creates a new BeatConfig with specified parameters.
+    ///
+    /// # Arguments
+    /// * `marker_style` - Style for beat markers
+    /// * `line_style` - Optional line style for connecting beat markers
+    /// * `show_tempo` - Whether to display tempo information
+    pub const fn new(
+        marker_style: MarkerStyle<F>,
+        line_style: Option<LineStyle<F>>,
+        show_tempo: bool,
+    ) -> Self {
+        Self {
+            marker_style,
+            line_style,
+            show_tempo,
+        }
+    }
+}
+
+impl<F: RealFloat> Default for BeatPlotConfig<F> {
     fn default() -> Self {
         Self {
             marker_style: MarkerStyle {

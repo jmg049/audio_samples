@@ -1,5 +1,4 @@
 #![cfg_attr(feature = "simd", feature(portable_simd))]
-#![feature(const_type_name)]
 // Correctness and logic
 #![warn(clippy::unit_cmp)] // Detects comparing unit types
 #![warn(clippy::match_same_arms)]
@@ -58,82 +57,55 @@
 //!
 //! ```toml
 //! [dependencies]
-//! audio_samples = { version = "0.10.0", features = ["fft", "plotting"] }
+//! audio_samples = { version = "*", features = ["fft", "plotting"] }
 //! ```
 //!
 //! Or enable everything:
 //!
 //! ```toml
 //! [dependencies]
-//! audio_samples = { version = "0.10.0", features = ["full"] }
+//! audio_samples = { version = "*", features = ["full"] }
 //! ```
 //!
 //! ## Features
 //!
 //! The library uses a modular feature system to keep dependencies minimal:
 //!
-//! - **`core-ops`** (default) - Basic audio operations and statistics
-//! - **`fft`** - Fast Fourier Transform and spectral analysis
-//! - **`plotting`** - Audio visualization capabilities
-//! - **`resampling`** - High-quality audio resampling
-//! - **`parallel-processing`** - Multi-threaded processing with Rayon
-//! - **`simd`** - SIMD acceleration for supported operations
-//! - **`beat-detection`** - Tempo and beat tracking (requires `fft`)
-//! - **`full`** - Enables all features
+//! - `statistics`: statistics utilities (peak, RMS, variance, etc.)
+//! - `processing`: processing operations (normalize, scale, clip, etc.)
+//! - `editing`: time-domain editing operations (trim, pad, reverse, etc.)
+//! - `channels`: channel operations (mono/stereo conversion)
+//! - `fft`: FFT-backed transforms (adds FFT dependencies)
+//! - `plotting`: plotting utilities (adds signal plotting dependencies)
+//! - `resampling`: resampling utilities (using `rubato` crate)
+//! - `serialization`: serialization utilities (using `serde` crate)
+//!
+//! See `Cargo.toml` for the complete feature list and feature groups.
+//!
 //!
 //! ## Error Handling
 //!
 //! The library uses a hierarchical error system designed for precise error handling:
 //!
 //! ```rust
-//! use audio_samples::{AudioSampleError, ConversionError, ParameterError};
+//! use audio_samples::{AudioSampleError, AudioSampleResult, ParameterError};
+//!
+//! let audio_result: AudioSampleResult<()> = Err(AudioSampleError::Parameter(
+//!     ParameterError::invalid_value("window_size", "must be > 0"),
+//! ));
 //!
 //! match audio_result {
-//!     Ok(samples) => { /* process samples */ }
-//!     Err(AudioSampleError::Conversion(err)) => {
-//!         eprintln!("Conversion failed: {}", err);
-//!     }
-//!     Err(AudioSampleError::Parameter(err)) => {
-//!         eprintln!("Invalid parameter: {}", err);
-//!     }
-//!     Err(other_err) => {
-//!         eprintln!("Other error: {}", other_err);
-//!     }
+//!     Ok(()) => {}
+//!     Err(AudioSampleError::Conversion(err)) => eprintln!("Conversion failed: {err}"),
+//!     Err(AudioSampleError::Parameter(err)) => eprintln!("Invalid parameter: {err}"),
+//!     Err(other_err) => eprintln!("Other error: {other_err}"),
 //! }
 //! ```
 //!
 //! ## Full Examples
 //!
-//! A range of examples demonstrating this crate and its companion [audio_io](https://ghithub.com/jmg049/audio_io) crate can be found at [here]().
-//!
-//! - [DTMF tone generation and decoding]()
-//! - [Basic synthesizer]()
-//! - [Silence Trimming CLI tool]()
-//! - [Audio file information CLI tool]()
-//!
-//! ## Available Operations
-//!
-//! The library organizes functionality into focused traits:
-//!
-//! ### Core Audio Operations (`core-ops`)
-//!
-//! - **Statistics** (`AudioStatistics`) - Peak, RMS, mean, variance, zero-crossings, autocorrelation
-//! - **Processing** (`AudioProcessing`) - Normalize, scale, clip, filtering, compression, DC removal
-//! - **Channel Operations** (`AudioChannelOps`) - Mono/stereo conversion, channel extraction, pan, balance
-//! - **Editing** (`AudioEditing`) - Trim, pad, reverse, fade, split, concatenate, mix
-//!
-//! ### Signal Processing Features
-//!
-//! - **IIR Filtering** (`AudioIirFiltering`) - Biquad filters, shelving, peaking
-//! - **Parametric EQ** (`AudioParametricEq`) - Multi-band equalizer with adjustable Q
-//! - **Dynamic Range** (`AudioDynamicRange`) - Compression, limiting, expansion, gating
-//!
-//! ### Advanced Analysis (Optional Features)
-//!
-//! - **Spectral Analysis** (`AudioTransforms`) - FFT, STFT, spectrogram, mel-spectrogram, MFCC, CQT
-//! - **Pitch Analysis** (`AudioPitchAnalysis`) - Fundamental frequency, harmonic analysis
-//! - **Beat Detection** - Tempo analysis and beat tracking
-//! - **Plotting** (`AudioPlottingUtils`) - Waveform, spectrogram, and frequency domain visualization
+//! Examples live in the repository (see `examples/`) and in the crate-level docs on
+//! <https://docs.rs/audio_samples>.
 //!
 //! ## Quick Start
 //!
@@ -158,17 +130,23 @@
 //! ### Basic Statistics
 //!
 //! ```rust
-//! use audio_samples::AudioStatistics;
+//! use audio_samples::{AudioStatistics, sine_wave};
+//! use std::time::Duration;
 //!
-//! // Simple statistics (no Result needed)
+//! // frequency, sample rate, duration, amplitude
+//! // <f32, f32> indicates the sine wave will be
+//! // generated using single float precision and
+//! // the resulting samples will also be f32
+//! let audio = sine_wave::<f32, f32>(440.0, Duration::from_secs_f32(1.0), 44100, 1.0);
+//! // Simple statistics
 //! let peak = audio.peak();
 //! let min = audio.min_sample();
 //! let max = audio.max_sample();
 //! let mean = audio.mean();
 //!
 //! // More complex statistics (return Result)
-//! let rms = audio.rms()?;
-//! let variance = audio.variance()?;
+//! let rms = audio.rms().unwrap();
+//! let variance = audio.variance().unwrap();
 //! let zero_crossings = audio.zero_crossings();
 //! ```
 //!
@@ -176,11 +154,15 @@
 //!
 //! ```rust
 //! use audio_samples::{AudioProcessing, NormalizationMethod};
+//! use ndarray::array;
 //!
-//! let mut audio = AudioSamples::new_mono(data, 44100);
+//! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
+//! let mut audio = audio_samples::AudioSamples::new_mono(data, 44100);
 //!
 //! // Basic processing (in-place)
-//! audio.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
+//! audio
+//!     .normalize(-1.0, 1.0, NormalizationMethod::Peak)
+//!     .unwrap();
 //! audio.scale(0.5); // Reduce volume by half
 //! audio.remove_dc_offset();
 //! ```
@@ -188,16 +170,22 @@
 //! ### Type Conversions
 //!
 //! ```rust
+//! use audio_samples::AudioSamples;
+//! use ndarray::array;
+//!
 //! // Convert between sample types
 //! let audio_f32 = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], 44100);
-//! let audio_i16 = audio_f32.as_type::<i16>()?;
-//! let audio_f64 = audio_f32.as_type::<f64>()?;
+//! let audio_i16 = audio_f32.as_type::<i16>().unwrap();
+//! let audio_f64 = audio_f32.as_type::<f64>().unwrap();
 //! ```
 //!
 //! ### Iterating Over Audio Data
 //!
 //! ```rust
 //! use audio_samples::AudioSampleIterators;
+//! use ndarray::array;
+//!
+//! let audio = audio_samples::AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0], 44100);
 //!
 //! // Iterate by frames (one sample from each channel)
 //! for frame in audio.frames() {
@@ -212,7 +200,7 @@
 //! // Windowed iteration for analysis
 //! for window in audio.windows(1024, 512) {
 //!     // Process 1024-sample windows with 50% overlap
-//!     let window_rms = window.rms()?;
+//!     let window_rms = window.rms().unwrap();
 //!     println!("Window RMS: {:.3}", window_rms);
 //! }
 //! ```
@@ -223,7 +211,9 @@
 //!
 //! ```rust
 //! use audio_samples::{AudioSamples, NormalizationMethod};
+//! use ndarray::array;
 //!
+//! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
 //! let mut audio = AudioSamples::new_mono(data, 44100);
 //!
 //! // Chain multiple operations
@@ -231,7 +221,8 @@
 //!     .normalize(-1.0, 1.0, NormalizationMethod::Peak)
 //!     .scale(0.8)
 //!     .remove_dc_offset()
-//!     .apply()?;
+//!     .apply()
+//!     .unwrap();
 //! ```
 //!
 //! ## Core Type System
@@ -277,14 +268,13 @@
 //!
 
 //! ```rust
-//! use audio_samples::utils::*;
+//! use audio_samples::{comparison, sine_wave};
+//! use std::time::Duration;
 //!
-//! // Generate test signal
-//! let test_tone = generation::generate_sine(440.0, 44100, 1.0);
-//!
-//! // Analyze audio content
-//! let has_speech = detection::detect_speech_activity(&audio)?;
-//! let snr = comparison::signal_to_noise_ratio(&signal, &noise)?;
+//! let a = sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44100, 1.0);
+//! let b = sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44100, 1.0);
+//! let corr: f32 = comparison::correlation::<f32, f32>(&a, &b).unwrap();
+//! assert!(corr > 0.99);
 //! ```
 //! ## Documentation
 //!
@@ -297,15 +287,27 @@
 //! ## Contributing
 //!
 //! Contributions are welcome! Please feel free to submit a Pull Request.
-//!
+
 mod error;
 
-#[cfg(feature = "core-ops")]
+#[cfg(any(
+    feature = "core-ops",
+    feature = "statistics",
+    feature = "processing",
+    feature = "editing",
+    feature = "channels"
+))]
+#[cfg(any(
+    feature = "core-ops",
+    feature = "statistics",
+    feature = "processing",
+    feature = "editing",
+    feature = "channels"
+))]
 pub mod operations;
 
 pub mod conversions;
 pub mod iterators;
-// pub mod realtime;
 mod repr;
 #[cfg(feature = "resampling")]
 pub mod resampling;
@@ -324,28 +326,57 @@ pub use crate::iterators::{
     AudioSampleIterators, ChannelIterator, ChannelIteratorMut, FrameIterator, FrameIteratorMut,
     FrameMut, PaddingMode, WindowIterator, WindowIteratorMut, WindowMut,
 };
-#[cfg(feature = "core-ops")]
-pub use crate::operations::{
-    AudioChannelOps, AudioEditing, AudioProcessing, AudioSamplesOperations, AudioStatistics,
-    NormalizationMethod,
-};
+#[cfg(feature = "statistics")]
+pub use crate::operations::AudioStatistics;
+
+#[cfg(feature = "processing")]
+pub use crate::operations::{AudioProcessing, NormalizationMethod};
+
+#[cfg(feature = "editing")]
+pub use crate::operations::AudioEditing;
+
+#[cfg(feature = "channels")]
+pub use crate::operations::AudioChannelOps;
 
 #[cfg(feature = "spectral-analysis")]
 pub use crate::operations::AudioTransforms;
 
 #[cfg(feature = "plotting")]
 pub use crate::operations::AudioPlottingUtils;
-pub use crate::repr::{AudioData, AudioSamples, StereoAudioSamples};
+#[cfg(feature = "fixed-size-audio")]
+pub use crate::repr::FixedSizeAudioSamples;
+pub use crate::repr::{AudioBytes, AudioData, AudioSamples, SampleType, StereoAudioSamples};
 pub use crate::traits::{
-    AudioSample, AudioSampleFamily, AudioTypeConversion, CastFrom, CastInto, Castable, ConvertTo,
+    AudioSample, AudioTypeConversion, CastFrom, CastInto, Castable, ConvertTo,
 };
-pub use crate::utils::*;
+pub use crate::utils::{
+    audio_math::{
+        amplitude_to_db, db_to_amplitude, fft_frequencies, frames_to_time, hz_to_mel, hz_to_midi,
+        mel_to_hz, mel_scale, midi_to_hz, midi_to_note, note_to_midi, power_to_db, time_to_frames,
+    },
+    comparison, detection,
+    generation::{
+        ToneComponent, chirp, compound_tone, cosine_wave, impulse, multichannel_compound_tone,
+        sawtooth_wave, silence, sine_wave, square_wave, stereo_chirp, stereo_silence,
+        stereo_sine_wave, triangle_wave,
+    },
+    samples_to_seconds, seconds_to_samples,
+};
 
-pub use i24::I24; // Re-export I24 type that has the AudioSample implementation
+// Re-export noise generation functions with feature gating
+#[cfg(feature = "random-generation")]
+pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
+
+pub use i24::{I24, PackedStruct}; // Re-export I24 type that has the AudioSample implementation
+
+// Re-export NonZero types used in the API
+pub use core::num::{NonZeroU32, NonZeroUsize};
 
 use num_traits::{Float, FloatConst, NumCast};
 #[cfg(feature = "resampling")]
 pub use resampling::{resample, resample_by_ratio};
+#[cfg(feature = "resampling")]
+use rubato::Sample;
 
 /// Array of supported audio sample data types as string identifiers
 pub const SUPPORTED_DTYPES: [&str; 5] = ["i16", "I24", "i32", "f32", "f64"];
@@ -354,8 +385,14 @@ pub const LEFT: usize = 0;
 /// Right channel index.
 pub const RIGHT: usize = 1;
 
+#[cfg(not(feature = "resampling"))]
 /// Marker trait for real floating-point types (f32, f64)
 pub trait RealFloat: Float + FloatConst + NumCast + AudioSample {}
+
+#[cfg(feature = "resampling")]
+/// Marker trait for real floating-point types (f32, f64)
+pub trait RealFloat: Float + FloatConst + NumCast + AudioSample + Sample {}
+
 impl RealFloat for f32 {}
 impl RealFloat for f64 {}
 
@@ -385,11 +422,12 @@ impl ChannelLayout {
 
 /// Casts a numeric value into the target floating-point type `F`.
 ///
-/// This function provides a *transparent* conversion mechanism
-/// for any numeric type (`T`) into a chosen floating-point type (`F`),
-/// typically `f32` or `f64`. It behaves identically to the built-in
-/// Rust `as` cast between those types, following the same IEEE-754
-/// rounding, overflow, and infinity rules.
+/// This function provides a *transparent* conversion mechanism for numeric
+/// values (`T`) into a chosen target type (`F`), typically `f32` or `f64`.
+///
+/// Internally it uses `num_traits::NumCast::from` and will **panic** if the
+/// cast is not representable by the target type (e.g. out-of-range values,
+/// or non-finite floats when converting to an integer type).
 ///
 /// The main purpose is to **abstract over floating-point precision**
 /// in generic code where the target type `F: RealFloat` may vary.
@@ -404,11 +442,8 @@ impl ChannelLayout {
 /// The input value converted to the target floating-point type `F`.
 ///
 /// # Behaviour
-/// - Performs the same operation as `value as F` for primitive numeric types.
-/// - Rounds ties to even, consistent with IEEE-754.
-/// - On overflow, produces `∞` with the same sign as the input.
-/// - Panics only if the cast is invalid (which should never occur
-///   for standard numeric types).
+/// - Uses `NumCast::from(value)`.
+/// - Panics if the conversion fails.
 ///
 /// In practice, if `F` and `T` are the same type (e.g. `f32 → f32`),
 /// this operation is a **compile-time no-op** with no runtime overhead.
@@ -426,8 +461,7 @@ impl ChannelLayout {
 /// ```
 ///
 /// # Panics
-/// Panics if the numeric conversion fails, which should never occur
-/// for standard numeric types but is theoretically possible for invalid values.
+/// Panics if the numeric conversion fails.
 #[inline(always)]
 pub fn to_precision<F, T>(value: T) -> F
 where
