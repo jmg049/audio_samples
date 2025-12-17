@@ -3266,18 +3266,15 @@ impl<F: RealFloat> Default for HpssConfig<F> {
 /// - STFT: Standard Short-Time Fourier Transform based approach
 /// - CQT: Constant-Q Transform based approach (better frequency resolution for low frequencies)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ChromaMethod {
     /// Use Short-Time Fourier Transform for chromagram computation
+    #[default]
     Stft,
     /// Use Constant-Q Transform for chromagram computation
     Cqt,
 }
 
-impl Default for ChromaMethod {
-    fn default() -> Self {
-        ChromaMethod::Stft
-    }
-}
 
 /// Configuration for chromagram (chroma vector) computation.
 ///
@@ -3314,7 +3311,7 @@ impl<F: RealFloat> ChromaConfig<F> {
     /// - 2048 sample window (good frequency resolution)
     /// - 512 sample hop size (good time resolution)
     /// - Frame normalization enabled
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             method: ChromaMethod::Stft,
             n_chroma: 12,
@@ -3329,7 +3326,7 @@ impl<F: RealFloat> ChromaConfig<F> {
     /// Create configuration optimized for STFT-based chromagram.
     ///
     /// Uses STFT with parameters optimized for harmonic content analysis.
-    pub fn stft() -> Self {
+    pub const fn stft() -> Self {
         Self {
             method: ChromaMethod::Stft,
             n_chroma: 12,
@@ -3345,7 +3342,7 @@ impl<F: RealFloat> ChromaConfig<F> {
     ///
     /// Uses Constant-Q Transform which provides better frequency resolution
     /// for lower frequencies, making it ideal for harmonic analysis.
-    pub fn cqt() -> Self {
+    pub const fn cqt() -> Self {
         Self {
             method: ChromaMethod::Cqt,
             n_chroma: 12,
@@ -3360,7 +3357,7 @@ impl<F: RealFloat> ChromaConfig<F> {
     /// Create configuration for high-resolution chromagram analysis.
     ///
     /// Uses larger windows for better frequency resolution.
-    pub fn high_resolution() -> Self {
+    pub const fn high_resolution() -> Self {
         Self {
             method: ChromaMethod::Stft,
             n_chroma: 12,
@@ -3375,7 +3372,7 @@ impl<F: RealFloat> ChromaConfig<F> {
     /// Create configuration for real-time chromagram analysis.
     ///
     /// Uses smaller windows for lower latency.
-    pub fn realtime() -> Self {
+    pub const fn realtime() -> Self {
         Self {
             method: ChromaMethod::Stft,
             n_chroma: 12,
@@ -3388,37 +3385,37 @@ impl<F: RealFloat> ChromaConfig<F> {
     }
 
     /// Set the number of chroma bins.
-    pub fn with_n_chroma(mut self, n_chroma: usize) -> Self {
+    pub const fn with_n_chroma(mut self, n_chroma: usize) -> Self {
         self.n_chroma = n_chroma;
         self
     }
 
     /// Set the window size for STFT.
-    pub fn with_window_size(mut self, window_size: usize) -> Self {
+    pub const fn with_window_size(mut self, window_size: usize) -> Self {
         self.window_size = window_size;
         self
     }
 
     /// Set the hop size.
-    pub fn with_hop_size(mut self, hop_size: usize) -> Self {
+    pub const fn with_hop_size(mut self, hop_size: usize) -> Self {
         self.hop_size = hop_size;
         self
     }
 
     /// Set the sample rate override.
-    pub fn with_sample_rate(mut self, sample_rate: usize) -> Self {
+    pub const fn with_sample_rate(mut self, sample_rate: usize) -> Self {
         self.sample_rate = Some(sample_rate);
         self
     }
 
     /// Set the normalization option.
-    pub fn with_norm(mut self, norm: bool) -> Self {
+    pub const fn with_norm(mut self, norm: bool) -> Self {
         self.norm = norm;
         self
     }
 
     /// Calculate the number of time frames for given audio length.
-    pub fn num_frames(&self, num_samples: usize) -> usize {
+    pub const fn num_frames(&self, num_samples: usize) -> usize {
         if num_samples <= self.window_size {
             1
         } else {

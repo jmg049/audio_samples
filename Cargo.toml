@@ -8,7 +8,7 @@ readme = "README.md"
 homepage = "https://github.com/jmg049/audio_samples"
 repository = "https://github.com/jmg049/audio_samples"
 documentation = "https://docs.rs/audio_samples"
-description = "A high-performance audio processing library for Rust"
+description = "A typed audio processing library for Rust that treats audio as a first-class, invariant-preserving object rather than an unstructured numeric buffer."
 
 keywords = ["audio", "dsp", "api"]
 categories = ["encoding", "multimedia", "science"]
@@ -16,7 +16,6 @@ categories = ["encoding", "multimedia", "science"]
 [lib]
 name = "audio_samples"
 crate-type = ["rlib"]
-
 
 [dependencies]
 bytemuck = "1.23.1"
@@ -51,7 +50,7 @@ intel-mkl-src = { version = "0.8.0", optional = true }
 plotly = { version = "0.13.5", optional = true }
 # plotview-rs = { path = "/home/jmg/code/rust/plotview-rs/", optional = true }
 plotly_static = { version = "0.1.0", features = ["chromedriver", "webdriver_download"], optional = true }
-html_view = { path = "/home/jmg/code/rust/html_view/html_view", optional = true }
+html_view = { version = "0.1.0", optional = true }
 
 # Resampling dependencies (gated behind "resampling" feature)
 rubato = { version = "0.16.2", optional = true }
@@ -80,7 +79,7 @@ processing-advanced = ["processing"]             # Filtering, compression
 # Minimal focused API
 minimal = ["statistics", "processing"]
 
-# Core audio operations (no FFT/plotting/resampling) - backwards compatibility
+# Core audio operations (no FFT/plotting/resampling)
 core-ops = ["statistics", "processing", "editing", "channels"]
 
 fixed-size-audio = [] # Support for fixed-size audio buffers (no heap allocation)
@@ -91,10 +90,8 @@ full = [
     "plotting",
     "resampling",
     "serialization",
-    "serialization",
     "static-plots",
     "parallel-processing",
-    # "simd",
     "mkl",
     "progress-tracking",
     "beat-detection",
@@ -130,6 +127,8 @@ utilities-full = ["formatting", "random-generation"]
 # Convenience feature groups
 full-analysis = ["spectral-analysis", "beat-detection", "plotting"]
 operations = ["core-ops", "spectral-analysis", "plotting", "resampling"]
+
+python = ["i24/pyo3"]
 
 [dev-dependencies]
 approx_eq = "0.1.8"

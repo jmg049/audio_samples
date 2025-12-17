@@ -9,7 +9,7 @@ use crate::operations::iir_filtering::IirFilter;
 use crate::operations::traits::AudioParametricEq;
 use crate::operations::types::{EqBand, EqBandType, ParametricEq};
 use crate::repr::AudioData;
-use crate::utils::audio_math::{amplitude_to_db as linear_to_db, db_to_amplitude as db_to_linear};
+use crate::utils::audio_math::db_to_amplitude as db_to_linear;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
     I24, LayoutError, ParameterError, RealFloat, to_precision,
@@ -505,6 +505,7 @@ mod tests {
     use crate::sample_rate;
     use ndarray::Array1;
     use std::f64::consts::PI;
+    use crate::utils::audio_math::amplitude_to_db as linear_to_db;
 
     #[test]
     fn test_peak_filter() {

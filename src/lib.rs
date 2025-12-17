@@ -287,10 +287,6 @@
 //! ## Contributing
 //!
 //! Contributions are welcome! Please feel free to submit a Pull Request.
-//!
-//!
-#[cfg(all(feature = "simd", not(nightly)))]
-compile_error!("The `simd` feature requires the nightly Rust toolchain");
 
 mod error;
 

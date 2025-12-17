@@ -455,7 +455,7 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
     let midi_note = (octave + 1) * 12 + base_note as i32;
 
     // Check range
-    if midi_note < 0 || midi_note > 127 {
+    if !(0..=127).contains(&midi_note) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "note_name",
             format!("Note {} (MIDI {}) is outside valid MIDI range 0-127", note_name, midi_note)
