@@ -85,6 +85,7 @@ use crate::{
 };
 use ndarray::Array2;
 
+use num_traits::FloatConst;
 #[cfg(feature = "fft")]
 use rustfft::num_complex::Complex;
 
@@ -139,7 +140,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
 
         config.validate(sample_rate)?;
 
@@ -207,7 +208,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute CQT magnitude spectrogram
@@ -316,7 +317,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         if hop_size == 0 {
@@ -387,7 +388,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute onset detection function
@@ -434,7 +435,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute magnitude difference matrix
@@ -522,7 +523,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute complex CQT spectrogram
@@ -545,7 +546,7 @@ where
 
         // Calculate expected phase advance for each bin
         let mut expected_phase_advance = Vec::with_capacity(num_bins);
-        let pi = F::PI();
+        let pi = <F as FloatConst>::PI();
         let two: F = to_precision(2.0);
         let hop_size = to_precision(config.hop_size);
         for bin_idx in 0..num_bins {
@@ -554,7 +555,7 @@ where
             expected_phase_advance.push(phase_advance);
         }
 
-        let pi = F::PI();
+        let pi = <F as FloatConst>::PI();
 
         // Compute phase deviation for each bin and frame
         for bin_idx in 0..num_bins {
@@ -611,7 +612,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute magnitude spectrogram
@@ -683,7 +684,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute spectral flux
@@ -812,7 +813,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute spectral flux using the configured method
@@ -851,7 +852,7 @@ where
         F: RealFloat + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         config.validate(sample_rate)?;
 
         // Compute spectral flux
@@ -1092,6 +1093,7 @@ fn apply_median_filter<F: RealFloat>(
 mod tests {
     use super::*;
     use crate::operations::types::{ComplexOnsetConfig, OnsetConfig, SpectralFluxConfig};
+    use crate::sample_rate;
     use ndarray::Array1;
     use std::f64::consts::PI;
 
@@ -1116,7 +1118,7 @@ mod tests {
     fn test_energy_based_onset_detection() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         let config = OnsetConfig::<f64>::percussive();
         let result = audio.detect_onsets(&config);
@@ -1138,7 +1140,7 @@ mod tests {
     fn test_onset_detection_function() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 2, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         let config = OnsetConfig::<f64>::musical();
         let result = audio.onset_detection_function(&config);
@@ -1162,7 +1164,7 @@ mod tests {
     fn test_spectral_flux_methods() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         let config = CqtConfig::<f64>::onset_detection();
         let hop_size = 512;
@@ -1188,7 +1190,7 @@ mod tests {
     fn test_complex_onset_detection() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 2, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         let config = ComplexOnsetConfig::<f64>::musical();
         let result = audio.complex_onset_detection(&config);
@@ -1209,7 +1211,7 @@ mod tests {
     fn test_phase_deviation_matrix() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         let config = ComplexOnsetConfig::<f64>::new();
         let result = audio.phase_deviation_matrix(&config);
@@ -1234,7 +1236,7 @@ mod tests {
     fn test_magnitude_difference_matrix() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         let config = ComplexOnsetConfig::<f64>::new();
         let result = audio.magnitude_difference_matrix(&config);
@@ -1259,7 +1261,7 @@ mod tests {
     fn test_spectral_flux_onset_detection() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 2, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         let config = SpectralFluxConfig::<f64>::percussive();
         let result = audio.detect_onsets_spectral_flux(&config);
@@ -1302,7 +1304,7 @@ mod tests {
     fn test_preset_configurations() {
         let sample_rate = 44100;
         let signal = generate_test_signal(sample_rate / 4, sample_rate as f64);
-        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate as u32);
+        let audio = AudioSamples::new_mono(Array1::from_vec(signal).into(), sample_rate!(44100));
 
         // Test OnsetConfig presets
         let onset_configs = vec![
@@ -1347,9 +1349,9 @@ mod tests {
     #[test]
     fn test_edge_cases() {
         // Test with very short signal
-        let sample_rate = 44100;
         let short_signal = vec![1.0f32, 2.0, 3.0];
-        let audio = AudioSamples::new_mono(Array1::from_vec(short_signal).into(), sample_rate);
+        let audio =
+            AudioSamples::new_mono(Array1::from_vec(short_signal).into(), sample_rate!(44100));
 
         let config = OnsetConfig::<f64>::new();
         let result = audio.detect_onsets(&config);
@@ -1361,13 +1363,15 @@ mod tests {
         assert!(result.is_ok());
         let onset_times = result.unwrap();
         assert!(onset_times.len() <= 1); // May or may not detect onsets in very short signals
+    }
 
-        // Test with empty signal
+    #[test]
+    #[should_panic(expected = "data must not be empty")]
+    fn test_empty_audio_rejected() {
+        // Empty audio should be rejected at construction time
         let empty_signal: Vec<f64> = vec![];
-        let audio = AudioSamples::new_mono(Array1::from_vec(empty_signal).into(), sample_rate);
-
-        let result = audio.detect_onsets(&config);
-        assert!(result.is_err()); // Should error on empty signal
+        let _audio =
+            AudioSamples::new_mono(Array1::from_vec(empty_signal).into(), sample_rate!(44100));
     }
 
     #[test]
@@ -1384,7 +1388,6 @@ mod tests {
 
     #[test]
     fn test_flux_computation_functions() {
-        let sample_rate = 44100.0;
         let hop_size = 512;
 
         // Create a simple test spectrogram
@@ -1396,7 +1399,7 @@ mod tests {
                 },
             );
 
-        let (times, flux) = compute_energy_flux(&spectrogram, hop_size, sample_rate).unwrap();
+        let (times, flux) = compute_energy_flux(&spectrogram, hop_size, 44100.0).unwrap();
 
         assert_eq!(times.len(), 5);
         assert_eq!(flux.len(), 5);

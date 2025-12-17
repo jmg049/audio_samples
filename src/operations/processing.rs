@@ -12,12 +12,13 @@ use crate::operations::types::NormalizationMethod;
 use crate::repr::AudioData;
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom,
-    ConversionError, ConvertTo, I24, LayoutError, ParameterError, RealFloat,
+    ConvertTo, I24, LayoutError, ParameterError, RealFloat,
     operations::traits::{AudioProcessing, AudioStatistics},
     to_precision,
 };
 
 use ndarray::Axis;
+use num_traits::FloatConst;
 
 impl<'a, T: AudioSample> AudioProcessing<T> for AudioSamples<'a, T>
 where
@@ -107,28 +108,28 @@ where
                 if peak == T::zero() {
                     return Ok(()); // No scaling needed for zero signal
                 }
-                let min: f64 = min.convert_to()?;
+                let min: f64 = min.convert_to();
                 let min = min.abs();
-                let max: f64 = max.convert_to()?;
+                let max: f64 = max.convert_to();
                 let max = max.abs();
 
                 let target_peak: f64 = min.max(max);
-                let peak: f64 = peak.convert_to()?;
+                let peak: f64 = peak.convert_to();
                 let scale_factor = target_peak / peak;
 
                 match &mut self.data {
                     AudioData::Mono(arr) => {
                         for x in arr.iter_mut() {
-                            let _x: f64 = x.convert_to()?;
+                            let _x: f64 = x.convert_to();
                             let _x = _x * scale_factor;
-                            *x = T::convert_from(_x)?;
+                            *x = T::convert_from(_x);
                         }
                     }
                     AudioData::Multi(arr) => {
                         for x in arr.iter_mut() {
-                            let _x: f64 = x.convert_to()?;
+                            let _x: f64 = x.convert_to();
                             let _x = _x * scale_factor;
-                            *x = T::convert_from(_x)?;
+                            *x = T::convert_from(_x);
                         }
                     }
                 }
@@ -446,6 +447,7 @@ where
                 let filter_len = filter_coeffs.len();
                 let output_len = arr.len() - filter_len + 1;
 
+                // Perform convolution using array views (no vector allocation)
                 // Create output buffer to avoid overwriting input during convolution
                 let mut output = ndarray::Array1::zeros(output_len);
 
@@ -457,7 +459,6 @@ where
                     }
                     output[i] = sum;
                 }
-
                 // Replace the original data with the filtered output
                 *arr = output.into();
             }
@@ -476,6 +477,7 @@ where
                 // Create output buffer
                 let mut output = ndarray::Array2::zeros((num_channels, output_len));
 
+                // Apply filter to each channel using views (no vector allocation)
                 // Apply filter to each channel using views (no vector allocation)
                 for (ch, mut output_channel) in output.axis_iter_mut(Axis(0)).enumerate() {
                     let input_channel = arr.row(ch);
@@ -497,46 +499,33 @@ where
 
     /// Applies μ-law compression to the audio samples.
     fn mu_compress(&mut self, mu: T) -> AudioSampleResult<()> {
-        let mu_f64: f64 = mu.convert_to()?;
+        let mu_f64: f64 = mu.convert_to();
         let mu_plus_one: f64 = mu_f64 + 1.0;
 
         self.apply_with_error(|x: T| {
-            let x: f64 = x.convert_to().map_err(|e| {
-                AudioSampleError::Conversion(ConversionError::audio_conversion(
-                    e.to_string(),
-                    std::any::type_name::<T>(),
-                    "f64",
-                    "mu_compress conversion failed",
-                ))
-            })?;
+            let x: f64 = x.convert_to();
             let sign = if x >= 0.0 { 1.0 } else { -1.0 };
             let abs_x = x.abs();
             let compressed = sign * (mu_plus_one.ln() + mu_f64 * abs_x).ln() / mu_plus_one.ln();
-            T::convert_from(compressed).map_err(|e| {
-                AudioSampleError::Conversion(ConversionError::audio_conversion(
-                    e.to_string(),
-                    std::any::type_name::<T>(),
-                    "f64",
-                    "mu_compress result conversion failed",
-                ))
-            })
+            Ok(T::convert_from(compressed))
         })
     }
 
     /// Applies μ-law expansion (decompression) to the audio samples.
     ///
     /// First the mu value is converted to f64, then the expansion is applied.
+    /// First the mu value is converted to f64, then the expansion is applied.
     /// Second, the result is converted back to T.
     fn mu_expand(&mut self, mu: T) -> AudioSampleResult<()> {
-        let mu: f64 = mu.convert_to()?;
+        let mu: f64 = mu.convert_to();
         let mu_plus_one = mu + 1.0;
 
         self.apply_with_error(|x: T| {
-            let x_f64: f64 = x.convert_to()?;
+            let x_f64: f64 = x.convert_to();
             let sign = if x_f64 >= 0.0 { 1.0 } else { -1.0 };
             let abs_x = x_f64.abs();
             let expanded = sign * (mu_plus_one.powf(abs_x) - 1.0) / mu;
-            T::convert_from(expanded)
+            Ok(T::convert_from(expanded))
         })
     }
 
@@ -547,7 +536,7 @@ where
         T: CastFrom<F> + ConvertTo<F>,
     {
         // Simple implementation using a basic low-pass filter design
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         let normalized_cutoff = cutoff_hz / sample_rate;
 
         if normalized_cutoff >= to_precision::<F, _>(0.5) {
@@ -558,30 +547,30 @@ where
         }
 
         // Simple single-pole low-pass filter coefficient
-        let alpha = to_precision::<F, _>(2.0) * F::PI() * normalized_cutoff;
+        let alpha = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * normalized_cutoff;
         let one_minus_alpha = F::one() - alpha;
 
         match &mut self.data {
             AudioData::Mono(arr) => {
                 if !arr.is_empty() {
-                    let mut prev_output: F = arr[0].convert_to()?;
+                    let mut prev_output: F = arr[0].convert_to();
                     for sample in arr.iter_mut() {
-                        let s: F = sample.convert_to()?;
+                        let s: F = sample.convert_to();
                         let s: F = alpha * s + one_minus_alpha * prev_output;
                         prev_output = s;
-                        *sample = T::convert_from(s)?;
+                        *sample = T::convert_from(s);
                     }
                 }
             }
             AudioData::Multi(arr) => {
                 for mut channel in arr.axis_iter_mut(Axis(0)) {
                     if !channel.is_empty() {
-                        let mut prev_output = channel[0].convert_to()?;
+                        let mut prev_output = channel[0].convert_to();
                         for sample in channel.iter_mut() {
-                            let s: F = sample.convert_to()?;
+                            let s: F = sample.convert_to();
                             let s: F = alpha * s + one_minus_alpha * prev_output;
                             prev_output = s;
-                            *sample = T::convert_from(s)?;
+                            *sample = T::convert_from(s);
                         }
                     }
                 }
@@ -597,7 +586,7 @@ where
         T: CastFrom<F> + ConvertTo<F>,
     {
         // Simple implementation using a basic high-pass filter design
-        let sample_rate = to_precision(self.sample_rate);
+        let sample_rate = to_precision(self.sample_rate.get());
         let normalized_cutoff = cutoff_hz / sample_rate;
 
         if normalized_cutoff >= to_precision::<F, _>(0.5) {
@@ -608,7 +597,7 @@ where
         }
 
         // Simple high-pass filter using RC circuit model
-        let rc = F::one() / (to_precision::<F, _>(2.0) * F::PI() * cutoff_hz);
+        let rc = F::one() / (to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * cutoff_hz);
         let dt = F::one() / sample_rate;
         let alpha = rc / (rc + dt);
 
@@ -667,31 +656,31 @@ where
 
     /// Resamples audio to a new sample rate using high-quality algorithms.
     #[cfg(feature = "resampling")]
-    fn resample(
+    fn resample<F>(
         &self,
         target_sample_rate: usize,
         quality: ResamplingQuality,
-    ) -> AudioSampleResult<Self> {
-        let resampled = crate::resampling::resample(self, target_sample_rate, quality)?;
-        Ok(unsafe {
-            std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
-                resampled,
-            )
-        })
+    ) -> AudioSampleResult<Self>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
+        let resampled = crate::resampling::resample::<F, T>(self, target_sample_rate, quality)?;
+        Ok(unsafe { std::mem::transmute::<AudioSamples<'_, T>, AudioSamples<'_, T>>(resampled) })
     }
 
     /// Resamples audio by a specific ratio.
     #[cfg(feature = "resampling")]
-    fn resample_by_ratio<F: RealFloat>(
-        &self,
-        ratio: F,
-        quality: ResamplingQuality,
-    ) -> AudioSampleResult<Self> {
+    fn resample_by_ratio<F>(&self, ratio: F, quality: ResamplingQuality) -> AudioSampleResult<Self>
+    where
+        F: RealFloat + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
         let resampled = crate::resampling::resample_by_ratio(self, ratio, quality)?;
         Ok(unsafe {
-            std::mem::transmute::<crate::repr::AudioSamples<'_, T>, crate::repr::AudioSamples<'_, T>>(
-                resampled,
-            )
+            use std::mem::transmute;
+
+            transmute::<AudioSamples<'_, T>, AudioSamples<'_, T>>(resampled)
         })
     }
 }
@@ -704,7 +693,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Computes the mean value of all samples.
     fn compute_mean(&self) -> f64 {
@@ -737,7 +726,7 @@ where
                 }
 
                 // Collect all values into a vector only once, directly from the iterator
-                let mut values: Vec<f64> = arr.iter().map(|&x| unsafe { x.unchecked_convert_to() }).collect();
+                let mut values: Vec<f64> = arr.iter().map(|&x| x.convert_to()).collect();
                 let mid = values.len() / 2;
                 let _ = values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
 
@@ -749,7 +738,7 @@ where
                         .iter()
                         .max_by(|a, b| a.total_cmp(b))
                         .copied()
-                        .unwrap();
+                        .expect("Failed to find max in left partition for median calculation");
                     Ok((max_left + values[mid]) / 2.0)
                 }
             }
@@ -759,7 +748,7 @@ where
                 }
 
                 // Collect all values directly from the flattened iterator
-                let mut values: Vec<f64> = arr.iter().map(|&x| unsafe { x.unchecked_convert_to() }).collect();
+                let mut values: Vec<f64> = arr.iter().map(|&x| x.convert_to()).collect();
                 let mid = values.len() / 2;
                 let _ = values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
 
@@ -771,7 +760,7 @@ where
                         .iter()
                         .max_by(|a, b| a.total_cmp(b))
                         .copied()
-                        .unwrap();
+                        .expect("Failed to find max in left partition for median calculation");
                     Ok((max_left + values[mid]) / 2.0)
                 }
             }
@@ -920,7 +909,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
     /// Creates a new ProcessingBuilder for the given audio samples.
     pub fn new(audio: &'a mut AudioSamples<'a, T>) -> Self {
@@ -1049,6 +1038,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample_rate;
     use approx_eq::assert_approx_eq;
     use ndarray::array;
 
@@ -1057,7 +1047,7 @@ mod tests {
     #[test]
     fn test_normalize_min_max() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio: AudioSamples<f32> = AudioSamples::new_mono(data, 44100);
+        let mut audio: AudioSamples<f32> = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::MinMax)
@@ -1070,7 +1060,7 @@ mod tests {
     #[test]
     fn test_normalize_peak() {
         let data = array![-2.0f32, 1.0, 3.0, -1.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::Peak)
@@ -1082,7 +1072,7 @@ mod tests {
     #[test]
     fn test_scale() {
         let data = array![1.0f32, 2.0, 3.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio.scale(2.0);
 
@@ -1100,7 +1090,7 @@ mod tests {
     #[test]
     fn test_remove_dc_offset() {
         let data = array![3.0f32, 4.0, 5.0]; // Mean = 4.0
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio.remove_dc_offset().unwrap();
 
@@ -1111,7 +1101,7 @@ mod tests {
     #[test]
     fn test_clip() {
         let data = array![-3.0f32, -1.0, 0.0, 1.0, 3.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio.clip(-2.0, 2.0).unwrap();
 
@@ -1129,7 +1119,7 @@ mod tests {
     #[test]
     fn test_apply_window() {
         let data = array![1.0f32, 1.0, 1.0, 1.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
         let window = [0.5f32, 1.0, 1.0, 0.5];
 
         audio.apply_window(&window).unwrap();
@@ -1148,7 +1138,8 @@ mod tests {
     #[test]
     fn test_multi_channel_normalize() {
         let data = array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
-        let mut audio: AudioSamples<f32> = AudioSamples::new_multi_channel(data.into(), 44100);
+        let mut audio: AudioSamples<f32> =
+            AudioSamples::new_multi_channel(data.into(), sample_rate!(44100));
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::MinMax)
@@ -1161,7 +1152,7 @@ mod tests {
     #[test]
     fn test_normalize_zscore() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio
             .normalize(-1.0, 1.0, NormalizationMethod::ZScore)
@@ -1179,7 +1170,7 @@ mod tests {
     #[test]
     fn test_processing_builder_basic() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let expected = array![2.0f32, 4.0, 6.0, 8.0, 10.0];
 
@@ -1196,7 +1187,7 @@ mod tests {
     #[test]
     fn test_processing_builder_chaining() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Test chaining multiple operations - main goal is to ensure no errors occur
         audio
@@ -1213,7 +1204,7 @@ mod tests {
     #[test]
     fn test_processing_builder_normalize() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio
             .processing()
@@ -1229,7 +1220,7 @@ mod tests {
     #[test]
     fn test_processing_builder_empty() {
         let data = array![1.0f32, 2.0, 3.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let builder = audio.processing();
         assert!(builder.is_empty());
@@ -1242,7 +1233,7 @@ mod tests {
     #[test]
     fn test_processing_builder_error_handling() {
         let data = array![1.0f32, 2.0, 3.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Test that invalid operations return errors
         let result = audio
@@ -1256,7 +1247,7 @@ mod tests {
     #[test]
     fn test_processing_builder_multi_channel() {
         let data = array![[1.0f32, 2.0], [3.0, 4.0]];
-        let mut audio = AudioSamples::new_multi_channel(data.into(), 44100);
+        let mut audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100));
 
         let expected = array![[0.5f32, 1.0], [1.5, 2.0]];
 

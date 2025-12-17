@@ -4,13 +4,13 @@
 //! supporting various data interchange formats commonly used in audio analysis and
 //! data science workflows.
 
-use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
-    ConvertTo, I24,
-};
+use crate::error::SerializationError;
 use crate::operations::traits::AudioSamplesSerialise;
 use crate::operations::types::{SerializationConfig, SerializationFormat, TextDelimiter};
-use crate::error::SerializationError;
+use crate::{
+    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    I24,
+};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -41,11 +41,11 @@ impl AudioMetadata {
     /// Create new audio metadata from AudioSamples.
     pub fn from_audio_samples<T: AudioSample>(audio: &AudioSamples<T>) -> Self {
         Self {
-            sample_rate: audio.sample_rate(),
+            sample_rate: audio.sample_rate().get(),
             channels: audio.num_channels() as u32,
             samples_per_channel: audio.samples_per_channel(),
             sample_type: std::any::type_name::<T>().to_string(),
-            duration_seconds: audio.samples_per_channel() as f64 / audio.sample_rate() as f64,
+            duration_seconds: audio.samples_per_channel() as f64 / audio.sample_rate().get() as f64,
             custom_attributes: HashMap::new(),
             serialized_at: chrono::Utc::now().to_rfc3339(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -75,7 +75,7 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
-    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
 {
     fn save_to_file<P: AsRef<Path>>(&self, path: P) -> AudioSampleResult<()> {
         let path = path.as_ref();
@@ -123,23 +123,14 @@ where
 
     fn serialize_to_bytes(&self, format: SerializationFormat) -> AudioSampleResult<Vec<u8>> {
         match format {
-            SerializationFormat::Text { delimiter } => {
-                serialize_text_format(self, delimiter)
-            }
-            SerializationFormat::Binary { endian } => {
-                serialize_binary_format(self, endian)
-            }
-            SerializationFormat::Numpy => {
-                serialize_numpy_format(self)
-            }
+            SerializationFormat::Text { delimiter } => serialize_text_format(self, delimiter),
+            SerializationFormat::Binary { endian } => serialize_binary_format(self, endian),
+            SerializationFormat::Numpy => serialize_numpy_format(self),
             SerializationFormat::NumpyCompressed { compression_level } => {
                 serialize_numpy_compressed_format(self, compression_level)
             }
             _ => Err(AudioSampleError::Serialization(
-                SerializationError::unsupported_format(
-                    format!("{:?}", format),
-                    "serialization",
-                ),
+                SerializationError::unsupported_format(format!("{:?}", format), "serialization"),
             )),
         }
     }
@@ -149,23 +140,14 @@ where
         format: SerializationFormat,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
         match format {
-            SerializationFormat::Text { delimiter } => {
-                deserialize_text_format(data, delimiter)
-            }
-            SerializationFormat::Binary { .. } => {
-                deserialize_binary_format(data)
-            }
-            SerializationFormat::Numpy => {
-                deserialize_numpy_format(data)
-            }
+            SerializationFormat::Text { delimiter } => deserialize_text_format(data, delimiter),
+            SerializationFormat::Binary { .. } => deserialize_binary_format(data),
+            SerializationFormat::Numpy => deserialize_numpy_format(data),
             SerializationFormat::NumpyCompressed { .. } => {
                 deserialize_numpy_compressed_format(data)
             }
             _ => Err(AudioSampleError::Serialization(
-                SerializationError::unsupported_format(
-                    format!("{:?}", format),
-                    "deserialization",
-                ),
+                SerializationError::unsupported_format(format!("{:?}", format), "deserialization"),
             )),
         }
     }
@@ -189,9 +171,7 @@ where
 
         if self.len() != deserialized.len() || self.num_channels() != deserialized.num_channels() {
             return Err(AudioSampleError::Serialization(
-                SerializationError::validation_failed(
-                    "Audio dimensions changed during round-trip",
-                ),
+                SerializationError::validation_failed("Audio dimensions changed during round-trip"),
             ));
         }
 
@@ -200,42 +180,55 @@ where
 
     fn detect_format<P: AsRef<Path>>(path: P) -> AudioSampleResult<SerializationFormat> {
         let path = path.as_ref();
-        let extension = path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("");
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
         match extension.to_lowercase().as_str() {
-            "txt" => Ok(SerializationFormat::Text { delimiter: TextDelimiter::Space }),
+            "txt" => Ok(SerializationFormat::Text {
+                delimiter: TextDelimiter::Space,
+            }),
             "csv" => Ok(SerializationFormat::Csv),
-            "bin" | "audio" => Ok(SerializationFormat::Binary { endian: crate::operations::types::Endianness::Native }),
+            "bin" | "audio" => Ok(SerializationFormat::Binary {
+                endian: crate::operations::types::Endianness::Native,
+            }),
             "npy" => Ok(SerializationFormat::Numpy),
-            "npz" => Ok(SerializationFormat::NumpyCompressed { compression_level: 6 }),
+            "npz" => Ok(SerializationFormat::NumpyCompressed {
+                compression_level: 6,
+            }),
             _ => Err(AudioSampleError::Serialization(
-                SerializationError::unsupported_format(
-                    extension.to_string(),
-                    "file extension",
-                ),
+                SerializationError::unsupported_format(extension.to_string(), "file extension"),
             )),
         }
     }
 
     fn supported_serialization_formats() -> Vec<SerializationFormat> {
         vec![
-            SerializationFormat::Text { delimiter: TextDelimiter::Space },
+            SerializationFormat::Text {
+                delimiter: TextDelimiter::Space,
+            },
             SerializationFormat::Csv,
-            SerializationFormat::Binary { endian: crate::operations::types::Endianness::Native },
+            SerializationFormat::Binary {
+                endian: crate::operations::types::Endianness::Native,
+            },
             SerializationFormat::Numpy,
-            SerializationFormat::NumpyCompressed { compression_level: 6 },
+            SerializationFormat::NumpyCompressed {
+                compression_level: 6,
+            },
         ]
     }
 
     fn supported_deserialization_formats() -> Vec<SerializationFormat> {
         vec![
-            SerializationFormat::Text { delimiter: TextDelimiter::Space },
+            SerializationFormat::Text {
+                delimiter: TextDelimiter::Space,
+            },
             SerializationFormat::Csv,
-            SerializationFormat::Binary { endian: crate::operations::types::Endianness::Native },
+            SerializationFormat::Binary {
+                endian: crate::operations::types::Endianness::Native,
+            },
             SerializationFormat::Numpy,
-            SerializationFormat::NumpyCompressed { compression_level: 6 },
+            SerializationFormat::NumpyCompressed {
+                compression_level: 6,
+            },
         ]
     }
 
@@ -332,9 +325,7 @@ where
         } else {
             // Parse the sample value directly since T: AudioSample already includes serialization
             if let Ok(sample) = line.parse::<f64>() {
-                if let Ok(converted) = sample.convert_to() {
-                    samples.push(converted);
-                }
+                samples.push(sample.convert_to());
             }
         }
     }
@@ -342,20 +333,33 @@ where
     match channels {
         1 => Ok(AudioSamples::new_mono(
             ndarray::Array1::from_vec(samples),
-            sample_rate,
+            std::num::NonZeroU32::new(sample_rate).ok_or_else(|| {
+                AudioSampleError::Serialization(SerializationError::deserialization_failed(
+                    "text",
+                    "Sample rate must be non-zero",
+                ))
+            })?,
         )),
         _ => {
             let samples_per_channel = samples.len() / channels;
-            let reshaped = ndarray::Array2::from_shape_vec(
-                (channels, samples_per_channel),
-                samples,
-            ).map_err(|e| {
-                AudioSampleError::Serialization(SerializationError::deserialization_failed(
-                    "text",
-                    format!("Failed to reshape data: {}", e),
-                ))
-            })?;
-            Ok(AudioSamples::new_multi_channel(reshaped, sample_rate))
+            let reshaped =
+                ndarray::Array2::from_shape_vec((channels, samples_per_channel), samples).map_err(
+                    |e| {
+                        AudioSampleError::Serialization(SerializationError::deserialization_failed(
+                            "text",
+                            format!("Failed to reshape data: {}", e),
+                        ))
+                    },
+                )?;
+            Ok(AudioSamples::new_multi_channel(
+                reshaped,
+                std::num::NonZeroU32::new(sample_rate).ok_or_else(|| {
+                    AudioSampleError::Serialization(SerializationError::deserialization_failed(
+                        "text",
+                        "Sample rate must be non-zero",
+                    ))
+                })?,
+            ))
         }
     }
 }
@@ -389,13 +393,19 @@ fn serialize_binary_format<T: AudioSample>(
 
     // Write version
     match endian {
-        crate::operations::types::Endianness::Big => buffer.extend_from_slice(&FORMAT_VERSION.to_be_bytes()),
-        crate::operations::types::Endianness::Little => buffer.extend_from_slice(&FORMAT_VERSION.to_le_bytes()),
-        crate::operations::types::Endianness::Native => buffer.extend_from_slice(&FORMAT_VERSION.to_ne_bytes()),
+        crate::operations::types::Endianness::Big => {
+            buffer.extend_from_slice(&FORMAT_VERSION.to_be_bytes())
+        }
+        crate::operations::types::Endianness::Little => {
+            buffer.extend_from_slice(&FORMAT_VERSION.to_le_bytes())
+        }
+        crate::operations::types::Endianness::Native => {
+            buffer.extend_from_slice(&FORMAT_VERSION.to_ne_bytes())
+        }
     }
 
     // Write metadata
-    let sample_rate = audio.sample_rate();
+    let sample_rate = audio.sample_rate().get();
     let channels = audio.num_channels() as u32;
     let samples_per_channel = audio.samples_per_channel() as u64;
     let sample_type = sample_type_id::<T>(); // Simple type identifier
@@ -433,9 +443,15 @@ fn serialize_binary_format<T: AudioSample>(
         // Write the JSON data length first
         let data_len = json_data.len() as u64;
         match endian {
-            crate::operations::types::Endianness::Big => buffer.extend_from_slice(&data_len.to_be_bytes()),
-            crate::operations::types::Endianness::Little => buffer.extend_from_slice(&data_len.to_le_bytes()),
-            crate::operations::types::Endianness::Native => buffer.extend_from_slice(&data_len.to_ne_bytes()),
+            crate::operations::types::Endianness::Big => {
+                buffer.extend_from_slice(&data_len.to_be_bytes())
+            }
+            crate::operations::types::Endianness::Little => {
+                buffer.extend_from_slice(&data_len.to_le_bytes())
+            }
+            crate::operations::types::Endianness::Native => {
+                buffer.extend_from_slice(&data_len.to_ne_bytes())
+            }
         }
 
         // Write the JSON data
@@ -452,7 +468,8 @@ fn serialize_binary_format<T: AudioSample>(
 fn deserialize_binary_format<T: AudioSample>(
     data: &[u8],
 ) -> AudioSampleResult<AudioSamples<'static, T>> {
-    if data.len() < 36 { // Magic + version + sample_rate + channels + samples_per_channel + sample_type + data_len
+    if data.len() < 36 {
+        // Magic + version + sample_rate + channels + samples_per_channel + sample_type + data_len
         return Err(AudioSampleError::Serialization(
             SerializationError::invalid_header("file", "File too short for binary format"),
         ));
@@ -476,15 +493,13 @@ fn deserialize_binary_format<T: AudioSample>(
     let sample_rate = u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
     let channels = u32::from_ne_bytes([data[12], data[13], data[14], data[15]]) as usize;
     let samples_per_channel = u64::from_ne_bytes([
-        data[16], data[17], data[18], data[19],
-        data[20], data[21], data[22], data[23]
+        data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
     ]) as usize;
     let _sample_type = u32::from_ne_bytes([data[24], data[25], data[26], data[27]]);
 
     // Read data length
     let data_len = u64::from_ne_bytes([
-        data[28], data[29], data[30], data[31],
-        data[32], data[33], data[34], data[35]
+        data[28], data[29], data[30], data[31], data[32], data[33], data[34], data[35],
     ]) as usize;
 
     // Read the actual audio data as bytes and cast back to T
@@ -493,7 +508,10 @@ fn deserialize_binary_format<T: AudioSample>(
     // Deserialize JSON data from the binary wrapper
     if audio_data_bytes.len() < data_len {
         return Err(AudioSampleError::Serialization(
-            SerializationError::invalid_header("data", "Insufficient data for declared JSON length"),
+            SerializationError::invalid_header(
+                "data",
+                "Insufficient data for declared JSON length",
+            ),
         ));
     }
 
@@ -513,27 +531,37 @@ fn deserialize_binary_format<T: AudioSample>(
     match channels {
         1 => Ok(AudioSamples::new_mono(
             ndarray::Array1::from_vec(samples_vec),
-            sample_rate,
-        )),
-        _ => {
-            let reshaped = ndarray::Array2::from_shape_vec(
-                (channels, samples_per_channel),
-                samples_vec,
-            ).map_err(|e| {
+            std::num::NonZeroU32::new(sample_rate).ok_or_else(|| {
                 AudioSampleError::Serialization(SerializationError::deserialization_failed(
                     "binary",
-                    format!("Failed to reshape data: {}", e),
+                    "Sample rate must be non-zero",
                 ))
-            })?;
-            Ok(AudioSamples::new_multi_channel(reshaped, sample_rate))
+            })?,
+        )),
+        _ => {
+            let reshaped =
+                ndarray::Array2::from_shape_vec((channels, samples_per_channel), samples_vec)
+                    .map_err(|e| {
+                        AudioSampleError::Serialization(SerializationError::deserialization_failed(
+                            "binary",
+                            format!("Failed to reshape data: {}", e),
+                        ))
+                    })?;
+            Ok(AudioSamples::new_multi_channel(
+                reshaped,
+                std::num::NonZeroU32::new(sample_rate).ok_or_else(|| {
+                    AudioSampleError::Serialization(SerializationError::deserialization_failed(
+                        "binary",
+                        "Sample rate must be non-zero",
+                    ))
+                })?,
+            ))
         }
     }
 }
 
 // NumPy format implementations (placeholder)
-fn serialize_numpy_format<T: AudioSample>(
-    _audio: &AudioSamples<T>,
-) -> AudioSampleResult<Vec<u8>> {
+fn serialize_numpy_format<T: AudioSample>(_audio: &AudioSamples<T>) -> AudioSampleResult<Vec<u8>> {
     // Placeholder - would implement NPY format specification
     Err(AudioSampleError::Serialization(
         SerializationError::missing_dependency(
@@ -587,13 +615,14 @@ fn deserialize_numpy_compressed_format<T: AudioSample>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operations::types::{Endianness, TextDelimiter};
+    use crate::sample_rate;
     use ndarray::array;
-    use crate::operations::types::{TextDelimiter, Endianness};
 
     #[test]
     fn test_audio_metadata_creation() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let metadata = AudioMetadata::from_audio_samples(&audio);
 
@@ -644,7 +673,9 @@ mod tests {
 
         assert!(matches!(
             AudioSamples::<f32>::detect_format(Path::new("test.txt")),
-            Ok(SerializationFormat::Text { delimiter: TextDelimiter::Space })
+            Ok(SerializationFormat::Text {
+                delimiter: TextDelimiter::Space
+            })
         ));
 
         assert!(matches!(
@@ -654,7 +685,9 @@ mod tests {
 
         assert!(matches!(
             AudioSamples::<f32>::detect_format(Path::new("test.bin")),
-            Ok(SerializationFormat::Binary { endian: Endianness::Native })
+            Ok(SerializationFormat::Binary {
+                endian: Endianness::Native
+            })
         ));
 
         assert!(matches!(
@@ -664,7 +697,9 @@ mod tests {
 
         assert!(matches!(
             AudioSamples::<f32>::detect_format(Path::new("test.npz")),
-            Ok(SerializationFormat::NumpyCompressed { compression_level: 6 })
+            Ok(SerializationFormat::NumpyCompressed {
+                compression_level: 6
+            })
         ));
 
         // Unknown extension should fail
@@ -674,7 +709,7 @@ mod tests {
     #[test]
     fn test_text_format_serialization_mono() {
         let data = array![1.0f32, -0.5, 0.0, 2.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let result = serialize_text_format(&audio, TextDelimiter::Space);
         assert!(result.is_ok());
@@ -701,7 +736,7 @@ mod tests {
         assert!(result.is_ok());
 
         let audio = result.unwrap();
-        assert_eq!(audio.sample_rate(), 22050);
+        assert_eq!(audio.sample_rate(), sample_rate!(22050));
         assert_eq!(audio.num_channels(), 1);
         assert_eq!(audio.samples_per_channel(), 3);
 
@@ -714,24 +749,28 @@ mod tests {
     #[test]
     fn test_text_format_round_trip() {
         let data = array![1.0f64, 2.0, 3.0];
-        let original = AudioSamples::new_mono(data, 48000);
+        let original = AudioSamples::new_mono(data, sample_rate!(48000));
 
         // Serialize
         let serialized = serialize_text_format(&original, TextDelimiter::Space).unwrap();
 
         // Deserialize
-        let deserialized = deserialize_text_format::<f64>(&serialized, TextDelimiter::Space).unwrap();
+        let deserialized =
+            deserialize_text_format::<f64>(&serialized, TextDelimiter::Space).unwrap();
 
         // Check metadata preserved
         assert_eq!(original.sample_rate(), deserialized.sample_rate());
         assert_eq!(original.num_channels(), deserialized.num_channels());
-        assert_eq!(original.samples_per_channel(), deserialized.samples_per_channel());
+        assert_eq!(
+            original.samples_per_channel(),
+            deserialized.samples_per_channel()
+        );
     }
 
     #[test]
     fn test_binary_format_serialization_structure() {
         let data = array![1.0f32, -1.0, 0.5];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let result = serialize_binary_format(&audio, Endianness::Native);
         assert!(result.is_ok());
@@ -742,21 +781,34 @@ mod tests {
         assert_eq!(&serialized[0..4], AUDIO_MAGIC);
 
         // Check version
-        let version = u32::from_ne_bytes([serialized[4], serialized[5], serialized[6], serialized[7]]);
+        let version =
+            u32::from_ne_bytes([serialized[4], serialized[5], serialized[6], serialized[7]]);
         assert_eq!(version, FORMAT_VERSION);
 
         // Check sample rate
-        let sample_rate = u32::from_ne_bytes([serialized[8], serialized[9], serialized[10], serialized[11]]);
+        let sample_rate =
+            u32::from_ne_bytes([serialized[8], serialized[9], serialized[10], serialized[11]]);
         assert_eq!(sample_rate, 44100);
 
         // Check channels
-        let channels = u32::from_ne_bytes([serialized[12], serialized[13], serialized[14], serialized[15]]);
+        let channels = u32::from_ne_bytes([
+            serialized[12],
+            serialized[13],
+            serialized[14],
+            serialized[15],
+        ]);
         assert_eq!(channels, 1);
 
         // Check samples per channel
         let samples_per_channel = u64::from_ne_bytes([
-            serialized[16], serialized[17], serialized[18], serialized[19],
-            serialized[20], serialized[21], serialized[22], serialized[23]
+            serialized[16],
+            serialized[17],
+            serialized[18],
+            serialized[19],
+            serialized[20],
+            serialized[21],
+            serialized[22],
+            serialized[23],
         ]);
         assert_eq!(samples_per_channel, 3);
 
@@ -767,7 +819,7 @@ mod tests {
     #[test]
     fn test_binary_format_round_trip_structure() {
         let data = array![1.0f32, 2.0];
-        let original = AudioSamples::new_mono(data, 44100);
+        let original = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Serialize
         let serialized = serialize_binary_format(&original, Endianness::Native).unwrap();
@@ -778,7 +830,10 @@ mod tests {
         // Check metadata preserved
         assert_eq!(original.sample_rate(), deserialized.sample_rate());
         assert_eq!(original.num_channels(), deserialized.num_channels());
-        assert_eq!(original.samples_per_channel(), deserialized.samples_per_channel());
+        assert_eq!(
+            original.samples_per_channel(),
+            deserialized.samples_per_channel()
+        );
     }
 
     #[test]
@@ -789,7 +844,11 @@ mod tests {
         let result = deserialize_binary_format::<f32>(&bad_data);
         assert!(result.is_err());
 
-        if let Err(AudioSampleError::Serialization(SerializationError::InvalidHeader { component, .. })) = result {
+        if let Err(AudioSampleError::Serialization(SerializationError::InvalidHeader {
+            component,
+            ..
+        })) = result
+        {
             assert_eq!(component, "magic");
         } else {
             panic!("Expected invalid magic error");
@@ -805,7 +864,11 @@ mod tests {
         let result = deserialize_binary_format::<f32>(&data);
         assert!(result.is_err());
 
-        if let Err(AudioSampleError::Serialization(SerializationError::InvalidHeader { component, .. })) = result {
+        if let Err(AudioSampleError::Serialization(SerializationError::InvalidHeader {
+            component,
+            ..
+        })) = result
+        {
             assert_eq!(component, "version");
         } else {
             panic!("Expected invalid version error");
@@ -830,9 +893,21 @@ mod tests {
         assert!(!deserialization_formats.is_empty());
 
         // Should include basic formats
-        assert!(serialization_formats.iter().any(|f| matches!(f, SerializationFormat::Text { .. })));
-        assert!(serialization_formats.iter().any(|f| matches!(f, SerializationFormat::Binary { .. })));
-        assert!(serialization_formats.iter().any(|f| matches!(f, SerializationFormat::Csv)));
+        assert!(
+            serialization_formats
+                .iter()
+                .any(|f| matches!(f, SerializationFormat::Text { .. }))
+        );
+        assert!(
+            serialization_formats
+                .iter()
+                .any(|f| matches!(f, SerializationFormat::Binary { .. }))
+        );
+        assert!(
+            serialization_formats
+                .iter()
+                .any(|f| matches!(f, SerializationFormat::Csv))
+        );
 
         // Serialization and deserialization formats should match
         assert_eq!(serialization_formats.len(), deserialization_formats.len());
@@ -841,11 +916,13 @@ mod tests {
     #[test]
     fn test_estimate_serialized_size() {
         let data = ndarray::Array1::from_elem(1000, 1.0f32);
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
-        let text_size = audio.estimate_serialized_size(SerializationFormat::Text {
-            delimiter: TextDelimiter::Space
-        }).unwrap();
+        let text_size = audio
+            .estimate_serialized_size(SerializationFormat::Text {
+                delimiter: TextDelimiter::Space,
+            })
+            .unwrap();
 
         // Text format should be larger due to verbose representation
         let expected_min_size = 1000 * std::mem::size_of::<f32>();
@@ -857,7 +934,7 @@ mod tests {
         use std::fs;
 
         let data = array![1.0f32, 2.0, 3.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Create a temporary file
         let temp_path = "/tmp/test_metadata.json";
@@ -881,7 +958,7 @@ mod tests {
     #[test]
     fn test_import_metadata_borrowed() {
         let data = array![1.0f32, 2.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Import should fail for borrowed AudioSamples
         let result = audio.import_metadata("/tmp/nonexistent.json");
@@ -891,7 +968,7 @@ mod tests {
     #[test]
     fn test_multi_channel_text_serialization() {
         let data = array![[1.0f32, 2.0], [-1.0, -2.0]]; // 2 channels, 2 samples each
-        let audio = AudioSamples::new_multi_channel(data, 44100);
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100));
 
         let result = serialize_text_format(&audio, TextDelimiter::Space);
         assert!(result.is_ok());
@@ -913,42 +990,34 @@ mod tests {
         assert!(result.is_ok());
 
         let audio = result.unwrap();
-        assert_eq!(audio.sample_rate(), 44100);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
         assert_eq!(audio.num_channels(), 2);
         assert_eq!(audio.samples_per_channel(), 2); // 4 total samples / 2 channels
     }
 
     #[test]
+    #[should_panic(expected = "data must not be empty")]
     fn test_empty_audio_serialization() {
         let data = ndarray::Array1::from_elem(0, 0.0f32); // Empty array
-        let audio = AudioSamples::new_mono(data, 44100);
-
-        let result = serialize_text_format(&audio, TextDelimiter::Space);
-        assert!(result.is_ok());
-
-        let serialized = result.unwrap();
-        let text = String::from_utf8(serialized).unwrap();
-
-        // Should still contain metadata even for empty audio
-        assert!(text.contains("# sample_rate: 44100"));
-        assert!(text.contains("# channels: 1"));
+        // This should panic because empty audio is not allowed
+        let _audio = AudioSamples::new_mono(data, sample_rate!(44100));
     }
 
     #[test]
     fn test_different_sample_types() {
         // Test f64
         let data_f64 = array![1.0f64, 2.0];
-        let audio_f64 = AudioSamples::new_mono(data_f64, 44100);
+        let audio_f64 = AudioSamples::new_mono(data_f64, sample_rate!(44100));
         assert!(serialize_text_format(&audio_f64, TextDelimiter::Space).is_ok());
 
         // Test i16
         let data_i16 = array![1000i16, -1000];
-        let audio_i16 = AudioSamples::new_mono(data_i16, 44100);
+        let audio_i16 = AudioSamples::new_mono(data_i16, sample_rate!(44100));
         assert!(serialize_text_format(&audio_i16, TextDelimiter::Space).is_ok());
 
         // Test i32
         let data_i32 = array![100000i32, -100000];
-        let audio_i32 = AudioSamples::new_mono(data_i32, 44100);
+        let audio_i32 = AudioSamples::new_mono(data_i32, sample_rate!(44100));
         assert!(serialize_text_format(&audio_i32, TextDelimiter::Space).is_ok());
     }
 
@@ -956,12 +1025,14 @@ mod tests {
     fn test_trait_implementation_completeness() {
         // Test that all required trait methods are implemented
         let data = array![1.0f32, 2.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // These should compile and run without panicking
         let _ = AudioSamples::<f32>::supported_serialization_formats();
         let _ = AudioSamples::<f32>::supported_deserialization_formats();
-        let _ = audio.estimate_serialized_size(SerializationFormat::Text { delimiter: TextDelimiter::Space });
+        let _ = audio.estimate_serialized_size(SerializationFormat::Text {
+            delimiter: TextDelimiter::Space,
+        });
 
         // Export metadata should work
         let temp_path = "/tmp/test_trait_completeness.json";

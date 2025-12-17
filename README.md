@@ -9,201 +9,289 @@
 [![Crates.io][crate-img]][crate] [![Docs.rs][docs-img]][docs] [![License: MIT][license-img]][license]
 </div>
 
-A high-performance audio processing library for Rust that provides type-safe sample format conversions, statistical analysis, and various audio processing operations.
+A typed audio processing library for Rust that treats audio as a
+first-class, invariant-preserving object rather than an unstructured
+numeric buffer.
 
-Core building block of the wider [AudioRs](link_to_website_in_development) ecosystem.
+AudioSamples provides explicit sample-format semantics, safe and
+transparent conversions between integer and floating-point
+representations, and a coherent API for constructing, transforming,
+and analysing audio data without relying on convention or implicit
+assumptions.
+
+---
 
 ## Overview
 
-<!-- This section is reserved for the project's purpose and motivation. -->
+Most audio libraries expose samples as raw numeric buffers. In Python,
+audio is typically represented as a NumPy array whose `dtype` is
+explicit, but whose meaning is not: sample rate, channel layout,
+amplitude range, memory interleaving, and PCM versus floating-point
+semantics are tracked externally, if at all. In Rust, the situation is
+reversed but not resolved. Libraries provide fast and safe low-level
+primitives, yet users are still responsible for managing raw buffers,
+writing ad hoc conversion code, and manually preserving invariants
+across crates.
 
+AudioSamples is designed to close this gap by providing a strongly
+typed audio representation that makes audio semantics explicit and
+enforced by construction. Sample format, numeric domain, channel
+structure, and layout are encoded in the type system, and all
+operations preserve or explicitly update these invariants.
+
+The result is an API that supports both exploratory workflows and
+reliable system-level use, without requiring users to remember hidden
+conventions or reimplement common audio logic.
+
+AudioSamples is the core data and processing layer of the broader
+AudioRs ecosystem. It defines the canonical audio object and the
+operations that act upon it.
+
+Other crates in the ecosystem build on this foundation:
+
+- `audio_io` for decoding and encoding audio containers into typed
+  audio objects
+- `audio_playback` for device-level output
+- `audio_python` for Python bindings, enabling AudioSamples to act as a
+  type-safe backend for Python workflows
+- `html_view` for lightweight visualisation and inspection, generating
+  self-contained HTML outputs suitable for analysis and reporting
+
+By separating representation from I/O, playback, and visualisation,
+AudioRs remains modular while enforcing a single, consistent audio
+model throughout the stack.
+
+---
+
+## Why Use audio_samples?
+
+AudioSamples exists to make audio semantics explicit and enforceable.
+
+In many audio libraries, audio data is represented as a numeric buffer
+with metadata tracked separately or implicitly. Sample rate, channel
+layout, amplitude domain, and sample representation often exist outside
+the type system and are maintained by convention. As a result,
+mismatches between representations can propagate silently through
+pipelines, particularly when converting between integer PCM and
+floating-point formats or combining signals from different sources.
+
+AudioSamples addresses this by treating audio as a structured object.
+An `AudioSamples<'a, T>` value couples sample data with its sample rate
+and channel layout, and operations on audio explicitly preserve or
+update these invariants. Conversions between sample formats are defined
+in terms of semantic transformations rather than raw casts, ensuring
+that changes in numerical representation are intentional and
+well-defined.
+
+This design supports workflows where correctness matters: research
+pipelines, long-lived systems code, and multi-stage audio processing
+where buffers pass through several components. Rather than relying on
+discipline or external documentation, AudioSamples encodes audio
+assumptions directly in the API.
+
+---
 
 ## Installation
-
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-audio_samples = "0.11.0"
-```
-
-or more easily with:
 
 ```bash
 cargo add audio_samples
 ```
 
+See the [Features](#features) for more details.
 
-For specific features, enable only what you need:
-
-```toml
-[dependencies]
-audio_samples = { version = "0.11.0", features = ["fft", "plotting"] }
-```
-
-Or enable everything:
-
-```toml
-[dependencies]
-audio_samples = { version = "0.11.0", features = ["full"] }
-```
-
-## Features
-
-The library uses a modular feature system to keep dependencies minimal:
-
-- **`core-ops`** (default) - Basic audio operations and statistics
-- **`fft`** - Fast Fourier Transform and spectral analysis
-- **`plotting`** - Audio visualization capabilities
-- **`resampling`** - High-quality audio resampling
-- **`parallel-processing`** - Multi-threaded processing with Rayon
-- **`simd`** - SIMD acceleration for supported operations
-- **`beat-detection`** - Tempo and beat tracking (requires `fft`)
-- **`full`** - Enables all features
-
-## Full Examples
-
-A range of examples demonstrating this crate and its companion [audio_io](https://github.com/jmg049/audio_io) crate can be found at [here]().
-
-- [DTMF tone generation and decoding]()
-- [Basic synthesizer]()
-- [Silence Trimming CLI tool]()
-- [Audio file information CLI tool]()
-
-## Available Operations
-
-The library organizes functionality into focused traits:
-
-### Core Audio Operations (`core-ops`)
-
-- **Statistics** (`AudioStatistics`) - Peak, RMS, mean, variance, zero-crossings, autocorrelation
-- **Processing** (`AudioProcessing`) - Normalize, scale, clip, filtering, compression, DC removal
-- **Channel Operations** (`AudioChannelOps`) - Mono/stereo conversion, channel extraction, pan, balance
-- **Editing** (`AudioEditing`) - Trim, pad, reverse, fade, split, concatenate, mix
-
-### Signal Processing Features
-
-- **IIR Filtering** (`AudioIirFiltering`) - Biquad filters, shelving, peaking
-- **Parametric EQ** (`AudioParametricEq`) - Multi-band equalizer with adjustable Q
-- **Dynamic Range** (`AudioDynamicRange`) - Compression, limiting, expansion, gating
-
-### Advanced Analysis (Optional Features)
-
-- **Spectral Analysis** (`AudioTransforms`) - FFT, STFT, spectrogram, mel-spectrogram, MFCC, CQT
-- **Pitch Analysis** (`AudioPitchAnalysis`) - Fundamental frequency, harmonic analysis
-- **Beat Detection** - Tempo analysis and beat tracking
-- **Plotting** (`AudioPlottingUtils`) - Waveform, spectrogram, and frequency domain visualization
+---
 
 ## Quick Start
 
-### Creating Audio Data
+### Generating and mixing signals
+
+This example generates a sine wave in a target sample format, converts
+it to floating-point samples, and mixes it with a second signal.
+
 
 ```rust
-use audio_samples::AudioSamples;
-use ndarray::array;
+use audio_samples::{
+    AudioProcessing, AudioTypeConversion, cosine_wave, operations::types::NormalizationMethod,
+    sine_wave,
+};
+use std::time::Duration;
 
-// Create mono audio
-let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
-let audio = AudioSamples::new_mono(data, 44100);
+fn main() {
+    let sample_rate = 44_100;
+    let duration = Duration::from_secs_f64(1.0);
+    let frequency = 440.0;
+    let amplitude = 0.5;
 
-// Create stereo audio
-let stereo_data = array![
-    [0.1f32, 0.5, -0.3],  // Left channel
-    [0.8f32, -0.2, 0.4]   // Right channel
-];
-let stereo_audio = AudioSamples::new_multi_channel(stereo_data, 44100);
-```
+    // Generate a sine wave with i16 output samples.
+    // The waveform is computed in f32 and converted into i16.
+    let pcm_sine = sine_wave::<i16, f32>(frequency, duration, sample_rate, amplitude);
 
-### Basic Statistics
+    // Convert to floating-point representation
+    let float_sine = pcm_sine.to_format::<f32>();
 
-```rust
-use audio_samples::AudioStatistics;
+    // Generate a second signal directly as floating-point samples
+    let cosine = cosine_wave::<f32, f32>(frequency / 2.0, duration, sample_rate, amplitude);
 
-let peak = audio.peak();
-let min = audio.min_sample();
-let max = audio.max_sample();
-let mean = audio.mean();
-
-// More complex statistics (return Result)
-let rms = audio.rms()?;
-let variance = audio.variance()?;
-let zero_crossings = audio.zero_crossings();
-```
-
-### Processing Operations
-
-```rust
-use audio_samples::{AudioProcessing, NormalizationMethod};
-
-let mut audio = AudioSamples::new_mono(data, 44100);
-
-// Basic processing (in-place)
-audio.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
-audio.scale(0.5); // Reduce volume by half
-audio.remove_dc_offset();
-```
-
-### Type Conversions
-
-```rust
-// Convert between sample types
-let audio_f32 = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], 44100);
-let audio_i16 = audio_f32.as_type::<i16>()?;
-let audio_f64 = audio_f32.as_type::<f64>()?;
-```
-
-### Iterating Over Audio Data
-
-```rust
-use audio_samples::AudioSampleIterators;
-
-// Iterate by frames (one sample from each channel)
-for frame in audio.frames() {
-    println!("Frame: {:?}", frame);
-}
-
-// Iterate by channels
-for channel in audio.channels() {
-    println!("Channel: {:?}", channel);
-}
-
-// Windowed iteration for analysis
-for window in audio.windows(1024, 512) {
-    // Process 1024-sample windows with 50% overlap
-    let window_rms = window.rms()?;
-    println!("Window RMS: {:.3}", window_rms);
+    // Mix the two signals
+    let mixed = (float_sine + cosine).normalize(-1.0, 1.0, NormalizationMethod::MinMax);
 }
 ```
 
-## Builder Pattern for Complex Processing
+---
 
-For more complex operations, use the fluent builder API:
+### Spectral transforms and analysis
 
-```rust
-use audio_samples::{AudioSamples, NormalizationMethod};
+AudioSamples supports spectral and time–frequency transforms via the
+`AudioTransforms` trait, enabled by the `spectral-analysis` feature.
+These operations produce standard frequency-domain and
+time–frequency representations used in audio analysis and research.
 
-let mut audio = AudioSamples::new_mono(data, 44100);
+Enable the feature:
 
-// Chain multiple operations
-audio.processing()
-    .normalize(-1.0, 1.0, NormalizationMethod::Peak)
-    .scale(0.8)
-    .remove_dc_offset()
-    .apply()?;
+```bash
+cargo add audio_samples --features spectral-analysis
 ```
 
+#### Example: STFT, spectrogram, and MFCC computation
+
+```rust
+use audio_samples::{
+    AudioTransforms,
+    operations::types::{SpectrogramScale, WindowType},
+    sine_wave,
+};
+use std::time::Duration;
+
+fn main() -> audio_samples::AudioSampleResult<()> {
+    let sample_rate = 44_100;
+    let duration = Duration::from_secs_f64(2.0);
+
+    let audio = sine_wave::<f32, f32>(220.0, duration, sample_rate, 0.8);
+
+    let window_size = 2048;
+    let hop_size = 512;
+
+    let window = WindowType::<f32>::Hanning;
+
+    let _stft = audio.stft::<f32>(window_size, hop_size, window)?;
+
+    let _spectrogram = audio.spectrogram::<f32>(
+        window_size,
+        hop_size,
+        WindowType::<f32>::Hanning,
+        SpectrogramScale::Log,
+        true,
+    )?;
+
+    let _mfcc = audio.mfcc::<f32>(13, 40, 80.0, (sample_rate as f32) / 2.0)?;
+
+    Ok(())
+}
+```
+
+---
+
+## <a name="features">Features</a>
+
+### Default features
+
+- `statistics`
+- `processing`
+- `editing`
+- `channels`
+
+### Major functionality groups
+
+- `fft`
+- `resampling`
+- `serialization`
+- `plotting`
+
+### Transform and analysis features
+
+- `spectral-analysis`
+- `beat-detection` (requires `spectral-analysis`)
+
+### Plotting sub-features
+
+- `static-plots` (PNG output)
+
+### Performance features
+
+- `parallel-processing`
+- `simd` (nightly only)
+- `mkl`
+- `fixed-size-audio`
+
+### Utility features
+
+- `formatting`
+- `random-generation`
+- `utilities-full`
+
+---
 
 ## Documentation
 
-Full API documentation is available at [docs.rs/audio_samples](https://docs.rs/audio_samples).
+Full API documentation is available at
+[https://docs.rs/audio_samples](https://docs.rs/audio_samples)
+
+---
+
+## Examples
+
+A range of examples is included in the repository.
+
+Additional demos include:
+
+- DTMF encoder and decoder
+- Basic synthesis examples
+- Audio inspection utilities
+
+More advanced I/O and playback examples are provided in the companion
+crates.
+
+---
+
+## AudioRs — Companion Crates
+
+### [`audio_io`](https://github.com/jmg049/audio_io)
+
+Audio decoding and encoding into typed audio objects.
+
+### [`audio_playback`](https://github.com/jmg049/audio_playback)
+
+Device-level playback built on AudioSamples.
+
+### [`audio_python`](https://github.com/jmg049/audio_python)
+
+Python bindings exposing AudioSamples, AudioIO and AudioPlayback.
+
+### [`html_view`](https://github.com/jmg049/html_view)
+
+Lightweight visualisation and inspection via self-contained HTML.
+
+### [`dtmf_tones`](https://github.com/jmg049/dtmf_tones)
+
+A zero-heap, `no_std` friendly, **const-first** implementation of the standard DTMF (Dual-Tone Multi-Frequency) keypad used in telephony systems.  
+This crate provides compile-time safe mappings between keypad keys and their canonical low/high frequencies, along with **runtime helpers** for practical audio processing.
+
+### `i24`
+
+24-bit integer audio sample type.
+
+---
 
 ## License
 
 MIT License
 
+---
+
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome. Please submit a pull request and see
+[CONTRIBUTING.md](CONTRIBUTING.md) for guidance.
 
 [crate]: https://crates.io/crates/audio_samples  
 [crate-img]: https://img.shields.io/crates/v/audio_samples?style=for-the-badge&color=009E73&label=crates.io

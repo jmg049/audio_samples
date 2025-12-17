@@ -12,6 +12,7 @@ use crate::{
 };
 
 use ndarray::Array1;
+use num_traits::FloatConst;
 
 impl<'a, T: AudioSample> AudioPitchAnalysis<T> for AudioSamples<'a, T>
 where
@@ -47,7 +48,7 @@ where
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
-        let sample_rate_f: F = to_precision(self.sample_rate);
+        let sample_rate_f: F = to_precision(self.sample_rate.get());
 
         // Calculate tau (lag) limits based on frequency constraints
         let min_tau = (sample_rate_f / max_frequency).to_usize().expect("both sample_rate and max_frequency are non-zero positive numbers so their product will be non-zero and positve. ");
@@ -79,7 +80,7 @@ where
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
 
         // Calculate tau (lag) limits based on frequency constraints
         let min_tau = (sample_rate / max_frequency).to_usize().expect("both sample_rate and max_frequency are non-zero positive numbers so their product will be non-zero and positve. ");
@@ -115,7 +116,7 @@ where
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
-        let sample_rate: F = to_precision(self.sample_rate());
+        let sample_rate: F = to_precision(self.sample_rate().get());
         let mut results = Vec::new();
 
         // Process each windowed segment
@@ -133,7 +134,7 @@ where
 
             for x in window {
                 // Convert f64 to T using the existing conversion system
-                window_data.push(x.convert_to()?);
+                window_data.push(x.convert_to());
             }
 
             let window_audio =
@@ -172,7 +173,7 @@ where
         }
 
         let samples = self.to_mono_float_samples()?;
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
 
         // Compute power spectrum
         let spectrum = compute_power_spectrum(&samples)?;
@@ -229,7 +230,7 @@ where
         }
 
         let samples: Vec<F> = self.to_mono_float_samples()?;
-        let sample_rate = to_precision::<F, _>(self.sample_rate);
+        let sample_rate = to_precision::<F, _>(self.sample_rate.get());
 
         // Compute power spectrum
         let spectrum = compute_power_spectrum(&samples)?;
@@ -280,7 +281,7 @@ where
 
         // Krumhansl-Schmuckler key-finding algorithm implementation
         let samples: Vec<F> = self.to_mono_float_samples()?;
-        let sample_rate: F = to_precision(self.sample_rate);
+        let sample_rate: F = to_precision(self.sample_rate.get());
 
         // Krumhansl-Schmuckler key profiles (major and minor)
         let major_profile: [f64; 12] = [
@@ -294,7 +295,7 @@ where
         let mut chroma_sum = vec![F::zero(); 12];
         let mut num_windows = 0;
 
-        let two_pi = to_precision::<F, _>(2.0) * F::PI();
+        let two_pi = to_precision::<F, _>(2.0) * <F as FloatConst>::PI();
 
         for start in (0..samples.len()).step_by(hop_size) {
             let end = (start + window_size).min(samples.len());
@@ -311,7 +312,9 @@ where
                 .map(|(i, &x)| {
                     let hann = to_precision::<F, _>(0.5)
                         * (F::one()
-                            - (two_pi * to_precision(i) / to_precision(window.len() - 1)).cos());
+                            - num_traits::Float::cos(
+                                two_pi * to_precision(i) / to_precision(window.len() - 1),
+                            ));
                     x * hann
                 })
                 .collect();
@@ -612,7 +615,7 @@ pub fn compute_chroma<F: RealFloat>(samples: &[F], sample_rate: F) -> AudioSampl
     Ok(chroma)
 }
 
-impl<'a, T: AudioSample> AudioSamples<'a, T>
+impl<T: AudioSample> AudioSamples<'_, T>
 where
     i16: ConvertTo<T>,
     I24: ConvertTo<T>,
@@ -628,10 +631,7 @@ where
         T: ConvertTo<F>,
     {
         let samples = match &self.data {
-            AudioData::Mono(samples) => samples
-                .iter()
-                .map(|&x| x.convert_to().unwrap_or_default())
-                .collect(),
+            AudioData::Mono(samples) => samples.iter().map(|&x| x.convert_to()).collect(),
             AudioData::Multi(_) => {
                 // Average all channels to create mono
                 let num_samples = self.samples_per_channel();
@@ -641,7 +641,7 @@ where
                 if let AudioData::Multi(channels) = &self.data {
                     for channel in channels.axis_iter(ndarray::Axis(0)) {
                         for (i, sample) in channel.iter().enumerate() {
-                            let x = sample.convert_to()?;
+                            let x = sample.convert_to();
                             mono_samples[i] += x;
                         }
                     }
@@ -665,6 +665,7 @@ where
 mod tests {
     use super::*;
     use crate::operations::traits::AudioPitchAnalysis;
+    use crate::sample_rate;
     use ndarray::Array1;
     use std::f64::consts::PI;
 
@@ -683,7 +684,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Test YIN pitch detection
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
@@ -709,7 +710,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Test autocorrelation pitch detection
         let detected_pitch = audio.detect_pitch_autocorr(80.0, 1000.0).unwrap();
@@ -735,7 +736,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Test pitch tracking
         let window_size = 2048;
@@ -784,7 +785,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Test harmonic analysis
         let harmonics = audio.harmonic_analysis(frequency, 5, 0.1).unwrap();
@@ -805,7 +806,7 @@ mod tests {
     #[test]
     fn test_silence_detection() {
         // Test with silence (should return None)
-        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(44100).into(), 44100);
+        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(44100).into(), sample_rate!(44100));
 
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
         assert!(detected_pitch.is_none());
@@ -832,7 +833,7 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // YIN should be more robust to noise
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
@@ -845,7 +846,10 @@ mod tests {
 
     #[test]
     fn test_parameter_validation() {
-        let audio = AudioSamples::new_mono(Array1::from(vec![1.0f32, 2.0, 3.0]).into(), 44100);
+        let audio = AudioSamples::new_mono(
+            Array1::from(vec![1.0f32, 2.0, 3.0]).into(),
+            sample_rate!(44100),
+        );
 
         // Test invalid threshold
         assert!(audio.detect_pitch_yin(-0.1, 80.0, 1000.0).is_err());

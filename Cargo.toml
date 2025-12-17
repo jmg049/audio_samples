@@ -17,12 +17,6 @@ categories = ["encoding", "multimedia", "science"]
 name = "audio_samples"
 crate-type = ["rlib"]
 
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = "z"
-panic = "abort"
-strip = "symbols"
 
 [dependencies]
 bytemuck = "1.23.1"
@@ -31,14 +25,13 @@ ndarray = "0.17.1"
 num-traits = "0.2.19"
 thiserror = "2.0.12"
 tracing = "0.1.41"
-approx_eq = { version = "0.1.8", optional = true }
 num-complex = "0.4"
-i24 = {version = "2.2.5", features = ["alloc","num-cast", "ndarray" ,"std", "serde"]}
+i24 = {version = "2.2.7", features = ["alloc","num-cast", "ndarray" ,"std", "serde"]}
+
 serde = "1.0.219"
 lazy_static = "1.4"
 num-format = { version = "0.4.4", optional = true }
 rand = { version = "0.9.2", optional = true }
-anyhow = { version = "1.0.100", optional = true }
 
 # Serialization dependencies (gated behind "serialization" feature)
 serde_json = { version = "1.0", optional = true }
@@ -91,7 +84,6 @@ minimal = ["statistics", "processing"]
 core-ops = ["statistics", "processing", "editing", "channels"]
 
 fixed-size-audio = [] # Support for fixed-size audio buffers (no heap allocation)
-
 # All
 full = [
     "core-ops",
@@ -99,12 +91,14 @@ full = [
     "plotting",
     "resampling",
     "serialization",
+    "serialization",
     "static-plots",
     "parallel-processing",
-    "simd",
+    # "simd",
     "mkl",
     "progress-tracking",
-    "beat-detection"
+    "beat-detection",
+    "chroma"
 ]
 
 # Major functionality groups
@@ -116,6 +110,8 @@ serialization = ["core-ops", "dep:serde_json", "dep:csv", "dep:rmp-serde", "dep:
 # FFT-dependent features (require fft)
 spectral-analysis = ["fft"]
 beat-detection = ["fft", "spectral-analysis"]
+hpss = ["spectral-analysis"]
+chroma = ["spectral-analysis"]
 
 # Plotting sub-features (require plotting)
 static-plots = ["plotting", "dep:plotly_static", "dep:serde_json"]
@@ -129,11 +125,7 @@ progress-tracking = ["dep:indicatif"]
 # Utility features
 formatting = ["dep:num-format"]
 random-generation = ["dep:rand"]
-error-chains = ["dep:anyhow"]
-utilities-full = ["formatting", "random-generation", "error-chains"]
-
-# Testing support
-testing = ["dep:approx_eq"]
+utilities-full = ["formatting", "random-generation"]
 
 # Convenience feature groups
 full-analysis = ["spectral-analysis", "beat-detection", "plotting"]
@@ -141,3 +133,81 @@ operations = ["core-ops", "spectral-analysis", "plotting", "resampling"]
 
 [dev-dependencies]
 approx_eq = "0.1.8"
+clap = { version = "4.5.53", features = ["derive"] }
+dtmf_tones = "1.0.1"
+rand = "0.9"
+criterion = { version = "0.8.1", features = ["html_reports"] }
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }
+
+[[bench]]
+name = "beats"
+path = "benches/beats.rs"
+harness = false
+
+[[bench]]
+name = "channels"
+path = "benches/channels.rs"
+harness = false
+
+[[bench]]
+name = "conversion"
+path = "benches/conversion.rs"
+harness = false
+
+[[bench]]
+name = "detection"
+path = "benches/detection.rs"
+harness = false
+
+[[bench]]
+name = "editing"
+path = "benches/editing.rs"
+harness = false
+
+[[bench]]
+name = "iir_filtering"
+path = "benches/iir_filtering.rs"
+harness = false
+
+[[bench]]
+name = "onset"
+path = "benches/onset.rs"
+harness = false
+
+[[bench]]
+name = "parametric_eq"
+path = "benches/parametric_eq.rs"
+harness = false
+
+[[bench]]
+name = "processing"
+path = "benches/processing.rs"
+harness = false
+
+[[bench]]
+name = "resampling"
+path = "benches/resampling.rs"
+harness = false
+
+[[bench]]
+name = "serialization"
+path = "benches/serialization.rs"
+harness = false
+
+[[bench]]
+name = "statistics"
+path = "benches/statistics.rs"
+harness = false
+
+[[bench]]
+name = "transforms"
+path = "benches/transforms.rs"
+harness = false
+
+[[bench]]
+name = "vad"
+path = "benches/vad.rs"
+harness = false

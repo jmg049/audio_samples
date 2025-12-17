@@ -106,9 +106,6 @@
 //! [`AudioStatistics`]: crate::operations::traits::AudioStatistics
 //! [`UnifiedFftBackend`]: crate::operations::fft_backends::UnifiedFftBackend
 
-#[cfg(feature = "parallel-processing")]
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-
 #[cfg(feature = "fft")]
 use crate::operations::fft_backends::{FftBackendImpl, UnifiedFftBackend};
 use crate::operations::traits::AudioStatistics;
@@ -117,6 +114,8 @@ use crate::{
     AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConversionError, ConvertTo,
     I24, ParameterError, RealFloat, to_precision,
 };
+use crate::{AudioSampleError, ProcessingError};
+
 use ndarray::{Array1, Axis};
 #[cfg(feature = "fft")]
 use num_complex::Complex;
@@ -267,12 +266,20 @@ where
     ///
     /// let data = array![1.0f32, -1.0, 2.0, -2.0];
     /// let audio = AudioSamples::new_mono(data, 44100);
-    /// assert_eq!(audio.mean::<f32>(), Some(0.0));
+    /// assert_eq!(audio.mean::<f32>(), 0.0);
     /// ```
-    fn mean<F: RealFloat>(&'a self) -> Option<F> {
+    fn mean<F: RealFloat>(&self) -> F {
         match &self.data {
-            AudioData::Mono(mono_data) => mono_data.mean().map(|x| to_precision::<F, _>(x)),
-            AudioData::Multi(multi_data) => multi_data.mean().map(|x| to_precision::<F, _>(x)),
+            AudioData::Mono(mono_data) => to_precision::<F, _>(
+                mono_data
+                    .mean()
+                    .expect("AudioSamples cannot be empty therefore mean is always available"),
+            ),
+            AudioData::Multi(multi_data) => to_precision::<F, _>(
+                multi_data
+                    .mean()
+                    .expect("AudioSamples cannot be empty therefore mean is always available"),
+            ),
         }
     }
 
@@ -292,36 +299,34 @@ where
     ///
     /// let data = array![1.0f32, -1.0, 1.0, -1.0];
     /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let rms = audio.rms::<f32>().unwrap();
+    /// let rms = audio.rms::<f32>();
     /// assert!((rms - 1.0).abs() < 1e-6);
     /// ```
-    fn rms<F: RealFloat>(&self) -> Option<F> {
+    fn rms<F: RealFloat>(&self) -> F {
+        // A frame iterator **could** be used but would be inefficient here due to the extra
+        // indirection and lack of vectorization. Direct ndarray operations are preferred for functions like this.
         match &self.data {
-            AudioData::Mono(arr) => {
-                if arr.is_empty() {
-                    return None;
-                }
+            AudioData::Mono(mono_data) => {
+                let mean_square: F = mono_data
+                    .mapv(|x| {
+                        let x: F = to_precision(x);
+                        x * x
+                    })
+                    .mean()
+                    .expect("AudioSamples cannot be empty therefore mean is always available");
 
-                let mut sum_sq = F::zero();
-                for &x in arr {
-                    let x = to_precision::<F, T>(x);
-                    sum_sq += x * x;
-                }
-                let mean_square = sum_sq / to_precision::<F, usize>(arr.len());
-                Some(mean_square.sqrt())
+                mean_square.sqrt()
             }
-            AudioData::Multi(arr) => {
-                if arr.is_empty() {
-                    return None;
-                }
+            AudioData::Multi(multi_data) => {
+                let mean_square: F = multi_data
+                    .mapv(|x| {
+                        let x: F = to_precision(x);
+                        x * x
+                    })
+                    .mean()
+                    .expect("AudioSamples cannot be empty therefore mean is always available");
 
-                let mut sum_sq = F::zero();
-                for &x in arr {
-                    let x = to_precision::<F, T>(x);
-                    sum_sq += x * x;
-                }
-                let mean_square = sum_sq / to_precision::<F, usize>(arr.len());
-                Some(mean_square.sqrt())
+                mean_square.sqrt()
             }
         }
     }
@@ -342,20 +347,13 @@ where
     ///
     /// let data = array![1.0f32, 2.0, 3.0, 4.0];
     /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let variance = audio.variance::<f32>().unwrap();
+    /// let variance = audio.variance::<f32>();
     /// assert!((variance - 1.25).abs() < 1e-6);
     /// ```
-    fn variance<F: RealFloat>(&'a self) -> Option<F> {
+    fn variance<F: RealFloat>(&self) -> F {
         match &self.data {
             AudioData::Mono(arr) => {
-                if arr.is_empty() {
-                    return None;
-                }
-
-                let mean: F = match &self.mean::<F>() {
-                    Some(m) => *m,
-                    None => return None,
-                };
+                let mean: F = self.mean::<F>();
 
                 let deviations: Array1<F> = arr.mapv(|x| {
                     let x: F = to_precision(x);
@@ -366,20 +364,12 @@ where
 
                 let squared_deviations = &deviations * &deviations; // Element-wise square 
 
-                let variance = squared_deviations
+                squared_deviations
                     .mean()
-                    .expect("Mean cannot be None as array is non-empty");
-                Some(variance)
+                    .expect("Mean cannot be None as array is non-empty")
             }
             AudioData::Multi(arr) => {
-                if arr.is_empty() {
-                    return None;
-                }
-
-                let mean: F = match &self.mean::<F>() {
-                    Some(m) => *m,
-                    None => return None,
-                };
+                let mean: F = self.mean::<F>();
 
                 // Vectorized variance computation: (x - mean)^2 across all channels
                 let mut deviations = arr.mapv(|x| {
@@ -388,10 +378,10 @@ where
                 });
 
                 deviations.mapv_inplace(|x| x * x);
-                let variance = deviations
+
+                deviations
                     .mean()
-                    .expect("Mean cannot be None as array is non-empty");
-                Some(variance)
+                    .expect("Mean cannot be None as array is non-empty")
             }
         }
     }
@@ -413,11 +403,11 @@ where
     ///
     /// let data = array![1.0f32, 2.0, 3.0, 4.0];
     /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let std_dev = audio.std_dev::<f32>().unwrap();
+    /// let std_dev = audio.std_dev::<f32>();
     /// assert!((std_dev - (1.25_f32).sqrt()).abs() < 1e-6);
     /// ```
-    fn std_dev<F: RealFloat>(&'a self) -> Option<F> {
-        Some(self.variance::<F>()?.sqrt())
+    fn std_dev<F: RealFloat>(&self) -> F {
+        self.variance::<F>().sqrt()
     }
 
     /// Counts the number of zero crossings in the audio signal.
@@ -795,8 +785,6 @@ where
                 let n = arr.len();
                 let duration: F = self.duration_seconds();
 
-                // Convert to f64 for FFT
-
                 // Create FFT backend
                 let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
 
@@ -804,16 +792,26 @@ where
                 let output_size = n / 2 + 1;
                 let mut fft_output = vec![Complex::new(F::zero(), F::zero()); output_size];
 
-                let arr: Vec<F> = arr.mapv(|x| x.convert_to().unwrap_or_default()).to_vec();
+                // Convert to f64 for FFT
+                let arr: Vec<F> = arr.mapv(|x| x.convert_to()).to_vec();
 
                 // Compute FFT
                 fft_backend.compute_real_fft(&arr, &mut fft_output)?;
 
                 // Compute power spectrum
-                let power_spectrum: Vec<F> = fft_output.iter().map(|c| c.norm_sqr()).collect();
-
+                let power_spectrum: Vec<F> = {
+                    #[cfg(feature = "parallel-processing")]
+                    {
+                        use rayon::prelude::*;
+                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
+                    }
+                    #[cfg(not(feature = "parallel-processing"))]
+                    {
+                        fft_output.iter().map(|c| c.norm_sqr()).collect()
+                    }
+                };
                 // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate);
+                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
                 let nyquist = sample_rate / to_precision::<F, _>(2.0);
                 let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
 
@@ -830,8 +828,16 @@ where
                 // Compute centroid
                 if total_energy > F::zero() {
                     Ok(weighted_sum / total_energy)
-                } else {
+                } else if total_energy == F::zero() {
                     Ok(F::zero())
+                } else {
+                    Err(AudioSampleError::Processing(
+                        ProcessingError::MathematicalFailure {
+                            operation: "spectral_centroid".to_string(),
+                            reason: "Total spectral energy is negative, cannot compute centroid"
+                                .to_string(),
+                        },
+                    ))
                 }
             }
             AudioData::Multi(arr) => {
@@ -845,9 +851,7 @@ where
                 let duration: F = self.duration_seconds();
 
                 // Convert to f64 for FFT
-                let input: Vec<F> = first_channel
-                    .mapv(|x| x.convert_to().unwrap_or_default())
-                    .to_vec();
+                let input: Vec<F> = first_channel.mapv(|x| x.convert_to()).to_vec();
 
                 // Create FFT backend
                 let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
@@ -873,7 +877,7 @@ where
                 };
 
                 // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate);
+                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
                 let nyquist = sample_rate / to_precision::<F, _>(2.0);
                 let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
 
@@ -890,8 +894,16 @@ where
                 // Compute centroid
                 if total_energy > F::zero() {
                     Ok(weighted_sum / total_energy)
-                } else {
+                } else if total_energy == F::zero() {
                     Ok(F::zero())
+                } else {
+                    Err(AudioSampleError::Processing(
+                        ProcessingError::MathematicalFailure {
+                            operation: "spectral_centroid".to_string(),
+                            reason: "Total spectral energy is negative, cannot compute centroid"
+                                .to_string(),
+                        },
+                    ))
                 }
             }
         }
@@ -932,7 +944,7 @@ where
                 let duration: F = self.duration_seconds();
 
                 // Convert to f64 for FFT
-                let input: Vec<F> = arr.mapv(|x| x.convert_to().unwrap_or_default()).to_vec();
+                let input: Vec<F> = arr.mapv(|x| x.convert_to()).to_vec();
 
                 // Create FFT backend
                 let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
@@ -945,17 +957,28 @@ where
                 fft_backend.compute_real_fft(&input, &mut fft_output)?;
 
                 // Compute power spectrum
-                let power_spectrum: Vec<F> = fft_output.iter().map(|c| c.norm_sqr()).collect();
-
+                let power_spectrum: Vec<F> = {
+                    #[cfg(feature = "parallel-processing")]
+                    {
+                        use rayon::prelude::*;
+                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
+                    }
+                    #[cfg(not(feature = "parallel-processing"))]
+                    {
+                        fft_output.iter().map(|c| c.norm_sqr()).collect()
+                    }
+                };
                 // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate);
+                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
                 let nyquist = sample_rate / to_precision::<F, _>(2.0);
                 let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
 
                 // Compute total energy
                 let total_energy: F = power_spectrum.iter().fold(F::zero(), |acc, &x| acc + x);
-                if total_energy <= F::zero() {
+                if total_energy == F::zero() {
                     return Ok(F::zero());
+                } else if total_energy < F::zero() {
+                    return Err(AudioSampleError::Processing(ProcessingError::MathematicalFailure { operation: "spectral_rolloff".to_string(), reason: "Total spectral energy is negative, cannot compute rolloff frequency".to_string()}));
                 }
 
                 // Find rolloff frequency
@@ -984,10 +1007,7 @@ where
                 let duration: F = self.duration_seconds();
 
                 // Convert to float type for FFT
-                let input: Vec<F> = first_channel
-                    .iter()
-                    .map(|&x| x.convert_to().unwrap_or_default())
-                    .collect();
+                let input: Vec<F> = first_channel.iter().map(|&x| x.convert_to()).collect();
 
                 // Create FFT backend
                 let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
@@ -1000,17 +1020,28 @@ where
                 fft_backend.compute_real_fft(&input, &mut fft_output)?;
 
                 // Compute power spectrum
-                let power_spectrum: Vec<F> = fft_output.iter().map(|c| c.norm_sqr()).collect();
-
+                let power_spectrum: Vec<F> = {
+                    #[cfg(feature = "parallel-processing")]
+                    {
+                        use rayon::prelude::*;
+                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
+                    }
+                    #[cfg(not(feature = "parallel-processing"))]
+                    {
+                        fft_output.iter().map(|c| c.norm_sqr()).collect()
+                    }
+                };
                 // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate);
+                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
                 let nyquist = sample_rate / to_precision::<F, _>(2.0);
                 let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
 
                 // Compute total energy
                 let total_energy: F = power_spectrum.iter().fold(F::zero(), |acc, &x| acc + x);
-                if total_energy <= F::zero() {
+                if total_energy == F::zero() {
                     return Ok(F::zero());
+                } else if total_energy < F::zero() {
+                    return Err(AudioSampleError::Processing(ProcessingError::MathematicalFailure { operation: "spectral_rolloff".to_string(), reason: "Total spectral energy is negative, cannot compute rolloff frequency".to_string()}));
                 }
 
                 // Find rolloff frequency
@@ -1035,13 +1066,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample_rate;
     use approx_eq::assert_approx_eq;
     use ndarray::{Array1, array};
 
     #[test]
     fn test_peak_min_max_existing_methods() {
         let data = array![-3.0f32, -1.0, 0.0, 2.0, 4.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // These should use the existing native implementations
         assert_eq!(audio.peak(), 4.0);
@@ -1053,20 +1085,19 @@ mod tests {
     fn test_rms_computation() {
         // Simple test case where we can verify RMS manually
         let data = array![1.0f32, -1.0, 1.0, -1.0];
-        let audio: AudioSamples<'static, f32> = AudioSamples::new_mono(data, 44100);
+        let audio: AudioSamples<'static, f32> = AudioSamples::new_mono(data, sample_rate!(44100));
 
-        let rms = audio.rms::<f64>().unwrap();
-        // RMS of [1, -1, 1, -1] = sqrt((1^2 + 1^2 + 1^2 + 1^2)/4) = sqrt(1) = 1.0
+        let rms = audio.rms::<f64>(); // RMS of [1, -1, 1, -1] = sqrt((1^2 + 1^2 + 1^2 + 1^2)/4) = sqrt(1) = 1.0
         assert_approx_eq!(rms, 1.0, 1e-6);
     }
 
     #[test]
     fn test_variance_and_std_dev() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio: AudioSamples<'_, f32> = AudioSamples::new_mono(data, 44100);
+        let audio: AudioSamples<'_, f32> = AudioSamples::new_mono(data, sample_rate!(44100));
 
-        let variance = audio.variance::<f64>().expect("Failed to compute variance");
-        let std_dev = audio.std_dev::<f64>().expect("Failed to compute std_dev");
+        let variance = audio.variance::<f64>();
+        let std_dev = audio.std_dev::<f64>();
 
         // Mean = 3.0, variance = mean((1-3)^2 + (2-3)^2 + ... + (5-3)^2) = mean(4+1+0+1+4) = 2.0
         assert_approx_eq!(variance, 2.0, 1e-6);
@@ -1076,7 +1107,7 @@ mod tests {
     #[test]
     fn test_zero_crossings() {
         let data = array![1.0f32, -1.0, 1.0, -1.0, 1.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let crossings = audio.zero_crossings();
         // Crossings occur at: 1->-1, -1->1, 1->-1, -1->1 = 4 crossings
@@ -1101,7 +1132,7 @@ mod tests {
             data.push(value);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(data).into(), sample_rate);
+        let audio = AudioSamples::new_mono(Array1::from(data).into(), sample_rate!(44100));
         let zcr = audio.zero_crossing_rate::<f64>();
 
         // 4 Hz square wave has ~8 zero crossings per second (2 per cycle)
@@ -1117,7 +1148,7 @@ mod tests {
     #[test]
     fn test_autocorrelation() {
         let data = array![1.0f32, 0.0, -1.0, 0.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let autocorr = audio.autocorrelation::<f64>(2).unwrap();
 
@@ -1134,8 +1165,8 @@ mod tests {
     fn test_cross_correlation() {
         let data1 = array![1.0f32, 0.0, -1.0];
         let data2 = array![1.0f32, 0.0, -1.0]; // Same signal
-        let audio1 = AudioSamples::new_mono(data1.into(), 44100);
-        let audio2 = AudioSamples::new_mono(data2.into(), 44100);
+        let audio1 = AudioSamples::new_mono(data1.into(), sample_rate!(44100));
+        let audio2 = AudioSamples::new_mono(data2.into(), sample_rate!(44100));
 
         let cross_corr = audio1.cross_correlation::<f64>(&audio2, 1).unwrap();
 
@@ -1147,10 +1178,10 @@ mod tests {
     #[test]
     fn test_multi_channel_statistics() {
         let data = array![[1.0f32, 2.0], [-1.0, 1.0]]; // 2 channels, 2 samples each
-        let audio = AudioSamples::new_multi_channel(data.into(), 44100);
+        let audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100));
 
-        let rms: f64 = audio.rms().unwrap();
-        let variance = audio.variance::<f64>().expect("Failed to compute variance");
+        let rms: f64 = audio.rms();
+        let variance = audio.variance::<f64>();
         let crossings = audio.zero_crossings();
 
         // Should compute across all samples
@@ -1161,23 +1192,24 @@ mod tests {
 
     #[test]
     fn test_edge_cases() {
-        // Empty audio
-        let empty_data: ndarray::Array1<f32> = ndarray::Array1::from(vec![]);
-        let empty_audio = AudioSamples::new_mono(empty_data.into(), 44100);
-
-        assert_eq!(empty_audio.zero_crossings(), 0);
-        assert_eq!(empty_audio.zero_crossing_rate::<f64>(), 0.0);
-
         // Single sample
         let single_data = array![1.0f32];
-        let single_audio = AudioSamples::new_mono(single_data.into(), 44100);
+        let single_audio = AudioSamples::new_mono(single_data.into(), sample_rate!(44100));
 
         assert_eq!(single_audio.zero_crossings(), 0);
         assert_eq!(
-            single_audio.rms::<f64>().unwrap(),
+            single_audio.rms::<f64>(),
             1.0,
             "RMS of single sample should be the sample itself"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "data must not be empty")]
+    fn test_empty_audio_rejected() {
+        // Empty audio should be rejected at construction time
+        let empty_data: ndarray::Array1<f32> = ndarray::Array1::from(vec![]);
+        let _empty_audio = AudioSamples::new_mono(empty_data.into(), sample_rate!(44100));
     }
 
     #[cfg(feature = "fft")]
@@ -1197,7 +1229,7 @@ mod tests {
             data.push(sample);
         }
 
-        let audio = AudioSamples::new_mono(ndarray::Array1::from(data).into(), sample_rate);
+        let audio = AudioSamples::new_mono(ndarray::Array1::from(data).into(), sample_rate!(44100));
         let centroid = audio
             .spectral_centroid::<f64>()
             .expect("Failed to compute spectral centroid");
@@ -1227,7 +1259,7 @@ mod tests {
             data.push(sample);
         }
 
-        let audio = AudioSamples::new_mono(ndarray::Array1::from(data).into(), sample_rate);
+        let audio = AudioSamples::new_mono(ndarray::Array1::from(data).into(), sample_rate!(8000));
         let rolloff = audio
             .spectral_rolloff(0.85)
             .expect("Failed to compute spectral rolloff");
@@ -1245,7 +1277,7 @@ mod tests {
     #[test]
     fn test_spectral_rolloff_validation() {
         let data = array![1.0f32, -1.0, 1.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Test invalid rolloff percentages
         assert!(audio.spectral_rolloff(0.0).is_err());
@@ -1259,11 +1291,10 @@ mod tests {
 
     #[cfg(feature = "fft")]
     #[test]
+    #[should_panic(expected = "data must not be empty")]
     fn test_spectral_methods_empty_audio() {
+        // Empty audio should be rejected at construction time
         let empty_data: ndarray::Array1<f32> = ndarray::Array1::from(vec![]);
-        let empty_audio = AudioSamples::new_mono(empty_data.into(), 44100);
-
-        assert_eq!(empty_audio.spectral_centroid::<f64>().unwrap(), 0.0);
-        assert_eq!(empty_audio.spectral_rolloff(0.85).unwrap(), 0.0);
+        let _empty_audio = AudioSamples::new_mono(empty_data.into(), sample_rate!(44100));
     }
 }

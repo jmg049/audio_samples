@@ -21,7 +21,7 @@ use ndarray::{Array1, ArrayView1};
 /// * `b` - Second audio signal
 ///
 /// # Returns
-/// to_precision::<F, _>(Correlation coefficient)
+/// The correlation coefficient.
 ///
 /// # Errors
 /// Returns an error if the signals have different lengths or channels.
@@ -43,8 +43,8 @@ where
         )));
     }
 
-    let a_f = a.as_float()?;
-    let b_f = b.as_float()?;
+    let a_f = a.as_float();
+    let b_f = b.as_float();
 
     match (a_f.as_mono(), b_f.as_mono()) {
         (Some(a_mono), Some(b_mono)) => {
@@ -103,7 +103,7 @@ where
 /// * `b` - Second audio signal
 ///
 /// # Returns
-/// to_precision::<F, _>(MSE value)
+/// The mean squared error.
 pub fn mse<T, F>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<F>
 where
     i16: ConvertTo<T>,
@@ -122,8 +122,8 @@ where
         )));
     }
 
-    let a_f = a.as_float()?;
-    let b_f = b.as_float()?;
+    let a_f = a.as_float();
+    let b_f = b.as_float();
 
     match (a_f.as_mono(), b_f.as_mono()) {
         (Some(a_mono), Some(b_mono)) => mse_1d(&a_mono.view(), &b_mono.view()),
@@ -199,8 +199,8 @@ where
         )));
     }
 
-    let signal_f = signal.as_float()?;
-    let noise_f: AudioSamples<'static, F> = noise.as_float()?;
+    let signal_f = signal.as_float();
+    let noise_f: AudioSamples<'static, F> = noise.as_float();
 
     // Calculate signal power
     let signal_power = match signal_f.as_mono() {
@@ -291,8 +291,8 @@ where
     }
 
     let sample_rate = signal.sample_rate();
-    let ref_f = reference.as_float()?;
-    let sig_f = signal.as_float()?;
+    let ref_f = reference.as_float();
+    let sig_f = signal.as_float();
 
     // For simplicity, we'll work with the first channel for mono or the average for multi-channel
     let (ref_data, sig_data) = match (ref_f.as_mono(), sig_f.as_mono()) {
@@ -502,14 +502,15 @@ fn mse_1d_slice<F: RealFloat>(a: &[F], b: &[F]) -> AudioSampleResult<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample_rate;
     use approx_eq::assert_approx_eq;
     use ndarray::array;
 
     #[test]
     fn test_correlation_identical_signals() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio1 = AudioSamples::new_mono(data.clone(), 44100);
-        let audio2 = AudioSamples::new_mono(data, 44100);
+        let audio1 = AudioSamples::new_mono(data.clone(), sample_rate!(44100));
+        let audio2 = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let corr: f64 = correlation(&audio1, &audio2).unwrap();
         assert_approx_eq!(corr, 1.0, 1e-10);
@@ -519,8 +520,8 @@ mod tests {
     fn test_correlation_opposite_signals() {
         let data1 = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let data2 = array![-1.0f32, -2.0, -3.0, -4.0, -5.0];
-        let audio1 = AudioSamples::new_mono(data1, 44100);
-        let audio2 = AudioSamples::new_mono(data2, 44100);
+        let audio1 = AudioSamples::new_mono(data1, sample_rate!(44100));
+        let audio2 = AudioSamples::new_mono(data2, sample_rate!(44100));
 
         let corr: f64 = correlation(&audio1, &audio2).unwrap();
         assert_approx_eq!(corr, -1.0, 1e-10);
@@ -529,8 +530,8 @@ mod tests {
     #[test]
     fn test_mse_identical_signals() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio1 = AudioSamples::new_mono(data.clone(), 44100);
-        let audio2 = AudioSamples::new_mono(data, 44100);
+        let audio1 = AudioSamples::new_mono(data.clone(), sample_rate!(44100));
+        let audio2 = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let mse_val = mse(&audio1, &audio2).unwrap();
         assert_approx_eq!(mse_val, 0.0_f64, 1e-10);
@@ -540,8 +541,8 @@ mod tests {
     fn test_snr_calculation() {
         let signal_data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let noise_data = array![0.1f32, 0.2, 0.1, 0.2, 0.1];
-        let signal = AudioSamples::new_mono(signal_data, 44100);
-        let noise = AudioSamples::new_mono(noise_data, 44100);
+        let signal = AudioSamples::new_mono(signal_data, sample_rate!(44100));
+        let noise = AudioSamples::new_mono(noise_data, sample_rate!(44100));
 
         let snr_val: f64 = snr(&signal, &noise).unwrap();
         assert!(snr_val > 0.0_f64); // Signal should have higher power than noise
@@ -550,8 +551,8 @@ mod tests {
     #[test]
     fn test_align_signals_no_offset() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let reference = AudioSamples::new_mono(data.clone(), 44100);
-        let signal = AudioSamples::new_mono(data, 44100);
+        let reference = AudioSamples::new_mono(data.clone(), sample_rate!(44100));
+        let signal = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let (aligned, offset) = align_signals::<f32, f64>(&reference, &signal).unwrap();
         assert_eq!(offset, 0);

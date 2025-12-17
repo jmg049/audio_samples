@@ -18,18 +18,36 @@
 //! # Usage Examples
 //!
 //! ```rust
-//! use audio_samples::{AudioSampleError, ConversionError, ParameterError};
+//! use audio_samples::{
+//!     AudioSampleError, AudioSampleResult, ConversionError, LayoutError, ParameterError,
+//! };
 //!
-//! // Handle specific error types
+//! let audio_result: AudioSampleResult<()> = Err(AudioSampleError::Parameter(
+//!     ParameterError::invalid_value("cutoff_hz", "must be > 0"),
+//! ));
+//!
 //! match audio_result {
-//!     Err(AudioSampleError::Conversion(conv_err)) => {
-//!         eprintln!("Failed to convert {} to {}", conv_err.source_type, conv_err.target_type);
+//!     Err(AudioSampleError::Conversion(ConversionError::AudioConversion {
+//!         source_type,
+//!         target_type,
+//!         reason,
+//!         ..
+//!     })) => {
+//!         eprintln!("Failed to convert {source_type} → {target_type}: {reason}");
 //!     }
-//!     Err(AudioSampleError::Parameter(param_err)) => {
-//!         eprintln!("Invalid parameter '{}': {}", param_err.parameter, param_err.reason);
+//!     Err(AudioSampleError::Parameter(ParameterError::InvalidValue { parameter, reason })) => {
+//!         eprintln!("Invalid parameter '{parameter}': {reason}");
 //!     }
-//!     Ok(value) => { /* success */ }
-//!     _ => { /* other errors */ }
+//!     Err(AudioSampleError::Layout(LayoutError::NonContiguous { operation, .. })) => {
+//!         eprintln!("Operation '{operation}' requires contiguous audio");
+//!     }
+//!     Ok(()) => {
+//!         // success
+//!     }
+//!     Err(other) => {
+//!         // other error variants
+//!         eprintln!("{other}");
+//!     }
 //! }
 //! ```
 
@@ -44,10 +62,9 @@ pub type AudioSampleResult<T> = Result<T, AudioSampleError>;
 /// in audio processing operations. It's designed as a hierarchy to allow
 /// both generic error handling and specific error inspection.
 ///
-/// # Migration Note
-///
-/// This enum now uses a hierarchical structure but maintains backward
-/// compatibility through deprecated variants that forward to the new system.
+/// # Feature-gated variants
+/// Some variants only exist when the corresponding cargo feature is enabled
+/// (e.g. `Plotting` requires `feature = "plotting"`).
 #[derive(Error, Debug, Clone)]
 pub enum AudioSampleError {
     /// Errors related to type conversions and casting operations.
@@ -81,7 +98,6 @@ pub enum AudioSampleError {
     /// This variant is only available when the "serialization" feature is enabled.
     #[error(transparent)]
     Serialization(#[from] SerializationError),
-
 }
 
 /// Errors that occur during type conversion and casting operations.
@@ -229,6 +245,24 @@ pub enum LayoutError {
         /// Detailed explanation of the format incompatibility.
         reason: String,
     },
+
+    /// A shape-related error occurred during array operations.
+    #[error("Shape error in {operation}: {info}")]
+    ShapeError {
+        /// The operation that encountered the shape error.
+        operation: String,
+        /// Detailed information about the shape error.
+        info: String,
+    },
+}
+
+impl From<ndarray::ShapeError> for AudioSampleError {
+    fn from(err: ndarray::ShapeError) -> Self {
+        AudioSampleError::Layout(LayoutError::ShapeError {
+            operation: "ndarray operation".to_string(),
+            info: err.to_string(),
+        })
+    }
 }
 
 /// Errors that occur during audio processing operations.
@@ -329,7 +363,6 @@ pub enum FeatureError {
 /// Errors related to plotting operations.
 #[derive(Error, Clone, Debug)]
 pub enum PlottingError {
-    
     /// Failed to create a plot due to invalid data or configuration.
     #[error("Failed to create plot: {reason}")]
     PlotCreation {
@@ -345,8 +378,7 @@ pub enum PlottingError {
     },
 
     #[error("html_view error: {0}")]
-    HtmlViewError(#[from] html_view::ViewerError)
-
+    HtmlViewError(#[from] html_view::ViewerError),
 }
 
 #[cfg(feature = "serialization")]
@@ -526,6 +558,16 @@ impl LayoutError {
             operation: operation.to_string(),
         }
     }
+
+    /// Create a new empty data error.
+    pub fn empty_data<O>(operation: O) -> Self
+    where
+        O: ToString,
+    {
+        Self::EmptyData {
+            operation: operation.to_string(),
+        }
+    }
 }
 
 impl ProcessingError {
@@ -690,7 +732,6 @@ impl SerializationError {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,7 +828,7 @@ mod tests {
                     AudioSampleError::Parameter(_) => { /* handle parameter */ }
                     AudioSampleError::Layout(_) => { /* handle layout */ }
                     AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                    AudioSampleError::Feature(_) => { /* handle feature */ }
                     AudioSampleError::Plotting(_) => { /* handle plotting */ }
                     #[cfg(feature = "serialization")]
                     AudioSampleError::Serialization(_) => { /* handle serialization */ }
@@ -800,7 +841,7 @@ mod tests {
                     AudioSampleError::Parameter(_) => { /* handle parameter */ }
                     AudioSampleError::Layout(_) => { /* handle layout */ }
                     AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                    AudioSampleError::Feature(_) => { /* handle feature */ }
                 }
             }
             #[cfg(all(not(feature = "plotting"), feature = "serialization"))]
@@ -810,7 +851,7 @@ mod tests {
                     AudioSampleError::Parameter(_) => { /* handle parameter */ }
                     AudioSampleError::Layout(_) => { /* handle layout */ }
                     AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                    AudioSampleError::Feature(_) => { /* handle feature */ }
                     AudioSampleError::Serialization(_) => { /* handle serialization */ }
                 }
             }
@@ -821,7 +862,7 @@ mod tests {
                     AudioSampleError::Parameter(_) => { /* handle parameter */ }
                     AudioSampleError::Layout(_) => { /* handle layout */ }
                     AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ } // All deprecated variants have been migrated to new error types
+                    AudioSampleError::Feature(_) => { /* handle feature */ }
                     AudioSampleError::Plotting(_) => { /* handle plotting */ }
                 }
             }

@@ -13,6 +13,7 @@ use crate::{
 
 use ndarray::Axis;
 use num_complex::Complex;
+use num_traits::FloatConst;
 
 /// IIR filter implementation with internal state.
 ///
@@ -112,7 +113,7 @@ impl<F: RealFloat> IirFilter<F> {
         let mut phases = Vec::new();
 
         for &freq in frequencies {
-            let omega = to_precision::<F, _>(2.0) * F::PI() * freq / sample_rate;
+            let omega = to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * freq / sample_rate;
             let z = Complex::new(F::zero(), omega).exp();
 
             // Compute numerator (B(z))
@@ -161,30 +162,25 @@ where
 
         match &mut self.data {
             AudioData::Mono(samples) => {
-                let input_samples: Vec<F> = samples
-                    .iter()
-                    .map(|&x| x.convert_to().unwrap_or_default())
-                    .collect();
+                let input_samples: Vec<F> = samples.iter().map(|&x| x.convert_to()).collect();
 
                 let output_samples = filter.process_samples(&input_samples);
 
                 for (i, &output) in output_samples.iter().enumerate() {
-                    samples[i] = output.convert_to()?;
+                    samples[i] = output.convert_to();
                 }
             }
             AudioData::Multi(data) => {
                 // Process each channel independently
                 for ch_idx in 0..data.dim().0 {
                     let mut channel = data.index_axis_mut(Axis(0), ch_idx);
-                    let input_samples: Vec<F> = channel
-                        .iter()
-                        .map(|sample| sample.convert_to().unwrap_or_default())
-                        .collect();
+                    let input_samples: Vec<F> =
+                        channel.iter().map(|sample| sample.convert_to()).collect();
 
                     let output_samples = filter.process_samples(&input_samples);
 
                     for (sample, output) in channel.iter_mut().zip(output_samples.iter()) {
-                        *sample = output.convert_to()?;
+                        *sample = output.convert_to();
                     }
 
                     // Reset filter state for next channel
@@ -401,15 +397,18 @@ fn design_butterworth_lowpass<F: RealFloat>(
     }
 
     // Pre-warp the cutoff frequency for bilinear transform
-    let wc = to_precision::<F, _>(2.0) * sample_rate * (F::PI() * cutoff_freq / sample_rate).tan();
+    let wc = to_precision::<F, _>(2.0)
+        * sample_rate
+        * (<F as FloatConst>::PI() * cutoff_freq / sample_rate).tan();
 
     // Generate analog Butterworth poles
     let mut poles = Vec::new();
     for k in 0..order {
-        let angle = F::PI() * (to_precision::<F, _>(2.0) * to_precision::<F, _>(k) + F::one())
+        let angle = <F as FloatConst>::PI()
+            * (to_precision::<F, _>(2.0) * to_precision::<F, _>(k) + F::one())
             / (to_precision::<F, _>(2.0) * to_precision::<F, _>(order));
-        let real = -wc * angle.sin();
-        let imag = wc * angle.cos();
+        let real = -wc * num_traits::Float::sin(angle);
+        let imag = wc * num_traits::Float::cos(angle);
         poles.push(num_complex::Complex::new(real, imag));
     }
 
@@ -464,8 +463,9 @@ fn design_butterworth_highpass<F: RealFloat>(
 
     // For a simple 2nd-order Butterworth high-pass filter
     if order == 2 {
-        let wc =
-            to_precision::<F, _>(2.0) * sample_rate * (F::PI() * cutoff_freq / sample_rate).tan();
+        let wc = to_precision::<F, _>(2.0)
+            * sample_rate
+            * (<F as FloatConst>::PI() * cutoff_freq / sample_rate).tan();
         let k = wc / (to_precision::<F, _>(2.0) * sample_rate);
         let k2 = k * k;
         let sqrt2 = to_precision::<F, _>(2.0).sqrt();
@@ -526,7 +526,9 @@ fn design_butterworth_bandpass<F: RealFloat>(
     b_coeffs[0] = bandwidth / sample_rate;
     a_coeffs[0] = F::one();
     a_coeffs[1] = to_precision::<F, _>(-2.0)
-        * (to_precision::<F, _>(2.0) * F::PI() * center_freq / sample_rate).cos();
+        * num_traits::Float::cos(
+            to_precision::<F, _>(2.0) * <F as FloatConst>::PI() * center_freq / sample_rate,
+        );
 
     if order > 1 {
         a_coeffs[2] = to_precision::<F, _>(0.9);
@@ -539,6 +541,7 @@ fn design_butterworth_bandpass<F: RealFloat>(
 mod tests {
     use super::*;
     use crate::operations::traits::AudioIirFiltering;
+    use crate::sample_rate;
     use ndarray::Array1;
     use std::f64::consts::PI;
 
@@ -569,10 +572,10 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Apply Butterworth low-pass filter with cutoff at 1000 Hz
-        let result = audio.butterworth_lowpass(2, 1000.0, sample_rate);
+        let result = audio.butterworth_lowpass(2, 1000.0, 44100.0);
         assert!(result.is_ok());
 
         // The high frequency component should be attenuated
@@ -594,10 +597,10 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Apply Butterworth high-pass filter with cutoff at 500 Hz
-        let result = audio.butterworth_highpass(2, 500.0, sample_rate);
+        let result = audio.butterworth_highpass(2, 500.0, 44100.0);
         assert!(result.is_ok());
 
         // The low frequency component should be attenuated
@@ -619,10 +622,10 @@ mod tests {
             samples.push(value as f32);
         }
 
-        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100));
 
         // Apply Butterworth band-pass filter from 500 Hz to 2000 Hz
-        let result = audio.butterworth_bandpass(2, 500.0, 2000.0, sample_rate);
+        let result = audio.butterworth_bandpass(2, 500.0, 2000.0, 44100.0);
         assert!(result.is_ok());
 
         // Only frequencies between 500-2000 Hz should pass through
@@ -652,10 +655,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut audio = AudioSamples::new_multi_channel(stereo_data.into(), sample_rate as u32);
+        let mut audio = AudioSamples::new_multi_channel(stereo_data.into(), sample_rate!(44100));
 
         // Apply low-pass filter to stereo signal
-        let result = audio.butterworth_lowpass(2, 2000.0, sample_rate);
+        let result = audio.butterworth_lowpass(2, 2000.0, 44100.0);
         assert!(result.is_ok());
 
         // Both channels should be filtered independently
@@ -666,35 +669,31 @@ mod tests {
         let sample_rate = 44100.0;
         let mut audio = AudioSamples::new_mono(
             Array1::from(vec![1.0f32, 0.0, -1.0]).into(),
-            sample_rate as u32,
+            sample_rate!(44100),
         );
 
         // Test invalid cutoff frequencies
-        assert!(audio.butterworth_lowpass(2, 0.0, sample_rate).is_err());
+        assert!(audio.butterworth_lowpass(2, 0.0, 44100.0).is_err());
         assert!(
             audio
-                .butterworth_lowpass(2, sample_rate / 2.0, sample_rate)
+                .butterworth_lowpass(2, sample_rate / 2.0, 44100.0)
                 .is_err()
         );
-        assert!(audio.butterworth_lowpass(2, -100.0, sample_rate).is_err());
+        assert!(audio.butterworth_lowpass(2, -100.0, 44100.0).is_err());
 
         // Test invalid order
-        assert!(audio.butterworth_lowpass(0, 1000.0, sample_rate).is_err());
+        assert!(audio.butterworth_lowpass(0, 1000.0, 44100.0).is_err());
 
         // Test invalid band-pass frequencies
         assert!(
             audio
-                .butterworth_bandpass(2, 2000.0, 1000.0, sample_rate)
+                .butterworth_bandpass(2, 2000.0, 1000.0, 44100.0)
                 .is_err()
         );
+        assert!(audio.butterworth_bandpass(2, 0.0, 1000.0, 44100.0).is_err());
         assert!(
             audio
-                .butterworth_bandpass(2, 0.0, 1000.0, sample_rate)
-                .is_err()
-        );
-        assert!(
-            audio
-                .butterworth_bandpass(2, 1000.0, sample_rate / 2.0, sample_rate)
+                .butterworth_bandpass(2, 1000.0, sample_rate / 2.0, 44100.0)
                 .is_err()
         );
     }

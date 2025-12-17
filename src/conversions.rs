@@ -1,6 +1,6 @@
 //! # Audio Sample Type Conversions
 //!
-//! This module provides **high-performance, type-safe conversion operations**
+//! This module provides **type-safe conversion operations**
 //! between different audio sample representations for [`AudioSamples`].
 //!
 //! Conversions are exposed through the [`AudioTypeConversion`] trait,
@@ -9,19 +9,18 @@
 //! directly on an `AudioSamples` instance:
 //!
 //! ```rust
-//! use audio_samples::AudioSamples;
+//! use audio_samples::{AudioSamples, AudioTypeConversion};
 //! use ndarray::array;
 //!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # fn example() {
 //! // Create mono audio data with f32 samples
 //! let audio_f32 = AudioSamples::new_mono(array![0.5f32, -0.3, 0.8], 44_100);
 //!
-//! // Convert to i16
-//! let audio_i16 = audio_f32.as_type::<i16>()?;
+//! // Convert to i16 (audio-aware conversion)
+//! let audio_i16 = audio_f32.to_format::<i16>();
 //!
-//! // Consume and convert (avoids copying)
-//! let audio_back = audio_i16.to_type::<f32>()?;
-//! # Ok(())
+//! // Consume and convert
+//! let audio_back = audio_i16.to_type::<f32>();
 //! # }
 //! ```
 //!
@@ -34,56 +33,40 @@
 //! - `f32`
 //! - `f64`
 //!
-//! Conversions use efficient **vectorised operations** internally (via `ndarray` and SIMD where
-//! available) to minimise overhead. Extreme floating-point values are clamped when converting to
-//! fixed-width integer formats to avoid overflow.
-//!
-//! ## Zero-Copy Conversion
-//! For conversions between identical or layout-compatible types, the [`into_cow`](crate::AudioSamples::into_cow)
-//! method can perform **zero-allocation conversions** using copy-on-write semantics:
-//!
-//! ```rust
-//! use audio_samples::AudioSamples;
-//! use ndarray::array;
-//! use std::borrow::Cow;
-//!
-//! let audio_i32 = AudioSamples::new_mono(array![1i32, 2, 3], 44_100);
-//! let cow = audio_i32.into_cow::<i32>().unwrap();
-//!
-//! match cow {
-//!     Cow::Borrowed(_) => println!("Zero-copy conversion"),
-//!     Cow::Owned(_) => println!("Conversion required allocation"),
-//! }
-//! ```
+//! Conversions are applied element-by-element via the crate's conversion traits.
+//! When converting from floating-point to fixed-width integer formats, extreme values are clamped
+//! to the destination range to avoid overflow.
 //!
 //! ## Typical Use Cases
-//! - Converting raw audio data from disk to a processing format (e.g. `i16` → `f32`)
+//! - Converting audio data from disk to a processing format (e.g. `i16` → `f32`)
 //! - Preparing audio buffers for model input
 //! - Reducing memory footprint after processing (`f64` → `i16`)
-//! - Zero-copy conversions when the type is already correct
+//!
+//! ## Allocation and Shape
+//! All conversion methods allocate a new owned buffer and preserve:
+//! - sample rate
+//! - channel count and sample count
+//! - sample ordering (mono, or `[channel, frame]` indexing for multi-channel)
+//!
+//! Maybe in future versions, zero-allocation conversions could be supported for certain cases where they share the same underlying representation.
 //!
 //! ## Error Handling
-//! Conversion methods return [`AudioSampleResult`], which can
-//! contain an [`AudioSampleError`] if the conversion fails
-//! (e.g. due to non-contiguous array layouts).
+//! These conversion methods do not return `Result` and do not require contiguous storage.
+//! They always produce a new owned `AudioSamples` value.
+//!
+//! ## Audio-aware conversion vs raw casting
+//! - `to_format` / `to_type` use the audio-aware [`ConvertTo`] conversions (e.g. integer PCM to
+//!   floating-point typically maps into $[-1.0, 1.0]$).
+//! - `cast_as` / `cast_to` use raw numeric casting via [`CastFrom`] (no audio scaling).
 //!
 //! ## API Summary
-//! - [`as_type`](crate::AudioTypeConversion::as_type): Borrow and convert (copy)
-//! - [`to_type`](crate::AudioTypeConversion::to_type): Consume and convert (no copy)
-//! - [`cast_as`](crate::AudioTypeConversion::cast_as): Borrow and cast without safety checks
-//! - [`cast_to`](crate::AudioTypeConversion::cast_to): Consume and cast without safety checks
-//! - [`into_cow`](crate::AudioSamples::into_cow): Copy-on-write zero-copy conversion when possible
-//!
-//! These methods are available on all `AudioSamples` instances without additional imports.
+//! - [`to_format`](crate::AudioTypeConversion::to_format): Borrow and convert (creates a new buffer)
+//! - [`to_type`](crate::AudioTypeConversion::to_type): Consume and convert (creates a new buffer)
+//! - [`cast_as`](crate::AudioTypeConversion::cast_as): Borrow and cast without audio-aware scaling
+//! - [`cast_to`](crate::AudioTypeConversion::cast_to): Consume and cast without audio-aware scaling
+use crate::{AudioSample, AudioSamples, AudioTypeConversion, CastFrom, ConvertTo, I24};
 
-use ndarray::Array2;
-
-use crate::repr::AudioData;
-use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom,
-    ConvertTo, I24, LayoutError,
-};
-
+// Single blanket implementation that satisfies all requirements
 impl<'a, T: AudioSample> AudioTypeConversion<'a, T> for AudioSamples<'a, T>
 where
     i16: ConvertTo<T>,
@@ -91,147 +74,53 @@ where
     i32: ConvertTo<T>,
     f32: ConvertTo<T>,
     f64: ConvertTo<T>,
+    T: ConvertTo<T>,
 {
-    /// Converts to different sample type, borrowing the original.
-    ///
-    /// Uses efficient vectorized operations via ndarray's mapv method
-    /// combined with the existing ConvertTo trait system for type safety.
-    ///
-    /// # Example
-    /// ```rust
-    /// use audio_samples::{AudioSamples, operations::AudioTypeConversion};
-    /// use ndarray::array;
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let audio_f32 = AudioSamples::new_mono(array![0.5f32, -0.3, 0.8], 44100);
-    /// let audio_i16 = audio_f32.as_type::<i16>()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn as_type<O>(&self) -> AudioSampleResult<AudioSamples<'static, O>>
+    fn to_format<O>(&self) -> AudioSamples<'static, O>
     where
         T: ConvertTo<O>,
         O: AudioSample + ConvertTo<T>,
     {
-        let sample_rate = self.sample_rate;
-        match &self.data {
-            AudioData::Mono(arr) => {
-                let converted: ndarray::Array1<O> = arr
-                    .iter()
-                    .map(|s| {
-                        let o: O = unsafe{s.unchecked_convert_to()};
-                        o
-                    })
-                    .collect::<Vec<_>>()
-                    .into();
-                Ok(AudioSamples::new_mono(converted, sample_rate))
-            }
-            AudioData::Multi(arr) => {
-                let shape = arr.raw_dim();
-                let converted_vec = arr
-                    .iter()
-                    .map(|s| {
-                        let o: O = unsafe{s.unchecked_convert_to()};
-                        o
-                    })
-                    .collect::<Vec<_>>();
-                let converted =
-                    ndarray::Array2::from_shape_vec(shape, converted_vec).map_err(|e| {
-                        AudioSampleError::Layout(LayoutError::IncompatibleFormat {
-                            operation: "array conversion".to_string(),
-                            reason: e.to_string(),
-                        })
-                    })?;
-                Ok(AudioSamples::new_multi_channel(converted, sample_rate))
-            }
-        }
+        self.map_into(O::convert_from)
     }
 
-    /// Converts to different sample type, consuming the original.
-    ///
-    /// More efficient than as_type when the original is no longer needed
-    /// since it avoids unnecessary copying.
-    ///
-    /// # Example
-    /// ```rust
-    /// use audio_samples::{AudioSamples, operations::AudioTypeConversion};
-    /// use ndarray::array;
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let audio_f32 = AudioSamples::new_mono(array![0.5f32, -0.3, 0.8], 44100);
-    /// let audio_i16 = audio_f32.to_type::<i16>()?;
-    /// // audio_f32 is no longer accessible here
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSampleResult<AudioSamples<'static, O>>
+    fn to_type<O: AudioSample + ConvertTo<T>>(self) -> AudioSamples<'static, O>
     where
         T: ConvertTo<O>,
     {
-        let sample_rate = self.sample_rate;
-        match self.data {
-            AudioData::Mono(arr) => {
-                let converted_data = arr
-                    .iter()
-                    .map(|sample| {
-                        let o: O = unsafe{sample.unchecked_convert_to()};
-                        o
-                    })
-                    .collect::<Vec<O>>().into();
-                Ok(AudioSamples::new_mono(converted_data, sample_rate))
-            }
-            AudioData::Multi(arr) => {
-                let shape: &[usize] = arr.shape();
-                let converted_data = arr
-                    .iter()
-                    .map(|sample| {
-                        let o: O = unsafe{sample.unchecked_convert_to()};
-                        o
-                    })
-                    .collect::<Vec<O>>();
-
-                let converted_data: Array2<O> =
-                    Array2::from_shape_vec((shape[0], shape[1]), converted_data).map_err(|e| {
-                        AudioSampleError::Layout(LayoutError::IncompatibleFormat {
-                            operation: "array conversion".to_string(),
-                            reason: e.to_string(),
-                        })
-                    })?;
-
-                Ok(AudioSamples::new_multi_channel(converted_data, sample_rate))
-            }
-        }
+        self.map_into(O::convert_from)
     }
 
-    fn cast_as<O>(&self) -> AudioSampleResult<AudioSamples<'static, O>>
+    fn cast_as<O>(&self) -> AudioSamples<'static, O>
     where
         O: AudioSample + CastFrom<T>,
     {
-        Ok(self.map_into(|x| O::cast_from(x)))
+        self.map_into(O::cast_from)
     }
 
-    fn cast_to<O>(self) -> AudioSampleResult<AudioSamples<'static, O>>
+    fn cast_to<O>(self) -> AudioSamples<'static, O>
     where
         O: AudioSample + CastFrom<T>,
     {
-        Ok(self.map_into(|x| O::cast_from(x)))
+        self.map_into(O::cast_from)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample_rate;
     use approx_eq::assert_approx_eq;
     use ndarray::array;
 
     #[test]
     fn test_mono_f32_to_i16_conversion() {
         let data = array![0.5f32, -0.3, 0.0, 1.0, -1.0];
-        let audio_f32 = AudioSamples::new_mono(data, 44100);
+        let audio_f32 = AudioSamples::new_mono(data, sample_rate!(44100));
 
-        let audio_i16 = audio_f32.as_type::<i16>().unwrap();
+        let audio_i16 = audio_f32.to_format::<i16>();
 
-        assert_eq!(audio_i16.sample_rate(), 44100);
+        assert_eq!(audio_i16.sample_rate(), sample_rate!(44100));
         assert_eq!(audio_i16.num_channels(), 1);
         assert_eq!(audio_i16.samples_per_channel(), 5);
 
@@ -257,10 +146,10 @@ mod tests {
     fn test_multi_channel_i16_to_f32_conversion() {
         // Create 2 channels with 3 samples each: [[ch0_sample0, ch0_sample1, ch0_sample2], [ch1_sample0, ch1_sample1, ch1_sample2]]
         let data = array![[16384i16, 32767, 0], [-16384, -32768, 8192]];
-        let audio_i16 = AudioSamples::new_multi_channel(data, 48000);
+        let audio_i16 = AudioSamples::new_multi_channel(data, sample_rate!(48000));
 
-        let audio_f32 = audio_i16.as_type::<f32>().unwrap();
-        assert_eq!(audio_f32.sample_rate(), 48000);
+        let audio_f32 = audio_i16.to_format::<f32>();
+        assert_eq!(audio_f32.sample_rate(), sample_rate!(48000));
         assert_eq!(audio_f32.num_channels(), 2);
         assert_eq!(audio_f32.samples_per_channel(), 3);
 
@@ -277,10 +166,10 @@ mod tests {
     #[test]
     fn test_consuming_conversion() {
         let data = array![0.1f32, 0.2, 0.3];
-        let audio_f32 = AudioSamples::new_mono(data, 44100);
+        let audio_f32 = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Test consuming conversion
-        let audio_i16 = audio_f32.to_type::<i16>().unwrap();
+        let audio_i16 = audio_f32.to_type::<i16>();
 
         assert_eq!(audio_i16.num_channels(), 1);
         assert_eq!(audio_i16.samples_per_channel(), 3);
@@ -295,36 +184,36 @@ mod tests {
     #[test]
     fn test_convenience_methods() {
         let data = array![100i16, -200, 300];
-        let audio_i16 = AudioSamples::new_mono(data, 44100);
+        let audio_i16 = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Test convenience methods
-        let audio_f32 = audio_i16.as_f32().unwrap();
-        let audio_f64 = audio_i16.as_f64().unwrap();
-        let audio_i32 = audio_i16.as_i32().unwrap();
+        let audio_f32 = audio_i16.as_f32();
+        let audio_f64 = audio_i16.as_f64();
+        let audio_i32 = audio_i16.as_i32();
 
         assert_eq!(audio_f32.num_channels(), 1);
         assert_eq!(audio_f64.num_channels(), 1);
         assert_eq!(audio_i32.num_channels(), 1);
 
         // Verify sample rate preservation
-        assert_eq!(audio_f32.sample_rate(), 44100);
-        assert_eq!(audio_f64.sample_rate(), 44100);
-        assert_eq!(audio_i32.sample_rate(), 44100);
+        assert_eq!(audio_f32.sample_rate(), sample_rate!(44100));
+        assert_eq!(audio_f64.sample_rate(), sample_rate!(44100));
+        assert_eq!(audio_i32.sample_rate(), sample_rate!(44100));
     }
 
     #[test]
     fn test_round_trip_conversion() {
         let original_data = array![0.123f32, -0.456, 0.789, -0.999, 0.0];
-        let audio_original = AudioSamples::new_mono(original_data.clone(), 44100);
+        let audio_original = AudioSamples::new_mono(original_data.clone(), sample_rate!(44100));
 
         // Convert f32 -> i16 -> f32
-        let audio_i16 = audio_original.as_type::<i16>().unwrap();
-        let audio_round_trip = audio_i16.as_type::<f32>().unwrap();
+        let audio_i16 = audio_original.to_format::<i16>();
+        let audio_round_trip = audio_i16.to_format::<f32>();
 
         // Verify structure preservation
         assert_eq!(audio_round_trip.num_channels(), 1);
         assert_eq!(audio_round_trip.samples_per_channel(), 5);
-        assert_eq!(audio_round_trip.sample_rate(), 44100);
+        assert_eq!(audio_round_trip.sample_rate(), sample_rate!(44100));
 
         // Check that values are approximately preserved (within i16 precision limits)
         let round_trip_data = audio_round_trip.as_mono().unwrap();
@@ -337,10 +226,10 @@ mod tests {
     fn test_edge_cases() {
         // Test with minimum and maximum values
         let data = array![f32::MAX, f32::MIN, 0.0f32];
-        let audio_f32 = AudioSamples::new_mono(data, 44100);
+        let audio_f32 = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Convert to i16 (should clamp extreme values)
-        let audio_i16 = audio_f32.as_type::<i16>().unwrap();
+        let audio_i16 = audio_f32.to_format::<i16>();
         let converted_data = audio_i16.as_mono().unwrap();
 
         // f32::MAX and f32::MIN should be clamped to i16 range

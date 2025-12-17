@@ -327,7 +327,7 @@ where
         let beats: Vec<F> = track_beats_with_progress(
             &onset_env,
             config.tempo_bpm,
-            to_precision(self.sample_rate),
+            to_precision(self.sample_rate().get()),
             config.tolerance,
             Some(config.onset_config.hop_size),
             progress_callback,

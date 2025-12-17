@@ -32,6 +32,7 @@ use crate::{
 };
 use ndarray::{Array1, Array2, Axis};
 
+use num_traits::FloatConst;
 #[cfg(feature = "simd")]
 use wide::{f32x8, f64x4, i16x16, i32x8};
 
@@ -97,6 +98,11 @@ where
                     )))
                 }
                 AudioData::Multi(data) => {
+                    assert!(
+                        data.nrows() >= 2,
+                        "Right channel conversion requires at least 2 channels, got {}",
+                        data.nrows()
+                    );
                     let right_channel = data.index_axis(Axis(0), 1).to_owned();
                     Ok(AudioSamples::new_mono(right_channel, self.sample_rate()))
                 }
@@ -125,9 +131,7 @@ where
                         for sample_idx in 0..samples_per_channel {
                             let mut weighted_sum = F::zero();
                             for (channel_idx, &weight) in weights.iter().enumerate() {
-                                let sample_value: F = multi[(channel_idx, sample_idx)]
-                                    .convert_to()
-                                    .unwrap_or_default();
+                                let sample_value: F = multi[(channel_idx, sample_idx)].convert_to();
                                 weighted_sum += sample_value * weight;
                             }
                             mono_samples[sample_idx] = T::cast_from(weighted_sum);
@@ -156,10 +160,8 @@ where
                             let two: F = to_precision::<F, _>(2.0);
                             let mut mono_samples = vec![T::default(); samples_per_channel];
                             for sample_idx in 0..samples_per_channel {
-                                let left: F =
-                                    multi[(0, sample_idx)].convert_to().unwrap_or_default();
-                                let right: F =
-                                    multi[(1, sample_idx)].convert_to().unwrap_or_default();
+                                let left: F = multi[(0, sample_idx)].convert_to();
+                                let right: F = multi[(1, sample_idx)].convert_to();
                                 let avg = (left + right) / two;
                                 mono_samples[sample_idx] = T::cast_from(avg);
                             }
@@ -170,9 +172,8 @@ where
                             for sample_idx in 0..samples_per_channel {
                                 let mut sum = F::zero();
                                 for channel_idx in 0..num_channels {
-                                    let sample_value: F = multi[(channel_idx, sample_idx)]
-                                        .convert_to()
-                                        .unwrap_or_default();
+                                    let sample_value: F =
+                                        multi[(channel_idx, sample_idx)].convert_to();
                                     sum += sample_value;
                                 }
                                 let avg = sum / to_precision::<F, _>(num_channels);
@@ -223,9 +224,10 @@ where
                 let pan = pan.clamp(-F::one(), F::one());
 
                 // Calculate left and right gains using equal power panning
-                let pan_radians = (pan + F::one()) * F::PI() / to_precision::<F, _>(4.0);
-                let left_gain = pan_radians.cos();
-                let right_gain = pan_radians.sin();
+                let pan_radians =
+                    (pan + F::one()) * <F as FloatConst>::PI() / to_precision::<F, _>(4.0);
+                let left_gain = num_traits::Float::cos(pan_radians);
+                let right_gain = num_traits::Float::sin(pan_radians);
 
                 match &self.data {
                     AudioData::Mono(mono) => {
@@ -265,6 +267,45 @@ where
             StereoConversionMethod::Left => self.extract_channel(0),
             StereoConversionMethod::Right => self.extract_channel(1),
         }
+    }
+
+    fn duplicate_to_channels(
+        &self,
+        n_channels: usize,
+    ) -> AudioSampleResult<AudioSamples<'static, T>> {
+        if n_channels == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "n_channels",
+                "must be at least 1",
+            )));
+        }
+
+        // Get mono data (either directly or by extracting first channel)
+        let mono_data = match &self.data {
+            AudioData::Mono(data) => data.as_view().to_owned(),
+            AudioData::Multi(data) => {
+                // For multi-channel input, use first channel
+                data.index_axis(Axis(0), 0).to_owned()
+            }
+        };
+
+        if n_channels == 1 {
+            return Ok(AudioSamples::new_mono(mono_data, self.sample_rate()));
+        }
+
+        // Stack the mono data n_channels times
+        let views: Vec<_> = (0..n_channels).map(|_| mono_data.view()).collect();
+        let multi_data = ndarray::stack(Axis(0), &views).map_err(|e| {
+            AudioSampleError::Processing(ProcessingError::algorithm_failure(
+                "duplicate_to_channels",
+                format!("Failed to stack channels: {}", e),
+            ))
+        })?;
+
+        Ok(AudioSamples::new_multi_channel(
+            multi_data,
+            self.sample_rate(),
+        ))
     }
 
     fn extract_channel(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'static, T>> {
@@ -567,37 +608,52 @@ where
     // For now, use specialized implementations for f32 and f64, fallback to base for others
     #[cfg(feature = "simd")]
     {
+        use crate::SampleType;
         use std::any::TypeId;
-        let type_id = TypeId::of::<T>();
 
-        if type_id == TypeId::of::<i16>() {
-            // SAFETY: We've confirmed that T is i16
-            let i16_channels: &[AudioSamples<i16>] = unsafe { std::mem::transmute(channels) };
-            let result = interleave_i16_simd_impl(i16_channels, samples_per_channel)?;
-            return Ok(unsafe {
-                std::mem::transmute::<AudioSamples<'_, i16>, AudioSamples<'_, T>>(result)
-            });
-        } else if type_id == TypeId::of::<i32>() {
-            // SAFETY: We've confirmed that T is i32
-            let i32_channels: &[AudioSamples<i32>] = unsafe { std::mem::transmute(channels) };
-            let result = interleave_i32_simd_impl(i32_channels, samples_per_channel)?;
-            return Ok(unsafe {
-                std::mem::transmute::<AudioSamples<'_, i32>, AudioSamples<'_, T>>(result)
-            });
-        } else if type_id == TypeId::of::<f32>() {
-            // SAFETY: We've confirmed that T is f32
-            let f32_channels: &[AudioSamples<f32>] = unsafe { std::mem::transmute(channels) };
-            let result = interleave_f32_simd_impl(f32_channels, samples_per_channel)?;
-            return Ok(unsafe {
-                std::mem::transmute::<AudioSamples<'_, f32>, AudioSamples<'_, T>>(result)
-            });
-        } else if type_id == TypeId::of::<f64>() {
-            // SAFETY: We've confirmed that T is f64
-            let f64_channels: &[AudioSamples<f64>] = unsafe { std::mem::transmute(channels) };
-            let result = interleave_f64_simd_impl(f64_channels, samples_per_channel)?;
-            return Ok(unsafe {
-                std::mem::transmute::<AudioSamples<'_, f64>, AudioSamples<'_, T>>(result)
-            });
+        // Use SampleType::from_type_id for cleaner dispatch
+        match SampleType::from_type_id(TypeId::of::<T>()) {
+            Some(SampleType::I16) => {
+                // SAFETY: We've confirmed via TypeId that T is i16. The transmute is sound because:
+                // 1. AudioSamples<T> has the same memory layout for all T: AudioSample
+                //    (the struct contains ndarray views/owned data which are type-erased pointers
+                //     plus metadata, and the sample type only affects the element type)
+                // 2. Both slices have the same length (we're reinterpreting in place)
+                // 3. The lifetime 'a is preserved
+                let i16_channels: &[AudioSamples<i16>] = unsafe { std::mem::transmute(channels) };
+                let result = interleave_i16_simd_impl(i16_channels, samples_per_channel)?;
+                // SAFETY: Same reasoning - T is i16, so converting AudioSamples<i16> to AudioSamples<T>
+                // is a no-op at the memory level
+                return Ok(unsafe {
+                    std::mem::transmute::<AudioSamples<'_, i16>, AudioSamples<'_, T>>(result)
+                });
+            }
+            Some(SampleType::I32) => {
+                // SAFETY: Same as I16 case - TypeId confirms T is i32
+                let i32_channels: &[AudioSamples<i32>] = unsafe { std::mem::transmute(channels) };
+                let result = interleave_i32_simd_impl(i32_channels, samples_per_channel)?;
+                return Ok(unsafe {
+                    std::mem::transmute::<AudioSamples<'_, i32>, AudioSamples<'_, T>>(result)
+                });
+            }
+            Some(SampleType::F32) => {
+                // SAFETY: Same as I16 case - TypeId confirms T is f32
+                let f32_channels: &[AudioSamples<f32>] = unsafe { std::mem::transmute(channels) };
+                let result = interleave_f32_simd_impl(f32_channels, samples_per_channel)?;
+                return Ok(unsafe {
+                    std::mem::transmute::<AudioSamples<'_, f32>, AudioSamples<'_, T>>(result)
+                });
+            }
+            Some(SampleType::F64) => {
+                // SAFETY: Same as I16 case - TypeId confirms T is f64
+                let f64_channels: &[AudioSamples<f64>] = unsafe { std::mem::transmute(channels) };
+                let result = interleave_f64_simd_impl(f64_channels, samples_per_channel)?;
+                return Ok(unsafe {
+                    std::mem::transmute::<AudioSamples<'_, f64>, AudioSamples<'_, T>>(result)
+                });
+            }
+            // I24 and Unknown fall through to base implementation (no SIMD optimization)
+            _ => {}
         }
     }
 
@@ -939,4 +995,146 @@ fn interleave_f64_simd_impl<'a>(
         array,
         channels[0].sample_rate(),
     ))
+}
+
+/// Deinterleave in-place: converts interleaved samples to planar layout
+pub fn deinterleave<T: AudioSample + 'static>(
+    samples: &mut [T],
+    num_channels: usize,
+) -> AudioSampleResult<()> {
+    if samples.is_empty() {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "samples",
+            "Cannot deinterleave an empty sample buffer",
+        )));
+    }
+
+    if num_channels == 0 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "num_channels",
+            "Number of channels must be > 0",
+        )));
+    }
+
+    if !samples.len().is_multiple_of(num_channels) {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "samples",
+            "Sample buffer length must be a multiple of number of channels",
+        )));
+    }
+
+    let num_frames = samples.len() / num_channels;
+
+    // Fast path: already effectively mono
+    if num_channels == 1 {
+        return Ok(());
+    }
+
+    // Allocate a single contiguous temp buffer
+    let mut tmp = vec![T::zero(); samples.len()];
+
+    // Transpose (interleaved -> planar)
+    for frame in 0..num_frames {
+        let frame_base = frame * num_channels;
+        for ch in 0..num_channels {
+            tmp[ch * num_frames + frame] = samples[frame_base + ch];
+        }
+    }
+
+    // Copy back
+    samples.copy_from_slice(&tmp);
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sample_rate;
+    use ndarray::Array1;
+
+    #[test]
+    fn test_duplicate_to_channels_mono_to_stereo() {
+        let mono = AudioSamples::new_mono(
+            Array1::from(vec![0.1f32, 0.2, 0.3, 0.4]),
+            sample_rate!(44100),
+        );
+
+        let stereo = mono.duplicate_to_channels(2).unwrap();
+
+        assert_eq!(stereo.num_channels(), 2);
+        assert_eq!(stereo.samples_per_channel(), 4);
+
+        // Both channels should have the same data via interleaved
+        let interleaved = stereo.to_interleaved_vec();
+        // For stereo interleaved: [L0, R0, L1, R1, L2, R2, L3, R3]
+        assert_eq!(interleaved.len(), 8);
+        // First check that L and R values at each position match
+        for i in 0..4 {
+            assert_eq!(interleaved[i * 2], interleaved[i * 2 + 1]);
+        }
+    }
+
+    #[test]
+    fn test_duplicate_to_channels_mono_to_surround() {
+        let mono =
+            AudioSamples::new_mono(Array1::from(vec![1.0f32, 2.0, 3.0]), sample_rate!(48000));
+
+        let surround = mono.duplicate_to_channels(6).unwrap(); // 5.1
+
+        assert_eq!(surround.num_channels(), 6);
+        assert_eq!(surround.samples_per_channel(), 3);
+
+        // Access via underlying array
+        let multi = surround.as_multi_channel().unwrap();
+        let expected = [1.0f32, 2.0, 3.0];
+        for ch_idx in 0..6 {
+            for (s_idx, &exp) in expected.iter().enumerate() {
+                assert_eq!(multi[(ch_idx, s_idx)], exp);
+            }
+        }
+    }
+
+    #[test]
+    fn test_duplicate_to_channels_single_channel() {
+        let mono = AudioSamples::new_mono(Array1::from(vec![0.5f32, 0.6]), sample_rate!(44100));
+
+        let result = mono.duplicate_to_channels(1).unwrap();
+
+        assert_eq!(result.num_channels(), 1);
+        assert!(result.is_mono());
+    }
+
+    #[test]
+    fn test_duplicate_to_channels_zero_channels_error() {
+        let mono = AudioSamples::new_mono(Array1::from(vec![0.1f32, 0.2]), sample_rate!(44100));
+
+        let result = mono.duplicate_to_channels(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_duplicate_to_channels_from_multi() {
+        // When starting with multi-channel, it should use the first channel
+        let mut data = ndarray::Array2::zeros((2, 3));
+        data[[0, 0]] = 1.0f32;
+        data[[0, 1]] = 2.0;
+        data[[0, 2]] = 3.0;
+        data[[1, 0]] = 10.0; // Different data in channel 1
+        data[[1, 1]] = 20.0;
+        data[[1, 2]] = 30.0;
+
+        let stereo = AudioSamples::new_multi_channel(data, sample_rate!(44100));
+        let quad = stereo.duplicate_to_channels(4).unwrap();
+
+        assert_eq!(quad.num_channels(), 4);
+        // All channels should have data from channel 0
+        let multi = quad.as_multi_channel().unwrap();
+        let expected = [1.0f32, 2.0, 3.0];
+        for ch_idx in 0..4 {
+            for (s_idx, &exp) in expected.iter().enumerate() {
+                assert_eq!(multi[(ch_idx, s_idx)], exp);
+            }
+        }
+    }
 }

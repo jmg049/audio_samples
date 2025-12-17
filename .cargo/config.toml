@@ -1,0 +1,6 @@
+[build]
+rustc-wrapper = ""
+
+[target.'cfg(all())']
+rustflags = ["--cfg", "nightly"]
+

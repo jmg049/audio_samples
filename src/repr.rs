@@ -85,23 +85,20 @@
 //! ```rust
 //! # use audio_samples::AudioSamples;
 //! # use ndarray::array;
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], 44100);
 //!
 //! // Apply gain to all samples
-//! audio.apply(|sample| sample * 0.5)?;
+//! audio.apply(|sample| sample * 0.5);
 //!
 //! // Apply position-dependent processing  
-//! audio.apply_indexed(|index, sample| {
+//! audio.apply_with_index(|index, sample| {
 //!     sample * (1.0 - index as f32 * 0.1) // Fade out
-//! })?;
+//! });
 //!
 //! // Process in overlapping windows (useful for FFT)
-//! audio.apply_windowed(1024, 512, |window| {
+//! audio.apply_windowed(1024, 512, |window, _prev_window| {
 //!     window.to_vec() // Identity function for demonstration
-//! })?;
-//! # Ok(())
-//! # }
+//! }).unwrap();
 //! ```
 //!
 //! # Memory Layout
@@ -114,7 +111,7 @@
 //! ## Multi-Channel Audio (`AudioData::Multi`)  
 //! - Stored as `Array2<T>` with shape `(channels, samples_per_channel)`
 //! - Each row represents one channel of audio data
-//! - Enables efficient per-channel operations with `apply_channels()`
+//! - Enables efficient per-channel operations with `apply_to_channels()`
 //!
 //! # Integration with Operations
 //!
@@ -135,13 +132,54 @@
 //! See [`AudioSamples`] for the complete API documentation.
 //!
 //! [`AudioSample`]: crate::AudioSample
+use core::fmt::{Display, Formatter, Result as FmtResult};
+
+use core::num::{NonZeroU32, NonZeroUsize};
 use ndarray::iter::AxisIterMut;
 use ndarray::{
     Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis, Ix1, Ix2, SliceArg,
 };
 use std::any::TypeId;
-use std::fmt::Display;
 use std::ops::{Bound, Deref, DerefMut, Index, IndexMut, Neg, RangeBounds};
+
+/// Creates a [`NonZeroU32`] sample rate from a compile-time constant.
+///
+/// This macro provides zero-cost construction of sample rates with compile-time
+/// validation that the value is non-zero.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::sample_rate;
+///
+/// // Common sample rates - validated at compile time
+/// let cd_rate = sample_rate!(44100);
+/// let dvd_rate = sample_rate!(48000);
+/// let high_res = sample_rate!(96000);
+///
+/// // Use directly in AudioSamples constructors
+/// use audio_samples::AudioSamples;
+/// use ndarray::array;
+/// let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100));
+/// ```
+///
+/// # Compile-time Safety
+///
+/// The macro will cause a compile error if passed zero:
+///
+/// ```compile_fail
+/// use audio_samples::sample_rate;
+/// let invalid = sample_rate!(0); // Compile error!
+/// ```
+#[macro_export]
+macro_rules! sample_rate {
+    ($rate:expr) => {{
+        const RATE: u32 = $rate;
+        const { assert!(RATE > 0, "sample rate must be greater than 0") };
+        // SAFETY: We just asserted RATE > 0 at compile time
+        unsafe { ::core::num::NonZeroU32::new_unchecked(RATE) }
+    }};
+}
 
 #[cfg(feature = "core-ops")]
 use crate::operations::ProcessingBuilder;
@@ -150,9 +188,213 @@ use crate::{
     ConvertTo, I24, LayoutError, ParameterError, RealFloat, to_precision,
 };
 
+/// Borrowed-or-owned byte view returned by `AudioData::bytes`.
+#[derive(Debug, Clone)]
+pub enum AudioBytes<'a> {
+    /// Zero-copy view into the underlying contiguous buffer.
+    Borrowed(&'a [u8]),
+    /// Owned buffer when a borrow is impossible (e.g., I24 packing).
+    Owned(Vec<u8>),
+}
+
+impl<'a> AudioBytes<'a> {
+    /// Returns the byte slice regardless of ownership mode.
+    pub const fn as_slice(&self) -> &[u8] {
+        match self {
+            AudioBytes::Borrowed(b) => b,
+            AudioBytes::Owned(v) => v.as_slice(),
+        }
+    }
+
+    /// Returns an owned `Vec<u8>`, cloning if necessary.
+    pub fn into_owned(self) -> Vec<u8> {
+        match self {
+            AudioBytes::Borrowed(b) => b.to_vec(),
+            AudioBytes::Owned(v) => v,
+        }
+    }
+}
+
+/// Audio sample data types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SampleType {
+    /// 16-bit signed integer
+    I16,
+    /// 24-bit signed integer
+    I24,
+    /// 32-bit signed integer
+    I32,
+    /// 32-bit floating point
+    F32,
+    /// 64-bit floating point
+    F64,
+    /// Unknown or unsupported sample type
+    Unknown,
+}
+
+impl SampleType {
+    /// Returns the canonical short name (machine-oriented)
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SampleType::I16 => "i16",
+            SampleType::I24 => "i24",
+            SampleType::I32 => "i32",
+            SampleType::F32 => "f32",
+            SampleType::F64 => "f64",
+            SampleType::Unknown => "unknown",
+        }
+    }
+
+    /// Returns a human-readable descriptive name
+    pub const fn description(self) -> &'static str {
+        match self {
+            SampleType::I16 => "16-bit signed integer",
+            SampleType::I24 => "24-bit signed integer",
+            SampleType::I32 => "32-bit signed integer",
+            SampleType::F32 => "32-bit floating point",
+            SampleType::F64 => "64-bit floating point",
+            SampleType::Unknown => "unknown or unsupported format",
+        }
+    }
+
+    /// Returns the bit-depth of the format, if defined
+    pub const fn bits(self) -> Option<u32> {
+        match self {
+            SampleType::I16 => Some(16),
+            SampleType::I24 => Some(24),
+            SampleType::I32 | SampleType::F32 => Some(32),
+            SampleType::F64 => Some(64),
+            SampleType::Unknown => None,
+        }
+    }
+
+    /// Returns the size in bytes of one sample, if defined
+    pub const fn bytes(self) -> Option<usize> {
+        match self {
+            SampleType::I16 => Some(2),
+            SampleType::I24 => Some(3),
+            SampleType::I32 | SampleType::F32 => Some(4),
+            SampleType::F64 => Some(8),
+            SampleType::Unknown => None,
+        }
+    }
+
+    /// True if this is an integer-based sample format
+    pub const fn is_integer(self) -> bool {
+        matches!(self, SampleType::I16 | SampleType::I24 | SampleType::I32)
+    }
+
+    /// True if this is a floating-point sample format
+    pub const fn is_float(self) -> bool {
+        matches!(self, SampleType::F32 | SampleType::F64)
+    }
+
+    /// True if this format is usable for DSP operations without conversion
+    pub const fn is_dsp_native(self) -> bool {
+        matches!(self, SampleType::F32 | SampleType::F64)
+    }
+}
+
+impl SampleType {
+    /// Returns the SampleType corresponding to a TypeId, or None if unrecognized.
+    ///
+    /// This is useful for SIMD dispatch code that needs to determine the
+    /// concrete sample type at runtime.
+    ///
+    /// # Example
+    /// ```
+    /// use audio_samples::SampleType;
+    /// use std::any::TypeId;
+    ///
+    /// assert_eq!(SampleType::from_type_id(TypeId::of::<f32>()), Some(SampleType::F32));
+    /// assert_eq!(SampleType::from_type_id(TypeId::of::<String>()), None);
+    /// ```
+    pub fn from_type_id(type_id: std::any::TypeId) -> Option<Self> {
+        use std::any::TypeId;
+        if type_id == TypeId::of::<i16>() {
+            Some(SampleType::I16)
+        } else if type_id == TypeId::of::<I24>() {
+            Some(SampleType::I24)
+        } else if type_id == TypeId::of::<i32>() {
+            Some(SampleType::I32)
+        } else if type_id == TypeId::of::<f32>() {
+            Some(SampleType::F32)
+        } else if type_id == TypeId::of::<f64>() {
+            Some(SampleType::F64)
+        } else {
+            None
+        }
+    }
+
+    /// Creates a sample type from a number of bits per sample.
+    pub const fn from_bits(bits: u16) -> Self {
+        match bits {
+            16 => SampleType::I16,
+            24 => SampleType::I24,
+            32 => SampleType::I32,
+            64 => SampleType::F64,
+            _ => SampleType::Unknown,
+        }
+    }
+}
+
+impl Display for SampleType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        if f.alternate() {
+            // "{:#}" → human-readable description
+            write!(f, "{}", self.description())
+        } else {
+            // "{}" → compact canonical form
+            write!(f, "{}", self.as_str())
+        }
+    }
+}
+
+impl TryFrom<&str> for SampleType {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "i16" => Ok(SampleType::I16),
+            "i24" => Ok(SampleType::I24),
+            "i32" => Ok(SampleType::I32),
+            "f32" => Ok(SampleType::F32),
+            "f64" => Ok(SampleType::F64),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Storage wrapper for mono (single-channel) audio samples.
+///
+/// `MonoData` can either **borrow** an `ndarray::ArrayView1` / `ArrayViewMut1` or **own** an
+/// `ndarray::Array1`. Methods that require mutation will promote borrowed data to an owned
+/// buffer when necessary.
+///
+/// # Indexing
+/// Indexing uses the sample index (`usize`).
+///
+/// # Allocation behavior
+/// - Pure reads are zero-copy.
+/// - Some mutable operations (e.g. indexing mutably when currently borrowed immutably) may
+///   allocate by cloning into an owned buffer.
 #[derive(Debug, PartialEq)]
 pub struct MonoData<'a, T: AudioSample>(MonoRepr<'a, T>);
 
+/// Storage wrapper for multi-channel (planar) audio samples.
+///
+/// `MultiData` can either **borrow** an `ndarray::ArrayView2` / `ArrayViewMut2` or **own** an
+/// `ndarray::Array2`.
+///
+/// The shape is `(channels, samples_per_channel)` (channels are rows).
+///
+/// # Indexing
+/// Indexing uses `(channel, sample)`.
+///
+/// # Allocation behavior
+/// - Pure reads are zero-copy.
+/// - Some mutable operations may allocate by cloning into an owned buffer.
 #[derive(Debug, PartialEq)]
 pub struct MultiData<'a, T: AudioSample>(MultiRepr<'a, T>);
 
@@ -241,7 +483,10 @@ pub(crate) enum MultiRepr<'a, T: AudioSample> {
 
 impl<'a, T: AudioSample> MonoData<'a, T> {
     #[inline]
-    fn as_view(&self) -> ArrayView1<'_, T> {
+    /// Returns an `ndarray` view of the samples.
+    ///
+    /// This is always a zero-copy operation.
+    pub fn as_view(&self) -> ArrayView1<'_, T> {
         match &self.0 {
             MonoRepr::Borrowed(v) => *v,
             MonoRepr::BorrowedMut(v) => v.view(),
@@ -249,6 +494,10 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         }
     }
 
+    /// Promotes immutably-borrowed data to owned data.
+    ///
+    /// If this `MonoData` is already mutable-borrowed or owned, this is a no-op.
+    /// If it is immutably borrowed, this allocates and clones the underlying samples.
     pub fn promote(&mut self) {
         if let MonoRepr::Borrowed(v) = &self.0 {
             self.0 = MonoRepr::Owned(v.to_owned());
@@ -290,6 +539,7 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
             _ => unreachable!(),
         }
     }
+
     #[inline]
     fn into_owned<'b>(self) -> MonoData<'b, T> {
         match self.0 {
@@ -301,22 +551,27 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
 
     // Delegation methods for ndarray operations
     #[inline]
+    /// Returns the number of samples.
     pub fn len(&self) -> usize {
         self.as_view().len()
     }
 
+    /// Returns an `ndarray` view of the samples.
     pub fn view(&self) -> ArrayView1<'_, T> {
         self.as_view()
     }
 
+    /// Returns the arithmetic mean of the samples, or `None` if empty.
     pub fn mean(&self) -> Option<T> {
         self.as_view().mean()
     }
 
+    /// Returns the sum of the samples.
     pub fn sum(&self) -> T {
         self.as_view().sum()
     }
 
+    /// Folds over the samples.
     pub fn fold<F>(&self, init: T, f: F) -> T
     where
         F: FnMut(T, &T) -> T,
@@ -325,8 +580,10 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
     }
 
     /// Returns a slice view of the audio data based on the provided slicing information.
+    /// Returns a slice view of the audio data based on the provided slicing information.
     pub fn slice<I>(&self, info: I) -> ArrayView1<'_, T>
     where
+        I: SliceArg<Ix1, OutDim = Ix1>,
         I: SliceArg<Ix1, OutDim = Ix1>,
     {
         match &self.0 {
@@ -338,8 +595,11 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
 
     /// Returns a mutable slice view of the audio data based on the provided slicing information.
     /// NOTE: This function promotes to owned data if the current representation is borrowed.
+    /// Returns a mutable slice view of the audio data based on the provided slicing information.
+    /// NOTE: This function promotes to owned data if the current representation is borrowed.
     pub fn slice_mut<I>(&mut self, info: I) -> ArrayViewMut1<'_, T>
     where
+        I: ndarray::SliceArg<Ix1, OutDim = Ix1>,
         I: ndarray::SliceArg<Ix1, OutDim = Ix1>,
     {
         if let MonoRepr::Borrowed(v) = self.0 {
@@ -354,6 +614,7 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         }
     }
 
+    /// Returns an iterator over the samples.
     pub fn iter(&self) -> ndarray::iter::Iter<'_, T, Ix1> {
         match &self.0 {
             MonoRepr::Borrowed(v) => v.iter(),
@@ -362,6 +623,9 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         }
     }
 
+    /// Returns a mutable iterator over the samples.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn iter_mut(&mut self) -> ndarray::iter::IterMut<'_, T, Ix1> {
         if let MonoRepr::Borrowed(a) = &mut self.0 {
             self.0 = MonoRepr::Owned(a.to_owned());
@@ -374,6 +638,9 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         }
     }
 
+    /// Applies a value-mapping function in-place.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn mapv_inplace<F>(&mut self, f: F)
     where
         F: FnMut(T) -> T,
@@ -381,10 +648,14 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         self.to_mut().mapv_inplace(f);
     }
 
-    pub const fn swap_axes(&mut self, _a: usize, _b: usize) {
-        // For 1D arrays, swap_axes is a no-op
-    }
+    // pub const fn swap_axes(&mut self, _a: usize, _b: usize) {
+    //     // For 1D arrays, swap_axes is a no-op
+    // }
 
+    /// Returns a mutable slice of the underlying samples.
+    ///
+    /// # Panics
+    /// Panics if the underlying `ndarray` storage is not contiguous.
     pub fn as_slice_mut(&mut self) -> &mut [T] {
         self.promote();
         match &mut self.0 {
@@ -398,6 +669,7 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         }
     }
 
+    /// Returns a shared slice if the underlying storage is contiguous.
     pub fn as_slice(&self) -> Option<&[T]> {
         match &self.0 {
             MonoRepr::Borrowed(v) => v.as_slice(),
@@ -406,10 +678,12 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         }
     }
 
+    /// Returns `true` if there are no samples.
     pub fn is_empty(&self) -> bool {
         self.as_view().is_empty()
     }
 
+    /// Returns the shape of the underlying `ndarray` buffer.
     pub fn shape(&self) -> &[usize] {
         match &self.0 {
             MonoRepr::Borrowed(v) => v.shape(),
@@ -418,6 +692,7 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         }
     }
 
+    /// Maps each sample into a new `Array1`.
     pub fn mapv<F, U>(&self, f: F) -> Array1<U>
     where
         F: Fn(T) -> U,
@@ -426,21 +701,28 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
         self.as_view().mapv(f)
     }
 
+    /// Returns a mutable pointer to the underlying buffer.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn as_mut_ptr(&mut self) -> *mut T {
         self.to_mut().as_mut_ptr()
     }
 
+    /// Collects the samples into a `Vec<T>`.
     pub fn to_vec(&self) -> Vec<T> {
         self.as_view().to_vec()
     }
 
-    pub fn fill(&mut self, value: T)
-    where
-        T: Clone,
-    {
+    /// Fills all samples with `value`.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
+    pub fn fill(&mut self, value: T) {
         self.to_mut().fill(value);
     }
 
+    /// Converts into a raw `Vec<T>` and an offset.
+    ///
+    /// For borrowed data, this allocates and clones.
     pub fn into_raw_vec_and_offset(self) -> (Vec<T>, usize) {
         match self.0 {
             MonoRepr::Borrowed(v) => {
@@ -455,6 +737,17 @@ impl<'a, T: AudioSample> MonoData<'a, T> {
                 let (vec, offset) = a.into_raw_vec_and_offset();
                 (vec, offset.unwrap_or(0))
             }
+        }
+    }
+
+    /// Converts this wrapper into an owned `Array1<T>`.
+    ///
+    /// For borrowed data, this allocates and clones.
+    pub fn take(self) -> Array1<T> {
+        match self.0 {
+            MonoRepr::Borrowed(v) => v.to_owned(),
+            MonoRepr::BorrowedMut(v) => v.to_owned(),
+            MonoRepr::Owned(a) => a,
         }
     }
 }
@@ -484,7 +777,10 @@ impl<'a, T: AudioSample> IntoIterator for &'a MonoData<'_, T> {
 
 impl<'a, T: AudioSample> MultiData<'a, T> {
     #[inline]
-    fn as_view(&self) -> ArrayView2<'_, T> {
+    /// Returns an `ndarray` view of the samples with shape `(channels, samples_per_channel)`.
+    ///
+    /// This is always a zero-copy operation.
+    pub fn as_view(&self) -> ArrayView2<'_, T> {
         match &self.0 {
             MultiRepr::Borrowed(a) => *a,
             MultiRepr::BorrowedMut(a) => a.view(),
@@ -492,6 +788,10 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Promotes immutably-borrowed data to owned data.
+    ///
+    /// If this `MultiData` is already mutable-borrowed or owned, this is a no-op.
+    /// If it is immutably borrowed, this allocates and clones the underlying samples.
     fn promote(&mut self) {
         if let MultiRepr::Borrowed(v) = &self.0 {
             self.0 = MultiRepr::Owned(v.to_owned());
@@ -503,6 +803,14 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         'b: 'a,
     {
         MultiData(MultiRepr::Borrowed(view))
+    }
+
+    /// Create MultiData from an ArrayViewMut2 (borrowed mutable data)
+    pub const fn from_view_mut<'b>(view: ArrayViewMut2<'b, T>) -> Self
+    where
+        'b: 'a,
+    {
+        MultiData(MultiRepr::BorrowedMut(view))
     }
 
     pub const fn from_owned(array: Array2<T>) -> Self {
@@ -529,6 +837,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
 
     // Delegation methods for ndarray operations
     #[inline]
+    /// Returns the number of channels (rows).
     pub fn nrows(&self) -> usize {
         self.as_view().nrows()
     }
@@ -538,22 +847,27 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         self.as_view().ncols()
     }
     #[inline]
+    /// Returns `(channels, samples_per_channel)`.
     pub fn dim(&self) -> (usize, usize) {
         self.as_view().dim()
     }
 
+    /// Returns the arithmetic mean along `axis`, or `None` if empty.
     pub fn mean_axis(&self, axis: Axis) -> Option<Array1<T>> {
         self.as_view().mean_axis(axis)
     }
 
+    /// Returns the arithmetic mean across all samples, or `None` if empty.
     pub fn mean(&self) -> Option<T> {
         self.as_view().mean()
     }
 
+    /// Returns the sum across all samples.
     pub fn sum(&self) -> T {
         self.as_view().sum()
     }
 
+    /// Returns a 1D view into `axis` at `index`.
     pub fn index_axis(&self, axis: Axis, index: usize) -> ArrayView1<'_, T> {
         match &self.0 {
             MultiRepr::Borrowed(a) => a.index_axis(axis, index),
@@ -562,6 +876,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a view of the column at `index`.
     pub fn column(&self, index: usize) -> ArrayView1<'_, T> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.column(index),
@@ -570,6 +885,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a sliced 2D view.
     pub fn slice<I>(&self, info: I) -> ArrayView2<'_, T>
     where
         I: ndarray::SliceArg<ndarray::Ix2, OutDim = ndarray::Ix2>,
@@ -581,10 +897,15 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a mutable sliced 2D view.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn slice_mut<I>(&mut self, info: I) -> ArrayViewMut2<'_, T>
     where
         I: ndarray::SliceArg<ndarray::Ix2, OutDim = ndarray::Ix2>,
     {
+        self.promote();
+
         self.promote();
 
         match &mut self.0 {
@@ -594,10 +915,14 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a 2D view of the samples.
     pub fn view(&self) -> ArrayView2<'_, T> {
         self.as_view()
     }
 
+    /// Returns a mutable 2D view of the samples.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn view_mut(&mut self) -> ArrayViewMut2<'_, T> {
         self.promote();
         match &mut self.0 {
@@ -607,11 +932,16 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Swaps two axes in-place.
     pub fn swap_axes(&mut self, a: usize, b: usize) {
         self.to_mut().swap_axes(a, b);
     }
 
+    /// Returns a mutable 1D view into `axis` at `index`.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn index_axis_mut(&mut self, axis: Axis, index: usize) -> ArrayViewMut1<'_, T> {
+        self.promote();
         self.promote();
         match &mut self.0 {
             MultiRepr::BorrowedMut(a) => a.index_axis_mut(axis, index),
@@ -620,6 +950,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns the shape of the underlying `ndarray` buffer.
     pub fn shape(&self) -> &[usize] {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.shape(),
@@ -628,6 +959,9 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Applies a value-mapping function in-place.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn mapv_inplace<F>(&mut self, f: F)
     where
         F: FnMut(T) -> T,
@@ -635,6 +969,9 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         self.to_mut().mapv_inplace(f);
     }
 
+    /// Returns a mutable iterator over 1D lanes along `axis`.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn axis_iter_mut(&mut self, axis: Axis) -> AxisIterMut<'_, T, Ix1> {
         self.promote();
         match &mut self.0 {
@@ -644,6 +981,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a view of the row at `index`.
     pub fn row(&self, index: usize) -> ArrayView1<'_, T> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.row(index),
@@ -652,6 +990,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns an iterator over all samples (row-major).
     pub fn iter(&self) -> ndarray::iter::Iter<'_, T, Ix2> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.iter(),
@@ -660,6 +999,9 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a mutable iterator over all samples (row-major).
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn iter_mut(&mut self) -> ndarray::iter::IterMut<'_, T, Ix2> {
         self.promote();
         match &mut self.0 {
@@ -669,14 +1011,19 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns the total number of samples across all channels.
     pub fn len(&self) -> usize {
         self.as_view().len()
     }
 
+    /// Returns `true` if there are no samples.
+    ///
+    /// This should really only ever be false si
     pub fn is_empty(&self) -> bool {
         self.as_view().is_empty()
     }
 
+    /// Maps each sample into a new `Array2`.
     pub fn mapv<F, U>(&self, f: F) -> Array2<U>
     where
         F: Fn(T) -> U,
@@ -685,10 +1032,14 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         self.as_view().mapv(f)
     }
 
+    /// Returns a mutable pointer to the underlying buffer.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn as_mut_ptr(&mut self) -> *mut T {
         self.to_mut().as_mut_ptr()
     }
 
+    /// Returns a shared slice if the underlying storage is contiguous.
     pub fn as_slice(&self) -> Option<&[T]> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.as_slice(),
@@ -697,6 +1048,9 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a mutable iterator over the outer axis (rows/channels).
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn outer_iter(&mut self) -> ndarray::iter::AxisIterMut<'_, T, ndarray::Ix1> {
         self.promote();
         match &mut self.0 {
@@ -706,6 +1060,9 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns a mutable slice if the underlying storage is contiguous.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn as_slice_mut(&mut self) -> Option<&mut [T]> {
         self.promote();
         match &mut self.0 {
@@ -715,6 +1072,7 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns an iterator over 1D lanes along `axis`.
     pub fn axis_iter(&self, axis: ndarray::Axis) -> ndarray::iter::AxisIter<'_, T, ndarray::Ix1> {
         match &self.0 {
             MultiRepr::Borrowed(v) => v.axis_iter(axis),
@@ -723,10 +1081,14 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Returns the raw dimension.
     pub fn raw_dim(&self) -> ndarray::Dim<[usize; 2]> {
         self.as_view().raw_dim()
     }
 
+    /// Returns a mutable view of the row at `index`.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn row_mut(&mut self, index: usize) -> ndarray::ArrayViewMut1<'_, T> {
         self.promote();
         match &mut self.0 {
@@ -736,10 +1098,16 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Fills all samples with `value`.
+    ///
+    /// If the data is currently immutably borrowed, this promotes to owned (allocates).
     pub fn fill(&mut self, value: T) {
         self.to_mut().fill(value);
     }
 
+    /// Converts into a raw `Vec<T>` and an offset.
+    ///
+    /// For borrowed data, this allocates and clones.
     pub fn into_raw_vec_and_offset(self) -> (Vec<T>, usize) {
         match self.0 {
             MultiRepr::Borrowed(v) => {
@@ -757,11 +1125,23 @@ impl<'a, T: AudioSample> MultiData<'a, T> {
         }
     }
 
+    /// Folds over all samples (row-major).
     pub fn fold<B, F>(&self, init: B, f: F) -> B
     where
         F: FnMut(B, &T) -> B,
     {
         self.as_view().iter().fold(init, f)
+    }
+
+    /// Converts this wrapper into an owned `Array2<T>`.
+    ///
+    /// For borrowed data, this allocates and clones.
+    pub fn take(self) -> Array2<T> {
+        match self.0 {
+            MultiRepr::Borrowed(v) => v.to_owned(),
+            MultiRepr::BorrowedMut(v) => v.to_owned(),
+            MultiRepr::Owned(a) => a,
+        }
     }
 }
 
@@ -831,6 +1211,25 @@ impl<T: AudioSample> AudioData<'static, T> {
             AudioData::Multi(m) => m.mean(),
         }
     }
+
+    /// Consumes self and returns the underlying data as an owned Array1 or Array2.
+    pub fn into_mono_data(self) -> Option<Array1<T>> {
+        if let AudioData::Mono(m) = self {
+            Some(m.take())
+        } else {
+            None
+        }
+    }
+
+    /// Consumes self and returns the underlying data as an owned Array2.
+    /// Returns None if the data is mono.
+    pub fn into_multi_data(self) -> Option<Array2<T>> {
+        if let AudioData::Multi(m) = self {
+            Some(m.take())
+        } else {
+            None
+        }
+    }
 }
 
 impl<T: AudioSample> Clone for AudioData<'_, T> {
@@ -846,6 +1245,78 @@ impl<T: AudioSample> AudioData<'_, T> {
     /// Creates a new mono AudioData from an owned Array1.
     pub const fn new_mono(data: Array1<T>) -> AudioData<'static, T> {
         AudioData::Mono(MonoData(MonoRepr::Owned(data)))
+    }
+
+    /// Creates a new multi-channel AudioData from an owned Array2.
+    pub const fn new_multi(data: Array2<T>) -> AudioData<'static, T> {
+        AudioData::Multi(MultiData(MultiRepr::Owned(data)))
+    }
+
+    /// Creates mono AudioData from a slice (borrowed).
+    pub fn from_slice<'a>(slice: &'a [T]) -> AudioData<'a, T> {
+        let view = ArrayView1::from(slice);
+        AudioData::Mono(MonoData(MonoRepr::Borrowed(view)))
+    }
+
+    /// Creates mono AudioData from a mutable slice (borrowed).
+    pub fn from_slice_mut<'a>(slice: &'a mut [T]) -> AudioData<'a, T> {
+        let view = ArrayViewMut1::from(slice);
+        AudioData::Mono(MonoData(MonoRepr::BorrowedMut(view)))
+    }
+
+    /// Creates multi-channel AudioData from a slice with specified channel count (borrowed).
+    ///
+    /// # Panics
+    /// - If `slice.len()` is not divisible by `channels`
+    /// - If the slice cannot be reshaped into the desired shape
+    pub fn from_slice_multi<'a>(slice: &'a [T], channels: usize) -> AudioData<'a, T> {
+        let total_samples = slice.len();
+        assert!(
+            total_samples.is_multiple_of(channels),
+            "Slice length must be divisible by number of channels"
+        );
+        let samples_per_channel = total_samples / channels;
+        let view = ArrayView2::from_shape((channels, samples_per_channel), slice)
+            .expect("Failed to create ArrayView2 from slice");
+        AudioData::Multi(MultiData(MultiRepr::Borrowed(view)))
+    }
+
+    /// Creates multi-channel AudioData from a mutable slice with specified channel count (borrowed).
+    ///
+    /// # Panics
+    /// - If `slice.len()` is not divisible by `channels`
+    /// - If the slice cannot be reshaped into the desired shape
+    pub fn from_slice_multi_mut<'a>(slice: &'a mut [T], channels: usize) -> AudioData<'a, T> {
+        let total_samples = slice.len();
+        assert!(
+            total_samples.is_multiple_of(channels),
+            "Slice length must be divisible by number of channels"
+        );
+        let samples_per_channel = total_samples / channels;
+        let view = ArrayViewMut2::from_shape((channels, samples_per_channel), slice)
+            .expect("Failed to create ArrayViewMut2 from slice");
+        AudioData::Multi(MultiData(MultiRepr::BorrowedMut(view)))
+    }
+
+    /// Creates mono AudioData from a Vec (owned).
+    pub fn from_vec(vec: Vec<T>) -> AudioData<'static, T> {
+        AudioData::Mono(MonoData(MonoRepr::Owned(Array1::from(vec))))
+    }
+
+    /// Creates multi-channel AudioData from a Vec with specified channel count (owned).
+    ///
+    /// # Panics
+    /// - If `vec.len()` is not divisible by `channels`
+    pub fn from_vec_multi(vec: Vec<T>, channels: usize) -> AudioData<'static, T> {
+        let total_samples = vec.len();
+        assert!(
+            total_samples.is_multiple_of(channels),
+            "Vec length must be divisible by number of channels"
+        );
+        let samples_per_channel = total_samples / channels;
+        let arr = Array2::from_shape_vec((channels, samples_per_channel), vec)
+            .expect("Failed to create Array2 from vec");
+        AudioData::Multi(MultiData(MultiRepr::Owned(arr)))
     }
 }
 
@@ -871,9 +1342,20 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
     pub const fn from_borrowed_array1<'b>(view: ArrayView1<'b, T>) -> AudioData<'b, T> {
         AudioData::Mono(MonoData(MonoRepr::Borrowed(view)))
     }
+
+    /// Creates AudioData from a borrowed mutable mono array view.
+    pub const fn from_borrowed_array1_mut<'b>(view: ArrayViewMut1<'b, T>) -> AudioData<'b, T> {
+        AudioData::Mono(MonoData(MonoRepr::BorrowedMut(view)))
+    }
+
     /// Creates AudioData from a borrowed multi-channel array view.
     pub const fn from_borrowed_array2<'b>(view: ArrayView2<'b, T>) -> AudioData<'b, T> {
         AudioData::Multi(MultiData(MultiRepr::Borrowed(view)))
+    }
+
+    /// Creates AudioData from a borrowed mutable multi-channel array view.
+    pub const fn from_borrowed_array2_mut<'b>(view: ArrayViewMut2<'b, T>) -> AudioData<'b, T> {
+        AudioData::Multi(MultiData(MultiRepr::BorrowedMut(view)))
     }
 
     /// Returns the total number of samples in the audio data.
@@ -949,20 +1431,52 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
         }
     }
 
+    /// Returns a contiguous byte view when possible, falling back to I24 packing when required.
+    pub fn bytes(&self) -> AudioSampleResult<AudioBytes<'_>> {
+        let slice =
+            self.as_slice()
+                .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
+                    operation: "bytes view".to_string(),
+                    layout_type: "non-contiguous audio data".to_string(),
+                }))?;
+
+        if TypeId::of::<T>() == TypeId::of::<I24>() {
+            // I24 is 4 bytes in memory but 3 bytes on disk; pack to owned bytes.
+            let i24_slice: &[I24] =
+                unsafe { core::slice::from_raw_parts(slice.as_ptr() as *const I24, slice.len()) };
+            let packed = I24::write_i24s_ne(i24_slice);
+            return Ok(AudioBytes::Owned(packed));
+        }
+
+        let byte_len = std::mem::size_of_val(slice);
+        let byte_ptr = slice.as_ptr() as *const u8;
+        let bytes = unsafe { core::slice::from_raw_parts(byte_ptr, byte_len) };
+        Ok(AudioBytes::Borrowed(bytes))
+    }
+
     /// Returns the number of bytes per sample for the current sample type.
     #[inline]
-    pub fn bytes_per_sample(&self) -> usize {
-        match TypeId::of::<T>() {
-            id if id == TypeId::of::<I24>() => 3,
-            _ => std::mem::size_of::<T>(),
-        }
+    pub const fn bytes_per_sample(&self) -> usize {
+        T::BYTES
     }
-    /// Converts the audio data to a byte vector.
+
+    /// Returns an owned byte buffer.
+    ///
+    /// Note: this always allocates a new `Vec<u8>`. Use [`Self::bytes`] for a
+    /// potentially zero-copy view.
+    pub fn into_bytes(&self) -> Vec<u8> {
+        self.bytes()
+            .map(AudioBytes::into_owned)
+            .unwrap_or_else(|_| match self {
+                AudioData::Mono(m) => m.as_view().iter().flat_map(|s| s.to_bytes()).collect(),
+                AudioData::Multi(m) => m.as_view().iter().flat_map(|s| s.to_bytes()).collect(),
+            })
+    }
+
+    /// Deprecated: use `bytes()` for borrowed access or `into_bytes()` for owned bytes.
+    #[deprecated(note = "use bytes() for borrowed access or into_bytes() for owned bytes")]
     pub fn as_bytes(&self) -> Vec<u8> {
-        match self {
-            AudioData::Mono(m) => m.as_view().iter().flat_map(|s| s.to_bytes()).collect(),
-            AudioData::Multi(m) => m.as_view().iter().flat_map(|s| s.to_bytes()).collect(),
-        }
+        self.into_bytes()
     }
 
     /// Maps a function over each sample, returning new owned audio data.
@@ -1170,18 +1684,21 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
             }
         }
     }
-    /// Convert audio data to another sample type.
+    /// Converts the samples to another sample type.
+    ///
+    /// This is an audio-aware conversion using [`ConvertTo`], so it can clamp and scale
+    /// as needed for the source/target sample formats.
     pub fn convert_to<O: AudioSample>(&self) -> AudioData<'static, O>
     where
         T: ConvertTo<O>,
     {
         match self {
             AudioData::Mono(m) => {
-                let out = m.as_view().mapv(|x| x.convert_to().expect("AudioSample <-> AudioSample conversions can fail in theory, but nearly impossible in practice."));
+                let out = m.as_view().mapv(|x| x.convert_to());
                 AudioData::Mono(MonoData(MonoRepr::Owned(out)))
             }
             AudioData::Multi(m) => {
-                let out = m.as_view().mapv(|x| x.convert_to().expect("AudioSample <-> AudioSample conversions can fail in theory, but nearly impossible in practice."));
+                let out = m.as_view().mapv(|x| x.convert_to());
                 AudioData::Multi(MultiData(MultiRepr::Owned(out)))
             }
         }
@@ -1195,14 +1712,18 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
                 MonoRepr::Owned(a) => a.to_vec(),
             },
             AudioData::Multi(m) => {
-                let (ch, spc) = m.as_view().dim();
-                let mut out = Vec::with_capacity(ch * spc);
-                for i in 0..spc {
-                    for c in 0..ch {
-                        out.push(m.as_view()[[c, i]]);
-                    }
-                }
-                out
+                let (ch, _spc) = m.as_view().dim();
+                // Get planar data as contiguous slice
+                let planar: Vec<T> = if let Some(slice) = m.as_view().as_slice() {
+                    slice.to_vec()
+                } else {
+                    // Array not contiguous in memory, must iterate
+                    m.as_view().iter().copied().collect()
+                };
+
+                // Use optimized interleave
+                crate::simd_conversions::interleave_multi_vec(planar, ch)
+                    .expect("Interleave failed - this should not happen with valid input")
             }
         }
     }
@@ -1213,14 +1734,18 @@ impl<'a, T: AudioSample> AudioData<'a, T> {
             AudioData::Mono(m) => m.as_view().to_vec(),
             AudioData::Multi(m) => {
                 let v = m.as_view();
-                let (ch, spc) = v.dim();
-                let mut out = Vec::with_capacity(ch * spc);
-                for i in 0..spc {
-                    for c in 0..ch {
-                        out.push(v[[c, i]]);
-                    }
-                }
-                out
+                let (ch, _spc) = v.dim();
+                // Get planar data as contiguous slice
+                let planar: Vec<T> = if let Some(slice) = v.as_slice() {
+                    slice.to_vec()
+                } else {
+                    // Array not contiguous in memory, must iterate
+                    v.iter().copied().collect()
+                };
+
+                // Use optimized interleave
+                crate::simd_conversions::interleave_multi_vec(planar, ch)
+                    .expect("Interleave failed - this should not happen with valid input")
             }
         }
     }
@@ -1454,23 +1979,37 @@ where
 ///
 /// # Examples
 /// ```rust
-/// use audio_samples::AudioSamples;
+/// use audio_samples::{AudioSamples, sample_rate};
 /// use ndarray::array;
 ///
-/// let mono_audio = AudioSamples::new_mono(array![0.1f32, 0.2, 0.3], 44100);
+/// let mono_audio = AudioSamples::new_mono(array![0.1f32, 0.2, 0.3], sample_rate!(44100));
 /// assert_eq!(mono_audio.num_channels(), 1);
 ///
 /// let stereo_data = array![[0.1f32, 0.2], [0.3f32, 0.4]];
-/// let stereo_audio = AudioSamples::new_multi_channel(stereo_data, 48000);
+/// let stereo_audio = AudioSamples::new_multi_channel(stereo_data, sample_rate!(48000));
 /// assert_eq!(stereo_audio.num_channels(), 2);
 /// ```
+///
+/// # Invariants
+///
+/// The following properties are guaranteed by construction and cannot be violated:
+/// - `sample_rate` is always > 0 (stored as [`NonZeroU32`])
+/// - `num_channels()` is always ≥ 1 (mono has 1 channel, multi has ≥ 1 rows)
+/// - `samples_per_channel()` is always ≥ 1 (empty audio is not allowed)
+///
+/// These invariants eliminate the need for runtime validation in downstream code.
 #[derive(Debug, PartialEq)]
 pub struct AudioSamples<'a, T: AudioSample> {
     /// The audio sample data.
     pub data: AudioData<'a, T>,
-    /// Sample rate in Hz.
-    pub sample_rate: u32,
-    /// Channel layout information.
+    /// Sample rate in Hz (guaranteed non-zero).
+    pub sample_rate: NonZeroU32,
+    /// Channel layout metadata.
+    ///
+    /// Note: multi-channel sample data stored in [`AudioData::Multi`] is represented as a
+    /// 2D array with shape `(channels, samples_per_channel)` (planar). This field records
+    /// how the samples should be interpreted/serialized (e.g. when converting to/from an
+    /// interleaved `Vec<T>`).
     pub layout: ChannelLayout,
 }
 
@@ -1591,7 +2130,7 @@ impl<'a, T: AudioSample> Display for AudioSamples<'a, T> {
 
 impl<T: AudioSample> AudioSamples<'static, T> {
     /// Creates AudioSamples from owned data.
-    pub fn from_owned(data: AudioData<'_, T>, sample_rate: u32) -> Self {
+    pub fn from_owned(data: AudioData<'_, T>, sample_rate: NonZeroU32) -> Self {
         let owned = data.into_owned();
 
         let layout = match &owned {
@@ -1605,11 +2144,35 @@ impl<T: AudioSample> AudioSamples<'static, T> {
             layout,
         }
     }
+
+    /// Consumes self and returns the underlying AudioData
+    pub fn into_data(self) -> AudioData<'static, T> {
+        self.data.into_owned()
+    }
+
+    /// Consumes self and returns the underlying mono Array1 if applicable
+    pub fn into_array1(self) -> Option<Array1<T>> {
+        match self.data {
+            AudioData::Mono(m) => Some(m.take()),
+            AudioData::Multi(_) => None,
+        }
+    }
+
+    /// Consumes self and returns the underlying multi-channel Array2 if applicable
+    pub fn into_array2(self) -> Option<Array2<T>> {
+        match self.data {
+            AudioData::Multi(m) => Some(m.take()),
+            AudioData::Mono(_) => None,
+        }
+    }
 }
 
 impl<'a, T: AudioSample> AudioSamples<'a, T> {
-    /// Creates a new AudioSamples with the given data and sample rate
-    pub const fn new(data: AudioData<'a, T>, sample_rate: u32) -> Self {
+    /// Creates a new AudioSamples with the given data and sample rate.
+    ///
+    /// This is a low-level constructor. Prefer `new_mono` or `new_multi_channel`
+    /// for most use cases.
+    pub const fn new(data: AudioData<'a, T>, sample_rate: NonZeroU32) -> Self {
         Self {
             data,
             sample_rate,
@@ -1618,7 +2181,7 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates AudioSamples from borrowed data.
-    pub const fn from_borrowed(data: AudioData<'a, T>, sample_rate: u32) -> Self {
+    pub const fn from_borrowed(data: AudioData<'a, T>, sample_rate: NonZeroU32) -> Self {
         let layout = match &data {
             AudioData::Mono(_) => ChannelLayout::NonInterleaved,
             AudioData::Multi(_) => ChannelLayout::Interleaved,
@@ -1634,7 +2197,7 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     /// Creates AudioSamples from borrowed data with specified channel layout.
     pub const fn from_borrowed_with_layout(
         data: AudioData<'a, T>,
-        sample_rate: u32,
+        sample_rate: NonZeroU32,
         layout: ChannelLayout,
     ) -> Self {
         Self {
@@ -1673,20 +2236,79 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::AudioSamples;
+    /// use audio_samples::{AudioSamples, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -1.0, 0.5, -0.5];
-    /// let audio = AudioSamples::new_mono(data, 44100);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100));
     /// assert_eq!(audio.num_channels(), 1);
-    /// assert_eq!(audio.sample_rate(), 44100);
+    /// assert_eq!(audio.sample_rate().get(), 44100);
     /// ```
-    pub const fn new_mono<'b>(data: Array1<T>, sample_rate: u32) -> AudioSamples<'b, T> {
+    /// Creates a new mono AudioSamples with the given data and sample rate.
+    ///
+    /// # Panics
+    /// - If `data` is empty
+    pub fn new_mono<'b>(data: Array1<T>, sample_rate: NonZeroU32) -> AudioSamples<'b, T> {
+        assert!(!data.is_empty(), "data must not be empty");
         AudioSamples {
             data: AudioData::Mono(MonoData(MonoRepr::Owned(data))),
             sample_rate,
             layout: ChannelLayout::NonInterleaved,
         }
+    }
+
+    /// Creates a new mono AudioSamples that owns its data, returning an error on invalid input.
+    ///
+    /// This is the fallible version of [`new_mono`](Self::new_mono). Use this when you want
+    /// to handle validation errors gracefully instead of panicking.
+    ///
+    /// # Arguments
+    /// * `data` - 1D array containing the audio samples
+    /// * `sample_rate` - Sample rate in Hz (must be non-zero)
+    ///
+    /// # Returns
+    /// `Ok(AudioSamples)` on success, or an error if:
+    /// - `data` is empty
+    /// - `sample_rate` is zero
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// // Valid input
+    /// let data = array![1.0f32, -1.0, 0.5, -0.5];
+    /// let audio = AudioSamples::try_new_mono(data, 44100).unwrap();
+    /// assert_eq!(audio.num_channels(), 1);
+    ///
+    /// // Invalid input (empty array)
+    /// let empty = ndarray::Array1::<f32>::zeros(0);
+    /// assert!(AudioSamples::try_new_mono(empty, 44100).is_err());
+    ///
+    /// // Invalid input (zero sample rate)
+    /// let data = array![1.0f32, -1.0];
+    /// assert!(AudioSamples::try_new_mono(data, 0).is_err());
+    /// ```
+    pub fn try_new_mono<'b>(
+        data: Array1<T>,
+        sample_rate: u32,
+    ) -> crate::AudioSampleResult<AudioSamples<'b, T>> {
+        if data.is_empty() {
+            return Err(crate::AudioSampleError::Layout(
+                crate::LayoutError::empty_data("try_new_mono"),
+            ));
+        }
+        let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+            crate::AudioSampleError::Parameter(crate::ParameterError::invalid_value(
+                "sample_rate",
+                "must be non-zero",
+            ))
+        })?;
+        Ok(AudioSamples {
+            data: AudioData::Mono(MonoData(MonoRepr::Owned(data))),
+            sample_rate,
+            layout: ChannelLayout::NonInterleaved,
+        })
     }
 
     /// Creates a new multi-channel AudioSamples with the given data and sample rate.
@@ -1700,20 +2322,83 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::AudioSamples;
+    /// use audio_samples::{AudioSamples, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![[1.0f32, -1.0], [0.5, -0.5]]; // 2 channels, 2 samples each
-    /// let audio = AudioSamples::new_multi_channel(data, 44100);
+    /// let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100));
     /// assert_eq!(audio.num_channels(), 2);
-    /// assert_eq!(audio.num_samples(), 2);
+    /// assert_eq!(audio.samples_per_channel(), 2);
     /// ```
-    pub const fn new_multi_channel<'b>(data: Array2<T>, sample_rate: u32) -> AudioSamples<'b, T> {
+    /// Creates a new multi-channel AudioSamples with the given data and sample rate.
+    ///
+    /// # Panics
+    /// - If `data` is empty (has zero samples per channel)
+    pub fn new_multi_channel<'b>(data: Array2<T>, sample_rate: NonZeroU32) -> AudioSamples<'b, T> {
+        assert!(
+            data.ncols() > 0,
+            "data must have at least one sample per channel"
+        );
         AudioSamples {
             data: AudioData::Multi(MultiData(MultiRepr::Owned(data))),
             sample_rate,
             layout: ChannelLayout::Interleaved,
         }
+    }
+
+    /// Creates a new multi-channel AudioSamples, returning an error on invalid input.
+    ///
+    /// This is the fallible version of [`new_multi_channel`](Self::new_multi_channel). Use this
+    /// when you want to handle validation errors gracefully instead of panicking.
+    ///
+    /// # Arguments
+    /// * `data` - 2D array where each row represents a channel and each column a sample
+    /// * `sample_rate` - Sample rate in Hz (must be non-zero)
+    ///
+    /// # Returns
+    /// `Ok(AudioSamples)` on success, or an error if:
+    /// - `data` has zero samples per channel (zero columns)
+    /// - `sample_rate` is zero
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// // Valid input
+    /// let data = array![[1.0f32, -1.0], [0.5, -0.5]]; // 2 channels, 2 samples each
+    /// let audio = AudioSamples::try_new_multi_channel(data, 44100).unwrap();
+    /// assert_eq!(audio.num_channels(), 2);
+    /// assert_eq!(audio.samples_per_channel(), 2);
+    ///
+    /// // Invalid input (zero columns)
+    /// let empty = ndarray::Array2::<f32>::zeros((2, 0));
+    /// assert!(AudioSamples::try_new_multi_channel(empty, 44100).is_err());
+    ///
+    /// // Invalid input (zero sample rate)
+    /// let data = array![[1.0f32, -1.0], [0.5, -0.5]];
+    /// assert!(AudioSamples::try_new_multi_channel(data, 0).is_err());
+    /// ```
+    pub fn try_new_multi_channel<'b>(
+        data: Array2<T>,
+        sample_rate: u32,
+    ) -> crate::AudioSampleResult<AudioSamples<'b, T>> {
+        if data.ncols() == 0 {
+            return Err(crate::AudioSampleError::Layout(
+                crate::LayoutError::empty_data("try_new_multi_channel"),
+            ));
+        }
+        let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+            crate::AudioSampleError::Parameter(crate::ParameterError::invalid_value(
+                "sample_rate",
+                "must be non-zero",
+            ))
+        })?;
+        Ok(AudioSamples {
+            data: AudioData::Multi(MultiData(MultiRepr::Owned(data))),
+            sample_rate,
+            layout: ChannelLayout::Interleaved,
+        })
     }
 
     /// Creates a new mono AudioSamples filled with zeros.
@@ -1729,11 +2414,15 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     /// ```
     /// use audio_samples::AudioSamples;
     ///
-    /// let audio = AudioSamples::<f32>::zeros_mono(1024, 44100);
-    /// assert_eq!(audio.num_samples(), 1024);
+    /// let audio = AudioSamples::<f32>::zeros_mono(1024, sample_rate!(44100));
+    /// assert_eq!(audio.samples_per_channel(), 1024);
     /// assert_eq!(audio.num_channels(), 1);
     /// ```
-    pub fn zeros_mono(length: usize, sample_rate: u32) -> Self {
+    ///
+    /// # Panics
+    /// - If `length` is 0
+    pub fn zeros_mono(length: usize, sample_rate: NonZeroU32) -> Self {
+        assert!(length > 0, "length must be greater than 0");
         Self {
             data: AudioData::Mono(MonoData(MonoRepr::Owned(Array1::zeros(length)))),
             sample_rate,
@@ -1753,13 +2442,17 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::AudioSamples;
+    /// use audio_samples::{AudioSamples, sample_rate};
     ///
-    /// let audio = AudioSamples::<f32>::zeros_multi(2, 1024, 44100);
+    /// let audio = AudioSamples::<f32>::zeros_multi(2, 1024, sample_rate!(44100));
     /// assert_eq!(audio.num_channels(), 2);
-    /// assert_eq!(audio.num_samples(), 1024);
+    /// assert_eq!(audio.samples_per_channel(), 1024);
     /// ```
-    pub fn zeros_multi(channels: usize, length: usize, sample_rate: u32) -> Self {
+    ///
+    /// # Panics
+    /// - If `length` is 0
+    pub fn zeros_multi(channels: usize, length: usize, sample_rate: NonZeroU32) -> Self {
+        assert!(length > 0, "length must be greater than 0");
         Self {
             data: AudioData::Multi(MultiData(MultiRepr::Owned(Array2::zeros((
                 channels, length,
@@ -1770,11 +2463,15 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates a new multi-channel AudioSamples filled with zeros (static version)
+    ///
+    /// # Panics
+    /// - If `length` is 0
     pub fn zeros_multi_channel(
         channels: usize,
         length: usize,
-        sample_rate: u32,
+        sample_rate: NonZeroU32,
     ) -> AudioSamples<'static, T> {
+        assert!(length > 0, "length must be greater than 0");
         AudioSamples {
             data: AudioData::Multi(MultiData(MultiRepr::Owned(Array2::zeros((
                 channels, length,
@@ -1785,7 +2482,11 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates a new mono AudioSamples filled with ones
-    pub fn ones_mono(length: usize, sample_rate: u32) -> Self {
+    ///
+    /// # Panics
+    /// - If `length` is 0
+    pub fn ones_mono(length: usize, sample_rate: NonZeroU32) -> Self {
+        assert!(length > 0, "length must be greater than 0");
         Self {
             data: AudioData::Mono(MonoData(MonoRepr::Owned(Array1::ones(length)))),
             sample_rate,
@@ -1794,7 +2495,11 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates a new multi-channel AudioSamples filled with ones
-    pub fn ones_multi(channels: usize, length: usize, sample_rate: u32) -> Self {
+    ///
+    /// # Panics
+    /// - If `length` is 0
+    pub fn ones_multi(channels: usize, length: usize, sample_rate: NonZeroU32) -> Self {
+        assert!(length > 0, "length must be greater than 0");
         Self {
             data: AudioData::Multi(MultiData(MultiRepr::Owned(Array2::ones((
                 channels, length,
@@ -1805,7 +2510,11 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates a new mono AudioSamples filled with the specified value
-    pub fn uniform_mono(length: usize, sample_rate: u32, value: T) -> Self {
+    ///
+    /// # Panics
+    /// - If `length` is 0
+    pub fn uniform_mono(length: usize, sample_rate: NonZeroU32, value: T) -> Self {
+        assert!(length > 0, "length must be greater than 0");
         Self {
             data: AudioData::Mono(MonoData(MonoRepr::Owned(Array1::from_elem(length, value)))),
             sample_rate,
@@ -1814,7 +2523,16 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates a new multi-channel AudioSamples filled with the specified value
-    pub fn uniform_multi(channels: usize, length: usize, sample_rate: u32, value: T) -> Self {
+    ///
+    /// # Panics
+    /// - If `length` is 0
+    pub fn uniform_multi(
+        channels: usize,
+        length: usize,
+        sample_rate: NonZeroU32,
+        value: T,
+    ) -> Self {
+        assert!(length > 0, "length must be greater than 0");
         Self {
             data: AudioData::Multi(MultiData(MultiRepr::Owned(Array2::from_elem(
                 (channels, length),
@@ -1841,29 +2559,110 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
             self.num_channels(),
             self.samples_per_channel(),
             self.duration_seconds(),
-            self.sample_rate,
+            self.sample_rate.get(),
             self.layout,
         )
     }
 
-    /// Returns the sample rate in Hz
-    pub const fn sample_rate(&self) -> u32 {
+    /// Returns the sample rate in Hz as a [`NonZeroU32`].
+    ///
+    /// This is guaranteed to be non-zero by construction.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![1.0f32, 2.0], sample_rate!(44100));
+    /// assert_eq!(audio.sample_rate().get(), 44100);
+    /// ```
+    #[inline]
+    pub const fn sample_rate(&self) -> NonZeroU32 {
         self.sample_rate
     }
 
-    /// Returns the number of channels
+    /// Returns the sample rate as a plain `u32`.
+    ///
+    /// This is a convenience method equivalent to `self.sample_rate().get()`.
+    #[inline]
+    pub const fn sample_rate_hz(&self) -> u32 {
+        self.sample_rate.get()
+    }
+
+    /// Returns the number of channels.
+    ///
+    /// This is guaranteed to be ≥ 1 by construction.
+    #[inline]
     pub fn num_channels(&self) -> usize {
         self.data.num_channels()
     }
 
-    /// Returns the number of samples per channel
+    /// Returns the number of channels as a [`NonZeroUsize`].
+    ///
+    /// This provides a compile-time guarantee that the value is non-zero,
+    /// eliminating the need for runtime validation in downstream code.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![1.0f32, 2.0], sample_rate!(44100));
+    /// let channels = audio.num_channels_nonzero();
+    /// assert_eq!(channels.get(), 1);
+    /// ```
+    #[inline]
+    pub fn num_channels_nonzero(&self) -> NonZeroUsize {
+        // SAFETY: AudioSamples always has at least 1 channel (mono = 1, multi = rows ≥ 1)
+        // This invariant is enforced by all constructors.
+        unsafe { NonZeroUsize::new_unchecked(self.data.num_channels()) }
+    }
+
+    /// Returns the number of samples per channel.
+    ///
+    /// This is guaranteed to be ≥ 1 by construction (empty audio is not allowed).
+    #[inline]
     pub fn samples_per_channel(&self) -> usize {
         self.data.samples_per_channel()
     }
 
+    /// Returns the number of samples per channel as a [`NonZeroUsize`].
+    ///
+    /// This provides a compile-time guarantee that the value is non-zero,
+    /// eliminating the need for runtime validation in downstream code.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100));
+    /// let samples = audio.samples_per_channel_nonzero();
+    /// assert_eq!(samples.get(), 3);
+    /// ```
+    #[inline]
+    pub fn samples_per_channel_nonzero(&self) -> NonZeroUsize {
+        // SAFETY: AudioSamples always has at least 1 sample per channel.
+        // This invariant is enforced by all constructors (empty audio is rejected).
+        unsafe { NonZeroUsize::new_unchecked(self.data.samples_per_channel()) }
+    }
+
+    /// Returns the total number of samples as a [`NonZeroUsize`].
+    ///
+    /// This is the product of channels × samples_per_channel, both guaranteed non-zero.
+    #[inline]
+    pub fn total_samples_nonzero(&self) -> NonZeroUsize {
+        // SAFETY: Product of two non-zero values is non-zero
+        unsafe { NonZeroUsize::new_unchecked(self.num_channels() * self.samples_per_channel()) }
+    }
+
     /// Returns the duration in seconds
     pub fn duration_seconds<F: RealFloat>(&self) -> F {
-        to_precision::<F, _>(self.samples_per_channel()) / to_precision::<F, _>(self.sample_rate)
+        to_precision::<F, _>(self.samples_per_channel())
+            / to_precision::<F, _>(self.sample_rate.get())
     }
 
     /// Returns the total number of samples across all channels
@@ -1872,13 +2671,13 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Returns the number of bytes per sample for type T
-    pub fn bytes_per_sample(&self) -> usize {
+    pub const fn bytes_per_sample(&self) -> usize {
         self.data.bytes_per_sample()
     }
 
     /// Returns the sample type as a string
-    pub const fn sample_type() -> &'static str {
-        std::any::type_name::<T>()
+    pub const fn sample_type() -> SampleType {
+        T::SAMPLE_TYPE
     }
 
     /// Returns the channel layout
@@ -1921,15 +2720,15 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     /// * `f` - A function that takes a sample and returns a transformed sample
     ///
     /// # Returns
-    /// A result indicating success or failure
+    /// Nothing. This method is infallible.
     ///
     /// # Example
     /// ```rust,ignore
     /// // Halve the amplitude of all samples
-    /// audio.apply(|sample| sample * 0.5)?;
+    /// audio.apply(|sample| sample * 0.5);
     ///
     /// // Apply a simple distortion
-    /// audio.apply(|sample| sample.clamp(-0.8, 0.8))?;
+    /// audio.apply(|sample| sample.clamp(-0.8, 0.8));
     /// ```
     pub fn apply<F>(&mut self, f: F)
     where
@@ -1960,10 +2759,10 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     /// # Example
     /// ```rust,ignore
     /// // Create a new audio instance with halved amplitude
-    /// let quieter_audio = audio.map(|sample| sample * 0.5)?;
+    /// let quieter_audio = audio.map(|sample| sample * 0.5);
     ///
     /// // Create a new audio instance with clipped samples
-    /// let clipped_audio = audio.map(|sample| sample.clamp(-0.8, 0.8))?;
+    /// let clipped_audio = audio.map(|sample| sample.clamp(-0.8, 0.8));
     /// ```
     pub fn map<F>(&self, f: F) -> AudioSamples<'static, T>
     where
@@ -1993,7 +2792,7 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     /// * `f` - A function that takes a sample index and sample value, returns transformed sample
     ///
     /// # Returns
-    /// A result indicating success or failure
+    /// Nothing. This method is infallible.
     ///
     /// # Example
     /// ```rust,ignore
@@ -2006,7 +2805,7 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     ///         1.0
     ///     };
     ///     sample * gain
-    /// })?;
+    /// });
     /// ```
     pub fn apply_with_index<F>(&mut self, f: F)
     where
@@ -2295,9 +3094,102 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
         }
     }
 
-    /// Convert audio samples to raw bytes.
+    /// Returns a contiguous byte view when possible.
+    pub fn bytes(&self) -> AudioSampleResult<AudioBytes<'_>> {
+        self.data.bytes()
+    }
+
+    /// Convert audio samples to raw bytes, preferring zero-copy when possible.
+    pub fn into_bytes(&self) -> Vec<u8> {
+        self.data.into_bytes()
+    }
+
+    /// Deprecated: use `bytes()` or `into_bytes()` instead.
+    #[deprecated(note = "use bytes() for borrowed access or into_bytes() for owned bytes")]
     pub fn as_bytes(&self) -> Vec<u8> {
-        self.data.as_bytes()
+        self.into_bytes()
+    }
+
+    /// Returns the total size in bytes of all audio data.
+    ///
+    /// This is equivalent to `self.data.len() * self.bytes_per_sample()`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], 44100);
+    /// assert_eq!(audio.total_byte_size(), 12); // 3 samples × 4 bytes per f32
+    /// ```
+    pub fn total_byte_size(&self) -> usize {
+        self.data.len() * self.bytes_per_sample()
+    }
+
+    /// Convert audio samples to bytes in the specified endianness.
+    ///
+    /// Returns a vector of bytes representing the audio data in the requested
+    /// byte order. For cross-platform compatibility and when working with
+    /// audio file formats that specify endianness.
+    ///
+    /// # Feature Gate
+    /// This method requires the `serialization` feature.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(feature = "serialization")]
+    /// # {
+    /// use audio_samples::{AudioSamples, operations::Endianness};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![1000i16, 2000, 3000], 44100);
+    ///
+    /// let native_bytes = audio.as_bytes_with_endianness(Endianness::Native);
+    /// let big_endian_bytes = audio.as_bytes_with_endianness(Endianness::Big);
+    /// let little_endian_bytes = audio.as_bytes_with_endianness(Endianness::Little);
+    ///
+    /// assert_eq!(native_bytes.len(), 6); // 3 samples × 2 bytes per i16
+    /// # }
+    /// ```
+    #[cfg(feature = "serialization")]
+    pub fn as_bytes_with_endianness(&self, endianness: crate::operations::Endianness) -> Vec<u8> {
+        use crate::operations::Endianness;
+
+        match endianness {
+            Endianness::Native => self.into_bytes(),
+            Endianness::Big => {
+                let mut result = Vec::with_capacity(self.total_byte_size());
+                match &self.data {
+                    AudioData::Mono(m) => {
+                        for sample in m.iter() {
+                            result.extend_from_slice(sample.to_be_bytes().as_ref());
+                        }
+                    }
+                    AudioData::Multi(m) => {
+                        for sample in m.iter() {
+                            result.extend_from_slice(sample.to_be_bytes().as_ref());
+                        }
+                    }
+                }
+                result
+            }
+            Endianness::Little => {
+                let mut result = Vec::with_capacity(self.total_byte_size());
+                match &self.data {
+                    AudioData::Mono(m) => {
+                        for sample in m.iter() {
+                            result.extend_from_slice(sample.to_le_bytes().as_ref());
+                        }
+                    }
+                    AudioData::Multi(m) => {
+                        for sample in m.iter() {
+                            result.extend_from_slice(sample.to_le_bytes().as_ref());
+                        }
+                    }
+                }
+                result
+            }
+        }
     }
 
     /// Apply a windowed processing function to the audio data.
@@ -2309,7 +3201,7 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     /// # Arguments
     /// * `window_size` - Size of each processing window in samples
     /// * `hop_size` - Number of samples to advance between windows
-    /// * `func` - Function to apply to each window, taking input and output slices
+    /// * `func` - Function called for each window, receiving `(current_window, prev_window)`
     ///
     /// # Returns
     /// Returns `Ok(())` on success, or an error if parameters are invalid.
@@ -2334,6 +3226,342 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
             data: self.data.into_owned(),
             sample_rate: self.sample_rate,
             layout: self.layout,
+        }
+    }
+
+    /// Replaces the audio data while preserving sample rate and channel layout.
+    ///
+    /// This method allows you to swap out the underlying audio data with new data
+    /// of the same channel configuration, maintaining the existing sample rate and
+    /// layout metadata.
+    ///
+    /// # Arguments
+    /// * `new_data` - The new audio data to replace the current data
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success, or an error if the new data has incompatible dimensions.
+    ///
+    /// # Errors
+    /// - Returns `ParameterError` if the new data has a different number of channels
+    /// - Returns `ParameterError` if mono/multi-channel layout mismatch occurs
+    ///
+    /// # Examples
+    /// ```rust
+    /// use audio_samples::{AudioSamples, AudioData};
+    /// use ndarray::array;
+    ///
+    /// // Create initial audio
+    /// let initial_data = array![1.0f32, 2.0, 3.0];
+    /// let mut audio = AudioSamples::new_mono(initial_data, 44100);
+    ///
+    /// // Replace with new data
+    /// let new_data = AudioData::new_mono(array![4.0f32, 5.0, 6.0, 7.0]);
+    /// audio.replace_data(new_data)?;
+    ///
+    /// assert_eq!(audio.samples_per_channel(), 4);
+    /// assert_eq!(audio.sample_rate(), 44100); // Preserved
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn replace_data(&mut self, new_data: AudioData<'a, T>) -> AudioSampleResult<()> {
+        // Validate channel count compatibility
+        let current_channels = self.data.num_channels();
+        let new_channels = new_data.num_channels();
+
+        if current_channels != new_channels {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "new_data",
+                format!(
+                    "Channel count mismatch: existing audio has {} channels, new data has {} channels",
+                    current_channels, new_channels
+                ),
+            )));
+        }
+
+        // Validate mono/multi layout compatibility
+        match (&self.data, &new_data) {
+            (AudioData::Mono(_), AudioData::Multi(_)) => {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "new_data",
+                    "Cannot replace mono audio data with multi-channel data",
+                )));
+            }
+            (AudioData::Multi(_), AudioData::Mono(_)) => {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "new_data",
+                    "Cannot replace multi-channel audio data with mono data",
+                )));
+            }
+            _ => {} // Same layout types are fine
+        }
+
+        // Replace the data while preserving metadata
+        self.data = new_data;
+        Ok(())
+    }
+
+    /// Replaces the audio data with new mono data from an owned Array1.
+    ///
+    /// This is a convenience method for replacing mono audio data while preserving
+    /// sample rate and layout metadata.
+    ///
+    /// # Arguments
+    /// * `data` - New mono audio data as an owned Array1
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success, or an error if the current audio is not mono.
+    ///
+    /// # Errors
+    /// - Returns `ParameterError` if the current audio is not mono
+    ///
+    /// # Examples
+    /// ```rust
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// // Create initial mono audio
+    /// let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0], 44100);
+    ///
+    /// // Replace with new mono data
+    /// audio.replace_with_mono(array![3.0f32, 4.0, 5.0])?;
+    ///
+    /// assert_eq!(audio.samples_per_channel(), 3);
+    /// assert_eq!(audio.sample_rate(), 44100); // Preserved
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn replace_with_mono(&mut self, data: Array1<T>) -> AudioSampleResult<()> {
+        if !self.is_mono() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_type",
+                format!(
+                    "Cannot replace multi-channel audio ({} channels) with mono data",
+                    self.num_channels()
+                ),
+            )));
+        }
+
+        let new_data = AudioData::from(data).into_owned();
+        self.replace_data(new_data)
+    }
+
+    /// Replaces the audio data with new multi-channel data from an owned Array2.
+    ///
+    /// This is a convenience method for replacing multi-channel audio data while preserving
+    /// sample rate and layout metadata.
+    ///
+    /// # Arguments
+    /// * `data` - New multi-channel audio data as an owned Array2 where rows are channels
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success, or an error if channel count doesn't match.
+    ///
+    /// # Errors
+    /// - Returns `ParameterError` if the current audio is mono
+    /// - Returns `ParameterError` if the new data has different number of channels
+    ///
+    /// # Examples
+    /// ```rust
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// // Create initial stereo audio
+    /// let mut audio = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0], [3.0, 4.0]], 44100
+    /// );
+    ///
+    /// // Replace with new stereo data (different length is OK)
+    /// audio.replace_with_multi(array![[5.0f32, 6.0, 7.0], [8.0, 9.0, 10.0]])?;
+    ///
+    /// assert_eq!(audio.samples_per_channel(), 3);
+    /// assert_eq!(audio.num_channels(), 2);
+    /// assert_eq!(audio.sample_rate(), 44100); // Preserved
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn replace_with_multi(&mut self, data: Array2<T>) -> AudioSampleResult<()> {
+        let new_channels = data.nrows();
+
+        if self.is_mono() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_type",
+                "Cannot replace mono audio with multi-channel data",
+            )));
+        }
+
+        if self.num_channels() != new_channels {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "new_data",
+                format!(
+                    "Channel count mismatch: existing audio has {} channels, new data has {} channels",
+                    self.num_channels(),
+                    new_channels
+                ),
+            )));
+        }
+
+        let new_data = AudioData::from(data).into_owned();
+        self.replace_data(new_data)
+    }
+
+    /// Replaces the audio data with new data from a Vec, maintaining current channel layout.
+    ///
+    /// This is a convenience method for replacing audio data with samples from a Vec.
+    /// The method infers whether to create mono or multi-channel data based on the
+    /// current AudioSamples configuration.
+    ///
+    /// # Arguments
+    /// * `samples` - Vector of samples to replace the current audio data
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success, or an error if the sample count is incompatible.
+    ///
+    /// # Errors
+    /// - Returns `ParameterError` if the sample count is not divisible by current channel count
+    /// - Returns `ParameterError` if the resulting array cannot be created
+    ///
+    /// # Examples
+    /// ```rust
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// // Replace mono audio
+    /// let mut mono_audio = AudioSamples::new_mono(array![1.0f32, 2.0], 44100);
+    /// mono_audio.replace_with_vec(vec![3.0f32, 4.0, 5.0, 6.0])?;
+    /// assert_eq!(mono_audio.samples_per_channel(), 4);
+    ///
+    /// // Replace stereo audio (interleaved samples)
+    /// let mut stereo_audio = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0], [3.0, 4.0]], 44100
+    /// );
+    /// stereo_audio.replace_with_vec(vec![5.0f32, 6.0, 7.0, 8.0, 9.0, 10.0])?;
+    /// assert_eq!(stereo_audio.samples_per_channel(), 3); // 6 samples ÷ 2 channels
+    /// assert_eq!(stereo_audio.num_channels(), 2);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn replace_with_vec(&mut self, samples: Vec<T>) -> AudioSampleResult<()> {
+        let num_channels = self.num_channels();
+
+        if !samples.len().is_multiple_of(num_channels) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "samples",
+                format!(
+                    "Sample count {} is not divisible by channel count {}",
+                    samples.len(),
+                    num_channels
+                ),
+            )));
+        }
+
+        match num_channels {
+            1 => {
+                // Mono case: create Array1 directly
+                let array = Array1::from(samples);
+                self.replace_with_mono(array)
+            }
+            _ => {
+                // Multi-channel case: reshape into (channels, samples_per_channel)
+                let samples_per_channel = samples.len() / num_channels;
+                let array = Array2::from_shape_vec((num_channels, samples_per_channel), samples)
+                    .map_err(|e| {
+                        AudioSampleError::Parameter(ParameterError::invalid_value(
+                            "samples",
+                            format!(
+                                "Failed to reshape samples into {}×{} array: {}",
+                                num_channels, samples_per_channel, e
+                            ),
+                        ))
+                    })?;
+                self.replace_with_multi(array)
+            }
+        }
+    }
+
+    /// Replaces the audio data with new data from a Vec, validating against a specific channel count.
+    ///
+    /// This method is similar to `replace_with_vec` but validates the sample count against
+    /// the provided `expected_channels` parameter rather than the current audio configuration.
+    /// This is useful when the current audio might be a placeholder or when you want to
+    /// ensure the data matches a specific channel configuration.
+    ///
+    /// # Arguments
+    /// * `samples` - Vector of samples to replace the current audio data
+    /// * `expected_channels` - Expected number of channels for validation
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success, or an error if validation fails.
+    ///
+    /// # Errors
+    /// - Returns `ParameterError` if the sample count is not divisible by `expected_channels`
+    /// - Returns `ParameterError` if the current audio doesn't match `expected_channels`
+    /// - Returns `ParameterError` if the resulting array cannot be created
+    ///
+    /// # Examples
+    /// ```rust
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// // Create placeholder stereo audio
+    /// let mut audio = AudioSamples::new_multi_channel(
+    ///     array![[0.0f32, 0.0], [0.0, 0.0]], 44100
+    /// );
+    ///
+    /// // Replace with data that must be stereo (2 channels)
+    /// let samples = vec![1.0f32, 2.0, 3.0, 4.0]; // 4 samples = 2 samples per channel
+    /// audio.replace_with_vec_channels(samples, 2)?;
+    ///
+    /// assert_eq!(audio.samples_per_channel(), 2);
+    /// assert_eq!(audio.num_channels(), 2);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn replace_with_vec_channels(
+        &mut self,
+        samples: Vec<T>,
+        expected_channels: usize,
+    ) -> AudioSampleResult<()> {
+        // Validate sample count against expected channels
+        if !samples.len().is_multiple_of(expected_channels) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "samples",
+                format!(
+                    "Sample count {} is not divisible by expected channel count {}",
+                    samples.len(),
+                    expected_channels
+                ),
+            )));
+        }
+
+        // Validate that current audio matches expected channels
+        if self.num_channels() != expected_channels {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "expected_channels",
+                format!(
+                    "Current audio has {} channels, but expected {} channels",
+                    self.num_channels(),
+                    expected_channels
+                ),
+            )));
+        }
+
+        match expected_channels {
+            1 => {
+                // Mono case: create Array1 directly
+                let array = Array1::from(samples);
+                self.replace_with_mono(array)
+            }
+            _ => {
+                // Multi-channel case: reshape into (channels, samples_per_channel)
+                let samples_per_channel = samples.len() / expected_channels;
+                let array =
+                    Array2::from_shape_vec((expected_channels, samples_per_channel), samples)
+                        .map_err(|e| {
+                            AudioSampleError::Parameter(ParameterError::invalid_value(
+                                "samples",
+                                format!(
+                                    "Failed to reshape samples into {}×{} array: {}",
+                                    expected_channels, samples_per_channel, e
+                                ),
+                            ))
+                        })?;
+                self.replace_with_multi(array)
+            }
         }
     }
 
@@ -2382,7 +3610,11 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates a new mono AudioSamples from a slice.
-    pub fn new_mono_from_slice(slice: &'a [T], sample_rate: u32) -> Self {
+    ///
+    /// # Panics
+    /// - If `slice` is empty
+    pub fn new_mono_from_slice(slice: &'a [T], sample_rate: NonZeroU32) -> Self {
+        assert!(!slice.is_empty(), "slice must not be empty");
         let arr = ArrayView1::from(slice);
         let mono_data = MonoData::from_view(arr);
         let audio_data = AudioData::Mono(mono_data);
@@ -2393,8 +3625,12 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
         }
     }
 
-    /// Creates a new mono AudioSamples from a slice.
-    pub fn new_mono_from_mut_slice(slice: &'a mut [T], sample_rate: u32) -> Self {
+    /// Creates a new mono AudioSamples from a mutable slice.
+    ///
+    /// # Panics
+    /// - If `slice` is empty
+    pub fn new_mono_from_mut_slice(slice: &'a mut [T], sample_rate: NonZeroU32) -> Self {
+        assert!(!slice.is_empty(), "slice must not be empty");
         let arr = ArrayViewMut1::from(slice);
         let mono_data = MonoData::from_view_mut(arr);
         let audio_data = AudioData::Mono(mono_data);
@@ -2406,14 +3642,26 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     }
 
     /// Creates a new multi-channel AudioSamples from a slice.
-    pub fn new_multi_channel_from_slice(slice: &'a [T], channels: usize, sample_rate: u32) -> Self {
+    ///
+    /// # Panics
+    /// - If `slice` is empty
+    /// - If the length of the slice is not divisible by the number of channels.
+    /// - If the slice cannot be reshaped into the desired shape.
+    ///
+    pub fn new_multi_channel_from_slice(
+        slice: &'a [T],
+        channels: usize,
+        sample_rate: NonZeroU32,
+    ) -> Self {
+        assert!(!slice.is_empty(), "slice must not be empty");
         let total_samples = slice.len();
         assert!(
             total_samples.is_multiple_of(channels),
             "Slice length must be divisible by number of channels"
         );
         let samples_per_channel = total_samples / channels;
-        let arr = ArrayView2::from_shape((channels, samples_per_channel), slice).unwrap();
+        let arr = ArrayView2::from_shape((channels, samples_per_channel), slice)
+            .expect("Failed to create ArrayView2 from slice");
         let multi_data = MultiData::from_view(arr);
         let audio_data = AudioData::Multi(multi_data);
         AudioSamples {
@@ -2421,6 +3669,374 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
             sample_rate,
             layout: ChannelLayout::Interleaved,
         }
+    }
+
+    /// Creates a new multi-channel AudioSamples from a mutable slice.
+    ///
+    /// # Panics
+    /// - If `slice` is empty
+    /// - If the length of the slice is not divisible by the number of channels.
+    /// - If the slice cannot be reshaped into the desired shape.
+    ///
+    pub fn new_multi_channel_from_mut_slice(
+        slice: &'a mut [T],
+        channels: usize,
+        sample_rate: NonZeroU32,
+    ) -> Self {
+        assert!(!slice.is_empty(), "slice must not be empty");
+        let total_samples = slice.len();
+        assert!(
+            total_samples.is_multiple_of(channels),
+            "Slice length must be divisible by number of channels"
+        );
+        let samples_per_channel = total_samples / channels;
+        let arr = ArrayViewMut2::from_shape((channels, samples_per_channel), slice)
+            .expect("Failed to create ArrayViewMut2 from slice");
+        let multi_data = MultiData::from_view_mut(arr);
+        let audio_data = AudioData::Multi(multi_data);
+        AudioSamples {
+            data: audio_data,
+            sample_rate,
+            layout: ChannelLayout::Interleaved,
+        }
+    }
+
+    /// Creates mono AudioSamples from a Vec (owned).
+    ///
+    /// # Panics
+    /// - If `vec` is empty
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    ///
+    /// let samples = vec![0.1f32, 0.2, 0.3, 0.4];
+    /// let audio = AudioSamples::from_vec(samples, sample_rate!(44100));
+    /// assert_eq!(audio.num_channels(), 1);
+    /// assert_eq!(audio.samples_per_channel(), 4);
+    /// ```
+    pub fn from_vec(vec: Vec<T>, sample_rate: NonZeroU32) -> AudioSamples<'static, T> {
+        assert!(!vec.is_empty(), "vec must not be empty");
+        AudioSamples {
+            data: AudioData::from_vec(vec),
+            sample_rate,
+            layout: ChannelLayout::NonInterleaved,
+        }
+    }
+
+    /// Creates multi-channel AudioSamples from a Vec with specified channel count (owned).
+    ///
+    /// The samples in the Vec are assumed to be in row-major order (all samples for
+    /// channel 0, then all samples for channel 1, etc.).
+    ///
+    /// # Panics
+    /// - If `vec` is empty
+    /// - If `vec.len()` is not divisible by `channels`
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    ///
+    /// // 2 channels, 3 samples each: [ch0_s0, ch0_s1, ch0_s2, ch1_s0, ch1_s1, ch1_s2]
+    /// let samples = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];
+    /// let audio = AudioSamples::from_vec_with_channels(samples, 2, sample_rate!(44100));
+    /// assert_eq!(audio.num_channels(), 2);
+    /// assert_eq!(audio.samples_per_channel(), 3);
+    /// ```
+    pub fn from_vec_with_channels(
+        vec: Vec<T>,
+        channels: usize,
+        sample_rate: NonZeroU32,
+    ) -> AudioSamples<'static, T> {
+        assert!(!vec.is_empty(), "vec must not be empty");
+        AudioSamples {
+            data: AudioData::from_vec_multi(vec, channels),
+            sample_rate,
+            layout: ChannelLayout::Interleaved,
+        }
+    }
+
+    /// Creates AudioSamples from interleaved sample data (owned).
+    ///
+    /// Interleaved format: [L0, R0, L1, R1, L2, R2, ...] for stereo.
+    /// This method de-interleaves the data into the internal non-interleaved format.
+    ///
+    /// # Panics
+    /// - If `samples` is empty
+    /// - If `samples.len()` is not divisible by `channels`
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    ///
+    /// // Interleaved stereo: [L0, R0, L1, R1]
+    /// let interleaved = vec![0.1f32, 0.4, 0.2, 0.5];
+    /// let audio = AudioSamples::from_interleaved_vec(interleaved, 2, sample_rate!(44100));
+    /// assert_eq!(audio.num_channels(), 2);
+    /// assert_eq!(audio.samples_per_channel(), 2);
+    /// // After de-interleaving: channel 0 = [0.1, 0.2], channel 1 = [0.4, 0.5]
+    /// ```
+    pub fn from_interleaved_vec(
+        samples: Vec<T>,
+        channels: usize,
+        sample_rate: NonZeroU32,
+    ) -> AudioSamples<'static, T> {
+        assert!(!samples.is_empty(), "samples must not be empty");
+        assert!(
+            samples.len().is_multiple_of(channels),
+            "Sample count must be divisible by number of channels"
+        );
+
+        if channels == 1 {
+            return AudioSamples::from_vec(samples, sample_rate);
+        }
+
+        let samples_per_channel = samples.len() / channels;
+
+        // Use optimized deinterleave functions
+        let deinterleaved = crate::simd_conversions::deinterleave_multi_vec(samples, channels)
+            .expect("Deinterleave failed - this should not happen with valid input");
+
+        let arr = Array2::from_shape_vec((channels, samples_per_channel), deinterleaved)
+            .expect("Failed to create Array2 from deinterleaved samples");
+
+        AudioSamples {
+            data: AudioData::Multi(MultiData::from_owned(arr)),
+            sample_rate,
+            layout: ChannelLayout::Interleaved,
+        }
+    }
+
+    /// Creates AudioSamples from interleaved slice data (borrowed).
+    ///
+    /// Note: This creates a borrowed view but requires de-interleaving, so it
+    /// actually creates owned data internally. For zero-copy borrowed access
+    /// to interleaved data, use `new_multi_channel_from_slice` with pre-deinterleaved data.
+    ///
+    /// # Panics
+    /// - If `samples` is empty
+    /// - If `samples.len()` is not divisible by `channels`
+    pub fn from_interleaved_slice(
+        samples: &[T],
+        channels: usize,
+        sample_rate: NonZeroU32,
+    ) -> AudioSamples<'static, T> {
+        // Must copy since we need to de-interleave
+        AudioSamples::from_interleaved_vec(samples.to_vec(), channels, sample_rate)
+    }
+
+    /// Creates multi-channel AudioSamples from separate channel arrays.
+    ///
+    /// Each element in the vector represents one channel of audio data.
+    /// All channels must have the same length.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - channels is empty
+    /// - any channel is empty (has no samples)
+    /// - channels have different lengths
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    ///
+    /// let left = vec![0.1f32, 0.2, 0.3];
+    /// let right = vec![0.4, 0.5, 0.6];
+    /// let audio = AudioSamples::from_channels(vec![left, right], sample_rate!(44100)).unwrap();
+    /// assert_eq!(audio.num_channels(), 2);
+    /// assert_eq!(audio.samples_per_channel(), 3);
+    /// ```
+    pub fn from_channels(
+        channels: Vec<Vec<T>>,
+        sample_rate: NonZeroU32,
+    ) -> AudioSampleResult<AudioSamples<'static, T>> {
+        if channels.is_empty() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "channels",
+                "Cannot create AudioSamples from empty channel list",
+            )));
+        }
+
+        let num_channels = channels.len();
+        let samples_per_channel = channels[0].len();
+
+        if samples_per_channel == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "channels",
+                "Channels must not be empty (no samples)",
+            )));
+        }
+
+        // Validate all channels have the same length
+        for (idx, ch) in channels.iter().enumerate() {
+            if ch.len() != samples_per_channel {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "channels",
+                    format!(
+                        "Channel {} has {} samples, but channel 0 has {} samples",
+                        idx,
+                        ch.len(),
+                        samples_per_channel
+                    ),
+                )));
+            }
+        }
+
+        if num_channels == 1 {
+            return Ok(AudioSamples::from_vec(
+                channels.into_iter().next().unwrap(),
+                sample_rate,
+            ));
+        }
+
+        // Flatten channels into row-major order
+        let flat: Vec<T> = channels.into_iter().flatten().collect();
+        let arr =
+            Array2::from_shape_vec((num_channels, samples_per_channel), flat).map_err(|e| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "channels",
+                    format!("Failed to create multi-channel array: {}", e),
+                ))
+            })?;
+
+        Ok(AudioSamples {
+            data: AudioData::Multi(MultiData::from_owned(arr)),
+            sample_rate,
+            layout: ChannelLayout::NonInterleaved,
+        })
+    }
+
+    /// Creates multi-channel AudioSamples from separate mono AudioSamples.
+    ///
+    /// All input AudioSamples must be mono and have the same sample rate and length.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Any input is not mono
+    /// - Sample rates don't match
+    /// - Lengths don't match
+    /// - Input is empty
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::AudioSamples;
+    /// use ndarray::array;
+    ///
+    /// let left = AudioSamples::new_mono(array![0.1f32, 0.2, 0.3], 44100);
+    /// let right = AudioSamples::new_mono(array![0.4, 0.5, 0.6], 44100);
+    /// let stereo = AudioSamples::from_mono_channels(vec![left, right]).unwrap();
+    /// assert_eq!(stereo.num_channels(), 2);
+    /// ```
+    pub fn from_mono_channels(
+        channels: Vec<AudioSamples<'_, T>>,
+    ) -> AudioSampleResult<AudioSamples<'static, T>> {
+        if channels.is_empty() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "channels",
+                "Cannot create AudioSamples from empty channel list",
+            )));
+        }
+
+        let sample_rate = channels[0].sample_rate();
+        let samples_per_channel = channels[0].samples_per_channel();
+
+        // Validate all channels
+        for (idx, ch) in channels.iter().enumerate() {
+            if !ch.is_mono() {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "channels",
+                    format!(
+                        "Channel {} is not mono (has {} channels)",
+                        idx,
+                        ch.num_channels()
+                    ),
+                )));
+            }
+            if ch.sample_rate() != sample_rate {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "channels",
+                    format!(
+                        "Channel {} has sample rate {}, but channel 0 has sample rate {}",
+                        idx,
+                        ch.sample_rate(),
+                        sample_rate
+                    ),
+                )));
+            }
+            if ch.samples_per_channel() != samples_per_channel {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "channels",
+                    format!(
+                        "Channel {} has {} samples, but channel 0 has {} samples",
+                        idx,
+                        ch.samples_per_channel(),
+                        samples_per_channel
+                    ),
+                )));
+            }
+        }
+
+        // Extract data from each mono channel
+        let channel_data: Vec<Vec<T>> = channels
+            .into_iter()
+            .map(|ch| match ch.data {
+                AudioData::Mono(m) => m.to_vec(),
+                AudioData::Multi(_) => unreachable!("Already validated as mono"),
+            })
+            .collect();
+
+        AudioSamples::from_channels(channel_data, sample_rate)
+    }
+
+    /// Creates AudioSamples from an iterator of samples (mono, owned).
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    ///
+    /// let audio = AudioSamples::from_iter((0..100).map(|i| i as f32 / 100.0), sample_rate!(44100));
+    /// assert_eq!(audio.num_channels(), 1);
+    /// assert_eq!(audio.samples_per_channel(), 100);
+    /// ```
+    pub fn from_iter<I>(iter: I, sample_rate: NonZeroU32) -> AudioSamples<'static, T>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let vec: Vec<T> = iter.into_iter().collect();
+        AudioSamples::from_vec(vec, sample_rate)
+    }
+
+    /// Creates AudioSamples from an iterator with specified channel count (owned).
+    ///
+    /// Samples are collected and arranged in row-major order (all samples for
+    /// channel 0, then channel 1, etc.).
+    ///
+    /// # Panics
+    /// - If the collected sample count is not divisible by `channels`
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    ///
+    /// // 2 channels, 50 samples each = 100 total samples
+    /// let audio = AudioSamples::from_iter_with_channels(
+    ///     (0..100).map(|i| i as f32 / 100.0),
+    ///     2,
+    ///     sample_rate!(44100)
+    /// );
+    /// assert_eq!(audio.num_channels(), 2);
+    /// assert_eq!(audio.samples_per_channel(), 50);
+    /// ```
+    pub fn from_iter_with_channels<I>(
+        iter: I,
+        channels: usize,
+        sample_rate: NonZeroU32,
+    ) -> AudioSamples<'static, T>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let vec: Vec<T> = iter.into_iter().collect();
+        AudioSamples::from_vec_with_channels(vec, channels, sample_rate)
     }
 }
 
@@ -2437,24 +4053,154 @@ impl<'a, T: AudioSample> Clone for AudioSamples<'a, T> {
 impl<'a, T: AudioSample> TryFrom<(u32, u32, Vec<T>)> for AudioSamples<'a, T> {
     type Error = AudioSampleError;
     /// Create AudioSamples from a sample rate and a vector of samples (assumed mono).
-    fn try_from((n_channels, sample_rate, samples): (u32, u32, Vec<T>)) -> Result<Self, Self::Error> {
+    fn try_from(
+        (n_channels, sample_rate, samples): (u32, u32, Vec<T>),
+    ) -> Result<Self, Self::Error> {
+        let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "sample_rate",
+                "sample_rate must be greater than 0",
+            ))
+        })?;
         match n_channels {
             1 => {
                 let arr = Array1::from(samples);
-                Ok(AudioSamples::new_mono(arr, n_channels))
+                Ok(AudioSamples::new_mono(arr, sample_rate))
             }
             _ => {
                 let shape = (n_channels as usize, samples.len() / n_channels as usize);
                 let arr = match Array2::from_shape_vec(shape, samples) {
                     Ok(arr) => arr,
-                    Err(e) => {return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "samples",
-                        format!("Failed to reshape samples into {} channels: {}", n_channels, e),
-                    )));}
+                    Err(e) => {
+                        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                            "samples",
+                            format!(
+                                "Failed to reshape samples into {} channels: {}",
+                                n_channels, e
+                            ),
+                        )));
+                    }
                 };
-                Ok(AudioSamples::new_multi_channel(arr, sample_rate ))
+                Ok(AudioSamples::new_multi_channel(arr, sample_rate))
             }
         }
+    }
+}
+
+/// Create mono AudioSamples from (Vec<T>, sample_rate) tuple.
+///
+/// # Examples
+/// ```
+/// use audio_samples::AudioSamples;
+/// use std::convert::TryFrom;
+///
+/// let audio = AudioSamples::try_from((vec![0.1f32, 0.2, 0.3], 44100_u32)).unwrap();
+/// assert_eq!(audio.num_channels(), 1);
+/// assert_eq!(audio.samples_per_channel(), 3);
+/// ```
+impl<T: AudioSample> TryFrom<(Vec<T>, u32)> for AudioSamples<'static, T> {
+    type Error = AudioSampleError;
+
+    fn try_from((samples, sample_rate): (Vec<T>, u32)) -> Result<Self, Self::Error> {
+        if samples.is_empty() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "samples",
+                "Cannot create AudioSamples from empty vector",
+            )));
+        }
+        let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "sample_rate",
+                "sample_rate must be greater than 0",
+            ))
+        })?;
+        Ok(AudioSamples::from_vec(samples, sample_rate))
+    }
+}
+
+/// Create mono AudioSamples from (&[T], sample_rate) tuple (creates owned copy).
+///
+/// # Examples
+/// ```
+/// use audio_samples::AudioSamples;
+/// use std::convert::TryFrom;
+///
+/// let data = [0.1f32, 0.2, 0.3];
+/// let audio = AudioSamples::try_from((data.as_slice(), 44100_u32)).unwrap();
+/// assert_eq!(audio.num_channels(), 1);
+/// assert_eq!(audio.samples_per_channel(), 3);
+/// ```
+impl<T: AudioSample> TryFrom<(&[T], u32)> for AudioSamples<'static, T> {
+    type Error = AudioSampleError;
+
+    fn try_from((samples, sample_rate): (&[T], u32)) -> Result<Self, Self::Error> {
+        if samples.is_empty() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "samples",
+                "Cannot create AudioSamples from empty slice",
+            )));
+        }
+        let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "sample_rate",
+                "sample_rate must be greater than 0",
+            ))
+        })?;
+        Ok(AudioSamples::from_vec(samples.to_vec(), sample_rate))
+    }
+}
+
+/// Create multi-channel AudioSamples from (Vec<T>, channels, sample_rate) tuple.
+///
+/// # Examples
+/// ```
+/// use audio_samples::AudioSamples;
+/// use std::convert::TryFrom;
+///
+/// // 2 channels, 2 samples each
+/// let audio = AudioSamples::try_from((vec![0.1f32, 0.2, 0.3, 0.4], 2_usize, 44100_u32)).unwrap();
+/// assert_eq!(audio.num_channels(), 2);
+/// assert_eq!(audio.samples_per_channel(), 2);
+/// ```
+impl<T: AudioSample> TryFrom<(Vec<T>, usize, u32)> for AudioSamples<'static, T> {
+    type Error = AudioSampleError;
+
+    fn try_from(
+        (samples, channels, sample_rate): (Vec<T>, usize, u32),
+    ) -> Result<Self, Self::Error> {
+        if samples.is_empty() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "samples",
+                "Cannot create AudioSamples from empty vector",
+            )));
+        }
+        if channels == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "channels",
+                "Channel count must be at least 1",
+            )));
+        }
+        if samples.len() % channels != 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "samples",
+                format!(
+                    "Sample count {} is not divisible by channel count {}",
+                    samples.len(),
+                    channels
+                ),
+            )));
+        }
+        let sample_rate = NonZeroU32::new(sample_rate).ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "sample_rate",
+                "sample_rate must be greater than 0",
+            ))
+        })?;
+        Ok(AudioSamples::from_vec_with_channels(
+            samples,
+            channels,
+            sample_rate,
+        ))
     }
 }
 
@@ -2744,7 +4490,10 @@ where
 pub struct StereoAudioSamples<'a, T: AudioSample>(pub AudioSamples<'a, T>);
 
 impl<'a, T: AudioSample> StereoAudioSamples<'a, T> {
-    /// Creates a new StereoAudioSamples from stereo audio data.
+    /// Creates a new `StereoAudioSamples` from audio data with exactly 2 channels.
+    ///
+    /// # Errors
+    /// Returns an error if `stereo_data` is mono or has a channel count other than 2.
     pub fn new(stereo_data: AudioData<'a, T>, sample_rate: u32) -> AudioSampleResult<Self> {
         // Separated failure conditions which the following if statements check allow for more descriptive errors.
 
@@ -2752,7 +4501,7 @@ impl<'a, T: AudioSample> StereoAudioSamples<'a, T> {
             1 => {
                 return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                     "channels",
-                    "Expected stereo data, got mono. See ``StereoAudioSamples::from_mono`` for a more relaxed instantiation.",
+                    "Expected stereo data (2 channels), got mono (1 channel).",
                 )));
             }
             2 => (),
@@ -2760,7 +4509,7 @@ impl<'a, T: AudioSample> StereoAudioSamples<'a, T> {
                 return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                     "channels",
                     format!(
-                        "Expected stereo data, got Multi with {} channels. See ``StereoAudioSamples::from_multi`` for a more relaxed instantiation.",
+                        "Expected stereo data (2 channels), got {} channels.",
                         stereo_data.num_channels()
                     ),
                 )));
@@ -2768,7 +4517,15 @@ impl<'a, T: AudioSample> StereoAudioSamples<'a, T> {
         };
 
         // From now on we have guaranteed that the stereo_data does in fact have 2 channels;
-        Ok(Self(AudioSamples::new(stereo_data, sample_rate)))
+        Ok(Self(AudioSamples::new(
+            stereo_data,
+            std::num::NonZeroU32::new(sample_rate).ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "sample_rate",
+                    "Sample rate must be non-zero",
+                ))
+            })?,
+        )))
     }
 
     /// Safely access individual channels with borrowed references for efficient processing.
@@ -2897,7 +4654,11 @@ pub struct FixedSizeAudioSamples<T: AudioSample, const N: usize> {
 #[cfg(feature = "fixed-size-audio")]
 impl<T: AudioSample, const N: usize> FixedSizeAudioSamples<T, N> {
     /// Create a fixed-size audio buffer from a 1D array
+    ///
+    /// # Panics
+    /// Panics if `sample_rate` is 0.
     pub fn from_1d(data: [T; N], sample_rate: u32) -> Self {
+        let sample_rate = NonZeroU32::new(sample_rate).expect("sample_rate must be non-zero");
         let array = Array1::from_vec(data.to_vec());
         let mono_data = MonoData::from_owned(array);
         let audio_data = AudioData::Mono(mono_data);
@@ -2937,9 +4698,9 @@ mod tests {
     fn test_new_mono_audio_samples() {
         let data: ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 1]>> =
             array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio: AudioSamples<f32> = AudioSamples::new_mono(data, 44100);
+        let audio: AudioSamples<f32> = AudioSamples::new_mono(data, sample_rate!(44100));
 
-        assert_eq!(audio.sample_rate(), 44100);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
         assert_eq!(audio.num_channels(), 1);
         assert_eq!(audio.samples_per_channel(), 5);
         assert!(audio.is_mono());
@@ -2949,9 +4710,9 @@ mod tests {
     #[test]
     fn test_new_multi_channel_audio_samples() {
         let data = array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]]; // 2 channels, 3 samples each
-        let audio = AudioSamples::new_multi_channel(data, 48000);
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(48000));
 
-        assert_eq!(audio.sample_rate(), 48000);
+        assert_eq!(audio.sample_rate(), sample_rate!(48000));
         assert_eq!(audio.num_channels(), 2);
         assert_eq!(audio.samples_per_channel(), 3);
         assert_eq!(audio.total_samples(), 6);
@@ -2961,16 +4722,16 @@ mod tests {
 
     #[test]
     fn test_zeros_construction() {
-        let mono_audio = AudioSamples::<f32>::zeros_mono(100, 44100);
+        let mono_audio = AudioSamples::<f32>::zeros_mono(100, sample_rate!(44100));
         assert_eq!(mono_audio.num_channels(), 1);
         assert_eq!(mono_audio.samples_per_channel(), 100);
-        assert_eq!(mono_audio.sample_rate(), 44100);
+        assert_eq!(mono_audio.sample_rate(), sample_rate!(44100));
 
-        let multi_audio = AudioSamples::<f32>::zeros_multi(2, 50, 48000);
+        let multi_audio = AudioSamples::<f32>::zeros_multi(2, 50, sample_rate!(48000));
         assert_eq!(multi_audio.num_channels(), 2);
         assert_eq!(multi_audio.samples_per_channel(), 50);
         assert_eq!(multi_audio.total_samples(), 100);
-        assert_eq!(multi_audio.sample_rate(), 48000);
+        assert_eq!(multi_audio.sample_rate(), sample_rate!(48000));
     }
 
     #[cfg(feature = "spectral-analysis")]
@@ -2993,7 +4754,7 @@ mod tests {
             stereo_data[[1, i]] = (phase.cos() * 0.5) as f32; // Right channel
         }
 
-        let audio = AudioSamples::new_multi_channel(stereo_data, sample_rate);
+        let audio = AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100));
 
         // Zero-copy conversion to StereoAudioSamples
         let stereo: StereoAudioSamples<'static, f32> = StereoAudioSamples::try_from(audio).unwrap();
@@ -3020,11 +4781,6 @@ mod tests {
             assert!(left_stft.dim().1 > 0); // Time frames
             assert!(right_stft.dim().1 > 0); // Time frames
 
-            // Could implement phase difference calculation here like in Python:
-            // phasediffs = left_phase - right_phase
-            // let left_phase = left_stft.mapv(|c| c.arg());
-            // let right_phase = right_stft.mapv(|c| c.arg());
-
             Ok(())
         });
 
@@ -3033,23 +4789,25 @@ mod tests {
 
     #[test]
     fn test_duration_seconds() {
-        let audio: AudioSamples<'_, f32> = AudioSamples::<f32>::zeros_mono(44100, 44100);
+        let audio: AudioSamples<'_, f32> =
+            AudioSamples::<f32>::zeros_mono(44100, sample_rate!(44100));
         assert!((audio.duration_seconds::<f64>() - 1.0).abs() < 1e-6);
 
-        let audio2: AudioSamples<'_, f32> = AudioSamples::<f32>::zeros_multi(2, 22050, 44100);
+        let audio2: AudioSamples<'_, f32> =
+            AudioSamples::<f32>::zeros_multi(2, 22050, sample_rate!(44100));
         assert!((audio2.duration_seconds::<f64>() - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn test_apply_simple() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio: AudioSamples<f32> = AudioSamples::new_mono(data, 44100);
+        let mut audio: AudioSamples<f32> = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Apply a simple scaling
         audio.apply(|sample| sample * 2.0);
 
         let expected = array![2.0f32, 4.0, 6.0, 8.0, 10.0];
-        let expected = AudioSamples::new_mono(expected, 44100);
+        let expected = AudioSamples::new_mono(expected, sample_rate!(44100));
         assert_eq!(
             audio, expected,
             "Applied audio samples do not match expected values"
@@ -3059,7 +4817,8 @@ mod tests {
     #[test]
     fn test_apply_channels() {
         let data = array![[1.0f32, 2.0], [3.0, 4.0]];
-        let mut audio: AudioSamples<f32> = AudioSamples::new_multi_channel(data, 44100);
+        let mut audio: AudioSamples<f32> =
+            AudioSamples::new_multi_channel(data, sample_rate!(44100));
 
         {
             // Mutable borrow lives only within this block
@@ -3067,7 +4826,7 @@ mod tests {
         } // Mutable borrow ends here
 
         let expected = array![[1.0, 4.0], [9.0, 16.0]];
-        let expected = AudioSamples::new_multi_channel(expected, 44100);
+        let expected = AudioSamples::new_multi_channel(expected, sample_rate!(44100));
         assert_eq!(
             audio, expected,
             "Applied multi-channel audio samples do not match expected values"
@@ -3077,14 +4836,14 @@ mod tests {
     #[test]
     fn test_map_functional() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Create a new audio instance with transformed samples
         let new_audio = audio.map(|sample| sample * 0.5);
 
         // Original should be unchanged
         let original_expected = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let original_expected = AudioSamples::new_mono(original_expected, 44100);
+        let original_expected = AudioSamples::new_mono(original_expected, sample_rate!(44100));
         assert_eq!(
             audio, original_expected,
             "Original audio samples should remain unchanged"
@@ -3092,7 +4851,7 @@ mod tests {
 
         // New audio should contain transformed values
         let new_expected = array![0.5f32, 1.0, 1.5, 2.0, 2.5];
-        let new_expected = AudioSamples::new_mono(new_expected, 44100);
+        let new_expected = AudioSamples::new_mono(new_expected, sample_rate!(44100));
         assert_eq!(
             new_audio, new_expected,
             "New audio should contain transformed samples"
@@ -3102,12 +4861,12 @@ mod tests {
     #[test]
     fn test_apply_indexed() {
         let data = array![1.0f32, 1.0, 1.0, 1.0, 1.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         // Apply index-based transformation
         audio.apply_with_index(|index, sample| sample * (index + 1) as f32);
         let expected = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let expected = AudioSamples::new_mono(expected, 44100);
+        let expected = AudioSamples::new_mono(expected, sample_rate!(44100));
         assert_eq!(
             audio, expected,
             "Indexed applied audio samples do not match expected values"
@@ -3121,7 +4880,7 @@ mod tests {
     #[test]
     fn test_index_mono_single() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         assert_eq!(audio[0], 1.0);
         assert_eq!(audio[2], 3.0);
@@ -3132,7 +4891,7 @@ mod tests {
     #[should_panic(expected = "Cannot use single index on multi-channel audio")]
     fn test_index_mono_single_on_multi_panics() {
         let data = array![[1.0f32, 2.0], [3.0, 4.0]];
-        let audio = AudioSamples::new_multi_channel(data, 44100);
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100));
 
         let _ = audio[0]; // Should panic
     }
@@ -3141,14 +4900,14 @@ mod tests {
     fn test_index_tuple() {
         // Test mono with tuple indexing
         let mono_data = array![1.0f32, 2.0, 3.0, 4.0];
-        let mono_audio = AudioSamples::new_mono(mono_data, 44100);
+        let mono_audio = AudioSamples::new_mono(mono_data, sample_rate!(44100));
 
         assert_eq!(mono_audio[(0, 1)], 2.0);
         assert_eq!(mono_audio[(0, 3)], 4.0);
 
         // Test multi-channel with tuple indexing
         let stereo_data = array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
-        let stereo_audio = AudioSamples::new_multi_channel(stereo_data, 44100);
+        let stereo_audio = AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100));
 
         assert_eq!(stereo_audio[(0, 0)], 1.0);
         assert_eq!(stereo_audio[(0, 2)], 3.0);
@@ -3160,7 +4919,7 @@ mod tests {
     #[should_panic(expected = "Channel index 1 out of bounds for mono audio")]
     fn test_index_tuple_invalid_channel_mono() {
         let data = array![1.0f32, 2.0, 3.0];
-        let audio = AudioSamples::new_mono(data, 44100);
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         let _ = audio[(1, 0)]; // Should panic - mono only has channel 0
     }
@@ -3168,13 +4927,13 @@ mod tests {
     #[test]
     fn test_index_mut_mono() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut audio = AudioSamples::new_mono(data, 44100);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100));
 
         audio[2] = 10.0;
         assert_eq!(audio[2], 10.0);
         assert_eq!(
             audio,
-            AudioSamples::new_mono(array![1.0f32, 2.0, 10.0, 4.0, 5.0], 44100),
+            AudioSamples::new_mono(array![1.0f32, 2.0, 10.0, 4.0, 5.0], sample_rate!(44100)),
             "Mutably indexed mono audio samples do not match expected values"
         );
     }
@@ -3182,16 +4941,327 @@ mod tests {
     #[test]
     fn test_index_mut_tuple() {
         let data = array![[1.0f32, 2.0], [3.0, 4.0]];
-        let mut audio = AudioSamples::new_multi_channel(data, 44100);
+        let mut audio = AudioSamples::new_multi_channel(data, sample_rate!(44100));
 
         audio[(1, 0)] = 10.0;
         assert_eq!(audio[(1, 0)], 10.0);
 
         let expected = array![[1.0f32, 2.0], [10.0, 4.0]];
-        let expected = AudioSamples::new_multi_channel(expected, 44100);
+        let expected = AudioSamples::new_multi_channel(expected, sample_rate!(44100));
         assert_eq!(
             audio, expected,
             "Mutably indexed audio samples do not match expected values"
         );
+    }
+
+    // ========================
+    // Audio Data Replacement Tests
+    // ========================
+
+    #[test]
+    fn test_replace_data_mono_success() {
+        let initial_data = array![1.0f32, 2.0, 3.0];
+        let mut audio = AudioSamples::new_mono(initial_data, sample_rate!(44100));
+
+        // Replace with new mono data of different length
+        let new_data = AudioData::from(array![4.0f32, 5.0, 6.0, 7.0, 8.0]).into_owned();
+        assert!(audio.replace_data(new_data).is_ok());
+
+        assert_eq!(audio.samples_per_channel(), 5);
+        assert_eq!(audio.num_channels(), 1);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100)); // Should be preserved
+        assert_eq!(audio.layout(), ChannelLayout::NonInterleaved); // Should be preserved
+    }
+
+    #[test]
+    fn test_replace_data_multi_success() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // Replace with new stereo data of different length
+        let new_data = AudioData::from(array![[5.0f32, 6.0, 7.0], [8.0, 9.0, 10.0]]);
+        assert!(audio.replace_data(new_data).is_ok());
+
+        assert_eq!(audio.samples_per_channel(), 3);
+        assert_eq!(audio.num_channels(), 2);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100)); // Should be preserved
+        assert_eq!(audio.layout(), ChannelLayout::Interleaved); // Should be preserved
+    }
+
+    #[test]
+    fn test_replace_data_channel_count_mismatch() {
+        let initial_data = array![1.0f32, 2.0, 3.0];
+        let mut audio = AudioSamples::new_mono(initial_data, sample_rate!(44100));
+
+        // Try to replace mono with stereo data
+        let new_data = AudioData::from(array![[4.0f32, 5.0], [6.0, 7.0]]);
+        let result = audio.replace_data(new_data);
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Channel count mismatch"));
+        }
+    }
+
+    #[test]
+    fn test_replace_data_layout_type_mismatch() {
+        let initial_data = array![1.0f32, 2.0, 3.0];
+        let mut audio = AudioSamples::new_mono(initial_data, sample_rate!(44100));
+
+        // Try to replace mono with multi-channel data (even same channel count fails due to type)
+        let new_data = AudioData::from(array![[4.0f32, 5.0, 6.0]]);
+        let result = audio.replace_data(new_data);
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string()
+                    .contains("Cannot replace mono audio data with multi-channel data")
+            );
+        }
+    }
+
+    #[test]
+    fn test_replace_with_mono_success() {
+        let initial_data = array![1.0f32, 2.0];
+        let mut audio = AudioSamples::new_mono(initial_data, sample_rate!(44100));
+
+        // Replace with new mono data
+        assert!(audio.replace_with_mono(array![3.0f32, 4.0, 5.0]).is_ok());
+
+        assert_eq!(audio.samples_per_channel(), 3);
+        assert_eq!(audio.num_channels(), 1);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
+        assert_eq!(audio[0], 3.0);
+        assert_eq!(audio[1], 4.0);
+        assert_eq!(audio[2], 5.0);
+    }
+
+    #[test]
+    fn test_replace_with_mono_on_multi_fails() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        let result = audio.replace_with_mono(array![5.0f32, 6.0, 7.0]);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Cannot replace multi-channel audio"));
+        }
+    }
+
+    #[test]
+    fn test_replace_with_multi_success() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // Replace with new stereo data of different length
+        assert!(
+            audio
+                .replace_with_multi(array![[5.0f32, 6.0, 7.0], [8.0, 9.0, 10.0]])
+                .is_ok()
+        );
+
+        assert_eq!(audio.samples_per_channel(), 3);
+        assert_eq!(audio.num_channels(), 2);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
+        assert_eq!(audio[(0, 0)], 5.0);
+        assert_eq!(audio[(0, 2)], 7.0);
+        assert_eq!(audio[(1, 0)], 8.0);
+        assert_eq!(audio[(1, 2)], 10.0);
+    }
+
+    #[test]
+    fn test_replace_with_multi_on_mono_fails() {
+        let initial_data = array![1.0f32, 2.0, 3.0];
+        let mut audio = AudioSamples::new_mono(initial_data, sample_rate!(44100));
+
+        let result = audio.replace_with_multi(array![[4.0f32, 5.0], [6.0, 7.0]]);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string()
+                    .contains("Cannot replace mono audio with multi-channel data")
+            );
+        }
+    }
+
+    #[test]
+    fn test_replace_with_multi_channel_count_mismatch() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // Try to replace stereo with tri-channel data
+        let result = audio.replace_with_multi(array![[5.0f32, 6.0], [7.0, 8.0], [9.0, 10.0]]);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Channel count mismatch"));
+        }
+    }
+
+    #[test]
+    fn test_replace_with_vec_mono_success() {
+        let initial_data = array![1.0f32, 2.0];
+        let mut audio = AudioSamples::new_mono(initial_data, sample_rate!(44100));
+
+        // Replace with vector
+        assert!(audio.replace_with_vec(vec![3.0f32, 4.0, 5.0, 6.0]).is_ok());
+
+        assert_eq!(audio.samples_per_channel(), 4);
+        assert_eq!(audio.num_channels(), 1);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
+    }
+
+    #[test]
+    fn test_replace_with_vec_multi_success() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // Replace with vector (6 samples = 3 samples per channel × 2 channels)
+        assert!(
+            audio
+                .replace_with_vec(vec![5.0f32, 6.0, 7.0, 8.0, 9.0, 10.0])
+                .is_ok()
+        );
+
+        assert_eq!(audio.samples_per_channel(), 3);
+        assert_eq!(audio.num_channels(), 2);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
+        // Data is arranged as: [ch0_sample0, ch0_sample1, ch0_sample2, ch1_sample0, ch1_sample1, ch1_sample2]
+        assert_eq!(audio[(0, 0)], 5.0); // First channel, first sample
+        assert_eq!(audio[(0, 1)], 6.0); // First channel, second sample
+        assert_eq!(audio[(1, 0)], 8.0); // Second channel, first sample
+    }
+
+    #[test]
+    fn test_replace_with_vec_not_divisible_fails() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // 5 samples is not divisible by 2 channels
+        let result = audio.replace_with_vec(vec![5.0f32, 6.0, 7.0, 8.0, 9.0]);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string()
+                    .contains("Sample count 5 is not divisible by channel count 2")
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_workflow_example() {
+        // Simulate the user's use case
+        let mut audio =
+            AudioSamples::new_multi_channel(array![[0.0f32, 0.0], [0.0, 0.0]], sample_rate!(44100));
+
+        // Simulate converted data from their function
+        let converted_samples: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let num_channels = audio.num_channels();
+
+        // This should work exactly like their use case
+        assert!(converted_samples.len().is_multiple_of(num_channels));
+        assert!(audio.replace_with_vec(converted_samples).is_ok());
+
+        assert_eq!(audio.samples_per_channel(), 3);
+        assert_eq!(audio.num_channels(), 2);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100)); // Preserved
+        assert_eq!(audio.layout(), ChannelLayout::Interleaved); // Preserved
+    }
+
+    #[test]
+    fn test_replace_with_vec_channels_success() {
+        // Test with correct channel count
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // Replace with vector, validating against expected 2 channels
+        assert!(
+            audio
+                .replace_with_vec_channels(vec![5.0f32, 6.0, 7.0, 8.0], 2)
+                .is_ok()
+        );
+
+        assert_eq!(audio.samples_per_channel(), 2);
+        assert_eq!(audio.num_channels(), 2);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
+    }
+
+    #[test]
+    fn test_replace_with_vec_channels_sample_count_mismatch() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // Try with sample count not divisible by expected channels
+        let result = audio.replace_with_vec_channels(vec![5.0f32, 6.0, 7.0], 2);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string()
+                    .contains("Sample count 3 is not divisible by expected channel count 2")
+            );
+        }
+    }
+
+    #[test]
+    fn test_replace_with_vec_channels_audio_channel_mismatch() {
+        let initial_data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let mut audio = AudioSamples::new_multi_channel(initial_data, sample_rate!(44100));
+
+        // Try with expected channel count different from current audio
+        let result = audio.replace_with_vec_channels(vec![5.0f32, 6.0, 7.0], 3);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string()
+                    .contains("Current audio has 2 channels, but expected 3 channels")
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_workflow_with_channels_validation() {
+        // Simulate the user's corrected use case
+        let mut audio =
+            AudioSamples::new_multi_channel(array![[0.0f32, 0.0], [0.0, 0.0]], sample_rate!(44100));
+
+        // Simulate converted data from their function
+        let converted_samples: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let num_channels = 2; // This comes from the function parameter, not audio.num_channels()
+
+        // Validate against the parameter, not the existing audio configuration
+        assert!(converted_samples.len().is_multiple_of(num_channels));
+        assert!(
+            audio
+                .replace_with_vec_channels(converted_samples, num_channels)
+                .is_ok()
+        );
+
+        assert_eq!(audio.samples_per_channel(), 3); // 6 samples ÷ 2 channels
+        assert_eq!(audio.num_channels(), 2);
+        assert_eq!(audio.sample_rate(), sample_rate!(44100)); // Preserved
+        assert_eq!(audio.layout(), ChannelLayout::Interleaved); // Preserved
+    }
+
+    #[test]
+    fn test_metadata_preservation_across_replacements() {
+        let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0], sample_rate!(48000));
+        audio.set_layout(ChannelLayout::NonInterleaved);
+
+        let original_rate = audio.sample_rate();
+        let original_layout = audio.layout();
+
+        // Replace data multiple times
+        assert!(audio.replace_with_mono(array![3.0f32, 4.0, 5.0]).is_ok());
+        assert_eq!(audio.sample_rate(), original_rate);
+        assert_eq!(audio.layout(), original_layout);
+
+        assert!(audio.replace_with_vec(vec![6.0f32, 7.0, 8.0, 9.0]).is_ok());
+        assert_eq!(audio.sample_rate(), original_rate);
+        assert_eq!(audio.layout(), original_layout);
+
+        let new_data = AudioData::from(array![10.0f32, 11.0]).into_owned();
+        assert!(audio.replace_data(new_data).is_ok());
+        assert_eq!(audio.sample_rate(), original_rate);
+        assert_eq!(audio.layout(), original_layout);
     }
 }

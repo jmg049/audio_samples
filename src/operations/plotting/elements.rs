@@ -7,6 +7,7 @@ use super::core::*;
 use crate::{AudioSample, RealFloat, to_precision};
 use ndarray::Array2;
 use num_complex::Complex;
+use num_traits::FloatConst;
 #[cfg(feature = "plotting")]
 use plotly::common::{Line, Mode};
 #[cfg(feature = "plotting")]
@@ -310,7 +311,7 @@ impl<F: RealFloat> PlotElement<F> for OnsetMarkers<F> {
 pub struct BeatMarkers<F: RealFloat> {
     beat_times: Vec<F>,
     tempo_bpm: Option<F>,
-    config: BeatConfig<F>,
+    config: BeatPlotConfig<F>,
     bounds: PlotBounds<F>,
     metadata: PlotMetadata,
 }
@@ -329,7 +330,7 @@ impl<F: RealFloat> BeatMarkers<F> {
     pub fn new(
         beat_times: Vec<F>,
         tempo_bpm: Option<F>,
-        config: BeatConfig<F>,
+        config: BeatPlotConfig<F>,
         y_range: (F, F),
     ) -> Self {
         let x_min = beat_times.iter().fold(F::infinity(), |a, &b| a.min(b));
@@ -895,7 +896,7 @@ impl<F: RealFloat> GroupDelayPlot<F> {
     ) -> Self {
         // Calculate group delay as negative derivative of phase
         let mut group_delay = Vec::with_capacity(complex_values.len());
-        let two_pi = to_precision::<F, _>(2.0) * F::PI();
+        let two_pi = to_precision::<F, _>(2.0) * <F as FloatConst>::PI();
         for i in 0..complex_values.len() {
             let delay = if i == 0 || i == complex_values.len() - 1 {
                 F::zero() // Boundary conditions
@@ -1151,7 +1152,7 @@ impl<F: RealFloat> InstantaneousFrequencyPlot<F> {
     ) -> Self {
         // Calculate instantaneous frequency as derivative of phase
         let mut instantaneous_freq = Vec::with_capacity(complex_signal.len());
-        let two_pi = to_precision::<F, _>(2.0) * F::PI();
+        let two_pi = to_precision::<F, _>(2.0) * <F as FloatConst>::PI();
         for i in 0..complex_signal.len() {
             let freq = if i == 0 || i == complex_signal.len() - 1 {
                 F::zero() // Boundary conditions
