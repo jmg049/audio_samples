@@ -51,8 +51,6 @@
 //!   [`AudioSamples::apply_to_windows`] for overlapping in-place windowed processing.
 
 use crate::{AudioData, AudioSample, AudioSampleError, AudioSamples, ConvertTo, I24, LayoutError};
-use core::num::NonZeroU32;
-use ndarray::{Array1, Array2, s};
 
 #[cfg(feature = "editing")]
 use crate::AudioEditing;
@@ -60,6 +58,13 @@ use std::marker::PhantomData;
 
 #[cfg(feature = "parallel-processing")]
 use rayon::prelude::*;
+
+#[cfg(feature = "parallel-processing")]
+use std::num::NonZeroU32;
+
+#[cfg(feature = "parallel-processing")]
+use ndarray::{Array1, Array2, s};
+
 
 /// Extension trait providing iterator methods for AudioSamples.
 pub trait AudioSampleIterators<'a, T: AudioSample> {
@@ -126,7 +131,7 @@ pub trait AudioSampleIterators<'a, T: AudioSample> {
     /// assert_eq!(channels[0], vec![1.0, 2.0, 3.0]);
     /// assert_eq!(channels[1], vec![4.0, 5.0, 6.0]);
     /// ```
-    fn channels(&'a self) -> ChannelIterator<'a, T>;
+    fn channels<'iter>(&'iter self) -> ChannelIterator<'iter, 'a, T>;
 
     /// Returns an iterator over overlapping windows of audio data.
     ///
@@ -424,7 +429,8 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     ///
     /// # Panics
     /// Does not panic.
-    pub fn channels(&'a self) -> ChannelIterator<'a, T> {
+    pub fn channels<'iter>(&'iter self) -> ChannelIterator<'iter, 'a, T>
+    {
         ChannelIterator::new(self)
     }
 
@@ -674,6 +680,7 @@ where
     }
 }
 
+
 /// Iterator over frames of audio data.
 ///
 /// A frame contains one sample from each channel at a given time point.
@@ -737,28 +744,27 @@ impl<'a, T: AudioSample> ExactSizeIterator for FrameIterator<'a, T> {}
 /// Iterator over complete channels of audio data.
 ///
 /// Each iteration yields all samples from one channel before proceeding to the next channel.
-pub struct ChannelIterator<'a, T: AudioSample> {
+pub struct ChannelIterator<'iter, 'data, T: AudioSample> {
     /// The source audio.
-    audio: &'a AudioSamples<'a, T>,
+    audio: &'iter AudioSamples<'data, T>,
     current_channel: usize,
     total_channels: usize,
-    _phantom: PhantomData<T>,
 }
 
-impl<'a, T: AudioSample> ChannelIterator<'a, T> {
-    fn new(audio: &'a AudioSamples<'a, T>) -> Self {
+impl<'iter, 'data, T: AudioSample> ChannelIterator<'iter, 'data, T> {
+    fn new(audio: &'iter AudioSamples<'data, T>) -> Self {
         let total_channels = audio.num_channels();
-
+        
         Self {
             audio,
             current_channel: 0,
             total_channels,
-            _phantom: PhantomData,
         }
     }
 }
 
-impl<'a, T: AudioSample> Iterator for ChannelIterator<'a, T> {
+impl<'iter, 'data, T: AudioSample> Iterator for ChannelIterator<'iter, 'data, T>
+{
     type Item = AudioSamples<'static, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -768,6 +774,8 @@ impl<'a, T: AudioSample> Iterator for ChannelIterator<'a, T> {
 
         let channel = match self
             .audio
+            .clone()
+            .into_owned()
             .slice_channels(self.current_channel..self.current_channel + 1)
         {
             Ok(ch) => ch,
@@ -788,7 +796,8 @@ impl<'a, T: AudioSample> Iterator for ChannelIterator<'a, T> {
     }
 }
 
-impl<'a, T: AudioSample> ExactSizeIterator for ChannelIterator<'a, T> {}
+impl<'iter, 'data, T: AudioSample> ExactSizeIterator for ChannelIterator<'iter, 'data, T>
+{}
 
 /// Padding strategy for window iteration when the window extends beyond available data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

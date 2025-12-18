@@ -137,7 +137,7 @@ use core::fmt::{Display, Formatter, Result as FmtResult};
 use core::num::{NonZeroU32, NonZeroUsize};
 use ndarray::iter::AxisIterMut;
 use ndarray::{
-    Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis, Ix1, Ix2, SliceArg,
+    Array1, Array2, ArrayView, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis, Ix1, Ix2, SliceArg
 };
 use std::any::TypeId;
 use std::ops::{Bound, Deref, DerefMut, Index, IndexMut, Neg, RangeBounds};
@@ -2920,8 +2920,9 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     ///
     /// # Errors
     /// Returns an error if the range is out of bounds.
-    pub fn slice_channels<R>(&self, channel_range: R) -> AudioSampleResult<AudioSamples<'static, T>>
+    pub fn slice_channels<'iter, R>(&'iter self, channel_range: R) -> AudioSampleResult<AudioSamples<'static, T>>
     where
+        'iter: 'a,
         R: RangeBounds<usize> + Clone,
     {
         let num_channels = self.num_channels();
@@ -2959,22 +2960,21 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
                         ),
                     )));
                 }
-                let audio_data = AudioData::from(arr.as_view().to_owned());
-
-                Ok(AudioSamples::from_owned(audio_data, self.sample_rate))
+                let audio_data = AudioData::from(arr.as_view());
+                let audio = AudioSamples::from_owned(audio_data.into_owned(), self.sample_rate);
+                Ok(audio)
             }
             AudioData::Multi(arr) => {
                 let sliced = arr.slice(ndarray::s![start..end, ..]);
                 if end - start == 1 {
                     // Single channel result - requires owned data due to temporary
                     let mono_data = sliced.index_axis(ndarray::Axis(0), 0).to_owned().into();
-                    Ok(AudioSamples::from_owned(mono_data, self.sample_rate))
+                    let audio = AudioSamples::from_owned(mono_data, self.sample_rate);
+                    Ok(audio)
                 } else {
                     // Multi-channel result - return owned data for consistency
-                    Ok(AudioSamples::from_owned(
-                        sliced.to_owned().into(),
-                        self.sample_rate,
-                    ))
+                    let audio = AudioSamples::from_owned(sliced.to_owned().into(), self.sample_rate);
+                    Ok(audio)
                 }
             }
         }
