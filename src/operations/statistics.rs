@@ -114,7 +114,6 @@ use crate::{
     AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConversionError, ConvertTo,
     I24, ParameterError, RealFloat, to_precision,
 };
-use crate::{AudioSampleError, ProcessingError};
 
 use ndarray::{Array1, Axis};
 #[cfg(feature = "fft")]
