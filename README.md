@@ -9,27 +9,6 @@
 [![Crates.io][crate-img]][crate] [![Docs.rs][docs-img]][docs] [![License: MIT][license-img]][license]
 </div>
 
-A typed audio processing library for Rust that treats audio as a
-first-class, invariant-preserving object rather than an unstructured
-numeric buffer.
-
-AudioSamples provides explicit sample-format semantics, safe and
-transparent conversions between integer and floating-point
-representations, and a coherent API for constructing, transforming,
-and analysing audio data without relying on convention or implicit
-assumptions.
-
----
-A typed audio processing library for Rust that treats audio as a
-first-class, invariant-preserving object rather than an unstructured
-numeric buffer.
-
-AudioSamples provides explicit sample-format semantics, safe and
-transparent conversions between integer and floating-point
-representations, and a coherent API for constructing, transforming,
-and analysing audio data without relying on convention or implicit
-assumptions.
-
 ---
 
 ## Overview
@@ -55,19 +34,19 @@ reliable system-level use, without requiring users to remember hidden
 conventions or reimplement common audio logic.
 
 AudioSamples is the core data and processing layer of the broader
-AudioRs ecosystem. It defines the canonical audio object and the
+audio related crates. It defines the canonical audio object and the
 operations that act upon it.
 
-Other crates in the ecosystem build on this foundation:
+Other crates that build on this foundation:
 
-- `audio_io` for decoding and encoding audio containers into typed
+- `audio_samples_io` for decoding and encoding audio containers into typed
   audio objects
-- `audio_playback` for device-level output
-- `audio_python` for Python bindings, enabling AudioSamples to act as a
+- `audio_samples_playback` for device-level output
+- `audio_samples_python` for Python bindings, enabling AudioSamples to act as a
   type-safe backend for Python workflows
 - `html_view` for lightweight visualisation and inspection, generating
   self-contained HTML outputs suitable for analysis and reporting
-
+  
 By separating representation from I/O, playback, and visualisation,
 AudioRs remains modular while enforcing a single, consistent audio
 model throughout the stack.
