@@ -3,8 +3,8 @@
 //! This module contains all the configuration types, enums, and helper structures
 //! used by the audio processing traits.
 
-use std::str::FromStr;
 use std::marker::PhantomData;
+use std::str::FromStr;
 
 use crate::{AudioSampleError, AudioSampleResult, ParameterError, RealFloat, to_precision};
 
@@ -3097,10 +3097,10 @@ impl<F: RealFloat> HpssConfig<F> {
     pub fn percussive() -> Self {
         Self {
             win_size: 2048,
-            hop_size: 256,  // Better time resolution for transients
+            hop_size: 256, // Better time resolution for transients
             median_filter_harmonic: 17,
-            median_filter_percussive: 51,  // Stronger percussive filtering
-            mask_softness: to_precision(0.1),  // Harder masking
+            median_filter_percussive: 51, // Stronger percussive filtering
+            mask_softness: to_precision(0.1), // Harder masking
         }
     }
 
@@ -3112,11 +3112,11 @@ impl<F: RealFloat> HpssConfig<F> {
     /// - Harder masking for cleaner tonal isolation
     pub fn harmonic() -> Self {
         Self {
-            win_size: 4096,  // Better frequency resolution for harmonics
+            win_size: 4096, // Better frequency resolution for harmonics
             hop_size: 512,
-            median_filter_harmonic: 51,  // Stronger harmonic filtering
+            median_filter_harmonic: 51, // Stronger harmonic filtering
             median_filter_percussive: 17,
-            mask_softness: to_precision(0.1),  // Harder masking
+            mask_softness: to_precision(0.1), // Harder masking
         }
     }
 
@@ -3231,7 +3231,10 @@ impl<F: RealFloat> HpssConfig<F> {
         if freq_resolution > to_precision(50.0) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "win_size",
-                format!("Window too small, frequency resolution ({:.1} Hz) is too low", freq_resolution),
+                format!(
+                    "Window too small, frequency resolution ({:.1} Hz) is too low",
+                    freq_resolution
+                ),
             )));
         }
 
@@ -3265,8 +3268,7 @@ impl<F: RealFloat> Default for HpssConfig<F> {
 /// Chromagram can be computed using different spectral representations:
 /// - STFT: Standard Short-Time Fourier Transform based approach
 /// - CQT: Constant-Q Transform based approach (better frequency resolution for low frequencies)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChromaMethod {
     /// Use Short-Time Fourier Transform for chromagram computation
     #[default]
@@ -3274,7 +3276,6 @@ pub enum ChromaMethod {
     /// Use Constant-Q Transform for chromagram computation
     Cqt,
 }
-
 
 /// Configuration for chromagram (chroma vector) computation.
 ///
@@ -3346,7 +3347,7 @@ impl<F: RealFloat> ChromaConfig<F> {
         Self {
             method: ChromaMethod::Cqt,
             n_chroma: 12,
-            window_size: 2048,  // Used for CQT kernel calculation
+            window_size: 2048, // Used for CQT kernel calculation
             hop_size: 512,
             sample_rate: None,
             norm: true,

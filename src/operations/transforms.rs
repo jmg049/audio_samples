@@ -1359,7 +1359,6 @@ where
 
         Ok(magnitude_spectrogram)
     }
-
 }
 
 impl<T: AudioSample> AudioSamples<'_, T>
@@ -1377,7 +1376,9 @@ where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = cfg.sample_rate.map(|sr| to_precision::<F, _>(sr))
+        let sample_rate = cfg
+            .sample_rate
+            .map(|sr| to_precision::<F, _>(sr))
             .unwrap_or_else(|| to_precision::<F, _>(self.sample_rate.get()));
 
         // Compute STFT (positive frequencies × time_frames)
@@ -1404,7 +1405,8 @@ where
             // convert to isize safely
             let k_i = kf.to_i64().unwrap_or(0);
             // Map so that A (440 Hz) -> class 9 (C=0)
-            let class = (((k_i + 9) % (cfg.n_chroma as i64)) + (cfg.n_chroma as i64)) % (cfg.n_chroma as i64);
+            let class = (((k_i + 9) % (cfg.n_chroma as i64)) + (cfg.n_chroma as i64))
+                % (cfg.n_chroma as i64);
             let class_usize = class as usize;
 
             for frame_idx in 0..num_frames {
@@ -1428,13 +1430,15 @@ where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
     {
-        let sample_rate = cfg.sample_rate.map(|sr| to_precision::<F, _>(sr))
+        let sample_rate = cfg
+            .sample_rate
+            .map(|sr| to_precision::<F, _>(sr))
             .unwrap_or_else(|| to_precision::<F, _>(self.sample_rate.get()));
 
         // Create CQT configuration
         // For chromagram, we want frequencies covering the audible range with good resolution
         let cqt_config = CqtConfig::<F> {
-            fmin: to_precision(55.0),   // A1 (low end)
+            fmin: to_precision(55.0),                    // A1 (low end)
             fmax: Some(sample_rate / to_precision(2.0)), // Nyquist frequency
             bins_per_octave: cfg.n_chroma,
             q_factor: to_precision(1.0), // Standard Q factor
@@ -1444,7 +1448,12 @@ where
         };
 
         // Compute CQT magnitude spectrogram
-        let cqt_magnitude = self.cqt_magnitude_spectrogram(&cqt_config, cfg.hop_size, Some(cfg.window_size), false)?;
+        let cqt_magnitude = self.cqt_magnitude_spectrogram(
+            &cqt_config,
+            cfg.hop_size,
+            Some(cfg.window_size),
+            false,
+        )?;
         let (num_cqt_bins, num_frames) = cqt_magnitude.dim();
 
         // Initialize chroma matrix (n_chroma × time_frames)
@@ -1468,7 +1477,6 @@ where
 
         Ok(chroma)
     }
-
 }
 
 /// Normalize chroma vectors per time frame.
@@ -1811,7 +1819,6 @@ fn apply_gammatone_filter<F: RealFloat>(signal: &[F], filter_coeffs: &[F]) -> Ve
 
     output
 }
-
 
 /// Generates mel-spaced center frequencies for mel filter bank.
 ///

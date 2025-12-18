@@ -9,10 +9,9 @@ use std::time::Duration;
 
 #[cfg(feature = "hpss")]
 use audio_samples::{
-    AudioSampleResult, AudioSamples,
+    AudioEditing, AudioSampleResult, AudioSamples, AudioStatistics,
     operations::{AudioDecomposition, HpssConfig},
-    utils::generation::{sine_wave, impulse},
-    AudioEditing, AudioStatistics,
+    utils::generation::{impulse, sine_wave},
 };
 
 #[cfg(not(feature = "hpss"))]
@@ -40,12 +39,8 @@ fn main() -> AudioSampleResult<()> {
     println!("\n🎼 Creating harmonic component (sine wave)...");
     let harmonic_freq = 440.0; // A4
     let harmonic_amplitude = 0.6;
-    let harmonic_signal = sine_wave::<f32, f32>(
-        harmonic_freq,
-        duration,
-        sample_rate,
-        harmonic_amplitude,
-    );
+    let harmonic_signal =
+        sine_wave::<f32, f32>(harmonic_freq, duration, sample_rate, harmonic_amplitude);
 
     println!("  • Frequency: {} Hz", harmonic_freq);
     println!("  • Amplitude: {}", harmonic_amplitude);
@@ -60,12 +55,7 @@ fn main() -> AudioSampleResult<()> {
     let mut impulses = Vec::new();
     let mut t = 0.5; // Start at 0.5 seconds
     while t < duration.as_secs_f64() - 0.1 {
-        let impulse_signal = impulse::<f32, f64>(
-            duration,
-            sample_rate,
-            impulse_amplitude,
-            t,
-        );
+        let impulse_signal = impulse::<f32, f64>(duration, sample_rate, impulse_amplitude, t);
         impulses.push(impulse_signal);
         t += impulse_interval;
     }
@@ -142,7 +132,10 @@ fn test_hpss_configuration(
     println!("      - Peak: {:.3}", percussive_peak);
     println!("      - Energy ratio: {:.1}%", percussive_energy_ratio);
 
-    println!("  ⏱️  Processing time: {:.2} ms", processing_time.as_secs_f64() * 1000.0);
+    println!(
+        "  ⏱️  Processing time: {:.2} ms",
+        processing_time.as_secs_f64() * 1000.0
+    );
 
     // Quality assessment
     assess_separation_quality(harmonic_energy_ratio, percussive_energy_ratio);
@@ -216,7 +209,11 @@ mod tests {
         let energy_ratio = separated_rms / original_rms;
 
         // Energy should be mostly preserved (within 20% due to processing artifacts)
-        assert!(energy_ratio > 0.8 && energy_ratio < 1.2,
-                "Energy not preserved: {} -> {}", original_rms, separated_rms);
+        assert!(
+            energy_ratio > 0.8 && energy_ratio < 1.2,
+            "Energy not preserved: {} -> {}",
+            original_rms,
+            separated_rms
+        );
     }
 }

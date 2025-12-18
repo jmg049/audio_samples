@@ -265,7 +265,6 @@ pub fn ms_to_samples<F: RealFloat>(ms: F, sample_rate: F) -> usize {
         .expect("Should not fail")
 }
 
-
 /// Calculate compression gain reduction.
 ///
 /// # Arguments

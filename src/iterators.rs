@@ -65,7 +65,6 @@ use std::num::NonZeroU32;
 #[cfg(feature = "parallel-processing")]
 use ndarray::{Array1, Array2, s};
 
-
 /// Extension trait providing iterator methods for AudioSamples.
 pub trait AudioSampleIterators<'a, T: AudioSample> {
     /// Returns an iterator over frames (one sample from each channel).
@@ -429,8 +428,7 @@ impl<'a, T: AudioSample> AudioSamples<'a, T> {
     ///
     /// # Panics
     /// Does not panic.
-    pub fn channels<'iter>(&'iter self) -> ChannelIterator<'iter, 'a, T>
-    {
+    pub fn channels<'iter>(&'iter self) -> ChannelIterator<'iter, 'a, T> {
         ChannelIterator::new(self)
     }
 
@@ -680,7 +678,6 @@ where
     }
 }
 
-
 /// Iterator over frames of audio data.
 ///
 /// A frame contains one sample from each channel at a given time point.
@@ -754,7 +751,7 @@ pub struct ChannelIterator<'iter, 'data, T: AudioSample> {
 impl<'iter, 'data, T: AudioSample> ChannelIterator<'iter, 'data, T> {
     fn new(audio: &'iter AudioSamples<'data, T>) -> Self {
         let total_channels = audio.num_channels();
-        
+
         Self {
             audio,
             current_channel: 0,
@@ -763,8 +760,7 @@ impl<'iter, 'data, T: AudioSample> ChannelIterator<'iter, 'data, T> {
     }
 }
 
-impl<'iter, 'data, T: AudioSample> Iterator for ChannelIterator<'iter, 'data, T>
-{
+impl<'iter, 'data, T: AudioSample> Iterator for ChannelIterator<'iter, 'data, T> {
     type Item = AudioSamples<'static, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -796,8 +792,7 @@ impl<'iter, 'data, T: AudioSample> Iterator for ChannelIterator<'iter, 'data, T>
     }
 }
 
-impl<'iter, 'data, T: AudioSample> ExactSizeIterator for ChannelIterator<'iter, 'data, T>
-{}
+impl<'iter, 'data, T: AudioSample> ExactSizeIterator for ChannelIterator<'iter, 'data, T> {}
 
 /// Padding strategy for window iteration when the window extends beyond available data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -352,7 +352,7 @@ pub use crate::traits::{
 pub use crate::utils::{
     audio_math::{
         amplitude_to_db, db_to_amplitude, fft_frequencies, frames_to_time, hz_to_mel, hz_to_midi,
-        mel_to_hz, mel_scale, midi_to_hz, midi_to_note, note_to_midi, power_to_db, time_to_frames,
+        mel_scale, mel_to_hz, midi_to_hz, midi_to_note, note_to_midi, power_to_db, time_to_frames,
     },
     comparison, detection,
     generation::{

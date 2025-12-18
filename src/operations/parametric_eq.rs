@@ -462,7 +462,6 @@ fn design_bandstop_filter<F: RealFloat>(
     Ok((b_coeffs, a_coeffs))
 }
 
-
 impl<T: AudioSample> AudioSamples<'_, T>
 where
     i16: ConvertTo<T>,
@@ -503,9 +502,9 @@ mod tests {
     use super::*;
     use crate::operations::traits::AudioParametricEq;
     use crate::sample_rate;
+    use crate::utils::audio_math::amplitude_to_db as linear_to_db;
     use ndarray::Array1;
     use std::f64::consts::PI;
-    use crate::utils::audio_math::amplitude_to_db as linear_to_db;
 
     #[test]
     fn test_peak_filter() {

@@ -7,8 +7,19 @@
 use audio_samples::{
     AudioSampleResult,
     // Re-exported audio math functions
-    amplitude_to_db, db_to_amplitude, fft_frequencies, frames_to_time, hz_to_mel, hz_to_midi,
-    mel_to_hz, mel_scale, midi_to_hz, midi_to_note, note_to_midi, power_to_db, time_to_frames,
+    amplitude_to_db,
+    db_to_amplitude,
+    fft_frequencies,
+    frames_to_time,
+    hz_to_mel,
+    hz_to_midi,
+    mel_scale,
+    mel_to_hz,
+    midi_to_hz,
+    midi_to_note,
+    note_to_midi,
+    power_to_db,
+    time_to_frames,
 };
 
 fn main() -> AudioSampleResult<()> {
@@ -44,36 +55,54 @@ fn frequency_conversions_demo() -> AudioSampleResult<()> {
     for freq_hz in frequencies_hz {
         let mel = hz_to_mel(freq_hz);
         let hz_back = mel_to_hz(mel);
-        println!("  {} Hz → {:.1} mels → {:.1} Hz (error: {:.3})",
-                freq_hz, mel, hz_back, (freq_hz - hz_back).abs());
+        println!(
+            "  {} Hz → {:.1} mels → {:.1} Hz (error: {:.3})",
+            freq_hz,
+            mel,
+            hz_back,
+            (freq_hz - hz_back).abs()
+        );
     }
 
     // Hz to MIDI conversions
     println!("\nHz ↔ MIDI Note Number Conversions:");
     let musical_frequencies = [
-        (440.0f64, "A4"),      // Concert pitch
-        (261.63, "C4"),     // Middle C
-        (523.25, "C5"),     // C5
-        (1046.5, "C6"),     // C6
-        (82.41, "E2"),      // Low E (guitar)
+        (440.0f64, "A4"), // Concert pitch
+        (261.63, "C4"),   // Middle C
+        (523.25, "C5"),   // C5
+        (1046.5, "C6"),   // C6
+        (82.41, "E2"),    // Low E (guitar)
     ];
 
     for (freq_hz, note_name) in musical_frequencies {
         let midi = hz_to_midi(freq_hz);
         let hz_back = midi_to_hz(midi);
-        println!("  {} Hz ({}) → MIDI {:.1} → {:.2} Hz (error: {:.3})",
-                freq_hz, note_name, midi, hz_back, (freq_hz - hz_back).abs());
+        println!(
+            "  {} Hz ({}) → MIDI {:.1} → {:.2} Hz (error: {:.3})",
+            freq_hz,
+            note_name,
+            midi,
+            hz_back,
+            (freq_hz - hz_back).abs()
+        );
     }
 
     // Mel scale demonstration
     println!("\nMel Scale Properties:");
     println!("  The mel scale provides perceptually uniform frequency spacing:");
     let mel_points = mel_scale(40, 80.0, 8000.0);
-    println!("  Generated {} mel-spaced frequencies from 80 Hz to 8000 Hz:", mel_points.len());
-    println!("  First 5: {:.1}, {:.1}, {:.1}, {:.1}, {:.1}",
-            mel_points[0], mel_points[1], mel_points[2], mel_points[3], mel_points[4]);
-    println!("  Last 5: {:.1}, {:.1}, {:.1}, {:.1}, {:.1}",
-            mel_points[35], mel_points[36], mel_points[37], mel_points[38], mel_points[39]);
+    println!(
+        "  Generated {} mel-spaced frequencies from 80 Hz to 8000 Hz:",
+        mel_points.len()
+    );
+    println!(
+        "  First 5: {:.1}, {:.1}, {:.1}, {:.1}, {:.1}",
+        mel_points[0], mel_points[1], mel_points[2], mel_points[3], mel_points[4]
+    );
+    println!(
+        "  Last 5: {:.1}, {:.1}, {:.1}, {:.1}, {:.1}",
+        mel_points[35], mel_points[36], mel_points[37], mel_points[38], mel_points[39]
+    );
 
     Ok(())
 }
@@ -88,8 +117,13 @@ fn amplitude_conversions_demo() {
     for amp in amplitudes {
         let db = amplitude_to_db(amp);
         let amp_back = db_to_amplitude(db);
-        println!("  {:.3} → {:.1} dB → {:.3} (error: {:.6})",
-                amp, db, amp_back, (amp - amp_back).abs());
+        println!(
+            "  {:.3} → {:.1} dB → {:.3} (error: {:.6})",
+            amp,
+            db,
+            amp_back,
+            (amp - amp_back).abs()
+        );
     }
 
     println!("\nPower to dB (10*log10):");
@@ -114,14 +148,18 @@ fn musical_theory_demo() -> AudioSampleResult<()> {
     println!("===========================");
 
     println!("\nNote Name ↔ MIDI Number Conversions:");
-    let notes = ["C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4"];
+    let notes = [
+        "C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4",
+    ];
 
     for note in notes {
         let midi = note_to_midi(note)?;
         let note_back = midi_to_note(midi)?;
         let freq = midi_to_hz(midi as f64);
-        println!("  {} → MIDI {} → {} → {:.2} Hz",
-                note, midi, note_back, freq);
+        println!(
+            "  {} → MIDI {} → {} → {:.2} Hz",
+            note, midi, note_back, freq
+        );
     }
 
     println!("\n🎹 Piano Range Demonstration:");
@@ -147,7 +185,10 @@ fn musical_theory_demo() -> AudioSampleResult<()> {
     for (note, description) in guitar_tuning {
         let midi = note_to_midi(note)?;
         let freq = midi_to_hz(midi as f64);
-        println!("  {} (MIDI {}) = {:.2} Hz - {}", note, midi, freq, description);
+        println!(
+            "  {} (MIDI {}) = {:.2} Hz - {}",
+            note, midi, freq, description
+        );
     }
 
     Ok(())
@@ -163,8 +204,14 @@ fn time_frame_conversions_demo() {
     println!("\nFrame-based Analysis Parameters:");
     println!("  Sample rate: {} Hz", sample_rate);
     println!("  Hop size: {} samples", hop_size);
-    println!("  Frame rate: {:.2} frames/second", sample_rate / hop_size as f64);
-    println!("  Frame duration: {:.3} ms", (hop_size as f64 / sample_rate) * 1000.0);
+    println!(
+        "  Frame rate: {:.2} frames/second",
+        sample_rate / hop_size as f64
+    );
+    println!(
+        "  Frame duration: {:.3} ms",
+        (hop_size as f64 / sample_rate) * 1000.0
+    );
 
     println!("\nFrames to Time Conversion:");
     let frame_numbers = [0, 10, 100, 1000, 4410]; // Various frame positions
@@ -172,8 +219,13 @@ fn time_frame_conversions_demo() {
     for frames in frame_numbers {
         let time_sec = frames_to_time::<f64>(frames, sample_rate, hop_size);
         let frames_back = time_to_frames(time_sec, sample_rate, hop_size);
-        println!("  Frame {} → {:.3} sec → frame {} (error: {})",
-                frames, time_sec, frames_back, (frames as isize - frames_back as isize).abs());
+        println!(
+            "  Frame {} → {:.3} sec → frame {} (error: {})",
+            frames,
+            time_sec,
+            frames_back,
+            (frames as isize - frames_back as isize).abs()
+        );
     }
 
     println!("\nTypical Analysis Durations:");
@@ -181,8 +233,10 @@ fn time_frame_conversions_demo() {
 
     for duration in durations {
         let frames = time_to_frames(duration, sample_rate, hop_size);
-        println!("  {:.1} sec = {} frames = {} analysis windows",
-                duration, frames, frames);
+        println!(
+            "  {:.1} sec = {} frames = {} analysis windows",
+            duration, frames, frames
+        );
     }
 }
 
@@ -200,10 +254,16 @@ fn spectral_helpers_demo() {
         let nyquist_bin = freqs.len() - 1;
 
         println!("\n  FFT size: {} samples", fft_size);
-        println!("    Frequency resolution: {:.2} Hz/bin", freqs[1] - freqs[0]);
+        println!(
+            "    Frequency resolution: {:.2} Hz/bin",
+            freqs[1] - freqs[0]
+        );
         println!("    Number of bins: {} (0 to {})", freqs.len(), nyquist_bin);
         println!("    DC bin (0): {:.1} Hz", freqs[0]);
-        println!("    Nyquist bin ({}): {:.1} Hz", nyquist_bin, freqs[nyquist_bin]);
+        println!(
+            "    Nyquist bin ({}): {:.1} Hz",
+            nyquist_bin, freqs[nyquist_bin]
+        );
 
         // Find bins for common frequencies
         let target_freqs = [100.0, 440.0, 1000.0, 4000.0];
@@ -211,13 +271,18 @@ fn spectral_helpers_demo() {
         for target in target_freqs {
             let bin = (target / (sample_rate / fft_size as f64)) as usize;
             if bin < freqs.len() {
-                println!("      {:.0} Hz ≈ bin {} ({:.1} Hz)", target, bin, freqs[bin]);
+                println!(
+                    "      {:.0} Hz ≈ bin {} ({:.1} Hz)",
+                    target, bin, freqs[bin]
+                );
             }
         }
     }
 
     println!("\nFrequency Band Analysis:");
-    println!("  Common audio frequency bands and their FFT bin ranges (for 2048-point FFT @ 44.1kHz):");
+    println!(
+        "  Common audio frequency bands and their FFT bin ranges (for 2048-point FFT @ 44.1kHz):"
+    );
 
     let bands = [
         ("Sub-bass", 20.0, 60.0),
@@ -236,8 +301,15 @@ fn spectral_helpers_demo() {
         let high_bin = (high_freq / (sample_rate / 2048.0)) as usize;
         let high_bin = high_bin.min(freqs.len() - 1);
 
-        println!("  • {}: {:.0}-{:.0} Hz → bins {}-{} ({} bins)",
-                name, low_freq, high_freq, low_bin, high_bin, high_bin - low_bin + 1);
+        println!(
+            "  • {}: {:.0}-{:.0} Hz → bins {}-{} ({} bins)",
+            name,
+            low_freq,
+            high_freq,
+            low_bin,
+            high_bin,
+            high_bin - low_bin + 1
+        );
     }
 }
 
