@@ -74,110 +74,12 @@ model throughout the stack.
 
 ---
 
-## Why Use audio_samples?
-
-AudioSamples exists to make audio semantics explicit and enforceable.
-
-In many audio libraries, audio data is represented as a numeric buffer
-with metadata tracked separately or implicitly. Sample rate, channel
-layout, amplitude domain, and sample representation often exist outside
-the type system and are maintained by convention. As a result,
-mismatches between representations can propagate silently through
-pipelines, particularly when converting between integer PCM and
-floating-point formats or combining signals from different sources.
-
-AudioSamples addresses this by treating audio as a structured object.
-An `AudioSamples<'a, T>` value couples sample data with its sample rate
-and channel layout, and operations on audio explicitly preserve or
-update these invariants. Conversions between sample formats are defined
-in terms of semantic transformations rather than raw casts, ensuring
-that changes in numerical representation are intentional and
-well-defined.
-
-This design supports workflows where correctness matters: research
-pipelines, long-lived systems code, and multi-stage audio processing
-where buffers pass through several components. Rather than relying on
-discipline or external documentation, AudioSamples encodes audio
-assumptions directly in the API.
-
----
-Most audio libraries expose samples as raw numeric buffers. In Python,
-audio is typically represented as a NumPy array whose `dtype` is
-explicit, but whose meaning is not: sample rate, channel layout,
-amplitude range, memory interleaving, and PCM versus floating-point
-semantics are tracked externally, if at all. In Rust, the situation is
-reversed but not resolved. Libraries provide fast and safe low-level
-primitives, yet users are still responsible for managing raw buffers,
-writing ad hoc conversion code, and manually preserving invariants
-across crates.
-
-AudioSamples is designed to close this gap by providing a strongly
-typed audio representation that makes audio semantics explicit and
-enforced by construction. Sample format, numeric domain, channel
-structure, and layout are encoded in the type system, and all
-operations preserve or explicitly update these invariants.
-
-The result is an API that supports both exploratory workflows and
-reliable system-level use, without requiring users to remember hidden
-conventions or reimplement common audio logic.
-
-AudioSamples is the core data and processing layer of the broader
-AudioRs ecosystem. It defines the canonical audio object and the
-operations that act upon it.
-
-Other crates in the ecosystem build on this foundation:
-
-- `audio_io` for decoding and encoding audio containers into typed
-  audio objects
-- `audio_playback` for device-level output
-- `audio_python` for Python bindings, enabling AudioSamples to act as a
-  type-safe backend for Python workflows
-- `html_view` for lightweight visualisation and inspection, generating
-  self-contained HTML outputs suitable for analysis and reporting
-
-By separating representation from I/O, playback, and visualisation,
-AudioRs remains modular while enforcing a single, consistent audio
-model throughout the stack.
-
----
-
-## Why Use audio_samples?
-
-AudioSamples exists to make audio semantics explicit and enforceable.
-
-In many audio libraries, audio data is represented as a numeric buffer
-with metadata tracked separately or implicitly. Sample rate, channel
-layout, amplitude domain, and sample representation often exist outside
-the type system and are maintained by convention. As a result,
-mismatches between representations can propagate silently through
-pipelines, particularly when converting between integer PCM and
-floating-point formats or combining signals from different sources.
-
-AudioSamples addresses this by treating audio as a structured object.
-An `AudioSamples<'a, T>` value couples sample data with its sample rate
-and channel layout, and operations on audio explicitly preserve or
-update these invariants. Conversions between sample formats are defined
-in terms of semantic transformations rather than raw casts, ensuring
-that changes in numerical representation are intentional and
-well-defined.
-
-This design supports workflows where correctness matters: research
-pipelines, long-lived systems code, and multi-stage audio processing
-where buffers pass through several components. Rather than relying on
-discipline or external documentation, AudioSamples encodes audio
-assumptions directly in the API.
-
----
-
 ## Installation
 
 ```bash
 cargo add audio_samples
 ```
 
-See the [Features](#features) for more details.
-
----
 See the [Features](#features) for more details.
 
 ---
@@ -233,6 +135,8 @@ cargo add audio_samples --features spectral-analysis
 ```
 
 #### Example: STFT, spectrogram, and MFCC computation
+
+```rust
 use audio_samples::{
     AudioProcessing, AudioTypeConversion, cosine_wave, operations::types::NormalizationMethod,
     sine_wave,
@@ -260,130 +164,50 @@ fn main() {
 }
 ```
 
----
+## Why Use audio_samples?
 
-### Spectral transforms and analysis
+AudioSamples exists to make audio semantics explicit and enforceable.
 
-AudioSamples supports spectral and time–frequency transforms via the
-`AudioTransforms` trait, enabled by the `spectral-analysis` feature.
-These operations produce standard frequency-domain and
-time–frequency representations used in audio analysis and research.
+In many audio libraries, audio data is represented as a numeric buffer
+with metadata tracked separately or implicitly. Sample rate, channel
+layout, amplitude domain, and sample representation often exist outside
+the type system and are maintained by convention. As a result,
+mismatches between representations can propagate silently through
+pipelines, particularly when converting between integer PCM and
+floating-point formats or combining signals from different sources.
 
-Enable the feature:
+AudioSamples addresses this by treating audio as a structured object.
+An `AudioSamples<'a, T>` value couples sample data with its sample rate
+and channel layout, and operations on audio explicitly preserve or
+update these invariants. Conversions between sample formats are defined
+in terms of semantic transformations rather than raw casts, ensuring
+that changes in numerical representation are intentional and
+well-defined.
 
-```bash
-cargo add audio_samples --features spectral-analysis
-```
+This design supports workflows where correctness matters: research
+pipelines, long-lived systems code, and multi-stage audio processing
+where buffers pass through several components. Rather than relying on
+discipline or external documentation, AudioSamples encodes audio
+assumptions directly in the API.
 
-#### Example: STFT, spectrogram, and MFCC computation
+AudioSamples is the core data and processing layer of the broader
+audio related crates. It defines the canonical audio object and the
+operations that act upon it.
 
-```rust
-use audio_samples::{
-    AudioTransforms,
-    operations::types::{SpectrogramScale, WindowType},
-    sine_wave,
-};
-use std::time::Duration;
+Other crates in the ecosystem build on this foundation:
 
-fn main() -> audio_samples::AudioSampleResult<()> {
-    let sample_rate = 44_100;
-    let duration = Duration::from_secs_f64(2.0);
+- `audio_samples_io` for decoding and encoding audio containers into typed
+  audio objects
+- `audio_samples_playback` for device-level output
+- `audio_samples_python` for Python bindings, enabling AudioSamples to act as a
+  type-safe backend for Python workflows
+- `html_view` for lightweight visualisation and inspection, generating
+  self-contained HTML outputs suitable for analysis and reporting
 
-    let audio = sine_wave::<f32, f32>(220.0, duration, sample_rate, 0.8);
+By separating representation from I/O, playback, and visualisation,
+AudioRs remains modular while enforcing a single, consistent audio
+model throughout the stack.
 
-    let window_size = 2048;
-    let hop_size = 512;
-
-    let window = WindowType::<f32>::Hanning;
-
-    let _stft = audio.stft::<f32>(window_size, hop_size, window)?;
-
-    let _spectrogram = audio.spectrogram::<f32>(
-        window_size,
-        hop_size,
-        WindowType::<f32>::Hanning,
-        SpectrogramScale::Log,
-        true,
-    )?;
-
-    let _mfcc = audio.mfcc::<f32>(13, 40, 80.0, (sample_rate as f32) / 2.0)?;
-
-    Ok(())
-use audio_samples::{
-    AudioTransforms,
-    operations::types::{SpectrogramScale, WindowType},
-    sine_wave,
-};
-use std::time::Duration;
-
-fn main() -> audio_samples::AudioSampleResult<()> {
-    let sample_rate = 44_100;
-    let duration = Duration::from_secs_f64(2.0);
-
-    let audio = sine_wave::<f32, f32>(220.0, duration, sample_rate, 0.8);
-
-    let window_size = 2048;
-    let hop_size = 512;
-
-    let window = WindowType::<f32>::Hanning;
-
-    let _stft = audio.stft::<f32>(window_size, hop_size, window)?;
-
-    let _spectrogram = audio.spectrogram::<f32>(
-        window_size,
-        hop_size,
-        WindowType::<f32>::Hanning,
-        SpectrogramScale::Log,
-        true,
-    )?;
-
-    let _mfcc = audio.mfcc::<f32>(13, 40, 80.0, (sample_rate as f32) / 2.0)?;
-
-    Ok(())
-}
-```
-
----
-
-## <a name="features">Features</a>
-
-### Default features
-
-- `statistics`
-- `processing`
-- `editing`
-- `channels`
-
-### Major functionality groups
-
-- `fft`
-- `resampling`
-- `serialization`
-- `plotting`
-
-### Transform and analysis features
-
-- `spectral-analysis`
-- `beat-detection` (requires `spectral-analysis`)
-
-### Plotting sub-features
-
-- `static-plots` (PNG output)
-
-### Performance features
-
-- `parallel-processing`
-- `simd` (nightly only)
-- `mkl`
-- `fixed-size-audio`
-
-### Utility features
-
-- `formatting`
-- `random-generation`
-- `utilities-full`
-
----
 ---
 
 ## <a name="features">Features</a>
@@ -450,15 +274,16 @@ crates.
 
 ## AudioRs — Companion Crates
 
-### [`audio_io`](https://github.com/jmg049/audio_io)
+### [`audio_samples_io`](https://github.com/jmg049/audio_samples_io)
 
-Audio decoding and encoding into typed audio objects.
+Rust crate providing audio file I/O utilities and helpers.
+`audio_samples_io` is the IO extension of the [audio_samples](https://crates.io/crates/audio_samples) crate.
 
-### [`audio_playback`](https://github.com/jmg049/audio_playback)
+### [`audio_samples_playback`](https://github.com/jmg049/audio_playback)
 
 Device-level playback built on AudioSamples.
 
-### [`audio_python`](https://github.com/jmg049/audio_python)
+### [`audio_samples_python`](https://github.com/jmg049/audio_python)
 
 Python bindings exposing AudioSamples, AudioIO and AudioPlayback.
 
@@ -485,12 +310,8 @@ MIT License
 
 ---
 
----
-
 ## Contributing
 
-Contributions are welcome. Please submit a pull request and see
-[CONTRIBUTING.md](CONTRIBUTING.md) for guidance.
 Contributions are welcome. Please submit a pull request and see
 [CONTRIBUTING.md](CONTRIBUTING.md) for guidance.
 

@@ -110,15 +110,14 @@ impl<F: RealFloat> PlotComposer<F> {
     pub fn render_to_html<P: AsRef<Path>>(&self, path: P, create_parent: bool) -> PlotResult<()> {
         let plot = self.create_plotly_plot()?;
 
-        if create_parent
-            && let Some(parent) = path.as_ref().parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "file_path",
-                        format!("Failed to create parent directories: {}", e),
-                    ))
-                })?;
-            }
+        if create_parent && let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "file_path",
+                    format!("Failed to create parent directories: {}", e),
+                ))
+            })?;
+        }
 
         plot.write_html(path);
         Ok(())

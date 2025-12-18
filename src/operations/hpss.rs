@@ -17,15 +17,15 @@
 //! - Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering"
 //! - Müller, M. (2015). "Fundamentals of Music Processing", Section 8.4
 
-use crate::operations::traits::{AudioTransforms, AudioDecomposition};
+use crate::operations::traits::{AudioDecomposition, AudioTransforms};
 use crate::operations::types::{HpssConfig, WindowType};
 use crate::{
     AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    ParameterError, RealFloat, I24,
+    I24, ParameterError, RealFloat,
 };
 
-use ndarray::{s, Array2};
-use rustfft::{num_complex::Complex, FftNum};
+use ndarray::{Array2, s};
+use rustfft::{FftNum, num_complex::Complex};
 
 impl<T: AudioSample> AudioDecomposition<T> for AudioSamples<'_, T>
 where
@@ -36,7 +36,10 @@ where
     f64: ConvertTo<T>,
     for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
 {
-    fn hpss<F: RealFloat>(&self, config: &HpssConfig<F>) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)>
+    fn hpss<F: RealFloat>(
+        &self,
+        config: &HpssConfig<F>,
+    ) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)>
     where
         F: FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>,
@@ -50,8 +53,11 @@ where
         if self.samples_per_channel() < min_length {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "signal_length",
-                format!("Signal too short ({} samples), need at least {} samples for window size",
-                    self.samples_per_channel(), min_length),
+                format!(
+                    "Signal too short ({} samples), need at least {} samples for window size",
+                    self.samples_per_channel(),
+                    min_length
+                ),
             )));
         }
 
@@ -90,19 +96,28 @@ where
     let percussive_spec = median_filter_freq_axis(&magnitude_spec, config.median_filter_percussive);
 
     // Step 4: Generate separation masks
-    let (harmonic_mask, percussive_mask) = generate_separation_masks(
-        &harmonic_spec,
-        &percussive_spec,
-        config.mask_softness,
-    );
+    let (harmonic_mask, percussive_mask) =
+        generate_separation_masks(&harmonic_spec, &percussive_spec, config.mask_softness);
 
     // Step 5: Apply masks and reconstruct signals
     let harmonic_stft = apply_mask_to_stft(&stft_result, &harmonic_mask);
     let percussive_stft = apply_mask_to_stft(&stft_result, &percussive_mask);
 
     // Step 6: Inverse STFT to get time domain signals
-    let harmonic_audio: AudioSamples<'static, T> = AudioSamples::istft(&harmonic_stft, config.hop_size, WindowType::Hanning, audio.sample_rate.get() as usize, true)?;
-    let percussive_audio: AudioSamples<'static, T> = AudioSamples::istft(&percussive_stft, config.hop_size, WindowType::Hanning, audio.sample_rate.get() as usize, true)?;
+    let harmonic_audio: AudioSamples<'static, T> = AudioSamples::istft(
+        &harmonic_stft,
+        config.hop_size,
+        WindowType::Hanning,
+        audio.sample_rate.get() as usize,
+        true,
+    )?;
+    let percussive_audio: AudioSamples<'static, T> = AudioSamples::istft(
+        &percussive_stft,
+        config.hop_size,
+        WindowType::Hanning,
+        audio.sample_rate.get() as usize,
+        true,
+    )?;
 
     Ok((harmonic_audio, percussive_audio))
 }
@@ -116,10 +131,7 @@ fn compute_magnitude_spectrogram<F: RealFloat>(stft: &Array2<Complex<F>>) -> Arr
 ///
 /// Harmonic components tend to be stable over time, so median filtering along
 /// the time axis preserves sustained tonal content while suppressing transients.
-fn median_filter_time_axis<F: RealFloat>(
-    spectrogram: &Array2<F>,
-    kernel_size: usize,
-) -> Array2<F> {
+fn median_filter_time_axis<F: RealFloat>(spectrogram: &Array2<F>, kernel_size: usize) -> Array2<F> {
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
@@ -139,10 +151,7 @@ fn median_filter_time_axis<F: RealFloat>(
 ///
 /// Percussive components tend to have broadband characteristics, so median filtering
 /// along the frequency axis preserves transients while suppressing tonal content.
-fn median_filter_freq_axis<F: RealFloat>(
-    spectrogram: &Array2<F>,
-    kernel_size: usize,
-) -> Array2<F> {
+fn median_filter_freq_axis<F: RealFloat>(spectrogram: &Array2<F>, kernel_size: usize) -> Array2<F> {
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
@@ -247,8 +256,11 @@ fn generate_separation_masks<F: RealFloat>(
                 let p_ratio = p_val / total;
 
                 // Apply softness: interpolate between binary and proportional masks
-                let h_soft = mask_softness * h_ratio + (F::one() - mask_softness) * if h_val >= p_val { F::one() } else { F::zero() };
-                let p_soft = mask_softness * p_ratio + (F::one() - mask_softness) * if p_val > h_val { F::one() } else { F::zero() };
+                let h_soft = mask_softness * h_ratio
+                    + (F::one() - mask_softness)
+                        * if h_val >= p_val { F::one() } else { F::zero() };
+                let p_soft = mask_softness * p_ratio
+                    + (F::one() - mask_softness) * if p_val > h_val { F::one() } else { F::zero() };
 
                 harmonic_mask[[freq_idx, time_idx]] = h_soft;
                 percussive_mask[[freq_idx, time_idx]] = p_soft;
@@ -316,7 +328,11 @@ mod tests {
         assert!(percussive.samples_per_channel() > 0);
         // Length should be close to original (within a reasonable range for STFT processing)
         let length_diff = (harmonic.samples_per_channel() as i32 - original_length as i32).abs();
-        assert!(length_diff < 1000, "Length difference too large: {}", length_diff);
+        assert!(
+            length_diff < 1000,
+            "Length difference too large: {}",
+            length_diff
+        );
         assert_eq!(harmonic.sample_rate, sine_audio.sample_rate);
         assert_eq!(percussive.sample_rate, sine_audio.sample_rate);
     }
@@ -346,15 +362,23 @@ mod tests {
 
     #[test]
     fn test_separation_masks() {
-        let harmonic_spec = Array2::from_shape_vec((2, 3), vec![
-            1.0, 2.0, 3.0,  // freq bin 0
-            0.5, 1.0, 1.5,  // freq bin 1
-        ]).unwrap();
+        let harmonic_spec = Array2::from_shape_vec(
+            (2, 3),
+            vec![
+                1.0, 2.0, 3.0, // freq bin 0
+                0.5, 1.0, 1.5, // freq bin 1
+            ],
+        )
+        .unwrap();
 
-        let percussive_spec = Array2::from_shape_vec((2, 3), vec![
-            0.5, 0.5, 0.5,  // freq bin 0
-            2.0, 1.5, 1.0,  // freq bin 1
-        ]).unwrap();
+        let percussive_spec = Array2::from_shape_vec(
+            (2, 3),
+            vec![
+                0.5, 0.5, 0.5, // freq bin 0
+                2.0, 1.5, 1.0, // freq bin 1
+            ],
+        )
+        .unwrap();
 
         // Test hard masking (softness = 0)
         let (h_mask, p_mask) = generate_separation_masks(&harmonic_spec, &percussive_spec, 0.0);

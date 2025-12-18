@@ -1,9 +1,8 @@
-use std::time::Duration;
 use audio_samples::{
-    AudioSampleResult, AudioTransforms, AudioEditing, AudioSamples,
-    operations::types::ChromaConfig,
-    sine_wave,
+    AudioEditing, AudioSampleResult, AudioSamples, AudioTransforms,
+    operations::types::ChromaConfig, sine_wave,
 };
+use std::time::Duration;
 
 pub fn main() -> AudioSampleResult<()> {
     println!("Chromagram Feature Demonstration");
@@ -20,7 +19,10 @@ pub fn main() -> AudioSampleResult<()> {
     // Mix the notes together using AudioSamples::mix
     let chord = AudioSamples::mix::<f64>(&[c_note, e_note, g_note], None)?;
 
-    println!("   - Audio length: {:.2}s", chord.samples_per_channel() as f64 / sample_rate_hz as f64);
+    println!(
+        "   - Audio length: {:.2}s",
+        chord.samples_per_channel() as f64 / sample_rate_hz as f64
+    );
     println!("   - Sample rate: {} Hz", sample_rate_hz);
 
     // Example 1: Basic chromagram with default settings
@@ -28,14 +30,19 @@ pub fn main() -> AudioSampleResult<()> {
     let config_default = ChromaConfig::<f64>::new();
     let chroma_default = chord.chromagram(&config_default)?;
     println!("   - Method: STFT");
-    println!("   - Shape: {:?} (chroma_bins × time_frames)", chroma_default.dim());
+    println!(
+        "   - Shape: {:?} (chroma_bins × time_frames)",
+        chroma_default.dim()
+    );
     println!("   - Window size: {} samples", config_default.window_size);
     println!("   - Hop size: {} samples", config_default.hop_size);
 
     // Display some chroma values for the first frame
     println!("   - First frame chroma values:");
     for i in 0..config_default.n_chroma {
-        let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        let note_names = [
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        ];
         println!("     {}: {:.3}", note_names[i], chroma_default[[i, 0]]);
     }
 
@@ -68,10 +75,10 @@ pub fn main() -> AudioSampleResult<()> {
     // Example 5: Custom configuration with builder pattern
     println!("\n6. Custom configuration using builder pattern:");
     let config_custom = ChromaConfig::<f64>::new()
-        .with_n_chroma(24)  // 24-tone equal temperament
+        .with_n_chroma(24) // 24-tone equal temperament
         .with_window_size(1024)
         .with_hop_size(512)
-        .with_norm(false);  // No normalization
+        .with_norm(false); // No normalization
 
     let chroma_custom = chord.chromagram(&config_custom)?;
     println!("   - Chroma bins: {}", config_custom.n_chroma);
@@ -90,9 +97,18 @@ pub fn main() -> AudioSampleResult<()> {
     println!("   │ Method      │ Time Frames │ Frequency    │");
     println!("   │             │             │ Resolution   │");
     println!("   ├─────────────┼─────────────┼──────────────┤");
-    println!("   │ STFT        │ {:>11} │ Linear       │", chroma_stft.dim().1);
-    println!("   │ CQT         │ {:>11} │ Logarithmic  │", chroma_cqt.dim().1);
-    println!("   │ Real-time   │ {:>11} │ Low latency  │", chroma_realtime.dim().1);
+    println!(
+        "   │ STFT        │ {:>11} │ Linear       │",
+        chroma_stft.dim().1
+    );
+    println!(
+        "   │ CQT         │ {:>11} │ Logarithmic  │",
+        chroma_cqt.dim().1
+    );
+    println!(
+        "   │ Real-time   │ {:>11} │ Low latency  │",
+        chroma_realtime.dim().1
+    );
     println!("   └─────────────┴─────────────┴──────────────┘");
 
     // Example 7: Testing with different musical content
@@ -108,7 +124,9 @@ pub fn main() -> AudioSampleResult<()> {
 
     println!("   - First frame chroma values:");
     for i in 0..12 {
-        let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        let note_names = [
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        ];
         println!("     {}: {:.3}", note_names[i], chroma_a_minor[[i, 0]]);
     }
 

@@ -1,8 +1,7 @@
 use std::time::Duration;
 
 use audio_samples::{
-    AudioSampleResult, AudioSamples, AudioStatistics, ConvertTo,
-    ToneComponent, sample_rate,
+    AudioSampleResult, AudioSamples, AudioStatistics, ConvertTo, ToneComponent, sample_rate,
 };
 use ndarray::array;
 

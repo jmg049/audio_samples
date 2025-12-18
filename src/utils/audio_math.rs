@@ -24,8 +24,8 @@
 //! ```
 
 use crate::{AudioSampleError, AudioSampleResult, ParameterError, RealFloat, to_precision};
-use std::collections::HashMap;
 use lazy_static::lazy_static;
+use std::collections::HashMap;
 
 // =============================================================================
 // FREQUENCY CONVERSIONS
@@ -147,7 +147,8 @@ pub fn mel_scale<F: RealFloat>(n_mels: usize, fmin: F, fmax: F) -> Vec<F> {
 /// let midi_c4 = hz_to_midi(261.63); // ≈ 60.0
 /// ```
 pub fn hz_to_midi<F: RealFloat>(freq_hz: F) -> F {
-    to_precision::<F, _>(69.0) + to_precision::<F, _>(12.0) * (freq_hz / to_precision::<F, _>(440.0)).log2()
+    to_precision::<F, _>(69.0)
+        + to_precision::<F, _>(12.0) * (freq_hz / to_precision::<F, _>(440.0)).log2()
 }
 
 /// Converts MIDI note number to frequency in Hz.
@@ -170,7 +171,9 @@ pub fn hz_to_midi<F: RealFloat>(freq_hz: F) -> F {
 /// let freq_c4 = midi_to_hz(60.0); // ≈ 261.63 Hz
 /// ```
 pub fn midi_to_hz<F: RealFloat>(midi_note: F) -> F {
-    to_precision::<F, _>(440.0) * to_precision::<F, _>(2.0).powf((midi_note - to_precision::<F, _>(69.0)) / to_precision::<F, _>(12.0))
+    to_precision::<F, _>(440.0)
+        * to_precision::<F, _>(2.0)
+            .powf((midi_note - to_precision::<F, _>(69.0)) / to_precision::<F, _>(12.0))
 }
 
 // =============================================================================
@@ -324,7 +327,10 @@ pub fn frames_to_time<F: RealFloat>(frames: usize, sample_rate: F, hop_size: usi
 /// let frame = time_to_frames(1.0, 44100.0, 512); // ≈ 86
 /// ```
 pub fn time_to_frames<F: RealFloat>(time_seconds: F, sample_rate: F, hop_size: usize) -> usize {
-    ((time_seconds * sample_rate) / to_precision::<F, _>(hop_size)).round().to_usize().unwrap_or(0)
+    ((time_seconds * sample_rate) / to_precision::<F, _>(hop_size))
+        .round()
+        .to_usize()
+        .unwrap_or(0)
 }
 
 /// Converts sample indices to time in seconds.
@@ -420,7 +426,7 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
     if note_name.len() < 2 {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "note_name",
-            "Note name must include octave number (e.g., 'A4')"
+            "Note name must include octave number (e.g., 'A4')",
         )));
     }
 
@@ -432,24 +438,25 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
     } else {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "note_name",
-            "Invalid note name format. Expected format: 'A4', 'C#3', 'Bb2'"
+            "Invalid note name format. Expected format: 'A4', 'C#3', 'Bb2'",
         )));
     };
 
     // Look up base note value
-    let base_note = NOTE_TO_MIDI_MAP.get(note_part)
-        .copied()
-        .ok_or_else(|| AudioSampleError::Parameter(ParameterError::invalid_value(
+    let base_note = NOTE_TO_MIDI_MAP.get(note_part).copied().ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
             "note_name",
-            format!("Unknown note: {}", note_part)
-        )))?;
+            format!("Unknown note: {}", note_part),
+        ))
+    })?;
 
     // Parse octave
-    let octave: i32 = octave_str.parse()
-        .map_err(|_| AudioSampleError::Parameter(ParameterError::invalid_value(
+    let octave: i32 = octave_str.parse().map_err(|_| {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
             "note_name",
-            format!("Invalid octave: {}", octave_str)
-        )))?;
+            format!("Invalid octave: {}", octave_str),
+        ))
+    })?;
 
     // Calculate MIDI note number
     let midi_note = (octave + 1) * 12 + base_note as i32;
@@ -458,7 +465,10 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
     if !(0..=127).contains(&midi_note) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "note_name",
-            format!("Note {} (MIDI {}) is outside valid MIDI range 0-127", note_name, midi_note)
+            format!(
+                "Note {} (MIDI {}) is outside valid MIDI range 0-127",
+                note_name, midi_note
+            ),
         )));
     }
 
@@ -488,7 +498,7 @@ pub fn midi_to_note(midi_note: u8) -> AudioSampleResult<String> {
     if midi_note > 127 {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "midi_note",
-            "MIDI note must be in range 0-127"
+            "MIDI note must be in range 0-127",
         )));
     }
 
@@ -542,7 +552,7 @@ pub fn frequency_to_note<F: RealFloat>(freq_hz: F) -> AudioSampleResult<(String,
     if freq_hz <= F::zero() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "freq_hz",
-            "Frequency must be positive"
+            "Frequency must be positive",
         )));
     }
 
@@ -664,9 +674,7 @@ pub fn mel_frequencies<F: RealFloat>(n_mels: usize, fmin: F, fmax: F) -> Vec<F> 
     let mel_points = linspace(mel_min, mel_max, n_mels);
 
     // Convert back to Hz
-    mel_points.into_iter()
-        .map(mel_to_hz)
-        .collect()
+    mel_points.into_iter().map(mel_to_hz).collect()
 }
 
 /// Generates linearly spaced values.
@@ -808,7 +816,7 @@ mod tests {
         let freqs = fft_frequencies(1024, 44100.0);
         assert_eq!(freqs.len(), 513); // 1024/2 + 1
         assert_eq!(freqs[0], 0.0); // DC
-        assert!((freqs[freqs.len()-1] - 22050.0f64).abs() < 0.1f64); // Nyquist
+        assert!((freqs[freqs.len() - 1] - 22050.0f64).abs() < 0.1f64); // Nyquist
 
         // Check frequency resolution
         let freq_res = freqs[1] - freqs[0];
@@ -821,12 +829,12 @@ mod tests {
         let mel_freqs = mel_frequencies(10, 0.0, 8000.0);
         assert_eq!(mel_freqs.len(), 10);
         assert_eq!(mel_freqs[0], 0.0);
-        assert!((mel_freqs[mel_freqs.len()-1] - 8000.0f64).abs() < 0.1f64);
+        assert!((mel_freqs[mel_freqs.len() - 1] - 8000.0f64).abs() < 0.1f64);
 
         // Check that they're properly spaced in mel scale
         let mel_vals: Vec<f64> = mel_freqs.iter().map(|&f| hz_to_mel(f)).collect();
         for i in 1..mel_vals.len() {
-            let diff = mel_vals[i] - mel_vals[i-1];
+            let diff = mel_vals[i] - mel_vals[i - 1];
             let expected_diff = (hz_to_mel(8000.0) - hz_to_mel(0.0)) / 9.0;
             assert!((diff - expected_diff).abs() < 1.0f64);
         }
