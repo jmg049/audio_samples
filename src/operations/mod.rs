@@ -9,8 +9,8 @@
 //! - [`traits`] - Core trait definitions
 //! - [`statistics`] - Statistical analysis operations
 //! - [`processing`] - Signal processing operations
-//! - [`transforms`] - FFT / spectral analysis (requires `spectral-analysis`)
-//! - [`fft_backends`] - FFT backend selection (requires `fft`)
+//! - `transforms` - FFT / spectral analysis (requires `spectral-analysis`)
+//! - `fft_backends` - FFT backend selection (requires `fft`)
 //! - [`editing`] - Time-domain editing operations
 //! - [`channels`] - Channel manipulation operations
 //! - [`types`] - Supporting types and enums
