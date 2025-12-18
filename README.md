@@ -47,9 +47,7 @@ Other crates that build on this foundation:
 - `html_view` for lightweight visualisation and inspection, generating
   self-contained HTML outputs suitable for analysis and reporting
   
-By separating representation from I/O, playback, and visualisation,
-AudioRs remains modular while enforcing a single, consistent audio
-model throughout the stack.
+**NOTE** The crate is still a WIP so some features particularly plotting and serialization are not fully complete.
 
 ---
 
@@ -143,52 +141,6 @@ fn main() {
 }
 ```
 
-## Why Use audio_samples?
-
-AudioSamples exists to make audio semantics explicit and enforceable.
-
-In many audio libraries, audio data is represented as a numeric buffer
-with metadata tracked separately or implicitly. Sample rate, channel
-layout, amplitude domain, and sample representation often exist outside
-the type system and are maintained by convention. As a result,
-mismatches between representations can propagate silently through
-pipelines, particularly when converting between integer PCM and
-floating-point formats or combining signals from different sources.
-
-AudioSamples addresses this by treating audio as a structured object.
-An `AudioSamples<'a, T>` value couples sample data with its sample rate
-and channel layout, and operations on audio explicitly preserve or
-update these invariants. Conversions between sample formats are defined
-in terms of semantic transformations rather than raw casts, ensuring
-that changes in numerical representation are intentional and
-well-defined.
-
-This design supports workflows where correctness matters: research
-pipelines, long-lived systems code, and multi-stage audio processing
-where buffers pass through several components. Rather than relying on
-discipline or external documentation, AudioSamples encodes audio
-assumptions directly in the API.
-
-AudioSamples is the core data and processing layer of the broader
-audio related crates. It defines the canonical audio object and the
-operations that act upon it.
-
-Other crates in the ecosystem build on this foundation:
-
-- `audio_samples_io` for decoding and encoding audio containers into typed
-  audio objects
-- `audio_samples_playback` for device-level output
-- `audio_samples_python` for Python bindings, enabling AudioSamples to act as a
-  type-safe backend for Python workflows
-- `html_view` for lightweight visualisation and inspection, generating
-  self-contained HTML outputs suitable for analysis and reporting
-
-By separating representation from I/O, playback, and visualisation,
-AudioRs remains modular while enforcing a single, consistent audio
-model throughout the stack.
-
----
-
 ## <a name="features">Features</a>
 
 ### Default features
@@ -251,7 +203,7 @@ crates.
 
 ---
 
-## AudioRs — Companion Crates
+## Companion Crates
 
 ### [`audio_samples_io`](https://github.com/jmg049/audio_samples_io)
 
@@ -287,7 +239,6 @@ i24 provides a 24-bit signed integer type for Rust, filling the gap between i16 
 
 MIT License
 
----
 
 ## Contributing
 

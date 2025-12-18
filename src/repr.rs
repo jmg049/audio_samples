@@ -4091,7 +4091,7 @@ impl<'a, T: AudioSample> TryFrom<(u32, u32, Vec<T>)> for AudioSamples<'a, T> {
     }
 }
 
-/// Create mono AudioSamples from (Vec<T>, sample_rate) tuple.
+/// Create mono AudioSamples from (`Vec<T>`, sample_rate) tuple.
 ///
 /// # Examples
 /// ```
@@ -4122,7 +4122,7 @@ impl<T: AudioSample> TryFrom<(Vec<T>, u32)> for AudioSamples<'static, T> {
     }
 }
 
-/// Create mono AudioSamples from (&[T], sample_rate) tuple (creates owned copy).
+/// Create mono AudioSamples from (`&[T]`, sample_rate) tuple (creates owned copy).
 ///
 /// # Examples
 /// ```
@@ -4154,7 +4154,7 @@ impl<T: AudioSample> TryFrom<(&[T], u32)> for AudioSamples<'static, T> {
     }
 }
 
-/// Create multi-channel AudioSamples from (Vec<T>, channels, sample_rate) tuple.
+/// Create multi-channel AudioSamples from (`Vec<T>`, channels, sample_rate) tuple.
 ///
 /// # Examples
 /// ```

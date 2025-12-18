@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "0.10.4"
+version = "0.10.5"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -60,7 +60,6 @@ num_cpus = { version = "1.16", optional = true }
 wide = { version = "0.7", optional = true }
 indicatif = { version = "0.18", optional = true }
 paste = "1.0.15"
-src = "0.0.6"
 
 [features]
 # Minimal core (no heavy dependencies)

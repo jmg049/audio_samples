@@ -13,7 +13,7 @@
 //!
 //! When the `fft` feature is enabled, several frequency-domain analyses
 //! (e.g. spectral centroid and rolloff) become available, using efficient FFT
-//! backends (via [`UnifiedFftBackend`]) to accelerate large transforms. See the `mkl` feature also.
+//! backends (via `UnifiedFftBackend`) to accelerate large transforms. See the `mkl` feature also.
 //!
 //! ## Available Operations
 //!
@@ -78,7 +78,7 @@
 //! Most operations return simple numeric results. However, some methods that
 //! require non-empty data (e.g. `variance`, `autocorrelation`, or
 //! `spectral_rolloff`) return a [`Result`], allowing graceful handling of
-//! empty or invalid inputs. In such cases, an [`AudioSampleError::ProcessingError`]
+//! empty or invalid inputs. In such cases, an [`crate::AudioSampleError::Processing`]
 //! is returned with a descriptive message.
 //!
 //! ## Implementation Details
@@ -100,11 +100,10 @@
 //!   to underlying sample buffers.
 //! - [`AudioStatistics`]: The trait defining
 //!   all available statistical operations.
-//! - [`UnifiedFftBackend`]: Unified FFT
+//! - `UnifiedFftBackend`: Unified FFT
 //!   abstraction for optimised spectral computation.
 //!
 //! [`AudioStatistics`]: crate::operations::traits::AudioStatistics
-//! [`UnifiedFftBackend`]: crate::operations::fft_backends::UnifiedFftBackend
 
 #[cfg(feature = "fft")]
 use crate::operations::fft_backends::{FftBackendImpl, UnifiedFftBackend};
