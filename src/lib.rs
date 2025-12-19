@@ -144,9 +144,8 @@
 //! let max = audio.max_sample();
 //! let mean = audio.mean();
 //!
-//! // More complex statistics (return Result)
-//! let rms = audio.rms().unwrap();
-//! let variance = audio.variance().unwrap();
+//! let rms = audio.rms();
+//! let variance = audio.variance();
 //! let zero_crossings = audio.zero_crossings();
 //! ```
 //!
@@ -175,8 +174,8 @@
 //!
 //! // Convert between sample types
 //! let audio_f32 = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], 44100);
-//! let audio_i16 = audio_f32.as_type::<i16>().unwrap();
-//! let audio_f64 = audio_f32.as_type::<f64>().unwrap();
+//! let audio_i16 = audio_f32.to_format::<i16>();
+//! let audio_f64 = audio_f32.to_format::<f64>();
 //! ```
 //!
 //! ### Iterating Over Audio Data
@@ -357,15 +356,47 @@ pub use crate::utils::{
     comparison, detection,
     generation::{
         ToneComponent, chirp, compound_tone, cosine_wave, impulse, multichannel_compound_tone,
-        sawtooth_wave, silence, sine_wave, square_wave, stereo_chirp, stereo_silence,
-        stereo_sine_wave, triangle_wave,
+        sawtooth_wave, silence, sine_wave, square_wave, triangle_wave,
+        // Convenience functions - precision-specific wrappers
+        am_signal_f32, am_signal_f64, chirp_f32, chirp_f64, compound_tone_f32, compound_tone_f64,
+        cosine_f32, cosine_f64, impulse_f32, impulse_f64, sawtooth_f32, sawtooth_f64, silence_f32,
+        silence_f64, sine_f32, sine_f64, square_f32, square_f64, triangle_f32, triangle_f64,
     },
     samples_to_seconds, seconds_to_samples,
 };
 
 // Re-export noise generation functions with feature gating
 #[cfg(feature = "random-generation")]
-pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
+pub use crate::utils::generation::{
+    brown_noise, brown_noise_f32, brown_noise_f64, pink_noise, pink_noise_f32, pink_noise_f64,
+    white_noise, white_noise_f32, white_noise_f64,
+};
+
+// Re-export stereo generation functions with feature gating
+#[cfg(feature = "channels")]
+pub use crate::utils::generation::{
+    stereo_am_signal, stereo_chirp, stereo_compound_tone, stereo_cosine_wave, stereo_impulse,
+    stereo_sawtooth_wave, stereo_silence, stereo_sine_wave, stereo_square_wave,
+    stereo_triangle_wave,
+    // Stereo convenience functions - precision-specific wrappers
+    stereo_am_signal_f32, stereo_am_signal_f64, stereo_chirp_f32, stereo_chirp_f64,
+    stereo_compound_tone_f32, stereo_compound_tone_f64, stereo_cosine_f32, stereo_cosine_f64,
+    stereo_impulse_f32, stereo_impulse_f64, stereo_sawtooth_f32, stereo_sawtooth_f64,
+    stereo_silence_f32, stereo_silence_f64, stereo_sine_f32, stereo_sine_f64, stereo_square_f32,
+    stereo_square_f64, stereo_triangle_f32, stereo_triangle_f64,
+    // Independent L/R channel functions
+    stereo_dual_sawtooth_f32, stereo_dual_sawtooth_f64, stereo_dual_sine_f32,
+    stereo_dual_sine_f64, stereo_dual_square_f32, stereo_dual_square_f64,
+    stereo_dual_triangle_f32, stereo_dual_triangle_f64, stereo_from_lr,
+};
+
+// Re-export stereo noise generation functions with feature gating
+#[cfg(all(feature = "channels", feature = "random-generation"))]
+pub use crate::utils::generation::{
+    stereo_brown_noise, stereo_brown_noise_f32, stereo_brown_noise_f64, stereo_pink_noise,
+    stereo_pink_noise_f32, stereo_pink_noise_f64, stereo_white_noise, stereo_white_noise_f32,
+    stereo_white_noise_f64,
+};
 
 pub use i24::{I24, PackedStruct}; // Re-export I24 type that has the AudioSample implementation
 

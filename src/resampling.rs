@@ -20,7 +20,7 @@ fn block_size(quality: ResamplingQuality, input_len: usize) -> usize {
     input_len.min(target)
 }
 
-/// Resamples audio to a new sample rate using high-quality algorithms.
+/// Resamples audio to a new sample rate using rubato.
 ///
 /// This function provides a convenient interface to rubato's resampling capabilities
 /// with different quality/performance trade-offs.
