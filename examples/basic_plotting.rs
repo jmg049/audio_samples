@@ -1,9 +1,8 @@
-use std::time::Duration;
-
 use audio_samples::{
     AudioSampleResult, AudioSamples,
     operations::{AudioPlotBuilders, PlotComposer},
 };
+use std::time::Duration;
 
 pub fn main() -> AudioSampleResult<()> {
     let note_a: AudioSamples<'_, f32> =

@@ -235,6 +235,7 @@ where
     /// Computes the inverse FFT from frequency domain back to time domain.
     ///
     /// Reconstructs time-domain signal from complex frequency spectrum.
+    /// Expects spectrum from real FFT (positive frequency bins only: n/2 + 1).
     fn ifft<F>(&self, spectrum: &Array2<Complex<F>>) -> AudioSampleResult<Self>
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
@@ -248,29 +249,44 @@ where
             )));
         }
 
-        let num_ffts = spectrum.nrows();
+        let num_channels = spectrum.nrows();
+        let num_positive_freqs = spectrum.ncols();
 
-        // run inverse FFT for each row (channel)
+        // Real FFT produces n/2 + 1 positive frequency bins
+        // Reconstruct original signal length: n = (num_positive_freqs - 1) * 2
+        let signal_length = (num_positive_freqs - 1) * 2;
 
-        let mut channels = Vec::with_capacity(num_ffts);
-        let buf_size = spectrum.ncols();
-        for ch in 0..num_ffts {
-            let mut buffer: Vec<Complex<F>> = spectrum.row(ch).to_vec();
+        // Run inverse real FFT for each row (channel)
+        let mut channels = Vec::with_capacity(num_channels);
 
-            // Create inverse FFT planner and plan
-            let mut planner = FftPlanner::new();
-            let ifft = planner.plan_fft_inverse(buffer.len());
+        for ch in 0..num_channels {
+            let mut complex_input: Vec<Complex<F>> = spectrum.row(ch).to_vec();
+            let mut real_output = vec![F::zero(); signal_length];
 
-            // Execute inverse FFT
-            ifft.process(&mut buffer);
+            // Create real inverse FFT planner and plan
+            let mut real_planner = realfft::RealFftPlanner::<F>::new();
+            let c2r = real_planner.plan_fft_inverse(signal_length);
 
-            // Extract real parts and normalize by length
-            let len = to_precision::<F, _>(buffer.len() as f64);
-            let mut real_samples: Vec<T> = Vec::with_capacity(buffer.len());
-            for c in buffer {
-                let real_val = c.re / len; // Normalize by length
-                real_samples.push(real_val.convert_to());
+            // Execute real inverse FFT
+            c2r.process(&mut complex_input, &mut real_output)
+                .map_err(|_| {
+                    AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "parameter",
+                        "Real inverse FFT processing failed",
+                    ))
+                })?;
+
+            // Normalize by signal length (realfft doesn't normalize automatically)
+            let norm_factor = to_precision::<F, _>(signal_length as f64);
+            for sample in &mut real_output {
+                *sample /= norm_factor;
             }
+
+            // Convert to output sample type
+            let real_samples: Vec<T> = real_output
+                .into_iter()
+                .map(|val| val.convert_to())
+                .collect();
 
             channels.push(real_samples);
         }
@@ -281,7 +297,7 @@ where
                 Ok(AudioSamples::new_mono(arr, self.sample_rate()))
             }
             n => {
-                let mut multi_arr = Array2::zeros((n, buf_size));
+                let mut multi_arr = Array2::zeros((n, signal_length));
                 for (ch, samples) in channels.into_iter().enumerate() {
                     for (i, &s) in samples.iter().enumerate() {
                         multi_arr[[ch, i]] = s;
@@ -293,26 +309,6 @@ where
                 ))
             }
         }
-
-        // // Create inverse FFT planner and plan
-        // let mut planner = FftPlanner::new();
-        // let ifft = planner.plan_fft_inverse(buffer.len());
-
-        // // Execute inverse FFT
-        // ifft.process(&mut buffer);
-
-        // // Extract real parts and normalize by length
-        // let len = to_precision::<F, _>(buffer.len() as f64);
-        // let mut real_samples: Vec<T> = Vec::with_capacity(buffer.len());
-        // for c in buffer {
-        //     let real_val = c.re / len; // Normalize by length
-        //     real_samples.push(real_val.convert_to());
-        // }
-
-        // // Create new AudioSamples with same metadata as original
-        // let arr = Array1::from_vec(real_samples);
-        // let owned = AudioSamples::new_mono(arr, self.sample_rate());
-        // Ok(owned)
     }
 
     /// Computes the Short-Time Fourier Transform (STFT).
@@ -748,8 +744,7 @@ where
         let mel_filter_bank =
             generate_mel_filter_bank(n_mels, window_size, sample_rate, fmin, fmax);
 
-        // Step 3: Apply mel filters to power spectrogram
-        // Return raw mel band energies (power) - non-negative values.
+        // Step 3: Apply mel filters to power spectrogram and convert to log scale (dB)
         let mut mel_spectrogram = Array2::zeros((n_mels, time_frames));
 
         for mel_idx in 0..n_mels {
@@ -767,8 +762,14 @@ where
                     mel_energy += filter_weight * power;
                 }
 
-                // Store non-negative mel energy (power)
-                mel_spectrogram[[mel_idx, time_idx]] = mel_energy;
+                // Convert to log scale (dB) with epsilon to prevent log(0)
+                let log_mel_energy = if mel_energy > to_precision::<F, _>(1e-10) {
+                    to_precision::<F, _>(10.0) * mel_energy.log10()
+                } else {
+                    to_precision::<F, _>(-100.0) // Floor at -100 dB
+                };
+
+                mel_spectrogram[[mel_idx, time_idx]] = log_mel_energy;
             }
         }
 
@@ -2371,7 +2372,8 @@ mod tests {
         let audio = AudioSamples::new_mono(Array1::from_vec(samples).into(), sample_rate!(44100));
 
         let fft_result: Array2<Complex<f32>> = audio.fft().unwrap();
-        assert_eq!(fft_result.len(), 1024);
+        // Real FFT returns only positive frequency bins: n/2 + 1
+        assert_eq!(fft_result.len(), 1024 / 2 + 1);
 
         // Check that we get complex numbers
         assert!(fft_result.iter().any(|c| c.im.abs() > 1e-10));
@@ -2401,7 +2403,7 @@ mod tests {
 
                     // Use relative tolerance for larger values, absolute for very small values
                     let tolerance = if max_val > 1e-6 {
-                        max_val * 2e-4 // 0.02% relative error (accounts for FFT numerical precision)
+                        max_val * 5e-4 // 0.05% relative error (accounts for real FFT numerical precision)
                     } else {
                         1e-6 // Absolute tolerance for very small values
                     };
@@ -2546,7 +2548,8 @@ mod tests {
         let audio = AudioSamples::new_multi_channel(stereo_data.into(), sample_rate!(44100));
 
         let fft_result = audio.fft::<f32>().unwrap();
-        assert_eq!(fft_result.dim(), (2, 1024));
+        // Real FFT returns only positive frequency bins: n/2 + 1
+        assert_eq!(fft_result.dim(), (2, 1024 / 2 + 1));
     }
 
     #[test]
