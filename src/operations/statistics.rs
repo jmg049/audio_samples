@@ -63,7 +63,7 @@
 //! let sample_rate = 44100;
 //! let freq = 1000.0;
 //! let duration = 1.0; // 1 second
-//! let audio: AudioSamples<f32> = sine_wave(freq, duration, sample_rate, 0.5).unwrap();
+//! let audio = sine_wave::<f32, f32>(freq, duration, sample_rate, 0.5);
 //!
 //! // Compute spectral descriptors (requires "fft" feature)
 //! let centroid = audio.spectral_centroid().unwrap();
@@ -113,6 +113,9 @@ use crate::{
     AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConversionError, ConvertTo,
     I24, ParameterError, RealFloat, to_precision,
 };
+
+#[cfg(feature = "fft")]
+use crate::{AudioSampleError, ProcessingError};
 
 use ndarray::{Array1, Axis};
 #[cfg(feature = "fft")]

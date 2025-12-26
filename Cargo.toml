@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "0.10.5"
+version = "0.10.6"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -27,7 +27,7 @@ tracing = "0.1.41"
 num-complex = "0.4"
 i24 = {version = "2.2.7", features = ["alloc","num-cast", "ndarray" ,"std", "serde"]}
 
-serde = "1.0.219"
+serde = { version = "1.0.219", features = ["derive"] }
 lazy_static = "1.4"
 num-format = { version = "0.4.4", optional = true }
 rand = { version = "0.9.2", optional = true }
@@ -137,77 +137,3 @@ clap = { version = "4.5.53", features = ["derive"] }
 dtmf_tones = "1.0.1"
 rand = "0.9"
 criterion = { version = "0.8.1", features = ["html_reports"] }
-
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }
-
-[[bench]]
-name = "beats"
-path = "benches/beats.rs"
-harness = false
-
-[[bench]]
-name = "channels"
-path = "benches/channels.rs"
-harness = false
-
-[[bench]]
-name = "conversion"
-path = "benches/conversion.rs"
-harness = false
-
-[[bench]]
-name = "detection"
-path = "benches/detection.rs"
-harness = false
-
-[[bench]]
-name = "editing"
-path = "benches/editing.rs"
-harness = false
-
-[[bench]]
-name = "iir_filtering"
-path = "benches/iir_filtering.rs"
-harness = false
-
-[[bench]]
-name = "onset"
-path = "benches/onset.rs"
-harness = false
-
-[[bench]]
-name = "parametric_eq"
-path = "benches/parametric_eq.rs"
-harness = false
-
-[[bench]]
-name = "processing"
-path = "benches/processing.rs"
-harness = false
-
-[[bench]]
-name = "resampling"
-path = "benches/resampling.rs"
-harness = false
-
-[[bench]]
-name = "serialization"
-path = "benches/serialization.rs"
-harness = false
-
-[[bench]]
-name = "statistics"
-path = "benches/statistics.rs"
-harness = false
-
-[[bench]]
-name = "transforms"
-path = "benches/transforms.rs"
-harness = false
-
-[[bench]]
-name = "vad"
-path = "benches/vad.rs"
-harness = false
