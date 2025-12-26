@@ -194,12 +194,11 @@ A range of examples is included in the repository.
 
 Additional demos include:
 
-- DTMF encoder and decoder
+- [DTMF encoder and decoder](https://github.com/jmg049/dtmf-demo)
 - Basic synthesis examples
 - Audio inspection utilities
 
-More advanced I/O and playback examples are provided in the companion
-crates.
+These additional demos are located in their own repos due to them depending on `audio_samples` and `audio_samples_io`
 
 ---
 
