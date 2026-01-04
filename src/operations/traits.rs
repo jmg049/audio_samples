@@ -461,6 +461,26 @@ where
     where
         F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
         T: ConvertTo<F>;
+
+    /// Computes the Short-Time Fourier Transform (STFT).
+    ///
+    /// Returns a tuple containing a 2D array where each column represents an FFT frame at a specific time and a vector of frequency bins.
+    /// This provides both time and frequency information simultaneously.
+    ///
+    /// # Arguments
+    /// * `window_size` - Size of each analysis window in samples
+    /// * `hop_size` - Number of samples between successive windows
+    /// * `window_type` - Window function to apply to each frame
+    fn stft_with_freqs<F>(
+        &self,
+        window_size: usize,
+        hop_size: usize,
+        window_type: WindowType<F>,
+    ) -> AudioSampleResult<(Array2<Complex<F>>, Vec<F>)>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>;
+
     /// Computes the inverse STFT to reconstruct time domain signal.
     ///
     /// Reconstructs a time-domain signal from its STFT representation.

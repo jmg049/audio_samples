@@ -450,6 +450,28 @@ where
         Ok(stft_matrix)
     }
 
+    /// Computes the STFT and returns frequency bins in Hz.
+    /// Calls stft() internally and computes frequency bins.
+    fn stft_with_freqs<F>(
+        &self,
+        window_size: usize,
+        hop_size: usize,
+        window_type: WindowType<F>,
+    ) -> AudioSampleResult<(Array2<Complex<F>>, Vec<F>)>
+    where
+        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
+        T: ConvertTo<F>,
+    {
+        let stft_matrix = self.stft(window_size, hop_size, window_type)?;
+        let freqs = (0..(window_size / 2 + 1))
+            .map(|i| {
+                to_precision::<F, _>(i) * to_precision::<F, _>(self.sample_rate.get())
+                    / to_precision::<F, _>(window_size as f64)
+            })
+            .collect::<Vec<_>>();
+        Ok((stft_matrix, freqs))
+    }
+
     /// Computes the inverse STFT to reconstruct time domain signal.
     ///
     /// Reconstructs time-domain signal from STFT representation using overlap-add.
