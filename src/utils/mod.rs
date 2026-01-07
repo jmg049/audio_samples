@@ -49,10 +49,13 @@ pub mod comparison;
 pub mod detection;
 pub mod generation;
 
+pub use audio_math::*;
+pub use comparison::*;
+pub use detection::*;
+pub use generation::*;
+
 // Re-export utility modules (not individual functions)
 // Modules are already public above, no need for additional re-exports
-
-use crate::{RealFloat, to_precision};
 
 /// Helper function to convert seconds to samples
 /// Converts time in seconds to number of samples at given sample rate
@@ -67,15 +70,30 @@ use crate::{RealFloat, to_precision};
 /// # Panics
 /// Panics if the computed sample count cannot be converted to `usize`,
 /// typically when the result would overflow or is infinite/NaN.
-pub fn seconds_to_samples<F: RealFloat>(seconds: F, sample_rate: impl Into<u32>) -> usize {
+#[inline]
+pub fn seconds_to_samples(seconds: f64, sample_rate: impl Into<u32>) -> usize {
     let rate: u32 = sample_rate.into();
-    (seconds * to_precision::<F, _>(rate))
-        .to_usize()
-        .expect("Invalid seconds or sample_rate")
+    (seconds * f64::from(rate)) as usize
 }
 
 /// Converts a number of samples to duration in seconds.
-pub fn samples_to_seconds<F: RealFloat>(num_samples: usize, sample_rate: impl Into<u32>) -> F {
+#[inline]
+pub fn samples_to_seconds(num_samples: usize, sample_rate: impl Into<u32>) -> f64 {
     let rate: u32 = sample_rate.into();
-    to_precision::<F, _>(num_samples) / to_precision::<F, _>(rate)
+    num_samples as f64 / f64::from(rate)
+}
+
+#[allow(dead_code)]
+pub(crate) fn min_max_single_pass<A: AsRef<[f64]>>(data: A) -> (f64, f64) {
+    let mut min_val = f64::INFINITY;
+    let mut max_val = f64::NEG_INFINITY;
+    for &val in data.as_ref() {
+        if val < min_val {
+            min_val = val;
+        }
+        if val > max_val {
+            max_val = val;
+        }
+    }
+    (min_val, max_val)
 }

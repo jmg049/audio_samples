@@ -15,7 +15,7 @@ The type system prevents common audio processing errors like mixing incompatible
 The library leverages `ndarray`'s view system to enable zero-allocation access patterns wherever possible.
 Operations prefer in-place modifications and views over copying data.
 The library adds several wrappers, ``MonoRepr/MultiRepr`` and ``MonoData/MultiData``, around `ndarray` arrays to facilitate owned and borrowed data automatically.
- The end user should never have to deal with these wrappers.
+The end user should never have to deal with these wrappers.
 The top layer of the wrappers is the ``AudioSamples<'_, T: AudioSample>`` struct.
 This is the entry point for a user and the impl blocks for ``AudioSamples`` connect to the right backend wrapper.
 
@@ -35,9 +35,9 @@ The library uses cargo features extensively to keep dependencies minimal, allowi
 
 ## Building Blocks
 
-### AudioSample (./traits.rs)
+### AudioSample/StandardSample (./traits.rs)
 
-The `AudioSample` trait is the foundation of the entire type system.
+The `AudioSample` and `StandardSample` traits are the foundation of the entire type system.
 It defines the interface for all supported audio sample formats:
 
 **Supported Types:**
@@ -56,15 +56,17 @@ It defines the interface for all supported audio sample formats:
 - Serialization support (`Serialize`, `Deserialize`)
 - Constants for range information (`MAX`, `MIN`, `BITS`)
 
+The `StandardSample` trait extends the `AudioSample` trait with conversion functionality provided via the `ConvertTo` and `ConvertFrom` traits.
+
 **API Contracts:**
 
 - All sample types must provide consistent arithmetic behavior
 - Byte serialization must be safe and deterministic
 - Range constants must accurately represent the format's dynamic range
 
-### ConvertTo (./traits.rs)
+### ConvertTo/ConvertFrom (./traits.rs)
 
-The `ConvertTo<T>` trait provides audio-aware conversions between different sample formats with proper scaling:
+The `ConvertTo<T>` and `ConvertFrom<T>` trait provides audio-aware conversions between different sample formats with proper scaling:
 
 **Conversion Behavior:**
 
@@ -79,6 +81,7 @@ The `ConvertTo<T>` trait provides audio-aware conversions between different samp
 - Uses macro-generated implementations for consistency and to cut down on manual code.
 - Maintains mathematical precision across format boundaries
 - Handles edge cases like range overflows gracefully
+- The two traits provide functionality like `Into` and `From` in the standard library.
 
 **API Contracts:**
 
@@ -113,12 +116,12 @@ These traits **DO NOT** perform any audio-specific scaling/conversions.
 
 If something like this fails then things are bad.
 
-### AudioSamples<'_, T: AudioSample> (repr.rs)
+### AudioSamples<'_, T: StandardSample> (repr.rs)
 
 The main data container that combines audio samples with essential metadata:
 
 ```rust
-pub struct AudioSamples<'a, T: AudioSample> {
+pub struct AudioSamples<'a, T: StandardSample> {
     pub data: AudioData<'a, T>,
     pub sample_rate: u32,
     pub layout: ChannelLayout,
@@ -127,7 +130,7 @@ pub struct AudioSamples<'a, T: AudioSample> {
 
 **Key Features:**
 
-- Generic over any `AudioSample` type
+- Generic over any `StandardSample` type
 - Lifetime parameter `'a` enables zero-copy views
 - Always includes sample rate and channel layout
 - Provides uniform interface for mono and multi-channel audio
@@ -179,7 +182,7 @@ Implements the `AudioTypeConversion` trait for safe type transformations on ``Au
 - `to_format<O>()`: Borrows original, returns new type
 - `to_type<O>()`: Consumes original, returns new type
 - Convenience methods: `as_f32()`, `as_i16()`, `as_i24()`, etc.
-- Uses `ConvertTo` trait for audio-aware scaling
+- Uses `ConvertTo` and `ConvertFrom` traits for audio-aware scaling
 
 **Out-of-Domain Conversions:**
 
@@ -200,7 +203,7 @@ Provides supporting functionality organized by purpose:
 - `generation.rs`: Signal generation (sine waves, noise, etc.)
 - `detection.rs`: Feature detection algorithms
 - `comparison.rs`: Audio comparison and similarity metrics
-
+- `audio_math.rs`: Audio-domain mathematical utilities and canonical unit conversions.
 In future, this may become a more general ``algorithms`` module.
 
 **Design Patterns:**
@@ -241,6 +244,23 @@ Consistency in the error messages would be nice and maybe split things into more
 - `AudioSampleResult<T>` type alias for consistency
 
 ## Trait Extensions
+
+Available:
+
+- AudioStatistics
+- AudioVoiceActivityDetection
+- AudioProcessing
+- AudioTransforms
+- AudioPitchAnalysis
+- AudioIirFiltering
+- AudioParametricEq
+- AudioDynamicRange
+- AudioEditing
+- AudioChannelOps
+- AudioPlottingUtils
+- AudioSamplesSerialise
+- AudioDecomposition
+- AudioTypeConversion
 
 ### The `operations` Module (./operations)
 
@@ -369,6 +389,7 @@ let combined = audio1.concatenate(&audio2)?;   // Join audio
 - `pad()`: Add silence or repeat edge samples
 - `reverse()`: Reverse audio timeline
 - `concatenate()`: Join multiple audio clips
+- `stack()`: Stack audio samples on top of each other
 - `repeat()`: Loop audio content
 
 **API Contracts**:
@@ -401,7 +422,12 @@ allocates a new ``AudioSamples`` for the extracted channel
 Does not allocate a new ``AudioSamples`` for the extracted channel, it just borrows the data.
 - `mix_channels()`: Custom channel mixing
 - `swap_channels()`: Channel reordering
-
+- `duplicate_to_channels(N)` - Duplicates mono audio to N channels
+- `pan(x)` - Applies pan control to stereo audio
+- `balance(x)` - Adjusts balance between left and right channels
+- `apply_to_channel(i, f)` - Apply a function to a specific channel
+- `interleave_channels(c)` - Interleave multiple channels into one audio sample
+- `deinterleave_channels()` - Deinterleave audio into separate channel samples
 **Conversion Methods**:
 
 - **Mono**: `Average`, `Left`, `Right`, `Sum`, `WeightedSum`
@@ -425,6 +451,7 @@ let shaped = audio.highpass_filter(cutoff_hz, q_factor)?;
 - `lowpass_filter()`, `highpass_filter()`: Basic frequency separation
 - `bandpass_filter()`, `bandstop_filter()`: Band-limited filtering
 - `butterworth_filter()`: Smooth response filters
+- `frequency_response()`: Get the frequency response of the current filter
 
 #### `AudioParametricEq` (parametric_eq.rs)
 
@@ -492,7 +519,6 @@ let resampled = audio.resample(48000, ResamplingQuality::VeryHigh)?;
 - `Fast`: Quick conversion with acceptable quality
 - `Medium`: Balanced quality and performance
 - `High`: High-quality anti-aliasing
-- `VeryHigh`: Maximum quality for critical applications
 
 ### Plotting (./operations/plotting)
 

@@ -17,39 +17,317 @@
 //! - Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering"
 //! - Müller, M. (2015). "Fundamentals of Music Processing", Section 8.4
 
+use std::num::{NonZeroU32, NonZeroUsize};
+
 use crate::operations::traits::{AudioDecomposition, AudioTransforms};
-use crate::operations::types::{HpssConfig, WindowType};
+use crate::traits::StandardSample;
 use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, ParameterError, RealFloat,
+    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
 };
 
 use ndarray::{Array2, s};
-use rustfft::{FftNum, num_complex::Complex};
+use num_complex::Complex;
+use spectrograms::{StftParams, StftParamsBuilder, istft as spectrograms_istft};
 
-impl<T: AudioSample> AudioDecomposition<T> for AudioSamples<'_, T>
+/// Configuration for Harmonic/Percussive Source Separation (HPSS).
+///
+/// HPSS separates audio into harmonic and percussive components using
+/// STFT magnitude median filtering. Harmonic components are enhanced
+/// by median filtering along the time axis, while percussive components
+/// are enhanced by median filtering along the frequency axis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HpssConfig {
+    /// STFT FFT size in samples
+    pub stft_params: StftParams,
+    /// Harmonic median filter kernel size (along time axis)
+    /// Larger values strengthen harmonic separation but may blur transients
+    pub median_filter_harmonic: usize,
+    /// Percussive median filter kernel size (along frequency axis)
+    /// Larger values strengthen percussive separation but may blur tonal content
+    pub median_filter_percussive: usize,
+    /// Soft masking parameter (0.0 = hard mask, 1.0 = completely soft)
+    /// Soft masking provides smoother component separation but less isolation
+    pub mask_softness: f64,
+}
+
+impl HpssConfig {
+    /// Create a new HPSS configuration with default settings.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        stft_params: StftParams,
+        median_filter_harmonic: usize,
+        median_filter_percussive: usize,
+        mask_softness: f64,
+    ) -> Self {
+        Self {
+            stft_params,
+            median_filter_harmonic,
+            median_filter_percussive,
+            mask_softness,
+        }
+    }
+
+    /// Create configuration optimized for musical content.
+    ///
+    /// Uses larger filters for stronger separation, suitable for complex musical material:
+    /// - Larger harmonic kernel for better tonal separation
+    /// - Larger percussive kernel for cleaner transient isolation
+    /// - Softer masking for more musical results
+    #[inline]
+    #[must_use]
+    pub fn musical() -> Self {
+        let stft_params = StftParamsBuilder::default()
+            .n_fft(crate::nzu!(2048))
+            .hop_size(crate::nzu!(512))
+            .build()
+            .expect("All parameters are set and valid according to the builder");
+        Self {
+            stft_params,
+            median_filter_harmonic: 31,
+            median_filter_percussive: 31,
+            mask_softness: 0.5,
+        }
+    }
+
+    /// Create configuration optimized for percussive content.
+    ///
+    /// Uses asymmetric filters favoring percussive separation:
+    /// - Moderate harmonic filtering
+    /// - Strong percussive filtering
+    /// - Harder masking for cleaner drum isolation
+    #[inline]
+    #[must_use]
+    pub fn percussive() -> Self {
+        let stft_params = StftParamsBuilder::default()
+            .n_fft(crate::nzu!(2048))
+            .hop_size(crate::nzu!(256))
+            .build()
+            .expect("All parameters are set and valid according to the builder");
+        Self {
+            stft_params,
+            median_filter_harmonic: 17,
+            median_filter_percussive: 51, // Stronger percussive filtering
+            mask_softness: 0.1,           // Harder masking
+        }
+    }
+
+    /// Create configuration optimized for harmonic content.
+    ///
+    /// Uses asymmetric filters favoring harmonic separation:
+    /// - Strong harmonic filtering
+    /// - Moderate percussive filtering
+    /// - Harder masking for cleaner tonal isolation
+    #[inline]
+    #[must_use]
+    pub fn harmonic() -> Self {
+        let stft_params = StftParamsBuilder::default()
+            .n_fft(crate::nzu!(4096))
+            .hop_size(crate::nzu!(512))
+            .build()
+            .expect("All parameters are set and valid according to the builder");
+
+        Self {
+            stft_params,
+            median_filter_harmonic: 51, // Stronger harmonic filtering
+            median_filter_percussive: 17,
+            mask_softness: 0.1, // Harder masking
+        }
+    }
+
+    /// Create configuration for real-time processing.
+    ///
+    /// Uses smaller window and filter sizes for lower latency:
+    /// - Smaller window for reduced latency
+    /// - Smaller hop size for responsiveness
+    /// - Smaller filters for faster processing
+    #[inline]
+    #[must_use]
+    pub fn realtime() -> Self {
+        let stft_params = StftParamsBuilder::default()
+            .n_fft(crate::nzu!(1024))
+            .hop_size(crate::nzu!(256))
+            .build()
+            .expect("All parameters are set and valid according to the builder");
+
+        Self {
+            stft_params,
+            median_filter_harmonic: 11,
+            median_filter_percussive: 11,
+            mask_softness: 0.3,
+        }
+    }
+
+    /// Set STFT parameters.
+    ///
+    /// # Arguments
+    /// * `n_fft` - FFT size in samples (should be power of 2)
+    /// * `hop_size` - Hop size in samples
+    #[inline]
+    pub fn set_stft_params(&mut self, n_fft: NonZeroUsize, hop_size: NonZeroUsize) {
+        self.stft_params = StftParamsBuilder::default()
+            .n_fft(n_fft)
+            .hop_size(hop_size)
+            .build()
+            .expect("All parameters are set and valid according to the builder");
+    }
+
+    /// Set median filter sizes.
+    ///
+    /// # Arguments
+    /// * `harmonic` - Harmonic filter size (odd numbers recommended)
+    /// * `percussive` - Percussive filter size (odd numbers recommended)
+    #[inline]
+    pub const fn set_filter_sizes(&mut self, harmonic: usize, percussive: usize) {
+        self.median_filter_harmonic = harmonic;
+        self.median_filter_percussive = percussive;
+    }
+
+    /// Set mask softness parameter.
+    ///
+    /// # Arguments
+    /// * `softness` - Softness value (0.0 = hard mask, 1.0 = completely soft)
+    #[inline]
+    pub const fn set_mask_softness(&mut self, softness: f64) {
+        self.mask_softness = softness.clamp(0.0, 1.0);
+    }
+
+    /// Validate HPSS configuration.
+    ///
+    /// # Arguments
+    /// * `sample_rate` - Sample rate in Hz
+    ///
+    /// # Returns
+    /// Result indicating whether the configuration is valid
+    #[inline]
+    pub fn validate(&self, sample_rate: f64) -> AudioSampleResult<()> {
+        // Validate window size
+        if !self.stft_params.n_fft().is_power_of_two() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "win_size",
+                "Window size must be a positive power of 2",
+            )));
+        }
+
+        // Validate hop size
+        if self.stft_params.hop_size() > self.stft_params.n_fft() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                "Hop size must be positive and not larger than window size",
+            )));
+        }
+
+        // Validate median filter sizes
+        if self.median_filter_harmonic == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "median_filter_harmonic",
+                "Harmonic median filter size must be greater than 0",
+            )));
+        }
+
+        if self.median_filter_percussive == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "median_filter_percussive",
+                "Percussive median filter size must be greater than 0",
+            )));
+        }
+
+        // Validate mask softness
+        if self.mask_softness < 0.0 || self.mask_softness > 1.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "mask_softness",
+                "Mask softness must be between 0.0 and 1.0",
+            )));
+        }
+
+        // Check reasonable parameter ranges
+        if self.stft_params.n_fft() > crate::nzu!(163840) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "win_size",
+                "Window size should not exceed 16384 samples for practical processing",
+            )));
+        }
+
+        if self.median_filter_harmonic > 101 || self.median_filter_percussive > 101 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "median_filter_size",
+                "Median filter sizes should not exceed 101 for practical processing",
+            )));
+        }
+
+        // Validate minimum frequency resolution
+        let freq_resolution = self.freq_resolution(sample_rate);
+        if freq_resolution > 50.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "win_size",
+                format!(
+                    "Window too small, frequency resolution ({freq_resolution:.1} Hz) is too low"
+                ),
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Calculate the number of frequency bins for this configuration.
+    #[inline]
+    #[must_use]
+    pub const fn num_freq_bins(&self) -> NonZeroUsize {
+        self.stft_params
+            .n_fft()
+            .div_ceil(crate::nzu!(2))
+            .checked_add(1)
+            .expect("Div 2 plus 1 will get nowhere near the max value")
+    }
+
+    /// Calculate the frequency resolution in Hz.
+    #[inline]
+    #[must_use]
+    pub fn freq_resolution(&self, sample_rate: f64) -> f64 {
+        sample_rate / self.stft_params.n_fft().get() as f64
+    }
+
+    /// Calculate the time resolution in seconds.
+    #[inline]
+    #[must_use]
+    pub fn time_resolution(&self, sample_rate: f64) -> f64 {
+        self.stft_params.hop_size().get() as f64 / sample_rate
+    }
+}
+
+impl Default for HpssConfig {
+    fn default() -> Self {
+        let stft_params = StftParamsBuilder::default()
+            .n_fft(crate::nzu!(2048))
+            .hop_size(crate::nzu!(512))
+            .build()
+            .expect("All parameters are set and valid according to the builder");
+        Self {
+            stft_params,
+            median_filter_harmonic: 17,
+            median_filter_percussive: 17,
+            mask_softness: 0.3,
+        }
+    }
+}
+
+impl<T> AudioDecomposition for AudioSamples<'_, T>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    T: StandardSample,
+    Self: AudioTypeConversion<Sample = T>,
 {
-    fn hpss<F: RealFloat>(
+    fn hpss(
         &self,
-        config: &HpssConfig<F>,
-    ) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)>
-    where
-        F: FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>,
-        for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T> + AudioTransforms<T>,
-    {
+        config: &HpssConfig,
+    ) -> AudioSampleResult<(
+        AudioSamples<'static, Self::Sample>,
+        AudioSamples<'static, Self::Sample>,
+    )> {
         // Validate configuration
-        config.validate(crate::to_precision::<F, f64>(self.sample_rate.get() as f64))?;
+        config.validate(self.sample_rate_hz())?;
 
         // Check minimum signal length
-        let min_length = config.win_size;
+        let min_length = config.stft_params.n_fft();
         if self.samples_per_channel() < min_length {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "signal_length",
@@ -71,25 +349,17 @@ where
 /// Core HPSS implementation function.
 ///
 /// Performs the actual harmonic/percussive separation using STFT and median filtering.
-fn perform_hpss<T, F>(
+fn perform_hpss<T>(
     audio: &AudioSamples<'_, T>,
-    config: &HpssConfig<F>,
+    config: &HpssConfig,
 ) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)>
 where
-    T: AudioSample + ConvertTo<F>,
-    F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTransforms<T>,
+    T: StandardSample,
 {
     // Step 1: Compute STFT of the input signal
-    let stft_result = audio.stft(config.win_size, config.hop_size, WindowType::Hanning)?;
-
+    let stft_result = audio.stft(&config.stft_params)?;
     // Step 2: Compute magnitude spectrogram
-    let magnitude_spec = compute_magnitude_spectrogram(&stft_result);
+    let magnitude_spec = stft_result.norm();
 
     // Step 3: Apply median filtering to create harmonic and percussive enhanced spectrograms
     let harmonic_spec = median_filter_time_axis(&magnitude_spec, config.median_filter_harmonic);
@@ -104,34 +374,29 @@ where
     let percussive_stft = apply_mask_to_stft(&stft_result, &percussive_mask);
 
     // Step 6: Inverse STFT to get time domain signals
-    let harmonic_audio: AudioSamples<'static, T> = AudioSamples::istft(
-        &harmonic_stft,
-        config.hop_size,
-        WindowType::Hanning,
-        audio.sample_rate.get() as usize,
-        true,
-    )?;
-    let percussive_audio: AudioSamples<'static, T> = AudioSamples::istft(
-        &percussive_stft,
-        config.hop_size,
-        WindowType::Hanning,
-        audio.sample_rate.get() as usize,
-        true,
-    )?;
+    let n_fft = stft_result.params.n_fft();
+    let hop_size = stft_result.params.hop_size();
+    let window = stft_result.params.window();
+    let centre = stft_result.params.centre();
+    // safety: sample_rate was validated during the forward STFT
+    let sample_rate = unsafe { NonZeroU32::new_unchecked(stft_result.sample_rate as u32) };
+
+    let harmonic_samples =
+        spectrograms_istft(&harmonic_stft, n_fft, hop_size, window.clone(), centre)?;
+    let harmonic_audio: AudioSamples<'static, T> =
+        AudioSamples::from_mono_vec::<f64>(harmonic_samples, sample_rate);
+
+    let percussive_samples = spectrograms_istft(&percussive_stft, n_fft, hop_size, window, centre)?;
+    let percussive_audio: AudioSamples<'static, T> =
+        AudioSamples::from_mono_vec::<f64>(percussive_samples, sample_rate);
 
     Ok((harmonic_audio, percussive_audio))
 }
 
-/// Compute magnitude spectrogram from complex STFT result.
-fn compute_magnitude_spectrogram<F: RealFloat>(stft: &Array2<Complex<F>>) -> Array2<F> {
-    stft.mapv(|c| c.norm())
-}
-
-/// Apply median filtering along the time axis to enhance harmonic components.
 ///
 /// Harmonic components tend to be stable over time, so median filtering along
 /// the time axis preserves sustained tonal content while suppressing transients.
-fn median_filter_time_axis<F: RealFloat>(spectrogram: &Array2<F>, kernel_size: usize) -> Array2<F> {
+fn median_filter_time_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Array2<f64> {
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
@@ -151,7 +416,7 @@ fn median_filter_time_axis<F: RealFloat>(spectrogram: &Array2<F>, kernel_size: u
 ///
 /// Percussive components tend to have broadband characteristics, so median filtering
 /// along the frequency axis preserves transients while suppressing tonal content.
-fn median_filter_freq_axis<F: RealFloat>(spectrogram: &Array2<F>, kernel_size: usize) -> Array2<F> {
+fn median_filter_freq_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Array2<f64> {
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
@@ -167,10 +432,11 @@ fn median_filter_freq_axis<F: RealFloat>(spectrogram: &Array2<F>, kernel_size: u
     filtered
 }
 
+// TODO: Change to NonEmptySlices and NonZeroUsize
 /// Simple 1D median filter implementation.
 ///
 /// Uses a sliding window approach with border handling via reflection.
-fn median_filter_1d<F: RealFloat>(signal: &[F], kernel_size: usize) -> Vec<F> {
+fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
     if kernel_size == 0 {
         return signal.to_vec();
     }
@@ -210,7 +476,7 @@ fn median_filter_1d<F: RealFloat>(signal: &[F], kernel_size: usize) -> Vec<F> {
         let median = if kernel_size % 2 == 1 {
             window[kernel_size / 2]
         } else {
-            (window[kernel_size / 2 - 1] + window[kernel_size / 2]) / crate::to_precision(2.0)
+            f64::midpoint(window[kernel_size / 2 - 1], window[kernel_size / 2])
         };
 
         filtered.push(median);
@@ -223,16 +489,16 @@ fn median_filter_1d<F: RealFloat>(signal: &[F], kernel_size: usize) -> Vec<F> {
 ///
 /// Creates binary or soft masks based on the relative strengths of harmonic
 /// and percussive components at each time-frequency bin.
-fn generate_separation_masks<F: RealFloat>(
-    harmonic_spec: &Array2<F>,
-    percussive_spec: &Array2<F>,
-    mask_softness: F,
-) -> (Array2<F>, Array2<F>) {
+fn generate_separation_masks(
+    harmonic_spec: &Array2<f64>,
+    percussive_spec: &Array2<f64>,
+    mask_softness: f64,
+) -> (Array2<f64>, Array2<f64>) {
     let (n_freq_bins, n_time_frames) = harmonic_spec.dim();
     let mut harmonic_mask = Array2::zeros((n_freq_bins, n_time_frames));
     let mut percussive_mask = Array2::zeros((n_freq_bins, n_time_frames));
 
-    let epsilon = crate::to_precision(1e-10); // Small constant to avoid division by zero
+    let epsilon = 1e-10; // Small constant to avoid division by zero
 
     for freq_idx in 0..n_freq_bins {
         for time_idx in 0..n_time_frames {
@@ -241,14 +507,14 @@ fn generate_separation_masks<F: RealFloat>(
 
             let total = h_val + p_val + epsilon;
 
-            if mask_softness == F::zero() {
+            if mask_softness == 0.0 {
                 // Hard masking: binary decision
                 if h_val >= p_val {
-                    harmonic_mask[[freq_idx, time_idx]] = F::one();
-                    percussive_mask[[freq_idx, time_idx]] = F::zero();
+                    harmonic_mask[[freq_idx, time_idx]] = 1.0;
+                    percussive_mask[[freq_idx, time_idx]] = 0.0;
                 } else {
-                    harmonic_mask[[freq_idx, time_idx]] = F::zero();
-                    percussive_mask[[freq_idx, time_idx]] = F::one();
+                    harmonic_mask[[freq_idx, time_idx]] = 0.0;
+                    percussive_mask[[freq_idx, time_idx]] = 1.0;
                 }
             } else {
                 // Soft masking: weighted by relative power with softness factor
@@ -256,11 +522,14 @@ fn generate_separation_masks<F: RealFloat>(
                 let p_ratio = p_val / total;
 
                 // Apply softness: interpolate between binary and proportional masks
-                let h_soft = mask_softness * h_ratio
-                    + (F::one() - mask_softness)
-                        * if h_val >= p_val { F::one() } else { F::zero() };
-                let p_soft = mask_softness * p_ratio
-                    + (F::one() - mask_softness) * if p_val > h_val { F::one() } else { F::zero() };
+                let h_soft = mask_softness.mul_add(
+                    h_ratio,
+                    (1.0 - mask_softness) * if h_val >= p_val { 1.0 } else { 0.0 },
+                );
+                let p_soft = mask_softness.mul_add(
+                    p_ratio,
+                    (1.0 - mask_softness) * if p_val > h_val { 1.0 } else { 0.0 },
+                );
 
                 harmonic_mask[[freq_idx, time_idx]] = h_soft;
                 percussive_mask[[freq_idx, time_idx]] = p_soft;
@@ -274,10 +543,11 @@ fn generate_separation_masks<F: RealFloat>(
 /// Apply a real-valued mask to a complex STFT spectrogram.
 ///
 /// Multiplies each complex coefficient by the corresponding mask value.
-fn apply_mask_to_stft<F: RealFloat>(
-    stft: &Array2<Complex<F>>,
-    mask: &Array2<F>,
-) -> Array2<Complex<F>> {
+fn apply_mask_to_stft<A: AsRef<Array2<Complex<f64>>>>(
+    stft: A,
+    mask: &Array2<f64>,
+) -> Array2<Complex<f64>> {
+    let stft = stft.as_ref();
     let (n_freq_bins, n_time_frames) = stft.dim();
     let mut masked_stft = Array2::zeros((n_freq_bins, n_time_frames));
 
@@ -316,18 +586,19 @@ mod tests {
         let duration = std::time::Duration::from_millis(200); // Long enough for 1024 window
 
         // Generate a simple sine wave
-        let sine_audio = sine_wave::<f32, f32>(440.0, duration, sample_rate.get(), 0.5);
-        let config = HpssConfig::<f32>::realtime(); // Faster for testing
+        let sine_audio = sine_wave::<f32>(440.0, duration, sample_rate, 0.5);
+        let config = HpssConfig::realtime(); // Faster for testing
 
         // Perform HPSS separation
         let (harmonic, percussive) = sine_audio.hpss(&config).unwrap();
 
         // Verify output properties (allow small length differences due to STFT/ISTFT processing)
-        let original_length = sine_audio.samples_per_channel();
-        assert!(harmonic.samples_per_channel() > 0);
-        assert!(percussive.samples_per_channel() > 0);
+        let original_length = sine_audio.samples_per_channel().get();
+        assert!(harmonic.samples_per_channel().get() > 0);
+        assert!(percussive.samples_per_channel().get() > 0);
         // Length should be close to original (within a reasonable range for STFT processing)
-        let length_diff = (harmonic.samples_per_channel() as i32 - original_length as i32).abs();
+        let length_diff =
+            (harmonic.samples_per_channel().get() as i32 - original_length as i32).abs();
         assert!(
             length_diff < 1000,
             "Length difference too large: {}",
@@ -339,24 +610,38 @@ mod tests {
 
     #[test]
     fn test_hpss_config_validation() {
-        let mut config = HpssConfig::<f32>::new();
+        let config = HpssConfig::default();
         let sample_rate = 44100.0;
 
         // Valid configuration should pass
         assert!(config.validate(sample_rate).is_ok());
 
         // Invalid window size (not power of 2)
-        config.win_size = 1000;
+        let config = HpssConfig {
+            stft_params: spectrograms::StftParamsBuilder::default()
+                .n_fft(crate::nzu!(1000))
+                .hop_size(crate::nzu!(256))
+                .build()
+                .unwrap(),
+            ..HpssConfig::default()
+        };
         assert!(config.validate(sample_rate).is_err());
 
         // Reset and test hop size > win size
-        config = HpssConfig::new();
-        config.hop_size = config.win_size + 1;
-        assert!(config.validate(sample_rate).is_err());
+        let stft_params_result = spectrograms::StftParamsBuilder::default()
+            .n_fft(crate::nzu!(1024))
+            .hop_size(crate::nzu!(2048))
+            .build();
+
+        // Should fail at builder level due to hop_size > n_fft constraint
+        assert!(stft_params_result.is_err());
 
         // Reset and test invalid mask softness
-        config = HpssConfig::new();
-        config.mask_softness = 1.5;
+        let config = HpssConfig::default();
+        let config = HpssConfig {
+            mask_softness: 1.5,
+            ..config
+        };
         assert!(config.validate(sample_rate).is_err());
     }
 
@@ -390,7 +675,7 @@ mod tests {
                 let p_val = p_mask[[i, j]];
                 assert!(h_val == 0.0 || h_val == 1.0);
                 assert!(p_val == 0.0 || p_val == 1.0);
-                assert!((h_val + p_val - 1.0f32).abs() < 1e-10 || (h_val + p_val).abs() < 1e-10);
+                assert!((h_val + p_val - 1.0f64).abs() < 1e-10 || (h_val + p_val).abs() < 1e-10);
             }
         }
     }

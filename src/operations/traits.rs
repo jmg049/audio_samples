@@ -1,191 +1,420 @@
 //! Core trait definitions for audio processing operations.
 
-#[cfg(feature = "plotting")]
-#[cfg(feature = "spectral-analysis")]
-use crate::operations::AudioPlotBuilders;
-#[cfg(feature = "resampling")]
-use crate::operations::ResamplingQuality;
+#[cfg(feature = "envelopes")]
+use crate::{NdResult, operations::dynamic_range::EnvelopeFollower};
+
+#[cfg(feature = "envelopes")]
+use crate::operations::types::DynamicRangeMethod;
+
+#[cfg(feature = "editing")]
+use crate::operations::types::{FadeCurve, PadSide};
+
+#[cfg(all(
+    feature = "editing",
+    feature = "random-generation",
+    feature = "iir-filtering"
+))]
+use crate::{AudioSample, operations::types::PerturbationConfig};
+
+#[cfg(feature = "channels")]
+use crate::operations::types::{MonoConversionMethod, StereoConversionMethod};
+
 #[cfg(feature = "processing")]
-use crate::operations::types::NormalizationMethod;
+use crate::operations::types::NormalizationConfig;
 
-#[cfg(feature = "spectral-analysis")]
-use crate::operations::types::ChromaConfig;
-#[cfg(feature = "spectral-analysis")]
-use crate::operations::{
-    CqtConfig,
-    types::{SpectrogramScale, WindowType},
+#[cfg(all(feature = "processing", feature = "resampling"))]
+use crate::{operations::types::ResamplingQuality, repr::SampleRate};
+
+#[cfg(feature = "decomposition")]
+use crate::operations::hpss::HpssConfig;
+
+#[cfg(feature = "onset-detection")]
+use crate::operations::onset::{
+    ComplexOnsetConfig, OnsetDetectionConfig, SpectralFluxConfig, SpectralFluxMethod,
 };
 
-use crate::{
-    AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom, CastInto,
-    ConvertTo, I24, RealFloat,
-    operations::{
-        MonoConversionMethod, StereoConversionMethod,
-        types::{
-            CompressorConfig, EqBand, FadeCurve, FilterResponse, IirFilterDesign, LimiterConfig,
-            PadSide, ParametricEq, PerturbationConfig, PitchDetectionMethod,
-        },
-    },
-};
+#[cfg(feature = "parametric-eq")]
+use crate::operations::types::{EqBand, ParametricEq};
 
-#[cfg(feature = "statistics")]
+#[cfg(feature = "beat-tracking")]
+use crate::operations::beat::{BeatTrackingConfig, BeatTrackingData};
+
+#[cfg(feature = "vad")]
 use crate::operations::types::VadConfig;
-#[cfg(feature = "spectral-analysis")]
-use ndarray::Array2;
 
-#[cfg(feature = "random-generation")]
-use rand::distr::{Distribution, StandardUniform};
+#[cfg(feature = "dynamic-range")]
+use crate::operations::types::{CompressorConfig, LimiterConfig};
 
-#[cfg(feature = "spectral-analysis")]
-use rustfft::FftNum;
+#[cfg(feature = "pitch-analysis")]
+use crate::operations::types::PitchDetectionMethod;
+
+#[cfg(feature = "iir-filtering")]
+use crate::operations::types::{FilterResponse, IirFilterDesign};
+
+#[cfg(feature = "transforms")]
+use spectrograms::{
+    AmpScaleSpec, ChromaParams, Chromagram, CqtDbSpectrogram, CqtMagnitudeSpectrogram, CqtParams,
+    CqtPowerSpectrogram, CqtResult, CqtSpectrogram, Decibels, Gammatone, GammatoneDbSpectrogram,
+    GammatoneMagnitudeSpectrogram, GammatoneParams, GammatonePowerSpectrogram, LinearDbSpectrogram,
+    LinearHz, LinearMagnitudeSpectrogram, LinearPowerSpectrogram, LogHz, LogHzDbSpectrogram,
+    LogHzMagnitudeSpectrogram, LogHzParams, LogHzPowerSpectrogram, LogMelSpectrogram, LogParams,
+    Magnitude, MelMagnitudeSpectrogram, MelParams, MelPowerSpectrogram, MelSpectrogram, Mfcc,
+    MfccParams, Power, Spectrogram, SpectrogramParams, StftParams, StftResult,
+};
+
+#[cfg(any(feature = "transforms", feature = "onset-detection"))]
+use ndarray::{Array2, Zip};
+#[cfg(feature = "pitch-analysis")]
+use spectrograms::WindowType;
 
 #[cfg(feature = "plotting")]
-#[cfg(feature = "spectral-analysis")]
-use std::path::Path;
-
-#[cfg(feature = "spectral-analysis")]
+use crate::operations::{
+    WaveformPlot, WaveformPlotParams,
+    plotting::spectrograms::{SpectrogramPlot, SpectrogramPlotParams},
+    plotting::spectrum::{MagnitudeSpectrumParams, MagnitudeSpectrumPlot},
+};
+#[cfg(any(feature = "transforms", feature = "onset-detection"))]
+use num_complex::Complex;
+// "Unused" imports below are required pretty much as soon as any of the traits are implemented, this is cleaner than a huge cfg(any(...)) block.
+#[allow(unused_imports)]
+use crate::{AudioSampleResult, AudioSamples, AudioTypeConversion, StandardSample};
+#[allow(unused_imports)]
+use non_empty_slice::{NonEmptySlice, NonEmptyVec};
+#[allow(unused_imports)]
 use std::num::NonZeroUsize;
-
-#[cfg(feature = "spectral-analysis")]
-use ndarray::Zip;
-
-// Complex numbers using num-complex crate
-pub use num_complex::Complex;
-
-// Type aliases for complex types to satisfy clippy::type_complexity
-#[cfg(feature = "spectral-analysis")]
-type FftInfoResult<F> = AudioSampleResult<(Vec<F>, Vec<F>, Array2<Complex<F>>)>;
-
 /// Statistical analysis operations for audio data.
 ///
 /// This trait provides methods to compute various statistical measures
 /// of audio samples, useful for analysis, visualization, and processing decisions.
 ///
-/// All methods return values in the native sample type `T` for consistency
+/// All methods return values in the native sample type `Self::Sample` for consistency
 /// with the underlying data representation.
-pub trait AudioStatistics<'a, T: AudioSample>
+#[cfg(feature = "statistics")]
+pub trait AudioStatistics: AudioTypeConversion
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    Self::Sample: StandardSample,
 {
-    /// Returns the peak (maximum absolute value) in the audio samples.
+    /// Returns the peak (maximum absolute value) across all samples and channels.
     ///
-    /// This is useful for preventing clipping and measuring signal levels.
-    fn peak(&self) -> T;
+    /// # Returns
+    /// The maximum absolute sample value, in the native sample type `T`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -3.0, 2.5, -1.5];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// assert_eq!(audio.peak(), 3.0);
+    /// ```
+    fn peak(&self) -> Self::Sample;
 
     /// Alias for peak to match common terminology
-    fn amplitude(&self) -> T {
+    fn amplitude(&self) -> Self::Sample {
         self.peak()
     }
 
-    /// Returns the minimum value in the audio samples.
-    fn min_sample(&self) -> T;
-
-    /// Returns the maximum value in the audio samples.
-    fn max_sample(&self) -> T;
-
-    /// Computes the mean (average) of the audio samples.
+    /// Returns the minimum sample value across all channels.
     ///
-    /// Always returns a value as audio samples cannot not be empty if properly contructed.
-    fn mean<F>(&self) -> F
-    where
-        F: RealFloat;
-
-    /// Computes the Root Mean Square (RMS) of the audio samples.
+    /// # Returns
+    /// The smallest sample value found, in the native sample type `T`.
     ///
-    /// RMS is useful for measuring average signal power/energy and
-    /// provides a perceptually relevant measure of loudness.
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
     ///
-    /// Always returns a value as audio samples cannot not be empty if properly contructed.
-    fn rms<F>(&self) -> F
-    where
-        F: RealFloat;
+    /// let data = array![1.0f32, -3.0, 2.5, -1.5];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// assert_eq!(audio.min_sample(), -3.0);
+    /// ```
+    fn min_sample(&self) -> Self::Sample;
 
-    /// Computes the statistical variance of the audio samples.
+    /// Returns the maximum sample value across all channels.
+    ///
+    /// # Returns
+    /// The largest sample value found, in the native sample type `T`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -3.0, 2.5, -1.5];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// assert_eq!(audio.max_sample(), 2.5);
+    /// ```
+    fn max_sample(&self) -> Self::Sample;
+
+    /// Computes the arithmetic mean of all samples across all channels.
+    ///
+    /// # Returns
+    /// The mean value as `f64`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 2.0, -2.0];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// assert_eq!(audio.mean(), 0.0);
+    /// ```
+    fn mean(&self) -> f64;
+
+    /// Returns the value at the temporal midpoint of a mono signal.
+    ///
+    /// For even-length signals the result is the average of the two samples at
+    /// the two central indices. For odd-length signals the single central sample
+    /// is returned directly. Samples are selected by index position; the buffer
+    /// is not sorted.
+    ///
+    /// # Returns
+    /// `Some(value)` for mono audio, or `None` if the signal is multi-channel.
+    ///
+    /// # Assumptions
+    /// For even-length signals the sum of the two central samples must not
+    /// overflow the sample type `T`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, 3.0, 5.0, 7.0];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// // Central indices 1 and 2: (3.0 + 5.0) / 2.0 = 4.0
+    /// assert_eq!(audio.median(), Some(4.0));
+    /// ```
+    fn median(&self) -> Option<f64>;
+
+    /// Computes the Root Mean Square (RMS) of all samples across all channels.
+    ///
+    /// RMS is the square root of the mean of squared sample values. It provides
+    /// a measure of the signal's average energy and is commonly used for
+    /// loudness estimation.
+    ///
+    /// # Returns
+    /// The RMS value as `f64`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 1.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let rms = audio.rms();
+    /// assert!((rms - 1.0).abs() < 1e-6);
+    /// ```
+    fn rms(&self) -> f64;
+
+    /// Computes the population variance of the audio samples.
     ///
     /// Variance measures the spread of sample values around the mean.
+    /// For mono audio this is the standard population variance of all samples.
+    /// For multi-channel audio the variance is computed per sample position
+    /// across channels and the results are averaged over time.
     ///
-    /// Always returns a value as audio samples cannot not be empty if properly contructed.
-    fn variance<F>(&self) -> F
-    where
-        F: RealFloat;
+    /// # Returns
+    /// The variance as `f64`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, 2.0, 3.0, 4.0];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let variance = audio.variance();
+    /// assert!((variance - 1.25).abs() < 1e-6);
+    /// ```
+    fn variance(&self) -> f64;
 
     /// Computes the standard deviation of the audio samples.
     ///
-    /// Standard deviation is the square root of variance and provides
-    /// a measure of signal variability in the same units as the samples.
+    /// Standard deviation is the square root of [`AudioStatistics::variance`].
+    /// It expresses the spread of sample values in the same units as the
+    /// original data.
     ///
-    /// Always returns a value as audio samples cannot not be empty if properly contructed.
-    fn std_dev<F>(&self) -> F
-    where
-        F: RealFloat;
+    /// # Returns
+    /// The standard deviation as `f64`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, 2.0, 3.0, 4.0];
+    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let std_dev = audio.std_dev();
+    /// assert!((std_dev - 1.25_f64.sqrt()).abs() < 1e-6);
+    /// ```
+    fn std_dev(&self) -> f64;
 
     /// Counts the number of zero crossings in the audio signal.
     ///
-    /// Zero crossings are useful for pitch detection and signal analysis.
-    /// The count represents transitions from positive to negative values or vice versa.
+    /// Zero crossings occur when the signal changes sign between adjacent samples.
+    /// This metric is useful for pitch detection, signal analysis, and estimating
+    /// the noisiness of a signal.
+    ///
+    /// # Returns
+    /// The total number of zero crossings across all channels. Returns 0 if the
+    /// audio has fewer than 2 samples.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 1.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// assert_eq!(audio.zero_crossings(), 3);
+    /// ```
     fn zero_crossings(&self) -> usize;
 
     /// Computes the zero crossing rate (crossings per second).
     ///
-    /// This normalizes the zero crossing count by the signal duration,
-    /// making it independent of audio length.
-    fn zero_crossing_rate<F>(&self) -> F
-    where
-        F: RealFloat;
-
-    /// Computes the autocorrelation function up to max_lag samples.
+    /// This normalises the zero crossing count by the signal duration, providing
+    /// a frequency-like measure that is independent of signal length.
     ///
-    /// Returns a vector of correlation values for each lag offset.
-    /// Useful for pitch detection and periodicity analysis.
+    /// # Returns
+    /// The number of zero crossings per second as `f64`.
     ///
-    /// # Arguments
-    /// * `max_lag` - Maximum lag to compute (in samples)
-    #[cfg(feature = "fft")]
-    fn autocorrelation<F>(&self, max_lag: usize) -> Option<Vec<F>>
-    where
-        F: RealFloat;
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 1.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let zcr = audio.zero_crossing_rate();
+    /// assert!(zcr > 0.0);
+    /// ```
+    fn zero_crossing_rate(&self) -> f64;
 
     /// Computes cross-correlation with another audio signal.
     ///
-    /// Returns correlation values for each lag offset between the two signals.
-    /// Useful for alignment, synchronization, and similarity analysis.
+    /// Cross-correlation measures the similarity between two signals as a
+    /// function of the displacement of one relative to the other. It is useful
+    /// for signal alignment, pattern matching, and delay estimation.
+    ///
+    /// For multi-channel audio only the first channels of both signals are
+    /// correlated.
     ///
     /// # Arguments
-    /// * `other` - The other audio signal to correlate with
-    /// * `max_lag` - Maximum lag to compute (in samples)
-    fn cross_correlation<F>(&self, other: &Self, max_lag: usize) -> AudioSampleResult<Vec<F>>
-    where
-        F: RealFloat;
-
-    /// Computes the spectral centroid (brightness measure).
+    /// - `other` — the second audio signal. Must have the same number of
+    ///   channels as `self`.
+    /// - `max_lag` — the maximum lag offset in samples. The effective maximum
+    ///   lag is clamped to `min(len_self, len_other) - 1`.
     ///
-    /// The spectral centroid represents the "center of mass" of the spectrum
-    /// and is often used as a measure of brightness or timbre.
-    /// Requires FFT computation internally.
-    #[cfg(feature = "fft")]
-    fn spectral_centroid<F: RealFloat + ConvertTo<T>>(&self) -> AudioSampleResult<F>
-    where
-        T: ConvertTo<F>;
-
-    /// Computes spectral rolloff frequency.
+    /// # Returns
+    /// A [`NonEmptyVec`] of correlation values for lags `0` through the
+    /// effective maximum lag.
     ///
-    /// The rolloff frequency is the frequency below which a specified percentage
-    /// of the total spectral energy is contained.
+    /// # Errors
+    /// Returns an error if the two signals have different numbers of channels,
+    /// or if one is mono and the other is multi-channel.
     ///
-    /// # Arguments
-    /// * `rolloff_percent` - Percentage of energy (0.0 to 1.0, typically 0.85)
-    #[cfg(feature = "fft")]
-    fn spectral_rolloff<F: RealFloat + ConvertTo<T>>(
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let data1 = array![1.0f32, 0.0, -1.0, 0.0];
+    /// let data2 = array![0.0, 1.0, 0.0, -1.0];
+    /// let audio1 = AudioSamples::new_mono(data1, sample_rate!(44100)).unwrap();
+    /// let audio2 = AudioSamples::new_mono(data2, sample_rate!(44100)).unwrap();
+    /// let max_lag = NonZeroUsize::new(3).unwrap();
+    /// let xcorr = audio1.cross_correlation(&audio2, max_lag).unwrap();
+    /// assert_eq!(xcorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// ```
+    fn cross_correlation(
         &self,
-        rolloff_percent: F,
-    ) -> AudioSampleResult<F>
-    where
-        T: ConvertTo<F>;
+        other: &Self,
+        max_lag: NonZeroUsize,
+    ) -> AudioSampleResult<NonEmptyVec<f64>>;
+
+    /// Computes the spectral centroid of a mono signal.
+    ///
+    /// The spectral centroid is the frequency-weighted mean of the power
+    /// spectrum and serves as a measure of spectral brightness. Higher values
+    /// indicate energy concentrated at higher frequencies.
+    ///
+    /// Reference: [Spectral centroid — Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
+    ///
+    /// # Returns
+    /// The spectral centroid frequency in Hz. Returns `0.0` when the signal
+    /// is silence (zero total spectral energy).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    ///
+    /// # Assumptions
+    /// The input signal must be mono. Multi-channel signals must be mixed or
+    /// channel-selected before calling this method.
+    #[cfg(feature = "transforms")]
+    fn spectral_centroid(&self) -> AudioSampleResult<f64>;
+
+    /// Computes the autocorrelation function up to `max_lag` samples.
+    ///
+    /// Autocorrelation measures the similarity of a signal with a time-shifted
+    /// copy of itself. The value at lag 0 is the signal's mean-square value;
+    /// subsequent lags decrease as the shift increases.
+    ///
+    /// For multi-channel audio only the first channel is used.
+    ///
+    /// Reference: [Autocorrelation — Wikipedia](https://en.wikipedia.org/wiki/Autocorrelation)
+    ///
+    /// # Arguments
+    /// - `max_lag` — the maximum lag offset in samples. The effective maximum
+    ///   lag is clamped to `signal_length - 1`.
+    ///
+    /// # Returns
+    /// A [`NonEmptyVec`] of correlation values for lags `0` through
+    /// `min(max_lag, signal_length - 1)`, or `None` if the FFT computation
+    /// fails.
+    ///
+    /// # Examples
+    /// ```ignore
+    /// // Requires the "transforms" feature.
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let data = array![1.0f32, 0.5, -0.5, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let autocorr = audio.autocorrelation(NonZeroUsize::new(3).unwrap()).unwrap();
+    /// assert_eq!(autocorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// ```
+    #[cfg(feature = "transforms")]
+    fn autocorrelation(&self, max_lag: NonZeroUsize) -> Option<NonEmptyVec<f64>>;
+
+    /// Computes the spectral rolloff frequency.
+    ///
+    /// The spectral rolloff is the frequency below which a specified proportion
+    /// of the total spectral energy is contained. It is commonly used to
+    /// distinguish harmonic signals from noise-like signals.
+    ///
+    /// For multi-channel audio only the first channel is used.
+    ///
+    /// # Arguments
+    /// - `rolloff_percent` — the energy proportion threshold. Must lie in the
+    ///   open interval `(0.0, 1.0)`. A typical value is `0.85`.
+    ///
+    /// # Returns
+    /// The rolloff frequency in Hz. Returns `0.0` when the signal is silence
+    /// (zero total spectral energy).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `rolloff_percent` is not in
+    ///   `(0.0, 1.0)`.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64>;
 }
 
 /// Voice Activity Detection (VAD) operations.
@@ -193,24 +422,20 @@ where
 /// This trait provides frame-based voice/speech activity detection for audio.
 /// It returns a boolean decision per frame (see [`VadConfig`]) and can also
 /// derive contiguous speech regions in sample indices.
-#[cfg(feature = "statistics")]
-pub trait AudioVoiceActivityDetection<'a, T: AudioSample> {
+#[cfg(feature = "vad")]
+pub trait AudioVoiceActivityDetection: AudioTypeConversion
+where
+    Self::Sample: StandardSample,
+{
     /// Compute a per-frame speech activity mask.
     ///
     /// The returned vector has one entry per analysis frame.
-    fn voice_activity_mask<F: RealFloat>(
-        &self,
-        config: &VadConfig<F>,
-    ) -> AudioSampleResult<Vec<bool>>;
-
+    fn voice_activity_mask(&self, config: &VadConfig) -> AudioSampleResult<NonEmptyVec<bool>>;
     /// Compute contiguous speech regions as `(start_sample, end_sample)` pairs.
     ///
     /// Indices are in samples-per-channel units (i.e., frame boundaries are derived
     /// from `config.hop_size` / `config.frame_size`). `end_sample` is exclusive.
-    fn speech_regions<F: RealFloat>(
-        &self,
-        config: &VadConfig<F>,
-    ) -> AudioSampleResult<Vec<(usize, usize)>>;
+    fn speech_regions(&self, config: &VadConfig) -> AudioSampleResult<Vec<(usize, usize)>>;
 }
 
 /// Signal processing operations for audio manipulation.
@@ -218,661 +443,911 @@ pub trait AudioVoiceActivityDetection<'a, T: AudioSample> {
 /// This trait provides methods for common audio processing tasks including
 /// normalization, filtering, compression, and envelope operations.
 ///
-/// Most methods modify the audio in-place for efficiency and return
-/// a Result to indicate success or failure.
-pub trait AudioProcessing<T: AudioSample>
+/// Methods consume self and return the processed audio, enabling method chaining.
+/// This provides a more functional and composable API compared to in-place mutation.
+#[cfg(feature = "processing")]
+pub trait AudioProcessing: AudioTypeConversion
 where
-    Self: Sized,
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    Self::Sample: StandardSample,
 {
-    /// Normalizes audio samples using the specified method and range.
+    /// Normalizes audio samples using the specified configuration.
+    ///
+    /// The normalization method determines both the algorithm and parameters:
+    /// - `NormalizationConfig::min_max(min, max)` — scale to the `[min, max]` range
+    /// - `NormalizationConfig::peak(target)` — scale so the peak equals `target`
+    /// - `NormalizationConfig::mean()` — subtract the mean (center around zero)
+    /// - `NormalizationConfig::median()` — subtract the median (mono only)
+    /// - `NormalizationConfig::zscore()` — transform to zero mean, unit variance
     ///
     /// # Arguments
-    /// * `min` - Target minimum value
-    /// * `max` - Target maximum value
-    /// * `max` - Target maximum value
-    /// * `method` - Normalization method to use
+    /// - `config` - Normalization configuration. Use the associated constructors
+    ///   on [`NormalizationConfig`] to build the desired method and parameters.
+    ///
+    /// # Returns
+    /// The normalized audio samples.
     ///
     /// # Errors
-    /// Returns an error if min >= max or if the method cannot be applied.
-    #[cfg(feature = "processing")]
-    #[cfg(feature = "processing")]
-    fn normalize(&mut self, min: T, max: T, method: NormalizationMethod) -> AudioSampleResult<()>;
+    /// - [`crate::AudioSampleError::Parameter`] if `min >= max` (MinMax), or if
+    ///   the input is multi-channel (Median).
+    ///
+    /// # Panics
+    /// Panics if the configuration fields required by the selected method are
+    /// `None`. Use the [`NormalizationConfig`] constructors to avoid this.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, AudioStatistics, NormalizationConfig, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -3.0, 2.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .normalize(NormalizationConfig::peak(1.0))
+    ///     .unwrap();
+    /// assert!(audio.peak() <= 1.0);
+    /// ```
+    fn normalize(self, config: NormalizationConfig<Self::Sample>) -> AudioSampleResult<Self>;
 
     /// Scales all audio samples by a constant factor.
     ///
-    /// This is equivalent to adjusting the volume/amplitude of the signal.
+    /// This is equivalent to adjusting the volume or amplitude of the signal.
+    /// A factor of 1.0 leaves the signal unchanged; values > 1.0 amplify and
+    /// values < 1.0 attenuate.
     ///
     /// # Arguments
-    /// * `factor` - Scaling factor (1.0 = no change, 2.0 = double amplitude)
-    fn scale(&mut self, factor: T);
+    /// - `factor` - The scaling factor to apply to all samples.
+    ///
+    /// # Returns
+    /// The scaled audio samples.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 0.5];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .scale(2.0);
+    /// assert_eq!(audio[0], 2.0);
+    /// assert_eq!(audio[1], -2.0);
+    /// ```
+    fn scale(self, factor: f64) -> Self;
 
     /// Applies a windowing function to the audio samples.
     ///
-    /// The window length must match the number of samples in the audio.
-    /// This is commonly used before FFT analysis to reduce spectral leakage.
+    /// Multiplies each sample by the corresponding window coefficient
+    /// element-wise. Windowing is commonly used before FFT operations to
+    /// reduce spectral leakage. Applied independently to each channel.
     ///
     /// # Arguments
-    /// * `window` - Window coefficients (must match audio length)
-    fn apply_window(&mut self, window: &[T]) -> AudioSampleResult<()>;
+    /// - `window` - Window coefficients. Length must equal the number of
+    ///   samples in the audio.
+    ///
+    /// # Returns
+    /// The windowed audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the window length does not
+    ///   match the audio length.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptySlice;
+    ///
+    /// let data = array![1.0f32, 1.0, 1.0, 1.0];
+    /// let window = [1.0f32, 0.5, 0.5, 1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .apply_window(NonEmptySlice::new(&window).unwrap())
+    ///     .unwrap();
+    /// assert_eq!(audio[0], 1.0);
+    /// assert_eq!(audio[1], 0.5);
+    /// ```
+    fn apply_window(self, window: &NonEmptySlice<Self::Sample>) -> AudioSampleResult<Self>;
 
-    /// Applies a digital filter to the audio samples.
+    /// Applies a digital filter to the audio samples using direct FIR convolution.
     ///
-    /// Uses convolution with the provided filter coefficients.
-    /// The filtered result will be shorter than the original by filter_length - 1 samples.
+    /// Each output sample is the dot product of the filter coefficients with the
+    /// corresponding segment of the input signal. The resulting audio is shorter
+    /// than the original by `filter_coeffs.len() - 1` samples.
     ///
     /// # Arguments
-    /// * `filter_coeffs` - FIR filter coefficients
-    fn apply_filter(&mut self, filter_coeffs: &[T]) -> AudioSampleResult<()>;
+    /// - `filter_coeffs` - FIR filter coefficients. A single-element slice
+    ///   `[1.0]` leaves the signal unchanged.
+    ///
+    /// # Returns
+    /// The filtered audio samples, with length reduced by `filter_coeffs.len() - 1`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the audio is shorter than
+    ///   the filter.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptySlice;
+    ///
+    /// let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
+    /// let coeffs = [0.5f32, 0.5]; // 2-sample moving average
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .apply_filter(NonEmptySlice::new(&coeffs).unwrap())
+    ///     .unwrap();
+    /// assert_eq!(audio[0], 1.5); // 1*0.5 + 2*0.5
+    /// assert_eq!(audio[1], 2.5); // 2*0.5 + 3*0.5
+    /// ```
+    fn apply_filter(self, filter_coeffs: &NonEmptySlice<Self::Sample>) -> AudioSampleResult<Self>;
 
     /// Applies μ-law compression to the audio samples.
     ///
-    /// μ-law compression is commonly used in telecommunications.
-    /// Standard μ-law uses μ = 255.
+    /// Compresses the dynamic range of the signal using a μ-law nonlinear
+    /// transfer function. Higher `mu` values produce stronger compression.
     ///
     /// # Arguments
-    /// * `mu` - Compression parameter (typically 255 for standard μ-law)
-    fn mu_compress(&mut self, mu: T) -> AudioSampleResult<()>;
+    /// - `mu` - Compression parameter (typically 255 for standard μ-law).
+    ///
+    /// # Returns
+    /// The compressed audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    ///
+    /// # See Also
+    /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![0.5f32, -0.5];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .mu_compress(255.0)
+    ///     .unwrap();
+    /// assert!(audio[0] > 0.0); // Positive input stays positive
+    /// assert!(audio[1] < 0.0); // Negative input stays negative
+    /// ```
+    fn mu_compress(self, mu: Self::Sample) -> AudioSampleResult<Self>;
 
     /// Applies μ-law expansion (decompression) to the audio samples.
     ///
-    /// This reverses μ-law compression. The μ parameter should match
-    /// the value used for compression.
+    /// This inverts μ-law compression. The `mu` parameter must match the value
+    /// used during compression for correct reconstruction.
     ///
     /// # Arguments
-    /// * `mu` - Expansion parameter (should match compression parameter)
-    fn mu_expand(&mut self, mu: T) -> AudioSampleResult<()>;
-
-    /// Applies a low-pass filter with the specified cutoff frequency.
+    /// - `mu` - Expansion parameter. Must match the value used for compression.
     ///
-    /// Frequencies above the cutoff will be attenuated.
+    /// # Returns
+    /// The expanded audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    ///
+    /// # See Also
+    /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![0.0f32, 0.5, -0.5];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .mu_expand(255.0)
+    ///     .unwrap();
+    /// assert_eq!(audio[0], 0.0); // Zero maps to zero
+    /// assert!(audio[1] > 0.0);   // Sign is preserved
+    /// assert!(audio[2] < 0.0);   // Sign is preserved
+    /// ```
+    fn mu_expand(self, mu: Self::Sample) -> AudioSampleResult<Self>;
+
+    /// Applies a first-order low-pass filter with the specified cutoff frequency.
+    ///
+    /// Uses a single-pole IIR filter to attenuate frequencies above the cutoff.
+    /// The filter operates independently on each channel.
     ///
     /// # Arguments
-    /// * `cutoff_hz` - Cutoff frequency in Hz
-    fn low_pass_filter<F>(&mut self, cutoff_hz: F) -> AudioSampleResult<()>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: CastFrom<F> + ConvertTo<F>;
-
-    /// Applies a high-pass filter with the specified cutoff frequency.
+    /// - `cutoff_hz` - Cutoff frequency in Hz. Must be less than the Nyquist
+    ///   frequency (half the sample rate).
     ///
-    /// Frequencies below the cutoff will be attenuated.
+    /// # Returns
+    /// The filtered audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `cutoff_hz` is ≥ the
+    ///   Nyquist frequency.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .low_pass_filter(1000.0)
+    ///     .unwrap();
+    /// // High-frequency content is attenuated
+    /// assert!(audio[1].abs() < 1.0);
+    /// ```
+    fn low_pass_filter(self, cutoff_hz: f64) -> AudioSampleResult<Self>;
+
+    /// Applies a first-order high-pass filter with the specified cutoff frequency.
+    ///
+    /// Uses an RC high-pass filter model to attenuate frequencies below the
+    /// cutoff. The filter operates independently on each channel.
     ///
     /// # Arguments
-    /// * `cutoff_hz` - Cutoff frequency in Hz
-    fn high_pass_filter<F>(&mut self, cutoff_hz: F) -> AudioSampleResult<()>
-    where
-        T: CastFrom<F> + ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Applies a band-pass filter between low and high frequencies.
+    /// - `cutoff_hz` - Cutoff frequency in Hz. Must be less than the Nyquist
+    ///   frequency (half the sample rate).
     ///
-    /// Only frequencies within the specified range will pass through.
+    /// # Returns
+    /// The filtered audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `cutoff_hz` is ≥ the
+    ///   Nyquist frequency.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, 1.0, 1.0, 1.0]; // Constant (DC) signal
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .high_pass_filter(100.0)
+    ///     .unwrap();
+    /// // A constant signal is fully removed by a high-pass filter
+    /// assert_eq!(audio[0], 0.0);
+    /// assert_eq!(audio[3], 0.0);
+    /// ```
+    fn high_pass_filter(self, cutoff_hz: f64) -> AudioSampleResult<Self>;
+
+    /// Applies a band-pass filter that passes frequencies between the two cutoffs.
+    ///
+    /// Implemented by cascading a high-pass filter at `low_cutoff_hz` followed
+    /// by a low-pass filter at `high_cutoff_hz`.
     ///
     /// # Arguments
-    /// * `low_cutoff_hz` - Lower cutoff frequency in Hz
-    /// * `high_cutoff_hz` - Upper cutoff frequency in Hz
-    fn band_pass_filter<F>(&mut self, low_cutoff_hz: F, high_cutoff_hz: F) -> AudioSampleResult<()>
-    where
-        T: CastFrom<F> + ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
+    /// - `low_cutoff_hz` - Lower cutoff frequency in Hz.
+    /// - `high_cutoff_hz` - Upper cutoff frequency in Hz. Must be greater than
+    ///   `low_cutoff_hz` and less than the Nyquist frequency.
+    ///
+    /// # Returns
+    /// The filtered audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `low_cutoff_hz >= high_cutoff_hz`,
+    ///   or if either cutoff exceeds the Nyquist frequency.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .band_pass_filter(100.0, 5000.0)
+    ///     .unwrap();
+    /// assert!(audio[0].is_finite());
+    /// ```
+    fn band_pass_filter(self, low_cutoff_hz: f64, high_cutoff_hz: f64) -> AudioSampleResult<Self>;
     /// Removes DC offset by subtracting the mean value.
     ///
-    /// This centers the audio around zero and removes any constant bias.
-    fn remove_dc_offset(&mut self) -> AudioSampleResult<()>;
+    /// This centers the audio around zero and removes any constant bias that
+    /// may have been introduced during recording or processing.
+    ///
+    /// # Returns
+    /// The audio samples with the DC offset removed.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![2.0f32, 3.0, 4.0, 5.0]; // Has DC offset
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .remove_dc_offset()
+    ///     .unwrap();
+    /// let mean: f64 = audio.mean();
+    /// assert!(mean.abs() < 1e-6); // Mean is now ~0
+    /// ```
+    fn remove_dc_offset(self) -> AudioSampleResult<Self>;
 
     /// Clips audio samples to the specified range.
     ///
-    /// Any samples outside the range will be limited to the range boundaries.
-    /// This is useful for preventing clipping in subsequent processing.
+    /// Any samples outside `[min_val, max_val]` are clamped to the nearest
+    /// boundary. Useful for preventing digital clipping before output.
     ///
     /// # Arguments
-    /// * `min_val` - Minimum allowed value
-    /// * `max_val` - Maximum allowed value
-    fn clip(&mut self, min_val: T, max_val: T) -> AudioSampleResult<()>;
-
-    /// Resamples audio to a new sample rate using high-quality algorithms.
-    ///
-    /// This method provides a convenient interface to rubato's resampling capabilities
-    /// with different quality/performance trade-offs.
-    ///
-    /// # Arguments
-    /// * `target_sample_rate` - Desired output sample rate in Hz
-    /// * `quality` - Quality/performance trade-off setting
+    /// - `min_val` - Minimum allowed sample value.
+    /// - `max_val` - Maximum allowed sample value.
     ///
     /// # Returns
-    /// A new AudioSamples instance with the target sample rate
+    /// The clipped audio samples.
     ///
     /// # Errors
-    /// Returns an error if:
-    /// - The resampling feature is not enabled
-    /// - The resampling parameters are invalid
-    /// - The input audio is empty
-    /// - Rubato encounters an internal error
+    /// - [`crate::AudioSampleError::Parameter`] if `min_val > max_val`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![2.0f32, -3.0, 1.5, -0.5];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .clip(-1.0, 1.0)
+    ///     .unwrap();
+    /// assert_eq!(audio[0], 1.0);   // clamped to max
+    /// assert_eq!(audio[1], -1.0);  // clamped to min
+    /// assert_eq!(audio[3], -0.5);  // within range, unchanged
+    /// ```
+    fn clip(self, min_val: Self::Sample, max_val: Self::Sample) -> AudioSampleResult<Self>;
+
+    /// Resamples audio to a new sample rate using high-quality resampling.
+    ///
+    /// Delegates to the `rubato` resampling library. The `quality` parameter
+    /// controls the trade-off between speed and output fidelity.
+    ///
+    /// # Arguments
+    /// - `target_sample_rate` - Desired output sample rate.
+    /// - `quality` - Resampling quality preset (see [`ResamplingQuality`]).
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] instance at the target sample rate.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the target sample rate or
+    ///   quality parameters are invalid.
+    /// - [`crate::AudioSampleError::Layout`] if the input audio is empty.
     #[cfg(feature = "resampling")]
-    fn resample<F>(
+    fn resample(
         &self,
-        target_sample_rate: usize,
+        target_sample_rate: SampleRate,
         quality: ResamplingQuality,
-    ) -> AudioSampleResult<Self>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
     /// Resamples audio by a specific ratio.
     ///
+    /// The output length is scaled by `ratio` relative to the input. A ratio
+    /// of 2.0 doubles the sample count; 0.5 halves it.
+    ///
+    /// Delegates to the `rubato` resampling library. The `quality` parameter
+    /// controls the trade-off between speed and output fidelity.
+    ///
     /// # Arguments
-    /// * `ratio` - Resampling ratio (output_rate / input_rate)
-    /// * `quality` - Quality/performance trade-off setting
+    /// - `ratio` - Resampling ratio (`output_rate / input_rate`). Must be > 0.
+    /// - `quality` - Resampling quality preset (see [`ResamplingQuality`]).
     ///
     /// # Returns
-    /// A new AudioSamples instance resampled by the given ratio
+    /// A new [`AudioSamples`] instance resampled by the given ratio.
     ///
     /// # Errors
-    /// Returns an error if:
-    /// - The resampling feature is not enabled
-    /// - The ratio is invalid (≤ 0)
-    /// - The input audio is empty
-    /// - Rubato encounters an internal error
+    /// - [`crate::AudioSampleError::Parameter`] if `ratio` is ≤ 0 or the
+    ///   quality parameters are invalid.
+    /// - [`crate::AudioSampleError::Layout`] if the input audio is empty.
     #[cfg(feature = "resampling")]
-    fn resample_by_ratio<F>(&self, ratio: F, quality: ResamplingQuality) -> AudioSampleResult<Self>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+    fn resample_by_ratio(
+        &self,
+        ratio: f64,
+        quality: ResamplingQuality,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 }
 
 /// Frequency domain analysis and spectral transformations.
 ///
 /// This trait provides methods for FFT-based analysis and spectral processing.
-/// Requires external FFT library dependencies.
 ///
 /// Complex numbers are used for frequency domain representations,
 /// and ndarray is used for efficient matrix operations on spectrograms.
-#[cfg(feature = "spectral-analysis")]
-pub trait AudioTransforms<T: AudioSample>
+#[cfg(feature = "transforms")]
+pub trait AudioTransforms: AudioTypeConversion
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
+    Self::Sample: StandardSample,
 {
-    /// Computes the Fast Fourier Transform of the audio samples.
+    /// Computes the Fast Fourier Transform of the audio signal.
     ///
-    /// Returns complex frequency domain representation where the real and
-    /// imaginary parts represent the magnitude and phase at each frequency bin.
-    ///
-    /// The output is a 2D array with shape (1, num_bins) for single-channel audio.
-    /// And (num_channels, num_bins) for multi-channel audio. Each row represents
-    /// the FFT of a channel.
-    fn fft<F>(&self) -> AudioSampleResult<Array2<Complex<F>>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Compute FFT with additional information.
-    fn fft_info<F>(
-        &self,
-        n_fft: Option<usize>,
-        window: Option<WindowType<F>>,
-        normalise: bool,
-    ) -> FftInfoResult<F>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>,
-        i16: ConvertTo<F>,
-        I24: ConvertTo<F>,
-        i32: ConvertTo<F>,
-        f32: ConvertTo<F>,
-        f64: ConvertTo<F>,
-        for<'b> AudioSamples<'b, F>: AudioTypeConversion<'b, F>;
-
-    /// Computes the inverse FFT from frequency domain back to time domain.
+    /// Each channel is transformed independently. The output has one row per
+    /// channel containing the complex spectral bins.
     ///
     /// # Arguments
-    /// * `spectrum` - Complex frequency domain data
-    fn ifft<F>(&self, spectrum: &Array2<Complex<F>>) -> AudioSampleResult<Self>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>,
-        Self: Sized;
-
-    /// Computes the Short-Time Fourier Transform (STFT).
-    ///
-    /// Returns a 2D array where each column represents an FFT frame at a specific time.
-    /// This provides both time and frequency information simultaneously.
-    ///
-    /// # Arguments
-    /// * `window_size` - Size of each analysis window in samples
-    /// * `hop_size` - Number of samples between successive windows
-    /// * `window_type` - Window function to apply to each frame
-    fn stft<F>(
-        &self,
-        window_size: usize,
-        hop_size: usize,
-        window_type: WindowType<F>,
-    ) -> AudioSampleResult<Array2<Complex<F>>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes the Short-Time Fourier Transform (STFT).
-    ///
-    /// Returns a tuple containing a 2D array where each column represents an FFT frame at a specific time and a vector of frequency bins.
-    /// This provides both time and frequency information simultaneously.
-    ///
-    /// # Arguments
-    /// * `window_size` - Size of each analysis window in samples
-    /// * `hop_size` - Number of samples between successive windows
-    /// * `window_type` - Window function to apply to each frame
-    fn stft_with_freqs<F>(
-        &self,
-        window_size: usize,
-        hop_size: usize,
-        window_type: WindowType<F>,
-    ) -> AudioSampleResult<(Array2<Complex<F>>, Vec<F>)>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes the inverse STFT to reconstruct time domain signal.
-    ///
-    /// Reconstructs a time-domain signal from its STFT representation.
-    ///
-    /// # Arguments
-    /// * `stft_matrix` - STFT data (frequency bins × time frames)
-    /// * `hop_size` - Hop size used in the original STFT
-    /// * `window_type` - Window type used in the original STFT
-    /// * `sample_rate` - Sample rate for the reconstructed signal
-    /// * `center` - Whether the original signal was centered with padding
+    /// - `n_fft` — FFT length in samples. If longer than the signal the input
+    ///   is zero-padded internally.
     ///
     /// # Returns
-    ///
-    /// Reconstructed time-domain audio samples
+    /// An `Array2<Complex<f64>>` where each row is the FFT of the
+    /// corresponding channel.
     ///
     /// # Errors
-    ///
-    /// Returns an error if reconstruction fails due to mismatched parameters.
-    fn istft<F>(
-        stft_matrix: &Array2<Complex<F>>,
-        hop_size: usize,
-        window_type: WindowType<F>,
-        sample_rate: usize,
-        center: bool,
-    ) -> AudioSampleResult<Self>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>,
-        Self: Sized;
-
-    /// Computes the magnitude spectrogram (|STFT|^2) with scaling options.
-    ///
-    /// Returns the power spectrum over time, useful for visualization
-    /// and analysis of spectral content.
-    ///
-    /// # Arguments
-    /// * `window_size` - Size of each analysis window in samples
-    /// * `hop_size` - Number of samples between successive windows
-    /// * `window_type` - Window function to apply to each frame
-    /// * `scale` - Scaling method to apply (Linear, Log, or Mel)
-    /// * `normalize` - Whether to normalize the result
-    fn spectrogram<F>(
-        &self,
-        window_size: usize,
-        hop_size: usize,
-        window_type: WindowType<F>,
-        scale: SpectrogramScale,
-        normalize: bool,
-    ) -> AudioSampleResult<Array2<F>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes mel-scaled spectrogram for perceptual analysis.
-    ///
-    /// The mel scale better represents human auditory perception
-    /// and is commonly used in speech and music analysis.
-    ///
-    /// # Arguments
-    /// * `n_mels` - Number of mel frequency bands
-    /// * `fmin` - Minimum frequency in Hz
-    /// * `fmax` - Maximum frequency in Hz
-    /// * `window_size` - Size of each analysis window in samples
-    /// * `hop_size` - Number of samples between successive windows
-    fn mel_spectrogram<F>(
-        &self,
-        n_mels: usize,
-        fmin: F,
-        fmax: F,
-        window_size: usize,
-        hop_size: usize,
-    ) -> AudioSampleResult<Array2<F>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes Mel-Frequency Cepstral Coefficients (MFCC).
-    ///
-    /// MFCCs are commonly used features in speech recognition and audio analysis.
-    /// They provide a compact representation of spectral characteristics.
-    ///
-    /// # Arguments
-    /// * `n_mfcc` - Number of MFCC coefficients to compute
-    /// * `n_mels` - Number of mel frequency bands (intermediate step)
-    /// * `fmin` - Minimum frequency in Hz
-    /// * `fmax` - Maximum frequency in Hz
-    fn mfcc<F>(
-        &self,
-        n_mfcc: usize,
-        n_mels: usize,
-        fmin: F,
-        fmax: F,
-    ) -> AudioSampleResult<Array2<F>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes chromagram (pitch class profile).
-    ///
-    /// Useful for music analysis and chord detection by representing
-    /// the energy in each of the 12 pitch classes (C, C#, D, etc.).
-    ///
-    /// # Arguments
-    /// * `n_chroma` - Number of chroma bins (typically 12)
-    fn chroma<F>(&self, n_chroma: usize) -> AudioSampleResult<Array2<F>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes chromagram features with configurable parameters and methods.
-    ///
-    /// Chromagram represents the distribution of energy across pitch classes,
-    /// providing a harmonic representation that is invariant to octave shifts.
-    /// This method provides full control over the computation including choice
-    /// between STFT and CQT methods.
-    ///
-    /// # Arguments
-    /// * `cfg` - Configuration specifying method, window parameters, and normalization
-    ///
-    /// # Returns
-    /// A 2D array with shape `(n_chroma, n_frames)` where each column represents
-    /// the chroma vector for one time frame.
+    /// Returns an error if the FFT computation fails.
     ///
     /// # Examples
-    /// ```rust,no_run
-    /// use audio_samples::{AudioSamples, AudioTransforms};
-    /// use audio_samples::operations::types::{ChromaConfig, ChromaMethod};
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let audio = AudioSamples::from_mono(&[0.1, 0.2, 0.3, 0.4], 44100)?;
-    ///
-    /// // Basic chromagram with STFT
-    /// let config = ChromaConfig::stft();
-    /// let chroma = audio.chromagram::<f64>(&config)?;
-    ///
-    /// // High resolution chromagram
-    /// let config = ChromaConfig::high_resolution();
-    /// let chroma = audio.chromagram::<f64>(&config)?;
-    ///
-    /// // CQT-based chromagram
-    /// let config = ChromaConfig::cqt();
-    /// let chroma = audio.chromagram::<f64>(&config)?;
-    /// # Ok(())
-    /// # }
     /// ```
-    fn chromagram<F>(&self, cfg: &ChromaConfig<F>) -> AudioSampleResult<Array2<F>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes the power spectral density using Welch's method.
+    /// use audio_samples::{AudioSamples, AudioTransforms, sample_rate};
+    /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
     ///
-    /// Returns both the frequency bins and corresponding power values.
-    /// Welch's method provides better noise reduction than a single FFT.
+    /// let data  = array![1.0f32, 0.0, -1.0, 0.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let spectrum = audio.fft(NonZeroUsize::new(4).unwrap()).unwrap();
+    /// assert_eq!(spectrum.shape()[0], 1); // one row per channel
+    /// ```
+    fn fft(&self, n_fft: NonZeroUsize) -> AudioSampleResult<Array2<Complex<f64>>>;
+
+    /// Computes the Real-valued Fast Fourier Transform of a mono signal.
     ///
     /// # Arguments
-    /// * `window_size` - Size of each segment for averaging
-    /// * `overlap` - Overlap between segments (0.0 to 1.0)
-    fn power_spectral_density<F>(
-        &self,
-        window_size: usize,
-        overlap: F,
-    ) -> AudioSampleResult<(Vec<F>, Vec<F>)>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>; // (frequencies, psd)
+    /// - `n_fft` — FFT length in samples. If longer than the signal the input
+    fn rfft(&self, n_fft: NonZeroUsize) -> AudioSampleResult<Array2<f64>> {
+        let fft_complex = self.fft(n_fft)?;
+        Ok(fft_complex.mapv(Complex::norm))
+    }
 
-    /// Computes gammatone-filtered spectrogram for auditory modeling.
+    /// Computes the Short-Time Fourier Transform (STFT) of a mono signal.
     ///
-    /// Gammatone filters model the human auditory system's frequency selectivity.
-    /// They use the ERB (Equivalent Rectangular Bandwidth) scale which approximates
-    /// the filtering characteristics of the human cochlea.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// Gammatone filter impulse response:
-    /// ```text
-    /// g(t) = a * t^(n-1) * exp(-2πERB(f)t) * cos(2πft + φ)
-    /// ```
-    ///
-    /// ERB scale:
-    /// ```text
-    /// ERB(f) = 24.7 * (4.37*f/1000 + 1)
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Auditory modeling**: Simulates cochlear filtering
-    /// - **Psychoacoustic analysis**: Perceptually relevant frequency decomposition
-    /// - **Hearing research**: Models human auditory processing
-    /// - **Audio compression**: Perceptually motivated frequency analysis
+    /// The signal is divided into overlapping, windowed frames and each frame
+    /// is transformed to the frequency domain. The returned [`StftResult`]
+    /// carries both the complex matrix and the parameters required by
+    /// [`istft`] for reconstruction.
     ///
     /// # Arguments
-    /// * `n_filters` - Number of gammatone filters (typically 64-128)
-    /// * `fmin` - Minimum frequency in Hz (typically 80-100 Hz)
-    /// * `fmax` - Maximum frequency in Hz (typically sample_rate/2)
-    /// * `window_size` - Size of analysis windows in samples
-    /// * `hop_size` - Number of samples between successive windows
-    fn gammatone_spectrogram<F>(
-        &self,
-        n_filters: usize,
-        fmin: F,
-        fmax: F,
-        window_size: usize,
-        hop_size: usize,
-    ) -> AudioSampleResult<Array2<F>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Computes the Constant-Q Transform (CQT) of the audio signal.
-    ///
-    /// The CQT provides logarithmic frequency resolution that aligns with musical
-    /// intervals, making it ideal for music analysis and harmonic detection.
-    /// Unlike FFT which has linear frequency spacing, CQT bins are spaced
-    /// logarithmically with constant Q factor (Q = f_center / bandwidth).
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The CQT is computed by convolving the signal with a bank of complex
-    /// exponential kernels at logarithmically spaced frequencies:
-    ///
-    /// ```text
-    /// CQT[k] = Σ(n=0 to N-1) x[n] * W*[k,n]
-    /// ```
-    ///
-    /// Where:
-    /// - `W[k,n]` is the kernel for bin k at sample n
-    /// - `f_k = fmin * 2^(k/bins_per_octave)` (logarithmic frequency spacing)
-    /// - `Q = f_k / bandwidth_k` (constant across all bins)
-    ///
-    /// # Applications
-    ///
-    /// - **Music analysis**: Chord detection, harmonic analysis
-    /// - **Pitch tracking**: Fundamental frequency estimation
-    /// - **Audio classification**: Genre classification, instrument recognition
-    /// - **Sound synthesis**: Spectral modeling and resynthesis
-    ///
-    /// # Arguments
-    /// * `config` - CQT configuration parameters
+    /// - `params` — STFT configuration (FFT size, hop size, window function,
+    ///   and centering behaviour). Field-level constraints are documented on
+    ///   [`StftParams`].
     ///
     /// # Returns
-    /// Complex-valued CQT coefficients as `Array2<Complex<f64>>` with dimensions
-    /// `(num_bins, 1)` for single-frame analysis
+    /// An [`StftResult`] containing the complex STFT matrix and metadata.
     ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::CqtConfig;
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel.
+    /// - Errors from the underlying STFT computation.
     ///
-    /// let config = CqtConfig::musical();
-    /// let cqt = audio.constant_q_transform(&config)?;
-    /// ```
-    fn constant_q_transform<F>(
-        &self,
-        config: &CqtConfig<F>,
-    ) -> AudioSampleResult<Array2<Complex<F>>>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
+    /// [`istft`]: Self::istft
+    fn stft(&self, params: &StftParams) -> AudioSampleResult<StftResult>;
 
-    /// Computes the inverse Constant-Q Transform (iCQT) to reconstruct time-domain signal.
+    /// Reconstructs a time-domain signal from an [`StftResult`].
     ///
-    /// Reconstructs a time-domain signal from its CQT representation using
-    /// dual-frame reconstruction or pseudo-inverse methods.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The iCQT attempts to reconstruct the original signal:
-    /// ```text
-    /// x[n] = Σ(k=0 to K-1) CQT[k] * W[k,n]
-    /// ```
-    ///
-    /// Due to the non-uniform sampling in the CQT, perfect reconstruction
-    /// requires careful consideration of the dual frame or pseudo-inverse.
+    /// Uses overlap-add synthesis with the window and hop parameters stored
+    /// in the [`StftResult`]. The output is a mono signal at the sample rate
+    /// that was recorded during the forward transform.
     ///
     /// # Arguments
-    /// * `cqt_matrix` - CQT coefficients from `constant_q_transform`
-    /// * `config` - CQT configuration used for the forward transform
-    /// * `signal_length` - Length of the original signal in samples
+    /// - `stft` — the [`StftResult`] produced by a prior call to [`stft`].
     ///
     /// # Returns
-    /// Reconstructed time-domain signal
+    /// A mono [`AudioSamples`] at the original sample rate.
     ///
-    /// # Example
-    /// ```rust,ignore
-    /// let cqt = audio.constant_q_transform(&config)?;
-    /// let reconstructed = AudioSamples::inverse_constant_q_transform(&cqt, &config, original_length)?;
-    /// ```
-    fn inverse_constant_q_transform<F>(
-        cqt_matrix: &Array2<Complex<F>>,
-        config: &CqtConfig<F>,
-        signal_length: usize,
-        sample_rate: F,
-    ) -> AudioSampleResult<Self>
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>,
-        Self: Sized;
+    /// # Errors
+    /// Returns an error if the reconstruction fails (e.g. mismatched
+    /// parameters inside the [`StftResult`]).
+    ///
+    /// [`stft`]: Self::stft
+    fn istft(stft: StftResult) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
-    /// Computes the CQT spectrogram for time-frequency analysis.
+    /// Computes a linearly-spaced spectrogram.
     ///
-    /// Applies the CQT to overlapping windows of the signal to create a
-    /// time-frequency representation with logarithmic frequency resolution.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The CQT spectrogram is computed by applying the CQT to overlapping
-    /// windows of the signal:
-    /// ```text
-    /// CQT_spectrogram[k,t] = CQT(x[t*hop_size:(t*hop_size + window_size)])
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Musical visualization**: Spectrograms with note-aligned frequency bins
-    /// - **Harmonic tracking**: Following harmonics over time
-    /// - **Onset detection**: Detecting note onsets in musical signals
-    /// - **Tempo analysis**: Beat tracking and rhythm analysis
+    /// Prefer the typed convenience methods —
+    /// [`linear_magnitude_spectrogram`], [`linear_power_spectrogram`], or
+    /// [`linear_db_spectrogram`] — for the most common amplitude scales.
     ///
     /// # Arguments
-    /// * `config` - CQT configuration parameters
-    /// * `hop_size` - Number of samples between successive windows
-    /// * `window_size` - Size of analysis windows in samples (None = auto-calculated)
+    /// - `params` — spectrogram parameters (window, hop, FFT size).
+    /// - `db` — required when `AmpScale` is `Decibels`; ignored otherwise.
     ///
     /// # Returns
-    /// Complex-valued CQT spectrogram as `Array2<Complex<F>>` with dimensions
-    /// `(num_bins, num_frames)` where num_frames depends on signal length and hop_size
+    /// A `Spectrogram<LinearHz, AmpScale>`.
     ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = CqtConfig::chord_detection();
-    /// let hop_size = 512;
-    /// let cqt_spectrogram = audio.cqt_spectrogram(&config, hop_size, None)?;
-    /// ```
-    fn cqt_spectrogram<F>(
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying spectrogram computation.
+    fn linear_spectrogram<AmpScale>(
         &self,
-        config: &CqtConfig<F>,
-        hop_size: usize,
-        window_size: Option<usize>,
-    ) -> AudioSampleResult<Array2<Complex<F>>>
+        params: &SpectrogramParams,
+        db: Option<&LogParams>,
+    ) -> AudioSampleResult<Spectrogram<LinearHz, AmpScale>>
     where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
+        AmpScale: AmpScaleSpec;
 
-    /// Computes the magnitude CQT spectrogram for visualization and analysis.
+    /// Shorthand for [`linear_spectrogram`] with `Magnitude` amplitude scale.
+    fn linear_magnitude_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+    ) -> AudioSampleResult<LinearMagnitudeSpectrogram> {
+        self.linear_spectrogram::<Magnitude>(params, None)
+    }
+
+    /// Shorthand for [`linear_spectrogram`] with `Power` amplitude scale.
+    fn linear_power_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+    ) -> AudioSampleResult<LinearPowerSpectrogram> {
+        self.linear_spectrogram::<Power>(params, None)
+    }
+
+    /// Shorthand for [`linear_spectrogram`] with `Decibels` amplitude scale.
+    fn linear_db_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        db: &LogParams,
+    ) -> AudioSampleResult<LinearDbSpectrogram> {
+        self.linear_spectrogram::<Decibels>(params, Some(db))
+    }
+
+    /// Computes a log-frequency-spaced spectrogram.
     ///
-    /// Similar to `cqt_spectrogram` but returns only the magnitude (amplitude)
-    /// information, which is often sufficient for analysis and visualization.
+    /// Prefer the typed convenience methods —
+    /// [`loghz_power_spectrogram`], [`loghz_magnitude_spectrogram`], or
+    /// [`loghz_db_spectrogram`] — for the most common amplitude scales.
     ///
     /// # Arguments
-    /// * `config` - CQT configuration parameters
-    /// * `hop_size` - Number of samples between successive windows
-    /// * `window_size` - Size of analysis windows in samples (None = auto-calculated)
-    /// * `power` - Whether to return power (magnitude²) instead of magnitude
+    /// - `params` — spectrogram parameters (window, hop, FFT size).
+    /// - `loghz` — log-Hz frequency-axis configuration (min/max
+    ///   frequency, number of bins). Field-level constraints are
+    ///   documented on [`LogHzParams`].
+    /// - `db` — required when `AmpScale` is `Decibels`; ignored otherwise.
     ///
     /// # Returns
-    /// Real-valued magnitude CQT spectrogram as `Array2<F>` with dimensions
-    /// `(num_bins, num_frames)`
+    /// A `Spectrogram<LogHz, AmpScale>`.
     ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = CqtConfig::musical();
-    /// let hop_size = 512;
-    /// let magnitude_spectrogram = audio.cqt_magnitude_spectrogram(&config, hop_size, None, false)?;
-    /// ```
-    fn cqt_magnitude_spectrogram<F>(
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying spectrogram computation.
+    fn log_frequency_spectrogram<AmpScale>(
         &self,
-        config: &CqtConfig<F>,
-        hop_size: usize,
-        window_size: Option<usize>,
-        power: bool,
-    ) -> AudioSampleResult<Array2<F>>
+        params: &SpectrogramParams,
+        loghz: &LogHzParams,
+        db: Option<&LogParams>,
+    ) -> AudioSampleResult<Spectrogram<LogHz, AmpScale>>
     where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>;
+        AmpScale: AmpScaleSpec;
 
-    /// Separate a complex-valued spectrogram D into its magnitude (S) and phase (P) components, so that D = S * P.
-    fn magphase<F>(
-        complex_spect: &Array2<Complex<F>>,
+    /// Shorthand for [`log_frequency_spectrogram`] with `Power` amplitude scale.
+    fn loghz_power_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        loghz: &LogHzParams,
+    ) -> AudioSampleResult<LogHzPowerSpectrogram> {
+        self.log_frequency_spectrogram::<Power>(params, loghz, None)
+    }
+
+    /// Shorthand for [`log_frequency_spectrogram`] with `Magnitude` amplitude scale.
+    fn loghz_magnitude_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        loghz: &LogHzParams,
+    ) -> AudioSampleResult<LogHzMagnitudeSpectrogram> {
+        self.log_frequency_spectrogram::<Magnitude>(params, loghz, None)
+    }
+
+    /// Shorthand for [`log_frequency_spectrogram`] with `Decibels` amplitude scale.
+    fn loghz_db_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        loghz: &LogHzParams,
+        db: &LogParams,
+    ) -> AudioSampleResult<LogHzDbSpectrogram> {
+        self.log_frequency_spectrogram::<Decibels>(params, loghz, Some(db))
+    }
+
+    /// Computes a mel-scaled spectrogram.
+    ///
+    /// The mel scale approximates human auditory perception by compressing
+    /// high frequencies relative to low ones.  Prefer the typed
+    /// convenience methods — [`mel_mag_spectrogram`],
+    /// [`mel_power_spectrogram`], or [`mel_db_spectrogram`] — for the
+    /// most common amplitude scales.
+    ///
+    /// # Arguments
+    /// - `params` — spectrogram parameters (window, hop, FFT size).
+    /// - `mel` — mel filter-bank configuration (number of bands,
+    ///   frequency range). Field-level constraints are documented on
+    ///   [`MelParams`].
+    /// - `db` — required when `AmpScale` is `Decibels`; ignored otherwise.
+    ///
+    /// # Returns
+    /// A [`MelSpectrogram<AmpScale>`].
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying spectrogram computation.
+    ///
+    /// ## See Also
+    /// - [Mel scale — Wikipedia](https://en.wikipedia.org/wiki/Mel_scale)
+    fn mel_spectrogram<AmpScale>(
+        &self,
+        params: &SpectrogramParams,
+        mel: &MelParams,
+        db: Option<&LogParams>, // only used when AmpScale = Decibels
+    ) -> AudioSampleResult<MelSpectrogram<AmpScale>>
+    where
+        AmpScale: AmpScaleSpec;
+
+    /// Shorthand for [`mel_spectrogram`] with `Magnitude` amplitude scale.
+    fn mel_mag_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        mel: &MelParams,
+    ) -> AudioSampleResult<MelMagnitudeSpectrogram> {
+        self.mel_spectrogram(params, mel, None)
+    }
+
+    /// Shorthand for [`mel_spectrogram`] with `Decibels` amplitude scale.
+    fn mel_db_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        mel: &MelParams,
+        db: &LogParams,
+    ) -> AudioSampleResult<LogMelSpectrogram> {
+        self.mel_spectrogram(params, mel, Some(db))
+    }
+
+    /// Shorthand for [`mel_spectrogram`] with `Power` amplitude scale.
+    fn mel_power_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        mel: &MelParams,
+    ) -> AudioSampleResult<MelPowerSpectrogram> {
+        self.mel_spectrogram(params, mel, None)
+    }
+
+    /// Computes Mel-Frequency Cepstral Coefficients (MFCCs).
+    ///
+    /// MFCCs are a compact spectral representation widely used in speech
+    /// recognition and audio classification.  They are derived by
+    /// applying a DCT to log-mel filter-bank energies.
+    ///
+    /// # Arguments
+    /// - `stft_params` — STFT configuration used for the underlying
+    ///   spectrogram.
+    /// - `n_mels` — number of mel filter-bank bands.
+    /// - `mfcc_params` — MFCC-specific configuration (number of
+    ///   coefficients, etc.). Field-level constraints are documented on
+    ///   [`MfccParams`].
+    ///
+    /// # Returns
+    /// An [`Mfcc`] containing the MFCC matrix.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying computation.
+    ///
+    /// ## See Also
+    /// - [MFCC — Wikipedia](https://en.wikipedia.org/wiki/Mel-frequency_cepstrum)
+    fn mfcc(
+        &self,
+        stft_params: &StftParams,
+        n_mels: NonZeroUsize,
+        mfcc_params: &MfccParams,
+    ) -> AudioSampleResult<Mfcc>;
+
+    /// Computes chromagram (pitch-class energy) features.
+    ///
+    /// A chromagram projects the spectrum onto the twelve pitch classes
+    /// (C, C♯, D, … , B), collapsing octave differences.  The result
+    /// is useful for harmonic and key detection.
+    ///
+    /// # Arguments
+    /// - `stft_params` — STFT configuration used for the underlying
+    ///   spectrogram.
+    /// - `cfg` — chromagram configuration (tuning, normalization,
+    ///   etc.). Field-level constraints are documented on
+    ///   [`ChromaParams`].
+    ///
+    /// # Returns
+    /// A [`Chromagram`].
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying computation.
+    fn chromagram(
+        &self,
+        stft_params: &StftParams,
+        cfg: &ChromaParams,
+    ) -> AudioSampleResult<Chromagram>;
+
+    /// Estimates the power spectral density using Welch's method.
+    ///
+    /// The signal is split into overlapping segments; each is windowed
+    /// with a Hanning window and FFT'd, and the resulting periodograms
+    /// are averaged.  The final values are normalised to power per Hz.
+    ///
+    /// # Arguments
+    /// - `window_size` — length of each segment in samples.  Must not
+    ///   exceed the signal length.
+    /// - `overlap` — fractional overlap between adjacent segments, in
+    ///   the range `[0, 1)`.
+    ///
+    /// # Returns
+    /// A pair `(frequencies, psd)` of equal length.  `frequencies[i]` is
+    /// the centre frequency of bin `i` in Hz; `psd[i]` is the estimated
+    /// power spectral density at that frequency.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is
+    ///   multi-channel, if `overlap` is outside `[0, 1)`, or if
+    ///   `window_size` exceeds the signal length.
+    ///
+    /// ## See Also
+    /// - [Welch's method — Wikipedia](https://en.wikipedia.org/wiki/Welch%27s_method)
+    fn power_spectral_density(
+        &self,
+        window_size: NonZeroUsize,
+        overlap: f64,
+    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
+
+    /// Computes a gammatone-filtered spectrogram.
+    ///
+    /// Gammatone filters model the bandpass response of the human
+    /// cochlea.  The filter centre frequencies are spaced according to
+    /// the ERB (Equivalent Rectangular Bandwidth) scale.  Prefer the
+    /// typed convenience methods —
+    /// [`gammatone_magnitude_spectrogram`],
+    /// [`gammatone_power_spectrogram`], or
+    /// [`gammatone_db_spectrogram`] — for the most common amplitude
+    /// scales.
+    ///
+    /// # Arguments
+    /// - `params` — spectrogram parameters (window, hop, FFT size).
+    /// - `gammatone_params` — gammatone filter-bank configuration
+    ///   (number of bands, frequency range). Field-level constraints are
+    ///   documented on [`GammatoneParams`].
+    /// - `db` — required when `AmpScale` is `Decibels`; ignored otherwise.
+    ///
+    /// # Returns
+    /// A `Spectrogram<Gammatone, AmpScale>`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying computation.
+    ///
+    /// ## See Also
+    /// - [Gammatone filter — Wikipedia](https://en.wikipedia.org/wiki/Gammatone)
+    fn gammatone_spectrogram<AmpScale>(
+        &self,
+        params: &SpectrogramParams,
+        gammatone_params: &GammatoneParams,
+        db: Option<&LogParams>,
+    ) -> AudioSampleResult<Spectrogram<Gammatone, AmpScale>>
+    where
+        AmpScale: AmpScaleSpec;
+
+    /// Shorthand for [`gammatone_spectrogram`] with `Magnitude` amplitude scale.
+    fn gammatone_magnitude_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        gammatone_params: &GammatoneParams,
+    ) -> AudioSampleResult<GammatoneMagnitudeSpectrogram> {
+        self.gammatone_spectrogram::<Magnitude>(params, gammatone_params, None)
+    }
+
+    /// Shorthand for [`gammatone_spectrogram`] with `Power` amplitude scale.
+    fn gammatone_power_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        gammatone_params: &GammatoneParams,
+    ) -> AudioSampleResult<GammatonePowerSpectrogram> {
+        self.gammatone_spectrogram::<Power>(params, gammatone_params, None)
+    }
+
+    /// Shorthand for [`gammatone_spectrogram`] with `Decibels` amplitude scale.
+    fn gammatone_db_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        gammatone_params: &GammatoneParams,
+        db: &LogParams,
+    ) -> AudioSampleResult<GammatoneDbSpectrogram> {
+        self.gammatone_spectrogram::<Decibels>(params, gammatone_params, Some(db))
+    }
+
+    /// Computes the Constant-Q Transform (CQT) of a mono signal.
+    ///
+    /// The CQT uses a bank of bandpass filters whose centre frequencies
+    /// are spaced logarithmically with a constant ratio
+    /// Q = f / Δf.  This gives it the same frequency resolution as the
+    /// musical scale, making it preferred for pitch and harmonic
+    /// analysis.
+    ///
+    /// # Arguments
+    /// - `params` — CQT parameters (frequency range, bins per octave,
+    ///   etc.). Field-level constraints are documented on [`CqtParams`].
+    /// - `hop_size` — hop length in samples between successive frames.
+    ///
+    /// # Returns
+    /// A [`CqtResult`] containing the CQT matrix.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying CQT computation.
+    ///
+    /// ## See Also
+    /// - [Constant-Q transform — Wikipedia](https://en.wikipedia.org/wiki/Constant-Q_transform)
+    fn constant_q_transform(
+        &self,
+        params: &CqtParams,
+        hop_size: NonZeroUsize,
+    ) -> AudioSampleResult<CqtResult>;
+
+    /// Computes a CQT-based spectrogram.
+    ///
+    /// Applies the CQT to the signal and returns the result as a typed
+    /// spectrogram.  Prefer the typed convenience methods —
+    /// [`cqt_magnitude_spectrogram`], [`cqt_power_spectrogram`], or
+    /// [`cqt_db_spectrogram`] — for the most common amplitude scales.
+    ///
+    /// # Arguments
+    /// - `params` — spectrogram parameters (window, hop, FFT size).
+    /// - `cqt` — CQT parameters (frequency range, bins per octave,
+    ///   etc.). Field-level constraints are documented on [`CqtParams`].
+    /// - `db` — required when `AmpScale` is `Decibels`; ignored otherwise.
+    ///
+    /// # Returns
+    /// A [`CqtSpectrogram<AmpScale>`].
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - Errors from the underlying computation.
+    fn cqt_spectrogram<AmpScale>(
+        &self,
+        params: &SpectrogramParams,
+        cqt: &CqtParams,
+        db: Option<&LogParams>,
+    ) -> AudioSampleResult<CqtSpectrogram<AmpScale>>
+    where
+        AmpScale: AmpScaleSpec;
+
+    /// Shorthand for [`cqt_spectrogram`] with `Magnitude` amplitude scale.
+    fn cqt_magnitude_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        cqt: &CqtParams,
+    ) -> AudioSampleResult<CqtMagnitudeSpectrogram> {
+        self.cqt_spectrogram::<Magnitude>(params, cqt, None)
+    }
+
+    /// Shorthand for [`cqt_spectrogram`] with `Power` amplitude scale.
+    fn cqt_power_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        cqt: &CqtParams,
+    ) -> AudioSampleResult<CqtPowerSpectrogram> {
+        self.cqt_spectrogram::<Power>(params, cqt, None)
+    }
+
+    /// Shorthand for [`cqt_spectrogram`] with `Decibels` amplitude scale.
+    fn cqt_db_spectrogram(
+        &self,
+        params: &SpectrogramParams,
+        cqt: &CqtParams,
+        db: &LogParams,
+    ) -> AudioSampleResult<CqtDbSpectrogram> {
+        self.cqt_spectrogram::<Decibels>(params, cqt, Some(db))
+    }
+
+    /// Decomposes a complex spectrogram into magnitude and phase.
+    ///
+    /// Given a complex matrix `D`, returns `(S, P)` such that
+    /// `D = S * P` elementwise, where `S` contains magnitudes raised to
+    /// `power` and `P` contains unit-magnitude complex phase factors.
+    /// Bins where the magnitude is zero are assigned a phase of `1 + 0i`.
+    ///
+    /// # Arguments
+    /// - `complex_spect` — the complex STFT or FFT matrix.
+    /// - `power` — exponent applied to the magnitude values.  `None`
+    ///   defaults to 1 (raw magnitude).
+    ///
+    /// # Returns
+    /// `(magnitude, phase)` — the magnitude matrix (real-valued) and
+    /// the phase matrix (complex unit-magnitude).
+    #[must_use]
+    fn magphase(
+        complex_spect: &Array2<Complex<f64>>,
         power: Option<NonZeroUsize>,
-    ) -> (Array2<F>, Array2<Complex<F>>)
-    where
-        F: RealFloat + FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>,
-    {
+    ) -> (Array2<f64>, Array2<Complex<f64>>) {
         // Magnitude: elementwise absolute value
 
-        let mut mag = complex_spect.mapv(|x| x.norm());
+        let mut mag = complex_spect.mapv(num_complex::Complex::norm);
 
         // zeros_to_ones: 1.0 where mag == 0, else 0.0
-        let zeros_to_ones = mag.mapv(|x| if x == F::zero() { F::one() } else { F::zero() });
+        let zeros_to_ones = mag.mapv(|x| if x == 0.0 { 1.0 } else { 0.0 });
 
         // mag_nonzero = mag + zeros_to_ones
         let mag_nonzero = &mag + &zeros_to_ones;
@@ -881,8 +1356,8 @@ where
         let mut phase = complex_spect.clone();
 
         let power = match power {
-            Some(p) => crate::to_precision(p.get() as f64),
-            None => F::one(),
+            Some(p) => p.get() as f64,
+            None => 1.0,
         };
 
         // Perform elementwise division for real and imaginary parts
@@ -909,14 +1384,10 @@ where
 /// This trait provides methods for detecting the fundamental frequency (pitch)
 /// of audio signals using various algorithms. These methods are essential for
 /// music analysis, tuning applications, and vocal processing.
-pub trait AudioPitchAnalysis<T: AudioSample>
+#[cfg(feature = "pitch-analysis")]
+pub trait AudioPitchAnalysis: AudioTypeConversion
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    Self::Sample: StandardSample,
 {
     /// Detects the fundamental frequency using the YIN algorithm.
     ///
@@ -944,15 +1415,12 @@ where
     /// # Returns
     /// * `Some(frequency)` - Detected fundamental frequency in Hz
     /// * `None` - No reliable pitch detected
-    fn detect_pitch_yin<F>(
+    fn detect_pitch_yin(
         &self,
-        threshold: F,
-        min_frequency: F,
-        max_frequency: F,
-    ) -> AudioSampleResult<Option<F>>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+        threshold: f64,
+        min_frequency: f64,
+        max_frequency: f64,
+    ) -> AudioSampleResult<Option<f64>>;
 
     /// Detects pitch using autocorrelation method.
     ///
@@ -966,14 +1434,11 @@ where
     /// # Returns
     /// * `Some(frequency)` - Detected fundamental frequency in Hz
     /// * `None` - No reliable pitch detected
-    fn detect_pitch_autocorr<F>(
+    fn detect_pitch_autocorr(
         &self,
-        min_frequency: F,
-        max_frequency: F,
-    ) -> AudioSampleResult<Option<F>>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+        min_frequency: f64,
+        max_frequency: f64,
+    ) -> AudioSampleResult<Option<f64>>;
 
     /// Tracks pitch over time using a sliding window analysis.
     ///
@@ -991,18 +1456,15 @@ where
     /// # Returns
     /// Vector of (time_seconds, frequency_hz) pairs, where frequency
     /// is None if no pitch was detected in that window.
-    fn track_pitch<F>(
+    fn track_pitch(
         &self,
-        window_size: usize,
-        hop_size: usize,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
         method: PitchDetectionMethod,
-        threshold: F,
-        min_frequency: F,
-        max_frequency: F,
-    ) -> AudioSampleResult<Vec<(F, Option<F>)>>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+        threshold: f64,
+        min_frequency: f64,
+        max_frequency: f64,
+    ) -> AudioSampleResult<Vec<(f64, Option<f64>)>>;
 
     /// Computes the harmonic-to-noise ratio (HNR).
     ///
@@ -1012,17 +1474,18 @@ where
     /// # Arguments
     /// * `fundamental_freq` - Known or estimated fundamental frequency
     /// * `num_harmonics` - Number of harmonics to analyze (typically 5-10)
+    /// * `n_fft` - Optional FFT size for spectral analysis (defaults to signal length)
+    /// * `window_type` - Optional window function to apply before analysis. Defaults to Hanning.
     ///
     /// # Returns
     /// HNR value in dB. Higher values indicate stronger harmonic structure.
-    fn harmonic_to_noise_ratio<F>(
+    fn harmonic_to_noise_ratio(
         &self,
-        fundamental_freq: F,
-        num_harmonics: usize,
-    ) -> AudioSampleResult<F>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+        fundamental_freq: f64,
+        num_harmonics: NonZeroUsize,
+        n_fft: Option<NonZeroUsize>,
+        window_type: Option<WindowType>,
+    ) -> AudioSampleResult<f64>;
 
     /// Performs harmonic analysis by detecting harmonics of a fundamental frequency.
     ///
@@ -1033,18 +1496,19 @@ where
     /// * `fundamental_freq` - Fundamental frequency in Hz
     /// * `num_harmonics` - Number of harmonics to analyze
     /// * `tolerance` - Frequency tolerance for harmonic detection (0.0-1.0)
+    /// * `n_fft` - Optional FFT size for spectral analysis (defaults to signal length)
+    /// * `window_type` - Optional window function to apply before analysis. Defaults to Hanning.
     ///
     /// # Returns
     /// Vector of harmonic magnitudes normalized to the fundamental (index 0).
-    fn harmonic_analysis<F>(
+    fn harmonic_analysis(
         &self,
-        fundamental_freq: F,
-        num_harmonics: usize,
-        tolerance: F,
-    ) -> AudioSampleResult<Vec<F>>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+        fundamental_freq: f64,
+        num_harmonics: NonZeroUsize,
+        tolerance: f64,
+        n_fft: Option<NonZeroUsize>,
+        window_type: Option<WindowType>,
+    ) -> AudioSampleResult<Vec<f64>>;
 
     /// Estimates the key/pitch class of musical audio.
     ///
@@ -1052,16 +1516,12 @@ where
     /// Returns both the key and a confidence measure.
     ///
     /// # Arguments
-    /// * `window_size` - Size of analysis window for chromagram
-    /// * `hop_size` - Hop size for chromagram analysis
+    /// * `stft_params` - Parameters for the Short-Time Fourier Transform used in chromagram analysis
     ///
     /// # Returns
     /// Tuple of (key_index, confidence) where key_index is 0-11 for
     /// C, C#, D, D#, E, F, F#, G, G#, A, A#, B and confidence is 0.0-1.0
-    fn estimate_key<F>(&self, window_size: usize, hop_size: usize) -> AudioSampleResult<(usize, F)>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+    fn estimate_key(&self, stft_params: &StftParams) -> AudioSampleResult<(usize, f64)>;
 }
 
 /// IIR (Infinite Impulse Response) filtering operations.
@@ -1069,1434 +1529,1849 @@ where
 /// This trait provides methods for applying IIR filters to audio signals.
 /// IIR filters are recursive filters that can achieve sharp roll-offs
 /// with fewer coefficients than FIR filters.
-pub trait AudioIirFiltering<T: AudioSample>
+#[cfg(feature = "iir-filtering")]
+pub trait AudioIirFiltering: AudioTypeConversion
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    Self::Sample: AudioSample,
 {
     /// Apply an IIR filter using the specified design parameters.
     ///
-    /// Creates and applies an IIR filter based on the provided design
-    /// specification. The filter state is maintained internally.
+    /// Designs a filter from `design` (using the audio's own sample
+    /// rate), then applies it to every channel independently.
+    /// Multi-channel audio resets the filter state between channels
+    /// so each channel is filtered from a clean initial state.
     ///
     /// # Arguments
-    /// * `design` - Filter design parameters including type, order, and frequencies
-    /// * `sample_rate` - Sample rate of the audio signal
+    /// - `design` – Filter specification (type, order, frequencies, ripple).
     ///
     /// # Returns
-    /// Result containing the filtered audio or an error if the design is invalid
+    /// `Ok(())` on success.
     ///
-    /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::IirFilterDesign;
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if any frequency in `design`
+    ///   is out of the valid range (0, Nyquist), or the filter type is
+    ///   not yet implemented.
     ///
-    /// let design = IirFilterDesign::butterworth_lowpass(4, 1000.0);
-    /// let mut audio = AudioSamples::new_mono(samples, 44100);
-    /// audio.apply_iir_filter(&design, 44100)?;
+    /// # Examples
     /// ```
-    fn apply_iir_filter<F>(
-        &mut self,
-        design: &IirFilterDesign<F>,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Apply a simple Butterworth low-pass filter.
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioIirFiltering;
+    /// use audio_samples::operations::types::IirFilterDesign;
+    /// use non_empty_slice::NonEmptyVec;
+    /// use std::num::NonZeroUsize;
     ///
-    /// Convenience method for applying a Butterworth low-pass filter
-    /// without needing to create a full design specification.
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5, -1.0, 0.0, 1.0, 0.5, -0.5]).unwrap();
+    /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 1000.0);
+    /// assert!(audio.apply_iir_filter(&design).is_ok());
+    /// ```
+    fn apply_iir_filter(&mut self, design: &IirFilterDesign) -> AudioSampleResult<()>;
+
+    /// Apply a second-order Butterworth low-pass filter.
+    ///
+    /// Convenience wrapper that constructs an [`IirFilterDesign`] and
+    /// delegates to [`Self::apply_iir_filter`].  Only order 2 produces
+    /// mathematically correct coefficients; other orders use an
+    /// approximate placeholder.
     ///
     /// # Arguments
-    /// * `order` - Filter order (number of poles)
-    /// * `cutoff_frequency` - Cutoff frequency in Hz
-    /// * `sample_rate` - Sample rate of the audio signal
+    /// - `order` – Filter order (use 2 for correct results).
+    /// - `cutoff_frequency` – Cutoff frequency in Hz; must be in
+    ///   (0, Nyquist).
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn butterworth_lowpass<F>(
-        &mut self,
-        order: usize,
-        cutoff_frequency: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Apply a simple Butterworth high-pass filter.
+    /// `Ok(())` on success.
     ///
-    /// Convenience method for applying a Butterworth high-pass filter
-    /// without needing to create a full design specification.
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `cutoff_frequency` is
+    ///   outside the valid range.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioIirFiltering;
+    /// use non_empty_slice::NonEmptyVec;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
+    /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// assert!(audio.butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 1000.0).is_ok());
+    /// ```
+    fn butterworth_lowpass(
+        &mut self,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+    ) -> AudioSampleResult<()>;
+    /// Apply a second-order Butterworth high-pass filter.
+    ///
+    /// Convenience wrapper that constructs an [`IirFilterDesign`] and
+    /// delegates to [`Self::apply_iir_filter`].  Only order 2 produces
+    /// mathematically correct coefficients; other orders use an
+    /// approximate placeholder.
     ///
     /// # Arguments
-    /// * `order` - Filter order (number of poles)
-    /// * `cutoff_frequency` - Cutoff frequency in Hz
-    /// * `sample_rate` - Sample rate of the audio signal
+    /// - `order` – Filter order (use 2 for correct results).
+    /// - `cutoff_frequency` – Cutoff frequency in Hz; must be in
+    ///   (0, Nyquist).
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn butterworth_highpass<F>(
-        &mut self,
-        order: usize,
-        cutoff_frequency: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Apply a simple Butterworth band-pass filter.
+    /// `Ok(())` on success.
     ///
-    /// Convenience method for applying a Butterworth band-pass filter
-    /// without needing to create a full design specification.
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `cutoff_frequency` is
+    ///   outside the valid range.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioIirFiltering;
+    /// use non_empty_slice::NonEmptyVec;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]).unwrap();
+    /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// assert!(audio.butterworth_highpass(NonZeroUsize::new(2).unwrap(), 500.0).is_ok());
+    /// ```
+    fn butterworth_highpass(
+        &mut self,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+    ) -> AudioSampleResult<()>;
+
+    /// Apply a Butterworth band-pass filter.
+    ///
+    /// Convenience wrapper that constructs an [`IirFilterDesign`] and
+    /// delegates to [`Self::apply_iir_filter`].  The current
+    /// implementation uses an approximate placeholder; treat results
+    /// as indicative only.
     ///
     /// # Arguments
-    /// * `order` - Filter order (number of poles)
-    /// * `low_frequency` - Lower cutoff frequency in Hz
-    /// * `high_frequency` - Upper cutoff frequency in Hz
-    /// * `sample_rate` - Sample rate of the audio signal
+    /// - `order` – Filter order.
+    /// - `low_frequency` – Lower cutoff frequency in Hz; must be > 0.
+    /// - `high_frequency` – Upper cutoff frequency in Hz; must be < Nyquist
+    ///   and > `low_frequency`.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn butterworth_bandpass<F>(
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if the frequency range is
+    ///   invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioIirFiltering;
+    /// use non_empty_slice::NonEmptyVec;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
+    /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// assert!(audio.butterworth_bandpass(NonZeroUsize::new(2).unwrap(), 100.0, 5000.0).is_ok());
+    /// ```
+    fn butterworth_bandpass(
         &mut self,
-        order: usize,
-        low_frequency: F,
-        high_frequency: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        order: NonZeroUsize,
+        low_frequency: f64,
+        high_frequency: f64,
+    ) -> AudioSampleResult<()>;
 
     /// Apply a Chebyshev Type I filter.
     ///
-    /// Chebyshev Type I filters have ripple in the passband but provide
-    /// sharper roll-off than Butterworth filters of the same order.
+    /// Chebyshev Type I filters offer sharper roll-off than Butterworth
+    /// filters of the same order at the cost of passband ripple.
+    ///
+    /// > **Note:** This design is not yet implemented.  All calls
+    /// > currently return `Err`.
     ///
     /// # Arguments
-    /// * `order` - Filter order (number of poles)
-    /// * `cutoff_frequency` - Cutoff frequency in Hz
-    /// * `passband_ripple` - Passband ripple in dB
-    /// * `sample_rate` - Sample rate of the audio signal
-    /// * `response` - Filter response type (low-pass, high-pass, etc.)
+    /// - `order` – Filter order (number of poles).
+    /// - `cutoff_frequency` – Cutoff frequency in Hz.
+    /// - `passband_ripple` – Maximum passband ripple in dB.
+    /// - `response` – Filter response type (low-pass, high-pass, etc.).
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn chebyshev_i<F>(
+    /// `Ok(())` on success (currently unreachable).
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – always, because the design
+    ///   is not yet implemented.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioIirFiltering;
+    /// use audio_samples::operations::types::FilterResponse;
+    /// use non_empty_slice::NonEmptyVec;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.0, -1.0, 0.0]).unwrap();
+    /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let result = audio.chebyshev_i(
+    ///     NonZeroUsize::new(4).unwrap(), 1000.0, 0.5, FilterResponse::LowPass,
+    /// );
+    /// assert!(result.is_err());
+    /// ```
+    fn chebyshev_i(
         &mut self,
-        order: usize,
-        cutoff_frequency: F,
-        passband_ripple: F,
-        sample_rate: F,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+        passband_ripple: f64,
         response: FilterResponse,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+    ) -> AudioSampleResult<()>;
 
-    /// Get the frequency response of the current filter.
+    /// Return the frequency response at the specified frequencies.
     ///
-    /// Computes the magnitude and phase response of the filter at
-    /// the specified frequencies. Useful for analyzing filter characteristics.
+    /// > **Note:** This is a placeholder that returns a flat magnitude-1,
+    /// > phase-0 response regardless of the audio content.  A complete
+    /// > implementation would store and query the last-applied filter.
     ///
     /// # Arguments
-    /// * `frequencies` - Frequencies at which to compute the response (in Hz)
-    /// * `sample_rate` - Sample rate of the audio signal
+    /// - `frequencies` – Frequencies in Hz at which to compute the response.
     ///
     /// # Returns
-    /// Tuple of (magnitude_response, phase_response) vectors
-    fn frequency_response<F>(
-        &self,
-        frequencies: &[F],
-        sample_rate: F,
-    ) -> AudioSampleResult<(Vec<F>, Vec<F>)>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+    /// `Ok((magnitudes, phases))` where both vectors have the same
+    /// length as `frequencies`.  Currently `magnitudes` is all 1.0 and
+    /// `phases` is all 0.0.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioIirFiltering;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.0, -1.0]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let freqs = [100.0, 500.0, 1000.0];
+    /// let (mag, phase) = audio.frequency_response(&freqs).unwrap();
+    /// assert_eq!(mag.len(), 3);
+    /// assert_eq!(phase, vec![0.0, 0.0, 0.0]);
+    /// ```
+    fn frequency_response(&self, frequencies: &[f64]) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
 }
 
 /// Parametric equalization operations.
 ///
-/// This trait provides methods for applying parametric EQ to audio signals.
-/// Parametric EQ allows precise frequency shaping with adjustable frequency,
-/// gain, and Q (bandwidth) parameters for each band.
-pub trait AudioParametricEq<'a, T: AudioSample>
+/// Parametric equalizer operations for audio signals.
+///
+/// Provides multi-band parametric EQ processing with independent control over
+/// centre frequency, gain, and bandwidth (Q) for each band. All seven standard
+/// band types are supported: peak, low/high shelf, low/high pass, band pass, and
+/// band stop.
+#[cfg(feature = "parametric-eq")]
+pub trait AudioParametricEq: AudioChannelOps
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T> + AudioChannelOps<T>,
+    Self::Sample: StandardSample,
 {
-    /// Apply a parametric EQ to the audio signal.
+    /// Applies a multi-band parametric EQ to the signal.
     ///
-    /// Processes the audio through all enabled bands in the parametric EQ
-    /// configuration, applying frequency shaping according to each band's
-    /// type, frequency, gain, and Q parameters.
+    /// Each enabled band in `eq` is applied in sequence using the RBJ biquad filter
+    /// coefficients appropriate for its type. An optional output gain is applied after
+    /// all bands. If the EQ is bypassed, the signal is returned unchanged.
     ///
     /// # Arguments
-    /// * `eq` - Parametric EQ configuration with multiple bands
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `eq` – The parametric EQ configuration. All enabled bands are validated before
+    ///   processing begins.
     ///
     /// # Returns
-    /// Result indicating success or failure
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if any enabled band fails validation
+    /// (e.g. frequency above the Nyquist limit, Q factor ≤ 0, or gain out of range).
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
     /// use audio_samples::operations::types::{ParametricEq, EqBand};
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_elem(512, 0.5f32);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     ///
     /// let mut eq = ParametricEq::new();
-    /// eq.add_band(EqBand::peak(1000.0, 3.0, 2.0)); // +3dB boost at 1kHz
-    /// eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707)); // -2dB cut below 100Hz
-    ///
-    /// let mut audio = AudioSamples::new_mono(samples, 44100);
-    /// audio.apply_parametric_eq(&eq, 44100.0)?;
+    /// eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));
+    /// audio.apply_parametric_eq(&eq).unwrap();
     /// ```
-    fn apply_parametric_eq<F>(
+    fn apply_parametric_eq(&mut self, eq: &ParametricEq) -> AudioSampleResult<()>;
+
+    /// Applies a single EQ band filter to the signal.
+    ///
+    /// Designs and applies one biquad filter for the given [`EqBand`] using RBJ cookbook
+    /// formulas. All seven band types are supported: `Peak`, `LowShelf`, `HighShelf`,
+    /// `LowPass`, `HighPass`, `BandPass`, and `BandStop`. Multi-channel audio is
+    /// processed per channel with filter state reset between channels.
+    ///
+    /// If the band is disabled, the signal is returned unchanged.
+    ///
+    /// # Arguments
+    ///
+    /// - `band` – The EQ band to apply, including its type, frequency, gain, and Q factor.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// - [`AudioSampleError::Parameter`] if band validation fails (frequency above Nyquist,
+    ///   Q ≤ 0, or gain out of range).
+    /// - [`AudioSampleError::Layout`] if the underlying sample buffer is non-contiguous.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use audio_samples::operations::types::EqBand;
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_elem(512, 0.5f32);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Boost at 2 kHz by 4 dB with Q of 1.5
+    /// audio.apply_eq_band(&EqBand::peak(2000.0, 4.0, 1.5)).unwrap();
+    /// ```
+    fn apply_eq_band(&mut self, band: &EqBand) -> AudioSampleResult<()>;
+
+    /// Applies a peak (or notch) filter at the specified centre frequency.
+    ///
+    /// A peak filter boosts or cuts a band of frequencies centred around `frequency`.
+    /// Positive `gain_db` creates a boost (peak); negative creates a cut (notch). The
+    /// Q factor controls bandwidth: higher Q values produce a narrower effect.
+    ///
+    /// # Arguments
+    ///
+    /// - `frequency` – Centre frequency in Hz. Must be in `(0, Nyquist)`.
+    /// - `gain_db` – Gain in dB. Positive boosts, negative cuts.
+    /// - `q_factor` – Quality factor controlling bandwidth. Must be > 0.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if `frequency`, `gain_db`, or `q_factor`
+    /// fail band validation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_elem(512, 0.5f32);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Boost at 880 Hz by 6 dB with Q of 2.0
+    /// audio.apply_peak_filter(880.0, 6.0, 2.0).unwrap();
+    /// ```
+    fn apply_peak_filter(
         &mut self,
-        eq: &ParametricEq<F>,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        frequency: f64,
+        gain_db: f64,
+        q_factor: f64,
+    ) -> AudioSampleResult<()>;
 
-    /// Apply a single EQ band to the audio signal.
+    /// Applies a low shelf filter that boosts or cuts frequencies below `frequency`.
     ///
-    /// Convenience method for applying a single parametric EQ band
-    /// without creating a full ParametricEq configuration.
+    /// All frequencies below the corner frequency receive approximately `gain_db` of
+    /// boost or cut, with a transition region controlled by `q_factor`. The shelf levels
+    /// off smoothly as frequency approaches zero.
     ///
     /// # Arguments
-    /// * `band` - EQ band configuration
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `frequency` – Corner (shelf) frequency in Hz. Must be in `(0, Nyquist)`.
+    /// - `gain_db` – Shelf gain in dB. Positive boosts, negative cuts.
+    /// - `q_factor` – Shelf slope control. `0.707` gives a maximally flat shelf.
+    ///   Must be > 0.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn apply_eq_band<F>(&mut self, band: &EqBand<F>, sample_rate: F) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Apply a peak/notch filter at the specified frequency.
     ///
-    /// Convenience method for applying a peak or notch filter.
-    /// Positive gain creates a peak, negative gain creates a notch.
+    /// `Ok(())` on success. The audio is modified in place.
     ///
-    /// # Arguments
-    /// * `frequency` - Center frequency in Hz
-    /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
-    /// * `q_factor` - Quality factor (bandwidth control)
-    /// * `sample_rate` - Sample rate of the audio signal
+    /// # Errors
     ///
-    /// # Returns
-    /// Result indicating success or failure
-    fn apply_peak_filter<F>(
+    /// Returns [`AudioSampleError::Parameter`] if any parameter fails band validation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_elem(512, 0.5f32);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Cut -3 dB below 200 Hz
+    /// audio.apply_low_shelf(200.0, -3.0, 0.707).unwrap();
+    /// ```
+    fn apply_low_shelf(
         &mut self,
-        frequency: F,
-        gain_db: F,
-        q_factor: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        frequency: f64,
+        gain_db: f64,
+        q_factor: f64,
+    ) -> AudioSampleResult<()>;
 
-    /// Apply a low shelf filter.
+    /// Applies a high shelf filter that boosts or cuts frequencies above `frequency`.
     ///
-    /// Affects frequencies below the corner frequency with a gentle
-    /// boost or cut that levels off at low frequencies.
+    /// All frequencies above the corner frequency receive approximately `gain_db` of
+    /// boost or cut, with a transition region controlled by `q_factor`. The shelf levels
+    /// off smoothly as frequency approaches the Nyquist limit.
     ///
     /// # Arguments
-    /// * `frequency` - Corner frequency in Hz
-    /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
-    /// * `q_factor` - Shelf slope control
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `frequency` – Corner (shelf) frequency in Hz. Must be in `(0, Nyquist)`.
+    /// - `gain_db` – Shelf gain in dB. Positive boosts, negative cuts.
+    /// - `q_factor` – Shelf slope control. `0.707` gives a maximally flat shelf.
+    ///   Must be > 0.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn apply_low_shelf<F>(
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if any parameter fails band validation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_elem(512, 0.5f32);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Boost +4 dB above 8 kHz
+    /// audio.apply_high_shelf(8000.0, 4.0, 0.707).unwrap();
+    /// ```
+    fn apply_high_shelf(
         &mut self,
-        frequency: F,
-        gain_db: F,
-        q_factor: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        frequency: f64,
+        gain_db: f64,
+        q_factor: f64,
+    ) -> AudioSampleResult<()>;
 
-    /// Apply a high shelf filter.
+    /// Applies a three-band EQ (low shelf, mid peak, high shelf) in a single call.
     ///
-    /// Affects frequencies above the corner frequency with a gentle
-    /// boost or cut that levels off at high frequencies.
+    /// Constructs a [`ParametricEq`] with three bands and applies it:
+    /// - A low shelf affecting frequencies below `low_freq`.
+    /// - A peak filter centred at `mid_freq`.
+    /// - A high shelf affecting frequencies above `high_freq`.
+    ///
+    /// This mirrors the EQ section found on most mixers and channel strips.
     ///
     /// # Arguments
-    /// * `frequency` - Corner frequency in Hz
-    /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
-    /// * `q_factor` - Shelf slope control
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `low_freq` – Low shelf corner frequency in Hz.
+    /// - `low_gain` – Low shelf gain in dB.
+    /// - `mid_freq` – Mid peak centre frequency in Hz.
+    /// - `mid_gain` – Mid peak gain in dB.
+    /// - `mid_q` – Mid peak Q factor.
+    /// - `high_freq` – High shelf corner frequency in Hz.
+    /// - `high_gain` – High shelf gain in dB.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn apply_high_shelf<F>(
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if any band fails validation
+    /// (e.g. frequency above Nyquist or Q ≤ 0).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_elem(512, 0.5f32);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Low shelf -2 dB at 200 Hz, mid peak +3 dB at 1 kHz (Q=2), high shelf +1 dB at 4 kHz
+    /// audio.apply_three_band_eq(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
+    /// ```
+    fn apply_three_band_eq(
         &mut self,
-        frequency: F,
-        gain_db: F,
-        q_factor: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        low_freq: f64,
+        low_gain: f64,
+        mid_freq: f64,
+        mid_gain: f64,
+        mid_q: f64,
+        high_freq: f64,
+        high_gain: f64,
+    ) -> AudioSampleResult<()>;
 
-    /// Create and apply a common 3-band EQ (low shelf, mid peak, high shelf).
+    /// Computes the combined magnitude and phase response of a parametric EQ.
     ///
-    /// Convenience method for applying a typical 3-band EQ configuration
-    /// commonly found in audio equipment.
+    /// Evaluates each enabled band's biquad filter at every frequency in `frequencies`
+    /// and combines the results: magnitudes are multiplied and phases are summed. The
+    /// EQ's output gain is applied to the combined magnitude. Disabled bands are skipped.
+    ///
+    /// This method does not modify the audio signal; it is purely analytical.
     ///
     /// # Arguments
-    /// * `low_freq` - Low shelf corner frequency in Hz
-    /// * `low_gain` - Low shelf gain in dB
-    /// * `mid_freq` - Mid peak center frequency in Hz
-    /// * `mid_gain` - Mid peak gain in dB
-    /// * `mid_q` - Mid peak Q factor
-    /// * `high_freq` - High shelf corner frequency in Hz
-    /// * `high_gain` - High shelf gain in dB
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `eq` – The parametric EQ whose frequency response to compute.
+    /// - `frequencies` – Frequencies in Hz at which to evaluate the response. An empty
+    ///   slice returns empty vectors.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn apply_three_band_eq<F>(
-        &mut self,
-        low_freq: F,
-        low_gain: F,
-        mid_freq: F,
-        mid_gain: F,
-        mid_q: F,
-        high_freq: F,
-        high_gain: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Get the combined frequency response of a parametric EQ.
     ///
-    /// Computes the magnitude and phase response of the complete
-    /// parametric EQ at the specified frequencies.
+    /// A tuple `(magnitudes, phases)` where:
+    /// - `magnitudes` – Linear magnitude response at each frequency (1.0 = unity gain).
+    /// - `phases` – Phase response in radians at each frequency.
     ///
-    /// # Arguments
-    /// * `eq` - Parametric EQ configuration
-    /// * `frequencies` - Frequencies at which to compute the response (in Hz)
-    /// * `sample_rate` - Sample rate of the audio signal
+    /// Both vectors have the same length as `frequencies`.
     ///
-    /// # Returns
-    /// Tuple of (magnitude_response, phase_response) vectors
-    fn eq_frequency_response<F>(
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if any enabled band fails to design
+    /// a filter (e.g. frequency above the Nyquist limit).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use audio_samples::operations::types::{ParametricEq, EqBand};
+    /// use ndarray::Array1;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::from_elem(512, 0.5f32), sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// let mut eq = ParametricEq::new();
+    /// eq.add_band(EqBand::peak(1000.0, 6.0, 2.0));
+    ///
+    /// let freqs = [100.0_f64, 500.0, 1000.0, 5000.0];
+    /// let (magnitudes, phases) = audio.eq_frequency_response(&eq, &freqs).unwrap();
+    /// assert_eq!(magnitudes.len(), 4);
+    /// // At the peak frequency, magnitude should be boosted above unity
+    /// assert!(magnitudes[2] > 1.0);
+    /// ```
+    fn eq_frequency_response(
         &self,
-        eq: &ParametricEq<F>,
-        frequencies: &[F],
-        sample_rate: F,
-    ) -> AudioSampleResult<(Vec<F>, Vec<F>)>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
+        eq: &ParametricEq,
+        frequencies: &[f64],
+    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
 }
 
-/// Dynamic range processing operations.
+/// Dynamic range control operations for audio signals.
 ///
-/// This trait provides methods for compressing and limiting audio signals
-/// to control dynamic range. These operations are essential for professional
-/// audio production, mixing, and mastering.
-pub trait AudioDynamicRange<T: AudioSample>
+/// Provides compressors, limiters, noise gates, and expanders — the standard toolkit
+/// for controlling the difference between loud and quiet passages. All operations work
+/// on both mono and multi-channel audio (unless otherwise noted).
+#[cfg(feature = "dynamic-range")]
+pub trait AudioDynamicRange: AudioTypeConversion
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    Self::Sample: StandardSample,
 {
-    /// Apply compression to the audio signal.
+    /// Applies compression to reduce the dynamic range of the signal.
     ///
-    /// Compresses the dynamic range by reducing the amplitude of signals
-    /// that exceed the threshold. The amount of reduction is determined
-    /// by the compression ratio.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// For a signal level `x` above the threshold `T` with ratio `R`:
-    /// ```text
-    /// output_level = T + (x - T) / R
-    /// ```
-    ///
-    /// Attack and release times control the envelope follower:
-    /// ```text
-    /// envelope[n] = α * envelope[n-1] + (1-α) * |input[n]|
-    /// ```
-    /// where `α` is calculated from the attack/release time constants.
-    ///
-    /// # Applications
-    ///
-    /// - **Vocals**: Smooth out level variations for consistent presence
-    /// - **Drums**: Control transients and add punch
-    /// - **Mix bus**: Glue mix elements together
-    /// - **Mastering**: Control overall dynamics
+    /// Samples above the threshold are attenuated according to the compression ratio.
+    /// Attack and release times control how quickly the compressor responds to level
+    /// changes. An optional lookahead delay allows the compressor to anticipate peaks
+    /// before they occur. Multi-channel audio is compressed independently per channel.
     ///
     /// # Arguments
-    /// * `config` - Compressor configuration parameters
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `config` – Compressor parameters including threshold, ratio, attack, release,
+    ///   knee type, makeup gain, lookahead, and detection method. Use preset constructors
+    ///   such as [`CompressorConfig::vocal`] or [`CompressorConfig::drum`] for common
+    ///   configurations.
     ///
     /// # Returns
-    /// Result indicating success or failure
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if the configuration fails validation
+    /// (e.g. threshold above 0 dBFS, ratio below 1.0, or negative time constants).
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::CompressorConfig;
     ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::CompressorConfig;
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let config = CompressorConfig::vocal();
-    /// let mut audio = AudioSamples::new_mono(samples, 44100);
-    /// audio.apply_compressor(&config, 44100.0)?;
+    /// audio.apply_compressor(&config).unwrap();
     /// ```
-    fn apply_compressor<F>(
-        &mut self,
-        config: &CompressorConfig<F>,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+    fn apply_compressor(&mut self, config: &CompressorConfig) -> AudioSampleResult<()>;
 
-    /// Apply limiting to the audio signal.
+    /// Prevents the signal from exceeding a specified ceiling level.
     ///
-    /// Prevents the signal from exceeding the specified ceiling level.
-    /// Limiting is typically used as the final stage in mastering to
-    /// prevent clipping and maximize loudness.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// Limiting uses a very high compression ratio (typically ∞:1) above the ceiling:
-    /// ```text
-    /// output_level = min(ceiling, input_level)
-    /// ```
-    ///
-    /// Lookahead processing delays the audio while analyzing future samples:
-    /// ```text
-    /// gain_reduction[n] = calculate_gain(input[n + lookahead_samples])
-    /// output[n] = input[n] * gain_reduction[n]
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Mastering**: Final peak control and loudness maximization
-    /// - **Broadcast**: Ensure signal compliance with broadcasting standards
-    /// - **Live sound**: Prevent speaker damage and feedback
-    /// - **Protection**: Safeguard against unexpected signal peaks
+    /// Applies gain reduction to any samples that breach the ceiling. Lookahead
+    /// processing delays the output signal while analysing future samples, allowing gain
+    /// reduction to begin before peaks arrive and minimising audible distortion.
+    /// Multi-channel audio is limited independently per channel.
     ///
     /// # Arguments
-    /// * `config` - Limiter configuration parameters
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `config` – Limiter parameters including ceiling, attack, release, knee type,
+    ///   lookahead, and detection method. Use preset constructors such as
+    ///   [`LimiterConfig::transparent`] or [`LimiterConfig::mastering`] for common
+    ///   configurations.
     ///
     /// # Returns
-    /// Result indicating success or failure
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if the configuration fails validation
+    /// (e.g. ceiling above 0 dBFS or invalid time constants).
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
     /// use audio_samples::operations::types::LimiterConfig;
+    /// use ndarray::Array1;
     ///
+    /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let config = LimiterConfig::mastering();
-    /// let mut audio = AudioSamples::new_mono(samples, 44100);
-    /// audio.apply_limiter(&config, 44100.0)?;
+    /// audio.apply_limiter(&config).unwrap();
     /// ```
-    fn apply_limiter<F>(
-        &mut self,
-        config: &LimiterConfig<F>,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+    fn apply_limiter(&mut self, config: &LimiterConfig) -> AudioSampleResult<()>;
 
-    /// Apply compression with external side-chain input.
+    /// Applies compression driven by an external sidechain signal.
     ///
-    /// The compressor is controlled by an external audio signal instead of
-    /// the input signal itself. This enables advanced techniques like
-    /// ducking, pumping effects, and frequency-conscious compression.
+    /// The gain reduction is determined by the level of `sidechain_signal` rather than
+    /// the main audio, allowing one signal to control the dynamics of another. A common
+    /// use case is ducking: a voice track causes background music to decrease in level
+    /// whenever speech is present.
     ///
-    /// # Applications
-    ///
-    /// - **Ducking**: Reduce music level when vocals are present
-    /// - **Pumping**: Rhythmic compression driven by kick drum
-    /// - **De-essing**: Frequency-specific compression for harsh sibilants
-    /// - **Multiband**: Independent compression of different frequency bands
+    /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
+    /// combinations return an error.
     ///
     /// # Arguments
-    /// * `config` - Compressor configuration parameters
-    /// * `sidechain_signal` - External control signal
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `config` – Compressor configuration. Sidechain processing must be enabled;
+    ///   call `config.side_chain.enable()` before passing the config to this method.
+    /// - `sidechain_signal` – External control signal. Must be the same length as the
+    ///   main signal.
     ///
     /// # Returns
-    /// Result indicating success or failure
+    ///
+    /// `Ok(())` on success. The main audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// - [`AudioSampleError::Parameter`] if sidechain is not enabled in `config`.
+    /// - [`AudioSampleError::Parameter`] if the main and sidechain signals have
+    ///   different lengths.
+    /// - [`AudioSampleError::Parameter`] if either signal is multi-channel (not yet
+    ///   supported).
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::CompressorConfig;
     ///
+    /// ```rust,no_run
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::CompressorConfig;
+    /// use ndarray::Array1;
+    ///
+    /// let mut audio = AudioSamples::new_mono(
+    ///     Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]),
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let sidechain = AudioSamples::new_mono(
+    ///     Array1::from_vec(vec![0.0f32, 1.0, 0.0, 1.0, 0.0]),
+    ///     sample_rate!(44100),
+    /// ).unwrap();
     /// let mut config = CompressorConfig::new();
     /// config.side_chain.enable();
-    /// let mut audio = AudioSamples::new_mono(samples, 44100);
-    /// let sidechain = AudioSamples::new_mono(sidechain_samples, 44100);
-    /// audio.apply_compressor_sidechain(&config, &sidechain, 44100.0)?;
+    /// audio.apply_compressor_sidechain(&config, &sidechain).unwrap();
     /// ```
-    fn apply_compressor_sidechain<F>(
+    fn apply_compressor_sidechain(
         &mut self,
-        config: &CompressorConfig<F>,
+        config: &CompressorConfig,
         sidechain_signal: &Self,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>,
-        Self: Sized;
+    ) -> AudioSampleResult<()>;
 
-    /// Apply limiting with external side-chain input.
+    /// Applies limiting driven by an external sidechain signal.
     ///
-    /// The limiter is controlled by an external audio signal instead of
-    /// the input signal itself. This enables advanced limiting techniques
-    /// and frequency-conscious peak control.
+    /// The gain reduction ceiling is enforced based on the level of `sidechain_signal`
+    /// rather than the main audio. Useful for frequency-selective limiting where a
+    /// filtered copy of the signal controls gain reduction.
     ///
-    /// # Applications
-    ///
-    /// - **Multiband limiting**: Independent limiting of frequency bands
-    /// - **Frequency-conscious limiting**: Prevent specific frequencies from dominating
-    /// - **Advanced mastering**: Sophisticated peak control techniques
+    /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
+    /// combinations return an error.
     ///
     /// # Arguments
-    /// * `config` - Limiter configuration parameters
-    /// * `sidechain_signal` - External control signal
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `config` – Limiter configuration. Sidechain processing must be enabled;
+    ///   call `config.side_chain.enable()` before passing the config to this method.
+    /// - `sidechain_signal` – External control signal. Must be the same length as the
+    ///   main signal.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn apply_limiter_sidechain<F>(
-        &mut self,
-        config: &LimiterConfig<F>,
-        sidechain_signal: &Self,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>,
-        Self: Sized;
-
-    /// Analyze the compression curve characteristics.
     ///
-    /// Computes the input-output relationship for the given compressor
-    /// configuration at specified input levels. This is useful for
-    /// visualizing and analyzing compressor behavior.
+    /// `Ok(())` on success. The main audio is modified in place.
     ///
-    /// # Arguments
-    /// * `config` - Compressor configuration parameters
-    /// * `input_levels_db` - Input levels in dB to analyze
-    /// * `sample_rate` - Sample rate (affects attack/release timing)
+    /// # Errors
     ///
-    /// # Returns
-    /// Vector of output levels in dB corresponding to the input levels
+    /// - [`AudioSampleError::Parameter`] if sidechain is not enabled in `config`.
+    /// - [`AudioSampleError::Parameter`] if the main and sidechain signals have
+    ///   different lengths.
+    /// - [`AudioSampleError::Parameter`] if either signal is multi-channel (not yet
+    ///   supported).
     ///
     /// # Example
-    /// ```rust,ignore
-    /// let config = CompressorConfig::new();
-    /// let input_levels = vec![-40.0, -30.0, -20.0, -10.0, 0.0];
-    /// let output_levels = audio.get_compression_curve(&config, &input_levels, 44100.0)?;
-    /// ```
-    fn get_compression_curve<F>(
-        &self,
-        config: &CompressorConfig<F>,
-        input_levels_db: &[F],
-        sample_rate: F,
-    ) -> AudioSampleResult<Vec<F>>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Track gain reduction over time.
     ///
-    /// Applies the compressor/limiter and returns the amount of gain reduction
-    /// applied at each sample. This is useful for visualization, metering,
-    /// and analysis of dynamic range processing.
+    /// ```rust,no_run
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::LimiterConfig;
+    /// use ndarray::Array1;
+    ///
+    /// let mut audio = AudioSamples::new_mono(
+    ///     Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]),
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let sidechain = AudioSamples::new_mono(
+    ///     Array1::from_vec(vec![0.0f32, 1.0, 0.0, 1.0, 0.0]),
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let mut config = LimiterConfig::default();
+    /// config.side_chain.enable();
+    /// audio.apply_limiter_sidechain(&config, &sidechain).unwrap();
+    /// ```
+    fn apply_limiter_sidechain(
+        &mut self,
+        config: &LimiterConfig,
+        sidechain_signal: &Self,
+    ) -> AudioSampleResult<()>;
+
+    /// Computes the static compression input-output curve for given input levels.
+    ///
+    /// Maps each input level in `input_levels_db` through the compressor's static gain
+    /// characteristic (threshold, ratio, knee) plus makeup gain, returning the resulting
+    /// output level in dBFS for each input. Does not use time-varying envelope following —
+    /// the result depends only on the static transfer function.
+    ///
+    /// Useful for visualising and verifying compressor behaviour without processing actual
+    /// audio samples.
     ///
     /// # Arguments
-    /// * `config` - Compressor configuration parameters
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `config` – Compressor configuration parameters.
+    /// - `input_levels_db` – Non-empty slice of input levels in dBFS to evaluate.
     ///
     /// # Returns
-    /// Vector of gain reduction values in dB (positive values indicate reduction)
+    ///
+    /// A `Vec<f64>` of output levels in dBFS, one per entry in `input_levels_db`,
+    /// in the same order.
     ///
     /// # Example
-    /// ```rust,ignore
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::CompressorConfig;
+    /// use non_empty_slice::NonEmptySlice;
+    /// use ndarray::Array1;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::from_elem(10, 0.5f32), sample_rate!(44100),
+    /// ).unwrap();
     /// let config = CompressorConfig::new();
-    /// let gain_reduction = audio.get_gain_reduction(&config, 44100.0)?;
-    /// let max_reduction = gain_reduction.iter().fold(0.0, |a, &b| a.max(b));
+    /// let levels = [-40.0f64, -20.0, -12.0, 0.0];
+    /// let curve = audio.get_compression_curve(
+    ///     &config,
+    ///     NonEmptySlice::new(&levels).unwrap(),
+    /// ).unwrap();
+    /// assert_eq!(curve.len(), 4);
+    /// // Levels above the threshold are reduced (output < input)
+    /// assert!(curve[3] < 0.0);
     /// ```
-    fn get_gain_reduction<F>(
+    fn get_compression_curve(
         &self,
-        config: &CompressorConfig<F>,
-        sample_rate: F,
-    ) -> AudioSampleResult<Vec<F>>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+        config: &CompressorConfig,
+        input_levels_db: &NonEmptySlice<f64>,
+    ) -> AudioSampleResult<Vec<f64>>;
 
-    /// Apply gate processing to the audio signal.
+    /// Returns the per-sample gain reduction that would be applied by the compressor.
     ///
-    /// A gate (noise gate) mutes or attenuates the signal when it falls
-    /// below a specified threshold. This is useful for removing background
-    /// noise and cleaning up recordings.
+    /// Passes the audio through the envelope follower and compression gain calculation,
+    /// collecting the gain reduction (in dB) at every sample without modifying the
+    /// signal. For multi-channel audio, only the first channel is analysed.
     ///
-    /// # Mathematical Foundation
-    ///
-    /// For a signal level `x` below the threshold `T` with ratio `R`:
-    /// ```text
-    /// output_level = T + (x - T) / R  (where R >> 1, typically ∞)
-    /// ```
-    ///
-    /// # Applications
-    ///
-    /// - **Noise removal**: Eliminate background noise between phrases
-    /// - **Drum gating**: Remove bleed between drum hits
-    /// - **Vocal cleanup**: Remove breath noise and room tone
-    /// - **Creative effects**: Rhythmic gating for musical effects
+    /// Useful for metering, visualising, and analysing compressor activity.
     ///
     /// # Arguments
-    /// * `threshold_db` - Gate threshold in dB
-    /// * `ratio` - Gate ratio (typically very high, e.g., 10:1 or ∞:1)
-    /// * `attack_ms` - Attack time in milliseconds
-    /// * `release_ms` - Release time in milliseconds
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `config` – Compressor configuration parameters.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn apply_gate<F>(
-        &mut self,
-        threshold_db: F,
-        ratio: F,
-        attack_ms: F,
-        release_ms: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
-
-    /// Apply expansion to the audio signal.
     ///
-    /// Expansion increases the dynamic range by increasing the amplitude
-    /// difference between loud and quiet parts. It's the opposite of compression.
+    /// A `Vec<f64>` of gain reduction values in dB (each value ≥ 0.0), one per sample
+    /// in the signal (or first channel for multi-channel audio).
     ///
-    /// # Mathematical Foundation
+    /// # Example
     ///
-    /// For a signal level `x` below the threshold `T` with ratio `R`:
-    /// ```text
-    /// output_level = T + (x - T) * R  (where R > 1)
     /// ```
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::CompressorConfig;
+    /// use ndarray::Array1;
     ///
-    /// # Applications
+    /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let config = CompressorConfig::new();
+    /// let reductions = audio.get_gain_reduction(&config).unwrap();
+    /// assert_eq!(reductions.len(), 5);
+    /// assert!(reductions.iter().all(|&r| r >= 0.0));
+    /// ```
+    fn get_gain_reduction(&self, config: &CompressorConfig) -> AudioSampleResult<Vec<f64>>;
+
+    /// Attenuates the signal when it falls below a threshold (noise gate).
     ///
-    /// - **Restore dynamics**: Reverse over-compression
-    /// - **Enhance transients**: Make drums and percussive elements more punchy
-    /// - **Creative effects**: Exaggerate dynamic differences
-    /// - **Mix enhancement**: Add life to flat-sounding material
+    /// A gate mutes or reduces quiet passages — typically background noise, room tone,
+    /// or bleed — while leaving louder content unaffected. Signals below `threshold_db`
+    /// are attenuated by the given ratio; signals above are passed through unchanged.
+    /// Peak detection is always used for gate processing.
     ///
     /// # Arguments
-    /// * `threshold_db` - Expansion threshold in dB
-    /// * `ratio` - Expansion ratio (typically 1.5:1 to 4:1)
-    /// * `attack_ms` - Attack time in milliseconds
-    /// * `release_ms` - Release time in milliseconds
-    /// * `sample_rate` - Sample rate of the audio signal
+    ///
+    /// - `threshold_db` – Gate threshold in dBFS. Signals below this level are attenuated.
+    /// - `ratio` – Attenuation ratio below the threshold. Higher values produce more
+    ///   aggressive gating; values near 1.0 approach unity gain.
+    /// - `attack_ms` – Attack time in milliseconds. Controls how quickly the gate opens
+    ///   when the signal rises above the threshold.
+    /// - `release_ms` – Release time in milliseconds. Controls how quickly the gate
+    ///   closes when the signal falls below the threshold.
     ///
     /// # Returns
-    /// Result indicating success or failure
-    fn apply_expander<F>(
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`. Future versions may validate parameter ranges.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Gate at -20 dBFS with 10:1 ratio
+    /// audio.apply_gate(-20.0, 10.0, 1.0, 10.0).unwrap();
+    /// ```
+    fn apply_gate(
         &mut self,
-        threshold_db: F,
-        ratio: F,
-        attack_ms: F,
-        release_ms: F,
-        sample_rate: F,
-    ) -> AudioSampleResult<()>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>;
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+    ) -> AudioSampleResult<()>;
+
+    /// Increases dynamic range by expanding signals below a threshold.
+    ///
+    /// An expander is the complement of compression: signals below `threshold_db` are
+    /// attenuated by an amount that grows with distance from the threshold, making quiet
+    /// passages quieter while leaving loud passages unchanged. RMS detection is always
+    /// used for expansion.
+    ///
+    /// # Arguments
+    ///
+    /// - `threshold_db` – Expansion threshold in dBFS. Signals below this level are
+    ///   attenuated.
+    /// - `ratio` – Expansion ratio. Values greater than `1.0` produce increasing
+    ///   attenuation the further the signal falls below the threshold.
+    /// - `attack_ms` – Attack time in milliseconds.
+    /// - `release_ms` – Release time in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success. The audio is modified in place.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`. Future versions may validate parameter ranges.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Expand at -20 dBFS with 2:1 ratio
+    /// audio.apply_expander(-20.0, 2.0, 1.0, 10.0).unwrap();
+    /// ```
+    fn apply_expander(
+        &mut self,
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+    ) -> AudioSampleResult<()>;
 }
 
-/// Time-domain editing and manipulation operations.
+/// Time-domain editing operations for [`AudioSamples`].
 ///
-/// This trait provides methods for cutting, pasting, mixing, and modifying
-/// audio samples in the time domain. Most operations create new AudioSamples
-/// instances rather than modifying in-place to preserve the original data.
-pub trait AudioEditing<'a, T: AudioSample>
+/// This trait provides trimming, padding, fading, mixing,
+/// concatenation, and other time-domain editing methods.  Most
+/// operations work transparently on both mono and multi-channel audio.
+#[cfg(feature = "editing")]
+pub trait AudioEditing: AudioTypeConversion
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    Self::Sample: StandardSample,
 {
-    /// Reverses the order of audio samples.
+    /// Returns a time-reversed copy of the signal.
     ///
-    /// Creates a new AudioSamples instance with time-reversed content.
-    fn reverse<'b>(&self) -> AudioSamples<'b, T>
+    /// All channels are reversed independently.  The sample rate and
+    /// channel count are preserved.
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] with the sample order reversed.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 2.0, 3.0], sample_rate!(44100),
+    /// ).unwrap();
+    /// let rev = audio.reverse();
+    /// assert_eq!(rev[0], 3.0);
+    /// assert_eq!(rev[1], 2.0);
+    /// assert_eq!(rev[2], 1.0);
+    /// ```
+    fn reverse<'b>(&self) -> AudioSamples<'b, Self::Sample>
     where
         Self: Sized;
 
-    /// Reverses the order of audio samples in place.
+    /// Reverses the sample order in place.
+    ///
+    /// All channels are reversed independently.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if an internal multi-channel
+    ///   array row is not contiguous.
     fn reverse_in_place(&mut self) -> AudioSampleResult<()>
     where
         Self: Sized;
 
-    /// Extracts a segment of audio between start and end times.
+    /// Extracts a segment of audio between two time boundaries.
+    ///
+    /// Works on both mono and multi-channel audio.  Time values are
+    /// converted to sample indices using the signal's sample rate.
     ///
     /// # Arguments
-    /// * `start_seconds` - Start time in seconds
-    /// * `end_seconds` - End time in seconds
+    /// - `start_seconds` — start of the segment in seconds (`>= 0`).
+    /// - `end_seconds` — end of the segment in seconds
+    ///   (`> start_seconds`, `<= duration`).
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] containing the requested segment.
     ///
     /// # Errors
-    /// Returns an error if start >= end or if times are out of bounds.
-    fn trim<'b, F: RealFloat>(
+    /// - [`crate::AudioSampleError::Parameter`] if `start_seconds < 0`,
+    ///   `end_seconds <= start_seconds`, or `end_seconds` exceeds the
+    ///   signal duration.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::<f32>::zeros(100), sample_rate!(100),
+    /// ).unwrap();
+    /// let trimmed = audio.trim(0.25, 0.75).unwrap();
+    /// assert_eq!(trimmed.samples_per_channel().get(), 50);
+    /// ```
+    fn trim<'b>(
         &self,
-        start_seconds: F,
-        end_seconds: F,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>;
+        start_seconds: f64,
+        end_seconds: f64,
+    ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
 
-    /// Adds padding/silence to the beginning and/or end of the audio.
+    /// Adds silence (or a constant value) at the beginning and/or end.
+    ///
+    /// Works on both mono and multi-channel audio.
     ///
     /// # Arguments
-    /// * `pad_start_seconds` - Duration to pad at the beginning
-    /// * `pad_end_seconds` - Duration to pad at the end
-    /// * `pad_value` - Value to use for padding (typically zero for silence)
-    fn pad<'b, F: RealFloat>(
+    /// - `pad_start_seconds` — duration of padding prepended, in seconds.
+    ///   Must be `>= 0`.
+    /// - `pad_end_seconds` — duration of padding appended, in seconds.
+    ///   Must be `>= 0`.
+    /// - `pad_value` — the sample value used for the padded region
+    ///   (typically the zero value of `T` for silence).
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] with the requested padding applied.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if either padding
+    ///   duration is negative.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::from_elem(5, 1.0f32), sample_rate!(10),
+    /// ).unwrap();
+    /// // 0.2 s at 10 Hz = 2 samples each side
+    /// let padded = audio.pad(0.2, 0.2, 0.0).unwrap();
+    /// assert_eq!(padded.samples_per_channel().get(), 9);
+    /// assert_eq!(padded[0], 0.0);
+    /// assert_eq!(padded[2], 1.0);
+    /// ```
+    fn pad<'b>(
         &self,
-        pad_start_seconds: F,
-        pad_end_seconds: F,
-        pad_value: T,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>;
+        pad_start_seconds: f64,
+        pad_end_seconds: f64,
+        pad_value: Self::Sample,
+    ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
 
-    /// Pad samples to the right to reach a target number of samples.
+    /// Pads with a constant value on the right to reach a target sample count.
+    ///
+    /// If the signal already has `target_num_samples` or more samples per
+    /// channel it is returned unchanged (as an owned clone).
+    ///
+    /// # Arguments
+    /// - `target_num_samples` — desired number of samples per channel.
+    /// - `pad_value` — the sample value used for the padded region.
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] with at least `target_num_samples` samples
+    /// per channel.
+    ///
+    /// # Errors
+    /// Propagates any error from the underlying [`pad_to_duration`] call.
+    ///
+    /// [`pad_to_duration`]: Self::pad_to_duration
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 2.0, 3.0], sample_rate!(44100),
+    /// ).unwrap();
+    /// let padded = audio.pad_samples_right(6, 0.0).unwrap();
+    /// assert_eq!(padded.samples_per_channel().get(), 6);
+    /// assert_eq!(padded[3], 0.0); // padded region is silent
+    /// ```
     fn pad_samples_right<'b>(
         &self,
         target_num_samples: usize,
-        pad_value: T,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>;
+        pad_value: Self::Sample,
+    ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
 
-    /// Pad audio to a target duration.
-    fn pad_to_duration<'b, F: RealFloat>(
-        &self,
-        target_duration_seconds: F,
-        pad_value: T,
-        pad_side: PadSide,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>;
-
-    /// Splits audio into segments of specified duration.
+    /// Pads the signal to reach a target duration.
     ///
-    /// The last segment may be shorter if the audio doesn't divide evenly.
+    /// Padding is added on the side specified by `pad_side`.  If the
+    /// signal is already at least as long as `target_duration_seconds`
+    /// it is returned unchanged (as an owned clone).
     ///
     /// # Arguments
-    /// * `segment_duration_seconds` - Duration of each segment
-    fn split<F: RealFloat>(
-        &self,
-        segment_duration_seconds: F,
-    ) -> AudioSampleResult<Vec<AudioSamples<'static, T>>>;
-
-    /// Concatenates multiple possible borrowed, audio segments into one.
-    /// Concatenates multiple possible borrowed, audio segments into one.
-    ///
-    /// All segments must have the same sample rate and channel configuration.
-    ///
-    /// # Arguments
-    /// * `segments` - Audio segments to concatenate in order
-    fn concatenate<'b>(
-        segments: &'b [AudioSamples<'b, T>],
-    ) -> AudioSampleResult<AudioSamples<'b, T>>
-    where
-        'b: 'a,
-        Self: Sized;
-
-    /// Concatenates multiple owned audio segments into one.
-    fn concatenate_owned<'b>(
-        segments: Vec<AudioSamples<'_, T>>,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>
-    where
-        'b: 'a,
-        Self: Sized;
-
-    /// Mixes multiple audio sources together.
-    ///
-    /// Sources must have the same sample rate, channel count, and length.
-    /// Optional weights can be provided for each source.
-    ///
-    /// # Arguments
-    /// * `sources` - Audio sources to mix
-    /// * `weights` - Optional mixing weights (defaults to equal weighting)
-    fn mix<F>(
-        sources: &[Self],
-        weights: Option<&[F]>,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>
-    where
-        F: RealFloat + ConvertTo<T>,
-        T: ConvertTo<F>,
-        Self: Sized;
-
-    /// Applies fade-in envelope over specified duration.
-    ///
-    /// # Arguments
-    /// * `duration_seconds` - Duration of the fade-in
-    /// * `curve` - Shape of the fade curve
-    fn fade_in<F>(&mut self, duration_seconds: F, curve: FadeCurve<F>) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Applies fade-out envelope over specified duration.
-    ///
-    /// # Arguments
-    /// * `duration_seconds` - Duration of the fade-out
-    /// * `curve` - Shape of the fade curve
-    fn fade_out<F>(&mut self, duration_seconds: F, curve: FadeCurve<F>) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Repeats the audio signal a specified number of times.
-    ///
-    /// # Arguments
-    /// * `count` - Number of repetitions (total length = original × count)
-    fn repeat(&self, count: usize) -> AudioSampleResult<AudioSamples<'static, T>>;
-
-    /// Crops audio to remove silence from beginning and end.
-    ///
-    /// # Arguments
-    /// * `threshold_db` - db threshold below which samples are considered silence
+    /// - `target_duration_seconds` — desired length in seconds.
+    /// - `pad_value` — the sample value used for the padded region.
+    /// - `pad_side` — which end to pad ([`PadSide::Left`] or
+    ///   [`PadSide::Right`]).
     ///
     /// # Returns
-    /// A new AudioSamples instance with leading and trailing silence removed
-    /// # Errors
-    /// Returns an error if the operation fails for any reason
-    fn trim_silence<F>(&self, threshold_db: F) -> AudioSampleResult<AudioSamples<'static, T>>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Applies perturbation to audio samples for data augmentation.
-    ///
-    /// Creates a new AudioSamples instance with the specified perturbation applied.
-    /// This method preserves the original audio data while creating a modified copy.
-    ///
-    /// # Arguments
-    /// * `config` - Perturbation configuration specifying method and parameters
-    ///
-    /// # Returns
-    /// A new AudioSamples instance with perturbation applied
+    /// A new [`AudioSamples`] at least `target_duration_seconds` long.
     ///
     /// # Errors
-    /// Returns an error if the perturbation configuration is invalid or if the
-    /// perturbation operation fails (e.g., insufficient memory, invalid parameters).
+    /// Propagates any error from the underlying [`pad`] call.
+    ///
+    /// [`pad`]: Self::pad
     ///
     /// # Examples
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::*;
-    ///
-    /// let audio = AudioSamples::new_mono(samples, 44100);
-    ///
-    /// // Add white noise at 20dB SNR
-    /// let noise_config = PerturbationConfig::new(
-    ///     PerturbationMethod::gaussian_noise(20.0, NoiseColor::White)
-    /// );
-    /// let noisy_audio = audio.perturb(&noise_config)?;
-    ///
-    /// // Apply random gain with deterministic seed
-    /// let gain_config = PerturbationConfig::with_seed(
-    ///     PerturbationMethod::random_gain(-3.0, 3.0),
-    ///     12345
-    /// );
-    /// let gained_audio = audio.perturb(&gain_config)?;
     /// ```
-    #[cfg(feature = "random-generation")]
-    #[cfg(feature = "random-generation")]
-    fn perturb<'b, F>(
-        &self,
-        config: &PerturbationConfig<F>,
-    ) -> AudioSampleResult<AudioSamples<'b, T>>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>,
-        StandardUniform: Distribution<F>;
-
-    /// Applies perturbation to audio samples in place.
-    ///
-    /// Modifies the current AudioSamples instance by applying the specified perturbation.
-    /// This method is more memory-efficient as it doesn't create a copy.
-    ///
-    /// # Arguments
-    /// * `config` - Perturbation configuration specifying method and parameters
-    ///
-    /// # Returns
-    /// Result indicating success or failure of the perturbation operation
-    ///
-    /// # Errors
-    /// Returns an error if the perturbation configuration is invalid or if the
-    /// perturbation operation fails.
-    ///
-    /// # Examples
-    /// ```rust,ignore
-    /// use audio_samples::{AudioSamples, operations::*};
-    /// use audio_samples::operations::types::*;
-    ///
-    /// let mut audio = AudioSamples::new_mono(samples, 44100);
-    ///
-    /// // Apply high-pass filter in place
-    /// let filter_config = PerturbationConfig::new(
-    ///     PerturbationMethod::high_pass_filter(80.0)
-    /// );
-    /// audio.perturb_(&filter_config)?;
-    ///
-    /// // Apply pitch shift with seed
-    /// let pitch_config = PerturbationConfig::with_seed(
-    ///     PerturbationMethod::pitch_shift(2.0, false),
-    ///     54321
-    /// );
-    /// audio.perturb_(&pitch_config)?;
-    /// ```
-    #[cfg(feature = "random-generation")]
-    #[cfg(feature = "random-generation")]
-    fn perturb_<F>(&mut self, config: &PerturbationConfig<F>) -> AudioSampleResult<()>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>,
-        StandardUniform: Distribution<F>;
-
-    /// Stacks multiple mono audio samples into a multi-channel audio sample.
-    fn stack(sources: &[Self]) -> AudioSampleResult<AudioSamples<'static, T>>
-    where
-        Self: Sized;
-
-    /// Trim silence anywhere in the audio.
-    fn trim_all_silence<F>(
-        &self,
-        threshold_db: F,
-        min_silence_duration_seconds: F,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>
-    where
-        T: ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-}
-
-/// Channel manipulation and spatial audio operations.
-///
-/// This trait provides methods for converting between different channel
-/// configurations and manipulating multi-channel audio.
-pub trait AudioChannelOps<T: AudioSample>
-where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
-{
-    /// Converts multi-channel audio to mono using specified method.
-    ///
-    /// # Arguments
-    /// * `method` - Method for combining channels into mono
-    fn to_mono<F>(
-        &self,
-        method: MonoConversionMethod<F>,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>
-    where
-        T: CastFrom<F> + ConvertTo<F>,
-        F: RealFloat + ConvertTo<T>;
-
-    /// Converts mono audio to stereo using specified method.
-    ///
-    /// # Arguments
-    /// * `method` - Method for creating stereo from mono
-    fn to_stereo<F>(
-        &self,
-        method: StereoConversionMethod<F>,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>
-    where
-        T: CastFrom<F> + ConvertTo<F>,
-        F: RealFloat + CastInto<T> + ConvertTo<T>;
-
-    /// Duplicates mono audio to N channels.
-    ///
-    /// This is a convenience method for creating multi-channel audio from mono
-    /// by copying the same signal to all channels.
-    ///
-    /// # Arguments
-    /// * `n_channels` - Number of output channels (must be >= 1)
-    ///
-    /// # Returns
-    /// Multi-channel audio with the mono signal duplicated to all channels.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - The input is not mono
-    /// - `n_channels` is 0
-    ///
-    /// # Examples
-    /// ```rust,no_run
-    /// use audio_samples::{AudioSamples, sample_rate};
-    /// use audio_samples::operations::AudioChannelOps;
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use audio_samples::operations::types::PadSide;
     /// use ndarray::Array1;
     ///
-    /// let mono = AudioSamples::new_mono(Array1::from(vec![0.1f32, 0.2, 0.3]), sample_rate!(44100));
-    /// let stereo = mono.duplicate_to_channels(2).unwrap();
-    /// assert_eq!(stereo.num_channels(), 2);
+    /// // 100 samples at 100 Hz = 1.0 s
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::<f32>::ones(100), sample_rate!(100),
+    /// ).unwrap();
+    /// // Pad to 1.5 s on the right → 50 extra samples of silence
+    /// let padded = audio.pad_to_duration(1.5, 0.0, PadSide::Right).unwrap();
+    /// assert_eq!(padded.samples_per_channel().get(), 150);
+    /// ```
+    fn pad_to_duration<'b>(
+        &self,
+        target_duration_seconds: f64,
+        pad_value: Self::Sample,
+        pad_side: PadSide,
+    ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
+
+    /// Splits the signal into segments of a fixed duration.
     ///
-    /// let surround = mono.duplicate_to_channels(6).unwrap(); // 5.1 surround
-    /// assert_eq!(surround.num_channels(), 6);
+    /// The last segment may be shorter than `segment_duration_seconds`
+    /// if the signal does not divide evenly.  Works on both mono and
+    /// multi-channel audio.
+    ///
+    /// # Arguments
+    /// - `segment_duration_seconds` — target length of each segment in
+    ///   seconds.  Must be `> 0` and must not exceed the signal length.
+    ///
+    /// # Returns
+    /// A vector of segments in chronological order.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the duration is not
+    ///   positive or exceeds the signal length.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::<f32>::zeros(100), sample_rate!(100),
+    /// ).unwrap();
+    /// let segments = audio.split(0.25).unwrap();
+    /// assert_eq!(segments.len(), 4);
+    /// assert_eq!(segments[0].samples_per_channel().get(), 25);
+    /// ```
+    fn split(
+        &self,
+        segment_duration_seconds: f64,
+    ) -> AudioSampleResult<Vec<AudioSamples<'static, Self::Sample>>>;
+
+    /// Joins multiple audio segments end-to-end.
+    ///
+    /// All segments must share the same sample rate and channel count.
+    /// The output preserves the order of the input slice.
+    ///
+    /// # Arguments
+    /// - `segments` — the segments to join, in order.
+    ///
+    /// # Returns
+    /// A single [`AudioSamples`] containing all segments concatenated.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if any segment has a
+    ///   different sample rate or channel count from the first.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let a = AudioSamples::new_mono(array![1.0f32, 2.0], sample_rate!(44100)).unwrap();
+    /// let b = AudioSamples::new_mono(array![3.0f32, 4.0], sample_rate!(44100)).unwrap();
+    /// let segments = NonEmptyVec::new(vec![a, b]).unwrap();
+    /// let joined = AudioSamples::concatenate(&segments).unwrap();
+    /// assert_eq!(joined.as_slice().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+    /// ```
+    fn concatenate<'b>(
+        segments: &'b NonEmptySlice<AudioSamples<'b, Self::Sample>>,
+    ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
+
+    /// Joins multiple owned audio segments end-to-end.
+    ///
+    /// Identical in behaviour to [`concatenate`] but accepts owned
+    /// segments rather than borrowed ones.  All segments must share the
+    /// same sample rate and channel count.
+    ///
+    /// # Arguments
+    /// - `segments` — the owned segments to join, in order.
+    ///
+    /// # Returns
+    /// A single [`AudioSamples`] containing all segments concatenated.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if any segment has a
+    ///   different sample rate or channel count from the first.
+    ///
+    /// [`concatenate`]: Self::concatenate
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let a = AudioSamples::new_mono(array![1.0f32, 2.0], sample_rate!(44100)).unwrap();
+    /// let b = AudioSamples::new_mono(array![3.0f32, 4.0], sample_rate!(44100)).unwrap();
+    /// let segments = NonEmptyVec::new(vec![a, b]).unwrap();
+    /// let joined = AudioSamples::concatenate_owned(segments).unwrap();
+    /// assert_eq!(joined.samples_per_channel().get(), 4);
+    /// ```
+    fn concatenate_owned<'b>(
+        segments: NonEmptyVec<AudioSamples<'_, Self::Sample>>,
+    ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
+
+    /// Produces a weighted sum of multiple audio sources.
+    ///
+    /// All sources must have the same sample rate, channel count, and
+    /// length.  When `weights` is `None`, equal weighting (1 / N per
+    /// source) is applied.
+    ///
+    /// # Arguments
+    /// - `sources` — the audio signals to mix.
+    /// - `weights` — optional per-source gain factors.  Must have the
+    ///   same length as `sources`.
+    ///
+    /// # Returns
+    /// The mixed signal.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the sources differ in
+    ///   sample rate, channel count, or length, or if the weights slice
+    ///   length does not match the sources.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::Array1;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let a = AudioSamples::new_mono(Array1::from_elem(4, 1.0f32), sample_rate!(44100)).unwrap();
+    /// let b = AudioSamples::new_mono(Array1::from_elem(4, 3.0f32), sample_rate!(44100)).unwrap();
+    /// let sources = NonEmptyVec::new(vec![a, b]).unwrap();
+    /// let mixed = AudioSamples::mix(&sources, None).unwrap();
+    /// // Equal weighting: (1.0 + 3.0) / 2 = 2.0
+    /// assert_eq!(mixed[0], 2.0);
+    /// ```
+    fn mix(
+        sources: &NonEmptySlice<Self>,
+        weights: Option<&NonEmptySlice<f64>>,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Applies a fade-in envelope to the beginning of the signal.
+    ///
+    /// The first `duration_seconds` of every channel are multiplied by
+    /// an amplitude ramp from 0 to 1 shaped by `curve`.  If
+    /// `duration_seconds` exceeds the signal length the entire signal
+    /// is faded.
+    ///
+    /// # Arguments
+    /// - `duration_seconds` — fade length in seconds.  Must be `> 0`.
+    /// - `curve` — the envelope shape (see [`FadeCurve`]).
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `duration_seconds`
+    ///   is not positive.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use audio_samples::operations::types::FadeCurve;
+    /// use ndarray::Array1;
+    ///
+    /// let mut audio = AudioSamples::new_mono(
+    ///     Array1::<f32>::ones(100), sample_rate!(100),
+    /// ).unwrap();
+    /// audio.fade_in(0.5, FadeCurve::Linear).unwrap();
+    /// // First sample is at position 0 → gain 0
+    /// assert_eq!(audio.as_slice().unwrap()[0], 0.0);
+    /// ```
+    fn fade_in(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()>;
+
+    /// Applies a fade-out envelope to the end of the signal.
+    ///
+    /// The last `duration_seconds` of every channel are multiplied by
+    /// an amplitude ramp from 1 to 0 shaped by `curve`.  If
+    /// `duration_seconds` exceeds the signal length the entire signal
+    /// is faded.
+    ///
+    /// # Arguments
+    /// - `duration_seconds` — fade length in seconds.  Must be `> 0`.
+    /// - `curve` — the envelope shape (see [`FadeCurve`]).
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `duration_seconds`
+    ///   is not positive.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use audio_samples::operations::types::FadeCurve;
+    /// use ndarray::Array1;
+    ///
+    /// let mut audio = AudioSamples::new_mono(
+    ///     Array1::<f32>::ones(100), sample_rate!(100),
+    /// ).unwrap();
+    /// audio.fade_out(0.5, FadeCurve::Linear).unwrap();
+    /// // Last sample has position 0 in the fade ramp → gain ≈ 0
+    /// let last = *audio.as_slice().unwrap().last().unwrap();
+    /// assert!(last < 0.1);
+    /// ```
+    fn fade_out(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()>;
+
+    /// Tiles the signal, repeating it end-to-end.
+    ///
+    /// Works on both mono and multi-channel audio.  A count of 1
+    /// returns an owned clone of the original.
+    ///
+    /// # Arguments
+    /// - `count` — number of repetitions.  Must be `>= 1`.
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] whose length is `original_length × count`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `count` is 0.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 2.0], sample_rate!(44100),
+    /// ).unwrap();
+    /// let tiled = audio.repeat(3).unwrap();
+    /// assert_eq!(tiled.as_slice().unwrap(), &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
+    /// ```
+    fn repeat(&self, count: usize) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Removes leading and trailing silence from the signal.
+    ///
+    /// A sample (or, for multi-channel audio, an entire frame) is
+    /// considered silent when its absolute value is at or below the
+    /// linear equivalent of `threshold_db`.  If the entire signal is
+    /// silent a zero-filled signal of the same length is returned.
+    ///
+    /// # Arguments
+    /// - `threshold_db` — silence threshold in dB (typically negative,
+    ///   e.g. `-40.0`).  Samples with amplitude at or below
+    ///   `10^(threshold_db / 20)` are treated as silence.
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] with leading and trailing silence removed.
+    ///
+    /// # Errors
+    /// Cannot fail for valid input; errors are propagated from internal
+    /// signal construction only.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// // 3 silent samples, 2 loud samples, 3 silent samples
+    /// let data = array![0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(8)).unwrap();
+    /// let trimmed = audio.trim_silence(-10.0).unwrap();
+    /// assert_eq!(trimmed.samples_per_channel().get(), 2);
+    /// ```
+    fn trim_silence(
+        &self,
+        threshold_db: f64,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Returns a perturbed copy of the signal for data augmentation.
+    ///
+    /// Delegates to [`perturb_in_place`] on an owned clone.  The original signal
+    /// is not modified.  Available only when the `random-generation`
+    /// feature is enabled.
+    ///
+    /// # Arguments
+    /// - `config` — perturbation configuration (method, parameters, and
+    ///   optional deterministic seed). See [`PerturbationConfig`].
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] with the perturbation applied.
+    ///
+    /// # Errors
+    /// Propagates any error from validation or from the underlying
+    /// perturbation method.
+    ///
+    /// [`perturb_in_place`]: Self::perturb_in_place
+    #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
+    fn perturb<'b>(
+        &self,
+        config: &PerturbationConfig,
+    ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
+
+    /// Applies a perturbation to the signal in place.
+    ///
+    /// Available only when the `random-generation` feature is enabled.
+    /// When a seed is set in `config` the operation is fully
+    /// deterministic.
+    ///
+    /// # Arguments
+    /// - `config` — perturbation configuration (method, parameters, and
+    ///   optional deterministic seed). See [`PerturbationConfig`].
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - Validation errors from [`PerturbationConfig`] (e.g. cutoff
+    ///   above Nyquist).
+    /// - Errors from the underlying perturbation method (filtering,
+    ///   pitch shift, etc.).
+    #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
+    fn perturb_in_place(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()>;
+
+    /// Interleaves multiple mono signals into a single multi-channel signal.
+    ///
+    /// Each source becomes one channel in the output.  If only one source
+    /// is provided it is returned unchanged (as an owned clone).
+    ///
+    /// # Arguments
+    /// - `sources` — mono audio signals of equal length and sample rate.
+    ///
+    /// # Returns
+    /// A multi-channel [`AudioSamples`] with one channel per source.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if any source is
+    ///   multi-channel, or if the sources differ in sample rate or length.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let ch1 = AudioSamples::new_mono(array![1.0f32, 2.0], sample_rate!(44100)).unwrap();
+    /// let ch2 = AudioSamples::new_mono(array![3.0f32, 4.0], sample_rate!(44100)).unwrap();
+    /// let sources = NonEmptyVec::new(vec![ch1, ch2]).unwrap();
+    /// let stereo = AudioSamples::stack(&sources).unwrap();
+    /// assert_eq!(stereo.num_channels().get(), 2);
+    /// ```
+    fn stack(
+        sources: &NonEmptySlice<Self>,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Removes all silence regions throughout the signal.
+    ///
+    /// The signal is scanned for runs of silent samples (amplitude at
+    /// or below `threshold_db`).  Any silence run at least
+    /// `min_silence_duration_seconds` long is excised; the remaining
+    /// non-silent segments are concatenated in order.
+    ///
+    /// # Arguments
+    /// - `threshold_db` — silence threshold in dB (typically negative).
+    /// - `min_silence_duration_seconds` — minimum length of a silence
+    ///   region (in seconds) before it is removed.
+    ///
+    /// # Returns
+    /// A new [`AudioSamples`] with qualifying silence regions removed.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the entire signal
+    ///   consists of silence, resulting in an empty output.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// // loud(2) – silence(4) – loud(2) at 10 Hz
+    /// let data = array![1.0f32, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(10)).unwrap();
+    /// // Remove silence runs >= 0.3 s (3 samples at 10 Hz)
+    /// let trimmed = audio.trim_all_silence(-10.0, 0.3).unwrap();
+    /// assert_eq!(trimmed.samples_per_channel().get(), 4);
+    /// ```
+    fn trim_all_silence(
+        &self,
+        threshold_db: f64,
+        min_silence_duration_seconds: f64,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+}
+
+/// Channel manipulation and layout conversion operations.
+///
+/// This trait provides mono/stereo conversions, channel extraction,
+/// panning, balancing, interleaving, and per-channel transforms on
+/// [`AudioSamples`] of any supported sample type.
+#[cfg(feature = "channels")]
+pub trait AudioChannelOps: AudioTypeConversion
+where
+    Self::Sample: StandardSample,
+{
+    /// Convert multi-channel audio to mono using the specified method.
+    ///
+    /// If the audio is already mono, a clone is returned without
+    /// applying the conversion method.
+    ///
+    /// # Arguments
+    /// - `method` – The downmix strategy.  Available variants:
+    ///   - `Average` – arithmetic mean of all channels.
+    ///   - `Left` – channel 0 only.
+    ///   - `Right` – channel 1 only.
+    ///   - `Weighted(weights)` – user-supplied per-channel weights.
+    ///   - `Center` – surround center channel (≥ 6 ch), or average
+    ///     of left and right for stereo.
+    ///
+    /// # Returns
+    /// An owned mono [`AudioSamples`] at the same sample rate.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `method` is `Weighted`
+    ///   and the weights vector length does not match the channel count.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use audio_samples::operations::types::MonoConversionMethod;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5, -1.0]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let stereo = audio.duplicate_to_channels(2).unwrap();
+    /// let mono = stereo.to_mono(MonoConversionMethod::Average).unwrap();
+    /// assert!(mono.is_mono());
+    /// ```
+    fn to_mono(
+        &self,
+        method: MonoConversionMethod,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Convert audio to a different channel layout.
+    ///
+    /// Behaviour depends on the chosen method:
+    /// - `Duplicate` – copies mono audio to both channels; multi-channel
+    ///   input is returned unchanged.
+    /// - `Pan(value)` – applies equal-power panning to mono input.
+    ///   The value is clamped to \[-1, 1\]: −1 is hard left, 0 is
+    ///   centre, +1 is hard right.  Multi-channel input is returned
+    ///   unchanged.
+    /// - `Left` – extracts channel 0 as a mono signal.
+    /// - `Right` – extracts channel 1 as a mono signal.
+    ///
+    /// # Arguments
+    /// - `method` – The conversion strategy.
+    ///
+    /// # Returns
+    /// An owned [`AudioSamples`] at the same sample rate.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `Left` or `Right` is
+    ///   chosen and the requested channel does not exist.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use audio_samples::operations::types::StereoConversionMethod;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5, -1.0]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let stereo = audio.to_stereo(StereoConversionMethod::Duplicate).unwrap();
+    /// assert_eq!(stereo.num_channels().get(), 2);
+    /// ```
+    fn to_stereo(
+        &self,
+        method: StereoConversionMethod,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Duplicate audio into an n-channel signal.
+    ///
+    /// For mono input the single channel is replicated into all output
+    /// channels.  For multi-channel input only channel 0 is used as the
+    /// source; the remaining input channels are ignored.
+    ///
+    /// # Arguments
+    /// - `n_channels` – Target channel count; must be ≥ 1.
+    ///
+    /// # Returns
+    /// An owned [`AudioSamples`] with `n_channels` identical channels
+    /// at the same sample rate.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `n_channels` is 0.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let quad = audio.duplicate_to_channels(4).unwrap();
+    /// assert_eq!(quad.num_channels().get(), 4);
     /// ```
     fn duplicate_to_channels(
         &self,
         n_channels: usize,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
-    /// Extracts a specific channel from multi-channel audio.
+    /// Extract a single channel as an owned mono signal.
+    ///
+    /// If the audio is already mono, a clone is returned (only
+    /// `channel_index` 0 is valid in that case).
     ///
     /// # Arguments
-    /// * `channel_index` - Zero-based index of channel to extract
-    fn extract_channel(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'static, T>>;
-
-    /// Borrows a specific channel from multi-channel audio.
-    ///
-    /// # Arguments
-    /// * `channel_index` - Zero-based index of channel to borrow
+    /// - `channel_index` – Zero-based index of the channel to extract;
+    ///   must be less than the number of channels.
     ///
     /// # Returns
-    /// AudioSamples with a borrowed representation of the specified channel from self.
-    fn borrow_channel(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'_, T>>;
+    /// An owned mono [`AudioSamples`] at the same sample rate.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `channel_index` is ≥ the
+    ///   number of channels.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let stereo = audio.duplicate_to_channels(2).unwrap();
+    /// let ch0 = stereo.extract_channel(0).unwrap();
+    /// assert!(ch0.is_mono());
+    /// ```
+    fn extract_channel(
+        &self,
+        channel_index: u32,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
-    /// Swaps two channels in multi-channel audio.
+    /// Borrow a single channel as a zero-copy view.
+    ///
+    /// The returned [`AudioSamples`] shares memory with `self`; its
+    /// lifetime is tied to the borrow of `self`.
     ///
     /// # Arguments
-    /// * `channel1` - Index of first channel
-    /// * `channel2` - Index of second channel
-    fn swap_channels(&mut self, channel1: usize, channel2: usize) -> AudioSampleResult<()>;
+    /// - `channel_index` – Zero-based index of the channel to borrow;
+    ///   must be less than the number of channels.
+    ///
+    /// # Returns
+    /// A borrowed mono [`AudioSamples`] at the same sample rate.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `channel_index` is ≥ the
+    ///   number of channels.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let stereo = audio.duplicate_to_channels(2).unwrap();
+    /// let ch1 = stereo.borrow_channel(1).unwrap();
+    /// assert!(ch1.is_mono());
+    /// ```
+    fn borrow_channel(
+        &self,
+        channel_index: u32,
+    ) -> AudioSampleResult<AudioSamples<'_, Self::Sample>>;
 
-    /// Applies pan control to stereo audio.
+    /// Swap two channels in place.
+    ///
+    /// For mono audio the only valid index is 0, making the swap a
+    /// no-op.  Passing any other index for mono audio will trigger
+    /// the out-of-range error below.
     ///
     /// # Arguments
-    /// * `pan_value` - Pan position (-1.0 = full left, 0.0 = center, 1.0 = full right)
-    fn pan<F>(&mut self, pan_value: F) -> AudioSampleResult<()>
-    where
-        T: CastFrom<F> + ConvertTo<F>,
-        F: RealFloat + CastInto<T> + ConvertTo<T>;
+    /// - `channel1` – Zero-based index of the first channel.
+    /// - `channel2` – Zero-based index of the second channel.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if either index is ≥ the
+    ///   number of channels.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
+    /// assert!(stereo.swap_channels(0, 1).is_ok());
+    /// ```
+    fn swap_channels(&mut self, channel1: u32, channel2: u32) -> AudioSampleResult<()>;
 
-    /// Adjusts balance between left and right channels.
+    /// Apply linear panning to a stereo signal in place.
+    ///
+    /// The left channel is scaled by `1 − pan_value` and the right
+    /// channel by `1 + pan_value`, after clamping `pan_value` to
+    /// \[-1, 1\].  A value of 0 leaves both channels unchanged;
+    /// −1 silences the right channel; +1 silences the left channel.
     ///
     /// # Arguments
-    /// * `balance` - Balance adjustment (-1.0 = left only, 0.0 = equal, 1.0 = right only)
-    fn balance<F>(&mut self, balance: F) -> AudioSampleResult<()>
-    where
-        T: CastFrom<F> + ConvertTo<F>,
-        F: RealFloat + CastInto<T> + ConvertTo<T>;
+    /// - `pan_value` – Panning position in the range \[-1, 1\].
+    ///   Values outside this range are clamped.  −1 is hard left,
+    ///   0 is centre, +1 is hard right.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if the audio is mono or
+    ///   has a channel count other than 2.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
+    /// stereo.pan(0.5).unwrap();
+    /// ```
+    fn pan(&mut self, pan_value: f64) -> AudioSampleResult<()>;
 
-    /// Apply a function to a specific channel.
-    fn apply_to_channel<F>(&mut self, channel_index: usize, func: F) -> AudioSampleResult<()>
-    where
-        F: FnMut(T) -> T,
-        Self: Sized;
+    /// Adjust the left/right balance of a stereo signal in place.
+    ///
+    /// The formula applied is identical to [`AudioChannelOps::pan`]:
+    /// the left channel is scaled by `1 − balance` and the right
+    /// channel by `1 + balance`, after clamping to \[-1, 1\].
+    ///
+    /// # Arguments
+    /// - `balance` – Balance position in the range \[-1, 1\].
+    ///   Values outside this range are clamped.  −1 is full left,
+    ///   0 is centre, +1 is full right.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if the audio is mono or
+    ///   has a channel count other than 2.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
+    /// stereo.balance(-0.3).unwrap();
+    /// ```
+    fn balance(&mut self, balance: f64) -> AudioSampleResult<()>;
 
-    /// Interleave multiple channels into one audio sample.
+    /// Apply a closure to every sample in a single channel.
+    ///
+    /// For mono audio the closure is applied to the single channel
+    /// and `channel_index` is ignored.  For multi-channel audio
+    /// `channel_index` is validated and must be less than the number
+    /// of channels.
+    ///
+    /// # Arguments
+    /// - `channel_index` – Zero-based index of the target channel.
+    ///   Ignored for mono audio.
+    /// - `func` – A closure that maps each sample to a new value.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if the audio is
+    ///   multi-channel and `channel_index` is ≥ the number of
+    ///   channels.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
+    ///
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
+    /// stereo.apply_to_channel(1, |s| s * 0.5).unwrap();
+    /// ```
+    fn apply_to_channel<F>(&mut self, channel_index: u32, func: F) -> AudioSampleResult<()>
+    where
+        F: FnMut(Self::Sample) -> Self::Sample;
+
+    /// Combine multiple mono signals into a single multi-channel signal.
+    ///
+    /// All input signals must have the same number of samples.  The
+    /// first signal becomes channel 0, the second becomes channel 1,
+    /// and so on.  The output sample rate is taken from the first
+    /// input signal.
+    ///
+    /// # Arguments
+    /// - `channels` – A non-empty slice of mono [`AudioSamples`].
+    ///   All elements must share the same sample count.
+    ///
+    /// # Returns
+    /// An owned multi-channel [`AudioSamples`] with one channel per
+    /// input signal.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if the input signals do
+    ///   not all have the same sample count.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::{NonEmptySlice, NonEmptyVec};
+    ///
+    /// let s0 = NonEmptyVec::new(vec![1.0f32, 0.5]).unwrap();
+    /// let s1 = NonEmptyVec::new(vec![-1.0f32, -0.5]).unwrap();
+    /// let ch0: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(s0, sample_rate!(44100));
+    /// let ch1: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(s1, sample_rate!(44100));
+    /// let arr = [ch0, ch1];
+    /// let channels = NonEmptySlice::new(&arr).unwrap();
+    /// let stereo = <AudioSamples<'_, f32> as AudioChannelOps>::interleave_channels(channels).unwrap();
+    /// assert_eq!(stereo.num_channels().get(), 2);
+    /// ```
     fn interleave_channels(
-        channels: &[AudioSamples<'_, T>],
-    ) -> AudioSampleResult<AudioSamples<'static, T>>;
+        channels: &NonEmptySlice<AudioSamples<'_, Self::Sample>>,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
-    /// Deinterleave audio into separate channel samples.
-    fn deinterleave_channels(&self) -> AudioSampleResult<Vec<AudioSamples<'static, T>>>;
-}
-
-/// Utilities for plotting audio data.
-#[cfg(feature = "plotting")]
-pub trait AudioPlottingUtils<T: AudioSample>
-where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
-{
-    /// Generate time axis values for plotting.
-    fn time_axis<F>(&self, step: Option<F>) -> Vec<F>;
-    /// Seconds from 0 to duration with ~target_ticks "nice" spacing (1–2–5).
-    fn time_ticks_seconds<F>(&self, target_ticks: usize) -> Vec<F>;
-    /// Generate frequency axis values for frequency domain plotting.
-    fn frequency_axis(&self) -> Vec<T>;
-    /// Create a quick analysis plot with waveform and spectrum
-    #[cfg(feature = "spectral-analysis")]
-    fn quick_plot<F, P: AsRef<Path>>(&self, save_to: Option<P>) -> super::PlotResult<()>
-    where
-        Self: AudioPlotBuilders<T>,
-        F: RealFloat + ConvertTo<T>,
-        T: CastFrom<F> + ConvertTo<F>,
-    {
-        use std::path::PathBuf;
-
-        use crate::operations::{LayoutConfig, PlotComposer};
-
-        let waveform = self.waveform_plot::<F>(None)?;
-        let spectrum = self.power_spectrum_plot::<F>(None, None, None, None, None)?;
-
-        let plot = PlotComposer::new()
-            .add_element(waveform)
-            .add_element(spectrum)
-            .with_layout(LayoutConfig::VerticalStack)
-            .with_title("Audio Analysis");
-
-        match save_to {
-            None => plot.show(true),
-            Some(p) => {
-                let out_path: PathBuf = p.as_ref().into();
-                plot.render_to_file(out_path, true)
-            }
-        }
-    }
-}
-
-/// Serialization and deserialization operations for audio samples.
-///
-/// This trait provides methods for saving and loading AudioSamples to/from
-/// various file formats including text-based formats (CSV, JSON, TXT),
-/// binary formats (NumPy, MessagePack, CBOR), and compressed formats.
-///
-/// The focus is on data analysis and interchange formats rather than
-/// traditional audio file formats like WAV or MP3. This enables seamless
-/// integration with data science workflows, Python NumPy/SciPy, and other
-/// audio analysis tools.
-///
-/// # Format Support
-///
-/// - **Text formats**: CSV, JSON, plain text with configurable delimiters
-/// - **Binary formats**: NumPy (.npy), MessagePack, CBOR, custom binary
-/// - **Compressed formats**: NumPy compressed (.npz), gzip compression
-/// - **Metadata preservation**: Sample rate, channel information, custom attributes
-///
-/// # Example Usage
-///
-/// ```rust,ignore
-/// use audio_samples::{AudioSamples, operations::*};
-/// use audio_samples::operations::types::{SerializationFormat, SerializationConfig};
-///
-/// let audio = AudioSamples::new_mono(samples, 44100);
-///
-/// // Save to JSON with metadata
-/// audio.save_to_file("audio_data.json")?;
-///
-/// // Save to NumPy format
-/// let config = SerializationConfig::numpy();
-/// audio.save_with_config("audio_data.npy", &config)?;
-///
-/// // Load from file with automatic format detection
-/// let loaded = AudioSamples::load_from_file("audio_data.json")?;
-/// ```
-#[cfg(feature = "serialization")]
-pub trait AudioSamplesSerialise<T: AudioSample>
-where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
-{
-    /// Save audio samples to a file with automatic format detection from extension.
+    /// Split a multi-channel signal into individual mono signals.
     ///
-    /// The file format is automatically determined based on the file extension:
-    /// - `.json` → JSON format with metadata
-    /// - `.csv` → CSV format with headers
-    /// - `.npy` → NumPy binary format
-    /// - `.npz` → NumPy compressed format
-    /// - `.txt` → Plain text with space delimiters
-    /// - `.bin` → Custom binary format
-    /// - `.msgpack` → MessagePack format
-    /// - `.cbor` → CBOR format
-    ///
-    /// # Arguments
-    /// * `path` - File path with extension indicating desired format
+    /// Each output signal contains the samples from a single input
+    /// channel.  Channel 0 becomes element 0, channel 1 becomes
+    /// element 1, and so on.  For mono input a single-element vector
+    /// is returned.
     ///
     /// # Returns
-    /// Result indicating success or failure
+    /// A vector of owned mono [`AudioSamples`], one per input channel.
     ///
-    /// # Errors
-    /// - `SerializationError::UnsupportedFormat` if extension is not recognized
-    /// - `SerializationError::IoError` for file I/O failures
-    /// - `SerializationError::SerializationFailed` for format-specific errors
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// audio.save_to_file("data/audio_analysis.json")?;
-    /// audio.save_to_file("output.npy")?;
+    /// # Examples
     /// ```
-    fn save_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> AudioSampleResult<()>;
-
-    /// Save audio samples with explicit format configuration.
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioChannelOps;
+    /// use non_empty_slice::NonEmptyVec;
     ///
-    /// Provides fine-grained control over the serialization process including
-    /// precision, compression, metadata inclusion, and format-specific options.
-    ///
-    /// # Arguments
-    /// * `path` - Output file path
-    /// * `config` - Serialization configuration specifying format and options
-    ///
-    /// # Returns
-    /// Result indicating success or failure
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = SerializationConfig::json()
-    ///     .with_precision(6)
-    ///     .with_metadata(true);
-    /// audio.save_with_config("analysis.json", &config)?;
+    /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
+    /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+    /// let stereo = audio.duplicate_to_channels(2).unwrap();
+    /// let channels = stereo.deinterleave_channels().unwrap();
+    /// assert_eq!(channels.len(), 2);
+    /// assert!(channels[0].is_mono());
     /// ```
-    fn save_with_config<P: AsRef<std::path::Path>>(
-        &self,
-        path: P,
-        config: &crate::operations::types::SerializationConfig<f64>,
-    ) -> AudioSampleResult<()>;
-
-    /// Load audio samples from a file with automatic format detection.
-    ///
-    /// Attempts to detect the file format using:
-    /// 1. File extension hints
-    /// 2. Magic number/header detection
-    /// 3. Content analysis for text formats
-    ///
-    /// # Arguments
-    /// * `path` - Input file path
-    ///
-    /// # Returns
-    /// New AudioSamples instance loaded from the file
-    ///
-    /// # Errors
-    /// - `SerializationError::FormatDetectionFailed` if format cannot be determined
-    /// - `SerializationError::IoError` for file I/O failures
-    /// - `SerializationError::DeserializationFailed` for parsing errors
-    /// - `SerializationError::InvalidHeader` for corrupted files
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let audio: AudioSamples<f32> = AudioSamples::load_from_file("data.json")?;
-    /// ```
-    fn load_from_file<P: AsRef<std::path::Path>>(
-        path: P,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>;
-
-    /// Load audio samples with explicit format configuration.
-    ///
-    /// Uses the specified configuration to parse the file, bypassing automatic
-    /// format detection. Useful when the automatic detection fails or when
-    /// specific parsing options are required.
-    ///
-    /// # Arguments
-    /// * `path` - Input file path
-    /// * `config` - Deserialization configuration specifying format and options
-    ///
-    /// # Returns
-    /// New AudioSamples instance loaded from the file
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = SerializationConfig::csv();
-    /// let audio = AudioSamples::load_with_config("data.csv", &config)?;
-    /// ```
-    fn load_with_config<P: AsRef<std::path::Path>>(
-        path: P,
-        config: &crate::operations::types::SerializationConfig<f64>,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>;
-
-    /// Serialize audio samples to bytes in memory.
-    ///
-    /// Converts the audio data to the specified format and returns the
-    /// serialized bytes. Useful for network transmission, caching, or
-    /// embedding in other data structures.
-    ///
-    /// # Arguments
-    /// * `format` - Target serialization format
-    ///
-    /// # Returns
-    /// Vector of bytes containing the serialized audio data
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let json_bytes = audio.serialize_to_bytes(SerializationFormat::Json)?;
-    /// let numpy_bytes = audio.serialize_to_bytes(SerializationFormat::Numpy)?;
-    /// ```
-    fn serialize_to_bytes(
-        &self,
-        format: crate::operations::types::SerializationFormat,
-    ) -> AudioSampleResult<Vec<u8>>;
-
-    /// Deserialize audio samples from bytes in memory.
-    ///
-    /// Parses audio data from the provided byte array using the specified format.
-    /// The inverse operation of `serialize_to_bytes`.
-    ///
-    /// # Arguments
-    /// * `data` - Byte array containing serialized audio data
-    /// * `format` - Format of the serialized data
-    ///
-    /// # Returns
-    /// New AudioSamples instance deserialized from the bytes
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let audio = AudioSamples::deserialize_from_bytes(&bytes, SerializationFormat::Json)?;
-    /// ```
-    fn deserialize_from_bytes(
-        data: &[u8],
-        format: crate::operations::types::SerializationFormat,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>;
-
-    /// Get an estimate of the serialized size for a format.
-    ///
-    /// Provides an approximation of how many bytes the audio data will
-    /// occupy when serialized to the specified format. Useful for memory
-    /// planning and storage estimation.
-    ///
-    /// # Arguments
-    /// * `format` - Target serialization format
-    ///
-    /// # Returns
-    /// Estimated size in bytes
-    ///
-    /// # Note
-    /// The estimate may not be exact, especially for compressed formats
-    /// where the final size depends on data compressibility.
-    fn estimate_serialized_size(
-        &self,
-        format: crate::operations::types::SerializationFormat,
-    ) -> AudioSampleResult<usize>;
-
-    /// List all supported formats for serialization.
-    ///
-    /// Returns a vector of all serialization formats that are available
-    /// for saving audio data. The availability depends on enabled cargo features.
-    ///
-    /// # Returns
-    /// Vector of supported serialization formats
-    fn supported_serialization_formats() -> Vec<crate::operations::types::SerializationFormat>;
-
-    /// List all supported formats for deserialization.
-    ///
-    /// Returns a vector of all formats that can be loaded. Usually identical
-    /// to serialization formats, but may differ if some formats are write-only.
-    ///
-    /// # Returns
-    /// Vector of supported deserialization formats
-    fn supported_deserialization_formats() -> Vec<crate::operations::types::SerializationFormat>;
-
-    /// Auto-detect format from file extension or magic bytes.
-    ///
-    /// Analyzes the file to determine its format using:
-    /// 1. File extension mapping
-    /// 2. Magic number detection in file headers
-    /// 3. Content structure analysis for text formats
-    ///
-    /// # Arguments
-    /// * `path` - File path to analyze
-    ///
-    /// # Returns
-    /// Detected serialization format
-    ///
-    /// # Errors
-    /// - `SerializationError::FormatDetectionFailed` if format cannot be determined
-    /// - `SerializationError::IoError` if file cannot be accessed
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let format = AudioSamples::<f32>::detect_format("data.json")?;
-    /// assert_eq!(format, SerializationFormat::Json);
-    /// ```
-    fn detect_format<P: AsRef<std::path::Path>>(
-        path: P,
-    ) -> AudioSampleResult<crate::operations::types::SerializationFormat>;
-
-    /// Validate serialization round-trip accuracy.
-    ///
-    /// Serializes the audio data to the specified format, then deserializes
-    /// it back and compares with the original. Useful for testing data integrity
-    /// and format compatibility.
-    ///
-    /// # Arguments
-    /// * `format` - Format to test
-    /// * `tolerance` - Acceptable difference threshold for floating-point comparison
-    ///
-    /// # Returns
-    /// Result indicating whether round-trip was successful within tolerance
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// audio.validate_round_trip(SerializationFormat::Json, 1e-6)?;
-    /// ```
-    fn validate_round_trip(
-        &self,
-        format: crate::operations::types::SerializationFormat,
-        tolerance: f64,
-    ) -> AudioSampleResult<()>;
-
-    /// Export metadata as a separate JSON file.
-    ///
-    /// Saves audio metadata (sample rate, channel count, duration, custom attributes)
-    /// to a JSON file alongside the main audio data. Useful when using binary
-    /// formats that don't support metadata natively.
-    ///
-    /// # Arguments
-    /// * `path` - Output file path for metadata JSON
-    ///
-    /// # Returns
-    /// Result indicating success or failure
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// audio.save_to_file("data.npy")?;
-    /// audio.export_metadata("data_metadata.json")?;
-    /// ```
-    fn export_metadata<P: AsRef<std::path::Path>>(&self, path: P) -> AudioSampleResult<()>;
-
-    /// Import metadata from a JSON file.
-    ///
-    /// Loads metadata from a JSON file and applies it to the current AudioSamples
-    /// instance. Useful when loading binary formats that don't preserve metadata.
-    ///
-    /// # Arguments
-    /// * `path` - Input file path for metadata JSON
-    ///
-    /// # Returns
-    /// Result indicating success or failure
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let mut audio = AudioSamples::load_from_file("data.npy")?;
-    /// audio.import_metadata("data_metadata.json")?;
-    /// ```
-    fn import_metadata<P: AsRef<std::path::Path>>(&mut self, path: P) -> AudioSampleResult<()>;
+    fn deinterleave_channels(&self) -> AudioSampleResult<Vec<AudioSamples<'static, Self::Sample>>>;
 }
 
 /// Audio decomposition operations for separating signals into components.
@@ -2519,7 +3394,7 @@ where
 /// use audio_samples::operations::types::HpssConfig;
 /// use ndarray::array;
 ///
-/// let audio = AudioSamples::new_mono(samples, 44100);
+/// let audio = AudioSamples::new_mono(samples, 44100).unwrap();
 /// let config = HpssConfig::new();
 ///
 /// // Separate into harmonic and percussive components
@@ -2529,15 +3404,10 @@ where
 /// let drums_isolated = percussive.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
 /// let melody_isolated = harmonic.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
 /// ```
-#[cfg(feature = "hpss")]
-pub trait AudioDecomposition<T: AudioSample>
+#[cfg(feature = "decomposition")]
+pub trait AudioDecomposition: AudioTransforms
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T>,
+    Self::Sample: StandardSample,
 {
     /// Separate audio into harmonic and percussive components using HPSS.
     ///
@@ -2594,12 +3464,419 @@ where
     ///
     /// - Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering"
     /// - Müller, M. (2015). "Fundamentals of Music Processing", Section 8.4
-    fn hpss<F: RealFloat>(
+    fn hpss(
         &self,
-        config: &crate::operations::types::HpssConfig<F>,
-    ) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)>
-    where
-        F: FftNum + AudioSample + ConvertTo<T>,
-        T: ConvertTo<F>,
-        for<'a> AudioSamples<'a, T>: AudioTypeConversion<'a, T> + AudioTransforms<T>;
+        config: &HpssConfig,
+    ) -> AudioSampleResult<(
+        AudioSamples<'static, Self::Sample>,
+        AudioSamples<'static, Self::Sample>,
+    )>;
+}
+
+#[cfg(feature = "onset-detection")]
+pub trait AudioOnsetDetection: AudioTransforms
+where
+    Self::Sample: StandardSample,
+{
+    /// Detects onsets in the audio signal using spectral flux method.
+    ///
+    /// # Arguments
+    /// * `config` - Onset detection configuration parameters
+    ///
+    /// # Returns
+    /// Vector of onset times in seconds
+    fn detect_onsets(&self, config: &OnsetDetectionConfig) -> AudioSampleResult<Vec<f64>>;
+
+    /// Compute onset detection function (energy-based).
+    ///
+    /// # Arguments
+    /// * `config` - Onset detection configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - Vector of onset detection function values
+    /// - Vector of corresponding time stamps in seconds
+    fn onset_detection_function(
+        &self,
+        config: &OnsetDetectionConfig,
+    ) -> AudioSampleResult<(NonEmptyVec<f64>, NonEmptyVec<f64>)>;
+
+    /// Detect onsets using spectral flux.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Spectral flux configuration parameters
+    ///
+    /// # Returns
+    ///
+    fn detect_onsets_spectral_flux(
+        &self,
+        config: &SpectralFluxConfig,
+    ) -> AudioSampleResult<Vec<f64>>;
+
+    /// Compute spectral flux only.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - CQT parameters for spectral analysis
+    /// * `hop_size` - Hop size between successive frames
+    /// * `method` - Method for computing spectral flux
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - Vector of spectral flux values
+    /// - Vector of corresponding time stamps in seconds
+    fn spectral_flux(
+        &self,
+        config: &CqtParams,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
+        method: SpectralFluxMethod,
+    ) -> AudioSampleResult<(NonEmptyVec<f64>, NonEmptyVec<f64>)>;
+
+    /// Complex domain onset detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `onset_config` - Onset detection configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// Vector of onset times in seconds
+    fn complex_onset_detection(
+        &self,
+        onset_config: &ComplexOnsetConfig,
+    ) -> AudioSampleResult<Vec<f64>>;
+
+    /// Compute complex domain onset detection function.
+    ///
+    /// # Arguments
+    ///
+    /// * `onset_config` - Onset detection configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// Vector of complex domain onset detection function values
+    fn onset_detection_function_complex(
+        &self,
+        onset_config: &ComplexOnsetConfig,
+    ) -> AudioSampleResult<NonEmptyVec<f64>>;
+
+    /// Compute magnitude difference matrix for complex domain onset detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Complex onset detection configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// 2D array representing the magnitude difference matrix
+    fn magnitude_difference_matrix(
+        &self,
+        config: &ComplexOnsetConfig,
+    ) -> AudioSampleResult<Array2<f64>>;
+
+    /// Compute phase deviation matrix for complex domain onset detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Complex onset detection configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// 2D array representing the phase deviation matrix
+    fn phase_deviation_matrix(&self, config: &ComplexOnsetConfig)
+    -> AudioSampleResult<Array2<f64>>;
+}
+
+/// Beat tracking operations for audio signals.
+///
+/// This trait provides tempo-aware beat detection via
+/// [`detect_beats`][AudioBeatTracking::detect_beats].  Configure the
+/// detection pipeline with [`BeatTrackingConfig`] and retrieve results
+/// as [`BeatTrackingData`].
+#[cfg(feature = "beat-tracking")]
+pub trait AudioBeatTracking: AudioTransforms
+where
+    Self::Sample: StandardSample,
+{
+    /// Detect beat positions in the audio signal at the target tempo.
+    ///
+    /// Computes an onset strength envelope from the signal using the
+    /// onset detection configuration in `config`, then locates beat
+    /// frames by walking forward and backward from the global onset
+    /// peak in steps of one inter-beat interval.
+    ///
+    /// # Arguments
+    /// - `config` – Beat tracking configuration: target tempo,
+    ///   optional timing tolerance, and onset detection parameters.
+    ///
+    /// # Returns
+    /// A [`BeatTrackingData`] containing the target tempo and the
+    /// detected beat timestamps in seconds.  Beat times are in
+    /// detection order (global peak first, then forward beats, then
+    /// backward beats in reverse); sort `beat_times` for
+    /// chronological order.
+    ///
+    /// # Errors
+    /// - [`AudioSampleError::Parameter`] – if `config.tempo_bpm` is
+    ///   ≤ 0 or if the inter-beat interval is too small relative to
+    ///   the hop size.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::beat::{BeatTrackingConfig, BeatTrackingData};
+    /// use audio_samples::operations::traits::AudioBeatTracking;
+    ///
+    /// # fn example(audio: AudioSamples<'_, f32>, config: BeatTrackingConfig) {
+    /// let result = audio.detect_beats(&config).unwrap();
+    /// println!("Tempo: {:.1} BPM", result.tempo_bpm);
+    /// for &t in &result.beat_times {
+    ///     println!("  beat at {:.3} s", t);
+    /// }
+    /// # }
+    /// ```
+    fn detect_beats(&self, config: &BeatTrackingConfig) -> AudioSampleResult<BeatTrackingData>;
+}
+
+#[cfg(feature = "plotting")]
+pub trait AudioPlotting: AudioTransforms
+where
+    Self::Sample: StandardSample,
+{
+    /// Plot the waveform of the audio signal.
+    ///
+    /// # Arguments
+    /// * `config` - Configuration parameters for waveform plotting
+    ///
+    /// # Returns
+    /// A plot object that can be rendered or saved to a file
+    fn plot_waveform(&self, params: &WaveformPlotParams) -> AudioSampleResult<WaveformPlot>;
+
+    /// Plot the spectrogram of the audio signal.
+    ///
+    /// # Arguments
+    /// * `config` - Configuration parameters for spectrogram plotting
+    ///
+    /// # Returns
+    /// A plot object that can be rendered or saved to a file
+    fn plot_spectrogram(
+        &self,
+        params: &SpectrogramPlotParams,
+    ) -> AudioSampleResult<SpectrogramPlot>;
+
+    /// Plot the magnitude spectrum (frequency content) of the audio signal.
+    ///
+    /// # Arguments
+    /// * `params` - Configuration parameters for magnitude spectrum plotting
+    ///
+    /// # Returns
+    /// A magnitude spectrum plot showing the frequency content
+    fn plot_magnitude_spectrum(
+        &self,
+        params: &MagnitudeSpectrumParams,
+    ) -> AudioSampleResult<MagnitudeSpectrumPlot>;
+}
+
+/// Amplitude envelope extraction operations.
+///
+/// This trait provides five methods for tracking how the amplitude of
+/// an audio signal varies over time.  All methods return an [`NdResult`]
+/// that mirrors the input channel layout.
+#[cfg(feature = "envelopes")]
+pub trait AudioEnvelopes: AudioStatistics
+where
+    Self::Sample: StandardSample,
+{
+    /// Compute a per-sample rectified amplitude envelope.
+    ///
+    /// Each output sample is the absolute value of the corresponding
+    /// input sample.  The channel layout of the input is preserved.
+    ///
+    /// # Returns
+    /// An [`NdResult`] matching the input channel layout:
+    /// - [`NdResult::Mono`] for mono audio.
+    /// - [`NdResult::MultiChannel`] for multi-channel audio.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, NdResult, sample_rate};
+    /// use audio_samples::operations::traits::AudioEnvelopes;
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, -0.5, 0.25],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let envelope = audio.amplitude_envelope().unwrap();
+    /// if let NdResult::Mono(env) = envelope {
+    ///     assert_eq!(env[0], 1.0f32);
+    ///     assert_eq!(env[1], 0.5f32); // |-0.5| = 0.5
+    /// }
+    /// ```
+    fn amplitude_envelope(&self) -> AudioSampleResult<NdResult<Self::Sample>>;
+
+    /// Compute the root-mean-square (RMS) envelope using a sliding window.
+    ///
+    /// The signal is divided into overlapping windows of `window_size`
+    /// samples, advancing by `hop_size` samples between windows.  The
+    /// RMS of each window becomes one output sample.  Partial windows
+    /// at the end of the signal are included.
+    ///
+    /// # Arguments
+    /// - `window_size` – Number of samples in each analysis window.
+    /// - `hop_size` – Number of samples to advance between successive
+    ///   windows.
+    ///
+    /// # Returns
+    /// An [`NdResult`] matching the input channel layout, with one
+    /// value per window.  The output length is approximately
+    /// `ceil(samples / hop_size)`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, NdResult, sample_rate};
+    /// use audio_samples::operations::traits::AudioEnvelopes;
+    /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// // A constant ±1 signal has RMS of 1.0 per window
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, -1.0, 1.0, -1.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let w = NonZeroUsize::new(2).unwrap();
+    /// let h = NonZeroUsize::new(2).unwrap();
+    /// let envelope = audio.rms_envelope(w, h).unwrap();
+    /// if let NdResult::Mono(env) = envelope {
+    ///     assert_eq!(env.len(), 2);
+    ///     assert!((env[0] - 1.0).abs() < 1e-6);
+    /// }
+    /// ```
+    fn rms_envelope(
+        &self,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
+    ) -> AudioSampleResult<NdResult<Self::Sample>>;
+
+    /// Track amplitude over time with an envelope follower, separating
+    /// attack and decay phases.
+    ///
+    /// For each sample, the [`EnvelopeFollower`] estimates the current
+    /// signal level.  Samples where the level is rising contribute to
+    /// the *attack* envelope; samples where it is falling contribute
+    /// to the *decay* envelope.  Both output envelopes have the same
+    /// length as the input.
+    ///
+    /// # Arguments
+    /// - `follower` – A configured [`EnvelopeFollower`] that controls
+    ///   attack and release time constants.
+    /// - `method` – Detection strategy used to estimate level:
+    ///   peak, RMS, or hybrid.
+    ///
+    /// # Returns
+    /// A tuple `(attack, decay)` of [`NdResult`] values, both matching
+    /// the input channel layout and length.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, NdResult, sample_rate};
+    /// use audio_samples::operations::traits::AudioEnvelopes;
+    /// use audio_samples::operations::dynamic_range::EnvelopeFollower;
+    /// use audio_samples::operations::types::DynamicRangeMethod;
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![0.0f32, 0.0, 0.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let follower = EnvelopeFollower::new(
+    ///     1.0, 10.0, 44100.0, DynamicRangeMethod::Peak,
+    /// );
+    /// let (attack, _decay) = audio
+    ///     .attack_decay_envelope(&follower, DynamicRangeMethod::Peak)
+    ///     .unwrap();
+    /// if let NdResult::Mono(env) = attack {
+    ///     assert!(env.iter().all(|&v| v.abs() < 1e-6));
+    /// }
+    /// ```
+    fn attack_decay_envelope(
+        &self,
+        follower: &EnvelopeFollower,
+        method: DynamicRangeMethod,
+    ) -> AudioSampleResult<(NdResult<Self::Sample>, NdResult<Self::Sample>)>;
+
+    /// Compute the instantaneous amplitude envelope via the analytic signal.
+    ///
+    /// The analytic signal is obtained by applying a Hilbert transform
+    /// to the input.  The instantaneous amplitude at each sample is the
+    /// magnitude of the resulting complex signal
+    /// (√(xᵣ² + xᵢ²)).  This produces a smooth envelope that tracks
+    /// the true amplitude of modulated or band-limited signals more
+    /// accurately than simple rectification.
+    ///
+    /// # Returns
+    /// An [`NdResult`] matching the input channel layout, with one
+    /// instantaneous amplitude value per input sample.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, NdResult, sample_rate};
+    /// use audio_samples::operations::traits::AudioEnvelopes;
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 0.0, -1.0, 0.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let envelope = audio.analytic_envelope().unwrap();
+    /// assert!(matches!(envelope, NdResult::Mono(_)));
+    /// ```
+    fn analytic_envelope(&self) -> AudioSampleResult<NdResult<Self::Sample>>;
+
+    /// Compute a moving-average envelope over the rectified signal.
+    ///
+    /// The signal is first rectified (absolute value taken per sample),
+    /// then a sliding window mean is applied.  The window advances by
+    /// `hop_size` samples between successive outputs.  Partial windows
+    /// at the end of the signal are included.
+    ///
+    /// # Arguments
+    /// - `window_size` – Number of samples per averaging window.
+    /// - `hop_size` – Number of samples to advance between successive
+    ///   windows.
+    ///
+    /// # Returns
+    /// An [`NdResult`] matching the input channel layout, with one
+    /// mean value per window.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, NdResult, sample_rate};
+    /// use audio_samples::operations::traits::AudioEnvelopes;
+    /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// // signal [0, 2, 4, 6]: window means are 1.0 and 5.0
+    /// let audio = AudioSamples::new_mono(
+    ///     array![0.0f32, 2.0, 4.0, 6.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    /// let w = NonZeroUsize::new(2).unwrap();
+    /// let h = NonZeroUsize::new(2).unwrap();
+    /// let envelope = audio.moving_average_envelope(w, h).unwrap();
+    /// if let NdResult::Mono(env) = envelope {
+    ///     assert_eq!(env.len(), 2);
+    ///     assert!((env[0] - 1.0).abs() < 1e-6);
+    ///     assert!((env[1] - 5.0).abs() < 1e-6);
+    /// }
+    /// ```
+    fn moving_average_envelope(
+        &self,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
+    ) -> AudioSampleResult<NdResult<Self::Sample>>;
 }

@@ -1,60 +1,64 @@
-#[cfg(feature = "spectral-analysis")]
-use std::time::Duration;
-
-#[cfg(feature = "spectral-analysis")]
-use audio_samples::{AudioSampleResult, AudioSamples, AudioStatistics, AudioTransforms, sine_wave};
-
-#[cfg(feature = "spectral-analysis")]
-use audio_samples::operations::types::{CqtConfig, SpectrogramScale, WindowType};
-
-#[cfg(not(feature = "spectral-analysis"))]
+#[cfg(not(feature = "transforms"))]
 fn main() {
-    eprintln!("This example requires the 'spectral-analysis' feature.");
+    eprintln!("error: This example requires the `transforms` feature.");
+    std::process::exit(1);
 }
 
-#[cfg(feature = "spectral-analysis")]
-pub fn main() -> AudioSampleResult<()> {
-    let sample_rate_hz = 44_100u32;
+#[cfg(feature = "transforms")]
+pub fn main() -> audio_samples::AudioSampleResult<()> {
+    use std::time::Duration;
+
+    use audio_samples::{
+        AudioSamples, AudioStatistics, AudioTransforms, nzu, sample_rate, sine_wave,
+    };
+    use spectrograms::{ChromaParams, CqtParams, MfccParams, StftParams, WindowType};
+
+    let sample_rate_hz = sample_rate!(44100);
 
     // A 440 Hz tone with a short duration keeps transforms fast.
     let audio: AudioSamples<'static, f64> =
-        sine_wave::<f64, f64>(440.0, Duration::from_millis(200), sample_rate_hz, 0.8);
+        sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate_hz, 0.8);
 
-    let fft = audio.fft::<f64>()?;
+    println!("=== Basic Transforms ===");
+
+    let fft = audio.fft(nzu!(8192))?;
     println!("FFT: shape={:?}", fft.dim());
 
-    let stft = audio.stft::<f64>(1024, 256, WindowType::Hanning)?;
-    println!("STFT: shape={:?}", stft.dim());
+    let stft_params = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true)?;
+    let stft = audio.stft(&stft_params)?;
+    println!("STFT: shape={:?}", stft.data.dim());
 
-    let spec =
-        audio.spectrogram::<f64>(1024, 256, WindowType::Hanning, SpectrogramScale::Log, true)?;
-    println!("Spectrogram: shape={:?}", spec.dim());
+    // MFCC
+    let mfcc_params = MfccParams::speech_standard();
+    let mfcc = audio.mfcc(&stft_params, nzu!(40), &mfcc_params)?;
+    println!("MFCC: shape={:?}", mfcc.data.dim());
 
-    let mfcc = audio.mfcc::<f64>(13, 40, 20.0, 8_000.0)?;
-    println!("MFCC: shape={:?}", mfcc.dim());
+    // Chromagram
+    let chroma_params = ChromaParams::music_standard();
+    let chroma = audio.chromagram(&stft_params, &chroma_params)?;
+    println!("Chroma: shape={:?}", chroma.data.dim());
 
-    let chroma = audio.chroma::<f64>(12)?;
-    println!("Chroma: shape={:?}", chroma.dim());
-
-    let (freqs, psd) = audio.power_spectral_density::<f64>(1024, 0.5)?;
+    // PSD via Welch's method
+    let (freqs, psd) = audio.power_spectral_density(nzu!(1024), 0.5)?;
     println!(
-        "PSD: bins={}  psd_len={}  f0≈{:.1}Hz",
+        "PSD: bins={} psd_len={} f0≈{:.1}Hz",
         freqs.len(),
         psd.len(),
         freqs[0]
     );
 
-    // CQT (single-frame): demonstrate API and output shape.
-    let config = CqtConfig::musical();
-    let cqt = audio.constant_q_transform::<f64>(&config)?;
-    println!("CQT: shape={:?}", cqt.dim());
+    // CQT
+    let cqt_params = CqtParams::new(nzu!(12), nzu!(7), 32.7)?;
+    let cqt = audio.constant_q_transform(&cqt_params, nzu!(256))?;
+    println!("CQT: shape={:?}", cqt.data.dim());
 
-    // Simple reconstruction from FFT just to validate round-trip.
-    let reconstructed = audio.ifft::<f64>(&fft)?;
+    // ISTFT reconstruction
+    println!("\n=== Reconstruction ===");
+    let reconstructed = AudioSamples::<f64>::istft(stft)?;
     println!(
-        "iFFT reconstructed: peak={:.4} rms={:.4}",
+        "iSTFT reconstructed: peak={:.4} rms={:.4}",
         reconstructed.peak(),
-        reconstructed.rms::<f64>()
+        reconstructed.rms()
     );
 
     Ok(())

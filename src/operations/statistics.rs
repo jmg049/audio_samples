@@ -1,27 +1,31 @@
 //! Statistical analysis operations for [`AudioSamples`].
 //!
-//! This module implements the [`AudioStatistics`] trait, providing a range of
-//! statistical and signal analysis methods for mono and multi-channel audio data.
+//! ## What
 //!
-//! ## Overview
+//! This module implements the [`AudioStatistics`] trait, providing statistical
+//! and signal analysis methods for mono and multi-channel audio data. Operations
+//! cover both time-domain statistics and, when the `fft` feature is enabled,
+//! frequency-domain descriptors computed via the [`spectrograms`] crate.
 //!
-//! The statistical operations exposed here are designed for direct use on
-//! [`AudioSamples`] instances. They support all core sample formats
-//! (`i16`, `i24`, `i32`, `f32`, `f64`) and handle both mono and multi-channel data
-//! transparently. Where possible, computations are performed using
-//! numerically stable and vectorised algorithms with minimal branching.
+//! ## Why
 //!
-//! When the `fft` feature is enabled, several frequency-domain analyses
-//! (e.g. spectral centroid and rolloff) become available, using efficient FFT
-//! backends (via `UnifiedFftBackend`) to accelerate large transforms. See the `mkl` feature also.
+//! Statistical measures are a core part of audio analysis. Isolating them into a
+//! single trait keeps the [`AudioSamples`] API organised and lets users access
+//! only the statistical surface they need. This module is the sole implementor of
+//! [`AudioStatistics`] for [`AudioSamples`].
 //!
-//! ## Available Operations
+//! ## How
+//!
+//! All operations are available on any [`AudioSamples<T>`] where `T` is a
+//! supported sample type (`u8`, `i16`, `I24`, `i32`, `f32`, `f64`). Import
+//! [`AudioStatistics`] and call methods on your audio directly.
 //!
 //! ### Time-domain statistics
 //! - [`peak`](AudioStatistics::peak): Maximum absolute amplitude value.
 //! - [`min_sample`](AudioStatistics::min_sample): Minimum sample value.
 //! - [`max_sample`](AudioStatistics::max_sample): Maximum sample value.
 //! - [`mean`](AudioStatistics::mean): Arithmetic mean of all samples.
+//! - [`median`](AudioStatistics::median): Temporal midpoint value of a mono signal.
 //! - [`rms`](AudioStatistics::rms): Root Mean Square energy.
 //! - [`variance`](AudioStatistics::variance): Variance of sample values.
 //! - [`std_dev`](AudioStatistics::std_dev): Standard deviation of sample values.
@@ -32,22 +36,21 @@
 //! - [`cross_correlation`](AudioStatistics::cross_correlation): Computes correlation between two signals.
 //!
 //! ### Frequency-domain features *(requires `fft` feature)*
-//! - `autocorrelation`: Computes signal self-similarity up to a lag.
-//! - `spectral_centroid`: Computes the "brightness" or spectral center of mass.
-//! - `spectral_rolloff`: Finds the frequency below which a given proportion of total energy lies.
+//! - [`autocorrelation`](AudioStatistics::autocorrelation): Signal self-similarity up to a given lag.
+//! - [`spectral_centroid`](AudioStatistics::spectral_centroid): Spectral center of mass (mono only).
+//! - [`spectral_rolloff`](AudioStatistics::spectral_rolloff): Frequency below which a given proportion of spectral energy lies.
 //!
 //! ## Example: Time-domain analysis
 //!
 //! ```rust
-//! use audio_samples::{AudioSamples, AudioStatistics};
+//! use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
 //! use ndarray::array;
 //!
 //! let data = array![1.0f32, -1.0, 0.5, -0.5];
-//! let audio = AudioSamples::new_mono(data, 44100);
+//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 //!
-//! // Compute common time-domain statistics
 //! let peak = audio.peak();
-//! let rms = audio.rms();
+//! let rms  = audio.rms();
 //! let mean = audio.mean();
 //!
 //! println!("Peak: {peak}, RMS: {rms:.4}, Mean: {mean:.4}");
@@ -56,18 +59,17 @@
 //! ## Example: Frequency-domain analysis
 //!
 //! ```rust,ignore
-//! // This example requires the "fft" feature
-//! use audio_samples::{sine_wave, AudioSamples, AudioStatistics};
+//! // Requires the "transforms" feature.
+//! use audio_samples::{sine_wave, AudioSamples, AudioStatistics, sample_rate};
+//! use std::time::Duration;
 //!
-//! // Generate a simple 1 kHz sine wave
-//! let sample_rate = 44100;
-//! let freq = 1000.0;
-//! let duration = 1.0; // 1 second
-//! let audio = sine_wave::<f32, f32>(freq, duration, sample_rate, 0.5);
+//! let sr       = sample_rate!(44100);
+//! let freq     = 1000.0;
+//! let duration = Duration::from_secs(1);
+//! let audio    = sine_wave::<f64>(freq, duration, sr, 0.5);
 //!
-//! // Compute spectral descriptors (requires "fft" feature)
 //! let centroid = audio.spectral_centroid().unwrap();
-//! let rolloff = audio.spectral_rolloff(0.85).unwrap();
+//! let rolloff  = audio.spectral_rolloff(0.85).unwrap();
 //!
 //! println!("Spectral centroid: {:.2} Hz", centroid);
 //! println!("Spectral rolloff (85%): {:.2} Hz", rolloff);
@@ -75,85 +77,66 @@
 //!
 //! ## Error Handling
 //!
-//! Most operations return simple numeric results. However, some methods that
-//! require non-empty data (e.g. `variance`, `autocorrelation`, or
-//! `spectral_rolloff`) return a [`Result`], allowing graceful handling of
-//! empty or invalid inputs. In such cases, an [`crate::AudioSampleError::Processing`]
-//! is returned with a descriptive message.
-//!
-//! ## Implementation Details
-//!
-//! - Operations use [`ndarray`]’s internal vectorisation to achieve SIMD-level
-//!   performance where available.
-//! - Statistical computations are automatically promoted to `f64` precision to
-//!   minimise rounding errors, then cast back to the original sample type when required.
-//! - FFT-based analyses pad input signals to avoid circular correlation artifacts,
-//!   and use normalisation consistent with standard DSP practice.
+//! Most operations return plain numeric results. Methods that perform FFT
+//! computation or validate input parameters return [`crate::AudioSampleResult`].
+//! An [`crate::AudioSampleError::Processing`] is returned for mathematical
+//! failures, and [`crate::AudioSampleError::Parameter`] for invalid arguments.
 //!
 //! ## Feature Flags
 //!
-//! - `fft`: Enables spectral and autocorrelation analyses using fast FFT backends.
+//! - `fft`: Enables spectral and autocorrelation analyses via the
+//!   [`spectrograms`] crate.
 //!
 //! ## See Also
 //!
-//! - [`AudioSamples`]: The core data structure providing access
-//!   to underlying sample buffers.
-//! - [`AudioStatistics`]: The trait defining
-//!   all available statistical operations.
-//! - `UnifiedFftBackend`: Unified FFT
-//!   abstraction for optimised spectral computation.
+//! - [`AudioSamples`]: The core data structure providing access to underlying
+//!   sample buffers.
+//! - [`AudioStatistics`]: The trait defining all statistical operations.
 //!
 //! [`AudioStatistics`]: crate::operations::traits::AudioStatistics
 
-#[cfg(feature = "fft")]
-use crate::operations::fft_backends::{FftBackendImpl, UnifiedFftBackend};
+use std::num::NonZeroUsize;
+
 use crate::operations::traits::AudioStatistics;
 use crate::repr::AudioData;
-use crate::{
-    AudioSample, AudioSampleResult, AudioSamples, AudioTypeConversion, ConversionError, ConvertTo,
-    I24, ParameterError, RealFloat, to_precision,
-};
+use crate::traits::StandardSample;
+use crate::{AudioSampleResult, AudioSamples, ConversionError, ParameterError};
 
-#[cfg(feature = "fft")]
-use crate::{AudioSampleError, ProcessingError};
-
-use ndarray::{Array1, Axis};
-#[cfg(feature = "fft")]
+#[cfg(feature = "transforms")]
+use crate::{AudioSampleError, AudioTypeConversion, ProcessingError};
+#[cfg(feature = "transforms")]
 use num_complex::Complex;
-#[cfg(feature = "fft")]
-use rustfft::FftPlanner;
 
-impl<'a, T: AudioSample> AudioStatistics<'a, T> for AudioSamples<'a, T>
+#[cfg(feature = "transforms")]
+use non_empty_slice::NonEmptySlice;
+
+use ndarray::Axis;
+use non_empty_slice::NonEmptyVec;
+
+#[cfg(feature = "transforms")]
+use spectrograms::FftPlanner;
+
+impl<T> AudioStatistics for AudioSamples<'_, T>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    T: StandardSample,
 {
-    /// Returns the peak (maximum absolute value) in the audio samples.
+    /// Returns the peak (maximum absolute value) across all samples and channels.
     ///
     /// # Returns
-    /// The maximum absolute value found across all samples and channels. Returns the
-    /// default value for type T if the audio data is empty.
+    /// The maximum absolute sample value, in the native sample type `T`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -3.0, 2.5, -1.5];
-    /// let audio = AudioSamples::new_mono(data, 44100);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.peak(), 3.0);
     /// ```
     fn peak(&self) -> T {
         match &self.data {
             AudioData::Mono(arr) => {
-                if arr.is_empty() {
-                    return T::default();
-                }
-
                 // Use ndarray's vectorized operations for SIMD-optimized absolute value and max
                 let abs_values = arr.mapv(|x| {
                     // Manual absolute value that works with existing trait bounds
@@ -168,10 +151,6 @@ where
                 abs_values.fold(T::default(), |acc, &x| if x > acc { x } else { acc })
             }
             AudioData::Multi(arr) => {
-                if arr.is_empty() {
-                    return T::default();
-                }
-
                 // Vectorized absolute value and max across entire multi-channel array
                 let abs_values = arr.mapv(|x| {
                     if x < T::default() {
@@ -186,229 +165,199 @@ where
         }
     }
 
-    /// Returns the minimum value in the audio samples.
+    /// Returns the minimum sample value across all channels.
     ///
     /// # Returns
-    /// The smallest sample value found across all samples and channels. Returns the
-    /// default value for type T if the audio data is empty.
+    /// The smallest sample value found, in the native sample type `T`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -3.0, 2.5, -1.5];
-    /// let audio = AudioSamples::new_mono(data, 44100);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.min_sample(), -3.0);
     /// ```
     fn min_sample(&self) -> T {
         match &self.data {
             AudioData::Mono(arr) => {
-                if arr.is_empty() {
-                    return T::default();
-                }
                 // Use ndarray's efficient fold operation for vectorized minimum finding
                 arr.fold(arr[0], |acc, &x| if x < acc { x } else { acc })
             }
             AudioData::Multi(arr) => {
-                if arr.is_empty() {
-                    return T::default();
-                }
                 // Vectorized minimum across entire multi-channel array
                 arr.fold(arr[[0, 0]], |acc, &x| if x < acc { x } else { acc })
             }
         }
     }
 
-    /// Returns the maximum value in the audio samples.
+    /// Returns the maximum sample value across all channels.
     ///
     /// # Returns
-    /// The largest sample value found across all samples and channels. Returns the
-    /// default value for type T if the audio data is empty.
+    /// The largest sample value found, in the native sample type `T`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -3.0, 2.5, -1.5];
-    /// let audio = AudioSamples::new_mono(data, 44100);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.max_sample(), 2.5);
     /// ```
     fn max_sample(&self) -> T {
         match &self.data {
             AudioData::Mono(arr) => {
-                if arr.is_empty() {
-                    return T::default();
-                }
                 // Use ndarray's efficient fold operation for vectorized maximum finding
                 arr.fold(arr[0], |acc, &x| if x > acc { x } else { acc })
             }
             AudioData::Multi(arr) => {
-                if arr.is_empty() {
-                    return T::default();
-                }
                 // Vectorized maximum across entire multi-channel array
                 arr.fold(arr[[0, 0]], |acc, &x| if x > acc { x } else { acc })
             }
         }
     }
 
-    /// Computes the mean (average) of the audio samples.
+    /// Computes the arithmetic mean of all samples across all channels.
     ///
     /// # Returns
-    /// `Some(mean)` containing the arithmetic mean of all samples across all channels,
-    /// or `None` if the audio data is empty.
+    /// The mean value as `f64`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -1.0, 2.0, -2.0];
-    /// let audio = AudioSamples::new_mono(data, 44100);
-    /// assert_eq!(audio.mean::<f32>(), 0.0);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// assert_eq!(audio.mean(), 0.0);
     /// ```
-    fn mean<F: RealFloat>(&self) -> F {
+    fn mean(&self) -> f64 {
         match &self.data {
-            AudioData::Mono(mono_data) => to_precision::<F, _>(
-                mono_data
-                    .mean()
-                    .expect("AudioSamples cannot be empty therefore mean is always available"),
-            ),
-            AudioData::Multi(multi_data) => to_precision::<F, _>(
-                multi_data
-                    .mean()
-                    .expect("AudioSamples cannot be empty therefore mean is always available"),
-            ),
+            AudioData::Mono(mono_data) => mono_data.mean().cast_into(),
+            AudioData::Multi(multi_data) => multi_data.mean().cast_into(),
         }
     }
 
-    /// Computes the Root Mean Square (RMS) of the audio samples.
+    /// Returns the value at the temporal midpoint of a mono signal.
     ///
-    /// RMS = sqrt(mean(x^2)) where x is the audio signal. This provides a measure
-    /// of the signal's energy content and is commonly used for loudness estimation.
+    /// For even-length signals the result is the average of the two samples at
+    /// the two central indices. For odd-length signals the single central sample
+    /// is returned directly. Samples are selected by index position; the buffer
+    /// is not sorted.
     ///
     /// # Returns
-    /// `Some(rms)` containing the RMS value of all samples across all channels,
-    /// or `None` if the audio data is empty.
+    /// `Some(value)` for mono audio, or `None` if the signal is multi-channel.
+    ///
+    /// # Assumptions
+    /// For even-length signals the sum of the two central samples must not
+    /// overflow the sample type `T`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, 3.0, 5.0, 7.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // Central indices 1 and 2: (3.0 + 5.0) / 2.0 = 4.0
+    /// assert_eq!(audio.median(), Some(4.0));
+    /// ```
+    fn median(&self) -> Option<f64> {
+        let mono = match self.as_mono() {
+            Some(mono) => mono,
+            None => {
+                return None;
+            }
+        };
+        let mono_len = mono.len().get();
+        Some(if mono_len.is_multiple_of(2) {
+            let first_idx = (mono_len / 2) - 1;
+            let first_val = self[first_idx];
+            let second_val = self[first_idx + 1];
+            let sum: f64 = (first_val + second_val).cast_into();
+
+            sum / 2.0
+        } else {
+            self[self.len().get() / 2].cast_into()
+        })
+    }
+
+    /// Computes the Root Mean Square (RMS) of all samples across all channels.
+    ///
+    /// RMS is the square root of the mean of squared sample values. It provides
+    /// a measure of the signal's average energy and is commonly used for
+    /// loudness estimation.
+    ///
+    /// # Returns
+    /// The RMS value as `f64`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -1.0, 1.0, -1.0];
-    /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let rms = audio.rms::<f32>();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let rms = audio.rms();
     /// assert!((rms - 1.0).abs() < 1e-6);
     /// ```
-    fn rms<F: RealFloat>(&self) -> F {
-        // A frame iterator **could** be used but would be inefficient here due to the extra
-        // indirection and lack of vectorization. Direct ndarray operations are preferred for functions like this.
-        match &self.data {
-            AudioData::Mono(mono_data) => {
-                let mean_square: F = mono_data
-                    .mapv(|x| {
-                        let x: F = to_precision(x);
-                        x * x
-                    })
-                    .mean()
-                    .expect("AudioSamples cannot be empty therefore mean is always available");
-
-                mean_square.sqrt()
-            }
-            AudioData::Multi(multi_data) => {
-                let mean_square: F = multi_data
-                    .mapv(|x| {
-                        let x: F = to_precision(x);
-                        x * x
-                    })
-                    .mean()
-                    .expect("AudioSamples cannot be empty therefore mean is always available");
-
-                mean_square.sqrt()
-            }
-        }
+    fn rms(&self) -> f64 {
+        self.powf(2.0, None).mean().sqrt()
     }
 
-    /// Computes the statistical variance of the audio samples.
+    /// Computes the population variance of the audio samples.
     ///
-    /// Variance = mean((x - mean(x))^2). This measures the spread of the data
-    /// points around the mean value.
+    /// Variance measures the spread of sample values around the mean.
+    /// For mono audio this is the standard population variance of all samples.
+    /// For multi-channel audio the variance is computed per sample position
+    /// across channels and the results are averaged over time.
     ///
     /// # Returns
-    /// `Some(variance)` containing the variance of all samples across all channels,
-    /// or `None` if the audio data is empty.
+    /// The variance as `f64`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, 2.0, 3.0, 4.0];
-    /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let variance = audio.variance::<f32>();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let variance = audio.variance();
     /// assert!((variance - 1.25).abs() < 1e-6);
     /// ```
-    fn variance<F: RealFloat>(&self) -> F {
+    fn variance(&self) -> f64 {
         match &self.data {
-            AudioData::Mono(arr) => {
-                let mean: F = self.mean::<F>();
-
-                let deviations: Array1<F> = arr.mapv(|x| {
-                    let x: F = to_precision(x);
-                    x - mean
-                });
-
-                // Vectorized variance computation: (x - mean)^2
-
-                let squared_deviations = &deviations * &deviations; // Element-wise square 
-
-                squared_deviations
-                    .mean()
-                    .expect("Mean cannot be None as array is non-empty")
-            }
-            AudioData::Multi(arr) => {
-                let mean: F = self.mean::<F>();
-
-                // Vectorized variance computation: (x - mean)^2 across all channels
-                let mut deviations = arr.mapv(|x| {
-                    let x: F = to_precision(x);
-                    x - mean
-                });
-
-                deviations.mapv_inplace(|x| x * x);
-
-                deviations
-                    .mean()
-                    .expect("Mean cannot be None as array is non-empty")
-            }
+            AudioData::Mono(mono_data) => mono_data.variance(),
+            AudioData::Multi(multi_data) => multi_data
+                .variance_axis(Axis(0))
+                .mean()
+                .expect("Non empty data will produce a mean"),
         }
     }
 
     /// Computes the standard deviation of the audio samples.
     ///
-    /// Standard deviation is the square root of variance. It provides a measure
-    /// of how spread out the sample values are from the mean, in the same units
-    /// as the original data.
+    /// Standard deviation is the square root of [`AudioStatistics::variance`].
+    /// It expresses the spread of sample values in the same units as the
+    /// original data.
     ///
     /// # Returns
-    /// `Some(std_dev)` containing the standard deviation of all samples across all channels,
-    /// or `None` if the audio data is empty.
+    /// The standard deviation as `f64`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, 2.0, 3.0, 4.0];
-    /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let std_dev = audio.std_dev::<f32>();
-    /// assert!((std_dev - (1.25_f32).sqrt()).abs() < 1e-6);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let std_dev = audio.std_dev();
+    /// assert!((std_dev - 1.25_f64.sqrt()).abs() < 1e-6);
     /// ```
-    fn std_dev<F: RealFloat>(&self) -> F {
-        self.variance::<F>().sqrt()
+    fn std_dev(&self) -> f64 {
+        self.variance().sqrt()
     }
 
     /// Counts the number of zero crossings in the audio signal.
@@ -423,22 +372,22 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -1.0, 1.0, -1.0];
-    /// let audio = AudioSamples::new_mono(data, 44100);
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.zero_crossings(), 3);
     /// ```
     fn zero_crossings(&self) -> usize {
         match &self.data {
             AudioData::Mono(arr) => {
-                if arr.len() < 2 {
+                if arr.len() < nzu!(2) {
                     return 0;
                 }
 
                 let mut crossings = 0;
-                for i in 1..arr.len() {
+                for i in 1..arr.len().get() {
                     let prev: T = arr[i - 1];
                     let curr: T = arr[i];
 
@@ -478,198 +427,165 @@ where
 
     /// Computes the zero crossing rate (crossings per second).
     ///
-    /// This normalizes the zero crossing count by the signal duration, providing
+    /// This normalises the zero crossing count by the signal duration, providing
     /// a frequency-like measure that is independent of signal length.
     ///
     /// # Returns
-    /// The number of zero crossings per second, or 0.0 if the signal duration is zero.
+    /// The number of zero crossings per second as `f64`.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -1.0, 1.0, -1.0];
-    /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let zcr = audio.zero_crossing_rate::<f32>();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let zcr = audio.zero_crossing_rate();
     /// assert!(zcr > 0.0);
     /// ```
-    fn zero_crossing_rate<F: RealFloat>(&self) -> F {
-        let crossings: F = to_precision::<F, _>(self.zero_crossings());
-        let duration_seconds: F = self.duration_seconds();
-
-        if duration_seconds > F::zero() {
-            crossings / duration_seconds
-        } else {
-            F::zero()
-        }
+    fn zero_crossing_rate(&self) -> f64 {
+        let crossings = self.zero_crossings() as f64;
+        let duration_seconds = self.duration_seconds(); // guaranteed > 0.0 since we do not allow empty audio
+        crossings / duration_seconds
     }
 
-    /// Computes the autocorrelation function up to max_lag samples.
+    /// Computes the autocorrelation function up to `max_lag` samples.
     ///
-    /// Uses FFT-based correlation for O(n log n) performance instead of O(n²).
-    /// Autocorrelation measures how similar a signal is to a delayed version of itself.
-    /// Formula: autocorr(x) = IFFT(FFT(x) * conj(FFT(x)))
+    /// Autocorrelation measures the similarity of a signal with a time-shifted
+    /// copy of itself. The value at lag 0 is the signal's mean-square value;
+    /// subsequent lags decrease as the shift increases.
+    ///
+    /// For multi-channel audio only the first channel is used.
+    ///
+    /// Reference: [Autocorrelation — Wikipedia](https://en.wikipedia.org/wiki/Autocorrelation)
     ///
     /// # Arguments
-    /// * `max_lag` - Maximum lag offset to compute correlations for
+    /// - `max_lag` — the maximum lag offset in samples. The effective maximum
+    ///   lag is clamped to `signal_length - 1`.
     ///
     /// # Returns
-    /// `Some(correlations)` containing correlation values for each lag offset from 0 to max_lag,
-    /// or `None` if the array is empty or max_lag is zero.
+    /// A [`NonEmptyVec`] of correlation values for lags `0` through
+    /// `min(max_lag, signal_length - 1)`, or `None` if the FFT computation
+    /// fails.
     ///
     /// # Examples
     /// ```ignore
-    /// // This example requires the "fft" feature
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// // Requires the "transforms" feature.
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
     ///
     /// let data = array![1.0f32, 0.5, -0.5, -1.0];
-    /// let audio = AudioSamples::new_mono(data, 44100);
-    /// let autocorr = audio.autocorrelation::<f32>(3).unwrap();
-    /// assert_eq!(autocorr.len(), 4); // 0 to max_lag inclusive
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let autocorr = audio.autocorrelation(NonZeroUsize::new(3).unwrap()).unwrap();
+    /// assert_eq!(autocorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
     /// ```
-    #[cfg(feature = "fft")]
-    fn autocorrelation<F: RealFloat>(&self, max_lag: usize) -> Option<Vec<F>> {
-        match &self.data {
+    #[cfg(feature = "transforms")]
+    fn autocorrelation(&self, max_lag: NonZeroUsize) -> Option<NonEmptyVec<f64>> {
+        let max_lag = max_lag.get();
+
+        // Extract signal as Vec<f64> — mono uses the array directly,
+        // multi-channel uses the first channel (row 0).
+        let (signal, n) = match &self.data {
             AudioData::Mono(arr) => {
-                if arr.is_empty() || max_lag == 0 {
-                    return None;
-                }
-
-                let n = arr.len();
-                let effective_max_lag = max_lag.min(n - 1);
-
-                // For FFT-based correlation, we need to pad to 2*n-1 to avoid circular correlation
-                let fft_size = (2 * n - 1).next_power_of_two();
-
-                // Convert to f64 and pad with zeros
-                let mut padded_signal: Vec<Complex<F>> = Vec::with_capacity(fft_size);
-                for &sample in arr.iter() {
-                    let sample = to_precision(sample);
-                    padded_signal.push(Complex::new(sample, F::zero()));
-                }
-                // Pad with zeros
-                padded_signal.resize(fft_size, Complex::new(F::zero(), F::zero()));
-
-                // Compute FFT
-                let mut planner = FftPlanner::new();
-                let fft = planner.plan_fft_forward(fft_size);
-                fft.process(&mut padded_signal);
-
-                // Compute power spectrum: FFT(x) * conj(FFT(x))
-                for sample in padded_signal.iter_mut() {
-                    *sample *= sample.conj();
-                }
-
-                // Compute inverse FFT
-                let ifft = planner.plan_fft_inverse(fft_size);
-                ifft.process(&mut padded_signal);
-
-                // Extract autocorrelation values and normalize
-                let mut correlations = Vec::with_capacity(effective_max_lag + 1);
-                let fft_size = to_precision(fft_size);
-
-                for (lag, &signal_value) in
-                    padded_signal.iter().enumerate().take(effective_max_lag + 1)
-                {
-                    // IFFT result is scaled by fft_size, and we normalize by number of overlaps
-                    let correlation = signal_value.re / fft_size;
-                    let overlap_count = n - lag;
-                    let normalized_correlation = correlation / to_precision::<F, _>(overlap_count);
-                    correlations.push(normalized_correlation);
-                }
-
-                Some(correlations)
+                let n = arr.len().get();
+                let sig: Vec<f64> = arr.iter().map(|&x| x.cast_into()).collect();
+                (sig, n)
             }
             AudioData::Multi(arr) => {
-                // For multi-channel, compute autocorrelation on the first channel
-                if arr.is_empty() || max_lag == 0 {
-                    return None;
-                }
-
                 let first_channel = arr.row(0);
                 let n = first_channel.len();
-                let effective_max_lag = max_lag.min(n - 1);
-
-                let fft_size = (2 * n - 1).next_power_of_two();
-
-                // Convert first channel to complex and pad
-                let mut padded_signal: Vec<Complex<F>> = Vec::with_capacity(fft_size);
-                for &sample in first_channel.iter() {
-                    let sample: F = to_precision(sample);
-                    padded_signal.push(Complex::new(sample, F::zero()));
-                }
-                padded_signal.resize(fft_size, Complex::new(F::zero(), F::zero()));
-
-                // FFT-based autocorrelation
-                let mut planner = FftPlanner::new();
-                let fft = planner.plan_fft_forward(fft_size);
-                fft.process(&mut padded_signal);
-
-                // Power spectrum
-                for sample in padded_signal.iter_mut() {
-                    *sample *= sample.conj();
-                }
-
-                // Inverse FFT
-                let ifft = planner.plan_fft_inverse(fft_size);
-                ifft.process(&mut padded_signal);
-
-                // Extract and normalize correlations
-                let mut correlations = Vec::with_capacity(effective_max_lag + 1);
-                let fft_size = to_precision(fft_size);
-
-                for (lag, &signal_value) in
-                    padded_signal.iter().enumerate().take(effective_max_lag + 1)
-                {
-                    let correlation = signal_value.re / fft_size;
-                    let overlap_count = n - lag;
-                    let normalized_correlation = correlation / to_precision::<F, _>(overlap_count);
-                    correlations.push(normalized_correlation);
-                }
-
-                Some(correlations)
+                let sig: Vec<f64> = first_channel.iter().map(|&x| x.cast_into()).collect();
+                (sig, n)
             }
+        };
+
+        let effective_max_lag = max_lag.min(n - 1);
+
+        // Zero-pad to next power of two of (2n − 1) to avoid circular correlation
+        let fft_size = (2 * n - 1).next_power_of_two();
+        let mut padded: Vec<f64> = Vec::with_capacity(fft_size);
+        padded.extend_from_slice(&signal);
+        padded.resize(fft_size, 0.0);
+
+        let mut planner = FftPlanner::new();
+        // safety: padded is non-empty (fft_size >= 1)
+        let padded_slice = unsafe { NonEmptySlice::new_unchecked(&padded[..]) };
+        let fft_size_nz =
+            // safety: fft_size is a next_power_of_two of a value >= 1
+            unsafe { NonZeroUsize::new_unchecked(fft_size) };
+
+        // Forward FFT → Array1<Complex<f64>> of length fft_size/2 + 1
+        let spectrum = planner.fft(padded_slice, fft_size_nz).ok()?;
+
+        // Power spectrum: |X[k]|² as complex values for irfft
+        let power: Vec<Complex<f64>> = spectrum
+            .iter()
+            .map(|c| Complex {
+                re: c.norm_sqr(),
+                im: 0.0,
+            })
+            .collect();
+        // safety: power has the same length as spectrum (fft_size/2 + 1 >= 1)
+        let power_slice = unsafe { NonEmptySlice::new_unchecked(&power[..]) };
+
+        // Inverse real FFT → NonEmptyVec<f64> of length fft_size
+        let raw = planner.irfft(power_slice, fft_size_nz).ok()?;
+
+        // Normalize: divide by fft_size (IFFT scaling) then by overlap count (n − lag)
+        let fft_size_f = fft_size as f64;
+        let mut correlations: Vec<f64> = Vec::with_capacity(effective_max_lag + 1);
+        for lag in 0..=effective_max_lag {
+            let overlap_count = (n - lag) as f64;
+            correlations.push(raw[lag] / fft_size_f / overlap_count);
         }
+
+        // safety: correlations has effective_max_lag + 1 >= 1 elements
+        Some(unsafe { NonEmptyVec::new_unchecked(correlations) })
     }
 
     /// Computes cross-correlation with another audio signal.
     ///
-    /// Cross-correlation measures the similarity between two signals as a function
-    /// of the displacement of one relative to the other. Useful for signal alignment,
-    /// pattern matching, and delay estimation.
+    /// Cross-correlation measures the similarity between two signals as a
+    /// function of the displacement of one relative to the other. It is useful
+    /// for signal alignment, pattern matching, and delay estimation.
+    ///
+    /// For multi-channel audio only the first channels of both signals are
+    /// correlated.
     ///
     /// # Arguments
-    /// * `other` - The second audio signal to correlate with
-    /// * `max_lag` - Maximum lag offset to compute correlations for
+    /// - `other` — the second audio signal. Must have the same number of
+    ///   channels as `self`.
+    /// - `max_lag` — the maximum lag offset in samples. The effective maximum
+    ///   lag is clamped to `min(len_self, len_other) - 1`.
     ///
     /// # Returns
-    /// `Ok(correlations)` containing correlation values for each lag offset from 0 to max_lag.
+    /// A [`NonEmptyVec`] of correlation values for lags `0` through the
+    /// effective maximum lag.
     ///
     /// # Errors
-    /// Returns an error if:
-    /// - Signals have different numbers of channels
-    /// - Either signal is empty
-    /// - max_lag is zero
+    /// Returns an error if the two signals have different numbers of channels,
+    /// or if one is mono and the other is multi-channel.
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
     ///
     /// let data1 = array![1.0f32, 0.0, -1.0, 0.0];
     /// let data2 = array![0.0, 1.0, 0.0, -1.0];
-    /// let audio1 = AudioSamples::new_mono(data1, 44100);
-    /// let audio2 = AudioSamples::new_mono(data2, 44100);
-    /// let xcorr = audio1.cross_correlation::<f32>(&audio2, 3).unwrap();
-    /// assert_eq!(xcorr.len(), 4); // 0 to max_lag inclusive
+    /// let audio1 = AudioSamples::new_mono(data1, sample_rate!(44100)).unwrap();
+    /// let audio2 = AudioSamples::new_mono(data2, sample_rate!(44100)).unwrap();
+    /// let max_lag = NonZeroUsize::new(3).unwrap();
+    /// let xcorr = audio1.cross_correlation(&audio2, max_lag).unwrap();
+    /// assert_eq!(xcorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
     /// ```
-    fn cross_correlation<F: RealFloat>(
+    fn cross_correlation(
         &self,
         other: &Self,
-        max_lag: usize,
-    ) -> AudioSampleResult<Vec<F>> {
+        max_lag: NonZeroUsize,
+    ) -> AudioSampleResult<NonEmptyVec<f64>> {
         // Verify compatible signals
         if self.num_channels() != other.num_channels() {
             return Err(crate::AudioSampleError::Parameter(
@@ -682,37 +598,27 @@ where
 
         match (&self.data, &other.data) {
             (AudioData::Mono(arr1), AudioData::Mono(arr2)) => {
-                if arr1.is_empty() || arr2.is_empty() || max_lag == 0 {
-                    return Err(crate::AudioSampleError::Parameter(
-                        ParameterError::invalid_value(
-                            "input_data",
-                            format!(
-                                "One of the signals is empty or max_lag is zero -- arr1 = {} arr2 = {} max_lag = {}",
-                                arr1.len(),
-                                arr2.len(),
-                                max_lag
-                            ),
-                        ),
-                    ));
-                }
-
                 let n1 = arr1.len();
                 let n2 = arr2.len();
-                let effective_max_lag = max_lag.min(n1.min(n2) - 1);
-                let mut correlations = Vec::with_capacity(effective_max_lag + 1);
+
+                let effective_max_lag: usize = max_lag.get().min(n1.get().min(n2.get()) - 1);
+                let correlations = Vec::with_capacity(effective_max_lag + 1);
+                // safety: we just allocated with capacity effective_max_lag + 1 which is at least 1
+                // effective_max_lag is at least 0 because max_lag is NonZeroUsize and n1 and n2 are at least 1
+                let mut correlations = unsafe { NonEmptyVec::new_unchecked(correlations) };
 
                 for lag in 0..=effective_max_lag {
                     let mut correlation: T = T::zero();
 
-                    let count = n1.min(n2 - lag);
+                    let count = n1.get().min(n2.get() - lag);
 
                     for i in 0..count {
                         let s1 = arr1[i];
                         let s2 = arr2[i + lag];
                         correlation += s1 * s2;
                     }
-                    let mut correlation: F = to_precision::<F, T>(correlation);
-                    correlation /= to_precision(count);
+                    let mut correlation = correlation.cast_into();
+                    correlation /= count as f64;
                     correlations.push(correlation);
                 }
 
@@ -723,19 +629,13 @@ where
                 let ch1 = arr1.row(0);
                 let ch2 = arr2.row(0);
 
-                if ch1.is_empty() || ch2.is_empty() || max_lag == 0 {
-                    return Err(crate::AudioSampleError::Parameter(
-                        ParameterError::invalid_value(
-                            "input_data",
-                            "One of the channels is empty or max_lag is zero",
-                        ),
-                    ));
-                }
-
                 let n1 = ch1.len();
                 let n2 = ch2.len();
-                let effective_max_lag = max_lag.min(n1.min(n2) - 1);
-                let mut correlations = Vec::with_capacity(effective_max_lag + 1);
+                let effective_max_lag: usize = max_lag.get().min(n1.min(n2 - 1));
+                let correlations = Vec::with_capacity(effective_max_lag + 1);
+                // safety: we just allocated with capacity effective_max_lag + 1 which is at
+                // least 1
+                let mut correlations = unsafe { NonEmptyVec::new_unchecked(correlations) };
 
                 for lag in 0..=effective_max_lag {
                     let mut correlation = T::zero();
@@ -746,8 +646,8 @@ where
                         let s2 = ch2[i + lag];
                         correlation += s1 * s2;
                     }
-                    let mut correlation: F = to_precision::<F, T>(correlation);
-                    correlation /= to_precision(count);
+                    let mut correlation: f64 = correlation.cast_into();
+                    correlation /= count as f64;
                     correlations.push(correlation);
                 }
 
@@ -767,163 +667,107 @@ where
         }
     }
 
-    /// Computes the spectral centroid (brightness measure).
+    /// Computes the spectral centroid of a mono signal.
     ///
-    /// The spectral centroid represents the "center of mass" of the spectrum
-    /// and is often used as a measure of brightness or timbre.
-    /// Higher values indicate brighter, more treble-heavy sounds.
-    #[cfg(feature = "fft")]
-    fn spectral_centroid<F: RealFloat + ConvertTo<T>>(&self) -> AudioSampleResult<F>
-    where
-        T: ConvertTo<F>,
-    {
-        match &self.data {
-            AudioData::Mono(arr) => {
-                if arr.is_empty() {
-                    return Ok(F::zero());
-                }
+    /// The spectral centroid is the frequency-weighted mean of the power
+    /// spectrum and serves as a measure of spectral brightness. Higher values
+    /// indicate energy concentrated at higher frequencies.
+    ///
+    /// Reference: [Spectral centroid — Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
+    ///
+    /// # Returns
+    /// The spectral centroid frequency in Hz. Returns `0.0` when the signal
+    /// is silence (zero total spectral energy).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    ///
+    /// # Assumptions
+    /// The input signal must be mono. Multi-channel signals must be mixed or
+    /// channel-selected before calling this method.
+    #[cfg(feature = "transforms")]
+    fn spectral_centroid(&self) -> AudioSampleResult<f64> {
+        if self.is_multi_channel() {
+            return Err(crate::AudioSampleError::Parameter(
+                ParameterError::invalid_value(
+                    "channels",
+                    "spectral_centroid is only defined for mono signals",
+                ),
+            ));
+        }
 
-                let n = arr.len();
-                let duration: F = self.duration_seconds();
+        // convert to f64 for processing
+        let working_samples = self.to_format::<f64>();
 
-                // Create FFT backend
-                let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
+        let working_slice = working_samples.as_slice().expect(
+            "Mono audio means a 1d array which is contiguous, which means as_slice cannot fail",
+        );
+        // safety: working_samples is guaranteed non-empty since self is non-empty by design
+        let working_samples = unsafe { NonEmptySlice::new_unchecked(working_slice) };
 
-                // Prepare output buffer
-                let output_size = n / 2 + 1;
-                let mut fft_output = vec![Complex::new(F::zero(), F::zero()); output_size];
+        let mut planner = FftPlanner::new();
 
-                // Convert to f64 for FFT
-                let arr: Vec<F> = arr.mapv(|x| x.convert_to()).to_vec();
+        let n = self.len();
+        let fft_output_size = n.div_ceil(nzu!(2)).checked_add(1).expect(
+            "n is non-zero since self is non-empty by design and  n/2 is always << usize::MAX, which means n/2 + 1 << usize::MAX and cannot overflow",
+        );
+        let power_spectrum = planner.power_spectrum(working_samples, n, None)?;
 
-                // Compute FFT
-                fft_backend.compute_real_fft(&arr, &mut fft_output)?;
+        let nyquist = self.nyquist();
+        let freq_step = nyquist / (fft_output_size.get() - 1) as f64;
+        // Compute weighted sum and total energy
+        let (weighted_sum, total_energy) = power_spectrum.iter().enumerate().fold(
+            (0.0, 0.0),
+            |(mut w_sum, mut t_energy), (i, &power)| {
+                let frequency = i as f64 * freq_step;
+                w_sum += frequency * power;
+                t_energy += power;
+                (w_sum, t_energy)
+            },
+        );
 
-                // Compute power spectrum
-                let power_spectrum: Vec<F> = {
-                    #[cfg(feature = "parallel-processing")]
-                    {
-                        use rayon::prelude::*;
-                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
-                    }
-                    #[cfg(not(feature = "parallel-processing"))]
-                    {
-                        fft_output.iter().map(|c| c.norm_sqr()).collect()
-                    }
-                };
-                // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
-                let nyquist = sample_rate / to_precision::<F, _>(2.0);
-                let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
-
-                // Compute weighted sum and total energy
-                let mut weighted_sum = F::zero();
-                let mut total_energy = F::zero();
-
-                for (i, &power) in power_spectrum.iter().enumerate() {
-                    let frequency = to_precision::<F, _>(i) * freq_step;
-                    weighted_sum += frequency * power;
-                    total_energy += power;
-                }
-
-                // Compute centroid
-                if total_energy > F::zero() {
-                    Ok(weighted_sum / total_energy)
-                } else if total_energy == F::zero() {
-                    Ok(F::zero())
-                } else {
-                    Err(AudioSampleError::Processing(
-                        ProcessingError::MathematicalFailure {
-                            operation: "spectral_centroid".to_string(),
-                            reason: "Total spectral energy is negative, cannot compute centroid"
-                                .to_string(),
-                        },
-                    ))
-                }
-            }
-            AudioData::Multi(arr) => {
-                // For multi-channel, compute centroid on the first channel
-                if arr.is_empty() {
-                    return Ok(F::zero());
-                }
-
-                let first_channel = arr.row(0);
-                let n = first_channel.len();
-                let duration: F = self.duration_seconds();
-
-                // Convert to f64 for FFT
-                let input: Vec<F> = first_channel.mapv(|x| x.convert_to()).to_vec();
-
-                // Create FFT backend
-                let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
-
-                // Prepare output buffer
-                let output_size = n / 2 + 1;
-                let mut fft_output = vec![Complex::new(F::zero(), F::zero()); output_size];
-
-                // Compute FFT
-                fft_backend.compute_real_fft(&input, &mut fft_output)?;
-
-                // Compute power spectrum
-                let power_spectrum: Vec<F> = {
-                    #[cfg(feature = "parallel-processing")]
-                    {
-                        use rayon::prelude::*;
-                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
-                    }
-                    #[cfg(not(feature = "parallel-processing"))]
-                    {
-                        fft_output.iter().map(|c| c.norm_sqr()).collect()
-                    }
-                };
-
-                // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
-                let nyquist = sample_rate / to_precision::<F, _>(2.0);
-                let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
-
-                // Compute weighted sum and total energy
-                let mut weighted_sum = F::zero();
-                let mut total_energy = F::zero();
-
-                for (i, &power) in power_spectrum.iter().enumerate() {
-                    let frequency = to_precision::<F, _>(i) * freq_step;
-                    weighted_sum += frequency * power;
-                    total_energy += power;
-                }
-
-                // Compute centroid
-                if total_energy > F::zero() {
-                    Ok(weighted_sum / total_energy)
-                } else if total_energy == F::zero() {
-                    Ok(F::zero())
-                } else {
-                    Err(AudioSampleError::Processing(
-                        ProcessingError::MathematicalFailure {
-                            operation: "spectral_centroid".to_string(),
-                            reason: "Total spectral energy is negative, cannot compute centroid"
-                                .to_string(),
-                        },
-                    ))
-                }
-            }
+        // Compute centroid
+        if total_energy > 0.0 {
+            Ok(weighted_sum / total_energy)
+        } else if total_energy == 0.0 {
+            // todo! --- is this correct behaviour? Should we force handling of zero-energy signals?
+            Ok(0.0)
+        } else {
+            Err(AudioSampleError::Processing(
+                ProcessingError::MathematicalFailure {
+                    operation: "spectral_centroid".to_string(),
+                    reason: format!(
+                        "Total spectral energy is negative, cannot compute centroid: total_energy={total_energy},weighted_sum={weighted_sum}"
+                    ),
+                },
+            ))
         }
     }
 
-    /// Computes spectral rolloff frequency.
+    /// Computes the spectral rolloff frequency.
     ///
-    /// The spectral rolloff frequency is the frequency below which a given percentage
-    /// (typically 85%) of the total spectral energy is contained.
-    /// This measure is useful for distinguishing between harmonic and noise-like sounds.
-    #[cfg(feature = "fft")]
-    fn spectral_rolloff<F: RealFloat + ConvertTo<T>>(
-        &self,
-        rolloff_percent: F,
-    ) -> AudioSampleResult<F>
-    where
-        T: ConvertTo<F>,
-    {
-        if rolloff_percent <= F::zero() || rolloff_percent >= F::one() {
+    /// The spectral rolloff is the frequency below which a specified proportion
+    /// of the total spectral energy is contained. It is commonly used to
+    /// distinguish harmonic signals from noise-like signals.
+    ///
+    /// For multi-channel audio only the first channel is used.
+    ///
+    /// # Arguments
+    /// - `rolloff_percent` — the energy proportion threshold. Must lie in the
+    ///   open interval `(0.0, 1.0)`. A typical value is `0.85`.
+    ///
+    /// # Returns
+    /// The rolloff frequency in Hz. Returns `0.0` when the signal is silence
+    /// (zero total spectral energy).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `rolloff_percent` is not in
+    ///   `(0.0, 1.0)`.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64> {
+        if rolloff_percent <= 0.0 || rolloff_percent >= 1.0 {
             return Err(crate::AudioSampleError::Parameter(
                 ParameterError::out_of_range(
                     "rolloff_percent",
@@ -937,59 +781,41 @@ where
 
         match &self.data {
             AudioData::Mono(arr) => {
-                if arr.is_empty() {
-                    return Ok(F::zero());
-                }
-
                 let n = arr.len();
-                let duration: F = self.duration_seconds();
-
-                // Convert to f64 for FFT
-                let input: Vec<F> = arr.mapv(|x| x.convert_to()).to_vec();
+                // Safety: Self is guaranteed non-empty by design, therefore arr is non-empty, therefore to_vec is non-empty
+                let input: NonEmptyVec<f64> = unsafe {
+                    NonEmptyVec::new_unchecked(
+                        arr.mapv(super::super::traits::ConvertTo::convert_to)
+                            .to_vec(),
+                    )
+                };
 
                 // Create FFT backend
-                let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
+                let mut planner = FftPlanner::new();
 
-                // Prepare output buffer
-                let output_size = n / 2 + 1;
-                let mut fft_output = vec![Complex::new(F::zero(), F::zero()); output_size];
+                let power_spectrum = planner.power_spectrum(input.as_non_empty_slice(), n, None)?;
 
-                // Compute FFT
-                fft_backend.compute_real_fft(&input, &mut fft_output)?;
-
-                // Compute power spectrum
-                let power_spectrum: Vec<F> = {
-                    #[cfg(feature = "parallel-processing")]
-                    {
-                        use rayon::prelude::*;
-                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
-                    }
-                    #[cfg(not(feature = "parallel-processing"))]
-                    {
-                        fft_output.iter().map(|c| c.norm_sqr()).collect()
-                    }
-                };
                 // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
-                let nyquist = sample_rate / to_precision::<F, _>(2.0);
-                let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
+                let nyquist = self.nyquist();
+                let freq_step = nyquist / (power_spectrum.len().get() as f64 - 1.0);
 
                 // Compute total energy
-                let total_energy: F = power_spectrum.iter().fold(F::zero(), |acc, &x| acc + x);
-                if total_energy == F::zero() {
-                    return Ok(F::zero());
-                } else if total_energy < F::zero() {
+                let total_energy: f64 = power_spectrum.iter().fold(0.0, |acc, &x| acc + x);
+                if total_energy == 0.0 {
+                    // todo! --- is this correct behaviour? Should we force handling of zero-energy signals?
+                    return Ok(0.0);
+                } else if total_energy < 0.0 {
                     return Err(AudioSampleError::Processing(ProcessingError::MathematicalFailure { operation: "spectral_rolloff".to_string(), reason: "Total spectral energy is negative, cannot compute rolloff frequency".to_string()}));
                 }
 
                 // Find rolloff frequency
                 let target_energy = total_energy * rolloff_percent;
-                let mut cumulative_energy = F::zero();
+                let mut cumulative_energy = 0.0;
 
                 for (i, &power) in power_spectrum.iter().enumerate() {
                     cumulative_energy += power;
                     if cumulative_energy >= target_energy {
-                        let frequency = to_precision::<F, _>(i) * freq_step;
+                        let frequency = i as f64 * freq_step;
                         return Ok(frequency);
                     }
                 }
@@ -999,60 +825,46 @@ where
             }
             AudioData::Multi(arr) => {
                 // For multi-channel, compute rolloff on the first channel
-                if arr.is_empty() {
-                    return Ok(F::zero());
-                }
+                // todo! --- figure out integration of multichannel. These methods typically are only an issue since they would either:
+                // 1)  Force the return value to be a Vec<f64> of per-channel values
+                // 2)  Force the method to accept a weighting/averaging method for channels so as to produce a single value
+                // 3)  Simply use the first channel as representative (current implementation)
 
                 let first_channel = arr.row(0);
                 let n = first_channel.len();
-                let duration: F = self.duration_seconds();
+                // safety: Self is guaranteed non-empty by design, therefore at least one channel exists with at least one sample
+                let n = unsafe { NonZeroUsize::new_unchecked(n) };
 
                 // Convert to float type for FFT
-                let input: Vec<F> = first_channel.iter().map(|&x| x.convert_to()).collect();
-
-                // Create FFT backend
-                let mut fft_backend = UnifiedFftBackend::auto_select(duration, n)?;
-
-                // Prepare output buffer
-                let output_size = n / 2 + 1;
-                let mut fft_output = vec![Complex::new(F::zero(), F::zero()); output_size];
-
-                // Compute FFT
-                fft_backend.compute_real_fft(&input, &mut fft_output)?;
-
-                // Compute power spectrum
-                let power_spectrum: Vec<F> = {
-                    #[cfg(feature = "parallel-processing")]
-                    {
-                        use rayon::prelude::*;
-                        fft_output.par_iter().map(|c| c.norm_sqr()).collect()
-                    }
-                    #[cfg(not(feature = "parallel-processing"))]
-                    {
-                        fft_output.iter().map(|c| c.norm_sqr()).collect()
-                    }
+                let input: NonEmptyVec<f64> = unsafe {
+                    NonEmptyVec::new_unchecked(
+                        first_channel.iter().map(|&x| x.convert_to()).collect(),
+                    )
                 };
+
+                let mut planner = FftPlanner::new();
+                // Prepare output buffer
+                let power_spectrum = planner.power_spectrum(input.as_non_empty_slice(), n, None)?;
                 // Generate frequency bins
-                let sample_rate = to_precision::<F, _>(self.sample_rate.get());
-                let nyquist = sample_rate / to_precision::<F, _>(2.0);
-                let freq_step = nyquist / to_precision::<F, _>(output_size - 1);
+                let nyquist = self.nyquist();
+                let freq_step = nyquist / (power_spectrum.len().get() as f64 - 1.0);
 
                 // Compute total energy
-                let total_energy: F = power_spectrum.iter().fold(F::zero(), |acc, &x| acc + x);
-                if total_energy == F::zero() {
-                    return Ok(F::zero());
-                } else if total_energy < F::zero() {
+                let total_energy: f64 = power_spectrum.iter().fold(0.0, |acc, &x| acc + x);
+                if total_energy == 0.0 {
+                    return Ok(0.0);
+                } else if total_energy < 0.0 {
                     return Err(AudioSampleError::Processing(ProcessingError::MathematicalFailure { operation: "spectral_rolloff".to_string(), reason: "Total spectral energy is negative, cannot compute rolloff frequency".to_string()}));
                 }
 
                 // Find rolloff frequency
                 let target_energy = total_energy * rolloff_percent;
-                let mut cumulative_energy = F::zero();
+                let mut cumulative_energy = 0.0;
 
                 for (i, &power) in power_spectrum.iter().enumerate() {
                     cumulative_energy += power;
                     if cumulative_energy >= target_energy {
-                        let frequency = to_precision::<F, _>(i) * freq_step;
+                        let frequency = i as f64 * freq_step;
                         return Ok(frequency);
                     }
                 }
@@ -1066,6 +878,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "transforms")]
+    use std::time::Duration;
+
     use super::*;
     use crate::sample_rate;
     use approx_eq::assert_approx_eq;
@@ -1074,7 +889,7 @@ mod tests {
     #[test]
     fn test_peak_min_max_existing_methods() {
         let data = array![-3.0f32, -1.0, 0.0, 2.0, 4.0];
-        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         // These should use the existing native implementations
         assert_eq!(audio.peak(), 4.0);
@@ -1086,19 +901,21 @@ mod tests {
     fn test_rms_computation() {
         // Simple test case where we can verify RMS manually
         let data = array![1.0f32, -1.0, 1.0, -1.0];
-        let audio: AudioSamples<'static, f32> = AudioSamples::new_mono(data, sample_rate!(44100));
+        let audio: AudioSamples<'static, f32> =
+            AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        let rms = audio.rms::<f64>(); // RMS of [1, -1, 1, -1] = sqrt((1^2 + 1^2 + 1^2 + 1^2)/4) = sqrt(1) = 1.0
+        let rms = audio.rms(); // RMS of [1, -1, 1, -1] = sqrt((1^2 + 1^2 + 1^2 + 1^2)/4) = sqrt(1) = 1.0
         assert_approx_eq!(rms, 1.0, 1e-6);
     }
 
     #[test]
     fn test_variance_and_std_dev() {
         let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio: AudioSamples<'_, f32> = AudioSamples::new_mono(data, sample_rate!(44100));
+        let audio: AudioSamples<'_, f32> =
+            AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        let variance = audio.variance::<f64>();
-        let std_dev = audio.std_dev::<f64>();
+        let variance = audio.variance();
+        let std_dev = audio.std_dev();
 
         // Mean = 3.0, variance = mean((1-3)^2 + (2-3)^2 + ... + (5-3)^2) = mean(4+1+0+1+4) = 2.0
         assert_approx_eq!(variance, 2.0, 1e-6);
@@ -1108,7 +925,7 @@ mod tests {
     #[test]
     fn test_zero_crossings() {
         let data = array![1.0f32, -1.0, 1.0, -1.0, 1.0];
-        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         let crossings = audio.zero_crossings();
         // Crossings occur at: 1->-1, -1->1, 1->-1, -1->1 = 4 crossings
@@ -1133,8 +950,8 @@ mod tests {
             data.push(value);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(data).into(), sample_rate!(44100));
-        let zcr = audio.zero_crossing_rate::<f64>();
+        let audio = AudioSamples::new_mono(Array1::from(data).into(), sample_rate!(44100)).unwrap();
+        let zcr = audio.zero_crossing_rate();
 
         // 4 Hz square wave has ~8 zero crossings per second (2 per cycle)
         // Due to discrete sampling, we might get 7-8 crossings
@@ -1145,44 +962,44 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "fft")]
     #[test]
+    #[cfg(feature = "transforms")]
     fn test_autocorrelation() {
         let data = array![1.0f32, 0.0, -1.0, 0.0];
-        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        let autocorr = audio.autocorrelation::<f64>(2).unwrap();
+        let autocorr = audio.autocorrelation(crate::nzu!(2)).unwrap();
 
         // Should have correlations for lags 0, 1, 2
-        assert_eq!(autocorr.len(), 3);
+        assert_eq!(autocorr.len(), crate::nzu!(3));
 
         // Lag 0 should be the highest (signal correlated with itself)
         assert!(autocorr[0] >= autocorr[1]);
         assert!(autocorr[0] >= autocorr[2]);
     }
 
-    #[cfg(feature = "fft")]
     #[test]
+    #[cfg(feature = "transforms")]
     fn test_cross_correlation() {
         let data1 = array![1.0f32, 0.0, -1.0];
         let data2 = array![1.0f32, 0.0, -1.0]; // Same signal
-        let audio1 = AudioSamples::new_mono(data1.into(), sample_rate!(44100));
-        let audio2 = AudioSamples::new_mono(data2.into(), sample_rate!(44100));
+        let audio1 = AudioSamples::new_mono(data1.into(), sample_rate!(44100)).unwrap();
+        let audio2 = AudioSamples::new_mono(data2.into(), sample_rate!(44100)).unwrap();
 
-        let cross_corr = audio1.cross_correlation::<f64>(&audio2, 1).unwrap();
+        let cross_corr = audio1.cross_correlation(&audio2, crate::nzu!(1)).unwrap();
 
         // Cross-correlation of identical signals should be same as autocorrelation
-        let autocorr = audio1.autocorrelation::<f64>(1).unwrap();
+        let autocorr = audio1.autocorrelation(crate::nzu!(1)).unwrap();
         assert_eq!(cross_corr.len(), autocorr.len());
     }
 
     #[test]
     fn test_multi_channel_statistics() {
         let data = array![[1.0f32, 2.0], [-1.0, 1.0]]; // 2 channels, 2 samples each
-        let audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100));
+        let audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
 
         let rms: f64 = audio.rms();
-        let variance = audio.variance::<f64>();
+        let variance = audio.variance();
         let crossings = audio.zero_crossings();
 
         // Should compute across all samples
@@ -1195,44 +1012,37 @@ mod tests {
     fn test_edge_cases() {
         // Single sample
         let single_data = array![1.0f32];
-        let single_audio = AudioSamples::new_mono(single_data.into(), sample_rate!(44100));
+        let single_audio = AudioSamples::new_mono(single_data.into(), sample_rate!(44100)).unwrap();
 
         assert_eq!(single_audio.zero_crossings(), 0);
         assert_eq!(
-            single_audio.rms::<f64>(),
+            single_audio.rms(),
             1.0,
             "RMS of single sample should be the sample itself"
         );
     }
 
     #[test]
-    #[should_panic(expected = "data must not be empty")]
     fn test_empty_audio_rejected() {
         // Empty audio should be rejected at construction time
-        let empty_data: ndarray::Array1<f32> = ndarray::Array1::from(vec![]);
-        let _empty_audio = AudioSamples::new_mono(empty_data.into(), sample_rate!(44100));
+        let empty_data: Array1<f32> = Array1::from(vec![]);
+        let empty_audio = AudioSamples::new_mono(empty_data.into(), sample_rate!(44100));
+        assert!(empty_audio.is_err(), "Empty audio should not be created");
     }
 
-    #[cfg(feature = "fft")]
     #[test]
+    #[cfg(feature = "transforms")]
     fn test_spectral_centroid() {
         // Test with a simple sine wave that should have energy concentrated at a specific frequency
-        let sample_rate = 44100;
-        let duration = 1.0; // 1 second
+        let sample_rate = sample_rate!(44100);
+        let duration = Duration::from_secs_f32(1.0); // 1 second
         let freq = 1000.0; // 1kHz sine wave
-        let n_samples = (sample_rate as f64 * duration) as usize;
+
+        let audio = crate::sine_wave::<f64>(freq, duration, sample_rate, 0.5);
 
         // Generate 1kHz sine wave
-        let mut data = Vec::with_capacity(n_samples);
-        for i in 0..n_samples {
-            let t = i as f64 / sample_rate as f64;
-            let sample = (2.0 * std::f64::consts::PI * freq * t).sin() as f32;
-            data.push(sample);
-        }
-
-        let audio = AudioSamples::new_mono(ndarray::Array1::from(data).into(), sample_rate!(44100));
         let centroid = audio
-            .spectral_centroid::<f64>()
+            .spectral_centroid()
             .expect("Failed to compute spectral centroid");
 
         // For a pure sine wave, the spectral centroid should be close to the frequency
@@ -1245,26 +1055,19 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "fft")]
     #[test]
+    #[cfg(all(feature = "transforms", feature = "random-generation"))]
     fn test_spectral_rolloff() {
         // Test with white noise - rolloff should be around 85% of Nyquist for 85% rolloff
-        let sample_rate = 8000; // Use lower sample rate for faster test
-        let n_samples = 4096;
-
+        let sample_rate = sample_rate!(8000); // Use lower sample rate for faster test
+        let duration = Duration::from_secs_f32(1.0);
         // Generate white noise
-        let mut data = Vec::with_capacity(n_samples);
-        for i in 0..n_samples {
-            // Simple deterministic "noise" for reproducible tests
-            let sample = ((i * 17 + 13) % 101) as f32 / 50.0 - 1.0;
-            data.push(sample);
-        }
+        let audio = crate::white_noise::<f64>(duration, sample_rate, 0.5, None);
 
-        let audio = AudioSamples::new_mono(ndarray::Array1::from(data).into(), sample_rate!(8000));
         let rolloff = audio
             .spectral_rolloff(0.85)
             .expect("Failed to compute spectral rolloff");
-        let nyquist = sample_rate as f64 / 2.0;
+        let nyquist = audio.nyquist();
 
         // For noise-like signals, rolloff should be somewhere reasonable
         assert!(rolloff > 0.0, "Rolloff should be positive");
@@ -1274,11 +1077,11 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "fft")]
     #[test]
+    #[cfg(feature = "transforms")]
     fn test_spectral_rolloff_validation() {
         let data = array![1.0f32, -1.0, 1.0];
-        let audio = AudioSamples::new_mono(data, sample_rate!(44100));
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         // Test invalid rolloff percentages
         assert!(audio.spectral_rolloff(0.0).is_err());
@@ -1288,14 +1091,5 @@ mod tests {
 
         // Test valid rolloff percentage
         assert!(audio.spectral_rolloff(0.85).is_ok());
-    }
-
-    #[cfg(feature = "fft")]
-    #[test]
-    #[should_panic(expected = "data must not be empty")]
-    fn test_spectral_methods_empty_audio() {
-        // Empty audio should be rejected at construction time
-        let empty_data: ndarray::Array1<f32> = ndarray::Array1::from(vec![]);
-        let _empty_audio = AudioSamples::new_mono(empty_data.into(), sample_rate!(44100));
     }
 }

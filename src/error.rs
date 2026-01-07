@@ -66,6 +66,7 @@ pub type AudioSampleResult<T> = Result<T, AudioSampleError>;
 /// Some variants only exist when the corresponding cargo feature is enabled
 /// (e.g. `Plotting` requires `feature = "plotting"`).
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum AudioSampleError {
     /// Errors related to type conversions and casting operations.
     #[error(transparent)]
@@ -87,17 +88,76 @@ pub enum AudioSampleError {
     #[error(transparent)]
     Feature(#[from] FeatureError),
 
-    #[cfg(feature = "plotting")]
-    /// Errors related to plotting operations.
-    /// This variant is only available when the "plotting" feature is enabled.
-    #[error(transparent)]
-    Plotting(#[from] PlottingError),
+    /// Errors related to parsing of any of the various audio_samples support types.
+    #[error("Failed to parse {type_name}. Context: {context}")]
+    Parse {
+        /// Type name of the type we failed to parse
+        type_name: String,
+        /// User provided context
+        context: String,
+    },
 
-    #[cfg(feature = "serialization")]
-    /// Errors related to serialization and deserialization operations.
-    /// This variant is only available when the "serialization" feature is enabled.
+    #[cfg(feature = "transforms")]
+    /// Errors stemming from the spectrograms crate.
     #[error(transparent)]
-    Serialization(#[from] SerializationError),
+    Spectrogram(#[from] spectrograms::SpectrogramError),
+
+    #[error("Empty audio data provided where non-empty data is required")]
+    /// Error indicating that audio data is empty when non-empty data is required.
+    EmptyData,
+
+    #[error("Invalid number of samples with respect to the number of channels")]
+    InvalidNumberOfSamples {
+        /// Total number of samples
+        total_samples: usize,
+        /// Number of channels
+        channels: u32,
+    },
+
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
+}
+
+impl AudioSampleError {
+    #[inline]
+    pub fn unsupported<S>(msg: S) -> Self
+    where
+        S: ToString,
+    {
+        Self::Unsupported(msg.to_string())
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn invalid_number_of_samples(total_samples: usize, channels: u32) -> Self {
+        Self::InvalidNumberOfSamples {
+            total_samples,
+            channels,
+        }
+    }
+
+    /// Creates an AudioSampleError::Parse error with the given message.
+    #[inline]
+    pub fn parse<T, S>(msg: S) -> Self
+    where
+        S: ToString,
+    {
+        Self::Parse {
+            type_name: std::any::type_name::<T>().to_string(),
+            context: msg.to_string(),
+        }
+    }
+
+    #[inline]
+    pub fn layout<S>(msg: S) -> Self
+    where
+        S: ToString,
+    {
+        Self::Layout(LayoutError::ShapeError {
+            operation: "unknown".to_string(),
+            info: msg.to_string(),
+        })
+    }
 }
 
 /// Errors that occur during type conversion and casting operations.
@@ -230,13 +290,6 @@ pub enum LayoutError {
         reason: String,
     },
 
-    /// Input data is empty when the operation requires non-empty data.
-    #[error("Empty input data provided to {operation}")]
-    EmptyData {
-        /// The operation that received empty data.
-        operation: String,
-    },
-
     /// Data size or format is incompatible with the operation requirements.
     #[error("Incompatible data format for {operation}: {reason}")]
     IncompatibleFormat {
@@ -254,14 +307,27 @@ pub enum LayoutError {
         /// Detailed information about the shape error.
         info: String,
     },
+
+    #[error("Invalid operation on {0}:\nReason: {1}")]
+    InvalidOperation(String, String),
 }
 
 impl From<ndarray::ShapeError> for AudioSampleError {
     fn from(err: ndarray::ShapeError) -> Self {
-        AudioSampleError::Layout(LayoutError::ShapeError {
+        Self::Layout(LayoutError::ShapeError {
             operation: "ndarray operation".to_string(),
             info: err.to_string(),
         })
+    }
+}
+
+impl LayoutError {
+    #[inline]
+    pub fn invalid_operation<S>(operation: S, reason: S) -> Self
+    where
+        S: ToString,
+    {
+        Self::InvalidOperation(operation.to_string(), reason.to_string())
     }
 }
 
@@ -359,109 +425,9 @@ pub enum FeatureError {
     },
 }
 
-#[cfg(feature = "plotting")]
-/// Errors related to plotting operations.
-#[derive(Error, Clone, Debug)]
-pub enum PlottingError {
-    /// Failed to create a plot due to invalid data or configuration.
-    #[error("Failed to create plot: {reason}")]
-    PlotCreation {
-        /// Detailed reason for the plot creation failure.
-        reason: String,
-    },
-
-    /// Rendering the plot to a file or display failed.
-    #[error("Failed to render plot: {reason}")]
-    PlotRendering {
-        /// Detailed reason for the rendering failure.
-        reason: String,
-    },
-
-    #[error("html_view error: {0}")]
-    HtmlViewError(#[from] html_view::ViewerError),
-}
-
-#[cfg(feature = "serialization")]
-/// Errors related to serialization and deserialization operations.
-///
-/// This covers failures in data format conversion, I/O operations,
-/// and format-specific encoding/decoding issues.
-#[derive(Error, Debug, Clone)]
-pub enum SerializationError {
-    /// Failed to serialize audio data to the specified format.
-    #[error("Failed to serialize to {format}: {reason}")]
-    SerializationFailed {
-        /// The target format that failed
-        format: String,
-        /// Detailed reason for the serialization failure
-        reason: String,
-    },
-
-    /// Failed to deserialize audio data from the specified format.
-    #[error("Failed to deserialize from {format}: {reason}")]
-    DeserializationFailed {
-        /// The source format that failed to deserialize
-        format: String,
-        /// Detailed reason for the deserialization failure
-        reason: String,
-    },
-
-    /// Input/output error during file operations.
-    #[error("IO error during {operation}: {reason}")]
-    IoError {
-        /// The I/O operation that failed
-        operation: String,
-        /// Detailed explanation of the I/O failure
-        reason: String,
-    },
-
-    /// The requested format is not supported for the operation.
-    #[error("Unsupported format {format} for {operation}")]
-    UnsupportedFormat {
-        /// The unsupported format
-        format: String,
-        /// The operation that doesn't support this format
-        operation: String,
-    },
-
-    /// Failed to automatically detect the file format.
-    #[error("Format detection failed: {reason}")]
-    FormatDetectionFailed {
-        /// Reason why format detection failed
-        reason: String,
-    },
-
-    /// Data validation failed after serialization round-trip.
-    #[error("Data validation failed after round-trip: {reason}")]
-    ValidationFailed {
-        /// Details about what validation failed
-        reason: String,
-    },
-
-    /// The file header or metadata is invalid or corrupted.
-    #[error("Invalid or corrupted {component}: {reason}")]
-    InvalidHeader {
-        /// The component that has invalid data (e.g., "header", "metadata")
-        component: String,
-        /// Details about the invalid data
-        reason: String,
-    },
-
-    /// A required dependency for the format is not available.
-    #[error("Missing dependency '{dependency}' for {format} format: {reason}")]
-    MissingDependency {
-        /// The missing dependency
-        dependency: String,
-        /// The format that requires this dependency
-        format: String,
-        /// Additional context about the dependency requirement
-        reason: String,
-    },
-}
-
-// Convenience constructors for common error patterns
 impl ConversionError {
     /// Create a new audio conversion error.
+    #[inline]
     pub fn audio_conversion<V, S, T, R>(value: V, source_type: S, target_type: T, reason: R) -> Self
     where
         V: ToString,
@@ -478,6 +444,7 @@ impl ConversionError {
     }
 
     /// Create a new numeric cast error.
+    #[inline]
     pub fn numeric_cast<V, S, T, R>(value: V, source_type: S, target_type: T, reason: R) -> Self
     where
         V: ToString,
@@ -496,6 +463,7 @@ impl ConversionError {
 
 impl ParameterError {
     /// Create a new out-of-range parameter error.
+    #[inline]
     pub fn out_of_range<P, V, Min, Max, R>(
         parameter: P,
         value: V,
@@ -520,6 +488,7 @@ impl ParameterError {
     }
 
     /// Create a new invalid value parameter error.
+    #[inline]
     pub fn invalid_value<P, R>(parameter: P, reason: R) -> Self
     where
         P: ToString,
@@ -534,6 +503,7 @@ impl ParameterError {
 
 impl LayoutError {
     /// Create a new borrowed data mutation error.
+    #[inline]
     pub fn borrowed_mutation<O, R>(operation: O, reason: R) -> Self
     where
         O: ToString,
@@ -546,6 +516,7 @@ impl LayoutError {
     }
 
     /// Create a new dimension mismatch error.
+    #[inline]
     pub fn dimension_mismatch<E, A, O>(expected: E, actual: A, operation: O) -> Self
     where
         E: ToString,
@@ -558,20 +529,11 @@ impl LayoutError {
             operation: operation.to_string(),
         }
     }
-
-    /// Create a new empty data error.
-    pub fn empty_data<O>(operation: O) -> Self
-    where
-        O: ToString,
-    {
-        Self::EmptyData {
-            operation: operation.to_string(),
-        }
-    }
 }
 
 impl ProcessingError {
     /// Create a new algorithm failure error.
+    #[inline]
     pub fn algorithm_failure<A, R>(algorithm: A, reason: R) -> Self
     where
         A: ToString,
@@ -586,6 +548,7 @@ impl ProcessingError {
 
 impl FeatureError {
     /// Create a new feature not enabled error.
+    #[inline]
     pub fn not_enabled<F, O>(feature: F, operation: O) -> Self
     where
         F: ToString,
@@ -635,103 +598,6 @@ impl From<String> for ProcessingError {
     }
 }
 
-#[cfg(feature = "serialization")]
-impl SerializationError {
-    /// Create a new serialization failed error.
-    pub fn serialization_failed<F, R>(format: F, reason: R) -> Self
-    where
-        F: ToString,
-        R: ToString,
-    {
-        Self::SerializationFailed {
-            format: format.to_string(),
-            reason: reason.to_string(),
-        }
-    }
-
-    /// Create a new deserialization failed error.
-    pub fn deserialization_failed<F, R>(format: F, reason: R) -> Self
-    where
-        F: ToString,
-        R: ToString,
-    {
-        Self::DeserializationFailed {
-            format: format.to_string(),
-            reason: reason.to_string(),
-        }
-    }
-
-    /// Create a new I/O error.
-    pub fn io_error<O, R>(operation: O, reason: R) -> Self
-    where
-        O: ToString,
-        R: ToString,
-    {
-        Self::IoError {
-            operation: operation.to_string(),
-            reason: reason.to_string(),
-        }
-    }
-
-    /// Create a new unsupported format error.
-    pub fn unsupported_format<F, O>(format: F, operation: O) -> Self
-    where
-        F: ToString,
-        O: ToString,
-    {
-        Self::UnsupportedFormat {
-            format: format.to_string(),
-            operation: operation.to_string(),
-        }
-    }
-
-    /// Create a new format detection failed error.
-    pub fn format_detection_failed<R>(reason: R) -> Self
-    where
-        R: ToString,
-    {
-        Self::FormatDetectionFailed {
-            reason: reason.to_string(),
-        }
-    }
-
-    /// Create a new validation failed error.
-    pub fn validation_failed<R>(reason: R) -> Self
-    where
-        R: ToString,
-    {
-        Self::ValidationFailed {
-            reason: reason.to_string(),
-        }
-    }
-
-    /// Create a new invalid header error.
-    pub fn invalid_header<C, R>(component: C, reason: R) -> Self
-    where
-        C: ToString,
-        R: ToString,
-    {
-        Self::InvalidHeader {
-            component: component.to_string(),
-            reason: reason.to_string(),
-        }
-    }
-
-    /// Create a new missing dependency error.
-    pub fn missing_dependency<D, F, R>(dependency: D, format: F, reason: R) -> Self
-    where
-        D: ToString,
-        F: ToString,
-        R: ToString,
-    {
-        Self::MissingDependency {
-            dependency: dependency.to_string(),
-            format: format.to_string(),
-            reason: reason.to_string(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,15 +635,16 @@ mod tests {
 
     #[test]
     fn test_processing_error() {
-        let proc_err = ProcessingError::algorithm_failure("FFT", "Input size must be power of 2");
-        assert!(format!("{}", proc_err).contains("FFT"));
+        let proc_err =
+            ProcessingError::algorithm_failure("transforms", "Input size must be power of 2");
+        assert!(format!("{}", proc_err).contains("transforms"));
         assert!(format!("{}", proc_err).contains("power of 2"));
     }
 
     #[test]
     fn test_feature_error() {
-        let feat_err = FeatureError::not_enabled("fft", "spectral analysis");
-        assert!(format!("{}", feat_err).contains("fft"));
+        let feat_err = FeatureError::not_enabled("transforms", "spectral analysis");
+        assert!(format!("{}", feat_err).contains("transforms"));
         assert!(format!("{}", feat_err).contains("spectral analysis"));
     }
 
@@ -806,66 +673,5 @@ mod tests {
         assert!(error_string.contains("Failed to convert sample value 1.5"));
         assert!(error_string.contains("f32"));
         assert!(error_string.contains("i16"));
-    }
-
-    #[test]
-    fn test_error_pattern_matching() {
-        let errors = vec![
-            AudioSampleError::Conversion(ConversionError::audio_conversion(
-                "val", "src", "dst", "reason",
-            )),
-            AudioSampleError::Parameter(ParameterError::invalid_value("param", "reason")),
-            AudioSampleError::Layout(LayoutError::borrowed_mutation("op", "reason")),
-            AudioSampleError::Processing(ProcessingError::algorithm_failure("alg", "reason")),
-            AudioSampleError::Feature(FeatureError::not_enabled("feat", "op")),
-        ];
-
-        for error in errors {
-            #[cfg(feature = "plotting")]
-            {
-                match error {
-                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
-                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
-                    AudioSampleError::Layout(_) => { /* handle layout */ }
-                    AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ }
-                    AudioSampleError::Plotting(_) => { /* handle plotting */ }
-                    #[cfg(feature = "serialization")]
-                    AudioSampleError::Serialization(_) => { /* handle serialization */ }
-                }
-            }
-            #[cfg(all(not(feature = "plotting"), not(feature = "serialization")))]
-            {
-                match error {
-                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
-                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
-                    AudioSampleError::Layout(_) => { /* handle layout */ }
-                    AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ }
-                }
-            }
-            #[cfg(all(not(feature = "plotting"), feature = "serialization"))]
-            {
-                match error {
-                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
-                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
-                    AudioSampleError::Layout(_) => { /* handle layout */ }
-                    AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ }
-                    AudioSampleError::Serialization(_) => { /* handle serialization */ }
-                }
-            }
-            #[cfg(all(feature = "plotting", not(feature = "serialization")))]
-            {
-                match error {
-                    AudioSampleError::Conversion(_) => { /* handle conversion */ }
-                    AudioSampleError::Parameter(_) => { /* handle parameter */ }
-                    AudioSampleError::Layout(_) => { /* handle layout */ }
-                    AudioSampleError::Processing(_) => { /* handle processing */ }
-                    AudioSampleError::Feature(_) => { /* handle feature */ }
-                    AudioSampleError::Plotting(_) => { /* handle plotting */ }
-                }
-            }
-        }
     }
 }

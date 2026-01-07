@@ -6,20 +6,22 @@
 
 use audio_samples::{
     AudioSampleResult,
-    // Re-exported audio math functions
-    amplitude_to_db,
-    db_to_amplitude,
-    fft_frequencies,
-    frames_to_time,
-    hz_to_mel,
-    hz_to_midi,
-    mel_scale,
-    mel_to_hz,
-    midi_to_hz,
-    midi_to_note,
-    note_to_midi,
-    power_to_db,
-    time_to_frames,
+    utils::{
+        // Re-exported audio math functions
+        amplitude_to_db,
+        db_to_amplitude,
+        fft_frequencies,
+        frames_to_time,
+        hz_to_mel,
+        hz_to_midi,
+        mel_scale,
+        mel_to_hz,
+        midi_to_hz,
+        midi_to_note,
+        note_to_midi,
+        power_to_db,
+        time_to_frames,
+    },
 };
 
 fn main() -> AudioSampleResult<()> {
@@ -217,7 +219,7 @@ fn time_frame_conversions_demo() {
     let frame_numbers = [0, 10, 100, 1000, 4410]; // Various frame positions
 
     for frames in frame_numbers {
-        let time_sec = frames_to_time::<f64>(frames, sample_rate, hop_size);
+        let time_sec = frames_to_time(frames, sample_rate, hop_size);
         let frames_back = time_to_frames(time_sec, sample_rate, hop_size);
         println!(
             "  Frame {} → {:.3} sec → frame {} (error: {})",

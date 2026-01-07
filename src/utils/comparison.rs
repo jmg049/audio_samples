@@ -1,40 +1,96 @@
-//! Audio comparison and similarity utilities.
+//! Audio signal comparison and similarity metrics.
 //!
-//! This module provides functions for comparing audio signals and measuring
-//! their similarity using various metrics.
-
+//! This module provides a small collection of signal-level comparison operators for
+//! analysing similarity, error, and alignment between audio signals. The exposed functions
+//! operate on [`AudioSamples`] and return scalar metrics or derived signals that are suitable
+//! for validation, evaluation, diagnostics, and lightweight analysis workflows.
+//!
+//! The primary purpose of this module is to centralise common comparison semantics.
+//!
+//! # Usage
+//!
+//! Typical usage consists of passing two compatible audio signals into a metric function
+//! and interpreting the returned scalar or aligned signal. All comparison functions require
+//! matching dimensionality and compatible channel layouts unless explicitly documented
+//! otherwise.
+//!
+//! ```rust
+//! use audio_samples::utils::comparison::{correlation, mse};
+//! # use audio_samples::AudioSamples;
+//!
+//! # fn example<T: audio_samples::traits::StandardSample>(a: AudioSamples<'static, T>, b: AudioSamples<'static, T>) {
+//! let corr = correlation::<T, f64>(&a, &b).unwrap();
+//! let error = mse::<T, f64>(&a, &b).unwrap();
+//!
+//! println!("Correlation: {corr}");
+//! println!("MSE: {error}");
+//! # }
+//! ```
 use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    I24, LayoutError, ParameterError, RealFloat, repr::MultiData, to_precision,
+    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, LayoutError,
+    ParameterError, traits::StandardSample,
 };
 use ndarray::{Array1, ArrayView1};
 
 /// Computes the Pearson correlation coefficient between two audio signals.
 ///
-/// The correlation coefficient ranges from -1 to 1, where:
-/// - 1 indicates perfect positive correlation
-/// - 0 indicates no correlation
-/// - -1 indicates perfect negative correlation
+/// This function measures linear similarity between two signals on a per-sample basis and
+/// returns a scalar correlation coefficient in the range `[-1, 1]`. Positive values indicate
+/// positive correlation, negative values indicate inverse correlation, and values near zero
+/// indicate weak linear relationship.
+///
+/// For mono signals, the correlation is computed directly over the single channel.\
+/// For multi-channel signals, the correlation is computed independently for each channel and
+/// the results are averaged to produce a single scalar score.
 ///
 /// # Arguments
-/// * `a` - First audio signal
-/// * `b` - Second audio signal
+///
+/// * `a`\
+///   The first audio signal.
+///
+/// * `b`\
+///   The second audio signal.
+///
+/// Both signals must have identical channel counts and the same number of samples per
+/// channel.
 ///
 /// # Returns
-/// The correlation coefficient.
+///
+/// A scalar correlation coefficient in the range `[-1, 1]`, expressed in the requested
+/// floating-point type.
 ///
 /// # Errors
-/// Returns an error if the signals have different lengths or channels.
-pub fn correlation<T, F>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<F>
+///
+/// Returns an error in the following cases:
+///
+/// * The two signals have different channel counts.
+/// * The two signals have different numbers of samples per channel.
+/// * The underlying sample layout is non-contiguous and cannot be viewed as a slice.
+/// * The channel configuration of the two signals does not match (mono vs multi-channel).
+///
+/// # Behavioural Guarantees
+///
+/// * The returned value lies in the closed interval `[-1, 1]` for all finite inputs.
+/// * For identical signals, the returned value is `1.0` (up to floating-point rounding).
+/// * For multi-channel inputs, the result is the arithmetic mean of per-channel correlations.
+/// * If either signal has zero variance over a channel, the correlation for that channel is
+///   defined as `0.0`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::correlation;
+/// # use audio_samples::AudioSamples;
+///
+/// # fn example<T: audio_samples::traits::StandardSample>(a: AudioSamples<'static, T>, b: AudioSamples<'static, T>) {
+/// let corr = correlation(&a, &b).unwrap();
+/// assert!(corr >= -1.0 && corr <= 1.0);
+/// # }
+/// ```
+#[inline]
+pub fn correlation<T>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<f64>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    F: RealFloat + ConvertTo<T>,
-    T: AudioSample + ConvertTo<F>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    T: StandardSample,
 {
     if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -67,7 +123,7 @@ where
             ))?;
 
             let mut correlations = Vec::new();
-            for i in 0..a_multi.nrows() {
+            for i in 0..a_multi.nrows().get() {
                 let a_channel = a_multi.row(i);
                 let b_channel = b_multi.row(i);
                 let corr = correlation_1d_slice(
@@ -87,33 +143,68 @@ where
                 correlations.push(corr);
             }
 
-            Ok(correlations.iter().fold(F::zero(), |acc, x| acc + *x)
-                / to_precision::<F, _>(correlations.len()))
+            Ok(correlations.iter().fold(0.0, |acc, x| acc + *x) / correlations.len() as f64)
         }
     }
 }
 
-/// Computes the Mean Squared Error (MSE) between two audio signals.
+/// Computes the mean squared error (MSE) between two audio signals.
 ///
-/// MSE measures the average squared difference between corresponding samples.
-/// Lower values indicate higher similarity.
+/// This function measures the average squared per-sample difference between two signals.
+/// Lower values indicate higher similarity, with a value of `0.0` indicating identical
+/// signals under exact arithmetic. The metric is unnormalised and scales quadratically with
+/// signal amplitude.
+///
+/// For mono signals, the MSE is computed directly over the single channel.\
+/// For multi-channel signals, the MSE is computed independently for each channel and the
+/// results are averaged to produce a single scalar value.
 ///
 /// # Arguments
-/// * `a` - First audio signal
-/// * `b` - Second audio signal
+///
+/// * `a`\
+///   The first audio signal.
+///
+/// * `b`\
+///   The second audio signal.
+///
+/// Both signals must have identical channel counts and the same number of samples per
+/// channel.
 ///
 /// # Returns
-/// The mean squared error.
-pub fn mse<T, F>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<F>
+///
+/// The mean squared error as a non-negative scalar value expressed in the requested
+/// floating-point type.
+///
+/// # Errors
+///
+/// Returns an error in the following cases:
+///
+/// * The two signals have different channel counts.
+/// * The two signals have different numbers of samples per channel.
+/// * The underlying sample layout is non-contiguous and cannot be viewed as a slice.
+/// * The channel configuration of the two signals does not match (mono vs multi-channel).
+///
+/// # Behavioural Guarantees
+///
+/// * The returned value is always greater than or equal to `0.0` for all finite inputs.
+/// * For identical signals, the returned value is `0.0` up to floating-point rounding.
+/// * For multi-channel inputs, the result is the arithmetic mean of per-channel MSE values.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::mse;
+/// # use audio_samples::AudioSamples;
+///
+/// # fn example<T: audio_samples::traits::StandardSample>(a: AudioSamples<'static, T>, b: AudioSamples<'static, T>) {
+/// let error = mse::<T, f64>(&a, &b).unwrap();
+/// assert!(error >= 0.0);
+/// # }
+/// ```
+#[inline]
+pub fn mse<T>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<f64>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    F: RealFloat + ConvertTo<T>,
-    T: AudioSample + ConvertTo<F>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    T: StandardSample,
 {
     if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -143,7 +234,7 @@ where
             ))?;
 
             let mut mses = Vec::new();
-            for i in 0..a_multi.nrows() {
+            for i in 0..a_multi.nrows().get() {
                 let a_channel = a_multi.row(i);
                 let b_channel = b_multi.row(i);
                 let mse = mse_1d_slice(
@@ -163,32 +254,73 @@ where
                 mses.push(mse);
             }
 
-            Ok(mses.iter().fold(F::zero(), |acc, x| acc + *x) / to_precision::<F, _>(mses.len()))
+            Ok(mses.iter().fold(0.0, |acc, x| acc + *x) / mses.len() as f64)
         }
     }
 }
 
-/// Computes the Signal-to-Noise Ratio (SNR) between a signal and noise.
+/// Computes the signal-to-noise ratio (SNR) between a signal and a noise signal.
 ///
-/// SNR is expressed in decibels (dB) and measures the ratio of signal power
-/// to noise power. Higher values indicate better signal quality.
+/// This function measures the ratio between the average power of a signal and the average
+/// power of a corresponding noise signal, expressed in decibels. Higher values indicate
+/// greater dominance of the signal relative to noise.
+///
+/// The function assumes that `signal` and `noise` are already aligned and represent
+/// compatible components. No validation is performed to determine whether the inputs
+/// actually correspond to a signal–noise decomposition.
+///
+/// For mono inputs, power is computed over the single channel.\
+/// For multi-channel inputs, power is computed over all samples across all channels and
+/// aggregated into a single scalar value. No per-channel SNR values are returned.
 ///
 /// # Arguments
-/// * `signal` - The clean signal
-/// * `noise` - The noise component
+///
+/// * `signal`\
+///   The signal component.
+///
+/// * `noise`\
+///   The noise component.
+///
+/// Both inputs must have identical channel counts and the same number of samples per
+/// channel.
 ///
 /// # Returns
-/// SNR value in dB
-pub fn snr<T, F>(signal: &AudioSamples<T>, noise: &AudioSamples<T>) -> AudioSampleResult<F>
+///
+/// The signal-to-noise ratio in decibels. Larger values indicate higher signal quality.
+///
+/// If the estimated noise power is zero, the function returns positive infinity.
+///
+/// # Errors
+///
+/// Returns an error in the following cases:
+///
+/// * The two inputs have different channel counts.
+/// * The two inputs have different numbers of samples per channel.
+/// * The underlying sample layout is non-contiguous and cannot be viewed as a slice.
+/// * The channel configuration of the two signals does not match (mono vs multi-channel).
+///
+/// # Behavioural Guarantees
+///
+/// * For finite non-zero noise power, the returned value is finite.
+/// * If the noise power is exactly zero, the returned value is positive infinity.
+/// * The returned value increases monotonically with increasing signal power for fixed
+///   noise power.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::audio_compare::snr;
+/// # use audio_samples::AudioSamples;
+///
+/// # fn example<T: audio_samples::traits::StandardSample>(signal: AudioSamples<'static, T>, noise: AudioSamples<'static, T>) {
+/// let value = snr::<T>(&signal, &noise).unwrap();
+/// assert!(value.is_finite() || value.is_infinite());
+/// # }
+/// ```
+#[inline]
+pub fn snr<T>(signal: &AudioSamples<T>, noise: &AudioSamples<T>) -> AudioSampleResult<f64>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    F: RealFloat + ConvertTo<T>,
-    T: AudioSample + ConvertTo<F>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    T: StandardSample,
 {
     if signal.num_channels() != noise.num_channels()
         || signal.samples_per_channel() != noise.samples_per_channel()
@@ -200,88 +332,141 @@ where
     }
 
     let signal_f = signal.as_float();
-    let noise_f: AudioSamples<'static, F> = noise.as_float();
+    let noise_f = noise.as_float();
 
     // Calculate signal power
-    let signal_power = match signal_f.as_mono() {
-        Some(mono) => {
-            mono.iter()
-                .map(|&x| x * x)
-                .fold(F::zero(), |acc, x| acc + x)
-                / to_precision::<F, _>(mono.len())
-        }
-        None => {
-            let multi: &MultiData<'static, F> =
-                signal_f
-                    .as_multi_channel()
-                    .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "audio_format",
-                        "Must be multi-channel audio",
-                    )))?;
-            multi
-                .iter()
-                .map(|&x| x * x)
-                .fold(F::zero(), |acc, x| acc + x)
-                / to_precision::<F, _>(multi.len())
-        }
+    let signal_power = if let Some(mono) = signal_f.as_mono() {
+        mono.iter().map(|&x| x * x).fold(0.0, |acc, x| acc + x) / mono.len().get() as f64
+    } else {
+        let multi = signal_f
+            .as_multi_channel()
+            .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Must be multi-channel audio",
+            )))?;
+        multi.iter().map(|&x| x * x).fold(0.0, |acc, x| acc + x) / multi.len().get() as f64
     };
 
     // Calculate noise power
-    let noise_power = match noise_f.as_mono() {
-        Some(mono) => {
-            mono.iter()
-                .map(|x| *x * *x)
-                .fold(F::zero(), |acc, x| acc + x)
-                / to_precision::<F, _>(mono.len())
-        }
-        None => {
-            let multi = noise_f
-                .as_multi_channel()
-                .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
-                    "audio_format",
-                    "Must be multi-channel audio",
-                )))?;
-            multi
-                .iter()
-                .map(|&x| x * x)
-                .fold(F::zero(), |acc, x| acc + x)
-                / to_precision::<F, _>(multi.len())
-        }
+    let noise_power = if let Some(mono) = noise_f.as_mono() {
+        mono.iter().map(|x| *x * *x).fold(0.0, |acc, x| acc + x) / mono.len().get() as f64
+    } else {
+        let multi = noise_f
+            .as_multi_channel()
+            .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Must be multi-channel audio",
+            )))?;
+        multi.iter().map(|&x| x * x).fold(0.0, |acc, x| acc + x) / multi.len().get() as f64
     };
 
-    if noise_power == F::zero() {
-        return Ok(F::infinity());
+    if noise_power == 0.0 {
+        return Ok(f64::INFINITY);
     }
 
-    let snr_db = to_precision::<F, _>(10.0) * (signal_power / noise_power).log10();
+    let snr_db = 10.0 * (signal_power / noise_power).log10();
     Ok(snr_db)
 }
-
-/// Aligns two audio signals by finding the best time offset.
+/// Aligns two audio signals by estimating a time offset that maximises correlation.
 ///
-/// This function finds the time offset that maximizes the cross-correlation
-/// between the two signals, effectively aligning them in time.
+/// This function attempts to temporally align `signal` to `reference` by searching for a
+/// non-negative sample offset that maximises cross-correlation between the two signals. The
+/// returned signal is a shifted version of the input signal padded at the start, together
+/// with the estimated offset in samples.
+///
+/// This is a heuristic alignment utility intended for coarse synchronisation, diagnostics,
+/// and preprocessing. It does not guarantee globally optimal alignment, sub-sample accuracy,
+/// or robustness under heavy noise, reverberation, or non-linear distortion.
+///
+/// # Channel Handling
+///
+/// * For mono signals, alignment is computed directly on the single channel.
+/// * For multi-channel signals, all channels are averaged to a single derived signal before
+///   alignment. The estimated offset is then applied uniformly to all channels.
+///
+/// No per-channel alignment is performed. Channel-specific delays are not detected.
+///
+/// # Search Behaviour
+///
+/// * Only non-negative offsets are considered. The signal is shifted forward in time only.
+/// * The maximum offset searched is half of the shorter signal length.
+/// * For each candidate offset, correlation is computed over the overlapping region only.
+///
+/// These limits are part of the public contract and constrain the class of alignments that
+/// can be detected.
+///
+/// # Padding Semantics
+///
+/// When a positive offset is selected, the aligned signal is padded at the start using the
+/// default value of the sample type. This is a structural padding operation rather than an
+/// explicit silence model.
 ///
 /// # Arguments
-/// * `reference` - The reference signal
-/// * `signal` - The signal to align
+///
+/// * `reference`\
+///   The reference signal that defines the target alignment.
+///
+/// * `signal`\
+///   The signal to be aligned to the reference.
+///
+/// Both signals must have identical channel counts.
 ///
 /// # Returns
-/// A tuple of (aligned_signal, offset_samples) where offset_samples is the
-/// number of samples by which the signal was shifted.
-pub fn align_signals<T, F>(
+///
+/// A tuple `(aligned_signal, offset_samples)` where:
+///
+/// * `aligned_signal` is a newly allocated signal shifted by the estimated offset.
+/// * `offset_samples` is the number of samples by which the signal was shifted.
+///
+/// # Errors
+///
+/// Returns an error in the following cases:
+///
+/// * The two signals have different channel counts.
+/// * The channel configuration of the two signals does not match (mono vs multi-channel).
+/// * The underlying sample layout is non-contiguous and cannot be viewed as a slice.
+/// * Internal array construction fails due to invalid shape assumptions.
+///
+/// # Behavioural Guarantees
+///
+/// * The returned offset is always greater than or equal to zero.
+/// * If no offset improves correlation, the returned offset is zero and the original signal
+///   is returned unchanged (cloned).
+/// * The alignment decision is deterministic for fixed inputs.
+/// * The function allocates a new signal when a non-zero offset is applied.
+///
+/// # Limitations
+///
+/// This function does not:
+///
+/// * Search negative offsets or bidirectional shifts.
+/// * Perform sub-sample alignment or interpolation.
+/// * Account for phase offsets, time stretching, or sample-rate mismatch.
+/// * Preserve original sample padding semantics beyond default value initialisation.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::align_signals;
+/// use audio_samples::AudioSamples;
+///
+/// fn example<T: audio_samples::traits::StandardSample>(
+///     reference: AudioSamples<'static, T>,
+///      signal: AudioSamples<'static, T>,
+///  ) {
+/// let (aligned, offset) = align_signals::<T>(&reference, &signal).unwrap();
+///
+/// println!("Estimated offset: {offset} samples");
+/// assert!(offset >= 0);
+///  }
+/// ```
+#[inline]
+pub fn align_signals<T>(
     reference: &AudioSamples<'_, T>,
     signal: &AudioSamples<'_, T>,
 ) -> AudioSampleResult<(AudioSamples<'static, T>, usize)>
 where
-    i16: ConvertTo<T>,
-    I24: ConvertTo<T>,
-    i32: ConvertTo<T>,
-    f32: ConvertTo<T>,
-    f64: ConvertTo<T>,
-    F: RealFloat + ConvertTo<T>,
-    T: AudioSample + ConvertTo<F>,
-    for<'b> AudioSamples<'b, T>: AudioTypeConversion<'b, T>,
+    T: StandardSample,
 {
     if reference.num_channels() != signal.num_channels() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -306,23 +491,17 @@ where
                 ParameterError::invalid_value("audio_format", "Must be multi-channel audio"),
             ))?;
 
-            let ref_avg: Vec<F> = (0..ref_multi.ncols())
+            let ref_avg: Vec<f64> = (0..ref_multi.ncols().get())
                 .map(|i| {
-                    ref_multi
-                        .column(i)
-                        .iter()
-                        .fold(F::zero(), |acc, x| acc + *x)
-                        / to_precision::<F, _>(ref_multi.nrows())
+                    ref_multi.column(i).iter().fold(0.0, |acc, x| acc + *x)
+                        / ref_multi.nrows().get() as f64
                 })
                 .collect();
 
-            let sig_avg: Vec<F> = (0..sig_multi.ncols())
+            let sig_avg: Vec<f64> = (0..sig_multi.ncols().get())
                 .map(|i| {
-                    sig_multi
-                        .column(i)
-                        .iter()
-                        .fold(F::zero(), |acc, x| acc + *x)
-                        / to_precision::<F, _>(sig_multi.nrows())
+                    sig_multi.column(i).iter().fold(0.0, |acc, x| acc + *x)
+                        / sig_multi.nrows().get() as f64
                 })
                 .collect();
 
@@ -339,7 +518,7 @@ where
     // Find the best alignment using cross-correlation
     let max_offset = ref_data.len().min(sig_data.len()) / 2;
     let mut best_offset = 0;
-    let mut best_correlation = F::neg_infinity();
+    let mut best_correlation = f64::NEG_INFINITY;
 
     for offset in 0..max_offset {
         let correlation = if offset < sig_data.len() {
@@ -349,7 +528,7 @@ where
                 &sig_data[offset..offset + end],
             )?
         } else {
-            F::zero()
+            0.0
         };
 
         if correlation > best_correlation {
@@ -360,52 +539,49 @@ where
 
     // Create aligned signal by shifting
     let aligned_signal = if best_offset > 0 {
-        match signal.as_mono() {
-            Some(mono) => {
-                let mut aligned_data = vec![T::default(); best_offset];
-                aligned_data.extend_from_slice(
-                    &mono.as_slice().ok_or(AudioSampleError::Layout(
+        if let Some(mono) = signal.as_mono() {
+            let mut aligned_data = vec![T::default(); best_offset];
+            aligned_data.extend_from_slice(
+                &mono
+                    .as_slice()
+                    .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
+                        operation: "signal alignment".to_string(),
+                        layout_type: "non-contiguous mono samples".to_string(),
+                    }))?[..mono.len().get() - best_offset],
+            );
+            let aligned_array = Array1::from_vec(aligned_data);
+            AudioSamples::new_mono(aligned_array, sample_rate)?
+        } else {
+            let multi = signal
+                .as_multi_channel()
+                .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Must be multi-channel audio",
+                )))?;
+            let mut aligned_data = Vec::new();
+            for i in 0..multi.nrows().get() {
+                let mut row = vec![T::default(); best_offset];
+                row.extend_from_slice(
+                    &multi.row(i).as_slice().ok_or(AudioSampleError::Layout(
                         LayoutError::NonContiguous {
                             operation: "signal alignment".to_string(),
-                            layout_type: "non-contiguous mono samples".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
                         },
-                    ))?[..mono.len() - best_offset],
+                    ))?[..multi.ncols().get() - best_offset],
                 );
-                let aligned_array = Array1::from_vec(aligned_data);
-                AudioSamples::new_mono(aligned_array, sample_rate)
+                aligned_data.push(row);
             }
-            None => {
-                let multi = signal
-                    .as_multi_channel()
-                    .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "audio_format",
-                        "Must be multi-channel audio",
-                    )))?;
-                let mut aligned_data = Vec::new();
-                for i in 0..multi.nrows() {
-                    let mut row = vec![T::default(); best_offset];
-                    row.extend_from_slice(
-                        &multi.row(i).as_slice().ok_or(AudioSampleError::Layout(
-                            LayoutError::NonContiguous {
-                                operation: "signal alignment".to_string(),
-                                layout_type: "non-contiguous multi-channel samples".to_string(),
-                            },
-                        ))?[..multi.ncols() - best_offset],
-                    );
-                    aligned_data.push(row);
-                }
-                let aligned_array = ndarray::Array2::from_shape_vec(
-                    (aligned_data.len(), aligned_data[0].len()),
-                    aligned_data.into_iter().flatten().collect(),
-                )
-                .map_err(|e| {
-                    AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "array_shape",
-                        format!("Array shape error: {}", e),
-                    ))
-                })?;
-                AudioSamples::new_multi_channel(aligned_array, sample_rate)
-            }
+            let aligned_array = ndarray::Array2::from_shape_vec(
+                (aligned_data.len(), aligned_data[0].len()),
+                aligned_data.into_iter().flatten().collect(),
+            )
+            .map_err(|e| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "array_shape",
+                    format!("Array shape error: {e}"),
+                ))
+            })?;
+            AudioSamples::new_multi_channel(aligned_array, sample_rate)?
         }
     } else {
         signal.clone().into_owned()
@@ -415,7 +591,7 @@ where
 }
 
 // Helper functions for 1D correlation and MSE
-fn correlation_1d<F: RealFloat>(a: &ArrayView1<F>, b: &ArrayView1<F>) -> AudioSampleResult<F> {
+fn correlation_1d(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> AudioSampleResult<f64> {
     correlation_1d_slice(
         a.as_slice()
             .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
@@ -430,7 +606,7 @@ fn correlation_1d<F: RealFloat>(a: &ArrayView1<F>, b: &ArrayView1<F>) -> AudioSa
     )
 }
 
-fn correlation_1d_slice<F: RealFloat>(a: &[F], b: &[F]) -> AudioSampleResult<F> {
+fn correlation_1d_slice(a: &[f64], b: &[f64]) -> AudioSampleResult<f64> {
     if a.len() != b.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "array_length",
@@ -438,13 +614,13 @@ fn correlation_1d_slice<F: RealFloat>(a: &[F], b: &[F]) -> AudioSampleResult<F> 
         )));
     }
 
-    let n = to_precision::<F, _>(a.len());
-    let mean_a = a.iter().fold(F::zero(), |acc, x| acc + *x) / n;
-    let mean_b = b.iter().fold(F::zero(), |acc, x| acc + *x) / n;
+    let n = a.len();
+    let mean_a = a.iter().fold(0.0, |acc, x| acc + *x) / n as f64;
+    let mean_b = b.iter().fold(0.0, |acc, x| acc + *x) / n as f64;
 
-    let mut num = F::zero();
-    let mut den_a = F::zero();
-    let mut den_b = F::zero();
+    let mut num = 0.0;
+    let mut den_a = 0.0;
+    let mut den_b = 0.0;
 
     for (&x, &y) in a.iter().zip(b.iter()) {
         let dx = x - mean_a;
@@ -455,14 +631,14 @@ fn correlation_1d_slice<F: RealFloat>(a: &[F], b: &[F]) -> AudioSampleResult<F> 
     }
 
     let denominator = (den_a * den_b).sqrt();
-    if denominator == F::zero() {
-        Ok(F::zero())
+    if denominator == 0.0 {
+        Ok(0.0)
     } else {
         Ok(num / denominator)
     }
 }
 
-fn mse_1d<F: RealFloat>(a: &ArrayView1<F>, b: &ArrayView1<F>) -> AudioSampleResult<F> {
+fn mse_1d(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> AudioSampleResult<f64> {
     if a.len() != b.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "array_length",
@@ -470,31 +646,31 @@ fn mse_1d<F: RealFloat>(a: &ArrayView1<F>, b: &ArrayView1<F>) -> AudioSampleResu
         )));
     }
 
-    let n = to_precision::<F, _>(a.len());
-    let sum_squared_diff: F = a
+    let n = a.len();
+    let sum_squared_diff: f64 = a
         .iter()
         .zip(b.iter())
         .map(|(&x, &y)| (x - y) * (x - y))
-        .fold(F::zero(), |acc, val| acc + val);
+        .fold(0.0, |acc, val| acc + val);
 
-    Ok(sum_squared_diff / n)
+    Ok(sum_squared_diff / n as f64)
 }
 
-fn mse_1d_slice<F: RealFloat>(a: &[F], b: &[F]) -> AudioSampleResult<F> {
+fn mse_1d_slice(a: &[f64], b: &[f64]) -> AudioSampleResult<f64> {
     if a.len() != b.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "array_length",
             "Arrays must have the same length for MSE",
         )));
     }
-    let n = to_precision::<F, _>(a.len());
+    let n = a.len();
 
-    let sum_squared_diff: F = a
+    let sum_squared_diff: f64 = a
         .iter()
         .zip(b.iter())
         .map(|(&x, &y)| (x - y) * (x - y))
-        .fold(F::zero(), |acc, val| acc + val)
-        / n;
+        .fold(0.0, |acc, val| acc + val)
+        / n as f64;
 
     Ok(sum_squared_diff)
 }
@@ -504,13 +680,15 @@ mod tests {
     use super::*;
     use crate::sample_rate;
     use approx_eq::assert_approx_eq;
-    use ndarray::array;
+    use non_empty_slice::non_empty_vec;
 
     #[test]
     fn test_correlation_identical_signals() {
-        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio1 = AudioSamples::new_mono(data.clone(), sample_rate!(44100));
-        let audio2 = AudioSamples::new_mono(data, sample_rate!(44100));
+        let data: non_empty_slice::NonEmptyVec<f64> = non_empty_vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
+        let audio1: AudioSamples<'static, f64> =
+            AudioSamples::from_mono_vec::<f64>(data.clone(), sample_rate!(44100));
+        let audio2: AudioSamples<'static, f64> =
+            AudioSamples::from_mono_vec::<f64>(data, sample_rate!(44100));
 
         let corr: f64 = correlation(&audio1, &audio2).unwrap();
         assert_approx_eq!(corr, 1.0, 1e-10);
@@ -518,10 +696,14 @@ mod tests {
 
     #[test]
     fn test_correlation_opposite_signals() {
-        let data1 = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let data2 = array![-1.0f32, -2.0, -3.0, -4.0, -5.0];
-        let audio1 = AudioSamples::new_mono(data1, sample_rate!(44100));
-        let audio2 = AudioSamples::new_mono(data2, sample_rate!(44100));
+        let audio1: AudioSamples<'static, f64> = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 2.0, 3.0, 4.0, 5.0],
+            sample_rate!(44100),
+        );
+        let audio2 = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![-1.0f64, -2.0, -3.0, -4.0, -5.0],
+            sample_rate!(44100),
+        );
 
         let corr: f64 = correlation(&audio1, &audio2).unwrap();
         assert_approx_eq!(corr, -1.0, 1e-10);
@@ -529,9 +711,14 @@ mod tests {
 
     #[test]
     fn test_mse_identical_signals() {
-        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let audio1 = AudioSamples::new_mono(data.clone(), sample_rate!(44100));
-        let audio2 = AudioSamples::new_mono(data, sample_rate!(44100));
+        let audio1: AudioSamples<'static, f64> = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 2.0, 3.0, 4.0, 5.0],
+            sample_rate!(44100),
+        );
+        let audio2 = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 2.0, 3.0, 4.0, 5.0],
+            sample_rate!(44100),
+        );
 
         let mse_val = mse(&audio1, &audio2).unwrap();
         assert_approx_eq!(mse_val, 0.0_f64, 1e-10);
@@ -539,10 +726,14 @@ mod tests {
 
     #[test]
     fn test_snr_calculation() {
-        let signal_data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let noise_data = array![0.1f32, 0.2, 0.1, 0.2, 0.1];
-        let signal = AudioSamples::new_mono(signal_data, sample_rate!(44100));
-        let noise = AudioSamples::new_mono(noise_data, sample_rate!(44100));
+        let signal: AudioSamples<'static, f64> = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 2.0, 3.0, 4.0, 5.0],
+            sample_rate!(44100),
+        );
+        let noise = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![0.1f64, 0.2, 0.1, 0.2, 0.1],
+            sample_rate!(44100),
+        );
 
         let snr_val: f64 = snr(&signal, &noise).unwrap();
         assert!(snr_val > 0.0_f64); // Signal should have higher power than noise
@@ -550,11 +741,11 @@ mod tests {
 
     #[test]
     fn test_align_signals_no_offset() {
-        let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let reference = AudioSamples::new_mono(data.clone(), sample_rate!(44100));
-        let signal = AudioSamples::new_mono(data, sample_rate!(44100));
+        let data = non_empty_vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
+        let reference = AudioSamples::from_mono_vec::<f64>(data.clone(), sample_rate!(44100));
+        let signal = AudioSamples::from_mono_vec::<f64>(data, sample_rate!(44100));
 
-        let (aligned, offset) = align_signals::<f32, f64>(&reference, &signal).unwrap();
+        let (aligned, offset) = align_signals::<f64>(&reference, &signal).unwrap();
         assert_eq!(offset, 0);
         assert_eq!(aligned.samples_per_channel(), signal.samples_per_channel());
     }
