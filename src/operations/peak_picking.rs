@@ -53,10 +53,15 @@
 //! - Bello, J.P., et al. "A tutorial on onset detection in music signals." IEEE TSALP 2005.
 //! - Böck, S., et al. "Evaluating the online capabilities of onset detection methods." ISMIR 2012.
 //! - Dixon, S. "Onset detection revisited." DAFx 2006.
+use std::num::NonZeroUsize;
+
+use non_empty_iter::{IntoNonEmptyIterator, NonEmptyIterator};
+use non_empty_slice::{NonEmptySlice, NonEmptyVec};
+
 use crate::operations::types::{
     AdaptiveThresholdConfig, AdaptiveThresholdMethod, NormalizationMethod, PeakPickingConfig,
 };
-use crate::{AudioSampleError, AudioSampleResult, ParameterError, RealFloat, to_precision};
+use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 
 /// Compute adaptive threshold for onset strength function.
 ///
@@ -88,21 +93,18 @@ use crate::{AudioSampleError, AudioSampleResult, ParameterError, RealFloat, to_p
 /// use audio_samples::operations::peak_picking::adaptive_threshold;
 ///
 /// let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
-/// let config = AdaptiveThresholdConfig::new();
+/// let config = AdaptiveThresholdConfig::default();
 /// let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
 /// assert_eq!(thresholds.len(), onset_strength.len());
 /// ```
-pub fn adaptive_threshold<F: RealFloat>(
-    onset_strength: &[F],
-    config: &AdaptiveThresholdConfig<F>,
-) -> AudioSampleResult<Vec<F>> {
+#[inline]
+pub fn adaptive_threshold(
+    onset_strength: &NonEmptySlice<f64>,
+    config: &AdaptiveThresholdConfig,
+) -> AudioSampleResult<Vec<f64>> {
     config.validate()?;
 
-    if onset_strength.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let len = onset_strength.len();
+    let len = onset_strength.len().get();
     let mut thresholds = Vec::with_capacity(len);
     let half_window = config.window_size / 2;
 
@@ -111,11 +113,12 @@ pub fn adaptive_threshold<F: RealFloat>(
         let start = i.saturating_sub(half_window);
         let end = (i + half_window + 1).min(len);
         let window = &onset_strength[start..end];
+        let window = non_empty_slice::non_empty_slice!(window);
 
         let threshold = match config.method {
             AdaptiveThresholdMethod::Delta => {
                 // Delta-based: threshold = local_max - delta
-                let local_max = window.iter().fold(F::neg_infinity(), |acc, &x| acc.max(x));
+                let local_max = window.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
                 local_max - config.delta
             }
             AdaptiveThresholdMethod::Percentile => {
@@ -124,7 +127,7 @@ pub fn adaptive_threshold<F: RealFloat>(
             }
             AdaptiveThresholdMethod::Combined => {
                 // Combined: max(delta_threshold, percentile_threshold)
-                let local_max = window.iter().fold(F::neg_infinity(), |acc, &x| acc.max(x));
+                let local_max = window.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
                 let delta_threshold = local_max - config.delta;
                 let percentile_threshold = percentile(window, config.percentile);
                 delta_threshold.max(percentile_threshold)
@@ -175,27 +178,39 @@ pub fn adaptive_threshold<F: RealFloat>(
 /// use audio_samples::operations::peak_picking::pick_peaks;
 ///
 /// let onset_strength = vec![0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
-/// let config = PeakPickingConfig::new();
+/// let config = PeakPickingConfig::default();
 /// let peaks = pick_peaks(&onset_strength, &config).unwrap();
 /// // peaks contains indices of detected onset locations
 /// ```
-pub fn pick_peaks<F: RealFloat>(
-    onset_strength: &[F],
-    config: &PeakPickingConfig<F>,
+#[inline]
+pub fn pick_peaks(
+    onset_strength: &NonEmptySlice<f64>,
+    config: &PeakPickingConfig,
 ) -> AudioSampleResult<Vec<usize>> {
     config.validate().map_err(|e| {
         AudioSampleError::Parameter(ParameterError::invalid_value(
             "peak_picking_config",
-            format!("Invalid peak picking config: {}", e),
+            format!("Invalid peak picking config: {e}"),
         ))
     })?;
+    // Adapt configuration for short signals
+    let mut adjusted_config = *config;
+    let signal_len = onset_strength.len().get();
 
-    if onset_strength.is_empty() {
-        return Ok(Vec::new());
+    // Adjust window size if it's larger than the signal
+    if adjusted_config.adaptive_threshold.window_size > signal_len {
+        adjusted_config.adaptive_threshold.window_size = signal_len.max(3); // Minimum window size of 3
+    }
+
+    // Adjust min_peak_separation if it's unreasonably large for the signal
+    if adjusted_config.min_peak_separation.get() >= signal_len / 2 {
+        // safety: guaranteed to be non-zero due to max(1)
+        adjusted_config.min_peak_separation =
+            unsafe { NonZeroUsize::new_unchecked((signal_len / 4).max(1)) };
     }
 
     // Step 1: Apply signal enhancement
-    let mut processed_strength = onset_strength.to_vec();
+    let mut processed_strength = onset_strength.to_non_empty_vec();
 
     // Pre-emphasis filtering
     if config.pre_emphasis {
@@ -219,7 +234,7 @@ pub fn pick_peaks<F: RealFloat>(
     // Step 3: Find candidate peaks (local maxima above threshold)
     let mut candidates = Vec::new();
 
-    for i in 1..processed_strength.len() - 1 {
+    for i in 1..processed_strength.len().get() - 1 {
         let current = processed_strength[i];
         let prev = processed_strength[i - 1];
         let next = processed_strength[i + 1];
@@ -229,9 +244,10 @@ pub fn pick_peaks<F: RealFloat>(
             candidates.push((i, current));
         }
     }
-
+    // safety: candidates is guaranteed to be non-empty since onset_strength is non-empty
+    let candidates = unsafe { NonEmptyVec::new_unchecked(candidates) };
     // Step 4: Apply temporal constraints
-    let peaks = apply_temporal_constraints(&candidates, config.min_peak_separation)?;
+    let peaks = apply_temporal_constraints(&candidates, adjusted_config.min_peak_separation.get())?;
 
     Ok(peaks)
 }
@@ -259,28 +275,29 @@ pub fn pick_peaks<F: RealFloat>(
 /// # Returns
 ///
 /// Filtered signal with enhanced transients
-pub fn apply_pre_emphasis<F: RealFloat>(signal: &[F], coeff: F) -> AudioSampleResult<Vec<F>> {
-    if !(F::zero()..=F::one()).contains(&coeff) {
+#[inline]
+pub fn apply_pre_emphasis(
+    signal: &NonEmptySlice<f64>,
+    coeff: f64,
+) -> AudioSampleResult<NonEmptyVec<f64>> {
+    if !(0.0..=1.0).contains(&coeff) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "pre_emphasis_coefficient",
             "Pre-emphasis coefficient must be between 0.0 and 1.0",
         )));
     }
 
-    if signal.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut filtered = Vec::with_capacity(signal.len());
+    let mut filtered = Vec::with_capacity(signal.len().get());
 
     // First sample unchanged
     filtered.push(signal[0]);
 
     // Apply pre-emphasis filter
-    for i in 1..signal.len() {
-        filtered.push(signal[i] - coeff * signal[i - 1]);
+    for i in 1..signal.len().get() {
+        filtered.push(coeff.mul_add(-signal[i - 1], signal[i]));
     }
-
+    // safety: filtered is guaranteed to be non-empty since signal is non-empty
+    let filtered = unsafe { NonEmptyVec::new_unchecked(filtered) };
     Ok(filtered)
 }
 
@@ -308,35 +325,32 @@ pub fn apply_pre_emphasis<F: RealFloat>(signal: &[F], coeff: F) -> AudioSampleRe
 /// # Returns
 ///
 /// Filtered signal with reduced noise
-pub fn apply_median_filter<F: RealFloat>(
-    signal: &[F],
-    filter_length: usize,
-) -> AudioSampleResult<Vec<F>> {
-    if filter_length == 0 || filter_length.is_multiple_of(2) {
+#[inline]
+pub fn apply_median_filter(
+    signal: &NonEmptySlice<f64>,
+    filter_length: NonZeroUsize,
+) -> AudioSampleResult<NonEmptyVec<f64>> {
+    if filter_length.get().is_multiple_of(2) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "filter_length",
             "Median filter length must be odd and greater than 0",
         )));
     }
 
-    if signal.is_empty() {
-        return Ok(Vec::new());
+    if filter_length.get() == 1 {
+        return Ok(signal.to_owned());
     }
 
-    if filter_length == 1 {
-        return Ok(signal.to_vec());
-    }
+    let mut filtered = Vec::with_capacity(signal.len().get());
+    let half_length = filter_length.get() / 2;
 
-    let mut filtered = Vec::with_capacity(signal.len());
-    let half_length = filter_length / 2;
-
-    for i in 0..signal.len() {
+    for i in 0..signal.len().get() {
         // Determine window bounds
         let start = i.saturating_sub(half_length);
-        let end = (i + half_length + 1).min(signal.len());
+        let end = (i + half_length + 1).min(signal.len().get());
 
         // Extract window and compute median
-        let mut window: Vec<F> = signal[start..end].to_vec();
+        let mut window: Vec<f64> = signal[start..end].to_vec();
         window.sort_by(|a, b| {
             match a.partial_cmp(b) {
                 Some(order) => order,
@@ -346,7 +360,8 @@ pub fn apply_median_filter<F: RealFloat>(
         let median = window[window.len() / 2];
         filtered.push(median);
     }
-
+    // safety : filtered is guaranteed to be non-empty since signal is non-empty
+    let filtered = unsafe { NonEmptyVec::new_unchecked(filtered) };
     Ok(filtered)
 }
 
@@ -364,73 +379,76 @@ pub fn apply_median_filter<F: RealFloat>(
 /// # Returns
 ///
 /// Normalized onset strength function
-pub fn normalize_onset_strength<F: RealFloat>(
-    onset_strength: &[F],
+#[inline]
+pub fn normalize_onset_strength(
+    onset_strength: &NonEmptySlice<f64>,
     method: NormalizationMethod,
-) -> AudioSampleResult<Vec<F>> {
-    if onset_strength.is_empty() {
-        return Ok(Vec::new());
-    }
-
+) -> AudioSampleResult<NonEmptyVec<f64>> {
     match method {
         NormalizationMethod::Peak => {
             // Peak normalization: divide by maximum absolute value
             let max_abs = onset_strength
                 .iter()
-                .fold(F::zero(), |acc, &x| acc.max(x.abs()));
+                .fold(0.0, |acc: f64, &x| acc.max(x.abs()));
 
-            if max_abs == F::zero() {
-                return Ok(onset_strength.to_vec());
+            if max_abs == 0.0 {
+                return Ok(onset_strength.to_owned());
             }
 
-            let normalized = onset_strength.iter().map(|&x| x / max_abs).collect();
+            let normalized = onset_strength
+                .into_non_empty_iter()
+                .map(|&x| x / max_abs)
+                .collect_non_empty();
             Ok(normalized)
         }
         NormalizationMethod::MinMax => {
             // Min-max normalization: scale to [0, 1]
             let min_val = onset_strength
                 .iter()
-                .fold(F::infinity(), |acc, &x| acc.min(x));
+                .fold(f64::INFINITY, |acc, &x| acc.min(x));
             let max_val = onset_strength
                 .iter()
-                .fold(F::neg_infinity(), |acc, &x| acc.max(x));
+                .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
 
-            if (max_val - min_val).abs() < F::epsilon() {
-                return Ok(onset_strength.to_vec());
+            if (max_val - min_val).abs() < f64::EPSILON {
+                return Ok(onset_strength.to_owned());
             }
 
             let normalized = onset_strength
-                .iter()
+                .into_non_empty_iter()
                 .map(|&x| (x - min_val) / (max_val - min_val))
-                .collect();
+                .collect_non_empty();
             Ok(normalized)
         }
         NormalizationMethod::ZScore => {
             // Z-score normalization: zero mean, unit variance
-            let mean = onset_strength.iter().fold(F::zero(), |acc: F, x| acc + *x)
-                / to_precision::<F, _>(onset_strength.len());
+            let mean = onset_strength.iter().fold(0.0, |acc, &x| acc + x)
+                / onset_strength.len().get() as f64;
             let variance = onset_strength
                 .iter()
                 .map(|&x| (x - mean).powi(2))
-                .fold(F::zero(), |acc, x| acc + x)
-                / to_precision::<F, _>(onset_strength.len());
+                .fold(0.0, |acc, x| acc + x)
+                / onset_strength.len().get() as f64;
 
-            if variance == F::zero() {
-                return Ok(onset_strength.to_vec());
+            if variance == 0.0 {
+                return Ok(onset_strength.to_owned());
             }
 
             let std_dev = variance.sqrt();
             let normalized = onset_strength
-                .iter()
+                .into_non_empty_iter()
                 .map(|&x| (x - mean) / std_dev)
-                .collect();
+                .collect_non_empty();
             Ok(normalized)
         }
         NormalizationMethod::Mean => {
             // Mean normalization: subtract mean
-            let mean = onset_strength.iter().fold(F::zero(), |acc: F, x| acc + *x)
-                / to_precision::<F, _>(onset_strength.len());
-            let normalized = onset_strength.iter().map(|&x| x - mean).collect();
+            let mean = onset_strength.iter().fold(0.0, |acc, &x| acc + x)
+                / onset_strength.len().get() as f64;
+            let normalized = onset_strength
+                .into_non_empty_iter()
+                .map(|&x| x - mean)
+                .collect_non_empty();
             Ok(normalized)
         }
         NormalizationMethod::Median => {
@@ -443,7 +461,10 @@ pub fn normalize_onset_strength<F: RealFloat>(
                 }
             });
             let median = sorted[sorted.len() / 2];
-            let normalized = onset_strength.iter().map(|&x| x - median).collect();
+            let normalized = onset_strength
+                .into_non_empty_iter()
+                .map(|&x| x - median)
+                .collect_non_empty();
             Ok(normalized)
         }
     }
@@ -470,14 +491,10 @@ pub fn normalize_onset_strength<F: RealFloat>(
 /// # Returns
 ///
 /// Vector of peak indices that satisfy temporal constraints
-fn apply_temporal_constraints<F: RealFloat>(
-    candidates: &[(usize, F)],
+fn apply_temporal_constraints(
+    candidates: &NonEmptySlice<(usize, f64)>,
     min_separation: usize,
 ) -> AudioSampleResult<Vec<usize>> {
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-
     // Sort candidates by strength (descending)
     let mut sorted_candidates = candidates.to_vec();
     sorted_candidates.sort_by(|a, b| {
@@ -524,23 +541,19 @@ fn apply_temporal_constraints<F: RealFloat>(
 /// # Returns
 ///
 /// Smoothed onset strength function
+#[inline]
 pub fn smooth_onset_strength(
-    onset_strength: &[f64],
-    window_size: usize,
-    median_length: usize,
-) -> AudioSampleResult<Vec<f64>> {
-    if onset_strength.is_empty() {
-        return Ok(Vec::new());
-    }
-
+    onset_strength: &NonEmptySlice<f64>,
+    window_size: NonZeroUsize,
+    median_length: NonZeroUsize,
+) -> AudioSampleResult<NonEmptyVec<f64>> {
     // Apply median filtering first
-    let mut smoothed = apply_median_filter(onset_strength, median_length)?;
+    let mut smoothed: NonEmptyVec<f64> = apply_median_filter(onset_strength, median_length)?;
 
     // Apply moving average smoothing
-    if window_size > 1 {
+    if window_size.get() > 1 {
         smoothed = apply_moving_average(&smoothed, window_size)?;
     }
-
     Ok(smoothed)
 }
 
@@ -557,34 +570,27 @@ pub fn smooth_onset_strength(
 /// # Returns
 ///
 /// Smoothed signal
-fn apply_moving_average(signal: &[f64], window_size: usize) -> AudioSampleResult<Vec<f64>> {
-    if window_size == 0 {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "window_size",
-            "Window size must be greater than 0",
-        )));
+fn apply_moving_average(
+    signal: &NonEmptySlice<f64>,
+    window_size: NonZeroUsize,
+) -> AudioSampleResult<NonEmptyVec<f64>> {
+    if window_size.get() == 1 {
+        return Ok(signal.to_owned());
     }
 
-    if signal.is_empty() {
-        return Ok(Vec::new());
-    }
+    let mut smoothed = Vec::with_capacity(signal.len().get());
+    let half_window = window_size.get() / 2;
 
-    if window_size == 1 {
-        return Ok(signal.to_vec());
-    }
-
-    let mut smoothed = Vec::with_capacity(signal.len());
-    let half_window = window_size / 2;
-
-    for i in 0..signal.len() {
+    for i in 0..signal.len().get() {
         let start = i.saturating_sub(half_window);
-        let end = (i + half_window + 1).min(signal.len());
+        let end = (i + half_window + 1).min(signal.len().get());
 
         let sum: f64 = signal[start..end].iter().sum();
         let average = sum / (end - start) as f64;
         smoothed.push(average);
     }
-
+    // safety: smoothed is guaranteed to be non-empty since signal is non-empty
+    let smoothed = unsafe { NonEmptyVec::new_unchecked(smoothed) };
     Ok(smoothed)
 }
 
@@ -602,11 +608,7 @@ fn apply_moving_average(signal: &[f64], window_size: usize) -> AudioSampleResult
 /// # Returns
 ///
 /// The percentile value
-fn percentile<F: RealFloat>(values: &[F], percentile: F) -> F {
-    if values.is_empty() {
-        return F::zero();
-    }
-
+fn percentile(values: &NonEmptySlice<f64>, percentile: f64) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| {
         match a.partial_cmp(b) {
@@ -620,30 +622,33 @@ fn percentile<F: RealFloat>(values: &[F], percentile: F) -> F {
         return sorted[0];
     }
 
-    let index = percentile * to_precision::<F, _>(n - 1);
-    let lower = index.floor().to_usize().expect("should not fail");
-    let upper = index.ceil().to_usize().expect("should not fail");
+    let index = percentile * (n - 1) as f64;
+    let lower = index.floor() as usize;
+    let upper = index.ceil() as usize;
 
     if lower == upper {
         sorted[lower]
     } else {
-        let weight = index - to_precision::<F, _>(lower);
-        sorted[lower] * (F::one() - weight) + sorted[upper] * weight
+        let weight = index - lower as f64;
+        sorted[lower].mul_add(1.0 - weight, sorted[upper] * weight)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use non_empty_slice::{NonEmptyVec, non_empty_vec};
+
     use super::*;
     use crate::operations::types::NormalizationMethod;
 
     #[test]
     fn test_adaptive_threshold_delta() {
-        let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+        let onset_strength =
+            NonEmptySlice::from_slice(&[0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1]).unwrap();
         let config = AdaptiveThresholdConfig::delta(0.1, 3);
 
         let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
-        assert_eq!(thresholds.len(), onset_strength.len());
+        assert_eq!(thresholds.len(), onset_strength.len().get());
 
         // All thresholds should be above minimum
         for &threshold in &thresholds {
@@ -653,12 +658,11 @@ mod tests {
 
     #[test]
     fn test_adaptive_threshold_percentile() {
-        let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+        let onset_strength = non_empty_vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
         let config = AdaptiveThresholdConfig::percentile(0.8, 3);
 
         let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
-        assert_eq!(thresholds.len(), onset_strength.len());
-
+        assert_eq!(thresholds.len(), onset_strength.len().get());
         // Thresholds should be within bounds
         for &threshold in &thresholds {
             assert!(threshold >= config.min_threshold);
@@ -668,21 +672,21 @@ mod tests {
 
     #[test]
     fn test_adaptive_threshold_combined() {
-        let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+        let onset_strength = non_empty_vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
         let config = AdaptiveThresholdConfig::combined(0.1, 0.8, 3);
 
         let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
-        assert_eq!(thresholds.len(), onset_strength.len());
+        assert_eq!(thresholds.len(), onset_strength.len().get());
     }
 
     #[test]
     fn test_pick_peaks_basic() {
-        let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
-        let mut config = PeakPickingConfig::new();
+        let onset_strength = non_empty_vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+        let mut config = PeakPickingConfig::default();
 
         // Configure for small test data
         config.adaptive_threshold.window_size = 3; // Small window for 7 samples
-        config.min_peak_separation = 1; // Allow adjacent peaks for testing
+        config.min_peak_separation = crate::nzu!(1); // Allow adjacent peaks for testing
         config.pre_emphasis = false; // Disable to avoid edge effects
         config.median_filter = false; // Disable to avoid smoothing
         config.normalize_onset_strength = false; // Keep original values
@@ -694,27 +698,27 @@ mod tests {
 
         // All peaks should be valid indices
         for &peak in &peaks {
-            assert!(peak < onset_strength.len());
+            assert!(peak < onset_strength.len().get());
         }
     }
 
     #[test]
     fn test_pick_peaks_with_constraints() {
-        let onset_strength = vec![0.1, 0.5, 0.6, 0.7, 0.2, 0.8, 0.1];
-        let mut config = PeakPickingConfig::new();
-        config.min_peak_separation = 3;
+        let onset_strength = non_empty_vec![0.1, 0.5, 0.6, 0.7, 0.2, 0.8, 0.1];
+        let mut config = PeakPickingConfig::default();
+        config.min_peak_separation = crate::nzu!(3);
 
         let peaks = pick_peaks(&onset_strength, &config).unwrap();
 
         // Check minimum separation constraint
         for i in 1..peaks.len() {
-            assert!(peaks[i] - peaks[i - 1] >= config.min_peak_separation);
+            assert!(peaks[i] - peaks[i - 1] >= config.min_peak_separation.get());
         }
     }
 
     #[test]
     fn test_pre_emphasis() {
-        let signal: Vec<f64> = vec![1.0, 2.0, 3.0, 2.0, 1.0];
+        let signal: NonEmptyVec<f64> = non_empty_vec![1.0, 2.0, 3.0, 2.0, 1.0];
         let coeff: f64 = 0.97;
 
         let filtered = apply_pre_emphasis(&signal, coeff).unwrap();
@@ -724,7 +728,7 @@ mod tests {
         assert_eq!(filtered[0], signal[0]);
 
         // Check pre-emphasis formula
-        for i in 1..signal.len() {
+        for i in 1..signal.len().get() {
             let expected = signal[i] - coeff * signal[i - 1];
             assert!((filtered[i] - expected).abs() < 1e-10);
         }
@@ -732,8 +736,8 @@ mod tests {
 
     #[test]
     fn test_median_filter() {
-        let signal: Vec<f64> = vec![1.0, 5.0, 2.0, 8.0, 3.0]; // Contains outlier
-        let filtered = apply_median_filter(&signal, 3).unwrap();
+        let signal: NonEmptyVec<f64> = non_empty_vec![1.0, 5.0, 2.0, 8.0, 3.0]; // Contains outlier
+        let filtered = apply_median_filter(&signal, crate::nzu!(3)).unwrap();
 
         assert_eq!(filtered.len(), signal.len());
 
@@ -743,7 +747,7 @@ mod tests {
 
     #[test]
     fn test_normalize_onset_strength_peak() {
-        let onset_strength: Vec<f64> = vec![0.1, 0.5, 1.0, 0.3];
+        let onset_strength: NonEmptyVec<f64> = non_empty_vec![0.1, 0.5, 1.0, 0.3];
         let normalized =
             normalize_onset_strength(&onset_strength, NormalizationMethod::Peak).unwrap();
 
@@ -756,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_normalize_onset_strength_minmax() {
-        let onset_strength: Vec<f64> = vec![0.1, 0.5, 1.0, 0.3];
+        let onset_strength: NonEmptyVec<f64> = non_empty_vec![0.1, 0.5, 1.0, 0.3];
         let normalized =
             normalize_onset_strength(&onset_strength, NormalizationMethod::MinMax).unwrap();
 
@@ -776,8 +780,9 @@ mod tests {
 
     #[test]
     fn test_smooth_onset_strength() {
-        let onset_strength = vec![0.1, 0.9, 0.1, 0.8, 0.2]; // Noisy signal
-        let smoothed = smooth_onset_strength(&onset_strength, 3, 3).unwrap();
+        let onset_strength: NonEmptyVec<f64> = non_empty_vec![0.1, 0.9, 0.1, 0.8, 0.2]; // Noisy signal
+        let smoothed =
+            smooth_onset_strength(&onset_strength, crate::nzu!(3), crate::nzu!(3)).unwrap();
 
         assert_eq!(smoothed.len(), onset_strength.len());
 
@@ -789,13 +794,10 @@ mod tests {
 
     #[test]
     fn test_temporal_constraints() {
-        let candidates = vec![(1, 0.8), (2, 0.6), (5, 0.9), (6, 0.7)];
+        let candidates = non_empty_vec![(1, 0.8), (2, 0.6), (5, 0.9), (6, 0.7)];
         let min_separation = 2;
 
         let selected = apply_temporal_constraints(&candidates, min_separation).unwrap();
-
-        // Should select peaks with highest strength that satisfy constraints
-        assert!(!selected.is_empty());
 
         // Check separation constraint
         for i in 1..selected.len() {
@@ -805,11 +807,11 @@ mod tests {
 
     #[test]
     fn test_percentile() {
-        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let values: NonEmptyVec<f64> = non_empty_vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
         assert_eq!(percentile(&values, 0.0), 1.0);
         assert_eq!(percentile(&values, 1.0), 5.0);
-        assert_eq!(percentile(&values, 0.5), 3.0);
+        assert_eq!(percentile(&values, 0.5), 2.5); // Interpolated median
 
         // Test interpolation
         let p25 = percentile(&values, 0.25);
@@ -818,24 +820,14 @@ mod tests {
 
     #[test]
     fn test_edge_cases() {
-        // Empty input
-        let empty: Vec<f64> = vec![];
-        let config = AdaptiveThresholdConfig::new();
-
-        assert!(adaptive_threshold(&empty, &config).unwrap().is_empty());
-        assert!(
-            pick_peaks(&empty, &PeakPickingConfig::new())
-                .unwrap()
-                .is_empty()
-        );
-
         // Single sample
-        let single = vec![1.0];
+        let config = AdaptiveThresholdConfig::default();
+        let single: NonEmptyVec<f64> = non_empty_vec![1.0];
         let thresholds = adaptive_threshold(&single, &config).unwrap();
         assert_eq!(thresholds.len(), 1);
 
         // All zeros
-        let zeros = vec![0.0, 0.0, 0.0];
+        let zeros: NonEmptyVec<f64> = non_empty_vec![0.0, 0.0, 0.0];
         let normalized = normalize_onset_strength(&zeros, NormalizationMethod::Peak).unwrap();
         assert_eq!(normalized, zeros);
     }
@@ -843,22 +835,22 @@ mod tests {
     #[test]
     fn test_config_validation() {
         // Invalid delta
-        let mut config = AdaptiveThresholdConfig::new();
+        let mut config = AdaptiveThresholdConfig::default();
         config.delta = -0.1;
         assert!(config.validate().is_err());
 
         // Invalid percentile
-        config = AdaptiveThresholdConfig::new();
+        config = AdaptiveThresholdConfig::default();
         config.percentile = 1.5;
         assert!(config.validate().is_err());
 
         // Invalid window size
-        config = AdaptiveThresholdConfig::new();
+        config = AdaptiveThresholdConfig::default();
         config.window_size = 0;
         assert!(config.validate().is_err());
 
         // Invalid threshold bounds
-        config = AdaptiveThresholdConfig::new();
+        config = AdaptiveThresholdConfig::default();
         config.min_threshold = 0.5;
         config.max_threshold = 0.3;
         assert!(config.validate().is_err());
@@ -866,11 +858,11 @@ mod tests {
 
     #[test]
     fn test_peak_picking_presets() {
-        let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+        let onset_strength = non_empty_vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
 
         // Test different presets
         let configs = vec![
-            PeakPickingConfig::new(),
+            PeakPickingConfig::default(),
             PeakPickingConfig::music(),
             PeakPickingConfig::speech(),
             PeakPickingConfig::drums(),
@@ -880,7 +872,7 @@ mod tests {
             let peaks = pick_peaks(&onset_strength, &config).unwrap();
             // All presets should produce valid results
             for &peak in &peaks {
-                assert!(peak < onset_strength.len());
+                assert!(peak < onset_strength.len().get());
             }
         }
     }

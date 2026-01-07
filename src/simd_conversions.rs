@@ -12,7 +12,11 @@
 //! The high-level [`convert`] API is intended to match the semantics of the crate's
 //! [`ConvertTo`] conversions (clamp + scale + round + saturate for float → int, and asymmetric
 //! scaling for int → float).
+#![allow(unused)]
 
+use std::num::NonZeroU32;
+
+use non_empty_slice::{NonEmptySlice, NonEmptyVec, non_empty_vec};
 #[cfg(feature = "simd")]
 use wide::f32x8;
 
@@ -29,6 +33,7 @@ use crate::{AudioSample, AudioSampleError, AudioSampleResult, ConvertTo, Paramet
 /// # Errors
 /// Returns an error if `input.len() != output.len()`.
 #[cfg(feature = "simd")]
+#[inline]
 pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSampleResult<()> {
     if input.len() != output.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -91,6 +96,7 @@ pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSample
 /// # Errors
 /// Returns an error if `input.len() != output.len()`.
 #[cfg(feature = "simd")]
+#[inline]
 pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSampleResult<()> {
     if input.len() != output.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -145,6 +151,7 @@ pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSample
 /// # Errors
 /// Returns an error if `input.len() != output.len()`.
 #[cfg(feature = "simd")]
+#[inline]
 pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSampleResult<()> {
     if input.len() != output.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -213,6 +220,7 @@ pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSample
 /// The casts are only taken when the runtime `TypeId` checks prove the types are exactly
 /// the expected concrete types.
 #[cfg(feature = "simd")]
+#[inline]
 pub fn convert_simd<T, U>(input: &[T], output: &mut [U]) -> AudioSampleResult<()>
 where
     T: AudioSample + ConvertTo<U>,
@@ -269,6 +277,7 @@ where
 ///
 /// # Panics
 /// Does not panic.
+#[inline]
 pub fn convert_scalar_unrolled<T, U>(input: &[T], output: &mut [U]) -> AudioSampleResult<()>
 where
     T: AudioSample + ConvertTo<U>,
@@ -316,6 +325,7 @@ where
 ///
 /// # Panics
 /// Does not panic.
+#[inline]
 pub fn convert<T, U>(input: &[T], output: &mut [U]) -> AudioSampleResult<()>
 where
     T: AudioSample + ConvertTo<U>,
@@ -517,9 +527,9 @@ fn deinterleave_stereo_f32_simd(interleaved: &[f32], output: &mut [f32]) -> Audi
 /// Does not panic.
 #[inline]
 pub fn deinterleave_multi<T: AudioSample>(
-    interleaved: &[T],
-    output: &mut [T],
-    num_channels: usize,
+    interleaved: &NonEmptySlice<T>,
+    output: &mut NonEmptySlice<T>,
+    num_channels: NonZeroU32,
 ) -> AudioSampleResult<()> {
     if interleaved.len() != output.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -527,13 +537,11 @@ pub fn deinterleave_multi<T: AudioSample>(
             "Input and output slices must have same length",
         )));
     }
-    if num_channels == 0 {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "num_channels",
-            "Number of channels must be greater than 0",
-        )));
-    }
-    if !interleaved.len().is_multiple_of(num_channels) {
+    if !interleaved
+        .len()
+        .get()
+        .is_multiple_of(num_channels.get() as usize)
+    {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "interleaved_length",
             "Interleaved data length must be divisible by channel count",
@@ -541,7 +549,7 @@ pub fn deinterleave_multi<T: AudioSample>(
     }
 
     // Use optimized stereo path for 2 channels
-    if num_channels == 2 {
+    if num_channels.get() == 2 {
         return deinterleave_stereo(interleaved, output);
     }
 
@@ -554,19 +562,18 @@ pub fn deinterleave_multi<T: AudioSample>(
 /// For >2 channels, we use a cache-friendly approach that processes
 /// one channel at a time to maximize sequential writes.
 fn deinterleave_multi_scalar<T: AudioSample>(
-    interleaved: &[T],
-    output: &mut [T],
-    num_channels: usize,
+    interleaved: &NonEmptySlice<T>,
+    output: &mut NonEmptySlice<T>,
+    num_channels: NonZeroU32,
 ) -> AudioSampleResult<()> {
-    let frames = interleaved.len() / num_channels;
-
+    let frames = interleaved.len().get() / num_channels.get() as usize;
     // Process each channel sequentially for better cache locality on writes
-    for ch in 0..num_channels {
+    for ch in 0..num_channels.get() as usize {
         let out_start = ch * frames;
         let out_slice = &mut output[out_start..out_start + frames];
 
         for frame in 0..frames {
-            out_slice[frame] = interleaved[frame * num_channels + ch];
+            out_slice[frame] = interleaved[frame * num_channels.get() as usize + ch];
         }
     }
 
@@ -747,9 +754,9 @@ fn interleave_stereo_f32_simd(planar: &[f32], output: &mut [f32]) -> AudioSample
 /// Does not panic.
 #[inline]
 pub fn interleave_multi<T: AudioSample>(
-    planar: &[T],
-    output: &mut [T],
-    num_channels: usize,
+    planar: &NonEmptySlice<T>,
+    output: &mut NonEmptySlice<T>,
+    num_channels: NonZeroU32,
 ) -> AudioSampleResult<()> {
     if planar.len() != output.len() {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -757,13 +764,11 @@ pub fn interleave_multi<T: AudioSample>(
             "Input and output slices must have same length",
         )));
     }
-    if num_channels == 0 {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "num_channels",
-            "Number of channels must be greater than 0",
-        )));
-    }
-    if !planar.len().is_multiple_of(num_channels) {
+    if !planar
+        .len()
+        .get()
+        .is_multiple_of(num_channels.get() as usize)
+    {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "planar_length",
             "Planar data length must be divisible by channel count",
@@ -771,7 +776,7 @@ pub fn interleave_multi<T: AudioSample>(
     }
 
     // Use optimized stereo path for 2 channels
-    if num_channels == 2 {
+    if num_channels.get() == 2 {
         return interleave_stereo(planar, output);
     }
 
@@ -781,16 +786,15 @@ pub fn interleave_multi<T: AudioSample>(
 
 /// Scalar implementation of multi-channel interleave.
 fn interleave_multi_scalar<T: AudioSample>(
-    planar: &[T],
-    output: &mut [T],
-    num_channels: usize,
+    planar: &NonEmptySlice<T>,
+    output: &mut NonEmptySlice<T>,
+    num_channels: NonZeroU32,
 ) -> AudioSampleResult<()> {
-    let frames = planar.len() / num_channels;
-
+    let frames = planar.len().get() / num_channels.get() as usize;
     // Process frame by frame for correct interleaving
     for frame in 0..frames {
-        let out_base = frame * num_channels;
-        for ch in 0..num_channels {
+        let out_base = frame * num_channels.get() as usize;
+        for ch in 0..num_channels.get() as usize {
             let in_idx = ch * frames + frame;
             output[out_base + ch] = planar[in_idx];
         }
@@ -799,7 +803,6 @@ fn interleave_multi_scalar<T: AudioSample>(
     Ok(())
 }
 
-// =============================================================================
 // CONVENIENCE FUNCTIONS FOR Vec
 // =============================================================================
 
@@ -810,15 +813,17 @@ fn interleave_multi_scalar<T: AudioSample>(
 /// # Errors
 /// Returns an error if `interleaved.len()` is not even.
 #[inline]
-pub fn deinterleave_stereo_vec<T: AudioSample>(interleaved: Vec<T>) -> AudioSampleResult<Vec<T>> {
-    if !interleaved.len().is_multiple_of(2) {
+pub fn deinterleave_stereo_vec<T: AudioSample>(
+    interleaved: NonEmptyVec<T>,
+) -> AudioSampleResult<NonEmptyVec<T>> {
+    if !interleaved.len().get().is_multiple_of(2) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "interleaved_length",
             "Interleaved stereo data must have even length",
         )));
     }
 
-    let mut output = vec![T::default(); interleaved.len()];
+    let mut output = non_empty_vec![T::default(); interleaved.len()];
     deinterleave_stereo(&interleaved, &mut output)?;
     Ok(output)
 }
@@ -830,23 +835,21 @@ pub fn deinterleave_stereo_vec<T: AudioSample>(interleaved: Vec<T>) -> AudioSamp
 /// `num_channels`.
 #[inline]
 pub fn deinterleave_multi_vec<T: AudioSample>(
-    interleaved: Vec<T>,
-    num_channels: usize,
-) -> AudioSampleResult<Vec<T>> {
-    if num_channels == 0 {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "num_channels",
-            "Number of channels must be greater than 0",
-        )));
-    }
-    if !interleaved.len().is_multiple_of(num_channels) {
+    interleaved: &NonEmptySlice<T>,
+    num_channels: NonZeroU32,
+) -> AudioSampleResult<NonEmptyVec<T>> {
+    if !interleaved
+        .len()
+        .get()
+        .is_multiple_of(num_channels.get() as usize)
+    {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "interleaved_length",
             "Interleaved data length must be divisible by channel count",
         )));
     }
 
-    let mut output = vec![T::default(); interleaved.len()];
+    let mut output = non_empty_vec![T::default(); interleaved.len()];
     deinterleave_multi(&interleaved, &mut output, num_channels)?;
     Ok(output)
 }
@@ -856,15 +859,17 @@ pub fn deinterleave_multi_vec<T: AudioSample>(
 /// # Errors
 /// Returns an error if `planar.len()` is not even.
 #[inline]
-pub fn interleave_stereo_vec<T: AudioSample>(planar: Vec<T>) -> AudioSampleResult<Vec<T>> {
-    if !planar.len().is_multiple_of(2) {
+pub fn interleave_stereo_vec<T: AudioSample>(
+    planar: NonEmptyVec<T>,
+) -> AudioSampleResult<NonEmptyVec<T>> {
+    if !planar.len().get().is_multiple_of(2) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "planar_length",
             "Planar stereo data must have even length",
         )));
     }
 
-    let mut output = vec![T::default(); planar.len()];
+    let mut output = non_empty_vec![T::default(); planar.len()];
     interleave_stereo(&planar, &mut output)?;
     Ok(output)
 }
@@ -876,35 +881,35 @@ pub fn interleave_stereo_vec<T: AudioSample>(planar: Vec<T>) -> AudioSampleResul
 /// `num_channels`.
 #[inline]
 pub fn interleave_multi_vec<T: AudioSample>(
-    planar: Vec<T>,
-    num_channels: usize,
-) -> AudioSampleResult<Vec<T>> {
-    if num_channels == 0 {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "num_channels",
-            "Number of channels must be greater than 0",
-        )));
-    }
-    if !planar.len().is_multiple_of(num_channels) {
+    planar: NonEmptyVec<T>,
+    num_channels: NonZeroU32,
+) -> AudioSampleResult<NonEmptyVec<T>> {
+    if !planar
+        .len()
+        .get()
+        .is_multiple_of(num_channels.get() as usize)
+    {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "planar_length",
             "Planar data length must be divisible by channel count",
         )));
     }
 
-    let mut output = vec![T::default(); planar.len()];
+    let mut output = non_empty_vec![T::default(); planar.len()];
     interleave_multi(&planar, &mut output, num_channels)?;
     Ok(output)
 }
 
 #[cfg(test)]
 mod tests {
+    use non_empty_iter::TryIntoNonEmptyIterator;
+
     use super::*;
 
     #[test]
     fn test_scalar_conversion() {
-        let _input = vec![0.5f32, -0.3, 0.8, 1.0, -1.0];
-        let mut _output = vec![0i16; 5];
+        let _input = non_empty_vec![0.5f32, -0.3, 0.8, 1.0, -1.0];
+        let mut _output = non_empty_vec![0i16; crate::nzu!(5)];
 
         // Test is compiled but only runs when simd feature is disabled
         #[cfg(not(feature = "simd"))]
@@ -925,8 +930,8 @@ mod tests {
     #[cfg(feature = "simd")]
     #[test]
     fn test_simd_f32_to_i16_conversion() {
-        let input = vec![0.5f32, -0.3, 0.8, 1.0, -1.0, 0.0, 0.1, -0.1, 0.25];
-        let mut output = vec![0i16; 9];
+        let input = non_empty_vec![0.5f32, -0.3, 0.8, 1.0, -1.0, 0.0, 0.1, -0.1, 0.25];
+        let mut output = non_empty_vec![0i16; 9];
 
         convert_f32_to_i16_simd(&input, &mut output).unwrap();
 
@@ -943,8 +948,8 @@ mod tests {
     #[cfg(feature = "simd")]
     #[test]
     fn test_simd_i16_to_f32_conversion() {
-        let input = vec![16383i16, -9830, 26214, 32767, -32768, 0, 3276, -3276];
-        let mut output = vec![0.0f32; 8];
+        let input = non_empty_vec![16383i16, -9830, 26214, 32767, -32768, 0, 3276, -3276];
+        let mut output = non_empty_vec![0.0f32; 8];
 
         convert_i16_to_f32_simd(&input, &mut output).unwrap();
 
@@ -961,13 +966,13 @@ mod tests {
 
     #[test]
     fn test_optimized_conversion_dispatch() {
-        let input = vec![0.5f32, -0.3, 0.8];
-        let mut output = vec![0i16; 3];
+        let input = non_empty_vec![0.5f32, -0.3, 0.8];
+        let mut output = non_empty_vec![0i16; crate::nzu!(3)];
 
         convert(&input, &mut output).unwrap();
 
         // Should work regardless of SIMD feature
-        assert_eq!(output.len(), 3);
+        assert_eq!(output.len().get(), 3);
         let expected0: i16 = input[0].convert_to();
         assert_eq!(output[0], expected0);
     }
@@ -1027,10 +1032,10 @@ mod tests {
     #[test]
     fn test_deinterleave_multi_3ch() {
         // Interleaved 3-channel: [ch0_f0, ch1_f0, ch2_f0, ch0_f1, ch1_f1, ch2_f1]
-        let interleaved = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut output = vec![0.0f32; 6];
+        let interleaved = non_empty_vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(6)];
 
-        deinterleave_multi(&interleaved, &mut output, 3).unwrap();
+        deinterleave_multi(&interleaved, &mut output, NonZeroU32::new(3).unwrap());
 
         // Planar: [ch0_f0, ch0_f1, ch1_f0, ch1_f1, ch2_f0, ch2_f1]
         assert_eq!(output[0], 1.0); // ch0_f0
@@ -1045,9 +1050,10 @@ mod tests {
     fn test_deinterleave_multi_6ch() {
         // 5.1 surround: 6 channels, 2 frames
         let interleaved: Vec<f32> = (1..=12).map(|x| x as f32).collect();
-        let mut output = vec![0.0f32; 12];
+        let interleaved = NonEmptyVec::new(interleaved).unwrap();
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(12)];
 
-        deinterleave_multi(&interleaved, &mut output, 6).unwrap();
+        deinterleave_multi(&interleaved, &mut output, NonZeroU32::new(6).unwrap()).unwrap();
 
         // Each channel should have 2 samples
         // ch0: [1, 7], ch1: [2, 8], ch2: [3, 9], ch3: [4, 10], ch4: [5, 11], ch5: [6, 12]
@@ -1066,8 +1072,8 @@ mod tests {
     #[test]
     fn test_interleave_stereo_f32() {
         // Planar: [L0, L1, L2, L3, R0, R1, R2, R3]
-        let planar = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-        let mut output = vec![0.0f32; 8];
+        let planar = non_empty_vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(8)];
 
         interleave_stereo(&planar, &mut output).unwrap();
 
@@ -1085,8 +1091,8 @@ mod tests {
     #[test]
     fn test_interleave_stereo_i16() {
         // Planar: [L0, L1, L2, R0, R1, R2]
-        let planar = vec![100i16, 300, 500, 200, 400, 600];
-        let mut output = vec![0i16; 6];
+        let planar = non_empty_vec![100i16, 300, 500, 200, 400, 600];
+        let mut output = non_empty_vec![0i16; crate::nzu!(6)];
 
         interleave_stereo(&planar, &mut output).unwrap();
 
@@ -1102,10 +1108,10 @@ mod tests {
     #[test]
     fn test_interleave_multi_3ch() {
         // Planar 3-channel: [ch0_f0, ch0_f1, ch1_f0, ch1_f1, ch2_f0, ch2_f1]
-        let planar = vec![1.0f32, 4.0, 2.0, 5.0, 3.0, 6.0];
-        let mut output = vec![0.0f32; 6];
+        let planar = non_empty_vec![1.0f32, 4.0, 2.0, 5.0, 3.0, 6.0];
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(6)];
 
-        interleave_multi(&planar, &mut output, 3).unwrap();
+        interleave_multi(&planar, &mut output, NonZeroU32::new(3).unwrap()).unwrap();
 
         // Interleaved: [ch0_f0, ch1_f0, ch2_f0, ch0_f1, ch1_f1, ch2_f1]
         assert_eq!(output[0], 1.0); // ch0_f0
@@ -1147,11 +1153,13 @@ mod tests {
     #[test]
     fn test_multi_roundtrip_6ch() {
         let original: Vec<f32> = (1..=60).map(|x| x as f32).collect(); // 6 channels, 10 frames
-        let mut deinterleaved = vec![0.0f32; 60];
-        let mut reinterleaved = vec![0.0f32; 60];
+        let original = NonEmptyVec::new(original).unwrap();
+        let mut deinterleaved = non_empty_vec![0.0f32; crate::nzu!(60)];
+        let mut reinterleaved = non_empty_vec![0.0f32; crate::nzu!(60)];
+        let num_channels = NonZeroU32::new(6).unwrap();
 
-        deinterleave_multi(&original, &mut deinterleaved, 6).unwrap();
-        interleave_multi(&deinterleaved, &mut reinterleaved, 6).unwrap();
+        deinterleave_multi(&original, &mut deinterleaved, num_channels).unwrap();
+        interleave_multi(&deinterleaved, &mut reinterleaved, num_channels).unwrap();
 
         assert_eq!(original, reinterleaved);
     }
@@ -1162,18 +1170,18 @@ mod tests {
 
     #[test]
     fn test_deinterleave_stereo_vec_fn() {
-        let interleaved = vec![1.0f32, 2.0, 3.0, 4.0];
+        let interleaved = non_empty_vec![1.0f32, 2.0, 3.0, 4.0];
         let planar = deinterleave_stereo_vec(interleaved).unwrap();
 
-        assert_eq!(planar, vec![1.0, 3.0, 2.0, 4.0]);
+        assert_eq!(planar, non_empty_vec![1.0, 3.0, 2.0, 4.0]);
     }
 
     #[test]
     fn test_interleave_stereo_vec_fn() {
-        let planar = vec![1.0f32, 3.0, 2.0, 4.0];
+        let planar = non_empty_vec![1.0f32, 3.0, 2.0, 4.0];
         let interleaved = interleave_stereo_vec(planar).unwrap();
 
-        assert_eq!(interleaved, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(interleaved, non_empty_vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     // =========================================================================
@@ -1182,8 +1190,8 @@ mod tests {
 
     #[test]
     fn test_deinterleave_stereo_length_mismatch() {
-        let interleaved = vec![1.0f32, 2.0, 3.0, 4.0];
-        let mut output = vec![0.0f32; 2]; // Wrong size
+        let interleaved = non_empty_vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(2)]; // Wrong size
 
         let result = deinterleave_stereo(&interleaved, &mut output);
         assert!(result.is_err());
@@ -1191,28 +1199,19 @@ mod tests {
 
     #[test]
     fn test_deinterleave_stereo_odd_length() {
-        let interleaved = vec![1.0f32, 2.0, 3.0]; // Odd length
-        let mut output = vec![0.0f32; 3];
+        let interleaved = non_empty_vec![1.0f32, 2.0, 3.0]; // Odd length
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(3)];
 
         let result = deinterleave_stereo(&interleaved, &mut output);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_deinterleave_multi_zero_channels() {
-        let interleaved = vec![1.0f32, 2.0, 3.0, 4.0];
-        let mut output = vec![0.0f32; 4];
-
-        let result = deinterleave_multi(&interleaved, &mut output, 0);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_deinterleave_multi_not_divisible() {
-        let interleaved = vec![1.0f32, 2.0, 3.0, 4.0, 5.0]; // 5 samples, 3 channels
-        let mut output = vec![0.0f32; 5];
+        let interleaved = non_empty_vec![1.0f32, 2.0, 3.0, 4.0, 5.0]; // 5 samples, 3 channels
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(5)];
 
-        let result = deinterleave_multi(&interleaved, &mut output, 3);
+        let result = deinterleave_multi(&interleaved, &mut output, NonZeroU32::new(3).unwrap());
         assert!(result.is_err());
     }
 }

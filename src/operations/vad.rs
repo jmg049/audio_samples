@@ -4,24 +4,29 @@
 //! pre-processing. It is designed to avoid allocations beyond the output mask,
 //! and prefers contiguous slice access paths for performance.
 
+use std::num::NonZeroUsize;
+
+use non_empty_slice::{NonEmptySlice, NonEmptyVec, non_empty_vec};
+
+use crate::AudioTypeConversion;
 use crate::operations::traits::AudioVoiceActivityDetection;
 use crate::operations::types::{VadChannelPolicy, VadConfig, VadMethod};
 use crate::{
-    AudioSample, AudioSampleError, AudioSampleResult, AudioSamples, FeatureError, LayoutError,
-    ParameterError, RealFloat, to_precision,
+    AudioSampleError, AudioSampleResult, AudioSamples, FeatureError, LayoutError, ParameterError,
+    traits::StandardSample,
 };
 
 /// Internal helper describing a frame iteration plan.
 #[derive(Debug, Clone, Copy)]
 struct FramePlan {
-    frame_size: usize,
-    hop_size: usize,
+    frame_size: NonZeroUsize,
+    hop_size: NonZeroUsize,
     pad_end: bool,
 }
 
 impl FramePlan {
     fn frame_starts(self, total_len: usize) -> impl Iterator<Item = usize> {
-        let FramePlan {
+        let Self {
             frame_size,
             hop_size,
             pad_end,
@@ -33,22 +38,23 @@ impl FramePlan {
                 if start >= total_len {
                     return None;
                 }
-            } else if start + frame_size > total_len {
+            } else if start + frame_size.get() > total_len {
                 return None;
             }
 
             let current = start;
-            start = start.saturating_add(hop_size);
+            start = start.saturating_add(hop_size.get());
             Some(current)
         })
     }
 }
 
-impl<'a, T: AudioSample> AudioVoiceActivityDetection<'a, T> for AudioSamples<'a, T> {
-    fn voice_activity_mask<F: RealFloat>(
-        &self,
-        config: &VadConfig<F>,
-    ) -> AudioSampleResult<Vec<bool>> {
+impl<T> AudioVoiceActivityDetection for AudioSamples<'_, T>
+where
+    T: StandardSample,
+    Self: AudioTypeConversion<Sample = T>,
+{
+    fn voice_activity_mask(&self, config: &VadConfig) -> AudioSampleResult<NonEmptyVec<bool>> {
         config.validate()?;
 
         let plan = FramePlan {
@@ -58,67 +64,61 @@ impl<'a, T: AudioSample> AudioVoiceActivityDetection<'a, T> for AudioSamples<'a,
         };
 
         let total_len = self.samples_per_channel();
-        if total_len == 0 {
-            return Ok(Vec::new());
-        }
 
-        let energy_threshold_db_f64: f64 = to_precision(config.energy_threshold_db);
-        let energy_threshold_rms: f64 = 10f64.powf(energy_threshold_db_f64 / 20.0);
+        let energy_threshold_rms = 10.0f64.powf(config.energy_threshold_db / 20.0);
 
         // Raw decisions per frame.
         let mut mask = Vec::new();
 
-        match self.as_mono() {
-            Some(mono) => {
-                let slice = mono.as_slice().ok_or(AudioSampleError::Layout(
-                    LayoutError::NonContiguous {
+        if let Some(mono) = self.as_mono() {
+            let slice =
+                mono.as_slice()
+                    .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
                         operation: "voice activity detection".to_string(),
                         layout_type: "non-contiguous mono array".to_string(),
-                    },
-                ))?;
-
-                for start in plan.frame_starts(total_len) {
-                    let decision = vad_decision_for_slice(
-                        slice,
-                        start,
-                        total_len,
-                        config,
-                        energy_threshold_rms,
-                    )?;
-                    mask.push(decision);
-                }
+                    }))?;
+            // safety: slice is non-empty because total_len > 0.
+            let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
+            for start in plan.frame_starts(total_len.get()) {
+                let decision =
+                    vad_decision_for_slice(slice, start, total_len, config, energy_threshold_rms)?;
+                mask.push(decision);
             }
-            None => {
-                let multi = self.as_multi_channel().ok_or(AudioSampleError::Parameter(
-                    ParameterError::invalid_value("audio_data", "Audio must be multi-channel"),
-                ))?;
+        } else {
+            let multi = self.as_multi_channel().ok_or(AudioSampleError::Parameter(
+                ParameterError::invalid_value("audio_data", "Audio must be multi-channel"),
+            ))?;
 
-                let multi_view = multi.as_view();
-                let channels = multi_view.nrows();
-                let samples = multi_view.ncols();
+            let multi_view = multi.as_view();
+            let channels = multi_view.nrows();
+            let samples = multi_view.ncols();
+            // safety: AudioSamples guarantees non-zero channels.
+            let channels = unsafe { NonZeroUsize::new_unchecked(channels) };
+            // safety: AudioSamples guarantees non-zero samples per channel.
+            let samples = unsafe { NonZeroUsize::new_unchecked(samples) };
 
-                if samples != total_len {
-                    return Err(AudioSampleError::Layout(LayoutError::DimensionMismatch {
-                        expected_dims: format!("samples_per_channel={total_len}"),
-                        actual_dims: format!("ncols={samples}"),
-                        operation: "voice activity detection".to_string(),
-                    }));
-                }
+            if samples != total_len {
+                return Err(AudioSampleError::Layout(LayoutError::DimensionMismatch {
+                    expected_dims: format!("samples_per_channel={total_len}"),
+                    actual_dims: format!("ncols={samples}"),
+                    operation: "voice activity detection".to_string(),
+                }));
+            }
 
-                for start in plan.frame_starts(total_len) {
-                    let decision = vad_decision_for_multi(
-                        multi_view,
-                        channels,
-                        samples,
-                        start,
-                        config,
-                        energy_threshold_rms,
-                    )?;
-                    mask.push(decision);
-                }
+            for start in plan.frame_starts(total_len.get()) {
+                let decision = vad_decision_for_multi(
+                    multi_view,
+                    channels,
+                    samples,
+                    start,
+                    config,
+                    energy_threshold_rms,
+                )?;
+                mask.push(decision);
             }
         }
-
+        // safety: mask is non-empty because total_len > 0 and frame plan yields at least one frame.
+        let mask = unsafe { NonEmptyVec::new_unchecked(mask) };
         // Post-processing: smoothing + hangover + min region duration.
         let mut mask = majority_smooth(mask, config.smooth_frames);
         apply_hangover(&mut mask, config.hangover_frames);
@@ -128,14 +128,9 @@ impl<'a, T: AudioSample> AudioVoiceActivityDetection<'a, T> for AudioSamples<'a,
         Ok(mask)
     }
 
-    fn speech_regions<F: RealFloat>(
-        &self,
-        config: &VadConfig<F>,
-    ) -> AudioSampleResult<Vec<(usize, usize)>> {
+    fn speech_regions(&self, config: &VadConfig) -> AudioSampleResult<Vec<(usize, usize)>>
+where {
         let mask = self.voice_activity_mask(config)?;
-        if mask.is_empty() {
-            return Ok(Vec::new());
-        }
 
         let plan = FramePlan {
             frame_size: config.frame_size,
@@ -143,7 +138,7 @@ impl<'a, T: AudioSample> AudioVoiceActivityDetection<'a, T> for AudioSamples<'a,
             pad_end: config.pad_end,
         };
 
-        let total_len = self.samples_per_channel();
+        let total_len = self.samples_per_channel().get();
         let mut regions = Vec::new();
 
         let mut in_region = false;
@@ -153,7 +148,7 @@ impl<'a, T: AudioSample> AudioVoiceActivityDetection<'a, T> for AudioSamples<'a,
         for (frame_idx, start) in plan.frame_starts(total_len).enumerate() {
             let is_speech = mask.get(frame_idx).copied().unwrap_or(false);
 
-            let frame_end = start.saturating_add(config.frame_size).min(total_len);
+            let frame_end = start.saturating_add(config.frame_size.get()).min(total_len);
             last_frame_end_sample = frame_end;
 
             if is_speech {
@@ -175,13 +170,16 @@ impl<'a, T: AudioSample> AudioVoiceActivityDetection<'a, T> for AudioSamples<'a,
     }
 }
 
-fn vad_decision_for_slice<T: AudioSample, F: RealFloat>(
-    samples: &[T],
+fn vad_decision_for_slice<T>(
+    samples: &NonEmptySlice<T>,
     frame_start: usize,
-    total_len: usize,
-    config: &VadConfig<F>,
+    total_len: NonZeroUsize,
+    config: &VadConfig,
     energy_threshold_rms: f64,
-) -> AudioSampleResult<bool> {
+) -> AudioSampleResult<bool>
+where
+    T: StandardSample,
+{
     let (rms, zcr) = frame_rms_and_zcr(
         samples,
         frame_start,
@@ -192,24 +190,27 @@ fn vad_decision_for_slice<T: AudioSample, F: RealFloat>(
     classify(config, rms, zcr, energy_threshold_rms)
 }
 
-fn vad_decision_for_multi<T: AudioSample, F: RealFloat>(
+fn vad_decision_for_multi<T>(
     multi: ndarray::ArrayView2<'_, T>,
-    channels: usize,
-    samples: usize,
+    channels: NonZeroUsize,
+    samples: NonZeroUsize,
     frame_start: usize,
-    config: &VadConfig<F>,
+    config: &VadConfig,
     energy_threshold_rms: f64,
-) -> AudioSampleResult<bool> {
+) -> AudioSampleResult<bool>
+where
+    T: StandardSample,
+{
     let plan_frame_size = config.frame_size;
 
     match &config.channel_policy {
         VadChannelPolicy::Channel(ch) => {
-            if *ch >= channels {
+            if *ch >= channels.get() {
                 return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                     "channel_policy",
                     ch.to_string(),
                     "0".to_string(),
-                    (channels.saturating_sub(1)).to_string(),
+                    (channels.get().saturating_sub(1)).to_string(),
                     "channel index out of range".to_string(),
                 )));
             }
@@ -220,6 +221,8 @@ fn vad_decision_for_multi<T: AudioSample, F: RealFloat>(
                         operation: "voice activity detection".to_string(),
                         layout_type: "non-contiguous channel row".to_string(),
                     }))?;
+            // safety: slice is non-empty because samples is non-zero.
+            let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
             let (rms, zcr) =
                 frame_rms_and_zcr(slice, frame_start, samples, plan_frame_size, config.pad_end);
             classify(config, rms, zcr, energy_threshold_rms)
@@ -227,6 +230,8 @@ fn vad_decision_for_multi<T: AudioSample, F: RealFloat>(
         VadChannelPolicy::AverageToMono => {
             // Fast path: contiguous ArrayView2.
             if let Some(flat) = multi.as_slice() {
+                // safety: flat is non-empty because channels and samples are non-zero.
+                let flat = unsafe { NonEmptySlice::new_unchecked(flat) };
                 let (rms, zcr) = frame_rms_and_zcr_avg(
                     flat,
                     channels,
@@ -253,9 +258,11 @@ fn vad_decision_for_multi<T: AudioSample, F: RealFloat>(
             let mut any_active = false;
             let mut all_active = true;
 
-            for ch in 0..channels {
+            for ch in 0..channels.get() {
                 let row = multi.row(ch);
                 let (rms, zcr) = if let Some(slice) = row.as_slice() {
+                    // safety: slice is non-empty because samples is non-zero.
+                    let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
                     frame_rms_and_zcr(slice, frame_start, samples, plan_frame_size, config.pad_end)
                 } else {
                     frame_rms_and_zcr_indexed(
@@ -285,19 +292,17 @@ fn vad_decision_for_multi<T: AudioSample, F: RealFloat>(
     }
 }
 
-fn classify<F: RealFloat>(
-    config: &VadConfig<F>,
+fn classify(
+    config: &VadConfig,
     rms: f64,
     zcr: f64,
     energy_threshold_rms: f64,
 ) -> AudioSampleResult<bool> {
     match config.method {
         VadMethod::Energy => Ok(rms >= energy_threshold_rms),
-        VadMethod::ZeroCrossing => Ok(zcr >= to_precision::<f64, _>(config.zcr_min)
-            && zcr <= to_precision::<f64, _>(config.zcr_max)),
+        VadMethod::ZeroCrossing => Ok(zcr >= config.zcr_min && zcr <= config.zcr_max),
         VadMethod::Combined => {
-            let zcr_ok = zcr >= to_precision::<f64, _>(config.zcr_min)
-                && zcr <= to_precision::<f64, _>(config.zcr_max);
+            let zcr_ok = zcr >= config.zcr_min && zcr <= config.zcr_max;
             Ok(rms >= energy_threshold_rms && zcr_ok)
         }
         VadMethod::Spectral => Err(AudioSampleError::Feature(FeatureError::not_enabled(
@@ -307,22 +312,25 @@ fn classify<F: RealFloat>(
     }
 }
 
-fn frame_rms_and_zcr<T: AudioSample>(
-    samples: &[T],
+fn frame_rms_and_zcr<T>(
+    samples: &NonEmptySlice<T>,
     frame_start: usize,
-    total_len: usize,
-    frame_size: usize,
+    total_len: NonZeroUsize,
+    frame_size: NonZeroUsize,
     pad_end: bool,
-) -> (f64, f64) {
-    let available = total_len.saturating_sub(frame_start);
-    if available == 0 || frame_size == 0 {
+) -> (f64, f64)
+where
+    T: StandardSample,
+{
+    let available = total_len.get().saturating_sub(frame_start);
+    if available == 0 {
         return (0.0, 0.0);
     }
 
-    let frame_len = available.min(frame_size);
-    let denom_len = if pad_end { frame_size } else { frame_len };
+    let frame_len = available.min(frame_size.get());
+    let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
-    let mut sum_sq = 0.0f64;
+    let mut sum_sq: f64 = 0.0;
     let mut zc = 0usize;
 
     let mut prev_sign = 0i8;
@@ -352,41 +360,44 @@ fn frame_rms_and_zcr<T: AudioSample>(
         (sum_sq / denom_len as f64).sqrt()
     };
 
-    let zcr_denom = (frame_size.saturating_sub(1)).max(1) as f64;
+    let zcr_denom = (frame_size.get().saturating_sub(1)).max(1) as f64;
     let zcr = zc as f64 / zcr_denom;
 
     (rms, zcr)
 }
 
-fn frame_rms_and_zcr_avg<T: AudioSample>(
-    flat: &[T],
-    channels: usize,
-    samples: usize,
+fn frame_rms_and_zcr_avg<T>(
+    flat: &NonEmptySlice<T>,
+    channels: NonZeroUsize,
+    samples: NonZeroUsize,
     frame_start: usize,
-    frame_size: usize,
+    frame_size: NonZeroUsize,
     pad_end: bool,
-) -> (f64, f64) {
-    let available = samples.saturating_sub(frame_start);
-    if available == 0 || frame_size == 0 || channels == 0 {
+) -> (f64, f64)
+where
+    T: StandardSample,
+{
+    let available = samples.get().saturating_sub(frame_start);
+    if available == 0 {
         return (0.0, 0.0);
     }
 
-    let frame_len = available.min(frame_size);
-    let denom_len = if pad_end { frame_size } else { frame_len };
+    let frame_len = available.min(frame_size.get());
+    let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
-    let mut sum_sq = 0.0f64;
+    let mut sum_sq = 0.0;
     let mut zc = 0usize;
     let mut prev_sign = 0i8;
 
     for i in 0..frame_len {
         let col = frame_start + i;
-        let mut acc = 0.0f64;
-        for ch in 0..channels {
-            let idx = ch * samples + col;
+        let mut acc = 0.0;
+        for ch in 0..channels.get() {
+            let idx = ch * samples.get() + col;
             let v: f64 = flat[idx].convert_to();
             acc += v;
         }
-        let x = acc / channels as f64;
+        let x = acc / channels.get() as f64;
         sum_sq += x * x;
 
         let sign = if x > 0.0 {
@@ -410,40 +421,42 @@ fn frame_rms_and_zcr_avg<T: AudioSample>(
         (sum_sq / denom_len as f64).sqrt()
     };
 
-    let zcr_denom = (frame_size.saturating_sub(1)).max(1) as f64;
+    let zcr_denom = (frame_size.get().saturating_sub(1)).max(1) as f64;
     let zcr = zc as f64 / zcr_denom;
-
     (rms, zcr)
 }
 
-fn frame_rms_and_zcr_avg_indexed<T: AudioSample>(
+fn frame_rms_and_zcr_avg_indexed<T>(
     multi: &ndarray::ArrayView2<'_, T>,
-    channels: usize,
-    samples: usize,
+    channels: NonZeroUsize,
+    samples: NonZeroUsize,
     frame_start: usize,
-    frame_size: usize,
+    frame_size: NonZeroUsize,
     pad_end: bool,
-) -> (f64, f64) {
-    let available = samples.saturating_sub(frame_start);
-    if available == 0 || frame_size == 0 || channels == 0 {
+) -> (f64, f64)
+where
+    T: StandardSample,
+{
+    let available = samples.get().saturating_sub(frame_start);
+    if available == 0 {
         return (0.0, 0.0);
     }
 
-    let frame_len = available.min(frame_size);
-    let denom_len = if pad_end { frame_size } else { frame_len };
+    let frame_len = available.min(frame_size.get());
+    let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
-    let mut sum_sq = 0.0f64;
+    let mut sum_sq = 0.0;
     let mut zc = 0usize;
     let mut prev_sign = 0i8;
 
     for i in 0..frame_len {
         let col = frame_start + i;
-        let mut acc = 0.0f64;
-        for ch in 0..channels {
+        let mut acc: f64 = 0.0;
+        for ch in 0..channels.get() {
             let v: f64 = multi[(ch, col)].convert_to();
             acc += v;
         }
-        let x = acc / channels as f64;
+        let x = acc / channels.get() as f64;
         sum_sq += x * x;
 
         let sign = if x > 0.0 {
@@ -467,29 +480,31 @@ fn frame_rms_and_zcr_avg_indexed<T: AudioSample>(
         (sum_sq / denom_len as f64).sqrt()
     };
 
-    let zcr_denom = (frame_size.saturating_sub(1)).max(1) as f64;
+    let zcr_denom = (frame_size.get().saturating_sub(1)).max(1) as f64;
     let zcr = zc as f64 / zcr_denom;
-
     (rms, zcr)
 }
 
-fn frame_rms_and_zcr_indexed<T: AudioSample>(
+fn frame_rms_and_zcr_indexed<T>(
     multi: &ndarray::ArrayView2<'_, T>,
     ch: usize,
-    samples: usize,
+    samples: NonZeroUsize,
     frame_start: usize,
-    frame_size: usize,
+    frame_size: NonZeroUsize,
     pad_end: bool,
-) -> (f64, f64) {
-    let available = samples.saturating_sub(frame_start);
-    if available == 0 || frame_size == 0 {
+) -> (f64, f64)
+where
+    T: StandardSample,
+{
+    let available = samples.get().saturating_sub(frame_start);
+    if available == 0 {
         return (0.0, 0.0);
     }
 
-    let frame_len = available.min(frame_size);
-    let denom_len = if pad_end { frame_size } else { frame_len };
+    let frame_len = available.min(frame_size.get());
+    let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
-    let mut sum_sq = 0.0f64;
+    let mut sum_sq = 0.0;
     let mut zc = 0usize;
     let mut prev_sign = 0i8;
 
@@ -519,31 +534,31 @@ fn frame_rms_and_zcr_indexed<T: AudioSample>(
         (sum_sq / denom_len as f64).sqrt()
     };
 
-    let zcr_denom = (frame_size.saturating_sub(1)).max(1) as f64;
+    let zcr_denom = (frame_size.get().saturating_sub(1)).max(1) as f64;
     let zcr = zc as f64 / zcr_denom;
 
     (rms, zcr)
 }
 
-fn majority_smooth(mask: Vec<bool>, window: usize) -> Vec<bool> {
-    if window <= 1 || mask.is_empty() {
+fn majority_smooth(mask: NonEmptyVec<bool>, window: NonZeroUsize) -> NonEmptyVec<bool> {
+    if window.get() == 1 {
         return mask;
     }
 
-    let w = window;
-    let mut out = vec![false; mask.len()];
+    let w = window.get();
+    let mut out = non_empty_vec![false; mask.len()];
 
     let mut sum = 0i32;
     let mut ring = vec![false; w];
 
-    for i in 0..mask.len() {
+    for i in 0..mask.len().get() {
         let incoming = mask[i];
         let idx = i % w;
         let outgoing = ring[idx];
 
         ring[idx] = incoming;
-        sum += if incoming { 1 } else { 0 };
-        sum -= if outgoing { 1 } else { 0 };
+        sum += i32::from(incoming);
+        sum -= i32::from(outgoing);
 
         // For the first (w-1) entries, only use the available prefix.
         let denom = (i + 1).min(w) as i32;
@@ -553,15 +568,11 @@ fn majority_smooth(mask: Vec<bool>, window: usize) -> Vec<bool> {
     out
 }
 
-fn apply_hangover(mask: &mut [bool], hangover_frames: usize) {
-    if hangover_frames == 0 || mask.is_empty() {
-        return;
-    }
-
+fn apply_hangover(mask: &mut NonEmptySlice<bool>, hangover_frames: NonZeroUsize) {
     let mut hold = 0usize;
     for v in mask.iter_mut() {
         if *v {
-            hold = hangover_frames;
+            hold = hangover_frames.get();
         } else if hold > 0 {
             *v = true;
             hold -= 1;
@@ -569,20 +580,16 @@ fn apply_hangover(mask: &mut [bool], hangover_frames: usize) {
     }
 }
 
-fn remove_short_runs(mask: &mut [bool], value: bool, min_len: usize) {
-    if min_len == 0 || mask.is_empty() {
-        return;
-    }
-
+fn remove_short_runs(mask: &mut NonEmptySlice<bool>, value: bool, min_len: usize) {
     let mut i = 0usize;
-    while i < mask.len() {
+    while i < mask.len().get() {
         if mask[i] != value {
             i += 1;
             continue;
         }
 
         let start = i;
-        while i < mask.len() && mask[i] == value {
+        while i < mask.len().get() && mask[i] == value {
             i += 1;
         }
         let end = i;
@@ -620,42 +627,44 @@ fn merge_overlapping_regions(mut regions: Vec<(usize, usize)>) -> Vec<(usize, us
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use crate::sample_rate;
+
     use super::*;
     use ndarray::Array1;
 
     #[test]
     fn vad_silence_is_inactive() {
-        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(4096), crate::sample_rate!(44100));
-        let cfg = VadConfig::<f32> {
-            energy_threshold_db: to_precision(-50.0),
+        let audio: AudioSamples<'_, f32> =
+            AudioSamples::zeros_mono(crate::nzu!(4096), crate::sample_rate!(44100));
+        let cfg = VadConfig {
+            energy_threshold_db: -50.0,
             ..VadConfig::energy_only()
         };
 
         let mask = audio.voice_activity_mask(&cfg).unwrap();
-        assert!(!mask.is_empty());
         assert!(mask.iter().all(|&v| !v));
     }
 
     #[test]
     fn vad_tone_is_active() {
         let n = 4096;
-        let sr = 44100.0;
+        let sr = sample_rate!(44100);
         let freq = 440.0;
-        let data: Vec<f32> = (0..n)
-            .map(|i| {
-                let t = i as f32 / sr as f32;
-                (2.0 * std::f32::consts::PI * freq as f32 * t).sin() * 0.5
-            })
-            .collect();
-        let audio = AudioSamples::new_mono(Array1::from(data), crate::sample_rate!(44100));
+        let audio = crate::sine_wave::<f64>(
+            freq,
+            Duration::from_secs_f64(n as f64 / sr.get() as f64),
+            sr,
+            0.5,
+        );
 
-        let cfg = VadConfig::<f32> {
-            energy_threshold_db: to_precision(-35.0),
+        let cfg = VadConfig {
+            energy_threshold_db: -35.0,
             ..VadConfig::energy_only()
         };
 
         let mask = audio.voice_activity_mask(&cfg).unwrap();
-        assert!(!mask.is_empty());
         assert!(mask.iter().any(|&v| v));
     }
 
@@ -665,12 +674,12 @@ mod tests {
         for i in 2048..4096 {
             data[i] = 0.2;
         }
-        let audio = AudioSamples::new_mono(Array1::from(data), crate::sample_rate!(44100));
+        let audio = AudioSamples::new_mono(Array1::from(data), crate::sample_rate!(44100)).unwrap();
 
-        let cfg = VadConfig::<f32> {
-            frame_size: 512,
-            hop_size: 256,
-            energy_threshold_db: to_precision(-45.0),
+        let cfg = VadConfig {
+            frame_size: crate::nzu!(512),
+            hop_size: crate::nzu!(256),
+            energy_threshold_db: -45.0,
             ..VadConfig::energy_only()
         };
 

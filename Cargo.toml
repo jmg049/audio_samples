@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "0.10.7"
+version = "0.11.0"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -18,122 +18,103 @@ name = "audio_samples"
 crate-type = ["rlib"]
 
 [dependencies]
-bytemuck = "1.23.1"
-colored = "3.0.0"
-ndarray = "0.17.1"
-num-traits = "0.2.19"
-thiserror = "2.0.12"
-tracing = "0.1.41"
+bytemuck = "1.25.0"
+ndarray = "0.17"
+num-traits = "0.2"
+thiserror = "2.0"
 num-complex = "0.4"
-i24 = {version = "2.2.7", features = ["alloc","num-cast", "ndarray" ,"std", "serde"]}
+i24 = { version = "2.3.3", features = [
+    "alloc",
+    "num-cast",
+    "ndarray",
+    "std",
+    "serde",
+] }
 
-serde = { version = "1.0.219", features = ["derive"] }
-lazy_static = "1.4"
+serde = { version = "1.0", features = ["derive"] }
+lazy_static = "1.5"
 num-format = { version = "0.4.4", optional = true }
-rand = { version = "0.9.2", optional = true }
+rand = { version = "0.10.0", optional = true }
+wide = "1.1.1"
+spectrograms = { path = "/home/jmg/code/rust/spectrograms", optional = true }
 
-# Serialization dependencies (gated behind "serialization" feature)
-serde_json = { version = "1.0", optional = true }
-csv = { version = "1.3", optional = true }
-rmp-serde = { version = "1.3", optional = true }
-serde_cbor = { version = "0.11", optional = true }
-flate2 = { version = "1.0", optional = true }
-chrono = { version = "0.4", features = ["serde"], optional = true }
+serde_json = { version = "1.0.149", optional = true }
 
-# FFT dependencies (gated behind "fft" feature)
-rustfft = { version = "6.2", optional = true }
-realfft = { version = "3.4", optional = true }
-fftw-sys = { version = "0.4.0", features = ["intel-mkl"], optional = true }
-intel-mkl-src = { version = "0.8.0", optional = true }
+plotly = { version = "0.14.1", optional = true }
+plotly_static = { version = "0.1.0", features = [
+    "chromedriver",
+    "webdriver_download",
+], optional = true }
+html_view = { path = "/home/jmg/code/rust/HTMLView/html_view", optional = true }
+base64 = { version = "0.22", optional = true }
 
-# Plotting dependencies (gated behind "plotting" feature)
-plotly = { version = "0.13.5", optional = true }
-plotly_static = { version = "0.1.0", features = ["chromedriver", "webdriver_download"], optional = true }
-html_view = { version = "0.1.0", optional = true }
+rubato = { version = "0.16.1", optional = true }
 
-# Resampling dependencies (gated behind "resampling" feature)
-rubato = { version = "0.16.2", optional = true }
 
-# Performance dependencies (optional features)
-rayon = { version = "1.10", optional = true }
-num_cpus = { version = "1.16", optional = true }
-wide = { version = "0.7", optional = true }
-indicatif = { version = "0.18", optional = true }
-paste = "1.0.15"
+regex = ">=1.12"
+rustfft = ">=6.2"
+non-empty-slice = ">=0.5"
+non-empty-iter = ">=0.2"
 
 [features]
 # Minimal core (no heavy dependencies)
-default = ["core-ops"]
+default = ["bare-bones", "envelopes"]
 
 # Core operation categories
-statistics = []                   # Basic stats: peak, rms, mean
-processing = []                   # Basic processing: normalize, scale, clip
-editing = ["random-generation"]   # Time operations: trim, pad, reverse (includes noise)
-channels = []                     # Channel operations: mono/stereo conversion
-
-# Advanced categories
-statistics-advanced = ["statistics", "fft"]      # Autocorr, spectral analysis
-processing-advanced = ["processing"]             # Filtering, compression
-
-# Minimal focused API
-minimal = ["statistics", "processing"]
-
-# Core audio operations (no FFT/plotting/resampling)
-core-ops = ["statistics", "processing", "editing", "channels"]
-
+statistics = [] # Basic stats: peak, rms, mean
+processing = ["statistics"] # Basic processing: normalize, scale, clip
+transforms = ["dep:spectrograms"]
+editing = ["statistics", "random-generation"] # Time operations: trim, pad, reverse (includes noise)
+beat-tracking = [] # Beat tracking operations
+onset-detection = ["transforms", "peak-picking", "processing"] # Onset detection operations
+decomposition = ["onset-detection"] # Audio decomposition operations (requires serialization)
+dynamic-range = [] # Dynamic range compression/expansion operations
+channels = [] # Channel operations: interleave/deinterleave
+iir-filtering = [] # IIR filtering operations
+parametric-eq = ["iir-filtering"] # Parametric equalization operations
+peak-picking = [] # Peak picking operations
+pitch-analysis = ["transforms"] # Pitch analysis operations
+resampling = ["dep:rubato", ]
+vad = [] # Voice activity detection operations
+plotting = ["dep:plotly", "dep:base64", "dep:serde_json"]
+envelopes = ["dynamic-range", "editing", "random-generation"] # Envelope generation operations
 fixed-size-audio = [] # Support for fixed-size audio buffers (no heap allocation)
-# All
+
 full = [
-    "core-ops",
-    "fft",
-    "plotting",
+    "statistics",
+    "editing",
+    "transforms",
+    "channels",
     "resampling",
-    "serialization",
-    "static-plots",
-    "parallel-processing",
-    "mkl",
-    "progress-tracking",
-    "beat-detection",
-    "chroma",
-    "hpss",
-    "fixed-size-audio"
+    "fixed-size-audio",
+    "beat-tracking",
+    "onset-detection",
+    "decomposition",
+    "dynamic-range",
+    "parametric-eq",
+    "peak-picking",
+    "pitch-analysis",
+    "processing",
+    "vad",
+    "iir-filtering",
+    "plotting",
+    "envelopes",
+    "random-generation",
 ]
 
-# Major functionality groups
-fft = ["core-ops", "dep:rustfft", "dep:realfft"]
-plotting = ["core-ops", "dep:plotly", "dep:html_view"]
-resampling = ["core-ops", "dep:rubato"]
-serialization = ["core-ops", "dep:serde_json", "dep:csv", "dep:rmp-serde", "dep:serde_cbor", "dep:flate2", "dep:chrono"]
-
-# FFT-dependent features (require fft)
-spectral-analysis = ["fft"]
-beat-detection = ["fft", "spectral-analysis"]
-hpss = ["spectral-analysis"]
-chroma = ["spectral-analysis"]
+bare-bones = [] # No features, just the core API and basic types
 
 # Plotting sub-features (require plotting)
-static-plots = ["plotting", "dep:plotly_static", "dep:serde_json"]
-
-# Performance features (independent)
-parallel-processing = ["dep:rayon", "dep:num_cpus"]
-simd = ["dep:wide"]
-mkl = ["fft", "dep:fftw-sys", "dep:intel-mkl-src"]
-progress-tracking = ["dep:indicatif"]
-
-# Utility features
-formatting = ["dep:num-format"]
+static-plots = ["plotting", "dep:plotly_static"]
+simd = []
 random-generation = ["dep:rand"]
-utilities-full = ["formatting", "random-generation"]
-
-# Convenience feature groups
-full-analysis = ["spectral-analysis", "beat-detection", "plotting"]
-operations = ["core-ops", "spectral-analysis", "plotting", "resampling"]
-
 python = ["i24/pyo3"]
+html_view = ["dep:html_view"]
 
 [dev-dependencies]
 approx_eq = "0.1.8"
-clap = { version = "4.5.53", features = ["derive"] }
+clap = { version = "4.5.59", features = ["derive"] }
 dtmf_tones = "1.0.1"
-rand = "0.9"
-criterion = { version = "0.8.1", features = ["html_reports"] }
+rand = "0.10.0"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+proptest = "1.10.0"

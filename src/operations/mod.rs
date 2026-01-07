@@ -9,8 +9,7 @@
 //! - [`traits`] - Core trait definitions
 //! - [`statistics`] - Statistical analysis operations
 //! - [`processing`] - Signal processing operations
-//! - `transforms` - FFT / spectral analysis (requires `spectral-analysis`)
-//! - `fft_backends` - FFT backend selection (requires `fft`)
+//! - [`transforms`] - FFT / spectral analysis
 //! - [`editing`] - Time-domain editing operations
 //! - [`channels`] - Channel manipulation operations
 //! - [`types`] - Supporting types and enums
@@ -28,7 +27,7 @@
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-//! let audio = AudioSamples::new_mono(data, 44100);
+//! let audio = AudioSamples::new_mono(data, 44100).unwrap();
 //!
 //! // Statistical analysis
 //! let peak = audio.peak(); // Returns f32 directly
@@ -36,11 +35,12 @@
 //! let _ = (peak, rms);
 //!
 //! // Signal processing
-//! let mut audio_copy = audio.clone();
+//! let audio_copy = audio.clone();
 //! // Requires the `processing` feature.
-//! audio_copy
-//!     .normalize(-1.0, 1.0, NormalizationMethod::MinMax)
+//! let audio_copy = audio_copy
+//!     .normalize(NormalizationConfig::min_max(-1.0, 1.0))
 //!     .unwrap();
+//! # let _ = audio_copy;
 //!
 //! // Type conversion
 //! // Requires `AudioTypeConversion` (re-exported at the crate root).
@@ -49,125 +49,133 @@
 //! # Ok(())
 //! # }
 //! ```
+pub mod traits;
+pub mod types;
 
-#[cfg(feature = "beat-detection")]
-/// Beat tracking and tempo analysis operations.
-pub mod beats;
+#[cfg(feature = "beat-tracking")]
+pub mod beat;
+
+#[cfg(feature = "channels")]
 pub mod channels;
+
+#[cfg(feature = "dynamic-range")]
 pub mod dynamic_range;
+
+#[cfg(feature = "editing")]
 pub mod editing;
-#[cfg(feature = "fft")]
-pub mod fft_backends;
-#[cfg(feature = "hpss")]
+
+#[cfg(feature = "decomposition")]
 pub mod hpss;
+
+#[cfg(feature = "iir-filtering")]
 pub mod iir_filtering;
-#[cfg(feature = "spectral-analysis")]
-pub mod onset_detection;
+
+#[cfg(feature = "parametric-eq")]
 pub mod parametric_eq;
+
+#[cfg(feature = "peak-picking")]
 pub mod peak_picking;
-#[cfg(feature = "spectral-analysis")]
+
+#[cfg(feature = "pitch-analysis")]
 pub mod pitch_analysis;
+
+#[cfg(feature = "processing")]
+pub mod processing;
+
+#[cfg(feature = "statistics")]
+pub mod statistics;
+
+#[cfg(feature = "transforms")]
+pub mod transforms;
+
+#[cfg(feature = "vad")]
+pub mod vad;
+
+#[cfg(feature = "onset-detection")]
+pub mod onset;
+
 #[cfg(feature = "plotting")]
 pub mod plotting;
-pub mod processing;
-#[cfg(feature = "serialization")]
-pub mod serialization;
-pub mod statistics;
-pub mod traits;
-#[cfg(feature = "spectral-analysis")]
-pub mod transforms;
-pub mod types;
-#[cfg(feature = "statistics")]
-pub mod vad;
+
+#[cfg(feature = "envelopes")]
+pub mod envelopes;
 
 // Re-export main traits for convenience
 #[cfg(feature = "statistics")]
 pub use traits::AudioStatistics;
 
-#[cfg(feature = "statistics")]
+#[cfg(feature = "vad")]
 pub use traits::AudioVoiceActivityDetection;
 
 #[cfg(feature = "processing")]
 pub use traits::AudioProcessing;
 
-#[cfg(feature = "editing")]
-pub use traits::AudioEditing;
-
 #[cfg(feature = "channels")]
 pub use traits::AudioChannelOps;
 
-#[cfg(feature = "core-ops")]
-pub use traits::{AudioDynamicRange, AudioIirFiltering, AudioParametricEq};
+#[cfg(feature = "editing")]
+pub use traits::AudioEditing;
 
-#[cfg(feature = "spectral-analysis")]
+#[cfg(feature = "iir-filtering")]
+pub use traits::AudioIirFiltering;
+
+#[cfg(feature = "parametric-eq")]
+pub use traits::AudioParametricEq;
+
+#[cfg(feature = "peak-picking")]
+pub use crate::operations::peak_picking::*;
+
+#[cfg(feature = "pitch-analysis")]
+pub use traits::AudioPitchAnalysis;
+
+#[cfg(feature = "dynamic-range")]
+pub use traits::AudioDynamicRange;
+
+#[cfg(feature = "transforms")]
 pub use traits::AudioTransforms;
 
-#[cfg(feature = "plotting")]
-pub use traits::AudioPlottingUtils;
-
-#[cfg(feature = "serialization")]
-pub use traits::AudioSamplesSerialise;
-
-#[cfg(feature = "hpss")]
+#[cfg(feature = "decomposition")]
 pub use traits::AudioDecomposition;
 
-// Re-export builder types
-pub use processing::ProcessingBuilder;
+#[cfg(feature = "beat-tracking")]
+pub use traits::AudioBeatTracking;
 
-// Re-export plotting types and functions (composable API)
+#[cfg(feature = "beat-tracking")]
+pub use beat::*;
+
+#[cfg(feature = "onset-detection")]
+pub use onset::*;
+
+#[cfg(feature = "decomposition")]
+pub use hpss::*;
+
 #[cfg(feature = "plotting")]
-pub use plotting::{
-    AudioPlotBuilders,
-    BeatMarkers,
-    BeatPlotConfig,
-    // Styling and configuration
-    ColorPalette,
-    LayoutConfig,
-    LineStyle,
-    LineStyleType,
-    MarkerShape,
-    MarkerStyle,
-    OnsetConfig,
-    OnsetMarkers,
-    PitchContour,
-    PitchDetectionMethod,
+pub use traits::AudioPlotting;
 
-    PlotBounds,
-    // Core plotting API
-    PlotComposer,
-    PlotElement,
-    PlotHandle,
-    PlotMetadata,
-    PlotResult,
+#[cfg(feature = "plotting")]
+pub use plotting::waveform::{WaveformPlot, WaveformPlotParams, create_waveform_plot};
 
-    PlotTheme,
-    // High-level Plotting trait and config types
-    Plotting,
-    PowerSpectrumPlot,
-    SpectrogramConfig,
-    SpectrogramPlot,
-    SpectrogramPlotConfig,
-    SpectrumPlotConfig,
-    // Plot elements
-    WaveformPlot,
-    WaveformPlotConfig,
-    channel_label,
+#[cfg(feature = "envelopes")]
+pub use traits::AudioEnvelopes;
+
+#[cfg(feature = "plotting")]
+pub use plotting::spectrograms::{
+    SpectrogramPlot, SpectrogramPlotParams, SpectrogramType, create_spectrogram_plot,
 };
 
-// Re-export supporting types
-pub use types::{
-    ChannelConversionMethod, CqtConfig, MonoConversionMethod, NormalizationMethod,
-    PeakPickingConfig, ResamplingQuality, SpectralFluxConfig, SpectralFluxMethod,
-    StereoConversionMethod,
+#[cfg(feature = "plotting")]
+pub use plotting::composite::{CompositeLayout, CompositePlot, PlotComponent};
+
+#[cfg(feature = "plotting")]
+pub use plotting::spectrum::{
+    MagnitudeSpectrumParams, MagnitudeSpectrumPlot, create_magnitude_spectrum_plot,
 };
 
-#[cfg(feature = "hpss")]
-pub use types::HpssConfig;
+#[cfg(feature = "plotting")]
+pub use plotting::{ChannelManagementStrategy, Layout, PlotParams, PlotUtils};
 
-#[cfg(feature = "serialization")]
-pub use types::{Endianness, SerializationConfig, SerializationFormat, TextDelimiter};
+#[cfg(feature = "plotting")]
+pub use plotting::dsp_overlays;
 
-#[cfg(feature = "beat-detection")]
-pub use beats::*;
-
-pub use channels::deinterleave;
+#[cfg(feature = "resampling")]
+pub use types::ResamplingQuality;
