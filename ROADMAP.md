@@ -44,3 +44,7 @@ The main criteria for the 1.0 release will be:
 ## ML Integration
 
 - `audio_samples_python` implements the numpy array protocol and the dlpack protocol. This means that we can easily convert audio data to and from numpy arrays, and we can also convert audio data to and from dlpack tensors. The Rust version `audio_samples` does not yet implement the dlpack protocol, but this is something that could be added in the future to allow for even easier integration with machine learning frameworks that support dlpack such as `candle`, `ort`, `tch`, etc.
+
+## General Extensions
+
+- Need to integrate newer features from the ``Spectrograms`` crate, such as the binaural spectrograms.

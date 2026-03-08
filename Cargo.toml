@@ -36,7 +36,7 @@ lazy_static = "1.5"
 num-format = { version = "0.4.4", optional = true }
 rand = { version = "0.10.0", optional = true }
 wide = "1.1.1"
-spectrograms = { path = "/home/jmg/code/rust/spectrograms", optional = true }
+spectrograms = { version = "1.1.0", optional = true }
 
 serde_json = { version = "1.0.149", optional = true }
 
@@ -45,7 +45,7 @@ plotly_static = { version = "0.1.0", features = [
     "chromedriver",
     "webdriver_download",
 ], optional = true }
-html_view = { path = "/home/jmg/code/rust/HTMLView/html_view", optional = true }
+html_view = { version = "0.2.2", optional = true }
 base64 = { version = "0.22", optional = true }
 
 rubato = { version = "1.0.1", optional = true }
