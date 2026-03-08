@@ -97,6 +97,7 @@ use ndarray::{
 };
 use non_empty_iter::{IntoNonEmptyIterator, NonEmptyIterator};
 use non_empty_slice::{NonEmptyByteVec, NonEmptyBytes, NonEmptySlice, NonEmptyVec};
+#[cfg(feature = "resampling")]
 use rubato::audioadapter::Adapter;
 use std::any::TypeId;
 use std::num::NonZeroU8;
@@ -5956,6 +5957,7 @@ where
     }
 }
 
+#[cfg(feature = "resampling")]
 impl<'a, T> Adapter<'a, T> for AudioSamples<'a, T>
 where
     T: StandardSample,
