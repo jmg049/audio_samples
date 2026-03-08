@@ -1,19 +1,13 @@
 //! Dynamic range processing for audio signals.
 //!
-//! ## What
-//!
 //! This module implements dynamic range control processors: compressors, limiters,
 //! noise gates, and expanders. Supporting utilities include an [`EnvelopeFollower`]
 //! for level detection and a [`LookaheadBuffer`] for anticipatory gain reduction.
-//!
-//! ## Why
 //!
 //! Raw audio signals often have wide dynamic ranges that are impractical for
 //! playback, broadcast, or mixing. Dynamic range processors reduce or expand these
 //! differences to achieve consistent loudness, protect against clipping, or enhance
 //! perceived punch and clarity.
-//!
-//! ## How
 //!
 //! All processors are accessed through the [`AudioDynamicRange`] trait. Behaviour is
 //! controlled by [`CompressorConfig`] and [`LimiterConfig`], which provide preset
@@ -603,7 +597,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if the configuration fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails validation
     /// (e.g. threshold above 0 dBFS, ratio below 1.0, or negative time constants).
     ///
     /// # Example
@@ -626,7 +620,7 @@ where
         // Calculate lookahead buffer size
         let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
         let lookahead_samples = lookahead_samples.max(1);
-        // Safe unwrap since we ensured lookahead_samples is at least 1
+        // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
         let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
         match &mut self.data {
             AudioData::Mono(samples) => {
@@ -792,7 +786,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if the configuration fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails validation
     /// (e.g. ceiling above 0 dBFS or invalid time constants).
     ///
     /// # Example
@@ -815,7 +809,7 @@ where
         // Calculate lookahead buffer size
         let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
         let lookahead_samples = lookahead_samples.max(1);
-        // Safe unwrap since we ensured lookahead_samples is at least 1
+        // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
         let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
         match &mut self.data {
             AudioData::Mono(samples) => {
@@ -978,10 +972,10 @@ where
     ///
     /// # Errors
     ///
-    /// - [`AudioSampleError::Parameter`] if sidechain is not enabled in `config`.
-    /// - [`AudioSampleError::Parameter`] if the main and sidechain signals have
+    /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
     ///   different lengths.
-    /// - [`AudioSampleError::Parameter`] if either signal is multi-channel (not yet
+    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
     ///   supported).
     ///
     /// # Example
@@ -1042,7 +1036,8 @@ where
 
                 let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
                 let lookahead_samples = lookahead_samples.max(1);
-                // Safe unwrap since we ensured lookahead_samples is at least 1
+
+                // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
                 let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
                 let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
                 let mut gain_reductions = Vec::with_capacity(main_samples.len().get());
@@ -1130,10 +1125,10 @@ where
     ///
     /// # Errors
     ///
-    /// - [`AudioSampleError::Parameter`] if sidechain is not enabled in `config`.
-    /// - [`AudioSampleError::Parameter`] if the main and sidechain signals have
+    /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
     ///   different lengths.
-    /// - [`AudioSampleError::Parameter`] if either signal is multi-channel (not yet
+    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
     ///   supported).
     ///
     /// # Example

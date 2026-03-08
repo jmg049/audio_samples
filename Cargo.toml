@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "0.11.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -48,17 +48,18 @@ plotly_static = { version = "0.1.0", features = [
 html_view = { path = "/home/jmg/code/rust/HTMLView/html_view", optional = true }
 base64 = { version = "0.22", optional = true }
 
-rubato = { version = "0.16.1", optional = true }
-
+rubato = { version = "1.0.1", optional = true }
 
 regex = ">=1.12"
 rustfft = ">=6.2"
 non-empty-slice = ">=0.5"
 non-empty-iter = ">=0.2"
+audioadapter = "2.0.0"
+audioadapter-buffers = "2.0.0"
 
 [features]
 # Minimal core (no heavy dependencies)
-default = ["bare-bones", "envelopes"]
+default = ["bare-bones"]
 
 # Core operation categories
 statistics = [] # Basic stats: peak, rms, mean
@@ -102,6 +103,27 @@ full = [
     "random-generation",
 ]
 
+full_no_plotting = [
+    "statistics",
+    "editing",
+    "transforms",
+    "channels",
+    "resampling",
+    "fixed-size-audio",
+    "beat-tracking",
+    "onset-detection",
+    "decomposition",
+    "dynamic-range",
+    "parametric-eq",
+    "peak-picking",
+    "pitch-analysis",
+    "processing",
+    "vad",
+    "iir-filtering",
+    "envelopes",
+    "random-generation",
+]
+
 bare-bones = [] # No features, just the core API and basic types
 
 # Plotting sub-features (require plotting)
@@ -113,7 +135,7 @@ html_view = ["dep:html_view"]
 
 [dev-dependencies]
 approx_eq = "0.1.8"
-clap = { version = "4.5.59", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 dtmf_tones = "1.0.1"
 rand = "0.10.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }

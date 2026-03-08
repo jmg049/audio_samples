@@ -27,7 +27,7 @@ Traits also allow for easy feature-gating.
 
 ### 4. Metadata Integration
 
-Audio samples are always paired with essential metadata (sample rate, channel layout) to prevent common audio processing errors and enable automatic format conversions.
+Audio samples are always paired with essential metadata (sample rate) to prevent common audio processing errors and enable automatic format conversions.
 
 ### 5. Feature-Gated Modularity
 
@@ -124,7 +124,6 @@ The main data container that combines audio samples with essential metadata:
 pub struct AudioSamples<'a, T: StandardSample> {
     pub data: AudioData<'a, T>,
     pub sample_rate: u32,
-    pub layout: ChannelLayout,
 }
 ```
 
@@ -132,7 +131,7 @@ pub struct AudioSamples<'a, T: StandardSample> {
 
 - Generic over any `StandardSample` type
 - Lifetime parameter `'a` enables zero-copy views
-- Always includes sample rate and channel layout
+- Always includes sample rate
 - Provides uniform interface for mono and multi-channel audio
 
 **Memory Layout:**
@@ -144,7 +143,6 @@ pub struct AudioSamples<'a, T: StandardSample> {
 **API Contracts:**
 
 - Sample rate must be positive
-- Channel layout must match data dimensions
 - Lifetime safety ensured through Rust's borrow checker.
 But at the user level of the API, unless they are really concerned with lifetime management and reuse in their program, lifetimes should not be a concern.
 - Metadata consistency maintained across operations

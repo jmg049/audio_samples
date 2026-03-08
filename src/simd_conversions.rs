@@ -380,21 +380,19 @@ pub fn deinterleave_stereo<T: AudioSample>(
 
     #[cfg(feature = "simd")]
     {
-        deinterleave_stereo_simd(interleaved, output)
+        Ok(deinterleave_stereo_simd(interleaved, output))
     }
 
     #[cfg(not(feature = "simd"))]
     {
-        deinterleave_stereo_scalar(interleaved, output)
+        deinterleave_stereo_scalar(interleaved, output);
+        Ok(())
     }
 }
 
 /// Scalar implementation of stereo deinterleave with loop unrolling.
 #[inline]
-fn deinterleave_stereo_scalar<T: AudioSample>(
-    interleaved: &[T],
-    output: &mut [T],
-) -> AudioSampleResult<()> {
+fn deinterleave_stereo_scalar<T: AudioSample>(interleaved: &[T], output: &mut [T]) {
     let frames = interleaved.len() / 2;
     let (left_out, right_out) = output.split_at_mut(frames);
 
@@ -428,18 +426,13 @@ fn deinterleave_stereo_scalar<T: AudioSample>(
         left_out[frame_idx] = interleaved[interleaved_idx];
         right_out[frame_idx] = interleaved[interleaved_idx + 1];
     }
-
-    Ok(())
 }
 
 /// SIMD-accelerated stereo deinterleave for f32 samples.
 ///
 /// Uses f32x8 to process 4 stereo frames (8 samples) at a time.
 #[cfg(feature = "simd")]
-fn deinterleave_stereo_simd<T: AudioSample>(
-    interleaved: &[T],
-    output: &mut [T],
-) -> AudioSampleResult<()> {
+fn deinterleave_stereo_simd<T: AudioSample>(interleaved: &[T], output: &mut [T]) {
     use std::any::TypeId;
 
     // Dispatch to type-specific SIMD implementations
@@ -460,7 +453,7 @@ fn deinterleave_stereo_simd<T: AudioSample>(
 
 /// SIMD deinterleave specifically for f32 stereo data.
 #[cfg(feature = "simd")]
-fn deinterleave_stereo_f32_simd(interleaved: &[f32], output: &mut [f32]) -> AudioSampleResult<()> {
+fn deinterleave_stereo_f32_simd(interleaved: &[f32], output: &mut [f32]) {
     let frames = interleaved.len() / 2;
     let (left_out, right_out) = output.split_at_mut(frames);
 
@@ -506,8 +499,6 @@ fn deinterleave_stereo_f32_simd(interleaved: &[f32], output: &mut [f32]) -> Audi
         left_out[i] = interleaved[interleaved_idx];
         right_out[i] = interleaved[interleaved_idx + 1];
     }
-
-    Ok(())
 }
 
 /// Deinterleave multi-channel audio data.
@@ -554,7 +545,8 @@ pub fn deinterleave_multi<T: AudioSample>(
     }
 
     // Generic multi-channel deinterleave (>2 channels)
-    deinterleave_multi_scalar(interleaved, output, num_channels)
+    deinterleave_multi_scalar(interleaved, output, num_channels);
+    Ok(())
 }
 
 /// Scalar implementation of multi-channel deinterleave.
@@ -565,7 +557,7 @@ fn deinterleave_multi_scalar<T: AudioSample>(
     interleaved: &NonEmptySlice<T>,
     output: &mut NonEmptySlice<T>,
     num_channels: NonZeroU32,
-) -> AudioSampleResult<()> {
+) {
     let frames = interleaved.len().get() / num_channels.get() as usize;
     // Process each channel sequentially for better cache locality on writes
     for ch in 0..num_channels.get() as usize {
@@ -576,8 +568,6 @@ fn deinterleave_multi_scalar<T: AudioSample>(
             out_slice[frame] = interleaved[frame * num_channels.get() as usize + ch];
         }
     }
-
-    Ok(())
 }
 
 // =============================================================================
@@ -615,21 +605,19 @@ pub fn interleave_stereo<T: AudioSample>(planar: &[T], output: &mut [T]) -> Audi
 
     #[cfg(feature = "simd")]
     {
-        interleave_stereo_simd(planar, output)
+        Ok(interleave_stereo_simd(planar, output))
     }
 
     #[cfg(not(feature = "simd"))]
     {
-        interleave_stereo_scalar(planar, output)
+        interleave_stereo_scalar(planar, output);
+        Ok(())
     }
 }
 
 /// Scalar implementation of stereo interleave with loop unrolling.
 #[inline]
-fn interleave_stereo_scalar<T: AudioSample>(
-    planar: &[T],
-    output: &mut [T],
-) -> AudioSampleResult<()> {
+fn interleave_stereo_scalar<T: AudioSample>(planar: &[T], output: &mut [T]) {
     let frames = planar.len() / 2;
     let (left_in, right_in) = planar.split_at(frames);
 
@@ -663,13 +651,11 @@ fn interleave_stereo_scalar<T: AudioSample>(
         output[interleaved_idx] = left_in[frame_idx];
         output[interleaved_idx + 1] = right_in[frame_idx];
     }
-
-    Ok(())
 }
 
 /// SIMD-accelerated stereo interleave.
 #[cfg(feature = "simd")]
-fn interleave_stereo_simd<T: AudioSample>(planar: &[T], output: &mut [T]) -> AudioSampleResult<()> {
+fn interleave_stereo_simd<T: AudioSample>(planar: &[T], output: &mut [T]) {
     use std::any::TypeId;
 
     // Dispatch to type-specific SIMD implementations
@@ -689,7 +675,7 @@ fn interleave_stereo_simd<T: AudioSample>(planar: &[T], output: &mut [T]) -> Aud
 
 /// SIMD interleave specifically for f32 stereo data.
 #[cfg(feature = "simd")]
-fn interleave_stereo_f32_simd(planar: &[f32], output: &mut [f32]) -> AudioSampleResult<()> {
+fn interleave_stereo_f32_simd(planar: &[f32], output: &mut [f32]) {
     let frames = planar.len() / 2;
     let (left_in, right_in) = planar.split_at(frames);
 
@@ -733,8 +719,6 @@ fn interleave_stereo_f32_simd(planar: &[f32], output: &mut [f32]) -> AudioSample
         output[interleaved_idx] = left_in[i];
         output[interleaved_idx + 1] = right_in[i];
     }
-
-    Ok(())
 }
 
 /// Interleave multi-channel audio data.
@@ -781,7 +765,8 @@ pub fn interleave_multi<T: AudioSample>(
     }
 
     // Generic multi-channel interleave (>2 channels)
-    interleave_multi_scalar(planar, output, num_channels)
+    interleave_multi_scalar(planar, output, num_channels);
+    Ok(())
 }
 
 /// Scalar implementation of multi-channel interleave.
@@ -789,7 +774,7 @@ fn interleave_multi_scalar<T: AudioSample>(
     planar: &NonEmptySlice<T>,
     output: &mut NonEmptySlice<T>,
     num_channels: NonZeroU32,
-) -> AudioSampleResult<()> {
+) {
     let frames = planar.len().get() / num_channels.get() as usize;
     // Process frame by frame for correct interleaving
     for frame in 0..frames {
@@ -799,8 +784,6 @@ fn interleave_multi_scalar<T: AudioSample>(
             output[out_base + ch] = planar[in_idx];
         }
     }
-
-    Ok(())
 }
 
 // CONVENIENCE FUNCTIONS FOR Vec
@@ -814,7 +797,7 @@ fn interleave_multi_scalar<T: AudioSample>(
 /// Returns an error if `interleaved.len()` is not even.
 #[inline]
 pub fn deinterleave_stereo_vec<T: AudioSample>(
-    interleaved: NonEmptyVec<T>,
+    interleaved: &NonEmptyVec<T>,
 ) -> AudioSampleResult<NonEmptyVec<T>> {
     if !interleaved.len().get().is_multiple_of(2) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -824,7 +807,7 @@ pub fn deinterleave_stereo_vec<T: AudioSample>(
     }
 
     let mut output = non_empty_vec![T::default(); interleaved.len()];
-    deinterleave_stereo(&interleaved, &mut output)?;
+    deinterleave_stereo(interleaved, &mut output)?;
     Ok(output)
 }
 
@@ -850,7 +833,7 @@ pub fn deinterleave_multi_vec<T: AudioSample>(
     }
 
     let mut output = non_empty_vec![T::default(); interleaved.len()];
-    deinterleave_multi(&interleaved, &mut output, num_channels)?;
+    deinterleave_multi(interleaved, &mut output, num_channels)?;
     Ok(output)
 }
 
@@ -860,7 +843,7 @@ pub fn deinterleave_multi_vec<T: AudioSample>(
 /// Returns an error if `planar.len()` is not even.
 #[inline]
 pub fn interleave_stereo_vec<T: AudioSample>(
-    planar: NonEmptyVec<T>,
+    planar: &NonEmptyVec<T>,
 ) -> AudioSampleResult<NonEmptyVec<T>> {
     if !planar.len().get().is_multiple_of(2) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -870,7 +853,7 @@ pub fn interleave_stereo_vec<T: AudioSample>(
     }
 
     let mut output = non_empty_vec![T::default(); planar.len()];
-    interleave_stereo(&planar, &mut output)?;
+    interleave_stereo(planar, &mut output)?;
     Ok(output)
 }
 
@@ -881,7 +864,7 @@ pub fn interleave_stereo_vec<T: AudioSample>(
 /// `num_channels`.
 #[inline]
 pub fn interleave_multi_vec<T: AudioSample>(
-    planar: NonEmptyVec<T>,
+    planar: &NonEmptyVec<T>,
     num_channels: NonZeroU32,
 ) -> AudioSampleResult<NonEmptyVec<T>> {
     if !planar
@@ -896,7 +879,7 @@ pub fn interleave_multi_vec<T: AudioSample>(
     }
 
     let mut output = non_empty_vec![T::default(); planar.len()];
-    interleave_multi(&planar, &mut output, num_channels)?;
+    interleave_multi(planar, &mut output, num_channels)?;
     Ok(output)
 }
 
@@ -1171,7 +1154,7 @@ mod tests {
     #[test]
     fn test_deinterleave_stereo_vec_fn() {
         let interleaved = non_empty_vec![1.0f32, 2.0, 3.0, 4.0];
-        let planar = deinterleave_stereo_vec(interleaved).unwrap();
+        let planar = deinterleave_stereo_vec(&interleaved).unwrap();
 
         assert_eq!(planar, non_empty_vec![1.0, 3.0, 2.0, 4.0]);
     }
@@ -1179,7 +1162,7 @@ mod tests {
     #[test]
     fn test_interleave_stereo_vec_fn() {
         let planar = non_empty_vec![1.0f32, 3.0, 2.0, 4.0];
-        let interleaved = interleave_stereo_vec(planar).unwrap();
+        let interleaved = interleave_stereo_vec(&planar).unwrap();
 
         assert_eq!(interleaved, non_empty_vec![1.0, 2.0, 3.0, 4.0]);
     }

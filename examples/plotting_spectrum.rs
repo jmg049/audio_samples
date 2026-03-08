@@ -8,8 +8,8 @@ fn main() {
 fn main() -> audio_samples::AudioSampleResult<()> {
     use audio_samples::operations::AudioPlotting;
     use audio_samples::operations::plotting::{PlotUtils, spectrum::MagnitudeSpectrumParams};
-    use audio_samples::utils::MonoSampleBuilder;
     use audio_samples::sample_rate;
+    use audio_samples::utils::MonoSampleBuilder;
     use std::time::Duration;
 
     println!("Testing MagnitudeSpectrumPlot...");

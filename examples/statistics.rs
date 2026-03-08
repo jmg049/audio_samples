@@ -20,13 +20,12 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         core::num::NonZeroU32::new(44100).unwrap(),
     );
 
-    let (num_channels, samples_per_channel, duration_seconds, sample_rate, layout) = audio.info();
+    let (num_channels, samples_per_channel, duration_seconds, sample_rate) = audio.info();
     println!("Compound Tone wave info:");
     println!("|-Number of channels: {}", num_channels);
     println!("|-Samples per channel: {}", samples_per_channel);
     println!("|-Duration (seconds): {:.2}", duration_seconds);
     println!("|-Sample rate: {} Hz", sample_rate);
-    println!("|-Layout: {:?}", layout);
 
     println!("-----\n");
 
@@ -60,14 +59,12 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         Duration::from_secs(2),
         core::num::NonZeroU32::new(44100).unwrap(),
     );
-    let (num_channels, samples_per_channel, duration_seconds, sample_rate, layout) =
-        other_audio.info();
+    let (num_channels, samples_per_channel, duration_seconds, sample_rate) = other_audio.info();
     println!("\nCompound Tone wave info:");
     println!("|-Number of channels: {}", num_channels);
     println!("|-Samples per channel: {}", samples_per_channel);
     println!("|-Duration (seconds): {:.2}", duration_seconds);
     println!("|-Sample rate: {} Hz", sample_rate);
-    println!("|-Layout: {:?}", layout);
 
     println!(
         "\nCross-correlation with 880 Hz tone: {:?}",

@@ -36,15 +36,12 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     let audio = AudioSamples::concatenate_owned(non_empty)?;
 
     // Configure VAD.
-    let cfg = VadConfig {
-        method: VadMethod::Combined,
-        frame_size: nzu!(1024),
-        hop_size: nzu!(512),
-        pad_end: false,
-        channel_policy: VadChannelPolicy::AverageToMono,
-        energy_threshold_db: -40.0,
-        ..Default::default()
-    };
+    let cfg = VadConfig::default()
+        .with_method(VadMethod::Combined)
+        .with_frame_size(nzu!(1024))?
+        .with_hop_size(nzu!(512))?
+        .with_channel_policy(VadChannelPolicy::AverageToMono)
+        .with_energy_threshold_db(-40.0);
 
     // Trait API.
     let mask = audio.voice_activity_mask(&cfg)?;

@@ -25,24 +25,24 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
         // Test waveform plot with overlays
         println!("\nCreating waveform plot with overlays...");
-        let waveform_params = WaveformPlotParams {
-            plot_params: PlotParams {
-                title: Some("Waveform with Event Markers".to_string()),
-                x_label: Some("Time (s)".to_string()),
-                y_label: Some("Amplitude".to_string()),
-                show_legend: true,
-                legend_title: Some("Events".to_string()),
-                font_sizes: None,
-                super_title: None,
-                grid: true,
-            },
-            ch_mgmt_strategy: Some(ChannelManagementStrategy::Separate(Layout::Vertical)),
-            color: None,
-            line_style: None,
-            line_width: None,
-            markers: false,
-            save_path: None,
-        };
+        let waveform_params = WaveformPlotParams::new(
+            &PlotParams::new(
+                Some("Waveform with Event Markers".to_string()),
+                Some("Time (s)".to_string()),
+                Some("Amplitude".to_string()),
+                None,
+                true,
+                Some("Events".to_string()),
+                None,
+                true,
+            ),
+            Some(ChannelManagementStrategy::Separate(Layout::Vertical)),
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
 
         let waveform_plot = audio
             .plot_waveform(&waveform_params)

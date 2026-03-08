@@ -1,22 +1,15 @@
 //! Amplitude envelope extraction for [`AudioSamples`].
 //!
-//! ## What
-//!
 //! This module implements the [`AudioEnvelopes`] trait, which provides
 //! five methods for tracking how the amplitude of an audio signal
 //! varies over time: instantaneous rectification, windowed RMS,
 //! moving average, attack/decay following, and the analytic signal
 //! envelope.
 //!
-//! ## Why
-//!
 //! Envelope detection is fundamental to dynamics analysis, onset
 //! detection, amplitude modulation, and feature extraction.
 //! Gathering these methods behind a single trait gives callers a
-//! uniform interface regardless of the underlying sample type or
-//! channel layout.
-//!
-//! ## How
+//! uniform interface regardless of the underlying sample type
 //!
 //! Bring [`AudioEnvelopes`] into scope and call methods on any
 //! [`AudioSamples`] value.  Each method returns an [`NdResult`] that
@@ -33,7 +26,7 @@
 //!     array![1.0f32, -0.5, 0.25],
 //!     sample_rate!(44100),
 //! ).unwrap();
-//! let envelope = audio.amplitude_envelope().unwrap();
+//! let envelope = audio.amplitude_envelope();
 //! if let NdResult::Mono(env) = envelope {
 //!     assert_eq!(env[0], 1.0f32);
 //!     assert_eq!(env[1], 0.5f32); // |-0.5| = 0.5
@@ -50,7 +43,7 @@ use crate::operations::dynamic_range::EnvelopeFollower;
 use crate::operations::traits::AudioEnvelopes;
 use crate::operations::types::DynamicRangeMethod;
 use crate::repr::AudioData;
-use crate::{AudioSampleResult, AudioSamples, NdResult, StandardSample};
+use crate::{AudioSamples, NdResult, StandardSample};
 
 impl<T> AudioEnvelopes for AudioSamples<'_, T>
 where
@@ -59,7 +52,7 @@ where
     /// Compute a per-sample rectified amplitude envelope.
     ///
     /// Each output sample is the absolute value of the corresponding
-    /// input sample.  The channel layout of the input is preserved.
+    /// input sample.
     ///
     /// # Returns
     /// An [`NdResult`] matching the input channel layout:
@@ -76,14 +69,15 @@ where
     ///     array![1.0f32, -0.5, 0.25],
     ///     sample_rate!(44100),
     /// ).unwrap();
-    /// let envelope = audio.amplitude_envelope().unwrap();
+    /// let envelope = audio.amplitude_envelope();
     /// if let NdResult::Mono(env) = envelope {
     ///     assert_eq!(env[0], 1.0f32);
     ///     assert_eq!(env[1], 0.5f32); // |-0.5| = 0.5
     /// }
     /// ```
-    fn amplitude_envelope(&self) -> AudioSampleResult<NdResult<Self::Sample>> {
-        let result = match &self.data {
+    #[inline]
+    fn amplitude_envelope(&self) -> NdResult<Self::Sample> {
+        match &self.data {
             AudioData::Mono(mono) => {
                 let array = mono.as_view().mapv(|sample| {
                     let value: f64 = sample.cast_into();
@@ -98,9 +92,7 @@ where
                 });
                 NdResult::MultiChannel(array)
             }
-        };
-
-        Ok(result)
+        }
     }
 
     /// Compute the root-mean-square (RMS) envelope using a sliding window.
@@ -134,23 +126,24 @@ where
     /// ).unwrap();
     /// let w = NonZeroUsize::new(2).unwrap();
     /// let h = NonZeroUsize::new(2).unwrap();
-    /// let envelope = audio.rms_envelope(w, h).unwrap();
+    /// let envelope = audio.rms_envelope(w, h);
     /// if let NdResult::Mono(env) = envelope {
     ///     assert_eq!(env.len(), 2);
     ///     assert!((env[0] - 1.0).abs() < 1e-6);
     /// }
     /// ```
+    #[inline]
     fn rms_envelope(
         &self,
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
-    ) -> AudioSampleResult<NdResult<Self::Sample>> {
+    ) -> NdResult<Self::Sample> {
         let num_channels = self.num_channels().get() as usize;
 
         let window_len = window_size.get();
         let hop = hop_size.get();
 
-        let result = match &self.data {
+        match &self.data {
             AudioData::Mono(mono) => {
                 let rms = compute_windowed_rms::<T>(mono.as_view(), window_len, hop);
                 NdResult::Mono(Array1::from_vec(rms))
@@ -171,9 +164,7 @@ where
 
                 NdResult::MultiChannel(array)
             }
-        };
-
-        Ok(result)
+        }
     }
 
     /// Track amplitude over time with an envelope follower, separating
@@ -211,17 +202,17 @@ where
     ///     1.0, 10.0, 44100.0, DynamicRangeMethod::Peak,
     /// );
     /// let (attack, _decay) = audio
-    ///     .attack_decay_envelope(&follower, DynamicRangeMethod::Peak)
-    ///     .unwrap();
+    ///     .attack_decay_envelope(&follower, DynamicRangeMethod::Peak);
     /// if let NdResult::Mono(env) = attack {
     ///     assert!(env.iter().all(|&v| v.abs() < 1e-6));
     /// }
     /// ```
+    #[inline]
     fn attack_decay_envelope(
         &self,
         follower: &EnvelopeFollower,
         method: DynamicRangeMethod,
-    ) -> AudioSampleResult<(NdResult<Self::Sample>, NdResult<Self::Sample>)> {
+    ) -> (NdResult<Self::Sample>, NdResult<Self::Sample>) {
         let num_channels = self.num_channels().get() as usize;
         let mut attack_per_channel: Vec<Vec<T>> = vec![Vec::new(); num_channels];
         let mut decay_per_channel: Vec<Vec<T>> = vec![Vec::new(); num_channels];
@@ -264,7 +255,7 @@ where
             NdResult::MultiChannel(array)
         };
 
-        Ok((attack_result, decay_result))
+        (attack_result, decay_result)
     }
 
     /// Compute the instantaneous amplitude envelope via the analytic signal.
@@ -290,21 +281,22 @@ where
     ///     array![1.0f32, 0.0, -1.0, 0.0],
     ///     sample_rate!(44100),
     /// ).unwrap();
-    /// let envelope = audio.analytic_envelope().unwrap();
+    /// let envelope = audio.analytic_envelope();
     /// assert!(matches!(envelope, NdResult::Mono(_)));
     /// ```
-    fn analytic_envelope(&self) -> AudioSampleResult<NdResult<Self::Sample>> {
+    #[inline]
+    fn analytic_envelope(&self) -> NdResult<Self::Sample> {
         let num_channels = self.num_channels().get() as usize;
 
-        let result = match &self.data {
+        match &self.data {
             AudioData::Mono(mono) => {
-                let envelope = compute_analytic_envelope_channel(mono.as_view())?;
+                let envelope = compute_analytic_envelope_channel(mono.as_view());
                 NdResult::Mono(Array1::from_vec(envelope))
             }
             AudioData::Multi(multi) => {
                 let mut envelopes = Vec::with_capacity(num_channels);
-                for channel in multi.as_view().rows().into_iter() {
-                    envelopes.push(compute_analytic_envelope_channel(channel)?);
+                for channel in multi.as_view().rows() {
+                    envelopes.push(compute_analytic_envelope_channel(channel));
                 }
 
                 let sample_count = envelopes.first().map(Vec::len).unwrap_or_default();
@@ -313,9 +305,7 @@ where
                 });
                 NdResult::MultiChannel(array)
             }
-        };
-
-        Ok(result)
+        }
     }
 
     /// Compute a moving-average envelope over the rectified signal.
@@ -348,21 +338,22 @@ where
     /// ).unwrap();
     /// let w = NonZeroUsize::new(2).unwrap();
     /// let h = NonZeroUsize::new(2).unwrap();
-    /// let envelope = audio.moving_average_envelope(w, h).unwrap();
+    /// let envelope = audio.moving_average_envelope(w, h);
     /// if let NdResult::Mono(env) = envelope {
     ///     assert_eq!(env.len(), 2);
     ///     assert!((env[0] - 1.0).abs() < 1e-6);
     ///     assert!((env[1] - 5.0).abs() < 1e-6);
     /// }
     /// ```
+    #[inline]
     fn moving_average_envelope(
         &self,
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
-    ) -> AudioSampleResult<NdResult<Self::Sample>> {
+    ) -> NdResult<Self::Sample> {
         let num_channels = self.num_channels().get() as usize;
 
-        let result = match &self.data {
+        match &self.data {
             AudioData::Mono(mono) => {
                 let envelope = compute_moving_average_channel(
                     mono.as_view(),
@@ -373,7 +364,7 @@ where
             }
             AudioData::Multi(multi) => {
                 let mut envelopes = Vec::with_capacity(num_channels);
-                for channel in multi.as_view().rows().into_iter() {
+                for channel in multi.as_view().rows() {
                     envelopes.push(compute_moving_average_channel(
                         channel,
                         window_size.get(),
@@ -387,9 +378,7 @@ where
                 });
                 NdResult::MultiChannel(array)
             }
-        };
-
-        Ok(result)
+        }
     }
 }
 
@@ -411,7 +400,7 @@ where
     let mut attack = Vec::with_capacity(samples.len());
     let mut decay = Vec::with_capacity(samples.len());
 
-    for sample in samples.iter() {
+    for sample in samples {
         let input: f64 = (*sample).cast_into();
         let envelope = follower_instance.process(input, method);
 
@@ -483,27 +472,26 @@ where
     averages.into_iter().map(T::cast_from).collect()
 }
 
-fn compute_analytic_envelope_channel<T>(samples: ArrayView1<'_, T>) -> AudioSampleResult<Vec<T>>
+fn compute_analytic_envelope_channel<T>(samples: ArrayView1<'_, T>) -> Vec<T>
 where
     T: StandardSample,
 {
     let values: Vec<f64> = samples.iter().map(|sample| (*sample).cast_into()).collect();
 
     if values.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let hilbert = hilbert_transform(&values);
-    let envelope = values
+
+    values
         .iter()
         .zip(hilbert.iter())
         .map(|(&real, &imag)| {
-            let magnitude = (real * real + imag * imag).sqrt();
+            let magnitude = real.hypot(imag);
             T::cast_from(magnitude)
         })
-        .collect();
-
-    Ok(envelope)
+        .collect()
 }
 
 fn apply_window_function<F>(
@@ -520,7 +508,7 @@ where
     }
 
     let len = values.len();
-    let mut results = Vec::with_capacity((len + hop_size - 1) / hop_size);
+    let mut results = Vec::with_capacity(len.div_ceil(hop_size));
     let mut start = 0usize;
 
     while start < len {
@@ -558,24 +546,23 @@ fn hilbert_transform(values: &[f64]) -> Vec<f64> {
         .collect();
 
     fft.process(&mut spectrum);
+    spectrum[0] *= 1.0;
 
-    if len % 2 == 0 {
-        spectrum[0] *= 1.0;
+    if len.is_multiple_of(2) {
         spectrum[len / 2] *= 1.0;
-        for bin in 1..(len / 2) {
-            spectrum[bin] *= 2.0;
+        for bin in spectrum.iter_mut().take(len / 2).skip(1) {
+            *bin *= 2.0;
         }
-        for bin in (len / 2 + 1)..len {
-            spectrum[bin] = Complex::new(0.0, 0.0);
+        for bin in spectrum.iter_mut().take(len).skip(len / 2 + 1) {
+            *bin = Complex::new(0.0, 0.0);
         }
     } else {
-        spectrum[0] *= 1.0;
-        let upper = (len + 1) / 2;
-        for bin in 1..upper {
-            spectrum[bin] *= 2.0;
+        let upper = len.div_ceil(2);
+        for bin in spectrum.iter_mut().take(upper).skip(1) {
+            *bin *= 2.0;
         }
-        for bin in upper..len {
-            spectrum[bin] = Complex::new(0.0, 0.0);
+        for bin in spectrum.iter_mut().take(len).skip(upper) {
+            *bin = Complex::new(0.0, 0.0);
         }
     }
 
@@ -598,7 +585,7 @@ mod tests {
         let audio =
             AudioSamples::new_mono(array![1.0f32, -0.5, 0.25], sample_rate!(48_000)).unwrap();
 
-        let result = audio.amplitude_envelope().unwrap();
+        let result = audio.amplitude_envelope();
 
         match result {
             NdResult::Mono(env) => {
@@ -614,9 +601,8 @@ mod tests {
         let audio =
             AudioSamples::new_mono(array![1.0f32, -1.0, 1.0, -1.0], sample_rate!(44_100)).unwrap();
 
-        let result = audio
-            .rms_envelope(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(2).unwrap())
-            .unwrap();
+        let result =
+            audio.rms_envelope(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(2).unwrap());
 
         match result {
             NdResult::Mono(env) => {
@@ -636,9 +622,7 @@ mod tests {
         let follower =
             EnvelopeFollower::new(1.0, 10.0, audio.sample_rate_hz(), DynamicRangeMethod::Peak);
 
-        let (attack, decay) = audio
-            .attack_decay_envelope(&follower, DynamicRangeMethod::Peak)
-            .unwrap();
+        let (attack, decay) = audio.attack_decay_envelope(&follower, DynamicRangeMethod::Peak);
 
         match attack {
             NdResult::Mono(env) => assert!(env.iter().all(|v| (*v - 0.0).abs() < 1e-6)),
@@ -667,7 +651,7 @@ mod tests {
         }));
 
         let audio = AudioSamples::new_mono(signal, sample_rate).unwrap();
-        let result = audio.analytic_envelope().unwrap();
+        let result = audio.analytic_envelope();
 
         let expected_envelope: Vec<f32> = (0..len)
             .map(|n| {
@@ -703,8 +687,7 @@ mod tests {
             AudioSamples::new_mono(array![0.0f32, 2.0, 4.0, 6.0], sample_rate!(44_100)).unwrap();
 
         let result = audio
-            .moving_average_envelope(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(2).unwrap())
-            .unwrap();
+            .moving_average_envelope(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(2).unwrap());
 
         match result {
             NdResult::Mono(env) => {

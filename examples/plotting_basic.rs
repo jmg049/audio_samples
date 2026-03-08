@@ -7,7 +7,7 @@ fn main() {
 #[cfg(all(feature = "plotting", feature = "transforms"))]
 fn main() -> audio_samples::AudioSampleResult<()> {
     use audio_samples::operations::{
-        AudioPlotting,
+        AudioPlotting, PlotParams, WaveformPlotParams,
         plotting::{PlotUtils, spectrograms::SpectrogramPlotParams},
     };
     use audio_samples::{AudioStatistics, sample_rate};
@@ -25,28 +25,28 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     // Test waveform plot
     println!("\nCreating waveform plot...");
-    let waveform_params = audio_samples::operations::WaveformPlotParams {
-        plot_params: audio_samples::operations::plotting::PlotParams {
-            title: Some("Test Waveform".to_string()),
-            x_label: Some("Time (s)".to_string()),
-            y_label: Some("Amplitude".to_string()),
-            show_legend: true,
-            legend_title: Some("Channels".to_string()),
-            font_sizes: None,
-            super_title: None,
-            grid: true,
-        },
-        ch_mgmt_strategy: Some(
+    let waveform_params = WaveformPlotParams::new(
+        &PlotParams::new(
+            Some("Test Waveform".to_string()),
+            Some("Time (s)".to_string()),
+            Some("Amplitude".to_string()),
+            None,
+            true,
+            Some("Channels".to_string()),
+            None,
+            true,
+        ),
+        Some(
             audio_samples::operations::plotting::ChannelManagementStrategy::Separate(
                 audio_samples::operations::plotting::Layout::Vertical,
             ),
         ),
-        color: None,
-        line_style: None,
-        line_width: None,
-        markers: false,
-        save_path: None,
-    };
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
 
     let waveform_plot = audio
         .plot_waveform(&waveform_params)

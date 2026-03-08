@@ -12,7 +12,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     use ndarray::array;
     use std::time::Duration;
     // At its core, audio_samples aims to provide a way of working with type-safe primitive audio samples.
-    // ['AudioSample']s operate under slightly different conditions than regular primitive types, for example,
+    // [`AudioSample`]s operate under slightly different conditions than regular primitive types, for example,
     // floats are expected to be normalised to [-1.0, +1.0].
 
     let i16_val: i16 = i16::MAX;
@@ -25,7 +25,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("{:.2}_f32 -> {}_i16", f32_val, i16_val);
     println!("\n-----\n");
 
-    // The ['AudioSample'] trait underpins the entire audio system.
+    // The [`AudioSample`] trait underpins the entire audio system.
 
     // The more useful side of things though is the AudioSamples<'_, T: AudioSample> struct.
     // This is the core public data structure in the library. It represents a collection of
@@ -77,13 +77,12 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         core::num::NonZeroU32::new(44100).unwrap(),
     );
 
-    let (num_channels, samples_per_channel, duration_seconds, sample_rate, layout) = audio.info();
+    let (num_channels, samples_per_channel, duration_seconds, sample_rate) = audio.info();
     println!("Compound Tone wave info:");
     println!("Number of channels: {}", num_channels);
     println!("Samples per channel: {}", samples_per_channel);
     println!("Duration (seconds): {:.2}", duration_seconds);
     println!("Sample rate: {} Hz", sample_rate);
-    println!("Layout: {:?}", layout);
 
     println!("-----\n");
 

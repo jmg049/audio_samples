@@ -1,19 +1,13 @@
 //! Parametric equalizer for precise frequency shaping.
 //!
-//! ## What
-//!
 //! This module implements parametric EQ processing: peak/notch filters, shelving
 //! filters, and pass/stop filters organised into bands. A [`ParametricEq`] configuration
 //! holds any number of [`EqBand`]s that are applied in sequence.
-//!
-//! ## Why
 //!
 //! Parametric EQ is the standard tool for correcting frequency imbalances, shaping
 //! tonal character, and removing unwanted resonances. Each band gives independent
 //! control over centre frequency, gain, and bandwidth (Q), making it far more
 //! flexible than fixed-band graphic equalisers.
-//!
-//! ## How
 //!
 //! All EQ operations are accessed through the [`AudioParametricEq`] trait. Build a
 //! [`ParametricEq`] using its constructors or add bands one at a time, then pass it
@@ -69,7 +63,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any enabled band fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if any enabled band fails validation
     /// (e.g. frequency above the Nyquist limit, Q factor ≤ 0, or gain out of range).
     ///
     /// # Example
@@ -86,6 +80,7 @@ where
     /// eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));
     /// audio.apply_parametric_eq(&eq).unwrap();
     /// ```
+    #[inline]
     fn apply_parametric_eq(&mut self, eq: &ParametricEq) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
         if eq.is_bypassed() {
@@ -130,9 +125,9 @@ where
     ///
     /// # Errors
     ///
-    /// - [`AudioSampleError::Parameter`] if band validation fails (frequency above Nyquist,
+    /// - [crate::AudioSampleError::Parameter] if band validation fails (frequency above Nyquist,
     ///   Q ≤ 0, or gain out of range).
-    /// - [`AudioSampleError::Layout`] if the underlying sample buffer is non-contiguous.
+    /// - [crate::AudioSampleError::Layout] if the underlying sample buffer is non-contiguous.
     ///
     /// # Example
     ///
@@ -146,6 +141,7 @@ where
     /// // Boost at 2 kHz by 4 dB with Q of 1.5
     /// audio.apply_eq_band(&EqBand::peak(2000.0, 4.0, 1.5)).unwrap();
     /// ```
+    #[inline]
     fn apply_eq_band(&mut self, band: &EqBand) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
         if !band.is_enabled() {
@@ -156,30 +152,26 @@ where
         band.validate(sample_rate)?;
 
         // Design the filter based on band type
-        let (b_coeffs, a_coeffs) = design_eq_band_filter(band, sample_rate)?;
+        let (b_coeffs, a_coeffs) = design_eq_band_filter(band, sample_rate);
         let mut filter = IirFilter::new(b_coeffs, a_coeffs);
 
         // Apply filter to audio data
         match &mut self.data {
             AudioData::Mono(_) => {
                 let mut working_samples = self.as_float();
-                let mono_self = match self.as_mono_mut() {
-                    Some(working) => working,
-                    None => {
-                        return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
-                            operation: "parametric EQ".to_string(),
-                            layout_type: "non-contiguous mono samples".to_string(),
-                        }));
-                    }
+                let Some(mono_self) = self.as_mono_mut() else {
+                    return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
+                        operation: "parametric EQ".to_string(),
+                        layout_type: "non-contiguous mono samples".to_string(),
+                    }));
                 };
 
-                let working_samples =
-                    working_samples
-                        .as_mono_mut()
-                        .ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
-                            "audio_format",
-                            "Failed to get mono data. Underlying data is not mono.",
-                        )))?;
+                let working_samples = working_samples.as_mono_mut().ok_or_else(|| {
+                    AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "audio_format",
+                        "Failed to get mono data. Underlying data is not mono.",
+                    ))
+                })?;
 
                 let working_samples = working_samples.as_slice_mut();
                 filter.process_samples_in_place(working_samples);
@@ -194,26 +186,22 @@ where
                 for channel in 0..num_channels {
                     let mut working_samples = self.as_float();
 
-                    let multi_self = match self.as_multi_channel_mut() {
-                        Some(working) => working,
-                        None => {
-                            return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
-                                operation: "parametric EQ".to_string(),
-                                layout_type: "non-contiguous multi-channel samples".to_string(),
-                            }));
-                        }
+                    let Some(multi_self) = self.as_multi_channel_mut() else {
+                        return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
+                            operation: "parametric EQ".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        }));
                     };
-                    let working_samples = working_samples.as_multi_channel_mut().ok_or(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    let working_samples = working_samples.as_multi_channel_mut() .ok_or_else(|| AudioSampleError::Parameter(ParameterError::invalid_value(
                         "audio_format",
                         "Failed to get multi-channel data. Underlying data is not multi-channel."
                     )))?;
-                    let working_samples =
-                        working_samples
-                            .as_slice_mut()
-                            .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
-                                operation: "parametric EQ".to_string(),
-                                layout_type: "non-contiguous multi-channel samples".to_string(),
-                            }))?;
+                    let working_samples = working_samples.as_slice_mut().ok_or_else(|| {
+                        AudioSampleError::Layout(LayoutError::NonContiguous {
+                            operation: "parametric EQ".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        })
+                    })?;
 
                     filter.process_samples_in_place(working_samples);
 
@@ -248,7 +236,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if `frequency`, `gain_db`, or `q_factor`
+    /// Returns [crate::AudioSampleError::Parameter] if `frequency`, `gain_db`, or `q_factor`
     /// fail band validation.
     ///
     /// # Example
@@ -262,6 +250,7 @@ where
     /// // Boost at 880 Hz by 6 dB with Q of 2.0
     /// audio.apply_peak_filter(880.0, 6.0, 2.0).unwrap();
     /// ```
+    #[inline]
     fn apply_peak_filter(
         &mut self,
         frequency: f64,
@@ -291,7 +280,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any parameter fails band validation.
+    /// Returns [crate::AudioSampleError::Parameter] if any parameter fails band validation.
     ///
     /// # Example
     ///
@@ -304,6 +293,7 @@ where
     /// // Cut -3 dB below 200 Hz
     /// audio.apply_low_shelf(200.0, -3.0, 0.707).unwrap();
     /// ```
+    #[inline]
     fn apply_low_shelf(
         &mut self,
         frequency: f64,
@@ -333,7 +323,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any parameter fails band validation.
+    /// Returns [crate::AudioSampleError::Parameter] if any parameter fails band validation.
     ///
     /// # Example
     ///
@@ -346,6 +336,7 @@ where
     /// // Boost +4 dB above 8 kHz
     /// audio.apply_high_shelf(8000.0, 4.0, 0.707).unwrap();
     /// ```
+    #[inline]
     fn apply_high_shelf(
         &mut self,
         frequency: f64,
@@ -381,7 +372,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any band fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if any band fails validation
     /// (e.g. frequency above Nyquist or Q ≤ 0).
     ///
     /// # Example
@@ -395,6 +386,7 @@ where
     /// // Low shelf -2 dB at 200 Hz, mid peak +3 dB at 1 kHz (Q=2), high shelf +1 dB at 4 kHz
     /// audio.apply_three_band_eq(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
     /// ```
+    #[inline]
     fn apply_three_band_eq(
         &mut self,
         low_freq: f64,
@@ -435,7 +427,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any enabled band fails to design
+    /// Returns [crate::AudioSampleError::Parameter] if any enabled band fails to design
     /// a filter (e.g. frequency above the Nyquist limit).
     ///
     /// # Example
@@ -458,6 +450,7 @@ where
     /// // At the peak frequency, magnitude should be boosted above unity
     /// assert!(magnitudes[2] > 1.0);
     /// ```
+    #[inline]
     fn eq_frequency_response(
         &self,
         eq: &ParametricEq,
@@ -471,7 +464,7 @@ where
                 continue;
             }
 
-            let (b_coeffs, a_coeffs) = design_eq_band_filter(band, f64::from(sample_rate))?;
+            let (b_coeffs, a_coeffs) = design_eq_band_filter(band, f64::from(sample_rate));
             let filter = IirFilter::new(b_coeffs, a_coeffs);
             let (magnitude, phase) = filter.frequency_response(frequencies, f64::from(sample_rate));
 
@@ -495,10 +488,7 @@ where
 }
 
 /// Design a filter for a parametric EQ band.
-fn design_eq_band_filter(
-    band: &EqBand,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+fn design_eq_band_filter(band: &EqBand, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     match band.band_type {
         EqBandType::Peak => {
             design_peak_filter(band.frequency, band.gain_db, band.q_factor, sample_rate)
@@ -522,7 +512,7 @@ fn design_peak_filter(
     gain_db: f64,
     q_factor: f64,
     sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+) -> (Vec<f64>, Vec<f64>) {
     let a = 10.04f64.powf(gain_db / 40.0); // sqrt of linear gain
     let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
@@ -540,7 +530,7 @@ fn design_peak_filter(
     let b_coeffs = vec![b0 / a0, b1 / a0, b2 / a0];
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
-    Ok((b_coeffs, a_coeffs))
+    (b_coeffs, a_coeffs)
 }
 
 /// Design a low shelf filter using the RBJ cookbook formulas.
@@ -549,7 +539,7 @@ fn design_low_shelf_filter(
     gain_db: f64,
     q_factor: f64,
     sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+) -> (Vec<f64>, Vec<f64>) {
     let a = 10.0f64.powf(gain_db / 40.0); // sqrt of linear gain
     let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
@@ -568,7 +558,7 @@ fn design_low_shelf_filter(
     let b_coeffs = vec![b0 / a0, b1 / a0, b2 / a0];
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
-    Ok((b_coeffs, a_coeffs))
+    (b_coeffs, a_coeffs)
 }
 
 /// Design a high shelf filter using the RBJ cookbook formulas.
@@ -577,7 +567,7 @@ fn design_high_shelf_filter(
     gain_db: f64,
     q_factor: f64,
     sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+) -> (Vec<f64>, Vec<f64>) {
     let a = 10.0f64.powf(gain_db / 40.0); // sqrt of linear gain
     let omega = 2.0 * f64::PI() * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
@@ -596,15 +586,11 @@ fn design_high_shelf_filter(
     let b_coeffs = vec![b0 / a0, b1 / a0, b2 / a0];
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
-    Ok((b_coeffs, a_coeffs))
+    (b_coeffs, a_coeffs)
 }
 
 /// Design a low-pass filter using the RBJ cookbook formulas.
-fn design_lowpass_filter(
-    frequency: f64,
-    q_factor: f64,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+fn design_lowpass_filter(frequency: f64, q_factor: f64, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
     let alpha = sin_omega / (2.0 * q_factor);
@@ -621,15 +607,11 @@ fn design_lowpass_filter(
     let b_coeffs = vec![b0 / a0, b1 / a0, b2 / a0];
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
-    Ok((b_coeffs, a_coeffs))
+    (b_coeffs, a_coeffs)
 }
 
 /// Design a high-pass filter using the RBJ cookbook formulas.
-fn design_highpass_filter(
-    frequency: f64,
-    q_factor: f64,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+fn design_highpass_filter(frequency: f64, q_factor: f64, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
     let alpha = sin_omega / (2.0 * q_factor);
@@ -646,15 +628,11 @@ fn design_highpass_filter(
     let b_coeffs = vec![b0 / a0, b1 / a0, b2 / a0];
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
-    Ok((b_coeffs, a_coeffs))
+    (b_coeffs, a_coeffs)
 }
 
 /// Design a band-pass filter using the RBJ cookbook formulas.
-fn design_bandpass_filter(
-    frequency: f64,
-    q_factor: f64,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+fn design_bandpass_filter(frequency: f64, q_factor: f64, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     let omega = 2.0 * f64::PI() * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
 
@@ -672,15 +650,11 @@ fn design_bandpass_filter(
     let b_coeffs = vec![b0 / a0, b1 / a0, b2 / a0];
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
-    Ok((b_coeffs, a_coeffs))
+    (b_coeffs, a_coeffs)
 }
 
 /// Design a band-stop (notch) filter using the RBJ cookbook formulas.
-fn design_bandstop_filter(
-    frequency: f64,
-    q_factor: f64,
-    sample_rate: f64,
-) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+fn design_bandstop_filter(frequency: f64, q_factor: f64, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
 
@@ -698,7 +672,7 @@ fn design_bandstop_filter(
     let b_coeffs = vec![b0 / a0, b1 / a0, b2 / a0];
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
-    Ok((b_coeffs, a_coeffs))
+    (b_coeffs, a_coeffs)
 }
 
 impl<T> AudioSamples<'_, T>

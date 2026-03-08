@@ -1,20 +1,14 @@
 //! Statistical analysis operations for [`AudioSamples`].
 //!
-//! ## What
-//!
 //! This module implements the [`AudioStatistics`] trait, providing statistical
 //! and signal analysis methods for mono and multi-channel audio data. Operations
 //! cover both time-domain statistics and, when the `fft` feature is enabled,
 //! frequency-domain descriptors computed via the [`spectrograms`] crate.
 //!
-//! ## Why
-//!
 //! Statistical measures are a core part of audio analysis. Isolating them into a
 //! single trait keeps the [`AudioSamples`] API organised and lets users access
 //! only the statistical surface they need. This module is the sole implementor of
 //! [`AudioStatistics`] for [`AudioSamples`].
-//!
-//! ## How
 //!
 //! All operations are available on any [`AudioSamples<T>`] where `T` is a
 //! supported sample type (`u8`, `i16`, `I24`, `i32`, `f32`, `f64`). Import
@@ -134,6 +128,7 @@ where
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.peak(), 3.0);
     /// ```
+    #[inline]
     fn peak(&self) -> T {
         match &self.data {
             AudioData::Mono(arr) => {
@@ -179,6 +174,7 @@ where
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.min_sample(), -3.0);
     /// ```
+    #[inline]
     fn min_sample(&self) -> T {
         match &self.data {
             AudioData::Mono(arr) => {
@@ -206,6 +202,7 @@ where
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.max_sample(), 2.5);
     /// ```
+    #[inline]
     fn max_sample(&self) -> T {
         match &self.data {
             AudioData::Mono(arr) => {
@@ -233,6 +230,7 @@ where
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.mean(), 0.0);
     /// ```
+    #[inline]
     fn mean(&self) -> f64 {
         match &self.data {
             AudioData::Mono(mono_data) => mono_data.mean().cast_into(),
@@ -264,13 +262,9 @@ where
     /// // Central indices 1 and 2: (3.0 + 5.0) / 2.0 = 4.0
     /// assert_eq!(audio.median(), Some(4.0));
     /// ```
+    #[inline]
     fn median(&self) -> Option<f64> {
-        let mono = match self.as_mono() {
-            Some(mono) => mono,
-            None => {
-                return None;
-            }
-        };
+        let mono = self.as_mono()?;
         let mono_len = mono.len().get();
         Some(if mono_len.is_multiple_of(2) {
             let first_idx = (mono_len / 2) - 1;
@@ -303,6 +297,7 @@ where
     /// let rms = audio.rms();
     /// assert!((rms - 1.0).abs() < 1e-6);
     /// ```
+    #[inline]
     fn rms(&self) -> f64 {
         self.powf(2.0, None).mean().sqrt()
     }
@@ -327,6 +322,7 @@ where
     /// let variance = audio.variance();
     /// assert!((variance - 1.25).abs() < 1e-6);
     /// ```
+    #[inline]
     fn variance(&self) -> f64 {
         match &self.data {
             AudioData::Mono(mono_data) => mono_data.variance(),
@@ -356,6 +352,7 @@ where
     /// let std_dev = audio.std_dev();
     /// assert!((std_dev - 1.25_f64.sqrt()).abs() < 1e-6);
     /// ```
+    #[inline]
     fn std_dev(&self) -> f64 {
         self.variance().sqrt()
     }
@@ -379,6 +376,7 @@ where
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.zero_crossings(), 3);
     /// ```
+    #[inline]
     fn zero_crossings(&self) -> usize {
         match &self.data {
             AudioData::Mono(arr) => {
@@ -443,6 +441,7 @@ where
     /// let zcr = audio.zero_crossing_rate();
     /// assert!(zcr > 0.0);
     /// ```
+    #[inline]
     fn zero_crossing_rate(&self) -> f64 {
         let crossings = self.zero_crossings() as f64;
         let duration_seconds = self.duration_seconds(); // guaranteed > 0.0 since we do not allow empty audio
@@ -481,6 +480,7 @@ where
     /// assert_eq!(autocorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
     /// ```
     #[cfg(feature = "transforms")]
+    #[inline]
     fn autocorrelation(&self, max_lag: NonZeroUsize) -> Option<NonEmptyVec<f64>> {
         let max_lag = max_lag.get();
 
@@ -581,6 +581,7 @@ where
     /// let xcorr = audio1.cross_correlation(&audio2, max_lag).unwrap();
     /// assert_eq!(xcorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
     /// ```
+    #[inline]
     fn cross_correlation(
         &self,
         other: &Self,
@@ -687,6 +688,7 @@ where
     /// The input signal must be mono. Multi-channel signals must be mixed or
     /// channel-selected before calling this method.
     #[cfg(feature = "transforms")]
+    #[inline]
     fn spectral_centroid(&self) -> AudioSampleResult<f64> {
         if self.is_multi_channel() {
             return Err(crate::AudioSampleError::Parameter(
@@ -766,6 +768,7 @@ where
     ///   `(0.0, 1.0)`.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
+    #[inline]
     fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64> {
         if rolloff_percent <= 0.0 || rolloff_percent >= 1.0 {
             return Err(crate::AudioSampleError::Parameter(
@@ -836,6 +839,7 @@ where
                 let n = unsafe { NonZeroUsize::new_unchecked(n) };
 
                 // Convert to float type for FFT
+                // safety: self is non empty therefore the underlying array (and it's row) are non-empty
                 let input: NonEmptyVec<f64> = unsafe {
                     NonEmptyVec::new_unchecked(
                         first_channel.iter().map(|&x| x.convert_to()).collect(),
