@@ -1,4 +1,49 @@
 //! Core trait definitions for audio processing operations.
+//!
+//! This module declares the public trait surface of the `audio_samples` operation layer.
+//! Every capability is expressed as a separate, feature-gated trait that is implemented
+//! for [`AudioSamples`]:
+//!
+//! | Trait | Feature | Responsibility |
+//! |---|---|---|
+//! | [`AudioStatistics`] | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |
+//! | [`AudioProcessing`] | `processing` | Normalize, filter, resample, μ-law, … |
+//! | [`AudioTransforms`] | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |
+//! | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |
+//! | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |
+//! | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |
+//! | [`AudioDynamicRange`] | `dynamic-range` | Compressor, limiter, gate, expander |
+//! | [`AudioIirFiltering`] | `iir-filtering` | Butterworth, Chebyshev IIR filters |
+//! | [`AudioParametricEq`] | `parametric-eq` | Multi-band parametric EQ |
+//! | [`AudioPitchAnalysis`] | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |
+//! | [`AudioVoiceActivityDetection`] | `vad` | Frame-based speech / silence classification |
+//! | [`AudioDecomposition`] | `decomposition` | Harmonic–percussive source separation (HPSS) |
+//! | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |
+//! | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |
+//! | [`AudioPlotting`](crate::operations::AudioPlotting) | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
+//!
+//! Grouping operations into separate traits keeps compile times low — only the code
+//! required for the enabled features is compiled — while providing a clean extension
+//! point for new capabilities.  Each trait is independently usable: bring only the
+//! traits you need into scope without paying for the rest.
+//!
+//! ## Usage
+//!
+//! Bring the relevant trait into scope with a `use` statement, then call its methods
+//! on any [`AudioSamples`] instance:
+//!
+//! ```rust
+//! use audio_samples::{AudioSamples, sample_rate};
+//! use ndarray::array;
+//!
+//! let audio = AudioSamples::new_mono(
+//!     array![1.0f32, -0.5, 0.25, -0.1],
+//!     sample_rate!(44100),
+//! ).unwrap();
+//!
+//! assert_eq!(audio.samples_per_channel().get(), 4);
+//! assert_eq!(audio.sample_rate().get(), 44100);
+//! ```
 
 #[cfg(feature = "envelopes")]
 use crate::{NdResult, operations::dynamic_range::EnvelopeFollower};
@@ -82,13 +127,30 @@ use crate::{AudioSampleResult, AudioSamples, AudioTypeConversion, StandardSample
 use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 #[allow(unused_imports)]
 use std::num::NonZeroUsize;
+
 /// Statistical analysis operations for audio data.
 ///
-/// This trait provides methods to compute various statistical measures
-/// of audio samples, useful for analysis, visualization, and processing decisions.
+/// # Purpose
 ///
-/// All methods return values in the native sample type `Self::Sample` for consistency
-/// with the underlying data representation.
+/// Provides descriptive statistics, energy metrics, and spectral summary measures
+/// computed from the sample buffer.  Operations range from simple extrema (peak,
+/// min, max) through signal-level descriptors (RMS, variance, zero-crossing rate)
+/// to frequency-weighted features (spectral centroid, spectral rolloff).
+///
+/// # Intended Usage
+///
+/// Use this trait for analysis, visualisation, and gating decisions — for example
+/// to check loudness before normalisation, to estimate the noise floor before gating,
+/// or to drive automatic level-matching in a processing pipeline.
+///
+/// Frequency-domain methods (`spectral_centroid`, `spectral_rolloff`,
+/// `autocorrelation`) require `feature = "transforms"`.
+///
+/// # Invariants
+///
+/// All methods operate on the full multi-channel buffer unless the documentation
+/// explicitly states otherwise (e.g. `median` is mono-only, `spectral_centroid`
+/// and `spectral_rolloff` use only the first channel).
 #[cfg(feature = "statistics")]
 pub trait AudioStatistics: AudioTypeConversion
 where
@@ -101,16 +163,23 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -3.0, 2.5, -1.5];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.peak(), 3.0);
     /// ```
     fn peak(&self) -> Self::Sample;
 
-    /// Alias for peak to match common terminology
+    /// Returns the peak (maximum absolute value) across all samples and channels.
+    ///
+    /// Alias for [`peak`][Self::peak]. Provided to match the conventional term
+    /// "amplitude" used in some audio contexts.
+    ///
+    /// # Returns
+    /// The maximum absolute sample value as the native sample type `T`.
+    #[inline]
     fn amplitude(&self) -> Self::Sample {
         self.peak()
     }
@@ -122,11 +191,11 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -3.0, 2.5, -1.5];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.min_sample(), -3.0);
     /// ```
     fn min_sample(&self) -> Self::Sample;
@@ -138,11 +207,11 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -3.0, 2.5, -1.5];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.max_sample(), 2.5);
     /// ```
     fn max_sample(&self) -> Self::Sample;
@@ -154,11 +223,11 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -1.0, 2.0, -2.0];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// assert_eq!(audio.mean(), 0.0);
     /// ```
     fn mean(&self) -> f64;
@@ -179,11 +248,11 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, 3.0, 5.0, 7.0];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Central indices 1 and 2: (3.0 + 5.0) / 2.0 = 4.0
     /// assert_eq!(audio.median(), Some(4.0));
     /// ```
@@ -200,11 +269,11 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, -1.0, 1.0, -1.0];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let rms = audio.rms();
     /// assert!((rms - 1.0).abs() < 1e-6);
     /// ```
@@ -222,11 +291,11 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, 2.0, 3.0, 4.0];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let variance = audio.variance();
     /// assert!((variance - 1.25).abs() < 1e-6);
     /// ```
@@ -243,11 +312,11 @@ where
     ///
     /// # Examples
     /// ```
-    /// use audio_samples::{AudioSamples, AudioStatistics};
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     ///
     /// let data = array![1.0f32, 2.0, 3.0, 4.0];
-    /// let audio = AudioSamples::new_mono(data, 44100).unwrap();
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let std_dev = audio.std_dev();
     /// assert!((std_dev - 1.25_f64.sqrt()).abs() < 1e-6);
     /// ```
@@ -356,6 +425,18 @@ where
     /// # Assumptions
     /// The input signal must be mono. Multi-channel signals must be mixed or
     /// channel-selected before calling this method.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// // Requires feature = "transforms"
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    /// let centroid = audio.spectral_centroid().unwrap();
+    /// // A 440 Hz sine wave should have a centroid near 440 Hz.
+    /// assert!(centroid > 0.0);
+    /// ```
     #[cfg(feature = "transforms")]
     fn spectral_centroid(&self) -> AudioSampleResult<f64>;
 
@@ -379,8 +460,8 @@ where
     /// fails.
     ///
     /// # Examples
-    /// ```ignore
-    /// // Requires the "transforms" feature.
+    /// ```no_run
+    /// // Requires feature = "transforms"
     /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     /// use std::num::NonZeroUsize;
@@ -413,38 +494,173 @@ where
     /// - [`crate::AudioSampleError::Parameter`] if `rolloff_percent` is not in
     ///   `(0.0, 1.0)`.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// // Requires feature = "transforms"
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    /// // 85 % of spectral energy is below the rolloff frequency.
+    /// let rolloff = audio.spectral_rolloff(0.85).unwrap();
+    /// assert!(rolloff > 0.0);
+    /// ```
     #[cfg(feature = "transforms")]
     fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64>;
 }
 
 /// Voice Activity Detection (VAD) operations.
 ///
-/// This trait provides frame-based voice/speech activity detection for audio.
-/// It returns a boolean decision per frame (see [`VadConfig`]) and can also
-/// derive contiguous speech regions in sample indices.
+/// # Purpose
+///
+/// Frame-based speech/silence classification for audio signals.  Produces
+/// per-frame boolean masks and contiguous speech region boundaries expressed
+/// as sample-index pairs.
+///
+/// # Intended Usage
+///
+/// Use this trait to strip silence, isolate voiced segments, or gate downstream
+/// processing to active speech regions.  Multi-channel audio is handled via the
+/// `channel_policy` field of [`VadConfig`].
+///
+/// # Invariants
+///
+/// Both methods delegate to the same internal frame-analysis pipeline, so
+/// [`speech_regions`][AudioVoiceActivityDetection::speech_regions] is always
+/// consistent with [`voice_activity_mask`][AudioVoiceActivityDetection::voice_activity_mask].
 #[cfg(feature = "vad")]
 pub trait AudioVoiceActivityDetection: AudioTypeConversion
 where
     Self::Sample: StandardSample,
 {
-    /// Compute a per-frame speech activity mask.
+    /// Classifies each audio frame as speech (`true`) or silence (`false`).
     ///
-    /// The returned vector has one entry per analysis frame.
+    /// Divides the signal into overlapping frames according to `config.frame_size`
+    /// and `config.hop_size`, applies the detection method, and post-processes
+    /// the raw per-frame decisions through four sequential steps:
+    ///
+    /// 1. Majority-vote smoothing over `config.smooth_frames`.
+    /// 2. Hangover extension — extends active frames forward by `config.hangover_frames`.
+    /// 3. Minimum speech run enforcement — speech runs shorter than
+    ///    `config.min_speech_frames` are reclassified as silence.
+    /// 4. Minimum silence run enforcement — silence gaps shorter than
+    ///    `config.min_silence_frames` are reclassified as speech.
+    ///
+    /// Multi-channel audio is handled according to `config.channel_policy`.
+    ///
+    /// # Arguments
+    ///
+    /// - `config` – VAD parameters: frame size, hop size, detection method,
+    ///   energy threshold, ZCR bounds, smoothing, hangover, and minimum
+    ///   region lengths.
+    ///
+    /// # Returns
+    ///
+    /// A `NonEmptyVec<bool>` with one entry per analysis frame. The length
+    /// equals the number of frame starts produced by `config.frame_size`,
+    /// `config.hop_size`, and `config.pad_end`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `config` fails validation
+    /// (e.g. `hop_size > frame_size` or invalid ZCR bounds).
+    /// Returns [crate::AudioSampleError::Layout] if the audio array is non-contiguous.
+    /// Returns [crate::AudioSampleError::Feature] if `config.method` is
+    /// `VadMethod::Spectral` (not yet implemented).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioVoiceActivityDetection;
+    /// use audio_samples::operations::types::VadConfig;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+    /// let config = VadConfig::energy_only();
+    /// let mask = audio.voice_activity_mask(&config).unwrap();
+    /// assert!(mask.iter().any(|&v| v));
+    /// ```
     fn voice_activity_mask(&self, config: &VadConfig) -> AudioSampleResult<NonEmptyVec<bool>>;
-    /// Compute contiguous speech regions as `(start_sample, end_sample)` pairs.
+
+    /// Returns contiguous speech segments as `(start_sample, end_sample)` pairs.
     ///
-    /// Indices are in samples-per-channel units (i.e., frame boundaries are derived
-    /// from `config.hop_size` / `config.frame_size`). `end_sample` is exclusive.
+    /// Internally calls [`voice_activity_mask`] to obtain per-frame decisions,
+    /// then converts frame indices to sample-index ranges. Adjacent or
+    /// overlapping regions are merged and the result is sorted by
+    /// `start_sample`. `end_sample` is exclusive (one past the last sample of
+    /// the region).
+    ///
+    /// [`voice_activity_mask`]: AudioVoiceActivityDetection::voice_activity_mask
+    ///
+    /// # Arguments
+    ///
+    /// - `config` – VAD parameters (same as [`voice_activity_mask`]).
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<(usize, usize)>` of `(start_sample, end_sample)` pairs sorted
+    /// by `start_sample`. Returns an empty `Vec` if no speech frames are
+    /// detected.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`voice_activity_mask`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioVoiceActivityDetection;
+    /// use audio_samples::operations::types::VadConfig;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+    /// let regions = audio.speech_regions(&VadConfig::energy_only()).unwrap();
+    /// for &(start, end) in &regions {
+    ///     assert!(start < end);
+    /// }
+    /// ```
     fn speech_regions(&self, config: &VadConfig) -> AudioSampleResult<Vec<(usize, usize)>>;
 }
 
 /// Signal processing operations for audio manipulation.
 ///
-/// This trait provides methods for common audio processing tasks including
-/// normalization, filtering, compression, and envelope operations.
+/// # Purpose
 ///
-/// Methods consume self and return the processed audio, enabling method chaining.
-/// This provides a more functional and composable API compared to in-place mutation.
+/// Provides time-domain signal processing primitives: amplitude scaling,
+/// normalisation, windowing, FIR filtering, μ-law compression/expansion,
+/// DC removal, hard clipping, and high-quality resampling.
+///
+/// # Intended Usage
+///
+/// Apply these methods in a preparation or post-processing pipeline — for example
+/// to normalise a recording before feature extraction, to remove DC bias before
+/// spectral analysis, or to resample to a target rate before model inference.
+/// Most methods consume `self` and return the processed signal, enabling
+/// method chaining:
+///
+/// ```rust
+/// use audio_samples::{AudioSamples, AudioProcessing, AudioStatistics,
+///                     NormalizationConfig, sample_rate};
+/// use ndarray::array;
+///
+/// let audio = AudioSamples::new_mono(array![2.0f32, -4.0, 1.0], sample_rate!(44100))
+///     .unwrap()
+///     .normalize(NormalizationConfig::peak(1.0))
+///     .unwrap();
+/// assert!(audio.peak() <= 1.0 + 1e-6);
+/// ```
+///
+/// Resampling methods (`resample`, `resample_by_ratio`) take `&self` rather than
+/// consuming `self`, since they produce a new allocation at a different rate.
+///
+/// # Invariants
+///
+/// Methods that accept a sample-rate or frequency parameter validate that the
+/// value is within the valid range; they return [crate::AudioSampleError::Parameter]
+/// on failure rather than panicking.
 #[cfg(feature = "processing")]
 pub trait AudioProcessing: AudioTypeConversion
 where
@@ -510,6 +726,7 @@ where
     /// assert_eq!(audio[0], 2.0);
     /// assert_eq!(audio[1], -2.0);
     /// ```
+    #[must_use]
     fn scale(self, factor: f64) -> Self;
 
     /// Applies a windowing function to the audio samples.
@@ -739,6 +956,9 @@ where
     /// # Returns
     /// The audio samples with the DC offset removed.
     ///
+    /// # Errors
+    /// Returns an error if the audio data layout is invalid or if mean computation fails.
+    ///
     /// # Examples
     /// ```
     /// use audio_samples::{AudioSamples, AudioProcessing, AudioStatistics, sample_rate};
@@ -833,12 +1053,33 @@ where
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 }
 
-/// Frequency domain analysis and spectral transformations.
+/// Frequency-domain analysis and spectral transformation operations.
 ///
-/// This trait provides methods for FFT-based analysis and spectral processing.
+/// # Purpose
 ///
-/// Complex numbers are used for frequency domain representations,
-/// and ndarray is used for efficient matrix operations on spectrograms.
+/// Provides FFT, STFT, and a comprehensive set of spectral representations —
+/// linear, log-frequency, mel-scale, MFCC, chromagram, gammatone, and
+/// constant-Q — all delegating to the `spectrograms` crate for numerics.
+///
+/// # Intended Usage
+///
+/// Use these methods when you need to move from the time domain into a
+/// frequency or perceptual representation:
+///
+/// - Feature extraction for machine-learning models: mel spectrograms, MFCCs, chroma.
+/// - Analysis and visualisation: linear spectrograms, power spectral density.
+/// - Round-trip processing: STFT → process → ISTFT.
+/// - Low-level building blocks: FFT, RFFT, magnitude/phase decomposition.
+///
+/// The `spectrograms` types returned by spectrogram methods are defined in
+/// the `spectrograms` crate and are **not** re-exported from `audio_samples`.
+/// Import them directly from `spectrograms`.
+///
+/// # Invariants
+///
+/// Methods that accept an FFT length (`n_fft`) zero-pad shorter signals rather
+/// than truncating.  Signals *longer* than `n_fft` are rejected with a
+/// [crate::AudioSampleError::Parameter] error.
 #[cfg(feature = "transforms")]
 pub trait AudioTransforms: AudioTypeConversion
 where
@@ -873,10 +1114,38 @@ where
     /// ```
     fn fft(&self, n_fft: NonZeroUsize) -> AudioSampleResult<Array2<Complex<f64>>>;
 
-    /// Computes the Real-valued Fast Fourier Transform of a mono signal.
+    /// Computes the magnitude spectrum of the audio signal.
+    ///
+    /// Equivalent to [`fft`] followed by taking the absolute value of each complex bin.
+    /// Each channel is transformed independently.
     ///
     /// # Arguments
-    /// - `n_fft` — FFT length in samples. If longer than the signal the input
+    ///
+    /// - `n_fft` — FFT length in samples. If longer than the signal the input is
+    ///   zero-padded internally.
+    ///
+    /// # Returns
+    ///
+    /// An `Array2<f64>` where each row is the magnitude spectrum of the corresponding
+    /// channel (one row per channel).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the FFT computation fails.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// // Use a short signal so n_fft (1024) is larger than the signal length.
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(10), sample_rate!(44100), 0.8);
+    /// let mag = audio.rfft(nzu!(1024)).unwrap();
+    /// assert_eq!(mag.nrows(), 1); // one row per channel
+    /// ```
+    ///
+    /// [`fft`]: Self::fft
+    #[inline]
     fn rfft(&self, n_fft: NonZeroUsize) -> AudioSampleResult<Array2<f64>> {
         let fft_complex = self.fft(n_fft)?;
         Ok(fft_complex.mapv(Complex::norm))
@@ -902,6 +1171,18 @@ where
     /// - Errors from the underlying STFT computation.
     ///
     /// [`istft`]: Self::istft
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let params = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let result = audio.stft(&params).unwrap();
+    /// assert!(result.data.nrows() > 0); // frequency bins
+    /// ```
     fn stft(&self, params: &StftParams) -> AudioSampleResult<StftResult>;
 
     /// Reconstructs a time-domain signal from an [`StftResult`].
@@ -921,13 +1202,26 @@ where
     /// parameters inside the [`StftResult`]).
     ///
     /// [`stft`]: Self::stft
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let params = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let stft_result = audio.stft(&params).unwrap();
+    /// let reconstructed = AudioSamples::<f64>::istft(stft_result).unwrap();
+    /// assert!(reconstructed.samples_per_channel().get() > 0);
+    /// ```
     fn istft(stft: StftResult) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
     /// Computes a linearly-spaced spectrogram.
     ///
     /// Prefer the typed convenience methods —
-    /// [`linear_magnitude_spectrogram`], [`linear_power_spectrogram`], or
-    /// [`linear_db_spectrogram`] — for the most common amplitude scales.
+    /// [`linear_magnitude_spectrogram`](crate::operations::AudioTransforms::linear_magnitude_spectrogram), [`linear_power_spectrogram`](crate::operations::AudioTransforms::linear_power_spectrogram), or
+    /// [`linear_db_spectrogram`](crate::operations::AudioTransforms::linear_db_spectrogram) — for the most common amplitude scales.
     ///
     /// # Arguments
     /// - `params` — spectrogram parameters (window, hop, FFT size).
@@ -939,6 +1233,19 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying spectrogram computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let spect = audio.linear_spectrogram::<Magnitude>(&params, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
     fn linear_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -947,7 +1254,24 @@ where
     where
         AmpScale: AmpScaleSpec;
 
-    /// Shorthand for [`linear_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation fails or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let spect = audio.linear_magnitude_spectrogram(&params).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn linear_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -955,7 +1279,24 @@ where
         self.linear_spectrogram::<Magnitude>(params, None)
     }
 
-    /// Shorthand for [`linear_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation fails or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let spect = audio.linear_power_spectrogram(&params).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn linear_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -963,7 +1304,25 @@ where
         self.linear_spectrogram::<Power>(params, None)
     }
 
-    /// Shorthand for [`linear_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation fails or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.linear_db_spectrogram(&params, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn linear_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -975,8 +1334,8 @@ where
     /// Computes a log-frequency-spaced spectrogram.
     ///
     /// Prefer the typed convenience methods —
-    /// [`loghz_power_spectrogram`], [`loghz_magnitude_spectrogram`], or
-    /// [`loghz_db_spectrogram`] — for the most common amplitude scales.
+    /// [`loghz_power_spectrogram`](crate::operations::AudioTransforms::loghz_power_spectrogram), [`loghz_magnitude_spectrogram`](crate::operations::AudioTransforms::loghz_magnitude_spectrogram), or
+    /// [`loghz_db_spectrogram`](crate::operations::AudioTransforms::loghz_db_spectrogram) — for the most common amplitude scales.
     ///
     /// # Arguments
     /// - `params` — spectrogram parameters (window, hop, FFT size).
@@ -991,6 +1350,20 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying spectrogram computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.log_frequency_spectrogram::<Magnitude>(&params, &loghz, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
     fn log_frequency_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -1000,7 +1373,25 @@ where
     where
         AmpScale: AmpScaleSpec;
 
-    /// Shorthand for [`log_frequency_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or frequency binning fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.loghz_power_spectrogram(&params, &loghz).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn loghz_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1009,7 +1400,25 @@ where
         self.log_frequency_spectrogram::<Power>(params, loghz, None)
     }
 
-    /// Shorthand for [`log_frequency_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or frequency binning fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.loghz_magnitude_spectrogram(&params, &loghz).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn loghz_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1018,7 +1427,26 @@ where
         self.log_frequency_spectrogram::<Magnitude>(params, loghz, None)
     }
 
-    /// Shorthand for [`log_frequency_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or frequency binning fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.loghz_db_spectrogram(&params, &loghz, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn loghz_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1032,8 +1460,8 @@ where
     ///
     /// The mel scale approximates human auditory perception by compressing
     /// high frequencies relative to low ones.  Prefer the typed
-    /// convenience methods — [`mel_mag_spectrogram`],
-    /// [`mel_power_spectrogram`], or [`mel_db_spectrogram`] — for the
+    /// convenience methods — [`mel_mag_spectrogram`](crate::operations::AudioTransforms::mel_mag_spectrogram),
+    /// [`mel_power_spectrogram`](crate::operations::AudioTransforms::mel_power_spectrogram), or [`mel_db_spectrogram`](crate::operations::AudioTransforms::mel_db_spectrogram) — for the
     /// most common amplitude scales.
     ///
     /// # Arguments
@@ -1052,6 +1480,20 @@ where
     ///
     /// ## See Also
     /// - [Mel scale — Wikipedia](https://en.wikipedia.org/wiki/Mel_scale)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{Magnitude, MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let spect = audio.mel_spectrogram::<Magnitude>(&params, &mel, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
     fn mel_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -1061,7 +1503,25 @@ where
     where
         AmpScale: AmpScaleSpec;
 
-    /// Shorthand for [`mel_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or mel filterbank application fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let spect = audio.mel_mag_spectrogram(&params, &mel).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn mel_mag_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1070,7 +1530,26 @@ where
         self.mel_spectrogram(params, mel, None)
     }
 
-    /// Shorthand for [`mel_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or mel filterbank application fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogParams, MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.mel_db_spectrogram(&params, &mel, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn mel_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1080,7 +1559,25 @@ where
         self.mel_spectrogram(params, mel, Some(db))
     }
 
-    /// Shorthand for [`mel_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or mel filterbank application fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let spect = audio.mel_power_spectrogram(&params, &mel).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn mel_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1112,6 +1609,19 @@ where
     ///
     /// ## See Also
     /// - [MFCC — Wikipedia](https://en.wikipedia.org/wiki/Mel-frequency_cepstrum)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{MfccParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let mfcc_params = MfccParams::speech_standard();
+    /// let result = audio.mfcc(&stft, nzu!(40), &mfcc_params).unwrap();
+    /// assert!(result.data.nrows() > 0); // MFCC coefficients
+    /// ```
     fn mfcc(
         &self,
         stft_params: &StftParams,
@@ -1138,6 +1648,19 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{ChromaParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let chroma_params = ChromaParams::music_standard();
+    /// let result = audio.chromagram(&stft, &chroma_params).unwrap();
+    /// assert_eq!(result.data.nrows(), 12); // twelve pitch classes (C through B)
+    /// ```
     fn chromagram(
         &self,
         stft_params: &StftParams,
@@ -1168,6 +1691,17 @@ where
     ///
     /// ## See Also
     /// - [Welch's method — Wikipedia](https://en.wikipedia.org/wiki/Welch%27s_method)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let (freqs, psd) = audio.power_spectral_density(nzu!(1024), 0.5).unwrap();
+    /// assert_eq!(freqs.len(), psd.len());
+    /// assert!(!freqs.is_empty());
+    /// ```
     fn power_spectral_density(
         &self,
         window_size: NonZeroUsize,
@@ -1180,9 +1714,9 @@ where
     /// cochlea.  The filter centre frequencies are spaced according to
     /// the ERB (Equivalent Rectangular Bandwidth) scale.  Prefer the
     /// typed convenience methods —
-    /// [`gammatone_magnitude_spectrogram`],
-    /// [`gammatone_power_spectrogram`], or
-    /// [`gammatone_db_spectrogram`] — for the most common amplitude
+    /// [`gammatone_magnitude_spectrogram`](crate::operations::AudioTransforms::gammatone_magnitude_spectrogram),
+    /// [`gammatone_power_spectrogram`](crate::operations::AudioTransforms::gammatone_power_spectrogram), or
+    /// [`gammatone_db_spectrogram`](crate::operations::AudioTransforms::gammatone_db_spectrogram) — for the most common amplitude
     /// scales.
     ///
     /// # Arguments
@@ -1201,6 +1735,20 @@ where
     ///
     /// ## See Also
     /// - [Gammatone filter — Wikipedia](https://en.wikipedia.org/wiki/Gammatone)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.gammatone_spectrogram::<Magnitude>(&params, &gammatone, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
     fn gammatone_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -1210,7 +1758,25 @@ where
     where
         AmpScale: AmpScaleSpec;
 
-    /// Shorthand for [`gammatone_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or gammatone filterbank application fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.gammatone_magnitude_spectrogram(&params, &gammatone).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn gammatone_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1219,7 +1785,25 @@ where
         self.gammatone_spectrogram::<Magnitude>(params, gammatone_params, None)
     }
 
-    /// Shorthand for [`gammatone_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or gammatone filterbank application fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.gammatone_power_spectrogram(&params, &gammatone).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn gammatone_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1228,7 +1812,26 @@ where
         self.gammatone_spectrogram::<Power>(params, gammatone_params, None)
     }
 
-    /// Shorthand for [`gammatone_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if STFT computation or gammatone filterbank application fails, or if parameters are invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.gammatone_db_spectrogram(&params, &gammatone, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn gammatone_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1260,6 +1863,19 @@ where
     ///
     /// ## See Also
     /// - [Constant-Q transform — Wikipedia](https://en.wikipedia.org/wiki/Constant-Q_transform)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::CqtParams;
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// // 12 bins per octave, 7 octaves, starting at 32.7 Hz (C1)
+    /// let cqt_params = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let result = audio.constant_q_transform(&cqt_params, nzu!(256)).unwrap();
+    /// assert!(result.data.nrows() > 0);
+    /// ```
     fn constant_q_transform(
         &self,
         params: &CqtParams,
@@ -1270,8 +1886,8 @@ where
     ///
     /// Applies the CQT to the signal and returns the result as a typed
     /// spectrogram.  Prefer the typed convenience methods —
-    /// [`cqt_magnitude_spectrogram`], [`cqt_power_spectrogram`], or
-    /// [`cqt_db_spectrogram`] — for the most common amplitude scales.
+    /// [`cqt_magnitude_spectrogram`](crate::operations::AudioTransforms::cqt_magnitude_spectrogram), [`cqt_power_spectrogram`](crate::operations::AudioTransforms::cqt_power_spectrogram), or
+    /// [`cqt_db_spectrogram`](crate::operations::AudioTransforms::cqt_db_spectrogram) — for the most common amplitude scales.
     ///
     /// # Arguments
     /// - `params` — spectrogram parameters (window, hop, FFT size).
@@ -1285,6 +1901,20 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let spect = audio.cqt_spectrogram::<Magnitude>(&params, &cqt, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
     fn cqt_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -1294,7 +1924,25 @@ where
     where
         AmpScale: AmpScaleSpec;
 
-    /// Shorthand for [`cqt_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if the signal is multi-channel, or if STFT or CQT computation fails.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let spect = audio.cqt_magnitude_spectrogram(&params, &cqt).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn cqt_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1303,7 +1951,25 @@ where
         self.cqt_spectrogram::<Magnitude>(params, cqt, None)
     }
 
-    /// Shorthand for [`cqt_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if the signal is multi-channel, or if STFT or CQT computation fails.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let spect = audio.cqt_power_spectrogram(&params, &cqt).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn cqt_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1312,7 +1978,26 @@ where
         self.cqt_spectrogram::<Power>(params, cqt, None)
     }
 
-    /// Shorthand for [`cqt_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Errors
+    /// Returns an error if the signal is multi-channel, or if STFT or CQT computation fails.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.cqt_db_spectrogram(&params, &cqt, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn cqt_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -1337,6 +2022,19 @@ where
     /// # Returns
     /// `(magnitude, phase)` — the magnitude matrix (real-valued) and
     /// the phase matrix (complex unit-magnitude).
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// // Use a short signal so n_fft (1024) is larger than the signal length.
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(10), sample_rate!(44100), 0.8);
+    /// let spectrum = audio.fft(nzu!(1024)).unwrap();
+    /// let (mag, phase) = AudioSamples::<f64>::magphase(&spectrum, None);
+    /// assert_eq!(mag.shape(), phase.shape());
+    /// ```
+    #[inline]
     #[must_use]
     fn magphase(
         complex_spect: &Array2<Complex<f64>>,
@@ -1355,10 +2053,7 @@ where
         // Compute phase = D / mag_nonzero, but handle zeros separately
         let mut phase = complex_spect.clone();
 
-        let power = match power {
-            Some(p) => p.get() as f64,
-            None => 1.0,
-        };
+        let power = power.map_or(1.0, |p| p.get() as f64);
 
         // Perform elementwise division for real and imaginary parts
         Zip::from(&mut phase)
@@ -1381,40 +2076,66 @@ where
 
 /// Pitch detection and fundamental frequency analysis.
 ///
-/// This trait provides methods for detecting the fundamental frequency (pitch)
-/// of audio signals using various algorithms. These methods are essential for
-/// music analysis, tuning applications, and vocal processing.
+/// # Purpose
+///
+/// Provides fundamental-frequency estimation (YIN and autocorrelation),
+/// temporal pitch tracking, harmonic-to-noise ratio measurement, harmonic
+/// content analysis, and musical key estimation via chromagram correlation.
+///
+/// # Intended Usage
+///
+/// Use this trait for pitch-based analysis of monophonic audio — for example
+/// to extract a melody contour from a vocal recording, to measure intonation
+/// accuracy, or to classify the musical key of a short clip.
+///
+/// # Invariants
+///
+/// All methods require mono audio.  Multi-channel signals must be reduced to
+/// mono (e.g. with [`AudioChannelOps::to_mono`]) before use; passing a
+/// multi-channel signal returns [crate::AudioSampleError::Unsupported].
 #[cfg(feature = "pitch-analysis")]
 pub trait AudioPitchAnalysis: AudioTypeConversion
 where
     Self::Sample: StandardSample,
 {
-    /// Detects the fundamental frequency using the YIN algorithm.
+    /// Detects the fundamental frequency using the YIN pitch detection algorithm.
     ///
-    /// YIN is a robust pitch detection algorithm that works well with
-    /// both musical and vocal signals. It uses autocorrelation with
-    /// a cumulative normalized difference function.
-    ///
-    /// # Mathematical Foundation
-    ///
-    /// The YIN algorithm uses a difference function:
-    /// ```text
-    /// d_t(τ) = Σ(x_j - x_{j+τ})²
-    /// ```
-    ///
-    /// And cumulative mean normalized difference:
-    /// ```text
-    /// d'_t(τ) = d_t(τ) / [(1/τ) * Σ d_t(j)] if τ > 0, else 1
-    /// ```
+    /// YIN computes a cumulative mean normalised difference function (CMND) and
+    /// finds the first lag below `threshold`, which corresponds to the fundamental
+    /// period. Lower thresholds are stricter and reduce false detections; values
+    /// in `[0.1, 0.2]` are typical for musical audio.
     ///
     /// # Arguments
-    /// * `threshold` - Confidence threshold (0.0-1.0, typically 0.1-0.2)
-    /// * `min_frequency` - Minimum expected frequency in Hz (typically 80-100)
-    /// * `max_frequency` - Maximum expected frequency in Hz (typically 1000-2000)
+    ///
+    /// - `threshold` – Confidence threshold in `[0.0, 1.0]`.
+    /// - `min_frequency` – Minimum detectable frequency in Hz (> 0).
+    /// - `max_frequency` – Maximum detectable frequency in Hz (> `min_frequency`).
     ///
     /// # Returns
-    /// * `Some(frequency)` - Detected fundamental frequency in Hz
-    /// * `None` - No reliable pitch detected
+    ///
+    /// - `Some(frequency_hz)` – Estimated fundamental frequency.
+    /// - `None` – Signal is too short, silent, or no pitch was detected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `threshold ∉ [0.0, 1.0]`,
+    /// `min_frequency ≤ 0.0`, or `max_frequency ≤ min_frequency`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 440.0f64;
+    /// let audio = sine_wave::<f64>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    ///
+    /// let pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
+    /// assert!(pitch.is_some());
+    /// assert!((pitch.unwrap() - hz).abs() < 10.0);
+    /// ```
     fn detect_pitch_yin(
         &self,
         threshold: f64,
@@ -1422,40 +2143,101 @@ where
         max_frequency: f64,
     ) -> AudioSampleResult<Option<f64>>;
 
-    /// Detects pitch using autocorrelation method.
+    /// Detects the fundamental frequency using autocorrelation.
     ///
-    /// A simpler but less robust method that works well for clean signals.
-    /// Uses the peak in the autocorrelation function to estimate periodicity.
+    /// Finds the lag with maximum autocorrelation within the range implied by
+    /// `[min_frequency, max_frequency]` and converts it to a frequency. This
+    /// method is fast and effective for clean, periodic signals but less robust
+    /// than YIN on noisy or voiced speech.
     ///
     /// # Arguments
-    /// * `min_frequency` - Minimum expected frequency in Hz
-    /// * `max_frequency` - Maximum expected frequency in Hz
+    ///
+    /// - `min_frequency` – Minimum detectable frequency in Hz (> 1.0).
+    /// - `max_frequency` – Maximum detectable frequency in Hz (> `min_frequency`).
     ///
     /// # Returns
-    /// * `Some(frequency)` - Detected fundamental frequency in Hz
-    /// * `None` - No reliable pitch detected
+    ///
+    /// - `Some(frequency_hz)` – Estimated fundamental frequency.
+    /// - `None` – Signal is too short, silent, or unpitched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `min_frequency ≤ 1.0` or
+    /// `max_frequency ≤ min_frequency`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 220.0f64;
+    /// let audio = sine_wave::<f32>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    ///
+    /// let pitch = audio.detect_pitch_autocorr(80.0, 1000.0).unwrap();
+    /// assert!(pitch.is_some());
+    /// assert!((pitch.unwrap() - hz).abs() < 15.0);
+    /// ```
     fn detect_pitch_autocorr(
         &self,
         min_frequency: f64,
         max_frequency: f64,
     ) -> AudioSampleResult<Option<f64>>;
 
-    /// Tracks pitch over time using a sliding window analysis.
+    /// Tracks pitch over time by applying pitch detection to successive windows.
     ///
-    /// Applies pitch detection to overlapping windows across the signal,
-    /// providing a time-varying pitch contour.
+    /// The signal is split into overlapping frames of `window_size` samples,
+    /// advancing by `hop_size` each step. Each frame is analysed independently
+    /// using `method`. Frames shorter than `window_size / 2` at the signal end
+    /// are discarded. Only [`PitchDetectionMethod::Yin`] and
+    /// [`PitchDetectionMethod::Autocorrelation`] are implemented; other variants
+    /// log a warning and return `None` for that frame.
     ///
     /// # Arguments
-    /// * `window_size` - Size of analysis window in samples
-    /// * `hop_size` - Number of samples between successive windows
-    /// * `method` - Pitch detection method to use
-    /// * `threshold` - Confidence threshold (for YIN method)
-    /// * `min_frequency` - Minimum expected frequency in Hz
-    /// * `max_frequency` - Maximum expected frequency in Hz
+    ///
+    /// - `window_size` – Analysis window length in samples; must be ≤ signal length.
+    /// - `hop_size` – Step between successive windows in samples; must be < `window_size`.
+    /// - `method` – Pitch detection algorithm to use per frame.
+    /// - `threshold` – YIN confidence threshold; ignored for autocorrelation.
+    /// - `min_frequency` – Minimum detectable frequency in Hz.
+    /// - `max_frequency` – Maximum detectable frequency in Hz.
     ///
     /// # Returns
-    /// Vector of (time_seconds, frequency_hz) pairs, where frequency
-    /// is None if no pitch was detected in that window.
+    ///
+    /// A `Vec<(f64, Option<f64>)>` of `(time_seconds, frequency_hz)` pairs in
+    /// time order. `frequency_hz` is `None` when no pitch was found in that frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `window_size > signal length`
+    /// or `hop_size >= window_size`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::operations::types::PitchDetectionMethod;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 440.0f64;
+    /// let audio = sine_wave::<f32>(hz, Duration::from_millis(500), sample_rate!(44100), 1.0);
+    ///
+    /// let track = audio.track_pitch(
+    ///     NonZeroUsize::new(2048).unwrap(),
+    ///     NonZeroUsize::new(512).unwrap(),
+    ///     PitchDetectionMethod::Yin,
+    ///     0.1,
+    ///     80.0,
+    ///     1000.0,
+    /// ).unwrap();
+    ///
+    /// assert!(!track.is_empty());
+    /// ```
     fn track_pitch(
         &self,
         window_size: NonZeroUsize,
@@ -1466,19 +2248,45 @@ where
         max_frequency: f64,
     ) -> AudioSampleResult<Vec<(f64, Option<f64>)>>;
 
-    /// Computes the harmonic-to-noise ratio (HNR).
+    /// Computes the harmonic-to-noise ratio (HNR) in decibels.
     ///
-    /// HNR measures the ratio of periodic (harmonic) to aperiodic (noise)
-    /// components in the signal. Higher values indicate cleaner pitch.
+    /// HNR measures how much of the signal's energy comes from periodic
+    /// (harmonic) components versus aperiodic (noise) components. A high HNR
+    /// indicates a clean, voiced tone; a low or negative HNR indicates
+    /// noise-dominated content.
     ///
     /// # Arguments
-    /// * `fundamental_freq` - Known or estimated fundamental frequency
-    /// * `num_harmonics` - Number of harmonics to analyze (typically 5-10)
-    /// * `n_fft` - Optional FFT size for spectral analysis (defaults to signal length)
-    /// * `window_type` - Optional window function to apply before analysis. Defaults to Hanning.
+    ///
+    /// - `fundamental_freq` – Known fundamental frequency in Hz (> 0).
+    /// - `num_harmonics` – Number of harmonics to accumulate into harmonic power.
+    /// - `n_fft` – FFT size. Defaults to the signal length when `None`.
+    /// - `window_type` – Window function applied before FFT. Defaults to Hanning when `None`.
     ///
     /// # Returns
-    /// HNR value in dB. Higher values indicate stronger harmonic structure.
+    ///
+    /// HNR in dB. Returns `f64::INFINITY` when noise power is zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `fundamental_freq ≤ 0.0`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 440.0f64;
+    /// let audio = sine_wave::<f32>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    ///
+    /// let hnr = audio
+    ///     .harmonic_to_noise_ratio(hz, NonZeroUsize::new(5).unwrap(), None, None)
+    ///     .unwrap();
+    /// assert!(hnr > 0.0, "pure sine should have positive HNR, got {hnr:.1} dB");
+    /// ```
     fn harmonic_to_noise_ratio(
         &self,
         fundamental_freq: f64,
@@ -1487,20 +2295,48 @@ where
         window_type: Option<WindowType>,
     ) -> AudioSampleResult<f64>;
 
-    /// Performs harmonic analysis by detecting harmonics of a fundamental frequency.
+    /// Analyses the harmonic content relative to a known fundamental frequency.
     ///
-    /// Returns the magnitudes of detected harmonics relative to the fundamental.
-    /// Useful for timbre analysis and synthesis applications.
+    /// Computes the power spectrum of the signal and extracts the peak power
+    /// within a `tolerance`-relative frequency band around each harmonic of
+    /// `fundamental_freq`. All magnitudes are normalised so that the fundamental
+    /// (index 0) equals 1.0.
     ///
     /// # Arguments
-    /// * `fundamental_freq` - Fundamental frequency in Hz
-    /// * `num_harmonics` - Number of harmonics to analyze
-    /// * `tolerance` - Frequency tolerance for harmonic detection (0.0-1.0)
-    /// * `n_fft` - Optional FFT size for spectral analysis (defaults to signal length)
-    /// * `window_type` - Optional window function to apply before analysis. Defaults to Hanning.
+    ///
+    /// - `fundamental_freq` – Fundamental frequency in Hz (> 0).
+    /// - `num_harmonics` – Number of harmonics to extract, including the fundamental.
+    /// - `tolerance` – Fractional bandwidth around each harmonic to search, in `[0.0, 1.0]`.
+    /// - `n_fft` – FFT size. Defaults to the signal length when `None`.
+    /// - `window_type` – Window function applied before FFT. Defaults to Hanning when `None`.
     ///
     /// # Returns
-    /// Vector of harmonic magnitudes normalized to the fundamental (index 0).
+    ///
+    /// A `Vec<f64>` of length `num_harmonics`. Index 0 is always 1.0 after
+    /// normalisation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `fundamental_freq ≤ 0.0` or
+    /// `tolerance ∉ [0.0, 1.0]`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sawtooth_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 220.0f64;
+    /// let audio = sawtooth_wave::<f32>(hz, Duration::from_millis(500), sample_rate!(44100), 1.0);
+    ///
+    /// let harmonics = audio
+    ///     .harmonic_analysis(hz, NonZeroUsize::new(5).unwrap(), 0.1, None, None)
+    ///     .unwrap();
+    /// assert_eq!(harmonics.len(), 5);
+    /// ```
     fn harmonic_analysis(
         &self,
         fundamental_freq: f64,
@@ -1510,25 +2346,85 @@ where
         window_type: Option<WindowType>,
     ) -> AudioSampleResult<Vec<f64>>;
 
-    /// Estimates the key/pitch class of musical audio.
+    /// Estimates the musical key of the audio using chromagram analysis.
     ///
-    /// Uses chromagram analysis to determine the most likely musical key.
-    /// Returns both the key and a confidence measure.
+    /// Computes a chromagram and compares the averaged chroma vector against
+    /// Krumhansl-Schmuckler major and minor key profiles via Pearson correlation.
     ///
     /// # Arguments
-    /// * `stft_params` - Parameters for the Short-Time Fourier Transform used in chromagram analysis
+    ///
+    /// - `stft_params` – STFT parameters controlling frame size and hop for
+    ///   chromagram computation.
     ///
     /// # Returns
-    /// Tuple of (key_index, confidence) where key_index is 0-11 for
-    /// C, C#, D, D#, E, F, F#, G, G#, A, A#, B and confidence is 0.0-1.0
+    ///
+    /// A `(key_index, confidence)` tuple where:
+    /// - `key_index` is in `0..=11` for major keys (C=0, C♯=1, …, B=11) and
+    ///   `12..=23` for minor keys (Cm=12, C♯m=13, …, Bm=23).
+    /// - `confidence` is in `[0.0, 1.0]`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the `spectrograms` crate during STFT or
+    /// chromagram computation.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use spectrograms::{StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// # let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+    /// let params = StftParams::new(
+    ///     NonZeroUsize::new(2048).unwrap(),
+    ///     NonZeroUsize::new(512).unwrap(),
+    ///     WindowType::Hanning,
+    ///     true,
+    /// ).unwrap();
+    /// let (key, confidence) = audio.estimate_key(&params).unwrap();
+    /// assert!(key < 24);
+    /// assert!((0.0..=1.0).contains(&confidence));
+    /// ```
     fn estimate_key(&self, stft_params: &StftParams) -> AudioSampleResult<(usize, f64)>;
 }
 
 /// IIR (Infinite Impulse Response) filtering operations.
 ///
-/// This trait provides methods for applying IIR filters to audio signals.
-/// IIR filters are recursive filters that can achieve sharp roll-offs
-/// with fewer coefficients than FIR filters.
+/// # Purpose
+///
+/// Applies recursive digital filters — Butterworth and Chebyshev Type I — to
+/// audio signals.  IIR filters achieve sharp frequency roll-offs with far fewer
+/// coefficients than equivalent FIR designs, making them efficient for tasks
+/// such as anti-aliasing, DC removal, and band limiting.
+///
+/// # Intended Usage
+///
+/// Use this trait when steeper roll-off or lower latency is more important than
+/// linear phase response.  For a gentler, linear-phase roll-off prefer the FIR
+/// helpers in [`AudioProcessing`].
+///
+/// ```rust
+/// use audio_samples::{AudioSamples, sample_rate};
+/// use audio_samples::operations::traits::AudioIirFiltering;
+/// use audio_samples::operations::types::IirFilterDesign;
+/// use non_empty_slice::NonEmptyVec;
+/// use std::num::NonZeroUsize;
+///
+/// let samples = NonEmptyVec::new(vec![1.0f32, -0.5, 0.25, -0.1, 0.0, 0.1]).unwrap();
+/// let mut audio: AudioSamples<'_, f32> =
+///     AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+/// audio.butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 5000.0).unwrap();
+/// ```
+///
+/// # Invariants
+///
+/// Each channel is filtered independently from a clean (zero) initial state.
+/// The filter coefficients are derived from the audio's own sample rate at
+/// call time; changing the sample rate between calls requires re-applying
+/// the filter.
 #[cfg(feature = "iir-filtering")]
 pub trait AudioIirFiltering: AudioTypeConversion
 where
@@ -1548,7 +2444,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if any frequency in `design`
+    /// - [crate::AudioSampleError::Parameter] – if any frequency in `design`
     ///   is out of the valid range (0, Nyquist), or the filter type is
     ///   not yet implemented.
     ///
@@ -1583,7 +2479,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `cutoff_frequency` is
+    /// - [crate::AudioSampleError::Parameter] – if `cutoff_frequency` is
     ///   outside the valid range.
     ///
     /// # Examples
@@ -1618,7 +2514,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `cutoff_frequency` is
+    /// - [crate::AudioSampleError::Parameter] – if `cutoff_frequency` is
     ///   outside the valid range.
     ///
     /// # Examples
@@ -1655,7 +2551,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the frequency range is
+    /// - [crate::AudioSampleError::Parameter] – if the frequency range is
     ///   invalid.
     ///
     /// # Examples
@@ -1694,7 +2590,7 @@ where
     /// `Ok(())` on success (currently unreachable).
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – always, because the design
+    /// - [crate::AudioSampleError::Parameter] – always, because the design
     ///   is not yet implemented.
     ///
     /// # Examples
@@ -1707,10 +2603,10 @@ where
     ///
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.0, -1.0, 0.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// let result = audio.chebyshev_i(
+    /// audio.chebyshev_i(
     ///     NonZeroUsize::new(4).unwrap(), 1000.0, 0.5, FilterResponse::LowPass,
-    /// );
-    /// assert!(result.is_err());
+    /// )?;
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     fn chebyshev_i(
         &mut self,
@@ -1734,6 +2630,9 @@ where
     /// length as `frequencies`.  Currently `magnitudes` is all 1.0 and
     /// `phases` is all 0.0.
     ///
+    /// # Errors
+    /// May return errors from underlying filter analysis (placeholder currently does not error).
+    ///
     /// # Examples
     /// ```
     /// use audio_samples::{AudioSamples, sample_rate};
@@ -1752,12 +2651,27 @@ where
 
 /// Parametric equalization operations.
 ///
-/// Parametric equalizer operations for audio signals.
+/// # Purpose
 ///
-/// Provides multi-band parametric EQ processing with independent control over
-/// centre frequency, gain, and bandwidth (Q) for each band. All seven standard
-/// band types are supported: peak, low/high shelf, low/high pass, band pass, and
-/// band stop.
+/// Multi-band parametric EQ with independent control over centre frequency,
+/// gain, and bandwidth (Q) per band.  All seven standard band types are
+/// supported: peak, low shelf, high shelf, low pass, high pass, band pass,
+/// and band stop.
+///
+/// # Intended Usage
+///
+/// Use this trait to shape the tonal balance of audio — for example to boost
+/// presence in a vocal, to cut rumble below 80 Hz, or to compare frequency
+/// responses programmatically.  Build a [`ParametricEq`] from one or more
+/// [`EqBand`] entries and apply it with [`apply_parametric_eq`].
+///
+/// # Invariants
+///
+/// EQ is applied independently to each channel.  The frequency response is
+/// computed from the audio's sample rate at call time; the same `EqBand`
+/// parameters produce different digital coefficients at different sample rates.
+///
+/// [`apply_parametric_eq`]: AudioParametricEq::apply_parametric_eq
 #[cfg(feature = "parametric-eq")]
 pub trait AudioParametricEq: AudioChannelOps
 where
@@ -1780,7 +2694,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any enabled band fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if any enabled band fails validation
     /// (e.g. frequency above the Nyquist limit, Q factor ≤ 0, or gain out of range).
     ///
     /// # Example
@@ -1818,9 +2732,9 @@ where
     ///
     /// # Errors
     ///
-    /// - [`AudioSampleError::Parameter`] if band validation fails (frequency above Nyquist,
+    /// - [crate::AudioSampleError::Parameter] if band validation fails (frequency above Nyquist,
     ///   Q ≤ 0, or gain out of range).
-    /// - [`AudioSampleError::Layout`] if the underlying sample buffer is non-contiguous.
+    /// - [crate::AudioSampleError::Layout] if the underlying sample buffer is non-contiguous.
     ///
     /// # Example
     ///
@@ -1854,7 +2768,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if `frequency`, `gain_db`, or `q_factor`
+    /// Returns [crate::AudioSampleError::Parameter] if `frequency`, `gain_db`, or `q_factor`
     /// fail band validation.
     ///
     /// # Example
@@ -1894,7 +2808,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any parameter fails band validation.
+    /// Returns [crate::AudioSampleError::Parameter] if any parameter fails band validation.
     ///
     /// # Example
     ///
@@ -1933,7 +2847,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any parameter fails band validation.
+    /// Returns [crate::AudioSampleError::Parameter] if any parameter fails band validation.
     ///
     /// # Example
     ///
@@ -1978,7 +2892,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any band fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if any band fails validation
     /// (e.g. frequency above Nyquist or Q ≤ 0).
     ///
     /// # Example
@@ -2027,7 +2941,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if any enabled band fails to design
+    /// Returns [crate::AudioSampleError::Parameter] if any enabled band fails to design
     /// a filter (e.g. frequency above the Nyquist limit).
     ///
     /// # Example
@@ -2059,9 +2973,25 @@ where
 
 /// Dynamic range control operations for audio signals.
 ///
-/// Provides compressors, limiters, noise gates, and expanders — the standard toolkit
-/// for controlling the difference between loud and quiet passages. All operations work
-/// on both mono and multi-channel audio (unless otherwise noted).
+/// # Purpose
+///
+/// The standard toolkit for controlling loudness variation: compression,
+/// limiting, noise gating, and expansion.  All four processors share a
+/// threshold-based design and support optional lookahead and side-chain inputs.
+///
+/// # Intended Usage
+///
+/// Apply these processors as a final stage in a mastering or broadcast chain
+/// to ensure consistent loudness, or as a creative effect.  For quick results
+/// use the preset constructors (`CompressorConfig::vocal()`,
+/// `LimiterConfig::transparent()`, etc.); for precise control build a config
+/// struct directly.
+///
+/// # Invariants
+///
+/// All operations modify the signal in place and propagate errors rather than
+/// panicking.  Each channel is processed independently from the same
+/// configuration unless side-chain routing is enabled.
 #[cfg(feature = "dynamic-range")]
 pub trait AudioDynamicRange: AudioTypeConversion
 where
@@ -2087,7 +3017,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if the configuration fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails validation
     /// (e.g. threshold above 0 dBFS, ratio below 1.0, or negative time constants).
     ///
     /// # Example
@@ -2124,7 +3054,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AudioSampleError::Parameter`] if the configuration fails validation
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails validation
     /// (e.g. ceiling above 0 dBFS or invalid time constants).
     ///
     /// # Example
@@ -2164,10 +3094,10 @@ where
     ///
     /// # Errors
     ///
-    /// - [`AudioSampleError::Parameter`] if sidechain is not enabled in `config`.
-    /// - [`AudioSampleError::Parameter`] if the main and sidechain signals have
+    /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
     ///   different lengths.
-    /// - [`AudioSampleError::Parameter`] if either signal is multi-channel (not yet
+    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
     ///   supported).
     ///
     /// # Example
@@ -2217,10 +3147,10 @@ where
     ///
     /// # Errors
     ///
-    /// - [`AudioSampleError::Parameter`] if sidechain is not enabled in `config`.
-    /// - [`AudioSampleError::Parameter`] if the main and sidechain signals have
+    /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
     ///   different lengths.
-    /// - [`AudioSampleError::Parameter`] if either signal is multi-channel (not yet
+    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
     ///   supported).
     ///
     /// # Example
@@ -2268,6 +3198,10 @@ where
     /// A `Vec<f64>` of output levels in dBFS, one per entry in `input_levels_db`,
     /// in the same order.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration parameters are invalid.
+    ///
     /// # Example
     ///
     /// ```
@@ -2311,6 +3245,10 @@ where
     ///
     /// A `Vec<f64>` of gain reduction values in dB (each value ≥ 0.0), one per sample
     /// in the signal (or first channel for multi-channel audio).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration parameters are invalid or signal processing fails.
     ///
     /// # Example
     ///
@@ -2418,9 +3356,27 @@ where
 
 /// Time-domain editing operations for [`AudioSamples`].
 ///
-/// This trait provides trimming, padding, fading, mixing,
-/// concatenation, and other time-domain editing methods.  Most
-/// operations work transparently on both mono and multi-channel audio.
+/// # Purpose
+///
+/// Provides structural manipulation of audio buffers: reversing, trimming,
+/// padding, splitting, concatenating, mixing, fading, repeating, and silence
+/// removal.  Also includes data-augmentation via [`perturb`].
+///
+/// # Intended Usage
+///
+/// Use this trait to construct or reshape audio segments — for example to
+/// trim silence from the edges of a recording, to concatenate a sequence of
+/// clips, or to build training data through random perturbation.  Most
+/// operations return a new owned [`AudioSamples`]; mutations are performed
+/// in place only where the method name ends with `_in_place`.
+///
+/// # Invariants
+///
+/// Operations that combine two signals (mix, concatenate, stack) validate that
+/// sample rates and channel counts match before proceeding; mismatches return
+/// [crate::AudioSampleError::Parameter].
+///
+/// [`perturb`]: AudioEditing::perturb
 #[cfg(feature = "editing")]
 pub trait AudioEditing: AudioTypeConversion
 where
@@ -2998,9 +3954,25 @@ where
 
 /// Channel manipulation and layout conversion operations.
 ///
-/// This trait provides mono/stereo conversions, channel extraction,
-/// panning, balancing, interleaving, and per-channel transforms on
-/// [`AudioSamples`] of any supported sample type.
+/// # Purpose
+///
+/// Provides everything needed to change the channel structure of an
+/// [`AudioSamples`] buffer: mono/stereo conversion, channel duplication,
+/// per-channel extraction, panning, balance adjustment, interleaving, and
+/// element-wise channel transforms.
+///
+/// # Intended Usage
+///
+/// Use this trait to prepare audio for a pipeline that has different channel
+/// requirements — for example downmixing a recording to mono before pitch
+/// analysis, or interleaving planar channels before writing to a file.
+///
+/// # Invariants
+///
+/// Operations that reference a specific channel index validate that the index
+/// is within bounds and return [crate::AudioSampleError::Parameter] if not.
+/// Interleaving and de-interleaving are inverse operations: round-tripping
+/// through both preserves all sample values.
 #[cfg(feature = "channels")]
 pub trait AudioChannelOps: AudioTypeConversion
 where
@@ -3024,7 +3996,7 @@ where
     /// An owned mono [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `method` is `Weighted`
+    /// - [crate::AudioSampleError::Parameter] – if `method` is `Weighted`
     ///   and the weights vector length does not match the channel count.
     ///
     /// # Examples
@@ -3045,7 +4017,7 @@ where
         method: MonoConversionMethod,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
-    /// Convert audio to a different channel layout.
+    /// Convert audio to a different stereo.
     ///
     /// Behaviour depends on the chosen method:
     /// - `Duplicate` – copies mono audio to both channels; multi-channel
@@ -3064,7 +4036,7 @@ where
     /// An owned [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `Left` or `Right` is
+    /// - [crate::AudioSampleError::Parameter] – if `Left` or `Right` is
     ///   chosen and the requested channel does not exist.
     ///
     /// # Examples
@@ -3098,7 +4070,7 @@ where
     /// at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `n_channels` is 0.
+    /// - [crate::AudioSampleError::Parameter] – if `n_channels` is 0.
     ///
     /// # Examples
     /// ```
@@ -3129,7 +4101,7 @@ where
     /// An owned mono [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `channel_index` is ≥ the
+    /// - [crate::AudioSampleError::Parameter] – if `channel_index` is ≥ the
     ///   number of channels.
     ///
     /// # Examples
@@ -3162,7 +4134,7 @@ where
     /// A borrowed mono [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `channel_index` is ≥ the
+    /// - [crate::AudioSampleError::Parameter] – if `channel_index` is ≥ the
     ///   number of channels.
     ///
     /// # Examples
@@ -3196,7 +4168,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if either index is ≥ the
+    /// - [crate::AudioSampleError::Parameter] – if either index is ≥ the
     ///   number of channels.
     ///
     /// # Examples
@@ -3228,7 +4200,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the audio is mono or
+    /// - [crate::AudioSampleError::Parameter] – if the audio is mono or
     ///   has a channel count other than 2.
     ///
     /// # Examples
@@ -3259,7 +4231,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the audio is mono or
+    /// - [crate::AudioSampleError::Parameter] – if the audio is mono or
     ///   has a channel count other than 2.
     ///
     /// # Examples
@@ -3291,7 +4263,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the audio is
+    /// - [crate::AudioSampleError::Parameter] – if the audio is
     ///   multi-channel and `channel_index` is ≥ the number of
     ///   channels.
     ///
@@ -3326,7 +4298,7 @@ where
     /// input signal.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the input signals do
+    /// - [crate::AudioSampleError::Parameter] – if the input signals do
     ///   not all have the same sample count.
     ///
     /// # Examples
@@ -3357,6 +4329,9 @@ where
     ///
     /// # Returns
     /// A vector of owned mono [`AudioSamples`], one per input channel.
+    ///
+    /// # Errors
+    /// Returns an error if channel separation fails or memory allocation fails.
     ///
     /// # Examples
     /// ```
@@ -3404,66 +4379,75 @@ where
 /// let drums_isolated = percussive.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
 /// let melody_isolated = harmonic.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
 /// ```
+/// Audio source separation using spectral decomposition techniques.
+///
+/// # Purpose
+///
+/// Separates an audio signal into its constituent perceptual components.
+/// Currently provides Harmonic–Percussive Source Separation (HPSS), which
+/// splits a signal into a tonal/sustained layer and a transient/percussive layer.
+///
+/// # Intended Usage
+///
+/// Use this trait when downstream processing needs to operate on only one
+/// component type — for example to apply pitch correction only to the harmonic
+/// layer, or to analyse rhythm independently of melody.
+///
+/// # Invariants
+///
+/// The harmonic and percussive components sum to the original signal (within
+/// floating-point precision) when soft masking is disabled.  Both outputs carry
+/// the same sample rate and channel count as the input.
 #[cfg(feature = "decomposition")]
 pub trait AudioDecomposition: AudioTransforms
 where
     Self::Sample: StandardSample,
 {
-    /// Separate audio into harmonic and percussive components using HPSS.
+    /// Separates audio into harmonic and percussive components (HPSS).
     ///
-    /// Harmonic/Percussive Source Separation (HPSS) uses Short-Time Fourier Transform
-    /// (STFT) magnitude median filtering to separate audio signals based on their
-    /// spectral characteristics:
+    /// Harmonic–Percussive Source Separation applies median filtering to the
+    /// STFT magnitude spectrogram along the time axis to enhance tonal content
+    /// and along the frequency axis to enhance transient content.  Binary or
+    /// soft masks are derived from the filtered spectrograms and applied to
+    /// the original STFT; the resulting masked spectra are inverted to produce
+    /// two time-domain signals.
     ///
-    /// - **Harmonic components**: Sustained tonal content (vocals, sustained instruments)
-    /// - **Percussive components**: Transient content (drums, attacks, onsets)
-    ///
-    /// The algorithm works by:
-    /// 1. Computing the STFT magnitude spectrogram
-    /// 2. Applying median filtering along time axis (enhances harmonic content)
-    /// 3. Applying median filtering along frequency axis (enhances percussive content)
-    /// 4. Creating separation masks based on the filtered spectrograms
-    /// 5. Reconstructing time-domain signals using inverse STFT
+    /// Reference:
+    /// Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering".
+    /// Müller, M. (2015). *Fundamentals of Music Processing*, Section 8.4.
     ///
     /// # Arguments
     ///
-    /// * `config` - HPSS configuration parameters controlling window size,
-    ///   hop size, median filter sizes, and mask softness
+    /// - `config` – HPSS parameters: window size, hop size, harmonic and percussive
+    ///   median-filter lengths, and mask softness (`HpssConfig::musical()` for a
+    ///   good default).
     ///
     /// # Returns
     ///
-    /// A tuple containing `(harmonic_component, percussive_component)` as separate
-    /// AudioSamples instances with the same sample rate as the input.
+    /// A `(harmonic, percussive)` tuple.  Both signals have the same sample rate
+    /// and channel count as the input.
     ///
     /// # Errors
     ///
-    /// - `AudioSampleError::Parameter` if configuration parameters are invalid
-    /// - `AudioSampleError::Parameter` if signal is too short for the specified window size
-    /// - `AudioSampleError::Layout` if STFT/ISTFT operations fail
+    /// - [crate::AudioSampleError::Parameter] if `config` fields are invalid or the
+    ///   signal is shorter than the specified STFT window.
+    /// - [crate::AudioSampleError::Layout] if internal STFT or ISTFT operations fail.
     ///
-    /// # Performance Notes
+    /// # Examples
     ///
-    /// - Computational complexity is O(N log N) due to FFT operations
-    /// - Memory usage scales with window size and signal length
-    /// - Consider using smaller window/hop sizes for real-time applications
-    /// - Enable `parallel-processing` feature for multi-threaded acceleration
+    /// ```no_run
+    /// use audio_samples::{AudioSamples, sample_rate, sine_wave};
+    /// use audio_samples::operations::hpss::HpssConfig;
+    /// use audio_samples::operations::traits::AudioDecomposition;
+    /// use std::time::Duration;
     ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use audio_samples::operations::{AudioDecomposition, HpssConfig};
-    ///
-    /// let config = HpssConfig::musical(); // Optimized for musical content
-    /// let (harmonic, percussive) = audio.hpss(&config)?;
-    ///
-    /// // Harmonic component contains vocals, sustained instruments
-    /// // Percussive component contains drums, attacks, transients
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+    /// let config = HpssConfig::musical();
+    /// let (harmonic, percussive) = audio.hpss(&config).unwrap();
+    /// assert_eq!(harmonic.sample_rate(), audio.sample_rate());
+    /// assert_eq!(percussive.sample_rate(), audio.sample_rate());
     /// ```
-    ///
-    /// # References
-    ///
-    /// - Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering"
-    /// - Müller, M. (2015). "Fundamentals of Music Processing", Section 8.4
+    #[allow(clippy::type_complexity)]
     fn hpss(
         &self,
         config: &HpssConfig,
@@ -3473,61 +4457,132 @@ where
     )>;
 }
 
+/// Onset detection and spectral analysis operations.
+///
+/// # Purpose
+///
+/// Locates the moments where a new musical event begins — note attacks,
+/// drum hits, chord changes — and exposes the intermediate spectral
+/// representations that drive the detection.
+///
+/// # Intended Usage
+///
+/// Use `detect_onsets` or `detect_onsets_spectral_flux` when you need
+/// a list of onset timestamps.  Use `onset_detection_function` or
+/// `spectral_flux` when you need the raw activation curve for downstream
+/// analysis (e.g. beat induction or custom peak-picking).
+/// `complex_onset_detection` and its helpers provide a phase-sensitive
+/// alternative useful for polyphonic or sustained content.
+///
+/// # Invariants
+///
+/// All returned time vectors are sorted in ascending order and expressed in
+/// seconds relative to the start of the signal.  The detection-function and
+/// timestamp vectors returned by tuple methods always have the same length.
 #[cfg(feature = "onset-detection")]
 pub trait AudioOnsetDetection: AudioTransforms
 where
     Self::Sample: StandardSample,
 {
-    /// Detects onsets in the audio signal using spectral flux method.
+    /// Detects onset times in the audio signal using spectral flux.
+    ///
+    /// Computes an onset detection function from the signal and applies
+    /// peak-picking to find the frames where new events begin.  The
+    /// exact pipeline is controlled by `config`.
     ///
     /// # Arguments
-    /// * `config` - Onset detection configuration parameters
+    ///
+    /// - `config` – Onset detection parameters: STFT settings, flux method,
+    ///   peak-picking thresholds, and minimum inter-onset interval.
     ///
     /// # Returns
-    /// Vector of onset times in seconds
+    ///
+    /// A `Vec<f64>` of onset times in seconds, sorted ascending.
+    /// Returns an empty `Vec` if no onsets are found.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `config` fields are invalid.
+    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
     fn detect_onsets(&self, config: &OnsetDetectionConfig) -> AudioSampleResult<Vec<f64>>;
 
-    /// Compute onset detection function (energy-based).
+    /// Computes the onset detection function and its time axis.
+    ///
+    /// Returns the raw activation curve before peak-picking, together with
+    /// the corresponding frame timestamps.  Useful when you want to inspect
+    /// the ODF, apply custom thresholding, or feed it into a beat tracker.
     ///
     /// # Arguments
-    /// * `config` - Onset detection configuration parameters
+    ///
+    /// - `config` – Onset detection parameters controlling the spectral
+    ///   analysis and flux computation.
     ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// - Vector of onset detection function values
-    /// - Vector of corresponding time stamps in seconds
+    /// A `(odf_values, timestamps)` tuple:
+    /// - `odf_values` – One activation value per analysis frame.
+    /// - `timestamps` – Corresponding frame centre times in seconds.
+    ///   Both vectors have the same length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `config` fields are invalid.
+    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
     fn onset_detection_function(
         &self,
         config: &OnsetDetectionConfig,
     ) -> AudioSampleResult<(NonEmptyVec<f64>, NonEmptyVec<f64>)>;
 
-    /// Detect onsets using spectral flux.
+    /// Detects onset times using the spectral-flux method.
+    ///
+    /// An alternative entry point that accepts a [`SpectralFluxConfig`]
+    /// directly, exposing finer control over the CQT analysis and flux
+    /// accumulation than the higher-level [`detect_onsets`].
     ///
     /// # Arguments
     ///
-    /// * `config` - Spectral flux configuration parameters
+    /// - `config` – Spectral flux parameters: CQT settings, flux method,
+    ///   and peak-picking thresholds.
     ///
     /// # Returns
     ///
+    /// A `Vec<f64>` of onset times in seconds, sorted ascending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `config` fields are invalid.
+    /// Returns [crate::AudioSampleError::Processing] if the CQT computation fails.
+    ///
+    /// [`detect_onsets`]: AudioOnsetDetection::detect_onsets
     fn detect_onsets_spectral_flux(
         &self,
         config: &SpectralFluxConfig,
     ) -> AudioSampleResult<Vec<f64>>;
 
-    /// Compute spectral flux only.
+    /// Computes the spectral flux curve and its time axis.
+    ///
+    /// Returns the per-frame positive spectral change using the specified
+    /// CQT parameters and flux method, together with the corresponding
+    /// timestamps.  The raw flux curve can be used as an onset strength
+    /// signal for beat tracking or visualisation.
     ///
     /// # Arguments
     ///
-    /// * `config` - CQT parameters for spectral analysis
-    /// * `hop_size` - Hop size between successive frames
-    /// * `method` - Method for computing spectral flux
+    /// - `config` – CQT analysis parameters (bins per octave, frequency range, etc.).
+    /// - `window_size` – Analysis window length in samples.
+    /// - `hop_size` – Number of samples to advance between successive windows.
+    /// - `method` – Spectral flux variant to compute (e.g. positive flux,
+    ///   complex flux, or Wiener entropy).
     ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// - Vector of spectral flux values
-    /// - Vector of corresponding time stamps in seconds
+    /// A `(flux_values, timestamps)` tuple, both of equal length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `window_size` or `hop_size`
+    /// are inconsistent with the signal length.
+    /// Returns [crate::AudioSampleError::Processing] if the CQT computation fails.
     fn spectral_flux(
         &self,
         config: &CqtParams,
@@ -3536,57 +4591,97 @@ where
         method: SpectralFluxMethod,
     ) -> AudioSampleResult<(NonEmptyVec<f64>, NonEmptyVec<f64>)>;
 
-    /// Complex domain onset detection.
+    /// Detects onset times using the complex-domain onset detection function.
+    ///
+    /// Combines magnitude difference and phase deviation into a single
+    /// activation curve that is sensitive to both amplitude changes and phase
+    /// discontinuities.  This makes it more robust than spectral-flux alone
+    /// for sustained or polyphonic content.
     ///
     /// # Arguments
     ///
-    /// * `onset_config` - Onset detection configuration parameters
+    /// - `onset_config` – Complex onset detection parameters: STFT settings
+    ///   and peak-picking thresholds.
     ///
     /// # Returns
     ///
-    /// Vector of onset times in seconds
+    /// A `Vec<f64>` of onset times in seconds, sorted ascending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `onset_config` fields are invalid.
+    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
     fn complex_onset_detection(
         &self,
         onset_config: &ComplexOnsetConfig,
     ) -> AudioSampleResult<Vec<f64>>;
 
-    /// Compute complex domain onset detection function.
+    /// Computes the complex-domain onset detection function curve.
+    ///
+    /// Returns the raw per-frame activation values before peak-picking.
+    /// Each value combines the magnitude difference and unwrapped phase
+    /// deviation for that frame.
     ///
     /// # Arguments
     ///
-    /// * `onset_config` - Onset detection configuration parameters
+    /// - `onset_config` – Complex onset detection parameters.
     ///
     /// # Returns
     ///
-    /// Vector of complex domain onset detection function values
+    /// A `NonEmptyVec<f64>` with one value per analysis frame, in
+    /// chronological order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `onset_config` is invalid.
+    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
     fn onset_detection_function_complex(
         &self,
         onset_config: &ComplexOnsetConfig,
     ) -> AudioSampleResult<NonEmptyVec<f64>>;
 
-    /// Compute magnitude difference matrix for complex domain onset detection.
+    /// Computes the frame-by-frame magnitude difference matrix.
+    ///
+    /// Each entry `[i, j]` is the absolute difference in spectral magnitude
+    /// between consecutive STFT frames at frequency bin `j` and frame `i`.
+    /// This is an intermediate building block of the complex ODF.
     ///
     /// # Arguments
     ///
-    /// * `config` - Complex onset detection configuration parameters
+    /// - `config` – Complex onset detection parameters controlling the STFT
+    ///   analysis window.
     ///
     /// # Returns
     ///
-    /// 2D array representing the magnitude difference matrix
+    /// An `Array2<f64>` with shape `[frames, frequency_bins]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
     fn magnitude_difference_matrix(
         &self,
         config: &ComplexOnsetConfig,
     ) -> AudioSampleResult<Array2<f64>>;
 
-    /// Compute phase deviation matrix for complex domain onset detection.
+    /// Computes the frame-by-frame phase deviation matrix.
+    ///
+    /// Each entry `[i, j]` is the second-order phase difference (phase
+    /// deviation from a constant-frequency prediction) at frequency bin `j`
+    /// and frame `i`.  This is an intermediate building block of the
+    /// complex ODF.
     ///
     /// # Arguments
     ///
-    /// * `config` - Complex onset detection configuration parameters
+    /// - `config` – Complex onset detection parameters controlling the STFT
+    ///   analysis window.
     ///
     /// # Returns
     ///
-    /// 2D array representing the phase deviation matrix
+    /// An `Array2<f64>` with shape `[frames, frequency_bins]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
     fn phase_deviation_matrix(&self, config: &ComplexOnsetConfig)
     -> AudioSampleResult<Array2<f64>>;
 }
@@ -3621,7 +4716,7 @@ where
     /// chronological order.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `config.tempo_bpm` is
+    /// - [crate::AudioSampleError::Parameter] – if `config.tempo_bpm` is
     ///   ≤ 0 or if the inter-beat interval is too small relative to
     ///   the hop size.
     ///
@@ -3642,39 +4737,91 @@ where
     fn detect_beats(&self, config: &BeatTrackingConfig) -> AudioSampleResult<BeatTrackingData>;
 }
 
+/// Audio visualisation operations.
+///
+/// # Purpose
+///
+/// Produces interactive plots of audio signals in three representations:
+/// time-domain waveform, time–frequency spectrogram, and single-frame
+/// magnitude spectrum.  All plots are rendered via the `plotly` crate.
+///
+/// # Intended Usage
+///
+/// Use this trait during exploratory analysis or for generating report
+/// artefacts.  Each method returns an opaque plot object that can be
+/// rendered to HTML or saved to a file — consult the `WaveformPlot`,
+/// `SpectrogramPlot`, and `MagnitudeSpectrumPlot` types for output
+/// options.
+///
+/// # Invariants
+///
+/// Plot methods do not modify the audio signal.  Errors are only returned
+/// when the underlying spectrogram or FFT computation fails (e.g. if the
+/// signal is too short for the requested window size).
 #[cfg(feature = "plotting")]
 pub trait AudioPlotting: AudioTransforms
 where
     Self::Sample: StandardSample,
 {
-    /// Plot the waveform of the audio signal.
+    /// Renders a time-domain waveform plot.
+    ///
+    /// Draws the amplitude of each sample against time, one trace per channel.
     ///
     /// # Arguments
-    /// * `config` - Configuration parameters for waveform plotting
+    ///
+    /// - `params` – Visual parameters: title, axis labels, colour scheme,
+    ///   and time range.
     ///
     /// # Returns
-    /// A plot object that can be rendered or saved to a file
+    ///
+    /// A [`WaveformPlot`] that can be rendered to HTML or saved to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Processing] if the internal rendering
+    /// pipeline fails.
     fn plot_waveform(&self, params: &WaveformPlotParams) -> AudioSampleResult<WaveformPlot>;
 
-    /// Plot the spectrogram of the audio signal.
+    /// Renders a time–frequency spectrogram plot.
+    ///
+    /// Computes an STFT and displays the resulting magnitude (or log-magnitude)
+    /// as a heat-map with time on the x-axis and frequency on the y-axis.
     ///
     /// # Arguments
-    /// * `config` - Configuration parameters for spectrogram plotting
+    ///
+    /// - `params` – Spectrogram and visual parameters: STFT window size, hop
+    ///   size, frequency range, colour scale, and title.
     ///
     /// # Returns
-    /// A plot object that can be rendered or saved to a file
+    ///
+    /// A [`SpectrogramPlot`] that can be rendered to HTML or saved to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails
+    /// (e.g. signal shorter than the STFT window).
     fn plot_spectrogram(
         &self,
         params: &SpectrogramPlotParams,
     ) -> AudioSampleResult<SpectrogramPlot>;
 
-    /// Plot the magnitude spectrum (frequency content) of the audio signal.
+    /// Renders a magnitude spectrum plot for a single frame.
+    ///
+    /// Applies an FFT to the audio and displays the per-bin magnitudes on
+    /// a frequency axis, optionally on a logarithmic scale.
     ///
     /// # Arguments
-    /// * `params` - Configuration parameters for magnitude spectrum plotting
+    ///
+    /// - `params` – Spectrum and visual parameters: FFT size, frequency range,
+    ///   amplitude scale, and title.
     ///
     /// # Returns
-    /// A magnitude spectrum plot showing the frequency content
+    ///
+    /// A [`MagnitudeSpectrumPlot`] that can be rendered to HTML or saved to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Processing] if the FFT computation fails.
     fn plot_magnitude_spectrum(
         &self,
         params: &MagnitudeSpectrumParams,
@@ -3683,9 +4830,31 @@ where
 
 /// Amplitude envelope extraction operations.
 ///
-/// This trait provides five methods for tracking how the amplitude of
-/// an audio signal varies over time.  All methods return an [`NdResult`]
-/// that mirrors the input channel layout.
+/// # Purpose
+///
+/// Tracks how the amplitude of an audio signal changes over time.  Five
+/// complementary methods cover the most common envelope shapes: per-sample
+/// rectification, RMS sliding window, attack/decay follower, analytic
+/// (Hilbert-transform) envelope, and moving-average smoothing.
+///
+/// # Intended Usage
+///
+/// Use this trait in dynamics processing (side-chain detection), amplitude
+/// modulation analysis, or anywhere you need a smooth representation of
+/// signal loudness over time.  Choose the method based on smoothing
+/// preference and computational budget:
+///
+/// - `amplitude_envelope` — fastest, no smoothing.
+/// - `rms_envelope` / `moving_average_envelope` — configurable smoothing via window.
+/// - `analytic_envelope` — smoothest, requires a Hilbert transform.
+/// - `attack_decay_envelope` — separates rising and falling energy.
+///
+/// # Invariants
+///
+/// All methods return an [`NdResult`] that mirrors the input channel layout:
+/// `NdResult::Mono` for mono audio and `NdResult::MultiChannel` for stereo
+/// or higher.  The sample count of each output matches the input (per-sample
+/// methods) or `⌈input_samples / hop_size⌉` (windowed methods).
 #[cfg(feature = "envelopes")]
 pub trait AudioEnvelopes: AudioStatistics
 where
@@ -3711,13 +4880,13 @@ where
     ///     array![1.0f32, -0.5, 0.25],
     ///     sample_rate!(44100),
     /// ).unwrap();
-    /// let envelope = audio.amplitude_envelope().unwrap();
+    /// let envelope = audio.amplitude_envelope();
     /// if let NdResult::Mono(env) = envelope {
     ///     assert_eq!(env[0], 1.0f32);
     ///     assert_eq!(env[1], 0.5f32); // |-0.5| = 0.5
     /// }
     /// ```
-    fn amplitude_envelope(&self) -> AudioSampleResult<NdResult<Self::Sample>>;
+    fn amplitude_envelope(&self) -> NdResult<Self::Sample>;
 
     /// Compute the root-mean-square (RMS) envelope using a sliding window.
     ///
@@ -3750,7 +4919,7 @@ where
     /// ).unwrap();
     /// let w = NonZeroUsize::new(2).unwrap();
     /// let h = NonZeroUsize::new(2).unwrap();
-    /// let envelope = audio.rms_envelope(w, h).unwrap();
+    /// let envelope = audio.rms_envelope(w, h);
     /// if let NdResult::Mono(env) = envelope {
     ///     assert_eq!(env.len(), 2);
     ///     assert!((env[0] - 1.0).abs() < 1e-6);
@@ -3760,7 +4929,7 @@ where
         &self,
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
-    ) -> AudioSampleResult<NdResult<Self::Sample>>;
+    ) -> NdResult<Self::Sample>;
 
     /// Track amplitude over time with an envelope follower, separating
     /// attack and decay phases.
@@ -3797,17 +4966,17 @@ where
     ///     1.0, 10.0, 44100.0, DynamicRangeMethod::Peak,
     /// );
     /// let (attack, _decay) = audio
-    ///     .attack_decay_envelope(&follower, DynamicRangeMethod::Peak)
-    ///     .unwrap();
+    ///     .attack_decay_envelope(&follower, DynamicRangeMethod::Peak);
     /// if let NdResult::Mono(env) = attack {
     ///     assert!(env.iter().all(|&v| v.abs() < 1e-6));
     /// }
     /// ```
+    #[allow(clippy::type_complexity)]
     fn attack_decay_envelope(
         &self,
         follower: &EnvelopeFollower,
         method: DynamicRangeMethod,
-    ) -> AudioSampleResult<(NdResult<Self::Sample>, NdResult<Self::Sample>)>;
+    ) -> (NdResult<Self::Sample>, NdResult<Self::Sample>);
 
     /// Compute the instantaneous amplitude envelope via the analytic signal.
     ///
@@ -3832,10 +5001,10 @@ where
     ///     array![1.0f32, 0.0, -1.0, 0.0],
     ///     sample_rate!(44100),
     /// ).unwrap();
-    /// let envelope = audio.analytic_envelope().unwrap();
+    /// let envelope = audio.analytic_envelope();
     /// assert!(matches!(envelope, NdResult::Mono(_)));
     /// ```
-    fn analytic_envelope(&self) -> AudioSampleResult<NdResult<Self::Sample>>;
+    fn analytic_envelope(&self) -> NdResult<Self::Sample>;
 
     /// Compute a moving-average envelope over the rectified signal.
     ///
@@ -3867,7 +5036,7 @@ where
     /// ).unwrap();
     /// let w = NonZeroUsize::new(2).unwrap();
     /// let h = NonZeroUsize::new(2).unwrap();
-    /// let envelope = audio.moving_average_envelope(w, h).unwrap();
+    /// let envelope = audio.moving_average_envelope(w, h);
     /// if let NdResult::Mono(env) = envelope {
     ///     assert_eq!(env.len(), 2);
     ///     assert!((env[0] - 1.0).abs() < 1e-6);
@@ -3878,5 +5047,5 @@ where
         &self,
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
-    ) -> AudioSampleResult<NdResult<Self::Sample>>;
+    ) -> NdResult<Self::Sample>;
 }

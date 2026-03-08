@@ -2,109 +2,97 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
-// Correctness and logic
-#![warn(clippy::unit_cmp)] // Detects comparing unit types
-#![warn(clippy::match_same_arms)]
-// Performance-focused
-#![warn(clippy::inefficient_to_string)] // `format!("{}", x)` vs `x.to_string()`
-#![warn(clippy::map_clone)] // Cloning inside `map()` unnecessarily
-#![warn(clippy::unnecessary_to_owned)] // Detects redundant `.to_owned()` or `.clone()`
-#![warn(clippy::large_stack_arrays)] // Helps avoid stack overflows
-#![warn(clippy::box_collection)] // Warns on boxed `Vec`, `String`, etc.
-#![warn(clippy::vec_box)] // Avoids using `Vec<Box<T>>` when unnecessary
-#![warn(clippy::needless_collect)] // Avoids `.collect().iter()` chains
-
-// Style and idiomatic Rust
-#![warn(clippy::redundant_clone)] // Detects unnecessary `.clone()`
-#![warn(clippy::identity_op)] // e.g., `x + 0`, `x * 1`
-#![warn(clippy::needless_return)] // Avoids `return` at the end of functions
-#![warn(clippy::let_unit_value)] // Avoids binding `()` to variables
-#![warn(clippy::manual_map)] // Use `.map()` instead of manual `match`
-#![warn(clippy::unwrap_used)] // Avoids using `unwrap()`
-
-// Maintainability
-#![warn(clippy::missing_panics_doc)] // Docs for functions that might panic
-#![warn(clippy::missing_safety_doc)] // Docs for `unsafe` functions
-#![warn(clippy::missing_const_for_fn)] // Suggests making eligible functions `const`
+#![deny(missing_docs)]
+// Additional strictness beyond default groups
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::missing_errors_doc)]
+#![warn(clippy::missing_panics_doc)]
+#![warn(clippy::missing_safety_doc)]
+#![warn(clippy::undocumented_unsafe_blocks)]
+#![warn(clippy::exhaustive_enums)]
+#![warn(clippy::exhaustive_structs)]
+#![warn(clippy::panic_in_result_fn)]
+#![warn(clippy::unnecessary_wraps)]
+// Intentional allowances
 #![allow(clippy::too_many_arguments)]
-#![allow(clippy::module_name_repetitions)]
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::module_name_repetitions)]
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::if_same_then_else)]
 #![allow(clippy::unnecessary_cast)]
-#![allow(clippy::needless_borrows_for_generic_args)]
-#![allow(clippy::unsafe_derive_deserialize)]
-#![allow(clippy::multiple_unsafe_ops_per_block)]
-#![allow(clippy::doc_markdown)]
-#![warn(clippy::exhaustive_enums)]
-#![warn(clippy::exhaustive_structs)]
-#![warn(clippy::missing_inline_in_public_items)]
-#![warn(clippy::missing_errors_doc)]
-#![warn(clippy::iter_cloned_collect)]
-#![warn(clippy::panic_in_result_fn)]
-#![warn(clippy::undocumented_unsafe_blocks)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
-// Allow functions with many parameters (very few and far between)
-// #![deny(missing_docs)] // Documentation is a must for release
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::tuple_array_conversions)]
+#![allow(clippy::unsafe_derive_deserialize)]
+#![allow(clippy::multiple_unsafe_ops_per_block)]
+#![allow(clippy::doc_markdown)]
+#![allow(unused_unsafe)]
 
 //! # AudioSamples
 //!
-//! A high-performance audio processing library for Rust that provides type-safe sample format conversions, statistical analysis, and various audio processing operations.
+//! A typed audio processing library for Rust that treats audio as a first-class,
+//! invariant-preserving object rather than an unstructured numeric buffer. is this library?
 //!
-//! ## Overview
+//! `audio_samples` provides a single central type, [`AudioSamples<T>`], that pairs raw
+//! PCM data (backed by [`ndarray`](https://docs.rs/ndarray)) with essential metadata:
+//! sample rate, channel count, and memory layout. Every audio processing operation in the
+//! library is defined as a trait method on this type, ensuring that metadata travels with
+//! the data throughout a processing pipeline. does this library exist?
 //!
-//! <!-- This section is reserved for the project's purpose and motivation. -->
-//! <!-- The author will fill this in later. -->
+//! Low-level audio APIs in Rust typically expose bare slices or `Vec<f32>` buffers,
+//! leaving metadata management to the caller. This encourages subtle bugs such as
+//! mismatched sample rates after resampling, or interleaved/non-interleaved confusion
+//! when passing buffers between components. `audio_samples` eliminates these error
+//! classes by encoding invariants directly into the type. should it be used?
+//!
+//! Start by creating an [`AudioSamples<T>`] from an ndarray or from one of the
+//! built-in signal generators (see [`utils::generation`]), then chain trait methods
+//! for any further processing. Feature flags keep the dependency footprint small –
+//! only enable what your application needs.
 //!
 //! ## Installation
 //!
-//! Add this to your `Cargo.toml`:
-//!
-//! ```toml
-//! [dependencies]
-//! audio_samples = "0.10.0"
-//! ```
-//!
-//! or more easily with:
 //! ```bash
 //! cargo add audio_samples
 //! ```
 //!
-//! For specific features, enable only what you need:
-//!
-//! ```toml
-//! [dependencies]
-//! audio_samples = { version = "*", features = ["transforms", "plotting"] }
-//! ```
-//!
-//! Or enable everything:
-//!
-//! ```toml
-//! [dependencies]
-//! audio_samples = { version = "*", features = ["full"] }
-//! ```
-//!
 //! ## Features
 //!
-//! The library uses a modular feature system to keep dependencies minimal:
+//! The library uses a modular feature flag system. Only enable what you need.
 //!
-//! - `statistics`: statistics utilities (peak, RMS, variance, etc.)
-//! - `processing`: processing operations (normalize, scale, clip, etc.)
-//! - `editing`: time-domain editing operations (trim, pad, reverse, etc.)
-//! - `channels`: channel operations (mono/stereo conversion)
-//! - `fft`: FFT-backed transforms (adds FFT dependencies)
-//! - `plotting`: plotting utilities (adds signal plotting dependencies)
-//! - `resampling`: resampling utilities (using `rubato` crate)
-//! - `serialization`: serialization utilities (using `serde` crate)
+//! | Feature | Description |
+//! |---|---|
+//! | `statistics` | Peak, RMS, variance, zero-crossings, and other statistical measures |
+//! | `processing` | Normalise, scale, clip, DC offset removal, and other sample-level operations (implies `statistics`) |
+//! | `editing` | Time-domain editing: trim, pad, reverse, concatenate, fade (implies `statistics`, `random-generation`) |
+//! | `channels` | Channel operations: mono↔stereo conversion, channel extraction, interleave/deinterleave |
+//! | `transforms` | Spectrogram and frequency-domain transforms via the `spectrograms` crate |
+//! | `iir-filtering` | IIR filter design and application (Butterworth, Chebyshev I) |
+//! | `parametric-eq` | Multi-band parametric equaliser (implies `iir-filtering`) |
+//! | `dynamic-range` | Compression, limiting, and expansion with side-chain support |
+//! | `envelopes` | Amplitude, RMS, and analytical envelope followers (implies `dynamic-range`, `editing`, `random-generation`) |
+//! | `peak-picking` | Onset strength curve peak picking |
+//! | `onset-detection` | Onset detection (implies `transforms`, `peak-picking`, `processing`) |
+//! | `beat-tracking` | Beat tracking and tempo estimation |
+//! | `decomposition` | Audio source decomposition (implies `onset-detection`) |
+//! | `pitch-analysis` | YIN and autocorrelation pitch detection (implies `transforms`) |
+//! | `vad` | Voice activity detection |
+//! | `resampling` | High-quality resampling via the `rubato` crate |
+//! | `plotting` | Signal plotting via `plotly` |
+//! | `fixed-size-audio` | Stack-allocated fixed-size audio buffers |
+//! | `random-generation` | Noise generators and stochastic signal sources (implies `rand`) |
+//! | `full` | Enables all of the above |
 //!
-//! See `Cargo.toml` for the complete feature list and feature groups.
-//!
+//! See `Cargo.toml` for the complete dependency graph.
 //!
 //! ## Error Handling
 //!
-//! The library uses a hierarchical error system designed for precise error handling:
+//! All fallible operations return [`AudioSampleResult<T>`], which is an alias for
+//! `Result<T, AudioSampleError>`. Errors are structured so that the variant indicates
+//! the category of failure and the inner type provides detail.
 //!
 //! ```rust
 //! use audio_samples::{AudioSampleError, AudioSampleResult, ParameterError};
@@ -131,85 +119,84 @@
 //! ### Creating Audio Data
 //!
 //! ```rust
-//! use audio_samples::AudioSamples;
+//! use audio_samples::{AudioSamples, sample_rate};
 //! use ndarray::array;
 //!
 //! // Create mono audio
 //! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
-//! let audio = AudioSamples::new_mono(data, 44100).unwrap();
+//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 //!
-//! // Create stereo audio
+//! // Create stereo audio (channels × samples)
 //! let stereo_data = array![
 //!     [0.1f32, 0.5, -0.3],  // Left channel
 //!     [0.8f32, -0.2, 0.4]   // Right channel
 //! ];
-//! let stereo_audio = AudioSamples::new_multi_channel(stereo_data, 44100);
+//! let stereo_audio = AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
 //! ```
 //!
 //! ### Basic Statistics
 //!
-//! ```rust
-//! use audio_samples::{AudioStatistics, sine_wave};
+//! Requires the `statistics` feature.
+//!
+//! ```rust,ignore
+//! use audio_samples::{AudioStatistics, sine_wave, sample_rate};
 //! use std::time::Duration;
 //!
-//! // frequency, sample rate, duration, amplitude
-//! // <f32, f32> indicates the sine wave will be
-//! // generated using single float precision and
-//! // the resulting samples will also be f32
-//! let audio = sine_wave::<f32, f32>(440.0, Duration::from_secs_f32(1.0), 44100, 1.0);
-//! // Simple statistics
-//! let peak = audio.peak();
-//! let min = audio.min_sample();
-//! let max = audio.max_sample();
-//! let mean = audio.mean();
+//! // Generate a 440 Hz sine wave at 44.1 kHz sample rate, amplitude 1.0
+//! let audio = sine_wave::<f32>(440.0, Duration::from_secs_f32(1.0), sample_rate!(44100), 1.0);
 //!
-//! // More complex statistics (return Result)
-//! let rms = audio.rms().unwrap();
-//! let variance = audio.variance().unwrap();
+//! let peak           = audio.peak();
+//! let min            = audio.min_sample();
+//! let max            = audio.max_sample();
+//! let mean           = audio.mean();
+//! let rms            = audio.rms().unwrap();
+//! let variance       = audio.variance().unwrap();
 //! let zero_crossings = audio.zero_crossings();
 //! ```
 //!
 //! ### Processing Operations
 //!
-//! ```rust
-//! use audio_samples::{AudioProcessing, NormalizationConfig, sample_rate};
+//! Requires the `processing` feature.
+//!
+//! ```rust,ignore
+//! use audio_samples::{AudioProcessing, NormalizationConfig, AudioSamples, sample_rate};
 //! use ndarray::array;
 //!
 //! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
-//! // new_mono and similar functions return Result types since the data cannot be empty
-//! let audio = audio_samples::AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 //!
-//! // Basic processing with method chaining
+//! // Method chaining: each operation consumes and returns Self
 //! let audio = audio
 //!     .normalize(NormalizationConfig::peak(1.0))
 //!     .unwrap()
-//!     .scale(0.5) // Reduce volume by half
+//!     .scale(0.5)
 //!     .remove_dc_offset()
 //!     .unwrap();
-//! # let _ = audio;
 //! ```
 //!
 //! ### Type Conversions
 //!
 //! ```rust
-//! use audio_samples::AudioSamples;
+//! use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
 //! use ndarray::array;
 //!
-//! // Convert between sample types
-//! let audio_f32 = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], 44100).unwrap();
-//! let audio_i16 = audio_f32.as_type::<i16>().unwrap();
-//! let audio_f64 = audio_f32.as_type::<f64>().unwrap();
+//! let audio_f32 = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
+//! let audio_i16 = audio_f32.clone().to_type::<i16>();
+//! let audio_f64 = audio_f32.to_type::<f64>();
 //! ```
 //!
 //! ### Iterating Over Audio Data
 //!
 //! ```rust
-//! use audio_samples::AudioSampleIterators;
+//! use audio_samples::{AudioSampleIterators, AudioSamples, sample_rate};
 //! use ndarray::array;
 //!
-//! let audio = audio_samples::AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0], 44100).unwrap();
+//! let audio = AudioSamples::new_mono(
+//!     array![1.0f32, 2.0, 3.0, 4.0],
+//!     sample_rate!(44100),
+//! ).unwrap();
 //!
-//! // Iterate by frames (one sample from each channel)
+//! // Iterate by frames (one sample per channel per time step)
 //! for frame in audio.frames() {
 //!     println!("Frame: {:?}", frame);
 //! }
@@ -218,111 +205,91 @@
 //! for channel in audio.channels() {
 //!     println!("Channel: {:?}", channel);
 //! }
-//!
-//! // Windowed iteration for analysis
-//! for window in audio.windows(1024, 512) {
-//!     // Process 1024-sample windows with 50% overlap
-//!     let window_rms = window.rms().unwrap();
-//!     println!("Window RMS: {:.3}", window_rms);
-//! }
-//! ```
-//!
-//! ## Method Chaining for Complex Processing
-//!
-//! For complex operations, chain methods directly:
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, AudioProcessing, NormalizationConfig};
-//! use ndarray::array;
-//!
-//! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
-//! let audio = AudioSamples::new_mono(data, 44100).unwrap();
-//!
-//! // Chain multiple operations - methods consume and return Self
-//! let audio = audio
-//!     .normalize(NormalizationConfig::peak(1.0))
-//!     .unwrap()
-//!     .scale(0.8)
-//!     .remove_dc_offset()
-//!     .unwrap();
-//! # let _ = audio;
 //! ```
 //!
 //! ## Core Type System
 //!
 //! ### Supported Sample Types
 //!
-//! - `i16` - 16-bit signed integer
-//! - `I24` - 24-bit signed integer (from `i24` crate)
-//! - `i32` - 32-bit signed integer
-//! - `f32` - 32-bit floating point
-//! - `f64` - 64-bit floating point
+//! | Type | Width | Notes |
+//! |---|---|---|
+//! | `u8`  | 8-bit unsigned  | Mid-scale (128) represents silence |
+//! | `i16` | 16-bit signed   | CD-quality audio |
+//! | [`I24`](i24::I24) | 24-bit signed | From the `i24` crate |
+//! | `i32` | 32-bit signed   | High-dynamic-range integer audio |
+//! | `f32` | 32-bit float    | Most DSP operations use this type |
+//! | `f64` | 64-bit float    | High-precision processing |
 //!
 //! ### Type System Traits
 //!
-//! The library provides a rich trait system for working with different audio sample types:
+//! - **[`AudioSample`]** – Core trait all sample types implement. Provides constants
+//!   (`MAX`, `MIN`, `BITS`, `BYTES`, `LABEL`) and low-level byte operations.
 //!
-//! #### `AudioSample` Trait
+//! - **[`ConvertTo<T>`]** / **[`ConvertFrom<T>`]** – Audio-aware conversions with
+//!   correct scaling between bit depths (e.g. `i16 → f32` normalises to `[-1.0, 1.0]`).
 //!
-//! Core trait that all audio sample types implement. Provides common operations and constraints needed for audio processing.
+//! - **[`CastFrom<T>`]** / **[`CastInto<T>`]** – Raw numeric casts without scaling.
+//!   Use these when you need the raw integer value as a float for computation,
+//!   not as an audio amplitude.
 //!
-//! #### Conversion Traits
+//! - **[`AudioTypeConversion`]** – High-level conversion methods on [`AudioSamples<T>`]
+//!   such as `as_f32()`, `as_i16()`, and `as_type::<U>()`.
 //!
-//! - **`ConvertTo<T>`** - Type-safe conversions between audio sample types with proper scaling
-//!   - `i16 -> f32`: Normalized to -1.0 to 1.0 range
-//!   - `f32 -> i16`: Scaled and clamped to integer range
-//!   - Handles bit depth differences automatically
+//! ## Signal Generation
 //!
-//! - **`CastFrom<T>` / `CastInto<T>`** - Direct type casting without audio-specific scaling
-//!   - For computational operations where you need the raw numeric value
-//!   - Example: `i16` sample `1334` casts to `f32` as `1334.0` (not normalized)
-//!   - Use when you need to work with samples as regular numbers, not audio values
-//!
-//! ## Utility Functions
-//!
-//! The `utils` module provides convenient functions for common audio tasks:
-//!
-//! ### Signal Generation (`utils::generation`)
-//!
-//! - **Test Signals**: `generate_sine()`, `generate_white_noise()`, `generate_chirp()`
-//! - **Complex Signals**: `generate_multi_tone()` for multiple frequencies
-//! - **Calibration**: Known reference signals for testing
-//!
+//! The [`utils::generation`] module provides functions for creating test and
+//! reference signals: [`sine_wave`], [`cosine_wave`], [`square_wave`],
+//! [`triangle_wave`], [`sawtooth_wave`], [`chirp`], [`impulse`], [`silence`],
+//! [`compound_tone`], and [`am_signal`].
 //!
 //! ```rust
-//! use audio_samples::{comparison, sine_wave};
+//! use audio_samples::{sine_wave, sample_rate};
+//! use audio_samples::utils::comparison;
 //! use std::time::Duration;
 //!
-//! let a = sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44100, 1.0);
-//! let b = sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44100, 1.0);
-//! let corr: f32 = comparison::correlation::<f32, f32>(&a, &b).unwrap();
+//! let a = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+//! let b = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+//! let corr: f64 = comparison::correlation(&a, &b).unwrap();
 //! assert!(corr > 0.99);
 //! ```
+//!
 //! ## Documentation
 //!
 //! Full API documentation is available at [docs.rs/audio_samples](https://docs.rs/audio_samples).
 //!
 //! ## License
 //!
-//! MIT License
+//! MIT
 //!
 //! ## Contributing
 //!
-//! Contributions are welcome! Please feel free to submit a Pull Request.
+//! Contributions are welcome. Please open an issue or pull request on
+//! [GitHub](https://github.com/jmg049/audio_samples).
 
 // General todos in audio_samples:
-// - Define a layout / template for all docs
-// - Define a standard way of using type parameters in functions, all type info should be in where clauses and not <>. i.e. should be  where F: RealFloat
-// - Improve the feature gating
-// - Improve user experience for F: RealFloat constrained functions/types via convenience wrappers/type declarations
-// - Outside of the core AudioSample structs there could be better use of the type system
-// - Aim to remove as many expect, unwrap, unwrap_or etc. as possible. As many things as possible should be constrained at compile time and anything else (for example sample rates which use the NonZero variant) should be validated ONCE. Beyond this we should be able to assume that any parameter value is valid.
-// - Plotting
-// - Serialisation / Deserialisation of structs
 // - Define / decide on a policy for parallel processing
 // - Improve the error system, it has breadth currently, but not depth or aethetics. Rust set a new standard for error handling (i.e. nice errors that tell you exactly what went wrong, where and how to possible fix things.) which other libraries in other languages have tried to emulate.
 // - Better constants and better use of them -- e.g. the LEFT, RIGHT and SUPPORTED_DTYPES are rarely used
 
+/// Creates a `NonZeroUsize` from a compile-time constant with zero-check.
+///
+/// This macro creates a `NonZeroUsize` with a compile-time assertion that the value is
+/// non-zero, making it safe to use `new_unchecked` internally. If the value is zero, the
+/// code will fail to compile.
+///
+/// # Example
+///
+/// ```
+/// # use audio_samples::nzu;
+/// let size = nzu!(1024);
+/// assert_eq!(size.get(), 1024);
+/// ```
+///
+/// This will fail to compile:
+/// ```compile_fail
+/// # use audio_samples::nzu;
+/// let invalid = nzu!(0); // Compile error: assertion failed
+/// ```
 #[macro_export]
 macro_rules! nzu {
     ($rate:expr) => {{
@@ -338,6 +305,7 @@ pub mod iterators;
 pub mod operations;
 #[cfg(feature = "resampling")]
 pub mod resampling;
+/// Core trait definitions for audio sample types and operations.
 pub mod traits;
 pub mod utils;
 
@@ -346,13 +314,12 @@ mod repr;
 
 pub mod simd_conversions;
 
-use std::fmt::Debug;
-
 pub use crate::error::{
     AudioSampleError, AudioSampleResult, ConversionError, FeatureError, LayoutError,
     ParameterError, ProcessingError,
 };
 pub use crate::repr::AudioData;
+pub use crate::repr::StereoAudioSamples;
 pub use crate::repr::{AudioSamples, SampleType};
 pub use crate::traits::{
     AudioSample, AudioTypeConversion, CastFrom, CastInto, ConvertFrom, ConvertTo, StandardSample,
@@ -424,49 +391,41 @@ use ndarray::{Array1, Array2};
 #[cfg(feature = "resampling")]
 pub use resampling::{resample, resample_by_ratio};
 
-/// Array of supported audio sample data types as string identifiers
-pub const SUPPORTED_DTYPES: [&str; 6] = ["u8", "i16", "I24", "i32", "f32", "f64"];
-/// Left channel index.
-pub const LEFT: usize = 0;
-/// Right channel index.
-pub const RIGHT: usize = 1;
-
-/// Describes how multi-channel audio data is organized in memory
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(clippy::exhaustive_enums)]
-pub enum ChannelLayout {
-    /// Samples from different channels are stored sequentially (LRLRLR...)
-    /// This is the most common format for audio files and streaming
-    #[default]
-    Interleaved,
-    /// Samples from each channel are stored in separate contiguous blocks (LLL...RRR...)
-    /// This format is often preferred for digital signal processing
-    NonInterleaved,
-}
-
-impl ChannelLayout {
-    /// Returns true if the layout is interleaved
-    #[inline]
-    #[must_use]
-    pub const fn is_interleaved(&self) -> bool {
-        matches!(self, Self::Interleaved)
-    }
-
-    /// Returns true if the layout is non-interleaved
-    #[inline]
-    #[must_use]
-    pub const fn is_non_interleaved(&self) -> bool {
-        matches!(self, Self::NonInterleaved)
-    }
-}
-
-/// Enum specific for representing a result which can be either 1D or 2D.
-/// Intended to be used for returning results from operations which can return a single result (mono) or a sequence of results (multichannel)
+/// A tagged result that is either a 1-D mono array or a 2-D multi-channel array.
+///
+/// ## Purpose
+///
+/// Several operations on [`AudioSamples<T>`] produce output whose dimensionality
+/// mirrors the input: a mono input yields a 1-D result; a multi-channel input yields
+/// a 2-D result. `NdResult` captures both possibilities in a single return type,
+/// letting callers branch on the actual dimensionality at runtime rather than
+/// discarding the channel structure.
+///
+/// ## Intended Usage
+///
+/// Pattern-match on the variants directly, or use [`into_array1`](NdResult::into_array1) /
+/// [`into_array2`](NdResult::into_array2) when you already know the expected shape.
+/// Prefer the safe helpers over the `_unchecked` variants unless performance is
+/// critical and the shape has already been verified.
+///
+/// ## Invariants
+///
+/// - The [`Mono`](NdResult::Mono) variant always holds a 1-D array with at least one element.
+/// - The [`MultiChannel`](NdResult::MultiChannel) variant always holds a 2-D array with at
+///   least one channel and at least one sample per channel.
+///
+/// ## Assumptions
+///
+/// Callers must not construct `NdResult` directly with empty arrays.
+/// All library functions that return `NdResult` uphold the non-empty invariants above.
+#[non_exhaustive]
 pub enum NdResult<T>
 where
     T: StandardSample,
 {
+    /// A single-channel (mono) result stored as a 1-D ndarray.
     Mono(Array1<T>),
+    /// A multi-channel result stored as a 2-D ndarray (channels × samples).
     MultiChannel(Array2<T>),
 }
 
@@ -474,12 +433,26 @@ impl<T> NdResult<T>
 where
     T: StandardSample,
 {
-    /// Converts the result into a 1D array if it is mono, otherwise returns None.
+    /// Extracts the inner 1-D array if this result is [`Mono`](NdResult::Mono).
     ///
     /// # Returns
     ///
-    /// Some(1D array) if the result is mono, otherwise None.
+    /// `Some(array)` when the variant is `Mono`; `None` when it is `MultiChannel`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::NdResult;
+    /// use ndarray::array;
+    ///
+    /// let result: NdResult<f32> = NdResult::Mono(array![0.1, 0.2, 0.3]);
+    /// assert!(result.into_array1().is_some());
+    ///
+    /// let result: NdResult<f32> = NdResult::MultiChannel(ndarray::array![[0.1, 0.2], [0.3, 0.4]]);
+    /// assert!(result.into_array1().is_none());
+    /// ```
     #[inline]
+    #[must_use]
     pub fn into_array1(self) -> Option<Array1<T>> {
         match self {
             Self::Mono(arr) => Some(arr),
@@ -487,17 +460,36 @@ where
         }
     }
 
+    /// Extracts the inner 1-D array without checking the variant.
+    ///
     /// # Safety
-    /// This function is unsafe because it assumes that the caller has already verified that the result is mono (1D). If the result is actually multi-channel (2D), this will panic.
+    ///
+    /// The caller must ensure that this `NdResult` is the [`Mono`](NdResult::Mono)
+    /// variant. Calling this on a [`MultiChannel`](NdResult::MultiChannel) value is
+    /// a programmer error and will panic in debug builds. There is no undefined
+    /// behaviour, but the panic is not recoverable.
     ///
     /// # Returns
     ///
-    /// The 1D array if the result is mono, otherwise panics.
+    /// The inner `Array1<T>`.
     ///
     /// # Panics
     ///
-    /// Panics if the result is multi-channel (2D).
+    /// Panics if the variant is `MultiChannel`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::NdResult;
+    /// use ndarray::array;
+    ///
+    /// let result: NdResult<f32> = NdResult::Mono(array![0.1, 0.2, 0.3]);
+    /// // SAFETY: we just constructed a Mono variant above
+    /// let arr = unsafe { result.into_array1_unchecked() };
+    /// assert_eq!(arr.len(), 3);
+    /// ```
     #[inline]
+    #[must_use]
     pub unsafe fn into_array1_unchecked(self) -> Array1<T> {
         match self {
             Self::Mono(arr) => arr,
@@ -505,12 +497,26 @@ where
         }
     }
 
-    /// Converts the result into a 2D array if it is multi-channel, otherwise returns None.
+    /// Extracts the inner 2-D array if this result is [`MultiChannel`](NdResult::MultiChannel).
     ///
     /// # Returns
     ///
-    /// Some(2D array) if the result is multi-channel, otherwise None.
+    /// `Some(array)` when the variant is `MultiChannel`; `None` when it is `Mono`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::NdResult;
+    /// use ndarray::array;
+    ///
+    /// let result: NdResult<f32> = NdResult::MultiChannel(array![[0.1, 0.2], [0.3, 0.4]]);
+    /// assert!(result.into_array2().is_some());
+    ///
+    /// let result: NdResult<f32> = NdResult::Mono(array![0.1, 0.2, 0.3]);
+    /// assert!(result.into_array2().is_none());
+    /// ```
     #[inline]
+    #[must_use]
     pub fn into_array2(self) -> Option<Array2<T>> {
         match self {
             Self::Mono(_) => None,
@@ -518,17 +524,36 @@ where
         }
     }
 
+    /// Extracts the inner 2-D array without checking the variant.
+    ///
     /// # Safety
-    /// This function is unsafe because it assumes that the caller has already verified that the result is multi-channel (2D). If the result is actually mono (1D), this will panic.
+    ///
+    /// The caller must ensure that this `NdResult` is the
+    /// [`MultiChannel`](NdResult::MultiChannel) variant. Calling this on a
+    /// [`Mono`](NdResult::Mono) value is a programmer error and will panic in debug
+    /// builds. There is no undefined behaviour, but the panic is not recoverable.
     ///
     /// # Returns
     ///
-    /// The 2D array if the result is multi-channel, otherwise panics.
+    /// The inner `Array2<T>`.
     ///
     /// # Panics
     ///
-    /// Panics if the result is mono (1D).
+    /// Panics if the variant is `Mono`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::NdResult;
+    /// use ndarray::array;
+    ///
+    /// let result: NdResult<f32> = NdResult::MultiChannel(array![[0.1, 0.2], [0.3, 0.4]]);
+    /// // SAFETY: we just constructed a MultiChannel variant above
+    /// let arr = unsafe { result.into_array2_unchecked() };
+    /// assert_eq!(arr.nrows(), 2);
+    /// ```
     #[inline]
+    #[must_use]
     pub unsafe fn into_array2_unchecked(self) -> Array2<T> {
         match self {
             Self::Mono(_) => panic!("Cannot convert Mono to Array2"),

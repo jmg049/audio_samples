@@ -15,7 +15,7 @@
 
 Most audio libraries expose samples as raw numeric buffers. In Python,
 audio is typically represented as a NumPy array whose `dtype` is
-explicit, but whose meaning is not: sample rate, channel layout,
+explicit, but whose meaning is not: sample rate
 amplitude range, memory interleaving, and PCM versus floating-point
 semantics are tracked externally, if at all. In Rust, the situation is
 reversed but not resolved. Libraries provide fast and safe low-level
@@ -44,10 +44,8 @@ Other crates that build on this foundation:
 - `audio_samples_playback` for device-level output
 - `audio_samples_python` for Python bindings, enabling AudioSamples to act as a
   type-safe backend for Python workflows
-- `html_view` for lightweight visualisation and inspection, generating
-  self-contained HTML outputs suitable for analysis and reporting
   
-**NOTE** The crate is still a WIP so some features particularly plotting and serialization are not fully complete.
+**NOTE** The crate is still a WIP so some features particularly plotting are not fully complete.
 
 ---
 
@@ -70,26 +68,26 @@ it to floating-point samples, and mixes it with a second signal.
 
 ```rust
 use audio_samples::{
+    sample_rate
     AudioProcessing, AudioTypeConversion, cosine_wave, operations::types::NormalizationMethod,
     sine_wave,
 };
 use std::time::Duration;
 
 fn main() {
-    let sample_rate = 44_100;
+    let sample_rate = sample_rate!(44_100);
     let duration = Duration::from_secs_f64(1.0);
     let frequency = 440.0;
     let amplitude = 0.5;
 
     // Generate a sine wave with i16 output samples.
-    // The waveform is computed in f32 and converted into i16.
-    let pcm_sine = sine_wave::<i16, f32>(frequency, duration, sample_rate, amplitude);
+    let pcm_sine = sine_wave::<i16>(frequency, duration, sample_rate, amplitude);
 
     // Convert to floating-point representation
-    let float_sine = pcm_sine.to_format::<f32>();
+    let float_sine = pcm_sine.as_f32::<f32>();
 
     // Generate a second signal directly as floating-point samples
-    let cosine = cosine_wave::<f32, f32>(frequency / 2.0, duration, sample_rate, amplitude);
+    let cosine = cosine_wave::<f32>(frequency / 2.0, duration, sample_rate, amplitude);
 
     // Mix the two signals
     let mixed = (float_sine + cosine).normalize(-1.0, 1.0, NormalizationMethod::MinMax);
@@ -115,13 +113,14 @@ cargo add audio_samples --features spectral-analysis
 
 ```rust
 use audio_samples::{
+    sample_rate,
     AudioProcessing, AudioTypeConversion, cosine_wave, operations::types::NormalizationMethod,
     sine_wave,
 };
 use std::time::Duration;
 
 fn main() {
-    let sample_rate = 44_100;
+    let sample_rate = sample_rate!(44_100);
     let duration = Duration::from_secs_f64(1.0);
     let frequency = 440.0;
     let amplitude = 0.5;
@@ -130,7 +129,7 @@ fn main() {
     let pcm_sine = sine_wave::<i16>(frequency, duration, sample_rate, amplitude);
 
     // Convert to floating-point representation
-    let float_sine = pcm_sine.to_format::<f32>();
+    let float_sine = pcm_sine.as_f32::<f32>();
 
     // Generate a second signal directly as floating-point samples
     let cosine = cosine_wave::<f32>(frequency / 2.0, duration, sample_rate, amplitude);
@@ -149,7 +148,6 @@ Creating ***valid*** AudioSamples instances is ``hard''. For a piece of audio da
 
 - The sample buffer length must be consistent with the declared number of channels and frames.
 - The sample rate must be a positive, non-zero value (ideally an integer).
-- The channel layout must be valid for the given number of channels (e.g., stereo cannot have a mono layout).
 - The number of channels must be a poisitive, non-zero value.
 - The sample format must be supported.
 
@@ -158,14 +156,13 @@ Any of these can lead to failure at creation time, hence the use of `AudioSample
 However, the intended usage of audio does not make this any worse and is more explicit about potential failure modes. For example, when loading audio from a file ([audio_samples_io](https://github.com/jmg049/audio_samples_io)) there is still only one final failure point, either we could load the audio and represent it as valid AudioSamples, or we could not.
 
 ```rust
-use audio_samples_io::read;
+use audio_samples_io::{read, AudioIOResult};
+use audio_samples::AudioSamples;
 
-let audio: AudioSamples<f32> = match read("path/to/audio/file.wav") {
-    Ok(audio) => audio,
-    Err(e) => {
-        eprintln!("Failed to read audio file: {}", e);
-        return;
-    }
+fn main() -> AudioIOResult<()> {
+    let audio: AudioSamples<f32> = read("path/to/audio/file.wav")?;
+    println!("{:#}", audio);
+    Ok(())
 }
 ```
 
@@ -196,7 +193,6 @@ but ultimately, checks must be performed to ensure validity, and so the return t
 
 - `fft`
 - `resampling`
-- `serialization`
 - `plotting`
 
 ### Transform and analysis features
@@ -210,16 +206,13 @@ but ultimately, checks must be performed to ensure validity, and so the return t
 
 ### Performance features
 
-- `parallel-processing`
 - `simd` (nightly only)
-- `mkl`
 - `fixed-size-audio`
 
 ### Utility features
 
 - `formatting`
 - `random-generation`
-- `utilities-full`
 
 ---
 
@@ -331,9 +324,9 @@ $env:WEBDRIVER_PATH="C:\Program Files\geckodriver.exe"
 After setting the environment variables:
 
 ```bash
-cargo build --features static-plots
+cargo build --features "plotting static-plots transforms"
 # or run examples
-cargo run --example plotting --features full
+cargo run --example plotting_basic --features "plotting static-plots transforms"
 ```
 
 ### Permanent Setup
@@ -408,6 +401,23 @@ sudo pacman -S firefox geckodriver
 
 MIT License
 
+## Citing
+
+If you use AudioSamples in your research, please consider citing the crate:
+
+```bibtex
+@inproceedings{geraghty2026audio,
+  author    = {Geraghty, Jack and Golpayegani, Fatemeh and Hines, Andrew},
+  title     = {Audio Made Simple: A Modern Framework for Audio Processing},
+  booktitle = {ACM Multimedia Systems Conference 2026 (MMSys '26)},
+  year      = {2026},
+  month     = apr,
+  publisher = {ACM},
+  address   = {Hong Kong, Hong Kong},
+  doi       = {10.1145/3793853.3799811},
+  note      = {Accepted for publication}
+}
+```
 
 ## Contributing
 

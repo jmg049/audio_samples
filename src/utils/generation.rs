@@ -1,11 +1,36 @@
 //! Audio signal generation utilities.
+
 //!
-//! This module provides functions for generating various types of audio signals
-//! for testing, synthesis, and audio processing applications.
+
+//! Functions for synthesising deterministic and stochastic audio signals: waveforms
+//! (sine, cosine, square, sawtooth, triangle), frequency sweeps (chirp), noise (white,
+//! pink, brown), silence, impulses, compound multi-harmonic tones, and amplitude-modulated
+//! signals.
+//!
+//! Multi-channel convenience wrappers (`stereo_sine_wave`, `stereo_chirp`, etc.) are
+//! provided when the `channels` feature is enabled. A `MonoSampleBuilder` for constructing
+//! concatenated sequences through method chaining is available when `editing` is enabled.
+
+//! Generated signals are the backbone of audio unit tests, benchmarks, and DSP prototyping.
+//! By centralising generators in this module, dependent code can produce reproducible test
+//! data without reaching for external audio files.
+
+//! All generators accept a `NonZeroU32` sample rate. Use the `sample_rate!` macro to
+//! construct one from an integer literal:
+//!
+//! ```rust
+//! use audio_samples::utils::generation::sine_wave;
+//! use audio_samples::sample_rate;
+//! use std::time::Duration;
+//!
+//! let tone = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+//! assert_eq!(tone.samples_per_channel().get(), 44100);
+//! ```
 //!
 //! Some helpers are feature-gated:
 //! - `MonoSampleBuilder` requires `feature = "editing"`.
-//! - Noise generators require `feature = "random-generation"`.
+//! - Noise generators (`white_noise`, `pink_noise`, `brown_noise`, `exponential_bursts`) require `feature = "random-generation"`.
+//! - `stereo_*` and `multichannel_compound_tone` require `feature = "channels"`.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -25,6 +50,27 @@ use non_empty_slice::NonEmptySlice;
 use num_traits::FloatConst;
 
 /// Builder for creating mono audio samples through method chaining.
+///
+/// `MonoSampleBuilder` accumulates a sequence of mono audio segments and concatenates them
+/// into a single [`AudioSamples`] buffer on [`build`](MonoSampleBuilder::build). All segments
+/// use the same sample rate provided at construction.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::MonoSampleBuilder;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let audio = MonoSampleBuilder::<f32>::new(sample_rate!(44100))
+///     .sine_wave(440.0, Duration::from_millis(100), 1.0)
+///     .silence(Duration::from_millis(50))
+///     .sine_wave(880.0, Duration::from_millis(100), 0.5)
+///     .build()
+///     .unwrap();
+///
+/// assert_eq!(audio.num_channels().get(), 1);
+/// ```
 #[cfg(feature = "editing")]
 #[derive(Debug, Clone)]
 pub struct MonoSampleBuilder<'a, T>
@@ -41,6 +87,10 @@ where
     T: StandardSample,
 {
     /// Creates a new empty builder.
+    ///
+    /// # Arguments
+    ///
+    /// - `sample_rate` – The sample rate used for all segments added to this builder.
     #[inline]
     #[must_use]
     pub const fn new(sample_rate: SampleRate) -> Self {
@@ -50,7 +100,9 @@ where
         }
     }
 
-    /// Adds an existing sample to the builder.
+    /// Appends an existing [`AudioSamples`] segment to the builder.
+    ///
+    /// The segment is converted to an owned buffer before being stored.
     #[inline]
     #[must_use]
     pub fn add_sample(mut self, sample: AudioSamples<'_, T>) -> Self {
@@ -58,7 +110,13 @@ where
         self
     }
 
-    /// Adds a sine wave to the audio builder.
+    /// Appends a sine wave segment to the builder.
+    ///
+    /// # Arguments
+    ///
+    /// - `frequency` – Frequency in Hz.
+    /// - `duration` – Duration of the segment.
+    /// - `amplitude` – Peak amplitude.
     #[inline]
     #[must_use]
     pub fn sine_wave(self, frequency: f64, duration: Duration, amplitude: f64) -> Self {
@@ -138,14 +196,32 @@ where
 
 /// Generates a sine wave with the specified parameters.
 ///
+/// Produces `floor(duration * sample_rate)` samples of `amplitude * sin(2π · frequency · t)`,
+/// where `t` is the sample time in seconds. The output is a mono [`AudioSamples`] buffer.
+///
 /// # Arguments
-/// * `frequency` - Frequency of the sine wave in Hz
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the sine wave (0.0 to 1.0)
+///
+/// - `frequency` – Frequency of the sine wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude. A value of `1.0` reaches the full-scale positive peak.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated sine wave.
+///
+/// A mono [`AudioSamples`] buffer containing the sine wave at the given sample rate.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::sine_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let tone = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+/// assert_eq!(tone.sample_rate().get(), 44100);
+/// assert_eq!(tone.samples_per_channel().get(), 44100);
+/// assert_eq!(tone.num_channels().get(), 1);
+/// ```
 #[inline]
 #[must_use]
 pub fn sine_wave<T>(
@@ -171,21 +247,36 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("Guaranteed valid mono audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
 /// Generates a cosine wave with the specified parameters.
 ///
+/// Produces `floor(duration * sample_rate)` samples of `amplitude * cos(2π · frequency · t)`.
+/// The output is a mono [`AudioSamples`] buffer.
+///
 /// # Arguments
-/// * `frequency` - Frequency of the cosine wave in Hz
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the cosine wave (0.0 to 1.0)
+///
+/// - `frequency` – Frequency of the cosine wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated cosine wave.
 ///
-
+/// A mono [`AudioSamples`] buffer containing the cosine wave at the given sample rate.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::cosine_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let tone = cosine_wave::<f32>(440.0, Duration::from_millis(10), sample_rate!(44100), 0.5);
+/// assert_eq!(tone.num_channels().get(), 1);
+/// ```
 #[inline]
 #[must_use]
 pub fn cosine_wave<T>(
@@ -209,42 +300,55 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("Guaranteed valid mono audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
-/// Generates brown noise with the specified parameters.
+/// Generates brown noise (Brownian / red noise) with the specified parameters.
 ///
-/// Brown noise, also known as red noise, has a power density that decreases 6 dB per octave with increasing frequency.
-/// This results in a deeper sound compared to white and pink noise.
+/// Brown noise has a power spectral density that rolls off at −6 dB per octave, producing
+/// a deeper, lower-frequency character than white or pink noise. It is synthesised via a
+/// random walk where each sample is the previous value plus a uniform random step, clamped
+/// to `[−1, 1]`.
 ///
 /// # Arguments
-/// * `duration` - Duration of the signal
-/// * `sample_rate` - Sample rate in Hz
-/// * `step` - Step size of the Brownian walk (larger values are “rougher”)
-/// * `amplitude` - Amplitude of the noise (0.0 to 1.0)
+///
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `step` – Step size of the Brownian walk. Larger values produce rougher, more volatile
+///   noise; smaller values produce smoother, more slowly drifting noise. A value around
+///   `0.02` is a common starting point.
+/// - `amplitude` – Overall amplitude scale applied to each output sample.
+/// - `seed` – Optional RNG seed for reproducibility. Pass `None` for non-deterministic output.
 ///
 /// # Returns
-/// `Ok(...)` containing the generated brown noise.
 ///
+/// `Ok(audio)` containing the generated brown noise as a mono [`AudioSamples`] buffer.
+///
+/// # Errors
+///
+/// Currently infallible; the `Result` wrapper is reserved for future validation.
 ///
 /// # Examples
-/// ```no_run
+///
+/// ```rust,no_run
+/// use audio_samples::utils::generation::brown_noise;
+/// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// use audio_samples::brown_noise;
-///
-/// let noise = brown_noise::<f64>(Duration::from_secs_f32(1.0), 44_100, 0.02, 0.5).unwrap();
-/// assert_eq!(noise.samples_per_channel.get(), 44_100);
+/// let noise = brown_noise::<f64>(Duration::from_secs(1), sample_rate!(44100), 0.02, 0.5, None);
+/// assert_eq!(noise.samples_per_channel().get(), 44100);
 /// ```
 #[cfg(feature = "random-generation")]
 #[inline]
+#[must_use]
 pub fn brown_noise<T>(
     duration: Duration,
     sample_rate: NonZeroU32,
     step: f64,
     amplitude: f64,
     seed: Option<u64>,
-) -> AudioSampleResult<AudioSamples<'static, T>>
+) -> AudioSamples<'static, T>
 where
     T: StandardSample,
 {
@@ -276,22 +380,37 @@ where
     }
 
     let arr = Array1::from_vec(samples);
-    Ok(AudioSamples::new_mono(arr, sample_rate).expect("Guaranteed valid mono audio"))
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(arr, sample_rate) }
 }
 
 /// Generates white noise with the specified parameters.
 ///
-/// White noise has equal energy across all frequencies within the Nyquist range.
+/// White noise has equal expected energy across all frequencies within the Nyquist range.
+/// Each sample is drawn independently from a uniform distribution scaled to the requested
+/// amplitude.
 ///
 /// # Arguments
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the noise (0.0 to 1.0)
+///
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude of the noise envelope (0.0 to 1.0).
+/// - `seed` – Optional RNG seed for reproducibility. Pass `None` for non-deterministic output.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated white noise.
 ///
-
+/// A mono [`AudioSamples`] buffer containing the generated white noise.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use audio_samples::utils::generation::white_noise;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let noise = white_noise::<f32>(Duration::from_millis(100), sample_rate!(44100), 0.5, None);
+/// assert_eq!(noise.num_channels().get(), 1);
+/// ```
 #[cfg(feature = "random-generation")]
 #[inline]
 #[must_use]
@@ -330,22 +449,37 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("Guaranteed valid mono audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
-/// Generates pink noise with the specified parameters.
+/// Generates pink noise (1/f noise) with the specified parameters.
 ///
-/// Pink noise has equal energy per octave, with power decreasing at -3dB per octave.
+/// Pink noise has equal energy per octave, meaning its power spectral density decreases at
+/// −3 dB per octave. It is generated using Paul Kellett's IIR approximation method, which
+/// shapes white noise through a bank of first-order filters.
 ///
 /// # Arguments
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the noise (0.0 to 1.0)
+///
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Overall amplitude scale applied to each output sample.
+/// - `seed` – Optional RNG seed for reproducibility. Pass `None` for non-deterministic output.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated pink noise.
 ///
-
+/// A mono [`AudioSamples`] buffer containing the generated pink noise.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use audio_samples::utils::generation::pink_noise;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let noise = pink_noise::<f32>(Duration::from_millis(100), sample_rate!(44100), 0.5, None);
+/// assert_eq!(noise.num_channels().get(), 1);
+/// ```
 #[cfg(feature = "random-generation")]
 #[inline]
 #[must_use]
@@ -368,28 +502,27 @@ where
     let two = 2.0;
     let half = 0.5;
 
-    let a0 = 0.99886;
-    let b0 = 0.0555179;
+    let a0 = 0.998_86;
+    let b0 = 0.055_517_9;
 
-    let a1 = 0.99332;
-    let b1 = 0.0750759;
-    let a2 = 0.96900;
-    let b2 = 0.1538520;
-    let a3 = 0.86650;
-    let b3 = 0.3104856;
-    let a4 = 0.55000;
-    let b4 = 0.5329522;
-    let a5 = -0.7616;
-    let b5 = -0.0168980;
+    let a1 = 0.993_32;
+    let b1 = 0.075_075_9;
+    let a2 = 0.969_00;
+    let b2 = 0.153_852_0;
+    let a3 = 0.866_50;
+    let b3 = 0.310_485_6;
+    let a4 = 0.550_00;
+    let b4 = 0.532_952_2;
+    let a5 = -0.761_6;
+    let b5 = -0.016_898_0;
 
-    let b6 = 0.115926;
+    let b6 = 0.115_926;
     let pink_calc_multiplier1 = 0.5362;
     let pink_calc_multiplier2 = 0.11;
 
     if let Some(seed) = seed {
         let mut rng = StdRng::seed_from_u64(seed);
         for _ in 0..num_samples {
-
             let white = (rng.random::<f64>() - half) * two;
             b[0] = a0 * b[0] + white * b0;
             b[1] = a1 * b[1] + white * b1;
@@ -427,21 +560,37 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("Guaranteed valid mono audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
 /// Generates a square wave with the specified parameters.
 ///
+/// Each sample is `+amplitude` when `sin(2π · frequency · t) ≥ 0` and `−amplitude`
+/// otherwise, producing an ideal (non-band-limited) square wave. The duty cycle is fixed
+/// at 50%.
+///
 /// # Arguments
-/// * `frequency` - Frequency of the square wave in Hz
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the square wave (0.0 to 1.0)
+///
+/// - `frequency` – Frequency of the square wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated square wave.
 ///
-
+/// A mono [`AudioSamples`] buffer containing the generated square wave.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::square_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let wave = square_wave::<f32>(440.0, Duration::from_millis(10), sample_rate!(44100), 1.0);
+/// assert_eq!(wave.num_channels().get(), 1);
+/// ```
 #[inline]
 #[must_use]
 pub fn square_wave<T>(
@@ -474,21 +623,37 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("Guaranteed valid mono audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
 /// Generates a sawtooth wave with the specified parameters.
 ///
+/// Produces a rising sawtooth waveform that ramps linearly from `−amplitude` to
+/// `+amplitude` over each period and then resets. The wave is non-band-limited (no
+/// anti-aliasing is applied).
+///
 /// # Arguments
-/// * `frequency` - Frequency of the sawtooth wave in Hz
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the sawtooth wave (0.0 to 1.0)
+///
+/// - `frequency` – Frequency of the sawtooth wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated sawtooth wave.
 ///
-
+/// A mono [`AudioSamples`] buffer containing the generated sawtooth wave.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::sawtooth_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let wave = sawtooth_wave::<f32>(440.0, Duration::from_millis(10), sample_rate!(44100), 1.0);
+/// assert_eq!(wave.num_channels().get(), 1);
+/// ```
 #[inline]
 #[must_use]
 pub fn sawtooth_wave<T>(
@@ -521,21 +686,37 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("Guaranteed valid mono audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
 /// Generates a triangle wave with the specified parameters.
 ///
+/// Produces a piecewise-linear waveform that rises from `−amplitude` to `+amplitude` over
+/// the first half-period and falls back to `−amplitude` over the second half-period. The
+/// wave is non-band-limited.
+///
 /// # Arguments
-/// * `frequency` - Frequency of the triangle wave in Hz
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the triangle wave (0.0 to 1.0)
+///
+/// - `frequency` – Frequency of the triangle wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated triangle wave.
 ///
-
+/// A mono [`AudioSamples`] buffer containing the generated triangle wave.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::triangle_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let wave = triangle_wave::<f32>(440.0, Duration::from_millis(10), sample_rate!(44100), 1.0);
+/// assert_eq!(wave.num_channels().get(), 1);
+/// ```
 #[inline]
 #[must_use]
 pub fn triangle_wave<T>(
@@ -575,22 +756,38 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("Guaranteed valid mono audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
-/// Generates a chirp (frequency sweep) signal.
+/// Generates a linear chirp (frequency sweep) signal.
+///
+/// Produces a sinusoidal signal whose instantaneous frequency increases linearly from
+/// `start_freq` to `end_freq` over the given duration. The analytic phase is
+/// `2π (f₀ t + 0.5 k t²)` where `k = (f₁ − f₀) / duration`.
 ///
 /// # Arguments
-/// * `start_freq` - Starting frequency in Hz
-/// * `end_freq` - Ending frequency in Hz
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the chirp (0.0 to 1.0)
+///
+/// - `start_freq` – Starting frequency in Hz.
+/// - `end_freq` – Ending frequency in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated chirp signal.
 ///
-
+/// A mono [`AudioSamples`] buffer containing the generated chirp signal.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::chirp;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let sweep = chirp::<f32>(100.0, 8000.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
+/// assert_eq!(sweep.num_channels().get(), 1);
+/// ```
 #[inline]
 #[must_use]
 pub fn chirp<T>(
@@ -625,24 +822,38 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("guaranteed valid audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
-/// Generates an impulse (delta function) signal.
+/// Generates a unit impulse (Dirac delta approximation) signal.
+///
+/// Produces a buffer of zeros with a single non-zero sample at `floor(position * sample_rate)`.
+/// If the computed sample index is out of bounds, the entire output is silence.
 ///
 /// # Arguments
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Amplitude of the impulse (0.0 to 1.0)
-/// * `position` - Position of the impulse in seconds
+///
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Value of the impulse sample.
+/// - `position` – Time offset of the impulse in seconds.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing the generated impulse signal.
 ///
-/// If `position * sample_rate` is not representable as `usize`, the impulse is placed at the
-/// start of the signal. If the computed sample index is out of bounds, the output is silence.
+/// A mono [`AudioSamples`] buffer containing the impulse at the specified position.
 ///
-
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::impulse;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// // 1-second buffer, impulse at t = 0.5 s (sample 22050 at 44100 Hz).
+/// let imp = impulse::<f64>(Duration::from_secs(1), sample_rate!(44100), 1.0, 0.5);
+/// let mono = imp.as_mono().unwrap();
+/// assert!((mono[22050] - 1.0).abs() < 1e-12);
+/// ```
 #[inline]
 #[must_use]
 pub fn impulse<T>(
@@ -663,19 +874,29 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("guaranteed valid audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 /// A component of a compound tone, specifying frequency and relative amplitude.
+///
+/// Used as input to [`compound_tone`] and [`multichannel_compound_tone`] to define a
+/// harmonic series or an arbitrary set of simultaneous sinusoids.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ToneComponent {
-    /// Frequency in Hz
+    /// Frequency in Hz.
     pub frequency: f64,
-    /// Relative amplitude (typically 0.0 to 1.0)
+    /// Relative amplitude (typically 0.0 to 1.0).
     pub amplitude: f64,
 }
 
 impl ToneComponent {
     /// Creates a new tone component.
+    ///
+    /// # Arguments
+    ///
+    /// - `frequency` – Frequency of this component in Hz.
+    /// - `amplitude` – Relative amplitude of this component.
     #[inline]
     #[must_use]
     pub const fn new(frequency: f64, amplitude: f64) -> Self {
@@ -698,21 +919,25 @@ impl ToneComponent {
 /// # Returns
 /// An [`AudioSamples`] instance containing the summed tones.
 ///
-
 /// - If `components` is empty.
 ///
 /// # Examples
-/// ```rust,no_run
+///
+/// ```rust
 /// use audio_samples::utils::generation::{compound_tone, ToneComponent};
+/// use audio_samples::sample_rate;
+/// use non_empty_slice::NonEmptySlice;
 /// use std::time::Duration;
 ///
-/// // Create 440 Hz with harmonics
-/// let components = [
-///     ToneComponent::new(440.0, 1.0),    // fundamental
-///     ToneComponent::new(880.0, 0.5),    // 2nd harmonic
-///     ToneComponent::new(1320.0, 0.25),  // 3rd harmonic
+/// // 440 Hz fundamental with two harmonics.
+/// let raw = [
+///     ToneComponent::new(440.0, 1.0),   // fundamental
+///     ToneComponent::new(880.0, 0.5),   // 2nd harmonic
+///     ToneComponent::new(1320.0, 0.25), // 3rd harmonic
 /// ];
-/// let audio = compound_tone::<f64>(&components, Duration::from_secs(1), 44100);
+/// let components = NonEmptySlice::from_slice(&raw).unwrap();
+/// let audio = compound_tone::<f64>(components, Duration::from_millis(100), sample_rate!(44100));
+/// assert_eq!(audio.num_channels().get(), 1);
 /// ```
 #[inline]
 #[must_use]
@@ -739,7 +964,8 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("guaranteed valid audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
 /// Generates an amplitude-modulated (AM) signal.
@@ -763,12 +989,15 @@ where
 /// - If `duration` results in zero samples.
 ///
 /// # Examples
-/// ```rust,no_run
+///
+/// ```rust
 /// use audio_samples::utils::generation::am_signal;
+/// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// // 440 Hz carrier modulated at 2 Hz
-/// let audio = am_signal::<f64>(440.0, 2.0, 0.5, Duration::from_secs(1), 44100, 0.8);
+/// // 440 Hz carrier modulated at 2 Hz with 50% depth.
+/// let audio = am_signal::<f64>(440.0, 2.0, 0.5, Duration::from_millis(100), sample_rate!(44100), 0.8);
+/// assert_eq!(audio.num_channels().get(), 1);
 /// ```
 #[inline]
 #[must_use]
@@ -802,7 +1031,8 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("guaranteed valid audio")
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
 /// Generates a signal with periodic exponential decay bursts.
@@ -825,12 +1055,15 @@ where
 /// - If `duration` results in zero samples.
 ///
 /// # Examples
+///
 /// ```rust,no_run
 /// use audio_samples::utils::generation::exponential_bursts;
+/// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// // 2 bursts per second with fast decay
-/// let audio = exponential_bursts::<f64>(2.0, 30.0, Duration::from_secs(3), 44100, 0.8);
+/// // 2 bursts per second with fast decay.
+/// let audio = exponential_bursts::<f64>(2.0, 30.0, Duration::from_secs(3), sample_rate!(44100), 0.8);
+/// assert_eq!(audio.num_channels().get(), 1);
 /// ```
 #[cfg(feature = "random-generation")]
 #[inline]
@@ -874,19 +1107,34 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("guaranteed valid audio")
+    // safety: we know array is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
-/// Generates silence (zeros) with the specified duration.
+/// Generates a silence buffer (all-zero samples) with the specified duration.
 ///
 /// # Arguments
-/// * `duration` - Duration of the signal in seconds
-/// * `sample_rate` - Sample rate in Hz
+///
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
 ///
 /// # Returns
-/// An [`AudioSamples`] instance containing silence.
 ///
-
+/// A mono [`AudioSamples`] buffer containing zero-valued samples for the entire duration.
+///
+/// # Panics
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::silence;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let silent = silence::<f32>(Duration::from_millis(100), sample_rate!(44100));
+/// assert_eq!(silent.num_channels().get(), 1);
+/// assert_eq!(silent.samples_per_channel().get(), 4410);
+/// ```
 #[inline]
 #[must_use]
 pub fn silence<T>(duration: Duration, sample_rate: NonZeroU32) -> AudioSamples<'static, T>
@@ -897,7 +1145,8 @@ where
     let samples = vec![T::zero(); num_samples];
 
     let array = Array1::from_vec(samples);
-    AudioSamples::new_mono(array, sample_rate).expect("guaranteed valid audio")
+    // safety: we know array is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
 // ============================================================================
@@ -923,11 +1172,13 @@ where
 /// Same as [`sine_wave`].
 ///
 /// # Examples
+///
 /// ```rust,no_run
 /// use audio_samples::utils::generation::stereo_sine_wave;
+/// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// let stereo = stereo_sine_wave::<f64>(440.0, Duration::from_secs(1), 44100, 0.8);
+/// let stereo = stereo_sine_wave::<f64>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.8);
 /// assert_eq!(stereo.num_channels().get(), 2);
 /// ```
 #[inline]
@@ -960,12 +1211,17 @@ where
 /// # Returns
 /// A stereo [`AudioSamples`] with the chirp on both channels.
 ///
+/// # Panics
+///
+/// If ndarray cannot stack the channels for some reason
 /// # Examples
+///
 /// ```rust,no_run
 /// use audio_samples::utils::generation::stereo_chirp;
+/// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// let stereo = stereo_chirp::<f64>(100.0, 1000.0, Duration::from_secs(1), 44100, 0.8);
+/// let stereo = stereo_chirp::<f64>(100.0, 1000.0, Duration::from_secs(1), sample_rate!(44100), 0.8);
 /// assert_eq!(stereo.num_channels().get(), 2);
 /// ```
 #[inline]
@@ -996,14 +1252,18 @@ where
 /// # Returns
 /// A stereo [`AudioSamples`] containing silence on both channels.
 ///
+/// # Panics
+///
+/// If ndarray cannot stack the channels for some reason
 ///
 /// # Examples
 ///
 /// ```rust,no_run
 /// use audio_samples::utils::generation::stereo_silence;
+/// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// let silent_stereo = stereo_silence::<f64>(Duration::from_secs(2), 44100);
+/// let silent_stereo = stereo_silence::<f64>(Duration::from_secs(2), sample_rate!(44100));
 /// assert_eq!(silent_stereo.num_channels().get(), 2);
 /// ```
 #[inline]
@@ -1039,16 +1299,17 @@ where
 /// - If the computed number of samples cannot be represented as `usize`.
 ///
 /// # Examples
+///
 /// ```rust,no_run
 /// use audio_samples::utils::generation::{multichannel_compound_tone, ToneComponent};
+/// use audio_samples::sample_rate;
+/// use non_empty_slice::NonEmptySlice;
 /// use std::time::Duration;
 ///
-/// let components = [
-///     ToneComponent::new(440.0, 1.0),
-///     ToneComponent::new(880.0, 0.5),
-/// ];
-/// // Create 5.1 surround sound test tone
-/// let surround = multichannel_compound_tone::<f64, f64>(&components, Duration::from_secs(1), 44100, 6);
+/// let raw = [ToneComponent::new(440.0, 1.0), ToneComponent::new(880.0, 0.5)];
+/// let components = NonEmptySlice::from_slice(&raw).unwrap();
+/// // 5.1 surround sound test tone.
+/// let surround = multichannel_compound_tone::<f64>(components, Duration::from_secs(1), sample_rate!(44100), 6);
 /// assert_eq!(surround.num_channels().get(), 6);
 /// ```
 #[inline]

@@ -1,58 +1,39 @@
-//! Peak picking and post-processing utilities for onset detection.
+//! Peak picking and signal enhancement utilities for onset detection.
 //!
-//! This module provides comprehensive peak picking and post-processing utilities
-//! that serve as the foundation for all onset detection methods. It implements
-//! adaptive thresholding, temporal constraints, and signal enhancement techniques
-//! based on established research in music information retrieval.
+//! This module provides the core signal analysis building blocks used by onset
+//! detection: adaptive thresholding, peak picking with temporal constraints, and
+//! signal pre-processing (pre-emphasis, median filtering, normalisation, smoothing).
 //!
-//! ## Mathematical Foundation
+//! Raw onset strength functions are noisy and have varying amplitude across signals
+//! and recording conditions. A fixed detection threshold fails in quiet sections and
+//! produces false positives in loud ones. This module handles signal conditioning and
+//! peak selection so that onset detectors can focus on their specific spectral or
+//! temporal features.
 //!
-//! ### Adaptive Thresholding
+//! The primary entry point is [`pick_peaks`], which applies a configurable pipeline:
+//! optional pre-emphasis → optional median filtering → optional normalisation →
+//! adaptive thresholding → local maximum detection → temporal constraint filtering.
+//! Each step is also available as a standalone function for use in custom pipelines.
 //!
-//! Adaptive thresholding dynamically adjusts the detection threshold based on
-//! local characteristics of the onset strength function. Three methods are supported:
+//! # Example
 //!
-//! 1. **Delta-based**: `threshold(n) = max(onset_strength[n-W:n+W]) - δ`
-//!    - Responsive to sudden changes but may be sensitive to noise
-//!    - Good for signals with varying dynamics
+//! ```
+//! use audio_samples::operations::peak_picking::pick_peaks;
+//! use audio_samples::operations::types::PeakPickingConfig;
+//! use non_empty_slice::NonEmptySlice;
 //!
-//! 2. **Percentile-based**: `threshold(n) = percentile(onset_strength[n-W:n+W], p)`
-//!    - More robust to noise and outliers
-//!    - Slower to adapt to sudden changes
-//!
-//! 3. **Combined**: `threshold(n) = max(delta_threshold(n), percentile_threshold(n))`
-//!    - Balances responsiveness and robustness
-//!    - Recommended for general use
-//!
-//! ### Peak Picking with Temporal Constraints
-//!
-//! Peak picking identifies local maxima in the onset strength function that exceed
-//! the adaptive threshold. Temporal constraints ensure detected peaks are separated
-//! by minimum time intervals to prevent multiple detections of the same onset event.
-//!
-//! The algorithm:
-//! 1. Find all local maxima where `onset_strength[n] > threshold[n]`
-//! 2. Apply minimum separation constraint: keep only peaks separated by ≥ `min_separation`
-//! 3. When multiple peaks violate the constraint, keep the one with highest strength
-//!
-//! ### Signal Enhancement
-//!
-//! Pre-processing techniques enhance onset detection:
-//!
-//! - **Pre-emphasis**: High-pass filtering to emphasize transients
-//!   `y[n] = x[n] - α * x[n-1]` where α is the pre-emphasis coefficient
-//!
-//! - **Median filtering**: Noise reduction while preserving peak structure
-//!   `y[n] = median(x[n-k:n+k])` where k = (filter_length - 1) / 2
-//!
-//! - **Normalization**: Ensures consistent detection across signal levels
-//!   Peak normalization: `y = x / max(|x|)`
-//!
-//! ## References
-//!
-//! - Bello, J.P., et al. "A tutorial on onset detection in music signals." IEEE TSALP 2005.
-//! - Böck, S., et al. "Evaluating the online capabilities of onset detection methods." ISMIR 2012.
-//! - Dixon, S. "Onset detection revisited." DAFx 2006.
+//! let data = [0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+//! let onset_strength = NonEmptySlice::from_slice(&data).unwrap();
+//! // Disable pre-processing steps that can suppress peaks on short signals.
+//! let mut config = PeakPickingConfig::default();
+//! config.pre_emphasis = false;
+//! config.median_filter = false;
+//! config.normalize_onset_strength = false;
+//! config.adaptive_threshold.window_size = 3;
+//! let peaks = pick_peaks(onset_strength, &config).unwrap();
+//! assert!(!peaks.is_empty());
+//! assert!(peaks.iter().all(|&i| i < data.len()));
+//! ```
 use std::num::NonZeroUsize;
 
 use non_empty_iter::{IntoNonEmptyIterator, NonEmptyIterator};
@@ -63,39 +44,44 @@ use crate::operations::types::{
 };
 use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 
-/// Compute adaptive threshold for onset strength function.
+/// Computes an adaptive threshold for each sample of an onset strength function.
 ///
-/// This function implements adaptive thresholding algorithms that dynamically
-/// adjust the detection threshold based on local characteristics of the onset
-/// strength function. The threshold adapts to varying signal conditions to
-/// improve detection accuracy.
+/// Three thresholding methods are available, selected by `config.method`:
 ///
-/// # Mathematical Theory
+/// - `Delta` – threshold = local max − δ. Responsive to sudden level changes.
+/// - `Percentile` – threshold = percentile(local window, p). More robust to noise.
+/// - `Combined` – maximum of the delta and percentile thresholds. Balances both.
 ///
-/// Adaptive thresholding is essential for robust onset detection because:
-/// - Fixed thresholds fail when signal dynamics vary
-/// - Local adaptation handles both quiet and loud sections
-/// - Multiple methods provide different trade-offs between responsiveness and robustness
+/// The computed threshold at each position is clamped to
+/// `[config.min_threshold, config.max_threshold]`.
 ///
 /// # Arguments
 ///
-/// * `onset_strength` - The onset strength function values
-/// * `config` - Configuration for adaptive thresholding
+/// - `onset_strength` – Non-empty slice of onset strength values.
+/// - `config` – Thresholding parameters: method, window size, delta, percentile,
+///   and threshold bounds.
 ///
 /// # Returns
 ///
-/// A vector of threshold values with the same length as the input
+/// A `Vec<f64>` of threshold values with the same length as `onset_strength`.
 ///
-/// # Examples
+/// # Errors
 ///
-/// ```rust
-/// use audio_samples::operations::{AdaptiveThresholdConfig, AdaptiveThresholdMethod};
+/// Returns [crate::AudioSampleError::Parameter] if `config` fails validation
+/// (e.g. delta < 0, percentile outside `[0, 1]`, or `min_threshold > max_threshold`).
+///
+/// # Example
+///
+/// ```
 /// use audio_samples::operations::peak_picking::adaptive_threshold;
+/// use audio_samples::operations::types::AdaptiveThresholdConfig;
+/// use non_empty_slice::NonEmptySlice;
 ///
-/// let onset_strength = vec![0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+/// let data = [0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+/// let onset_strength = NonEmptySlice::from_slice(&data).unwrap();
 /// let config = AdaptiveThresholdConfig::default();
-/// let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
-/// assert_eq!(thresholds.len(), onset_strength.len());
+/// let thresholds = adaptive_threshold(onset_strength, &config).unwrap();
+/// assert_eq!(thresholds.len(), data.len());
 /// ```
 #[inline]
 pub fn adaptive_threshold(
@@ -145,42 +131,55 @@ pub fn adaptive_threshold(
     Ok(thresholds)
 }
 
-/// Pick peaks from onset strength function using adaptive thresholding and temporal constraints.
+/// Picks local maxima from an onset strength function using adaptive thresholding.
 ///
-/// This function identifies local maxima in the onset strength function that exceed
-/// the adaptive threshold and satisfy temporal separation constraints. It implements
-/// the complete peak picking pipeline with optional signal enhancement.
+/// Applies a configurable pipeline to `onset_strength` and returns the indices of
+/// detected peaks in ascending order:
 ///
-/// # Mathematical Theory
+/// 1. Pre-emphasis filtering (optional) — high-pass `y[n] = x[n] − α·x[n-1]`
+/// 2. Median filtering (optional) — noise reduction
+/// 3. Normalisation (optional)
+/// 4. Adaptive threshold computation
+/// 5. Local maximum detection above threshold (interior samples only)
+/// 6. Temporal constraint filtering — retains only the strongest peak within each
+///    minimum-separation window
 ///
-/// Peak picking is crucial for onset detection because:
-/// - Converts continuous onset strength to discrete onset times
-/// - Temporal constraints prevent multiple detections of the same event
-/// - Signal enhancement improves detection in noisy conditions
-///
-/// The algorithm implements a two-stage process:
-/// 1. **Candidate detection**: Find all local maxima above threshold
-/// 2. **Temporal filtering**: Apply minimum separation constraints
+/// Configuration window sizes and minimum separation are automatically adjusted
+/// downward when the signal is shorter than the configured values.
 ///
 /// # Arguments
 ///
-/// * `onset_strength` - The onset strength function values
-/// * `config` - Configuration for peak picking
+/// - `onset_strength` – Non-empty slice of onset strength values.
+/// - `config` – Peak picking parameters including threshold configuration,
+///   minimum peak separation, pre-processing flags, and normalisation method.
 ///
 /// # Returns
 ///
-/// A vector of peak indices (sample positions) in the onset strength function
+/// A `Vec<usize>` of peak indices into `onset_strength`, sorted in ascending order.
+/// Returns an empty `Vec` if no peaks are found.
 ///
-/// # Examples
+/// # Errors
 ///
-/// ```rust
-/// use audio_samples::operations::{PeakPickingConfig};
+/// Returns [crate::AudioSampleError::Parameter] if `config` fails validation.
+///
+/// # Example
+///
+/// ```
 /// use audio_samples::operations::peak_picking::pick_peaks;
+/// use audio_samples::operations::types::PeakPickingConfig;
+/// use non_empty_slice::NonEmptySlice;
 ///
-/// let onset_strength = vec![0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
-/// let config = PeakPickingConfig::default();
-/// let peaks = pick_peaks(&onset_strength, &config).unwrap();
-/// // peaks contains indices of detected onset locations
+/// let data = [0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+/// let onset_strength = NonEmptySlice::from_slice(&data).unwrap();
+/// // Disable pre-processing steps that can suppress peaks on short signals.
+/// let mut config = PeakPickingConfig::default();
+/// config.pre_emphasis = false;
+/// config.median_filter = false;
+/// config.normalize_onset_strength = false;
+/// config.adaptive_threshold.window_size = 3;
+/// let peaks = pick_peaks(onset_strength, &config).unwrap();
+/// // All returned indices are valid positions in the onset strength function.
+/// assert!(peaks.iter().all(|&i| i < data.len()));
 /// ```
 #[inline]
 pub fn pick_peaks(
@@ -225,7 +224,7 @@ pub fn pick_peaks(
     // Normalization
     if config.normalize_onset_strength {
         processed_strength =
-            normalize_onset_strength(&processed_strength, config.normalization_method)?;
+            normalize_onset_strength(&processed_strength, config.normalization_method);
     }
 
     // Step 2: Compute adaptive threshold
@@ -244,37 +243,52 @@ pub fn pick_peaks(
             candidates.push((i, current));
         }
     }
-    // safety: candidates is guaranteed to be non-empty since onset_strength is non-empty
+
+    // Early return if no peaks found
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // safety: candidates is non-empty due to check above
     let candidates = unsafe { NonEmptyVec::new_unchecked(candidates) };
     // Step 4: Apply temporal constraints
-    let peaks = apply_temporal_constraints(&candidates, adjusted_config.min_peak_separation.get())?;
+    let peaks = apply_temporal_constraints(&candidates, adjusted_config.min_peak_separation.get());
 
     Ok(peaks)
 }
 
-/// Apply pre-emphasis filtering to enhance transients.
+/// Applies a first-order high-pass pre-emphasis filter to enhance transients.
 ///
-/// Pre-emphasis is a high-pass filter that emphasizes high-frequency components
-/// and transients in the signal. This is particularly useful for onset detection
-/// as it enhances the characteristics that distinguish onsets from steady-state signals.
-///
-/// # Mathematical Theory
-///
-/// Pre-emphasis implements a first-order high-pass filter:
-/// `y[n] = x[n] - α * x[n-1]`
-///
-/// Where α is the pre-emphasis coefficient (typically 0.95-0.99):
-/// - Higher α values provide stronger emphasis
-/// - Lower α values provide gentler emphasis
+/// Each output sample `y[n] = x[n] − α·x[n-1]`, where α is `coeff`.
+/// The first sample is passed through unchanged. A coefficient of `0.0` is
+/// the identity; higher values provide stronger high-frequency emphasis.
 ///
 /// # Arguments
 ///
-/// * `signal` - Input signal to filter
-/// * `coeff` - Pre-emphasis coefficient (0.0-1.0)
+/// - `signal` – Non-empty slice of input values.
+/// - `coeff` – Pre-emphasis coefficient in `[0.0, 1.0]`.
 ///
 /// # Returns
 ///
-/// Filtered signal with enhanced transients
+/// A new `NonEmptyVec<f64>` the same length as `signal` with the filter applied.
+///
+/// # Errors
+///
+/// Returns [crate::AudioSampleError::Parameter] if `coeff` is outside `[0.0, 1.0]`.
+///
+/// # Example
+///
+/// ```
+/// use audio_samples::operations::peak_picking::apply_pre_emphasis;
+/// use non_empty_slice::NonEmptySlice;
+///
+/// let data = [1.0f64, 2.0, 3.0, 2.0, 1.0];
+/// let signal = NonEmptySlice::from_slice(&data).unwrap();
+/// let filtered = apply_pre_emphasis(signal, 0.97).unwrap();
+/// assert_eq!(filtered.len(), signal.len());
+/// // First sample passes through unchanged.
+/// assert_eq!(filtered[0], data[0]);
+/// ```
 #[inline]
 pub fn apply_pre_emphasis(
     signal: &NonEmptySlice<f64>,
@@ -301,30 +315,39 @@ pub fn apply_pre_emphasis(
     Ok(filtered)
 }
 
-/// Apply median filtering for noise reduction.
+/// Applies a median filter to reduce impulse noise while preserving peaks.
 ///
-/// Median filtering is a non-linear filter that replaces each sample with the
-/// median of its neighborhood. It effectively reduces noise while preserving
-/// edge structure, making it ideal for onset strength processing.
-///
-/// # Mathematical Theory
-///
-/// Median filtering: `y[n] = median(x[n-k:n+k])`
-/// where k = (filter_length - 1) / 2
-///
-/// Properties:
-/// - Preserves edges and peaks
-/// - Removes impulse noise
-/// - Non-linear operation
+/// Each output sample is replaced by the median of a symmetric window centred
+/// on that sample, using edge-clamped boundaries. A `filter_length` of `1`
+/// returns the signal unchanged.
 ///
 /// # Arguments
 ///
-/// * `signal` - Input signal to filter
-/// * `filter_length` - Length of median filter (must be odd)
+/// - `signal` – Non-empty slice of input values.
+/// - `filter_length` – Length of the median window; must be an odd `NonZeroUsize`.
 ///
 /// # Returns
 ///
-/// Filtered signal with reduced noise
+/// A new `NonEmptyVec<f64>` the same length as `signal` with the filter applied.
+///
+/// # Errors
+///
+/// Returns [crate::AudioSampleError::Parameter] if `filter_length` is even.
+///
+/// # Example
+///
+/// ```
+/// use std::num::NonZeroUsize;
+/// use audio_samples::operations::peak_picking::apply_median_filter;
+/// use non_empty_slice::NonEmptySlice;
+///
+/// let data = [1.0f64, 5.0, 2.0, 8.0, 3.0]; // contains outliers
+/// let signal = NonEmptySlice::from_slice(&data).unwrap();
+/// let filtered = apply_median_filter(signal, NonZeroUsize::new(3).unwrap()).unwrap();
+/// assert_eq!(filtered.len(), signal.len());
+/// // The spike at index 1 should be reduced.
+/// assert!(filtered[1] < data[1]);
+/// ```
 #[inline]
 pub fn apply_median_filter(
     signal: &NonEmptySlice<f64>,
@@ -352,38 +375,59 @@ pub fn apply_median_filter(
         // Extract window and compute median
         let mut window: Vec<f64> = signal[start..end].to_vec();
         window.sort_by(|a, b| {
-            match a.partial_cmp(b) {
-                Some(order) => order,
-                None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
-            }
+            a.partial_cmp(b)
+                .map_or(std::cmp::Ordering::Equal, |order| order)
         });
         let median = window[window.len() / 2];
         filtered.push(median);
     }
-    // safety : filtered is guaranteed to be non-empty since signal is non-empty
+    // safety: filtered is guaranteed to be non-empty since signal is non-empty
     let filtered = unsafe { NonEmptyVec::new_unchecked(filtered) };
     Ok(filtered)
 }
 
-/// Normalize onset strength function.
+/// Normalises an onset strength function to a consistent amplitude scale.
 ///
-/// Normalization ensures consistent detection thresholds across signals with
-/// different amplitude levels. This is crucial for robust onset detection in
-/// varied acoustic conditions.
+/// Available methods (selected via `method`):
+///
+/// - `Peak` – divides by the maximum absolute value; output peaks at ±1.
+/// - `MinMax` – scales to `[0, 1]`.
+/// - `ZScore` – zero mean, unit variance.
+/// - `Mean` – subtracts the mean.
+/// - `Median` – subtracts the median.
+///
+/// When the signal is constant (or all zeros for `Peak`), the input is returned
+/// unchanged.
 ///
 /// # Arguments
 ///
-/// * `onset_strength` - Input onset strength function
-/// * `method` - Normalization method to apply
+/// - `onset_strength` – Non-empty slice of onset strength values.
+/// - `method` – Normalisation method to apply.
 ///
 /// # Returns
 ///
-/// Normalized onset strength function
+/// A new `NonEmptyVec<f64>` the same length as `onset_strength`.
+///
+/// # Example
+///
+/// ```
+/// use audio_samples::operations::peak_picking::normalize_onset_strength;
+/// use audio_samples::operations::types::NormalizationMethod;
+/// use non_empty_slice::NonEmptySlice;
+///
+/// let data = [0.2f64, 0.5, 1.0, 0.3];
+/// let onset_strength = NonEmptySlice::from_slice(&data).unwrap();
+/// let normalized = normalize_onset_strength(onset_strength, NormalizationMethod::Peak);
+/// // Peak normalisation maps the maximum to 1.0.
+/// let max_abs = normalized.iter().cloned().fold(0.0f64, f64::max);
+/// assert!((max_abs - 1.0).abs() < 1e-10);
+/// ```
 #[inline]
+#[must_use]
 pub fn normalize_onset_strength(
     onset_strength: &NonEmptySlice<f64>,
     method: NormalizationMethod,
-) -> AudioSampleResult<NonEmptyVec<f64>> {
+) -> NonEmptyVec<f64> {
     match method {
         NormalizationMethod::Peak => {
             // Peak normalization: divide by maximum absolute value
@@ -392,14 +436,13 @@ pub fn normalize_onset_strength(
                 .fold(0.0, |acc: f64, &x| acc.max(x.abs()));
 
             if max_abs == 0.0 {
-                return Ok(onset_strength.to_owned());
+                return onset_strength.to_owned();
             }
 
-            let normalized = onset_strength
+            onset_strength
                 .into_non_empty_iter()
                 .map(|&x| x / max_abs)
-                .collect_non_empty();
-            Ok(normalized)
+                .collect_non_empty()
         }
         NormalizationMethod::MinMax => {
             // Min-max normalization: scale to [0, 1]
@@ -411,14 +454,13 @@ pub fn normalize_onset_strength(
                 .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
 
             if (max_val - min_val).abs() < f64::EPSILON {
-                return Ok(onset_strength.to_owned());
+                return onset_strength.to_owned();
             }
 
-            let normalized = onset_strength
+            onset_strength
                 .into_non_empty_iter()
                 .map(|&x| (x - min_val) / (max_val - min_val))
-                .collect_non_empty();
-            Ok(normalized)
+                .collect_non_empty()
         }
         NormalizationMethod::ZScore => {
             // Z-score normalization: zero mean, unit variance
@@ -431,77 +473,62 @@ pub fn normalize_onset_strength(
                 / onset_strength.len().get() as f64;
 
             if variance == 0.0 {
-                return Ok(onset_strength.to_owned());
+                return onset_strength.to_owned();
             }
 
             let std_dev = variance.sqrt();
-            let normalized = onset_strength
+
+            onset_strength
                 .into_non_empty_iter()
                 .map(|&x| (x - mean) / std_dev)
-                .collect_non_empty();
-            Ok(normalized)
+                .collect_non_empty()
         }
         NormalizationMethod::Mean => {
             // Mean normalization: subtract mean
             let mean = onset_strength.iter().fold(0.0, |acc, &x| acc + x)
                 / onset_strength.len().get() as f64;
-            let normalized = onset_strength
+
+            onset_strength
                 .into_non_empty_iter()
                 .map(|&x| x - mean)
-                .collect_non_empty();
-            Ok(normalized)
+                .collect_non_empty()
         }
         NormalizationMethod::Median => {
             // Median normalization: subtract median
             let mut sorted = onset_strength.to_vec();
             sorted.sort_by(|a, b| {
-                match a.partial_cmp(b) {
-                    Some(order) => order,
-                    None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
-                }
+                a.partial_cmp(b)
+                    .map_or(std::cmp::Ordering::Equal, |order| order)
             });
             let median = sorted[sorted.len() / 2];
-            let normalized = onset_strength
+
+            onset_strength
                 .into_non_empty_iter()
                 .map(|&x| x - median)
-                .collect_non_empty();
-            Ok(normalized)
+                .collect_non_empty()
         }
     }
 }
 
-/// Apply temporal constraints to candidate peaks.
+/// Filters candidate peaks to enforce a minimum sample separation.
 ///
-/// This function implements temporal filtering to ensure detected peaks are
-/// separated by minimum time intervals. When multiple peaks violate the
-/// separation constraint, the one with highest strength is kept.
-///
-/// # Mathematical Theory
-///
-/// Temporal constraints prevent multiple detections of the same onset event:
-/// - Minimum separation ensures peaks are spaced ≥ min_separation samples
-/// - When conflicts occur, higher-strength peaks are preferred
-/// - This is a greedy algorithm that processes peaks in strength order
+/// Candidates are processed in descending strength order. A candidate is kept
+/// if it is at least `min_separation` samples away from all already-selected
+/// peaks. The returned indices are sorted in ascending order.
 ///
 /// # Arguments
 ///
-/// * `candidates` - Vector of (index, strength) tuples for candidate peaks
-/// * `min_separation` - Minimum separation between peaks in samples
-///
-/// # Returns
-///
-/// Vector of peak indices that satisfy temporal constraints
+/// - `candidates` – Non-empty slice of `(index, strength)` tuples.
+/// - `min_separation` – Minimum distance between any two kept peaks in samples.
 fn apply_temporal_constraints(
     candidates: &NonEmptySlice<(usize, f64)>,
     min_separation: usize,
-) -> AudioSampleResult<Vec<usize>> {
+) -> Vec<usize> {
     // Sort candidates by strength (descending)
     let mut sorted_candidates = candidates.to_vec();
     sorted_candidates.sort_by(|a, b| {
-        match b.1.partial_cmp(&a.1) {
-            Some(order) => order,
-            None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
-        }
+        b.1.partial_cmp(&a.1)
+            .map_or(std::cmp::Ordering::Equal, |order| order)
     });
 
     let mut selected_peaks = Vec::new();
@@ -523,24 +550,45 @@ fn apply_temporal_constraints(
 
     // Sort selected peaks by index
     selected_peaks.sort_unstable();
-    Ok(selected_peaks)
+    selected_peaks
 }
 
-/// Smooth onset strength function using temporal processing.
+/// Applies two-stage smoothing: median filtering followed by a moving average.
 ///
-/// This function applies temporal smoothing to the onset strength function
-/// to reduce noise and improve peak detection. It combines multiple smoothing
-/// techniques for optimal results.
+/// Median filtering is applied first to remove impulse noise, then a centred
+/// moving average is applied to reduce remaining high-frequency variation.
+/// Passing `window_size = 1` skips the moving-average step.
 ///
 /// # Arguments
 ///
-/// * `onset_strength` - Input onset strength function
-/// * `window_size` - Size of smoothing window
-/// * `median_length` - Length of median filter (must be odd)
+/// - `onset_strength` – Non-empty slice of onset strength values.
+/// - `window_size` – Moving-average window size. A value of `1` skips the step.
+/// - `median_length` – Median filter window length; must be an odd `NonZeroUsize`.
 ///
 /// # Returns
 ///
-/// Smoothed onset strength function
+/// A new `NonEmptyVec<f64>` the same length as `onset_strength`.
+///
+/// # Errors
+///
+/// Returns [crate::AudioSampleError::Parameter] if `median_length` is even.
+///
+/// # Example
+///
+/// ```
+/// use std::num::NonZeroUsize;
+/// use audio_samples::operations::peak_picking::smooth_onset_strength;
+/// use non_empty_slice::NonEmptySlice;
+///
+/// let data = [0.1f64, 0.9, 0.1, 0.8, 0.2, 0.7, 0.3];
+/// let onset_strength = NonEmptySlice::from_slice(&data).unwrap();
+/// let smoothed = smooth_onset_strength(
+///     onset_strength,
+///     NonZeroUsize::new(3).unwrap(),
+///     NonZeroUsize::new(3).unwrap(),
+/// ).unwrap();
+/// assert_eq!(smoothed.len(), onset_strength.len());
+/// ```
 #[inline]
 pub fn smooth_onset_strength(
     onset_strength: &NonEmptySlice<f64>,
@@ -552,30 +600,20 @@ pub fn smooth_onset_strength(
 
     // Apply moving average smoothing
     if window_size.get() > 1 {
-        smoothed = apply_moving_average(&smoothed, window_size)?;
+        smoothed = apply_moving_average(&smoothed, window_size);
     }
     Ok(smoothed)
 }
 
-/// Apply moving average smoothing.
+/// Applies a centred moving-average filter to smooth `signal`.
 ///
-/// This function applies a moving average filter to smooth the signal
-/// while preserving overall trends and reducing high-frequency noise.
-///
-/// # Arguments
-///
-/// * `signal` - Input signal to smooth
-/// * `window_size` - Size of moving average window
-///
-/// # Returns
-///
-/// Smoothed signal
+/// A `window_size` of `1` returns the signal unchanged.
 fn apply_moving_average(
     signal: &NonEmptySlice<f64>,
     window_size: NonZeroUsize,
-) -> AudioSampleResult<NonEmptyVec<f64>> {
+) -> NonEmptyVec<f64> {
     if window_size.get() == 1 {
-        return Ok(signal.to_owned());
+        return signal.to_owned();
     }
 
     let mut smoothed = Vec::with_capacity(signal.len().get());
@@ -590,31 +628,18 @@ fn apply_moving_average(
         smoothed.push(average);
     }
     // safety: smoothed is guaranteed to be non-empty since signal is non-empty
-    let smoothed = unsafe { NonEmptyVec::new_unchecked(smoothed) };
-    Ok(smoothed)
+
+    unsafe { NonEmptyVec::new_unchecked(smoothed) }
 }
 
-/// Compute percentile of a slice of values.
+/// Returns the `percentile`-th quantile of `values` using linear interpolation.
 ///
-/// This helper function computes the percentile of a slice without
-/// modifying the original data. It uses linear interpolation for
-/// percentiles that fall between sample points.
-///
-/// # Arguments
-///
-/// * `values` - Slice of values to compute percentile from
-/// * `percentile` - Percentile to compute (0.0-1.0)
-///
-/// # Returns
-///
-/// The percentile value
+/// `percentile` must be in `[0.0, 1.0]` (not validated; caller is responsible).
 fn percentile(values: &NonEmptySlice<f64>, percentile: f64) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| {
-        match a.partial_cmp(b) {
-            Some(order) => order,
-            None => std::cmp::Ordering::Equal, // Handle NaN values gracefully
-        }
+        a.partial_cmp(b)
+            .map_or(std::cmp::Ordering::Equal, |order| order)
     });
 
     let n = sorted.len();
@@ -748,8 +773,7 @@ mod tests {
     #[test]
     fn test_normalize_onset_strength_peak() {
         let onset_strength: NonEmptyVec<f64> = non_empty_vec![0.1, 0.5, 1.0, 0.3];
-        let normalized =
-            normalize_onset_strength(&onset_strength, NormalizationMethod::Peak).unwrap();
+        let normalized = normalize_onset_strength(&onset_strength, NormalizationMethod::Peak);
 
         assert_eq!(normalized.len(), onset_strength.len());
 
@@ -761,8 +785,7 @@ mod tests {
     #[test]
     fn test_normalize_onset_strength_minmax() {
         let onset_strength: NonEmptyVec<f64> = non_empty_vec![0.1, 0.5, 1.0, 0.3];
-        let normalized =
-            normalize_onset_strength(&onset_strength, NormalizationMethod::MinMax).unwrap();
+        let normalized = normalize_onset_strength(&onset_strength, NormalizationMethod::MinMax);
 
         assert_eq!(normalized.len(), onset_strength.len());
 
@@ -797,7 +820,7 @@ mod tests {
         let candidates = non_empty_vec![(1, 0.8), (2, 0.6), (5, 0.9), (6, 0.7)];
         let min_separation = 2;
 
-        let selected = apply_temporal_constraints(&candidates, min_separation).unwrap();
+        let selected = apply_temporal_constraints(&candidates, min_separation);
 
         // Check separation constraint
         for i in 1..selected.len() {
@@ -811,7 +834,7 @@ mod tests {
 
         assert_eq!(percentile(&values, 0.0), 1.0);
         assert_eq!(percentile(&values, 1.0), 5.0);
-        assert_eq!(percentile(&values, 0.5), 2.5); // Interpolated median
+        assert_eq!(percentile(&values, 0.5), 3.0); // Median of odd-length array
 
         // Test interpolation
         let p25 = percentile(&values, 0.25);
@@ -828,7 +851,7 @@ mod tests {
 
         // All zeros
         let zeros: NonEmptyVec<f64> = non_empty_vec![0.0, 0.0, 0.0];
-        let normalized = normalize_onset_strength(&zeros, NormalizationMethod::Peak).unwrap();
+        let normalized = normalize_onset_strength(&zeros, NormalizationMethod::Peak);
         assert_eq!(normalized, zeros);
     }
 

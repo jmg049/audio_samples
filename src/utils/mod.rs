@@ -1,46 +1,63 @@
 //! Utility functions and helpers for audio processing.
 //!
 //! This module groups convenience utilities that complement the core types and operations.
+
+//! Four sub-modules expose signal generation, signal comparison, audio analysis, and
+//! mathematical building blocks respectively:
 //!
-//! # Module organization
 //! - [`generation`]: synthesize common test signals (sine, chirp, impulse, silence, …)
-//! - [`comparison`]: similarity metrics (correlation, MSE, SNR, …)
+//! - [`comparison`]: similarity metrics (correlation, MSE, SNR, signal alignment)
 //! - [`detection`]: lightweight analysis helpers (fundamental frequency, silence regions, …)
-//! - [`audio_math`]: mathematical utility functions for audio processing
+//! - [`audio_math`]: domain-level conversions between frequency, amplitude, MIDI, mel, and time
+//!
+//! All sub-modules are re-exported at the `utils` level for convenience. Top-level helpers
+//! for sample-to-time conversion are also provided directly.
+
+//! Audio pipelines typically require many small numeric helpers — converting frequencies,
+//! detecting silence, generating test tones — that do not belong to the core sample-buffer
+//! API. This module isolates those helpers so they remain composable and easy to discover
+//! without polluting the primary `AudioSamples` interface.
+
+//! Import individual functions by path or use the module prefix directly:
+//!
+//! ```rust
+//! use audio_samples::utils::generation;
+//! use audio_samples::sample_rate;
+//! use std::time::Duration;
+//!
+//! // Generate a one-second 440 Hz sine wave at 44 100 Hz sample rate.
+//! let tone = generation::sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+//! assert_eq!(tone.sample_rate().get(), 44100);
+//! ```
 //!
 //! Some utilities are feature-gated:
-//! - `detection::detect_sample_rate` requires `fft`.
-//! - noise generators like `generation::white_noise` require `random-generation`.
+//! - `detection::detect_sample_rate` requires `feature = "transforms"`.
+//! - Noise generators (`white_noise`, `pink_noise`, `brown_noise`) require `feature = "random-generation"`.
 //!
 //! # Examples
 //!
-//! ## Generate a test tone
-//! ```rust,no_run
-//! use audio_samples::utils::generation;
-//! use std::time::Duration;
-//!
-//! let tone = generation::sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44_100, 1.0);
-//! assert_eq!(tone.sample_rate(), 44_100);
-//! ```
-//!
-//! ## Compare two signals
-//! ```rust,no_run
+//! ## Compare two identical signals
+//! ```rust
 //! use audio_samples::utils::{comparison, generation};
+//! use audio_samples::sample_rate;
 //! use std::time::Duration;
 //!
-//! let a = generation::sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44_100, 1.0);
-//! let b = generation::sine_wave::<f32, f32>(440.0, Duration::from_secs(1), 44_100, 1.0);
-//! let corr: f32 = comparison::correlation::<f32, f32>(&a, &b).unwrap();
+//! let sr = sample_rate!(44100);
+//! let a = generation::sine_wave::<f32>(440.0, Duration::from_secs(1), sr, 1.0);
+//! let b = generation::sine_wave::<f32>(440.0, Duration::from_secs(1), sr, 1.0);
+//! let corr: f64 = comparison::correlation(&a, &b).unwrap();
 //! assert!(corr > 0.99);
 //! ```
 //!
 //! ## Detect silence regions
-//! ```rust,no_run
+//! ```rust
 //! use audio_samples::utils::{detection, generation};
+//! use audio_samples::sample_rate;
 //! use std::time::Duration;
 //!
-//! let audio = generation::silence::<f32, f32>(Duration::from_millis(200), 44_100);
-//! let regions = detection::detect_silence_regions::<f32, f32>(&audio, 0.001f32).unwrap();
+//! let sr = sample_rate!(44100);
+//! let audio = generation::silence::<f32>(Duration::from_millis(200), sr);
+//! let regions = detection::detect_silence_regions(&audio, 0.001f32).unwrap();
 //! assert!(!regions.is_empty());
 //! ```
 
@@ -57,26 +74,56 @@ pub use generation::*;
 // Re-export utility modules (not individual functions)
 // Modules are already public above, no need for additional re-exports
 
-/// Helper function to convert seconds to samples
-/// Converts time in seconds to number of samples at given sample rate
+/// Converts a duration expressed in seconds into a sample count.
 ///
 /// # Arguments
-/// - `seconds`: Duration in seconds
-/// - `sample_rate`: Sampling frequency in Hz (accepts `u32` or `NonZeroU32`)
+///
+/// - `seconds` – Duration in seconds.
+/// - `sample_rate` – Sampling frequency in Hz. Accepts any type that converts into `u32`,
+///   including `u32` and `NonZeroU32`.
 ///
 /// # Returns
-/// Number of samples representing the specified duration
 ///
-/// # Panics
-/// Panics if the computed sample count cannot be converted to `usize`,
-/// typically when the result would overflow or is infinite/NaN.
+/// The number of samples corresponding to the given duration at the specified sample rate.
+/// The result is truncated (not rounded) to the nearest integer sample.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::seconds_to_samples;
+/// use audio_samples::sample_rate;
+///
+/// let n = seconds_to_samples(1.0, sample_rate!(44100));
+/// assert_eq!(n, 44100);
+/// ```
 #[inline]
 pub fn seconds_to_samples(seconds: f64, sample_rate: impl Into<u32>) -> usize {
     let rate: u32 = sample_rate.into();
     (seconds * f64::from(rate)) as usize
 }
 
-/// Converts a number of samples to duration in seconds.
+/// Converts a sample count into a duration expressed in seconds.
+///
+/// # Arguments
+///
+/// - `num_samples` – The number of samples.
+/// - `sample_rate` – Sampling frequency in Hz. Accepts any type that converts into `u32`,
+///   including `u32` and `NonZeroU32`.
+///
+/// # Returns
+///
+/// The duration in seconds corresponding to the given number of samples at the specified
+/// sample rate.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::samples_to_seconds;
+/// use audio_samples::sample_rate;
+///
+/// let t = samples_to_seconds(44100, sample_rate!(44100));
+/// assert!((t - 1.0).abs() < 1e-9);
+/// ```
 #[inline]
 pub fn samples_to_seconds(num_samples: usize, sample_rate: impl Into<u32>) -> f64 {
     let rate: u32 = sample_rate.into();

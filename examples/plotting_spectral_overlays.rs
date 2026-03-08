@@ -6,10 +6,10 @@ fn main() {
 
 #[cfg(all(feature = "plotting", feature = "statistics"))]
 fn main() -> audio_samples::AudioSampleResult<()> {
-    use audio_samples::{AudioSamples, chirp, sample_rate};
     use audio_samples::operations::plotting::dsp_overlays;
     use audio_samples::operations::plotting::spectrograms::SpectrogramPlotParams;
     use audio_samples::operations::{AudioPlotting, PlotUtils};
+    use audio_samples::{AudioSamples, chirp, sample_rate};
     use std::time::Duration;
 
     println!("=== Spectral Overlays Example ===\n");

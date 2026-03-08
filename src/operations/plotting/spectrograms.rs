@@ -4,6 +4,7 @@ use plotly::{
     HeatMap, Plot, Scatter,
     layout::{Axis, GridPattern, LayoutGrid, RowOrder, Shape, ShapeLine, ShapeType},
 };
+use std::convert::AsRef;
 use std::path::Path;
 
 #[cfg(feature = "transforms")]
@@ -24,17 +25,34 @@ use crate::{
 /// Default padding fraction for auto-zooming frequency range (e.g., 0.1 = 10%)
 const DEFAULT_FREQ_PADDING: f64 = 0.4; // 40% padding on each side when auto-zooming frequency range
 
+/// Interactive time-frequency representation with configurable scale and amplitude encoding.
+///
+/// # Purpose
+/// Encapsulates a rendered Plotly spectrogram visualization. Provides methods for saving
+/// to disk, generating HTML, and adding overlays such as vertical/horizontal lines, contour
+/// tracks (e.g., pitch, spectral centroid), and spectral feature annotations.
+///
+/// # Intended Usage
+/// Created via [`create_spectrogram_plot`] or through the [`crate::AudioPlotting`] trait.
+/// Supports method chaining for adding overlays before final rendering or saving.
+///
+/// # Invariants
+/// - The underlying `Plot` contains at least one heatmap trace representing the spectrogram.
+/// - Frequency axis units (Hz or kHz) are determined automatically based on the frequency range.
+/// - Time axis is always in seconds.
 pub struct SpectrogramPlot {
     _params: SpectrogramPlotParams,
     plot: Plot,
 }
 
 impl PlotUtils for SpectrogramPlot {
+    #[inline]
     fn html(&self) -> crate::AudioSampleResult<String> {
         Ok(self.plot.to_html())
     }
 
     #[cfg(feature = "html_view")]
+    #[inline]
     fn show(&self) -> crate::AudioSampleResult<()> {
         let html = self.html()?;
         html_view::show(html).map_err(|e| {
@@ -43,6 +61,7 @@ impl PlotUtils for SpectrogramPlot {
         Ok(())
     }
 
+    #[inline]
     fn save<P: AsRef<Path>>(&self, path: P) -> crate::AudioSampleResult<()> {
         let path = path.as_ref();
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("html");
@@ -51,10 +70,7 @@ impl PlotUtils for SpectrogramPlot {
             "html" => {
                 let html = self.html()?;
                 std::fs::write(path, html).map_err(|e| {
-                    crate::AudioSampleError::unsupported(format!(
-                        "Failed to write HTML file: {}",
-                        e
-                    ))
+                    crate::AudioSampleError::unsupported(format!("Failed to write HTML file: {e}"))
                 })?;
                 Ok(())
             }
@@ -104,8 +120,7 @@ impl PlotUtils for SpectrogramPlot {
                 crate::ParameterError::InvalidValue {
                     parameter: "file_extension".to_string(),
                     reason: format!(
-                        "Unsupported file extension: {}. Supported: html, png, svg, jpeg, jpg, webp",
-                        extension
+                        "Unsupported file extension: {extension}. Supported: html, png, svg, jpeg, jpg, webp"
                     ),
                 },
             )),
@@ -114,28 +129,48 @@ impl PlotUtils for SpectrogramPlot {
 }
 
 impl PlotComponent for SpectrogramPlot {
+    #[inline]
     fn get_plot(&self) -> &Plot {
         &self.plot
     }
 
+    #[inline]
     fn get_plot_mut(&mut self) -> &mut Plot {
         &mut self.plot
     }
 
+    #[inline]
     fn requires_shared_x_axis(&self) -> bool {
         true // Spectrograms are time-based
     }
 }
 
 impl SpectrogramPlot {
-    /// Add a vertical line at the specified time position (for marking events).
+    /// Adds a vertical line overlay at the specified time position.
+    ///
+    /// Useful for marking temporal events such as onset times, beat positions, or segment
+    /// boundaries. The line is rendered as a dashed white line spanning the full frequency range.
     ///
     /// # Arguments
-    /// * `time` - Time position in seconds
-    /// * `label` - Optional label for the line
+    /// * `time` — Time position in seconds where the vertical line should be drawn
+    /// * `label` — Optional text label displayed above the line
     ///
     /// # Returns
-    /// Self for method chaining
+    /// Self for method chaining.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use audio_samples::{AudioSamples, sample_rate};
+    /// # use audio_samples::operations::traits::AudioPlotting;
+    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
+    /// let plot = audio.plot_spectrogram(&SpectrogramPlotParams::default())?
+    ///     .add_vline(1.5, Some("Event A"))
+    ///     .add_vline(3.2, Some("Event B"));
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
+    /// ```
+    #[inline]
+    #[must_use]
     pub fn add_vline(mut self, time: f64, label: Option<&str>) -> Self {
         let shape = Shape::new()
             .shape_type(ShapeType::Line)
@@ -170,14 +205,31 @@ impl SpectrogramPlot {
         self
     }
 
-    /// Add a horizontal line at the specified frequency (for marking frequency bands).
+    /// Adds a horizontal line overlay at the specified frequency.
+    ///
+    /// Useful for marking frequency bands, pitch references (e.g., A440), or formant locations.
+    /// The line is rendered as a dashed white line spanning the full time range.
     ///
     /// # Arguments
-    /// * `freq` - Frequency in Hz
-    /// * `label` - Optional label for the line
+    /// * `freq` — Frequency in Hz where the horizontal line should be drawn
+    /// * `label` — Optional text label displayed to the right of the line
     ///
     /// # Returns
-    /// Self for method chaining
+    /// Self for method chaining.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use audio_samples::{AudioSamples, sample_rate};
+    /// # use audio_samples::operations::traits::AudioPlotting;
+    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
+    /// let plot = audio.plot_spectrogram(&SpectrogramPlotParams::default())?
+    ///     .add_hline(440.0, Some("A4"))
+    ///     .add_hline(880.0, Some("A5"));
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
+    /// ```
+    #[inline]
+    #[must_use]
     pub fn add_hline(mut self, freq: f64, label: Option<&str>) -> Self {
         let shape = Shape::new()
             .shape_type(ShapeType::Line)
@@ -212,18 +264,37 @@ impl SpectrogramPlot {
         self
     }
 
-    /// Overlay a continuous contour line (e.g., for pitch/F0 tracking).
+    /// Overlays a continuous contour line representing a time-varying frequency track.
+    ///
+    /// Renders a white line with cyan markers following the provided time-frequency trajectory.
+    /// Commonly used to visualize pitch (F0) tracks, formant trajectories, or other spectral
+    /// features that evolve over time.
     ///
     /// # Arguments
-    /// * `times` - Time points in seconds
-    /// * `freqs` - Frequency values in Hz
-    /// * `label` - Optional label for the contour
+    /// * `times` — Time points in seconds, must be in ascending order
+    /// * `freqs` — Frequency values in Hz corresponding to each time point
+    /// * `label` — Optional legend label for the contour track
     ///
     /// # Returns
-    /// Self for method chaining
+    /// Self for method chaining.
     ///
     /// # Panics
-    /// Panics if `times` and `freqs` have different lengths
+    /// Panics if `times` and `freqs` have different lengths.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use audio_samples::{AudioSamples, sample_rate};
+    /// # use audio_samples::operations::traits::AudioPlotting;
+    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
+    /// let times = vec![0.0, 0.5, 1.0, 1.5];
+    /// let freqs = vec![220.0, 247.0, 262.0, 294.0]; // A3, B3, C4, D4
+    /// let plot = audio.plot_spectrogram(&SpectrogramPlotParams::default())?
+    ///     .overlay_contour(&times, &freqs, Some("Pitch Track"));
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
+    /// ```
+    #[inline]
+    #[must_use]
     pub fn overlay_contour(mut self, times: &[f64], freqs: &[f64], label: Option<&str>) -> Self {
         assert_eq!(
             times.len(),
@@ -254,21 +325,23 @@ impl SpectrogramPlot {
         self
     }
 
-    /// Add spectral centroid track overlay
+    /// Adds a spectral centroid track overlay to the spectrogram.
     ///
-    /// Use with [`crate::operations::plotting::dsp_overlays::compute_windowed_spectral_centroid`]
-    /// to compute the spectral centroid over time.
+    /// The spectral centroid represents the "center of mass" of the spectrum and correlates
+    /// with the perceived brightness of a sound. This convenience method wraps [`overlay_contour`]
+    /// with a default label of "Spectral Centroid".
     ///
-    /// The centroid represents the "center of mass" of the spectrum and correlates
-    /// with perceived brightness of the sound.
+    /// Typically used in conjunction with
+    /// [`crate::operations::plotting::dsp_overlays::compute_windowed_spectral_centroid`]
+    /// to compute windowed centroid values over time.
     ///
     /// # Arguments
-    /// * `times` - Time points in seconds
-    /// * `centroid_hz` - Spectral centroid values in Hz
-    /// * `label` - Optional label (default: "Spectral Centroid")
+    /// * `times` — Time points in seconds where centroid values were computed
+    /// * `centroid_hz` — Spectral centroid values in Hz
+    /// * `label` — Optional custom label (defaults to "Spectral Centroid" if `None`)
     ///
     /// # Returns
-    /// Self for method chaining
+    /// Self for method chaining.
     ///
     /// # Example
     /// ```rust,ignore
@@ -280,6 +353,8 @@ impl SpectrogramPlot {
     /// let plot = audio.plot_spectrogram(&params)?
     ///     .add_spectral_centroid(times, centroids, None);
     /// ```
+    #[inline]
+    #[must_use]
     pub fn add_spectral_centroid(
         self,
         times: Vec<f64>,
@@ -290,21 +365,26 @@ impl SpectrogramPlot {
         self.overlay_contour(&times, &centroid_hz, Some(label))
     }
 
-    /// Add spectral rolloff track overlay
-    ///
-    /// Use with [`crate::operations::plotting::dsp_overlays::compute_windowed_spectral_rolloff`]
-    /// to compute the spectral rolloff over time.
+    /// Adds a spectral rolloff track overlay to the spectrogram.
     ///
     /// The rolloff frequency is the point below which a specified percentage (e.g., 85%)
-    /// of the spectral energy is contained. It indicates the "cutoff" of the spectrum.
+    /// of the spectral energy is contained. It indicates the high-frequency "cutoff" of the
+    /// spectrum and is useful for distinguishing tonal vs. noisy content.
+    ///
+    /// This convenience method wraps [`overlay_contour`] with a default label of
+    /// "Spectral Rolloff".
+    ///
+    /// Typically used in conjunction with
+    /// [`crate::operations::plotting::dsp_overlays::compute_windowed_spectral_rolloff`]
+    /// to compute windowed rolloff values over time.
     ///
     /// # Arguments
-    /// * `times` - Time points in seconds
-    /// * `rolloff_hz` - Spectral rolloff values in Hz
-    /// * `label` - Optional label (default: "Spectral Rolloff")
+    /// * `times` — Time points in seconds where rolloff values were computed
+    /// * `rolloff_hz` — Spectral rolloff values in Hz
+    /// * `label` — Optional custom label (defaults to "Spectral Rolloff" if `None`)
     ///
     /// # Returns
-    /// Self for method chaining
+    /// Self for method chaining.
     ///
     /// # Example
     /// ```rust,ignore
@@ -316,6 +396,8 @@ impl SpectrogramPlot {
     /// let plot = audio.plot_spectrogram(&params)?
     ///     .add_spectral_rolloff(times, rolloff, None);
     /// ```
+    #[inline]
+    #[must_use]
     pub fn add_spectral_rolloff(
         self,
         times: Vec<f64>,
@@ -327,84 +409,213 @@ impl SpectrogramPlot {
     }
 }
 
+/// Configuration parameters for spectrogram plot generation.
+///
+/// # Purpose
+/// Encapsulates all settings required to generate a spectrogram visualization, including
+/// STFT parameters, frequency/amplitude scale selection, color mapping, axis ranges, and
+/// channel management strategy.
+///
+/// # Intended Usage
+/// Construct via [`SpectrogramPlotParams::default()`], [`mel_db()`], or [`linear_magnitude()`]
+/// constructor methods. Modify fields as needed before passing to [`create_spectrogram_plot`]
+/// or the [`crate::AudioPlotting`] trait methods.
+///
+/// # Invariants
+/// - When `auto_zoom_freq` is `true` and `freq_range` is `None`, the frequency axis will be
+///   automatically zoomed to the range containing significant spectral energy.
+/// - `stft_params` must be `Some` when the `transforms` feature is enabled.
+/// - `colormap` values should correspond to valid Plotly colorscale names (e.g., "Viridis",
+///   "Hot", "Jet"). Invalid names fall back to "Viridis".
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SpectrogramPlotParams {
+    /// Base plotting parameters shared across all plot types (title, labels, legend, etc.).
     pub plot_params: PlotParams,
+    /// Strategy for handling multi-channel audio (average, separate, first, last).
+    /// If `None`, defaults to [`ChannelManagementStrategy::default()`].
     pub ch_mgmt_strategy: Option<ChannelManagementStrategy>,
+    /// Specifies the frequency scale (linear, mel, log, gammatone) and amplitude encoding
+    /// (magnitude, power, dB).
     pub spectrogram_type: SpectrogramType,
+    /// STFT parameters from the `spectrograms` crate (FFT size, hop size, window type).
+    /// Required when the `transforms` feature is enabled.
     #[cfg(feature = "transforms")]
     pub stft_params: Option<SpectrogramParams>,
-    pub colormap: Option<String>,
+    /// Colormap for the heatmap (e.g., "Viridis", "Hot", "Jet"). Defaults to "Viridis".
+    pub colormap: Option<ColorScale>,
+    /// Label for the colorbar axis. Defaults to a string appropriate for the amplitude scale
+    /// (e.g., "Amplitude (dB)" for dB scales).
     pub colorbar_label: Option<String>,
+    /// Manual frequency range in Hz as `(min_freq, max_freq)`. Overridden by `auto_zoom_freq`
+    /// if that is enabled and this is `None`.
     pub freq_range: Option<(f64, f64)>,
+    /// Manual time range in seconds as `(start_time, end_time)`. If `None`, shows full duration.
     pub time_range: Option<(f64, f64)>,
-    /// Automatically detect and zoom to the frequency range containing significant energy
-    /// If true, overrides freq_range with an intelligently detected range
+    /// Automatically detect and zoom to the frequency range containing significant energy.
+    /// If `true` and `freq_range` is `None`, overrides `freq_range` with an intelligently
+    /// detected range based on spectral energy distribution.
     pub auto_zoom_freq: bool,
-    /// Padding around the detected frequency range (as a fraction, e.g., 0.1 = 10%)
-    /// Only used when auto_zoom_freq is enabled. Default: 0.1 (10%)
+    /// Padding around the detected frequency range as a fraction (e.g., 0.1 = 10% padding on
+    /// each side). Only used when `auto_zoom_freq` is enabled. Defaults to 0.4 (40%) if `None`.
     pub freq_range_padding: Option<f64>,
 }
 
+impl AsRef<Self> for SpectrogramPlotParams {
+    #[inline]
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+/// Specifies the frequency scale and amplitude encoding for spectrogram computation.
+///
+/// # Purpose
+/// Defines all supported combinations of frequency scale (linear, logarithmic, mel, gammatone)
+/// and amplitude encoding (magnitude, power, decibels) for spectrogram visualization.
+///
+/// # Intended Usage
+/// Used as a field in [`SpectrogramPlotParams`] to determine which spectrogram computation
+/// method is invoked. Each variant corresponds to a specific method from the
+/// [`crate::AudioTransforms`] trait.
+///
+/// # Invariants
+/// - All variants require the `transforms` feature to be enabled.
+/// - Variants with `db_params` perform logarithmic amplitude scaling (decibels).
+/// - Variants with `mel_params`, `loghz_params`, or `gammatone_params` apply perceptual
+///   frequency warping.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SpectrogramType {
+    /// Linear-frequency STFT with magnitude values (non-negative real amplitudes).
     #[cfg(feature = "transforms")]
     LinearMagnitude,
+    /// Linear-frequency STFT with power values (magnitude squared).
     #[cfg(feature = "transforms")]
     LinearPower,
+    /// Linear-frequency STFT with decibel-scaled magnitude.
+    /// `db_params` controls the noise floor and reference level for dB conversion.
     #[cfg(feature = "transforms")]
-    LinearDb { db_params: LogParams },
+    LinearDb {
+        /// Decibel conversion parameters (noise floor, reference level).
+        db_params: LogParams,
+    },
+    /// Logarithmic-frequency STFT with magnitude values.
+    /// `loghz_params` controls the number of bins and frequency range for log scaling.
     #[cfg(feature = "transforms")]
-    LogFreqMagnitude { loghz_params: LogHzParams },
+    LogFreqMagnitude {
+        /// Logarithmic frequency scale parameters (bin count, range).
+        loghz_params: LogHzParams,
+    },
+    /// Logarithmic-frequency STFT with power values.
+    /// `loghz_params` controls the number of bins and frequency range for log scaling.
     #[cfg(feature = "transforms")]
-    LogFreqPower { loghz_params: LogHzParams },
+    LogFreqPower {
+        /// Logarithmic frequency scale parameters (bin count, range).
+        loghz_params: LogHzParams,
+    },
+    /// Logarithmic-frequency STFT with decibel-scaled magnitude.
+    /// `loghz_params` controls frequency binning, `db_params` controls dB conversion.
     #[cfg(feature = "transforms")]
     LogFreqDb {
+        /// Logarithmic frequency scale parameters (bin count, range).
         loghz_params: LogHzParams,
+        /// Decibel conversion parameters (noise floor, reference level).
         db_params: LogParams,
     },
+    /// Mel-scaled STFT with magnitude values.
+    /// `mel_params` controls the number of mel bands and frequency range.
     #[cfg(feature = "transforms")]
-    MelMagnitude { mel_params: MelParams },
+    MelMagnitude {
+        /// Mel-scale parameters (number of bands, frequency range).
+        mel_params: MelParams,
+    },
+    /// Mel-scaled STFT with power values.
+    /// `mel_params` controls the number of mel bands and frequency range.
     #[cfg(feature = "transforms")]
-    MelPower { mel_params: MelParams },
+    MelPower {
+        /// Mel-scale parameters (number of bands, frequency range).
+        mel_params: MelParams,
+    },
+    /// Mel-scaled STFT with decibel-scaled magnitude.
+    /// `mel_params` controls mel binning, `db_params` controls dB conversion.
+    /// This is the default spectrogram type.
     #[cfg(feature = "transforms")]
     MelDb {
+        /// Mel-scale parameters (number of bands, frequency range).
         mel_params: MelParams,
+        /// Decibel conversion parameters (noise floor, reference level).
         db_params: LogParams,
     },
+    /// Gammatone filterbank with magnitude values.
+    /// `gammatone_params` controls the number of filters, frequency range, and filter shape.
     #[cfg(feature = "transforms")]
-    Gammatone { gammatone_params: GammatoneParams },
+    Gammatone {
+        /// Gammatone filterbank parameters (filter count, range, shape).
+        gammatone_params: GammatoneParams,
+    },
+    /// Gammatone filterbank with power values.
+    /// `gammatone_params` controls the number of filters, frequency range, and filter shape.
     #[cfg(feature = "transforms")]
-    GammatonePower { gammatone_params: GammatoneParams },
+    GammatonePower {
+        /// Gammatone filterbank parameters (filter count, range, shape).
+        gammatone_params: GammatoneParams,
+    },
+    /// Gammatone filterbank with decibel-scaled magnitude.
+    /// `gammatone_params` controls filterbank design, `db_params` controls dB conversion.
     #[cfg(feature = "transforms")]
     GammatoneDb {
+        /// Gammatone filterbank parameters (filter count, range, shape).
         gammatone_params: GammatoneParams,
+        /// Decibel conversion parameters (noise floor, reference level).
         db_params: LogParams,
     },
 }
 
 impl SpectrogramPlotParams {
+    /// Creates default parameters for a mel-scaled dB spectrogram.
+    ///
+    /// Constructs a parameter set with 128 mel bands spanning 0-8000 Hz, a 2048-sample FFT
+    /// with 512-sample hop size, Hanning window, and a -80 dB noise floor. Auto-zoom is
+    /// enabled by default. This is the most common configuration for music and speech analysis.
+    ///
+    /// # Returns
+    /// A [`SpectrogramPlotParams`] instance configured for mel-dB visualization.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// let params = SpectrogramPlotParams::mel_db();
+    /// ```
     #[cfg(feature = "transforms")]
+    #[inline]
+    #[must_use]
     pub fn mel_db() -> Self {
-        use std::num::NonZeroUsize;
         Self {
             plot_params: PlotParams::default(),
             ch_mgmt_strategy: None,
             spectrogram_type: SpectrogramType::MelDb {
-                mel_params: MelParams::new(NonZeroUsize::new(128).unwrap(), 0.0, 8000.0).unwrap(),
-                db_params: LogParams::new(-80.0).unwrap(),
+                // safety: known valid parameters
+                mel_params: unsafe { MelParams::new_unchecked(nzu!(128), 0.0, 8000.0) },
+                // safety: -80.0 is finite
+                db_params: unsafe { LogParams::new_unchecked(-80.0) },
             },
             stft_params: Some(
-                SpectrogramParams::builder()
-                    .sample_rate(44100.0)
-                    .n_fft(crate::nzu!(2048))
-                    .hop_size(crate::nzu!(512))
-                    .window(spectrograms::WindowType::Hanning)
-                    .centre(true)
-                    .build()
-                    .unwrap(),
+                // safety: we set the required fields below:
+                // - sample_rate
+                // - n_fft
+                // - hop_size
+                unsafe {
+                    SpectrogramParams::builder()
+                        .sample_rate(44100.0)
+                        .n_fft(crate::nzu!(2048))
+                        .hop_size(crate::nzu!(512))
+                        .window(spectrograms::WindowType::Hanning)
+                        .centre(true)
+                        .build_unchecked()
+                },
             ),
-            colormap: Some("Viridis".to_string()),
+            colormap: Some(ColorScale::Palette(ColorScalePalette::Viridis)),
             colorbar_label: Some("Amplitude (dB)".to_string()),
             freq_range: None,
             time_range: None,
@@ -413,23 +624,45 @@ impl SpectrogramPlotParams {
         }
     }
 
+    /// Creates default parameters for a linear-frequency magnitude spectrogram.
+    ///
+    /// Constructs a parameter set with linear frequency bins (from STFT), a 2048-sample FFT
+    /// with 512-sample hop size, Hanning window, and magnitude amplitude encoding.
+    /// Auto-zoom is enabled by default. Useful for detailed frequency analysis where
+    /// perceptual scaling is not desired.
+    ///
+    /// # Returns
+    /// A [`SpectrogramPlotParams`] instance configured for linear magnitude visualization.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// let params = SpectrogramPlotParams::linear_magnitude();
+    /// ```
     #[cfg(feature = "transforms")]
+    #[inline]
+    #[must_use]
     pub fn linear_magnitude() -> Self {
         Self {
             plot_params: PlotParams::default(),
             ch_mgmt_strategy: None,
             spectrogram_type: SpectrogramType::LinearMagnitude,
             stft_params: Some(
-                SpectrogramParams::builder()
-                    .sample_rate(44100.0)
-                    .n_fft(crate::nzu!(2048))
-                    .hop_size(crate::nzu!(512))
-                    .window(spectrograms::WindowType::Hanning)
-                    .centre(true)
-                    .build()
-                    .unwrap(),
+                // safety: the required fields are set below:
+                // - sample_rate
+                // - n_fft
+                // - hop_size
+                unsafe {
+                    SpectrogramParams::builder()
+                        .sample_rate(44100.0)
+                        .n_fft(crate::nzu!(2048))
+                        .hop_size(crate::nzu!(512))
+                        .window(spectrograms::WindowType::Hanning)
+                        .centre(true)
+                        .build_unchecked()
+                },
             ),
-            colormap: Some("Viridis".to_string()),
+            colormap: Some(ColorScale::Palette(ColorScalePalette::Viridis)),
             colorbar_label: Some("Magnitude".to_string()),
             freq_range: None,
             time_range: None,
@@ -440,6 +673,7 @@ impl SpectrogramPlotParams {
 }
 
 impl Default for SpectrogramPlotParams {
+    #[inline]
     fn default() -> Self {
         #[cfg(feature = "transforms")]
         {
@@ -461,7 +695,41 @@ impl Default for SpectrogramPlotParams {
     }
 }
 
+/// Creates an interactive spectrogram plot from audio data.
+///
+/// Computes a time-frequency representation using the specified STFT and scale parameters,
+/// then renders it as a Plotly heatmap. Supports multiple channel management strategies,
+/// automatic frequency range detection, and optional kHz scaling for high-frequency signals.
+///
+/// # Arguments
+/// * `audio` — The audio data to visualize. Can be mono or multi-channel.
+/// * `params` — Configuration parameters controlling the spectrogram type, STFT settings,
+///   colormap, axis ranges, and channel management.
+///
+/// # Returns
+/// A [`SpectrogramPlot`] on success, which can be further customized with overlay methods
+/// before saving or displaying.
+///
+/// # Errors
+/// Returns an error if:
+/// - `params.stft_params` is `None` (required when `transforms` feature is enabled).
+/// - The spectrogram computation fails (e.g., invalid STFT parameters, insufficient samples).
+/// - The channel management strategy is [`ChannelManagementStrategy::Overlap`], which is not
+///   supported for spectrograms.
+///
+/// # Example
+/// ```rust,no_run
+/// use audio_samples::{AudioSamples, sample_rate};
+/// use audio_samples::operations::plotting::{create_spectrogram_plot, SpectrogramPlotParams, PlotUtils};
+///
+/// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
+/// let params = SpectrogramPlotParams::mel_db();
+/// let plot = create_spectrogram_plot(&audio, &params)?;
+/// plot.save("spectrogram.html")?;
+/// # Ok::<(), audio_samples::AudioSampleError>(())
+/// ```
 #[cfg(feature = "transforms")]
+#[inline]
 pub fn create_spectrogram_plot<T>(
     audio: &AudioSamples<'_, T>,
     params: &SpectrogramPlotParams,
@@ -494,10 +762,11 @@ where
     };
 
     let mut plot = Plot::new();
-    let colormap = params
+    let colormap = &params
         .colormap
         .clone()
-        .unwrap_or_else(|| "Viridis".to_string());
+        .unwrap_or(ColorScale::Palette(ColorScalePalette::Viridis));
+
     let colorbar_label = params
         .colorbar_label
         .clone()
@@ -519,7 +788,7 @@ where
             if let Some(max_freq) = spec_data
                 .freq_axis
                 .iter()
-                .cloned()
+                .copied()
                 .fold(None, |max, x| Some(max.map_or(x, |m: f64| m.max(x))))
             {
                 use_khz = max_freq > 1000.0;
@@ -528,7 +797,7 @@ where
         if use_khz {
             spec_data = scale_freq_to_khz(&spec_data);
         }
-        add_spectrogram_trace(&mut plot, &spec_data, &colormap, &colorbar_label, None)?;
+        add_spectrogram_trace(&mut plot, &spec_data, colormap, &colorbar_label, None)?;
     } else {
         match strategy {
             ChannelManagementStrategy::Average => {
@@ -540,7 +809,7 @@ where
                     if let Some(max_freq) = spec_data
                         .freq_axis
                         .iter()
-                        .cloned()
+                        .copied()
                         .fold(None, |max, x| Some(max.map_or(x, |m: f64| m.max(x))))
                     {
                         use_khz = max_freq > 1000.0;
@@ -549,7 +818,7 @@ where
                 if use_khz {
                     spec_data = scale_freq_to_khz(&spec_data);
                 }
-                add_spectrogram_trace(&mut plot, &spec_data, &colormap, &colorbar_label, None)?;
+                add_spectrogram_trace(&mut plot, &spec_data, colormap, &colorbar_label, None)?;
             }
             ChannelManagementStrategy::First => {
                 let mono_audio = audio_f64.to_mono(MonoConversionMethod::Left)?;
@@ -560,7 +829,7 @@ where
                     if let Some(max_freq) = spec_data
                         .freq_axis
                         .iter()
-                        .cloned()
+                        .copied()
                         .fold(None, |max, x| Some(max.map_or(x, |m: f64| m.max(x))))
                     {
                         use_khz = max_freq > 1000.0;
@@ -569,7 +838,7 @@ where
                 if use_khz {
                     spec_data = scale_freq_to_khz(&spec_data);
                 }
-                add_spectrogram_trace(&mut plot, &spec_data, &colormap, &colorbar_label, None)?;
+                add_spectrogram_trace(&mut plot, &spec_data, colormap, &colorbar_label, None)?;
             }
             ChannelManagementStrategy::Last => {
                 let mono_audio = audio_f64.to_mono(MonoConversionMethod::Right)?;
@@ -580,7 +849,7 @@ where
                     if let Some(max_freq) = spec_data
                         .freq_axis
                         .iter()
-                        .cloned()
+                        .copied()
                         .fold(None, |max, x| Some(max.map_or(x, |m: f64| m.max(x))))
                     {
                         use_khz = max_freq > 1000.0;
@@ -589,7 +858,7 @@ where
                 if use_khz {
                     spec_data = scale_freq_to_khz(&spec_data);
                 }
-                add_spectrogram_trace(&mut plot, &spec_data, &colormap, &colorbar_label, None)?;
+                add_spectrogram_trace(&mut plot, &spec_data, colormap, &colorbar_label, None)?;
             }
             ChannelManagementStrategy::Separate(layout) => {
                 for (idx, channel) in audio_f64.channels().enumerate() {
@@ -600,7 +869,7 @@ where
                         if let Some(max_freq) = spec_data
                             .freq_axis
                             .iter()
-                            .cloned()
+                            .copied()
                             .fold(None, |max, x| Some(max.map_or(x, |m: f64| m.max(x))))
                         {
                             use_khz = max_freq > 1000.0;
@@ -617,7 +886,7 @@ where
                     add_spectrogram_trace(
                         &mut plot,
                         &spec_data,
-                        &colormap,
+                        colormap,
                         &colorbar_label,
                         Some(axis_ref),
                     )?;
@@ -630,20 +899,19 @@ where
     // Determine frequency range (auto-zoom or manual)
     let freq_range_unscaled = if params.auto_zoom_freq && params.freq_range.is_none() {
         // Auto-detect frequency range based on energy
-        if let Some(ref spec_data) = first_spec_data {
+        first_spec_data.as_ref().map(|spec_data| {
             let padding = params.freq_range_padding.unwrap_or(DEFAULT_FREQ_PADDING); // Default 10%
-            Some(detect_frequency_range(spec_data, padding))
-        } else {
-            None
-        }
+            detect_frequency_range(spec_data, padding)
+        })
     } else {
         params.freq_range
     };
 
     // Keep the original max frequency for axis label determination
-    let max_freq_for_axis = freq_range_unscaled
-        .map(|(_, max)| max)
-        .unwrap_or(audio.sample_rate().get() as f64 / 2.0);
+    let max_freq_for_axis = freq_range_unscaled.map_or_else(
+        || f64::from(audio.sample_rate().get()) / 2.0,
+        |(_, max)| max,
+    );
 
     // Scale freq_range to kHz if needed (for the actual plot range)
     let freq_range = if use_khz {
@@ -729,7 +997,7 @@ struct SpectrogramData {
 /// * `padding_fraction` - Padding to add on each side (e.g., 0.1 = 10%)
 fn detect_frequency_range(spec_data: &SpectrogramData, padding_fraction: f64) -> (f64, f64) {
     let n_freq_bins = spec_data.freq_axis.len();
-    let n_time_bins = spec_data.data.first().map(|row| row.len()).unwrap_or(0);
+    let n_time_bins = spec_data.data.first().map_or(0, std::vec::Vec::len);
 
     if n_freq_bins == 0 || n_time_bins == 0 {
         return (0.0, spec_data.freq_axis.last().copied().unwrap_or(22050.0));
@@ -737,7 +1005,7 @@ fn detect_frequency_range(spec_data: &SpectrogramData, padding_fraction: f64) ->
 
     // Compute total energy per frequency bin (sum across time)
     let mut freq_energy: Vec<f64> = vec![0.0; n_freq_bins];
-    for freq_idx in 0..n_freq_bins {
+    for (freq_idx, bin_energy) in freq_energy.iter_mut().enumerate().take(n_freq_bins) {
         for time_idx in 0..n_time_bins {
             let val = spec_data.data[freq_idx][time_idx];
             // For dB values, convert back to linear scale for energy calculation
@@ -749,7 +1017,7 @@ fn detect_frequency_range(spec_data: &SpectrogramData, padding_fraction: f64) ->
                 // Assume linear scale
                 val * val
             };
-            freq_energy[freq_idx] += energy;
+            *bin_energy += energy;
         }
     }
 
@@ -913,34 +1181,17 @@ fn scale_freq_to_khz(spec_data: &SpectrogramData) -> SpectrogramData {
 fn add_spectrogram_trace(
     plot: &mut Plot,
     spec_data: &SpectrogramData,
-    colormap: &str,
+    colorscale: &ColorScale,
     colorbar_label: &str,
     axis_ref: Option<(String, String)>,
 ) -> AudioSampleResult<()> {
-    let colorscale = match colormap {
-        // Perceptually uniform (recommended)
-        "Viridis" => ColorScale::Palette(ColorScalePalette::Viridis),
-        "Cividis" => ColorScale::Palette(ColorScalePalette::Cividis),
-        // Sequential
-        "Hot" => ColorScale::Palette(ColorScalePalette::Hot),
-        "Greys" => ColorScale::Palette(ColorScalePalette::Greys),
-        "YlGnBu" => ColorScale::Palette(ColorScalePalette::YlGnBu),
-        "Greens" => ColorScale::Palette(ColorScalePalette::Greens),
-        "YlOrRd" => ColorScale::Palette(ColorScalePalette::YlOrRd),
-        "Reds" => ColorScale::Palette(ColorScalePalette::Reds),
-        "Blues" => ColorScale::Palette(ColorScalePalette::Blues),
-        // Diverging
-        "Bluered" => ColorScale::Palette(ColorScalePalette::Bluered),
-        "RdBu" => ColorScale::Palette(ColorScalePalette::RdBu),
-        // Misc
-        "Jet" => ColorScale::Palette(ColorScalePalette::Jet),
-        "Rainbow" => ColorScale::Palette(ColorScalePalette::Rainbow),
-        "Portland" => ColorScale::Palette(ColorScalePalette::Portland),
-        "Blackbody" => ColorScale::Palette(ColorScalePalette::Blackbody),
-        "Earth" => ColorScale::Palette(ColorScalePalette::Earth),
-        "Electric" => ColorScale::Palette(ColorScalePalette::Electric),
-        "Picnic" => ColorScale::Palette(ColorScalePalette::Picnic),
-        _ => ColorScale::Palette(ColorScalePalette::Viridis), // Default
+    let colorscale = match colorscale {
+        ColorScale::Palette(color_scale_palette) => color_scale_palette,
+        ColorScale::Vector(_) => {
+            return Err(crate::AudioSampleError::unsupported(
+                "Vector colour scales not supported yet.",
+            ));
+        }
     };
 
     let mut heatmap = HeatMap::new(
@@ -948,7 +1199,7 @@ fn add_spectrogram_trace(
         spec_data.freq_axis.clone(),
         spec_data.data.clone(),
     )
-    .color_scale(colorscale)
+    .color_scale(ColorScale::Palette(colorscale.clone()))
     .color_bar(ColorBar::new().title(colorbar_label.to_string()))
     .show_scale(true);
 
@@ -1010,11 +1261,11 @@ fn configure_vertical_axes(
     for row in 0..rows {
         for col in 0..cols {
             let axis_index = row * cols + col;
-            let axis_x_name = axis_id('x', axis_index);
-            let axis_y_name = axis_id('y', axis_index);
+            let x_axis_id = axis_id('x', axis_index);
+            let y_axis_id = axis_id('y', axis_index);
             let is_bottom_row = row == rows - 1;
 
-            let mut x_axis = Axis::new().anchor(&axis_y_name);
+            let mut x_axis = Axis::new().anchor(&y_axis_id);
 
             if !is_bottom_row {
                 x_axis = x_axis
@@ -1033,7 +1284,7 @@ fn configure_vertical_axes(
 
             layout = assign_x_axis(layout, axis_index, x_axis);
 
-            let mut y_axis = Axis::new().anchor(&axis_x_name);
+            let mut y_axis = Axis::new().anchor(&x_axis_id);
             if col == 0 && row == 0 {
                 y_axis = configure_frequency_axis(
                     y_axis,
@@ -1074,10 +1325,10 @@ fn configure_horizontal_axes(
     for row in 0..rows {
         for col in 0..cols {
             let axis_index = row * cols + col;
-            let axis_x_name = axis_id('x', axis_index);
-            let axis_y_name = axis_id('y', axis_index);
+            let x_axis_id = axis_id('x', axis_index);
+            let y_axis_id = axis_id('y', axis_index);
 
-            let mut x_axis = Axis::new().anchor(&axis_y_name);
+            let mut x_axis = Axis::new().anchor(&y_axis_id);
             if row == 0 {
                 x_axis = configure_time_axis(
                     x_axis,
@@ -1090,7 +1341,7 @@ fn configure_horizontal_axes(
 
             layout = assign_x_axis(layout, axis_index, x_axis);
 
-            let mut y_axis = Axis::new().anchor(&axis_x_name);
+            let mut y_axis = Axis::new().anchor(&x_axis_id);
             if col != 0 {
                 y_axis = y_axis
                     .matches(&base_axis_name)

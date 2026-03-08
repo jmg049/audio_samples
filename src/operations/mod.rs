@@ -20,31 +20,28 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use audio_samples::AudioSamples;
-//! use audio_samples::operations::types::NormalizationMethod;
+//! use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+//! use audio_samples::operations::types::{NormalizationConfig, NormalizationMethod};
 //! use audio_samples::operations::traits::{AudioProcessing, AudioStatistics};
+//!
+//! # #[cfg(feature = "processing")]
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use ndarray::array;
 //!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-//! let audio = AudioSamples::new_mono(data, 44100).unwrap();
+//! let audio = AudioSamples::new_mono(data, sample_rate!(44100))?;
 //!
 //! // Statistical analysis
-//! let peak = audio.peak(); // Returns f32 directly
-//! let rms = audio.rms::<f32>();
+//! let peak = audio.peak();
+//! let rms = audio.rms();
 //! let _ = (peak, rms);
 //!
-//! // Signal processing
-//! let audio_copy = audio.clone();
-//! // Requires the `processing` feature.
-//! let audio_copy = audio_copy
-//!     .normalize(NormalizationConfig::min_max(-1.0, 1.0))
-//!     .unwrap();
-//! # let _ = audio_copy;
+//! // Signal processing (requires `processing` feature)
+//! let config = NormalizationConfig::min_max(-1.0, 1.0);
+//! let normalized = audio.normalize(config)?;
 //!
 //! // Type conversion
-//! // Requires `AudioTypeConversion` (re-exported at the crate root).
-//! let audio_i16 = audio.as_type::<i16>().unwrap();
+//! let audio_i16 = normalized.to_type::<i16>();
 //! let _ = audio_i16;
 //! # Ok(())
 //! # }

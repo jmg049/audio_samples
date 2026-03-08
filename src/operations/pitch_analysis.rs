@@ -1,7 +1,35 @@
-//! Pitch detection and fundamental frequency analysis implementations.
+//! Pitch detection and fundamental frequency analysis.
 //!
-//! This module provides robust pitch detection algorithms including YIN and
-//! autocorrelation-based methods, as well as harmonic analysis and key estimation.
+//! This module implements algorithms for detecting the fundamental frequency
+//! (pitch) of audio signals, tracking pitch over time, and analysing harmonic
+//! structure. It also provides musical key estimation via chromagram analysis.
+//!
+//! No single algorithm is optimal for all audio types. This module exposes the
+//! YIN algorithm (accurate for voiced speech and musical instruments) and an
+//! autocorrelation method (simpler and faster, effective for clean tones), so
+//! callers can choose the right tool for their signal.
+//!
+//! Use [`AudioPitchAnalysis::detect_pitch_yin`] for robust single-frame pitch
+//! detection or [`AudioPitchAnalysis::track_pitch`] for a time-varying pitch
+//! contour. Harmonic analysis and key estimation use the `spectrograms` crate
+//! internally for FFT computation. All methods operate on mono signals only.
+//!
+//! # Example
+//!
+//! ```
+//! use audio_samples::operations::traits::AudioPitchAnalysis;
+//! use audio_samples::{sample_rate, sine_wave};
+//! use std::time::Duration;
+//!
+//! // Generate a 440 Hz sine wave at 44100 Hz for 0.1 s.
+//! let hz = 440.0f64;
+//! let audio = sine_wave::<f64>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+//!
+//! let pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
+//! assert!(pitch.is_some());
+//! let detected_hz = pitch.unwrap();
+//! assert!((detected_hz - hz).abs() < 10.0, "detected {detected_hz:.1} Hz, expected {hz} Hz");
+//! ```
 
 use std::num::NonZeroUsize;
 
@@ -20,6 +48,45 @@ where
     T: StandardSample,
     Self: AudioTypeConversion<Sample = T>,
 {
+    /// Detects the fundamental frequency using the YIN pitch detection algorithm.
+    ///
+    /// YIN computes a cumulative mean normalised difference function (CMND) and
+    /// finds the first lag below `threshold`, which corresponds to the fundamental
+    /// period. Lower thresholds are stricter and reduce false detections; values
+    /// in `[0.1, 0.2]` are typical for musical audio.
+    ///
+    /// # Arguments
+    ///
+    /// - `threshold` – Confidence threshold in `[0.0, 1.0]`.
+    /// - `min_frequency` – Minimum detectable frequency in Hz (> 0).
+    /// - `max_frequency` – Maximum detectable frequency in Hz (> `min_frequency`).
+    ///
+    /// # Returns
+    ///
+    /// - `Some(frequency_hz)` – Estimated fundamental frequency.
+    /// - `None` – Signal is too short, silent, or no pitch was detected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `threshold ∉ [0.0, 1.0]`,
+    /// `min_frequency ≤ 0.0`, or `max_frequency ≤ min_frequency`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 440.0f64;
+    /// let audio = sine_wave::<f64>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    ///
+    /// let pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
+    /// assert!(pitch.is_some());
+    /// assert!((pitch.unwrap() - hz).abs() < 10.0);
+    /// ```
+    #[inline]
     fn detect_pitch_yin(
         &self,
         threshold: f64,
@@ -65,6 +132,44 @@ where
         Ok(result.map(|tau| sample_rate_f / tau))
     }
 
+    /// Detects the fundamental frequency using autocorrelation.
+    ///
+    /// Finds the lag with maximum autocorrelation within the range implied by
+    /// `[min_frequency, max_frequency]` and converts it to a frequency. This
+    /// method is fast and effective for clean, periodic signals but less robust
+    /// than YIN on noisy or voiced speech.
+    ///
+    /// # Arguments
+    ///
+    /// - `min_frequency` – Minimum detectable frequency in Hz (> 1.0).
+    /// - `max_frequency` – Maximum detectable frequency in Hz (> `min_frequency`).
+    ///
+    /// # Returns
+    ///
+    /// - `Some(frequency_hz)` – Estimated fundamental frequency.
+    /// - `None` – Signal is too short, silent, or unpitched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `min_frequency ≤ 1.0` or
+    /// `max_frequency ≤ min_frequency`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 220.0f64;
+    /// let audio = sine_wave::<f32>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    ///
+    /// let pitch = audio.detect_pitch_autocorr(80.0, 1000.0).unwrap();
+    /// assert!(pitch.is_some());
+    /// assert!((pitch.unwrap() - hz).abs() < 15.0);
+    /// ```
+    #[inline]
     fn detect_pitch_autocorr(
         &self,
         min_frequency: f64,
@@ -105,6 +210,62 @@ where
         Ok(result.map(|tau| sample_rate / tau))
     }
 
+    /// Tracks pitch over time by applying pitch detection to successive windows.
+    ///
+    /// The signal is split into overlapping frames of `window_size` samples,
+    /// advancing by `hop_size` each step. Each frame is analysed independently
+    /// using `method`. Frames shorter than `window_size / 2` at the signal end
+    /// are discarded. Only [`PitchDetectionMethod::Yin`] and
+    /// [`PitchDetectionMethod::Autocorrelation`] are implemented; other variants
+    /// log a warning and return `None` for that frame.
+    ///
+    /// # Arguments
+    ///
+    /// - `window_size` – Analysis window length in samples; must be ≤ signal length.
+    /// - `hop_size` – Step between successive windows in samples; must be < `window_size`.
+    /// - `method` – Pitch detection algorithm to use per frame.
+    /// - `threshold` – YIN confidence threshold; ignored for autocorrelation.
+    /// - `min_frequency` – Minimum detectable frequency in Hz.
+    /// - `max_frequency` – Maximum detectable frequency in Hz.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<(f64, Option<f64>)>` of `(time_seconds, frequency_hz)` pairs in
+    /// time order. `frequency_hz` is `None` when no pitch was found in that frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `window_size > signal length`
+    /// or `hop_size >= window_size`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::operations::types::PitchDetectionMethod;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let hz = 440.0f64;
+    /// let audio = sine_wave::<f32>(hz, Duration::from_millis(500), sample_rate!(44100), 1.0);
+    ///
+    /// let track = audio.track_pitch(
+    ///     NonZeroUsize::new(2048).unwrap(),
+    ///     NonZeroUsize::new(512).unwrap(),
+    ///     PitchDetectionMethod::Yin,
+    ///     0.1,
+    ///     80.0,
+    ///     1000.0,
+    /// ).unwrap();
+    ///
+    /// assert!(!track.is_empty());
+    /// let detected: Vec<f64> = track.iter().filter_map(|&(_, f)| f).collect();
+    /// let avg = detected.iter().sum::<f64>() / detected.len() as f64;
+    /// assert!((avg - hz).abs() < 20.0);
+    /// ```
+    #[inline]
     fn track_pitch(
         &self,
         window_size: NonZeroUsize,
@@ -153,7 +314,7 @@ where
             }
 
             let window = &samples_slice[start..end];
-            // safety : window is guaranteed non-empty since end - start >= window_size / 2 > 0
+            // safety: window is guaranteed non-empty since end - start >= window_size / 2 > 0
             let window = unsafe { NonEmptySlice::new_unchecked(window) };
             let time_seconds = start as f64 / sample_rate;
 
@@ -180,6 +341,50 @@ where
         Ok(results)
     }
 
+    /// Computes the harmonic-to-noise ratio (HNR) in decibels.
+    ///
+    /// HNR measures how much of the signal's energy comes from periodic
+    /// (harmonic) components versus aperiodic (noise) components. A high HNR
+    /// indicates a clean, voiced tone; a low or negative HNR indicates
+    /// noise-dominated content. Power spectrum computation is delegated to the
+    /// `spectrograms` crate. Harmonic bins are those within one
+    /// frequency-resolution unit of a multiple of `fundamental_freq`.
+    ///
+    /// # Arguments
+    ///
+    /// - `fundamental_freq` – Known fundamental frequency in Hz (> 0).
+    /// - `num_harmonics` – Number of harmonics to accumulate into harmonic power.
+    /// - `n_fft` – FFT size. Defaults to the signal length when `None`.
+    /// - `window_type` – Window function applied before FFT. Defaults to Hanning when `None`.
+    ///
+    /// # Returns
+    ///
+    /// HNR in dB. Returns `f64::INFINITY` when noise power is zero (purely
+    /// harmonic signal).
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `fundamental_freq ≤ 0.0`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// // A pure sine wave is maximally harmonic.
+    /// let hz = 440.0f64;
+    /// let audio = sine_wave::<f32>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    ///
+    /// let hnr = audio
+    ///     .harmonic_to_noise_ratio(hz, NonZeroUsize::new(5).unwrap(), None, None)
+    ///     .unwrap();
+    /// assert!(hnr > 0.0, "pure sine should have positive HNR, got {hnr:.1} dB");
+    /// ```
+    #[inline]
     fn harmonic_to_noise_ratio(
         &self,
         fundamental_freq: f64,
@@ -246,6 +451,53 @@ where
         Ok(10.0 * (harmonic_power / noise_power).log10())
     }
 
+    /// Analyses the harmonic content relative to a known fundamental frequency.
+    ///
+    /// Computes the power spectrum of the signal and extracts the peak power
+    /// within a `tolerance`-relative frequency band around each harmonic of
+    /// `fundamental_freq`. All magnitudes are normalised so that the fundamental
+    /// (index 0) equals 1.0; higher indices contain the relative magnitudes of
+    /// the 2nd, 3rd, … harmonics.
+    ///
+    /// # Arguments
+    ///
+    /// - `fundamental_freq` – Fundamental frequency in Hz (> 0).
+    /// - `num_harmonics` – Number of harmonics to extract, including the fundamental.
+    /// - `tolerance` – Fractional bandwidth around each harmonic to search, in `[0.0, 1.0]`.
+    /// - `n_fft` – FFT size. Defaults to the signal length when `None`.
+    /// - `window_type` – Window function applied before FFT. Defaults to Hanning when `None`.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<f64>` of length `num_harmonics`. Index 0 is always 1.0 after
+    /// normalisation (unless the fundamental has zero power, in which case all
+    /// values are the raw magnitudes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `fundamental_freq ≤ 0.0` or
+    /// `tolerance ∉ [0.0, 1.0]`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sawtooth_wave};
+    /// use std::time::Duration;
+    ///
+    /// // Sawtooth wave at 220 Hz — rich in harmonics.
+    /// let hz = 220.0f64;
+    /// let audio = sawtooth_wave::<f32>(hz, Duration::from_millis(500), sample_rate!(44100), 1.0);
+    ///
+    /// let harmonics = audio
+    ///     .harmonic_analysis(hz, NonZeroUsize::new(5).unwrap(), 0.1, None, None)
+    ///     .unwrap();
+    /// assert_eq!(harmonics.len(), 5);
+    /// assert!((harmonics[0] - 1.0).abs() < 0.1, "fundamental should be normalised to 1.0");
+    /// ```
+    #[inline]
     fn harmonic_analysis(
         &self,
         fundamental_freq: f64,
@@ -324,7 +576,51 @@ where
         Ok(harmonic_magnitudes)
     }
 
-    /// Complete key estimation implementation
+    /// Estimates the musical key of the audio using chromagram analysis.
+    ///
+    /// Computes a chromagram via the `spectrograms` crate and accumulates chroma
+    /// energy across all time frames. The average chroma vector is compared
+    /// against Krumhansl-Schmuckler major and minor key profiles via Pearson
+    /// correlation to identify the best-matching key.
+    ///
+    /// # Arguments
+    ///
+    /// - `stft_params` – STFT parameters controlling frame size and hop for
+    ///   chromagram computation.
+    ///
+    /// # Returns
+    ///
+    /// A `(key_index, confidence)` tuple where:
+    /// - `key_index` is in `0..=11` for major keys (C=0, C♯=1, …, B=11) and
+    ///   `12..=23` for minor keys (Cm=12, C♯m=13, …, Bm=23).
+    /// - `confidence` is in `[0.0, 1.0]`; higher values indicate a stronger match.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error returned by the `spectrograms` crate during STFT
+    /// or chromagram computation.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::num::NonZeroUsize;
+    /// use audio_samples::operations::traits::AudioPitchAnalysis;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use spectrograms::{StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// # let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
+    /// let params = StftParams::new(
+    ///     NonZeroUsize::new(2048).unwrap(),
+    ///     NonZeroUsize::new(512).unwrap(),
+    ///     WindowType::Hanning,
+    ///     true,
+    /// ).unwrap();
+    /// let (key, confidence) = audio.estimate_key(&params).unwrap();
+    /// assert!(key < 24);
+    /// assert!((0.0..=1.0).contains(&confidence));
+    /// ```
+    #[inline]
     fn estimate_key(&self, stft_params: &StftParams) -> AudioSampleResult<(usize, f64)> {
         let samples = self.to_format::<f64>();
 
@@ -348,8 +644,8 @@ where
         // Accumulate chroma features across all time frames
         let mut chroma_sum = vec![0.0; 12];
         for frame_idx in 0..chromagram.n_frames().get() {
-            for pitch_class in 0..12 {
-                chroma_sum[pitch_class] += chromagram.data[[pitch_class, frame_idx]];
+            for (pitch_class, value) in chroma_sum.iter_mut().enumerate().take(12) {
+                *value += chromagram.data[[pitch_class, frame_idx]];
             }
         }
 
@@ -402,7 +698,9 @@ where
     }
 }
 
-/// Calculate correlation between chroma vector and key profile
+/// Computes Pearson correlation between a chroma vector and a rotated key profile.
+///
+/// `tonic` rotates `profile` so that position 0 corresponds to the tonic pitch class.
 fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
     debug_assert_eq!(chroma.len(), 12);
     debug_assert_eq!(profile.len(), 12);
@@ -438,10 +736,56 @@ fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
     }
 }
 
-/// Implementation of the YIN pitch detection algorithm.
+/// Low-level YIN pitch detection that returns the fundamental period in samples.
 ///
-/// YIN uses a difference function and cumulative mean normalized difference
-/// to find the most likely fundamental period in the signal.
+/// Computes the difference function `d(τ) = Σ(x_j − x_{j+τ})²` and its
+/// cumulative mean normalised form (CMND). Returns the first lag τ in
+/// `[min_tau, max_tau]` whose CMND value falls below `threshold`, refined
+/// by a local neighbourhood search. The caller converts τ to Hz with
+/// `sample_rate / τ`.
+///
+/// This is the low-level primitive used by
+/// [`AudioPitchAnalysis::detect_pitch_yin`].
+///
+/// # Arguments
+///
+/// - `samples` – Non-empty slice of audio samples.
+/// - `min_tau` – Smallest lag to search (inclusive), in samples. Set to
+///   `(sample_rate / max_frequency) as usize`.
+/// - `max_tau` – Largest lag to search (inclusive), in samples. Set to
+///   `(sample_rate / min_frequency) as usize`.
+/// - `threshold` – Maximum CMND value accepted as a valid pitch. Typical
+///   values are in `[0.1, 0.2]`.
+///
+/// # Returns
+///
+/// `Some(tau)` — period in samples; convert to Hz with `sample_rate / tau`.
+/// `None` — no CMND value below `threshold`, or `max_tau ≥ samples.len() / 2`.
+///
+/// # Example
+///
+/// ```
+/// use audio_samples::operations::pitch_analysis::yin_pitch_detection;
+/// use audio_samples::{sample_rate, sine_wave};
+/// use non_empty_slice::NonEmptySlice;
+/// use std::time::Duration;
+///
+/// let sr = 44100.0f64;
+/// let hz = 440.0f64;
+/// let audio = sine_wave::<f64>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+/// let data = audio.as_slice().unwrap();
+/// let samples = NonEmptySlice::from_slice(data).unwrap();
+///
+/// let min_tau = (sr / 1000.0) as usize; // 44 samples → 1000 Hz upper bound
+/// let max_tau = (sr / 80.0) as usize;   // 551 samples → 80 Hz lower bound
+///
+/// let tau = yin_pitch_detection(samples, min_tau, max_tau, 0.1);
+/// assert!(tau.is_some());
+/// if let Some(t) = tau {
+///     let detected_hz = sr / t;
+///     assert!((detected_hz - hz).abs() < 10.0);
+/// }
+/// ```
 #[inline]
 #[must_use]
 pub fn yin_pitch_detection(
@@ -502,9 +846,52 @@ pub fn yin_pitch_detection(
     None
 }
 
-/// Simple autocorrelation-based pitch detection.
+/// Low-level autocorrelation pitch detection that returns the fundamental period in samples.
 ///
-/// Finds the lag with maximum autocorrelation within the specified range.
+/// Finds the lag in `[min_tau, max_tau]` with maximum autocorrelation and
+/// returns it as the estimated period. The caller converts to frequency with
+/// `sample_rate / tau`. Unlike YIN, this does not normalise the correlation,
+/// making it fast but more susceptible to noise.
+///
+/// This is the low-level primitive used by
+/// [`AudioPitchAnalysis::detect_pitch_autocorr`].
+///
+/// # Arguments
+///
+/// - `samples` – Slice of audio samples.
+/// - `min_tau` – Smallest lag to search (inclusive), in samples. Set to
+///   `(sample_rate / max_frequency) as usize`.
+/// - `max_tau` – Largest lag to search (inclusive), in samples. Set to
+///   `(sample_rate / min_frequency) as usize`.
+///
+/// # Returns
+///
+/// `Some(tau)` — lag in samples with highest autocorrelation; convert to Hz
+/// with `sample_rate / tau`.
+/// `None` — no positive autocorrelation found, or `max_tau ≥ samples.len() / 2`.
+///
+/// # Example
+///
+/// ```
+/// use audio_samples::operations::pitch_analysis::autocorr_pitch_detection;
+/// use audio_samples::{sample_rate, sine_wave};
+/// use std::time::Duration;
+///
+/// let sr = 44100.0f64;
+/// let hz = 220.0f64;
+/// let audio = sine_wave::<f64>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
+/// let data = audio.as_slice().unwrap();
+///
+/// let min_tau = (sr / 1000.0) as usize;
+/// let max_tau = (sr / 80.0) as usize;
+///
+/// let tau = autocorr_pitch_detection(data, min_tau, max_tau);
+/// assert!(tau.is_some());
+/// if let Some(t) = tau {
+///     let detected_hz = sr / t;
+///     assert!((detected_hz - hz).abs() < 15.0);
+/// }
+/// ```
 #[inline]
 #[must_use]
 pub fn autocorr_pitch_detection(samples: &[f64], min_tau: usize, max_tau: usize) -> Option<f64> {

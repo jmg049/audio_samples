@@ -1,20 +1,14 @@
 //! Channel manipulation operations for [`AudioSamples`].
 //!
-//! ## What
-//!
 //! This module implements the [`AudioChannelOps`] trait, which provides
 //! mono/stereo conversions, channel extraction, panning, balancing,
 //! interleaving, and per-channel transforms on [`AudioSamples`] of any
 //! supported sample type.
 //!
-//! ## Why
-//!
 //! Multi-channel audio is the norm in production audio.  A single trait
 //! with a uniform interface lets callers convert between layouts, isolate
 //! individual channels, and apply channel-aware effects without needing
 //! to know whether the underlying storage is mono, stereo, or surround.
-//!
-//! ## How
 //!
 //! Bring [`AudioChannelOps`] into scope and call methods on any
 //! [`AudioSamples`] value.  Conversion methods that produce new audio
@@ -68,7 +62,7 @@ where
     /// An owned mono [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `method` is `Weighted`
+    /// - [crate::AudioSampleError::Parameter] – if `method` is `Weighted`
     ///   and the weights vector length does not match the channel count.
     ///
     /// # Examples
@@ -213,7 +207,7 @@ where
         }
     }
 
-    /// Convert audio to a different channel layout.
+    /// Convert audio to a different stereo.
     ///
     /// Behaviour depends on the chosen method:
     /// - `Duplicate` – copies mono audio to both channels; multi-channel
@@ -232,7 +226,7 @@ where
     /// An owned [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `Left` or `Right` is
+    /// - [crate::AudioSampleError::Parameter] – if `Left` or `Right` is
     ///   chosen and the requested channel does not exist.
     ///
     /// # Examples
@@ -333,7 +327,7 @@ where
     /// at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `n_channels` is 0.
+    /// - [crate::AudioSampleError::Parameter] – if `n_channels` is 0.
     ///
     /// # Examples
     /// ```
@@ -397,7 +391,7 @@ where
     /// An owned mono [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `channel_index` is ≥ the
+    /// - [crate::AudioSampleError::Parameter] – if `channel_index` is ≥ the
     ///   number of channels.
     ///
     /// # Examples
@@ -448,7 +442,7 @@ where
     /// A borrowed mono [`AudioSamples`] at the same sample rate.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `channel_index` is ≥ the
+    /// - [crate::AudioSampleError::Parameter] – if `channel_index` is ≥ the
     ///   number of channels.
     ///
     /// # Examples
@@ -505,7 +499,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if either index is ≥ the
+    /// - [crate::AudioSampleError::Parameter] – if either index is ≥ the
     ///   number of channels.
     ///
     /// # Examples
@@ -555,7 +549,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the audio is mono or
+    /// - [crate::AudioSampleError::Parameter] – if the audio is mono or
     ///   has a channel count other than 2.
     ///
     /// # Examples
@@ -624,7 +618,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the audio is mono or
+    /// - [crate::AudioSampleError::Parameter] – if the audio is mono or
     ///   has a channel count other than 2.
     ///
     /// # Examples
@@ -695,7 +689,7 @@ where
     /// `Ok(())` on success.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the audio is
+    /// - [crate::AudioSampleError::Parameter] – if the audio is
     ///   multi-channel and `channel_index` is ≥ the number of
     ///   channels.
     ///
@@ -752,7 +746,7 @@ where
     /// input signal.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if the input signals do
+    /// - [crate::AudioSampleError::Parameter] – if the input signals do
     ///   not all have the same sample count.
     ///
     /// # Examples
@@ -1283,7 +1277,7 @@ fn interleave_f64_simd_impl<'a>(
 /// `Ok(())` on success.  The buffer is reordered in place.
 ///
 /// # Errors
-/// - [`AudioSampleError::Parameter`] – if `samples` is empty,
+/// - [crate::AudioSampleError::Parameter] – if `samples` is empty,
 ///   `num_channels` is 0, or `samples.len()` is not evenly
 ///   divisible by `num_channels`.
 ///

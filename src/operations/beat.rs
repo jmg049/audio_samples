@@ -1,21 +1,15 @@
 //! Beat tracking operations for [`AudioSamples`].
 //!
-//! ## What
-//!
 //! This module implements the [`AudioBeatTracking`] trait and provides
 //! supporting types ([`BeatTrackingConfig`], [`BeatTrackingData`]) and
 //! lower-level helpers ([`onset_strength_envelope`], [`track_beats_core`])
 //! for tempo-aware beat detection.
-//!
-//! ## Why
 //!
 //! Rhythmic analysis — tempo estimation, beat alignment, and
 //! synchronisation — is central to music production, DJ software, and
 //! audio feature extraction.  Encapsulating the detection pipeline
 //! behind a single trait keeps callers isolated from the onset
 //! detection internals.
-//!
-//! ## How
 //!
 //! Build a [`BeatTrackingConfig`] with the target tempo and onset
 //! detection parameters, then call [`AudioBeatTracking::detect_beats`]
@@ -63,6 +57,7 @@ use crate::{
 /// temporal order.  Sort `beat_times` if you need chronological
 /// order.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct BeatTrackingData {
     /// Estimated tempo in beats per minute.
     pub tempo_bpm: f64,
@@ -88,7 +83,8 @@ impl BeatTrackingData {
     /// # Returns
     /// A new [`BeatTrackingData`].
     #[inline]
-    pub fn new(tempo_bpm: f64, beat_times: Vec<f64>, config: BeatTrackingConfig) -> Self {
+    #[must_use]
+    pub const fn new(tempo_bpm: f64, beat_times: Vec<f64>, config: BeatTrackingConfig) -> Self {
         Self {
             tempo_bpm,
             beat_times,
@@ -102,7 +98,7 @@ impl core::fmt::Display for BeatTrackingData {
         writeln!(f, "Estimated Tempo: {:.2} BPM", self.tempo_bpm)?;
         writeln!(f, "Detected Beats (s):")?;
         for &time in &self.beat_times {
-            writeln!(f, "{:.3}", time)?;
+            writeln!(f, "{time:.3}")?;
         }
         Ok(())
     }
@@ -119,6 +115,7 @@ impl core::fmt::Display for BeatTrackingData {
 /// - `tolerance`, when `Some`, should be positive and smaller than
 ///   the inter-beat interval.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct BeatTrackingConfig {
     /// Target tempo in beats per minute; must be > 0.
     pub tempo_bpm: f64,
@@ -145,7 +142,12 @@ impl BeatTrackingConfig {
     /// # Returns
     /// A new [`BeatTrackingConfig`].
     #[inline]
-    pub fn new(tempo_bpm: f64, tolerance: Option<f64>, onset_config: OnsetDetectionConfig) -> Self {
+    #[must_use]
+    pub const fn new(
+        tempo_bpm: f64,
+        tolerance: Option<f64>,
+        onset_config: OnsetDetectionConfig,
+    ) -> Self {
         Self {
             tempo_bpm,
             tolerance,
@@ -154,7 +156,7 @@ impl BeatTrackingConfig {
     }
 }
 
-impl<'a, T> AudioBeatTracking for AudioSamples<'a, T>
+impl<T> AudioBeatTracking for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
@@ -177,7 +179,7 @@ where
     /// chronological order.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] – if `config.tempo_bpm` is
+    /// - [crate::AudioSampleError::Parameter] – if `config.tempo_bpm` is
     ///   ≤ 0 or if the inter-beat interval is too small relative to
     ///   the hop size.
     ///
@@ -265,7 +267,7 @@ where
 
     let env: Vec<f64> = smoothed
         .iter()
-        .map(|&x| (1.0 + compression * x).ln())
+        .map(|&x| (compression * x).ln_1p())
         .collect();
 
     // safety: odf is non-empty, so env is non-empty
@@ -273,13 +275,14 @@ where
     Ok(env)
 }
 
-#[inline(always)]
+#[inline]
 fn peak_index(slice: &[f64]) -> usize {
     let mut best_i = 0usize;
     let mut best_v = f64::NEG_INFINITY;
 
     // Manual loop beats iterator chains for branch predictability and inlining
     for i in 0..slice.len() {
+        // safety: i is in bounds of slice
         let v = unsafe { *slice.get_unchecked(i) };
         if v > best_v {
             best_v = v;
@@ -316,7 +319,7 @@ fn peak_index(slice: &[f64]) -> usize {
 /// Beat timestamps in seconds, in detection order.
 ///
 /// # Errors
-/// - [`AudioSampleError::Parameter`] – if `tempo_bpm` is ≤ 0 or if
+/// - [crate::AudioSampleError::Parameter] – if `tempo_bpm` is ≤ 0 or if
 ///   the inter-beat interval in frames is ≤ 0.
 ///
 /// # Examples
@@ -363,8 +366,10 @@ pub fn track_beats_core(
     }
 
     let tol_frames = tolerance_seconds
-        .map(|t| (t / hop_time).round() as isize)
-        .unwrap_or((ibi_frames as f64 * 0.1).round() as isize)
+        .map_or_else(
+            || (ibi_frames as f64 * 0.1).round() as isize,
+            |t| (t / hop_time).round() as isize,
+        )
         .max(1);
 
     let len = onset.len().get() as isize;
@@ -373,6 +378,7 @@ pub fn track_beats_core(
     let mut start = 0isize;
     let mut best_v = f64::NEG_INFINITY;
     for i in 0..onset.len().get() {
+        // safety: i is in bounds of onset
         let v = unsafe { *onset.get_unchecked(i) };
         if v > best_v {
             best_v = v;
@@ -386,29 +392,29 @@ pub fn track_beats_core(
     beat_frames.push(start);
 
     // --- Forward tracking ---
-    let mut idx = start;
-    while idx + ibi_frames < len {
-        let target = idx + ibi_frames;
+    // `center` advances by exactly `ibi_frames` each step so the loop always
+    // terminates, even when the detected peak falls behind the previous position.
+    let mut center = start;
+    while center + ibi_frames < len {
+        center += ibi_frames;
 
-        let lo = (target - tol_frames).max(0) as usize;
-        let hi = (target + tol_frames).min(len) as usize;
+        let lo = (center - tol_frames).max(0) as usize;
+        let hi = (center + tol_frames).min(len) as usize;
 
         let rel = peak_index(&onset[lo..hi]) as isize;
-        idx = lo as isize + rel;
-        beat_frames.push(idx);
+        beat_frames.push(lo as isize + rel);
     }
 
     // --- Backward tracking ---
-    let mut idx = start;
-    while idx - ibi_frames > 0 {
-        let target = idx - ibi_frames;
+    let mut center = start;
+    while center - ibi_frames >= 0 {
+        center -= ibi_frames;
 
-        let lo = (target - tol_frames).max(0) as usize;
-        let hi = (target + tol_frames).min(len) as usize;
+        let lo = (center - tol_frames).max(0) as usize;
+        let hi = (center + tol_frames).min(len) as usize;
 
         let rel = peak_index(&onset[lo..hi]) as isize;
-        idx = lo as isize + rel;
-        beat_frames.push(idx);
+        beat_frames.push(lo as isize + rel);
     }
 
     // --- Convert to seconds ---
@@ -525,13 +531,29 @@ mod tests {
                 None,
             ).unwrap();
 
-            if beats.len() > 1usize && beats.len() >= 3 {
+            if beats.len() >= 2 {
                 // First forward step should move forward in time
-                prop_assert!(beats[1] >= beats[0] || beats.len() == 1);
+                prop_assert!(beats[1] >= beats[0]);
+            }
 
-                // Last element should be <= first element if backward beats exist
-                let last = beats[beats.len() - 1];
-                prop_assert!(last <= beats[0] || beats.len() <= 2);
+            // Check structure: forward beats come before backward beats
+            // All beats after index 0 should be either all >= beats[0] (only forward)
+            // or mixed (some forward >= beats[0], then backward < beats[0])
+            if beats.len() >= 3 {
+                let first = beats[0];
+                let mut seen_forward = false;
+                let mut seen_backward = false;
+
+                for i in 1..beats.len() {
+                    if beats[i] >= first {
+                        // Forward beat
+                        prop_assert!(!seen_backward, "Forward beat found after backward beat");
+                        seen_forward = true;
+                    } else {
+                        // Backward beat
+                        seen_backward = true;
+                    }
+                }
             }
         }
     }

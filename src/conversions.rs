@@ -1,73 +1,68 @@
-//! Audio sample type conversion utilities.
+//! Audio sample type conversion utilities. is this module?
 //!
 //! This module defines the audio-aware type conversion facilities for
 //! [`AudioSamples`]. It provides a consistent and explicit mechanism for
 //! converting audio data between different sample representations while
-//! preserving the structural properties of the signal.
+//! preserving the structural properties of the signal — sample rate, channel
+//! count, and temporal ordering are always retained exactly.
 //!
-//! ## Purpose
+//! The supported sample types are `u8`, `i16`, `i24` ([`I24`](i24::I24)), `i32`, `f32`,
+//! and `f64`. Two distinct conversion classes are provided:
 //!
-//! Audio data is commonly stored and processed using different numeric sample
-//! types depending on context, such as fixed-width PCM formats for storage and
-//! floating-point formats for analysis or learning-based models. This module
-//! exists to centralise those conversions and to ensure that they are applied
-//! correctly and consistently across the crate.
+//! - **Audio-aware conversions** (`to_format`, `to_type`, `as_f32`, etc.) —
+//!   interpret numeric values as audio samples and apply appropriate scaling,
+//!   clamping, and rounding when converting between floating-point and integer
+//!   representations. `u8` audio uses the unsigned PCM convention (mid-scale
+//!   value `128` maps to silence / `0.0`).
+//! - **Raw numeric casts** (`cast_as`, `cast_to`, `cast_as_f64`) — reinterpret
+//!   values using standard Rust `as`-cast rules without any audio-specific
+//!   scaling or normalisation. does this module exist?
+//!
+//! Audio data is routinely stored and processed using different sample types.
+//! Fixed-width PCM formats (`i16`, `i24`, `i32`, `u8`) are used for storage
+//! and interoperability with audio hardware; floating-point formats (`f32`,
+//! `f64`) are preferred for analysis, effects, and machine-learning pipelines.
+//! This module centralises those conversions so they are applied correctly and
+//! consistently throughout the crate, without duplicating conversion logic in
+//! every consumer.
 //!
 //! Conversions are exposed via the [`AudioTypeConversion`] trait, which is
-//! implemented for [`AudioSamples`] when the underlying sample type supports
-//! the required conversion operations. In typical usage, the trait does not
-//! need to be referenced directly, as its methods are available on
-//! `AudioSamples` values.
+//! implemented for [`AudioSamples`] whenever the underlying sample type
+//! supports the required conversion operations. In typical usage the trait
+//! does not need to be referenced directly — its methods are available on any
+//! `AudioSamples` value. should it be used?
 //!
-//! ## Intended Usage
+//! Call conversion methods directly on an `AudioSamples` value. Use
+//! `to_format` (borrows) or `to_type` (consumes) for audio-aware conversions
+//! that preserve amplitude meaning. Use `cast_as` / `cast_to` only when you
+//! need the raw numeric value without any amplitude normalisation.
 //!
-//! Conversion methods are designed for explicit, one-step transitions between
-//! audio sample formats. They are commonly used when preparing audio for
-//! processing, adapting data for downstream consumers, or reducing memory
-//! usage after computation.
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, AudioTypeConversion};
+//! ```
+//! use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
 //! use ndarray::array;
 //!
-//! fn example() {
-//! let audio_f32 = AudioSamples::new_mono(array![0.5f32, -0.3, 0.8], 44_100).unwrap();
-//!
+//! // Convert f32 audio to i16 PCM (audio-aware: scales to ±32767)
+//! let audio_f32 = AudioSamples::new_mono(array![0.5f32, -0.3, 0.8], sample_rate!(44100)).unwrap();
 //! let audio_i16 = audio_f32.to_format::<i16>();
-//! let audio_back = audio_i16.to_type::<f32>();
-//! }
+//! assert!((audio_i16[0] - 16384).abs() <= 1); // 0.5 × 32767 ≈ 16384
+//!
+//! // Convert back — audio-aware round-trip preserves amplitude to i16 precision
+//! let audio_back: AudioSamples<'static, f32> = audio_i16.to_format::<f32>();
+//! assert!((audio_back[0] - 0.5).abs() < 1e-3);
 //! ```
 //!
-//! ## Conversion Semantics
+//! ## Allocation and ownership
 //!
-//! Conversions operate element-by-element and preserve the logical structure
-//! of the audio signal. Sample rate, channel count, and sample ordering are
-//! retained exactly. Mono and multi-channel layouts are preserved without
-//! reordering.
+//! All conversion operations produce a new owned [`AudioSamples<'static, O>`]
+//! value. The source audio is never modified. No conversion performs in-place
+//! mutation, and no conversion requires contiguous storage.
 //!
-//! Two classes of conversion are supported:
-//!
-//! - *Audio-aware conversions*, which interpret numeric values as audio samples
-//!   and apply appropriate scaling and clamping when converting between
-//!   floating-point and integer representations.
-//! - *Raw numeric casts*, which reinterpret values using standard numeric
-//!   casting rules without audio-specific scaling.
-//!
-//! The distinction between these modes is explicit in the API and must be
-//! chosen intentionally by the caller.
-//!
-//! ## Allocation and Ownership
-//!
-//! All conversion operations produce a new owned [`AudioSamples`] value. The
-//! original audio data is never modified, and conversions do not require
-//! contiguous storage. No conversion method performs in-place mutation.
-//!
-//! ## Error Handling
+//! ## Error handling
 //!
 //! Conversion methods do not return `Result`. All supported conversions are
-//! total over their input domain and will always produce a valid output. When
-//! converting from floating-point to fixed-width integer formats, values that
-//! exceed the representable range are clamped to preserve numerical safety.
+//! defined over their entire input domain. When converting from floating-point
+//! to fixed-width integer formats, values outside the representable range are
+//! clamped.
 use crate::{AudioSamples, AudioTypeConversion, CastInto, ConvertTo, traits::StandardSample};
 
 impl<T> AudioTypeConversion for AudioSamples<'_, T>
@@ -76,6 +71,39 @@ where
 {
     type Sample = T;
 
+    /// Converts the audio to a different sample type using audio-aware scaling.
+    ///
+    /// Performs an element-wise audio-aware conversion from `T` to `O`.
+    /// Amplitude meaning is preserved: integer-to-float conversions normalise
+    /// into `[-1.0, 1.0]`; float-to-integer conversions scale, clamp, and
+    /// round; integer-to-integer conversions shift bit depth with saturation.
+    /// For `u8`, the unsigned PCM convention applies (mid-scale `128` = silence).
+    ///
+    /// The source audio is not modified; a new owned value is returned.
+    ///
+    /// See [`AudioTypeConversion::to_format`] for the full contract.
+    ///
+    /// # Arguments
+    /// – `O` — the target sample type; must implement [`StandardSample`] and
+    ///   `T` must implement [`ConvertTo<O>`].
+    ///
+    /// # Returns
+    /// A new owned [`AudioSamples<'static, O>`] with amplitude-preserving
+    /// converted samples. Sample rate, channel count, and ordering are
+    /// unchanged.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![0.5f32, -1.0, 0.0], sample_rate!(44100)).unwrap();
+    /// let audio_i16 = audio.to_format::<i16>();
+    /// assert!((audio_i16[0] - 16384).abs() <= 1); // 0.5 × 32767 ≈ 16384
+    /// assert_eq!(audio_i16[1], i16::MIN);          // -1.0 → i16::MIN
+    /// assert_eq!(audio_i16[2], 0);                 // 0.0 → 0
+    /// ```
+    #[inline]
     fn to_format<O>(&self) -> AudioSamples<'static, O>
     where
         T: ConvertTo<O>,
@@ -84,6 +112,34 @@ where
         self.map_into(T::convert_to)
     }
 
+    /// Converts the audio to a different sample type, consuming the source.
+    ///
+    /// This is the consuming counterpart to [`AudioTypeConversion::to_format`].
+    /// It performs the same audio-aware conversion but takes ownership of the
+    /// input, avoiding a clone when the source is no longer needed.
+    ///
+    /// See [`AudioTypeConversion::to_type`] for the full contract.
+    ///
+    /// # Arguments
+    /// – `O` — the target sample type; must implement [`StandardSample`] and
+    ///   `T` must implement [`ConvertTo<O>`].
+    ///
+    /// # Returns
+    /// A new owned [`AudioSamples<'static, O>`] with amplitude-preserving
+    /// converted samples. Sample rate, channel count, and ordering are
+    /// unchanged.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![0i16, i16::MAX], sample_rate!(44100)).unwrap();
+    /// let audio_f32: AudioSamples<'static, f32> = audio.to_type::<f32>();
+    /// assert_eq!(audio_f32[0], 0.0);
+    /// assert!((audio_f32[1] - 1.0).abs() < 1e-4);
+    /// ```
+    #[inline]
     fn to_type<O>(self) -> AudioSamples<'static, O>
     where
         T: ConvertTo<O>,
@@ -92,6 +148,39 @@ where
         self.map_into(T::convert_to)
     }
 
+    /// Casts the audio to a different sample type without audio-aware scaling.
+    ///
+    /// Performs a raw element-wise numeric cast from `T` to `O`, equivalent to
+    /// an `as` cast applied to every sample. No normalisation, clamping, or
+    /// bit-depth scaling is applied — integer values are preserved as their raw
+    /// numeric magnitude.
+    ///
+    /// Use [`AudioTypeConversion::to_format`] when amplitude meaning must be
+    /// preserved across sample types.
+    ///
+    /// See [`AudioTypeConversion::cast_as`] for the full contract.
+    ///
+    /// # Arguments
+    /// – `O` — the target sample type; must implement [`StandardSample`] and
+    ///   `T` must implement [`CastInto<O>`].
+    ///
+    /// # Returns
+    /// A new owned [`AudioSamples<'static, O>`] containing raw-cast samples.
+    /// The source audio is unchanged. Sample rate, channel count, and ordering
+    /// are preserved.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// // Raw cast: i16 value 1000 becomes f32 value 1000.0, not 0.030518...
+    /// let audio = AudioSamples::new_mono(array![1000i16, -500], sample_rate!(44100)).unwrap();
+    /// let raw = audio.cast_as::<f32>();
+    /// assert_eq!(raw[0], 1000.0_f32);
+    /// assert_eq!(raw[1], -500.0_f32);
+    /// ```
+    #[inline]
     fn cast_as<O>(&self) -> AudioSamples<'static, O>
     where
         T: CastInto<O> + ConvertTo<O>,
@@ -100,6 +189,34 @@ where
         self.map_into(T::cast_into)
     }
 
+    /// Casts the audio to a different sample type without audio-aware scaling,
+    /// consuming the source.
+    ///
+    /// This is the consuming counterpart to [`AudioTypeConversion::cast_as`].
+    /// It performs the same raw numeric cast but takes ownership of the input.
+    ///
+    /// See [`AudioTypeConversion::cast_to`] for the full contract.
+    ///
+    /// # Arguments
+    /// – `O` — the target sample type; must implement [`StandardSample`] and
+    ///   `T` must implement [`CastInto<O>`].
+    ///
+    /// # Returns
+    /// A new owned [`AudioSamples<'static, O>`] containing raw-cast samples.
+    /// Sample rate, channel count, and ordering are preserved.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![255u8, 128u8, 0u8], sample_rate!(44100)).unwrap();
+    /// let raw: AudioSamples<'static, i16> = audio.cast_to::<i16>();
+    /// assert_eq!(raw[0], 255);
+    /// assert_eq!(raw[1], 128);
+    /// assert_eq!(raw[2], 0);
+    /// ```
+    #[inline]
     fn cast_to<O>(self) -> AudioSamples<'static, O>
     where
         T: CastInto<O> + ConvertTo<O>,

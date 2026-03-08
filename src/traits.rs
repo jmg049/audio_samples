@@ -8,22 +8,54 @@ use crate::{AudioSamples, I24};
 use std::fmt::{Debug, Display};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign};
 
-/// Trait for casting from one type to another.
+/// Performs a raw numeric cast from type `S` into `Self`.
+///
+/// Unlike [`ConvertTo`] and [`ConvertFrom`], casts apply standard numeric
+/// conversion rules equivalent to an `as` expression — no audio-aware
+/// scaling, rounding, or saturation is applied. This trait is used
+/// internally to move values between numeric types for arithmetic or
+/// indexing purposes.
+///
+/// For audio-meaningful conversions (e.g. `i16` → `f32` in the range
+/// `[-1.0, 1.0]`), use [`ConvertTo`] or [`ConvertFrom`] instead.
 pub trait CastFrom<S>: Sized {
-    /// Cast from the source type to Self.
+    /// Casts a value of type `S` into `Self` using raw numeric conversion.
+    ///
+    /// # Arguments
+    ///
+    /// – `value` — the source value to cast.
+    ///
+    /// # Returns
+    ///
+    /// The cast value as `Self`. No audio-aware scaling is applied.
     fn cast_from(value: S) -> Self;
 }
 
-/// Trait for casting into another type.
+/// Performs a raw numeric cast from `Self` into type `T`.
+///
+/// This is the directional complement of [`CastFrom`]. A blanket
+/// implementation delegates to `T::cast_from(self)`, so this trait does
+/// not need to be implemented directly.
+///
+/// For audio-meaningful conversions, use [`ConvertTo`] instead.
 pub trait CastInto<T>: Sized
 where
     Self: CastFrom<T>,
 {
-    /// Cast self into the target type.
+    /// Casts `self` into type `T` using raw numeric conversion.
+    ///
+    /// # Returns
+    ///
+    /// The cast value as `T`. No audio-aware scaling is applied.
     fn cast_into(self) -> T;
 }
 
-/// Trait for types that can be cast to all audio sample types.
+/// Convenience supertrait asserting that a type can be raw-cast into all
+/// supported audio sample types: `u8`, `i16`, [`I24`](i24::I24), `i32`, `f32`, and
+/// `f64`.
+///
+/// A type satisfies this bound automatically when it implements [`CastInto`]
+/// for all six target types; no manual implementation is required.
 pub trait Castable:
     CastInto<u8> + CastInto<i16> + CastInto<I24> + CastInto<i32> + CastInto<f32> + CastInto<f64>
 {
@@ -38,10 +70,22 @@ mod sealed {
 }
 use sealed::Sealed;
 
-/// Marker type for supported sample byte sizes.
+/// Zero-sized marker type parameterised by byte width `N`.
+///
+/// Used together with [`SupportedByteSize`] as a compile-time guard on
+/// [`AudioSample::as_bytes`] to restrict byte serialisation to widths that
+/// are valid for the supported sample types: 1, 2, 3, 4, and 8.
+#[non_exhaustive]
 pub struct SampleByteSize<const N: usize>;
 
-/// Marker trait for supported sample byte sizes.
+/// Sealed marker trait indicating that byte width `N` is a supported audio
+/// sample size.
+///
+/// Implemented for [`SampleByteSize<N>`] where `N` is 1, 2, 3, 4, or 8,
+/// corresponding to the byte widths of `u8`, `i16`, `I24`, `i32`/`f32`,
+/// and `f64` respectively.
+///
+/// This trait is sealed and cannot be implemented outside this crate.
 pub trait SupportedByteSize: Sealed {}
 
 impl<const N: usize> Sealed for SampleByteSize<N> {}
@@ -52,33 +96,47 @@ impl SupportedByteSize for SampleByteSize<3> {}
 impl SupportedByteSize for SampleByteSize<4> {}
 impl SupportedByteSize for SampleByteSize<8> {}
 
-/// Core trait defining the interface for audio sample types.
+/// Core trait for all audio sample types.
 ///
-/// Provides a unified interface for working with different audio sample formats
-/// including integers, 24-bit integers, and floating-point values. Ensures type-safe
-/// conversions and arithmetic operations across all supported sample formats.
+/// `AudioSample` is the foundational constraint that every audio sample
+/// numeric type in this crate must satisfy. It provides a uniform interface
+/// for arithmetic, conversions, byte serialisation, and interoperability
+/// with `ndarray` scalar operations.
 ///
-/// All implementors support:
-/// - Type-safe conversions between all supported formats
-/// - Arithmetic operations (Add, Sub, Mul, Div)
-/// - Serialization to byte arrays
-/// - Safe memory layout guarantees for audio processing
+/// ## Supported Types
 ///
-/// # Required Methods
-/// This trait is implemented automatically for types that satisfy the
-/// comprehensive bounds listed below. No manual implementation is required.
+/// | Type    | Representation              | Bit depth |
+/// |---------|-----------------------------|-----------|
+/// | `u8`    | Unsigned PCM (silence = 128)| 8         |
+/// | `i16`   | Signed integer PCM          | 16        |
+/// | [`I24`](i24::I24) | Signed integer PCM (24-bit) | 24        |
+/// | `i32`   | Signed integer PCM          | 32        |
+/// | `f32`   | Normalised float            | 32        |
+/// | `f64`   | Normalised float            | 64        |
 ///
-/// # Supported Types
-/// - `i16`: 16-bit signed integer samples (most common for audio files)
-/// - `I24`: 24-bit signed integer samples (professional audio)
-/// - `i32`: 32-bit signed integer samples (high precision)
-/// - `f32`: 32-bit floating-point samples (normalized -1.0 to 1.0)
-/// - `f64`: 64-bit floating-point samples (highest precision)
+/// For `u8`, the silence level is 128 (mid-scale unsigned PCM convention).
+/// For `f32` and `f64`, `MAX` and `MIN` are `1.0` and `-1.0`.
 ///
 /// # Safety
-/// Implementors must ensure proper numeric behavior and memory safety
-/// for all required trait bounds, particularly for byte serialization
-/// and numeric conversions.
+///
+/// All implementors must satisfy [`bytemuck::NoUninit`], guaranteeing that
+/// the byte representation contains no uninitialised or padding bytes. This
+/// is required for safe byte-level serialisation via [`AudioSample::to_bytes`]
+/// and [`AudioSample::as_bytes`].
+///
+/// ## Examples
+///
+/// ```
+/// use audio_samples::AudioSample;
+///
+/// let sample: f32 = 0.5;
+/// let bytes = sample.to_bytes();
+/// assert_eq!(bytes.len(), 4); // f32 is 4 bytes
+///
+/// // Raw numeric cast (not audio-normalised)
+/// let raw: f64 = sample.as_float();
+/// assert_eq!(raw, 0.5_f64);
+/// ```
 pub trait AudioSample:
     // Standard library traits
     Copy
@@ -129,20 +187,86 @@ pub trait AudioSample:
     + CastFrom<usize> // "I can cast from a  usize"
     + Castable // "I can be cast into supported types"
 {
+    /// Returns this sample value unchanged.
+    ///
+    /// This is an identity method provided for API uniformity. It is useful
+    /// in generic contexts where a value must be consumed through a trait
+    /// interface but should pass through unmodified.
+    ///
+    /// # Returns
+    ///
+    /// `self` unchanged.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::AudioSample;
+    ///
+    /// let s: f32 = 0.75;
+    /// assert_eq!(s.into_inner(), 0.75_f32);
+    /// ```
     #[inline]
-    /// Consumes this sample and returns itself.
+    #[must_use]
     fn into_inner(self) -> Self {
         self
     }
 
+    /// Converts this sample into a byte vector in native-endian order.
+    ///
+    /// Each sample is serialised to its native byte representation using
+    /// the platform's endianness. The returned vector has length
+    /// `Self::BYTES as usize`.
+    ///
+    /// For converting a whole slice at once, prefer
+    /// [`AudioSample::slice_to_bytes`].
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<u8>` of length `Self::BYTES as usize` containing the
+    /// native-endian byte representation of this sample.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::AudioSample;
+    ///
+    /// let sample: i16 = 256;
+    /// let bytes = sample.to_bytes();
+    /// assert_eq!(bytes.len(), 2);
+    /// ```
     #[inline]
-    /// Convert this sample into a byte vector in native-endian order.
+    #[must_use]
     fn to_bytes(self) -> Vec<u8> {
         self.to_ne_bytes().as_ref().to_vec()
     }
 
+    /// Converts this sample into a fixed-size byte array in native-endian order.
+    ///
+    /// The const generic parameter `N` must equal the byte size of `Self`
+    /// (e.g. `N = 4` for `f32` or `i32`). Supported widths — 1, 2, 3, 4,
+    /// and 8 — are enforced at compile time via the [`SupportedByteSize`]
+    /// bound.
+    ///
+    /// # Arguments
+    ///
+    /// – `N` (const generic) — the number of bytes in the output array.
+    ///   Must match `Self::BYTES`; mismatches are compile errors.
+    ///
+    /// # Returns
+    ///
+    /// A `[u8; N]` containing the native-endian byte representation of
+    /// this sample.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::AudioSample;
+    ///
+    /// let sample: i16 = 0x0100_i16;
+    /// let bytes: [u8; 2] = sample.as_bytes::<2>();
+    /// assert_eq!(bytes.len(), 2);
+    /// ```
     #[inline]
-    /// Convert this sample into a byte array of specified size (must be supported) in native-endian order.
     fn as_bytes<const N: usize>(&self) -> [u8; N]
         where SampleByteSize<N>: SupportedByteSize,
     {
@@ -154,33 +278,107 @@ pub trait AudioSample:
     }
 
     #[inline]
-    /// Convert a slice of samples into a byte vector in native-endian order.
+    /// Converts a slice of samples into a byte vector in native-endian order.
+    ///
+    /// Uses [`bytemuck`] to reinterpret the slice as bytes. This avoids
+    /// element-wise copying when the alignment allows it.
+    ///
+    /// # Arguments
+    ///
+    /// – `samples` — a slice of samples to serialise.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<u8>` of length `samples.len() * Self::BYTES as usize`.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::AudioSample;
+    ///
+    /// let samples = [1_i16, 2, 3];
+    /// let bytes = i16::slice_to_bytes(&samples);
+    /// assert_eq!(bytes.len(), 6); // 3 samples × 2 bytes each
+    /// ```
     fn slice_to_bytes(samples: &[Self]) -> Vec<u8> {
         Vec::from(bytemuck::cast_slice(samples))
     }
 
     #[inline]
-    /// Cast this sample into a floating-point type. No audio-aware scaling is applied, just a raw numeric cast.
+    /// Casts this sample value to `f64` without audio-aware scaling.
+    ///
+    /// This is a raw numeric cast equivalent to `self as f64`. No
+    /// normalisation into `[-1.0, 1.0]` is applied. For integer sample
+    /// types, the raw integer magnitude is preserved.
+    ///
+    /// For audio-aware conversion that scales integer samples into the
+    /// floating-point range, use [`ConvertTo::<f64>::convert_to`] instead.
+    ///
+    /// # Returns
+    ///
+    /// The sample value cast to `f64`, preserving the raw numeric magnitude.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::AudioSample;
+    ///
+    /// // Raw cast: the integer value 32767 becomes 32767.0, not 1.0.
+    /// let sample: i16 = 32767;
+    /// assert_eq!(sample.as_float(), 32767.0_f64);
+    ///
+    /// // For float types the value is unchanged.
+    /// let f: f32 = 0.5;
+    /// assert_eq!(f.as_float(), 0.5_f64);
+    /// ```
     fn as_float(self) -> f64
     {
         self.cast_into()
     }
 
-    /// Maximum representable value for this sample type.
+    /// Maximum representable amplitude value for this sample type.
+    ///
+    /// For integer types this is the type's integer maximum (e.g. `32767`
+    /// for `i16`, `255` for `u8`). For float types (`f32`, `f64`) this
+    /// is `1.0`.
     const MAX: Self;
-    /// Minimum representable value for this sample type.
+
+    /// Minimum representable amplitude value for this sample type.
+    ///
+    /// For integer types this is the type's integer minimum (e.g. `-32768`
+    /// for `i16`, `0` for `u8`). For float types this is `-1.0`.
     const MIN: Self;
-    /// Bit depth of this sample type.
+
+    /// Bit depth of this sample type (e.g. `8` for `u8`, `16` for `i16`).
     const BITS: u8;
-    /// Byte length
+
+    /// Byte width of this sample type, derived as `BITS / 8`.
     const BYTES: u32 = Self::BITS as u32 / 8;
-    /// Label used for plotting and display purposes.
+
+    /// Human-readable label for this sample type, used for display and
+    /// plotting. Examples: `"u8"`, `"i16"`, `"I24"`, `"f32"`, `"f64"`.
     const LABEL: &'static str;
-    /// Sample type enum variant.
+
+    /// Enum variant identifying this sample type at runtime.
+    ///
+    /// Corresponds to a variant of [`SampleType`].
     const SAMPLE_TYPE: SampleType;
 }
 
-/// Supported sample types
+/// Supertrait combining [`AudioSample`] with full bidirectional conversion
+/// support across all standard sample types.
+///
+/// A type satisfies `StandardSample` automatically when it implements
+/// [`AudioSample`] together with [`CastInto<f64>`], [`CastFrom<f64>`], and
+/// [`ConvertFrom`] for every standard sample type (`u8`, `i16`, [`I24`](i24::I24),
+/// `i32`, `f32`, `f64`). No manual implementation is required.
+///
+/// The supported standard sample types are `u8`, `i16`, [`I24`](i24::I24), `i32`,
+/// `f32`, and `f64`. Most audio processing operations in this crate are
+/// generic over `T: StandardSample`.
+///
+/// Prefer this bound over [`AudioSample`] when bidirectional conversions
+/// between sample types are required.
 pub trait StandardSample:
     AudioSample
     + CastInto<f64>
@@ -233,13 +431,37 @@ impl<T> StandardSample for T where
 /// assert_eq!(sample_i32, 0x4000_0000);
 /// ```
 pub trait ConvertTo<Dst> {
-    /// Converts a sample of type Self to Dst
+    /// Converts this sample into `Dst` using audio-aware scaling.
+    ///
+    /// # Returns
+    ///
+    /// The converted sample as `Dst`. Conversion semantics follow the rules
+    /// documented on [`ConvertTo`]: integer-to-float converts to
+    /// `[-1.0, 1.0]`; float-to-integer clamps, scales, and rounds;
+    /// integer-to-integer shifts bit depth with saturation.
     fn convert_to(self) -> Dst;
 }
 
-/// Convert from sample types
+/// Audio-aware conversion from a source sample type into `Self`.
+///
+/// This is the blanket-implemented inverse of [`ConvertTo`]. Implementing
+/// `ConvertFrom<Src>` for `Dst` automatically provides `ConvertTo<Dst>`
+/// for `Src` via the blanket implementation.
+///
+/// Conversion semantics are the same as documented on [`ConvertTo`]:
+/// integer ↔ float conversions apply asymmetric normalised scaling;
+/// integer ↔ integer conversions use PCM-style bit-depth shifting with
+/// saturation; `u8` uses mid-scale unsigned PCM conventions.
 pub trait ConvertFrom<Src> {
-    /// Converts a sample of type Src to Self
+    /// Converts a sample of type `Src` into `Self`.
+    ///
+    /// # Arguments
+    ///
+    /// – `source` — the source sample to convert.
+    ///
+    /// # Returns
+    ///
+    /// The converted sample as `Self`.
     fn convert_from(source: Src) -> Self;
 }
 
@@ -247,7 +469,7 @@ impl<Src, Dst> ConvertTo<Dst> for Src
 where
     Dst: ConvertFrom<Src>,
 {
-    #[inline(always)]
+    #[inline]
     fn convert_to(self) -> Dst {
         Dst::convert_from(self)
     }
@@ -257,7 +479,7 @@ where
 macro_rules! impl_identity_conversion {
     ($ty:ty) => {
         impl ConvertFrom<$ty> for $ty {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $ty) -> Self {
                 source
             }
@@ -269,12 +491,12 @@ macro_rules! impl_identity_conversion {
 macro_rules! impl_int_to_int_conversion {
     ($from:ty, $to:ty) => {
         impl ConvertFrom<$from> for $to {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $from) -> Self {
                 let from_bits = <$from>::BITS as i32;
                 let to_bits = <$to>::BITS as i32;
 
-                let v = source as i128;
+                let v = <i128 as From<$from>>::from(source);
                 let scaled = if from_bits < to_bits {
                     v << (to_bits - from_bits)
                 } else if from_bits > to_bits {
@@ -283,8 +505,9 @@ macro_rules! impl_int_to_int_conversion {
                     v
                 };
 
-                let min = <$to>::MIN as i128;
-                let max = <$to>::MAX as i128;
+                let min = <i128 as From<$to>>::from(<$to>::MIN);
+                let max = <i128 as From<$to>>::from(<$to>::MAX);
+
                 if scaled < min {
                     <$to>::MIN
                 } else if scaled > max {
@@ -301,10 +524,10 @@ macro_rules! impl_int_to_int_conversion {
 macro_rules! impl_i24_to_int {
     ($to:ty) => {
         impl ConvertFrom<I24> for $to {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: I24) -> Self {
                 let to_bits = <$to>::BITS as i32;
-                let v = source.to_i32() as i128;
+                let v = <i128 as From<i32>>::from(source.to_i32());
 
                 let shift = to_bits - 24;
                 let scaled = if shift >= 0 {
@@ -313,8 +536,8 @@ macro_rules! impl_i24_to_int {
                     v >> (-shift)
                 };
 
-                let min = <$to>::MIN as i128;
-                let max = <$to>::MAX as i128;
+                let min = <i128 as From<$to>>::from(<$to>::MIN);
+                let max = <i128 as From<$to>>::from(<$to>::MAX);
                 if scaled < min {
                     <$to>::MIN
                 } else if scaled > max {
@@ -331,10 +554,10 @@ macro_rules! impl_i24_to_int {
 macro_rules! impl_int_to_i24 {
     ($from:ty) => {
         impl ConvertFrom<$from> for I24 {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $from) -> Self {
                 let from_bits = <$from>::BITS as i32;
-                let v = source as i128;
+                let v = <i128 as From<$from>>::from(source);
 
                 let shift = 24 - from_bits;
                 let scaled = if shift >= 0 {
@@ -343,8 +566,8 @@ macro_rules! impl_int_to_i24 {
                     v >> (-shift)
                 };
 
-                let min = I24::MIN.to_i32() as i128;
-                let max = I24::MAX.to_i32() as i128;
+                let min = <i128 as From<i32>>::from(I24::MIN.to_i32());
+                let max = <i128 as From<i32>>::from(I24::MAX.to_i32());
                 let clamped = if scaled < min {
                     min as i32
                 } else if scaled > max {
@@ -363,7 +586,8 @@ macro_rules! impl_int_to_i24 {
 macro_rules! impl_i24_to_float {
     ($to:ty) => {
         impl ConvertFrom<I24> for $to {
-            #[inline(always)]
+            #[inline]
+            #[allow(clippy::cast_lossless)]
             fn convert_from(source: I24) -> Self {
                 let v = source.to_i32() as $to;
                 let max = I24::MAX.to_i32() as $to;
@@ -378,7 +602,7 @@ macro_rules! impl_i24_to_float {
 macro_rules! impl_int_to_float {
     ($from:ty, $to:ty) => {
         impl ConvertFrom<$from> for $to {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $from) -> Self {
                 let v = source;
                 if v < 0 {
@@ -395,7 +619,7 @@ macro_rules! impl_int_to_float {
 macro_rules! impl_float_to_int {
     ($from:ty, $to:ty) => {
         impl ConvertFrom<$from> for $to {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $from) -> Self {
                 let v = source.clamp(-1.0, 1.0);
                 let scaled = if v < 0.0 {
@@ -420,7 +644,7 @@ macro_rules! impl_float_to_int {
 macro_rules! impl_float_to_i24 {
     ($from:ty) => {
         impl ConvertFrom<$from> for I24 {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $from) -> Self {
                 let v = source.clamp(-1.0, 1.0);
                 let scaled = if v < 0.0 {
@@ -446,7 +670,7 @@ macro_rules! impl_float_to_i24 {
 macro_rules! impl_float_to_float {
     ($from:ty, $to:ty) => {
         impl ConvertFrom<$from> for $to {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $from) -> Self {
                 source as $to
             }
@@ -473,7 +697,7 @@ macro_rules! impl_float_to_float {
 // - All intermediate arithmetic is done in i128 to avoid overflow for i32::MIN abs.
 // - Rounding is symmetric "nearest" for integer division (positive numerators only).
 
-#[inline(always)]
+#[inline]
 const fn div_round_nearest_i128(num: i128, den: i128) -> i128 {
     // Assumes den > 0 and num >= 0
     (num + (den / 2)) / den
@@ -483,7 +707,8 @@ const fn div_round_nearest_i128(num: i128, den: i128) -> i128 {
 macro_rules! impl_u8_to_int {
     ($to:ty) => {
         impl ConvertFrom<u8> for $to {
-            #[inline(always)]
+            #[inline]
+            #[allow(clippy::cast_lossless)]
             fn convert_from(source: u8) -> Self {
                 let c: i128 = (source as i128) - 128; // [-128, 127]
 
@@ -515,7 +740,8 @@ macro_rules! impl_u8_to_int {
 macro_rules! impl_int_to_u8 {
     ($from:ty) => {
         impl ConvertFrom<$from> for u8 {
-            #[inline(always)]
+            #[inline]
+            #[allow(clippy::cast_lossless)]
             fn convert_from(source: $from) -> Self {
                 let v: i128 = source as i128;
 
@@ -549,12 +775,11 @@ macro_rules! impl_int_to_u8 {
 macro_rules! impl_u8_to_i24 {
     () => {
         impl ConvertFrom<u8> for I24 {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: u8) -> Self {
-                let c: i128 = (source as i128) - 128; // [-128, 127]
-
-                let min = I24::MIN.to_i32() as i128; // -8388608
-                let max = I24::MAX.to_i32() as i128; // +8388607
+                let c: i128 = (<i128 as From<u8>>::from(source)) - 128; // [-128, 127]
+                let min = <i128 as From<i32>>::from(I24::MIN.to_i32());
+                let max = <i128 as From<i32>>::from(I24::MAX.to_i32());
 
                 let scaled: i128 = if c < 0 {
                     c * (-min) / 128
@@ -581,20 +806,19 @@ macro_rules! impl_u8_to_i24 {
 macro_rules! impl_i24_to_u8 {
     () => {
         impl ConvertFrom<I24> for u8 {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: I24) -> Self {
-                let v: i128 = source.to_i32() as i128;
-
-                let min = I24::MIN.to_i32() as i128; // negative
-                let max = I24::MAX.to_i32() as i128; // positive
+                let v: i128 = <i128 as From<i32>>::from(source.to_i32());
+                let min = <i128 as From<i32>>::from(I24::MIN.to_i32()); // negative
+                let max = <i128 as From<i32>>::from(I24::MAX.to_i32()); // positive
 
                 let out_i128: i128 = if v < 0 {
-                    let mag = (-v) as i128;
-                    let den = (-min) as i128; // abs(min) = 8388608
+                    let mag = <i128 as From<i128>>::from(-v);
+                    let den = <i128 as From<i128>>::from(-min); // abs(min) = 8388608
                     let scaled = div_round_nearest_i128(mag * 128, den); // 0..128
                     128 - scaled
                 } else {
-                    let den = max as i128; // 8388607
+                    let den = <i128 as From<i128>>::from(max); // 8388607
                     let scaled = div_round_nearest_i128(v * 127, den); // 0..127
                     128 + scaled
                 };
@@ -615,9 +839,9 @@ macro_rules! impl_i24_to_u8 {
 macro_rules! impl_u8_to_float {
     ($to:ty) => {
         impl ConvertFrom<u8> for $to {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: u8) -> Self {
-                let c: i32 = (source as i32) - 128; // [-128, 127]
+                let c: i32 = (<i32 as From<u8>>::from(source)) - 128; // [-128, 127]
                 let v = c as $to;
                 if c < 0 {
                     v / (128.0 as $to)
@@ -633,7 +857,7 @@ macro_rules! impl_u8_to_float {
 macro_rules! impl_float_to_u8 {
     ($from:ty) => {
         impl ConvertFrom<$from> for u8 {
-            #[inline(always)]
+            #[inline]
             fn convert_from(source: $from) -> Self {
                 let v = source.clamp(-1.0, 1.0);
 
@@ -847,6 +1071,7 @@ macro_rules! impl_cast_from_i24 {
     ($src:ty => $dst:ty) => {
         impl CastFrom<$src> for $dst {
             #[inline]
+            #[allow(clippy::cast_lossless)]
             fn cast_from(value: $src) -> Self {
                 value as $dst
             }
@@ -888,6 +1113,7 @@ macro_rules! impl_cast_from_i24 {
     (i24_to_primitive $src:ty => $dst:ty) => {
         impl CastFrom<$src> for $dst {
             #[inline]
+            #[allow(clippy::cast_lossless)]
             fn cast_from(value: $src) -> Self {
                 value.to_i32() as $dst
             }
@@ -898,6 +1124,7 @@ macro_rules! impl_cast_from_i24 {
     (primitive_to_i24 $src:ty => $dst:ty) => {
         impl CastFrom<$src> for $dst {
             #[inline]
+            #[allow(clippy::cast_lossless)]
             fn cast_from(value: $src) -> Self {
                 I24::try_from_i32(value as i32).unwrap_or(I24::MIN)
             }
@@ -1039,61 +1266,104 @@ impl_cast_into_i24!(primitive_to_i24 f64 => I24);
 /// the involved sample types. This trait is implemented for `AudioSamples<T>`
 /// where those conversions are available.
 pub trait AudioTypeConversion: Sized {
-    /// The specific type of audio sample to convert from
+    /// The source sample type of the audio being converted.
     type Sample: StandardSample;
 
-    /// Converts the audio to a different sample type by borrowing the source.
+    /// Converts the audio to a different sample type using audio-aware scaling.
     ///
-    /// ## Purpose
+    /// Performs an audio-aware conversion from `Self::Sample` to `O`. The
+    /// amplitude meaning of each sample is preserved: integer-to-float
+    /// conversions normalise into `[-1.0, 1.0]`; float-to-integer conversions
+    /// clamp, scale, and round; integer-to-integer conversions shift bit depth
+    /// with saturation. For `u8`, the mid-scale unsigned PCM convention is
+    /// applied.
     ///
-    /// This method performs audio-aware conversion from `T` to `O`. It is
-    /// intended for changing the numeric representation of audio samples while
-    /// preserving the meaning of values as audio signals.
+    /// The source audio is not modified; a new owned value is returned.
     ///
-    /// ## Return Value
+    /// # Returns
     ///
-    /// Returns a new owned [`AudioSamples`] value containing samples of type `O`.
-    /// The source audio is unchanged.
+    /// A new owned [`AudioSamples<'static, O>`] with samples converted from
+    /// `Self::Sample` to `O`. Sample rate, channel count, and temporal
+    /// ordering are preserved.
     ///
-    /// ## Conversion Semantics
+    /// ## Examples
     ///
-    /// When converting between integer PCM and floating-point formats, values
-    /// are scaled according to the audio conversion rules defined by
-    /// [`ConvertTo`]. When converting to a fixed-width integer format, values
-    /// outside the representable range are clamped.
-
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate, AudioTypeConversion};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![0i16, i16::MAX],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// let float_audio = audio.to_format::<f32>();
+    /// let samples = float_audio.as_mono().unwrap();
+    /// assert_eq!(samples[0], 0.0_f32);
+    /// assert!((samples[1] - 1.0_f32).abs() < 1e-4);
+    /// ```
     fn to_format<O>(&self) -> AudioSamples<'static, O>
     where
         Self::Sample: ConvertTo<O> + ConvertFrom<O>,
         O: StandardSample;
+
     /// Converts the audio to a different sample type, consuming the source.
     ///
     /// This is the consuming counterpart to [`AudioTypeConversion::to_format`].
     /// It performs the same audio-aware conversion, but takes ownership of the
-    /// input value.
+    /// input value. Prefer this method over `to_format` when the source is no
+    /// longer needed, to avoid an unnecessary clone.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, O>`] with samples converted from
+    /// `Self::Sample` to `O`. Sample rate, channel count, and temporal
+    /// ordering are preserved.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![0i16, i16::MAX], sample_rate!(44100)).unwrap();
+    /// let audio_f32: AudioSamples<'static, f32> = audio.to_type::<f32>();
+    /// assert_eq!(audio_f32[0], 0.0);
+    /// assert!((audio_f32[1] - 1.0).abs() < 1e-4);
+    /// ```
     fn to_type<O>(self) -> AudioSamples<'static, O>
     where
-        Self: Sized,
         Self::Sample: ConvertTo<O> + ConvertFrom<O>,
         O: StandardSample;
 
     /// Casts the audio to a different sample type without audio-aware scaling.
     ///
-    /// ## Purpose
+    /// Performs a raw numeric cast from `Self::Sample` to `O`, equivalent to
+    /// an `as` cast applied element-wise. No normalisation, clamping, or
+    /// bit-depth scaling is applied. Integer values are preserved as their
+    /// raw numeric magnitude.
     ///
-    /// This method performs raw numeric casting from `T` to `O`. It is intended
-    /// for scenarios where the numeric values should be preserved as numbers,
-    /// rather than interpreted as audio samples.
+    /// Use [`AudioTypeConversion::to_format`] when amplitude meaning must be
+    /// preserved across sample types.
     ///
-    /// ## Return Value
+    /// # Returns
     ///
-    /// Returns a new owned [`AudioSamples`] value containing samples of type `O`.
-    /// The source audio is unchanged.
+    /// A new owned [`AudioSamples<'static, O>`] containing raw-cast samples.
+    /// The source audio is unchanged. Sample rate, channel count, and temporal
+    /// ordering are preserved.
     ///
-    /// ## Notes
+    /// ## Examples
     ///
-    /// This method does not apply the scaling or clamping semantics used by
-    /// [`AudioTypeConversion::to_format`].
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// // Raw cast: i16 value 1000 becomes f32 value 1000.0, not 0.030518...
+    /// let audio = AudioSamples::new_mono(array![1000i16, -500], sample_rate!(44100)).unwrap();
+    /// let raw = audio.cast_as::<f32>();
+    /// assert_eq!(raw[0], 1000.0_f32);
+    /// assert_eq!(raw[1], -500.0_f32);
+    /// ```
     fn cast_as<O>(&self) -> AudioSamples<'static, O>
     where
         Self::Sample: CastInto<O> + ConvertTo<O>,
@@ -1101,47 +1371,146 @@ pub trait AudioTypeConversion: Sized {
 
     /// Casts the audio to a different sample type without audio-aware scaling,
     /// consuming the source.
+    ///
+    /// This is the consuming counterpart to [`AudioTypeConversion::cast_as`].
+    /// It performs the same raw numeric cast but takes ownership of the input.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, O>`] containing raw-cast samples.
+    /// Sample rate, channel count, and ordering are preserved.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![255u8, 128u8, 0u8], sample_rate!(44100)).unwrap();
+    /// let raw: AudioSamples<'static, i16> = audio.cast_to::<i16>();
+    /// assert_eq!(raw[0], 255);
+    /// assert_eq!(raw[1], 128);
+    /// assert_eq!(raw[2], 0);
+    /// ```
     fn cast_to<O>(self) -> AudioSamples<'static, O>
     where
-        Self: Sized,
         Self::Sample: CastInto<O> + ConvertTo<O>,
         O: StandardSample;
 
-    /// Casts the audio to double precision floating-point format without audio-aware scaling.
+    /// Casts the audio to `f64` without audio-aware scaling.
+    ///
+    /// Each sample value is raw-cast to `f64` as a number, preserving its
+    /// numeric magnitude without normalisation. For integer sample types,
+    /// the integer value (e.g. `32767`) is cast directly to `f64`, not
+    /// scaled to `1.0`.
+    ///
+    /// For audio-aware conversion into `[-1.0, 1.0]`, use
+    /// [`AudioTypeConversion::as_f64`] instead.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, f64>`] with raw-cast sample values.
+    #[inline]
     fn cast_as_f64(&self) -> AudioSamples<'static, f64> {
         self.cast_as::<f64>()
     }
 
-    /// Casts the audio to a double floating-point sample type without using audio-aware conversion.
+    /// Converts the audio to `f64` using audio-aware scaling.
+    ///
+    /// Integer sample values are normalised into `[-1.0, 1.0]` according to
+    /// the [`ConvertTo`] rules for the source type. For `u8` audio, value
+    /// `128` maps to `0.0`. For float sources the values are widened unchanged.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, f64>`] with normalised sample values.
+    #[inline]
     fn as_float(&self) -> AudioSamples<'static, f64> {
         self.to_format::<f64>()
     }
 
-    /// Converts to double precision floating-point format.
+    /// Converts the audio to `f64` using audio-aware scaling.
+    ///
+    /// Equivalent to [`AudioTypeConversion::as_float`]. Integer sample values
+    /// are normalised into `[-1.0, 1.0]`.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, f64>`] with normalised sample values.
+    #[inline]
     fn as_f64(&self) -> AudioSamples<'static, f64> {
         self.to_format::<f64>()
     }
 
-    /// Converts to single precision floating-point format.
+    /// Converts the audio to `f32` using audio-aware scaling.
+    ///
+    /// Integer sample values are normalised into `[-1.0, 1.0]`. For `u8`
+    /// audio, value `128` maps to `0.0`.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, f32>`] with normalised sample values.
+    #[inline]
     fn as_f32(&self) -> AudioSamples<'static, f32> {
         self.to_format::<f32>()
     }
 
-    /// Converts to 32-bit integer format.
+    /// Converts the audio to 32-bit signed integer PCM using audio-aware
+    /// scaling.
+    ///
+    /// Float samples in `[-1.0, 1.0]` are scaled and rounded to the `i32`
+    /// range with saturation. For `u8` audio, mid-scale value `128` maps to
+    /// `0`.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, i32>`] in signed 32-bit PCM format.
+    #[inline]
     fn as_i32(&self) -> AudioSamples<'static, i32> {
         self.to_format::<i32>()
     }
 
-    /// Converts the audio to 16-bit PCM samples using audio-aware conversion.
+    /// Converts the audio to 16-bit signed integer PCM using audio-aware
+    /// scaling.
+    ///
+    /// Float samples in `[-1.0, 1.0]` are scaled and rounded to the `i16`
+    /// range with saturation. For `u8` audio, mid-scale value `128` maps to
+    /// `0`.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, i16>`] in signed 16-bit PCM format.
+    #[inline]
     fn as_i16(&self) -> AudioSamples<'static, i16> {
         self.to_format::<i16>()
     }
 
-    /// Converts the audio to 24-bit PCM samples using audio-aware conversion.
+    /// Converts the audio to 24-bit signed integer PCM using audio-aware
+    /// scaling.
+    ///
+    /// Float samples in `[-1.0, 1.0]` are scaled and rounded to the [`I24`](i24::I24)
+    /// range with saturation. For `u8` audio, mid-scale value `128` maps to
+    /// `0`.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, I24>`] in signed 24-bit PCM format.
+    #[inline]
     fn as_i24(&self) -> AudioSamples<'static, I24> {
         self.to_format::<I24>()
     }
 
+    /// Converts the audio to 8-bit unsigned PCM format using audio-aware
+    /// scaling.
+    ///
+    /// Float samples in `[-1.0, 1.0]` and signed integer samples are scaled
+    /// to the `u8` range with mid-scale silence at `128`. Negative full-scale
+    /// maps to `0`; positive full-scale maps to `255`.
+    ///
+    /// # Returns
+    ///
+    /// A new owned [`AudioSamples<'static, u8>`] in unsigned 8-bit PCM format.
+    #[inline]
     fn as_u8(&self) -> AudioSamples<'static, u8> {
         self.to_format::<u8>()
     }

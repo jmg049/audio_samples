@@ -1,18 +1,12 @@
 //! Spectral analysis and frequency-domain transformations for [`AudioSamples`].
 //!
-//! ## What
-//!
 //! This module implements the [`AudioTransforms`] trait, providing FFT-based
 //! spectral analysis and spectrogram computation for audio data. All spectral
 //! operations delegate to the [`spectrograms`] crate.
 //!
-//! ## Why
-//!
 //! Frequency-domain analysis is central to audio processing --- spectrograms,
 //! MFCCs, chromagrams, and pitch detection all begin with a transform into the
 //! spectral domain.
-//!
-//! ## How
 //!
 //! All operations are available on any [`AudioSamples<T>`] where `T` is a
 //! supported sample type (`u8`, `i16`, `I24`, `i32`, `f32`, `f64`).
@@ -27,14 +21,14 @@
 //! |--------|-------------|:--------------:|
 //! | [`fft`](AudioTransforms::fft) | Full-signal FFT | Yes |
 //! | [`stft`](AudioTransforms::stft) / [`istft`](AudioTransforms::istft) | Forward / inverse STFT | No |
-//! | [`linear_spectrogram`](AudioTransforms::linear_spectrogram) | Linearly-spaced spectrogram | No |
-//! | [`log_frequency_spectrogram`](AudioTransforms::log_frequency_spectrogram) | Log-Hz spectrogram | No |
-//! | [`mel_spectrogram`](AudioTransforms::mel_spectrogram) | Mel-scaled spectrogram | No |
+//! | [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram)(AudioTransforms::linear_spectrogram) | Linearly-spaced spectrogram | No |
+//! | [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram)(AudioTransforms::log_frequency_spectrogram) | Log-Hz spectrogram | No |
+//! | [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram)(AudioTransforms::mel_spectrogram) | Mel-scaled spectrogram | No |
 //! | [`mfcc`](AudioTransforms::mfcc) | Mel-Frequency Cepstral Coefficients | No |
 //! | [`chromagram`](AudioTransforms::chromagram) | Chroma (pitch-class) features | No |
-//! | [`gammatone_spectrogram`](AudioTransforms::gammatone_spectrogram) | Gammatone (auditory) spectrogram | No |
+//! | [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram)(AudioTransforms::gammatone_spectrogram) | Gammatone (auditory) spectrogram | No |
 //! | [`constant_q_transform`](AudioTransforms::constant_q_transform) | Constant-Q Transform | No |
-//! | [`cqt_spectrogram`](AudioTransforms::cqt_spectrogram) | CQT spectrogram | No |
+//! | [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram)(AudioTransforms::cqt_spectrogram) | CQT spectrogram | No |
 //! | [`power_spectral_density`](AudioTransforms::power_spectral_density) | Welch PSD estimate | No |
 //! | [`magphase`](AudioTransforms::magphase) | Magnitude / phase decomposition | — |
 //!
@@ -115,6 +109,7 @@ where
     /// let spectrum = audio.fft(NonZeroUsize::new(4).unwrap()).unwrap();
     /// assert_eq!(spectrum.shape()[0], 1); // one row per channel
     /// ```
+    #[inline]
     fn fft(&self, n_fft: NonZeroUsize) -> AudioSampleResult<Array2<Complex<f64>>> {
         let working_samples = self.to_format::<f64>();
 
@@ -160,6 +155,19 @@ where
     /// - Errors from the underlying [`spectrograms`] STFT computation.
     ///
     /// [`istft`]: Self::istft
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let params = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let result = audio.stft(&params).unwrap();
+    /// assert!(result.data.nrows() > 0); // frequency bins
+    /// ```
+    #[inline]
     fn stft(&self, params: &StftParams) -> AudioSampleResult<StftResult> {
         if self.is_multi_channel() {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -199,6 +207,20 @@ where
     /// parameters inside the [`StftResult`]).
     ///
     /// [`stft`]: Self::stft
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let params = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let stft_result = audio.stft(&params).unwrap();
+    /// let reconstructed = AudioSamples::<f64>::istft(stft_result).unwrap();
+    /// assert!(reconstructed.samples_per_channel().get() > 0);
+    /// ```
+    #[inline]
     fn istft(stft: StftResult) -> AudioSampleResult<AudioSamples<'static, T>> {
         let sample_rate = stft.sample_rate;
         // safety: sample_rate is non-zero since it was validated during STFT computation on the ``spectrograms`` side
@@ -217,8 +239,8 @@ where
     /// Computes a linearly-spaced spectrogram.
     ///
     /// Prefer the typed convenience methods —
-    /// [`linear_magnitude_spectrogram`], [`linear_power_spectrogram`], or
-    /// [`linear_db_spectrogram`] — for the most common amplitude scales.
+    /// [`linear_magnitude_spectrogram`](crate::operations::AudioTransforms::linear_magnitude_spectrogram), [`linear_power_spectrogram`](crate::operations::AudioTransforms::linear_power_spectrogram), or
+    /// [`linear_db_spectrogram`](crate::operations::AudioTransforms::linear_db_spectrogram) — for the most common amplitude scales.
     ///
     /// # Arguments
     /// - `params` — spectrogram parameters (window, hop, FFT size).
@@ -230,6 +252,20 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying spectrogram computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let spect = audio.linear_spectrogram::<Magnitude>(&params, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn linear_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -254,8 +290,8 @@ where
     /// Computes a log-frequency-spaced spectrogram.
     ///
     /// Prefer the typed convenience methods —
-    /// [`loghz_power_spectrogram`], [`loghz_magnitude_spectrogram`], or
-    /// [`loghz_db_spectrogram`] — for the most common amplitude scales.
+    /// [`loghz_power_spectrogram`](crate::operations::AudioTransforms::loghz_power_spectrogram), [`loghz_magnitude_spectrogram`](crate::operations::AudioTransforms::loghz_magnitude_spectrogram), or
+    /// [`loghz_db_spectrogram`](crate::operations::AudioTransforms::loghz_db_spectrogram) — for the most common amplitude scales.
     ///
     /// # Arguments
     /// - `params` — spectrogram parameters (window, hop, FFT size).
@@ -270,6 +306,21 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying spectrogram computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.log_frequency_spectrogram::<Magnitude>(&params, &loghz, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn log_frequency_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -296,8 +347,8 @@ where
     ///
     /// The mel scale approximates human auditory perception by compressing
     /// high frequencies relative to low ones.  Prefer the typed
-    /// convenience methods — [`mel_mag_spectrogram`],
-    /// [`mel_power_spectrogram`], or [`mel_db_spectrogram`] — for the
+    /// convenience methods — [`mel_mag_spectrogram`](crate::operations::AudioTransforms::mel_mag_spectrogram),
+    /// [`mel_power_spectrogram`](crate::operations::AudioTransforms::mel_power_spectrogram), or [`mel_db_spectrogram`](crate::operations::AudioTransforms::mel_db_spectrogram) — for the
     /// most common amplitude scales.
     ///
     /// # Arguments
@@ -316,6 +367,21 @@ where
     ///
     /// ## See Also
     /// - [Mel scale — Wikipedia](https://en.wikipedia.org/wiki/Mel_scale)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{Magnitude, MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let spect = audio.mel_spectrogram::<Magnitude>(&params, &mel, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn mel_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -361,6 +427,20 @@ where
     ///
     /// ## See Also
     /// - [MFCC — Wikipedia](https://en.wikipedia.org/wiki/Mel-frequency_cepstral_coefficients)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{MfccParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let mfcc_params = MfccParams::speech_standard();
+    /// let result = audio.mfcc(&stft, nzu!(40), &mfcc_params).unwrap();
+    /// assert!(result.data.nrows() > 0); // MFCC coefficients
+    /// ```
+    #[inline]
     fn mfcc(
         &self,
         stft_params: &StftParams,
@@ -408,6 +488,20 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{ChromaParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let chroma_params = ChromaParams::music_standard();
+    /// let result = audio.chromagram(&stft, &chroma_params).unwrap();
+    /// assert_eq!(result.data.nrows(), 12); // twelve pitch classes (C through B)
+    /// ```
+    #[inline]
     fn chromagram(
         &self,
         stft_params: &StftParams,
@@ -434,9 +528,9 @@ where
     /// cochlea.  The filter centre frequencies are spaced according to
     /// the ERB (Equivalent Rectangular Bandwidth) scale.  Prefer the
     /// typed convenience methods —
-    /// [`gammatone_magnitude_spectrogram`],
-    /// [`gammatone_power_spectrogram`], or
-    /// [`gammatone_db_spectrogram`] — for the most common amplitude
+    /// [`gammatone_magnitude_spectrogram`](crate::operations::AudioTransforms::gammatone_magnitude_spectrogram),
+    /// [`gammatone_power_spectrogram`](crate::operations::AudioTransforms::gammatone_power_spectrogram), or
+    /// [`gammatone_db_spectrogram`](crate::operations::AudioTransforms::gammatone_db_spectrogram) — for the most common amplitude
     /// scales.
     ///
     /// # Arguments
@@ -455,6 +549,21 @@ where
     ///
     /// ## See Also
     /// - [Gammatone filter — Wikipedia](https://en.wikipedia.org/wiki/Gammatone)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.gammatone_spectrogram::<Magnitude>(&params, &gammatone, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn gammatone_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -466,8 +575,8 @@ where
     {
         if self.is_multi_channel() {
             return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "chromagram",
-                "Chromagram is only supported for mono audio samples",
+                "gammatone_spectrogram",
+                "Gammatone spectrogram is only supported for mono audio samples",
             )));
         }
 
@@ -501,6 +610,20 @@ where
     ///
     /// ## See Also
     /// - [Constant-Q transform — Wikipedia](https://en.wikipedia.org/wiki/Constant-Q_transform)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::CqtParams;
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// // 12 bins per octave, 7 octaves, starting at 32.7 Hz (C1)
+    /// let cqt_params = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let result = audio.constant_q_transform(&cqt_params, nzu!(256)).unwrap();
+    /// assert!(result.data.nrows() > 0);
+    /// ```
+    #[inline]
     fn constant_q_transform(
         &self,
         params: &CqtParams,
@@ -508,8 +631,8 @@ where
     ) -> AudioSampleResult<CqtResult> {
         if self.is_multi_channel() {
             return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "chromagram",
-                "Chromagram is only supported for mono audio samples",
+                "constant_q_transform",
+                "Constant-Q Transform is only supported for mono audio samples",
             )));
         }
 
@@ -530,8 +653,8 @@ where
     ///
     /// Applies the CQT to the signal and returns the result as a typed
     /// spectrogram.  Prefer the typed convenience methods —
-    /// [`cqt_magnitude_spectrogram`], [`cqt_power_spectrogram`], or
-    /// [`cqt_db_spectrogram`] — for the most common amplitude scales.
+    /// [`cqt_magnitude_spectrogram`](crate::operations::AudioTransforms::cqt_magnitude_spectrogram), [`cqt_power_spectrogram`](crate::operations::AudioTransforms::cqt_power_spectrogram), or
+    /// [`cqt_db_spectrogram`](crate::operations::AudioTransforms::cqt_db_spectrogram) — for the most common amplitude scales.
     ///
     /// # Arguments
     /// - `params` — spectrogram parameters (window, hop, FFT size).
@@ -545,6 +668,21 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying computation.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, Magnitude, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let spect = audio.cqt_spectrogram::<Magnitude>(&params, &cqt, None).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn cqt_spectrogram<AmpScale>(
         &self,
         params: &SpectrogramParams,
@@ -566,7 +704,7 @@ where
             .as_slice()
             .expect("Safe since we have ensured mono");
 
-        // safety : working_samples_slice is non-empty since audio is mono and has samples
+        // safety: working_samples_slice is non-empty since audio is mono and has samples
         let working_samples_slice = unsafe { NonEmptySlice::new_unchecked(working_samples_slice) };
 
         CqtSpectrogram::<AmpScale>::compute(working_samples_slice, params, cqt, db)
@@ -597,6 +735,18 @@ where
     ///
     /// ## See Also
     /// - [Welch's method — Wikipedia](https://en.wikipedia.org/wiki/Welch%27s_method)
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let (freqs, psd) = audio.power_spectral_density(nzu!(1024), 0.5).unwrap();
+    /// assert_eq!(freqs.len(), psd.len());
+    /// assert!(!freqs.is_empty());
+    /// ```
+    #[inline]
     fn power_spectral_density(
         &self,
         window_size: NonZeroUsize,
@@ -676,7 +826,21 @@ where
         Ok((frequencies, sum))
     }
 
-    /// Shorthand for [`linear_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let spect = audio.linear_magnitude_spectrogram(&params).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn linear_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -684,7 +848,21 @@ where
         self.linear_spectrogram::<spectrograms::Magnitude>(params, None)
     }
 
-    /// Shorthand for [`linear_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let spect = audio.linear_power_spectrogram(&params).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn linear_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -692,7 +870,22 @@ where
         self.linear_spectrogram::<spectrograms::Power>(params, None)
     }
 
-    /// Shorthand for [`linear_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.linear_db_spectrogram(&params, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn linear_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -701,7 +894,22 @@ where
         self.linear_spectrogram::<spectrograms::Decibels>(params, Some(db))
     }
 
-    /// Shorthand for [`log_frequency_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.loghz_power_spectrogram(&params, &loghz).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn loghz_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -710,7 +918,22 @@ where
         self.log_frequency_spectrogram::<spectrograms::Power>(params, loghz, None)
     }
 
-    /// Shorthand for [`log_frequency_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.loghz_magnitude_spectrogram(&params, &loghz).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn loghz_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -719,7 +942,23 @@ where
         self.log_frequency_spectrogram::<spectrograms::Magnitude>(params, loghz, None)
     }
 
-    /// Shorthand for [`log_frequency_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogHzParams, LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let loghz = LogHzParams::new(nzu!(64), 80.0, 8_000.0).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.loghz_db_spectrogram(&params, &loghz, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn loghz_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -729,7 +968,22 @@ where
         self.log_frequency_spectrogram::<spectrograms::Decibels>(params, loghz, Some(db))
     }
 
-    /// Shorthand for [`mel_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let spect = audio.mel_mag_spectrogram(&params, &mel).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn mel_mag_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -738,7 +992,23 @@ where
         self.mel_spectrogram(params, mel, None)
     }
 
-    /// Shorthand for [`mel_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{LogParams, MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.mel_db_spectrogram(&params, &mel, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn mel_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -748,7 +1018,22 @@ where
         self.mel_spectrogram(params, mel, Some(db))
     }
 
-    /// Shorthand for [`mel_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{MelParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let mel = MelParams::new(nzu!(40), 0.0, 8_000.0).unwrap();
+    /// let spect = audio.mel_power_spectrogram(&params, &mel).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn mel_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -757,7 +1042,22 @@ where
         self.mel_spectrogram(params, mel, None)
     }
 
-    /// Shorthand for [`gammatone_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.gammatone_magnitude_spectrogram(&params, &gammatone).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn gammatone_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -766,7 +1066,22 @@ where
         self.gammatone_spectrogram::<spectrograms::Magnitude>(params, gammatone_params, None)
     }
 
-    /// Shorthand for [`gammatone_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let spect = audio.gammatone_power_spectrogram(&params, &gammatone).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn gammatone_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -775,7 +1090,23 @@ where
         self.gammatone_spectrogram::<spectrograms::Power>(params, gammatone_params, None)
     }
 
-    /// Shorthand for [`gammatone_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{GammatoneParams, LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let gammatone = GammatoneParams::new(nzu!(32), 80.0, 8_000.0).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.gammatone_db_spectrogram(&params, &gammatone, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn gammatone_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -785,7 +1116,22 @@ where
         self.gammatone_spectrogram::<spectrograms::Decibels>(params, gammatone_params, Some(db))
     }
 
-    /// Shorthand for [`cqt_spectrogram`] with `Magnitude` amplitude scale.
+    /// Shorthand for [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram) with `Magnitude` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let spect = audio.cqt_magnitude_spectrogram(&params, &cqt).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn cqt_magnitude_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -794,7 +1140,22 @@ where
         self.cqt_spectrogram::<spectrograms::Magnitude>(params, cqt, None)
     }
 
-    /// Shorthand for [`cqt_spectrogram`] with `Power` amplitude scale.
+    /// Shorthand for [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram) with `Power` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let spect = audio.cqt_power_spectrogram(&params, &cqt).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn cqt_power_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -803,7 +1164,23 @@ where
         self.cqt_spectrogram::<spectrograms::Power>(params, cqt, None)
     }
 
-    /// Shorthand for [`cqt_spectrogram`] with `Decibels` amplitude scale.
+    /// Shorthand for [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use spectrograms::{CqtParams, LogParams, SpectrogramParams, StftParams, WindowType};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+    /// let stft = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true).unwrap();
+    /// let params = SpectrogramParams::new(stft, audio.sample_rate_hz()).unwrap();
+    /// let cqt = CqtParams::new(nzu!(12), nzu!(7), 32.7).unwrap();
+    /// let db = LogParams::new(-80.0).unwrap();
+    /// let spect = audio.cqt_db_spectrogram(&params, &cqt, &db).unwrap();
+    /// assert!(spect.data().nrows() > 0);
+    /// ```
+    #[inline]
     fn cqt_db_spectrogram(
         &self,
         params: &SpectrogramParams,
@@ -828,6 +1205,19 @@ where
     /// # Returns
     /// `(magnitude, phase)` — the magnitude matrix (real-valued) and
     /// the phase matrix (complex unit-magnitude).
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// // Use a short signal so n_fft (1024) is larger than the signal length (441 samples).
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(10), sample_rate!(44100), 0.8);
+    /// let spectrum = audio.fft(nzu!(1024)).unwrap();
+    /// let (mag, phase) = AudioSamples::<f64>::magphase(&spectrum, None);
+    /// assert_eq!(mag.shape(), phase.shape());
+    /// ```
+    #[inline]
     fn magphase(
         complex_spect: &Array2<Complex<f64>>,
         power: Option<NonZeroUsize>,
@@ -845,10 +1235,7 @@ where
         // Compute phase = D / mag_nonzero, but handle zeros separately
         let mut phase = complex_spect.clone();
 
-        let power = match power {
-            Some(p) => p.get() as f64,
-            None => 1.0,
-        };
+        let power = power.map_or(1.0, |p| p.get() as f64);
 
         // Perform elementwise division for real and imaginary parts
         ndarray::Zip::from(&mut phase)

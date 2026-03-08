@@ -1,20 +1,14 @@
 //! Signal processing operations for audio samples.
 //!
-//! ## What
-//!
 //! This module provides the [`AudioProcessing`] trait implementation for
 //! [`AudioSamples`], covering normalization, scaling, filtering, dynamic-range
 //! compression, and windowing. All operations use a consuming pattern — each
 //! method takes ownership and returns the processed audio — enabling fluent
 //! method chaining.
 //!
-//! ## Why
-//!
 //! Audio signals routinely need amplitude adjustment, spectral shaping, and
 //! dynamic-range management before playback or further analysis. A single trait
 //! keeps the API discoverable and composable across all supported sample types.
-//!
-//! ## How
 //!
 //! Import [`AudioProcessing`] and call methods directly on an [`AudioSamples`]
 //! value. Infallible methods (e.g. [`AudioProcessing::scale`]) return `Self`
@@ -92,11 +86,12 @@ where
     ///     .unwrap();
     /// assert!(audio.peak() <= 1.0);
     /// ```
+    #[inline]
     fn normalize(mut self, config: NormalizationConfig<Self::Sample>) -> AudioSampleResult<Self> {
         match config.method {
             NormalizationMethod::MinMax => {
-                let min = config.min.unwrap();
-                let max = config.max.unwrap();
+                let min = config.min.unwrap_or(T::MIN);
+                let max = config.max.unwrap_or(T::MAX);
                 // Validate input range
                 if min >= max {
                     return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
@@ -137,7 +132,10 @@ where
             }
 
             NormalizationMethod::Peak => {
-                let target = config.target.unwrap();
+                let target = config.target.unwrap_or({
+                    // Default target is the maximum representable value for the sample type
+                    Self::Sample::MAX
+                });
                 // Peak normalization: scale by peak value to target level
                 let peak: Self::Sample = self.peak();
                 if peak == Self::Sample::zero() {
@@ -152,16 +150,16 @@ where
                 match &mut self.data {
                     AudioData::Mono(arr) => {
                         for x in arr.iter_mut() {
-                            let _x: f64 = (*x).convert_to();
-                            let _x = _x * scale_factor;
-                            *x = Self::Sample::convert_from(_x);
+                            let y: f64 = (*x).convert_to();
+                            let y = y * scale_factor;
+                            *x = Self::Sample::convert_from(y);
                         }
                     }
                     AudioData::Multi(arr) => {
                         for x in arr.iter_mut() {
-                            let _x: f64 = (*x).convert_to();
-                            let _x = _x * scale_factor;
-                            *x = Self::Sample::convert_from(_x);
+                            let y: f64 = (*x).convert_to();
+                            let y = y * scale_factor;
+                            *x = Self::Sample::convert_from(y);
                         }
                     }
                 }
@@ -191,12 +189,12 @@ where
 
             NormalizationMethod::Median => {
                 // Median normalization: subtract median to center around zero
-                let median: f64 = self.median().ok_or(AudioSampleError::Parameter(
-                    ParameterError::InvalidValue {
+                let median: f64 = self.median().ok_or_else(|| {
+                    AudioSampleError::Parameter(ParameterError::InvalidValue {
                         parameter: "self".to_string(),
                         reason: "Self is not mono".to_string(),
-                    },
-                ))?;
+                    })
+                })?;
 
                 match &mut self.data {
                     AudioData::Mono(arr) => {
@@ -286,6 +284,7 @@ where
     /// assert_eq!(audio[0], 2.0);
     /// assert_eq!(audio[1], -2.0);
     /// ```
+    #[inline]
     fn scale(mut self, factor: f64) -> Self {
         match &mut self.data {
             AudioData::Mono(arr) => {
@@ -326,6 +325,7 @@ where
     /// let mean: f64 = audio.mean();
     /// assert!(mean.abs() < 1e-6); // Mean is now ~0
     /// ```
+    #[inline]
     fn remove_dc_offset(mut self) -> AudioSampleResult<Self> {
         let mean: f64 = self.mean();
 
@@ -376,6 +376,7 @@ where
     /// assert_eq!(audio[1], -1.0);  // clamped to min
     /// assert_eq!(audio[3], -0.5);  // within range, unchanged
     /// ```
+    #[inline]
     fn clip(mut self, min_val: Self::Sample, max_val: Self::Sample) -> AudioSampleResult<Self> {
         if min_val > max_val {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
@@ -445,6 +446,7 @@ where
     /// assert_eq!(audio[0], 1.0);
     /// assert_eq!(audio[1], 0.5);
     /// ```
+    #[inline]
     fn apply_window(mut self, window: &NonEmptySlice<Self::Sample>) -> AudioSampleResult<Self> {
         match &mut self.data {
             AudioData::Mono(arr) => {
@@ -512,6 +514,7 @@ where
     /// assert_eq!(audio[0], 1.5); // 1*0.5 + 2*0.5
     /// assert_eq!(audio[1], 2.5); // 2*0.5 + 3*0.5
     /// ```
+    #[inline]
     fn apply_filter(
         mut self,
         filter_coeffs: &NonEmptySlice<Self::Sample>,
@@ -609,6 +612,7 @@ where
     /// assert!(audio[0] > 0.0); // Positive input stays positive
     /// assert!(audio[1] < 0.0); // Negative input stays negative
     /// ```
+    #[inline]
     fn mu_compress(self, mu: Self::Sample) -> AudioSampleResult<Self> {
         let mu_f64: f64 = mu.convert_to();
         let mu_plus_one: f64 = mu_f64 + 1.0;
@@ -652,6 +656,7 @@ where
     /// assert!(audio[1] > 0.0);   // Sign is preserved
     /// assert!(audio[2] < 0.0);   // Sign is preserved
     /// ```
+    #[inline]
     fn mu_expand(self, mu: Self::Sample) -> AudioSampleResult<Self> {
         let mu: f64 = mu.convert_to();
         let mu_plus_one = mu + 1.0;
@@ -693,6 +698,7 @@ where
     /// // High-frequency content is attenuated
     /// assert!(audio[1].abs() < 1.0);
     /// ```
+    #[inline]
     fn low_pass_filter(mut self, cutoff_hz: f64) -> AudioSampleResult<Self> {
         // Simple implementation using a basic low-pass filter design
         let sample_rate = self.sample_rate_hz();
@@ -763,6 +769,7 @@ where
     /// assert_eq!(audio[0], 0.0);
     /// assert_eq!(audio[3], 0.0);
     /// ```
+    #[inline]
     fn high_pass_filter(mut self, cutoff_hz: f64) -> AudioSampleResult<Self> {
         // Simple implementation using a basic high-pass filter design
         let sample_rate = self.sample_rate_hz();
@@ -841,6 +848,7 @@ where
     ///     .unwrap();
     /// assert!(audio[0].is_finite());
     /// ```
+    #[inline]
     fn band_pass_filter(self, low_cutoff_hz: f64, high_cutoff_hz: f64) -> AudioSampleResult<Self> {
         if low_cutoff_hz >= high_cutoff_hz {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -871,6 +879,7 @@ where
     ///   quality parameters are invalid.
     /// - [`crate::AudioSampleError::Layout`] if the input audio is empty.
     #[cfg(feature = "resampling")]
+    #[inline]
     fn resample(
         &self,
         target_sample_rate: SampleRate,
@@ -901,6 +910,7 @@ where
     ///   quality parameters are invalid.
     /// - [`crate::AudioSampleError::Layout`] if the input audio is empty.
     #[cfg(feature = "resampling")]
+    #[inline]
     fn resample_by_ratio(
         &self,
         ratio: f64,
@@ -931,6 +941,10 @@ where
     ///     }
     /// })?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// - if the provided function errors for some reason
     #[inline]
     pub fn apply_with_error<F>(mut self, f: F) -> AudioSampleResult<Self>
     where
@@ -967,6 +981,10 @@ where
     ///     }
     /// })?;
     /// ```
+    ///
+    ///  # Errors
+    ///
+    /// - if the provided function errors for some reason
     #[inline]
     pub fn try_fold<Acc, F>(&mut self, mut acc: Acc, mut f: F) -> AudioSampleResult<Acc>
     where

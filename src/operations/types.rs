@@ -1,8 +1,36 @@
 #![allow(unused_imports)]
-//! Supporting types and enums for audio operations.
+//! Configuration types and support enumerations for audio processing operations.
 //!
-//! This module contains all the configuration types, enums, and helper structures
-//! used by the audio processing traits.
+//! This module defines every configuration struct, option enum, and helper type
+//! used by the audio processing traits. Types are grouped by the feature gate that
+//! enables them: editing, processing, channels, VAD, resampling, transforms, pitch
+//! analysis, IIR filtering, parametric EQ, dynamic range, and peak picking.
+//!
+//! Centralising configuration types in one place ensures consistent naming, shared
+//! validation logic, and a single source of truth for parameter constraints. Callers
+//! construct a typed configuration value and pass it to the relevant processing
+//! method, rather than threading raw primitive arguments through call chains.
+//!
+//! Each struct that accepts numeric bounds exposes a `validate` method that checks
+//! invariants before the value is submitted to a processing call. Using preset
+//! constructors (e.g. [`CompressorConfig::vocal`], [`VadConfig::energy_only`]) is
+//! the quickest path to a sensible default.
+//!
+//! Import the types you need from [`audio_samples::operations::types`](crate::operations::types) or via the
+//! crate-level re-export. Construct a configuration using one of the provided
+//! constructors or preset methods, optionally adjust fields, then pass it to the
+//! corresponding processing function.
+//!
+//! ```
+//! # #[cfg(feature = "processing")]
+//! # {
+//! use audio_samples::operations::types::NormalizationConfig;
+//!
+//! // Use a preset — peak normalise to 1.0
+//! let config = NormalizationConfig::<f64>::peak_normalized();
+//! assert_eq!(config.target, Some(1.0));
+//! # }
+//! ```
 
 // General todos in types.rs
 // - Serialisation + Deserialisation for types
@@ -17,13 +45,17 @@ use core::fmt::Display;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
-/// Pad side enum
+/// Which end of a buffer to pad when extending audio length.
+///
+/// Used by padding operations that insert silence or a repeated value at one
+/// end of the sample data. Defaults to [`Right`][PadSide::Right] (append).
 #[cfg(feature = "editing")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PadSide {
-    /// Pad on the left side
+    /// Prepend padding before the first sample.
     Left,
-    /// Pad on the right side
+    /// Append padding after the last sample.
     #[default]
     Right,
 }
@@ -44,27 +76,45 @@ impl FromStr for PadSide {
     }
 }
 
-/// Methods for normalizing audio sample values.
+/// Algorithm used to scale or centre audio sample values.
 ///
-/// Different normalization methods are appropriate for different audio processing scenarios.
+/// Different methods suit different goals. Choose the method that matches your
+/// intended output range and tolerance for outliers.
 #[cfg(any(feature = "processing", feature = "peak-picking"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum NormalizationMethod {
-    /// Min-Max normalization: scales values to a specified range [min, max].
-    /// Best for general audio level adjustment and ensuring samples fit within a target range.
+    /// Min-Max normalisation — scales all values into a caller-specified `[min, max]` range.
+    ///
+    /// Good for general level adjustment and ensuring samples stay within a
+    /// target amplitude bound. Requires a valid `min` and `max` in the accompanying
+    /// [`NormalizationConfig`].
     #[default]
     MinMax,
-    /// Peak normalization: scales by the maximum absolute value to a target level.
-    /// Preserves dynamic range while preventing clipping.
+
+    /// Peak normalisation — scales by the maximum absolute value to reach a target peak.
+    ///
+    /// Preserves the dynamic shape of the signal while bringing the loudest sample
+    /// to a specified level. Requires a valid `target` in the accompanying
+    /// [`NormalizationConfig`].
     Peak,
-    /// Mean normalization: centers data around zero by subtracting the mean.
-    /// Good for removing DC offset while preserving relative amplitudes.
+
+    /// Mean normalisation — subtracts the mean so the output is centred at zero.
+    ///
+    /// Removes DC offset without altering relative amplitudes. Equivalent to
+    /// zero-mean centering; does not rescale the range.
     Mean,
-    /// Median normalization: centers data around zero using the median.
-    /// More robust to outliers than mean normalization.
+
+    /// Median normalisation — subtracts the median so the output is centred at zero.
+    ///
+    /// More robust than mean normalisation when the signal contains large outlier
+    /// values, as the median is not skewed by extreme samples.
     Median,
-    /// Z-Score normalization: transforms to zero mean and unit variance.
-    /// Useful for statistical analysis and machine learning preprocessing.
+
+    /// Z-score normalisation — transforms to zero mean and unit variance.
+    ///
+    /// Useful for statistical comparisons and machine-learning preprocessing where
+    /// equal contribution from all features is required.
     ZScore,
 }
 
@@ -94,23 +144,60 @@ impl FromStr for NormalizationMethod {
     }
 }
 
-/// Configuration for audio normalization operations.
+/// Parameters governing a single call to `normalize`.
 ///
-/// Combines a normalization method with its parameters, providing type-safe
-/// configuration for the normalize() operation.
+/// ## Purpose
+///
+/// Bundles the [`NormalizationMethod`] with the numeric bounds it requires into
+/// one type-safe value. This avoids ambiguous argument lists and makes it clear
+/// which fields are active for a given method.
+///
+/// ## Intended Usage
+///
+/// Construct with one of the provided constructors (`peak`, `min_max`, `mean`,
+/// `median`, `zscore`) or use the `f64`-specific presets (`peak_normalized`,
+/// `range_normalized`). Pass the resulting value to
+/// [`AudioProcessing::normalize`][crate::operations::AudioProcessing::normalize].
+///
+/// ## Invariants
+///
+/// - When `method` is [`NormalizationMethod::MinMax`]: `min` and `max` must
+///   both be `Some`, and `min < max`.
+/// - When `method` is [`NormalizationMethod::Peak`]: `target` must be `Some`
+///   and positive.
+/// - For `Mean`, `Median`, and `ZScore`: `min`, `max`, and `target` are unused;
+///   their values are ignored during processing.
+///
+/// ## Assumptions
+///
+/// `T` implements [`StandardSample`][crate::traits::StandardSample], which bounds
+/// it to the numeric types supported throughout the crate.
 #[cfg(feature = "processing")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NormalizationConfig<T>
 where
     T: StandardSample,
 {
-    /// The normalization method to apply
+    /// The normalisation algorithm to apply.
     pub method: NormalizationMethod,
-    /// Target minimum value (for MinMax method)
+
+    /// Lower bound for [`NormalizationMethod::MinMax`].
+    ///
+    /// Must be `Some` and less than `max` when `method` is `MinMax`.
+    /// Ignored for all other methods.
     pub min: Option<T>,
-    /// Target maximum value (for MinMax method)
+
+    /// Upper bound for [`NormalizationMethod::MinMax`].
+    ///
+    /// Must be `Some` and greater than `min` when `method` is `MinMax`.
+    /// Ignored for all other methods.
     pub max: Option<T>,
-    /// Target peak level (for Peak method)
+
+    /// Target peak amplitude for [`NormalizationMethod::Peak`].
+    ///
+    /// Must be `Some` and positive when `method` is `Peak`.
+    /// Ignored for all other methods.
     pub target: Option<T>,
 }
 
@@ -119,7 +206,16 @@ impl<T> NormalizationConfig<T>
 where
     T: StandardSample,
 {
-    /// Create a Peak normalization configuration.
+    /// Creates a peak normalisation configuration targeting `target`.
+    ///
+    /// # Arguments
+    ///
+    /// – `target` – the amplitude level that the loudest sample will be scaled to.
+    ///   Must be positive for meaningful output.
+    ///
+    /// # Returns
+    ///
+    /// A [`NormalizationConfig`] with `method = Peak` and `target = Some(target)`.
     #[inline]
     pub const fn peak(target: T) -> Self {
         Self {
@@ -130,7 +226,17 @@ where
         }
     }
 
-    /// Create a MinMax normalization configuration.
+    /// Creates a min-max normalisation configuration scaling to `[min, max]`.
+    ///
+    /// # Arguments
+    ///
+    /// – `min` – the lower bound of the target amplitude range. Must be less than `max`.\
+    /// – `max` – the upper bound of the target amplitude range. Must be greater than `min`.
+    ///
+    /// # Returns
+    ///
+    /// A [`NormalizationConfig`] with `method = MinMax`, `min = Some(min)`, and
+    /// `max = Some(max)`.
     #[inline]
     pub const fn min_max(min: T, max: T) -> Self {
         Self {
@@ -141,7 +247,12 @@ where
         }
     }
 
-    /// Create a Mean normalization configuration.
+    /// Creates a mean normalisation configuration (zero-mean centering).
+    ///
+    /// # Returns
+    ///
+    /// A [`NormalizationConfig`] with `method = Mean`. The `min`, `max`, and `target`
+    /// fields are unused and set to `None`.
     #[inline]
     #[must_use]
     pub const fn mean() -> Self {
@@ -153,7 +264,12 @@ where
         }
     }
 
-    /// Create a Median normalization configuration.
+    /// Creates a median normalisation configuration (median centering).
+    ///
+    /// # Returns
+    ///
+    /// A [`NormalizationConfig`] with `method = Median`. The `min`, `max`, and `target`
+    /// fields are unused and set to `None`.
     #[inline]
     #[must_use]
     pub const fn median() -> Self {
@@ -165,7 +281,12 @@ where
         }
     }
 
-    /// Create a ZScore normalization configuration.
+    /// Creates a z-score normalisation configuration (zero mean, unit variance).
+    ///
+    /// # Returns
+    ///
+    /// A [`NormalizationConfig`] with `method = ZScore`. The `min`, `max`, and `target`
+    /// fields are unused and set to `None`.
     #[inline]
     #[must_use]
     pub const fn zscore() -> Self {
@@ -180,14 +301,47 @@ where
 
 #[cfg(feature = "processing")]
 impl NormalizationConfig<f64> {
-    /// Peak normalization to 1.0
+    /// Peak normalisation that scales to a maximum absolute amplitude of 1.0.
+    ///
+    /// # Returns
+    ///
+    /// Equivalent to `NormalizationConfig::<f64>::peak(1.0)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "processing")]
+    /// # {
+    /// use audio_samples::operations::types::NormalizationConfig;
+    ///
+    /// let config = NormalizationConfig::<f64>::peak_normalized();
+    /// assert_eq!(config.target, Some(1.0));
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub const fn peak_normalized() -> Self {
         Self::peak(1.0)
     }
 
-    /// Min-Max normalization to [-1.0, 1.0] range
+    /// Min-Max normalisation into the `[-1.0, 1.0]` range.
+    ///
+    /// # Returns
+    ///
+    /// Equivalent to `NormalizationConfig::<f64>::min_max(-1.0, 1.0)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "processing")]
+    /// # {
+    /// use audio_samples::operations::types::NormalizationConfig;
+    ///
+    /// let config = NormalizationConfig::<f64>::range_normalized();
+    /// assert_eq!(config.min, Some(-1.0));
+    /// assert_eq!(config.max, Some(1.0));
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub const fn range_normalized() -> Self {
@@ -195,20 +349,37 @@ impl NormalizationConfig<f64> {
     }
 }
 
-/// Fade curve shapes for envelope operations.
+/// Shape of the gain envelope applied during a fade-in or fade-out.
 ///
-/// Different curves provide different perceptual characteristics for fades.
+/// Each variant describes how the gain multiplier changes from 0.0 to 1.0 over
+/// the fade region. The default is [`Linear`][FadeCurve::Linear].
 #[cfg(feature = "editing")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FadeCurve {
-    /// Linear fade - constant rate of change.
+    /// Gain changes at a constant rate from start to end.
+    ///
+    /// Simple and predictable, but can sound abrupt at the endpoints because
+    /// there is no gradual onset or release.
     #[default]
     Linear,
-    /// Exponential fade - faster change at the beginning.
+
+    /// Gain changes rapidly near the start and slowly near the end.
+    ///
+    /// Produces a fast attack or quick onset when fading in, and a slow tail
+    /// when fading out. Perceptually emphasises the early portion of the fade.
     Exponential,
-    /// Logarithmic fade - faster change at the end.
+
+    /// Gain changes slowly near the start and rapidly near the end.
+    ///
+    /// Produces a gradual onset and a sharp cutoff. The perceptual complement
+    /// of [`Exponential`][FadeCurve::Exponential].
     Logarithmic,
-    /// Smooth step fade - S-curve with smooth transitions.
+
+    /// S-shaped gain curve with zero first derivative at both endpoints.
+    ///
+    /// Starts and ends smoothly, resulting in the most perceptually natural
+    /// transition. Implemented as a cubic Hermite interpolation (smoothstep).
     SmoothStep,
 }
 
@@ -236,50 +407,113 @@ impl FromStr for FadeCurve {
     }
 }
 
-/// Methods for converting multi-channel audio to mono.
+/// Algorithm for collapsing a multi-channel signal to a single mono channel.
+///
+/// Select the variant that best matches the intended perceptual result.
+/// [`Average`][MonoConversionMethod::Average] is the default and suits general
+/// downmix scenarios. Use [`Weighted`][MonoConversionMethod::Weighted] when
+/// channels carry unequal acoustic importance.
 #[cfg(feature = "channels")]
 #[derive(Default, Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MonoConversionMethod {
-    /// Average all channels equally.
+    /// Mix all channels to mono with equal weight.
+    ///
+    /// Each output sample is the arithmetic mean across all input channels.
     #[default]
     Average,
-    /// Use left channel only (for stereo input).
+
+    /// Use only the left channel (channel index 0).
+    ///
+    /// Appropriate for stereo input when only left content is needed.
     Left,
-    /// Use right channel only (for stereo input).
+
+    /// Use only the right channel (channel index 1).
+    ///
+    /// Appropriate for stereo input when only right content is needed.
     Right,
-    /// Use weighted average with custom weights per channel.
+
+    /// Mix channels using per-channel gain weights.
+    ///
+    /// The inner `Vec<f64>` must contain one weight per channel. Weights need
+    /// not sum to 1.0; they are applied as linear gain multipliers and the
+    /// resulting values are summed. Mismatched length behaviour is
+    /// implementation-defined.
     Weighted(Vec<f64>),
-    /// Use center channel if available, otherwise average L/R.
+
+    /// Use the center channel when present; fall back to averaging L/R otherwise.
+    ///
+    /// For 5.1 and similar multichannel formats where a discrete center channel
+    /// (typically index 2) carries dialogue or lead content.
     Center,
 }
 
-/// Methods for converting mono audio to stereo.
+/// Algorithm for expanding a mono signal into a two-channel stereo pair.
+///
+/// Defaults to [`Duplicate`][StereoConversionMethod::Duplicate], which produces
+/// a centred mono-compatible stereo signal.
 #[cfg(feature = "channels")]
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum StereoConversionMethod {
-    /// Duplicate mono signal to both left and right channels.
+    /// Copy the mono signal identically to both left and right channels.
+    ///
+    /// The result is a centred, mono-compatible stereo signal.
     #[default]
     Duplicate,
-    /// Pan the mono signal (0.0 = center, -1.0 = left,1.0 = right).
+
+    /// Pan the mono signal to a specific stereo position.
+    ///
+    /// The inner `f64` encodes the pan position: `-1.0` = hard left,
+    /// `0.0` = centre, `1.0` = hard right. Values outside `[-1.0, 1.0]`
+    /// have implementation-defined behaviour.
     Pan(f64),
-    /// Use as left channel, fill right with silence.
+
+    /// Route the mono signal to the left channel; fill the right with silence.
     Left,
-    /// Use as right channel, fill left with silence.
+
+    /// Route the mono signal to the right channel; fill the left with silence.
     Right,
 }
 
-/// Voice Activity Detection (VAD) methods.
+/// Algorithm used by the Voice Activity Detector to classify frames.
+///
+/// Each method makes different trade-offs between simplicity, computational cost,
+/// and robustness to noise. [`Energy`][VadMethod::Energy] is the default and
+/// suits clean or lightly noisy speech. For challenging conditions, prefer
+/// [`Combined`][VadMethod::Combined] or [`Spectral`][VadMethod::Spectral].
 #[cfg(feature = "vad")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VadMethod {
-    /// Simple energy-based detection using RMS threshold.
+    /// RMS energy threshold detection.
+    ///
+    /// A frame is classified as speech when its RMS level exceeds
+    /// [`VadConfig::energy_threshold_db`]. Fast and reliable for clean audio;
+    /// sensitive to background noise.
     #[default]
     Energy,
-    /// Zero crossing rate based detection.
+
+    /// Zero-crossing rate (ZCR) detection.
+    ///
+    /// Uses the per-frame rate of sign changes as a proxy for voiced activity.
+    /// Speech typically produces ZCR in the range defined by
+    /// [`VadConfig::zcr_min`] and [`VadConfig::zcr_max`].
     ZeroCrossing,
-    /// Combined energy and zero crossing rate.
+
+    /// Combined energy and zero-crossing rate detection.
+    ///
+    /// Both the energy threshold and the ZCR window must be satisfied for a
+    /// frame to be classified as speech. Reduces false positives from either
+    /// method alone.
     Combined,
-    /// Spectral-based detection using spectral features.
+
+    /// Spectral energy ratio detection.
+    ///
+    /// Computes the fraction of spectral energy within the speech band
+    /// (`speech_band_low_hz`..`speech_band_high_hz`) and compares it to
+    /// [`VadConfig::spectral_ratio_threshold`]. More computationally intensive
+    /// but more discriminative in noisy environments.
     Spectral,
 }
 
@@ -316,32 +550,71 @@ impl FromStr for VadMethod {
     }
 }
 
-/// Multi-channel handling policy for Voice Activity Detection (VAD).
+/// How to derive a single activity decision from a multi-channel signal.
 ///
-/// This determines how VAD decisions are produced for multi-channel audio.
+/// Applies only when the input has more than one channel. For mono input this
+/// setting has no effect. Defaults to
+/// [`AverageToMono`][VadChannelPolicy::AverageToMono].
 #[cfg(feature = "vad")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VadChannelPolicy {
-    /// Average all channels to a mono signal and run VAD once.
+    /// Average all channels to mono before running VAD.
+    ///
+    /// Cheapest option; produces one activity mask independent of channel
+    /// count.
     #[default]
     AverageToMono,
-    /// Run VAD per-channel and mark speech if any channel is active.
+
+    /// Run VAD on every channel independently; output `true` if any is active.
+    ///
+    /// Use when voice may appear on any single channel (e.g. a microphone
+    /// array where only some elements pick up speech).
     AnyChannel,
-    /// Run VAD per-channel and mark speech only if all channels are active.
+
+    /// Run VAD on every channel independently; output `true` only if all are active.
+    ///
+    /// Use when corroborated activity across all channels is required before
+    /// classifying a frame as speech.
     AllChannels,
-    /// Run VAD on a specific channel index.
+
+    /// Run VAD on only the specified channel index.
+    ///
+    /// The inner `usize` is the zero-based channel index. Behaviour when the
+    /// index exceeds the actual channel count is implementation-defined.
     Channel(usize),
 }
 
-/// Configuration for Voice Activity Detection (VAD).
+/// Full configuration for Voice Activity Detection.
 ///
-/// The VAD implementation is frame-based: it produces a boolean decision per frame
-/// of length `frame_size` with step `hop_size`.
+/// ## Purpose
 ///
-/// Defaults are chosen to work reasonably well for general audio, but you should
-/// tune thresholds for your content and sample format.
+/// Controls every aspect of the frame-based VAD pipeline: the detection algorithm,
+/// framing parameters, per-method thresholds, temporal smoothing, and multi-channel
+/// handling.
+///
+/// ## Intended Usage
+///
+/// Use [`VadConfig::energy_only`] for a quick, energy-threshold VAD; use the
+/// [`Default`] impl for a balanced starting point; or build a fully custom
+/// configuration with [`VadConfig::new`]. Call [`validate`][VadConfig::validate]
+/// before passing to a VAD function to catch invalid parameter combinations.
+///
+/// ## Invariants
+///
+/// - `hop_size` must be ≤ `frame_size`.
+/// - `0.0 ≤ zcr_min ≤ zcr_max ≤ 1.0`.
+/// - `0.0 < speech_band_low_hz < speech_band_high_hz`.
+/// - `0.0 ≤ spectral_ratio_threshold ≤ 1.0`.
+///
+/// ## Assumptions
+///
+/// Threshold fields that are not relevant to the chosen [`VadMethod`] are
+/// silently ignored during processing (e.g. `zcr_*` fields have no effect when
+/// `method` is [`VadMethod::Energy`]).
 #[cfg(feature = "vad")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct VadConfig {
     /// VAD method to use.
     pub method: VadMethod,
@@ -381,7 +654,34 @@ pub struct VadConfig {
 
 #[cfg(feature = "vad")]
 impl VadConfig {
-    /// Create a new VAD configuration with specified parameters
+    /// Creates a VAD configuration with every parameter specified explicitly.
+    ///
+    /// Prefer the [`Default`] impl or [`energy_only`][VadConfig::energy_only] for
+    /// typical use cases. Use this constructor only when full control over every
+    /// parameter is required.
+    ///
+    /// # Arguments
+    ///
+    /// – `method` – detection algorithm.\
+    /// – `frame_size` – analysis window length in samples.\
+    /// – `hop_size` – step between consecutive frames; must be ≤ `frame_size`.\
+    /// – `pad_end` – whether to include a final zero-padded partial frame.\
+    /// – `channel_policy` – how to derive activity from multi-channel input.\
+    /// – `energy_threshold_db` – RMS threshold in dBFS; typical range `[-60.0, -20.0]`.\
+    /// – `zcr_min` – minimum zero-crossing rate for voiced activity; in `[0.0, 1.0]`.\
+    /// – `zcr_max` – maximum zero-crossing rate for voiced activity; in `[zcr_min, 1.0]`.\
+    /// – `min_speech_frames` – minimum consecutive speech frames to confirm a region.\
+    /// – `min_silence_frames` – minimum consecutive silence frames to close a region.\
+    /// – `hangover_frames` – frames to remain "active" after energy drops below threshold.\
+    /// – `smooth_frames` – majority-vote window size; `1` disables smoothing.\
+    /// – `speech_band_low_hz` – lower boundary of the speech band (Spectral method).\
+    /// – `speech_band_high_hz` – upper boundary of the speech band (Spectral method).\
+    /// – `spectral_ratio_threshold` – minimum in-band energy fraction; in `[0.0, 1.0]`.
+    ///
+    /// # Returns
+    ///
+    /// A [`VadConfig`] with all fields set as provided. Use
+    /// [`validate`][VadConfig::validate] to check constraints before use.
     #[inline]
     #[must_use]
     pub const fn new(
@@ -420,16 +720,40 @@ impl VadConfig {
         }
     }
 
-    /// Create a VAD configuration using only energy-based detection.
+    /// Creates a VAD configuration using only energy-based (RMS) detection.
+    ///
+    /// All parameters are taken from the [`Default`] impl; only `method` is
+    /// overridden to [`VadMethod::Energy`]. This is the simplest and fastest
+    /// configuration and works well for clean or lightly noisy speech.
+    ///
+    /// # Returns
+    ///
+    /// A [`VadConfig`] identical to `Default::default()` except that `method` is
+    /// `VadMethod::Energy`.
     #[inline]
     #[must_use]
     pub fn energy_only() -> Self {
-        let mut conf = Self::default();
-        conf.method = VadMethod::Energy;
-        conf
+        Self {
+            method: VadMethod::Energy,
+            ..Default::default()
+        }
     }
 
-    /// Validate configuration parameters.
+    /// Validates all parameter constraints.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if all constraints are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] describing the
+    /// first violated constraint:
+    ///
+    /// - `hop_size` ≤ `frame_size`
+    /// - `0.0 ≤ zcr_min ≤ zcr_max ≤ 1.0`
+    /// - `0.0 < speech_band_low_hz < speech_band_high_hz`
+    /// - `0.0 ≤ spectral_ratio_threshold ≤ 1.0`
     #[inline]
     pub fn validate(self) -> AudioSampleResult<Self> {
         if self.hop_size > self.frame_size {
@@ -461,6 +785,252 @@ impl VadConfig {
         }
 
         Ok(self)
+    }
+
+    /// Returns a copy of `self` with the specified `method`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_method(self, method: VadMethod) -> Self {
+        Self { method, ..self }
+    }
+
+    /// Returns a copy of `self` with the specified `frame_size`.
+    ///
+    /// Other fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `frame_size` is less than the current `hop_size`.
+    #[inline]
+    pub fn with_frame_size(self, frame_size: NonZeroUsize) -> AudioSampleResult<Self> {
+        let updated = Self { frame_size, ..self };
+        if updated.hop_size > updated.frame_size {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frame_size",
+                "must be >= hop_size",
+            )));
+        }
+        Ok(updated)
+    }
+
+    /// Returns a copy of `self` with the specified `hop_size`.
+    ///
+    /// Other fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `hop_size` is greater than the current `frame_size`.
+    #[inline]
+    pub fn with_hop_size(self, hop_size: NonZeroUsize) -> AudioSampleResult<Self> {
+        let updated = Self { hop_size, ..self };
+        if updated.hop_size > updated.frame_size {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                "must be <= frame_size",
+            )));
+        }
+        Ok(updated)
+    }
+
+    /// Returns a copy of `self` with the specified `pad_end`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_pad_end(self, pad_end: bool) -> Self {
+        Self { pad_end, ..self }
+    }
+
+    /// Returns a copy of `self` with the specified `channel_policy`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_channel_policy(self, channel_policy: VadChannelPolicy) -> Self {
+        Self {
+            channel_policy,
+            ..self
+        }
+    }
+
+    /// Returns a copy of `self` with the specified `energy_threshold_db`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_energy_threshold_db(self, energy_threshold_db: f64) -> Self {
+        Self {
+            energy_threshold_db,
+            ..self
+        }
+    }
+
+    /// Returns a copy of `self` with the specified `zcr_min`.
+    ///
+    /// Other fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `zcr_min` is not in the range `[0.0, 1.0]` or is greater than the current `zcr_max`.
+    #[inline]
+    pub fn with_zcr_min(self, zcr_min: f64) -> AudioSampleResult<Self> {
+        let updated = Self { zcr_min, ..self };
+        if updated.zcr_min < 0.0 || updated.zcr_min > 1.0 || updated.zcr_min > updated.zcr_max {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "zcr_min",
+                "expected 0 <= zcr_min <= zcr_max <= 1",
+            )));
+        }
+        Ok(updated)
+    }
+
+    /// Returns a copy of `self` with the specified `zcr_max`.
+    ///
+    /// Other fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `zcr_max` is not in the range `[0.0, 1.0]` or is less than the current `zcr_min`.
+    #[inline]
+    pub fn with_zcr_max(self, zcr_max: f64) -> AudioSampleResult<Self> {
+        let updated = Self { zcr_max, ..self };
+        if updated.zcr_max < 0.0 || updated.zcr_max > 1.0 || updated.zcr_min > updated.zcr_max {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "zcr_max",
+                "expected 0 <= zcr_min <= zcr_max <= 1",
+            )));
+        }
+        Ok(updated)
+    }
+
+    /// Returns a copy of `self` with the specified `min_speech_frames`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_min_speech_frames(self, min_speech_frames: usize) -> Self {
+        Self {
+            min_speech_frames,
+            ..self
+        }
+    }
+
+    /// Returns a copy of `self` with the specified `min_silence_frames`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_min_silence_frames(self, min_silence_frames: usize) -> Self {
+        Self {
+            min_silence_frames,
+            ..self
+        }
+    }
+
+    /// Returns a copy of `self` with the specified `hangover_frames`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_hangover_frames(self, hangover_frames: NonZeroUsize) -> Self {
+        Self {
+            hangover_frames,
+            ..self
+        }
+    }
+
+    /// Returns a copy of `self` with the specified `smooth_frames`.
+    ///
+    /// Other fields are unchanged.
+    #[inline]
+    #[must_use]
+    pub const fn with_smooth_frames(self, smooth_frames: NonZeroUsize) -> Self {
+        Self {
+            smooth_frames,
+            ..self
+        }
+    }
+
+    /// Returns a copy of `self` with the specified `speech_band_low_hz`.
+    ///
+    /// Other fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `speech_band_low_hz` is not positive or is not less than the current `speech_band_high_hz`.
+    #[inline]
+    pub fn with_speech_band_low_hz(self, speech_band_low_hz: f64) -> AudioSampleResult<Self> {
+        let updated = Self {
+            speech_band_low_hz,
+            ..self
+        };
+        if updated.speech_band_low_hz <= 0.0
+            || updated.speech_band_low_hz >= updated.speech_band_high_hz
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "speech_band_low_hz",
+                "expected 0 < low_hz < high_hz",
+            )));
+        }
+        Ok(updated)
+    }
+
+    /// Returns a copy of `self` with the specified `speech_band_high_hz`.
+    ///
+    /// Other fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `speech_band_high_hz` is not positive or is not greater than the current `speech_band_low_hz`.
+    #[inline]
+    pub fn with_speech_band_high_hz(self, speech_band_high_hz: f64) -> AudioSampleResult<Self> {
+        let updated = Self {
+            speech_band_high_hz,
+            ..self
+        };
+        if updated.speech_band_high_hz <= 0.0
+            || updated.speech_band_low_hz >= updated.speech_band_high_hz
+        {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "speech_band_high_hz",
+                "expected 0 < low_hz < high_hz",
+            )));
+        }
+        Ok(updated)
+    }
+
+    /// Returns a copy of `self` with the specified `spectral_ratio_threshold`.
+    ///
+    /// Other fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `spectral_ratio_threshold` is not in the range `[0.0, 1.0]`.
+    #[inline]
+    pub fn with_spectral_ratio_threshold(
+        self,
+        spectral_ratio_threshold: f64,
+    ) -> AudioSampleResult<Self> {
+        let updated = Self {
+            spectral_ratio_threshold,
+            ..self
+        };
+        if updated.spectral_ratio_threshold < 0.0 || updated.spectral_ratio_threshold > 1.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "spectral_ratio_threshold",
+                "expected 0 <= threshold <= 1",
+            )));
+        }
+        Ok(updated)
     }
 }
 
@@ -494,6 +1064,7 @@ impl Default for VadConfig {
 /// behaviour. Lower quality levels prioritise throughput and low latency.
 #[cfg(feature = "resampling")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[non_exhaustive]
 pub enum ResamplingQuality {
     /// Fast but lower quality resampling.
     #[default]
@@ -552,6 +1123,7 @@ impl TryFrom<&str> for ResamplingQuality {
 /// and are appropriate for different analysis and visualisation tasks.
 #[cfg(feature = "transforms")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum SpectrogramScale {
     /// Linear power scale.
     ///
@@ -631,6 +1203,7 @@ impl TryFrom<&str> for SpectrogramScale {
 /// fundamental frequency of a signal.
 #[cfg(feature = "pitch-analysis")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum PitchDetectionMethod {
     /// YIN pitch detection algorithm.
     ///
@@ -727,6 +1300,7 @@ impl TryFrom<&str> for PitchDetectionMethod {
 /// bands than FIR filters for a given computational budget.
 #[cfg(feature = "iir-filtering")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum IirFilterType {
     /// Butterworth filter.
     ///
@@ -811,6 +1385,7 @@ impl TryFrom<&str> for IirFilterType {
 /// Defines the qualitative frequency response shape of a filter.
 #[cfg(feature = "iir-filtering")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum FilterResponse {
     /// Low-pass filter.
     ///
@@ -885,34 +1460,98 @@ impl TryFrom<&str> for FilterResponse {
     }
 }
 
-/// IIR filter design parameters.
+/// Design specification for an IIR digital filter.
 ///
-/// Comprehensive parameters for designing IIR filters with various
-/// characteristics and specifications.
+/// ## Purpose
+///
+/// Encapsulates all parameters needed to specify a single IIR filter stage:
+/// the filter family, response shape, order, cutoff frequencies, and ripple
+/// or attenuation tolerances.
+///
+/// ## Intended Usage
+///
+/// Use one of the provided constructors (`butterworth_lowpass`, etc.) to obtain
+/// a valid design for the most common cases. Pass the result to
+/// [`AudioIirFiltering::apply_iir_filter`][crate::operations::AudioIirFiltering::apply_iir_filter].
+///
+/// ## Invariants
+///
+/// - For `LowPass` / `HighPass` responses: `cutoff_frequency` must be `Some`.
+/// - For `BandPass` / `BandStop` responses: `low_frequency` and
+///   `high_frequency` must both be `Some`, with `low_frequency < high_frequency`.
+/// - For `ChebyshevI` and `Elliptic`: `passband_ripple` must be `Some` and
+///   positive.
+/// - For `ChebyshevII` and `Elliptic`: `stopband_attenuation` must be `Some`
+///   and positive.
+/// - All frequencies must be positive and below the Nyquist frequency of the
+///   target sample rate.
+///
+/// ## Assumptions
+///
+/// Validation of frequency values against the sample rate occurs at filter
+/// application time, not at construction.
 #[cfg(feature = "iir-filtering")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct IirFilterDesign {
-    /// Type of IIR filter (Butterworth, Chebyshev, etc.)
+    /// The filter family (Butterworth, Chebyshev I/II, Elliptic).
     pub filter_type: IirFilterType,
-    /// Response type (low-pass, high-pass, etc.)
+
+    /// The frequency response shape (low-pass, high-pass, band-pass, band-stop).
     pub response: FilterResponse,
-    /// Filter order (number of poles)
+
+    /// Filter order — the number of poles.
+    ///
+    /// Higher order yields a steeper transition band at the cost of more
+    /// computation and potentially less stable phase behaviour.
     pub order: NonZeroUsize,
-    /// Cutoff frequency in Hz (for low-pass/high-pass)
+
+    /// Cutoff frequency in Hz for `LowPass` and `HighPass` responses.
+    ///
+    /// Must be `Some` and in `(0, nyquist)` for those response types; otherwise
+    /// `None`.
     pub cutoff_frequency: Option<f64>,
-    /// Lower cutoff frequency in Hz (for band-pass/band-stop)
+
+    /// Lower edge frequency in Hz for `BandPass` and `BandStop` responses.
+    ///
+    /// Must be `Some` and less than `high_frequency` for those response types;
+    /// otherwise `None`.
     pub low_frequency: Option<f64>,
-    /// Upper cutoff frequency in Hz (for band-pass/band-stop)
+
+    /// Upper edge frequency in Hz for `BandPass` and `BandStop` responses.
+    ///
+    /// Must be `Some` and greater than `low_frequency` for those response types;
+    /// otherwise `None`.
     pub high_frequency: Option<f64>,
-    /// Passband ripple in dB (for Chebyshev Type I and Elliptic)
+
+    /// Passband ripple in dB for `ChebyshevI` and `Elliptic` filter types.
+    ///
+    /// Controls how much gain variation is permitted within the passband.
+    /// Larger values yield a steeper transition but more audible ripple.
+    /// Must be positive. `None` for filter types that do not use this parameter.
     pub passband_ripple: Option<f64>,
-    /// Stopband attenuation in dB (for Chebyshev Type II and Elliptic)
+
+    /// Stopband attenuation in dB for `ChebyshevII` and `Elliptic` filter types.
+    ///
+    /// Minimum attenuation guaranteed in the stopband. Larger values yield
+    /// stronger rejection but require a higher filter order to achieve.
+    /// Must be positive. `None` for filter types that do not use this parameter.
     pub stopband_attenuation: Option<f64>,
 }
 
 #[cfg(feature = "iir-filtering")]
 impl IirFilterDesign {
-    /// Create a simple Butterworth low-pass filter design.
+    /// Creates a Butterworth low-pass filter design.
+    ///
+    /// # Arguments
+    ///
+    /// – `order` – filter order; higher values yield a steeper roll-off.\
+    /// – `cutoff_frequency` – –3 dB point in Hz; must be in `(0, nyquist)`.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Butterworth` and
+    /// `response = LowPass`.
     #[inline]
     #[must_use]
     pub const fn butterworth_lowpass(order: NonZeroUsize, cutoff_frequency: f64) -> Self {
@@ -928,7 +1567,17 @@ impl IirFilterDesign {
         }
     }
 
-    /// Create a simple Butterworth high-pass filter design.
+    /// Creates a Butterworth high-pass filter design.
+    ///
+    /// # Arguments
+    ///
+    /// – `order` – filter order; higher values yield a steeper roll-off.\
+    /// – `cutoff_frequency` – –3 dB point in Hz; must be in `(0, nyquist)`.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Butterworth` and
+    /// `response = HighPass`.
     #[inline]
     #[must_use]
     pub const fn butterworth_highpass(order: NonZeroUsize, cutoff_frequency: f64) -> Self {
@@ -944,7 +1593,17 @@ impl IirFilterDesign {
         }
     }
 
-    /// Create a simple Butterworth band-pass filter design.
+    /// Creates a Butterworth band-pass filter design.
+    ///
+    /// # Arguments
+    ///
+    /// – `order` – filter order per edge; total order is `2 × order` for a band-pass.\
+    /// – `low_frequency` – lower –3 dB edge in Hz; must be positive and less than `high_frequency`.\
+    /// – `high_frequency` – upper –3 dB edge in Hz; must be less than the Nyquist frequency.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Butterworth` and `response = BandPass`.
     #[inline]
     #[must_use]
     pub const fn butterworth_bandpass(
@@ -964,7 +1623,22 @@ impl IirFilterDesign {
         }
     }
 
-    /// Create a Chebyshev Type I filter design.
+    /// Creates a Chebyshev Type I filter design.
+    ///
+    /// Chebyshev Type I filters achieve a steeper transition than Butterworth
+    /// designs of the same order by allowing controlled ripple in the passband.
+    ///
+    /// # Arguments
+    ///
+    /// – `response` – frequency response shape (`LowPass` or `HighPass`).\
+    /// – `order` – filter order; higher values yield a steeper roll-off.\
+    /// – `cutoff_frequency` – passband edge frequency in Hz.\
+    /// – `passband_ripple` – peak-to-peak ripple in dB within the passband;
+    ///   must be positive. Typical values are 0.5–3.0 dB.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = ChebyshevI`.
     #[inline]
     #[must_use]
     pub const fn chebyshev_i(
@@ -992,6 +1666,7 @@ impl IirFilterDesign {
 /// relative to a centre or cutoff frequency.
 #[cfg(feature = "parametric-eq")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum EqBandType {
     /// Peaking (bell) filter.
     ///
@@ -1094,34 +1769,76 @@ impl TryFrom<&str> for EqBandType {
     }
 }
 
-/// Parametric EQ band configuration.
+/// A single band in a parametric equaliser.
 ///
-/// Represents a single band in a parametric equalizer with
-/// frequency, gain, and Q (quality factor) parameters.
+/// ## Purpose
+///
+/// Describes one frequency-shaping stage: its type (peak, shelf, pass filter),
+/// the target frequency, the amount of gain or attenuation, and the bandwidth.
+///
+/// ## Intended Usage
+///
+/// Construct with one of the type-specific helpers (`peak`, `low_shelf`, etc.)
+/// and add to a [`ParametricEq`] instance. Individual bands can be toggled
+/// without removing them via [`set_enabled`][EqBand::set_enabled]. Call
+/// [`validate`][EqBand::validate] with the target sample rate to check that
+/// frequency and gain values are within acceptable limits.
+///
+/// ## Invariants
+///
+/// - `frequency` must be in `(0, nyquist)` where `nyquist = sample_rate / 2`.
+/// - `q_factor` must be positive.
+/// - `gain_db` must be within `[-40.0, 40.0]` dB.
+///
+/// ## Assumptions
+///
+/// The `gain_db` field is ignored by `LowPass` and `HighPass` band types;
+/// those bands always set `gain_db = 0.0` at construction.
 #[cfg(feature = "parametric-eq")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct EqBand {
-    /// Type of EQ band (peak, shelf, etc.)
+    /// Shape of the frequency response for this band.
     pub band_type: EqBandType,
-    /// Center frequency in Hz (for peak/notch) or corner frequency (for shelves)
+
+    /// Centre frequency for peak/notch bands, or corner frequency for shelves
+    /// and pass filters, in Hz.
     pub frequency: f64,
-    /// Gain in dB (positive for boost, negative for cut)
+
+    /// Gain in dB applied within the active region.
+    ///
+    /// Positive values boost; negative values cut. Ignored by `LowPass` and
+    /// `HighPass` band types (always 0.0 for those). Valid range: `[-40.0, 40.0]`.
     pub gain_db: f64,
-    /// Quality factor (bandwidth control)
-    /// Higher Q = narrower bandwidth, Lower Q = wider bandwidth
+
+    /// Quality factor controlling bandwidth.
+    ///
+    /// Higher Q → narrower affected frequency region; lower Q → wider region.
+    /// For shelf filters this controls the shelf slope. Must be positive.
     pub q_factor: f64,
-    /// Whether this band is enabled/active
+
+    /// Whether this band is currently active.
+    ///
+    /// When `false`, the band is bypassed and contributes no gain change.
     pub enabled: bool,
 }
 
 #[cfg(feature = "parametric-eq")]
 impl EqBand {
-    /// Create a new peak/notch EQ band.
+    /// Creates a peak (bell) EQ band.
+    ///
+    /// Boosts or attenuates a frequency region centred at `frequency`. Positive
+    /// `gain_db` creates a peak; negative `gain_db` creates a dip.
     ///
     /// # Arguments
-    /// * `frequency` - Center frequency in Hz
-    /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
-    /// * `q_factor` - Quality factor (bandwidth control)
+    ///
+    /// – `frequency` – centre frequency in Hz; must be in `(0, nyquist)`.\
+    /// – `gain_db` – gain at the centre frequency; positive = boost, negative = cut.\
+    /// – `q_factor` – bandwidth control; higher Q = narrower bell.
+    ///
+    /// # Returns
+    ///
+    /// An enabled [`EqBand`] with `band_type = EqBandType::Peak`.
     #[inline]
     #[must_use]
     pub const fn peak(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
@@ -1134,12 +1851,19 @@ impl EqBand {
         }
     }
 
-    /// Create a new low shelf EQ band.
+    /// Creates a low-shelf EQ band.
+    ///
+    /// Applies a broadband boost or cut to all frequencies below `frequency`.
     ///
     /// # Arguments
-    /// * `frequency` - Corner frequency in Hz
-    /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
-    /// * `q_factor` - Shelf slope control
+    ///
+    /// – `frequency` – corner (transition) frequency in Hz.\
+    /// – `gain_db` – gain applied below the corner; positive = boost, negative = cut.\
+    /// – `q_factor` – shelf slope control; 0.707 gives a Butterworth-style shelf.
+    ///
+    /// # Returns
+    ///
+    /// An enabled [`EqBand`] with `band_type = EqBandType::LowShelf`.
     #[inline]
     #[must_use]
     pub const fn low_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
@@ -1152,12 +1876,19 @@ impl EqBand {
         }
     }
 
-    /// Create a new high shelf EQ band.
+    /// Creates a high-shelf EQ band.
+    ///
+    /// Applies a broadband boost or cut to all frequencies above `frequency`.
     ///
     /// # Arguments
-    /// * `frequency` - Corner frequency in Hz
-    /// * `gain_db` - Gain in dB (positive for boost, negative for cut)
-    /// * `q_factor` - Shelf slope control
+    ///
+    /// – `frequency` – corner (transition) frequency in Hz.\
+    /// – `gain_db` – gain applied above the corner; positive = boost, negative = cut.\
+    /// – `q_factor` – shelf slope control; 0.707 gives a Butterworth-style shelf.
+    ///
+    /// # Returns
+    ///
+    /// An enabled [`EqBand`] with `band_type = EqBandType::HighShelf`.
     #[inline]
     #[must_use]
     pub const fn high_shelf(frequency: f64, gain_db: f64, q_factor: f64) -> Self {
@@ -1170,11 +1901,19 @@ impl EqBand {
         }
     }
 
-    /// Create a new low-pass filter band.
+    /// Creates a low-pass filter band.
+    ///
+    /// Attenuates frequencies above `frequency`. No gain is applied; the band
+    /// acts as a filter rather than a boost/cut stage.
     ///
     /// # Arguments
-    /// * `frequency` - Cutoff frequency in Hz
-    /// * `q_factor` - Filter resonance (typically 0.707 for Butterworth)
+    ///
+    /// – `frequency` – cutoff frequency in Hz.\
+    /// – `q_factor` – filter resonance; 0.707 gives a Butterworth (maximally flat) response.
+    ///
+    /// # Returns
+    ///
+    /// An enabled [`EqBand`] with `band_type = EqBandType::LowPass` and `gain_db = 0.0`.
     #[inline]
     #[must_use]
     pub const fn low_pass(frequency: f64, q_factor: f64) -> Self {
@@ -1187,11 +1926,19 @@ impl EqBand {
         }
     }
 
-    /// Create a new high-pass filter band.
+    /// Creates a high-pass filter band.
+    ///
+    /// Attenuates frequencies below `frequency`. No gain is applied; the band
+    /// acts as a filter rather than a boost/cut stage.
     ///
     /// # Arguments
-    /// * `frequency` - Cutoff frequency in Hz
-    /// * `q_factor` - Filter resonance (typically 0.707 for Butterworth)
+    ///
+    /// – `frequency` – cutoff frequency in Hz.\
+    /// – `q_factor` – filter resonance; 0.707 gives a Butterworth (maximally flat) response.
+    ///
+    /// # Returns
+    ///
+    /// An enabled [`EqBand`] with `band_type = EqBandType::HighPass` and `gain_db = 0.0`.
     #[inline]
     #[must_use]
     pub const fn high_pass(frequency: f64, q_factor: f64) -> Self {
@@ -1204,20 +1951,42 @@ impl EqBand {
         }
     }
 
-    /// Enable or disable this EQ band.
+    /// Enables or disables this band.
+    ///
+    /// Disabled bands are bypassed by the EQ processor without being removed.
+    ///
+    /// # Arguments
+    ///
+    /// – `enabled` – `true` to activate this band; `false` to bypass it.
     #[inline]
     pub const fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
-    /// Check if this EQ band is enabled.
+    /// Returns `true` if this band is active.
     #[inline]
     #[must_use]
     pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    /// Validate the EQ band parameters.
+    /// Validates that the band parameters are consistent with `sample_rate`.
+    ///
+    /// # Arguments
+    ///
+    /// – `sample_rate` – the target sample rate in Hz; used to derive the Nyquist limit.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if all constraints are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if:
+    ///
+    /// - `frequency` is not in `(0, nyquist)`
+    /// - `q_factor` is not positive
+    /// - `gain_db` has absolute value greater than 40 dB
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         let nyquist = sample_rate / 2.0;
@@ -1254,24 +2023,58 @@ impl EqBand {
     }
 }
 
-/// Parametric equalizer configuration.
+/// A multi-band parametric equaliser configuration.
 ///
-/// A complete parametric EQ consisting of multiple bands that can be
-/// applied to audio signals for frequency shaping.
+/// ## Purpose
+///
+/// Holds an ordered collection of [`EqBand`] stages along with a global output
+/// gain and a bypass flag. Bands are processed in the order they appear in
+/// `bands`.
+///
+/// ## Intended Usage
+///
+/// Build the EQ using [`new`][ParametricEq::new] and [`add_band`][ParametricEq::add_band],
+/// or use the [`three_band`][ParametricEq::three_band] / [`five_band`][ParametricEq::five_band]
+/// presets as a starting point. Pass the result to
+/// [`AudioParametricEq::apply_parametric_eq`][crate::operations::AudioParametricEq::apply_parametric_eq].
+/// Call [`validate`][ParametricEq::validate] with the target sample rate to check
+/// all band parameters before processing.
+///
+/// ## Invariants
+///
+/// - Each band in `bands` must satisfy the [`EqBand`] invariants (validated by
+///   [`validate`][ParametricEq::validate]).
+/// - `output_gain_db` is an unclamped linear gain applied after all bands.
+///
+/// ## Assumptions
+///
+/// Bands are applied sequentially; the order in `bands` affects the result for
+/// non-minimum-phase chains.
 #[cfg(feature = "parametric-eq")]
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ParametricEq {
-    /// Vector of EQ bands
+    /// Ordered sequence of EQ bands to apply.
     pub bands: Vec<EqBand>,
-    /// Overall output gain in dB
+
+    /// Output gain in dB applied after all bands.
+    ///
+    /// Positive values boost the overall output; negative values attenuate it.
+    /// Set to `0.0` for unity gain.
     pub output_gain_db: f64,
-    /// Whether the EQ is bypassed
+
+    /// When `true`, all band processing is skipped and the input passes through unchanged.
     pub bypassed: bool,
 }
 
 #[cfg(feature = "parametric-eq")]
 impl ParametricEq {
-    /// Create a new empty parametric EQ.
+    /// Creates an empty parametric EQ with no bands and unity output gain.
+    ///
+    /// # Returns
+    ///
+    /// A [`ParametricEq`] with an empty `bands` vector, `output_gain_db = 0.0`,
+    /// and `bypassed = false`.
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
@@ -1282,13 +2085,25 @@ impl ParametricEq {
         }
     }
 
-    /// Add an EQ band to the parametric EQ.
+    /// Appends a band to the end of the processing chain.
+    ///
+    /// # Arguments
+    ///
+    /// – `band` – the [`EqBand`] to append.
     #[inline]
     pub fn add_band(&mut self, band: EqBand) {
         self.bands.push(band);
     }
 
-    /// Remove an EQ band by index.
+    /// Removes the band at `index` and returns it, or `None` if out of range.
+    ///
+    /// # Arguments
+    ///
+    /// – `index` – zero-based position in `bands`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(band)` if `index < band_count()`, otherwise `None`.
     #[inline]
     pub fn remove_band(&mut self, index: usize) -> Option<EqBand> {
         if index < self.bands.len() {
@@ -1298,46 +2113,77 @@ impl ParametricEq {
         }
     }
 
-    /// Get a reference to an EQ band by index.
+    /// Returns a shared reference to the band at `index`, or `None` if out of range.
+    ///
+    /// # Arguments
+    ///
+    /// – `index` – zero-based position in `bands`.
     #[inline]
     #[must_use]
     pub fn get_band(&self, index: usize) -> Option<&EqBand> {
         self.bands.get(index)
     }
 
-    /// Get a mutable reference to an EQ band by index.
+    /// Returns an exclusive reference to the band at `index`, or `None` if out of range.
+    ///
+    /// # Arguments
+    ///
+    /// – `index` – zero-based position in `bands`.
     #[inline]
     pub fn get_band_mut(&mut self, index: usize) -> Option<&mut EqBand> {
         self.bands.get_mut(index)
     }
 
-    /// Get the number of bands in the EQ.
+    /// Returns the number of bands currently in the EQ.
     #[inline]
     #[must_use]
     pub const fn band_count(&self) -> usize {
         self.bands.len()
     }
 
-    /// Set the overall output gain.
+    /// Sets the overall output gain applied after all bands.
+    ///
+    /// # Arguments
+    ///
+    /// – `gain_db` – gain in dB; `0.0` is unity, positive values boost, negative values attenuate.
     #[inline]
     pub const fn set_output_gain(&mut self, gain_db: f64) {
         self.output_gain_db = gain_db;
     }
 
-    /// Enable or disable the EQ (bypass).
+    /// Sets whether the entire EQ is bypassed.
+    ///
+    /// When bypassed, the input signal passes through without modification.
+    ///
+    /// # Arguments
+    ///
+    /// – `bypassed` – `true` to bypass; `false` to enable processing.
     #[inline]
     pub const fn set_bypassed(&mut self, bypassed: bool) {
         self.bypassed = bypassed;
     }
 
-    /// Check if the EQ is bypassed.
+    /// Returns `true` if the EQ is currently bypassed.
     #[inline]
     #[must_use]
     pub const fn is_bypassed(&self) -> bool {
         self.bypassed
     }
 
-    /// Validate all EQ bands.
+    /// Validates all bands against `sample_rate`.
+    ///
+    /// # Arguments
+    ///
+    /// – `sample_rate` – the target sample rate in Hz.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if every band passes [`EqBand::validate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] identifying the
+    /// index and error of the first failing band.
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         for (i, band) in self.bands.iter().enumerate() {
@@ -1354,7 +2200,21 @@ impl ParametricEq {
         Ok(self)
     }
 
-    /// Create a common 3-band EQ (low shelf, mid peak, high shelf).
+    /// Creates a three-band EQ preset: low shelf, mid peak, high shelf.
+    ///
+    /// # Arguments
+    ///
+    /// – `low_freq` – corner frequency of the low shelf in Hz.\
+    /// – `low_gain` – gain of the low shelf in dB.\
+    /// – `mid_freq` – centre frequency of the mid peak in Hz.\
+    /// – `mid_gain` – gain of the mid peak in dB.\
+    /// – `mid_q` – Q factor of the mid peak band.\
+    /// – `high_freq` – corner frequency of the high shelf in Hz.\
+    /// – `high_gain` – gain of the high shelf in dB.
+    ///
+    /// # Returns
+    ///
+    /// A [`ParametricEq`] with three bands: low shelf at Q 0.707, mid peak, high shelf at Q 0.707.
     #[inline]
     #[must_use]
     pub fn three_band(
@@ -1373,7 +2233,14 @@ impl ParametricEq {
         eq
     }
 
-    /// Create a common 5-band EQ.
+    /// Creates a five-band EQ preset with all gains at 0 dB.
+    ///
+    /// Bands: 100 Hz low shelf, 300 Hz peak, 1 kHz peak, 3 kHz peak, 8 kHz high shelf.
+    /// All gains are initialised to 0.0 dB; adjust individual bands to taste.
+    ///
+    /// # Returns
+    ///
+    /// A [`ParametricEq`] with five bands at unity gain.
     #[inline]
     #[must_use]
     pub fn five_band() -> Self {
@@ -1400,6 +2267,7 @@ impl Default for ParametricEq {
 /// the threshold.
 #[cfg(any(feature = "parametric-eq", feature = "dynamic-range"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum KneeType {
     /// Hard knee.
     ///
@@ -1467,6 +2335,7 @@ impl TryFrom<&str> for KneeType {
 /// Determines how signal level is estimated for driving gain reduction.
 #[cfg(feature = "dynamic-range")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum DynamicRangeMethod {
     /// RMS-based level detection.
     ///
@@ -1532,31 +2401,70 @@ impl TryFrom<&str> for DynamicRangeMethod {
     }
 }
 
-/// Side-chain configuration for dynamic range processing.
+/// Side-chain configuration for dynamic range processors.
 ///
-/// Allows external control signals to drive the compressor/limiter.
+/// ## Purpose
+///
+/// Controls whether gain reduction is driven by the main signal (internal) or
+/// by an external control signal, and applies optional frequency shaping to the
+/// control path.
+///
+/// ## Intended Usage
+///
+/// Attach to [`CompressorConfig::side_chain`] or [`LimiterConfig::side_chain`].
+/// Use [`disabled`][SideChainConfig::disabled] (the default) for standard operation.
+/// Use [`enabled`][SideChainConfig::enabled] or call [`enable`][SideChainConfig::enable]
+/// when side-chain triggering is required. Apply a high-pass filter to the side-chain
+/// via [`set_high_pass`][SideChainConfig::set_high_pass] to reduce low-frequency pumping.
+///
+/// ## Invariants
+///
+/// - `high_pass_freq`, if `Some`, must be in `(0, nyquist)`.
+/// - `low_pass_freq`, if `Some`, must be in `(0, nyquist)`.
+/// - If both are `Some`, `high_pass_freq < low_pass_freq`.
+/// - `external_mix` must be in `[0.0, 1.0]`.
 #[cfg(feature = "dynamic-range")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SideChainConfig {
-    /// Whether side-chain processing is enabled
+    /// Whether side-chain processing is active.
+    ///
+    /// When `false` the processor uses its own output as the gain-reduction signal.
     pub enabled: bool,
-    /// High-pass filter frequency for side-chain signal (Hz)
-    /// Helps reduce low-frequency pumping effects
+
+    /// Optional high-pass filter on the side-chain signal, in Hz.
+    ///
+    /// Filtering out low frequencies prevents bass content from triggering
+    /// excessive gain reduction ("pumping"). Must be in `(0, nyquist)` if `Some`.
     pub high_pass_freq: Option<f64>,
-    /// Low-pass filter frequency for side-chain signal (Hz)
-    /// Focuses compression on specific frequency ranges
+
+    /// Optional low-pass filter on the side-chain signal, in Hz.
+    ///
+    /// Limits the frequency range that can trigger gain reduction.
+    /// Must be in `(0, nyquist)` and greater than `high_pass_freq` if both are `Some`.
     pub low_pass_freq: Option<f64>,
-    /// Pre-emphasis for side-chain signal (dB)
-    /// Emphasizes specific frequencies in the control signal
+
+    /// Pre-emphasis gain applied to the side-chain signal in dB.
+    ///
+    /// Positive values make specific frequencies trigger gain reduction more
+    /// easily. `0.0` disables pre-emphasis.
     pub pre_emphasis_db: f64,
-    /// Mix between internal and external side-chain signal (0.0-1.0)
-    ///0.0 = internal only,1.0 = external only
+
+    /// Mix between the internal signal (`0.0`) and external side-chain (`1.0`).
+    ///
+    /// Must be in `[0.0, 1.0]`. Values between 0 and 1 blend both sources.
     pub external_mix: f64,
 }
 
 #[cfg(feature = "dynamic-range")]
 impl SideChainConfig {
-    /// Create a new disabled side-chain configuration.
+    /// Creates a disabled side-chain configuration (the default).
+    ///
+    /// The processor uses its own output as the gain-detection signal.
+    ///
+    /// # Returns
+    ///
+    /// A [`SideChainConfig`] with `enabled = false` and no filter frequencies.
     #[inline]
     #[must_use]
     pub const fn disabled() -> Self {
@@ -1569,7 +2477,14 @@ impl SideChainConfig {
         }
     }
 
-    /// Create a new enabled side-chain configuration with default settings.
+    /// Creates an enabled side-chain configuration with a default 100 Hz high-pass filter.
+    ///
+    /// The 100 Hz high-pass filter reduces bass-driven pumping artefacts.
+    ///
+    /// # Returns
+    ///
+    /// A [`SideChainConfig`] with `enabled = true`, `high_pass_freq = Some(100.0)`,
+    /// and `external_mix = 1.0`.
     #[inline]
     #[must_use]
     pub const fn enabled() -> Self {
@@ -1582,31 +2497,54 @@ impl SideChainConfig {
         }
     }
 
-    /// Enable side-chain processing.
+    /// Activates side-chain processing.
     #[inline]
     pub const fn enable(&mut self) {
         self.enabled = true;
     }
 
-    /// Disable side-chain processing.
+    /// Deactivates side-chain processing.
     #[inline]
     pub const fn disable(&mut self) {
         self.enabled = false;
     }
 
-    /// Set high-pass filter frequency for side-chain signal.
+    /// Sets the high-pass filter frequency applied to the side-chain signal.
+    ///
+    /// # Arguments
+    ///
+    /// – `freq` – cut-off frequency in Hz; must be in `(0, nyquist)`.
     #[inline]
     pub const fn set_high_pass(&mut self, freq: f64) {
         self.high_pass_freq = Some(freq);
     }
 
-    /// Set low-pass filter frequency for side-chain signal.
+    /// Sets the low-pass filter frequency applied to the side-chain signal.
+    ///
+    /// # Arguments
+    ///
+    /// – `freq` – cut-off frequency in Hz; must be in `(0, nyquist)` and greater than
+    ///   `high_pass_freq` if that is also set.
     #[inline]
     pub const fn set_low_pass(&mut self, freq: f64) {
         self.low_pass_freq = Some(freq);
     }
 
-    /// Validate side-chain configuration.
+    /// Validates all side-chain parameters against `sample_rate`.
+    ///
+    /// # Arguments
+    ///
+    /// – `sample_rate` – the target sample rate in Hz.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if all constraints are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if any frequency
+    /// is outside `(0, nyquist)`, if `high_pass_freq ≥ low_pass_freq`, or if
+    /// `external_mix` is outside `[0.0, 1.0]`.
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         if let Some(hp_freq) = self.high_pass_freq
@@ -1654,51 +2592,113 @@ impl Default for SideChainConfig {
     }
 }
 
-/// Compressor configuration parameters.
+/// Configuration for a dynamic range compressor.
 ///
-/// Controls how the compressor responds to signal levels above the threshold.
+/// ## Purpose
+///
+/// Specifies all parameters governing the compressor's gain-reduction behaviour:
+/// threshold, ratio, envelope times, knee shape, level detection, side-chain,
+/// and lookahead.
+///
+/// ## Intended Usage
+///
+/// Use [`CompressorConfig::new`] (which delegates to [`Default`]) or one of the
+/// presets (`vocal`, `drum`, `bus`) as a starting point. Call
+/// [`validate`][CompressorConfig::validate] to check parameter bounds before
+/// passing to a compressor function.
+///
+/// ## Invariants
+///
+/// - `threshold_db` must be ≤ 0.
+/// - `ratio` must be ≥ 1.0.
+/// - `attack_ms` must be in `[0.01, 1000.0]` ms.
+/// - `release_ms` must be in `[1.0, 10000.0]` ms.
+/// - `|makeup_gain_db|` must be ≤ 40 dB.
+/// - `knee_width_db` must be in `[0.0, 20.0]` dB.
+/// - `lookahead_ms` must be in `[0.0, 20.0]` ms.
+/// - `side_chain` must satisfy its own invariants.
 #[cfg(feature = "dynamic-range")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct CompressorConfig {
-    /// Threshold level in dB (typically -40 to 0 dB)
-    /// Signal levels above this will be compressed
+    /// Level above which gain reduction begins, in dBFS.
+    ///
+    /// Must be ≤ 0. Typical range: `[-40.0, 0.0]`.
     pub threshold_db: f64,
-    /// Compression ratio (1.0 = no compression, >1.0 = compression)
-    /// Higher values provide more aggressive compression
+
+    /// Ratio of input level change to output level change above the threshold.
+    ///
+    /// `1.0` = no compression; `∞` (very large) = limiting. Must be ≥ 1.0.
+    /// Typical values: `2.0` (light) to `10.0` (heavy).
     pub ratio: f64,
-    /// Attack time in milliseconds (0.1 to 100 ms typical)
-    /// How quickly the compressor responds to signals above threshold
+
+    /// Time for the compressor to reach full gain reduction after a threshold
+    /// crossing, in milliseconds.
+    ///
+    /// Shorter attack catches transients; longer attack lets them through.
+    /// Valid range: `[0.01, 1000.0]` ms.
     pub attack_ms: f64,
-    /// Release time in milliseconds (10 to 1000 ms typical)
-    /// How quickly the compressor stops compressing when signal drops below threshold
+
+    /// Time for the compressor to return to unity gain after the signal drops
+    /// below the threshold, in milliseconds.
+    ///
+    /// Shorter release may produce pumping artefacts; longer release sounds
+    /// more transparent. Valid range: `[1.0, 10000.0]` ms.
     pub release_ms: f64,
-    /// Makeup gain in dB (-20 to +20 dB typical)
-    /// Gain applied after compression to restore loudness
+
+    /// Gain added after compression to compensate for level reduction, in dB.
+    ///
+    /// Positive values restore loudness lost during gain reduction.
+    /// Valid range: `[-40.0, 40.0]` dB.
     pub makeup_gain_db: f64,
-    /// Knee type for compression curve
+
+    /// Transition shape at the threshold.
     pub knee_type: KneeType,
-    /// Knee width in dB (0.1 to 10 dB for soft knee)
-    /// Controls the transition smoothness around the threshold
+
+    /// Width of the soft-knee transition region around the threshold, in dB.
+    ///
+    /// Only meaningful when `knee_type = KneeType::Soft`. `0.0` is equivalent
+    /// to a hard knee. Valid range: `[0.0, 20.0]` dB.
     pub knee_width_db: f64,
-    /// Detection method for compression
+
+    /// Algorithm used to estimate the signal level for gain-reduction decisions.
     pub detection_method: DynamicRangeMethod,
-    /// Side-chain configuration
+
+    /// Side-chain routing and filtering configuration.
     pub side_chain: SideChainConfig,
-    /// Lookahead time in milliseconds (0 to 10 ms typical)
-    /// Allows the compressor to "see" upcoming peaks
+
+    /// Lookahead delay in milliseconds.
+    ///
+    /// When greater than `0.0`, the compressor buffers the input and begins
+    /// gain reduction before a peak is reached, improving transparency.
+    /// Introduces latency equal to `lookahead_ms`. Valid range: `[0.0, 20.0]` ms.
     pub lookahead_ms: f64,
 }
 
 #[cfg(feature = "dynamic-range")]
 impl CompressorConfig {
-    /// Create a new compressor configuration with default settings.
+    /// Creates a compressor configuration using default values.
+    ///
+    /// Equivalent to [`CompressorConfig::default()`]: threshold −12 dBFS,
+    /// ratio 4:1, attack 5 ms, release 50 ms, soft knee, no makeup gain.
+    ///
+    /// # Returns
+    ///
+    /// A [`CompressorConfig`] suitable as a general-purpose starting point.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Create a vocal compressor preset.
+    /// A preset optimised for lead vocals.
+    ///
+    /// Moderate ratio and soft knee for transparent vocal control.
+    /// Threshold −18 dBFS, ratio 3:1, attack 2 ms, release 100 ms.
+    ///
+    /// # Returns
+    ///
+    /// A [`CompressorConfig`] tuned for typical vocal dynamics.
     #[inline]
     #[must_use]
     pub const fn vocal() -> Self {
@@ -1716,7 +2716,14 @@ impl CompressorConfig {
         }
     }
 
-    /// Create a drum compressor preset.
+    /// A preset optimised for drums and percussive material.
+    ///
+    /// High ratio, fast attack and release, hard knee for punchy transient
+    /// control. Threshold −8 dBFS, ratio 6:1, attack 0.1 ms, release 20 ms.
+    ///
+    /// # Returns
+    ///
+    /// A [`CompressorConfig`] tuned for percussive signals.
     #[inline]
     #[must_use]
     pub const fn drum() -> Self {
@@ -1734,7 +2741,15 @@ impl CompressorConfig {
         }
     }
 
-    /// Create a bus compressor preset.
+    /// A preset for mix-bus (glue) compression.
+    ///
+    /// Low ratio, slow attack and release, wide soft knee for transparent
+    /// cohesion across a full mix. Threshold −20 dBFS, ratio 2:1, attack 10 ms,
+    /// release 200 ms.
+    ///
+    /// # Returns
+    ///
+    /// A [`CompressorConfig`] tuned for bus compression.
     #[inline]
     #[must_use]
     pub const fn bus() -> Self {
@@ -1752,7 +2767,21 @@ impl CompressorConfig {
         }
     }
 
-    /// Validate compressor configuration.
+    /// Validates all compressor parameters.
+    ///
+    /// # Arguments
+    ///
+    /// – `sample_rate` – target sample rate in Hz; forwarded to side-chain validation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if all parameter bounds are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] for the first
+    /// violated constraint (threshold, ratio, attack, release, makeup gain, knee
+    /// width, lookahead, or side-chain).
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         if self.threshold_db > 0.0 {
@@ -1827,41 +2856,97 @@ impl Default for CompressorConfig {
     }
 }
 
-/// Limiter configuration parameters.
+/// Configuration for a true-peak limiter.
 ///
-/// Controls how the limiter prevents signal levels from exceeding the ceiling.
+/// ## Purpose
+///
+/// Specifies all parameters controlling the limiter's ceiling enforcement:
+/// the maximum output level, envelope times, knee shape, detection method,
+/// side-chain routing, lookahead, and optional inter-sample peak (ISP) limiting.
+///
+/// ## Intended Usage
+///
+/// Use one of the presets (`transparent`, `mastering`, `broadcast`) or build
+/// from scratch with [`LimiterConfig::new`]. Call
+/// [`validate`][LimiterConfig::validate] before passing to a limiter function.
+///
+/// ## Invariants
+///
+/// - `ceiling_db` must be ≤ 0.
+/// - `attack_ms` must be in `[0.001, 100.0]` ms.
+/// - `release_ms` must be in `[1.0, 10000.0]` ms.
+/// - `knee_width_db` must be in `[0.0, 10.0]` dB.
+/// - `lookahead_ms` must be in `[0.0, 20.0]` ms.
+/// - `side_chain` must satisfy its own invariants.
 #[cfg(feature = "dynamic-range")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct LimiterConfig {
-    /// Ceiling level in dB (typically -0.1 to -3.0 dB)
-    /// Absolute maximum level that the limiter will allow
+    /// Maximum allowable output level in dBFS.
+    ///
+    /// No output sample will exceed this level when limiting is active.
+    /// Must be ≤ 0. Typical range: `[-3.0, -0.1]`.
     pub ceiling_db: f64,
-    /// Attack time in milliseconds (0.01 to 10 ms typical)
-    /// How quickly the limiter responds to signals approaching the ceiling
+
+    /// Time for the limiter to react to a signal approaching the ceiling, in ms.
+    ///
+    /// Very short attack (< 1 ms) enables brick-wall peak control.
+    /// Valid range: `[0.001, 100.0]` ms.
     pub attack_ms: f64,
-    /// Release time in milliseconds (10 to 1000 ms typical)
-    /// How quickly the limiter stops limiting when signal drops below ceiling
+
+    /// Time to return to unity gain after the signal recedes, in ms.
+    ///
+    /// Valid range: `[1.0, 10000.0]` ms.
     pub release_ms: f64,
-    /// Knee type for limiting curve
+
+    /// Transition shape at the ceiling.
     pub knee_type: KneeType,
-    /// Knee width in dB (0.1 to 5 dB for soft knee)
-    /// Controls the transition smoothness around the ceiling
+
+    /// Width of the soft-knee transition region in dB.
+    ///
+    /// Only meaningful when `knee_type = KneeType::Soft`. Valid range: `[0.0, 10.0]` dB.
     pub knee_width_db: f64,
-    /// Detection method for limiting
+
+    /// Algorithm used to estimate peak or RMS level for gain-reduction decisions.
     pub detection_method: DynamicRangeMethod,
-    /// Side-chain configuration
+
+    /// Side-chain routing and filtering configuration.
     pub side_chain: SideChainConfig,
-    /// Lookahead time in milliseconds (0.1 to 10 ms typical)
-    /// Allows the limiter to prevent peaks before they occur
+
+    /// Lookahead delay in milliseconds.
+    ///
+    /// Buffers audio and begins gain reduction ahead of approaching peaks,
+    /// enabling cleaner limiting at the cost of added latency.
+    /// Valid range: `[0.0, 20.0]` ms.
     pub lookahead_ms: f64,
-    /// Whether to apply ISP (Inter-Sample Peak) limiting
-    /// Prevents aliasing and inter-sample peaks in the digital domain
+
+    /// Whether inter-sample peak (ISP) limiting is enabled.
+    ///
+    /// When `true`, the limiter accounts for peaks that may exceed 0 dBFS when
+    /// the digital signal is reconstructed via a DAC, preventing audible
+    /// clipping on playback. Recommended for mastering and broadcast delivery.
     pub isp_limiting: bool,
 }
 
 #[cfg(feature = "dynamic-range")]
 impl LimiterConfig {
-    /// Create a new limiter configuration with default settings.
+    /// Creates a limiter configuration with every parameter specified explicitly.
+    ///
+    /// # Arguments
+    ///
+    /// – `ceiling_db` – maximum output level in dBFS; must be ≤ 0.\
+    /// – `attack_ms` – attack time in milliseconds; must be in `[0.001, 100.0]`.\
+    /// – `release_ms` – release time in milliseconds; must be in `[1.0, 10000.0]`.\
+    /// – `knee_type` – transition shape at the ceiling.\
+    /// – `knee_width_db` – soft-knee width in dB; in `[0.0, 10.0]`.\
+    /// – `detection_method` – level estimation algorithm.\
+    /// – `lookahead_ms` – lookahead delay in milliseconds; in `[0.0, 20.0]`.\
+    /// – `isp_filtering` – whether inter-sample peak protection is enabled.
+    ///
+    /// # Returns
+    ///
+    /// A [`LimiterConfig`] with `side_chain` set to `SideChainConfig::disabled()`.
+    /// Use [`validate`][LimiterConfig::validate] to verify constraints.
     #[inline]
     #[must_use]
     pub const fn new(
@@ -1887,7 +2972,15 @@ impl LimiterConfig {
         }
     }
 
-    /// Create a transparent limiter preset.
+    /// A preset for low-audibility peak limiting.
+    ///
+    /// Very fast attack and soft knee for transparent operation at −0.1 dBFS.
+    /// Suitable for final-stage limiting where audible artefacts are undesirable.
+    ///
+    /// # Returns
+    ///
+    /// A [`LimiterConfig`] with ceiling −0.1 dBFS, attack 0.1 ms, release 100 ms,
+    /// 5 ms lookahead, and ISP limiting enabled.
     #[inline]
     #[must_use]
     pub const fn transparent() -> Self {
@@ -1904,7 +2997,15 @@ impl LimiterConfig {
         }
     }
 
-    /// Create a mastering limiter preset.
+    /// A preset for mastering-grade limiting.
+    ///
+    /// Hybrid detection and a longer lookahead for optimal loudness management
+    /// at −0.3 dBFS. ISP limiting enabled for streaming and physical delivery.
+    ///
+    /// # Returns
+    ///
+    /// A [`LimiterConfig`] with ceiling −0.3 dBFS, attack 1 ms, release 200 ms,
+    /// 10 ms lookahead, and ISP limiting enabled.
     #[inline]
     #[must_use]
     pub const fn mastering() -> Self {
@@ -1921,7 +3022,15 @@ impl LimiterConfig {
         }
     }
 
-    /// Create a broadcast limiter preset.
+    /// A preset for broadcast delivery compliance.
+    ///
+    /// Hard knee and fast attack enforce a strict −1.0 dBFS ceiling suitable
+    /// for loudness-normalised delivery formats. ISP limiting enabled.
+    ///
+    /// # Returns
+    ///
+    /// A [`LimiterConfig`] with ceiling −1.0 dBFS, attack 0.5 ms, release 50 ms,
+    /// 2 ms lookahead, and ISP limiting enabled.
     #[inline]
     #[must_use]
     pub const fn broadcast() -> Self {
@@ -1938,7 +3047,21 @@ impl LimiterConfig {
         }
     }
 
-    /// Validate limiter configuration.
+    /// Validates all limiter parameters.
+    ///
+    /// # Arguments
+    ///
+    /// – `sample_rate` – target sample rate in Hz; forwarded to side-chain validation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if all constraints hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] for the first
+    /// violated constraint (ceiling, attack, release, knee width, lookahead, or
+    /// side-chain).
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         if self.ceiling_db > 0.0 {
@@ -2004,6 +3127,7 @@ impl Default for LimiterConfig {
 /// onset strength function over time.
 #[cfg(feature = "peak-picking")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum AdaptiveThresholdMethod {
     /// Delta-based adaptive threshold.
     ///
@@ -2078,41 +3202,88 @@ impl TryFrom<&str> for AdaptiveThresholdMethod {
     }
 }
 
-/// Configuration for adaptive thresholding in peak picking.
+/// Parameters for adaptive threshold estimation in peak picking.
 ///
-/// Adaptive thresholding dynamically adjusts the detection threshold based on
-/// local characteristics of the onset strength function to improve detection
-/// accuracy across varying signal conditions.
+/// ## Purpose
+///
+/// Controls how a dynamic detection threshold is derived from the local
+/// statistics of the onset strength function. A well-tuned adaptive threshold
+/// adapts to varying signal conditions and reduces both false positives and
+/// missed detections compared to a fixed threshold.
+///
+/// ## Intended Usage
+///
+/// Use one of the type-specific constructors (`delta`, `percentile`, `combined`)
+/// rather than `new` for most scenarios. Attach the result to
+/// [`PeakPickingConfig::adaptive_threshold`]. Call
+/// [`validate`][AdaptiveThresholdConfig::validate] to check parameter bounds.
+///
+/// ## Invariants
+///
+/// - `delta` must be ≥ 0.0.
+/// - `percentile` must be in `[0.0, 1.0]`.
+/// - `window_size` must be > 0.
+/// - `min_threshold` must be ≥ 0.0.
+/// - `max_threshold` must be > `min_threshold`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg(feature = "peak-picking")]
+#[non_exhaustive]
 pub struct AdaptiveThresholdConfig {
-    /// Method for computing adaptive threshold
+    /// Algorithm used to derive the adaptive threshold.
     pub method: AdaptiveThresholdMethod,
-    /// Delta value for delta-based thresholding (typical range: 0.01-0.1)
-    /// Larger values = fewer false positives but may miss weak onsets
+
+    /// Fixed offset added to local maxima for delta-based thresholding.
+    ///
+    /// Larger values raise the threshold and reduce false positives at the
+    /// cost of potentially missing weak onsets. Must be ≥ 0.0.
+    /// Typical range: `[0.01, 0.1]`.
     pub delta: f64,
-    /// Percentile value for percentile-based thresholding (0.0-1.0)
-    /// Higher percentiles = more conservative thresholding
+
+    /// Percentile of the local distribution used as the threshold.
+    ///
+    /// Higher percentiles (closer to 1.0) yield a more conservative threshold
+    /// and fewer detections. Must be in `[0.0, 1.0]`.
     pub percentile: f64,
-    /// Size of local window for adaptive computation (in samples)
-    /// Larger windows = more stable but less responsive thresholds
+
+    /// Length of the local analysis window in samples.
+    ///
+    /// Larger windows produce more stable thresholds but respond more slowly
+    /// to changes in signal dynamics. Must be > 0.
     pub window_size: usize,
-    /// Minimum threshold value to prevent over-sensitivity
-    /// Ensures threshold never drops below this absolute minimum
+
+    /// Floor below which the threshold will never drop.
+    ///
+    /// Prevents over-sensitivity when the onset strength is very low.
+    /// Must be ≥ 0.0 and less than `max_threshold`.
     pub min_threshold: f64,
-    /// Maximum threshold value to prevent under-sensitivity
-    /// Ensures threshold never exceeds this absolute maximum
+
+    /// Ceiling above which the threshold will never rise.
+    ///
+    /// Prevents under-sensitivity when the onset strength is very high.
+    /// Must be > `min_threshold`.
     pub max_threshold: f64,
 }
 
 #[cfg(feature = "peak-picking")]
 impl AdaptiveThresholdConfig {
-    /// Create a new adaptive threshold configuration with default settings.
+    /// Creates an adaptive threshold configuration with all fields specified.
     ///
-    /// Default configuration suitable for general onset detection:
-    /// - Delta method with 0.05 delta value
-    /// - Window size of 1024 samples (about 23ms at 44.1kHz)
-    /// - Reasonable min/max threshold bounds
+    /// Prefer the type-specific constructors (`delta`, `percentile`, `combined`)
+    /// for typical usage.
+    ///
+    /// # Arguments
+    ///
+    /// – `method` – threshold estimation algorithm.\
+    /// – `delta` – offset for delta-based estimation; must be ≥ 0.0.\
+    /// – `percentile` – percentile for distribution-based estimation; in `[0.0, 1.0]`.\
+    /// – `window_size` – local analysis window in samples; must be > 0.\
+    /// – `min_threshold` – lower clamp on the computed threshold; must be ≥ 0.0.\
+    /// – `max_threshold` – upper clamp on the computed threshold; must be > `min_threshold`.
+    ///
+    /// # Returns
+    ///
+    /// An [`AdaptiveThresholdConfig`] with the specified values. Use
+    /// [`validate`][AdaptiveThresholdConfig::validate] to verify constraints.
     #[inline]
     #[must_use]
     pub const fn new(
@@ -2133,11 +3304,17 @@ impl AdaptiveThresholdConfig {
         }
     }
 
-    /// Create a delta-based adaptive threshold configuration.
+    /// Creates a delta-based adaptive threshold configuration.
     ///
     /// # Arguments
-    /// * `delta` - Delta value for threshold computation
-    /// * `window_size` - Size of local window in samples
+    ///
+    /// – `delta` – fixed offset added to local maxima; must be ≥ 0.0.\
+    /// – `window_size` – local analysis window in samples; must be > 0.
+    ///
+    /// # Returns
+    ///
+    /// An [`AdaptiveThresholdConfig`] with `method = Delta`, `percentile = 0.9`,
+    /// and threshold bounds `[0.01, 1.0]`.
     #[inline]
     #[must_use]
     pub const fn delta(delta: f64, window_size: usize) -> Self {
@@ -2151,11 +3328,17 @@ impl AdaptiveThresholdConfig {
         }
     }
 
-    /// Create a percentile-based adaptive threshold configuration.
+    /// Creates a percentile-based adaptive threshold configuration.
     ///
     /// # Arguments
-    /// * `percentile` - Percentile value (0.0-1.0)
-    /// * `window_size` - Size of local window in samples
+    ///
+    /// – `percentile` – distribution percentile used as the threshold; must be in `[0.0, 1.0]`.\
+    /// – `window_size` – local analysis window in samples; must be > 0.
+    ///
+    /// # Returns
+    ///
+    /// An [`AdaptiveThresholdConfig`] with `method = Percentile`, `delta = 0.05`,
+    /// and threshold bounds `[0.01, 1.0]`.
     #[inline]
     #[must_use]
     pub const fn percentile(percentile: f64, window_size: usize) -> Self {
@@ -2169,12 +3352,18 @@ impl AdaptiveThresholdConfig {
         }
     }
 
-    /// Create a combined adaptive threshold configuration.
+    /// Creates a combined delta + percentile adaptive threshold configuration.
     ///
     /// # Arguments
-    /// * `delta` - Delta value for delta component
-    /// * `percentile` - Percentile value for percentile component
-    /// * `window_size` - Size of local window in samples
+    ///
+    /// – `delta` – delta offset component; must be ≥ 0.0.\
+    /// – `percentile` – percentile component; must be in `[0.0, 1.0]`.\
+    /// – `window_size` – local analysis window in samples; must be > 0.
+    ///
+    /// # Returns
+    ///
+    /// An [`AdaptiveThresholdConfig`] with `method = Combined` and threshold
+    /// bounds `[0.01, 1.0]`.
     #[inline]
     #[must_use]
     pub const fn combined(delta: f64, percentile: f64, window_size: usize) -> Self {
@@ -2188,19 +3377,37 @@ impl AdaptiveThresholdConfig {
         }
     }
 
-    /// Set the minimum threshold value.
+    /// Sets the lower clamp on the computed threshold.
+    ///
+    /// # Arguments
+    ///
+    /// – `min_threshold` – new minimum; must be ≥ 0.0 and < `max_threshold`.
     #[inline]
     pub const fn set_min_threshold(&mut self, min_threshold: f64) {
         self.min_threshold = min_threshold;
     }
 
-    /// Set the maximum threshold value.
+    /// Sets the upper clamp on the computed threshold.
+    ///
+    /// # Arguments
+    ///
+    /// – `max_threshold` – new maximum; must be > `min_threshold`.
     #[inline]
     pub const fn set_max_threshold(&mut self, max_threshold: f64) {
         self.max_threshold = max_threshold;
     }
 
-    /// Validate the adaptive threshold configuration.
+    /// Validates all parameter constraints.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if all constraints hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] for the first
+    /// violated constraint: `delta < 0`, `percentile` outside `[0, 1]`,
+    /// `window_size == 0`, `min_threshold < 0`, or `max_threshold ≤ min_threshold`.
     #[inline]
     pub fn validate(self) -> AudioSampleResult<Self> {
         if self.delta < 0.0 {
@@ -2256,49 +3463,100 @@ impl Default for AdaptiveThresholdConfig {
     }
 }
 
-/// Configuration for peak picking with temporal constraints.
+/// Full configuration for onset peak picking.
 ///
-/// Peak picking identifies local maxima in the onset strength function that
-/// exceed a threshold. Temporal constraints ensure detected peaks are
-/// separated by minimum time intervals and can include smoothing.
+/// ## Purpose
+///
+/// Governs every stage of the peak-picking pipeline: optional pre-emphasis
+/// filtering, optional median smoothing, optional onset-strength normalisation,
+/// adaptive threshold estimation, and minimum-separation enforcement.
+///
+/// ## Intended Usage
+///
+/// Use one of the content-specific presets (`music`, `speech`, `drums`) or
+/// build from scratch with [`PeakPickingConfig::new`]. Attach to the relevant
+/// peak-picking call. Call [`validate`][PeakPickingConfig::validate] to check
+/// constraints before processing.
+///
+/// ## Invariants
+///
+/// - `pre_emphasis_coeff` must be in `[0.0, 1.0]`.
+/// - `median_filter_length` must be an odd positive integer.
+/// - `adaptive_threshold` must satisfy its own invariants.
+///
+/// ## Assumptions
+///
+/// Disabling `pre_emphasis`, `median_filter`, and `normalize_onset_strength`
+/// is safe and reduces processing cost at the expense of robustness. These
+/// flags are always respected regardless of the chosen preset.
 #[cfg(feature = "peak-picking")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PeakPickingConfig {
-    /// Adaptive threshold configuration
+    /// Parameters for adaptive threshold estimation.
     pub adaptive_threshold: AdaptiveThresholdConfig,
-    /// Minimum time separation between peaks (in samples)
-    /// Prevents detecting multiple peaks for the same onset event
-    /// Must be greater than zero
+
+    /// Minimum distance between two consecutive detected peaks, in samples.
+    ///
+    /// Prevents multiple detections from a single onset event. At 44.1 kHz,
+    /// 512 samples ≈ 11.6 ms.
     pub min_peak_separation: NonZeroUsize,
-    /// Enable pre-emphasis to enhance transient detection
-    /// Applies high-pass filtering to emphasize onset characteristics
+
+    /// Whether to apply pre-emphasis (high-pass) filtering before detection.
+    ///
+    /// Enhances transient content by attenuating slowly-varying components.
     pub pre_emphasis: bool,
-    /// Pre-emphasis coefficient (0.0-1.0) for high-pass filtering
-    /// Higher values = stronger emphasis on transients
+
+    /// First-order high-pass coefficient for pre-emphasis, in `[0.0, 1.0]`.
+    ///
+    /// Higher values produce stronger emphasis on rapid changes. Only used
+    /// when `pre_emphasis = true`.
     pub pre_emphasis_coeff: f64,
-    /// Enable median filtering for onset strength smoothing
-    /// Reduces noise while preserving peak structure
+
+    /// Whether to apply a median filter to the onset strength signal.
+    ///
+    /// Smooths impulsive noise while preserving genuine peak structure.
     pub median_filter: bool,
-    /// Median filter length (must be odd)
-    /// Larger values = more smoothing but may blur sharp onsets
+
+    /// Kernel length of the median filter; must be an odd positive integer.
+    ///
+    /// Larger kernels smooth more aggressively but may merge nearby peaks.
+    /// Only used when `median_filter = true`.
     pub median_filter_length: NonZeroUsize,
-    /// Normalize onset strength before peak picking
-    /// Ensures consistent detection across different signal levels
+
+    /// Whether to normalise the onset strength before thresholding.
+    ///
+    /// Normalisation makes detection thresholds consistent across signals with
+    /// different overall levels.
     pub normalize_onset_strength: bool,
-    /// Normalization method for onset strength
+
+    /// Normalisation method applied to onset strength when
+    /// `normalize_onset_strength = true`.
     pub normalization_method: NormalizationMethod,
 }
 
 #[cfg(feature = "peak-picking")]
 impl PeakPickingConfig {
-    /// Create a new peak picking configuration with default settings.
+    /// Creates a peak-picking configuration with all fields specified.
     ///
-    /// Default configuration optimized for general onset detection:
-    /// - Adaptive delta thresholding
-    /// - 512 samples minimum separation (about 11ms at 44.1kHz)
-    /// - Pre-emphasis enabled with moderate coefficient
-    /// - Median filtering enabled with small kernel
-    /// - Peak normalization enabled
+    /// Prefer the content-specific presets (`music`, `speech`, `drums`) for
+    /// common scenarios.
+    ///
+    /// # Arguments
+    ///
+    /// – `adaptive_threshold` – adaptive threshold parameters.\
+    /// – `min_peak_separation` – minimum samples between adjacent peaks.\
+    /// – `pre_emphasis` – whether to apply pre-emphasis filtering.\
+    /// – `pre_emphasis_coeff` – first-order high-pass coefficient; in `[0.0, 1.0]`.\
+    /// – `median_filter` – whether to smooth with a median filter.\
+    /// – `median_filter_length` – kernel size; must be an odd positive integer.\
+    /// – `normalize_onset_strength` – whether to normalise onset strength.\
+    /// – `normalization_method` – normalisation algorithm when `normalize_onset_strength = true`.
+    ///
+    /// # Returns
+    ///
+    /// A [`PeakPickingConfig`] with the given values. Use
+    /// [`validate`][PeakPickingConfig::validate] to verify constraints.
     #[inline]
     #[must_use]
     pub const fn new(
@@ -2323,13 +3581,19 @@ impl PeakPickingConfig {
         }
     }
 
-    /// Create a configuration optimized for music onset detection.
+    /// A preset optimised for musical onset detection.
     ///
-    /// Uses settings that work well for typical musical content:
-    /// - Combined adaptive thresholding for robustness
-    /// - Longer minimum separation to avoid over-detection
-    /// - Strong pre-emphasis for transient enhancement
-    /// - Median filtering for noise reduction
+    /// Combined adaptive thresholding, long minimum separation, strong
+    /// pre-emphasis, and median filtering for robustness on typical music.
+    ///
+    /// # Returns
+    ///
+    /// A [`PeakPickingConfig`] with combined thresholding (delta 0.03, percentile 0.85,
+    /// window 2048), min separation 1024 samples, pre-emphasis 0.95, and median filter 5.
+    ///
+    /// # Panics
+    ///
+    /// Never panics; hardcoded nonzero values are used.
     #[inline]
     #[must_use]
     pub const fn music() -> Self {
@@ -2345,13 +3609,19 @@ impl PeakPickingConfig {
         }
     }
 
-    /// Create a configuration optimized for speech onset detection.
+    /// A preset optimised for speech onset detection.
     ///
-    /// Uses settings that work well for speech signals:
-    /// - Delta-based thresholding for responsiveness
-    /// - Shorter minimum separation for rapid speech
-    /// - Moderate pre-emphasis
-    /// - Smaller median filter to preserve speech transients
+    /// Delta-based thresholding with short minimum separation and a small
+    /// median filter to preserve rapid speech transitions.
+    ///
+    /// # Returns
+    ///
+    /// A [`PeakPickingConfig`] with delta thresholding (delta 0.07, window 1024),
+    /// min separation 256 samples, pre-emphasis 0.98, and median filter 3.
+    ///
+    /// # Panics
+    ///
+    /// Never panics; hardcoded nonzero values are used.
     #[inline]
     #[must_use]
     pub const fn speech() -> Self {
@@ -2367,13 +3637,19 @@ impl PeakPickingConfig {
         }
     }
 
-    /// Create a configuration optimized for drum onset detection.
+    /// A preset optimised for drum and percussive onset detection.
     ///
-    /// Uses settings that work well for percussive content:
-    /// - Percentile-based thresholding for stability
-    /// - Very short minimum separation for rapid sequences
-    /// - Strong pre-emphasis for transient enhancement
-    /// - No median filtering to preserve sharp transients
+    /// Percentile-based thresholding with very short minimum separation and
+    /// no median filtering to preserve sharp transient edges.
+    ///
+    /// # Returns
+    ///
+    /// A [`PeakPickingConfig`] with percentile thresholding (0.95, window 512),
+    /// min separation 128 samples, pre-emphasis 0.93, and median filter disabled.
+    ///
+    /// # Panics
+    ///
+    /// Never panics; hardcoded nonzero values are used.
     #[inline]
     #[must_use]
     pub const fn drums() -> Self {
@@ -2389,38 +3665,68 @@ impl PeakPickingConfig {
         }
     }
 
-    /// Set the minimum peak separation in samples.
+    /// Sets the minimum distance between consecutive detected peaks.
+    ///
+    /// # Arguments
+    ///
+    /// – `samples` – minimum separation in samples.
     #[inline]
     pub const fn set_min_peak_separation(&mut self, samples: NonZeroUsize) {
         self.min_peak_separation = samples;
     }
 
-    /// Set the minimum peak separation in milliseconds.
+    /// Sets the minimum distance between consecutive peaks, given in milliseconds.
+    ///
+    /// # Arguments
+    ///
+    /// – `ms` – minimum separation in milliseconds.\
+    /// – `sample_rate` – sample rate in Hz used to convert milliseconds to samples.
     ///
     /// # Panics
     ///
-    /// Panics if the millisecond to sample conversion results in a value that cannot be converted to usize.
+    /// Panics if `ms * sample_rate / 1000.0` rounds to zero, which would produce
+    /// an invalid `NonZeroUsize`.
     #[inline]
     pub fn set_min_peak_separation_ms(&mut self, ms: f64, sample_rate: f64) {
         self.min_peak_separation =
             NonZeroUsize::new((ms * sample_rate / 1000.0) as usize).expect("Must be non-zero");
     }
 
-    /// Enable or disable pre-emphasis.
+    /// Configures pre-emphasis filtering.
+    ///
+    /// # Arguments
+    ///
+    /// – `enabled` – whether to apply pre-emphasis before peak picking.\
+    /// – `coeff` – first-order high-pass coefficient; must be in `[0.0, 1.0]`.
     #[inline]
     pub const fn set_pre_emphasis(&mut self, enabled: bool, coeff: f64) {
         self.pre_emphasis = enabled;
         self.pre_emphasis_coeff = coeff;
     }
 
-    /// Enable or disable median filtering.
+    /// Configures median smoothing.
+    ///
+    /// # Arguments
+    ///
+    /// – `enabled` – whether to apply median filtering to the onset strength.\
+    /// – `length` – kernel size; must be an odd positive integer.
     #[inline]
     pub const fn set_median_filter(&mut self, enabled: bool, length: NonZeroUsize) {
         self.median_filter = enabled;
         self.median_filter_length = length;
     }
 
-    /// Validate the peak picking configuration.
+    /// Validates all parameter constraints.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(self)` if all constraints hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if
+    /// `pre_emphasis_coeff` is outside `[0.0, 1.0]`, `median_filter_length`
+    /// is even, or `adaptive_threshold` fails its own validation.
     #[inline]
     pub fn validate(self) -> AudioSampleResult<Self> {
         self.adaptive_threshold.validate()?;
@@ -2465,6 +3771,7 @@ impl Default for PeakPickingConfig {
 /// influencing perceived brightness, smoothness, and temporal structure.
 #[cfg(feature = "editing")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum NoiseColor {
     /// White noise.
     ///
@@ -2540,92 +3847,89 @@ impl TryFrom<&str> for NoiseColor {
     }
 }
 
-/// Perturbation methods for audio data augmentation.
+/// Type of perturbation applied to audio during data augmentation.
 ///
-/// Each variant defines a specific type of perturbation that can be applied
-/// to audio samples for data augmentation, robustness testing, or creative effects.
+/// Each variant encodes all parameters needed for one perturbation operation.
+/// Use the associated constructor functions (`gaussian_noise`, `random_gain`,
+/// etc.) rather than constructing variants directly, as they set sensible
+/// defaults for optional fields.
 #[cfg(feature = "editing")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum PerturbationMethod {
-    /// Gaussian noise injection with specified signal-to-noise ratio.
+    /// Adds coloured Gaussian noise to reach a target signal-to-noise ratio.
     ///
-    /// Adds colored Gaussian noise to achieve the target SNR relative to
-    /// the input signal's RMS level.
-    ///
-    /// # Arguments
-    /// * `target_snr_db` - Target signal-to-noise ratio in dB
-    /// * `noise_color` - Color/spectrum of the noise to add
+    /// Noise is scaled so the SNR between the unperturbed signal's RMS level
+    /// and the added noise matches `target_snr_db`. Valid range: `[-60, 60]` dB.
     GaussianNoise {
-        /// Target signal-to-noise ratio in dB
+        /// Target signal-to-noise ratio in dB. Valid range: `[-60.0, 60.0]`.
         target_snr_db: f64,
-        /// Color/spectrum of the noise to add
+        /// Spectral colour of the added noise.
         noise_color: NoiseColor,
     },
-    /// Random gain adjustment within specified dB range.
+
+    /// Applies a uniformly distributed random gain within a dB range.
     ///
-    /// Applies uniform random gain scaling to all channels.
-    /// Positive values boost, negative values attenuate.
-    ///
-    /// # Arguments
-    /// * `min_gain_db` - Minimum gain in dB
-    /// * `max_gain_db` - Maximum gain in dB
+    /// A gain value is drawn from the uniform distribution over
+    /// `[min_gain_db, max_gain_db]` and applied equally to all channels.
     RandomGain {
-        /// Minimum gain in dB
+        /// Lower bound of the gain range in dB. Must be < `max_gain_db` and ≥ −40.0.
         min_gain_db: f64,
-        /// Maximum gain in dB
+        /// Upper bound of the gain range in dB. Must be > `min_gain_db` and ≤ 20.0.
         max_gain_db: f64,
     },
-    /// High-pass filtering to remove low-frequency content.
+
+    /// Applies a high-pass filter to attenuate low-frequency content.
     ///
-    /// Applies a high-pass filter to simulate microphone rumble removal
-    /// or other high-pass effects commonly found in audio processing chains.
-    ///
-    /// # Arguments
-    /// * `cutoff_hz` - Cutoff frequency in Hz
-    /// * `slope_db_per_octave` - Filter slope (None = default 6dB/octave)
+    /// Simulates microphone rumble filtering or band-limited recording conditions.
     HighPassFilter {
-        /// Cutoff frequency in Hz
+        /// Cutoff frequency in Hz. Must be in `(0, nyquist)`.
         cutoff_hz: f64,
-        /// Filter slope in dB per octave (None = default 6dB/octave)
+        /// Filter slope in dB per octave. `None` uses the default 6 dB/octave.
+        /// When `Some`, must be in `[0.0, 48.0]` dB/octave.
         slope_db_per_octave: Option<f64>,
     },
-    /// Low-pass filtering to remove high-frequency content.
+
+    /// Applies a low-pass filter to attenuate high-frequency content.
     ///
-    /// Applies a low-pass filter to simulate telephone bandwidth
-    /// or other low-pass effects commonly found in audio processing chains.
-    ///
-    /// # Arguments
-    /// * `cutoff_hz` - Cutoff frequency in Hz
-    /// * `slope_db_per_octave` - Filter slope (None = default 6dB/octave)
+    /// Simulates telephone bandwidth or other band-limited environments.
     LowPassFilter {
-        /// Cutoff frequency in Hz
+        /// Cutoff frequency in Hz. Must be in `(0, nyquist)`.
         cutoff_hz: f64,
-        /// Filter slope in dB per octave (None = default 6dB/octave)
+        /// Filter slope in dB per octave. `None` uses the default 6 dB/octave.
+        /// When `Some`, must be in `[0.0, 48.0]` dB/octave.
         slope_db_per_octave: Option<f64>,
     },
-    /// Pitch shifting for data augmentation.
+
+    /// Shifts the fundamental frequency by a fixed number of semitones.
     ///
-    /// Shifts the pitch of the audio signal by the specified number of semitones
-    /// while attempting to maintain the original duration.
-    ///
-    /// # Arguments
-    /// * `semitones` - Pitch shift in semitones (positive = higher, negative = lower)
-    /// * `preserve_formants` - Whether to attempt formant preservation (basic implementation)
+    /// Uses a phase vocoder algorithm to preserve audio duration while shifting
+    /// pitch. Valid range: `[-12.0, 12.0]` semitones.
     PitchShift {
-        /// Pitch shift in semitones (positive = higher, negative = lower)
+        /// Pitch shift in semitones. Positive = higher; negative = lower.
+        /// Valid range: `[-12.0, 12.0]`.
         semitones: f64,
-        /// Whether to attempt formant preservation (basic implementation)
+        /// Whether to preserve spectral envelope (formants) during pitch shifting.
+        ///
+        /// When `true`, extracts and reapplies the spectral envelope to maintain
+        /// natural vocal timbre. Useful for vocal pitch shifts to avoid "chipmunk"
+        /// or "monster" effects. For non-vocal sources, this can typically be `false`.
         preserve_formants: bool,
     },
 }
 
 #[cfg(feature = "editing")]
 impl PerturbationMethod {
-    /// Create a Gaussian noise perturbation configuration.
+    /// Creates a Gaussian noise perturbation targeting `target_snr_db`.
     ///
     /// # Arguments
-    /// * `target_snr_db` - Target signal-to-noise ratio in dB
-    /// * `noise_color` - Color/spectrum of the noise
+    ///
+    /// – `target_snr_db` – desired SNR in dB; valid range `[-60.0, 60.0]`.\
+    /// – `noise_color` – spectral colour of the added noise.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationMethod::GaussianNoise`] variant.
     #[inline]
     #[must_use]
     pub const fn gaussian_noise(target_snr_db: f64, noise_color: NoiseColor) -> Self {
@@ -2635,11 +3939,16 @@ impl PerturbationMethod {
         }
     }
 
-    /// Create a random gain perturbation configuration.
+    /// Creates a random gain perturbation within `[min_gain_db, max_gain_db]`.
     ///
     /// # Arguments
-    /// * `min_gain_db` - Minimum gain in dB
-    /// * `max_gain_db` - Maximum gain in dB
+    ///
+    /// – `min_gain_db` – lower bound in dB; must be ≥ −40.0 and < `max_gain_db`.\
+    /// – `max_gain_db` – upper bound in dB; must be ≤ 20.0 and > `min_gain_db`.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationMethod::RandomGain`] variant.
     #[inline]
     #[must_use]
     pub const fn random_gain(min_gain_db: f64, max_gain_db: f64) -> Self {
@@ -2649,10 +3958,15 @@ impl PerturbationMethod {
         }
     }
 
-    /// Create a high-pass filter perturbation configuration.
+    /// Creates a high-pass filter perturbation with the default 6 dB/octave slope.
     ///
     /// # Arguments
-    /// * `cutoff_hz` - Cutoff frequency in Hz
+    ///
+    /// – `cutoff_hz` – cutoff frequency in Hz; must be in `(0, nyquist)`.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationMethod::HighPassFilter`] variant with `slope_db_per_octave = None`.
     #[inline]
     #[must_use]
     pub const fn high_pass_filter(cutoff_hz: f64) -> Self {
@@ -2662,11 +3976,16 @@ impl PerturbationMethod {
         }
     }
 
-    /// Create a high-pass filter perturbation with custom slope.
+    /// Creates a high-pass filter perturbation with an explicit filter slope.
     ///
     /// # Arguments
-    /// * `cutoff_hz` - Cutoff frequency in Hz
-    /// * `slope_db_per_octave` - Filter slope in dB per octave
+    ///
+    /// – `cutoff_hz` – cutoff frequency in Hz; must be in `(0, nyquist)`.\
+    /// – `slope_db_per_octave` – roll-off rate; must be in `[0.0, 48.0]` dB/octave.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationMethod::HighPassFilter`] variant with the given slope.
     #[inline]
     #[must_use]
     pub const fn high_pass_filter_with_slope(cutoff_hz: f64, slope_db_per_octave: f64) -> Self {
@@ -2676,11 +3995,17 @@ impl PerturbationMethod {
         }
     }
 
-    /// Create a low-pass filter perturbation configuration.
+    /// Creates a low-pass filter perturbation.
     ///
     /// # Arguments
-    /// * `cutoff_hz` - Cutoff frequency in Hz
-    /// * `slope_db_per_octave` - Filter slope in dB per octave
+    ///
+    /// – `cutoff_hz` – cutoff frequency in Hz; must be in `(0, nyquist)`.\
+    /// – `slope_db_per_octave` – roll-off rate. `None` uses the default 6 dB/octave;
+    ///   when `Some`, must be in `[0.0, 48.0]` dB/octave.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationMethod::LowPassFilter`] variant.
     #[inline]
     #[must_use]
     pub const fn low_pass_filter(cutoff_hz: f64, slope_db_per_octave: Option<f64>) -> Self {
@@ -2690,11 +4015,20 @@ impl PerturbationMethod {
         }
     }
 
-    /// Create a pitch shift perturbation configuration.
+    /// Creates a pitch-shift perturbation using phase vocoder algorithm.
+    ///
+    /// Preserves audio duration while shifting pitch. Uses STFT-based phase vocoder
+    /// for high-quality results. When formant preservation is enabled, maintains
+    /// vocal timbre by preserving spectral envelope.
     ///
     /// # Arguments
-    /// * `semitones` - Pitch shift in semitones
-    /// * `preserve_formants` - Whether to preserve formants
+    ///
+    /// – `semitones` – shift amount; positive = higher, negative = lower. Valid range `[-12.0, 12.0]`.\
+    /// – `preserve_formants` – whether to preserve spectral envelope (formants); recommended for vocal content.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationMethod::PitchShift`] variant.
     #[inline]
     #[must_use]
     pub const fn pitch_shift(semitones: f64, preserve_formants: bool) -> Self {
@@ -2704,13 +4038,21 @@ impl PerturbationMethod {
         }
     }
 
-    /// Validate the perturbation method parameters.
+    /// Validates all perturbation parameters against `sample_rate`.
     ///
     /// # Arguments
-    /// * `sample_rate` - Sample rate in Hz (for frequency validation)
+    ///
+    /// – `sample_rate` – sample rate in Hz; used to compute the Nyquist limit for
+    ///   frequency bounds validation.
     ///
     /// # Returns
-    /// Result indicating whether the parameters are valid
+    ///
+    /// `Ok(self)` if all constraints are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] describing the
+    /// first violated constraint.
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         match self {
@@ -2742,24 +4084,8 @@ impl PerturbationMethod {
             Self::HighPassFilter {
                 cutoff_hz,
                 slope_db_per_octave,
-            } => {
-                let nyquist = sample_rate / 2.0;
-                if cutoff_hz <= 0.0 || cutoff_hz >= nyquist {
-                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "parameter",
-                        format!("Cutoff frequency must be between 0 and Nyquist ({nyquist:.1} Hz)"),
-                    )));
-                }
-                if let Some(slope) = slope_db_per_octave
-                    && !(0.0..=48.0).contains(&slope)
-                {
-                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "parameter",
-                        "Slope must be between 0 and 48 dB/octave",
-                    )));
-                }
             }
-            Self::LowPassFilter {
+            | Self::LowPassFilter {
                 cutoff_hz,
                 slope_db_per_octave,
             } => {
@@ -2792,37 +4118,73 @@ impl PerturbationMethod {
     }
 }
 
-/// Configuration for audio perturbation operations.
+/// Configuration for a single audio perturbation operation.
 ///
-/// This struct defines how audio samples should be perturbed for data augmentation,
-/// robustness testing, or creative effects.
+/// ## Purpose
+///
+/// Pairs a [`PerturbationMethod`] with an optional random seed to allow both
+/// stochastic and fully reproducible perturbation pipelines.
+///
+/// ## Intended Usage
+///
+/// Use [`PerturbationConfig::new`] for randomised perturbation or
+/// [`PerturbationConfig::with_seed`] when reproducibility is required.
+/// Call [`validate`][PerturbationConfig::validate] with the target sample rate
+/// before passing to a perturbation function.
+///
+/// ## Invariants
+///
+/// The `method` field must satisfy its own parameter constraints (checked by
+/// [`validate`][PerturbationConfig::validate]).
+///
+/// ## Assumptions
+///
+/// When `seed` is `None`, the implementation uses the thread-local random
+/// number generator; results will vary between runs.
 #[cfg(feature = "editing")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PerturbationConfig {
-    /// The perturbation method to apply
+    /// The perturbation algorithm and its parameters.
     pub method: PerturbationMethod,
-    /// Optional random seed for deterministic perturbation
-    /// If None, uses thread-local random number generator
+
+    /// Optional seed for the random number generator.
+    ///
+    /// When `Some`, the perturbation is fully reproducible. When `None`,
+    /// the thread-local RNG is used and results will differ between runs.
     pub seed: Option<u64>,
 }
 
 #[cfg(feature = "editing")]
 impl PerturbationConfig {
-    /// Create a new perturbation configuration.
+    /// Creates a perturbation configuration using the thread-local RNG.
     ///
     /// # Arguments
-    /// * `method` - The perturbation method to apply
+    ///
+    /// – `method` – the perturbation algorithm and its parameters.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationConfig`] with `seed = None`.
     #[inline]
     #[must_use]
     pub const fn new(method: PerturbationMethod) -> Self {
         Self { method, seed: None }
     }
 
-    /// Create a new perturbation configuration with a specific seed.
+    /// Creates a perturbation configuration with a fixed random seed.
+    ///
+    /// Using the same `method` and `seed` on identical input guarantees
+    /// identical output.
     ///
     /// # Arguments
-    /// * `method` - The perturbation method to apply
-    /// * `seed` - Random seed for deterministic results
+    ///
+    /// – `method` – the perturbation algorithm and its parameters.\
+    /// – `seed` – value used to seed the random number generator.
+    ///
+    /// # Returns
+    ///
+    /// A [`PerturbationConfig`] with `seed = Some(seed)`.
     #[inline]
     #[must_use]
     pub const fn with_seed(method: PerturbationMethod, seed: u64) -> Self {
@@ -2832,13 +4194,20 @@ impl PerturbationConfig {
         }
     }
 
-    /// Validate the perturbation configuration.
+    /// Validates that the perturbation method parameters are consistent with `sample_rate`.
     ///
     /// # Arguments
-    /// * `sample_rate` - Sample rate in Hz
+    ///
+    /// – `sample_rate` – sample rate in Hz; used for frequency bounds checking.
     ///
     /// # Returns
-    /// Result indicating whether the configuration is valid, containing the validated configuration
+    ///
+    /// `Ok(self)` if validation passes; otherwise an
+    ///
+    /// # Errors
+    ///
+    /// Returns an [crate::AudioSampleError::Parameter][crate::AudioSampleError] describing the first
+    /// [crate::AudioSampleError::Parameter][crate::AudioSampleError].
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         self.method.validate(sample_rate)?;

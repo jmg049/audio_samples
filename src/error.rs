@@ -1,21 +1,32 @@
 //! Hierarchical error types and result utilities for audio sample operations.
+
+//! This module defines [`AudioSampleError`], the root error type for the entire
+//! crate, together with five specialised sub-error enums that each cover a
+//! distinct failure domain:
 //!
-//! This module provides an error hierarchy designed around the core
-//! failure modes of audio processing operations. The hierarchy separates concerns
-//! into distinct categories to enable precise error handling and clear debugging.
-//!
-//! # Error Hierarchy
+//! - [`ConversionError`] — type conversion and casting failures
+//! - [`ParameterError`] — invalid parameters and configuration values
+//! - [`LayoutError`] — memory layout and array-structure issues
+//! - [`ProcessingError`] — DSP algorithm and arithmetic failures
+//! - [`FeatureError`] — optional cargo features that are missing or misconfigured
 //!
 //! ```text
 //! AudioSampleError
-//! ├── Conversion(ConversionError)     - Type conversion and casting failures
-//! ├── Parameter(ParameterError)       - Invalid parameters and configuration
-//! ├── Layout(LayoutError)            - Memory layout and array structure issues
-//! ├── Processing(ProcessingError)     - Audio processing operation failures
-//! └── Feature(FeatureError)          - Missing feature dependencies
+//! ├── Conversion(ConversionError)     – type conversion and casting failures
+//! ├── Parameter(ParameterError)       – invalid parameters and configuration
+//! ├── Layout(LayoutError)             – memory layout and array structure issues
+//! ├── Processing(ProcessingError)     – audio processing operation failures
+//! └── Feature(FeatureError)           – missing feature dependencies
 //! ```
-//!
-//! # Usage Examples
+
+//! Grouping errors by domain makes it possible to handle broad categories with a
+//! single match arm while still allowing callers to inspect specific failure
+//! causes when needed. The sub-enum design keeps `AudioSampleError` `#[non_exhaustive]`
+//! so that new variants can be added in future minor versions without breaking
+//! downstream code.
+
+//! Import the root type and any sub-types you intend to match on, then propagate
+//! with `?` or inspect with a `match` expression:
 //!
 //! ```rust
 //! use audio_samples::{
@@ -45,7 +56,6 @@
 //!         // success
 //!     }
 //!     Err(other) => {
-//!         // other error variants
 //!         eprintln!("{other}");
 //!     }
 //! }
@@ -53,18 +63,37 @@
 
 use thiserror::Error;
 
-/// Convenience type alias for results that may contain AudioSampleError
+/// Convenience alias for any `Result` that may fail with [`AudioSampleError`].
+///
+/// Every fallible public API in this crate returns `AudioSampleResult<T>`.
+/// Results can be propagated with `?` or matched on [`AudioSampleError`] variants
+/// directly.
 pub type AudioSampleResult<T> = Result<T, AudioSampleError>;
 
-/// Main error type for audio sample operations.
+/// Root error type for all audio sample operations.
 ///
-/// This is the root error type that encompasses all possible failures
-/// in audio processing operations. It's designed as a hierarchy to allow
-/// both generic error handling and specific error inspection.
+/// # Purpose
+///
+/// `AudioSampleError` is the single error type returned by every fallible
+/// public API in this crate. It groups failures into five sub-domains so that
+/// callers can handle broad categories with a single match arm while retaining
+/// the ability to inspect specific variants when required.
+///
+/// # Intended Usage
+///
+/// Prefer matching on the inner sub-type rather than the outer variant wherever
+/// the specific failure domain matters. Propagate errors out of functions using
+/// the `?` operator together with the [`AudioSampleResult`] return type.
+///
+/// # Invariants
+///
+/// The enum is `#[non_exhaustive]`, meaning new variants may be added in future
+/// minor versions. Always include a catch-all arm when matching exhaustively.
 ///
 /// # Feature-gated variants
-/// Some variants only exist when the corresponding cargo feature is enabled
-/// (e.g. `Plotting` requires `feature = "plotting"`).
+///
+/// The `Spectrogram` variant is only present when the `transforms` feature is
+/// enabled. It wraps errors originating from the `spectrograms` crate.
 #[derive(Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum AudioSampleError {
@@ -98,7 +127,7 @@ pub enum AudioSampleError {
     },
 
     #[cfg(feature = "transforms")]
-    /// Errors stemming from the spectrograms crate.
+    /// Errors originating from the `spectrograms` crate (requires `feature = "transforms"`).
     #[error(transparent)]
     Spectrogram(#[from] spectrograms::SpectrogramError),
 
@@ -106,6 +135,10 @@ pub enum AudioSampleError {
     /// Error indicating that audio data is empty when non-empty data is required.
     EmptyData,
 
+    /// Error indicating mismatch between total samples and channel count.
+    ///
+    /// Occurs when the total number of samples is not evenly divisible by the number of
+    /// channels, indicating malformed or corrupted audio data.
     #[error("Invalid number of samples with respect to the number of channels")]
     InvalidNumberOfSamples {
         /// Total number of samples
@@ -114,11 +147,42 @@ pub enum AudioSampleError {
         channels: u32,
     },
 
+    /// Error indicating a formatting failure during display or debug output.
+    #[error("Fmt error occurred: {0}")]
+    Fmt(#[from] std::fmt::Error),
+
+    /// Error indicating an unsupported operation or configuration.
+    ///
+    /// Used when a requested operation is valid in principle but not implemented for the
+    /// given combination of inputs (e.g., certain multi-channel operations, unsupported
+    /// sample types, or platform-specific limitations).
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
 }
 
 impl AudioSampleError {
+    /// Creates an [crate::AudioSampleError::Unsupported] with the given message.
+    ///
+    /// Use this when a caller requests an operation that is valid in principle
+    /// but not implemented for the given combination of inputs (e.g. multi-channel
+    /// STFT).
+    ///
+    /// # Arguments
+    ///
+    /// - `msg` — Human-readable description of the unsupported operation.
+    ///
+    /// # Returns
+    ///
+    /// `AudioSampleError::Unsupported(msg.to_string())`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::AudioSampleError;
+    ///
+    /// let err = AudioSampleError::unsupported("multi-channel MFCC is not supported");
+    /// assert!(matches!(err, AudioSampleError::Unsupported(_)));
+    /// ```
     #[inline]
     pub fn unsupported<S>(msg: S) -> Self
     where
@@ -127,6 +191,30 @@ impl AudioSampleError {
         Self::Unsupported(msg.to_string())
     }
 
+    /// Creates an [`AudioSampleError::InvalidNumberOfSamples`] error.
+    ///
+    /// Use this when `total_samples` cannot be distributed evenly across
+    /// `channels`, or when the combination is otherwise incoherent for the
+    /// requested layout.
+    ///
+    /// # Arguments
+    ///
+    /// - `total_samples` — The total number of interleaved samples provided.
+    /// - `channels` — The number of audio channels requested.
+    ///
+    /// # Returns
+    ///
+    /// `AudioSampleError::InvalidNumberOfSamples { total_samples, channels }`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::AudioSampleError;
+    ///
+    /// // 5 samples cannot be divided evenly into 2 channels
+    /// let err = AudioSampleError::invalid_number_of_samples(5, 2);
+    /// assert!(matches!(err, AudioSampleError::InvalidNumberOfSamples { .. }));
+    /// ```
     #[inline]
     #[must_use]
     pub const fn invalid_number_of_samples(total_samples: usize, channels: u32) -> Self {
@@ -136,7 +224,33 @@ impl AudioSampleError {
         }
     }
 
-    /// Creates an AudioSampleError::Parse error with the given message.
+    /// Creates an [`AudioSampleError::Parse`] error for the type `T`.
+    ///
+    /// The type name of `T` is captured automatically via
+    /// [`std::any::type_name`] and embedded in the returned error for
+    /// diagnostic purposes.
+    ///
+    /// # Arguments
+    ///
+    /// - `msg` — Human-readable description of the parse failure.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `T` — The type that could not be parsed. Its name is recorded in the
+    ///   `type_name` field of the returned error.
+    ///
+    /// # Returns
+    ///
+    /// `AudioSampleError::Parse { type_name: std::any::type_name::<T>(), context: msg }`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::AudioSampleError;
+    ///
+    /// let err = AudioSampleError::parse::<f32, _>("expected a finite float");
+    /// assert!(matches!(err, AudioSampleError::Parse { .. }));
+    /// ```
     #[inline]
     pub fn parse<T, S>(msg: S) -> Self
     where
@@ -148,6 +262,29 @@ impl AudioSampleError {
         }
     }
 
+    /// Creates an [crate::AudioSampleError::Layout] wrapping a
+    /// [`LayoutError::ShapeError`].
+    ///
+    /// Convenience constructor for shape-related layout errors where the
+    /// specific operation name is not available at the call site. The
+    /// `operation` field is set to `"unknown"`.
+    ///
+    /// # Arguments
+    ///
+    /// - `msg` — Human-readable description of the shape problem.
+    ///
+    /// # Returns
+    ///
+    /// `AudioSampleError::Layout(LayoutError::ShapeError { operation: "unknown", info: msg })`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSampleError, LayoutError};
+    ///
+    /// let err = AudioSampleError::layout("expected 2-D array, got 3-D");
+    /// assert!(matches!(err, AudioSampleError::Layout(LayoutError::ShapeError { .. })));
+    /// ```
     #[inline]
     pub fn layout<S>(msg: S) -> Self
     where
@@ -162,9 +299,21 @@ impl AudioSampleError {
 
 /// Errors that occur during type conversion and casting operations.
 ///
-/// This covers both audio-aware conversions (e.g., i16 ↔ f32 with normalization)
-/// and raw numeric casting operations between sample types.
+/// # Purpose
+///
+/// Covers both audio-aware conversions (e.g. `i16 ↔ f32` with normalisation)
+/// and raw numeric casts between sample types. The distinction between
+/// [`AudioConversion`][ConversionError::AudioConversion] and
+/// [`NumericCast`][ConversionError::NumericCast] reflects whether the
+/// operation understood audio semantics.
+///
+/// # Intended Usage
+///
+/// Returned by `to_format`, `to_type`, `cast_as`, and `cast_to`. Prefer the
+/// audio-aware variants (`to_format`, `to_type`) over raw casts unless you
+/// deliberately need non-normalised bit patterns.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ConversionError {
     /// Failed to convert between audio sample types with audio-aware scaling.
     #[error("Failed to convert sample value {value} from {source_type} to {target_type}: {reason}")]
@@ -204,9 +353,22 @@ pub enum ConversionError {
 
 /// Errors related to invalid parameters, ranges, or configuration values.
 ///
-/// This covers validation failures for user-provided parameters to audio
-/// processing operations, including range violations and invalid configurations.
+/// # Purpose
+///
+/// Covers validation failures for caller-supplied parameters to audio
+/// processing operations, including range violations and conflicting
+/// configuration fields.
+///
+/// # Intended Usage
+///
+/// Return these errors at the boundary between user input and internal logic.
+/// Use [`OutOfRange`][ParameterError::OutOfRange] when a numeric bound is
+/// violated, [`InvalidValue`][ParameterError::InvalidValue] for other
+/// semantic constraints, and
+/// [`InvalidConfiguration`][ParameterError::InvalidConfiguration] when multiple
+/// fields interact in an unsupported way.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ParameterError {
     /// A parameter value is outside the valid range for the operation.
     #[error(
@@ -253,9 +415,19 @@ pub enum ParameterError {
 
 /// Errors related to memory layout, array structure, and data organization.
 ///
-/// This covers failures related to array contiguity, dimension mismatches,
-/// borrowed data mutation attempts, and other structural issues.
+/// # Purpose
+///
+/// Covers failures related to array contiguity, dimension mismatches,
+/// borrowed data mutation attempts, and other structural issues that arise
+/// from the ndarray-backed storage of audio samples.
+///
+/// # Intended Usage
+///
+/// Return these errors when an operation's structural preconditions are not
+/// met — for example, when a mono-only function receives multi-channel input,
+/// or when an in-place operation is attempted on borrowed (non-owned) data.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum LayoutError {
     /// Array data is not contiguous in memory when contiguous layout is required.
     #[error(
@@ -308,11 +480,16 @@ pub enum LayoutError {
         info: String,
     },
 
+    /// Error indicating an invalid operation on audio data.
+    ///
+    /// Occurs when attempting an operation that violates preconditions, such as applying
+    /// a function to incompatible audio layouts, mismatched dimensions, or invalid state.
     #[error("Invalid operation on {0}:\nReason: {1}")]
     InvalidOperation(String, String),
 }
 
 impl From<ndarray::ShapeError> for AudioSampleError {
+    #[inline]
     fn from(err: ndarray::ShapeError) -> Self {
         Self::Layout(LayoutError::ShapeError {
             operation: "ndarray operation".to_string(),
@@ -322,6 +499,29 @@ impl From<ndarray::ShapeError> for AudioSampleError {
 }
 
 impl LayoutError {
+    /// Creates a [`LayoutError::InvalidOperation`] error.
+    ///
+    /// Use this when a valid operation is called in a context where it cannot
+    /// proceed — for example, requesting an STFT on multi-channel audio.
+    ///
+    /// # Arguments
+    ///
+    /// - `operation` — Name of the operation that was called in an invalid context.
+    /// - `reason` — Human-readable explanation of why the operation cannot proceed
+    ///   (e.g. `"STFT requires mono audio"`).
+    ///
+    /// # Returns
+    ///
+    /// `LayoutError::InvalidOperation(operation.to_string(), reason.to_string())`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::LayoutError;
+    ///
+    /// let err = LayoutError::invalid_operation("stft", "requires mono audio");
+    /// assert!(matches!(err, LayoutError::InvalidOperation(_, _)));
+    /// ```
     #[inline]
     pub fn invalid_operation<S>(operation: S, reason: S) -> Self
     where
@@ -333,9 +533,22 @@ impl LayoutError {
 
 /// Errors that occur during audio processing operations.
 ///
-/// This covers failures in DSP algorithms, mathematical operations,
-/// and other processing-specific issues that don't fit into other categories.
+/// # Purpose
+///
+/// Covers failures in DSP algorithms, mathematical operations, and other
+/// processing-specific issues that don't belong in the conversion, parameter,
+/// or layout domains.
+///
+/// # Intended Usage
+///
+/// Return these errors when a processing algorithm cannot complete successfully.
+/// Use [`MathematicalFailure`][ProcessingError::MathematicalFailure] for
+/// arithmetic issues, [`AlgorithmFailure`][ProcessingError::AlgorithmFailure]
+/// for general algorithm errors, and
+/// [`ConvergenceFailure`][ProcessingError::ConvergenceFailure] when an
+/// iterative algorithm exhausts its iteration budget.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ProcessingError {
     /// A mathematical operation failed due to invalid input or numerical issues.
     #[error("Mathematical operation '{operation}' failed: {reason}")]
@@ -387,9 +600,19 @@ pub enum ProcessingError {
 
 /// Errors related to missing or disabled cargo features.
 ///
-/// This covers cases where optional functionality was used but the required
-/// cargo feature wasn't enabled at compile time.
+/// # Purpose
+///
+/// Covers cases where optional functionality was invoked but the required
+/// cargo feature was not enabled at compile time.
+///
+/// # Intended Usage
+///
+/// Return [`NotEnabled`][FeatureError::NotEnabled] from feature-gated code
+/// paths that cannot be reached at runtime without the relevant feature flag.
+/// This is distinct from a compile error — it allows conditional code paths
+/// to provide a clear runtime message rather than silently doing nothing.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum FeatureError {
     /// A cargo feature is required but not enabled.
     #[error(
@@ -426,7 +649,34 @@ pub enum FeatureError {
 }
 
 impl ConversionError {
-    /// Create a new audio conversion error.
+    /// Creates a [`ConversionError::AudioConversion`] error.
+    ///
+    /// Use this when an audio-aware type conversion fails — for example, when a
+    /// normalised float value cannot be represented in the target integer type.
+    ///
+    /// # Arguments
+    ///
+    /// - `value` — The sample value that failed to convert (converted to string for display).
+    /// - `source_type` — Name of the source sample type (e.g. `"i16"`).
+    /// - `target_type` — Name of the target sample type (e.g. `"f32"`).
+    /// - `reason` — Human-readable explanation of why the conversion failed.
+    ///
+    /// # Returns
+    ///
+    /// A `ConversionError::AudioConversion` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSampleError, ConversionError};
+    ///
+    /// let err = ConversionError::audio_conversion("32768", "i16", "i8", "value out of range");
+    /// assert!(matches!(err, ConversionError::AudioConversion { .. }));
+    ///
+    /// // Wraps into the root error type via the From impl.
+    /// let audio_err: AudioSampleError = err.into();
+    /// assert!(matches!(audio_err, AudioSampleError::Conversion(_)));
+    /// ```
     #[inline]
     pub fn audio_conversion<V, S, T, R>(value: V, source_type: S, target_type: T, reason: R) -> Self
     where
@@ -443,7 +693,31 @@ impl ConversionError {
         }
     }
 
-    /// Create a new numeric cast error.
+    /// Creates a [`ConversionError::NumericCast`] error.
+    ///
+    /// Use this when a raw numeric cast fails — for example, when casting a
+    /// large `f64` value to `u8` would overflow or produce a meaningless bit
+    /// pattern.
+    ///
+    /// # Arguments
+    ///
+    /// - `value` — The numeric value that failed to cast (converted to string for display).
+    /// - `source_type` — Name of the source numeric type (e.g. `"f64"`).
+    /// - `target_type` — Name of the target numeric type (e.g. `"u8"`).
+    /// - `reason` — Human-readable explanation of why the cast failed.
+    ///
+    /// # Returns
+    ///
+    /// A `ConversionError::NumericCast` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::ConversionError;
+    ///
+    /// let err = ConversionError::numeric_cast("300.0", "f64", "u8", "value exceeds 255");
+    /// assert!(matches!(err, ConversionError::NumericCast { .. }));
+    /// ```
     #[inline]
     pub fn numeric_cast<V, S, T, R>(value: V, source_type: S, target_type: T, reason: R) -> Self
     where
@@ -462,7 +736,32 @@ impl ConversionError {
 }
 
 impl ParameterError {
-    /// Create a new out-of-range parameter error.
+    /// Creates a [`ParameterError::OutOfRange`] error.
+    ///
+    /// Use this when a caller supplies a numeric value that falls outside the
+    /// bounds required by an operation (e.g. a cutoff frequency above the
+    /// Nyquist limit).
+    ///
+    /// # Arguments
+    ///
+    /// - `parameter` — Name of the parameter that is out of range.
+    /// - `value` — The invalid value supplied by the caller (converted to string for display).
+    /// - `min` — The minimum valid value, inclusive (converted to string for display).
+    /// - `max` — The maximum valid value, inclusive (converted to string for display).
+    /// - `reason` — Human-readable explanation of why this range is required.
+    ///
+    /// # Returns
+    ///
+    /// A `ParameterError::OutOfRange` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::ParameterError;
+    ///
+    /// let err = ParameterError::out_of_range("cutoff_hz", "25000", "20", "22050", "exceeds Nyquist");
+    /// assert!(matches!(err, ParameterError::OutOfRange { .. }));
+    /// ```
     #[inline]
     pub fn out_of_range<P, V, Min, Max, R>(
         parameter: P,
@@ -487,7 +786,29 @@ impl ParameterError {
         }
     }
 
-    /// Create a new invalid value parameter error.
+    /// Creates a [`ParameterError::InvalidValue`] error.
+    ///
+    /// Use this when a parameter value is semantically invalid in a way that
+    /// cannot be described by a numeric range — for example, a window size that
+    /// is not a power of two, or a filter order that is too high for stability.
+    ///
+    /// # Arguments
+    ///
+    /// - `parameter` — Name of the parameter with the invalid value.
+    /// - `reason` — Human-readable explanation of why the value is invalid.
+    ///
+    /// # Returns
+    ///
+    /// A `ParameterError::InvalidValue` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::ParameterError;
+    ///
+    /// let err = ParameterError::invalid_value("window_size", "must be a power of two");
+    /// assert!(matches!(err, ParameterError::InvalidValue { .. }));
+    /// ```
     #[inline]
     pub fn invalid_value<P, R>(parameter: P, reason: R) -> Self
     where
@@ -502,7 +823,29 @@ impl ParameterError {
 }
 
 impl LayoutError {
-    /// Create a new borrowed data mutation error.
+    /// Creates a [`LayoutError::BorrowedDataMutation`] error.
+    ///
+    /// Use this when an in-place or mutating operation is attempted on audio
+    /// data that is held via an immutable borrow and therefore cannot be
+    /// modified.
+    ///
+    /// # Arguments
+    ///
+    /// - `operation` — Name of the operation that attempted to modify borrowed data.
+    /// - `reason` — Human-readable explanation of why modification is not allowed.
+    ///
+    /// # Returns
+    ///
+    /// A `LayoutError::BorrowedDataMutation` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::LayoutError;
+    ///
+    /// let err = LayoutError::borrowed_mutation("normalize_in_place", "audio data is borrowed");
+    /// assert!(matches!(err, LayoutError::BorrowedDataMutation { .. }));
+    /// ```
     #[inline]
     pub fn borrowed_mutation<O, R>(operation: O, reason: R) -> Self
     where
@@ -515,7 +858,29 @@ impl LayoutError {
         }
     }
 
-    /// Create a new dimension mismatch error.
+    /// Creates a [`LayoutError::DimensionMismatch`] error.
+    ///
+    /// Use this when an array or buffer has the wrong number of dimensions or
+    /// an unexpected shape for the operation being performed.
+    ///
+    /// # Arguments
+    ///
+    /// - `expected` — Description of the expected dimensions (e.g. `"(1, 1024)"`).
+    /// - `actual` — Description of the actual dimensions received (e.g. `"(2, 1024)"`).
+    /// - `operation` — Name of the operation that has the dimension requirement.
+    ///
+    /// # Returns
+    ///
+    /// A `LayoutError::DimensionMismatch` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::LayoutError;
+    ///
+    /// let err = LayoutError::dimension_mismatch("(1, 1024)", "(2, 1024)", "mono_fft");
+    /// assert!(matches!(err, LayoutError::DimensionMismatch { .. }));
+    /// ```
     #[inline]
     pub fn dimension_mismatch<E, A, O>(expected: E, actual: A, operation: O) -> Self
     where
@@ -532,7 +897,29 @@ impl LayoutError {
 }
 
 impl ProcessingError {
-    /// Create a new algorithm failure error.
+    /// Creates a [`ProcessingError::AlgorithmFailure`] error.
+    ///
+    /// Use this when a DSP or signal-processing algorithm cannot complete
+    /// successfully for reasons intrinsic to the algorithm itself, such as
+    /// filter instability or a failed FFT plan.
+    ///
+    /// # Arguments
+    ///
+    /// - `algorithm` — Name of the processing algorithm that failed.
+    /// - `reason` — Human-readable explanation of what went wrong.
+    ///
+    /// # Returns
+    ///
+    /// A `ProcessingError::AlgorithmFailure` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::ProcessingError;
+    ///
+    /// let err = ProcessingError::algorithm_failure("butterworth", "filter became unstable");
+    /// assert!(matches!(err, ProcessingError::AlgorithmFailure { .. }));
+    /// ```
     #[inline]
     pub fn algorithm_failure<A, R>(algorithm: A, reason: R) -> Self
     where
@@ -547,7 +934,28 @@ impl ProcessingError {
 }
 
 impl FeatureError {
-    /// Create a new feature not enabled error.
+    /// Creates a [`FeatureError::NotEnabled`] error.
+    ///
+    /// Use this to report that an optional cargo feature required by the
+    /// requested operation is not enabled in the current build.
+    ///
+    /// # Arguments
+    ///
+    /// - `feature` — The cargo feature name that must be enabled (e.g. `"transforms"`).
+    /// - `operation` — Name of the operation that requires this feature.
+    ///
+    /// # Returns
+    ///
+    /// A `FeatureError::NotEnabled` variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::FeatureError;
+    ///
+    /// let err = FeatureError::not_enabled("transforms", "stft");
+    /// assert!(matches!(err, FeatureError::NotEnabled { .. }));
+    /// ```
     #[inline]
     pub fn not_enabled<F, O>(feature: F, operation: O) -> Self
     where
@@ -563,6 +971,7 @@ impl FeatureError {
 
 // Conversion traits for easier error creation
 impl From<&str> for ParameterError {
+    #[inline]
     fn from(msg: &str) -> Self {
         Self::InvalidValue {
             parameter: "unknown".to_string(),
@@ -572,6 +981,7 @@ impl From<&str> for ParameterError {
 }
 
 impl From<String> for ParameterError {
+    #[inline]
     fn from(msg: String) -> Self {
         Self::InvalidValue {
             parameter: "unknown".to_string(),
@@ -581,6 +991,7 @@ impl From<String> for ParameterError {
 }
 
 impl From<&str> for ProcessingError {
+    #[inline]
     fn from(msg: &str) -> Self {
         Self::AlgorithmFailure {
             algorithm: "unknown".to_string(),
@@ -590,6 +1001,7 @@ impl From<&str> for ProcessingError {
 }
 
 impl From<String> for ProcessingError {
+    #[inline]
     fn from(msg: String) -> Self {
         Self::AlgorithmFailure {
             algorithm: "unknown".to_string(),

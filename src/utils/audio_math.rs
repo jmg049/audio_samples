@@ -42,7 +42,6 @@
 //! ```
 
 use crate::{AudioSampleError, AudioSampleResult, ParameterError};
-use lazy_static::lazy_static;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -132,12 +131,13 @@ pub fn hz_to_mel(freq_hz: f64) -> f64 {
 /// let mel = hz_to_mel(freq);
 /// let recovered = mel_to_hz(mel);
 ///
+/// // Round-trip should recover the original frequency within floating-point precision.
 /// assert!((freq - recovered).abs() < 1e-6);
 /// ```
 #[inline]
 #[must_use]
 pub fn mel_to_hz(mel: f64) -> f64 {
-    700.0f64.mul_add(10.0f64.powf(mel / 2595.0), -1.0)
+    700.0 * (10.0f64.powf(mel / 2595.0) - 1.0)
 }
 
 /// Generates a sequence of frequencies whose spacing is uniform in the mel domain.
@@ -184,8 +184,8 @@ pub fn mel_to_hz(mel: f64) -> f64 {
 /// let freqs = mel_scale(10, 100.0, 8_000.0);
 ///
 /// assert_eq!(freqs.len(), 10);
-/// assert!(freqs.first().unwrap() >= &100.0);
-/// assert!(freqs.last().unwrap() <= &8_000.0);
+/// assert!((freqs[0] - 100.0).abs() < 1e-6);
+/// assert!((freqs[9] - 8_000.0).abs() < 1e-6);
 /// ```
 #[inline]
 #[must_use]
@@ -675,11 +675,26 @@ pub fn seconds_to_samples(time_seconds: f64, sample_rate: f64) -> usize {
     (time_seconds * sample_rate).round() as usize
 }
 
-/// Convert time in milliseconds to sample count.
+/// Converts a duration expressed in milliseconds into a sample count.
 ///
-/// # Panics
+/// # Arguments
 ///
-/// Panics if the conversion from floating point to usize fails.
+/// - `ms` – Duration in milliseconds.
+/// - `sample_rate` – Sampling rate in Hz. Must be strictly positive.
+///
+/// # Returns
+///
+/// The number of samples corresponding to `ms` milliseconds at the given sample rate.
+/// The result is rounded to the nearest integer sample.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::ms_to_samples;
+///
+/// let n = ms_to_samples(10.0, 44_100.0);
+/// assert_eq!(n, 441);
+/// ```
 #[inline]
 #[must_use]
 pub fn ms_to_samples(ms: f64, sample_rate: f64) -> usize {
@@ -690,26 +705,35 @@ pub fn ms_to_samples(ms: f64, sample_rate: f64) -> usize {
 // MUSICAL THEORY FUNCTIONS
 // =============================================================================
 
-// Note name to MIDI number lookup table.
-lazy_static! {
-    static ref NOTE_TO_MIDI_MAP: HashMap<&'static str, u8> = {
+static NOTE_TO_MIDI_MAP: std::sync::LazyLock<HashMap<&'static str, u8>> =
+    std::sync::LazyLock::new(|| {
         let mut m = HashMap::new();
 
         // Base notes (octave 0)
-        m.insert("C", 0);   m.insert("C#", 1);  m.insert("Db", 1);
-        m.insert("D", 2);   m.insert("D#", 3);  m.insert("Eb", 3);
-        m.insert("E", 4);   m.insert("F", 5);   m.insert("F#", 6);
-        m.insert("Gb", 6);  m.insert("G", 7);   m.insert("G#", 8);
-        m.insert("Ab", 8);  m.insert("A", 9);   m.insert("A#", 10);
-        m.insert("Bb", 10); m.insert("B", 11);
+        m.insert("C", 0);
+        m.insert("C#", 1);
+        m.insert("Db", 1);
+        m.insert("D", 2);
+        m.insert("D#", 3);
+        m.insert("Eb", 3);
+        m.insert("E", 4);
+        m.insert("F", 5);
+        m.insert("F#", 6);
+        m.insert("Gb", 6);
+        m.insert("G", 7);
+        m.insert("G#", 8);
+        m.insert("Ab", 8);
+        m.insert("A", 9);
+        m.insert("A#", 10);
+        m.insert("Bb", 10);
+        m.insert("B", 11);
 
         m
-    };
+    });
 
-    static ref MIDI_TO_NOTE_MAP: [&'static str; 12] = [
-        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
-    ];
-}
+const MIDI_TO_NOTE_MAP: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
 
 /// Parses a scientific pitch notation string and converts it into a MIDI note number.
 ///
@@ -1166,8 +1190,8 @@ pub fn fft_frequencies(n_fft: usize, sample_rate: f64) -> Vec<f64> {
 /// let freqs = mel_frequencies(10, 0.0, 8_000.0);
 ///
 /// assert_eq!(freqs.len(), 10);
-/// assert!(freqs.first().unwrap() >= &0.0);
-/// assert!(freqs.last().unwrap() <= &8_000.0);
+/// assert!((freqs[0] - 0.0).abs() < 1e-6);
+/// assert!((freqs[9] - 8_000.0).abs() < 1e-6);
 /// ```
 #[inline]
 pub fn mel_frequencies(n_mels: usize, fmin: f64, fmax: f64) -> Vec<f64> {

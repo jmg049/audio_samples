@@ -1,8 +1,36 @@
 //! Voice Activity Detection (VAD) operations.
 //!
-//! This module provides fast, frame-based VAD suitable for segmentation and
-//! pre-processing. It is designed to avoid allocations beyond the output mask,
-//! and prefers contiguous slice access paths for performance.
+//! Frame-based VAD that classifies each audio frame as speech (`true`) or
+//! silence (`false`), returning per-frame boolean masks and contiguous speech
+//! regions as sample-index pairs.
+//!
+//! Many audio processing pipelines (ASR pre-processing, noise suppression,
+//! speaker diarisation) need to locate voiced segments before running more
+//! expensive analysis. A fast, allocation-minimal, frame-based approach avoids
+//! unnecessary computation on silence and provides clean segmentation
+//! boundaries suitable for real-time use.
+//!
+//! [`AudioVoiceActivityDetection::voice_activity_mask`] is the primary entry
+//! point. It divides the signal into overlapping frames according to
+//! [`VadConfig`], applies the selected detection method (`Energy`,
+//! `ZeroCrossing`, or `Combined`), and post-processes the raw per-frame
+//! decisions with majority-vote smoothing, hangover extension, and
+//! minimum-region enforcement. [`AudioVoiceActivityDetection::speech_regions`]
+//! converts the frame mask into `(start_sample, end_sample)` pairs.
+//!
+//! # Example
+//!
+//! ```
+//! use audio_samples::operations::traits::AudioVoiceActivityDetection;
+//! use audio_samples::operations::types::VadConfig;
+//! use audio_samples::{sample_rate, sine_wave};
+//! use std::time::Duration;
+//!
+//! let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+//! let config = VadConfig::energy_only();
+//! let mask = audio.voice_activity_mask(&config).unwrap();
+//! assert!(mask.iter().any(|&v| v), "440 Hz sine should be detected as active");
+//! ```
 
 use std::num::NonZeroUsize;
 
@@ -54,6 +82,57 @@ where
     T: StandardSample,
     Self: AudioTypeConversion<Sample = T>,
 {
+    /// Classifies each audio frame as speech (`true`) or silence (`false`).
+    ///
+    /// Divides the signal into overlapping frames according to `config.frame_size`
+    /// and `config.hop_size`, applies the detection method, and post-processes
+    /// the raw per-frame decisions through four sequential steps:
+    ///
+    /// 1. Majority-vote smoothing over `config.smooth_frames`.
+    /// 2. Hangover extension — extends active frames forward by `config.hangover_frames`.
+    /// 3. Minimum speech run enforcement — speech runs shorter than
+    ///    `config.min_speech_frames` are reclassified as silence.
+    /// 4. Minimum silence run enforcement — silence gaps shorter than
+    ///    `config.min_silence_frames` are reclassified as speech.
+    ///
+    /// Multi-channel audio is handled according to `config.channel_policy`.
+    ///
+    /// # Arguments
+    ///
+    /// - `config` – VAD parameters: frame size, hop size, detection method,
+    ///   energy threshold, ZCR bounds, smoothing, hangover, and minimum
+    ///   region lengths.
+    ///
+    /// # Returns
+    ///
+    /// A `NonEmptyVec<bool>` with one entry per analysis frame. The length
+    /// equals the number of frame starts produced by `config.frame_size`,
+    /// `config.hop_size`, and `config.pad_end`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `config` fails validation
+    /// (e.g. `hop_size > frame_size` or invalid ZCR bounds).
+    /// Returns [crate::AudioSampleError::Layout] if the audio array is non-contiguous
+    /// (can occur after reversing or non-standard slicing).
+    /// Returns [crate::AudioSampleError::Feature] if `config.method` is
+    /// `VadMethod::Spectral` (not yet implemented).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioVoiceActivityDetection;
+    /// use audio_samples::operations::types::VadConfig;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+    /// let config = VadConfig::energy_only();
+    /// let mask = audio.voice_activity_mask(&config).unwrap();
+    /// // At least one frame of a 440 Hz sine should be classified as active.
+    /// assert!(mask.iter().any(|&v| v));
+    /// ```
+    #[inline]
     fn voice_activity_mask(&self, config: &VadConfig) -> AudioSampleResult<NonEmptyVec<bool>> {
         config.validate()?;
 
@@ -71,12 +150,12 @@ where
         let mut mask = Vec::new();
 
         if let Some(mono) = self.as_mono() {
-            let slice =
-                mono.as_slice()
-                    .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
-                        operation: "voice activity detection".to_string(),
-                        layout_type: "non-contiguous mono array".to_string(),
-                    }))?;
+            let slice = mono.as_slice().ok_or_else(|| {
+                AudioSampleError::Layout(LayoutError::NonContiguous {
+                    operation: "voice activity detection".to_string(),
+                    layout_type: "non-contiguous mono array".to_string(),
+                })
+            })?;
             // safety: slice is non-empty because total_len > 0.
             let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
             for start in plan.frame_starts(total_len.get()) {
@@ -85,9 +164,12 @@ where
                 mask.push(decision);
             }
         } else {
-            let multi = self.as_multi_channel().ok_or(AudioSampleError::Parameter(
-                ParameterError::invalid_value("audio_data", "Audio must be multi-channel"),
-            ))?;
+            let multi = self.as_multi_channel().ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_data",
+                    "Audio must be multi-channel",
+                ))
+            })?;
 
             let multi_view = multi.as_view();
             let channels = multi_view.nrows();
@@ -128,8 +210,47 @@ where
         Ok(mask)
     }
 
-    fn speech_regions(&self, config: &VadConfig) -> AudioSampleResult<Vec<(usize, usize)>>
-where {
+    /// Returns contiguous speech segments as `(start_sample, end_sample)` pairs.
+    ///
+    /// Internally calls [`voice_activity_mask`] to obtain per-frame decisions,
+    /// then converts frame indices to sample-index ranges. Adjacent or
+    /// overlapping regions are merged and the result is sorted by
+    /// `start_sample`. `end_sample` is exclusive (one past the last sample of
+    /// the region).
+    ///
+    /// [`voice_activity_mask`]: AudioVoiceActivityDetection::voice_activity_mask
+    ///
+    /// # Arguments
+    ///
+    /// - `config` – VAD parameters (same as [`voice_activity_mask`]).
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<(usize, usize)>` of `(start_sample, end_sample)` pairs sorted
+    /// by `start_sample`. Returns an empty `Vec` if no speech frames are
+    /// detected.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`voice_activity_mask`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use audio_samples::operations::traits::AudioVoiceActivityDetection;
+    /// use audio_samples::operations::types::VadConfig;
+    /// use audio_samples::{sample_rate, sine_wave};
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+    /// let regions = audio.speech_regions(&VadConfig::energy_only()).unwrap();
+    /// // Every returned region must span at least one sample.
+    /// for &(start, end) in &regions {
+    ///     assert!(start < end);
+    /// }
+    /// ```
+    #[inline]
+    fn speech_regions(&self, config: &VadConfig) -> AudioSampleResult<Vec<(usize, usize)>> {
         let mask = self.voice_activity_mask(config)?;
 
         let plan = FramePlan {
@@ -215,12 +336,12 @@ where
                 )));
             }
             let row = multi.row(*ch);
-            let slice =
-                row.as_slice()
-                    .ok_or(AudioSampleError::Layout(LayoutError::NonContiguous {
-                        operation: "voice activity detection".to_string(),
-                        layout_type: "non-contiguous channel row".to_string(),
-                    }))?;
+            let slice = row.as_slice().ok_or_else(|| {
+                AudioSampleError::Layout(LayoutError::NonContiguous {
+                    operation: "voice activity detection".to_string(),
+                    layout_type: "non-contiguous channel row".to_string(),
+                })
+            })?;
             // safety: slice is non-empty because samples is non-zero.
             let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
             let (rms, zcr) =
@@ -229,29 +350,32 @@ where
         }
         VadChannelPolicy::AverageToMono => {
             // Fast path: contiguous ArrayView2.
-            if let Some(flat) = multi.as_slice() {
-                // safety: flat is non-empty because channels and samples are non-zero.
-                let flat = unsafe { NonEmptySlice::new_unchecked(flat) };
-                let (rms, zcr) = frame_rms_and_zcr_avg(
-                    flat,
-                    channels,
-                    samples,
-                    frame_start,
-                    plan_frame_size,
-                    config.pad_end,
-                );
-                classify(config, rms, zcr, energy_threshold_rms)
-            } else {
-                let (rms, zcr) = frame_rms_and_zcr_avg_indexed(
-                    &multi,
-                    channels,
-                    samples,
-                    frame_start,
-                    plan_frame_size,
-                    config.pad_end,
-                );
-                classify(config, rms, zcr, energy_threshold_rms)
-            }
+            multi.as_slice().map_or_else(
+                || {
+                    let (rms, zcr) = frame_rms_and_zcr_avg_indexed(
+                        &multi,
+                        channels,
+                        samples,
+                        frame_start,
+                        plan_frame_size,
+                        config.pad_end,
+                    );
+                    classify(config, rms, zcr, energy_threshold_rms)
+                },
+                |flat| {
+                    // safety: flat is non-empty because channels and samples are non-zero.
+                    let flat = unsafe { NonEmptySlice::new_unchecked(flat) };
+                    let (rms, zcr) = frame_rms_and_zcr_avg(
+                        flat,
+                        channels,
+                        samples,
+                        frame_start,
+                        plan_frame_size,
+                        config.pad_end,
+                    );
+                    classify(config, rms, zcr, energy_threshold_rms)
+                },
+            )
         }
         VadChannelPolicy::AnyChannel | VadChannelPolicy::AllChannels => {
             let want_any = matches!(config.channel_policy, VadChannelPolicy::AnyChannel);
@@ -260,20 +384,29 @@ where
 
             for ch in 0..channels.get() {
                 let row = multi.row(ch);
-                let (rms, zcr) = if let Some(slice) = row.as_slice() {
-                    // safety: slice is non-empty because samples is non-zero.
-                    let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
-                    frame_rms_and_zcr(slice, frame_start, samples, plan_frame_size, config.pad_end)
-                } else {
-                    frame_rms_and_zcr_indexed(
-                        &multi,
-                        ch,
-                        samples,
-                        frame_start,
-                        plan_frame_size,
-                        config.pad_end,
-                    )
-                };
+                let (rms, zcr) = row.as_slice().map_or_else(
+                    || {
+                        frame_rms_and_zcr_indexed(
+                            &multi,
+                            ch,
+                            samples,
+                            frame_start,
+                            plan_frame_size,
+                            config.pad_end,
+                        )
+                    },
+                    |slice| {
+                        // safety: slice is non-empty because samples is non-zero.
+                        let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
+                        frame_rms_and_zcr(
+                            slice,
+                            frame_start,
+                            samples,
+                            plan_frame_size,
+                            config.pad_end,
+                        )
+                    },
+                );
 
                 let active = classify(config, rms, zcr, energy_threshold_rms)?;
                 any_active |= active;

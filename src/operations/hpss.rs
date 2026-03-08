@@ -36,6 +36,7 @@ use spectrograms::{StftParams, StftParamsBuilder, istft as spectrograms_istft};
 /// by median filtering along the time axis, while percussive components
 /// are enhanced by median filtering along the frequency axis.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct HpssConfig {
     /// STFT FFT size in samples
     pub stft_params: StftParams,
@@ -74,6 +75,10 @@ impl HpssConfig {
     /// - Larger harmonic kernel for better tonal separation
     /// - Larger percussive kernel for cleaner transient isolation
     /// - Softer masking for more musical results
+    ///
+    /// # Panics
+    ///
+    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid according to the builder. The chosen parameters are common for musical separation and should not cause any issues.
     #[inline]
     #[must_use]
     pub fn musical() -> Self {
@@ -96,6 +101,10 @@ impl HpssConfig {
     /// - Moderate harmonic filtering
     /// - Strong percussive filtering
     /// - Harder masking for cleaner drum isolation
+    ///
+    /// # Panics
+    ///
+    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid. The chosen parameters are common for percussive separation and should not cause any issues.
     #[inline]
     #[must_use]
     pub fn percussive() -> Self {
@@ -118,6 +127,10 @@ impl HpssConfig {
     /// - Strong harmonic filtering
     /// - Moderate percussive filtering
     /// - Harder masking for cleaner tonal isolation
+    ///
+    /// # Panics
+    ///
+    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid. The chosen parameters are common for harmonic separation and should not cause any issues.
     #[inline]
     #[must_use]
     pub fn harmonic() -> Self {
@@ -141,6 +154,10 @@ impl HpssConfig {
     /// - Smaller window for reduced latency
     /// - Smaller hop size for responsiveness
     /// - Smaller filters for faster processing
+    ///
+    /// # Panics
+    ///
+    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid. The chosen parameters are common for real-time processing and should not cause any issues.
     #[inline]
     #[must_use]
     pub fn realtime() -> Self {
@@ -163,6 +180,10 @@ impl HpssConfig {
     /// # Arguments
     /// * `n_fft` - FFT size in samples (should be power of 2)
     /// * `hop_size` - Hop size in samples
+    ///
+    /// # Panics
+    ///
+    /// Theorectically, will not panic as we set the parameters through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set.
     #[inline]
     pub fn set_stft_params(&mut self, n_fft: NonZeroUsize, hop_size: NonZeroUsize) {
         self.stft_params = StftParamsBuilder::default()
@@ -198,7 +219,12 @@ impl HpssConfig {
     /// * `sample_rate` - Sample rate in Hz
     ///
     /// # Returns
+    ///
     /// Result indicating whether the configuration is valid
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any parameter is out of valid range or if the configuration would lead to impractical processing conditions.
     #[inline]
     pub fn validate(&self, sample_rate: f64) -> AudioSampleResult<()> {
         // Validate window size
@@ -241,7 +267,7 @@ impl HpssConfig {
         }
 
         // Check reasonable parameter ranges
-        if self.stft_params.n_fft() > crate::nzu!(163840) {
+        if self.stft_params.n_fft() > crate::nzu!(163_840) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "win_size",
                 "Window size should not exceed 16384 samples for practical processing",
@@ -270,6 +296,11 @@ impl HpssConfig {
     }
 
     /// Calculate the number of frequency bins for this configuration.
+    ///
+    /// # Panics
+    ///
+    /// Theorectically, this will never panic because the builder enforces n_fft > 0 and is a power of 2.
+    /// So we know it starts as a valid usize, and dividing by 2 and adding 1 will never exceed usize limits.
     #[inline]
     #[must_use]
     pub const fn num_freq_bins(&self) -> NonZeroUsize {
@@ -296,6 +327,7 @@ impl HpssConfig {
 }
 
 impl Default for HpssConfig {
+    #[inline]
     fn default() -> Self {
         let stft_params = StftParamsBuilder::default()
             .n_fft(crate::nzu!(2048))
@@ -316,6 +348,7 @@ where
     T: StandardSample,
     Self: AudioTypeConversion<Sample = T>,
 {
+    #[inline]
     fn hpss(
         &self,
         config: &HpssConfig,
@@ -472,7 +505,7 @@ fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
         }
 
         // Compute median
-        window.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        window.sort_by(f64::total_cmp);
         let median = if kernel_size % 2 == 1 {
             window[kernel_size / 2]
         } else {

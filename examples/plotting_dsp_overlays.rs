@@ -41,7 +41,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     use audio_samples::operations::plotting::dsp_overlays;
     use audio_samples::operations::plotting::waveform::WaveformPlotParams;
     use audio_samples::operations::{AudioPlotting, PlotUtils};
-    use audio_samples::sample_rate;
+    use audio_samples::{nzu, sample_rate};
     println!("=== DSP Overlays Example ===\n");
 
     let sample_rate = sample_rate!(44100);
@@ -54,19 +54,19 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Duration: {:.2} seconds\n", duration);
 
     // Configuration for DSP overlays
-    let window_size = 2048; // ~46ms at 44.1kHz
-    let hop_size = 512; // ~12ms hop for smooth overlay
+    let window_size = nzu!(2048); // ~46ms at 44.1kHz
+    let hop_size = nzu!(512); // ~12ms hop for smooth overlay
 
     println!("DSP overlay parameters:");
     println!(
         "  Window size: {} samples (~{:.1}ms)",
         window_size,
-        window_size as f64 / sample_rate_hz * 1000.0
+        window_size.get() as f64 / sample_rate_hz * 1000.0
     );
     println!(
         "  Hop size: {} samples (~{:.1}ms)\n",
         hop_size,
-        hop_size as f64 / sample_rate_hz * 1000.0
+        hop_size.get() as f64 / sample_rate_hz * 1000.0
     );
 
     // Example 1: Waveform with RMS envelope
@@ -139,11 +139,11 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     // Small window (more temporal detail, noisier)
     let (rms_times_small, rms_values_small) =
-        dsp_overlays::compute_windowed_rms(&audio.borrow(), 512, 128);
+        dsp_overlays::compute_windowed_rms(&audio.borrow(), nzu!(512), nzu!(128));
 
     // Large window (smoother, less temporal detail)
     let (rms_times_large, rms_values_large) =
-        dsp_overlays::compute_windowed_rms(&audio.borrow(), 4096, 1024);
+        dsp_overlays::compute_windowed_rms(&audio.borrow(), nzu!(4096), nzu!(1024));
     let plot_comparison = audio
         .plot_waveform(&WaveformPlotParams::default())?
         .add_rms_envelope(rms_times_small, rms_values_small, Some("red"), Some(1.0))

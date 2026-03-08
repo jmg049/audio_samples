@@ -3,67 +3,49 @@
 //! This module defines the primary iteration abstractions for traversing
 //! [`AudioSamples`] in semantically meaningful ways. Rather than exposing raw
 //! indexing or layout-dependent access, the iterators in this module present
-//! audio data in forms that reflect common signal-processing views, such as
-//! frames, channels, and sliding windows.
+//! audio data through three conceptual lenses:
 //!
-//! The purpose of this module is to provide **explicit and intention-revealing**
-//! access patterns over audio data while preserving the invariants of
-//! [`AudioSamples`]. By centralising iteration logic here, the crate ensures that
-//! higher-level operations can reason about audio structure without duplicating
-//! indexing, slicing, or boundary-handling logic.
+//! - **Frames** — a snapshot across all channels at one time index
+//!   ([`FrameIterator`])
+//! - **Channels** — the full temporal sequence for one channel
+//!   ([`ChannelIterator`])
+//! - **Windows** — fixed-size, optionally overlapping temporal blocks
+//!   ([`WindowIterator`], requires the `editing` feature)
 //!
-//! ## Conceptual Model
+//! Audio algorithms frequently need to traverse data in ways that reflect its
+//! *structure* rather than its *storage layout*. Centralising iteration logic here
+//! prevents duplicated indexing and boundary-handling code throughout the crate,
+//! while keeping each iterator's ownership and lifetime contract explicit and
+//! documented at the iterator type level.
 //!
-//! Iteration is defined in terms of *audio structure*, not storage layout.
-//! Depending on the iterator, each yielded item represents a coherent unit of
-//! audio data, such as:
+//! For in-place or overlapping mutation, specialised methods such as
+//! [`AudioSamples::apply_to_frames`], [`AudioSamples::apply_to_channel_data`], and
+//! [`AudioSamples::apply_to_windows`] are provided as counterparts to the
+//! read-oriented iterators defined here.
 //!
-//! - A frame containing one sample per channel at a given time index
-//! - A complete channel viewed independently of others
-//! - A fixed-size temporal window, optionally overlapping with neighbouring windows
+//! Obtain an iterator by calling the corresponding method on any
+//! [`AudioSamples`] value. The method is also available through the
+//! [`AudioSampleIterators`] extension trait. Collect, chain, or consume the
+//! iterator using standard [`Iterator`] combinators.
 //!
-//! Some iterators yield borrowed views into the original data when this is
-//! structurally valid. Others yield owned buffers when borrowing would be
-//! incorrect or when padding or independent ownership is required. These
-//! distinctions are part of the iterator’s contract and are documented at the
-//! iterator level.
-//!
-//! ## Intended Usage
-//!
-//! The iterators in this module are intended to be used for read-oriented and
-//! transformation-oriented workflows where the *shape* of the audio matters.
-//! Typical use cases include feature extraction, windowed analysis, per-channel
-//! processing, and frame-wise inspection.
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, iterators::AudioSampleIterators};
+//! ```
+//! use audio_samples::{AudioSamples, sample_rate, iterators::AudioSampleIterators};
 //! use ndarray::array;
 //!
 //! let audio = AudioSamples::new_multi_channel(
 //!     array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
-//!     44_100,
-//! );
+//!     sample_rate!(44100),
+//! ).unwrap();
 //!
+//! // Iterate over time-aligned frames (one sample per channel per time step).
 //! for frame in audio.frames() {
-//!     println!("Frame: {:?}", frame);
+//!     assert_eq!(frame.num_channels().get(), 2);
 //! }
 //!
-//! for channel in audio.channels() {
-//!     println!("Channel samples: {:?}", channel);
-//! }
-//!
-//! for window in audio.windows(1024, 512) {
-//!     println!("Window length: {}", window.len());
-//! }
+//! // Iterate over complete channels.
+//! let channels: Vec<_> = audio.channels().collect();
+//! assert_eq!(channels.len(), 2);
 //! ```
-//!
-//! ## Relationship to Other APIs
-//!
-//! This module complements higher-level processing methods on [`AudioSamples`]
-//! by providing fine-grained control over iteration order and granularity.
-//! Where in-place or overlapping mutation is required, specialised APIs such as
-//! [`AudioSamples::apply_to_windows`] should be preferred, as overlapping mutable
-//! iteration cannot be expressed safely through standard iterator interfaces.
 
 #[cfg(feature = "editing")]
 use non_empty_slice::{NonEmptyVec, non_empty_vec};
@@ -86,104 +68,105 @@ pub trait AudioSampleIterators<'a, T>
 where
     T: StandardSample,
 {
-    /// Returns an iterator over frames (one sample from each channel).
+    /// Returns an iterator over frames, where each frame is a snapshot of one
+    /// sample from each channel at the same point in time.
     ///
-    /// For mono audio, each frame contains one sample.
-    /// For multi-channel audio, each frame contains one sample from each channel.
-    ///
-    /// # Inputs
-    /// - `&self`
+    /// For mono audio, each frame contains exactly one sample. For multi-channel
+    /// audio, each frame contains one sample per channel, preserving channel
+    /// alignment across time.
     ///
     /// # Returns
-    /// An iterator yielding an `AudioSamples` view for each frame. Each yielded item contains
-    /// exactly one sample per channel.
     ///
-    /// # Errors
-    /// This iterator does not report errors. Internally it relies on valid in-bounds slicing.
+    /// A [`FrameIterator`] that yields one [`AudioSamples`] view per time index.
+    /// The total number of frames equals `self.samples_per_channel()`.
     ///
     /// # Panics
+    ///
     /// Does not panic.
     ///
-    /// # Examples
+    /// ## Examples
     ///
-    /// ```rust
-    /// # use audio_samples::{AudioSamples, iterators::AudioSampleIterators};
-    /// # use ndarray::array;
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate, iterators::AudioSampleIterators};
+    /// use ndarray::array;
+    ///
     /// let audio = AudioSamples::new_multi_channel(
     ///     array![[1.0f32, 2.0], [3.0, 4.0]],
-    ///     44100
-    /// );
+    ///     sample_rate!(44100),
+    /// ).unwrap();
     ///
-    /// let frames: Vec<Vec<f32>> = audio.frames().map(|f| f.to_interleaved_vec()).collect();
-    /// assert_eq!(frames, vec![vec![1.0, 3.0], vec![2.0, 4.0]]);
+    /// // Each frame has one sample per channel; two time steps → two frames.
+    /// let mut count = 0;
+    /// for frame in audio.frames() {
+    ///     assert_eq!(frame.num_channels().get(), 2);
+    ///     count += 1;
+    /// }
+    /// assert_eq!(count, 2);
     /// ```
     fn frames(&'a self) -> FrameIterator<'a, T>;
 
     /// Returns an iterator over complete channels.
     ///
-    /// Each iteration yields all samples from one channel before moving to the next.
-    ///
-    /// # Inputs
-    /// - `&self`
+    /// Each iteration yields the full temporal sequence of samples belonging to
+    /// one channel. Channels are yielded in increasing channel-index order.
     ///
     /// # Returns
-    /// An iterator yielding owned `AudioSamples` values, one per channel.
     ///
-    /// # Errors
-    /// This iterator does not report errors. Internally it relies on valid in-bounds slicing.
+    /// A [`ChannelIterator`] that yields one owned [`AudioSamples`] per channel.
+    /// The total number of items equals `self.num_channels()`.
     ///
     /// # Panics
+    ///
     /// Does not panic.
     ///
-    /// # Examples
+    /// ## Examples
     ///
-    /// ```rust
-    /// # use audio_samples::{AudioSamples, iterators::AudioSampleIterators};
-    /// # use ndarray::array;
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate, iterators::AudioSampleIterators};
+    /// use ndarray::array;
+    ///
     /// let audio = AudioSamples::new_multi_channel(
     ///     array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
-    ///     44100
-    /// );
+    ///     sample_rate!(44100),
+    /// ).unwrap();
     ///
-    /// let channels: Vec<Vec<f32>> = audio.channels().map(|c| c.to_interleaved_vec()).collect();
-    /// assert_eq!(channels[0], vec![1.0, 2.0, 3.0]);
-    /// assert_eq!(channels[1], vec![4.0, 5.0, 6.0]);
+    /// let channels: Vec<_> = audio.channels().collect();
+    /// assert_eq!(channels.len(), 2);
+    /// assert_eq!(channels[0].samples_per_channel().get(), 3);
     /// ```
     fn channels<'iter>(&'iter self) -> ChannelIterator<'iter, 'a, T>;
 
     #[cfg(feature = "editing")]
-    /// Returns an iterator over overlapping windows of audio data.
+    /// Returns an iterator over fixed-size, optionally overlapping windows.
     ///
-    /// # Inputs
-    /// - `window_size`: size of each window in samples (per channel)
-    /// - `hop_size`: number of samples to advance between windows
+    /// Each window covers `window_size` samples per channel. Successive windows
+    /// start `hop_size` samples apart, so windows overlap when `hop_size < window_size`.
+    ///
+    /// The default boundary strategy is [`PaddingMode::Zero`]. Call
+    /// [`WindowIterator::with_padding_mode`] on the returned iterator to change it.
+    ///
+    /// # Arguments
+    ///
+    /// – `window_size` — number of samples per channel in each window. If zero,
+    ///   no windows are yielded.
+    /// – `hop_size` — number of samples to advance between window starts. If zero,
+    ///   no windows are yielded.
     ///
     /// # Returns
-    /// An iterator yielding owned `AudioSamples` windows.
     ///
-    /// # Padding
-    /// The default padding mode is [`PaddingMode::Zero`]. Use
-    /// [`WindowIterator::with_padding_mode`] to change it.
+    /// A [`WindowIterator`] that yields one owned [`AudioSamples`] per window.
     ///
     /// # Panics
-    /// Does not panic. If `window_size == 0` or `hop_size == 0`, the iterator yields no items.
     ///
-    /// # Examples
+    /// Does not panic.
     ///
-    /// ```rust
-    /// # use audio_samples::{AudioSamples, iterators::AudioSampleIterators};
-    /// # use ndarray::array;
-    /// let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], 44100).unwrap();
+    /// ## Examples
     ///
-    /// let windows: Vec<Vec<f32>> = audio
-    ///     .windows(NonZeroUsize::new(4).unwrap(), NonZeroUsize::new(2).unwrap())
-    ///     .map(|w| w.to_interleaved_vec())
-    ///     .collect();
-    /// assert_eq!(windows, vec![
-    ///     vec![1.0, 2.0, 3.0, 4.0],
-    ///     vec![3.0, 4.0, 5.0, 6.0],
-    ///     vec![5.0, 6.0, 0.0, 0.0], // zero-padded tail
-    /// ]);
+    /// See [`AudioSamples::windows`] for a runnable usage example.
+    ///
+    /// ```ignore
+    /// // Conceptual usage via the trait interface (usize arguments):
+    /// let windows: Vec<_> = audio.windows(3_usize, 3_usize).collect();
     /// ```
     fn windows(&'a self, window_size: usize, hop_size: usize) -> WindowIterator<'a, T>;
 }
@@ -192,13 +175,40 @@ impl<'a, T> AudioSamples<'a, T>
 where
     T: StandardSample,
 {
-    /// Returns an iterator over frames (one sample from each channel).
+    /// Returns an iterator over frames, where each frame is a snapshot of one
+    /// sample from each channel at the same point in time.
+    ///
+    /// For mono audio, each frame contains exactly one sample. For multi-channel
+    /// audio, each frame contains one sample per channel in channel-index order.
     ///
     /// # Returns
-    /// A [`FrameIterator`] yielding borrowed frame views.
+    ///
+    /// A [`FrameIterator`] that yields one [`AudioSamples`] view per time index.
+    /// The iterator yields exactly `self.samples_per_channel()` frames.
     ///
     /// # Panics
+    ///
     /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// // Three time steps → three frames.
+    /// assert_eq!(audio.frames().count(), 3);
+    ///
+    /// // Each frame spans all channels.
+    /// for frame in audio.frames() {
+    ///     assert_eq!(frame.num_channels().get(), 2);
+    /// }
+    /// ```
     #[inline]
     #[must_use]
     pub fn frames(&'a self) -> FrameIterator<'a, T> {
@@ -207,11 +217,36 @@ where
 
     /// Returns an iterator over complete channels.
     ///
+    /// Each iteration yields the full temporal sequence of samples belonging to
+    /// one channel. Channels are yielded in increasing channel-index order.
+    ///
+    /// Each yielded value is an owned [`AudioSamples`] instance containing exactly
+    /// one mono channel. This involves allocation and data copying.
+    ///
     /// # Returns
-    /// A [`ChannelIterator`] yielding owned `AudioSamples` values (one per channel).
+    ///
+    /// A [`ChannelIterator`] yielding one owned [`AudioSamples`] per channel.
+    /// The iterator yields exactly `self.num_channels()` items.
     ///
     /// # Panics
+    ///
     /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// let channels: Vec<_> = audio.channels().collect();
+    /// assert_eq!(channels.len(), 2);
+    /// assert_eq!(channels[0].samples_per_channel().get(), 3);
+    /// ```
     #[inline]
     #[must_use]
     pub fn channels<'iter>(&'iter self) -> ChannelIterator<'iter, 'a, T> {
@@ -219,16 +254,50 @@ where
     }
 
     #[cfg(feature = "editing")]
-    /// Returns an iterator over windows of audio data.
+    /// Returns an iterator over fixed-size, optionally overlapping windows.
     ///
-    /// The default padding mode is [`PaddingMode::Zero`].
+    /// Each window covers `window_size` samples per channel. Successive windows
+    /// start `hop_size` samples apart, so windows overlap when `hop_size < window_size`.
     ///
-    /// # Inputs
-    /// - `window_size`: size of each window in samples (per channel)
-    /// - `hop_size`: number of samples to advance between windows
+    /// The default boundary strategy is [`PaddingMode::Zero`], which zero-pads the
+    /// last window when the signal does not divide evenly. Call
+    /// [`WindowIterator::with_padding_mode`] on the returned iterator to change
+    /// this behaviour.
+    ///
+    /// # Arguments
+    ///
+    /// – `window_size` — number of samples per channel in each window.
+    /// – `hop_size` — number of samples to advance between window starts.
     ///
     /// # Returns
-    /// A [`WindowIterator`] yielding owned windows.
+    ///
+    /// A [`WindowIterator`] yielding one owned [`AudioSamples`] per window.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "editing")] {
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// // Non-overlapping windows of size 3.
+    /// let windows: Vec<_> = audio
+    ///     .windows(NonZeroUsize::new(3).unwrap(), NonZeroUsize::new(3).unwrap())
+    ///     .collect();
+    /// assert_eq!(windows.len(), 2);
+    /// assert_eq!(windows[0].samples_per_channel().get(), 3);
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn windows(
@@ -239,22 +308,51 @@ where
         WindowIterator::new(self, window_size, hop_size)
     }
 
-    /// Applies a function to each frame without borrowing issues.
+    /// Applies a mutable function to every frame without requiring a borrowing-safe iterator.
     ///
-    /// For mono audio, the callback receives a mutable slice of length 1.
+    /// The callback receives the frame index and a mutable slice containing the samples for
+    /// that frame across all channels. For mono audio the slice has length 1. For
+    /// multi-channel audio the slice is a temporary buffer ordered by channel index;
+    /// changes are written back into the underlying storage after the callback returns.
     ///
-    /// For multi-channel audio, the callback receives a temporary buffer containing exactly one
-    /// sample per channel. The buffer is ordered by channel index and is copied back into the
-    /// underlying audio after the callback returns.
+    /// Use this method when in-place, frame-wise mutation is needed and the immutable
+    /// [`AudioSamples::frames`] iterator is insufficient.
     ///
-    /// # Inputs
-    /// - `f(frame_index, frame_samples)`
+    /// # Arguments
+    ///
+    /// – `f` — a closure of the form `FnMut(frame_index: usize, frame_samples: &mut [T])`.
+    ///   – `frame_index` — zero-based index of the current frame.
+    ///   – `frame_samples` — mutable slice of length `num_channels()` for the current frame.
     ///
     /// # Returns
-    /// `()`
+    ///
+    /// `()` — the audio is modified in place.
     ///
     /// # Panics
+    ///
     /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let mut audio = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// // Double every sample frame-by-frame.
+    /// audio.apply_to_frames(|_frame_idx, frame| {
+    ///     for s in frame { *s *= 2.0; }
+    /// });
+    ///
+    /// assert_eq!(
+    ///     audio.as_multi_channel().unwrap(),
+    ///     &array![[2.0f32, 4.0, 6.0], [8.0, 10.0, 12.0]],
+    /// );
+    /// ```
     #[inline]
     pub fn apply_to_frames<F>(&mut self, mut f: F)
     where
@@ -285,16 +383,57 @@ where
         }
     }
 
-    /// Applies a function to each channel's raw data without borrowing issues.
+    /// Applies a mutable function to each channel's contiguous sample slice.
     ///
-    /// # Inputs
-    /// - `f(channel_index, channel_samples)`
+    /// This is the fallible counterpart to [`AudioSamples::apply_to_channel_data`].
+    /// It requires that the underlying ndarray storage is contiguous in memory.
+    /// Non-contiguous layouts (such as after certain in-place reversals or
+    /// non-standard strides) will cause this method to return an error.
+    ///
+    /// The callback receives the channel index and a mutable slice of all samples
+    /// for that channel.
+    ///
+    /// # Arguments
+    ///
+    /// – `f` — a closure of the form `FnMut(channel_index: usize, channel_samples: &mut [T])`.
+    ///   – `channel_index` — zero-based index of the channel being processed.
+    ///   – `channel_samples` — mutable slice of all samples belonging to that channel.
     ///
     /// # Returns
-    /// `Ok(())` on success.
+    ///
+    /// `Ok(())` if all channels were processed successfully.
     ///
     /// # Errors
-    /// Returns [`AudioSampleError::Layout`] if the underlying storage is not contiguous.
+    ///
+    /// Returns [crate::AudioSampleError::Layout] with variant `NonContiguous` if the
+    /// underlying multi-channel storage is not contiguous in memory.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let mut audio = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// // Halve channel 0, double channel 1.
+    /// audio.try_apply_to_channel_data(|ch, samples| {
+    ///     let gain = if ch == 0 { 0.5 } else { 2.0 };
+    ///     for s in samples { *s *= gain; }
+    /// }).unwrap();
+    ///
+    /// assert_eq!(
+    ///     audio.as_multi_channel().unwrap(),
+    ///     &array![[0.5f32, 1.0, 1.5], [8.0, 10.0, 12.0]],
+    /// );
+    /// ```
     #[inline]
     pub fn try_apply_to_channel_data<F>(&mut self, mut f: F) -> AudioSampleResult<()>
     where
@@ -325,12 +464,49 @@ where
         Ok(())
     }
 
-    /// Applies a function to each channel's raw data without borrowing issues.
+    /// Applies a mutable function to each channel's contiguous sample slice.
     ///
     /// This is the infallible counterpart to [`AudioSamples::try_apply_to_channel_data`].
+    /// It panics if the underlying storage is not contiguous; prefer the fallible
+    /// variant when working with audio that may have non-standard memory layouts.
+    ///
+    /// The callback receives the channel index and a mutable slice of all samples
+    /// for that channel.
+    ///
+    /// # Arguments
+    ///
+    /// – `f` — a closure of the form `FnMut(channel_index: usize, channel_samples: &mut [T])`.
+    ///   – `channel_index` — zero-based index of the channel being processed.
+    ///   – `channel_samples` — mutable slice of all samples belonging to that channel.
+    ///
+    /// # Returns
+    ///
+    /// `()` — the audio is modified in place.
     ///
     /// # Panics
-    /// Panics if the underlying storage is not contiguous in memory.
+    ///
+    /// Panics if the underlying storage is not contiguous in memory. Use
+    /// [`AudioSamples::try_apply_to_channel_data`] to handle non-contiguous inputs
+    /// without panicking.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let mut audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 2.0, 3.0, 4.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// // Add 10.0 to every sample.
+    /// audio.apply_to_channel_data(|_ch, samples| {
+    ///     for s in samples { *s += 10.0; }
+    /// });
+    ///
+    /// assert_eq!(audio.as_mono().unwrap(), &array![11.0f32, 12.0, 13.0, 14.0]);
+    /// ```
     #[inline]
     pub fn apply_to_channel_data<F>(&mut self, mut f: F)
     where
@@ -340,21 +516,62 @@ where
             .expect("apply_to_channel_data requires contiguous storage; use try_apply_to_channel_data to handle non-contiguous inputs");
     }
 
-    /// Applies a function to each window without borrowing issues.
+    /// Applies a mutable function to each temporal window of audio data.
     ///
-    /// For mono audio, the callback receives a mutable slice into the underlying buffer.
+    /// For mono audio, the callback receives a mutable slice directly into the
+    /// underlying buffer for each window. For multi-channel audio, the callback
+    /// receives a temporary interleaved buffer of length `window_size * num_channels`
+    /// laid out as `[ch0_s0, ch1_s0, …, ch0_s1, ch1_s1, …]`; changes are
+    /// written back into the underlying storage after the callback returns.
     ///
-    /// For multi-channel audio, the callback receives a temporary interleaved buffer of length
-    /// `window_size * num_channels` that is copied back after the callback returns.
+    /// Only fully-contained windows are visited; trailing samples that do not
+    /// form a complete window are not passed to the callback.
     ///
-    /// # Inputs
-    /// - `window_size`: size of each window in samples (per channel)
-    /// - `hop_size`: number of samples to advance between windows
-    /// - `f(window_index, window_samples)`
+    /// Use this method for in-place windowed processing, such as applying window
+    /// functions or block-wise gain changes, when the read-only
+    /// [`AudioSamples::windows`] iterator is not sufficient.
+    ///
+    /// # Arguments
+    ///
+    /// – `window_size` — number of samples per channel in each window. If zero,
+    ///   the method returns immediately.
+    /// – `hop_size` — number of samples to advance between window starts. If zero,
+    ///   the method returns immediately.
+    /// – `f` — a closure of the form `FnMut(window_index: usize, window_samples: &mut [T])`.
+    ///   – `window_index` — zero-based index of the current window.
+    ///   – `window_samples` — mutable slice for the current window. For mono audio,
+    ///     length equals `window_size`. For multi-channel audio, length equals
+    ///     `window_size * num_channels`, laid out in interleaved channel order.
+    ///
+    /// # Returns
+    ///
+    /// `()` — the audio is modified in place.
     ///
     /// # Panics
-    /// Does not panic. If `window_size == 0` or the audio is empty, this method returns
-    /// immediately.
+    ///
+    /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let mut audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// // Halve every sample using non-overlapping windows of size 3.
+    /// audio.apply_to_windows(3, 3, |_window_idx, window| {
+    ///     for s in window { *s *= 0.5; }
+    /// });
+    ///
+    /// assert_eq!(
+    ///     audio.as_mono().unwrap(),
+    ///     &array![0.5f32, 1.0, 1.5, 2.0, 2.5, 3.0],
+    /// );
+    /// ```
     #[inline]
     pub fn apply_to_windows<F>(&mut self, window_size: usize, hop_size: usize, mut f: F)
     where
@@ -471,7 +688,7 @@ where
     /// This constructor establishes a frame-wise traversal over the provided
     /// audio data, yielding one frame per time index.
     ///
-    /// ## Arguments
+    /// # Arguments
     ///
     /// - `audio`: The source audio to iterate over. All channels must be
     ///   time-aligned.
@@ -481,7 +698,7 @@ where
     /// - The iterator will yield exactly `audio.samples_per_channel()` frames.
     /// - Frames are yielded in deterministic order.
     ///
-    /// ## Panics
+    /// # Panics
     ///
     /// This function does not panic.
     #[inline]
@@ -503,6 +720,7 @@ where
 {
     type Item = AudioSamples<'a, T>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_frame >= self.total_frames {
             return None;
@@ -515,6 +733,7 @@ where
         self.audio.slice_samples(frame_range).ok()
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.total_frames - self.current_frame;
         (remaining, Some(remaining))
@@ -554,13 +773,6 @@ impl<T> ExactSizeIterator for FrameIterator<'_, T> where T: StandardSample {}
 /// - Each channel is yielded exactly once.
 /// - The number of yielded items is equal to the number of channels.
 /// - All samples within a yielded item belong to the same channel.
-///
-/// ## Assumptions and Limitations
-///
-/// This iterator assumes that the underlying [`AudioSamples`] instance has a
-/// fixed channel layout for the duration of iteration. It is not suitable for
-/// algorithms that require simultaneous access to multiple channels or
-/// fine-grained temporal alignment across channels.
 pub struct ChannelIterator<'iter, 'data, T>
 where
     T: StandardSample,
@@ -582,7 +794,7 @@ where
     /// This constructor establishes a channel-wise traversal over the provided
     /// audio data, yielding one complete channel per iteration.
     ///
-    /// ## Arguments
+    /// # Arguments
     ///
     /// - `audio`: The source audio whose channels will be iterated.
     ///
@@ -591,7 +803,7 @@ where
     /// - The iterator will yield exactly `audio.num_channels()` items.
     /// - Channels are yielded in deterministic order.
     ///
-    /// ## Panics
+    /// # Panics
     ///
     /// This function does not panic.
     #[inline]
@@ -652,6 +864,7 @@ impl<T> ExactSizeIterator for ChannelIterator<'_, '_, T> where T: StandardSample
 /// the number of samples per channel. The selected mode determines whether such
 /// windows are padded, truncated, or omitted entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum PaddingMode {
     /// Pads incomplete windows with zeros so that all yielded windows have
     /// identical length.
@@ -714,7 +927,7 @@ pub enum PaddingMode {
 ///
 /// ## Assumptions and Limitations
 ///
-/// This iterator assumes a fixed sampling rate and channel layout for the
+/// This iterator assumes a fixed sampling rate for the
 /// lifetime of iteration. It is not suitable for overlapping mutable access or
 /// algorithms that require shared ownership of window data.
 #[cfg(feature = "editing")]
@@ -746,7 +959,7 @@ where
     /// This constructor establishes a windowed traversal over the provided
     /// audio data using the specified window and hop sizes.
     ///
-    /// ## Arguments
+    /// # Arguments
     ///
     /// - `audio`: The source audio to iterate over.
     /// - `window_size`: The number of samples per channel in each window.
@@ -762,7 +975,7 @@ where
     /// If either `window_size` or `hop_size` is zero, the iterator yields no
     /// windows.
     ///
-    /// ## Panics
+    /// # Panics
     ///
     /// This function does not panic.
     fn new(
@@ -977,6 +1190,7 @@ where
         window
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.total_windows.get() - self.current_window;
         (remaining, Some(remaining))
@@ -985,11 +1199,12 @@ where
 
 #[cfg(feature = "editing")]
 impl<T> ExactSizeIterator for WindowIterator<'_, T> where T: StandardSample {}
+
 #[cfg(test)]
 mod tests {
-    // use super::*;
-    use crate::PaddingMode;
     use crate::AudioSamples;
+    #[cfg(feature = "editing")]
+    use crate::PaddingMode;
     use crate::sample_rate;
     use ndarray::{Array1, array};
     use non_empty_slice::non_empty_vec;
@@ -1100,7 +1315,6 @@ mod tests {
     #[cfg(feature = "editing")]
     #[test]
     fn test_window_iterator_zero_padding() {
-
         let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], sample_rate!(44100))
             .unwrap();
         let windows: Vec<AudioSamples<f32>> = audio

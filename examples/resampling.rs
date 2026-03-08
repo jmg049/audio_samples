@@ -1,18 +1,19 @@
-#[cfg(feature = "resampling")]
+#[cfg(all(feature = "resampling", feature = "statistics", feature = "processing"))]
 use std::time::Duration;
 
-#[cfg(feature = "resampling")]
+#[cfg(all(feature = "resampling", feature = "statistics", feature = "processing"))]
 use audio_samples::{
     AudioProcessing, AudioSampleResult, AudioSamples, AudioStatistics,
     operations::types::ResamplingQuality, sine_wave,
 };
 
-#[cfg(not(feature = "resampling"))]
+#[cfg(not(all(feature = "resampling", feature = "statistics", feature = "processing")))]
 fn main() {
-    eprintln!("This example requires the 'resampling' feature.");
+    eprintln!("This example requires the 'resampling', 'statistics', and 'processing' features.");
+    eprintln!("Run with: cargo run --example resampling --features full");
 }
 
-#[cfg(feature = "resampling")]
+#[cfg(all(feature = "resampling", feature = "statistics", feature = "processing"))]
 #[inline]
 pub fn main() -> AudioSampleResult<()> {
     let src_sr = core::num::NonZeroU32::new(44_100).unwrap();
