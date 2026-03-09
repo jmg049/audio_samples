@@ -1850,7 +1850,7 @@ where
 /// Callers that use the unsafe constructors (`from_array1`, `from_array2`, …)
 /// are responsible for upholding the non-empty invariant.
 #[derive(Debug, PartialEq)]
-#[non_exhaustive]
+#[allow(clippy::exhaustive_enums)]
 pub enum AudioData<'a, T>
 where
     T: StandardSample,
