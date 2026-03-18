@@ -101,19 +101,24 @@ fn validate_time_bounds(start: f64, end: f64, duration: f64) -> AudioSampleResul
     Ok(())
 }
 
-/// Applies fade curve transformation to a position value [0.0, 1.0]
-fn apply_fade_curve(curve: FadeCurve, position: f64) -> f64 {
-    match curve {
-        FadeCurve::Linear => position,
-        FadeCurve::Exponential => position * position,
-        FadeCurve::Logarithmic => {
-            if position <= 0.0 {
-                0.0
-            } else {
-                position.ln_1p() / 2.0f64.ln()
-            }
-        }
-        FadeCurve::SmoothStep => position * position * 2.0f64.mul_add(-position, 3.0),
+/// Applies a per-sample gain ramp to a contiguous slice.
+///
+/// Position for sample `i` is computed as `start + i as f64 * step` — a
+/// multiply rather than a sequential accumulation — so there is no
+/// loop-carried dependency on the position value and LLVM can vectorise the
+/// gain computation across multiple samples in parallel.
+///
+/// Use a negative `step` for a fade-out ramp (position counts down from
+/// `start` towards zero).  `gain_fn` is monomorphised for each call site so
+/// the gain formula is inlined directly into the loop body.
+#[inline(always)]
+fn apply_gain_to_slice<T, F>(slice: &mut [T], step: f64, start: f64, gain_fn: F)
+where
+    T: StandardSample,
+    F: Fn(f64) -> f64,
+{
+    for (i, x) in slice.iter_mut().enumerate() {
+        *x *= T::cast_from(gain_fn(start + i as f64 * step));
     }
 }
 
@@ -886,26 +891,35 @@ where
         let total_samples = self.samples_per_channel().get();
         let actual_fade_samples = fade_samples.min(total_samples);
 
-        let step = 1.0_f64 / actual_fade_samples as f64;
-        match &mut self.data {
-            AudioData::Mono(arr) => {
-                let mut position = 0.0_f64;
-                for i in 0..actual_fade_samples {
-                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
-                    arr[i] *= gain_t;
-                    position += step;
-                }
-            }
-            AudioData::Multi(arr) => {
-                let mut position = 0.0_f64;
-                for i in 0..actual_fade_samples {
-                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
-                    for channel in 0..arr.nrows().get() {
-                        arr[[channel, i]] *= gain_t;
+        let n = actual_fade_samples;
+        let step = 1.0_f64 / n as f64;
+
+        // Hoist the curve dispatch outside the sample loop so each variant
+        // gets its own tight inner loop that LLVM can auto-vectorise.
+        macro_rules! apply_fade_in {
+            ($gain:expr) => {{
+                match &mut self.data {
+                    AudioData::Mono(arr) => {
+                        apply_gain_to_slice(&mut arr.as_slice_mut()[..n], step, 0.0, $gain);
                     }
-                    position += step;
+                    AudioData::Multi(arr) => {
+                        for mut ch in arr.axis_iter_mut(Axis(0)) {
+                            let s = ch.as_slice_mut()
+                                .expect("fade_in: channel row must be contiguous");
+                            apply_gain_to_slice(&mut s[..n], step, 0.0, $gain);
+                        }
+                    }
                 }
-            }
+            }};
+        }
+
+        match curve {
+            FadeCurve::Linear     => apply_fade_in!(|p: f64| p),
+            FadeCurve::Exponential => apply_fade_in!(|p: f64| p * p),
+            FadeCurve::Logarithmic => apply_fade_in!(|p: f64| {
+                if p <= 0.0 { 0.0 } else { p.ln_1p() / 2.0f64.ln() }
+            }),
+            FadeCurve::SmoothStep => apply_fade_in!(|p: f64| p * p * 2.0f64.mul_add(-p, 3.0)),
         }
 
         Ok(())
@@ -956,26 +970,35 @@ where
         let actual_fade_samples = fade_samples.min(total_samples);
         let start_sample = total_samples - actual_fade_samples;
 
-        let step = 1.0_f64 / actual_fade_samples as f64;
-        match &mut self.data {
-            AudioData::Mono(arr) => {
-                let mut position = 1.0_f64;
-                for i in 0..actual_fade_samples {
-                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
-                    arr[start_sample + i] *= gain_t;
-                    position -= step;
-                }
-            }
-            AudioData::Multi(arr) => {
-                let mut position = 1.0_f64;
-                for i in 0..actual_fade_samples {
-                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
-                    for channel in 0..arr.nrows().get() {
-                        arr[[channel, start_sample + i]] *= gain_t;
+        let n = actual_fade_samples;
+        let start = start_sample;
+        // Negative step: position counts down from 1.0 → ~0.0 over n samples.
+        let step = 1.0_f64 / n as f64;
+
+        macro_rules! apply_fade_out {
+            ($gain:expr) => {{
+                match &mut self.data {
+                    AudioData::Mono(arr) => {
+                        apply_gain_to_slice(&mut arr.as_slice_mut()[start..start + n], -step, 1.0, $gain);
                     }
-                    position -= step;
+                    AudioData::Multi(arr) => {
+                        for mut ch in arr.axis_iter_mut(Axis(0)) {
+                            let s = ch.as_slice_mut()
+                                .expect("fade_out: channel row must be contiguous");
+                            apply_gain_to_slice(&mut s[start..start + n], -step, 1.0, $gain);
+                        }
+                    }
                 }
-            }
+            }};
+        }
+
+        match curve {
+            FadeCurve::Linear      => apply_fade_out!(|p: f64| p),
+            FadeCurve::Exponential => apply_fade_out!(|p: f64| p * p),
+            FadeCurve::Logarithmic => apply_fade_out!(|p: f64| {
+                if p <= 0.0 { 0.0 } else { p.ln_1p() / 2.0f64.ln() }
+            }),
+            FadeCurve::SmoothStep  => apply_fade_out!(|p: f64| p * p * 2.0f64.mul_add(-p, 3.0)),
         }
 
         Ok(())
