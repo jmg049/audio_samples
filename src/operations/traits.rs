@@ -54,12 +54,15 @@ use crate::operations::types::DynamicRangeMethod;
 #[cfg(feature = "editing")]
 use crate::operations::types::{FadeCurve, PadSide};
 
+#[cfg(feature = "iir-filtering")]
+use crate::AudioSample;
+
 #[cfg(all(
     feature = "editing",
     feature = "random-generation",
     feature = "iir-filtering"
 ))]
-use crate::{AudioSample, operations::types::PerturbationConfig};
+use crate::operations::types::PerturbationConfig;
 
 #[cfg(feature = "channels")]
 use crate::operations::types::{MonoConversionMethod, StereoConversionMethod};
@@ -278,6 +281,32 @@ where
     /// assert!((rms - 1.0).abs() < 1e-6);
     /// ```
     fn rms(&self) -> f64;
+
+    /// Computes RMS and peak absolute value in a single pass over the data.
+    ///
+    /// Equivalent to calling [`rms`](Self::rms) and [`peak`](Self::peak)
+    /// separately, but reads the sample buffer only once. For large signals
+    /// where the data does not fit in CPU cache this is roughly twice as fast
+    /// as two separate calls.
+    ///
+    /// # Returns
+    /// A tuple `(rms, peak)` where `rms` is the root-mean-square as `f64`
+    /// and `peak` is the maximum absolute sample value as `T`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 1.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let (rms, peak) = audio.rms_and_peak();
+    /// assert!((rms - 1.0).abs() < 1e-6);
+    /// assert_eq!(peak, 1.0f32);
+    /// ```
+    fn rms_and_peak(&self) -> (f64, Self::Sample) {
+        (self.rms(), self.peak())
+    }
 
     /// Computes the population variance of the audio samples.
     ///

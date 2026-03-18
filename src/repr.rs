@@ -2480,6 +2480,10 @@ where
     }
 
     /// Maps a function over each sample, returning new owned audio data.
+    ///
+    /// Uses a raw contiguous slice when available so the compiler can
+    /// auto-vectorise the element-wise conversion loop. Falls back to
+    /// ndarray's `mapv` for non-contiguous views.
     #[inline]
     pub fn mapv<U, F>(&self, f: F) -> AudioData<'static, U>
     where
@@ -2488,11 +2492,25 @@ where
     {
         match self {
             AudioData::Mono(m) => {
-                let out = m.as_view().mapv(f);
+                let out = if let Some(slice) = m.as_slice() {
+                    // Fast path: flat slice lets the compiler auto-vectorise.
+                    let vec: Vec<U> = slice.iter().map(|&x| f(x)).collect();
+                    Array1::from(vec)
+                } else {
+                    m.as_view().mapv(&f)
+                };
                 AudioData::Mono(MonoData(MonoRepr::Owned(out)))
             }
             AudioData::Multi(m) => {
-                let out = m.as_view().mapv(f);
+                let out = if let Some(slice) = m.as_slice() {
+                    // Fast path: collect from flat C-order slice then reshape.
+                    let (rows, cols) = m.as_view().dim();
+                    let vec: Vec<U> = slice.iter().map(|&x| f(x)).collect();
+                    Array2::from_shape_vec((rows, cols), vec)
+                        .expect("slice length matches shape")
+                } else {
+                    m.as_view().mapv(&f)
+                };
                 AudioData::Multi(MultiData(MultiRepr::Owned(out)))
             }
         }

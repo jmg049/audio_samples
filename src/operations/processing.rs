@@ -367,12 +367,8 @@ where
         }
 
         match &mut self.data {
-            AudioData::Mono(arr) => arr.mapv_inplace(|x| {
-                if x < min_val { min_val } else if x > max_val { max_val } else { x }
-            }),
-            AudioData::Multi(arr) => arr.mapv_inplace(|x| {
-                if x < min_val { min_val } else if x > max_val { max_val } else { x }
-            }),
+            AudioData::Mono(arr) => arr.mapv_inplace(|x| x.clamp_to(min_val, max_val)),
+            AudioData::Multi(arr) => arr.mapv_inplace(|x| x.clamp_to(min_val, max_val)),
         }
         Ok(self)
     }

@@ -130,33 +130,47 @@ where
     /// ```
     #[inline]
     fn peak(&self) -> T {
+        // Four independent accumulators let LLVM's SLP vectoriser pack them into
+        // a single SIMD register (e.g. 4-wide ymm for f32) without requiring
+        // -ffast-math. Falls back to ndarray fold for non-contiguous views.
+        let zero = T::default();
+        let abs_max_slice = |slice: &[T]| -> T {
+            if let Some(result) = T::avx2_abs_max(slice) {
+                return result;
+            }
+            let mut acc = [zero; 4];
+            let chunks = slice.chunks_exact(4);
+            let rem = chunks.remainder();
+            for chunk in chunks {
+                for j in 0..4 {
+                    let x = chunk[j];
+                    let ax = if x < zero { zero - x } else { x };
+                    if ax > acc[j] {
+                        acc[j] = ax;
+                    }
+                }
+            }
+            for &x in rem {
+                let ax = if x < zero { zero - x } else { x };
+                if ax > acc[0] {
+                    acc[0] = ax;
+                }
+            }
+            acc.iter().fold(zero, |a, &b| if b > a { b } else { a })
+        };
+        let fold_ndarray = |acc: T, &x: &T| {
+            let ax = if x < zero { zero - x } else { x };
+            if ax > acc { ax } else { acc }
+        };
         match &self.data {
-            AudioData::Mono(arr) => {
-                // Use ndarray's vectorized operations for SIMD-optimized absolute value and max
-                let abs_values = arr.mapv(|x| {
-                    // Manual absolute value that works with existing trait bounds
-                    if x < T::default() {
-                        T::default() - x
-                    } else {
-                        x
-                    }
-                });
-
-                // Use ndarray's efficient fold operation instead of iterator chains
-                abs_values.fold(T::default(), |acc, &x| if x > acc { x } else { acc })
-            }
-            AudioData::Multi(arr) => {
-                // Vectorized absolute value and max across entire multi-channel array
-                let abs_values = arr.mapv(|x| {
-                    if x < T::default() {
-                        T::default() - x
-                    } else {
-                        x
-                    }
-                });
-
-                abs_values.fold(T::default(), |acc, &x| if x > acc { x } else { acc })
-            }
+            AudioData::Mono(arr) => match arr.as_slice() {
+                Some(s) => abs_max_slice(s),
+                None    => arr.fold(zero, fold_ndarray),
+            },
+            AudioData::Multi(arr) => match arr.as_slice() {
+                Some(s) => abs_max_slice(s),
+                None    => arr.fold(zero, fold_ndarray),
+            },
         }
     }
 
@@ -299,7 +313,132 @@ where
     /// ```
     #[inline]
     fn rms(&self) -> f64 {
-        self.powf(2.0, None).mean().sqrt()
+        // Four independent f64 accumulators break the sequential dependency chain
+        // so LLVM's SLP vectoriser can pack them into a ymm register (4 f64 wide)
+        // without -ffast-math. Falls back to ndarray iter for non-contiguous views.
+        let sum_sq_slice = |slice: &[T]| -> f64 {
+            let mut acc = [0.0f64; 4];
+            let chunks = slice.chunks_exact(4);
+            let rem = chunks.remainder();
+            for chunk in chunks {
+                let f0: f64 = chunk[0].cast_into();
+                let f1: f64 = chunk[1].cast_into();
+                let f2: f64 = chunk[2].cast_into();
+                let f3: f64 = chunk[3].cast_into();
+                acc[0] += f0 * f0;
+                acc[1] += f1 * f1;
+                acc[2] += f2 * f2;
+                acc[3] += f3 * f3;
+            }
+            for &x in rem {
+                let f: f64 = x.cast_into();
+                acc[0] += f * f;
+            }
+            acc[0] + acc[1] + acc[2] + acc[3]
+        };
+        let (sum_sq, n) = match &self.data {
+            AudioData::Mono(arr) => {
+                let s = match arr.as_slice() {
+                    Some(s) => sum_sq_slice(s),
+                    None    => arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum(),
+                };
+                (s, arr.len().get())
+            }
+            AudioData::Multi(arr) => {
+                let s = match arr.as_slice() {
+                    Some(s) => sum_sq_slice(s),
+                    None    => arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum(),
+                };
+                (s, arr.len().get())
+            }
+        };
+        (sum_sq / n as f64).sqrt()
+    }
+
+    #[inline]
+    fn rms_and_peak(&self) -> (f64, T) {
+        // Single-pass combined computation with four independent accumulators per
+        // quantity. Reading the data once is critical for signals larger than L3
+        // cache where two separate calls would double memory bandwidth.
+        let zero = T::default();
+
+        let combined_slice = |slice: &[T]| -> (f64, T) {
+            // Eight independent accumulators: sq uses 2 ymm f64 registers,
+            // pk uses 1 ymm f32 register. Explicit constant-index loads
+            // let LLVM keep all 8 values in registers (no re-read from memory)
+            // and pack both sq and pk into SIMD via SLP vectorisation.
+            let mut sq = [0.0f64; 8];
+            let mut pk = [zero; 8];
+            let chunks = slice.chunks_exact(8);
+            let rem = chunks.remainder();
+            for chunk in chunks {
+                // Load all 8 elements once; compiler keeps them in registers.
+                let x0 = chunk[0]; let x1 = chunk[1];
+                let x2 = chunk[2]; let x3 = chunk[3];
+                let x4 = chunk[4]; let x5 = chunk[5];
+                let x6 = chunk[6]; let x7 = chunk[7];
+                // sq: 8 independent f64 chains → 2 ymm accumulator registers.
+                let f0: f64 = x0.cast_into(); sq[0] += f0 * f0;
+                let f1: f64 = x1.cast_into(); sq[1] += f1 * f1;
+                let f2: f64 = x2.cast_into(); sq[2] += f2 * f2;
+                let f3: f64 = x3.cast_into(); sq[3] += f3 * f3;
+                let f4: f64 = x4.cast_into(); sq[4] += f4 * f4;
+                let f5: f64 = x5.cast_into(); sq[5] += f5 * f5;
+                let f6: f64 = x6.cast_into(); sq[6] += f6 * f6;
+                let f7: f64 = x7.cast_into(); sq[7] += f7 * f7;
+                // pk: 8-wide abs-max, SLP-vectorisable to vmaxps + vandps.
+                let ax0 = if x0 < zero { zero - x0 } else { x0 }; if ax0 > pk[0] { pk[0] = ax0; }
+                let ax1 = if x1 < zero { zero - x1 } else { x1 }; if ax1 > pk[1] { pk[1] = ax1; }
+                let ax2 = if x2 < zero { zero - x2 } else { x2 }; if ax2 > pk[2] { pk[2] = ax2; }
+                let ax3 = if x3 < zero { zero - x3 } else { x3 }; if ax3 > pk[3] { pk[3] = ax3; }
+                let ax4 = if x4 < zero { zero - x4 } else { x4 }; if ax4 > pk[4] { pk[4] = ax4; }
+                let ax5 = if x5 < zero { zero - x5 } else { x5 }; if ax5 > pk[5] { pk[5] = ax5; }
+                let ax6 = if x6 < zero { zero - x6 } else { x6 }; if ax6 > pk[6] { pk[6] = ax6; }
+                let ax7 = if x7 < zero { zero - x7 } else { x7 }; if ax7 > pk[7] { pk[7] = ax7; }
+            }
+            for &x in rem {
+                let f: f64 = x.cast_into();
+                sq[0] += f * f;
+                let ax = if x < zero { zero - x } else { x };
+                if ax > pk[0] { pk[0] = ax; }
+            }
+            let sum_sq = sq[0]+sq[1]+sq[2]+sq[3]+sq[4]+sq[5]+sq[6]+sq[7];
+            let peak = pk.iter().fold(zero, |a, &b| if b > a { b } else { a });
+            (sum_sq, peak)
+        };
+
+        let (sum_sq, peak, n) = match &self.data {
+            AudioData::Mono(arr) => {
+                let (sq, pk) = match arr.as_slice() {
+                    Some(s) => combined_slice(s),
+                    None => {
+                        let sq = arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum();
+                        let pk = arr.fold(zero, |acc, &x| {
+                            let ax = if x < zero { zero - x } else { x };
+                            if ax > acc { ax } else { acc }
+                        });
+                        (sq, pk)
+                    }
+                };
+                (sq, pk, arr.len().get())
+            }
+            AudioData::Multi(arr) => {
+                let (sq, pk) = match arr.as_slice() {
+                    Some(s) => combined_slice(s),
+                    None => {
+                        let sq = arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum();
+                        let pk = arr.fold(zero, |acc, &x| {
+                            let ax = if x < zero { zero - x } else { x };
+                            if ax > acc { ax } else { acc }
+                        });
+                        (sq, pk)
+                    }
+                };
+                (sq, pk, arr.len().get())
+            }
+        };
+
+        ((sum_sq / n as f64).sqrt(), peak)
     }
 
     /// Computes the population variance of the audio samples.

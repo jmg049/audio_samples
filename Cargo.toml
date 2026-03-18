@@ -136,8 +136,17 @@ html_view = ["dep:html_view"]
 
 [dev-dependencies]
 approx_eq = "0.1.8"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = ">=4.5", features = ["derive"] }
 dtmf_tones = "1.0.1"
 rand = "0.10.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.10.0"
+audio_samples_io = { path = "../audio_samples_io" }
+
+[[bench]]
+name = "ffmpeg_comparison"
+harness = false
+required-features = ["resampling", "iir-filtering", "channels", "processing", "statistics", "editing"]
+
+[patch.crates-io]
+audio_samples = { path = "." }
