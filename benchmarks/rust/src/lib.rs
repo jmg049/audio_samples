@@ -24,6 +24,16 @@ pub fn bench_init() {
     // SAFETY: mallopt is a safe libc function; no invariants to uphold.
     unsafe {
         unsafe extern "C" { fn mallopt(param: i32, value: i32) -> i32; }
+        // Disable mmap for individual allocations (M_MMAP_THRESHOLD = -3).
+        // By default glibc uses mmap for allocations ≥ 128 KB.  mmap'd blocks
+        // are returned to the OS on free() via munmap, so every re-allocation of
+        // the same buffer incurs page faults.  Setting the threshold to MAX forces
+        // all allocations through the brk heap regardless of size.
+        mallopt(-3 /* M_MMAP_THRESHOLD */, i32::MAX);
+        // Disable heap trimming (M_TRIM_THRESHOLD = -1).
+        // Without this, glibc calls brk() to return heap pages to the OS after
+        // freeing blocks above 128 KB, causing the same page-fault storm for
+        // brk-based allocations.
         mallopt(-1 /* M_TRIM_THRESHOLD */, i32::MAX);
     }
 }
