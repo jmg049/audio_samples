@@ -72,6 +72,7 @@ fn bench_normalize(dur_s: u64, iters: usize, warmup: usize) {
 }
 
 fn main() {
+    audio_samples_benchmarks::bench_init();
     let a = Args::parse_with_defaults(1000, 100);
     print_csv_header();
     bench_scale(a.duration_s, a.iterations, a.warmup);
