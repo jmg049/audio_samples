@@ -38,7 +38,7 @@ use crate::repr::AudioData;
 use crate::repr::SampleRate;
 
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, CastFrom, ConvertTo, LayoutError,
+    AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, LayoutError,
     ParameterError, StandardSample,
     operations::traits::{AudioProcessing, AudioStatistics},
 };
@@ -146,22 +146,11 @@ where
                 let target_peak = target_f64.abs();
                 let peak_f64: f64 = peak.convert_to();
                 let scale_factor = target_peak / peak_f64;
+                let factor_t: T = T::cast_from(scale_factor);
 
                 match &mut self.data {
-                    AudioData::Mono(arr) => {
-                        for x in arr.iter_mut() {
-                            let y: f64 = (*x).convert_to();
-                            let y = y * scale_factor;
-                            *x = Self::Sample::convert_from(y);
-                        }
-                    }
-                    AudioData::Multi(arr) => {
-                        for x in arr.iter_mut() {
-                            let y: f64 = (*x).convert_to();
-                            let y = y * scale_factor;
-                            *x = Self::Sample::convert_from(y);
-                        }
-                    }
+                    AudioData::Mono(arr) => arr.mapv_inplace(|x| x * factor_t),
+                    AudioData::Multi(arr) => arr.mapv_inplace(|x| x * factor_t),
                 }
             }
 
@@ -286,21 +275,10 @@ where
     /// ```
     #[inline]
     fn scale(mut self, factor: f64) -> Self {
+        let factor_t: T = T::cast_from(factor);
         match &mut self.data {
-            AudioData::Mono(arr) => {
-                arr.mapv_inplace(|x| {
-                    let x: f64 = x.cast_into();
-                    let x_factor = x * factor;
-                    <T as CastFrom<f64>>::cast_from(x_factor)
-                });
-            }
-            AudioData::Multi(arr) => {
-                arr.mapv_inplace(|x| {
-                    let x: f64 = x.cast_into();
-                    let x_factor = x * factor;
-                    <T as CastFrom<f64>>::cast_from(x_factor)
-                });
-            }
+            AudioData::Mono(arr) => arr.mapv_inplace(|x| x * factor_t),
+            AudioData::Multi(arr) => arr.mapv_inplace(|x| x * factor_t),
         }
         self
     }
@@ -389,28 +367,12 @@ where
         }
 
         match &mut self.data {
-            AudioData::Mono(arr) => {
-                arr.mapv_inplace(|x| {
-                    if x < min_val {
-                        min_val
-                    } else if x > max_val {
-                        max_val
-                    } else {
-                        x
-                    }
-                });
-            }
-            AudioData::Multi(arr) => {
-                arr.mapv_inplace(|x| {
-                    if x < min_val {
-                        min_val
-                    } else if x > max_val {
-                        max_val
-                    } else {
-                        x
-                    }
-                });
-            }
+            AudioData::Mono(arr) => arr.mapv_inplace(|x| {
+                if x < min_val { min_val } else if x > max_val { max_val } else { x }
+            }),
+            AudioData::Multi(arr) => arr.mapv_inplace(|x| {
+                if x < min_val { min_val } else if x > max_val { max_val } else { x }
+            }),
         }
         Ok(self)
     }

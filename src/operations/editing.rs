@@ -317,15 +317,16 @@ where
 
         match &self.data {
             AudioData::Mono(arr) => {
-                let total_length = start_samples + arr.len().get() + end_samples;
-                let mut padded = Array1::from_elem(total_length, pad_value);
-
-                // Copy original data to the middle
-                padded
-                    .slice_mut(s![start_samples..start_samples + arr.len().get()])
-                    .assign(&arr.view());
-
-                AudioSamples::new_mono(padded, self.sample_rate())
+                let n = arr.len().get();
+                let total = start_samples + n + end_samples;
+                let mut v: Vec<T> = Vec::with_capacity(total);
+                v.resize(start_samples, pad_value);
+                match arr.as_slice() {
+                    Some(src) => v.extend_from_slice(src),
+                    None => v.extend(arr.iter().copied()),
+                }
+                v.resize(total, pad_value);
+                AudioSamples::new_mono(Array1::from(v), self.sample_rate())
             }
             AudioData::Multi(arr) => {
                 let total_length = start_samples + arr.ncols().get() + end_samples;
@@ -885,24 +886,24 @@ where
         let total_samples = self.samples_per_channel().get();
         let actual_fade_samples = fade_samples.min(total_samples);
 
+        let step = 1.0_f64 / actual_fade_samples as f64;
         match &mut self.data {
             AudioData::Mono(arr) => {
+                let mut position = 0.0_f64;
                 for i in 0..actual_fade_samples {
-                    let position = i as f64 / actual_fade_samples as f64;
-                    let gain = apply_fade_curve(curve, position as f64);
-                    let gain_t: T = gain.convert_to();
+                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
                     arr[i] *= gain_t;
+                    position += step;
                 }
             }
             AudioData::Multi(arr) => {
+                let mut position = 0.0_f64;
                 for i in 0..actual_fade_samples {
-                    let position = i as f64 / actual_fade_samples as f64;
-                    let gain = apply_fade_curve(curve, position as f64);
-                    let gain_t: T = gain.convert_to();
-
+                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
                     for channel in 0..arr.nrows().get() {
                         arr[[channel, i]] *= gain_t;
                     }
+                    position += step;
                 }
             }
         }
@@ -955,24 +956,24 @@ where
         let actual_fade_samples = fade_samples.min(total_samples);
         let start_sample = total_samples - actual_fade_samples;
 
+        let step = 1.0_f64 / actual_fade_samples as f64;
         match &mut self.data {
             AudioData::Mono(arr) => {
+                let mut position = 1.0_f64;
                 for i in 0..actual_fade_samples {
-                    let position = 1.0 - (i as f64 / actual_fade_samples as f64);
-                    let gain = apply_fade_curve(curve, position);
-                    let gain_t: T = gain.convert_to();
-
+                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
                     arr[start_sample + i] *= gain_t;
+                    position -= step;
                 }
             }
             AudioData::Multi(arr) => {
+                let mut position = 1.0_f64;
                 for i in 0..actual_fade_samples {
-                    let position = 1.0 - (i as f64 / actual_fade_samples as f64);
-                    let gain = apply_fade_curve(curve, position);
-                    let gain_t: T = gain.convert_to();
+                    let gain_t: T = T::cast_from(apply_fade_curve(curve, position));
                     for channel in 0..arr.nrows().get() {
                         arr[[channel, start_sample + i]] *= gain_t;
                     }
+                    position -= step;
                 }
             }
         }
@@ -1550,10 +1551,15 @@ where
 
             audio.apply_iir_filter(&butterworth_filter)
         }
+        #[cfg(all(feature = "transforms", feature = "channels"))]
         PerturbationMethod::PitchShift {
             semitones,
             preserve_formants,
         } => apply_pitch_shift_(audio, *semitones, *preserve_formants),
+        #[cfg(not(all(feature = "transforms", feature = "channels")))]
+        PerturbationMethod::PitchShift { .. } => Err(crate::AudioSampleError::unsupported(
+            "PitchShift requires the `transforms` and `channels` features",
+        )),
     }
 }
 
