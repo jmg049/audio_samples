@@ -1032,6 +1032,32 @@ where
     /// ```
     fn clip(self, min_val: Self::Sample, max_val: Self::Sample) -> AudioSampleResult<Self>;
 
+    /// Clips all samples in-place to `[min_val, max_val]`.
+    ///
+    /// Equivalent to [`clip`](AudioProcessing::clip) but borrows `self`
+    /// mutably rather than consuming it, avoiding any allocation.
+    ///
+    /// # Arguments
+    /// - `min_val` — lower bound; samples below this value are set to `min_val`.
+    /// - `max_val` — upper bound; samples above this value are set to `max_val`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `min_val > max_val`.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![2.0f32, -3.0, 1.5, -0.5];
+    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// audio.clip_in_place(-1.0f32, 1.0f32).unwrap();
+    /// assert_eq!(audio[0], 1.0);
+    /// assert_eq!(audio[1], -1.0);
+    /// assert_eq!(audio[3], -0.5);
+    /// ```
+    fn clip_in_place(&mut self, min_val: Self::Sample, max_val: Self::Sample) -> AudioSampleResult<()>;
+
     /// Resamples audio to a new sample rate using high-quality resampling.
     ///
     /// Delegates to the `rubato` resampling library. The `quality` parameter
