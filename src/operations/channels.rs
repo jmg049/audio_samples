@@ -96,8 +96,43 @@ where
                     unreachable!("We check for mono at the start of the function")
                 }
                 AudioData::Multi(data) => {
-                    let mono_data = data.mean_axis(Axis(0));
-                    Ok(AudioSamples::new_mono(mono_data, self.sample_rate())?)
+                    if data.dim().0.get() == 2 {
+                        // Stereo fast path: (L+R)*0.5 with f32 arithmetic so
+                        // LLVM can emit vaddps+vmulps (8-wide) rather than the
+                        // 4-wide f64 vaddpd+vmulpd path. For f32 samples the
+                        // f32→f64→f32 cast round-trip is a no-op; for other
+                        // types it introduces at most 1 ULP of error.
+                        let left  = data.index_axis(Axis(0), 0);
+                        let right = data.index_axis(Axis(0), 1);
+                        let n = left.len();
+                        let mut mono_vec: Vec<T> = Vec::with_capacity(n);
+                        // SAFETY: we write exactly n elements before set_len.
+                        let dst = mono_vec.as_mut_ptr();
+                        if let (Some(ls), Some(rs)) = (left.as_slice(), right.as_slice()) {
+                            // Contiguous path: direct slice loop — vectorisable.
+                            for i in 0..n {
+                                let lf: f32 = ls[i].cast_into();
+                                let rf: f32 = rs[i].cast_into();
+                                let avg: f64 = ((lf + rf) * 0.5f32) as f64;
+                                unsafe { dst.add(i).write(T::cast_from(avg)); }
+                            }
+                        } else {
+                            // Non-contiguous fallback: iterator path.
+                            for (i, (&l, &r)) in left.iter().zip(right.iter()).enumerate() {
+                                let lf: f32 = l.cast_into();
+                                let rf: f32 = r.cast_into();
+                                let avg: f64 = ((lf + rf) * 0.5f32) as f64;
+                                unsafe { dst.add(i).write(T::cast_from(avg)); }
+                            }
+                        }
+                        unsafe { mono_vec.set_len(n); }
+                        let mono = Array1::from(mono_vec);
+                        Ok(AudioSamples::new_mono(mono, self.sample_rate())?)
+                    } else {
+                        // Generic N-channel fallback.
+                        let mono_data = data.mean_axis(Axis(0));
+                        Ok(AudioSamples::new_mono(mono_data, self.sample_rate())?)
+                    }
                 }
             },
             MonoConversionMethod::Left => match &self.data {

@@ -211,6 +211,37 @@ pub trait AudioSample:
         self
     }
 
+    /// Clamps `self` to the closed interval `[min, max]`.
+    ///
+    /// This is a per-type hook used internally by [`clip`][crate::AudioProcessing::clip]
+    /// to select the most efficient clamping implementation.  Integer types
+    /// use [`Ord::clamp`]; floating-point types use their inherent `.clamp()`
+    /// method which the compiler maps to `VMAXPS`/`VMINPS` in vectorised
+    /// loops.  The default implementation uses explicit comparisons and is
+    /// correct for all types.
+    ///
+    /// # Arguments
+    /// - `min` — lower bound (inclusive).
+    /// - `max` — upper bound (inclusive).
+    ///
+    /// # Returns
+    /// `min` if `self < min`, `max` if `self > max`, otherwise `self`.
+    #[inline]
+    #[must_use]
+    fn clamp_to(self, min: Self, max: Self) -> Self {
+        if self < min { min } else if self > max { max } else { self }
+    }
+
+    /// Returns the absolute-value maximum of a slice using a type-specific
+    /// fast path when available, or `None` to signal fallback to the generic
+    /// scalar path.
+    ///
+    /// The default returns `None`.  Types with hardware-specific
+    /// implementations (e.g. `f32` on x86-64 with AVX2) override this.
+    #[doc(hidden)]
+    #[inline]
+    fn avx2_abs_max(_slice: &[Self]) -> Option<Self> { None }
+
     /// Converts this sample into a byte vector in native-endian order.
     ///
     /// Each sample is serialised to its native byte representation using
@@ -615,26 +646,57 @@ macro_rules! impl_int_to_float {
     };
 }
 
-// Float -> Integer (clamp + scale + round + saturating)
+// Float -> Integer (clamp + scale + truncating cast)
+//
+// Uses IEEE max/min (f32::max / f32::min) instead of clamp so that NaN
+// inputs produce a defined finite value: max(NaN, -1.0) = -1.0 per IEEE
+// 754-2008 maxNum semantics (returns the non-NaN operand). This lets LLVM
+// prove the intermediate value is finite, eliminating the NaN-handling
+// branches that Rust's saturating `as i32` would otherwise generate.
+// Without those branches LLVM can emit vcvttps2dq + vpackssdw (vectorised
+// f32→i32→i16) instead of the scalar vcvttss2si path.
+//
+// Semantic differences from a fully-IEEE-correct implementation:
+// - NaN input → −MAX (e.g. −32767) instead of 0 or ±MAX.
+// - Uses truncation rather than round-to-nearest (error ≤ 1 LSB, inaudible).
+// - −1.0 maps to −MAX (e.g. −32767 for i16), not MIN (−32768).  The one-
+//   code-unit asymmetry at full negative scale is inaudible in practice.
+// Used for i16 (and similarly small integer types) where $to::MAX is exactly
+// representable in f32/f64 (32767 < 2^23). `to_int_unchecked` removes the
+// NaN/overflow branches that `as i32` would otherwise emit, letting LLVM
+// vectorise the loop with vcvttps2dq + vpackssdw.
 macro_rules! impl_float_to_int {
     ($from:ty, $to:ty) => {
         impl ConvertFrom<$from> for $to {
             #[inline]
             fn convert_from(source: $from) -> Self {
-                let v = source.clamp(-1.0, 1.0);
-                let scaled = if v < 0.0 {
-                    v * (-(<$to>::MIN as $from))
-                } else {
-                    v * (<$to>::MAX as $from)
-                };
-                let rounded = scaled.round();
-                if rounded < (<$to>::MIN as $from) {
-                    <$to>::MIN
-                } else if rounded > (<$to>::MAX as $from) {
-                    <$to>::MAX
-                } else {
-                    rounded as $to
-                }
+                // IEEE max/min: NaN input → -1.0 (non-NaN). v ∈ [-1.0, 1.0].
+                let v = source.max(-1.0).min(1.0);
+                // scaled ∈ [−MAX, MAX]. For i16, MAX = 32767 which is exactly
+                // representable in f32, so scaled is strictly within i32 range.
+                let scaled = v * (<$to>::MAX as $from);
+                // SAFETY: scaled is finite and |scaled| ≤ $to::MAX ≤ 32767,
+                // which fits comfortably in i32. No NaN/overflow is possible.
+                let as_i32: i32 = unsafe { scaled.to_int_unchecked() };
+                as_i32 as $to
+            }
+        }
+    };
+}
+
+// Used for i32 where i32::MAX = 2147483647 rounds up to 2147483648.0 in f32
+// (not exactly representable). Using `to_int_unchecked` there would be UB for
+// source = 1.0, so we use the saturating `as $to` cast instead.
+macro_rules! impl_float_to_large_int {
+    ($from:ty, $to:ty) => {
+        impl ConvertFrom<$from> for $to {
+            #[inline]
+            fn convert_from(source: $from) -> Self {
+                let v = source.max(-1.0).min(1.0);
+                let scaled = v * (<$to>::MAX as $from);
+                // Saturating cast handles the case where $to::MAX as $from
+                // rounds up (e.g. i32::MAX → 2147483648.0f32).
+                scaled.clamp(<$to>::MIN as $from, <$to>::MAX as $from) as $to
             }
         }
     };
@@ -969,8 +1031,8 @@ impl_i24_to_float!(f64);
 impl_float_to_int!(f32, i16);
 impl_float_to_int!(f64, i16);
 
-impl_float_to_int!(f32, i32);
-impl_float_to_int!(f64, i32);
+impl_float_to_large_int!(f32, i32);
+impl_float_to_large_int!(f64, i32);
 
 // ========================
 // Float -> I24 (Clamped, Rounded, Saturating)
@@ -987,6 +1049,60 @@ impl_float_to_float!(f32, f64);
 impl_float_to_float!(f64, f32);
 
 // ========================
+// AVX2 fast path for f32 abs-max scan
+// ========================
+
+/// Computes the maximum absolute value of a contiguous f32 slice using AVX2.
+///
+/// Processes 8 f32 samples per iteration using `_mm256_andnot_ps` to mask
+/// the sign bit (branchless abs) and `_mm256_max_ps` to track the running
+/// maximum across 8 independent lanes.  A horizontal reduction folds the
+/// lanes to a single scalar at the end.
+///
+/// # Safety
+/// Caller must ensure that the AVX2 feature is available
+/// (e.g. via `is_x86_feature_detected!("avx2")`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn abs_max_f32_avx2(slice: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    // Bit-mask that strips the IEEE 754 sign bit from every lane.
+    let sign_mask = _mm256_set1_ps(-0.0_f32);
+    // Eight independent max accumulators — no sequential dependency.
+    let mut max_v = _mm256_setzero_ps();
+
+    let chunks = slice.len() / 8;
+    let ptr = slice.as_ptr();
+
+    for i in 0..chunks {
+        // SAFETY: i * 8 + 7 < slice.len() because i < chunks = slice.len() / 8.
+        unsafe {
+            let v = _mm256_loadu_ps(ptr.add(i * 8));
+            let abs_v = _mm256_andnot_ps(sign_mask, v); // abs via bitmask, no branch
+            max_v = _mm256_max_ps(max_v, abs_v);
+        }
+    }
+
+    // Horizontal reduction: fold 8 f32 lanes down to one scalar.
+    let hi128 = _mm256_extractf128_ps(max_v, 1);   // lanes [4..7]
+    let lo128 = _mm256_castps256_ps128(max_v);      // lanes [0..3]
+    let max128 = _mm_max_ps(lo128, hi128);
+    let shuf = _mm_movehl_ps(max128, max128);
+    let max64 = _mm_max_ps(max128, shuf);
+    let shuf2 = _mm_shuffle_ps(max64, max64, 0x1);
+    let max32 = _mm_max_ss(max64, shuf2);
+    let mut result = _mm_cvtss_f32(max32);
+
+    // Scalar tail for the remaining < 8 samples.
+    for &x in &slice[chunks * 8..] {
+        let ax = x.abs();
+        if ax > result { result = ax; }
+    }
+    result
+}
+
+// ========================
 // AudioSample Implementations
 // ========================
 impl AudioSample for u8 {
@@ -995,6 +1111,7 @@ impl AudioSample for u8 {
     const BITS: Self = 8;
     const LABEL: &'static str = "u8";
     const SAMPLE_TYPE: SampleType = SampleType::U8;
+    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
 }
 
 impl AudioSample for i16 {
@@ -1003,6 +1120,7 @@ impl AudioSample for i16 {
     const BITS: u8 = 16;
     const LABEL: &'static str = "i16";
     const SAMPLE_TYPE: SampleType = SampleType::I16;
+    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
 }
 
 impl AudioSample for I24 {
@@ -1016,6 +1134,7 @@ impl AudioSample for I24 {
     const BITS: u8 = 24;
     const LABEL: &'static str = "I24";
     const SAMPLE_TYPE: SampleType = SampleType::I24;
+    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
 }
 
 impl AudioSample for i32 {
@@ -1024,6 +1143,7 @@ impl AudioSample for i32 {
     const BITS: u8 = 32;
     const LABEL: &'static str = "i32";
     const SAMPLE_TYPE: SampleType = SampleType::I32;
+    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
 }
 
 impl AudioSample for f32 {
@@ -1032,6 +1152,18 @@ impl AudioSample for f32 {
     const BITS: u8 = 32;
     const LABEL: &'static str = "f32";
     const SAMPLE_TYPE: SampleType = SampleType::F32;
+    /// Uses `f32::clamp` — compiles to `VMAXSS`/`VMINSS` (and `VMAXPS`/`VMINPS` in
+    /// vectorised loops), matching what C achieves with `-ffast-math`.
+    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { self.clamp(min, max) }
+
+    #[inline]
+    fn avx2_abs_max(slice: &[Self]) -> Option<Self> {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            return Some(unsafe { abs_max_f32_avx2(slice) });
+        }
+        None
+    }
 }
 
 impl AudioSample for f64 {
@@ -1040,6 +1172,8 @@ impl AudioSample for f64 {
     const BITS: u8 = 64;
     const LABEL: &'static str = "f64";
     const SAMPLE_TYPE: SampleType = SampleType::F64;
+    /// Uses `f64::clamp` — compiles to `VMAXSD`/`VMINSD` in vectorised loops.
+    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { self.clamp(min, max) }
 }
 
 // ========================
@@ -1767,11 +1901,11 @@ mod conversion_tests {
         // Test values near 0.5
         let half_f32: f32 = 0.5;
         let half_f32_to_i16: i16 = half_f32.convert_to();
-        assert_eq!(half_f32_to_i16, 16384); // 0.5 * 32767 rounded to nearest
+        assert_eq!(half_f32_to_i16, 16383); // 0.5 * 32767 = 16383.5, truncated to 16383
 
         let neg_half_f32: f32 = -0.5;
         let neg_half_f32_to_i16: i16 = neg_half_f32.convert_to();
-        assert_eq!(neg_half_f32_to_i16, -16384);
+        assert_eq!(neg_half_f32_to_i16, -16383); // -0.5 * 32767 = -16383.5, truncated toward zero
     }
 
     // Edge cases for f64 conversions
@@ -1929,7 +2063,7 @@ mod conversion_tests {
         // Test i16::convert_from with different source types
         let f32_source: f32 = 0.5;
         let i16_result: i16 = i16::convert_from(f32_source);
-        assert_eq!(i16_result, 16384); // 0.5 * 32767 rounded
+        assert_eq!(i16_result, 16383); // 0.5 * 32767 = 16383.5, truncated to 16383
 
         let i32_source: i32 = 65536;
         let i16_result: i16 = i16::convert_from(i32_source);

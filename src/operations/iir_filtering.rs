@@ -322,6 +322,59 @@ impl IirFilter {
     }
 }
 
+// ============================================================================
+// Private Biquad — fast inner type used by apply_iir_filter
+// ============================================================================
+
+/// Fixed-size second-order (biquad) section using Direct Form II Transposed.
+///
+/// All coefficients are pre-normalised by a0 at construction so the hot loop
+/// contains **no division and no heap allocation**.  State fits in two f64
+/// slots on the stack.
+///
+/// Direct Form II Transposed recurrence:
+/// ```text
+///   y    = b0·x + s0
+///   s0'  = b1·x − a1·y + s1
+///   s1'  = b2·x − a2·y
+/// ```
+#[derive(Debug, Clone, Copy)]
+struct Biquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    s0: f64,
+    s1: f64,
+}
+
+impl Biquad {
+    fn from_coeffs(b_coeffs: &[f64], a_coeffs: &[f64]) -> Self {
+        let a0 = a_coeffs.first().copied().unwrap_or(1.0);
+        let b0 = b_coeffs.first().copied().unwrap_or(0.0) / a0;
+        let b1 = b_coeffs.get(1).copied().unwrap_or(0.0) / a0;
+        let b2 = b_coeffs.get(2).copied().unwrap_or(0.0) / a0;
+        let a1 = a_coeffs.get(1).copied().unwrap_or(0.0) / a0;
+        let a2 = a_coeffs.get(2).copied().unwrap_or(0.0) / a0;
+        Self { b0, b1, b2, a1, a2, s0: 0.0, s1: 0.0 }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.s0;
+        self.s0 = self.b1 * x - self.a1 * y + self.s1;
+        self.s1 = self.b2 * x - self.a2 * y;
+        y
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.s0 = 0.0;
+        self.s1 = 0.0;
+    }
+}
+
 /// A second-order sections (SOS) cascade filter.
 ///
 /// Represents an IIR filter as a cascade of second-order (biquad) sections.
@@ -684,51 +737,52 @@ where
         let sample_rate = self.sample_rate_hz();
         let filter_repr = design_iir_filter(design, sample_rate)?;
 
+        // Process sample-by-sample. The IIR difference equation is inherently
+        // sequential (each output depends on previous outputs), so batching
+        // gains nothing. We use Direct Form II Transposed biquad sections:
+        // stack-allocated state, pre-normalised coefficients, no division.
         match filter_repr {
-            FilterRepresentation::DirectForm { b_coeffs, a_coeffs } => {
-                let mut filter = IirFilter::new(b_coeffs, a_coeffs);
-
-                match &mut self.data {
-                    AudioData::Mono(samples) => {
-                        let input_samples: Vec<f64> =
-                            samples.iter().map(|&x| x.convert_to()).collect();
-                        let output_samples = filter.process_samples(&input_samples);
-                        for (i, &output) in output_samples.iter().enumerate() {
-                            samples[i] = output.convert_to();
-                        }
-                    }
-                    AudioData::Multi(data) => {
-                        for ch_idx in 0..data.dim().0.get() {
-                            let mut channel = data.index_axis_mut(Axis(0), ch_idx);
-                            let input_samples: Vec<f64> =
-                                channel.iter().map(|&x| x.convert_to()).collect();
-                            let output_samples = filter.process_samples(&input_samples);
-                            for (sample, output) in channel.iter_mut().zip(output_samples.iter()) {
-                                *sample = (*output).convert_to();
-                            }
-                            filter.reset();
-                        }
-                    }
-                }
-            }
-            FilterRepresentation::Sos(mut sos_filter) => match &mut self.data {
+            FilterRepresentation::Single(mut bq) => match &mut self.data {
                 AudioData::Mono(samples) => {
-                    let input_samples: Vec<f64> = samples.iter().map(|&x| x.convert_to()).collect();
-                    let output_samples = sos_filter.process_samples(&input_samples);
-                    for (i, &output) in output_samples.iter().enumerate() {
-                        samples[i] = output.convert_to();
+                    for sample in samples.iter_mut() {
+                        let x: f64 = (*sample).convert_to();
+                        *sample = bq.process(x).convert_to();
                     }
                 }
                 AudioData::Multi(data) => {
                     for ch_idx in 0..data.dim().0.get() {
                         let mut channel = data.index_axis_mut(Axis(0), ch_idx);
-                        let input_samples: Vec<f64> =
-                            channel.iter().map(|&x| x.convert_to()).collect();
-                        let output_samples = sos_filter.process_samples(&input_samples);
-                        for (sample, output) in channel.iter_mut().zip(output_samples.iter()) {
-                            *sample = (*output).convert_to();
+                        for sample in channel.iter_mut() {
+                            let x: f64 = (*sample).convert_to();
+                            *sample = bq.process(x).convert_to();
                         }
-                        sos_filter.reset();
+                        bq.reset();
+                    }
+                }
+            },
+            FilterRepresentation::Cascade(mut bqs) => match &mut self.data {
+                AudioData::Mono(samples) => {
+                    for sample in samples.iter_mut() {
+                        let mut x: f64 = (*sample).convert_to();
+                        for bq in bqs.iter_mut() {
+                            x = bq.process(x);
+                        }
+                        *sample = x.convert_to();
+                    }
+                }
+                AudioData::Multi(data) => {
+                    for ch_idx in 0..data.dim().0.get() {
+                        let mut channel = data.index_axis_mut(Axis(0), ch_idx);
+                        for sample in channel.iter_mut() {
+                            let mut x: f64 = (*sample).convert_to();
+                            for bq in bqs.iter_mut() {
+                                x = bq.process(x);
+                            }
+                            *sample = x.convert_to();
+                        }
+                        for bq in bqs.iter_mut() {
+                            bq.reset();
+                        }
                     }
                 }
             },
@@ -1397,17 +1451,15 @@ fn design_chebyshev1_bandpass_sos(
 
 /// Internal representation of a designed IIR filter.
 ///
-/// Supports both direct-form (for low-order filters) and second-order
-/// sections cascade (for high-order filters requiring numerical stability).
+/// Both variants are biquad-based (Direct Form II Transposed).  The `Single`
+/// variant is used when the filter has exactly one section (order ≤ 2); the
+/// `Cascade` variant is used for higher-order SOS filters.
 #[derive(Debug, Clone)]
 enum FilterRepresentation {
-    /// Direct-form IIR filter with b and a coefficients.
-    DirectForm {
-        b_coeffs: Vec<f64>,
-        a_coeffs: Vec<f64>,
-    },
-    /// Second-order sections cascade.
-    Sos(SosFilter),
+    /// A single biquad section (order ≤ 2).
+    Single(Biquad),
+    /// A cascade of biquad sections (SOS, order > 2).
+    Cascade(Vec<Biquad>),
 }
 
 /// Design an IIR filter based on the given specifications.
@@ -1460,16 +1512,15 @@ fn design_butterworth_filter(
                 )));
             }
 
-            // Use direct form for order 2, SOS for higher orders
+            // Single biquad for order 2, cascade for higher orders
             if order == 2 {
                 let (b, a) = design_butterworth_lowpass(design.order, cutoff, sample_rate);
-                Ok(FilterRepresentation::DirectForm {
-                    b_coeffs: b,
-                    a_coeffs: a,
-                })
+                Ok(FilterRepresentation::Single(Biquad::from_coeffs(&b, &a)))
             } else {
                 let sos = design_butterworth_lowpass_sos(order, cutoff, sample_rate);
-                Ok(FilterRepresentation::Sos(sos))
+                Ok(FilterRepresentation::Cascade(
+                    sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                ))
             }
         }
         FilterResponse::HighPass => {
@@ -1487,16 +1538,15 @@ fn design_butterworth_filter(
                 )));
             }
 
-            // Use direct form for order 2, SOS for higher orders
+            // Single biquad for order 2, cascade for higher orders
             if order == 2 {
                 let (b, a) = design_butterworth_highpass(design.order, cutoff, sample_rate);
-                Ok(FilterRepresentation::DirectForm {
-                    b_coeffs: b,
-                    a_coeffs: a,
-                })
+                Ok(FilterRepresentation::Single(Biquad::from_coeffs(&b, &a)))
             } else {
                 let sos = design_butterworth_highpass_sos(order, cutoff, sample_rate);
-                Ok(FilterRepresentation::Sos(sos))
+                Ok(FilterRepresentation::Cascade(
+                    sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                ))
             }
         }
         FilterResponse::BandPass => {
@@ -1520,9 +1570,10 @@ fn design_butterworth_filter(
                 )));
             }
 
-            // Always use SOS for bandpass (more complex)
             let sos = design_butterworth_bandpass_sos(order, low_freq, high_freq, sample_rate);
-            Ok(FilterRepresentation::Sos(sos))
+            Ok(FilterRepresentation::Cascade(
+                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+            ))
         }
         FilterResponse::BandStop => {
             Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -1581,7 +1632,9 @@ fn design_chebyshev_i_filter(
             }
 
             let sos = design_chebyshev1_lowpass_sos(order, cutoff, ripple, sample_rate);
-            Ok(FilterRepresentation::Sos(sos))
+            Ok(FilterRepresentation::Cascade(
+                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+            ))
         }
         FilterResponse::HighPass => {
             let cutoff = design.cutoff_frequency.ok_or_else(|| {
@@ -1599,7 +1652,9 @@ fn design_chebyshev_i_filter(
             }
 
             let sos = design_chebyshev1_highpass_sos(order, cutoff, ripple, sample_rate);
-            Ok(FilterRepresentation::Sos(sos))
+            Ok(FilterRepresentation::Cascade(
+                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+            ))
         }
         FilterResponse::BandPass => {
             let low_freq = design.low_frequency.ok_or_else(|| {
@@ -1624,7 +1679,9 @@ fn design_chebyshev_i_filter(
 
             let sos =
                 design_chebyshev1_bandpass_sos(order, low_freq, high_freq, ripple, sample_rate);
-            Ok(FilterRepresentation::Sos(sos))
+            Ok(FilterRepresentation::Cascade(
+                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+            ))
         }
         FilterResponse::BandStop => {
             Err(AudioSampleError::Parameter(ParameterError::invalid_value(

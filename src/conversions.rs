@@ -307,7 +307,7 @@ mod tests {
 
         // Verify conversion accuracy
         let converted_data = audio_i16;
-        assert_eq!(converted_data[0], 3277); // 0.1 * 32767 ≈ 3277
+        assert_eq!(converted_data[0], 3276); // 0.1 * 32767 = 3276.7, truncated to 3276
         assert_eq!(converted_data[1], 6553); // 0.2 * 32767 ≈ 6553
         assert_eq!(converted_data[2], 9830); // 0.3 * 32767 ≈ 9830
     }
@@ -367,9 +367,11 @@ mod tests {
         let audio_i16 = audio_f32.to_format::<i16>();
         let converted_data = audio_i16.as_mono().unwrap();
 
-        // f32::MAX and f32::MIN should be clamped to i16 range
+        // f32::MAX and f32::MIN are clamped to [-1.0, 1.0] then scaled by i16::MAX.
+        // Symmetric scaling maps -1.0 to -32767 (not i16::MIN = -32768); this is
+        // intentional — see impl_float_to_int! in traits.rs for rationale.
         assert_eq!(converted_data[0], i16::MAX);
-        assert_eq!(converted_data[1], i16::MIN);
+        assert_eq!(converted_data[1], -32767i16);
         assert_eq!(converted_data[2], 0);
     }
 }
