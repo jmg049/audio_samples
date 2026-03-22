@@ -35,7 +35,7 @@ serde = { version = "1.0", features = ["derive"] }
 lazy_static = "1.5"
 num-format = { version = "0.4.4", optional = true }
 rand = { version = "0.10.0", optional = true }
-wide = "1.1.1"
+wide = "1.2.0"
 spectrograms = { version = "1.1.0", optional = true }
 
 serde_json = { version = "1.0.149", optional = true }
@@ -136,12 +136,11 @@ html_view = ["dep:html_view"]
 
 [dev-dependencies]
 approx_eq = "0.1.8"
-clap = { version = ">=4.5", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 dtmf_tones = "1.0.1"
 rand = "0.10.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.10.0"
-audio_samples_io = { path = "../audio_samples_io" }
 
 [[bench]]
 name = "ffmpeg_comparison"
