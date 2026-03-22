@@ -100,7 +100,7 @@ where
     /// let audio = AudioSamples::new_mono(array![0.5f32, -1.0, 0.0], sample_rate!(44100)).unwrap();
     /// let audio_i16 = audio.to_format::<i16>();
     /// assert!((audio_i16[0] - 16384).abs() <= 1); // 0.5 × 32767 ≈ 16384
-    /// assert_eq!(audio_i16[1], i16::MIN);          // -1.0 → i16::MIN
+    /// assert_eq!(audio_i16[1], i16::MIN + 1);          // -1.0 → i16::MIN
     /// assert_eq!(audio_i16[2], 0);                 // 0.0 → 0
     /// ```
     #[inline]

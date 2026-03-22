@@ -41,10 +41,10 @@ const HIGH_BLOCK: usize = 16384;
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct ResamplerKey {
-    in_sr:    u32,
-    out_sr:   u32,
+    in_sr: u32,
+    out_sr: u32,
     channels: usize,
-    quality:  u8, // 1 = medium, 2 = high
+    quality: u8, // 1 = medium, 2 = high
 }
 
 thread_local! {
@@ -76,9 +76,8 @@ fn with_cached_per_channel_resamplers<T>(
     })?;
 
     // Take the Vec out so we can use it across a rayon parallel region.
-    let mut resamplers = SINC_CACHE.with(|cell| {
-        std::mem::take(cell.borrow_mut().get_mut(&key).unwrap())
-    });
+    let mut resamplers =
+        SINC_CACHE.with(|cell| std::mem::take(cell.borrow_mut().get_mut(&key).unwrap()));
 
     // Reset all delay lines; filter tables are untouched.
     for r in &mut resamplers {
@@ -162,15 +161,15 @@ unsafe fn upsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
 
     for i in 0..n_simd {
         unsafe {
-            let half   = _mm_set1_ps(0.5f32);
-            let v_cur  = _mm_loadu_ps(src_ptr.add(i * 4));     // [s0, s1, s2, s3]
+            let half = _mm_set1_ps(0.5f32);
+            let v_cur = _mm_loadu_ps(src_ptr.add(i * 4)); // [s0, s1, s2, s3]
             let v_next = _mm_loadu_ps(src_ptr.add(i * 4 + 1)); // [s1, s2, s3, s4]
             // v_avg = [(s0+s1)/2, (s1+s2)/2, (s2+s3)/2, (s3+s4)/2]
-            let v_avg  = _mm_mul_ps(_mm_add_ps(v_cur, v_next), half);
+            let v_avg = _mm_mul_ps(_mm_add_ps(v_cur, v_next), half);
             // Interleave: lo = [s0, avg01, s1, avg12],  hi = [s2, avg23, s3, avg34]
             let lo = _mm_unpacklo_ps(v_cur, v_avg);
             let hi = _mm_unpackhi_ps(v_cur, v_avg);
-            _mm_storeu_ps(dst_ptr.add(i * 8),     lo);
+            _mm_storeu_ps(dst_ptr.add(i * 8), lo);
             _mm_storeu_ps(dst_ptr.add(i * 8 + 4), hi);
         }
     }
@@ -181,7 +180,7 @@ unsafe fn upsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
     let last = src.len().saturating_sub(1);
     for (j, out_s) in dst[simd_out..].iter_mut().enumerate() {
         let in_i = simd_in + j / 2;
-        let k    = j & 1;
+        let k = j & 1;
         if in_i < last {
             let s0 = src[in_i];
             let s1 = src[in_i + 1];
@@ -267,8 +266,7 @@ where
         ((in_frames as u64 * out_sr as u64 + in_sr as u64 - 1) / in_sr as u64) as usize;
     let channels = audio.num_channels().get() as usize;
 
-    let mut output: Vec<Vec<f32>> =
-        (0..channels).map(|_| vec![0.0f32; out_frames]).collect();
+    let mut output: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; out_frames]).collect();
 
     let process_channel = |src: &[f32], dst: &mut [f32]| {
         if in_sr % out_sr == 0 {
@@ -282,7 +280,9 @@ where
             #[cfg(target_arch = "x86_64")]
             if n == 2 {
                 // SAFETY: SSE2 is mandated by the x86_64 ABI.
-                unsafe { downsample_by_2_simd(src, dst); }
+                unsafe {
+                    downsample_by_2_simd(src, dst);
+                }
                 return;
             }
 
@@ -298,7 +298,9 @@ where
             #[cfg(target_arch = "x86_64")]
             if n == 2 {
                 // SAFETY: SSE2 is mandated by the x86_64 ABI.
-                unsafe { upsample_by_2_simd(src, dst); }
+                unsafe {
+                    upsample_by_2_simd(src, dst);
+                }
                 return;
             }
 
@@ -370,7 +372,13 @@ where
         }
     }
 
-    assemble_output(output, out_frames, channels, audio.num_channels(), target_sample_rate)
+    assemble_output(
+        output,
+        out_frames,
+        channels,
+        audio.num_channels(),
+        target_sample_rate,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -390,13 +398,18 @@ fn resample_medium<T>(
 where
     T: StandardSample,
 {
-    let in_sr    = audio.sample_rate().get();
+    let in_sr = audio.sample_rate().get();
     let channels = audio.num_channels().get() as usize;
-    let ratio    = f64::from(target_sample_rate.get()) / f64::from(in_sr);
-    let key      = ResamplerKey { in_sr, out_sr: target_sample_rate.get(), channels, quality: 1 };
+    let ratio = f64::from(target_sample_rate.get()) / f64::from(in_sr);
+    let key = ResamplerKey {
+        in_sr,
+        out_sr: target_sample_rate.get(),
+        channels,
+        quality: 1,
+    };
 
     let input_data = extract_channel_data(audio)?;
-    let in_sr_u64  = in_sr as u64;
+    let in_sr_u64 = in_sr as u64;
     let out_sr_u64 = target_sample_rate.get() as u64;
     let input_length = input_data[0].len();
     let expected_frames = ((input_length as u64 * out_sr_u64 + in_sr_u64 - 1) / in_sr_u64) as usize;
@@ -450,13 +463,18 @@ fn resample_high<T>(
 where
     T: StandardSample,
 {
-    let in_sr    = audio.sample_rate().get();
+    let in_sr = audio.sample_rate().get();
     let channels = audio.num_channels().get() as usize;
-    let ratio    = f64::from(target_sample_rate.get()) / f64::from(in_sr);
-    let key      = ResamplerKey { in_sr, out_sr: target_sample_rate.get(), channels, quality: 2 };
+    let ratio = f64::from(target_sample_rate.get()) / f64::from(in_sr);
+    let key = ResamplerKey {
+        in_sr,
+        out_sr: target_sample_rate.get(),
+        channels,
+        quality: 2,
+    };
 
     let input_data = extract_channel_data(audio)?;
-    let in_sr_u64  = in_sr as u64;
+    let in_sr_u64 = in_sr as u64;
     let out_sr_u64 = target_sample_rate.get() as u64;
     let input_length = input_data[0].len();
     let expected_frames = ((input_length as u64 * out_sr_u64 + in_sr_u64 - 1) / in_sr_u64) as usize;
@@ -529,7 +547,9 @@ where
         .collect();
 
     // Propagate the first error, if any.
-    let all_out: Vec<Vec<f32>> = channel_results.into_iter().collect::<AudioSampleResult<_>>()?;
+    let all_out: Vec<Vec<f32>> = channel_results
+        .into_iter()
+        .collect::<AudioSampleResult<_>>()?;
 
     if all_out.is_empty() || all_out[0].is_empty() {
         return Err(AudioSampleError::Processing(
@@ -538,7 +558,13 @@ where
     }
 
     let total_frames = all_out[0].len();
-    assemble_output(all_out, total_frames, channels, channel_count, target_sample_rate)
+    assemble_output(
+        all_out,
+        total_frames,
+        channels,
+        channel_count,
+        target_sample_rate,
+    )
 }
 
 /// Block-processing loop for a single channel using a single-channel rubato resampler.
@@ -554,7 +580,7 @@ fn resample_single_channel_blocked(
     let mut out = Vec::with_capacity(expected_frames + block_out);
 
     // Single-channel scratch buffers, reused across blocks.
-    let mut in_buf: Vec<Vec<f32>>  = vec![vec![0.0f32; block_in]];
+    let mut in_buf: Vec<Vec<f32>> = vec![vec![0.0f32; block_in]];
     let mut out_buf: Vec<Vec<f32>> = vec![vec![0.0f32; block_out]];
 
     for block_start in (0..input_length).step_by(block_in) {
@@ -641,8 +667,7 @@ where
 {
     if channels == 1 {
         // SAFETY: caller guarantees total_frames > 0.
-        let data =
-            unsafe { NonEmptyVec::new_unchecked(channel_data.into_iter().next().unwrap()) };
+        let data = unsafe { NonEmptyVec::new_unchecked(channel_data.into_iter().next().unwrap()) };
         return Ok(AudioSamples::from_mono_vec::<f32>(data, sample_rate));
     }
 
@@ -765,8 +790,7 @@ mod tests {
         let samples = (0..220500)
             .map(|x| (x as f32 * 2.0 * std::f32::consts::PI * 440.0 / 44100.0).sin())
             .collect::<Vec<f32>>();
-        let audio =
-            AudioSamples::new_mono(Array1::from_vec(samples), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(Array1::from_vec(samples), sample_rate!(44100)).unwrap();
 
         for quality in [
             ResamplingQuality::Fast,

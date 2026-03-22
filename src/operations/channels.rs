@@ -102,7 +102,7 @@ where
                         // 4-wide f64 vaddpd+vmulpd path. For f32 samples the
                         // f32→f64→f32 cast round-trip is a no-op; for other
                         // types it introduces at most 1 ULP of error.
-                        let left  = data.index_axis(Axis(0), 0);
+                        let left = data.index_axis(Axis(0), 0);
                         let right = data.index_axis(Axis(0), 1);
                         let n = left.len();
                         let mut mono_vec: Vec<T> = Vec::with_capacity(n);
@@ -114,7 +114,9 @@ where
                                 let lf: f32 = ls[i].cast_into();
                                 let rf: f32 = rs[i].cast_into();
                                 let avg: f64 = ((lf + rf) * 0.5f32) as f64;
-                                unsafe { dst.add(i).write(T::cast_from(avg)); }
+                                unsafe {
+                                    dst.add(i).write(T::cast_from(avg));
+                                }
                             }
                         } else {
                             // Non-contiguous fallback: iterator path.
@@ -122,10 +124,14 @@ where
                                 let lf: f32 = l.cast_into();
                                 let rf: f32 = r.cast_into();
                                 let avg: f64 = ((lf + rf) * 0.5f32) as f64;
-                                unsafe { dst.add(i).write(T::cast_from(avg)); }
+                                unsafe {
+                                    dst.add(i).write(T::cast_from(avg));
+                                }
                             }
                         }
-                        unsafe { mono_vec.set_len(n); }
+                        unsafe {
+                            mono_vec.set_len(n);
+                        }
                         let mono = Array1::from(mono_vec);
                         Ok(AudioSamples::new_mono(mono, self.sample_rate())?)
                     } else {
