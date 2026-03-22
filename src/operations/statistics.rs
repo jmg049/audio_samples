@@ -165,11 +165,11 @@ where
         match &self.data {
             AudioData::Mono(arr) => match arr.as_slice() {
                 Some(s) => abs_max_slice(s),
-                None    => arr.fold(zero, fold_ndarray),
+                None => arr.fold(zero, fold_ndarray),
             },
             AudioData::Multi(arr) => match arr.as_slice() {
                 Some(s) => abs_max_slice(s),
-                None    => arr.fold(zero, fold_ndarray),
+                None => arr.fold(zero, fold_ndarray),
             },
         }
     }
@@ -340,14 +340,26 @@ where
             AudioData::Mono(arr) => {
                 let s = match arr.as_slice() {
                     Some(s) => sum_sq_slice(s),
-                    None    => arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum(),
+                    None => arr
+                        .iter()
+                        .map(|&x| {
+                            let f: f64 = x.cast_into();
+                            f * f
+                        })
+                        .sum(),
                 };
                 (s, arr.len().get())
             }
             AudioData::Multi(arr) => {
                 let s = match arr.as_slice() {
                     Some(s) => sum_sq_slice(s),
-                    None    => arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum(),
+                    None => arr
+                        .iter()
+                        .map(|&x| {
+                            let f: f64 = x.cast_into();
+                            f * f
+                        })
+                        .sum(),
                 };
                 (s, arr.len().get())
             }
@@ -373,36 +385,74 @@ where
             let rem = chunks.remainder();
             for chunk in chunks {
                 // Load all 8 elements once; compiler keeps them in registers.
-                let x0 = chunk[0]; let x1 = chunk[1];
-                let x2 = chunk[2]; let x3 = chunk[3];
-                let x4 = chunk[4]; let x5 = chunk[5];
-                let x6 = chunk[6]; let x7 = chunk[7];
+                let x0 = chunk[0];
+                let x1 = chunk[1];
+                let x2 = chunk[2];
+                let x3 = chunk[3];
+                let x4 = chunk[4];
+                let x5 = chunk[5];
+                let x6 = chunk[6];
+                let x7 = chunk[7];
                 // sq: 8 independent f64 chains → 2 ymm accumulator registers.
-                let f0: f64 = x0.cast_into(); sq[0] += f0 * f0;
-                let f1: f64 = x1.cast_into(); sq[1] += f1 * f1;
-                let f2: f64 = x2.cast_into(); sq[2] += f2 * f2;
-                let f3: f64 = x3.cast_into(); sq[3] += f3 * f3;
-                let f4: f64 = x4.cast_into(); sq[4] += f4 * f4;
-                let f5: f64 = x5.cast_into(); sq[5] += f5 * f5;
-                let f6: f64 = x6.cast_into(); sq[6] += f6 * f6;
-                let f7: f64 = x7.cast_into(); sq[7] += f7 * f7;
+                let f0: f64 = x0.cast_into();
+                sq[0] += f0 * f0;
+                let f1: f64 = x1.cast_into();
+                sq[1] += f1 * f1;
+                let f2: f64 = x2.cast_into();
+                sq[2] += f2 * f2;
+                let f3: f64 = x3.cast_into();
+                sq[3] += f3 * f3;
+                let f4: f64 = x4.cast_into();
+                sq[4] += f4 * f4;
+                let f5: f64 = x5.cast_into();
+                sq[5] += f5 * f5;
+                let f6: f64 = x6.cast_into();
+                sq[6] += f6 * f6;
+                let f7: f64 = x7.cast_into();
+                sq[7] += f7 * f7;
                 // pk: 8-wide abs-max, SLP-vectorisable to vmaxps + vandps.
-                let ax0 = if x0 < zero { zero - x0 } else { x0 }; if ax0 > pk[0] { pk[0] = ax0; }
-                let ax1 = if x1 < zero { zero - x1 } else { x1 }; if ax1 > pk[1] { pk[1] = ax1; }
-                let ax2 = if x2 < zero { zero - x2 } else { x2 }; if ax2 > pk[2] { pk[2] = ax2; }
-                let ax3 = if x3 < zero { zero - x3 } else { x3 }; if ax3 > pk[3] { pk[3] = ax3; }
-                let ax4 = if x4 < zero { zero - x4 } else { x4 }; if ax4 > pk[4] { pk[4] = ax4; }
-                let ax5 = if x5 < zero { zero - x5 } else { x5 }; if ax5 > pk[5] { pk[5] = ax5; }
-                let ax6 = if x6 < zero { zero - x6 } else { x6 }; if ax6 > pk[6] { pk[6] = ax6; }
-                let ax7 = if x7 < zero { zero - x7 } else { x7 }; if ax7 > pk[7] { pk[7] = ax7; }
+                let ax0 = if x0 < zero { zero - x0 } else { x0 };
+                if ax0 > pk[0] {
+                    pk[0] = ax0;
+                }
+                let ax1 = if x1 < zero { zero - x1 } else { x1 };
+                if ax1 > pk[1] {
+                    pk[1] = ax1;
+                }
+                let ax2 = if x2 < zero { zero - x2 } else { x2 };
+                if ax2 > pk[2] {
+                    pk[2] = ax2;
+                }
+                let ax3 = if x3 < zero { zero - x3 } else { x3 };
+                if ax3 > pk[3] {
+                    pk[3] = ax3;
+                }
+                let ax4 = if x4 < zero { zero - x4 } else { x4 };
+                if ax4 > pk[4] {
+                    pk[4] = ax4;
+                }
+                let ax5 = if x5 < zero { zero - x5 } else { x5 };
+                if ax5 > pk[5] {
+                    pk[5] = ax5;
+                }
+                let ax6 = if x6 < zero { zero - x6 } else { x6 };
+                if ax6 > pk[6] {
+                    pk[6] = ax6;
+                }
+                let ax7 = if x7 < zero { zero - x7 } else { x7 };
+                if ax7 > pk[7] {
+                    pk[7] = ax7;
+                }
             }
             for &x in rem {
                 let f: f64 = x.cast_into();
                 sq[0] += f * f;
                 let ax = if x < zero { zero - x } else { x };
-                if ax > pk[0] { pk[0] = ax; }
+                if ax > pk[0] {
+                    pk[0] = ax;
+                }
             }
-            let sum_sq = sq[0]+sq[1]+sq[2]+sq[3]+sq[4]+sq[5]+sq[6]+sq[7];
+            let sum_sq = sq[0] + sq[1] + sq[2] + sq[3] + sq[4] + sq[5] + sq[6] + sq[7];
             let peak = pk.iter().fold(zero, |a, &b| if b > a { b } else { a });
             (sum_sq, peak)
         };
@@ -412,7 +462,13 @@ where
                 let (sq, pk) = match arr.as_slice() {
                     Some(s) => combined_slice(s),
                     None => {
-                        let sq = arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum();
+                        let sq = arr
+                            .iter()
+                            .map(|&x| {
+                                let f: f64 = x.cast_into();
+                                f * f
+                            })
+                            .sum();
                         let pk = arr.fold(zero, |acc, &x| {
                             let ax = if x < zero { zero - x } else { x };
                             if ax > acc { ax } else { acc }
@@ -426,7 +482,13 @@ where
                 let (sq, pk) = match arr.as_slice() {
                     Some(s) => combined_slice(s),
                     None => {
-                        let sq = arr.iter().map(|&x| { let f: f64 = x.cast_into(); f * f }).sum();
+                        let sq = arr
+                            .iter()
+                            .map(|&x| {
+                                let f: f64 = x.cast_into();
+                                f * f
+                            })
+                            .sum();
                         let pk = arr.fold(zero, |acc, &x| {
                             let ax = if x < zero { zero - x } else { x };
                             if ax > acc { ax } else { acc }

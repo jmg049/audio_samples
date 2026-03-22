@@ -1056,7 +1056,11 @@ where
     /// assert_eq!(audio[1], -1.0);
     /// assert_eq!(audio[3], -0.5);
     /// ```
-    fn clip_in_place(&mut self, min_val: Self::Sample, max_val: Self::Sample) -> AudioSampleResult<()>;
+    fn clip_in_place(
+        &mut self,
+        min_val: Self::Sample,
+        max_val: Self::Sample,
+    ) -> AudioSampleResult<()>;
 
     /// Resamples audio to a new sample rate using high-quality resampling.
     ///

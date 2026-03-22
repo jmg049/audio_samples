@@ -1,0 +1,41 @@
+[package]
+name    = "audio_samples_benchmarks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies.audio_samples]
+path = "../.."
+default-features = false
+features = ["resampling", "iir-filtering", "channels", "processing", "statistics", "editing"]
+
+[[bin]]
+name = "resample"
+
+[[bin]]
+name = "filter"
+
+[[bin]]
+name = "volume"
+
+[[bin]]
+name = "channels"
+
+[[bin]]
+name = "format_conv"
+
+[[bin]]
+name = "processing"
+
+[[bin]]
+name = "editing"
+
+[[bin]]
+name = "show_results"
+
+[profile.release]
+opt-level = 3
+lto       = "thin"
+
+# Mirror the patch declared in the workspace root so path resolution is consistent.
+[patch.crates-io]
+audio_samples = { path = "../.." }

@@ -38,8 +38,8 @@ use crate::repr::AudioData;
 use crate::repr::SampleRate;
 
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, LayoutError,
-    ParameterError, StandardSample,
+    AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, LayoutError, ParameterError,
+    StandardSample,
     operations::traits::{AudioProcessing, AudioStatistics},
 };
 
@@ -398,7 +398,11 @@ where
     /// assert_eq!(audio[3], -0.5);
     /// ```
     #[inline]
-    fn clip_in_place(&mut self, min_val: Self::Sample, max_val: Self::Sample) -> AudioSampleResult<()> {
+    fn clip_in_place(
+        &mut self,
+        min_val: Self::Sample,
+        max_val: Self::Sample,
+    ) -> AudioSampleResult<()> {
         if min_val > max_val {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                 "clipping_range",

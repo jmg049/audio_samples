@@ -1065,7 +1065,11 @@ impl_float_to_float!(f64, f32);
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn abs_max_f32_avx2(slice: &[f32]) -> f32 {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        _mm_cvtss_f32, _mm_max_ps, _mm_max_ss, _mm_movehl_ps, _mm_shuffle_ps, _mm256_andnot_ps,
+        _mm256_castps256_ps128, _mm256_extractf128_ps, _mm256_loadu_ps, _mm256_max_ps,
+        _mm256_set1_ps, _mm256_setzero_ps,
+    };
 
     // Bit-mask that strips the IEEE 754 sign bit from every lane.
     let sign_mask = _mm256_set1_ps(-0.0_f32);
@@ -1085,8 +1089,8 @@ unsafe fn abs_max_f32_avx2(slice: &[f32]) -> f32 {
     }
 
     // Horizontal reduction: fold 8 f32 lanes down to one scalar.
-    let hi128 = _mm256_extractf128_ps(max_v, 1);   // lanes [4..7]
-    let lo128 = _mm256_castps256_ps128(max_v);      // lanes [0..3]
+    let hi128 = _mm256_extractf128_ps(max_v, 1); // lanes [4..7]
+    let lo128 = _mm256_castps256_ps128(max_v); // lanes [0..3]
     let max128 = _mm_max_ps(lo128, hi128);
     let shuf = _mm_movehl_ps(max128, max128);
     let max64 = _mm_max_ps(max128, shuf);
@@ -1097,7 +1101,9 @@ unsafe fn abs_max_f32_avx2(slice: &[f32]) -> f32 {
     // Scalar tail for the remaining < 8 samples.
     for &x in &slice[chunks * 8..] {
         let ax = x.abs();
-        if ax > result { result = ax; }
+        if ax > result {
+            result = ax;
+        }
     }
     result
 }
@@ -1111,7 +1117,10 @@ impl AudioSample for u8 {
     const BITS: Self = 8;
     const LABEL: &'static str = "u8";
     const SAMPLE_TYPE: SampleType = SampleType::U8;
-    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
+    #[inline]
+    fn clamp_to(self, min: Self, max: Self) -> Self {
+        Ord::clamp(self, min, max)
+    }
 }
 
 impl AudioSample for i16 {
@@ -1120,7 +1129,10 @@ impl AudioSample for i16 {
     const BITS: u8 = 16;
     const LABEL: &'static str = "i16";
     const SAMPLE_TYPE: SampleType = SampleType::I16;
-    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
+    #[inline]
+    fn clamp_to(self, min: Self, max: Self) -> Self {
+        Ord::clamp(self, min, max)
+    }
 }
 
 impl AudioSample for I24 {
@@ -1134,7 +1146,10 @@ impl AudioSample for I24 {
     const BITS: u8 = 24;
     const LABEL: &'static str = "I24";
     const SAMPLE_TYPE: SampleType = SampleType::I24;
-    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
+    #[inline]
+    fn clamp_to(self, min: Self, max: Self) -> Self {
+        Ord::clamp(self, min, max)
+    }
 }
 
 impl AudioSample for i32 {
@@ -1143,7 +1158,10 @@ impl AudioSample for i32 {
     const BITS: u8 = 32;
     const LABEL: &'static str = "i32";
     const SAMPLE_TYPE: SampleType = SampleType::I32;
-    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { Ord::clamp(self, min, max) }
+    #[inline]
+    fn clamp_to(self, min: Self, max: Self) -> Self {
+        Ord::clamp(self, min, max)
+    }
 }
 
 impl AudioSample for f32 {
@@ -1154,12 +1172,16 @@ impl AudioSample for f32 {
     const SAMPLE_TYPE: SampleType = SampleType::F32;
     /// Uses `f32::clamp` — compiles to `VMAXSS`/`VMINSS` (and `VMAXPS`/`VMINPS` in
     /// vectorised loops), matching what C achieves with `-ffast-math`.
-    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { self.clamp(min, max) }
+    #[inline]
+    fn clamp_to(self, min: Self, max: Self) -> Self {
+        self.clamp(min, max)
+    }
 
     #[inline]
     fn avx2_abs_max(slice: &[Self]) -> Option<Self> {
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") {
+            // safety: caller must ensure AVX2 is available, which we check with is_x86_feature_detected.
             return Some(unsafe { abs_max_f32_avx2(slice) });
         }
         None
@@ -1173,7 +1195,10 @@ impl AudioSample for f64 {
     const LABEL: &'static str = "f64";
     const SAMPLE_TYPE: SampleType = SampleType::F64;
     /// Uses `f64::clamp` — compiles to `VMAXSD`/`VMINSD` in vectorised loops.
-    #[inline] fn clamp_to(self, min: Self, max: Self) -> Self { self.clamp(min, max) }
+    #[inline]
+    fn clamp_to(self, min: Self, max: Self) -> Self {
+        self.clamp(min, max)
+    }
 }
 
 // ========================

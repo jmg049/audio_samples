@@ -904,7 +904,8 @@ where
                     }
                     AudioData::Multi(arr) => {
                         for mut ch in arr.axis_iter_mut(Axis(0)) {
-                            let s = ch.as_slice_mut()
+                            let s = ch
+                                .as_slice_mut()
                                 .expect("fade_in: channel row must be contiguous");
                             apply_gain_to_slice(&mut s[..n], step, 0.0, $gain);
                         }
@@ -914,10 +915,14 @@ where
         }
 
         match curve {
-            FadeCurve::Linear     => apply_fade_in!(|p: f64| p),
+            FadeCurve::Linear => apply_fade_in!(|p: f64| p),
             FadeCurve::Exponential => apply_fade_in!(|p: f64| p * p),
             FadeCurve::Logarithmic => apply_fade_in!(|p: f64| {
-                if p <= 0.0 { 0.0 } else { p.ln_1p() / 2.0f64.ln() }
+                if p <= 0.0 {
+                    0.0
+                } else {
+                    p.ln_1p() / 2.0f64.ln()
+                }
             }),
             FadeCurve::SmoothStep => apply_fade_in!(|p: f64| p * p * 2.0f64.mul_add(-p, 3.0)),
         }
@@ -979,11 +984,17 @@ where
             ($gain:expr) => {{
                 match &mut self.data {
                     AudioData::Mono(arr) => {
-                        apply_gain_to_slice(&mut arr.as_slice_mut()[start..start + n], -step, 1.0, $gain);
+                        apply_gain_to_slice(
+                            &mut arr.as_slice_mut()[start..start + n],
+                            -step,
+                            1.0,
+                            $gain,
+                        );
                     }
                     AudioData::Multi(arr) => {
                         for mut ch in arr.axis_iter_mut(Axis(0)) {
-                            let s = ch.as_slice_mut()
+                            let s = ch
+                                .as_slice_mut()
                                 .expect("fade_out: channel row must be contiguous");
                             apply_gain_to_slice(&mut s[start..start + n], -step, 1.0, $gain);
                         }
@@ -993,12 +1004,16 @@ where
         }
 
         match curve {
-            FadeCurve::Linear      => apply_fade_out!(|p: f64| p),
+            FadeCurve::Linear => apply_fade_out!(|p: f64| p),
             FadeCurve::Exponential => apply_fade_out!(|p: f64| p * p),
             FadeCurve::Logarithmic => apply_fade_out!(|p: f64| {
-                if p <= 0.0 { 0.0 } else { p.ln_1p() / 2.0f64.ln() }
+                if p <= 0.0 {
+                    0.0
+                } else {
+                    p.ln_1p() / 2.0f64.ln()
+                }
             }),
-            FadeCurve::SmoothStep  => apply_fade_out!(|p: f64| p * p * 2.0f64.mul_add(-p, 3.0)),
+            FadeCurve::SmoothStep => apply_fade_out!(|p: f64| p * p * 2.0f64.mul_add(-p, 3.0)),
         }
 
         Ok(())

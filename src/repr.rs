@@ -2492,25 +2492,23 @@ where
     {
         match self {
             AudioData::Mono(m) => {
-                let out = if let Some(slice) = m.as_slice() {
-                    // Fast path: flat slice lets the compiler auto-vectorise.
-                    let vec: Vec<U> = slice.iter().map(|&x| f(x)).collect();
-                    Array1::from(vec)
-                } else {
-                    m.as_view().mapv(&f)
-                };
+                let out = m.as_slice().map_or_else(
+                    || m.as_view().mapv(&f),
+                    |slice| {
+                        // Fast path: flat slice lets the compiler auto-vectorise.
+                        let vec: Vec<U> = slice.iter().map(|&x| f(x)).collect();
+                        Array1::from(vec)
+                    },
+                );
                 AudioData::Mono(MonoData(MonoRepr::Owned(out)))
             }
             AudioData::Multi(m) => {
-                let out = if let Some(slice) = m.as_slice() {
+                let out = m.as_slice().map_or_else(|| m.as_view().mapv(&f), |slice| {
                     // Fast path: collect from flat C-order slice then reshape.
                     let (rows, cols) = m.as_view().dim();
                     let vec: Vec<U> = slice.iter().map(|&x| f(x)).collect();
-                    Array2::from_shape_vec((rows, cols), vec)
-                        .expect("slice length matches shape")
-                } else {
-                    m.as_view().mapv(&f)
-                };
+                    Array2::from_shape_vec((rows, cols), vec).unwrap_or_else(|_| unreachable!("Output shape is guaranteed to match input shape since we're just mapping elementwise"))
+                 });
                 AudioData::Multi(MultiData(MultiRepr::Owned(out)))
             }
         }

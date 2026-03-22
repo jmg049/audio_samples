@@ -357,7 +357,15 @@ impl Biquad {
         let b2 = b_coeffs.get(2).copied().unwrap_or(0.0) / a0;
         let a1 = a_coeffs.get(1).copied().unwrap_or(0.0) / a0;
         let a2 = a_coeffs.get(2).copied().unwrap_or(0.0) / a0;
-        Self { b0, b1, b2, a1, a2, s0: 0.0, s1: 0.0 }
+        Self {
+            b0,
+            b1,
+            b2,
+            a1,
+            a2,
+            s0: 0.0,
+            s1: 0.0,
+        }
     }
 
     #[inline(always)]
@@ -1519,7 +1527,10 @@ fn design_butterworth_filter(
             } else {
                 let sos = design_butterworth_lowpass_sos(order, cutoff, sample_rate);
                 Ok(FilterRepresentation::Cascade(
-                    sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                    sos.sections
+                        .iter()
+                        .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
+                        .collect(),
                 ))
             }
         }
@@ -1545,7 +1556,10 @@ fn design_butterworth_filter(
             } else {
                 let sos = design_butterworth_highpass_sos(order, cutoff, sample_rate);
                 Ok(FilterRepresentation::Cascade(
-                    sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                    sos.sections
+                        .iter()
+                        .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
+                        .collect(),
                 ))
             }
         }
@@ -1572,7 +1586,10 @@ fn design_butterworth_filter(
 
             let sos = design_butterworth_bandpass_sos(order, low_freq, high_freq, sample_rate);
             Ok(FilterRepresentation::Cascade(
-                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                sos.sections
+                    .iter()
+                    .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
+                    .collect(),
             ))
         }
         FilterResponse::BandStop => {
@@ -1633,7 +1650,10 @@ fn design_chebyshev_i_filter(
 
             let sos = design_chebyshev1_lowpass_sos(order, cutoff, ripple, sample_rate);
             Ok(FilterRepresentation::Cascade(
-                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                sos.sections
+                    .iter()
+                    .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
+                    .collect(),
             ))
         }
         FilterResponse::HighPass => {
@@ -1653,7 +1673,10 @@ fn design_chebyshev_i_filter(
 
             let sos = design_chebyshev1_highpass_sos(order, cutoff, ripple, sample_rate);
             Ok(FilterRepresentation::Cascade(
-                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                sos.sections
+                    .iter()
+                    .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
+                    .collect(),
             ))
         }
         FilterResponse::BandPass => {
@@ -1680,7 +1703,10 @@ fn design_chebyshev_i_filter(
             let sos =
                 design_chebyshev1_bandpass_sos(order, low_freq, high_freq, ripple, sample_rate);
             Ok(FilterRepresentation::Cascade(
-                sos.sections.iter().map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs)).collect(),
+                sos.sections
+                    .iter()
+                    .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
+                    .collect(),
             ))
         }
         FilterResponse::BandStop => {
