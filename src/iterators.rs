@@ -103,7 +103,9 @@ where
     /// }
     /// assert_eq!(count, 2);
     /// ```
-    fn frames(&'a self) -> FrameIterator<'a, T>;
+    fn frames<'iter>(&'iter self) -> FrameIterator<'iter, 'a, T>
+    where
+        'a: 'iter;
 
     /// Returns an iterator over complete channels.
     ///
@@ -168,7 +170,13 @@ where
     /// // Conceptual usage via the trait interface (usize arguments):
     /// let windows: Vec<_> = audio.windows(3_usize, 3_usize).collect();
     /// ```
-    fn windows(&'a self, window_size: usize, hop_size: usize) -> WindowIterator<'a, T>;
+    fn windows<'iter>(
+        &'iter self,
+        window_size: usize,
+        hop_size: usize,
+    ) -> WindowIterator<'iter, 'a, T>
+    where
+        'a: 'iter;
 }
 
 impl<'a, T> AudioSamples<'a, T>
@@ -211,7 +219,10 @@ where
     /// ```
     #[inline]
     #[must_use]
-    pub fn frames(&'a self) -> FrameIterator<'a, T> {
+    pub fn frames<'iter>(&'iter self) -> FrameIterator<'iter, 'a, T>
+    where
+        'a: 'iter,
+    {
         FrameIterator::new(self)
     }
 
@@ -300,11 +311,14 @@ where
     /// ```
     #[inline]
     #[must_use]
-    pub fn windows(
-        &'a self,
+    pub fn windows<'iter>(
+        &'iter self,
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
-    ) -> WindowIterator<'a, T> {
+    ) -> WindowIterator<'iter, 'a, T>
+    where
+        'a: 'iter,
+    {
         WindowIterator::new(self, window_size, hop_size)
     }
 
@@ -666,20 +680,22 @@ where
 ///
 /// Use higher-level windowed or transformation APIs when temporal context
 /// beyond a single frame is required.
-pub struct FrameIterator<'a, T>
+pub struct FrameIterator<'iter, 'a, T>
 where
     T: StandardSample,
+    'a: 'iter,
 {
     /// The source audio data over which frames are iterated.
-    audio: &'a AudioSamples<'a, T>,
+    audio: &'iter AudioSamples<'a, T>,
     current_frame: usize,
     total_frames: usize,
     _phantom: PhantomData<T>,
 }
 
-impl<'a, T> FrameIterator<'a, T>
+impl<'iter, 'a, T> FrameIterator<'iter, 'a, T>
 where
     T: StandardSample,
+    'a: 'iter,
 {
     /// Constructs a new frame iterator over the given audio.
     ///
@@ -703,7 +719,7 @@ where
     /// This function does not panic.
     #[inline]
     #[must_use]
-    pub fn new(audio: &'a AudioSamples<'a, T>) -> Self {
+    pub fn new(audio: &'iter AudioSamples<'a, T>) -> Self {
         let total_frames = audio.samples_per_channel().get();
         Self {
             audio,
@@ -714,11 +730,12 @@ where
     }
 }
 
-impl<'a, T> Iterator for FrameIterator<'a, T>
+impl<'iter, 'a, T> Iterator for FrameIterator<'iter, 'a, T>
 where
     T: StandardSample,
+    'a: 'iter,
 {
-    type Item = AudioSamples<'a, T>;
+    type Item = AudioSamples<'iter, T>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -728,9 +745,10 @@ where
 
         let frame_range = self.current_frame..self.current_frame + 1;
         self.current_frame += 1;
-
-        // Return a view of a single frame
-        self.audio.slice_samples(frame_range).ok()
+        // Copy the &'iter reference so that slice_samples returns AudioSamples<'iter, T>
+        // rather than a shorter-lived borrow through &mut self.
+        let audio: &'iter AudioSamples<'a, T> = self.audio;
+        audio.slice_samples(frame_range).ok()
     }
 
     #[inline]
@@ -740,7 +758,7 @@ where
     }
 }
 
-impl<T> ExactSizeIterator for FrameIterator<'_, T> where T: StandardSample {}
+impl<T> ExactSizeIterator for FrameIterator<'_, '_, T> where T: StandardSample {}
 
 /// Iterates over complete channels of an [`AudioSamples`] instance.
 ///
@@ -931,12 +949,13 @@ pub enum PaddingMode {
 /// lifetime of iteration. It is not suitable for overlapping mutable access or
 /// algorithms that require shared ownership of window data.
 #[cfg(feature = "editing")]
-pub struct WindowIterator<'a, T>
+pub struct WindowIterator<'iter, 'a, T>
 where
     T: StandardSample,
+    'a: 'iter,
 {
     /// The source audio from which windows are extracted.
-    audio: &'a AudioSamples<'a, T>,
+    audio: &'iter AudioSamples<'a, T>,
     window_size: NonZeroUsize,
     hop_size: NonZeroUsize,
     current_position: usize,
@@ -948,9 +967,10 @@ where
 }
 
 #[cfg(feature = "editing")]
-impl<'a, T> WindowIterator<'a, T>
+impl<'iter, 'a, T> WindowIterator<'iter, 'a, T>
 where
     T: StandardSample,
+    'a: 'iter,
 {
     /// Constructs a new window iterator over the given audio.
     ///
@@ -979,7 +999,7 @@ where
     ///
     /// This function does not panic.
     fn new(
-        audio: &'a AudioSamples<'a, T>,
+        audio: &'iter AudioSamples<'a, T>,
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
     ) -> Self {
@@ -1068,7 +1088,7 @@ where
 }
 
 #[cfg(feature = "editing")]
-impl<T> Iterator for WindowIterator<'_, T>
+impl<T> Iterator for WindowIterator<'_, '_, T>
 where
     T: StandardSample,
 {
@@ -1082,10 +1102,13 @@ where
 
         let start_pos = self.current_position;
         let end_pos = start_pos + self.window_size.get();
+        // Copy the stored reference so that slice_samples borrows from the
+        // audio data rather than from the short-lived &mut self borrow.
+        let audio = self.audio;
 
         let window = if end_pos <= self.total_samples.get() {
             // Complete window within bounds
-            self.audio
+            audio
                 .slice_samples(start_pos..end_pos)
                 .ok()
                 .map(super::repr::AudioSamples::into_owned)
@@ -1095,12 +1118,11 @@ where
                 PaddingMode::Zero => {
                     // Zero-pad to maintain consistent window size
                     let available_samples = self.total_samples.get().saturating_sub(start_pos);
-                    match &self.audio.data {
+                    match &audio.data {
                         AudioData::Mono(_) => {
                             // Add available samples
                             let starting_slice = if available_samples > 0 {
-                                let slice = self
-                                    .audio
+                                let slice = audio
                                     .slice_samples(start_pos..self.total_samples.get())
                                     .ok()?
                                     .into_owned();
@@ -1113,7 +1135,7 @@ where
                             let length = NonZeroUsize::new(silence_samples)?;
                             let silence = if silence_samples > 0 {
                                 let silence =
-                                    AudioSamples::<T>::zeros_mono(length, self.audio.sample_rate);
+                                    AudioSamples::<T>::zeros_mono(length, audio.sample_rate);
                                 Some(silence)
                             } else {
                                 return starting_slice;
@@ -1132,8 +1154,7 @@ where
                         }
                         AudioData::Multi(_) => {
                             let interleaved_slice = if available_samples > 0 {
-                                let slice = self
-                                    .audio
+                                let slice = audio
                                     .slice_samples(start_pos..self.total_samples.get())
                                     .ok()?
                                     .into_owned();
@@ -1151,9 +1172,9 @@ where
                             let length = NonZeroUsize::new(remaining_samples)?;
 
                             let silence = AudioSamples::<T>::zeros_multi_channel(
-                                self.audio.num_channels(),
+                                audio.num_channels(),
                                 length,
-                                self.audio.sample_rate,
+                                audio.sample_rate,
                             );
 
                             match interleaved_slice {
@@ -1173,7 +1194,7 @@ where
                         return None;
                     }
 
-                    self.audio
+                    audio
                         .slice_samples(start_pos..self.total_samples.get())
                         .ok()
                         .map(super::repr::AudioSamples::into_owned)
@@ -1198,7 +1219,7 @@ where
 }
 
 #[cfg(feature = "editing")]
-impl<T> ExactSizeIterator for WindowIterator<'_, T> where T: StandardSample {}
+impl<T> ExactSizeIterator for WindowIterator<'_, '_, T> where T: StandardSample {}
 
 #[cfg(test)]
 mod tests {

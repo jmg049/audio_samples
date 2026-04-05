@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -12,6 +12,10 @@ description = "A typed audio processing library for Rust that treats audio as a 
 
 keywords = ["audio", "dsp", "api"]
 categories = ["encoding", "multimedia", "science"]
+
+[package.metadata.docs.rs]
+features = ["full"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "audio_samples"
