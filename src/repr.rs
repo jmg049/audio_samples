@@ -1999,8 +1999,13 @@ where
 
     /// Create a mutably-borrowed version of self.
     ///
-    /// If the underlying storage is an immutable borrow it is promoted to owned
-    /// before the mutable view is created so that write-through is safe.
+    /// Returns an `AudioData` that holds a `BorrowedMut` view into `self`.
+    ///
+    /// If the underlying storage is an immutable borrow it is first promoted to
+    /// owned by **cloning** the sample buffer before the mutable view is created.
+    /// This allocation is a one-time cost; subsequent mutable operations on the
+    /// resulting view are zero-copy. If the storage is already owned or a mutable
+    /// borrow, no allocation occurs.
     #[inline]
     #[must_use]
     pub fn borrow_mut(&mut self) -> AudioData<'_, T> {
@@ -3527,8 +3532,11 @@ where
     ///
     /// Creates a zero-copy mutable view of this `AudioSamples`. The returned
     /// instance shares the underlying sample buffer and writes through to `self`.
-    /// If the underlying storage is currently an immutable borrow it is promoted
-    /// to owned before the mutable view is created.
+    ///
+    /// If the underlying storage is currently an immutable borrow it is first
+    /// **cloned** (promoted to owned) before the mutable view is created — this is
+    /// a one-time allocation. If the storage is already owned or a mutable borrow,
+    /// no allocation occurs.
     ///
     /// # Examples
     ///
@@ -3536,12 +3544,25 @@ where
     /// use audio_samples::{AudioSamples, sample_rate};
     /// use ndarray::array;
     ///
+    /// // Write-through on owned storage — no allocation.
     /// let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
     /// {
     ///     let mut view = audio.borrow_mut();
     ///     view.apply(|s| s * 2.0);
     /// }
     /// assert_eq!(audio.as_slice().unwrap(), &[2.0f32, 4.0, 6.0]);
+    ///
+    /// // Immutable-borrow source is promoted to owned before the mutable view is created.
+    /// let source = [3.0f32, 4.0, 5.0];
+    /// let mut borrowed = AudioSamples::new_mono_from_slice(
+    ///     non_empty_slice::NonEmptySlice::from_slice(&source).unwrap(),
+    ///     sample_rate!(44100),
+    /// );
+    /// {
+    ///     let mut view = borrowed.borrow_mut();
+    ///     view.apply(|s| s + 1.0);
+    /// }
+    /// assert_eq!(borrowed.as_vec(), vec![4.0f32, 5.0, 6.0]);
     /// ```
     #[inline]
     #[must_use]
@@ -6873,5 +6894,43 @@ mod tests {
             .into_owned();
         assert!(audio.replace_data(new_data).is_ok());
         assert_eq!(audio.sample_rate(), original_rate);
+    }
+
+    #[test]
+    fn test_borrow_creates_immutable_view() {
+        let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
+        let borrowed = audio.borrow();
+        assert_eq!(borrowed.as_vec(), vec![1.0f32, 2.0, 3.0]);
+        assert_eq!(borrowed.sample_rate(), audio.sample_rate());
+    }
+
+    #[test]
+    fn test_borrow_mut_writes_through_on_owned_storage() {
+        let mut audio =
+            AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
+        {
+            let mut view = audio.borrow_mut();
+            view.apply(|s| s * 2.0);
+        }
+        assert_eq!(audio.as_vec(), vec![2.0f32, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_borrow_mut_promotes_immutable_borrow_to_owned() {
+        use non_empty_slice::NonEmptySlice;
+        let source = [3.0f32, 4.0, 5.0];
+        let slice = NonEmptySlice::from_slice(&source).unwrap();
+        // Construct from an immutable slice — storage is Borrowed.
+        let mut immut_audio = AudioSamples::new_mono_from_slice(slice, sample_rate!(44100));
+        {
+            // borrow_mut() must promote the immutable borrow to owned (clone) then
+            // return a write-through mutable view.
+            let mut view = immut_audio.borrow_mut();
+            view.apply(|s| s + 1.0);
+        }
+        // Writes must be visible on the promoted-to-owned storage.
+        assert_eq!(immut_audio.as_vec(), vec![4.0f32, 5.0, 6.0]);
+        // Original source slice must be unchanged.
+        assert_eq!(source, [3.0f32, 4.0, 5.0]);
     }
 }
