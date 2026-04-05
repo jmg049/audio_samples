@@ -1851,7 +1851,7 @@ where
 /// are responsible for upholding the non-empty invariant.
 #[derive(Debug, PartialEq)]
 #[allow(clippy::exhaustive_enums)]
-pub enum AudioData<'a, T>
+pub(crate) enum AudioData<'a, T>
 where
     T: StandardSample,
 {
@@ -1993,6 +1993,23 @@ where
             }
             AudioData::Multi(multi_data) => {
                 AudioData::Multi(MultiData(MultiRepr::Borrowed(multi_data.as_view())))
+            }
+        }
+    }
+
+    /// Create a mutably-borrowed version of self.
+    ///
+    /// If the underlying storage is an immutable borrow it is promoted to owned
+    /// before the mutable view is created so that write-through is safe.
+    #[inline]
+    #[must_use]
+    pub fn borrow_mut(&mut self) -> AudioData<'_, T> {
+        match self {
+            AudioData::Mono(mono_data) => {
+                AudioData::Mono(MonoData(MonoRepr::BorrowedMut(mono_data.to_mut())))
+            }
+            AudioData::Multi(multi_data) => {
+                AudioData::Multi(MultiData(MultiRepr::BorrowedMut(multi_data.view_mut())))
             }
         }
     }
@@ -3283,7 +3300,7 @@ where
     T: StandardSample,
 {
     /// The audio sample data.
-    pub data: AudioData<'a, T>,
+    pub(crate) data: AudioData<'a, T>,
     /// Sample rate in Hz (guaranteed non-zero).
     pub sample_rate: SampleRate,
     // pub layout: ChannelLayout,
@@ -3431,7 +3448,7 @@ where
     /// Creates AudioSamples from owned data.
     #[inline]
     #[must_use]
-    pub fn from_owned(data: AudioData<'_, T>, sample_rate: SampleRate) -> Self {
+    pub(crate) fn from_owned(data: AudioData<'_, T>, sample_rate: SampleRate) -> Self {
         let owned = data.into_owned();
 
         Self {
@@ -3443,7 +3460,7 @@ where
     /// Consumes self and returns the underlying AudioData
     #[inline]
     #[must_use]
-    pub fn into_data(self) -> AudioData<'static, T> {
+    pub(crate) fn into_data(self) -> AudioData<'static, T> {
         self.data.into_owned()
     }
 
@@ -3478,17 +3495,61 @@ where
     /// for most use cases.
     #[inline]
     #[must_use]
-    pub const fn new(data: AudioData<'a, T>, sample_rate: SampleRate) -> Self {
+    pub(crate) const fn new(data: AudioData<'a, T>, sample_rate: SampleRate) -> Self {
         Self { data, sample_rate }
     }
 
     /// Borrows the audio data as an AudioSamples with the same lifetime.
+    ///
+    /// Creates a zero-copy immutable view of this `AudioSamples`. The returned
+    /// instance shares the underlying sample buffer and will not allocate.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
+    /// let borrowed = audio.borrow();
+    /// assert_eq!(borrowed.as_slice(), audio.as_slice());
+    /// ```
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> AudioSamples<'_, T> {
         AudioSamples {
             data: self.data.borrow(),
             sample_rate: self.sample_rate,
+        }
+    }
+
+    /// Mutably borrows the audio data as an `AudioSamples` with the same lifetime.
+    ///
+    /// Creates a zero-copy mutable view of this `AudioSamples`. The returned
+    /// instance shares the underlying sample buffer and writes through to `self`.
+    /// If the underlying storage is currently an immutable borrow it is promoted
+    /// to owned before the mutable view is created.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
+    /// {
+    ///     let mut view = audio.borrow_mut();
+    ///     view.apply(|s| s * 2.0);
+    /// }
+    /// assert_eq!(audio.as_slice().unwrap(), &[2.0f32, 4.0, 6.0]);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn borrow_mut(&mut self) -> AudioSamples<'_, T> {
+        let sample_rate = self.sample_rate;
+        AudioSamples {
+            data: self.data.borrow_mut(),
+            sample_rate,
         }
     }
 
@@ -3532,7 +3593,7 @@ where
     /// A new `AudioSamples` instance borrowing the provided data
     #[inline]
     #[must_use]
-    pub const fn from_borrowed(data: AudioData<'a, T>, sample_rate: SampleRate) -> Self {
+    pub(crate) const fn from_borrowed(data: AudioData<'a, T>, sample_rate: SampleRate) -> Self {
         Self { data, sample_rate }
     }
 
@@ -3548,7 +3609,7 @@ where
     /// A new `AudioSamples` instance borrowing the provided data.
     #[inline]
     #[must_use]
-    pub const fn from_borrowed_with_layout(
+    pub(crate) const fn from_borrowed_with_layout(
         data: AudioData<'a, T>,
         sample_rate: SampleRate,
     ) -> Self {
@@ -4529,26 +4590,8 @@ where
     ///
     /// # Errors
     /// - Returns `ParameterError` if the new data has a different number of channels
-    ///
-    /// # Examples
-    /// ```rust
-    /// use audio_samples::{AudioSamples, AudioData, sample_rate};
-    /// use ndarray::array;
-    ///
-    /// // Create initial audio
-    /// let initial_data = array![1.0f32, 2.0, 3.0];
-    /// let mut audio = AudioSamples::new_mono(initial_data, sample_rate!(44100)).unwrap();
-    ///
-    /// // Replace with new data
-    /// let new_data = AudioData::new_mono(array![4.0f32, 5.0, 6.0, 7.0]).unwrap();
-    /// audio.replace_data(new_data)?;
-    ///
-    /// assert_eq!(audio.samples_per_channel().get(), 4);
-    /// assert_eq!(audio.sample_rate().get(), 44100); // Preserved
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
     #[inline]
-    pub fn replace_data(&mut self, new_data: AudioData<'a, T>) -> AudioSampleResult<()> {
+    pub(crate) fn replace_data(&mut self, new_data: AudioData<'a, T>) -> AudioSampleResult<()> {
         // Validate channel count compatibility
         let current_channels = self.data.num_channels();
         let new_channels = new_data.num_channels();
@@ -6030,7 +6073,7 @@ where
     /// # Errors
     /// Returns an error if `stereo_data` is mono or has a channel count other than 2.
     #[inline]
-    pub fn new(stereo_data: AudioData<'a, T>, sample_rate: SampleRate) -> AudioSampleResult<Self> {
+    pub(crate) fn new(stereo_data: AudioData<'a, T>, sample_rate: SampleRate) -> AudioSampleResult<Self> {
         // Separated failure conditions which the following if statements check allow for more descriptive errors.
 
         if stereo_data.is_mono() {

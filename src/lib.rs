@@ -318,7 +318,6 @@ pub use crate::error::{
     AudioSampleError, AudioSampleResult, ConversionError, FeatureError, LayoutError,
     ParameterError, ProcessingError,
 };
-pub use crate::repr::AudioData;
 pub use crate::repr::StereoAudioSamples;
 pub use crate::repr::{AudioSamples, SampleType};
 pub use crate::traits::{

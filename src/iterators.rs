@@ -51,7 +51,8 @@
 use non_empty_slice::{NonEmptyVec, non_empty_vec};
 
 use crate::{
-    AudioData, AudioSampleError, AudioSampleResult, AudioSamples, LayoutError,
+    AudioSampleError, AudioSampleResult, AudioSamples, LayoutError,
+    repr::AudioData,
     traits::StandardSample,
 };
 
