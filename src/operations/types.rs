@@ -4224,3 +4224,42 @@ impl Default for PerturbationConfig {
         })
     }
 }
+
+
+/// Noise shaping algorithm applied during dithering.
+///
+/// Selects the spectral distribution of the dither noise added by
+/// [`AudioDithering::dither`][crate::operations::traits::AudioDithering::dither].
+/// All variants use triangular-probability-density-function (TPDF) dither as the
+/// noise source; the variant controls how that noise is spectrally shaped before it
+/// is mixed into the signal.
+///
+/// ## Intended Usage
+///
+/// Pass a `NoiseShape` value to
+/// [`AudioDithering::dither`][crate::operations::traits::AudioDithering::dither]
+/// to choose between flat or perceptually optimized noise placement.
+#[cfg(feature = "dithering")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NoiseShape {
+    /// Flat (white) TPDF dithering.
+    ///
+    /// Adds triangular noise with a flat power spectral density across all
+    /// frequencies.  This is the simplest and most widely supported dither
+    /// variant and is appropriate when downstream processing will handle
+    /// perceptual weighting, or when the extra computation of noise shaping
+    /// is undesirable.
+    Flat,
+
+    /// F-weighted noise shaping.
+    ///
+    /// Applies a first-order high-pass filter to the TPDF noise so that
+    /// noise energy is redistributed towards higher frequencies where the
+    /// human ear is less sensitive.  The result is perceptually quieter
+    /// dither at the cost of increased noise power near Nyquist.
+    ///
+    /// This variant approximates the behaviour of the classic Wannamaker
+    /// F-weighting filter using a single-pole recursive shaper.
+    FWeighted,
+}

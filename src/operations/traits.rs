@@ -21,6 +21,7 @@
 //! | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |
 //! | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |
 //! | [`AudioPlotting`](crate::operations::AudioPlotting) | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
+//! | [`AudioDithering`] | `dithering` | TPDF dithering and bit-depth reduction |
 //!
 //! Grouping operations into separate traits keeps compile times low — only the code
 //! required for the enabled features is compiled — while providing a clean extension
@@ -125,11 +126,14 @@ use crate::operations::{
 use num_complex::Complex;
 // "Unused" imports below are required pretty much as soon as any of the traits are implemented, this is cleaner than a huge cfg(any(...)) block.
 #[allow(unused_imports)]
-use crate::{AudioSampleResult, AudioSamples, AudioTypeConversion, StandardSample};
+use crate::{AudioSampleResult, AudioSamples, AudioTypeConversion, CastFrom, CastInto, ConvertTo, StandardSample};
 #[allow(unused_imports)]
 use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 #[allow(unused_imports)]
 use std::num::NonZeroUsize;
+
+#[cfg(feature = "dithering")]
+use crate::operations::types::NoiseShape;
 
 /// Statistical analysis operations for audio data.
 ///
@@ -537,6 +541,58 @@ where
     /// ```
     #[cfg(feature = "transforms")]
     fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64>;
+
+    /// Returns the peak level expressed as dBFS (decibels relative to full scale).
+    ///
+    /// Computed as `20 × log₁₀(peak)` where `peak` is the value returned by
+    /// [`AudioStatistics::peak`].  Zero or near-zero signals are clamped to a
+    /// −80 dB floor rather than producing `−∞`.
+    ///
+    /// # Returns
+    /// The peak level in dBFS.  Values range from −80 (silence) to 0 (full scale).
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -0.5, 0.25];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let peak_dbfs = audio.peak_dbfs();
+    /// assert!((peak_dbfs - 0.0).abs() < 1e-6); // peak is 1.0 → 0 dBFS
+    /// ```
+    #[inline]
+    fn peak_dbfs(&self) -> f64 {
+        let peak: f64 = self.peak().convert_to();
+        crate::utils::audio_math::amplitude_to_db(peak.abs())
+    }
+
+    /// Returns the RMS level expressed as dBFS (decibels relative to full scale).
+    ///
+    /// Computed as `20 × log₁₀(rms)` where `rms` is the value returned by
+    /// [`AudioStatistics::rms`].  Zero RMS is clamped to a −80 dB floor.
+    ///
+    /// This is the natural dBFS companion to [`peak_dbfs`][Self::peak_dbfs]:
+    /// `peak_dbfs` captures the instantaneous maximum while `rms_dbfs` reflects
+    /// the average energy level.
+    ///
+    /// # Returns
+    /// The RMS level in dBFS.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0, 1.0, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// let rms_dbfs = audio.rms_dbfs();
+    /// assert!((rms_dbfs - 0.0).abs() < 1e-6); // RMS of full-scale square wave is 1.0 → 0 dBFS
+    /// ```
+    #[inline]
+    fn rms_dbfs(&self) -> f64 {
+        crate::utils::audio_math::amplitude_to_db(self.rms())
+    }
 }
 
 /// Voice Activity Detection (VAD) operations.
@@ -1110,6 +1166,74 @@ where
         ratio: f64,
         quality: ResamplingQuality,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Normalizes to a target level expressed as dBFS.
+    ///
+    /// Converts `target` from dBFS to a linear amplitude and delegates to
+    /// [`normalize`][Self::normalize] with a [`NormalizationConfig::peak`] configuration.
+    /// This is the ergonomic dBFS complement to the linear
+    /// `normalize(NormalizationConfig::peak(t))` call.
+    ///
+    /// # Arguments
+    /// - `target` — desired peak level in dBFS (e.g. `-3.0` for −3 dBFS).
+    ///   Use `0.0` for full-scale normalization.
+    ///
+    /// # Returns
+    /// The normalized audio samples.
+    ///
+    /// # Errors
+    /// Propagates any error returned by [`normalize`][Self::normalize].
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, AudioStatistics, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![0.5f32, -0.25, 0.1];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .normalize_to_dbfs(-6.0)
+    ///     .unwrap();
+    /// // peak should be approximately -6 dBFS (≈ 0.501)
+    /// assert!((audio.peak_dbfs() - (-6.0)).abs() < 0.1);
+    /// ```
+    #[inline]
+    fn normalize_to_dbfs(self, target: f64) -> AudioSampleResult<Self> {
+        let target_linear = crate::utils::audio_math::db_to_amplitude(target);
+        self.normalize(NormalizationConfig::peak(
+            Self::Sample::cast_from(target_linear),
+        ))
+    }
+
+    /// Applies a gain adjustment expressed in decibels.
+    ///
+    /// Converts `db` to a linear scale factor (`10^(db/20)`) and delegates to
+    /// [`scale`][Self::scale].  This is the ergonomic dBFS complement to the linear
+    /// [`scale`][Self::scale] method.
+    ///
+    /// A gain of `0.0 dB` leaves the signal unchanged; negative values attenuate
+    /// and positive values amplify.
+    ///
+    /// # Arguments
+    /// - `db` — gain in decibels.
+    ///
+    /// # Returns
+    /// The gain-adjusted audio samples.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let data = array![1.0f32, -1.0];
+    /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
+    ///     .apply_gain_db(-6.0); // attenuate by 6 dB
+    /// assert!((audio[0] - 0.501).abs() < 0.001);
+    /// ```
+    #[must_use]
+    #[inline]
+    fn apply_gain_db(self, db: f64) -> Self {
+        self.scale(crate::utils::audio_math::db_to_amplitude(db))
+    }
 }
 
 /// Frequency-domain analysis and spectral transformation operations.
@@ -5107,4 +5231,95 @@ where
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
     ) -> NdResult<Self::Sample>;
+}
+
+/// Dithering and bit-depth reduction operations.
+///
+/// # Purpose
+///
+/// Provides noise-shaped dithering and lossless-in-container bit-depth reduction
+/// for audio signals.  Dithering masks quantisation distortion by adding a small
+/// amount of shaped noise before the quantisation step, trading deterministic
+/// harmonic distortion for less audible stochastic noise.
+///
+/// # Intended Usage
+///
+/// Call [`dither`][Self::dither] first to add TPDF (or shaped) noise, then call
+/// [`requantize`][Self::requantize] to reduce the effective bit depth while keeping
+/// the same sample container type:
+///
+/// ```rust,ignore
+/// use audio_samples::operations::traits::AudioDithering;
+/// use audio_samples::operations::types::NoiseShape;
+///
+/// let dithered = audio
+///     .dither(NoiseShape::Flat)
+///     .requantize(16)
+///     .unwrap();
+/// ```
+///
+/// This is distinct from [`AudioTypeConversion::to_type::<i16>()`] which rescales
+/// the signal to the full integer range; `requantize` reduces precision while the
+/// signal remains in its original container type.
+///
+/// # Invariants
+///
+/// - All methods return a new owned `AudioSamples<T>`; the original is not mutated.
+/// - `requantize` accepts bit depths in the range `[1, 32]`.
+#[cfg(feature = "dithering")]
+pub trait AudioDithering: AudioTypeConversion
+where
+    Self::Sample: StandardSample,
+{
+    /// Applies TPDF dithering with the given noise shape.
+    ///
+    /// Adds a small amount of triangular-PDF noise to every sample in the signal.
+    /// The noise amplitude is set to 1 LSB of the native sample type so that it
+    /// is below the perceptible threshold for the source format but sufficient to
+    /// linearise the quantisation error before [`requantize`][Self::requantize].
+    ///
+    /// # Arguments
+    /// - `shape` — spectral distribution of the added noise (see [`NoiseShape`]).
+    ///
+    /// # Returns
+    /// A new `AudioSamples<T>` with dither noise mixed in.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use audio_samples::operations::traits::AudioDithering;
+    /// use audio_samples::operations::types::NoiseShape;
+    ///
+    /// let dithered = audio.dither(NoiseShape::Flat);
+    /// ```
+    #[must_use]
+    fn dither(self, shape: NoiseShape) -> Self;
+
+    /// Reduces the effective bit depth to `bits` while remaining in the same
+    /// container type.
+    ///
+    /// Each sample is quantised to a grid of `2^bits` evenly-spaced levels spanning
+    /// the full normalised range `[−1, 1]`.  The sample is first converted to f64,
+    /// snapped to the nearest grid point, then converted back to `T`.
+    ///
+    /// This is distinct from [`AudioTypeConversion::to_type::<i16>()`] which
+    /// rescales to the full integer range; `requantize` reduces precision without
+    /// changing the container type.
+    ///
+    /// # Arguments
+    /// - `bits` — target bit depth.  Must be in the range `[1, 32]`.
+    ///
+    /// # Returns
+    /// A new `AudioSamples<T>` quantised to `bits` bit precision.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `bits` is `0` or greater than `32`.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use audio_samples::operations::traits::AudioDithering;
+    ///
+    /// // Reduce to 16-bit precision while keeping f32 container
+    /// let requantized = audio.requantize(16).unwrap();
+    /// ```
+    fn requantize(self, bits: u32) -> AudioSampleResult<Self>;
 }

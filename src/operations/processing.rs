@@ -1020,6 +1020,47 @@ mod tests {
     use ndarray::array;
 
     use crate::AudioProcessing;
+    use crate::AudioStatistics;
+
+    #[test]
+    fn test_normalize_to_dbfs() {
+        // A signal with peak 0.5 normalized to -6 dBFS should have peak ≈ 0.5012
+        let data = array![0.5f32, -0.25, 0.1];
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        let normalized = audio.normalize_to_dbfs(-6.0).unwrap();
+        // peak_dbfs should be approximately -6.0
+        assert_approx_eq!(normalized.peak_dbfs(), -6.0, 0.01);
+    }
+
+    #[test]
+    fn test_normalize_to_dbfs_zero() {
+        // Normalizing to 0 dBFS should give peak = 1.0
+        let data = array![0.25f32, -0.5, 0.125];
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        let normalized = audio.normalize_to_dbfs(0.0).unwrap();
+        assert_approx_eq!(normalized.peak() as f64, 1.0, 0.001);
+    }
+
+    #[test]
+    fn test_apply_gain_db_attenuation() {
+        // Applying -6 dB should multiply amplitude by ~0.5012
+        let data = array![1.0f32, -1.0];
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        let attenuated = audio.apply_gain_db(-6.0);
+        // 10^(-6/20) ≈ 0.5012
+        assert_approx_eq!(attenuated.peak() as f64, 0.501_187_2, 0.0001);
+    }
+
+    #[test]
+    fn test_apply_gain_db_unity() {
+        // 0 dB gain should leave signal unchanged
+        let data = array![0.5f32, -0.3, 0.1];
+        let audio = AudioSamples::new_mono(data.clone(), sample_rate!(44100)).unwrap();
+        let gained = audio.apply_gain_db(0.0);
+        assert_approx_eq!(gained[0] as f64, 0.5, 1e-6);
+        assert_approx_eq!(gained[1] as f64, -0.3, 1e-6);
+        assert_approx_eq!(gained[2] as f64, 0.1, 1e-4);
+    }
 
     #[test]
     fn test_normalize_min_max() {

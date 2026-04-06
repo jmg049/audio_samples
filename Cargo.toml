@@ -80,6 +80,7 @@ resampling = ["dep:rubato", "dep:rayon"]
 vad = [] # Voice activity detection operations
 plotting = ["dep:plotly", "dep:base64", "dep:serde_json"]
 envelopes = ["dynamic-range", "editing", "random-generation"] # Envelope generation operations
+dithering = ["random-generation"] # Dithering and noise-shaping operations
 fixed-size-audio = [] # Support for fixed-size audio buffers (no heap allocation)
 
 full = [
@@ -101,6 +102,7 @@ full = [
     "iir-filtering",
     "plotting",
     "envelopes",
+    "dithering",
     "random-generation",
 ]
 
@@ -122,6 +124,7 @@ full_no_plotting = [
     "vad",
     "iir-filtering",
     "envelopes",
+    "dithering",
     "random-generation",
 ]
 
