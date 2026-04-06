@@ -79,26 +79,27 @@ where
                 // Each channel maintains independent feedback state so that
                 // inter-channel correlation does not introduce spectral artefacts.
                 // Transfer function: H(z) = 1 − 0.5·z⁻¹ (single-pole HP).
-                let apply_fweighted = |iter: &mut dyn Iterator<Item = &mut T>| {
-                    let mut prev: f64 = 0.0;
-                    for sample in iter {
-                        let tpdf: f64 = rand::random::<f64>() - rand::random::<f64>();
-                        let shaped = 0.5_f64.mul_add(-prev, tpdf);
-                        prev = tpdf;
-                        let s: f64 = (*sample).convert_to();
-                        *sample = T::convert_from(shaped.mul_add(lsb_norm, s));
-                    }
-                };
-
                 match &mut self.data {
                     AudioData::Mono(arr) => {
-                        apply_fweighted(&mut arr.iter_mut() as &mut dyn Iterator<Item = &mut T>);
+                        let mut prev: f64 = 0.0;
+                        for sample in arr.iter_mut() {
+                            let tpdf: f64 = rand::random::<f64>() - rand::random::<f64>();
+                            let shaped = 0.5_f64.mul_add(-prev, tpdf);
+                            prev = tpdf;
+                            let s: f64 = (*sample).convert_to();
+                            *sample = T::convert_from(shaped.mul_add(lsb_norm, s));
+                        }
                     }
                     AudioData::Multi(arr) => {
                         for mut channel in arr.axis_iter_mut(Axis(0)) {
-                            apply_fweighted(
-                                &mut channel.iter_mut() as &mut dyn Iterator<Item = &mut T>,
-                            );
+                            let mut prev: f64 = 0.0;
+                            for sample in &mut channel {
+                                let tpdf: f64 = rand::random::<f64>() - rand::random::<f64>();
+                                let shaped = 0.5_f64.mul_add(-prev, tpdf);
+                                prev = tpdf;
+                                let s: f64 = (*sample).convert_to();
+                                *sample = T::convert_from(shaped.mul_add(lsb_norm, s));
+                            }
                         }
                     }
                 }
