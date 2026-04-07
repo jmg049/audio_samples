@@ -1103,6 +1103,51 @@ mod tests {
     }
 
     #[test]
+    fn test_peak_dbfs_full_scale() {
+        // A peak of 1.0 should give 0 dBFS
+        let data = array![1.0f32, -1.0, 0.5];
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        assert_approx_eq!(audio.peak_dbfs(), 0.0, 1e-6);
+    }
+
+    #[test]
+    fn test_peak_dbfs_half_amplitude() {
+        // A peak of 0.5 should give approximately -6.02 dBFS
+        let data = array![0.5f32, -0.25];
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        // 20 * log10(0.5) ≈ -6.0206
+        assert_approx_eq!(audio.peak_dbfs(), -6.020_600_0, 0.001);
+    }
+
+    #[test]
+    fn test_peak_dbfs_silence() {
+        // A zero-amplitude signal should return the -80 dB floor
+        let data = array![0.0f32, 0.0, 0.0];
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        assert_approx_eq!(audio.peak_dbfs(), -80.0, 1e-6);
+    }
+
+    #[test]
+    fn test_rms_dbfs_full_scale_square_wave() {
+        // A full-scale square wave has RMS = 1.0, so rms_dbfs should be 0.0
+        let data = array![1.0f32, -1.0, 1.0, -1.0];
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        assert_approx_eq!(audio.rms_dbfs(), 0.0, 1e-6);
+    }
+
+    #[test]
+    fn test_rms_dbfs_sine_wave() {
+        // A sine wave with amplitude A has RMS = A / sqrt(2)
+        // rms_dbfs = 20 * log10(A/sqrt(2)) ≈ 20 * log10(A) - 3.01
+        let data = array![1.0f32, 0.0, -1.0, 0.0]; // approximates a sine wave
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        let rms_dbfs = audio.rms_dbfs();
+        // RMS of this signal is sqrt((1+0+1+0)/4) = sqrt(0.5) ≈ 0.7071
+        // 20 * log10(0.7071) ≈ -3.01
+        assert!(rms_dbfs < 0.0 && rms_dbfs > -10.0);
+    }
+
+    #[test]
     fn test_rms_computation() {
         // Simple test case where we can verify RMS manually
         let data = array![1.0f32, -1.0, 1.0, -1.0];

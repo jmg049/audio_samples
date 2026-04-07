@@ -55,6 +55,9 @@ pub mod beat;
 #[cfg(feature = "channels")]
 pub mod channels;
 
+#[cfg(feature = "dithering")]
+pub mod dithering;
+
 #[cfg(feature = "dynamic-range")]
 pub mod dynamic_range;
 
@@ -127,6 +130,9 @@ pub use traits::AudioPitchAnalysis;
 
 #[cfg(feature = "dynamic-range")]
 pub use traits::AudioDynamicRange;
+
+#[cfg(feature = "dithering")]
+pub use traits::AudioDithering;
 
 #[cfg(feature = "transforms")]
 pub use traits::AudioTransforms;

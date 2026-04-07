@@ -370,6 +370,12 @@ pub use crate::operations::traits::AudioDecomposition;
 #[cfg(feature = "dynamic-range")]
 pub use crate::operations::traits::AudioDynamicRange;
 
+#[cfg(feature = "dithering")]
+pub use crate::operations::traits::AudioDithering;
+
+#[cfg(feature = "dithering")]
+pub use crate::operations::types::NoiseShape;
+
 #[cfg(feature = "iir-filtering")]
 pub use crate::operations::traits::AudioIirFiltering;
 
