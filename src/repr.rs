@@ -5974,7 +5974,7 @@ where
 }
 
 #[cfg(feature = "resampling")]
-impl<'a, T> Adapter<'a, T> for AudioSamples<'a, T>
+unsafe impl<'a, T> Adapter<'a, T> for AudioSamples<'a, T>
 where
     T: StandardSample,
 {
