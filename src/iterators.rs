@@ -1029,7 +1029,11 @@ where
     ) -> NonZeroUsize {
         // Calculate the maximum number of windows we could have
         // This is the ceiling of total_samples / hop_size
-        let max_windows = total_samples.div_ceil(hop_size);
+        let max_windows = total_samples.get().div_ceil(hop_size.get());
+        let max_windows = unsafe {
+            // safety: div_ceil on NonZeroUsize is not stable yet. Convert to usize, do div_ceil, and then go back. Never not valid
+            NonZeroUsize::new_unchecked(max_windows)
+        };
 
         match padding_mode {
             PaddingMode::Zero => {
