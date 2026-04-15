@@ -554,6 +554,17 @@ mod tests {
                         seen_backward = true;
                     }
                 }
+
+                if seen_forward && seen_backward {
+                    // If both forward and backward beats are present, check the order
+                    let first_backward_idx = beats.iter().position(|&t| t < first).unwrap();
+                    for i in 1..first_backward_idx {
+                        prop_assert!(beats[i] >= first, "Beat at index {} should be forward", i);
+                    }
+                    for i in first_backward_idx..beats.len() {
+                        prop_assert!(beats[i] < first, "Beat at index {} should be backward", i);
+                    }
+                }
             }
         }
     }
