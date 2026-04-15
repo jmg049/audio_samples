@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -70,10 +70,19 @@ default = ["bare-bones"]
 statistics = [] # Basic stats: peak, rms, mean
 processing = ["statistics"] # Basic processing: normalize, scale, clip
 transforms = ["dep:spectrograms"]
-editing = ["statistics", "random-generation"] # Time operations: trim, pad, reverse (includes noise)
+editing = [
+    "statistics",
+    "random-generation",
+] # Time operations: trim, pad, reverse (includes noise)
 beat-tracking = [] # Beat tracking operations
-onset-detection = ["transforms", "peak-picking", "processing"] # Onset detection operations
-decomposition = ["onset-detection"] # Audio decomposition operations (requires serialization)
+onset-detection = [
+    "transforms",
+    "peak-picking",
+    "processing",
+] # Onset detection operations
+decomposition = [
+    "onset-detection",
+] # Audio decomposition operations (requires serialization)
 dynamic-range = [] # Dynamic range compression/expansion operations
 channels = [] # Channel operations: interleave/deinterleave
 iir-filtering = [] # IIR filtering operations
@@ -83,8 +92,13 @@ pitch-analysis = ["transforms"] # Pitch analysis operations
 resampling = ["dep:rubato", "dep:rayon"]
 vad = [] # Voice activity detection operations
 plotting = ["dep:plotly", "dep:base64", "dep:serde_json"]
-envelopes = ["dynamic-range", "editing", "random-generation"] # Envelope generation operations
-fixed-size-audio = [] # Support for fixed-size audio buffers (no heap allocation)
+envelopes = [
+    "dynamic-range",
+    "editing",
+    "random-generation",
+] # Envelope generation operations
+fixed-size-audio = [
+] # Support for fixed-size audio buffers (no heap allocation)
 
 full = [
     "statistics",
@@ -149,7 +163,14 @@ proptest = "1.10.0"
 [[bench]]
 name = "ffmpeg_comparison"
 harness = false
-required-features = ["resampling", "iir-filtering", "channels", "processing", "statistics", "editing"]
+required-features = [
+    "resampling",
+    "iir-filtering",
+    "channels",
+    "processing",
+    "statistics",
+    "editing",
+]
 
 [patch.crates-io]
 audio_samples = { path = "." }
