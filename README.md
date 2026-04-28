@@ -99,6 +99,57 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 }
 ```
 
+### Psychoacoustic analysis
+
+Enable the `psychoacoustic` feature:
+
+```bash
+cargo add audio_samples --features psychoacoustic
+```
+
+```rust
+use audio_samples::{
+    AudioPerceptualAnalysis, BandLayout, PsychoacousticConfig, sample_rate, sine_wave,
+};
+use non_empty_slice::NonEmptySlice;
+use spectrograms::WindowType;
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
+fn main() -> audio_samples::AudioSampleResult<()> {
+    let signal = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+
+    // 24 Bark critical bands mapped onto 1024 MDCT bins.
+    let layout = BandLayout::bark(
+        NonZeroUsize::new(24).unwrap(),
+        44100.0,
+        NonZeroUsize::new(1024).unwrap(),
+    );
+
+    let weights = vec![1.0_f32; 24];
+    let config = PsychoacousticConfig::new(
+        -60.0, 14.5, 0.4, 25.0, 6.0,
+        NonEmptySlice::from_slice(&weights).unwrap(),
+        1e-10,
+    );
+
+    let result = signal.analyse_psychoacoustic(WindowType::Hanning, &layout, &config)?;
+
+    // Print bands audible above the masking threshold.
+    for metric in result.band_metrics.as_slice().iter() {
+        if metric.signal_to_mask_ratio > 0.0 {
+            println!(
+                "{:.0} Hz — SMR {:.1} dB, importance {:.2}",
+                metric.band.centre_frequency,
+                metric.signal_to_mask_ratio,
+                metric.importance,
+            );
+        }
+    }
+    Ok(())
+}
+```
+
 ---
 
 ## Creating AudioSamples
@@ -156,6 +207,7 @@ optional dependencies. Enable features as needed:
 | Feature | Description |
 |---|---|
 | `transforms` | FFT, STFT, MFCC, chromagram, CQT, PSD |
+| `psychoacoustic` | Bark/Mel band layouts, ATH, masking thresholds, SMR (requires `transforms`) |
 | `pitch-analysis` | YIN and autocorrelation pitch detection (requires `transforms`) |
 | `onset-detection` | Onset detection (requires `transforms`, `peak-picking`, `processing`) |
 | `beat-tracking` | Beat tracking |

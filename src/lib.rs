@@ -80,6 +80,7 @@
 //! | `decomposition` | Audio source decomposition (implies `onset-detection`) |
 //! | `pitch-analysis` | YIN and autocorrelation pitch detection (implies `transforms`) |
 //! | `vad` | Voice activity detection |
+//! | `psychoacoustic` | Psychoacoustic analysis: Bark/Mel band layouts, ATH, masking thresholds, SMR (implies `transforms`) |
 //! | `resampling` | High-quality resampling via the `rubato` crate |
 //! | `plotting` | Signal plotting via `plotly` |
 //! | `fixed-size-audio` | Stack-allocated fixed-size audio buffers |
@@ -207,6 +208,52 @@
 //! }
 //! ```
 //!
+//! ### Psychoacoustic Analysis
+//!
+//! Requires the `psychoacoustic` feature.
+//!
+//! ```rust,ignore
+//! use audio_samples::{
+//!     AudioPerceptualAnalysis, BandLayout, PsychoacousticConfig, sine_wave, sample_rate,
+//! };
+//! use non_empty_slice::NonEmptySlice;
+//! use spectrograms::WindowType;
+//! use std::num::NonZeroUsize;
+//! use std::time::Duration;
+//!
+//! let signal = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
+//!
+//! // 24 Bark critical bands mapped onto 1024 MDCT bins.
+//! let layout = BandLayout::bark(
+//!     NonZeroUsize::new(24).unwrap(),
+//!     44100.0,
+//!     NonZeroUsize::new(1024).unwrap(),
+//! );
+//!
+//! let weights = vec![1.0_f32; 24];
+//! let config = PsychoacousticConfig::new(
+//!     -60.0, 14.5, 5.5, 25.0, 6.0,
+//!     NonEmptySlice::from_slice(&weights).unwrap(),
+//!     1e-10,
+//! );
+//!
+//! let result = signal
+//!     .analyse_psychoacoustic(WindowType::Hanning, &layout, &config)
+//!     .unwrap();
+//!
+//! // Bands with positive SMR are audible above the masking threshold.
+//! for metric in result.band_metrics.as_slice().iter() {
+//!     if metric.signal_to_mask_ratio > 0.0 {
+//!         println!(
+//!             "{:.0} Hz — SMR {:.1} dB (importance {:.2})",
+//!             metric.band.centre_frequency,
+//!             metric.signal_to_mask_ratio,
+//!             metric.importance,
+//!         );
+//!     }
+//! }
+//! ```
+//!
 //! ## Core Type System
 //!
 //! ### Supported Sample Types
@@ -308,9 +355,16 @@ pub mod resampling;
 /// Core trait definitions for audio sample types and operations.
 pub mod traits;
 pub mod utils;
+/// Codec infrastructure: the [`AudioCodec`] trait, `encode`/`decode` free functions,
+/// and the [`PerceptualCodec`] implementation (requires `feature = "psychoacoustic"`).
+#[cfg(feature = "psychoacoustic")]
+pub mod codecs;
 
 mod error;
 mod repr;
+/// Fixed-size audio buffer types whose geometry is encoded in the type system.
+#[cfg(feature = "fixed-size-audio")]
+pub mod fixed_audio;
 
 pub mod simd_conversions;
 
@@ -359,7 +413,7 @@ pub use crate::operations::AudioEditing;
 pub use crate::operations::AudioTransforms;
 
 #[cfg(feature = "fixed-size-audio")]
-pub use crate::repr::FixedSizeAudioSamples;
+pub use crate::fixed_audio::{FixedSizeAudioSamples, FixedSizeMultiChannelAudioSamples};
 
 #[cfg(feature = "onset-detection")]
 pub use crate::operations::traits::AudioOnsetDetection;
@@ -381,6 +435,40 @@ pub use crate::operations::traits::AudioPitchAnalysis;
 
 #[cfg(feature = "vad")]
 pub use crate::operations::traits::AudioVoiceActivityDetection;
+
+#[cfg(feature = "psychoacoustic")]
+pub use crate::codecs::perceptual::{
+    AudioPerceptualAnalysis, AudioCodec,
+    Band, BandLayout, BandMetric, BandMetrics,
+    EncodedSegment,
+    PerceptualAnalysisResult, PerceptualCodec, PerceptualEncodedAudio,
+    StereoPerceptualCodec, StereoPerceptualEncodedAudio,
+    PsychoacousticConfig,
+    apply_temporal_masking, detect_transient_windows,
+    reconstruct_signal, analyse_signal_with_window_size,
+};
+
+#[cfg(feature = "psychoacoustic")]
+pub use crate::codecs::perceptual::bands::scale_band_layout;
+
+#[cfg(feature = "psychoacoustic")]
+pub use crate::codecs::perceptual::masking::{
+    MaskerType, classify_masker_types,
+    absolute_threshold_of_hearing, spreading_attenuation, compute_smr,
+};
+
+#[cfg(feature = "psychoacoustic")]
+pub use crate::codecs::perceptual::stereo::{mid_side_encode, mid_side_decode};
+
+#[cfg(feature = "psychoacoustic")]
+pub use crate::codecs::perceptual::quantization::{
+    BandAllocation, BitAllocationResult,
+    allocate_bits, dequantize, dequantize_band,
+    quantize, quantize_band, step_size_from_allowed_noise,
+};
+
+#[cfg(feature = "psychoacoustic")]
+pub use crate::codecs::perceptual::codec::{decode as codec_decode, encode as codec_encode};
 
 #[cfg(feature = "random-generation")]
 pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
