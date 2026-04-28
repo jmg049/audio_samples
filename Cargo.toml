@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -34,9 +34,9 @@ i24 = { version = "2.3.3", features = [
 serde = { version = "1.0", features = ["derive"] }
 lazy_static = "1.5"
 num-format = { version = "0.4.4", optional = true }
-rand = { version = "0.10.0", optional = true }
+rand = { version = "0.10.1", optional = true }
 wide = "1.2.0"
-spectrograms = { version = "1.1.0", optional = true }
+spectrograms = { version = "1.4.0", optional = true }
 
 serde_json = { version = "1.0.149", optional = true }
 
@@ -60,7 +60,7 @@ audioadapter-buffers = "2.0.0"
 
 [features]
 # Minimal core (no heavy dependencies)
-default = ["bare-bones"]
+default = ["bare-bones", "transforms", "editing"]
 
 # Core operation categories
 statistics = [] # Basic stats: peak, rms, mean
@@ -78,6 +78,8 @@ peak-picking = [] # Peak picking operations
 pitch-analysis = ["transforms"] # Pitch analysis operations
 resampling = ["dep:rubato", "dep:rayon"]
 vad = [] # Voice activity detection operations
+psychoacoustic = ["transforms"] # Psychoacoustic analysis: band layouts, masking thresholds, SMR
+parallel = ["dep:rayon"] # Parallel codec encoding/decoding via rayon (works with psychoacoustic)
 plotting = ["dep:plotly", "dep:base64", "dep:serde_json"]
 envelopes = ["dynamic-range", "editing", "random-generation"] # Envelope generation operations
 fixed-size-audio = [] # Support for fixed-size audio buffers (no heap allocation)
@@ -102,6 +104,8 @@ full = [
     "plotting",
     "envelopes",
     "random-generation",
+    "psychoacoustic",
+    "parallel",
 ]
 
 full_no_plotting = [
@@ -123,6 +127,7 @@ full_no_plotting = [
     "iir-filtering",
     "envelopes",
     "random-generation",
+    "psychoacoustic",
 ]
 
 bare-bones = [] # No features, just the core API and basic types
@@ -142,10 +147,23 @@ rand = "0.10.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.10.0"
 
+[[example]]
+name = "psychoacoustic"
+required-features = ["psychoacoustic"]
+
 [[bench]]
 name = "ffmpeg_comparison"
 harness = false
 required-features = ["resampling", "iir-filtering", "channels", "processing", "statistics", "editing"]
+
+[[bench]]
+name = "codec_parallel"
+harness = false
+required-features = ["psychoacoustic"]
+
+[[test]]
+name = "codec_quality"
+required-features = ["psychoacoustic", "random-generation"]
 
 [patch.crates-io]
 audio_samples = { path = "." }
