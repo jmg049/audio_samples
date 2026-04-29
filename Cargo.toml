@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -54,6 +54,9 @@ base64 = { version = "0.22", optional = true }
 
 rubato = { version = "2.0.0", optional = true }
 rayon = { version = "1.12.0", optional = true }
+explainable = { version = "0.1.1", optional = true }
+term-maths = { version = "1.0.0", optional = true }
+open = { version = "5", optional = true }
 
 regex = ">=1.12"
 rustfft = ">=6.2"
@@ -93,7 +96,7 @@ resampling = ["dep:rubato", "dep:rayon", "audioadapter", "audioadapter-buffers"]
 vad = [] # Voice activity detection operations
 psychoacoustic = ["transforms"] # Psychoacoustic analysis: band layouts, masking thresholds, SMR
 parallel = ["dep:rayon"] # Parallel codec encoding/decoding via rayon (works with psychoacoustic)
-plotting = ["dep:plotly", "dep:base64", "dep:serde_json"]
+plotting = ["dep:plotly", "dep:base64", "dep:serde_json", "channels", "transforms"]
 envelopes = [
     "dynamic-range",
     "editing",
@@ -148,6 +151,7 @@ full_no_plotting = [
     "psychoacoustic",
 ]
 
+educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing"]
 bare-bones = [] # No features, just the core API and basic types
 
 # Plotting sub-features (require plotting)
@@ -168,6 +172,10 @@ proptest = "1.10.0"
 [[example]]
 name = "psychoacoustic"
 required-features = ["psychoacoustic"]
+
+[[example]]
+name = "educational"
+required-features = ["educational", "processing"]
 
 [[bench]]
 name = "ffmpeg_comparison"

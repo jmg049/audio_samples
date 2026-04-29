@@ -258,7 +258,7 @@ where
 
     // Fallback to scalar conversion for unsupported type combinations
     for (i, o) in input.iter().zip(output.iter_mut()) {
-        *o = i.convert_to();
+        *o = (*i).convert_to();
     }
 
     Ok(())
