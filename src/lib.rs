@@ -368,6 +368,14 @@ pub mod fixed_audio;
 
 pub mod simd_conversions;
 
+/// Educational / explainable layer: step-by-step operation explanations with
+/// before/after waveforms and term-maths formula rendering.
+///
+/// Enable with `--features educational`. See [`educational::open_explanation_document`]
+/// for the primary entry point.
+#[cfg(feature = "educational")]
+pub mod educational;
+
 pub use crate::error::{
     AudioSampleError, AudioSampleResult, ConversionError, FeatureError, LayoutError,
     ParameterError, ProcessingError,
@@ -472,6 +480,12 @@ pub use crate::codecs::perceptual::codec::{decode as codec_decode, encode as cod
 
 #[cfg(feature = "random-generation")]
 pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
+
+#[cfg(feature = "educational")]
+pub use explainable::{ExplainMode, Explainable, Explaining, Explanation};
+
+#[cfg(all(feature = "educational", feature = "processing"))]
+pub use crate::operations::traits::AudioProcessingExt;
 
 pub use i24::{I24, PackedStruct}; // Re-export I24 type that has the AudioSample implementation
 

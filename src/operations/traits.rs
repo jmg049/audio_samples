@@ -691,6 +691,7 @@ where
 /// value is within the valid range; they return [crate::AudioSampleError::Parameter]
 /// on failure rather than panicking.
 #[cfg(feature = "processing")]
+#[cfg_attr(feature = "educational", explainable::explainable)]
 pub trait AudioProcessing: AudioTypeConversion
 where
     Self::Sample: StandardSample,

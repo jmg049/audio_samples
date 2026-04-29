@@ -151,6 +151,16 @@ impl PlotComponent for WaveformPlot {
 }
 
 impl WaveformPlot {
+    /// Returns the plot as an inline HTML `<div>` fragment suitable for embedding in a
+    /// larger document. Unlike [`PlotUtils::html`] this does not include `<html>` or
+    /// `<head>` boilerplate.
+    ///
+    /// `div_id` — optional CSS id for the container `<div>`; pass `None` for a random id.
+    #[cfg(feature = "educational")]
+    pub(crate) fn inline_html(&self, div_id: Option<&str>) -> String {
+        self.plot.to_inline_html(div_id)
+    }
+
     /// Adds a vertical line overlay at the specified time position.
     ///
     /// Renders a vertical line spanning the full amplitude range at the given time. Useful for
