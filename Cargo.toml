@@ -96,6 +96,7 @@ resampling = ["dep:rubato", "dep:rayon", "audioadapter", "audioadapter-buffers"]
 vad = [] # Voice activity detection operations
 psychoacoustic = ["transforms"] # Psychoacoustic analysis: band layouts, masking thresholds, SMR
 parallel = ["dep:rayon"] # Parallel codec encoding/decoding via rayon (works with psychoacoustic)
+opus-codec = ["psychoacoustic"] # Opus-inspired codec: SILK (speech) and CELT (music) modes
 plotting = ["dep:plotly", "dep:base64", "dep:serde_json", "channels", "transforms"]
 envelopes = [
     "dynamic-range",
@@ -127,6 +128,7 @@ full = [
     "random-generation",
     "psychoacoustic",
     "parallel",
+    "opus-codec",
 ]
 
 full_no_plotting = [
@@ -149,6 +151,7 @@ full_no_plotting = [
     "envelopes",
     "random-generation",
     "psychoacoustic",
+    "opus-codec",
 ]
 
 educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing"]

@@ -478,6 +478,17 @@ pub use crate::codecs::perceptual::quantization::{
 #[cfg(feature = "psychoacoustic")]
 pub use crate::codecs::perceptual::codec::{decode as codec_decode, encode as codec_encode};
 
+// ── Opus codec re-exports ─────────────────────────────────────────────────────
+
+#[cfg(feature = "opus-codec")]
+pub use crate::codecs::opus::{
+    CeltEncodedFrame, OpusBandwidth, OpusCodec, OpusConfig, OpusEncodedAudio, OpusEncodedFrame,
+    OpusFrameData, OpusMode, OpusStereoCodec, OpusStereoEncodedAudio, SilkEncodedFrame,
+    celt_decode_frame, celt_encode_frame, detect_mode as detect_opus_mode, lpc_analysis,
+    lpc_residual, lpc_synthesis, levinson_durbin, silk_decode_frame, silk_encode_frame,
+    LpcCoefficients, SILK_LPC_ORDER,
+};
+
 #[cfg(feature = "random-generation")]
 pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
 
