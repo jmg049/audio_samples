@@ -342,6 +342,88 @@ impl BandLayout {
         Self::new(bands_non_empty)
     }
 
+    /// Creates a CELT-style band layout using the Opus RFC 6716 band edges.
+    ///
+    /// Maps the 21 perceptual bands defined in RFC 6716 §4.3.1 onto the caller's
+    /// spectral-bin array. Bands whose lower edge falls at or above Nyquist are
+    /// omitted, so the returned layout will have **fewer than 21 bands** for
+    /// sample rates below 40 kHz.
+    ///
+    /// This band layout is the recommended choice for the CELT mode of
+    /// [`crate::codecs::opus::OpusCodec`].
+    ///
+    /// `n_bins` is the number of spectral bins (typically `window_size / 2`).
+    ///
+    /// # Arguments
+    /// - `sample_rate_hz` – Sample rate of the audio signal in Hz.
+    /// - `n_bins` – Total number of spectral bins.
+    ///
+    /// # Returns
+    /// A `BandLayout` with up to 21 entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "psychoacoustic")] {
+    /// use audio_samples::BandLayout;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// // 20 ms frame at 44.1 kHz → 882 samples → 441 bins
+    /// let layout = BandLayout::celt(44100.0, NonZeroUsize::new(441).unwrap());
+    /// assert!(layout.len().get() <= 21);
+    /// for band in layout.as_slice().iter() {
+    ///     assert!(band.end_bin > band.start_bin);
+    /// }
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn celt(sample_rate_hz: f32, n_bins: NonZeroUsize) -> Self {
+        /// CELT band boundary frequencies in Hz (RFC 6716 §4.3.1, Table 2).
+        ///
+        /// 22 edge values define 21 bands:
+        /// `[0–200), [200–400), …, [15600–20000)`.
+        const CELT_BAND_EDGES_HZ: &[f32] = &[
+            0.0, 200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0, 1400.0, 1600.0,
+            2000.0, 2400.0, 2800.0, 3200.0, 4000.0, 4800.0, 5600.0, 6800.0,
+            8000.0, 9600.0, 12000.0, 15600.0, 20000.0,
+        ];
+
+        let nyquist = sample_rate_hz / 2.0;
+        let bins = n_bins.get();
+        let n_edges = CELT_BAND_EDGES_HZ.len();
+
+        let mut bands: Vec<Band> = Vec::with_capacity(n_edges - 1);
+
+        for i in 0..n_edges - 1 {
+            let low_hz = CELT_BAND_EDGES_HZ[i];
+            if low_hz >= nyquist {
+                break;
+            }
+            let high_hz = CELT_BAND_EDGES_HZ[i + 1].min(nyquist);
+            let centre_hz = (low_hz + high_hz) / 2.0;
+
+            let start_bin = hz_to_bin(low_hz, sample_rate_hz, bins);
+            let end_bin_raw = hz_to_bin(high_hz, sample_rate_hz, bins);
+            let end_bin = end_bin_raw.max(start_bin + 1).min(bins);
+
+            // Normalised position: linear index in [0, 1].
+            let perceptual_position = i as f32 / (n_edges - 2) as f32;
+
+            // SAFETY: end_bin > start_bin is enforced by .max(start_bin + 1) above.
+            bands.push(unsafe { Band::new(start_bin, end_bin, centre_hz, perceptual_position) });
+        }
+
+        // Guarantee at least one band even for very low sample rates.
+        if bands.is_empty() {
+            // SAFETY: end_bin = 1 > 0 = start_bin.
+            bands.push(unsafe { Band::new(0, 1, nyquist / 2.0, 0.0) });
+        }
+
+        // SAFETY: bands is non-empty (guarded by the fallback above).
+        let bands_ne = unsafe { NonEmptySlice::new_unchecked(&bands) };
+        Self::new(bands_ne)
+    }
+
     /// Creates an ERB-scale band layout.
     ///
     /// Divides the spectrum from 0 Hz to Nyquist into `n_bands` bands spaced
