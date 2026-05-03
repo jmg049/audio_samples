@@ -259,8 +259,10 @@ impl AudioCodec for OpusCodec {
 
         // Frame size and CELT band layout — computed once for all frames.
         let frame_size = compute_frame_size(sample_rate.get(), self.config.frame_size_ms);
+        // `compute_frame_size` always returns an even number >= 4 (see its doc),
+        // so `frame_size / 2 >= 2` and `NonZeroUsize::new` always succeeds here.
         let n_bins = NonZeroUsize::new(frame_size / 2)
-            .unwrap_or_else(|| NonZeroUsize::new(2).expect("frame_size/2 >= 2"));
+            .expect("frame_size is always even and >= 4, so frame_size/2 >= 2");
         let band_layout = resolve_band_layout(&self.band_layout, sample_rate.get(), n_bins);
         let n_bands = band_layout.len();
         let psych_config = resolve_psych_config(&self.psych_config, n_bands);

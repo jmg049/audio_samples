@@ -98,6 +98,11 @@ fn round_trip_snr(
         .map(|(a, b)| a - b)
         .collect();
 
+    // SAFETY: `len = orig.len().min(recon.len())`.  Both signals are the output
+    // of a successful encode/decode, which requires a non-empty input, so
+    // orig.len() >= 1 and recon.len() >= 1, therefore len >= 1 and `error` is
+    // non-empty.
+    debug_assert!(!error.is_empty(), "error vector must be non-empty");
     let nev = unsafe { NonEmptyVec::new_unchecked(error) };
     let error_sig =
         audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, signal.sample_rate());
@@ -106,6 +111,8 @@ fn round_trip_snr(
         signal.clone()
     } else {
         let trimmed: Vec<f32> = orig[..len].to_vec();
+        // SAFETY: len >= 1 (same guarantee as error above), so trimmed is non-empty.
+        debug_assert!(!trimmed.is_empty(), "trimmed vector must be non-empty");
         let nev2 = unsafe { NonEmptyVec::new_unchecked(trimmed) };
         audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev2, signal.sample_rate())
     };

@@ -42,6 +42,12 @@ use super::lpc::{LpcCoefficients, SILK_LPC_ORDER, lpc_analysis, lpc_residual, lp
 /// rounding to `i16`, and divided by the same constant during dequantisation.
 const SILK_RESIDUAL_SCALE: f32 = 32_767.0;
 
+/// Minimum allowed gain value, used to prevent division by zero for silent frames.
+///
+/// Corresponds to a residual peak amplitude of 10^-8 linear, which is well below
+/// the noise floor of any practical audio system.
+const MIN_GAIN_THRESHOLD: f32 = 1e-8;
+
 // ── SilkEncodedFrame ──────────────────────────────────────────────────────────
 
 /// One SILK-encoded audio frame.
@@ -115,7 +121,7 @@ pub fn silk_encode_frame(samples: &[f32]) -> AudioSampleResult<SilkEncodedFrame>
         .copied()
         .map(f32::abs)
         .fold(0.0_f32, f32::max)
-        .max(1e-8); // prevent division by zero for silent frames
+        .max(MIN_GAIN_THRESHOLD); // prevent division by zero for silent frames
 
     // Quantise to i16.
     let residual_quantized: Vec<i16> = residual

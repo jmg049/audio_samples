@@ -21,6 +21,10 @@
 
 // ── OpusMode ──────────────────────────────────────────────────────────────────
 
+/// Guard added to each sub-band energy before taking `ln()`, preventing `ln(0)`
+/// for silent sub-bands. The value is negligible compared to any audible signal.
+const LOG_GUARD_EPSILON: f64 = 1e-10;
+
 /// Operating mode of the Opus codec for a given audio frame.
 ///
 /// See the [module documentation](self) for a comparison of modes.
@@ -226,7 +230,7 @@ pub fn detect_mode(samples: &[f32], _sample_rate: u32, bandwidth: OpusBandwidth)
                 .iter()
                 .map(|&x| (x as f64).powi(2))
                 .sum::<f64>()
-                + 1e-10 // guard against log(0)
+                + LOG_GUARD_EPSILON // guard against log(0)
         })
         .collect();
 

@@ -28,6 +28,19 @@
 //! The reconstruction is exact up to floating-point precision; quantization of
 //! the residual is the only lossy step.
 
+/// Small diagonal loading factor applied to `R[0]` for numerical stability.
+///
+/// Biases the autocorrelation matrix slightly away from singularity, which
+/// can occur for signals with near-zero energy. Value follows the SILK
+/// reference code convention (0.001% perturbation of the zero-lag energy).
+const DIAGONAL_LOADING_EPSILON: f64 = 1e-5;
+
+/// Minimum prediction error to prevent numerical underflow in Levinson–Durbin.
+///
+/// Clamps the error after each Levinson step. At this scale, the filter is
+/// essentially an all-pass and further iterations are numerically meaningless.
+const MIN_PREDICTION_ERROR: f64 = 1e-15;
+
 /// Default LPC predictor order used by SILK.
 ///
 /// SILK uses a 16th-order LP filter for narrowband/wideband speech coding.
@@ -129,7 +142,7 @@ pub fn levinson_durbin(autocorr: &[f64], order: usize) -> Option<LpcCoefficients
 
     // Diagonal loading for numerical stability.
     let mut r = autocorr.to_vec();
-    r[0] *= 1.0 + 1e-5;
+    r[0] *= 1.0 + DIAGONAL_LOADING_EPSILON;
 
     let mut a = vec![0.0f64; order];
     let mut a_prev = vec![0.0f64; order];
@@ -150,7 +163,7 @@ pub fn levinson_durbin(autocorr: &[f64], order: usize) -> Option<LpcCoefficients
         a[m] = k;
 
         // Update prediction error; clamp against underflow.
-        error = (error * (1.0 - k * k)).max(1e-15);
+        error = (error * (1.0 - k * k)).max(MIN_PREDICTION_ERROR);
         a_prev.clone_from(&a);
     }
 
