@@ -1,6 +1,7 @@
 use bytemuck::NoUninit;
 use ndarray::ScalarOperand;
 use num_traits::{FromPrimitive, Num, NumCast, One, ToBytes, Zero};
+#[cfg(feature = "static-plots")]
 use serde::{Deserialize, Serialize};
 
 use crate::repr::SampleType;
@@ -168,8 +169,7 @@ pub trait AudioSample:
     + One // num-traits trait for 1 value
     + Zero // num-traits trait for 0 value
     + ToBytes // num-traits trait for byte conversion
-    + Serialize // serde trait for serialization
-    + Deserialize<'static> //serde trait for deserialisation // Need to make these optional. 
+    + MaybeSerdeAudioSample // conditional serde support for audio samples
     + FromPrimitive // num-traits trait for conversion from primitive types
     + NumCast // num-traits trait for casting between numeric types
     + ScalarOperand // ndarray trait for scalar operations
@@ -438,6 +438,24 @@ impl<T> StandardSample for T where
         + ConvertFrom<f64>
 {
 }
+
+#[cfg(feature = "static-plots")]
+/// A marker supertrait that conditionally requires [`serde::Serialize`] and
+/// [`serde::Deserialize`] bounds depending on whether the `static-plots`
+/// feature is enabled.
+pub trait MaybeSerdeAudioSample: Serialize + Deserialize<'static> {}
+
+#[cfg(feature = "static-plots")]
+/// Blanket implementation for all types that implement the required serde
+/// traits when `static-plots` is enabled.
+impl<T: Serialize + Deserialize<'static>> MaybeSerdeAudioSample for T {}
+
+/// [`AudioSample`] to remain unconditionally usable without serde.
+#[cfg(not(feature = "static-plots"))]
+pub trait MaybeSerdeAudioSample {}
+
+#[cfg(not(feature = "static-plots"))]
+impl<T> MaybeSerdeAudioSample for T {}
 
 /// Trait for converting one sample type to another with audio-aware scaling.
 ///
