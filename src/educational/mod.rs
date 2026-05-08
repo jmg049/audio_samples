@@ -60,8 +60,8 @@ impl<T: StandardSample> RenderVisual for AudioSamples<'static, T> {
     fn render_visual(before: &Self, after: &Self) -> Box<dyn ExplainDisplay> {
         #[cfg(feature = "plotting")]
         {
-            use crate::operations::plotting::WaveformPlotParams;
             use crate::operations::AudioPlotting;
+            use crate::operations::plotting::WaveformPlotParams;
             // Use None so Plotly generates a unique UUID per div — a fixed ID
             // causes every step to share one element and only the last renders.
             let before_frag = before
@@ -127,10 +127,7 @@ pub fn render_explanation_document(explanations: &[Explanation], title: &str) ->
 ///
 /// # Errors
 /// Returns `Err` if the file cannot be written or the browser cannot be opened.
-pub fn open_explanation_document(
-    explanations: &[Explanation],
-    title: &str,
-) -> std::io::Result<()> {
+pub fn open_explanation_document(explanations: &[Explanation], title: &str) -> std::io::Result<()> {
     let html = render_explanation_document(explanations, title);
     let path = std::env::temp_dir().join(format!(
         "audio_samples_explain_{}.html",
@@ -156,19 +153,19 @@ fn html_escape(s: &str) -> String {
 /// Convert a display-friendly operation name into the Rust method name.
 fn op_name_to_method(name: &str) -> &'static str {
     match name {
-        "Normalize"           => "normalize",
-        "Scale"               => "scale",
-        "Apply Window"        => "apply_window",
-        "Apply FIR Filter"    => "apply_filter",
+        "Normalize" => "normalize",
+        "Scale" => "scale",
+        "Apply Window" => "apply_window",
+        "Apply FIR Filter" => "apply_filter",
         "\u{03bc}-law Compress" => "mu_compress",
-        "\u{03bc}-law Expand"   => "mu_expand",
-        "Low-Pass Filter"     => "low_pass_filter",
-        "High-Pass Filter"    => "high_pass_filter",
-        "Band-Pass Filter"    => "band_pass_filter",
-        "Remove DC Offset"    => "remove_dc_offset",
-        "Clip"                => "clip",
-        "Clip (in-place)"     => "clip_in_place",
-        _                     => "operation",
+        "\u{03bc}-law Expand" => "mu_expand",
+        "Low-Pass Filter" => "low_pass_filter",
+        "High-Pass Filter" => "high_pass_filter",
+        "Band-Pass Filter" => "band_pass_filter",
+        "Remove DC Offset" => "remove_dc_offset",
+        "Clip" => "clip",
+        "Clip (in-place)" => "clip_in_place",
+        _ => "operation",
     }
 }
 
@@ -285,7 +282,11 @@ fn render_card(index: usize, exp: &Explanation, is_first: bool) -> String {
 
     let op_label = op_name.as_deref().unwrap_or("Operation");
     let visual_block = render_visual_block(exp);
-    let connector_class = if is_first { "step-connector first" } else { "step-connector" };
+    let connector_class = if is_first {
+        "step-connector first"
+    } else {
+        "step-connector"
+    };
 
     format!(
         r#"

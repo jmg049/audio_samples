@@ -9,11 +9,11 @@ use crate::traits::AudioTypeConversion;
 use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
 
 use super::{
-    BandLayout, PsychoacousticConfig,
-    analyse_signal_with_window_size, reconstruct_signal,
+    BandLayout, PsychoacousticConfig, analyse_signal_with_window_size,
     bands::scale_band_layout,
     masking::detect_transient_windows,
     quantization::{BitAllocationResult, allocate_bits, dequantize, quantize},
+    reconstruct_signal,
 };
 
 // ── AudioCodec trait ──────────────────────────────────────────────────────────
@@ -46,7 +46,8 @@ pub trait AudioCodec: Sized {
     /// # Errors
     /// Returns an error if `audio` is incompatible with the codec's parameters
     /// (e.g. multi-channel input for a mono codec, or a signal that is too short).
-    fn encode<T: StandardSample>(self, audio: &AudioSamples<T>) -> AudioSampleResult<Self::Encoded>;
+    fn encode<T: StandardSample>(self, audio: &AudioSamples<T>)
+    -> AudioSampleResult<Self::Encoded>;
 
     /// Decodes an encoded representation into audio samples of type `U`.
     ///
@@ -59,7 +60,9 @@ pub trait AudioCodec: Sized {
     ///
     /// # Errors
     /// Returns an error if the encoded data is malformed or reconstruction fails.
-    fn decode<U: StandardSample>(encoded: Self::Encoded) -> AudioSampleResult<AudioSamples<'static, U>>
+    fn decode<U: StandardSample>(
+        encoded: Self::Encoded,
+    ) -> AudioSampleResult<AudioSamples<'static, U>>
     where
         f32: crate::ConvertFrom<U>;
 }
@@ -318,7 +321,8 @@ fn encode_segment<T: StandardSample>(
 ) -> AudioSampleResult<EncodedSegment> {
     let original_length = sub_audio.samples_per_channel().get();
 
-    let result = analyse_signal_with_window_size(sub_audio, window, window_size, band_layout, config)?;
+    let result =
+        analyse_signal_with_window_size(sub_audio, window, window_size, band_layout, config)?;
 
     let allocation = allocate_bits(&result.band_metrics, bit_budget, min_bits_per_band);
     let quantized = quantize(
@@ -343,7 +347,10 @@ fn encode_segment<T: StandardSample>(
 impl AudioCodec for PerceptualCodec {
     type Encoded = PerceptualEncodedAudio;
 
-    fn encode<T: StandardSample>(self, audio: &AudioSamples<T>) -> AudioSampleResult<Self::Encoded> {
+    fn encode<T: StandardSample>(
+        self,
+        audio: &AudioSamples<T>,
+    ) -> AudioSampleResult<Self::Encoded> {
         if !self.config.is_compatible_with(&self.band_layout) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "config",
@@ -378,17 +385,19 @@ impl AudioCodec for PerceptualCodec {
                     self.min_bits_per_band,
                 )?;
                 let segments = NonEmptyVec::new(vec![segment]).expect("single segment");
-                Ok(PerceptualEncodedAudio { segments, original_length, sample_rate })
+                Ok(PerceptualEncodedAudio {
+                    segments,
+                    original_length,
+                    sample_rate,
+                })
             }
 
             Some(short_ws) => {
                 // ── Window-switching path ──────────────────────────────────
-                let long_ws_val = self.window_size
-                    .map(|w| w.get())
-                    .unwrap_or_else(|| {
-                        let raw = 2048_usize.min(original_length);
-                        if raw % 2 == 0 { raw } else { raw - 1 }
-                    });
+                let long_ws_val = self.window_size.map(|w| w.get()).unwrap_or_else(|| {
+                    let raw = 2048_usize.min(original_length);
+                    if raw % 2 == 0 { raw } else { raw - 1 }
+                });
 
                 if long_ws_val < 4 {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -408,7 +417,10 @@ impl AudioCodec for PerceptualCodec {
                 // SAFETY: original_length >= 1 (AudioSamples invariant).
                 let samples_ne = unsafe { NonEmptySlice::new_unchecked(samples) };
                 let transient_mask = detect_transient_windows(
-                    samples_ne, long_ws, long_hop, self.transient_threshold,
+                    samples_ne,
+                    long_ws,
+                    long_hop,
+                    self.transient_threshold,
                 );
 
                 let groups = group_by_type(transient_mask.as_non_empty_slice());
@@ -439,8 +451,8 @@ impl AudioCodec for PerceptualCodec {
                     }
 
                     let seg_vec = samples[sample_start..sample_end].to_vec();
-                    let seg_ne = NonEmptyVec::new(seg_vec)
-                        .map_err(|_| AudioSampleError::EmptyData)?;
+                    let seg_ne =
+                        NonEmptyVec::new(seg_vec).map_err(|_| AudioSampleError::EmptyData)?;
                     let seg_audio: AudioSamples<'static, f32> =
                         AudioSamples::from_mono_vec(seg_ne, sample_rate);
 
@@ -453,13 +465,21 @@ impl AudioCodec for PerceptualCodec {
                 }
 
                 // Encode segments — parallel when `parallel` feature is enabled.
-                let window     = self.window;
-                let config     = self.config;
+                let window = self.window;
+                let config = self.config;
                 let bit_budget = self.bit_budget;
-                let min_bits   = self.min_bits_per_band;
+                let min_bits = self.min_bits_per_band;
 
                 let process = |(seg_audio, win_size, layout): SegInput| {
-                    encode_segment(&seg_audio, window.clone(), win_size, &layout, &config, bit_budget, min_bits)
+                    encode_segment(
+                        &seg_audio,
+                        window.clone(),
+                        win_size,
+                        &layout,
+                        &config,
+                        bit_budget,
+                        min_bits,
+                    )
                 };
 
                 #[cfg(feature = "parallel")]
@@ -471,18 +491,24 @@ impl AudioCodec for PerceptualCodec {
                 let encoded_segments: AudioSampleResult<Vec<EncodedSegment>> =
                     seg_inputs.into_iter().map(process).collect();
 
-                let segments = NonEmptyVec::new(encoded_segments?)
-                    .map_err(|_| AudioSampleError::EmptyData)?;
-                Ok(PerceptualEncodedAudio { segments, original_length, sample_rate })
+                let segments =
+                    NonEmptyVec::new(encoded_segments?).map_err(|_| AudioSampleError::EmptyData)?;
+                Ok(PerceptualEncodedAudio {
+                    segments,
+                    original_length,
+                    sample_rate,
+                })
             }
         }
     }
 
-    fn decode<U: StandardSample>(encoded: Self::Encoded) -> AudioSampleResult<AudioSamples<'static, U>>
+    fn decode<U: StandardSample>(
+        encoded: Self::Encoded,
+    ) -> AudioSampleResult<AudioSamples<'static, U>>
     where
         f32: crate::ConvertFrom<U>,
     {
-        let sample_rate   = encoded.sample_rate;
+        let sample_rate = encoded.sample_rate;
         let target_length = encoded.original_length;
 
         // Reconstruct each segment independently — order is preserved by rayon.
@@ -508,11 +534,20 @@ impl AudioCodec for PerceptualCodec {
         #[cfg(feature = "parallel")]
         let segment_samples: AudioSampleResult<Vec<Vec<f32>>> = {
             use rayon::prelude::*;
-            encoded.segments.into_vec().into_par_iter().map(decode_seg).collect()
+            encoded
+                .segments
+                .into_vec()
+                .into_par_iter()
+                .map(decode_seg)
+                .collect()
         };
         #[cfg(not(feature = "parallel"))]
-        let segment_samples: AudioSampleResult<Vec<Vec<f32>>> =
-            encoded.segments.into_vec().into_iter().map(decode_seg).collect();
+        let segment_samples: AudioSampleResult<Vec<Vec<f32>>> = encoded
+            .segments
+            .into_vec()
+            .into_iter()
+            .map(decode_seg)
+            .collect();
 
         let mut all_samples: Vec<f32> = Vec::with_capacity(target_length);
         for chunk in segment_samples? {
@@ -520,8 +555,7 @@ impl AudioCodec for PerceptualCodec {
         }
         all_samples.truncate(target_length);
 
-        let samples_ne = NonEmptyVec::new(all_samples)
-            .map_err(|_| AudioSampleError::EmptyData)?;
+        let samples_ne = NonEmptyVec::new(all_samples).map_err(|_| AudioSampleError::EmptyData)?;
         let f32_audio: AudioSamples<'static, f32> =
             AudioSamples::from_mono_vec(samples_ne, sample_rate);
         Ok(f32_audio.to_format::<U>())

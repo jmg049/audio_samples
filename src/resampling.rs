@@ -1,5 +1,5 @@
 //! Module for handling audio sample resampling operations.
-//! Uses linear interpolation for the Fast path and rubato for Medium/High quality.
+//! Uses linear interpolation for the Fast path and rubato's FFT resampler for Medium/High quality.
 
 use crate::{
     AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
@@ -10,34 +10,30 @@ use crate::{
 };
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use non_empty_slice::NonEmptyVec;
-use rayon::prelude::*;
-use rubato::{Async, FixedAsync, Resampler, SincInterpolationType, WindowFunction};
+use rubato::{Fft, FixedSync, Resampler};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-// Block sizes for rubato's FixedAsync::Input mode.
-// Larger blocks amortise per-block overhead (adapter construction, loop setup)
-// without affecting the per-sample filter cost.
-const MEDIUM_BLOCK: usize = 32768;
-const HIGH_BLOCK: usize = 16384;
+// Chunk sizes for rubato's Fft synchronous resampler.
+// The Fft resampler snaps to the nearest integer multiple of (in_sr / gcd(in_sr, out_sr)),
+// so these are targets; the actual chunk will be slightly larger.
+// Larger chunks amortise per-FFT overhead and improve throughput for long signals.
+const FFT_MEDIUM_CHUNK: usize = 4096;
+const FFT_HIGH_CHUNK: usize = 16384;
 
 // ---------------------------------------------------------------------------
-// Per-thread resampler cache
+// Per-thread FFT resampler cache
 // ---------------------------------------------------------------------------
 //
-// Building a rubato sinc resampler computes filter tables at construction
-// time, which costs 1–6 ms per call depending on quality.  That dominates
-// short-signal benchmarks and makes Medium/High slower than librosa for
-// short inputs.
+// Building a rubato Fft resampler computes FFT plans and filter tables at
+// construction time.  Caching one Fft<f32> per (in_sr, out_sr, channels,
+// quality) tuple avoids that overhead on repeated calls with the same
+// parameters (e.g. processing a batch of clips at the same sample rates).
 //
-// The fix: keep one Vec<Async<f32>> alive per (in_sr, out_sr, channels,
-// quality) tuple in a thread-local HashMap.  Each element is a single-channel
-// (channels=1) resampler so that rayon can process all channels in parallel
-// without sharing state.  On reuse, `Resampler::reset()` clears delay state
-// while preserving filter tables.
-//
-// Thread-local storage means no locking overhead, and std::mem::take lets us
-// move the Vec out temporarily for the rayon parallel section.
+// Thread-local storage means no locking overhead.  Fft<f32> does not
+// implement Default, so we use HashMap::remove / re-insert to move ownership
+// in and out of the cache around each call.  On reuse, Resampler::reset()
+// clears overlap buffers and delay state while preserving FFT plans.
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct ResamplerKey {
@@ -48,49 +44,29 @@ struct ResamplerKey {
 }
 
 thread_local! {
-    static SINC_CACHE: RefCell<HashMap<ResamplerKey, Vec<Async<f32>>>>
+    static FFT_CACHE: RefCell<HashMap<ResamplerKey, Fft<f32>>>
         = RefCell::new(HashMap::new());
 }
 
-/// Retrieves (or creates) the per-channel resampler vec from the cache,
-/// resets all resamplers, then calls `f`.  The vec is taken out of the map
-/// before calling `f` so that `f` can hold a mutable reference to the Vec
-/// elements across a rayon parallel section, then returned afterwards.
-fn with_cached_per_channel_resamplers<T>(
+fn with_cached_fft_resampler<T>(
     key: ResamplerKey,
-    make_one: impl Fn() -> AudioSampleResult<Async<f32>>,
-    channels: usize,
-    f: impl FnOnce(&mut Vec<Async<f32>>) -> AudioSampleResult<T>,
+    make: impl FnOnce() -> AudioSampleResult<Fft<f32>>,
+    f: impl FnOnce(&mut Fft<f32>) -> AudioSampleResult<T>,
 ) -> AudioSampleResult<T> {
-    // Ensure the entry exists with the right number of single-channel resamplers.
-    SINC_CACHE.with(|cell| -> AudioSampleResult<()> {
+    FFT_CACHE.with(|cell| -> AudioSampleResult<()> {
         let mut map = cell.borrow_mut();
         if !map.contains_key(&key) {
-            let mut v = Vec::with_capacity(channels);
-            for _ in 0..channels {
-                v.push(make_one()?);
-            }
-            map.insert(key, v);
+            map.insert(key, make()?);
         }
         Ok(())
     })?;
 
-    // Take the Vec out so we can use it across a rayon parallel region.
-    let mut resamplers =
-        SINC_CACHE.with(|cell| std::mem::take(cell.borrow_mut().get_mut(&key).unwrap()));
-
-    // Reset all delay lines; filter tables are untouched.
-    for r in &mut resamplers {
-        r.reset();
-    }
-
-    let result = f(&mut resamplers);
-
-    // Return the Vec to the cache regardless of whether `f` succeeded.
-    SINC_CACHE.with(|cell| {
-        cell.borrow_mut().insert(key, resamplers);
+    let mut resampler = FFT_CACHE.with(|cell| cell.borrow_mut().remove(&key).unwrap());
+    resampler.reset();
+    let result = f(&mut resampler);
+    FFT_CACHE.with(|cell| {
+        cell.borrow_mut().insert(key, resampler);
     });
-
     result
 }
 
@@ -382,14 +358,28 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Medium / High paths — rubato sinc resampler with rayon parallelism
+// Medium / High paths — rubato FFT synchronous resampler
 // ---------------------------------------------------------------------------
 //
-// Each quality tier stores a Vec<Async<f32>> in the thread-local cache,
-// where every element is a single-channel (channels=1) sinc resampler.
-// Channels are processed in parallel via rayon, eliminating the sequential
-// bottleneck that made stereo slower than librosa (which vectorises across
-// channels with numba).
+// Both quality tiers use rubato's Fft<f32> synchronous resampler, which
+// operates entirely in the spectral domain:
+//   1. FFT the input chunk.
+//   2. Extend or truncate the spectrum to the output length.
+//   3. Apply a BlackmanHarris2 anti-aliasing window in the frequency domain.
+//   4. IFFT to produce output samples.
+//
+// This is O(N log N) vs O(N × sinc_len) for the sinc resampler, giving
+// significantly better throughput on the long signals typical in offline/batch
+// use.  Quality is also slightly better in practice: the spectral approach
+// avoids the sinc interpolation approximation error that the async resampler
+// incurs between pre-computed filter table entries.
+//
+// The two tiers differ only in chunk size.  A larger chunk amortises per-FFT
+// overhead more aggressively and gives marginally sharper roll-off at signal
+// edges; both use the same BlackmanHarris2 anti-aliasing filter.
+//
+// The Fft resampler processes all channels in a single call, so no per-channel
+// parallelism is needed here.
 
 fn resample_medium<T>(
     audio: &AudioSamples<f32>,
@@ -398,62 +388,7 @@ fn resample_medium<T>(
 where
     T: StandardSample,
 {
-    let in_sr = audio.sample_rate().get();
-    let channels = audio.num_channels().get() as usize;
-    let ratio = f64::from(target_sample_rate.get()) / f64::from(in_sr);
-    let key = ResamplerKey {
-        in_sr,
-        out_sr: target_sample_rate.get(),
-        channels,
-        quality: 1,
-    };
-
-    let input_data = extract_channel_data(audio)?;
-    let in_sr_u64 = in_sr as u64;
-    let out_sr_u64 = target_sample_rate.get() as u64;
-    let input_length = input_data[0].len();
-    let expected_frames = ((input_length as u64 * out_sr_u64 + in_sr_u64 - 1) / in_sr_u64) as usize;
-
-    with_cached_per_channel_resamplers(
-        key,
-        || {
-            // sinc_len=64, oversampling=256:
-            //   filter table = 64 × 256 × 4 B = 64 KB — fits in L1/L2 cache.
-            //   Quality is comparable to soxr HQ and above resampy kaiser_fast.
-            Async::<f32>::new_sinc(
-                ratio,
-                2.0,
-                &rubato::SincInterpolationParameters {
-                    sinc_len: 64,
-                    f_cutoff: 0.95,
-                    interpolation: SincInterpolationType::Linear,
-                    oversampling_factor: 256,
-                    window: WindowFunction::BlackmanHarris2,
-                },
-                MEDIUM_BLOCK,
-                1, // single-channel per resampler
-                FixedAsync::Input,
-            )
-            .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "medium_resampler",
-                    format!("Failed to create medium quality resampler: {e}"),
-                ))
-            })
-        },
-        channels,
-        |resamplers| {
-            resample_parallel(
-                resamplers,
-                input_data,
-                MEDIUM_BLOCK,
-                expected_frames,
-                channels,
-                audio.num_channels(),
-                target_sample_rate,
-            )
-        },
-    )
+    resample_fft(audio, target_sample_rate, FFT_MEDIUM_CHUNK, 1)
 }
 
 fn resample_high<T>(
@@ -463,14 +398,25 @@ fn resample_high<T>(
 where
     T: StandardSample,
 {
+    resample_fft(audio, target_sample_rate, FFT_HIGH_CHUNK, 2)
+}
+
+fn resample_fft<T>(
+    audio: &AudioSamples<f32>,
+    target_sample_rate: SampleRate,
+    chunk_size: usize,
+    quality_id: u8,
+) -> AudioSampleResult<AudioSamples<'static, T>>
+where
+    T: StandardSample,
+{
     let in_sr = audio.sample_rate().get();
     let channels = audio.num_channels().get() as usize;
-    let ratio = f64::from(target_sample_rate.get()) / f64::from(in_sr);
     let key = ResamplerKey {
         in_sr,
         out_sr: target_sample_rate.get(),
         channels,
-        quality: 2,
+        quality: quality_id,
     };
 
     let input_data = extract_channel_data(audio)?;
@@ -479,42 +425,28 @@ where
     let input_length = input_data[0].len();
     let expected_frames = ((input_length as u64 * out_sr_u64 + in_sr_u64 - 1) / in_sr_u64) as usize;
 
-    with_cached_per_channel_resamplers(
+    with_cached_fft_resampler(
         key,
         || {
-            // sinc_len=128, oversampling=512:
-            //   filter table = 128 × 512 × 4 B = 256 KB — fits in L2 cache.
-            //   This matches resampy kaiser_best (64 zero-crossings, 2^9 phases)
-            //   which is librosa's highest quality mode.  Linear interpolation
-            //   with high oversampling gives equivalent accuracy to Cubic at
-            //   lower oversampling while being faster to evaluate.
-            Async::<f32>::new_sinc(
-                ratio,
-                2.0,
-                &rubato::SincInterpolationParameters {
-                    sinc_len: 128,
-                    f_cutoff: 0.9476,
-                    interpolation: SincInterpolationType::Linear,
-                    oversampling_factor: 512,
-                    window: WindowFunction::BlackmanHarris2,
-                },
-                HIGH_BLOCK,
-                1, // single-channel per resampler
-                FixedAsync::Input,
+            Fft::<f32>::new(
+                in_sr as usize,
+                target_sample_rate.get() as usize,
+                chunk_size,
+                1,
+                channels,
+                FixedSync::Input,
             )
             .map_err(|e| {
                 AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "high_resampler",
-                    format!("Failed to create high quality resampler: {e}"),
+                    "fft_resampler",
+                    format!("Failed to create FFT resampler: {e}"),
                 ))
             })
         },
-        channels,
-        |resamplers| {
-            resample_parallel(
-                resamplers,
+        |resampler| {
+            resample_fft_blocked(
+                resampler,
                 input_data,
-                HIGH_BLOCK,
                 expected_frames,
                 channels,
                 audio.num_channels(),
@@ -524,11 +456,10 @@ where
     )
 }
 
-/// Process all channels in parallel using rayon, one single-channel resampler per channel.
-fn resample_parallel<T>(
-    resamplers: &mut Vec<Async<f32>>,
+/// Block-processing loop for all channels using a multi-channel rubato FFT resampler.
+fn resample_fft_blocked<T>(
+    resampler: &mut Fft<f32>,
     input_data: Vec<Vec<f32>>,
-    block_size: usize,
     expected_frames: usize,
     channels: usize,
     channel_count: ChannelCount,
@@ -537,71 +468,39 @@ fn resample_parallel<T>(
 where
     T: StandardSample,
 {
-    // Process channels in parallel; collect results or the first error.
-    let channel_results: Vec<AudioSampleResult<Vec<f32>>> = resamplers
-        .par_iter_mut()
-        .zip(input_data.into_par_iter())
-        .map(|(resampler, ch_data)| {
-            resample_single_channel_blocked(resampler, &ch_data, block_size, expected_frames)
-        })
+    let chunk_in = resampler.input_frames_next();
+    let chunk_out = resampler.output_frames_max();
+    let input_length = input_data[0].len();
+
+    let mut out: Vec<Vec<f32>> = (0..channels)
+        .map(|_| Vec::with_capacity(expected_frames + chunk_out))
         .collect();
 
-    // Propagate the first error, if any.
-    let all_out: Vec<Vec<f32>> = channel_results
-        .into_iter()
-        .collect::<AudioSampleResult<_>>()?;
+    // Multi-channel scratch buffers, reused across blocks.
+    let mut in_buf: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; chunk_in]).collect();
+    let mut out_buf: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; chunk_out]).collect();
 
-    if all_out.is_empty() || all_out[0].is_empty() {
-        return Err(AudioSampleError::Processing(
-            ProcessingError::algorithm_failure("resampler", "No output frames produced"),
-        ));
-    }
-
-    let total_frames = all_out[0].len();
-    assemble_output(
-        all_out,
-        total_frames,
-        channels,
-        channel_count,
-        target_sample_rate,
-    )
-}
-
-/// Block-processing loop for a single channel using a single-channel rubato resampler.
-fn resample_single_channel_blocked(
-    resampler: &mut Async<f32>,
-    input: &[f32],
-    block_in: usize,
-    expected_frames: usize,
-) -> AudioSampleResult<Vec<f32>> {
-    let input_length = input.len();
-    let block_out = resampler.output_frames_max();
-
-    let mut out = Vec::with_capacity(expected_frames + block_out);
-
-    // Single-channel scratch buffers, reused across blocks.
-    let mut in_buf: Vec<Vec<f32>> = vec![vec![0.0f32; block_in]];
-    let mut out_buf: Vec<Vec<f32>> = vec![vec![0.0f32; block_out]];
-
-    for block_start in (0..input_length).step_by(block_in) {
-        let block_end = (block_start + block_in).min(input_length);
+    for block_start in (0..input_length).step_by(chunk_in) {
+        let block_end = (block_start + chunk_in).min(input_length);
         let actual = block_end - block_start;
 
-        in_buf[0][..actual].copy_from_slice(&input[block_start..block_end]);
-        if actual < block_in {
-            in_buf[0][actual..].fill(0.0);
+        for ch in 0..channels {
+            in_buf[ch][..actual].copy_from_slice(&input_data[ch][block_start..block_end]);
+            if actual < chunk_in {
+                in_buf[ch][actual..].fill(0.0);
+            }
         }
 
-        let in_adapter = SequentialSliceOfVecs::new(&in_buf, 1, block_in).map_err(|e| {
+        let in_adapter = SequentialSliceOfVecs::new(&in_buf, channels, chunk_in).map_err(|e| {
             AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "resampler",
+                "fft_resampler",
                 format!("Input adapter error: {e}"),
             ))
         })?;
-        let mut out_adapter =
-            SequentialSliceOfVecs::new_mut(&mut out_buf, 1, block_out).map_err(|e| {
+        let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut out_buf, channels, chunk_out)
+            .map_err(|e| {
                 AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "resampler",
+                    "fft_resampler",
                     format!("Output adapter error: {e}"),
                 ))
             })?;
@@ -610,18 +509,30 @@ fn resample_single_channel_blocked(
             .process_into_buffer(&in_adapter, &mut out_adapter, None)
             .map_err(|e| {
                 AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "resampler",
+                    "fft_resampler",
                     format!("Resampling failed: {e}"),
                 ))
             })?;
 
-        out.extend_from_slice(&out_buf[0][..frames_written]);
+        for ch in 0..channels {
+            out[ch].extend_from_slice(&out_buf[ch][..frames_written]);
+        }
     }
 
     // Clamp to exact expected length; zero-padding the final block may
     // produce a few extra frames.
-    out.truncate(expected_frames.min(out.len()));
-    Ok(out)
+    for ch_data in &mut out {
+        ch_data.truncate(expected_frames.min(ch_data.len()));
+    }
+
+    let total_frames = out[0].len();
+    assemble_output(
+        out,
+        total_frames,
+        channels,
+        channel_count,
+        target_sample_rate,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ use audio_samples::educational;
 use audio_samples::operations::types::NormalizationConfig;
 use audio_samples::utils::generation::sine_wave;
 use audio_samples::{
-    AudioProcessingExt, AudioSamples, AudioStatistics, Explainable, ExplainMode, sample_rate,
+    AudioProcessingExt, AudioSamples, AudioStatistics, ExplainMode, Explainable, sample_rate,
 };
 use ndarray::Array1;
 use std::time::Duration;
@@ -27,11 +27,9 @@ fn main() {
         .iter()
         .map(|&s| s + dc_bias)
         .collect();
-    let audio = AudioSamples::<'static, f32>::new_mono(
-        Array1::from_vec(biased),
-        sample_rate!(2000),
-    )
-    .expect("valid mono buffer");
+    let audio =
+        AudioSamples::<'static, f32>::new_mono(Array1::from_vec(biased), sample_rate!(2000))
+            .expect("valid mono buffer");
 
     let (result, explanations) = audio
         .explaining(ExplainMode::Both)

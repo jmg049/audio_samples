@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -67,7 +67,7 @@ audioadapter-buffers = { version = "3.0.0", optional = true }
 
 [features]
 # Minimal core (no heavy dependencies)
-default = ["bare-bones", "transforms", "editing"]
+default = ["bare-bones"]
 
 # Core operation categories
 statistics = [] # Basic stats: peak, rms, mean

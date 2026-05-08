@@ -27,7 +27,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use audio_samples::{
     BandLayout, PerceptualCodec, PsychoacousticConfig,
     codecs::{decode, encode},
-    sample_rate, sine_wave, silence,
+    sample_rate, silence, sine_wave,
 };
 use spectrograms::WindowType;
 
@@ -40,22 +40,32 @@ const TRANSIENT_THRESHOLD: f32 = 8.0;
 
 fn codec_no_switch() -> PerceptualCodec {
     let n_bands = NonZeroUsize::new(N_BANDS).unwrap();
-    let n_bins  = NonZeroUsize::new(N_BINS).unwrap();
-    let layout  = BandLayout::bark(n_bands, SR as f32, n_bins);
+    let n_bins = NonZeroUsize::new(N_BINS).unwrap();
+    let layout = BandLayout::bark(n_bands, SR as f32, n_bins);
     let weights = PsychoacousticConfig::uniform_weights(n_bands);
-    let config  = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
-    PerceptualCodec::with_window_size(layout, config, WindowType::Hanning, 128_000, 1,
-        NonZeroUsize::new(LONG_WIN).unwrap())
+    let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+    PerceptualCodec::with_window_size(
+        layout,
+        config,
+        WindowType::Hanning,
+        128_000,
+        1,
+        NonZeroUsize::new(LONG_WIN).unwrap(),
+    )
 }
 
 fn codec_switching() -> PerceptualCodec {
-    let n_bands  = NonZeroUsize::new(N_BANDS).unwrap();
-    let n_bins   = NonZeroUsize::new(N_BINS).unwrap();
-    let layout   = BandLayout::bark(n_bands, SR as f32, n_bins);
-    let weights  = PsychoacousticConfig::uniform_weights(n_bands);
-    let config   = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+    let n_bands = NonZeroUsize::new(N_BANDS).unwrap();
+    let n_bins = NonZeroUsize::new(N_BINS).unwrap();
+    let layout = BandLayout::bark(n_bands, SR as f32, n_bins);
+    let weights = PsychoacousticConfig::uniform_weights(n_bands);
+    let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
     PerceptualCodec::with_window_switching(
-        layout, config, WindowType::Hanning, 128_000, 1,
+        layout,
+        config,
+        WindowType::Hanning,
+        128_000,
+        1,
         NonZeroUsize::new(LONG_WIN).unwrap(),
         NonZeroUsize::new(SHORT_WIN).unwrap(),
         TRANSIENT_THRESHOLD,
@@ -72,16 +82,17 @@ fn signal_sine(ms: u64) -> audio_samples::AudioSamples<'static, f32> {
 fn signal_transient(n_bursts: usize) -> audio_samples::AudioSamples<'static, f32> {
     use audio_samples::AudioSamples;
     let burst_ms = 50u64;
-    let gap_ms   = 50u64;
+    let gap_ms = 50u64;
     let sr = sample_rate!(44100);
 
     let burst = sine_wave::<f32>(880.0, Duration::from_millis(burst_ms), sr, 1.0);
-    let gap   = silence::<f32>(Duration::from_millis(gap_ms), sr);
+    let gap = silence::<f32>(Duration::from_millis(gap_ms), sr);
 
     let burst_samples = burst.as_slice().expect("contiguous").to_vec();
-    let gap_samples   = gap.as_slice().expect("contiguous").to_vec();
+    let gap_samples = gap.as_slice().expect("contiguous").to_vec();
 
-    let mut flat: Vec<f32> = Vec::with_capacity((burst_samples.len() + gap_samples.len()) * n_bursts);
+    let mut flat: Vec<f32> =
+        Vec::with_capacity((burst_samples.len() + gap_samples.len()) * n_bursts);
     for _ in 0..n_bursts {
         flat.extend_from_slice(&burst_samples);
         flat.extend_from_slice(&gap_samples);
@@ -128,9 +139,9 @@ fn bench_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("codec/decode");
 
     for &ms in &[200u64, 500, 1000] {
-        let sine            = signal_sine(ms);
-        let enc_no_switch   = encode(&sine, codec_no_switch()).unwrap();
-        let enc_switching   = encode(&sine, codec_switching()).unwrap();
+        let sine = signal_sine(ms);
+        let enc_no_switch = encode(&sine, codec_no_switch()).unwrap();
+        let enc_switching = encode(&sine, codec_switching()).unwrap();
 
         // iter_batched: clone happens outside the measured region.
         group.bench_with_input(
@@ -159,7 +170,7 @@ fn bench_decode(c: &mut Criterion) {
     }
 
     for &n_bursts in &[4usize, 8, 16] {
-        let transient     = signal_transient(n_bursts);
+        let transient = signal_transient(n_bursts);
         let enc_transient = encode(&transient, codec_switching()).unwrap();
 
         group.bench_with_input(

@@ -185,16 +185,24 @@ pub fn erb_to_hz(erb: f32) -> f32 {
 /// # Returns
 /// A new [`BandLayout`] with the same number of bands and scaled bin ranges.
 #[must_use]
-pub fn scale_band_layout(layout: &BandLayout, from_n_bins: NonZeroUsize, to_n_bins: NonZeroUsize) -> BandLayout {
+pub fn scale_band_layout(
+    layout: &BandLayout,
+    from_n_bins: NonZeroUsize,
+    to_n_bins: NonZeroUsize,
+) -> BandLayout {
     let from = from_n_bins.get();
     let to = to_n_bins.get();
 
-    let bands: Vec<super::Band> = layout.as_slice().iter().map(|band| {
-        let start = band.start_bin * to / from;
-        let end = (band.end_bin * to / from).max(start + 1).min(to);
-        // SAFETY: end > start is enforced by the .max(start + 1) above.
-        unsafe { super::Band::new(start, end, band.centre_frequency, band.perceptual_position) }
-    }).collect();
+    let bands: Vec<super::Band> = layout
+        .as_slice()
+        .iter()
+        .map(|band| {
+            let start = band.start_bin * to / from;
+            let end = (band.end_bin * to / from).max(start + 1).min(to);
+            // SAFETY: end > start is enforced by the .max(start + 1) above.
+            unsafe { super::Band::new(start, end, band.centre_frequency, band.perceptual_position) }
+        })
+        .collect();
 
     // SAFETY: layout is non-empty (BandLayout invariant), so bands is non-empty.
     let ne = unsafe { NonEmptySlice::new_unchecked(&bands) };
