@@ -46,8 +46,8 @@ use spectrograms::WindowType;
 use crate::traits::AudioTypeConversion;
 use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
 
-use super::{BandLayout, PsychoacousticConfig};
 use super::codec::{AudioCodec, PerceptualCodec, PerceptualEncodedAudio, decode as mono_decode};
+use super::{BandLayout, PsychoacousticConfig};
 
 // ── M/S matrix helpers ────────────────────────────────────────────────────────
 
@@ -65,8 +65,16 @@ use super::codec::{AudioCodec, PerceptualCodec, PerceptualEncodedAudio, decode a
 #[must_use]
 pub fn mid_side_encode(left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
     debug_assert_eq!(left.len(), right.len());
-    let mid  = left.iter().zip(right).map(|(&l, &r)| (l + r) * 0.5).collect();
-    let side = left.iter().zip(right).map(|(&l, &r)| (l - r) * 0.5).collect();
+    let mid = left
+        .iter()
+        .zip(right)
+        .map(|(&l, &r)| (l + r) * 0.5)
+        .collect();
+    let side = left
+        .iter()
+        .zip(right)
+        .map(|(&l, &r)| (l - r) * 0.5)
+        .collect();
     (mid, side)
 }
 
@@ -84,7 +92,7 @@ pub fn mid_side_encode(left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
 #[must_use]
 pub fn mid_side_decode(mid: &[f32], side: &[f32]) -> (Vec<f32>, Vec<f32>) {
     debug_assert_eq!(mid.len(), side.len());
-    let left  = mid.iter().zip(side).map(|(&m, &s)| m + s).collect();
+    let left = mid.iter().zip(side).map(|(&m, &s)| m + s).collect();
     let right = mid.iter().zip(side).map(|(&m, &s)| m - s).collect();
     (left, right)
 }
@@ -267,7 +275,10 @@ impl StereoPerceptualCodec {
 impl AudioCodec for StereoPerceptualCodec {
     type Encoded = StereoPerceptualEncodedAudio;
 
-    fn encode<T: StandardSample>(self, audio: &AudioSamples<T>) -> AudioSampleResult<Self::Encoded> {
+    fn encode<T: StandardSample>(
+        self,
+        audio: &AudioSamples<T>,
+    ) -> AudioSampleResult<Self::Encoded> {
         if audio.num_channels().get() != 2 {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "audio",
@@ -283,44 +294,75 @@ impl AudioCodec for StereoPerceptualCodec {
         // Extract L/R as f32.
         let audio_f32 = audio.to_format::<f32>();
         let mut channels = audio_f32.channels();
-        let left  = channels.next().expect("validated 2 channels").as_slice().expect("contiguous").to_vec();
-        let right = channels.next().expect("validated 2 channels").as_slice().expect("contiguous").to_vec();
+        let left = channels
+            .next()
+            .expect("validated 2 channels")
+            .as_slice()
+            .expect("contiguous")
+            .to_vec();
+        let right = channels
+            .next()
+            .expect("validated 2 channels")
+            .as_slice()
+            .expect("contiguous")
+            .to_vec();
 
         // M/S matrix encode.
         let (mid_samples, side_samples) = mid_side_encode(&left, &right);
 
-        let mid_ne   = NonEmptyVec::new(mid_samples).map_err(|_| AudioSampleError::EmptyData)?;
-        let side_ne  = NonEmptyVec::new(side_samples).map_err(|_| AudioSampleError::EmptyData)?;
+        let mid_ne = NonEmptyVec::new(mid_samples).map_err(|_| AudioSampleError::EmptyData)?;
+        let side_ne = NonEmptyVec::new(side_samples).map_err(|_| AudioSampleError::EmptyData)?;
 
-        let mid_audio:  AudioSamples<'static, f32> = AudioSamples::from_mono_vec(mid_ne,  sample_rate);
-        let side_audio: AudioSamples<'static, f32> = AudioSamples::from_mono_vec(side_ne, sample_rate);
+        let mid_audio: AudioSamples<'static, f32> =
+            AudioSamples::from_mono_vec(mid_ne, sample_rate);
+        let side_audio: AudioSamples<'static, f32> =
+            AudioSamples::from_mono_vec(side_ne, sample_rate);
 
         // Encode each channel with its own bit budget.
-        let mid  = self.mid_codec().encode(&mid_audio)?;
+        let mid = self.mid_codec().encode(&mid_audio)?;
         let side = self.side_codec().encode(&side_audio)?;
 
         Ok(StereoPerceptualEncodedAudio { mid, side })
     }
 
-    fn decode<U: StandardSample>(encoded: Self::Encoded) -> AudioSampleResult<AudioSamples<'static, U>>
+    fn decode<U: StandardSample>(
+        encoded: Self::Encoded,
+    ) -> AudioSampleResult<AudioSamples<'static, U>>
     where
         f32: crate::ConvertFrom<U>,
     {
         // Decode each M/S channel to f32 via the mono codec.
-        let mid_audio:  AudioSamples<'static, f32> = mono_decode::<PerceptualCodec, f32>(encoded.mid)?;
-        let side_audio: AudioSamples<'static, f32> = mono_decode::<PerceptualCodec, f32>(encoded.side)?;
+        let mid_audio: AudioSamples<'static, f32> =
+            mono_decode::<PerceptualCodec, f32>(encoded.mid)?;
+        let side_audio: AudioSamples<'static, f32> =
+            mono_decode::<PerceptualCodec, f32>(encoded.side)?;
 
-        let mid_samples  = mid_audio .channels().next().expect("mono").as_slice().expect("contiguous").to_vec();
-        let side_samples = side_audio.channels().next().expect("mono").as_slice().expect("contiguous").to_vec();
+        let mid_samples = mid_audio
+            .channels()
+            .next()
+            .expect("mono")
+            .as_slice()
+            .expect("contiguous")
+            .to_vec();
+        let side_samples = side_audio
+            .channels()
+            .next()
+            .expect("mono")
+            .as_slice()
+            .expect("contiguous")
+            .to_vec();
 
         // M/S matrix decode.
         let (left, right) = mid_side_decode(&mid_samples, &side_samples);
 
         // Interleave L/R → stereo AudioSamples.
-        let interleaved: Vec<f32> = left.iter().zip(right.iter())
+        let interleaved: Vec<f32> = left
+            .iter()
+            .zip(right.iter())
             .flat_map(|(&l, &r)| [l, r])
             .collect();
-        let interleaved_ne = NonEmptyVec::new(interleaved).map_err(|_| AudioSampleError::EmptyData)?;
+        let interleaved_ne =
+            NonEmptyVec::new(interleaved).map_err(|_| AudioSampleError::EmptyData)?;
 
         let stereo_f32: AudioSamples<'static, f32> = AudioSamples::from_interleaved_vec(
             interleaved_ne,

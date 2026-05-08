@@ -347,6 +347,10 @@ macro_rules! nzu {
     }};
 }
 
+/// Codec infrastructure: the [`AudioCodec`] trait, `encode`/`decode` free functions,
+/// and the [`PerceptualCodec`] implementation (requires `feature = "psychoacoustic"`).
+#[cfg(feature = "psychoacoustic")]
+pub mod codecs;
 pub mod conversions;
 pub mod iterators;
 pub mod operations;
@@ -355,16 +359,12 @@ pub mod resampling;
 /// Core trait definitions for audio sample types and operations.
 pub mod traits;
 pub mod utils;
-/// Codec infrastructure: the [`AudioCodec`] trait, `encode`/`decode` free functions,
-/// and the [`PerceptualCodec`] implementation (requires `feature = "psychoacoustic"`).
-#[cfg(feature = "psychoacoustic")]
-pub mod codecs;
 
 mod error;
-mod repr;
 /// Fixed-size audio buffer types whose geometry is encoded in the type system.
 #[cfg(feature = "fixed-size-audio")]
 pub mod fixed_audio;
+mod repr;
 
 pub mod simd_conversions;
 
@@ -446,14 +446,10 @@ pub use crate::operations::traits::AudioVoiceActivityDetection;
 
 #[cfg(feature = "psychoacoustic")]
 pub use crate::codecs::perceptual::{
-    AudioPerceptualAnalysis, AudioCodec,
-    Band, BandLayout, BandMetric, BandMetrics,
-    EncodedSegment,
-    PerceptualAnalysisResult, PerceptualCodec, PerceptualEncodedAudio,
-    StereoPerceptualCodec, StereoPerceptualEncodedAudio,
-    PsychoacousticConfig,
-    apply_temporal_masking, detect_transient_windows,
-    reconstruct_signal, analyse_signal_with_window_size,
+    AudioCodec, AudioPerceptualAnalysis, Band, BandLayout, BandMetric, BandMetrics, EncodedSegment,
+    PerceptualAnalysisResult, PerceptualCodec, PerceptualEncodedAudio, PsychoacousticConfig,
+    StereoPerceptualCodec, StereoPerceptualEncodedAudio, analyse_signal_with_window_size,
+    apply_temporal_masking, detect_transient_windows, reconstruct_signal,
 };
 
 #[cfg(feature = "psychoacoustic")]
@@ -461,18 +457,17 @@ pub use crate::codecs::perceptual::bands::scale_band_layout;
 
 #[cfg(feature = "psychoacoustic")]
 pub use crate::codecs::perceptual::masking::{
-    MaskerType, classify_masker_types,
-    absolute_threshold_of_hearing, spreading_attenuation, compute_smr,
+    MaskerType, absolute_threshold_of_hearing, classify_masker_types, compute_smr,
+    spreading_attenuation,
 };
 
 #[cfg(feature = "psychoacoustic")]
-pub use crate::codecs::perceptual::stereo::{mid_side_encode, mid_side_decode};
+pub use crate::codecs::perceptual::stereo::{mid_side_decode, mid_side_encode};
 
 #[cfg(feature = "psychoacoustic")]
 pub use crate::codecs::perceptual::quantization::{
-    BandAllocation, BitAllocationResult,
-    allocate_bits, dequantize, dequantize_band,
-    quantize, quantize_band, step_size_from_allowed_noise,
+    BandAllocation, BitAllocationResult, allocate_bits, dequantize, dequantize_band, quantize,
+    quantize_band, step_size_from_allowed_noise,
 };
 
 #[cfg(feature = "psychoacoustic")]

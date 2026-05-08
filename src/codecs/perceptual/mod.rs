@@ -118,9 +118,7 @@ impl Band {
         if end_bin <= start_bin {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "end_bin",
-                format!(
-                    "end_bin ({end_bin}) must be greater than start_bin ({start_bin})"
-                ),
+                format!("end_bin ({end_bin}) must be greater than start_bin ({start_bin})"),
             )));
         }
         Ok(Self {
@@ -625,7 +623,9 @@ where
     if window_size_val < 4 {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "signal",
-            format!("signal too short for psychoacoustic analysis: {n_samples} samples (minimum 4)"),
+            format!(
+                "signal too short for psychoacoustic analysis: {n_samples} samples (minimum 4)"
+            ),
         )));
     }
 
@@ -639,10 +639,7 @@ where
 
     // Convert to f32 and extract the mono channel.
     let signal_f32 = signal.to_format::<f32>();
-    let channel = signal_f32
-        .channels()
-        .next()
-        .expect("validated mono above");
+    let channel = signal_f32.channels().next().expect("validated mono above");
     let samples: &[f32] = channel
         .as_slice()
         .expect("mono channel is always contiguous");
@@ -656,8 +653,8 @@ where
 
     // Flatten coefficients in row-major (C) order: index as k * n_frames + f.
     let coefficients_vec: Vec<f32> = mdct_matrix.iter().copied().collect();
-    let coefficients = NonEmptyVec::new(coefficients_vec)
-        .expect("MDCT matrix is non-empty for valid input");
+    let coefficients =
+        NonEmptyVec::new(coefficients_vec).expect("MDCT matrix is non-empty for valid input");
 
     // Average power per bin across frames (linear scale).
     let bin_energies_vec: Vec<f32> = (0..n_bins)
@@ -666,8 +663,8 @@ where
             sum / n_frames_raw as f32
         })
         .collect();
-    let bin_energies = NonEmptyVec::new(bin_energies_vec)
-        .expect("n_bins >= 1 for window_size >= 4");
+    let bin_energies =
+        NonEmptyVec::new(bin_energies_vec).expect("n_bins >= 1 for window_size >= 4");
 
     let band_metrics = masking::compute_band_metrics(
         bin_energies.as_non_empty_slice().as_slice(),

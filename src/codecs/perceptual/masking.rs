@@ -14,7 +14,7 @@
 //! These primitives follow the structure of the MPEG-1 psychoacoustic model (ISO
 //! 11172-3 Annex D), simplified for use as a general-purpose analysis layer.
 
-use super::{BandMetric, BandMetrics, BandLayout, PsychoacousticConfig};
+use super::{BandLayout, BandMetric, BandMetrics, PsychoacousticConfig};
 use non_empty_slice::NonEmptySlice;
 
 // ── Masker type ────────────────────────────────────────────────────────────────
@@ -375,7 +375,14 @@ pub fn apply_temporal_masking(
                     let weight = config.perceptual_weights[b];
                     let importance = weight * smr.max(0.0);
                     let allowed_noise = new_threshold - smr.max(0.0);
-                    BandMetric::new(m.band.clone(), energy, new_threshold, smr, importance, allowed_noise)
+                    BandMetric::new(
+                        m.band.clone(),
+                        energy,
+                        new_threshold,
+                        smr,
+                        importance,
+                        allowed_noise,
+                    )
                 })
                 .collect();
             // SAFETY: n_bands >= 1 (BandMetrics invariant, preserved from input).
@@ -433,9 +440,7 @@ pub fn detect_transient_windows(
     let result: Vec<bool> = energies
         .iter()
         .enumerate()
-        .map(|(i, &e)| {
-            i > 0 && energies[i - 1] > 1e-10 && e > energies[i - 1] * threshold_ratio
-        })
+        .map(|(i, &e)| i > 0 && energies[i - 1] > 1e-10 && e > energies[i - 1] * threshold_ratio)
         .collect();
 
     // SAFETY: at least one window since n >= 1 (NonEmptySlice).

@@ -115,9 +115,7 @@ where
     samples: AudioSamples<'static, T>,
 }
 
-impl<T: StandardSample, const N: usize, const C: usize>
-    FixedSizeMultiChannelAudioSamples<T, N, C>
-{
+impl<T: StandardSample, const N: usize, const C: usize> FixedSizeMultiChannelAudioSamples<T, N, C> {
     /// Creates a zero-filled multi-channel buffer at the given sample rate.
     ///
     /// Panics at compile time if `N` (frames) or `C` (channels) is zero.

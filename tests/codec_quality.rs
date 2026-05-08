@@ -16,8 +16,8 @@ use audio_samples::{
     BandLayout, PerceptualCodec, PsychoacousticConfig,
     codecs::{decode, encode},
     sample_rate,
-    utils::generation::{sine_wave, white_noise},
     utils::comparison::snr,
+    utils::generation::{sine_wave, white_noise},
 };
 use non_empty_slice::NonEmptyVec;
 use spectrograms::WindowType;
@@ -32,12 +32,16 @@ const SIGNAL_DURATION_MS: u64 = 500;
 
 fn make_codec(bit_budget: u32) -> PerceptualCodec {
     let n_bands = NonZeroUsize::new(N_BANDS).unwrap();
-    let n_bins  = NonZeroUsize::new(N_BINS).unwrap();
-    let layout  = BandLayout::bark(n_bands, SR as f32, n_bins);
+    let n_bins = NonZeroUsize::new(N_BINS).unwrap();
+    let layout = BandLayout::bark(n_bands, SR as f32, n_bins);
     let weights = PsychoacousticConfig::uniform_weights(n_bands);
-    let config  = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+    let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
     PerceptualCodec::with_window_size(
-        layout, config, WindowType::Hanning, bit_budget, 1,
+        layout,
+        config,
+        WindowType::Hanning,
+        bit_budget,
+        1,
         NonZeroUsize::new(WINDOW_SIZE).unwrap(),
     )
 }
@@ -45,19 +49,29 @@ fn make_codec(bit_budget: u32) -> PerceptualCodec {
 // ── Test signals ──────────────────────────────────────────────────────────────
 
 fn signal_sine(freq_hz: f64) -> audio_samples::AudioSamples<'static, f32> {
-    sine_wave::<f32>(freq_hz, Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 0.5)
+    sine_wave::<f32>(
+        freq_hz,
+        Duration::from_millis(SIGNAL_DURATION_MS),
+        sample_rate!(44100),
+        0.5,
+    )
 }
 
 fn signal_white_noise() -> audio_samples::AudioSamples<'static, f32> {
-    white_noise::<f32>(Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 0.5, Some(42))
+    white_noise::<f32>(
+        Duration::from_millis(SIGNAL_DURATION_MS),
+        sample_rate!(44100),
+        0.5,
+        Some(42),
+    )
 }
 
 fn signal_transient(n_bursts: usize) -> audio_samples::AudioSamples<'static, f32> {
     let burst = sine_wave::<f32>(880.0, Duration::from_millis(50), sample_rate!(44100), 1.0);
-    let gap   = audio_samples::silence::<f32>(Duration::from_millis(50), sample_rate!(44100));
+    let gap = audio_samples::silence::<f32>(Duration::from_millis(50), sample_rate!(44100));
 
     let burst_s = burst.as_slice().expect("contiguous").to_vec();
-    let gap_s   = gap.as_slice().expect("contiguous").to_vec();
+    let gap_s = gap.as_slice().expect("contiguous").to_vec();
 
     let mut flat = Vec::with_capacity((burst_s.len() + gap_s.len()) * n_bursts);
     for _ in 0..n_bursts {
@@ -79,20 +93,22 @@ fn round_trip_snr(
     signal: &audio_samples::AudioSamples<'static, f32>,
     codec: PerceptualCodec,
 ) -> f64 {
-    let encoded       = encode(signal, codec).expect("encode failed");
+    let encoded = encode(signal, codec).expect("encode failed");
     let reconstructed = decode::<PerceptualCodec, f32>(encoded).expect("decode failed");
 
-    let orig  = signal.as_slice().expect("original contiguous");
+    let orig = signal.as_slice().expect("original contiguous");
     let recon = reconstructed.as_slice().expect("reconstructed contiguous");
-    let len   = orig.len().min(recon.len());
+    let len = orig.len().min(recon.len());
 
-    let error: Vec<f32> = orig[..len].iter()
+    let error: Vec<f32> = orig[..len]
+        .iter()
         .zip(recon[..len].iter())
         .map(|(a, b)| a - b)
         .collect();
 
-    let nev        = unsafe { NonEmptyVec::new_unchecked(error) };
-    let error_sig  = audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, signal.sample_rate());
+    let nev = unsafe { NonEmptyVec::new_unchecked(error) };
+    let error_sig =
+        audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, signal.sample_rate());
 
     // Trim original to same length as error signal for SNR computation.
     let orig_trimmed = if len == orig.len() {

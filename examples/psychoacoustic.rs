@@ -61,14 +61,13 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         "Spectral bins:     {} (avg energy per bin)",
         result.bin_energies.len().get()
     );
-    println!(
-        "Bands analysed:    {}",
-        result.band_metrics.len().get()
-    );
+    println!("Bands analysed:    {}", result.band_metrics.len().get());
 
     // ── Per-band metrics ───────────────────────────────────────────────────
-    println!("\n{:<6} {:<12} {:<10} {:<8} {:<10} {:<10}",
-        "Band", "CentreHz", "Energy dB", "SMR dB", "Importance", "AllowNoise");
+    println!(
+        "\n{:<6} {:<12} {:<10} {:<8} {:<10} {:<10}",
+        "Band", "CentreHz", "Energy dB", "SMR dB", "Importance", "AllowNoise"
+    );
     println!("{}", "-".repeat(60));
 
     for (i, metric) in result.band_metrics.as_slice().iter().enumerate() {
@@ -112,9 +111,8 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
 
     let mel_weights = vec![1.0_f32; 40];
     let mel_weights_slice = NonEmptySlice::from_slice(&mel_weights).unwrap();
-    let mel_config = PsychoacousticConfig::new(
-        -60.0, 14.5, 0.4, 25.0, 6.0, mel_weights_slice, 1e-10,
-    );
+    let mel_config =
+        PsychoacousticConfig::new(-60.0, 14.5, 0.4, 25.0, 6.0, mel_weights_slice, 1e-10);
 
     let mel_result =
         signal.analyse_psychoacoustic(WindowType::Hanning, &mel_layout, &mel_config)?;

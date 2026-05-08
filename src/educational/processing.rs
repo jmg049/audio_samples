@@ -153,7 +153,8 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
     }
 
     fn explain_text_band_pass_filter(before: &Self, after: &Self) -> String {
-        let latex = r"H(f) = \begin{cases} 1 & f_l \le f \le f_h \\ 0 & \text{otherwise} \end{cases}";
+        let latex =
+            r"H(f) = \begin{cases} 1 & f_l \le f \le f_h \\ 0 & \text{otherwise} \end{cases}";
         let formula = term_maths::render(latex);
         let _ = (before, after);
         format!(
