@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.7"
+version = "1.0.8"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -36,7 +36,6 @@ i24 = { version = "2.3.3", features = [
 ] }
 
 serde = { version = "1.0", features = ["derive"] }
-lazy_static = "1.5"
 num-format = { version = "0.4.4", optional = true }
 rand = { version = "0.10.1", optional = true }
 wide = "1.2.0"
@@ -58,8 +57,7 @@ explainable = { version = "0.1.1", optional = true }
 term-maths = { version = "1.0.0", optional = true }
 open = { version = "5", optional = true }
 
-regex = ">=1.12"
-rustfft = ">=6.2"
+rustfft = { version = ">=6.2", optional = true }
 non-empty-slice = ">=0.5"
 non-empty-iter = ">=0.2"
 audioadapter = { version =  "3.0.0",  optional = true }
@@ -72,7 +70,7 @@ default = ["bare-bones"]
 # Core operation categories
 statistics = [] # Basic stats: peak, rms, mean
 processing = ["statistics"] # Basic processing: normalize, scale, clip
-transforms = ["dep:spectrograms"]
+transforms = ["dep:spectrograms", "dep:rustfft"]
 editing = [
     "statistics",
     "random-generation",
@@ -101,6 +99,7 @@ envelopes = [
     "dynamic-range",
     "editing",
     "random-generation",
+    "dep:rustfft"
 ] # Envelope generation operations
 fixed-size-audio = [
 ] # Support for fixed-size audio buffers (no heap allocation)
