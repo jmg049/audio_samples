@@ -19,6 +19,7 @@ use super::ComplexOnsetConfig;
 use ndarray::{Array2, ArrayView2, Axis, s};
 use non_empty_slice::NonEmptyVec;
 use num_complex::Complex;
+#[cfg(feature = "simd")]
 use wide::f64x4;
 
 /// Computes frame-to-frame magnitude differences in a spectrogram.
@@ -228,10 +229,17 @@ pub fn combine_complex_odf(
         let mag_col = mag_diff.index_axis(Axis(1), t);
         let phase_col = phase_dev.index_axis(Axis(1), t);
 
+        let mut b = 0;
+
+        #[cfg(feature = "simd")]
         let mut mag_acc = f64x4::ZERO;
+        #[cfg(feature = "simd")]
         let mut phase_acc = f64x4::ZERO;
 
-        let mut b = 0;
+        #[cfg(not(feature = "simd"))]
+        let mut mag_acc = 0.0_f64;
+        #[cfg(not(feature = "simd"))]
+        let mut phase_acc = 0.0_f64;
 
         if mag_rect && phase_rect {
             while b + 4 <= bins {
@@ -239,12 +247,20 @@ pub fn combine_complex_odf(
                 let p_view = phase_col.slice(s![b..b + 4]);
                 let m_slice = m_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
                 let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                let m =
-                    f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]]).max(f64x4::ZERO);
-                let p =
-                    f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]]).max(f64x4::ZERO);
-                mag_acc += m;
-                phase_acc += p;
+                #[cfg(feature = "simd")]
+                {
+                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]]).max(f64x4::ZERO);
+                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]]).max(f64x4::ZERO);
+                    mag_acc += m;
+                    phase_acc += p;
+                }
+                #[cfg(not(feature = "simd"))]
+                {
+                    for i in 0..4 {
+                        mag_acc += m_slice[i].max(0.0);
+                        phase_acc += p_slice[i].max(0.0);
+                    }
+                }
                 b += 4;
             }
         } else {
@@ -253,16 +269,33 @@ pub fn combine_complex_odf(
                 let p_view = phase_col.slice(s![b..b + 4]);
                 let m_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
                 let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]]).abs();
-                let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]]).abs();
-                mag_acc += m;
-                phase_acc += p;
+                #[cfg(feature = "simd")]
+                {
+                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]]).abs();
+                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]]).abs();
+                    mag_acc += m;
+                    phase_acc += p;
+                }
+                #[cfg(not(feature = "simd"))]
+                {
+                    for i in 0..4 {
+                        mag_acc += m_slice[i].abs();
+                        phase_acc += p_slice[i].abs();
+                    }
+                }
                 b += 4;
             }
         }
 
+        #[cfg(feature = "simd")]
         let mut mag_sum = mag_acc.reduce_add();
+        #[cfg(feature = "simd")]
         let mut phase_sum = phase_acc.reduce_add();
+
+        #[cfg(not(feature = "simd"))]
+        let mut mag_sum = mag_acc;
+        #[cfg(not(feature = "simd"))]
+        let mut phase_sum = phase_acc;
 
         for i in b..bins {
             mag_sum += if mag_rect {
