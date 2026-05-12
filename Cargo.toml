@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.9"
+version = "1.0.10"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -32,10 +32,9 @@ i24 = { version = "2.3.3", features = [
     "num-cast",
     "ndarray",
     "std",
-    "serde",
 ] }
 
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
 num-format = { version = "0.4.4", optional = true }
 rand = { version = "0.10.1", optional = true }
 wide = { version = "1.2.0", optional = true }
@@ -154,7 +153,7 @@ educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing"]
 bare-bones = [] # No features, just the core API and basic types
 
 # Plotting sub-features (require plotting)
-static-plots = ["plotting", "dep:plotly_static"]
+static-plots = ["plotting", "dep:plotly_static", "dep:serde", "i24/serde"]
 simd = ["dep:wide"]
 random-generation = ["dep:rand"]
 python = ["i24/pyo3"]
