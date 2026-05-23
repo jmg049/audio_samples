@@ -1,3 +1,7 @@
+---
+terminology-vocab: invariants
+---
+
 <div align="center">
 
 # AudioSamples
@@ -7,6 +11,7 @@
 <img src="logo.png" title="AudioSamples Logo -- Ferrous' Mustachioed Cousin From East Berlin, Eisenhaltig" width="200"/>
 
 [![Crates.io][crate-img]][crate] [![Docs.rs][docs-img]][docs] [![License: MIT][license-img]][license]
+
 </div>
 
 ---
@@ -190,46 +195,46 @@ optional dependencies. Enable features as needed:
 
 ### Core operations
 
-| Feature | Description |
-|---|---|
-| `statistics` | Descriptive statistics: peak, RMS, mean, variance |
-| `processing` | Normalization, scaling, clipping (requires `statistics`) |
-| `editing` | Trim, pad, reverse, perturb, concatenate (requires `statistics`, `random-generation`) |
-| `channels` | Interleave/deinterleave, mono↔stereo conversion |
-| `iir-filtering` | IIR filter design and application |
-| `parametric-eq` | Parametric EQ bands (requires `iir-filtering`) |
-| `dynamic-range` | Compression, limiting, expansion |
-| `envelopes` | Amplitude, RMS, and attack-decay envelopes |
-| `vad` | Voice activity detection |
+| Feature         | Description                                                                           |
+| --------------- | ------------------------------------------------------------------------------------- |
+| `statistics`    | Descriptive statistics: peak, RMS, mean, variance                                     |
+| `processing`    | Normalization, scaling, clipping (requires `statistics`)                              |
+| `editing`       | Trim, pad, reverse, perturb, concatenate (requires `statistics`, `random-generation`) |
+| `channels`      | Interleave/deinterleave, mono↔stereo conversion                                       |
+| `iir-filtering` | IIR filter design and application                                                     |
+| `parametric-eq` | Parametric EQ bands (requires `iir-filtering`)                                        |
+| `dynamic-range` | Compression, limiting, expansion                                                      |
+| `envelopes`     | Amplitude, RMS, and attack-decay envelopes                                            |
+| `vad`           | Voice activity detection                                                              |
 
 ### Spectral and analysis
 
-| Feature | Description |
-|---|---|
-| `transforms` | FFT, STFT, MFCC, chromagram, CQT, PSD |
-| `psychoacoustic` | Bark/Mel band layouts, ATH, masking thresholds, SMR (requires `transforms`) |
-| `pitch-analysis` | YIN and autocorrelation pitch detection (requires `transforms`) |
-| `onset-detection` | Onset detection (requires `transforms`, `peak-picking`, `processing`) |
-| `beat-tracking` | Beat tracking |
-| `peak-picking` | Peak picking on onset envelopes |
-| `decomposition` | Audio decomposition (requires `onset-detection`) |
+| Feature           | Description                                                                 |
+| ----------------- | --------------------------------------------------------------------------- |
+| `transforms`      | FFT, STFT, MFCC, chromagram, CQT, PSD                                       |
+| `psychoacoustic`  | Bark/Mel band layouts, ATH, masking thresholds, SMR (requires `transforms`) |
+| `pitch-analysis`  | YIN and autocorrelation pitch detection (requires `transforms`)             |
+| `onset-detection` | Onset detection (requires `transforms`, `peak-picking`, `processing`)       |
+| `beat-tracking`   | Beat tracking                                                               |
+| `peak-picking`    | Peak picking on onset envelopes                                             |
+| `decomposition`   | Audio decomposition (requires `onset-detection`)                            |
 
 ### Utility
 
-| Feature | Description |
-|---|---|
-| `resampling` | Sample-rate conversion via rubato |
-| `random-generation` | Noise and random audio generation |
-| `fixed-size-audio` | Fixed-size buffer support (no heap allocation) |
-| `plotting` | Interactive HTML plots via plotly |
-| `static-plots` | PNG/SVG export (requires `plotting` — see [PLOTTING.md](PLOTTING.md)) |
-| `simd` | SIMD acceleration (nightly only) |
+| Feature             | Description                                                           |
+| ------------------- | --------------------------------------------------------------------- |
+| `resampling`        | Sample-rate conversion via rubato                                     |
+| `random-generation` | Noise and random audio generation                                     |
+| `fixed-size-audio`  | Fixed-size buffer support (no heap allocation)                        |
+| `plotting`          | Interactive HTML plots via plotly                                     |
+| `static-plots`      | PNG/SVG export (requires `plotting` — see [PLOTTING.md](PLOTTING.md)) |
+| `simd`              | SIMD acceleration (nightly only)                                      |
 
 ### Bundles
 
-| Feature | Description |
-|---|---|
-| `full` | All features |
+| Feature            | Description                  |
+| ------------------ | ---------------------------- |
+| `full`             | All features                 |
 | `full_no_plotting` | All features except plotting |
 
 ---
@@ -295,9 +300,7 @@ Contributions are welcome. Please submit a pull request and see
 
 [crate]: https://crates.io/crates/audio_samples
 [crate-img]: https://img.shields.io/crates/v/audio_samples?style=for-the-badge&color=009E73&label=crates.io
-
 [docs]: https://docs.rs/audio_samples
 [docs-img]: https://img.shields.io/badge/docs.rs-online-009E73?style=for-the-badge&labelColor=gray
-
 [license-img]: https://img.shields.io/crates/l/audio_samples?style=for-the-badge&label=license&labelColor=gray
 [license]: https://github.com/jmg049/audio_samples/blob/main/LICENSE
