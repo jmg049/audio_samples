@@ -14,12 +14,27 @@ use rubato::{Fft, FixedSync, Resampler};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-// Chunk sizes for rubato's Fft synchronous resampler.
-// The Fft resampler snaps to the nearest integer multiple of (in_sr / gcd(in_sr, out_sr)),
-// so these are targets; the actual chunk will be slightly larger.
+// Target chunk sizes for rubato's Fft synchronous resampler.
+// The actual chunk passed to rubato is rounded up to the nearest multiple of
+// in_sr / gcd(in_sr, out_sr); see `round_chunk_to_fft_boundary`.
 // Larger chunks amortise per-FFT overhead and improve throughput for long signals.
 const FFT_MEDIUM_CHUNK: usize = 4096;
 const FFT_HIGH_CHUNK: usize = 16384;
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+// Rubato's FixedSync::Input mode sets fft_size_in = ceil(chunk/min_chunk)*min_chunk.
+// If chunk < fft_size_in, subchunks_available = 0 → zero output frames → empty-vec UB.
+// Rounding up to the next multiple of min_chunk guarantees subchunks_available >= 1.
+fn round_chunk_to_fft_boundary(chunk: usize, in_sr: usize, out_sr: usize) -> usize {
+    let min_chunk = in_sr / gcd(in_sr, out_sr);
+    ((chunk + min_chunk - 1) / min_chunk) * min_chunk
+}
 
 // ---------------------------------------------------------------------------
 // Per-thread FFT resampler cache
@@ -425,13 +440,19 @@ where
     let input_length = input_data[0].len();
     let expected_frames = ((input_length as u64 * out_sr_u64 + in_sr_u64 - 1) / in_sr_u64) as usize;
 
+    let actual_chunk = round_chunk_to_fft_boundary(
+        chunk_size,
+        in_sr as usize,
+        target_sample_rate.get() as usize,
+    );
+
     with_cached_fft_resampler(
         key,
         || {
             Fft::<f32>::new(
                 in_sr as usize,
                 target_sample_rate.get() as usize,
-                chunk_size,
+                actual_chunk,
                 1,
                 channels,
                 FixedSync::Input,
