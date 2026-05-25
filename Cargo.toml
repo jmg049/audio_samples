@@ -103,6 +103,10 @@ envelopes = [
 fixed-size-audio = [
 ] # Support for fixed-size audio buffers (no heap allocation)
 
+# Enables PMU-based Criterion measurements (instructions, cycles, cache misses,
+# branch misses) for the bench_suite/ benches. Linux only — see bench_suite/README.md.
+perf_events = ["bench_suite_common/perf_events"]
+
 full = [
     "statistics",
     "editing",
@@ -164,8 +168,16 @@ approx_eq = "0.1.8"
 clap = { version = "4.6.0", features = ["derive"] }
 dtmf_tones = "1.0.1"
 rand = "0.10.0"
-criterion = { version = "0.8.2", features = ["html_reports"] }
+# Existing benches under benches/ use html_reports; the new bench_suite/ uses
+# csv_output. Both features can coexist on a single criterion dep.
+criterion = { version = "0.8.2", default-features = false, features = [
+    "html_reports",         # legacy benches/ffmpeg_comparison + codec_parallel
+    "rayon",
+    "cargo_bench_support",
+    "csv_output",           # bench_suite/: raw.csv per benchmark (METHODOLOGY §2)
+] }
 proptest = "1.10.0"
+bench_suite_common = { path = "bench_suite/common" }
 
 [[example]]
 name = "psychoacoustic"
@@ -191,6 +203,837 @@ required-features = [
 name = "codec_parallel"
 harness = false
 required-features = ["psychoacoustic"]
+
+# --------------------------------------------------------------------------
+# bench_suite/ — new comprehensive benchmark suite. See bench_suite/README.md.
+# Each catalog section gets five [[bench]] targets: one WallTime baseline +
+# four PMU variants (Linux + perf_events feature).
+# --------------------------------------------------------------------------
+
+# AudioStatistics (catalog section Stats, 16 functions).
+[[bench]]
+name              = "bench_stats_walltime"
+path              = "bench_suite/benches/bench_stats_walltime.rs"
+harness           = false
+required-features = ["statistics"]
+
+[[bench]]
+name              = "bench_stats_instructions"
+path              = "bench_suite/benches/bench_stats_instructions.rs"
+harness           = false
+required-features = ["statistics", "perf_events"]
+
+[[bench]]
+name              = "bench_stats_cycles"
+path              = "bench_suite/benches/bench_stats_cycles.rs"
+harness           = false
+required-features = ["statistics", "perf_events"]
+
+[[bench]]
+name              = "bench_stats_cache_misses"
+path              = "bench_suite/benches/bench_stats_cache_misses.rs"
+harness           = false
+required-features = ["statistics", "perf_events"]
+
+[[bench]]
+name              = "bench_stats_branch_misses"
+path              = "bench_suite/benches/bench_stats_branch_misses.rs"
+harness           = false
+required-features = ["statistics", "perf_events"]
+
+# AudioProcessing (catalog section proc).
+
+[[bench]]
+name              = "bench_proc_walltime"
+path              = "bench_suite/benches/bench_proc_walltime.rs"
+harness           = false
+required-features = ["processing"]
+
+[[bench]]
+name              = "bench_proc_instructions"
+path              = "bench_suite/benches/bench_proc_instructions.rs"
+harness           = false
+required-features = ["processing", "perf_events"]
+
+[[bench]]
+name              = "bench_proc_cycles"
+path              = "bench_suite/benches/bench_proc_cycles.rs"
+harness           = false
+required-features = ["processing", "perf_events"]
+
+[[bench]]
+name              = "bench_proc_cache_misses"
+path              = "bench_suite/benches/bench_proc_cache_misses.rs"
+harness           = false
+required-features = ["processing", "perf_events"]
+
+[[bench]]
+name              = "bench_proc_branch_misses"
+path              = "bench_suite/benches/bench_proc_branch_misses.rs"
+harness           = false
+required-features = ["processing", "perf_events"]
+
+# AudioTransforms (catalog section trans).
+
+[[bench]]
+name              = "bench_trans_walltime"
+path              = "bench_suite/benches/bench_trans_walltime.rs"
+harness           = false
+required-features = ["transforms"]
+
+[[bench]]
+name              = "bench_trans_instructions"
+path              = "bench_suite/benches/bench_trans_instructions.rs"
+harness           = false
+required-features = ["transforms", "perf_events"]
+
+[[bench]]
+name              = "bench_trans_cycles"
+path              = "bench_suite/benches/bench_trans_cycles.rs"
+harness           = false
+required-features = ["transforms", "perf_events"]
+
+[[bench]]
+name              = "bench_trans_cache_misses"
+path              = "bench_suite/benches/bench_trans_cache_misses.rs"
+harness           = false
+required-features = ["transforms", "perf_events"]
+
+[[bench]]
+name              = "bench_trans_branch_misses"
+path              = "bench_suite/benches/bench_trans_branch_misses.rs"
+harness           = false
+required-features = ["transforms", "perf_events"]
+
+# AudioEditing (catalog section edit).
+
+[[bench]]
+name              = "bench_edit_walltime"
+path              = "bench_suite/benches/bench_edit_walltime.rs"
+harness           = false
+required-features = ["editing"]
+
+[[bench]]
+name              = "bench_edit_instructions"
+path              = "bench_suite/benches/bench_edit_instructions.rs"
+harness           = false
+required-features = ["editing", "perf_events"]
+
+[[bench]]
+name              = "bench_edit_cycles"
+path              = "bench_suite/benches/bench_edit_cycles.rs"
+harness           = false
+required-features = ["editing", "perf_events"]
+
+[[bench]]
+name              = "bench_edit_cache_misses"
+path              = "bench_suite/benches/bench_edit_cache_misses.rs"
+harness           = false
+required-features = ["editing", "perf_events"]
+
+[[bench]]
+name              = "bench_edit_branch_misses"
+path              = "bench_suite/benches/bench_edit_branch_misses.rs"
+harness           = false
+required-features = ["editing", "perf_events"]
+
+# AudioChannelOps (catalog section chan).
+
+[[bench]]
+name              = "bench_chan_walltime"
+path              = "bench_suite/benches/bench_chan_walltime.rs"
+harness           = false
+required-features = ["channels"]
+
+[[bench]]
+name              = "bench_chan_instructions"
+path              = "bench_suite/benches/bench_chan_instructions.rs"
+harness           = false
+required-features = ["channels", "perf_events"]
+
+[[bench]]
+name              = "bench_chan_cycles"
+path              = "bench_suite/benches/bench_chan_cycles.rs"
+harness           = false
+required-features = ["channels", "perf_events"]
+
+[[bench]]
+name              = "bench_chan_cache_misses"
+path              = "bench_suite/benches/bench_chan_cache_misses.rs"
+harness           = false
+required-features = ["channels", "perf_events"]
+
+[[bench]]
+name              = "bench_chan_branch_misses"
+path              = "bench_suite/benches/bench_chan_branch_misses.rs"
+harness           = false
+required-features = ["channels", "perf_events"]
+
+# AudioIirFiltering (catalog section iir).
+
+[[bench]]
+name              = "bench_iir_walltime"
+path              = "bench_suite/benches/bench_iir_walltime.rs"
+harness           = false
+required-features = ["iir-filtering"]
+
+[[bench]]
+name              = "bench_iir_instructions"
+path              = "bench_suite/benches/bench_iir_instructions.rs"
+harness           = false
+required-features = ["iir-filtering", "perf_events"]
+
+[[bench]]
+name              = "bench_iir_cycles"
+path              = "bench_suite/benches/bench_iir_cycles.rs"
+harness           = false
+required-features = ["iir-filtering", "perf_events"]
+
+[[bench]]
+name              = "bench_iir_cache_misses"
+path              = "bench_suite/benches/bench_iir_cache_misses.rs"
+harness           = false
+required-features = ["iir-filtering", "perf_events"]
+
+[[bench]]
+name              = "bench_iir_branch_misses"
+path              = "bench_suite/benches/bench_iir_branch_misses.rs"
+harness           = false
+required-features = ["iir-filtering", "perf_events"]
+
+# AudioParametricEq (catalog section eq).
+
+[[bench]]
+name              = "bench_eq_walltime"
+path              = "bench_suite/benches/bench_eq_walltime.rs"
+harness           = false
+required-features = ["parametric-eq", "iir-filtering"]
+
+[[bench]]
+name              = "bench_eq_instructions"
+path              = "bench_suite/benches/bench_eq_instructions.rs"
+harness           = false
+required-features = ["parametric-eq", "iir-filtering", "perf_events"]
+
+[[bench]]
+name              = "bench_eq_cycles"
+path              = "bench_suite/benches/bench_eq_cycles.rs"
+harness           = false
+required-features = ["parametric-eq", "iir-filtering", "perf_events"]
+
+[[bench]]
+name              = "bench_eq_cache_misses"
+path              = "bench_suite/benches/bench_eq_cache_misses.rs"
+harness           = false
+required-features = ["parametric-eq", "iir-filtering", "perf_events"]
+
+[[bench]]
+name              = "bench_eq_branch_misses"
+path              = "bench_suite/benches/bench_eq_branch_misses.rs"
+harness           = false
+required-features = ["parametric-eq", "iir-filtering", "perf_events"]
+
+# AudioDynamicRange (catalog section dr).
+
+[[bench]]
+name              = "bench_dr_walltime"
+path              = "bench_suite/benches/bench_dr_walltime.rs"
+harness           = false
+required-features = ["dynamic-range"]
+
+[[bench]]
+name              = "bench_dr_instructions"
+path              = "bench_suite/benches/bench_dr_instructions.rs"
+harness           = false
+required-features = ["dynamic-range", "perf_events"]
+
+[[bench]]
+name              = "bench_dr_cycles"
+path              = "bench_suite/benches/bench_dr_cycles.rs"
+harness           = false
+required-features = ["dynamic-range", "perf_events"]
+
+[[bench]]
+name              = "bench_dr_cache_misses"
+path              = "bench_suite/benches/bench_dr_cache_misses.rs"
+harness           = false
+required-features = ["dynamic-range", "perf_events"]
+
+[[bench]]
+name              = "bench_dr_branch_misses"
+path              = "bench_suite/benches/bench_dr_branch_misses.rs"
+harness           = false
+required-features = ["dynamic-range", "perf_events"]
+
+# AudioEnvelopes (catalog section env).
+
+[[bench]]
+name              = "bench_env_walltime"
+path              = "bench_suite/benches/bench_env_walltime.rs"
+harness           = false
+required-features = ["envelopes"]
+
+[[bench]]
+name              = "bench_env_instructions"
+path              = "bench_suite/benches/bench_env_instructions.rs"
+harness           = false
+required-features = ["envelopes", "perf_events"]
+
+[[bench]]
+name              = "bench_env_cycles"
+path              = "bench_suite/benches/bench_env_cycles.rs"
+harness           = false
+required-features = ["envelopes", "perf_events"]
+
+[[bench]]
+name              = "bench_env_cache_misses"
+path              = "bench_suite/benches/bench_env_cache_misses.rs"
+harness           = false
+required-features = ["envelopes", "perf_events"]
+
+[[bench]]
+name              = "bench_env_branch_misses"
+path              = "bench_suite/benches/bench_env_branch_misses.rs"
+harness           = false
+required-features = ["envelopes", "perf_events"]
+
+# AudioOnsetDetection (catalog section onset).
+
+[[bench]]
+name              = "bench_onset_walltime"
+path              = "bench_suite/benches/bench_onset_walltime.rs"
+harness           = false
+required-features = ["onset-detection"]
+
+[[bench]]
+name              = "bench_onset_instructions"
+path              = "bench_suite/benches/bench_onset_instructions.rs"
+harness           = false
+required-features = ["onset-detection", "perf_events"]
+
+[[bench]]
+name              = "bench_onset_cycles"
+path              = "bench_suite/benches/bench_onset_cycles.rs"
+harness           = false
+required-features = ["onset-detection", "perf_events"]
+
+[[bench]]
+name              = "bench_onset_cache_misses"
+path              = "bench_suite/benches/bench_onset_cache_misses.rs"
+harness           = false
+required-features = ["onset-detection", "perf_events"]
+
+[[bench]]
+name              = "bench_onset_branch_misses"
+path              = "bench_suite/benches/bench_onset_branch_misses.rs"
+harness           = false
+required-features = ["onset-detection", "perf_events"]
+
+# peak picking (catalog section pp).
+
+[[bench]]
+name              = "bench_pp_walltime"
+path              = "bench_suite/benches/bench_pp_walltime.rs"
+harness           = false
+required-features = ["peak-picking"]
+
+[[bench]]
+name              = "bench_pp_instructions"
+path              = "bench_suite/benches/bench_pp_instructions.rs"
+harness           = false
+required-features = ["peak-picking", "perf_events"]
+
+[[bench]]
+name              = "bench_pp_cycles"
+path              = "bench_suite/benches/bench_pp_cycles.rs"
+harness           = false
+required-features = ["peak-picking", "perf_events"]
+
+[[bench]]
+name              = "bench_pp_cache_misses"
+path              = "bench_suite/benches/bench_pp_cache_misses.rs"
+harness           = false
+required-features = ["peak-picking", "perf_events"]
+
+[[bench]]
+name              = "bench_pp_branch_misses"
+path              = "bench_suite/benches/bench_pp_branch_misses.rs"
+harness           = false
+required-features = ["peak-picking", "perf_events"]
+
+# AudioBeatTracking (catalog section beat).
+
+[[bench]]
+name              = "bench_beat_walltime"
+path              = "bench_suite/benches/bench_beat_walltime.rs"
+harness           = false
+required-features = ["beat-tracking"]
+
+[[bench]]
+name              = "bench_beat_instructions"
+path              = "bench_suite/benches/bench_beat_instructions.rs"
+harness           = false
+required-features = ["beat-tracking", "perf_events"]
+
+[[bench]]
+name              = "bench_beat_cycles"
+path              = "bench_suite/benches/bench_beat_cycles.rs"
+harness           = false
+required-features = ["beat-tracking", "perf_events"]
+
+[[bench]]
+name              = "bench_beat_cache_misses"
+path              = "bench_suite/benches/bench_beat_cache_misses.rs"
+harness           = false
+required-features = ["beat-tracking", "perf_events"]
+
+[[bench]]
+name              = "bench_beat_branch_misses"
+path              = "bench_suite/benches/bench_beat_branch_misses.rs"
+harness           = false
+required-features = ["beat-tracking", "perf_events"]
+
+# AudioDecomposition (HPSS) (catalog section dec).
+
+[[bench]]
+name              = "bench_dec_walltime"
+path              = "bench_suite/benches/bench_dec_walltime.rs"
+harness           = false
+required-features = ["decomposition"]
+
+[[bench]]
+name              = "bench_dec_instructions"
+path              = "bench_suite/benches/bench_dec_instructions.rs"
+harness           = false
+required-features = ["decomposition", "perf_events"]
+
+[[bench]]
+name              = "bench_dec_cycles"
+path              = "bench_suite/benches/bench_dec_cycles.rs"
+harness           = false
+required-features = ["decomposition", "perf_events"]
+
+[[bench]]
+name              = "bench_dec_cache_misses"
+path              = "bench_suite/benches/bench_dec_cache_misses.rs"
+harness           = false
+required-features = ["decomposition", "perf_events"]
+
+[[bench]]
+name              = "bench_dec_branch_misses"
+path              = "bench_suite/benches/bench_dec_branch_misses.rs"
+harness           = false
+required-features = ["decomposition", "perf_events"]
+
+# AudioPitchAnalysis (catalog section pitch).
+
+[[bench]]
+name              = "bench_pitch_walltime"
+path              = "bench_suite/benches/bench_pitch_walltime.rs"
+harness           = false
+required-features = ["pitch-analysis"]
+
+[[bench]]
+name              = "bench_pitch_instructions"
+path              = "bench_suite/benches/bench_pitch_instructions.rs"
+harness           = false
+required-features = ["pitch-analysis", "perf_events"]
+
+[[bench]]
+name              = "bench_pitch_cycles"
+path              = "bench_suite/benches/bench_pitch_cycles.rs"
+harness           = false
+required-features = ["pitch-analysis", "perf_events"]
+
+[[bench]]
+name              = "bench_pitch_cache_misses"
+path              = "bench_suite/benches/bench_pitch_cache_misses.rs"
+harness           = false
+required-features = ["pitch-analysis", "perf_events"]
+
+[[bench]]
+name              = "bench_pitch_branch_misses"
+path              = "bench_suite/benches/bench_pitch_branch_misses.rs"
+harness           = false
+required-features = ["pitch-analysis", "perf_events"]
+
+# AudioVoiceActivityDetection (catalog section vad).
+
+[[bench]]
+name              = "bench_vad_walltime"
+path              = "bench_suite/benches/bench_vad_walltime.rs"
+harness           = false
+required-features = ["vad"]
+
+[[bench]]
+name              = "bench_vad_instructions"
+path              = "bench_suite/benches/bench_vad_instructions.rs"
+harness           = false
+required-features = ["vad", "perf_events"]
+
+[[bench]]
+name              = "bench_vad_cycles"
+path              = "bench_suite/benches/bench_vad_cycles.rs"
+harness           = false
+required-features = ["vad", "perf_events"]
+
+[[bench]]
+name              = "bench_vad_cache_misses"
+path              = "bench_suite/benches/bench_vad_cache_misses.rs"
+harness           = false
+required-features = ["vad", "perf_events"]
+
+[[bench]]
+name              = "bench_vad_branch_misses"
+path              = "bench_suite/benches/bench_vad_branch_misses.rs"
+harness           = false
+required-features = ["vad", "perf_events"]
+
+# AudioPlotting (catalog section plot).
+
+[[bench]]
+name              = "bench_plot_walltime"
+path              = "bench_suite/benches/bench_plot_walltime.rs"
+harness           = false
+required-features = ["plotting"]
+
+[[bench]]
+name              = "bench_plot_instructions"
+path              = "bench_suite/benches/bench_plot_instructions.rs"
+harness           = false
+required-features = ["plotting", "perf_events"]
+
+[[bench]]
+name              = "bench_plot_cycles"
+path              = "bench_suite/benches/bench_plot_cycles.rs"
+harness           = false
+required-features = ["plotting", "perf_events"]
+
+[[bench]]
+name              = "bench_plot_cache_misses"
+path              = "bench_suite/benches/bench_plot_cache_misses.rs"
+harness           = false
+required-features = ["plotting", "perf_events"]
+
+[[bench]]
+name              = "bench_plot_branch_misses"
+path              = "bench_suite/benches/bench_plot_branch_misses.rs"
+harness           = false
+required-features = ["plotting", "perf_events"]
+
+# psychoacoustic codec (catalog section psy).
+
+[[bench]]
+name              = "bench_psy_walltime"
+path              = "bench_suite/benches/bench_psy_walltime.rs"
+harness           = false
+required-features = ["psychoacoustic"]
+
+[[bench]]
+name              = "bench_psy_instructions"
+path              = "bench_suite/benches/bench_psy_instructions.rs"
+harness           = false
+required-features = ["psychoacoustic", "perf_events"]
+
+[[bench]]
+name              = "bench_psy_cycles"
+path              = "bench_suite/benches/bench_psy_cycles.rs"
+harness           = false
+required-features = ["psychoacoustic", "perf_events"]
+
+[[bench]]
+name              = "bench_psy_cache_misses"
+path              = "bench_suite/benches/bench_psy_cache_misses.rs"
+harness           = false
+required-features = ["psychoacoustic", "perf_events"]
+
+[[bench]]
+name              = "bench_psy_branch_misses"
+path              = "bench_suite/benches/bench_psy_branch_misses.rs"
+harness           = false
+required-features = ["psychoacoustic", "perf_events"]
+
+# resampling free fns (catalog section resamp).
+
+[[bench]]
+name              = "bench_resamp_walltime"
+path              = "bench_suite/benches/bench_resamp_walltime.rs"
+harness           = false
+required-features = ["resampling"]
+
+[[bench]]
+name              = "bench_resamp_instructions"
+path              = "bench_suite/benches/bench_resamp_instructions.rs"
+harness           = false
+required-features = ["resampling", "perf_events"]
+
+[[bench]]
+name              = "bench_resamp_cycles"
+path              = "bench_suite/benches/bench_resamp_cycles.rs"
+harness           = false
+required-features = ["resampling", "perf_events"]
+
+[[bench]]
+name              = "bench_resamp_cache_misses"
+path              = "bench_suite/benches/bench_resamp_cache_misses.rs"
+harness           = false
+required-features = ["resampling", "perf_events"]
+
+[[bench]]
+name              = "bench_resamp_branch_misses"
+path              = "bench_suite/benches/bench_resamp_branch_misses.rs"
+harness           = false
+required-features = ["resampling", "perf_events"]
+
+# type conversion (catalog section conv).
+
+[[bench]]
+name              = "bench_conv_walltime"
+path              = "bench_suite/benches/bench_conv_walltime.rs"
+harness           = false
+
+[[bench]]
+name              = "bench_conv_instructions"
+path              = "bench_suite/benches/bench_conv_instructions.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_conv_cycles"
+path              = "bench_suite/benches/bench_conv_cycles.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_conv_cache_misses"
+path              = "bench_suite/benches/bench_conv_cache_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_conv_branch_misses"
+path              = "bench_suite/benches/bench_conv_branch_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+# signal generation (catalog section gen).
+
+[[bench]]
+name              = "bench_gen_walltime"
+path              = "bench_suite/benches/bench_gen_walltime.rs"
+harness           = false
+required-features = ["random-generation", "channels"]
+
+[[bench]]
+name              = "bench_gen_instructions"
+path              = "bench_suite/benches/bench_gen_instructions.rs"
+harness           = false
+required-features = ["random-generation", "channels", "perf_events"]
+
+[[bench]]
+name              = "bench_gen_cycles"
+path              = "bench_suite/benches/bench_gen_cycles.rs"
+harness           = false
+required-features = ["random-generation", "channels", "perf_events"]
+
+[[bench]]
+name              = "bench_gen_cache_misses"
+path              = "bench_suite/benches/bench_gen_cache_misses.rs"
+harness           = false
+required-features = ["random-generation", "channels", "perf_events"]
+
+[[bench]]
+name              = "bench_gen_branch_misses"
+path              = "bench_suite/benches/bench_gen_branch_misses.rs"
+harness           = false
+required-features = ["random-generation", "channels", "perf_events"]
+
+# utils::comparison (catalog section comp).
+
+[[bench]]
+name              = "bench_comp_walltime"
+path              = "bench_suite/benches/bench_comp_walltime.rs"
+harness           = false
+
+[[bench]]
+name              = "bench_comp_instructions"
+path              = "bench_suite/benches/bench_comp_instructions.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_comp_cycles"
+path              = "bench_suite/benches/bench_comp_cycles.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_comp_cache_misses"
+path              = "bench_suite/benches/bench_comp_cache_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_comp_branch_misses"
+path              = "bench_suite/benches/bench_comp_branch_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+# utils::detection (catalog section det).
+
+[[bench]]
+name              = "bench_det_walltime"
+path              = "bench_suite/benches/bench_det_walltime.rs"
+harness           = false
+
+[[bench]]
+name              = "bench_det_instructions"
+path              = "bench_suite/benches/bench_det_instructions.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_det_cycles"
+path              = "bench_suite/benches/bench_det_cycles.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_det_cache_misses"
+path              = "bench_suite/benches/bench_det_cache_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_det_branch_misses"
+path              = "bench_suite/benches/bench_det_branch_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+# utils::audio_math (catalog section math).
+
+[[bench]]
+name              = "bench_math_walltime"
+path              = "bench_suite/benches/bench_math_walltime.rs"
+harness           = false
+
+[[bench]]
+name              = "bench_math_instructions"
+path              = "bench_suite/benches/bench_math_instructions.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_math_cycles"
+path              = "bench_suite/benches/bench_math_cycles.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_math_cache_misses"
+path              = "bench_suite/benches/bench_math_cache_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_math_branch_misses"
+path              = "bench_suite/benches/bench_math_branch_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+# AudioSampleIterators (catalog section iter).
+
+[[bench]]
+name              = "bench_iter_walltime"
+path              = "bench_suite/benches/bench_iter_walltime.rs"
+harness           = false
+
+[[bench]]
+name              = "bench_iter_instructions"
+path              = "bench_suite/benches/bench_iter_instructions.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_iter_cycles"
+path              = "bench_suite/benches/bench_iter_cycles.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_iter_cache_misses"
+path              = "bench_suite/benches/bench_iter_cache_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_iter_branch_misses"
+path              = "bench_suite/benches/bench_iter_branch_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+# FixedSizeAudioSamples (catalog section fixed).
+
+[[bench]]
+name              = "bench_fixed_walltime"
+path              = "bench_suite/benches/bench_fixed_walltime.rs"
+harness           = false
+required-features = ["fixed-size-audio"]
+
+[[bench]]
+name              = "bench_fixed_instructions"
+path              = "bench_suite/benches/bench_fixed_instructions.rs"
+harness           = false
+required-features = ["fixed-size-audio", "perf_events"]
+
+[[bench]]
+name              = "bench_fixed_cycles"
+path              = "bench_suite/benches/bench_fixed_cycles.rs"
+harness           = false
+required-features = ["fixed-size-audio", "perf_events"]
+
+[[bench]]
+name              = "bench_fixed_cache_misses"
+path              = "bench_suite/benches/bench_fixed_cache_misses.rs"
+harness           = false
+required-features = ["fixed-size-audio", "perf_events"]
+
+[[bench]]
+name              = "bench_fixed_branch_misses"
+path              = "bench_suite/benches/bench_fixed_branch_misses.rs"
+harness           = false
+required-features = ["fixed-size-audio", "perf_events"]
+
+# AudioSamples core repr (catalog section repr).
+
+[[bench]]
+name              = "bench_repr_walltime"
+path              = "bench_suite/benches/bench_repr_walltime.rs"
+harness           = false
+
+[[bench]]
+name              = "bench_repr_instructions"
+path              = "bench_suite/benches/bench_repr_instructions.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_repr_cycles"
+path              = "bench_suite/benches/bench_repr_cycles.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_repr_cache_misses"
+path              = "bench_suite/benches/bench_repr_cache_misses.rs"
+harness           = false
+required-features = ["perf_events"]
+
+[[bench]]
+name              = "bench_repr_branch_misses"
+path              = "bench_suite/benches/bench_repr_branch_misses.rs"
+harness           = false
+required-features = ["perf_events"]
 
 [[test]]
 name = "codec_quality"

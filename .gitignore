@@ -81,3 +81,8 @@ docs/_build/
 results/
 scripts/
 output/
+
+# bench_suite/ harvested results (raw CSVs, manifests) — large and per-host.
+# Keep the directory structure and code; ignore captured runs.
+bench_suite/results/
+!bench_suite/scripts/

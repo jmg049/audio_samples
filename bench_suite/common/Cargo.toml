@@ -1,0 +1,38 @@
+[package]
+name        = "bench_suite_common"
+version     = "0.0.0"
+edition     = "2024"
+publish     = false
+description = "Shared helpers for the audio_samples bench_suite. Not for external use."
+
+[features]
+# Enable the four PMU Criterion builders. Linux only; non-Linux hosts that
+# enable this will hit a compile error from perfcnt (intentional — the wrong
+# host should fail loudly rather than silently fall back).
+perf_events = ["dep:criterion-perf-events", "dep:perfcnt"]
+
+[dependencies]
+# Enable every audio_samples feature except plotting so any section's bench
+# body can compile its fixtures and trait imports. Pulls in a heavier audio_samples
+# build but bench wall-time on the server dwarfs build time.
+audio_samples = { path = "../..", default-features = false, features = [
+    "full_no_plotting",
+] }
+
+criterion = { version = "0.8.2", default-features = false, features = [
+    "rayon",
+    "cargo_bench_support",
+    "csv_output",
+] }
+
+rand = "0.10"
+
+# PMU deps — Linux-only via target cfg. Marked optional so the perf_events
+# feature flag controls whether they enter the build graph.
+#
+# criterion-perf-events 0.5.0 lives only on master at time of writing — the
+# latest crates.io release is 0.4.0. Pull from git so the criterion-0.8.x
+# `Measurement` trait shape is compatible.
+[target.'cfg(target_os = "linux")'.dependencies]
+criterion-perf-events = { git = "https://github.com/criterion-rs/criterion-perf-events", branch = "master", optional = true }
+perfcnt               = { version = "0.8", optional = true }
