@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -38,7 +38,7 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 num-format = { version = "0.4.4", optional = true }
 rand = { version = "0.10.1", optional = true }
 wide = { version = "1.4.0", optional = true }
-spectrograms = { version = "1.4.0", optional = true }
+spectrograms = { version = "1.4.1", optional = true }
 
 serde_json = { version = "1.0.150", optional = true }
 
@@ -50,15 +50,15 @@ plotly_static = { version = "0.1.0", features = [
 html_view = { version = "0.2.2", optional = true }
 base64 = { version = "0.22", optional = true }
 
-rubato = { version = "2.0.0", optional = true }
+rubato = { version = "3.0.0", optional = true }
 rayon = { version = "1.12.0", optional = true }
 explainable = { version = "0.1.1", optional = true }
 term-maths = { version = "1.0.0", optional = true }
 open = { version = "5.3.5", optional = true }
 
 rustfft = { version = "6.2", optional = true }
-non-empty-slice = "0.5"
-non-empty-iter = "0.2"
+non-empty-slice = "0.6"
+non-empty-iter = "0.3.1"
 audioadapter = { version =  "3.0.0",  optional = true }
 audioadapter-buffers = { version = "3.0.0", optional = true }
 
@@ -74,7 +74,7 @@ editing = [
     "statistics",
     "random-generation",
 ] # Time operations: trim, pad, reverse (includes noise)
-beat-tracking = [] # Beat tracking operations
+beat-tracking = ["onset-detection"] # Beat tracking operations
 onset-detection = [
     "transforms",
     "peak-picking",
@@ -86,7 +86,7 @@ decomposition = [
 dynamic-range = [] # Dynamic range compression/expansion operations
 channels = [] # Channel operations: interleave/deinterleave
 iir-filtering = [] # IIR filtering operations
-parametric-eq = ["iir-filtering"] # Parametric equalization operations
+parametric-eq = ["iir-filtering", "channels"] # Parametric equalization operations
 peak-picking = [] # Peak picking operations
 pitch-analysis = ["transforms"] # Pitch analysis operations
 resampling = ["dep:rubato", "dep:rayon", "audioadapter", "audioadapter-buffers"] # Resampling operations
@@ -195,6 +195,22 @@ required-features = ["psychoacoustic"]
 [[test]]
 name = "codec_quality"
 required-features = ["psychoacoustic", "random-generation"]
+
+[[test]]
+name = "processing_pipeline"
+required-features = ["statistics", "processing", "editing", "transforms"]
+
+[[test]]
+name = "channel_pipeline"
+required-features = ["channels", "processing", "editing"]
+
+[[test]]
+name = "effects_chain"
+required-features = ["channels", "iir-filtering", "dynamic-range", "parametric-eq"]
+
+[[test]]
+name = "analysis_pipeline"
+required-features = ["pitch-analysis", "vad"]
 
 [patch.crates-io]
 audio_samples = { path = "." }

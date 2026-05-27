@@ -249,8 +249,10 @@ pub fn combine_complex_odf(
                 let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
                 #[cfg(feature = "simd")]
                 {
-                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]]).max(f64x4::ZERO);
-                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]]).max(f64x4::ZERO);
+                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]])
+                        .max(f64x4::ZERO);
+                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]])
+                        .max(f64x4::ZERO);
                     mag_acc += m;
                     phase_acc += p;
                 }

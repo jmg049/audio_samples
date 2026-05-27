@@ -19,32 +19,28 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```rust,ignore
+//! // Full example requires the `statistics` and `processing` features.
 //! use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
 //! use audio_samples::operations::types::{NormalizationConfig, NormalizationMethod};
 //! use audio_samples::operations::traits::{AudioProcessing, AudioStatistics};
-//!
-//! # #[cfg(feature = "processing")]
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use ndarray::array;
 //!
 //! let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-//! let audio = AudioSamples::new_mono(data, sample_rate!(44100))?;
+//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 //!
-//! // Statistical analysis
+//! // Statistical analysis (requires `statistics` feature)
 //! let peak = audio.peak();
 //! let rms = audio.rms();
 //! let _ = (peak, rms);
 //!
 //! // Signal processing (requires `processing` feature)
 //! let config = NormalizationConfig::min_max(-1.0, 1.0);
-//! let normalized = audio.normalize(config)?;
+//! let normalized = audio.normalize(config).unwrap();
 //!
-//! // Type conversion
+//! // Type conversion (always available)
 //! let audio_i16 = normalized.to_type::<i16>();
 //! let _ = audio_i16;
-//! # Ok(())
-//! # }
 //! ```
 pub mod traits;
 pub mod types;
