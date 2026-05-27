@@ -408,8 +408,11 @@ pub use crate::operations::AudioStatistics;
 #[cfg(feature = "processing")]
 pub use crate::operations::AudioProcessing;
 
+#[cfg(feature = "processing")]
+pub use crate::operations::types::NormalizationConfig;
+
 #[cfg(any(feature = "processing", feature = "peak-picking"))]
-pub use crate::operations::types::{NormalizationConfig, NormalizationMethod};
+pub use crate::operations::types::NormalizationMethod;
 
 #[cfg(feature = "channels")]
 pub use crate::operations::AudioChannelOps;
