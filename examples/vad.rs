@@ -31,8 +31,9 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     // Concatenate segments using the built-in API.
     use non_empty_slice::NonEmptyVec;
     let vec = vec![s1, tone, s2];
-    let non_empty = NonEmptyVec::try_from(vec)
-        .map_err(|_| audio_samples::AudioSampleError::layout("Empty audio"))?;
+    let non_empty = NonEmptyVec::try_from(vec).map_err(|_| {
+        audio_samples::AudioSampleError::empty_data("vad example: concatenate segments")
+    })?;
     let audio = AudioSamples::concatenate_owned(non_empty)?;
 
     // Configure VAD.

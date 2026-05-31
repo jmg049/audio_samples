@@ -603,7 +603,7 @@ where
         'b: 'a,
     {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_view"));
         }
         Ok(MonoData(MonoRepr::Borrowed(view)))
     }
@@ -644,7 +644,7 @@ where
         'b: 'a,
     {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_view_mut"));
         }
         Ok(MonoData(MonoRepr::BorrowedMut(view)))
     }
@@ -682,7 +682,7 @@ where
     #[inline]
     pub fn from_owned(array: Array1<T>) -> AudioSampleResult<Self> {
         if array.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_owned"));
         }
         Ok(MonoData(MonoRepr::Owned(array)))
     }
@@ -1291,7 +1291,7 @@ where
         'b: 'a,
     {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_view"));
         }
         Ok(MultiData(MultiRepr::Borrowed(view)))
     }
@@ -1316,7 +1316,7 @@ where
         'b: 'a,
     {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_view_mut"));
         }
         Ok(MultiData(MultiRepr::BorrowedMut(view)))
     }
@@ -1337,7 +1337,7 @@ where
     #[inline]
     pub fn from_owned(array: Array2<T>) -> AudioSampleResult<Self> {
         if array.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_owned"));
         }
         Ok(MultiData(MultiRepr::Owned(array)))
     }
@@ -1966,7 +1966,7 @@ where
     #[inline]
     pub fn new_mono(data: Array1<T>) -> AudioSampleResult<AudioData<'static, T>> {
         if data.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("new_mono"));
         }
         Ok(AudioData::Mono(MonoData(MonoRepr::Owned(data))))
     }
@@ -1979,7 +1979,7 @@ where
     #[inline]
     pub fn new_multi(data: Array2<T>) -> AudioSampleResult<AudioData<'static, T>> {
         if data.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("new_multi"));
         }
         Ok(AudioData::Multi(MultiData(MultiRepr::Owned(data))))
     }
@@ -2226,7 +2226,7 @@ where
     #[inline]
     pub fn from_borrowed_array1(view: ArrayView1<'_, T>) -> AudioSampleResult<AudioData<'_, T>> {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_borrowed_array1"));
         }
         Ok(AudioData::Mono(MonoData(MonoRepr::Borrowed(view))))
     }
@@ -2261,7 +2261,7 @@ where
         view: ArrayViewMut1<'_, T>,
     ) -> AudioSampleResult<AudioData<'_, T>> {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_borrowed_array1_mut"));
         }
         Ok(AudioData::Mono(MonoData(MonoRepr::BorrowedMut(view))))
     }
@@ -2294,7 +2294,7 @@ where
     #[inline]
     pub fn from_borrowed_array2(view: ArrayView2<'_, T>) -> AudioSampleResult<AudioData<'_, T>> {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_borrowed_array2"));
         }
         Ok(AudioData::Multi(MultiData(MultiRepr::Borrowed(view))))
     }
@@ -2329,7 +2329,7 @@ where
         view: ArrayViewMut2<'_, T>,
     ) -> AudioSampleResult<AudioData<'_, T>> {
         if view.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("from_borrowed_array2_mut"));
         }
         Ok(AudioData::Multi(MultiData(MultiRepr::BorrowedMut(view))))
     }
@@ -2848,7 +2848,9 @@ where
     #[inline]
     fn try_from(arr: ArrayView1<'a, T>) -> Result<Self, Self::Error> {
         if arr.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data(
+                "AudioData::try_from(ArrayView1)",
+            ));
         }
         Ok(AudioData::Mono(MonoData(MonoRepr::Borrowed(arr))))
     }
@@ -2868,7 +2870,9 @@ where
     #[inline]
     fn try_from(arr: ArrayViewMut1<'a, T>) -> Result<Self, Self::Error> {
         if arr.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data(
+                "AudioData::try_from(ArrayViewMut1)",
+            ));
         }
         Ok(AudioData::Mono(MonoData(MonoRepr::BorrowedMut(arr))))
     }
@@ -2890,7 +2894,9 @@ where
     #[inline]
     fn try_from(arr: ArrayView2<'a, T>) -> Result<Self, Self::Error> {
         if arr.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data(
+                "AudioData::try_from(ArrayView2)",
+            ));
         }
         Ok(AudioData::Multi(MultiData(MultiRepr::Borrowed(arr))))
     }
@@ -2912,7 +2918,9 @@ where
     #[inline]
     fn try_from(arr: ArrayViewMut2<'a, T>) -> Result<Self, Self::Error> {
         if arr.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data(
+                "AudioData::try_from(ArrayViewMut2)",
+            ));
         }
         Ok(AudioData::Multi(MultiData(MultiRepr::BorrowedMut(arr))))
     }
@@ -2965,7 +2973,7 @@ where
     #[inline]
     fn try_from(a: Array1<T>) -> Result<Self, Self::Error> {
         if a.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("MonoData::try_from(Array1)"));
         }
         Ok(MonoData(MonoRepr::Owned(a)))
     }
@@ -2987,7 +2995,7 @@ where
     #[inline]
     fn try_from(a: Array2<T>) -> Result<Self, Self::Error> {
         if a.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("MultiData::try_from(Array2)"));
         }
         Ok(MultiData(MultiRepr::Owned(a)))
     }
@@ -3007,7 +3015,7 @@ where
     #[inline]
     fn try_from(a: Array1<T>) -> Result<Self, Self::Error> {
         if a.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("AudioData::try_from(Array1)"));
         }
         Ok(AudioData::Mono(a.try_into()?))
     }
@@ -3029,7 +3037,7 @@ where
     #[inline]
     fn try_from(a: Array2<T>) -> Result<Self, Self::Error> {
         if a.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("AudioData::try_from(Array2)"));
         }
         Ok(AudioData::Multi(a.try_into()?))
     }
@@ -3650,7 +3658,7 @@ where
         sample_rate: SampleRate,
     ) -> AudioSampleResult<AudioSamples<'b, T>> {
         if data.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("new_mono"));
         }
 
         Ok(AudioSamples {
@@ -3705,7 +3713,7 @@ where
         sample_rate: SampleRate,
     ) -> AudioSampleResult<AudioSamples<'b, T>> {
         if data.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("new_multi_channel"));
         }
 
         Ok(AudioSamples {
@@ -4616,7 +4624,7 @@ where
     #[inline]
     pub fn replace_with_mono(&mut self, data: Array1<T>) -> AudioSampleResult<()> {
         if data.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("replace_with_mono"));
         }
         if !self.is_mono() {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -4668,7 +4676,7 @@ where
     #[inline]
     pub fn replace_with_multi(&mut self, data: Array2<T>) -> AudioSampleResult<()> {
         if data.is_empty() {
-            return Err(AudioSampleError::EmptyData);
+            return Err(AudioSampleError::empty_data("replace_with_multi"));
         }
         let new_channels = data.nrows();
         // safety: Channel count cannot be zero

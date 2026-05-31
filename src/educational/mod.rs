@@ -8,7 +8,7 @@
 //! # Quick start
 //!
 //! ```rust,no_run
-//! use audio_samples::{AudioSamples, AudioProcessingExt, ExplainMode, NormalizationConfig, sample_rate};
+//! use audio_samples::{AudioSamples, AudioProcessingExt, Explainable, ExplainMode, NormalizationConfig, sample_rate};
 //! use audio_samples::educational;
 //! use audio_samples::utils::generation::sine_wave;
 //! use std::time::Duration;
@@ -118,8 +118,12 @@ pub fn render_explanation_document(explanations: &[Explanation], title: &str) ->
 /// default system browser.
 ///
 /// # Errors
-/// Returns `Err` if the file cannot be written or the browser cannot be opened.
-pub fn open_explanation_document(explanations: &[Explanation], title: &str) -> std::io::Result<()> {
+/// Returns [`crate::AudioSampleError::Io`] if the file cannot be written or the
+/// browser cannot be opened.
+pub fn open_explanation_document(
+    explanations: &[Explanation],
+    title: &str,
+) -> crate::AudioSampleResult<()> {
     let html = render_explanation_document(explanations, title);
     let path = std::env::temp_dir().join(format!(
         "audio_samples_explain_{}.html",
@@ -128,8 +132,11 @@ pub fn open_explanation_document(explanations: &[Explanation], title: &str) -> s
             .map(|d| d.as_secs())
             .unwrap_or(0)
     ));
-    std::fs::write(&path, &html)?;
-    open::that(&path).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(&path, &html)
+        .map_err(|e| crate::AudioSampleError::io("write explanation document", &e))?;
+    open::that(&path).map_err(|e| {
+        crate::AudioSampleError::io("open explanation document", &std::io::Error::other(e))
+    })?;
     Ok(())
 }
 

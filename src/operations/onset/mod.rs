@@ -49,7 +49,7 @@ use spectrograms::{CqtParams, SpectrogramParams, StftParams};
 
 use crate::{
     AudioSampleError, AudioSampleResult, AudioSamples, AudioTransforms, AudioTypeConversion,
-    ParameterError, StandardSample,
+    EnumParseError, ParameterError, StandardSample,
     operations::{
         onset::{
             complex::{combine_complex_odf, magnitude_difference, phase_deviation},
@@ -443,10 +443,12 @@ impl FromStr for SpectralFluxMethod {
             "magnitude" => Ok(Self::Magnitude),
             "complex" => Ok(Self::Complex),
             "rectified_complex" => Ok(Self::RectifiedComplex),
-            _ => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "spectral_flux_method",
+            _ => Err(EnumParseError::new(
+                "SpectralFluxMethod",
                 s,
-            ))),
+                &["energy", "magnitude", "complex", "rectified_complex"],
+            )
+            .into()),
         }
     }
 }

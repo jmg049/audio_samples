@@ -49,10 +49,10 @@
 //! ## Error Handling
 //!
 //! All operations return [`crate::AudioSampleResult`]. Mono-only methods
-//! return [`crate::AudioSampleError::Layout`] or
-//! [`crate::AudioSampleError::Parameter`] when given multi-channel input.
-//! Failures originating inside [`spectrograms`] are propagated as
-//! [`crate::AudioSampleError::Processing`].
+//! return [`crate::AudioSampleError::Layout`]
+//! ([`LayoutError::ChannelCountUnsupported`](crate::LayoutError::ChannelCountUnsupported))
+//! when given multi-channel input. Failures originating inside [`spectrograms`]
+//! are propagated as [`crate::AudioSampleError::Processing`].
 //!
 //! ## See Also
 //!
@@ -64,8 +64,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 
 use crate::operations::traits::AudioTransforms;
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, LayoutError,
-    ParameterError, StandardSample,
+    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ChannelRequirement,
+    LayoutError, ParameterError, StandardSample,
 };
 
 use ndarray::{Array1, Array2, Axis};
@@ -151,7 +151,7 @@ where
     /// An [`StftResult`] containing the complex STFT matrix and metadata.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel.
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying [`spectrograms`] STFT computation.
     ///
     /// [`istft`]: Self::istft
@@ -170,10 +170,13 @@ where
     #[inline]
     fn stft(&self, params: &StftParams) -> AudioSampleResult<StftResult> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "self",
-                "STFT is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "stft",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
 
         let samples = self.to_format::<f64>();
@@ -275,10 +278,13 @@ where
         AmpScale: AmpScaleSpec + 'static,
     {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "linear_frequency_spectrogram",
-                "Linear frequency spectrogram is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "linear_frequency_spectrogram",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
         let samples = self.cast_as_f64();
         let samples_slice = samples.as_slice().expect("Safe since we have ensured mono");
@@ -331,10 +337,13 @@ where
         AmpScale: AmpScaleSpec,
     {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "log_frequency_spectrogram",
-                "LogHz spectrogram is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "log_frequency_spectrogram",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
         let samples: AudioSamples<'static, f64> = self.cast_as_f64();
         let samples_slice = samples.as_slice().expect("Safe since we have ensured mono");
@@ -392,10 +401,13 @@ where
         AmpScale: AmpScaleSpec,
     {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "mel_spectrogram",
-                "Mel spectrogram is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "mel_spectrogram",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
         let samples = self.cast_as_f64();
         let samples_slice = samples.as_slice().expect("Safe since we have ensured mono");
@@ -448,10 +460,13 @@ where
         mfcc_params: &MfccParams,
     ) -> AudioSampleResult<Mfcc> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "mfcc",
-                "MFCC is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "mfcc",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
 
         let samples = self.cast_as_f64();
@@ -508,10 +523,13 @@ where
         cfg: &ChromaParams,
     ) -> AudioSampleResult<Chromagram> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "chromagram",
-                "Chromagram is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "chromagram",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
 
         let samples = self.cast_as_f64();
@@ -574,10 +592,13 @@ where
         AmpScale: AmpScaleSpec,
     {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "gammatone_spectrogram",
-                "Gammatone spectrogram is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "gammatone_spectrogram",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
 
         let samples = self.cast_as_f64();
@@ -630,10 +651,13 @@ where
         hop_size: NonZeroUsize,
     ) -> AudioSampleResult<CqtResult> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "constant_q_transform",
-                "Constant-Q Transform is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "constant_q_transform",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
 
         let samples = self.cast_as_f64();
@@ -693,10 +717,13 @@ where
         AmpScale: AmpScaleSpec,
     {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Layout(LayoutError::invalid_operation(
-                "cqt",
-                "CqtSpectrogram is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "cqt",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
 
         let working_samples = self.as_float();
@@ -753,10 +780,13 @@ where
         overlap: f64,
     ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "self",
-                "PSD is only supported for mono audio samples",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "power_spectral_density",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
+            ));
         }
         if !(0.0..1.0).contains(&overlap) {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(

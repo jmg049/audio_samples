@@ -302,8 +302,10 @@ impl AudioCodec for StereoPerceptualCodec {
         // M/S matrix encode.
         let (mid_samples, side_samples) = mid_side_encode(&left, &right);
 
-        let mid_ne = NonEmptyVec::new(mid_samples).map_err(|_| AudioSampleError::EmptyData)?;
-        let side_ne = NonEmptyVec::new(side_samples).map_err(|_| AudioSampleError::EmptyData)?;
+        let mid_ne = NonEmptyVec::new(mid_samples)
+            .map_err(|_| AudioSampleError::empty_data("mid_side_encode"))?;
+        let side_ne = NonEmptyVec::new(side_samples)
+            .map_err(|_| AudioSampleError::empty_data("mid_side_encode"))?;
 
         let mid_audio: AudioSamples<'static, f32> =
             AudioSamples::from_mono_vec(mid_ne, sample_rate);
@@ -353,8 +355,8 @@ impl AudioCodec for StereoPerceptualCodec {
             .zip(right.iter())
             .flat_map(|(&l, &r)| [l, r])
             .collect();
-        let interleaved_ne =
-            NonEmptyVec::new(interleaved).map_err(|_| AudioSampleError::EmptyData)?;
+        let interleaved_ne = NonEmptyVec::new(interleaved)
+            .map_err(|_| AudioSampleError::empty_data("mid_side_decode"))?;
 
         let stereo_f32: AudioSamples<'static, f32> = AudioSamples::from_interleaved_vec(
             interleaved_ne,

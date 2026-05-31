@@ -188,8 +188,8 @@ where
     /// Returns an error if no samples were added to the builder.
     #[inline]
     pub fn build(self) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let samples =
-            NonEmptyVec::new(self.samples).map_err(|_| crate::AudioSampleError::EmptyData)?;
+        let samples = NonEmptyVec::new(self.samples)
+            .map_err(|_| crate::AudioSampleError::empty_data("MonoSampleBuilder::build"))?;
         AudioSamples::concatenate_owned(samples)
     }
 }

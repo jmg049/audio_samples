@@ -40,7 +40,7 @@
 #[cfg(feature = "processing")]
 use crate::traits::StandardSample;
 
-use crate::{AudioSampleError, AudioSampleResult, ParameterError};
+use crate::{AudioSampleError, AudioSampleResult, EnumParseError, ParameterError};
 use core::fmt::Display;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
@@ -68,10 +68,7 @@ impl FromStr for PadSide {
         match s.to_lowercase().as_str() {
             "left" => Ok(Self::Left),
             "right" => Ok(Self::Right),
-            _ => Err(AudioSampleError::Parameter(ParameterError::InvalidValue {
-                parameter: s.to_string(),
-                reason: "Expected 'left' or 'right'".to_string(),
-            })),
+            _ => Err(EnumParseError::new("PadSide", s, &["left", "right"]).into()),
         }
     }
 }
@@ -131,15 +128,15 @@ impl FromStr for NormalizationMethod {
             "mean" => Ok(Self::Mean),
             "median" => Ok(Self::Median),
             "zscore" | "z_score" | "z-score" => Ok(Self::ZScore),
-            _ => Err(AudioSampleError::parse::<Self, _>(format!(
-                "Failed to parse {}. Got {}, must be one of {:?}",
-                std::any::type_name::<Self>(),
+            _ => Err(EnumParseError::new(
+                "NormalizationMethod",
                 s,
-                [
+                &[
                     "min_max", "min-max", "minmax", "peak", "mean", "median", "zscore", "z_score",
                     "z-score",
-                ]
-            ))),
+                ],
+            )
+            .into()),
         }
     }
 }
@@ -529,11 +526,10 @@ impl FromStr for VadMethod {
             "zero_crossing" | "zero-crossing" | "zcr" => Ok(Self::ZeroCrossing),
             "combined" | "energy_zcr" | "energy-zcr" => Ok(Self::Combined),
             "spectral" | "spectrum" => Ok(Self::Spectral),
-            _ => Err(AudioSampleError::parse::<Self, _>(format!(
-                "Failed to parse {}. Got {}, must be one of {:?}",
-                std::any::type_name::<Self>(),
+            _ => Err(EnumParseError::new(
+                "VadMethod",
                 s,
-                [
+                &[
                     "energy",
                     "rms",
                     "zero_crossing",
@@ -544,8 +540,9 @@ impl FromStr for VadMethod {
                     "energy-zcr",
                     "spectral",
                     "spectrum",
-                ]
-            ))),
+                ],
+            )
+            .into()),
         }
     }
 }
@@ -1098,12 +1095,12 @@ impl FromStr for ResamplingQuality {
             "fast" | "low" => Ok(Self::Fast),
             "medium" | "med" | "balanced" => Ok(Self::Medium),
             "high" | "best" => Ok(Self::High),
-            _ => Err(AudioSampleError::parse::<Self, _>(format!(
-                "Failed to parse {}. Got {}, must be one of {:?}",
-                std::any::type_name::<Self>(),
+            _ => Err(EnumParseError::new(
+                "ResamplingQuality",
                 s,
-                ["fast", "low", "medium", "med", "balanced", "high", "best"]
-            ))),
+                &["fast", "low", "medium", "med", "balanced", "high", "best"],
+            )
+            .into()),
         }
     }
 }

@@ -66,7 +66,8 @@ use crate::repr::{AudioData, ChannelCount};
 use crate::utils::{samples_to_seconds, seconds_to_samples};
 use crate::{
     AudioEditing, AudioSampleError, AudioSampleResult, AudioSamples, AudioStatistics,
-    AudioTypeConversion, ConvertTo, LayoutError, ParameterError, StandardSample,
+    AudioTypeConversion, ChannelRequirement, ConvertTo, LayoutError, ParameterError,
+    StandardSample,
 };
 
 #[cfg(feature = "random-generation")]
@@ -684,20 +685,24 @@ where
         // Validate all sources have the same sample rate and length
         let first: &AudioSamples<T> = &sources[0];
         if first.is_multi_channel() {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "parameter",
-                "Stacking is only supported for mono sources",
-            )));
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "stack",
+                    ChannelRequirement::Mono,
+                    first.num_channels().get(),
+                ),
+            ));
         }
 
         for (idx, source) in sources.iter().enumerate().skip(1) {
             if source.is_multi_channel() {
-                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                    "parameter",
-                    format!(
-                        "Stacking is only supported for mono sources. Audio at index {idx} is not mono"
+                return Err(AudioSampleError::Layout(
+                    LayoutError::channel_count_unsupported(
+                        format!("stack (source at index {idx})"),
+                        ChannelRequirement::Mono,
+                        source.num_channels().get(),
                     ),
-                )));
+                ));
             }
 
             if source.sample_rate() != first.sample_rate() {
@@ -1870,9 +1875,7 @@ where
                 .unwrap_or(0);
 
             if min_len == 0 {
-                return Err(AudioSampleError::Processing(
-                    "Pitch-shifted channels have zero length".into(),
-                ));
+                return Err(AudioSampleError::empty_data("apply_pitch_shift"));
             }
 
             // Trim all channels to the same length for stacking
@@ -1882,9 +1885,8 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
 
             // Reconstruct multi-channel audio from trimmed channels
-            let non_empty_channels = NonEmptyVec::new(trimmed_channels).map_err(|_| {
-                AudioSampleError::Processing("Failed to create non-empty channel vector".into())
-            })?;
+            let non_empty_channels = NonEmptyVec::new(trimmed_channels)
+                .map_err(|_| AudioSampleError::empty_data("apply_pitch_shift"))?;
 
             AudioSamples::stack(&non_empty_channels)?
         }
@@ -1896,15 +1898,15 @@ where
             let vec_data: Vec<T> = arr
                 .as_slice()
                 .ok_or_else(|| {
-                    AudioSampleError::Processing("Failed to get slice from mono data".into())
+                    AudioSampleError::Layout(LayoutError::NonContiguous {
+                        operation: "apply_pitch_shift".to_string(),
+                        layout_type: "non-contiguous mono data".to_string(),
+                    })
                 })?
                 .to_vec();
 
-            let non_empty_vec = NonEmptyVec::new(vec_data).map_err(|_| {
-                AudioSampleError::Processing(
-                    "Failed to create non-empty vector from shifted data".into(),
-                )
-            })?;
+            let non_empty_vec = NonEmptyVec::new(vec_data)
+                .map_err(|_| AudioSampleError::empty_data("apply_pitch_shift"))?;
 
             audio.replace_with_vec(&non_empty_vec)?;
         }
@@ -1921,13 +1923,15 @@ where
                 }
             }
 
-            let non_empty_interleaved = NonEmptyVec::new(interleaved).map_err(|_| {
-                AudioSampleError::Processing("Failed to create non-empty interleaved vector".into())
-            })?;
+            let non_empty_interleaved = NonEmptyVec::new(interleaved)
+                .map_err(|_| AudioSampleError::empty_data("apply_pitch_shift"))?;
 
             let expected_channels =
                 std::num::NonZeroU32::new(num_channels as u32).ok_or_else(|| {
-                    AudioSampleError::Processing("Invalid channel count (zero)".into())
+                    AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "num_channels",
+                        "channel count must be non-zero",
+                    ))
                 })?;
 
             audio.replace_with_vec_channels(&non_empty_interleaved, expected_channels)?;
@@ -2008,8 +2012,9 @@ where
     use spectrograms::StftParams;
 
     // Perform STFT
-    let params = StftParams::new(n_fft, hop_size, window, true)
-        .map_err(|e| AudioSampleError::Processing(format!("STFT parameter error: {e}").into()))?;
+    let params = StftParams::new(n_fft, hop_size, window, true).map_err(|e| {
+        AudioSampleError::Parameter(ParameterError::invalid_configuration("stft", e.to_string()))
+    })?;
 
     let mut stft_result = audio.stft(&params)?;
     let num_bins = stft_result.data.nrows();

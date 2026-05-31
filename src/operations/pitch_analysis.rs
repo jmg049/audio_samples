@@ -36,8 +36,8 @@ use std::num::NonZeroUsize;
 use crate::operations::traits::AudioPitchAnalysis;
 use crate::operations::types::PitchDetectionMethod;
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
-    StandardSample,
+    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ChannelRequirement,
+    LayoutError, ParameterError, StandardSample,
 };
 
 use non_empty_slice::NonEmptySlice;
@@ -94,8 +94,12 @@ where
         max_frequency: f64,
     ) -> AudioSampleResult<Option<f64>> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::unsupported(
-                "YIN pitch detection is only supported for mono audio samples",
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "detect_pitch_yin",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
             ));
         }
 
@@ -176,8 +180,12 @@ where
         max_frequency: f64,
     ) -> AudioSampleResult<Option<f64>> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::unsupported(
-                "Autocorrelation pitch detection is only supported for mono audio samples",
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "detect_pitch_autocorr",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
             ));
         }
 
@@ -276,8 +284,12 @@ where
         max_frequency: f64,
     ) -> AudioSampleResult<Vec<(f64, Option<f64>)>> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::unsupported(
-                "Pitch tracking is only supported for mono audio samples",
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "track_pitch",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
             ));
         }
 
@@ -393,9 +405,12 @@ where
         window_type: Option<WindowType>,
     ) -> AudioSampleResult<f64> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Unsupported(
-                "Harmonic-to-noise ratio analysis is only supported for mono audio samples"
-                    .to_string(),
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "harmonic_to_noise_ratio",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
             ));
         }
 
@@ -507,8 +522,12 @@ where
         window_type: Option<WindowType>,
     ) -> AudioSampleResult<Vec<f64>> {
         if self.is_multi_channel() {
-            return Err(AudioSampleError::Unsupported(
-                "Harmonic analysis is only supported for mono audio samples".to_string(),
+            return Err(AudioSampleError::Layout(
+                LayoutError::channel_count_unsupported(
+                    "harmonic_analysis",
+                    ChannelRequirement::Mono,
+                    self.num_channels().get(),
+                ),
             ));
         }
 
