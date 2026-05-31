@@ -56,7 +56,11 @@ impl PlotUtils for WaveformPlot {
     fn show(&self) -> AudioSampleResult<()> {
         let html = self.html()?;
         html_view::show(html).map_err(|e| {
-            crate::AudioSampleError::unsupported(format!("Failed to show plot: {}", e))
+            crate::AudioSampleError::Processing(crate::ProcessingError::external_dependency(
+                "html_view",
+                "show",
+                e.to_string(),
+            ))
         })?;
         Ok(())
     }
@@ -70,9 +74,7 @@ impl PlotUtils for WaveformPlot {
         match extension.to_lowercase().as_str() {
             "html" => {
                 let html = self.html()?;
-                std::fs::write(path, html).map_err(|e| {
-                    crate::AudioSampleError::unsupported(format!("Failed to write HTML file: {e}"))
-                })?;
+                std::fs::write(path, html).map_err(|e| crate::AudioSampleError::io("save", &e))?;
                 Ok(())
             }
             #[cfg(feature = "static-plots")]
@@ -81,10 +83,13 @@ impl PlotUtils for WaveformPlot {
                 use serde_json::json;
                 let mut static_exporter =
                     StaticExporterBuilder::default().build().map_err(|e| {
-                        crate::AudioSampleError::unsupported(format!(
-                            "Failed to create static exporter: {}",
-                            e
-                        ))
+                        crate::AudioSampleError::Processing(
+                            crate::ProcessingError::external_dependency(
+                                "plotly_static",
+                                "save",
+                                e.to_string(),
+                            ),
+                        )
                     })?;
                 let format = match extension {
                     "png" => ImageFormat::PNG,
@@ -106,10 +111,13 @@ impl PlotUtils for WaveformPlot {
                         scale,
                     )
                     .map_err(|e| {
-                        crate::AudioSampleError::unsupported(format!(
-                            "Failed to save static image: {}",
-                            e
-                        ))
+                        crate::AudioSampleError::Processing(
+                            crate::ProcessingError::external_dependency(
+                                "plotly_static",
+                                "save",
+                                e.to_string(),
+                            ),
+                        )
                     })?;
 
                 Ok(())

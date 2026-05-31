@@ -28,7 +28,7 @@
 
 use crate::{
     AudioChannelOps, AudioData, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    CastFrom, ParameterError, ProcessingError, StandardSample,
+    CastFrom, LayoutError, ParameterError, StandardSample,
     operations::types::{MonoConversionMethod, StereoConversionMethod},
     repr::MonoData,
 };
@@ -291,12 +291,7 @@ where
                 AudioData::Mono(mono_data) => {
                     let stereo_data =
                         ndarray::stack(Axis(0), &[mono_data.view(), mono_data.view()]).map_err(
-                            |e| {
-                                AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                                    "stereo_conversion",
-                                    format!("Failed to duplicate mono to stereo: {e}"),
-                                ))
-                            },
+                            |e| AudioSampleError::Layout(LayoutError::shape_error("to_stereo", e)),
                         )?;
 
                     let stereo_data = AudioData::try_from(stereo_data)?;
@@ -409,10 +404,7 @@ where
         let views: Vec<_> = (0..n_channels).map(|_| mono_data.view()).collect();
         let multi_data: AudioData<T> = ndarray::stack(Axis(0), &views)
             .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "duplicate_to_channels",
-                    format!("Failed to stack channels: {e}"),
-                ))
+                AudioSampleError::Layout(LayoutError::shape_error("duplicate_to_channels", e))
             })?
             .try_into()?;
 
@@ -878,10 +870,10 @@ where
     for i in 0..samples_per_channel {
         for ch in channels {
             let slice = ch.data.as_slice().ok_or_else(|| {
-                AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "data_access",
-                    "Failed to get data as slice",
-                ))
+                AudioSampleError::Layout(LayoutError::NonContiguous {
+                    operation: "channel data access".to_string(),
+                    layout_type: "non-contiguous".to_string(),
+                })
             })?;
             interleaved.push(slice[i]);
         }
@@ -977,16 +969,16 @@ fn interleave_i16_simd_impl<'a>(
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
         let left_data = channels[0].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get left channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "left channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
         let right_data = channels[1].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get right channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "right channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
 
         // Process 16 samples at a time with SIMD (i16x16)
@@ -1026,10 +1018,10 @@ fn interleave_i16_simd_impl<'a>(
         for i in 0..samples_per_channel {
             for ch in channels {
                 let slice = ch.data.as_slice().ok_or_else(|| {
-                    AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                        "data_access",
-                        "Failed to get data as slice",
-                    ))
+                    AudioSampleError::Layout(LayoutError::NonContiguous {
+                        operation: "channel data access".to_string(),
+                        layout_type: "non-contiguous".to_string(),
+                    })
                 })?;
                 interleaved.push(slice[i]);
             }
@@ -1038,10 +1030,7 @@ fn interleave_i16_simd_impl<'a>(
 
     let array = ndarray::Array2::from_shape_vec((num_channels, samples_per_channel), interleaved)
         .map_err(|e| {
-        AudioSampleError::Processing(ProcessingError::algorithm_failure(
-            "array_creation",
-            format!("Failed to create interleaved array: {}", e),
-        ))
+        AudioSampleError::Layout(LayoutError::shape_error("interleave_channels", e))
     })?;
 
     AudioSamples::new_multi_channel(array, channels[0].sample_rate())
@@ -1058,16 +1047,16 @@ fn interleave_i32_simd_impl<'a>(
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
         let left_data = channels[0].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get left channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "left channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
         let right_data = channels[1].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get right channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "right channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
 
         // Process 8 samples at a time with SIMD (i32x8)
@@ -1107,10 +1096,10 @@ fn interleave_i32_simd_impl<'a>(
         for i in 0..samples_per_channel {
             for ch in channels {
                 let slice = ch.data.as_slice().ok_or_else(|| {
-                    AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                        "data_access",
-                        "Failed to get data as slice",
-                    ))
+                    AudioSampleError::Layout(LayoutError::NonContiguous {
+                        operation: "channel data access".to_string(),
+                        layout_type: "non-contiguous".to_string(),
+                    })
                 })?;
                 interleaved.push(slice[i]);
             }
@@ -1119,10 +1108,7 @@ fn interleave_i32_simd_impl<'a>(
 
     let array = ndarray::Array2::from_shape_vec((num_channels, samples_per_channel), interleaved)
         .map_err(|e| {
-        AudioSampleError::Processing(ProcessingError::algorithm_failure(
-            "array_creation",
-            format!("Failed to create interleaved array: {}", e),
-        ))
+        AudioSampleError::Layout(LayoutError::shape_error("interleave_channels", e))
     })?;
 
     AudioSamples::new_multi_channel(array, channels[0].sample_rate())
@@ -1139,16 +1125,16 @@ fn interleave_f32_simd_impl<'a>(
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
         let left_data = channels[0].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get left channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "left channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
         let right_data = channels[1].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get right channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "right channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
 
         // Process 8 samples at a time with SIMD
@@ -1188,10 +1174,10 @@ fn interleave_f32_simd_impl<'a>(
         for i in 0..samples_per_channel {
             for ch in channels {
                 let slice = ch.data.as_slice().ok_or_else(|| {
-                    AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                        "data_access",
-                        "Failed to get data as slice",
-                    ))
+                    AudioSampleError::Layout(LayoutError::NonContiguous {
+                        operation: "channel data access".to_string(),
+                        layout_type: "non-contiguous".to_string(),
+                    })
                 })?;
                 interleaved.push(slice[i]);
             }
@@ -1200,10 +1186,7 @@ fn interleave_f32_simd_impl<'a>(
 
     let array = ndarray::Array2::from_shape_vec((num_channels, samples_per_channel), interleaved)
         .map_err(|e| {
-        AudioSampleError::Processing(ProcessingError::algorithm_failure(
-            "array_creation",
-            format!("Failed to create interleaved array: {}", e),
-        ))
+        AudioSampleError::Layout(LayoutError::shape_error("interleave_channels", e))
     })?;
 
     AudioSamples::new_multi_channel(array, channels[0].sample_rate())
@@ -1220,16 +1203,16 @@ fn interleave_f64_simd_impl<'a>(
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
         let left_data = channels[0].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get left channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "left channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
         let right_data = channels[1].data.as_slice().ok_or_else(|| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "data_access",
-                "Failed to get right channel data as slice",
-            ))
+            AudioSampleError::Layout(LayoutError::NonContiguous {
+                operation: "right channel access".to_string(),
+                layout_type: "non-contiguous".to_string(),
+            })
         })?;
 
         // Process 4 samples at a time with SIMD (f64x4)
@@ -1269,10 +1252,10 @@ fn interleave_f64_simd_impl<'a>(
         for i in 0..samples_per_channel {
             for ch in channels {
                 let slice = ch.data.as_slice().ok_or_else(|| {
-                    AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                        "data_access",
-                        "Failed to get data as slice",
-                    ))
+                    AudioSampleError::Layout(LayoutError::NonContiguous {
+                        operation: "channel data access".to_string(),
+                        layout_type: "non-contiguous".to_string(),
+                    })
                 })?;
                 interleaved.push(slice[i]);
             }
@@ -1281,10 +1264,7 @@ fn interleave_f64_simd_impl<'a>(
 
     let array = ndarray::Array2::from_shape_vec((num_channels, samples_per_channel), interleaved)
         .map_err(|e| {
-        AudioSampleError::Processing(ProcessingError::algorithm_failure(
-            "array_creation",
-            format!("Failed to create interleaved array: {}", e),
-        ))
+        AudioSampleError::Layout(LayoutError::shape_error("interleave_channels", e))
     })?;
 
     AudioSamples::new_multi_channel(array, channels[0].sample_rate())

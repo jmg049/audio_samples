@@ -301,7 +301,11 @@ impl PlotUtils for CompositePlot {
     fn show(&self) -> AudioSampleResult<()> {
         let html = self.html()?;
         html_view::show(html).map_err(|e| {
-            crate::AudioSampleError::unsupported(format!("Failed to show plot: {}", e))
+            crate::AudioSampleError::Processing(crate::ProcessingError::external_dependency(
+                "html_view",
+                "show",
+                e.to_string(),
+            ))
         })?;
         Ok(())
     }
@@ -314,9 +318,7 @@ impl PlotUtils for CompositePlot {
         match extension.to_lowercase().as_str() {
             "html" => {
                 let html = self.html()?;
-                std::fs::write(path, html).map_err(|e| {
-                    crate::AudioSampleError::unsupported(format!("Failed to write HTML file: {e}"))
-                })?;
+                std::fs::write(path, html).map_err(|e| crate::AudioSampleError::io("save", &e))?;
                 Ok(())
             }
             _ => Err(crate::AudioSampleError::Parameter(

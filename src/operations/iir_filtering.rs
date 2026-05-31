@@ -1481,10 +1481,10 @@ fn design_iir_filter(
     match design.filter_type {
         IirFilterType::Butterworth => design_butterworth_filter(design, sample_rate),
         IirFilterType::ChebyshevI => design_chebyshev_i_filter(design, sample_rate),
-        _ => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "filter_type",
-            "Filter type not yet implemented",
-        ))),
+        other => Err(AudioSampleError::unsupported(
+            "design_iir_filter",
+            format!("filter type {other:?} is not yet implemented; use Butterworth or ChebyshevI"),
+        )),
     }
 }
 
@@ -1592,12 +1592,10 @@ fn design_butterworth_filter(
                     .collect(),
             ))
         }
-        FilterResponse::BandStop => {
-            Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "filter_response",
-                "Band-stop Butterworth filter not yet implemented",
-            )))
-        }
+        FilterResponse::BandStop => Err(AudioSampleError::unsupported(
+            "design_butterworth_filter",
+            "band-stop Butterworth response is not yet implemented",
+        )),
     }
 }
 
@@ -1709,12 +1707,10 @@ fn design_chebyshev_i_filter(
                     .collect(),
             ))
         }
-        FilterResponse::BandStop => {
-            Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "filter_response",
-                "Band-stop Chebyshev Type I filter not yet implemented",
-            )))
-        }
+        FilterResponse::BandStop => Err(AudioSampleError::unsupported(
+            "design_chebyshev_i_filter",
+            "band-stop Chebyshev Type I response is not yet implemented",
+        )),
     }
 }
 

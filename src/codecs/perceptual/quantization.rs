@@ -12,10 +12,12 @@
 //! ## Why
 //!
 //! Psychoacoustic analysis ([`super::analyse_signal`]) produces per-band
-//! `importance` and `allowed_noise` scores, but does not act on them. This
-//! module bridges analysis and coding: `importance` drives how many bits each
-//! band receives, while `allowed_noise` determines the coarseness of the
-//! quantizer so that quantization noise stays below the masking threshold.
+//! `energy`, `importance`, and `allowed_noise` scores. This module bridges
+//! analysis and coding: [`allocate_bits`] distributes the bit budget across
+//! bands (weighted by energy and perceptual importance), and
+//! [`refine_step_sizes`] turns that budget into per-band quantiser step sizes
+//! via optimal bit allocation, so the bit budget genuinely controls
+//! reconstruction quality. `allowed_noise` seeds the initial perceptual step.
 //!
 //! ## How
 //!
@@ -50,12 +52,15 @@ pub struct BandAllocation {
     pub start_bin: usize,
     /// One past the last spectral bin index (exclusive).
     pub end_bin: usize,
-    /// Bits allocated to this band (0 = band is not coded).
-    pub bits: u8,
+    /// Total bits allocated to this band across all its coefficients
+    /// (0 = band is not coded).
+    pub bits: u32,
     /// Uniform quantization step size in linear amplitude.
     ///
-    /// Chosen so that RMS quantization noise stays below the psychoacoustic
-    /// masking threshold: `step_size = 10^(allowed_noise_db / 20) × √12`.
+    /// Initialised from the psychoacoustic masking threshold
+    /// (`10^(allowed_noise_db / 20) × √12`) and then refined by
+    /// [`refine_step_sizes`] so that bands granted more bits are quantised more
+    /// finely — letting the bit budget actually control reconstruction quality.
     pub step_size: f32,
 }
 
@@ -118,23 +123,29 @@ pub fn allocate_bits(
     let reserved = (n_bands as u32).saturating_mul(min_bits_per_band as u32);
     let remaining = total_bits.saturating_sub(reserved);
 
-    let total_importance: f32 = band_metrics
-        .metrics
-        .iter()
-        .map(|m| m.importance.max(0.0))
-        .sum();
+    // Weight each band by its linear energy (`energy` is in dB:
+    // `10·log10(power)`) boosted by its perceptual importance. Energy ensures
+    // every signal-bearing band is coded even when it is perceptually masked
+    // (e.g. self-masking noise), which keeps objective reconstruction quality
+    // scaling with the bit budget; importance biases extra bits toward the
+    // bands the ear cares about most.
+    let band_weight = |m: &super::BandMetric| -> f32 {
+        let energy_linear = 10.0_f32.powf(m.energy / 10.0);
+        energy_linear * (1.0 + m.importance.max(0.0))
+    };
+    let total_weight: f32 = band_metrics.metrics.iter().map(band_weight).sum();
 
     let allocations: Vec<BandAllocation> = band_metrics
         .metrics
         .iter()
         .map(|m| {
-            let extra_bits = if total_importance > 0.0 {
-                let fraction = m.importance.max(0.0) / total_importance;
-                (fraction * remaining as f32).round() as u8
+            let extra_bits = if total_weight > 0.0 {
+                let fraction = band_weight(m) / total_weight;
+                (fraction * remaining as f32).round().max(0.0) as u32
             } else {
                 0
             };
-            let bits = min_bits_per_band.saturating_add(extra_bits);
+            let bits = u32::from(min_bits_per_band).saturating_add(extra_bits);
             let step_size = step_size_from_allowed_noise(m.allowed_noise);
             BandAllocation {
                 start_bin: m.band.start_bin,
@@ -272,4 +283,142 @@ pub fn dequantize(
 
     // SAFETY: nc * nf >= 1 since both nc >= 1 and nf >= 1.
     unsafe { NonEmptyVec::new_unchecked(out) }
+}
+
+/// Maximum per-coefficient quantiser word length, in bits.
+///
+/// Caps the resolution at a level that is effectively lossless for normalised
+/// MDCT coefficients while keeping quantised indices comfortably inside `i32`.
+const MAX_WORDLENGTH_BITS: u32 = 24;
+
+/// Refines per-band quantisation step sizes from the bit budget using optimal
+/// bit allocation.
+///
+/// [`allocate_bits`] seeds each band's `step_size` from its psychoacoustic
+/// masking threshold, which alone makes reconstruction quality independent of
+/// the bit budget. This pass replaces those steps with a rate-driven assignment
+/// so the budget actually controls quality.
+///
+/// It applies the classic high-resolution optimal bit-allocation rule: with an
+/// average of `R` bits per coefficient and per-band coefficient variance
+/// `σ²_k`, the rate-distortion-optimal word length for band `k` is
+///
+/// ```text
+/// w_k = R + ½·log₂( σ²_k / geomean(σ²) )
+/// ```
+///
+/// i.e. give every coefficient the average word length, then shift bits toward
+/// louder bands and away from quieter ones. For a flat spectrum (white noise)
+/// every band gets `R`, so the whole budget is used and SNR scales with the
+/// budget; for a tone, the budget concentrates on the few loud bands. The step
+/// size then covers each band's peak with `2^w_k` levels.
+///
+/// # Arguments
+/// - `allocation` – Allocation from [`allocate_bits`]; `step_size` is updated in place.
+///   Only the *sum* of `bits` (the total budget) is used here.
+/// - `coefficients` – The MDCT coefficients about to be quantised (row-major,
+///   `k * n_frames + f`).
+/// - `n_coefficients` – Number of spectral bins per frame.
+/// - `n_frames` – Number of MDCT frames.
+pub fn refine_step_sizes(
+    allocation: &mut BitAllocationResult,
+    coefficients: &NonEmptySlice<f32>,
+    n_coefficients: NonZeroUsize,
+    n_frames: NonZeroUsize,
+) {
+    let nc = n_coefficients.get();
+    let nf = n_frames.get();
+
+    // Per-band statistics: peak magnitude, mean-square (variance proxy), and
+    // coefficient count.
+    struct BandStat {
+        peak: f32,
+        variance: f32,
+        n_coeffs: usize,
+    }
+
+    let stats: Vec<BandStat> = allocation
+        .allocations
+        .iter()
+        .map(|alloc| {
+            let k_end = alloc.end_bin.min(nc);
+            if alloc.start_bin >= k_end {
+                return BandStat {
+                    peak: 0.0,
+                    variance: 0.0,
+                    n_coeffs: 0,
+                };
+            }
+            let mut peak = 0.0f32;
+            let mut sum_sq = 0.0f64;
+            let mut n = 0usize;
+            for k in alloc.start_bin..k_end {
+                for f in 0..nf {
+                    let v = coefficients[k * nf + f];
+                    let a = v.abs();
+                    if a > peak {
+                        peak = a;
+                    }
+                    sum_sq += f64::from(v) * f64::from(v);
+                    n += 1;
+                }
+            }
+            let variance = if n > 0 {
+                (sum_sq / n as f64) as f32
+            } else {
+                0.0
+            };
+            BandStat {
+                peak,
+                variance,
+                n_coeffs: n,
+            }
+        })
+        .collect();
+
+    // Total budget (sum of allocated bits) and total coded coefficients.
+    let total_bits: u64 = allocation
+        .allocations
+        .iter()
+        .map(|a| u64::from(a.bits))
+        .sum();
+    let total_coeffs: usize = stats.iter().map(|s| s.n_coeffs).sum();
+    if total_coeffs == 0 {
+        return;
+    }
+    let r_avg = total_bits as f32 / total_coeffs as f32;
+
+    // Geometric mean of the (positive) per-band variances, in log2 space.
+    let mut log_sum = 0.0f32;
+    let mut active = 0usize;
+    for s in &stats {
+        if s.variance > 0.0 {
+            log_sum += s.variance.log2();
+            active += 1;
+        }
+    }
+    let geomean_log2 = if active > 0 {
+        log_sum / active as f32
+    } else {
+        0.0
+    };
+
+    for (alloc, s) in allocation.allocations.iter_mut().zip(stats.iter()) {
+        if s.peak <= 0.0 || s.variance <= 0.0 {
+            // Silent band: a coarse step quantises its ~zero data to zero.
+            alloc.step_size = (2.0 * s.peak).max(1e-6);
+            continue;
+        }
+
+        // Optimal word length, clamped to a representable, near-lossless range.
+        let w = (r_avg + 0.5 * (s.variance.log2() - geomean_log2))
+            .clamp(0.0, MAX_WORDLENGTH_BITS as f32);
+        if w < 0.5 {
+            // Fewer than ~one level: drop the band (its energy is negligible).
+            alloc.step_size = (2.0 * s.peak).max(1e-6);
+        } else {
+            let levels = 2.0_f32.powf(w);
+            alloc.step_size = ((2.0 * s.peak) / levels).max(1e-6);
+        }
+    }
 }

@@ -41,7 +41,7 @@
 //! let freq = midi_to_hz(midi as f64);
 //! ```
 
-use crate::{AudioSampleError, AudioSampleResult, ParameterError};
+use crate::{AudioSampleError, AudioSampleResult, NoteParseError, ParameterError};
 use std::collections::HashMap;
 
 // =============================================================================
@@ -791,10 +791,12 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 #[inline]
 pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
     if note_name.len() < 2 {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "note_name",
-            "Note name must include octave number (e.g., 'A4')",
-        )));
+        return Err(NoteParseError::new(
+            note_name,
+            (0, note_name.len()),
+            "note name must include an octave number (e.g. `A4`)",
+        )
+        .into());
     }
 
     // Parse note and octave
@@ -803,36 +805,40 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
     } else if note_name.len() == 3 && (note_name.contains('#') || note_name.contains('b')) {
         (&note_name[..2], &note_name[2..])
     } else {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "note_name",
-            "Invalid note name format. Expected format: 'A4', 'C#3', 'Bb2'",
-        )));
+        return Err(NoteParseError::new(
+            note_name,
+            (0, note_name.len()),
+            "unrecognised note format; expected `A4`, `C#3`, `Bb2`",
+        )
+        .into());
     };
 
-    // Look up base note value
-    let base_note = NOTE_TO_MIDI_MAP.get(note_part).copied().ok_or_else(|| {
-        AudioSampleError::Parameter(ParameterError::invalid_value(
-            "note_name",
-            format!("Unknown note: {note_part}"),
-        ))
-    })?;
+    // Look up base note value — point the caret at the note letter/accidental.
+    let base_note = NOTE_TO_MIDI_MAP
+        .get(note_part)
+        .copied()
+        .ok_or_else(|| NoteParseError::new(note_name, (0, note_part.len()), "unrecognised note"))?;
 
-    // Parse octave
+    // Parse octave — point the caret at the octave digits.
     let octave: i32 = octave_str.parse().map_err(|_| {
-        AudioSampleError::Parameter(ParameterError::invalid_value(
-            "note_name",
-            format!("Invalid octave: {octave_str}"),
-        ))
+        NoteParseError::new(
+            note_name,
+            (note_part.len(), octave_str.len()),
+            "invalid octave",
+        )
     })?;
 
     // Calculate MIDI note number
     let midi_note = (octave + 1) * 12 + i32::from(base_note);
 
-    // Check range
+    // Check range — the note parsed cleanly, this is a genuine range violation.
     if !(0..=127).contains(&midi_note) {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+        return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
             "note_name",
-            format!("Note {note_name} (MIDI {midi_note}) is outside valid MIDI range 0-127"),
+            midi_note,
+            0,
+            127,
+            format!("note {note_name} maps to MIDI {midi_note}, outside the valid range"),
         )));
     }
 
@@ -1258,6 +1264,47 @@ mod tests {
 
         // Test case insensitivity would require making the function case-insensitive
         // assert_eq!(note_to_midi("a4").unwrap(), 69);
+    }
+
+    #[test]
+    fn test_note_parse_error_spans() {
+        use crate::AudioSampleError;
+        use miette::Diagnostic;
+
+        // Unrecognised note letter: caret points at the leading note token.
+        let err = note_to_midi("H4").unwrap_err();
+        match &err {
+            AudioSampleError::NoteParse(npe) => {
+                assert_eq!(npe.span.offset(), 0);
+                assert_eq!(npe.span.len(), 1); // the "H"
+                assert!(npe.kind.contains("unrecognised note"));
+            }
+            other => panic!("expected NoteParse, got {other:?}"),
+        }
+        assert_eq!(
+            err.code().unwrap().to_string(),
+            "audio_samples::parse::note_name"
+        );
+        assert!(err.help().unwrap().to_string().contains("A4"));
+
+        // Bad octave: caret moves past the note token to the octave digits.
+        let err = note_to_midi("C#x").unwrap_err();
+        match err {
+            AudioSampleError::NoteParse(npe) => {
+                assert_eq!(npe.span.offset(), 2); // after "C#"
+                assert_eq!(npe.span.len(), 1); // the "x"
+                assert!(npe.kind.contains("invalid octave"));
+            }
+            other => panic!("expected NoteParse, got {other:?}"),
+        }
+
+        // A note that parses but lands outside the MIDI range is a genuine
+        // range error, not a parse error. B9 maps to MIDI 131 (> 127).
+        let err = note_to_midi("B9").unwrap_err();
+        assert!(matches!(
+            err,
+            AudioSampleError::Parameter(crate::ParameterError::OutOfRange { .. })
+        ));
     }
 
     #[test]

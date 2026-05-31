@@ -94,7 +94,7 @@ use std::num::NonZeroUsize;
 use crate::operations::traits::AudioStatistics;
 use crate::repr::AudioData;
 use crate::traits::StandardSample;
-use crate::{AudioSampleResult, AudioSamples, ConversionError, ParameterError};
+use crate::{AudioSampleResult, AudioSamples, ParameterError};
 
 #[cfg(feature = "transforms")]
 use crate::{AudioSampleError, AudioTypeConversion, ProcessingError};
@@ -856,14 +856,15 @@ where
                 Ok(correlations)
             }
             _ => {
-                // Mixed mono/multi-channel case - not supported
-                Err(crate::AudioSampleError::Conversion(
-                    ConversionError::audio_conversion(
-                        "Mixed",
-                        "cross_correlation",
-                        "compatible",
-                        "Cannot correlate mono and multi-channel signals",
-                    ),
+                // Mixed mono/multi-channel case is a structural mismatch, not a
+                // type conversion — report it as a layout incompatibility.
+                Err(crate::AudioSampleError::Layout(
+                    crate::LayoutError::IncompatibleFormat {
+                        operation: "cross_correlation".to_string(),
+                        reason: "cannot correlate mono and multi-channel signals; \
+                                 convert both inputs to the same channel layout first"
+                            .to_string(),
+                    },
                 ))
             }
         }

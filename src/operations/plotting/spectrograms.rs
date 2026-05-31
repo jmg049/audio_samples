@@ -56,7 +56,11 @@ impl PlotUtils for SpectrogramPlot {
     fn show(&self) -> crate::AudioSampleResult<()> {
         let html = self.html()?;
         html_view::show(html).map_err(|e| {
-            crate::AudioSampleError::unsupported(format!("Failed to show plot: {}", e))
+            crate::AudioSampleError::Processing(crate::ProcessingError::external_dependency(
+                "html_view",
+                "show",
+                e.to_string(),
+            ))
         })?;
         Ok(())
     }
@@ -69,9 +73,7 @@ impl PlotUtils for SpectrogramPlot {
         match extension.to_lowercase().as_str() {
             "html" => {
                 let html = self.html()?;
-                std::fs::write(path, html).map_err(|e| {
-                    crate::AudioSampleError::unsupported(format!("Failed to write HTML file: {e}"))
-                })?;
+                std::fs::write(path, html).map_err(|e| crate::AudioSampleError::io("save", &e))?;
                 Ok(())
             }
             #[cfg(feature = "static-plots")]
@@ -80,10 +82,13 @@ impl PlotUtils for SpectrogramPlot {
                 use serde_json::json;
                 let mut static_exporter =
                     StaticExporterBuilder::default().build().map_err(|e| {
-                        crate::AudioSampleError::unsupported(format!(
-                            "Failed to initialize static exporter: {}",
-                            e
-                        ))
+                        crate::AudioSampleError::Processing(
+                            crate::ProcessingError::external_dependency(
+                                "plotly_static",
+                                "save",
+                                e.to_string(),
+                            ),
+                        )
                     })?;
 
                 let format = match extension {
@@ -101,10 +106,13 @@ impl PlotUtils for SpectrogramPlot {
                 static_exporter
                     .write_fig(path, &plot, format, width, height, scale)
                     .map_err(|e| {
-                        crate::AudioSampleError::unsupported(format!(
-                            "Failed to save static image: {}",
-                            e
-                        ))
+                        crate::AudioSampleError::Processing(
+                            crate::ProcessingError::external_dependency(
+                                "plotly_static",
+                                "save",
+                                e.to_string(),
+                            ),
+                        )
                     })?;
 
                 Ok(())
@@ -1190,7 +1198,8 @@ fn add_spectrogram_trace(
         ColorScale::Palette(color_scale_palette) => color_scale_palette,
         ColorScale::Vector(_) => {
             return Err(crate::AudioSampleError::unsupported(
-                "Vector colour scales not supported yet.",
+                "plot_spectrogram",
+                "vector colour scales are not supported yet",
             ));
         }
     };

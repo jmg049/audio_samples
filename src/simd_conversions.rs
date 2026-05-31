@@ -9,9 +9,9 @@
 //! When the `simd` feature is disabled, [`convert`] falls back to a scalar implementation.
 //!
 //! ## Conversion semantics
-//! The high-level [`convert`] API is intended to match the semantics of the crate's
-//! [`ConvertTo`] conversions (clamp + scale + round + saturate for float → int, and asymmetric
-//! scaling for int → float).
+//! The high-level [`convert`] API matches the semantics of the crate's
+//! [`ConvertTo`] conversions (clamp + symmetric scale + truncate + saturate for
+//! float → int, and asymmetric scaling for int → float).
 #![allow(unused)]
 
 use std::num::NonZeroU32;
@@ -27,8 +27,8 @@ use crate::{AudioSample, AudioSampleError, AudioSampleResult, ConvertTo, Paramet
 /// # Behavior
 /// Matches the crate's [`ConvertTo<i16>`] semantics for `f32`:
 /// - clamps the input to $[-1.0, 1.0]$
-/// - scales with asymmetric endpoints (`-1.0 → i16::MIN`, `1.0 → i16::MAX`)
-/// - rounds to the nearest integer and saturates to the destination range
+/// - scales symmetrically by `i16::MAX` (`±1.0 → ±32767`)
+/// - truncates toward zero and saturates to the destination range
 ///
 /// # Errors
 /// Returns an error if `input.len() != output.len()`.
@@ -61,26 +61,21 @@ pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSample
             input[start_idx + 7],
         ]);
 
-        // Clamp to [-1.0, 1.0]
+        // Clamp to [-1.0, 1.0] using the vector unit, then convert each lane
+        // through the canonical scalar `ConvertTo` so SIMD output is bit-for-bit
+        // identical to the scalar path (symmetric scale by i16::MAX, truncation
+        // toward zero — see `impl_float_to_int` in `traits.rs`).
         let clamped = f32_vec.max(f32x8::splat(-1.0)).min(f32x8::splat(1.0));
-
-        // Convert lane-by-lane to exactly match ConvertTo semantics.
         let as_array = clamped.to_array();
         for (j, &v) in as_array.iter().enumerate() {
-            let scaled = if v < 0.0 { v * 32768.0 } else { v * 32767.0 };
-            let rounded = scaled.round();
-            let clamped = rounded.clamp(i16::MIN as f32, i16::MAX as f32);
-            output[start_idx + j] = clamped as i16;
+            output[start_idx + j] = v.convert_to();
         }
     }
 
     // Handle remaining samples with scalar code
     let start_remainder = chunks * 8;
     for i in 0..remainder {
-        let v = input[start_remainder + i].clamp(-1.0, 1.0);
-        let scaled = if v < 0.0 { v * 32768.0 } else { v * 32767.0 };
-        let rounded = scaled.round();
-        output[start_remainder + i] = rounded.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        output[start_remainder + i] = input[start_remainder + i].convert_to();
     }
 
     Ok(())
@@ -145,8 +140,8 @@ pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSample
 /// # Behavior
 /// Matches the crate's [`ConvertTo<i32>`] semantics for `f32`:
 /// - clamps the input to $[-1.0, 1.0]$
-/// - scales with asymmetric endpoints (`-1.0 → i32::MIN`, `1.0 → i32::MAX`)
-/// - rounds to the nearest integer and saturates to the destination range
+/// - scales symmetrically by `i32::MAX`
+/// - truncates toward zero and saturates to the destination range
 ///
 /// # Errors
 /// Returns an error if `input.len() != output.len()`.
@@ -177,32 +172,20 @@ pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSample
             input[start_idx + 7],
         ]);
 
+        // Clamp on the vector unit, then convert each lane through the canonical
+        // scalar `ConvertTo` so the SIMD result matches the scalar path exactly
+        // (see `impl_float_to_large_int` in `traits.rs`).
         let clamped = f32_vec.max(f32x8::splat(-1.0)).min(f32x8::splat(1.0));
-
         let as_array = clamped.to_array();
         for (j, &v) in as_array.iter().enumerate() {
-            let scaled = if v < 0.0 {
-                v * 2147483648.0
-            } else {
-                v * 2147483647.0
-            };
-            let rounded = scaled.round();
-            let clamped = rounded.clamp(i32::MIN as f32, i32::MAX as f32);
-            output[start_idx + j] = clamped as i32;
+            output[start_idx + j] = v.convert_to();
         }
     }
 
     // Handle remainder
     let start_remainder = chunks * 8;
     for i in 0..remainder {
-        let v = input[start_remainder + i].clamp(-1.0, 1.0);
-        let scaled = if v < 0.0 {
-            v * 2147483648.0
-        } else {
-            v * 2147483647.0
-        };
-        let rounded = scaled.round();
-        output[start_remainder + i] = rounded.clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+        output[start_remainder + i] = input[start_remainder + i].convert_to();
     }
 
     Ok(())
@@ -914,7 +897,7 @@ mod tests {
     #[test]
     fn test_simd_f32_to_i16_conversion() {
         let input = non_empty_vec![0.5f32, -0.3, 0.8, 1.0, -1.0, 0.0, 0.1, -0.1, 0.25];
-        let mut output = non_empty_vec![0i16; 9];
+        let mut output = non_empty_vec![0i16; crate::nzu!(9)];
 
         convert_f32_to_i16_simd(&input, &mut output).unwrap();
 
@@ -932,7 +915,7 @@ mod tests {
     #[test]
     fn test_simd_i16_to_f32_conversion() {
         let input = non_empty_vec![16383i16, -9830, 26214, 32767, -32768, 0, 3276, -3276];
-        let mut output = non_empty_vec![0.0f32; 8];
+        let mut output = non_empty_vec![0.0f32; crate::nzu!(8)];
 
         convert_i16_to_f32_simd(&input, &mut output).unwrap();
 

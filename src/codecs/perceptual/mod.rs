@@ -623,8 +623,13 @@ where
     }
 
     let window_size = NonZeroUsize::new(window_size_val).expect("validated >= 4");
-    let hop_size = NonZeroUsize::new(window_size_val / 2).expect("window_size >= 4");
-    let mdct_params = MdctParams::new(window_size, hop_size, window)?;
+    // The MDCT only reconstructs perfectly with a Princen–Bradley window — at the
+    // 50% hop used here, that is the sine window `sin(π(k+0.5)/N)`, which uniquely
+    // satisfies `w[k]² + w[k+N]² = 1`. Standard windows (Hanning, Hamming, …) break
+    // time-domain aliasing cancellation and yield poor round-trip SNR, so the MDCT
+    // always uses the sine window regardless of the requested `window`.
+    let _ = window;
+    let mdct_params = MdctParams::sine_window(window_size)?;
     let n_bins = mdct_params.n_coefficients();
 
     let sample_rate = signal.sample_rate();
@@ -637,8 +642,26 @@ where
         .as_slice()
         .expect("mono channel is always contiguous");
 
-    // SAFETY: signal has at least 4 samples (validated above), so non-empty.
-    let samples_ne = unsafe { NonEmptySlice::new_unchecked(samples) };
+    // MDCT priming: at a 50% hop the first and last `hop` output samples have no
+    // overlapping neighbour, so their time-domain aliasing is never cancelled.
+    // Pad the signal by `hop` zeros at the front (and enough at the back to tile
+    // whole frames with a trailing overlap) so the entire original signal lands
+    // in the perfectly-reconstructed interior. `reconstruct_signal` slices the
+    // original back out using the same `hop` offset.
+    let hop = window_size_val / 2;
+    let pad_front = hop;
+    let mut padded_len = pad_front + samples.len() + hop;
+    // Ensure (padded_len - window_size) is a whole multiple of hop so no tail is
+    // dropped and the last frame ends exactly at `padded_len`.
+    let rem = (padded_len - window_size_val) % hop;
+    if rem != 0 {
+        padded_len += hop - rem;
+    }
+    let mut padded = vec![0.0f32; padded_len];
+    padded[pad_front..pad_front + samples.len()].copy_from_slice(samples);
+
+    // SAFETY: padded_len >= window_size_val >= 4, so the buffer is non-empty.
+    let samples_ne = unsafe { NonEmptySlice::new_unchecked(&padded) };
     let mdct_matrix = spectrograms::mdct_f32(samples_ne, &mdct_params)?;
     // mdct_matrix shape: (n_bins, n_frames)
 
@@ -698,8 +721,11 @@ where
 /// - `n_frames` – Number of analysis frames.
 /// - `params` – MDCT parameters used during analysis (see
 ///   [`PerceptualAnalysisResult::mdct_params`]).
-/// - `original_length` – If provided, the output signal is truncated to this
-///   many samples, matching the original signal length precisely.
+/// - `original_length` – If provided, the original (pre-priming) signal length.
+///   [`analyse_signal`] pads the signal by `hop` samples at the front for MDCT
+///   priming, so the original signal is sliced back out as
+///   `[hop, hop + original_length)`. If `None`, the full primed reconstruction
+///   is returned.
 /// - `sample_rate` – Sample rate for the returned [`AudioSamples`].
 ///
 /// # Errors
@@ -735,9 +761,24 @@ pub fn reconstruct_signal(
     let coef_vec: Vec<f32> = coefficients.iter().copied().collect();
     let coef_matrix = Array2::from_shape_vec((nc, nf), coef_vec)?;
 
-    let samples = spectrograms::imdct_f32(&coef_matrix, params, original_length)?;
+    // Reconstruct the full primed signal, then slice the original content back
+    // out. `analyse_signal` prepends `hop` zeros for MDCT priming, so the
+    // original signal occupies `[hop, hop + original_length)` of the primed
+    // reconstruction.
+    let full = spectrograms::imdct_f32(&coef_matrix, params, None)?;
 
-    let samples_ne = NonEmptyVec::new(samples).map_err(|_| AudioSampleError::EmptyData)?;
+    let samples = match original_length {
+        Some(len) => {
+            let pad_front = params.hop_size.get();
+            let start = pad_front.min(full.len());
+            let end = (pad_front + len).min(full.len());
+            full[start..end].to_vec()
+        }
+        None => full,
+    };
+
+    let samples_ne = NonEmptyVec::new(samples)
+        .map_err(|_| AudioSampleError::empty_data("reconstruct_signal"))?;
 
     Ok(AudioSamples::from_mono_vec(samples_ne, sample_rate))
 }

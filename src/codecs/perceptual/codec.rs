@@ -12,7 +12,7 @@ use super::{
     BandLayout, PsychoacousticConfig, analyse_signal_with_window_size,
     bands::scale_band_layout,
     masking::detect_transient_windows,
-    quantization::{BitAllocationResult, allocate_bits, dequantize, quantize},
+    quantization::{BitAllocationResult, allocate_bits, dequantize, quantize, refine_step_sizes},
     reconstruct_signal,
 };
 
@@ -314,7 +314,16 @@ fn encode_segment<T: StandardSample>(
     let result =
         analyse_signal_with_window_size(sub_audio, window, window_size, band_layout, config)?;
 
-    let allocation = allocate_bits(&result.band_metrics, bit_budget, min_bits_per_band);
+    let mut allocation = allocate_bits(&result.band_metrics, bit_budget, min_bits_per_band);
+    // Turn the per-band bit allocation into actual quantiser resolution so the
+    // bit budget controls reconstruction quality (otherwise the step size is
+    // purely perceptual and the budget has no effect).
+    refine_step_sizes(
+        &mut allocation,
+        result.coefficients.as_non_empty_slice(),
+        result.n_coefficients,
+        result.n_frames,
+    );
     let quantized = quantize(
         result.coefficients.as_non_empty_slice(),
         result.n_coefficients,
@@ -437,8 +446,8 @@ impl AudioCodec for PerceptualCodec {
                     }
 
                     let seg_vec = samples[sample_start..sample_end].to_vec();
-                    let seg_ne =
-                        NonEmptyVec::new(seg_vec).map_err(|_| AudioSampleError::EmptyData)?;
+                    let seg_ne = NonEmptyVec::new(seg_vec)
+                        .map_err(|_| AudioSampleError::empty_data("PerceptualCodec::encode"))?;
                     let seg_audio: AudioSamples<'static, f32> =
                         AudioSamples::from_mono_vec(seg_ne, sample_rate);
 
@@ -477,8 +486,8 @@ impl AudioCodec for PerceptualCodec {
                 let encoded_segments: AudioSampleResult<Vec<EncodedSegment>> =
                     seg_inputs.into_iter().map(process).collect();
 
-                let segments =
-                    NonEmptyVec::new(encoded_segments?).map_err(|_| AudioSampleError::EmptyData)?;
+                let segments = NonEmptyVec::new(encoded_segments?)
+                    .map_err(|_| AudioSampleError::empty_data("PerceptualCodec::encode"))?;
                 Ok(PerceptualEncodedAudio {
                     segments,
                     original_length,
@@ -541,7 +550,8 @@ impl AudioCodec for PerceptualCodec {
         }
         all_samples.truncate(target_length);
 
-        let samples_ne = NonEmptyVec::new(all_samples).map_err(|_| AudioSampleError::EmptyData)?;
+        let samples_ne = NonEmptyVec::new(all_samples)
+            .map_err(|_| AudioSampleError::empty_data("PerceptualCodec::decode"))?;
         let f32_audio: AudioSamples<'static, f32> =
             AudioSamples::from_mono_vec(samples_ne, sample_rate);
         Ok(f32_audio.to_format::<U>())

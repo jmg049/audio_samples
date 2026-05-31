@@ -26,6 +26,7 @@ bytemuck = "1.25.0"
 ndarray = "0.17"
 num-traits = "0.2"
 thiserror = "2.0"
+miette = "7"
 num-complex = "0.4"
 i24 = { version = "2.3.3", features = [
     "alloc",
@@ -64,6 +65,11 @@ audioadapter-buffers = { version = "3.0.0", optional = true }
 [features]
 # Minimal core (no heavy dependencies)
 default = ["bare-bones"]
+
+# Coloured caret-underline diagnostic rendering via miette's `fancy` renderer.
+# Library consumers get plain `Display` unless they opt in; examples and the
+# `educational` module enable this so the pretty output is visible by default.
+fancy = ["miette/fancy"]
 
 # Core operation categories
 statistics = [] # Basic stats: peak, rms, mean
@@ -126,7 +132,7 @@ full_no_plotting = [
     "parallel",
 ]
 
-educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing"]
+educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing", "fancy"]
 bare-bones = [] # No features, just the core API and basic types
 
 # Plotting sub-features (require plotting)
@@ -143,6 +149,10 @@ dtmf_tones = "1.0.1"
 rand = "0.10.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11.0"
+
+[[example]]
+name = "error_diagnostics"
+required-features = ["fancy"]
 
 [[example]]
 name = "psychoacoustic"

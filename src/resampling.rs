@@ -458,9 +458,10 @@ where
                 FixedSync::Input,
             )
             .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "fft_resampler",
-                    format!("Failed to create FFT resampler: {e}"),
+                AudioSampleError::Processing(ProcessingError::external_dependency(
+                    "rubato",
+                    "resample",
+                    format!("failed to create FFT resampler: {e}"),
                 ))
             })
         },
@@ -513,25 +514,28 @@ where
         }
 
         let in_adapter = SequentialSliceOfVecs::new(&in_buf, channels, chunk_in).map_err(|e| {
-            AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                "fft_resampler",
-                format!("Input adapter error: {e}"),
+            AudioSampleError::Processing(ProcessingError::external_dependency(
+                "audioadapter",
+                "resample",
+                format!("input adapter error: {e}"),
             ))
         })?;
         let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut out_buf, channels, chunk_out)
             .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "fft_resampler",
-                    format!("Output adapter error: {e}"),
+                AudioSampleError::Processing(ProcessingError::external_dependency(
+                    "audioadapter",
+                    "resample",
+                    format!("output adapter error: {e}"),
                 ))
             })?;
 
         let (_, frames_written) = resampler
             .process_into_buffer(&in_adapter, &mut out_adapter, None)
             .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::algorithm_failure(
-                    "fft_resampler",
-                    format!("Resampling failed: {e}"),
+                AudioSampleError::Processing(ProcessingError::external_dependency(
+                    "rubato",
+                    "resample",
+                    format!("resampling failed: {e}"),
                 ))
             })?;
 
@@ -612,12 +616,7 @@ where
         flat.extend_from_slice(ch_data);
     }
 
-    let data = NonEmptyVec::new(flat).map_err(|_| {
-        AudioSampleError::Processing(ProcessingError::algorithm_failure(
-            "resampler",
-            "Empty output after assembling channels",
-        ))
-    })?;
+    let data = NonEmptyVec::new(flat).map_err(|_| AudioSampleError::empty_data("resample"))?;
 
     AudioSamples::new_multi_channel_from_vec::<f32>(data, channel_count, sample_rate)
 }

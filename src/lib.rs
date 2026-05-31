@@ -62,6 +62,16 @@
 //! `Result<T, AudioSampleError>`. Errors are structured so that the variant indicates
 //! the category of failure and the inner type provides detail.
 //!
+//! Every error implements [`miette::Diagnostic`] as well as [`std::error::Error`].
+//! Each variant carries a stable, namespaced **code**
+//! (`audio_samples::<domain>::<variant>`) for programmatic matching and an
+//! actionable **help** hint. Failures that arise from parsing user-supplied text
+//! (note names, enum `FromStr`) additionally carry a source span pointing a caret
+//! at the offending character. Enable the `fancy` feature to render the coloured
+//! caret-underline output (see `examples/error_diagnostics.rs`); library consumers
+//! who do not opt in get plain [`Display`] output and pay nothing for graphical
+//! dependencies.
+//!
 //! ```rust
 //! use audio_samples::{AudioSampleError, AudioSampleResult, ParameterError};
 //!
@@ -347,8 +357,8 @@ pub mod simd_conversions;
 pub mod educational;
 
 pub use crate::error::{
-    AudioSampleError, AudioSampleResult, ConversionError, FeatureError, LayoutError,
-    ParameterError, ProcessingError,
+    AudioSampleError, AudioSampleResult, ChannelRequirement, ConversionError, EnumParseError,
+    FeatureError, LayoutError, NoteParseError, ParameterError, ProcessingError,
 };
 pub use crate::repr::AudioData;
 pub use crate::repr::StereoAudioSamples;
