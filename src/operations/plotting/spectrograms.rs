@@ -598,6 +598,7 @@ impl SpectrogramPlotParams {
                 // safety: known valid parameters
                 mel_params: unsafe { MelParams::new_unchecked(nzu!(128), 0.0, 8000.0) },
                 // safety: -80.0 is finite
+                #[allow(unused_unsafe)]
                 db_params: unsafe { LogParams::new_unchecked(-80.0) },
             },
             stft_params: Some(

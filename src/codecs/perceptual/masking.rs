@@ -308,7 +308,6 @@ pub fn apply_temporal_masking(
     }
 
     let n_frames = frame_metrics.len();
-    let n_bands = frame_metrics[0].metrics.len().get();
 
     // Work on a mutable 2D grid [frame][band] of masking thresholds.
     // Initialise from the simultaneous-masking thresholds.
@@ -318,9 +317,9 @@ pub fn apply_temporal_masking(
         .collect();
 
     // Post-masking: frame t propagates forward until decay removes the contribution.
-    for t in 0..n_frames {
-        for b in 0..n_bands {
-            let masker = frame_metrics[t].metrics[b].masking_threshold;
+    for (t, frame_metric_t) in frame_metrics.iter().enumerate() {
+        for (b, metric) in frame_metric_t.metrics.iter().enumerate() {
+            let masker = metric.masking_threshold;
             let mut k = 1usize;
             loop {
                 let future = t + k;
@@ -339,9 +338,9 @@ pub fn apply_temporal_masking(
     }
 
     // Pre-masking: frame t propagates backward (weaker, faster decay).
-    for t in 1..n_frames {
-        for b in 0..n_bands {
-            let masker = frame_metrics[t].metrics[b].masking_threshold;
+    for (t, frame_metric_t) in frame_metrics.iter().enumerate().skip(1) {
+        for (b, metric) in frame_metric_t.metrics.iter().enumerate() {
+            let masker = metric.masking_threshold;
             let mut k = 1usize;
             loop {
                 if k > t {

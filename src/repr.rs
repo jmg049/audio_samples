@@ -5990,7 +5990,7 @@ where
 
     #[inline]
     fn frames(&self) -> usize {
-        self.total_frames().get() as usize
+        self.total_frames().get()
     }
 }
 

@@ -33,8 +33,6 @@ use crate::traits::StandardSample;
 #[cfg(feature = "processing")]
 pub(crate) mod processing;
 
-// ── Visual surface ────────────────────────────────────────────────────────────
-
 /// Opaque visual explanation for one operation step.
 ///
 /// Holds Plotly inline HTML fragments when compiled with `plotting`; otherwise
@@ -53,8 +51,6 @@ impl ExplainDisplay for AudioSamplesVisual {
         // Call render_explanation_document / open_explanation_document instead.
     }
 }
-
-// ── RenderVisual ──────────────────────────────────────────────────────────────
 
 impl<T: StandardSample> RenderVisual for AudioSamples<'static, T> {
     fn render_visual(before: &Self, after: &Self) -> Box<dyn ExplainDisplay> {
@@ -85,11 +81,7 @@ impl<T: StandardSample> RenderVisual for AudioSamples<'static, T> {
     }
 }
 
-// ── Explainable marker ────────────────────────────────────────────────────────
-
 impl<T: StandardSample> Explainable for AudioSamples<'static, T> {}
-
-// ── HTML document renderer ────────────────────────────────────────────────────
 
 /// Assemble all explanations from a chain into a single polished HTML document.
 ///
@@ -140,8 +132,6 @@ pub fn open_explanation_document(explanations: &[Explanation], title: &str) -> s
     open::that(&path).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     Ok(())
 }
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -224,7 +214,6 @@ fn render_chain_block(explanations: &[Explanation]) -> String {
 fn parse_explanation_text(text: &str) -> (Option<String>, String, String) {
     let mut remaining = text;
 
-    // ── [operation: ...] ──
     let op_name = if let Some(rest) = remaining.strip_prefix("[operation: ") {
         if let Some(close) = rest.find("]\n") {
             let name = rest[..close].to_owned();
@@ -237,7 +226,6 @@ fn parse_explanation_text(text: &str) -> (Option<String>, String, String) {
         None
     };
 
-    // ── [formula: ...] → KaTeX ──
     let formula_html = if let Some(rest) = remaining.strip_prefix("[formula: ") {
         if let Some(close) = rest.find("]\n") {
             let latex = html_escape(&rest[..close]);
@@ -261,7 +249,6 @@ fn parse_explanation_text(text: &str) -> (Option<String>, String, String) {
         }
     };
 
-    // ── prose ──
     // Split on double-newline for paragraphs; single newlines become <br>.
     let prose_inner = html_escape(remaining.trim());
     let prose_inner = prose_inner.replace("\n\n", r#"</p><p class="prose">"#);
@@ -336,8 +323,6 @@ fn render_visual_block(exp: &Explanation) -> String {
     }
     String::new()
 }
-
-// ── HTML template ─────────────────────────────────────────────────────────────
 
 const DOCUMENT_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en" data-theme="midnight">
@@ -795,7 +780,7 @@ p.prose:last-of-type { margin-bottom: 0; }
 </main>
 
 <script>
-// ── Theme switcher ────────────────────────────────────────────────────────────
+
 (function () {
   var root = document.documentElement;
   var btns = document.querySelectorAll('.theme-btn');
@@ -818,7 +803,7 @@ p.prose:last-of-type { margin-bottom: 0; }
   } catch (_) {}
 }());
 
-// ── Plotly post-render ────────────────────────────────────────────────────────
+
 // Relayout all Plotly divs to a consistent height and theme-neutral background.
 // Runs after window load to ensure Plotly has finished drawing.
 window.addEventListener('load', function () {

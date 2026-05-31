@@ -414,7 +414,7 @@ where
         // safety: samples is guaranteed non-empty by construction
         let samples_slice = unsafe { NonEmptySlice::new_unchecked(samples_slice) };
         let planner = SpectrogramPlanner::new();
-        let n_fft = n_fft.map_or(samples.len(), |n| n);
+        let n_fft = n_fft.unwrap_or(samples.len());
 
         // Compute power spectrum
         let spectrum = planner.compute_power_spectrum(
@@ -536,7 +536,7 @@ where
 
         let sample_rate = self.sample_rate_hz();
         let planner = SpectrogramPlanner::new();
-        let n_fft = n_fft.map_or(samples.len(), |n| n);
+        let n_fft = n_fft.unwrap_or(samples.len());
         // Compute power spectrum
         let spectrum = planner.compute_power_spectrum(
             samples_slice,

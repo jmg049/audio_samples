@@ -16,8 +16,6 @@ use super::{
     reconstruct_signal,
 };
 
-// ── AudioCodec trait ──────────────────────────────────────────────────────────
-
 /// Abstraction over an audio codec's encode/decode round-trip.
 ///
 /// A codec type serves as both the parameter container and the encode/decode
@@ -67,8 +65,6 @@ pub trait AudioCodec: Sized {
         f32: crate::ConvertFrom<U>;
 }
 
-// ── EncodedSegment ────────────────────────────────────────────────────────────
-
 /// One encoded segment: a run of consecutive MDCT frames that all share the
 /// same window size and band layout.
 ///
@@ -93,8 +89,6 @@ pub struct EncodedSegment {
     pub original_length: usize,
 }
 
-// ── PerceptualEncodedAudio ────────────────────────────────────────────────────
-
 /// In-memory encoded representation produced by [`PerceptualCodec`].
 ///
 /// Contains one or more [`EncodedSegment`] values in temporal order. A single
@@ -112,8 +106,6 @@ pub struct PerceptualEncodedAudio {
     /// Sample rate of the original signal.
     pub sample_rate: NonZeroU32,
 }
-
-// ── PerceptualCodec ───────────────────────────────────────────────────────────
 
 /// A perceptual audio codec driven by MDCT + psychoacoustic masking.
 ///
@@ -284,8 +276,6 @@ impl PerceptualCodec {
     }
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
 /// Groups a transient mask into runs of consecutive same-valued entries.
 ///
 /// Returns a `NonEmptyVec` of `(frame_start, frame_end, is_transient)` triples
@@ -342,8 +332,6 @@ fn encode_segment<T: StandardSample>(
     })
 }
 
-// ── AudioCodec impl ───────────────────────────────────────────────────────────
-
 impl AudioCodec for PerceptualCodec {
     type Encoded = PerceptualEncodedAudio;
 
@@ -374,7 +362,6 @@ impl AudioCodec for PerceptualCodec {
 
         match self.short_window_size {
             None => {
-                // ── Single-segment path (no window switching) ──────────────
                 let segment = encode_segment(
                     audio,
                     self.window,
@@ -393,10 +380,9 @@ impl AudioCodec for PerceptualCodec {
             }
 
             Some(short_ws) => {
-                // ── Window-switching path ──────────────────────────────────
                 let long_ws_val = self.window_size.map(|w| w.get()).unwrap_or_else(|| {
                     let raw = 2048_usize.min(original_length);
-                    if raw % 2 == 0 { raw } else { raw - 1 }
+                    if raw.is_multiple_of(2) { raw } else { raw - 1 }
                 });
 
                 if long_ws_val < 4 {
@@ -561,8 +547,6 @@ impl AudioCodec for PerceptualCodec {
         Ok(f32_audio.to_format::<U>())
     }
 }
-
-// ── Free functions ────────────────────────────────────────────────────────────
 
 /// Encodes an audio signal using the given codec.
 ///

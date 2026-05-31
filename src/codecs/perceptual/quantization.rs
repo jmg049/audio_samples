@@ -43,8 +43,6 @@ use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 
 use super::BandMetrics;
 
-// ── Per-band allocation ───────────────────────────────────────────────────────
-
 /// Bit allocation and quantization step size for a single frequency band.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BandAllocation {
@@ -69,8 +67,6 @@ pub struct BitAllocationResult {
     pub allocations: NonEmptyVec<BandAllocation>,
 }
 
-// ── Step size helper ──────────────────────────────────────────────────────────
-
 /// Computes the quantization step size for a band from its allowed-noise budget.
 ///
 /// Uses the relation between uniform quantization noise and step size:
@@ -93,8 +89,6 @@ pub fn step_size_from_allowed_noise(allowed_noise_db: f32) -> f32 {
     let noise_amplitude = 10.0_f32.powf(allowed_noise_db / 20.0);
     (noise_amplitude * 12.0_f32.sqrt()).max(1e-6)
 }
-
-// ── Bit allocation ────────────────────────────────────────────────────────────
 
 /// Allocates a fixed bit budget across frequency bands proportional to their
 /// perceptual importance.
@@ -156,8 +150,6 @@ pub fn allocate_bits(
     BitAllocationResult { allocations }
 }
 
-// ── Per-band helpers ──────────────────────────────────────────────────────────
-
 /// Uniformly quantizes a slice of `f32` MDCT coefficients to `i32` indices.
 ///
 /// `q[i] = round(c[i] / step_size)`
@@ -186,8 +178,6 @@ pub fn quantize_band(coefficients: &[f32], step_size: f32) -> Vec<i32> {
 pub fn dequantize_band(quantized: &[i32], step_size: f32) -> Vec<f32> {
     quantized.iter().map(|&q| q as f32 * step_size).collect()
 }
-
-// ── Full-matrix quantization ─────────────────────────────────────────────────
 
 /// Quantizes all MDCT coefficients using the given band allocation.
 ///

@@ -374,10 +374,7 @@ pub fn apply_median_filter(
 
         // Extract window and compute median
         let mut window: Vec<f64> = signal[start..end].to_vec();
-        window.sort_by(|a, b| {
-            a.partial_cmp(b)
-                .map_or(std::cmp::Ordering::Equal, |order| order)
-        });
+        window.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = window[window.len() / 2];
         filtered.push(median);
     }
@@ -496,10 +493,7 @@ pub fn normalize_onset_strength(
         NormalizationMethod::Median => {
             // Median normalization: subtract median
             let mut sorted = onset_strength.to_vec();
-            sorted.sort_by(|a, b| {
-                a.partial_cmp(b)
-                    .map_or(std::cmp::Ordering::Equal, |order| order)
-            });
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let median = sorted[sorted.len() / 2];
 
             onset_strength
@@ -526,10 +520,7 @@ fn apply_temporal_constraints(
 ) -> Vec<usize> {
     // Sort candidates by strength (descending)
     let mut sorted_candidates = candidates.to_vec();
-    sorted_candidates.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .map_or(std::cmp::Ordering::Equal, |order| order)
-    });
+    sorted_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut selected_peaks = Vec::new();
 
@@ -637,10 +628,7 @@ fn apply_moving_average(
 /// `percentile` must be in `[0.0, 1.0]` (not validated; caller is responsible).
 fn percentile(values: &NonEmptySlice<f64>, percentile: f64) -> f64 {
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| {
-        a.partial_cmp(b)
-            .map_or(std::cmp::Ordering::Equal, |order| order)
-    });
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = sorted.len();
     if n == 1 {
