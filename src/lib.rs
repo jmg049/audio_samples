@@ -1,36 +1,3 @@
-#![cfg_attr(feature = "simd", feature(portable_simd))]
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
-#![deny(missing_docs)]
-// Additional strictness beyond default groups
-#![warn(clippy::unwrap_used)]
-#![warn(clippy::missing_errors_doc)]
-#![warn(clippy::missing_panics_doc)]
-#![warn(clippy::missing_safety_doc)]
-#![warn(clippy::undocumented_unsafe_blocks)]
-#![warn(clippy::exhaustive_enums)]
-#![warn(clippy::exhaustive_structs)]
-#![warn(clippy::panic_in_result_fn)]
-#![warn(clippy::unnecessary_wraps)]
-// Intentional allowances
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::if_same_then_else)]
-#![allow(clippy::unnecessary_cast)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::needless_pass_by_value)]
-#![allow(clippy::tuple_array_conversions)]
-#![allow(clippy::unsafe_derive_deserialize)]
-#![allow(clippy::multiple_unsafe_ops_per_block)]
-#![allow(clippy::doc_markdown)]
-#![allow(unused_unsafe)]
-
 //! # AudioSamples
 //!
 //! A typed audio processing library for Rust that treats audio as a first-class,
@@ -343,7 +310,10 @@ macro_rules! nzu {
         const RATE: usize = $rate;
         const { assert!(RATE > 0, "non zero usize must be greater than 0") };
         // SAFETY: We just asserted RATE > 0 at compile time
-        unsafe { ::core::num::NonZeroUsize::new_unchecked(RATE) }
+        #[allow(unused_unsafe)]
+        unsafe {
+            ::core::num::NonZeroUsize::new_unchecked(RATE)
+        }
     }};
 }
 

@@ -49,8 +49,6 @@ use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, S
 use super::codec::{AudioCodec, PerceptualCodec, PerceptualEncodedAudio, decode as mono_decode};
 use super::{BandLayout, PsychoacousticConfig};
 
-// ── M/S matrix helpers ────────────────────────────────────────────────────────
-
 /// Encodes left and right sample slices into mid and side components.
 ///
 /// `mid[i]  = (left[i] + right[i]) / 2`
@@ -97,8 +95,6 @@ pub fn mid_side_decode(mid: &[f32], side: &[f32]) -> (Vec<f32>, Vec<f32>) {
     (left, right)
 }
 
-// ── StereoPerceptualEncodedAudio ──────────────────────────────────────────────
-
 /// In-memory encoded representation produced by [`StereoPerceptualCodec`].
 ///
 /// Independently encoded mid and side channels, each as a full
@@ -110,8 +106,6 @@ pub struct StereoPerceptualEncodedAudio {
     /// Encoded side (difference) channel.
     pub side: PerceptualEncodedAudio,
 }
-
-// ── StereoPerceptualCodec ─────────────────────────────────────────────────────
 
 /// A stereo perceptual codec using Mid/Side matrix coding.
 ///
@@ -269,8 +263,6 @@ impl StereoPerceptualCodec {
         }
     }
 }
-
-// ── AudioCodec impl ───────────────────────────────────────────────────────────
 
 impl AudioCodec for StereoPerceptualCodec {
     type Encoded = StereoPerceptualEncodedAudio;

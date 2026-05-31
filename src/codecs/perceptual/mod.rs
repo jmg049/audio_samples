@@ -71,8 +71,6 @@ pub use masking::{apply_temporal_masking, detect_transient_windows};
 pub use stereo::{StereoPerceptualCodec, StereoPerceptualEncodedAudio};
 pub use traits::AudioPerceptualAnalysis;
 
-// ── Core types ────────────────────────────────────────────────────────────────
-
 /// A single frequency band defined by its spectral-bin range, centre frequency,
 /// and normalised perceptual position.
 ///
@@ -108,7 +106,6 @@ impl Band {
     /// # Errors
     /// Returns [`AudioSampleError::Parameter`] if `end_bin <= start_bin`.
     #[inline]
-    #[must_use]
     pub fn try_new(
         start_bin: usize,
         end_bin: usize,
@@ -373,8 +370,6 @@ impl PsychoacousticConfig {
         self.band_count() == band_layout.len()
     }
 
-    // ── Preset constructors ───────────────────────────────────────────────────
-
     /// MPEG-1 psychoacoustic model 1 parameters.
     ///
     /// Uses the standard MPEG-1 (ISO 11172-3 Annex D) values: −60 dB noise floor,
@@ -517,8 +512,6 @@ impl PerceptualAnalysisResult {
     }
 }
 
-// ── Analysis entry point ──────────────────────────────────────────────────────
-
 /// Runs the psychoacoustic analysis pipeline on `signal`.
 ///
 /// This is the free-function form of
@@ -617,7 +610,7 @@ where
     } else {
         // Auto: largest even value in [4, min(2048, n_samples)].
         let raw = 2048_usize.min(n_samples);
-        if raw % 2 == 0 { raw } else { raw - 1 }
+        if raw.is_multiple_of(2) { raw } else { raw - 1 }
     };
 
     if window_size_val < 4 {
@@ -687,8 +680,6 @@ where
         mdct_params,
     ))
 }
-
-// ── Reconstruction ────────────────────────────────────────────────────────────
 
 /// Reconstructs an audio signal from (possibly quantized) MDCT coefficients.
 ///

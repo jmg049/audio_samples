@@ -927,7 +927,7 @@ where
                 // 2. Both slices have the same length (we're reinterpreting in place)
                 // 3. The lifetime 'a is preserved
                 let i16_channels: &[AudioSamples<i16>] = unsafe { std::mem::transmute(channels) };
-                let result = interleave_i16_simd_impl(i16_channels, samples_per_channel)?;
+                let result = interleave_i16_simd_impl(i16_channels, samples_per_channel.get())?;
                 // SAFETY: Same reasoning - T is i16, so converting AudioSamples<i16> to AudioSamples<T>
                 // is a no-op at the memory level
                 return Ok(unsafe {
@@ -937,7 +937,7 @@ where
             Some(SampleType::I32) => {
                 // SAFETY: Same as I16 case - TypeId confirms T is i32
                 let i32_channels: &[AudioSamples<i32>] = unsafe { std::mem::transmute(channels) };
-                let result = interleave_i32_simd_impl(i32_channels, samples_per_channel)?;
+                let result = interleave_i32_simd_impl(i32_channels, samples_per_channel.get())?;
                 return Ok(unsafe {
                     std::mem::transmute::<AudioSamples<'_, i32>, AudioSamples<'_, T>>(result)
                 });
@@ -945,7 +945,7 @@ where
             Some(SampleType::F32) => {
                 // SAFETY: Same as I16 case - TypeId confirms T is f32
                 let f32_channels: &[AudioSamples<f32>] = unsafe { std::mem::transmute(channels) };
-                let result = interleave_f32_simd_impl(f32_channels, samples_per_channel)?;
+                let result = interleave_f32_simd_impl(f32_channels, samples_per_channel.get())?;
                 return Ok(unsafe {
                     std::mem::transmute::<AudioSamples<'_, f32>, AudioSamples<'_, T>>(result)
                 });
@@ -953,7 +953,7 @@ where
             Some(SampleType::F64) => {
                 // SAFETY: Same as I16 case - TypeId confirms T is f64
                 let f64_channels: &[AudioSamples<f64>] = unsafe { std::mem::transmute(channels) };
-                let result = interleave_f64_simd_impl(f64_channels, samples_per_channel)?;
+                let result = interleave_f64_simd_impl(f64_channels, samples_per_channel.get())?;
                 return Ok(unsafe {
                     std::mem::transmute::<AudioSamples<'_, f64>, AudioSamples<'_, T>>(result)
                 });
@@ -1044,10 +1044,7 @@ fn interleave_i16_simd_impl<'a>(
         ))
     })?;
 
-    Ok(AudioSamples::new_multi_channel(
-        array,
-        channels[0].sample_rate(),
-    ))
+    AudioSamples::new_multi_channel(array, channels[0].sample_rate())
 }
 
 #[cfg(feature = "simd")]
@@ -1128,10 +1125,7 @@ fn interleave_i32_simd_impl<'a>(
         ))
     })?;
 
-    Ok(AudioSamples::new_multi_channel(
-        array,
-        channels[0].sample_rate(),
-    ))
+    AudioSamples::new_multi_channel(array, channels[0].sample_rate())
 }
 
 #[cfg(feature = "simd")]
@@ -1212,10 +1206,7 @@ fn interleave_f32_simd_impl<'a>(
         ))
     })?;
 
-    Ok(AudioSamples::new_multi_channel(
-        array,
-        channels[0].sample_rate(),
-    ))
+    AudioSamples::new_multi_channel(array, channels[0].sample_rate())
 }
 
 #[cfg(feature = "simd")]
@@ -1296,10 +1287,7 @@ fn interleave_f64_simd_impl<'a>(
         ))
     })?;
 
-    Ok(AudioSamples::new_multi_channel(
-        array,
-        channels[0].sample_rate(),
-    ))
+    AudioSamples::new_multi_channel(array, channels[0].sample_rate())
 }
 
 /// Rearrange an interleaved sample buffer into planar layout in place.

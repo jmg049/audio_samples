@@ -310,7 +310,7 @@ where
     let magnitudes: Vec<f64> = channel_fft
         .iter()
         .map(|c| {
-            let mag = c.norm() as f64;
+            let mag = c.norm();
             if params.db_scale {
                 // Convert to dB scale, avoiding log(0)
                 if mag > 1e-10 {

@@ -1140,11 +1140,11 @@ where
 
     let mut plotly_layout = plotly_layout;
 
-    if audio.is_multi_channel() {
-        if let ChannelManagementStrategy::Separate(layout) = strategy {
-            plotly_layout =
-                configure_separate_axes(plotly_layout, rows, cols, layout, &params.plot_params);
-        }
+    if audio.is_multi_channel()
+        && let ChannelManagementStrategy::Separate(layout) = strategy
+    {
+        plotly_layout =
+            configure_separate_axes(plotly_layout, rows, cols, layout, &params.plot_params);
     }
 
     plot.set_layout(plotly_layout);
@@ -1208,19 +1208,20 @@ fn configure_vertical_axes(
                     .matches(&base_axis_name)
                     .show_tick_labels(false)
                     .tick_length(0);
-            } else if col == 0 {
-                if let Some(label) = plot_params.x_label.as_ref() {
-                    x_axis = x_axis.title(label.clone());
-                }
+            } else if col == 0
+                && let Some(label) = plot_params.x_label.as_ref()
+            {
+                x_axis = x_axis.title(label.clone());
             }
 
             layout = assign_x_axis(layout, axis_index, x_axis);
 
             let mut y_axis = Axis::new().anchor(&x_axis_id);
-            if col == 0 && row == 0 {
-                if let Some(label) = plot_params.y_label.as_ref() {
-                    y_axis = y_axis.title(label.clone());
-                }
+            if col == 0
+                && row == 0
+                && let Some(label) = plot_params.y_label.as_ref()
+            {
+                y_axis = y_axis.title(label.clone());
             }
 
             layout = assign_y_axis(layout, axis_index, y_axis);
@@ -1249,10 +1250,10 @@ fn configure_horizontal_axes(
             let y_axis_id = axis_id('y', axis_index);
 
             let mut x_axis = Axis::new().anchor(&y_axis_id).side(AxisSide::Bottom);
-            if row == 0 {
-                if let Some(label) = plot_params.x_label.as_ref() {
-                    x_axis = x_axis.title(label.clone());
-                }
+            if row == 0
+                && let Some(label) = plot_params.x_label.as_ref()
+            {
+                x_axis = x_axis.title(label.clone());
             }
 
             layout = assign_x_axis(layout, axis_index, x_axis);
@@ -1263,10 +1264,10 @@ fn configure_horizontal_axes(
                     .matches(&base_axis_name)
                     .show_tick_labels(false)
                     .tick_length(0);
-            } else if row == 0 {
-                if let Some(label) = plot_params.y_label.as_ref() {
-                    y_axis = y_axis.title(label.clone());
-                }
+            } else if row == 0
+                && let Some(label) = plot_params.y_label.as_ref()
+            {
+                y_axis = y_axis.title(label.clone());
             }
 
             layout = assign_y_axis(layout, axis_index, y_axis);

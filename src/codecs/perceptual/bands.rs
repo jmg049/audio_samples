@@ -41,8 +41,6 @@ use non_empty_slice::NonEmptySlice;
 
 use super::{Band, BandLayout};
 
-// ── Bark-scale helpers ────────────────────────────────────────────────────────
-
 /// Converts a frequency in Hz to its Bark-scale value.
 ///
 /// Uses the Traunmüller (1990) formula:
@@ -77,8 +75,6 @@ pub fn bark_to_hz(bark: f32) -> f32 {
     let bark = bark.max(0.0);
     (1960.0_f32 * (bark + 0.53_f32) / (26.28_f32 - bark)).max(0.0)
 }
-
-// ── Mel-scale helpers ─────────────────────────────────────────────────────────
 
 /// Converts a frequency in Hz to its Mel-scale value.
 ///
@@ -116,8 +112,6 @@ pub fn mel_to_hz(mel: f32) -> f32 {
     (700.0_f32 * (10.0_f32.powf(mel / 2595.0_f32) - 1.0_f32)).max(0.0)
 }
 
-// ── Shared bin-mapping helper ─────────────────────────────────────────────────
-
 /// Maps a frequency in Hz to the nearest integer bin index.
 ///
 /// Assumes a linear spacing from 0 Hz (bin 0) to Nyquist (bin `n_bins − 1`).
@@ -128,8 +122,6 @@ fn hz_to_bin(hz: f32, sample_rate_hz: f32, n_bins: usize) -> usize {
     let bin = (hz / nyquist * (n_bins - 1) as f32).round() as isize;
     bin.clamp(0, (n_bins - 1) as isize) as usize
 }
-
-// ── ERB-scale helpers ─────────────────────────────────────────────────────────
 
 /// Converts a frequency in Hz to its ERB-bandwidth value (Glasberg & Moore, 1990).
 ///
@@ -166,8 +158,6 @@ pub fn hz_to_erb(hz: f32) -> f32 {
 pub fn erb_to_hz(erb: f32) -> f32 {
     (1000.0_f32 * (erb / 24.7_f32 - 1.0_f32) / 4.37_f32).max(0.0)
 }
-
-// ── Derived layout helpers ────────────────────────────────────────────────────
 
 /// Scales a [`BandLayout`] from one spectral-bin count to another.
 ///
@@ -208,8 +198,6 @@ pub fn scale_band_layout(
     let ne = unsafe { NonEmptySlice::new_unchecked(&bands) };
     BandLayout::new(ne)
 }
-
-// ── BandLayout preset constructors ───────────────────────────────────────────
 
 impl BandLayout {
     /// Creates a Bark-scale band layout.
