@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.11"
+version = "1.0.12"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -37,8 +37,8 @@ i24 = { version = "2.3.3", features = [
 
 serde = { version = "1.0", features = ["derive"], optional = true }
 rand = { version = "0.10.1", optional = true }
-wide = { version = "1.4.0", optional = true }
-spectrograms = { version = "1.4.1", optional = true }
+wide = { version = "1.5.0", optional = true }
+spectrograms = { version = "1.4.2", optional = true }
 
 serde_json = { version = "1.0.150", optional = true }
 
@@ -98,6 +98,7 @@ resampling = ["dep:rubato", "dep:rayon", "audioadapter", "audioadapter-buffers"]
 vad = [] # Voice activity detection operations
 psychoacoustic = ["transforms"] # Psychoacoustic analysis: band layouts, masking thresholds, SMR
 parallel = ["dep:rayon"] # Parallel codec encoding/decoding via rayon (works with psychoacoustic)
+opus-codec = ["psychoacoustic", "statistics"] # Opus-inspired codec: SILK (speech) and CELT (music) modes
 plotting = ["dep:plotly", "dep:base64", "dep:serde_json", "channels", "transforms", "editing"]
 envelopes = [
     "dynamic-range",
@@ -130,6 +131,7 @@ full_no_plotting = [
     "random-generation",
     "psychoacoustic",
     "parallel",
+    "opus-codec",
 ]
 
 educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing", "fancy"]
@@ -151,6 +153,10 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11.0"
 
 [[example]]
+name = "errors"
+required-features = ["fancy"]
+
+[[example]]
 name = "error_diagnostics"
 required-features = ["fancy"]
 
@@ -165,6 +171,10 @@ required-features = ["educational", "processing"]
 [[test]]
 name = "codec_quality"
 required-features = ["psychoacoustic", "random-generation"]
+
+[[test]]
+name = "opus_codec_quality"
+required-features = ["opus-codec", "random-generation"]
 
 [[test]]
 name = "processing_pipeline"

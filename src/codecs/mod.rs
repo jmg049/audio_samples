@@ -8,6 +8,9 @@
 //! together with the [`PerceptualCodec`] and [`StereoPerceptualCodec`] implementations
 //! that use psychoacoustic masking to drive perceptual quantization.
 //!
+//! An Opus-inspired codec ([`opus::OpusCodec`]) is also available under the
+//! `opus-codec` feature. It supports SILK (speech) and CELT (music) modes.
+//!
 //! ## Why
 //!
 //! `audio_samples` exposes the full signal-processing toolkit that perceptual codecs
@@ -34,6 +37,12 @@
 //! ```
 
 pub mod perceptual;
+
+/// Opus codec skeleton: SILK (speech) and CELT (music) modes.
+///
+/// Requires the `opus-codec` feature flag.
+#[cfg(feature = "opus-codec")]
+pub mod opus;
 
 pub use perceptual::codec::{AudioCodec, decode, encode};
 pub use perceptual::stereo::{StereoPerceptualCodec, StereoPerceptualEncodedAudio};

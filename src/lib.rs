@@ -385,6 +385,9 @@ pub use crate::utils::generation::{
 #[cfg(feature = "statistics")]
 pub use crate::operations::AudioStatistics;
 
+#[cfg(feature = "transforms")]
+pub use crate::operations::statistics::fft_alignment_lag;
+
 #[cfg(feature = "processing")]
 pub use crate::operations::AudioProcessing;
 
@@ -455,6 +458,17 @@ pub use crate::codecs::perceptual::quantization::{
 
 #[cfg(feature = "psychoacoustic")]
 pub use crate::codecs::perceptual::codec::{decode as codec_decode, encode as codec_encode};
+
+#[cfg(feature = "opus-codec")]
+pub use crate::codecs::opus::{
+    CeltEncodedFrame, HYBRID_CROSSOVER_HZ, HybridEncodedFrame, LpcCoefficients, OpusBandwidth,
+    OpusCodec, OpusConfig, OpusEncodedAudio, OpusEncodedFrame, OpusFrameData, OpusMode,
+    OpusStereoCodec, OpusStereoEncodedAudio, SILK_LPC_ORDER, SilkEncodedFrame, SilkState,
+    celt_decode_frame, celt_encode_frame, detect_mode as detect_opus_mode, estimate_pitch,
+    hybrid_decode_frame, hybrid_encode_frame, levinson_durbin, lpc_analysis, lpc_residual,
+    lpc_residual_stateful, lpc_synthesis, lpc_synthesis_stateful, ltp_residual, ltp_synthesis,
+    silk_decode_frame, silk_decode_frame_stateful, silk_encode_frame, silk_encode_frame_stateful,
+};
 
 #[cfg(feature = "random-generation")]
 pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
