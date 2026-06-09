@@ -1082,6 +1082,82 @@ where
     }
 }
 
+/// Returns the signed lag (in samples) that maximises the FFT cross-correlation
+/// between `reference` and `query`, searching ±`max_lag` samples.
+///
+/// Positive lag → `query` is delayed relative to `reference`; negative → `query` leads.
+/// Uses only the first channel of each signal.  Returns `None` if the FFT fails
+/// or either signal is empty.
+#[cfg(feature = "transforms")]
+pub fn fft_alignment_lag<T: StandardSample>(
+    reference: &AudioSamples<'_, T>,
+    query: &AudioSamples<'_, T>,
+    max_lag: usize,
+) -> Option<i64> {
+    let extract = |audio: &AudioSamples<'_, T>| -> Vec<f64> {
+        match &audio.data {
+            AudioData::Mono(arr) => arr.iter().map(|&x| x.cast_into()).collect(),
+            AudioData::Multi(arr) => arr.row(0).iter().map(|&x| x.cast_into()).collect(),
+        }
+    };
+
+    let ref_sig = extract(reference);
+    let deg_sig = extract(query);
+    let n1 = ref_sig.len();
+    let n2 = deg_sig.len();
+    if n1 == 0 || n2 == 0 {
+        return None;
+    }
+
+    let fft_size = (n1 + n2 - 1).next_power_of_two();
+    let fft_nz = unsafe { NonZeroUsize::new_unchecked(fft_size) };
+
+    let mut ref_buf = ref_sig;
+    ref_buf.resize(fft_size, 0.0);
+    let mut deg_buf = deg_sig;
+    deg_buf.resize(fft_size, 0.0);
+
+    let mut planner = FftPlanner::new();
+    let ref_spec = planner
+        .fft(unsafe { NonEmptySlice::new_unchecked(&ref_buf) }, fft_nz)
+        .ok()?;
+    let deg_spec = planner
+        .fft(unsafe { NonEmptySlice::new_unchecked(&deg_buf) }, fft_nz)
+        .ok()?;
+
+    let cross: Vec<Complex<f64>> = ref_spec
+        .iter()
+        .zip(deg_spec.iter())
+        .map(|(r, d)| r * d.conj())
+        .collect();
+
+    let xcorr = planner
+        .irfft(unsafe { NonEmptySlice::new_unchecked(&cross) }, fft_nz)
+        .ok()?;
+
+    let scale = 1.0 / fft_size as f64;
+    let search = max_lag.min(n1.saturating_sub(1));
+    let mut best_val = f64::NEG_INFINITY;
+    let mut best_lag = 0i64;
+
+    for k in 0..=search {
+        let v = xcorr[k] * scale;
+        if v > best_val {
+            best_val = v;
+            best_lag = k as i64;
+        }
+    }
+    for k in 1..=search {
+        let v = xcorr[fft_size - k] * scale;
+        if v > best_val {
+            best_val = v;
+            best_lag = -(k as i64);
+        }
+    }
+
+    Some(best_lag)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "transforms")]
