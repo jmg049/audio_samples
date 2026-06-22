@@ -1,6 +1,6 @@
 [package]
 name = "audio_samples"
-version = "1.0.12"
+version = "1.0.13"
 edition = "2024"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
@@ -28,7 +28,7 @@ num-traits = "0.2"
 thiserror = "2.0"
 miette = "7"
 num-complex = "0.4"
-i24 = { version = "2.3.3", features = [
+i24 = { version = "2.3.4", features = [
     "alloc",
     "num-cast",
     "ndarray",
