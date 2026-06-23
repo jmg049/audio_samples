@@ -76,6 +76,7 @@ use spectrograms::{
     Gammatone, GammatoneParams, GammatoneSpectrogram, LinearHz, LinearSpectrogram, LogHz,
     LogHzParams, LogHzSpectrogram, LogParams, MelParams, MelSpectrogram, Mfcc, MfccParams,
     Spectrogram, SpectrogramParams, StftParams, StftPlan, StftResult, WindowType,
+    fft_convolve, fft_deconvolve,
 };
 
 impl<T> AudioTransforms for AudioSamples<'_, T>
@@ -1220,6 +1221,40 @@ where
         self.cqt_spectrogram::<spectrograms::Decibels>(params, cqt, Some(db))
     }
 
+    /// Linear convolution of this signal with `other` via FFT.
+    ///
+    /// See [`AudioTransforms::convolve`](crate::operations::AudioTransforms::convolve).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if either signal is multi-channel.
+    /// - Errors propagated from the underlying FFT.
+    #[inline]
+    fn convolve(&self, other: &Self) -> AudioSampleResult<AudioSamples<'static, Self::Sample>> {
+        let result_f64 = convolve_or_deconvolve_mono(self, other, |a, b| {
+            Ok(fft_convolve(a, b)?)
+        })?;
+        from_f64_mono::<T>(result_f64, self.sample_rate())
+    }
+
+    /// Regularised spectral-division deconvolution.
+    ///
+    /// See [`AudioTransforms::deconvolve`](crate::operations::AudioTransforms::deconvolve).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if either signal is multi-channel.
+    /// - Errors propagated from the underlying FFT.
+    #[inline]
+    fn deconvolve(
+        &self,
+        denominator: &Self,
+        regularization: f64,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>> {
+        let result_f64 = convolve_or_deconvolve_mono(self, denominator, |a, b| {
+            Ok(fft_deconvolve(a, b, regularization)?)
+        })?;
+        from_f64_mono::<T>(result_f64, self.sample_rate())
+    }
+
     /// Decomposes a complex spectrogram into magnitude and phase.
     ///
     /// Given a complex matrix `D`, returns `(S, P)` such that
@@ -1283,5 +1318,108 @@ where
         mag.mapv_inplace(|x| x.powf(power));
 
         (mag, phase)
+    }
+}
+
+/// Extracts the single mono channel of `audio` as an owned `Vec<f64>`, erroring
+/// on multi-channel input.
+fn mono_f64<T: StandardSample>(audio: &AudioSamples<'_, T>) -> AudioSampleResult<Vec<f64>> {
+    if audio.num_channels().get() != 1 {
+        return Err(AudioSampleError::Layout(
+            LayoutError::channel_count_unsupported(
+                "convolve/deconvolve (mono only)",
+                ChannelRequirement::Mono,
+                audio.num_channels().get(),
+            ),
+        ));
+    }
+    let working = audio.to_format::<f64>();
+    let ch = working
+        .as_slice()
+        .expect("validated single channel");
+    Ok(ch.to_vec())
+}
+
+/// Runs an FFT convolution-style op on the mono channels of `a` and `b`.
+fn convolve_or_deconvolve_mono<T, F>(
+    a: &AudioSamples<'_, T>,
+    b: &AudioSamples<'_, T>,
+    op: F,
+) -> AudioSampleResult<Vec<f64>>
+where
+    T: StandardSample,
+    F: FnOnce(
+        &non_empty_slice::NonEmptySlice<f64>,
+        &non_empty_slice::NonEmptySlice<f64>,
+    ) -> AudioSampleResult<non_empty_slice::NonEmptyVec<f64>>,
+{
+    let a_vec = mono_f64(a)?;
+    let b_vec = mono_f64(b)?;
+    // AudioSamples::new_mono rejects empty data, so this error path is unreachable for well-formed inputs.
+    let a_ne = non_empty_slice::NonEmptySlice::new(a_vec.as_slice())
+        .ok_or_else(|| AudioSampleError::Parameter(ParameterError::invalid_value("self", "empty signal")))?;
+    let b_ne = non_empty_slice::NonEmptySlice::new(b_vec.as_slice())
+        .ok_or_else(|| AudioSampleError::Parameter(ParameterError::invalid_value("other", "empty signal")))?;
+    Ok(op(a_ne, b_ne)?.into_vec())
+}
+
+/// Wraps a `Vec<f64>` back into a mono `AudioSamples<T>` at `sample_rate`.
+fn from_f64_mono<T: StandardSample>(
+    data: Vec<f64>,
+    sample_rate: std::num::NonZeroU32,
+) -> AudioSampleResult<AudioSamples<'static, T>> {
+    use non_empty_slice::NonEmptyVec;
+    let ne_vec = NonEmptyVec::new(data)
+        .map_err(|_| AudioSampleError::Parameter(ParameterError::invalid_value("data", "empty result")))?;
+    Ok(AudioSamples::<T>::from_mono_vec::<f64>(ne_vec, sample_rate))
+}
+
+#[cfg(test)]
+mod convolution_tests {
+    use crate::{AudioSamples, AudioSampleError, AudioTransforms, LayoutError, sample_rate};
+    use ndarray::array;
+
+    #[test]
+    fn convolve_with_unit_impulse_is_identity() {
+        let signal = AudioSamples::new_mono(array![1.0_f64, 2.0, 3.0], sample_rate!(48000)).unwrap();
+        let impulse = AudioSamples::new_mono(array![1.0_f64], sample_rate!(48000)).unwrap();
+        let out = signal.convolve(&impulse).unwrap();
+        assert_eq!(out.sample_rate().get(), 48000);
+        let ch = out.as_slice().unwrap();
+        assert!((ch[0] - 1.0).abs() < 1e-9);
+        assert!((ch[1] - 2.0).abs() < 1e-9);
+        assert!((ch[2] - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deconvolve_inverts_convolve() {
+        let excitation = AudioSamples::new_mono(
+            array![1.0_f64, 0.7, -0.3, 0.2, 0.9, -0.5, 0.1, 0.4],
+            sample_rate!(48000),
+        )
+        .unwrap();
+        let system = AudioSamples::new_mono(array![0.0_f64, 0.0, 1.0, 0.5], sample_rate!(48000)).unwrap();
+        let recorded = excitation.convolve(&system).unwrap();
+        let recovered = recorded.deconvolve(&excitation, 0.0).unwrap();
+        let r = recovered.as_slice().unwrap();
+        for (i, want) in [0.0, 0.0, 1.0, 0.5].iter().enumerate() {
+            assert!((r[i] - want).abs() < 1e-6, "tap {i}: got {}, want {want}", r[i]);
+        }
+    }
+
+    #[test]
+    fn multichannel_input_is_rejected() {
+        // 2 channels, 4 samples each
+        let stereo = AudioSamples::new_multi_channel(
+            array![[1.0_f64, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+            sample_rate!(48000),
+        )
+        .unwrap();
+        let mono = AudioSamples::new_mono(array![1.0_f64], sample_rate!(48000)).unwrap();
+        let err = stereo.convolve(&mono).unwrap_err();
+        assert!(
+            matches!(err, AudioSampleError::Layout(LayoutError::ChannelCountUnsupported { .. })),
+            "expected Layout(ChannelCountUnsupported), got: {err:?}"
+        );
     }
 }

@@ -1174,6 +1174,33 @@ where
     /// ```
     fn fft(&self, n_fft: NonZeroUsize) -> AudioSampleResult<Array2<Complex<f64>>>;
 
+    /// Linear convolution of this signal with `other` via FFT.
+    ///
+    /// Both signals are converted to `f64` internally. The result is mono and
+    /// carries this signal's sample rate, with length
+    /// `self.len() + other.len() - 1`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if either signal is multi-channel.
+    /// - Errors propagated from the underlying FFT.
+    fn convolve(&self, other: &Self) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Regularised spectral-division deconvolution: recover the system response
+    /// `h` from `self = denominator ⊛ h`.
+    ///
+    /// `regularization` (≥ 0) is scaled by the denominator's peak power to
+    /// stabilise division near spectral nulls. Result is mono at this signal's
+    /// sample rate.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if either signal is multi-channel.
+    /// - Errors propagated from the underlying FFT.
+    fn deconvolve(
+        &self,
+        denominator: &Self,
+        regularization: f64,
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
     /// Computes the magnitude spectrum of the audio signal.
     ///
     /// Equivalent to [`fft`] followed by taking the absolute value of each complex bin.

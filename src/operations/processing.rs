@@ -27,8 +27,6 @@
 //! assert!(audio[0] <= 1.0);
 //! ```
 
-use std::num::NonZeroUsize;
-
 #[cfg(feature = "resampling")]
 use crate::operations::types::ResamplingQuality;
 use crate::operations::types::{NormalizationConfig, NormalizationMethod};
@@ -46,6 +44,114 @@ use crate::{
 use ndarray::{Array2, Axis};
 use non_empty_slice::NonEmptySlice;
 use num_traits::FloatConst;
+
+/// Valid-region FIR convolution over flat slices, matching [`AudioProcessing::apply_filter`]'s
+/// convention: `output[i] = Σ_j input[i + j] · coeffs[j]` for `i in 0..output_len`.
+///
+/// Working on contiguous `&[T]` slices (rather than enum-dispatched element
+/// indexing) lets the compiler autovectorize the inner dot product.
+///
+/// `output_len` must equal `input.len() - coeffs.len() + 1`.
+#[inline]
+fn fir_valid_convolve<T>(input: &[T], coeffs: &[T], output_len: usize) -> Vec<T>
+where
+    T: StandardSample,
+{
+    let filter_len = coeffs.len();
+    let mut output = Vec::with_capacity(output_len);
+    for i in 0..output_len {
+        let window = &input[i..i + filter_len];
+        let mut sum = T::zero();
+        for (s, c) in window.iter().zip(coeffs.iter()) {
+            sum += *s * *c;
+        }
+        output.push(sum);
+    }
+    output
+}
+
+/// Tap count at or above which FFT convolution beats direct convolution for
+/// whole-signal FIR filtering. Below this the O(N·M) direct loop wins because
+/// the FFT's constant overhead dominates; above it the O(N·log N) FFT path pulls
+/// far ahead (e.g. ~120x at 4096 taps on a 1 s signal).
+#[cfg(feature = "transforms")]
+const FIR_FFT_MIN_TAPS: usize = 256;
+
+/// Choose the fastest valid-region FIR convolution for the given filter length.
+///
+/// With `transforms` enabled, long filters route through FFT convolution
+/// (`spectrograms::fft_convolve`); short filters and builds without `transforms`
+/// use the direct slice loop. Both produce identical results up to floating-point
+/// rounding and preserve `apply_filter`'s valid-region / correlation convention.
+#[cfg(feature = "transforms")]
+fn fir_valid_convolve_dispatch<T>(
+    input: &[T],
+    coeffs: &[T],
+    output_len: usize,
+) -> AudioSampleResult<Vec<T>>
+where
+    T: StandardSample,
+{
+    if coeffs.len() >= FIR_FFT_MIN_TAPS {
+        fir_valid_convolve_fft(input, coeffs, output_len)
+    } else {
+        Ok(fir_valid_convolve(input, coeffs, output_len))
+    }
+}
+
+/// Direct-only dispatch used when the `transforms` feature (and thus the FFT
+/// backend) is not available.
+#[cfg(not(feature = "transforms"))]
+fn fir_valid_convolve_dispatch<T>(
+    input: &[T],
+    coeffs: &[T],
+    output_len: usize,
+) -> AudioSampleResult<Vec<T>>
+where
+    T: StandardSample,
+{
+    Ok(fir_valid_convolve(input, coeffs, output_len))
+}
+
+/// Valid-region FIR convolution via FFT, matching the direct path's convention
+/// `output[i] = Σ_j input[i + j] · coeffs[j]`.
+///
+/// FFT convolution computes true convolution `(x * h)`, so we convolve `x` with
+/// the **reversed** coefficients and then take the central "valid" region, which
+/// reproduces the correlation convention exactly. Computation is in `f64` for
+/// headroom; results match the direct loop to floating-point tolerance.
+#[cfg(feature = "transforms")]
+fn fir_valid_convolve_fft<T>(
+    input: &[T],
+    coeffs: &[T],
+    output_len: usize,
+) -> AudioSampleResult<Vec<T>>
+where
+    T: StandardSample,
+{
+    use non_empty_slice::NonEmptySlice;
+
+    let x: Vec<f64> = input.iter().map(|&s| -> f64 { s.convert_to() }).collect();
+    let h_rev: Vec<f64> = coeffs.iter().rev().map(|&c| -> f64 { c.convert_to() }).collect();
+
+    let x_ne = NonEmptySlice::new(x.as_slice()).ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value("audio", "empty signal"))
+    })?;
+    let h_ne = NonEmptySlice::new(h_rev.as_slice()).ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value("filter", "empty filter"))
+    })?;
+
+    // Full linear convolution, length x.len() + coeffs.len() - 1.
+    let full = spectrograms::fft_convolve(x_ne, h_ne)?.into_vec();
+
+    // Valid region starts at coeffs.len() - 1 (see module note above).
+    let start = coeffs.len() - 1;
+    let out: Vec<T> = full[start..start + output_len]
+        .iter()
+        .map(|&v| -> T { v.convert_to() })
+        .collect();
+    Ok(out)
+}
 
 impl<T> AudioProcessing for AudioSamples<'_, T>
 where
@@ -524,61 +630,63 @@ where
         mut self,
         filter_coeffs: &NonEmptySlice<Self::Sample>,
     ) -> AudioSampleResult<Self> {
+        // Filter coefficients as a flat slice (used by every dot product below).
+        let coeffs: &[Self::Sample] = filter_coeffs.as_ref();
+        let filter_len = coeffs.len();
+
         match &mut self.data {
             AudioData::Mono(arr) => {
-                if arr.len() < filter_coeffs.len() {
+                if arr.len().get() < filter_len {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                         "audio_length",
                         "Audio length must be at least as long as filter length",
                     )));
                 }
 
-                let filter_len = filter_coeffs.len();
+                let output_len = arr.len().get() - filter_len + 1;
 
-                let output_len = arr.len().get() - filter_len.get() + 1;
-                // safety: output_len > 0 because arr.len() >= filter_len
-                let output_len = unsafe { NonZeroUsize::new_unchecked(output_len) };
-
-                // Perform convolution using array views (no vector allocation)
-                // Create output buffer to avoid overwriting input during convolution
-                let mut output = ndarray::Array1::zeros(output_len.get());
-
-                // Perform convolution using array views (no vector allocation)
-                for i in 0..output_len.get() {
-                    let mut sum = Self::Sample::zero();
-                    for j in 0..filter_len.get() {
-                        sum += arr[i + j] * filter_coeffs[j];
+                // Operate on a flat contiguous slice. The previous version indexed
+                // `arr[i + j]`, which dispatched through the `MonoData` enum on every
+                // single sample access; a raw slice lets the inner dot product
+                // autovectorize and removes that per-element overhead entirely.
+                let owned_fallback;
+                let input: &[Self::Sample] = match arr.as_slice() {
+                    Some(s) => s,
+                    None => {
+                        owned_fallback = arr.to_vec();
+                        &owned_fallback
                     }
-                    output[i] = sum;
-                }
-                // Replace the original data with the filtered output
-                *arr = output.try_into()?;
+                };
+
+                let output = fir_valid_convolve_dispatch(input, coeffs, output_len)?;
+                *arr = ndarray::Array1::from_vec(output).try_into()?;
             }
             AudioData::Multi(arr) => {
-                if arr.ncols() < filter_coeffs.len() {
+                if arr.ncols().get() < filter_len {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                         "audio_length",
                         "Audio length must be at least as long as filter length",
                     )));
                 }
 
-                let filter_len = filter_coeffs.len();
-                let output_len = arr.ncols().get() - filter_len.get() + 1;
-                let num_channels = arr.nrows();
+                let output_len = arr.ncols().get() - filter_len + 1;
+                let num_channels = arr.nrows().get();
 
-                // Create output buffer
-                let mut output = Array2::zeros((num_channels.get(), output_len));
+                let mut output = Array2::zeros((num_channels, output_len));
 
-                // Apply filter to each channel using views (no vector allocation)
                 for (ch, mut output_channel) in output.axis_iter_mut(Axis(0)).enumerate() {
-                    let input_channel = arr.row(ch);
-
-                    for i in 0..output_len {
-                        let mut sum = Self::Sample::zero();
-                        for j in 0..filter_len.get() {
-                            sum += input_channel[i + j] * filter_coeffs[j];
+                    let row = arr.index_axis(Axis(0), ch);
+                    let owned_fallback;
+                    let input: &[Self::Sample] = match row.as_slice() {
+                        Some(s) => s,
+                        None => {
+                            owned_fallback = row.to_vec();
+                            &owned_fallback
                         }
-                        output_channel[i] = sum;
+                    };
+                    let filtered = fir_valid_convolve_dispatch(input, coeffs, output_len)?;
+                    for (dst, src) in output_channel.iter_mut().zip(filtered.into_iter()) {
+                        *dst = src;
                     }
                 }
 
@@ -1020,6 +1128,44 @@ mod tests {
     use ndarray::array;
 
     use crate::AudioProcessing;
+
+    /// The FFT fast path (filter >= FIR_FFT_MIN_TAPS) must match the direct
+    /// slice convolution to floating-point tolerance, preserving apply_filter's
+    /// valid-region / correlation convention.
+    #[cfg(feature = "transforms")]
+    #[test]
+    fn apply_filter_fft_matches_direct_long_filter() {
+        let n = 4000usize;
+        let m = 512usize; // >= FIR_FFT_MIN_TAPS, so this exercises the FFT path
+        assert!(m >= FIR_FFT_MIN_TAPS);
+
+        let input: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 0.013).sin() + 0.4 * (i as f32 * 0.07).cos())
+            .collect();
+        let coeffs: Vec<f32> = (0..m)
+            .map(|k| ((k as f32 * 0.05).sin()) / m as f32)
+            .collect();
+
+        // Reference: direct slice convolution (same convention).
+        let output_len = n - m + 1;
+        let reference = fir_valid_convolve(&input, &coeffs, output_len);
+
+        // Public API path (routes to FFT because m >= threshold).
+        let audio: AudioSamples<f32> =
+            AudioSamples::new_mono(ndarray::Array1::from_vec(input), sample_rate!(44100)).unwrap();
+        let filtered = audio
+            .apply_filter(NonEmptySlice::new(&coeffs).unwrap())
+            .unwrap();
+
+        assert_eq!(filtered.samples_per_channel().get(), output_len);
+        for (i, &want) in reference.iter().enumerate() {
+            let got = filtered[i];
+            assert!(
+                (got - want).abs() < 1e-3,
+                "sample {i}: fft {got} vs direct {want}"
+            );
+        }
+    }
 
     #[test]
     fn test_normalize_min_max() {

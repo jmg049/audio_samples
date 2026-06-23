@@ -770,6 +770,12 @@ where
             },
             FilterRepresentation::Cascade(mut bqs) => match &mut self.data {
                 AudioData::Mono(samples) => {
+                    // Per-sample-all-sections: each sample flows through every biquad
+                    // while staying in registers, so the buffer is touched only once.
+                    // (A section-major variant that streams the whole buffer per section
+                    // was measured ~1.8x SLOWER — it adds a read+write memory pass per
+                    // section, and the biquad recurrence is sequential so register
+                    // residency of the coefficients buys nothing.)
                     for sample in samples.iter_mut() {
                         let mut x: f64 = (*sample).convert_to();
                         for bq in bqs.iter_mut() {

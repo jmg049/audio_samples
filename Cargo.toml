@@ -191,3 +191,8 @@ required-features = ["channels", "iir-filtering", "dynamic-range", "parametric-e
 [[test]]
 name = "analysis_pipeline"
 required-features = ["pitch-analysis", "vad"]
+
+[[bench]]
+name = "filtering"
+harness = false
+required-features = ["iir-filtering", "processing", "editing", "statistics", "transforms"]
