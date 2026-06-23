@@ -1,7 +1,3 @@
----
-terminology-vocab: invariants
----
-
 <div align="center">
 
 # AudioSamples

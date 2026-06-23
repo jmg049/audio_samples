@@ -1601,6 +1601,7 @@ where
         } => apply_pitch_shift_(audio, *semitones, *preserve_formants),
         #[cfg(not(all(feature = "transforms", feature = "channels")))]
         PerturbationMethod::PitchShift { .. } => Err(crate::AudioSampleError::unsupported(
+            "apply_perturbation(PitchShift)",
             "PitchShift requires the `transforms` and `channels` features",
         )),
     }
