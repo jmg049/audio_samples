@@ -431,6 +431,9 @@ pub use crate::operations::types::{
 #[cfg(feature = "iir-filtering")]
 pub use crate::operations::traits::AudioIirFiltering;
 
+#[cfg(feature = "iir-filtering")]
+pub use crate::operations::iir_filtering::{IirFilter, SosFilter};
+
 #[cfg(feature = "parametric-eq")]
 pub use crate::operations::traits::AudioParametricEq;
 
