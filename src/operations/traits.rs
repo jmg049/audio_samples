@@ -557,6 +557,146 @@ where
         rolloff_percent: f64,
         reduction: crate::operations::types::ChannelReduction,
     ) -> AudioSampleResult<f64>;
+
+    /// Computes the spectral bandwidth (spectral spread).
+    ///
+    /// The magnitude-weighted standard deviation of the spectrum about its
+    /// [`spectral_centroid`](Self::spectral_centroid):
+    /// `sqrt( Σ (f_k − centroid)² · mag_k / Σ mag_k )`. Larger values indicate
+    /// energy spread across a wider frequency range; a single pure tone yields a
+    /// value near zero.
+    ///
+    /// # Arguments
+    /// - `reduction` — the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The spectral bandwidth in Hz. Returns `0.0` for silence (zero total
+    /// magnitude).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    fn spectral_bandwidth(
+        &self,
+        reduction: crate::operations::types::ChannelReduction,
+    ) -> AudioSampleResult<f64>;
+
+    /// Computes the spectral flatness (Wiener entropy).
+    ///
+    /// The ratio of the geometric mean to the arithmetic mean of the power
+    /// spectrum: `geometric_mean(power) / arithmetic_mean(power)`. The geometric
+    /// mean is computed in the log domain with a small epsilon floor for numerical
+    /// stability. The result lies in `[0, 1]`: values near `1` indicate noise-like
+    /// (flat) spectra, while values near `0` indicate tonal spectra dominated by a
+    /// few peaks.
+    ///
+    /// # Arguments
+    /// - `reduction` — the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The spectral flatness in `[0, 1]`. Returns `0.0` for silence.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    fn spectral_flatness(
+        &self,
+        reduction: crate::operations::types::ChannelReduction,
+    ) -> AudioSampleResult<f64>;
+
+    /// Computes the spectral crest factor.
+    ///
+    /// The ratio of the peak magnitude to the mean magnitude of the spectrum:
+    /// `max(mag) / mean(mag)`. High values indicate a strongly peaked (tonal)
+    /// spectrum; a flat spectrum approaches `1`.
+    ///
+    /// # Arguments
+    /// - `reduction` — the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The spectral crest factor (≥ 1 for non-silent signals). Returns `0.0` for
+    /// silence.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    fn spectral_crest(
+        &self,
+        reduction: crate::operations::types::ChannelReduction,
+    ) -> AudioSampleResult<f64>;
+
+    /// Computes the spectral slope.
+    ///
+    /// The slope of an ordinary least-squares linear fit of the **linear
+    /// magnitude** spectrum against frequency (Hz). Returned in units of
+    /// magnitude per Hz. A negative slope indicates energy concentrated at low
+    /// frequencies (e.g. a low-pass or pink-ish spectrum); a flat (white) spectrum
+    /// yields a slope near zero.
+    ///
+    /// # Arguments
+    /// - `reduction` — the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The least-squares slope (magnitude per Hz). Returns `0.0` for silence or a
+    /// degenerate single-bin spectrum.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    fn spectral_slope(
+        &self,
+        reduction: crate::operations::types::ChannelReduction,
+    ) -> AudioSampleResult<f64>;
+
+    /// Computes spectral contrast across octave-spaced sub-bands (librosa-style).
+    ///
+    /// The spectrum is partitioned into `n_bands` octave-spaced sub-bands. Within
+    /// each band the magnitudes are sorted and the contrast is the dB difference
+    /// between the mean of the top quantile (peaks) and the mean of the bottom
+    /// quantile (valleys). High contrast indicates clear tonal/harmonic structure;
+    /// low contrast indicates noise-like content.
+    ///
+    /// # Arguments
+    /// - `n_bands` — the number of octave-spaced sub-bands.
+    /// - `reduction` — the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// A vector of `n_bands` contrast values in dB, low band to high band. Empty
+    /// bands yield `0.0`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    fn spectral_contrast(
+        &self,
+        n_bands: core::num::NonZeroUsize,
+        reduction: crate::operations::types::ChannelReduction,
+    ) -> AudioSampleResult<Vec<f64>>;
 }
 
 /// Voice Activity Detection (VAD) operations.
@@ -5847,6 +5987,27 @@ where
     /// # }
     /// ```
     fn detect_beats(&self, config: &BeatTrackingConfig) -> AudioSampleResult<BeatTrackingData>;
+
+    /// Estimate the dominant tempo of the signal in beats per minute.
+    ///
+    /// Computes the onset strength envelope (using the onset configuration in
+    /// `config`), autocorrelates it, restricts the search to a plausible BPM lag
+    /// range (40–240 BPM at the envelope frame rate), and picks the dominant
+    /// autocorrelation peak, converting its lag to BPM. Unlike
+    /// [`detect_beats`][AudioBeatTracking::detect_beats], this does **not** require
+    /// the tempo to be known in advance — `config.tempo_bpm` is ignored here.
+    ///
+    /// # Arguments
+    /// - `config` — beat tracking configuration; only `onset_config` is used.
+    ///
+    /// # Returns
+    /// The estimated tempo in BPM.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if no plausible tempo lag can be
+    ///   found (e.g. the envelope is too short for the 40 BPM lag).
+    /// - [crate::AudioSampleError::Processing] – if onset detection fails.
+    fn estimate_tempo(&self, config: &BeatTrackingConfig) -> AudioSampleResult<f64>;
 }
 
 /// Audio visualisation operations.

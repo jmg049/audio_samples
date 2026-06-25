@@ -1124,6 +1124,227 @@ where
         // If we reach here, return Nyquist frequency
         Ok(nyquist)
     }
+
+    /// Computes the spectral bandwidth (magnitude-weighted spread about the centroid).
+    ///
+    /// `sqrt( Σ (f_k − centroid)² · mag_k / Σ mag_k )`. The centroid is computed
+    /// from the same magnitude spectrum used here.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    #[inline]
+    fn spectral_bandwidth(&self, reduction: ChannelReduction) -> AudioSampleResult<f64> {
+        let working_vec = reduce_to_mono_f64(self, reduction, "spectral_bandwidth")?;
+        // safety: self is non-empty by design.
+        let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
+        let mag = with_fft_planner(|planner| {
+            planner.magnitude_spectrum(input.as_non_empty_slice(), n, None)
+        })?;
+
+        let nyquist = self.nyquist();
+        let freq_step = nyquist / (mag.len().get() as f64 - 1.0);
+
+        // Magnitude-weighted centroid.
+        let (weighted_sum, total_mag) =
+            mag.iter()
+                .enumerate()
+                .fold((0.0, 0.0), |(w, t), (i, &m)| {
+                    let f = i as f64 * freq_step;
+                    (w + f * m, t + m)
+                });
+        if total_mag <= 0.0 {
+            return Ok(0.0);
+        }
+        let centroid = weighted_sum / total_mag;
+
+        // Weighted variance about the centroid.
+        let var = mag.iter().enumerate().fold(0.0, |acc, (i, &m)| {
+            let f = i as f64 * freq_step;
+            let d = f - centroid;
+            acc + d * d * m
+        }) / total_mag;
+
+        Ok(var.max(0.0).sqrt())
+    }
+
+    /// Computes the spectral flatness (Wiener entropy): `geo_mean(power) / arith_mean(power)`.
+    ///
+    /// The geometric mean is evaluated in the log domain with an epsilon floor.
+    /// Result is clamped to `[0, 1]`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    #[inline]
+    fn spectral_flatness(&self, reduction: ChannelReduction) -> AudioSampleResult<f64> {
+        let working_vec = reduce_to_mono_f64(self, reduction, "spectral_flatness")?;
+        // safety: self is non-empty by design.
+        let working_samples = unsafe { NonEmptySlice::new_unchecked(working_vec.as_slice()) };
+        let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        let power =
+            with_fft_planner(|planner| planner.power_spectrum(working_samples, n, None))?;
+
+        // Small epsilon floor relative to the spectrum scale keeps log() finite
+        // for empty bins without biasing a genuinely flat spectrum.
+        const EPS: f64 = 1e-10;
+        let count = power.len().get() as f64;
+        let arith_mean = power.iter().fold(0.0, |a, &p| a + p) / count;
+        if arith_mean <= 0.0 {
+            return Ok(0.0);
+        }
+        // Geometric mean via mean of logs.
+        let log_sum = power.iter().fold(0.0, |a, &p| a + (p + EPS).ln());
+        let geo_mean = (log_sum / count).exp();
+
+        Ok((geo_mean / arith_mean).clamp(0.0, 1.0))
+    }
+
+    /// Computes the spectral crest factor: `max(mag) / mean(mag)`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    #[inline]
+    fn spectral_crest(&self, reduction: ChannelReduction) -> AudioSampleResult<f64> {
+        let working_vec = reduce_to_mono_f64(self, reduction, "spectral_crest")?;
+        // safety: self is non-empty by design.
+        let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
+        let mag = with_fft_planner(|planner| {
+            planner.magnitude_spectrum(input.as_non_empty_slice(), n, None)
+        })?;
+
+        let count = mag.len().get() as f64;
+        let (sum, peak) = mag
+            .iter()
+            .fold((0.0, 0.0_f64), |(s, p), &m| (s + m, p.max(m)));
+        let mean = sum / count;
+        if mean <= 0.0 {
+            return Ok(0.0);
+        }
+        Ok(peak / mean)
+    }
+
+    /// Computes the spectral slope: ordinary least-squares slope of the **linear
+    /// magnitude** spectrum versus frequency (magnitude per Hz).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    #[inline]
+    fn spectral_slope(&self, reduction: ChannelReduction) -> AudioSampleResult<f64> {
+        let working_vec = reduce_to_mono_f64(self, reduction, "spectral_slope")?;
+        // safety: self is non-empty by design.
+        let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
+        let mag = with_fft_planner(|planner| {
+            planner.magnitude_spectrum(input.as_non_empty_slice(), n, None)
+        })?;
+
+        let len = mag.len().get();
+        if len < 2 {
+            return Ok(0.0);
+        }
+        if mag.iter().all(|&m| m <= 0.0) {
+            return Ok(0.0);
+        }
+
+        let nyquist = self.nyquist();
+        let freq_step = nyquist / (len as f64 - 1.0);
+
+        // OLS slope: Σ (x − x̄)(y − ȳ) / Σ (x − x̄)².
+        let count = len as f64;
+        let (sum_x, sum_y) = mag.iter().enumerate().fold((0.0, 0.0), |(sx, sy), (i, &m)| {
+            (sx + i as f64 * freq_step, sy + m)
+        });
+        let mean_x = sum_x / count;
+        let mean_y = sum_y / count;
+        let (num, den) = mag.iter().enumerate().fold((0.0, 0.0), |(num, den), (i, &m)| {
+            let dx = i as f64 * freq_step - mean_x;
+            (num + dx * (m - mean_y), den + dx * dx)
+        });
+        if den <= 0.0 {
+            return Ok(0.0);
+        }
+        Ok(num / den)
+    }
+
+    /// Computes octave-band spectral contrast (librosa-style): per band, the dB
+    /// difference between the mean of the top quantile and the bottom quantile.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    #[cfg(feature = "transforms")]
+    #[inline]
+    fn spectral_contrast(
+        &self,
+        n_bands: NonZeroUsize,
+        reduction: ChannelReduction,
+    ) -> AudioSampleResult<Vec<f64>> {
+        let working_vec = reduce_to_mono_f64(self, reduction, "spectral_contrast")?;
+        // safety: self is non-empty by design.
+        let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
+        // Hann window before the FFT: reduces spectral leakage so a tonal band's
+        // peak/valley gap is not flattened by sidelobes (librosa windows too).
+        let mag = with_fft_planner(|planner| {
+            planner.magnitude_spectrum(
+                input.as_non_empty_slice(),
+                n,
+                Some(spectrograms::WindowType::Hanning),
+            )
+        })?;
+
+        let bins = mag.len().get();
+        let n_bands = n_bands.get();
+
+        // Octave-spaced band edges over bin indices [1, bins): edge_b grows
+        // geometrically so each band spans roughly one octave. Bin 0 (DC) is
+        // excluded.
+        let lo_bin = 1usize.min(bins.saturating_sub(1)).max(1);
+        let hi_bin = bins; // exclusive
+        let span = (hi_bin as f64 / lo_bin as f64).max(1.0);
+        let ratio = span.powf(1.0 / n_bands as f64);
+
+        // Quantile fraction for peak/valley pooling (librosa default 0.02).
+        const QUANTILE: f64 = 0.02;
+        // dB floor so log10 of an empty bin stays finite.
+        const EPS: f64 = 1e-10;
+
+        let mut out = Vec::with_capacity(n_bands);
+        for b in 0..n_bands {
+            let start = (lo_bin as f64 * ratio.powi(b as i32)).floor() as usize;
+            let mut end = (lo_bin as f64 * ratio.powi(b as i32 + 1)).floor() as usize;
+            let start = start.min(bins);
+            if b == n_bands - 1 {
+                end = bins;
+            }
+            let end = end.clamp(start, bins);
+
+            if end <= start {
+                out.push(0.0);
+                continue;
+            }
+
+            let mut band: Vec<f64> = mag[start..end].iter().map(|&m| 10.0 * (m + EPS).log10()).collect();
+            band.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            let len = band.len();
+            let k = ((len as f64 * QUANTILE).round() as usize).clamp(1, len);
+            let valley: f64 = band[..k].iter().sum::<f64>() / k as f64;
+            let peak: f64 = band[len - k..].iter().sum::<f64>() / k as f64;
+            out.push(peak - valley);
+        }
+
+        Ok(out)
+    }
 }
 
 /// Returns the signed lag (in samples) that maximises the FFT cross-correlation
@@ -1522,5 +1743,158 @@ mod tests {
         let l1 = fft_alignment_lag(&tone, &tone, 32);
         let l2 = fft_alignment_lag(&tone, &tone, 32);
         assert_eq!(l1, l2, "alignment lag must be identical across cached calls");
+    }
+
+    // ---- New spectral feature validation ----
+
+    /// White noise should have flatness near 1; a pure sine near 0 with high crest.
+    #[test]
+    #[cfg(all(feature = "transforms", feature = "random-generation"))]
+    fn test_spectral_flatness_noise_vs_tone() {
+        let sr = sample_rate!(16000);
+        let dur = Duration::from_secs_f32(1.0);
+
+        let noise = crate::white_noise::<f64>(dur, sr, 0.5, None);
+        let flat_noise = noise.spectral_flatness(ChannelReduction::Error).unwrap();
+        assert!(
+            flat_noise > 0.5,
+            "white-noise flatness {flat_noise} should be > 0.5"
+        );
+
+        let tone = crate::sine_wave::<f64>(1000.0, dur, sr, 0.5);
+        let flat_tone = tone.spectral_flatness(ChannelReduction::Error).unwrap();
+        assert!(
+            flat_tone < 0.1,
+            "pure-tone flatness {flat_tone} should be < 0.1"
+        );
+
+        // A pure tone is strongly peaked -> high crest; noise is comparatively low.
+        let crest_tone = tone.spectral_crest(ChannelReduction::Error).unwrap();
+        let crest_noise = noise.spectral_crest(ChannelReduction::Error).unwrap();
+        assert!(
+            crest_tone > crest_noise,
+            "tone crest {crest_tone} should exceed noise crest {crest_noise}"
+        );
+        assert!(crest_tone > 10.0, "tone crest {crest_tone} should be large");
+    }
+
+    /// A two-tone signal has larger spectral bandwidth than a single tone.
+    #[test]
+    #[cfg(feature = "transforms")]
+    fn test_spectral_bandwidth_two_tone_vs_one() {
+        let sr = sample_rate!(16000);
+        let n = 16000usize;
+        let single: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr.get() as f64;
+                0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin()
+            })
+            .collect();
+        let two: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr.get() as f64;
+                0.25 * (2.0 * std::f64::consts::PI * 500.0 * t).sin()
+                    + 0.25 * (2.0 * std::f64::consts::PI * 5000.0 * t).sin()
+            })
+            .collect();
+
+        let single = AudioSamples::new_mono(Array1::from(single).into(), sr).unwrap();
+        let two = AudioSamples::new_mono(Array1::from(two).into(), sr).unwrap();
+
+        let bw1 = single.spectral_bandwidth(ChannelReduction::Error).unwrap();
+        let bw2 = two.spectral_bandwidth(ChannelReduction::Error).unwrap();
+        assert!(
+            bw2 > bw1,
+            "two-tone bandwidth {bw2} should exceed single-tone bandwidth {bw1}"
+        );
+    }
+
+    /// A low-pass-weighted (energy concentrated low) spectrum has negative slope;
+    /// flat/white is near zero.
+    #[test]
+    #[cfg(all(feature = "transforms", feature = "random-generation"))]
+    fn test_spectral_slope_lowpass_vs_white() {
+        let sr = sample_rate!(16000);
+        let dur = Duration::from_secs_f32(1.0);
+
+        // Low-frequency tone: magnitude concentrated near 0 Hz -> negative slope.
+        let low = crate::sine_wave::<f64>(200.0, dur, sr, 0.5);
+        let slope_low = low.spectral_slope(ChannelReduction::Error).unwrap();
+        assert!(
+            slope_low < 0.0,
+            "low-frequency-weighted slope {slope_low} should be negative"
+        );
+
+        // White noise: roughly flat magnitude -> slope near zero. Use a generous
+        // bound since noise realisations vary.
+        let noise = crate::white_noise::<f64>(dur, sr, 0.5, None);
+        let slope_white = noise.spectral_slope(ChannelReduction::Error).unwrap();
+        assert!(
+            slope_white.abs() < slope_low.abs(),
+            "white-noise slope {slope_white} should be flatter than low-tone slope {slope_low}"
+        );
+    }
+
+    /// Spectral contrast returns one value per band and is higher for a tonal
+    /// signal than for noise.
+    #[test]
+    #[cfg(all(feature = "transforms", feature = "random-generation"))]
+    fn test_spectral_contrast_shape_and_tonality() {
+        let sr = sample_rate!(16000);
+        let dur = Duration::from_secs_f32(1.0);
+
+        let tone = crate::sine_wave::<f64>(1000.0, dur, sr, 0.5);
+        let contrast = tone
+            .spectral_contrast(nzu!(4), ChannelReduction::Error)
+            .unwrap();
+        assert_eq!(contrast.len(), 4, "one contrast value per band");
+        assert!(
+            contrast.iter().all(|&c| c.is_finite() && c >= 0.0),
+            "contrast values must be finite and non-negative: {contrast:?}"
+        );
+        // A tone produces a strong peak/valley gap in at least one band.
+        let max_tone = contrast.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(
+            max_tone > 1.0,
+            "tonal signal should yield a band contrast > 1 dB, got {contrast:?}"
+        );
+    }
+
+    /// ChannelReduction policies on a stereo signal for the new features.
+    #[test]
+    #[cfg(feature = "transforms")]
+    fn test_new_features_channel_reduction() {
+        let sr = sample_rate!(44100);
+        let dur = Duration::from_secs_f32(0.25);
+        let tone = crate::sine_wave::<f64>(1000.0, dur, sr, 0.5);
+        let tone_ch = tone.as_mono().expect("mono tone");
+        let n = tone_ch.len().get();
+        let tone_vec: Vec<f64> = (0..n).map(|i| tone[i]).collect();
+
+        // Channel 0 = tone, channel 1 = silence.
+        let mut data = ndarray::Array2::<f64>::zeros((2, n));
+        for (i, &v) in tone_vec.iter().enumerate() {
+            data[[0, i]] = v;
+        }
+        let stereo = AudioSamples::new_multi_channel(data, sr).unwrap();
+
+        // Error rejects multi-channel.
+        assert!(stereo.spectral_bandwidth(ChannelReduction::Error).is_err());
+        assert!(stereo.spectral_flatness(ChannelReduction::Error).is_err());
+        assert!(stereo.spectral_crest(ChannelReduction::Error).is_err());
+        assert!(stereo.spectral_slope(ChannelReduction::Error).is_err());
+        assert!(
+            stereo
+                .spectral_contrast(nzu!(4), ChannelReduction::Error)
+                .is_err()
+        );
+
+        // First selects the tone channel -> tonal (low flatness).
+        let flat_first = stereo.spectral_flatness(ChannelReduction::First).unwrap();
+        assert!(flat_first < 0.1, "First-channel flatness {flat_first} should be tonal");
+
+        // Average mixes tone with silence -> still tonal.
+        let flat_avg = stereo.spectral_flatness(ChannelReduction::Average).unwrap();
+        assert!(flat_avg < 0.2, "Average flatness {flat_avg} should be tonal");
     }
 }

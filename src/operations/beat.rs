@@ -217,6 +217,90 @@ where
             config: config.clone(),
         })
     }
+
+    /// Estimate the dominant tempo of the signal in beats per minute.
+    ///
+    /// # Algorithm
+    /// 1. Compute the onset strength envelope (reusing
+    ///    [`onset_strength_envelope`]).
+    /// 2. Mean-subtract the envelope and compute its autocorrelation by direct
+    ///    summation for every lag in the plausible range.
+    /// 3. The envelope frame rate is `sample_rate / hop_size`. A lag of `L`
+    ///    frames corresponds to a period of `L / frame_rate` seconds, i.e.
+    ///    `60 · frame_rate / L` BPM. Restrict the lag search to the window that
+    ///    maps into `[MIN_BPM, MAX_BPM] = [40, 240]`.
+    /// 4. Weight each lag's autocorrelation by a log-normal tempo prior centred
+    ///    on `PRIOR_BPM = 120` (in log2-BPM space, librosa-style). The prior
+    ///    breaks the octave ambiguity inherent in autocorrelation — a periodic
+    ///    envelope correlates almost as strongly at twice/half the true period —
+    ///    by biasing toward perceptually plausible tempi. With the default prior
+    ///    a true tempo and its octaves are disambiguated toward the fundamental.
+    /// 5. Pick the lag with the largest weighted score and convert to BPM.
+    ///
+    /// `config.tempo_bpm` is ignored; only `config.onset_config` is used.
+    fn estimate_tempo(&self, config: &BeatTrackingConfig) -> AudioSampleResult<f64> {
+        const MIN_BPM: f64 = 40.0;
+        const MAX_BPM: f64 = 240.0;
+        // Log-normal tempo prior (librosa default): centre and spread in log2-BPM.
+        const PRIOR_BPM: f64 = 120.0;
+        const PRIOR_STD_OCTAVES: f64 = 1.0;
+
+        let sr = self.sample_rate_hz();
+        let hop = config.onset_config.hop_size.get() as f64;
+        // Envelope frame rate in frames per second.
+        let frame_rate = sr / hop;
+
+        let env = onset_strength_envelope(self, &config.onset_config, None)?;
+        let env: &[f64] = &env;
+        let len = env.len();
+
+        // Mean-subtract so a constant offset (DC) does not dominate the
+        // autocorrelation and bias toward lag 0.
+        let mean = env.iter().sum::<f64>() / len as f64;
+        let centered: Vec<f64> = env.iter().map(|&x| x - mean).collect();
+
+        // BPM -> lag (frames): lag = 60 * frame_rate / bpm. Higher BPM -> smaller
+        // lag, so MAX_BPM gives the min lag and MIN_BPM the max lag.
+        let min_lag = ((60.0 * frame_rate / MAX_BPM).floor() as usize).max(1);
+        let max_lag_raw = (60.0 * frame_rate / MIN_BPM).ceil() as usize;
+        // Cannot correlate at a lag with no overlap.
+        let max_lag = max_lag_raw.min(len.saturating_sub(1));
+
+        if min_lag >= len || max_lag < min_lag {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "signal",
+                "onset envelope too short to estimate tempo in the 40-240 BPM range",
+            )));
+        }
+
+        let log_prior = PRIOR_BPM.log2();
+        let mut best_lag = min_lag;
+        let mut best_score = f64::NEG_INFINITY;
+        for lag in min_lag..=max_lag {
+            let mut acc = 0.0;
+            for i in lag..len {
+                acc += centered[i] * centered[i - lag];
+            }
+            // Normalise by the number of overlapping terms so long-lag (low-BPM)
+            // sums are not penalised purely for having fewer products.
+            let acc = acc / (len - lag) as f64;
+            if acc <= 0.0 {
+                continue;
+            }
+            let bpm = 60.0 * frame_rate / lag as f64;
+            // Log-normal prior weight in log2-BPM space.
+            let z = (bpm.log2() - log_prior) / PRIOR_STD_OCTAVES;
+            let weight = (-0.5 * z * z).exp();
+            let score = acc * weight;
+            if score > best_score {
+                best_score = score;
+                best_lag = lag;
+            }
+        }
+
+        let bpm = 60.0 * frame_rate / best_lag as f64;
+        Ok(bpm)
+    }
 }
 
 /// Compute a smoothed, log-compressed onset strength envelope.
@@ -602,5 +686,61 @@ mod tests {
         let beats = track_beats_core(&onset, 120.0, 44_100.0, hop, Some(1000.0))
             .expect("single-frame edge case must not error");
         assert!(beats.iter().all(|t| t.is_finite() && *t >= 0.0));
+    }
+
+    /// `estimate_tempo` on a synthesized click train at a known BPM should
+    /// recover the fundamental tempo within ~5%. Octave errors are NOT accepted
+    /// here — the autocorrelation peak in the 40-240 BPM window is asserted to be
+    /// the fundamental (120 BPM).
+    #[test]
+    fn test_estimate_tempo_click_train_120bpm() {
+        use crate::{AudioSamples, sample_rate};
+        use ndarray::Array1;
+
+        // Sample rate chosen so the default onset hop (512) gives a frame rate of
+        // exactly 44 fps; at 120 BPM each beat is then exactly 22 frames apart,
+        // avoiding sub-frame quantisation of the click positions.
+        let sr = 22_528.0;
+        let bpm = 120.0;
+        let dur_secs = 6.0;
+        let n = (sr * dur_secs) as usize;
+        let period = (sr * 60.0 / bpm) as usize; // 11264 samples = 22 hops
+
+        // Percussive click train: short, broadband noise bursts at each beat so
+        // the energy onset detector fires cleanly on every beat.
+        let mut data = vec![0.0f64; n];
+        let mut seed = 0x1234_5678u64;
+        let mut click = 0usize;
+        while click < n {
+            for k in 0..256 {
+                if click + k < n {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let r = ((seed >> 33) as f64 / (1u64 << 31) as f64) - 1.0;
+                    let env = (-(k as f64) / 24.0).exp();
+                    data[click + k] += 0.9 * env * r;
+                }
+            }
+            click += period;
+        }
+
+        let audio =
+            AudioSamples::new_mono(Array1::from(data).into(), sample_rate!(22528)).unwrap();
+
+        let config = BeatTrackingConfig::new(
+            bpm, // ignored by estimate_tempo
+            None,
+            OnsetDetectionConfig::default(),
+        );
+
+        let est = audio.estimate_tempo(&config).expect("tempo estimate");
+        let rel_err = (est - bpm).abs() / bpm;
+        // Assert the fundamental tempo, not an octave: the log-normal prior in
+        // estimate_tempo disambiguates the autocorrelation's octave peaks.
+        assert!(
+            rel_err < 0.05,
+            "estimated tempo {est} BPM should be within 5% of {bpm} BPM (rel_err {rel_err:.3})"
+        );
     }
 }
