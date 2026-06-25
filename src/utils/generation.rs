@@ -828,6 +828,368 @@ where
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
+/// Generates an exponential (logarithmic) chirp — a frequency sweep whose instantaneous
+/// frequency grows geometrically rather than linearly.
+///
+/// Unlike [`chirp`], which sweeps frequency linearly, this generator sweeps frequency
+/// exponentially so that equal time intervals correspond to equal frequency *ratios*
+/// (octaves). With `k = (end_freq / start_freq)^(1/T)` the instantaneous frequency is
+/// `f(t) = start_freq · kᵗ` and the analytic phase is
+/// `φ(t) = 2π · start_freq · ((kᵗ − 1) / ln k)`. When `start_freq == end_freq` (so `k == 1`)
+/// the signal degenerates to a pure tone at that frequency.
+///
+/// # Arguments
+///
+/// - `start_freq` – Starting frequency in Hz. Must be `> 0`.
+/// - `end_freq` – Ending frequency in Hz. Must be `> 0`.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude.
+///
+/// # Returns
+///
+/// A mono [`AudioSamples`] buffer containing the generated exponential chirp.
+///
+/// # Panics
+///
+/// Panics if `start_freq` or `end_freq` is not strictly positive.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::exponential_chirp;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let sweep = exponential_chirp::<f32>(100.0, 8000.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
+/// assert_eq!(sweep.num_channels().get(), 1);
+/// ```
+#[inline]
+#[must_use]
+pub fn exponential_chirp<T>(
+    start_freq: f64,
+    end_freq: f64,
+    duration: Duration,
+    sample_rate: NonZeroU32,
+    amplitude: f64,
+) -> AudioSamples<'static, T>
+where
+    T: StandardSample,
+{
+    assert!(
+        start_freq > 0.0 && end_freq > 0.0,
+        "exponential_chirp requires start_freq > 0 and end_freq > 0"
+    );
+
+    let sr_f = f64::from(sample_rate.get());
+    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+
+    let duration_f = duration.as_secs_f64();
+    let two_pi = 2.0 * f64::PI();
+    // k is the per-second geometric frequency growth factor.
+    let k = (end_freq / start_freq).powf(1.0 / duration_f);
+    let ln_k = k.ln();
+
+    for i in 0..num_samples {
+        let t = i as f64 / sr_f;
+        // Analytic phase. For k == 1 (start == end) ln_k == 0 and the limit of
+        // (k^t - 1)/ln k as ln_k -> 0 is t, i.e. a pure tone at start_freq.
+        let phase = if ln_k == 0.0 {
+            two_pi * start_freq * t
+        } else {
+            two_pi * start_freq * ((k.powf(t) - 1.0) / ln_k)
+        };
+        let value = amplitude * phase.sin();
+        samples.push(value.convert_to());
+    }
+
+    let array = Array1::from_vec(samples);
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
+}
+
+/// Generates a band-limited (alias-free) square wave via additive synthesis.
+///
+/// Whereas [`square_wave`] hard-clips a sine and therefore contains harmonics above the
+/// Nyquist frequency that fold back as aliasing, this generator sums only the odd harmonics
+/// that lie strictly below Nyquist, producing an exactly band-limited signal:
+/// `(4/π) · Σ sin(2π(2k−1)f t)/(2k−1)` for every odd harmonic `(2k−1)·frequency < Nyquist`.
+///
+/// # Arguments
+///
+/// - `frequency` – Fundamental frequency of the square wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude of the underlying ideal square wave.
+///
+/// # Returns
+///
+/// A mono [`AudioSamples`] buffer containing the band-limited square wave.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::square_wave_bandlimited;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let wave = square_wave_bandlimited::<f32>(440.0, Duration::from_millis(10), sample_rate!(44100), 1.0);
+/// assert_eq!(wave.num_channels().get(), 1);
+/// ```
+#[inline]
+#[must_use]
+pub fn square_wave_bandlimited<T>(
+    frequency: f64,
+    duration: Duration,
+    sample_rate: NonZeroU32,
+    amplitude: f64,
+) -> AudioSamples<'static, T>
+where
+    T: StandardSample,
+{
+    let sr_f = f64::from(sample_rate.get());
+    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+
+    let two_pi = 2.0 * f64::PI();
+    let nyquist = sr_f / 2.0;
+    let scale = amplitude * 4.0 / f64::PI();
+
+    // Collect odd harmonic numbers (1, 3, 5, ...) whose frequency is below Nyquist.
+    let mut harmonics: Vec<f64> = Vec::new();
+    let mut h = 1.0;
+    while h * frequency < nyquist {
+        harmonics.push(h);
+        h += 2.0;
+    }
+
+    for i in 0..num_samples {
+        let t = i as f64 / sr_f;
+        let mut sum = 0.0;
+        for &n in &harmonics {
+            sum += (two_pi * n * frequency * t).sin() / n;
+        }
+        let sample = scale * sum;
+        samples.push(sample.convert_to());
+    }
+
+    let array = Array1::from_vec(samples);
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
+}
+
+/// Generates a band-limited (alias-free) sawtooth wave via additive synthesis.
+///
+/// Whereas [`sawtooth_wave`] ramps linearly and therefore aliases, this generator sums only
+/// the harmonics below Nyquist, producing an exactly band-limited signal:
+/// `(2/π) · Σ (−1)^(k+1) sin(2π k f t)/k` for every harmonic `k·frequency < Nyquist`.
+///
+/// # Arguments
+///
+/// - `frequency` – Fundamental frequency of the sawtooth wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude of the underlying ideal sawtooth wave.
+///
+/// # Returns
+///
+/// A mono [`AudioSamples`] buffer containing the band-limited sawtooth wave.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::sawtooth_wave_bandlimited;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let wave = sawtooth_wave_bandlimited::<f32>(440.0, Duration::from_millis(10), sample_rate!(44100), 1.0);
+/// assert_eq!(wave.num_channels().get(), 1);
+/// ```
+#[inline]
+#[must_use]
+pub fn sawtooth_wave_bandlimited<T>(
+    frequency: f64,
+    duration: Duration,
+    sample_rate: NonZeroU32,
+    amplitude: f64,
+) -> AudioSamples<'static, T>
+where
+    T: StandardSample,
+{
+    let sr_f = f64::from(sample_rate.get());
+    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+
+    let two_pi = 2.0 * f64::PI();
+    let nyquist = sr_f / 2.0;
+    let scale = amplitude * 2.0 / f64::PI();
+
+    // Collect all harmonic numbers (1, 2, 3, ...) whose frequency is below Nyquist,
+    // paired with their alternating sign (-1)^(k+1).
+    let mut harmonics: Vec<(f64, f64)> = Vec::new();
+    let mut k = 1.0;
+    while k * frequency < nyquist {
+        let sign = if (k as i64) % 2 == 1 { 1.0 } else { -1.0 };
+        harmonics.push((k, sign));
+        k += 1.0;
+    }
+
+    for i in 0..num_samples {
+        let t = i as f64 / sr_f;
+        let mut sum = 0.0;
+        for &(n, sign) in &harmonics {
+            sum += sign * (two_pi * n * frequency * t).sin() / n;
+        }
+        let sample = scale * sum;
+        samples.push(sample.convert_to());
+    }
+
+    let array = Array1::from_vec(samples);
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
+}
+
+/// Generates a band-limited (alias-free) triangle wave via additive synthesis.
+///
+/// Whereas [`triangle_wave`] is piecewise-linear and therefore aliases, this generator sums
+/// only the odd harmonics below Nyquist, producing an exactly band-limited signal:
+/// `(8/π²) · Σ (−1)^k sin(2π(2k+1)f t)/(2k+1)²` for `k = 0, 1, 2, …` while
+/// `(2k+1)·frequency < Nyquist`.
+///
+/// # Arguments
+///
+/// - `frequency` – Fundamental frequency of the triangle wave in Hz.
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude of the underlying ideal triangle wave.
+///
+/// # Returns
+///
+/// A mono [`AudioSamples`] buffer containing the band-limited triangle wave.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::triangle_wave_bandlimited;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let wave = triangle_wave_bandlimited::<f32>(440.0, Duration::from_millis(10), sample_rate!(44100), 1.0);
+/// assert_eq!(wave.num_channels().get(), 1);
+/// ```
+#[inline]
+#[must_use]
+pub fn triangle_wave_bandlimited<T>(
+    frequency: f64,
+    duration: Duration,
+    sample_rate: NonZeroU32,
+    amplitude: f64,
+) -> AudioSamples<'static, T>
+where
+    T: StandardSample,
+{
+    let sr_f = f64::from(sample_rate.get());
+    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+
+    let two_pi = 2.0 * f64::PI();
+    let nyquist = sr_f / 2.0;
+    let scale = amplitude * 8.0 / (f64::PI() * f64::PI());
+
+    // For k = 0, 1, 2, ... the harmonic number is (2k+1); include while below Nyquist.
+    // The sign alternates as (-1)^k.
+    let mut harmonics: Vec<(f64, f64)> = Vec::new();
+    let mut k: i64 = 0;
+    loop {
+        let n = (2 * k + 1) as f64;
+        if n * frequency >= nyquist {
+            break;
+        }
+        let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+        harmonics.push((n, sign));
+        k += 1;
+    }
+
+    for i in 0..num_samples {
+        let t = i as f64 / sr_f;
+        let mut sum = 0.0;
+        for &(n, sign) in &harmonics {
+            sum += sign * (two_pi * n * frequency * t).sin() / (n * n);
+        }
+        let sample = scale * sum;
+        samples.push(sample.convert_to());
+    }
+
+    let array = Array1::from_vec(samples);
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
+}
+
+/// Generates a frequency-modulated (FM) signal.
+///
+/// A sinusoidal carrier whose instantaneous phase is modulated by a sinusoidal modulator:
+/// `amplitude · sin(2π·carrier·t + modulation_index·sin(2π·modulator·t))`. With
+/// `modulation_index == 0` this reduces exactly to a pure sine at `carrier_freq`.
+///
+/// # Arguments
+///
+/// - `carrier_freq` – Carrier frequency in Hz.
+/// - `modulator_freq` – Modulator frequency in Hz.
+/// - `modulation_index` – Modulation index (peak phase deviation in radians).
+/// - `duration` – Duration of the generated signal.
+/// - `sample_rate` – Sampling rate in Hz.
+/// - `amplitude` – Peak amplitude.
+///
+/// # Returns
+///
+/// A mono [`AudioSamples`] buffer containing the FM signal.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::generation::fm_signal;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// // 440 Hz carrier modulated at 110 Hz with index 2.0.
+/// let audio = fm_signal::<f64>(440.0, 110.0, 2.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
+/// assert_eq!(audio.num_channels().get(), 1);
+/// ```
+#[inline]
+#[must_use]
+pub fn fm_signal<T>(
+    carrier_freq: f64,
+    modulator_freq: f64,
+    modulation_index: f64,
+    duration: Duration,
+    sample_rate: NonZeroU32,
+    amplitude: f64,
+) -> AudioSamples<'static, T>
+where
+    T: StandardSample,
+{
+    let sr_f = f64::from(sample_rate.get());
+    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+
+    let two_pi = 2.0 * f64::PI();
+    let two_pi_carrier = two_pi * carrier_freq;
+    let two_pi_modulator = two_pi * modulator_freq;
+
+    for i in 0..num_samples {
+        let t = i as f64 / sr_f;
+        let modulation = modulation_index * (two_pi_modulator * t).sin();
+        let phase = two_pi_carrier.mul_add(t, modulation);
+        let sample = amplitude * phase.sin();
+        samples.push(sample.convert_to());
+    }
+
+    let array = Array1::from_vec(samples);
+    // safety: we just created the data so is non-empty
+    unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
+}
+
 /// Generates a unit impulse (Dirac delta approximation) signal.
 ///
 /// Produces a buffer of zeros with a single non-zero sample at `floor(position * sample_rate)`.
@@ -1582,6 +1944,307 @@ mod tests {
         let min_val = mono.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_val = mono.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         assert!(max_val > min_val);
+    }
+
+    // Counts signed zero crossings over a window and converts to an estimated
+    // instantaneous frequency (crossings per second / 2).
+    fn estimate_freq_over_window(samples: &[f64], sr: f64) -> f64 {
+        let mut crossings = 0usize;
+        for w in samples.windows(2) {
+            if (w[0] <= 0.0 && w[1] > 0.0) || (w[0] >= 0.0 && w[1] < 0.0) {
+                crossings += 1;
+            }
+        }
+        let window_secs = samples.len() as f64 / sr;
+        (crossings as f64 / window_secs) / 2.0
+    }
+
+    #[test]
+    fn test_exponential_chirp_endpoints() {
+        let start = 200.0;
+        let end = 4000.0;
+        let sr = 44100u32;
+        let audio = exponential_chirp::<f64>(
+            start,
+            end,
+            Duration::from_secs_f64(1.0),
+            sample_rate!(44100),
+            1.0,
+        );
+
+        assert_eq!(audio.sample_rate(), sample_rate!(44100));
+        assert_eq!(audio.samples_per_channel().get(), 44100);
+        assert_eq!(audio.num_channels().get(), 1);
+
+        let mono = audio.as_mono().unwrap();
+        let s: Vec<f64> = mono.iter().cloned().collect();
+
+        // Local zero-crossing rate over a short window at each end. Use a window
+        // large enough to contain several cycles at the relevant frequency.
+        let win = 4410; // 0.1 s
+        let near_start = estimate_freq_over_window(&s[..win], sr as f64);
+        let near_end = estimate_freq_over_window(&s[s.len() - win..], sr as f64);
+
+        // Frequency near t=0 should be close to start_freq, and near t=T close to
+        // end_freq. The window averages over a slice so we allow generous tolerance.
+        assert!(
+            (near_start - start).abs() < start * 0.30,
+            "start: expected ~{start}, measured {near_start}"
+        );
+        assert!(
+            (near_end - end).abs() < end * 0.30,
+            "end: expected ~{end}, measured {near_end}"
+        );
+        // Exponential sweep must be monotonically rising: end >> start.
+        assert!(near_end > near_start * 4.0);
+    }
+
+    #[test]
+    fn test_exponential_chirp_equal_freqs_is_tone() {
+        // start == end => k == 1 => pure tone at that frequency.
+        let f = 1000.0;
+        let sr = 48000u32;
+        let audio = exponential_chirp::<f64>(
+            f,
+            f,
+            Duration::from_secs_f64(1.0),
+            sample_rate!(48000),
+            1.0,
+        );
+        let mono = audio.as_mono().unwrap();
+        let s: Vec<f64> = mono.iter().cloned().collect();
+        let est = estimate_freq_over_window(&s, sr as f64);
+        assert!(
+            (est - f).abs() < f * 0.02,
+            "degenerate exponential_chirp should be a {f} Hz tone, got {est}"
+        );
+    }
+
+    #[test]
+    fn test_square_wave_bandlimited() {
+        let f = 1000.0;
+        let sr = 44100u32;
+        let audio = square_wave_bandlimited::<f64>(
+            f,
+            Duration::from_secs_f64(1.0),
+            sample_rate!(44100),
+            1.0,
+        );
+        assert_eq!(audio.samples_per_channel().get(), 44100);
+        let mono = audio.as_mono().unwrap();
+        let s: Vec<f64> = mono.iter().cloned().collect();
+
+        // Fundamental frequency via zero-crossing rate ~ 2f crossings per second.
+        let est = estimate_freq_over_window(&s, sr as f64);
+        assert!(
+            (est - f).abs() < f * 0.02,
+            "expected fundamental ~{f} Hz, got {est}"
+        );
+
+        // Highest odd harmonic used must be strictly below Nyquist.
+        let nyquist = sr as f64 / 2.0;
+        let mut max_h = 1.0;
+        let mut h = 1.0;
+        while h * f < nyquist {
+            max_h = h;
+            h += 2.0;
+        }
+        assert!(max_h * f < nyquist, "max harmonic must be < Nyquist");
+        // For 1000 Hz at 44100, highest odd harmonic < 22050 is 21*1000=21000.
+        assert_eq!(max_h, 21.0);
+
+        // Spot-check a sample against the closed-form harmonic sum.
+        let idx = 137usize;
+        let t = idx as f64 / sr as f64;
+        let mut expected = 0.0;
+        let mut n = 1.0;
+        while n * f < nyquist {
+            expected += (2.0 * std::f64::consts::PI * n * f * t).sin() / n;
+            n += 2.0;
+        }
+        expected *= 4.0 / std::f64::consts::PI;
+        assert_approx_eq!(s[idx], expected, 1e-9);
+    }
+
+    #[test]
+    fn test_sawtooth_wave_bandlimited() {
+        let f = 1000.0;
+        let sr = 44100u32;
+        let audio = sawtooth_wave_bandlimited::<f64>(
+            f,
+            Duration::from_secs_f64(1.0),
+            sample_rate!(44100),
+            1.0,
+        );
+        let mono = audio.as_mono().unwrap();
+        let s: Vec<f64> = mono.iter().cloned().collect();
+
+        let est = estimate_freq_over_window(&s, sr as f64);
+        assert!(
+            (est - f).abs() < f * 0.05,
+            "expected fundamental ~{f} Hz, got {est}"
+        );
+
+        let nyquist = sr as f64 / 2.0;
+        // Highest harmonic (all integers) used < Nyquist.
+        let mut max_h = 1.0;
+        let mut h = 1.0;
+        while h * f < nyquist {
+            max_h = h;
+            h += 1.0;
+        }
+        assert!(max_h * f < nyquist);
+        // 22*1000 = 22000 < 22050 for the saw (all harmonics).
+        assert_eq!(max_h, 22.0);
+
+        // Closed-form spot check.
+        let idx = 251usize;
+        let t = idx as f64 / sr as f64;
+        let mut expected = 0.0;
+        let mut k = 1.0;
+        while k * f < nyquist {
+            let sign = if (k as i64) % 2 == 1 { 1.0 } else { -1.0 };
+            expected += sign * (2.0 * std::f64::consts::PI * k * f * t).sin() / k;
+            k += 1.0;
+        }
+        expected *= 2.0 / std::f64::consts::PI;
+        assert_approx_eq!(s[idx], expected, 1e-9);
+    }
+
+    #[test]
+    fn test_triangle_wave_bandlimited() {
+        let f = 1000.0;
+        let sr = 44100u32;
+        let audio = triangle_wave_bandlimited::<f64>(
+            f,
+            Duration::from_secs_f64(1.0),
+            sample_rate!(44100),
+            1.0,
+        );
+        let mono = audio.as_mono().unwrap();
+        let s: Vec<f64> = mono.iter().cloned().collect();
+
+        let est = estimate_freq_over_window(&s, sr as f64);
+        assert!(
+            (est - f).abs() < f * 0.02,
+            "expected fundamental ~{f} Hz, got {est}"
+        );
+
+        let nyquist = sr as f64 / 2.0;
+        // Triangle uses odd harmonics (2k+1); highest must be < Nyquist.
+        let mut max_n = 1.0;
+        let mut k: i64 = 0;
+        loop {
+            let n = (2 * k + 1) as f64;
+            if n * f >= nyquist {
+                break;
+            }
+            max_n = n;
+            k += 1;
+        }
+        assert!(max_n * f < nyquist);
+        assert_eq!(max_n, 21.0);
+
+        // Closed-form spot check.
+        let idx = 89usize;
+        let t = idx as f64 / sr as f64;
+        let mut expected = 0.0;
+        let mut kk: i64 = 0;
+        loop {
+            let n = (2 * kk + 1) as f64;
+            if n * f >= nyquist {
+                break;
+            }
+            let sign = if kk % 2 == 0 { 1.0 } else { -1.0 };
+            expected += sign * (2.0 * std::f64::consts::PI * n * f * t).sin() / (n * n);
+            kk += 1;
+        }
+        expected *= 8.0 / (std::f64::consts::PI * std::f64::consts::PI);
+        assert_approx_eq!(s[idx], expected, 1e-9);
+    }
+
+    #[cfg(feature = "transforms")]
+    #[test]
+    fn test_bandlimited_no_energy_above_nyquist() {
+        use crate::operations::traits::AudioTransforms;
+        use std::num::NonZeroUsize;
+        // A band-limited oscillator must, by construction, contain no harmonic at
+        // or above Nyquist. We verify the spectrum has negligible energy in the
+        // top bins (which only fill if aliasing occurred).
+        let f = 1000.0;
+        let sr = 44100u32;
+        // Choose signal length == n_fft (no zero-padding => no windowing leakage)
+        // and a fundamental whose harmonics land exactly on FFT bins: with
+        // n_fft = 4410 the bin spacing is 10 Hz, and 1000 Hz (+ all odd
+        // multiples) lands exactly on a bin. Any energy in high bins would then
+        // only come from aliasing, which a band-limited oscillator must not have.
+        let n_fft = 4410usize;
+        let audio = square_wave_bandlimited::<f64>(
+            f,
+            Duration::from_secs_f64(0.1),
+            sample_rate!(44100),
+            1.0,
+        );
+        assert_eq!(audio.samples_per_channel().get(), n_fft);
+        let spectrum = audio.fft(NonZeroUsize::new(n_fft).unwrap()).unwrap();
+        // One row per channel; mono => row 0.
+        let mags: Vec<f64> = spectrum.row(0).iter().map(|c| c.norm()).collect();
+        // Bins map linearly to [0, sr). Highest harmonic used is 21 kHz; bins
+        // above ~21.5 kHz must be essentially empty.
+        let bin_hz = sr as f64 / n_fft as f64;
+        let nyquist_bin = n_fft / 2;
+        let total: f64 = mags[..nyquist_bin].iter().sum();
+        let high_cutoff_bin = (21500.0 / bin_hz) as usize;
+        let high_energy: f64 = mags[high_cutoff_bin..nyquist_bin].iter().sum();
+        assert!(
+            high_energy < total * 1e-6,
+            "band-limited square wave has unexpected high-frequency energy: {high_energy} of {total}"
+        );
+    }
+
+    #[test]
+    fn test_fm_signal_zero_index_is_sine() {
+        let carrier = 440.0;
+        let audio = fm_signal::<f64>(
+            carrier,
+            110.0,
+            0.0, // no modulation
+            Duration::from_secs_f64(0.05),
+            sample_rate!(44100),
+            0.8,
+        );
+        let reference = sine_wave::<f64>(
+            carrier,
+            Duration::from_secs_f64(0.05),
+            sample_rate!(44100),
+            0.8,
+        );
+        let a: Vec<f64> = audio.as_mono().unwrap().iter().cloned().collect();
+        let b: Vec<f64> = reference.as_mono().unwrap().iter().cloned().collect();
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_approx_eq!(*x, *y, 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_fm_signal_peak_bounded() {
+        let amplitude = 0.8;
+        let audio = fm_signal::<f64>(
+            440.0,
+            110.0,
+            5.0, // heavy modulation
+            Duration::from_secs_f64(0.2),
+            sample_rate!(44100),
+            amplitude,
+        );
+        let mono = audio.as_mono().unwrap();
+        let peak = mono.iter().cloned().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(
+            peak <= amplitude + 1e-9,
+            "FM peak {peak} should not exceed amplitude {amplitude}"
+        );
+        assert_eq!(audio.num_channels().get(), 1);
     }
 
     #[cfg(all(feature = "editing", feature = "channels"))]
