@@ -77,7 +77,7 @@ where
     /// ```
     #[inline]
     fn amplitude_envelope(&self) -> NdResult<Self::Sample> {
-        match &self.data {
+        match self.data() {
             AudioData::Mono(mono) => {
                 let array = mono.as_view().mapv(|sample| {
                     let value: f64 = sample.cast_into();
@@ -143,7 +143,7 @@ where
         let window_len = window_size.get();
         let hop = hop_size.get();
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(mono) => {
                 let rms = compute_windowed_rms::<T>(mono.as_view(), window_len, hop);
                 NdResult::Mono(Array1::from_vec(rms))
@@ -217,7 +217,7 @@ where
         let mut attack_per_channel: Vec<Vec<T>> = vec![Vec::new(); num_channels];
         let mut decay_per_channel: Vec<Vec<T>> = vec![Vec::new(); num_channels];
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(mono) => {
                 let (attack, decay) =
                     compute_attack_decay_channel(mono.as_view(), follower, method);
@@ -288,7 +288,7 @@ where
     fn analytic_envelope(&self) -> NdResult<Self::Sample> {
         let num_channels = self.num_channels().get() as usize;
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(mono) => {
                 let envelope = compute_analytic_envelope_channel(mono.as_view());
                 NdResult::Mono(Array1::from_vec(envelope))
@@ -353,7 +353,7 @@ where
     ) -> NdResult<Self::Sample> {
         let num_channels = self.num_channels().get() as usize;
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(mono) => {
                 let envelope = compute_moving_average_channel(
                     mono.as_view(),

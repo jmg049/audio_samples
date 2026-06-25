@@ -150,7 +150,7 @@ where
     /// assert_eq!(rev[2], 1.0);
     /// ```
     fn reverse<'b>(&self) -> AudioSamples<'b, T> {
-        match &self.data {
+        match self.data() {
             AudioData::Mono(arr) => {
                 // Reverse the 1D array using ndarray's reverse slicing
                 let reversed = arr.slice(s![..;-1]).to_owned();
@@ -178,7 +178,7 @@ where
     /// - [`crate::AudioSampleError::Layout`] if an internal multi-channel
     ///   array row is not contiguous.
     fn reverse_in_place(&mut self) -> AudioSampleResult<()> {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 arr.as_slice_mut().reverse();
             }
@@ -240,7 +240,7 @@ where
         let start_sample = seconds_to_samples(start_seconds, self.sample_rate());
         let end_sample = seconds_to_samples(end_seconds, self.sample_rate());
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(arr) => {
                 if end_sample > arr.len().get() {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -321,7 +321,7 @@ where
         let start_samples = seconds_to_samples(pad_start_seconds, self.sample_rate());
         let end_samples = seconds_to_samples(pad_end_seconds, self.sample_rate());
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(arr) => {
                 let n = arr.len().get();
                 let total = start_samples + n + end_samples;
@@ -389,7 +389,7 @@ where
         }
 
         let target_num_samples_seconds: f64 =
-            samples_to_seconds(target_num_samples, self.sample_rate.get());
+            samples_to_seconds(target_num_samples, self.sample_rate().get());
 
         self.pad_to_duration(target_num_samples_seconds, pad_value, PadSide::Right)
     }
@@ -441,7 +441,7 @@ where
         }
 
         let total_target_samples =
-            seconds_to_samples(target_duration_seconds, self.sample_rate.get());
+            seconds_to_samples(target_duration_seconds, self.sample_rate().get());
         let current_samples = self.samples_per_channel().get();
         let total_padding_samples = total_target_samples - current_samples;
 
@@ -451,8 +451,8 @@ where
         };
 
         let padded = self.pad(
-            pad_start_samples as f64 / f64::from(self.sample_rate.get()),
-            pad_end_samples as f64 / f64::from(self.sample_rate.get()),
+            pad_start_samples as f64 / f64::from(self.sample_rate().get()),
+            pad_end_samples as f64 / f64::from(self.sample_rate().get()),
             pad_value,
         )?;
 
@@ -499,7 +499,7 @@ where
             )));
         }
 
-        let segment_samples = seconds_to_samples(segment_duration_seconds, self.sample_rate.get());
+        let segment_samples = seconds_to_samples(segment_duration_seconds, self.sample_rate().get());
         let total_samples = self.samples_per_channel().get();
 
         if segment_samples > total_samples {
@@ -515,7 +515,7 @@ where
         while start < total_samples {
             let end = (start + segment_samples).min(total_samples);
 
-            match &self.data {
+            match self.data() {
                 AudioData::Mono(arr) => {
                     let segment = arr.slice(s![start..end]).to_owned();
                     segments.push(AudioSamples::new_mono(segment, self.sample_rate())?);
@@ -725,7 +725,7 @@ where
         let num_samples = first.samples_per_channel();
         let mut stacked = Array2::zeros((num_sources.get(), num_samples.get()));
         for (i, source) in sources.iter().enumerate() {
-            if let AudioData::Mono(arr) = &source.data {
+            if let AudioData::Mono(arr) = source.data() {
                 stacked.slice_mut(s![i, ..]).assign(&arr.view());
             }
         }
@@ -807,18 +807,18 @@ where
             &vec![1.0 / sources.len().get() as f64; sources.len().get()]
         };
 
-        match &first.data {
+        match first.data() {
             AudioData::Mono(_) => {
                 let mut result = first.clone();
-                if let AudioData::Mono(result_arr) = &mut result.data {
-                    if let AudioData::Mono(_first_arr) = &first.data {
+                if let AudioData::Mono(result_arr) = result.data_mut() {
+                    if let AudioData::Mono(_first_arr) = first.data() {
                         let weight: T = mix_weights[0].convert_to();
                         result_arr.mapv_inplace(|x| x * weight);
                     }
 
                     // Add remaining sources
                     for (i, source) in sources.iter().skip(1).enumerate() {
-                        if let AudioData::Mono(source_arr) = &source.data {
+                        if let AudioData::Mono(source_arr) = source.data() {
                             let weight: T = mix_weights[i + 1].convert_to();
                             for (r, s) in result_arr.iter_mut().zip(source_arr.iter()) {
                                 *r += *s * weight;
@@ -831,16 +831,16 @@ where
             AudioData::Multi(_) => {
                 let mut result = first.clone();
 
-                if let AudioData::Multi(result_arr) = &mut result.data {
+                if let AudioData::Multi(result_arr) = result.data_mut() {
                     // Start with first source * weight
-                    if let AudioData::Multi(_first_arr) = &first.data {
+                    if let AudioData::Multi(_first_arr) = first.data() {
                         let weight: T = mix_weights[0].convert_to();
                         result_arr.mapv_inplace(|x| x * weight);
                     }
 
                     // Add remaining sources
                     for (i, source) in sources.iter().skip(1).enumerate() {
-                        if let AudioData::Multi(source_arr) = &source.data {
+                        if let AudioData::Multi(source_arr) = source.data() {
                             let weight: T = mix_weights[i + 1].convert_to();
                             for (r, s) in result_arr.iter_mut().zip(source_arr.iter()) {
                                 *r += *s * weight;
@@ -903,7 +903,7 @@ where
         // gets its own tight inner loop that LLVM can auto-vectorise.
         macro_rules! apply_fade_in {
             ($gain:expr) => {{
-                match &mut self.data {
+                match self.data_mut() {
                     AudioData::Mono(arr) => {
                         apply_gain_to_slice(&mut arr.as_slice_mut()[..n], step, 0.0, $gain);
                     }
@@ -987,7 +987,7 @@ where
 
         macro_rules! apply_fade_out {
             ($gain:expr) => {{
-                match &mut self.data {
+                match self.data_mut() {
                     AudioData::Mono(arr) => {
                         apply_gain_to_slice(
                             &mut arr.as_slice_mut()[start..start + n],
@@ -1061,7 +1061,7 @@ where
             return Ok(self.clone().into_owned());
         }
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(arr) => {
                 let mut repeated = Array1::zeros(arr.len().get() * count);
                 for i in 0..count {
@@ -1118,7 +1118,7 @@ where
         // dB = 20 * log10(x)  =>  x = 10^(dB / 20)
         let threshold_lin: f64 = 10.0f64.powf(threshold_db / 20.0);
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(arr) => {
                 // Find first non-silent sample
                 let mut start = 0usize;
@@ -1245,7 +1245,7 @@ where
     ///   pitch shift, etc.).
     #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
     fn perturb_in_place(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()> {
-        config.validate(f64::from(self.sample_rate.get()))?;
+        config.validate(f64::from(self.sample_rate().get()))?;
         // Apply perturbation based on seed or use thread-local randomness
         if let Some(seed) = config.seed {
             use rand::{SeedableRng, rngs::StdRng};
@@ -1298,7 +1298,7 @@ where
         let sr = self.sample_rate().get();
         let min_silence_samples = (min_silence_duration_seconds * f64::from(sr)).round() as usize;
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(arr) => {
                 let mut segments: Vec<(usize, usize)> = Vec::new();
                 let mut in_silence = true;
@@ -1642,25 +1642,25 @@ where
     // Generate noise based on color
     let noise_audio: AudioSamples<T> = match noise_color {
         NoiseColor::White => {
-            let mut noise = white_noise(duration, audio.sample_rate, target_noise_rms, None);
+            let mut noise = white_noise(duration, audio.sample_rate(), target_noise_rms, None);
             // Use custom RNG for deterministic results
             apply_custom_noise_to_audio(&mut noise, target_noise_rms, rng);
             noise
         }
         NoiseColor::Pink => {
-            let mut noise = pink_noise(duration, audio.sample_rate, target_noise_rms, None);
+            let mut noise = pink_noise(duration, audio.sample_rate(), target_noise_rms, None);
             apply_custom_noise_to_audio(&mut noise, target_noise_rms, rng);
             noise
         }
-        NoiseColor::Brown => match &audio.data {
+        NoiseColor::Brown => match audio.data() {
             AudioData::Mono(_) => {
-                brown_noise(duration, audio.sample_rate, 0.02, target_noise_rms, None)
+                brown_noise(duration, audio.sample_rate(), 0.02, target_noise_rms, None)
             }
             AudioData::Multi(arr) => {
                 let mut noise_arrays = Vec::new();
                 for _ in 0..arr.nrows().get() {
                     let noise =
-                        brown_noise(duration, audio.sample_rate, 0.02, target_noise_rms, None);
+                        brown_noise(duration, audio.sample_rate(), 0.02, target_noise_rms, None);
                     noise_arrays.push(noise);
                 }
                 // safety: noise_arrays is guaranteed non-empty because arr.nrows() > 0 for valid multi-channel audio
@@ -1671,7 +1671,7 @@ where
     };
 
     // Add noise to signal
-    match (&mut audio.data, &noise_audio.data) {
+    match (audio.data_mut(), noise_audio.data()) {
         (AudioData::Mono(signal), AudioData::Mono(noise)) => {
             for (s, n) in signal.iter_mut().zip(noise.iter()) {
                 *s += *n;
@@ -1701,7 +1701,7 @@ where
     T: StandardSample,
 {
     use rand::RngExt;
-    match &mut noise.data {
+    match noise.data_mut() {
         AudioData::Mono(arr) => {
             for sample in arr.iter_mut() {
                 let random_value: f64 = (rng.random_range(0.0..1.0) - 0.5) * 2.0;
@@ -1735,7 +1735,7 @@ pub fn apply_random_gain_<T, R>(
     let gain_db = rng.random_range(min_gain_db..=max_gain_db);
     let gain_linear: f64 = 10.0f64.powf(gain_db / 20.0);
 
-    match &mut audio.data {
+    match audio.data_mut() {
         AudioData::Mono(arr) => {
             for sample in arr.iter_mut() {
                 let sample_f: f64 = (*sample).convert_to();
@@ -1838,7 +1838,7 @@ where
     let audio_owned = audio.clone().into_owned();
 
     // Perform pitch shifting and get the result
-    let shifted: AudioSamples<'static, T> = match &audio_owned.data {
+    let shifted: AudioSamples<'static, T> = match audio_owned.data() {
         AudioData::Mono(_) => {
             // Process mono audio directly
             phase_vocoder_pitch_shift(
@@ -1894,7 +1894,7 @@ where
     };
 
     // Replace audio data using replace_with_vec
-    match shifted.data {
+    match shifted.into_data_borrowed() {
         AudioData::Mono(arr) => {
             let vec_data: Vec<T> = arr
                 .as_slice()
@@ -2124,7 +2124,7 @@ mod tests {
 
         let reversed = audio.reverse();
 
-        if let AudioData::Mono(arr) = &reversed.data {
+        if let AudioData::Mono(arr) = reversed.data() {
             let expected = vec![5.0, 4.0, 3.0, 2.0, 1.0];
             // Convert to vec for comparison since array might not be contiguous
             let actual: Vec<f32> = arr.iter().cloned().collect();
@@ -2154,7 +2154,7 @@ mod tests {
 
         assert_eq!(padded.samples_per_channel().get(), 1000 + 4410 + 4410);
 
-        if let AudioData::Mono(arr) = &padded.data {
+        if let AudioData::Mono(arr) = padded.data() {
             // Check padding is zeros
             assert_eq!(arr[0], 0.0);
             assert_eq!(arr[arr.len().get() - 1], 0.0);
@@ -2189,7 +2189,7 @@ mod tests {
 
         assert_eq!(concatenated.samples_per_channel().get(), 2000);
 
-        if let AudioData::Mono(arr) = &concatenated.data {
+        if let AudioData::Mono(arr) = concatenated.data() {
             assert_eq!(arr[500], 1.0); // First segment
             assert_eq!(arr[1500], 2.0); // Second segment
         }
@@ -2204,7 +2204,7 @@ mod tests {
         let v = NonEmptyVec::new(vec![audio1, audio2]).unwrap();
         let mixed = AudioSamples::mix(&v, None).unwrap();
 
-        if let AudioData::Mono(arr) = &mixed.data {
+        if let AudioData::Mono(arr) = mixed.data() {
             // Equal weighting: (1.0 + 2.0) / 2 = 1.5
             assert!((arr[0] - 1.5).abs() < 1e-6);
         }
@@ -2218,7 +2218,7 @@ mod tests {
         // Test fade in
         audio.fade_in(0.01, FadeCurve::Linear).unwrap(); // 0.01s fade = 441 samples
 
-        if let AudioData::Mono(arr) = &audio.data {
+        if let AudioData::Mono(arr) = audio.data() {
             assert_eq!(arr[0], 0.0); // Should start at 0
             assert!(arr[220] > 0.0 && arr[220] < 1.0); // Should be partially faded (middle of fade)
             // The fade applies to indices 0..441, so arr[440] should be close to but not exactly 1.0
@@ -2231,7 +2231,7 @@ mod tests {
 
         audio.fade_out(0.01, FadeCurve::Linear).unwrap();
 
-        if let AudioData::Mono(arr) = &audio.data {
+        if let AudioData::Mono(arr) = audio.data() {
             // The last sample should be very close to 0 but not exactly 0 due to discrete sampling
             assert!(arr[arr.len().get() - 1] < 0.01); // Should end very close to 0
             let fade_start = arr.len().get() - 441;
@@ -2251,7 +2251,7 @@ mod tests {
             NonZeroUsize::new(6).unwrap()
         ); // 2 * 3
 
-        if let AudioData::Mono(arr) = &repeated.data {
+        if let AudioData::Mono(arr) = repeated.data() {
             let expected = vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0];
             assert_eq!(arr.as_slice().unwrap(), &expected);
         }
@@ -2275,7 +2275,7 @@ mod tests {
             NonZeroUsize::new(200).unwrap()
         ); // Samples 400-599
 
-        if let AudioData::Mono(arr) = &trimmed.data {
+        if let AudioData::Mono(arr) = trimmed.data() {
             assert!(arr.iter().all(|&x| x == 1.0));
         }
     }
@@ -2338,7 +2338,7 @@ mod tests {
         let v = NonEmptyVec::new(vec![audio1, audio2, audio3]).unwrap();
         let mixed = AudioSamples::mix(&v, Some(&weights)).unwrap();
 
-        if let AudioData::Mono(arr) = &mixed.data {
+        if let AudioData::Mono(arr) = mixed.data() {
             // 1.0*0.5 + 2.0*0.3 + 3.0*0.2 = 0.5 + 0.6 + 0.6 = 1.7
             assert!((arr[0] - 1.7).abs() < 1e-6);
         }
@@ -2361,7 +2361,7 @@ mod tests {
 
         // The original signal should be different from the noisy signal
         if let (AudioData::Mono(original), AudioData::Mono(noisy)) =
-            (&audio.data, &noisy_audio.data)
+            (audio.data(), noisy_audio.data())
         {
             assert_ne!(original[0], noisy[0]);
             assert_eq!(original.len(), noisy.len());
@@ -2379,7 +2379,7 @@ mod tests {
         let config =
             PerturbationConfig::with_seed(PerturbationMethod::random_gain(-3.0, 3.0), 54321);
 
-        let original_sample = if let AudioData::Mono(arr) = &audio.data {
+        let original_sample = if let AudioData::Mono(arr) = audio.data() {
             arr[0]
         } else {
             panic!("Expected mono audio");
@@ -2387,7 +2387,7 @@ mod tests {
 
         audio.perturb_in_place(&config).unwrap();
 
-        let gained_sample = if let AudioData::Mono(arr) = &audio.data {
+        let gained_sample = if let AudioData::Mono(arr) = audio.data() {
             arr[0]
         } else {
             panic!("Expected mono audio");
@@ -2411,7 +2411,7 @@ mod tests {
 
         // After high-pass filtering, the signal should be modified
         // This is more of a smoke test to ensure no crashes
-        if let AudioData::Mono(arr) = &audio.data {
+        if let AudioData::Mono(arr) = audio.data() {
             assert_eq!(arr.len(), NonZeroUsize::new(100).unwrap());
         }
     }
@@ -2428,7 +2428,7 @@ mod tests {
         let result2 = audio.perturb(&config).unwrap();
 
         // Results should be identical due to fixed seed
-        if let (AudioData::Mono(arr1), AudioData::Mono(arr2)) = (&result1.data, &result2.data) {
+        if let (AudioData::Mono(arr1), AudioData::Mono(arr2)) = (result1.data(), result2.data()) {
             for (a, b) in arr1.iter().zip(arr2.iter()) {
                 assert_eq!(a, b);
             }

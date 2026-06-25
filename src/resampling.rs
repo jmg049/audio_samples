@@ -649,7 +649,7 @@ where
         )));
     }
 
-    let input_sample_rate = audio.sample_rate.get();
+    let input_sample_rate = audio.sample_rate().get();
     let target_sample_rate = (f64::from(input_sample_rate) * ratio).round() as usize;
     let target_sample_rate = SampleRate::new(target_sample_rate as u32).ok_or_else(|| {
         AudioSampleError::Parameter(ParameterError::invalid_value(

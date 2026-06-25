@@ -750,7 +750,7 @@ where
         // gains nothing. We use Direct Form II Transposed biquad sections:
         // stack-allocated state, pre-normalised coefficients, no division.
         match filter_repr {
-            FilterRepresentation::Single(mut bq) => match &mut self.data {
+            FilterRepresentation::Single(mut bq) => match self.data_mut() {
                 AudioData::Mono(samples) => {
                     for sample in samples.iter_mut() {
                         let x: f64 = (*sample).convert_to();
@@ -768,7 +768,7 @@ where
                     }
                 }
             },
-            FilterRepresentation::Cascade(mut bqs) => match &mut self.data {
+            FilterRepresentation::Cascade(mut bqs) => match self.data_mut() {
                 AudioData::Mono(samples) => {
                     // Per-sample-all-sections: each sample flows through every biquad
                     // while staying in registers, so the buffer is touched only once.

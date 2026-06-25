@@ -85,13 +85,13 @@ where
         if self.num_channels().get() == 1 {
             // return a borrowed version of self to avoid cloning
             return Ok(AudioSamples::from_borrowed(
-                self.data.clone().into_owned(),
+                self.data().clone().into_owned(),
                 self.sample_rate(),
             ));
         }
 
         match method {
-            MonoConversionMethod::Average => match &self.data {
+            MonoConversionMethod::Average => match self.data() {
                 AudioData::Mono(_) => {
                     unreachable!("We check for mono at the start of the function")
                 }
@@ -141,7 +141,7 @@ where
                     }
                 }
             },
-            MonoConversionMethod::Left => match &self.data {
+            MonoConversionMethod::Left => match self.data() {
                 AudioData::Mono(_) => {
                     // This should not happen as we check for mono above
                     unreachable!("We check for mono at the start of the function")
@@ -151,7 +151,7 @@ where
                     Ok(AudioSamples::new_mono(left_channel, self.sample_rate())?)
                 }
             },
-            MonoConversionMethod::Right => match &self.data {
+            MonoConversionMethod::Right => match self.data() {
                 AudioData::Mono(_) => {
                     // This should not happen as we check for mono above
                     unreachable!("We check for mono at the start of the function")
@@ -162,7 +162,7 @@ where
                 }
             },
             MonoConversionMethod::Weighted(weights) => {
-                match &self.data {
+                match self.data() {
                     AudioData::Mono(_) => Ok(self.clone().into_owned()),
                     AudioData::Multi(multi) => {
                         if weights.len() != multi.nrows().get() {
@@ -201,7 +201,7 @@ where
                 }
             }
             MonoConversionMethod::Center => {
-                match &self.data {
+                match self.data() {
                     AudioData::Mono(_) => Ok(self.clone().into_owned()),
                     AudioData::Multi(multi) => {
                         let num_channels = multi.nrows().get();
@@ -287,7 +287,7 @@ where
         method: StereoConversionMethod,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
         match method {
-            StereoConversionMethod::Duplicate => match &self.data {
+            StereoConversionMethod::Duplicate => match self.data() {
                 AudioData::Mono(mono_data) => {
                     let stereo_data =
                         ndarray::stack(Axis(0), &[mono_data.view(), mono_data.view()]).map_err(
@@ -309,7 +309,7 @@ where
                 let left_gain = num_traits::Float::cos(pan_radians);
                 let right_gain = num_traits::Float::sin(pan_radians);
 
-                match &self.data {
+                match self.data() {
                     AudioData::Mono(mono) => {
                         let samples_per_channel = mono.len().get();
                         let mut left_channel = vec![T::default(); samples_per_channel];
@@ -388,7 +388,7 @@ where
         }
 
         // Get mono data (either directly or by extracting first channel)
-        let mono_data = match &self.data {
+        let mono_data = match self.data() {
             AudioData::Mono(data) => data.as_view().to_owned(),
             AudioData::Multi(data) => {
                 // For multi-channel input, use first channel
@@ -449,7 +449,7 @@ where
                 "Channel index must be within available channels",
             )));
         }
-        match &self.data {
+        match self.data() {
             AudioData::Mono(_) => Ok(self.clone().into_owned()),
             AudioData::Multi(data) => {
                 let channel: Array1<T> =
@@ -500,7 +500,7 @@ where
                 "Channel index must be within available channels",
             )));
         }
-        match &self.data {
+        match self.data() {
             AudioData::Mono(data) => {
                 let channel = data.view();
                 Ok(AudioSamples::new(
@@ -557,7 +557,7 @@ where
             )));
         }
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(_) => Ok(()), // No channels to swap in mono
             AudioData::Multi(data) => {
                 data.swap_axes(channel1 as usize, channel2 as usize);
@@ -597,7 +597,7 @@ where
     /// stereo.pan(0.5).unwrap();
     /// ```
     fn pan(&mut self, pan_value: f64) -> AudioSampleResult<()> {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(_) => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "audio_data",
                 "Cannot pan mono audio",
@@ -666,7 +666,7 @@ where
     /// stereo.balance(-0.3).unwrap();
     /// ```
     fn balance(&mut self, balance: f64) -> AudioSampleResult<()> {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(_) => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "audio_data",
                 "Cannot balance mono audio",
@@ -741,7 +741,7 @@ where
     where
         F: FnMut(T) -> T,
     {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(array_base) => {
                 array_base.mapv_inplace(func);
             }
@@ -869,7 +869,7 @@ where
     // Interleave loop
     for i in 0..samples_per_channel {
         for ch in channels {
-            let slice = ch.data.as_slice().ok_or_else(|| {
+            let slice = ch.data().as_slice().ok_or_else(|| {
                 AudioSampleError::Layout(LayoutError::NonContiguous {
                     operation: "channel data access".to_string(),
                     layout_type: "non-contiguous".to_string(),
@@ -968,13 +968,13 @@ fn interleave_i16_simd_impl<'a>(
 
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
-        let left_data = channels[0].data.as_slice().ok_or_else(|| {
+        let left_data = channels[0].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "left channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
             })
         })?;
-        let right_data = channels[1].data.as_slice().ok_or_else(|| {
+        let right_data = channels[1].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "right channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
@@ -1017,7 +1017,7 @@ fn interleave_i16_simd_impl<'a>(
         // For non-stereo, fallback to scalar implementation
         for i in 0..samples_per_channel {
             for ch in channels {
-                let slice = ch.data.as_slice().ok_or_else(|| {
+                let slice = ch.data().as_slice().ok_or_else(|| {
                     AudioSampleError::Layout(LayoutError::NonContiguous {
                         operation: "channel data access".to_string(),
                         layout_type: "non-contiguous".to_string(),
@@ -1046,13 +1046,13 @@ fn interleave_i32_simd_impl<'a>(
 
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
-        let left_data = channels[0].data.as_slice().ok_or_else(|| {
+        let left_data = channels[0].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "left channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
             })
         })?;
-        let right_data = channels[1].data.as_slice().ok_or_else(|| {
+        let right_data = channels[1].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "right channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
@@ -1095,7 +1095,7 @@ fn interleave_i32_simd_impl<'a>(
         // For non-stereo, fallback to scalar implementation
         for i in 0..samples_per_channel {
             for ch in channels {
-                let slice = ch.data.as_slice().ok_or_else(|| {
+                let slice = ch.data().as_slice().ok_or_else(|| {
                     AudioSampleError::Layout(LayoutError::NonContiguous {
                         operation: "channel data access".to_string(),
                         layout_type: "non-contiguous".to_string(),
@@ -1124,13 +1124,13 @@ fn interleave_f32_simd_impl<'a>(
 
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
-        let left_data = channels[0].data.as_slice().ok_or_else(|| {
+        let left_data = channels[0].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "left channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
             })
         })?;
-        let right_data = channels[1].data.as_slice().ok_or_else(|| {
+        let right_data = channels[1].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "right channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
@@ -1173,7 +1173,7 @@ fn interleave_f32_simd_impl<'a>(
         // For non-stereo, fallback to scalar implementation
         for i in 0..samples_per_channel {
             for ch in channels {
-                let slice = ch.data.as_slice().ok_or_else(|| {
+                let slice = ch.data().as_slice().ok_or_else(|| {
                     AudioSampleError::Layout(LayoutError::NonContiguous {
                         operation: "channel data access".to_string(),
                         layout_type: "non-contiguous".to_string(),
@@ -1202,13 +1202,13 @@ fn interleave_f64_simd_impl<'a>(
 
     // Optimized case for stereo (2 channels)
     if num_channels == 2 {
-        let left_data = channels[0].data.as_slice().ok_or_else(|| {
+        let left_data = channels[0].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "left channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
             })
         })?;
-        let right_data = channels[1].data.as_slice().ok_or_else(|| {
+        let right_data = channels[1].data().as_slice().ok_or_else(|| {
             AudioSampleError::Layout(LayoutError::NonContiguous {
                 operation: "right channel access".to_string(),
                 layout_type: "non-contiguous".to_string(),
@@ -1251,7 +1251,7 @@ fn interleave_f64_simd_impl<'a>(
         // For non-stereo, fallback to scalar implementation
         for i in 0..samples_per_channel {
             for ch in channels {
-                let slice = ch.data.as_slice().ok_or_else(|| {
+                let slice = ch.data().as_slice().ok_or_else(|| {
                     AudioSampleError::Layout(LayoutError::NonContiguous {
                         operation: "channel data access".to_string(),
                         layout_type: "non-contiguous".to_string(),

@@ -622,7 +622,7 @@ where
         let lookahead_samples = lookahead_samples.max(1);
         // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
         let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(samples) => {
                 let mut envelope_follower = EnvelopeFollower::new(
                     config.attack_ms,
@@ -811,7 +811,7 @@ where
         let lookahead_samples = lookahead_samples.max(1);
         // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
         let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(samples) => {
                 let mut envelope_follower = EnvelopeFollower::new(
                     config.attack_ms,
@@ -1018,7 +1018,7 @@ where
         // This is a simplified implementation - a full implementation would include
         // filtering of the sidechain signal according to the configuration
 
-        match (&mut self.data, &sidechain_signal.data) {
+        match (self.data_mut(), sidechain_signal.data()) {
             (AudioData::Mono(main_samples), AudioData::Mono(sc_samples)) => {
                 if main_samples.len() != sc_samples.len() {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -1166,7 +1166,7 @@ where
         }
 
         // Similar to compressor sidechain but with limiting gain calculation
-        match (&mut self.data, &sidechain_signal.data) {
+        match (self.data_mut(), sidechain_signal.data()) {
             (AudioData::Mono(main_samples), AudioData::Mono(sc_samples)) => {
                 if main_samples.len() != sc_samples.len() {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -1344,7 +1344,7 @@ where
     fn get_gain_reduction(&self, config: &CompressorConfig) -> AudioSampleResult<Vec<f64>> {
         let sample_rate = self.sample_rate_hz();
 
-        match &self.data {
+        match self.data() {
             AudioData::Mono(samples) => {
                 let mut envelope_follower = EnvelopeFollower::new(
                     config.attack_ms,
@@ -1462,7 +1462,7 @@ where
         // Gate is essentially a compressor with inverted threshold logic
         // and very high ratio for signals below threshold
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(samples) => {
                 let mut envelope_follower = EnvelopeFollower::new(
                     attack_ms,
@@ -1583,7 +1583,7 @@ where
         let sample_rate = self.sample_rate_hz();
         // Expander increases dynamic range by expanding signals below threshold
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(samples) => {
                 let mut envelope_follower = EnvelopeFollower::new(
                     attack_ms,
@@ -1928,7 +1928,7 @@ mod tests {
         // Threshold (-40 dBFS) far below the signal (~ -1.9 dBFS).
         audio.apply_expander(-40.0, 2.0, 1.0, 10.0).unwrap();
 
-        if let AudioData::Mono(samples) = &audio.data {
+        if let AudioData::Mono(samples) = audio.data() {
             // Check the settled tail: gain must be ~1.0 (unchanged), not 0.891.
             for &s in samples.iter().skip(2048) {
                 let v: f64 = s.convert_to();
@@ -1961,7 +1961,7 @@ mod tests {
         );
 
         // The audio must be untouched (no NaN/inf written) when validation fails.
-        if let AudioData::Mono(samples) = &gate_audio.data {
+        if let AudioData::Mono(samples) = gate_audio.data() {
             assert!(samples.iter().all(|&s| {
                 let v: f64 = s.convert_to();
                 v.is_finite()

@@ -668,7 +668,7 @@ where
         let samples_slice = unsafe { NonEmptySlice::new_unchecked(samples_slice) };
         spectrograms::cqt(
             samples_slice,
-            f64::from(self.sample_rate.get()),
+            f64::from(self.sample_rate().get()),
             params,
             hop_size,
         )

@@ -156,7 +156,7 @@ where
         let mut filter = IirFilter::new(b_coeffs, a_coeffs);
 
         // Apply filter to audio data
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(_) => {
                 let mut working_samples = self.as_float();
                 let Some(mono_self) = self.as_mono_mut() else {
@@ -856,7 +856,7 @@ mod tests {
     fn test_parametric_eq_bypass() {
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(non_empty_vec![1.0f32, 0.5, -0.5], sample_rate!(44100));
-        let original_samples = audio.data.clone();
+        let original_samples = audio.data().clone();
 
         let mut eq = ParametricEq::new();
         eq.add_band(EqBand::peak(1000.0, 10.0, 2.0)); // Large gain
@@ -866,7 +866,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Audio should be unchanged when bypassed
-        match (&audio.data, &original_samples) {
+        match (audio.data(), &original_samples) {
             (AudioData::Mono(new), AudioData::Mono(orig)) => {
                 assert_eq!(new, orig);
             }

@@ -345,7 +345,7 @@ where
             // Create temporary AudioSamples for this window
             let window_data = window.to_non_empty_vec();
             let window_audio =
-                AudioSamples::from_mono_vec(window_data, self.sample_rate).into_owned();
+                AudioSamples::from_mono_vec(window_data, self.sample_rate()).into_owned();
             let frequency: Option<f64> = match method {
                 PitchDetectionMethod::Yin => {
                     window_audio.detect_pitch_yin(threshold, min_frequency, max_frequency)?
