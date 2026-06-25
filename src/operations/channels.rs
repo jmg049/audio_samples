@@ -600,7 +600,16 @@ where
         match self.data_mut() {
             AudioData::Mono(_) => Ok(()), // No channels to swap in mono
             AudioData::Multi(data) => {
-                data.swap_axes(channel1, channel2);
+                // Swap the two channel rows element-wise. NOT `swap_axes`, which
+                // would transpose the (channels x samples) array and corrupt its
+                // shape rather than exchange the two channels.
+                if channel1 != channel2 {
+                    let mut view = data.view_mut();
+                    let cols = view.ncols();
+                    for c in 0..cols {
+                        view.swap((channel1, c), (channel2, c));
+                    }
+                }
                 Ok(())
             }
         }
@@ -1503,6 +1512,28 @@ mod tests {
                 assert_eq!(b[(ch, s)], p[(ch, s)]);
             }
         }
+    }
+
+    #[test]
+    fn test_swap_channels_actually_swaps() {
+        // Regression: swap_channels previously used swap_axes (a transpose),
+        // corrupting the (channels x samples) shape instead of exchanging rows.
+        let mut data = ndarray::Array2::zeros((2, 3));
+        data[[0, 0]] = 1.0f32;
+        data[[0, 1]] = 2.0;
+        data[[0, 2]] = 3.0;
+        data[[1, 0]] = 10.0;
+        data[[1, 1]] = 20.0;
+        data[[1, 2]] = 30.0;
+        let mut audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        audio.swap_channels_in_place(0, 1).unwrap();
+
+        let m = audio.as_multi_channel().unwrap();
+        // Shape must be preserved (2 channels x 3 samples), NOT transposed.
+        assert_eq!(m.shape(), &[2, 3]);
+        // Channel 0 now holds the old channel-1 data and vice versa.
+        assert_eq!([m[(0, 0)], m[(0, 1)], m[(0, 2)]], [10.0f32, 20.0, 30.0]);
+        assert_eq!([m[(1, 0)], m[(1, 1)], m[(1, 2)]], [1.0f32, 2.0, 3.0]);
     }
 
     #[test]
