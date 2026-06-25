@@ -31,7 +31,9 @@
 use non_empty_slice::NonEmptySlice;
 
 use crate::operations::traits::AudioDynamicRange;
-use crate::operations::types::{CompressorConfig, DynamicRangeMethod, KneeType, LimiterConfig};
+use crate::operations::types::{
+    CompressorConfig, DynamicRangeMethod, ExpanderConfig, GateConfig, KneeType, LimiterConfig,
+};
 use crate::repr::AudioData;
 use crate::traits::StandardSample;
 use crate::utils::audio_math::{
@@ -80,6 +82,8 @@ pub struct EnvelopeFollower {
     rms_window_size: usize,
     /// RMS window sum
     rms_sum: f64,
+    /// Detection method chosen at construction time
+    detection_method: DynamicRangeMethod,
 }
 
 impl EnvelopeFollower {
@@ -145,6 +149,7 @@ impl EnvelopeFollower {
             rms_window: VecDeque::with_capacity(rms_window_size),
             rms_window_size,
             rms_sum: 0.0,
+            detection_method,
         }
     }
 
@@ -154,13 +159,13 @@ impl EnvelopeFollower {
     /// then smoothed using the attack coefficient when rising and the release coefficient
     /// when falling.
     ///
+    /// The detection algorithm is the one supplied to [`new`][EnvelopeFollower::new];
+    /// it is not chosen per call.
+    ///
     /// # Arguments
     ///
     /// - `input` – The input sample value. The follower tracks amplitude, so any
     ///   numeric scale is accepted.
-    /// - `detection_method` – Detection algorithm to apply. `Peak` uses the absolute
-    ///   value; `Rms` computes a windowed root-mean-square; `Hybrid` takes the maximum
-    ///   of peak and RMS.
     ///
     /// # Returns
     ///
@@ -173,12 +178,12 @@ impl EnvelopeFollower {
     /// use audio_samples::operations::types::DynamicRangeMethod;
     ///
     /// let mut follower = EnvelopeFollower::new(1.0, 10.0, 44100.0, DynamicRangeMethod::Peak);
-    /// let level = follower.process(0.5, DynamicRangeMethod::Peak);
+    /// let level = follower.process(0.5);
     /// assert!(level > 0.0);
     /// ```
     #[inline]
-    pub fn process(&mut self, input: f64, detection_method: DynamicRangeMethod) -> f64 {
-        let detector_value = match detection_method {
+    pub fn process(&mut self, input: f64) -> f64 {
+        let detector_value = match self.detection_method {
             DynamicRangeMethod::Peak => input.abs(),
             DynamicRangeMethod::Rms => {
                 // Add new sample to RMS window
@@ -237,6 +242,20 @@ impl EnvelopeFollower {
         self.envelope
     }
 
+    /// Overrides the detection method used by [`process`][EnvelopeFollower::process].
+    ///
+    /// The detection method is normally fixed at construction. This setter exists
+    /// for callers that reuse a single configured follower across detection modes
+    /// (for example envelope analysis); it does not reset the internal state.
+    ///
+    /// # Arguments
+    ///
+    /// - `detection_method` – The detection algorithm to apply from now on.
+    #[inline]
+    pub fn set_detection_method(&mut self, detection_method: DynamicRangeMethod) {
+        self.detection_method = detection_method;
+    }
+
     /// Resets all internal state to zero.
     ///
     /// Clears the envelope value, detector state, and any accumulated RMS window data.
@@ -250,9 +269,9 @@ impl EnvelopeFollower {
     /// use audio_samples::operations::types::DynamicRangeMethod;
     ///
     /// let mut follower = EnvelopeFollower::new(1.0, 10.0, 44100.0, DynamicRangeMethod::Peak);
-    /// follower.process(0.8, DynamicRangeMethod::Peak);
+    /// follower.process(0.8);
     /// follower.reset();
-    /// let level = follower.process(0.0, DynamicRangeMethod::Peak);
+    /// let level = follower.process(0.0);
     /// assert_eq!(level, 0.0);
     /// ```
     #[inline]
@@ -639,7 +658,7 @@ where
                     let sample_f: f64 = sample.convert_to();
 
                     // Get envelope level
-                    let envelope = envelope_follower.process(sample_f, config.detection_method);
+                    let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
                     // Calculate gain reduction
@@ -709,7 +728,7 @@ where
                         let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
 
                         // Get envelope level
-                        let envelope = envelope_follower.process(sample_f, config.detection_method);
+                        let envelope = envelope_follower.process(sample_f);
                         let envelope_db = linear_to_db(envelope);
 
                         // Calculate gain reduction
@@ -828,7 +847,7 @@ where
                     let sample_f: f64 = sample.convert_to();
 
                     // Get envelope level
-                    let envelope = envelope_follower.process(sample_f, config.detection_method);
+                    let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
                     // Calculate gain reduction
@@ -895,7 +914,7 @@ where
                         let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
 
                         // Get envelope level
-                        let envelope = envelope_follower.process(sample_f, config.detection_method);
+                        let envelope = envelope_follower.process(sample_f);
                         let envelope_db = linear_to_db(envelope);
 
                         // Calculate gain reduction
@@ -1047,7 +1066,7 @@ where
                     let sc_f: f64 = sc_sample.convert_to();
 
                     // Mix between internal and external sidechain
-                    let envelope = envelope_follower.process(sc_f, config.detection_method);
+                    let envelope = envelope_follower.process(sc_f);
                     let envelope_db = linear_to_db(envelope);
 
                     // Calculate gain reduction
@@ -1194,7 +1213,7 @@ where
                 for &sc_sample in sc_samples {
                     let sc_f: f64 = sc_sample.convert_to();
 
-                    let envelope = envelope_follower.process(sc_f, config.detection_method);
+                    let envelope = envelope_follower.process(sc_f);
                     let envelope_db = linear_to_db(envelope);
 
                     // Calculate gain reduction
@@ -1357,7 +1376,7 @@ where
 
                 for &sample in samples {
                     let sample_f: f64 = sample.convert_to();
-                    let envelope = envelope_follower.process(sample_f, config.detection_method);
+                    let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
                     let gain_reduction_db = calculate_compression_gain(
@@ -1387,7 +1406,7 @@ where
 
                 for sample_idx in 0..num_samples {
                     let sample_f: f64 = samples[[0, sample_idx]].convert_to();
-                    let envelope = envelope_follower.process(sample_f, config.detection_method);
+                    let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
                     let gain_reduction_db = calculate_compression_gain(
@@ -1415,13 +1434,8 @@ where
     ///
     /// # Arguments
     ///
-    /// - `threshold_db` – Gate threshold in dBFS. Signals below this level are attenuated.
-    /// - `ratio` – Attenuation ratio below the threshold. Higher values produce more
-    ///   aggressive gating; values near 1.0 approach unity gain.
-    /// - `attack_ms` – Attack time in milliseconds. Controls how quickly the gate opens
-    ///   when the signal rises above the threshold.
-    /// - `release_ms` – Release time in milliseconds. Controls how quickly the gate
-    ///   closes when the signal falls below the threshold.
+    /// - `config` – Gate parameters (threshold, ratio, attack, release). Use
+    ///   [`GateConfig::new`] or the [`GateConfig::noise_gate`] preset.
     ///
     /// # Returns
     ///
@@ -1429,34 +1443,31 @@ where
     ///
     /// # Errors
     ///
-    /// Currently always returns `Ok`. Future versions may validate parameter ranges.
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails
+    /// [`GateConfig::validate`] (e.g. ratio ≤ 0).
     ///
     /// # Example
     ///
     /// ```
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::GateConfig;
     /// use ndarray::Array1;
     ///
     /// let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Gate at -20 dBFS with 10:1 ratio
-    /// audio.apply_gate_in_place(-20.0, 10.0, 1.0, 10.0).unwrap();
+    /// audio.apply_gate_in_place(&GateConfig::with_params(-20.0, 10.0, 1.0, 10.0)).unwrap();
     /// ```
-    fn apply_gate_in_place(
-        &mut self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-    ) -> AudioSampleResult<()> {
-        // A ratio of zero (or negative) causes a division by zero in the gate
-        // gain computation `(ratio - 1.0) / ratio`, producing NaN/inf output.
-        if ratio <= 0.0 {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "ratio",
-                "Gate ratio must be greater than 0.0",
-            )));
-        }
+    fn apply_gate_in_place(&mut self, config: &GateConfig) -> AudioSampleResult<()> {
+        config.validate()?;
+
+        let GateConfig {
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_ms,
+            ..
+        } = *config;
 
         let sample_rate = self.sample_rate_hz();
         // Gate is essentially a compressor with inverted threshold logic
@@ -1473,7 +1484,7 @@ where
 
                 for sample in samples.iter_mut() {
                     let sample_f: f64 = (*sample).convert_to();
-                    let envelope = envelope_follower.process(sample_f, DynamicRangeMethod::Peak);
+                    let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
                     // Gate logic: attenuate if below threshold
@@ -1505,7 +1516,7 @@ where
                     for sample_idx in 0..num_samples {
                         let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
                         let envelope =
-                            envelope_follower.process(sample_f, DynamicRangeMethod::Peak);
+                            envelope_follower.process(sample_f);
                         let envelope_db = linear_to_db(envelope);
 
                         // Gate logic: attenuate if below threshold
@@ -1537,12 +1548,8 @@ where
     ///
     /// # Arguments
     ///
-    /// - `threshold_db` – Expansion threshold in dBFS. Signals below this level are
-    ///   attenuated.
-    /// - `ratio` – Expansion ratio. Values greater than `1.0` produce increasing
-    ///   attenuation the further the signal falls below the threshold.
-    /// - `attack_ms` – Attack time in milliseconds.
-    /// - `release_ms` – Release time in milliseconds.
+    /// - `config` – Expander parameters (threshold, ratio, attack, release). Use
+    ///   [`ExpanderConfig::new`] or the [`ExpanderConfig::gentle`] preset.
     ///
     /// # Returns
     ///
@@ -1550,35 +1557,31 @@ where
     ///
     /// # Errors
     ///
-    /// Currently always returns `Ok`. Future versions may validate parameter ranges.
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails
+    /// [`ExpanderConfig::validate`] (e.g. ratio ≤ 0).
     ///
     /// # Example
     ///
     /// ```
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::ExpanderConfig;
     /// use ndarray::Array1;
     ///
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Expand at -20 dBFS with 2:1 ratio
-    /// audio.apply_expander_in_place(-20.0, 2.0, 1.0, 10.0).unwrap();
+    /// audio.apply_expander_in_place(&ExpanderConfig::with_params(-20.0, 2.0, 1.0, 10.0)).unwrap();
     /// ```
-    fn apply_expander_in_place(
-        &mut self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-    ) -> AudioSampleResult<()> {
-        // Guard against a zero/negative ratio. The valid expansion domain is
-        // `ratio > 0.0`; values <= 0.0 are nonsensical and mirror the gate's
-        // division-by-zero hazard, so reject them rather than produce garbage.
-        if ratio <= 0.0 {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "ratio",
-                "Expander ratio must be greater than 0.0",
-            )));
-        }
+    fn apply_expander_in_place(&mut self, config: &ExpanderConfig) -> AudioSampleResult<()> {
+        config.validate()?;
+
+        let ExpanderConfig {
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_ms,
+            ..
+        } = *config;
 
         let sample_rate = self.sample_rate_hz();
         // Expander increases dynamic range by expanding signals below threshold
@@ -1594,7 +1597,7 @@ where
 
                 for sample in samples.iter_mut() {
                     let sample_f: f64 = (*sample).convert_to();
-                    let envelope = envelope_follower.process(sample_f, DynamicRangeMethod::Rms);
+                    let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
                     // Expander logic: amplify the difference below threshold
@@ -1625,7 +1628,7 @@ where
 
                     for sample_idx in 0..num_samples {
                         let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
-                        let envelope = envelope_follower.process(sample_f, DynamicRangeMethod::Rms);
+                        let envelope = envelope_follower.process(sample_f);
                         let envelope_db = linear_to_db(envelope);
 
                         // Expander logic: amplify the difference below threshold
@@ -1728,7 +1731,7 @@ mod tests {
         let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        let result = audio.apply_gate_in_place(-20.0, 10.0, 1.0, 10.0);
+        let result = audio.apply_gate_in_place(&GateConfig::with_params(-20.0, 10.0, 1.0, 10.0));
 
         assert!(result.is_ok());
     }
@@ -1738,7 +1741,8 @@ mod tests {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        let result = audio.apply_expander_in_place(-20.0, 2.0, 1.0, 10.0);
+        let result =
+            audio.apply_expander_in_place(&ExpanderConfig::with_params(-20.0, 2.0, 1.0, 10.0));
 
         assert!(result.is_ok());
     }
@@ -1748,8 +1752,8 @@ mod tests {
         let mut envelope = EnvelopeFollower::new(1.0, 10.0, 44100.0, DynamicRangeMethod::Peak);
 
         // Test that envelope responds to input
-        let output1 = envelope.process(0.5, DynamicRangeMethod::Peak);
-        let output2 = envelope.process(0.5, DynamicRangeMethod::Peak);
+        let output1 = envelope.process(0.5);
+        let output2 = envelope.process(0.5);
 
         assert!(output1 > 0.0);
         assert!(output2 > output1); // Should be increasing on attack
@@ -1926,7 +1930,9 @@ mod tests {
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         // Threshold (-40 dBFS) far below the signal (~ -1.9 dBFS).
-        audio.apply_expander_in_place(-40.0, 2.0, 1.0, 10.0).unwrap();
+        audio
+            .apply_expander_in_place(&ExpanderConfig::with_params(-40.0, 2.0, 1.0, 10.0))
+            .unwrap();
 
         if let AudioData::Mono(samples) = audio.data() {
             // Check the settled tail: gain must be ~1.0 (unchanged), not 0.891.
@@ -1944,17 +1950,20 @@ mod tests {
 
     /// Regression test for BUG 4: a `ratio` of `0.0` caused a division by zero
     /// in the gate gain formula `(ratio - 1.0) / ratio`. Both `apply_gate` and
-    /// `apply_expander` must now reject `ratio <= 0.0` with an `Err`.
+    /// `apply_expander` must now reject `ratio <= 0.0` with an `Err`. The
+    /// rejection now lives in `GateConfig::validate` / `ExpanderConfig::validate`.
     #[test]
     fn test_gate_and_expander_reject_zero_ratio() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
 
         let mut gate_audio = AudioSamples::new_mono(data.clone(), sample_rate!(44100)).unwrap();
-        let gate_result = gate_audio.apply_gate_in_place(-20.0, 0.0, 1.0, 10.0);
+        let gate_result =
+            gate_audio.apply_gate_in_place(&GateConfig::with_params(-20.0, 0.0, 1.0, 10.0));
         assert!(gate_result.is_err(), "apply_gate(ratio=0.0) should error");
 
         let mut exp_audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-        let exp_result = exp_audio.apply_expander_in_place(-20.0, 0.0, 1.0, 10.0);
+        let exp_result =
+            exp_audio.apply_expander_in_place(&ExpanderConfig::with_params(-20.0, 0.0, 1.0, 10.0));
         assert!(
             exp_result.is_err(),
             "apply_expander(ratio=0.0) should error"
@@ -1967,6 +1976,42 @@ mod tests {
                 v.is_finite()
             }));
         }
+    }
+
+    #[test]
+    fn test_gate_config_validate_rejects_bad_input() {
+        // Ratio must be > 0.
+        assert!(GateConfig::with_params(-20.0, 0.0, 1.0, 10.0)
+            .validate()
+            .is_err());
+        // Attack out of range.
+        assert!(GateConfig::with_params(-20.0, 10.0, 0.0, 10.0)
+            .validate()
+            .is_err());
+        // Release out of range.
+        assert!(GateConfig::with_params(-20.0, 10.0, 1.0, 0.0)
+            .validate()
+            .is_err());
+        // A valid config passes.
+        assert!(GateConfig::noise_gate().validate().is_ok());
+    }
+
+    #[test]
+    fn test_expander_config_validate_rejects_bad_input() {
+        // Ratio must be > 0.
+        assert!(ExpanderConfig::with_params(-20.0, 0.0, 1.0, 10.0)
+            .validate()
+            .is_err());
+        // Attack out of range.
+        assert!(ExpanderConfig::with_params(-20.0, 2.0, 2000.0, 10.0)
+            .validate()
+            .is_err());
+        // Release out of range.
+        assert!(ExpanderConfig::with_params(-20.0, 2.0, 1.0, 20000.0)
+            .validate()
+            .is_err());
+        // A valid config passes.
+        assert!(ExpanderConfig::gentle().validate().is_ok());
     }
 
     #[test]

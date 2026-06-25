@@ -82,7 +82,7 @@ use crate::operations::onset::{
 };
 
 #[cfg(feature = "parametric-eq")]
-use crate::operations::types::{EqBand, ParametricEq};
+use crate::operations::types::{EqBand, ParametricEq, ThreeBandEqConfig};
 
 #[cfg(feature = "beat-tracking")]
 use crate::operations::beat::{BeatTrackingConfig, BeatTrackingData};
@@ -91,7 +91,7 @@ use crate::operations::beat::{BeatTrackingConfig, BeatTrackingData};
 use crate::operations::types::VadConfig;
 
 #[cfg(feature = "dynamic-range")]
-use crate::operations::types::{CompressorConfig, LimiterConfig};
+use crate::operations::types::{CompressorConfig, ExpanderConfig, GateConfig, LimiterConfig};
 
 #[cfg(feature = "pitch-analysis")]
 use crate::operations::types::PitchDetectionMethod;
@@ -3547,11 +3547,9 @@ where
     ///
     /// - `low_freq` – Low shelf corner frequency in Hz.
     /// - `low_gain` – Low shelf gain in dB.
-    /// - `mid_freq` – Mid peak centre frequency in Hz.
-    /// - `mid_gain` – Mid peak gain in dB.
-    /// - `mid_q` – Mid peak Q factor.
-    /// - `high_freq` – High shelf corner frequency in Hz.
-    /// - `high_gain` – High shelf gain in dB.
+    /// - `config` – Three-band EQ parameters (low/mid/high frequencies and gains,
+    ///   plus the mid Q). Use [`ThreeBandEqConfig::new`] or the
+    ///   [`ThreeBandEqConfig::flat`] preset.
     ///
     /// # Returns
     ///
@@ -3559,53 +3557,37 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Parameter] if any band fails validation
-    /// (e.g. frequency above Nyquist or Q ≤ 0).
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails
+    /// [`ThreeBandEqConfig::validate`] or if any band's frequency exceeds Nyquist.
     ///
     /// # Example
     ///
     /// ```
     /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use audio_samples::operations::types::ThreeBandEqConfig;
     /// use ndarray::Array1;
     ///
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Low shelf -2 dB at 200 Hz, mid peak +3 dB at 1 kHz (Q=2), high shelf +1 dB at 4 kHz
-    /// audio.apply_three_band_eq_in_place(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
+    /// let config = ThreeBandEqConfig::new(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0);
+    /// audio.apply_three_band_eq_in_place(&config).unwrap();
     /// ```
     fn apply_three_band_eq_in_place(
         &mut self,
-        low_freq: f64,
-        low_gain: f64,
-        mid_freq: f64,
-        mid_gain: f64,
-        mid_q: f64,
-        high_freq: f64,
-        high_gain: f64,
+        config: &ThreeBandEqConfig,
     ) -> AudioSampleResult<()>;
 
     /// Applies a three-band EQ, returning a new copy.
     ///
     /// Non-mutating twin of [`apply_three_band_eq_in_place`](Self::apply_three_band_eq_in_place);
     /// leaves `self` unchanged.
-    #[allow(clippy::too_many_arguments)]
-    fn apply_three_band_eq(
-        &self,
-        low_freq: f64,
-        low_gain: f64,
-        mid_freq: f64,
-        mid_gain: f64,
-        mid_q: f64,
-        high_freq: f64,
-        high_gain: f64,
-    ) -> AudioSampleResult<Self>
+    fn apply_three_band_eq(&self, config: &ThreeBandEqConfig) -> AudioSampleResult<Self>
     where
         Self: Sized + Clone,
     {
         let mut out = self.clone();
-        out.apply_three_band_eq_in_place(
-            low_freq, low_gain, mid_freq, mid_gain, mid_q, high_freq, high_gain,
-        )?;
+        out.apply_three_band_eq_in_place(config)?;
         Ok(out)
     }
 
@@ -4029,13 +4011,8 @@ where
     ///
     /// # Arguments
     ///
-    /// - `threshold_db` – Gate threshold in dBFS. Signals below this level are attenuated.
-    /// - `ratio` – Attenuation ratio below the threshold. Higher values produce more
-    ///   aggressive gating; values near 1.0 approach unity gain.
-    /// - `attack_ms` – Attack time in milliseconds. Controls how quickly the gate opens
-    ///   when the signal rises above the threshold.
-    /// - `release_ms` – Release time in milliseconds. Controls how quickly the gate
-    ///   closes when the signal falls below the threshold.
+    /// - `config` – Gate parameters (threshold, ratio, attack, release). Use
+    ///   [`GateConfig::new`] or the [`GateConfig::noise_gate`] preset.
     ///
     /// # Returns
     ///
@@ -4043,43 +4020,33 @@ where
     ///
     /// # Errors
     ///
-    /// Currently always returns `Ok`. Future versions may validate parameter ranges.
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails
+    /// [`GateConfig::validate`] (e.g. ratio ≤ 0).
     ///
     /// # Example
     ///
     /// ```
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::GateConfig;
     /// use ndarray::Array1;
     ///
     /// let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Gate at -20 dBFS with 10:1 ratio
-    /// audio.apply_gate_in_place(-20.0, 10.0, 1.0, 10.0).unwrap();
+    /// audio.apply_gate_in_place(&GateConfig::with_params(-20.0, 10.0, 1.0, 10.0)).unwrap();
     /// ```
-    fn apply_gate_in_place(
-        &mut self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-    ) -> AudioSampleResult<()>;
+    fn apply_gate_in_place(&mut self, config: &GateConfig) -> AudioSampleResult<()>;
 
     /// Attenuates the signal below a threshold (noise gate), returning a new copy.
     ///
     /// Non-mutating twin of [`apply_gate_in_place`](Self::apply_gate_in_place);
     /// leaves `self` unchanged.
-    fn apply_gate(
-        &self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-    ) -> AudioSampleResult<Self>
+    fn apply_gate(&self, config: &GateConfig) -> AudioSampleResult<Self>
     where
         Self: Sized + Clone,
     {
         let mut out = self.clone();
-        out.apply_gate_in_place(threshold_db, ratio, attack_ms, release_ms)?;
+        out.apply_gate_in_place(config)?;
         Ok(out)
     }
 
@@ -4092,12 +4059,8 @@ where
     ///
     /// # Arguments
     ///
-    /// - `threshold_db` – Expansion threshold in dBFS. Signals below this level are
-    ///   attenuated.
-    /// - `ratio` – Expansion ratio. Values greater than `1.0` produce increasing
-    ///   attenuation the further the signal falls below the threshold.
-    /// - `attack_ms` – Attack time in milliseconds.
-    /// - `release_ms` – Release time in milliseconds.
+    /// - `config` – Expander parameters (threshold, ratio, attack, release). Use
+    ///   [`ExpanderConfig::new`] or the [`ExpanderConfig::gentle`] preset.
     ///
     /// # Returns
     ///
@@ -4105,43 +4068,33 @@ where
     ///
     /// # Errors
     ///
-    /// Currently always returns `Ok`. Future versions may validate parameter ranges.
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails
+    /// [`ExpanderConfig::validate`] (e.g. ratio ≤ 0).
     ///
     /// # Example
     ///
     /// ```
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
+    /// use audio_samples::operations::types::ExpanderConfig;
     /// use ndarray::Array1;
     ///
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Expand at -20 dBFS with 2:1 ratio
-    /// audio.apply_expander_in_place(-20.0, 2.0, 1.0, 10.0).unwrap();
+    /// audio.apply_expander_in_place(&ExpanderConfig::with_params(-20.0, 2.0, 1.0, 10.0)).unwrap();
     /// ```
-    fn apply_expander_in_place(
-        &mut self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-    ) -> AudioSampleResult<()>;
+    fn apply_expander_in_place(&mut self, config: &ExpanderConfig) -> AudioSampleResult<()>;
 
     /// Increases dynamic range by expanding below a threshold, returning a new copy.
     ///
     /// Non-mutating twin of [`apply_expander_in_place`](Self::apply_expander_in_place);
     /// leaves `self` unchanged.
-    fn apply_expander(
-        &self,
-        threshold_db: f64,
-        ratio: f64,
-        attack_ms: f64,
-        release_ms: f64,
-    ) -> AudioSampleResult<Self>
+    fn apply_expander(&self, config: &ExpanderConfig) -> AudioSampleResult<Self>
     where
         Self: Sized + Clone,
     {
         let mut out = self.clone();
-        out.apply_expander_in_place(threshold_db, ratio, attack_ms, release_ms)?;
+        out.apply_expander_in_place(config)?;
         Ok(out)
     }
 }

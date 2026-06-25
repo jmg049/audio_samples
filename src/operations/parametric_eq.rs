@@ -36,7 +36,7 @@ use num_traits::FloatConst;
 
 use crate::operations::iir_filtering::IirFilter;
 use crate::operations::traits::AudioParametricEq;
-use crate::operations::types::{EqBand, EqBandType, ParametricEq};
+use crate::operations::types::{EqBand, EqBandType, ParametricEq, ThreeBandEqConfig};
 use crate::traits::StandardSample;
 use crate::utils::audio_math::db_to_amplitude as db_to_linear;
 use crate::{AudioData, AudioSampleError, LayoutError, ParameterError};
@@ -358,13 +358,9 @@ where
     ///
     /// # Arguments
     ///
-    /// - `low_freq` – Low shelf corner frequency in Hz.
-    /// - `low_gain` – Low shelf gain in dB.
-    /// - `mid_freq` – Mid peak centre frequency in Hz.
-    /// - `mid_gain` – Mid peak gain in dB.
-    /// - `mid_q` – Mid peak Q factor.
-    /// - `high_freq` – High shelf corner frequency in Hz.
-    /// - `high_gain` – High shelf gain in dB.
+    /// - `config` – Three-band EQ parameters (low/mid/high frequencies and gains,
+    ///   plus the mid Q). Use [`ThreeBandEqConfig::new`] or the
+    ///   [`ThreeBandEqConfig::flat`] preset.
     ///
     /// # Returns
     ///
@@ -372,33 +368,36 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Parameter] if any band fails validation
-    /// (e.g. frequency above Nyquist or Q ≤ 0).
+    /// Returns [crate::AudioSampleError::Parameter] if the configuration fails
+    /// [`ThreeBandEqConfig::validate`] or if any band's frequency exceeds Nyquist.
     ///
     /// # Example
     ///
     /// ```
     /// use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
+    /// use audio_samples::operations::types::ThreeBandEqConfig;
     /// use ndarray::Array1;
     ///
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Low shelf -2 dB at 200 Hz, mid peak +3 dB at 1 kHz (Q=2), high shelf +1 dB at 4 kHz
-    /// audio.apply_three_band_eq_in_place(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
+    /// let config = ThreeBandEqConfig::new(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0);
+    /// audio.apply_three_band_eq_in_place(&config).unwrap();
     /// ```
     #[inline]
     fn apply_three_band_eq_in_place(
         &mut self,
-        low_freq: f64,
-        low_gain: f64,
-        mid_freq: f64,
-        mid_gain: f64,
-        mid_q: f64,
-        high_freq: f64,
-        high_gain: f64,
+        config: &ThreeBandEqConfig,
     ) -> AudioSampleResult<()> {
+        config.validate()?;
         let eq = ParametricEq::three_band(
-            low_freq, low_gain, mid_freq, mid_gain, mid_q, high_freq, high_gain,
+            config.low_freq,
+            config.low_gain,
+            config.mid_freq,
+            config.mid_gain,
+            config.mid_q,
+            config.high_freq,
+            config.high_gain,
         );
         self.apply_parametric_eq_in_place(&eq)
     }
@@ -793,10 +792,29 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply 3-band EQ: low shelf at 200Hz (-2dB), mid peak at 1kHz (+3dB), high shelf at 4kHz (+1dB)
-        let result = audio.apply_three_band_eq_in_place(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0);
+        let config = ThreeBandEqConfig::new(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0);
+        let result = audio.apply_three_band_eq_in_place(&config);
         assert!(result.is_ok());
 
         // Should apply all three bands
+    }
+
+    #[test]
+    fn test_three_band_eq_config_validate_rejects_bad_input() {
+        // Non-positive frequency.
+        assert!(ThreeBandEqConfig::new(0.0, 0.0, 1000.0, 0.0, 1.0, 4000.0, 0.0)
+            .validate()
+            .is_err());
+        // Mis-ordered frequencies (mid below low).
+        assert!(ThreeBandEqConfig::new(2000.0, 0.0, 1000.0, 0.0, 1.0, 4000.0, 0.0)
+            .validate()
+            .is_err());
+        // Non-positive mid Q.
+        assert!(ThreeBandEqConfig::new(200.0, 0.0, 1000.0, 0.0, 0.0, 4000.0, 0.0)
+            .validate()
+            .is_err());
+        // A valid config passes.
+        assert!(ThreeBandEqConfig::flat().validate().is_ok());
     }
 
     #[test]

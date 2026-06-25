@@ -421,11 +421,17 @@ pub use crate::operations::traits::AudioDecomposition;
 #[cfg(feature = "dynamic-range")]
 pub use crate::operations::traits::AudioDynamicRange;
 
+#[cfg(feature = "dynamic-range")]
+pub use crate::operations::types::{ExpanderConfig, GateConfig};
+
 #[cfg(feature = "iir-filtering")]
 pub use crate::operations::traits::AudioIirFiltering;
 
 #[cfg(feature = "parametric-eq")]
 pub use crate::operations::traits::AudioParametricEq;
+
+#[cfg(feature = "parametric-eq")]
+pub use crate::operations::types::ThreeBandEqConfig;
 
 #[cfg(feature = "pitch-analysis")]
 pub use crate::operations::traits::AudioPitchAnalysis;

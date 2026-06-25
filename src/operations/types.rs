@@ -2258,6 +2258,163 @@ impl Default for ParametricEq {
     }
 }
 
+/// Configuration for a three-band EQ (low shelf, mid peak, high shelf).
+///
+/// ## Purpose
+///
+/// Bundles the seven parameters of the classic mixer/channel-strip EQ section
+/// into a single config: a low shelf, a mid peak (with a Q control), and a high
+/// shelf.
+///
+/// ## Intended Usage
+///
+/// Build with [`ThreeBandEqConfig::new`], then call
+/// [`validate`][ThreeBandEqConfig::validate] to check parameter bounds before
+/// passing to a three-band EQ function.
+///
+/// ## Invariants
+///
+/// - `low_freq`, `mid_freq`, `high_freq` must all be `> 0.0`.
+/// - The corner frequencies must be strictly ordered: `low_freq < mid_freq < high_freq`.
+/// - `mid_q` must be `> 0.0`.
+///
+/// Frequencies must additionally lie below the Nyquist limit, which depends on
+/// the target sample rate and therefore cannot be checked here; it is validated
+/// when the EQ is applied.
+#[cfg(feature = "parametric-eq")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct ThreeBandEqConfig {
+    /// Low shelf corner frequency in Hz. Must be `> 0.0` and `< mid_freq`.
+    pub low_freq: f64,
+
+    /// Low shelf gain in dB.
+    pub low_gain: f64,
+
+    /// Mid peak centre frequency in Hz. Must be `> low_freq` and `< high_freq`.
+    pub mid_freq: f64,
+
+    /// Mid peak gain in dB.
+    pub mid_gain: f64,
+
+    /// Mid peak Q factor. Must be `> 0.0`.
+    pub mid_q: f64,
+
+    /// High shelf corner frequency in Hz. Must be `> mid_freq`.
+    pub high_freq: f64,
+
+    /// High shelf gain in dB.
+    pub high_gain: f64,
+}
+
+#[cfg(feature = "parametric-eq")]
+impl ThreeBandEqConfig {
+    /// Creates a three-band EQ configuration with every parameter specified explicitly.
+    ///
+    /// # Arguments
+    ///
+    /// – `low_freq` – low shelf corner frequency in Hz.\
+    /// – `low_gain` – low shelf gain in dB.\
+    /// – `mid_freq` – mid peak centre frequency in Hz.\
+    /// – `mid_gain` – mid peak gain in dB.\
+    /// – `mid_q` – mid peak Q factor.\
+    /// – `high_freq` – high shelf corner frequency in Hz.\
+    /// – `high_gain` – high shelf gain in dB.
+    ///
+    /// # Returns
+    ///
+    /// A [`ThreeBandEqConfig`]. Use [`validate`][ThreeBandEqConfig::validate] to
+    /// verify constraints.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        low_freq: f64,
+        low_gain: f64,
+        mid_freq: f64,
+        mid_gain: f64,
+        mid_q: f64,
+        high_freq: f64,
+        high_gain: f64,
+    ) -> Self {
+        Self {
+            low_freq,
+            low_gain,
+            mid_freq,
+            mid_gain,
+            mid_q,
+            high_freq,
+            high_gain,
+        }
+    }
+
+    /// A flat (unity-gain) three-band EQ preset.
+    ///
+    /// Low shelf at 200 Hz, mid peak at 1 kHz (Q = 1.0), high shelf at 4 kHz,
+    /// all gains at 0 dB. A neutral starting point for further adjustment.
+    ///
+    /// # Returns
+    ///
+    /// A [`ThreeBandEqConfig`] with all gains at unity.
+    #[inline]
+    #[must_use]
+    pub const fn flat() -> Self {
+        Self {
+            low_freq: 200.0,
+            low_gain: 0.0,
+            mid_freq: 1000.0,
+            mid_gain: 0.0,
+            mid_q: 1.0,
+            high_freq: 4000.0,
+            high_gain: 0.0,
+        }
+    }
+
+    /// Validates the three-band EQ parameters.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all parameter bounds are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] for the first
+    /// violated constraint (non-positive frequency, mis-ordered frequencies, or
+    /// non-positive mid Q). Frequencies are not checked against the Nyquist limit
+    /// here; that is validated when the EQ is applied.
+    #[inline]
+    pub fn validate(&self) -> AudioSampleResult<()> {
+        if self.low_freq <= 0.0 || self.mid_freq <= 0.0 || self.high_freq <= 0.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frequency",
+                "All band frequencies must be greater than 0.0 Hz",
+            )));
+        }
+
+        if !(self.low_freq < self.mid_freq && self.mid_freq < self.high_freq) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frequency",
+                "Band frequencies must be strictly ordered: low_freq < mid_freq < high_freq",
+            )));
+        }
+
+        if self.mid_q <= 0.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "mid_q",
+                "Mid Q factor must be greater than 0.0",
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "parametric-eq")]
+impl Default for ThreeBandEqConfig {
+    fn default() -> Self {
+        Self::flat()
+    }
+}
+
 /// Knee characteristic for dynamic range processing.
 ///
 /// Controls how smoothly gain reduction transitions as the signal crosses
@@ -3114,6 +3271,333 @@ impl Default for LimiterConfig {
             side_chain: SideChainConfig::disabled(),
             lookahead_ms: 2.0,
             isp_limiting: true,
+        }
+    }
+}
+
+/// Configuration for a noise gate.
+///
+/// ## Purpose
+///
+/// Specifies the parameters controlling a noise gate: the threshold below which
+/// the signal is attenuated, the attenuation ratio, and the attack and release
+/// envelope times. Peak detection is always used for gating.
+///
+/// ## Intended Usage
+///
+/// Use [`GateConfig::new`] (which delegates to [`Default`]) or a preset such as
+/// [`GateConfig::noise_gate`] as a starting point. Call
+/// [`validate`][GateConfig::validate] to check parameter bounds before passing
+/// to a gate function.
+///
+/// ## Invariants
+///
+/// - `ratio` must be `> 0.0`.
+/// - `attack_ms` must be in `[0.01, 1000.0]` ms.
+/// - `release_ms` must be in `[1.0, 10000.0]` ms.
+#[cfg(feature = "dynamic-range")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct GateConfig {
+    /// Gate threshold in dBFS. Signals below this level are attenuated.
+    ///
+    /// Typical range: `[-80.0, 0.0]`.
+    pub threshold_db: f64,
+
+    /// Attenuation ratio applied below the threshold.
+    ///
+    /// Higher values produce more aggressive gating; values near `1.0` approach
+    /// unity gain. Must be `> 0.0`.
+    pub ratio: f64,
+
+    /// Attack time in milliseconds.
+    ///
+    /// Controls how quickly the gate opens when the signal rises above the
+    /// threshold. Valid range: `[0.01, 1000.0]` ms.
+    pub attack_ms: f64,
+
+    /// Release time in milliseconds.
+    ///
+    /// Controls how quickly the gate closes when the signal falls below the
+    /// threshold. Valid range: `[1.0, 10000.0]` ms.
+    pub release_ms: f64,
+}
+
+#[cfg(feature = "dynamic-range")]
+impl GateConfig {
+    /// Creates a gate configuration using default values.
+    ///
+    /// Equivalent to [`GateConfig::default()`]: threshold −40 dBFS, ratio 10:1,
+    /// attack 1 ms, release 100 ms.
+    ///
+    /// # Returns
+    ///
+    /// A [`GateConfig`] suitable as a general-purpose starting point.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a gate configuration with every parameter specified explicitly.
+    ///
+    /// # Arguments
+    ///
+    /// – `threshold_db` – gate threshold in dBFS.\
+    /// – `ratio` – attenuation ratio below the threshold; must be `> 0.0`.\
+    /// – `attack_ms` – attack time in milliseconds; in `[0.01, 1000.0]`.\
+    /// – `release_ms` – release time in milliseconds; in `[1.0, 10000.0]`.
+    ///
+    /// # Returns
+    ///
+    /// A [`GateConfig`]. Use [`validate`][GateConfig::validate] to verify
+    /// constraints.
+    #[inline]
+    #[must_use]
+    pub const fn with_params(
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+    ) -> Self {
+        Self {
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_ms,
+        }
+    }
+
+    /// A preset for general-purpose noise gating.
+    ///
+    /// Moderate threshold and a high ratio for firmly attenuating background
+    /// noise and room tone between phrases. Threshold −45 dBFS, ratio 20:1,
+    /// attack 0.5 ms, release 150 ms.
+    ///
+    /// # Returns
+    ///
+    /// A [`GateConfig`] tuned for noise suppression.
+    #[inline]
+    #[must_use]
+    pub const fn noise_gate() -> Self {
+        Self {
+            threshold_db: -45.0,
+            ratio: 20.0,
+            attack_ms: 0.5,
+            release_ms: 150.0,
+        }
+    }
+
+    /// Validates all gate parameters.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all parameter bounds are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] for the first
+    /// violated constraint (ratio, attack, or release).
+    #[inline]
+    pub fn validate(&self) -> AudioSampleResult<()> {
+        // A ratio of zero (or negative) causes a division by zero in the gate
+        // gain computation `(ratio - 1.0) / ratio`, producing NaN/inf output.
+        if self.ratio <= 0.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "ratio",
+                "Gate ratio must be greater than 0.0",
+            )));
+        }
+
+        if self.attack_ms < 0.01 || self.attack_ms > 1000.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "attack_ms",
+                "Attack time must be between 0.01 and 1000 ms",
+            )));
+        }
+
+        if self.release_ms < 1.0 || self.release_ms > 10000.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "release_ms",
+                "Release time must be between 1.0 and 10000 ms",
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "dynamic-range")]
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self {
+            threshold_db: -40.0,
+            ratio: 10.0,
+            attack_ms: 1.0,
+            release_ms: 100.0,
+        }
+    }
+}
+
+/// Configuration for a downward expander.
+///
+/// ## Purpose
+///
+/// Specifies the parameters controlling an expander: the threshold below which
+/// the signal is attenuated, the expansion ratio, and the attack and release
+/// envelope times. RMS detection is always used for expansion.
+///
+/// ## Intended Usage
+///
+/// Use [`ExpanderConfig::new`] (which delegates to [`Default`]) or a preset such
+/// as [`ExpanderConfig::gentle`] as a starting point. Call
+/// [`validate`][ExpanderConfig::validate] to check parameter bounds before
+/// passing to an expander function.
+///
+/// ## Invariants
+///
+/// - `ratio` must be `> 0.0`.
+/// - `attack_ms` must be in `[0.01, 1000.0]` ms.
+/// - `release_ms` must be in `[1.0, 10000.0]` ms.
+#[cfg(feature = "dynamic-range")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct ExpanderConfig {
+    /// Expansion threshold in dBFS. Signals below this level are attenuated.
+    ///
+    /// Typical range: `[-80.0, 0.0]`.
+    pub threshold_db: f64,
+
+    /// Expansion ratio applied below the threshold.
+    ///
+    /// Values greater than `1.0` produce increasing attenuation the further the
+    /// signal falls below the threshold. Must be `> 0.0`.
+    pub ratio: f64,
+
+    /// Attack time in milliseconds.
+    ///
+    /// Valid range: `[0.01, 1000.0]` ms.
+    pub attack_ms: f64,
+
+    /// Release time in milliseconds.
+    ///
+    /// Valid range: `[1.0, 10000.0]` ms.
+    pub release_ms: f64,
+}
+
+#[cfg(feature = "dynamic-range")]
+impl ExpanderConfig {
+    /// Creates an expander configuration using default values.
+    ///
+    /// Equivalent to [`ExpanderConfig::default()`]: threshold −40 dBFS,
+    /// ratio 2:1, attack 1 ms, release 100 ms.
+    ///
+    /// # Returns
+    ///
+    /// An [`ExpanderConfig`] suitable as a general-purpose starting point.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an expander configuration with every parameter specified explicitly.
+    ///
+    /// # Arguments
+    ///
+    /// – `threshold_db` – expansion threshold in dBFS.\
+    /// – `ratio` – expansion ratio below the threshold; must be `> 0.0`.\
+    /// – `attack_ms` – attack time in milliseconds; in `[0.01, 1000.0]`.\
+    /// – `release_ms` – release time in milliseconds; in `[1.0, 10000.0]`.
+    ///
+    /// # Returns
+    ///
+    /// An [`ExpanderConfig`]. Use [`validate`][ExpanderConfig::validate] to
+    /// verify constraints.
+    #[inline]
+    #[must_use]
+    pub const fn with_params(
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+    ) -> Self {
+        Self {
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_ms,
+        }
+    }
+
+    /// A preset for gentle downward expansion.
+    ///
+    /// A low ratio and relaxed envelope times for subtle dynamic-range
+    /// enhancement without obvious pumping. Threshold −50 dBFS, ratio 1.5:1,
+    /// attack 5 ms, release 200 ms.
+    ///
+    /// # Returns
+    ///
+    /// An [`ExpanderConfig`] tuned for transparent expansion.
+    #[inline]
+    #[must_use]
+    pub const fn gentle() -> Self {
+        Self {
+            threshold_db: -50.0,
+            ratio: 1.5,
+            attack_ms: 5.0,
+            release_ms: 200.0,
+        }
+    }
+
+    /// Validates all expander parameters.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all parameter bounds are satisfied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] for the first
+    /// violated constraint (ratio, attack, or release).
+    #[inline]
+    pub fn validate(&self) -> AudioSampleResult<()> {
+        // Guard against a zero/negative ratio. The valid expansion domain is
+        // `ratio > 0.0`; values <= 0.0 are nonsensical and mirror the gate's
+        // division-by-zero hazard, so reject them rather than produce garbage.
+        if self.ratio <= 0.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "ratio",
+                "Expander ratio must be greater than 0.0",
+            )));
+        }
+
+        if self.attack_ms < 0.01 || self.attack_ms > 1000.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "attack_ms",
+                "Attack time must be between 0.01 and 1000 ms",
+            )));
+        }
+
+        if self.release_ms < 1.0 || self.release_ms > 10000.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "release_ms",
+                "Release time must be between 1.0 and 10000 ms",
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "dynamic-range")]
+impl Default for ExpanderConfig {
+    fn default() -> Self {
+        Self {
+            threshold_db: -40.0,
+            ratio: 2.0,
+            attack_ms: 1.0,
+            release_ms: 100.0,
         }
     }
 }

@@ -392,6 +392,7 @@ where
 {
     let mut follower_instance = follower.clone();
     follower_instance.reset();
+    follower_instance.set_detection_method(method);
 
     let mut previous_envelope = 0.0;
     let mut attack_value = 0.0;
@@ -402,7 +403,7 @@ where
 
     for sample in samples {
         let input: f64 = (*sample).cast_into();
-        let envelope = follower_instance.process(input, method);
+        let envelope = follower_instance.process(input);
 
         if envelope >= previous_envelope {
             attack_value = envelope;
