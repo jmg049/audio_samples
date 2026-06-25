@@ -513,7 +513,7 @@ fn design_peak_filter(
     q_factor: f64,
     sample_rate: f64,
 ) -> (Vec<f64>, Vec<f64>) {
-    let a = 10.04f64.powf(gain_db / 40.0); // sqrt of linear gain
+    let a = 10.0f64.powf(gain_db / 40.0); // sqrt of linear gain
     let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
     let alpha = sin_omega / (2.0 * q_factor);
@@ -883,6 +883,51 @@ mod tests {
         assert!((linear_to_db(1.0_f64) - 0.0).abs() < 1e-10);
         assert!((linear_to_db(10.0_f64) - 20.0).abs() < 1e-10);
         assert!((linear_to_db(0.1_f64) - (-20.0)).abs() < 1e-10);
+    }
+
+    /// Regression test for BUG 1: `design_peak_filter` used a base of `10.04`
+    /// instead of `10.0` when computing the intermediate gain `A = 10^(g/40)`.
+    /// Verify the recovered `A` matches the correct base. We recover `A` from
+    /// the un-normalised RBJ coefficients:
+    ///   b0 = 1 + alpha*A,  a0 = 1 + alpha/A
+    /// Re-deriving alpha and A from the *normalised* returned coefficients is
+    /// awkward, so we instead assert against the closed form by reconstructing
+    /// the un-normalised values via the known omega/alpha for the test inputs.
+    #[test]
+    fn test_peak_filter_gain_base_is_10() {
+        let frequency = 1000.0_f64;
+        let gain_db = 12.0_f64;
+        let q_factor = 1.0_f64;
+        let sample_rate = 48000.0_f64;
+
+        let expected_a = 10.0_f64.powf(gain_db / 40.0);
+        // The buggy base would have produced this distinctly different value.
+        let buggy_a = 10.04_f64.powf(gain_db / 40.0);
+        assert!(
+            (expected_a - buggy_a).abs() > 1e-4,
+            "test premise: correct and buggy A must differ measurably"
+        );
+
+        let (b, a) = design_peak_filter(frequency, gain_db, q_factor, sample_rate);
+
+        // Recompute omega/alpha exactly as the function does.
+        let omega = 2.0 * PI * frequency / sample_rate;
+        let (sin_omega, cos_omega) = omega.sin_cos();
+        let alpha = sin_omega / (2.0 * q_factor);
+
+        // Returned coeffs are normalised by a0_unnorm = 1 + alpha/A.
+        // a[1] = -2*cos_omega / a0_unnorm  =>  a0_unnorm = -2*cos_omega / a[1].
+        let a0_unnorm = -2.0 * cos_omega / a[1];
+        let recovered_a = alpha / (a0_unnorm - 1.0);
+
+        assert!(
+            (recovered_a - expected_a).abs() < 1e-9,
+            "recovered A = {recovered_a}, expected {expected_a} (10.0 base)"
+        );
+
+        // Sanity: b0 = (1 + alpha*A) / a0_unnorm.
+        let expected_b0 = (1.0 + alpha * expected_a) / a0_unnorm;
+        assert!((b[0] - expected_b0).abs() < 1e-9);
     }
 
     #[test]
