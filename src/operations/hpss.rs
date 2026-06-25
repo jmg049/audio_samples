@@ -637,8 +637,8 @@ mod tests {
             "Length difference too large: {}",
             length_diff
         );
-        assert_eq!(harmonic.sample_rate, sine_audio.sample_rate);
-        assert_eq!(percussive.sample_rate, sine_audio.sample_rate);
+        assert_eq!(harmonic.sample_rate(), sine_audio.sample_rate());
+        assert_eq!(percussive.sample_rate(), sine_audio.sample_rate());
     }
 
     #[test]

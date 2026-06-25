@@ -372,7 +372,7 @@ where
     where
         F: FnMut(usize, &mut [T]), // (frame_index, frame_samples)
     {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 for (frame_idx, sample) in arr.iter_mut().enumerate() {
                     f(frame_idx, std::slice::from_mut(sample));
@@ -453,7 +453,7 @@ where
     where
         F: FnMut(usize, &mut [T]), // (channel_index, channel_samples)
     {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 let slice = arr.as_slice_mut();
                 f(0, slice);
@@ -597,7 +597,7 @@ where
             return;
         }
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 let mut window_idx = 0;
                 let mut pos = 0;
@@ -1116,7 +1116,7 @@ where
                 PaddingMode::Zero => {
                     // Zero-pad to maintain consistent window size
                     let available_samples = self.total_samples.get().saturating_sub(start_pos);
-                    match &audio.data {
+                    match audio.data() {
                         AudioData::Mono(_) => {
                             // Add available samples
                             let starting_slice = if available_samples > 0 {
@@ -1133,7 +1133,7 @@ where
                             let length = NonZeroUsize::new(silence_samples)?;
                             let silence = if silence_samples > 0 {
                                 let silence =
-                                    AudioSamples::<T>::zeros_mono(length, audio.sample_rate);
+                                    AudioSamples::<T>::zeros_mono(length, audio.sample_rate());
                                 Some(silence)
                             } else {
                                 return starting_slice;
@@ -1172,7 +1172,7 @@ where
                             let silence = AudioSamples::<T>::zeros_multi_channel(
                                 audio.num_channels(),
                                 length,
-                                audio.sample_rate,
+                                audio.sample_rate(),
                             );
 
                             match interleaved_slice {

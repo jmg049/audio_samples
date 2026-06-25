@@ -3291,9 +3291,9 @@ where
     T: StandardSample,
 {
     /// The audio sample data.
-    pub data: AudioData<'a, T>,
+    data: AudioData<'a, T>,
     /// Sample rate in Hz (guaranteed non-zero).
-    pub sample_rate: SampleRate,
+    sample_rate: SampleRate,
     // pub layout: ChannelLayout,
 }
 
@@ -3889,6 +3889,26 @@ where
     #[must_use]
     pub const fn sample_rate(&self) -> SampleRate {
         self.sample_rate
+    }
+
+    /// Borrows the underlying audio data (mono or multi-channel).
+    #[inline]
+    #[must_use]
+    pub fn data(&self) -> &AudioData<'a, T> {
+        &self.data
+    }
+
+    /// Mutably borrows the underlying audio data. Prefer the typed operations where possible.
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut AudioData<'a, T> {
+        &mut self.data
+    }
+
+    /// Consumes self and returns the underlying audio data, preserving its lifetime.
+    #[inline]
+    #[must_use]
+    pub fn into_data_borrowed(self) -> AudioData<'a, T> {
+        self.data
     }
 
     /// Returns the sample rate as a plain `f64`.

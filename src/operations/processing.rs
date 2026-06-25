@@ -216,7 +216,7 @@ where
                 if current_min == current_max {
                     // All values are the same, set to middle of target range
                     let middle = min + (max - min) / Self::Sample::cast_from(2.0f64);
-                    match &mut self.data {
+                    match self.data_mut() {
                         AudioData::Mono(arr) => arr.fill(middle),
                         AudioData::Multi(arr) => arr.fill(middle),
                     }
@@ -227,7 +227,7 @@ where
                 let target_range = max - min;
                 let scale_factor = target_range / current_range;
 
-                match &mut self.data {
+                match self.data_mut() {
                     AudioData::Mono(arr) => {
                         arr.mapv_inplace(|x| min + (x - current_min) * scale_factor);
                     }
@@ -254,7 +254,7 @@ where
                 let scale_factor = target_peak / peak_f64;
                 let factor_t: T = T::cast_from(scale_factor);
 
-                match &mut self.data {
+                match self.data_mut() {
                     AudioData::Mono(arr) => arr.mapv_inplace(|x| x * factor_t),
                     AudioData::Multi(arr) => arr.mapv_inplace(|x| x * factor_t),
                 }
@@ -264,7 +264,7 @@ where
                 // Mean normalization: subtract mean to center around zero
                 let mean: f64 = self.mean();
 
-                match &mut self.data {
+                match self.data_mut() {
                     AudioData::Mono(arr) => {
                         arr.mapv_inplace(|x| {
                             let x: f64 = x.cast_into();
@@ -291,7 +291,7 @@ where
                     })
                 })?;
 
-                match &mut self.data {
+                match self.data_mut() {
                     AudioData::Mono(arr) => {
                         arr.mapv_inplace(|x| {
                             let x: f64 = x.cast_into();
@@ -316,7 +316,7 @@ where
 
                 if std_dev == 0.0f64 {
                     // All values are the same, just subtract mean
-                    match &mut self.data {
+                    match self.data_mut() {
                         AudioData::Mono(arr) => {
                             arr.mapv_inplace(|x| {
                                 let x: f64 = x.cast_into();
@@ -333,7 +333,7 @@ where
                         }
                     }
                 } else {
-                    match &mut self.data {
+                    match self.data_mut() {
                         AudioData::Mono(arr) => {
                             arr.mapv_inplace(|x| {
                                 let x: f64 = x.cast_into();
@@ -382,7 +382,7 @@ where
     #[inline]
     fn scale(mut self, factor: f64) -> Self {
         let factor_t: T = T::cast_from(factor);
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => arr.mapv_inplace(|x| x * factor_t),
             AudioData::Multi(arr) => arr.mapv_inplace(|x| x * factor_t),
         }
@@ -413,7 +413,7 @@ where
     fn remove_dc_offset(mut self) -> AudioSampleResult<Self> {
         let mean: f64 = self.mean();
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 arr.mapv_inplace(|x| {
                     let x: f64 = x.cast_into();
@@ -472,7 +472,7 @@ where
             )));
         }
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => arr.mapv_inplace(|x| x.clamp_to(min_val, max_val)),
             AudioData::Multi(arr) => arr.mapv_inplace(|x| x.clamp_to(min_val, max_val)),
         }
@@ -519,7 +519,7 @@ where
             )));
         }
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => arr.mapv_inplace(|x| x.clamp_to(min_val, max_val)),
             AudioData::Multi(arr) => arr.mapv_inplace(|x| x.clamp_to(min_val, max_val)),
         }
@@ -559,7 +559,7 @@ where
     /// ```
     #[inline]
     fn apply_window(mut self, window: &NonEmptySlice<Self::Sample>) -> AudioSampleResult<Self> {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 if window.len() != arr.len() {
                     return Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
@@ -634,7 +634,7 @@ where
         let coeffs: &[Self::Sample] = filter_coeffs.as_ref();
         let filter_len = coeffs.len();
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 if arr.len().get() < filter_len {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -828,7 +828,7 @@ where
         let alpha = 2.0 * f64::PI() * normalized_cutoff;
         let one_minus_alpha = 1.0 - alpha;
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 let mut prev_output: f64 = arr[0].convert_to();
                 for sample in arr.iter_mut() {
@@ -900,7 +900,7 @@ where
         let dt = 1.0 / sample_rate;
         let alpha = T::cast_from(rc / (rc + dt));
 
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 if arr.len().get() > 1 {
                     let mut prev_input = arr[0];
@@ -1063,7 +1063,7 @@ where
     where
         F: Fn(T) -> AudioSampleResult<T>,
     {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 for x in arr.iter_mut() {
                     *x = f(*x)?;
@@ -1103,7 +1103,7 @@ where
     where
         F: FnMut(&mut Acc, T) -> AudioSampleResult<T>,
     {
-        match &mut self.data {
+        match self.data_mut() {
             AudioData::Mono(arr) => {
                 for x in arr.iter_mut() {
                     *x = f(&mut acc, *x)?;
@@ -1198,7 +1198,7 @@ mod tests {
         let audio = audio.scale(2.0);
 
         let expected = array![2.0f32, 4.0, 6.0];
-        match &audio.data {
+        match audio.data() {
             AudioData::Mono(arr) => {
                 for (actual, expected) in arr.iter().zip(expected.iter()) {
                     assert_approx_eq!(*actual as f64, *expected as f64, 1e-6);
@@ -1227,7 +1227,7 @@ mod tests {
         let audio = audio.clip(-2.0, 2.0).unwrap();
 
         let expected = array![-2.0f32, -1.0, 0.0, 1.0, 2.0];
-        match &audio.data {
+        match audio.data() {
             AudioData::Mono(arr) => {
                 for (actual, expected) in arr.iter().zip(expected.iter()) {
                     assert_approx_eq!(*actual as f64, *expected as f64, 1e-6);
@@ -1246,7 +1246,7 @@ mod tests {
         let audio = audio.apply_window(window_slice).unwrap();
 
         let expected = array![0.5f32, 1.0, 1.0, 0.5];
-        match &audio.data {
+        match audio.data() {
             AudioData::Mono(arr) => {
                 for (actual, expected) in arr.iter().zip(expected.iter()) {
                     assert_approx_eq!(*actual as f64, *expected as f64, 1e-6);

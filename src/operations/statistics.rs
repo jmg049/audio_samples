@@ -162,7 +162,7 @@ where
             let ax = if x < zero { zero - x } else { x };
             if ax > acc { ax } else { acc }
         };
-        match &self.data {
+        match &self.data() {
             AudioData::Mono(arr) => match arr.as_slice() {
                 Some(s) => abs_max_slice(s),
                 None => arr.fold(zero, fold_ndarray),
@@ -190,7 +190,7 @@ where
     /// ```
     #[inline]
     fn min_sample(&self) -> T {
-        match &self.data {
+        match &self.data() {
             AudioData::Mono(arr) => {
                 // Use ndarray's efficient fold operation for vectorized minimum finding
                 arr.fold(arr[0], |acc, &x| if x < acc { x } else { acc })
@@ -218,7 +218,7 @@ where
     /// ```
     #[inline]
     fn max_sample(&self) -> T {
-        match &self.data {
+        match &self.data() {
             AudioData::Mono(arr) => {
                 // Use ndarray's efficient fold operation for vectorized maximum finding
                 arr.fold(arr[0], |acc, &x| if x > acc { x } else { acc })
@@ -246,7 +246,7 @@ where
     /// ```
     #[inline]
     fn mean(&self) -> f64 {
-        match &self.data {
+        match &self.data() {
             AudioData::Mono(mono_data) => mono_data.mean().cast_into(),
             AudioData::Multi(multi_data) => multi_data.mean().cast_into(),
         }
@@ -336,7 +336,7 @@ where
             }
             acc[0] + acc[1] + acc[2] + acc[3]
         };
-        let (sum_sq, n) = match &self.data {
+        let (sum_sq, n) = match &self.data() {
             AudioData::Mono(arr) => {
                 let s = match arr.as_slice() {
                     Some(s) => sum_sq_slice(s),
@@ -457,7 +457,7 @@ where
             (sum_sq, peak)
         };
 
-        let (sum_sq, peak, n) = match &self.data {
+        let (sum_sq, peak, n) = match &self.data() {
             AudioData::Mono(arr) => {
                 let (sq, pk) = match arr.as_slice() {
                     Some(s) => combined_slice(s),
@@ -525,7 +525,7 @@ where
     /// ```
     #[inline]
     fn variance(&self) -> f64 {
-        match &self.data {
+        match &self.data() {
             AudioData::Mono(mono_data) => mono_data.variance(),
             AudioData::Multi(multi_data) => multi_data
                 .variance_axis(Axis(0))
@@ -579,7 +579,7 @@ where
     /// ```
     #[inline]
     fn zero_crossings(&self) -> usize {
-        match &self.data {
+        match &self.data() {
             AudioData::Mono(arr) => {
                 if arr.len() < nzu!(2) {
                     return 0;
@@ -687,7 +687,7 @@ where
 
         // Extract signal as Vec<f64> — mono uses the array directly,
         // multi-channel uses the first channel (row 0).
-        let (signal, n) = match &self.data {
+        let (signal, n) = match &self.data() {
             AudioData::Mono(arr) => {
                 let n = arr.len().get();
                 let sig: Vec<f64> = arr.iter().map(|&x| x.cast_into()).collect();
@@ -798,7 +798,7 @@ where
             ));
         }
 
-        match (&self.data, &other.data) {
+        match (&self.data(), &other.data()) {
             (AudioData::Mono(arr1), AudioData::Mono(arr2)) => {
                 let n1 = arr1.len();
                 let n2 = arr2.len();
@@ -984,7 +984,7 @@ where
             ));
         }
 
-        match &self.data {
+        match &self.data() {
             AudioData::Mono(arr) => {
                 let n = arr.len();
                 // Safety: Self is guaranteed non-empty by design, therefore arr is non-empty, therefore to_vec is non-empty
@@ -1095,7 +1095,7 @@ pub fn fft_alignment_lag<T: StandardSample>(
     max_lag: usize,
 ) -> Option<i64> {
     let extract = |audio: &AudioSamples<'_, T>| -> Vec<f64> {
-        match &audio.data {
+        match &audio.data() {
             AudioData::Mono(arr) => arr.iter().map(|&x| x.cast_into()).collect(),
             AudioData::Multi(arr) => arr.row(0).iter().map(|&x| x.cast_into()).collect(),
         }
