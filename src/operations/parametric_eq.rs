@@ -29,7 +29,7 @@
 //! let mut eq = ParametricEq::new();
 //! eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));        // +3 dB at 1 kHz
 //! eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707)); // -2 dB shelf below 100 Hz
-//! audio.apply_parametric_eq(&eq).unwrap();
+//! audio.apply_parametric_eq_in_place(&eq).unwrap();
 //! ```
 
 use num_traits::FloatConst;
@@ -78,10 +78,10 @@ where
     ///
     /// let mut eq = ParametricEq::new();
     /// eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));
-    /// audio.apply_parametric_eq(&eq).unwrap();
+    /// audio.apply_parametric_eq_in_place(&eq).unwrap();
     /// ```
     #[inline]
-    fn apply_parametric_eq(&mut self, eq: &ParametricEq) -> AudioSampleResult<()> {
+    fn apply_parametric_eq_in_place(&mut self, eq: &ParametricEq) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
         if eq.is_bypassed() {
             return Ok(());
@@ -93,7 +93,7 @@ where
         // Apply each enabled band in sequence
         for band in &eq.bands {
             if band.is_enabled() {
-                self.apply_eq_band(band)?;
+                self.apply_eq_band_in_place(band)?;
             }
         }
 
@@ -139,10 +139,10 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Boost at 2 kHz by 4 dB with Q of 1.5
-    /// audio.apply_eq_band(&EqBand::peak(2000.0, 4.0, 1.5)).unwrap();
+    /// audio.apply_eq_band_in_place(&EqBand::peak(2000.0, 4.0, 1.5)).unwrap();
     /// ```
     #[inline]
-    fn apply_eq_band(&mut self, band: &EqBand) -> AudioSampleResult<()> {
+    fn apply_eq_band_in_place(&mut self, band: &EqBand) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
         if !band.is_enabled() {
             return Ok(());
@@ -248,17 +248,17 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Boost at 880 Hz by 6 dB with Q of 2.0
-    /// audio.apply_peak_filter(880.0, 6.0, 2.0).unwrap();
+    /// audio.apply_peak_filter_in_place(880.0, 6.0, 2.0).unwrap();
     /// ```
     #[inline]
-    fn apply_peak_filter(
+    fn apply_peak_filter_in_place(
         &mut self,
         frequency: f64,
         gain_db: f64,
         q_factor: f64,
     ) -> AudioSampleResult<()> {
         let band = EqBand::peak(frequency, gain_db, q_factor);
-        self.apply_eq_band(&band)
+        self.apply_eq_band_in_place(&band)
     }
 
     /// Applies a low shelf filter that boosts or cuts frequencies below `frequency`.
@@ -291,17 +291,17 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Cut -3 dB below 200 Hz
-    /// audio.apply_low_shelf(200.0, -3.0, 0.707).unwrap();
+    /// audio.apply_low_shelf_in_place(200.0, -3.0, 0.707).unwrap();
     /// ```
     #[inline]
-    fn apply_low_shelf(
+    fn apply_low_shelf_in_place(
         &mut self,
         frequency: f64,
         gain_db: f64,
         q_factor: f64,
     ) -> AudioSampleResult<()> {
         let band = EqBand::low_shelf(frequency, gain_db, q_factor);
-        self.apply_eq_band(&band)
+        self.apply_eq_band_in_place(&band)
     }
 
     /// Applies a high shelf filter that boosts or cuts frequencies above `frequency`.
@@ -334,17 +334,17 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Boost +4 dB above 8 kHz
-    /// audio.apply_high_shelf(8000.0, 4.0, 0.707).unwrap();
+    /// audio.apply_high_shelf_in_place(8000.0, 4.0, 0.707).unwrap();
     /// ```
     #[inline]
-    fn apply_high_shelf(
+    fn apply_high_shelf_in_place(
         &mut self,
         frequency: f64,
         gain_db: f64,
         q_factor: f64,
     ) -> AudioSampleResult<()> {
         let band = EqBand::high_shelf(frequency, gain_db, q_factor);
-        self.apply_eq_band(&band)
+        self.apply_eq_band_in_place(&band)
     }
 
     /// Applies a three-band EQ (low shelf, mid peak, high shelf) in a single call.
@@ -384,10 +384,10 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Low shelf -2 dB at 200 Hz, mid peak +3 dB at 1 kHz (Q=2), high shelf +1 dB at 4 kHz
-    /// audio.apply_three_band_eq(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
+    /// audio.apply_three_band_eq_in_place(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
     /// ```
     #[inline]
-    fn apply_three_band_eq(
+    fn apply_three_band_eq_in_place(
         &mut self,
         low_freq: f64,
         low_gain: f64,
@@ -400,7 +400,7 @@ where
         let eq = ParametricEq::three_band(
             low_freq, low_gain, mid_freq, mid_gain, mid_q, high_freq, high_gain,
         );
-        self.apply_parametric_eq(&eq)
+        self.apply_parametric_eq_in_place(&eq)
     }
 
     /// Computes the combined magnitude and phase response of a parametric EQ.
@@ -719,7 +719,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply peak filter at 880Hz with +6dB gain
-        let result = audio.apply_peak_filter(880.0, 6.0, 2.0);
+        let result = audio.apply_peak_filter_in_place(880.0, 6.0, 2.0);
         assert!(result.is_ok());
     }
 
@@ -743,7 +743,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply low shelf filter at 500Hz with -3dB gain
-        let result = audio.apply_low_shelf(500.0, -3.0, 0.707);
+        let result = audio.apply_low_shelf_in_place(500.0, -3.0, 0.707);
         assert!(result.is_ok());
     }
 
@@ -767,7 +767,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply high shelf filter at 2000Hz with +4dB gain
-        let result = audio.apply_high_shelf(2000.0, 4.0, 0.707);
+        let result = audio.apply_high_shelf_in_place(2000.0, 4.0, 0.707);
         assert!(result.is_ok());
 
         // High frequencies should be boosted
@@ -793,7 +793,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply 3-band EQ: low shelf at 200Hz (-2dB), mid peak at 1kHz (+3dB), high shelf at 4kHz (+1dB)
-        let result = audio.apply_three_band_eq(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0);
+        let result = audio.apply_three_band_eq_in_place(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0);
         assert!(result.is_ok());
 
         // Should apply all three bands
@@ -809,7 +809,7 @@ mod tests {
         eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707));
         eq.set_output_gain(1.0);
 
-        let result = audio.apply_parametric_eq(&eq);
+        let result = audio.apply_parametric_eq_in_place(&eq);
         assert!(result.is_ok());
 
         // Check EQ configuration
@@ -862,7 +862,7 @@ mod tests {
         eq.add_band(EqBand::peak(1000.0, 10.0, 2.0)); // Large gain
         eq.set_bypassed(true);
 
-        let result = audio.apply_parametric_eq(&eq);
+        let result = audio.apply_parametric_eq_in_place(&eq);
         assert!(result.is_ok());
 
         // Audio should be unchanged when bypassed
@@ -941,5 +941,40 @@ mod tests {
         assert_eq!(eq.get_band(2).unwrap().frequency, 1000.0);
         assert_eq!(eq.get_band(3).unwrap().frequency, 3000.0);
         assert_eq!(eq.get_band(4).unwrap().frequency, 8000.0);
+    }
+
+    #[test]
+    fn test_apply_peak_filter_dual_variant() {
+        let sample_rate = 44100.0;
+        let samples_count = 1024;
+        let mut samples = Vec::with_capacity(samples_count);
+        for i in 0..samples_count {
+            let t = i as f64 / sample_rate;
+            samples.push((2.0 * PI * 880.0 * t).sin() as f32);
+        }
+        let original: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(NonEmptyVec::new(samples.clone()).unwrap(), sample_rate!(44100));
+
+        // Non-mutating: returns a new copy, leaves `original` unchanged.
+        let filtered = original.apply_peak_filter(880.0, 6.0, 2.0).unwrap();
+
+        // In-place on a clone produces an equal result.
+        let mut in_place = original.clone();
+        in_place.apply_peak_filter_in_place(880.0, 6.0, 2.0).unwrap();
+
+        assert_eq!(
+            filtered.as_slice().unwrap(),
+            in_place.as_slice().unwrap(),
+            "non-mutating and in-place variants must produce equal results"
+        );
+
+        // The original is untouched by the non-mutating call.
+        let pristine: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(NonEmptyVec::new(samples).unwrap(), sample_rate!(44100));
+        assert_eq!(
+            original.as_slice().unwrap(),
+            pristine.as_slice().unwrap(),
+            "non-mutating variant must not modify the original"
+        );
     }
 }

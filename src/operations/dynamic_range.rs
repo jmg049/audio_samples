@@ -25,7 +25,7 @@
 //! let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
 //! let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 //! let config = CompressorConfig::vocal();
-//! audio.apply_compressor(&config).unwrap();
+//! audio.apply_compressor_in_place(&config).unwrap();
 //! ```
 
 use non_empty_slice::NonEmptySlice;
@@ -610,9 +610,9 @@ where
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let config = CompressorConfig::vocal();
-    /// audio.apply_compressor(&config).unwrap();
+    /// audio.apply_compressor_in_place(&config).unwrap();
     /// ```
-    fn apply_compressor(&mut self, config: &CompressorConfig) -> AudioSampleResult<()> {
+    fn apply_compressor_in_place(&mut self, config: &CompressorConfig) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
         // Validate configuration
         config.validate(sample_rate)?;
@@ -799,9 +799,9 @@ where
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let config = LimiterConfig::mastering();
-    /// audio.apply_limiter(&config).unwrap();
+    /// audio.apply_limiter_in_place(&config).unwrap();
     /// ```
-    fn apply_limiter(&mut self, config: &LimiterConfig) -> AudioSampleResult<()> {
+    fn apply_limiter_in_place(&mut self, config: &LimiterConfig) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
         // Validate configuration
         let config = config.validate(sample_rate)?;
@@ -995,9 +995,9 @@ where
     /// ).unwrap();
     /// let mut config = CompressorConfig::new();
     /// config.side_chain.enable();
-    /// audio.apply_compressor_sidechain(&config, &sidechain).unwrap();
+    /// audio.apply_compressor_sidechain_in_place(&config, &sidechain).unwrap();
     /// ```
-    fn apply_compressor_sidechain(
+    fn apply_compressor_sidechain_in_place(
         &mut self,
         config: &CompressorConfig,
         sidechain_signal: &Self,
@@ -1148,9 +1148,9 @@ where
     /// ).unwrap();
     /// let mut config = LimiterConfig::default();
     /// config.side_chain.enable();
-    /// audio.apply_limiter_sidechain(&config, &sidechain).unwrap();
+    /// audio.apply_limiter_sidechain_in_place(&config, &sidechain).unwrap();
     /// ```
-    fn apply_limiter_sidechain(
+    fn apply_limiter_sidechain_in_place(
         &mut self,
         config: &LimiterConfig,
         sidechain_signal: &Self,
@@ -1440,9 +1440,9 @@ where
     /// let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Gate at -20 dBFS with 10:1 ratio
-    /// audio.apply_gate(-20.0, 10.0, 1.0, 10.0).unwrap();
+    /// audio.apply_gate_in_place(-20.0, 10.0, 1.0, 10.0).unwrap();
     /// ```
-    fn apply_gate(
+    fn apply_gate_in_place(
         &mut self,
         threshold_db: f64,
         ratio: f64,
@@ -1561,9 +1561,9 @@ where
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Expand at -20 dBFS with 2:1 ratio
-    /// audio.apply_expander(-20.0, 2.0, 1.0, 10.0).unwrap();
+    /// audio.apply_expander_in_place(-20.0, 2.0, 1.0, 10.0).unwrap();
     /// ```
-    fn apply_expander(
+    fn apply_expander_in_place(
         &mut self,
         threshold_db: f64,
         ratio: f64,
@@ -1663,7 +1663,7 @@ mod tests {
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         let config = CompressorConfig::new();
-        let result = audio.apply_compressor(&config);
+        let result = audio.apply_compressor_in_place(&config);
 
         assert!(result.is_ok());
     }
@@ -1674,7 +1674,7 @@ mod tests {
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         let config = LimiterConfig::default();
-        let result = audio.apply_limiter(&config);
+        let result = audio.apply_limiter_in_place(&config);
 
         assert!(result.is_ok());
     }
@@ -1728,7 +1728,7 @@ mod tests {
         let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        let result = audio.apply_gate(-20.0, 10.0, 1.0, 10.0);
+        let result = audio.apply_gate_in_place(-20.0, 10.0, 1.0, 10.0);
 
         assert!(result.is_ok());
     }
@@ -1738,7 +1738,7 @@ mod tests {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        let result = audio.apply_expander(-20.0, 2.0, 1.0, 10.0);
+        let result = audio.apply_expander_in_place(-20.0, 2.0, 1.0, 10.0);
 
         assert!(result.is_ok());
     }
@@ -1861,7 +1861,7 @@ mod tests {
         let mut audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
 
         let config = CompressorConfig::new();
-        let result = audio.apply_compressor(&config);
+        let result = audio.apply_compressor_in_place(&config);
 
         assert!(result.is_ok());
     }
@@ -1876,7 +1876,7 @@ mod tests {
         let mut audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
 
         let config = LimiterConfig::default();
-        let result = audio.apply_limiter(&config);
+        let result = audio.apply_limiter_in_place(&config);
 
         assert!(result.is_ok());
     }
@@ -1888,13 +1888,13 @@ mod tests {
 
         // Test different presets
         let vocal_config = CompressorConfig::vocal();
-        assert!(audio.apply_compressor(&vocal_config).is_ok());
+        assert!(audio.apply_compressor_in_place(&vocal_config).is_ok());
 
         let drum_config = CompressorConfig::drum();
-        assert!(audio.apply_compressor(&drum_config).is_ok());
+        assert!(audio.apply_compressor_in_place(&drum_config).is_ok());
 
         let bus_config = CompressorConfig::bus();
-        assert!(audio.apply_compressor(&bus_config).is_ok());
+        assert!(audio.apply_compressor_in_place(&bus_config).is_ok());
     }
 
     #[test]
@@ -1904,13 +1904,13 @@ mod tests {
 
         // Test different presets
         let transparent_config = LimiterConfig::transparent();
-        assert!(audio.apply_limiter(&transparent_config).is_ok());
+        assert!(audio.apply_limiter_in_place(&transparent_config).is_ok());
 
         let mastering_config = LimiterConfig::mastering();
-        assert!(audio.apply_limiter(&mastering_config).is_ok());
+        assert!(audio.apply_limiter_in_place(&mastering_config).is_ok());
 
         let broadcast_config = LimiterConfig::broadcast();
-        assert!(audio.apply_limiter(&broadcast_config).is_ok());
+        assert!(audio.apply_limiter_in_place(&broadcast_config).is_ok());
     }
 
     /// Regression test for BUG 3: the MONO expander branch set
@@ -1926,7 +1926,7 @@ mod tests {
         let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         // Threshold (-40 dBFS) far below the signal (~ -1.9 dBFS).
-        audio.apply_expander(-40.0, 2.0, 1.0, 10.0).unwrap();
+        audio.apply_expander_in_place(-40.0, 2.0, 1.0, 10.0).unwrap();
 
         if let AudioData::Mono(samples) = audio.data() {
             // Check the settled tail: gain must be ~1.0 (unchanged), not 0.891.
@@ -1950,11 +1950,11 @@ mod tests {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
 
         let mut gate_audio = AudioSamples::new_mono(data.clone(), sample_rate!(44100)).unwrap();
-        let gate_result = gate_audio.apply_gate(-20.0, 0.0, 1.0, 10.0);
+        let gate_result = gate_audio.apply_gate_in_place(-20.0, 0.0, 1.0, 10.0);
         assert!(gate_result.is_err(), "apply_gate(ratio=0.0) should error");
 
         let mut exp_audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-        let exp_result = exp_audio.apply_expander(-20.0, 0.0, 1.0, 10.0);
+        let exp_result = exp_audio.apply_expander_in_place(-20.0, 0.0, 1.0, 10.0);
         assert!(
             exp_result.is_err(),
             "apply_expander(ratio=0.0) should error"
@@ -1967,5 +1967,33 @@ mod tests {
                 v.is_finite()
             }));
         }
+    }
+
+    #[test]
+    fn test_apply_compressor_dual_variant() {
+        let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1, 0.7, 0.3, 0.95]);
+        let original = AudioSamples::new_mono(data.clone(), sample_rate!(44100)).unwrap();
+        let config = CompressorConfig::vocal();
+
+        // Non-mutating: returns a new copy, leaves `original` unchanged.
+        let compressed = original.apply_compressor(&config).unwrap();
+
+        // In-place on a clone produces an equal result.
+        let mut in_place = original.clone();
+        in_place.apply_compressor_in_place(&config).unwrap();
+
+        assert_eq!(
+            compressed.as_slice().unwrap(),
+            in_place.as_slice().unwrap(),
+            "non-mutating and in-place variants must produce equal results"
+        );
+
+        // The original is untouched by the non-mutating call.
+        let pristine = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        assert_eq!(
+            original.as_slice().unwrap(),
+            pristine.as_slice().unwrap(),
+            "non-mutating variant must not modify the original"
+        );
     }
 }

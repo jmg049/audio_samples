@@ -42,7 +42,7 @@ fn butterworth_lowpass_passes_below_cutoff() {
     let mut audio = sine_f32(440.0, 500, 0.8);
     let rms_before = rms(&audio);
     audio
-        .butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 2000.0)
+        .butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 2000.0)
         .unwrap();
     let rms_after = rms(&audio);
     assert!(
@@ -57,7 +57,7 @@ fn butterworth_lowpass_attenuates_above_cutoff() {
     let mut audio = sine_f32(8000.0, 500, 0.8);
     let rms_before = rms(&audio);
     audio
-        .butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 1000.0)
+        .butterworth_lowpass_in_place(NonZeroUsize::new(4).unwrap(), 1000.0)
         .unwrap();
     let rms_after = rms(&audio);
     assert!(
@@ -72,7 +72,7 @@ fn butterworth_lowpass_attenuates_above_cutoff() {
 fn butterworth_lowpass_does_not_produce_nan_or_inf() {
     let mut audio = sine_f32(1000.0, 200, 0.9);
     audio
-        .butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 500.0)
+        .butterworth_lowpass_in_place(NonZeroUsize::new(4).unwrap(), 500.0)
         .unwrap();
     let all_finite = audio.as_slice().unwrap().iter().all(|x| x.is_finite());
     assert!(all_finite, "butterworth_lowpass produced NaN or Inf");
@@ -87,7 +87,7 @@ fn compressor_modifies_signal() {
 
     let mut compressed = sine_f32(440.0, 300, 0.9);
     compressed
-        .apply_compressor(&CompressorConfig::vocal())
+        .apply_compressor_in_place(&CompressorConfig::vocal())
         .unwrap();
     let rms_after = rms(&compressed);
 
@@ -101,7 +101,7 @@ fn compressor_modifies_signal() {
 #[test]
 fn compressor_output_is_finite() {
     let mut audio = sine_f32(440.0, 200, 0.8);
-    audio.apply_compressor(&CompressorConfig::vocal()).unwrap();
+    audio.apply_compressor_in_place(&CompressorConfig::vocal()).unwrap();
     let all_finite = audio.as_slice().unwrap().iter().all(|x| x.is_finite());
     assert!(all_finite, "compressor output contains NaN or Inf");
 }
@@ -113,7 +113,7 @@ fn eq_peak_boost_increases_rms() {
 
     let mut eq = ParametricEq::new();
     eq.add_band(EqBand::peak(1000.0, 6.0, 2.0)); // +6 dB at 1 kHz
-    audio.apply_parametric_eq(&eq).unwrap();
+    audio.apply_parametric_eq_in_place(&eq).unwrap();
 
     let rms_after = rms(&audio);
     assert!(
@@ -128,7 +128,7 @@ fn eq_output_is_finite() {
     let mut eq = ParametricEq::new();
     eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));
     eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707));
-    audio.apply_parametric_eq(&eq).unwrap();
+    audio.apply_parametric_eq_in_place(&eq).unwrap();
     let all_finite = audio.as_slice().unwrap().iter().all(|x| x.is_finite());
     assert!(all_finite, "parametric EQ output contains NaN or Inf");
 }
@@ -138,13 +138,13 @@ fn full_chain_lowpass_compress_eq_is_finite() {
     let mut audio = sine_f32(440.0, 500, 0.8);
 
     audio
-        .butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 2000.0)
+        .butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 2000.0)
         .unwrap();
-    audio.apply_compressor(&CompressorConfig::vocal()).unwrap();
+    audio.apply_compressor_in_place(&CompressorConfig::vocal()).unwrap();
 
     let mut eq = ParametricEq::new();
     eq.add_band(EqBand::peak(800.0, 2.0, 1.5));
-    audio.apply_parametric_eq(&eq).unwrap();
+    audio.apply_parametric_eq_in_place(&eq).unwrap();
 
     let all_finite = audio.as_slice().unwrap().iter().all(|x| x.is_finite());
     assert!(all_finite, "full effects chain produced NaN or Inf");

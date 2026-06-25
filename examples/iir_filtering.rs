@@ -28,7 +28,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Input: peak={:.4} rms={:.4}", audio.peak(), audio.rms());
 
     // Apply a Butterworth low-pass.
-    audio.butterworth_lowpass(core::num::NonZeroUsize::new(4).unwrap(), 1_000.0)?;
+    audio.butterworth_lowpass_in_place(core::num::NonZeroUsize::new(4).unwrap(), 1_000.0)?;
     println!("Low-pass: peak={:.4} rms={:.4}", audio.peak(), audio.rms());
 
     // Frequency response (after filter is configured).
@@ -43,7 +43,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         2000.0,
         1.0,
     );
-    audio.apply_iir_filter(&design)?;
+    audio.apply_iir_filter_in_place(&design)?;
     println!(
         "Chebyshev HP: peak={:.4} rms={:.4}",
         audio.peak(),
