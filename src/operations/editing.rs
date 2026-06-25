@@ -272,6 +272,17 @@ where
         }
     }
 
+    /// Extracts a time-bounded segment in place, replacing `self`.
+    ///
+    /// In-place twin of [`trim`](Self::trim).
+    ///
+    /// # Errors
+    /// See [`trim`](Self::trim).
+    fn trim_in_place(&mut self, start_seconds: f64, end_seconds: f64) -> AudioSampleResult<()> {
+        *self = self.trim(start_seconds, end_seconds)?.into_owned();
+        Ok(())
+    }
+
     /// Adds silence (or a constant value) at the beginning and/or end.
     ///
     /// Works on both mono and multi-channel audio.
@@ -348,6 +359,24 @@ where
         }
     }
 
+    /// Adds padding in place, replacing `self`.
+    ///
+    /// In-place twin of [`pad`](Self::pad).
+    ///
+    /// # Errors
+    /// See [`pad`](Self::pad).
+    fn pad_in_place(
+        &mut self,
+        pad_start_seconds: f64,
+        pad_end_seconds: f64,
+        pad_value: T,
+    ) -> AudioSampleResult<()> {
+        *self = self
+            .pad(pad_start_seconds, pad_end_seconds, pad_value)?
+            .into_owned();
+        Ok(())
+    }
+
     /// Pads with a constant value on the right to reach a target sample count.
     ///
     /// If the signal already has `target_num_samples` or more samples per
@@ -392,6 +421,23 @@ where
             samples_to_seconds(target_num_samples, self.sample_rate().get());
 
         self.pad_to_duration(target_num_samples_seconds, pad_value, PadSide::Right)
+    }
+
+    /// Pads on the right to a target sample count in place, replacing `self`.
+    ///
+    /// In-place twin of [`pad_samples_right`](Self::pad_samples_right).
+    ///
+    /// # Errors
+    /// See [`pad_samples_right`](Self::pad_samples_right).
+    fn pad_samples_right_in_place(
+        &mut self,
+        target_num_samples: usize,
+        pad_value: T,
+    ) -> AudioSampleResult<()> {
+        *self = self
+            .pad_samples_right(target_num_samples, pad_value)?
+            .into_owned();
+        Ok(())
     }
 
     /// Pads the signal to reach a target duration.
@@ -457,6 +503,24 @@ where
         )?;
 
         Ok(padded)
+    }
+
+    /// Pads to a target duration in place, replacing `self`.
+    ///
+    /// In-place twin of [`pad_to_duration`](Self::pad_to_duration).
+    ///
+    /// # Errors
+    /// See [`pad_to_duration`](Self::pad_to_duration).
+    fn pad_to_duration_in_place(
+        &mut self,
+        target_duration_seconds: f64,
+        pad_value: T,
+        pad_side: PadSide,
+    ) -> AudioSampleResult<()> {
+        *self = self
+            .pad_to_duration(target_duration_seconds, pad_value, pad_side)?
+            .into_owned();
+        Ok(())
     }
 
     /// Splits the signal into segments of a fixed duration.
@@ -880,11 +944,15 @@ where
     /// let mut audio = AudioSamples::new_mono(
     ///     Array1::<f32>::ones(100), sample_rate!(100),
     /// ).unwrap();
-    /// audio.fade_in(0.5, FadeCurve::Linear).unwrap();
+    /// audio.fade_in_in_place(0.5, FadeCurve::Linear).unwrap();
     /// // First sample is at position 0 → gain 0
     /// assert_eq!(audio.as_slice().unwrap()[0], 0.0);
     /// ```
-    fn fade_in(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()> {
+    fn fade_in_in_place(
+        &mut self,
+        duration_seconds: f64,
+        curve: FadeCurve,
+    ) -> AudioSampleResult<()> {
         if duration_seconds <= 0.0 {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "parameter",
@@ -962,12 +1030,16 @@ where
     /// let mut audio = AudioSamples::new_mono(
     ///     Array1::<f32>::ones(100), sample_rate!(100),
     /// ).unwrap();
-    /// audio.fade_out(0.5, FadeCurve::Linear).unwrap();
+    /// audio.fade_out_in_place(0.5, FadeCurve::Linear).unwrap();
     /// // Last sample has position 0 in the fade ramp → gain ≈ 0
     /// let last = *audio.as_slice().unwrap().last().unwrap();
     /// assert!(last < 0.1);
     /// ```
-    fn fade_out(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()> {
+    fn fade_out_in_place(
+        &mut self,
+        duration_seconds: f64,
+        curve: FadeCurve,
+    ) -> AudioSampleResult<()> {
         if duration_seconds <= 0.0 {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "parameter",
@@ -1081,6 +1153,17 @@ where
                 AudioSamples::new_multi_channel(repeated, self.sample_rate())
             }
         }
+    }
+
+    /// Tiles the signal in place, replacing `self`.
+    ///
+    /// In-place twin of [`repeat`](Self::repeat).
+    ///
+    /// # Errors
+    /// See [`repeat`](Self::repeat).
+    fn repeat_in_place(&mut self, count: usize) -> AudioSampleResult<()> {
+        *self = self.repeat(count)?.into_owned();
+        Ok(())
     }
 
     /// Removes leading and trailing silence from the signal.
@@ -1198,6 +1281,17 @@ where
                 )
             }
         }
+    }
+
+    /// Removes leading and trailing silence in place, replacing `self`.
+    ///
+    /// In-place twin of [`trim_silence`](Self::trim_silence).
+    ///
+    /// # Errors
+    /// See [`trim_silence`](Self::trim_silence).
+    fn trim_silence_in_place(&mut self, threshold_db: f64) -> AudioSampleResult<()> {
+        *self = self.trim_silence(threshold_db)?.into_owned();
+        Ok(())
     }
 
     /// Returns a perturbed copy of the signal for data augmentation.
@@ -1396,6 +1490,23 @@ where
                 AudioSamples::new_multi_channel(result, self.sample_rate())
             }
         }
+    }
+
+    /// Removes all qualifying silence regions in place, replacing `self`.
+    ///
+    /// In-place twin of [`trim_all_silence`](Self::trim_all_silence).
+    ///
+    /// # Errors
+    /// See [`trim_all_silence`](Self::trim_all_silence).
+    fn trim_all_silence_in_place(
+        &mut self,
+        threshold_db: f64,
+        min_silence_duration_seconds: f64,
+    ) -> AudioSampleResult<()> {
+        *self = self
+            .trim_all_silence(threshold_db, min_silence_duration_seconds)?
+            .into_owned();
+        Ok(())
     }
 
     /// Joins multiple owned audio segments end-to-end.
@@ -2216,7 +2327,7 @@ mod tests {
         let mut audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
 
         // Test fade in
-        audio.fade_in(0.01, FadeCurve::Linear).unwrap(); // 0.01s fade = 441 samples
+        audio.fade_in_in_place(0.01, FadeCurve::Linear).unwrap(); // 0.01s fade = 441 samples
 
         if let AudioData::Mono(arr) = audio.data() {
             assert_eq!(arr[0], 0.0); // Should start at 0
@@ -2229,7 +2340,7 @@ mod tests {
         let samples = Array1::from(vec![1.0f32; 1000]);
         let mut audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
 
-        audio.fade_out(0.01, FadeCurve::Linear).unwrap();
+        audio.fade_out_in_place(0.01, FadeCurve::Linear).unwrap();
 
         if let AudioData::Mono(arr) = audio.data() {
             // The last sample should be very close to 0 but not exactly 0 due to discrete sampling
@@ -2238,6 +2349,59 @@ mod tests {
             assert!(arr[fade_start + 220] > 0.0 && arr[fade_start + 220] < 1.0);
             // Should be partially faded
         }
+    }
+
+    #[test]
+    fn test_fade_in_dual_variant_equivalence() {
+        // Non-mutating fade_in must equal the in-place variant, and must
+        // leave the original untouched.
+        let samples = Array1::from(vec![1.0f32; 1000]);
+        let original = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+
+        // Non-mutating variant returns a new copy.
+        let faded = original.fade_in(0.01, FadeCurve::Linear).unwrap();
+
+        // In-place variant mutates a clone.
+        let mut in_place = original.clone();
+        in_place.fade_in_in_place(0.01, FadeCurve::Linear).unwrap();
+
+        assert_eq!(
+            faded.as_slice().unwrap(),
+            in_place.as_slice().unwrap(),
+            "fade_in and fade_in_in_place must produce identical output"
+        );
+
+        // The original must be unchanged by the non-mutating call.
+        assert!(
+            original.as_slice().unwrap().iter().all(|&x| x == 1.0),
+            "non-mutating fade_in must leave the original intact"
+        );
+    }
+
+    #[test]
+    fn test_pad_dual_variant_equivalence() {
+        // ADD-twin op: pad is the non-mutating primitive, pad_in_place is the
+        // provided default twin.
+        let samples = Array1::from(vec![1.0f32; 1000]);
+        let original = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+
+        let padded = original.pad(0.1, 0.1, 0.0).unwrap();
+
+        let mut in_place = original.clone();
+        in_place.pad_in_place(0.1, 0.1, 0.0).unwrap();
+
+        assert_eq!(
+            padded.as_slice().unwrap(),
+            in_place.as_slice().unwrap(),
+            "pad and pad_in_place must produce identical output"
+        );
+
+        // Original unchanged: still 1000 samples all 1.0.
+        assert_eq!(original.samples_per_channel().get(), 1000);
+        assert!(
+            original.as_slice().unwrap().iter().all(|&x| x == 1.0),
+            "non-mutating pad must leave the original intact"
+        );
     }
 
     #[test]

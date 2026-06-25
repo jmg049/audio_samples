@@ -33,8 +33,8 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
 
     // Fade in/out in-place.
     let mut faded = audio.clone();
-    faded.fade_in(0.05f64, FadeCurve::SmoothStep)?;
-    faded.fade_out(0.05f64, FadeCurve::SmoothStep)?;
+    faded.fade_in_in_place(0.05f64, FadeCurve::SmoothStep)?;
+    faded.fade_out_in_place(0.05f64, FadeCurve::SmoothStep)?;
     println!("Faded: peak={:.4}  rms={:.4}", faded.peak(), faded.rms());
 
     // Split + concatenate.
