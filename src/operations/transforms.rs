@@ -80,6 +80,27 @@ use spectrograms::{
 
 use crate::operations::fft_convolution::{fft_convolve, fft_deconvolve};
 
+use std::cell::RefCell;
+
+thread_local! {
+    /// Thread-local [`FftPlanner`] reused across all FFT-based transforms in
+    /// this module. `spectrograms::FftPlanner` wraps a real-FFT planner that
+    /// memoizes plans (twiddles, scratch) by size internally, so reconstructing
+    /// it per call discarded that cache. Keeping one planner per thread lets
+    /// repeated same-size transforms reuse cached plans. The planner is `!Sync`
+    /// (it owns a real-FFT planner), so `thread_local` is the correct scope.
+    static FFT_PLANNER: RefCell<FftPlanner> = RefCell::new(FftPlanner::new());
+}
+
+/// Runs `f` with the thread-local cached [`FftPlanner`] borrowed mutably.
+///
+/// The borrow is released as soon as `f` returns, so callers must finish all
+/// planner use inside the closure.
+#[inline]
+fn with_fft_planner<R>(f: impl FnOnce(&mut FftPlanner) -> R) -> R {
+    FFT_PLANNER.with(|p| f(&mut p.borrow_mut()))
+}
+
 /// Power spectral density estimate produced by [`AudioTransforms::power_spectral_density`].
 ///
 /// Pairs a frequency axis with the estimated power-per-Hz at each bin. The two
@@ -160,20 +181,21 @@ where
     fn fft(&self, n_fft: NonZeroUsize) -> AudioSampleResult<Array2<Complex<f64>>> {
         let working_samples = self.to_format::<f64>();
 
-        let mut fft_planner = FftPlanner::new();
-
         let mut channel_ffts: Vec<Array1<Complex<f64>>> =
             Vec::with_capacity(self.num_channels().get() as usize);
 
-        for ch in working_samples.channels() {
-            let ch_slice = ch
-                .as_slice()
-                .expect("Can always get a mono channel as a slice");
-            // safety: ch_slice is non-empty since audio has samples
-            let working_ch_slice = unsafe { NonEmptySlice::new_unchecked(ch_slice) };
-            let channel_fft: Array1<Complex<f64>> = fft_planner.fft(working_ch_slice, n_fft)?;
-            channel_ffts.push(channel_fft);
-        }
+        with_fft_planner(|fft_planner| -> AudioSampleResult<()> {
+            for ch in working_samples.channels() {
+                let ch_slice = ch
+                    .as_slice()
+                    .expect("Can always get a mono channel as a slice");
+                // safety: ch_slice is non-empty since audio has samples
+                let working_ch_slice = unsafe { NonEmptySlice::new_unchecked(ch_slice) };
+                let channel_fft: Array1<Complex<f64>> = fft_planner.fft(working_ch_slice, n_fft)?;
+                channel_ffts.push(channel_fft);
+            }
+            Ok(())
+        })?;
 
         ndarray::stack(
             Axis(0),
@@ -861,28 +883,30 @@ where
         let hop = ((1.0 - overlap) * win as f64).floor().max(1.0) as usize;
         let sample_rate = self.sample_rate_hz();
 
-        let mut planner = FftPlanner::new();
         let mut sum: Vec<f64> = Vec::new();
         let mut segment_count = 0u64;
 
-        let mut start = 0;
-        while start + win <= signal.len() {
-            let segment = &signal[start..start + win];
-            // safety: segment length == win == window_size >= 1
-            let segment_slice = unsafe { NonEmptySlice::new_unchecked(segment) };
-            let power =
-                planner.power_spectrum(segment_slice, window_size, Some(WindowType::Hanning))?;
+        with_fft_planner(|planner| -> AudioSampleResult<()> {
+            let mut start = 0;
+            while start + win <= signal.len() {
+                let segment = &signal[start..start + win];
+                // safety: segment length == win == window_size >= 1
+                let segment_slice = unsafe { NonEmptySlice::new_unchecked(segment) };
+                let power =
+                    planner.power_spectrum(segment_slice, window_size, Some(WindowType::Hanning))?;
 
-            if sum.is_empty() {
-                sum = power.to_vec();
-            } else {
-                for (acc, &val) in sum.iter_mut().zip(power.iter()) {
-                    *acc += val;
+                if sum.is_empty() {
+                    sum = power.to_vec();
+                } else {
+                    for (acc, &val) in sum.iter_mut().zip(power.iter()) {
+                        *acc += val;
+                    }
                 }
+                segment_count += 1;
+                start += hop;
             }
-            segment_count += 1;
-            start += hop;
-        }
+            Ok(())
+        })?;
 
         // Average
         let count = segment_count as f64;

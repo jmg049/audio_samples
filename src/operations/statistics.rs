@@ -113,6 +113,29 @@ use non_empty_slice::NonEmptyVec;
 #[cfg(feature = "transforms")]
 use spectrograms::FftPlanner;
 
+#[cfg(feature = "transforms")]
+use std::cell::RefCell;
+
+#[cfg(feature = "transforms")]
+thread_local! {
+    /// Thread-local [`FftPlanner`] reused across all FFT-based statistics in
+    /// this module. `spectrograms::FftPlanner` wraps a real-FFT planner that
+    /// memoizes plans by size internally, so reconstructing it per call
+    /// discarded that cache. One planner per thread lets repeated same-size
+    /// transforms reuse cached plans. The planner is `!Sync`, so `thread_local`
+    /// is the correct scope.
+    static FFT_PLANNER: RefCell<FftPlanner> = RefCell::new(FftPlanner::new());
+}
+
+/// Runs `f` with the thread-local cached [`FftPlanner`] borrowed mutably.
+///
+/// The borrow is released as soon as `f` returns.
+#[cfg(feature = "transforms")]
+#[inline]
+fn with_fft_planner<R>(f: impl FnOnce(&mut FftPlanner) -> R) -> R {
+    FFT_PLANNER.with(|p| f(&mut p.borrow_mut()))
+}
+
 /// Reduces a (possibly multi-channel) signal to a single `f64` sample vector
 /// according to `reduction`, for the spectral analysis ops that produce one
 /// scalar result.
@@ -782,29 +805,30 @@ where
         padded.extend_from_slice(&signal);
         padded.resize(fft_size, 0.0);
 
-        let mut planner = FftPlanner::new();
         // safety: padded is non-empty (fft_size >= 1)
         let padded_slice = unsafe { NonEmptySlice::new_unchecked(&padded[..]) };
         let fft_size_nz =
             // safety: fft_size is a next_power_of_two of a value >= 1
             unsafe { NonZeroUsize::new_unchecked(fft_size) };
 
-        // Forward FFT → Array1<Complex<f64>> of length fft_size/2 + 1
-        let spectrum = planner.fft(padded_slice, fft_size_nz).ok()?;
-
-        // Power spectrum: |X[k]|² as complex values for irfft
-        let power: Vec<Complex<f64>> = spectrum
-            .iter()
-            .map(|c| Complex {
-                re: c.norm_sqr(),
-                im: 0.0,
-            })
-            .collect();
-        // safety: power has the same length as spectrum (fft_size/2 + 1 >= 1)
-        let power_slice = unsafe { NonEmptySlice::new_unchecked(&power[..]) };
-
         // Inverse real FFT → NonEmptyVec<f64> of length fft_size
-        let raw = planner.irfft(power_slice, fft_size_nz).ok()?;
+        let raw = with_fft_planner(|planner| {
+            // Forward FFT → Array1<Complex<f64>> of length fft_size/2 + 1
+            let spectrum = planner.fft(padded_slice, fft_size_nz).ok()?;
+
+            // Power spectrum: |X[k]|² as complex values for irfft
+            let power: Vec<Complex<f64>> = spectrum
+                .iter()
+                .map(|c| Complex {
+                    re: c.norm_sqr(),
+                    im: 0.0,
+                })
+                .collect();
+            // safety: power has the same length as spectrum (fft_size/2 + 1 >= 1)
+            let power_slice = unsafe { NonEmptySlice::new_unchecked(&power[..]) };
+
+            planner.irfft(power_slice, fft_size_nz).ok()
+        })?;
 
         // Normalize: divide by fft_size (IFFT scaling) then by overlap count (n − lag)
         let fft_size_f = fft_size as f64;
@@ -973,14 +997,13 @@ where
         // channel has at least one sample.
         let working_samples = unsafe { NonEmptySlice::new_unchecked(working_vec.as_slice()) };
 
-        let mut planner = FftPlanner::new();
-
         // safety: working_vec is non-empty (see above).
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
         let fft_output_size = n.div_ceil(nzu!(2)).checked_add(1).expect(
             "n is non-zero since self is non-empty by design and  n/2 is always << usize::MAX, which means n/2 + 1 << usize::MAX and cannot overflow",
         );
-        let power_spectrum = planner.power_spectrum(working_samples, n, None)?;
+        let power_spectrum =
+            with_fft_planner(|planner| planner.power_spectrum(working_samples, n, None))?;
 
         let nyquist = self.nyquist();
         let freq_step = nyquist / (fft_output_size.get() - 1) as f64;
@@ -1063,8 +1086,9 @@ where
         let n = unsafe { NonZeroUsize::new_unchecked(input_vec.len()) };
         let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(input_vec) };
 
-        let mut planner = FftPlanner::new();
-        let power_spectrum = planner.power_spectrum(input.as_non_empty_slice(), n, None)?;
+        let power_spectrum = with_fft_planner(|planner| {
+            planner.power_spectrum(input.as_non_empty_slice(), n, None)
+        })?;
 
         // Generate frequency bins
         let nyquist = self.nyquist();
@@ -1137,23 +1161,24 @@ pub fn fft_alignment_lag<T: StandardSample>(
     let mut deg_buf = deg_sig;
     deg_buf.resize(fft_size, 0.0);
 
-    let mut planner = FftPlanner::new();
-    let ref_spec = planner
-        .fft(unsafe { NonEmptySlice::new_unchecked(&ref_buf) }, fft_nz)
-        .ok()?;
-    let deg_spec = planner
-        .fft(unsafe { NonEmptySlice::new_unchecked(&deg_buf) }, fft_nz)
-        .ok()?;
+    let xcorr = with_fft_planner(|planner| {
+        let ref_spec = planner
+            .fft(unsafe { NonEmptySlice::new_unchecked(&ref_buf) }, fft_nz)
+            .ok()?;
+        let deg_spec = planner
+            .fft(unsafe { NonEmptySlice::new_unchecked(&deg_buf) }, fft_nz)
+            .ok()?;
 
-    let cross: Vec<Complex<f64>> = ref_spec
-        .iter()
-        .zip(deg_spec.iter())
-        .map(|(r, d)| r * d.conj())
-        .collect();
+        let cross: Vec<Complex<f64>> = ref_spec
+            .iter()
+            .zip(deg_spec.iter())
+            .map(|(r, d)| r * d.conj())
+            .collect();
 
-    let xcorr = planner
-        .irfft(unsafe { NonEmptySlice::new_unchecked(&cross) }, fft_nz)
-        .ok()?;
+        planner
+            .irfft(unsafe { NonEmptySlice::new_unchecked(&cross) }, fft_nz)
+            .ok()
+    })?;
 
     let scale = 1.0 / fft_size as f64;
     let search = max_lag.min(n1.saturating_sub(1));
@@ -1466,5 +1491,36 @@ mod tests {
             (avg - 1000.0).abs() < 50.0,
             "Averaged centroid {avg} should be near 1000 Hz"
         );
+    }
+
+    /// Sanity check that the thread-local cached [`FftPlanner`] yields
+    /// bit-identical results across repeated calls of the same size — i.e.
+    /// reusing the planner did not corrupt or mutate its cached state in a way
+    /// that changes the numeric output.
+    #[test]
+    #[cfg(feature = "transforms")]
+    fn test_cached_fft_planner_repeatable() {
+        let sample_rate = sample_rate!(44100);
+        let duration = Duration::from_secs_f32(0.1);
+        let tone = crate::sine_wave::<f64>(1000.0, duration, sample_rate, 0.5);
+
+        // spectral_centroid uses the cached planner (power_spectrum path).
+        let c1 = tone.spectral_centroid(ChannelReduction::First).unwrap();
+        let c2 = tone.spectral_centroid(ChannelReduction::First).unwrap();
+        assert_eq!(c1, c2, "centroid must be identical across cached calls");
+
+        // autocorrelation uses the cached planner (fft + irfft path).
+        let a1 = tone.autocorrelation(nzu!(64)).unwrap();
+        let a2 = tone.autocorrelation(nzu!(64)).unwrap();
+        assert_eq!(
+            a1.as_slice(),
+            a2.as_slice(),
+            "autocorrelation must be identical across cached calls"
+        );
+
+        // fft_alignment_lag uses the cached planner (two ffts + irfft path).
+        let l1 = fft_alignment_lag(&tone, &tone, 32);
+        let l2 = fft_alignment_lag(&tone, &tone, 32);
+        assert_eq!(l1, l2, "alignment lag must be identical across cached calls");
     }
 }
