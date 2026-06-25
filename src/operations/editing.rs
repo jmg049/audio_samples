@@ -1967,7 +1967,7 @@ where
             let mut shifted_channels = Vec::with_capacity(num_channels);
 
             for ch_idx in 0..num_channels {
-                let channel_audio = audio_owned.extract_channel(ch_idx as u32)?;
+                let channel_audio = audio_owned.extract_channel(ch_idx)?;
                 let shifted_channel = phase_vocoder_pitch_shift(
                     &channel_audio,
                     pitch_ratio,

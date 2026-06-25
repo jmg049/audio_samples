@@ -34,8 +34,8 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     );
 
     // Pan and balance.
-    stereo.pan(-0.5f64)?;
-    stereo.balance(0.2f64)?;
+    stereo.pan_in_place(-0.5f64)?;
+    stereo.balance_in_place(0.2f64)?;
 
     // Extract and swap channels.
     let left = stereo.extract_channel(0)?;
@@ -47,10 +47,10 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         right.peak()
     );
 
-    stereo.swap_channels(0, 1)?;
+    stereo.swap_channels_in_place(0, 1)?;
 
     // Apply a function to a single channel (invert channel 1).
-    stereo.apply_to_channel(1, |x| -x)?;
+    stereo.apply_to_channel_in_place(1, |x| -x)?;
 
     // Stereo -> mono.
     let mono_avg = stereo.to_mono(MonoConversionMethod::Average)?;

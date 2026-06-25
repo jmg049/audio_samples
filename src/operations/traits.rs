@@ -4980,6 +4980,15 @@ where
         method: MonoConversionMethod,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
+    /// Convert this audio to mono in place, replacing `self`.
+    ///
+    /// In-place twin of [`to_mono`](Self::to_mono). See that method for the
+    /// available downmix strategies and error conditions.
+    ///
+    /// # Errors
+    /// See [`to_mono`](Self::to_mono).
+    fn to_mono_in_place(&mut self, method: MonoConversionMethod) -> AudioSampleResult<()>;
+
     /// Convert audio to a different stereo.
     ///
     /// Behaviour depends on the chosen method:
@@ -5019,6 +5028,15 @@ where
         method: StereoConversionMethod,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
+    /// Convert this audio to stereo in place, replacing `self`.
+    ///
+    /// In-place twin of [`to_stereo`](Self::to_stereo). See that method for the
+    /// available conversion strategies and error conditions.
+    ///
+    /// # Errors
+    /// See [`to_stereo`](Self::to_stereo).
+    fn to_stereo_in_place(&mut self, method: StereoConversionMethod) -> AudioSampleResult<()>;
+
     /// Duplicate audio into an n-channel signal.
     ///
     /// For mono input the single channel is replicated into all output
@@ -5051,6 +5069,15 @@ where
         n_channels: usize,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
+    /// Duplicate audio into an n-channel signal in place, replacing `self`.
+    ///
+    /// In-place twin of [`duplicate_to_channels`](Self::duplicate_to_channels).
+    /// See that method for argument semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`duplicate_to_channels`](Self::duplicate_to_channels).
+    fn duplicate_to_channels_in_place(&mut self, n_channels: usize) -> AudioSampleResult<()>;
+
     /// Extract a single channel as an owned mono signal.
     ///
     /// If the audio is already mono, a clone is returned (only
@@ -5081,7 +5108,7 @@ where
     /// ```
     fn extract_channel(
         &self,
-        channel_index: u32,
+        channel_index: usize,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
     /// Borrow a single channel as a zero-copy view.
@@ -5114,7 +5141,7 @@ where
     /// ```
     fn borrow_channel(
         &self,
-        channel_index: u32,
+        channel_index: usize,
     ) -> AudioSampleResult<AudioSamples<'_, Self::Sample>>;
 
     /// Swap two channels in place.
@@ -5143,9 +5170,37 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// assert!(stereo.swap_channels(0, 1).is_ok());
+    /// assert!(stereo.swap_channels_in_place(0, 1).is_ok());
     /// ```
-    fn swap_channels(&mut self, channel1: u32, channel2: u32) -> AudioSampleResult<()>;
+    fn swap_channels_in_place(
+        &mut self,
+        channel1: usize,
+        channel2: usize,
+    ) -> AudioSampleResult<()>;
+
+    /// Swap two channels, returning a new copy and leaving `self` unchanged.
+    ///
+    /// Non-mutating twin of [`swap_channels_in_place`](Self::swap_channels_in_place).
+    ///
+    /// # Arguments
+    /// - `channel1` – Zero-based index of the first channel.
+    /// - `channel2` – Zero-based index of the second channel.
+    ///
+    /// # Returns
+    /// The audio with the two channels swapped.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if either index is ≥ the
+    ///   number of channels.
+    #[inline]
+    fn swap_channels(&self, channel1: usize, channel2: usize) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.swap_channels_in_place(channel1, channel2)?;
+        Ok(out)
+    }
 
     /// Apply linear panning to a stereo signal in place.
     ///
@@ -5175,9 +5230,33 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// stereo.pan(0.5).unwrap();
+    /// stereo.pan_in_place(0.5).unwrap();
     /// ```
-    fn pan(&mut self, pan_value: f64) -> AudioSampleResult<()>;
+    fn pan_in_place(&mut self, pan_value: f64) -> AudioSampleResult<()>;
+
+    /// Apply linear panning, returning a new copy and leaving `self` unchanged.
+    ///
+    /// Non-mutating twin of [`pan_in_place`](Self::pan_in_place).
+    ///
+    /// # Arguments
+    /// - `pan_value` – Panning position in the range \[-1, 1\].
+    ///   Values outside this range are clamped.
+    ///
+    /// # Returns
+    /// The panned audio samples.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if the audio is mono or
+    ///   has a channel count other than 2.
+    #[inline]
+    fn pan(&self, pan_value: f64) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.pan_in_place(pan_value)?;
+        Ok(out)
+    }
 
     /// Adjust the left/right balance of a stereo signal in place.
     ///
@@ -5206,9 +5285,34 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// stereo.balance(-0.3).unwrap();
+    /// stereo.balance_in_place(-0.3).unwrap();
     /// ```
-    fn balance(&mut self, balance: f64) -> AudioSampleResult<()>;
+    fn balance_in_place(&mut self, balance: f64) -> AudioSampleResult<()>;
+
+    /// Adjust left/right balance, returning a new copy and leaving `self`
+    /// unchanged.
+    ///
+    /// Non-mutating twin of [`balance_in_place`](Self::balance_in_place).
+    ///
+    /// # Arguments
+    /// - `balance` – Balance position in the range \[-1, 1\].
+    ///   Values outside this range are clamped.
+    ///
+    /// # Returns
+    /// The balance-adjusted audio samples.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if the audio is mono or
+    ///   has a channel count other than 2.
+    #[inline]
+    fn balance(&self, balance: f64) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.balance_in_place(balance)?;
+        Ok(out)
+    }
 
     /// Apply a closure to every sample in a single channel.
     ///
@@ -5239,11 +5343,43 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// stereo.apply_to_channel(1, |s| s * 0.5).unwrap();
+    /// stereo.apply_to_channel_in_place(1, |s| s * 0.5).unwrap();
     /// ```
-    fn apply_to_channel<F>(&mut self, channel_index: u32, func: F) -> AudioSampleResult<()>
+    fn apply_to_channel_in_place<F>(
+        &mut self,
+        channel_index: usize,
+        func: F,
+    ) -> AudioSampleResult<()>
     where
         F: FnMut(Self::Sample) -> Self::Sample;
+
+    /// Apply a closure to every sample in a single channel, returning a new
+    /// copy and leaving `self` unchanged.
+    ///
+    /// Non-mutating twin of [`apply_to_channel_in_place`](Self::apply_to_channel_in_place).
+    ///
+    /// # Arguments
+    /// - `channel_index` – Zero-based index of the target channel.
+    ///   Ignored for mono audio.
+    /// - `func` – A closure that maps each sample to a new value.
+    ///
+    /// # Returns
+    /// The audio with `func` applied to the selected channel.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if the audio is
+    ///   multi-channel and `channel_index` is ≥ the number of
+    ///   channels.
+    #[inline]
+    fn apply_to_channel<F>(&self, channel_index: usize, func: F) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+        F: FnMut(Self::Sample) -> Self::Sample,
+    {
+        let mut out = self.clone();
+        out.apply_to_channel_in_place(channel_index, func)?;
+        Ok(out)
+    }
 
     /// Combine multiple mono signals into a single multi-channel signal.
     ///
