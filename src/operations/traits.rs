@@ -2998,6 +2998,47 @@ where
         Ok(out)
     }
 
+    /// Apply zero-phase (forward-backward) IIR filtering in place.
+    ///
+    /// Designs the filter from `design`, then filters each channel forward,
+    /// reverses, filters again, and reverses back. The two passes cancel the
+    /// phase response (giving exactly **zero phase delay**) and **square** the
+    /// magnitude response relative to a single pass. This is the SciPy
+    /// `filtfilt` algorithm.
+    ///
+    /// To suppress start/end transients, each channel is extended at both ends
+    /// with odd (point-)reflection padding before filtering; the padding is
+    /// stripped afterwards. Filter state is reset between the forward and
+    /// backward passes and between channels. Integer sample types are processed
+    /// through an `f64` intermediate.
+    ///
+    /// Unlike [`apply_iir_filter_in_place`](Self::apply_iir_filter_in_place),
+    /// which delays the signal by the filter's group delay, `filtfilt` leaves a
+    /// symmetric input symmetric.
+    ///
+    /// # Arguments
+    /// - `design` – Filter specification (type, order, frequencies, ripple).
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if the design is invalid
+    ///   (out-of-range frequency, unsupported response, order > 12, …).
+    fn filtfilt_in_place(&mut self, design: &IirFilterDesign) -> AudioSampleResult<()>;
+
+    /// Apply zero-phase (forward-backward) IIR filtering, returning a new copy.
+    ///
+    /// Non-mutating twin of [`filtfilt_in_place`](Self::filtfilt_in_place).
+    fn filtfilt(&self, design: &IirFilterDesign) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.filtfilt_in_place(design)?;
+        Ok(out)
+    }
+
     /// Apply a second-order Butterworth low-pass filter.
     ///
     /// Convenience wrapper that constructs an [`IirFilterDesign`] and

@@ -52,6 +52,9 @@ use std::num::NonZeroUsize;
 
 use crate::operations::traits::AudioIirFiltering;
 use crate::operations::types::{FilterResponse, IirFilterDesign, IirFilterType};
+
+// `IirFilterDesign` is used by the design dispatcher; the streaming
+// `to_sos` / `from_design` API is defined further down in this module.
 use crate::repr::AudioData;
 use crate::traits::StandardSample;
 use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ConvertTo, ParameterError};
@@ -391,6 +394,108 @@ impl Biquad {
         self.s0 = 0.0;
         self.s1 = 0.0;
     }
+
+    /// Recover normalised `(b, a)` coefficient vectors (a0 = 1) for this biquad.
+    ///
+    /// Used to rebuild a stateful [`IirFilter`] section from a designed
+    /// (already-normalised) [`Biquad`] when assembling a streaming
+    /// [`SosFilter`]. The coefficients are identical up to the a0 = 1
+    /// normalisation the biquad already applied at construction.
+    fn to_coeffs(self) -> (Vec<f64>, Vec<f64>) {
+        (
+            vec![self.b0, self.b1, self.b2],
+            vec![1.0, self.a1, self.a2],
+        )
+    }
+}
+
+/// Build a stateful [`SosFilter`] (cascade of [`IirFilter`] sections) from an
+/// internal [`FilterRepresentation`].
+///
+/// The biquads carried by the representation are already normalised by a0, so
+/// each section is reconstructed as an order-2 [`IirFilter`] with a0 = 1. The
+/// resulting cascade is mathematically identical to the fast biquad path but
+/// exposes a public, resettable streaming API.
+fn sos_from_representation(repr: &FilterRepresentation) -> SosFilter {
+    let sections = match repr {
+        FilterRepresentation::Single(bq) => {
+            let (b, a) = bq.to_coeffs();
+            vec![IirFilter::new(b, a)]
+        }
+        FilterRepresentation::Cascade(bqs) => bqs
+            .iter()
+            .map(|bq| {
+                let (b, a) = bq.to_coeffs();
+                IirFilter::new(b, a)
+            })
+            .collect(),
+    };
+    SosFilter::new(sections)
+}
+
+/// Zero-phase (forward-backward) filtering of one channel of `f64` samples,
+/// in place, using `sos`.
+///
+/// Algorithm (SciPy `filtfilt` style):
+/// 1. Extend the signal at both ends with odd (point-)reflection padding of
+///    length `padlen ≈ 3·(2·n_sections)` so the edges of interest are not
+///    contaminated by the filter's start-up transient.
+/// 2. Filter the padded signal forward, reset the cascade state, reverse,
+///    filter forward again (= backward over the original orientation), reverse
+///    back. The two passes cancel the phase and square the magnitude.
+/// 3. Strip the padding, leaving an output the same length as the input.
+///
+/// Odd reflection about the first sample maps `x[k]` to `2·x[0] − x[k]`
+/// (and symmetrically at the tail about the last sample), which continues the
+/// signal smoothly without introducing a discontinuity or a DC step.
+///
+/// For very short signals (`len ≤ padlen`) the padding is clamped to
+/// `len − 1`; a single-sample signal is filtered without padding.
+fn filtfilt_slice(sos: &mut SosFilter, signal: &mut [f64]) {
+    let len = signal.len();
+    if len == 0 {
+        return;
+    }
+
+    // Padding length: 3 * (number of biquad coefficients along one side). Each
+    // second-order section contributes 2 to the effective order, so 2*n_sections
+    // is the total filter order; tripling it gives ample transient room. This
+    // matches scipy.signal.sosfiltfilt's default `padlen = 3 * (2 * n_sections)`.
+    let n_sections = sos.sections.len().max(1);
+    let mut padlen = 3 * (2 * n_sections);
+    if padlen >= len {
+        // Not enough samples for the default; clamp so we never reflect past
+        // the available data.
+        padlen = len.saturating_sub(1);
+    }
+
+    // Build the odd-reflected, padded buffer:
+    //   left  pad: 2*x[0]   - x[padlen..0]      (reversed)
+    //   body:      x[0..len]
+    //   right pad: 2*x[len-1] - x[len-2 .. len-2-padlen] (reversed)
+    let mut padded = Vec::with_capacity(len + 2 * padlen);
+    let x0 = signal[0];
+    for k in (1..=padlen).rev() {
+        padded.push(2.0 * x0 - signal[k]);
+    }
+    padded.extend_from_slice(signal);
+    let xn = signal[len - 1];
+    for k in 1..=padlen {
+        padded.push(2.0 * xn - signal[len - 1 - k]);
+    }
+
+    // Forward pass.
+    sos.reset();
+    sos.process_block(&mut padded);
+
+    // Backward pass: reverse, filter forward (reset state first), reverse back.
+    padded.reverse();
+    sos.reset();
+    sos.process_block(&mut padded);
+    padded.reverse();
+
+    // Strip the padding back to the original length.
+    signal.copy_from_slice(&padded[padlen..padlen + len]);
 }
 
 /// A second-order sections (SOS) cascade filter.
@@ -554,6 +659,74 @@ impl SosFilter {
         for section in &mut self.sections {
             section.reset();
         }
+    }
+
+    /// Build an [`SosFilter`] from a filter design, for design-once streaming.
+    ///
+    /// Designs the filter once (via the same dispatcher used by
+    /// [`AudioIirFiltering::apply_iir_filter_in_place`]) and returns a stateful
+    /// cascade whose [`Self::process_sample`] / [`Self::process_block`] retain
+    /// state across calls. This lets real-time / block processing avoid
+    /// redesigning the filter for every block.
+    ///
+    /// # Arguments
+    /// - `design` – Filter specification (type, order, frequencies, ripple).
+    /// - `sample_rate` – Sample rate of the signal in Hz.
+    ///
+    /// # Returns
+    /// A freshly-reset [`SosFilter`] implementing the requested design.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if the design is invalid
+    ///   (out-of-range frequency, unsupported response, order > 12, …).
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::operations::iir_filtering::SosFilter;
+    /// use audio_samples::operations::types::IirFilterDesign;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 1000.0);
+    /// let mut sos = SosFilter::from_design(&design, 44100.0).unwrap();
+    /// let y = sos.process_sample(1.0);
+    /// assert!(y.is_finite());
+    /// ```
+    #[inline]
+    pub fn from_design(
+        design: &IirFilterDesign,
+        sample_rate: f64,
+    ) -> AudioSampleResult<SosFilter> {
+        let repr = design_iir_filter(design, sample_rate)?;
+        Ok(sos_from_representation(&repr))
+    }
+
+    /// Process a block of samples in place, retaining filter state across calls.
+    ///
+    /// Each element of `block` is replaced with its filtered value, in order,
+    /// flowing through every section. Because the internal delay lines persist,
+    /// calling `process_block` on consecutive halves of a signal yields exactly
+    /// the same result as calling it once on the whole signal — the key
+    /// property for streaming / real-time block processing.
+    ///
+    /// This is an alias of [`Self::process_samples_in_place`] with a name that
+    /// signals the design-once / stream-many usage.
+    ///
+    /// # Arguments
+    /// - `block` – Mutable slice; each element is replaced with its filtered value.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::operations::iir_filtering::{IirFilter, SosFilter};
+    ///
+    /// let section = IirFilter::new(vec![0.5, 0.5], vec![1.0]);
+    /// let mut sos = SosFilter::new(vec![section]);
+    /// let mut buf = [1.0, 1.0, 1.0];
+    /// sos.process_block(&mut buf);
+    /// assert_eq!(buf, [0.5, 1.0, 1.0]);
+    /// ```
+    #[inline]
+    pub fn process_block(&mut self, block: &mut [f64]) {
+        self.process_samples_in_place(block);
     }
 
     /// Compute the frequency response at the given frequencies.
@@ -1322,6 +1495,41 @@ where
                     }
                 }
             },
+        }
+
+        Ok(())
+    }
+
+    /// Apply zero-phase (forward-backward) IIR filtering in place.
+    ///
+    /// See [`AudioIirFiltering::filtfilt_in_place`] for the full description.
+    #[inline]
+    fn filtfilt_in_place(&mut self, design: &IirFilterDesign) -> AudioSampleResult<()> {
+        let sample_rate = self.sample_rate_hz();
+        // Design once; clone the (reset) cascade per channel so each channel
+        // starts from a clean state, mirroring the per-channel reset used by
+        // `apply_iir_filter_in_place` and `apply_eq_band_in_place`.
+        let sos = SosFilter::from_design(design, sample_rate)?;
+
+        match self.data_mut() {
+            AudioData::Mono(samples) => {
+                let mut buf: Vec<f64> = samples.iter().map(|&s| s.convert_to()).collect();
+                filtfilt_slice(&mut sos.clone(), &mut buf);
+                for (dst, &v) in samples.iter_mut().zip(buf.iter()) {
+                    *dst = v.convert_to();
+                }
+            }
+            AudioData::Multi(data) => {
+                for ch_idx in 0..data.dim().0.get() {
+                    let mut channel = data.index_axis_mut(Axis(0), ch_idx);
+                    let mut buf: Vec<f64> =
+                        channel.iter().map(|&s| s.convert_to()).collect();
+                    filtfilt_slice(&mut sos.clone(), &mut buf);
+                    for (dst, &v) in channel.iter_mut().zip(buf.iter()) {
+                        *dst = v.convert_to();
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -2409,6 +2617,37 @@ fn design_butterworth_filter(
             );
             Ok(sos_to_cascade(&sos))
         }
+    }
+}
+
+impl IirFilterDesign {
+    /// Design this filter as a stateful second-order-sections cascade.
+    ///
+    /// Convenience wrapper around [`SosFilter::from_design`]; designs the
+    /// filter once for the given `sample_rate` so the returned [`SosFilter`]
+    /// can stream consecutive blocks without redesigning.
+    ///
+    /// # Arguments
+    /// - `sample_rate` – Sample rate of the signal in Hz.
+    ///
+    /// # Returns
+    /// A freshly-reset [`SosFilter`] implementing this design.
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] – if the design is invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::operations::types::IirFilterDesign;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 1000.0);
+    /// let sos = design.to_sos(44100.0).unwrap();
+    /// assert!(!sos.sections.is_empty());
+    /// ```
+    #[inline]
+    pub fn to_sos(&self, sample_rate: f64) -> AudioSampleResult<SosFilter> {
+        SosFilter::from_design(self, sample_rate)
     }
 }
 
@@ -4490,5 +4729,191 @@ mod tests {
             3.0,
         );
         assert!(audio.apply_iir_filter_in_place(&bad).is_err());
+    }
+
+    // ========================================================================
+    // Streaming (design-once) SosFilter + zero-phase filtfilt
+    // ========================================================================
+
+    /// Streaming continuity: filtering a signal in two consecutive
+    /// `process_block` halves on a single stateful SosFilter must equal
+    /// filtering the whole signal in one pass.
+    #[test]
+    fn test_sos_streaming_block_continuity() {
+        let design =
+            IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(6).unwrap(), 1500.0);
+
+        // Build a non-trivial signal.
+        let n = 512;
+        let signal: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / FS;
+                (2.0 * PI * 300.0 * t).sin() + 0.4 * (2.0 * PI * 4000.0 * t).sin()
+            })
+            .collect();
+
+        // One-pass reference.
+        let mut sos_whole = SosFilter::from_design(&design, FS).unwrap();
+        let mut whole = signal.clone();
+        sos_whole.process_block(&mut whole);
+
+        // Two consecutive halves on one streaming filter (state retained).
+        let mut sos_stream = design.to_sos(FS).unwrap();
+        let mut streamed = signal.clone();
+        let mid = n / 2;
+        let (first, second) = streamed.split_at_mut(mid);
+        sos_stream.process_block(first);
+        sos_stream.process_block(second);
+
+        for (i, (a, b)) in whole.iter().zip(streamed.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "stream discontinuity at {i}: whole={a}, streamed={b}"
+            );
+        }
+
+        // reset() restores the freshly-constructed state.
+        sos_stream.reset();
+        let mut after_reset = signal.clone();
+        sos_stream.process_block(&mut after_reset);
+        for (a, b) in whole.iter().zip(after_reset.iter()) {
+            assert!((a - b).abs() < 1e-12, "reset did not restore clean state");
+        }
+    }
+
+    /// Zero phase: a symmetric input stays symmetric after filtfilt, and the
+    /// cross-correlation peak with the input is at lag 0. Contrast with the
+    /// single-pass filter, which group-delays the signal (peak at lag > 0).
+    #[test]
+    fn test_filtfilt_zero_phase_symmetry() {
+        let design =
+            IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 2000.0);
+
+        // Symmetric input: a centred triangular burst on a zero background.
+        let n = 401usize;
+        let center = n / 2;
+        let mut sig = vec![0.0f64; n];
+        for i in 0..n {
+            let d = (i as isize - center as isize).abs();
+            if d <= 20 {
+                sig[i] = 20.0 - d as f64;
+            }
+        }
+        // sig is exactly symmetric about `center`.
+
+        // --- filtfilt: must remain symmetric ---
+        let samples = NonEmptyVec::new(sig.iter().map(|&v| v as f32).collect()).unwrap();
+        let mut audio: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+        audio.filtfilt_in_place(&design).unwrap();
+        let ff: Vec<f64> = audio
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&v| v as f64)
+            .collect();
+
+        // Symmetry: ff[center - k] ≈ ff[center + k].
+        let mut max_asym = 0.0f64;
+        for k in 0..=center.min(n - 1 - center) {
+            max_asym = max_asym.max((ff[center - k] - ff[center + k]).abs());
+        }
+        let peak = ff.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+        assert!(
+            max_asym < 1e-4 * peak.max(1e-9),
+            "filtfilt broke symmetry: max_asym={max_asym}, peak={peak}"
+        );
+
+        // Cross-correlation peak between input and filtfilt output at lag 0.
+        let best_lag_ff = best_xcorr_lag(&sig, &ff, 40);
+        assert_eq!(best_lag_ff, 0, "filtfilt should have zero group delay");
+
+        // --- single-pass: DOES delay (peak at positive lag) ---
+        let samples2 = NonEmptyVec::new(sig.iter().map(|&v| v as f32).collect()).unwrap();
+        let mut audio2: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
+        audio2.apply_iir_filter_in_place(&design).unwrap();
+        let sp: Vec<f64> = audio2
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&v| v as f64)
+            .collect();
+        let best_lag_sp = best_xcorr_lag(&sig, &sp, 40);
+        assert!(
+            best_lag_sp > 0,
+            "single-pass filter should be group-delayed, got lag {best_lag_sp}"
+        );
+    }
+
+    /// Magnitude: the effective filtfilt magnitude is the SQUARE of the
+    /// single-pass magnitude (≈ 2x the single-pass attenuation in dB), at both
+    /// a passband and a stopband frequency.
+    #[test]
+    fn test_filtfilt_magnitude_is_squared() {
+        let design =
+            IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 2000.0);
+        let sos = SosFilter::from_design(&design, FS).unwrap();
+
+        // Pass a pure tone through filtfilt and measure the steady-state
+        // amplitude ratio; compare to the squared single-pass |H|.
+        for &freq in &[500.0f64, 6000.0] {
+            let n = 8192usize;
+            let sig: Vec<f64> = (0..n)
+                .map(|i| (2.0 * PI * freq * (i as f64) / FS).sin())
+                .collect();
+
+            let samples =
+                NonEmptyVec::new(sig.iter().map(|&v| v as f32).collect()).unwrap();
+            let mut audio: AudioSamples<'_, f32> =
+                AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+            audio.filtfilt_in_place(&design).unwrap();
+            let out: Vec<f64> = audio
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|&v| v as f64)
+                .collect();
+
+            // Steady-state amplitude over the central region (avoid any edges).
+            let lo = n / 4;
+            let hi = 3 * n / 4;
+            let amp_out = out[lo..hi].iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+            let measured_db = db(amp_out); // input amplitude is 1.0
+
+            // Single-pass magnitude (linear) -> squared -> dB.
+            let (m, _) = sos.frequency_response(&[freq], FS);
+            let single_db = db(m[0]);
+            let expected_db = 2.0 * single_db;
+
+            assert!(
+                (measured_db - expected_db).abs() < 1.0,
+                "freq {freq}: filtfilt {measured_db:.2} dB vs expected square {expected_db:.2} dB (single {single_db:.2})"
+            );
+        }
+    }
+
+    /// Cross-correlation lag (in `-max_lag..=max_lag`) at which `b` best aligns
+    /// with `a`; positive lag means `b` is delayed relative to `a`.
+    fn best_xcorr_lag(a: &[f64], b: &[f64], max_lag: isize) -> isize {
+        let n = a.len() as isize;
+        let mut best_lag = 0isize;
+        let mut best_val = f64::NEG_INFINITY;
+        for lag in -max_lag..=max_lag {
+            let mut acc = 0.0;
+            // j = i + lag: positive `lag` means `b` is shifted later (delayed)
+            // relative to `a`, so a group-delayed `b` peaks at positive lag.
+            for i in 0..n {
+                let j = i + lag;
+                if j >= 0 && j < n {
+                    acc += a[i as usize] * b[j as usize];
+                }
+            }
+            if acc > best_val {
+                best_val = acc;
+                best_lag = lag;
+            }
+        }
+        best_lag
     }
 }
