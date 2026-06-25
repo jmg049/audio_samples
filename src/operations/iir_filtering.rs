@@ -298,18 +298,25 @@ impl IirFilter {
         for &freq in frequencies {
             let omega = 2.0 * f64::PI() * freq / sample_rate;
             let z = Complex::new(0.0, omega).exp();
+            // z^-1 = reciprocal of z on the unit circle. Successive
+            // multiplication by `z_inv` replaces the per-coefficient
+            // `z.powf(-i)` call, giving the same z^-i terms iteratively.
+            let z_inv = z.inv();
 
             // Compute numerator (B(z))
             let mut numerator = Complex::new(0.0, 0.0);
-            for (i, &b) in self.b_coeffs.iter().enumerate() {
-                let term = z.powf(-(i as f64));
-                numerator += term * b;
+            let mut z_pow = Complex::new(1.0, 0.0); // z^0
+            for &b in &self.b_coeffs {
+                numerator += z_pow * b;
+                z_pow *= z_inv;
             }
 
             // Compute denominator (A(z))
             let mut denominator = num_complex::Complex::new(0.0, 0.0);
-            for (i, &a) in self.a_coeffs.iter().enumerate() {
-                denominator += z.powf(-(i as f64)) * a;
+            let mut z_pow = Complex::new(1.0, 0.0); // z^0
+            for &a in &self.a_coeffs {
+                denominator += z_pow * a;
+                z_pow *= z_inv;
             }
 
             // H(z) = B(z) / A(z)

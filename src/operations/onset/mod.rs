@@ -1247,8 +1247,16 @@ where
         &self,
         onset_config: &ComplexOnsetConfig,
     ) -> AudioSampleResult<NonEmptyVec<f64>> {
-        let mag_diff = self.magnitude_difference_matrix(onset_config)?;
-        let phase_dev = self.phase_deviation_matrix(onset_config)?;
+        // Compute the CQT once and share it between the magnitude-difference
+        // and phase-deviation computations. `magnitude_difference_matrix` and
+        // `phase_deviation_matrix` each compute their own CQT when called
+        // standalone; here we avoid that duplicated transform.
+        let cqt_result = self.constant_q_transform(&onset_config.cqt_config, onset_config.hop_size)?;
+        let sample_rate = self.sample_rate_hz();
+
+        let mag = cqt_result.to_magnitude();
+        let mag_diff = magnitude_difference(mag.view());
+        let phase_dev = phase_deviation(cqt_result.data.view(), onset_config, sample_rate);
 
         Ok(combine_complex_odf(&mag_diff, &phase_dev, onset_config))
     }
@@ -1304,5 +1312,54 @@ where
         let sample_rate = self.sample_rate_hz();
         let cqt_result = self.constant_q_transform(&config.cqt_config, config.hop_size)?;
         Ok(phase_deviation(cqt_result.data.view(), config, sample_rate))
+    }
+}
+
+#[cfg(test)]
+mod cqt_dedup_tests {
+    use super::*;
+    use crate::AudioSamples;
+    use crate::operations::traits::AudioOnsetDetection;
+    use crate::sample_rate;
+    use ndarray::Array1;
+
+    /// Item 2 parity: computing the CQT once (the optimized combined path)
+    /// must produce a bit-identical ODF to the previous composition that
+    /// computed the CQT twice (once per matrix). The CQT is deterministic, so
+    /// `combine_complex_odf` over the standalone matrices is the reference.
+    #[test]
+    fn test_complex_odf_single_cqt_bit_identical() {
+        // A multi-tone signal long enough to yield several CQT frames.
+        let sr = 44100usize;
+        let n = 16384;
+        let data: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                0.6 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                    + 0.3 * (2.0 * std::f64::consts::PI * 880.0 * t).sin()
+            })
+            .collect();
+        let audio = AudioSamples::new_mono(Array1::from_vec(data), sample_rate!(44100)).unwrap();
+
+        let config = ComplexOnsetConfig::default();
+
+        // Reference: standalone matrices (each computes its own CQT), combined.
+        let mag_diff = audio.magnitude_difference_matrix(&config).unwrap();
+        let phase_dev = audio.phase_deviation_matrix(&config).unwrap();
+        let expected = combine_complex_odf(&mag_diff, &phase_dev, &config);
+
+        // Optimized: combined path computes the CQT once internally.
+        let actual = audio.onset_detection_function_complex(&config).unwrap();
+
+        let exp = expected.as_slice();
+        let act = actual.as_slice();
+        assert_eq!(exp.len(), act.len(), "ODF length mismatch");
+        for (i, (e, a)) in exp.iter().zip(act.iter()).enumerate() {
+            assert_eq!(
+                e.to_bits(),
+                a.to_bits(),
+                "ODF frame {i} differs: {e} vs {a}"
+            );
+        }
     }
 }

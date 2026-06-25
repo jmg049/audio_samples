@@ -158,26 +158,22 @@ where
         // Apply filter to audio data
         match self.data_mut() {
             AudioData::Mono(_) => {
-                let mut working_samples = self.as_f64();
-                let Some(mono_self) = self.as_mono_mut() else {
+                let Some(working_samples) = self.as_slice_mut() else {
                     return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
                         operation: "parametric EQ".to_string(),
                         layout_type: "non-contiguous mono samples".to_string(),
                     }));
                 };
 
-                let working_samples = working_samples.as_mono_mut().ok_or_else(|| {
-                    AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "audio_format",
-                        "Failed to get mono data. Underlying data is not mono.",
-                    ))
-                })?;
-
-                let working_samples = working_samples.as_slice_mut();
-                filter.process_samples_in_place(working_samples);
-
-                for (i, output) in working_samples.iter_mut().enumerate() {
-                    mono_self[i] = (*output).convert_to();
+                // Filter directly into the destination in a single pass. Each
+                // sample is converted to f64, filtered, and converted back to
+                // `T` — identical to the previous "copy to f64 / filter /
+                // write back" sequence, but without the whole-buffer f64 copy.
+                // `process_sample` is invoked in the same order on the same
+                // f64 inputs, so the output is numerically unchanged.
+                for sample in working_samples.iter_mut() {
+                    let x: f64 = (*sample).convert_to();
+                    *sample = filter.process_sample(x).convert_to();
                 }
             }
             AudioData::Multi(samples) => {

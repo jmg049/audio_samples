@@ -283,6 +283,49 @@ impl EnvelopeFollower {
     }
 }
 
+/// Fixed-capacity FIFO of gain-reduction values used to apply the lookahead
+/// delay to computed gains without retaining the full O(N) history.
+///
+/// It holds at most `capacity` (= `lookahead_samples`) of the most recently
+/// pushed gains. [`delayed`][GainDelayLine::delayed] returns the oldest stored
+/// gain — the one computed `capacity` steps ago — which is exactly the value
+/// the original code read as `gain_reductions[i - lookahead]`. Callers only
+/// invoke [`delayed`][GainDelayLine::delayed] once the line is full, matching
+/// the `i >= lookahead` / `lookahead <= len` guards in the processing loops.
+#[derive(Debug, Clone)]
+struct GainDelayLine {
+    buffer: VecDeque<f64>,
+    capacity: usize,
+}
+
+impl GainDelayLine {
+    #[inline]
+    fn new(capacity: usize) -> Self {
+        Self {
+            buffer: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Returns the oldest stored gain (the front of the FIFO).
+    ///
+    /// Only called when the line is full, so the front is the gain computed
+    /// exactly `capacity` steps before the current one.
+    #[inline]
+    fn delayed(&self) -> f64 {
+        self.buffer.front().copied().unwrap_or(0.0)
+    }
+
+    /// Appends a gain, evicting the oldest once `capacity` is exceeded.
+    #[inline]
+    fn push(&mut self, gain: f64) {
+        if self.buffer.len() == self.capacity {
+            self.buffer.pop_front();
+        }
+        self.buffer.push_back(gain);
+    }
+}
+
 /// A circular delay buffer that enables lookahead processing in limiters and compressors.
 ///
 /// ## Purpose
@@ -651,17 +694,27 @@ where
                 );
 
                 let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                let mut gain_reductions = Vec::with_capacity(samples.len().get());
+                // Only the last `lookahead_samples` gain values are ever read
+                // back (the value computed `lookahead_samples` steps earlier),
+                // so a fixed-capacity ring replaces the full-length Vec.
+                let mut gain_reductions =
+                    GainDelayLine::new(lookahead_samples.get());
+                let makeup_gain = db_to_linear(config.makeup_gain_db);
 
-                // Process each sample
-                for &sample in samples.iter() {
-                    let sample_f: f64 = sample.convert_to();
+                // Apply gain reductions with lookahead. Envelope/gain
+                // computation is fused into the apply pass: at step `i` we
+                // compute gain[i] and apply gain[i - lookahead] to the
+                // delayed sample. Writes target index `i - lookahead < i`, so
+                // they never affect a later read of `samples[i']`.
+                let n = samples.len().get();
+                for i in 0..n {
+                    let sample_f: f64 = samples[i].convert_to();
 
                     // Get envelope level
                     let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
-                    // Calculate gain reduction
+                    // Calculate gain reduction for this sample
                     let gain_reduction_db = calculate_compression_gain(
                         envelope_db,
                         config.threshold_db,
@@ -670,22 +723,17 @@ where
                         config.knee_width_db,
                     );
 
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                // Apply gain reductions with lookahead
-                for i in 0..samples.len().get() {
-                    let sample_f: f64 = samples[i].convert_to();
                     let delayed_sample = lookahead_buffer.process(sample_f);
 
                     if i >= lookahead_samples.get() {
-                        let gain_reduction_db = gain_reductions[i - lookahead_samples.get()];
+                        let gain_reduction_db = gain_reductions.delayed();
                         let gain_linear = db_to_linear(-gain_reduction_db);
-                        let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                         let output_sample = delayed_sample * gain_linear * makeup_gain;
                         samples[i - lookahead_samples.get()] = output_sample.convert_to();
                     }
+
+                    gain_reductions.push(gain_reduction_db);
                 }
 
                 // Process remaining samples in lookahead buffer
@@ -694,12 +742,12 @@ where
 
                     // Check for overflow before subtraction
                     if lookahead_samples <= samples.len() {
-                        let sample_idx = samples.len().get() - lookahead_samples.get() + i;
+                        let sample_idx = n - lookahead_samples.get() + i;
 
-                        if sample_idx < samples.len().get() {
-                            let gain_reduction_db = gain_reductions[sample_idx];
+                        if sample_idx < n {
+                            let gain_reduction_db = gain_reductions.delayed();
+                            gain_reductions.push(0.0);
                             let gain_linear = db_to_linear(-gain_reduction_db);
-                            let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                             let output_sample = delayed_sample * gain_linear * makeup_gain;
                             samples[sample_idx] = output_sample.convert_to();
@@ -721,17 +769,18 @@ where
                     );
 
                     let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                    let mut gain_reductions = Vec::with_capacity(num_samples);
+                    let mut gain_reductions =
+                        GainDelayLine::new(lookahead_samples.get());
+                    let makeup_gain = db_to_linear(config.makeup_gain_db);
 
-                    // Process each sample
+                    // Apply gain reductions with lookahead (envelope/gain
+                    // computation fused into the apply pass).
                     for sample_idx in 0..num_samples {
                         let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
 
-                        // Get envelope level
                         let envelope = envelope_follower.process(sample_f);
                         let envelope_db = linear_to_db(envelope);
 
-                        // Calculate gain reduction
                         let gain_reduction_db = calculate_compression_gain(
                             envelope_db,
                             config.threshold_db,
@@ -740,24 +789,18 @@ where
                             config.knee_width_db,
                         );
 
-                        gain_reductions.push(gain_reduction_db);
-                    }
-
-                    // Apply gain reductions with lookahead
-                    for sample_idx in 0..num_samples {
-                        let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
                         let delayed_sample = lookahead_buffer.process(sample_f);
 
                         if sample_idx >= lookahead_samples.get() {
-                            let gain_reduction_db =
-                                gain_reductions[sample_idx - lookahead_samples.get()];
-                            let gain_linear = db_to_linear(-gain_reduction_db);
-                            let makeup_gain = db_to_linear(config.makeup_gain_db);
+                            let delayed_gain_db = gain_reductions.delayed();
+                            let gain_linear = db_to_linear(-delayed_gain_db);
 
                             let output_sample = delayed_sample * gain_linear * makeup_gain;
                             samples[[channel, sample_idx - lookahead_samples.get()]] =
                                 output_sample.convert_to();
                         }
+
+                        gain_reductions.push(gain_reduction_db);
                     }
 
                     // Process remaining samples in lookahead buffer
@@ -769,9 +812,9 @@ where
                             let sample_idx = num_samples - lookahead_samples.get() + i;
 
                             if sample_idx < num_samples {
-                                let gain_reduction_db = gain_reductions[sample_idx];
+                                let gain_reduction_db = gain_reductions.delayed();
+                                gain_reductions.push(0.0);
                                 let gain_linear = db_to_linear(-gain_reduction_db);
-                                let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                                 let output_sample = delayed_sample * gain_linear * makeup_gain;
                                 samples[[channel, sample_idx]] = output_sample.convert_to();
@@ -840,17 +883,18 @@ where
                 );
 
                 let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                let mut gain_reductions = Vec::with_capacity(samples.len().get());
+                let mut gain_reductions =
+                    GainDelayLine::new(lookahead_samples.get());
 
-                // Process each sample
-                for &sample in samples.iter() {
-                    let sample_f: f64 = sample.convert_to();
+                // Apply gain reductions with lookahead (envelope/gain
+                // computation fused into the apply pass).
+                let n = samples.len().get();
+                for i in 0..n {
+                    let sample_f: f64 = samples[i].convert_to();
 
-                    // Get envelope level
                     let envelope = envelope_follower.process(sample_f);
                     let envelope_db = linear_to_db(envelope);
 
-                    // Calculate gain reduction
                     let gain_reduction_db = calculate_limiting_gain(
                         envelope_db,
                         config.ceiling_db,
@@ -858,21 +902,17 @@ where
                         config.knee_width_db,
                     );
 
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                // Apply gain reductions with lookahead
-                for i in 0..samples.len().get() {
-                    let sample_f: f64 = samples[i].convert_to();
                     let delayed_sample = lookahead_buffer.process(sample_f);
 
                     if i >= lookahead_samples.get() {
-                        let gain_reduction_db = gain_reductions[i - lookahead_samples.get()];
-                        let gain_linear = db_to_linear(-gain_reduction_db);
+                        let delayed_gain_db = gain_reductions.delayed();
+                        let gain_linear = db_to_linear(-delayed_gain_db);
 
                         let output_sample = delayed_sample * gain_linear;
                         samples[i - lookahead_samples.get()] = output_sample.convert_to();
                     }
+
+                    gain_reductions.push(gain_reduction_db);
                 }
 
                 // Process remaining samples in lookahead buffer
@@ -881,10 +921,11 @@ where
 
                     // Check for overflow before subtraction
                     if lookahead_samples <= samples.len() {
-                        let sample_idx = samples.len().get() - lookahead_samples.get() + i;
+                        let sample_idx = n - lookahead_samples.get() + i;
 
-                        if sample_idx < samples.len().get() {
-                            let gain_reduction_db = gain_reductions[sample_idx];
+                        if sample_idx < n {
+                            let gain_reduction_db = gain_reductions.delayed();
+                            gain_reductions.push(0.0);
                             let gain_linear = db_to_linear(-gain_reduction_db);
 
                             let output_sample = delayed_sample * gain_linear;
@@ -907,17 +948,17 @@ where
                     );
 
                     let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                    let mut gain_reductions = Vec::with_capacity(num_samples);
+                    let mut gain_reductions =
+                        GainDelayLine::new(lookahead_samples.get());
 
-                    // Process each sample
+                    // Apply gain reductions with lookahead (envelope/gain
+                    // computation fused into the apply pass).
                     for sample_idx in 0..num_samples {
                         let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
 
-                        // Get envelope level
                         let envelope = envelope_follower.process(sample_f);
                         let envelope_db = linear_to_db(envelope);
 
-                        // Calculate gain reduction
                         let gain_reduction_db = calculate_limiting_gain(
                             envelope_db,
                             config.ceiling_db,
@@ -925,23 +966,18 @@ where
                             config.knee_width_db,
                         );
 
-                        gain_reductions.push(gain_reduction_db);
-                    }
-
-                    // Apply gain reductions with lookahead
-                    for sample_idx in 0..num_samples {
-                        let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
                         let delayed_sample = lookahead_buffer.process(sample_f);
 
                         if sample_idx >= lookahead_samples.get() {
-                            let gain_reduction_db =
-                                gain_reductions[sample_idx - lookahead_samples.get()];
-                            let gain_linear = db_to_linear(-gain_reduction_db);
+                            let delayed_gain_db = gain_reductions.delayed();
+                            let gain_linear = db_to_linear(-delayed_gain_db);
 
                             let output_sample = delayed_sample * gain_linear;
                             samples[[channel, sample_idx - lookahead_samples.get()]] =
                                 output_sample.convert_to();
                         }
+
+                        gain_reductions.push(gain_reduction_db);
                     }
 
                     // Process remaining samples in lookahead buffer
@@ -953,7 +989,8 @@ where
                             let sample_idx = num_samples - lookahead_samples.get() + i;
 
                             if sample_idx < num_samples {
-                                let gain_reduction_db = gain_reductions[sample_idx];
+                                let gain_reduction_db = gain_reductions.delayed();
+                                gain_reductions.push(0.0);
                                 let gain_linear = db_to_linear(-gain_reduction_db);
 
                                 let output_sample = delayed_sample * gain_linear;
@@ -2040,5 +2077,223 @@ mod tests {
             pristine.as_slice().unwrap(),
             "non-mutating variant must not modify the original"
         );
+    }
+
+    // ---- Ring-buffer parity (item 1) -------------------------------------
+    //
+    // These reference implementations reproduce the ORIGINAL O(N)-`Vec`
+    // algorithm exactly (two-pass: compute all gains into a Vec, then apply
+    // with the `gain_reductions[i - lookahead]` delay plus the trailing
+    // flush). The current implementation uses a fixed-capacity ring instead;
+    // its output must be bit-for-bit identical to these references.
+
+    fn reference_compressor_mono(input: &[f64], config: &CompressorConfig, sample_rate: f64) -> Vec<f64> {
+        let lookahead = ms_to_samples(config.lookahead_ms, sample_rate).max(1);
+        let mut samples = input.to_vec();
+        let mut env = EnvelopeFollower::new(
+            config.attack_ms,
+            config.release_ms,
+            sample_rate,
+            config.detection_method,
+        );
+        let mut look = LookaheadBuffer::new(NonZeroUsize::new(lookahead).unwrap());
+
+        let mut gains = Vec::with_capacity(samples.len());
+        for &s in &samples {
+            let env_db = linear_to_db(env.process(s));
+            gains.push(calculate_compression_gain(
+                env_db,
+                config.threshold_db,
+                config.ratio,
+                config.knee_type,
+                config.knee_width_db,
+            ));
+        }
+        for i in 0..samples.len() {
+            let delayed = look.process(samples[i]);
+            if i >= lookahead {
+                let g = db_to_linear(-gains[i - lookahead]);
+                let mk = db_to_linear(config.makeup_gain_db);
+                samples[i - lookahead] = delayed * g * mk;
+            }
+        }
+        for i in 0..lookahead {
+            let delayed = look.process(0.0);
+            if lookahead <= samples.len() {
+                let idx = samples.len() - lookahead + i;
+                if idx < samples.len() {
+                    let g = db_to_linear(-gains[idx]);
+                    let mk = db_to_linear(config.makeup_gain_db);
+                    samples[idx] = delayed * g * mk;
+                }
+            }
+        }
+        samples
+    }
+
+    fn reference_limiter_mono(input: &[f64], config: &LimiterConfig, sample_rate: f64) -> Vec<f64> {
+        let lookahead = ms_to_samples(config.lookahead_ms, sample_rate).max(1);
+        let mut samples = input.to_vec();
+        let mut env = EnvelopeFollower::new(
+            config.attack_ms,
+            config.release_ms,
+            sample_rate,
+            config.detection_method,
+        );
+        let mut look = LookaheadBuffer::new(NonZeroUsize::new(lookahead).unwrap());
+
+        let mut gains = Vec::with_capacity(samples.len());
+        for &s in &samples {
+            let env_db = linear_to_db(env.process(s));
+            gains.push(calculate_limiting_gain(
+                env_db,
+                config.ceiling_db,
+                config.knee_type,
+                config.knee_width_db,
+            ));
+        }
+        for i in 0..samples.len() {
+            let delayed = look.process(samples[i]);
+            if i >= lookahead {
+                let g = db_to_linear(-gains[i - lookahead]);
+                samples[i - lookahead] = delayed * g;
+            }
+        }
+        for i in 0..lookahead {
+            let delayed = look.process(0.0);
+            if lookahead <= samples.len() {
+                let idx = samples.len() - lookahead + i;
+                if idx < samples.len() {
+                    let g = db_to_linear(-gains[idx]);
+                    samples[idx] = delayed * g;
+                }
+            }
+        }
+        samples
+    }
+
+    fn assert_bit_identical(a: &[f64], b: &[f64], ctx: &str) {
+        assert_eq!(a.len(), b.len(), "{ctx}: length mismatch");
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{ctx}: sample {i} differs: {x} vs {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compressor_ring_buffer_bit_identical() {
+        // Input long enough to exercise both the main loop (i >= lookahead)
+        // and the trailing flush.
+        let sr = 44100.0;
+        let input: Vec<f64> = (0..256)
+            .map(|i| 0.5 * (i as f64 * 0.13).sin() + 0.4 * (i as f64 * 0.017).sin())
+            .collect();
+
+        let mut config = CompressorConfig::new();
+        config.lookahead_ms = 1.0; // ~44 samples of lookahead
+        config.makeup_gain_db = 3.0;
+
+        let expected = reference_compressor_mono(&input, &config, sr);
+
+        let mut audio =
+            AudioSamples::new_mono(Array1::from_vec(input), sample_rate!(44100)).unwrap();
+        audio.apply_compressor_in_place(&config).unwrap();
+
+        assert_bit_identical(audio.as_slice().unwrap(), &expected, "compressor mono ring");
+    }
+
+    #[test]
+    fn test_limiter_ring_buffer_bit_identical() {
+        let sr = 44100.0;
+        let input: Vec<f64> = (0..256)
+            .map(|i| 0.9 * (i as f64 * 0.21).sin())
+            .collect();
+
+        let mut config = LimiterConfig::default();
+        config.lookahead_ms = 1.0;
+
+        let expected = reference_limiter_mono(&input, &config, sr);
+
+        let mut audio =
+            AudioSamples::new_mono(Array1::from_vec(input), sample_rate!(44100)).unwrap();
+        audio.apply_limiter_in_place(&config).unwrap();
+
+        assert_bit_identical(audio.as_slice().unwrap(), &expected, "limiter mono ring");
+    }
+
+    #[test]
+    fn test_compressor_ring_buffer_short_input_no_lookahead_reached() {
+        // Input SHORTER than the lookahead: neither the main-loop apply nor the
+        // flush guard fires, so the signal must be returned unchanged.
+        let sr = 44100.0;
+        let input: Vec<f64> = vec![0.3, -0.6, 0.2, 0.9, -0.1];
+        let mut config = CompressorConfig::new();
+        config.lookahead_ms = 1.0; // ~44 samples >> 5
+        config.makeup_gain_db = 2.0;
+
+        let expected = reference_compressor_mono(&input, &config, sr);
+
+        let mut audio =
+            AudioSamples::new_mono(Array1::from_vec(input.clone()), sample_rate!(44100)).unwrap();
+        audio.apply_compressor_in_place(&config).unwrap();
+
+        assert_bit_identical(audio.as_slice().unwrap(), &expected, "compressor short input");
+        // And specifically: unchanged from input.
+        assert_bit_identical(audio.as_slice().unwrap(), &input, "compressor short unchanged");
+    }
+
+    #[test]
+    fn test_compressor_ring_buffer_multi_channel_bit_identical() {
+        let sr = 44100.0;
+        let n = 200;
+        let ch0: Vec<f64> = (0..n).map(|i| 0.5 * (i as f64 * 0.11).sin()).collect();
+        let ch1: Vec<f64> = (0..n).map(|i| 0.7 * (i as f64 * 0.23).cos()).collect();
+
+        let mut config = CompressorConfig::new();
+        config.lookahead_ms = 0.5;
+        config.makeup_gain_db = 1.5;
+
+        // Per-channel reference (processing is independent per channel).
+        let exp0 = reference_compressor_mono(&ch0, &config, sr);
+        let exp1 = reference_compressor_mono(&ch1, &config, sr);
+
+        let mut flat = ch0.clone();
+        flat.extend_from_slice(&ch1);
+        let data = ndarray::Array2::from_shape_vec((2, n), flat).unwrap();
+        let mut audio =
+            AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+        audio.apply_compressor_in_place(&config).unwrap();
+
+        let out = audio.as_slice().unwrap();
+        assert_bit_identical(&out[0..n], &exp0, "compressor multi ch0");
+        assert_bit_identical(&out[n..2 * n], &exp1, "compressor multi ch1");
+    }
+
+    #[test]
+    fn test_limiter_ring_buffer_multi_channel_bit_identical() {
+        let sr = 44100.0;
+        let n = 200;
+        let ch0: Vec<f64> = (0..n).map(|i| 0.95 * (i as f64 * 0.19).sin()).collect();
+        let ch1: Vec<f64> = (0..n).map(|i| 0.85 * (i as f64 * 0.07).cos()).collect();
+
+        let mut config = LimiterConfig::default();
+        config.lookahead_ms = 0.5;
+
+        let exp0 = reference_limiter_mono(&ch0, &config, sr);
+        let exp1 = reference_limiter_mono(&ch1, &config, sr);
+
+        let mut flat = ch0.clone();
+        flat.extend_from_slice(&ch1);
+        let data = ndarray::Array2::from_shape_vec((2, n), flat).unwrap();
+        let mut audio =
+            AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+        audio.apply_limiter_in_place(&config).unwrap();
+
+        let out = audio.as_slice().unwrap();
+        assert_bit_identical(&out[0..n], &exp0, "limiter multi ch0");
+        assert_bit_identical(&out[n..2 * n], &exp1, "limiter multi ch1");
     }
 }
