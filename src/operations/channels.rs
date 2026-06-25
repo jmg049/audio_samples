@@ -13,7 +13,7 @@
 //! Bring [`AudioChannelOps`] into scope and call methods on any
 //! [`AudioSamples`] value.  Conversion methods that produce new audio
 //! (e.g. `to_mono`) return owned `AudioSamples<'static, T>`; in-place
-//! methods (e.g. `pan`) mutate through `&mut self`.
+//! methods (e.g. `pan_in_place`) mutate through `&mut self`.
 //!
 //! ```
 //! use audio_samples::{AudioSamples, sample_rate};
@@ -248,6 +248,18 @@ where
         }
     }
 
+    /// Convert this audio to mono in place, replacing `self`.
+    ///
+    /// In-place twin of [`AudioChannelOps::to_mono`]. See that method for the
+    /// available downmix strategies and error conditions.
+    ///
+    /// # Errors
+    /// See [`AudioChannelOps::to_mono`].
+    fn to_mono_in_place(&mut self, method: MonoConversionMethod) -> AudioSampleResult<()> {
+        *self = self.to_mono(method)?.into_owned();
+        Ok(())
+    }
+
     /// Convert audio to a different stereo.
     ///
     /// Behaviour depends on the chosen method:
@@ -349,6 +361,18 @@ where
         }
     }
 
+    /// Convert this audio to stereo in place, replacing `self`.
+    ///
+    /// In-place twin of [`AudioChannelOps::to_stereo`]. See that method for the
+    /// available conversion strategies and error conditions.
+    ///
+    /// # Errors
+    /// See [`AudioChannelOps::to_stereo`].
+    fn to_stereo_in_place(&mut self, method: StereoConversionMethod) -> AudioSampleResult<()> {
+        *self = self.to_stereo(method)?.into_owned();
+        Ok(())
+    }
+
     /// Duplicate audio into an n-channel signal.
     ///
     /// For mono input the single channel is replicated into all output
@@ -411,6 +435,18 @@ where
         Ok(AudioSamples::new(multi_data, self.sample_rate()))
     }
 
+    /// Duplicate audio into an n-channel signal in place, replacing `self`.
+    ///
+    /// In-place twin of [`AudioChannelOps::duplicate_to_channels`]. See that
+    /// method for argument semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`AudioChannelOps::duplicate_to_channels`].
+    fn duplicate_to_channels_in_place(&mut self, n_channels: usize) -> AudioSampleResult<()> {
+        *self = self.duplicate_to_channels(n_channels)?.into_owned();
+        Ok(())
+    }
+
     /// Extract a single channel as an owned mono signal.
     ///
     /// If the audio is already mono, a clone is returned (only
@@ -439,8 +475,8 @@ where
     /// let ch0 = stereo.extract_channel(0).unwrap();
     /// assert!(ch0.is_mono());
     /// ```
-    fn extract_channel(&self, channel_index: u32) -> AudioSampleResult<AudioSamples<'static, T>> {
-        if channel_index >= self.num_channels().get() {
+    fn extract_channel(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'static, T>> {
+        if channel_index >= self.num_channels().get() as usize {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                 "channel_index",
                 channel_index.to_string(),
@@ -452,8 +488,7 @@ where
         match self.data() {
             AudioData::Mono(_) => Ok(self.clone().into_owned()),
             AudioData::Multi(data) => {
-                let channel: Array1<T> =
-                    data.index_axis(Axis(0), channel_index as usize).to_owned();
+                let channel: Array1<T> = data.index_axis(Axis(0), channel_index).to_owned();
                 Ok(AudioSamples::new(
                     AudioData::Mono(channel.try_into()?),
                     self.sample_rate(),
@@ -490,8 +525,8 @@ where
     /// let ch1 = stereo.borrow_channel(1).unwrap();
     /// assert!(ch1.is_mono());
     /// ```
-    fn borrow_channel(&self, channel_index: u32) -> AudioSampleResult<AudioSamples<'_, T>> {
-        if channel_index >= self.num_channels().get() {
+    fn borrow_channel(&self, channel_index: usize) -> AudioSampleResult<AudioSamples<'_, T>> {
+        if channel_index >= self.num_channels().get() as usize {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                 "channel_index",
                 channel_index.to_string(),
@@ -509,7 +544,7 @@ where
                 ))
             }
             AudioData::Multi(data) => {
-                let channel = data.index_axis(Axis(0), channel_index as usize);
+                let channel = data.index_axis(Axis(0), channel_index);
                 Ok(AudioSamples::new(
                     AudioData::Mono(MonoData::from_view(channel)?),
                     self.sample_rate(),
@@ -544,10 +579,15 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// assert!(stereo.swap_channels(0, 1).is_ok());
+    /// assert!(stereo.swap_channels_in_place(0, 1).is_ok());
     /// ```
-    fn swap_channels(&mut self, channel1: u32, channel2: u32) -> AudioSampleResult<()> {
-        if channel1 >= self.num_channels().get() || channel2 >= self.num_channels().get() {
+    fn swap_channels_in_place(
+        &mut self,
+        channel1: usize,
+        channel2: usize,
+    ) -> AudioSampleResult<()> {
+        let n = self.num_channels().get() as usize;
+        if channel1 >= n || channel2 >= n {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                 "channel_indices",
                 format!("{channel1}, {channel2}"),
@@ -560,7 +600,7 @@ where
         match self.data_mut() {
             AudioData::Mono(_) => Ok(()), // No channels to swap in mono
             AudioData::Multi(data) => {
-                data.swap_axes(channel1 as usize, channel2 as usize);
+                data.swap_axes(channel1, channel2);
                 Ok(())
             }
         }
@@ -594,9 +634,9 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// stereo.pan(0.5).unwrap();
+    /// stereo.pan_in_place(0.5).unwrap();
     /// ```
-    fn pan(&mut self, pan_value: f64) -> AudioSampleResult<()> {
+    fn pan_in_place(&mut self, pan_value: f64) -> AudioSampleResult<()> {
         match self.data_mut() {
             AudioData::Mono(_) => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "audio_data",
@@ -663,9 +703,9 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// stereo.balance(-0.3).unwrap();
+    /// stereo.balance_in_place(-0.3).unwrap();
     /// ```
-    fn balance(&mut self, balance: f64) -> AudioSampleResult<()> {
+    fn balance_in_place(&mut self, balance: f64) -> AudioSampleResult<()> {
         match self.data_mut() {
             AudioData::Mono(_) => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "audio_data",
@@ -735,9 +775,13 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5]).unwrap();
     /// let audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
-    /// stereo.apply_to_channel(1, |s| s * 0.5).unwrap();
+    /// stereo.apply_to_channel_in_place(1, |s| s * 0.5).unwrap();
     /// ```
-    fn apply_to_channel<F>(&mut self, channel_index: u32, func: F) -> AudioSampleResult<()>
+    fn apply_to_channel_in_place<F>(
+        &mut self,
+        channel_index: usize,
+        func: F,
+    ) -> AudioSampleResult<()>
     where
         F: FnMut(T) -> T,
     {
@@ -746,7 +790,7 @@ where
                 array_base.mapv_inplace(func);
             }
             AudioData::Multi(array_base) => {
-                if channel_index >= array_base.shape()[0] as u32 {
+                if channel_index >= array_base.shape()[0] {
                     return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                         "channel_index",
                         channel_index.to_string(),
@@ -755,7 +799,7 @@ where
                         "Channel index must be within available channels",
                     )));
                 }
-                let mut channel = array_base.index_axis_mut(Axis(0), channel_index as usize);
+                let mut channel = array_base.index_axis_mut(Axis(0), channel_index);
                 channel.mapv_inplace(func);
             }
         }
@@ -839,7 +883,7 @@ where
         let mut result = Vec::with_capacity(num_channels as usize);
 
         for ch in 0..num_channels {
-            let channel = self.extract_channel(ch)?;
+            let channel = self.extract_channel(ch as usize)?;
             result.push(channel);
         }
 
@@ -1423,6 +1467,75 @@ mod tests {
 
         let result = mono.duplicate_to_channels(0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_swap_channels_dual_variant_equivalence() {
+        // Build a stereo signal with distinct channels.
+        let mut data = ndarray::Array2::zeros((2, 3));
+        data[[0, 0]] = 1.0f32;
+        data[[0, 1]] = 2.0;
+        data[[0, 2]] = 3.0;
+        data[[1, 0]] = 10.0;
+        data[[1, 1]] = 20.0;
+        data[[1, 2]] = 30.0;
+        let original = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+
+        // Non-mutating variant returns a swapped copy and leaves `original` intact.
+        let borrowed = original.swap_channels(0, 1).unwrap();
+
+        // Non-mutating variant leaves `original` untouched.
+        let orig_multi = original.as_multi_channel().unwrap();
+        assert_eq!(orig_multi[(0, 0)], 1.0);
+        assert_eq!(orig_multi[(1, 0)], 10.0);
+
+        // In-place variant mutates a clone the same way the borrowing variant
+        // returned a fresh copy.
+        let mut in_place = original.clone();
+        in_place.swap_channels_in_place(0, 1).unwrap();
+
+        // Both variants produce identical results.
+        let b = borrowed.as_multi_channel().unwrap();
+        let p = in_place.as_multi_channel().unwrap();
+        assert_eq!(b.shape(), p.shape());
+        for ch in 0..b.shape()[0] {
+            for s in 0..b.shape()[1] {
+                assert_eq!(b[(ch, s)], p[(ch, s)]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_to_mono_dual_variant_equivalence() {
+        let mut data = ndarray::Array2::zeros((2, 3));
+        data[[0, 0]] = 1.0f32;
+        data[[0, 1]] = 3.0;
+        data[[0, 2]] = 5.0;
+        data[[1, 0]] = 3.0;
+        data[[1, 1]] = 5.0;
+        data[[1, 2]] = 7.0;
+        let original = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+
+        // Non-mutating variant returns a mono copy, leaving `original` stereo.
+        let borrowed = original.to_mono(MonoConversionMethod::Average).unwrap();
+        assert!(borrowed.is_mono());
+        assert_eq!(original.num_channels().get(), 2); // original intact
+
+        // In-place variant mutates a clone to mono.
+        let mut in_place = original.clone();
+        in_place
+            .to_mono_in_place(MonoConversionMethod::Average)
+            .unwrap();
+        assert!(in_place.is_mono());
+
+        // Both variants produce identical samples.
+        let b = borrowed.as_slice().unwrap();
+        let p = in_place.as_slice().unwrap();
+        assert_eq!(b, p);
+        // Average of (1,3),(3,5),(5,7) = 2,4,6.
+        assert_eq!(b[0], 2.0);
+        assert_eq!(b[1], 4.0);
+        assert_eq!(b[2], 6.0);
     }
 
     #[test]

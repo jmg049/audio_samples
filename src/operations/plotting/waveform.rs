@@ -1134,7 +1134,8 @@ where
                 plot_mono_waveform(&channel_one, params, &mut plot, "Ch1", None);
             }
             ChannelManagementStrategy::Last => {
-                let last_channel = audio_f64.extract_channel(audio_f64.num_channels().get() - 1)?;
+                let last_channel =
+                    audio_f64.extract_channel(audio_f64.num_channels().get() as usize - 1)?;
                 plot_mono_waveform(&last_channel, params, &mut plot, "Last", None);
             }
             ChannelManagementStrategy::Overlap => {
