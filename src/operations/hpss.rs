@@ -433,13 +433,16 @@ fn median_filter_time_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Arr
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
-    // Process each frequency bin independently
+    // Reusable scratch window shared across rows; the inner kernel buffer is
+    // hoisted out of the per-sample loop inside `median_filter_1d_view`.
+    let mut window = Vec::with_capacity(kernel_size);
+    // Process each frequency bin independently. Index the (contiguous) row view
+    // directly instead of allocating a `Vec` per row via `.to_vec()`.
     for freq_idx in 0..n_freq_bins {
         let freq_row = spectrogram.slice(s![freq_idx, ..]);
-        let filtered_row = median_filter_1d(&freq_row.to_vec(), kernel_size);
-        for (time_idx, &val) in filtered_row.iter().enumerate() {
+        median_filter_1d_view(&freq_row, kernel_size, &mut window, |time_idx, val| {
             filtered[[freq_idx, time_idx]] = val;
-        }
+        });
     }
 
     filtered
@@ -453,13 +456,17 @@ fn median_filter_freq_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Arr
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
-    // Process each time frame independently
+    // Reusable scratch window shared across columns; the inner kernel buffer is
+    // hoisted out of the per-sample loop inside `median_filter_1d_view`.
+    let mut window = Vec::with_capacity(kernel_size);
+    // Process each time frame independently. The column view is strided (not
+    // contiguous), but indexing it directly still avoids the per-column
+    // `.to_vec()` allocation.
     for time_idx in 0..n_time_frames {
         let time_col = spectrogram.slice(s![.., time_idx]);
-        let filtered_col = median_filter_1d(&time_col.to_vec(), kernel_size);
-        for (freq_idx, &val) in filtered_col.iter().enumerate() {
+        median_filter_1d_view(&time_col, kernel_size, &mut window, |freq_idx, val| {
             filtered[[freq_idx, time_idx]] = val;
-        }
+        });
     }
 
     filtered
@@ -468,7 +475,10 @@ fn median_filter_freq_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Arr
 // TODO: Change to NonEmptySlices and NonZeroUsize
 /// Simple 1D median filter implementation.
 ///
-/// Uses a sliding window approach with border handling via reflection.
+/// Uses a sliding window approach with border handling via reflection. This
+/// slice-based reference implementation is retained as the behavioural oracle
+/// for [`median_filter_1d_view`]; the hot path uses the view-based variant.
+#[cfg(test)]
 fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
     if kernel_size == 0 {
         return signal.to_vec();
@@ -485,8 +495,14 @@ fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
     let half_kernel = kernel_size / 2;
     let mut filtered = Vec::with_capacity(len);
 
+    // Hoist a single reusable scratch window outside the per-sample loop.
+    // Cleared and refilled each step before sorting, this avoids the previous
+    // per-sample `Vec::with_capacity(kernel_size)` allocation while leaving the
+    // selection, reflection padding, and even/odd handling unchanged.
+    let mut window = Vec::with_capacity(kernel_size);
+
     for i in 0..len {
-        let mut window = Vec::with_capacity(kernel_size);
+        window.clear();
 
         // Collect values in the kernel window with reflection padding
         for j in 0..kernel_size {
@@ -516,6 +532,70 @@ fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
     }
 
     filtered
+}
+
+/// Median-filters a 1-D ndarray view in place into a caller-supplied sink,
+/// reusing a caller-supplied scratch `window` buffer.
+///
+/// This is the allocation-hoisted core used by the time- and frequency-axis
+/// filters. It produces results identical to [`median_filter_1d`] — same
+/// reflection padding, same even/odd median selection, same handling of the
+/// `kernel_size <= 1` and empty-input cases — but avoids a per-row/column
+/// `.to_vec()` and a per-sample kernel allocation. The `sink` closure receives
+/// `(index, value)` for each output position, in increasing index order.
+fn median_filter_1d_view<F>(
+    signal: &ndarray::ArrayView1<'_, f64>,
+    kernel_size: usize,
+    window: &mut Vec<f64>,
+    mut sink: F,
+) where
+    F: FnMut(usize, f64),
+{
+    let len = signal.len();
+
+    // Mirror `median_filter_1d`'s short-circuits: a kernel of 0 or 1, or an
+    // empty signal, copies the input through unchanged.
+    if kernel_size == 0 || kernel_size == 1 {
+        for i in 0..len {
+            sink(i, signal[i]);
+        }
+        return;
+    }
+    if len == 0 {
+        return;
+    }
+
+    let half_kernel = kernel_size / 2;
+
+    for i in 0..len {
+        window.clear();
+
+        // Collect values in the kernel window with reflection padding.
+        for j in 0..kernel_size {
+            let idx = i as i32 + j as i32 - half_kernel as i32;
+            let reflected_idx = if idx < 0 {
+                (-idx) as usize
+            } else if idx >= len as i32 {
+                len - 2 - (idx - len as i32) as usize
+            } else {
+                idx as usize
+            };
+
+            // Clamp to valid range
+            let safe_idx = reflected_idx.min(len - 1);
+            window.push(signal[safe_idx]);
+        }
+
+        // Compute median
+        window.sort_by(f64::total_cmp);
+        let median = if kernel_size % 2 == 1 {
+            window[kernel_size / 2]
+        } else {
+            f64::midpoint(window[kernel_size / 2 - 1], window[kernel_size / 2])
+        };
+
+        sink(i, median);
+    }
 }
 
 /// Generate separation masks from harmonic and percussive spectrograms.
@@ -599,6 +679,43 @@ fn apply_mask_to_stft<A: AsRef<Array2<Complex<f64>>>>(
 mod tests {
     use super::*;
     use crate::utils::generation::sine_wave;
+
+    /// The allocation-hoisted `median_filter_1d_view` must produce output
+    /// bit-identical to the slice-based `median_filter_1d` oracle, both for
+    /// contiguous (row) and strided (column) ndarray views, and across odd and
+    /// even kernel sizes plus the `kernel_size <= 1` short-circuits.
+    #[test]
+    fn median_filter_1d_view_matches_slice_oracle() {
+        use ndarray::Array2;
+
+        let data: Vec<f64> = vec![
+            1.0, 5.0, 3.0, 2.0, 4.0, 9.0, // row 0
+            8.0, 6.0, 7.0, 0.5, 1.5, 2.5, // row 1
+            3.3, 9.9, 4.4, 8.8, 5.5, 7.7, // row 2
+        ];
+        let arr = Array2::from_shape_vec((3, 6), data).unwrap();
+
+        for &kernel in &[0usize, 1, 2, 3, 4, 5] {
+            // Contiguous row views.
+            for r in 0..arr.nrows() {
+                let row = arr.slice(s![r, ..]);
+                let expected = median_filter_1d(&row.to_vec(), kernel);
+                let mut window = Vec::new();
+                let mut got = vec![0.0; row.len()];
+                median_filter_1d_view(&row, kernel, &mut window, |i, v| got[i] = v);
+                assert_eq!(got, expected, "row {r}, kernel {kernel}");
+            }
+            // Strided column views.
+            for c in 0..arr.ncols() {
+                let col = arr.slice(s![.., c]);
+                let expected = median_filter_1d(&col.to_vec(), kernel);
+                let mut window = Vec::new();
+                let mut got = vec![0.0; col.len()];
+                median_filter_1d_view(&col, kernel, &mut window, |i, v| got[i] = v);
+                assert_eq!(got, expected, "col {c}, kernel {kernel}");
+            }
+        }
+    }
 
     #[test]
     fn test_median_filter_1d() {
