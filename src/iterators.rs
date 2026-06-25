@@ -381,8 +381,12 @@ where
             AudioData::Multi(arr) => {
                 let (channels, samples_per_channel) = arr.dim();
 
+                // Hoist a single reusable frame buffer outside the loop; clear and
+                // refill it each iteration so the callback sees identical contents
+                // to the previous per-iteration `Vec::with_capacity` allocation.
+                let mut frame = Vec::with_capacity(channels.get());
                 for frame_idx in 0..samples_per_channel.get() {
-                    let mut frame = Vec::with_capacity(channels.get());
+                    frame.clear();
                     for ch in 0..channels.get() {
                         frame.push(arr[[ch, frame_idx]]);
                     }
@@ -618,10 +622,14 @@ where
                 let mut pos = 0;
                 let mut window_idx = 0;
 
-                while pos + window_size <= samples_per_channel.get() {
-                    // Create a temporary buffer for the interleaved window
-                    let mut window_data = vec![T::zero(); window_size * rows];
+                // Hoist a single reusable interleaved window buffer outside the
+                // loop. It is fully overwritten each iteration (every element is
+                // assigned before the callback runs), so the callback sees the
+                // same contents as the previous per-iteration `vec![T::zero(); ..]`
+                // allocation.
+                let mut window_data = vec![T::zero(); window_size * rows];
 
+                while pos + window_size <= samples_per_channel.get() {
                     // Copy window data from each channel into interleaved buffer.
                     for ch in 0..rows {
                         for sample_idx in 0..window_size {

@@ -510,8 +510,45 @@ where
             )));
         }
 
+        // Validate the per-frame detector parameters ONCE up front. Previously
+        // these were re-checked inside the per-frame `detect_pitch_*` calls; the
+        // first frame would surface any error via `?`. Since the parameters are
+        // constant across frames, hoisting the validation preserves the exact
+        // same error behaviour while letting the loop call the low-level
+        // detectors directly.
+        match method {
+            PitchDetectionMethod::Yin => {
+                if !(0.0..=1.0).contains(&threshold) {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "threshold",
+                        "Threshold must be between 0.0 and 1.0",
+                    )));
+                }
+                if min_frequency <= 0.0 || max_frequency <= min_frequency {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "frequency_range",
+                        "Invalid frequency range",
+                    )));
+                }
+            }
+            PitchDetectionMethod::Autocorrelation => {
+                if min_frequency <= 1.0 || max_frequency <= min_frequency {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "frequency_range",
+                        format!("Invalid frequency range {min_frequency} - {max_frequency}"),
+                    )));
+                }
+            }
+            // Unsupported methods are rejected before this point.
+            _ => {}
+        }
+
         let window_size = window_size.get();
         let hop_size = hop_size.get();
+        // Convert the signal to an owned f64 buffer ONCE, instead of rebuilding
+        // an owned `AudioSamples` (and re-running multi-channel validation +
+        // f64 conversion) for every frame. The low-level detectors are then
+        // called directly on sub-slices of this buffer.
         let samples = self.as_f64();
         let samples_slice = samples
             .as_slice()
@@ -529,20 +566,36 @@ where
             }
 
             let window = &samples_slice[start..end];
-            // safety: window is guaranteed non-empty since end - start >= window_size / 2 > 0
-            let window = unsafe { NonEmptySlice::new_unchecked(window) };
             let time_seconds = start as f64 / sample_rate;
 
-            // Create temporary AudioSamples for this window
-            let window_data = window.to_non_empty_vec();
-            let window_audio =
-                AudioSamples::from_mono_vec(window_data, self.sample_rate()).into_owned();
+            // Call the low-level detector directly on the window sub-slice. The
+            // tau bounds and the `max_tau >= window_len / 2` early-out replicate
+            // exactly what `detect_pitch_yin` / `detect_pitch_autocorr` compute
+            // per frame, so results are bit-identical to the previous path.
+            let window_len = window.len();
             let frequency: Option<f64> = match method {
                 PitchDetectionMethod::Yin => {
-                    window_audio.detect_pitch_yin(threshold, min_frequency, max_frequency)?
+                    let min_tau = (sample_rate / max_frequency) as usize;
+                    let max_tau = (sample_rate / min_frequency) as usize;
+                    if max_tau >= window_len / 2 {
+                        None
+                    } else {
+                        // safety: window is guaranteed non-empty since
+                        // end - start >= window_size / 2 > 0
+                        let window = unsafe { NonEmptySlice::new_unchecked(window) };
+                        yin_pitch_detection(window, min_tau, max_tau, threshold)
+                            .map(|tau| sample_rate / tau)
+                    }
                 }
                 PitchDetectionMethod::Autocorrelation => {
-                    window_audio.detect_pitch_autocorr(min_frequency, max_frequency)?
+                    let min_tau = (sample_rate / max_frequency) as usize;
+                    let max_tau = (sample_rate / min_frequency) as usize;
+                    if max_tau >= window_len / 2 {
+                        None
+                    } else {
+                        autocorr_pitch_detection(window, min_tau, max_tau)
+                            .map(|tau| sample_rate / tau)
+                    }
                 }
                 // Unsupported methods are rejected before this loop, so this arm is
                 // unreachable in practice; return `None` defensively without logging.
