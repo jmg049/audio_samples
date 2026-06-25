@@ -1161,7 +1161,7 @@ where
                     let col = arr.column(idx);
                     let is_silent = col.iter().all(|&x| {
                         let value: f64 = x.convert_to();
-                        value <= threshold_lin
+                        value.abs() <= threshold_lin
                     });
                     if !is_silent {
                         start = idx;
@@ -1184,7 +1184,7 @@ where
                     let col = arr.column(idx);
                     let is_silent = col.iter().all(|&x| {
                         let value: f64 = x.convert_to();
-                        value <= threshold_lin
+                        value.abs() <= threshold_lin
                     });
                     if !is_silent {
                         end = idx;
@@ -1359,7 +1359,7 @@ where
                 for i in 0..n_frames {
                     let is_silent = arr.column(i).iter().all(|&x| {
                         let value: f64 = x.convert_to();
-                        value <= threshold_lin
+                        value.abs() <= threshold_lin
                     });
 
                     if in_silence && !is_silent {
@@ -2278,6 +2278,51 @@ mod tests {
         if let AudioData::Mono(arr) = &trimmed.data {
             assert!(arr.iter().all(|&x| x == 1.0));
         }
+    }
+
+    /// Regression test for BUG 2: multichannel silence detection compared the
+    /// SIGNED sample value to a positive linear threshold instead of its
+    /// magnitude. Large negative samples were therefore misclassified as
+    /// silence (since e.g. `-0.9 <= threshold_lin` is true) and trimmed away.
+    #[test]
+    fn test_trim_silence_multichannel_negative_not_silent() {
+        use ndarray::Array2;
+
+        // Two channels, all loud NEGATIVE samples. None of this is silence.
+        let arr = Array2::from_shape_fn((2, 100), |_| -0.9f32);
+        let audio = AudioSamples::new_multi_channel(arr, sample_rate!(44100)).unwrap();
+
+        // Threshold well below the signal magnitude.
+        let trimmed = audio.trim_silence(-10.0).unwrap();
+
+        // Nothing should be trimmed: all 100 frames are loud.
+        assert_eq!(trimmed.samples_per_channel().get(), 100);
+
+        // And genuinely quiet leading/trailing regions ARE trimmed:
+        // silent ends (|x| < threshold) around a loud negative middle.
+        let mut data = Array2::<f32>::zeros((2, 300));
+        for f in 100..200 {
+            for c in 0..2 {
+                data[[c, f]] = -0.9; // loud middle (negative)
+            }
+        }
+        let audio2 = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        let trimmed2 = audio2.trim_silence(-10.0).unwrap();
+        // Frames 100..=199 -> 100 frames retained.
+        assert_eq!(trimmed2.samples_per_channel().get(), 100);
+    }
+
+    /// Regression test for BUG 2 in `trim_all_silence`'s multichannel path.
+    #[test]
+    fn test_trim_all_silence_multichannel_negative_not_silent() {
+        use ndarray::Array2;
+
+        // All loud negative samples: nothing should be removed.
+        let arr = Array2::from_shape_fn((2, 200), |_| -0.9f32);
+        let audio = AudioSamples::new_multi_channel(arr, sample_rate!(44100)).unwrap();
+
+        let trimmed = audio.trim_all_silence(-10.0, 0.0001).unwrap();
+        assert_eq!(trimmed.samples_per_channel().get(), 200);
     }
 
     #[test]

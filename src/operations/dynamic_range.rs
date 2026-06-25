@@ -1449,6 +1449,15 @@ where
         attack_ms: f64,
         release_ms: f64,
     ) -> AudioSampleResult<()> {
+        // A ratio of zero (or negative) causes a division by zero in the gate
+        // gain computation `(ratio - 1.0) / ratio`, producing NaN/inf output.
+        if ratio <= 0.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "ratio",
+                "Gate ratio must be greater than 0.0",
+            )));
+        }
+
         let sample_rate = self.sample_rate_hz();
         // Gate is essentially a compressor with inverted threshold logic
         // and very high ratio for signals below threshold
@@ -1561,6 +1570,16 @@ where
         attack_ms: f64,
         release_ms: f64,
     ) -> AudioSampleResult<()> {
+        // Guard against a zero/negative ratio. The valid expansion domain is
+        // `ratio > 0.0`; values <= 0.0 are nonsensical and mirror the gate's
+        // division-by-zero hazard, so reject them rather than produce garbage.
+        if ratio <= 0.0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "ratio",
+                "Expander ratio must be greater than 0.0",
+            )));
+        }
+
         let sample_rate = self.sample_rate_hz();
         // Expander increases dynamic range by expanding signals below threshold
 
@@ -1583,7 +1602,7 @@ where
                         let undershoot = threshold_db - envelope_db;
                         undershoot * (ratio - 1.0) // Expand by ratio
                     } else {
-                        1.0
+                        0.0
                     };
 
                     let gain_linear = db_to_linear(-gain_change_db); // Negative because we're reducing level
@@ -1892,5 +1911,61 @@ mod tests {
 
         let broadcast_config = LimiterConfig::broadcast();
         assert!(audio.apply_limiter(&broadcast_config).is_ok());
+    }
+
+    /// Regression test for BUG 3: the MONO expander branch set
+    /// `gain_change_db = 1.0` for signals ABOVE threshold (instead of `0.0`),
+    /// causing ~1 dB attenuation everywhere above threshold via
+    /// `db_to_linear(-1.0) ~= 0.891`. Loud signal should pass through unchanged.
+    #[test]
+    fn test_expander_above_threshold_mono_unchanged() {
+        // Constant loud signal, well above a low threshold. RMS envelope settles
+        // to the signal level, so every sample stays above threshold.
+        let amp = 0.8f64;
+        let data = Array1::from_vec(vec![amp as f32; 4096]);
+        let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+
+        // Threshold (-40 dBFS) far below the signal (~ -1.9 dBFS).
+        audio.apply_expander(-40.0, 2.0, 1.0, 10.0).unwrap();
+
+        if let AudioData::Mono(samples) = &audio.data {
+            // Check the settled tail: gain must be ~1.0 (unchanged), not 0.891.
+            for &s in samples.iter().skip(2048) {
+                let v: f64 = s.convert_to();
+                assert!(
+                    (v - amp).abs() < 1e-4,
+                    "above-threshold sample changed: got {v}, expected {amp}"
+                );
+            }
+        } else {
+            panic!("expected mono");
+        }
+    }
+
+    /// Regression test for BUG 4: a `ratio` of `0.0` caused a division by zero
+    /// in the gate gain formula `(ratio - 1.0) / ratio`. Both `apply_gate` and
+    /// `apply_expander` must now reject `ratio <= 0.0` with an `Err`.
+    #[test]
+    fn test_gate_and_expander_reject_zero_ratio() {
+        let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
+
+        let mut gate_audio = AudioSamples::new_mono(data.clone(), sample_rate!(44100)).unwrap();
+        let gate_result = gate_audio.apply_gate(-20.0, 0.0, 1.0, 10.0);
+        assert!(gate_result.is_err(), "apply_gate(ratio=0.0) should error");
+
+        let mut exp_audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+        let exp_result = exp_audio.apply_expander(-20.0, 0.0, 1.0, 10.0);
+        assert!(
+            exp_result.is_err(),
+            "apply_expander(ratio=0.0) should error"
+        );
+
+        // The audio must be untouched (no NaN/inf written) when validation fails.
+        if let AudioData::Mono(samples) = &gate_audio.data {
+            assert!(samples.iter().all(|&s| {
+                let v: f64 = s.convert_to();
+                v.is_finite()
+            }));
+        }
     }
 }

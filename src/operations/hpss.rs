@@ -270,7 +270,7 @@ impl HpssConfig {
         if self.stft_params.n_fft() > crate::nzu!(163_840) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "win_size",
-                "Window size should not exceed 16384 samples for practical processing",
+                "Window size should not exceed 163840 samples for practical processing",
             )));
         }
 
@@ -676,6 +676,37 @@ mod tests {
             ..config
         };
         assert!(config.validate(sample_rate).is_err());
+    }
+
+    /// Regression test for BUG 4: the n_fft upper-bound check and its error
+    /// message must agree on the same number. The check rejects
+    /// `n_fft > 163_840`, so the message must mention 163840, not 16384.
+    #[test]
+    fn test_nfft_bound_message_matches_bound() {
+        // 262_144 == 2^18, a power of two strictly greater than 163_840 so the
+        // bound check (and only that check) triggers.
+        let config = HpssConfig {
+            stft_params: spectrograms::StftParamsBuilder::default()
+                .n_fft(crate::nzu!(262_144))
+                .hop_size(crate::nzu!(256))
+                .build()
+                .unwrap(),
+            ..HpssConfig::default()
+        };
+
+        let err = config
+            .validate(44100.0)
+            .expect_err("n_fft of 262144 exceeds the 163840 bound and must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("163840"),
+            "error message must mention the actual bound (163840), got: {msg}"
+        );
+        // The stale bound from the bug must not appear.
+        assert!(
+            !msg.contains("16384 "),
+            "error message must not mention the stale 16384 bound, got: {msg}"
+        );
     }
 
     #[test]

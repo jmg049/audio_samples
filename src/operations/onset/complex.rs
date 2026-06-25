@@ -99,6 +99,7 @@ pub fn magnitude_difference(mag: ArrayView2<f64>) -> Array2<f64> {
 /// assert!((diff - 0.0).abs() < 1e-10);
 /// ```
 #[inline]
+#[allow(dead_code)] // retained utility; superseded by `princarg` in `phase_deviation`
 fn wrapped_phase_diff(a: f64, b: f64) -> f64 {
     let mut d = a - b;
 
@@ -109,6 +110,21 @@ fn wrapped_phase_diff(a: f64, b: f64) -> f64 {
     }
 
     d
+}
+
+/// Maps an angle (in radians) to its principal value in `(-π, π]`.
+///
+/// Unlike [`wrapped_phase_diff`], which only adjusts by a single ±2π, this
+/// handles arbitrarily large inputs via modular arithmetic, which is required
+/// when wrapping `phase_diff - expected` where `expected = 2π·f·hop/sr` can be
+/// many multiples of 2π for high-frequency bins.
+#[inline]
+fn princarg(angle: f64) -> f64 {
+    use std::f64::consts::{PI, TAU};
+    // rem_euclid maps into [0, TAU); shift to (-π, π].
+    let wrapped = (angle + PI).rem_euclid(TAU) - PI;
+    // rem_euclid produces [-π, π); fold -π up to π so the range is (-π, π].
+    if wrapped <= -PI { wrapped + TAU } else { wrapped }
 }
 
 /// Computes phase deviation from expected phase progression.
@@ -168,8 +184,12 @@ pub fn phase_deviation(
 
         for t in 1..frames {
             let phase = spec_row[t].arg();
-            let diff = wrapped_phase_diff(phase, prev_phase);
-            out_row[t] = (diff - expected).abs();
+            let diff = phase - prev_phase;
+            // Standard phase-deviation ODF: wrap the FINAL quantity into (-π, π].
+            // `expected` can exceed π for high-frequency bins, so wrapping the raw
+            // phase difference before subtracting `expected` would leave a large,
+            // never-re-wrapped residual that makes high bins dominate.
+            out_row[t] = princarg(diff - expected).abs();
             prev_phase = phase;
         }
     }
@@ -267,9 +287,9 @@ pub fn combine_complex_odf(
             }
         } else {
             while b + 4 <= bins {
-                let _m_view = mag_col.slice(s![b..b + 4]);
+                let m_view = mag_col.slice(s![b..b + 4]);
                 let p_view = phase_col.slice(s![b..b + 4]);
-                let m_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
+                let m_slice = m_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
                 let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
                 #[cfg(feature = "simd")]
                 {
@@ -325,4 +345,97 @@ pub fn combine_complex_odf(
 
     // safety: frames > 0 ensures odf is non-empty
     unsafe { NonEmptyVec::new_unchecked(odf) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for BUG 1: in the non-rectified combine path the magnitude
+    /// contribution must come from `mag_diff`, not from `phase_dev`.
+    ///
+    /// We use `ComplexOnsetConfig::speech()` (`phase_rectify: false`), force the
+    /// output to depend only on the magnitude term (magnitude_weight = 1,
+    /// phase_weight = 0, no log compression), and feed magnitude and phase arrays
+    /// with deliberately different values. Before the fix, `m_slice` was bound to
+    /// the phase view, so the result reflected the phase data and this assertion
+    /// failed.
+    #[test]
+    fn bug1_nonrectified_magnitude_comes_from_magnitude() {
+        let mut config = ComplexOnsetConfig::speech();
+        assert!(!config.phase_rectify, "test relies on non-rectified phase");
+        config.magnitude_weight = 1.0;
+        config.phase_weight = 0.0;
+        config.log_compression = 0.0;
+        // Ensure we hit the non-(mag&&phase)-rectify branch.
+        config.magnitude_rectify = false;
+
+        // 8 bins (two full 4-wide SIMD/blocked iterations), 1 frame.
+        let bins = 8;
+        let mag_val = 2.0;
+        let phase_val = 100.0; // wildly different from magnitude
+        let mag_diff = Array2::from_elem((bins, 1), mag_val);
+        let phase_dev = Array2::from_elem((bins, 1), phase_val);
+
+        let odf = combine_complex_odf(&mag_diff, &phase_dev, &config);
+
+        // Output = magnitude_weight * Σ|mag| = 1.0 * (8 * 2.0) = 16.0
+        let expected = bins as f64 * mag_val;
+        assert!(
+            (odf[0] - expected).abs() < 1e-9,
+            "expected magnitude-derived sum {expected}, got {} (would be {} if read from phase)",
+            odf[0],
+            bins as f64 * phase_val
+        );
+    }
+
+    /// Regression test for BUG 2: for a bin whose true phase advances by exactly
+    /// `expected = 2π·f·hop/sr` each hop, the phase deviation must be ~0 even when
+    /// `expected > π` (high-frequency bins). The buggy version wrapped the raw
+    /// phase difference BEFORE subtracting `expected`, leaving a large residual.
+    #[test]
+    fn bug2_phase_deviation_zero_for_expected_advance() {
+        let config = ComplexOnsetConfig::speech();
+        let sample_rate = 44100.0;
+        let hop = config.hop_size.get() as f64;
+        let tau = std::f64::consts::TAU;
+
+        // Find a high bin whose expected per-hop advance exceeds π, which is what
+        // makes the bug observable (single-wrap is insufficient there).
+        let bins = 64usize;
+        let frames = 6usize;
+        let mut high_bin = 0usize;
+        for b in 0..bins {
+            let f = config.cqt_config.bin_frequency(b);
+            let expected = tau * f * hop / sample_rate;
+            if expected > std::f64::consts::PI {
+                high_bin = b;
+                break;
+            }
+        }
+        assert!(high_bin > 0, "expected to find a bin with advance > π");
+
+        // Build a spec where every bin's phase advances by exactly its own
+        // `expected` per frame (magnitude = 1).
+        let mut spec = Array2::from_elem((bins, frames), Complex::new(0.0, 0.0));
+        for b in 0..bins {
+            let f = config.cqt_config.bin_frequency(b);
+            let expected = tau * f * hop / sample_rate;
+            for t in 0..frames {
+                let ph = expected * t as f64;
+                spec[[b, t]] = Complex::from_polar(1.0, ph);
+            }
+        }
+
+        let dev = phase_deviation(spec.view(), &config, sample_rate);
+
+        // The high bin's deviation must be ~0 for all t >= 1.
+        for t in 1..frames {
+            assert!(
+                dev[[high_bin, t]].abs() < 1e-9,
+                "high bin {high_bin} deviation at frame {t} should be ~0, got {}",
+                dev[[high_bin, t]]
+            );
+        }
+    }
 }

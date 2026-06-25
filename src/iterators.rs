@@ -592,7 +592,8 @@ where
         F: FnMut(usize, &mut [T]), // (window_index, window_samples)
     {
         let total_samples = self.samples_per_channel().get();
-        if total_samples == 0 || window_size == 0 {
+        // A zero hop would advance `pos` by 0 each iteration, looping forever.
+        if total_samples == 0 || window_size == 0 || hop_size == 0 {
             return;
         }
 
@@ -848,18 +849,15 @@ where
             return None;
         }
 
-        let channel = match self
+        // Extract only the current channel by borrowing `self.audio` directly.
+        // `slice_channels` copies just that one channel into an owned
+        // `AudioSamples<'static, T>`, so there is no O(N) deep clone of every
+        // channel per step. For a valid `AudioSamples` with `current_channel`
+        // in range, this extraction is infallible.
+        let channel = self
             .audio
-            .clone()
-            .into_owned()
             .slice_channels(self.current_channel..=self.current_channel)
-        {
-            Ok(ch) => ch,
-            Err(e) => {
-                eprintln!("Error slicing channel {}: {}", self.current_channel, e);
-                return None;
-            }
-        };
+            .ok()?;
 
         self.current_channel += 1;
 
@@ -960,7 +958,7 @@ where
     hop_size: NonZeroUsize,
     current_position: usize,
     total_samples: NonZeroUsize,
-    total_windows: NonZeroUsize,
+    total_windows: usize,
     current_window: usize,
     padding_mode: PaddingMode,
     _phantom: PhantomData<T>,
@@ -1026,14 +1024,10 @@ where
         window_size: NonZeroUsize,
         hop_size: NonZeroUsize,
         padding_mode: PaddingMode,
-    ) -> NonZeroUsize {
+    ) -> usize {
         // Calculate the maximum number of windows we could have
         // This is the ceiling of total_samples / hop_size
         let max_windows = total_samples.get().div_ceil(hop_size.get());
-        let max_windows = unsafe {
-            // safety: div_ceil on NonZeroUsize is not stable yet. Convert to usize, do div_ceil, and then go back. Never not valid
-            NonZeroUsize::new_unchecked(max_windows)
-        };
 
         match padding_mode {
             PaddingMode::Zero => {
@@ -1048,16 +1042,16 @@ where
                     count += 1;
                     pos += hop_size.get();
                 }
-                // safety: count is at least 1 because total_samples is non-zero
-                unsafe { NonZeroUsize::new_unchecked(count) }
+                count
             }
             PaddingMode::Skip => {
-                // With skip, only count complete windows
-                // safety: we have already checked that window_size and hop_size are non-zero
-                unsafe {
-                    NonZeroUsize::new_unchecked(
-                        1 + (total_samples.get() - window_size.get()) / hop_size.get(),
-                    )
+                // With skip, only count complete windows. When the window is
+                // larger than the signal, no complete window fits, so yield 0.
+                // `saturating_sub` avoids underflow when `window_size > total`.
+                if total_samples.get() < window_size.get() {
+                    0
+                } else {
+                    1 + total_samples.get().saturating_sub(window_size.get()) / hop_size.get()
                 }
             }
         }
@@ -1100,7 +1094,7 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_window >= self.total_windows.get() {
+        if self.current_window >= self.total_windows {
             return None;
         }
 
@@ -1217,7 +1211,7 @@ where
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.total_windows.get() - self.current_window;
+        let remaining = self.total_windows - self.current_window;
         (remaining, Some(remaining))
     }
 }
@@ -1639,5 +1633,96 @@ mod tests {
 
         // Results should be identical
         assert_eq!(audio1.as_mono().unwrap(), audio2.as_mono().unwrap());
+    }
+
+    // Regression: BUG 3 — WindowIterator window-count underflow in Skip mode.
+    // With window (8) > total (5), the old `1 + (total - window) / hop`
+    // underflowed (debug panic / release wrap) and NonZeroUsize could not even
+    // represent 0 windows. Skip mode must yield 0 windows without panicking.
+    #[cfg(feature = "editing")]
+    #[test]
+    fn test_window_iterator_skip_window_larger_than_signal_yields_zero() {
+        let audio =
+            AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], sample_rate!(44100)).unwrap();
+        let iter = audio
+            .windows(crate::nzu!(8), crate::nzu!(4))
+            .with_padding_mode(PaddingMode::Skip);
+
+        // len()/size_hint must report 0 ...
+        assert_eq!(iter.len(), 0);
+
+        // ... and iteration must produce 0 windows without panicking.
+        let windows: Vec<AudioSamples<f32>> = iter.collect();
+        assert_eq!(windows.len(), 0);
+    }
+
+    // Regression: BUG 3 — Skip mode still counts complete windows correctly
+    // when the window fits, confirming the saturating_sub change didn't regress
+    // the normal path.
+    #[cfg(feature = "editing")]
+    #[test]
+    fn test_window_iterator_skip_counts_complete_windows() {
+        let audio =
+            AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], sample_rate!(44100))
+                .unwrap();
+        // window 3, hop 2 over 6 samples: starts at 0 (1..3) and 2 (3..5);
+        // a third start at 4 would need samples 4..7 (incomplete) -> 2 windows.
+        let windows: Vec<AudioSamples<f32>> = audio
+            .windows(crate::nzu!(3), crate::nzu!(2))
+            .with_padding_mode(PaddingMode::Skip)
+            .collect();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].as_mono().unwrap().to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(windows[1].as_mono().unwrap().to_vec(), vec![3.0, 4.0, 5.0]);
+    }
+
+    // Regression: BUG 4 — apply_to_windows infinite loop on hop_size == 0.
+    // The old code only guarded window_size == 0, so `pos += 0` looped forever.
+    // Must return immediately without invoking the callback.
+    #[cfg(feature = "editing")]
+    #[test]
+    fn test_apply_to_windows_zero_hop_returns_without_hanging() {
+        let mut audio =
+            AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0], sample_rate!(44100)).unwrap();
+        let original = audio.as_mono().unwrap().to_vec();
+
+        let mut called = false;
+        audio.apply_to_windows(2, 0, |_idx, _window| {
+            called = true;
+        });
+
+        // Callback must never run, and data must be untouched.
+        assert!(!called, "callback must not be invoked when hop_size == 0");
+        assert_eq!(audio.as_mono().unwrap().to_vec(), original);
+    }
+
+    // Regression: BUG 5 — ChannelIterator::next must extract exactly one channel
+    // per step (no O(N^2) deep clone, no eprintln!), advance current_channel
+    // correctly, and keep len() consistent with what next() yields.
+    #[test]
+    fn test_channel_iterator_three_channels_len_and_data() {
+        let audio = AudioSamples::new_multi_channel(
+            array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            sample_rate!(44100),
+        )
+        .unwrap();
+
+        let mut iter = audio.channels();
+        assert_eq!(iter.len(), 3);
+
+        let c0 = iter.next().unwrap();
+        assert_eq!(c0.as_mono().unwrap().to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(iter.len(), 2);
+
+        let c1 = iter.next().unwrap();
+        assert_eq!(c1.as_mono().unwrap().to_vec(), vec![4.0, 5.0, 6.0]);
+        assert_eq!(iter.len(), 1);
+
+        let c2 = iter.next().unwrap();
+        assert_eq!(c2.as_mono().unwrap().to_vec(), vec![7.0, 8.0, 9.0]);
+        assert_eq!(iter.len(), 0);
+
+        assert!(iter.next().is_none());
+        assert_eq!(iter.len(), 0);
     }
 }

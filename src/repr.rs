@@ -4178,12 +4178,11 @@ where
     /// # Errors
     /// Returns an error if the range is out of bounds.
     #[inline]
-    pub fn slice_channels<'iter, R>(
-        &'iter self,
+    pub fn slice_channels<R>(
+        &self,
         channel_range: R,
     ) -> AudioSampleResult<AudioSamples<'static, T>>
     where
-        'iter: 'a,
         R: RangeBounds<usize> + Clone,
     {
         let num_channels = self.num_channels();
@@ -4982,6 +4981,12 @@ where
         sample_rate: SampleRate,
     ) -> AudioSampleResult<Self> {
         let total_samples = slice.len().get();
+        if !total_samples.is_multiple_of(channels.get() as usize) {
+            return Err(AudioSampleError::invalid_number_of_samples(
+                total_samples,
+                channels.get(),
+            ));
+        }
         let samples_per_channel = total_samples / channels.get() as usize;
         let arr = ArrayView2::from_shape((channels.get() as usize, samples_per_channel), slice)?;
         let multi_data = MultiData::from_view(arr)?;
@@ -5192,9 +5197,15 @@ where
     /// - `channels`: The number of channels in the interleaved data.
     /// - `sample_rate`: The sample rate of the audio data.
     ///
+    /// Interleaved format: `[L0, R0, L1, R1, L2, R2, ...]` for stereo. The data is
+    /// de-interleaved into the internal planar format. De-interleaving requires an
+    /// owned buffer, so for `channels > 1` this allocates and copies rather than
+    /// borrowing the input slice in place.
+    ///
     /// # Errors
     ///
-    /// If the `samples` slice cannot be turned into an 2D Array due to a shape error.
+    /// If the number of samples in the slice is not divisible by the number of
+    /// channels, or if the de-interleaving process fails due to shape issues.
     #[inline]
     pub fn from_interleaved_slice(
         samples: &'a NonEmptySlice<T>,
@@ -5205,7 +5216,11 @@ where
             return Ok(AudioSamples::new_mono_from_slice(samples, sample_rate));
         }
 
-        AudioSamples::new_multi_channel_from_slice(samples, channels, sample_rate)
+        // De-interleaving necessarily allocates an owned buffer, so we mirror
+        // `from_interleaved_vec`: de-interleave into a planar Vec and build an
+        // owned multi-channel array (correctness over zero-copy here).
+        let deinterleaved = crate::simd_conversions::deinterleave_multi_vec(samples, channels)?;
+        AudioSamples::new_multi_channel_from_vec::<T>(deinterleaved, channels, sample_rate)
     }
 
     /// Creates multi-channel AudioSamples from separate channel arrays.
@@ -6745,5 +6760,53 @@ mod tests {
             .into_owned();
         assert!(audio.replace_data(new_data).is_ok());
         assert_eq!(audio.sample_rate(), original_rate);
+    }
+
+    // Regression: BUG 1 — from_interleaved_slice must actually de-interleave.
+    // The old code called new_multi_channel_from_slice, which reshaped the flat
+    // interleaved slice as PLANAR (channels, samples_per_channel) — splitting
+    // L/R across the wrong rows. Build interleaved [L0,R0,L1,R1,L2,R2] and
+    // assert channel 0 == [L0,L1,L2] and channel 1 == [R0,R1,R2].
+    #[test]
+    fn test_from_interleaved_slice_deinterleaves() {
+        // Interleaved stereo: L0=1, R0=4, L1=2, R1=5, L2=3, R2=6
+        let data = [1.0f32, 4.0, 2.0, 5.0, 3.0, 6.0];
+        let slice = NonEmptySlice::new(&data).unwrap();
+
+        let audio: AudioSamples<f32> =
+            AudioSamples::from_interleaved_slice(slice, channels!(2), sample_rate!(44100)).unwrap();
+
+        assert_eq!(audio.num_channels(), channels!(2));
+        assert_eq!(audio.samples_per_channel().get(), 3);
+
+        let multi = audio.as_multi_channel().unwrap();
+        // channel 0 = [L0, L1, L2]; channel 1 = [R0, R1, R2]
+        assert_eq!(multi.row(0).to_vec(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(multi.row(1).to_vec(), vec![4.0, 5.0, 6.0]);
+    }
+
+    // Regression: BUG 2 — new_multi_channel_from_slice must return the structured
+    // InvalidNumberOfSamples error (matching the owned variant) when the total
+    // sample count is not divisible by the channel count, rather than surfacing a
+    // generic ndarray ShapeError.
+    #[test]
+    fn test_new_multi_channel_from_slice_non_divisible_errors() {
+        // 7 samples cannot be split evenly across 2 channels.
+        let data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let slice = NonEmptySlice::new(&data).unwrap();
+
+        let result: AudioSampleResult<AudioSamples<f32>> =
+            AudioSamples::new_multi_channel_from_slice(slice, channels!(2), sample_rate!(44100));
+
+        match result {
+            Err(AudioSampleError::InvalidNumberOfSamples {
+                total_samples,
+                channels,
+            }) => {
+                assert_eq!(total_samples, 7);
+                assert_eq!(channels, 2);
+            }
+            other => panic!("expected InvalidNumberOfSamples, got {other:?}"),
+        }
     }
 }

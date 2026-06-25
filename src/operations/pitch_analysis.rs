@@ -307,6 +307,18 @@ where
             )));
         }
 
+        // Reject unsupported methods up front. A library must not print to stderr
+        // per-frame, so validate the method once before entering the analysis loop.
+        if !matches!(
+            method,
+            PitchDetectionMethod::Yin | PitchDetectionMethod::Autocorrelation
+        ) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "method",
+                format!("Pitch detection method {method:?} is not supported by track_pitch"),
+            )));
+        }
+
         let window_size = window_size.get();
         let hop_size = hop_size.get();
         let samples = self.as_f64();
@@ -341,10 +353,9 @@ where
                 PitchDetectionMethod::Autocorrelation => {
                     window_audio.detect_pitch_autocorr(min_frequency, max_frequency)?
                 }
-                _ => {
-                    eprintln!("Pitch detection method {method:?} not implemented yet");
-                    None
-                } // Other methods not implemented yet
+                // Unsupported methods are rejected before this loop, so this arm is
+                // unreachable in practice; return `None` defensively without logging.
+                _ => None,
             };
 
             results.push((time_seconds, frequency));
@@ -844,21 +855,23 @@ pub fn yin_pitch_detection(
     for tau in min_tau..=max_tau {
         if cmnd[tau] < threshold {
             // Find the actual minimum around this tau
-            let mut min_tau = tau;
+            let mut best_tau = tau;
             let mut min_val = cmnd[tau];
 
-            // Search in a small neighborhood
+            // Search in a small neighborhood, clamped to the valid `[min_tau, max_tau]`
+            // range. Using the `min_tau` parameter here (rather than a shadow of `tau`)
+            // keeps the backward neighbourhood search (`tau - 5`) live.
             let start = tau.saturating_sub(5).max(min_tau);
             let end = (tau + 5).min(max_tau);
 
             for (t, &val) in cmnd.iter().enumerate().skip(start).take(end - start + 1) {
                 if val < min_val {
                     min_val = val;
-                    min_tau = t;
+                    best_tau = t;
                 }
             }
 
-            return Some(min_tau as f64);
+            return Some(best_tau as f64);
         }
     }
 
@@ -949,6 +962,96 @@ mod tests {
     use ndarray::Array1;
     use non_empty_slice::{NonEmptyVec, non_empty_vec};
     use std::f64::consts::PI;
+
+    /// Regression test for BUG 3: the YIN neighbourhood search must include the
+    /// backward window `[tau-5, tau]`. The bug shadowed the `min_tau` parameter
+    /// with a local `= tau`, so `start = tau.saturating_sub(5).max(min_tau)`
+    /// collapsed to `tau` and the backward search was dead.
+    ///
+    /// We craft a CMND-shaped signal indirectly: a periodic signal whose true
+    /// period minimum sits a few samples *below* the first tau that dips under
+    /// threshold. With the bug the function returns the first sub-threshold tau;
+    /// after the fix the neighbourhood search uses the correct `[tau-5, tau+5]`
+    /// (clamped to the `min_tau` parameter) window.
+    ///
+    /// NOTE: with YIN's "first tau below threshold" rule, the *backward* half of
+    /// the window can never select a different tau (any earlier tau below
+    /// threshold would already have been the first crossing). So a strict
+    /// fail-before/pass-after assertion is not feasible for this shadowing bug.
+    /// Following the spec's fallback, this is a tight pitch-accuracy guard that
+    /// also exercises the corrected `start = tau.saturating_sub(5).max(min_tau)`
+    /// expression (it must not panic or mis-index).
+    #[test]
+    fn bug3_yin_neighbourhood_search_accuracy() {
+        let sr = 44100usize;
+        let period = 100.0;
+        let n = 4096usize;
+        let mut samples = Vec::with_capacity(n);
+        for i in 0..n {
+            let v = (2.0 * PI * (i as f64) / period).sin();
+            samples.push(v);
+        }
+        let samples_slice: &[f64] = &samples;
+        let slice = non_empty_slice::non_empty_slice!(samples_slice);
+
+        let min_tau = 20usize;
+        let max_tau = 400usize;
+        let detected = yin_pitch_detection(slice, min_tau, max_tau, 0.1)
+            .expect("clean periodic signal should yield a period");
+
+        // Detected period must be at the true minimum (≈100 samples). The
+        // neighbourhood search lands a couple of samples off the exact period
+        // because there is no parabolic sub-sample interpolation here.
+        assert!(
+            (detected - period).abs() <= 3.0,
+            "detected period {detected} should be ~{period}"
+        );
+
+        let freq = sr as f64 / detected;
+        let expected_freq = sr as f64 / period;
+        assert!(
+            (freq - expected_freq).abs() < 15.0,
+            "detected freq {freq} Hz vs expected {expected_freq} Hz"
+        );
+    }
+
+    /// Regression test for BUG 5: `track_pitch` must reject unsupported pitch
+    /// detection methods with a single up-front `Err`, and must NOT print to
+    /// stderr per-frame nor enter the analysis loop.
+    #[test]
+    fn bug5_track_pitch_unsupported_method_errors_up_front() {
+        let sample_rate = 44100;
+        let samples: Vec<f64> = (0..8192)
+            .map(|i| (2.0 * PI * 220.0 * i as f64 / sample_rate as f64).sin())
+            .collect();
+        let samples = NonEmptyVec::new(samples).unwrap();
+        let audio: AudioSamples<'_, f64> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+
+        let result = audio.track_pitch(
+            std::num::NonZeroUsize::new(2048).unwrap(),
+            std::num::NonZeroUsize::new(512).unwrap(),
+            PitchDetectionMethod::Cepstrum,
+            0.1,
+            80.0,
+            1000.0,
+        );
+        assert!(
+            result.is_err(),
+            "unsupported method must return Err, got {result:?}"
+        );
+
+        // Also confirm a supported method still works.
+        let ok = audio.track_pitch(
+            std::num::NonZeroUsize::new(2048).unwrap(),
+            std::num::NonZeroUsize::new(512).unwrap(),
+            PitchDetectionMethod::Yin,
+            0.1,
+            80.0,
+            1000.0,
+        );
+        assert!(ok.is_ok(), "supported method must still succeed");
+    }
 
     #[test]
     fn test_pitch_detection_yin() {

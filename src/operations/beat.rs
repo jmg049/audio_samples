@@ -399,7 +399,10 @@ pub fn track_beats_core(
         center += ibi_frames;
 
         let lo = (center - tol_frames).max(0) as usize;
-        let hi = (center + tol_frames).min(len) as usize;
+        // Clamp `hi` so the window is always a valid, non-empty slice: clamping can
+        // otherwise push `hi` below `lo` (or to `lo`), which would panic in `peak_index`.
+        // `len` is the slice length, so `hi` never exceeds the slice bounds.
+        let hi = (center + tol_frames).min(len).max(lo as isize + 1).min(len) as usize;
 
         let rel = peak_index(&onset[lo..hi]) as isize;
         beat_frames.push(lo as isize + rel);
@@ -411,7 +414,8 @@ pub fn track_beats_core(
         center -= ibi_frames;
 
         let lo = (center - tol_frames).max(0) as usize;
-        let hi = (center + tol_frames).min(len) as usize;
+        // Clamp `hi` so the window is always a valid, non-empty slice (see forward pass).
+        let hi = (center + tol_frames).min(len).max(lo as isize + 1).min(len) as usize;
 
         let rel = peak_index(&onset[lo..hi]) as isize;
         beat_frames.push(lo as isize + rel);
@@ -567,5 +571,36 @@ mod tests {
                 }
             }
         }
+
+        /// Regression test for BUG 6: `track_beats_core` must never panic when the
+        /// tolerance window clamps to an empty or inverted `[lo, hi)` range. We
+        /// hammer it with tiny signals, extreme tolerances (huge and ~0), and large
+        /// hops so the `peak_index(&onset[lo..hi])` slicing is exercised at the edges.
+        #[test]
+        fn bug6_edge_windows_do_not_panic(
+            len in 1usize..32,
+            tempo in 40.0f64..240.0,
+            sr in 8_000.0f64..96_000.0,
+            hop in 1usize..4096,
+            tol in prop::option::of(0.0f64..100.0),
+        ) {
+            let onset = synthetic_onset(len);
+            let hop = NonZeroUsize::new(hop).unwrap();
+            // Must not panic regardless of how the window clamps.
+            let _ = track_beats_core(&onset, tempo, sr, hop, tol);
+        }
+    }
+
+    /// Regression test for BUG 6 (deterministic): a single-frame onset with a
+    /// huge tolerance forces `hi` to clamp to `len`, which previously could leave
+    /// an empty/inverted slice handed to `peak_index`. Must not panic.
+    #[test]
+    fn bug6_single_frame_huge_tolerance_no_panic() {
+        let onset = NonEmptyVec::new(vec![1.0f64]).unwrap();
+        let hop = NonZeroUsize::new(512).unwrap();
+        // Huge tolerance dwarfs the 1-frame signal.
+        let beats = track_beats_core(&onset, 120.0, 44_100.0, hop, Some(1000.0))
+            .expect("single-frame edge case must not error");
+        assert!(beats.iter().all(|t| t.is_finite() && *t >= 0.0));
     }
 }

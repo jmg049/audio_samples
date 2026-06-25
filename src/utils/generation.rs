@@ -360,13 +360,15 @@ where
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
         let mut rng = StdRng::seed_from_u64(seed);
-        let white: f64 = (rng.random::<f64>() - 0.5) * 2.0;
-        brown_state += white * step;
-        brown_state = brown_state.clamp(-1.0, 1.0);
+        for _ in 0..num_samples {
+            let white: f64 = (rng.random::<f64>() - 0.5) * 2.0;
+            brown_state += white * step;
+            brown_state = brown_state.clamp(-1.0, 1.0);
 
-        let b_state: f64 = brown_state;
-        let sample = amplitude * b_state;
-        samples.push(sample.convert_to());
+            let b_state: f64 = brown_state;
+            let sample = amplitude * b_state;
+            samples.push(sample.convert_to());
+        }
     } else {
         for _ in 0..num_samples {
             let white: f64 = (rand::random::<f64>() - 0.5) * 2.0;
@@ -958,7 +960,7 @@ where
         let t = i as f64 / sr_f;
         let mut sum = 0.0;
         for comp in components {
-            sum += comp.amplitude * two_pi * comp.frequency * t.sin();
+            sum += comp.amplitude * (two_pi * comp.frequency * t).sin();
         }
         samples.push(sum.convert_to());
     }
@@ -1472,6 +1474,69 @@ mod tests {
         let min_val = mono.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_val = mono.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         assert!(max_val > min_val);
+    }
+
+    // Regression test for BUG 1: operator-precedence bug in compound_tone made
+    // `.sin()` bind only to `t`, producing amplitude*2pi*f*sin(t) instead of a
+    // tone at `comp.frequency`. A single 1000 Hz component over 1 s should cross
+    // zero ~2*f times. The buggy expression produces a ramped sin(t) (near DC),
+    // crossing zero only ~2 times over a second.
+    #[test]
+    fn test_compound_tone_frequency_zero_crossings() {
+        let freq = 1000.0;
+        let sr = 44100u32;
+        let components = [ToneComponent::new(freq, 1.0)];
+        let components = NonEmptySlice::from_slice(&components).unwrap();
+        let audio = compound_tone::<f64>(
+            &components,
+            Duration::from_secs_f64(1.0),
+            sample_rate!(44100),
+        );
+
+        let mono = audio.as_mono().unwrap();
+        let samples: Vec<f64> = mono.iter().cloned().collect();
+
+        let mut crossings = 0usize;
+        for w in samples.windows(2) {
+            if (w[0] <= 0.0 && w[1] > 0.0) || (w[0] >= 0.0 && w[1] < 0.0) {
+                crossings += 1;
+            }
+        }
+
+        // Expected ~2*f zero crossings per second.
+        let expected = 2.0 * freq;
+        let _ = sr;
+        assert!(
+            (crossings as f64 - expected).abs() < expected * 0.05,
+            "expected ~{expected} zero crossings for a {freq} Hz tone, got {crossings}"
+        );
+    }
+
+    // Regression test for BUG 2: the seeded branch of brown_noise had no
+    // generation loop and pushed exactly one sample. It must now return a full
+    // buffer, be deterministic for a fixed seed, and differ across seeds.
+    #[test]
+    #[cfg(feature = "random-generation")]
+    fn test_brown_noise_seeded_length_and_determinism() {
+        let dur = Duration::from_secs_f64(0.1);
+        let sr = sample_rate!(44100);
+        let num_samples = (0.1 * 44100.0) as usize;
+
+        let a = brown_noise::<f64>(dur, sr, 0.02, 0.5, Some(42));
+        let b = brown_noise::<f64>(dur, sr, 0.02, 0.5, Some(42));
+        let c = brown_noise::<f64>(dur, sr, 0.02, 0.5, Some(7));
+
+        // Correct length (not a 1-sample buffer).
+        assert_eq!(a.samples_per_channel().get(), num_samples);
+
+        let av: Vec<f64> = a.as_mono().unwrap().iter().cloned().collect();
+        let bv: Vec<f64> = b.as_mono().unwrap().iter().cloned().collect();
+        let cv: Vec<f64> = c.as_mono().unwrap().iter().cloned().collect();
+
+        // Deterministic: same seed -> identical output.
+        assert_eq!(av, bv);
+        // Different seed -> different output.
+        assert_ne!(av, cv);
     }
 
     #[test]

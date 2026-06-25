@@ -423,7 +423,7 @@ where
     let peak_amplitude = data.iter().map(|&x| x.abs()).fold(0.0, f64::max);
 
     // Calculate RMS amplitude
-    let rms_amplitude = (data.iter().fold(0.0, |acc, x| acc + *x) / data.len() as f64).sqrt();
+    let rms_amplitude = (data.iter().map(|x| x * x).sum::<f64>() / data.len() as f64).sqrt();
 
     // Calculate dynamic range in dB
     let dynamic_range_db = if rms_amplitude > 0.0 {
@@ -915,6 +915,54 @@ mod tests {
         assert_eq!(peak, 1.0);
         assert!(rms > 0.0);
         assert!(dynamic_range > 0.0);
+    }
+
+    // Regression test for BUG 3: detect_dynamic_range computed
+    // sqrt(mean(x)) instead of sqrt(mean(x^2)). For zero-mean audio that is
+    // ~0 (giving a wrong/infinite dynamic range) and NaN when the sample sum
+    // is negative. A sine of amplitude A has RMS = A/sqrt(2).
+    #[test]
+    fn test_detect_dynamic_range_rms_correct_and_finite() {
+        let sr = 44100u32;
+        let amplitude = 0.8f64;
+        let n = sr as usize; // 1 second
+        let two_pi = std::f64::consts::PI * 2.0;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / sr as f64;
+            data.push(amplitude * (two_pi * 440.0 * t).sin());
+        }
+        let arr = ndarray::Array1::from_vec(data);
+        let audio: AudioSamples<'_, f64> = AudioSamples::new_mono(arr, sample_rate!(44100)).unwrap();
+
+        let (peak, rms, dynamic_range) = detect_dynamic_range(&audio).unwrap();
+
+        let expected_rms = amplitude / 2.0f64.sqrt();
+        assert!(
+            (rms - expected_rms).abs() < expected_rms * 0.01,
+            "expected RMS ~{expected_rms}, got {rms}"
+        );
+        assert!(rms.is_finite() && dynamic_range.is_finite());
+        assert!(peak > 0.0);
+        // Dynamic range for a full sine: 20*log10(peak/rms) ~ 3.01 dB.
+        assert!((dynamic_range - 20.0 * (peak / rms).log10()).abs() < 1e-9);
+        assert!(dynamic_range > 0.0);
+    }
+
+    // The buggy fold(acc + x) summed raw samples; for a signal whose sample
+    // sum is negative, sqrt of a negative number is NaN. The mean-of-squares
+    // form is always non-negative, so the result must be finite.
+    #[test]
+    fn test_detect_dynamic_range_negative_sum_not_nan() {
+        // Sample sum is clearly negative.
+        let data = array![-0.9f64, -0.8, -0.7, 0.1, -0.5];
+        let audio: AudioSamples<'_, f64> = AudioSamples::new_mono(data, sample_rate!(10)).unwrap();
+
+        let (_, rms, dynamic_range) = detect_dynamic_range(&audio).unwrap();
+
+        assert!(!rms.is_nan(), "RMS must not be NaN for a negative-sum signal");
+        assert!(rms.is_finite() && rms > 0.0);
+        assert!(!dynamic_range.is_nan() && dynamic_range.is_finite());
     }
 
     #[test]
