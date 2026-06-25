@@ -30,7 +30,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
 
     // Build an EQ: low shelf cut, mid peak boost, high shelf boost.
     let eq = ParametricEq::three_band(120.0, -3.0, 1_000.0, 4.0, 1.2, 8_000.0, 2.0);
-    audio.apply_parametric_eq(&eq)?;
+    audio.apply_parametric_eq_in_place(&eq)?;
     println!(
         "EQ applied: peak={:.4} rms={:.4}",
         audio.peak(),
@@ -38,7 +38,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     );
 
     // Single-band convenience.
-    audio.apply_eq_band(&EqBand::peak(500.0, -2.0, 1.0))?;
+    audio.apply_eq_band_in_place(&EqBand::peak(500.0, -2.0, 1.0))?;
     println!(
         "+ Notch 500Hz: peak={:.4} rms={:.4}",
         audio.peak(),

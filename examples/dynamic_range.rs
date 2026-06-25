@@ -39,7 +39,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     let max_gr = gr.into_iter().fold(0.0f64, f64::max);
     println!("Max gain reduction: {:.2} dB", max_gr);
 
-    audio.apply_compressor(&config)?;
+    audio.apply_compressor_in_place(&config)?;
     println!(
         "Compressed: peak={:.4} rms={:.4}",
         audio.peak(),
@@ -47,7 +47,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     );
 
     let limiter = LimiterConfig::mastering();
-    audio.apply_limiter(&limiter)?;
+    audio.apply_limiter_in_place(&limiter)?;
     println!("Limited: peak={:.4} rms={:.4}", audio.peak(), audio.rms());
 
     Ok(())

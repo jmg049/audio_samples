@@ -2503,7 +2503,7 @@ where
 /// let samples = NonEmptyVec::new(vec![1.0f32, -0.5, 0.25, -0.1, 0.0, 0.1]).unwrap();
 /// let mut audio: AudioSamples<'_, f32> =
 ///     AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-/// audio.butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 5000.0).unwrap();
+/// audio.butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 5000.0).unwrap();
 /// ```
 ///
 /// # Invariants
@@ -2517,7 +2517,7 @@ pub trait AudioIirFiltering: AudioTypeConversion
 where
     Self::Sample: AudioSample,
 {
-    /// Apply an IIR filter using the specified design parameters.
+    /// Apply an IIR filter using the specified design parameters, mutating in place.
     ///
     /// Designs a filter from `design` (using the audio's own sample
     /// rate), then applies it to every channel independently.
@@ -2546,9 +2546,21 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5, -1.0, 0.0, 1.0, 0.5, -0.5]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 1000.0);
-    /// assert!(audio.apply_iir_filter(&design).is_ok());
+    /// assert!(audio.apply_iir_filter_in_place(&design).is_ok());
     /// ```
-    fn apply_iir_filter(&mut self, design: &IirFilterDesign) -> AudioSampleResult<()>;
+    fn apply_iir_filter_in_place(&mut self, design: &IirFilterDesign) -> AudioSampleResult<()>;
+
+    /// Apply an IIR filter, returning a new filtered copy and leaving `self` unchanged.
+    ///
+    /// Non-mutating twin of [`apply_iir_filter_in_place`](Self::apply_iir_filter_in_place).
+    fn apply_iir_filter(&self, design: &IirFilterDesign) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_iir_filter_in_place(design)?;
+        Ok(out)
+    }
 
     /// Apply a second-order Butterworth low-pass filter.
     ///
@@ -2578,13 +2590,31 @@ where
     ///
     /// let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// assert!(audio.butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 1000.0).is_ok());
+    /// assert!(audio.butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 1000.0).is_ok());
     /// ```
-    fn butterworth_lowpass(
+    fn butterworth_lowpass_in_place(
         &mut self,
         order: NonZeroUsize,
         cutoff_frequency: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Apply a second-order Butterworth low-pass filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`butterworth_lowpass_in_place`](Self::butterworth_lowpass_in_place);
+    /// leaves `self` unchanged.
+    fn butterworth_lowpass(
+        &self,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.butterworth_lowpass_in_place(order, cutoff_frequency)?;
+        Ok(out)
+    }
+
     /// Apply a second-order Butterworth high-pass filter.
     ///
     /// Convenience wrapper that constructs an [`IirFilterDesign`] and
@@ -2613,13 +2643,30 @@ where
     ///
     /// let samples = NonEmptyVec::new(vec![1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// assert!(audio.butterworth_highpass(NonZeroUsize::new(2).unwrap(), 500.0).is_ok());
+    /// assert!(audio.butterworth_highpass_in_place(NonZeroUsize::new(2).unwrap(), 500.0).is_ok());
     /// ```
-    fn butterworth_highpass(
+    fn butterworth_highpass_in_place(
         &mut self,
         order: NonZeroUsize,
         cutoff_frequency: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Apply a second-order Butterworth high-pass filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`butterworth_highpass_in_place`](Self::butterworth_highpass_in_place);
+    /// leaves `self` unchanged.
+    fn butterworth_highpass(
+        &self,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.butterworth_highpass_in_place(order, cutoff_frequency)?;
+        Ok(out)
+    }
 
     /// Apply a Butterworth band-pass filter.
     ///
@@ -2650,14 +2697,32 @@ where
     ///
     /// let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// assert!(audio.butterworth_bandpass(NonZeroUsize::new(2).unwrap(), 100.0, 5000.0).is_ok());
+    /// assert!(audio.butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 100.0, 5000.0).is_ok());
     /// ```
-    fn butterworth_bandpass(
+    fn butterworth_bandpass_in_place(
         &mut self,
         order: NonZeroUsize,
         low_frequency: f64,
         high_frequency: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Apply a Butterworth band-pass filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`butterworth_bandpass_in_place`](Self::butterworth_bandpass_in_place);
+    /// leaves `self` unchanged.
+    fn butterworth_bandpass(
+        &self,
+        order: NonZeroUsize,
+        low_frequency: f64,
+        high_frequency: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.butterworth_bandpass_in_place(order, low_frequency, high_frequency)?;
+        Ok(out)
+    }
 
     /// Apply a Chebyshev Type I filter.
     ///
@@ -2690,18 +2755,37 @@ where
     ///
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.0, -1.0, 0.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// audio.chebyshev_i(
+    /// audio.chebyshev_i_in_place(
     ///     NonZeroUsize::new(4).unwrap(), 1000.0, 0.5, FilterResponse::LowPass,
     /// )?;
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
-    fn chebyshev_i(
+    fn chebyshev_i_in_place(
         &mut self,
         order: NonZeroUsize,
         cutoff_frequency: f64,
         passband_ripple: f64,
         response: FilterResponse,
     ) -> AudioSampleResult<()>;
+
+    /// Apply a Chebyshev Type I filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`chebyshev_i_in_place`](Self::chebyshev_i_in_place);
+    /// leaves `self` unchanged.
+    fn chebyshev_i(
+        &self,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+        passband_ripple: f64,
+        response: FilterResponse,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.chebyshev_i_in_place(order, cutoff_frequency, passband_ripple, response)?;
+        Ok(out)
+    }
 
     /// Return the frequency response at the specified frequencies.
     ///
@@ -2796,9 +2880,22 @@ where
     ///
     /// let mut eq = ParametricEq::new();
     /// eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));
-    /// audio.apply_parametric_eq(&eq).unwrap();
+    /// audio.apply_parametric_eq_in_place(&eq).unwrap();
     /// ```
-    fn apply_parametric_eq(&mut self, eq: &ParametricEq) -> AudioSampleResult<()>;
+    fn apply_parametric_eq_in_place(&mut self, eq: &ParametricEq) -> AudioSampleResult<()>;
+
+    /// Applies a multi-band parametric EQ, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_parametric_eq_in_place`](Self::apply_parametric_eq_in_place);
+    /// leaves `self` unchanged.
+    fn apply_parametric_eq(&self, eq: &ParametricEq) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_parametric_eq_in_place(eq)?;
+        Ok(out)
+    }
 
     /// Applies a single EQ band filter to the signal.
     ///
@@ -2833,9 +2930,22 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Boost at 2 kHz by 4 dB with Q of 1.5
-    /// audio.apply_eq_band(&EqBand::peak(2000.0, 4.0, 1.5)).unwrap();
+    /// audio.apply_eq_band_in_place(&EqBand::peak(2000.0, 4.0, 1.5)).unwrap();
     /// ```
-    fn apply_eq_band(&mut self, band: &EqBand) -> AudioSampleResult<()>;
+    fn apply_eq_band_in_place(&mut self, band: &EqBand) -> AudioSampleResult<()>;
+
+    /// Applies a single EQ band filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_eq_band_in_place`](Self::apply_eq_band_in_place);
+    /// leaves `self` unchanged.
+    fn apply_eq_band(&self, band: &EqBand) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_eq_band_in_place(band)?;
+        Ok(out)
+    }
 
     /// Applies a peak (or notch) filter at the specified centre frequency.
     ///
@@ -2867,14 +2977,32 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Boost at 880 Hz by 6 dB with Q of 2.0
-    /// audio.apply_peak_filter(880.0, 6.0, 2.0).unwrap();
+    /// audio.apply_peak_filter_in_place(880.0, 6.0, 2.0).unwrap();
     /// ```
-    fn apply_peak_filter(
+    fn apply_peak_filter_in_place(
         &mut self,
         frequency: f64,
         gain_db: f64,
         q_factor: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Applies a peak (or notch) filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_peak_filter_in_place`](Self::apply_peak_filter_in_place);
+    /// leaves `self` unchanged.
+    fn apply_peak_filter(
+        &self,
+        frequency: f64,
+        gain_db: f64,
+        q_factor: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_peak_filter_in_place(frequency, gain_db, q_factor)?;
+        Ok(out)
+    }
 
     /// Applies a low shelf filter that boosts or cuts frequencies below `frequency`.
     ///
@@ -2906,14 +3034,32 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Cut -3 dB below 200 Hz
-    /// audio.apply_low_shelf(200.0, -3.0, 0.707).unwrap();
+    /// audio.apply_low_shelf_in_place(200.0, -3.0, 0.707).unwrap();
     /// ```
-    fn apply_low_shelf(
+    fn apply_low_shelf_in_place(
         &mut self,
         frequency: f64,
         gain_db: f64,
         q_factor: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Applies a low shelf filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_low_shelf_in_place`](Self::apply_low_shelf_in_place);
+    /// leaves `self` unchanged.
+    fn apply_low_shelf(
+        &self,
+        frequency: f64,
+        gain_db: f64,
+        q_factor: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_low_shelf_in_place(frequency, gain_db, q_factor)?;
+        Ok(out)
+    }
 
     /// Applies a high shelf filter that boosts or cuts frequencies above `frequency`.
     ///
@@ -2945,14 +3091,32 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Boost +4 dB above 8 kHz
-    /// audio.apply_high_shelf(8000.0, 4.0, 0.707).unwrap();
+    /// audio.apply_high_shelf_in_place(8000.0, 4.0, 0.707).unwrap();
     /// ```
-    fn apply_high_shelf(
+    fn apply_high_shelf_in_place(
         &mut self,
         frequency: f64,
         gain_db: f64,
         q_factor: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Applies a high shelf filter, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_high_shelf_in_place`](Self::apply_high_shelf_in_place);
+    /// leaves `self` unchanged.
+    fn apply_high_shelf(
+        &self,
+        frequency: f64,
+        gain_db: f64,
+        q_factor: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_high_shelf_in_place(frequency, gain_db, q_factor)?;
+        Ok(out)
+    }
 
     /// Applies a three-band EQ (low shelf, mid peak, high shelf) in a single call.
     ///
@@ -2991,9 +3155,9 @@ where
     /// let data = Array1::from_elem(512, 0.5f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Low shelf -2 dB at 200 Hz, mid peak +3 dB at 1 kHz (Q=2), high shelf +1 dB at 4 kHz
-    /// audio.apply_three_band_eq(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
+    /// audio.apply_three_band_eq_in_place(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0).unwrap();
     /// ```
-    fn apply_three_band_eq(
+    fn apply_three_band_eq_in_place(
         &mut self,
         low_freq: f64,
         low_gain: f64,
@@ -3003,6 +3167,31 @@ where
         high_freq: f64,
         high_gain: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Applies a three-band EQ, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_three_band_eq_in_place`](Self::apply_three_band_eq_in_place);
+    /// leaves `self` unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_three_band_eq(
+        &self,
+        low_freq: f64,
+        low_gain: f64,
+        mid_freq: f64,
+        mid_gain: f64,
+        mid_q: f64,
+        high_freq: f64,
+        high_gain: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_three_band_eq_in_place(
+            low_freq, low_gain, mid_freq, mid_gain, mid_q, high_freq, high_gain,
+        )?;
+        Ok(out)
+    }
 
     /// Computes the combined magnitude and phase response of a parametric EQ.
     ///
@@ -3117,9 +3306,22 @@ where
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let config = CompressorConfig::vocal();
-    /// audio.apply_compressor(&config).unwrap();
+    /// audio.apply_compressor_in_place(&config).unwrap();
     /// ```
-    fn apply_compressor(&mut self, config: &CompressorConfig) -> AudioSampleResult<()>;
+    fn apply_compressor_in_place(&mut self, config: &CompressorConfig) -> AudioSampleResult<()>;
+
+    /// Applies compression, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_compressor_in_place`](Self::apply_compressor_in_place);
+    /// leaves `self` unchanged.
+    fn apply_compressor(&self, config: &CompressorConfig) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_compressor_in_place(config)?;
+        Ok(out)
+    }
 
     /// Prevents the signal from exceeding a specified ceiling level.
     ///
@@ -3154,9 +3356,22 @@ where
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let config = LimiterConfig::mastering();
-    /// audio.apply_limiter(&config).unwrap();
+    /// audio.apply_limiter_in_place(&config).unwrap();
     /// ```
-    fn apply_limiter(&mut self, config: &LimiterConfig) -> AudioSampleResult<()>;
+    fn apply_limiter_in_place(&mut self, config: &LimiterConfig) -> AudioSampleResult<()>;
+
+    /// Prevents the signal from exceeding a ceiling, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_limiter_in_place`](Self::apply_limiter_in_place);
+    /// leaves `self` unchanged.
+    fn apply_limiter(&self, config: &LimiterConfig) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_limiter_in_place(config)?;
+        Ok(out)
+    }
 
     /// Applies compression driven by an external sidechain signal.
     ///
@@ -3204,13 +3419,31 @@ where
     /// ).unwrap();
     /// let mut config = CompressorConfig::new();
     /// config.side_chain.enable();
-    /// audio.apply_compressor_sidechain(&config, &sidechain).unwrap();
+    /// audio.apply_compressor_sidechain_in_place(&config, &sidechain).unwrap();
     /// ```
-    fn apply_compressor_sidechain(
+    fn apply_compressor_sidechain_in_place(
         &mut self,
         config: &CompressorConfig,
         sidechain_signal: &Self,
     ) -> AudioSampleResult<()>;
+
+    /// Applies sidechain compression, returning a new copy.
+    ///
+    /// Non-mutating twin of
+    /// [`apply_compressor_sidechain_in_place`](Self::apply_compressor_sidechain_in_place);
+    /// leaves `self` unchanged.
+    fn apply_compressor_sidechain(
+        &self,
+        config: &CompressorConfig,
+        sidechain_signal: &Self,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_compressor_sidechain_in_place(config, sidechain_signal)?;
+        Ok(out)
+    }
 
     /// Applies limiting driven by an external sidechain signal.
     ///
@@ -3257,13 +3490,31 @@ where
     /// ).unwrap();
     /// let mut config = LimiterConfig::default();
     /// config.side_chain.enable();
-    /// audio.apply_limiter_sidechain(&config, &sidechain).unwrap();
+    /// audio.apply_limiter_sidechain_in_place(&config, &sidechain).unwrap();
     /// ```
-    fn apply_limiter_sidechain(
+    fn apply_limiter_sidechain_in_place(
         &mut self,
         config: &LimiterConfig,
         sidechain_signal: &Self,
     ) -> AudioSampleResult<()>;
+
+    /// Applies sidechain limiting, returning a new copy.
+    ///
+    /// Non-mutating twin of
+    /// [`apply_limiter_sidechain_in_place`](Self::apply_limiter_sidechain_in_place);
+    /// leaves `self` unchanged.
+    fn apply_limiter_sidechain(
+        &self,
+        config: &LimiterConfig,
+        sidechain_signal: &Self,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_limiter_sidechain_in_place(config, sidechain_signal)?;
+        Ok(out)
+    }
 
     /// Computes the static compression input-output curve for given input levels.
     ///
@@ -3387,15 +3638,34 @@ where
     /// let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Gate at -20 dBFS with 10:1 ratio
-    /// audio.apply_gate(-20.0, 10.0, 1.0, 10.0).unwrap();
+    /// audio.apply_gate_in_place(-20.0, 10.0, 1.0, 10.0).unwrap();
     /// ```
-    fn apply_gate(
+    fn apply_gate_in_place(
         &mut self,
         threshold_db: f64,
         ratio: f64,
         attack_ms: f64,
         release_ms: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Attenuates the signal below a threshold (noise gate), returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_gate_in_place`](Self::apply_gate_in_place);
+    /// leaves `self` unchanged.
+    fn apply_gate(
+        &self,
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_gate_in_place(threshold_db, ratio, attack_ms, release_ms)?;
+        Ok(out)
+    }
 
     /// Increases dynamic range by expanding signals below a threshold.
     ///
@@ -3430,15 +3700,34 @@ where
     /// let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Expand at -20 dBFS with 2:1 ratio
-    /// audio.apply_expander(-20.0, 2.0, 1.0, 10.0).unwrap();
+    /// audio.apply_expander_in_place(-20.0, 2.0, 1.0, 10.0).unwrap();
     /// ```
-    fn apply_expander(
+    fn apply_expander_in_place(
         &mut self,
         threshold_db: f64,
         ratio: f64,
         attack_ms: f64,
         release_ms: f64,
     ) -> AudioSampleResult<()>;
+
+    /// Increases dynamic range by expanding below a threshold, returning a new copy.
+    ///
+    /// Non-mutating twin of [`apply_expander_in_place`](Self::apply_expander_in_place);
+    /// leaves `self` unchanged.
+    fn apply_expander(
+        &self,
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+    ) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_expander_in_place(threshold_db, ratio, attack_ms, release_ms)?;
+        Ok(out)
+    }
 }
 
 /// Time-domain editing operations for [`AudioSamples`].

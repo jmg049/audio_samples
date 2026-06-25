@@ -1575,7 +1575,7 @@ where
             );
             let butterworth_filter = IirFilterDesign::butterworth_highpass(order, *cutoff_hz);
 
-            audio.apply_iir_filter(&butterworth_filter)
+            audio.apply_iir_filter_in_place(&butterworth_filter)
         }
         PerturbationMethod::LowPassFilter {
             cutoff_hz,
@@ -1592,7 +1592,7 @@ where
             );
             let butterworth_filter = IirFilterDesign::butterworth_lowpass(order, *cutoff_hz);
 
-            audio.apply_iir_filter(&butterworth_filter)
+            audio.apply_iir_filter_in_place(&butterworth_filter)
         }
         #[cfg(all(feature = "transforms", feature = "channels"))]
         PerturbationMethod::PitchShift {

@@ -56,7 +56,7 @@ fn bench_iir_whole(c: &mut Criterion) {
             b.iter_batched(
                 || base.clone(),
                 |mut audio| {
-                    audio.apply_iir_filter(&design).unwrap();
+                    audio.apply_iir_filter_in_place(&design).unwrap();
                     audio
                 },
                 BatchSize::SmallInput,
@@ -87,7 +87,7 @@ fn bench_iir_streaming(c: &mut Criterion) {
                     let chunk = buf.slice(ndarray::s![start..end]).to_owned();
                     let mut audio =
                         AudioSamples::new_mono(chunk, NonZeroU32::new(SR).unwrap()).unwrap();
-                    audio.apply_iir_filter(&design).unwrap();
+                    audio.apply_iir_filter_in_place(&design).unwrap();
                     start = end;
                 }
             },

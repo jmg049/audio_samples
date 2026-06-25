@@ -738,10 +738,10 @@ where
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5, -1.0, 0.0, 1.0, 0.5, -0.5]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
     /// let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 1000.0);
-    /// assert!(audio.apply_iir_filter(&design).is_ok());
+    /// assert!(audio.apply_iir_filter_in_place(&design).is_ok());
     /// ```
     #[inline]
-    fn apply_iir_filter(&mut self, design: &IirFilterDesign) -> AudioSampleResult<()> {
+    fn apply_iir_filter_in_place(&mut self, design: &IirFilterDesign) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
         let filter_repr = design_iir_filter(design, sample_rate)?;
 
@@ -835,21 +835,21 @@ where
     /// // Order-2 Butterworth lowpass
     /// let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// assert!(audio.butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 1000.0).is_ok());
+    /// assert!(audio.butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 1000.0).is_ok());
     ///
     /// // High-order (8th-order) Butterworth lowpass
     /// let samples2 = NonEmptyVec::new(vec![1.0f32; 200]).unwrap();
     /// let mut audio2: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
-    /// assert!(audio2.butterworth_lowpass(NonZeroUsize::new(8).unwrap(), 2000.0).is_ok());
+    /// assert!(audio2.butterworth_lowpass_in_place(NonZeroUsize::new(8).unwrap(), 2000.0).is_ok());
     /// ```
     #[inline]
-    fn butterworth_lowpass(
+    fn butterworth_lowpass_in_place(
         &mut self,
         order: NonZeroUsize,
         cutoff_frequency: f64,
     ) -> AudioSampleResult<()> {
         let design = IirFilterDesign::butterworth_lowpass(order, cutoff_frequency);
-        self.apply_iir_filter(&design)
+        self.apply_iir_filter_in_place(&design)
     }
 
     /// Apply a Butterworth high-pass filter.
@@ -882,21 +882,21 @@ where
     /// // Order-2 Butterworth highpass
     /// let samples = NonEmptyVec::new(vec![1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// assert!(audio.butterworth_highpass(NonZeroUsize::new(2).unwrap(), 500.0).is_ok());
+    /// assert!(audio.butterworth_highpass_in_place(NonZeroUsize::new(2).unwrap(), 500.0).is_ok());
     ///
     /// // High-order (6th-order) Butterworth highpass
     /// let samples2 = NonEmptyVec::new(vec![1.0f32; 200]).unwrap();
     /// let mut audio2: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
-    /// assert!(audio2.butterworth_highpass(NonZeroUsize::new(6).unwrap(), 1500.0).is_ok());
+    /// assert!(audio2.butterworth_highpass_in_place(NonZeroUsize::new(6).unwrap(), 1500.0).is_ok());
     /// ```
     #[inline]
-    fn butterworth_highpass(
+    fn butterworth_highpass_in_place(
         &mut self,
         order: NonZeroUsize,
         cutoff_frequency: f64,
     ) -> AudioSampleResult<()> {
         let design = IirFilterDesign::butterworth_highpass(order, cutoff_frequency);
-        self.apply_iir_filter(&design)
+        self.apply_iir_filter_in_place(&design)
     }
 
     /// Apply a Butterworth band-pass filter.
@@ -930,22 +930,22 @@ where
     /// // Order-2 bandpass (effective order ≈ 4)
     /// let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// assert!(audio.butterworth_bandpass(NonZeroUsize::new(2).unwrap(), 100.0, 5000.0).is_ok());
+    /// assert!(audio.butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 100.0, 5000.0).is_ok());
     ///
     /// // High-order (4th-order per section) bandpass
     /// let samples2 = NonEmptyVec::new(vec![1.0f32; 200]).unwrap();
     /// let mut audio2: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
-    /// assert!(audio2.butterworth_bandpass(NonZeroUsize::new(4).unwrap(), 800.0, 1200.0).is_ok());
+    /// assert!(audio2.butterworth_bandpass_in_place(NonZeroUsize::new(4).unwrap(), 800.0, 1200.0).is_ok());
     /// ```
     #[inline]
-    fn butterworth_bandpass(
+    fn butterworth_bandpass_in_place(
         &mut self,
         order: NonZeroUsize,
         low_frequency: f64,
         high_frequency: f64,
     ) -> AudioSampleResult<()> {
         let design = IirFilterDesign::butterworth_bandpass(order, low_frequency, high_frequency);
-        self.apply_iir_filter(&design)
+        self.apply_iir_filter_in_place(&design)
     }
 
     /// Apply a Chebyshev Type I filter.
@@ -988,7 +988,7 @@ where
     /// // 4th-order Chebyshev Type I lowpass with 0.5 dB ripple
     /// let samples = NonEmptyVec::new(vec![1.0f32, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0]).unwrap();
     /// let mut audio: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-    /// assert!(audio.chebyshev_i(
+    /// assert!(audio.chebyshev_i_in_place(
     ///     NonZeroUsize::new(4).unwrap(),
     ///     1000.0,
     ///     0.5,
@@ -998,7 +998,7 @@ where
     /// // 6th-order Chebyshev Type I highpass with 1.0 dB ripple
     /// let samples2 = NonEmptyVec::new(vec![1.0f32; 200]).unwrap();
     /// let mut audio2: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
-    /// assert!(audio2.chebyshev_i(
+    /// assert!(audio2.chebyshev_i_in_place(
     ///     NonZeroUsize::new(6).unwrap(),
     ///     2000.0,
     ///     1.0,
@@ -1006,7 +1006,7 @@ where
     /// ).is_ok());
     /// ```
     #[inline]
-    fn chebyshev_i(
+    fn chebyshev_i_in_place(
         &mut self,
         order: NonZeroUsize,
         cutoff_frequency: f64,
@@ -1015,7 +1015,7 @@ where
     ) -> AudioSampleResult<()> {
         let design =
             IirFilterDesign::chebyshev_i(response, order, cutoff_frequency, passband_ripple);
-        self.apply_iir_filter(&design)
+        self.apply_iir_filter_in_place(&design)
     }
 
     /// Return the frequency response at the specified frequencies.
@@ -1835,7 +1835,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply Butterworth low-pass filter with cutoff at 1000 Hz
-        let result = audio.butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 1000.0);
+        let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 1000.0);
         assert!(result.is_ok());
 
         // The high frequency component should be attenuated
@@ -1861,7 +1861,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply Butterworth high-pass filter with cutoff at 500 Hz
-        let result = audio.butterworth_highpass(NonZeroUsize::new(2).unwrap(), 500.0);
+        let result = audio.butterworth_highpass_in_place(NonZeroUsize::new(2).unwrap(), 500.0);
         assert!(result.is_ok());
 
         // The low frequency component should be attenuated
@@ -1888,7 +1888,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply Butterworth band-pass filter from 500 Hz to 2000 Hz
-        let result = audio.butterworth_bandpass(NonZeroUsize::new(2).unwrap(), 500.0, 2000.0);
+        let result = audio.butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 500.0, 2000.0);
         assert!(result.is_ok());
 
         // Only frequencies between 500-2000 Hz should pass through
@@ -1922,7 +1922,7 @@ mod tests {
             AudioSamples::new_multi_channel(stereo_data.into(), sample_rate!(44100)).unwrap();
 
         // Apply low-pass filter to stereo signal
-        let result = audio.butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 2000.0);
+        let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 2000.0);
         assert!(result.is_ok());
 
         // Both channels should be filtered independently
@@ -1938,34 +1938,34 @@ mod tests {
         // Test invalid cutoff frequencies
         assert!(
             audio
-                .butterworth_lowpass(NonZeroUsize::new(2).unwrap(), 0.0)
+                .butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 0.0)
                 .is_err()
         );
         assert!(
             audio
-                .butterworth_lowpass(NonZeroUsize::new(2).unwrap(), sample_rate / 2.0)
+                .butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), sample_rate / 2.0)
                 .is_err()
         );
         assert!(
             audio
-                .butterworth_lowpass(NonZeroUsize::new(2).unwrap(), -100.0)
+                .butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), -100.0)
                 .is_err()
         );
 
         // Test invalid band-pass frequencies
         assert!(
             audio
-                .butterworth_bandpass(NonZeroUsize::new(2).unwrap(), 2000.0, 1000.0)
+                .butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 2000.0, 1000.0)
                 .is_err()
         );
         assert!(
             audio
-                .butterworth_bandpass(NonZeroUsize::new(2).unwrap(), 0.0, 1000.0)
+                .butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 0.0, 1000.0)
                 .is_err()
         );
         assert!(
             audio
-                .butterworth_bandpass(NonZeroUsize::new(2).unwrap(), 1000.0, sample_rate / 2.0)
+                .butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 1000.0, sample_rate / 2.0)
                 .is_err()
         );
     }
@@ -2186,7 +2186,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply 6th-order Butterworth lowpass at 2000 Hz
-        let result = audio.butterworth_lowpass(NonZeroUsize::new(6).unwrap(), 2000.0);
+        let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(6).unwrap(), 2000.0);
         assert!(result.is_ok(), "6th-order Butterworth should work");
     }
 
@@ -2208,7 +2208,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply 8th-order Butterworth highpass at 1000 Hz
-        let result = audio.butterworth_highpass(NonZeroUsize::new(8).unwrap(), 1000.0);
+        let result = audio.butterworth_highpass_in_place(NonZeroUsize::new(8).unwrap(), 1000.0);
         assert!(result.is_ok(), "8th-order Butterworth should work");
     }
 
@@ -2229,7 +2229,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply 10th-order Butterworth bandpass
-        let result = audio.butterworth_bandpass(NonZeroUsize::new(10).unwrap(), 800.0, 1200.0);
+        let result = audio.butterworth_bandpass_in_place(NonZeroUsize::new(10).unwrap(), 800.0, 1200.0);
         assert!(
             result.is_ok(),
             "10th-order Butterworth bandpass should work"
@@ -2244,7 +2244,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // This should now work (not error)
-        let result = audio.chebyshev_i(
+        let result = audio.chebyshev_i_in_place(
             NonZeroUsize::new(4).unwrap(),
             1000.0,
             0.5,
@@ -2260,7 +2260,7 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Test invalid ripple (too large)
-        let result = audio.chebyshev_i(
+        let result = audio.chebyshev_i_in_place(
             NonZeroUsize::new(4).unwrap(),
             1000.0,
             10.0, // Invalid: > 5.0 dB
@@ -2272,7 +2272,7 @@ mod tests {
         let samples2 = NonEmptyVec::new(vec![1.0f32; 100]).unwrap();
         let mut audio2: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
-        let result2 = audio2.chebyshev_i(
+        let result2 = audio2.chebyshev_i_in_place(
             NonZeroUsize::new(4).unwrap(),
             1000.0,
             0.0,
@@ -2350,7 +2350,7 @@ mod tests {
             AudioSamples::new_multi_channel(stereo_data.into(), sample_rate!(44100)).unwrap();
 
         // Apply 6th-order filter to stereo
-        let result = audio.butterworth_lowpass(NonZeroUsize::new(6).unwrap(), 2000.0);
+        let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(6).unwrap(), 2000.0);
         assert!(result.is_ok(), "SOS should work with multi-channel audio");
     }
 
@@ -2361,7 +2361,7 @@ mod tests {
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
-        let result = audio.butterworth_lowpass(NonZeroUsize::new(14).unwrap(), 1000.0);
+        let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(14).unwrap(), 1000.0);
         assert!(result.is_err(), "Should reject order > 12");
     }
 
@@ -2372,7 +2372,7 @@ mod tests {
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
-        let result = audio.chebyshev_i(
+        let result = audio.chebyshev_i_in_place(
             NonZeroUsize::new(4).unwrap(),
             2000.0,
             0.5,
@@ -2388,7 +2388,7 @@ mod tests {
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
-        let result = audio.chebyshev_i(
+        let result = audio.chebyshev_i_in_place(
             NonZeroUsize::new(4).unwrap(),
             1000.0,
             1.0,
@@ -2401,6 +2401,41 @@ mod tests {
         assert!(
             result.is_err(),
             "Current API doesn't support Chebyshev bandpass via chebyshev_i method"
+        );
+    }
+
+    #[test]
+    fn test_butterworth_lowpass_dual_variant() {
+        // The non-mutating variant must leave the original untouched and
+        // produce the same result as clone + in-place.
+        let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
+        let original: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+
+        let order = NonZeroUsize::new(2).unwrap();
+
+        // Non-mutating: returns a new copy, leaves `original` unchanged.
+        let filtered = original.butterworth_lowpass(order, 1000.0).unwrap();
+
+        // In-place on a clone.
+        let mut in_place = original.clone();
+        in_place.butterworth_lowpass_in_place(order, 1000.0).unwrap();
+
+        assert_eq!(
+            filtered.as_slice().unwrap(),
+            in_place.as_slice().unwrap(),
+            "non-mutating and in-place variants must produce equal results"
+        );
+
+        // The original must be untouched by the non-mutating call.
+        let pristine: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(
+            NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap(),
+            sample_rate!(44100),
+        );
+        assert_eq!(
+            original.as_slice().unwrap(),
+            pristine.as_slice().unwrap(),
+            "non-mutating variant must not modify the original"
         );
     }
 }
