@@ -396,6 +396,273 @@ where
     let snr_db = 10.0 * (signal_power / noise_power).log10();
     Ok(snr_db)
 }
+
+/// Computes the Peak Signal-to-Noise Ratio (PSNR) between a reference and a test signal.
+///
+/// PSNR relates the peak amplitude of the reference signal to the power of the error between
+/// the two signals, expressed in decibels:
+///
+/// ```text
+/// PSNR = 20 · log10(peak / sqrt(MSE))
+/// ```
+///
+/// where `peak` is the maximum absolute amplitude observed in `reference` and `MSE` is the
+/// mean squared error between `reference` and `test` (see [`mse`]). Higher values indicate a
+/// test signal that more closely reproduces the reference.
+///
+/// For mono signals the metric is computed over the single channel.\
+/// For multi-channel signals the peak is taken across all channels and the MSE is the mean
+/// across all channels, matching the aggregation performed by [`mse`].
+///
+/// # Arguments
+///
+/// * `reference`\
+///   The reference signal whose peak amplitude defines the dynamic range.
+///
+/// * `test`\
+///   The signal under evaluation.
+///
+/// Both signals must have identical channel counts and the same number of samples per
+/// channel.
+///
+/// # Returns
+///
+/// The peak signal-to-noise ratio in decibels.
+///
+/// If the two signals are identical (`MSE == 0`), the function returns
+/// [`f64::INFINITY`], since there is no error to measure.
+///
+/// # Errors
+///
+/// Returns an error in the following cases:
+///
+/// * The two signals have different channel counts.
+/// * The two signals have different numbers of samples per channel.
+/// * The underlying sample layout is non-contiguous and cannot be viewed as a slice.
+/// * The channel configuration of the two signals does not match (mono vs multi-channel).
+///
+/// # Behavioural Guarantees
+///
+/// * For identical signals the returned value is [`f64::INFINITY`].
+/// * For a fixed reference, the returned value decreases monotonically as the MSE increases.
+/// * If the reference peak amplitude is zero while the signals differ, the returned value is
+///   [`f64::NEG_INFINITY`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::psnr;
+/// use audio_samples::utils::generation::sine_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let sr = sample_rate!(44100);
+/// let a = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+/// let b = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+///
+/// let db = psnr(&a, &b).unwrap();
+/// assert!(db.is_infinite()); // identical signals → infinite PSNR
+/// ```
+#[inline]
+pub fn psnr<T>(reference: &AudioSamples<T>, test: &AudioSamples<T>) -> AudioSampleResult<f64>
+where
+    T: StandardSample,
+{
+    if reference.num_channels() != test.num_channels()
+        || reference.samples_per_channel() != test.samples_per_channel()
+    {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_signals",
+            "Signals must have the same dimensions for PSNR",
+        )));
+    }
+
+    // Reuse the existing MSE logic for the error term.
+    let error = mse(reference, test)?;
+    if error == 0.0 {
+        return Ok(f64::INFINITY);
+    }
+
+    // Peak amplitude of the reference signal (across all channels).
+    let ref_f = reference.as_f64();
+    let peak = if let Some(mono) = ref_f.as_mono() {
+        mono.iter().fold(0.0_f64, |acc, &x| acc.max(x.abs()))
+    } else {
+        let multi = ref_f.as_multi_channel().ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Must be multi-channel audio",
+            ))
+        })?;
+        multi.iter().fold(0.0_f64, |acc, &x| acc.max(x.abs()))
+    };
+
+    Ok(20.0 * (peak / error.sqrt()).log10())
+}
+
+/// Computes the mean segmental signal-to-noise ratio (segmental SNR) in decibels.
+///
+/// The signal and noise are split into consecutive, non-overlapping segments of
+/// `segment_len` samples. For each segment the local SNR is computed as:
+///
+/// ```text
+/// SNR_seg = 10 · log10( Σ signal² / Σ noise² )
+/// ```
+///
+/// Each per-segment value is then clamped to the closed range `[-10, 35]` dB before
+/// averaging. The clamp prevents near-silent segments (where the noise power dwarfs the
+/// signal power, or vice versa) from dominating the mean with extreme values, which is the
+/// standard treatment for segmental SNR in speech-quality literature. The final result is the
+/// arithmetic mean of the clamped per-segment values.
+///
+/// A trailing partial segment shorter than `segment_len` is still evaluated.
+///
+/// For mono inputs the segmentation is applied to the single channel.\
+/// For multi-channel inputs the per-sample energy is summed across all channels within each
+/// segment, producing a single aggregate segmental SNR. No per-channel values are returned.
+///
+/// # Arguments
+///
+/// * `signal`\
+///   The signal component.
+///
+/// * `noise`\
+///   The noise component.
+///
+/// * `segment_len`\
+///   The number of samples per segment (non-zero).
+///
+/// Both inputs must have identical channel counts and the same number of samples per
+/// channel.
+///
+/// # Returns
+///
+/// The mean clamped per-segment SNR in decibels.
+///
+/// # Errors
+///
+/// Returns an error in the following cases:
+///
+/// * The two inputs have different channel counts.
+/// * The two inputs have different numbers of samples per channel.
+/// * The underlying sample layout is non-contiguous and cannot be viewed as a slice.
+/// * The channel configuration of the two signals does not match (mono vs multi-channel).
+///
+/// # Behavioural Guarantees
+///
+/// * Every per-segment contribution lies in the closed interval `[-10, 35]` dB.
+/// * A silent signal segment paired with non-zero noise clamps to the lower bound (`-10` dB).
+/// * A non-zero signal segment paired with silent noise clamps to the upper bound (`35` dB).
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::segmental_snr;
+/// use audio_samples::utils::generation::sine_wave;
+/// use audio_samples::sample_rate;
+/// use std::num::NonZeroUsize;
+/// use std::time::Duration;
+///
+/// let sr = sample_rate!(44100);
+/// let signal = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+/// let noise  = sine_wave::<f64>(880.0, Duration::from_millis(100), sr, 0.01);
+///
+/// let db = segmental_snr(&signal, &noise, NonZeroUsize::new(256).unwrap()).unwrap();
+/// assert!(db > 0.0);
+/// ```
+#[inline]
+pub fn segmental_snr<T>(
+    signal: &AudioSamples<T>,
+    noise: &AudioSamples<T>,
+    segment_len: core::num::NonZeroUsize,
+) -> AudioSampleResult<f64>
+where
+    T: StandardSample,
+{
+    /// Lower clamp bound (dB) applied to each per-segment SNR.
+    const SEG_SNR_MIN_DB: f64 = -10.0;
+    /// Upper clamp bound (dB) applied to each per-segment SNR.
+    const SEG_SNR_MAX_DB: f64 = 35.0;
+
+    if signal.num_channels() != noise.num_channels()
+        || signal.samples_per_channel() != noise.samples_per_channel()
+    {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_signals",
+            "Signal and noise must have the same dimensions for segmental SNR",
+        )));
+    }
+
+    let signal_f = signal.as_f64();
+    let noise_f = noise.as_f64();
+
+    // Flatten to per-sample energy series. For multi-channel input each "sample index"
+    // sums the squared values across all channels (column-major energy).
+    let (sig_sq, noise_sq): (Vec<f64>, Vec<f64>) = match (signal_f.as_mono(), noise_f.as_mono()) {
+        (Some(s), Some(n)) => (
+            s.iter().map(|&x| x * x).collect(),
+            n.iter().map(|&x| x * x).collect(),
+        ),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Signals must have the same channel configuration",
+            )));
+        }
+        (None, None) => {
+            let s_multi = signal_f.as_multi_channel().ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Must be multi-channel audio",
+                ))
+            })?;
+            let n_multi = noise_f.as_multi_channel().ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Must be multi-channel audio",
+                ))
+            })?;
+
+            let sig_sq: Vec<f64> = (0..s_multi.ncols().get())
+                .map(|i| s_multi.column(i).iter().map(|&x| x * x).sum())
+                .collect();
+            let noise_sq: Vec<f64> = (0..n_multi.ncols().get())
+                .map(|i| n_multi.column(i).iter().map(|&x| x * x).sum())
+                .collect();
+            (sig_sq, noise_sq)
+        }
+    };
+
+    let seg = segment_len.get();
+    let mut acc = 0.0;
+    let mut count = 0usize;
+
+    for (s_chunk, n_chunk) in sig_sq.chunks(seg).zip(noise_sq.chunks(seg)) {
+        let sig_energy: f64 = s_chunk.iter().sum();
+        let noise_energy: f64 = n_chunk.iter().sum();
+
+        // Compute the raw per-segment SNR, handling degenerate (zero-power) segments by
+        // saturating to the clamp bounds rather than producing NaN/±inf.
+        let snr_db = if noise_energy == 0.0 {
+            if sig_energy == 0.0 {
+                // Both silent: treat as a neutral lower-bound contribution.
+                SEG_SNR_MIN_DB
+            } else {
+                SEG_SNR_MAX_DB
+            }
+        } else if sig_energy == 0.0 {
+            SEG_SNR_MIN_DB
+        } else {
+            10.0 * (sig_energy / noise_energy).log10()
+        };
+
+        acc += snr_db.clamp(SEG_SNR_MIN_DB, SEG_SNR_MAX_DB);
+        count += 1;
+    }
+
+    Ok(acc / count as f64)
+}
+
 /// Aligns two audio signals by estimating a time offset that maximises correlation.
 ///
 /// This function attempts to temporally align `signal` to `reference` by searching for a
@@ -625,6 +892,377 @@ where
     Ok((aligned_signal, best_offset))
 }
 
+/// Computes the RMS log-spectral distance (LSD) between two audio signals, in decibels.
+///
+/// The log-spectral distance compares the two signals in the (log) power-spectral domain. For
+/// each frequency bin the difference of the log-power spectra is taken, and the root mean
+/// square of those differences across bins yields the distance:
+///
+/// ```text
+/// LSD = sqrt( mean_over_bins[ (10·log10(Pa + eps) - 10·log10(Pb + eps))² ] )
+/// ```
+///
+/// where `Pa` and `Pb` are the power spectra (squared magnitude of the FFT) of the two signals
+/// and `eps` is a small floor that keeps the logarithm finite for silent bins. The FFT length
+/// equals the signal length, and the distance is averaged across all frequency bins of all
+/// channels.
+///
+/// This function requires the `transforms` feature, since it relies on the crate's FFT.
+///
+/// # Arguments
+///
+/// * `a`\
+///   The first audio signal.
+///
+/// * `b`\
+///   The second audio signal.
+///
+/// Both signals must have identical channel counts and the same number of samples per
+/// channel.
+///
+/// # Returns
+///
+/// The RMS log-spectral distance in decibels. Lower values indicate more similar spectra; a
+/// value of `0.0` indicates identical power spectra.
+///
+/// # Errors
+///
+/// Returns an error in the following cases:
+///
+/// * The two signals have different channel counts.
+/// * The two signals have different numbers of samples per channel.
+/// * The underlying FFT computation fails.
+///
+/// # Behavioural Guarantees
+///
+/// * The returned value is greater than or equal to `0.0`.
+/// * For identical signals the returned value is `0.0` up to floating-point rounding.
+/// * The metric is symmetric in its arguments.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::log_spectral_distance;
+/// use audio_samples::utils::generation::sine_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let sr = sample_rate!(44100);
+/// let a = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+/// let b = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+///
+/// let lsd = log_spectral_distance(&a, &b).unwrap();
+/// assert!(lsd < 1e-6); // identical signals → ~0 distance
+/// ```
+#[cfg(feature = "transforms")]
+#[inline]
+pub fn log_spectral_distance<T>(
+    a: &AudioSamples<T>,
+    b: &AudioSamples<T>,
+) -> AudioSampleResult<f64>
+where
+    T: StandardSample,
+{
+    use crate::operations::AudioTransforms;
+
+    /// Power floor that keeps `log10` finite for silent frequency bins.
+    const EPS: f64 = 1e-10;
+
+    if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_signals",
+            "Signals must have the same dimensions for log-spectral distance",
+        )));
+    }
+
+    // FFT length is the full signal length; `fft` returns one row per channel.
+    let n_fft = a.samples_per_channel();
+    let spec_a = a.fft(n_fft)?;
+    let spec_b = b.fft(n_fft)?;
+
+    let mut sum_sq = 0.0;
+    let mut bins = 0usize;
+    for (ca, cb) in spec_a.rows().into_iter().zip(spec_b.rows().into_iter()) {
+        for (za, zb) in ca.iter().zip(cb.iter()) {
+            let la = 10.0 * (za.norm_sqr() + EPS).log10();
+            let lb = 10.0 * (zb.norm_sqr() + EPS).log10();
+            let d = la - lb;
+            sum_sq += d * d;
+            bins += 1;
+        }
+    }
+
+    Ok((sum_sq / bins as f64).sqrt())
+}
+
+/// Computes the Pearson correlation coefficient for each channel independently.
+///
+/// This mirrors [`correlation`] but reports one value per channel instead of averaging across
+/// channels. For mono input the returned vector contains a single element.
+///
+/// # Arguments
+///
+/// * `a`\
+///   The first audio signal.
+///
+/// * `b`\
+///   The second audio signal.
+///
+/// Both signals must have identical channel counts and the same number of samples per
+/// channel.
+///
+/// # Returns
+///
+/// A vector of per-channel correlation coefficients, each in the range `[-1, 1]`, in channel
+/// order. The vector length equals the channel count.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as [`correlation`]: mismatched dimensions,
+/// mismatched channel configuration, or a non-contiguous sample layout.
+///
+/// # Behavioural Guarantees
+///
+/// * The returned vector has exactly one entry per channel.
+/// * For mono input the returned vector has length one and its sole entry equals the value
+///   returned by [`correlation`] on the same input.
+/// * If a channel has zero variance, its correlation is defined as `0.0`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::correlation_per_channel;
+/// use audio_samples::utils::generation::sine_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let sr = sample_rate!(44100);
+/// let a = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+/// let b = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+///
+/// let per_channel = correlation_per_channel(&a, &b).unwrap();
+/// assert_eq!(per_channel.len(), 1);
+/// ```
+#[inline]
+pub fn correlation_per_channel<T>(
+    a: &AudioSamples<T>,
+    b: &AudioSamples<T>,
+) -> AudioSampleResult<Vec<f64>>
+where
+    T: StandardSample,
+{
+    per_channel(a, b, "correlation", correlation_1d_slice)
+}
+
+/// Computes the mean squared error (MSE) for each channel independently.
+///
+/// This mirrors [`mse`] but reports one value per channel instead of averaging across
+/// channels. For mono input the returned vector contains a single element.
+///
+/// # Arguments
+///
+/// * `a`\
+///   The first audio signal.
+///
+/// * `b`\
+///   The second audio signal.
+///
+/// Both signals must have identical channel counts and the same number of samples per
+/// channel.
+///
+/// # Returns
+///
+/// A vector of per-channel MSE values, each non-negative, in channel order. The vector length
+/// equals the channel count.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as [`mse`]: mismatched dimensions, mismatched
+/// channel configuration, or a non-contiguous sample layout.
+///
+/// # Behavioural Guarantees
+///
+/// * The returned vector has exactly one entry per channel.
+/// * For mono input the returned vector has length one and its sole entry equals the value
+///   returned by [`mse`] on the same input.
+/// * Every entry is greater than or equal to `0.0` for finite inputs.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::mse_per_channel;
+/// use audio_samples::utils::generation::sine_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let sr = sample_rate!(44100);
+/// let a = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+/// let b = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+///
+/// let per_channel = mse_per_channel(&a, &b).unwrap();
+/// assert_eq!(per_channel.len(), 1);
+/// ```
+#[inline]
+pub fn mse_per_channel<T>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<Vec<f64>>
+where
+    T: StandardSample,
+{
+    per_channel(a, b, "MSE", mse_1d_slice)
+}
+
+/// Computes the signal-to-noise ratio (SNR) in decibels for each channel independently.
+///
+/// This mirrors [`snr`] but reports one value per channel instead of aggregating power across
+/// all channels. Each entry is `10 · log10(signal_power / noise_power)` for that channel. For
+/// mono input the returned vector contains a single element.
+///
+/// # Arguments
+///
+/// * `signal`\
+///   The signal component.
+///
+/// * `noise`\
+///   The noise component.
+///
+/// Both inputs must have identical channel counts and the same number of samples per
+/// channel.
+///
+/// # Returns
+///
+/// A vector of per-channel SNR values in decibels, in channel order. The vector length equals
+/// the channel count. A channel with zero noise power yields [`f64::INFINITY`].
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as [`snr`]: mismatched dimensions, mismatched
+/// channel configuration, or a non-contiguous sample layout.
+///
+/// # Behavioural Guarantees
+///
+/// * The returned vector has exactly one entry per channel.
+/// * For mono input the returned vector has length one and its sole entry equals the value
+///   returned by [`snr`] on the same input.
+/// * A channel with exactly zero noise power yields [`f64::INFINITY`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::comparison::snr_per_channel;
+/// use audio_samples::utils::generation::sine_wave;
+/// use audio_samples::sample_rate;
+/// use std::time::Duration;
+///
+/// let sr = sample_rate!(44100);
+/// let signal = sine_wave::<f64>(440.0, Duration::from_millis(100), sr, 1.0);
+/// let noise  = sine_wave::<f64>(880.0, Duration::from_millis(100), sr, 0.01);
+///
+/// let per_channel = snr_per_channel(&signal, &noise).unwrap();
+/// assert_eq!(per_channel.len(), 1);
+/// ```
+#[inline]
+pub fn snr_per_channel<T>(
+    signal: &AudioSamples<T>,
+    noise: &AudioSamples<T>,
+) -> AudioSampleResult<Vec<f64>>
+where
+    T: StandardSample,
+{
+    per_channel(signal, noise, "SNR", |sig, noise| {
+        let n = sig.len();
+        let signal_power = sig.iter().map(|&x| x * x).sum::<f64>() / n as f64;
+        let noise_power = noise.iter().map(|&x| x * x).sum::<f64>() / n as f64;
+        if noise_power == 0.0 {
+            Ok(f64::INFINITY)
+        } else {
+            Ok(10.0 * (signal_power / noise_power).log10())
+        }
+    })
+}
+
+/// Shared driver for the `*_per_channel` metrics.
+///
+/// Validates that the two signals share dimensions and channel configuration, then applies
+/// `metric` to each channel's contiguous sample slice, collecting one value per channel.
+fn per_channel<T, F>(
+    a: &AudioSamples<T>,
+    b: &AudioSamples<T>,
+    metric_name: &str,
+    metric: F,
+) -> AudioSampleResult<Vec<f64>>
+where
+    T: StandardSample,
+    F: Fn(&[f64], &[f64]) -> AudioSampleResult<f64>,
+{
+    if a.num_channels() != b.num_channels() || a.samples_per_channel() != b.samples_per_channel() {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio_signals",
+            format!("Signals must have the same dimensions for {metric_name}"),
+        )));
+    }
+
+    let a_f = a.as_f64();
+    let b_f = b.as_f64();
+
+    match (a_f.as_mono(), b_f.as_mono()) {
+        (Some(a_mono), Some(b_mono)) => {
+            let av = a_mono.as_slice().ok_or_else(|| {
+                AudioSampleError::Layout(LayoutError::NonContiguous {
+                    operation: "signal processing".to_string(),
+                    layout_type: "non-contiguous mono samples".to_string(),
+                })
+            })?;
+            let bv = b_mono.as_slice().ok_or_else(|| {
+                AudioSampleError::Layout(LayoutError::NonContiguous {
+                    operation: "signal processing".to_string(),
+                    layout_type: "non-contiguous mono samples".to_string(),
+                })
+            })?;
+            Ok(vec![metric(av, bv)?])
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Signals must have the same channel configuration",
+            )))
+        }
+        (None, None) => {
+            let a_multi = a_f.as_multi_channel().ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Must be multi-channel audio",
+                ))
+            })?;
+            let b_multi = b_f.as_multi_channel().ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_format",
+                    "Must be multi-channel audio",
+                ))
+            })?;
+
+            let mut results = Vec::with_capacity(a_multi.nrows().get());
+            for i in 0..a_multi.nrows().get() {
+                let a_channel = a_multi.row(i);
+                let b_channel = b_multi.row(i);
+                results.push(metric(
+                    a_channel.as_slice().ok_or_else(|| {
+                        AudioSampleError::Layout(LayoutError::NonContiguous {
+                            operation: "signal processing".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        })
+                    })?,
+                    b_channel.as_slice().ok_or_else(|| {
+                        AudioSampleError::Layout(LayoutError::NonContiguous {
+                            operation: "signal processing".to_string(),
+                            layout_type: "non-contiguous multi-channel samples".to_string(),
+                        })
+                    })?,
+                )?);
+            }
+            Ok(results)
+        }
+    }
+}
+
 // Helper functions for 1D correlation and MSE
 fn correlation_1d(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> AudioSampleResult<f64> {
     correlation_1d_slice(
@@ -785,5 +1423,139 @@ mod tests {
         let (aligned, offset) = align_signals::<f64>(&reference, &signal).unwrap();
         assert_eq!(offset, 0);
         assert_eq!(aligned.samples_per_channel(), signal.samples_per_channel());
+    }
+
+    #[test]
+    fn test_psnr_identical_signals_is_infinite() {
+        let data = non_empty_vec![0.1f64, -0.5, 0.7, -0.2, 1.0];
+        let reference: AudioSamples<'static, f64> =
+            AudioSamples::from_mono_vec::<f64>(data.clone(), sample_rate!(44100));
+        let test = AudioSamples::from_mono_vec::<f64>(data, sample_rate!(44100));
+
+        let db = psnr(&reference, &test).unwrap();
+        assert!(db.is_infinite() && db > 0.0);
+    }
+
+    #[test]
+    fn test_psnr_known_noise() {
+        // Reference peak = 1.0; constant error of 0.1 → MSE = 0.01,
+        // PSNR = 20·log10(1.0 / sqrt(0.01)) = 20·log10(10) = 20 dB.
+        let reference: AudioSamples<'static, f64> = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 0.5, -0.5, 0.25, -1.0],
+            sample_rate!(44100),
+        );
+        let test = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.1f64, 0.6, -0.4, 0.35, -0.9],
+            sample_rate!(44100),
+        );
+
+        let db = psnr(&reference, &test).unwrap();
+        assert_approx_eq!(db, 20.0, 1e-9);
+    }
+
+    #[test]
+    fn test_segmental_snr_scaled_noise() {
+        // Signal energy per segment is 100x noise energy → 10·log10(100) = 20 dB,
+        // within the clamp range [-10, 35].
+        let signal: AudioSamples<'static, f64> = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            sample_rate!(44100),
+        );
+        let noise = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![0.1f64, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+            sample_rate!(44100),
+        );
+
+        let db = segmental_snr(&signal, &noise, core::num::NonZeroUsize::new(4).unwrap()).unwrap();
+        assert_approx_eq!(db, 20.0, 1e-9);
+    }
+
+    #[test]
+    fn test_segmental_snr_clamp_engages_for_silent_segment() {
+        // Segment 0: signal energy 100x noise → 20 dB.
+        // Segment 1: signal silent, noise non-zero → clamps to lower bound -10 dB.
+        // Mean = (20 + -10) / 2 = 5 dB.
+        let signal: AudioSamples<'static, f64> = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            sample_rate!(44100),
+        );
+        let noise = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![0.1f64, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+            sample_rate!(44100),
+        );
+
+        let db = segmental_snr(&signal, &noise, core::num::NonZeroUsize::new(4).unwrap()).unwrap();
+        assert_approx_eq!(db, 5.0, 1e-9);
+    }
+
+    #[test]
+    fn test_per_channel_mono_equals_aggregate() {
+        let a: AudioSamples<'static, f64> = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 2.0, 3.0, 4.0, 5.0],
+            sample_rate!(44100),
+        );
+        let b = AudioSamples::from_mono_vec::<f64>(
+            non_empty_vec![1.0f64, 2.5, 2.5, 4.5, 5.0],
+            sample_rate!(44100),
+        );
+
+        let corr_pc = correlation_per_channel(&a, &b).unwrap();
+        let mse_pc = mse_per_channel(&a, &b).unwrap();
+        let snr_pc = snr_per_channel(&a, &b).unwrap();
+
+        assert_eq!(corr_pc.len(), 1);
+        assert_eq!(mse_pc.len(), 1);
+        assert_eq!(snr_pc.len(), 1);
+
+        assert_approx_eq!(corr_pc[0], correlation(&a, &b).unwrap(), 1e-12);
+        assert_approx_eq!(mse_pc[0], mse(&a, &b).unwrap(), 1e-12);
+        assert_approx_eq!(snr_pc[0], snr(&a, &b).unwrap(), 1e-12);
+    }
+
+    #[test]
+    fn test_per_channel_distinct_values_for_two_channels() {
+        // Channel 0 of `a` and `b` are identical (corr = 1); channel 1 differs.
+        let a = AudioSamples::new_multi_channel(
+            ndarray::array![[1.0f64, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]],
+            sample_rate!(44100),
+        )
+        .unwrap();
+        let b = AudioSamples::new_multi_channel(
+            ndarray::array![[1.0f64, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]],
+            sample_rate!(44100),
+        )
+        .unwrap();
+
+        let mse_pc = mse_per_channel(&a, &b).unwrap();
+        let corr_pc = correlation_per_channel(&a, &b).unwrap();
+
+        assert_eq!(mse_pc.len(), 2);
+        assert_eq!(corr_pc.len(), 2);
+
+        // Channel 0 identical, channel 1 differs → distinct values.
+        assert_approx_eq!(mse_pc[0], 0.0, 1e-12);
+        assert!(mse_pc[1] > 0.0);
+        assert!((mse_pc[0] - mse_pc[1]).abs() > 1e-6);
+
+        assert_approx_eq!(corr_pc[0], 1.0, 1e-12);
+        assert_approx_eq!(corr_pc[1], -1.0, 1e-12);
+    }
+
+    #[cfg(feature = "transforms")]
+    #[test]
+    fn test_log_spectral_distance_identical_and_different() {
+        use crate::utils::generation::sine_wave;
+        use std::time::Duration;
+
+        let sr = sample_rate!(44100);
+        let a = sine_wave::<f64>(440.0, Duration::from_millis(50), sr, 1.0);
+        let a2 = sine_wave::<f64>(440.0, Duration::from_millis(50), sr, 1.0);
+        let c = sine_wave::<f64>(880.0, Duration::from_millis(50), sr, 1.0);
+
+        let lsd_identical = log_spectral_distance(&a, &a2).unwrap();
+        assert!(lsd_identical < 1e-6, "identical → ~0, got {lsd_identical}");
+
+        let lsd_diff = log_spectral_distance(&a, &c).unwrap();
+        assert!(lsd_diff > 0.0, "different tones → > 0, got {lsd_diff}");
     }
 }
