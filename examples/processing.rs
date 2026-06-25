@@ -24,7 +24,8 @@ pub fn main() -> AudioSampleResult<()> {
         sine_wave(440.0, Duration::from_secs(1), sample_rate_hz, 0.8);
     println!("Input:  peak={:.4}  rms={:.4}", audio.peak(), audio.rms());
 
-    // Demonstrate method chaining with the new consuming API
+    // Demonstrate method chaining with the non-mutating variants (each borrows
+    // and returns a new owned copy).
     // Simple gain.
     let audio = audio.scale(0.5);
     println!("Scaled: peak={:.4}  rms={:.4}", audio.peak(), audio.rms());
@@ -61,8 +62,8 @@ pub fn main() -> AudioSampleResult<()> {
         audio.rms()
     );
 
-    // µ-law round-trip - demonstrating chaining.
-    let ulaw = audio.clone().mu_compress(255.0)?.mu_expand(255.0)?;
+    // µ-law round-trip - demonstrating chaining (non-mutating, leaves `audio` intact).
+    let ulaw = audio.mu_compress(255.0)?.mu_expand(255.0)?;
     println!(
         "µ-law round-trip: peak={:.4}  rms={:.4}",
         ulaw.peak(),
