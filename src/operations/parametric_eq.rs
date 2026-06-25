@@ -158,7 +158,7 @@ where
         // Apply filter to audio data
         match self.data_mut() {
             AudioData::Mono(_) => {
-                let mut working_samples = self.as_float();
+                let mut working_samples = self.as_f64();
                 let Some(mono_self) = self.as_mono_mut() else {
                     return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
                         operation: "parametric EQ".to_string(),
@@ -184,7 +184,7 @@ where
                 let num_channels = samples.nrows().get();
                 // Process each channel independently
                 for channel in 0..num_channels {
-                    let mut working_samples = self.as_float();
+                    let mut working_samples = self.as_f64();
 
                     let Some(multi_self) = self.as_multi_channel_mut() else {
                         return Err(AudioSampleError::Layout(LayoutError::NonContiguous {

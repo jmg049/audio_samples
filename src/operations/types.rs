@@ -73,6 +73,33 @@ impl FromStr for PadSide {
     }
 }
 
+/// Policy for reducing a multi-channel signal to a single channel for
+/// analysis operations that produce one scalar result.
+///
+/// Category-2 analysis operations (e.g. [`spectral_centroid`] and
+/// [`spectral_rolloff`]) historically disagreed on multi-channel handling:
+/// some errored, others silently used channel 0. This enum unifies that
+/// behaviour behind an explicit, caller-chosen policy.
+///
+/// The default is [`Error`][ChannelReduction::Error], which preserves the
+/// strictest historical behaviour by refusing to silently collapse channels.
+///
+/// [`spectral_centroid`]: crate::AudioStatistics::spectral_centroid
+/// [`spectral_rolloff`]: crate::AudioStatistics::spectral_rolloff
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ChannelReduction {
+    /// Return an error when the signal has more than one channel.
+    #[default]
+    Error,
+    /// Use the first channel (index 0) and ignore the rest.
+    First,
+    /// Average the corresponding samples across all channels.
+    Average,
+    /// Use the channel at the given index (bounds-checked).
+    Channel(usize),
+}
+
 /// Algorithm used to scale or centre audio sample values.
 ///
 /// Different methods suit different goals. Choose the method that matches your

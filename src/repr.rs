@@ -189,7 +189,8 @@ pub type ChannelCount = NonZeroU32;
 
 use crate::traits::{ConvertFrom, StandardSample};
 use crate::{
-    AudioSampleError, AudioSampleResult, CastInto, ConvertTo, I24, LayoutError, ParameterError,
+    AudioSampleError, AudioSampleResult, CastInto, ConvertTo, EnumParseError, I24, LayoutError,
+    ParameterError,
 };
 
 /// Borrowed-or-owned byte view returned by `AudioData::bytes`.
@@ -438,25 +439,14 @@ impl Display for SampleType {
     }
 }
 
-/// Parses a [`SampleType`] from its canonical short-name string.
-///
-/// Accepts `"u8"`, `"i16"`, `"i24"`, `"i32"`, `"f32"`, and `"f64"`.
-/// Returns `Err(())` for any unrecognised string.
-///
-/// # Examples
-///
-/// ```rust
-/// use audio_samples::SampleType;
-///
-/// assert_eq!(SampleType::try_from("f32"), Ok(SampleType::F32));
-/// assert_eq!(SampleType::try_from("i16"), Ok(SampleType::I16));
-/// assert!(SampleType::try_from("unknown").is_err());
-/// ```
-impl TryFrom<&str> for SampleType {
-    type Error = ();
+impl SampleType {
+    /// The canonical short-name strings accepted when parsing a [`SampleType`].
+    const PARSE_VARIANTS: &'static [&'static str] =
+        &["u8", "i16", "i24", "i32", "f32", "f64"];
 
+    /// Shared parsing logic for [`TryFrom<&str>`] and [`FromStr`].
     #[inline]
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn parse_str(value: &str) -> Result<Self, EnumParseError> {
         match value {
             "u8" => Ok(Self::U8),
             "i16" => Ok(Self::I16),
@@ -464,8 +454,57 @@ impl TryFrom<&str> for SampleType {
             "i32" => Ok(Self::I32),
             "f32" => Ok(Self::F32),
             "f64" => Ok(Self::F64),
-            _ => Err(()),
+            _ => Err(EnumParseError::new(
+                "SampleType",
+                value,
+                Self::PARSE_VARIANTS,
+            )),
         }
+    }
+}
+
+/// Parses a [`SampleType`] from its canonical short-name string.
+///
+/// Accepts `"u8"`, `"i16"`, `"i24"`, `"i32"`, `"f32"`, and `"f64"`. Returns a
+/// span-carrying [`EnumParseError`] for any unrecognised string.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::SampleType;
+///
+/// assert_eq!(SampleType::try_from("f32").unwrap(), SampleType::F32);
+/// assert_eq!(SampleType::try_from("i16").unwrap(), SampleType::I16);
+/// assert!(SampleType::try_from("unknown").is_err());
+/// ```
+impl TryFrom<&str> for SampleType {
+    type Error = EnumParseError;
+
+    #[inline]
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse_str(value)
+    }
+}
+
+/// Parses a [`SampleType`] from its canonical short-name string.
+///
+/// Delegates to the same logic as [`TryFrom<&str>`], returning a span-carrying
+/// [`EnumParseError`] for unrecognised input.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::SampleType;
+///
+/// assert_eq!("f64".parse::<SampleType>().unwrap(), SampleType::F64);
+/// assert!("nope".parse::<SampleType>().is_err());
+/// ```
+impl core::str::FromStr for SampleType {
+    type Err = EnumParseError;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(s)
     }
 }
 
@@ -4071,7 +4110,6 @@ where
     pub fn map_into<O, F>(&self, f: F) -> AudioSamples<'static, O>
     where
         F: Fn(T) -> O,
-        T: ConvertTo<O>,
         O: StandardSample,
     {
         let new_data = AudioData::from_owned(self.data.mapv(f));
@@ -6256,6 +6294,40 @@ mod tests {
     use super::*;
     use ndarray::{ArrayBase, array};
     use non_empty_slice::non_empty_vec;
+
+    #[test]
+    fn test_sample_type_from_str_round_trip() {
+        use core::str::FromStr;
+
+        let cases = [
+            ("u8", SampleType::U8),
+            ("i16", SampleType::I16),
+            ("i24", SampleType::I24),
+            ("i32", SampleType::I32),
+            ("f32", SampleType::F32),
+            ("f64", SampleType::F64),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(SampleType::from_str(s).unwrap(), expected);
+            assert_eq!(s.parse::<SampleType>().unwrap(), expected);
+            assert_eq!(SampleType::try_from(s).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn test_sample_type_from_str_invalid() {
+        use core::str::FromStr;
+
+        let err = SampleType::from_str("nope").unwrap_err();
+        assert_eq!(err.type_name, "SampleType");
+        assert_eq!(err.input, "nope");
+        // The span underlines the whole unrecognised token.
+        assert_eq!(err.span.offset(), 0);
+        assert_eq!(err.span.len(), "nope".len());
+
+        assert!("".parse::<SampleType>().is_err());
+        assert!(SampleType::try_from("F32").is_err()); // case-sensitive
+    }
 
     #[test]
     fn test_new_mono_audio_samples() {

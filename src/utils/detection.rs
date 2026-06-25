@@ -80,7 +80,7 @@ pub fn detect_sample_rate<T>(audio: &AudioSamples<T>) -> AudioSampleResult<Optio
 where
     T: StandardSample,
 {
-    let audio_f64 = audio.as_float();
+    let audio_f64 = audio.as_f64();
 
     // Use the first channel for analysis
     let data = if let Some(mono) = audio_f64.as_mono() {
@@ -185,7 +185,7 @@ where
 {
     // error if audio is empty
     // if audio is empty, you are doing something wrong
-    let audio_f64 = audio.as_float();
+    let audio_f64 = audio.as_f64();
 
     // Use the first channel for analysis
     let data = if let Some(mono) = audio_f64.as_mono() {
@@ -385,7 +385,7 @@ pub fn detect_dynamic_range<T>(audio: &AudioSamples<T>) -> AudioSampleResult<(f6
 where
     T: StandardSample,
 {
-    let audio_f = audio.as_float();
+    let audio_f = audio.as_f64();
 
     let data: Vec<f64> = if let Some(mono) = audio_f.as_mono() {
         mono.as_slice()
@@ -601,7 +601,7 @@ pub fn estimate_noise_floor<T, F>(audio: &AudioSamples<T>) -> AudioSampleResult<
 where
     T: StandardSample,
 {
-    let audio = audio.as_float();
+    let audio = audio.as_f64();
 
     let data: Vec<f64> = if let Some(mono) = audio.as_mono() {
         mono.as_slice()
@@ -681,7 +681,7 @@ pub fn estimate_frequency_range<T>(audio: &AudioSamples<T>) -> AudioSampleResult
 where
     T: StandardSample,
 {
-    let audio = audio.as_float();
+    let audio = audio.as_f64();
 
     let data: Vec<f64> = if let Some(mono) = audio.as_mono() {
         mono.as_slice()

@@ -121,8 +121,15 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     );
     #[cfg(feature = "transforms")]
     {
-        println!("Spectral-centroid: {}", audio.spectral_centroid()?);
-        println!("Spectral-rolloff (0.85): {}", audio.spectral_rolloff(0.85)?);
+        use audio_samples::operations::types::ChannelReduction;
+        println!(
+            "Spectral-centroid: {}",
+            audio.spectral_centroid(ChannelReduction::Error)?
+        );
+        println!(
+            "Spectral-rolloff (0.85): {}",
+            audio.spectral_rolloff(0.85, ChannelReduction::Error)?
+        );
     }
     Ok(())
 }

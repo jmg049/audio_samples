@@ -385,6 +385,8 @@ pub use crate::utils::generation::{
 #[cfg(feature = "statistics")]
 pub use crate::operations::AudioStatistics;
 
+pub use crate::operations::types::ChannelReduction;
+
 #[cfg(all(feature = "transforms", feature = "statistics"))]
 pub use crate::operations::statistics::fft_alignment_lag;
 
@@ -422,7 +424,9 @@ pub use crate::operations::traits::AudioDecomposition;
 pub use crate::operations::traits::AudioDynamicRange;
 
 #[cfg(feature = "dynamic-range")]
-pub use crate::operations::types::{ExpanderConfig, GateConfig};
+pub use crate::operations::types::{
+    CompressorConfig, ExpanderConfig, GateConfig, LimiterConfig, SideChainConfig,
+};
 
 #[cfg(feature = "iir-filtering")]
 pub use crate::operations::traits::AudioIirFiltering;

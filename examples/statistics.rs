@@ -44,8 +44,15 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         if let Some(ac) = audio.autocorrelation(audio_samples::nzu!(1)) {
             println!("Autocorrelation (lag 1): {:?}", ac);
         }
-        println!("Spectral-centroid: {}", audio.spectral_centroid()?);
-        println!("Spectral-rolloff (0.85): {}", audio.spectral_rolloff(0.85)?);
+        use audio_samples::operations::types::ChannelReduction;
+        println!(
+            "Spectral-centroid: {}",
+            audio.spectral_centroid(ChannelReduction::Error)?
+        );
+        println!(
+            "Spectral-rolloff (0.85): {}",
+            audio.spectral_rolloff(0.85, ChannelReduction::Error)?
+        );
     }
 
     // Create a new 880 Hz tone by shifting the frequency of the original audio

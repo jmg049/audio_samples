@@ -1543,7 +1543,7 @@ pub trait AudioTypeConversion: Sized {
     /// ```
     fn cast_as<O>(&self) -> AudioSamples<'static, O>
     where
-        Self::Sample: CastInto<O> + ConvertTo<O>,
+        Self::Sample: CastInto<O>,
         O: StandardSample;
 
     /// Casts the audio to a different sample type without audio-aware scaling,
@@ -1597,19 +1597,6 @@ pub trait AudioTypeConversion: Sized {
     /// Integer sample values are normalised into `[-1.0, 1.0]` according to
     /// the [`ConvertTo`] rules for the source type. For `u8` audio, value
     /// `128` maps to `0.0`. For float sources the values are widened unchanged.
-    ///
-    /// # Returns
-    ///
-    /// A new owned [`AudioSamples<'static, f64>`] with normalised sample values.
-    #[inline]
-    fn as_float(&self) -> AudioSamples<'static, f64> {
-        self.to_format::<f64>()
-    }
-
-    /// Converts the audio to `f64` using audio-aware scaling.
-    ///
-    /// Equivalent to [`AudioTypeConversion::as_float`]. Integer sample values
-    /// are normalised into `[-1.0, 1.0]`.
     ///
     /// # Returns
     ///
