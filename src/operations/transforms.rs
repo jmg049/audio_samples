@@ -773,7 +773,7 @@ where
             ));
         }
 
-        let working_samples = self.as_float();
+        let working_samples = self.as_f64();
         let working_samples_slice = working_samples
             .as_slice()
             .expect("Safe since we have ensured mono");

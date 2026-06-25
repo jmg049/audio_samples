@@ -107,8 +107,8 @@ where
         )));
     }
 
-    let a_f = a.as_float();
-    let b_f = b.as_float();
+    let a_f = a.as_f64();
+    let b_f = b.as_f64();
 
     match (a_f.as_mono(), b_f.as_mono()) {
         (Some(a_mono), Some(b_mono)) => {
@@ -231,8 +231,8 @@ where
         )));
     }
 
-    let a_f = a.as_float();
-    let b_f = b.as_float();
+    let a_f = a.as_f64();
+    let b_f = b.as_f64();
 
     match (a_f.as_mono(), b_f.as_mono()) {
         (Some(a_mono), Some(b_mono)) => mse_1d(&a_mono.view(), &b_mono.view()),
@@ -360,8 +360,8 @@ where
         )));
     }
 
-    let signal_f = signal.as_float();
-    let noise_f = noise.as_float();
+    let signal_f = signal.as_f64();
+    let noise_f = noise.as_f64();
 
     // Calculate signal power
     let signal_power = if let Some(mono) = signal_f.as_mono() {
@@ -505,8 +505,8 @@ where
     }
 
     let sample_rate = signal.sample_rate();
-    let ref_f = reference.as_float();
-    let sig_f = signal.as_float();
+    let ref_f = reference.as_f64();
+    let sig_f = signal.as_f64();
 
     // For simplicity, we'll work with the first channel for mono or the average for multi-channel
     let (ref_data, sig_data) = match (ref_f.as_mono(), sig_f.as_mono()) {

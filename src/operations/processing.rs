@@ -288,7 +288,7 @@ where
 
             NormalizationMethod::Median => {
                 // Median normalization: subtract median to center around zero
-                let median: f64 = self.median().ok_or_else(|| {
+                let median: f64 = self.midpoint_sample().ok_or_else(|| {
                     AudioSampleError::Parameter(ParameterError::InvalidValue {
                         parameter: "self".to_string(),
                         reason: "Self is not mono".to_string(),

@@ -152,8 +152,10 @@ use std::num::NonZeroUsize;
 /// # Invariants
 ///
 /// All methods operate on the full multi-channel buffer unless the documentation
-/// explicitly states otherwise (e.g. `median` is mono-only, `spectral_centroid`
-/// and `spectral_rolloff` use only the first channel).
+/// explicitly states otherwise (e.g. `midpoint_sample` is mono-only, while
+/// `spectral_centroid` and `spectral_rolloff` take an explicit
+/// [`ChannelReduction`](crate::operations::types::ChannelReduction) policy for
+/// multi-channel input).
 #[cfg(feature = "statistics")]
 pub trait AudioStatistics: AudioTypeConversion
 where
@@ -257,9 +259,9 @@ where
     /// let data = array![1.0f32, 3.0, 5.0, 7.0];
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Central indices 1 and 2: (3.0 + 5.0) / 2.0 = 4.0
-    /// assert_eq!(audio.median(), Some(4.0));
+    /// assert_eq!(audio.midpoint_sample(), Some(4.0));
     /// ```
-    fn median(&self) -> Option<f64>;
+    fn midpoint_sample(&self) -> Option<f64>;
 
     /// Computes the Root Mean Square (RMS) of all samples across all channels.
     ///
@@ -443,17 +445,20 @@ where
     ///
     /// Reference: [Spectral centroid — Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
     ///
+    /// # Arguments
+    /// - `reduction` — the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy applied to multi-channel input. [`Error`](crate::operations::types::ChannelReduction::Error)
+    ///   (the default) rejects multi-channel signals.
+    ///
     /// # Returns
     /// The spectral centroid frequency in Hz. Returns `0.0` when the signal
     /// is silence (zero total spectral energy).
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel
+    ///   and `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or if a [`Channel`](crate::operations::types::ChannelReduction::Channel) index is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
-    ///
-    /// # Assumptions
-    /// The input signal must be mono. Multi-channel signals must be mixed or
-    /// channel-selected before calling this method.
     ///
     /// # Examples
     /// ```no_run
@@ -461,13 +466,18 @@ where
     /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate, sine_wave};
     /// use std::time::Duration;
     ///
+    /// use audio_samples::operations::types::ChannelReduction;
+    ///
     /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
-    /// let centroid = audio.spectral_centroid().unwrap();
+    /// let centroid = audio.spectral_centroid(ChannelReduction::Error).unwrap();
     /// // A 440 Hz sine wave should have a centroid near 440 Hz.
     /// assert!(centroid > 0.0);
     /// ```
     #[cfg(feature = "transforms")]
-    fn spectral_centroid(&self) -> AudioSampleResult<f64>;
+    fn spectral_centroid(
+        &self,
+        reduction: crate::operations::types::ChannelReduction,
+    ) -> AudioSampleResult<f64>;
 
     /// Computes the autocorrelation function up to `max_lag` samples.
     ///
@@ -509,11 +519,13 @@ where
     /// of the total spectral energy is contained. It is commonly used to
     /// distinguish harmonic signals from noise-like signals.
     ///
-    /// For multi-channel audio only the first channel is used.
-    ///
     /// # Arguments
     /// - `rolloff_percent` — the energy proportion threshold. Must lie in the
     ///   open interval `(0.0, 1.0)`. A typical value is `0.85`.
+    /// - `reduction` — the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy applied to multi-channel input. Pass
+    ///   [`First`](crate::operations::types::ChannelReduction::First) to reproduce the
+    ///   historical channel-0 behaviour.
     ///
     /// # Returns
     /// The rolloff frequency in Hz. Returns `0.0` when the signal is silence
@@ -521,7 +533,9 @@ where
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `rolloff_percent` is not in
-    ///   `(0.0, 1.0)`.
+    ///   `(0.0, 1.0)`, if the signal is multi-channel and `reduction` is
+    ///   [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or if a [`Channel`](crate::operations::types::ChannelReduction::Channel) index is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     ///
     /// # Examples
@@ -530,13 +544,19 @@ where
     /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate, sine_wave};
     /// use std::time::Duration;
     ///
+    /// use audio_samples::operations::types::ChannelReduction;
+    ///
     /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
     /// // 85 % of spectral energy is below the rolloff frequency.
-    /// let rolloff = audio.spectral_rolloff(0.85).unwrap();
+    /// let rolloff = audio.spectral_rolloff(0.85, ChannelReduction::Error).unwrap();
     /// assert!(rolloff > 0.0);
     /// ```
     #[cfg(feature = "transforms")]
-    fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64>;
+    fn spectral_rolloff(
+        &self,
+        rolloff_percent: f64,
+        reduction: crate::operations::types::ChannelReduction,
+    ) -> AudioSampleResult<f64>;
 }
 
 /// Voice Activity Detection (VAD) operations.

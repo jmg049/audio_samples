@@ -183,7 +183,7 @@ where
     #[inline]
     fn cast_as<O>(&self) -> AudioSamples<'static, O>
     where
-        T: CastInto<O> + ConvertTo<O>,
+        T: CastInto<O>,
         O: StandardSample,
     {
         self.map_into(T::cast_into)

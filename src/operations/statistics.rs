@@ -19,7 +19,7 @@
 //! - [`min_sample`](AudioStatistics::min_sample): Minimum sample value.
 //! - [`max_sample`](AudioStatistics::max_sample): Maximum sample value.
 //! - [`mean`](AudioStatistics::mean): Arithmetic mean of all samples.
-//! - [`median`](AudioStatistics::median): Temporal midpoint value of a mono signal.
+//! - [`midpoint_sample`](AudioStatistics::midpoint_sample): Temporal midpoint value of a mono signal (the middle sample by position).
 //! - [`rms`](AudioStatistics::rms): Root Mean Square energy.
 //! - [`variance`](AudioStatistics::variance): Variance of sample values.
 //! - [`std_dev`](AudioStatistics::std_dev): Standard deviation of sample values.
@@ -55,6 +55,7 @@
 //! ```rust,ignore
 //! // Requires the "transforms" feature.
 //! use audio_samples::{sine_wave, AudioSamples, AudioStatistics, sample_rate};
+//! use audio_samples::operations::types::ChannelReduction;
 //! use std::time::Duration;
 //!
 //! let sr       = sample_rate!(44100);
@@ -62,8 +63,8 @@
 //! let duration = Duration::from_secs(1);
 //! let audio    = sine_wave::<f64>(freq, duration, sr, 0.5);
 //!
-//! let centroid = audio.spectral_centroid().unwrap();
-//! let rolloff  = audio.spectral_rolloff(0.85).unwrap();
+//! let centroid = audio.spectral_centroid(ChannelReduction::Error).unwrap();
+//! let rolloff  = audio.spectral_rolloff(0.85, ChannelReduction::Error).unwrap();
 //!
 //! println!("Spectral centroid: {:.2} Hz", centroid);
 //! println!("Spectral rolloff (85%): {:.2} Hz", rolloff);
@@ -94,10 +95,12 @@ use std::num::NonZeroUsize;
 use crate::operations::traits::AudioStatistics;
 use crate::repr::AudioData;
 use crate::traits::StandardSample;
+#[cfg(feature = "transforms")]
+use crate::operations::types::ChannelReduction;
 use crate::{AudioSampleResult, AudioSamples, ParameterError};
 
 #[cfg(feature = "transforms")]
-use crate::{AudioSampleError, AudioTypeConversion, ProcessingError};
+use crate::{AudioSampleError, ProcessingError};
 #[cfg(feature = "transforms")]
 use num_complex::Complex;
 
@@ -109,6 +112,76 @@ use non_empty_slice::NonEmptyVec;
 
 #[cfg(feature = "transforms")]
 use spectrograms::FftPlanner;
+
+/// Reduces a (possibly multi-channel) signal to a single `f64` sample vector
+/// according to `reduction`, for the spectral analysis ops that produce one
+/// scalar result.
+///
+/// Samples are converted with audio-aware [`ConvertTo`](crate::traits::ConvertTo)
+/// scaling. Returns an error when `reduction` forbids the channel layout (e.g.
+/// [`ChannelReduction::Error`] on multi-channel input) or names an out-of-range
+/// channel.
+#[cfg(feature = "transforms")]
+fn reduce_to_mono_f64<T>(
+    audio: &AudioSamples<'_, T>,
+    reduction: ChannelReduction,
+    operation: &str,
+) -> AudioSampleResult<Vec<f64>>
+where
+    T: StandardSample,
+{
+    match &audio.data() {
+        AudioData::Mono(arr) => Ok(arr.iter().map(|&x| x.convert_to()).collect()),
+        AudioData::Multi(multi) => {
+            let view = multi.as_view();
+            let num_channels = view.nrows();
+            match reduction {
+                ChannelReduction::Error => Err(crate::AudioSampleError::Parameter(
+                    ParameterError::invalid_value(
+                        "channels",
+                        format!(
+                            "{operation} is only defined for mono signals; pass a \
+                             ChannelReduction other than `Error` to reduce \
+                             {num_channels} channels to one"
+                        ),
+                    ),
+                )),
+                ChannelReduction::First => {
+                    Ok(view.row(0).iter().map(|&x| x.convert_to()).collect())
+                }
+                ChannelReduction::Channel(idx) => {
+                    if idx >= num_channels {
+                        return Err(crate::AudioSampleError::Parameter(
+                            ParameterError::out_of_range(
+                                "channel",
+                                idx.to_string(),
+                                "0",
+                                (num_channels - 1).to_string(),
+                                format!(
+                                    "{operation}: channel index {idx} out of range for \
+                                     {num_channels} channels"
+                                ),
+                            ),
+                        ));
+                    }
+                    Ok(view.row(idx).iter().map(|&x| x.convert_to()).collect())
+                }
+                ChannelReduction::Average => {
+                    let n = view.ncols();
+                    let inv = 1.0 / num_channels as f64;
+                    let mut out = vec![0.0f64; n];
+                    for row in view.rows() {
+                        for (o, &x) in out.iter_mut().zip(row.iter()) {
+                            let v: f64 = x.convert_to();
+                            *o += v * inv;
+                        }
+                    }
+                    Ok(out)
+                }
+            }
+        }
+    }
+}
 
 impl<T> AudioStatistics for AudioSamples<'_, T>
 where
@@ -274,10 +347,10 @@ where
     /// let data = array![1.0f32, 3.0, 5.0, 7.0];
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// // Central indices 1 and 2: (3.0 + 5.0) / 2.0 = 4.0
-    /// assert_eq!(audio.median(), Some(4.0));
+    /// assert_eq!(audio.midpoint_sample(), Some(4.0));
     /// ```
     #[inline]
-    fn median(&self) -> Option<f64> {
+    fn midpoint_sample(&self) -> Option<f64> {
         let mono = self.as_mono()?;
         let mono_len = mono.len().get();
         Some(if mono_len.is_multiple_of(2) {
@@ -882,37 +955,28 @@ where
     /// The spectral centroid frequency in Hz. Returns `0.0` when the signal
     /// is silence (zero total spectral energy).
     ///
-    /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel.
-    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    /// # Arguments
+    /// - `reduction` — the [`ChannelReduction`] policy for multi-channel input.
     ///
-    /// # Assumptions
-    /// The input signal must be mono. Multi-channel signals must be mixed or
-    /// channel-selected before calling this method.
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel
+    ///   and `reduction` is [`ChannelReduction::Error`], or a
+    ///   [`ChannelReduction::Channel`] index is out of bounds.
+    /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
     #[inline]
-    fn spectral_centroid(&self) -> AudioSampleResult<f64> {
-        if self.is_multi_channel() {
-            return Err(crate::AudioSampleError::Parameter(
-                ParameterError::invalid_value(
-                    "channels",
-                    "spectral_centroid is only defined for mono signals",
-                ),
-            ));
-        }
+    fn spectral_centroid(&self, reduction: ChannelReduction) -> AudioSampleResult<f64> {
+        // Reduce to a single f64 channel per the requested policy.
+        let working_vec = reduce_to_mono_f64(self, reduction, "spectral_centroid")?;
 
-        // convert to f64 for processing
-        let working_samples = self.to_format::<f64>();
-
-        let working_slice = working_samples.as_slice().expect(
-            "Mono audio means a 1d array which is contiguous, which means as_slice cannot fail",
-        );
-        // safety: working_samples is guaranteed non-empty since self is non-empty by design
-        let working_samples = unsafe { NonEmptySlice::new_unchecked(working_slice) };
+        // safety: self is guaranteed non-empty by design, so the reduced
+        // channel has at least one sample.
+        let working_samples = unsafe { NonEmptySlice::new_unchecked(working_vec.as_slice()) };
 
         let mut planner = FftPlanner::new();
 
-        let n = self.len();
+        // safety: working_vec is non-empty (see above).
+        let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
         let fft_output_size = n.div_ceil(nzu!(2)).checked_add(1).expect(
             "n is non-zero since self is non-empty by design and  n/2 is always << usize::MAX, which means n/2 + 1 << usize::MAX and cannot overflow",
         );
@@ -955,11 +1019,12 @@ where
     /// of the total spectral energy is contained. It is commonly used to
     /// distinguish harmonic signals from noise-like signals.
     ///
-    /// For multi-channel audio only the first channel is used.
-    ///
     /// # Arguments
     /// - `rolloff_percent` — the energy proportion threshold. Must lie in the
     ///   open interval `(0.0, 1.0)`. A typical value is `0.85`.
+    /// - `reduction` — the [`ChannelReduction`] policy for multi-channel input.
+    ///   Pass [`ChannelReduction::First`] to reproduce the historical channel-0
+    ///   behaviour.
     ///
     /// # Returns
     /// The rolloff frequency in Hz. Returns `0.0` when the signal is silence
@@ -967,11 +1032,17 @@ where
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `rolloff_percent` is not in
-    ///   `(0.0, 1.0)`.
+    ///   `(0.0, 1.0)`, if the signal is multi-channel and `reduction` is
+    ///   [`ChannelReduction::Error`], or a [`ChannelReduction::Channel`] index is
+    ///   out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
     #[inline]
-    fn spectral_rolloff(&self, rolloff_percent: f64) -> AudioSampleResult<f64> {
+    fn spectral_rolloff(
+        &self,
+        rolloff_percent: f64,
+        reduction: ChannelReduction,
+    ) -> AudioSampleResult<f64> {
         if rolloff_percent <= 0.0 || rolloff_percent >= 1.0 {
             return Err(crate::AudioSampleError::Parameter(
                 ParameterError::out_of_range(
@@ -984,101 +1055,50 @@ where
             ));
         }
 
-        match &self.data() {
-            AudioData::Mono(arr) => {
-                let n = arr.len();
-                // Safety: Self is guaranteed non-empty by design, therefore arr is non-empty, therefore to_vec is non-empty
-                let input: NonEmptyVec<f64> = unsafe {
-                    NonEmptyVec::new_unchecked(
-                        arr.mapv(super::super::traits::ConvertTo::convert_to)
-                            .to_vec(),
-                    )
-                };
+        // Reduce to a single f64 channel per the requested policy.
+        let input_vec = reduce_to_mono_f64(self, reduction, "spectral_rolloff")?;
 
-                // Create FFT backend
-                let mut planner = FftPlanner::new();
+        // safety: self is guaranteed non-empty by design, so the reduced
+        // channel has at least one sample.
+        let n = unsafe { NonZeroUsize::new_unchecked(input_vec.len()) };
+        let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(input_vec) };
 
-                let power_spectrum = planner.power_spectrum(input.as_non_empty_slice(), n, None)?;
+        let mut planner = FftPlanner::new();
+        let power_spectrum = planner.power_spectrum(input.as_non_empty_slice(), n, None)?;
 
-                // Generate frequency bins
-                let nyquist = self.nyquist();
-                let freq_step = nyquist / (power_spectrum.len().get() as f64 - 1.0);
+        // Generate frequency bins
+        let nyquist = self.nyquist();
+        let freq_step = nyquist / (power_spectrum.len().get() as f64 - 1.0);
 
-                // Compute total energy
-                let total_energy: f64 = power_spectrum.iter().fold(0.0, |acc, &x| acc + x);
-                if total_energy == 0.0 {
-                    // todo! --- is this correct behaviour? Should we force handling of zero-energy signals?
-                    return Ok(0.0);
-                } else if total_energy < 0.0 {
-                    return Err(AudioSampleError::Processing(ProcessingError::MathematicalFailure { operation: "spectral_rolloff".to_string(), reason: "Total spectral energy is negative, cannot compute rolloff frequency".to_string()}));
-                }
+        // Compute total energy
+        let total_energy: f64 = power_spectrum.iter().fold(0.0, |acc, &x| acc + x);
+        if total_energy == 0.0 {
+            // todo! --- is this correct behaviour? Should we force handling of zero-energy signals?
+            return Ok(0.0);
+        } else if total_energy < 0.0 {
+            return Err(AudioSampleError::Processing(
+                ProcessingError::MathematicalFailure {
+                    operation: "spectral_rolloff".to_string(),
+                    reason: "Total spectral energy is negative, cannot compute rolloff frequency"
+                        .to_string(),
+                },
+            ));
+        }
 
-                // Find rolloff frequency
-                let target_energy = total_energy * rolloff_percent;
-                let mut cumulative_energy = 0.0;
+        // Find rolloff frequency
+        let target_energy = total_energy * rolloff_percent;
+        let mut cumulative_energy = 0.0;
 
-                for (i, &power) in power_spectrum.iter().enumerate() {
-                    cumulative_energy += power;
-                    if cumulative_energy >= target_energy {
-                        let frequency = i as f64 * freq_step;
-                        return Ok(frequency);
-                    }
-                }
-
-                // If we reach here, return Nyquist frequency
-                Ok(nyquist)
-            }
-            AudioData::Multi(arr) => {
-                // For multi-channel, compute rolloff on the first channel
-                // todo! --- figure out integration of multichannel. These methods typically are only an issue since they would either:
-                // 1)  Force the return value to be a Vec<f64> of per-channel values
-                // 2)  Force the method to accept a weighting/averaging method for channels so as to produce a single value
-                // 3)  Simply use the first channel as representative (current implementation)
-
-                let first_channel = arr.row(0);
-                let n = first_channel.len();
-                // safety: Self is guaranteed non-empty by design, therefore at least one channel exists with at least one sample
-                let n = unsafe { NonZeroUsize::new_unchecked(n) };
-
-                // Convert to float type for FFT
-                // safety: self is non empty therefore the underlying array (and it's row) are non-empty
-                let input: NonEmptyVec<f64> = unsafe {
-                    NonEmptyVec::new_unchecked(
-                        first_channel.iter().map(|&x| x.convert_to()).collect(),
-                    )
-                };
-
-                let mut planner = FftPlanner::new();
-                // Prepare output buffer
-                let power_spectrum = planner.power_spectrum(input.as_non_empty_slice(), n, None)?;
-                // Generate frequency bins
-                let nyquist = self.nyquist();
-                let freq_step = nyquist / (power_spectrum.len().get() as f64 - 1.0);
-
-                // Compute total energy
-                let total_energy: f64 = power_spectrum.iter().fold(0.0, |acc, &x| acc + x);
-                if total_energy == 0.0 {
-                    return Ok(0.0);
-                } else if total_energy < 0.0 {
-                    return Err(AudioSampleError::Processing(ProcessingError::MathematicalFailure { operation: "spectral_rolloff".to_string(), reason: "Total spectral energy is negative, cannot compute rolloff frequency".to_string()}));
-                }
-
-                // Find rolloff frequency
-                let target_energy = total_energy * rolloff_percent;
-                let mut cumulative_energy = 0.0;
-
-                for (i, &power) in power_spectrum.iter().enumerate() {
-                    cumulative_energy += power;
-                    if cumulative_energy >= target_energy {
-                        let frequency = i as f64 * freq_step;
-                        return Ok(frequency);
-                    }
-                }
-
-                // If we reach here, return Nyquist frequency
-                Ok(nyquist)
+        for (i, &power) in power_spectrum.iter().enumerate() {
+            cumulative_energy += power;
+            if cumulative_energy >= target_energy {
+                let frequency = i as f64 * freq_step;
+                return Ok(frequency);
             }
         }
+
+        // If we reach here, return Nyquist frequency
+        Ok(nyquist)
     }
 }
 
@@ -1167,6 +1187,25 @@ mod tests {
     use crate::sample_rate;
     use approx_eq::assert_approx_eq;
     use ndarray::{Array1, array};
+
+    #[test]
+    fn test_midpoint_sample_odd_and_even() {
+        // Odd length: single central sample at index len/2 (3 / 2 == 1 -> value 3.0).
+        let odd = AudioSamples::new_mono(array![1.0f32, 3.0, 5.0], sample_rate!(44100)).unwrap();
+        assert_eq!(odd.midpoint_sample(), Some(3.0));
+
+        // Even length: average of the two central samples.
+        let even =
+            AudioSamples::new_mono(array![1.0f32, 3.0, 5.0, 7.0], sample_rate!(44100)).unwrap();
+        // Central indices 1 and 2: (3.0 + 5.0) / 2.0 = 4.0
+        assert_eq!(even.midpoint_sample(), Some(4.0));
+
+        // Multi-channel returns None.
+        let stereo =
+            AudioSamples::new_multi_channel(ndarray::array![[1.0f32, 2.0], [3.0, 4.0]], sample_rate!(44100))
+                .unwrap();
+        assert_eq!(stereo.midpoint_sample(), None);
+    }
 
     #[test]
     fn test_peak_min_max_existing_methods() {
@@ -1324,7 +1363,7 @@ mod tests {
 
         // Generate 1kHz sine wave
         let centroid = audio
-            .spectral_centroid()
+            .spectral_centroid(ChannelReduction::Error)
             .expect("Failed to compute spectral centroid");
 
         // For a pure sine wave, the spectral centroid should be close to the frequency
@@ -1347,7 +1386,7 @@ mod tests {
         let audio = crate::white_noise::<f64>(duration, sample_rate, 0.5, None);
 
         let rolloff = audio
-            .spectral_rolloff(0.85)
+            .spectral_rolloff(0.85, ChannelReduction::Error)
             .expect("Failed to compute spectral rolloff");
         let nyquist = audio.nyquist();
 
@@ -1366,12 +1405,66 @@ mod tests {
         let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         // Test invalid rolloff percentages
-        assert!(audio.spectral_rolloff(0.0).is_err());
-        assert!(audio.spectral_rolloff(1.0).is_err());
-        assert!(audio.spectral_rolloff(-0.1).is_err());
-        assert!(audio.spectral_rolloff(1.1).is_err());
+        assert!(audio.spectral_rolloff(0.0, ChannelReduction::Error).is_err());
+        assert!(audio.spectral_rolloff(1.0, ChannelReduction::Error).is_err());
+        assert!(audio.spectral_rolloff(-0.1, ChannelReduction::Error).is_err());
+        assert!(audio.spectral_rolloff(1.1, ChannelReduction::Error).is_err());
 
         // Test valid rolloff percentage
-        assert!(audio.spectral_rolloff(0.85).is_ok());
+        assert!(audio.spectral_rolloff(0.85, ChannelReduction::Error).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "transforms")]
+    fn test_spectral_centroid_channel_reduction() {
+        // Stereo signal: channel 0 is a 1 kHz tone, channel 1 is silence.
+        let sample_rate = sample_rate!(44100);
+        let duration = Duration::from_secs_f32(0.25);
+        let tone = crate::sine_wave::<f64>(1000.0, duration, sample_rate, 0.5);
+        let tone_ch = tone.as_mono().expect("mono tone");
+        let n = tone_ch.len().get();
+        let tone_vec: Vec<f64> = (0..n).map(|i| tone[i]).collect();
+
+        let mut data = ndarray::Array2::<f64>::zeros((2, n));
+        for (i, &v) in tone_vec.iter().enumerate() {
+            data[[0, i]] = v;
+        }
+        let stereo = AudioSamples::new_multi_channel(data, sample_rate).unwrap();
+
+        // Error: multi-channel must be rejected by default.
+        assert!(stereo.spectral_centroid(ChannelReduction::Error).is_err());
+
+        // First: uses channel 0 (the tone) -> centroid near 1 kHz.
+        let first = stereo
+            .spectral_centroid(ChannelReduction::First)
+            .expect("First channel centroid");
+        assert!(
+            (first - 1000.0).abs() < 50.0,
+            "First-channel centroid {first} should be near 1000 Hz"
+        );
+
+        // Channel(0) must match First.
+        let ch0 = stereo
+            .spectral_centroid(ChannelReduction::Channel(0))
+            .expect("Channel(0) centroid");
+        assert!((ch0 - first).abs() < 1e-6);
+
+        // Channel(1) is silence -> zero-energy -> 0.0.
+        let ch1 = stereo
+            .spectral_centroid(ChannelReduction::Channel(1))
+            .expect("Channel(1) centroid");
+        assert_eq!(ch1, 0.0);
+
+        // Out-of-range channel errors.
+        assert!(stereo.spectral_centroid(ChannelReduction::Channel(2)).is_err());
+
+        // Average: mean of the tone and silence -> still tonal, centroid near 1 kHz.
+        let avg = stereo
+            .spectral_centroid(ChannelReduction::Average)
+            .expect("Average centroid");
+        assert!(
+            (avg - 1000.0).abs() < 50.0,
+            "Averaged centroid {avg} should be near 1000 Hz"
+        );
     }
 }

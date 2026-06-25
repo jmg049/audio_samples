@@ -1038,7 +1038,7 @@ pub fn create_waveform_plot<T>(
 where
     T: StandardSample,
 {
-    let audio_f64 = audio.as_float();
+    let audio_f64 = audio.as_f64();
 
     let strategy = params.ch_mgmt_strategy.unwrap_or_default();
 
