@@ -1351,6 +1351,15 @@ pub enum IirFilterType {
     /// Introduces ripple in both passband and stopband, yielding the
     /// steepest transition region for a given filter order.
     Elliptic,
+
+    /// Bessel (Bessel–Thomson) filter.
+    ///
+    /// Exhibits a maximally flat group delay (approximately linear phase) in
+    /// the passband, preserving wave shape at the cost of a gentle, monotonic
+    /// magnitude roll-off. The analog prototype is normalised so that the
+    /// magnitude response is −3 dB at ω = 1 rad/s (matching
+    /// `scipy.signal.bessel(..., norm='mag')`).
+    Bessel,
 }
 
 #[cfg(feature = "iir-filtering")]
@@ -1361,6 +1370,7 @@ impl Display for IirFilterType {
             Self::ChebyshevI => "chebyshev1",
             Self::ChebyshevII => "chebyshev2",
             Self::Elliptic => "elliptic",
+            Self::Bessel => "bessel",
         };
         f.write_str(s)
     }
@@ -1379,6 +1389,7 @@ impl FromStr for IirFilterType {
             "chebyshev1" | "cheby1" | "chebyshev_i" | "chebyshev-i" => Ok(Self::ChebyshevI),
             "chebyshev2" | "cheby2" | "chebyshev_ii" | "chebyshev-ii" => Ok(Self::ChebyshevII),
             "elliptic" | "cauer" | "ellip" => Ok(Self::Elliptic),
+            "bessel" | "bessel-thomson" | "thomson" => Ok(Self::Bessel),
             _ => Err(AudioSampleError::parse::<Self, _>(format!(
                 "Failed to parse {}. Got {}, must be one of {:?}",
                 std::any::type_name::<Self>(),
@@ -1389,6 +1400,7 @@ impl FromStr for IirFilterType {
                     "chebyshev2",
                     "elliptic",
                     "cauer",
+                    "bessel",
                 ]
             ))),
         }
@@ -1754,6 +1766,150 @@ impl IirFilterDesign {
             low_frequency: Some(low_frequency),
             high_frequency: Some(high_frequency),
             passband_ripple: None,
+            stopband_attenuation: Some(stopband_attenuation),
+        }
+    }
+
+    /// Creates a Bessel (Bessel–Thomson) low-pass / high-pass filter design.
+    ///
+    /// Bessel filters have a maximally flat group delay in the passband,
+    /// preserving the wave shape of in-band signals. The prototype is
+    /// normalised so the magnitude is −3 dB at the cutoff frequency.
+    ///
+    /// # Arguments
+    ///
+    /// – `response` – frequency response shape (`LowPass` or `HighPass`).\
+    /// – `order` – filter order; higher values yield a steeper roll-off.\
+    /// – `cutoff_frequency` – −3 dB cutoff frequency in Hz.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Bessel`.
+    #[inline]
+    #[must_use]
+    pub const fn bessel(
+        response: FilterResponse,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::Bessel,
+            response,
+            order,
+            cutoff_frequency: Some(cutoff_frequency),
+            low_frequency: None,
+            high_frequency: None,
+            passband_ripple: None,
+            stopband_attenuation: None,
+        }
+    }
+
+    /// Creates a Bessel band-pass / band-stop filter design.
+    ///
+    /// # Arguments
+    ///
+    /// – `response` – frequency response shape (`BandPass` or `BandStop`).\
+    /// – `order` – prototype filter order per edge.\
+    /// – `low_frequency` – lower band edge in Hz; must be positive and less
+    ///   than `high_frequency`.\
+    /// – `high_frequency` – upper band edge in Hz; must be less than Nyquist.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Bessel`.
+    #[inline]
+    #[must_use]
+    pub const fn bessel_band(
+        response: FilterResponse,
+        order: NonZeroUsize,
+        low_frequency: f64,
+        high_frequency: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::Bessel,
+            response,
+            order,
+            cutoff_frequency: None,
+            low_frequency: Some(low_frequency),
+            high_frequency: Some(high_frequency),
+            passband_ripple: None,
+            stopband_attenuation: None,
+        }
+    }
+
+    /// Creates an elliptic (Cauer) low-pass / high-pass filter design.
+    ///
+    /// Elliptic filters are equiripple in both passband and stopband, giving
+    /// the steepest transition for a given order. They are specified by both
+    /// the passband ripple and the stopband attenuation.
+    ///
+    /// # Arguments
+    ///
+    /// – `response` – frequency response shape (`LowPass` or `HighPass`).\
+    /// – `order` – filter order; higher values yield a steeper roll-off.\
+    /// – `cutoff_frequency` – passband edge frequency in Hz (the point at which
+    ///   the gain first drops below `−passband_ripple`).\
+    /// – `passband_ripple` – peak passband ripple in dB; positive.\
+    /// – `stopband_attenuation` – minimum stopband attenuation in dB; positive
+    ///   and greater than `passband_ripple`.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Elliptic`.
+    #[inline]
+    #[must_use]
+    pub const fn elliptic(
+        response: FilterResponse,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+        passband_ripple: f64,
+        stopband_attenuation: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::Elliptic,
+            response,
+            order,
+            cutoff_frequency: Some(cutoff_frequency),
+            low_frequency: None,
+            high_frequency: None,
+            passband_ripple: Some(passband_ripple),
+            stopband_attenuation: Some(stopband_attenuation),
+        }
+    }
+
+    /// Creates an elliptic (Cauer) band-pass / band-stop filter design.
+    ///
+    /// # Arguments
+    ///
+    /// – `response` – frequency response shape (`BandPass` or `BandStop`).\
+    /// – `order` – prototype filter order per edge.\
+    /// – `low_frequency` – lower band edge in Hz; positive, < `high_frequency`.\
+    /// – `high_frequency` – upper band edge in Hz; must be less than Nyquist.\
+    /// – `passband_ripple` – peak passband ripple in dB; positive.\
+    /// – `stopband_attenuation` – minimum stopband attenuation in dB; positive
+    ///   and greater than `passband_ripple`.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Elliptic`.
+    #[inline]
+    #[must_use]
+    pub const fn elliptic_band(
+        response: FilterResponse,
+        order: NonZeroUsize,
+        low_frequency: f64,
+        high_frequency: f64,
+        passband_ripple: f64,
+        stopband_attenuation: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::Elliptic,
+            response,
+            order,
+            cutoff_frequency: None,
+            low_frequency: Some(low_frequency),
+            high_frequency: Some(high_frequency),
+            passband_ripple: Some(passband_ripple),
             stopband_attenuation: Some(stopband_attenuation),
         }
     }

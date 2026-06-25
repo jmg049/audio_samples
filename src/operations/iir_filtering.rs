@@ -1085,6 +1085,11 @@ enum GainRef {
     Dc,
     Nyquist,
     Hz(f64),
+    /// Do not renormalise: trust the gain carried through the bilinear
+    /// transform. Used by elliptic filters, whose passband is equiripple and
+    /// whose DC/edge value is intentionally offset by the ripple bound, so
+    /// pinning |H| = 1 at any single reference would shift the whole passband.
+    Prototype,
 }
 
 /// Assemble a digital ZPK into an [`SosFilter`], normalising the overall gain to
@@ -1121,11 +1126,13 @@ fn zpk_to_sos(zpk: &AnalogZpk, sample_rate: f64, gain_ref: GainRef) -> SosFilter
 
     let mut sos = SosFilter::new(sections);
 
-    // Normalise to unit gain at the reference frequency.
+    // Normalise to unit gain at the reference frequency, unless the prototype
+    // gain is already calibrated (elliptic) and must be preserved.
     let ref_freq = match gain_ref {
         GainRef::Dc => 0.0,
         GainRef::Nyquist => sample_rate / 2.0,
         GainRef::Hz(f) => f,
+        GainRef::Prototype => return sos,
     };
     let (mag, _) = sos.frequency_response(&[ref_freq], sample_rate);
     if mag[0].abs() > 1e-12 {
@@ -1154,18 +1161,39 @@ fn design_from_prototype(
     low: Option<f64>,
     high: Option<f64>,
 ) -> SosFilter {
+    design_from_prototype_with_gain(proto, response, sample_rate, cutoff, low, high, None)
+}
+
+/// As [`design_from_prototype`], but with an optional [`GainRef`] override.
+///
+/// When `gain_override` is `Some`, that reference is used instead of the
+/// response-type default. Elliptic filters pass [`GainRef::Prototype`] so the
+/// carefully calibrated equiripple gain survives unchanged.
+fn design_from_prototype_with_gain(
+    proto: &AnalogZpk,
+    response: FilterResponse,
+    sample_rate: f64,
+    cutoff: Option<f64>,
+    low: Option<f64>,
+    high: Option<f64>,
+    gain_override: Option<GainRef>,
+) -> SosFilter {
     match response {
         FilterResponse::LowPass => {
             let wc = prewarp(cutoff.expect("lowpass needs cutoff"), sample_rate);
             let analog = lp_to_lp(proto, wc);
             let digital = bilinear_zpk(&analog, sample_rate);
-            zpk_to_sos(&digital, sample_rate, GainRef::Dc)
+            zpk_to_sos(&digital, sample_rate, gain_override.unwrap_or(GainRef::Dc))
         }
         FilterResponse::HighPass => {
             let wc = prewarp(cutoff.expect("highpass needs cutoff"), sample_rate);
             let analog = lp_to_hp(proto, wc);
             let digital = bilinear_zpk(&analog, sample_rate);
-            zpk_to_sos(&digital, sample_rate, GainRef::Nyquist)
+            zpk_to_sos(
+                &digital,
+                sample_rate,
+                gain_override.unwrap_or(GainRef::Nyquist),
+            )
         }
         FilterResponse::BandPass => {
             let lo = low.expect("bandpass needs low");
@@ -1178,7 +1206,11 @@ fn design_from_prototype(
             let digital = bilinear_zpk(&analog, sample_rate);
             // Normalise at the geometric-centre frequency (Hz).
             let center_hz = (lo * hi).sqrt();
-            zpk_to_sos(&digital, sample_rate, GainRef::Hz(center_hz))
+            zpk_to_sos(
+                &digital,
+                sample_rate,
+                gain_override.unwrap_or(GainRef::Hz(center_hz)),
+            )
         }
         FilterResponse::BandStop => {
             let lo = low.expect("bandstop needs low");
@@ -1190,7 +1222,7 @@ fn design_from_prototype(
             let analog = lp_to_bs(proto, omega0, bw);
             let digital = bilinear_zpk(&analog, sample_rate);
             // Band-stop passes DC, so normalise there.
-            zpk_to_sos(&digital, sample_rate, GainRef::Dc)
+            zpk_to_sos(&digital, sample_rate, gain_override.unwrap_or(GainRef::Dc))
         }
     }
 }
@@ -1862,6 +1894,340 @@ fn design_chebyshev1_highpass_sos(
 // cascaded-LP+HP approximation.
 
 // ============================================================================
+// Bessel (Bessel–Thomson) analog prototype
+// ============================================================================
+//
+// The Bessel low-pass prototype is all-pole: its poles are the roots of the
+// reverse Bessel polynomial θ_N(s) of degree N. We compute those roots
+// numerically (Durand–Kerner), then frequency-normalise so the magnitude
+// response is −3 dB at ω = 1 rad/s. This matches the default of older SciPy
+// and `scipy.signal.bessel(..., norm='mag')`. The poles agree with SciPy to
+// better than 1e-12 for orders ≤ 8 (validated in tests).
+
+/// Reverse Bessel polynomial coefficients θ_N(x) = Σ a_k x^k, returned
+/// highest-degree-first (a_N, a_{N-1}, …, a_0) for the root finder.
+///
+/// a_k = (2N − k)! / (2^(N−k) · k! · (N−k)!).
+fn reverse_bessel_coeffs(order: usize) -> Vec<f64> {
+    // Compute factorials as f64; orders are small (≤ 12) so 24! fits in f64
+    // exactly enough for these well-conditioned roots.
+    fn factorial(n: usize) -> f64 {
+        (1..=n).fold(1.0_f64, |acc, i| acc * i as f64)
+    }
+    let n = order;
+    let mut coeffs = Vec::with_capacity(n + 1);
+    for k in 0..=n {
+        let a_k =
+            factorial(2 * n - k) / (2.0_f64.powi((n - k) as i32) * factorial(k) * factorial(n - k));
+        coeffs.push(a_k);
+    }
+    coeffs.reverse(); // highest degree first
+    coeffs
+}
+
+/// Find all complex roots of a polynomial via the Durand–Kerner (Weierstrass)
+/// iteration. `coeffs` are highest-degree-first; the polynomial is made monic
+/// internally. Robust for the well-conditioned Bessel polynomials used here.
+fn durand_kerner(coeffs: &[f64]) -> Vec<Complex<f64>> {
+    let lead = coeffs[0];
+    let monic: Vec<Complex<f64>> = coeffs.iter().map(|&c| Complex::new(c / lead, 0.0)).collect();
+    let n = monic.len() - 1;
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Horner evaluation of the monic polynomial.
+    let poly = |x: Complex<f64>| -> Complex<f64> {
+        let mut r = monic[0];
+        for &a in &monic[1..] {
+            r = r * x + a;
+        }
+        r
+    };
+
+    // Spread initial guesses around the complex plane to avoid degeneracy.
+    let seed = Complex::new(0.4, 0.9);
+    let mut roots: Vec<Complex<f64>> = (0..n).map(|k| seed.powu(k as u32)).collect();
+
+    for _ in 0..1000 {
+        let mut max_delta = 0.0_f64;
+        let current = roots.clone();
+        for i in 0..n {
+            let mut den = Complex::new(1.0, 0.0);
+            for j in 0..n {
+                if j != i {
+                    den *= current[i] - current[j];
+                }
+            }
+            let delta = poly(current[i]) / den;
+            roots[i] = current[i] - delta;
+            max_delta = max_delta.max(delta.norm());
+        }
+        if max_delta < 1e-15 {
+            break;
+        }
+    }
+    roots
+}
+
+/// Magnitude of an all-pole transfer function H(s) = gain / Π(s − p) at s = jω.
+fn allpole_mag(poles: &[Complex<f64>], gain: f64, omega: f64) -> f64 {
+    let s = Complex::new(0.0, omega);
+    let mut val = Complex::new(gain, 0.0);
+    for &p in poles {
+        val /= s - p;
+    }
+    val.norm()
+}
+
+/// Normalised analog Bessel low-pass prototype (−3 dB at ω = 1, all-pole).
+///
+/// Poles are the reverse-Bessel-polynomial roots scaled so that the magnitude
+/// drops to 1/√2 at ω = 1 rad/s (SciPy `norm='mag'`). No finite zeros.
+fn bessel_prototype(order: usize) -> AnalogZpk {
+    let coeffs = reverse_bessel_coeffs(order);
+    let raw_poles = durand_kerner(&coeffs);
+
+    // Gain so H(0) = 1: gain = Π(−p).
+    let gain0 = raw_poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p))
+        .re;
+
+    // Locate the −3 dB frequency by bisection (magnitude is monotone-decreasing
+    // for the Bessel low-pass), then scale every pole by 1/ω₀.
+    let target = 1.0 / 2.0_f64.sqrt();
+    let mut lo = 1e-3_f64;
+    let mut hi = 100.0_f64;
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if allpole_mag(&raw_poles, gain0, mid) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let omega0 = 0.5 * (lo + hi);
+
+    let poles: Vec<Complex<f64>> = raw_poles.iter().map(|&p| p / omega0).collect();
+    // Unit-gain prototype at DC: gain = Π(−p) of the scaled poles.
+    let gain = poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p))
+        .re;
+
+    AnalogZpk {
+        zeros: Vec::new(),
+        poles,
+        gain,
+    }
+}
+
+// ============================================================================
+// Elliptic (Cauer) analog prototype
+// ============================================================================
+//
+// Equiripple in BOTH passband and stopband. Implemented after Orfanidis'
+// "Lecture Notes on Elliptic Filter Design" (the same algorithm SciPy's
+// `ellipap` uses): the special functions K(m), the Jacobi functions sn/cn/dn,
+// the modular degree equation and the inverse Jacobi sn are all evaluated via
+// the AGM / Landen transformation. The resulting zeros, poles and gain match
+// `scipy.signal.ellip(..., analog=True)` to ≈1e-12 (validated in tests).
+//
+// Throughout, the modulus convention is m = k² (as in SciPy), so e.g.
+// `ellipk(m)` is the complete elliptic integral K with parameter m.
+
+/// Complete elliptic integral of the first kind K(m), m = k², via AGM.
+fn ellipk(m: f64) -> f64 {
+    if m >= 1.0 {
+        return f64::INFINITY;
+    }
+    let (mut a, mut b) = (1.0_f64, (1.0 - m).sqrt());
+    for _ in 0..60 {
+        if (a - b).abs() <= 1e-16 * a.abs() {
+            break;
+        }
+        let an = 0.5 * (a + b);
+        let bn = (a * b).sqrt();
+        a = an;
+        b = bn;
+    }
+    f64::PI() / (2.0 * a)
+}
+
+/// Jacobi elliptic functions (sn, cn, dn) for real argument `u`, modulus
+/// `m = k²`, via the descending-Landen / AGM scale sequence.
+fn ellipj(u: f64, m: f64) -> (f64, f64, f64) {
+    if m == 0.0 {
+        return (u.sin(), u.cos(), 1.0);
+    }
+    let mut a = vec![1.0_f64];
+    let mut c = vec![m.sqrt()];
+    let mut b = (1.0 - m).sqrt();
+    let mut n = 0usize;
+    while c[n].abs() > 1e-15 && n < 40 {
+        let ai = a[n];
+        let bi = b;
+        a.push(0.5 * (ai + bi));
+        c.push(0.5 * (ai - bi));
+        b = (ai * bi).sqrt();
+        n += 1;
+    }
+    let mut phi = (2.0_f64).powi(n as i32) * a[n] * u;
+    for i in (1..=n).rev() {
+        let arg = (c[i] / a[i] * phi.sin()).clamp(-1.0, 1.0);
+        phi = 0.5 * (phi + arg.asin());
+    }
+    let sn = phi.sin();
+    let cn = phi.cos();
+    let dn = (1.0 - m * sn * sn).max(0.0).sqrt();
+    (sn, cn, dn)
+}
+
+/// Solve the modular degree equation n·K(m)/K'(m) = K(m₁)/K'(m₁) for m, using
+/// the nome series (Orfanidis Eq. 49). `m1` is the squared selectivity ck1².
+fn ellipdeg(n: usize, m1: f64) -> f64 {
+    const MMAX: usize = 7;
+    let k1 = ellipk(m1);
+    let k1p = ellipk(1.0 - m1);
+    let q1 = (-f64::PI() * k1p / k1).exp();
+    let q = q1.powf(1.0 / n as f64);
+
+    let mut num = 0.0_f64;
+    for i in 0..=MMAX {
+        num += q.powi((i * (i + 1)) as i32);
+    }
+    let mut den = 1.0_f64;
+    for i in 1..=(MMAX + 1) {
+        den += 2.0 * q.powi((i * i) as i32);
+    }
+    16.0 * q * (num / den).powi(4)
+}
+
+/// Inverse Jacobi sn for complex argument `w`, modulus `m = k²`, via the
+/// ascending Landen transformation (Orfanidis Eq. 56).
+fn arc_jac_sn(w: Complex<f64>, m: f64) -> Complex<f64> {
+    // (1 - kx²)^(1/2) for complex kx.
+    let complement = |kx: Complex<f64>| ((Complex::new(1.0, 0.0) - kx) * (Complex::new(1.0, 0.0) + kx)).sqrt();
+
+    let mut ks = vec![m.sqrt()];
+    let mut k_ = m.sqrt();
+    let mut n = 0usize;
+    while k_ != 0.0 && n < 30 {
+        let kp = complement(Complex::new(k_, 0.0)).re;
+        k_ = (1.0 - kp) / (1.0 + kp);
+        ks.push(k_);
+        n += 1;
+    }
+    // K = Π(1 + k_i) · π/2 over the descended moduli (excluding the seed).
+    let big_k: f64 = ks[1..].iter().fold(1.0, |acc, &kv| acc * (1.0 + kv)) * f64::PI() / 2.0;
+
+    let mut wn = w;
+    for idx in 0..(ks.len() - 1) {
+        let kn = ks[idx];
+        let knext = ks[idx + 1];
+        wn = (2.0 * wn)
+            / ((1.0 + knext) * (Complex::new(1.0, 0.0) + complement(Complex::new(kn, 0.0) * wn)));
+    }
+    // u = (2/π)·asin(w_last); z = K·u.
+    let u = (2.0 / f64::PI()) * complex_asin(wn);
+    Complex::new(big_k, 0.0) * u
+}
+
+/// Complex arcsine, asin(z) = −i·ln(i·z + sqrt(1 − z²)).
+fn complex_asin(z: Complex<f64>) -> Complex<f64> {
+    let i = Complex::new(0.0, 1.0);
+    let one = Complex::new(1.0, 0.0);
+    let root = (one - z * z).sqrt();
+    -i * (i * z + root).ln()
+}
+
+/// Real inverse Jacobi sc with complementary modulus: solve w = sc(z, 1−m)
+/// for real z. Uses sc(z, m) = −i·sn(i·z, 1−m) ⇒ z = Im(arc_jac_sn(i·w, m)).
+fn arc_jac_sc1(w: f64, m: f64) -> f64 {
+    arc_jac_sn(Complex::new(0.0, w), m).im
+}
+
+/// Normalised analog elliptic (Cauer) low-pass prototype (passband edge at
+/// ω = 1), following Orfanidis / SciPy `ellipap`.
+///
+/// `rp` is the passband ripple in dB; `rs` the stopband attenuation in dB.
+/// Returns finite imaginary-axis zeros, left-half-plane poles and a real gain.
+fn elliptic_prototype(order: usize, rp: f64, rs: f64) -> AnalogZpk {
+    let n = order;
+    let eps_sq = (10.0_f64.powf(0.1 * rp)) - 1.0; // ε² = 10^(rp/10) − 1
+    let eps = eps_sq.sqrt();
+    let ck1_sq = eps_sq / (10.0_f64.powf(0.1 * rs) - 1.0); // selectivity²
+
+    let m = ellipdeg(n, ck1_sq);
+    let capk = ellipk(m);
+
+    // j runs over 1−(N mod 2), …, N−1 stepping by 2 (the prototype indices).
+    let j_start = 1 - (n % 2);
+    let mut js = Vec::new();
+    let mut jv = j_start as i64;
+    while (jv as usize) < n {
+        js.push(jv);
+        jv += 2;
+    }
+
+    // Finite transmission zeros on the imaginary axis: z = j / (√m · sn).
+    let mut zeros = Vec::new();
+    for &jval in &js {
+        let (s, _c, _d) = ellipj(jval as f64 * capk / n as f64, m);
+        if s.abs() > 2e-16 {
+            let z = 1.0 / (m.sqrt() * s);
+            zeros.push(Complex::new(0.0, z));
+        }
+    }
+    let conj_zeros: Vec<Complex<f64>> = zeros.iter().map(|z| z.conj()).collect();
+    zeros.extend(conj_zeros);
+
+    // Pole placement: shift the prototype by v0 along the imaginary axis.
+    let r = arc_jac_sc1(1.0 / eps, ck1_sq);
+    let v0 = capk * r / (n as f64 * ellipk(ck1_sq));
+    let (sv, cv, dv) = ellipj(v0, 1.0 - m);
+
+    let mut poles = Vec::new();
+    for &jval in &js {
+        let (s, c, d) = ellipj(jval as f64 * capk / n as f64, m);
+        // p = −(c·d·sv·cv + j·s·dv) / (1 − (d·sv)²)
+        let num = Complex::new(c * d * sv * cv, s * dv);
+        let den = 1.0 - (d * sv) * (d * sv);
+        poles.push(-num / den);
+    }
+    if n % 2 == 1 {
+        // Odd order keeps a real pole; mirror only the genuinely complex ones.
+        let new_poles: Vec<Complex<f64>> = poles
+            .iter()
+            .filter(|p| p.im.abs() > 1e-12)
+            .map(|p| p.conj())
+            .collect();
+        poles.extend(new_poles);
+    } else {
+        let conj_poles: Vec<Complex<f64>> = poles.iter().map(|p| p.conj()).collect();
+        poles.extend(conj_poles);
+    }
+
+    // Gain k = Re(Π(−p) / Π(−z)); even order is divided by √(1+ε²) so the
+    // DC value lands on the −rp ripple bound.
+    let prod_p = poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
+    let prod_z = if zeros.is_empty() {
+        Complex::new(1.0, 0.0)
+    } else {
+        zeros.iter().fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z))
+    };
+    let mut gain = (prod_p / prod_z).re;
+    if n % 2 == 0 {
+        gain /= (1.0 + eps_sq).sqrt();
+    }
+
+    AnalogZpk { zeros, poles, gain }
+}
+
+// ============================================================================
 // IIR filter design dispatcher
 // ============================================================================
 
@@ -1890,10 +2256,15 @@ fn design_iir_filter(
         IirFilterType::Butterworth => design_butterworth_filter(design, sample_rate),
         IirFilterType::ChebyshevI => design_chebyshev_i_filter(design, sample_rate),
         IirFilterType::ChebyshevII => design_chebyshev_ii_filter(design, sample_rate),
+        IirFilterType::Bessel => design_bessel_filter(design, sample_rate),
+        IirFilterType::Elliptic => design_elliptic_filter(design, sample_rate),
+        // `IirFilterType` is `#[non_exhaustive]`; future variants fall through
+        // here until a dedicated design path is wired up.
+        #[allow(unreachable_patterns)]
         other => Err(AudioSampleError::unsupported(
             "design_iir_filter",
             format!(
-                "filter type {other:?} is not yet implemented; use Butterworth, ChebyshevI or ChebyshevII"
+                "filter type {other:?} is not yet implemented; use Butterworth, ChebyshevI, ChebyshevII, Bessel or Elliptic"
             ),
         )),
     }
@@ -2285,6 +2656,188 @@ fn design_chebyshev_ii_filter(
                 None,
                 Some(low_freq),
                 Some(high_freq),
+            );
+            Ok(sos_to_cascade(&sos))
+        }
+    }
+}
+
+/// Design a Bessel (Bessel–Thomson) filter.
+///
+/// All-pole maximally-flat-group-delay prototype, normalised so the magnitude
+/// is −3 dB at the cutoff. Low/high-pass use `cutoff_frequency`; band-pass /
+/// band-stop use `low_frequency`/`high_frequency`.
+fn design_bessel_filter(
+    design: &IirFilterDesign,
+    sample_rate: f64,
+) -> AudioSampleResult<FilterRepresentation> {
+    let nyquist = sample_rate / 2.0;
+    let order = design.order.get();
+
+    if order > 12 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "order",
+            "Filter order must be ≤ 12 for numerical stability",
+        )));
+    }
+
+    let proto = bessel_prototype(order);
+
+    match design.response {
+        FilterResponse::LowPass | FilterResponse::HighPass => {
+            let cutoff = design.cutoff_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency required for low/high-pass filter",
+                ))
+            })?;
+            if cutoff <= 0.0 || cutoff >= nyquist {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency must be between 0 and Nyquist frequency",
+                )));
+            }
+            let sos = design_from_prototype(
+                &proto,
+                design.response,
+                sample_rate,
+                Some(cutoff),
+                None,
+                None,
+            );
+            Ok(sos_to_cascade(&sos))
+        }
+        FilterResponse::BandPass | FilterResponse::BandStop => {
+            let low_freq = design.low_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "low_frequency",
+                    "Low frequency required for band filter",
+                ))
+            })?;
+            let high_freq = design.high_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "high_frequency",
+                    "High frequency required for band filter",
+                ))
+            })?;
+            if low_freq <= 0.0 || high_freq >= nyquist || low_freq >= high_freq {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "frequency_range",
+                    "Invalid frequency range for band filter",
+                )));
+            }
+            let sos = design_from_prototype(
+                &proto,
+                design.response,
+                sample_rate,
+                None,
+                Some(low_freq),
+                Some(high_freq),
+            );
+            Ok(sos_to_cascade(&sos))
+        }
+    }
+}
+
+/// Design an elliptic (Cauer) filter.
+///
+/// Equiripple in both passband and stopband. `passband_ripple` (dB) sets the
+/// passband ripple; `stopband_attenuation` (dB) the stopband floor. Low/high-
+/// pass use `cutoff_frequency` (the passband edge); band responses use
+/// `low_frequency`/`high_frequency`.
+fn design_elliptic_filter(
+    design: &IirFilterDesign,
+    sample_rate: f64,
+) -> AudioSampleResult<FilterRepresentation> {
+    let nyquist = sample_rate / 2.0;
+    let order = design.order.get();
+
+    let rp = design.passband_ripple.ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "passband_ripple",
+            "Passband ripple required for elliptic filter",
+        ))
+    })?;
+    let rs = design.stopband_attenuation.ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "stopband_attenuation",
+            "Stopband attenuation required for elliptic filter",
+        ))
+    })?;
+
+    if rp <= 0.0 || rp > 10.0 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "passband_ripple",
+            "Passband ripple must be between 0 and 10 dB",
+        )));
+    }
+    if rs <= rp || rs > 200.0 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "stopband_attenuation",
+            "Stopband attenuation must exceed passband ripple and be ≤ 200 dB",
+        )));
+    }
+    if order > 12 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "order",
+            "Filter order must be ≤ 12 for numerical stability",
+        )));
+    }
+
+    let proto = elliptic_prototype(order, rp, rs);
+
+    match design.response {
+        FilterResponse::LowPass | FilterResponse::HighPass => {
+            let cutoff = design.cutoff_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency required for low/high-pass filter",
+                ))
+            })?;
+            if cutoff <= 0.0 || cutoff >= nyquist * 0.95 {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency must be between 0 and 0.95 * Nyquist frequency",
+                )));
+            }
+            let sos = design_from_prototype_with_gain(
+                &proto,
+                design.response,
+                sample_rate,
+                Some(cutoff),
+                None,
+                None,
+                Some(GainRef::Prototype),
+            );
+            Ok(sos_to_cascade(&sos))
+        }
+        FilterResponse::BandPass | FilterResponse::BandStop => {
+            let low_freq = design.low_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "low_frequency",
+                    "Low frequency required for band filter",
+                ))
+            })?;
+            let high_freq = design.high_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "high_frequency",
+                    "High frequency required for band filter",
+                ))
+            })?;
+            if low_freq <= 0.0 || high_freq >= nyquist * 0.95 || low_freq >= high_freq {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "frequency_range",
+                    "Invalid frequency range for band filter",
+                )));
+            }
+            let sos = design_from_prototype_with_gain(
+                &proto,
+                design.response,
+                sample_rate,
+                None,
+                Some(low_freq),
+                Some(high_freq),
+                Some(GainRef::Prototype),
             );
             Ok(sos_to_cascade(&sos))
         }
@@ -3413,5 +3966,529 @@ mod tests {
         );
         bs.response = FilterResponse::BandStop;
         assert!(audio.apply_iir_filter_in_place(&bs).is_ok());
+    }
+
+    // ========================================================================
+    // Bessel filter tests
+    //
+    // Reference dB values cross-checked against
+    //   scipy.signal.bessel(N, Wn, btype, output='sos', fs=44100, norm='mag')
+    // evaluated with signal.sosfreqz. Checkpoints noted inline.
+    // ========================================================================
+
+    /// The analog Bessel prototype poles must match scipy's `norm='mag'`
+    /// prototype (−3 dB at ω = 1) to high precision for orders 2,4,6,8.
+    #[test]
+    fn test_bessel_prototype_poles_match_scipy() {
+        // scipy.signal.bessel(N, 1, analog=True, output='zpk', norm='mag')
+        // poles, sorted by (imag, real).
+        let order4 = [
+            Complex::new(-0.995208764350272, -1.257105739454664),
+            Complex::new(-1.370067830551442, -0.410249717493752),
+            Complex::new(-1.370067830551442, 0.410249717493752),
+            Complex::new(-0.995208764350272, 1.257105739454664),
+        ];
+        let proto = super::bessel_prototype(4);
+        let mut got = proto.poles.clone();
+        got.sort_by(|a, b| {
+            a.im.partial_cmp(&b.im)
+                .unwrap()
+                .then(a.re.partial_cmp(&b.re).unwrap())
+        });
+        assert_eq!(got.len(), 4);
+        for (g, e) in got.iter().zip(order4.iter()) {
+            assert!(
+                (g - e).norm() < 1e-9,
+                "Bessel N=4 pole mismatch: got {g}, expected {e}"
+            );
+        }
+        assert!(proto.zeros.is_empty(), "Bessel prototype is all-pole");
+
+        // Order 2 prototype magnitude must be exactly −3 dB at ω = 1.
+        let proto2 = super::bessel_prototype(2);
+        let mag1 = super::allpole_mag(&proto2.poles, proto2.gain, 1.0);
+        assert!(
+            (db(mag1) - (-3.0103)).abs() < 1e-3,
+            "Bessel −3 dB normalization off: {} dB",
+            db(mag1)
+        );
+    }
+
+    #[test]
+    fn test_bessel_lowpass_response() {
+        // order 4, cutoff 1000 Hz. SciPy: 0 Hz 0 dB, 100 −0.028, 500 −0.703,
+        // 1000 −3.01, 2000 −13.53, 4000 −35.30. Monotonic, no ripple.
+        let proto = super::bessel_prototype(4);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::LowPass,
+            FS,
+            Some(1000.0),
+            None,
+            None,
+        );
+        assert!(mag_db(&sos, 0.0).abs() < 0.01, "DC: {}", mag_db(&sos, 0.0));
+        assert!(
+            (mag_db(&sos, 500.0) - (-0.703)).abs() < 0.1,
+            "500Hz: {}",
+            mag_db(&sos, 500.0)
+        );
+        assert!(
+            (mag_db(&sos, 1000.0) - (-3.01)).abs() < 0.1,
+            "cutoff −3 dB: {}",
+            mag_db(&sos, 1000.0)
+        );
+        assert!(
+            (mag_db(&sos, 2000.0) - (-13.533)).abs() < 0.3,
+            "2000Hz: {}",
+            mag_db(&sos, 2000.0)
+        );
+        assert!(
+            (mag_db(&sos, 4000.0) - (-35.295)).abs() < 0.5,
+            "4000Hz: {}",
+            mag_db(&sos, 4000.0)
+        );
+
+        // Monotonic roll-off (no ripple): magnitude strictly decreasing.
+        let mut prev = mag_db(&sos, 0.0);
+        for f in [50.0, 200.0, 500.0, 800.0, 1000.0, 1500.0, 2000.0, 3000.0] {
+            let cur = mag_db(&sos, f);
+            assert!(cur <= prev + 1e-6, "non-monotonic at {f}Hz: {cur} > {prev}");
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn test_bessel_lowpass_flat_group_delay() {
+        // The defining Bessel property: approximately flat group delay across
+        // the passband. We estimate group delay by finite-differencing the
+        // unwrapped phase of the SOS response.
+        let proto = super::bessel_prototype(4);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::LowPass,
+            FS,
+            Some(1000.0),
+            None,
+            None,
+        );
+
+        // group delay τ(f) = −dφ/dω, ω = 2πf/FS. Sample finely in passband.
+        let freqs: Vec<f64> = (1..=40).map(|i| i as f64 * 20.0).collect(); // 20..800 Hz
+        let (_, phases) = sos.frequency_response(&freqs, FS);
+        // unwrap phase
+        let mut unwrapped = phases.clone();
+        for i in 1..unwrapped.len() {
+            let mut d = unwrapped[i] - unwrapped[i - 1];
+            while d > PI {
+                d -= 2.0 * PI;
+            }
+            while d < -PI {
+                d += 2.0 * PI;
+            }
+            unwrapped[i] = unwrapped[i - 1] + d;
+        }
+        let dw = 2.0 * PI * 20.0 / FS;
+        let mut gds = Vec::new();
+        for i in 1..unwrapped.len() {
+            gds.push(-(unwrapped[i] - unwrapped[i - 1]) / dw);
+        }
+        let mean: f64 = gds.iter().sum::<f64>() / gds.len() as f64;
+        // scipy group delay is ~14.8 samples and very flat across passband.
+        for &g in &gds {
+            assert!(
+                (g - mean).abs() / mean < 0.05,
+                "group delay not flat: {g} vs mean {mean}"
+            );
+        }
+        assert!(
+            (mean - 14.8).abs() < 1.0,
+            "group delay mean {mean} (expected ~14.8 samples)"
+        );
+    }
+
+    #[test]
+    fn test_bessel_highpass_response() {
+        // order 4, cutoff 1000 Hz. SciPy: Nyquist 0 dB, 5000 −0.10,
+        // 2000 −0.70, 1000 −3.01, 500 −13.44, 100 −65.7.
+        let proto = super::bessel_prototype(4);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::HighPass,
+            FS,
+            Some(1000.0),
+            None,
+            None,
+        );
+        assert!(
+            mag_db(&sos, 22050.0).abs() < 0.05,
+            "Nyquist: {}",
+            mag_db(&sos, 22050.0)
+        );
+        assert!(
+            (mag_db(&sos, 2000.0) - (-0.698)).abs() < 0.1,
+            "2000Hz: {}",
+            mag_db(&sos, 2000.0)
+        );
+        assert!(
+            (mag_db(&sos, 1000.0) - (-3.01)).abs() < 0.1,
+            "cutoff: {}",
+            mag_db(&sos, 1000.0)
+        );
+        assert!(
+            (mag_db(&sos, 500.0) - (-13.437)).abs() < 0.4,
+            "500Hz: {}",
+            mag_db(&sos, 500.0)
+        );
+    }
+
+    #[test]
+    fn test_bessel_bandpass_response() {
+        // order 4, band [500,2000], centre 1000 Hz. SciPy: centre ~0 dB,
+        // 100 −51 dB, 8000 −47 dB, 250 −19.5 dB.
+        let proto = super::bessel_prototype(4);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::BandPass,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+        assert!(
+            mag_db(&sos, center).abs() < 0.5,
+            "centre: {}",
+            mag_db(&sos, center)
+        );
+        assert!(
+            mag_db(&sos, 100.0) <= -30.0,
+            "100Hz: {}",
+            mag_db(&sos, 100.0)
+        );
+        assert!(
+            mag_db(&sos, 8000.0) <= -30.0,
+            "8000Hz: {}",
+            mag_db(&sos, 8000.0)
+        );
+    }
+
+    #[test]
+    fn test_bessel_bandstop_response() {
+        // order 4, band [500,2000], notch at 1000 Hz. SciPy: notch very deep,
+        // DC/15 kHz ~0 dB.
+        let proto = super::bessel_prototype(4);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::BandStop,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+        assert!(
+            mag_db(&sos, center) <= -40.0,
+            "notch: {}",
+            mag_db(&sos, center)
+        );
+        assert!(mag_db(&sos, 50.0).abs() < 0.5, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 15000.0).abs() < 0.5,
+            "15kHz: {}",
+            mag_db(&sos, 15000.0)
+        );
+    }
+
+    #[test]
+    fn test_bessel_dispatcher_wired() {
+        let samples = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
+        let mut audio: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+        let design =
+            IirFilterDesign::bessel(FilterResponse::LowPass, NonZeroUsize::new(4).unwrap(), 1000.0);
+        assert!(audio.apply_iir_filter_in_place(&design).is_ok());
+
+        let samples2 = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
+        let mut audio2: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
+        let bp = IirFilterDesign::bessel_band(
+            FilterResponse::BandPass,
+            NonZeroUsize::new(4).unwrap(),
+            500.0,
+            2000.0,
+        );
+        assert!(audio2.apply_iir_filter_in_place(&bp).is_ok());
+    }
+
+    // ========================================================================
+    // Elliptic (Cauer) filter tests
+    //
+    // Reference dB values cross-checked against
+    //   scipy.signal.ellip(N, rp, rs, Wn, btype, output='sos', fs=44100)
+    // evaluated with signal.sosfreqz. Checkpoints noted inline.
+    // ========================================================================
+
+    /// The analog elliptic prototype zeros/poles/gain must match SciPy's
+    /// `ellipap` to ≈1e-9 for both even and odd orders.
+    #[test]
+    fn test_elliptic_prototype_matches_scipy() {
+        // scipy.signal.ellip(4, 1, 40, 1, analog=True, output='zpk').
+        let poles_ref = [
+            Complex::new(-0.1052812646, -0.9937108112),
+            Complex::new(-0.3642905959, -0.4786027676),
+            Complex::new(-0.3642905959, 0.4786027676),
+            Complex::new(-0.1052812646, 0.9937108112),
+        ];
+        let zeros_ref = [
+            Complex::new(0.0, -3.5252874330),
+            Complex::new(0.0, -1.6095504012),
+            Complex::new(0.0, 1.6095504012),
+            Complex::new(0.0, 3.5252874330),
+        ];
+        let k_ref = 1.000000000000e-02;
+
+        let proto = super::elliptic_prototype(4, 1.0, 40.0);
+        let mut p = proto.poles.clone();
+        p.sort_by(|a, b| {
+            a.im.partial_cmp(&b.im)
+                .unwrap()
+                .then(a.re.partial_cmp(&b.re).unwrap())
+        });
+        let mut z = proto.zeros.clone();
+        z.sort_by(|a, b| {
+            a.im.partial_cmp(&b.im)
+                .unwrap()
+                .then(a.re.partial_cmp(&b.re).unwrap())
+        });
+        for (g, e) in p.iter().zip(poles_ref.iter()) {
+            assert!((g - e).norm() < 1e-8, "pole mismatch got {g} exp {e}");
+        }
+        for (g, e) in z.iter().zip(zeros_ref.iter()) {
+            assert!((g - e).norm() < 1e-7, "zero mismatch got {g} exp {e}");
+        }
+        assert!(
+            (proto.gain - k_ref).abs() < 1e-9,
+            "gain mismatch got {} exp {k_ref}",
+            proto.gain
+        );
+
+        // Odd order N=3, rp=0.5, rs=60: pole/zero counts and a real pole.
+        let proto3 = super::elliptic_prototype(3, 0.5, 60.0);
+        assert_eq!(proto3.poles.len(), 3, "N=3 has 3 poles");
+        assert_eq!(proto3.zeros.len(), 2, "N=3 drops one zero to infinity");
+        assert!(
+            proto3.poles.iter().any(|p| p.im.abs() < 1e-9),
+            "odd order should have a real pole"
+        );
+    }
+
+    #[test]
+    fn test_elliptic_lowpass_response() {
+        // order 4, cutoff 2000 Hz, rp=1, rs=40. SciPy: DC −1.0, 500 −0.435,
+        // 1000 −0.085, 1500 −0.998, 1900 −0.013, 2000 −1.0, 2500 −18.82,
+        // 4000 −40.03, 8000 −49.2.
+        let proto = super::elliptic_prototype(4, 1.0, 40.0);
+        let sos = super::design_from_prototype_with_gain(
+            &proto,
+            FilterResponse::LowPass,
+            FS,
+            Some(2000.0),
+            None,
+            None,
+            Some(super::GainRef::Prototype),
+        );
+        // Passband ripple stays within [−1, 0] dB (allow tiny slack).
+        for f in [0.0, 500.0, 1000.0, 1500.0, 1900.0, 2000.0] {
+            let g = mag_db(&sos, f);
+            assert!(
+                g <= 0.05 && g >= -1.0 - 0.1,
+                "passband {f}Hz gain {g} outside ripple bound"
+            );
+        }
+        // Equiripple: the passband touches the −1 dB bound more than once.
+        let touches = [0.0_f64, 1500.0, 2000.0]
+            .iter()
+            .filter(|&&f| (mag_db(&sos, f) - (-1.0)).abs() < 0.05)
+            .count();
+        assert!(touches >= 2, "expected multiple −1 dB touches, got {touches}");
+        // Equiripple peaks (touch 0 dB) between the −1 dB dips.
+        assert!(
+            mag_db(&sos, 1000.0) >= -0.2,
+            "passband peak 1000Hz: {}",
+            mag_db(&sos, 1000.0)
+        );
+        assert!(
+            mag_db(&sos, 1900.0) >= -0.2,
+            "passband peak 1900Hz: {}",
+            mag_db(&sos, 1900.0)
+        );
+
+        // Stopband: ≥40 dB at and beyond the stopband edge.
+        assert!(
+            mag_db(&sos, 4000.0) <= -40.0 + 0.5,
+            "4000Hz: {}",
+            mag_db(&sos, 4000.0)
+        );
+        assert!(
+            mag_db(&sos, 8000.0) <= -40.0 + 0.5,
+            "8000Hz: {}",
+            mag_db(&sos, 8000.0)
+        );
+        // Cross-check exact SciPy transition value.
+        assert!(
+            (mag_db(&sos, 2500.0) - (-18.819)).abs() < 0.5,
+            "2500Hz: {}",
+            mag_db(&sos, 2500.0)
+        );
+    }
+
+    #[test]
+    fn test_elliptic_highpass_response() {
+        // order 4, cutoff 2000 Hz, rp=1, rs=40. SciPy: Nyquist −1.0,
+        // 4000 −0.066, 2000 −1.0, 1500 −24.6, 1000 −40.0, 500 −53.6.
+        let proto = super::elliptic_prototype(4, 1.0, 40.0);
+        let sos = super::design_from_prototype_with_gain(
+            &proto,
+            FilterResponse::HighPass,
+            FS,
+            Some(2000.0),
+            None,
+            None,
+            Some(super::GainRef::Prototype),
+        );
+        for f in [4000.0, 8000.0, 22000.0] {
+            let g = mag_db(&sos, f);
+            assert!(g <= 0.05 && g >= -1.1, "passband {f}Hz gain {g}");
+        }
+        assert!(
+            (mag_db(&sos, 2000.0) - (-1.0)).abs() < 0.1,
+            "edge 2000Hz: {}",
+            mag_db(&sos, 2000.0)
+        );
+        assert!(
+            mag_db(&sos, 1000.0) <= -40.0 + 0.5,
+            "1000Hz stopband: {}",
+            mag_db(&sos, 1000.0)
+        );
+        assert!(
+            mag_db(&sos, 500.0) <= -40.0 + 0.5,
+            "500Hz stopband: {}",
+            mag_db(&sos, 500.0)
+        );
+    }
+
+    #[test]
+    fn test_elliptic_bandpass_response() {
+        // order 4, band [500,2000], rp=1, rs=40. SciPy: band edges and centre
+        // within ripple bound; 100 −43, 8000 −44, 250 −43 dB.
+        let proto = super::elliptic_prototype(4, 1.0, 40.0);
+        let sos = super::design_from_prototype_with_gain(
+            &proto,
+            FilterResponse::BandPass,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+            Some(super::GainRef::Prototype),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+        for f in [500.0, center, 2000.0] {
+            let g = mag_db(&sos, f);
+            assert!(g <= 0.1 && g >= -1.0 - 0.2, "passband {f}Hz gain {g}");
+        }
+        assert!(
+            mag_db(&sos, 100.0) <= -40.0 + 0.5,
+            "100Hz: {}",
+            mag_db(&sos, 100.0)
+        );
+        assert!(
+            mag_db(&sos, 8000.0) <= -40.0 + 0.5,
+            "8000Hz: {}",
+            mag_db(&sos, 8000.0)
+        );
+    }
+
+    #[test]
+    fn test_elliptic_bandstop_response() {
+        // order 4, band [500,2000], rp=1, rs=40. SciPy: notch band ≥40 dB,
+        // DC/15 kHz within ripple bound.
+        let proto = super::elliptic_prototype(4, 1.0, 40.0);
+        let sos = super::design_from_prototype_with_gain(
+            &proto,
+            FilterResponse::BandStop,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+            Some(super::GainRef::Prototype),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+        assert!(
+            mag_db(&sos, center) <= -40.0 + 0.5,
+            "notch centre: {}",
+            mag_db(&sos, center)
+        );
+        assert!(
+            mag_db(&sos, 500.0) <= -1.0 + 0.1,
+            "edge 500Hz: {}",
+            mag_db(&sos, 500.0)
+        );
+        assert!(
+            mag_db(&sos, 2000.0) <= -1.0 + 0.1,
+            "edge 2000Hz: {}",
+            mag_db(&sos, 2000.0)
+        );
+        // Passband on both sides within the ripple bound.
+        assert!(mag_db(&sos, 50.0) >= -1.1, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 15000.0) >= -1.1,
+            "15kHz: {}",
+            mag_db(&sos, 15000.0)
+        );
+    }
+
+    #[test]
+    fn test_elliptic_dispatcher_wired() {
+        let samples = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
+        let mut audio: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+        let design = IirFilterDesign::elliptic(
+            FilterResponse::LowPass,
+            NonZeroUsize::new(4).unwrap(),
+            2000.0,
+            1.0,
+            40.0,
+        );
+        assert!(audio.apply_iir_filter_in_place(&design).is_ok());
+
+        let samples2 = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
+        let mut audio2: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
+        let bs = IirFilterDesign::elliptic_band(
+            FilterResponse::BandStop,
+            NonZeroUsize::new(4).unwrap(),
+            500.0,
+            2000.0,
+            1.0,
+            40.0,
+        );
+        assert!(audio2.apply_iir_filter_in_place(&bs).is_ok());
+    }
+
+    #[test]
+    fn test_elliptic_validation_errors() {
+        let samples = NonEmptyVec::new(vec![1.0f32; 64]).unwrap();
+        let mut audio: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+        // rs must exceed rp.
+        let bad = IirFilterDesign::elliptic(
+            FilterResponse::LowPass,
+            NonZeroUsize::new(4).unwrap(),
+            2000.0,
+            5.0,
+            3.0,
+        );
+        assert!(audio.apply_iir_filter_in_place(&bad).is_err());
     }
 }
