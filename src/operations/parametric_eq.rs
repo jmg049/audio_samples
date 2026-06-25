@@ -177,35 +177,17 @@ where
                 }
             }
             AudioData::Multi(samples) => {
-                let num_channels = samples.nrows().get();
-                // Process each channel independently
-                for channel in 0..num_channels {
-                    let mut working_samples = self.as_f64();
-
-                    let Some(multi_self) = self.as_multi_channel_mut() else {
-                        return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
-                            operation: "parametric EQ".to_string(),
-                            layout_type: "non-contiguous multi-channel samples".to_string(),
-                        }));
-                    };
-                    let working_samples = working_samples.as_multi_channel_mut() .ok_or_else(|| AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "audio_format",
-                        "Failed to get multi-channel data. Underlying data is not multi-channel."
-                    )))?;
-                    let working_samples = working_samples.as_slice_mut().ok_or_else(|| {
-                        AudioSampleError::Layout(LayoutError::NonContiguous {
-                            operation: "parametric EQ".to_string(),
-                            layout_type: "non-contiguous multi-channel samples".to_string(),
-                        })
-                    })?;
-
-                    filter.process_samples_in_place(working_samples);
-
-                    for (i, output) in working_samples.iter().enumerate() {
-                        multi_self[[channel, i]] = (*output).convert_to();
+                // Filter each channel (row) independently, in place, resetting
+                // the filter state between channels so they do not bleed into
+                // one another. The array is (channels x samples), so the outer
+                // axis iterates channels.
+                let mut view = samples.view_mut();
+                for mut channel in view.outer_iter_mut() {
+                    for sample in channel.iter_mut() {
+                        let x: f64 = (*sample).convert_to();
+                        *sample = filter.process_sample(x).convert_to();
                     }
-
-                    // Reset filter state for next channel
+                    // Reset filter state for the next channel.
                     filter.reset();
                 }
             }
@@ -692,6 +674,48 @@ mod tests {
     use crate::utils::audio_math::amplitude_to_db as linear_to_db;
     use non_empty_slice::{NonEmptyVec, non_empty_vec};
     use std::f64::consts::PI;
+
+    #[test]
+    fn test_apply_eq_band_multichannel_matches_per_channel_mono() {
+        // Regression: the multi-channel apply_eq_band branch previously
+        // filtered a flattened all-channels buffer and indexed out of bounds
+        // (panic) for genuine multi-channel input. It must now filter each
+        // channel independently, identically to applying the band to that
+        // channel on its own.
+        let sr = 44100.0;
+        let n = 256usize;
+        let ch0: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 440.0 * (i as f64 / sr)).sin() as f32)
+            .collect();
+        let ch1: Vec<f32> = (0..n)
+            .map(|i| 0.5 * (2.0 * PI * 880.0 * (i as f64 / sr)).sin() as f32)
+            .collect();
+
+        let stereo_arr =
+            ndarray::Array2::from_shape_fn((2, n), |(c, i)| if c == 0 { ch0[i] } else { ch1[i] });
+        let mut stereo =
+            AudioSamples::new_multi_channel(stereo_arr, sample_rate!(44100)).unwrap();
+
+        let band = EqBand::peak(880.0, 6.0, 2.0);
+        // Must not panic.
+        stereo.apply_eq_band_in_place(&band).unwrap();
+
+        // Reference: filter each channel as an independent mono signal.
+        let mut mono0: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(NonEmptyVec::new(ch0).unwrap(), sample_rate!(44100));
+        let mut mono1: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(NonEmptyVec::new(ch1).unwrap(), sample_rate!(44100));
+        mono0.apply_eq_band_in_place(&band).unwrap();
+        mono1.apply_eq_band_in_place(&band).unwrap();
+
+        let out = stereo.as_multi_channel().unwrap();
+        let r0 = mono0.as_slice().unwrap();
+        let r1 = mono1.as_slice().unwrap();
+        for i in 0..n {
+            assert!((out[(0, i)] - r0[i]).abs() < 1e-6, "ch0 sample {i}");
+            assert!((out[(1, i)] - r1[i]).abs() < 1e-6, "ch1 sample {i}");
+        }
+    }
 
     #[test]
     fn test_peak_filter() {
