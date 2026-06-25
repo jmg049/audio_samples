@@ -168,6 +168,14 @@ pub use plotting::spectrum::{
 };
 
 #[cfg(feature = "plotting")]
+pub use plotting::phase_spectrum::{
+    PhaseSpectrumParams, PhaseSpectrumPlot, create_phase_spectrum_plot,
+};
+
+#[cfg(feature = "plotting")]
+pub use plotting::lissajous::{LissajousParams, LissajousPlot, create_lissajous_plot};
+
+#[cfg(feature = "plotting")]
 pub use plotting::{ChannelManagementStrategy, Layout, PlotParams, PlotUtils};
 
 #[cfg(feature = "plotting")]

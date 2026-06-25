@@ -45,6 +45,10 @@
 pub mod composite;
 #[cfg(feature = "plotting")]
 pub mod dsp_overlays;
+/// Lissajous (stereo X-Y) correlation plotting.
+pub mod lissajous;
+/// Phase spectrum visualization.
+pub mod phase_spectrum;
 /// Spectrogram plotting with various frequency scales and amplitude encodings.
 pub mod spectrograms;
 /// Magnitude spectrum visualization.
@@ -53,6 +57,8 @@ pub mod spectrum;
 pub mod waveform;
 
 pub use composite::{CompositeLayout, CompositePlot};
+pub use lissajous::{LissajousParams, LissajousPlot, create_lissajous_plot};
+pub use phase_spectrum::{PhaseSpectrumParams, PhaseSpectrumPlot, create_phase_spectrum_plot};
 pub use spectrograms::{SpectrogramPlot, SpectrogramPlotParams, create_spectrogram_plot};
 pub use spectrum::{MagnitudeSpectrumParams, create_magnitude_spectrum_plot};
 pub use waveform::{WaveformPlot, WaveformPlotParams};
@@ -651,5 +657,36 @@ where
                 operation: "plot magnitude spectrum".to_string(),
             },
         ))
+    }
+
+    #[cfg(feature = "transforms")]
+    #[inline]
+    fn plot_phase_spectrum(
+        &self,
+        params: &phase_spectrum::PhaseSpectrumParams,
+    ) -> AudioSampleResult<phase_spectrum::PhaseSpectrumPlot> {
+        phase_spectrum::create_phase_spectrum_plot(self, params)
+    }
+
+    #[cfg(not(feature = "transforms"))]
+    #[inline]
+    fn plot_phase_spectrum(
+        &self,
+        _params: &phase_spectrum::PhaseSpectrumParams,
+    ) -> AudioSampleResult<phase_spectrum::PhaseSpectrumPlot> {
+        Err(crate::AudioSampleError::Feature(
+            crate::FeatureError::NotEnabled {
+                feature: "transforms".to_string(),
+                operation: "plot phase spectrum".to_string(),
+            },
+        ))
+    }
+
+    #[inline]
+    fn plot_lissajous(
+        &self,
+        params: &lissajous::LissajousParams,
+    ) -> AudioSampleResult<lissajous::LissajousPlot> {
+        lissajous::create_lissajous_plot(self, params)
     }
 }

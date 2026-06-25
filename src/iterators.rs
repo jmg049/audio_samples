@@ -177,6 +177,44 @@ where
     ) -> WindowIterator<'iter, 'a, T>
     where
         'a: 'iter;
+
+    #[cfg(feature = "editing")]
+    /// Returns a zero-copy, borrowing iterator over fully-contained windows.
+    ///
+    /// Unlike [`windows`](AudioSampleIterators::windows), which yields an owned
+    /// [`AudioSamples`] per window (re-copying overlapping data), this iterator
+    /// yields a [`WindowView`] that borrows directly into the underlying buffer.
+    /// No allocation or copying occurs per window, making it well suited to the
+    /// STFT use case where windows overlap heavily.
+    ///
+    /// Only windows that lie fully within the signal are yielded — equivalent to
+    /// [`PaddingMode::Skip`]. Padded or partial trailing windows require the
+    /// owning [`windows`](AudioSampleIterators::windows).
+    ///
+    /// # Arguments
+    ///
+    /// – `window_size` — number of samples per channel in each window.
+    /// – `hop_size` — number of samples to advance between window starts.
+    ///
+    /// # Returns
+    ///
+    /// A [`WindowRefIterator`] yielding one borrowing [`WindowView`] per window.
+    /// If `window_size > samples_per_channel`, the iterator yields zero windows.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// See [`AudioSamples::windows_ref`] for a runnable example.
+    fn windows_ref<'iter>(
+        &'iter self,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
+    ) -> WindowRefIterator<'iter, 'a, T>
+    where
+        'a: 'iter;
 }
 
 impl<'a, T> AudioSamples<'a, T>
@@ -320,6 +358,74 @@ where
         'a: 'iter,
     {
         WindowIterator::new(self, window_size, hop_size)
+    }
+
+    #[cfg(feature = "editing")]
+    /// Returns a zero-copy, borrowing iterator over fully-contained windows.
+    ///
+    /// Each yielded [`WindowView`] borrows directly into this `AudioSamples`'
+    /// underlying buffer (lifetime-tied to `&self`); no per-window allocation or
+    /// copying is performed. This is the preferred iterator for read-only
+    /// windowed analysis such as STFT, where the owning
+    /// [`windows`](AudioSamples::windows) iterator would wastefully re-copy
+    /// overlapping samples.
+    ///
+    /// Only windows fully contained within the signal are yielded — equivalent
+    /// to [`PaddingMode::Skip`]. Trailing partial windows are not produced; if a
+    /// padded final window is required, use the owning
+    /// [`windows`](AudioSamples::windows) iterator instead.
+    ///
+    /// # Arguments
+    ///
+    /// – `window_size` — number of samples per channel in each window.
+    /// – `hop_size` — number of samples to advance between window starts.
+    ///
+    /// # Returns
+    ///
+    /// A [`WindowRefIterator`] yielding one borrowing [`WindowView`] per window.
+    /// If `window_size > samples_per_channel`, the iterator yields zero windows
+    /// (it does not panic).
+    ///
+    /// # Panics
+    ///
+    /// Does not panic.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "editing")] {
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::iterators::WindowView;
+    /// use ndarray::array;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+    ///     sample_rate!(44100),
+    /// ).unwrap();
+    ///
+    /// // Overlapping windows of size 4, hop 2 — zero-copy views.
+    /// let windows: Vec<_> = audio
+    ///     .windows_ref(NonZeroUsize::new(4).unwrap(), NonZeroUsize::new(2).unwrap())
+    ///     .collect();
+    /// assert_eq!(windows.len(), 2); // only fully-contained windows
+    /// match windows[0] {
+    ///     WindowView::Mono(view) => assert_eq!(view.to_vec(), vec![1.0, 2.0, 3.0, 4.0]),
+    ///     WindowView::Multi(_) => unreachable!(),
+    /// }
+    /// # }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn windows_ref<'iter>(
+        &'iter self,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
+    ) -> WindowRefIterator<'iter, 'a, T>
+    where
+        'a: 'iter,
+    {
+        WindowRefIterator::new(self, window_size, hop_size)
     }
 
     /// Applies a mutable function to every frame without requiring a borrowing-safe iterator.
@@ -910,6 +1016,166 @@ pub enum PaddingMode {
     /// and no partial windows.
     Skip,
 }
+
+/// A zero-copy, borrowing view of a single window of audio data.
+///
+/// Yielded by [`WindowRefIterator`] (obtained via
+/// [`AudioSamples::windows_ref`]). Each variant borrows directly into the
+/// underlying [`AudioSamples`] buffer for the lifetime `'a`, so iterating
+/// performs no per-window allocation or copying.
+///
+/// - [`WindowView::Mono`] wraps an [`ArrayView1`] over `window_size` samples.
+/// - [`WindowView::Multi`] wraps an [`ArrayView2`] of shape
+///   `(channels, window_size)`.
+///
+/// The variant matches the channel layout of the source audio: mono audio
+/// yields `Mono` views, multi-channel audio yields `Multi` views.
+#[cfg(feature = "editing")]
+#[derive(Debug, Clone, Copy)]
+pub enum WindowView<'a, T>
+where
+    T: StandardSample,
+{
+    /// A borrowed view over one mono window of `window_size` samples.
+    Mono(ndarray::ArrayView1<'a, T>),
+    /// A borrowed view over one multi-channel window, shape `(channels, window_size)`.
+    Multi(ndarray::ArrayView2<'a, T>),
+}
+
+/// A zero-copy, borrowing iterator over fully-contained windows of audio data.
+///
+/// Obtained via [`AudioSamples::windows_ref`]. Each iteration yields a
+/// [`WindowView`] that borrows directly into the source [`AudioSamples`] buffer,
+/// avoiding the per-window allocation and copying performed by the owning
+/// [`WindowIterator`]. This makes it the preferred choice for read-only,
+/// overlapping windowed analysis such as STFT.
+///
+/// ## Scope
+///
+/// Only windows that lie *fully within* the signal are yielded — this is the
+/// fast path equivalent to [`PaddingMode::Skip`]. Trailing partial windows are
+/// never produced; algorithms that need a zero-padded final window must use the
+/// owning [`AudioSamples::windows`] iterator.
+///
+/// ## Degenerate Parameters
+///
+/// If `window_size` exceeds the number of samples per channel, no window fits
+/// and the iterator yields zero windows without panicking.
+///
+/// ## Invariants
+///
+/// - Windows are yielded in strictly increasing temporal order.
+/// - Every yielded window has exactly `window_size` samples per channel.
+/// - The number of yielded windows is finite and deterministic.
+#[cfg(feature = "editing")]
+pub struct WindowRefIterator<'iter, 'a, T>
+where
+    T: StandardSample,
+    'a: 'iter,
+{
+    /// The source audio from which window views are borrowed.
+    audio: &'iter AudioSamples<'a, T>,
+    window_size: usize,
+    hop_size: usize,
+    total_samples: usize,
+    current_position: usize,
+    current_window: usize,
+    total_windows: usize,
+}
+
+#[cfg(feature = "editing")]
+impl<'iter, 'a, T> WindowRefIterator<'iter, 'a, T>
+where
+    T: StandardSample,
+    'a: 'iter,
+{
+    /// Constructs a new borrowing window iterator over the given audio.
+    ///
+    /// Only fully-contained windows are produced (equivalent to
+    /// [`PaddingMode::Skip`]). When `window_size` exceeds the number of samples
+    /// per channel, the iterator yields zero windows.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    #[inline]
+    fn new(
+        audio: &'iter AudioSamples<'a, T>,
+        window_size: NonZeroUsize,
+        hop_size: NonZeroUsize,
+    ) -> Self {
+        let total_samples = audio.samples_per_channel().get();
+        let window_size = window_size.get();
+        let hop_size = hop_size.get();
+
+        // Count only complete windows. When the window is larger than the
+        // signal, no complete window fits, so yield 0. `saturating_sub` mirrors
+        // the underflow fix in `WindowIterator` (BUG 3) so `window > len` is
+        // safe in both debug and release builds.
+        let total_windows = if total_samples < window_size {
+            0
+        } else {
+            1 + (total_samples - window_size) / hop_size
+        };
+
+        Self {
+            audio,
+            window_size,
+            hop_size,
+            total_samples,
+            current_position: 0,
+            current_window: 0,
+            total_windows,
+        }
+    }
+}
+
+#[cfg(feature = "editing")]
+impl<'iter, 'a, T> Iterator for WindowRefIterator<'iter, 'a, T>
+where
+    T: StandardSample,
+    'a: 'iter,
+{
+    type Item = WindowView<'iter, T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_window >= self.total_windows {
+            return None;
+        }
+
+        let start = self.current_position;
+        let end = start + self.window_size;
+        debug_assert!(end <= self.total_samples);
+
+        // Copy the stored reference so the produced view borrows from the audio
+        // data (lifetime `'iter`) rather than from the short-lived `&mut self`.
+        let audio: &'iter AudioSamples<'a, T> = self.audio;
+
+        let view = match audio.data() {
+            AudioData::Mono(mono) => {
+                WindowView::Mono(mono.as_view().slice_move(ndarray::s![start..end]))
+            }
+            AudioData::Multi(multi) => {
+                WindowView::Multi(multi.as_view().slice_move(ndarray::s![.., start..end]))
+            }
+        };
+
+        self.current_position += self.hop_size;
+        self.current_window += 1;
+        Some(view)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.total_windows - self.current_window;
+        (remaining, Some(remaining))
+    }
+}
+
+#[cfg(feature = "editing")]
+impl<T> ExactSizeIterator for WindowRefIterator<'_, '_, T> where T: StandardSample {}
+
 /// Iterates over fixed-size temporal windows of audio data.
 ///
 /// Each iteration yields a contiguous block of samples spanning all channels
@@ -1235,6 +1501,8 @@ mod tests {
     use crate::sample_rate;
     use ndarray::{Array1, array};
     use non_empty_slice::non_empty_vec;
+    #[cfg(feature = "editing")]
+    use std::num::NonZeroUsize;
 
     #[test]
     fn test_frame_iterator_mono() {
@@ -1702,6 +1970,123 @@ mod tests {
         // Callback must never run, and data must be untouched.
         assert!(!called, "callback must not be invoked when hop_size == 0");
         assert_eq!(audio.as_mono().unwrap().to_vec(), original);
+    }
+
+    // ==============================
+    // BORROWING WINDOW ITERATOR (windows_ref) TESTS
+    // ==============================
+
+    // windows_ref must yield the SAME window contents as the owning windows()
+    // iterator (in Skip / fully-contained mode) for several (window, hop) pairs
+    // on a mono signal, with matching window counts.
+    #[cfg(feature = "editing")]
+    #[test]
+    fn test_windows_ref_matches_owning_windows_mono() {
+        use crate::WindowView;
+        let audio = AudioSamples::new_mono(
+            array![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            sample_rate!(44100),
+        )
+        .unwrap();
+
+        for (w, h) in [(3usize, 3usize), (4, 2), (5, 1), (2, 3), (8, 4)] {
+            let wnz = NonZeroUsize::new(w).unwrap();
+            let hnz = NonZeroUsize::new(h).unwrap();
+
+            // Reference: owning windows in Skip mode (fully-contained only).
+            let owned: Vec<Vec<f32>> = audio
+                .windows(wnz, hnz)
+                .with_padding_mode(PaddingMode::Skip)
+                .map(|win| win.as_mono().unwrap().to_vec())
+                .collect();
+
+            // Borrowing zero-copy variant.
+            let borrowed: Vec<Vec<f32>> = audio
+                .windows_ref(wnz, hnz)
+                .map(|view| match view {
+                    WindowView::Mono(v) => v.to_vec(),
+                    WindowView::Multi(_) => panic!("mono signal must yield Mono views"),
+                })
+                .collect();
+
+            assert_eq!(
+                borrowed.len(),
+                owned.len(),
+                "count mismatch for window={w}, hop={h}"
+            );
+            assert_eq!(
+                borrowed, owned,
+                "content mismatch for window={w}, hop={h}"
+            );
+
+            // ExactSizeIterator len() must agree with what is yielded.
+            assert_eq!(audio.windows_ref(wnz, hnz).len(), owned.len());
+        }
+    }
+
+    // Same equivalence check for multi-channel audio: contents must match the
+    // owning windows() (Skip) channel-by-channel, and counts must match.
+    #[cfg(feature = "editing")]
+    #[test]
+    fn test_windows_ref_matches_owning_windows_multi() {
+        use crate::WindowView;
+        let audio = AudioSamples::new_multi_channel(
+            array![
+                [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+                [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+            ],
+            sample_rate!(44100),
+        )
+        .unwrap();
+
+        for (w, h) in [(2usize, 2usize), (3, 1), (4, 2), (6, 3)] {
+            let wnz = NonZeroUsize::new(w).unwrap();
+            let hnz = NonZeroUsize::new(h).unwrap();
+
+            // Reference: owning windows (Skip), captured as per-channel rows.
+            let owned: Vec<Vec<Vec<f32>>> = audio
+                .windows(wnz, hnz)
+                .with_padding_mode(PaddingMode::Skip)
+                .map(|win| {
+                    let n = win.num_channels().get() as usize;
+                    let mc = win.as_multi_channel().unwrap();
+                    (0..n).map(|ch| mc.row(ch).to_vec()).collect()
+                })
+                .collect();
+
+            let borrowed: Vec<Vec<Vec<f32>>> = audio
+                .windows_ref(wnz, hnz)
+                .map(|view| match view {
+                    WindowView::Multi(v) => v.rows().into_iter().map(|r| r.to_vec()).collect(),
+                    WindowView::Mono(_) => panic!("multi-channel signal must yield Multi views"),
+                })
+                .collect();
+
+            assert_eq!(
+                borrowed.len(),
+                owned.len(),
+                "count mismatch for window={w}, hop={h}"
+            );
+            assert_eq!(
+                borrowed, owned,
+                "content mismatch for window={w}, hop={h}"
+            );
+        }
+    }
+
+    // window_size > signal length must yield zero windows without panicking,
+    // mirroring the WindowIterator Skip-mode underflow fix.
+    #[cfg(feature = "editing")]
+    #[test]
+    fn test_windows_ref_window_larger_than_signal_yields_zero() {
+        let audio =
+            AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], sample_rate!(44100)).unwrap();
+
+        let iter = audio.windows_ref(NonZeroUsize::new(8).unwrap(), NonZeroUsize::new(4).unwrap());
+        assert_eq!(iter.len(), 0);
+
+        let windows: Vec<_> = iter.collect();
+        assert_eq!(windows.len(), 0);
     }
 
     // Regression: BUG 5 — ChannelIterator::next must extract exactly one channel

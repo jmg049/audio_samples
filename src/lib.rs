@@ -370,7 +370,7 @@ pub use crate::traits::{
 pub use crate::iterators::{AudioSampleIterators, ChannelIterator, FrameIterator, PaddingMode};
 
 #[cfg(feature = "editing")]
-pub use crate::iterators::WindowIterator;
+pub use crate::iterators::{WindowIterator, WindowRefIterator, WindowView};
 
 pub use crate::utils::generation::{
     ToneComponent, am_signal, chirp, compound_tone, cosine_wave, exponential_chirp, fm_signal,

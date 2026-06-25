@@ -118,6 +118,8 @@ use spectrograms::WindowType;
 #[cfg(feature = "plotting")]
 use crate::operations::{
     WaveformPlot, WaveformPlotParams,
+    plotting::lissajous::{LissajousParams, LissajousPlot},
+    plotting::phase_spectrum::{PhaseSpectrumParams, PhaseSpectrumPlot},
     plotting::spectrograms::{SpectrogramPlot, SpectrogramPlotParams},
     plotting::spectrum::{MagnitudeSpectrumParams, MagnitudeSpectrumPlot},
 };
@@ -6099,6 +6101,49 @@ where
         &self,
         params: &MagnitudeSpectrumParams,
     ) -> AudioSampleResult<MagnitudeSpectrumPlot>;
+
+    /// Renders a phase spectrum plot for a single frame.
+    ///
+    /// Applies an FFT to the audio and displays the per-bin phase angle
+    /// (`Complex::arg()`, in radians) on a frequency axis, optionally unwrapped.
+    ///
+    /// # Arguments
+    ///
+    /// - `params` – Phase-spectrum and visual parameters: FFT size, unwrapping,
+    ///   frequency range, and title.
+    ///
+    /// # Returns
+    ///
+    /// A [`PhaseSpectrumPlot`] that can be rendered to HTML or saved to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Processing] if the FFT computation fails,
+    /// or [crate::AudioSampleError::Feature] if the `transforms` feature is disabled.
+    fn plot_phase_spectrum(
+        &self,
+        params: &PhaseSpectrumParams,
+    ) -> AudioSampleResult<PhaseSpectrumPlot>;
+
+    /// Renders a Lissajous (stereo X-Y) plot.
+    ///
+    /// Scatters channel 0 (x) against channel 1 (y) for a 2-channel signal — the
+    /// standard stereo correlation / phase visualization.
+    ///
+    /// # Arguments
+    ///
+    /// - `params` – Visual parameters and an optional point cap.
+    ///
+    /// # Returns
+    ///
+    /// A [`LissajousPlot`] that can be rendered to HTML or saved to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if the audio does not have
+    /// exactly two channels.
+    fn plot_lissajous(&self, params: &LissajousParams)
+    -> AudioSampleResult<LissajousPlot>;
 }
 
 /// Amplitude envelope extraction operations.
