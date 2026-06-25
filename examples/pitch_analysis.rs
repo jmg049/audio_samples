@@ -29,11 +29,12 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         80.0,
         1_000.0,
     )?;
-    let voiced = contour.iter().filter(|(_, f)| f.is_some()).count();
+    let voiced = contour.voiced_frames().count();
     println!(
-        "Pitch contour: {} frames ({} voiced)",
+        "Pitch contour: {} frames ({} voiced, mean {:?} Hz)",
         contour.len(),
-        voiced
+        voiced,
+        contour.mean_pitch()
     );
 
     let hnr = audio.harmonic_to_noise_ratio(440.0, audio_samples::nzu!(8), None, None)?;
@@ -47,8 +48,11 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         .hop_size(audio_samples::nzu!(1024))
         .build()
         .unwrap();
-    let (key, confidence) = audio.estimate_key(&stft_params)?;
-    println!("Estimated key index: {}  confidence={:.3}", key, confidence);
+    let key = audio.estimate_key(&stft_params)?;
+    println!(
+        "Estimated key: {} {:?}  confidence={:.3}",
+        key.tonic, key.mode, key.confidence
+    );
 
     Ok(())
 }

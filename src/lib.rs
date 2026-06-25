@@ -406,6 +406,9 @@ pub use crate::operations::AudioEditing;
 #[cfg(feature = "transforms")]
 pub use crate::operations::AudioTransforms;
 
+#[cfg(feature = "transforms")]
+pub use crate::operations::transforms::Psd;
+
 #[cfg(feature = "fixed-size-audio")]
 pub use crate::fixed_audio::{FixedSizeAudioSamples, FixedSizeMultiChannelAudioSamples};
 
@@ -426,6 +429,9 @@ pub use crate::operations::traits::AudioParametricEq;
 
 #[cfg(feature = "pitch-analysis")]
 pub use crate::operations::traits::AudioPitchAnalysis;
+
+#[cfg(feature = "pitch-analysis")]
+pub use crate::operations::pitch_analysis::{Key, Mode, PitchClass, PitchContour, PitchFrame};
 
 #[cfg(feature = "vad")]
 pub use crate::operations::traits::AudioVoiceActivityDetection;

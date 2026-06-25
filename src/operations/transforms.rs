@@ -80,6 +80,51 @@ use spectrograms::{
 
 use crate::operations::fft_convolution::{fft_convolve, fft_deconvolve};
 
+/// Power spectral density estimate produced by [`AudioTransforms::power_spectral_density`].
+///
+/// Pairs a frequency axis with the estimated power-per-Hz at each bin. The two
+/// slices are always the same length: `frequencies()[i]` is the centre frequency
+/// of bin `i` in Hz, and `density()[i]` is the estimated power spectral density
+/// at that frequency.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Psd {
+    frequencies: Vec<f64>,
+    density: Vec<f64>,
+}
+
+impl Psd {
+    /// Constructs a [`Psd`] from a frequency axis and a matching density vector.
+    #[inline]
+    pub(crate) fn new(frequencies: Vec<f64>, density: Vec<f64>) -> Self {
+        Self {
+            frequencies,
+            density,
+        }
+    }
+
+    /// The frequency axis, in Hz. Same length as [`density`](Self::density).
+    #[inline]
+    #[must_use]
+    pub fn frequencies(&self) -> &[f64] {
+        &self.frequencies
+    }
+
+    /// The estimated power spectral density (power per Hz) at each frequency bin.
+    /// Same length as [`frequencies`](Self::frequencies).
+    #[inline]
+    #[must_use]
+    pub fn density(&self) -> &[f64] {
+        &self.density
+    }
+
+    /// Consumes the estimate, returning the `(frequencies, density)` vectors.
+    #[inline]
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<f64>, Vec<f64>) {
+        (self.frequencies, self.density)
+    }
+}
+
 impl<T> AudioTransforms for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -753,8 +798,9 @@ where
     ///   the range `[0, 1)`.
     ///
     /// # Returns
-    /// A pair `(frequencies, psd)` of equal length.  `frequencies[i]` is
-    /// the centre frequency of bin `i` in Hz; `psd[i]` is the estimated
+    /// A [`Psd`] whose [`frequencies`](Psd::frequencies) and
+    /// [`density`](Psd::density) slices are of equal length. `frequencies[i]`
+    /// is the centre frequency of bin `i` in Hz; `density[i]` is the estimated
     /// power spectral density at that frequency.
     ///
     /// # Errors
@@ -771,16 +817,16 @@ where
     /// use std::time::Duration;
     ///
     /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
-    /// let (freqs, psd) = audio.power_spectral_density(nzu!(1024), 0.5).unwrap();
-    /// assert_eq!(freqs.len(), psd.len());
-    /// assert!(!freqs.is_empty());
+    /// let psd = audio.power_spectral_density(nzu!(1024), 0.5).unwrap();
+    /// assert_eq!(psd.frequencies().len(), psd.density().len());
+    /// assert!(!psd.frequencies().is_empty());
     /// ```
     #[inline]
     fn power_spectral_density(
         &self,
         window_size: NonZeroUsize,
         overlap: f64,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)> {
+    ) -> AudioSampleResult<Psd> {
         if self.is_multi_channel() {
             return Err(AudioSampleError::Layout(
                 LayoutError::channel_count_unsupported(
@@ -855,7 +901,7 @@ where
             .map(|i| i as f64 * sample_rate / win as f64)
             .collect();
 
-        Ok((frequencies, sum))
+        Ok(Psd::new(frequencies, sum))
     }
 
     /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Magnitude` amplitude scale.
@@ -1422,5 +1468,21 @@ mod convolution_tests {
             matches!(err, AudioSampleError::Layout(LayoutError::ChannelCountUnsupported { .. })),
             "expected Layout(ChannelCountUnsupported), got: {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod psd_tests {
+    use super::Psd;
+
+    #[test]
+    fn psd_accessors_and_into_parts_round_trip() {
+        let psd = Psd::new(vec![0.0, 10.0, 20.0], vec![1.0, 0.5, 0.25]);
+        assert_eq!(psd.frequencies(), &[0.0, 10.0, 20.0]);
+        assert_eq!(psd.density(), &[1.0, 0.5, 0.25]);
+
+        let (freqs, density) = psd.into_parts();
+        assert_eq!(freqs, vec![0.0, 10.0, 20.0]);
+        assert_eq!(density, vec![1.0, 0.5, 0.25]);
     }
 }
