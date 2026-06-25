@@ -6,20 +6,39 @@ Each section corresponds to a minor version release. Each minor release will foc
 
 The exact ordering of the minor releases may change and there is no guarantee they will be worked on in the order they are listed here.
 
-## 1.0 --- What is it?
+## 2.0 --- A unified API
 
-AudioSamples (currently v0.11.0) is near the end of its initial development phase. 
-The library is broad and feature rich, the API is mostly stable, and the documentation is comprehensive.
+AudioSamples 2.0 is a deliberate breaking release that unifies the public
+API into a single, consistent convention. The library is broad and feature
+rich; 2.0 makes its surface predictable and ergonomic.
 
-The main criteria for the 1.0 release will be:
+Headline changes in 2.0:
 
-- API stability: No breaking changes to the public API. Any necessary changes will be made in a way that allows for migration without breaking existing code. This will take the form of deprecations and additions rather than outright removals and breaking changes.
+- Dual-variant operations: every transforming operation exposes both an
+  in-place primitive (`op_in_place(&mut self) -> Result<()>`) and a
+  non-mutating borrowing form (`op(&self) -> Result<Self>`). See
+  `docs/superpowers/specs/2026-06-25-audio-samples-2.0-api-convention-design.md`.
 
-- Comprehensive documentation: All public APIs will be fully documented with clear explanations, usage examples, and any necessary warnings or notes about edge cases.
+- Encapsulation: `AudioSamples` fields are sealed behind accessors so the
+  invariant-preserving guarantees cannot be bypassed.
 
-- Thorough testing: All features will be covered by unit tests, integration tests, and documentation tests to ensure reliability and correctness.
+- Consistency: unified channel-index types (`usize`), a single
+  `ChannelReduction` policy for multi-channel analysis, config structs with
+  builders/validation for multi-parameter operations, and structured return
+  types (`Psd`, `PitchContour`, `Key`) in place of bare tuples.
 
-- Examples: A wide range of examples will be provided to demonstrate the capabilities of the library and to serve as a reference for users.
+Post-2.0 the API is intended to remain stable: subsequent changes should be
+additive, with deprecations rather than silent breakage.
+
+Ongoing quality criteria (across releases):
+
+- Comprehensive documentation: all public APIs fully documented with clear
+  explanations, usage examples, and notes on edge cases.
+
+- Thorough testing: unit, integration, and documentation tests covering every
+  feature, backed by CI across the feature matrix.
+
+- Examples: a wide range of runnable, self-verifying examples.
 
 ## Error handling
 
