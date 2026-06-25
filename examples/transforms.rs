@@ -39,12 +39,12 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Chroma: shape={:?}", chroma.data.dim());
 
     // PSD via Welch's method
-    let (freqs, psd) = audio.power_spectral_density(nzu!(1024), 0.5)?;
+    let psd = audio.power_spectral_density(nzu!(1024), 0.5)?;
     println!(
         "PSD: bins={} psd_len={} f0≈{:.1}Hz",
-        freqs.len(),
-        psd.len(),
-        freqs[0]
+        psd.frequencies().len(),
+        psd.density().len(),
+        psd.frequencies()[0]
     );
 
     // CQT

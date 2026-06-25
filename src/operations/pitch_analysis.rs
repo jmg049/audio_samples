@@ -43,6 +43,198 @@ use crate::{
 use non_empty_slice::NonEmptySlice;
 use spectrograms::{ChromaParams, SpectrogramPlanner, StftParams, WindowType};
 
+/// A single frame of a [`PitchContour`].
+///
+/// `frequency` is `None` for unvoiced frames (no pitch detected).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PitchFrame {
+    /// Frame onset time, in seconds from the start of the signal.
+    pub time: f64,
+    /// Detected fundamental frequency in Hz, or `None` if the frame is unvoiced.
+    pub frequency: Option<f64>,
+}
+
+/// A time-ordered pitch track produced by [`AudioPitchAnalysis::track_pitch`].
+///
+/// Each [`PitchFrame`] pairs a frame onset time with the pitch detected in that
+/// frame (or `None` when no pitch was found).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PitchContour {
+    frames: Vec<PitchFrame>,
+}
+
+impl PitchContour {
+    /// Constructs a [`PitchContour`] from its frames.
+    #[inline]
+    pub(crate) fn new(frames: Vec<PitchFrame>) -> Self {
+        Self { frames }
+    }
+
+    /// All frames in time order, voiced and unvoiced alike.
+    #[inline]
+    #[must_use]
+    pub fn frames(&self) -> &[PitchFrame] {
+        &self.frames
+    }
+
+    /// Iterates over voiced frames as `(time_seconds, frequency_hz)` pairs,
+    /// skipping unvoiced frames.
+    #[inline]
+    pub fn voiced_frames(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.frames
+            .iter()
+            .filter_map(|frame| frame.frequency.map(|hz| (frame.time, hz)))
+    }
+
+    /// The mean of all voiced frequencies, or `None` when no frame is voiced.
+    #[inline]
+    #[must_use]
+    pub fn mean_pitch(&self) -> Option<f64> {
+        let mut count = 0usize;
+        let mut sum = 0.0;
+        for (_, hz) in self.voiced_frames() {
+            sum += hz;
+            count += 1;
+        }
+        if count == 0 {
+            None
+        } else {
+            Some(sum / count as f64)
+        }
+    }
+
+    /// The total number of frames (voiced and unvoiced).
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Returns `true` when the contour contains no frames.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+}
+
+/// One of the twelve pitch classes of the chromatic scale.
+///
+/// Pitch class `C` has index 0, ascending chromatically to `B` at index 11.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PitchClass {
+    /// C
+    C,
+    /// C♯ / D♭
+    CSharp,
+    /// D
+    D,
+    /// D♯ / E♭
+    DSharp,
+    /// E
+    E,
+    /// F
+    F,
+    /// F♯ / G♭
+    FSharp,
+    /// G
+    G,
+    /// G♯ / A♭
+    GSharp,
+    /// A
+    A,
+    /// A♯ / B♭
+    ASharp,
+    /// B
+    B,
+}
+
+impl PitchClass {
+    /// Maps a chromatic index `0..=11` to a pitch class (`0` = C, `11` = B).
+    ///
+    /// # Panics
+    /// Panics if `index >= 12`.
+    #[inline]
+    #[must_use]
+    pub fn from_index(index: u8) -> Self {
+        match index {
+            0 => Self::C,
+            1 => Self::CSharp,
+            2 => Self::D,
+            3 => Self::DSharp,
+            4 => Self::E,
+            5 => Self::F,
+            6 => Self::FSharp,
+            7 => Self::G,
+            8 => Self::GSharp,
+            9 => Self::A,
+            10 => Self::ASharp,
+            11 => Self::B,
+            other => panic!("pitch class index out of range: {other}"),
+        }
+    }
+
+    /// Returns the chromatic index of this pitch class (`C` = 0, `B` = 11).
+    #[inline]
+    #[must_use]
+    pub fn to_index(self) -> u8 {
+        match self {
+            Self::C => 0,
+            Self::CSharp => 1,
+            Self::D => 2,
+            Self::DSharp => 3,
+            Self::E => 4,
+            Self::F => 5,
+            Self::FSharp => 6,
+            Self::G => 7,
+            Self::GSharp => 8,
+            Self::A => 9,
+            Self::ASharp => 10,
+            Self::B => 11,
+        }
+    }
+}
+
+impl std::fmt::Display for PitchClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::C => "C",
+            Self::CSharp => "C#",
+            Self::D => "D",
+            Self::DSharp => "D#",
+            Self::E => "E",
+            Self::F => "F",
+            Self::FSharp => "F#",
+            Self::G => "G",
+            Self::GSharp => "G#",
+            Self::A => "A",
+            Self::ASharp => "A#",
+            Self::B => "B",
+        };
+        f.write_str(name)
+    }
+}
+
+/// The mode (tonality) of an estimated [`Key`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Major mode.
+    Major,
+    /// Minor mode.
+    Minor,
+}
+
+/// A musical key estimate produced by [`AudioPitchAnalysis::estimate_key`].
+#[derive(Clone, Copy, Debug)]
+pub struct Key {
+    /// The tonic pitch class of the key.
+    pub tonic: PitchClass,
+    /// The mode (major or minor) of the key.
+    pub mode: Mode,
+    /// Match confidence, in `[0.0, 1.0]`; higher values indicate a stronger match.
+    pub confidence: f64,
+}
+
 impl<T> AudioPitchAnalysis for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -269,8 +461,7 @@ where
     /// ).unwrap();
     ///
     /// assert!(!track.is_empty());
-    /// let detected: Vec<f64> = track.iter().filter_map(|&(_, f)| f).collect();
-    /// let avg = detected.iter().sum::<f64>() / detected.len() as f64;
+    /// let avg = track.mean_pitch().unwrap();
     /// assert!((avg - hz).abs() < 20.0);
     /// ```
     #[inline]
@@ -282,7 +473,7 @@ where
         threshold: f64,
         min_frequency: f64,
         max_frequency: f64,
-    ) -> AudioSampleResult<Vec<(f64, Option<f64>)>> {
+    ) -> AudioSampleResult<PitchContour> {
         if self.is_multi_channel() {
             return Err(AudioSampleError::Layout(
                 LayoutError::channel_count_unsupported(
@@ -358,10 +549,13 @@ where
                 _ => None,
             };
 
-            results.push((time_seconds, frequency));
+            results.push(PitchFrame {
+                time: time_seconds,
+                frequency,
+            });
         }
 
-        Ok(results)
+        Ok(PitchContour::new(results))
     }
 
     /// Computes the harmonic-to-noise ratio (HNR) in decibels.
@@ -620,10 +814,10 @@ where
     ///
     /// # Returns
     ///
-    /// A `(key_index, confidence)` tuple where:
-    /// - `key_index` is in `0..=11` for major keys (C=0, C♯=1, …, B=11) and
-    ///   `12..=23` for minor keys (Cm=12, C♯m=13, …, Bm=23).
-    /// - `confidence` is in `[0.0, 1.0]`; higher values indicate a stronger match.
+    /// A [`Key`](crate::Key) with the estimated `tonic`
+    /// ([`PitchClass`](crate::PitchClass)), `mode`
+    /// ([`Mode`](crate::Mode)), and a `confidence` in `[0.0, 1.0]`; higher
+    /// confidence values indicate a stronger match.
     ///
     /// # Errors
     ///
@@ -646,12 +840,11 @@ where
     ///     WindowType::Hanning,
     ///     true,
     /// ).unwrap();
-    /// let (key, confidence) = audio.estimate_key(&params).unwrap();
-    /// assert!(key < 24);
-    /// assert!((0.0..=1.0).contains(&confidence));
+    /// let key = audio.estimate_key(&params).unwrap();
+    /// assert!((0.0..=1.0).contains(&key.confidence));
     /// ```
     #[inline]
-    fn estimate_key(&self, stft_params: &StftParams) -> AudioSampleResult<(usize, f64)> {
+    fn estimate_key(&self, stft_params: &StftParams) -> AudioSampleResult<Key> {
         let samples = self.to_format::<f64>();
 
         let samples_slice = samples
@@ -718,13 +911,14 @@ where
             }
         }
 
-        // Encode key: 0-11 for major keys, 12-23 for minor keys
-        let encoded_key = if is_major { best_key } else { best_key + 12 };
-
         // Convert correlation to confidence (normalize to 0-1 range)
         let confidence = f64::midpoint(best_correlation, 1.0);
 
-        Ok((encoded_key, confidence))
+        Ok(Key {
+            tonic: PitchClass::from_index(best_key as u8),
+            mode: if is_major { Mode::Major } else { Mode::Minor },
+            confidence,
+        })
     }
 }
 
@@ -1143,13 +1337,12 @@ mod tests {
         assert!(!pitch_track.is_empty());
 
         // Most should detect around 440 Hz
-        let detected_pitches: Vec<f64> =
-            pitch_track.iter().filter_map(|(_, pitch)| *pitch).collect();
+        let detected_pitches: Vec<f64> = pitch_track.voiced_frames().map(|(_, hz)| hz).collect();
 
         assert!(!detected_pitches.is_empty());
 
         // Average should be close to 440 Hz
-        let avg_pitch = detected_pitches.iter().sum::<f64>() / detected_pitches.len() as f64;
+        let avg_pitch = pitch_track.mean_pitch().unwrap();
         assert!((avg_pitch - 440.0).abs() < 20.0); // Allow 20 Hz tolerance for windowed analysis
     }
 
@@ -1265,6 +1458,70 @@ mod tests {
             audio
                 .harmonic_analysis(440.0, NonZeroUsize::new(5).unwrap(), 1.5, None, None)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn pitch_contour_mean_pitch_averages_voiced_frames_only() {
+        let contour = PitchContour::new(vec![
+            PitchFrame {
+                time: 0.0,
+                frequency: Some(100.0),
+            },
+            PitchFrame {
+                time: 0.1,
+                frequency: None,
+            },
+            PitchFrame {
+                time: 0.2,
+                frequency: Some(300.0),
+            },
+        ]);
+
+        assert_eq!(contour.len(), 3);
+        assert!(!contour.is_empty());
+        // mean of voiced frequencies: (100 + 300) / 2 = 200
+        assert_eq!(contour.mean_pitch(), Some(200.0));
+        let voiced: Vec<(f64, f64)> = contour.voiced_frames().collect();
+        assert_eq!(voiced, vec![(0.0, 100.0), (0.2, 300.0)]);
+    }
+
+    #[test]
+    fn pitch_contour_mean_pitch_is_none_when_all_unvoiced() {
+        let contour = PitchContour::new(vec![PitchFrame {
+            time: 0.0,
+            frequency: None,
+        }]);
+        assert_eq!(contour.mean_pitch(), None);
+
+        let empty = PitchContour::new(Vec::new());
+        assert!(empty.is_empty());
+        assert_eq!(empty.mean_pitch(), None);
+    }
+
+    #[test]
+    fn key_pitch_class_index_round_trips_and_displays() {
+        for idx in 0u8..12 {
+            let pc = PitchClass::from_index(idx);
+            assert_eq!(pc.to_index(), idx);
+        }
+        assert_eq!(PitchClass::C.to_string(), "C");
+        assert_eq!(PitchClass::CSharp.to_string(), "C#");
+        assert_eq!(PitchClass::B.to_string(), "B");
+
+        // Old usize encoding: pc = idx % 12, mode = Major if idx < 12 else Minor.
+        let major_idx = 4usize; // E major
+        assert_eq!(PitchClass::from_index((major_idx % 12) as u8), PitchClass::E);
+        assert_eq!(
+            if major_idx < 12 { Mode::Major } else { Mode::Minor },
+            Mode::Major
+        );
+
+        let minor_idx = 21usize; // 21 - 12 = 9 -> A minor
+        assert_eq!(PitchClass::from_index((minor_idx % 12) as u8), PitchClass::A);
+        assert_eq!(
+            if minor_idx < 12 { Mode::Major } else { Mode::Minor },
+            Mode::Minor
         );
     }
 }

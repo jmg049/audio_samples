@@ -2184,9 +2184,9 @@ where
     ///   the range `[0, 1)`.
     ///
     /// # Returns
-    /// A pair `(frequencies, psd)` of equal length.  `frequencies[i]` is
-    /// the centre frequency of bin `i` in Hz; `psd[i]` is the estimated
-    /// power spectral density at that frequency.
+    /// A [`Psd`](crate::Psd) whose `frequencies()` and `density()` slices are of
+    /// equal length. `frequencies[i]` is the centre frequency of bin `i` in Hz;
+    /// `density[i]` is the estimated power spectral density at that frequency.
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if the signal is
@@ -2202,15 +2202,15 @@ where
     /// use std::time::Duration;
     ///
     /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
-    /// let (freqs, psd) = audio.power_spectral_density(nzu!(1024), 0.5).unwrap();
-    /// assert_eq!(freqs.len(), psd.len());
-    /// assert!(!freqs.is_empty());
+    /// let psd = audio.power_spectral_density(nzu!(1024), 0.5).unwrap();
+    /// assert_eq!(psd.frequencies().len(), psd.density().len());
+    /// assert!(!psd.frequencies().is_empty());
     /// ```
     fn power_spectral_density(
         &self,
         window_size: NonZeroUsize,
         overlap: f64,
-    ) -> AudioSampleResult<(Vec<f64>, Vec<f64>)>;
+    ) -> AudioSampleResult<crate::Psd>;
 
     /// Computes a gammatone-filtered spectrogram.
     ///
@@ -2710,8 +2710,9 @@ where
     ///
     /// # Returns
     ///
-    /// A `Vec<(f64, Option<f64>)>` of `(time_seconds, frequency_hz)` pairs in
-    /// time order. `frequency_hz` is `None` when no pitch was found in that frame.
+    /// A [`PitchContour`](crate::PitchContour) of per-frame
+    /// [`PitchFrame`](crate::PitchFrame)s in time order. Each frame's
+    /// `frequency` is `None` when no pitch was found in that frame.
     ///
     /// # Errors
     ///
@@ -2750,7 +2751,7 @@ where
         threshold: f64,
         min_frequency: f64,
         max_frequency: f64,
-    ) -> AudioSampleResult<Vec<(f64, Option<f64>)>>;
+    ) -> AudioSampleResult<crate::PitchContour>;
 
     /// Computes the harmonic-to-noise ratio (HNR) in decibels.
     ///
@@ -2862,10 +2863,9 @@ where
     ///
     /// # Returns
     ///
-    /// A `(key_index, confidence)` tuple where:
-    /// - `key_index` is in `0..=11` for major keys (C=0, C♯=1, …, B=11) and
-    ///   `12..=23` for minor keys (Cm=12, C♯m=13, …, Bm=23).
-    /// - `confidence` is in `[0.0, 1.0]`.
+    /// A [`Key`](crate::Key) with the estimated `tonic`
+    /// ([`PitchClass`](crate::PitchClass)), `mode` ([`Mode`](crate::Mode)),
+    /// and a `confidence` in `[0.0, 1.0]`.
     ///
     /// # Errors
     ///
@@ -2888,11 +2888,10 @@ where
     ///     WindowType::Hanning,
     ///     true,
     /// ).unwrap();
-    /// let (key, confidence) = audio.estimate_key(&params).unwrap();
-    /// assert!(key < 24);
-    /// assert!((0.0..=1.0).contains(&confidence));
+    /// let key = audio.estimate_key(&params).unwrap();
+    /// assert!((0.0..=1.0).contains(&key.confidence));
     /// ```
-    fn estimate_key(&self, stft_params: &StftParams) -> AudioSampleResult<(usize, f64)>;
+    fn estimate_key(&self, stft_params: &StftParams) -> AudioSampleResult<crate::Key>;
 }
 
 /// IIR (Infinite Impulse Response) filtering operations.
