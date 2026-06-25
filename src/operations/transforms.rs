@@ -76,8 +76,9 @@ use spectrograms::{
     Gammatone, GammatoneParams, GammatoneSpectrogram, LinearHz, LinearSpectrogram, LogHz,
     LogHzParams, LogHzSpectrogram, LogParams, MelParams, MelSpectrogram, Mfcc, MfccParams,
     Spectrogram, SpectrogramParams, StftParams, StftPlan, StftResult, WindowType,
-    fft_convolve, fft_deconvolve,
 };
+
+use crate::operations::fft_convolution::{fft_convolve, fft_deconvolve};
 
 impl<T> AudioTransforms for AudioSamples<'_, T>
 where

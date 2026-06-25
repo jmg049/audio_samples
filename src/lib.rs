@@ -385,7 +385,7 @@ pub use crate::utils::generation::{
 #[cfg(feature = "statistics")]
 pub use crate::operations::AudioStatistics;
 
-#[cfg(feature = "transforms")]
+#[cfg(all(feature = "transforms", feature = "statistics"))]
 pub use crate::operations::statistics::fft_alignment_lag;
 
 #[cfg(feature = "processing")]
