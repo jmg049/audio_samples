@@ -3,8 +3,11 @@
 //! This module provides the [`IirFilter`] struct for direct-form IIR
 //! filtering, the [`SosFilter`] struct for second-order sections cascade,
 //! and the [`AudioIirFiltering`] trait implementation for [`AudioSamples`].
-//! Supported filter families include Butterworth (all response types) and
-//! Chebyshev Type I (lowpass, highpass, bandpass).
+//! Supported filter families include Butterworth, Chebyshev Type I, and
+//! Chebyshev Type II (inverse Chebyshev), each across all four response types
+//! (low-pass, high-pass, band-pass, band-stop). Band-pass and band-stop use the
+//! analog low-pass→band transforms applied to the analog prototype before the
+//! bilinear transform, so the band edges and notch are placed correctly.
 //!
 //! IIR filters achieve sharper frequency roll-off than FIR filters of
 //! the same length by feeding back a portion of the output signal. They
@@ -712,6 +715,486 @@ fn biquad_from_poles_zeros(
     (b, a)
 }
 
+// ============================================================================
+// Analog zero-pole-gain (ZPK) prototype infrastructure
+// ============================================================================
+//
+// To produce correct band-pass / band-stop responses and Chebyshev Type II
+// (which has finite transmission zeros), the simple "pole-only, zeros pinned at
+// ±1" path is not sufficient. Instead we follow the standard SciPy/MATLAB
+// pipeline:
+//
+//   1. Build a *normalised* analog low-pass prototype (cutoff ω = 1 rad/s) as a
+//      set of zeros, poles and a real gain in the s-plane.
+//   2. Apply an analog frequency transform (LP→LP, LP→HP, LP→BP, LP→BS) that
+//      maps the prototype onto the desired band, in the s-plane.
+//   3. Bilinear-transform every zero and pole into the z-plane and fold the
+//      analog gain through the bilinear Jacobian.
+//   4. Pair conjugate roots into biquad second-order sections.
+//
+// This keeps zeros first-class throughout, which is exactly what BP/BS and
+// Chebyshev II require.
+
+/// Analog zero-pole-gain description in the s-plane.
+#[derive(Debug, Clone)]
+struct AnalogZpk {
+    zeros: Vec<Complex<f64>>,
+    poles: Vec<Complex<f64>>,
+    gain: f64,
+}
+
+/// Normalised (ω_c = 1) analog Butterworth low-pass prototype.
+///
+/// No finite zeros; `order` poles equally spaced on the unit circle in the left
+/// half-plane; unit gain.
+fn butterworth_prototype(order: usize) -> AnalogZpk {
+    let mut poles = Vec::with_capacity(order);
+    let n = order as f64;
+    for k in 0..order {
+        // Angles π/2 · (2k+1)/N offset into the left half-plane.
+        let theta = f64::PI() * (2.0f64.mul_add(k as f64, 1.0)) / (2.0 * n) + f64::PI() / 2.0;
+        poles.push(Complex::new(theta.cos(), theta.sin()));
+    }
+    AnalogZpk {
+        zeros: Vec::new(),
+        poles,
+        gain: 1.0,
+    }
+}
+
+/// Normalised analog Chebyshev Type I low-pass prototype (ω_c = 1).
+///
+/// `ripple_db` is the passband ripple. No finite zeros; poles on an ellipse.
+/// The gain is set so the prototype matches the standard Cheby-I DC behaviour
+/// (0 dB at DC for even order, peak-ripple reference for odd order).
+fn chebyshev1_prototype(order: usize, ripple_db: f64) -> AnalogZpk {
+    let epsilon = (10.0_f64.powf(ripple_db / 10.0) - 1.0).sqrt();
+    let n = order as f64;
+    let mu = (1.0 / epsilon).asinh() / n;
+
+    let mut poles = Vec::with_capacity(order);
+    for k in 0..order {
+        let theta = f64::PI() * (2.0f64.mul_add(k as f64, 1.0)) / (2.0 * n);
+        // Left-half-plane Chebyshev poles.
+        let re = -mu.sinh() * theta.sin();
+        let im = mu.cosh() * theta.cos();
+        poles.push(Complex::new(re, im));
+    }
+
+    // Gain so that the prototype transfer function has the canonical Cheby-I
+    // normalisation: product(-poles) gives the leading coefficient; for even
+    // order divide by sqrt(1+ε²) to land the DC value on the ripple bound.
+    let mut gain = poles.iter().fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
+    let mut gain_re = gain.re;
+    if order % 2 == 0 {
+        gain_re /= (1.0 + epsilon * epsilon).sqrt();
+    }
+    gain = Complex::new(gain_re, 0.0);
+
+    AnalogZpk {
+        zeros: Vec::new(),
+        poles,
+        gain: gain.re,
+    }
+}
+
+/// Normalised analog Chebyshev Type II (inverse Chebyshev) low-pass prototype.
+///
+/// Here `ω = 1` is the *stopband* edge: the response first reaches the
+/// requested `stopband_db` attenuation at ω = 1 and is equiripple beyond it,
+/// while the passband is maximally flat. The prototype has `order` poles and,
+/// for even order, `order` finite imaginary-axis zeros (odd order drops one
+/// zero to ∞, leaving `order−1`). Built by reciprocal-mapping the Chebyshev I
+/// poles and placing zeros at `j / cos((2k−1)π/2N)`.
+fn chebyshev2_prototype(order: usize, stopband_db: f64) -> AnalogZpk {
+    let n = order as f64;
+    // ε for Type II is defined from the stopband attenuation:
+    //   ε = 1 / sqrt(10^(As/10) − 1)
+    let epsilon = 1.0 / (10.0_f64.powf(stopband_db / 10.0) - 1.0).sqrt();
+    let mu = (1.0 / epsilon).asinh() / n;
+
+    // Poles: reciprocal of the Chebyshev I ellipse poles (inverse Chebyshev).
+    let mut poles = Vec::with_capacity(order);
+    for k in 0..order {
+        let theta = f64::PI() * (2.0f64.mul_add(k as f64, 1.0)) / (2.0 * n);
+        let cheb1_re = -mu.sinh() * theta.sin();
+        let cheb1_im = mu.cosh() * theta.cos();
+        let cheb1 = Complex::new(cheb1_re, cheb1_im);
+        // Reciprocal map s -> 1/s places poles for the inverse filter and
+        // keeps the stopband edge at ω = 1.
+        poles.push(Complex::new(1.0, 0.0) / cheb1);
+    }
+
+    // Zeros: on the imaginary axis at ± j / cos((2k+1)π/2N), for k = 0..N-1.
+    // For odd k giving cos ≈ 0 (only when order is odd, the middle term) the
+    // zero goes to infinity and is dropped.
+    let mut zeros = Vec::with_capacity(order);
+    for k in 0..order {
+        let c = (f64::PI() * (2.0f64.mul_add(k as f64, 1.0)) / (2.0 * n)).cos();
+        if c.abs() < 1e-12 {
+            continue; // zero at infinity (odd order centre term)
+        }
+        zeros.push(Complex::new(0.0, 1.0 / c));
+    }
+
+    // Gain so the prototype passband (ω → 0) settles at unity:
+    //   H(0) = gain · Π(−z) / Π(−p)  ⇒  gain = Π(−p) / Π(−z).
+    let prod_poles = poles.iter().fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
+    let prod_zeros = zeros.iter().fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z));
+    let gain = (prod_poles / prod_zeros).re;
+
+    AnalogZpk { zeros, poles, gain }
+}
+
+/// Analog low-pass → low-pass scaling: s → s / ω0.
+///
+/// Scales every root by ω0 and adjusts the gain by the degree deficit so the
+/// transfer function stays consistent (each missing finite zero contributes a
+/// factor of ω0 to the gain).
+fn lp_to_lp(zpk: &AnalogZpk, omega0: f64) -> AnalogZpk {
+    let zeros: Vec<_> = zpk.zeros.iter().map(|&z| z * omega0).collect();
+    let poles: Vec<_> = zpk.poles.iter().map(|&p| p * omega0).collect();
+    let degree = zpk.poles.len() as i32 - zpk.zeros.len() as i32;
+    let gain = zpk.gain * omega0.powi(degree);
+    AnalogZpk { zeros, poles, gain }
+}
+
+/// Analog low-pass → high-pass: s → ω0 / s.
+///
+/// Maps poles/zeros to ω0/root and adds zeros at the origin to fill the degree
+/// deficit, matching SciPy's `lp2hp_zpk`.
+fn lp_to_hp(zpk: &AnalogZpk, omega0: f64) -> AnalogZpk {
+    let degree = zpk.poles.len() as i32 - zpk.zeros.len() as i32;
+
+    let mut zeros: Vec<_> = zpk
+        .zeros
+        .iter()
+        .map(|&z| Complex::new(omega0, 0.0) / z)
+        .collect();
+    let poles: Vec<_> = zpk
+        .poles
+        .iter()
+        .map(|&p| Complex::new(omega0, 0.0) / p)
+        .collect();
+    // Fill the missing zeros (that were at infinity) with zeros at the origin.
+    for _ in 0..degree {
+        zeros.push(Complex::new(0.0, 0.0));
+    }
+
+    // Gain: H_hp(s) = H_lp(ω0/s); the gain folds through as
+    //   k · Π(−z_lp) / Π(−p_lp)  (real).
+    let prod_z = zpk
+        .zeros
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z));
+    let prod_p = zpk
+        .poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
+    let gain = zpk.gain * (prod_z / prod_p).re;
+
+    AnalogZpk { zeros, poles, gain }
+}
+
+/// Analog low-pass → band-pass: s → (s² + ω0²) / (s·BW).
+///
+/// `omega0` is the geometric-centre frequency, `bw` the bandwidth, both in
+/// rad/s. Each prototype root splits into two; the gain is scaled by BW^degree;
+/// `degree` zeros are added at the origin. Mirrors SciPy's `lp2bp_zpk`.
+fn lp_to_bp(zpk: &AnalogZpk, omega0: f64, bw: f64) -> AnalogZpk {
+    let degree = zpk.poles.len() as i32 - zpk.zeros.len() as i32;
+
+    // Scale roots by BW/2, then each splits via s = scaled ± sqrt(scaled² − ω0²).
+    let split = |root: Complex<f64>| -> (Complex<f64>, Complex<f64>) {
+        let scaled = root * (bw / 2.0);
+        let disc = (scaled * scaled - omega0 * omega0).sqrt();
+        (scaled + disc, scaled - disc)
+    };
+
+    let mut zeros = Vec::with_capacity(zpk.zeros.len() * 2 + degree as usize);
+    for &z in &zpk.zeros {
+        let (a, b) = split(z);
+        zeros.push(a);
+        zeros.push(b);
+    }
+    // Missing finite zeros map to the origin.
+    for _ in 0..degree {
+        zeros.push(Complex::new(0.0, 0.0));
+    }
+
+    let mut poles = Vec::with_capacity(zpk.poles.len() * 2);
+    for &p in &zpk.poles {
+        let (a, b) = split(p);
+        poles.push(a);
+        poles.push(b);
+    }
+
+    let gain = zpk.gain * bw.powi(degree);
+    AnalogZpk { zeros, poles, gain }
+}
+
+/// Analog low-pass → band-stop: s → (s·BW) / (s² + ω0²).
+///
+/// `omega0` is the geometric centre, `bw` the bandwidth. Each root inverts and
+/// splits; the deficit is filled with `degree` conjugate pairs of zeros at
+/// ±jω0 (the notch). Mirrors SciPy's `lp2bs_zpk`.
+fn lp_to_bs(zpk: &AnalogZpk, omega0: f64, bw: f64) -> AnalogZpk {
+    let degree = zpk.poles.len() as i32 - zpk.zeros.len() as i32;
+
+    // Invert then split: root -> (BW/2)/root ± sqrt(((BW/2)/root)² − ω0²).
+    let split = |root: Complex<f64>| -> (Complex<f64>, Complex<f64>) {
+        let inv = Complex::new(bw / 2.0, 0.0) / root;
+        let disc = (inv * inv - omega0 * omega0).sqrt();
+        (inv + disc, inv - disc)
+    };
+
+    let mut zeros = Vec::with_capacity(zpk.zeros.len() * 2 + (degree as usize) * 2);
+    for &z in &zpk.zeros {
+        let (a, b) = split(z);
+        zeros.push(a);
+        zeros.push(b);
+    }
+    // Missing finite zeros map to ±jω0 (the band-stop notch).
+    for _ in 0..degree {
+        zeros.push(Complex::new(0.0, omega0));
+        zeros.push(Complex::new(0.0, -omega0));
+    }
+
+    let mut poles = Vec::with_capacity(zpk.poles.len() * 2);
+    for &p in &zpk.poles {
+        let (a, b) = split(p);
+        poles.push(a);
+        poles.push(b);
+    }
+
+    // Gain folds through as k · Π(−z_lp)/Π(−p_lp) (real).
+    let prod_z = zpk
+        .zeros
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z));
+    let prod_p = zpk
+        .poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
+    let gain = zpk.gain * (prod_z / prod_p).re;
+
+    AnalogZpk { zeros, poles, gain }
+}
+
+/// Bilinear-transform an analog ZPK into a digital ZPK.
+///
+/// Uses z = (1 + s/(2fs)) / (1 − s/(2fs)). Finite zeros and poles map through
+/// [`bilinear_transform_pole`]; the analog gain folds through the bilinear
+/// Jacobian, and zeros missing relative to poles map to z = −1.
+fn bilinear_zpk(zpk: &AnalogZpk, sample_rate: f64) -> AnalogZpk {
+    let fs2 = 2.0 * sample_rate;
+    let degree = zpk.poles.len() as i32 - zpk.zeros.len() as i32;
+
+    let zeros_z: Vec<_> = zpk
+        .zeros
+        .iter()
+        .map(|&z| bilinear_transform_pole(z, sample_rate))
+        .collect();
+    let poles_z: Vec<_> = zpk
+        .poles
+        .iter()
+        .map(|&p| bilinear_transform_pole(p, sample_rate))
+        .collect();
+
+    // Gain correction: k_z = k_s · Π(2fs − z_s) / Π(2fs − p_s)  (real for
+    // conjugate-symmetric root sets).
+    let num = zpk
+        .zeros
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &z| acc * (Complex::new(fs2, 0.0) - z));
+    let den = zpk
+        .poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (Complex::new(fs2, 0.0) - p));
+    let gain = zpk.gain * (num / den).re;
+
+    // Append the missing zeros at z = −1.
+    let mut zeros = zeros_z;
+    for _ in 0..degree {
+        zeros.push(Complex::new(-1.0, 0.0));
+    }
+
+    AnalogZpk {
+        zeros,
+        poles: poles_z,
+        gain,
+    }
+}
+
+/// Pair complex-conjugate roots (zeros or poles) into ordered pairs.
+///
+/// Like [`pair_poles`] but generic over roots that may be zeros. Real roots are
+/// paired with another available real root when possible, otherwise duplicated.
+fn pair_roots(roots: &[Complex<f64>]) -> Vec<(Complex<f64>, Complex<f64>)> {
+    let mut pairs = Vec::new();
+    let mut used = vec![false; roots.len()];
+
+    for i in 0..roots.len() {
+        if used[i] {
+            continue;
+        }
+        if roots[i].im.abs() < 1e-9 {
+            // Real root: try to pair with another unused real root.
+            used[i] = true;
+            let mut partner = None;
+            for j in (i + 1)..roots.len() {
+                if !used[j] && roots[j].im.abs() < 1e-9 {
+                    partner = Some(j);
+                    break;
+                }
+            }
+            match partner {
+                Some(j) => {
+                    used[j] = true;
+                    pairs.push((roots[i], roots[j]));
+                }
+                None => pairs.push((roots[i], Complex::new(0.0, 0.0))),
+            }
+        } else {
+            // Complex root: find its conjugate.
+            used[i] = true;
+            let mut found = false;
+            for j in (i + 1)..roots.len() {
+                if used[j] {
+                    continue;
+                }
+                if (roots[i].conj() - roots[j]).norm() < 1e-7 {
+                    used[j] = true;
+                    pairs.push((roots[i], roots[j]));
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                pairs.push((roots[i], roots[i].conj()));
+            }
+        }
+    }
+    pairs
+}
+
+/// Reference frequency (Hz) at which a response type should be normalised to
+/// unit gain, given the digital design parameters.
+#[derive(Clone, Copy)]
+enum GainRef {
+    Dc,
+    Nyquist,
+    Hz(f64),
+}
+
+/// Assemble a digital ZPK into an [`SosFilter`], normalising the overall gain to
+/// 1.0 at the supplied reference frequency.
+///
+/// Zeros and poles are paired independently and zipped into biquad sections;
+/// any leftover unpaired set (when counts differ) is padded so each section is
+/// a valid second-order block. The cascade gain is applied to the first
+/// section, then corrected so |H| = 1 at `gain_ref`.
+fn zpk_to_sos(zpk: &AnalogZpk, sample_rate: f64, gain_ref: GainRef) -> SosFilter {
+    let pole_pairs = pair_roots(&zpk.poles);
+    let zero_pairs = pair_roots(&zpk.zeros);
+
+    let n_sections = pole_pairs.len().max(zero_pairs.len()).max(1);
+    let mut sections = Vec::with_capacity(n_sections);
+
+    for i in 0..n_sections {
+        let (p1, p2) = pole_pairs
+            .get(i)
+            .copied()
+            .unwrap_or((Complex::new(0.0, 0.0), Complex::new(0.0, 0.0)));
+        let (z1, z2) = zero_pairs
+            .get(i)
+            .copied()
+            .unwrap_or((Complex::new(0.0, 0.0), Complex::new(0.0, 0.0)));
+        let (b, a) = biquad_from_poles_zeros(p1, p2, z1, z2, 1.0);
+        sections.push(IirFilter::new(b, a));
+    }
+
+    // Apply the overall gain to the first section's numerator.
+    for coeff in &mut sections[0].b_coeffs {
+        *coeff *= zpk.gain;
+    }
+
+    let mut sos = SosFilter::new(sections);
+
+    // Normalise to unit gain at the reference frequency.
+    let ref_freq = match gain_ref {
+        GainRef::Dc => 0.0,
+        GainRef::Nyquist => sample_rate / 2.0,
+        GainRef::Hz(f) => f,
+    };
+    let (mag, _) = sos.frequency_response(&[ref_freq], sample_rate);
+    if mag[0].abs() > 1e-12 {
+        let correction = 1.0 / mag[0];
+        for coeff in &mut sos.sections[0].b_coeffs {
+            *coeff *= correction;
+        }
+    }
+
+    sos
+}
+
+/// Pre-warp a frequency (Hz) for the bilinear transform, returning rad/s.
+fn prewarp(freq_hz: f64, sample_rate: f64) -> f64 {
+    2.0 * sample_rate * (f64::PI() * freq_hz / sample_rate).tan()
+}
+
+/// Design an SOS filter from a normalised analog prototype and a target
+/// response, doing all frequency transforms in the analog domain before the
+/// bilinear transform.
+fn design_from_prototype(
+    proto: &AnalogZpk,
+    response: FilterResponse,
+    sample_rate: f64,
+    cutoff: Option<f64>,
+    low: Option<f64>,
+    high: Option<f64>,
+) -> SosFilter {
+    match response {
+        FilterResponse::LowPass => {
+            let wc = prewarp(cutoff.expect("lowpass needs cutoff"), sample_rate);
+            let analog = lp_to_lp(proto, wc);
+            let digital = bilinear_zpk(&analog, sample_rate);
+            zpk_to_sos(&digital, sample_rate, GainRef::Dc)
+        }
+        FilterResponse::HighPass => {
+            let wc = prewarp(cutoff.expect("highpass needs cutoff"), sample_rate);
+            let analog = lp_to_hp(proto, wc);
+            let digital = bilinear_zpk(&analog, sample_rate);
+            zpk_to_sos(&digital, sample_rate, GainRef::Nyquist)
+        }
+        FilterResponse::BandPass => {
+            let lo = low.expect("bandpass needs low");
+            let hi = high.expect("bandpass needs high");
+            let w_lo = prewarp(lo, sample_rate);
+            let w_hi = prewarp(hi, sample_rate);
+            let omega0 = (w_lo * w_hi).sqrt();
+            let bw = w_hi - w_lo;
+            let analog = lp_to_bp(proto, omega0, bw);
+            let digital = bilinear_zpk(&analog, sample_rate);
+            // Normalise at the geometric-centre frequency (Hz).
+            let center_hz = (lo * hi).sqrt();
+            zpk_to_sos(&digital, sample_rate, GainRef::Hz(center_hz))
+        }
+        FilterResponse::BandStop => {
+            let lo = low.expect("bandstop needs low");
+            let hi = high.expect("bandstop needs high");
+            let w_lo = prewarp(lo, sample_rate);
+            let w_hi = prewarp(hi, sample_rate);
+            let omega0 = (w_lo * w_hi).sqrt();
+            let bw = w_hi - w_lo;
+            let analog = lp_to_bs(proto, omega0, bw);
+            let digital = bilinear_zpk(&analog, sample_rate);
+            // Band-stop passes DC, so normalise there.
+            zpk_to_sos(&digital, sample_rate, GainRef::Dc)
+        }
+    }
+}
+
 impl<T> AudioIirFiltering for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -1206,56 +1689,10 @@ fn design_butterworth_highpass_sos(order: usize, cutoff: f64, sample_rate: f64) 
     highpass
 }
 
-/// Design a Butterworth bandpass filter as a second-order sections cascade.
-///
-/// Uses a lowpass-to-bandpass transformation on the analog prototype.
-/// This effectively doubles the filter order.
-///
-/// # Arguments
-/// - `order` – Filter order (will be doubled in bandpass conversion).
-/// - `low_freq` – Lower cutoff frequency in Hz.
-/// - `high_freq` – Upper cutoff frequency in Hz.
-/// - `sample_rate` – Sample rate in Hz.
-///
-/// # Returns
-/// A [`SosFilter`] implementing the Butterworth bandpass response.
-fn design_butterworth_bandpass_sos(
-    order: usize,
-    low_freq: f64,
-    high_freq: f64,
-    sample_rate: f64,
-) -> SosFilter {
-    // For bandpass, cascade lowpass and highpass filters
-    // This is a simplified approach; a proper implementation would use
-    // the lowpass-to-bandpass transformation in the analog domain.
-    // For now, we'll use the cascade approach which is effective for audio.
-
-    let center_freq = (low_freq * high_freq).sqrt();
-
-    // Design lowpass and highpass sections
-    let lowpass = design_butterworth_lowpass_sos(order, high_freq, sample_rate);
-    let highpass = design_butterworth_highpass_sos(order, low_freq, sample_rate);
-
-    // Combine sections
-    let mut combined_sections = Vec::new();
-    combined_sections.extend(lowpass.sections);
-    combined_sections.extend(highpass.sections);
-
-    let mut sos = SosFilter::new(combined_sections);
-
-    // Normalize gain at center frequency
-    let (center_response, _) = sos.frequency_response(&[center_freq], sample_rate);
-    let center_gain = center_response[0];
-
-    if center_gain.abs() > 1e-10 {
-        let gain_correction = 1.0 / center_gain;
-        for coeff in &mut sos.sections[0].b_coeffs {
-            *coeff *= gain_correction;
-        }
-    }
-
-    sos
-}
+// Butterworth band-pass / band-stop are now produced by the analog-prototype
+// pipeline (`butterworth_prototype` → `lp_to_bp`/`lp_to_bs` → `bilinear_zpk`)
+// in `design_butterworth_filter`, replacing the earlier cascaded-LP+HP
+// approximation.
 
 // ============================================================================
 // Chebyshev Type I SOS filter design
@@ -1419,52 +1856,10 @@ fn design_chebyshev1_highpass_sos(
     highpass
 }
 
-/// Design a Chebyshev Type I bandpass filter as a second-order sections cascade.
-///
-/// Cascades lowpass and highpass sections to create bandpass response.
-///
-/// # Arguments
-/// - `order` – Filter order (will be doubled in cascade).
-/// - `low_freq` – Lower cutoff frequency in Hz.
-/// - `high_freq` – Upper cutoff frequency in Hz.
-/// - `ripple_db` – Passband ripple in dB.
-/// - `sample_rate` – Sample rate in Hz.
-///
-/// # Returns
-/// A [`SosFilter`] implementing the Chebyshev Type I bandpass response.
-fn design_chebyshev1_bandpass_sos(
-    order: usize,
-    low_freq: f64,
-    high_freq: f64,
-    ripple_db: f64,
-    sample_rate: f64,
-) -> SosFilter {
-    let center_freq = (low_freq * high_freq).sqrt();
-
-    // Design lowpass and highpass sections
-    let lowpass = design_chebyshev1_lowpass_sos(order, high_freq, ripple_db, sample_rate);
-    let highpass = design_chebyshev1_highpass_sos(order, low_freq, ripple_db, sample_rate);
-
-    // Combine sections
-    let mut combined_sections = Vec::new();
-    combined_sections.extend(lowpass.sections);
-    combined_sections.extend(highpass.sections);
-
-    let mut sos = SosFilter::new(combined_sections);
-
-    // Normalize gain at center frequency
-    let (center_response, _) = sos.frequency_response(&[center_freq], sample_rate);
-    let center_gain = center_response[0];
-
-    if center_gain.abs() > 1e-10 {
-        let gain_correction = 1.0 / center_gain;
-        for coeff in &mut sos.sections[0].b_coeffs {
-            *coeff *= gain_correction;
-        }
-    }
-
-    sos
-}
+// Chebyshev Type I band-pass / band-stop are now produced by the
+// analog-prototype pipeline (`chebyshev1_prototype` → `lp_to_bp`/`lp_to_bs` →
+// `bilinear_zpk`) in `design_chebyshev_i_filter`, replacing the earlier
+// cascaded-LP+HP approximation.
 
 // ============================================================================
 // IIR filter design dispatcher
@@ -1494,9 +1889,12 @@ fn design_iir_filter(
     match design.filter_type {
         IirFilterType::Butterworth => design_butterworth_filter(design, sample_rate),
         IirFilterType::ChebyshevI => design_chebyshev_i_filter(design, sample_rate),
+        IirFilterType::ChebyshevII => design_chebyshev_ii_filter(design, sample_rate),
         other => Err(AudioSampleError::unsupported(
             "design_iir_filter",
-            format!("filter type {other:?} is not yet implemented; use Butterworth or ChebyshevI"),
+            format!(
+                "filter type {other:?} is not yet implemented; use Butterworth, ChebyshevI or ChebyshevII"
+            ),
         )),
     }
 }
@@ -1597,19 +1995,61 @@ fn design_butterworth_filter(
                 )));
             }
 
-            let sos = design_butterworth_bandpass_sos(order, low_freq, high_freq, sample_rate);
-            Ok(FilterRepresentation::Cascade(
-                sos.sections
-                    .iter()
-                    .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
-                    .collect(),
-            ))
+            let proto = butterworth_prototype(order);
+            let sos = design_from_prototype(
+                &proto,
+                FilterResponse::BandPass,
+                sample_rate,
+                None,
+                Some(low_freq),
+                Some(high_freq),
+            );
+            Ok(sos_to_cascade(&sos))
         }
-        FilterResponse::BandStop => Err(AudioSampleError::unsupported(
-            "design_butterworth_filter",
-            "band-stop Butterworth response is not yet implemented",
-        )),
+        FilterResponse::BandStop => {
+            let low_freq = design.low_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "low_frequency",
+                    "Low frequency required for band-stop filter",
+                ))
+            })?;
+            let high_freq = design.high_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "high_frequency",
+                    "High frequency required for band-stop filter",
+                ))
+            })?;
+
+            if low_freq <= 0.0 || high_freq >= nyquist || low_freq >= high_freq {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "frequency_range",
+                    "Invalid frequency range for band-stop filter",
+                )));
+            }
+
+            let proto = butterworth_prototype(order);
+            let sos = design_from_prototype(
+                &proto,
+                FilterResponse::BandStop,
+                sample_rate,
+                None,
+                Some(low_freq),
+                Some(high_freq),
+            );
+            Ok(sos_to_cascade(&sos))
+        }
     }
+}
+
+/// Convert an [`SosFilter`] into a [`FilterRepresentation::Cascade`] of fast
+/// biquads.
+fn sos_to_cascade(sos: &SosFilter) -> FilterRepresentation {
+    FilterRepresentation::Cascade(
+        sos.sections
+            .iter()
+            .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
+            .collect(),
+    )
 }
 
 /// Design a Chebyshev Type I filter.
@@ -1711,19 +2151,143 @@ fn design_chebyshev_i_filter(
                 )));
             }
 
-            let sos =
-                design_chebyshev1_bandpass_sos(order, low_freq, high_freq, ripple, sample_rate);
-            Ok(FilterRepresentation::Cascade(
-                sos.sections
-                    .iter()
-                    .map(|s| Biquad::from_coeffs(&s.b_coeffs, &s.a_coeffs))
-                    .collect(),
-            ))
+            let proto = chebyshev1_prototype(order, ripple);
+            let sos = design_from_prototype(
+                &proto,
+                FilterResponse::BandPass,
+                sample_rate,
+                None,
+                Some(low_freq),
+                Some(high_freq),
+            );
+            Ok(sos_to_cascade(&sos))
         }
-        FilterResponse::BandStop => Err(AudioSampleError::unsupported(
-            "design_chebyshev_i_filter",
-            "band-stop Chebyshev Type I response is not yet implemented",
-        )),
+        FilterResponse::BandStop => {
+            let low_freq = design.low_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "low_frequency",
+                    "Low frequency required for band-stop filter",
+                ))
+            })?;
+            let high_freq = design.high_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "high_frequency",
+                    "High frequency required for band-stop filter",
+                ))
+            })?;
+
+            if low_freq <= 0.0 || high_freq >= nyquist * 0.95 || low_freq >= high_freq {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "frequency_range",
+                    "Invalid frequency range for band-stop filter",
+                )));
+            }
+
+            let proto = chebyshev1_prototype(order, ripple);
+            let sos = design_from_prototype(
+                &proto,
+                FilterResponse::BandStop,
+                sample_rate,
+                None,
+                Some(low_freq),
+                Some(high_freq),
+            );
+            Ok(sos_to_cascade(&sos))
+        }
+    }
+}
+
+/// Design a Chebyshev Type II (inverse Chebyshev) filter.
+///
+/// Uses the analog inverse-Chebyshev prototype (maximally flat passband,
+/// equiripple stopband) transformed via the standard analog frequency
+/// transforms and bilinear transform. The `stopband_attenuation` field
+/// (dB) sets the stopband floor; for low/high-pass `cutoff_frequency` is the
+/// stopband edge, for band responses `low/high_frequency` are the band edges.
+fn design_chebyshev_ii_filter(
+    design: &IirFilterDesign,
+    sample_rate: f64,
+) -> AudioSampleResult<FilterRepresentation> {
+    let nyquist = sample_rate / 2.0;
+    let order = design.order.get();
+
+    let stopband_db = design.stopband_attenuation.ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "stopband_attenuation",
+            "Stopband attenuation required for Chebyshev Type II filter",
+        ))
+    })?;
+
+    // Sensible stopband attenuation range.
+    if stopband_db <= 0.0 || stopband_db > 200.0 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "stopband_attenuation",
+            "Stopband attenuation must be between 0 and 200 dB",
+        )));
+    }
+
+    if order > 12 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "order",
+            "Filter order must be ≤ 12 for numerical stability",
+        )));
+    }
+
+    let proto = chebyshev2_prototype(order, stopband_db);
+
+    match design.response {
+        FilterResponse::LowPass | FilterResponse::HighPass => {
+            let cutoff = design.cutoff_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency required for low/high-pass filter",
+                ))
+            })?;
+            if cutoff <= 0.0 || cutoff >= nyquist * 0.95 {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "cutoff_frequency",
+                    "Cutoff frequency must be between 0 and 0.95 * Nyquist frequency",
+                )));
+            }
+            let sos = design_from_prototype(
+                &proto,
+                design.response,
+                sample_rate,
+                Some(cutoff),
+                None,
+                None,
+            );
+            Ok(sos_to_cascade(&sos))
+        }
+        FilterResponse::BandPass | FilterResponse::BandStop => {
+            let low_freq = design.low_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "low_frequency",
+                    "Low frequency required for band filter",
+                ))
+            })?;
+            let high_freq = design.high_frequency.ok_or_else(|| {
+                AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "high_frequency",
+                    "High frequency required for band filter",
+                ))
+            })?;
+            if low_freq <= 0.0 || high_freq >= nyquist * 0.95 || low_freq >= high_freq {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "frequency_range",
+                    "Invalid frequency range for band filter",
+                )));
+            }
+            let sos = design_from_prototype(
+                &proto,
+                design.response,
+                sample_rate,
+                None,
+                Some(low_freq),
+                Some(high_freq),
+            );
+            Ok(sos_to_cascade(&sos))
+        }
     }
 }
 
@@ -2444,5 +3008,410 @@ mod tests {
             pristine.as_slice().unwrap(),
             "non-mutating variant must not modify the original"
         );
+    }
+
+    // ========================================================================
+    // Validated frequency-response tests for the new designs
+    //
+    // Reference dB values cross-checked against SciPy:
+    //   signal.cheby2 / signal.butter / signal.cheby1 with output='sos',
+    //   evaluated via signal.sosfreqz at fs = 44100. Concrete checkpoints are
+    //   noted inline next to each assertion.
+    // ========================================================================
+
+    const FS: f64 = 44100.0;
+
+    fn db(mag: f64) -> f64 {
+        20.0 * mag.max(1e-12).log10()
+    }
+
+    /// Convenience: magnitude (dB) of an SOS at a single frequency.
+    fn mag_db(sos: &SosFilter, freq: f64) -> f64 {
+        let (m, _) = sos.frequency_response(&[freq], FS);
+        db(m[0])
+    }
+
+    // ---- Chebyshev Type II low-pass ----------------------------------------
+
+    #[test]
+    fn test_cheby2_lowpass_response() {
+        // order 4, stopband edge 2000 Hz, As = 40 dB.
+        // SciPy reference: 0 Hz ~ 0 dB, 2000 Hz = -40 dB, >=2000 Hz <= -40 dB,
+        // 1000 Hz ~ -3.04 dB.
+        let proto = super::chebyshev2_prototype(4, 40.0);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::LowPass,
+            FS,
+            Some(2000.0),
+            None,
+            None,
+        );
+
+        // Maximally flat passband: ~0 dB within 1 dB at DC and well below edge.
+        assert!(mag_db(&sos, 0.0).abs() < 1.0, "DC: {}", mag_db(&sos, 0.0));
+        assert!(
+            mag_db(&sos, 100.0).abs() < 1.0,
+            "100Hz: {}",
+            mag_db(&sos, 100.0)
+        );
+        assert!(
+            mag_db(&sos, 500.0).abs() < 1.0,
+            "500Hz: {}",
+            mag_db(&sos, 500.0)
+        );
+
+        // Stopband: at and beyond the stopband edge attenuation >= 40 dB
+        // (equiripple touches exactly -40, allow tiny numerical slack).
+        assert!(
+            mag_db(&sos, 2000.0) <= -40.0 + 0.5,
+            "2000Hz stopband: {}",
+            mag_db(&sos, 2000.0)
+        );
+        assert!(
+            mag_db(&sos, 2500.0) <= -40.0 + 0.5,
+            "2500Hz stopband: {}",
+            mag_db(&sos, 2500.0)
+        );
+        assert!(
+            mag_db(&sos, 4000.0) <= -40.0 + 0.5,
+            "4000Hz stopband: {}",
+            mag_db(&sos, 4000.0)
+        );
+
+        // Transition: 1000 Hz ~ -3 dB (SciPy: -3.04). Within 1 dB.
+        assert!(
+            (mag_db(&sos, 1000.0) - (-3.04)).abs() < 1.0,
+            "1000Hz transition: {}",
+            mag_db(&sos, 1000.0)
+        );
+    }
+
+    #[test]
+    fn test_cheby2_lowpass_odd_order() {
+        // Odd order drops one zero to infinity. order 3, edge 2000, As 40.
+        // SciPy reference: DC ~0 dB, 2000 Hz = -40 dB, 4000 Hz ~ -40 dB.
+        let proto = super::chebyshev2_prototype(3, 40.0);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::LowPass,
+            FS,
+            Some(2000.0),
+            None,
+            None,
+        );
+        assert!(mag_db(&sos, 0.0).abs() < 1.0, "DC: {}", mag_db(&sos, 0.0));
+        assert!(
+            mag_db(&sos, 2000.0) <= -40.0 + 0.5,
+            "2000Hz: {}",
+            mag_db(&sos, 2000.0)
+        );
+        assert!(
+            mag_db(&sos, 4000.0) <= -40.0 + 0.5,
+            "4000Hz: {}",
+            mag_db(&sos, 4000.0)
+        );
+    }
+
+    // ---- Chebyshev Type II high-pass ---------------------------------------
+
+    #[test]
+    fn test_cheby2_highpass_response() {
+        // order 4, stopband edge 2000 Hz, As = 40 dB.
+        // SciPy reference: 2000 Hz = -40 dB, 100 Hz = -40.2 dB (stopband),
+        // 10000 Hz ~ 0 dB.
+        let proto = super::chebyshev2_prototype(4, 40.0);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::HighPass,
+            FS,
+            Some(2000.0),
+            None,
+            None,
+        );
+
+        // Passband (well above edge): flat ~0 dB.
+        assert!(
+            mag_db(&sos, 10000.0).abs() < 1.0,
+            "10kHz: {}",
+            mag_db(&sos, 10000.0)
+        );
+        assert!(
+            mag_db(&sos, 5000.0).abs() < 1.0,
+            "5kHz: {}",
+            mag_db(&sos, 5000.0)
+        );
+
+        // Stopband: at and below edge attenuation >= 40 dB.
+        assert!(
+            mag_db(&sos, 2000.0) <= -40.0 + 0.5,
+            "2000Hz: {}",
+            mag_db(&sos, 2000.0)
+        );
+        assert!(
+            mag_db(&sos, 1000.0) <= -40.0 + 0.5,
+            "1000Hz: {}",
+            mag_db(&sos, 1000.0)
+        );
+        assert!(
+            mag_db(&sos, 100.0) <= -40.0 + 0.5,
+            "100Hz: {}",
+            mag_db(&sos, 100.0)
+        );
+    }
+
+    // ---- Butterworth band-pass (proper analog LP->BP transform) ------------
+
+    #[test]
+    fn test_butterworth_bandpass_response() {
+        // order 4, band [500, 2000] Hz. Geometric centre = 1000 Hz.
+        // SciPy reference: centre 0 dB, edges -3.01 dB, 100 Hz -65 dB,
+        // 8000 Hz -61 dB.
+        let proto = super::butterworth_prototype(4);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::BandPass,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt(); // 1000 Hz
+
+        // ~0 dB at the geometric centre.
+        assert!(
+            mag_db(&sos, center).abs() < 0.5,
+            "center {center}Hz: {}",
+            mag_db(&sos, center)
+        );
+
+        // Edges ~ -3 dB.
+        assert!(
+            (mag_db(&sos, 500.0) - (-3.01)).abs() < 1.0,
+            "500Hz edge: {}",
+            mag_db(&sos, 500.0)
+        );
+        assert!(
+            (mag_db(&sos, 2000.0) - (-3.01)).abs() < 1.0,
+            "2000Hz edge: {}",
+            mag_db(&sos, 2000.0)
+        );
+
+        // Strong attenuation outside the band.
+        assert!(
+            mag_db(&sos, 100.0) <= -20.0,
+            "100Hz: {}",
+            mag_db(&sos, 100.0)
+        );
+        assert!(
+            mag_db(&sos, 8000.0) <= -20.0,
+            "8000Hz: {}",
+            mag_db(&sos, 8000.0)
+        );
+    }
+
+    // ---- Butterworth band-stop (analog LP->BS transform) -------------------
+
+    #[test]
+    fn test_butterworth_bandstop_response() {
+        // order 4, band [500, 2000] Hz, notch centred at 1000 Hz.
+        // SciPy reference: 1000 Hz extremely deep (< -200 dB), edges -3 dB,
+        // DC and 15 kHz ~ 0 dB.
+        let proto = super::butterworth_prototype(4);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::BandStop,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+
+        // Deep notch at centre.
+        assert!(
+            mag_db(&sos, center) <= -40.0,
+            "notch center: {}",
+            mag_db(&sos, center)
+        );
+
+        // ~0 dB well outside the notch.
+        assert!(mag_db(&sos, 50.0).abs() < 1.0, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 100.0).abs() < 1.0,
+            "100Hz: {}",
+            mag_db(&sos, 100.0)
+        );
+        assert!(
+            mag_db(&sos, 15000.0).abs() < 1.0,
+            "15kHz: {}",
+            mag_db(&sos, 15000.0)
+        );
+
+        // Edges ~ -3 dB.
+        assert!(
+            (mag_db(&sos, 500.0) - (-3.01)).abs() < 1.0,
+            "500Hz edge: {}",
+            mag_db(&sos, 500.0)
+        );
+    }
+
+    // ---- Chebyshev I band-pass (proper analog LP->BP transform) ------------
+
+    #[test]
+    fn test_cheby1_bandpass_response() {
+        // order 4, band [500, 2000] Hz, rp = 0.5 dB. Centre 1000 Hz.
+        // SciPy reference: passband sits within [-0.5, 0] dB across [500,2000],
+        // 100 Hz -74 dB, 5000 Hz -49 dB.
+        let proto = super::chebyshev1_prototype(4, 0.5);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::BandPass,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+
+        // Within the passband, gain stays within the ripple bound of 0 dB.
+        for &f in &[500.0, center, 1000.0, 2000.0] {
+            let g = mag_db(&sos, f);
+            assert!(
+                g <= 0.1 && g >= -0.5 - 0.2,
+                "passband {f}Hz gain {g} out of ripple bound"
+            );
+        }
+
+        // Strong rejection outside.
+        assert!(
+            mag_db(&sos, 100.0) <= -30.0,
+            "100Hz: {}",
+            mag_db(&sos, 100.0)
+        );
+        assert!(
+            mag_db(&sos, 5000.0) <= -30.0,
+            "5000Hz: {}",
+            mag_db(&sos, 5000.0)
+        );
+    }
+
+    // ---- Chebyshev I band-stop ---------------------------------------------
+
+    #[test]
+    fn test_cheby1_bandstop_response() {
+        // order 4, band [500, 2000] Hz, rp = 0.5 dB. Notch at 1000 Hz.
+        let proto = super::chebyshev1_prototype(4, 0.5);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::BandStop,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+
+        assert!(
+            mag_db(&sos, center) <= -40.0,
+            "notch center: {}",
+            mag_db(&sos, center)
+        );
+        // Passband on both sides within the ripple bound.
+        assert!(mag_db(&sos, 50.0) >= -0.7, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 15000.0) >= -0.7,
+            "15kHz: {}",
+            mag_db(&sos, 15000.0)
+        );
+    }
+
+    // ---- Chebyshev II band-stop --------------------------------------------
+
+    #[test]
+    fn test_cheby2_bandstop_response() {
+        // order 4, band [500, 2000] Hz, As = 40 dB. Notch at 1000 Hz.
+        // SciPy reference: across [500,2000] attenuation = -40 dB, DC and
+        // 15 kHz ~ 0 dB.
+        let proto = super::chebyshev2_prototype(4, 40.0);
+        let sos = super::design_from_prototype(
+            &proto,
+            FilterResponse::BandStop,
+            FS,
+            None,
+            Some(500.0),
+            Some(2000.0),
+        );
+        let center = (500.0_f64 * 2000.0).sqrt();
+
+        // Stopband floor across the band >= 40 dB attenuation.
+        assert!(
+            mag_db(&sos, center) <= -40.0 + 0.5,
+            "center: {}",
+            mag_db(&sos, center)
+        );
+        assert!(
+            mag_db(&sos, 500.0) <= -40.0 + 0.5,
+            "500Hz: {}",
+            mag_db(&sos, 500.0)
+        );
+        assert!(
+            mag_db(&sos, 2000.0) <= -40.0 + 0.5,
+            "2000Hz: {}",
+            mag_db(&sos, 2000.0)
+        );
+
+        // Maximally flat passband ~0 dB outside the band.
+        assert!(mag_db(&sos, 50.0).abs() < 1.0, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 15000.0).abs() < 1.0,
+            "15kHz: {}",
+            mag_db(&sos, 15000.0)
+        );
+    }
+
+    // ---- End-to-end dispatcher wiring (apply_iir_filter) -------------------
+
+    #[test]
+    fn test_cheby2_dispatcher_wired() {
+        // Chebyshev II lowpass via the public apply_iir_filter path.
+        let samples = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
+        let audio: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+        let design = IirFilterDesign::chebyshev_ii(
+            FilterResponse::LowPass,
+            NonZeroUsize::new(4).unwrap(),
+            2000.0,
+            40.0,
+        );
+        assert!(audio.apply_iir_filter(&design).is_ok());
+
+        // And in-place band-stop.
+        let samples2 = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
+        let mut audio2: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples2, sample_rate!(44100));
+        let bs = IirFilterDesign::chebyshev_ii_band(
+            FilterResponse::BandStop,
+            NonZeroUsize::new(4).unwrap(),
+            500.0,
+            2000.0,
+            40.0,
+        );
+        assert!(audio2.apply_iir_filter_in_place(&bs).is_ok());
+    }
+
+    #[test]
+    fn test_butterworth_bandstop_dispatcher_wired() {
+        // Butterworth band-stop now supported (was previously unsupported).
+        let samples = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
+        let mut audio: AudioSamples<'_, f32> =
+            AudioSamples::from_mono_vec(samples, sample_rate!(44100));
+        let mut bs = IirFilterDesign::butterworth_bandpass(
+            NonZeroUsize::new(4).unwrap(),
+            500.0,
+            2000.0,
+        );
+        bs.response = FilterResponse::BandStop;
+        assert!(audio.apply_iir_filter_in_place(&bs).is_ok());
     }
 }

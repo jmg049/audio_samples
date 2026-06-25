@@ -1682,6 +1682,81 @@ impl IirFilterDesign {
             stopband_attenuation: None,
         }
     }
+
+    /// Creates a Chebyshev Type II (inverse Chebyshev) low-pass / high-pass
+    /// filter design.
+    ///
+    /// Chebyshev Type II filters have a maximally flat passband and equiripple
+    /// behaviour in the stopband. They are specified by the stopband
+    /// attenuation rather than passband ripple.
+    ///
+    /// # Arguments
+    ///
+    /// – `response` – frequency response shape (`LowPass` or `HighPass`).\
+    /// – `order` – filter order; higher values yield a steeper roll-off.\
+    /// – `cutoff_frequency` – stopband edge frequency in Hz (the point at which
+    ///   the requested attenuation is first reached).\
+    /// – `stopband_attenuation` – minimum stopband attenuation in dB; must be
+    ///   positive. Typical values are 20–80 dB.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = ChebyshevII`.
+    #[inline]
+    #[must_use]
+    pub const fn chebyshev_ii(
+        response: FilterResponse,
+        order: NonZeroUsize,
+        cutoff_frequency: f64,
+        stopband_attenuation: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::ChebyshevII,
+            response,
+            order,
+            cutoff_frequency: Some(cutoff_frequency),
+            low_frequency: None,
+            high_frequency: None,
+            passband_ripple: None,
+            stopband_attenuation: Some(stopband_attenuation),
+        }
+    }
+
+    /// Creates a Chebyshev Type II (inverse Chebyshev) band-pass / band-stop
+    /// filter design.
+    ///
+    /// # Arguments
+    ///
+    /// – `response` – frequency response shape (`BandPass` or `BandStop`).\
+    /// – `order` – prototype filter order per edge.\
+    /// – `low_frequency` – lower band edge in Hz; must be positive and less
+    ///   than `high_frequency`.\
+    /// – `high_frequency` – upper band edge in Hz; must be less than Nyquist.\
+    /// – `stopband_attenuation` – minimum stopband attenuation in dB; positive.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = ChebyshevII`.
+    #[inline]
+    #[must_use]
+    pub const fn chebyshev_ii_band(
+        response: FilterResponse,
+        order: NonZeroUsize,
+        low_frequency: f64,
+        high_frequency: f64,
+        stopband_attenuation: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::ChebyshevII,
+            response,
+            order,
+            cutoff_frequency: None,
+            low_frequency: Some(low_frequency),
+            high_frequency: Some(high_frequency),
+            passband_ripple: None,
+            stopband_attenuation: Some(stopband_attenuation),
+        }
+    }
 }
 
 /// Parametric equaliser band types.
