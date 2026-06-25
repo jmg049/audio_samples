@@ -39,8 +39,8 @@ use crate::operations::traits::AudioParametricEq;
 use crate::operations::types::{EqBand, EqBandType, ParametricEq, ThreeBandEqConfig};
 use crate::traits::StandardSample;
 use crate::utils::audio_math::db_to_amplitude as db_to_linear;
-use crate::{AudioData, AudioSampleError, LayoutError, ParameterError};
-use crate::{AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo};
+use crate::{AudioData, AudioSampleError, LayoutError};
+use crate::{AudioSampleResult, AudioSamples, ConvertTo};
 
 impl<T> AudioParametricEq for AudioSamples<'_, T>
 where
