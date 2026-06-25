@@ -4249,6 +4249,15 @@ where
         end_seconds: f64,
     ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
 
+    /// Extracts a time-bounded segment in place, replacing `self`.
+    ///
+    /// In-place twin of [`trim`](Self::trim). See that method for argument
+    /// semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`trim`](Self::trim).
+    fn trim_in_place(&mut self, start_seconds: f64, end_seconds: f64) -> AudioSampleResult<()>;
+
     /// Adds silence (or a constant value) at the beginning and/or end.
     ///
     /// Works on both mono and multi-channel audio.
@@ -4289,6 +4298,20 @@ where
         pad_value: Self::Sample,
     ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
 
+    /// Adds padding in place, replacing `self`.
+    ///
+    /// In-place twin of [`pad`](Self::pad). See that method for argument
+    /// semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`pad`](Self::pad).
+    fn pad_in_place(
+        &mut self,
+        pad_start_seconds: f64,
+        pad_end_seconds: f64,
+        pad_value: Self::Sample,
+    ) -> AudioSampleResult<()>;
+
     /// Pads with a constant value on the right to reach a target sample count.
     ///
     /// If the signal already has `target_num_samples` or more samples per
@@ -4324,6 +4347,19 @@ where
         target_num_samples: usize,
         pad_value: Self::Sample,
     ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
+
+    /// Pads on the right to a target sample count in place, replacing `self`.
+    ///
+    /// In-place twin of [`pad_samples_right`](Self::pad_samples_right). See that
+    /// method for argument semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`pad_samples_right`](Self::pad_samples_right).
+    fn pad_samples_right_in_place(
+        &mut self,
+        target_num_samples: usize,
+        pad_value: Self::Sample,
+    ) -> AudioSampleResult<()>;
 
     /// Pads the signal to reach a target duration.
     ///
@@ -4365,6 +4401,20 @@ where
         pad_value: Self::Sample,
         pad_side: PadSide,
     ) -> AudioSampleResult<AudioSamples<'b, Self::Sample>>;
+
+    /// Pads to a target duration in place, replacing `self`.
+    ///
+    /// In-place twin of [`pad_to_duration`](Self::pad_to_duration). See that
+    /// method for argument semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`pad_to_duration`](Self::pad_to_duration).
+    fn pad_to_duration_in_place(
+        &mut self,
+        target_duration_seconds: f64,
+        pad_value: Self::Sample,
+        pad_side: PadSide,
+    ) -> AudioSampleResult<()>;
 
     /// Splits the signal into segments of a fixed duration.
     ///
@@ -4529,11 +4579,55 @@ where
     /// let mut audio = AudioSamples::new_mono(
     ///     Array1::<f32>::ones(100), sample_rate!(100),
     /// ).unwrap();
-    /// audio.fade_in(0.5, FadeCurve::Linear).unwrap();
+    /// audio.fade_in_in_place(0.5, FadeCurve::Linear).unwrap();
     /// // First sample is at position 0 → gain 0
     /// assert_eq!(audio.as_slice().unwrap()[0], 0.0);
     /// ```
-    fn fade_in(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()>;
+    fn fade_in_in_place(
+        &mut self,
+        duration_seconds: f64,
+        curve: FadeCurve,
+    ) -> AudioSampleResult<()>;
+
+    /// Applies a fade-in envelope, returning a new faded copy and leaving
+    /// `self` unchanged.
+    ///
+    /// Non-mutating twin of [`fade_in_in_place`](Self::fade_in_in_place).
+    ///
+    /// # Arguments
+    /// - `duration_seconds` — fade length in seconds.  Must be `> 0`.
+    /// - `curve` — the envelope shape (see [`FadeCurve`]).
+    ///
+    /// # Returns
+    /// The faded audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `duration_seconds`
+    ///   is not positive.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use audio_samples::operations::types::FadeCurve;
+    /// use ndarray::Array1;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::<f32>::ones(100), sample_rate!(100),
+    /// ).unwrap()
+    ///     .fade_in(0.5, FadeCurve::Linear)
+    ///     .unwrap();
+    /// // First sample is at position 0 → gain 0
+    /// assert_eq!(audio.as_slice().unwrap()[0], 0.0);
+    /// ```
+    #[inline]
+    fn fade_in(&self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.fade_in_in_place(duration_seconds, curve)?;
+        Ok(out)
+    }
 
     /// Applies a fade-out envelope to the end of the signal.
     ///
@@ -4562,12 +4656,57 @@ where
     /// let mut audio = AudioSamples::new_mono(
     ///     Array1::<f32>::ones(100), sample_rate!(100),
     /// ).unwrap();
-    /// audio.fade_out(0.5, FadeCurve::Linear).unwrap();
+    /// audio.fade_out_in_place(0.5, FadeCurve::Linear).unwrap();
     /// // Last sample has position 0 in the fade ramp → gain ≈ 0
     /// let last = *audio.as_slice().unwrap().last().unwrap();
     /// assert!(last < 0.1);
     /// ```
-    fn fade_out(&mut self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<()>;
+    fn fade_out_in_place(
+        &mut self,
+        duration_seconds: f64,
+        curve: FadeCurve,
+    ) -> AudioSampleResult<()>;
+
+    /// Applies a fade-out envelope, returning a new faded copy and leaving
+    /// `self` unchanged.
+    ///
+    /// Non-mutating twin of [`fade_out_in_place`](Self::fade_out_in_place).
+    ///
+    /// # Arguments
+    /// - `duration_seconds` — fade length in seconds.  Must be `> 0`.
+    /// - `curve` — the envelope shape (see [`FadeCurve`]).
+    ///
+    /// # Returns
+    /// The faded audio samples.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if `duration_seconds`
+    ///   is not positive.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+    /// use audio_samples::operations::types::FadeCurve;
+    /// use ndarray::Array1;
+    ///
+    /// let audio = AudioSamples::new_mono(
+    ///     Array1::<f32>::ones(100), sample_rate!(100),
+    /// ).unwrap()
+    ///     .fade_out(0.5, FadeCurve::Linear)
+    ///     .unwrap();
+    /// // Last sample has position 0 in the fade ramp → gain ≈ 0
+    /// let last = *audio.as_slice().unwrap().last().unwrap();
+    /// assert!(last < 0.1);
+    /// ```
+    #[inline]
+    fn fade_out(&self, duration_seconds: f64, curve: FadeCurve) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.fade_out_in_place(duration_seconds, curve)?;
+        Ok(out)
+    }
 
     /// Tiles the signal, repeating it end-to-end.
     ///
@@ -4595,6 +4734,15 @@ where
     /// assert_eq!(tiled.as_slice().unwrap(), &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
     /// ```
     fn repeat(&self, count: usize) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Tiles the signal in place, replacing `self`.
+    ///
+    /// In-place twin of [`repeat`](Self::repeat). See that method for argument
+    /// semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`repeat`](Self::repeat).
+    fn repeat_in_place(&mut self, count: usize) -> AudioSampleResult<()>;
 
     /// Removes leading and trailing silence from the signal.
     ///
@@ -4630,6 +4778,15 @@ where
         &self,
         threshold_db: f64,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Removes leading and trailing silence in place, replacing `self`.
+    ///
+    /// In-place twin of [`trim_silence`](Self::trim_silence). See that method
+    /// for argument semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`trim_silence`](Self::trim_silence).
+    fn trim_silence_in_place(&mut self, threshold_db: f64) -> AudioSampleResult<()>;
 
     /// Returns a perturbed copy of the signal for data augmentation.
     ///
@@ -4743,6 +4900,19 @@ where
         threshold_db: f64,
         min_silence_duration_seconds: f64,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
+
+    /// Removes all qualifying silence regions in place, replacing `self`.
+    ///
+    /// In-place twin of [`trim_all_silence`](Self::trim_all_silence). See that
+    /// method for argument semantics and error conditions.
+    ///
+    /// # Errors
+    /// See [`trim_all_silence`](Self::trim_all_silence).
+    fn trim_all_silence_in_place(
+        &mut self,
+        threshold_db: f64,
+        min_silence_duration_seconds: f64,
+    ) -> AudioSampleResult<()>;
 }
 
 /// Channel manipulation and layout conversion operations.
