@@ -54,9 +54,6 @@ pub mod channels;
 #[cfg(feature = "dynamic-range")]
 pub mod dynamic_range;
 
-#[cfg(feature = "transforms")]
-pub(crate) mod fft_convolution;
-
 #[cfg(feature = "editing")]
 pub mod editing;
 
