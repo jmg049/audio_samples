@@ -31,12 +31,8 @@ crate-type = ["rlib"]
 # Was `-A unused_unsafe` in the old rustflags; kept allowed because several
 # `unsafe` blocks are defensively conservative across feature gates.
 unused_unsafe = "allow"
-# `docsrs` (docs.rs cfg) and `spectrograms_1_4_4` (gates the streaming
-# overlap-save FFT bench until that dependency release lands) are known cfgs.
-unexpected_cfgs = { level = "warn", check-cfg = [
-    "cfg(docsrs)",
-    "cfg(spectrograms_1_4_4)",
-] }
+# `docsrs` is the docs.rs cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 [lints.clippy]
 # --- Correctness / logic (clean -> denied) ---
@@ -114,7 +110,7 @@ i24 = { version = "2.3.4", features = [
 serde = { version = "1.0", features = ["derive"], optional = true }
 rand = { version = "0.10.1", optional = true }
 wide = { version = "1.5.0", optional = true }
-spectrograms = { version = "1.4.2", optional = true }
+spectrograms = { version = "1.4.4", optional = true }
 
 serde_json = { version = "1.0.150", optional = true }
 

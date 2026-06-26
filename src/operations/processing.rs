@@ -147,7 +147,7 @@ where
     })?;
 
     // Full linear convolution, length x.len() + coeffs.len() - 1.
-    let full = crate::operations::fft_convolution::fft_convolve(x_ne, h_ne)?.into_vec();
+    let full = spectrograms::fft_convolve(x_ne, h_ne)?.into_vec();
 
     // Valid region starts at coeffs.len() - 1 (see module note above).
     let start = coeffs.len() - 1;

@@ -184,14 +184,7 @@ fn bench_room_correction_streaming(c: &mut Criterion) {
         })
     });
 
-    // New: overlap-save FFT convolver.
-    //
-    // Gated on `spectrograms_1_4_4`: `spectrograms::OverlapSaveConvolver` is a
-    // streaming API that only lands in spectrograms 1.4.4. Until that release
-    // is published and the dependency bumped, this benchmark would fail to
-    // compile, so it is compiled out by default. Enable with
-    // `RUSTFLAGS="--cfg spectrograms_1_4_4"` once the dep is available.
-    #[cfg(spectrograms_1_4_4)]
+    // Overlap-save FFT convolver (spectrograms streaming API).
     {
         use spectrograms::OverlapSaveConvolver;
         g.bench_function("overlap_save_fft", |b| {
