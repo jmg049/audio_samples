@@ -216,7 +216,8 @@ pub struct BandMetric {
     /// Perceptual importance: `weight × max(SMR, 0)`. Higher values warrant
     /// more bits.
     pub importance: f32,
-    /// Quantization noise budget in dB: `masking_threshold − max(SMR, 0)`.
+    /// Quantization noise budget in dB: equal to the `masking_threshold` — noise
+    /// kept at or below the masking threshold is perceptually inaudible.
     pub allowed_noise: f32,
 }
 

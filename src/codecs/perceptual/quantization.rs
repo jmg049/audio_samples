@@ -55,6 +55,15 @@ pub struct BandAllocation {
     /// Total bits allocated to this band across all its coefficients
     /// (0 = band is not coded).
     pub bits: u32,
+    /// Per-coefficient quantiser word length in bits.
+    ///
+    /// Every quantised index in this band must fit in a signed `word_length`-bit
+    /// word, i.e. lie in `±(2^(word_length−1) − 1)` (see
+    /// [`max_index_for_word_length`]). [`allocate_bits`] seeds it from the band's
+    /// bit budget divided by its coefficient count; [`refine_step_sizes`] then
+    /// overwrites it with the rate-distortion word length it actually used to set
+    /// `step_size`, keeping the clamp consistent with the chosen resolution.
+    pub word_length: u32,
     /// Uniform quantization step size in linear amplitude.
     ///
     /// Initialised from the psychoacoustic masking threshold
@@ -147,10 +156,17 @@ pub fn allocate_bits(
             };
             let bits = u32::from(min_bits_per_band).saturating_add(extra_bits);
             let step_size = step_size_from_allowed_noise(m.allowed_noise);
+            // Seed the per-coefficient word length from the band's bit budget
+            // spread over its bins. `refine_step_sizes` overwrites this with the
+            // rate-distortion word length it actually uses; this seed only
+            // applies when `quantize` is called without `refine_step_sizes`.
+            let band_width = m.band.end_bin.saturating_sub(m.band.start_bin).max(1) as u32;
+            let word_length = bits / band_width;
             BandAllocation {
                 start_bin: m.band.start_bin,
                 end_bin: m.band.end_bin,
                 bits,
+                word_length,
                 step_size,
             }
         })
@@ -161,19 +177,50 @@ pub fn allocate_bits(
     BitAllocationResult { allocations }
 }
 
-/// Uniformly quantizes a slice of `f32` MDCT coefficients to `i32` indices.
+/// Largest signed magnitude representable in a `bits`-bit two's-complement word.
 ///
-/// `q[i] = round(c[i] / step_size)`
+/// A `w`-bit signed index spans `[−2^(w−1), 2^(w−1) − 1]`. To keep quantisation
+/// symmetric we clamp to `±(2^(w−1) − 1)`, the largest magnitude that fits in
+/// both directions. A word length of `0` codes only the value `0`. Word lengths
+/// at or above `i32`'s 31 usable magnitude bits impose no clamp (the value
+/// always fits), so we saturate the cap at [`i32::MAX`].
+#[inline]
+#[must_use]
+pub fn max_index_for_word_length(bits: u32) -> i32 {
+    if bits == 0 {
+        0
+    } else if bits >= 31 {
+        i32::MAX
+    } else {
+        (1i32 << (bits - 1)) - 1
+    }
+}
+
+/// Uniformly quantizes a slice of `f32` MDCT coefficients to `i32` indices,
+/// clamping each index to the band's per-coefficient word length.
+///
+/// `q[i] = clamp(round(c[i] / step_size), ±(2^(bits_per_coeff−1) − 1))`
+///
+/// The clamp guarantees every index fits in the `bits_per_coeff`-bit word the
+/// bit allocator budgeted for this band, so a single outlier coefficient cannot
+/// blow the band's bit budget. In-range values (the normal case) are unchanged.
 ///
 /// # Arguments
 /// - `coefficients` – Float coefficients for a single band.
 /// - `step_size` – Quantization step size (from [`BandAllocation::step_size`]).
+/// - `bits_per_coeff` – Word length per coefficient; the index is clamped to
+///   `±(2^(bits_per_coeff−1) − 1)`. Pass `0` to force every index to `0`, or a
+///   large value (≥ 31) to disable clamping.
 #[inline]
 #[must_use]
-pub fn quantize_band(coefficients: &[f32], step_size: f32) -> Vec<i32> {
+pub fn quantize_band(coefficients: &[f32], step_size: f32, bits_per_coeff: u32) -> Vec<i32> {
+    let max_index = max_index_for_word_length(bits_per_coeff);
     coefficients
         .iter()
-        .map(|&c| (c / step_size).round() as i32)
+        .map(|&c| {
+            let q = (c / step_size).round() as i32;
+            q.clamp(-max_index, max_index)
+        })
         .collect()
 }
 
@@ -229,10 +276,18 @@ pub fn quantize(
 
     for alloc in allocation.allocations.iter() {
         let step = alloc.step_size;
-        for k in alloc.start_bin..alloc.end_bin.min(nc) {
+        let k_end = alloc.end_bin.min(nc);
+        if alloc.start_bin >= k_end {
+            continue;
+        }
+        // Clamp each index to the band's per-coefficient word length so a single
+        // large coefficient cannot overrun the bit budget the band was granted.
+        let max_index = max_index_for_word_length(alloc.word_length);
+        for k in alloc.start_bin..k_end {
             for f in 0..nf {
                 let idx = k * nf + f;
-                out[idx] = (coefficients[idx] / step).round() as i32;
+                let q = (coefficients[idx] / step).round() as i32;
+                out[idx] = q.clamp(-max_index, max_index);
             }
         }
     }
@@ -407,6 +462,8 @@ pub fn refine_step_sizes(
         if s.peak <= 0.0 || s.variance <= 0.0 {
             // Silent band: a coarse step quantises its ~zero data to zero.
             alloc.step_size = (2.0 * s.peak).max(1e-6);
+            // A single sign bit is enough for the (clamped-to-zero) data.
+            alloc.word_length = 1;
             continue;
         }
 
@@ -416,9 +473,57 @@ pub fn refine_step_sizes(
         if w < 0.5 {
             // Fewer than ~one level: drop the band (its energy is negligible).
             alloc.step_size = (2.0 * s.peak).max(1e-6);
+            alloc.word_length = 1;
         } else {
             let levels = 2.0_f32.powf(w);
             alloc.step_size = ((2.0 * s.peak) / levels).max(1e-6);
+            // The step covers `2·peak` with `2^w` levels, so the peak quantises
+            // to index ≈ ±2^(w−1). Record `w` so the quantiser clamps to exactly
+            // the resolution this step size implies (and not the coarser budget
+            // seed). `+ 1` keeps the unbiased rounded peak inside the word.
+            alloc.word_length = (w.ceil() as u32).saturating_add(1).min(MAX_WORDLENGTH_BITS + 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_index_for_word_length_bounds() {
+        assert_eq!(max_index_for_word_length(0), 0);
+        assert_eq!(max_index_for_word_length(1), 0); // ±(2^0 − 1) = 0
+        assert_eq!(max_index_for_word_length(2), 1); // ±(2^1 − 1) = 1
+        assert_eq!(max_index_for_word_length(4), 7); // ±(2^3 − 1) = 7
+        assert_eq!(max_index_for_word_length(8), 127);
+        assert_eq!(max_index_for_word_length(31), i32::MAX);
+        assert_eq!(max_index_for_word_length(64), i32::MAX);
+    }
+
+    #[test]
+    fn quantize_band_clamps_to_word_length() {
+        // A huge coefficient relative to the step would overflow a small word.
+        // With a 4-bit word, indices must lie in ±7.
+        let coeffs = [100.0_f32, -100.0, 3.0, -3.0, 0.0];
+        let q = quantize_band(&coeffs, 1.0, 4);
+        for &idx in &q {
+            assert!((-7..=7).contains(&idx), "index {idx} escaped ±7 (4-bit word)");
+        }
+        // In-range values are untouched.
+        assert_eq!(q[2], 3);
+        assert_eq!(q[3], -3);
+        assert_eq!(q[4], 0);
+        // Out-of-range values are clamped to the boundary, not wrapped.
+        assert_eq!(q[0], 7);
+        assert_eq!(q[1], -7);
+    }
+
+    #[test]
+    fn quantize_band_unbounded_word_is_lossless_rounding() {
+        let coeffs = [1000.0_f32, -1000.0, 12.4, -12.6];
+        // word_length >= 31 disables clamping.
+        let q = quantize_band(&coeffs, 1.0, 31);
+        assert_eq!(q, vec![1000, -1000, 12, -13]);
     }
 }

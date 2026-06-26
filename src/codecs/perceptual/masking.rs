@@ -144,6 +144,27 @@ pub fn spreading_attenuation(
     base_gain + distance_decay
 }
 
+// ── Self-masking ────────────────────────────────────────────────────────────
+
+/// Self-masking offset in dB applied to a band's own energy contribution.
+///
+/// In a simultaneous-masking model the threshold a masker creates at its *own*
+/// band (`i == j`) must be handled separately from the cross-band spreading
+/// term. The cross-band [`spreading_attenuation`] returns `base_gain` (the
+/// masker-type gain, e.g. 14.5 dB for tonal) at zero Bark distance, which would
+/// floor every band's masking threshold at `energy − base_gain` and hence floor
+/// its SMR at `base_gain` regardless of how isolated the band is.
+///
+/// That is wrong: a band's energy does not strongly mask noise at its own
+/// frequency. Standard MPEG-style models therefore use a small per-masker
+/// self-masking offset rather than the full inter-band gain. We use `0.5 dB`,
+/// meaning a band's self-generated masking threshold sits essentially at its own
+/// energy (the band can tolerate quantisation noise just below its own level).
+/// This keeps a strong, isolated band's SMR near 0 dB instead of pinning it at
+/// the inter-band gain, while still letting genuinely louder neighbouring bands
+/// raise the threshold via the cross-band spreading term.
+const SELF_MASKING_OFFSET_DB: f32 = 0.5;
+
 // ── Band-metric computation ───────────────────────────────────────────────────
 
 /// Computes per-band psychoacoustic metrics from a linear-scale bin-energy array.
@@ -220,12 +241,19 @@ pub fn compute_band_metrics(
         .map(|j| {
             let dominated_by: f32 = (0..n_bands)
                 .map(|i| {
-                    let attenuation = spreading_attenuation(
-                        bark_positions[i],
-                        bark_positions[j],
-                        masker_types[i],
-                        config,
-                    );
+                    // The `i == j` term is self-masking: a band does not mask
+                    // noise at its own frequency with the full inter-band gain,
+                    // so use a small dedicated offset instead of `base_gain`.
+                    let attenuation = if i == j {
+                        SELF_MASKING_OFFSET_DB
+                    } else {
+                        spreading_attenuation(
+                            bark_positions[i],
+                            bark_positions[j],
+                            masker_types[i],
+                            config,
+                        )
+                    };
                     band_energy_db[i] - attenuation
                 })
                 .fold(f32::NEG_INFINITY, f32::max);
@@ -241,7 +269,11 @@ pub fn compute_band_metrics(
             let smr = compute_smr(energy, masking_threshold);
             let weight = weights[i];
             let importance = weight * smr.max(0.0);
-            let allowed_noise = masking_threshold - smr.max(0.0);
+            // The masking threshold IS the quantisation-noise budget: noise kept
+            // at or below it is inaudible. (The previous
+            // `masking_threshold − max(SMR, 0)` expanded to `2·threshold −
+            // energy`, which is dimensionally inconsistent.)
+            let allowed_noise = masking_threshold;
             BandMetric::new(
                 bands[i].clone(),
                 energy,
@@ -373,7 +405,9 @@ pub fn apply_temporal_masking(
                     let smr = compute_smr(energy, new_threshold);
                     let weight = config.perceptual_weights[b];
                     let importance = weight * smr.max(0.0);
-                    let allowed_noise = new_threshold - smr.max(0.0);
+                    // The masking threshold is the noise budget (see
+                    // `compute_band_metrics`); keep both call sites consistent.
+                    let allowed_noise = new_threshold;
                     BandMetric::new(
                         m.band.clone(),
                         energy,

@@ -472,8 +472,8 @@ pub use crate::codecs::perceptual::stereo::{mid_side_decode, mid_side_encode};
 
 #[cfg(feature = "psychoacoustic")]
 pub use crate::codecs::perceptual::quantization::{
-    BandAllocation, BitAllocationResult, allocate_bits, dequantize, dequantize_band, quantize,
-    quantize_band, step_size_from_allowed_noise,
+    BandAllocation, BitAllocationResult, allocate_bits, dequantize, dequantize_band,
+    max_index_for_word_length, quantize, quantize_band, step_size_from_allowed_noise,
 };
 
 #[cfg(feature = "psychoacoustic")]
