@@ -1098,7 +1098,8 @@ where
         // Compute total energy
         let total_energy: f64 = power_spectrum.iter().fold(0.0, |acc, &x| acc + x);
         if total_energy == 0.0 {
-            // todo! --- is this correct behaviour? Should we force handling of zero-energy signals?
+            // A silent (zero-energy) signal has no spectral content; 0.0 Hz is
+            // the conventional, well-defined rolloff for this degenerate case.
             return Ok(0.0);
         } else if total_energy < 0.0 {
             return Err(AudioSampleError::Processing(
