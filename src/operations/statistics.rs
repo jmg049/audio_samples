@@ -1022,7 +1022,8 @@ where
         if total_energy > 0.0 {
             Ok(weighted_sum / total_energy)
         } else if total_energy == 0.0 {
-            // todo! --- is this correct behaviour? Should we force handling of zero-energy signals?
+            // A silent (zero-energy) signal has no spectral content; 0.0 Hz is
+            // the conventional, well-defined result for this degenerate case.
             Ok(0.0)
         } else {
             Err(AudioSampleError::Processing(

@@ -1,4 +1,4 @@
-//! Audio sample type conversion utilities. is this module?
+//! Audio sample type conversion utilities.
 //!
 //! This module defines the audio-aware type conversion facilities for
 //! [`AudioSamples`]. It provides a consistent and explicit mechanism for
@@ -16,7 +16,7 @@
 //!   value `128` maps to silence / `0.0`).
 //! - **Raw numeric casts** (`cast_as`, `cast_to`, `cast_as_f64`) — reinterpret
 //!   values using standard Rust `as`-cast rules without any audio-specific
-//!   scaling or normalisation. does this module exist?
+//!   scaling or normalisation.
 //!
 //! Audio data is routinely stored and processed using different sample types.
 //! Fixed-width PCM formats (`i16`, `i24`, `i32`, `u8`) are used for storage
@@ -30,7 +30,7 @@
 //! implemented for [`AudioSamples`] whenever the underlying sample type
 //! supports the required conversion operations. In typical usage the trait
 //! does not need to be referenced directly — its methods are available on any
-//! `AudioSamples` value. should it be used?
+//! `AudioSamples` value.
 //!
 //! Call conversion methods directly on an `AudioSamples` value. Use
 //! `to_format` (borrows) or `to_type` (consumes) for audio-aware conversions

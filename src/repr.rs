@@ -1,4 +1,4 @@
-//! Core audio sample representation and data structures. is this module?
+//! Core audio sample representation and data structures.
 //!
 //! This module defines the foundational data types used throughout the `audio_samples`
 //! library: the storage primitives [`MonoData`] / [`MultiData`], the channel-agnostic
@@ -6,12 +6,12 @@
 //!
 //! [`AudioSamples<T>`] pairs raw PCM data (backed by `ndarray`) with essential metadata –
 //! sample rate, channel count, and memory layout – so that all downstream operations have
-//! access to the full audio context without passing it separately. does this module exist?
+//! access to the full audio context without passing it separately.
 //!
 //! Separating the storage layer from the processing API keeps the representation stable
 //! and independently testable. Internal storage types (`MonoData`, `MultiData`) can
 //! borrow or own their ndarray buffers without exposing that detail to callers; the
-//! promote-on-write pattern means read-only paths are always zero-copy. should it be used?
+//! promote-on-write pattern means read-only paths are always zero-copy.
 //!
 //! Construct audio via the `AudioSamples` constructors (`new_mono`, `new_multi_channel`,
 //! `from_mono_vec`, …) or via the signal generators in [`utils::generation`](crate::utils::generation).
