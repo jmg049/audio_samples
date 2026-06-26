@@ -11,11 +11,29 @@
 //! Both functions operate in `f64` for headroom and match a direct
 //! time-domain convolution to floating-point tolerance.
 
+use std::cell::RefCell;
+use std::sync::Arc;
+
 use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 use num_complex::Complex;
-use rustfft::FftPlanner;
+use rustfft::{Fft, FftPlanner};
 
 use crate::{AudioSampleError, AudioSampleResult, ParameterError};
+
+thread_local! {
+    // rustfft's FftPlanner memoises plans by length, so reusing one planner
+    // across calls reuses the plan for a given size instead of rebuilding it on
+    // every convolution.
+    static FFT_PLANNER: RefCell<FftPlanner<f64>> = RefCell::new(FftPlanner::new());
+}
+
+fn plan_forward(len: usize) -> Arc<dyn Fft<f64>> {
+    FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_forward(len))
+}
+
+fn plan_inverse(len: usize) -> Arc<dyn Fft<f64>> {
+    FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_inverse(len))
+}
 
 /// Wraps a non-empty `Vec<f64>` into a [`NonEmptyVec`], mapping the
 /// (unreachable for these functions) empty case to a `Parameter` error.
@@ -30,11 +48,10 @@ fn into_non_empty(v: Vec<f64>) -> AudioSampleResult<NonEmptyVec<f64>> {
 
 /// Forward-FFTs a real signal zero-padded to length `len` into a complex
 /// spectrum (unnormalised, as `rustfft` produces).
-fn forward_padded(planner: &mut FftPlanner<f64>, signal: &[f64], len: usize) -> Vec<Complex<f64>> {
+fn forward_padded(signal: &[f64], len: usize) -> Vec<Complex<f64>> {
     let mut buf: Vec<Complex<f64>> = signal.iter().map(|&s| Complex::new(s, 0.0)).collect();
     buf.resize(len, Complex::new(0.0, 0.0));
-    let fft = planner.plan_fft_forward(len);
-    fft.process(&mut buf);
+    plan_forward(len).process(&mut buf);
     buf
 }
 
@@ -54,16 +71,14 @@ pub(crate) fn fft_convolve(
     let n = a.len() + b.len() - 1;
     let l = n.next_power_of_two();
 
-    let mut planner = FftPlanner::<f64>::new();
-    let mut spec_a = forward_padded(&mut planner, a, l);
-    let spec_b = forward_padded(&mut planner, b, l);
+    let mut spec_a = forward_padded(a, l);
+    let spec_b = forward_padded(b, l);
 
     for (xa, xb) in spec_a.iter_mut().zip(spec_b.iter()) {
         *xa *= *xb;
     }
 
-    let ifft = planner.plan_fft_inverse(l);
-    ifft.process(&mut spec_a);
+    plan_inverse(l).process(&mut spec_a);
 
     let scale = 1.0 / l as f64;
     let out: Vec<f64> = spec_a.iter().take(n).map(|c| c.re * scale).collect();
@@ -95,9 +110,8 @@ pub(crate) fn fft_deconvolve(
     let out_len = a.len().saturating_sub(b.len()) + 1;
     let l = a.len().next_power_of_two();
 
-    let mut planner = FftPlanner::<f64>::new();
-    let spec_a = forward_padded(&mut planner, a, l);
-    let spec_b = forward_padded(&mut planner, b, l);
+    let spec_a = forward_padded(a, l);
+    let spec_b = forward_padded(b, l);
 
     let mut spec_x: Vec<Complex<f64>> = spec_a
         .iter()
@@ -111,8 +125,7 @@ pub(crate) fn fft_deconvolve(
         })
         .collect();
 
-    let ifft = planner.plan_fft_inverse(l);
-    ifft.process(&mut spec_x);
+    plan_inverse(l).process(&mut spec_x);
 
     let scale = 1.0 / l as f64;
     let out: Vec<f64> = spec_x.iter().take(out_len).map(|c| c.re * scale).collect();
