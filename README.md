@@ -30,6 +30,16 @@ these invariants, supporting both exploratory workflows and system-level
 use without requiring users to remember hidden conventions or reimplement
 common audio logic.
 
+The `AudioSamples` type keeps its fields private; access the underlying
+buffer and metadata through accessors (`data()`, `data_mut()`,
+`into_data()`, `into_data_borrowed()`, `sample_rate()`). Every transforming
+operation comes in two flavours: the canonical, unsuffixed name borrows and
+returns a **new** modified copy (`op(&self, ..) -> AudioSampleResult<Self>`),
+while the `op_in_place` counterpart mutates the receiver
+(`op_in_place(&mut self, ..) -> AudioSampleResult<()>`). The borrowing
+variants compose into pipelines without consuming the binding; infallible
+operations such as `scale` return `Self` directly.
+
 ---
 
 ## Installation
@@ -61,6 +71,39 @@ fn main() {
     // Mix with a 220 Hz cosine wave
     let cosine = cosine_wave::<f32>(220.0, duration, sr, 0.5);
     let mixed = float_sine + cosine;
+}
+```
+
+Alongside the classic oscillators, the generators include exponential/log
+chirps (`exponential_chirp`), band-limited square/sawtooth/triangle waves
+(`square_wave_bandlimited`, `sawtooth_wave_bandlimited`,
+`triangle_wave_bandlimited`), and FM signals (`fm_signal`).
+
+### Processing pipelines
+
+Enable the `processing` feature. Each borrowing operation returns a new owned
+value, so they chain directly; use the `*_in_place` variants to mutate instead.
+
+```rust
+use audio_samples::{AudioProcessing, AudioSamples, NormalizationConfig, sample_rate};
+use ndarray::array;
+
+fn main() -> audio_samples::AudioSampleResult<()> {
+    let audio = AudioSamples::new_mono(
+        array![0.1f32, 0.5, -0.3, 0.8, -0.2],
+        sample_rate!(44100),
+    )?;
+
+    // `scale` is infallible (no `?`); `normalize`/`remove_dc_offset` are fallible.
+    let processed = audio
+        .normalize(NormalizationConfig::peak(1.0))?
+        .scale(0.5)
+        .remove_dc_offset()?;
+
+    // Or mutate in place:
+    let mut buf = processed;
+    buf.scale_in_place(2.0);
+    Ok(())
 }
 ```
 
@@ -193,13 +236,13 @@ optional dependencies. Enable features as needed:
 
 | Feature         | Description                                                                           |
 | --------------- | ------------------------------------------------------------------------------------- |
-| `statistics`    | Descriptive statistics: peak, RMS, mean, variance                                     |
+| `statistics`    | Descriptive statistics: peak, RMS, mean, variance; spectral feature suite (centroid, rolloff, bandwidth, flatness, contrast, slope, crest) when `transforms` is also enabled |
 | `processing`    | Normalization, scaling, clipping (requires `statistics`)                              |
 | `editing`       | Trim, pad, reverse, perturb, concatenate (requires `statistics`, `random-generation`) |
 | `channels`      | Interleave/deinterleave, mono↔stereo conversion                                       |
-| `iir-filtering` | IIR filter design and application                                                     |
-| `parametric-eq` | Parametric EQ bands (requires `iir-filtering`)                                        |
-| `dynamic-range` | Compression, limiting, expansion                                                      |
+| `iir-filtering` | IIR filters: Butterworth, Chebyshev I/II, Elliptic (Cauer), Bessel; low/high/band-pass and band-stop; zero-phase `filtfilt`; design-once streaming `SosFilter` |
+| `parametric-eq` | Parametric EQ bands and `ThreeBandEqConfig` (requires `iir-filtering`)                |
+| `dynamic-range` | Compression, limiting, gating, expansion (config structs, side-chain support)         |
 | `envelopes`     | Amplitude, RMS, and attack-decay envelopes                                            |
 | `vad`           | Voice activity detection                                                              |
 
@@ -211,7 +254,7 @@ optional dependencies. Enable features as needed:
 | `psychoacoustic`  | Bark/Mel band layouts, ATH, masking thresholds, SMR (requires `transforms`) |
 | `pitch-analysis`  | YIN and autocorrelation pitch detection (requires `transforms`)             |
 | `onset-detection` | Onset detection (requires `transforms`, `peak-picking`, `processing`)       |
-| `beat-tracking`   | Beat tracking                                                               |
+| `beat-tracking`   | Beat tracking and tempo estimation (`estimate_tempo`)                       |
 | `peak-picking`    | Peak picking on onset envelopes                                             |
 | `decomposition`   | Audio decomposition (requires `onset-detection`)                            |
 
