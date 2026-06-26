@@ -20,6 +20,31 @@
 //! for any further processing. Feature flags keep the dependency footprint small –
 //! only enable what your application needs.
 //!
+//! ## Operation Conventions
+//!
+//! Every transforming operation comes in two variants. The canonical, unsuffixed
+//! name borrows (`op(&self, ..) -> AudioSampleResult<Self>`) and returns a new,
+//! owned, modified copy, leaving the receiver untouched; the `op_in_place`
+//! counterpart (`op_in_place(&mut self, ..) -> AudioSampleResult<()>`) mutates the
+//! receiver in place. Because the borrowing variants return owned values, they
+//! compose into pipelines without consuming a binding you still need. A handful of
+//! operations that cannot fail (such as `scale`) return `Self` directly rather than
+//! a `Result`.
+//!
+//! [`AudioSamples<T>`] keeps its fields private; reach the underlying buffer and
+//! metadata through accessors – [`data()`](AudioSamples::data),
+//! [`data_mut()`](AudioSamples::data_mut),
+//! [`into_data()`](AudioSamples::into_data),
+//! [`into_data_borrowed()`](AudioSamples::into_data_borrowed), and
+//! [`sample_rate()`](AudioSamples::sample_rate). Channel **indices** are plain
+//! `usize`; channel **counts** use the dedicated `ChannelCount` type. Multi-channel
+//! analysis operations (spectral centroid, rolloff, and the rest of the spectral
+//! suite) take a [`ChannelReduction`] policy that selects how channels are folded
+//! down to a single value (`Error`, `First`, `Average`, or `Channel(i)`). Several
+//! analysis operations return structured results rather than bare tuples – for
+//! example `power_spectral_density` yields a [`Psd`], `track_pitch` a
+//! [`PitchContour`], and `estimate_key` a [`Key`].
+//!
 //! ## Installation
 //!
 //! ```bash
@@ -37,13 +62,13 @@
 //! | `editing` | Time-domain editing: trim, pad, reverse, concatenate, fade (implies `statistics`, `random-generation`) |
 //! | `channels` | Channel operations: mono↔stereo conversion, channel extraction, interleave/deinterleave |
 //! | `transforms` | Spectrogram and frequency-domain transforms via the `spectrograms` crate |
-//! | `iir-filtering` | IIR filter design and application (Butterworth, Chebyshev I) |
+//! | `iir-filtering` | IIR filter design and application (Butterworth, Chebyshev I/II, Elliptic/Cauer, Bessel; low/high/band-pass and band-stop), zero-phase `filtfilt`, and a design-once streaming `SosFilter` |
 //! | `parametric-eq` | Multi-band parametric equaliser (implies `iir-filtering`) |
-//! | `dynamic-range` | Compression, limiting, and expansion with side-chain support |
+//! | `dynamic-range` | Compression, limiting, gating, and expansion with side-chain support, configured via `CompressorConfig`/`LimiterConfig`/`GateConfig`/`ExpanderConfig` |
 //! | `envelopes` | Amplitude, RMS, and analytical envelope followers (implies `dynamic-range`, `editing`, `random-generation`) |
 //! | `peak-picking` | Onset strength curve peak picking |
 //! | `onset-detection` | Onset detection (implies `transforms`, `peak-picking`, `processing`) |
-//! | `beat-tracking` | Beat tracking and tempo estimation |
+//! | `beat-tracking` | Beat tracking and tempo estimation (`estimate_tempo`) |
 //! | `decomposition` | Audio source decomposition (implies `onset-detection`) |
 //! | `pitch-analysis` | YIN and autocorrelation pitch detection (implies `transforms`) |
 //! | `vad` | Voice activity detection |
@@ -127,8 +152,8 @@
 //! let min            = audio.min_sample();
 //! let max            = audio.max_sample();
 //! let mean           = audio.mean();
-//! let rms            = audio.rms().unwrap();
-//! let variance       = audio.variance().unwrap();
+//! let rms            = audio.rms();
+//! let variance       = audio.variance();
 //! let zero_crossings = audio.zero_crossings();
 //! ```
 //!
@@ -143,7 +168,10 @@
 //! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
 //! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 //!
-//! // Method chaining: each operation consumes and returns Self
+//! // Method chaining: each borrowing operation returns a NEW owned value, so the
+//! // results compose directly. `scale` is infallible (returns `Self`, no `?`),
+//! // while `normalize`/`remove_dc_offset` are fallible. Use the `*_in_place`
+//! // variants instead when you want to mutate `audio` rather than build a copy.
 //! let audio = audio
 //!     .normalize(NormalizationConfig::peak(1.0))
 //!     .unwrap()
@@ -263,8 +291,12 @@
 //!
 //! The [`utils::generation`] module provides functions for creating test and
 //! reference signals: [`sine_wave`], [`cosine_wave`], [`square_wave`],
-//! [`triangle_wave`], [`sawtooth_wave`], [`chirp`], [`impulse`], [`silence`],
-//! [`compound_tone`], and [`am_signal`].
+//! [`triangle_wave`], [`sawtooth_wave`], [`chirp`], [`exponential_chirp`] (also
+//! covering logarithmic sweeps), the band-limited oscillators
+//! [`square_wave_bandlimited`], [`sawtooth_wave_bandlimited`], and
+//! [`triangle_wave_bandlimited`], [`fm_signal`], [`impulse`], [`silence`],
+//! [`compound_tone`], and [`am_signal`]. With the `random-generation` feature,
+//! `white_noise`, `pink_noise`, and `brown_noise` are also available.
 //!
 //! ```rust
 //! use audio_samples::{sine_wave, sample_rate};

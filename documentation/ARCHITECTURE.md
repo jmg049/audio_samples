@@ -33,6 +33,17 @@ Audio samples are always paired with essential metadata (sample rate) to prevent
 
 The library uses cargo features extensively to keep dependencies minimal, allowing users to enable only the functionality they need.
 
+### 6. Dual-Variant Operations
+
+Every transforming operation is exposed as a matched pair. The canonical, unsuffixed name **borrows** and returns a new owned copy:
+
+```rust,ignore
+fn op(&self, ..) -> AudioSampleResult<Self>;        // returns a NEW modified value
+fn op_in_place(&mut self, ..) -> AudioSampleResult<()>; // mutates the receiver
+```
+
+The `*_in_place` variant is the primitive; the borrowing variant clones the receiver and delegates to it. Because the borrowing form does not consume `self`, results compose into pipelines (`audio.normalize(cfg)?.scale(0.5).remove_dc_offset()?`) while leaving the original binding usable. Operations that cannot fail (e.g. `scale`) return `Self` directly rather than `AudioSampleResult<Self>`, so no `?` is needed.
+
 ## Building Blocks
 
 ### AudioSample/StandardSample (./traits.rs)
@@ -120,18 +131,26 @@ If something like this fails then things are bad.
 
 The main data container that combines audio samples with essential metadata:
 
-```rust
+```rust,ignore
 pub struct AudioSamples<'a, T: StandardSample> {
-    pub data: AudioData<'a, T>,
-    pub sample_rate: u32,
+    data: AudioData<'a, T>,        // private
+    sample_rate: SampleRate,       // private; guaranteed non-zero
 }
 ```
+
+**Sealed fields and accessors:** the fields are **private**. Callers reach the underlying data and metadata through accessors:
+
+- `data(&self) -> &AudioData<'a, T>` and `data_mut(&mut self) -> &mut AudioData<'a, T>`
+- `into_data(self) -> AudioData<'static, T>` (owned) and `into_data_borrowed(self) -> AudioData<'a, T>` (preserves the borrow)
+- `sample_rate(&self) -> SampleRate` (plus the convenience `sample_rate_hz() -> f64`)
+
+Channel **indices** are plain `usize`; channel **counts** use the dedicated `ChannelCount` type, keeping the two concepts from being confused at call sites.
 
 **Key Features:**
 
 - Generic over any `StandardSample` type
 - Lifetime parameter `'a` enables zero-copy views
-- Always includes sample rate
+- Always includes a non-zero sample rate (`SampleRate`)
 - Provides uniform interface for mono and multi-channel audio
 
 **Memory Layout:**
@@ -155,7 +174,8 @@ Provides multiple iteration patterns for efficient audio processing:
 
 - `frames()`: Iterate by frames (one sample from each channel)
 - `channels()`: Iterate by complete channels
-- `windows(size, hop)`: Windowed iteration with configurable overlap
+- `windows(size, hop)`: Windowed iteration with configurable overlap (owning `WindowIterator`)
+- `windows_ref(size, hop)`: Zero-copy windowed iteration that borrows each window (`WindowRefIterator`) instead of allocating
 - Support for different padding modes: `Zero`, `None`, `Skip`
 
 **Design Patterns:**
@@ -194,13 +214,17 @@ Implements the `AudioTypeConversion` trait for safe type transformations on ``Au
 - Lifetime management ensures memory safety
 - Type bounds enforce conversion compatibility
 
+### NdResult (lib.rs)
+
+Some operations (for example envelope followers) produce an array whose dimensionality mirrors the input: a mono input yields a 1-D array, a multi-channel input yields a 2-D `channels × samples` array. `NdResult<T>` is the tagged return type that expresses this **1-D / 2-D by layout** distinction in a single value: it is either `Mono(Array1<T>)` or `MultiChannel(Array2<T>)`. Callers pattern-match, or use the `into_array1()` / `into_array2()` helpers when the expected shape is known. Both variants are guaranteed non-empty.
+
 ### Utilities (./utils)
 
 Provides supporting functionality organized by purpose:
 
-- `generation.rs`: Signal generation (sine waves, noise, etc.)
+- `generation.rs`: Signal generation. Beyond the classic oscillators (`sine_wave`, `cosine_wave`, `square_wave`, `triangle_wave`, `sawtooth_wave`, `chirp`, `impulse`, `silence`, `compound_tone`, `am_signal`), this now includes exponential/log chirps (`exponential_chirp`), band-limited oscillators (`square_wave_bandlimited`, `sawtooth_wave_bandlimited`, `triangle_wave_bandlimited`), FM signals (`fm_signal`), and the noise sources `white_noise`/`pink_noise`/`brown_noise` (under `random-generation`).
 - `detection.rs`: Feature detection algorithms
-- `comparison.rs`: Audio comparison and similarity metrics
+- `comparison.rs`: Audio comparison and similarity metrics — `correlation`, `mse`, `snr`, `psnr`, `segmental_snr`, `log_spectral_distance`, plus per-channel variants of the first three (`correlation_per_channel`, `mse_per_channel`, `snr_per_channel`).
 - `audio_math.rs`: Audio-domain mathematical utilities and canonical unit conversions.
 In future, this may become a more general ``algorithms`` module.
 
@@ -213,52 +237,51 @@ In future, this may become a more general ``algorithms`` module.
 
 ### Errors (./error.rs)
 
-Comprehensive error handling with specific error types:
+Hierarchical error handling. `AudioSampleError` is the `#[non_exhaustive]` root, and each variant wraps a specialised sub-enum that covers one failure domain:
 
-```rust
+```rust,ignore
 pub enum AudioSampleError {
-    ConversionError(String, String, String, String),
-    InvalidRange(String),
-    InvalidParameter(String),
-    DimensionMismatch(String),
-    InvalidInput { msg: String },
-    ProcessingError { msg: String },
-    FeatureNotEnabled { feature: String },
-    ArrayLayoutError { message: String },
-    OptionError { message: String },
-    BorrowedDataError { message: String },
-    InternalError(String),
+    Conversion(ConversionError),   // type conversion and casting failures
+    Parameter(ParameterError),     // invalid parameters and configuration values
+    Layout(LayoutError),           // memory layout / array-structure issues
+    Processing(ProcessingError),   // DSP algorithm and arithmetic failures
+    Feature(FeatureError),         // missing/misconfigured optional cargo features
 }
 ```
 
-Needs reviewing though.
-Consistency in the error messages would be nice and maybe split things into more granular errors.
+Grouping by domain lets callers match a broad category in a single arm while still drilling into the specific cause when needed.
 
 **Error Handling Strategy:**
 
-- Specific error types for different failure modes
-- Rich context information in error messages
-- Integration with `thiserror` for ergonomic handling
-- `AudioSampleResult<T>` type alias for consistency
+- Built on `thiserror`; every error also implements [`miette::Diagnostic`].
+- Each variant carries a stable, namespaced **code** (`audio_samples::<domain>::<variant>`) for programmatic matching and an actionable **help** hint.
+- Text-parsing failures (note names, enum `FromStr`) carry a `SourceSpan` pointing a caret at the offending character.
+- The coloured caret-underline rendering is gated behind the `fancy` feature, so library consumers pay nothing for graphical dependencies unless they opt in.
+- `AudioSampleResult<T>` (= `Result<T, AudioSampleError>`) is the consistent return alias for fallible operations.
 
 ## Trait Extensions
 
 Available:
 
-- AudioStatistics
+- AudioStatistics (descriptive stats + spectral feature suite)
 - AudioVoiceActivityDetection
 - AudioProcessing
 - AudioTransforms
-- AudioPitchAnalysis
-- AudioIirFiltering
+- AudioPitchAnalysis (`track_pitch`, `estimate_key`)
+- AudioBeatTracking (`estimate_tempo`)
+- AudioOnsetDetection
+- AudioIirFiltering (filter design, `filtfilt`, streaming)
 - AudioParametricEq
 - AudioDynamicRange
 - AudioEditing
 - AudioChannelOps
+- AudioPerceptualAnalysis (psychoacoustic)
 - AudioPlottingUtils
 - AudioSamplesSerialise
 - AudioDecomposition
 - AudioTypeConversion
+
+Each transforming trait method follows the dual-variant convention (`op` / `op_in_place`) described in the Core Design Principles.
 
 ### The `operations` Module (./operations)
 
@@ -280,10 +303,14 @@ Each trait addresses a specific domain of audio processing:
 
 **How to use it?**:
 
-```rust
-let peak = audio.peak();          // Returns T directly
-let rms: f64 = audio.rms();      // Returns f64
-let crossings = audio.zero_crossings(); // Signal analysis
+```rust,ignore
+let peak = audio.peak();                  // Returns T directly
+let rms: f64 = audio.rms();               // Returns f64 directly (infallible)
+let crossings = audio.zero_crossings();   // Signal analysis
+
+// Spectral features fold multi-channel input via a ChannelReduction policy.
+let centroid = audio.spectral_centroid(ChannelReduction::Average)?;
+let flatness = audio.spectral_flatness(ChannelReduction::First)?;
 ```
 
 **Key Operations**:
@@ -292,79 +319,79 @@ let crossings = audio.zero_crossings(); // Signal analysis
 - `mean()`, `variance()`, `std_dev()`: Statistical measures
 - `rms()`: Perceptually relevant loudness measure
 - `zero_crossings()`, `zero_crossing_rate()`: Periodicity analysis
-- `autocorrelation()`, `cross_correlation()`: Correlation analysis (requires `fft`)
-- `spectral_centroid()`: Brightness measure (requires `fft`)
+- `autocorrelation()`, `cross_correlation()`: Correlation analysis (requires `transforms`)
+- Spectral feature suite (requires `transforms`): `spectral_centroid()`, `spectral_rolloff()`, `spectral_bandwidth()`, `spectral_flatness()`, `spectral_contrast()`, `spectral_slope()`, `spectral_crest()` — each takes a `ChannelReduction` argument
+
+**ChannelReduction policy**: spectral analysis on multi-channel audio must decide how to collapse channels to a single value. `ChannelReduction` is the parameter that chooses: `Error` (default — refuse multi-channel input), `First`, `Average`, or `Channel(usize)`.
 
 **API Contracts**:
 
-- Leverages invariants provided by AudioSamples around non-empty audio to guarantee a value.
+- Simple statistics (`peak`, `rms`, `mean`, `variance`, `zero_crossings`, …) return values **directly** — no `Result` — leveraging the non-empty invariant of `AudioSamples`.
 - Generic over float types for numerical operations
 - Consistent behavior across mono and multi-channel audio
 
 #### `AudioProcessing` (processing.rs)
 
-**Purpose**: Core signal processing operations with fluent builder API.
+**Purpose**: Core signal processing operations following the dual-variant convention.
 
-**Why use it?**: Fundamental audio modifications like normalization, scaling, filtering.
+**Why use it?**: Fundamental audio modifications like normalization, scaling, DC removal.
 
 **How to use it?**:
 
-```rust
-// Individual operations
-audio.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
-audio.scale(0.8)?;
-
-// Fluent builder API
-audio.processing()
-    .normalize(-1.0, 1.0, NormalizationMethod::Peak)
+```rust,ignore
+// Borrowing variants return a NEW value and compose into a pipeline. `scale` is
+// infallible (returns Self, no `?`); the others are fallible.
+let processed = audio
+    .normalize(NormalizationConfig::peak(1.0))?
     .scale(0.8)
-    .clip(-0.5, 0.5)
-    .apply()?;
+    .remove_dc_offset()?;
+
+// In-place variants mutate the receiver instead of allocating a copy.
+let mut buf = audio.clone();
+buf.normalize_in_place(NormalizationConfig::peak(1.0))?;
+buf.scale_in_place(0.8);
 ```
 
 **Key Operations**:
 
-- `normalize()`: Multiple normalization strategies
-- `scale()`, `gain()`: Amplitude adjustments
+- `normalize()`: Multiple normalization strategies, configured via `NormalizationConfig` (e.g. `NormalizationConfig::peak(target)`)
+- `scale()`, `gain()`: Amplitude adjustments (`scale` is infallible)
 - `clip()`: Hard limiting to prevent overflows
 - `remove_dc_offset()`: DC bias removal
 - `fade_in()`, `fade_out()`: Envelope operations
 
-**ProcessingBuilder Pattern**:
-
-- Chains operations efficiently
-- Validates parameters before application
-- Atomic application (all or nothing)
-- Memory-efficient operation sequencing
+**Convention**: each operation above has both the borrowing form shown here and an `*_in_place` counterpart, as described under *Dual-Variant Operations*. Multi-parameter behaviour is captured in dedicated config structs rather than long positional argument lists.
 
 #### `AudioTransforms` (transforms.rs)
 
-**Purpose**: Frequency-domain analysis and transformations (requires `fft`).
+**Purpose**: Frequency-domain analysis and transformations (requires `transforms`).
 
-**Why use it?**: Spectral analysis, filtering, and frequency-domain processing.
+**Why use it?**: Spectral analysis, filtering, and frequency-domain processing. The heavy time–frequency machinery lives in the companion `spectrograms` crate.
 
 **How to use it?**:
 
-```rust
-let spectrum = audio.fft()?;
-let stft = audio.stft(window_size, hop_size)?;
-let filtered = audio.spectral_filter(cutoff_freq)?;
+```rust,ignore
+let spectrum = audio.fft(nzu!(8192))?;
+let stft = audio.stft(&stft_params)?;
+let mfcc = audio.mfcc(&stft_params, nzu!(40), &MfccParams::speech_standard())?;
+let psd = audio.power_spectral_density(nzu!(1024), 0.5)?; // -> Psd
 ```
 
 **Key Operations**:
 
 - `fft()`, `ifft()`: Fast Fourier Transform and inverse
-- `stft()`, `istft()`: Short-Time Fourier Transform
-- `spectrogram()`: Time-frequency representation
+- `stft()`, `istft()`: Short-Time Fourier Transform (parameterised by `StftParams`)
+- `mfcc()`, `chromagram()`, `constant_q_transform()`: higher-level spectral representations
+- `power_spectral_density()`: returns a structured `Psd { frequencies, density }` rather than a bare tuple (access via `frequencies()` / `density()` / `into_parts()`)
 - `spectral_filter()`: Frequency domain filtering
-- `phase_vocoder()`: Time/pitch manipulation
+
+**Structured returns**: where a pre-2.0 API returned a loose tuple, the modern API returns a named type — for example `power_spectral_density` yields `Psd`, and (in the pitch-analysis trait) `track_pitch` yields `PitchContour` and `estimate_key` yields `Key { tonic, mode, confidence }`.
 
 **Performance Considerations**:
 
-- Uses `RustFFT` by default
-- Optional Intel MKL backend (`mkl` feature)
+- Uses `rustfft` by default
 - Real-valued FFT optimization for audio signals
-- Memory-efficient windowing operations
+- Memory-efficient windowing operations (`windows()` / zero-copy `windows_ref()`)
 
 #### `AudioEditing` (editing.rs)
 
@@ -433,23 +460,40 @@ Does not allocate a new ``AudioSamples`` for the extracted channel, it just borr
 
 #### `AudioIirFiltering` (iir_filtering.rs)
 
-**Purpose**: Infinite Impulse Response filter implementations.
+**Purpose**: Infinite Impulse Response filter design and application.
 
 **Why use it?**: Real-time filtering, tone shaping, frequency response control.
 
 **How to use it?**:
 
-```rust
-let filtered = audio.lowpass_filter(cutoff_hz, q_factor)?;
-let shaped = audio.highpass_filter(cutoff_hz, q_factor)?;
+```rust,ignore
+// Convenience constructors per family + response, in borrowing or in-place form.
+let filtered = audio.butterworth_lowpass(nzu!(4), 1_000.0)?;
+audio.butterworth_lowpass_in_place(nzu!(4), 1_000.0)?;
+
+// Full control via an IirFilterDesign struct.
+let design = IirFilterDesign::chebyshev_i(FilterResponse::HighPass, nzu!(6), 2_000.0, 1.0);
+let shaped = audio.apply_iir_filter(&design)?;
+
+// Zero-phase (forward-backward) filtering: no group delay.
+let flat_phase = audio.filtfilt(&design)?;
+
+// Design once, stream many blocks (real-time / chunked input).
+let mut sos = SosFilter::from_design(&design, 44_100.0)?;
+sos.process_block(&mut block);
 ```
 
-**Filter Types**:
+**Filter families** (`IirFilterType`): `Butterworth` (default), `ChebyshevI`, `ChebyshevII`, `Elliptic` (Cauer), and `Bessel`.
 
-- `lowpass_filter()`, `highpass_filter()`: Basic frequency separation
-- `bandpass_filter()`, `bandstop_filter()`: Band-limited filtering
-- `butterworth_filter()`: Smooth response filters
-- `frequency_response()`: Get the frequency response of the current filter
+**Responses** (`FilterResponse`): `LowPass`, `HighPass`, `BandPass`, `BandStop`.
+
+**Key capabilities**:
+
+- `IirFilterDesign`: a single struct describing family + response + order + cut-off(s) + ripple/attenuation, built with constructors such as `butterworth_lowpass`, `chebyshev_i`, `chebyshev_ii`, `bessel`, `elliptic`.
+- `apply_iir_filter()` / `apply_iir_filter_in_place()`: apply a design.
+- `filtfilt()` / `filtfilt_in_place()`: zero-phase forward-backward filtering (SciPy `sosfiltfilt`-style), doubling the magnitude response while cancelling group delay.
+- `SosFilter::from_design(..)` + `process_block(&mut [f64])`: a design-once, second-order-sections filter that carries state across calls for streaming use.
+- `frequency_response()`: magnitude/phase of the configured filter at probe frequencies.
 
 #### `AudioParametricEq` (parametric_eq.rs)
 
@@ -459,19 +503,25 @@ let shaped = audio.highpass_filter(cutoff_hz, q_factor)?;
 
 **How to use it?**:
 
-```rust
-let eq = ParametricEq::new()
-    .add_band(EqBand::new(1000.0, 2.0, 3.0)) // +3dB at 1kHz
-    .add_band(EqBand::new(5000.0, 1.0, -6.0)); // -6dB at 5kHz
+```rust,ignore
+let mut eq = ParametricEq::new();
+eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));  // +3 dB at 1 kHz, Q = 2.0
+eq.add_band(EqBand::peak(5000.0, -6.0, 1.0)); // -6 dB at 5 kHz, Q = 1.0
 
-let equalized = audio.apply_parametric_eq(&eq)?;
+let equalized = audio.apply_parametric_eq(&eq)?;          // borrowing variant
+// audio.apply_parametric_eq_in_place(&eq)?;              // in-place variant
+
+// Or the fixed three-band shelf/peak EQ via a config struct:
+let config = ThreeBandEqConfig::new(200.0, 2.0, 1000.0, -1.0, 1.0, 5000.0, 3.0);
+let shaped = audio.apply_three_band_eq(&config)?;
 ```
 
 **Key Features**:
 
-- Multiple simultaneous frequency bands
+- Multiple simultaneous frequency bands (`ParametricEq` / `EqBand`)
+- A convenience `ThreeBandEqConfig` for the common low/mid/high case
 - Independent gain, frequency, and Q controls
-- Real-time parameter updates
+- Both borrowing and `*_in_place` application variants
 - Efficient cascaded biquad implementation
 
 #### `AudioDynamicRange` (dynamic_range.rs)
@@ -480,20 +530,23 @@ let equalized = audio.apply_parametric_eq(&eq)?;
 
 **Why use it?**: Level control, dynamics processing, mastering operations.
 
-**How to use it?**:
+**How to use it?**: each processor is driven by a dedicated config struct.
 
-```rust
-let compressed = audio.compressor(CompressorConfig::new(
-    threshold: -12.0,
-    ratio: 4.0,
-    attack: 0.003,
-    release: 0.1
-))?;
+```rust,ignore
+// CompressorConfig::new() yields a sensible default; presets like vocal()/drum()/
+// bus() and field setters tailor it further.
+let compressed = audio.compressor(&CompressorConfig::vocal())?;
 
-let limited = audio.limiter(LimiterConfig::new(-1.0, 0.001, 0.05))?;
+// GateConfig / ExpanderConfig expose with_params(threshold, ratio, attack, release).
+let gated = audio.gate(&GateConfig::with_params(-40.0, 4.0, 1.0, 100.0))?;
+
+// LimiterConfig / ThreeBandEqConfig take explicit positional parameters.
+let limited = audio.limiter(&LimiterConfig::default())?;
 ```
 
-**Processor Types**:
+**Configuration structs**: `CompressorConfig`, `LimiterConfig`, `GateConfig`, and `ExpanderConfig` replace long positional argument lists. Each exposes a `new()`/`default()` baseline plus either presets or a `with_params(..)` helper, and side-chain behaviour is described by `SideChainConfig`.
+
+**Processor Types** (each with a borrowing and an `*_in_place` variant):
 
 - `compressor()`: Reduce dynamic range above threshold
 - `limiter()`: Hard limiting to prevent peaks
@@ -508,8 +561,8 @@ let limited = audio.limiter(LimiterConfig::new(-1.0, 0.001, 0.05))?;
 
 **How to use it?**:
 
-```rust
-let resampled = audio.resample(48000, ResamplingQuality::VeryHigh)?;
+```rust,ignore
+let resampled = audio.resample(48000, ResamplingQuality::High)?;
 ```
 
 **Quality Levels**:
@@ -548,6 +601,8 @@ let plot = PlotComposer::new()
 - `Waveform`: Time-domain amplitude plots
 - `Spectrogram`: Time-frequency representations
 - `Spectrum`: Frequency-domain magnitude plots
+- `PhaseSpectrum`: Frequency-domain phase plots
+- `Lissajous`: Stereo X-Y / Lissajous (phase-correlation) plots
 - `OnsetMarkers`: Event detection visualization
 - `BeatMarkers`: Tempo and rhythm visualization
 - `PitchContour`: Fundamental frequency tracking
