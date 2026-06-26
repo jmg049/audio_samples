@@ -64,7 +64,7 @@ It defines the interface for all supported audio sample formats:
 - Standard arithmetic operations (`Add`, `Sub`, `Mul`, `Div`)
 - Memory safety guarantees (`NoUninit` for safe byte serialization)
 - Numeric operations (`Num`, `Zero`, `One`, `Signed`)
-- Serialization support (`Serialize`, `Deserialize`)
+- Optional serde support via the `MaybeSerdeAudioSample` bound (adds `Serialize`/`Deserialize` only when the `serde` feature is enabled)
 - Constants for range information (`MAX`, `MIN`, `BITS`)
 
 The `StandardSample` trait extends the `AudioSample` trait with conversion functionality provided via the `ConvertTo` and `ConvertFrom` traits.
@@ -81,10 +81,10 @@ The `ConvertTo<T>` and `ConvertFrom<T>` trait provides audio-aware conversions b
 
 **Conversion Behavior:**
 
-- **Integer ↔ Integer**: Bit-shift scaling to preserve full dynamic range
-- **Integer ↔ Float**: Normalized scaling (-1.0 to 1.0 for floats)
-- **Float ↔ Float**: Direct casting with precision conversion
-- **I24 Special Handling**: Custom methods for 24-bit operations
+- Integer to integer: bit-shift scaling to preserve the full dynamic range
+- Integer to/from float: normalized scaling (-1.0 to 1.0 for floats)
+- Float to float: direct cast with a precision change
+- I24: custom handling for the 24-bit type
 
 **Design Patterns:**
 
@@ -216,7 +216,7 @@ Implements the `AudioTypeConversion` trait for safe type transformations on ``Au
 
 ### NdResult (lib.rs)
 
-Some operations (for example envelope followers) produce an array whose dimensionality mirrors the input: a mono input yields a 1-D array, a multi-channel input yields a 2-D `channels × samples` array. `NdResult<T>` is the tagged return type that expresses this **1-D / 2-D by layout** distinction in a single value: it is either `Mono(Array1<T>)` or `MultiChannel(Array2<T>)`. Callers pattern-match, or use the `into_array1()` / `into_array2()` helpers when the expected shape is known. Both variants are guaranteed non-empty.
+Some operations (for example envelope followers) produce an array whose dimensionality mirrors the input: a mono input yields a 1-D array, a multi-channel input yields a 2-D `channels x samples` array. `NdResult<T>` is the tagged return type that expresses this 1-D / 2-D by layout distinction in a single value: it is either `Mono(Array1<T>)` or `MultiChannel(Array2<T>)`. Callers pattern-match, or use the `into_array1()` / `into_array2()` helpers when the expected shape is known. Both variants are guaranteed non-empty.
 
 ### Utilities (./utils)
 
@@ -224,7 +224,7 @@ Provides supporting functionality organized by purpose:
 
 - `generation.rs`: Signal generation. Beyond the classic oscillators (`sine_wave`, `cosine_wave`, `square_wave`, `triangle_wave`, `sawtooth_wave`, `chirp`, `impulse`, `silence`, `compound_tone`, `am_signal`), this now includes exponential/log chirps (`exponential_chirp`), band-limited oscillators (`square_wave_bandlimited`, `sawtooth_wave_bandlimited`, `triangle_wave_bandlimited`), FM signals (`fm_signal`), and the noise sources `white_noise`/`pink_noise`/`brown_noise` (under `random-generation`).
 - `detection.rs`: Feature detection algorithms
-- `comparison.rs`: Audio comparison and similarity metrics — `correlation`, `mse`, `snr`, `psnr`, `segmental_snr`, `log_spectral_distance`, plus per-channel variants of the first three (`correlation_per_channel`, `mse_per_channel`, `snr_per_channel`).
+- `comparison.rs`: Audio comparison and similarity metrics - `correlation`, `mse`, `snr`, `psnr`, `segmental_snr`, `log_spectral_distance`, plus per-channel variants of the first three (`correlation_per_channel`, `mse_per_channel`, `snr_per_channel`).
 - `audio_math.rs`: Audio-domain mathematical utilities and canonical unit conversions.
 In future, this may become a more general ``algorithms`` module.
 
@@ -275,9 +275,9 @@ Available:
 - AudioDynamicRange
 - AudioEditing
 - AudioChannelOps
-- AudioPerceptualAnalysis (psychoacoustic)
-- AudioPlottingUtils
-- AudioSamplesSerialise
+- AudioEnvelopes
+- AudioPerceptualAnalysis (psychoacoustic; defined in `codecs::perceptual`)
+- AudioPlotting
 - AudioDecomposition
 - AudioTypeConversion
 
@@ -291,7 +291,7 @@ Each trait addresses a specific domain of audio processing:
 #### Core Organization
 
 - **`traits.rs`**: Trait definitions and type bounds
-- **Implementation files**: Named after traits (e.g., `AudioChannelOps` → `channels.rs`)
+- **Implementation files**: Named after traits (e.g., `AudioChannelOps` -> `channels.rs`)
 - **Supporting types**: Enums and structs in `types.rs`
 - **Feature gating**: Advanced functionality behind cargo features
 
@@ -320,13 +320,13 @@ let flatness = audio.spectral_flatness(ChannelReduction::First)?;
 - `rms()`: Perceptually relevant loudness measure
 - `zero_crossings()`, `zero_crossing_rate()`: Periodicity analysis
 - `autocorrelation()`, `cross_correlation()`: Correlation analysis (requires `transforms`)
-- Spectral feature suite (requires `transforms`): `spectral_centroid()`, `spectral_rolloff()`, `spectral_bandwidth()`, `spectral_flatness()`, `spectral_contrast()`, `spectral_slope()`, `spectral_crest()` — each takes a `ChannelReduction` argument
+- Spectral feature suite (requires `transforms`): `spectral_centroid()`, `spectral_rolloff()`, `spectral_bandwidth()`, `spectral_flatness()`, `spectral_contrast()`, `spectral_slope()`, `spectral_crest()` - each takes a `ChannelReduction` argument
 
-**ChannelReduction policy**: spectral analysis on multi-channel audio must decide how to collapse channels to a single value. `ChannelReduction` is the parameter that chooses: `Error` (default — refuse multi-channel input), `First`, `Average`, or `Channel(usize)`.
+**ChannelReduction policy**: spectral analysis on multi-channel audio must decide how to collapse channels to a single value. `ChannelReduction` is the parameter that chooses: `Error` (default - refuse multi-channel input), `First`, `Average`, or `Channel(usize)`.
 
 **API Contracts**:
 
-- Simple statistics (`peak`, `rms`, `mean`, `variance`, `zero_crossings`, …) return values **directly** — no `Result` — leveraging the non-empty invariant of `AudioSamples`.
+- Simple statistics (`peak`, `rms`, `mean`, `variance`, `zero_crossings`, ...) return values **directly** - no `Result` - leveraging the non-empty invariant of `AudioSamples`.
 - Generic over float types for numerical operations
 - Consistent behavior across mono and multi-channel audio
 
@@ -354,11 +354,13 @@ buf.scale_in_place(0.8);
 
 **Key Operations**:
 
-- `normalize()`: Multiple normalization strategies, configured via `NormalizationConfig` (e.g. `NormalizationConfig::peak(target)`)
-- `scale()`, `gain()`: Amplitude adjustments (`scale` is infallible)
-- `clip()`: Hard limiting to prevent overflows
+- `normalize()`: normalization strategies, configured via `NormalizationConfig` (e.g. `NormalizationConfig::peak(target)`)
+- `scale()`: amplitude scaling (infallible)
+- `clip()`: hard limiting to prevent overflows
 - `remove_dc_offset()`: DC bias removal
-- `fade_in()`, `fade_out()`: Envelope operations
+- `apply_window()`, `apply_filter()`, `mu_compress()`/`mu_expand()`, `low_pass_filter()`/`high_pass_filter()`/`band_pass_filter()`
+
+(Fades live on `AudioEditing`, not here.)
 
 **Convention**: each operation above has both the borrowing form shown here and an `*_in_place` counterpart, as described under *Dual-Variant Operations*. Multi-parameter behaviour is captured in dedicated config structs rather than long positional argument lists.
 
@@ -366,7 +368,7 @@ buf.scale_in_place(0.8);
 
 **Purpose**: Frequency-domain analysis and transformations (requires `transforms`).
 
-**Why use it?**: Spectral analysis, filtering, and frequency-domain processing. The heavy time–frequency machinery lives in the companion `spectrograms` crate.
+**Why use it?**: Spectral analysis, filtering, and frequency-domain processing. The heavy time-frequency machinery lives in the companion `spectrograms` crate.
 
 **How to use it?**:
 
@@ -379,13 +381,13 @@ let psd = audio.power_spectral_density(nzu!(1024), 0.5)?; // -> Psd
 
 **Key Operations**:
 
-- `fft()`, `ifft()`: Fast Fourier Transform and inverse
-- `stft()`, `istft()`: Short-Time Fourier Transform (parameterised by `StftParams`)
+- `fft()`: forward Fast Fourier Transform (per channel)
+- `stft()`, `istft()`: Short-Time Fourier Transform and its inverse (parameterised by `StftParams`)
 - `mfcc()`, `chromagram()`, `constant_q_transform()`: higher-level spectral representations
 - `power_spectral_density()`: returns a structured `Psd { frequencies, density }` rather than a bare tuple (access via `frequencies()` / `density()` / `into_parts()`)
-- `spectral_filter()`: Frequency domain filtering
+- `convolve()`, `deconvolve()`: FFT-based linear convolution and regularised deconvolution
 
-**Structured returns**: where a pre-2.0 API returned a loose tuple, the modern API returns a named type — for example `power_spectral_density` yields `Psd`, and (in the pitch-analysis trait) `track_pitch` yields `PitchContour` and `estimate_key` yields `Key { tonic, mode, confidence }`.
+**Structured returns**: where a pre-2.0 API returned a loose tuple, the modern API returns a named type - for example `power_spectral_density` yields `Psd`, and (in the pitch-analysis trait) `track_pitch` yields `PitchContour` and `estimate_key` yields `Key { tonic, mode, confidence }`.
 
 **Performance Considerations**:
 
@@ -401,21 +403,22 @@ let psd = audio.power_spectral_density(nzu!(1024), 0.5)?; // -> Psd
 
 **How to use it?**:
 
-```rust
-let trimmed = audio.trim_start_end(1.0, 2.0)?;  // Remove first 1s, last 2s
-let padded = audio.pad(PadSide::Both, 0.5)?;   // Add 0.5s silence
-let reversed = audio.reverse()?;                // Reverse audio
-let combined = audio1.concatenate(&audio2)?;   // Join audio
+```rust,ignore
+let kept     = audio.trim(1.0, 2.0)?;      // keep the region from 1.0s to 2.0s
+let padded   = audio.pad(0.0, 0.5, 0.0)?;  // append 0.5s padded with value 0.0
+let reversed = audio.reverse();            // infallible; returns a new value
+// `concatenate` is an associated function over a non-empty slice of segments:
+let joined = AudioSamples::concatenate(segments)?;
 ```
 
 **Key Operations**:
 
-- `trim()`, `trim_start_end()`: Remove audio segments
-- `pad()`: Add silence or repeat edge samples
-- `reverse()`: Reverse audio timeline
-- `concatenate()`: Join multiple audio clips
-- `stack()`: Stack audio samples on top of each other
-- `repeat()`: Loop audio content
+- `trim()`, `trim_silence()`, `trim_all_silence()`: remove a region or leading/trailing silence
+- `pad()`, `pad_to_duration()`, `pad_samples_right()`: add padding
+- `reverse()`: reverse the timeline (infallible)
+- `concatenate()` (associated fn), `stack()`, `mix()`: combine multiple clips
+- `repeat()`: loop content
+- `fade_in()`, `fade_out()`, `perturb()`, `split()`
 
 **API Contracts**:
 
@@ -445,7 +448,6 @@ let extracted = multi_audio.extract_channel(0)?;
 allocates a new ``AudioSamples`` for the extracted channel
 - `borrow_channel()`: Borrows a specific channel.
 Does not allocate a new ``AudioSamples`` for the extracted channel, it just borrows the data.
-- `mix_channels()`: Custom channel mixing
 - `swap_channels()`: Channel reordering
 - `duplicate_to_channels(N)` - Duplicates mono audio to N channels
 - `pan(x)` - Applies pan control to stereo audio
@@ -455,8 +457,8 @@ Does not allocate a new ``AudioSamples`` for the extracted channel, it just borr
 - `deinterleave_channels()` - Deinterleave audio into separate channel samples
 **Conversion Methods**:
 
-- **Mono**: `Average`, `Left`, `Right`, `Sum`, `WeightedSum`
-- **Stereo**: `Duplicate`, `Spread`, `Custom`
+- **Mono** (`MonoConversionMethod`): `Average`, `Left`, `Right`, `Weighted(weights)`, `Center`
+- **Stereo** (`StereoConversionMethod`): `Duplicate`, `Pan(value)`, `Left`, `Right`
 
 #### `AudioIirFiltering` (iir_filtering.rs)
 
@@ -533,25 +535,26 @@ let shaped = audio.apply_three_band_eq(&config)?;
 **How to use it?**: each processor is driven by a dedicated config struct.
 
 ```rust,ignore
-// CompressorConfig::new() yields a sensible default; presets like vocal()/drum()/
-// bus() and field setters tailor it further.
-let compressed = audio.compressor(&CompressorConfig::vocal())?;
+// CompressorConfig::new() yields a sensible default; presets and field setters
+// tailor it further.
+let compressed = audio.apply_compressor(&CompressorConfig::vocal())?;
 
-// GateConfig / ExpanderConfig expose with_params(threshold, ratio, attack, release).
-let gated = audio.gate(&GateConfig::with_params(-40.0, 4.0, 1.0, 100.0))?;
+// GateConfig / ExpanderConfig expose with_params(threshold, ratio, attack, release)
+// and presets such as noise_gate().
+let gated = audio.apply_gate(&GateConfig::noise_gate())?;
 
-// LimiterConfig / ThreeBandEqConfig take explicit positional parameters.
-let limited = audio.limiter(&LimiterConfig::default())?;
+let limited = audio.apply_limiter(&LimiterConfig::default())?;
 ```
 
 **Configuration structs**: `CompressorConfig`, `LimiterConfig`, `GateConfig`, and `ExpanderConfig` replace long positional argument lists. Each exposes a `new()`/`default()` baseline plus either presets or a `with_params(..)` helper, and side-chain behaviour is described by `SideChainConfig`.
 
 **Processor Types** (each with a borrowing and an `*_in_place` variant):
 
-- `compressor()`: Reduce dynamic range above threshold
-- `limiter()`: Hard limiting to prevent peaks
-- `expander()`: Increase dynamic range below threshold
-- `gate()`: Remove low-level noise
+- `apply_compressor()`: reduce dynamic range above the threshold
+- `apply_limiter()`: hard limiting to prevent peaks
+- `apply_expander()`: increase dynamic range below the threshold
+- `apply_gate()`: remove low-level noise
+- `apply_compressor_sidechain()` / `apply_limiter_sidechain()`: side-chained variants
 
 #### Audio Resampling (resampling.rs)
 
@@ -562,7 +565,7 @@ let limited = audio.limiter(&LimiterConfig::default())?;
 **How to use it?**:
 
 ```rust,ignore
-let resampled = audio.resample(48000, ResamplingQuality::High)?;
+let resampled = audio.resample(sample_rate!(48000), ResamplingQuality::High)?;
 ```
 
 **Quality Levels**:
@@ -573,60 +576,28 @@ let resampled = audio.resample(48000, ResamplingQuality::High)?;
 
 ### Plotting (./operations/plotting)
 
-**Purpose**: Comprehensive audio visualization capabilities (requires `plotting`).
+**Purpose**: audio visualisation (requires `plotting`). Plots render to interactive HTML via plotly; PNG/SVG export is available behind `static-plots`.
 
-**Architecture**:
+**How to use it**: the `AudioPlotting` trait adds plot constructors to `AudioSamples`:
 
-- **Composable API**: Build complex plots from simple elements
-- **Builder Pattern**: Fluent configuration of plot appearance
-- **Multiple Backends**: Plotly for interactive plots, static generation support
+- `plot_waveform()`, `plot_magnitude_spectrum()`, `plot_phase_spectrum()`, `plot_spectrogram()`, `plot_lissajous()`
 
-**Core Components**:
+Each returns a plot value (`WaveformPlot`, `MagnitudeSpectrumPlot`, `PhaseSpectrumPlot`, `SpectrogramPlot`, `LissajousPlot`) that renders to an HTML string.
 
-#### `PlotComposer` (composer.rs)
+**Module layout**:
 
-Orchestrates the creation of complex, multi-element plots:
+- `waveform.rs`, `spectrum.rs`, `spectrograms.rs`, `phase_spectrum.rs`, `lissajous.rs`: the individual plot types and their parameter structs (`WaveformPlotParams`, `MagnitudeSpectrumParams`, `SpectrogramPlotParams`, `PhaseSpectrumParams`, `LissajousParams`).
+- `composite.rs`: `CompositePlot` / `CompositeLayout` for arranging several plots together.
+- `dsp_overlays.rs`: overlays (onset and beat markers, event lines) drawn on top of a base plot.
+- `mod.rs`: shared styling types (`PlotParams`, `FontSizes`, `Layout`) and the `AudioPlotting` trait wiring.
 
-```rust
-let plot = PlotComposer::new()
-    .add_waveform(&audio, "Waveform")
-    .add_spectrogram(&audio, window_size)
-    .add_onsets(&onset_times)
-    .set_layout(layout_config)
-    .build()?;
-```
-
-#### Plotting Elements (elements.rs)
-
-- `Waveform`: Time-domain amplitude plots
-- `Spectrogram`: Time-frequency representations
-- `Spectrum`: Frequency-domain magnitude plots
-- `PhaseSpectrum`: Frequency-domain phase plots
-- `Lissajous`: Stereo X-Y / Lissajous (phase-correlation) plots
-- `OnsetMarkers`: Event detection visualization
-- `BeatMarkers`: Tempo and rhythm visualization
-- `PitchContour`: Fundamental frequency tracking
-
-#### Styling System (builders.rs)
-
-- `ColorPalette`: Consistent color schemes
-- `LineStyle`: Customizable line appearance
-- `MarkerStyle`: Point and event markers
-- `LayoutConfig`: Plot layout and formatting
-
-**Feature Integration**:
-
-- Automatic sample rate handling for time axis
-- Frequency axis scaling for spectral plots
-- Real-time plot updates for streaming audio
-- Export capabilities (PNG, SVG, HTML)
+**Styling**: each plot has a `*Params` struct (with builders such as `WaveformPlotParamsBuilder`) for its own appearance; `PlotParams`, `FontSizes`, and `Layout` cover the shared title, axis, and size options.
 
 **API Contracts**:
 
-- Consistent time/frequency axis handling
-- Memory-efficient plot generation
-- Thread-safe plot composition
-- Graceful fallbacks for missing features
+- Time and frequency axes are derived from the sample rate and the transform parameters.
+- Plots render to an in-memory HTML string; nothing is written to disk unless the caller asks for it.
+- Plotting is feature-gated and costs nothing when disabled.
 
 ## API Design Contracts
 
