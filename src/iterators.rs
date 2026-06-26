@@ -1918,8 +1918,8 @@ mod tests {
     #[cfg(feature = "editing")]
     #[test]
     fn test_window_iterator_skip_window_larger_than_signal_yields_zero() {
-        let audio =
-            AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], sample_rate!(44100))
+            .unwrap();
         let iter = audio
             .windows(crate::nzu!(8), crate::nzu!(4))
             .with_padding_mode(PaddingMode::Skip);
@@ -2013,10 +2013,7 @@ mod tests {
                 owned.len(),
                 "count mismatch for window={w}, hop={h}"
             );
-            assert_eq!(
-                borrowed, owned,
-                "content mismatch for window={w}, hop={h}"
-            );
+            assert_eq!(borrowed, owned, "content mismatch for window={w}, hop={h}");
 
             // ExactSizeIterator len() must agree with what is yielded.
             assert_eq!(audio.windows_ref(wnz, hnz).len(), owned.len());
@@ -2066,10 +2063,7 @@ mod tests {
                 owned.len(),
                 "count mismatch for window={w}, hop={h}"
             );
-            assert_eq!(
-                borrowed, owned,
-                "content mismatch for window={w}, hop={h}"
-            );
+            assert_eq!(borrowed, owned, "content mismatch for window={w}, hop={h}");
         }
     }
 
@@ -2078,8 +2072,8 @@ mod tests {
     #[cfg(feature = "editing")]
     #[test]
     fn test_windows_ref_window_larger_than_signal_yields_zero() {
-        let audio =
-            AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0, 4.0, 5.0], sample_rate!(44100))
+            .unwrap();
 
         let iter = audio.windows_ref(NonZeroUsize::new(8).unwrap(), NonZeroUsize::new(4).unwrap());
         assert_eq!(iter.len(), 0);

@@ -101,7 +101,9 @@ fn compressor_modifies_signal() {
 #[test]
 fn compressor_output_is_finite() {
     let mut audio = sine_f32(440.0, 200, 0.8);
-    audio.apply_compressor_in_place(&CompressorConfig::vocal()).unwrap();
+    audio
+        .apply_compressor_in_place(&CompressorConfig::vocal())
+        .unwrap();
     let all_finite = audio.as_slice().unwrap().iter().all(|x| x.is_finite());
     assert!(all_finite, "compressor output contains NaN or Inf");
 }
@@ -140,7 +142,9 @@ fn full_chain_lowpass_compress_eq_is_finite() {
     audio
         .butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 2000.0)
         .unwrap();
-    audio.apply_compressor_in_place(&CompressorConfig::vocal()).unwrap();
+    audio
+        .apply_compressor_in_place(&CompressorConfig::vocal())
+        .unwrap();
 
     let mut eq = ParametricEq::new();
     eq.add_band(EqBand::peak(800.0, 2.0, 1.5));

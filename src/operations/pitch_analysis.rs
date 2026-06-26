@@ -1440,8 +1440,8 @@ mod tests {
     #[test]
     fn test_silence_detection() {
         // Test with silence (should return None)
-        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(44100), sample_rate!(44100))
-            .unwrap();
+        let audio =
+            AudioSamples::new_mono(Array1::<f32>::zeros(44100), sample_rate!(44100)).unwrap();
 
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
         assert!(detected_pitch.is_none());
@@ -1562,16 +1562,30 @@ mod tests {
 
         // Old usize encoding: pc = idx % 12, mode = Major if idx < 12 else Minor.
         let major_idx = 4usize; // E major
-        assert_eq!(PitchClass::from_index((major_idx % 12) as u8), PitchClass::E);
         assert_eq!(
-            if major_idx < 12 { Mode::Major } else { Mode::Minor },
+            PitchClass::from_index((major_idx % 12) as u8),
+            PitchClass::E
+        );
+        assert_eq!(
+            if major_idx < 12 {
+                Mode::Major
+            } else {
+                Mode::Minor
+            },
             Mode::Major
         );
 
         let minor_idx = 21usize; // 21 - 12 = 9 -> A minor
-        assert_eq!(PitchClass::from_index((minor_idx % 12) as u8), PitchClass::A);
         assert_eq!(
-            if minor_idx < 12 { Mode::Major } else { Mode::Minor },
+            PitchClass::from_index((minor_idx % 12) as u8),
+            PitchClass::A
+        );
+        assert_eq!(
+            if minor_idx < 12 {
+                Mode::Major
+            } else {
+                Mode::Minor
+            },
             Mode::Minor
         );
     }

@@ -693,8 +693,7 @@ mod tests {
 
         let stereo_arr =
             ndarray::Array2::from_shape_fn((2, n), |(c, i)| if c == 0 { ch0[i] } else { ch1[i] });
-        let mut stereo =
-            AudioSamples::new_multi_channel(stereo_arr, sample_rate!(44100)).unwrap();
+        let mut stereo = AudioSamples::new_multi_channel(stereo_arr, sample_rate!(44100)).unwrap();
 
         let band = EqBand::peak(880.0, 6.0, 2.0);
         // Must not panic.
@@ -822,17 +821,23 @@ mod tests {
     #[test]
     fn test_three_band_eq_config_validate_rejects_bad_input() {
         // Non-positive frequency.
-        assert!(ThreeBandEqConfig::new(0.0, 0.0, 1000.0, 0.0, 1.0, 4000.0, 0.0)
-            .validate()
-            .is_err());
+        assert!(
+            ThreeBandEqConfig::new(0.0, 0.0, 1000.0, 0.0, 1.0, 4000.0, 0.0)
+                .validate()
+                .is_err()
+        );
         // Mis-ordered frequencies (mid below low).
-        assert!(ThreeBandEqConfig::new(2000.0, 0.0, 1000.0, 0.0, 1.0, 4000.0, 0.0)
-            .validate()
-            .is_err());
+        assert!(
+            ThreeBandEqConfig::new(2000.0, 0.0, 1000.0, 0.0, 1.0, 4000.0, 0.0)
+                .validate()
+                .is_err()
+        );
         // Non-positive mid Q.
-        assert!(ThreeBandEqConfig::new(200.0, 0.0, 1000.0, 0.0, 0.0, 4000.0, 0.0)
-            .validate()
-            .is_err());
+        assert!(
+            ThreeBandEqConfig::new(200.0, 0.0, 1000.0, 0.0, 0.0, 4000.0, 0.0)
+                .validate()
+                .is_err()
+        );
         // A valid config passes.
         assert!(ThreeBandEqConfig::flat().validate().is_ok());
     }
@@ -990,15 +995,19 @@ mod tests {
             let t = i as f64 / sample_rate;
             samples.push((2.0 * PI * 880.0 * t).sin() as f32);
         }
-        let original: AudioSamples<'_, f32> =
-            AudioSamples::from_mono_vec(NonEmptyVec::new(samples.clone()).unwrap(), sample_rate!(44100));
+        let original: AudioSamples<'_, f32> = AudioSamples::from_mono_vec(
+            NonEmptyVec::new(samples.clone()).unwrap(),
+            sample_rate!(44100),
+        );
 
         // Non-mutating: returns a new copy, leaves `original` unchanged.
         let filtered = original.apply_peak_filter(880.0, 6.0, 2.0).unwrap();
 
         // In-place on a clone produces an equal result.
         let mut in_place = original.clone();
-        in_place.apply_peak_filter_in_place(880.0, 6.0, 2.0).unwrap();
+        in_place
+            .apply_peak_filter_in_place(880.0, 6.0, 2.0)
+            .unwrap();
 
         assert_eq!(
             filtered.as_slice().unwrap(),

@@ -229,9 +229,24 @@ fn transient_256k() {
 
 /// Sum of three sinusoids (220 / 440 / 880 Hz), peak-normalised to 0.5.
 fn signal_multi_tone() -> audio_samples::AudioSamples<'static, f32> {
-    let a = sine_wave::<f32>(220.0, Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 1.0);
-    let b = sine_wave::<f32>(440.0, Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 1.0);
-    let c = sine_wave::<f32>(880.0, Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 1.0);
+    let a = sine_wave::<f32>(
+        220.0,
+        Duration::from_millis(SIGNAL_DURATION_MS),
+        sample_rate!(44100),
+        1.0,
+    );
+    let b = sine_wave::<f32>(
+        440.0,
+        Duration::from_millis(SIGNAL_DURATION_MS),
+        sample_rate!(44100),
+        1.0,
+    );
+    let c = sine_wave::<f32>(
+        880.0,
+        Duration::from_millis(SIGNAL_DURATION_MS),
+        sample_rate!(44100),
+        1.0,
+    );
 
     let av = a.as_slice().expect("contiguous");
     let bv = b.as_slice().expect("contiguous");
@@ -239,7 +254,10 @@ fn signal_multi_tone() -> audio_samples::AudioSamples<'static, f32> {
     let n = av.len().min(bv.len()).min(cv.len());
 
     let mut mixed: Vec<f32> = (0..n).map(|i| av[i] + bv[i] + cv[i]).collect();
-    let peak = mixed.iter().fold(0.0_f32, |m, &x| m.max(x.abs())).max(1e-12);
+    let peak = mixed
+        .iter()
+        .fold(0.0_f32, |m, &x| m.max(x.abs()))
+        .max(1e-12);
     let scale = 0.5 / peak;
     for x in &mut mixed {
         *x *= scale;
@@ -280,7 +298,11 @@ fn quantized_indices_fit_allocated_word_length() {
     let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
     let window_size = NonZeroUsize::new(WINDOW_SIZE).unwrap();
 
-    for signal in [signal_multi_tone(), signal_sine(440.0), signal_white_noise()] {
+    for signal in [
+        signal_multi_tone(),
+        signal_sine(440.0),
+        signal_white_noise(),
+    ] {
         let result = analyse_signal_with_window_size(
             &signal,
             WindowType::Hanning,

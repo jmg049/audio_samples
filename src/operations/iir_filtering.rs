@@ -402,10 +402,7 @@ impl Biquad {
     /// [`SosFilter`]. The coefficients are identical up to the a0 = 1
     /// normalisation the biquad already applied at construction.
     fn to_coeffs(self) -> (Vec<f64>, Vec<f64>) {
-        (
-            vec![self.b0, self.b1, self.b2],
-            vec![1.0, self.a1, self.a2],
-        )
+        (vec![self.b0, self.b1, self.b2], vec![1.0, self.a1, self.a2])
     }
 }
 
@@ -692,10 +689,7 @@ impl SosFilter {
     /// assert!(y.is_finite());
     /// ```
     #[inline]
-    pub fn from_design(
-        design: &IirFilterDesign,
-        sample_rate: f64,
-    ) -> AudioSampleResult<SosFilter> {
+    pub fn from_design(design: &IirFilterDesign, sample_rate: f64) -> AudioSampleResult<SosFilter> {
         let repr = design_iir_filter(design, sample_rate)?;
         Ok(sos_from_representation(&repr))
     }
@@ -957,7 +951,9 @@ fn chebyshev1_prototype(order: usize, ripple_db: f64) -> AnalogZpk {
     // Gain so that the prototype transfer function has the canonical Cheby-I
     // normalisation: product(-poles) gives the leading coefficient; for even
     // order divide by sqrt(1+ε²) to land the DC value on the ripple bound.
-    let mut gain = poles.iter().fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
+    let mut gain = poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
     let mut gain_re = gain.re;
     if order.is_multiple_of(2) {
         gain_re /= (1.0 + epsilon * epsilon).sqrt();
@@ -1012,8 +1008,12 @@ fn chebyshev2_prototype(order: usize, stopband_db: f64) -> AnalogZpk {
 
     // Gain so the prototype passband (ω → 0) settles at unity:
     //   H(0) = gain · Π(−z) / Π(−p)  ⇒  gain = Π(−p) / Π(−z).
-    let prod_poles = poles.iter().fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
-    let prod_zeros = zeros.iter().fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z));
+    let prod_poles = poles
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
+    let prod_zeros = zeros
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z));
     let gain = (prod_poles / prod_zeros).re;
 
     AnalogZpk { zeros, poles, gain }
@@ -1176,14 +1176,12 @@ fn bilinear_zpk(zpk: &AnalogZpk, sample_rate: f64) -> AnalogZpk {
 
     // Gain correction: k_z = k_s · Π(2fs − z_s) / Π(2fs − p_s)  (real for
     // conjugate-symmetric root sets).
-    let num = zpk
-        .zeros
-        .iter()
-        .fold(Complex::new(1.0, 0.0), |acc, &z| acc * (Complex::new(fs2, 0.0) - z));
-    let den = zpk
-        .poles
-        .iter()
-        .fold(Complex::new(1.0, 0.0), |acc, &p| acc * (Complex::new(fs2, 0.0) - p));
+    let num = zpk.zeros.iter().fold(Complex::new(1.0, 0.0), |acc, &z| {
+        acc * (Complex::new(fs2, 0.0) - z)
+    });
+    let den = zpk.poles.iter().fold(Complex::new(1.0, 0.0), |acc, &p| {
+        acc * (Complex::new(fs2, 0.0) - p)
+    });
     let gain = zpk.gain * (num / den).re;
 
     // Append the missing zeros at z = −1.
@@ -1522,8 +1520,7 @@ where
             AudioData::Multi(data) => {
                 for ch_idx in 0..data.dim().0.get() {
                     let mut channel = data.index_axis_mut(Axis(0), ch_idx);
-                    let mut buf: Vec<f64> =
-                        channel.iter().map(|&s| s.convert_to()).collect();
+                    let mut buf: Vec<f64> = channel.iter().map(|&s| s.convert_to()).collect();
                     filtfilt_slice(&mut sos.clone(), &mut buf);
                     for (dst, &v) in channel.iter_mut().zip(buf.iter()) {
                         *dst = v.convert_to();
@@ -2138,7 +2135,10 @@ fn reverse_bessel_coeffs(order: usize) -> Vec<f64> {
 /// internally. Robust for the well-conditioned Bessel polynomials used here.
 fn durand_kerner(coeffs: &[f64]) -> Vec<Complex<f64>> {
     let lead = coeffs[0];
-    let monic: Vec<Complex<f64>> = coeffs.iter().map(|&c| Complex::new(c / lead, 0.0)).collect();
+    let monic: Vec<Complex<f64>> = coeffs
+        .iter()
+        .map(|&c| Complex::new(c / lead, 0.0))
+        .collect();
     let n = monic.len() - 1;
     if n == 0 {
         return Vec::new();
@@ -2316,7 +2316,8 @@ fn ellipdeg(n: usize, m1: f64) -> f64 {
 /// ascending Landen transformation (Orfanidis Eq. 56).
 fn arc_jac_sn(w: Complex<f64>, m: f64) -> Complex<f64> {
     // (1 - kx²)^(1/2) for complex kx.
-    let complement = |kx: Complex<f64>| ((Complex::new(1.0, 0.0) - kx) * (Complex::new(1.0, 0.0) + kx)).sqrt();
+    let complement =
+        |kx: Complex<f64>| ((Complex::new(1.0, 0.0) - kx) * (Complex::new(1.0, 0.0) + kx)).sqrt();
 
     let mut ks = vec![m.sqrt()];
     let mut k_ = m.sqrt();
@@ -2425,7 +2426,9 @@ fn elliptic_prototype(order: usize, rp: f64, rs: f64) -> AnalogZpk {
     let prod_z = if zeros.is_empty() {
         Complex::new(1.0, 0.0)
     } else {
-        zeros.iter().fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z))
+        zeros
+            .iter()
+            .fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z))
     };
     let mut gain = (prod_p / prod_z).re;
     if n.is_multiple_of(2) {
@@ -3251,7 +3254,8 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply Butterworth band-pass filter from 500 Hz to 2000 Hz
-        let result = audio.butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 500.0, 2000.0);
+        let result =
+            audio.butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 500.0, 2000.0);
         assert!(result.is_ok());
 
         // Only frequencies between 500-2000 Hz should pass through
@@ -3281,8 +3285,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut audio =
-            AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
 
         // Apply low-pass filter to stereo signal
         let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 2000.0);
@@ -3328,7 +3331,11 @@ mod tests {
         );
         assert!(
             audio
-                .butterworth_bandpass_in_place(NonZeroUsize::new(2).unwrap(), 1000.0, sample_rate / 2.0)
+                .butterworth_bandpass_in_place(
+                    NonZeroUsize::new(2).unwrap(),
+                    1000.0,
+                    sample_rate / 2.0
+                )
                 .is_err()
         );
     }
@@ -3592,7 +3599,8 @@ mod tests {
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
         // Apply 10th-order Butterworth bandpass
-        let result = audio.butterworth_bandpass_in_place(NonZeroUsize::new(10).unwrap(), 800.0, 1200.0);
+        let result =
+            audio.butterworth_bandpass_in_place(NonZeroUsize::new(10).unwrap(), 800.0, 1200.0);
         assert!(
             result.is_ok(),
             "10th-order Butterworth bandpass should work"
@@ -3709,8 +3717,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut audio =
-            AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
 
         // Apply 6th-order filter to stereo
         let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(6).unwrap(), 2000.0);
@@ -3771,7 +3778,8 @@ mod tests {
     fn test_butterworth_lowpass_dual_variant() {
         // The non-mutating variant must leave the original untouched and
         // produce the same result as clone + in-place.
-        let samples = NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
+        let samples =
+            NonEmptyVec::new(vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]).unwrap();
         let original: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
@@ -3782,7 +3790,9 @@ mod tests {
 
         // In-place on a clone.
         let mut in_place = original.clone();
-        in_place.butterworth_lowpass_in_place(order, 1000.0).unwrap();
+        in_place
+            .butterworth_lowpass_in_place(order, 1000.0)
+            .unwrap();
 
         assert_eq!(
             filtered.as_slice().unwrap(),
@@ -4028,7 +4038,11 @@ mod tests {
         );
 
         // ~0 dB well outside the notch.
-        assert!(mag_db(&sos, 50.0).abs() < 1.0, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 50.0).abs() < 1.0,
+            "50Hz: {}",
+            mag_db(&sos, 50.0)
+        );
         assert!(
             mag_db(&sos, 100.0).abs() < 1.0,
             "100Hz: {}",
@@ -4154,7 +4168,11 @@ mod tests {
         );
 
         // Maximally flat passband ~0 dB outside the band.
-        assert!(mag_db(&sos, 50.0).abs() < 1.0, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 50.0).abs() < 1.0,
+            "50Hz: {}",
+            mag_db(&sos, 50.0)
+        );
         assert!(
             mag_db(&sos, 15000.0).abs() < 1.0,
             "15kHz: {}",
@@ -4198,11 +4216,8 @@ mod tests {
         let samples = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-        let mut bs = IirFilterDesign::butterworth_bandpass(
-            NonZeroUsize::new(4).unwrap(),
-            500.0,
-            2000.0,
-        );
+        let mut bs =
+            IirFilterDesign::butterworth_bandpass(NonZeroUsize::new(4).unwrap(), 500.0, 2000.0);
         bs.response = FilterResponse::BandStop;
         assert!(audio.apply_iir_filter_in_place(&bs).is_ok());
     }
@@ -4431,7 +4446,11 @@ mod tests {
             "notch: {}",
             mag_db(&sos, center)
         );
-        assert!(mag_db(&sos, 50.0).abs() < 0.5, "50Hz: {}", mag_db(&sos, 50.0));
+        assert!(
+            mag_db(&sos, 50.0).abs() < 0.5,
+            "50Hz: {}",
+            mag_db(&sos, 50.0)
+        );
         assert!(
             mag_db(&sos, 15000.0).abs() < 0.5,
             "15kHz: {}",
@@ -4444,8 +4463,11 @@ mod tests {
         let samples = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
-        let design =
-            IirFilterDesign::bessel(FilterResponse::LowPass, NonZeroUsize::new(4).unwrap(), 1000.0);
+        let design = IirFilterDesign::bessel(
+            FilterResponse::LowPass,
+            NonZeroUsize::new(4).unwrap(),
+            1000.0,
+        );
         assert!(audio.apply_iir_filter_in_place(&design).is_ok());
 
         let samples2 = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
@@ -4550,7 +4572,10 @@ mod tests {
             .iter()
             .filter(|&&f| (mag_db(&sos, f) - (-1.0)).abs() < 0.05)
             .count();
-        assert!(touches >= 2, "expected multiple −1 dB touches, got {touches}");
+        assert!(
+            touches >= 2,
+            "expected multiple −1 dB touches, got {touches}"
+        );
         // Equiripple peaks (touch 0 dB) between the −1 dB dips.
         assert!(
             mag_db(&sos, 1000.0) >= -0.2,
@@ -4740,8 +4765,7 @@ mod tests {
     /// filtering the whole signal in one pass.
     #[test]
     fn test_sos_streaming_block_continuity() {
-        let design =
-            IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(6).unwrap(), 1500.0);
+        let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(6).unwrap(), 1500.0);
 
         // Build a non-trivial signal.
         let n = 512;
@@ -4786,8 +4810,7 @@ mod tests {
     /// single-pass filter, which group-delays the signal (peak at lag > 0).
     #[test]
     fn test_filtfilt_zero_phase_symmetry() {
-        let design =
-            IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 2000.0);
+        let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 2000.0);
 
         // Symmetric input: a centred triangular burst on a zero background.
         let n = 401usize;
@@ -4851,8 +4874,7 @@ mod tests {
     /// a passband and a stopband frequency.
     #[test]
     fn test_filtfilt_magnitude_is_squared() {
-        let design =
-            IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 2000.0);
+        let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 2000.0);
         let sos = SosFilter::from_design(&design, FS).unwrap();
 
         // Pass a pure tone through filtfilt and measure the steady-state
@@ -4863,8 +4885,7 @@ mod tests {
                 .map(|i| (2.0 * PI * freq * (i as f64) / FS).sin())
                 .collect();
 
-            let samples =
-                NonEmptyVec::new(sig.iter().map(|&v| v as f32).collect()).unwrap();
+            let samples = NonEmptyVec::new(sig.iter().map(|&v| v as f32).collect()).unwrap();
             let mut audio: AudioSamples<'_, f32> =
                 AudioSamples::from_mono_vec(samples, sample_rate!(44100));
             audio.filtfilt_in_place(&design).unwrap();
@@ -4878,7 +4899,10 @@ mod tests {
             // Steady-state amplitude over the central region (avoid any edges).
             let lo = n / 4;
             let hi = 3 * n / 4;
-            let amp_out = out[lo..hi].iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+            let amp_out = out[lo..hi]
+                .iter()
+                .cloned()
+                .fold(0.0f64, |a, b| a.max(b.abs()));
             let measured_db = db(amp_out); // input amplitude is 1.0
 
             // Single-pass magnitude (linear) -> squared -> dB.

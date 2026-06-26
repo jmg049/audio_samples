@@ -302,9 +302,7 @@ where
         .map(|v| (*v).convert_to())
         .collect();
 
-    let trace = Scatter::new(xs, ys)
-        .mode(Mode::Markers)
-        .name("Stereo X-Y");
+    let trace = Scatter::new(xs, ys).mode(Mode::Markers).name("Stereo X-Y");
 
     let mut plot = Plot::new();
     plot.add_trace(trace);
@@ -398,8 +396,7 @@ mod tests {
     #[test]
     fn test_lissajous_errors_on_non_two_channels() {
         // Mono signal must be rejected.
-        let mono =
-            AudioSamples::new_mono(array![0.0f32, 0.5, 1.0], sample_rate!(44100)).unwrap();
+        let mono = AudioSamples::new_mono(array![0.0f32, 0.5, 1.0], sample_rate!(44100)).unwrap();
         assert!(create_lissajous_plot(&mono, &LissajousParams::new()).is_err());
 
         // Three channels must be rejected too.

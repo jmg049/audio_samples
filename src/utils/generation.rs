@@ -2004,13 +2004,8 @@ mod tests {
         // start == end => k == 1 => pure tone at that frequency.
         let f = 1000.0;
         let sr = 48000u32;
-        let audio = exponential_chirp::<f64>(
-            f,
-            f,
-            Duration::from_secs_f64(1.0),
-            sample_rate!(48000),
-            1.0,
-        );
+        let audio =
+            exponential_chirp::<f64>(f, f, Duration::from_secs_f64(1.0), sample_rate!(48000), 1.0);
         let mono = audio.as_mono().unwrap();
         let s: Vec<f64> = mono.iter().cloned().collect();
         let est = estimate_freq_over_window(&s, sr as f64);

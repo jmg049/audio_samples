@@ -79,7 +79,11 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     // --- Self-verification -------------------------------------------------
     // We placed an impulse every 0.5 s starting at 0.5 s over a 3 s signal.
-    assert_eq!(impulses.len().get(), 5, "expected 5 impulses across the 3 s signal");
+    assert_eq!(
+        impulses.len().get(),
+        5,
+        "expected 5 impulses across the 3 s signal"
+    );
     assert!(
         harmonic_rms > 0.0 && percussive_rms > 0.0,
         "both components must be non-silent"
@@ -98,10 +102,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 #[cfg(test)]
 #[cfg(all(feature = "decomposition", feature = "statistics", feature = "editing"))]
 mod tests {
-    use audio_samples::operations::hpss::HpssConfig;
     use audio_samples::operations::AudioDecomposition;
+    use audio_samples::operations::hpss::HpssConfig;
     use audio_samples::utils::generation::{impulse, sine_wave};
-    use audio_samples::{sample_rate, AudioEditing, AudioSamples, AudioStatistics};
+    use audio_samples::{AudioEditing, AudioSamples, AudioStatistics, sample_rate};
     use non_empty_slice::NonEmptySlice;
     use std::time::Duration;
 

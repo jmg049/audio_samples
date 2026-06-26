@@ -697,8 +697,7 @@ where
                 // Only the last `lookahead_samples` gain values are ever read
                 // back (the value computed `lookahead_samples` steps earlier),
                 // so a fixed-capacity ring replaces the full-length Vec.
-                let mut gain_reductions =
-                    GainDelayLine::new(lookahead_samples.get());
+                let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
                 let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                 // Apply gain reductions with lookahead. Envelope/gain
@@ -769,8 +768,7 @@ where
                     );
 
                     let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                    let mut gain_reductions =
-                        GainDelayLine::new(lookahead_samples.get());
+                    let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
                     let makeup_gain = db_to_linear(config.makeup_gain_db);
 
                     // Apply gain reductions with lookahead (envelope/gain
@@ -883,8 +881,7 @@ where
                 );
 
                 let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                let mut gain_reductions =
-                    GainDelayLine::new(lookahead_samples.get());
+                let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
 
                 // Apply gain reductions with lookahead (envelope/gain
                 // computation fused into the apply pass).
@@ -948,8 +945,7 @@ where
                     );
 
                     let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                    let mut gain_reductions =
-                        GainDelayLine::new(lookahead_samples.get());
+                    let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
 
                     // Apply gain reductions with lookahead (envelope/gain
                     // computation fused into the apply pass).
@@ -1552,8 +1548,7 @@ where
 
                     for sample_idx in 0..num_samples {
                         let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
-                        let envelope =
-                            envelope_follower.process(sample_f);
+                        let envelope = envelope_follower.process(sample_f);
                         let envelope_db = linear_to_db(envelope);
 
                         // Gate logic: attenuate if below threshold
@@ -2020,17 +2015,23 @@ mod tests {
     #[test]
     fn test_gate_config_validate_rejects_bad_input() {
         // Ratio must be > 0.
-        assert!(GateConfig::with_params(-20.0, 0.0, 1.0, 10.0)
-            .validate()
-            .is_err());
+        assert!(
+            GateConfig::with_params(-20.0, 0.0, 1.0, 10.0)
+                .validate()
+                .is_err()
+        );
         // Attack out of range.
-        assert!(GateConfig::with_params(-20.0, 10.0, 0.0, 10.0)
-            .validate()
-            .is_err());
+        assert!(
+            GateConfig::with_params(-20.0, 10.0, 0.0, 10.0)
+                .validate()
+                .is_err()
+        );
         // Release out of range.
-        assert!(GateConfig::with_params(-20.0, 10.0, 1.0, 0.0)
-            .validate()
-            .is_err());
+        assert!(
+            GateConfig::with_params(-20.0, 10.0, 1.0, 0.0)
+                .validate()
+                .is_err()
+        );
         // A valid config passes.
         assert!(GateConfig::noise_gate().validate().is_ok());
     }
@@ -2038,17 +2039,23 @@ mod tests {
     #[test]
     fn test_expander_config_validate_rejects_bad_input() {
         // Ratio must be > 0.
-        assert!(ExpanderConfig::with_params(-20.0, 0.0, 1.0, 10.0)
-            .validate()
-            .is_err());
+        assert!(
+            ExpanderConfig::with_params(-20.0, 0.0, 1.0, 10.0)
+                .validate()
+                .is_err()
+        );
         // Attack out of range.
-        assert!(ExpanderConfig::with_params(-20.0, 2.0, 2000.0, 10.0)
-            .validate()
-            .is_err());
+        assert!(
+            ExpanderConfig::with_params(-20.0, 2.0, 2000.0, 10.0)
+                .validate()
+                .is_err()
+        );
         // Release out of range.
-        assert!(ExpanderConfig::with_params(-20.0, 2.0, 1.0, 20000.0)
-            .validate()
-            .is_err());
+        assert!(
+            ExpanderConfig::with_params(-20.0, 2.0, 1.0, 20000.0)
+                .validate()
+                .is_err()
+        );
         // A valid config passes.
         assert!(ExpanderConfig::gentle().validate().is_ok());
     }
@@ -2089,7 +2096,11 @@ mod tests {
     // flush). The current implementation uses a fixed-capacity ring instead;
     // its output must be bit-for-bit identical to these references.
 
-    fn reference_compressor_mono(input: &[f64], config: &CompressorConfig, sample_rate: f64) -> Vec<f64> {
+    fn reference_compressor_mono(
+        input: &[f64],
+        config: &CompressorConfig,
+        sample_rate: f64,
+    ) -> Vec<f64> {
         let lookahead = ms_to_samples(config.lookahead_ms, sample_rate).max(1);
         let mut samples = input.to_vec();
         let mut env = EnvelopeFollower::new(
@@ -2210,9 +2221,7 @@ mod tests {
     #[test]
     fn test_limiter_ring_buffer_bit_identical() {
         let sr = 44100.0;
-        let input: Vec<f64> = (0..256)
-            .map(|i| 0.9 * (i as f64 * 0.21).sin())
-            .collect();
+        let input: Vec<f64> = (0..256).map(|i| 0.9 * (i as f64 * 0.21).sin()).collect();
 
         let config = LimiterConfig {
             lookahead_ms: 1.0,
@@ -2244,9 +2253,17 @@ mod tests {
             AudioSamples::new_mono(Array1::from_vec(input.clone()), sample_rate!(44100)).unwrap();
         audio.apply_compressor_in_place(&config).unwrap();
 
-        assert_bit_identical(audio.as_slice().unwrap(), &expected, "compressor short input");
+        assert_bit_identical(
+            audio.as_slice().unwrap(),
+            &expected,
+            "compressor short input",
+        );
         // And specifically: unchanged from input.
-        assert_bit_identical(audio.as_slice().unwrap(), &input, "compressor short unchanged");
+        assert_bit_identical(
+            audio.as_slice().unwrap(),
+            &input,
+            "compressor short unchanged",
+        );
     }
 
     #[test]
@@ -2267,8 +2284,7 @@ mod tests {
         let mut flat = ch0;
         flat.extend_from_slice(&ch1);
         let data = ndarray::Array2::from_shape_vec((2, n), flat).unwrap();
-        let mut audio =
-            AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
         audio.apply_compressor_in_place(&config).unwrap();
 
         let out = audio.as_slice().unwrap();
@@ -2294,8 +2310,7 @@ mod tests {
         let mut flat = ch0;
         flat.extend_from_slice(&ch1);
         let data = ndarray::Array2::from_shape_vec((2, n), flat).unwrap();
-        let mut audio =
-            AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
         audio.apply_limiter_in_place(&config).unwrap();
 
         let out = audio.as_slice().unwrap();

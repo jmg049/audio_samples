@@ -293,7 +293,8 @@ pub(crate) fn explain_text_compressor<T: StandardSample>(
     before: &AudioSamples<'static, T>,
     after: &AudioSamples<'static, T>,
 ) -> String {
-    let latex = r"g(L) = \begin{cases} 0 & L \le T \\ \left(\tfrac{1}{R}-1\right)(L-T) & L > T \end{cases}";
+    let latex =
+        r"g(L) = \begin{cases} 0 & L \le T \\ \left(\tfrac{1}{R}-1\right)(L-T) & L > T \end{cases}";
     let formula = term_maths::render(latex);
     let peak_before = before.peak();
     let peak_after = after.peak();

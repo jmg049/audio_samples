@@ -481,7 +481,9 @@ pub fn refine_step_sizes(
             // to index ≈ ±2^(w−1). Record `w` so the quantiser clamps to exactly
             // the resolution this step size implies (and not the coarser budget
             // seed). `+ 1` keeps the unbiased rounded peak inside the word.
-            alloc.word_length = (w.ceil() as u32).saturating_add(1).min(MAX_WORDLENGTH_BITS + 1);
+            alloc.word_length = (w.ceil() as u32)
+                .saturating_add(1)
+                .min(MAX_WORDLENGTH_BITS + 1);
         }
     }
 }
@@ -508,7 +510,10 @@ mod tests {
         let coeffs = [100.0_f32, -100.0, 3.0, -3.0, 0.0];
         let q = quantize_band(&coeffs, 1.0, 4);
         for &idx in &q {
-            assert!((-7..=7).contains(&idx), "index {idx} escaped ±7 (4-bit word)");
+            assert!(
+                (-7..=7).contains(&idx),
+                "index {idx} escaped ±7 (4-bit word)"
+            );
         }
         // In-range values are untouched.
         assert_eq!(q[2], 3);

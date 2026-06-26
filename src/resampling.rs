@@ -259,8 +259,7 @@ where
     let in_sr = audio.sample_rate().get();
     let out_sr = target_sample_rate.get();
     let in_frames = audio.samples_per_channel().get();
-    let out_frames =
-        (in_frames as u64 * out_sr as u64).div_ceil(in_sr as u64) as usize;
+    let out_frames = (in_frames as u64 * out_sr as u64).div_ceil(in_sr as u64) as usize;
     let channels = audio.num_channels().get() as usize;
 
     let mut output: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; out_frames]).collect();

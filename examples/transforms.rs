@@ -34,7 +34,10 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         .iter()
         .enumerate()
         .map(|(i, &m)| (i + 1, m))
-        .fold((1usize, f64::MIN), |acc, (i, m)| if m > acc.1 { (i, m) } else { acc });
+        .fold(
+            (1usize, f64::MIN),
+            |acc, (i, m)| if m > acc.1 { (i, m) } else { acc },
+        );
     let bin_hz = peak_bin as f64 * sample_rate_hz.get() as f64 / n_fft as f64;
     println!("Dominant FFT bin: {peak_bin} (~{bin_hz:.1} Hz)");
     assert!(

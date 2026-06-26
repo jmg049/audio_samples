@@ -1256,7 +1256,8 @@ where
         // and phase-deviation computations. `magnitude_difference_matrix` and
         // `phase_deviation_matrix` each compute their own CQT when called
         // standalone; here we avoid that duplicated transform.
-        let cqt_result = self.constant_q_transform(&onset_config.cqt_config, onset_config.hop_size)?;
+        let cqt_result =
+            self.constant_q_transform(&onset_config.cqt_config, onset_config.hop_size)?;
         let sample_rate = self.sample_rate_hz();
 
         let mag = cqt_result.to_magnitude();

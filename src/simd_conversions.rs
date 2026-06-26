@@ -1279,10 +1279,8 @@ mod simd_parity_tests {
                     let len = 37usize; // not a multiple of 16/8/4 -> exercises remainder
                     let chans: Vec<AudioSamples<'static, $t>> = (0..nch)
                         .map(|c| {
-                            let data: Vec<$t> =
-                                (0..len).map(|i| $gen(c, i)).collect();
-                            AudioSamples::new_mono(Array1::from(data), sample_rate!(44100))
-                                .unwrap()
+                            let data: Vec<$t> = (0..len).map(|i| $gen(c, i)).collect();
+                            AudioSamples::new_mono(Array1::from(data), sample_rate!(44100)).unwrap()
                         })
                         .collect();
                     let slice = NonEmptySlice::new(&chans).unwrap();

@@ -80,8 +80,15 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     // A symmetric tone centred on zero has ~zero mean and a peak near its
     // largest harmonic-sum amplitude (1.0 + 0.5 + 0.25 = 1.75, normalised by
     // the generator so |peak| <= ~1.0 region; we just assert sane bounds).
-    assert!(audio.mean().abs() < 1e-2, "compound tone should be ~zero-mean, got {}", audio.mean());
-    assert!(audio.rms() > 0.0, "rms of a non-silent signal must be positive");
+    assert!(
+        audio.mean().abs() < 1e-2,
+        "compound tone should be ~zero-mean, got {}",
+        audio.mean()
+    );
+    assert!(
+        audio.rms() > 0.0,
+        "rms of a non-silent signal must be positive"
+    );
     assert!(
         f64::from(audio.peak()) > audio.rms(),
         "peak must exceed rms for a tonal signal"

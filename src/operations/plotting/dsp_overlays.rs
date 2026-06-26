@@ -355,9 +355,10 @@ where
         let time = center_sample as f64 / sample_rate;
 
         // Compute spectral rolloff for this window
-        if let Ok(rolloff) = window
-            .spectral_rolloff(rolloff_percent, crate::operations::types::ChannelReduction::First)
-        {
+        if let Ok(rolloff) = window.spectral_rolloff(
+            rolloff_percent,
+            crate::operations::types::ChannelReduction::First,
+        ) {
             time_points.push(time);
             rolloff_values.push(rolloff);
         }

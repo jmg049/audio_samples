@@ -140,8 +140,16 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
 
     // --- Self-verification -------------------------------------------------
     // We requested 24 Bark bands and 40 Mel bands; the analysis must honour that.
-    assert_eq!(result.band_metrics.len().get(), 24, "expected 24 Bark bands");
-    assert_eq!(mel_result.band_metrics.len().get(), 40, "expected 40 Mel bands");
+    assert_eq!(
+        result.band_metrics.len().get(),
+        24,
+        "expected 24 Bark bands"
+    );
+    assert_eq!(
+        mel_result.band_metrics.len().get(),
+        40,
+        "expected 40 Mel bands"
+    );
     // All importance and energy metrics must be finite numbers.
     assert!(
         result

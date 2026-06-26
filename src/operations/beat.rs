@@ -724,8 +724,7 @@ mod tests {
             click += period;
         }
 
-        let audio =
-            AudioSamples::new_mono(Array1::from(data), sample_rate!(22528)).unwrap();
+        let audio = AudioSamples::new_mono(Array1::from(data), sample_rate!(22528)).unwrap();
 
         let config = BeatTrackingConfig::new(
             bpm, // ignored by estimate_tempo

@@ -58,7 +58,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     // predictable, non-zero frame count, and the per-frame mask and derived
     // regions must be self-consistent.
     let total_frames = mask.len().get();
-    assert!(total_frames > 50, "expected ~87 analysis frames, got {total_frames}");
+    assert!(
+        total_frames > 50,
+        "expected ~87 analysis frames, got {total_frames}"
+    );
     assert!(
         speech_frames <= total_frames,
         "speech frames cannot exceed total frames"
@@ -67,7 +70,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     let n_samples = audio.samples_per_channel().get();
     for (start, end) in &regions {
         assert!(start < end, "region must be non-empty: ({start}, {end})");
-        assert!(*end <= n_samples, "region end {end} exceeds signal length {n_samples}");
+        assert!(
+            *end <= n_samples,
+            "region end {end} exceeds signal length {n_samples}"
+        );
     }
 
     Ok(())

@@ -892,8 +892,11 @@ where
                 let segment = &signal[start..start + win];
                 // safety: segment length == win == window_size >= 1
                 let segment_slice = unsafe { NonEmptySlice::new_unchecked(segment) };
-                let power =
-                    planner.power_spectrum(segment_slice, window_size, Some(WindowType::Hanning))?;
+                let power = planner.power_spectrum(
+                    segment_slice,
+                    window_size,
+                    Some(WindowType::Hanning),
+                )?;
 
                 if sum.is_empty() {
                     sum = power.to_vec();
@@ -1403,9 +1406,7 @@ fn mono_f64<T: StandardSample>(audio: &AudioSamples<'_, T>) -> AudioSampleResult
         ));
     }
     let working = audio.to_format::<f64>();
-    let ch = working
-        .as_slice()
-        .expect("validated single channel");
+    let ch = working.as_slice().expect("validated single channel");
     Ok(ch.to_vec())
 }
 
@@ -1425,10 +1426,12 @@ where
     let a_vec = mono_f64(a)?;
     let b_vec = mono_f64(b)?;
     // AudioSamples::new_mono rejects empty data, so this error path is unreachable for well-formed inputs.
-    let a_ne = non_empty_slice::NonEmptySlice::new(a_vec.as_slice())
-        .ok_or_else(|| AudioSampleError::Parameter(ParameterError::invalid_value("self", "empty signal")))?;
-    let b_ne = non_empty_slice::NonEmptySlice::new(b_vec.as_slice())
-        .ok_or_else(|| AudioSampleError::Parameter(ParameterError::invalid_value("other", "empty signal")))?;
+    let a_ne = non_empty_slice::NonEmptySlice::new(a_vec.as_slice()).ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value("self", "empty signal"))
+    })?;
+    let b_ne = non_empty_slice::NonEmptySlice::new(b_vec.as_slice()).ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value("other", "empty signal"))
+    })?;
     Ok(op(a_ne, b_ne)?.into_vec())
 }
 
@@ -1438,19 +1441,21 @@ fn from_f64_mono<T: StandardSample>(
     sample_rate: std::num::NonZeroU32,
 ) -> AudioSampleResult<AudioSamples<'static, T>> {
     use non_empty_slice::NonEmptyVec;
-    let ne_vec = NonEmptyVec::new(data)
-        .map_err(|_| AudioSampleError::Parameter(ParameterError::invalid_value("data", "empty result")))?;
+    let ne_vec = NonEmptyVec::new(data).map_err(|_| {
+        AudioSampleError::Parameter(ParameterError::invalid_value("data", "empty result"))
+    })?;
     Ok(AudioSamples::<T>::from_mono_vec::<f64>(ne_vec, sample_rate))
 }
 
 #[cfg(test)]
 mod convolution_tests {
-    use crate::{AudioSamples, AudioSampleError, AudioTransforms, LayoutError, sample_rate};
+    use crate::{AudioSampleError, AudioSamples, AudioTransforms, LayoutError, sample_rate};
     use ndarray::array;
 
     #[test]
     fn convolve_with_unit_impulse_is_identity() {
-        let signal = AudioSamples::new_mono(array![1.0_f64, 2.0, 3.0], sample_rate!(48000)).unwrap();
+        let signal =
+            AudioSamples::new_mono(array![1.0_f64, 2.0, 3.0], sample_rate!(48000)).unwrap();
         let impulse = AudioSamples::new_mono(array![1.0_f64], sample_rate!(48000)).unwrap();
         let out = signal.convolve(&impulse).unwrap();
         assert_eq!(out.sample_rate().get(), 48000);
@@ -1467,12 +1472,17 @@ mod convolution_tests {
             sample_rate!(48000),
         )
         .unwrap();
-        let system = AudioSamples::new_mono(array![0.0_f64, 0.0, 1.0, 0.5], sample_rate!(48000)).unwrap();
+        let system =
+            AudioSamples::new_mono(array![0.0_f64, 0.0, 1.0, 0.5], sample_rate!(48000)).unwrap();
         let recorded = excitation.convolve(&system).unwrap();
         let recovered = recorded.deconvolve(&excitation, 0.0).unwrap();
         let r = recovered.as_slice().unwrap();
         for (i, want) in [0.0, 0.0, 1.0, 0.5].iter().enumerate() {
-            assert!((r[i] - want).abs() < 1e-6, "tap {i}: got {}, want {want}", r[i]);
+            assert!(
+                (r[i] - want).abs() < 1e-6,
+                "tap {i}: got {}, want {want}",
+                r[i]
+            );
         }
     }
 
@@ -1487,7 +1497,10 @@ mod convolution_tests {
         let mono = AudioSamples::new_mono(array![1.0_f64], sample_rate!(48000)).unwrap();
         let err = stereo.convolve(&mono).unwrap_err();
         assert!(
-            matches!(err, AudioSampleError::Layout(LayoutError::ChannelCountUnsupported { .. })),
+            matches!(
+                err,
+                AudioSampleError::Layout(LayoutError::ChannelCountUnsupported { .. })
+            ),
             "expected Layout(ChannelCountUnsupported), got: {err:?}"
         );
     }

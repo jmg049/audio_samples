@@ -441,8 +441,7 @@ impl Display for SampleType {
 
 impl SampleType {
     /// The canonical short-name strings accepted when parsing a [`SampleType`].
-    const PARSE_VARIANTS: &'static [&'static str] =
-        &["u8", "i16", "i24", "i32", "f32", "f64"];
+    const PARSE_VARIANTS: &'static [&'static str] = &["u8", "i16", "i24", "i32", "f32", "f64"];
 
     /// Shared parsing logic for [`TryFrom<&str>`] and [`FromStr`].
     #[inline]
@@ -4236,10 +4235,7 @@ where
     /// # Errors
     /// Returns an error if the range is out of bounds.
     #[inline]
-    pub fn slice_channels<R>(
-        &self,
-        channel_range: R,
-    ) -> AudioSampleResult<AudioSamples<'static, T>>
+    pub fn slice_channels<R>(&self, channel_range: R) -> AudioSampleResult<AudioSamples<'static, T>>
     where
         R: RangeBounds<usize> + Clone,
     {

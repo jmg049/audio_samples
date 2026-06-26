@@ -7,11 +7,11 @@ use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 
+use audio_samples::AudioSamples;
 use audio_samples::operations::traits::{AudioIirFiltering, AudioProcessing};
 use audio_samples::operations::types::{FilterResponse, IirFilterDesign};
-use audio_samples::AudioSamples;
 use ndarray::Array1;
 use non_empty_slice::NonEmptySlice;
 
@@ -45,9 +45,18 @@ fn bench_iir_whole(c: &mut Criterion) {
     g.throughput(Throughput::Elements(len as u64));
 
     let cases: Vec<(&str, IirFilterDesign)> = vec![
-        ("butter_lp_order2_single", IirFilterDesign::butterworth_lowpass(nz(2), 1_000.0)),
-        ("butter_lp_order8_cascade", IirFilterDesign::butterworth_lowpass(nz(8), 1_000.0)),
-        ("cheby1_hp_order6_cascade", IirFilterDesign::chebyshev_i(FilterResponse::HighPass, nz(6), 2_000.0, 1.0)),
+        (
+            "butter_lp_order2_single",
+            IirFilterDesign::butterworth_lowpass(nz(2), 1_000.0),
+        ),
+        (
+            "butter_lp_order8_cascade",
+            IirFilterDesign::butterworth_lowpass(nz(8), 1_000.0),
+        ),
+        (
+            "cheby1_hp_order6_cascade",
+            IirFilterDesign::chebyshev_i(FilterResponse::HighPass, nz(6), 2_000.0, 1.0),
+        ),
     ];
 
     for (name, design) in cases {

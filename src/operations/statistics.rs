@@ -93,10 +93,10 @@
 use std::num::NonZeroUsize;
 
 use crate::operations::traits::AudioStatistics;
-use crate::repr::AudioData;
-use crate::traits::StandardSample;
 #[cfg(feature = "transforms")]
 use crate::operations::types::ChannelReduction;
+use crate::repr::AudioData;
+use crate::traits::StandardSample;
 use crate::{AudioSampleResult, AudioSamples, ParameterError};
 
 #[cfg(feature = "transforms")]
@@ -1157,12 +1157,10 @@ where
 
         // Magnitude-weighted centroid.
         let (weighted_sum, total_mag) =
-            mag.iter()
-                .enumerate()
-                .fold((0.0, 0.0), |(w, t), (i, &m)| {
-                    let f = i as f64 * freq_step;
-                    (w + f * m, t + m)
-                });
+            mag.iter().enumerate().fold((0.0, 0.0), |(w, t), (i, &m)| {
+                let f = i as f64 * freq_step;
+                (w + f * m, t + m)
+            });
         if total_mag <= 0.0 {
             return Ok(0.0);
         }
@@ -1195,8 +1193,7 @@ where
         // SAFETY: working_vec is the reduced channel of a non-empty signal, so its
         // length is non-zero.
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
-        let power =
-            with_fft_planner(|planner| planner.power_spectrum(working_samples, n, None))?;
+        let power = with_fft_planner(|planner| planner.power_spectrum(working_samples, n, None))?;
 
         // Small epsilon floor relative to the spectrum scale keeps log() finite
         // for empty bins without biasing a genuinely flat spectrum.
@@ -1274,15 +1271,21 @@ where
 
         // OLS slope: Σ (x − x̄)(y − ȳ) / Σ (x − x̄)².
         let count = len as f64;
-        let (sum_x, sum_y) = mag.iter().enumerate().fold((0.0, 0.0), |(sx, sy), (i, &m)| {
-            (sx + i as f64 * freq_step, sy + m)
-        });
+        let (sum_x, sum_y) = mag
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sx, sy), (i, &m)| {
+                (sx + i as f64 * freq_step, sy + m)
+            });
         let mean_x = sum_x / count;
         let mean_y = sum_y / count;
-        let (num, den) = mag.iter().enumerate().fold((0.0, 0.0), |(num, den), (i, &m)| {
-            let dx = i as f64 * freq_step - mean_x;
-            (num + dx * (m - mean_y), den + dx * dx)
-        });
+        let (num, den) = mag
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(num, den), (i, &m)| {
+                let dx = i as f64 * freq_step - mean_x;
+                (num + dx * (m - mean_y), den + dx * dx)
+            });
         if den <= 0.0 {
             return Ok(0.0);
         }
@@ -1351,7 +1354,10 @@ where
                 continue;
             }
 
-            let mut band: Vec<f64> = mag[start..end].iter().map(|&m| 10.0 * (m + EPS).log10()).collect();
+            let mut band: Vec<f64> = mag[start..end]
+                .iter()
+                .map(|&m| 10.0 * (m + EPS).log10())
+                .collect();
             band.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             let len = band.len();
@@ -1471,9 +1477,11 @@ mod tests {
         assert_eq!(even.midpoint_sample(), Some(4.0));
 
         // Multi-channel returns None.
-        let stereo =
-            AudioSamples::new_multi_channel(ndarray::array![[1.0f32, 2.0], [3.0, 4.0]], sample_rate!(44100))
-                .unwrap();
+        let stereo = AudioSamples::new_multi_channel(
+            ndarray::array![[1.0f32, 2.0], [3.0, 4.0]],
+            sample_rate!(44100),
+        )
+        .unwrap();
         assert_eq!(stereo.midpoint_sample(), None);
     }
 
@@ -1675,13 +1683,33 @@ mod tests {
         let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         // Test invalid rolloff percentages
-        assert!(audio.spectral_rolloff(0.0, ChannelReduction::Error).is_err());
-        assert!(audio.spectral_rolloff(1.0, ChannelReduction::Error).is_err());
-        assert!(audio.spectral_rolloff(-0.1, ChannelReduction::Error).is_err());
-        assert!(audio.spectral_rolloff(1.1, ChannelReduction::Error).is_err());
+        assert!(
+            audio
+                .spectral_rolloff(0.0, ChannelReduction::Error)
+                .is_err()
+        );
+        assert!(
+            audio
+                .spectral_rolloff(1.0, ChannelReduction::Error)
+                .is_err()
+        );
+        assert!(
+            audio
+                .spectral_rolloff(-0.1, ChannelReduction::Error)
+                .is_err()
+        );
+        assert!(
+            audio
+                .spectral_rolloff(1.1, ChannelReduction::Error)
+                .is_err()
+        );
 
         // Test valid rolloff percentage
-        assert!(audio.spectral_rolloff(0.85, ChannelReduction::Error).is_ok());
+        assert!(
+            audio
+                .spectral_rolloff(0.85, ChannelReduction::Error)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1726,7 +1754,11 @@ mod tests {
         assert_eq!(ch1, 0.0);
 
         // Out-of-range channel errors.
-        assert!(stereo.spectral_centroid(ChannelReduction::Channel(2)).is_err());
+        assert!(
+            stereo
+                .spectral_centroid(ChannelReduction::Channel(2))
+                .is_err()
+        );
 
         // Average: mean of the tone and silence -> still tonal, centroid near 1 kHz.
         let avg = stereo
@@ -1766,7 +1798,10 @@ mod tests {
         // fft_alignment_lag uses the cached planner (two ffts + irfft path).
         let l1 = fft_alignment_lag(&tone, &tone, 32);
         let l2 = fft_alignment_lag(&tone, &tone, 32);
-        assert_eq!(l1, l2, "alignment lag must be identical across cached calls");
+        assert_eq!(
+            l1, l2,
+            "alignment lag must be identical across cached calls"
+        );
     }
 
     // ---- New spectral feature validation ----
@@ -1915,10 +1950,16 @@ mod tests {
 
         // First selects the tone channel -> tonal (low flatness).
         let flat_first = stereo.spectral_flatness(ChannelReduction::First).unwrap();
-        assert!(flat_first < 0.1, "First-channel flatness {flat_first} should be tonal");
+        assert!(
+            flat_first < 0.1,
+            "First-channel flatness {flat_first} should be tonal"
+        );
 
         // Average mixes tone with silence -> still tonal.
         let flat_avg = stereo.spectral_flatness(ChannelReduction::Average).unwrap();
-        assert!(flat_avg < 0.2, "Average flatness {flat_avg} should be tonal");
+        assert!(
+            flat_avg < 0.2,
+            "Average flatness {flat_avg} should be tonal"
+        );
     }
 }
