@@ -16,8 +16,7 @@ Headline changes in 2.0:
 
 - Dual-variant operations: every transforming operation exposes both an
   in-place primitive (`op_in_place(&mut self) -> Result<()>`) and a
-  non-mutating borrowing form (`op(&self) -> Result<Self>`). See
-  `docs/superpowers/specs/2026-06-25-audio-samples-2.0-api-convention-design.md`.
+  non-mutating borrowing form (`op(&self) -> Result<Self>`).
 
 - Encapsulation: `AudioSamples` fields are sealed behind accessors so the
   invariant-preserving guarantees cannot be bypassed.
