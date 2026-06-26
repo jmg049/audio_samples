@@ -1,19 +1,19 @@
 //! # AudioSamples
 //!
 //! A typed audio processing library for Rust that treats audio as a first-class,
-//! invariant-preserving object rather than an unstructured numeric buffer. is this library?
+//! invariant-preserving object rather than an unstructured numeric buffer.
 //!
 //! `audio_samples` provides a single central type, [`AudioSamples<T>`], that pairs raw
 //! PCM data (backed by [`ndarray`](https://docs.rs/ndarray)) with essential metadata:
 //! sample rate, channel count, and memory layout. Every audio processing operation in the
 //! library is defined as a trait method on this type, ensuring that metadata travels with
-//! the data throughout a processing pipeline. does this library exist?
+//! the data throughout a processing pipeline.
 //!
 //! Low-level audio APIs in Rust typically expose bare slices or `Vec<f32>` buffers,
 //! leaving metadata management to the caller. This encourages subtle bugs such as
 //! mismatched sample rates after resampling, or interleaved/non-interleaved confusion
 //! when passing buffers between components. `audio_samples` eliminates these error
-//! classes by encoding invariants directly into the type. should it be used?
+//! classes by encoding invariants directly into the type.
 //!
 //! Start by creating an [`AudioSamples<T>`] from an ndarray or from one of the
 //! built-in signal generators (see [`utils::generation`]), then chain trait methods
