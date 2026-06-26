@@ -162,8 +162,42 @@ fn op_name_to_method(name: &str) -> &'static str {
         "Remove DC Offset" => "remove_dc_offset",
         "Clip" => "clip",
         "Clip (in-place)" => "clip_in_place",
+        "Compressor" => "apply_compressor",
+        "Limiter" => "apply_limiter",
+        "EQ Band" => "apply_eq_band",
+        "Resample" => "resample",
         _ => "operation",
     }
+}
+
+/// Produce the educational explanation text for an operation that lives outside
+/// the `AudioProcessing` trait (and so has no auto-generated `explain_text_*`
+/// method on the explaining chain).
+///
+/// Dynamics (`"Compressor"`, `"Limiter"`), parametric EQ (`"EQ Band"`), and
+/// `"Resample"` are dispatched here by their display name to the matching free
+/// function in [`processing`]. The returned string uses the same
+/// `[operation: …]\n[formula: …]` layout as the chain explanations, so it can be
+/// fed straight into [`render_explanation_document`] via an [`Explanation`].
+///
+/// Returns `None` for an unrecognised name.
+#[cfg(feature = "processing")]
+pub fn explain_text_for_op<T: StandardSample>(
+    op_name: &str,
+    before: &AudioSamples<'static, T>,
+    after: &AudioSamples<'static, T>,
+) -> Option<String> {
+    use processing::{
+        explain_text_compressor, explain_text_eq_band, explain_text_limiter,
+        explain_text_resample,
+    };
+    Some(match op_name {
+        "Compressor" => explain_text_compressor(before, after),
+        "Limiter" => explain_text_limiter(before, after),
+        "EQ Band" => explain_text_eq_band(before, after),
+        "Resample" => explain_text_resample(before, after),
+        _ => return None,
+    })
 }
 
 /// Extract the `[operation: Name]` value from a raw explanation text string.
@@ -850,3 +884,91 @@ window.addEventListener('load', function () {
 </body>
 </html>
 "#;
+
+#[cfg(all(test, feature = "processing"))]
+mod tests {
+    use super::*;
+    use crate::sample_rate;
+    use ndarray::array;
+
+    fn sample() -> AudioSamples<'static, f32> {
+        AudioSamples::new_mono(
+            array![0.1f32, 0.8, -0.2, 0.9, -0.7, 0.3, 0.5, -0.4],
+            sample_rate!(44100),
+        )
+        .expect("valid mono buffer")
+    }
+
+    // ── Each new explanation is non-empty and mentions its key concept ─────────
+
+    #[test]
+    fn compressor_explanation_mentions_threshold_and_ratio() {
+        let a = sample();
+        let text = explain_text_for_op("Compressor", &a, &a).expect("compressor is wired");
+        assert!(!text.is_empty());
+        assert!(text.contains("[operation: Compressor]"));
+        assert!(text.contains("threshold"));
+        assert!(text.contains("ratio"));
+        assert!(text.contains("attack") && text.contains("release"));
+    }
+
+    #[test]
+    fn limiter_explanation_mentions_ceiling() {
+        let a = sample();
+        let text = explain_text_for_op("Limiter", &a, &a).expect("limiter is wired");
+        assert!(!text.is_empty());
+        assert!(text.contains("[operation: Limiter]"));
+        assert!(text.contains("ceiling"));
+    }
+
+    #[test]
+    fn eq_band_explanation_mentions_frequency_gain_q() {
+        let a = sample();
+        let text = explain_text_for_op("EQ Band", &a, &a).expect("eq band is wired");
+        assert!(!text.is_empty());
+        assert!(text.contains("[operation: EQ Band]"));
+        assert!(text.contains("frequency"));
+        assert!(text.contains("gain"));
+        assert!(text.contains("q_factor") || text.contains("Q "));
+        assert!(text.contains("biquad"));
+    }
+
+    #[test]
+    fn resample_explanation_mentions_sample_rate_and_aliasing() {
+        let a = sample();
+        let text = explain_text_for_op("Resample", &a, &a).expect("resample is wired");
+        assert!(!text.is_empty());
+        assert!(text.contains("[operation: Resample]"));
+        assert!(text.contains("sample rate"));
+        assert!(text.contains("alias"));
+    }
+
+    #[test]
+    fn unrecognised_op_returns_none() {
+        let a = sample();
+        assert!(explain_text_for_op("Nonexistent", &a, &a).is_none());
+    }
+
+    // ── Newly wired ops resolve to their specific method, not the fallback ─────
+
+    #[test]
+    fn newly_wired_ops_do_not_fall_back_to_generic_operation() {
+        for (name, method) in [
+            ("Compressor", "apply_compressor"),
+            ("Limiter", "apply_limiter"),
+            ("EQ Band", "apply_eq_band"),
+            ("Resample", "resample"),
+        ] {
+            let resolved = op_name_to_method(name);
+            assert_eq!(resolved, method, "{name} should resolve to {method}");
+            assert_ne!(resolved, "operation", "{name} must not hit the fallback");
+        }
+    }
+
+    #[test]
+    fn existing_ops_still_resolve_and_unknown_falls_back() {
+        assert_eq!(op_name_to_method("Normalize"), "normalize");
+        assert_eq!(op_name_to_method("Clip"), "clip");
+        assert_eq!(op_name_to_method("Totally Unknown Op"), "operation");
+    }
+}
