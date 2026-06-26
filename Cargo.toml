@@ -392,6 +392,18 @@ required-features = ["channels", "iir-filtering", "dynamic-range", "parametric-e
 name = "analysis_pipeline"
 required-features = ["pitch-analysis", "vad"]
 
+[[test]]
+name = "proptest_invariants"
+required-features = ["processing", "channels", "iir-filtering", "editing"]
+
+[[test]]
+name = "plotting_integration"
+required-features = ["plotting"]
+
+[[test]]
+name = "educational_integration"
+required-features = ["educational", "processing"]
+
 [[bench]]
 name = "filtering"
 harness = false
