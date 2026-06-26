@@ -2,7 +2,7 @@
 
 # AudioSamples
 
-## Fast, simple, and expressive audio in Rust
+## Typed, invariant-preserving audio processing for Rust
 
 <img src="logo.png" title="AudioSamples Logo -- Ferrous' Mustachioed Cousin From East Berlin, Eisenhaltig" width="200"/>
 
@@ -14,31 +14,36 @@
 
 ## Overview
 
-Most audio libraries expose samples as raw numeric buffers. In Python,
-audio is typically represented as a NumPy array whose `dtype` is
-explicit, but whose meaning is not: sample rate, amplitude range,
-memory interleaving, and PCM versus floating-point semantics are tracked
-externally, if at all. In Rust, the situation is reversed but not
-resolved. Libraries provide fast and safe low-level primitives, yet
-users are still responsible for managing raw buffers, writing ad hoc
-conversion code, and manually preserving invariants across crates.
+Most audio libraries hand you a bare buffer. In Python it is a NumPy array
+whose `dtype` is explicit but whose meaning is not: the sample rate, amplitude
+range, channel layout, and interleaving live elsewhere, if they are tracked at
+all. Rust libraries give you fast, safe primitives but still leave you holding
+the raw buffer, writing your own conversions, and carrying those conventions in
+your head. Mismatches between them, such as a stale sample rate after
+resampling or a buffer that was interleaved when the next stage expected planar,
+are a recurring source of bugs.
 
-AudioSamples closes this gap with a strongly typed audio representation
-that encodes sample format, numeric domain, channel structure, and
-layout in the type system. All operations preserve or explicitly update
-these invariants, supporting both exploratory workflows and system-level
-use without requiring users to remember hidden conventions or reimplement
-common audio logic.
+`audio_samples` puts that metadata in the type. [`AudioSamples<T>`] pairs the
+PCM data with its sample rate, channel count, and memory layout, and every
+operation either preserves those invariants or updates them explicitly. The
+sample type `T` (`u8`, `i16`, [`I24`], `i32`, `f32`, `f64`) is part of the type,
+so format and bit-depth conversions are checked and scaled correctly rather than
+left to ad hoc casts.
 
-The `AudioSamples` type keeps its fields private; access the underlying
-buffer and metadata through accessors (`data()`, `data_mut()`,
-`into_data()`, `into_data_borrowed()`, `sample_rate()`). Every transforming
-operation comes in two flavours: the canonical, unsuffixed name borrows and
-returns a **new** modified copy (`op(&self, ..) -> AudioSampleResult<Self>`),
-while the `op_in_place` counterpart mutates the receiver
-(`op_in_place(&mut self, ..) -> AudioSampleResult<()>`). The borrowing
-variants compose into pipelines without consuming the binding; infallible
-operations such as `scale` return `Self` directly.
+### API conventions
+
+`AudioSamples` keeps its fields private; reach the buffer and metadata through
+`data()`, `data_mut()`, `into_data()`, and `sample_rate()`. Every transforming
+operation has two forms:
+
+- `op(&self, ..) -> AudioSampleResult<Self>` borrows and returns a new, modified
+  value. This is the unsuffixed, canonical name, and these forms chain into
+  pipelines without consuming the binding. Infallible operations such as `scale`
+  return `Self` directly.
+- `op_in_place(&mut self, ..) -> AudioSampleResult<()>` mutates the receiver.
+
+Analysis operations that do not modify the audio (statistics, transforms, pitch,
+and so on) take `&self` and return their result.
 
 ---
 
@@ -48,8 +53,11 @@ operations such as `scale` return `Self` directly.
 cargo add audio_samples
 ```
 
-The default feature set (`bare-bones`) includes only the core types and
-traits. Add features for the operations you need — see [Features](#features).
+The default feature set (`bare-bones`) is the core types and traits with no
+optional dependencies. Add features for the operations you need; see
+[Features](#features).
+
+Upgrading from 1.x? See [the migration guide](documentation/MIGRATING_TO_2.0.md).
 
 ---
 
@@ -65,24 +73,24 @@ fn main() {
     let sr = sample_rate!(44_100);
     let duration = Duration::from_secs_f64(1.0);
 
-    // Generate a 440 Hz sine wave as i16 PCM, then convert to f32
+    // A 440 Hz sine as i16 PCM, converted to f32.
     let float_sine = sine_wave::<i16>(440.0, duration, sr, 0.5).as_f32();
 
-    // Mix with a 220 Hz cosine wave
+    // Mixed with a 220 Hz cosine.
     let cosine = cosine_wave::<f32>(220.0, duration, sr, 0.5);
     let mixed = float_sine + cosine;
 }
 ```
 
-Alongside the classic oscillators, the generators include exponential/log
-chirps (`exponential_chirp`), band-limited square/sawtooth/triangle waves
-(`square_wave_bandlimited`, `sawtooth_wave_bandlimited`,
-`triangle_wave_bandlimited`), and FM signals (`fm_signal`).
+Besides the classic oscillators, the generators include logarithmic chirps
+(`exponential_chirp`), band-limited (alias-free) square, sawtooth, and triangle
+waves (`square_wave_bandlimited`, `sawtooth_wave_bandlimited`,
+`triangle_wave_bandlimited`), and frequency modulation (`fm_signal`).
 
 ### Processing pipelines
 
 Enable the `processing` feature. Each borrowing operation returns a new owned
-value, so they chain directly; use the `*_in_place` variants to mutate instead.
+value, so they chain; use the `*_in_place` variants to mutate instead.
 
 ```rust
 use audio_samples::{AudioProcessing, AudioSamples, NormalizationConfig, sample_rate};
@@ -94,13 +102,13 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         sample_rate!(44100),
     )?;
 
-    // `scale` is infallible (no `?`); `normalize`/`remove_dc_offset` are fallible.
+    // `scale` is infallible (no `?`); `normalize` and `remove_dc_offset` are fallible.
     let processed = audio
         .normalize(NormalizationConfig::peak(1.0))?
         .scale(0.5)
         .remove_dc_offset()?;
 
-    // Or mutate in place:
+    // The same work, mutating in place:
     let mut buf = processed;
     buf.scale_in_place(2.0);
     Ok(())
@@ -131,13 +139,17 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     let stft = audio.stft(&stft_params)?;
     let mfcc = audio.mfcc(&stft_params, nzu!(40), &MfccParams::speech_standard())?;
     let chroma = audio.chromagram(&stft_params, &ChromaParams::music_standard())?;
-    let (_freqs, _psd) = audio.power_spectral_density(nzu!(1024), 0.5)?;
+
+    // power_spectral_density returns a `Psd` with frequency and density axes.
+    let psd = audio.power_spectral_density(nzu!(1024), 0.5)?;
+    let (_freqs, _density) = (psd.frequencies(), psd.density());
+
     let _cqt = audio.constant_q_transform(
         &CqtParams::new(nzu!(12), nzu!(7), 32.7)?,
         nzu!(256),
     )?;
 
-    // Round-trip via inverse STFT
+    // Round-trip via the inverse STFT.
     let _reconstructed = AudioSamples::<f64>::istft(stft)?;
     Ok(())
 }
@@ -179,11 +191,11 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     let result = signal.analyse_psychoacoustic(WindowType::Hanning, &layout, &config)?;
 
-    // Print bands audible above the masking threshold.
+    // Bands audible above the masking threshold.
     for metric in result.band_metrics.as_slice().iter() {
         if metric.signal_to_mask_ratio > 0.0 {
             println!(
-                "{:.0} Hz — SMR {:.1} dB, importance {:.2}",
+                "{:.0} Hz, SMR {:.1} dB, importance {:.2}",
                 metric.band.centre_frequency,
                 metric.signal_to_mask_ratio,
                 metric.importance,
@@ -198,10 +210,9 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
 ## Creating AudioSamples
 
-AudioSamples creation returns a `Result` because validity requires
-consistent buffer length, channel count, and sample rate. The
-`sample_rate!` macro and `non_empty_vec!` guarantee invariants at
-construction:
+Construction returns a `Result`: a valid `AudioSamples` requires a consistent
+buffer length, channel count, and sample rate. The `sample_rate!` macro and
+`non_empty_vec!` enforce the non-zero and non-empty invariants at the call site.
 
 ```rust
 use audio_samples::{AudioSamples, sample_rate};
@@ -213,7 +224,7 @@ let audio = AudioSamples::from_mono_vec(
 );
 ```
 
-For multi-channel audio:
+For multi-channel audio (channels x samples):
 
 ```rust
 use audio_samples::{AudioSamples, sample_rate};
@@ -229,67 +240,72 @@ let stereo = AudioSamples::<f32>::new_multi_channel(
 
 ## <a name="features">Features</a>
 
-The default feature is `bare-bones` — the core types and traits with no
-optional dependencies. Enable features as needed:
+The default feature is `bare-bones`: the core types and traits, no optional
+dependencies. Enable the rest as needed.
 
 ### Core operations
 
 | Feature         | Description                                                                           |
 | --------------- | ------------------------------------------------------------------------------------- |
-| `statistics`    | Descriptive statistics: peak, RMS, mean, variance; spectral feature suite (centroid, rolloff, bandwidth, flatness, contrast, slope, crest) when `transforms` is also enabled |
-| `processing`    | Normalization, scaling, clipping (requires `statistics`)                              |
-| `editing`       | Trim, pad, reverse, perturb, concatenate (requires `statistics`, `random-generation`) |
-| `channels`      | Interleave/deinterleave, mono↔stereo conversion                                       |
-| `iir-filtering` | IIR filters: Butterworth, Chebyshev I/II, Elliptic (Cauer), Bessel; low/high/band-pass and band-stop; zero-phase `filtfilt`; design-once streaming `SosFilter` |
-| `parametric-eq` | Parametric EQ bands and `ThreeBandEqConfig` (requires `iir-filtering`)                |
-| `dynamic-range` | Compression, limiting, gating, expansion (config structs, side-chain support)         |
-| `envelopes`     | Amplitude, RMS, and attack-decay envelopes                                            |
+| `statistics`    | Peak, RMS, mean, variance, zero-crossings; the spectral feature suite (centroid, rolloff, bandwidth, flatness, contrast, slope, crest) when `transforms` is also enabled |
+| `processing`    | Normalization, scaling, clipping, DC-offset removal (requires `statistics`)           |
+| `editing`       | Trim, pad, reverse, fade, concatenate, perturb (requires `statistics`, `random-generation`) |
+| `channels`      | Interleave/deinterleave, mono/stereo conversion, channel extraction                   |
+| `iir-filtering` | Butterworth, Chebyshev I and II, Elliptic (Cauer), and Bessel filters; low-, high-, band-pass and band-stop responses; zero-phase `filtfilt`; design-once streaming `SosFilter` |
+| `parametric-eq` | Parametric EQ bands and `ThreeBandEqConfig` (requires `iir-filtering`)                 |
+| `dynamic-range` | Compression, limiting, gating, expansion via config structs, with side-chain support  |
+| `envelopes`     | Amplitude, RMS, and attack-decay envelope followers                                   |
 | `vad`           | Voice activity detection                                                              |
 
 ### Spectral and analysis
 
 | Feature           | Description                                                                 |
 | ----------------- | --------------------------------------------------------------------------- |
-| `transforms`      | FFT, STFT, MFCC, chromagram, CQT, PSD                                       |
-| `psychoacoustic`  | Bark/Mel band layouts, ATH, masking thresholds, SMR (requires `transforms`) |
-| `pitch-analysis`  | YIN and autocorrelation pitch detection (requires `transforms`)             |
-| `onset-detection` | Onset detection (requires `transforms`, `peak-picking`, `processing`)       |
-| `beat-tracking`   | Beat tracking and tempo estimation (`estimate_tempo`)                       |
-| `peak-picking`    | Peak picking on onset envelopes                                             |
-| `decomposition`   | Audio decomposition (requires `onset-detection`)                            |
+| `transforms`      | FFT, STFT and inverse STFT, MFCC, chromagram, CQT, power spectral density   |
+| `psychoacoustic`  | Bark/Mel band layouts, absolute threshold of hearing, masking thresholds, SMR (requires `transforms`) |
+| `pitch-analysis`  | YIN and autocorrelation pitch detection and tracking (requires `transforms`) |
+| `onset-detection` | Onset detection (requires `transforms`, `peak-picking`, `processing`)        |
+| `beat-tracking`   | Beat tracking and tempo estimation (`estimate_tempo`)                        |
+| `peak-picking`    | Peak picking on onset-strength envelopes                                     |
+| `decomposition`   | Harmonic/percussive source separation (requires `onset-detection`)           |
 
 ### Utility
 
-| Feature             | Description                                                           |
-| ------------------- | --------------------------------------------------------------------- |
-| `resampling`        | Sample-rate conversion via rubato                                     |
-| `random-generation` | Noise and random audio generation                                     |
-| `fixed-size-audio`  | Fixed-size buffer support (no heap allocation)                        |
-| `plotting`          | Interactive HTML plots via plotly                                     |
-| `static-plots`      | PNG/SVG export (requires `plotting` — see [PLOTTING.md](PLOTTING.md)) |
-| `simd`              | SIMD acceleration (nightly only)                                      |
+| Feature             | Description                                                          |
+| ------------------- | -------------------------------------------------------------------- |
+| `resampling`        | Sample-rate conversion via rubato                                    |
+| `random-generation` | White, pink, and brown noise generators                              |
+| `fixed-size-audio`  | Stack-allocated fixed-size buffers                                   |
+| `plotting`          | Interactive HTML plots (waveform, spectrum, phase, spectrogram, Lissajous) via plotly |
+| `static-plots`      | PNG/SVG export (requires `plotting`; see [PLOTTING.md](PLOTTING.md)) |
+| `simd`              | SIMD-accelerated sample conversions via the `wide` crate (stable; results are bit-identical to the scalar path) |
 
 ### Bundles
 
 | Feature            | Description                  |
 | ------------------ | ---------------------------- |
-| `full`             | All features                 |
-| `full_no_plotting` | All features except plotting |
+| `full`             | Everything below             |
+| `full_no_plotting` | Everything except plotting   |
 
 ---
 
 ## Documentation
 
-Full API documentation: [https://docs.rs/audio_samples](https://docs.rs/audio_samples)
+Full API documentation: [https://docs.rs/audio_samples](https://docs.rs/audio_samples).
+Architecture notes are in [documentation/ARCHITECTURE.md](documentation/ARCHITECTURE.md).
 
 ---
 
 ## Examples
 
-The repository includes runnable examples in `examples/`. Each is
-self-contained and annotated with the required feature flags.
+The repository includes runnable examples in `examples/`, each annotated with
+its required feature flags. Run one with, for example:
 
-Additional demos:
+```bash
+cargo run --example transforms --features transforms,statistics
+```
+
+A larger demo lives in a separate repository:
 
 - [DTMF encoder and decoder](https://github.com/jmg049/dtmf-demo)
 
@@ -297,18 +313,18 @@ Additional demos:
 
 ## Companion Crates
 
-- [`audio_samples_io`](https://github.com/jmg049/audio_samples_io) — Audio file decoding and encoding
-- [`audio_samples_playback`](https://github.com/jmg049/audio_playback) — Device-level playback
-- [`audio_samples_python`](https://github.com/jmg049/audio_python) — Python bindings
-- [`spectrograms`](https://github.com/jmg049/Spectrograms) — Spectrogram and time–frequency transforms (used by the `transforms` feature)
-- [`i24`](https://github.com/jmg049/i24) — 24-bit signed integer type for Rust
-- [`dtmf_tones`](https://github.com/jmg049/dtmf_tones) — `no_std` DTMF keypad frequencies
+- [`audio_samples_io`](https://github.com/jmg049/audio_samples_io): audio file decoding and encoding
+- [`audio_samples_playback`](https://github.com/jmg049/audio_playback): device-level playback
+- [`audio_samples_python`](https://github.com/jmg049/audio_python): Python bindings
+- [`spectrograms`](https://github.com/jmg049/Spectrograms): spectrograms and time-frequency transforms (used by the `transforms` feature)
+- [`i24`](https://github.com/jmg049/i24): 24-bit signed integer type for Rust
+- [`dtmf_tones`](https://github.com/jmg049/dtmf_tones): `no_std` DTMF keypad frequencies
 
 ---
 
 ## License
 
-MIT License
+MIT.
 
 ---
 
@@ -334,7 +350,7 @@ If you use AudioSamples in research, please cite:
 
 ## Contributing
 
-Contributions are welcome. Please submit a pull request and see
+Contributions are welcome. Please open an issue or pull request, and see
 [CONTRIBUTING.md](CONTRIBUTING.md) for guidance.
 
 [crate]: https://crates.io/crates/audio_samples
