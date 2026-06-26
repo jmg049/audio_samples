@@ -13,8 +13,13 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use audio_samples::{
-    BandLayout, PerceptualCodec, PsychoacousticConfig,
-    codecs::{decode, encode},
+    BandLayout, PerceptualCodec, PsychoacousticConfig, analyse_signal_with_window_size,
+    codecs::{
+        decode, encode,
+        perceptual::quantization::{
+            allocate_bits, max_index_for_word_length, quantize, refine_step_sizes,
+        },
+    },
     sample_rate,
     utils::comparison::snr,
     utils::generation::{sine_wave, white_noise},
@@ -212,4 +217,102 @@ fn transient_256k() {
     let snr_db = round_trip_snr(&signal_transient(8), make_codec(256_000));
     eprintln!("transient_8 @ 256k: {snr_db:.2} dB");
     assert!(snr_db > 20.0, "SNR {snr_db:.2} dB below floor of 20 dB");
+}
+
+// ── Multi-tone round-trip ───────────────────────────────────────────────────────
+
+/// Sum of three sinusoids (220 / 440 / 880 Hz), peak-normalised to 0.5.
+fn signal_multi_tone() -> audio_samples::AudioSamples<'static, f32> {
+    let a = sine_wave::<f32>(220.0, Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 1.0);
+    let b = sine_wave::<f32>(440.0, Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 1.0);
+    let c = sine_wave::<f32>(880.0, Duration::from_millis(SIGNAL_DURATION_MS), sample_rate!(44100), 1.0);
+
+    let av = a.as_slice().expect("contiguous");
+    let bv = b.as_slice().expect("contiguous");
+    let cv = c.as_slice().expect("contiguous");
+    let n = av.len().min(bv.len()).min(cv.len());
+
+    let mut mixed: Vec<f32> = (0..n).map(|i| av[i] + bv[i] + cv[i]).collect();
+    let peak = mixed.iter().fold(0.0_f32, |m, &x| m.max(x.abs())).max(1e-12);
+    let scale = 0.5 / peak;
+    for x in &mut mixed {
+        *x *= scale;
+    }
+
+    let nev = unsafe { NonEmptyVec::new_unchecked(mixed) };
+    audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, sample_rate!(44100))
+}
+
+#[test]
+fn multi_tone_128k() {
+    let snr_db = round_trip_snr(&signal_multi_tone(), make_codec(128_000));
+    eprintln!("multi_tone @ 128k: {snr_db:.2} dB");
+    assert!(snr_db > 20.0, "SNR {snr_db:.2} dB below floor of 20 dB");
+}
+
+#[test]
+fn multi_tone_256k() {
+    let snr_db = round_trip_snr(&signal_multi_tone(), make_codec(256_000));
+    eprintln!("multi_tone @ 256k: {snr_db:.2} dB");
+    assert!(snr_db > 25.0, "SNR {snr_db:.2} dB below floor of 25 dB");
+}
+
+// ── Quantizer word-length bound (proves the index clamp) ────────────────────────
+
+/// Encoding via the real allocate → refine → quantize path must keep every
+/// quantised index inside the band's allocated signed word length. This is the
+/// invariant the quantization index clamp enforces: no single coefficient can
+/// overrun the bit budget its band was granted.
+#[test]
+fn quantized_indices_fit_allocated_word_length() {
+    let n_bands = NonZeroUsize::new(N_BANDS).unwrap();
+    let n_bins = NonZeroUsize::new(N_BINS).unwrap();
+    let layout = BandLayout::bark(n_bands, SR as f32, n_bins);
+    let weights = PsychoacousticConfig::uniform_weights(n_bands);
+    let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+    let window_size = NonZeroUsize::new(WINDOW_SIZE).unwrap();
+
+    for signal in [signal_multi_tone(), signal_sine(440.0), signal_white_noise()] {
+        let result = analyse_signal_with_window_size(
+            &signal,
+            WindowType::Hanning,
+            Some(window_size),
+            &layout,
+            &config,
+        )
+        .expect("analysis failed");
+
+        let mut allocation = allocate_bits(&result.band_metrics, 128_000, 1);
+        refine_step_sizes(
+            &mut allocation,
+            result.coefficients.as_non_empty_slice(),
+            result.n_coefficients,
+            result.n_frames,
+        );
+        let quantized = quantize(
+            result.coefficients.as_non_empty_slice(),
+            result.n_coefficients,
+            result.n_frames,
+            &allocation,
+        );
+
+        let nf = result.n_frames.get();
+        let nc = result.n_coefficients.get();
+        for alloc in allocation.allocations.iter() {
+            let max_index = max_index_for_word_length(alloc.word_length);
+            for k in alloc.start_bin..alloc.end_bin.min(nc) {
+                for f in 0..nf {
+                    let idx = quantized[k * nf + f];
+                    assert!(
+                        idx.abs() <= max_index,
+                        "index {idx} in band [{}, {}) exceeds ±{max_index} \
+                         (word_length = {} bits)",
+                        alloc.start_bin,
+                        alloc.end_bin,
+                        alloc.word_length,
+                    );
+                }
+            }
+        }
+    }
 }
