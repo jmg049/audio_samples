@@ -660,7 +660,7 @@ mod tests {
             NonEmptySlice::from_slice(&[0.1, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1]).unwrap();
         let config = AdaptiveThresholdConfig::delta(0.1, 3);
 
-        let thresholds = adaptive_threshold(&onset_strength, &config).unwrap();
+        let thresholds = adaptive_threshold(onset_strength, &config).unwrap();
         assert_eq!(thresholds.len(), onset_strength.len().get());
 
         // All thresholds should be above minimum
@@ -718,8 +718,10 @@ mod tests {
     #[test]
     fn test_pick_peaks_with_constraints() {
         let onset_strength = non_empty_vec![0.1, 0.5, 0.6, 0.7, 0.2, 0.8, 0.1];
-        let mut config = PeakPickingConfig::default();
-        config.min_peak_separation = crate::nzu!(3);
+        let config = PeakPickingConfig {
+            min_peak_separation: crate::nzu!(3),
+            ..Default::default()
+        };
 
         let peaks = pick_peaks(&onset_strength, &config).unwrap();
 
@@ -846,8 +848,10 @@ mod tests {
     #[test]
     fn test_config_validation() {
         // Invalid delta
-        let mut config = AdaptiveThresholdConfig::default();
-        config.delta = -0.1;
+        let mut config = AdaptiveThresholdConfig {
+            delta: -0.1,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
 
         // Invalid percentile

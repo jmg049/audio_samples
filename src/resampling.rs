@@ -33,7 +33,7 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
 // Rounding up to the next multiple of min_chunk guarantees subchunks_available >= 1.
 fn round_chunk_to_fft_boundary(chunk: usize, in_sr: usize, out_sr: usize) -> usize {
     let min_chunk = in_sr / gcd(in_sr, out_sr);
-    ((chunk + min_chunk - 1) / min_chunk) * min_chunk
+    chunk.div_ceil(min_chunk) * min_chunk
 }
 
 // ---------------------------------------------------------------------------
@@ -70,8 +70,8 @@ fn with_cached_fft_resampler<T>(
 ) -> AudioSampleResult<T> {
     FFT_CACHE.with(|cell| -> AudioSampleResult<()> {
         let mut map = cell.borrow_mut();
-        if !map.contains_key(&key) {
-            map.insert(key, make()?);
+        if let std::collections::hash_map::Entry::Vacant(e) = map.entry(key) {
+            e.insert(make()?);
         }
         Ok(())
     })?;
@@ -113,6 +113,9 @@ unsafe fn downsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
         // shuffle mask 0x88 = 0b10_00_10_00:
         //   result[0] = v0[0], result[1] = v0[2], result[2] = v1[0], result[3] = v1[2]
         // → [a0, b0, c0, d0]  (stride-2 downsampled)
+        // SAFETY: n_simd = min(src.len()/8, dst.len()/4), so for every i < n_simd the
+        // reads src_ptr.add(i*8 .. i*8+8) and write dst_ptr.add(i*4 .. i*4+4) stay in
+        // bounds; _mm_loadu/storeu_ps are unaligned, and SSE2 is in the x86_64 baseline.
         unsafe {
             let v0 = _mm_loadu_ps(src_ptr.add(i * 8));
             let v1 = _mm_loadu_ps(src_ptr.add(i * 8 + 4));
@@ -151,6 +154,9 @@ unsafe fn upsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
     let dst_ptr = dst.as_mut_ptr();
 
     for i in 0..n_simd {
+        // SAFETY: n_simd is bounded so that i*4+4 < src.len() (reads src_ptr.add(i*4 ..
+        // i*4+5)) and i*8+8 <= dst.len() (writes dst_ptr.add(i*8 .. i*8+8)) for every
+        // i < n_simd; _mm_loadu/storeu_ps are unaligned, and SSE2 is in the x86_64 baseline.
         unsafe {
             let half = _mm_set1_ps(0.5f32);
             let v_cur = _mm_loadu_ps(src_ptr.add(i * 4)); // [s0, s1, s2, s3]
@@ -254,13 +260,13 @@ where
     let out_sr = target_sample_rate.get();
     let in_frames = audio.samples_per_channel().get();
     let out_frames =
-        ((in_frames as u64 * out_sr as u64 + in_sr as u64 - 1) / in_sr as u64) as usize;
+        (in_frames as u64 * out_sr as u64).div_ceil(in_sr as u64) as usize;
     let channels = audio.num_channels().get() as usize;
 
     let mut output: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; out_frames]).collect();
 
     let process_channel = |src: &[f32], dst: &mut [f32]| {
-        if in_sr % out_sr == 0 {
+        if in_sr.is_multiple_of(out_sr) {
             // Integer downsampling by N: take the first sample of every
             // N-element chunk.
             let n = (in_sr / out_sr) as usize;
@@ -280,7 +286,7 @@ where
             for (chunk, out_s) in src.chunks_exact(n).zip(dst.iter_mut()) {
                 *out_s = chunk[0];
             }
-        } else if out_sr % in_sr == 0 {
+        } else if out_sr.is_multiple_of(in_sr) {
             // Integer upsampling by N.
             let n = (out_sr / in_sr) as usize;
 
@@ -350,7 +356,7 @@ where
                 "Failed to get multi-channel data",
             ))
         })?;
-        for ch in 0..channels {
+        for (ch, dst) in output.iter_mut().enumerate() {
             let row = view.row(ch);
             let owned;
             let src: &[f32] = if let Some(s) = row.as_slice() {
@@ -359,7 +365,7 @@ where
                 owned = row.to_vec();
                 &owned
             };
-            process_channel(src, &mut output[ch]);
+            process_channel(src, dst);
         }
     }
 
@@ -438,7 +444,7 @@ where
     let in_sr_u64 = in_sr as u64;
     let out_sr_u64 = target_sample_rate.get() as u64;
     let input_length = input_data[0].len();
-    let expected_frames = ((input_length as u64 * out_sr_u64 + in_sr_u64 - 1) / in_sr_u64) as usize;
+    let expected_frames = (input_length as u64 * out_sr_u64).div_ceil(in_sr_u64) as usize;
 
     let actual_chunk = round_chunk_to_fft_boundary(
         chunk_size,
@@ -697,7 +703,7 @@ mod tests {
     #[test]
     fn test_no_resampling_needed() {
         let data = array![1.0f32, 0.0, -1.0];
-        let audio = AudioSamples::new_mono(data.clone().into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         let result = resample(&audio, sample_rate!(44100), ResamplingQuality::High).unwrap();
         assert_eq!(result.sample_rate(), sample_rate!(44100));

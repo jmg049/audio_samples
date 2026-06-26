@@ -22,6 +22,82 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "audio_samples"
 crate-type = ["rlib"]
 
+# ---------------------------------------------------------------------------
+# Lint configuration (portable; authoritative across all consumers, not just
+# local builds). Migrated here from `.cargo/config.toml` rustflags. CI runs
+# clippy with `-D warnings`, so every "warn" below must be clean in the tree.
+# ---------------------------------------------------------------------------
+[lints.rust]
+# Was `-A unused_unsafe` in the old rustflags; kept allowed because several
+# `unsafe` blocks are defensively conservative across feature gates.
+unused_unsafe = "allow"
+# `docsrs` (docs.rs cfg) and `spectrograms_1_4_4` (gates the streaming
+# overlap-save FFT bench until that dependency release lands) are known cfgs.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(docsrs)",
+    "cfg(spectrograms_1_4_4)",
+] }
+
+[lints.clippy]
+# --- Correctness / logic (clean -> denied) ---
+unit_cmp = "deny"
+match_same_arms = "warn"
+
+# --- Performance (clean -> denied) ---
+inefficient_to_string = "deny"
+map_clone = "deny"
+unnecessary_to_owned = "deny"
+large_stack_arrays = "deny"
+box_collection = "deny"
+vec_box = "deny"
+needless_collect = "deny"
+redundant_clone = "deny"
+
+# --- Style / idiomatic (clean -> denied) ---
+needless_return = "deny"
+let_unit_value = "deny"
+manual_map = "deny"
+# Demo/example fns keep a uniform `-> Result<()>` signature for readability even
+# when one happens not to fail; not worth churning. (Was `-W` in old config.)
+unnecessary_wraps = "allow"
+
+# --- Safety documentation (kept at warn; tree is clean) ---
+missing_safety_doc = "warn"
+undocumented_unsafe_blocks = "warn"
+
+# --- Intentionally allowed: advisory / pervasive style we do not churn for ---
+result_large_err = "allow"
+missing_const_for_fn = "allow"
+collapsible_if = "allow"
+missing_panics_doc = "allow"
+needless_borrows_for_generic_args = "allow"
+if_same_then_else = "allow"
+unnecessary_cast = "allow"
+identity_op = "allow"
+unwrap_used = "allow"
+panic = "allow"
+panic_in_result_fn = "allow"
+missing_errors_doc = "allow"
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+module_name_repetitions = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+needless_pass_by_value = "allow"
+tuple_array_conversions = "allow"
+unsafe_derive_deserialize = "allow"
+multiple_unsafe_ops_per_block = "allow"
+doc_markdown = "allow"
+# `NonZero::div_ceil` is stable since 1.92 but the crate MSRV is 1.87. The two
+# call sites are pre-existing; resolving them properly is an MSRV bump (out of
+# scope for the lint migration), so the advisory is allowed rather than silenced
+# at each site.
+incompatible_msrv = "allow"
+
 [dependencies]
 bytemuck = "1.25.0"
 ndarray = "0.17"

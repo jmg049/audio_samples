@@ -959,7 +959,7 @@ fn chebyshev1_prototype(order: usize, ripple_db: f64) -> AnalogZpk {
     // order divide by sqrt(1+ε²) to land the DC value on the ripple bound.
     let mut gain = poles.iter().fold(Complex::new(1.0, 0.0), |acc, &p| acc * (-p));
     let mut gain_re = gain.re;
-    if order % 2 == 0 {
+    if order.is_multiple_of(2) {
         gain_re /= (1.0 + epsilon * epsilon).sqrt();
     }
     gain = Complex::new(gain_re, 0.0);
@@ -1509,12 +1509,12 @@ where
         // Design once; clone the (reset) cascade per channel so each channel
         // starts from a clean state, mirroring the per-channel reset used by
         // `apply_iir_filter_in_place` and `apply_eq_band_in_place`.
-        let sos = SosFilter::from_design(design, sample_rate)?;
+        let mut sos = SosFilter::from_design(design, sample_rate)?;
 
         match self.data_mut() {
             AudioData::Mono(samples) => {
                 let mut buf: Vec<f64> = samples.iter().map(|&s| s.convert_to()).collect();
-                filtfilt_slice(&mut sos.clone(), &mut buf);
+                filtfilt_slice(&mut sos, &mut buf);
                 for (dst, &v) in samples.iter_mut().zip(buf.iter()) {
                     *dst = v.convert_to();
                 }
@@ -2428,7 +2428,7 @@ fn elliptic_prototype(order: usize, rp: f64, rs: f64) -> AnalogZpk {
         zeros.iter().fold(Complex::new(1.0, 0.0), |acc, &z| acc * (-z))
     };
     let mut gain = (prod_p / prod_z).re;
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         gain /= (1.0 + eps_sq).sqrt();
     }
 
@@ -3282,7 +3282,7 @@ mod tests {
         .unwrap();
 
         let mut audio =
-            AudioSamples::new_multi_channel(stereo_data.into(), sample_rate!(44100)).unwrap();
+            AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
 
         // Apply low-pass filter to stereo signal
         let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(2).unwrap(), 2000.0);
@@ -3583,9 +3583,9 @@ mod tests {
         let samples_count = (sample_rate * duration) as usize;
 
         let mut samples = vec![0.0f32; samples_count];
-        for i in 0..samples_count {
+        for (i, s) in samples.iter_mut().enumerate() {
             let t = i as f64 / sample_rate;
-            samples[i] = (2.0 * PI * 1000.0 * t).sin() as f32;
+            *s = (2.0 * PI * 1000.0 * t).sin() as f32;
         }
         let samples = NonEmptyVec::new(samples).unwrap();
         let mut audio: AudioSamples<'_, f32> =
@@ -3710,7 +3710,7 @@ mod tests {
         .unwrap();
 
         let mut audio =
-            AudioSamples::new_multi_channel(stereo_data.into(), sample_rate!(44100)).unwrap();
+            AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
 
         // Apply 6th-order filter to stereo
         let result = audio.butterworth_lowpass_in_place(NonZeroUsize::new(6).unwrap(), 2000.0);
@@ -4070,7 +4070,7 @@ mod tests {
         for &f in &[500.0, center, 1000.0, 2000.0] {
             let g = mag_db(&sos, f);
             assert!(
-                g <= 0.1 && g >= -0.5 - 0.2,
+                (-0.5 - 0.2..=0.1).contains(&g),
                 "passband {f}Hz gain {g} out of ripple bound"
             );
         }
@@ -4316,7 +4316,7 @@ mod tests {
         let freqs: Vec<f64> = (1..=40).map(|i| i as f64 * 20.0).collect(); // 20..800 Hz
         let (_, phases) = sos.frequency_response(&freqs, FS);
         // unwrap phase
-        let mut unwrapped = phases.clone();
+        let mut unwrapped = phases;
         for i in 1..unwrapped.len() {
             let mut d = unwrapped[i] - unwrapped[i - 1];
             while d > PI {
@@ -4541,7 +4541,7 @@ mod tests {
         for f in [0.0, 500.0, 1000.0, 1500.0, 1900.0, 2000.0] {
             let g = mag_db(&sos, f);
             assert!(
-                g <= 0.05 && g >= -1.0 - 0.1,
+                (-1.0 - 0.1..=0.05).contains(&g),
                 "passband {f}Hz gain {g} outside ripple bound"
             );
         }
@@ -4598,7 +4598,7 @@ mod tests {
         );
         for f in [4000.0, 8000.0, 22000.0] {
             let g = mag_db(&sos, f);
-            assert!(g <= 0.05 && g >= -1.1, "passband {f}Hz gain {g}");
+            assert!((-1.1..=0.05).contains(&g), "passband {f}Hz gain {g}");
         }
         assert!(
             (mag_db(&sos, 2000.0) - (-1.0)).abs() < 0.1,
@@ -4634,7 +4634,7 @@ mod tests {
         let center = (500.0_f64 * 2000.0).sqrt();
         for f in [500.0, center, 2000.0] {
             let g = mag_db(&sos, f);
-            assert!(g <= 0.1 && g >= -1.0 - 0.2, "passband {f}Hz gain {g}");
+            assert!((-1.0 - 0.2..=0.1).contains(&g), "passband {f}Hz gain {g}");
         }
         assert!(
             mag_db(&sos, 100.0) <= -40.0 + 0.5,
@@ -4774,7 +4774,7 @@ mod tests {
 
         // reset() restores the freshly-constructed state.
         sos_stream.reset();
-        let mut after_reset = signal.clone();
+        let mut after_reset = signal;
         sos_stream.process_block(&mut after_reset);
         for (a, b) in whole.iter().zip(after_reset.iter()) {
             assert!((a - b).abs() < 1e-12, "reset did not restore clean state");
@@ -4793,10 +4793,10 @@ mod tests {
         let n = 401usize;
         let center = n / 2;
         let mut sig = vec![0.0f64; n];
-        for i in 0..n {
+        for (i, s) in sig.iter_mut().enumerate() {
             let d = (i as isize - center as isize).abs();
             if d <= 20 {
-                sig[i] = 20.0 - d as f64;
+                *s = 20.0 - d as f64;
             }
         }
         // sig is exactly symmetric about `center`.

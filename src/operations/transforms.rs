@@ -1301,9 +1301,7 @@ where
     /// - Errors propagated from the underlying FFT.
     #[inline]
     fn convolve(&self, other: &Self) -> AudioSampleResult<AudioSamples<'static, Self::Sample>> {
-        let result_f64 = convolve_or_deconvolve_mono(self, other, |a, b| {
-            Ok(fft_convolve(a, b)?)
-        })?;
+        let result_f64 = convolve_or_deconvolve_mono(self, other, fft_convolve)?;
         from_f64_mono::<T>(result_f64, self.sample_rate())
     }
 
@@ -1321,7 +1319,7 @@ where
         regularization: f64,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>> {
         let result_f64 = convolve_or_deconvolve_mono(self, denominator, |a, b| {
-            Ok(fft_deconvolve(a, b, regularization)?)
+            fft_deconvolve(a, b, regularization)
         })?;
         from_f64_mono::<T>(result_f64, self.sample_rate())
     }

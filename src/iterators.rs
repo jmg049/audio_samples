@@ -1525,7 +1525,7 @@ mod tests {
         .unwrap();
 
         // Borrowing-first behavior: work with frames directly, don't collect into Vec
-        let expected_frames = vec![vec![1.0, 4.0], vec![2.0, 5.0], vec![3.0, 6.0]];
+        let expected_frames = [vec![1.0, 4.0], vec![2.0, 5.0], vec![3.0, 6.0]];
 
         for (i, frame) in audio.frames().enumerate() {
             assert_eq!(frame.to_interleaved_vec().to_vec(), expected_frames[i]);
@@ -1558,7 +1558,7 @@ mod tests {
         .unwrap();
 
         // Borrowing-first behavior: work with channels directly
-        let expected_channels = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let expected_channels = [vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
 
         for (i, channel) in audio.channels().enumerate() {
             assert_eq!(channel.as_mono().unwrap().to_vec(), expected_channels[i]);
@@ -1928,8 +1928,7 @@ mod tests {
         assert_eq!(iter.len(), 0);
 
         // ... and iteration must produce 0 windows without panicking.
-        let windows: Vec<AudioSamples<f32>> = iter.collect();
-        assert_eq!(windows.len(), 0);
+        assert_eq!(iter.count(), 0);
     }
 
     // Regression: BUG 3 — Skip mode still counts complete windows correctly
@@ -2085,8 +2084,7 @@ mod tests {
         let iter = audio.windows_ref(NonZeroUsize::new(8).unwrap(), NonZeroUsize::new(4).unwrap());
         assert_eq!(iter.len(), 0);
 
-        let windows: Vec<_> = iter.collect();
-        assert_eq!(windows.len(), 0);
+        assert_eq!(iter.count(), 0);
     }
 
     // Regression: BUG 5 — ChannelIterator::next must extract exactly one channel

@@ -25,7 +25,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     ];
     let components_slice: &[_] = &components;
     let non_empty = non_empty_slice::NonEmptySlice::from_slice(components_slice).unwrap();
-    let mut audio = compound_tone::<f64>(&non_empty, Duration::from_secs(1), sample_rate_hz);
+    let mut audio = compound_tone::<f64>(non_empty, Duration::from_secs(1), sample_rate_hz);
     println!("Input: peak={:.4} rms={:.4}", audio.peak(), audio.rms());
 
     // Build an EQ: low shelf cut, mid peak boost, high shelf boost.

@@ -1374,11 +1374,10 @@ mod tests {
         };
         let plot = create_waveform_plot(&audio, &params).unwrap();
 
-        // Test html() method
+        // Test html() method renders an in-memory document without touching the
+        // filesystem (no temp file written to the CWD).
         let html = plot.html().unwrap();
         assert!(html.contains("plotly"));
-
-        // Test save() method
-        plot.save("test_waveform_plot.html").unwrap();
+        assert!(html.contains("Test Sine Wave"));
     }
 }

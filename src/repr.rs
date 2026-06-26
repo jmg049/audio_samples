@@ -6054,6 +6054,9 @@ where
     }
 }
 
+// SAFETY: `channels()` and `frames()` report the true dimensions of the underlying
+// `AudioSamples`, and `read_sample_unchecked` indexes `(channel, frame)` which is in
+// bounds for any `channel < channels()` and `frame < frames()`.
 #[cfg(feature = "resampling")]
 unsafe impl<'a, T> Adapter<'a, T> for AudioSamples<'a, T>
 where

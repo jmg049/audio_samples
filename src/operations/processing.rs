@@ -643,7 +643,7 @@ where
                         }
                     };
                     let filtered = fir_valid_convolve_dispatch(input, coeffs, output_len)?;
-                    for (dst, src) in output_channel.iter_mut().zip(filtered.into_iter()) {
+                    for (dst, src) in output_channel.iter_mut().zip(filtered) {
                         *dst = src;
                     }
                 }
@@ -1257,7 +1257,7 @@ mod tests {
     fn test_multi_channel_normalize() {
         let data = array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
         let audio: AudioSamples<f32> =
-            AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+            AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
 
         let audio = audio
             .normalize(NormalizationConfig::min_max(-1.0, 1.0))
@@ -1311,7 +1311,7 @@ mod tests {
     #[test]
     fn test_multi_channel_chaining() {
         let data = array![[1.0f32, 2.0], [3.0, 4.0]];
-        let audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
 
         let expected = array![[0.5f32, 1.0], [1.5, 2.0]];
 

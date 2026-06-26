@@ -77,7 +77,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     let components_slice: &[_] = &components;
     let non_empty = non_empty_slice::NonEmptySlice::from_slice(components_slice).unwrap();
     let audio = audio_samples::compound_tone::<f32>(
-        &non_empty,
+        non_empty,
         Duration::from_secs(2),
         core::num::NonZeroU32::new(44100).unwrap(),
     );

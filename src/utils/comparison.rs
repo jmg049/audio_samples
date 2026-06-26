@@ -982,7 +982,7 @@ where
 
     let mut sum_sq = 0.0;
     let mut bins = 0usize;
-    for (ca, cb) in spec_a.rows().into_iter().zip(spec_b.rows().into_iter()) {
+    for (ca, cb) in spec_a.rows().into_iter().zip(spec_b.rows()) {
         for (za, zb) in ca.iter().zip(cb.iter()) {
             let la = 10.0 * (za.norm_sqr() + EPS).log10();
             let lb = 10.0 * (zb.norm_sqr() + EPS).log10();

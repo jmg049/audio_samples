@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Lint levels are configured via the [lints] table in Cargo.toml; `-D
+      # warnings` is scoped to the clippy step (not a global RUSTFLAGS) so it
+      # does not force every test/doc/build job to treat warnings as errors.
+      - run: cargo clippy --all-targets --features full_no_plotting -- -D warnings
+      - run: cargo clippy --all-targets --features full -- -D warnings
+
+  test:
+    name: test (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""                       # bare-bones (default)
+          - "full_no_plotting"
+          - "full"
+          - "psychoacoustic random-generation"
+          - "opus-codec random-generation"
+          - "simd full_no_plotting"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo test --no-default-features
+          else
+            cargo test --features "${{ matrix.features }}"
+          fi
+
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    # NOTE: `RUSTDOCFLAGS: -D warnings` is intentionally NOT set yet. The crate
+    # has a pre-existing backlog of ~75 broken intra-doc links; the docs still
+    # build, so this job catches hard doc-build failures. Re-enable `-D warnings`
+    # once the broken-link backlog is cleared (separate doc-hygiene pass).
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --features full_no_plotting
+
+  msrv:
+    name: msrv (1.87)
+    runs-on: ubuntu-latest
+    # KNOWN GAP: two call sites use `NonZero::div_ceil` (stable since 1.92), so
+    # this currently does not build on the declared MSRV 1.87. Resolving it is an
+    # MSRV bump or a rewrite of those sites — tracked separately, out of scope of
+    # the lint-config migration. Left in place so the gap stays visible.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --features full_no_plotting
+
+  feature-powerset:
+    name: feature powerset (hack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-hack
+      - uses: Swatinem/rust-cache@v2
+      # Exclude plotting/static-plots (heavy, pull a browser stack) and
+      # educational (pulls `open`); they are covered by the `full` test job.
+      - run: >
+          cargo hack check --feature-powerset --depth 2 --no-dev-deps
+          --exclude-features plotting,static-plots,educational,html_view,python

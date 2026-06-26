@@ -124,8 +124,6 @@ fn bench_fir(c: &mut Criterion) {
 /// Mirrors the user's app config (10.17 ms/buffer, RT 0.48x with direct conv).
 /// Compares direct streaming FIR vs the overlap-save FFT convolver.
 fn bench_room_correction_streaming(c: &mut Criterion) {
-    use spectrograms::OverlapSaveConvolver;
-
     let total = SR as usize * SECONDS;
     let block = 1024usize;
     let taps = 4096usize;
@@ -154,7 +152,7 @@ fn bench_room_correction_streaming(c: &mut Criterion) {
             let mut start = 0;
             for _ in 0..n_blocks {
                 let blk = &xv[start..start + block];
-                for i in 0..block {
+                for (i, out_sample) in out.iter_mut().enumerate() {
                     let mut acc = 0.0f32;
                     for (k, &h) in ir.iter().enumerate() {
                         let idx = i as isize - k as isize;
@@ -165,32 +163,44 @@ fn bench_room_correction_streaming(c: &mut Criterion) {
                         };
                         acc += h * s;
                     }
-                    out[i] = acc;
+                    *out_sample = acc;
                 }
                 // update history with last taps-1 samples of this block
                 if block >= taps - 1 {
                     hist.copy_from_slice(&blk[block - (taps - 1)..]);
                 }
                 start += block;
-                criterion::black_box(&out);
+                std::hint::black_box(&out);
             }
         })
     });
 
     // New: overlap-save FFT convolver.
-    g.bench_function("overlap_save_fft", |b| {
-        let mut conv = OverlapSaveConvolver::new(&ir, NonZeroUsize::new(block).unwrap()).unwrap();
-        let mut out = vec![0.0f32; block];
-        b.iter(|| {
-            conv.reset();
-            let mut start = 0;
-            for _ in 0..n_blocks {
-                conv.process_block(&xv[start..start + block], &mut out).unwrap();
-                start += block;
-                criterion::black_box(&out);
-            }
-        })
-    });
+    //
+    // Gated on `spectrograms_1_4_4`: `spectrograms::OverlapSaveConvolver` is a
+    // streaming API that only lands in spectrograms 1.4.4. Until that release
+    // is published and the dependency bumped, this benchmark would fail to
+    // compile, so it is compiled out by default. Enable with
+    // `RUSTFLAGS="--cfg spectrograms_1_4_4"` once the dep is available.
+    #[cfg(spectrograms_1_4_4)]
+    {
+        use spectrograms::OverlapSaveConvolver;
+        g.bench_function("overlap_save_fft", |b| {
+            let mut conv =
+                OverlapSaveConvolver::new(&ir, NonZeroUsize::new(block).unwrap()).unwrap();
+            let mut out = vec![0.0f32; block];
+            b.iter(|| {
+                conv.reset();
+                let mut start = 0;
+                for _ in 0..n_blocks {
+                    conv.process_block(&xv[start..start + block], &mut out)
+                        .unwrap();
+                    start += block;
+                    std::hint::black_box(&out);
+                }
+            })
+        });
+    }
 
     g.finish();
 }

@@ -119,7 +119,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     let combined_plot = audio
         .plot_spectrogram(&SpectrogramPlotParams::mel_db())?
-        .add_spectral_centroid(centroid_times.clone(), centroid_values.clone(), Some("Centroid"))
+        .add_spectral_centroid(centroid_times, centroid_values.clone(), Some("Centroid"))
         .add_spectral_rolloff(rolloff_times, rolloff_values, Some("Rolloff 85%"));
 
     assert_plot_html(&combined_plot, "combined")?;
