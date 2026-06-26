@@ -262,6 +262,19 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
              Peak amplitude:  {peak_before:.4}  →  {peak_after:.4}"
         )
     }
+
+    // Resampling lives behind the `resampling` feature; the #[explainable] macro
+    // only generates these required methods when that feature is enabled, so the
+    // impls are gated to match. Both delegate to the shared resample explanation.
+    #[cfg(feature = "resampling")]
+    fn explain_text_resample_in_place(before: &Self, after: &Self) -> String {
+        explain_text_resample(before, after)
+    }
+
+    #[cfg(feature = "resampling")]
+    fn explain_text_resample_by_ratio_in_place(before: &Self, after: &Self) -> String {
+        explain_text_resample(before, after)
+    }
 }
 
 // ─── Free-function explanations for operations outside `AudioProcessing` ────────
