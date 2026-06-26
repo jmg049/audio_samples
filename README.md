@@ -30,21 +30,6 @@ sample type `T` (`u8`, `i16`, [`I24`], `i32`, `f32`, `f64`) is part of the type,
 so format and bit-depth conversions are checked and scaled correctly rather than
 left to ad hoc casts.
 
-### API conventions
-
-`AudioSamples` keeps its fields private; reach the buffer and metadata through
-`data()`, `data_mut()`, `into_data()`, and `sample_rate()`. Every transforming
-operation has two forms:
-
-- `op(&self, ..) -> AudioSampleResult<Self>` borrows and returns a new, modified
-  value. This is the unsuffixed, canonical name, and these forms chain into
-  pipelines without consuming the binding. Infallible operations such as `scale`
-  return `Self` directly.
-- `op_in_place(&mut self, ..) -> AudioSampleResult<()>` mutates the receiver.
-
-Analysis operations that do not modify the audio (statistics, transforms, pitch,
-and so on) take `&self` and return their result.
-
 ---
 
 ## Installation
