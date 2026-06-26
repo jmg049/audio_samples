@@ -231,10 +231,10 @@ pub fn detect_mode(samples: &[f32], _sample_rate: u32, bandwidth: OpusBandwidth)
     }
 
     let mut band_energies = [0.0f64; N_SUB_BANDS];
-    for b in 0..N_SUB_BANDS {
+    for (b, energy) in band_energies.iter_mut().enumerate() {
         let start = b * band_size;
         let end = ((b + 1) * band_size).min(n);
-        band_energies[b] = samples[start..end]
+        *energy = samples[start..end]
             .iter()
             .map(|&x| (x as f64).powi(2))
             .sum::<f64>()

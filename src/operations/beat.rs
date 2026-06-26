@@ -523,11 +523,10 @@ mod tests {
     fn synthetic_onset(len: usize) -> NonEmptyVec<f64> {
         // Simple periodic peaks with noise
         let mut v = vec![0.0; len];
-        for i in (0..len).step_by(20.max(1)) {
+        for i in (0..len).step_by(20) {
             v[i] = 1.0;
         }
-        let v = NonEmptyVec::new(v).unwrap();
-        v
+        NonEmptyVec::new(v).unwrap()
     }
 
     proptest! {
@@ -632,8 +631,8 @@ mod tests {
                 let mut seen_forward = false;
                 let mut seen_backward = false;
 
-                for i in 1..beats.len() {
-                    if beats[i] >= first {
+                for beat in beats.iter().skip(1) {
+                    if *beat >= first {
                         // Forward beat
                         prop_assert!(!seen_backward, "Forward beat found after backward beat");
                         seen_forward = true;
@@ -646,11 +645,11 @@ mod tests {
                 if seen_forward && seen_backward {
                     // If both forward and backward beats are present, check the order
                     let first_backward_idx = beats.iter().position(|&t| t < first).unwrap();
-                    for i in 1..first_backward_idx {
-                        prop_assert!(beats[i] >= first, "Beat at index {} should be forward", i);
+                    for (i, beat) in beats.iter().enumerate().take(first_backward_idx).skip(1) {
+                        prop_assert!(*beat >= first, "Beat at index {} should be forward", i);
                     }
-                    for i in first_backward_idx..beats.len() {
-                        prop_assert!(beats[i] < first, "Beat at index {} should be backward", i);
+                    for (i, beat) in beats.iter().enumerate().skip(first_backward_idx) {
+                        prop_assert!(*beat < first, "Beat at index {} should be backward", i);
                     }
                 }
             }
@@ -726,7 +725,7 @@ mod tests {
         }
 
         let audio =
-            AudioSamples::new_mono(Array1::from(data).into(), sample_rate!(22528)).unwrap();
+            AudioSamples::new_mono(Array1::from(data), sample_rate!(22528)).unwrap();
 
         let config = BeatTrackingConfig::new(
             bpm, // ignored by estimate_tempo

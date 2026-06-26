@@ -1774,7 +1774,7 @@ mod tests {
         assert_eq!(non_zero_count, 1);
 
         // Check that the impulse is at the right position (sample 5)
-        assert_approx_eq!(mono[5].into(), 1.0, 1e-6);
+        assert_approx_eq!(mono[5], 1.0, 1e-6);
         assert!((mono[5] as f64 - 1.0).abs() < 1e-6);
     }
 
@@ -1822,7 +1822,7 @@ mod tests {
         ];
         let components = NonEmptySlice::from_slice(&components).unwrap();
         let audio = compound_tone::<f64>(
-            &components,
+            components,
             Duration::from_secs_f32(1.0),
             sample_rate!(44100),
         );
@@ -1850,7 +1850,7 @@ mod tests {
         let components = [ToneComponent::new(freq, 1.0)];
         let components = NonEmptySlice::from_slice(&components).unwrap();
         let audio = compound_tone::<f64>(
-            &components,
+            components,
             Duration::from_secs_f64(1.0),
             sample_rate!(44100),
         );
@@ -2277,7 +2277,7 @@ mod tests {
         ];
         let components = NonEmptySlice::from_slice(&components).unwrap();
         let audio = multichannel_compound_tone::<f64>(
-            &components,
+            components,
             Duration::from_secs_f32(0.1),
             sample_rate!(44100),
             6, // 5.1 surround

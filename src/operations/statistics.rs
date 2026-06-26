@@ -1085,6 +1085,8 @@ where
         // safety: self is guaranteed non-empty by design, so the reduced
         // channel has at least one sample.
         let n = unsafe { NonZeroUsize::new_unchecked(input_vec.len()) };
+        // SAFETY: input_vec is the reduced channel of a non-empty signal, so it
+        // has at least one element and is a valid NonEmptyVec.
         let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(input_vec) };
 
         let power_spectrum = with_fft_planner(|planner| {
@@ -1141,6 +1143,8 @@ where
         let working_vec = reduce_to_mono_f64(self, reduction, "spectral_bandwidth")?;
         // safety: self is non-empty by design.
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        // SAFETY: working_vec is the reduced channel of a non-empty signal, so it
+        // has at least one element and is a valid NonEmptyVec.
         let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
         let mag = with_fft_planner(|planner| {
             planner.magnitude_spectrum(input.as_non_empty_slice(), n, None)
@@ -1186,6 +1190,8 @@ where
         let working_vec = reduce_to_mono_f64(self, reduction, "spectral_flatness")?;
         // safety: self is non-empty by design.
         let working_samples = unsafe { NonEmptySlice::new_unchecked(working_vec.as_slice()) };
+        // SAFETY: working_vec is the reduced channel of a non-empty signal, so its
+        // length is non-zero.
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
         let power =
             with_fft_planner(|planner| planner.power_spectrum(working_samples, n, None))?;
@@ -1216,6 +1222,8 @@ where
         let working_vec = reduce_to_mono_f64(self, reduction, "spectral_crest")?;
         // safety: self is non-empty by design.
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        // SAFETY: working_vec is the reduced channel of a non-empty signal, so it
+        // has at least one element and is a valid NonEmptyVec.
         let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
         let mag = with_fft_planner(|planner| {
             planner.magnitude_spectrum(input.as_non_empty_slice(), n, None)
@@ -1244,6 +1252,8 @@ where
         let working_vec = reduce_to_mono_f64(self, reduction, "spectral_slope")?;
         // safety: self is non-empty by design.
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        // SAFETY: working_vec is the reduced channel of a non-empty signal, so it
+        // has at least one element and is a valid NonEmptyVec.
         let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
         let mag = with_fft_planner(|planner| {
             planner.magnitude_spectrum(input.as_non_empty_slice(), n, None)
@@ -1293,6 +1303,8 @@ where
         let working_vec = reduce_to_mono_f64(self, reduction, "spectral_contrast")?;
         // safety: self is non-empty by design.
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
+        // SAFETY: working_vec is the reduced channel of a non-empty signal, so it
+        // has at least one element and is a valid NonEmptyVec.
         let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
         // Hann window before the FFT: reduces spectral leakage so a tonal band's
         // peak/valley gap is not flattened by sidelobes (librosa windows too).
@@ -1310,7 +1322,9 @@ where
         // Octave-spaced band edges over bin indices [1, bins): edge_b grows
         // geometrically so each band spans roughly one octave. Bin 0 (DC) is
         // excluded.
-        let lo_bin = 1usize.min(bins.saturating_sub(1)).max(1);
+        // First non-DC bin: index 1, clamped into the available bin range so it
+        // never exceeds the last valid bin when the spectrum is tiny.
+        let lo_bin = 1usize.clamp(1, bins.max(1));
         let hi_bin = bins; // exclusive
         let span = (hi_bin as f64 / lo_bin as f64).max(1.0);
         let ratio = span.powf(1.0 / n_bands as f64);
@@ -1377,6 +1391,8 @@ pub fn fft_alignment_lag<T: StandardSample>(
     }
 
     let fft_size = (n1 + n2 - 1).next_power_of_two();
+    // SAFETY: n1 and n2 are both non-zero (checked above), so n1 + n2 - 1 >= 1
+    // and its next_power_of_two() is therefore non-zero.
     let fft_nz = unsafe { NonZeroUsize::new_unchecked(fft_size) };
 
     let mut ref_buf = ref_sig;
@@ -1385,9 +1401,11 @@ pub fn fft_alignment_lag<T: StandardSample>(
     deg_buf.resize(fft_size, 0.0);
 
     let xcorr = with_fft_planner(|planner| {
+        // SAFETY: ref_buf was resized to fft_size (>= 1), so it is non-empty.
         let ref_spec = planner
             .fft(unsafe { NonEmptySlice::new_unchecked(&ref_buf) }, fft_nz)
             .ok()?;
+        // SAFETY: deg_buf was resized to fft_size (>= 1), so it is non-empty.
         let deg_spec = planner
             .fft(unsafe { NonEmptySlice::new_unchecked(&deg_buf) }, fft_nz)
             .ok()?;
@@ -1398,6 +1416,8 @@ pub fn fft_alignment_lag<T: StandardSample>(
             .map(|(r, d)| r * d.conj())
             .collect();
 
+        // SAFETY: cross has one element per rfft bin (fft_size/2 + 1 >= 1 since
+        // fft_size >= 1), so it is non-empty.
         planner
             .irfft(unsafe { NonEmptySlice::new_unchecked(&cross) }, fft_nz)
             .ok()
@@ -1519,7 +1539,7 @@ mod tests {
             data.push(value);
         }
 
-        let audio = AudioSamples::new_mono(Array1::from(data).into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(Array1::from(data), sample_rate!(44100)).unwrap();
         let zcr = audio.zero_crossing_rate();
 
         // 4 Hz square wave has ~8 zero crossings per second (2 per cycle)
@@ -1552,8 +1572,8 @@ mod tests {
     fn test_cross_correlation() {
         let data1 = array![1.0f32, 0.0, -1.0];
         let data2 = array![1.0f32, 0.0, -1.0]; // Same signal
-        let audio1 = AudioSamples::new_mono(data1.into(), sample_rate!(44100)).unwrap();
-        let audio2 = AudioSamples::new_mono(data2.into(), sample_rate!(44100)).unwrap();
+        let audio1 = AudioSamples::new_mono(data1, sample_rate!(44100)).unwrap();
+        let audio2 = AudioSamples::new_mono(data2, sample_rate!(44100)).unwrap();
 
         let cross_corr = audio1.cross_correlation(&audio2, crate::nzu!(1)).unwrap();
 
@@ -1565,7 +1585,7 @@ mod tests {
     #[test]
     fn test_multi_channel_statistics() {
         let data = array![[1.0f32, 2.0], [-1.0, 1.0]]; // 2 channels, 2 samples each
-        let audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
 
         let rms: f64 = audio.rms();
         let variance = audio.variance();
@@ -1581,7 +1601,7 @@ mod tests {
     fn test_edge_cases() {
         // Single sample
         let single_data = array![1.0f32];
-        let single_audio = AudioSamples::new_mono(single_data.into(), sample_rate!(44100)).unwrap();
+        let single_audio = AudioSamples::new_mono(single_data, sample_rate!(44100)).unwrap();
 
         assert_eq!(single_audio.zero_crossings(), 0);
         assert_eq!(
@@ -1595,7 +1615,7 @@ mod tests {
     fn test_empty_audio_rejected() {
         // Empty audio should be rejected at construction time
         let empty_data: Array1<f32> = Array1::from(vec![]);
-        let empty_audio = AudioSamples::new_mono(empty_data.into(), sample_rate!(44100));
+        let empty_audio = AudioSamples::new_mono(empty_data, sample_rate!(44100));
         assert!(empty_audio.is_err(), "Empty audio should not be created");
     }
 
@@ -1800,8 +1820,8 @@ mod tests {
             })
             .collect();
 
-        let single = AudioSamples::new_mono(Array1::from(single).into(), sr).unwrap();
-        let two = AudioSamples::new_mono(Array1::from(two).into(), sr).unwrap();
+        let single = AudioSamples::new_mono(Array1::from(single), sr).unwrap();
+        let two = AudioSamples::new_mono(Array1::from(two), sr).unwrap();
 
         let bw1 = single.spectral_bandwidth(ChannelReduction::Error).unwrap();
         let bw2 = two.spectral_bandwidth(ChannelReduction::Error).unwrap();

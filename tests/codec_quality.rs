@@ -83,6 +83,8 @@ fn signal_transient(n_bursts: usize) -> audio_samples::AudioSamples<'static, f32
         flat.extend_from_slice(&burst_s);
         flat.extend_from_slice(&gap_s);
     }
+    // SAFETY: callers pass n_bursts >= 1, and each iteration appends the 50 ms
+    // burst and gap (2205 samples each at 44100 Hz), so `flat` is non-empty.
     let nev = unsafe { NonEmptyVec::new_unchecked(flat) };
     audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, sample_rate!(44100))
 }
@@ -111,6 +113,9 @@ fn round_trip_snr(
         .map(|(a, b)| a - b)
         .collect();
 
+    // SAFETY: len = orig.len().min(recon.len()); both come from a successful
+    // encode/decode round-trip of a non-empty signal, so len >= 1 and `error`
+    // (built from orig[..len]) is non-empty.
     let nev = unsafe { NonEmptyVec::new_unchecked(error) };
     let error_sig =
         audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, signal.sample_rate());
@@ -120,6 +125,7 @@ fn round_trip_snr(
         signal.clone()
     } else {
         let trimmed: Vec<f32> = orig[..len].to_vec();
+        // SAFETY: len >= 1 (same guarantee as for `error` above), so `trimmed` is non-empty.
         let nev2 = unsafe { NonEmptyVec::new_unchecked(trimmed) };
         audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev2, signal.sample_rate())
     };
@@ -239,6 +245,8 @@ fn signal_multi_tone() -> audio_samples::AudioSamples<'static, f32> {
         *x *= scale;
     }
 
+    // SAFETY: n = min of three non-empty signal lengths, so n >= 1 and `mixed`
+    // (built from 0..n) is non-empty.
     let nev = unsafe { NonEmptyVec::new_unchecked(mixed) };
     audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, sample_rate!(44100))
 }

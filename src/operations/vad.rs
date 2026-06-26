@@ -804,8 +804,8 @@ mod tests {
     #[test]
     fn speech_regions_are_non_overlapping() {
         let mut data = vec![0.0f32; 4096];
-        for i in 2048..4096 {
-            data[i] = 0.2;
+        for v in data.iter_mut().take(4096).skip(2048) {
+            *v = 0.2;
         }
         let audio = AudioSamples::new_mono(Array1::from(data), crate::sample_rate!(44100)).unwrap();
 

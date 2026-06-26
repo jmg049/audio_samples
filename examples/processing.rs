@@ -64,7 +64,7 @@ pub fn main() -> AudioSampleResult<()> {
 
     // FIR filtering (moving average).
     let taps = vec![1.0 / 9.0; 9];
-    let audio = audio.apply_filter(&non_empty_slice::NonEmptySlice::from_slice(&taps).unwrap())?;
+    let audio = audio.apply_filter(non_empty_slice::NonEmptySlice::from_slice(&taps).unwrap())?;
     println!(
         "Filtered (moving avg): len={}  peak={:.4}  rms={:.4}",
         audio.samples_per_channel(),
@@ -85,7 +85,7 @@ pub fn main() -> AudioSampleResult<()> {
     // Add a higher tone so the low-pass effect is visible in stats.
     let hi = sine_wave::<f64>(5_000.0, Duration::from_secs(1), sample_rate_hz, 0.2);
     let mixed = AudioSamples::mix(
-        &non_empty_slice::NonEmptySlice::from_slice(&[lp, hi]).unwrap(),
+        non_empty_slice::NonEmptySlice::from_slice(&[lp, hi]).unwrap(),
         None,
     )?;
 

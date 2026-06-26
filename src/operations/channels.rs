@@ -111,6 +111,9 @@ where
                                 let lf: f32 = ls[i].cast_into();
                                 let rf: f32 = rs[i].cast_into();
                                 let avg: f64 = ((lf + rf) * 0.5f32) as f64;
+                                // SAFETY: i < n and mono_vec was allocated with
+                                // capacity n, so dst.add(i) is in bounds and the
+                                // slot is uninitialised until this write.
                                 unsafe {
                                     dst.add(i).write(T::cast_from(avg));
                                 }
@@ -121,11 +124,17 @@ where
                                 let lf: f32 = l.cast_into();
                                 let rf: f32 = r.cast_into();
                                 let avg: f64 = ((lf + rf) * 0.5f32) as f64;
+                                // SAFETY: the enumerate runs at most n iterations
+                                // and mono_vec was allocated with capacity n, so
+                                // dst.add(i) is in bounds for every write.
                                 unsafe {
                                     dst.add(i).write(T::cast_from(avg));
                                 }
                             }
                         }
+                        // SAFETY: both branches above write exactly n elements
+                        // into the first n slots of mono_vec, so all n are now
+                        // initialised and within the allocated capacity.
                         unsafe {
                             mono_vec.set_len(n);
                         }

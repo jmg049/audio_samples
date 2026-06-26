@@ -97,11 +97,11 @@ fn round_trip_snr(signal: &audio_samples::AudioSamples<'static, f32>, codec: Opu
         .map(|(a, b)| a - b)
         .collect();
 
+    debug_assert!(!error.is_empty(), "error vector must be non-empty");
     // SAFETY: `len = orig.len().min(recon.len())`.  Both signals are the output
     // of a successful encode/decode, which requires a non-empty input, so
     // orig.len() >= 1 and recon.len() >= 1, therefore len >= 1 and `error` is
     // non-empty.
-    debug_assert!(!error.is_empty(), "error vector must be non-empty");
     let nev = unsafe { NonEmptyVec::new_unchecked(error) };
     let error_sig =
         audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev, signal.sample_rate());
@@ -110,8 +110,8 @@ fn round_trip_snr(signal: &audio_samples::AudioSamples<'static, f32>, codec: Opu
         signal.clone()
     } else {
         let trimmed: Vec<f32> = orig[..len].to_vec();
-        // SAFETY: len >= 1 (same guarantee as error above), so trimmed is non-empty.
         debug_assert!(!trimmed.is_empty(), "trimmed vector must be non-empty");
+        // SAFETY: len >= 1 (same guarantee as error above), so trimmed is non-empty.
         let nev2 = unsafe { NonEmptyVec::new_unchecked(trimmed) };
         audio_samples::AudioSamples::<'static, f32>::from_mono_vec(nev2, signal.sample_rate())
     };
@@ -340,8 +340,8 @@ fn detect_mode_selects_silk_for_burst() {
     let n = 882usize;
     let mut burst = vec![0.0f32; n];
     let burst_len = n / 8;
-    for i in 0..burst_len {
-        burst[i] = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin() * 0.5;
+    for (i, sample) in burst.iter_mut().enumerate().take(burst_len) {
+        *sample = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin() * 0.5;
     }
     // WideBand: both modes are valid, so the SFM decides.
     let mode = detect_opus_mode(&burst, 44100, OpusBandwidth::WideBand);
@@ -506,7 +506,7 @@ fn hybrid_sine_round_trip() {
     let samples: Vec<f32> = (0..882 * 2)
         .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin() * 0.5)
         .collect();
-    let ne = non_empty_slice::NonEmptyVec::new(samples.clone()).unwrap();
+    let ne = non_empty_slice::NonEmptyVec::new(samples).unwrap();
     let audio = AudioSamples::<'static, f32>::from_mono_vec(ne, sr);
 
     let config = OpusConfig::with_mode(OpusMode::Hybrid, 128_000);

@@ -365,7 +365,7 @@ pub fn lpc_synthesis_stateful(
     normalise_state(state, order);
 
     let mut output = Vec::with_capacity(residual.len());
-    for n in 0..residual.len() {
+    for (n, &r) in residual.iter().enumerate() {
         let mut sum = 0.0f32;
         for k in 0..order {
             let pos = n as isize - 1 - k as isize;
@@ -376,7 +376,7 @@ pub fn lpc_synthesis_stateful(
             };
             sum += coeffs.coeffs[k] * y;
         }
-        output.push(residual[n] - sum);
+        output.push(r - sum);
     }
 
     update_state(state, &output, order);

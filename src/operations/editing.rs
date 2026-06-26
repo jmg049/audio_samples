@@ -2231,7 +2231,7 @@ mod tests {
     #[test]
     fn test_reverse_mono_audio() {
         let samples = Array1::from(vec![1.0f32, 2.0, 3.0, 4.0, 5.0]);
-        let audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let reversed = audio.reverse();
 
@@ -2248,7 +2248,7 @@ mod tests {
     #[test]
     fn test_trim_with_time_bounds() {
         let samples = Array1::from(vec![1.0f32; 44100]); // 1 second at 44.1kHz
-        let audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let trimmed = audio.trim(0.25, 0.75).unwrap();
 
@@ -2259,7 +2259,7 @@ mod tests {
     #[test]
     fn test_pad_with_silence() {
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let padded = audio.pad(0.1, 0.1, 0.0).unwrap(); // 0.1s = 4410 samples each side
 
@@ -2277,7 +2277,7 @@ mod tests {
     #[test]
     fn test_split_into_segments() {
         let samples = Array1::from(vec![1.0f32; 8820]); // 0.2 seconds at 44.1kHz
-        let audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let segments = audio.split(0.05).unwrap(); // Split into 0.05s segments
 
@@ -2292,8 +2292,8 @@ mod tests {
     fn test_concatenate_segments() {
         let samples1 = Array1::from(vec![1.0f32; 1000]);
         let samples2 = Array1::from(vec![2.0f32; 1000]);
-        let audio1 = AudioSamples::new_mono(samples1.into(), sample_rate!(44100)).unwrap();
-        let audio2 = AudioSamples::new_mono(samples2.into(), sample_rate!(44100)).unwrap();
+        let audio1 = AudioSamples::new_mono(samples1, sample_rate!(44100)).unwrap();
+        let audio2 = AudioSamples::new_mono(samples2, sample_rate!(44100)).unwrap();
         let audio = vec![audio1, audio2];
         let audio = NonEmptyVec::new(audio).unwrap();
         let concatenated = AudioSamples::concatenate(&audio).unwrap();
@@ -2310,8 +2310,8 @@ mod tests {
     fn test_mix_two_sources() {
         let samples1 = Array1::from(vec![1.0f32; 1000]);
         let samples2 = Array1::from(vec![2.0f32; 1000]);
-        let audio1 = AudioSamples::new_mono(samples1.into(), sample_rate!(44100)).unwrap();
-        let audio2 = AudioSamples::new_mono(samples2.into(), sample_rate!(44100)).unwrap();
+        let audio1 = AudioSamples::new_mono(samples1, sample_rate!(44100)).unwrap();
+        let audio2 = AudioSamples::new_mono(samples2, sample_rate!(44100)).unwrap();
         let v = NonEmptyVec::new(vec![audio1, audio2]).unwrap();
         let mixed = AudioSamples::mix(&v, None).unwrap();
 
@@ -2324,7 +2324,7 @@ mod tests {
     #[test]
     fn test_fade_operations() {
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let mut audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         // Test fade in
         audio.fade_in_in_place(0.01, FadeCurve::Linear).unwrap(); // 0.01s fade = 441 samples
@@ -2338,7 +2338,7 @@ mod tests {
 
         // Reset and test fade out
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let mut audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         audio.fade_out_in_place(0.01, FadeCurve::Linear).unwrap();
 
@@ -2356,7 +2356,7 @@ mod tests {
         // Non-mutating fade_in must equal the in-place variant, and must
         // leave the original untouched.
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let original = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let original = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         // Non-mutating variant returns a new copy.
         let faded = original.fade_in(0.01, FadeCurve::Linear).unwrap();
@@ -2383,7 +2383,7 @@ mod tests {
         // ADD-twin op: pad is the non-mutating primitive, pad_in_place is the
         // provided default twin.
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let original = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let original = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let padded = original.pad(0.1, 0.1, 0.0).unwrap();
 
@@ -2407,7 +2407,7 @@ mod tests {
     #[test]
     fn test_repeat_audio() {
         let samples = Array1::from(vec![1.0f32, 2.0]);
-        let audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
         let repeated = audio.repeat(3).unwrap();
 
         assert_eq!(
@@ -2425,11 +2425,11 @@ mod tests {
     fn test_trim_silence() {
         let mut samples = vec![0.0f32; 1000];
         // Add some signal in the middle
-        for i in 400..600 {
-            samples[i] = 1.0;
+        for s in samples.iter_mut().take(600).skip(400) {
+            *s = 1.0;
         }
         let audio =
-            AudioSamples::new_mono(Array1::from(samples).into(), sample_rate!(44100)).unwrap();
+            AudioSamples::new_mono(Array1::from(samples), sample_rate!(44100)).unwrap();
 
         let trimmed = audio.trim_silence(-10.0).unwrap();
 
@@ -2494,9 +2494,9 @@ mod tests {
         let samples1 = Array1::from(vec![1.0f32; 100]);
         let samples2 = Array1::from(vec![2.0f32; 100]);
         let samples3 = Array1::from(vec![3.0f32; 100]);
-        let audio1 = AudioSamples::new_mono(samples1.into(), sample_rate!(44100)).unwrap();
-        let audio2 = AudioSamples::new_mono(samples2.into(), sample_rate!(44100)).unwrap();
-        let audio3 = AudioSamples::new_mono(samples3.into(), sample_rate!(44100)).unwrap();
+        let audio1 = AudioSamples::new_mono(samples1, sample_rate!(44100)).unwrap();
+        let audio2 = AudioSamples::new_mono(samples2, sample_rate!(44100)).unwrap();
+        let audio3 = AudioSamples::new_mono(samples3, sample_rate!(44100)).unwrap();
 
         let weights = NonEmptyVec::new(vec![0.5, 0.3, 0.2]).unwrap();
         let v = NonEmptyVec::new(vec![audio1, audio2, audio3]).unwrap();
@@ -2514,7 +2514,7 @@ mod tests {
         use crate::operations::types::*;
 
         let samples = Array1::from(vec![1.0f32; 1000]);
-        let audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let config = PerturbationConfig::with_seed(
             PerturbationMethod::gaussian_noise(20.0, NoiseColor::White),
@@ -2538,7 +2538,7 @@ mod tests {
         use crate::operations::types::*;
 
         let samples = Array1::from(vec![1.0f32; 100]);
-        let mut audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let config =
             PerturbationConfig::with_seed(PerturbationMethod::random_gain(-3.0, 3.0), 54321);
@@ -2567,7 +2567,7 @@ mod tests {
         use crate::operations::types::*;
 
         let samples = Array1::from(vec![1.0f32; 100]);
-        let mut audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let config = PerturbationConfig::new(PerturbationMethod::high_pass_filter(80.0));
 
@@ -2584,7 +2584,7 @@ mod tests {
     #[test]
     fn test_perturbation_deterministic() {
         let samples = Array1::from(vec![1.0f32; 100]);
-        let audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         let config = PerturbationConfig::with_seed(PerturbationMethod::random_gain(-1.0, 1.0), 42);
 
@@ -2603,7 +2603,7 @@ mod tests {
     #[test]
     fn test_perturbation_validation() {
         let samples = Array1::from(vec![1.0f32; 100]);
-        let mut audio = AudioSamples::new_mono(samples.into(), sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
         // Test invalid high-pass filter cutoff
         let invalid_config = PerturbationConfig::new(

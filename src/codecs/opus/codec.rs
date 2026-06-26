@@ -215,7 +215,7 @@ impl OpusCodec {
 /// a minimum of 4.
 fn compute_frame_size(sample_rate: u32, frame_size_ms: f32) -> usize {
     let raw = (sample_rate as f32 * frame_size_ms / 1000.0).round() as usize;
-    let even = if raw % 2 == 0 { raw } else { raw + 1 };
+    let even = if raw.is_multiple_of(2) { raw } else { raw + 1 };
     even.max(4)
 }
 
@@ -281,7 +281,7 @@ impl AudioCodec for OpusCodec {
         // so `as_slice()` is guaranteed to succeed here.
         let all_samples: &[f32] = channel.as_slice().expect("to_format always contiguous");
 
-        let n_frames_estimate = (original_length + frame_size - 1) / frame_size;
+        let n_frames_estimate = original_length.div_ceil(frame_size);
         let mut frames: Vec<OpusEncodedFrame> = Vec::with_capacity(n_frames_estimate);
         let mut silk_state = SilkState::default();
         let mut offset = 0;

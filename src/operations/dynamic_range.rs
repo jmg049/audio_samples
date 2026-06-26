@@ -1885,10 +1885,12 @@ mod tests {
             config
         );
 
-        let mut config = LimiterConfig::default();
         // Fix ceiling, test invalid attack time
-        config.ceiling_db = -1.0;
-        config.attack_ms = 0.0;
+        let config = LimiterConfig {
+            ceiling_db: -1.0,
+            attack_ms: 0.0,
+            ..Default::default()
+        };
         assert!(config.validate(44100.0).is_err());
     }
 
@@ -1899,7 +1901,7 @@ mod tests {
             vec![0.1f32, 0.8, 0.2, 0.9, 0.1, 0.2f32, 0.7, 0.3, 0.8, 0.2],
         )
         .unwrap();
-        let mut audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
 
         let config = CompressorConfig::new();
         let result = audio.apply_compressor_in_place(&config);
@@ -1914,7 +1916,7 @@ mod tests {
             vec![0.1f32, 0.8, 0.2, 0.9, 0.1, 0.2f32, 0.7, 0.3, 0.8, 0.2],
         )
         .unwrap();
-        let mut audio = AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+        let mut audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
 
         let config = LimiterConfig::default();
         let result = audio.apply_limiter_in_place(&config);
@@ -2212,8 +2214,10 @@ mod tests {
             .map(|i| 0.9 * (i as f64 * 0.21).sin())
             .collect();
 
-        let mut config = LimiterConfig::default();
-        config.lookahead_ms = 1.0;
+        let config = LimiterConfig {
+            lookahead_ms: 1.0,
+            ..Default::default()
+        };
 
         let expected = reference_limiter_mono(&input, &config, sr);
 
@@ -2260,11 +2264,11 @@ mod tests {
         let exp0 = reference_compressor_mono(&ch0, &config, sr);
         let exp1 = reference_compressor_mono(&ch1, &config, sr);
 
-        let mut flat = ch0.clone();
+        let mut flat = ch0;
         flat.extend_from_slice(&ch1);
         let data = ndarray::Array2::from_shape_vec((2, n), flat).unwrap();
         let mut audio =
-            AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+            AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
         audio.apply_compressor_in_place(&config).unwrap();
 
         let out = audio.as_slice().unwrap();
@@ -2279,17 +2283,19 @@ mod tests {
         let ch0: Vec<f64> = (0..n).map(|i| 0.95 * (i as f64 * 0.19).sin()).collect();
         let ch1: Vec<f64> = (0..n).map(|i| 0.85 * (i as f64 * 0.07).cos()).collect();
 
-        let mut config = LimiterConfig::default();
-        config.lookahead_ms = 0.5;
+        let config = LimiterConfig {
+            lookahead_ms: 0.5,
+            ..Default::default()
+        };
 
         let exp0 = reference_limiter_mono(&ch0, &config, sr);
         let exp1 = reference_limiter_mono(&ch1, &config, sr);
 
-        let mut flat = ch0.clone();
+        let mut flat = ch0;
         flat.extend_from_slice(&ch1);
         let data = ndarray::Array2::from_shape_vec((2, n), flat).unwrap();
         let mut audio =
-            AudioSamples::new_multi_channel(data.into(), sample_rate!(44100)).unwrap();
+            AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
         audio.apply_limiter_in_place(&config).unwrap();
 
         let out = audio.as_slice().unwrap();

@@ -531,13 +531,13 @@ where
                     )));
                 }
             }
-            PitchDetectionMethod::Autocorrelation => {
-                if min_frequency <= 1.0 || max_frequency <= min_frequency {
-                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "frequency_range",
-                        format!("Invalid frequency range {min_frequency} - {max_frequency}"),
-                    )));
-                }
+            PitchDetectionMethod::Autocorrelation
+                if (min_frequency <= 1.0 || max_frequency <= min_frequency) =>
+            {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "frequency_range",
+                    format!("Invalid frequency range {min_frequency} - {max_frequency}"),
+                )));
             }
             // Unsupported methods are rejected before this point.
             _ => {}
@@ -1390,9 +1390,7 @@ mod tests {
         assert!(!pitch_track.is_empty());
 
         // Most should detect around 440 Hz
-        let detected_pitches: Vec<f64> = pitch_track.voiced_frames().map(|(_, hz)| hz).collect();
-
-        assert!(!detected_pitches.is_empty());
+        assert!(pitch_track.voiced_frames().next().is_some());
 
         // Average should be close to 440 Hz
         let avg_pitch = pitch_track.mean_pitch().unwrap();
@@ -1442,7 +1440,7 @@ mod tests {
     #[test]
     fn test_silence_detection() {
         // Test with silence (should return None)
-        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(44100).into(), sample_rate!(44100))
+        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(44100), sample_rate!(44100))
             .unwrap();
 
         let detected_pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();

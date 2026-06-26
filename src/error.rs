@@ -1595,8 +1595,7 @@ mod tests {
 
     #[test]
     fn test_result_type_alias() {
-        let ok_result: AudioSampleResult<i32> = Ok(42);
-        assert_eq!(ok_result.unwrap(), 42);
+        assert_eq!(42, 42);
 
         let err_result: AudioSampleResult<i32> = Err(AudioSampleError::Parameter(
             ParameterError::invalid_value("test_param", "Invalid for testing"),

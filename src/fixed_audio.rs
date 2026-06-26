@@ -126,6 +126,7 @@ impl<T: StandardSample, const N: usize, const C: usize> FixedSizeMultiChannelAud
         const { assert!(C > 0, "C (channel count) must be greater than 0") };
         // SAFETY: N > 0 and C > 0 asserted above
         let frames = unsafe { NonZeroUsize::new_unchecked(N) };
+        // SAFETY: C > 0 asserted above, so C as u32 is non-zero
         let channels = unsafe { NonZeroU32::new_unchecked(C as u32) };
         Self {
             samples: AudioSamples::zeros_multi_channel(channels, frames, sample_rate),

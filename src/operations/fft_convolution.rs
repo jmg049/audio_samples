@@ -143,7 +143,7 @@ mod tests {
     fn convolve_matches_naive_small() {
         let a = [1.0, 2.0, 3.0, -1.0, 0.5];
         let b = [0.5, -0.25, 1.0];
-        let got = fft_convolve(&ne(&a), &ne(&b)).unwrap();
+        let got = fft_convolve(ne(&a), ne(&b)).unwrap();
         let want = naive_convolve(&a, &b);
         assert_eq!(got.as_slice().len(), want.len());
         for (g, w) in got.as_slice().iter().zip(want.iter()) {
@@ -159,7 +159,7 @@ mod tests {
             (&[2.0, 0.0, 0.0, 5.0], &[0.0, 1.0, 0.0, 0.0, 3.0]),
         ];
         for (a, b) in cases {
-            let got = fft_convolve(&ne(a), &ne(b)).unwrap();
+            let got = fft_convolve(ne(a), ne(b)).unwrap();
             let want = naive_convolve(a, b);
             assert_eq!(got.as_slice().len(), want.len());
             for (g, w) in got.as_slice().iter().zip(want.iter()) {
@@ -172,9 +172,9 @@ mod tests {
     fn deconvolve_round_trip() {
         let excitation = [1.0, 0.7, -0.3, 0.2, 0.9, -0.5, 0.1, 0.4];
         let system = [0.0, 0.0, 1.0, 0.5];
-        let recorded = fft_convolve(&ne(&excitation), &ne(&system)).unwrap();
+        let recorded = fft_convolve(ne(&excitation), ne(&system)).unwrap();
         let recorded = recorded.as_slice().to_vec();
-        let recovered = fft_deconvolve(&ne(&recorded), &ne(&excitation), 0.0).unwrap();
+        let recovered = fft_deconvolve(ne(&recorded), ne(&excitation), 0.0).unwrap();
         let r = recovered.as_slice();
         assert_eq!(r.len(), system.len());
         for (i, want) in system.iter().enumerate() {
