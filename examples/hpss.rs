@@ -64,6 +64,11 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     println!("  • Number of impulses: {}", impulses.len());
     println!("  • RMS: {:.3}", percussive_signal.rms());
 
+    // Capture component properties before they are moved into the mix.
+    let harmonic_rms = harmonic_signal.rms();
+    let percussive_rms = percussive_signal.rms();
+    let component_len = harmonic_signal.samples_per_channel();
+
     // Mix harmonic and percussive components
     println!("\nMixing components...");
     let sources = NonEmptyVec::new(vec![harmonic_signal, percussive_signal]).unwrap();
@@ -72,43 +77,77 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     println!("  • Mixed RMS: {:.3}", mixed_signal.rms());
     println!("  • Mixed peak: {:.3}", mixed_signal.peak());
 
+    // --- Self-verification -------------------------------------------------
+    // We placed an impulse every 0.5 s starting at 0.5 s over a 3 s signal.
+    assert_eq!(impulses.len().get(), 5, "expected 5 impulses across the 3 s signal");
+    assert!(
+        harmonic_rms > 0.0 && percussive_rms > 0.0,
+        "both components must be non-silent"
+    );
+    // Mixing two non-silent sources produces a non-silent result.
+    assert!(mixed_signal.rms() > 0.0, "mixed signal must be non-silent");
+    assert_eq!(
+        mixed_signal.samples_per_channel(),
+        component_len,
+        "mix preserves the per-channel sample count"
+    );
+
     Ok(())
 }
 
 #[cfg(test)]
 #[cfg(all(feature = "decomposition", feature = "statistics", feature = "editing"))]
 mod tests {
-    use audio_samples::sample_rate;
-
-    use super::*;
+    use audio_samples::operations::hpss::HpssConfig;
+    use audio_samples::operations::AudioDecomposition;
+    use audio_samples::utils::generation::{impulse, sine_wave};
+    use audio_samples::{sample_rate, AudioEditing, AudioSamples, AudioStatistics};
+    use non_empty_slice::NonEmptySlice;
+    use std::time::Duration;
 
     #[test]
     fn test_hpss_example() {
         // Run the main example logic as a test
-        main().expect("HPSS example should complete without error");
+        super::main().expect("HPSS example should complete without error");
     }
 
     #[test]
     fn test_synthetic_separation() {
         let sample_rate = sample_rate!(8000); // Smaller for faster test
-        let duration = Duration::from_millis(100);
+        // Keep this comfortably above the HPSS window size (1024 samples):
+        // 8 kHz * 0.5 s = 4000 samples.
+        let duration = Duration::from_millis(500);
 
         // Create simple test signals
-        let harmonic = sine_wave::<f32, f32>(440.0, duration, sample_rate, 0.5);
-        let percussive = impulse::<f32, f32>(duration, sample_rate, 0.5, 0.05);
+        let harmonic = sine_wave::<f32>(440.0, duration, sample_rate, 0.5);
+        let percussive = impulse::<f32>(duration, sample_rate, 0.5, 0.05);
 
-        let sources = NonEmptySlice::new(&[harmonic, percussive]).unwrap();
-        let mixed = AudioSamples::mix::<f32>(&sources, None).unwrap();
+        let sources = [harmonic, percussive];
+        let sources = NonEmptySlice::from_slice(&sources).unwrap();
+        let mixed = AudioSamples::mix(sources, None).unwrap();
 
         // Test separation
         let config = HpssConfig::realtime(); // Faster for testing
         let (h_sep, p_sep) = mixed.hpss(&config).unwrap();
 
-        // Basic sanity checks
-        assert_eq!(h_sep.samples_per_channel(), mixed.samples_per_channel());
-        assert_eq!(p_sep.samples_per_channel(), mixed.samples_per_channel());
-        assert_eq!(h_sep.sample_rate, mixed.sample_rate);
-        assert_eq!(p_sep.sample_rate, mixed.sample_rate);
+        // Basic sanity checks. HPSS works on whole STFT frames, so the output
+        // length may be trimmed to a frame boundary (it will not exceed the
+        // input length), but both components share the same length and rate.
+        assert_eq!(
+            h_sep.samples_per_channel(),
+            p_sep.samples_per_channel(),
+            "harmonic and percussive parts must have equal length"
+        );
+        assert!(
+            h_sep.samples_per_channel().get() <= mixed.samples_per_channel().get(),
+            "separated length must not exceed the input length"
+        );
+        assert!(
+            h_sep.samples_per_channel().get() * 100 >= mixed.samples_per_channel().get() * 90,
+            "separated length should retain at least ~90% of the input"
+        );
+        assert_eq!(h_sep.sample_rate(), mixed.sample_rate());
+        assert_eq!(p_sep.sample_rate(), mixed.sample_rate());
 
         // Energy should be preserved (approximately)
         let original_rms = mixed.rms();

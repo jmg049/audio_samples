@@ -21,8 +21,10 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("=> Converting i16 to f32...");
     println!("{}_i16 -> {:.2}_f32", i16_val, f32_val);
     println!("=> And back again to i16...");
-    let i16_val: i16 = f32_val.convert_to();
-    println!("{:.2}_f32 -> {}_i16", f32_val, i16_val);
+    let round_trip: i16 = f32_val.convert_to();
+    println!("{:.2}_f32 -> {}_i16", f32_val, round_trip);
+    // i16::MAX should survive the round-trip through normalised f32.
+    assert_eq!(round_trip, i16::MAX, "i16 -> f32 -> i16 round-trip must be lossless at full scale");
     println!("\n-----\n");
 
     // The [`AudioSample`] trait underpins the entire audio system.
@@ -44,6 +46,9 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Mono audio: {:#}\n", mono_audio);
     println!("-----\n");
     println!("Stereo audio: {:#}\n", stereo_audio);
+
+    assert_eq!(mono_audio.num_channels().get(), 1, "mono constructor must yield 1 channel");
+    assert_eq!(stereo_audio.num_channels().get(), 2, "stereo constructor must yield 2 channels");
 
     println!("-----\n");
 
@@ -75,6 +80,13 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         &non_empty,
         Duration::from_secs(2),
         core::num::NonZeroU32::new(44100).unwrap(),
+    );
+
+    // A 2-second sine at 44.1 kHz has the expected sample count.
+    assert_eq!(
+        sine_wave.samples_per_channel().get(),
+        88_200,
+        "2s @ 44.1kHz should be 88200 samples"
     );
 
     let (num_channels, samples_per_channel, duration_seconds, sample_rate) = audio.info();

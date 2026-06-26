@@ -51,10 +51,13 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     let waveform_plot = audio
         .plot_waveform(&waveform_params)
         .expect("Failed to create waveform plot");
-    waveform_plot
-        .save("test_waveform.html")
-        .expect("Failed to save waveform plot");
-    println!("Saved waveform plot to test_waveform.html");
+    // Render to an in-memory HTML string instead of writing to disk.
+    let waveform_html = waveform_plot.html().expect("Failed to render waveform plot");
+    println!("Rendered waveform plot ({} bytes of HTML)", waveform_html.len());
+    assert!(
+        !waveform_html.is_empty() && waveform_html.contains("plotly"),
+        "waveform plot HTML should be a non-empty Plotly document"
+    );
 
     // Test spectrogram plot
     println!("\nCreating spectrogram plot...");
@@ -62,9 +65,11 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     let spec_plot = audio
         .plot_spectrogram(&spec_params)
         .expect("Failed to create spectrogram plot");
-    spec_plot
-        .save("outputs/test_spectrogram.html")
-        .expect("Failed to save spectrogram plot");
-    println!("Saved spectrogram plot to outputs/test_spectrogram.html");
+    let spec_html = spec_plot.html().expect("Failed to render spectrogram plot");
+    println!("Rendered spectrogram plot ({} bytes of HTML)", spec_html.len());
+    assert!(
+        !spec_html.is_empty() && spec_html.contains("plotly"),
+        "spectrogram plot HTML should be a non-empty Plotly document"
+    );
     Ok(())
 }

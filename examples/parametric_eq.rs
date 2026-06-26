@@ -52,5 +52,18 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     let (mag, _phase) = audio.eq_frequency_response(&eq, &freqs)?;
     println!("EQ magnitude response @ {:?} Hz => {:?}", freqs, mag);
 
+    // --- Self-verification -------------------------------------------------
+    // freqs = [60, 120, 250, 500, 1000, 2000, 4000, 8000, 12000].
+    // The 1 kHz band has a +4 dB peak boost; 120 Hz has a -3 dB low-shelf cut.
+    // So the response at 1 kHz (index 4) must exceed the response at 120 Hz (index 1).
+    assert_eq!(mag.len(), freqs.len(), "one magnitude per probed frequency");
+    assert!(
+        mag[4] > mag[1],
+        "boosted 1 kHz band should exceed cut 120 Hz band: {} !> {}",
+        mag[4],
+        mag[1]
+    );
+    assert!(audio.rms() > 0.0, "EQ output must remain non-silent");
+
     Ok(())
 }

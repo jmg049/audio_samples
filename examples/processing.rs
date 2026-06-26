@@ -40,10 +40,20 @@ pub fn main() -> AudioSampleResult<()> {
         audio.peak(),
         audio.rms()
     );
+    assert!(
+        (audio.peak() - 1.0).abs() < 1e-3,
+        "peak-normalize should make |peak| == 1.0, got {}",
+        audio.peak()
+    );
 
     // Clip to a tighter range.
     let audio = audio.clip(-0.7, 0.7)?;
     println!("Clipped: peak={:.4}  rms={:.4}", audio.peak(), audio.rms());
+    assert!(
+        audio.peak() <= 0.7 + 1e-6,
+        "after clip(-0.7, 0.7) peak must not exceed 0.7, got {}",
+        audio.peak()
+    );
 
     // Windowing (Hann).
 
@@ -82,6 +92,22 @@ pub fn main() -> AudioSampleResult<()> {
     println!("Two-tone: peak={:.4}  rms={:.4}", mixed.peak(), mixed.rms());
     let lp = mixed.low_pass_filter(1_000.0)?;
     println!("Low-pass 1kHz: peak={:.4}  rms={:.4}", lp.peak(), lp.rms());
+    // The 5 kHz component sits well above the 1 kHz cutoff, so the low-pass
+    // must remove energy: filtered RMS should be below the two-tone RMS.
+    assert!(
+        lp.rms() < mixed.rms(),
+        "low-pass should attenuate the two-tone signal: {} !< {}",
+        lp.rms(),
+        mixed.rms()
+    );
+
+    // µ-law round-trip should reconstruct close to the original.
+    assert!(
+        (ulaw.peak() - audio.peak()).abs() < 0.1,
+        "µ-law round-trip peak drifted too far: {} vs {}",
+        ulaw.peak(),
+        audio.peak()
+    );
 
     Ok(())
 }

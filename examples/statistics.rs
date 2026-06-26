@@ -73,9 +73,34 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("|-Duration (seconds): {:.2}", duration_seconds);
     println!("|-Sample rate: {} Hz", sample_rate);
 
-    println!(
-        "\nCross-correlation with 880 Hz tone: {:?}",
-        audio.cross_correlation(&other_audio, core::num::NonZeroUsize::new(1).unwrap())?
+    let xcorr = audio.cross_correlation(&other_audio, core::num::NonZeroUsize::new(1).unwrap())?;
+    println!("\nCross-correlation with 880 Hz tone: {:?}", xcorr);
+
+    // --- Self-verification -------------------------------------------------
+    // A symmetric tone centred on zero has ~zero mean and a peak near its
+    // largest harmonic-sum amplitude (1.0 + 0.5 + 0.25 = 1.75, normalised by
+    // the generator so |peak| <= ~1.0 region; we just assert sane bounds).
+    assert!(audio.mean().abs() < 1e-2, "compound tone should be ~zero-mean, got {}", audio.mean());
+    assert!(audio.rms() > 0.0, "rms of a non-silent signal must be positive");
+    assert!(
+        f64::from(audio.peak()) > audio.rms(),
+        "peak must exceed rms for a tonal signal"
+    );
+    assert!(
+        audio.max_sample() >= audio.min_sample(),
+        "max must be >= min"
+    );
+    // A 440 Hz fundamental crosses zero ~twice per cycle, so the zero-crossing
+    // rate (crossings per second) is on the order of ~880; assert it is positive
+    // and in a sane sub-Nyquist range.
+    assert!(
+        audio.zero_crossing_rate() > 0.0 && audio.zero_crossing_rate() < 44_100.0,
+        "zero-crossing rate out of expected range: {}",
+        audio.zero_crossing_rate()
+    );
+    assert!(
+        xcorr.as_slice().iter().all(|v| v.is_finite()),
+        "cross-correlation values must be finite"
     );
 
     Ok(())

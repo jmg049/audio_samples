@@ -138,5 +138,26 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         most_audible.band.centre_frequency, most_audible.signal_to_mask_ratio,
     );
 
+    // --- Self-verification -------------------------------------------------
+    // We requested 24 Bark bands and 40 Mel bands; the analysis must honour that.
+    assert_eq!(result.band_metrics.len().get(), 24, "expected 24 Bark bands");
+    assert_eq!(mel_result.band_metrics.len().get(), 40, "expected 40 Mel bands");
+    // All importance and energy metrics must be finite numbers.
+    assert!(
+        result
+            .band_metrics
+            .as_slice()
+            .iter()
+            .all(|m| m.importance.is_finite() && m.energy.is_finite()),
+        "all band metrics must be finite"
+    );
+    // The signal has real energy concentrated below ~1 kHz (440 Hz + 880 Hz),
+    // so the most-audible Mel band's centre should be in the low/mid range.
+    assert!(
+        most_audible.band.centre_frequency < 5_000.0,
+        "most-audible band should be in the low/mid range for a 440/880 Hz signal, got {} Hz",
+        most_audible.band.centre_frequency
+    );
+
     Ok(())
 }

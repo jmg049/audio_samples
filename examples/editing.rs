@@ -69,5 +69,37 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     )?;
     println!("Mixed: peak={:.4}  rms={:.4}", mixed.peak(), mixed.rms());
 
+    // --- Self-verification -------------------------------------------------
+    // Trimming 0.2..0.6s of a 1s signal yields ~0.4s.
+    assert!(
+        (segment.duration_seconds() - 0.4).abs() < 1e-3,
+        "trim 0.2..0.6 should be ~0.4s, got {}",
+        segment.duration_seconds()
+    );
+    // Padding 0.25 on each side of a 1s signal -> ~1.5s.
+    assert!(
+        (padded.duration_seconds() - 1.5).abs() < 1e-3,
+        "pad should yield ~1.5s, got {}",
+        padded.duration_seconds()
+    );
+    // Split into 0.25s chunks then concatenate reconstructs the full duration.
+    assert!(
+        (reconstructed.duration_seconds() - 1.0).abs() < 1e-3,
+        "split+concatenate should reconstruct ~1.0s, got {}",
+        reconstructed.duration_seconds()
+    );
+    // repeat(3) triples the duration.
+    assert!(
+        (repeated.duration_seconds() - 3.0).abs() < 1e-3,
+        "repeat x3 should be ~3.0s, got {}",
+        repeated.duration_seconds()
+    );
+    // pad_to_duration(2.0) gives exactly 2 seconds.
+    assert!(
+        (to_2s.duration_seconds() - 2.0).abs() < 1e-3,
+        "pad_to_duration should be ~2.0s, got {}",
+        to_2s.duration_seconds()
+    );
+
     Ok(())
 }

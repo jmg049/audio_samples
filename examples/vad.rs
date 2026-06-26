@@ -48,9 +48,27 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     let mask = audio.voice_activity_mask(&cfg)?;
     let regions = audio.speech_regions(&cfg)?;
 
+    let speech_frames = mask.iter().filter(|&&b| b).count();
     println!("frames: {}", mask.len());
-    println!("speech frames: {}", mask.iter().filter(|&&b| b).count());
+    println!("speech frames: {}", speech_frames);
     println!("speech regions (samples): {regions:?}");
+
+    // --- Self-verification -------------------------------------------------
+    // The 1 s signal at 44.1 kHz framed with a 512-sample hop yields a
+    // predictable, non-zero frame count, and the per-frame mask and derived
+    // regions must be self-consistent.
+    let total_frames = mask.len().get();
+    assert!(total_frames > 50, "expected ~87 analysis frames, got {total_frames}");
+    assert!(
+        speech_frames <= total_frames,
+        "speech frames cannot exceed total frames"
+    );
+    // Every reported region must lie within the signal and be non-empty.
+    let n_samples = audio.samples_per_channel().get();
+    for (start, end) in &regions {
+        assert!(start < end, "region must be non-empty: ({start}, {end})");
+        assert!(*end <= n_samples, "region end {end} exceeds signal length {n_samples}");
+    }
 
     Ok(())
 }

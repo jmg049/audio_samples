@@ -67,5 +67,20 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     let deinterleaved = interleaved.deinterleave_channels()?;
     println!("Interleave/deinterleave: {} channels", deinterleaved.len());
 
+    // --- Self-verification -------------------------------------------------
+    assert_eq!(mono.num_channels().get(), 1, "source must be mono");
+    assert_eq!(stereo.num_channels().get(), 2, "Duplicate should produce 2 channels");
+    assert_eq!(mono_avg.num_channels().get(), 1, "Average down-mix must be mono");
+    assert_eq!(
+        deinterleaved.len(),
+        2,
+        "deinterleave must recover both channels"
+    );
+    assert_eq!(
+        left.samples_per_channel(),
+        right.samples_per_channel(),
+        "extracted channels must have equal length"
+    );
+
     Ok(())
 }

@@ -21,6 +21,18 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Pitch (YIN): {:?} Hz", yin);
     println!("Pitch (autocorr): {:?} Hz", ac);
 
+    // --- Self-verification: both detectors should land near 440 Hz ---------
+    // Both detectors quantise to a coarse grid here, so allow a modest tolerance.
+    if let Some(f) = yin {
+        assert!((f - 440.0).abs() < 20.0, "YIN pitch {f} Hz should be ~440 Hz");
+    }
+    if let Some(f) = ac {
+        assert!(
+            (f - 440.0).abs() < 20.0,
+            "autocorr pitch {f} Hz should be ~440 Hz"
+        );
+    }
+
     let contour = audio.track_pitch(
         audio_samples::nzu!(2048),
         audio_samples::nzu!(512),
@@ -53,6 +65,11 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         "Estimated key: {} {:?}  confidence={:.3}",
         key.tonic, key.mode, key.confidence
     );
+
+    // A pure 440 Hz tone is strongly voiced, so the contour must report
+    // at least one voiced frame, and HNR should be a finite number.
+    assert!(voiced > 0, "a steady tone should have voiced frames");
+    assert!(hnr.is_finite(), "HNR must be finite, got {hnr}");
 
     Ok(())
 }

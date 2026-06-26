@@ -87,8 +87,14 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .layout(CompositeLayout::Vertical)
         .build()?;
 
-    composite.save("outputs/test_composition_advanced.html")?;
-    println!("Saved: outputs/test_composition_advanced.html");
+    let composite_html = composite.html()?;
+    // A composite embeds each sub-plot as a base64-encoded iframe, so we check
+    // for the composite container and the embedded iframes rather than "plotly".
+    assert!(
+        composite_html.contains("composite-container") && composite_html.contains("iframe"),
+        "composite plot HTML should contain the composite container and iframes"
+    );
+    println!("Rendered composite plot ({} bytes)", composite_html.len());
 
     #[cfg(feature = "html_view")]
     {

@@ -46,9 +46,30 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         audio.rms()
     );
 
+    let peak_before_limit = audio.peak();
     let limiter = LimiterConfig::mastering();
     audio.apply_limiter_in_place(&limiter)?;
     println!("Limited: peak={:.4} rms={:.4}", audio.peak(), audio.rms());
+
+    // --- Self-verification -------------------------------------------------
+    // A compressor produces non-negative gain reduction on a loud signal.
+    assert!(
+        max_gr >= 0.0,
+        "gain reduction must be non-negative, got {max_gr}"
+    );
+    // The mastering limiter must not increase the peak.
+    assert!(
+        audio.peak() <= peak_before_limit + 1e-6,
+        "limiter must not raise the peak: {} > {}",
+        audio.peak(),
+        peak_before_limit
+    );
+    // A mastering limiter keeps the peak within the [0, 1] sample range.
+    assert!(
+        audio.peak() <= 1.0 + 1e-6,
+        "limited peak should stay within unity, got {}",
+        audio.peak()
+    );
 
     Ok(())
 }

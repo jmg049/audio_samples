@@ -44,5 +44,27 @@ pub fn main() -> AudioSampleResult<()> {
         half.peak()
     );
 
+    // --- Self-verification -------------------------------------------------
+    // Resampling 44.1 kHz -> 16 kHz must set the new rate exactly and shrink
+    // the sample count by roughly the rate ratio (~0.3628).
+    assert_eq!(
+        resampled.sample_rate().get(),
+        16_000,
+        "resample must set the target sample rate"
+    );
+    let expected = audio.samples_per_channel().get() as f64 * (16_000.0 / 44_100.0);
+    let got = resampled.samples_per_channel().get() as f64;
+    assert!(
+        (got - expected).abs() / expected < 0.02,
+        "resampled length {got} should be ~{expected:.0} (within 2%)"
+    );
+    // Ratio 0.5 roughly halves the length.
+    let half_expected = audio.samples_per_channel().get() as f64 * 0.5;
+    let half_got = half.samples_per_channel().get() as f64;
+    assert!(
+        (half_got - half_expected).abs() / half_expected < 0.02,
+        "ratio-0.5 length {half_got} should be ~{half_expected:.0} (within 2%)"
+    );
+
     Ok(())
 }
