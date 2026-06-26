@@ -194,7 +194,7 @@ impl FromStr for NormalizationMethod {
 ///
 /// ## Assumptions
 ///
-/// `T` implements [`StandardSample`][crate::traits::StandardSample], which bounds
+/// `T` implements [`StandardSample`], which bounds
 /// it to the numeric types supported throughout the crate.
 #[cfg(feature = "processing")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]

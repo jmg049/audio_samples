@@ -1,6 +1,6 @@
 //! Phase spectrum visualization.
 //!
-//! Mirrors [`spectrum`](super::spectrum) but plots the per-bin phase angle
+//! Mirrors [`spectrum`](crate::operations::plotting::spectrum) but plots the per-bin phase angle
 //! (`Complex::arg()`, in radians) on the y-axis instead of magnitude. Phase is
 //! optionally unwrapped to remove the ±π discontinuities introduced by the
 //! principal-value branch of `atan2`, which is useful for inspecting group

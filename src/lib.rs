@@ -69,7 +69,7 @@
 //! (note names, enum `FromStr`) additionally carry a source span pointing a caret
 //! at the offending character. Enable the `fancy` feature to render the coloured
 //! caret-underline output (see `examples/error_diagnostics.rs`); library consumers
-//! who do not opt in get plain [`Display`] output and pay nothing for graphical
+//! who do not opt in get plain [`Display`](std::fmt::Display) output and pay nothing for graphical
 //! dependencies.
 //!
 //! ```rust
@@ -239,7 +239,7 @@
 //! |---|---|---|
 //! | `u8`  | 8-bit unsigned  | Mid-scale (128) represents silence |
 //! | `i16` | 16-bit signed   | CD-quality audio |
-//! | [`I24`](i24::I24) | 24-bit signed | From the `i24` crate |
+//! | [`I24`] | 24-bit signed | From the `i24` crate |
 //! | `i32` | 32-bit signed   | High-dynamic-range integer audio |
 //! | `f32` | 32-bit float    | Most DSP operations use this type |
 //! | `f64` | 64-bit float    | High-precision processing |

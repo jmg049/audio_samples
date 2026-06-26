@@ -19,7 +19,7 @@
 //!
 //! ## Submodules
 //!
-//! - [`complex`](crate::operations::AudioDecomposition::complex) — Complex domain onset detection functions (magnitude + phase)
+//! - [`complex`] — Complex domain onset detection functions (magnitude + phase)
 //! - [`filters`] — Signal processing utilities (median filter, rectification, compression)
 //! - [`flux`] — Spectral flux computation kernels
 //! - [`kernels`] — Low-level DSP kernels for onset detection
@@ -73,8 +73,9 @@ use crate::{
 ///
 /// # Intended Usage
 ///
-/// Construct via preset methods ([`percussive()`], [`musical()`], [`speech()`]) for common use
-/// cases, or use [`new()`] for custom configurations. Pass to [`AudioOnsetDetection::detect_onsets`]
+/// Construct via preset methods ([`percussive()`](Self::percussive), [`musical()`](Self::musical),
+/// [`speech()`](Self::speech)) for common use
+/// cases, or use [`new()`](Self::new) for custom configurations. Pass to [`AudioOnsetDetection::detect_onsets`]
 /// to detect onset times.
 ///
 /// # Invariants
@@ -119,8 +120,9 @@ pub struct OnsetDetectionConfig {
 impl OnsetDetectionConfig {
     /// Creates a new onset detection configuration with explicit parameters.
     ///
-    /// For common use cases, prefer the preset methods ([`percussive()`], [`musical()`],
-    /// [`speech()`]) which provide sensible defaults. Use this constructor for fine-grained
+    /// For common use cases, prefer the preset methods ([`percussive()`](Self::percussive),
+    /// [`musical()`](Self::musical),
+    /// [`speech()`](Self::speech)) which provide sensible defaults. Use this constructor for fine-grained
     /// control over all parameters.
     ///
     /// # Arguments
@@ -409,19 +411,19 @@ impl Default for OnsetDetectionConfig {
 pub enum SpectralFluxMethod {
     /// Energy-based flux using squared magnitude differences.
     ///
-    /// Computes the sum of positive energy differences: Σ max(0, |X[k,n]|² - |X[k,n-1]|²)
+    /// Computes the sum of positive energy differences: `Σ max(0, |X[k,n]|² - |X[k,n-1]|²)`
     /// across all frequency bins. Emphasizes sharp energy increases, making it ideal for
     /// percussive events like drum hits.
     Energy,
     /// Magnitude-based flux using absolute magnitude differences.
     ///
-    /// Computes the sum of positive magnitude differences: Σ max(0, |X[k,n]| - |X[k,n-1]|)
+    /// Computes the sum of positive magnitude differences: `Σ max(0, |X[k,n]| - |X[k,n-1]|)`
     /// across all frequency bins. More sensitive to subtle spectral changes than energy-based
     /// methods, suitable for tonal instruments with gradual attacks.
     Magnitude,
     /// Complex domain flux incorporating both magnitude and phase changes.
     ///
-    /// Computes the Euclidean distance between consecutive complex spectra: Σ |X[k,n] - X[k,n-1]|.
+    /// Computes the Euclidean distance between consecutive complex spectra: `Σ |X[k,n] - X[k,n-1]|`.
     /// Provides the most complete spectral change information but is computationally expensive.
     /// Best for polyphonic music with complex timbres.
     Complex,
@@ -463,8 +465,9 @@ impl FromStr for SpectralFluxMethod {
 ///
 /// # Intended Usage
 ///
-/// Construct via preset methods ([`percussive()`], [`musical()`], [`complex()`]) for common
-/// scenarios, or use [`new()`] for custom configurations. Pass to
+/// Construct via preset methods ([`percussive()`](Self::percussive), [`musical()`](Self::musical),
+/// [`complex()`](Self::complex)) for common
+/// scenarios, or use [`new()`](Self::new) for custom configurations. Pass to
 /// [`AudioOnsetDetection::detect_onsets_spectral_flux`] to detect onset times.
 ///
 /// # Invariants
@@ -501,8 +504,9 @@ pub struct SpectralFluxConfig {
 impl SpectralFluxConfig {
     /// Creates a new spectral flux configuration with explicit parameters.
     ///
-    /// For common use cases, prefer the preset methods ([`percussive()`], [`musical()`],
-    /// [`complex()`]) which provide sensible defaults. Use this constructor for fine-grained
+    /// For common use cases, prefer the preset methods ([`percussive()`](Self::percussive),
+    /// [`musical()`](Self::musical),
+    /// [`complex()`](Self::complex)) which provide sensible defaults. Use this constructor for fine-grained
     /// control over all parameters.
     ///
     /// # Arguments
@@ -669,8 +673,9 @@ impl SpectralFluxConfig {
 ///
 /// # Intended Usage
 ///
-/// Construct via preset methods ([`percussive()`], [`musical()`], [`speech()`]) for common
-/// scenarios, or use [`new()`] for custom configurations. Pass to
+/// Construct via preset methods ([`percussive()`](Self::percussive), [`musical()`](Self::musical),
+/// [`speech()`](Self::speech)) for common
+/// scenarios, or use [`new()`](Self::new) for custom configurations. Pass to
 /// [`AudioOnsetDetection::complex_onset_detection`] to detect onset times. Adjust
 /// `magnitude_weight` and `phase_weight` to balance the contribution of each component.
 ///
@@ -957,8 +962,8 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if configuration is invalid
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
-    /// - [crate::AudioSampleError::PeakPicking] if peak picking fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if peak picking fails
     ///
     /// # Example
     ///
@@ -1002,7 +1007,7 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if configuration is invalid
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
     #[inline]
     fn onset_detection_function(
         &self,
@@ -1053,8 +1058,8 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if configuration is invalid
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
-    /// - [crate::AudioSampleError::PeakPicking] if peak picking fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if peak picking fails
     ///
     /// # Example
     ///
@@ -1122,7 +1127,7 @@ where
     ///
     /// # Errors
     ///
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
     #[inline]
     fn spectral_flux(
         &self,
@@ -1197,8 +1202,8 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if configuration is invalid
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
-    /// - [crate::AudioSampleError::PeakPicking] if peak picking fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if peak picking fails
     ///
     /// # Example
     ///
@@ -1241,7 +1246,7 @@ where
     ///
     /// # Errors
     ///
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
     #[inline]
     fn onset_detection_function_complex(
         &self,
@@ -1277,7 +1282,7 @@ where
     ///
     /// # Errors
     ///
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
     #[inline]
     fn magnitude_difference_matrix(
         &self,
@@ -1303,7 +1308,7 @@ where
     ///
     /// # Errors
     ///
-    /// - [crate::AudioSampleError::Transform] if CQT computation fails
+    /// - [crate::AudioSampleError::Processing] if CQT computation fails
     #[inline]
     fn phase_deviation_matrix(
         &self,

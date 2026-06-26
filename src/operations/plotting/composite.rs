@@ -14,7 +14,7 @@ use std::path::Path;
 ///
 /// # Intended Usage
 /// Passed to [`CompositePlot::layout`] to specify the desired arrangement before calling
-/// [`build()`]. Different layouts are appropriate for different analysis workflows (e.g.,
+/// [`build()`](CompositePlot::build). Different layouts are appropriate for different analysis workflows (e.g.,
 /// vertical stacking for waveform above spectrogram, horizontal for side-by-side comparison).
 ///
 /// # Invariants
@@ -49,7 +49,7 @@ pub enum CompositeLayout {
 ///
 /// # Intended Usage
 /// Implemented by all concrete plot types ([`super::WaveformPlot`], [`super::SpectrogramPlot`],
-/// [`super::MagnitudeSpectrumPlot`]). Users interact with this trait primarily through
+/// [`super::spectrum::MagnitudeSpectrumPlot`]). Users interact with this trait primarily through
 /// [`CompositePlot::add_plot`], which accepts any type implementing `PlotComponent`.
 ///
 /// # Invariants
@@ -83,13 +83,13 @@ pub trait PlotComponent {
 /// visualization embedded in an iframe within a flexbox container.
 ///
 /// # Intended Usage
-/// Construct via [`CompositePlot::new()`], add plots with [`add_plot`], optionally configure
-/// layout with [`layout`], then finalize with [`build()`]. The result can be saved or displayed
+/// Construct via [`CompositePlot::new()`], add plots with [`add_plot`](Self::add_plot), optionally configure
+/// layout with [`layout`](Self::layout), then finalize with [`build()`](Self::build). The result can be saved or displayed
 /// using the [`PlotUtils`] trait methods.
 ///
 /// # Invariants
-/// - At least one plot must be added before calling [`build()`].
-/// - All plots are converted to HTML at the time of addition (via [`add_plot`]).
+/// - At least one plot must be added before calling [`build()`](Self::build).
+/// - All plots are converted to HTML at the time of addition (via [`add_plot`](Self::add_plot)).
 /// - The composite plot only supports HTML output (not static image formats).
 ///
 /// # Implementation Note
@@ -105,7 +105,7 @@ impl CompositePlot {
     /// Creates a new empty composite plot with vertical layout.
     ///
     /// # Returns
-    /// An empty [`CompositePlot`] instance. Use [`add_plot`] to add visualizations.
+    /// An empty [`CompositePlot`] instance. Use [`add_plot`](Self::add_plot) to add visualizations.
     ///
     /// # Example
     /// ```rust,no_run
@@ -129,7 +129,7 @@ impl CompositePlot {
     ///
     /// # Arguments
     /// * `plot` — Any type implementing [`PlotComponent`] (e.g., [`super::WaveformPlot`],
-    ///   [`super::SpectrogramPlot`], [`super::MagnitudeSpectrumPlot`]).
+    ///   [`super::SpectrogramPlot`], [`super::spectrum::MagnitudeSpectrumPlot`]).
     ///
     /// # Returns
     /// Self for method chaining.

@@ -14,7 +14,7 @@
 //! audio abstractions, keeping the main API surface clean while providing rich
 //! visualisation tools when the `plotting` feature is enabled.
 //!
-//! Import the [`AudioPlotting`](crate::operations::AudioPlotting) trait and call its methods on any [`AudioSamples`] instance.
+//! Import the [`AudioPlotting`] trait and call its methods on any [`AudioSamples`] instance.
 //! Each method returns an opaque plot object (`WaveformPlot`, `SpectrogramPlot`,
 //! `MagnitudeSpectrumPlot`) that can be rendered to HTML or saved to a file:
 //!
@@ -37,7 +37,6 @@
 //! choose the spectrogram type via [`SpectrogramPlotParams`]; for magnitude spectrum plots,
 //! configure FFT size and frequency range via [`MagnitudeSpectrumParams`].
 //!
-//! [`AudioPlotting`](crate::operations::AudioPlotting): crate::operations::AudioPlotting
 //! [`AudioSamples`]: crate::AudioSamples
 //! [`SpectrogramPlotParams`]: spectrograms::SpectrogramPlotParams
 //! [`MagnitudeSpectrumParams`]: spectrum::MagnitudeSpectrumParams

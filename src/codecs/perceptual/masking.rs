@@ -174,7 +174,7 @@ const SELF_MASKING_OFFSET_DB: f32 = 0.5;
 ///    normalised by band width.
 /// 2. Convert aggregated energy to dB, applying `config.epsilon` as a noise floor.
 /// 3. Compute ATH for each band's centre frequency.
-/// 4. For each target band `j`, the masking threshold = max(ATH[j], max over all
+/// 4. For each target band `j`, the masking threshold = max(`ATH[j]`, max over all
 ///    bands `i` of `energy[i] − spreading_attenuation(i → j)`). Bands far from
 ///    the masker contribute a lower threshold; the dominant masker wins.
 /// 5. Derive SMR, importance (perceptual weight × SMR), and allowed noise.
@@ -444,7 +444,7 @@ pub fn apply_temporal_masking(
 ///   Values of `6.0`–`10.0` correspond to roughly 8–10 dB sudden onsets.
 ///
 /// # Returns
-/// A [`NonEmptyVec<bool>`] with one entry per window; `true` = transient detected.
+/// A `NonEmptyVec<bool>` with one entry per window; `true` = transient detected.
 ///
 /// # Panics
 ///

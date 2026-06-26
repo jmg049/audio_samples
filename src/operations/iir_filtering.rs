@@ -87,9 +87,9 @@ use num_traits::FloatConst;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IirFilter {
-    /// Feed-forward (numerator) coefficients, ordered as b[0], b[1], …, b[M].
+    /// Feed-forward (numerator) coefficients, ordered as `b[0]`, `b[1]`, …, `b[M]`.
     pub b_coeffs: Vec<f64>,
-    /// Feed-back (denominator) coefficients, ordered as a[0], a[1], …, a[N].
+    /// Feed-back (denominator) coefficients, ordered as `a[0]`, `a[1]`, …, `a[N]`.
     /// `a[0]` is used as the normalisation divisor; set it to 1.0 for
     /// standard filter designs.
     pub a_coeffs: Vec<f64>,
@@ -535,7 +535,7 @@ pub struct SosFilter {
 impl SosFilter {
     /// Create a new SOS filter from a vector of biquad sections.
     ///
-    /// The sections are applied in order: input → section[0] → section[1] → ... → output.
+    /// The sections are applied in order: input → `section[0]` → `section[1]` → ... → output.
     ///
     /// # Arguments
     /// - `sections` – Vector of second-order [`IirFilter`] sections.
@@ -561,7 +561,7 @@ impl SosFilter {
     /// Process a single sample through the cascade.
     ///
     /// Feeds the input through each section in order, passing the
-    /// output of section[i] as the input to section[i+1].
+    /// output of `section[i]` as the input to `section[i+1]`.
     ///
     /// # Arguments
     /// - `input` – The current input sample.

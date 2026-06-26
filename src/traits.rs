@@ -52,7 +52,7 @@ where
 }
 
 /// Convenience supertrait asserting that a type can be raw-cast into all
-/// supported audio sample types: `u8`, `i16`, [`I24`](i24::I24), `i32`, `f32`, and
+/// supported audio sample types: `u8`, `i16`, [`I24`], `i32`, `f32`, and
 /// `f64`.
 ///
 /// A type satisfies this bound automatically when it implements [`CastInto`]
@@ -110,7 +110,7 @@ impl SupportedByteSize for SampleByteSize<8> {}
 /// |---------|-----------------------------|-----------|
 /// | `u8`    | Unsigned PCM (silence = 128)| 8         |
 /// | `i16`   | Signed integer PCM          | 16        |
-/// | [`I24`](i24::I24) | Signed integer PCM (24-bit) | 24        |
+/// | [`I24`] | Signed integer PCM (24-bit) | 24        |
 /// | `i32`   | Signed integer PCM          | 32        |
 /// | `f32`   | Normalised float            | 32        |
 /// | `f64`   | Normalised float            | 64        |
@@ -401,10 +401,10 @@ pub trait AudioSample:
 ///
 /// A type satisfies `StandardSample` automatically when it implements
 /// [`AudioSample`] together with [`CastInto<f64>`], [`CastFrom<f64>`], and
-/// [`ConvertFrom`] for every standard sample type (`u8`, `i16`, [`I24`](i24::I24),
+/// [`ConvertFrom`] for every standard sample type (`u8`, `i16`, [`I24`],
 /// `i32`, `f32`, `f64`). No manual implementation is required.
 ///
-/// The supported standard sample types are `u8`, `i16`, [`I24`](i24::I24), `i32`,
+/// The supported standard sample types are `u8`, `i16`, [`I24`], `i32`,
 /// `f32`, and `f64`. Most audio processing operations in this crate are
 /// generic over `T: StandardSample`.
 ///
@@ -1652,7 +1652,7 @@ pub trait AudioTypeConversion: Sized {
     /// Converts the audio to 24-bit signed integer PCM using audio-aware
     /// scaling.
     ///
-    /// Float samples in `[-1.0, 1.0]` are scaled and rounded to the [`I24`](i24::I24)
+    /// Float samples in `[-1.0, 1.0]` are scaled and rounded to the [`I24`]
     /// range with saturation. For `u8` audio, mid-scale value `128` maps to
     /// `0`.
     ///

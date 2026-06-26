@@ -62,15 +62,16 @@ jobs:
   doc:
     name: doc
     runs-on: ubuntu-latest
-    # NOTE: `RUSTDOCFLAGS: -D warnings` is intentionally NOT set yet. The crate
-    # has a pre-existing backlog of ~75 broken intra-doc links; the docs still
-    # build, so this job catches hard doc-build failures. Re-enable `-D warnings`
-    # once the broken-link backlog is cleared (separate doc-hygiene pass).
+    # Docs must build warning-free: any rustdoc warning (broken intra-doc link,
+    # redundant link target, bare URL, …) fails the build.
+    env:
+      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --features full_no_plotting
+      - run: cargo doc --no-deps --features full
 
   msrv:
     name: msrv (1.87)

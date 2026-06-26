@@ -20,7 +20,7 @@
 //! | [`AudioDecomposition`] | `decomposition` | Harmonic–percussive source separation (HPSS) |
 //! | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |
 //! | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |
-//! | [`AudioPlotting`](crate::operations::AudioPlotting) | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
+//! | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
 //!
 //! Grouping operations into separate traits keeps compile times low — only the code
 //! required for the enabled features is compiled — while providing a clean extension

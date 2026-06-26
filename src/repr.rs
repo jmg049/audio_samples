@@ -2189,7 +2189,7 @@ where
         AudioData::Multi(MultiData(MultiRepr::Owned(arr)))
     }
 
-    /// Wraps a pre-validated [`MonoData`] in `AudioData::Mono`.
+    /// Wraps a pre-validated `MonoData` in `AudioData::Mono`.
     ///
     /// # Safety
     ///
@@ -2202,7 +2202,7 @@ where
         AudioData::Mono(data)
     }
 
-    /// Wraps a pre-validated [`MultiData`] in `AudioData::Multi`.
+    /// Wraps a pre-validated `MultiData` in `AudioData::Multi`.
     ///
     /// # Safety
     ///

@@ -7,28 +7,28 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! [`lpc`] | Levinson–Durbin LPC analysis/synthesis, pitch estimation, LTP primitives. |
-//! [`mode`] | `OpusMode`, `OpusBandwidth`, `OpusConfig`, and `detect_mode`. |
-//! [`silk`] | SILK frame encode/decode: stateful LPC + LTP + 16-bit quantisation. |
-//! [`celt`] | CELT frame encode/decode: delegates to the psychoacoustic pipeline. |
-//! [`hybrid`] | Hybrid mode: SILK low band + CELT high band with IIR crossover. |
-//! [`stereo`] | M/S stereo codec [`OpusStereoCodec`]. |
-//! [`codec`] | [`OpusCodec`] and [`OpusEncodedAudio`] — the public entry points. |
+//! | [`lpc`](crate::codecs::opus::lpc) | Levinson–Durbin LPC analysis/synthesis, pitch estimation, LTP primitives. |
+//! | [`mode`](crate::codecs::opus::mode) | `OpusMode`, `OpusBandwidth`, `OpusConfig`, and `detect_mode`. |
+//! | [`silk`](crate::codecs::opus::silk) | SILK frame encode/decode: stateful LPC + LTP + 16-bit quantisation. |
+//! | [`celt`](crate::codecs::opus::celt) | CELT frame encode/decode: delegates to the psychoacoustic pipeline. |
+//! | [`hybrid`](crate::codecs::opus::hybrid) | Hybrid mode: SILK low band + CELT high band with IIR crossover. |
+//! | [`stereo`](crate::codecs::opus::stereo) | M/S stereo codec [`OpusStereoCodec`](crate::codecs::opus::OpusStereoCodec). |
+//! | [`codec`](crate::codecs::opus::codec) | [`OpusCodec`](crate::codecs::opus::OpusCodec) and [`OpusEncodedAudio`](crate::codecs::opus::OpusEncodedAudio) — the public entry points. |
 //!
 //! ## Design
 //!
 //! - **CELT** reuses the existing [`crate::codecs::perceptual`] pipeline:
 //!   MDCT → psychoacoustic masking → bit allocation → scalar quantisation.
 //!
-//! - **SILK** uses new LPC primitives in [`lpc`] with cross-frame state and a
+//! - **SILK** uses new LPC primitives in [`lpc`](crate::codecs::opus::lpc) with cross-frame state and a
 //!   single-tap long-term predictor (LTP).
 //!
 //! - **Hybrid** splits the signal at 8 kHz via a first-order IIR crossover
 //!   (perfect reconstruction), encodes the low band with SILK and the high band
 //!   with CELT, and sums on decode.
 //!
-//! - [`OpusCodec`] segments audio into fixed-length frames and dispatches each
-//!   to SILK, CELT, or Hybrid based on [`OpusConfig`] or per-frame detection.
+//! - [`OpusCodec`](crate::codecs::opus::OpusCodec) segments audio into fixed-length frames and dispatches each
+//!   to SILK, CELT, or Hybrid based on [`OpusConfig`](crate::codecs::opus::OpusConfig) or per-frame detection.
 //!
 //! ## What lives in the IO crate
 //!

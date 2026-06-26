@@ -17,9 +17,9 @@ use crate::{AudioSampleResult, AudioSamples, StandardSample};
 /// frequency range filtering.
 ///
 /// # Intended Usage
-/// Construct via [`MagnitudeSpectrumParams::db()`] or [`linear()`] constructor methods,
+/// Construct via [`MagnitudeSpectrumParams::db()`] or [`linear()`](Self::linear) constructor methods,
 /// then modify fields as needed before passing to [`create_magnitude_spectrum_plot`] or
-/// the [`crate::AudioPlotting`] trait methods.
+/// the [`crate::operations::AudioPlotting`] trait methods.
 ///
 /// # Invariants
 /// - If `n_fft` is `None`, it defaults to the next power of 2 greater than or equal to
@@ -116,7 +116,7 @@ impl Default for MagnitudeSpectrumParams {
 /// amplitude) of an audio signal. Provides methods for saving to disk and generating HTML.
 ///
 /// # Intended Usage
-/// Created via [`create_magnitude_spectrum_plot`] or through the [`crate::AudioPlotting`]
+/// Created via [`create_magnitude_spectrum_plot`] or through the [`crate::operations::AudioPlotting`]
 /// trait. Unlike spectrograms, magnitude spectrum plots show a single frequency snapshot
 /// (typically of the entire signal) rather than a time-varying representation.
 ///

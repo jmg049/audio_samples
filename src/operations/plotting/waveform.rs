@@ -640,7 +640,7 @@ impl WaveformPlot {
     /// onset detection algorithms. Onsets mark the beginning of transient events such as note
     /// attacks, percussive hits, or significant spectral changes.
     ///
-    /// Internally calls [`add_vline`] for each onset time.
+    /// Internally calls [`add_vline`](Self::add_vline) for each onset time.
     ///
     /// # Arguments
     /// * `onset_times` — Vector of onset times in seconds
@@ -687,7 +687,7 @@ impl WaveformPlot {
     /// Renders vertical lines at each beat time, typically used to visualize the output of
     /// beat tracking algorithms. Beats mark the perceptual pulse or rhythm of the signal.
     ///
-    /// Internally calls [`add_vline`] for each beat time.
+    /// Internally calls [`add_vline`](Self::add_vline) for each beat time.
     ///
     /// # Arguments
     /// * `beat_times` — Vector of beat times in seconds
@@ -773,7 +773,7 @@ impl WaveformPlotParams {
     /// Creates a new `WaveformPlotParams` instance with default values.
     ///
     /// All fields are initialized to `None` or default settings. Use the
-    /// builder pattern via [`builder()`] to customize parameters fluently.
+    /// builder pattern via [`builder()`](Self::builder) to customize parameters fluently.
     ///
     /// # Returns
     ///
@@ -998,7 +998,7 @@ impl WaveformPlotParamsBuilder {
 /// Creates a waveform plot from audio samples and parameters.
 ///
 /// Converts the audio to `f64`, applies decimation if the sample count exceeds
-/// [`DECIMATE_THRESHOLD`], and renders the waveform using the configured channel
+/// the internal `DECIMATE_THRESHOLD`, and renders the waveform using the configured channel
 /// management strategy.
 ///
 /// # Arguments
@@ -1028,7 +1028,6 @@ impl WaveformPlotParamsBuilder {
 /// // plot.save("waveform.html").unwrap();
 /// ```
 ///
-/// [`DECIMATE_THRESHOLD`]: super::DECIMATE_THRESHOLD
 /// [`AudioSampleError`]: crate::AudioSampleError
 #[inline]
 pub fn create_waveform_plot<T>(

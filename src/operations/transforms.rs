@@ -50,7 +50,7 @@
 //!
 //! All operations return [`crate::AudioSampleResult`]. Mono-only methods
 //! return [`crate::AudioSampleError::Layout`]
-//! ([`LayoutError::ChannelCountUnsupported`](crate::LayoutError::ChannelCountUnsupported))
+//! ([`LayoutError::ChannelCountUnsupported`])
 //! when given multi-channel input. Failures originating inside [`spectrograms`]
 //! are propagated as [`crate::AudioSampleError::Processing`].
 //!
