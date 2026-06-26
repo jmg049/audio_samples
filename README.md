@@ -48,178 +48,113 @@ Upgrading from 1.x? See [the migration guide](documentation/MIGRATING_TO_2.0.md)
 
 ## Quick Start
 
-### Generating and mixing signals
+### Creating audio
+
+Build `AudioSamples` from an `ndarray`, or generate a signal. Construction is
+fallible because the data, channel count, and sample rate must agree.
 
 ```rust
-use audio_samples::{sample_rate, AudioTypeConversion, cosine_wave, sine_wave};
+use audio_samples::{AudioSamples, sample_rate, sine_wave};
+use ndarray::array;
 use std::time::Duration;
 
-fn main() {
+fn main() -> audio_samples::AudioSampleResult<()> {
+    // Mono, from a slice of samples.
+    let _mono = AudioSamples::new_mono(array![0.1f32, 0.5, -0.3, 0.8], sample_rate!(44_100))?;
+
+    // Stereo, from a 2-D (channels x samples) array.
+    let _stereo = AudioSamples::<f32>::new_multi_channel(
+        array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+        sample_rate!(44_100),
+    )?;
+
+    // Or generate one: a 440 Hz sine, 1 second, amplitude 0.5.
+    let _tone = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44_100), 0.5);
+    Ok(())
+}
+```
+
+Generators cover the classic oscillators plus logarithmic chirps
+(`exponential_chirp`), band-limited square/sawtooth/triangle waves, FM
+(`fm_signal`), and white/pink/brown noise.
+
+### A processing pipeline
+
+Operations carry the sample rate and channel layout with the data and chain
+through the borrowing API. Here two tones are mixed, the low one is filtered
+out, the result is peak-normalized, and its level is read back. Enable the
+`processing` feature.
+
+```rust
+use audio_samples::{AudioProcessing, AudioStatistics, NormalizationConfig, sample_rate, sine_wave};
+use std::time::Duration;
+
+fn main() -> audio_samples::AudioSampleResult<()> {
     let sr = sample_rate!(44_100);
-    let duration = Duration::from_secs_f64(1.0);
+    let dur = Duration::from_secs(1);
 
-    // A 440 Hz sine as i16 PCM, converted to f32.
-    let float_sine = sine_wave::<i16>(440.0, duration, sr, 0.5).as_f32();
+    // 100 Hz and 5 kHz, mixed.
+    let signal = sine_wave::<f32>(100.0, dur, sr, 0.5) + sine_wave::<f32>(5_000.0, dur, sr, 0.5);
 
-    // Mixed with a 220 Hz cosine.
-    let cosine = cosine_wave::<f32>(220.0, duration, sr, 0.5);
-    let mixed = float_sine + cosine;
-}
-```
+    // High-pass above 1 kHz, then peak-normalize. Each step returns a new value.
+    let cleaned = signal
+        .high_pass_filter(1_000.0)?
+        .normalize(NormalizationConfig::peak(1.0))?;
 
-Besides the classic oscillators, the generators include logarithmic chirps
-(`exponential_chirp`), band-limited (alias-free) square, sawtooth, and triangle
-waves (`square_wave_bandlimited`, `sawtooth_wave_bandlimited`,
-`triangle_wave_bandlimited`), and frequency modulation (`fm_signal`).
+    println!(
+        "{} channel(s) at {} Hz, peak {:.3}, rms {:.3}",
+        cleaned.num_channels().get(),
+        cleaned.sample_rate().get(),
+        cleaned.peak(),
+        cleaned.rms(),
+    );
 
-### Processing pipelines
-
-Enable the `processing` feature. Each borrowing operation returns a new owned
-value, so they chain; use the `*_in_place` variants to mutate instead.
-
-```rust
-use audio_samples::{AudioProcessing, AudioSamples, NormalizationConfig, sample_rate};
-use ndarray::array;
-
-fn main() -> audio_samples::AudioSampleResult<()> {
-    let audio = AudioSamples::new_mono(
-        array![0.1f32, 0.5, -0.3, 0.8, -0.2],
-        sample_rate!(44100),
-    )?;
-
-    // `scale` is infallible (no `?`); `normalize` and `remove_dc_offset` are fallible.
-    let processed = audio
-        .normalize(NormalizationConfig::peak(1.0))?
-        .scale(0.5)
-        .remove_dc_offset()?;
-
-    // The same work, mutating in place:
-    let mut buf = processed;
-    buf.scale_in_place(2.0);
+    // The `*_in_place` variants mutate instead of returning a new value.
+    let mut buf = cleaned;
+    buf.scale_in_place(0.5);
     Ok(())
 }
 ```
 
-### Spectral transforms
+### Type conversions
 
-Enable the `transforms` feature:
-
-```bash
-cargo add audio_samples --features transforms
-```
+Conversions are audio-aware: integer PCM is scaled to and from the float
+`[-1.0, 1.0]` range rather than cast blindly.
 
 ```rust
-use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate, sine_wave};
-use spectrograms::{ChromaParams, CqtParams, MfccParams, StftParams, WindowType};
+use audio_samples::{AudioTypeConversion, sample_rate, sine_wave};
+use std::time::Duration;
+
+let pcm = sine_wave::<i16>(440.0, Duration::from_secs(1), sample_rate!(44_100), 0.8); // i16 PCM
+let as_float = pcm.as_f32();   // scaled into [-1.0, 1.0]
+let _back = as_float.as_i16(); // and back to i16
+```
+
+### Spectral analysis
+
+Enable the `transforms` feature for FFT/STFT and the spectral feature suite.
+
+```rust
+use audio_samples::{AudioStatistics, AudioTransforms, ChannelReduction, nzu, sample_rate, sine_wave};
+use spectrograms::{StftParams, WindowType};
 use std::time::Duration;
 
 fn main() -> audio_samples::AudioSampleResult<()> {
-    let sr = sample_rate!(44100);
-    let audio: AudioSamples<'static, f64> =
-        sine_wave::<f64>(440.0, Duration::from_millis(200), sr, 0.8);
+    let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44_100), 0.8);
 
-    let fft = audio.fft(nzu!(8192))?;
+    // Short-time Fourier transform.
+    let params = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true)?;
+    let _stft = audio.stft(&params)?;
 
-    let stft_params = StftParams::new(nzu!(1024), nzu!(256), WindowType::Hanning, true)?;
-    let stft = audio.stft(&stft_params)?;
-    let mfcc = audio.mfcc(&stft_params, nzu!(40), &MfccParams::speech_standard())?;
-    let chroma = audio.chromagram(&stft_params, &ChromaParams::music_standard())?;
-
-    // power_spectral_density returns a `Psd` with frequency and density axes.
-    let psd = audio.power_spectral_density(nzu!(1024), 0.5)?;
-    let (_freqs, _density) = (psd.frequencies(), psd.density());
-
-    let _cqt = audio.constant_q_transform(
-        &CqtParams::new(nzu!(12), nzu!(7), 32.7)?,
-        nzu!(256),
-    )?;
-
-    // Round-trip via the inverse STFT.
-    let _reconstructed = AudioSamples::<f64>::istft(stft)?;
+    // A derived spectral feature (brightness), in Hz.
+    let centroid = audio.spectral_centroid(ChannelReduction::Average)?;
+    println!("spectral centroid: {centroid:.0} Hz");
     Ok(())
 }
 ```
 
-### Psychoacoustic analysis
-
-Enable the `psychoacoustic` feature:
-
-```bash
-cargo add audio_samples --features psychoacoustic
-```
-
-```rust
-use audio_samples::{
-    AudioPerceptualAnalysis, BandLayout, PsychoacousticConfig, sample_rate, sine_wave,
-};
-use non_empty_slice::NonEmptySlice;
-use spectrograms::WindowType;
-use std::num::NonZeroUsize;
-use std::time::Duration;
-
-fn main() -> audio_samples::AudioSampleResult<()> {
-    let signal = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
-
-    // 24 Bark critical bands mapped onto 1024 MDCT bins.
-    let layout = BandLayout::bark(
-        NonZeroUsize::new(24).unwrap(),
-        44100.0,
-        NonZeroUsize::new(1024).unwrap(),
-    );
-
-    let weights = vec![1.0_f32; 24];
-    let config = PsychoacousticConfig::new(
-        -60.0, 14.5, 0.4, 25.0, 6.0,
-        NonEmptySlice::from_slice(&weights).unwrap(),
-        1e-10,
-    );
-
-    let result = signal.analyse_psychoacoustic(WindowType::Hanning, &layout, &config)?;
-
-    // Bands audible above the masking threshold.
-    for metric in result.band_metrics.as_slice().iter() {
-        if metric.signal_to_mask_ratio > 0.0 {
-            println!(
-                "{:.0} Hz, SMR {:.1} dB, importance {:.2}",
-                metric.band.centre_frequency,
-                metric.signal_to_mask_ratio,
-                metric.importance,
-            );
-        }
-    }
-    Ok(())
-}
-```
-
----
-
-## Creating AudioSamples
-
-Construction returns a `Result`: a valid `AudioSamples` requires a consistent
-buffer length, channel count, and sample rate. The `sample_rate!` macro and
-`non_empty_vec!` enforce the non-zero and non-empty invariants at the call site.
-
-```rust
-use audio_samples::{AudioSamples, sample_rate};
-use non_empty_slice::non_empty_vec;
-
-let audio = AudioSamples::from_mono_vec(
-    non_empty_vec![0.1f32, 0.2, 0.3],
-    sample_rate!(44100),
-);
-```
-
-For multi-channel audio (channels x samples):
-
-```rust
-use audio_samples::{AudioSamples, sample_rate};
-use ndarray::array;
-
-let stereo = AudioSamples::<f32>::new_multi_channel(
-    array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
-    sample_rate!(44100),
-).unwrap();
-```
+The full transform set (FFT, MFCC, chromagram, CQT, PSD, inverse STFT) and the
+rest of the spectral features are listed under [Features](#features).
 
 ---
 
@@ -299,7 +234,9 @@ A larger demo lives in a separate repository:
 ## Companion Crates
 
 - [`audio_samples_io`](https://github.com/jmg049/audio_samples_io): audio file decoding and encoding
-- [`audio_samples_playback`](https://github.com/jmg049/audio_playback): device-level playback
+- [`audio_samples_streaming](https://github.com/jmg049/audio_samples_streaming): streaming functionality
+- [`audio_samples_ml](https://github.com/jmg049/audio_samples_ml): audio machine learning such as STT and TTS.
+- [`audio_samples_qoe](https://github.com/jmg049/audio_samples_streaming): audio Quality of Experience (qoe) metrics.
 - [`audio_samples_python`](https://github.com/jmg049/audio_python): Python bindings
 - [`spectrograms`](https://github.com/jmg049/Spectrograms): spectrograms and time-frequency transforms (used by the `transforms` feature)
 - [`i24`](https://github.com/jmg049/i24): 24-bit signed integer type for Rust
