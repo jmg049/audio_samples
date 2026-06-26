@@ -999,8 +999,10 @@ where
 
         // safety: working_vec is non-empty (see above).
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
-        let fft_output_size = n.div_ceil(nzu!(2)).checked_add(1).expect(
-            "n is non-zero since self is non-empty by design and  n/2 is always << usize::MAX, which means n/2 + 1 << usize::MAX and cannot overflow",
+        // ceil(n/2) + 1, computed without NonZero::div_ceil (MSRV 1.92) — the
+        // overflow-safe `n/2 + n%2 + 1` keeps the minimum supported Rust at 1.87.
+        let fft_output_size = NonZeroUsize::new(n.get() / 2 + (n.get() % 2) + 1).expect(
+            "n is non-zero so n/2 + n%2 + 1 >= 2; n/2 is always << usize::MAX so this cannot overflow",
         );
         let power_spectrum =
             with_fft_planner(|planner| planner.power_spectrum(working_samples, n, None))?;
