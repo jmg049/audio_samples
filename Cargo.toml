@@ -93,10 +93,9 @@ unsafe_derive_deserialize = "allow"
 multiple_unsafe_ops_per_block = "allow"
 doc_markdown = "allow"
 # `NonZero::div_ceil` is stable since 1.92 but the crate MSRV is 1.87. The two
-# call sites are pre-existing; resolving them properly is an MSRV bump (out of
-# scope for the lint migration), so the advisory is allowed rather than silenced
-# at each site.
-incompatible_msrv = "allow"
+# Guards against using stdlib items newer than rust-version (1.87). The former
+# NonZero::div_ceil (1.92) call sites were rewritten with plain arithmetic.
+incompatible_msrv = "warn"
 
 [dependencies]
 bytemuck = "1.25.0"

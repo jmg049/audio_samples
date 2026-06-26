@@ -304,11 +304,11 @@ impl HpssConfig {
     #[inline]
     #[must_use]
     pub const fn num_freq_bins(&self) -> NonZeroUsize {
-        self.stft_params
-            .n_fft()
-            .div_ceil(crate::nzu!(2))
-            .checked_add(1)
-            .expect("Div 2 plus 1 will get nowhere near the max value")
+        // ceil(n_fft/2) + 1, computed without NonZero::div_ceil (MSRV 1.92) so
+        // the minimum supported Rust stays at 1.87. `n/2 + n%2` == ceil(n/2).
+        let n = self.stft_params.n_fft().get();
+        NonZeroUsize::new(n / 2 + (n % 2) + 1)
+            .expect("n_fft >= 1, so n/2 + n%2 + 1 >= 2 and never zero or overflowing")
     }
 
     /// Calculate the frequency resolution in Hz.
