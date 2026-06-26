@@ -404,3 +404,23 @@ required-features = ["educational", "processing"]
 name = "filtering"
 harness = false
 required-features = ["iir-filtering", "processing", "editing", "statistics", "transforms"]
+
+[[bench]]
+name = "conversions"
+harness = false
+required-features = ["statistics", "channels"]
+
+[[bench]]
+name = "transforms"
+harness = false
+required-features = ["transforms", "statistics"]
+
+[[bench]]
+name = "generation"
+harness = false
+required-features = ["random-generation"]
+
+[[bench]]
+name = "dynamics"
+harness = false
+required-features = ["dynamic-range", "statistics"]
