@@ -33,7 +33,7 @@ const DEFAULT_FREQ_PADDING: f64 = 0.4; // 40% padding on each side when auto-zoo
 /// tracks (e.g., pitch, spectral centroid), and spectral feature annotations.
 ///
 /// # Intended Usage
-/// Created via [`create_spectrogram_plot`] or through the [`crate::AudioPlotting`] trait.
+/// Created via [`create_spectrogram_plot`] or through the [`crate::operations::AudioPlotting`] trait.
 /// Supports method chaining for adding overlays before final rendering or saving.
 ///
 /// # Invariants
@@ -336,7 +336,7 @@ impl SpectrogramPlot {
     /// Adds a spectral centroid track overlay to the spectrogram.
     ///
     /// The spectral centroid represents the "center of mass" of the spectrum and correlates
-    /// with the perceived brightness of a sound. This convenience method wraps [`overlay_contour`]
+    /// with the perceived brightness of a sound. This convenience method wraps [`overlay_contour`](Self::overlay_contour)
     /// with a default label of "Spectral Centroid".
     ///
     /// Typically used in conjunction with
@@ -379,7 +379,7 @@ impl SpectrogramPlot {
     /// of the spectral energy is contained. It indicates the high-frequency "cutoff" of the
     /// spectrum and is useful for distinguishing tonal vs. noisy content.
     ///
-    /// This convenience method wraps [`overlay_contour`] with a default label of
+    /// This convenience method wraps [`overlay_contour`](Self::overlay_contour) with a default label of
     /// "Spectral Rolloff".
     ///
     /// Typically used in conjunction with
@@ -425,9 +425,9 @@ impl SpectrogramPlot {
 /// channel management strategy.
 ///
 /// # Intended Usage
-/// Construct via [`SpectrogramPlotParams::default()`], [`mel_db()`], or [`linear_magnitude()`]
+/// Construct via [`SpectrogramPlotParams::default()`], [`mel_db()`](Self::mel_db), or [`linear_magnitude()`](Self::linear_magnitude)
 /// constructor methods. Modify fields as needed before passing to [`create_spectrogram_plot`]
-/// or the [`crate::AudioPlotting`] trait methods.
+/// or the [`crate::operations::AudioPlotting`] trait methods.
 ///
 /// # Invariants
 /// - When `auto_zoom_freq` is `true` and `freq_range` is `None`, the frequency axis will be

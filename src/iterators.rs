@@ -1024,8 +1024,8 @@ pub enum PaddingMode {
 /// underlying [`AudioSamples`] buffer for the lifetime `'a`, so iterating
 /// performs no per-window allocation or copying.
 ///
-/// - [`WindowView::Mono`] wraps an [`ArrayView1`] over `window_size` samples.
-/// - [`WindowView::Multi`] wraps an [`ArrayView2`] of shape
+/// - [`WindowView::Mono`] wraps an [`ArrayView1`](ndarray::ArrayView1) over `window_size` samples.
+/// - [`WindowView::Multi`] wraps an [`ArrayView2`](ndarray::ArrayView2) of shape
 ///   `(channels, window_size)`.
 ///
 /// The variant matches the channel layout of the source audio: mono audio

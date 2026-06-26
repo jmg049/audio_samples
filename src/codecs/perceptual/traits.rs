@@ -87,7 +87,7 @@ pub trait AudioPerceptualAnalysis {
     ///   and allowed noise.
     ///
     /// # Errors
-    /// - [`AudioSampleError::Parameter`] if the signal is not mono, is too short
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is not mono, is too short
     ///   (< 4 samples), or if `config` is incompatible with `band_layout`.
     fn analyse_psychoacoustic(
         &self,

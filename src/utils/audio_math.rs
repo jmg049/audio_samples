@@ -615,7 +615,7 @@ pub fn time_to_frames(time_seconds: f64, sample_rate: f64, hop_size: usize) -> u
 /// # Behavioural Guarantees
 ///
 /// * The returned value is non-decreasing with increasing `samples` when `sample_rate > 0`.
-/// * For fixed parameters, applying [`time_to_samples`] to the returned value recovers the
+/// * For fixed parameters, applying [`seconds_to_samples`] to the returned value recovers the
 ///   original sample index up to rounding error.
 ///
 /// # Examples
