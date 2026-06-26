@@ -47,7 +47,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         vertical_html.contains("composite-container") && vertical_html.contains("iframe"),
         "vertical composite HTML should contain the composite container and iframes"
     );
-    println!("Rendered vertical composite ({} bytes)", vertical_html.len());
+    println!(
+        "Rendered vertical composite ({} bytes)",
+        vertical_html.len()
+    );
 
     // Test 2: Horizontal composition
     // Create new plots since we consumed the originals
@@ -66,7 +69,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         horizontal_html.contains("composite-container") && horizontal_html.contains("iframe"),
         "horizontal composite HTML should contain the composite container and iframes"
     );
-    println!("Rendered horizontal composite ({} bytes)", horizontal_html.len());
+    println!(
+        "Rendered horizontal composite ({} bytes)",
+        horizontal_html.len()
+    );
 
     // Test 3: Show vertical composite
     #[cfg(feature = "html_view")]

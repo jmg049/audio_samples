@@ -188,8 +188,7 @@ pub fn explain_text_for_op<T: StandardSample>(
     after: &AudioSamples<'static, T>,
 ) -> Option<String> {
     use processing::{
-        explain_text_compressor, explain_text_eq_band, explain_text_limiter,
-        explain_text_resample,
+        explain_text_compressor, explain_text_eq_band, explain_text_limiter, explain_text_resample,
     };
     Some(match op_name {
         "Compressor" => explain_text_compressor(before, after),

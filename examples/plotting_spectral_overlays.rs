@@ -22,9 +22,9 @@ fn assert_plot_html<P: audio_samples::operations::PlotUtils>(
 
 #[cfg(all(feature = "plotting", feature = "statistics"))]
 fn main() -> audio_samples::AudioSampleResult<()> {
+    use audio_samples::operations::AudioPlotting;
     use audio_samples::operations::plotting::dsp_overlays;
     use audio_samples::operations::plotting::spectrograms::SpectrogramPlotParams;
-    use audio_samples::operations::AudioPlotting;
     use audio_samples::{AudioSamples, chirp, sample_rate};
     use std::time::Duration;
 

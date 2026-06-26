@@ -24,7 +24,11 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     let round_trip: i16 = f32_val.convert_to();
     println!("{:.2}_f32 -> {}_i16", f32_val, round_trip);
     // i16::MAX should survive the round-trip through normalised f32.
-    assert_eq!(round_trip, i16::MAX, "i16 -> f32 -> i16 round-trip must be lossless at full scale");
+    assert_eq!(
+        round_trip,
+        i16::MAX,
+        "i16 -> f32 -> i16 round-trip must be lossless at full scale"
+    );
     println!("\n-----\n");
 
     // The [`AudioSample`] trait underpins the entire audio system.
@@ -47,8 +51,16 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("-----\n");
     println!("Stereo audio: {:#}\n", stereo_audio);
 
-    assert_eq!(mono_audio.num_channels().get(), 1, "mono constructor must yield 1 channel");
-    assert_eq!(stereo_audio.num_channels().get(), 2, "stereo constructor must yield 2 channels");
+    assert_eq!(
+        mono_audio.num_channels().get(),
+        1,
+        "mono constructor must yield 1 channel"
+    );
+    assert_eq!(
+        stereo_audio.num_channels().get(),
+        2,
+        "stereo constructor must yield 2 channels"
+    );
 
     println!("-----\n");
 

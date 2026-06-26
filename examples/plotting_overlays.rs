@@ -61,7 +61,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
             !waveform_html.is_empty() && waveform_html.contains("plotly"),
             "waveform overlay HTML should be a non-empty Plotly document"
         );
-        println!("Rendered waveform plot with overlays ({} bytes)", waveform_html.len());
+        println!(
+            "Rendered waveform plot with overlays ({} bytes)",
+            waveform_html.len()
+        );
 
         // Test spectrogram plot with overlays
         println!("\nCreating spectrogram plot with overlays...");
@@ -78,7 +81,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
             !spec_html.is_empty() && spec_html.contains("plotly"),
             "spectrogram overlay HTML should be a non-empty Plotly document"
         );
-        println!("Rendered spectrogram plot with overlays ({} bytes)", spec_html.len());
+        println!(
+            "Rendered spectrogram plot with overlays ({} bytes)",
+            spec_html.len()
+        );
 
         // Test pitch contour overlay
         println!("\nCreating spectrogram with pitch contour...");
@@ -108,7 +114,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
             !contour_html.is_empty() && contour_html.contains("plotly"),
             "spectrogram-with-contour HTML should be a non-empty Plotly document"
         );
-        println!("Rendered spectrogram with pitch contour ({} bytes)", contour_html.len());
+        println!(
+            "Rendered spectrogram with pitch contour ({} bytes)",
+            contour_html.len()
+        );
         Ok(())
     }
 }

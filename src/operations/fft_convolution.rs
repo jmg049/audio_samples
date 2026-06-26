@@ -178,7 +178,11 @@ mod tests {
         let r = recovered.as_slice();
         assert_eq!(r.len(), system.len());
         for (i, want) in system.iter().enumerate() {
-            assert!((r[i] - want).abs() < 1e-6, "tap {i}: got {}, want {want}", r[i]);
+            assert!(
+                (r[i] - want).abs() < 1e-6,
+                "tap {i}: got {}, want {want}",
+                r[i]
+            );
         }
     }
 }

@@ -124,7 +124,11 @@ fn princarg(angle: f64) -> f64 {
     // rem_euclid maps into [0, TAU); shift to (-π, π].
     let wrapped = (angle + PI).rem_euclid(TAU) - PI;
     // rem_euclid produces [-π, π); fold -π up to π so the range is (-π, π].
-    if wrapped <= -PI { wrapped + TAU } else { wrapped }
+    if wrapped <= -PI {
+        wrapped + TAU
+    } else {
+        wrapped
+    }
 }
 
 /// Computes phase deviation from expected phase progression.

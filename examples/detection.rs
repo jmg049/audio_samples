@@ -3,7 +3,7 @@
 //! heuristic additionally requires the `transforms` feature.
 
 pub fn main() -> audio_samples::AudioSampleResult<()> {
-    use audio_samples::{sine_wave, utils::detection, AudioSamples};
+    use audio_samples::{AudioSamples, sine_wave, utils::detection};
     use std::time::Duration;
 
     let audio: AudioSamples<'static, f64> = sine_wave::<f64>(

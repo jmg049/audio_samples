@@ -133,7 +133,11 @@ where
     use non_empty_slice::NonEmptySlice;
 
     let x: Vec<f64> = input.iter().map(|&s| -> f64 { s.convert_to() }).collect();
-    let h_rev: Vec<f64> = coeffs.iter().rev().map(|&c| -> f64 { c.convert_to() }).collect();
+    let h_rev: Vec<f64> = coeffs
+        .iter()
+        .rev()
+        .map(|&c| -> f64 { c.convert_to() })
+        .collect();
 
     let x_ne = NonEmptySlice::new(x.as_slice()).ok_or_else(|| {
         AudioSampleError::Parameter(ParameterError::invalid_value("audio", "empty signal"))
@@ -1348,18 +1352,13 @@ mod tests {
         let original = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
         // Non-mutating variant.
-        let borrowed = original
-            .normalize(NormalizationConfig::peak(1.0))
-            .unwrap();
+        let borrowed = original.normalize(NormalizationConfig::peak(1.0)).unwrap();
 
         // The original must be unchanged.
         assert_mono_eq(
             &original,
-            &AudioSamples::new_mono(
-                array![1.0f32, -3.0, 2.0, -1.0, 0.5],
-                sample_rate!(44100),
-            )
-            .unwrap(),
+            &AudioSamples::new_mono(array![1.0f32, -3.0, 2.0, -1.0, 0.5], sample_rate!(44100))
+                .unwrap(),
         );
 
         // In-place variant on a clone.

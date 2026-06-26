@@ -1460,11 +1460,7 @@ where
     /// assert!(audio[0].is_finite());
     /// ```
     #[inline]
-    fn band_pass_filter(
-        &self,
-        low_cutoff_hz: f64,
-        high_cutoff_hz: f64,
-    ) -> AudioSampleResult<Self>
+    fn band_pass_filter(&self, low_cutoff_hz: f64, high_cutoff_hz: f64) -> AudioSampleResult<Self>
     where
         Self: Sized + Clone,
     {
@@ -3776,10 +3772,8 @@ where
     /// let config = ThreeBandEqConfig::new(200.0, -2.0, 1000.0, 3.0, 2.0, 4000.0, 1.0);
     /// audio.apply_three_band_eq_in_place(&config).unwrap();
     /// ```
-    fn apply_three_band_eq_in_place(
-        &mut self,
-        config: &ThreeBandEqConfig,
-    ) -> AudioSampleResult<()>;
+    fn apply_three_band_eq_in_place(&mut self, config: &ThreeBandEqConfig)
+    -> AudioSampleResult<()>;
 
     /// Applies a three-band EQ, returning a new copy.
     ///
@@ -5327,11 +5321,8 @@ where
     /// let mut stereo = audio.duplicate_to_channels(2).unwrap();
     /// assert!(stereo.swap_channels_in_place(0, 1).is_ok());
     /// ```
-    fn swap_channels_in_place(
-        &mut self,
-        channel1: usize,
-        channel2: usize,
-    ) -> AudioSampleResult<()>;
+    fn swap_channels_in_place(&mut self, channel1: usize, channel2: usize)
+    -> AudioSampleResult<()>;
 
     /// Swap two channels, returning a new copy and leaving `self` unchanged.
     ///
@@ -6142,8 +6133,7 @@ where
     ///
     /// Returns [crate::AudioSampleError::Parameter] if the audio does not have
     /// exactly two channels.
-    fn plot_lissajous(&self, params: &LissajousParams)
-    -> AudioSampleResult<LissajousPlot>;
+    fn plot_lissajous(&self, params: &LissajousParams) -> AudioSampleResult<LissajousPlot>;
 }
 
 /// Amplitude envelope extraction operations.

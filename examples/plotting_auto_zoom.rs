@@ -34,7 +34,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     params_manual.auto_zoom_freq = false;
     let plot_manual = audio.plot_spectrogram(&params_manual)?;
     let html_manual = plot_manual.html()?;
-    println!("Rendered fixed-range spectrogram ({} bytes)", html_manual.len());
+    println!(
+        "Rendered fixed-range spectrogram ({} bytes)",
+        html_manual.len()
+    );
 
     // Test 3: Manual frequency range override
     println!("Creating spectrogram with manual frequency range...");
@@ -42,7 +45,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     params_override.freq_range = Some((200.0, 1000.0));
     let plot_override = audio.plot_spectrogram(&params_override)?;
     let html_override = plot_override.html()?;
-    println!("Rendered manual-range spectrogram ({} bytes)", html_override.len());
+    println!(
+        "Rendered manual-range spectrogram ({} bytes)",
+        html_override.len()
+    );
 
     // All three render paths must produce non-empty HTML documents.
     for (name, html) in [

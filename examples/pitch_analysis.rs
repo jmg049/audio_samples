@@ -24,7 +24,10 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     // --- Self-verification: both detectors should land near 440 Hz ---------
     // Both detectors quantise to a coarse grid here, so allow a modest tolerance.
     if let Some(f) = yin {
-        assert!((f - 440.0).abs() < 20.0, "YIN pitch {f} Hz should be ~440 Hz");
+        assert!(
+            (f - 440.0).abs() < 20.0,
+            "YIN pitch {f} Hz should be ~440 Hz"
+        );
     }
     if let Some(f) = ac {
         assert!(

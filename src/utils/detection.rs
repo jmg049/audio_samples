@@ -933,7 +933,8 @@ mod tests {
             data.push(amplitude * (two_pi * 440.0 * t).sin());
         }
         let arr = ndarray::Array1::from_vec(data);
-        let audio: AudioSamples<'_, f64> = AudioSamples::new_mono(arr, sample_rate!(44100)).unwrap();
+        let audio: AudioSamples<'_, f64> =
+            AudioSamples::new_mono(arr, sample_rate!(44100)).unwrap();
 
         let (peak, rms, dynamic_range) = detect_dynamic_range(&audio).unwrap();
 
@@ -960,7 +961,10 @@ mod tests {
 
         let (_, rms, dynamic_range) = detect_dynamic_range(&audio).unwrap();
 
-        assert!(!rms.is_nan(), "RMS must not be NaN for a negative-sum signal");
+        assert!(
+            !rms.is_nan(),
+            "RMS must not be NaN for a negative-sum signal"
+        );
         assert!(rms.is_finite() && rms > 0.0);
         assert!(!dynamic_range.is_nan() && dynamic_range.is_finite());
     }

@@ -17,7 +17,11 @@ use audio_samples::{AudioSamples, sample_rate};
 use ndarray::array;
 
 fn sample() -> AudioSamples<'static, f32> {
-    AudioSamples::new_mono(array![0.1f32, 0.8, -0.2, 0.9, -0.7, 0.3], sample_rate!(44100)).unwrap()
+    AudioSamples::new_mono(
+        array![0.1f32, 0.8, -0.2, 0.9, -0.7, 0.3],
+        sample_rate!(44100),
+    )
+    .unwrap()
 }
 
 /// Every wired dispatcher op returns `Some` non-empty text tagged with its
@@ -59,9 +63,8 @@ fn wired_dispatcher_ops_return_concept_text() {
 #[test]
 fn normalize_explanation_is_wired_via_trait() {
     let a = sample();
-    let text = <AudioSamples<'static, f32> as AudioProcessingExplainText>::explain_text_normalize(
-        &a, &a,
-    );
+    let text =
+        <AudioSamples<'static, f32> as AudioProcessingExplainText>::explain_text_normalize(&a, &a);
     assert!(!text.is_empty(), "normalize explanation was empty");
     assert!(
         text.contains("[operation: Normalize]"),

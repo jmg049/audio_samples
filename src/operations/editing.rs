@@ -563,7 +563,8 @@ where
             )));
         }
 
-        let segment_samples = seconds_to_samples(segment_duration_seconds, self.sample_rate().get());
+        let segment_samples =
+            seconds_to_samples(segment_duration_seconds, self.sample_rate().get());
         let total_samples = self.samples_per_channel().get();
 
         if segment_samples > total_samples {
@@ -2428,8 +2429,7 @@ mod tests {
         for s in samples.iter_mut().take(600).skip(400) {
             *s = 1.0;
         }
-        let audio =
-            AudioSamples::new_mono(Array1::from(samples), sample_rate!(44100)).unwrap();
+        let audio = AudioSamples::new_mono(Array1::from(samples), sample_rate!(44100)).unwrap();
 
         let trimmed = audio.trim_silence(-10.0).unwrap();
 

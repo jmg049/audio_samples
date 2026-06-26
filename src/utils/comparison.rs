@@ -956,10 +956,7 @@ where
 /// ```
 #[cfg(feature = "transforms")]
 #[inline]
-pub fn log_spectral_distance<T>(
-    a: &AudioSamples<T>,
-    b: &AudioSamples<T>,
-) -> AudioSampleResult<f64>
+pub fn log_spectral_distance<T>(a: &AudioSamples<T>, b: &AudioSamples<T>) -> AudioSampleResult<f64>
 where
     T: StandardSample,
 {

@@ -454,7 +454,10 @@ mod tests {
         let html = plot.html().unwrap();
         assert!(!html.is_empty());
         // The trace name should appear in the rendered plot data.
-        assert!(html.contains("Phase"), "rendered HTML must contain the trace name");
+        assert!(
+            html.contains("Phase"),
+            "rendered HTML must contain the trace name"
+        );
     }
 
     #[test]
