@@ -78,6 +78,27 @@ fn main() {
     std::process::exit(1);
 }
 
+/// Render a plot to in-memory HTML and assert it is a non-empty Plotly
+/// document — avoids writing files to disk while still verifying the plot.
+#[cfg(all(
+    feature = "plotting",
+    feature = "onset-detection",
+    feature = "beat-tracking",
+    feature = "statistics"
+))]
+fn assert_plot_html<P: audio_samples::operations::PlotUtils>(
+    plot: &P,
+    name: &str,
+) -> audio_samples::AudioSampleResult<()> {
+    let html = plot.html()?;
+    assert!(
+        !html.is_empty() && html.contains("plotly"),
+        "{name} marker plot HTML should be a non-empty Plotly document"
+    );
+    println!("Rendered {name} marker plot ({} bytes)", html.len());
+    Ok(())
+}
+
 #[cfg(all(
     feature = "plotting",
     feature = "onset-detection",
@@ -88,7 +109,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     use audio_samples::operations::beat::BeatTrackingConfig;
     use audio_samples::operations::onset::OnsetDetectionConfig;
     use audio_samples::operations::plotting::waveform::WaveformPlotParams;
-    use audio_samples::operations::{AudioBeatTracking, AudioPlotting, PlotUtils};
+    use audio_samples::operations::{AudioBeatTracking, AudioPlotting};
     use audio_samples::{AudioOnsetDetection, AudioSamples};
     println!("=== Event Markers Example ===\n");
 
@@ -104,21 +125,25 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     for (idx, onset_time) in onsets.iter().enumerate() {
         println!("  Onset {}: {:.3}s", idx + 1, onset_time);
     }
+    // The signal contains 16 percussive hits over 4 s; we should find several.
+    assert!(
+        onsets.len() >= 4,
+        "expected to detect several onsets in the percussive pattern, got {}",
+        onsets.len()
+    );
 
     let plot_onsets = audio
         .plot_waveform(&WaveformPlotParams::default())?
         .add_onset_markers(onsets.clone(), Some("red"), false);
 
-    plot_onsets.save("output/event_markers_onsets.html")?;
-    println!("\nSaved onset markers to: output/event_markers_onsets.html");
+    assert_plot_html(&plot_onsets, "onsets")?;
 
     // Example 2: Onset Detection with time labels
     let plot_onsets_labeled = audio
         .plot_waveform(&WaveformPlotParams::default())?
         .add_onset_markers(onsets, Some("red"), true);
 
-    plot_onsets_labeled.save("output/event_markers_onsets_labeled.html")?;
-    println!("Saved labeled onset markers to: output/event_markers_onsets_labeled.html");
+    assert_plot_html(&plot_onsets_labeled, "onsets_labeled")?;
 
     // Example 3: Beat Tracking with markers
     println!("\n--- Beat Tracking ---");
@@ -132,6 +157,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     println!("Detected tempo: {:.1} BPM", beat_data.tempo_bpm);
     println!("Detected {} beats:", beat_data.beat_times.len());
+    assert!(
+        beat_data.tempo_bpm > 0.0 && !beat_data.beat_times.is_empty(),
+        "beat tracking should report a positive tempo and at least one beat"
+    );
     for (idx, beat_time) in beat_data.beat_times.iter().take(8).enumerate() {
         println!("  Beat {}: {:.3}s", idx + 1, beat_time);
     }
@@ -140,16 +169,14 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_waveform(&WaveformPlotParams::default())?
         .add_beat_markers(beat_data.beat_times.clone(), Some("blue"), false);
 
-    plot_beats.save("output/event_markers_beats.html")?;
-    println!("\nSaved beat markers to: output/event_markers_beats.html");
+    assert_plot_html(&plot_beats, "beats")?;
 
     // Example 4: Beat tracking with beat numbers
     let plot_beats_numbered = audio
         .plot_waveform(&WaveformPlotParams::default())?
         .add_beat_markers(beat_data.beat_times.clone(), Some("blue"), true);
 
-    plot_beats_numbered.save("output/event_markers_beats_numbered.html")?;
-    println!("Saved numbered beat markers to: output/event_markers_beats_numbered.html");
+    assert_plot_html(&plot_beats_numbered, "beats_numbered")?;
 
     // Example 5: Combined - both onsets and beats
     println!("\n--- Combined Visualization ---");
@@ -162,8 +189,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .add_onset_markers(onsets_fresh, Some("rgba(255,0,0,0.5)"), false)
         .add_beat_markers(beat_data.beat_times, Some("rgba(0,0,255,0.7)"), true);
 
-    plot_combined.save("output/event_markers_combined.html")?;
-    println!("Saved combined markers to: output/event_markers_combined.html");
+    assert_plot_html(&plot_combined, "combined")?;
     println!("  Red = Onsets (note attacks)");
     println!("  Blue = Beats (tempo grid)");
 

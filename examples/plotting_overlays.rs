@@ -1,6 +1,6 @@
-#[cfg(not(all(feature = "plotting", feature = "statistics")))]
+#[cfg(not(all(feature = "plotting", feature = "transforms")))]
 fn main() {
-    eprintln!("error: This example requires the `plotting` and `statistics` features.");
+    eprintln!("error: This example requires the `plotting` and `transforms` features.");
     std::process::exit(1);
 }
 
@@ -54,10 +54,14 @@ fn main() -> audio_samples::AudioSampleResult<()> {
             .add_marker(0.25, 0.4, Some("Peak"), None)
             .add_shaded_region(0.8, 1.2, Some("rgba(255,200,0,0.2)"), None);
 
-        waveform_plot
-            .save("outputs/test_waveform_overlays.html")
-            .expect("Failed to save waveform plot");
-        println!("Saved waveform plot with overlays to outputs/test_waveform_overlays.html");
+        let waveform_html = waveform_plot
+            .html()
+            .expect("Failed to render waveform plot");
+        assert!(
+            !waveform_html.is_empty() && waveform_html.contains("plotly"),
+            "waveform overlay HTML should be a non-empty Plotly document"
+        );
+        println!("Rendered waveform plot with overlays ({} bytes)", waveform_html.len());
 
         // Test spectrogram plot with overlays
         println!("\nCreating spectrogram plot with overlays...");
@@ -69,10 +73,12 @@ fn main() -> audio_samples::AudioSampleResult<()> {
             .add_vline(1.5, Some("Offset"))
             .add_hline(440.0, Some("F0 (A4)"));
 
-        spec_plot
-            .save("outputs/test_spectrogram_overlays.html")
-            .expect("Failed to save spectrogram plot");
-        println!("Saved spectrogram plot with overlays to outputs/test_spectrogram_overlays.html");
+        let spec_html = spec_plot.html().expect("Failed to render spectrogram plot");
+        assert!(
+            !spec_html.is_empty() && spec_html.contains("plotly"),
+            "spectrogram overlay HTML should be a non-empty Plotly document"
+        );
+        println!("Rendered spectrogram plot with overlays ({} bytes)", spec_html.len());
 
         // Test pitch contour overlay
         println!("\nCreating spectrogram with pitch contour...");
@@ -95,10 +101,14 @@ fn main() -> audio_samples::AudioSampleResult<()> {
             .expect("Failed to create spectrogram plot")
             .overlay_contour(&times, &freqs, Some("F0 Contour"));
 
-        spec_with_contour
-            .save("outputs/test_spectrogram_contour.html")
-            .expect("Failed to save spectrogram with contour");
-        println!("Saved spectrogram with pitch contour to outputs/test_spectrogram_contour.html");
+        let contour_html = spec_with_contour
+            .html()
+            .expect("Failed to render spectrogram with contour");
+        assert!(
+            !contour_html.is_empty() && contour_html.contains("plotly"),
+            "spectrogram-with-contour HTML should be a non-empty Plotly document"
+        );
+        println!("Rendered spectrogram with pitch contour ({} bytes)", contour_html.len());
         Ok(())
     }
 }

@@ -4,11 +4,27 @@ fn main() {
     std::process::exit(1);
 }
 
+/// Render a plot to in-memory HTML and assert it is a non-empty Plotly
+/// document — avoids writing files to disk while still verifying the plot.
+#[cfg(all(feature = "plotting", feature = "statistics"))]
+fn assert_plot_html<P: audio_samples::operations::PlotUtils>(
+    plot: &P,
+    name: &str,
+) -> audio_samples::AudioSampleResult<()> {
+    let html = plot.html()?;
+    assert!(
+        !html.is_empty() && html.contains("plotly"),
+        "{name} spectral-overlay HTML should be a non-empty Plotly document"
+    );
+    println!("Rendered {name} spectral overlay ({} bytes)", html.len());
+    Ok(())
+}
+
 #[cfg(all(feature = "plotting", feature = "statistics"))]
 fn main() -> audio_samples::AudioSampleResult<()> {
     use audio_samples::operations::plotting::dsp_overlays;
     use audio_samples::operations::plotting::spectrograms::SpectrogramPlotParams;
-    use audio_samples::operations::{AudioPlotting, PlotUtils};
+    use audio_samples::operations::AudioPlotting;
     use audio_samples::{AudioSamples, chirp, sample_rate};
     use std::time::Duration;
 
@@ -64,8 +80,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_spectrogram(&SpectrogramPlotParams::mel_db())?
         .add_spectral_centroid(centroid_times.clone(), centroid_values.clone(), None);
 
-    spectrogram_plot.save("output/spectral_overlay_centroid.html")?;
-    println!("\nSaved spectrogram with centroid to: output/spectral_overlay_centroid.html");
+    assert_plot_html(&spectrogram_plot, "centroid")?;
     println!("  White line with cyan markers = Spectral Centroid");
 
     // Example 2: Spectrogram with spectral rolloff overlay (85%)
@@ -96,8 +111,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_spectrogram(&SpectrogramPlotParams::mel_db())?
         .add_spectral_rolloff(rolloff_times.clone(), rolloff_values.clone(), None);
 
-    rolloff_plot.save("output/spectral_overlay_rolloff.html")?;
-    println!("\nSaved spectrogram with rolloff to: output/spectral_overlay_rolloff.html");
+    assert_plot_html(&rolloff_plot, "rolloff")?;
     println!("  White line with cyan markers = Spectral Rolloff (85%)");
 
     // Example 3: Combined - both centroid and rolloff
@@ -105,11 +119,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     let combined_plot = audio
         .plot_spectrogram(&SpectrogramPlotParams::mel_db())?
-        .add_spectral_centroid(centroid_times, centroid_values, Some("Centroid"))
+        .add_spectral_centroid(centroid_times.clone(), centroid_values.clone(), Some("Centroid"))
         .add_spectral_rolloff(rolloff_times, rolloff_values, Some("Rolloff 85%"));
 
-    combined_plot.save("output/spectral_overlay_combined.html")?;
-    println!("Saved combined spectrogram to: output/spectral_overlay_combined.html");
+    assert_plot_html(&combined_plot, "combined")?;
     println!("  Shows both Centroid and Rolloff tracks with legend");
 
     // Example 4: Different rolloff percentages comparison
@@ -139,6 +152,19 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .add_spectral_rolloff(rolloff_85_times, rolloff_85_values, Some("Rolloff 85%"))
         .add_spectral_rolloff(rolloff_95_times, rolloff_95_values, Some("Rolloff 95%"));
 
-    comparison_plot.save("output/spectral_overlay_rolloff_comparison.html")?;
+    assert_plot_html(&comparison_plot, "rolloff_comparison")?;
+
+    // The chirp sweeps 200 Hz -> 2000 Hz, so the spectral centroid must rise
+    // over time: the last window's centroid should exceed the first window's.
+    assert!(
+        centroid_values.len() >= 2,
+        "expected multiple centroid windows for a 4 s chirp"
+    );
+    assert!(
+        centroid_values.last().unwrap() > centroid_values.first().unwrap(),
+        "spectral centroid should rise across an ascending chirp: {} !> {}",
+        centroid_values.last().unwrap(),
+        centroid_values.first().unwrap()
+    );
     Ok(())
 }

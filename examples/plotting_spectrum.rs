@@ -26,22 +26,33 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     // Test 1: dB scale spectrum (default)
     println!("Creating magnitude spectrum (dB scale)...");
     let spec_db = audio.plot_magnitude_spectrum(&MagnitudeSpectrumParams::db())?;
-    spec_db.save("outputs/test_spectrum_db.html")?;
-    println!("Saved: outputs/test_spectrum_db.html");
+    let html_db = spec_db.html()?;
+    println!("Rendered dB spectrum ({} bytes)", html_db.len());
 
     // Test 2: Linear scale spectrum
     println!("Creating magnitude spectrum (linear scale)...");
     let spec_linear = audio.plot_magnitude_spectrum(&MagnitudeSpectrumParams::linear())?;
-    spec_linear.save("outputs/test_spectrum_linear.html")?;
-    println!("Saved: outputs/test_spectrum_linear.html");
+    let html_linear = spec_linear.html()?;
+    println!("Rendered linear spectrum ({} bytes)", html_linear.len());
 
     // Test 3: Zoom into frequency range of interest (0-2000 Hz)
     println!("Creating zoomed magnitude spectrum...");
     let mut params_zoomed = MagnitudeSpectrumParams::db();
     params_zoomed.freq_range = Some((0.0, 2000.0));
     let spec_zoomed = audio.plot_magnitude_spectrum(&params_zoomed)?;
-    spec_zoomed.save("outputs/test_spectrum_zoomed.html")?;
-    println!("Saved: outputs/test_spectrum_zoomed.html");
+    let html_zoomed = spec_zoomed.html()?;
+    println!("Rendered zoomed spectrum ({} bytes)", html_zoomed.len());
+
+    for (name, html) in [
+        ("db", &html_db),
+        ("linear", &html_linear),
+        ("zoomed", &html_zoomed),
+    ] {
+        assert!(
+            !html.is_empty() && html.contains("plotly"),
+            "{name} magnitude spectrum HTML should be a non-empty Plotly document"
+        );
+    }
 
     // Test 4: Show in browser
     #[cfg(feature = "html_view")]

@@ -25,24 +25,36 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Creating spectrogram with auto-zoom enabled...");
     let params_auto = SpectrogramPlotParams::mel_db();
     let plot_auto = audio.plot_spectrogram(&params_auto)?;
-    plot_auto.save("outputs/test_auto_zoom_enabled.html")?;
-    println!("Saved: outputs/test_auto_zoom_enabled.html");
+    let html_auto = plot_auto.html()?;
+    println!("Rendered auto-zoom spectrogram ({} bytes)", html_auto.len());
 
     // Test 2: Auto-zoom disabled (show full range)
     println!("Creating spectrogram with auto-zoom disabled...");
     let mut params_manual = SpectrogramPlotParams::mel_db();
     params_manual.auto_zoom_freq = false;
     let plot_manual = audio.plot_spectrogram(&params_manual)?;
-    plot_manual.save("outputs/test_auto_zoom_disabled.html")?;
-    println!("Saved: outputs/test_auto_zoom_disabled.html");
+    let html_manual = plot_manual.html()?;
+    println!("Rendered fixed-range spectrogram ({} bytes)", html_manual.len());
 
     // Test 3: Manual frequency range override
     println!("Creating spectrogram with manual frequency range...");
     let mut params_override = SpectrogramPlotParams::mel_db();
     params_override.freq_range = Some((200.0, 1000.0));
     let plot_override = audio.plot_spectrogram(&params_override)?;
-    plot_override.save("outputs/test_manual_range.html")?;
-    println!("Saved: outputs/test_manual_range.html");
+    let html_override = plot_override.html()?;
+    println!("Rendered manual-range spectrogram ({} bytes)", html_override.len());
+
+    // All three render paths must produce non-empty HTML documents.
+    for (name, html) in [
+        ("auto", &html_auto),
+        ("manual", &html_manual),
+        ("override", &html_override),
+    ] {
+        assert!(
+            !html.is_empty() && html.contains("plotly"),
+            "{name} spectrogram HTML should be a non-empty Plotly document"
+        );
+    }
 
     Ok(())
 }

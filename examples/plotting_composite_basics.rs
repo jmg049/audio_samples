@@ -40,8 +40,14 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .layout(CompositeLayout::Vertical)
         .build()?;
 
-    vertical.save("outputs/test_composite_vertical.html")?;
-    println!("Saved: outputs/test_composite_vertical.html");
+    let vertical_html = vertical.html()?;
+    // A composite embeds each sub-plot as a base64-encoded iframe, so we check
+    // for the composite container and the embedded iframes rather than "plotly".
+    assert!(
+        vertical_html.contains("composite-container") && vertical_html.contains("iframe"),
+        "vertical composite HTML should contain the composite container and iframes"
+    );
+    println!("Rendered vertical composite ({} bytes)", vertical_html.len());
 
     // Test 2: Horizontal composition
     // Create new plots since we consumed the originals
@@ -55,8 +61,12 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .layout(CompositeLayout::Horizontal)
         .build()?;
 
-    horizontal.save("outputs/test_composite_horizontal.html")?;
-    println!("Saved: outputs/test_composite_horizontal.html");
+    let horizontal_html = horizontal.html()?;
+    assert!(
+        horizontal_html.contains("composite-container") && horizontal_html.contains("iframe"),
+        "horizontal composite HTML should contain the composite container and iframes"
+    );
+    println!("Rendered horizontal composite ({} bytes)", horizontal_html.len());
 
     // Test 3: Show vertical composite
     #[cfg(feature = "html_view")]

@@ -36,11 +36,28 @@ fn create_test_audio() -> audio_samples::AudioSamples<'static, f32> {
     )
 }
 
+/// Render a plot to in-memory HTML and assert it is a non-empty Plotly
+/// document — avoids writing files to disk while still verifying the plot
+/// was actually produced.
+#[cfg(all(feature = "plotting", feature = "statistics"))]
+fn assert_plot_html<P: audio_samples::operations::PlotUtils>(
+    plot: &P,
+    name: &str,
+) -> audio_samples::AudioSampleResult<()> {
+    let html = plot.html()?;
+    assert!(
+        !html.is_empty() && html.contains("plotly"),
+        "{name} overlay HTML should be a non-empty Plotly document"
+    );
+    println!("  Rendered {name} overlay ({} bytes)", html.len());
+    Ok(())
+}
+
 #[cfg(all(feature = "plotting", feature = "statistics"))]
 fn main() -> audio_samples::AudioSampleResult<()> {
     use audio_samples::operations::plotting::dsp_overlays;
     use audio_samples::operations::plotting::waveform::WaveformPlotParams;
-    use audio_samples::operations::{AudioPlotting, PlotUtils};
+    use audio_samples::operations::AudioPlotting;
     use audio_samples::{nzu, sample_rate};
     println!("=== DSP Overlays Example ===\n");
 
@@ -78,8 +95,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_waveform(&WaveformPlotParams::default())?
         .add_rms_envelope(rms_times, rms_values, Some("red"), Some(2.5));
 
-    plot_rms.save("output/dsp_overlay_rms.html")?;
-    println!("  Saved to: output/dsp_overlay_rms.html");
+    assert_plot_html(&plot_rms, "rms")?;
 
     // Example 2: Waveform with Peak envelope
     println!("\nCreating waveform with Peak envelope overlay...");
@@ -90,8 +106,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_waveform(&WaveformPlotParams::default())?
         .add_peak_envelope(peak_times, peak_values, Some("orange"), Some(2.5));
 
-    plot_peak.save("output/dsp_overlay_peak.html")?;
-    println!("  Saved to: output/dsp_overlay_peak.html");
+    assert_plot_html(&plot_peak, "peak")?;
 
     // Example 3: Waveform with Zero-Crossing Rate overlay
     println!("\nCreating waveform with ZCR overlay...");
@@ -102,8 +117,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_waveform(&WaveformPlotParams::default())?
         .add_zcr_overlay(zcr_times, zcr_values, Some("blue"), Some(2.0));
 
-    plot_zcr.save("output/dsp_overlay_zcr.html")?;
-    println!("  Saved to: output/dsp_overlay_zcr.html");
+    assert_plot_html(&plot_zcr, "zcr")?;
     println!("  Note: ZCR uses secondary y-axis (right side)");
 
     // Example 4: Waveform with Energy overlay
@@ -115,8 +129,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_waveform(&WaveformPlotParams::default())?
         .add_energy_overlay(energy_times, energy_values, Some("green"), Some(2.5));
 
-    plot_energy.save("output/dsp_overlay_energy.html")?;
-    println!("  Saved to: output/dsp_overlay_energy.html");
+    assert_plot_html(&plot_energy, "energy")?;
     println!("  Note: Energy uses secondary y-axis (right side)");
 
     // Example 5: Waveform with multiple overlays combined
@@ -131,8 +144,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .add_rms_envelope(rms_times, rms_values, Some("red"), Some(2.0))
         .add_peak_envelope(peak_times, peak_values, Some("orange"), Some(1.5));
 
-    plot_combined.save("output/dsp_overlay_combined.html")?;
-    println!("  Saved to: output/dsp_overlay_combined.html");
+    assert_plot_html(&plot_combined, "combined")?;
 
     // Example 6: Different window sizes comparison
     println!("\nCreating comparison with different window sizes...");
@@ -154,8 +166,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
             Some(3.0),
         );
 
-    plot_comparison.save("output/dsp_overlay_window_comparison.html")?;
-    println!("  Saved to: output/dsp_overlay_window_comparison.html");
+    assert_plot_html(&plot_comparison, "window_comparison")?;
 
     Ok(())
 }

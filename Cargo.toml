@@ -153,6 +153,40 @@ rand = "0.10.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11.0"
 
+# ---------------------------------------------------------------------------
+# Examples — each declares the MINIMAL feature set its body uses so that
+# `cargo build --examples` (and `cargo test`) under a partial feature set
+# transparently SKIPS the examples whose features are not enabled, instead of
+# failing to compile. `--features full` enables them all.
+#
+# Note on transitive features (do not need to be repeated, but listed where it
+# aids clarity): editing -> {statistics, random-generation};
+# processing -> statistics; parametric-eq -> {iir-filtering, channels};
+# plotting -> {channels, transforms, editing}; onset-detection ->
+# {transforms, peak-picking, processing}; beat-tracking -> onset-detection;
+# decomposition -> onset-detection; pitch-analysis -> transforms;
+# psychoacoustic -> transforms; envelopes -> {dynamic-range, editing}.
+# ---------------------------------------------------------------------------
+
+# Core / introductory
+# (basics, statistics, utils_demo, detection have minimal or no feature needs)
+[[example]]
+name = "basics"
+required-features = ["statistics"]
+
+[[example]]
+name = "statistics"
+required-features = ["statistics"]
+
+[[example]]
+name = "utils_demo"
+# Audio-math utilities are always available; no extra features required.
+
+[[example]]
+name = "detection"
+# Core detection helpers are ungated; the transforms path is `cfg`-guarded.
+
+# Diagnostics
 [[example]]
 name = "errors"
 required-features = ["fancy"]
@@ -161,13 +195,103 @@ required-features = ["fancy"]
 name = "error_diagnostics"
 required-features = ["fancy"]
 
+# Processing / editing / channels
+[[example]]
+name = "processing"
+required-features = ["processing", "editing", "transforms"]
+
+[[example]]
+name = "editing"
+required-features = ["editing"]
+
+[[example]]
+name = "channels"
+required-features = ["channels", "statistics"]
+
+[[example]]
+name = "transforms"
+required-features = ["transforms", "statistics"]
+
+[[example]]
+name = "resampling"
+required-features = ["resampling", "statistics", "processing"]
+
+# Filtering / dynamics
+[[example]]
+name = "iir_filtering"
+required-features = ["iir-filtering", "editing", "statistics"]
+
+[[example]]
+name = "parametric_eq"
+required-features = ["parametric-eq", "statistics"]
+
+[[example]]
+name = "dynamic_range"
+required-features = ["dynamic-range", "statistics"]
+
+# Analysis
+[[example]]
+name = "pitch_analysis"
+required-features = ["pitch-analysis"]
+
+[[example]]
+name = "vad"
+required-features = ["vad", "editing"]
+
+[[example]]
+name = "hpss"
+required-features = ["decomposition", "statistics", "editing"]
+
 [[example]]
 name = "psychoacoustic"
 required-features = ["psychoacoustic"]
 
+# Educational rendering
 [[example]]
 name = "educational"
 required-features = ["educational", "processing"]
+
+# Plotting (all require the `plotting` feature; several also need transforms,
+# statistics, or detection features for the data they visualise)
+[[example]]
+name = "plotting_basic"
+required-features = ["plotting", "transforms"]
+
+[[example]]
+name = "plotting_auto_zoom"
+required-features = ["plotting", "transforms"]
+
+[[example]]
+name = "plotting_spectrum"
+required-features = ["plotting", "transforms"]
+
+[[example]]
+name = "plotting_overlays"
+required-features = ["plotting", "transforms"]
+
+[[example]]
+name = "plotting_composite_basics"
+required-features = ["plotting", "transforms"]
+
+[[example]]
+name = "plotting_composite_advanced"
+required-features = ["plotting", "envelopes"]
+
+[[example]]
+name = "plotting_configurable_padding"
+required-features = ["plotting", "transforms"]
+
+[[example]]
+name = "plotting_dsp_overlays"
+required-features = ["plotting", "statistics"]
+
+[[example]]
+name = "plotting_spectral_overlays"
+required-features = ["plotting", "statistics"]
+
+[[example]]
+name = "plotting_event_markers"
+required-features = ["plotting", "onset-detection", "beat-tracking", "statistics"]
 
 [[test]]
 name = "codec_quality"

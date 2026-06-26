@@ -37,10 +37,13 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         params.freq_range_padding = Some(padding);
 
         let plot = audio.plot_spectrogram(&params)?;
-        let filename = format!("outputs/test_padding_{:.0}pct.html", padding * 100.0);
-        plot.save(&filename)?;
-
-        println!("  Saved: {}", filename);
+        let html = plot.html()?;
+        assert!(
+            !html.is_empty() && html.contains("plotly"),
+            "spectrogram HTML for {:.0}% padding should be a non-empty Plotly document",
+            padding * 100.0
+        );
+        println!("  Rendered ({} bytes)", html.len());
     }
     Ok(())
 }
