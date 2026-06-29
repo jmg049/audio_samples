@@ -10,45 +10,34 @@ use crate::{
 };
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use non_empty_slice::NonEmptyVec;
-use rubato::{Fft, FixedSync, Resampler};
+use rubato::{
+    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-// Target chunk sizes for rubato's Fft synchronous resampler.
-// The actual chunk passed to rubato is rounded up to the nearest multiple of
-// in_sr / gcd(in_sr, out_sr); see `round_chunk_to_fft_boundary`.
-// Larger chunks amortise per-FFT overhead and improve throughput for long signals.
-const FFT_MEDIUM_CHUNK: usize = 4096;
-const FFT_HIGH_CHUNK: usize = 16384;
-
-fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
-}
-
-// Rubato's FixedSync::Input mode sets fft_size_in = ceil(chunk/min_chunk)*min_chunk.
-// If chunk < fft_size_in, subchunks_available = 0 → zero output frames → empty-vec UB.
-// Rounding up to the next multiple of min_chunk guarantees subchunks_available >= 1.
-fn round_chunk_to_fft_boundary(chunk: usize, in_sr: usize, out_sr: usize) -> usize {
-    let min_chunk = in_sr / gcd(in_sr, out_sr);
-    chunk.div_ceil(min_chunk) * min_chunk
-}
+// Block size handed to rubato's async sinc resampler per `process` call.
+// With `FixedAsync::Input` the resampler consumes exactly this many input
+// frames per call and emits a variable number of output frames. Output quality
+// is governed by the sinc interpolation parameters (see `resample_medium` /
+// `resample_high`), not by the chunk size, so a modest fixed chunk keeps
+// latency and scratch buffers small while still amortising per-call overhead.
+const RESAMPLE_CHUNK: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Per-thread FFT resampler cache
 // ---------------------------------------------------------------------------
 //
-// Building a rubato Fft resampler computes FFT plans and filter tables at
-// construction time.  Caching one Fft<f32> per (in_sr, out_sr, channels,
-// quality) tuple avoids that overhead on repeated calls with the same
+// Building a rubato sinc Async resampler precomputes the windowed-sinc filter
+// table at construction time.  Caching one Async<f32> per (in_sr, out_sr,
+// channels, quality) tuple avoids that overhead on repeated calls with the same
 // parameters (e.g. processing a batch of clips at the same sample rates).
 //
-// Thread-local storage means no locking overhead.  Fft<f32> does not
+// Thread-local storage means no locking overhead.  Async<f32> does not
 // implement Default, so we use HashMap::remove / re-insert to move ownership
 // in and out of the cache around each call.  On reuse, Resampler::reset()
-// clears overlap buffers and delay state while preserving FFT plans.
+// clears the delay line and internal state while preserving the filter table.
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct ResamplerKey {
@@ -59,16 +48,16 @@ struct ResamplerKey {
 }
 
 thread_local! {
-    static FFT_CACHE: RefCell<HashMap<ResamplerKey, Fft<f32>>>
+    static RESAMPLER_CACHE: RefCell<HashMap<ResamplerKey, Async<f32>>>
         = RefCell::new(HashMap::new());
 }
 
-fn with_cached_fft_resampler<T>(
+fn with_cached_sinc_resampler<T>(
     key: ResamplerKey,
-    make: impl FnOnce() -> AudioSampleResult<Fft<f32>>,
-    f: impl FnOnce(&mut Fft<f32>) -> AudioSampleResult<T>,
+    make: impl FnOnce() -> AudioSampleResult<Async<f32>>,
+    f: impl FnOnce(&mut Async<f32>) -> AudioSampleResult<T>,
 ) -> AudioSampleResult<T> {
-    FFT_CACHE.with(|cell| -> AudioSampleResult<()> {
+    RESAMPLER_CACHE.with(|cell| -> AudioSampleResult<()> {
         let mut map = cell.borrow_mut();
         if let std::collections::hash_map::Entry::Vacant(e) = map.entry(key) {
             e.insert(make()?);
@@ -76,10 +65,10 @@ fn with_cached_fft_resampler<T>(
         Ok(())
     })?;
 
-    let mut resampler = FFT_CACHE.with(|cell| cell.borrow_mut().remove(&key).unwrap());
+    let mut resampler = RESAMPLER_CACHE.with(|cell| cell.borrow_mut().remove(&key).unwrap());
     resampler.reset();
     let result = f(&mut resampler);
-    FFT_CACHE.with(|cell| {
+    RESAMPLER_CACHE.with(|cell| {
         cell.borrow_mut().insert(key, resampler);
     });
     result
@@ -378,28 +367,27 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Medium / High paths — rubato FFT synchronous resampler
+// Medium / High paths — rubato async windowed-sinc resampler
 // ---------------------------------------------------------------------------
 //
-// Both quality tiers use rubato's Fft<f32> synchronous resampler, which
-// operates entirely in the spectral domain:
-//   1. FFT the input chunk.
-//   2. Extend or truncate the spectrum to the output length.
-//   3. Apply a BlackmanHarris2 anti-aliasing window in the frequency domain.
-//   4. IFFT to produce output samples.
+// Both quality tiers use rubato's `Async<f32>` resampler with windowed-sinc
+// interpolation. For each output sample the resampler evaluates a windowed-sinc
+// reconstruction filter at the (generally fractional) source position, which
+// band-limits the signal and rejects images/aliases. This is the textbook
+// high-quality resampling approach and behaves consistently across arbitrary
+// in/out ratios — unlike the spectral (FFT synchronous) resampler, whose
+// per-sub-chunk FFT length is fixed by `fs / gcd(fs_in, fs_out)` and collapses
+// to a handful of bins for common ratios (e.g. 2 bins for 44.1k↔22.05k),
+// smearing spectral energy into sidebands around tonal components.
 //
-// This is O(N log N) vs O(N × sinc_len) for the sinc resampler, giving
-// significantly better throughput on the long signals typical in offline/batch
-// use.  Quality is also slightly better in practice: the spectral approach
-// avoids the sinc interpolation approximation error that the async resampler
-// incurs between pre-computed filter table entries.
+// The two tiers differ in filter quality:
+//   * Medium — shorter sinc, linear sub-sample interpolation, Hann² window.
+//   * High   — longer sinc, cubic sub-sample interpolation, Blackman-Harris²
+//              window for steeper roll-off and deeper stop-band attenuation.
 //
-// The two tiers differ only in chunk size.  A larger chunk amortises per-FFT
-// overhead more aggressively and gives marginally sharper roll-off at signal
-// edges; both use the same BlackmanHarris2 anti-aliasing filter.
-//
-// The Fft resampler processes all channels in a single call, so no per-channel
-// parallelism is needed here.
+// `FixedAsync::Input` consumes a fixed number of input frames per call and
+// emits a variable number of output frames. The resampler processes all
+// channels in a single call, so no per-channel parallelism is needed here.
 
 fn resample_medium<T>(
     audio: &AudioSamples<f32>,
@@ -408,7 +396,14 @@ fn resample_medium<T>(
 where
     T: StandardSample,
 {
-    resample_fft(audio, target_sample_rate, FFT_MEDIUM_CHUNK, 1)
+    let params = SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: 0.95,
+        oversampling_factor: 128,
+        interpolation: SincInterpolationType::Linear,
+        window: WindowFunction::Hann2,
+    };
+    resample_sinc(audio, target_sample_rate, &params, 1)
 }
 
 fn resample_high<T>(
@@ -418,13 +413,20 @@ fn resample_high<T>(
 where
     T: StandardSample,
 {
-    resample_fft(audio, target_sample_rate, FFT_HIGH_CHUNK, 2)
+    let params = SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        oversampling_factor: 256,
+        interpolation: SincInterpolationType::Cubic,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    resample_sinc(audio, target_sample_rate, &params, 2)
 }
 
-fn resample_fft<T>(
+fn resample_sinc<T>(
     audio: &AudioSamples<f32>,
     target_sample_rate: SampleRate,
-    chunk_size: usize,
+    params: &SincInterpolationParameters,
     quality_id: u8,
 ) -> AudioSampleResult<AudioSamples<'static, T>>
 where
@@ -445,33 +447,31 @@ where
     let input_length = input_data[0].len();
     let expected_frames = (input_length as u64 * out_sr_u64).div_ceil(in_sr_u64) as usize;
 
-    let actual_chunk = round_chunk_to_fft_boundary(
-        chunk_size,
-        in_sr as usize,
-        target_sample_rate.get() as usize,
-    );
+    // Fixed resample ratio (output / input); FixedAsync::Input means the ratio
+    // never changes at runtime, so the relative ratio bound is 1.0.
+    let ratio = out_sr_u64 as f64 / in_sr_u64 as f64;
 
-    with_cached_fft_resampler(
+    with_cached_sinc_resampler(
         key,
         || {
-            Fft::<f32>::new(
-                in_sr as usize,
-                target_sample_rate.get() as usize,
-                actual_chunk,
-                1,
+            Async::<f32>::new_sinc(
+                ratio,
+                1.0,
+                params,
+                RESAMPLE_CHUNK,
                 channels,
-                FixedSync::Input,
+                FixedAsync::Input,
             )
             .map_err(|e| {
                 AudioSampleError::Processing(ProcessingError::external_dependency(
                     "rubato",
                     "resample",
-                    format!("failed to create FFT resampler: {e}"),
+                    format!("failed to create sinc resampler: {e}"),
                 ))
             })
         },
         |resampler| {
-            resample_fft_blocked(
+            resample_sinc_blocked(
                 resampler,
                 input_data,
                 expected_frames,
@@ -483,9 +483,9 @@ where
     )
 }
 
-/// Block-processing loop for all channels using a multi-channel rubato FFT resampler.
-fn resample_fft_blocked<T>(
-    resampler: &mut Fft<f32>,
+/// Block-processing loop for all channels using a multi-channel rubato sinc resampler.
+fn resample_sinc_blocked<T>(
+    resampler: &mut Async<f32>,
     input_data: Vec<Vec<f32>>,
     expected_frames: usize,
     channels: usize,
