@@ -22,24 +22,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "audio_samples"
 crate-type = ["rlib"]
 
-# ---------------------------------------------------------------------------
-# Lint configuration (portable; authoritative across all consumers, not just
-# local builds). Migrated here from `.cargo/config.toml` rustflags. CI runs
-# clippy with `-D warnings`, so every "warn" below must be clean in the tree.
-# ---------------------------------------------------------------------------
 [lints.rust]
-# Was `-A unused_unsafe` in the old rustflags; kept allowed because several
-# `unsafe` blocks are defensively conservative across feature gates.
 unused_unsafe = "allow"
-# `docsrs` is the docs.rs cfg.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 [lints.clippy]
-# --- Correctness / logic (clean -> denied) ---
 unit_cmp = "deny"
 match_same_arms = "warn"
 
-# --- Performance (clean -> denied) ---
 inefficient_to_string = "deny"
 map_clone = "deny"
 unnecessary_to_owned = "deny"
@@ -49,19 +39,15 @@ vec_box = "deny"
 needless_collect = "deny"
 redundant_clone = "deny"
 
-# --- Style / idiomatic (clean -> denied) ---
 needless_return = "deny"
 let_unit_value = "deny"
 manual_map = "deny"
-# Demo/example fns keep a uniform `-> Result<()>` signature for readability even
-# when one happens not to fail; not worth churning. (Was `-W` in old config.)
+
 unnecessary_wraps = "allow"
 
-# --- Safety documentation (kept at warn; tree is clean) ---
 missing_safety_doc = "warn"
 undocumented_unsafe_blocks = "warn"
 
-# --- Intentionally allowed: advisory / pervasive style we do not churn for ---
 result_large_err = "allow"
 missing_const_for_fn = "allow"
 collapsible_if = "allow"
@@ -88,6 +74,7 @@ tuple_array_conversions = "allow"
 unsafe_derive_deserialize = "allow"
 multiple_unsafe_ops_per_block = "allow"
 doc_markdown = "allow"
+
 # `NonZero::div_ceil` is stable since 1.92 but the crate MSRV is 1.87. The two
 # Guards against using stdlib items newer than rust-version (1.87). The former
 # NonZero::div_ceil (1.92) call sites were rewritten with plain arithmetic.
@@ -108,9 +95,9 @@ i24 = { version = "2.3.4", features = [
 ] }
 
 serde = { version = "1.0", features = ["derive"], optional = true }
-rand = { version = "0.10.1", optional = true }
+rand = { version = "0.10.2", optional = true }
 wide = { version = "1.5.0", optional = true }
-spectrograms = { version = "1.4.4", optional = true }
+spectrograms = { version = "2.1.0", optional = true }
 
 serde_json = { version = "1.0.150", optional = true }
 
@@ -126,7 +113,7 @@ rubato = { version = "3.0.0", optional = true }
 rayon = { version = "1.12.0", optional = true }
 explainable = { version = "0.1.1", optional = true }
 term-maths = { version = "1.0.0", optional = true }
-open = { version = "5.3.5", optional = true }
+open = { version = "5.3.6", optional = true }
 
 rustfft = { version = "6.2", optional = true }
 non-empty-slice = "0.6"
@@ -158,8 +145,8 @@ onset-detection = [
     "processing",
 ] # Onset detection operations
 decomposition = [
-    "onset-detection",
-] # Audio decomposition operations (requires serialization)
+    "onset-detection", 
+] # Audio decomposition operations
 dynamic-range = [] # Dynamic range compression/expansion operations
 channels = [] # Channel operations: interleave/deinterleave
 iir-filtering = [] # IIR filtering operations
@@ -224,23 +211,6 @@ rand = "0.10.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11.0"
 
-# ---------------------------------------------------------------------------
-# Examples — each declares the MINIMAL feature set its body uses so that
-# `cargo build --examples` (and `cargo test`) under a partial feature set
-# transparently SKIPS the examples whose features are not enabled, instead of
-# failing to compile. `--features full` enables them all.
-#
-# Note on transitive features (do not need to be repeated, but listed where it
-# aids clarity): editing -> {statistics, random-generation};
-# processing -> statistics; parametric-eq -> {iir-filtering, channels};
-# plotting -> {channels, transforms, editing}; onset-detection ->
-# {transforms, peak-picking, processing}; beat-tracking -> onset-detection;
-# decomposition -> onset-detection; pitch-analysis -> transforms;
-# psychoacoustic -> transforms; envelopes -> {dynamic-range, editing}.
-# ---------------------------------------------------------------------------
-
-# Core / introductory
-# (basics, statistics, utils_demo, detection have minimal or no feature needs)
 [[example]]
 name = "basics"
 required-features = ["statistics"]
@@ -251,13 +221,10 @@ required-features = ["statistics"]
 
 [[example]]
 name = "utils_demo"
-# Audio-math utilities are always available; no extra features required.
 
 [[example]]
 name = "detection"
-# Core detection helpers are ungated; the transforms path is `cfg`-guarded.
 
-# Diagnostics
 [[example]]
 name = "errors"
 required-features = ["fancy"]
@@ -266,7 +233,6 @@ required-features = ["fancy"]
 name = "error_diagnostics"
 required-features = ["fancy"]
 
-# Processing / editing / channels
 [[example]]
 name = "processing"
 required-features = ["processing", "editing", "transforms"]
@@ -287,7 +253,6 @@ required-features = ["transforms", "statistics"]
 name = "resampling"
 required-features = ["resampling", "statistics", "processing"]
 
-# Filtering / dynamics
 [[example]]
 name = "iir_filtering"
 required-features = ["iir-filtering", "editing", "statistics"]
@@ -317,13 +282,10 @@ required-features = ["decomposition", "statistics", "editing"]
 name = "psychoacoustic"
 required-features = ["psychoacoustic"]
 
-# Educational rendering
 [[example]]
 name = "educational"
 required-features = ["educational", "processing"]
 
-# Plotting (all require the `plotting` feature; several also need transforms,
-# statistics, or detection features for the data they visualise)
 [[example]]
 name = "plotting_basic"
 required-features = ["plotting", "transforms"]

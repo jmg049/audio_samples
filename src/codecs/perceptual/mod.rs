@@ -663,7 +663,7 @@ where
 
     // SAFETY: padded_len >= window_size_val >= 4, so the buffer is non-empty.
     let samples_ne = unsafe { NonEmptySlice::new_unchecked(&padded) };
-    let mdct_matrix = spectrograms::mdct_f32(samples_ne, &mdct_params)?;
+    let mdct_matrix = spectrograms::mdct::<f32>(samples_ne, &mdct_params)?;
     // mdct_matrix shape: (n_bins, n_frames)
 
     let n_frames_raw = mdct_matrix.ncols();
@@ -766,7 +766,7 @@ pub fn reconstruct_signal(
     // out. `analyse_signal` prepends `hop` zeros for MDCT priming, so the
     // original signal occupies `[hop, hop + original_length)` of the primed
     // reconstruction.
-    let full = spectrograms::imdct_f32(&coef_matrix, params, None)?;
+    let full = spectrograms::imdct::<f32>(&coef_matrix, params, None)?;
 
     let samples = match original_length {
         Some(len) => {
