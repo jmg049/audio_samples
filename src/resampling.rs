@@ -389,6 +389,29 @@ where
 // emits a variable number of output frames. The resampler processes all
 // channels in a single call, so no per-channel parallelism is needed here.
 
+// Shared with `StreamingResampler`, which needs the exact same filter tuning
+// for a given quality tier so a track sounds identical whether it was resampled
+// offline or through the chunked streaming path.
+fn medium_sinc_params() -> SincInterpolationParameters {
+    SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: 0.95,
+        oversampling_factor: 128,
+        interpolation: SincInterpolationType::Linear,
+        window: WindowFunction::Hann2,
+    }
+}
+
+fn high_sinc_params() -> SincInterpolationParameters {
+    SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        oversampling_factor: 256,
+        interpolation: SincInterpolationType::Cubic,
+        window: WindowFunction::BlackmanHarris2,
+    }
+}
+
 fn resample_medium<T>(
     audio: &AudioSamples<f32>,
     target_sample_rate: SampleRate,
@@ -396,14 +419,7 @@ fn resample_medium<T>(
 where
     T: StandardSample,
 {
-    let params = SincInterpolationParameters {
-        sinc_len: 128,
-        f_cutoff: 0.95,
-        oversampling_factor: 128,
-        interpolation: SincInterpolationType::Linear,
-        window: WindowFunction::Hann2,
-    };
-    resample_sinc(audio, target_sample_rate, &params, 1)
+    resample_sinc(audio, target_sample_rate, &medium_sinc_params(), 1)
 }
 
 fn resample_high<T>(
@@ -413,14 +429,7 @@ fn resample_high<T>(
 where
     T: StandardSample,
 {
-    let params = SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        oversampling_factor: 256,
-        interpolation: SincInterpolationType::Cubic,
-        window: WindowFunction::BlackmanHarris2,
-    };
-    resample_sinc(audio, target_sample_rate, &params, 2)
+    resample_sinc(audio, target_sample_rate, &high_sinc_params(), 2)
 }
 
 fn resample_sinc<T>(
@@ -563,6 +572,228 @@ where
         channel_count,
         target_sample_rate,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (chunk-by-chunk) resampling
+// ---------------------------------------------------------------------------
+//
+// `resample`/`resample_by_ratio` above are whole-buffer: the entire clip must be
+// in memory before resampling starts. `StreamingResampler` wraps the same `Async<f32>`
+// engine (and, for `Medium`/`High`, the exact same filter tuning via
+// `medium_sinc_params`/`high_sinc_params`) but keeps it alive across many calls, so a
+// long-running source - a file being decoded chunk-by-chunk, or a live network stream -
+// can be resampled without ever holding more than a couple of chunks in memory.
+//
+// rubato's `Async` (constructed with `FixedAsync::Input`) always wants exactly
+// `input_frames_next()` frames per call. Caller-supplied chunks rarely line up with
+// that, so incoming frames are appended to a small per-channel `pending` buffer and
+// drained in `input_frames_next()`-sized blocks; leftover frames (fewer than one
+// block) carry over to the next call.
+
+/// Stateful resampler for continuous, chunk-by-chunk resampling of a live audio
+/// stream.
+///
+/// Construct once per stream with [`new`](Self::new) and feed it via
+/// [`process_chunk`](Self::process_chunk) as chunks arrive. Each call may return
+/// `Ok(None)` (not enough input accumulated yet for a full block - normal for the
+/// first call or short chunks) or `Ok(Some(chunk))` with however many output frames
+/// were produced; output chunk sizes do not need to match input chunk sizes.
+///
+/// Call [`finish`](Self::finish) exactly once when the source is exhausted to flush
+/// the final, zero-padded partial block. [`reset`](Self::reset) clears both the
+/// rubato delay line and any pending input - call it after a seek, since the buffered
+/// state no longer corresponds to a contiguous position in the stream.
+pub struct StreamingResampler<T: StandardSample> {
+    resampler: Async<f32>,
+    chunk_in: usize,
+    channels: usize,
+    channel_count: ChannelCount,
+    out_sample_rate: SampleRate,
+    pending: Vec<Vec<f32>>,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: StandardSample> StreamingResampler<T> {
+    /// Create a streaming resampler from `in_sample_rate` to `out_sample_rate` for
+    /// `channels` channels of audio, at the given quality tier.
+    pub fn new(
+        in_sample_rate: SampleRate,
+        out_sample_rate: SampleRate,
+        channels: ChannelCount,
+        quality: ResamplingQuality,
+    ) -> AudioSampleResult<Self> {
+        let nbr_channels = channels.get() as usize;
+        let ratio = out_sample_rate.get() as f64 / in_sample_rate.get() as f64;
+
+        let make_err = |e: rubato::ResamplerConstructionError| {
+            AudioSampleError::Processing(ProcessingError::external_dependency(
+                "rubato",
+                "streaming_resample",
+                format!("failed to create resampler: {e}"),
+            ))
+        };
+
+        let resampler = match quality {
+            ResamplingQuality::Fast => Async::<f32>::new_poly(
+                ratio,
+                1.0,
+                rubato::PolynomialDegree::Linear,
+                RESAMPLE_CHUNK,
+                nbr_channels,
+                FixedAsync::Input,
+            )
+            .map_err(make_err)?,
+            ResamplingQuality::Medium => Async::<f32>::new_sinc(
+                ratio,
+                1.0,
+                &medium_sinc_params(),
+                RESAMPLE_CHUNK,
+                nbr_channels,
+                FixedAsync::Input,
+            )
+            .map_err(make_err)?,
+            ResamplingQuality::High => Async::<f32>::new_sinc(
+                ratio,
+                1.0,
+                &high_sinc_params(),
+                RESAMPLE_CHUNK,
+                nbr_channels,
+                FixedAsync::Input,
+            )
+            .map_err(make_err)?,
+        };
+
+        let chunk_in = resampler.input_frames_next();
+
+        Ok(Self {
+            resampler,
+            chunk_in,
+            channels: nbr_channels,
+            channel_count: channels,
+            out_sample_rate,
+            pending: vec![Vec::with_capacity(chunk_in * 2); nbr_channels],
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    /// Sample rate this resampler produces.
+    pub fn output_sample_rate(&self) -> SampleRate {
+        self.out_sample_rate
+    }
+
+    /// Feed the next chunk of input audio (must have the channel count this
+    /// resampler was constructed with). Returns `Ok(None)` if `chunk` was not
+    /// enough to complete an internal processing block yet.
+    pub fn process_chunk(
+        &mut self,
+        chunk: &AudioSamples<T>,
+    ) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
+        if chunk.num_channels().get() as usize != self.channels {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "channels",
+                "chunk channel count does not match the resampler's configured channel count",
+            )));
+        }
+
+        let input = chunk.as_f32();
+        let input_data = extract_channel_data(&input)?;
+        for (dst, src) in self.pending.iter_mut().zip(input_data.iter()) {
+            dst.extend_from_slice(src);
+        }
+
+        self.drain_blocks()
+    }
+
+    /// Flush any buffered input as a final, zero-padded block. Call exactly once
+    /// when the source is exhausted. Returns `Ok(None)` if nothing was pending.
+    ///
+    /// The padding means the final call may emit a handful of trailing frames beyond
+    /// the mathematically exact resampled length - inaudible in practice, but callers
+    /// that need an exact frame count should track it themselves rather than relying
+    /// on this output's length.
+    pub fn finish(&mut self) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
+        if self.pending[0].is_empty() {
+            return Ok(None);
+        }
+        let chunk_in = self.chunk_in;
+        for ch in self.pending.iter_mut() {
+            ch.resize(chunk_in, 0.0);
+        }
+        self.drain_blocks()
+    }
+
+    /// Reset the resampler's delay line and discard any pending input. Call this
+    /// after a seek - buffered state no longer corresponds to a contiguous stream
+    /// position.
+    pub fn reset(&mut self) {
+        self.resampler.reset();
+        for ch in self.pending.iter_mut() {
+            ch.clear();
+        }
+    }
+
+    fn drain_blocks(&mut self) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
+        let chunk_in = self.chunk_in;
+        let channels = self.channels;
+        let mut out: Vec<Vec<f32>> = (0..channels).map(|_| Vec::new()).collect();
+
+        while self.pending[0].len() >= chunk_in {
+            let chunk_out = self.resampler.output_frames_next();
+            let mut out_buf: Vec<Vec<f32>> =
+                (0..channels).map(|_| vec![0.0f32; chunk_out]).collect();
+
+            let in_adapter = SequentialSliceOfVecs::new(&self.pending, channels, chunk_in)
+                .map_err(|e| {
+                    AudioSampleError::Processing(ProcessingError::external_dependency(
+                        "audioadapter",
+                        "streaming_resample",
+                        format!("input adapter error: {e}"),
+                    ))
+                })?;
+            let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut out_buf, channels, chunk_out)
+                .map_err(|e| {
+                    AudioSampleError::Processing(ProcessingError::external_dependency(
+                        "audioadapter",
+                        "streaming_resample",
+                        format!("output adapter error: {e}"),
+                    ))
+                })?;
+
+            let (_, frames_written) = self
+                .resampler
+                .process_into_buffer(&in_adapter, &mut out_adapter, None)
+                .map_err(|e| {
+                    AudioSampleError::Processing(ProcessingError::external_dependency(
+                        "rubato",
+                        "streaming_resample",
+                        format!("resampling failed: {e}"),
+                    ))
+                })?;
+
+            for (dst, src) in out.iter_mut().zip(out_buf.iter()) {
+                dst.extend_from_slice(&src[..frames_written]);
+            }
+
+            for ch in self.pending.iter_mut() {
+                ch.drain(..chunk_in);
+            }
+        }
+
+        let total_frames = out[0].len();
+        if total_frames == 0 {
+            return Ok(None);
+        }
+
+        assemble_output(
+            out,
+            total_frames,
+            channels,
+            self.channel_count,
+            self.out_sample_rate,
+        )
+        .map(Some)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -741,5 +972,99 @@ mod tests {
                 "{quality:?}: expected ~{expected} samples, got {got}"
             );
         }
+    }
+
+    fn sine_mono(n: usize, sample_rate: SampleRate) -> AudioSamples<'static, f32> {
+        let samples = (0..n)
+            .map(|x| {
+                (x as f32 * 2.0 * std::f32::consts::PI * 440.0 / sample_rate.get() as f32).sin()
+            })
+            .collect::<Vec<f32>>();
+        AudioSamples::new_mono(Array1::from_vec(samples), sample_rate).unwrap()
+    }
+
+    #[test]
+    fn test_streaming_resampler_matches_offline_length() {
+        let in_sr = sample_rate!(44100);
+        let out_sr = sample_rate!(22050);
+        let total_frames = 44100; // 1 second
+        let audio = sine_mono(total_frames, in_sr);
+
+        for quality in [
+            ResamplingQuality::Fast,
+            ResamplingQuality::Medium,
+            ResamplingQuality::High,
+        ] {
+            let mut streaming =
+                StreamingResampler::<f32>::new(in_sr, out_sr, channels!(1), quality).unwrap();
+
+            // Deliberately misaligned with rubato's internal block size, to
+            // exercise the pending-buffer carry logic.
+            const CHUNK: usize = 333;
+            let mut streamed_frames = 0usize;
+            let mono = audio.as_mono().unwrap();
+            for chunk in mono.as_slice().unwrap().chunks(CHUNK) {
+                let piece =
+                    AudioSamples::new_mono(Array1::from_vec(chunk.to_vec()), in_sr).unwrap();
+                if let Some(out) = streaming.process_chunk(&piece).unwrap() {
+                    streamed_frames += out.samples_per_channel().get();
+                }
+            }
+            if let Some(out) = streaming.finish().unwrap() {
+                streamed_frames += out.samples_per_channel().get();
+            }
+
+            let offline = resample(&audio, out_sr, quality).unwrap();
+            let offline_frames = offline.samples_per_channel().get();
+
+            // The streaming path pads its final block to a full internal chunk,
+            // so it may run a little long, but should never be short.
+            assert!(
+                streamed_frames >= offline_frames,
+                "{quality:?}: streamed {streamed_frames} < offline {offline_frames}"
+            );
+            assert!(
+                streamed_frames - offline_frames < RESAMPLE_CHUNK,
+                "{quality:?}: streamed {streamed_frames} too far past offline {offline_frames}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_streaming_resampler_channel_mismatch_errors() {
+        let mut streaming = StreamingResampler::<f32>::new(
+            sample_rate!(44100),
+            sample_rate!(48000),
+            channels!(1),
+            ResamplingQuality::Fast,
+        )
+        .unwrap();
+
+        let stereo = AudioSamples::new_multi_channel(
+            ndarray::array![[0.0f32, 0.0], [0.0, 0.0]],
+            sample_rate!(44100),
+        )
+        .unwrap();
+
+        assert!(streaming.process_chunk(&stereo).is_err());
+    }
+
+    #[test]
+    fn test_streaming_resampler_reset_allows_reuse() {
+        let in_sr = sample_rate!(44100);
+        let out_sr = sample_rate!(48000);
+        let mut streaming =
+            StreamingResampler::<f32>::new(in_sr, out_sr, channels!(1), ResamplingQuality::Medium)
+                .unwrap();
+
+        let chunk = sine_mono(2048, in_sr);
+        streaming.process_chunk(&chunk).unwrap();
+
+        streaming.reset();
+
+        // After reset, feeding the same chunk again should behave like a fresh
+        // resampler rather than panicking or erroring on stale state.
+        let result = streaming.process_chunk(&chunk);
+        assert!(result.is_ok());
     }
 }

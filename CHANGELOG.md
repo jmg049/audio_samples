@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `StreamingResampler` (`resampling` feature): a stateful, chunk-by-chunk resampler for continuous sources (e.g. audio being decoded live and fed to a playback device at a different sample rate). Wraps the same rubato `Async<f32>` engine and quality tuning as `resample`/`resample_by_ratio`, but keeps the delay line and any leftover input alive across calls instead of requiring the whole clip up front.
+
 ## 2.0.0
 
 A breaking release that unifies the public API. See

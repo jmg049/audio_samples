@@ -535,7 +535,7 @@ pub use i24::{I24, PackedStruct}; // Re-export I24 type that has the AudioSample
 
 use ndarray::{Array1, Array2};
 #[cfg(feature = "resampling")]
-pub use resampling::{resample, resample_by_ratio};
+pub use resampling::{StreamingResampler, resample, resample_by_ratio};
 
 /// A tagged result that is either a 1-D mono array or a 2-D multi-channel array.
 ///
