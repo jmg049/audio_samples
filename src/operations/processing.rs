@@ -606,7 +606,7 @@ where
     /// `numpy.convolve(x, h, mode='valid')`, and to
     /// `scipy.signal.lfilter(h, 1, x)[M-1:]`. The resulting audio is shorter
     /// than the original by `filter_coeffs.len() - 1` samples. Long filters
-    /// (≥ 256 taps, with the `transforms` feature) use FFT convolution.
+    /// (≥ 160 taps, with the `transforms` feature) use FFT convolution.
     ///
     /// Computation is carried out in `f64`. For integer sample types both the
     /// samples and the coefficients are interpreted on the normalised
