@@ -39,6 +39,31 @@ fn nz(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n).unwrap()
 }
 
+fn bench_iir_multichannel(c: &mut Criterion) {
+    let len = SR as usize * SECONDS;
+    let mut g = c.benchmark_group("iir_multichannel_f32");
+    for channels in [2usize, 8] {
+        g.throughput(Throughput::Elements((len * channels) as u64));
+        let mono = signal(len);
+        let data = ndarray::Array2::from_shape_fn((channels, len), |(_, i)| mono[i]);
+        let base = AudioSamples::new_multi_channel(data, NonZeroU32::new(SR).unwrap()).unwrap();
+        for order in [2usize, 8] {
+            let design = IirFilterDesign::butterworth_lowpass(nz(order), 1_000.0);
+            g.bench_function(format!("butter_lp_order{order}_{channels}ch"), |b| {
+                b.iter_batched(
+                    || base.clone(),
+                    |mut audio| {
+                        audio.apply_iir_filter_in_place(&design).unwrap();
+                        audio
+                    },
+                    BatchSize::LargeInput,
+                );
+            });
+        }
+    }
+    g.finish();
+}
+
 fn bench_iir_whole(c: &mut Criterion) {
     let len = SR as usize * SECONDS;
     let mut g = c.benchmark_group("iir_whole_signal_f32");
@@ -210,6 +235,6 @@ fn bench_room_correction_streaming(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().warm_up_time(Duration::from_millis(500)).measurement_time(Duration::from_secs(3));
-    targets = bench_iir_whole, bench_iir_streaming, bench_fir, bench_room_correction_streaming
+    targets = bench_iir_whole, bench_iir_multichannel, bench_iir_streaming, bench_fir, bench_room_correction_streaming
 }
 criterion_main!(benches);

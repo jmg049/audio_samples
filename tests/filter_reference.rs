@@ -596,9 +596,17 @@ fn parametric_eq_cascade_matches_band_by_band() {
     let mix = f64s(&fixtures["signals"]["mix"]);
     let fs = 48000.0;
     let mut eq = audio_samples::operations::types::ParametricEq::new();
-    eq.add_band(EqBand::low_shelf(100.0, 4.0, std::f64::consts::FRAC_1_SQRT_2));
+    eq.add_band(EqBand::low_shelf(
+        100.0,
+        4.0,
+        std::f64::consts::FRAC_1_SQRT_2,
+    ));
     eq.add_band(EqBand::peak(1000.0, -6.0, 2.0));
-    eq.add_band(EqBand::high_shelf(8000.0, 3.0, std::f64::consts::FRAC_1_SQRT_2));
+    eq.add_band(EqBand::high_shelf(
+        8000.0,
+        3.0,
+        std::f64::consts::FRAC_1_SQRT_2,
+    ));
     eq.set_output_gain(-2.0);
 
     let mut cascade = mono_f64(&mix, fs);

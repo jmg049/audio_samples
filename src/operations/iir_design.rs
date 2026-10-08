@@ -755,21 +755,27 @@ fn is_real(r: &C64) -> bool {
 }
 
 /// Index of the root in `fro` nearest to `to`, restricted to real / complex /
-/// any roots (SciPy `_nearest_real_complex_idx`).
+/// any roots (SciPy `_nearest_real_complex_idx`). Ties resolve to the lowest
+/// index, as a stable `argsort` would.
 fn nearest_idx(fro: &[C64], to: C64, which: Which) -> usize {
-    let mut order: Vec<usize> = (0..fro.len()).collect();
-    order.sort_by(|&a, &b| (fro[a] - to).norm().total_cmp(&(fro[b] - to).norm()));
-    match which {
-        Which::Any => order[0],
-        Which::Real => *order
-            .iter()
-            .find(|&&i| is_real(&fro[i]))
-            .unwrap_or(&order[0]),
-        Which::Complex => *order
-            .iter()
-            .find(|&&i| !is_real(&fro[i]))
-            .unwrap_or(&order[0]),
+    let wanted = |r: &C64| match which {
+        Which::Any => true,
+        Which::Real => is_real(r),
+        Which::Complex => !is_real(r),
+    };
+    let mut best: Option<(usize, f64)> = None;
+    for (i, r) in fro.iter().enumerate() {
+        if !wanted(r) {
+            continue;
+        }
+        let d = (r - to).norm();
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((i, d));
+        }
     }
+    // SciPy would raise if no root of the requested kind exists; fall back to
+    // the nearest root of any kind (cannot happen for valid designs).
+    best.map_or_else(|| nearest_idx(fro, to, Which::Any), |(i, _)| i)
 }
 
 #[derive(Clone, Copy)]
@@ -779,26 +785,24 @@ enum Which {
     Any,
 }
 
-/// Polynomial (highest degree first, real part) with the given roots.
-fn poly(roots: &[C64]) -> Vec<f64> {
-    let mut c = vec![C64::new(1.0, 0.0)];
-    for &r in roots {
-        let mut next = vec![C64::new(0.0, 0.0); c.len() + 1];
-        for (i, &v) in c.iter().enumerate() {
-            next[i] += v;
-            next[i + 1] -= v * r;
-        }
-        c = next;
+/// Coefficients (highest degree first, real part) of the monic polynomial
+/// with the given (at most two) roots, as `numpy.poly`; returns the
+/// coefficient array and its length.
+fn poly2(roots: &[C64]) -> ([f64; 3], usize) {
+    match roots {
+        [] => ([1.0, 0.0, 0.0], 1),
+        [r] => ([1.0, -r.re, 0.0], 2),
+        [r1, r2] => ([1.0, (-*r1 - *r2).re, (*r1 * *r2).re], 3),
+        _ => unreachable!("second-order sections have at most two roots"),
     }
-    c.into_iter().map(|v| v.re).collect()
 }
 
 fn single_zpksos(z: &[C64], p: &[C64]) -> Sos {
-    let b = poly(z);
-    let a = poly(p);
+    let (b, nb) = poly2(z);
+    let (a, na) = poly2(p);
     let mut sos = [0.0; 6];
-    sos[3 - b.len()..3].copy_from_slice(&b);
-    sos[6 - a.len()..6].copy_from_slice(&a);
+    sos[3 - nb..3].copy_from_slice(&b[..nb]);
+    sos[6 - na..6].copy_from_slice(&a[..na]);
     sos
 }
 
@@ -830,11 +834,16 @@ pub(crate) fn zpk2sos(zpk: &Zpk) -> AudioSampleResult<Vec<Sos>> {
     let mut z = to_vec(cplxreal(&z)?);
     let mut p = to_vec(cplxreal(&p)?);
 
-    let idx_worst = |v: &[C64], idx: &[usize]| -> usize {
-        let mut best = idx[0];
-        let mut best_val = (1.0 - v[best].norm()).abs();
-        for &i in &idx[1..] {
-            let val = (1.0 - v[i].norm()).abs();
+    // Index of the root closest to the unit circle (optionally real only);
+    // ties resolve to the lowest index, like `np.argmin`.
+    let idx_worst = |v: &[C64], real_only: bool| -> usize {
+        let mut best = usize::MAX;
+        let mut best_val = f64::INFINITY;
+        for (i, r) in v.iter().enumerate() {
+            if real_only && !is_real(r) {
+                continue;
+            }
+            let val = (1.0 - r.norm()).abs();
             if val < best_val {
                 best = i;
                 best_val = val;
@@ -845,8 +854,7 @@ pub(crate) fn zpk2sos(zpk: &Zpk) -> AudioSampleResult<Vec<Sos>> {
 
     let mut sos = vec![[0.0f64; 6]; n_sections];
     for si in (0..n_sections).rev() {
-        let all: Vec<usize> = (0..p.len()).collect();
-        let p1_idx = idx_worst(&p, &all);
+        let p1_idx = idx_worst(&p, false);
         let p1 = p.remove(p1_idx);
         let n_real_p = p.iter().filter(|r| is_real(r)).count();
         let n_real_z = z.iter().filter(|r| is_real(r)).count();
@@ -864,8 +872,7 @@ pub(crate) fn zpk2sos(zpk: &Zpk) -> AudioSampleResult<Vec<Sos>> {
             sos[si] = single_zpksos(&[z1, z1.conj()], &[p1, p1.conj()]);
         } else {
             let p2 = if is_real(&p1) {
-                let real_idx: Vec<usize> = (0..p.len()).filter(|&i| is_real(&p[i])).collect();
-                let p2_idx = idx_worst(&p, &real_idx);
+                let p2_idx = idx_worst(&p, true);
                 p.remove(p2_idx)
             } else {
                 p1.conj()
