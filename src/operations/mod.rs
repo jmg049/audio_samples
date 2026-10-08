@@ -61,6 +61,8 @@ pub mod editing;
 pub mod hpss;
 
 #[cfg(feature = "iir-filtering")]
+pub(crate) mod iir_design;
+#[cfg(feature = "iir-filtering")]
 pub mod iir_filtering;
 
 #[cfg(feature = "parametric-eq")]

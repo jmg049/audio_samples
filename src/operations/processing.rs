@@ -28,10 +28,12 @@
 //! assert!(audio[0] <= 1.0);
 //! ```
 
+use crate::operations::traits::AudioIirFiltering;
 #[cfg(feature = "resampling")]
 use crate::operations::types::ResamplingQuality;
-use crate::operations::types::{NormalizationConfig, NormalizationMethod};
+use crate::operations::types::{IirFilterDesign, NormalizationConfig, NormalizationMethod};
 use crate::repr::AudioData;
+use std::num::NonZeroUsize;
 
 #[cfg(feature = "resampling")]
 use crate::repr::SampleRate;
@@ -44,7 +46,6 @@ use crate::{
 
 use ndarray::{Array2, Axis};
 use non_empty_slice::NonEmptySlice;
-use num_traits::FloatConst;
 
 /// Valid-region FIR convolution over flat slices, matching [`AudioProcessing::apply_filter`]'s
 /// convention: `output[i] = Σ_j input[i + j] · coeffs[j]` for `i in 0..output_len`.
@@ -58,17 +59,28 @@ fn fir_valid_convolve<T>(input: &[T], coeffs: &[T], output_len: usize) -> Vec<T>
 where
     T: StandardSample,
 {
-    let filter_len = coeffs.len();
-    let mut output = Vec::with_capacity(output_len);
-    for i in 0..output_len {
-        let window = &input[i..i + filter_len];
-        let mut sum = T::zero();
-        for (s, c) in window.iter().zip(coeffs.iter()) {
-            sum += *s * *c;
-        }
-        output.push(sum);
-    }
-    output
+    // True convolution, `y[i] = Σ_j h[j] · x[i + M - 1 - j]` (the "valid" part
+    // of `numpy.convolve(x, h)`): dot each window with the reversed taps.
+    // Accumulates in f64 using the audio-aware sample conversion, so integer
+    // samples and taps are interpreted on the normalised [-1, 1] scale and
+    // cannot overflow.
+    let h_rev: Vec<f64> = coeffs
+        .iter()
+        .rev()
+        .map(|&c| -> f64 { c.convert_to() })
+        .collect();
+    let x: Vec<f64> = input.iter().map(|&s| -> f64 { s.convert_to() }).collect();
+    let filter_len = h_rev.len();
+    (0..output_len)
+        .map(|i| {
+            let sum: f64 = x[i..i + filter_len]
+                .iter()
+                .zip(h_rev.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            sum.convert_to()
+        })
+        .collect()
 }
 
 /// Tap count at or above which FFT convolution beats direct convolution for
@@ -83,7 +95,7 @@ const FIR_FFT_MIN_TAPS: usize = 256;
 /// With `transforms` enabled, long filters route through FFT convolution
 /// (`spectrograms::fft_convolve`); short filters and builds without `transforms`
 /// use the direct slice loop. Both produce identical results up to floating-point
-/// rounding and preserve `apply_filter`'s valid-region / correlation convention.
+/// rounding and implement `apply_filter`'s valid-region convolution.
 #[cfg(feature = "transforms")]
 fn fir_valid_convolve_dispatch<T>(
     input: &[T],
@@ -114,13 +126,11 @@ where
     Ok(fir_valid_convolve(input, coeffs, output_len))
 }
 
-/// Valid-region FIR convolution via FFT, matching the direct path's convention
-/// `output[i] = Σ_j input[i + j] · coeffs[j]`.
+/// Valid-region FIR convolution via FFT, matching the direct path:
+/// `output[i] = Σ_j coeffs[j] · input[i + M - 1 - j]` (`numpy.convolve(x, h, 'valid')`).
 ///
-/// FFT convolution computes true convolution `(x * h)`, so we convolve `x` with
-/// the **reversed** coefficients and then take the central "valid" region, which
-/// reproduces the correlation convention exactly. Computation is in `f64` for
-/// headroom; results match the direct loop to floating-point tolerance.
+/// Computation is in `f64` for headroom; results match the direct loop to
+/// floating-point tolerance.
 #[cfg(feature = "transforms")]
 fn fir_valid_convolve_fft<T>(
     input: &[T],
@@ -133,16 +143,12 @@ where
     use non_empty_slice::NonEmptySlice;
 
     let x: Vec<f64> = input.iter().map(|&s| -> f64 { s.convert_to() }).collect();
-    let h_rev: Vec<f64> = coeffs
-        .iter()
-        .rev()
-        .map(|&c| -> f64 { c.convert_to() })
-        .collect();
+    let h: Vec<f64> = coeffs.iter().map(|&c| -> f64 { c.convert_to() }).collect();
 
     let x_ne = NonEmptySlice::new(x.as_slice()).ok_or_else(|| {
         AudioSampleError::Parameter(ParameterError::invalid_value("audio", "empty signal"))
     })?;
-    let h_ne = NonEmptySlice::new(h_rev.as_slice()).ok_or_else(|| {
+    let h_ne = NonEmptySlice::new(h.as_slice()).ok_or_else(|| {
         AudioSampleError::Parameter(ParameterError::invalid_value("filter", "empty filter"))
     })?;
 
@@ -557,11 +563,19 @@ where
         Ok(())
     }
 
-    /// Applies a digital filter to the audio samples using direct FIR convolution.
+    /// Applies an FIR filter to the audio samples by linear convolution.
     ///
-    /// Each output sample is the dot product of the filter coefficients with the
-    /// corresponding segment of the input signal. The resulting audio is shorter
-    /// than the original by `filter_coeffs.len() - 1` samples.
+    /// Computes the fully-overlapping ("valid") part of the convolution of each
+    /// channel with `filter_coeffs`, i.e. `y[i] = Σ_j h[j] · x[i + M - 1 - j]`
+    /// for a filter of length `M` - identical to
+    /// `numpy.convolve(x, h, mode='valid')`, and to
+    /// `scipy.signal.lfilter(h, 1, x)[M-1:]`. The resulting audio is shorter
+    /// than the original by `filter_coeffs.len() - 1` samples. Long filters
+    /// (≥ 256 taps, with the `transforms` feature) use FFT convolution.
+    ///
+    /// Computation is carried out in `f64`. For integer sample types both the
+    /// samples and the coefficients are interpreted on the normalised
+    /// `[-1, 1]` scale (so an `i16` coefficient of `16384` means ≈ 0.5).
     ///
     /// # Arguments
     /// - `filter_coeffs` - FIR filter coefficients. A single-element slice
@@ -581,11 +595,12 @@ where
     /// use non_empty_slice::NonEmptySlice;
     ///
     /// let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-    /// let coeffs = [0.5f32, 0.5]; // 2-sample moving average
+    /// let coeffs = [1.0f32, -1.0]; // first difference: y[n] = x[n] - x[n-1]
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// audio.apply_filter_in_place(NonEmptySlice::new(&coeffs).unwrap()).unwrap();
-    /// assert_eq!(audio[0], 1.5); // 1*0.5 + 2*0.5
-    /// assert_eq!(audio[1], 2.5); // 2*0.5 + 3*0.5
+    /// assert_eq!(audio.samples_per_channel().get(), 4);
+    /// assert_eq!(audio[0], 1.0); // 2 - 1
+    /// assert_eq!(audio[3], 1.0); // 5 - 4
     /// ```
     #[inline]
     fn apply_filter_in_place(
@@ -745,19 +760,23 @@ where
 
     /// Applies a first-order low-pass filter with the specified cutoff frequency.
     ///
-    /// Uses a single-pole IIR filter to attenuate frequencies above the cutoff.
-    /// The filter operates independently on each channel.
+    /// The filter is a first-order Butterworth low-pass designed with the
+    /// bilinear transform: -3 dB at `cutoff_hz`, unity gain at DC, a zero at
+    /// Nyquist and a 6 dB/octave roll-off. It is applied to each channel
+    /// independently from zero initial state, and is identical to
+    /// `scipy.signal.sosfilt(scipy.signal.butter(1, cutoff_hz, fs=fs,
+    /// output='sos'), x)`. For steeper slopes use
+    /// [`AudioIirFiltering::butterworth_lowpass`].
     ///
     /// # Arguments
-    /// - `cutoff_hz` - Cutoff frequency in Hz. Must be less than the Nyquist
-    ///   frequency (half the sample rate).
+    /// - `cutoff_hz` - Cutoff (-3 dB) frequency in Hz, in `(0, Nyquist)`.
     ///
     /// # Returns
     /// The filtered audio samples.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if `cutoff_hz` is ≥ the
-    ///   Nyquist frequency.
+    /// - [`crate::AudioSampleError::Parameter`] if `cutoff_hz` is not in
+    ///   `(0, Nyquist)`.
     ///
     /// # Examples
     /// ```
@@ -767,143 +786,70 @@ where
     /// let data = array![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// audio.low_pass_filter_in_place(1000.0).unwrap();
-    /// // High-frequency content is attenuated
-    /// assert!(audio[1].abs() < 1.0);
+    /// // A Nyquist-rate tone is strongly attenuated
+    /// assert!(audio[7].abs() < 0.2);
     /// ```
     #[inline]
     fn low_pass_filter_in_place(&mut self, cutoff_hz: f64) -> AudioSampleResult<()> {
-        // Simple implementation using a basic low-pass filter design
-        let sample_rate = self.sample_rate_hz();
-        let normalized_cutoff = cutoff_hz / sample_rate;
-
-        if normalized_cutoff >= 0.5 {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "cutoff_hz",
-                "Cutoff frequency must be less than Nyquist frequency",
-            )));
-        }
-
-        // Simple single-pole low-pass filter coefficient
-        let alpha = 2.0 * f64::PI() * normalized_cutoff;
-        let one_minus_alpha = 1.0 - alpha;
-
-        match self.data_mut() {
-            AudioData::Mono(arr) => {
-                let mut prev_output: f64 = arr[0].convert_to();
-                for sample in arr.iter_mut() {
-                    let s: f64 = (*sample).convert_to();
-                    let s = alpha * s + one_minus_alpha * prev_output;
-                    prev_output = s;
-                    *sample = s.convert_to();
-                }
-            }
-            AudioData::Multi(arr) => {
-                for mut channel in arr.axis_iter_mut(Axis(0)) {
-                    let mut prev_output: f64 = channel[0].convert_to();
-                    for sample in &mut channel {
-                        let s: f64 = (*sample).convert_to();
-                        let s = alpha * s + one_minus_alpha * prev_output;
-                        prev_output = s;
-                        *sample = s.convert_to();
-                    }
-                }
-            }
-        }
-        Ok(())
+        let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::MIN, cutoff_hz);
+        self.apply_iir_filter_in_place(&design)
     }
 
     /// Applies a first-order high-pass filter with the specified cutoff frequency.
     ///
-    /// Uses an RC high-pass filter model to attenuate frequencies below the
-    /// cutoff. The filter operates independently on each channel.
+    /// The filter is a first-order Butterworth high-pass designed with the
+    /// bilinear transform: -3 dB at `cutoff_hz`, a zero at DC, unity gain at
+    /// Nyquist and a 6 dB/octave slope. It is applied to each channel
+    /// independently from zero initial state, and is identical to
+    /// `scipy.signal.sosfilt(scipy.signal.butter(1, cutoff_hz, 'highpass',
+    /// fs=fs, output='sos'), x)`. For steeper slopes use
+    /// [`AudioIirFiltering::butterworth_highpass`].
     ///
     /// # Arguments
-    /// - `cutoff_hz` - Cutoff frequency in Hz. Must be less than the Nyquist
-    ///   frequency (half the sample rate).
+    /// - `cutoff_hz` - Cutoff (-3 dB) frequency in Hz, in `(0, Nyquist)`.
     ///
     /// # Returns
     /// The filtered audio samples.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if `cutoff_hz` is ≥ the
-    ///   Nyquist frequency.
+    /// - [`crate::AudioSampleError::Parameter`] if `cutoff_hz` is not in
+    ///   `(0, Nyquist)`.
     ///
     /// # Examples
     /// ```
     /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
-    /// use ndarray::array;
+    /// use ndarray::Array1;
     ///
-    /// let data = array![1.0f32, 1.0, 1.0, 1.0]; // Constant (DC) signal
+    /// // A DC (constant) signal decays to zero through a high-pass filter.
+    /// let data = Array1::from_elem(4410, 1.0f32);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// audio.high_pass_filter_in_place(100.0).unwrap();
-    /// // A constant signal is fully removed by a high-pass filter
-    /// assert_eq!(audio[0], 0.0);
-    /// assert_eq!(audio[3], 0.0);
+    /// assert!(audio[4409].abs() < 1e-3);
     /// ```
     #[inline]
     fn high_pass_filter_in_place(&mut self, cutoff_hz: f64) -> AudioSampleResult<()> {
-        // Simple implementation using a basic high-pass filter design
-        let sample_rate = self.sample_rate_hz();
-        let normalized_cutoff = cutoff_hz / sample_rate;
-
-        if normalized_cutoff >= 0.5 {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "cutoff_hz",
-                "Cutoff frequency must be less than Nyquist frequency",
-            )));
-        }
-
-        // Simple high-pass filter using RC circuit model
-        let rc = 1.0 / (2.0 * f64::PI() * cutoff_hz);
-        let dt = 1.0 / sample_rate;
-        let alpha = T::cast_from(rc / (rc + dt));
-
-        match self.data_mut() {
-            AudioData::Mono(arr) => {
-                if arr.len().get() > 1 {
-                    let mut prev_input = arr[0];
-                    let mut prev_output = Self::Sample::zero();
-
-                    for sample in arr.iter_mut() {
-                        let current = *sample;
-                        *sample = alpha * (prev_output + current - prev_input);
-                        prev_input = current;
-                        prev_output = *sample;
-                    }
-                }
-            }
-            AudioData::Multi(arr) => {
-                for mut channel in arr.axis_iter_mut(Axis(0)) {
-                    if channel.len() > 1 {
-                        let mut prev_input = channel[0];
-                        let mut prev_output = Self::Sample::zero();
-
-                        for sample in &mut channel {
-                            let current = *sample;
-                            *sample = alpha * (prev_output + current - prev_input);
-                            prev_input = current;
-                            prev_output = *sample;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
+        let design = IirFilterDesign::butterworth_highpass(NonZeroUsize::MIN, cutoff_hz);
+        self.apply_iir_filter_in_place(&design)
     }
 
     /// Applies a band-pass filter that passes frequencies between the two cutoffs.
     ///
-    /// Implemented by cascading a high-pass filter at `low_cutoff_hz` followed
-    /// by a low-pass filter at `high_cutoff_hz`, both applied in place.
+    /// The filter is the band-pass transform of a first-order Butterworth
+    /// prototype (a single second-order section): unity gain at the geometric
+    /// centre of the (pre-warped) band, -3 dB at both edges, and 6 dB/octave
+    /// slopes outside the band. It is identical to
+    /// `scipy.signal.sosfilt(scipy.signal.butter(1, [low, high], 'bandpass',
+    /// fs=fs, output='sos'), x)`. For steeper slopes use
+    /// [`AudioIirFiltering::butterworth_bandpass`].
     ///
     /// # Arguments
-    /// - `low_cutoff_hz` - Lower cutoff frequency in Hz.
-    /// - `high_cutoff_hz` - Upper cutoff frequency in Hz. Must be greater than
+    /// - `low_cutoff_hz` - Lower -3 dB edge in Hz.
+    /// - `high_cutoff_hz` - Upper -3 dB edge in Hz. Must be greater than
     ///   `low_cutoff_hz` and less than the Nyquist frequency.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if `low_cutoff_hz >= high_cutoff_hz`,
-    ///   or if either cutoff exceeds the Nyquist frequency.
+    /// - [`crate::AudioSampleError::Parameter`] unless
+    ///   `0 < low_cutoff_hz < high_cutoff_hz < Nyquist`.
     ///
     /// # Examples
     /// ```
@@ -921,16 +867,9 @@ where
         low_cutoff_hz: f64,
         high_cutoff_hz: f64,
     ) -> AudioSampleResult<()> {
-        if low_cutoff_hz >= high_cutoff_hz {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "frequency_range",
-                "Low frequency must be less than high frequency",
-            )));
-        }
-
-        // Apply high-pass filter first, then low-pass.
-        self.high_pass_filter_in_place(low_cutoff_hz)?;
-        self.low_pass_filter_in_place(high_cutoff_hz)
+        let design =
+            IirFilterDesign::butterworth_bandpass(NonZeroUsize::MIN, low_cutoff_hz, high_cutoff_hz);
+        self.apply_iir_filter_in_place(&design)
     }
 
     /// Resamples audio to a new sample rate using high-quality resampling.

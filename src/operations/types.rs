@@ -1496,6 +1496,56 @@ impl TryFrom<&str> for FilterResponse {
     }
 }
 
+/// Frequency normalisation of the Bessel (Bessel-Thomson) analog prototype.
+///
+/// Mirrors the `norm` argument of `scipy.signal.bessel`.
+#[cfg(feature = "iir-filtering")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum BesselNorm {
+    /// The magnitude response is -3 dB at the cutoff frequency
+    /// (SciPy `norm='mag'`). This is the crate default.
+    #[default]
+    Magnitude,
+    /// The phase response is half its asymptotic value at the cutoff
+    /// frequency, so the high-frequency asymptote matches a Butterworth filter
+    /// of the same order (SciPy `norm='phase'`, SciPy's default).
+    Phase,
+    /// The group delay in the passband is `1 / (2π·cutoff)` seconds
+    /// (SciPy `norm='delay'`).
+    Delay,
+}
+
+#[cfg(feature = "iir-filtering")]
+impl Display for BesselNorm {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Magnitude => "mag",
+            Self::Phase => "phase",
+            Self::Delay => "delay",
+        })
+    }
+}
+
+#[cfg(feature = "iir-filtering")]
+impl FromStr for BesselNorm {
+    type Err = AudioSampleError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mag" | "magnitude" => Ok(Self::Magnitude),
+            "phase" => Ok(Self::Phase),
+            "delay" => Ok(Self::Delay),
+            _ => Err(AudioSampleError::parse::<Self, _>(format!(
+                "Failed to parse {}. Got {}, must be one of {:?}",
+                std::any::type_name::<Self>(),
+                s,
+                ["mag", "phase", "delay"]
+            ))),
+        }
+    }
+}
+
 /// Design specification for an IIR digital filter.
 ///
 /// ## Purpose
@@ -1573,6 +1623,11 @@ pub struct IirFilterDesign {
     /// stronger rejection but require a higher filter order to achieve.
     /// Must be positive. `None` for filter types that do not use this parameter.
     pub stopband_attenuation: Option<f64>,
+    /// Normalisation of the Bessel prototype (ignored by other families).
+    ///
+    /// Defaults to [`BesselNorm::Magnitude`] (-3 dB at the cutoff). Use
+    /// [`BesselNorm::Phase`] to reproduce SciPy's `bessel()` default.
+    pub bessel_norm: BesselNorm,
 }
 
 #[cfg(feature = "iir-filtering")]
@@ -1600,6 +1655,7 @@ impl IirFilterDesign {
             high_frequency: None,
             passband_ripple: None,
             stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1626,6 +1682,7 @@ impl IirFilterDesign {
             high_frequency: None,
             passband_ripple: None,
             stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1656,6 +1713,7 @@ impl IirFilterDesign {
             high_frequency: Some(high_frequency),
             passband_ripple: None,
             stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1692,6 +1750,7 @@ impl IirFilterDesign {
             high_frequency: None,
             passband_ripple: Some(passband_ripple),
             stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1731,6 +1790,7 @@ impl IirFilterDesign {
             high_frequency: None,
             passband_ripple: None,
             stopband_attenuation: Some(stopband_attenuation),
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1767,6 +1827,7 @@ impl IirFilterDesign {
             high_frequency: Some(high_frequency),
             passband_ripple: None,
             stopband_attenuation: Some(stopband_attenuation),
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1801,6 +1862,7 @@ impl IirFilterDesign {
             high_frequency: None,
             passband_ripple: None,
             stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1834,6 +1896,7 @@ impl IirFilterDesign {
             high_frequency: Some(high_frequency),
             passband_ripple: None,
             stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1874,6 +1937,7 @@ impl IirFilterDesign {
             high_frequency: None,
             passband_ripple: Some(passband_ripple),
             stopband_attenuation: Some(stopband_attenuation),
+            bessel_norm: BesselNorm::Magnitude,
         }
     }
 
@@ -1911,7 +1975,100 @@ impl IirFilterDesign {
             high_frequency: Some(high_frequency),
             passband_ripple: Some(passband_ripple),
             stopband_attenuation: Some(stopband_attenuation),
+            bessel_norm: BesselNorm::Magnitude,
         }
+    }
+
+    /// Creates a Butterworth band-stop filter design.
+    ///
+    /// # Arguments
+    ///
+    /// - `order` - order of the low-pass prototype; the resulting digital
+    ///   filter has order `2 × order`.\
+    /// - `low_frequency` - lower -3 dB edge in Hz.\
+    /// - `high_frequency` - upper -3 dB edge in Hz; must exceed `low_frequency`.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = Butterworth` and
+    /// `response = BandStop`.
+    #[inline]
+    #[must_use]
+    pub const fn butterworth_bandstop(
+        order: NonZeroUsize,
+        low_frequency: f64,
+        high_frequency: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::Butterworth,
+            response: FilterResponse::BandStop,
+            order,
+            cutoff_frequency: None,
+            low_frequency: Some(low_frequency),
+            high_frequency: Some(high_frequency),
+            passband_ripple: None,
+            stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
+        }
+    }
+
+    /// Creates a Chebyshev Type I band-pass / band-stop filter design.
+    ///
+    /// # Arguments
+    ///
+    /// - `response` - `BandPass` or `BandStop`.\
+    /// - `order` - order of the low-pass prototype; the resulting digital
+    ///   filter has order `2 × order`.\
+    /// - `low_frequency` - lower passband (band-pass) or stopband (band-stop)
+    ///   edge in Hz, where the response crosses the ripple bound.\
+    /// - `high_frequency` - upper edge in Hz; must exceed `low_frequency`.\
+    /// - `passband_ripple` - maximum passband ripple in dB; must be positive.
+    ///
+    /// # Returns
+    ///
+    /// An [`IirFilterDesign`] with `filter_type = ChebyshevI`.
+    #[inline]
+    #[must_use]
+    pub const fn chebyshev_i_band(
+        response: FilterResponse,
+        order: NonZeroUsize,
+        low_frequency: f64,
+        high_frequency: f64,
+        passband_ripple: f64,
+    ) -> Self {
+        Self {
+            filter_type: IirFilterType::ChebyshevI,
+            response,
+            order,
+            cutoff_frequency: None,
+            low_frequency: Some(low_frequency),
+            high_frequency: Some(high_frequency),
+            passband_ripple: Some(passband_ripple),
+            stopband_attenuation: None,
+            bessel_norm: BesselNorm::Magnitude,
+        }
+    }
+
+    /// Returns this design with the given Bessel normalisation.
+    ///
+    /// Only affects [`IirFilterType::Bessel`] designs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use audio_samples::operations::types::{BesselNorm, FilterResponse, IirFilterDesign};
+    /// use std::num::NonZeroUsize;
+    ///
+    /// // Equivalent to scipy.signal.bessel(4, 1000, fs=fs) (norm='phase').
+    /// let design = IirFilterDesign::bessel(FilterResponse::LowPass, NonZeroUsize::new(4).unwrap(), 1000.0)
+    ///     .with_bessel_norm(BesselNorm::Phase);
+    /// assert_eq!(design.bessel_norm, BesselNorm::Phase);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn with_bessel_norm(mut self, norm: BesselNorm) -> Self {
+        self.bessel_norm = norm;
+        self
     }
 }
 
@@ -2206,6 +2363,56 @@ impl EqBand {
         }
     }
 
+    /// Creates a band-pass filter band (RBJ "constant 0 dB peak gain").
+    ///
+    /// Passes a band centred on `frequency` with unity gain at the centre; the
+    /// bandwidth is set by `q_factor`. No gain is applied.
+    ///
+    /// # Arguments
+    ///
+    /// - `frequency` - centre frequency in Hz.\
+    /// - `q_factor` - centre frequency divided by the -3 dB bandwidth.
+    ///
+    /// # Returns
+    ///
+    /// An enabled [`EqBand`] with `band_type = EqBandType::BandPass` and `gain_db = 0.0`.
+    #[inline]
+    #[must_use]
+    pub const fn band_pass(frequency: f64, q_factor: f64) -> Self {
+        Self {
+            band_type: EqBandType::BandPass,
+            frequency,
+            gain_db: 0.0,
+            q_factor,
+            enabled: true,
+        }
+    }
+
+    /// Creates a band-stop (notch) filter band.
+    ///
+    /// Removes a band centred on `frequency` (infinite attenuation at the
+    /// centre); the width of the notch is set by `q_factor`.
+    ///
+    /// # Arguments
+    ///
+    /// - `frequency` - notch frequency in Hz.\
+    /// - `q_factor` - centre frequency divided by the -3 dB bandwidth.
+    ///
+    /// # Returns
+    ///
+    /// An enabled [`EqBand`] with `band_type = EqBandType::BandStop` and `gain_db = 0.0`.
+    #[inline]
+    #[must_use]
+    pub const fn band_stop(frequency: f64, q_factor: f64) -> Self {
+        Self {
+            band_type: EqBandType::BandStop,
+            frequency,
+            gain_db: 0.0,
+            q_factor,
+            enabled: true,
+        }
+    }
+
     /// Enables or disables this band.
     ///
     /// Disabled bands are bypassed by the EQ processor without being removed.
@@ -2246,7 +2453,7 @@ impl EqBand {
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         let nyquist = sample_rate / 2.0;
 
-        if self.frequency <= 0.0 || self.frequency >= nyquist {
+        if !(self.frequency > 0.0 && self.frequency < nyquist) {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                 "frequency",
                 format!("{} Hz", self.frequency),
@@ -2256,15 +2463,15 @@ impl EqBand {
             )));
         }
 
-        if self.q_factor <= 0.0 {
+        if !(self.q_factor > 0.0 && self.q_factor.is_finite()) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "q_factor",
-                "Q factor must be positive",
+                "Q factor must be positive and finite",
             )));
         }
 
         // Check reasonable gain limits
-        if self.gain_db.abs() > 40.0 {
+        if self.gain_db.is_nan() || self.gain_db.abs() > 40.0 {
             return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
                 "gain_db",
                 format!("{} dB", self.gain_db),

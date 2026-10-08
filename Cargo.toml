@@ -132,7 +132,7 @@ fancy = ["miette/fancy"]
 
 # Core operation categories
 statistics = [] # Basic stats: peak, rms, mean
-processing = ["statistics"] # Basic processing: normalize, scale, clip
+processing = ["statistics", "iir-filtering"] # Basic processing: normalize, scale, clip, simple filters
 transforms = ["dep:spectrograms", "dep:rustfft"]
 editing = [
     "statistics",

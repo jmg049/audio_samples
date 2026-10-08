@@ -34,13 +34,12 @@
 
 use num_traits::FloatConst;
 
-use crate::operations::iir_filtering::IirFilter;
+use crate::operations::iir_filtering::{IirFilter, apply_sos_to_audio};
 use crate::operations::traits::AudioParametricEq;
 use crate::operations::types::{EqBand, EqBandType, ParametricEq, ThreeBandEqConfig};
 use crate::traits::StandardSample;
 use crate::utils::audio_math::db_to_amplitude as db_to_linear;
-use crate::{AudioData, AudioSampleError, LayoutError};
-use crate::{AudioSampleResult, AudioSamples, ConvertTo};
+use crate::{AudioSampleResult, AudioSamples};
 
 impl<T> AudioParametricEq for AudioSamples<'_, T>
 where
@@ -90,17 +89,27 @@ where
         // Validate the EQ configuration
         let eq = eq.clone().validate(sample_rate)?;
 
-        // Apply each enabled band in sequence
-        for band in &eq.bands {
-            if band.is_enabled() {
-                self.apply_eq_band_in_place(band)?;
+        // Cascade every enabled band into one SOS filter and apply it in a
+        // single pass over the data (identical to applying the bands one by
+        // one, but each sample is read and written only once).
+        let mut sos: Vec<[f64; 6]> = eq
+            .bands
+            .iter()
+            .filter(|band| band.is_enabled())
+            .map(|band| eq_band_sos(band, sample_rate))
+            .collect();
+
+        // The output gain is folded into the cascade so integer samples are
+        // converted only once.
+        if eq.output_gain_db != 0.0 {
+            let gain = db_to_linear(eq.output_gain_db);
+            match sos.first_mut() {
+                Some(first) => first[..3].iter_mut().for_each(|c| *c *= gain),
+                None => sos.push([gain, 0.0, 0.0, 1.0, 0.0, 0.0]),
             }
         }
-
-        // Apply output gain if present
-        if eq.output_gain_db != 0.0 {
-            let output_gain_linear = db_to_linear(eq.output_gain_db);
-            self.apply_linear_gain(output_gain_linear);
+        if !sos.is_empty() {
+            apply_sos_to_audio(self, &sos);
         }
 
         Ok(())
@@ -151,47 +160,10 @@ where
         // Validate band parameters
         band.validate(sample_rate)?;
 
-        // Design the filter based on band type
-        let (b_coeffs, a_coeffs) = design_eq_band_filter(band, sample_rate);
-        let mut filter = IirFilter::new(b_coeffs, a_coeffs);
-
-        // Apply filter to audio data
-        match self.data_mut() {
-            AudioData::Mono(_) => {
-                let Some(working_samples) = self.as_slice_mut() else {
-                    return Err(AudioSampleError::Layout(LayoutError::NonContiguous {
-                        operation: "parametric EQ".to_string(),
-                        layout_type: "non-contiguous mono samples".to_string(),
-                    }));
-                };
-
-                // Filter directly into the destination in a single pass. Each
-                // sample is converted to f64, filtered, and converted back to
-                // `T` - identical to the previous "copy to f64 / filter /
-                // write back" sequence, but without the whole-buffer f64 copy.
-                // `process_sample` is invoked in the same order on the same
-                // f64 inputs, so the output is numerically unchanged.
-                for sample in working_samples.iter_mut() {
-                    let x: f64 = (*sample).convert_to();
-                    *sample = filter.process_sample(x).convert_to();
-                }
-            }
-            AudioData::Multi(samples) => {
-                // Filter each channel (row) independently, in place, resetting
-                // the filter state between channels so they do not bleed into
-                // one another. The array is (channels x samples), so the outer
-                // axis iterates channels.
-                let mut view = samples.view_mut();
-                for mut channel in view.outer_iter_mut() {
-                    for sample in channel.iter_mut() {
-                        let x: f64 = (*sample).convert_to();
-                        *sample = filter.process_sample(x).convert_to();
-                    }
-                    // Reset filter state for the next channel.
-                    filter.reset();
-                }
-            }
-        }
+        // Design the RBJ biquad and run it as a transposed-direct-form-II
+        // section over every channel (zero initial state per channel).
+        let sos = [eq_band_sos(band, sample_rate)];
+        apply_sos_to_audio(self, &sos);
 
         Ok(())
     }
@@ -464,6 +436,12 @@ where
     }
 }
 
+/// RBJ biquad for `band` as a SciPy-layout SOS row `[b0, b1, b2, 1, a1, a2]`.
+fn eq_band_sos(band: &EqBand, sample_rate: f64) -> [f64; 6] {
+    let (b, a) = design_eq_band_filter(band, sample_rate);
+    [b[0], b[1], b[2], a[0], a[1], a[2]]
+}
+
 /// Design a filter for a parametric EQ band.
 fn design_eq_band_filter(band: &EqBand, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     match band.band_type {
@@ -521,7 +499,8 @@ fn design_low_shelf_filter(
     let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
     let alpha = sin_omega / (2.0 * q_factor);
-    let sqrt_2a = (2.0 * a).sqrt();
+    // RBJ cookbook: 2·sqrt(A)·alpha.
+    let sqrt_2a = 2.0 * a.sqrt();
 
     // RBJ low shelf filter coefficients
     let b0 = a * ((a - 1.0).mul_add(-cos_omega, a + 1.0) + sqrt_2a * alpha);
@@ -549,7 +528,8 @@ fn design_high_shelf_filter(
     let omega = 2.0 * f64::PI() * frequency / sample_rate;
     let (sin_omega, cos_omega) = omega.sin_cos();
     let alpha = sin_omega / (2.0 * q_factor);
-    let sqrt_2a = (2.0 * a).sqrt();
+    // RBJ cookbook: 2·sqrt(A)·alpha.
+    let sqrt_2a = 2.0 * a.sqrt();
 
     // RBJ high shelf filter coefficients
     let b0 = a * ((a - 1.0).mul_add(cos_omega, a + 1.0) + sqrt_2a * alpha);
@@ -650,20 +630,6 @@ fn design_bandstop_filter(frequency: f64, q_factor: f64, sample_rate: f64) -> (V
     let a_coeffs = vec![1.0, a1 / a0, a2 / a0];
 
     (b_coeffs, a_coeffs)
-}
-
-impl<T> AudioSamples<'_, T>
-where
-    T: StandardSample,
-{
-    /// Apply a linear gain to all samples.
-    fn apply_linear_gain(&mut self, gain: f64) {
-        self.apply(|x| {
-            let x_f: f64 = T::cast_into(x);
-            let y_f = x_f * gain;
-            T::cast_from(y_f)
-        });
-    }
 }
 
 #[cfg(test)]
@@ -910,7 +876,7 @@ mod tests {
 
         // Audio should be unchanged when bypassed
         match (audio.data(), &original_samples) {
-            (AudioData::Mono(new), AudioData::Mono(orig)) => {
+            (crate::AudioData::Mono(new), crate::AudioData::Mono(orig)) => {
                 assert_eq!(new, orig);
             }
             _ => panic!("Expected mono audio"),

@@ -39,18 +39,20 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
         rms_before
     );
 
-    // Frequency response (after filter is configured).
+    // Frequency response of the design that was just applied.
+    let lowpass =
+        IirFilterDesign::butterworth_lowpass(core::num::NonZeroUsize::new(4).unwrap(), 1_000.0);
     let freqs: Vec<f64> = (0..10).map(|i| i as f64 * 500.0).collect();
-    let (mag, _phase) = audio.frequency_response(&freqs)?;
+    let (mag, _phase) = lowpass.frequency_response(&freqs, 44_100.0)?;
     println!("Response @ {:?} Hz => mag {:?}", freqs, mag);
-    // The response query must return one finite, non-negative magnitude per
-    // probed frequency. (The real low-pass effect is verified above via the
-    // drop in signal RMS.)
-    assert_eq!(mag.len(), freqs.len(), "one magnitude per probed frequency");
+    // Unity gain at DC, exactly -3.01 dB at the cutoff, and monotonically
+    // falling above it (Butterworth).
+    assert!((mag[0] - 1.0).abs() < 1e-12, "DC gain must be 1");
     assert!(
-        mag.iter().all(|&m| m.is_finite() && m >= 0.0),
-        "frequency-response magnitudes must be finite and non-negative"
+        (mag[2] - core::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12,
+        "|H(1 kHz)| must be 1/sqrt(2)"
     );
+    assert!(mag.windows(2).all(|w| w[1] <= w[0]), "monotonic roll-off");
 
     // Chebyshev example via full design.
     let design = IirFilterDesign::chebyshev_i(
