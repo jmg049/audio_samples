@@ -171,7 +171,7 @@ dependencies. Enable the rest as needed.
 | `processing`    | Normalization, scaling, clipping, DC-offset removal (requires `statistics`)           |
 | `editing`       | Trim, pad, reverse, fade, concatenate, perturb (requires `statistics`, `random-generation`) |
 | `channels`      | Interleave/deinterleave, mono/stereo conversion, channel extraction                   |
-| `iir-filtering` | Butterworth, Chebyshev I and II, Elliptic (Cauer), and Bessel filters; low-, high-, band-pass and band-stop responses; zero-phase `filtfilt`; design-once streaming `SosFilter` |
+| `iir-filtering` | Butterworth, Chebyshev I and II, Elliptic (Cauer), and Bessel filters; low-, high-, band-pass and band-stop responses; zero-phase `filtfilt`; design-once streaming `SosFilter`. Designs and outputs match `scipy.signal` (verified by `tests/filter_reference.rs`) |
 | `parametric-eq` | Parametric EQ bands and `ThreeBandEqConfig` (requires `iir-filtering`)                 |
 | `dynamic-range` | Compression, limiting, gating, expansion via config structs, with side-chain support  |
 | `envelopes`     | Amplitude, RMS, and attack-decay envelope followers                                   |
