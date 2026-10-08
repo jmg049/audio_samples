@@ -1,0 +1,12 @@
+[project]
+name = "audio-samples-filter-reference"
+version = "0.1.0"
+description = "Golden-fixture generator for the audio_samples filter test suite"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.14",
+]
+
+[tool.uv]
+package = false

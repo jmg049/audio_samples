@@ -210,6 +210,7 @@ dtmf_tones = "1.0.1"
 rand = "0.10.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11.0"
+serde_json = "1.0.150"
 
 [[example]]
 name = "basics"
@@ -341,6 +342,10 @@ required-features = ["statistics", "processing", "editing", "transforms"]
 [[test]]
 name = "channel_pipeline"
 required-features = ["channels", "processing", "editing"]
+
+[[test]]
+name = "filter_reference"
+required-features = ["iir-filtering", "parametric-eq", "processing", "channels"]
 
 [[test]]
 name = "effects_chain"

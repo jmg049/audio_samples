@@ -1,0 +1,31 @@
+# Pre-commit hooks (https://pre-commit.com).
+#
+#   pre-commit install            # once per clone
+#   pre-commit run --all-files    # run everything manually
+#
+# The filter hooks guard the golden-reference test suite: any change to the
+# filter code, the fixtures or the fixture generator must keep audio_samples in
+# agreement with SciPy / FFmpeg / DSPFilters / liquid-dsp.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: filter-reference-tests
+        name: filter reference tests (SciPy / FFmpeg / DSPFilters / liquid-dsp fixtures)
+        entry: scripts/check_filters.sh
+        language: system
+        pass_filenames: false
+        files: ^(src/operations/(iir_design|iir_filtering|parametric_eq|processing|types|traits)\.rs|src/traits\.rs|src/conversions\.rs|tests/filter_reference\.rs|tests/fixtures/filters/.*|Cargo\.toml)$
+
+      - id: filter-fixtures-fresh
+        name: filter fixtures match their generator
+        entry: scripts/check_filter_fixtures.sh
+        language: system
+        pass_filenames: false
+        files: ^(tests/reference/.*|tests/fixtures/filters/.*)$
