@@ -38,7 +38,7 @@ generator leaves out the DSPFilters / liquid-dsp cross references (and
 `--check` ignores them). Pass `--require-harness` to treat a missing harness
 as an error.
 
-The `pre-commit` hooks (`.pre-commit-config.yaml`) do two things:
+The `pre-commit` hooks (`.pre-commit-config.yaml`, scripts in `hooks/`) do two things:
 
 - run the reference tests whenever filter code or fixtures change;
 - run `--check` whenever the generator or fixtures change.

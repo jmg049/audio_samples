@@ -18,14 +18,14 @@ repos:
 
       - id: filter-reference-tests
         name: filter reference tests (SciPy / FFmpeg / DSPFilters / liquid-dsp fixtures)
-        entry: scripts/check_filters.sh
+        entry: tests/reference/hooks/check_filters.sh
         language: system
         pass_filenames: false
         files: ^(src/operations/(iir_design|iir_filtering|parametric_eq|processing|types|traits)\.rs|src/traits\.rs|src/conversions\.rs|tests/filter_reference\.rs|tests/fixtures/filters/.*|Cargo\.toml)$
 
       - id: filter-fixtures-fresh
         name: filter fixtures match their generator
-        entry: scripts/check_filter_fixtures.sh
+        entry: tests/reference/hooks/check_filter_fixtures.sh
         language: system
         pass_filenames: false
         files: ^(tests/reference/.*|tests/fixtures/filters/.*)$
