@@ -69,7 +69,8 @@ All notable changes to this project are documented here.
 
 - `IirFilterDesign::sos_coefficients`, `IirFilterDesign::frequency_response`,
   `SosFilter::from_sos_coefficients`, `SosFilter::sos_coefficients` and
-  `SosFilter::filtfilt_in_place`: SciPy/MATLAB-layout SOS interchange
+  `SosFilter::filtfilt_in_place` (the last two return an error for
+  non-biquad sections): SciPy/MATLAB-layout SOS interchange
   (`[b0, b1, b2, a0, a1, a2]` rows).
 - `BesselNorm` and `IirFilterDesign::with_bessel_norm` (SciPy's `norm=`
   `'mag'` (default here), `'phase'` (SciPy's default) and `'delay'`).
