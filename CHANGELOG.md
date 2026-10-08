@@ -40,6 +40,10 @@ All notable changes to this project are documented here.
   `numpy.convolve(x, h, 'valid')`, accumulates in `f64`, and no longer
   overflows for integer samples.
 - EQ band validation rejects NaN frequency / Q / gain.
+- Numerically degenerate IIR specifications (e.g. a ripple so small that
+  `10^(rp/10) - 1` underflows) return a `Parameter` error instead of
+  panicking or producing NaN / all-zero output, and edges within ~1e-5 of
+  Nyquist no longer overflow the gain computation.
 - **Float → `i16`/`i32` sample conversion was not the inverse of
   `i16`/`i32` → float**: it scaled negatives by `MAX` instead of `-MIN` and
   truncated instead of rounding, so every negative sample moved one LSB

@@ -672,6 +672,10 @@ macro_rules! impl_int_to_float {
 // (e.g. 32767), then rounded half away from zero. Consequently
 // int → float → int is the identity for every value, -1.0 maps to `MIN` and
 // +1.0 to `MAX`, and requantising processed audio has no bias.
+// Rounding is half away from zero on the float product `v · scale` up to one
+// ulp: a product within one ulp below a .5 tie may round up. That is below
+// the precision of the product itself and never affects the round trip; an
+// exact variant measured ~50 % slower.
 //
 // Uses IEEE max/min (f32::max / f32::min) instead of clamp so that NaN
 // inputs produce a defined finite value: max(NaN, -1.0) = -1.0 per IEEE

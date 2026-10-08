@@ -728,7 +728,7 @@ fn sos_coefficients_round_trip_through_scipy_layout() {
         IirFilterDesign::chebyshev_ii_band(FilterResponse::BandStop, nz(5), 900.0, 1100.0, 50.0);
     let rows = design.sos_coefficients(48000.0).unwrap();
     let sos = SosFilter::from_sos_coefficients(&rows).unwrap();
-    assert_eq!(sos.sos_coefficients(), rows);
+    assert_eq!(sos.sos_coefficients().unwrap(), rows);
     assert_eq!(design.filter_type, IirFilterType::ChebyshevII);
 }
 
@@ -799,4 +799,33 @@ fn i16_filtering_matches_f64_reference_without_bias() {
     }
     assert!(max_diff <= 1, "max LSB difference {max_diff}");
     assert_eq!(sum_diff, 0, "requantisation must be unbiased");
+}
+
+#[test]
+fn non_biquad_sections_are_rejected_by_sos_export() {
+    use audio_samples::operations::iir_filtering::IirFilter;
+    let sos = SosFilter::new(vec![IirFilter::new(vec![0.25; 4], vec![1.0])]);
+    assert!(sos.sos_coefficients().is_err());
+    let mut x = vec![1.0; 64];
+    assert!(sos.filtfilt_in_place(&mut x).is_err());
+    assert!(x.iter().all(|&v| v == 1.0), "signal untouched on error");
+}
+
+#[test]
+fn degenerate_designs_error_instead_of_panicking_or_nan() {
+    // Vanishing ripple makes the Chebyshev prototype poles non-finite.
+    for order in 1..=4 {
+        let d = IirFilterDesign::chebyshev_i(FilterResponse::LowPass, nz(order), 1000.0, 1e-17);
+        assert!(d.sos_coefficients(48000.0).is_err());
+        let mut a = mono_f64(&[0.5; 32], 48000.0);
+        assert!(a.apply_iir_filter_in_place(&d).is_err());
+    }
+    // Edges within 1e-5 of Nyquist used to overflow the gain computation and
+    // silently produce zero / NaN output; SciPy designs these fine.
+    let d = IirFilterDesign::butterworth_lowpass(nz(24), 23999.99);
+    let (m, _) = d.frequency_response(&[0.0, 1000.0], 48000.0).unwrap();
+    assert!((m[0] - 1.0).abs() < 1e-9 && (m[1] - 1.0).abs() < 1e-9);
+    let d = IirFilterDesign::butterworth_bandstop(nz(17), 23990.0, 23999.9);
+    let (m, _) = d.frequency_response(&[0.0, 1000.0], 48000.0).unwrap();
+    assert!((m[0] - 1.0).abs() < 1e-9 && (m[1] - 1.0).abs() < 1e-9);
 }

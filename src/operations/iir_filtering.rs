@@ -753,6 +753,11 @@ impl SosFilter {
     /// `scipy.signal.sosfilt` or `sosfreqz`. Sections with fewer than three
     /// coefficients are zero-padded.
     ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] - if a section has more than
+    ///   three numerator or denominator coefficients (it is not a biquad), or
+    ///   no denominator coefficients.
+    ///
     /// # Examples
     /// ```
     /// use audio_samples::operations::iir_filtering::SosFilter;
@@ -761,24 +766,29 @@ impl SosFilter {
     ///
     /// let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 1000.0);
     /// let sos = SosFilter::from_design(&design, 48000.0).unwrap();
-    /// let rows = sos.sos_coefficients();
+    /// let rows = sos.sos_coefficients().unwrap();
     /// assert_eq!(rows.len(), 2);
     /// assert_eq!(rows[0][3], 1.0);
     /// ```
-    #[must_use]
-    pub fn sos_coefficients(&self) -> Vec<[f64; 6]> {
+    pub fn sos_coefficients(&self) -> AudioSampleResult<Vec<[f64; 6]>> {
         self.sections
             .iter()
             .map(|s| {
+                if s.b_coeffs.len() > 3 || s.a_coeffs.len() > 3 || s.a_coeffs.is_empty() {
+                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                        "sections",
+                        "every section must be a biquad (at most three b and three a coefficients)",
+                    )));
+                }
                 let g = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(0.0);
-                [
+                Ok([
                     g(&s.b_coeffs, 0),
                     g(&s.b_coeffs, 1),
                     g(&s.b_coeffs, 2),
                     g(&s.a_coeffs, 0),
                     g(&s.a_coeffs, 1),
                     g(&s.a_coeffs, 2),
-                ]
+                ])
             })
             .collect()
     }
@@ -995,12 +1005,18 @@ impl SosFilter {
     /// let design = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(4).unwrap(), 1000.0);
     /// let sos = SosFilter::from_design(&design, 48000.0).unwrap();
     /// let mut x = vec![1.0; 256];
-    /// sos.filtfilt_in_place(&mut x);
+    /// sos.filtfilt_in_place(&mut x).unwrap();
     /// // A constant passes a unity-DC-gain low-pass untouched.
     /// assert!(x.iter().all(|v| (v - 1.0).abs() < 1e-9));
     /// ```
-    pub fn filtfilt_in_place(&self, signal: &mut [f64]) {
-        sosfiltfilt_slice(&self.sos_coefficients(), signal);
+    ///
+    /// # Errors
+    /// - [crate::AudioSampleError::Parameter] - if a section is not a biquad
+    ///   (see [`Self::sos_coefficients`]); `signal` is left unchanged.
+    pub fn filtfilt_in_place(&self, signal: &mut [f64]) -> AudioSampleResult<()> {
+        let sos = self.sos_coefficients()?;
+        sosfiltfilt_slice(&sos, signal);
+        Ok(())
     }
 
     /// Compute the frequency response at the given frequencies.

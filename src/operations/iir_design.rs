@@ -40,6 +40,10 @@ pub(crate) struct Zpk {
     pub(crate) gain: f64,
 }
 
+// Gains are ratios of root products. `num_complex`'s `/` divides by
+// `norm_sqr`, which overflows once |den| > ~1e154 (e.g. edges within 1e-5 of
+// Nyquist); `fdiv` scales first, like numpy's complex division.
+
 fn prod_neg(roots: &[C64]) -> C64 {
     roots.iter().fold(C64::new(1.0, 0.0), |acc, &r| acc * (-r))
 }
@@ -109,7 +113,7 @@ pub(crate) fn cheb2ap(n: usize, rs: f64) -> Zpk {
         })
         .collect();
 
-    let gain = (prod_neg(&poles) / prod_neg(&zeros)).re;
+    let gain = prod_neg(&poles).fdiv(prod_neg(&zeros)).re;
     Zpk { zeros, poles, gain }
 }
 
@@ -539,20 +543,25 @@ fn arc_jac_sc1(w: f64, m: f64) -> f64 {
     arc_jac_sn(C64::new(0.0, w), m).im
 }
 
+/// `10^x - 1` without cancellation for small `x` (SciPy `_pow10m1`).
+fn pow10m1(x: f64) -> f64 {
+    (x * std::f64::consts::LN_10).exp_m1()
+}
+
 /// `scipy.signal.ellipap`.
 pub(crate) fn ellipap(n: usize, rp: f64, rs: f64) -> AudioSampleResult<Zpk> {
     const EPSILON: f64 = 2e-16;
     if n == 1 {
-        let p = -(1.0 / (10f64.powf(0.1 * rp) - 1.0)).sqrt();
+        let p = -(1.0 / pow10m1(0.1 * rp)).sqrt();
         return Ok(Zpk {
             zeros: Vec::new(),
             poles: vec![C64::new(p, 0.0)],
             gain: -p,
         });
     }
-    let eps_sq = 10f64.powf(0.1 * rp) - 1.0;
+    let eps_sq = pow10m1(0.1 * rp);
     let eps = eps_sq.sqrt();
-    let ck1_sq = eps_sq / (10f64.powf(0.1 * rs) - 1.0);
+    let ck1_sq = eps_sq / pow10m1(0.1 * rs);
     if ck1_sq == 0.0 {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "stopband_attenuation",
@@ -595,7 +604,7 @@ pub(crate) fn ellipap(n: usize, rp: f64, rs: f64) -> AudioSampleResult<Zpk> {
         poles.extend(conj);
     }
 
-    let mut gain = (prod_neg(&poles) / prod_neg(&zeros)).re;
+    let mut gain = prod_neg(&poles).fdiv(prod_neg(&zeros)).re;
     if n.is_multiple_of(2) {
         gain /= (1.0 + eps_sq).sqrt();
     }
@@ -628,7 +637,7 @@ pub(crate) fn lp2hp_zpk(z: &Zpk, wo: f64) -> Zpk {
     Zpk {
         zeros,
         poles: z.poles.iter().map(|&r| wo / r).collect(),
-        gain: z.gain * (prod_neg(&z.zeros) / prod_neg(&z.poles)).re,
+        gain: z.gain * prod_neg(&z.zeros).fdiv(prod_neg(&z.poles)).re,
     }
 }
 
@@ -664,7 +673,7 @@ pub(crate) fn lp2bs_zpk(z: &Zpk, wo: f64, bw: f64) -> Zpk {
     Zpk {
         zeros,
         poles: split_band(&p_hp, wo),
-        gain: z.gain * (prod_neg(&z.zeros) / prod_neg(&z.poles)).re,
+        gain: z.gain * prod_neg(&z.zeros).fdiv(prod_neg(&z.poles)).re,
     }
 }
 
@@ -686,7 +695,7 @@ pub(crate) fn bilinear_zpk(z: &Zpk, fs: f64) -> Zpk {
     Zpk {
         zeros,
         poles: z.poles.iter().map(map).collect(),
-        gain: z.gain * (num / den).re,
+        gain: z.gain * num.fdiv(den).re,
     }
 }
 
@@ -808,6 +817,13 @@ fn single_zpksos(z: &[C64], p: &[C64]) -> Sos {
 
 /// `scipy.signal.zpk2sos(z, p, k, pairing='nearest')` for digital filters.
 pub(crate) fn zpk2sos(zpk: &Zpk) -> AudioSampleResult<Vec<Sos>> {
+    let finite = |r: &C64| r.re.is_finite() && r.im.is_finite();
+    if !zpk.gain.is_finite() || !zpk.zeros.iter().all(finite) || !zpk.poles.iter().all(finite) {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "filter_design",
+            "the specification yields non-finite poles, zeros or gain (e.g. a vanishing ripple or an edge too close to Nyquist)",
+        )));
+    }
     let mut z = zpk.zeros.clone();
     let mut p = zpk.poles.clone();
     if z.is_empty() && p.is_empty() {
@@ -1067,7 +1083,18 @@ pub(crate) fn design_sos(
         }
     };
 
-    iirfilter_sos(&proto, design.response, wn, sample_rate)
+    let sos = iirfilter_sos(&proto, design.response, wn, sample_rate)?;
+    // Reject numerically degenerate designs (non-finite or zero gain) rather
+    // than silently producing NaN or silent output.
+    let degenerate = sos.iter().any(|row| row.iter().any(|v| !v.is_finite()))
+        || sos.iter().any(|row| row[..3].iter().all(|&v| v == 0.0));
+    if degenerate {
+        return Err(param_err(
+            "filter_design",
+            "the specification is numerically degenerate (non-finite or zero gain); move the edges away from 0 / Nyquist or lower the order",
+        ));
+    }
+    Ok(sos)
 }
 
 // ============================================================================
