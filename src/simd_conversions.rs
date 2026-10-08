@@ -10,8 +10,9 @@
 //!
 //! ## Conversion semantics
 //! The high-level [`convert`] API matches the semantics of the crate's
-//! [`ConvertTo`] conversions (clamp + symmetric scale + truncate + saturate for
-//! float → int, and asymmetric scaling for int → float).
+//! [`ConvertTo`] conversions (clamp + asymmetric scale + round half away from
+//! zero for float → int, and the inverse asymmetric scaling for int → float,
+//! so int → float → int is lossless).
 #![allow(unused)]
 
 use std::num::NonZeroU32;
@@ -27,8 +28,9 @@ use crate::{AudioSample, AudioSampleError, AudioSampleResult, ConvertTo, Paramet
 /// # Behavior
 /// Matches the crate's [`ConvertTo<i16>`] semantics for `f32`:
 /// - clamps the input to $[-1.0, 1.0]$
-/// - scales symmetrically by `i16::MAX` (`±1.0 → ±32767`)
-/// - truncates toward zero and saturates to the destination range
+/// - scales asymmetrically (`-1.0 → -32768`, `+1.0 → 32767`), the exact
+///   inverse of the `i16 → f32` conversion
+/// - rounds half away from zero
 ///
 /// # Errors
 /// Returns an error if `input.len() != output.len()`.
@@ -44,25 +46,30 @@ pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSample
 
     let chunks = input.len() / 8;
 
-    // Genuine vector path: clamp, scale by i16::MAX, truncate toward zero, narrow.
+    // Genuine vector path: clamp, asymmetric scale, round half away from
+    // zero, narrow.
     //
     // Parity with the scalar `impl_float_to_int` (`traits.rs`): the scalar path
-    // is `v = source.max(-1).min(1); scaled = v * 32767.0; (scaled.to_int_unchecked()) as i16`,
-    // i.e. clamp + symmetric scale + truncate-toward-zero. `wide`'s `trunc_int`
-    // truncates toward zero exactly like `to_int_unchecked`, and because the
-    // clamped+scaled value is always in `[-32767, 32767]` the `i32 -> i16` narrow
-    // is lossless and order-preserving (verified bit-identical for all inputs,
-    // including values whose fractional part >= 0.5 that would round differently).
+    // is `v = source.max(-1).min(1); scaled = v * (v < 0 ? 32768 : 32767);
+    // trunc(v * (32767.5 - h) + h)` with `h = copysign(0.5, v)`. Here `h` is
+    // selected with `blend` on `v < 0` (identical except for v = -0.0, where
+    // both paths truncate to 0), and `trunc_int` truncates toward zero like
+    // `to_int_unchecked`. The result lies in [-32768, 32767], so the
+    // `i32 -> i16` narrow is lossless.
+    let zero = f32x8::splat(0.0);
     for i in 0..chunks {
         let start_idx = i * 8;
 
         let chunk: [f32; 8] = input[start_idx..start_idx + 8].try_into().unwrap();
         let f32_vec = f32x8::from(chunk);
         let clamped = f32_vec.max(f32x8::splat(-1.0)).min(f32x8::splat(1.0));
-        let scaled = clamped * f32x8::splat(i16::MAX as f32);
-        let ints = scaled.trunc_int().to_array();
+        let half = clamped
+            .simd_lt(zero)
+            .blend(f32x8::splat(-0.5), f32x8::splat(0.5));
+        let scaled = clamped * (f32x8::splat(32767.5) - half);
+        let ints = (scaled + half).trunc_int().to_array();
         for (j, &v) in ints.iter().enumerate() {
-            // `v` is guaranteed in [-32767, 32767]; `as i16` matches scalar exactly.
+            // `v` is guaranteed in [-32768, 32767]; `as i16` matches scalar exactly.
             output[start_idx + j] = v as i16;
         }
     }
@@ -142,8 +149,8 @@ pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSample
 /// # Behavior
 /// Matches the crate's [`ConvertTo<i32>`] semantics for `f32`:
 /// - clamps the input to $[-1.0, 1.0]$
-/// - scales symmetrically by `i32::MAX`
-/// - truncates toward zero and saturates to the destination range
+/// - scales by 2^31 (both endpoints of the asymmetric range round to 2^31 in
+///   `f32`), rounds half away from zero and saturates
 ///
 /// # Errors
 /// Returns an error if `input.len() != output.len()`.
@@ -159,26 +166,26 @@ pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSample
 
     let chunks = input.len() / 8;
 
-    // Genuine vector path: clamp, scale by i32::MAX, truncate toward zero (saturating).
-    //
-    // Parity with the scalar `impl_float_to_large_int` (`traits.rs`):
-    // `v = source.max(-1).min(1); scaled = v * (i32::MAX as f32);
-    //  scaled.clamp(i32::MIN as f32, i32::MAX as f32) as i32`.
-    // The subtle case is `source == 1.0`: `1.0 * 2147483647.0` rounds up to
-    // `2147483648.0` in f32, which the scalar clamps to `i32::MAX as f32`
-    // (== 2147483648.0) and then `as i32` saturates to `2147483647`. `wide`'s
-    // `trunc_int` is the SATURATING truncation (out-of-range -> i32::MIN/MAX),
-    // so it yields exactly `2147483647` there - matching scalar. (Note:
-    // `fast_trunc_int` would WRAP to i32::MIN here, so it must NOT be used.)
-    // Verified bit-identical across the full input range.
+    // Genuine vector path, identical to the scalar `ConvertFrom<f32> for i32`
+    // (`traits.rs`): clamp, scale by 2^31 (both i32 endpoints round to 2^31 in
+    // f32), add ±0.5 (sign of the input) only where |x| < 2^23 (larger values
+    // are already integers), then truncate. `wide`'s `trunc_int` is the SATURATING
+    // truncation, so +2^31 becomes i32::MAX exactly like the scalar `as`.
+    // (`fast_trunc_int` would WRAP to i32::MIN and must not be used.)
+    let zero = f32x8::splat(0.0);
     for i in 0..chunks {
         let start_idx = i * 8;
 
         let chunk: [f32; 8] = input[start_idx..start_idx + 8].try_into().unwrap();
         let f32_vec = f32x8::from(chunk);
         let clamped = f32_vec.max(f32x8::splat(-1.0)).min(f32x8::splat(1.0));
-        let scaled = clamped * f32x8::splat(i32::MAX as f32);
-        let ints = scaled.trunc_int().to_array();
+        let scaled = clamped * f32x8::splat(2_147_483_648.0);
+        let half = clamped
+            .simd_lt(zero)
+            .blend(f32x8::splat(-0.5), f32x8::splat(0.5));
+        let small = scaled.abs().simd_lt(f32x8::splat(8_388_608.0));
+        let rounded = small.blend(scaled + half, scaled);
+        let ints = rounded.trunc_int().to_array();
         output[start_idx..start_idx + 8].copy_from_slice(&ints);
     }
 
@@ -1079,7 +1086,7 @@ mod tests {
 // are *bit-for-bit identical* to the scalar reference. Inputs deliberately
 // include negative, zero, max, and fractional values that would ROUND
 // differently than they TRUNCATE (e.g. x where x*MAX has fractional part
-// >= 0.5), since the scalar path truncates toward zero.
+// >= 0.5), since the conversions round half away from zero.
 #[cfg(all(test, feature = "simd"))]
 mod simd_parity_tests {
     use super::*;
@@ -1087,16 +1094,21 @@ mod simd_parity_tests {
     /// Inline scalar reference for f32 -> i16 (mirrors `impl_float_to_int`).
     fn scalar_f32_to_i16(source: f32) -> i16 {
         let v = source.max(-1.0).min(1.0);
-        let scaled = v * (i16::MAX as f32);
-        let as_i32: i32 = unsafe { scaled.to_int_unchecked() };
+        let h = 0.5f32.copysign(v);
+        let rounded = v * (32767.5 - h) + h;
+        let as_i32: i32 = unsafe { rounded.to_int_unchecked() };
         as_i32 as i16
     }
 
-    /// Inline scalar reference for f32 -> i32 (mirrors `impl_float_to_large_int`).
+    /// Inline scalar reference for f32 -> i32 (mirrors `ConvertFrom<f32> for i32`).
     fn scalar_f32_to_i32(source: f32) -> i32 {
         let v = source.max(-1.0).min(1.0);
-        let scaled = v * (i32::MAX as f32);
-        scaled.clamp(i32::MIN as f32, i32::MAX as f32) as i32
+        let scaled = v * 2_147_483_648.0f32;
+        if scaled.abs() < 8_388_608.0 {
+            (scaled + 0.5f32.copysign(v)) as i32
+        } else {
+            scaled as i32
+        }
     }
 
     /// Inline scalar reference for i16 -> f32 (mirrors `impl_int_to_float`).

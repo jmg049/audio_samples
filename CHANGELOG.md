@@ -40,6 +40,14 @@ All notable changes to this project are documented here.
   `numpy.convolve(x, h, 'valid')`, accumulates in `f64`, and no longer
   overflows for integer samples.
 - EQ band validation rejects NaN frequency / Q / gain.
+- **Float → `i16`/`i32` sample conversion was not the inverse of
+  `i16`/`i32` → float**: it scaled negatives by `MAX` instead of `-MIN` and
+  truncated instead of rounding, so every negative sample moved one LSB
+  towards zero on an int → float → int round trip and any processing of
+  16-bit audio (filters, EQ, gain) added a half-LSB bias. Conversion now
+  scales asymmetrically and rounds half away from zero (as `I24` and `u8`
+  already did): `-1.0 → i16::MIN`, and int → float → int is the identity for
+  every value. The `simd` conversion paths match bit-for-bit.
 
 ### Changed
 

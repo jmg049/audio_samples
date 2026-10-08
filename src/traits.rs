@@ -664,25 +664,24 @@ macro_rules! impl_int_to_float {
     };
 }
 
-// Float -> Integer (clamp + scale + truncating cast)
+// Float -> Integer (clamp + asymmetric scale + round-to-nearest)
+//
+// This is the exact inverse of `impl_int_to_float`, which maps negative
+// values by `1 / -MIN` and non-negative values by `1 / MAX`: here negative
+// inputs are scaled by `-MIN` (e.g. 32768) and non-negative inputs by `MAX`
+// (e.g. 32767), then rounded half away from zero. Consequently
+// int → float → int is the identity for every value, -1.0 maps to `MIN` and
+// +1.0 to `MAX`, and requantising processed audio has no bias.
 //
 // Uses IEEE max/min (f32::max / f32::min) instead of clamp so that NaN
 // inputs produce a defined finite value: max(NaN, -1.0) = -1.0 per IEEE
-// 754-2008 maxNum semantics (returns the non-NaN operand). This lets LLVM
-// prove the intermediate value is finite, eliminating the NaN-handling
-// branches that Rust's saturating `as i32` would otherwise generate.
-// Without those branches LLVM can emit vcvttps2dq + vpackssdw (vectorised
-// f32→i32→i16) instead of the scalar vcvttss2si path.
+// 754-2008 maxNum semantics (returns the non-NaN operand), i.e. NaN → MIN.
+// Rounding adds ±0.5 (sign of the input) before truncating, which needs no
+// libm call, and `to_int_unchecked` removes the NaN/overflow branches of
+// `as`; together they keep the loop branch-free so LLVM can vectorise it.
 //
-// Semantic differences from a fully-IEEE-correct implementation:
-// - NaN input → -MAX (e.g. -32767) instead of 0 or ±MAX.
-// - Uses truncation rather than round-to-nearest (error ≤ 1 LSB, inaudible).
-// - -1.0 maps to -MAX (e.g. -32767 for i16), not MIN (-32768).  The one-
-//   code-unit asymmetry at full negative scale is inaudible in practice.
-// Used for i16 (and similarly small integer types) where $to::MAX is exactly
-// representable in f32/f64 (32767 < 2^23). `to_int_unchecked` removes the
-// NaN/overflow branches that `as i32` would otherwise emit, letting LLVM
-// vectorise the loop with vcvttps2dq + vpackssdw.
+// Used for i16 (and similarly small integer types), where MIN/MAX are
+// exactly representable in f32/f64 and |x| + 0.5 fits comfortably in i32.
 macro_rules! impl_float_to_int {
     ($from:ty, $to:ty) => {
         impl ConvertFrom<$from> for $to {
@@ -690,31 +689,40 @@ macro_rules! impl_float_to_int {
             fn convert_from(source: $from) -> Self {
                 // IEEE max/min: NaN input → -1.0 (non-NaN). v ∈ [-1.0, 1.0].
                 let v = source.max(-1.0).min(1.0);
-                // scaled ∈ [-MAX, MAX]. For i16, MAX = 32767 which is exactly
-                // representable in f32, so scaled is strictly within i32 range.
-                let scaled = v * (<$to>::MAX as $from);
-                // SAFETY: scaled is finite and |scaled| ≤ $to::MAX ≤ 32767,
-                // which fits comfortably in i32. No NaN/overflow is possible.
-                let as_i32: i32 = unsafe { scaled.to_int_unchecked() };
+                // h = ±0.5 with the sign of v. The scale (MAX + MIN.abs()) / 2 - h
+                // is exactly MAX for v ≥ 0 and -MIN for v < 0, and adding h
+                // before truncating rounds half away from zero. Using one
+                // copysign for both keeps the loop vectorisable.
+                let h = (0.5 as $from).copysign(v);
+                let mid = (<$to>::MAX as $from - <$to>::MIN as $from) / 2.0;
+                let rounded = v * (mid - h) + h;
+                // SAFETY: rounded is finite and |rounded| ≤ |MIN| + 0.5 ≤
+                // 32768.5, which fits in i32; truncation then yields a value
+                // in [MIN, MAX].
+                let as_i32: i32 = unsafe { rounded.to_int_unchecked() };
                 as_i32 as $to
             }
         }
     };
 }
 
-// Used for i32 where i32::MAX = 2147483647 rounds up to 2147483648.0 in f32
-// (not exactly representable). Using `to_int_unchecked` there would be UB for
-// source = 1.0, so we use the saturating `as $to` cast instead.
+// Used for i32, where i32::MAX = 2147483647 rounds up to 2147483648.0 in f32
+// (not exactly representable). Same asymmetric scaling and rounding as
+// `impl_float_to_int`, followed by a saturating cast.
 macro_rules! impl_float_to_large_int {
     ($from:ty, $to:ty) => {
         impl ConvertFrom<$from> for $to {
             #[inline]
             fn convert_from(source: $from) -> Self {
                 let v = source.max(-1.0).min(1.0);
-                let scaled = v * (<$to>::MAX as $from);
-                // Saturating cast handles the case where $to::MAX as $from
-                // rounds up (e.g. i32::MAX → 2147483648.0f32).
-                scaled.clamp(<$to>::MIN as $from, <$to>::MAX as $from) as $to
+                let scale = if v < 0.0 {
+                    -(<$to>::MIN as $from)
+                } else {
+                    <$to>::MAX as $from
+                };
+                // Saturating `as` handles values that round past MAX
+                // (e.g. i32::MAX as f32 == 2147483648.0).
+                (v * scale).round() as $to
             }
         }
     };
@@ -1049,8 +1057,27 @@ impl_i24_to_float!(f64);
 impl_float_to_int!(f32, i16);
 impl_float_to_int!(f64, i16);
 
-impl_float_to_large_int!(f32, i32);
 impl_float_to_large_int!(f64, i32);
+
+// f32 -> i32: in f32 both `-(i32::MIN)` and `i32::MAX` round to 2^31, and
+// every |x| ≥ 2^23 is already an integer, so rounding is only applied below
+// 2^23 (where `x ± 0.5` is exact up to a final tie). The SIMD path
+// (`simd_conversions::convert_f32_to_i32_simd`) uses the identical sequence.
+impl ConvertFrom<f32> for i32 {
+    #[inline]
+    // max/min rather than clamp: NaN maps to -1.0 (see `impl_float_to_int`).
+    #[allow(clippy::manual_clamp)]
+    fn convert_from(source: f32) -> Self {
+        let v = source.max(-1.0).min(1.0);
+        let scaled = v * 2_147_483_648.0_f32;
+        // `as i32` truncates toward zero (and saturates +2^31 to i32::MAX).
+        if scaled.abs() < 8_388_608.0 {
+            (scaled + 0.5_f32.copysign(v)) as i32
+        } else {
+            scaled as i32
+        }
+    }
+}
 
 // ========================
 // Float -> I24 (Clamped, Rounded, Saturating)
@@ -1828,13 +1855,8 @@ mod conversion_tests {
         // Test -1.0 (minimum valid value)
         let min_f32: f32 = -1.0;
         let min_f32_to_i16: i16 = min_f32.convert_to();
-        // For exact -1.0, we can get -32767 due to rounding in the implementation
-        // This is acceptable since it's only 1 bit off from the true min
-        assert!(
-            min_f32_to_i16 == i16::MIN || min_f32_to_i16 == -32767,
-            "Expected either -32768 or -32767, got {}",
-            min_f32_to_i16
-        );
+        // -1.0 maps exactly to i16::MIN (inverse of i16::MIN -> -1.0).
+        assert_eq!(min_f32_to_i16, i16::MIN);
 
         let min_f32_to_i32: i32 = min_f32.convert_to();
         assert!(
@@ -1904,11 +1926,7 @@ mod conversion_tests {
 
         let neg_large_f32: f32 = -2.0;
         let neg_large_f32_to_i16: i16 = neg_large_f32.convert_to();
-        assert!(
-            neg_large_f32_to_i16 == i16::MIN || neg_large_f32_to_i16 == -32767,
-            "Expected either -32768 or -32767, got {}",
-            neg_large_f32_to_i16
-        );
+        assert_eq!(neg_large_f32_to_i16, i16::MIN);
 
         let large_f32_to_i32: i32 = large_f32.convert_to();
         assert_eq!(large_f32_to_i32, i32::MAX);
@@ -1931,11 +1949,11 @@ mod conversion_tests {
         // Test values near 0.5
         let half_f32: f32 = 0.5;
         let half_f32_to_i16: i16 = half_f32.convert_to();
-        assert_eq!(half_f32_to_i16, 16383); // 0.5 * 32767 = 16383.5, truncated to 16383
+        assert_eq!(half_f32_to_i16, 16384); // 0.5 * 32767 = 16383.5, rounded half away from zero
 
         let neg_half_f32: f32 = -0.5;
         let neg_half_f32_to_i16: i16 = neg_half_f32.convert_to();
-        assert_eq!(neg_half_f32_to_i16, -16383); // -0.5 * 32767 = -16383.5, truncated toward zero
+        assert_eq!(neg_half_f32_to_i16, -16384); // -0.5 * 32768 = -16384 exactly
     }
 
     // Edge cases for f64 conversions
@@ -2093,7 +2111,7 @@ mod conversion_tests {
         // Test i16::convert_from with different source types
         let f32_source: f32 = 0.5;
         let i16_result: i16 = i16::convert_from(f32_source);
-        assert_eq!(i16_result, 16383); // 0.5 * 32767 = 16383.5, truncated to 16383
+        assert_eq!(i16_result, 16384); // 0.5 * 32767 = 16383.5, rounded half away from zero
 
         let i32_source: i32 = 65536;
         let i16_result: i16 = i16::convert_from(i32_source);

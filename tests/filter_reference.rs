@@ -731,3 +731,72 @@ fn sos_coefficients_round_trip_through_scipy_layout() {
     assert_eq!(sos.sos_coefficients(), rows);
     assert_eq!(design.filter_type, IirFilterType::ChebyshevII);
 }
+
+// ---------------------------------------------------------------------------
+// Integer sample paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i16_audio_through_unity_filter_is_bit_identical() {
+    // A 0 dB peaking band has identical numerator and denominator, so it must
+    // be transparent. Regression: float -> i16 used to truncate with a
+    // symmetric scale, shifting every negative sample by one LSB.
+    let x: Vec<i16> = (0..4096)
+        .map(|i| ((i as f64 * 0.731).sin() * 30000.0) as i16)
+        .chain([i16::MIN, i16::MAX, -1, 0, 1])
+        .collect();
+    let mut a: AudioSamples<'static, i16> =
+        AudioSamples::new_mono(Array1::from_vec(x.clone()), sample_rate!(48000)).unwrap();
+    a.apply_eq_band_in_place(&EqBand::peak(1000.0, 0.0, 1.0))
+        .unwrap();
+    assert_eq!(a.as_slice().unwrap(), x.as_slice());
+}
+
+#[test]
+fn i16_filtering_matches_f64_reference_without_bias() {
+    let fixtures = load("iir_time_domain.json");
+    let mix = f64s(&fixtures["signals"]["mix"]);
+    let design = IirFilterDesign::butterworth_highpass(nz(4), 100.0);
+    let fs = 44100.0;
+    let n = mix.len();
+    let x: Vec<i16> = mix
+        .iter()
+        .map(|&v| (v * 0.9 * 32767.0).round() as i16)
+        .collect();
+    // f64 reference on the dequantised input (the f64 path is checked against
+    // scipy elsewhere), then requantised by the documented rule.
+    let xf: Vec<f64> = x
+        .iter()
+        .map(|&v| {
+            if v < 0 {
+                f64::from(v) / 32768.0
+            } else {
+                f64::from(v) / 32767.0
+            }
+        })
+        .collect();
+    let mut r = mono_f64(&xf, fs);
+    r.apply_iir_filter_in_place(&design).unwrap();
+    let want: Vec<i16> = r
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|&v| {
+            let v = v.clamp(-1.0, 1.0);
+            (if v < 0.0 { v * 32768.0 } else { v * 32767.0 }).round() as i16
+        })
+        .collect();
+    let mut a: AudioSamples<'static, i16> =
+        AudioSamples::new_mono(Array1::from_vec(x), sample_rate!(44100)).unwrap();
+    a.apply_iir_filter_in_place(&design).unwrap();
+    let got = a.as_slice().unwrap();
+    let mut max_diff = 0i32;
+    let mut sum_diff = 0i64;
+    for i in 0..n {
+        let d = i32::from(got[i]) - i32::from(want[i]);
+        max_diff = max_diff.max(d.abs());
+        sum_diff += i64::from(d);
+    }
+    assert!(max_diff <= 1, "max LSB difference {max_diff}");
+    assert_eq!(sum_diff, 0, "requantisation must be unbiased");
+}

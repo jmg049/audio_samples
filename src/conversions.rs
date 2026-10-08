@@ -99,8 +99,8 @@ where
     ///
     /// let audio = AudioSamples::new_mono(array![0.5f32, -1.0, 0.0], sample_rate!(44100)).unwrap();
     /// let audio_i16 = audio.to_format::<i16>();
-    /// assert!((audio_i16[0] - 16384).abs() <= 1); // 0.5 × 32767 ≈ 16384
-    /// assert_eq!(audio_i16[1], i16::MIN + 1);          // -1.0 → i16::MIN
+    /// assert_eq!(audio_i16[0], 16384);             // 0.5 × 32767 = 16383.5, rounded
+    /// assert_eq!(audio_i16[1], i16::MIN);          // -1.0 → i16::MIN
     /// assert_eq!(audio_i16[2], 0);                 // 0.0 → 0
     /// ```
     #[inline]
@@ -259,12 +259,7 @@ mod tests {
         );
         assert_eq!(converted_data[2], 0); // 0.0 -> 0
         assert_eq!(converted_data[3], 32767); // 1.0 -> i16::MAX
-        // -1.0 can map to either -32767 or -32768 depending on implementation
-        assert!(
-            converted_data[4] <= -32767,
-            "Expected <= -32767, got {}",
-            converted_data[4]
-        );
+        assert_eq!(converted_data[4], i16::MIN); // -1.0 -> i16::MIN
     }
 
     #[test]
@@ -307,9 +302,9 @@ mod tests {
 
         // Verify conversion accuracy
         let converted_data = audio_i16;
-        assert_eq!(converted_data[0], 3276); // 0.1 * 32767 = 3276.7, truncated to 3276
-        assert_eq!(converted_data[1], 6553); // 0.2 * 32767 ≈ 6553
-        assert_eq!(converted_data[2], 9830); // 0.3 * 32767 ≈ 9830
+        assert_eq!(converted_data[0], 3277); // 0.1 * 32767 = 3276.7, rounded to 3277
+        assert_eq!(converted_data[1], 6553); // 0.2 * 32767 = 6553.4, rounded to 6553
+        assert_eq!(converted_data[2], 9830); // 0.3 * 32767 = 9830.1, rounded to 9830
     }
 
     #[test]
@@ -367,11 +362,11 @@ mod tests {
         let audio_i16 = audio_f32.to_format::<i16>();
         let converted_data = audio_i16.as_mono().unwrap();
 
-        // f32::MAX and f32::MIN are clamped to [-1.0, 1.0] then scaled by i16::MAX.
-        // Symmetric scaling maps -1.0 to -32767 (not i16::MIN = -32768); this is
-        // intentional - see impl_float_to_int! in traits.rs for rationale.
+        // f32::MAX and f32::MIN are clamped to [-1.0, 1.0]; the asymmetric
+        // scaling (the inverse of i16 -> f32) maps +1.0 to i16::MAX and -1.0
+        // to i16::MIN.
         assert_eq!(converted_data[0], i16::MAX);
-        assert_eq!(converted_data[1], -32767i16);
+        assert_eq!(converted_data[1], i16::MIN);
         assert_eq!(converted_data[2], 0);
     }
 }
