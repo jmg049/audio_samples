@@ -332,7 +332,7 @@ mod onset {
                     doc.add_warning(
                         WarningLevel::Caution,
                         format!(
-                            "peak_picking.min_peak_separation = {sep} is applied to onset-function frames, i.e. {} ms here, although the field is documented in samples ({} ms).",
+                            "peak_picking.min_peak_separation = {sep} counts onset-function frames, i.e. {} ms here (not {} ms, as it would be if it counted audio samples).",
                             fmt_num(1000.0 * sep_s),
                             fmt_num(1000.0 * sep as f64 / fs)
                         ),
