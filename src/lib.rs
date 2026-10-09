@@ -468,6 +468,21 @@ pub use crate::operations::effects::{
     HarmonicPercussiveConfig, HpssMaskConfig, NnAggregate, PitchShiftConfig, SilenceConfig,
 };
 
+#[cfg(all(feature = "transforms", feature = "resampling"))]
+pub use crate::operations::AudioConstantQ;
+
+#[cfg(all(feature = "transforms", feature = "resampling"))]
+pub use crate::operations::constant_q::{CqtConfig, VqtConfig, WaveletConfig};
+
+#[cfg(all(
+    feature = "transforms",
+    feature = "resampling",
+    feature = "feature-extraction"
+))]
+pub use crate::operations::constant_q::{
+    ChromaCensConfig, ChromaCqtConfig, ChromaVqtConfig, CqtMode, TonnetzConfig,
+};
+
 pub use crate::utils::audio_math::MelScale;
 
 #[cfg(feature = "feature-extraction")]

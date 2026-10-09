@@ -85,7 +85,7 @@ thread_local! {
     static REAL_FFT_PLANNER: RefCell<RealFftPlanner<f64>> = RefCell::new(RealFftPlanner::new());
 }
 
-fn forward_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
+pub(crate) fn forward_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
     REAL_FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_forward(n))
 }
 

@@ -13,6 +13,7 @@
 //! | [`AudioTonal`] | `feature-extraction` | librosa-compatible chroma_stft, piptrack, tuning estimation |
 //! | [`AudioFeatures`] | `feature-extraction` | librosa-compatible frame-wise spectral features, RMS, ZCR |
 //! | `AudioEffects` | `effects` | librosa-compatible time stretch, pitch shift, emphasis, dB trim/split, HPSS |
+//! | [`AudioConstantQ`] | `transforms` + `resampling` | librosa-compatible CQT/VQT/iCQT, chroma_cqt/cens/vqt, tonnetz |
 //! | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |
 //! | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |
 //! | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |
@@ -6489,6 +6490,8 @@ where
 #[cfg(feature = "transforms")]
 pub use crate::operations::spectrum::AudioSpectrum;
 
+#[cfg(all(feature = "transforms", feature = "resampling"))]
+pub use crate::operations::constant_q::AudioConstantQ;
 #[cfg(feature = "feature-extraction")]
 pub use crate::operations::tonal::AudioTonal;
 

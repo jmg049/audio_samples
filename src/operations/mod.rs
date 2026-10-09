@@ -12,6 +12,7 @@
 //! - [`transforms`] - FFT / spectral analysis
 //! - [`spectrum`] - librosa-compatible STFT, mel spectrogram, MFCC, dB, delta
 //! - `effects` - librosa-compatible time stretch, pitch shift, emphasis, dB trim/split, HPSS (feature `effects`)
+//! - [`constant_q`] - librosa-compatible CQT / VQT / iCQT, CQT chroma and tonnetz
 //! - [`filterbanks`] - window functions and mel filterbanks (librosa / SciPy semantics)
 //! - [`editing`] - Time-domain editing operations
 //! - [`channels`] - Channel manipulation operations
@@ -95,6 +96,9 @@ pub mod filterbanks;
 #[cfg(feature = "transforms")]
 pub mod spectrum;
 
+#[cfg(all(feature = "transforms", feature = "resampling"))]
+pub mod constant_q;
+
 #[cfg(feature = "vad")]
 pub mod vad;
 
@@ -164,6 +168,8 @@ pub use traits::AudioSpectrum;
 #[cfg(feature = "feature-extraction")]
 pub use traits::AudioTonal;
 
+#[cfg(all(feature = "transforms", feature = "resampling"))]
+pub use traits::AudioConstantQ;
 #[cfg(feature = "effects")]
 pub use traits::AudioEffects;
 
