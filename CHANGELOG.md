@@ -53,6 +53,62 @@ All notable changes to this project are documented here.
   already did): `-1.0 → i16::MIN`, and int → float → int is the identity for
   every value. The `simd` conversion paths match bit-for-bit.
 
+
+### Fixed (correctness audit for teaching use)
+
+A formula-by-formula audit checked the documentation against the code and
+against SciPy/librosa/closed-form results. Each fix below has a regression
+test (`tests/audit_*.rs`). Several change numerical output; they now match
+their documented definitions.
+
+- **Dynamics:** the envelope follower used the release time almost
+  everywhere (a 1 ms attack reached 3 % instead of 63 % after 1 ms), so every
+  compressor, limiter, gate, expander and `attack_decay_envelope` was too slow
+  to react. Lookahead had no effect. The soft knee was non-monotone (now the
+  Giannoulis/Massberg/Reiss quadratic knee); the soft limiter overshot its
+  ceiling statically; gate ratio now means a 1:R downward expander;
+  `set_detection_method` resizes the RMS window. `LimiterConfig::isp_limiting`
+  is documented as having no effect yet.
+- **Statistics:** `autocorrelation` was divided by the FFT size twice;
+  `mean`/`variance`/`cross_correlation` wrapped or panicked on integer audio
+  (also breaking `remove_dc_offset`); multi-channel `variance` now pools all
+  samples; u8 zero crossings are counted about 128; spectral centroid,
+  rolloff, bandwidth and slope used the wrong bin spacing for odd lengths;
+  `align_signals` never searched any lag; `detect_fundamental_frequency`
+  returned sub-harmonics; `detect_sample_rate` tested the wrong bins and now
+  returns `Ok(None)` when no cutoff is found.
+- **Processing:** gains, peak/min-max normalisation, fades and `mix` on
+  integer audio truncated the gain to an integer (silence on i16);
+  `mu_compress`/`mu_expand` rescaled μ like a sample; median normalisation
+  subtracted the middle sample, not the median; `GaussianNoise` perturbation
+  added uniform noise at the wrong SNR (and pink was white); `am_signal`
+  depth now follows the standard AM definition; Medium/High resampling is
+  time-aligned (the sinc delay of ~69/139 samples at 44.1→48 kHz is
+  compensated and the tail is kept).
+- **Spectral:** `power_spectral_density` now has SciPy `welch` density
+  scaling (it was off by N·Σw²/2); spectrograms, mel, MFCC, chroma, gammatone
+  and CQT of integer audio used a raw cast (i16 power 2³⁰ too large);
+  `HpssConfig::num_freq_bins` for odd FFT sizes; spectrum/phase plot axes and
+  spectrogram plot sample rate; `frequency_to_note` errors outside MIDI 0–127.
+- **LPC:** `levinson_durbin` returned the order-(p−1) solution padded with a
+  zero; it now returns the order-p predictor (LPC/SILK output changes).
+- **Pitch and rhythm:** YIN now follows de Cheveigné & Kawahara with
+  parabolic interpolation (440 Hz read as 450 Hz at 44.1 kHz, and +3.9 % at
+  100 Hz); `estimate_key` rotated its profile the wrong way (D major reported
+  as A# major); `complex_onset_detection` panicked on every input; the beat
+  grid drifted; onset envelope smoothing used a sample count as frames;
+  `pick_peaks` ignored the adjusted threshold window.
+- **VAD:** a signal shorter than one frame with `pad_end = false` returns an
+  error (was undefined behaviour); `VadMethod::Spectral` returns
+  `Unsupported` (it is not implemented).
+- **Documentation:** about 150 formulas and claims corrected so that the docs
+  state what the code computes (conventions, normalisation, units, dB
+  references), with librosa/SciPy differences called out (symmetric Hann,
+  Slaney mel on power, unnormalised DCT-II with lifter 22, absolute dB floor,
+  HTK `audio_math` mel helpers, ZCR in crossings per second). The perceptual
+  codec docs were scientifically corrected and the Opus module is described
+  as an Opus-inspired teaching codec, not bitstream compatible.
+
 ### Changed
 
 - Filter parameter validation follows SciPy: any edge in `(0, Nyquist)` is
@@ -93,6 +149,12 @@ All notable changes to this project are documented here.
   (`ExplainFor`) uses the signal's sample rate and length; `explain::topics`
   covers sampling, aliasing, quantisation, the DFT, windows, YIN,
   autocorrelation pitch, LPC, the cepstrum, resampling and FIR filters.
+
+- Learning guide (`guide` module, `educational` + `full_no_plotting`): a
+  14-chapter course mapped to a speech and audio processing syllabus, with
+  doctested chapters, a runnable lab per chapter
+  (`examples/tutorial_NN_*.rs`) and a page for instructors.
+- `StreamingResampler::output_delay()`.
 
 - `StreamingResampler` (`resampling` feature): a stateful, chunk-by-chunk resampler for continuous sources (e.g. audio being decoded live and fed to a playback device at a different sample rate). Wraps the same rubato `Async<f32>` engine and quality tuning as `resample`/`resample_by_ratio`, but keeps the delay line and any leftover input alive across calls instead of requiring the whole clip up front.
 
