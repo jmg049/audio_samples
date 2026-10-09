@@ -2013,30 +2013,10 @@ where
             audio.replace_with_vec(&non_empty_vec)?;
         }
         AudioData::Multi(arr) => {
-            // For multi-channel, flatten to interleaved format
-            let num_channels = arr.shape()[0];
-            let samples_per_channel = arr.shape()[1];
-            let mut interleaved = Vec::with_capacity(num_channels * samples_per_channel);
-
-            // Interleave: [ch0_s0, ch1_s0, ..., ch0_s1, ch1_s1, ...]
-            for sample_idx in 0..samples_per_channel {
-                for ch_idx in 0..num_channels {
-                    interleaved.push(arr[[ch_idx, sample_idx]]);
-                }
-            }
-
-            let non_empty_interleaved = NonEmptyVec::new(interleaved)
-                .map_err(|_| AudioSampleError::empty_data("apply_pitch_shift"))?;
-
-            let expected_channels =
-                std::num::NonZeroU32::new(num_channels as u32).ok_or_else(|| {
-                    AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "num_channels",
-                        "channel count must be non-zero",
-                    ))
-                })?;
-
-            audio.replace_with_vec_channels(&non_empty_interleaved, expected_channels)?;
+            // Planar (channels x samples) data: replace directly. (Building an
+            // interleaved vector and reshaping it as planar scrambled the
+            // channels and failed whenever the length changed.)
+            audio.replace_with_multi(arr.as_view().to_owned())?;
         }
     }
 
@@ -2131,9 +2111,19 @@ where
     // Allocate output STFT matrix
     let mut output_stft = ndarray::Array2::<Complex<f64>>::zeros((num_bins, num_frames));
 
-    // Previous frame phases for phase unwrapping
+    // Phase of each input bin in the previous frame, and the running
+    // (synthesis) phase of each output bin.
     let mut prev_phase = vec![0.0_f64; num_bins];
-    let mut prev_output_phase = vec![0.0_f64; num_bins];
+    let mut output_phase = vec![0.0_f64; num_bins];
+    // Per-frame scratch: summed magnitude per output bin, and the shifted
+    // frequency (in bins) and magnitude of its strongest contributor.
+    let mut out_mag = vec![0.0_f64; num_bins];
+    let mut out_freq = vec![0.0_f64; num_bins];
+    let mut out_peak = vec![0.0_f64; num_bins];
+
+    // Wrap an angle to [-pi, pi] (Rust's `%` keeps the sign of the dividend,
+    // so `(x + pi) % 2pi - pi` does not wrap negative angles).
+    let wrap = |x: f64| x - 2.0 * f64::PI() * (x / (2.0 * f64::PI())).round();
 
     // Process each frame
     for frame_idx in 0..num_frames {
@@ -2143,6 +2133,8 @@ where
         } else {
             vec![1.0; num_bins] // Unity envelope (no formant preservation)
         };
+        out_mag.fill(0.0);
+        out_peak.fill(0.0);
 
         for bin_idx in 0..num_bins {
             let complex_val = stft_result.data[[bin_idx, frame_idx]];
@@ -2156,40 +2148,51 @@ where
                 magnitude
             };
 
-            // Compute phase difference from expected advance
-            let phase_diff = phase - prev_phase[bin_idx];
-            let phase_diff_wrapped = ((phase_diff + f64::PI()) % (2.0 * f64::PI())) - f64::PI();
+            // Deviation of the measured phase advance from the advance
+            // expected for this bin's centre frequency (k * 2pi * hop / n_fft),
+            // wrapped to [-pi, pi]: the bin's frequency offset.
+            let deviation =
+                wrap(phase - prev_phase[bin_idx] - bin_idx as f64 * expected_phase_advance);
+            prev_phase[bin_idx] = phase;
 
             // Instantaneous frequency (in bins)
-            let inst_freq_offset = phase_diff_wrapped / expected_phase_advance;
-            let true_freq_bin = bin_idx as f64 + inst_freq_offset;
+            let true_freq_bin = bin_idx as f64 + deviation / expected_phase_advance;
 
             // Map to output bin according to pitch ratio
             let output_bin_f64 = true_freq_bin * pitch_ratio;
+            if output_bin_f64 < -0.5 {
+                continue;
+            }
             let output_bin = output_bin_f64.round() as usize;
-
-            if output_bin < num_bins {
-                // Compute output phase with horizontal phase coherence
-                let phase_advance = expected_phase_advance * output_bin_f64;
-                let output_phase = prev_output_phase[output_bin] + phase_advance;
-
-                // Apply original envelope at output bin (preserves formants)
-                // When shifting up, output_bin might exceed input bin range, so clamp to last envelope value
-                let output_magnitude = if preserve_formants {
-                    let envelope_idx = output_bin.min(num_bins - 1);
-                    detail_magnitude * envelope[envelope_idx]
-                } else {
-                    detail_magnitude
-                };
-
-                // Accumulate into output bin (overlap-add)
-                output_stft[[output_bin, frame_idx]] +=
-                    Complex::from_polar(output_magnitude, output_phase);
-
-                prev_output_phase[output_bin] = output_phase;
+            if output_bin >= num_bins {
+                continue;
             }
 
-            prev_phase[bin_idx] = phase;
+            // Apply original envelope at output bin (preserves formants)
+            let output_magnitude = if preserve_formants {
+                detail_magnitude * envelope[output_bin]
+            } else {
+                detail_magnitude
+            };
+
+            // Several input bins (e.g. a sinusoid's main lobe) may land on the
+            // same output bin: add their magnitudes and take the frequency of
+            // the strongest one, so the bin gets one coherent phase track.
+            out_mag[output_bin] += output_magnitude;
+            if output_magnitude > out_peak[output_bin] {
+                out_peak[output_bin] = output_magnitude;
+                out_freq[output_bin] = output_bin_f64;
+            }
+        }
+
+        for out_bin in 0..num_bins {
+            if out_mag[out_bin] > 0.0 {
+                // Advance the synthesis phase by the shifted frequency.
+                output_phase[out_bin] =
+                    wrap(output_phase[out_bin] + expected_phase_advance * out_freq[out_bin]);
+                output_stft[[out_bin, frame_idx]] =
+                    Complex::from_polar(out_mag[out_bin], output_phase[out_bin]);
+            }
         }
 
         // Ensure Nyquist bin (last bin) is real for conjugate symmetry
@@ -2206,8 +2209,19 @@ where
     // Replace STFT data with pitch-shifted version
     stft_result.data = output_stft;
 
-    // Perform inverse STFT
-    AudioSamples::<T>::istft(stft_result)
+    // Inverse STFT, then trim / zero-pad to the input length (the inverse
+    // transform covers whole hops only).
+    let shifted = AudioSamples::<T>::istft(stft_result)?;
+    let n = audio.samples_per_channel().get();
+    let mut samples: Vec<T> = shifted
+        .as_mono()
+        .ok_or_else(|| AudioSampleError::empty_data("phase_vocoder_pitch_shift"))?
+        .iter()
+        .copied()
+        .take(n)
+        .collect();
+    samples.resize(n, T::default());
+    AudioSamples::new_mono(Array1::from(samples), audio.sample_rate())
 }
 
 #[cfg(test)]
@@ -2540,6 +2554,96 @@ mod tests {
     fn test_trim_all_silence_all_silent_errors() {
         let audio = AudioSamples::new_mono(Array1::<f32>::zeros(100), sample_rate!(100)).unwrap();
         assert!(audio.trim_all_silence(-40.0, 0.1).is_err());
+    }
+
+    /// Frequency (Hz) of the strongest component of `x` in `[lo, hi]`, by a
+    /// Hann-windowed DFT scan at 0.25 Hz steps.
+    #[cfg(all(feature = "transforms", feature = "channels"))]
+    fn peak_frequency(x: &[f64], sr: f64, lo: f64, hi: f64) -> (f64, Vec<(f64, f64)>) {
+        let n = x.len();
+        let w: Vec<f64> = (0..n)
+            .map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos())
+            .collect();
+        let mut spectrum = Vec::new();
+        let mut f = lo;
+        while f <= hi {
+            let (mut re, mut im) = (0.0, 0.0);
+            for i in 0..n {
+                let ph = 2.0 * std::f64::consts::PI * f * i as f64 / sr;
+                re += x[i] * w[i] * ph.cos();
+                im -= x[i] * w[i] * ph.sin();
+            }
+            spectrum.push((f, (re * re + im * im).sqrt()));
+            f += 0.25;
+        }
+        let best = spectrum
+            .iter()
+            .copied()
+            .fold((0.0, -1.0), |b, c| if c.1 > b.1 { c } else { b });
+        (best.0, spectrum)
+    }
+
+    /// Regression for the perturbation pitch shift: the phase increment was
+    /// not de-trended by the bin's expected advance, the wrap used Rust's
+    /// sign-preserving `%`, colliding bins were summed with unrelated
+    /// phases, and multichannel input failed with a shape error. A 440 Hz
+    /// tone shifted up 2 semitones came out at 505.7 Hz with -8.8 dB
+    /// sidebands.
+    #[cfg(all(feature = "transforms", feature = "channels"))]
+    #[test]
+    fn test_pitch_shift_perturbation_frequency_and_stereo() {
+        use crate::operations::types::{PerturbationConfig, PerturbationMethod};
+        let sr = 22050usize;
+        let tone: Vec<f64> = (0..2 * sr)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr as f64).sin())
+            .collect();
+        let target = 440.0 * 2f64.powf(2.0 / 12.0); // 493.88 Hz
+        let bin = sr as f64 / 2048.0; // STFT bin width, 10.77 Hz
+        let config = PerturbationConfig::new(PerturbationMethod::pitch_shift(2.0, false));
+
+        let audio =
+            AudioSamples::new_mono(Array1::from(tone.clone()), sample_rate!(22050)).unwrap();
+        let shifted = audio.perturb(&config).unwrap();
+        assert_eq!(shifted.samples_per_channel().get(), 2 * sr);
+        let y = shifted.as_mono().unwrap().to_vec();
+        let mid = &y[sr / 2..sr / 2 + sr];
+        let (peak, spectrum) = peak_frequency(mid, sr as f64, 380.0, 620.0);
+        assert!(
+            (peak - target).abs() <= bin,
+            "peak {peak} Hz, expected {target}"
+        );
+        // Sidebands: nothing more than 1.5 bins from the target within 30 dB
+        // of the peak (the old implementation had sidebands at -8.8 dB).
+        let max_mag = spectrum.iter().map(|p| p.1).fold(0.0, f64::max);
+        let side = spectrum
+            .iter()
+            .filter(|p| (p.0 - target).abs() > 1.5 * bin)
+            .map(|p| p.1)
+            .fold(0.0, f64::max);
+        let side_db = 20.0 * (side / max_mag).log10();
+        assert!(side_db < -30.0, "sideband level {side_db:.1} dB");
+
+        // Stereo input works and each channel is shifted independently.
+        let mut data = Array2::<f64>::zeros((2, 2 * sr));
+        for i in 0..2 * sr {
+            data[[0, i]] = tone[i];
+            data[[1, i]] = 0.5 * tone[i];
+        }
+        let stereo = AudioSamples::new_multi_channel(data, sample_rate!(22050)).unwrap();
+        let shifted = stereo.perturb(&config).unwrap();
+        assert_eq!(shifted.num_channels().get(), 2);
+        assert_eq!(shifted.samples_per_channel().get(), 2 * sr);
+        let multi = shifted.as_multi_channel().unwrap();
+        for ch in 0..2 {
+            let row = multi.row(ch).to_vec();
+            let (peak, _) = peak_frequency(&row[sr / 2..sr / 2 + sr], sr as f64, 380.0, 620.0);
+            assert!((peak - target).abs() <= bin, "channel {ch}: peak {peak} Hz");
+        }
+        let l = multi.row(0).to_vec();
+        let r = multi.row(1).to_vec();
+        for i in (0..2 * sr).step_by(97) {
+            assert!((r[i] - 0.5 * l[i]).abs() < 1e-9, "channel scaling at {i}");
+        }
     }
 
     #[test]
