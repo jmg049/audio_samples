@@ -1960,6 +1960,628 @@ pub fn linspace(start: f64, end: f64, num: usize) -> Vec<f64> {
     (0..num).map(|i| (i as f64).mul_add(step, start)).collect()
 }
 
+// =============================================================================
+// TUNING, OCTAVES, CONSTANT-Q FREQUENCIES AND KEY SPELLING (librosa)
+// =============================================================================
+
+/// Reference frequency of A4 for a tuning offset, `440 * 2^(tuning / bins_per_octave)`.
+#[inline]
+fn tuned_a440(tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
+    440.0 * 2.0f64.powf(tuning / bins_per_octave.get() as f64)
+}
+
+/// Converts a frequency in Hz to (fractional) octaves above C0-ish, librosa style.
+///
+/// Octave 0 is placed at `A4 / 16` (A0 = 27.5 Hz for standard tuning), so
+/// 440 Hz is octave 4 and every doubling of the frequency adds 1. A non-zero
+/// `tuning` moves the reference: the A4 frequency becomes
+/// `440 * 2^(tuning / bins_per_octave)`.
+///
+/// This is `librosa.hz_to_octs(frequency, tuning=..., bins_per_octave=...)`.
+/// It is used by the chroma filterbank and by tuning estimation.
+///
+/// # Arguments
+///
+/// * `freq_hz` - Frequency in Hz. Must be positive for a finite result: 0 Hz
+///   gives `-inf` and negative values give `NaN` (as in librosa).
+/// * `tuning` - Tuning deviation from A440 in fractions of a bin (for example
+///   `0.25` is a quarter of a semitone sharp when `bins_per_octave` is 12).
+/// * `bins_per_octave` - Number of bins per octave that `tuning` is measured in.
+///
+/// # Returns
+///
+/// `log2(freq_hz / (A4 / 16))` with `A4 = 440 * 2^(tuning / bins_per_octave)`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::{hz_to_octs, octs_to_hz};
+///
+/// assert_eq!(hz_to_octs(440.0, 0.0, nzu!(12)), 4.0);
+/// assert_eq!(hz_to_octs(27.5, 0.0, nzu!(12)), 0.0);
+/// // A tuning of +1 bin moves the reference up one semitone.
+/// assert!((hz_to_octs(440.0 * 2f64.powf(1.0 / 12.0), 1.0, nzu!(12)) - 4.0).abs() < 1e-12);
+/// assert!((octs_to_hz(hz_to_octs(1000.0, 0.3, nzu!(12)), 0.3, nzu!(12)) - 1000.0).abs() < 1e-9);
+/// ```
+///
+/// # References
+///
+/// librosa `core.convert.hz_to_octs`.
+#[inline]
+#[must_use]
+pub fn hz_to_octs(freq_hz: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
+    (freq_hz / (tuned_a440(tuning, bins_per_octave) / 16.0)).log2()
+}
+
+/// Converts (fractional) octave numbers to frequencies in Hz; the inverse of [`hz_to_octs`].
+///
+/// This is `librosa.octs_to_hz(octs, tuning=..., bins_per_octave=...)`.
+///
+/// # Arguments
+///
+/// * `octs` - Octave number (octave 0 is `A4 / 16`, 27.5 Hz in standard tuning).
+/// * `tuning` - Tuning deviation from A440 in fractions of a bin.
+/// * `bins_per_octave` - Number of bins per octave that `tuning` is measured in.
+///
+/// # Returns
+///
+/// `(A4 / 16) * 2^octs` with `A4 = 440 * 2^(tuning / bins_per_octave)`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::octs_to_hz;
+///
+/// assert_eq!(octs_to_hz(4.0, 0.0, nzu!(12)), 440.0);
+/// assert_eq!(octs_to_hz(0.0, 0.0, nzu!(12)), 27.5);
+/// ```
+///
+/// # References
+///
+/// librosa `core.convert.octs_to_hz`.
+#[inline]
+#[must_use]
+pub fn octs_to_hz(octs: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
+    (tuned_a440(tuning, bins_per_octave) / 16.0) * 2.0f64.powf(octs)
+}
+
+/// Converts an A4 reference frequency to a tuning deviation in fractional bins.
+///
+/// This is `librosa.A4_to_tuning(A4, bins_per_octave=...)`:
+/// `bins_per_octave * (log2(a4_hz) - log2(440))`. Use it to turn a concert pitch
+/// such as 432 Hz or 443 Hz into the `tuning` argument that chroma, constant-Q
+/// and octave helpers expect.
+///
+/// # Arguments
+///
+/// * `a4_hz` - Frequency of A4 in Hz. Must be positive for a finite result.
+/// * `bins_per_octave` - Number of bins per octave to express the deviation in.
+///
+/// # Returns
+///
+/// The tuning deviation from A440 in fractions of a bin (0 for 440 Hz).
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::{a4_to_tuning, tuning_to_a4};
+///
+/// assert_eq!(a4_to_tuning(440.0, nzu!(12)), 0.0);
+/// assert!((a4_to_tuning(880.0, nzu!(12)) - 12.0).abs() < 1e-12);
+/// let t = a4_to_tuning(432.0, nzu!(12)); // about -0.32 semitones
+/// assert!((tuning_to_a4(t, nzu!(12)) - 432.0).abs() < 1e-9);
+/// ```
+///
+/// # References
+///
+/// librosa `core.convert.A4_to_tuning`.
+#[inline]
+#[must_use]
+pub fn a4_to_tuning(a4_hz: f64, bins_per_octave: NonZeroUsize) -> f64 {
+    bins_per_octave.get() as f64 * (a4_hz.log2() - 440.0f64.log2())
+}
+
+/// Converts a tuning deviation in fractional bins to the A4 reference frequency.
+///
+/// This is `librosa.tuning_to_A4(tuning, bins_per_octave=...)`:
+/// `440 * 2^(tuning / bins_per_octave)`; the inverse of [`a4_to_tuning`].
+///
+/// # Arguments
+///
+/// * `tuning` - Tuning deviation from A440 in fractions of a bin.
+/// * `bins_per_octave` - Number of bins per octave that `tuning` is measured in.
+///
+/// # Returns
+///
+/// The frequency of A4 in Hz.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::tuning_to_a4;
+///
+/// assert_eq!(tuning_to_a4(0.0, nzu!(12)), 440.0);
+/// assert_eq!(tuning_to_a4(-12.0, nzu!(12)), 220.0);
+/// ```
+///
+/// # References
+///
+/// librosa `core.convert.tuning_to_A4`.
+#[inline]
+#[must_use]
+pub fn tuning_to_a4(tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
+    tuned_a440(tuning, bins_per_octave)
+}
+
+/// Centre frequencies of a constant-Q (geometrically spaced) filterbank.
+///
+/// This is `librosa.cqt_frequencies(n_bins, fmin=..., bins_per_octave=..., tuning=...)`:
+/// bin `k` has frequency `2^(tuning / bins_per_octave) * fmin * 2^(k / bins_per_octave)`.
+///
+/// # Arguments
+///
+/// * `n_bins` - Number of frequencies to generate (0 gives an empty vector).
+/// * `fmin` - Frequency of bin 0 before the tuning correction, in Hz (librosa's
+///   CQT default is C1, about 32.70 Hz).
+/// * `bins_per_octave` - Number of bins per octave (12 for semitones).
+/// * `tuning` - Tuning deviation from A440 in fractions of a bin; all
+///   frequencies are multiplied by `2^(tuning / bins_per_octave)`.
+///
+/// # Returns
+///
+/// A vector of `n_bins` increasing frequencies in Hz.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::cqt_frequencies;
+///
+/// let f = cqt_frequencies(25, 110.0, nzu!(12), 0.0);
+/// assert_eq!(f.len(), 25);
+/// assert_eq!(f[0], 110.0);
+/// assert_eq!(f[12], 220.0);
+/// assert_eq!(f[24], 440.0);
+/// ```
+///
+/// # References
+///
+/// librosa `core.convert.cqt_frequencies`.
+#[must_use]
+pub fn cqt_frequencies(
+    n_bins: usize,
+    fmin: f64,
+    bins_per_octave: NonZeroUsize,
+    tuning: f64,
+) -> Vec<f64> {
+    let bpo = bins_per_octave.get() as f64;
+    let correction = 2.0f64.powf(tuning / bpo);
+    // Same evaluation order as librosa: (correction * fmin) * 2^(k / bpo).
+    (0..n_bins)
+        .map(|k| correction * fmin * 2.0f64.powf(k as f64 / bpo))
+        .collect()
+}
+
+/// Pitch class (0 = C) of each natural note letter.
+fn letter_pitch_class(letter: char) -> Option<i32> {
+    match letter.to_ascii_uppercase() {
+        'C' => Some(0),
+        'D' => Some(2),
+        'E' => Some(4),
+        'F' => Some(5),
+        'G' => Some(7),
+        'A' => Some(9),
+        'B' => Some(11),
+        _ => None,
+    }
+}
+
+/// Semitone offset of one accidental symbol (librosa's `ACC_MAP`).
+fn accidental_offset(c: char) -> Option<i32> {
+    match c {
+        '#' | '\u{266F}' => Some(1),
+        'b' | '!' | '\u{266D}' => Some(-1),
+        '\u{1D12A}' => Some(2),
+        '\u{1D12B}' => Some(-2),
+        'n' | '\u{266E}' => Some(0),
+        _ => None,
+    }
+}
+
+/// Scale or mode of a parsed key signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyKind {
+    Major,
+    Minor,
+    /// Church mode, as librosa's 3-letter code index (ion=0 .. loc=6).
+    Mode(usize),
+}
+
+/// A key signature parsed with librosa's `KEY_RE` grammar.
+struct ParsedKey {
+    /// Upper-case tonic letter.
+    letter: char,
+    /// The accidental characters exactly as written.
+    accidentals: String,
+    kind: KeyKind,
+}
+
+impl ParsedKey {
+    fn offset(&self) -> i32 {
+        self.accidentals
+            .chars()
+            .map(|c| accidental_offset(c).unwrap_or(0))
+            .sum()
+    }
+}
+
+/// Parses `TONIC[accidentals]:scale-or-mode` exactly as librosa's `KEY_RE`.
+fn parse_key(key: &str) -> AudioSampleResult<ParsedKey> {
+    let bad = || {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "key",
+            format!(
+                "improper key format {key:?}: expected TONIC[accidentals]:scale, \
+                 e.g. 'C:maj', 'A\u{266D}:min' or 'D:dorian'"
+            ),
+        ))
+    };
+    let mut chars = key.chars();
+    let letter = chars.next().ok_or_else(bad)?;
+    if letter_pitch_class(letter).is_none() || !letter.is_ascii_alphabetic() {
+        return Err(bad());
+    }
+    let rest: String = chars.collect();
+    let (accidentals, kind) = rest.split_once(':').ok_or_else(bad)?;
+    if !accidentals.chars().all(|c| accidental_offset(c).is_some()) {
+        return Err(bad());
+    }
+    let kind = match kind {
+        "maj" | "major" => KeyKind::Major,
+        "min" | "minor" => KeyKind::Minor,
+        "ion" | "ionian" => KeyKind::Mode(0),
+        "dor" | "dorian" => KeyKind::Mode(1),
+        "phr" | "phryg" | "phrygian" => KeyKind::Mode(2),
+        "lyd" | "lydian" => KeyKind::Mode(3),
+        "mix" | "mixolyd" | "mixolydian" => KeyKind::Mode(4),
+        "aeo" | "aeol" | "aeolian" => KeyKind::Mode(5),
+        "loc" | "locr" | "locrian" => KeyKind::Mode(6),
+        _ => return Err(bad()),
+    };
+    Ok(ParsedKey {
+        letter: letter.to_ascii_uppercase(),
+        accidentals: accidentals.to_string(),
+        kind,
+    })
+}
+
+/// Pitch class of a note name made of a letter and accidental symbols.
+fn note_name_degree(note: &str) -> i32 {
+    let mut chars = note.chars();
+    let letter = chars.next().and_then(letter_pitch_class).unwrap_or(0);
+    let acc: i32 = chars.map(|c| accidental_offset(c).unwrap_or(0)).sum();
+    (letter + acc).rem_euclid(12)
+}
+
+/// librosa `__simplify_note`: cancel accidentals and spell the net offset with
+/// (double) sharps or flats, Unicode symbols.
+fn simplify_note(note: &str) -> String {
+    let mut chars = note.chars();
+    let letter = chars.next().unwrap_or('C').to_ascii_uppercase();
+    let offset: i32 = chars.map(|c| accidental_offset(c).unwrap_or(0)).sum();
+    let mut out = String::new();
+    out.push(letter);
+    let (single, double) = if offset >= 0 {
+        ('\u{266F}', '\u{1D12A}')
+    } else {
+        ('\u{266D}', '\u{1D12B}')
+    };
+    if offset.rem_euclid(2) == 1 {
+        out.push(single);
+    }
+    for _ in 0..offset.abs() / 2 {
+        out.push(double);
+    }
+    out
+}
+
+/// Maps Unicode accidentals to librosa's ASCII forms.
+fn ascii_accidentals(note: &str) -> String {
+    let mut out = String::with_capacity(note.len());
+    for c in note.chars() {
+        match c {
+            '\u{266F}' => out.push('#'),
+            '\u{1D12A}' => out.push_str("##"),
+            '\u{266D}' => out.push('b'),
+            '\u{1D12B}' => out.push_str("bb"),
+            '\u{266E}' => out.push('n'),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// librosa `__mode_to_key`: the relative major key of a mode (Unicode spelling).
+fn mode_to_major(letter: char, accidentals: &str, mode: usize) -> String {
+    // MAJOR_DICT[mode][letter], indexed by mode (ion..loc) and letter (C D E F G A B).
+    const MAJOR: [[&str; 7]; 7] = [
+        ["C", "D", "E", "F", "G", "A", "B"],
+        ["B\u{266D}", "C", "D", "E\u{266D}", "F", "G", "A"],
+        [
+            "A\u{266D}",
+            "B\u{266D}",
+            "C",
+            "D\u{266D}",
+            "E\u{266D}",
+            "F",
+            "G",
+        ],
+        ["G", "A", "B", "C", "D", "E", "F\u{266F}"],
+        ["F", "G", "A", "B\u{266D}", "C", "D", "E"],
+        ["E\u{266D}", "F", "G", "A\u{266D}", "B\u{266D}", "C", "D"],
+        [
+            "D\u{266D}",
+            "E\u{266D}",
+            "F",
+            "G\u{266D}",
+            "A\u{266D}",
+            "B\u{266D}",
+            "C",
+        ],
+    ];
+    let col = "CDEFGAB".find(letter).unwrap_or(0);
+    let tonic = format!("{}{accidentals}", MAJOR[mode][col]);
+    format!("{}:maj", simplify_note(&tonic))
+}
+
+/// Lists the 12 chromatic note names (C first) as spelled in a given key or mode.
+///
+/// This is `librosa.key_to_notes(key, unicode=..., natural=...)`. It resolves
+/// enharmonic spellings (C♯ vs D♭) for human-readable output such as plot
+/// labels: a tonic with an accidental fixes sharps or flats, otherwise the
+/// spelling minimises accidentals on the scale degrees (sharps win ties);
+/// keys with six or more sharps or flats use E♯, B♯, C♭, F♭ and double
+/// accidentals where needed.
+///
+/// # Arguments
+///
+/// * `key` - Key signature `TONIC[accidentals]:scale`. The tonic is a letter
+///   `A`-`G` (either case); accidentals are any of `#` `♯` `𝄪` `b` `!` `♭` `𝄫`
+///   `♮` `n` (combinations allowed); the scale is `maj`, `major`, `min`,
+///   `minor`, or a mode: `ionian`, `dorian`, `phrygian`, `lydian`,
+///   `mixolydian`, `aeolian`, `locrian`, abbreviated to its first three
+///   letters or without `ian` (e.g. `mix`, `mixolyd`). Scale and mode names
+///   are lower case.
+/// * `unicode` - If `true`, accidentals are the Unicode symbols ♯ 𝄪 ♭ 𝄫 ♮;
+///   if `false` they are mapped to `#`, `##`, `b`, `bb`, `n`.
+/// * `natural` - If `true`, notes outside the scale that carry no accidental
+///   get a natural sign (`D♮` in `G:loc`).
+///
+/// # Returns
+///
+/// Twelve note names; element `k` names pitch class `k` (0 = C).
+///
+/// # Errors
+///
+/// [`ParameterError`] if `key` does not follow the format above.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::key_to_notes;
+///
+/// let c = key_to_notes("C:maj", false, false).unwrap();
+/// assert_eq!(c, ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]);
+/// let eb = key_to_notes("Eb:min", true, false).unwrap();
+/// assert_eq!(eb[11], "C\u{266D}");
+/// assert_eq!(key_to_notes("G#:maj", false, false).unwrap()[7], "F##");
+/// assert!(key_to_notes("H:maj", true, false).is_err());
+/// ```
+///
+/// # References
+///
+/// librosa `core.notation.key_to_notes`.
+pub fn key_to_notes(key: &str, unicode: bool, natural: bool) -> AudioSampleResult<Vec<String>> {
+    let parsed = parse_key(key)?;
+    let scale_is_major = match parsed.kind {
+        KeyKind::Mode(mode) => {
+            let equiv = mode_to_major(parsed.letter, &parsed.accidentals, mode);
+            return key_to_notes(&equiv, unicode, natural);
+        }
+        KeyKind::Major => true,
+        KeyKind::Minor => false,
+    };
+    let offset = parsed.offset();
+    let tonic = parsed.letter;
+
+    if offset.abs() >= 2 {
+        // Multiple accidentals: spell the key one accidental closer to natural,
+        // add the extra accidental to every note, then rotate C's spelling to the front.
+        let acc = if offset > 0 { '\u{266F}' } else { '\u{266D}' };
+        let reduced: String =
+            std::iter::repeat_n(acc, (offset.unsigned_abs() - 1) as usize).collect();
+        let scale = if scale_is_major { "maj" } else { "min" };
+        let intermediate = key_to_notes(&format!("{tonic}{reduced}:{scale}"), true, false)?;
+        let mut notes: Vec<String> = intermediate
+            .iter()
+            .map(|n| simplify_note(&format!("{n}{acc}")))
+            .collect();
+        let zero = notes
+            .iter()
+            .position(|n| note_name_degree(n) == 0)
+            .unwrap_or(0);
+        notes.rotate_left(zero);
+        if !unicode {
+            notes = notes.iter().map(|n| ascii_accidentals(n)).collect();
+        }
+        return Ok(notes);
+    }
+
+    let pc = letter_pitch_class(tonic).unwrap_or(0);
+    // Steps clockwise on the circle of fifths (= number of sharps).
+    let tonic_number = if scale_is_major {
+        ((pc + offset) * 7).rem_euclid(12)
+    } else {
+        ((pc + offset) * 7 + 9).rem_euclid(12)
+    };
+    let use_sharps = match offset {
+        o if o < 0 => false,
+        o if o > 0 => true,
+        // A natural tonic never lands on 6 (that needs F♯ / E♭), so `<= 6` is total.
+        _ => tonic_number <= 6,
+    };
+
+    let mut notes: Vec<String> = if use_sharps {
+        let mut n: Vec<String> = [
+            "C",
+            "C\u{266F}",
+            "D",
+            "D\u{266F}",
+            "E",
+            "F",
+            "F\u{266F}",
+            "G",
+            "G\u{266F}",
+            "A",
+            "A\u{266F}",
+            "B",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        const SHARP_CORRECTIONS: [(usize, &str); 7] = [
+            (5, "E\u{266F}"),
+            (0, "B\u{266F}"),
+            (7, "F\u{1D12A}"),
+            (2, "C\u{1D12A}"),
+            (9, "G\u{1D12A}"),
+            (4, "D\u{1D12A}"),
+            (11, "A\u{1D12A}"),
+        ];
+        // Distinguish B♯:maj (12 sharps) from C:maj (0).
+        let n_sharps = if tonic_number == 0 && tonic == 'B' {
+            12
+        } else {
+            tonic_number
+        };
+        for &(index, name) in SHARP_CORRECTIONS
+            .iter()
+            .take((n_sharps - 5).max(0) as usize)
+        {
+            n[index] = name.to_string();
+        }
+        n
+    } else {
+        let mut n: Vec<String> = [
+            "C",
+            "D\u{266D}",
+            "D",
+            "E\u{266D}",
+            "E",
+            "F",
+            "G\u{266D}",
+            "G",
+            "A\u{266D}",
+            "A",
+            "B\u{266D}",
+            "B",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        const FLAT_CORRECTIONS: [(usize, &str); 6] = [
+            (11, "C\u{266D}"),
+            (4, "F\u{266D}"),
+            (9, "B\u{1D12B}"),
+            (2, "E\u{1D12B}"),
+            (7, "A\u{1D12B}"),
+            (0, "D\u{1D12B}"),
+        ];
+        let n_flats = (12 - tonic_number).rem_euclid(12);
+        for &(index, name) in FLAT_CORRECTIONS.iter().take((n_flats - 5).max(0) as usize) {
+            n[index] = name.to_string();
+        }
+        n
+    };
+
+    if natural {
+        let degrees = key_to_degrees(key)?;
+        for note in &mut notes {
+            let d = note_name_degree(note);
+            if degrees.iter().any(|&s| i32::from(s) == d) {
+                continue;
+            }
+            if note.chars().count() == 1 {
+                note.push('\u{266E}');
+            }
+        }
+    }
+    if !unicode {
+        notes = notes.iter().map(|n| ascii_accidentals(n)).collect();
+    }
+    Ok(notes)
+}
+
+/// The seven diatonic scale degrees of a key or mode, as pitch classes (0 = C).
+///
+/// This is `librosa.key_to_degrees(key)`: the pitch classes of the scale
+/// starting from the tonic. Major keys use the steps 0 2 4 5 7 9 11, minor
+/// keys 0 2 3 5 7 8 10, and modes rotate the relative major scale.
+///
+/// # Arguments
+///
+/// * `key` - Key signature in the format accepted by [`key_to_notes`]
+///   (e.g. `"C:maj"`, `"A\u{266D}:min"`, `"D:dorian"`, `"C#b#:min"`).
+///
+/// # Returns
+///
+/// Seven pitch classes in `0..12`, tonic first.
+///
+/// # Errors
+///
+/// [`ParameterError`] if `key` is not a valid key signature.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::key_to_degrees;
+///
+/// assert_eq!(key_to_degrees("C:maj").unwrap(), [0, 2, 4, 5, 7, 9, 11]);
+/// assert_eq!(key_to_degrees("C#:maj").unwrap(), [1, 3, 5, 6, 8, 10, 0]);
+/// assert_eq!(key_to_degrees("A:min").unwrap(), [9, 11, 0, 2, 4, 5, 7]);
+/// assert_eq!(key_to_degrees("D:dorian").unwrap(), [2, 4, 5, 7, 9, 11, 0]);
+/// ```
+///
+/// # References
+///
+/// librosa `core.notation.key_to_degrees`.
+pub fn key_to_degrees(key: &str) -> AudioSampleResult<[u8; 7]> {
+    const MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
+    const MINOR: [i32; 7] = [0, 2, 3, 5, 7, 8, 10];
+    let parsed = parse_key(key)?;
+    let steps = match parsed.kind {
+        KeyKind::Mode(mode) => {
+            let equiv = mode_to_major(parsed.letter, &parsed.accidentals, mode);
+            let mut degrees = key_to_degrees(&equiv)?;
+            degrees.rotate_left(mode);
+            return Ok(degrees);
+        }
+        KeyKind::Major => MAJOR,
+        KeyKind::Minor => MINOR,
+    };
+    let base = letter_pitch_class(parsed.letter).unwrap_or(0) + parsed.offset();
+    let mut out = [0u8; 7];
+    for (o, s) in out.iter_mut().zip(steps) {
+        // rem_euclid(12) is in 0..12, so the cast is lossless.
+        *o = (s + base).rem_euclid(12) as u8;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
