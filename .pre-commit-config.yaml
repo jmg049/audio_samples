@@ -3,9 +3,10 @@
 #   pre-commit install            # once per clone
 #   pre-commit run --all-files    # run everything manually
 #
-# The filter hooks guard the golden-reference test suite: any change to the
+# The reference hooks guard the golden-reference test suites: any change to the
 # filter code, the fixtures or the fixture generator must keep audio_samples in
-# agreement with SciPy / FFmpeg / DSPFilters / liquid-dsp.
+# agreement with SciPy / FFmpeg / DSPFilters / liquid-dsp, and any change to the
+# librosa-compatible analysis code must keep it in agreement with librosa.
 repos:
   - repo: local
     hooks:
@@ -29,3 +30,17 @@ repos:
         language: system
         pass_filenames: false
         files: ^(tests/reference/.*|tests/fixtures/filters/.*)$
+
+      - id: librosa-reference-tests
+        name: librosa reference tests (librosa 1.0 golden fixtures)
+        entry: tests/reference/hooks/check_librosa.sh
+        language: system
+        pass_filenames: false
+        files: ^(src/operations/(spectrum|filterbanks|features|constant_q|rhythm|effects|pitch_tracking|sequence|transforms|statistics|processing|editing|hpss|pitch_analysis|beat|peak_picking|onset/.*)\.rs|src/(resampling|conversions|traits)\.rs|src/utils/audio_math\.rs|tests/librosa_reference/.*|tests/fixtures/librosa/.*|Cargo\.toml)$
+
+      - id: librosa-fixtures-fresh
+        name: librosa fixtures match their generator
+        entry: tests/reference/hooks/check_librosa_fixtures.sh
+        language: system
+        pass_filenames: false
+        files: ^(tests/reference/librosa/.*|tests/fixtures/librosa/.*)$

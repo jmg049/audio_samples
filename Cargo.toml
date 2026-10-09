@@ -166,6 +166,9 @@ envelopes = [
 ] # Envelope generation operations
 fixed-size-audio = [
 ] # Support for fixed-size audio buffers (no heap allocation)
+feature-extraction = ["transforms"] # Frame-wise (librosa-style) spectral, rhythmic and tonal features
+effects = ["transforms", "resampling", "editing"] # Time-stretch, pitch-shift, pre-emphasis, dB trim/split, librosa-style HPSS
+sequence = [] # Sequence alignment and decoding: DTW, Viterbi, transition matrices
 
 full = ["full_no_plotting", "plotting"]
 
@@ -191,6 +194,9 @@ full_no_plotting = [
     "psychoacoustic",
     "parallel",
     "opus-codec",
+    "feature-extraction",
+    "effects",
+    "sequence",
 ]
 
 educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing", "fancy"]
@@ -346,6 +352,11 @@ required-features = ["channels", "processing", "editing"]
 [[test]]
 name = "filter_reference"
 required-features = ["iir-filtering", "parametric-eq", "processing", "channels"]
+
+[[test]]
+name = "librosa_reference"
+path = "tests/librosa_reference/main.rs"
+required-features = ["full_no_plotting"]
 
 [[test]]
 name = "effects_chain"
