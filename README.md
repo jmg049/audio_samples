@@ -156,6 +156,12 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 The full transform set (FFT, MFCC, chromagram, CQT, PSD, inverse STFT) and the
 rest of the spectral features are listed under [Features](#features).
 
+For results that match librosa 1.0 (periodic windows, librosa's defaults,
+multichannel `(channels, features, frames)` arrays), use the librosa-compatible
+traits instead: `AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
+`AudioRhythm`, `AudioEffects` and `AudioPitchTracking`. See the
+[migration guide](documentation/LIBROSA_MIGRATION.md).
+
 ---
 
 ## <a name="features">Features</a>
@@ -181,13 +187,16 @@ dependencies. Enable the rest as needed.
 
 | Feature           | Description                                                                 |
 | ----------------- | --------------------------------------------------------------------------- |
-| `transforms`      | FFT, STFT and inverse STFT, MFCC, chromagram, CQT, power spectral density   |
+| `transforms`      | FFT, STFT and inverse STFT, MFCC, chromagram, CQT, power spectral density; librosa-compatible STFT/ISTFT, mel spectrogram, MFCC, dB scaling, mel filterbanks and windows (`AudioSpectrum`); with `resampling`, librosa-compatible CQT/VQT (`AudioConstantQ`) |
 | `psychoacoustic`  | Bark/Mel band layouts, absolute threshold of hearing, masking thresholds, SMR (requires `transforms`) |
-| `pitch-analysis`  | YIN and autocorrelation pitch detection and tracking (requires `transforms`) |
+| `pitch-analysis`  | YIN and autocorrelation pitch detection and tracking; librosa-compatible frame-wise YIN and pYIN (`AudioPitchTracking`) (requires `transforms`, `sequence`) |
 | `onset-detection` | Onset detection (requires `transforms`, `peak-picking`, `processing`)        |
-| `beat-tracking`   | Beat tracking and tempo estimation (`estimate_tempo`)                        |
+| `beat-tracking`   | Beat tracking and tempo estimation (`estimate_tempo`); librosa-compatible onset strength/detection, tempograms, tempo, dynamic-programming beat tracking and PLP (`AudioRhythm`) |
 | `peak-picking`    | Peak picking on onset-strength envelopes                                     |
 | `decomposition`   | Harmonic/percussive source separation (requires `onset-detection`)           |
+| `feature-extraction` | librosa-compatible frame-wise spectral features, RMS, ZCR, PCEN, weightings (`AudioFeatures`) and chroma / tuning (`AudioTonal`) (requires `transforms`) |
+| `effects`         | librosa-compatible time stretch, pitch shift, pre-/de-emphasis, dB trim/split, remix, HPSS, Griffin-Lim (`AudioEffects`) (requires `transforms`, `resampling`, `editing`, `sequence`) |
+| `sequence`        | DTW, Viterbi, transition matrices, recurrence matrices, RQA, `sync` (librosa `sequence` / `segment`) |
 
 ### Utility
 
@@ -213,6 +222,9 @@ dependencies. Enable the rest as needed.
 
 Full API documentation: [https://docs.rs/audio_samples](https://docs.rs/audio_samples).
 Architecture notes are in [documentation/ARCHITECTURE.md](documentation/ARCHITECTURE.md).
+Coming from librosa? [documentation/LIBROSA_MIGRATION.md](documentation/LIBROSA_MIGRATION.md)
+maps every librosa 1.0 function to its counterpart here, lists the differences,
+and explains the golden-fixture suite that checks agreement with librosa.
 
 ---
 
