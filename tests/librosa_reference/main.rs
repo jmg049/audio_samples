@@ -21,6 +21,7 @@ mod effects;
 mod features;
 mod pitch;
 mod resample;
+mod rhythm;
 mod sequence;
 mod spectrum;
 mod tonal;
