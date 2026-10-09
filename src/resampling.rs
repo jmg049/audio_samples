@@ -53,6 +53,10 @@
 //! so its output lags the input by about
 //! [`StreamingResampler::output_delay`] frames.
 //!
+//! Every tier computes in `f32`, whatever the sample type: `f64` input comes
+//! back with about `1e-7` relative precision (single-precision rounding), which
+//! matters when comparing against a double-precision reference.
+//!
 //! ```
 //! use audio_samples::{AudioSamples, sample_rate, resample};
 //! use audio_samples::operations::types::ResamplingQuality;
