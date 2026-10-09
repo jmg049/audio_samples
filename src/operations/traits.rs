@@ -4525,6 +4525,10 @@ where
     ///
     /// Useful for metering, visualising, and analysing compressor activity.
     ///
+    /// The values come from the detector and static curve only:
+    /// `config.lookahead_ms` is ignored here, so they show the gain reduction
+    /// without the lookahead max-hold that `apply_compressor` applies.
+    ///
     /// # Arguments
     ///
     /// - `config` - Compressor configuration parameters.
