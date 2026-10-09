@@ -336,6 +336,10 @@ required-features = ["plotting", "statistics"]
 name = "plotting_event_markers"
 required-features = ["plotting", "onset-detection", "beat-tracking", "statistics"]
 
+[[example]]
+name = "librosa_bench"
+required-features = ["full_no_plotting"]
+
 [[test]]
 name = "codec_quality"
 required-features = ["psychoacoustic", "random-generation"]
