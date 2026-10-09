@@ -748,8 +748,10 @@ where
     /// Computes the autocorrelation function up to `max_lag` samples.
     ///
     /// Autocorrelation measures the similarity of a signal with a time-shifted
-    /// copy of itself. The value at lag 0 is the signal's mean-square value;
-    /// subsequent lags decrease as the shift increases.
+    /// copy of itself. This returns the unbiased estimate
+    /// `r[k] = (1 / (n - k)) · Σ_{j=0}^{n-1-k} x[j] · x[j+k]`, so the value at
+    /// lag 0 is the signal's mean-square value. It is computed with a
+    /// zero-padded FFT.
     ///
     /// For multi-channel audio only the first channel is used.
     ///
@@ -764,9 +766,14 @@ where
     /// `min(max_lag, signal_length - 1)`, or `None` if the FFT computation
     /// fails.
     ///
+    /// # Differences from librosa
+    ///
+    /// `librosa.autocorrelate` (like `numpy.correlate(x, x, "full")[n-1:]`)
+    /// returns the raw sums `Σ x[j] · x[j+k]`; multiply `r[k]` by `n - k` to
+    /// obtain them. librosa also autocorrelates every channel.
+    ///
     /// # Examples
-    /// ```ignore
-    /// // Requires the "transforms" feature.
+    /// ```
     /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     /// use std::num::NonZeroUsize;
@@ -775,6 +782,10 @@ where
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
     /// let autocorr = audio.autocorrelation(NonZeroUsize::new(3).unwrap()).unwrap();
     /// assert_eq!(autocorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// // Lag 0 is the mean square (1 + 0.25 + 0.25 + 1) / 4.
+    /// assert!((autocorr[0] - 0.625).abs() < 1e-12);
+    /// // Lag 3 is the single product 1 * -1.
+    /// assert!((autocorr[3] + 1.0).abs() < 1e-12);
     /// ```
     #[cfg(feature = "transforms")]
     #[inline]
@@ -830,12 +841,13 @@ where
             planner.irfft(power_slice, fft_size_nz).ok()
         })?;
 
-        // Normalize: divide by fft_size (IFFT scaling) then by overlap count (n - lag)
-        let fft_size_f = fft_size as f64;
+        // Unbiased normalisation by the overlap count (n - lag). The inverse FFT
+        // of the planner already applies the 1/fft_size scaling, so `raw[lag]` is
+        // the plain sum of products.
         let mut correlations: Vec<f64> = Vec::with_capacity(effective_max_lag + 1);
         for lag in 0..=effective_max_lag {
             let overlap_count = (n - lag) as f64;
-            correlations.push(raw[lag] / fft_size_f / overlap_count);
+            correlations.push(raw[lag] / overlap_count);
         }
 
         // safety: correlations has effective_max_lag + 1 >= 1 elements
@@ -1575,6 +1587,44 @@ mod tests {
         // Lag 0 should be the highest (signal correlated with itself)
         assert!(autocorr[0] >= autocorr[1]);
         assert!(autocorr[0] >= autocorr[2]);
+
+        // Exact values: r[k] = (1 / (n - k)) Σ x[j] x[j+k].
+        assert!((autocorr[0] - 0.5).abs() < 1e-12); // (1 + 1) / 4
+        assert!(autocorr[1].abs() < 1e-12);
+        assert!((autocorr[2] + 0.5).abs() < 1e-12); // (1 * -1) / 2
+    }
+
+    /// Regression: the values were divided by the zero-padded FFT size twice (the
+    /// planner's inverse FFT already normalises), so they were too small by a
+    /// factor of 2048 for n = 1000 and 8192 for n = 4096. `r[k] * (n - k)` must
+    /// equal the direct sum of products (`numpy.correlate`, `librosa.autocorrelate`).
+    #[test]
+    #[cfg(feature = "transforms")]
+    fn autocorrelation_matches_direct_sum() {
+        for n in [1000usize, 4096, 777] {
+            let x: Vec<f64> = (0..n)
+                .map(|i| {
+                    let t = i as f64;
+                    (0.05 * t).sin() + 0.3 * (0.31 * t + 1.0).cos() + 0.01 * (t % 7.0)
+                })
+                .collect();
+            let audio =
+                AudioSamples::new_mono(Array1::from(x.clone()), sample_rate!(22050)).unwrap();
+            let max_lag = 300;
+            let r = audio
+                .autocorrelation(NonZeroUsize::new(max_lag).unwrap())
+                .unwrap();
+            assert_eq!(r.len().get(), max_lag + 1);
+            let scale = x.iter().map(|v| v * v).sum::<f64>();
+            for k in 0..=max_lag {
+                let direct: f64 = (0..n - k).map(|j| x[j] * x[j + k]).sum();
+                let got = r[k] * (n - k) as f64;
+                assert!(
+                    (got - direct).abs() <= 1e-10 * scale,
+                    "n {n}, lag {k}: {got} vs {direct}"
+                );
+            }
+        }
     }
 
     #[test]
