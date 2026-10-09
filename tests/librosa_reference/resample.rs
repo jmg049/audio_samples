@@ -1,0 +1,189 @@
+//! `librosa.resample` (soxr_hq) and `librosa.mu_compress` / `mu_expand`.
+//!
+//! librosa's default resampler is the soxr C library (`res_type="soxr_hq"`),
+//! a different filter design from ours (a single Kaiser-windowed sinc stage),
+//! so the comparison is by signal-to-noise ratio rather than element-wise
+//! tolerance. The fixture stores the first/last 256 output samples and 1024
+//! from the middle; `scipy.signal.resample_poly` (another delay-free design)
+//! is stored for the middle window as an independent cross-check.
+
+use audio_samples::operations::types::ResamplingQuality;
+use audio_samples::{AudioProcessing, mu_law_decode, mu_law_encode, resample};
+use serde_json::Value;
+
+use crate::common::{assert_close, f64s, load, mono};
+
+/// SNR in dB of `actual` against `reference`.
+fn snr_db(actual: &[f64], reference: &[f64]) -> f64 {
+    assert_eq!(actual.len(), reference.len());
+    let sig: f64 = reference.iter().map(|v| v * v).sum();
+    let err: f64 = actual
+        .iter()
+        .zip(reference)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum();
+    10.0 * (sig / err.max(1e-300)).log10()
+}
+
+struct Window<'a> {
+    name: &'a str,
+    start: usize,
+    reference: Vec<f64>,
+}
+
+fn windows(case: &Value) -> Vec<Window<'_>> {
+    let len = case["len"].as_u64().unwrap() as usize;
+    let edge = f64s(&case["head"]).len();
+    vec![
+        Window {
+            name: "head",
+            start: 0,
+            reference: f64s(&case["head"]),
+        },
+        Window {
+            name: "mid",
+            start: case["mid_start"].as_u64().unwrap() as usize,
+            reference: f64s(&case["mid"]),
+        },
+        Window {
+            name: "tail",
+            start: len - edge,
+            reference: f64s(&case["tail"]),
+        },
+    ]
+}
+
+/// Minimum SNR (dB) against soxr_hq for `High` quality, per signal and window.
+///
+/// Measured (this implementation, `High`, 22050 Hz to 16000 / 44100 / 11025):
+///
+/// | signal | head | mid | tail |
+/// |---|---|---|---|
+/// | mix | 59.0 / 90.0 / 95.9 | 129.0 / 135.0 / 135.3 | 97.9 / 104.3 / 90.9 |
+/// | noise | 55.2 / 54.9 / 53.2 | 53.5 / 52.6 / 54.6 | 50.5 / 56.9 / 58.2 |
+///
+/// (Before the delay fix the audit measured -2 to -5 dB for every ratio.)
+/// Each bound is about 3-4 dB under the lowest measured value of its group.
+///
+/// Why they differ: in the middle of `mix` (tones and a chirp below 4.1 kHz,
+/// far from every Nyquist frequency involved) both resamplers are essentially
+/// ideal band-limited interpolators, so they agree to > 125 dB; this is the
+/// figure that shows time alignment (a 0.01-sample offset would cap it near
+/// 40 dB). White `noise` has energy up to 11025 Hz, so the different shapes of
+/// the two transition bands (both start near 0.913 x the lower Nyquist, but
+/// soxr is a multi-stage design) dominate; likewise the signals start and end
+/// abruptly, and that broadband step makes the `head`/`tail` windows of `mix`
+/// sensitive to the transition band too.
+fn min_snr(signal: &str, window: &str) -> f64 {
+    match (signal, window) {
+        ("mix", "mid") => 125.0,
+        ("mix", _) => 55.0,
+        _ => 47.0,
+    }
+}
+
+#[test]
+fn resample_matches_librosa_soxr_hq() {
+    let fx = load("resample");
+    for (key, case) in fx["resample"].as_object().unwrap() {
+        let signal = key.split('_').next().unwrap();
+        let target = case["target_sr"].as_u64().unwrap() as u32;
+        let rate = std::num::NonZeroU32::new(target).unwrap();
+        let y = resample(&mono(signal), rate, ResamplingQuality::High).unwrap();
+        let y = y.as_mono().unwrap().to_vec();
+
+        // Lengths: we compute ceil(n * target / orig) exactly in integers;
+        // librosa (and soxr) use floating point, which can exceed the exact
+        // value by one (e.g. 96001 for 88200 samples, 44100 -> 48000). For
+        // these ratios the two agree.
+        assert_eq!(
+            y.len(),
+            case["len_exact"].as_u64().unwrap() as usize,
+            "{key}"
+        );
+        assert_eq!(y.len(), case["len"].as_u64().unwrap() as usize, "{key}");
+
+        for w in windows(case) {
+            let ours = &y[w.start..w.start + w.reference.len()];
+            let snr = snr_db(ours, &w.reference);
+            eprintln!("{key} {}: SNR vs soxr_hq {snr:.1} dB", w.name);
+            let bound = min_snr(signal, w.name);
+            assert!(
+                snr >= bound,
+                "{key} {}: SNR {snr:.1} dB < {bound} dB",
+                w.name
+            );
+        }
+
+        // Cross-check against scipy's resample_poly on the band-limited signal
+        // only (its Kaiser(5.0) filter has a much wider transition band, so on
+        // white noise it measures the filter difference, not alignment).
+        // Measured 65.9 / 67.5 / 66.0 dB, limited by resample_poly's own
+        // passband ripple; bound 3 dB under.
+        if signal == "mix" {
+            let start = case["mid_start"].as_u64().unwrap() as usize;
+            let reference = f64s(&case["scipy_mid"]);
+            let snr = snr_db(&y[start..start + reference.len()], &reference);
+            eprintln!("{key}: SNR vs scipy resample_poly {snr:.1} dB");
+            assert!(snr >= 62.0, "{key}: SNR vs resample_poly {snr:.1} dB");
+        }
+    }
+}
+
+#[test]
+fn mu_law_matches_librosa() {
+    let fx = load("resample");
+    for (mu_key, case) in fx["mu_law"].as_object().unwrap() {
+        let mu = case["mu"].as_f64().unwrap();
+        let x = f64s(&case["x"]);
+        let audio = audio_samples::AudioSamples::new_mono(
+            ndarray::Array1::from(x.clone()),
+            audio_samples::sample_rate!(22050),
+        )
+        .unwrap();
+
+        // Same formula, same evaluation order (log1p / pow): round-off only.
+        let comp = audio.mu_compress(mu).unwrap();
+        let comp = comp.as_mono().unwrap().to_vec();
+        assert_close(
+            &format!("mu_compress mu={mu_key}"),
+            &comp,
+            &f64s(&case["compress"]),
+            1e-12,
+            0.0,
+        );
+        let expanded = audio_samples::AudioSamples::new_mono(
+            ndarray::Array1::from(f64s(&case["compress"])),
+            audio_samples::sample_rate!(22050),
+        )
+        .unwrap()
+        .mu_expand(mu)
+        .unwrap();
+        assert_close(
+            &format!("mu_expand mu={mu_key}"),
+            &expanded.as_mono().unwrap().to_vec(),
+            &f64s(&case["expand"]),
+            1e-12,
+            0.0,
+        );
+
+        // Quantised codes are integers: exact.
+        let codes = mu_law_encode(&x, mu).unwrap();
+        let expected: Vec<i64> = case["codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        assert_eq!(codes, expected, "mu_law_encode mu={mu_key}");
+
+        let decoded = mu_law_decode(&codes, mu).unwrap();
+        assert_close(
+            &format!("mu_law_decode mu={mu_key}"),
+            &decoded,
+            &f64s(&case["decoded"]),
+            1e-12,
+            0.0,
+        );
+    }
+}
