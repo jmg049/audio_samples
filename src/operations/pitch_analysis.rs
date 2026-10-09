@@ -243,9 +243,11 @@ where
     /// Detects the fundamental frequency using the YIN pitch detection algorithm.
     ///
     /// YIN computes a cumulative mean normalised difference function (CMND) and
-    /// finds the first lag below `threshold`, which corresponds to the fundamental
-    /// period. Lower thresholds are stricter and reduce false detections; values
-    /// in `[0.1, 0.2]` are typical for musical audio.
+    /// takes the first dip below `threshold`, refined to the bottom of the dip and
+    /// by parabolic interpolation, as the fundamental period (see
+    /// [`yin_pitch_detection`]). The whole buffer is analysed as one frame. Lower
+    /// thresholds are stricter and reduce false detections; values in
+    /// `[0.1, 0.2]` are typical for musical audio.
     ///
     /// # Arguments
     ///
@@ -1015,14 +1017,31 @@ fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
 
 /// Low-level YIN pitch detection that returns the fundamental period in samples.
 ///
-/// Computes the difference function `d(τ) = Σ(x_j - x_{j+τ})²` and its
-/// cumulative mean normalised form (CMND). Returns the first lag τ in
-/// `[min_tau, max_tau]` whose CMND value falls below `threshold`, refined
-/// by a local neighbourhood search. The caller converts τ to Hz with
-/// `sample_rate / τ`.
+/// Computes the difference function `d(τ) = Σ_{j < n-τ} (x_j - x_{j+τ})²` for
+/// every lag `τ` in `1..=max_tau` and its cumulative mean normalised form
+/// `d'(τ) = d(τ) / ((1/τ) Σ_{k=1..τ} d(k))` (CMND). The cumulative mean always
+/// runs over all lags from 1, independent of `min_tau`; `[min_tau, max_tau]`
+/// only restricts the search. The first lag in that range whose CMND falls
+/// below `threshold` is followed down to the bottom of its dip (the local
+/// minimum), and the period is refined by parabolic interpolation over the
+/// neighbouring lags, so the result is fractional. The caller converts the
+/// period to Hz with `sample_rate / τ`.
 ///
 /// This is the low-level primitive used by
-/// [`AudioPitchAnalysis::detect_pitch_yin`].
+/// [`AudioPitchAnalysis::detect_pitch_yin`] and by
+/// [`AudioPitchAnalysis::track_pitch`] with [`PitchDetectionMethod::Yin`].
+///
+/// Reference: A. de Cheveigné and H. Kawahara, "YIN, a fundamental frequency
+/// estimator for speech and music", JASA 111(4), 2002 (steps 2 to 5), and
+/// `librosa.yin`.
+///
+/// # Differences from librosa
+///
+/// - The difference function sums the `n - τ` overlapping products of the
+///   whole slice (the paper's eq. 6); `librosa.yin` uses a zero-padded sum over
+///   a fixed frame. The two differ slightly in the tail of the frame.
+/// - When no lag falls below `threshold` this returns `None`; `librosa.yin`
+///   falls back to the global minimum of the CMND.
 ///
 /// # Arguments
 ///
@@ -1036,8 +1055,10 @@ fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
 ///
 /// # Returns
 ///
-/// `Some(tau)` - period in samples; convert to Hz with `sample_rate / tau`.
-/// `None` - no CMND value below `threshold`, or `max_tau ≥ samples.len() / 2`.
+/// `Some(tau)` - period in samples (fractional, after parabolic interpolation);
+/// convert to Hz with `sample_rate / tau`.
+/// `None` - no CMND value below `threshold`, `min_tau > max_tau`, or
+/// `max_tau ≥ samples.len() / 2`.
 ///
 /// # Example
 ///
@@ -1076,21 +1097,28 @@ pub fn yin_pitch_detection(
         return None;
     }
 
-    // Step 1: Compute difference function
-    let mut diff_fn = vec![0.0; max_tau + 1];
-    for tau in min_tau..=max_tau {
-        let mut sum = 0.0;
-        for j in 0..(n - tau) {
-            let delta = samples[j] - samples[j + tau];
-            sum += delta * delta;
-        }
-        diff_fn[tau] = sum;
+    // Lag 0 is never a period; searching it would divide by a zero running mean.
+    let min_tau = min_tau.max(1);
+    if min_tau > max_tau {
+        return None;
     }
 
-    // Step 2: Compute cumulative mean normalized difference
+    // Step 1: difference function d(τ) = Σ_{j < n-τ} (x_j - x_{j+τ})² for EVERY lag
+    // τ in 1..=max_tau. The cumulative mean in step 2 runs over all lags from 1, so
+    // the lags below `min_tau` must be computed too (they are just not searched).
+    let mut diff_fn = vec![0.0; max_tau + 1];
+    for (tau, d) in diff_fn.iter_mut().enumerate().skip(1) {
+        *d = samples[..n - tau]
+            .iter()
+            .zip(&samples[tau..])
+            .map(|(&a, &b)| (a - b) * (a - b))
+            .sum();
+    }
+
+    // Step 2: cumulative mean normalised difference d'(τ) = d(τ) / ((1/τ) Σ_{k=1..τ} d(k))
+    // (de Cheveigné & Kawahara 2002, eq. 8).
     let mut cmnd = vec![1.0; max_tau + 1];
     let mut running_sum = 0.0;
-
     for tau in 1..=max_tau {
         running_sum += diff_fn[tau];
         if running_sum > 0.0 {
@@ -1098,31 +1126,26 @@ pub fn yin_pitch_detection(
         }
     }
 
-    // Step 3: Find the first minimum below threshold
-    for tau in min_tau..=max_tau {
-        if cmnd[tau] < threshold {
-            // Find the actual minimum around this tau
-            let mut best_tau = tau;
-            let mut min_val = cmnd[tau];
-
-            // Search in a small neighborhood, clamped to the valid `[min_tau, max_tau]`
-            // range. Using the `min_tau` parameter here (rather than a shadow of `tau`)
-            // keeps the backward neighbourhood search (`tau - 5`) live.
-            let start = tau.saturating_sub(5).max(min_tau);
-            let end = (tau + 5).min(max_tau);
-
-            for (t, &val) in cmnd.iter().enumerate().skip(start).take(end - start + 1) {
-                if val < min_val {
-                    min_val = val;
-                    best_tau = t;
-                }
-            }
-
-            return Some(best_tau as f64);
-        }
+    // Step 3: absolute threshold. Take the first lag in [min_tau, max_tau] whose
+    // d' falls below `threshold`, then follow that dip down to its local minimum
+    // (the bottom of the trough, however wide it is).
+    let mut tau = (min_tau..=max_tau).find(|&t| cmnd[t] < threshold)?;
+    while tau < max_tau && cmnd[tau + 1] < cmnd[tau] {
+        tau += 1;
     }
 
-    None
+    // Step 4: parabolic interpolation of the trough (librosa's rule: no shift at the
+    // ends of the search range, and none when the vertex lies more than one lag away).
+    let shift = if tau > min_tau && tau < max_tau {
+        let (prev, mid, next) = (cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]);
+        let a = next + prev - 2.0 * mid;
+        let b = (next - prev) / 2.0;
+        if b.abs() >= a.abs() { 0.0 } else { -b / a }
+    } else {
+        0.0
+    };
+
+    Some(tau as f64 + shift)
 }
 
 /// Low-level autocorrelation pitch detection that returns the fundamental period in samples.
@@ -1210,56 +1233,160 @@ mod tests {
     use non_empty_slice::{NonEmptyVec, non_empty_vec};
     use std::f64::consts::PI;
 
-    /// Regression test for BUG 3: the YIN neighbourhood search must include the
-    /// backward window `[tau-5, tau]`. The bug shadowed the `min_tau` parameter
-    /// with a local `= tau`, so `start = tau.saturating_sub(5).max(min_tau)`
-    /// collapsed to `tau` and the backward search was dead.
-    ///
-    /// We craft a CMND-shaped signal indirectly: a periodic signal whose true
-    /// period minimum sits a few samples *below* the first tau that dips under
-    /// threshold. With the bug the function returns the first sub-threshold tau;
-    /// after the fix the neighbourhood search uses the correct `[tau-5, tau+5]`
-    /// (clamped to the `min_tau` parameter) window.
-    ///
-    /// NOTE: with YIN's "first tau below threshold" rule, the *backward* half of
-    /// the window can never select a different tau (any earlier tau below
-    /// threshold would already have been the first crossing). So a strict
-    /// fail-before/pass-after assertion is not feasible for this shadowing bug.
-    /// Following the spec's fallback, this is a tight pitch-accuracy guard that
-    /// also exercises the corrected `start = tau.saturating_sub(5).max(min_tau)`
-    /// expression (it must not panic or mis-index).
+    /// A 5-harmonic tone (amplitudes 0.6/k), as used by the librosa-parity audit.
+    fn harmonic_tone(f0: f64, sr: f64, seconds: f64) -> Vec<f64> {
+        let n = (sr * seconds) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / sr;
+                (1..=5)
+                    .map(|k| 0.6 / k as f64 * (2.0 * PI * f0 * k as f64 * t).sin())
+                    .sum()
+            })
+            .collect()
+    }
+
+    fn cents(f: f64, reference: f64) -> f64 {
+        1200.0 * (f / reference).log2()
+    }
+
+    fn mono_f64(samples: Vec<f64>, sr: u32) -> AudioSamples<'static, f64> {
+        AudioSamples::new_mono(
+            Array1::from(samples),
+            std::num::NonZeroU32::new(sr).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// YIN must follow the first sub-threshold dip down to its local minimum. The
+    /// old code took the arg-min over a +-5-lag window around the first
+    /// sub-threshold lag, which for low pitches stops on the dip's flank: 82.41 Hz
+    /// at 22.05 kHz came out as 84.16 Hz (+36 cents) and at 44.1 kHz as 84.97 Hz
+    /// (+53 cents).
     #[test]
-    fn bug3_yin_neighbourhood_search_accuracy() {
-        let sr = 44100usize;
-        let period = 100.0;
-        let n = 4096usize;
-        let mut samples = Vec::with_capacity(n);
-        for i in 0..n {
-            let v = (2.0 * PI * (i as f64) / period).sin();
-            samples.push(v);
+    fn yin_follows_dip_to_local_minimum() {
+        for sr in [22_050u32, 44_100] {
+            let f0 = 82.41;
+            let audio = mono_f64(harmonic_tone(f0, f64::from(sr), 0.1), sr);
+            let hz = audio.detect_pitch_yin(0.1, 50.0, 2000.0).unwrap().unwrap();
+            assert!(
+                cents(hz, f0).abs() < 1.0,
+                "sr {sr}: detected {hz} Hz for {f0} Hz ({:+.2} cents)",
+                cents(hz, f0)
+            );
         }
+    }
+
+    /// The period is refined by parabolic interpolation, so it is no longer an
+    /// integer number of samples: 440 Hz at 22.05 kHz used to come out as exactly
+    /// 441 Hz (+3.9 cents), and 987.77 Hz at 44.1 kHz as 980 Hz (-13.7 cents).
+    #[test]
+    fn yin_parabolic_interpolation_gives_fractional_period() {
+        for (sr, f0) in [(22_050u32, 440.0), (44_100, 987.77)] {
+            let audio = mono_f64(harmonic_tone(f0, f64::from(sr), 0.1), sr);
+            let hz = audio.detect_pitch_yin(0.1, 50.0, 2000.0).unwrap().unwrap();
+            assert!(
+                cents(hz, f0).abs() < 1.0,
+                "sr {sr}: detected {hz} Hz for {f0} Hz ({:+.2} cents)",
+                cents(hz, f0)
+            );
+        }
+
+        // Clean sine with a period of exactly 100.25 samples.
+        let period = 100.25;
+        let samples: Vec<f64> = (0..4096)
+            .map(|i| (2.0 * PI * i as f64 / period).sin())
+            .collect();
         let samples_slice: &[f64] = &samples;
         let slice = non_empty_slice::non_empty_slice!(samples_slice);
-
-        let min_tau = 20usize;
-        let max_tau = 400usize;
-        let detected = yin_pitch_detection(slice, min_tau, max_tau, 0.1)
-            .expect("clean periodic signal should yield a period");
-
-        // Detected period must be at the true minimum (≈100 samples). The
-        // neighbourhood search lands a couple of samples off the exact period
-        // because there is no parabolic sub-sample interpolation here.
+        let tau = yin_pitch_detection(slice, 20, 400, 0.1).unwrap();
         assert!(
-            (detected - period).abs() <= 3.0,
-            "detected period {detected} should be ~{period}"
+            (tau - period).abs() < 0.05,
+            "period {tau}, expected {period}"
         );
+    }
 
-        let freq = sr as f64 / detected;
-        let expected_freq = sr as f64 / period;
+    /// The cumulative mean in the CMND runs over ALL lags from 1. The old code
+    /// only filled the difference function from `min_tau` (derived from
+    /// `max_frequency`) and summed zeros below it, which shrank the denominator
+    /// and inflated the CMND whenever `max_frequency` was low. On this noisy
+    /// 110 Hz tone the CMND minimum is below the
+    /// 0.2 threshold, so `max_frequency = 300` returned `None`.
+    #[test]
+    fn yin_cmnd_does_not_depend_on_max_frequency() {
+        let sr = 44_100u32;
+        let mut samples = harmonic_tone(110.0, f64::from(sr), 0.1);
+        // Deterministic, roughly Gaussian noise (sum of 4 uniforms from an LCG).
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        for x in &mut samples {
+            let g = (uniform() + uniform() + uniform() + uniform()) * 3.0f64.sqrt();
+            *x += 0.25 * g;
+        }
+        let audio = mono_f64(samples, sr);
+
+        let wide = audio.detect_pitch_yin(0.2, 60.0, 2000.0).unwrap();
+        let narrow = audio.detect_pitch_yin(0.2, 60.0, 300.0).unwrap();
+        let (wide, narrow) = (wide.expect("voiced"), narrow.expect("voiced"));
         assert!(
-            (freq - expected_freq).abs() < 15.0,
-            "detected freq {freq} Hz vs expected {expected_freq} Hz"
+            (wide - narrow).abs() < 1e-9,
+            "fmax 2000 -> {wide} Hz, fmax 300 -> {narrow} Hz"
         );
+        // Heavy noise moves the estimate by a few tens of cents; it must stay on 110 Hz.
+        assert!(cents(wide, 110.0).abs() < 50.0, "detected {wide} Hz");
+    }
+
+    /// End-to-end: `track_pitch` with YIN on an exponential 110 -> 880 Hz glide
+    /// (3 harmonics). Before the fixes the frame errors were median 8.6 / max 32
+    /// cents at 22.05 kHz and 17 / 72 cents at 44.1 kHz (full frames); librosa.yin
+    /// gives 3.2 / 8.1 and 1.8 / 7.4 on the same glide.
+    #[test]
+    fn yin_track_pitch_glide_accuracy() {
+        for (sr, max_median, max_max) in [(22_050u32, 4.0, 8.0), (44_100, 2.0, 5.0)] {
+            let srf = f64::from(sr);
+            let n = 2 * sr as usize;
+            let mut phase = 0.0;
+            let samples: Vec<f64> = (0..n)
+                .map(|i| {
+                    let f = 110.0 * (1.5 * i as f64 / srf).exp2();
+                    phase += 2.0 * PI * f / srf;
+                    (1..=3)
+                        .map(|k| 0.6 / k as f64 * (k as f64 * phase).sin())
+                        .sum()
+                })
+                .collect();
+            let track = mono_f64(samples, sr)
+                .track_pitch(
+                    NonZeroUsize::new(2048).unwrap(),
+                    NonZeroUsize::new(512).unwrap(),
+                    PitchDetectionMethod::Yin,
+                    0.1,
+                    65.0,
+                    2093.0,
+                )
+                .unwrap();
+            let mut errors: Vec<f64> = track
+                .frames()
+                .iter()
+                // full-length frames only (trailing partial windows shrink)
+                .filter(|fr| fr.time * srf + 2048.0 <= n as f64)
+                .map(|fr| {
+                    let truth = 110.0 * (1.5 * (fr.time + 1024.0 / srf)).exp2();
+                    cents(fr.frequency.expect("voiced"), truth).abs()
+                })
+                .collect();
+            errors.sort_by(f64::total_cmp);
+            let (median, max) = (errors[errors.len() / 2], errors[errors.len() - 1]);
+            assert!(
+                median < max_median && max < max_max,
+                "sr {sr}: median {median:.2} cents, max {max:.2} cents"
+            );
+        }
     }
 
     /// Regression test for BUG 5: `track_pitch` must reject unsupported pitch
