@@ -58,12 +58,15 @@
 //! ```
 
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
+    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
+    ParameterError,
     operations::types::ResamplingQuality,
     repr::{ChannelCount, SampleRate},
     traits::StandardSample,
 };
 use non_empty_slice::NonEmptyVec;
+use realfft::num_complex::Complex;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -500,6 +503,221 @@ impl PolyphaseState {
 }
 
 // ---------------------------------------------------------------------------
+// FFT evaluation of the polyphase filter (small L and M)
+// ---------------------------------------------------------------------------
+
+/// Largest `L · M` for which the FFT path is considered (one filter spectrum
+/// is precomputed per `(output phase, input residue)` pair).
+const FFT_MAX_SPECTRA: usize = 64;
+/// Inputs shorter than this always use the direct path.
+const FFT_MIN_INPUT: usize = 8192;
+
+thread_local! {
+    static RESAMPLE_FFT_PLANNER: RefCell<RealFftPlanner<f64>> = RefCell::new(RealFftPlanner::new());
+}
+
+/// Exact FFT (overlap-save) evaluation of a whole-buffer polyphase resample,
+/// for ratios `L / M` with small `L` and `M` (e.g. 2:1 decimation, 1:2
+/// interpolation, 3:1, 2:3).
+///
+/// It computes the same sums as [`Kernel::eval`] with the same coefficients,
+/// only in a different order, so the result equals the direct path up to
+/// floating-point round-off. Output `k = q · L + i` (sub-stream `i`) is
+///
+/// ```text
+/// y[q L + i] = Σ_j c[p_i][j] · x[q M + d_i − half + 1 + j]
+///            = Σ_r Σ_t G_{i,r}[t] · x_r[q + t0 + t]
+/// ```
+///
+/// with `p_i = i M mod L`, `d_i = ⌊i M / L⌋`, `x_r[v] = x[M v + r]` the input
+/// split into its `M` residue streams, and `G_{i,r}` the taps of row `p_i`
+/// that land on residue `r`. Each block of every sub-stream is therefore a sum
+/// of `M` correlations at the input rate divided by `M`, which share the
+/// residue streams' forward FFTs: per block, `M` forward and `L` inverse real
+/// FFTs replace `L · block · taps` multiply-adds.
+struct FftPolyphase {
+    l: usize,
+    m: usize,
+    /// FFT size.
+    fft_len: usize,
+    /// Taps per `(i, r)` filter.
+    filter_len: usize,
+    /// Valid outputs per sub-stream per block (`fft_len - filter_len + 1`).
+    block: usize,
+    /// Residue-stream index of the first filter tap (may be negative).
+    t0: i64,
+    /// Spectra of the time-reversed `G_{i,r}`, scaled by `1 / fft_len`;
+    /// index `i * m + r`.
+    spectra: Vec<Vec<Complex<f64>>>,
+    forward: Arc<dyn RealToComplex<f64>>,
+    inverse: Arc<dyn ComplexToReal<f64>>,
+}
+
+impl FftPolyphase {
+    /// Builds the FFT evaluator when it is applicable and estimated to be
+    /// faster than the direct dot products for an input of `n` samples.
+    fn new(kernel: &Kernel, n: usize) -> Option<Self> {
+        if !kernel.exact || kernel.hold_last || n < FFT_MIN_INPUT {
+            return None;
+        }
+        let (l, m) = (kernel.l as usize, kernel.m as usize);
+        if l.saturating_mul(m) > FFT_MAX_SPECTRA {
+            return None;
+        }
+        let (half, taps) = (kernel.half as i64, kernel.taps);
+        let a_len = taps.div_ceil(m);
+        let mi = m as i64;
+        // Per sub-stream: phase row, input offset of tap 0, first residue index.
+        let subs: Vec<(usize, i64, i64)> = (0..l)
+            .map(|i| {
+                let p = (i * m) % l;
+                let b = (i * m / l) as i64 - half + 1;
+                (p, b, b.div_euclid(mi))
+            })
+            .collect();
+        let t0 = subs.iter().map(|s| s.2).min()?;
+        let t_end = subs.iter().map(|s| s.2 + a_len as i64 + 1).max()?;
+        let filter_len = (t_end - t0) as usize;
+
+        // Cost model (CPU cycles per output sample, measured on AVX2 + FMA):
+        // the direct path costs ~0.35 cycles per tap; a real FFT of size F
+        // ~0.45 F log2 F, a complex multiply-add per bin ~1.
+        let direct = 0.35 * taps as f64 + 10.0;
+        let (fft_len, cost) = (8..=16)
+            .map(|e| 1usize << e)
+            .filter(|&f| f >= 2 * filter_len)
+            .map(|f| {
+                let block = (f - filter_len + 1) as f64;
+                let fft = 0.45 * f as f64 * (f as f64).log2();
+                let macs = (l * m * (f / 2 + 1)) as f64;
+                (f, ((l + m) as f64 * fft + macs) / (l as f64 * block))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        if cost >= 0.8 * direct {
+            return None;
+        }
+
+        let (forward, inverse) = RESAMPLE_FFT_PLANNER.with(|p| {
+            let mut p = p.borrow_mut();
+            (p.plan_fft_forward(fft_len), p.plan_fft_inverse(fft_len))
+        });
+        let scale = 1.0 / fft_len as f64;
+        let mut buf = vec![0.0; fft_len];
+        let mut spectra = Vec::with_capacity(l * m);
+        for &(p, b, _) in &subs {
+            let row = &kernel.coeffs[p * taps..(p + 1) * taps];
+            let mut g = vec![vec![0.0; filter_len]; m];
+            for s in 0..m {
+                let u = b + s as i64;
+                let (r, e) = (u.rem_euclid(mi) as usize, u.div_euclid(mi));
+                for a in 0..a_len {
+                    if let Some(&c) = row.get(m * a + s) {
+                        g[r][(e - t0) as usize + a] = c;
+                    }
+                }
+            }
+            for g_r in g {
+                buf.fill(0.0);
+                for (dst, &v) in buf.iter_mut().zip(g_r.iter().rev()) {
+                    *dst = v * scale;
+                }
+                let mut spec = forward.make_output_vec();
+                forward.process(&mut buf, &mut spec).ok()?;
+                spectra.push(spec);
+            }
+        }
+        Some(Self {
+            l,
+            m,
+            fft_len,
+            filter_len,
+            block: fft_len - filter_len + 1,
+            t0,
+            spectra,
+            forward,
+            inverse,
+        })
+    }
+
+    /// Fills `dst` with `x[M (t0 + q0 + v) + r]` for `v in 0..dst.len()`
+    /// (zero where the index falls outside `x`).
+    fn gather(&self, x: &[f64], r: usize, q0: usize, dst: &mut [f64]) {
+        let m = self.m as i64;
+        let start = (self.t0 + q0 as i64) * m + r as i64;
+        // Leading entries with a negative input index.
+        let lead = if start < 0 {
+            usize::try_from((-start + m - 1) / m).unwrap_or(usize::MAX)
+        } else {
+            0
+        }
+        .min(dst.len());
+        dst[..lead].fill(0.0);
+        let first = start + lead as i64 * m;
+        let mut filled = lead;
+        if let Ok(first) = usize::try_from(first)
+            && first < x.len()
+        {
+            for (d, &v) in dst[lead..]
+                .iter_mut()
+                .zip(x[first..].iter().step_by(self.m))
+            {
+                *d = v;
+                filled += 1;
+            }
+        }
+        dst[filled..].fill(0.0);
+    }
+
+    /// Resamples one channel, producing `n_out` samples.
+    fn process(&self, x: &[f64], n_out: usize) -> Vec<f64> {
+        let (l, m, f) = (self.l, self.m, self.fft_len);
+        let n_q = n_out.div_ceil(l);
+        let n_blocks = n_q.div_ceil(self.block);
+        let n_bins = f / 2 + 1;
+        let mut y = vec![0.0; n_out];
+        let mut time = vec![0.0; f];
+        let mut fwd_scratch = self.forward.make_scratch_vec();
+        let mut inv_scratch = self.inverse.make_scratch_vec();
+        let mut x_spec = vec![vec![Complex::new(0.0, 0.0); n_bins]; m];
+        let mut acc = vec![Complex::new(0.0, 0.0); n_bins];
+        for blk in 0..n_blocks {
+            let q0 = blk * self.block;
+            for (r, spec) in x_spec.iter_mut().enumerate() {
+                // Residue stream r: time[v] = x[M (t0 + q0 + v) + r], zero outside x.
+                self.gather(x, r, q0, &mut time);
+                // Infallible: buffer lengths come from the plan itself.
+                let _ = self
+                    .forward
+                    .process_with_scratch(&mut time, spec, &mut fwd_scratch);
+            }
+            for i in 0..l {
+                acc.fill(Complex::new(0.0, 0.0));
+                for (r, spec) in x_spec.iter().enumerate() {
+                    for ((a, &xv), &hv) in acc.iter_mut().zip(spec).zip(&self.spectra[i * m + r]) {
+                        *a += xv * hv;
+                    }
+                }
+                // Real inputs: the DC and Nyquist bins are real.
+                acc[0].im = 0.0;
+                acc[n_bins - 1].im = 0.0;
+                let _ = self
+                    .inverse
+                    .process_with_scratch(&mut acc, &mut time, &mut inv_scratch);
+                let valid = &time[self.filter_len - 1..];
+                for (qq, &v) in valid.iter().enumerate().take(self.block) {
+                    let k = (q0 + qq) * l + i;
+                    if k >= n_out {
+                        break;
+                    }
+                    y[k] = v;
+                }
+            }
+        }
+        y
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Whole-buffer resampling
 // ---------------------------------------------------------------------------
 
@@ -555,9 +773,14 @@ where
         // Linear interpolation: dedicated (SIMD) loops, f32.
         KernelKind::Linear => resample_linear(&audio.as_f32(), target_sample_rate),
         KernelKind::Sinc(_) => {
-            let input = audio.as_f64();
-            let data = extract_channel_data(&input)?;
+            let data = channel_data_f64(audio)?;
             let kernel = cached_kernel(in_sr, out_sr, quality);
+            let n_in = data.first().map_or(0, Vec::len);
+            if let Some(fft) = FftPolyphase::new(&kernel, n_in) {
+                let n_out = kernel.output_len(n_in as u64) as usize;
+                let out: Vec<Vec<f64>> = data.iter().map(|x| fft.process(x, n_out)).collect();
+                return assemble_output(out, n_out, audio.num_channels(), target_sample_rate);
+            }
             let mut state = PolyphaseState::new(kernel, data.len());
             let slices: Vec<&[f64]> = data.iter().map(Vec::as_slice).collect();
             let mut out = state.process(&slices);
@@ -820,6 +1043,31 @@ fn extract_channel_data<S: StandardSample>(
         })?;
         let channels = audio.num_channels().get() as usize;
         Ok((0..channels).map(|ch| multi.row(ch).to_vec()).collect())
+    }
+}
+
+/// Extracts per-channel data converted to `f64` (audio-aware, as
+/// [`AudioTypeConversion::as_f64`]) in a single pass.
+fn channel_data_f64<S: StandardSample>(
+    audio: &AudioSamples<S>,
+) -> AudioSampleResult<Vec<Vec<f64>>> {
+    let to_f64 = |s: &S| -> f64 { ConvertTo::<f64>::convert_to(*s) };
+    if let Some(mono) = audio.as_mono() {
+        Ok(vec![match mono.as_slice() {
+            Some(x) => x.iter().map(to_f64).collect(),
+            None => mono.iter().map(to_f64).collect(),
+        }])
+    } else {
+        let multi = audio.as_multi_channel().ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Failed to get multi-channel data",
+            ))
+        })?;
+        let channels = audio.num_channels().get() as usize;
+        Ok((0..channels)
+            .map(|ch| multi.row(ch).iter().map(to_f64).collect())
+            .collect())
     }
 }
 
@@ -1162,6 +1410,58 @@ mod tests {
             let multi = y.as_multi_channel().unwrap();
             assert_eq!(multi.row(0).to_vec(), yl.as_mono().unwrap().to_vec());
             assert_eq!(multi.row(1).to_vec(), yr.as_mono().unwrap().to_vec());
+        }
+    }
+
+    /// The FFT evaluation computes the same filter sums as the direct
+    /// polyphase loop (only the summation order differs).
+    #[test]
+    fn test_fft_path_matches_direct_path() {
+        let cases = [
+            (44100, 22050),
+            (22050, 44100),
+            (2, 1),
+            (48000, 16000),
+            (16000, 48000),
+            (44100, 29400),
+            (29400, 44100),
+            (48000, 8000),
+        ];
+        for (in_sr, out_sr) in cases {
+            for quality in [
+                ResamplingQuality::Fast,
+                ResamplingQuality::Medium,
+                ResamplingQuality::High,
+            ] {
+                let kernel = cached_kernel(in_sr, out_sr, quality);
+                for n in [FFT_MIN_INPUT, 20011, 65537] {
+                    let x: Vec<f64> = (0..n)
+                        .map(|i| (i as f64 * 0.37).sin() + 0.3 * (i as f64 * 0.0123).cos())
+                        .collect();
+                    let Some(fft) = FftPolyphase::new(&kernel, n) else {
+                        assert!(
+                            kernel.hold_last
+                                || n == FFT_MIN_INPUT
+                                || quality != ResamplingQuality::High,
+                            "FFT path not used for {in_sr} -> {out_sr} {quality:?} (n={n})"
+                        );
+                        continue;
+                    };
+                    let mut state = PolyphaseState::new(Arc::clone(&kernel), 1);
+                    let mut direct = state.process(&[&x]).remove(0);
+                    direct.extend(state.finish().remove(0));
+                    let fast = fft.process(&x, direct.len());
+                    assert_eq!(fast.len(), direct.len());
+                    let err = fast
+                        .iter()
+                        .zip(&direct)
+                        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+                    assert!(
+                        err < 1e-13,
+                        "{in_sr} -> {out_sr} {quality:?} n={n}: {err:e}"
+                    );
+                }
+            }
         }
     }
 
