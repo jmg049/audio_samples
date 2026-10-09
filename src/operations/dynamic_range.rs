@@ -1299,6 +1299,10 @@ where
     /// A `Vec<f64>` of gain reduction values in dB (each value ≥ 0.0), one per sample
     /// in the signal (or first channel for multi-channel audio).
     ///
+    /// The values come from the detector and static curve only:
+    /// `config.lookahead_ms` is ignored here, so they show the gain reduction
+    /// without the lookahead max-hold that `apply_compressor` applies.
+    ///
     /// # Example
     ///
     /// ```

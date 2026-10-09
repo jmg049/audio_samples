@@ -1173,7 +1173,9 @@ pub fn resampling(from_hz: f64, to_hz: f64) -> ExplainDoc {
         let medium = crate::resampling::medium_sinc_params();
         let high = crate::resampling::high_sinc_params();
         let lower_nyq = nyq_in.min(nyq_out);
-        let edge = |fc: f32| f64::from(fc) * lower_nyq;
+        // rubato stores the cutoff as f32 (0.95 -> 0.949999988); round the
+        // ratio to 6 decimals so the printed edge is not 7599.9999 Hz.
+        let edge = |fc: f32| (f64::from(fc) * 1e6).round() / 1e6 * lower_nyq;
         doc.add_quantity(
             "Sinc pass-band edge",
             r"f_c",
