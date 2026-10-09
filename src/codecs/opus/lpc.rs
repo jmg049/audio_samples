@@ -206,7 +206,9 @@ pub fn levinson_durbin(autocorr: &[f64], order: usize) -> Option<LpcCoefficients
         std::mem::swap(&mut a, &mut a_prev);
     }
 
-    let coeffs = a.iter().map(|&v| v as f32).collect();
+    // After the final swap the order-`order` solution is in `a_prev`; `a` holds
+    // the order-(order - 1) solution with a stale trailing entry.
+    let coeffs = a_prev.iter().map(|&v| v as f32).collect();
     Some(LpcCoefficients {
         coeffs,
         prediction_error: error,
@@ -522,6 +524,81 @@ mod tests {
                 "round-trip error {:.2e} > 1e-4",
                 (orig - rec).abs()
             );
+        }
+    }
+
+    /// Solves the (diagonally loaded) Yule-Walker system `R a = -r` directly by
+    /// Gaussian elimination, as a reference for `levinson_durbin`.
+    fn yule_walker_reference(autocorr: &[f64], order: usize) -> Vec<f64> {
+        let r0 = autocorr[0] * (1.0 + DIAGONAL_LOADING_EPSILON);
+        let at = |k: usize| if k == 0 { r0 } else { autocorr[k] };
+        let mut m: Vec<Vec<f64>> = (0..order)
+            .map(|i| {
+                let mut row: Vec<f64> = (0..order).map(|j| at(i.abs_diff(j))).collect();
+                row.push(-autocorr[i + 1]);
+                row
+            })
+            .collect();
+        for c in 0..order {
+            let p = (c..order)
+                .max_by(|&a, &b| m[a][c].abs().total_cmp(&m[b][c].abs()))
+                .unwrap();
+            m.swap(c, p);
+            for r in 0..order {
+                if r != c {
+                    let pivot_row = m[c].clone();
+                    let f = m[r][c] / pivot_row[c];
+                    for (x, p) in m[r].iter_mut().zip(&pivot_row).skip(c) {
+                        *x -= f * p;
+                    }
+                }
+            }
+        }
+        (0..order).map(|i| m[i][order] / m[i][i]).collect()
+    }
+
+    /// Regression: `levinson_durbin` swapped `a`/`a_prev` at the end of every
+    /// iteration and then returned `a`, i.e. the order-(p-1) solution padded with
+    /// a stale value (all zeros for p = 1). On an AR(4) process it returned
+    /// [-1.67, 1.50, -0.56, 0.0] instead of about [-2.21, 2.93, -2.16, 0.96].
+    #[test]
+    fn levinson_returns_full_order_solution() {
+        // AR(4) process x[n] = -sum a_k x[n-k] + e[n], e from an LCG.
+        let true_a = [-2.2137f64, 2.9403, -2.1697, 0.9606];
+        let mut seed = 0x0123_4567_89AB_CDEFu64;
+        let mut x = vec![0.0f64; 4096];
+        for n in 0..x.len() {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let e = (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            let past: f64 = (1..=4)
+                .filter(|&k| n >= k)
+                .map(|k| true_a[k - 1] * x[n - k])
+                .sum();
+            x[n] = e - past;
+        }
+        let autocorr: Vec<f64> = (0..=SILK_LPC_ORDER)
+            .map(|k| (0..x.len() - k).map(|j| x[j] * x[j + k]).sum())
+            .collect();
+
+        for order in 1..=SILK_LPC_ORDER {
+            let lpc = levinson_durbin(&autocorr, order).unwrap();
+            let reference = yule_walker_reference(&autocorr, order);
+            assert_eq!(lpc.coeffs.len(), order);
+            for (got, want) in lpc.coeffs.iter().zip(&reference) {
+                assert!(
+                    (f64::from(*got) - want).abs() < 1e-4 * want.abs().max(1.0),
+                    "order {order}: {:?} vs {reference:?}",
+                    lpc.coeffs
+                );
+            }
+        }
+
+        // The order-4 fit recovers the generating coefficients.
+        let lpc = levinson_durbin(&autocorr, 4).unwrap();
+        for (got, want) in lpc.coeffs.iter().zip(&true_a) {
+            assert!((f64::from(*got) - want).abs() < 0.05, "{:?}", lpc.coeffs);
         }
     }
 
