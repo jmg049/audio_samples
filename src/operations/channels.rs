@@ -28,7 +28,7 @@
 
 use crate::{
     AudioChannelOps, AudioData, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    CastFrom, LayoutError, ParameterError, StandardSample,
+    CastFrom, LayoutError, ParameterError, SampleType, StandardSample,
     operations::types::{MonoConversionMethod, StereoConversionMethod},
     repr::MonoData,
 };
@@ -93,12 +93,16 @@ where
                     unreachable!("We check for mono at the start of the function")
                 }
                 AudioData::Multi(data) => {
-                    if data.dim().0.get() == 2 {
+                    if data.dim().0.get() == 2
+                        && (T::BITS <= 24 || T::SAMPLE_TYPE == SampleType::F32)
+                    {
                         // Stereo fast path: (L+R)*0.5 with f32 arithmetic so
                         // LLVM can emit vaddps+vmulps (8-wide) rather than the
-                        // 4-wide f64 vaddpd+vmulpd path. For f32 samples the
-                        // f32→f64→f32 cast round-trip is a no-op; for other
-                        // types it introduces at most 1 ULP of error.
+                        // 4-wide f64 vaddpd+vmulpd path. Only used where it is
+                        // exact: f32 samples (an f32 sum is what f32 averaging
+                        // means) and integers of at most 24 bits, whose sum
+                        // fits the 24-bit f32 mantissa. f64 and i32 samples
+                        // take the f64 path below.
                         let left = data.index_axis(Axis(0), 0);
                         let right = data.index_axis(Axis(0), 1);
                         let n = left.len();
@@ -141,8 +145,19 @@ where
                         let mono = Array1::from(mono_vec);
                         Ok(AudioSamples::new_mono(mono, self.sample_rate())?)
                     } else {
-                        // Generic N-channel fallback.
-                        let mono_data = data.mean_axis(Axis(0));
+                        // General path: sum the raw values in f64 and divide by
+                        // the channel count (no overflow for integer samples,
+                        // full precision for f64 and i32).
+                        let n_ch = data.dim().0.get() as f64;
+                        let mut sums = vec![0.0f64; data.ncols().get()];
+                        for row in data.as_view().outer_iter() {
+                            for (acc, &x) in sums.iter_mut().zip(row.iter()) {
+                                let v: f64 = x.cast_into();
+                                *acc += v;
+                            }
+                        }
+                        let mono_data: Array1<T> =
+                            sums.into_iter().map(|s| T::cast_from(s / n_ch)).collect();
                         Ok(AudioSamples::new_mono(mono_data, self.sample_rate())?)
                     }
                 }
@@ -275,18 +290,23 @@ where
     ///   The value is clamped to \[-1, 1\]: -1 is hard left, 0 is
     ///   centre, +1 is hard right.  Multi-channel input is returned
     ///   unchanged.
-    /// - `Left` - extracts channel 0 as a mono signal.
-    /// - `Right` - extracts channel 1 as a mono signal.
+    /// - `Left` - routes mono input to the left channel and fills the
+    ///   right with silence (`[m, 0]`, like `librosa.to_stereo(left=m)`).
+    ///   Multi-channel input is returned unchanged.
+    /// - `Right` - routes mono input to the right channel and fills the
+    ///   left with silence (`[0, m]`). Multi-channel input is returned
+    ///   unchanged.
     ///
     /// # Arguments
     /// - `method` - The conversion strategy.
     ///
     /// # Returns
-    /// An owned [`AudioSamples`] at the same sample rate.
+    /// An owned [`AudioSamples`] at the same sample rate: two channels for
+    /// mono input, the input unchanged for multi-channel input.
     ///
     /// # Errors
-    /// - [crate::AudioSampleError::Parameter] - if `Left` or `Right` is
-    ///   chosen and the requested channel does not exist.
+    /// - [crate::AudioSampleError::Layout] - only if the internal stereo
+    ///   buffer cannot be built (not expected for valid input).
     ///
     /// # Examples
     /// ```
@@ -362,8 +382,21 @@ where
                     }
                 }
             }
-            StereoConversionMethod::Left => self.extract_channel(0),
-            StereoConversionMethod::Right => self.extract_channel(1),
+            StereoConversionMethod::Left | StereoConversionMethod::Right => match self.data() {
+                AudioData::Mono(mono) => {
+                    let n = mono.len().get();
+                    let mut stereo = Array2::<T>::zeros((2, n));
+                    let row = usize::from(matches!(method, StereoConversionMethod::Right));
+                    stereo.row_mut(row).assign(&mono.as_view());
+                    Ok(AudioSamples::new(
+                        AudioData::Multi(stereo.try_into()?),
+                        self.sample_rate(),
+                    ))
+                }
+                // Already multi-channel: returned unchanged, as for
+                // `Duplicate` and `Pan`.
+                AudioData::Multi(_) => Ok(self.clone().into_owned()),
+            },
         }
     }
 
@@ -1234,5 +1267,60 @@ mod tests {
                 assert_eq!(multi[(ch_idx, s_idx)], exp);
             }
         }
+    }
+
+    /// Regression: the stereo average was computed in f32 for every sample
+    /// type, so f64 input lost precision ([1.0, 1e-9] averaged to 0.5).
+    #[test]
+    fn test_to_mono_average_f64_full_precision() {
+        let data = ndarray::array![[1.0f64, 0.1], [1e-9, 0.2]];
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        let mono = audio.to_mono(MonoConversionMethod::Average).unwrap();
+        assert_eq!(mono[0], (1.0 + 1e-9) * 0.5);
+        assert_eq!(mono[1], (0.1 + 0.2) * 0.5);
+    }
+
+    #[test]
+    fn test_to_mono_average_i32_exact() {
+        let data = ndarray::array![[i32::MAX - 1, -7], [i32::MAX - 3, 9]];
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        let mono = audio.to_mono(MonoConversionMethod::Average).unwrap();
+        assert_eq!(mono[0], i32::MAX - 2);
+        assert_eq!(mono[1], 1);
+    }
+
+    /// Regression: the N-channel average summed in the sample type, which
+    /// overflows for integer samples.
+    #[test]
+    fn test_to_mono_average_multichannel_integer_no_overflow() {
+        let data = ndarray::array![[30000i16], [30000], [30000]];
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        let mono = audio.to_mono(MonoConversionMethod::Average).unwrap();
+        assert_eq!(mono[0], 30000);
+    }
+
+    /// Regression: `Left` on mono returned the mono signal and `Right`
+    /// errored; the documented behaviour is [m, 0] / [0, m].
+    #[test]
+    fn test_to_stereo_left_right_on_mono() {
+        let audio =
+            AudioSamples::new_mono(ndarray::array![0.5f32, -0.25], sample_rate!(44100)).unwrap();
+        let left = audio.to_stereo(StereoConversionMethod::Left).unwrap();
+        let l = left.as_multi_channel().unwrap();
+        assert_eq!(l.row(0).to_vec(), vec![0.5, -0.25]);
+        assert_eq!(l.row(1).to_vec(), vec![0.0, 0.0]);
+        let right = audio.to_stereo(StereoConversionMethod::Right).unwrap();
+        let r = right.as_multi_channel().unwrap();
+        assert_eq!(r.row(0).to_vec(), vec![0.0, 0.0]);
+        assert_eq!(r.row(1).to_vec(), vec![0.5, -0.25]);
+
+        // Multi-channel input is returned unchanged.
+        let stereo = audio.to_stereo(StereoConversionMethod::Duplicate).unwrap();
+        let same = stereo.to_stereo(StereoConversionMethod::Right).unwrap();
+        assert_eq!(same.num_channels().get(), 2);
+        assert_eq!(
+            same.as_multi_channel().unwrap().to_owned(),
+            stereo.as_multi_channel().unwrap().to_owned()
+        );
     }
 }
