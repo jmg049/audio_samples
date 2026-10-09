@@ -197,7 +197,7 @@ pub fn aliasing(signal_hz: f64, sample_rate_hz: f64) -> ExplainDoc {
     let k = (f / fs).round();
     let fa = fold(f, fs);
     doc.set_summary(format!(
-        "A {} Hz tone sampled at {} Hz produces the same samples as a {} Hz tone. \
+        "A tone at {} Hz, sampled at {} Hz, produces the same samples as a {} Hz tone. \
          Only frequencies up to the Nyquist frequency ({} Hz) are represented faithfully.",
         fmt_num(f),
         fmt_num(fs),
