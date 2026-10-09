@@ -144,8 +144,8 @@ for q in [ResamplingQuality::Medium, ResamplingQuality::High] {
 ```
 
 The alignment is exact only to within half an output frame. For this
-conversion the removed delay is $\mathrm{round}(256/3/2 - 1) = 41$ frames
-against an exact $40.667$ for High, so the output *leads* by about one third of
+conversion the removed delay is $\mathrm{round}(256/3/2 - 1) = 42$ frames
+against an exact $41.667$ for High, so the output *leads* by about one third of
 an output frame (one input sample); the lab measures $+0.335$ frames from the
 phase of the 1 kHz tone (and $-0.331$ for Medium, predicted $-1/3$).
 

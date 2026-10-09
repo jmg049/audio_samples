@@ -185,7 +185,7 @@ fn main() -> AudioSampleResult<()> {
     }
     // Sub-sample check with the 1 kHz tone's phase: the library removes a whole
     // number of output frames, round(sinc_len * r / 2 - 1), so a fraction of a
-    // frame remains: 41 - 40.667 = +1/3 (High), 20 - 20.333 = -1/3 (Medium).
+    // frame remains: 42 - 41.667 = +1/3 (High), 20 - 20.333 = -1/3 (Medium).
     let ideal_phase = tone_phase(&ideal_tone(1_000.0, fs_out)[mid.clone()], 1_000.0, fs_out);
     for (i, sinc_len) in [(1usize, 128.0), (2, 256.0)] {
         let ph = tone_phase(&measured[i].0[mid.clone()], 1_000.0, fs_out);

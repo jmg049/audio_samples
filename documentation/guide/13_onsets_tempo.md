@@ -301,7 +301,7 @@ assert!((doc.quantity("Window duration").unwrap().value - 72.72).abs() < 0.005);
 assert!((doc.quantity("Time resolution").unwrap().value - 11.61).abs() < 0.005);
 assert!((doc.quantity("Minimum peak separation").unwrap().value - 58.05).abs() < 0.005);
 assert_eq!(doc.quantity("CQT bins").unwrap().value, 144.0);
-assert!(doc.has_warning_containing("applied to onset-function frames"));
+assert!(doc.has_warning_containing("counts onset-function frames"));
 assert!(doc.has_warning_containing("not read by detect_onsets"));
 ```
 
