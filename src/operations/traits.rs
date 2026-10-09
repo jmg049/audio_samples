@@ -379,10 +379,20 @@ where
     /// Computes the zero crossing rate (crossings per second).
     ///
     /// This normalises the zero crossing count by the signal duration, providing
-    /// a frequency-like measure that is independent of signal length.
+    /// a frequency-like measure that is independent of signal length. For
+    /// multi-channel audio it is the mean of the per-channel rates (the total
+    /// from [`zero_crossings`](Self::zero_crossings) divided by the number of
+    /// channels), so a stereo signal with two identical channels has the same
+    /// rate as either channel alone.
     ///
     /// # Returns
-    /// The number of zero crossings per second as `f64`.
+    /// The number of zero crossings per second as `f64`, averaged over channels.
+    ///
+    /// # Differences from librosa
+    ///
+    /// `librosa.feature.zero_crossing_rate` returns, per channel and per frame,
+    /// the fraction of samples at which the sign changes (centred frames of 2048
+    /// samples, hop 512). This method is a single whole-signal rate in Hz.
     ///
     /// # Examples
     /// ```

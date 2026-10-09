@@ -723,10 +723,20 @@ where
     /// Computes the zero crossing rate (crossings per second).
     ///
     /// This normalises the zero crossing count by the signal duration, providing
-    /// a frequency-like measure that is independent of signal length.
+    /// a frequency-like measure that is independent of signal length. For
+    /// multi-channel audio it is the mean of the per-channel rates (the total
+    /// from [`zero_crossings`](Self::zero_crossings) divided by the number of
+    /// channels), so a stereo signal with two identical channels has the same
+    /// rate as either channel alone.
     ///
     /// # Returns
-    /// The number of zero crossings per second as `f64`.
+    /// The number of zero crossings per second as `f64`, averaged over channels.
+    ///
+    /// # Differences from librosa
+    ///
+    /// `librosa.feature.zero_crossing_rate` returns, per channel and per frame,
+    /// the fraction of samples at which the sign changes (centred frames of 2048
+    /// samples, hop 512). This method is a single whole-signal rate in Hz.
     ///
     /// # Examples
     /// ```
@@ -740,9 +750,10 @@ where
     /// ```
     #[inline]
     fn zero_crossing_rate(&self) -> f64 {
-        let crossings = self.zero_crossings() as f64;
+        // `zero_crossings` sums over channels; average it so the rate is per channel.
+        let crossings_per_channel = self.zero_crossings() as f64 / self.num_channels().get() as f64;
         let duration_seconds = self.duration_seconds(); // guaranteed > 0.0 since we do not allow empty audio
-        crossings / duration_seconds
+        crossings_per_channel / duration_seconds
     }
 
     /// Computes the autocorrelation function up to `max_lag` samples.
@@ -1597,6 +1608,34 @@ mod tests {
         assert!((autocorr[0] - 0.5).abs() < 1e-12); // (1 + 1) / 4
         assert!(autocorr[1].abs() < 1e-12);
         assert!((autocorr[2] + 0.5).abs() < 1e-12); // (1 * -1) / 2
+    }
+
+    /// Regression: on multi-channel audio the rate summed the crossings of all
+    /// channels but divided by the single-channel duration, so two identical
+    /// channels reported twice the mono rate.
+    #[test]
+    fn zero_crossing_rate_is_averaged_over_channels() {
+        let mono_data = array![1.0f32, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0];
+        let mono = AudioSamples::new_mono(mono_data.clone(), sample_rate!(8)).unwrap();
+        let mut stereo_data = ndarray::Array2::zeros((2, mono_data.len()));
+        stereo_data.row_mut(0).assign(&mono_data);
+        stereo_data.row_mut(1).assign(&mono_data);
+        let stereo = AudioSamples::new_multi_channel(stereo_data, sample_rate!(8)).unwrap();
+
+        // 5 crossings in 1 s.
+        assert_eq!(mono.zero_crossings(), 5);
+        assert!((mono.zero_crossing_rate() - 5.0).abs() < 1e-12);
+        // The count is still the total over channels; the rate is per channel.
+        assert_eq!(stereo.zero_crossings(), 10);
+        assert!((stereo.zero_crossing_rate() - 5.0).abs() < 1e-12);
+
+        // Different channels: the mean of the per-channel rates.
+        let mixed = AudioSamples::new_multi_channel(
+            array![[1.0f32, -1.0, 1.0, -1.0], [1.0, 1.0, 1.0, -1.0]],
+            sample_rate!(4),
+        )
+        .unwrap();
+        assert!((mixed.zero_crossing_rate() - 2.0).abs() < 1e-12); // (3 + 1) / 2
     }
 
     /// Regression: the spectral scalars put bin k at `k * nyquist / (bins - 1)`,
