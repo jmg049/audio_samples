@@ -19,3 +19,4 @@ mod analysis_fixes;
 mod resample;
 mod sequence;
 mod spectrum;
+mod tonal;
