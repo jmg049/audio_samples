@@ -25,12 +25,12 @@ fn detector_formula(method: DynamicRangeMethod) -> (&'static str, &'static str) 
     match method {
         DynamicRangeMethod::Peak => (r"x_d[n] = |x[n]|", "Peak detector"),
         DynamicRangeMethod::Rms => (
-            r"x_d[n] = \sqrt{\frac{1}{W}\sum_{i=0}^{W-1} x^2[n-i]}",
-            "RMS detector over the last W = 10 ms of samples (fewer at the very start)",
+            r"x_d[n] = \sqrt{\frac{1}{N_{rms}}\sum_{i=0}^{N_{rms}-1} x^2[n-i]}",
+            "RMS detector over the last N_rms = 10 ms of samples (fewer at the very start)",
         ),
         _ => (
-            r"x_d[n] = \max\left(|x[n]|, \sqrt{\frac{1}{W}\sum_{i=0}^{W-1} x^2[n-i]}\right)",
-            "Hybrid detector: the larger of peak and 10 ms RMS",
+            r"x_d[n] = \max\left(|x[n]|, \sqrt{\frac{1}{N_{rms}}\sum_{i=0}^{N_{rms}-1} x^2[n-i]}\right)",
+            "Hybrid detector: the larger of peak and RMS over N_rms = 10 ms",
         ),
     }
 }
@@ -101,7 +101,7 @@ fn add_ballistics(
         if method != DynamicRangeMethod::Peak {
             doc.add_quantity(
                 "RMS window",
-                "W",
+                r"N_{rms}",
                 (0.01 * fs).max(1.0).floor(),
                 "samples",
                 r"\lfloor 0.01 f_s \rfloor",
@@ -262,6 +262,10 @@ impl Explain for CompressorConfig {
             "audio_samples::AudioDynamicRange::apply_compressor",
         )
         .add_see_also(
+            "Apply (Python)",
+            "audio_samples.AudioSamples.apply_compressor",
+        )
+        .add_see_also(
             "Gain computer",
             "audio_samples::operations::dynamic_range::calculate_compression_gain",
         )
@@ -357,6 +361,7 @@ impl Explain for LimiterConfig {
             }
         }
         doc.add_see_also("Apply", "audio_samples::AudioDynamicRange::apply_limiter")
+            .add_see_also("Apply (Python)", "audio_samples.AudioSamples.apply_limiter")
             .add_see_also(
                 "Gain computer",
                 "audio_samples::operations::dynamic_range::calculate_limiting_gain",

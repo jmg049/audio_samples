@@ -24,10 +24,10 @@
 //!
 //! **Search range.** A frequency range `[f_min, f_max]` (Hz) becomes the lag
 //! range `τ_min = ⌊f_s/f_max⌋ ... τ_max = ⌊f_s/f_min⌋` (samples). Every
-//! detector requires `τ_max < N/2`, i.e. the analysed signal or frame must be
+//! detector requires `τ_max < ⌊N/2⌋`, i.e. the analysed signal or frame must be
 //! longer than **two periods of the lowest frequency** searched
-//! (N > 2·f_s/f_min); otherwise the result is `None`. Example: f_min = 80 Hz
-//! at f_s = 16 kHz needs N > 400 samples (25 ms).
+//! (N ≥ 2(⌊f_s/f_min⌋ + 1)); otherwise the result is `None`. Example:
+//! f_min = 80 Hz at f_s = 16 kHz needs N ≥ 402 samples (about 25 ms).
 //!
 //! **Autocorrelation** ([`autocorr_pitch_detection`]): the raw (unnormalised,
 //! no mean removal) sum
@@ -41,7 +41,9 @@
 //! ≈ f₀²/f_s (12 Hz at 440 Hz and 16 kHz). Because the overlap shrinks with τ,
 //! r(τ) is biased towards short lags.
 //!
-//! **YIN** ([`yin_pitch_detection`], de Cheveigné & Kawahara, 2002, steps 2-5):
+//! **YIN** ([`yin_pitch_detection`]; de Cheveigné & Kawahara, "YIN, a fundamental
+//! frequency estimator for speech and music", JASA 111(4):1917-1930, 2002,
+//! steps 2-5 with the departures noted below):
 //!
 //! 1. Difference function over a fixed integration window of W samples:
 //!
@@ -67,6 +69,14 @@
 //!    ```
 //!
 //!    giving a fractional period; f₀ = f_s/τ̂ Hz.
+//!
+//! Two deliberate departures from the paper, shared with `librosa.yin`:
+//! (a) the paper's step 5 interpolates the **raw** difference function d(τ)
+//! around the selected lag (interpolating d′ is slightly biased), whereas this
+//! code fits the parabola to d′, as librosa does; (b) the paper's step 6
+//! ("best local estimate") is not implemented, and when no lag dips below the
+//! threshold the paper takes the global minimum of d′ rather than declaring the
+//! frame unvoiced.
 //!
 //! Note: unlike `librosa.yin`, which always works frame by frame
 //! (W = `frame_length`/2) and falls back to the global minimum of d′ when
@@ -1125,7 +1135,8 @@ fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
 /// normalised form `d′(τ) = d(τ)·τ / Σ_{j=1}^{τ} d(j)` (running sum from
 /// τ = 1). Takes the first lag in `[min_tau, max_tau]` with `d′ < threshold`,
 /// descends to the local minimum of that dip, and refines it by parabolic
-/// interpolation of d′ (see the [module docs](self) for the formulas). The
+/// interpolation of d′ (as `librosa.yin` does; the paper's step 5 interpolates
+/// the raw d(τ) instead, see the [module docs](self) for the formulas). The
 /// returned period is therefore fractional. The caller converts τ to Hz with
 /// `sample_rate / τ`.
 ///
@@ -1225,7 +1236,8 @@ pub fn yin_pitch_detection(
         tau += 1;
     }
 
-    // Step 4 (YIN step 5): parabolic interpolation of d' through
+    // Step 4 (cf. YIN step 5, which interpolates the raw d; here d' is
+    // interpolated, as in librosa): parabolic interpolation of d' through
     // (τ−1, τ, τ+1) gives a fractional period estimate.
     let (a, b, c) = (cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]);
     let denom = a - 2.0 * b + c;

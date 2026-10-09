@@ -301,8 +301,8 @@ pub struct PsychoacousticConfig {
     /// the codec (stored for configuration completeness only).
     pub noise_floor: f32,
     /// Tonal masking offset in dB: how far below a tonal (sinusoidal) masker the
-    /// masking threshold sits at zero Bark distance (Johnston 1988: 14.5 dB, which
-    /// Johnston makes frequency dependent as 14.5 + z; here it is constant).
+    /// masking threshold sits at zero Bark distance (Johnston 1988 uses 14.5 + z dB
+    /// at Bark band z; the constant 14.5 dB used here is a simplification).
     /// A larger offset puts the threshold further below the masker, so the masker
     /// masks *less*.
     pub masking_gain: f32,
@@ -311,7 +311,8 @@ pub struct PsychoacousticConfig {
     ///
     /// Noise-like maskers are *more* effective than tonal maskers (the asymmetry of
     /// masking; Hellman 1972), so this offset is smaller: the masked threshold lies
-    /// only ≈ 5.5 dB below a noise masker but ≈ 14.5 dB below a tone.
+    /// only ≈ 5.5 dB below a noise masker but 14.5 + z dB below a tone (Johnston;
+    /// simplified to a constant `masking_gain` here).
     pub noise_masking_gain: f32,
     /// Slope in dB/Bark by which the threshold falls for maskees **above** the
     /// masker in frequency (dz > 0). Larger values mean less upward spread.
@@ -343,7 +344,8 @@ impl PsychoacousticConfig {
     ///
     /// # Arguments
     /// - `noise_floor` - Absolute noise floor in dB (currently unused).
-    /// - `masking_gain` - Tonal masker offset in dB (Johnston 1988: 14.5 dB).
+    /// - `masking_gain` - Tonal masker offset in dB (Johnston 1988: 14.5 + z dB at
+    ///   Bark band z; a constant such as 14.5 dB is a simplification).
     /// - `noise_masking_gain` - Noise masker offset in dB (Johnston 1988: 5.5 dB).
     /// - `upward_spread` - Threshold slope above the masker, in dB/Bark
     ///   (psychoacoustically ≈ 10 dB/Bark).
@@ -391,7 +393,8 @@ impl PsychoacousticConfig {
     /// Johnston-style default parameters (named after, but not equal to, MPEG-1
     /// psychoacoustic model 1).
     ///
-    /// Uses Johnston (1988) offsets (tonal 14.5 dB, noise 5.5 dB) with linear
+    /// Uses offsets from Johnston (1988) (tonal 14.5 dB, a constant simplification
+    /// of Johnston's 14.5 + z dB; noise 5.5 dB) with linear
     /// spreading slopes of 25 dB/Bark upward and 6 dB/Bark downward, and a -60 dB
     /// `noise_floor` (unused). This is a simplification *inspired by* ISO 11172-3
     /// psychoacoustic model 1, not its values: model 1 uses masking indices

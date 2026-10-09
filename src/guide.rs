@@ -7,6 +7,14 @@
 //!
 //! Built only with the `educational` and `full_no_plotting` features (both are
 //! enabled on docs.rs).
+//!
+//! The maths (`$…$` inline, `$$…$$` display) is rendered by KaTeX, loaded from
+//! `documentation/katex-header.html` (docs.rs passes it automatically). To get
+//! the same rendering locally, build the docs with:
+//!
+//! ```text
+//! RUSTDOCFLAGS="--html-in-header documentation/katex-header.html" cargo doc --features educational,full_no_plotting --no-deps
+//! ```
 #![doc = include_str!("../documentation/guide/README.md")]
 
 #[doc = include_str!("../documentation/guide/01_sampling_aliasing.md")]

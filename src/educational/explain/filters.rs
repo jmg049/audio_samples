@@ -101,6 +101,21 @@ fn response_table(freqs: &[f64], mags: &[f64]) -> Table {
     }
 }
 
+/// One sentence on stability that agrees with the computed largest pole radius.
+fn stability_sentence(max_r: f64) -> String {
+    if max_r < 1.0 {
+        format!(
+            "All poles lie inside the unit circle (largest radius {}), so the filter is stable.",
+            fmt_num(max_r)
+        )
+    } else {
+        format!(
+            "At least one pole lies on or outside the unit circle (largest radius {}), so the filter is UNSTABLE.",
+            fmt_num(max_r)
+        )
+    }
+}
+
 fn family_name(t: IirFilterType) -> &'static str {
     match t {
         IirFilterType::Butterworth => "Butterworth",
@@ -228,6 +243,10 @@ impl Explain for IirFilterDesign {
         .add_see_also(
             "Apply",
             "audio_samples::AudioIirFiltering::apply_iir_filter",
+        )
+        .add_see_also(
+            "Apply (Python)",
+            "audio_samples.AudioSamples.apply_iir_filter",
         )
         .add_see_also("Python", "audio_samples.IirFilterDesign.explain");
         doc.add_trade_off("Higher order gives a steeper transition band but more phase distortion near the cutoff and poles closer to the unit circle.")
@@ -368,7 +387,7 @@ impl Explain for IirFilterDesign {
             doc.add_warning(
                 WarningLevel::Info,
                 format!("With Bessel normalisation {:?} the critical frequency fixes the phase or delay, not the gain.", self.bessel_norm),
-                "Use BesselNorm::Magnitude for -3 dB at the cutoff.",
+                "Use BesselNorm::Magnitude (Rust) / bessel_norm='mag' (Python) for -3 dB at the cutoff.",
             );
         }
         let probes = probe_frequencies(&edges, nyq);
@@ -376,13 +395,20 @@ impl Explain for IirFilterDesign {
             doc.add_table(response_table(&probes, &mags));
         }
 
+        let edge_text = match edges.as_slice() {
+            [fc] => format!("with cutoff {} Hz", fmt_num(*fc)),
+            [lo, hi] => format!(
+                "with band edges {} Hz and {} Hz",
+                fmt_num(*lo),
+                fmt_num(*hi)
+            ),
+            _ => String::new(),
+        };
         doc.set_summary(format!(
-            "An order-{order} {family} {response} filter at {} Hz, realised as {} second-order section(s) with {n_poles} poles. \
-             All poles lie inside the unit circle (largest radius {}), so the filter is {}.",
+            "An order-{order} {family} {response} filter {edge_text} at f_s = {} Hz, realised as {} second-order section(s) with {n_poles} poles. {}",
             fmt_num(fs),
             sos.len(),
-            fmt_num(max_r),
-            if max_r < 1.0 { "stable" } else { "UNSTABLE" }
+            stability_sentence(max_r)
         ));
         if max_r >= 1.0 {
             doc.add_warning(
@@ -504,6 +530,10 @@ mod eq {
             doc.add_see_also(
                 "Apply one band",
                 "audio_samples::AudioParametricEq::apply_eq_band",
+            )
+            .add_see_also(
+                "Apply one band (Python)",
+                "audio_samples.AudioSamples.apply_eq_band",
             )
             .add_see_also("Python", "audio_samples.EqBand.explain");
             doc.add_trade_off("Higher Q narrows the band affected; lower Q gives broad, gentle tonal changes.")
@@ -630,10 +660,10 @@ mod eq {
             };
             doc.set_summary(format!(
                 "A {t} biquad at {} Hz (Q = {}) designed with the RBJ cookbook formulas; by design it has {expectation}. \
-                 Its poles lie at radius {} (stable).",
+                 {}",
                 fmt_num(self.frequency),
                 fmt_num(self.q_factor),
-                fmt_num(max_r)
+                stability_sentence(max_r)
             ));
             if self.frequency > 0.25 * fs {
                 doc.add_warning(
@@ -666,6 +696,38 @@ mod tests {
         assert!(r < 1.0 && r > 0.8);
         assert!(!d.has_warning(WarningLevel::Caution));
         assert!(d.to_text().contains("stable"));
+    }
+
+    #[test]
+    fn summary_names_cutoff_and_sample_rate_separately() {
+        let d = IirFilterDesign::butterworth_lowpass(nzu!(4), 1_000.0)
+            .explain_with(&ExplainContext::new().with_sample_rate(16_000.0));
+        assert!(
+            d.summary.contains("with cutoff 1000 Hz at f_s = 16000 Hz"),
+            "{}",
+            d.summary
+        );
+        assert!(!d.summary.contains("filter at 16000 Hz"), "{}", d.summary);
+        let d = IirFilterDesign::butterworth_bandpass(nzu!(2), 300.0, 3_000.0)
+            .explain_with(&ExplainContext::new().with_sample_rate(16_000.0));
+        assert!(
+            d.summary
+                .contains("band edges 300 Hz and 3000 Hz at f_s = 16000 Hz"),
+            "{}",
+            d.summary
+        );
+    }
+
+    #[test]
+    fn stability_sentence_follows_pole_radius() {
+        let stable = stability_sentence(0.9);
+        assert!(stable.contains("inside the unit circle") && stable.contains("stable"));
+        assert!(!stable.contains("UNSTABLE"));
+        for r in [1.0, 1.2] {
+            let unstable = stability_sentence(r);
+            assert!(unstable.contains("UNSTABLE"), "{unstable}");
+            assert!(!unstable.contains("All poles lie inside"), "{unstable}");
+        }
     }
 
     #[test]

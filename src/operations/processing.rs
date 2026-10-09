@@ -135,7 +135,10 @@ use ndarray::{Array2, Axis};
 use non_empty_slice::NonEmptySlice;
 
 /// Valid-region FIR convolution over flat slices, matching [`AudioProcessing::apply_filter`]'s
-/// convention: `output[i] = Σ_j input[i + j] · coeffs[j]` for `i in 0..output_len`.
+/// convention: `output[i] = Σ_{j=0}^{M-1} coeffs[j] · input[i + M - 1 - j]` for
+/// `i in 0..output_len`, with `M = coeffs.len()` (true convolution, the "valid"
+/// part of `numpy.convolve(input, coeffs)`; the taps are reversed, so this is not
+/// the correlation `Σ_j input[i + j] · coeffs[j]`).
 ///
 /// Working on contiguous `&[T]` slices (rather than enum-dispatched element
 /// indexing) lets the compiler autovectorize the inner dot product.

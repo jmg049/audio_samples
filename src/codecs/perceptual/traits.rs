@@ -46,7 +46,7 @@ use super::{BandLayout, PerceptualAnalysisResult, PsychoacousticConfig};
 /// let weights_slice = NonEmptySlice::from_slice(&weights).unwrap();
 /// let config = PsychoacousticConfig::new(
 ///     -60.0,  // noise_floor dB
-///     14.5,   // masking_gain dB (tonal)
+///     14.5,   // masking_gain dB (tonal; constant simplification of Johnston's 14.5 + z)
 ///     5.5,    // noise_masking_gain dB
 ///     25.0,   // upward_spread dB/Bark
 ///     6.0,    // downward_spread dB/Bark

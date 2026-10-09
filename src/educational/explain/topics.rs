@@ -89,9 +89,14 @@ pub fn sampling(sample_rate_hz: f64) -> ExplainDoc {
         "Ideal (Whittaker-Shannon) reconstruction, exact when x_a has no energy at or above f_N",
     );
     doc.add_see_also("Aliasing", "audio_samples::educational::topics::aliasing")
+        .add_see_also("Aliasing (Python)", "audio_samples.explain.aliasing")
         .add_see_also(
             "Sample rate of a signal",
             "audio_samples::AudioSamples::sample_rate",
+        )
+        .add_see_also(
+            "Sample rate of a signal (Python)",
+            "audio_samples.AudioSamples.sample_rate",
         )
         .add_see_also("Python", "audio_samples.explain.sampling");
     if reject_rate(&mut doc, fs) {
@@ -178,10 +183,12 @@ pub fn aliasing(signal_hz: f64, sample_rate_hz: f64) -> ExplainDoc {
         "Tones that differ by a multiple of f_s give identical samples",
     );
     doc.add_see_also("Sampling", "audio_samples::educational::topics::sampling")
+        .add_see_also("Sampling (Python)", "audio_samples.explain.sampling")
         .add_see_also(
             "Resampling",
             "audio_samples::educational::topics::resampling",
-        );
+        )
+        .add_see_also("Resampling (Python)", "audio_samples.explain.resampling");
     if reject_rate(&mut doc, fs) {
         return doc;
     }
@@ -308,6 +315,10 @@ pub fn quantisation(bits: u32) -> ExplainDoc {
         "Type conversion",
         "audio_samples::AudioTypeConversion::to_format",
     )
+    .add_see_also(
+        "Type conversion (Python)",
+        "audio_samples.AudioSamples.to_format",
+    )
     .add_see_also("Python", "audio_samples.explain.quantisation");
     if bits == 0 || bits > 64 {
         doc.add_warning(
@@ -362,8 +373,15 @@ pub fn quantisation(bits: u32) -> ExplainDoc {
             "Noise level",
             r"10 \log_{10} \sigma_e^2",
             10.0 * noise_power.log10(),
-            "dBFS",
+            "dB re 1 (power of a full-scale DC level)",
             r"10 \log_{10}(\Delta^2/12)",
+        )
+        .add_quantity(
+            "Noise level (AES17 dBFS)",
+            r"10 \log_{10} (2 \sigma_e^2)",
+            10.0 * (noise_power / 0.5).log10(),
+            "dBFS (AES17: full-scale sine = 0 dBFS)",
+            r"10 \log_{10}(\Delta^2/12) + 10 \log_{10} 2",
         )
         .add_quantity(
             "SQNR (full-scale sine)",
@@ -374,10 +392,10 @@ pub fn quantisation(bits: u32) -> ExplainDoc {
         )
         .add_quantity(
             "Rule of thumb",
-            r"6.02\,b + 1.76",
+            r"20 \log_{10}(2) \, b + 10 \log_{10}(1.5)",
             rule,
             "dB",
-            r"20 \log_{10}(2) \, b + 10 \log_{10}(1.5)",
+            r"\text{exact form of } 6.02\,b + 1.76 \text{ (the rounded constants give 0.01 dB less at 16 bits)}",
         )
         .add_quantity(
             "SQNR with TPDF dither",
@@ -450,6 +468,7 @@ pub fn dft(n_fft: usize, sample_rate_hz: f64) -> ExplainDoc {
         "Real input: the upper half mirrors the lower half (complex conjugate)",
     );
     doc.add_see_also("FFT of a signal", "audio_samples::AudioTransforms::fft")
+        .add_see_also("FFT of a signal (Python)", "audio_samples.AudioSamples.fft")
         .add_see_also("STFT", "spectrograms::StftParams (explain it)");
     if n_fft == 0 {
         doc.add_warning(
@@ -734,7 +753,7 @@ pub fn yin(
     )
     .add_formula(
         r"\hat{\tau} = \tau_0 + \frac{1}{2} \frac{d'(\tau_0 - 1) - d'(\tau_0 + 1)}{d'(\tau_0 - 1) - 2 d'(\tau_0) + d'(\tau_0 + 1)}, \quad \hat{f}_0 = \frac{f_s}{\hat{\tau}}",
-        "Parabolic interpolation gives a fractional period",
+        "Parabolic interpolation of d' gives a fractional period. This follows librosa; de Cheveigné & Kawahara (2002, JASA 111(4)) step 5 interpolates the raw difference function d(τ) instead, and their step 6 (best local estimate) is not implemented",
     );
     doc.add_symbol("x", "analysis frame (N samples)")
         .add_symbol(r"\tau", "lag in samples")
@@ -742,6 +761,10 @@ pub fn yin(
     doc.add_see_also(
         "Single estimate",
         "audio_samples::AudioPitchAnalysis::detect_pitch_yin",
+    )
+    .add_see_also(
+        "Single estimate (Python)",
+        "audio_samples.AudioSamples.detect_pitch_yin",
     )
     .add_see_also(
         "Low-level routine",
@@ -763,7 +786,7 @@ pub fn yin(
     };
     doc.set_summary(format!(
         "YIN searches lags {} to {} samples ({} Hz to {} Hz at {} Hz) for the first dip of the normalised \
-         difference function below θ = {} and refines it by parabolic interpolation. Frames need at least {min_len} samples.",
+         difference function below θ = {} and refines it by parabolic interpolation of d' (as librosa does). Frames need at least {min_len} samples.",
         (fs / max_hz) as usize,
         (fs / min_hz) as usize,
         fmt_num(max_hz),
@@ -840,7 +863,12 @@ pub fn autocorrelation_pitch(min_hz: f64, max_hz: f64, sample_rate_hz: f64) -> E
         "Single estimate",
         "audio_samples::AudioPitchAnalysis::detect_pitch_autocorr",
     )
-    .add_see_also("YIN", "audio_samples::educational::topics::yin");
+    .add_see_also(
+        "Single estimate (Python)",
+        "audio_samples.AudioSamples.detect_pitch_autocorr",
+    )
+    .add_see_also("YIN", "audio_samples::educational::topics::yin")
+    .add_see_also("YIN (Python)", "audio_samples.explain.yin");
     if reject_rate(&mut doc, fs) {
         return doc;
     }
@@ -998,7 +1026,7 @@ pub fn lpc(order: usize, sample_rate_hz: f64) -> ExplainDoc {
     }
     doc.add_warning(
         WarningLevel::Info,
-        "lpc_analysis silently lowers the order to half the frame length for very short frames.",
+        "lpc_analysis (Rust only; not in the Python bindings) silently lowers the order to half the frame length for very short frames.",
         format!("Use frames of at least {} samples.", 2 * order),
     );
     doc
@@ -1051,7 +1079,11 @@ pub fn cepstrum(n_fft: usize, sample_rate_hz: f64) -> ExplainDoc {
         "Mel cepstrum (MFCC)",
         "spectrograms::MfccParams (explain it)",
     )
-    .add_see_also("MFCCs of a signal", "audio_samples::AudioTransforms::mfcc");
+    .add_see_also("MFCCs of a signal", "audio_samples::AudioTransforms::mfcc")
+    .add_see_also(
+        "MFCCs of a signal (Python)",
+        "audio_samples.AudioSamples.mfcc",
+    );
     if n_fft < 2 {
         doc.add_warning(
             WarningLevel::Problem,
@@ -1135,8 +1167,10 @@ pub fn resampling(from_hz: f64, to_hz: f64) -> ExplainDoc {
             "Band-limited interpolation with a windowed-sinc kernel h (Medium and High quality)",
         );
     doc.add_see_also("Offline", "audio_samples::resample")
+        .add_see_also("Offline (Python)", "audio_samples.AudioSamples.resample")
         .add_see_also("Streaming", "audio_samples::StreamingResampler")
-        .add_see_also("Aliasing", "audio_samples::educational::topics::aliasing");
+        .add_see_also("Aliasing", "audio_samples::educational::topics::aliasing")
+        .add_see_also("Aliasing (Python)", "audio_samples.explain.aliasing");
     if reject_rate(&mut doc, from_hz) || reject_rate(&mut doc, to_hz) {
         return doc;
     }
@@ -1267,6 +1301,7 @@ pub fn fir(coeffs: &[f64], sample_rate_hz: f64) -> ExplainDoc {
         .add_formula(r"H(e^{j\omega}) = \sum_{j=0}^{M-1} h[j] \, e^{-j \omega j}, \quad \omega = \frac{2\pi f}{f_s}", "Frequency response")
         .add_formula(r"h[j] = \pm h[M-1-j] \Rightarrow \tau_g = \frac{M-1}{2}", "Symmetric or antisymmetric taps give linear phase with constant group delay");
     doc.add_see_also("Apply", "audio_samples::AudioProcessing::apply_filter")
+        .add_see_also("Apply (Python)", "audio_samples.AudioSamples.apply_filter")
         .add_see_also("Python", "audio_samples.explain.fir");
     if coeffs.is_empty() || coeffs.iter().any(|c| !c.is_finite()) {
         doc.add_warning(
@@ -1309,7 +1344,7 @@ pub fn fir(coeffs: &[f64], sample_rate_hz: f64) -> ExplainDoc {
     let delay = (m as f64 - 1.0) / 2.0;
 
     doc.set_summary(format!(
-        "{m} taps at {} Hz. {} The crate's apply_filter returns the fully overlapping part of the convolution, \
+        "{m} taps at {} Hz. {} apply_filter (Rust AudioProcessing::apply_filter, Python AudioSamples.apply_filter) returns the fully overlapping part of the convolution, \
          {} samples shorter than the input.",
         fmt_num(fs),
         match fir_type {
@@ -1436,6 +1471,17 @@ mod tests {
         // Independent: 6.0206 b + 1.7609.
         assert!((sqnr - (6.020_599_913 * 16.0 + 1.760_912_591)).abs() < 1e-6);
         assert!((sqnr - 98.09).abs() < 0.01);
+        // Noise level: dB re 1 (full-scale DC) and AES17 dBFS (full-scale sine = 0 dBFS).
+        let re1 = d.quantity("Noise level").unwrap();
+        assert!((re1.value + 101.10).abs() < 0.01, "{}", re1.value);
+        assert!(re1.unit.contains("dB re 1") && !re1.unit.contains("dBFS"));
+        let aes = d.quantity("Noise level (AES17 dBFS)").unwrap().value;
+        assert!((aes + 98.09).abs() < 0.01, "{aes}");
+        assert!((aes + sqnr).abs() < 1e-9);
+        // The "rule of thumb" line carries the exact expression it evaluates.
+        let rule = d.quantity("Rule of thumb").unwrap();
+        assert!(rule.symbol.contains(r"20 \log_{10}(2)"));
+        assert!((rule.value - (20.0 * 2f64.log10() * 16.0 + 10.0 * 1.5f64.log10())).abs() < 1e-12);
         assert_eq!(
             d.quantity("Step size (negative half)").unwrap().value,
             1.0 / 32768.0

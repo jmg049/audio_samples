@@ -37,7 +37,7 @@ use super::silk::{
 
 /// Crossover frequency for Opus hybrid mode in Hz.
 ///
-/// SILK encodes 0-8 kHz; CELT encodes 8 kHz to Nyquist (RFC 6716 §2.1.2).
+/// SILK encodes 0-8 kHz; CELT encodes 8 kHz to Nyquist (RFC 6716, Section 2).
 pub const HYBRID_CROSSOVER_HZ: f32 = 8_000.0;
 
 // ── HybridEncodedFrame ────────────────────────────────────────────────────────

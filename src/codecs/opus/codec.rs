@@ -27,7 +27,10 @@
 //!
 //! - This is an Opus-inspired teaching codec, not bitstream compatible with Opus.
 //! - No range coding or bitstream packing - that belongs in `audio_samples_io`.
-//! - CELT window size equals the frame length (not Opus's fixed 20 ms / 960 sample block).
+//! - Frames are `frame_size_ms` long (default 20 ms) and the CELT MDCT window
+//!   equals the frame length. Real Opus is not fixed at 20 ms: CELT supports
+//!   2.5, 5, 10 and 20 ms frames (120-960 samples at 48 kHz) with short-block
+//!   MDCTs for transients, and SILK 10, 20, 40 and 60 ms (RFC 6716, Section 2.1.4).
 
 use std::num::{NonZeroU32, NonZeroUsize};
 

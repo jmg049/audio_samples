@@ -235,6 +235,10 @@ pub(crate) fn explain_window(window: &WindowType, n: usize, fs: Option<f64>) -> 
             "Apply to a signal",
             "audio_samples::AudioProcessing::apply_window",
         )
+        .add_see_also(
+            "Apply to a signal (Python)",
+            "audio_samples.AudioSamples.apply_window",
+        )
         .add_see_also("Python", "audio_samples.explain.window");
     doc
 }
@@ -283,6 +287,13 @@ impl Explain for StftParams {
         let w = coefficients(&window, self.n_fft());
         let m = window_metrics(&w);
         let ola = overlap_check(&w, hop);
+        // SciPy's `sym=False` construction: the periodic (DFT-even) form of a symmetric
+        // window is the symmetric window of length N + 1 with its last sample dropped.
+        let periodic_ripple = (m.symmetric && n > 1).then(|| {
+            let mut wp = coefficients(&window, NonZeroUsize::new(n + 1).unwrap_or(self.n_fft()));
+            wp.truncate(n);
+            overlap_check(&wp, hop).cola_ripple
+        });
         let fs = ctx.valid_sample_rate();
         let pad = if centre { n / 2 } else { 0 };
         let overlap_pct = 100.0 * (1.0 - hop as f64 / n as f64);
@@ -436,11 +447,27 @@ impl Explain for StftParams {
                 "Reduce the hop or use a window that is non-zero where frames overlap.",
             );
         }
+        if let Some(pr) = periodic_ripple {
+            doc.add_quantity(
+                "Overlap-add ripple of the periodic form",
+                r"\mathrm{COLA}_{per}",
+                pr,
+                "",
+                r"\text{same, for the periodic window (length } N+1 \text{, last sample dropped)}",
+            );
+        }
         if ola.cola_ripple > 1e-9 {
+            let cause = match periodic_ripple {
+                Some(pr) if pr <= 1e-9 => format!(
+                    " The ripple comes entirely from the window being symmetric (denominator N-1): the periodic (DFT-even) {wname} window at the same hop is exactly COLA (ripple {}).",
+                    fmt_num(pr)
+                ),
+                _ => String::new(),
+            };
             doc.add_warning(
                 WarningLevel::Info,
                 format!(
-                    "The window/hop pair is not constant-overlap-add: the summed windows ripple by {}% around their mean.",
+                    "The window/hop pair is not constant-overlap-add: the summed windows ripple by {}% around their mean.{cause}",
                     fmt_num(100.0 * ola.cola_ripple)
                 ),
                 "Plain overlap-add would modulate the amplitude; this crate's istft divides by the summed squared windows, so reconstruction stays exact where NOLA holds.",
@@ -497,11 +524,20 @@ impl Explain for StftParams {
             }
         }
         doc.add_see_also("Forward transform", "audio_samples::AudioTransforms::stft")
+            .add_see_also(
+                "Forward transform (Python)",
+                "audio_samples.AudioSamples.stft",
+            )
             .add_see_also("Inverse transform", "audio_samples::AudioTransforms::istft")
+            .add_see_also(
+                "Inverse transform (Python)",
+                "audio_samples.AudioSamples.istft",
+            )
             .add_see_also(
                 "Window figures",
                 "audio_samples::educational::topics::window",
             )
+            .add_see_also("Window figures (Python)", "audio_samples.explain.window")
             .add_see_also("Python", "audio_samples.explain.explain(StftParams)");
         doc
     }
@@ -868,6 +904,7 @@ impl Explain for MfccParams {
             }
         }
         doc.add_see_also("Compute", "audio_samples::AudioTransforms::mfcc")
+            .add_see_also("Compute (Python)", "audio_samples.AudioSamples.mfcc")
             .add_see_also("From log-mel", "spectrograms::mfcc_from_log_mel")
             .add_see_also("Python", "audio_samples.explain.explain(MfccParams)");
         doc
@@ -961,8 +998,19 @@ mod tests {
         assert!(!d.has_warning_containing("not constant-overlap-add"));
         // The crate's symmetric Hann at hop = N/2 is close to, but not exactly, COLA.
         let hann = StftParams::new(nzu!(256), nzu!(128), WindowType::Hanning, true).unwrap();
-        let ripple = hann.explain().quantity("Overlap-add ripple").unwrap().value;
+        let hd = hann.explain();
+        let ripple = hd.quantity("Overlap-add ripple").unwrap().value;
         assert!(ripple > 1e-6 && ripple < 0.05, "{ripple}");
+        // numpy: symmetric Hann, N = 256, hop 128 -> 0.6146 % ripple; periodic -> 0.
+        assert!((ripple - 0.006_145_54).abs() < 1e-6, "{ripple}");
+        let pr = hd
+            .quantity("Overlap-add ripple of the periodic form")
+            .unwrap()
+            .value;
+        assert!(pr < 1e-12, "{pr}");
+        assert!(hd.has_warning_containing(
+            "periodic (DFT-even) Hann window at the same hop is exactly COLA"
+        ));
         // Hann with hop = N leaves gaps around the frame edges: NOLA fails.
         let gap = StftParams::new(nzu!(256), nzu!(256), WindowType::Hanning, true).unwrap();
         assert!(gap.explain().has_warning(WarningLevel::Problem));

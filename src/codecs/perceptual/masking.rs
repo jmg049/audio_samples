@@ -7,14 +7,18 @@
 //! 2. **Spreading function** - how a loud masker raises the masking threshold in
 //!    neighbouring Bark bands (simultaneous masking). Noise-like maskers are
 //!    *more* effective than tonal maskers (Hellman 1972; Johnston 1988), so they
-//!    use a smaller offset below the masker level (5.5 dB vs 14.5 dB).
+//!    use a smaller offset below the masker level (5.5 dB vs 14.5 dB here; the
+//!    14.5 dB tonal constant simplifies Johnston's 14.5 + z dB).
 //! 3. **Masking-threshold computation** - combines ATH, band energies, masker
 //!    classification, and the spreading function to produce a per-band threshold
 //!    and signal-to-mask ratio.
 //!
 //! These primitives follow the general structure of the MPEG-1 psychoacoustic
 //! model (ISO 11172-3 Annex D) but are a simplification, not that model: the
-//! masker offsets are Johnston's (1988) constants (tonal 14.5 dB, noise 5.5 dB),
+//! masker offsets are constants taken from Johnston (1988) (tonal 14.5 dB, noise
+//! 5.5 dB; Johnston's tonal offset is 14.5 + z dB at Bark band z, so the
+//! constant is a simplification), a band's offset against its own energy is a
+//! separate 0.5 dB engineering choice (see the self-masking note below),
 //! the spreading function is two straight lines in dB/Bark (see
 //! [`spreading_attenuation`]; the default slopes invert the real upward/downward
 //! asymmetry), and the ATH is Terhardt's (1979) formula.
@@ -32,9 +36,9 @@ use non_empty_slice::NonEmptySlice;
 ///
 /// The masking effectiveness differs between masker types: noise-like maskers are
 /// *more* effective than tonal maskers (the asymmetry of masking). The masked
-/// threshold lies ≈ 5.5 dB below a noise masker but ≈ 14.5 dB below a tonal masker
-/// (Johnston 1988's offsets, used as the defaults here), so a larger offset means a
-/// *less* effective masker.
+/// threshold lies ≈ 5.5 dB below a noise masker but 14.5 + z dB below a tonal masker
+/// at Bark band z (Johnston 1988; the defaults here simplify the tonal offset to a
+/// constant 14.5 dB), so a larger offset means a *less* effective masker.
 ///
 /// Determined per-band by [`classify_masker_types`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +126,8 @@ pub fn absolute_threshold_of_hearing(freq_hz: f32) -> f32 {
 /// This means:
 ///
 /// - At zero distance: attenuation equals the masker-type gain. For tonal maskers
-///   this is `config.masking_gain` (e.g. 14.5 dB); for noise maskers it is
+///   this is `config.masking_gain` (e.g. 14.5 dB, a constant simplification of
+///   Johnston's 14.5 + z dB); for noise maskers it is
 ///   `config.noise_masking_gain` (e.g. 5.5 dB). A larger gain means the threshold
 ///   sits further below the masker, so the masker is *less* effective (noise
 ///   maskers, with the smaller offset, mask more).
@@ -176,14 +181,21 @@ pub fn spreading_attenuation(
 /// floor every band's masking threshold at `energy - base_gain` and hence floor
 /// its SMR at `base_gain` regardless of how isolated the band is.
 ///
-/// That is wrong: a band's energy does not strongly mask noise at its own
-/// frequency with the full inter-band offset. This implementation therefore uses a
-/// small dedicated self-masking offset instead of the inter-band gain: `0.5 dB`,
-/// meaning a band's self-generated masking threshold sits essentially at its own
-/// energy (the band can tolerate quantisation noise just below its own level).
-/// This keeps a strong, isolated band's SMR near 0 dB instead of pinning it at
-/// the inter-band gain, while still letting genuinely louder neighbouring bands
-/// raise the threshold via the cross-band spreading term.
+/// The textbook models do exactly that: Johnston (1988) places the threshold
+/// 14.5 + z dB (tonal) or 5.5 dB (noise) below the masker *in its own critical
+/// band*, and the MPEG-1 model 1 masking indices describe the same zero-distance
+/// case. Noise only 0.5 dB below a tone in the same band is clearly audible.
+///
+/// This implementation deliberately departs from those models as an engineering
+/// simplification for bit allocation: the `i == j` term uses a small dedicated
+/// offset of `0.5 dB` instead of the masker-type gain, so a band's
+/// self-generated threshold sits essentially at its own energy. Bits are then
+/// allocated mainly by cross-band spreading (genuinely louder neighbouring bands
+/// still raise the threshold) rather than by self-masking. The cost is that the
+/// SMR of an isolated tonal band is under-estimated by roughly 14.5 + z dB
+/// relative to Johnston: for a 60 dB tonal band at z = 10 Bark, Johnston's
+/// threshold is 35.5 dB (SMR 24.5 dB), whereas this model gives 59.5 dB
+/// (SMR 0.5 dB).
 const SELF_MASKING_OFFSET_DB: f32 = 0.5;
 
 // ── Band-metric computation ───────────────────────────────────────────────────
@@ -262,9 +274,9 @@ pub fn compute_band_metrics(
         .map(|j| {
             let dominated_by: f32 = (0..n_bands)
                 .map(|i| {
-                    // The `i == j` term is self-masking: a band does not mask
-                    // noise at its own frequency with the full inter-band gain,
-                    // so use a small dedicated offset instead of `base_gain`.
+                    // The `i == j` term is self-masking. Deliberate departure
+                    // from Johnston/MPEG-1 (see SELF_MASKING_OFFSET_DB): use a
+                    // small dedicated offset instead of `base_gain`.
                     let attenuation = if i == j {
                         SELF_MASKING_OFFSET_DB
                     } else {

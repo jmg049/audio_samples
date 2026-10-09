@@ -188,8 +188,8 @@ mod vad {
             if self.method == VadMethod::Spectral {
                 doc.add_warning(
                     WarningLevel::Problem,
-                    "VadMethod::Spectral is not implemented: voice_activity_mask returns an error.",
-                    "Use Energy or Combined.",
+                    "VadMethod::Spectral (Python: VadMethod.spectral) is not implemented: voice_activity_mask returns an error.",
+                    "Use the Energy or Combined method.",
                 );
             }
             if let Err(e) = self.validate() {
@@ -211,8 +211,16 @@ mod vad {
                 "audio_samples::AudioVoiceActivityDetection::voice_activity_mask",
             )
             .add_see_also(
+                "Mask (Python)",
+                "audio_samples.AudioSamples.voice_activity_mask",
+            )
+            .add_see_also(
                 "Regions",
                 "audio_samples::AudioVoiceActivityDetection::speech_regions",
+            )
+            .add_see_also(
+                "Regions (Python)",
+                "audio_samples.AudioSamples.speech_regions",
             )
             .add_see_also("Python", "audio_samples.VadConfig.explain");
             doc
@@ -230,7 +238,11 @@ mod onset {
             let h = self.hop_size.get();
             let cqt = &self.cqt_params;
             let n_bins = cqt.bins_per_octave.get() * cqt.n_octaves.get();
-            let f_top = cqt.f_min * 2f64.powf(cqt.n_octaves.get() as f64);
+            // Highest bin centre: f_min 2^{(BO-1)/B}, the last term of the bin formula below
+            // (the same values as `CqtParams::frequencies`).
+            let f_top =
+                cqt.f_min * 2f64.powf((n_bins - 1) as f64 / cqt.bins_per_octave.get() as f64);
+            let q = cqt.q_factor;
             let mut doc = ExplainDoc::new(Topic::Onsets, "Onset detection (CQT energy flux)");
             doc.add_formula(
                 r"N_w = \left\lfloor \frac{4 f_s}{f_{min}} \right\rfloor",
@@ -262,7 +274,8 @@ mod onset {
                     cqt.bins_per_octave.get().to_string(),
                     "",
                 )
-                .add_symbol_value("O", "octaves", cqt.n_octaves.get().to_string(), "");
+                .add_symbol_value("O", "octaves", cqt.n_octaves.get().to_string(), "")
+                .add_symbol_value("Q", "CQT quality factor f_b / bandwidth", fmt_num(q), "");
             if self.adaptive_threshold {
                 doc.add_symbol_value(
                     r"\mu",
@@ -280,10 +293,10 @@ mod onset {
             doc.add_quantity("CQT bins", "B O", n_bins as f64, "", "B O")
                 .add_quantity(
                     "Highest CQT frequency",
-                    r"f_{min} 2^{O}",
+                    r"f_{min} 2^{(BO-1)/B}",
                     f_top,
                     "Hz",
-                    r"f_{min} 2^{O}",
+                    r"f_{min} 2^{(BO-1)/B}",
                 );
             let sep = self.peak_picking.min_peak_separation.get();
             match ctx.valid_sample_rate() {
@@ -322,10 +335,43 @@ mod onset {
                         "ms",
                         r"1000 s H / f_s",
                     );
-                    if f_top > fs / 2.0 {
+                    // Kernel length per bin is round(Q f_s / f_b), capped at the analysis window
+                    // (the `spectrograms` CQT kernels are generated with n_fft = N_w).
+                    let ideal_lowest = q * fs / cqt.f_min;
+                    doc.add_quantity(
+                        "Ideal kernel length at f_min",
+                        r"Q f_s / f_{min}",
+                        ideal_lowest,
+                        "samples",
+                        r"Q f_s / f_{min}",
+                    );
+                    let n_truncated = (0..n_bins)
+                        .map(|b| cqt.f_min * 2f64.powf(b as f64 / cqt.bins_per_octave.get() as f64))
+                        .filter(|&f_b| f_b < fs / 2.0 && (q * fs / f_b).round() > n_w as f64)
+                        .count();
+                    doc.add_quantity(
+                        "Truncated low bins",
+                        r"\mathrm{count}(Q f_s / f_b > N_w)",
+                        n_truncated as f64,
+                        "bins",
+                        r"\text{count of bins whose kernel exceeds } N_w",
+                    );
+                    if n_truncated > 0 {
+                        doc.add_warning(
+                            WarningLevel::Info,
+                            format!(
+                                "The lowest {n_truncated} bin(s) (below about {} Hz) need kernels longer than the {n_w}-sample window (up to {} samples at f_min with Q = {}); their kernels are cut to {n_w} samples, so those bins are wider than constant-Q.",
+                                fmt_num(q * fs / n_w as f64),
+                                fmt_num(ideal_lowest.round()),
+                                fmt_num(q)
+                            ),
+                            "Set a longer window_size, or a lower Q, if low-frequency resolution matters.",
+                        );
+                    }
+                    if f_top >= fs / 2.0 {
                         doc.add_warning(
                             WarningLevel::Caution,
-                            format!("The CQT reaches {} Hz, above the Nyquist frequency ({} Hz); the top bins see only aliased or no energy.", fmt_num(f_top), fmt_num(fs / 2.0)),
+                            format!("The highest CQT bin centre ({} Hz) is at or above the Nyquist frequency ({} Hz); the CQT drops every bin from the first one at or above Nyquist, so it returns fewer than B O bins.", fmt_num(f_top), fmt_num(fs / 2.0)),
                             "Reduce n_octaves or raise the sample rate.",
                         );
                     }
@@ -339,18 +385,22 @@ mod onset {
                         "Choose min_peak_separation = (desired seconds) × f_s / hop_size.",
                     );
                     doc.set_summary(format!(
-                        "A {}-sample ({} ms) window is hopped every {h} samples ({} ms); {n_bins} constant-Q bins from {} Hz feed a rectified \
+                        "A {}-sample ({} ms) window is hopped every {h} samples ({} ms); {n_bins} constant-Q bins (Q = {}) from {} Hz to {} Hz feed a rectified \
                          spectral-increase onset function whose peaks are reported as onset times.",
                         n_w,
                         fmt_num(1000.0 * n_w as f64 / fs),
                         fmt_num(1000.0 * h as f64 / fs),
-                        fmt_num(cqt.f_min)
+                        fmt_num(q),
+                        fmt_num(cqt.f_min),
+                        fmt_num(f_top)
                     ));
                 }
                 None => {
                     doc.set_summary(format!(
-                        "{n_bins} constant-Q bins from {} Hz feed a rectified spectral-increase onset function computed every {h} samples; its peaks are the onsets.",
-                        fmt_num(cqt.f_min)
+                        "{n_bins} constant-Q bins (Q = {}) from {} Hz to {} Hz feed a rectified spectral-increase onset function computed every {h} samples; its peaks are the onsets.",
+                        fmt_num(q),
+                        fmt_num(cqt.f_min),
+                        fmt_num(f_top)
                     ));
                     note_missing_sample_rate(&mut doc);
                 }
@@ -379,8 +429,16 @@ mod onset {
                 "audio_samples::AudioOnsetDetection::detect_onsets",
             )
             .add_see_also(
+                "Detect (Python)",
+                "audio_samples.AudioSamples.detect_onsets",
+            )
+            .add_see_also(
                 "Onset function",
                 "audio_samples::AudioOnsetDetection::onset_detection_function",
+            )
+            .add_see_also(
+                "Onset function (Python)",
+                "audio_samples.AudioSamples.onset_detection_function",
             )
             .add_see_also(
                 "Python",
@@ -441,5 +499,37 @@ mod tests {
         let expected = 1000.0 * c.peak_picking.min_peak_separation.get() as f64 * 256.0 / 44_100.0;
         assert!((sep_ms - expected).abs() < 1e-9);
         assert!(d.has_warning_containing("not read by detect_onsets"));
+    }
+
+    #[cfg(feature = "onset-detection")]
+    #[test]
+    fn onset_cqt_top_frequency_q_and_truncation_match_parameters() {
+        use crate::operations::onset::OnsetDetectionConfig;
+        let c = OnsetDetectionConfig::percussive();
+        let fs = 16_000.0;
+        let d = c.explain_with(&ExplainContext::new().with_sample_rate(fs));
+        // Top centre is the last element of the spectrograms crate's own bin list.
+        let freqs = c.cqt_params.frequencies();
+        let last = *freqs.iter().last().unwrap();
+        let top = d.quantity("Highest CQT frequency").unwrap().value;
+        assert!((top - last).abs() < 1e-9, "{top} vs {last}");
+        // 12 bins/oct, 7 octaves from 32.7 Hz: 32.7 * 2^(83/12) = 3950.7 Hz.
+        assert!((top - 3950.7).abs() < 0.1, "{top}");
+        assert!(d.symbols.iter().any(|s| s.symbol == "Q"
+            && s.value.as_deref() == Some(fmt_num(c.cqt_params.q_factor).as_str())));
+        // Independent count: bins with round(Q fs / f_b) > N_w.
+        let n_w = c.effective_window_size(fs).get() as f64;
+        let q = c.cqt_params.q_factor;
+        let expected = freqs
+            .iter()
+            .filter(|&&f| (q * fs / f).round() > n_w)
+            .count();
+        assert_eq!(expected, 25);
+        assert_eq!(
+            d.quantity("Truncated low bins").unwrap().value as usize,
+            expected
+        );
+        assert!(d.has_warning_containing("cut to"));
+        assert!(d.summary.contains("to 3950.68 Hz"), "{}", d.summary);
     }
 }
