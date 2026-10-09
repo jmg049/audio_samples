@@ -73,7 +73,7 @@
 //! | `pitch-analysis` | YIN and autocorrelation pitch detection (implies `transforms`) |
 //! | `vad` | Voice activity detection |
 //! | `psychoacoustic` | Psychoacoustic analysis: Bark/Mel band layouts, ATH, masking thresholds, SMR (implies `transforms`) |
-//! | `resampling` | High-quality resampling via the `rubato` crate |
+//! | `resampling` | Delay-free windowed-sinc sample-rate conversion (whole-buffer and streaming) |
 //! | `plotting` | Signal plotting via `plotly` |
 //! | `fixed-size-audio` | Stack-allocated fixed-size audio buffers |
 //! | `random-generation` | Noise generators and stochastic signal sources (implies `rand`) |

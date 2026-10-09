@@ -913,7 +913,9 @@ where
 
     /// Resamples audio to a new sample rate using high-quality resampling.
     ///
-    /// Delegates to the `rubato` resampling library. The `quality` parameter
+    /// Uses the crate's windowed-sinc resampler (see [`crate::resampling`]): the
+    /// output is time-aligned with the input and has exactly
+    /// `ceil(n · target / input)` samples per channel. The `quality` parameter
     /// controls the trade-off between speed and output fidelity.
     ///
     /// # Arguments
@@ -966,7 +968,9 @@ where
     /// The output length is scaled by `ratio` relative to the input. A ratio
     /// of 2.0 doubles the sample count; 0.5 halves it.
     ///
-    /// Delegates to the `rubato` resampling library. The `quality` parameter
+    /// Uses the crate's windowed-sinc resampler (see [`crate::resampling`]): the
+    /// output is time-aligned with the input and has exactly
+    /// `ceil(n · target / input)` samples per channel. The `quality` parameter
     /// controls the trade-off between speed and output fidelity.
     ///
     /// # Arguments

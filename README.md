@@ -193,7 +193,7 @@ dependencies. Enable the rest as needed.
 
 | Feature             | Description                                                          |
 | ------------------- | -------------------------------------------------------------------- |
-| `resampling`        | Sample-rate conversion via rubato                                    |
+| `resampling`        | Delay-free windowed-sinc sample-rate conversion                      |
 | `random-generation` | White, pink, and brown noise generators                              |
 | `fixed-size-audio`  | Stack-allocated fixed-size buffers                                   |
 | `plotting`          | Interactive HTML plots (waveform, spectrum, phase, spectrogram, Lissajous) via plotly |

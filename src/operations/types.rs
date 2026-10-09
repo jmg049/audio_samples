@@ -1090,12 +1090,18 @@ impl Default for VadConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum ResamplingQuality {
-    /// Fast but lower quality resampling.
+    /// Fast but lower quality resampling: linear interpolation when
+    /// upsampling (images are not suppressed), a short anti-aliasing
+    /// windowed-sinc filter (passband 0.80 · Nyquist, 70 dB stopband) when
+    /// downsampling.
     #[default]
     Fast,
-    /// Balanced speed and quality.
+    /// Balanced speed and quality: windowed sinc, passband 0.90 · Nyquist,
+    /// 100 dB stopband.
     Medium,
-    /// Highest quality but slower resampling.
+    /// Highest quality but slower resampling: windowed sinc, passband
+    /// 0.913 · Nyquist, 125 dB stopband (close to librosa's default
+    /// `soxr_hq`).
     High,
 }
 

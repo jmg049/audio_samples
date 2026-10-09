@@ -1,124 +1,909 @@
-//! Module for handling audio sample resampling operations.
-//! Uses linear interpolation for the Fast path and rubato's FFT resampler for Medium/High quality.
+//! Sample-rate conversion for [`AudioSamples`].
+//!
+//! This module converts audio between sample rates, either all at once
+//! ([`resample`], [`resample_by_ratio`]) or chunk by chunk for live sources
+//! ([`StreamingResampler`]).
+//!
+//! Sample-rate conversion is needed whenever audio from different sources is
+//! combined, or when an analysis expects a fixed rate (e.g. 16 kHz speech
+//! models, librosa's 22.05 kHz default). Done naively it either aliases
+//! (dropping samples) or shifts the signal in time (a filter delay that is not
+//! compensated); both corrupt any later sample-accurate comparison.
+//!
+//! All quality tiers except `Fast` upsampling use a Kaiser-windowed sinc
+//! interpolator evaluated at the exact rational position of every output
+//! sample: output `k` is the band-limited reconstruction of the input at time
+//! `k · in_rate / out_rate`. The filter is symmetric (linear phase) and centred
+//! on that position, so the output is time-aligned with the input (no delay to
+//! trim), input before the start and after the end is treated as zeros (so the
+//! tail is flushed), and the output always has exactly
+//! `ceil(n · out_rate / in_rate)` samples. The filter cut-off is placed just
+//! below the Nyquist frequency of the lower of the two rates, so downsampling
+//! is anti-aliased and upsampling is anti-imaged. Processing is done in `f64`.
+//!
+//! | Quality | Passband edge | Stopband | Use |
+//! |---|---|---|---|
+//! | `Fast` (downsampling) | 0.80 · Nyquist | 70 dB from Nyquist | cheap anti-aliased decimation |
+//! | `Fast` (upsampling) | linear interpolation | none | cheapest; images are not suppressed |
+//! | `Medium` | 0.90 · Nyquist | 100 dB from Nyquist | general use |
+//! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis; close to `librosa.resample` (`soxr_hq`) |
+//!
+//! (Nyquist of the lower of the two rates.) Where the ratio
+//! `out_rate / in_rate = L / M` (in lowest terms) has a small enough `L`, one
+//! exact filter phase is precomputed per output phase; otherwise the filter is
+//! tabulated at 4096 phases per sample and linearly interpolated (error below
+//! -120 dB). Filter tables are cached per thread.
+//!
+//! # Differences from librosa
+//!
+//! `librosa.resample` (default `res_type="soxr_hq"`) delegates to the soxr C
+//! library, a different filter design; `High` follows soxr-hq's passband
+//! (91.3 % of Nyquist) and attenuation, so the two agree closely on band-limited
+//! content (see `tests/librosa_reference/resample.rs` for measured agreement)
+//! but are not bit-identical. librosa computes the output length as
+//! `ceil(n * target_sr / orig_sr)` in floating point, which can exceed the exact
+//! value by one sample (e.g. 96001 instead of 96000 for 88200 samples from
+//! 44100 Hz to 48000 Hz); this module uses exact integer arithmetic. librosa
+//! accepts fractional sample rates and a `scale` option; this module does not.
+//!
+//! ```
+//! use audio_samples::{AudioSamples, resample, sample_rate};
+//! use audio_samples::operations::types::ResamplingQuality;
+//! use ndarray::Array1;
+//!
+//! let x = Array1::from_iter((0..44100).map(|i| (i as f64 * 0.01).sin()));
+//! let audio = AudioSamples::new_mono(x, sample_rate!(44100)).unwrap();
+//! let y = resample(&audio, sample_rate!(16000), ResamplingQuality::High).unwrap();
+//! assert_eq!(y.samples_per_channel().get(), 16000);
+//! ```
 
 use crate::{
     AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
-    ProcessingError,
     operations::types::ResamplingQuality,
     repr::{ChannelCount, SampleRate},
     traits::StandardSample,
 };
-use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use non_empty_slice::NonEmptyVec;
-use rubato::{
-    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
-};
 use std::cell::RefCell;
 use std::collections::HashMap;
-
-// Block size handed to rubato's async sinc resampler per `process` call.
-// With `FixedAsync::Input` the resampler consumes exactly this many input
-// frames per call and emits a variable number of output frames. Output quality
-// is governed by the sinc interpolation parameters (see `resample_medium` /
-// `resample_high`), not by the chunk size, so a modest fixed chunk keeps
-// latency and scratch buffers small while still amortising per-call overhead.
-const RESAMPLE_CHUNK: usize = 1024;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// Per-thread FFT resampler cache
+// Windowed-sinc interpolation kernel
 // ---------------------------------------------------------------------------
-//
-// Building a rubato sinc Async resampler precomputes the windowed-sinc filter
-// table at construction time.  Caching one Async<f32> per (in_sr, out_sr,
-// channels, quality) tuple avoids that overhead on repeated calls with the same
-// parameters (e.g. processing a batch of clips at the same sample rates).
-//
-// Thread-local storage means no locking overhead.  Async<f32> does not
-// implement Default, so we use HashMap::remove / re-insert to move ownership
-// in and out of the cache around each call.  On reuse, Resampler::reset()
-// clears the delay line and internal state while preserving the filter table.
+
+/// Largest `L` (output phases per input period) for which every phase gets its
+/// own exact filter row.
+const MAX_EXACT_PHASES: u64 = 4096;
+/// Upper bound on the size of an exact polyphase table (entries).
+const MAX_TABLE_ENTRIES: u64 = 1 << 22;
+/// Phase resolution of the interpolated table used for awkward ratios.
+const INTERP_PHASES: usize = 4096;
+
+/// Low-pass specification, relative to the Nyquist frequency of the lower of
+/// the two sample rates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FilterSpec {
+    /// End of the passband (fraction of Nyquist).
+    passband: f64,
+    /// Start of the stopband (fraction of Nyquist).
+    stopband: f64,
+    /// Stopband attenuation in dB (sets the Kaiser window's beta and length).
+    attenuation_db: f64,
+}
+
+/// What kind of interpolation kernel a quality tier uses for a given ratio.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum KernelKind {
+    /// Kaiser-windowed sinc.
+    Sinc(FilterSpec),
+    /// Two-tap linear interpolation (`Fast` upsampling). The end of the signal
+    /// is extended by holding the last sample rather than with zeros.
+    Linear,
+}
+
+fn kernel_kind(quality: ResamplingQuality, in_sr: u32, out_sr: u32) -> KernelKind {
+    match quality {
+        ResamplingQuality::Fast if out_sr >= in_sr => KernelKind::Linear,
+        ResamplingQuality::Fast => KernelKind::Sinc(FilterSpec {
+            passband: 0.80,
+            stopband: 1.0,
+            attenuation_db: 70.0,
+        }),
+        ResamplingQuality::Medium => KernelKind::Sinc(FilterSpec {
+            passband: 0.90,
+            stopband: 1.0,
+            attenuation_db: 100.0,
+        }),
+        ResamplingQuality::High => KernelKind::Sinc(FilterSpec {
+            passband: 0.913,
+            stopband: 1.0,
+            attenuation_db: 125.0,
+        }),
+    }
+}
+
+/// Zeroth-order modified Bessel function of the first kind (power series).
+fn bessel_i0(x: f64) -> f64 {
+    let q = x * x / 4.0;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut k = 1.0;
+    while term > sum * 1e-17 {
+        term *= q / (k * k);
+        sum += term;
+        k += 1.0;
+    }
+    sum
+}
+
+/// Kaiser's empirical beta for a given stopband attenuation (dB).
+fn kaiser_beta(attenuation_db: f64) -> f64 {
+    if attenuation_db > 50.0 {
+        0.1102 * (attenuation_db - 8.7)
+    } else if attenuation_db >= 21.0 {
+        0.5842 * (attenuation_db - 21.0).powf(0.4) + 0.07886 * (attenuation_db - 21.0)
+    } else {
+        0.0
+    }
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Polyphase interpolation table for one `(in_rate, out_rate, quality)`.
+///
+/// Output sample `k` sits at input position `t = k · M / L`. With
+/// `n0 = floor(t)` and phase `p = (k · M) mod L`, it is the dot product of the
+/// `taps` input samples `x[n0 - half + 1 ..= n0 + half]` with the row for `p`,
+/// where row entry `j` is `h(p / L - (j - half + 1))`.
+#[derive(Debug)]
+struct Kernel {
+    /// Output samples per period (`out_rate / gcd`).
+    l: u64,
+    /// Input samples per period (`in_rate / gcd`).
+    m: u64,
+    /// Taps on each side of the interpolation point.
+    half: usize,
+    /// Row length (`2 · half`).
+    taps: usize,
+    /// `true`: one row per phase `p`; `false`: `INTERP_PHASES + 1` rows over
+    /// `[0, 1]`, linearly interpolated.
+    exact: bool,
+    /// Row-major coefficients.
+    coeffs: Vec<f64>,
+    /// Whether the signal end is extended by holding the last sample.
+    hold_last: bool,
+    /// Use the AVX2 + FMA dot product.
+    avx2_fma: bool,
+}
+
+impl Kernel {
+    fn new(in_sr: u32, out_sr: u32, kind: KernelKind) -> Self {
+        let g = gcd(u64::from(in_sr), u64::from(out_sr));
+        let l = u64::from(out_sr) / g;
+        let m = u64::from(in_sr) / g;
+
+        // Continuous kernel h(tau), tau in input samples, and its support.
+        let (half, h): (usize, Box<dyn Fn(f64) -> f64>) = match kind {
+            KernelKind::Linear => (1, Box::new(|tau: f64| (1.0 - tau.abs()).max(0.0))),
+            KernelKind::Sinc(spec) => {
+                // Bandwidth of the lower rate relative to the input rate.
+                let lower = (l as f64 / m as f64).min(1.0);
+                // -6 dB point midway through the transition band, as a
+                // fraction of the input Nyquist frequency.
+                let cutoff = 0.5 * (spec.passband + spec.stopband) * lower;
+                // Kaiser length estimate (in lower-rate samples) for the
+                // requested attenuation and transition width.
+                let transition = std::f64::consts::PI * (spec.stopband - spec.passband);
+                let length = (spec.attenuation_db - 7.95) / (2.285 * transition);
+                let half_lower = (length / 2.0).ceil();
+                let support = half_lower / lower;
+                let beta = kaiser_beta(spec.attenuation_db);
+                let i0_beta = bessel_i0(beta);
+                let h = move |tau: f64| -> f64 {
+                    let r = tau / support;
+                    if r.abs() >= 1.0 {
+                        return 0.0;
+                    }
+                    let window = bessel_i0(beta * (1.0 - r * r).sqrt()) / i0_beta;
+                    let x = std::f64::consts::PI * cutoff * tau;
+                    let sinc = if x == 0.0 { 1.0 } else { x.sin() / x };
+                    cutoff * sinc * window
+                };
+                // Round the half-width up to a multiple of 8 so rows are a
+                // whole number of 16-wide SIMD blocks (the extra taps are 0).
+                ((support.ceil() as usize).next_multiple_of(8), Box::new(h))
+            }
+        };
+        let taps = 2 * half;
+        let exact = l <= MAX_EXACT_PHASES && l * taps as u64 <= MAX_TABLE_ENTRIES;
+        let (rows, denom) = if exact {
+            (l as usize, l as f64)
+        } else {
+            (INTERP_PHASES + 1, INTERP_PHASES as f64)
+        };
+        let mut coeffs = Vec::with_capacity(rows * taps);
+        for row in 0..rows {
+            let phi = row as f64 / denom;
+            for j in 0..taps {
+                let offset = j as f64 - (half as f64 - 1.0);
+                coeffs.push(h(phi - offset));
+            }
+        }
+        Self {
+            l,
+            m,
+            half,
+            taps,
+            exact,
+            coeffs,
+            hold_last: matches!(kind, KernelKind::Linear),
+            avx2_fma: has_avx2_fma(),
+        }
+    }
+
+    /// Integer part and phase of output `k`'s input position.
+    #[inline]
+    fn position(&self, k: u64) -> (u64, u64) {
+        let num = u128::from(k) * u128::from(self.m);
+        let l = u128::from(self.l);
+        ((num / l) as u64, (num % l) as u64)
+    }
+
+    /// Number of output samples for `n` input samples: `ceil(n · L / M)`.
+    #[inline]
+    fn output_len(&self, n: u64) -> u64 {
+        let num = u128::from(n) * u128::from(self.l);
+        num.div_ceil(u128::from(self.m)) as u64
+    }
+
+    /// Interpolates one output sample from `window` (`taps` input samples
+    /// starting at `n0 - half + 1`) at phase `p`.
+    #[inline]
+    fn eval(&self, window: &[f64], p: u64) -> f64 {
+        let taps = self.taps;
+        if self.exact {
+            let row = &self.coeffs[p as usize * taps..(p as usize + 1) * taps];
+            dot(row, window, self.avx2_fma)
+        } else {
+            let pos = p as f64 / self.l as f64 * INTERP_PHASES as f64;
+            let i = (pos.floor() as usize).min(INTERP_PHASES - 1);
+            let frac = pos - i as f64;
+            let r0 = &self.coeffs[i * taps..(i + 1) * taps];
+            let r1 = &self.coeffs[(i + 1) * taps..(i + 2) * taps];
+            (1.0 - frac) * dot(r0, window, self.avx2_fma) + frac * dot(r1, window, self.avx2_fma)
+        }
+    }
+}
+
+/// Dot product with eight independent accumulators (vectorises well).
+#[inline(always)]
+fn dot_portable(a: &[f64], b: &[f64]) -> f64 {
+    let mut acc = [0.0f64; 8];
+    let ca = a.chunks_exact(8);
+    let cb = b.chunks_exact(8);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for i in 0..8 {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    let mut sum = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
+    for (x, y) in ra.iter().zip(rb) {
+        sum += x * y;
+    }
+    sum
+}
+
+/// [`dot_portable`] compiled for AVX2 + FMA (fused multiply-adds, four `f64`
+/// lanes per register).
+///
+/// # Safety
+/// The CPU must support `avx2` and `fma` (checked once in [`Kernel::new`]).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_avx2_fma(a: &[f64], b: &[f64]) -> f64 {
+    let mut acc = [0.0f64; 16];
+    let ca = a.chunks_exact(16);
+    let cb = b.chunks_exact(16);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for i in 0..16 {
+            acc[i] = x[i].mul_add(y[i], acc[i]);
+        }
+    }
+    let mut sum = 0.0;
+    for v in acc {
+        sum += v;
+    }
+    for (x, y) in ra.iter().zip(rb) {
+        sum = x.mul_add(*y, sum);
+    }
+    sum
+}
+
+/// Whether the AVX2 + FMA dot product can be used on this CPU.
+fn has_avx2_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+#[inline]
+fn dot(a: &[f64], b: &[f64], avx2_fma: bool) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if avx2_fma {
+        // SAFETY: `avx2_fma` is only true when the CPU supports AVX2 and FMA.
+        return unsafe { dot_avx2_fma(a, b) };
+    }
+    let _ = avx2_fma;
+    dot_portable(a, b)
+}
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
-struct ResamplerKey {
+struct KernelKey {
     in_sr: u32,
     out_sr: u32,
-    channels: usize,
-    quality: u8, // 1 = medium, 2 = high
+    quality: ResamplingQuality,
 }
 
 thread_local! {
-    static RESAMPLER_CACHE: RefCell<HashMap<ResamplerKey, Async<f32>>>
-        = RefCell::new(HashMap::new());
+    static KERNEL_CACHE: RefCell<HashMap<KernelKey, Arc<Kernel>>> = RefCell::new(HashMap::new());
 }
 
-fn with_cached_sinc_resampler<T>(
-    key: ResamplerKey,
-    make: impl FnOnce() -> AudioSampleResult<Async<f32>>,
-    f: impl FnOnce(&mut Async<f32>) -> AudioSampleResult<T>,
-) -> AudioSampleResult<T> {
-    RESAMPLER_CACHE.with(|cell| -> AudioSampleResult<()> {
-        let mut map = cell.borrow_mut();
-        if let std::collections::hash_map::Entry::Vacant(e) = map.entry(key) {
-            e.insert(make()?);
+/// Returns the (per-thread cached) kernel for a rate pair and quality.
+fn cached_kernel(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Arc<Kernel> {
+    let key = KernelKey {
+        in_sr,
+        out_sr,
+        quality,
+    };
+    KERNEL_CACHE.with(|cell| {
+        Arc::clone(cell.borrow_mut().entry(key).or_insert_with(|| {
+            Arc::new(Kernel::new(
+                in_sr,
+                out_sr,
+                kernel_kind(quality, in_sr, out_sr),
+            ))
+        }))
+    })
+}
+
+/// Incremental polyphase resampling state shared by the whole-buffer and the
+/// streaming paths, so both produce identical output for the same input.
+///
+/// Each channel buffer holds input samples from absolute index `buf_start`
+/// on; the signal before index 0 is zeros (pre-filled).
+#[derive(Debug)]
+struct PolyphaseState {
+    kernel: Arc<Kernel>,
+    buffers: Vec<Vec<f64>>,
+    /// Absolute input index of `buffers[c][0]`.
+    buf_start: i64,
+    /// Next output index to produce.
+    next_out: u64,
+    /// Total input samples received per channel.
+    received: u64,
+    /// Last input sample per channel (for `hold_last` kernels).
+    last: Vec<f64>,
+}
+
+impl PolyphaseState {
+    fn new(kernel: Arc<Kernel>, channels: usize) -> Self {
+        let half = kernel.half;
+        Self {
+            buffers: vec![vec![0.0; half]; channels],
+            buf_start: -(half as i64),
+            next_out: 0,
+            received: 0,
+            last: vec![0.0; channels],
+            kernel,
         }
-        Ok(())
+    }
+
+    fn reset(&mut self) {
+        let half = self.kernel.half;
+        for b in &mut self.buffers {
+            b.clear();
+            b.resize(half, 0.0);
+        }
+        self.buf_start = -(half as i64);
+        self.next_out = 0;
+        self.received = 0;
+        self.last.fill(0.0);
+    }
+
+    /// Appends one block of input (one slice per channel, equal lengths).
+    fn push(&mut self, input: &[&[f64]]) {
+        for ((buf, src), last) in self.buffers.iter_mut().zip(input).zip(&mut self.last) {
+            buf.extend_from_slice(src);
+            if let Some(&v) = src.last() {
+                *last = v;
+            }
+        }
+        self.received += input.first().map_or(0, |c| c.len()) as u64;
+    }
+
+    /// Produces every output sample whose input window lies before absolute
+    /// index `available` (exclusive), stopping at output index `limit`, then
+    /// discards input that is no longer needed.
+    fn produce(&mut self, available: i64, limit: Option<u64>) -> Vec<Vec<f64>> {
+        let kernel = Arc::clone(&self.kernel);
+        let half = kernel.half as i64;
+        let taps = kernel.taps;
+        let mut out: Vec<Vec<f64>> = vec![Vec::new(); self.buffers.len()];
+        // Step the position incrementally: output k + 1 is M / L input
+        // samples after output k.
+        let (step_int, step_frac) = ((kernel.m / kernel.l) as i64, kernel.m % kernel.l);
+        let (n0, mut p) = kernel.position(self.next_out);
+        let mut n0 = n0 as i64;
+        loop {
+            if limit.is_some_and(|lim| self.next_out >= lim) || n0 + half >= available {
+                break;
+            }
+            let start = (n0 - half + 1 - self.buf_start) as usize;
+            for (buf, o) in self.buffers.iter().zip(out.iter_mut()) {
+                o.push(kernel.eval(&buf[start..start + taps], p));
+            }
+            self.next_out += 1;
+            n0 += step_int;
+            p += step_frac;
+            if p >= kernel.l {
+                p -= kernel.l;
+                n0 += 1;
+            }
+        }
+        // Keep from the first sample the next output needs.
+        let keep_from = (n0 - half + 1).max(self.buf_start);
+        let drop = ((keep_from - self.buf_start) as usize).min(self.buffers[0].len());
+        if drop > 0 {
+            for buf in &mut self.buffers {
+                buf.drain(..drop);
+            }
+            self.buf_start += drop as i64;
+        }
+        out
+    }
+
+    /// Produces what the input so far allows (the look-ahead of `half`
+    /// samples is held back until more input or [`finish`](Self::finish)).
+    fn process(&mut self, input: &[&[f64]]) -> Vec<Vec<f64>> {
+        self.push(input);
+        let available = self.received as i64;
+        self.produce(available, None)
+    }
+
+    /// Flushes the tail: extends the input (zeros, or the held last sample for
+    /// linear interpolation) and produces the remaining outputs, so that the
+    /// total output is exactly `ceil(received · L / M)` samples.
+    fn finish(&mut self) -> Vec<Vec<f64>> {
+        let half = self.kernel.half;
+        let hold = self.kernel.hold_last;
+        for (buf, &last) in self.buffers.iter_mut().zip(&self.last) {
+            let pad = if hold { last } else { 0.0 };
+            buf.extend(std::iter::repeat_n(pad, half));
+        }
+        let available = self.received as i64 + half as i64;
+        let total = self.kernel.output_len(self.received);
+        self.produce(available, Some(total))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Whole-buffer resampling
+// ---------------------------------------------------------------------------
+
+/// Resamples audio to a new sample rate.
+///
+/// The output is time-aligned with the input (no filter delay) and has exactly
+/// `ceil(n · target_rate / input_rate)` samples per channel. See the
+/// [module documentation](self) for the filter used by each quality tier.
+///
+/// # Arguments
+/// - `audio` - The input audio samples (any channel count).
+/// - `target_sample_rate` - Desired output sample rate in Hz.
+/// - `quality` - Quality/performance trade-off setting.
+///
+/// # Returns
+/// A new `AudioSamples` instance at the target sample rate (a copy of the input
+/// if the rates are equal).
+///
+/// # Errors
+/// - [`crate::AudioSampleError::Parameter`] if the channel data cannot be read
+///   (never for well-formed audio).
+///
+/// # Examples
+/// ```
+/// use audio_samples::{AudioSamples, resample, sample_rate};
+/// use audio_samples::operations::types::ResamplingQuality;
+/// use ndarray::array;
+///
+/// let audio = AudioSamples::new_mono(array![1.0f32, 0.5, -0.5, -1.0], sample_rate!(44100)).unwrap();
+/// let resampled = resample(&audio, sample_rate!(48000), ResamplingQuality::High).unwrap();
+/// assert_eq!(resampled.sample_rate(), sample_rate!(48000));
+/// assert_eq!(resampled.samples_per_channel().get(), 5); // ceil(4 * 48000 / 44100)
+/// ```
+///
+/// # Differences from librosa
+/// See the [module documentation](self#differences-from-librosa).
+#[inline]
+pub fn resample<T>(
+    audio: &AudioSamples<T>,
+    target_sample_rate: SampleRate,
+    quality: ResamplingQuality,
+) -> AudioSampleResult<AudioSamples<'static, T>>
+where
+    T: StandardSample,
+{
+    if audio.sample_rate() == target_sample_rate {
+        return Ok(audio.clone().into_owned());
+    }
+
+    let in_sr = audio.sample_rate().get();
+    let out_sr = target_sample_rate.get();
+    match kernel_kind(quality, in_sr, out_sr) {
+        // Linear interpolation: dedicated (SIMD) loops, f32.
+        KernelKind::Linear => resample_linear(&audio.as_f32(), target_sample_rate),
+        KernelKind::Sinc(_) => {
+            let input = audio.as_f64();
+            let data = extract_channel_data(&input)?;
+            let kernel = cached_kernel(in_sr, out_sr, quality);
+            let mut state = PolyphaseState::new(kernel, data.len());
+            let slices: Vec<&[f64]> = data.iter().map(Vec::as_slice).collect();
+            let mut out = state.process(&slices);
+            for (o, tail) in out.iter_mut().zip(state.finish()) {
+                o.extend(tail);
+            }
+            let frames = out[0].len();
+            assemble_output(out, frames, audio.num_channels(), target_sample_rate)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fast upsampling - linear interpolation
+// ---------------------------------------------------------------------------
+//
+// Zero construction overhead. Output sample `k` is the straight-line
+// interpolation of the input at position `k · in_rate / out_rate`, holding the
+// last sample past the end. Integer ratios (e.g. 22050 → 44100) are
+// special-cased so the inner loop vectorises. Only used for upsampling: the
+// triangle kernel does not suppress images, which is acceptable for the Fast
+// preset; downsampling always goes through the anti-aliased sinc kernel.
+
+fn resample_linear<T>(
+    audio: &AudioSamples<f32>,
+    target_sample_rate: SampleRate,
+) -> AudioSampleResult<AudioSamples<'static, T>>
+where
+    T: StandardSample,
+{
+    let in_sr = audio.sample_rate().get();
+    let out_sr = target_sample_rate.get();
+    let in_frames = audio.samples_per_channel().get();
+    let out_frames = (in_frames as u64 * out_sr as u64).div_ceil(in_sr as u64) as usize;
+
+    let process_channel = |src: &[f32], dst: &mut [f32]| {
+        if out_sr.is_multiple_of(in_sr) {
+            // Integer upsampling by N.
+            let n = (out_sr / in_sr) as usize;
+
+            // n=2 hot path: SSE2 interleave + midpoint average, 8 output
+            // samples per instruction pair.
+            #[cfg(target_arch = "x86_64")]
+            if n == 2 {
+                // SAFETY: SSE2 is mandated by the x86_64 ABI.
+                unsafe {
+                    upsample_by_2_simd(src, dst);
+                }
+                return;
+            }
+
+            // General N: linear interpolation across N-wide output chunks.
+            let step_f32 = 1.0f32 / n as f32;
+            let safe_in = src.len().saturating_sub(1);
+            let safe_out = safe_in * n;
+            let split = safe_out.min(dst.len());
+            let (main, tail) = dst.split_at_mut(split);
+
+            for (in_i, out_chunk) in main.chunks_exact_mut(n).enumerate() {
+                let s0 = src[in_i];
+                let s1 = src[in_i + 1]; // always valid: in_i < safe_in
+                let diff = s1 - s0;
+                for (k, out_s) in out_chunk.iter_mut().enumerate() {
+                    *out_s = s0 + k as f32 * step_f32 * diff;
+                }
+            }
+            let last_s = src.last().copied().unwrap_or(0.0);
+            tail.fill(last_s);
+        } else {
+            // General fractional ratio.
+            let step = in_sr as f64 / out_sr as f64;
+            let last = src.len() - 1;
+            for (out_i, out_s) in dst.iter_mut().enumerate() {
+                let pos = out_i as f64 * step;
+                let i0 = pos as usize;
+                let i1 = (i0 + 1).min(last);
+                let frac = (pos - i0 as f64) as f32;
+                *out_s = src[i0] + frac * (src[i1] - src[i0]);
+            }
+        }
+    };
+
+    let input = extract_channel_data(audio)?;
+    let output: Vec<Vec<f32>> = input
+        .iter()
+        .map(|src| {
+            let mut dst = vec![0.0f32; out_frames];
+            process_channel(src, &mut dst);
+            dst
+        })
+        .collect();
+
+    assemble_output(output, out_frames, audio.num_channels(), target_sample_rate)
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (chunk-by-chunk) resampling
+// ---------------------------------------------------------------------------
+
+/// Stateful resampler for continuous, chunk-by-chunk resampling of a live audio
+/// stream.
+///
+/// Construct once per stream with [`new`](Self::new) and feed it via
+/// [`process_chunk`](Self::process_chunk) as chunks arrive. Each call returns
+/// every output sample whose input is already known: the interpolation filter
+/// needs a short look-ahead (up to a few hundred input samples for `High`), so
+/// the first call(s) may return `Ok(None)` and every call holds back that much
+/// input until more arrives. Output chunk sizes need not match input chunk
+/// sizes.
+///
+/// The stream uses the same filters and the same exact sample positions as
+/// [`resample`]: the output is time-aligned with the input (no delay), and
+/// after [`finish`](Self::finish) the concatenated output equals
+/// `resample(whole_input, ...)` up to floating-point rounding, with exactly
+/// `ceil(n · out_rate / in_rate)` samples in total.
+///
+/// [`reset`](Self::reset) clears all state - call it after a seek, since the
+/// buffered input no longer corresponds to a contiguous position in the stream.
+///
+/// # Examples
+/// ```
+/// use audio_samples::{AudioSamples, StreamingResampler, resample, sample_rate, channels};
+/// use audio_samples::operations::types::ResamplingQuality;
+/// use ndarray::Array1;
+///
+/// let x: Vec<f64> = (0..10_000).map(|i| (i as f64 * 0.05).sin()).collect();
+/// let mut stream = StreamingResampler::<f64>::new(
+///     sample_rate!(44100), sample_rate!(16000), channels!(1), ResamplingQuality::Medium,
+/// ).unwrap();
+/// let mut total = 0;
+/// for chunk in x.chunks(1000) {
+///     let piece = AudioSamples::new_mono(Array1::from(chunk.to_vec()), sample_rate!(44100)).unwrap();
+///     if let Some(out) = stream.process_chunk(&piece).unwrap() {
+///         total += out.samples_per_channel().get();
+///     }
+/// }
+/// if let Some(out) = stream.finish().unwrap() {
+///     total += out.samples_per_channel().get();
+/// }
+/// assert_eq!(total, 3629); // ceil(10000 * 16000 / 44100)
+/// ```
+#[derive(Debug)]
+pub struct StreamingResampler<T: StandardSample> {
+    state: PolyphaseState,
+    channels: usize,
+    channel_count: ChannelCount,
+    out_sample_rate: SampleRate,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: StandardSample> StreamingResampler<T> {
+    /// Create a streaming resampler from `in_sample_rate` to `out_sample_rate` for
+    /// `channels` channels of audio, at the given quality tier.
+    ///
+    /// # Errors
+    /// Currently infallible for valid (non-zero) rates and channel counts; the
+    /// `Result` is kept for API stability.
+    pub fn new(
+        in_sample_rate: SampleRate,
+        out_sample_rate: SampleRate,
+        channels: ChannelCount,
+        quality: ResamplingQuality,
+    ) -> AudioSampleResult<Self> {
+        let nbr_channels = channels.get() as usize;
+        let kernel = Arc::new(Kernel::new(
+            in_sample_rate.get(),
+            out_sample_rate.get(),
+            kernel_kind(quality, in_sample_rate.get(), out_sample_rate.get()),
+        ));
+        Ok(Self {
+            state: PolyphaseState::new(kernel, nbr_channels),
+            channels: nbr_channels,
+            channel_count: channels,
+            out_sample_rate,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    /// Sample rate this resampler produces.
+    pub fn output_sample_rate(&self) -> SampleRate {
+        self.out_sample_rate
+    }
+
+    /// Feed the next chunk of input audio (must have the channel count this
+    /// resampler was constructed with). Returns `Ok(None)` if no output sample
+    /// could be completed yet (the filter's look-ahead is not yet filled).
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the chunk's channel count
+    ///   differs from the configured one.
+    pub fn process_chunk(
+        &mut self,
+        chunk: &AudioSamples<T>,
+    ) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
+        if chunk.num_channels().get() as usize != self.channels {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "channels",
+                "chunk channel count does not match the resampler's configured channel count",
+            )));
+        }
+        let input = extract_channel_data(&chunk.as_f64())?;
+        let slices: Vec<&[f64]> = input.iter().map(Vec::as_slice).collect();
+        let out = self.state.process(&slices);
+        self.emit(out)
+    }
+
+    /// Flush the held-back tail (the input is extended with zeros, or by holding
+    /// the last sample for `Fast` upsampling). Call exactly once when the source
+    /// is exhausted. Returns `Ok(None)` if there is nothing left to emit.
+    ///
+    /// After this call the stream has produced exactly
+    /// `ceil(n · out_rate / in_rate)` samples for `n` input samples. Call
+    /// [`reset`](Self::reset) before reusing the resampler.
+    ///
+    /// # Errors
+    /// Currently infallible; the `Result` is kept for API stability.
+    pub fn finish(&mut self) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
+        let out = self.state.finish();
+        self.emit(out)
+    }
+
+    /// Reset the resampler and discard any pending input. Call this after a
+    /// seek - buffered state no longer corresponds to a contiguous stream
+    /// position.
+    pub fn reset(&mut self) {
+        self.state.reset();
+    }
+
+    fn emit(&self, out: Vec<Vec<f64>>) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
+        let frames = out.first().map_or(0, Vec::len);
+        if frames == 0 {
+            return Ok(None);
+        }
+        assemble_output(out, frames, self.channel_count, self.out_sample_rate).map(Some)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Extracts per-channel data into owned `Vec`s.
+fn extract_channel_data<S: StandardSample>(
+    audio: &AudioSamples<S>,
+) -> AudioSampleResult<Vec<Vec<S>>> {
+    if audio.is_mono() {
+        let mono = audio.as_mono().ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Failed to get mono data",
+            ))
+        })?;
+        Ok(vec![mono.to_vec()])
+    } else {
+        let multi = audio.as_multi_channel().ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Failed to get multi-channel data",
+            ))
+        })?;
+        let channels = audio.num_channels().get() as usize;
+        Ok((0..channels).map(|ch| multi.row(ch).to_vec()).collect())
+    }
+}
+
+/// Assembles per-channel output `Vec`s into an [`AudioSamples<T>`].
+///
+/// Multi-channel data is laid out channel-major (`[ch0[..], ch1[..], ...]`), as
+/// required by [`AudioSamples::new_multi_channel_from_vec`].
+fn assemble_output<S, T>(
+    channel_data: Vec<Vec<S>>,
+    total_frames: usize,
+    channel_count: ChannelCount,
+    sample_rate: SampleRate,
+) -> AudioSampleResult<AudioSamples<'static, T>>
+where
+    S: StandardSample,
+    T: StandardSample + crate::ConvertFrom<S>,
+{
+    if channel_data.len() == 1 {
+        let data = NonEmptyVec::new(channel_data.into_iter().next().unwrap_or_default())
+            .map_err(|_| AudioSampleError::empty_data("resample"))?;
+        return Ok(AudioSamples::from_mono_vec::<S>(data, sample_rate));
+    }
+    let mut flat = Vec::with_capacity(total_frames * channel_data.len());
+    for ch_data in &channel_data {
+        flat.extend_from_slice(ch_data);
+    }
+    let data = NonEmptyVec::new(flat).map_err(|_| AudioSampleError::empty_data("resample"))?;
+    AudioSamples::new_multi_channel_from_vec::<S>(data, channel_count, sample_rate)
+}
+
+/// Resamples audio by a specific ratio.
+///
+/// The target rate is `round(input_rate · ratio)`; the conversion is then the
+/// same as [`resample`] to that rate.
+///
+/// # Arguments
+/// - `audio` - The input audio samples
+/// - `ratio` - Resampling ratio (output_rate / input_rate)
+/// - `quality` - Quality/performance trade-off setting
+///
+/// # Returns
+/// A new `AudioSamples` instance resampled by the given ratio.
+///
+/// # Errors
+/// - [`crate::AudioSampleError::Parameter`] if the ratio is not positive or the
+///   resulting target rate rounds to zero.
+///
+/// # Examples
+/// ```
+/// use audio_samples::{AudioSamples, resample_by_ratio, sample_rate};
+/// use audio_samples::operations::types::ResamplingQuality;
+/// use ndarray::array;
+///
+/// let audio = AudioSamples::new_mono(array![1.0f32, 0.0, -1.0, 0.0], sample_rate!(44100)).unwrap();
+/// let half = resample_by_ratio(&audio, 0.5, ResamplingQuality::Medium).unwrap();
+/// assert_eq!(half.sample_rate(), sample_rate!(22050));
+/// assert_eq!(half.samples_per_channel().get(), 2);
+/// ```
+#[inline]
+pub fn resample_by_ratio<T>(
+    audio: &AudioSamples<T>,
+    ratio: f64,
+    quality: ResamplingQuality,
+) -> AudioSampleResult<AudioSamples<'static, T>>
+where
+    T: StandardSample,
+{
+    if ratio.is_nan() || ratio <= 0.0 {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "ratio",
+            format!("Invalid resampling ratio: {ratio}"),
+        )));
+    }
+
+    let input_sample_rate = audio.sample_rate().get();
+    let target_sample_rate = (f64::from(input_sample_rate) * ratio).round() as usize;
+    let target_sample_rate = SampleRate::new(target_sample_rate as u32).ok_or_else(|| {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "target_sample_rate",
+            "Calculated target sample rate is invalid",
+        ))
     })?;
 
-    let mut resampler = RESAMPLER_CACHE.with(|cell| cell.borrow_mut().remove(&key).unwrap());
-    resampler.reset();
-    let result = f(&mut resampler);
-    RESAMPLER_CACHE.with(|cell| {
-        cell.borrow_mut().insert(key, resampler);
-    });
-    result
-}
-
-// ---------------------------------------------------------------------------
-// SSE2 SIMD helpers (x86_64 baseline - no runtime feature check needed)
-// ---------------------------------------------------------------------------
-
-/// Stride-2 downsample using SSE2 `_mm_shuffle_ps`.
-///
-/// Each SSE2 iteration loads 8 input f32s into two `__m128` registers and
-/// extracts the even-indexed elements (indices 0, 2, 4, 6) with a single
-/// shuffle, producing 4 output f32s.  This avoids the scalar stride-2 read
-/// pattern that LLVM cannot auto-vectorise without AVX2 gather instructions.
-///
-/// `src.len()` must be ≥ 2 × `dst.len()` (caller ensures this).
-#[cfg(target_arch = "x86_64")]
-#[inline]
-unsafe fn downsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
-    use core::arch::x86_64::*;
-
-    // Number of full 8-input / 4-output SIMD iterations that stay in bounds.
-    let n_simd = (src.len() / 8).min(dst.len() / 4);
-
-    let src_ptr = src.as_ptr();
-    let dst_ptr = dst.as_mut_ptr();
-
-    for i in 0..n_simd {
-        // v0 = [a0, a1, b0, b1]   v1 = [c0, c1, d0, d1]
-        // shuffle mask 0x88 = 0b10_00_10_00:
-        //   result[0] = v0[0], result[1] = v0[2], result[2] = v1[0], result[3] = v1[2]
-        // → [a0, b0, c0, d0]  (stride-2 downsampled)
-        // SAFETY: n_simd = min(src.len()/8, dst.len()/4), so for every i < n_simd the
-        // reads src_ptr.add(i*8 .. i*8+8) and write dst_ptr.add(i*4 .. i*4+4) stay in
-        // bounds; _mm_loadu/storeu_ps are unaligned, and SSE2 is in the x86_64 baseline.
-        unsafe {
-            let v0 = _mm_loadu_ps(src_ptr.add(i * 8));
-            let v1 = _mm_loadu_ps(src_ptr.add(i * 8 + 4));
-            let out = _mm_shuffle_ps(v0, v1, 0x88);
-            _mm_storeu_ps(dst_ptr.add(i * 4), out);
-        }
-    }
-
-    // Scalar tail for the remaining ≤ 3 output samples.
-    let simd_out = n_simd * 4;
-    let simd_in = n_simd * 8;
-    for (j, out_s) in dst[simd_out..].iter_mut().enumerate() {
-        *out_s = src[simd_in + j * 2];
-    }
+    resample(audio, target_sample_rate, quality)
 }
 
 /// Stride-2 upsample (linear interpolation) using SSE2.
@@ -177,733 +962,33 @@ unsafe fn upsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
     }
 }
 
-/// Resamples audio to a new sample rate.
-///
-/// # Arguments
-/// * `audio` - The input audio samples
-/// * `target_sample_rate` - Desired output sample rate in Hz
-/// * `quality` - Quality/performance trade-off setting
-///
-/// # Returns
-/// A new `AudioSamples` instance at the target sample rate.
-///
-/// # Errors
-/// Returns an error if the resampling parameters are invalid or rubato fails internally.
-///
-/// # Example
-/// ```rust,ignore
-/// use audio_samples::{AudioSamples, operations::types::ResamplingQuality};
-/// use ndarray::array;
-///
-/// let audio = AudioSamples::new_mono(array![1.0f32, 0.5, -0.5, -1.0], 44100).unwrap();
-/// let resampled = resample(&audio, 48000, ResamplingQuality::High)?;
-/// assert_eq!(resampled.sample_rate(), 48000);
-/// ```
-#[inline]
-pub fn resample<T>(
-    audio: &AudioSamples<T>,
-    target_sample_rate: SampleRate,
-    quality: ResamplingQuality,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    if audio.sample_rate() == target_sample_rate {
-        return Ok(audio.clone().into_owned());
-    }
-
-    // Process at f32; sufficient precision for audio and halves memory traffic
-    // versus f64.
-    let input = audio.as_f32();
-
-    match quality {
-        ResamplingQuality::Fast => resample_linear(&input, target_sample_rate),
-        ResamplingQuality::Medium => resample_medium(&input, target_sample_rate),
-        ResamplingQuality::High => resample_high(&input, target_sample_rate),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Fast path - linear interpolation
-// ---------------------------------------------------------------------------
-//
-// Zero construction overhead (no rubato resampler).  Each call allocates the
-// output buffer and runs a tight per-channel loop.
-//
-// Integer ratios (e.g. 44100 → 22050, factor 2) are special-cased to avoid
-// floating-point position tracking and allow the compiler to emit SIMD
-// instructions for the inner loop.
-//
-// Quality trade-off: no anti-aliasing filter.  Aliasing is audible on signals
-// with energy close to the Nyquist frequency of the output, which is
-// acceptable for the Fast preset.
-
-fn resample_linear<T>(
-    audio: &AudioSamples<f32>,
-    target_sample_rate: SampleRate,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    let in_sr = audio.sample_rate().get();
-    let out_sr = target_sample_rate.get();
-    let in_frames = audio.samples_per_channel().get();
-    let out_frames = (in_frames as u64 * out_sr as u64).div_ceil(in_sr as u64) as usize;
-    let channels = audio.num_channels().get() as usize;
-
-    let mut output: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; out_frames]).collect();
-
-    let process_channel = |src: &[f32], dst: &mut [f32]| {
-        if in_sr.is_multiple_of(out_sr) {
-            // Integer downsampling by N: take the first sample of every
-            // N-element chunk.
-            let n = (in_sr / out_sr) as usize;
-
-            // n=2 hot path: explicit SSE2 shuffle avoids the stride-2 read
-            // pattern that LLVM cannot auto-vectorise without AVX2 gather
-            // instructions.
-            #[cfg(target_arch = "x86_64")]
-            if n == 2 {
-                // SAFETY: SSE2 is mandated by the x86_64 ABI.
-                unsafe {
-                    downsample_by_2_simd(src, dst);
-                }
-                return;
-            }
-
-            for (chunk, out_s) in src.chunks_exact(n).zip(dst.iter_mut()) {
-                *out_s = chunk[0];
-            }
-        } else if out_sr.is_multiple_of(in_sr) {
-            // Integer upsampling by N.
-            let n = (out_sr / in_sr) as usize;
-
-            // n=2 hot path: SSE2 interleave + midpoint average, 8 output
-            // samples per instruction pair.
-            #[cfg(target_arch = "x86_64")]
-            if n == 2 {
-                // SAFETY: SSE2 is mandated by the x86_64 ABI.
-                unsafe {
-                    upsample_by_2_simd(src, dst);
-                }
-                return;
-            }
-
-            // General N: linear interpolation across N-wide output chunks.
-            let step_f32 = 1.0f32 / n as f32;
-            let safe_in = src.len().saturating_sub(1);
-            let safe_out = safe_in * n;
-            let split = safe_out.min(dst.len());
-            let (main, tail) = dst.split_at_mut(split);
-
-            for (in_i, out_chunk) in main.chunks_exact_mut(n).enumerate() {
-                let s0 = src[in_i];
-                let s1 = src[in_i + 1]; // always valid: in_i < safe_in
-                let diff = s1 - s0;
-                for (k, out_s) in out_chunk.iter_mut().enumerate() {
-                    *out_s = s0 + k as f32 * step_f32 * diff;
-                }
-            }
-            let last_s = src.last().copied().unwrap_or(0.0);
-            tail.fill(last_s);
-        } else {
-            // General fractional ratio.
-            let step = in_sr as f64 / out_sr as f64;
-            let last = src.len() - 1;
-            for (out_i, out_s) in dst.iter_mut().enumerate() {
-                let pos = out_i as f64 * step;
-                let i0 = pos as usize;
-                let i1 = (i0 + 1).min(last);
-                let frac = (pos - i0 as f64) as f32;
-                *out_s = src[i0] + frac * (src[i1] - src[i0]);
-            }
-        }
-    };
-
-    if audio.is_mono() {
-        let view = audio.as_mono().ok_or_else(|| {
-            AudioSampleError::Parameter(ParameterError::invalid_value(
-                "audio_format",
-                "Failed to get mono data",
-            ))
-        })?;
-        // Prefer a zero-copy slice; fall back to an owned copy only if the
-        // backing array is non-contiguous (rare in practice).
-        let owned;
-        let src: &[f32] = if let Some(s) = view.as_slice() {
-            s
-        } else {
-            owned = view.to_vec();
-            &owned
-        };
-        process_channel(src, &mut output[0]);
-    } else {
-        let view = audio.as_multi_channel().ok_or_else(|| {
-            AudioSampleError::Parameter(ParameterError::invalid_value(
-                "audio_format",
-                "Failed to get multi-channel data",
-            ))
-        })?;
-        for (ch, dst) in output.iter_mut().enumerate() {
-            let row = view.row(ch);
-            let owned;
-            let src: &[f32] = if let Some(s) = row.as_slice() {
-                s
-            } else {
-                owned = row.to_vec();
-                &owned
-            };
-            process_channel(src, dst);
-        }
-    }
-
-    assemble_output(
-        output,
-        out_frames,
-        channels,
-        audio.num_channels(),
-        target_sample_rate,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Medium / High paths - rubato async windowed-sinc resampler
-// ---------------------------------------------------------------------------
-//
-// Both quality tiers use rubato's `Async<f32>` resampler with windowed-sinc
-// interpolation. For each output sample the resampler evaluates a windowed-sinc
-// reconstruction filter at the (generally fractional) source position, which
-// band-limits the signal and rejects images/aliases. This is the textbook
-// high-quality resampling approach and behaves consistently across arbitrary
-// in/out ratios - unlike the spectral (FFT synchronous) resampler, whose
-// per-sub-chunk FFT length is fixed by `fs / gcd(fs_in, fs_out)` and collapses
-// to a handful of bins for common ratios (e.g. 2 bins for 44.1k↔22.05k),
-// smearing spectral energy into sidebands around tonal components.
-//
-// The two tiers differ in filter quality:
-//   * Medium - shorter sinc, linear sub-sample interpolation, Hann² window.
-//   * High   - longer sinc, cubic sub-sample interpolation, Blackman-Harris²
-//              window for steeper roll-off and deeper stop-band attenuation.
-//
-// `FixedAsync::Input` consumes a fixed number of input frames per call and
-// emits a variable number of output frames. The resampler processes all
-// channels in a single call, so no per-channel parallelism is needed here.
-
-// Shared with `StreamingResampler`, which needs the exact same filter tuning
-// for a given quality tier so a track sounds identical whether it was resampled
-// offline or through the chunked streaming path.
-fn medium_sinc_params() -> SincInterpolationParameters {
-    SincInterpolationParameters {
-        sinc_len: 128,
-        f_cutoff: 0.95,
-        oversampling_factor: 128,
-        interpolation: SincInterpolationType::Linear,
-        window: WindowFunction::Hann2,
-    }
-}
-
-fn high_sinc_params() -> SincInterpolationParameters {
-    SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        oversampling_factor: 256,
-        interpolation: SincInterpolationType::Cubic,
-        window: WindowFunction::BlackmanHarris2,
-    }
-}
-
-fn resample_medium<T>(
-    audio: &AudioSamples<f32>,
-    target_sample_rate: SampleRate,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    resample_sinc(audio, target_sample_rate, &medium_sinc_params(), 1)
-}
-
-fn resample_high<T>(
-    audio: &AudioSamples<f32>,
-    target_sample_rate: SampleRate,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    resample_sinc(audio, target_sample_rate, &high_sinc_params(), 2)
-}
-
-fn resample_sinc<T>(
-    audio: &AudioSamples<f32>,
-    target_sample_rate: SampleRate,
-    params: &SincInterpolationParameters,
-    quality_id: u8,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    let in_sr = audio.sample_rate().get();
-    let channels = audio.num_channels().get() as usize;
-    let key = ResamplerKey {
-        in_sr,
-        out_sr: target_sample_rate.get(),
-        channels,
-        quality: quality_id,
-    };
-
-    let input_data = extract_channel_data(audio)?;
-    let in_sr_u64 = in_sr as u64;
-    let out_sr_u64 = target_sample_rate.get() as u64;
-    let input_length = input_data[0].len();
-    let expected_frames = (input_length as u64 * out_sr_u64).div_ceil(in_sr_u64) as usize;
-
-    // Fixed resample ratio (output / input); FixedAsync::Input means the ratio
-    // never changes at runtime, so the relative ratio bound is 1.0.
-    let ratio = out_sr_u64 as f64 / in_sr_u64 as f64;
-
-    with_cached_sinc_resampler(
-        key,
-        || {
-            Async::<f32>::new_sinc(
-                ratio,
-                1.0,
-                params,
-                RESAMPLE_CHUNK,
-                channels,
-                FixedAsync::Input,
-            )
-            .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::external_dependency(
-                    "rubato",
-                    "resample",
-                    format!("failed to create sinc resampler: {e}"),
-                ))
-            })
-        },
-        |resampler| {
-            resample_sinc_blocked(
-                resampler,
-                input_data,
-                expected_frames,
-                channels,
-                audio.num_channels(),
-                target_sample_rate,
-            )
-        },
-    )
-}
-
-/// Block-processing loop for all channels using a multi-channel rubato sinc resampler.
-fn resample_sinc_blocked<T>(
-    resampler: &mut Async<f32>,
-    input_data: Vec<Vec<f32>>,
-    expected_frames: usize,
-    channels: usize,
-    channel_count: ChannelCount,
-    target_sample_rate: SampleRate,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    let chunk_in = resampler.input_frames_next();
-    let chunk_out = resampler.output_frames_max();
-    let input_length = input_data[0].len();
-
-    let mut out: Vec<Vec<f32>> = (0..channels)
-        .map(|_| Vec::with_capacity(expected_frames + chunk_out))
-        .collect();
-
-    // Multi-channel scratch buffers, reused across blocks.
-    let mut in_buf: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; chunk_in]).collect();
-    let mut out_buf: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; chunk_out]).collect();
-
-    for block_start in (0..input_length).step_by(chunk_in) {
-        let block_end = (block_start + chunk_in).min(input_length);
-        let actual = block_end - block_start;
-
-        for ch in 0..channels {
-            in_buf[ch][..actual].copy_from_slice(&input_data[ch][block_start..block_end]);
-            if actual < chunk_in {
-                in_buf[ch][actual..].fill(0.0);
-            }
-        }
-
-        let in_adapter = SequentialSliceOfVecs::new(&in_buf, channels, chunk_in).map_err(|e| {
-            AudioSampleError::Processing(ProcessingError::external_dependency(
-                "audioadapter",
-                "resample",
-                format!("input adapter error: {e}"),
-            ))
-        })?;
-        let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut out_buf, channels, chunk_out)
-            .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::external_dependency(
-                    "audioadapter",
-                    "resample",
-                    format!("output adapter error: {e}"),
-                ))
-            })?;
-
-        let (_, frames_written) = resampler
-            .process_into_buffer(&in_adapter, &mut out_adapter, None)
-            .map_err(|e| {
-                AudioSampleError::Processing(ProcessingError::external_dependency(
-                    "rubato",
-                    "resample",
-                    format!("resampling failed: {e}"),
-                ))
-            })?;
-
-        for ch in 0..channels {
-            out[ch].extend_from_slice(&out_buf[ch][..frames_written]);
-        }
-    }
-
-    // Clamp to exact expected length; zero-padding the final block may
-    // produce a few extra frames.
-    for ch_data in &mut out {
-        ch_data.truncate(expected_frames.min(ch_data.len()));
-    }
-
-    let total_frames = out[0].len();
-    assemble_output(
-        out,
-        total_frames,
-        channels,
-        channel_count,
-        target_sample_rate,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Streaming (chunk-by-chunk) resampling
-// ---------------------------------------------------------------------------
-//
-// `resample`/`resample_by_ratio` above are whole-buffer: the entire clip must be
-// in memory before resampling starts. `StreamingResampler` wraps the same `Async<f32>`
-// engine (and, for `Medium`/`High`, the exact same filter tuning via
-// `medium_sinc_params`/`high_sinc_params`) but keeps it alive across many calls, so a
-// long-running source - a file being decoded chunk-by-chunk, or a live network stream -
-// can be resampled without ever holding more than a couple of chunks in memory.
-//
-// rubato's `Async` (constructed with `FixedAsync::Input`) always wants exactly
-// `input_frames_next()` frames per call. Caller-supplied chunks rarely line up with
-// that, so incoming frames are appended to a small per-channel `pending` buffer and
-// drained in `input_frames_next()`-sized blocks; leftover frames (fewer than one
-// block) carry over to the next call.
-
-/// Stateful resampler for continuous, chunk-by-chunk resampling of a live audio
-/// stream.
-///
-/// Construct once per stream with [`new`](Self::new) and feed it via
-/// [`process_chunk`](Self::process_chunk) as chunks arrive. Each call may return
-/// `Ok(None)` (not enough input accumulated yet for a full block - normal for the
-/// first call or short chunks) or `Ok(Some(chunk))` with however many output frames
-/// were produced; output chunk sizes do not need to match input chunk sizes.
-///
-/// Call [`finish`](Self::finish) exactly once when the source is exhausted to flush
-/// the final, zero-padded partial block. [`reset`](Self::reset) clears both the
-/// rubato delay line and any pending input - call it after a seek, since the buffered
-/// state no longer corresponds to a contiguous position in the stream.
-pub struct StreamingResampler<T: StandardSample> {
-    resampler: Async<f32>,
-    chunk_in: usize,
-    channels: usize,
-    channel_count: ChannelCount,
-    out_sample_rate: SampleRate,
-    pending: Vec<Vec<f32>>,
-    _marker: std::marker::PhantomData<T>,
-}
-
-impl<T: StandardSample> StreamingResampler<T> {
-    /// Create a streaming resampler from `in_sample_rate` to `out_sample_rate` for
-    /// `channels` channels of audio, at the given quality tier.
-    pub fn new(
-        in_sample_rate: SampleRate,
-        out_sample_rate: SampleRate,
-        channels: ChannelCount,
-        quality: ResamplingQuality,
-    ) -> AudioSampleResult<Self> {
-        let nbr_channels = channels.get() as usize;
-        let ratio = out_sample_rate.get() as f64 / in_sample_rate.get() as f64;
-
-        let make_err = |e: rubato::ResamplerConstructionError| {
-            AudioSampleError::Processing(ProcessingError::external_dependency(
-                "rubato",
-                "streaming_resample",
-                format!("failed to create resampler: {e}"),
-            ))
-        };
-
-        let resampler = match quality {
-            ResamplingQuality::Fast => Async::<f32>::new_poly(
-                ratio,
-                1.0,
-                rubato::PolynomialDegree::Linear,
-                RESAMPLE_CHUNK,
-                nbr_channels,
-                FixedAsync::Input,
-            )
-            .map_err(make_err)?,
-            ResamplingQuality::Medium => Async::<f32>::new_sinc(
-                ratio,
-                1.0,
-                &medium_sinc_params(),
-                RESAMPLE_CHUNK,
-                nbr_channels,
-                FixedAsync::Input,
-            )
-            .map_err(make_err)?,
-            ResamplingQuality::High => Async::<f32>::new_sinc(
-                ratio,
-                1.0,
-                &high_sinc_params(),
-                RESAMPLE_CHUNK,
-                nbr_channels,
-                FixedAsync::Input,
-            )
-            .map_err(make_err)?,
-        };
-
-        let chunk_in = resampler.input_frames_next();
-
-        Ok(Self {
-            resampler,
-            chunk_in,
-            channels: nbr_channels,
-            channel_count: channels,
-            out_sample_rate,
-            pending: vec![Vec::with_capacity(chunk_in * 2); nbr_channels],
-            _marker: std::marker::PhantomData,
-        })
-    }
-
-    /// Sample rate this resampler produces.
-    pub fn output_sample_rate(&self) -> SampleRate {
-        self.out_sample_rate
-    }
-
-    /// Feed the next chunk of input audio (must have the channel count this
-    /// resampler was constructed with). Returns `Ok(None)` if `chunk` was not
-    /// enough to complete an internal processing block yet.
-    pub fn process_chunk(
-        &mut self,
-        chunk: &AudioSamples<T>,
-    ) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
-        if chunk.num_channels().get() as usize != self.channels {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "channels",
-                "chunk channel count does not match the resampler's configured channel count",
-            )));
-        }
-
-        let input = chunk.as_f32();
-        let input_data = extract_channel_data(&input)?;
-        for (dst, src) in self.pending.iter_mut().zip(input_data.iter()) {
-            dst.extend_from_slice(src);
-        }
-
-        self.drain_blocks()
-    }
-
-    /// Flush any buffered input as a final, zero-padded block. Call exactly once
-    /// when the source is exhausted. Returns `Ok(None)` if nothing was pending.
-    ///
-    /// The padding means the final call may emit a handful of trailing frames beyond
-    /// the mathematically exact resampled length - inaudible in practice, but callers
-    /// that need an exact frame count should track it themselves rather than relying
-    /// on this output's length.
-    pub fn finish(&mut self) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
-        if self.pending[0].is_empty() {
-            return Ok(None);
-        }
-        let chunk_in = self.chunk_in;
-        for ch in self.pending.iter_mut() {
-            ch.resize(chunk_in, 0.0);
-        }
-        self.drain_blocks()
-    }
-
-    /// Reset the resampler's delay line and discard any pending input. Call this
-    /// after a seek - buffered state no longer corresponds to a contiguous stream
-    /// position.
-    pub fn reset(&mut self) {
-        self.resampler.reset();
-        for ch in self.pending.iter_mut() {
-            ch.clear();
-        }
-    }
-
-    fn drain_blocks(&mut self) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
-        let chunk_in = self.chunk_in;
-        let channels = self.channels;
-        let mut out: Vec<Vec<f32>> = (0..channels).map(|_| Vec::new()).collect();
-
-        while self.pending[0].len() >= chunk_in {
-            let chunk_out = self.resampler.output_frames_next();
-            let mut out_buf: Vec<Vec<f32>> =
-                (0..channels).map(|_| vec![0.0f32; chunk_out]).collect();
-
-            let in_adapter = SequentialSliceOfVecs::new(&self.pending, channels, chunk_in)
-                .map_err(|e| {
-                    AudioSampleError::Processing(ProcessingError::external_dependency(
-                        "audioadapter",
-                        "streaming_resample",
-                        format!("input adapter error: {e}"),
-                    ))
-                })?;
-            let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut out_buf, channels, chunk_out)
-                .map_err(|e| {
-                    AudioSampleError::Processing(ProcessingError::external_dependency(
-                        "audioadapter",
-                        "streaming_resample",
-                        format!("output adapter error: {e}"),
-                    ))
-                })?;
-
-            let (_, frames_written) = self
-                .resampler
-                .process_into_buffer(&in_adapter, &mut out_adapter, None)
-                .map_err(|e| {
-                    AudioSampleError::Processing(ProcessingError::external_dependency(
-                        "rubato",
-                        "streaming_resample",
-                        format!("resampling failed: {e}"),
-                    ))
-                })?;
-
-            for (dst, src) in out.iter_mut().zip(out_buf.iter()) {
-                dst.extend_from_slice(&src[..frames_written]);
-            }
-
-            for ch in self.pending.iter_mut() {
-                ch.drain(..chunk_in);
-            }
-        }
-
-        let total_frames = out[0].len();
-        if total_frames == 0 {
-            return Ok(None);
-        }
-
-        assemble_output(
-            out,
-            total_frames,
-            channels,
-            self.channel_count,
-            self.out_sample_rate,
-        )
-        .map(Some)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Extracts per-channel f32 data into owned `Vec<Vec<f32>>` for block processing.
-fn extract_channel_data(audio: &AudioSamples<f32>) -> AudioSampleResult<Vec<Vec<f32>>> {
-    if audio.is_mono() {
-        let mono = audio.as_mono().ok_or_else(|| {
-            AudioSampleError::Parameter(ParameterError::invalid_value(
-                "audio_format",
-                "Failed to get mono data",
-            ))
-        })?;
-        Ok(vec![mono.to_vec()])
-    } else {
-        let multi = audio.as_multi_channel().ok_or_else(|| {
-            AudioSampleError::Parameter(ParameterError::invalid_value(
-                "audio_format",
-                "Failed to get multi-channel data",
-            ))
-        })?;
-        let channels = audio.num_channels().get() as usize;
-        Ok((0..channels).map(|ch| multi.row(ch).to_vec()).collect())
-    }
-}
-
-/// Assembles per-channel output `Vec`s into an [`AudioSamples<T>`].
-///
-/// For mono, the single channel `Vec` is used directly with no interleaving.
-/// For multi-channel, channels are stored in channel-major (row-major) order
-/// as required by [`AudioSamples::new_multi_channel_from_vec`].
-fn assemble_output<T>(
-    channel_data: Vec<Vec<f32>>,
-    total_frames: usize,
-    channels: usize,
-    channel_count: ChannelCount,
-    sample_rate: SampleRate,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    if channels == 1 {
-        // SAFETY: caller guarantees total_frames > 0.
-        let data = unsafe { NonEmptyVec::new_unchecked(channel_data.into_iter().next().unwrap()) };
-        return Ok(AudioSamples::from_mono_vec::<f32>(data, sample_rate));
-    }
-
-    // new_multi_channel_from_vec stores data via Array2::from_shape_vec with
-    // shape (channels, samples_per_channel), which interprets the flat vec in
-    // row-major (C) order.  We therefore need channel-major layout:
-    // [ch0[0..N], ch1[0..N], ...]  NOT interleaved [ch0[0], ch1[0], ch0[1], …].
-    let mut flat = Vec::with_capacity(total_frames * channels);
-    for ch_data in &channel_data {
-        flat.extend_from_slice(ch_data);
-    }
-
-    let data = NonEmptyVec::new(flat).map_err(|_| AudioSampleError::empty_data("resample"))?;
-
-    AudioSamples::new_multi_channel_from_vec::<f32>(data, channel_count, sample_rate)
-}
-
-/// Resamples audio by a specific ratio.
-///
-/// # Arguments
-/// * `audio` - The input audio samples
-/// * `ratio` - Resampling ratio (output_rate / input_rate)
-/// * `quality` - Quality/performance trade-off setting
-///
-/// # Returns
-/// A new `AudioSamples` instance resampled by the given ratio.
-///
-/// # Errors
-/// Returns an error if the ratio is not positive or the resampling fails.
-#[inline]
-pub fn resample_by_ratio<T>(
-    audio: &AudioSamples<T>,
-    ratio: f64,
-    quality: ResamplingQuality,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
-    if ratio <= 0.0 {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "ratio",
-            format!("Invalid resampling ratio: {ratio}"),
-        )));
-    }
-
-    let input_sample_rate = audio.sample_rate().get();
-    let target_sample_rate = (f64::from(input_sample_rate) * ratio).round() as usize;
-    let target_sample_rate = SampleRate::new(target_sample_rate as u32).ok_or_else(|| {
-        AudioSampleError::Parameter(ParameterError::invalid_value(
-            "target_sample_rate",
-            "Calculated target sample rate is invalid",
-        ))
-    })?;
-
-    resample(audio, target_sample_rate, quality)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::AudioSamples;
     use crate::channels;
     use crate::sample_rate;
-    use ndarray::{Array1, array};
+    use ndarray::{Array1, Array2, array};
+
+    fn sine(n: usize, freq: f64, sr: f64, phase: f64) -> Vec<f64> {
+        (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sr + phase).sin())
+            .collect()
+    }
+
+    fn mono(x: Vec<f64>, sr: SampleRate) -> AudioSamples<'static, f64> {
+        AudioSamples::new_mono(Array1::from(x), sr).unwrap()
+    }
+
+    /// SNR (dB) of `actual` against `expected` over `range`.
+    fn snr_db(actual: &[f64], expected: &[f64], range: std::ops::Range<usize>) -> f64 {
+        let (mut sig, mut err) = (0.0, 0.0);
+        for i in range {
+            sig += expected[i] * expected[i];
+            err += (actual[i] - expected[i]).powi(2);
+        }
+        10.0 * (sig / err.max(1e-300)).log10()
+    }
 
     #[test]
     fn test_resample_mono() {
@@ -916,6 +1001,7 @@ mod tests {
         let resampled = resample(&audio, sample_rate!(48000), ResamplingQuality::Medium).unwrap();
         assert_eq!(resampled.sample_rate(), sample_rate!(48000));
         assert_eq!(resampled.num_channels(), channels!(1));
+        assert_eq!(resampled.samples_per_channel().get(), 1115); // ceil(1024 * 48000 / 44100)
     }
 
     #[test]
@@ -925,9 +1011,11 @@ mod tests {
 
         let upsampled = resample_by_ratio(&audio, 2.0, ResamplingQuality::Fast).unwrap();
         assert_eq!(upsampled.sample_rate(), sample_rate!(88200));
+        assert_eq!(upsampled.samples_per_channel().get(), 8);
 
         let downsampled = resample_by_ratio(&audio, 0.5, ResamplingQuality::Fast).unwrap();
         assert_eq!(downsampled.sample_rate(), sample_rate!(22050));
+        assert_eq!(downsampled.samples_per_channel().get(), 2);
     }
 
     #[test]
@@ -950,8 +1038,11 @@ mod tests {
 
         assert!(resample_by_ratio(&audio, -1.0, ResamplingQuality::Fast).is_err());
         assert!(resample_by_ratio(&audio, 0.0, ResamplingQuality::Fast).is_err());
+        assert!(resample_by_ratio(&audio, f64::NAN, ResamplingQuality::Fast).is_err());
     }
 
+    /// Output length is exactly `ceil(n * out / in)` for every quality (this
+    /// test used to allow 200 samples of slack, which hid the lost tail).
     #[test]
     fn test_resample_correct_length_long_signal() {
         let samples = (0..220500)
@@ -964,14 +1055,135 @@ mod tests {
             ResamplingQuality::Medium,
             ResamplingQuality::High,
         ] {
-            let result = resample(&audio, sample_rate!(22050), quality).unwrap();
-            let got = result.samples_per_channel().get();
-            let expected = 110250usize;
-            assert!(
-                got.abs_diff(expected) < 200,
-                "{quality:?}: expected ~{expected} samples, got {got}"
-            );
+            for (out_sr, expected) in [(22050u32, 110250usize), (16000, 80000), (48000, 240000)] {
+                let rate = SampleRate::new(out_sr).unwrap();
+                let got = resample(&audio, rate, quality)
+                    .unwrap()
+                    .samples_per_channel()
+                    .get();
+                assert_eq!(got, expected, "{quality:?} 44100 -> {out_sr}");
+            }
         }
+        // Exact integer length (librosa's float ceil gives 96001 here).
+        let audio = mono(vec![0.1; 88200], sample_rate!(44100));
+        let y = resample(&audio, sample_rate!(48000), ResamplingQuality::High).unwrap();
+        assert_eq!(y.samples_per_channel().get(), 96000);
+    }
+
+    /// Regression: Medium/High output was delayed by the rubato filter delay
+    /// (64/128 input samples) and lost the tail. A band-limited tone must now
+    /// line up with the analytic tone at the output rate.
+    #[test]
+    fn test_resample_is_time_aligned() {
+        let cases = [
+            (44100u32, 16000u32, 1000.0),
+            (22050, 44100, 3000.0),
+            (22050, 16000, 2500.0),
+            (44100, 48000, 5000.0),
+            (48000, 44100, 7000.0),
+        ];
+        for (in_sr, out_sr, f) in cases {
+            let x = sine(in_sr as usize, f, f64::from(in_sr), 0.3);
+            let audio = mono(x, SampleRate::new(in_sr).unwrap());
+            let expected = sine(out_sr as usize, f, f64::from(out_sr), 0.3);
+            // Ignore the edges, where the input is implicitly zero-padded.
+            let interior = (out_sr as usize / 20)..(out_sr as usize * 19 / 20);
+            for (quality, min_snr) in [
+                (ResamplingQuality::High, 130.0),
+                (ResamplingQuality::Medium, 110.0),
+            ] {
+                let y = resample(&audio, SampleRate::new(out_sr).unwrap(), quality).unwrap();
+                let y = y.as_mono().unwrap().to_vec();
+                assert_eq!(y.len(), expected.len());
+                let snr = snr_db(&y, &expected, interior.clone());
+                assert!(
+                    snr > min_snr,
+                    "{quality:?} {in_sr} -> {out_sr}, {f} Hz: SNR {snr:.1} dB"
+                );
+            }
+        }
+    }
+
+    /// Regression: Fast downsampling was plain decimation, so content above
+    /// the new Nyquist frequency aliased at full level.
+    #[test]
+    fn test_fast_downsampling_is_anti_aliased() {
+        // 13 kHz is above the 11.025 kHz Nyquist of 22.05 kHz.
+        let x = sine(44100, 13000.0, 44100.0, 0.0);
+        let audio = mono(x, sample_rate!(44100));
+        let y = resample(&audio, sample_rate!(22050), ResamplingQuality::Fast).unwrap();
+        let y = y.as_mono().unwrap().to_vec();
+        let mid = &y[1000..y.len() - 1000];
+        let rms = (mid.iter().map(|v| v * v).sum::<f64>() / mid.len() as f64).sqrt();
+        let level_db = 20.0 * (rms / std::f64::consts::FRAC_1_SQRT_2).log10();
+        assert!(level_db < -70.0, "alias level {level_db:.1} dB");
+
+        // A passband tone survives.
+        let x = sine(44100, 2000.0, 44100.0, 0.0);
+        let y = resample(
+            &mono(x, sample_rate!(44100)),
+            sample_rate!(22050),
+            ResamplingQuality::Fast,
+        )
+        .unwrap();
+        let expected = sine(22050, 2000.0, 22050.0, 0.0);
+        let snr = snr_db(&y.as_mono().unwrap().to_vec(), &expected, 1000..21000);
+        assert!(snr > 90.0, "Fast passband SNR {snr:.1} dB");
+    }
+
+    #[test]
+    fn test_resample_multichannel_matches_per_channel() {
+        let l = sine(4410, 440.0, 44100.0, 0.0);
+        let r = sine(4410, 1250.0, 44100.0, 1.0);
+        let mut data = Array2::<f64>::zeros((2, 4410));
+        for i in 0..4410 {
+            data[[0, i]] = l[i];
+            data[[1, i]] = r[i];
+        }
+        let stereo = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        for quality in [
+            ResamplingQuality::Fast,
+            ResamplingQuality::Medium,
+            ResamplingQuality::High,
+        ] {
+            let y = resample(&stereo, sample_rate!(16000), quality).unwrap();
+            let yl = resample(
+                &mono(l.clone(), sample_rate!(44100)),
+                sample_rate!(16000),
+                quality,
+            )
+            .unwrap();
+            let yr = resample(
+                &mono(r.clone(), sample_rate!(44100)),
+                sample_rate!(16000),
+                quality,
+            )
+            .unwrap();
+            let multi = y.as_multi_channel().unwrap();
+            assert_eq!(multi.row(0).to_vec(), yl.as_mono().unwrap().to_vec());
+            assert_eq!(multi.row(1).to_vec(), yr.as_mono().unwrap().to_vec());
+        }
+    }
+
+    #[test]
+    fn test_interpolated_table_for_awkward_ratio() {
+        // L = 44101 phases is too many for an exact table.
+        let kernel = Kernel::new(
+            44100,
+            44101,
+            kernel_kind(ResamplingQuality::High, 44100, 44101),
+        );
+        assert!(!kernel.exact);
+        let x = sine(44100, 3000.0, 44100.0, 0.2);
+        let y = resample(
+            &mono(x, sample_rate!(44100)),
+            sample_rate!(44101),
+            ResamplingQuality::High,
+        )
+        .unwrap();
+        let expected = sine(44101, 3000.0, 44101.0, 0.2);
+        let snr = snr_db(&y.as_mono().unwrap().to_vec(), &expected, 2000..42000);
+        assert!(snr > 130.0, "SNR {snr:.1} dB");
     }
 
     fn sine_mono(n: usize, sample_rate: SampleRate) -> AudioSamples<'static, f32> {
@@ -983,50 +1195,56 @@ mod tests {
         AudioSamples::new_mono(Array1::from_vec(samples), sample_rate).unwrap()
     }
 
+    /// The streaming path uses the same kernel and positions as the offline
+    /// path: same total length, same samples (no delay in either).
     #[test]
-    fn test_streaming_resampler_matches_offline_length() {
+    fn test_streaming_resampler_matches_offline() {
         let in_sr = sample_rate!(44100);
-        let out_sr = sample_rate!(22050);
         let total_frames = 44100; // 1 second
-        let audio = sine_mono(total_frames, in_sr);
+        let x = sine(total_frames, 440.0, 44100.0, 0.1);
+        let audio = mono(x.clone(), in_sr);
 
-        for quality in [
-            ResamplingQuality::Fast,
-            ResamplingQuality::Medium,
-            ResamplingQuality::High,
+        for out_sr in [
+            sample_rate!(22050),
+            sample_rate!(48000),
+            sample_rate!(16000),
         ] {
-            let mut streaming =
-                StreamingResampler::<f32>::new(in_sr, out_sr, channels!(1), quality).unwrap();
+            for quality in [
+                ResamplingQuality::Fast,
+                ResamplingQuality::Medium,
+                ResamplingQuality::High,
+            ] {
+                let mut streaming =
+                    StreamingResampler::<f64>::new(in_sr, out_sr, channels!(1), quality).unwrap();
+                // Deliberately odd chunk size.
+                const CHUNK: usize = 333;
+                let mut streamed: Vec<f64> = Vec::new();
+                for chunk in x.chunks(CHUNK) {
+                    let piece = mono(chunk.to_vec(), in_sr);
+                    if let Some(out) = streaming.process_chunk(&piece).unwrap() {
+                        streamed.extend(out.as_mono().unwrap().iter());
+                    }
+                }
+                if let Some(out) = streaming.finish().unwrap() {
+                    streamed.extend(out.as_mono().unwrap().iter());
+                }
 
-            // Deliberately misaligned with rubato's internal block size, to
-            // exercise the pending-buffer carry logic.
-            const CHUNK: usize = 333;
-            let mut streamed_frames = 0usize;
-            let mono = audio.as_mono().unwrap();
-            for chunk in mono.as_slice().unwrap().chunks(CHUNK) {
-                let piece =
-                    AudioSamples::new_mono(Array1::from_vec(chunk.to_vec()), in_sr).unwrap();
-                if let Some(out) = streaming.process_chunk(&piece).unwrap() {
-                    streamed_frames += out.samples_per_channel().get();
+                let offline = resample(&audio, out_sr, quality).unwrap();
+                let offline = offline.as_mono().unwrap().to_vec();
+                assert_eq!(streamed.len(), offline.len(), "{quality:?} -> {out_sr}");
+                // Fast upsampling offline runs in f32.
+                let tol = if quality == ResamplingQuality::Fast {
+                    1e-6
+                } else {
+                    1e-12
+                };
+                for (i, (a, b)) in streamed.iter().zip(&offline).enumerate() {
+                    assert!(
+                        (a - b).abs() < tol,
+                        "{quality:?} -> {out_sr} at {i}: {a} vs {b}"
+                    );
                 }
             }
-            if let Some(out) = streaming.finish().unwrap() {
-                streamed_frames += out.samples_per_channel().get();
-            }
-
-            let offline = resample(&audio, out_sr, quality).unwrap();
-            let offline_frames = offline.samples_per_channel().get();
-
-            // The streaming path pads its final block to a full internal chunk,
-            // so it may run a little long, but should never be short.
-            assert!(
-                streamed_frames >= offline_frames,
-                "{quality:?}: streamed {streamed_frames} < offline {offline_frames}"
-            );
-            assert!(
-                streamed_frames - offline_frames < RESAMPLE_CHUNK,
-                "{quality:?}: streamed {streamed_frames} too far past offline {offline_frames}"
-            );
         }
     }
 
@@ -1058,13 +1276,21 @@ mod tests {
                 .unwrap();
 
         let chunk = sine_mono(2048, in_sr);
-        streaming.process_chunk(&chunk).unwrap();
+        let first: Vec<f32> = streaming
+            .process_chunk(&chunk)
+            .unwrap()
+            .map(|a| a.as_mono().unwrap().to_vec())
+            .unwrap_or_default();
 
         streaming.reset();
 
-        // After reset, feeding the same chunk again should behave like a fresh
-        // resampler rather than panicking or erroring on stale state.
-        let result = streaming.process_chunk(&chunk);
-        assert!(result.is_ok());
+        // After reset, the same chunk gives the same output as a fresh stream.
+        let again: Vec<f32> = streaming
+            .process_chunk(&chunk)
+            .unwrap()
+            .map(|a| a.as_mono().unwrap().to_vec())
+            .unwrap_or_default();
+        assert_eq!(first, again);
+        assert!(!first.is_empty());
     }
 }
