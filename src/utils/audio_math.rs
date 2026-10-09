@@ -42,7 +42,6 @@
 //! ```
 
 use crate::{AudioSampleError, AudioSampleResult, NoteParseError, ParameterError};
-use std::collections::HashMap;
 
 // =============================================================================
 // FREQUENCY CONVERSIONS
@@ -705,31 +704,58 @@ pub fn ms_to_samples(ms: f64, sample_rate: f64) -> usize {
 // MUSICAL THEORY FUNCTIONS
 // =============================================================================
 
-static NOTE_TO_MIDI_MAP: std::sync::LazyLock<HashMap<&'static str, u8>> =
-    std::sync::LazyLock::new(|| {
-        let mut m = HashMap::new();
+/// Semitone offset of each natural note letter from C.
+const fn letter_semitone(letter: char) -> Option<i64> {
+    match letter.to_ascii_uppercase() {
+        'C' => Some(0),
+        'D' => Some(2),
+        'E' => Some(4),
+        'F' => Some(5),
+        'G' => Some(7),
+        'A' => Some(9),
+        'B' => Some(11),
+        _ => None,
+    }
+}
 
-        // Base notes (octave 0)
-        m.insert("C", 0);
-        m.insert("C#", 1);
-        m.insert("Db", 1);
-        m.insert("D", 2);
-        m.insert("D#", 3);
-        m.insert("Eb", 3);
-        m.insert("E", 4);
-        m.insert("F", 5);
-        m.insert("F#", 6);
-        m.insert("Gb", 6);
-        m.insert("G", 7);
-        m.insert("G#", 8);
-        m.insert("Ab", 8);
-        m.insert("A", 9);
-        m.insert("A#", 10);
-        m.insert("Bb", 10);
-        m.insert("B", 11);
+/// Semitone offset of an accidental symbol (the set accepted by `librosa.note_to_midi`).
+const fn accidental_semitones(symbol: char) -> Option<i64> {
+    match symbol {
+        '#' | '\u{266F}' => Some(1),        // # and ♯
+        'b' | '!' | '\u{266D}' => Some(-1), // b, ! and ♭
+        '\u{1D12A}' => Some(2),             // 𝄪 double sharp
+        '\u{1D12B}' => Some(-2),            // 𝄫 double flat
+        '\u{266E}' => Some(0),              // ♮ natural
+        _ => None,
+    }
+}
 
-        m
-    });
+/// Parses an optionally signed run of ASCII digits starting at byte `start` of
+/// `text`. Returns the value and the byte index just past it, or `None` if there
+/// are no digits (or the number overflows).
+fn parse_signed_digits(text: &str, start: usize, sign_required: bool) -> Option<(i64, usize)> {
+    let bytes = text.as_bytes();
+    let mut pos = start;
+    let mut negative = false;
+    match bytes.get(pos) {
+        Some(b'+') => pos += 1,
+        Some(b'-') => {
+            negative = true;
+            pos += 1;
+        }
+        _ if sign_required => return None,
+        _ => {}
+    }
+    let digits_start = pos;
+    while bytes.get(pos).is_some_and(u8::is_ascii_digit) {
+        pos += 1;
+    }
+    if pos == digits_start {
+        return None;
+    }
+    let magnitude: i64 = text[digits_start..pos].parse().ok()?;
+    Some((if negative { -magnitude } else { magnitude }, pos))
+}
 
 const MIDI_TO_NOTE_MAP: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -740,43 +766,50 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 /// This function provides a lightweight bridge between human-readable musical notation
 /// (e.g. `"A4"`, `"C#3"`, `"Bb2"`) and numeric MIDI pitch indices. It is intended for
 /// configuration, annotation, testing, and tooling scenarios rather than high-throughput
-/// parsing.
-///
-/// Accidentals are supported using a single sharp (`#`) or flat (`b`). Enharmonic spellings
-/// (e.g. `"C#4"` and `"Db4"`) resolve to the same MIDI value.
+/// parsing. The grammar follows `librosa.note_to_midi`.
 ///
 /// # Arguments
 ///
 /// * `note_name`\
-///   A note name encoded using scientific pitch notation with an explicit octave number.
-///   The accepted grammar is:
+///   A note name encoded using scientific pitch notation with an explicit octave number:
 ///
-///   * A single uppercase pitch class in `A`-`G`
-///   * Optionally followed by exactly one accidental (`#` or `b`)
-///   * Followed by a base-10 octave number with no sign or separators
+///   * a pitch letter `A`-`G`, upper or lower case;
+///   * any number of accidentals: `#` or `♯` (+1), `b`, `!` or `♭` (-1), `𝄪` (+2),
+///     `𝄫` (-2), `♮` (0). Accidentals add up (`"C##4"` is D4) and may cross an
+///     octave boundary without changing the octave number (`"B#3"` is C4 = 60,
+///     `"Cb4"` is B3 = 59), as in librosa;
+///   * an octave number, optionally signed (`"C-1"` is MIDI 0);
+///   * optionally a signed cents offset (`"A4+50"`, `"C4-20"`).
 ///
-///   Examples of valid inputs include `"A4"`, `"C#3"`, and `"Bb2"`.
-///
-///   The parser is case-sensitive. Lowercase note letters are not accepted.
+///   Examples of valid inputs include `"A4"`, `"c#3"`, `"Bb2"`, `"E♭5"`, `"G-1"`
+///   and `"F𝄪4"`.
 ///
 /// # Returns
 ///
-/// The corresponding MIDI note number in the inclusive range `0..=127`.
+/// The corresponding MIDI note number in the inclusive range `0..=127`. A cents
+/// offset is added and the result is rounded to the nearest integer, ties to
+/// even (`numpy.round`), as librosa does with `round_midi=True`.
 ///
 /// # Errors
 ///
-/// Returns an error in the following cases:
-///
-/// * The input does not conform to the accepted note grammar.
-/// * The pitch class or accidental is not recognised.
-/// * The octave component cannot be parsed as an integer.
-/// * The resulting MIDI value lies outside the valid range `0..=127`.
-///
-/// All errors are reported as parameter validation failures.
+/// * [`AudioSampleError::NoteParse`](crate::AudioSampleError::NoteParse), with a
+///   span pointing at the offending part of the input, if the text does not follow
+///   the grammar (unknown letter, unknown accidental, missing or malformed octave,
+///   malformed cents offset).
+/// * [`ParameterError::OutOfRange`] if the note parses but lies outside MIDI
+///   `0..=127`.
 ///
 /// # Behavioural Guarantees
 ///
 /// * Valid enharmonic spellings resolve to the same MIDI value.
+/// * [`midi_to_note`] output always parses back to the same MIDI value.
+///
+/// # Differences from librosa
+///
+/// * The octave is required; librosa treats a missing octave as octave 0.
+/// * The result is a `u8` limited to `0..=127`; librosa returns any integer.
+/// * librosa's regular expression also admits `n` as an accidental but then
+///   fails on it; it is rejected here.
 ///
 /// # Examples
 ///
@@ -787,10 +820,45 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 /// assert_eq!(note_to_midi("C4").unwrap(), 60);
 /// assert_eq!(note_to_midi("C#4").unwrap(), 61);
 /// assert_eq!(note_to_midi("Db4").unwrap(), 61);
+/// assert_eq!(note_to_midi("d\u{266D}4").unwrap(), 61); // lowercase, Unicode flat
+/// assert_eq!(note_to_midi("B#3").unwrap(), 60);
+/// assert_eq!(note_to_midi("C-1").unwrap(), 0);
+/// assert_eq!(note_to_midi("A4+50").unwrap(), 70); // 69.5 rounds to even
 /// ```
 #[inline]
 pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
-    if note_name.len() < 2 {
+    let mut chars = note_name.char_indices().peekable();
+
+    // Pitch letter - point the caret at it.
+    let semitone = match chars.next() {
+        Some((_, c)) => letter_semitone(c).ok_or_else(|| {
+            NoteParseError::new(note_name, (0, c.len_utf8()), "unrecognised note")
+        })?,
+        None => {
+            return Err(NoteParseError::new(
+                note_name,
+                (0, 0),
+                "note name must include an octave number (e.g. `A4`)",
+            )
+            .into());
+        }
+    };
+
+    // Accidentals.
+    let mut offset = 0i64;
+    while let Some(&(_, c)) = chars.peek() {
+        match accidental_semitones(c) {
+            Some(delta) => {
+                offset += delta;
+                chars.next();
+            }
+            None => break,
+        }
+    }
+    let octave_start = chars.peek().map_or(note_name.len(), |&(i, _)| i);
+
+    // Octave - point the caret at whatever follows the note token.
+    if octave_start == note_name.len() {
         return Err(NoteParseError::new(
             note_name,
             (0, note_name.len()),
@@ -798,51 +866,52 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
         )
         .into());
     }
+    let (octave, cents_start) =
+        parse_signed_digits(note_name, octave_start, false).ok_or_else(|| {
+            NoteParseError::new(
+                note_name,
+                (octave_start, note_name.len() - octave_start),
+                "invalid octave",
+            )
+        })?;
 
-    // Parse note and octave
-    let (note_part, octave_str) = if note_name.len() == 2 {
-        (&note_name[..1], &note_name[1..])
-    } else if note_name.len() == 3 && (note_name.contains('#') || note_name.contains('b')) {
-        (&note_name[..2], &note_name[2..])
+    // Optional cents offset; nothing may follow it.
+    let cents = if cents_start == note_name.len() {
+        0
     } else {
-        return Err(NoteParseError::new(
-            note_name,
-            (0, note_name.len()),
-            "unrecognised note format; expected `A4`, `C#3`, `Bb2`",
-        )
-        .into());
+        match parse_signed_digits(note_name, cents_start, true) {
+            Some((cents, end)) if end == note_name.len() => cents,
+            _ => {
+                return Err(NoteParseError::new(
+                    note_name,
+                    (cents_start, note_name.len() - cents_start),
+                    "invalid cents offset; expected e.g. `+50` or `-20`",
+                )
+                .into());
+            }
+        }
     };
 
-    // Look up base note value - point the caret at the note letter/accidental.
-    let base_note = NOTE_TO_MIDI_MAP
-        .get(note_part)
-        .copied()
-        .ok_or_else(|| NoteParseError::new(note_name, (0, note_part.len()), "unrecognised note"))?;
-
-    // Parse octave - point the caret at the octave digits.
-    let octave: i32 = octave_str.parse().map_err(|_| {
-        NoteParseError::new(
-            note_name,
-            (note_part.len(), octave_str.len()),
-            "invalid octave",
-        )
-    })?;
-
-    // Calculate MIDI note number
-    let midi_note = (octave + 1) * 12 + i32::from(base_note);
+    // MIDI value, rounded like numpy.round (ties to even). Integer arithmetic is
+    // exact; i64 saturating ops keep absurd octave numbers from overflowing.
+    let semitones = octave
+        .saturating_add(1)
+        .saturating_mul(12)
+        .saturating_add(semitone + offset);
+    let midi = (semitones as f64 + cents as f64 / 100.0).round_ties_even();
 
     // Check range - the note parsed cleanly, this is a genuine range violation.
-    if !(0..=127).contains(&midi_note) {
+    if !(0.0..=127.0).contains(&midi) {
         return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
             "note_name",
-            midi_note,
+            midi,
             0,
             127,
-            format!("note {note_name} maps to MIDI {midi_note}, outside the valid range"),
+            format!("note {note_name} maps to MIDI {midi}, outside the valid range"),
         )));
     }
 
-    Ok(midi_note as u8)
+    Ok(midi as u8)
 }
 
 /// Converts a MIDI note number into a scientific pitch notation string.
@@ -874,6 +943,13 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
 /// * The returned string always uses sharp notation for accidentals.
 /// * For any value accepted by this function, applying [`note_to_midi`] to the returned
 ///   string recovers the original MIDI value.
+///
+/// # Differences from librosa
+///
+/// `librosa.midi_to_note` uses Unicode accidentals by default (`"C♯4"`); this function
+/// always writes ASCII `#` (`"C#4"`), which is what librosa returns with
+/// `unicode=False`. The names are otherwise identical for `0..=127`. Fractional MIDI
+/// values, cents output and `octave=False` are not supported.
 ///
 /// # Examples
 ///
@@ -971,16 +1047,23 @@ pub fn note_to_frequency(note_name: &str) -> AudioSampleResult<f64> {
 ///
 /// # Errors
 ///
-/// Returns an error if `freq_hz` is non-positive.
+/// * [`ParameterError::InvalidValue`] if `freq_hz` is not a finite positive number.
+/// * [`ParameterError::OutOfRange`] if the nearest note lies outside MIDI `0..=127`
+///   (below about 7.9 Hz or above about 12.9 kHz), consistently with [`midi_to_note`]
+///   and [`note_to_midi`], which cover the same range.
 ///
 /// # Behavioural Guarantees
 ///
-/// * The returned `cents` value lies in the half-open interval approximately
-///   `[-50, 50)`, subject to floating-point rounding.
-/// * For frequencies whose nearest MIDI value cannot be represented as a valid `u8`,
-///   the note component defaults to `"A4"`. This behaviour is deterministic but lossy.
+/// * The returned `cents` value lies in the closed interval `[-50, 50]`, subject to
+///   floating-point rounding.
 /// * Applying [`note_to_frequency`] to the returned `note_name` yields a frequency close
 ///   to the nearest semitone of the original input, not necessarily the original value.
+///
+/// # Differences from librosa
+///
+/// `librosa.hz_to_note` names any frequency, with negative octaves below C-1
+/// (`"C-2"` for 4 Hz) and octaves above 9; here those frequencies are an error. librosa
+/// also writes Unicode accidentals by default and returns the cents inside the string.
 ///
 /// # Examples
 ///
@@ -991,13 +1074,16 @@ pub fn note_to_frequency(note_name: &str) -> AudioSampleResult<f64> {
 ///
 /// assert_eq!(note, "A4");
 /// assert!(cents.abs() < 1e-6);
+///
+/// // Below the MIDI range: an error, not a mislabelled "C-1".
+/// assert!(frequency_to_note(4.0).is_err());
 /// ```
 #[inline]
 pub fn frequency_to_note(freq_hz: f64) -> AudioSampleResult<(String, f64)> {
-    if freq_hz <= 0.0 {
+    if !(freq_hz.is_finite() && freq_hz > 0.0) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "freq_hz",
-            "Frequency must be positive",
+            "Frequency must be a finite positive number",
         )));
     }
 
@@ -1005,8 +1091,21 @@ pub fn frequency_to_note(freq_hz: f64) -> AudioSampleResult<(String, f64)> {
     let midi_rounded = midi_float.round();
     let cents = (midi_float - midi_rounded) * 100.0;
 
-    let midi_note = midi_rounded as u8;
-    let note_name = midi_to_note(midi_note)?;
+    // Range-check BEFORE converting: a saturating `as u8` cast would silently
+    // turn every frequency below ~7.9 Hz into MIDI 0 ("C-1").
+    if !(0.0..=127.0).contains(&midi_rounded) {
+        return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+            "freq_hz",
+            freq_hz,
+            midi_to_hz(-0.5),
+            midi_to_hz(127.5),
+            format!(
+                "{freq_hz} Hz is nearest to MIDI {midi_rounded}, outside the representable range 0..=127"
+            ),
+        )));
+    }
+
+    let note_name = midi_to_note(midi_rounded as u8)?;
 
     Ok((note_name, cents))
 }
@@ -1262,8 +1361,111 @@ mod tests {
         // Test sharp/flat equivalence
         assert_eq!(note_to_midi("C#4").unwrap(), note_to_midi("Db4").unwrap());
 
-        // Test case insensitivity would require making the function case-insensitive
-        // assert_eq!(note_to_midi("a4").unwrap(), 69);
+        // Lowercase letters are accepted, as in librosa.
+        assert_eq!(note_to_midi("a4").unwrap(), 69);
+    }
+
+    /// The parser follows `librosa.note_to_midi`: case-insensitive letters, stacked
+    /// ASCII/Unicode accidentals that may cross the octave boundary, signed
+    /// octaves and an optional cents suffix (rounded half to even).
+    #[test]
+    fn note_to_midi_accepts_librosa_grammar() {
+        let cases: &[(&str, u8)] = &[
+            ("C4", 60),
+            ("c4", 60),
+            ("B#3", 60),
+            ("Cb4", 59),
+            ("E#4", 65),
+            ("Fb4", 64),
+            ("C##4", 62),
+            ("Dbb4", 60),
+            ("C\u{266F}4", 61),
+            ("D\u{266D}4", 61),
+            ("C\u{1D12A}4", 62),
+            ("D\u{1D12B}4", 60),
+            ("C\u{266E}4", 60),
+            ("C!4", 59),
+            ("C-1", 0),
+            ("G9", 127),
+            ("C+4", 60),
+            ("A4+50", 70),
+            ("A4-50", 68),
+            ("A4+49", 69),
+            ("C-1+40", 0),
+        ];
+        for &(name, midi) in cases {
+            assert_eq!(note_to_midi(name).unwrap(), midi, "{name}");
+        }
+        // Every name midi_to_note produces parses back.
+        for midi in 0..=127u8 {
+            assert_eq!(note_to_midi(&midi_to_note(midi).unwrap()).unwrap(), midi);
+        }
+        // Outside 0..=127 after parsing: a range error.
+        for name in ["Cb-1", "G#9", "C10", "C-2"] {
+            assert!(
+                matches!(
+                    note_to_midi(name),
+                    Err(AudioSampleError::Parameter(
+                        ParameterError::OutOfRange { .. }
+                    ))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn note_to_midi_rejects_malformed_with_spans() {
+        // (input, span offset, span length, message fragment)
+        let cases: &[(&str, usize, usize, &str)] = &[
+            ("", 0, 0, "octave number"),
+            ("A", 0, 1, "octave number"),
+            ("Bb", 0, 2, "octave number"),
+            ("H4", 0, 1, "unrecognised note"),
+            ("\u{266F}4", 0, 3, "unrecognised note"),
+            ("Cn4", 1, 2, "invalid octave"),
+            ("C4x", 2, 1, "invalid cents"),
+            ("A4+", 2, 1, "invalid cents"),
+            ("A4+5x", 2, 3, "invalid cents"),
+        ];
+        for &(input, offset, len, kind) in cases {
+            match note_to_midi(input) {
+                Err(AudioSampleError::NoteParse(npe)) => {
+                    assert_eq!(npe.span.offset(), offset, "{input:?}");
+                    assert_eq!(npe.span.len(), len, "{input:?}");
+                    assert!(npe.kind.contains(kind), "{input:?}: {}", npe.kind);
+                }
+                other => panic!("{input:?}: expected NoteParse, got {other:?}"),
+            }
+        }
+    }
+
+    /// Below about 7.9 Hz the nearest MIDI note is negative. The old code cast it
+    /// with a saturating `as u8`, labelling e.g. 4 Hz and 1 Hz as "C-1" with cents
+    /// measured against a different note. It is now a range error, like
+    /// frequencies above G9.
+    #[test]
+    fn frequency_to_note_rejects_notes_outside_midi_range() {
+        for f in [1.0, 4.0, 7.9, 13_000.0, 20_000.0] {
+            assert!(
+                matches!(
+                    frequency_to_note(f),
+                    Err(AudioSampleError::Parameter(
+                        ParameterError::OutOfRange { .. }
+                    ))
+                ),
+                "{f} Hz"
+            );
+        }
+        for f in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(frequency_to_note(f).is_err(), "{f} Hz");
+        }
+        // Edges of the range still work.
+        let (note, cents) = frequency_to_note(8.1758).unwrap();
+        assert_eq!(note, "C-1");
+        assert!(cents.abs() < 0.1);
+        let (note, _) = frequency_to_note(12_543.85).unwrap();
+        assert_eq!(note, "G9");
     }
 
     #[test]

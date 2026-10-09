@@ -62,21 +62,18 @@ fn midi_note_round_trip() {
 }
 
 #[test]
-fn note_parsing_is_case_sensitive() {
-    // The reviewer-flagged behaviour: lowercase note letters are NOT accepted
-    // and must error rather than silently mapping to the uppercase note.
-    assert!(note_to_midi("a4").is_err(), "lowercase 'a4' should error");
-    assert!(note_to_midi("c4").is_err(), "lowercase 'c4' should error");
-    assert!(note_to_midi("db4").is_err(), "lowercase 'db4' should error");
+fn note_parsing_is_case_insensitive() {
+    // Like librosa.note_to_midi, the note letter is case-insensitive (the
+    // accidental `b` stays lowercase, so "db4" is D-flat 4).
+    assert_eq!(note_to_midi("a4").unwrap(), note_to_midi("A4").unwrap());
+    assert_eq!(note_to_midi("c4").unwrap(), 60);
+    assert_eq!(note_to_midi("db4").unwrap(), 61);
 
-    // It is specifically a *parse* error, not a range error.
-    match note_to_midi("a4").unwrap_err() {
+    // An unknown letter is still a *parse* error, not a range error.
+    match note_to_midi("h4").unwrap_err() {
         AudioSampleError::NoteParse(_) => {}
-        other => panic!("expected NoteParse for 'a4', got {other:?}"),
+        other => panic!("expected NoteParse for 'h4', got {other:?}"),
     }
-
-    // And it does not coincidentally equal the uppercase result.
-    assert!(note_to_midi("a4").is_err() && note_to_midi("A4").is_ok());
 }
 
 #[test]
