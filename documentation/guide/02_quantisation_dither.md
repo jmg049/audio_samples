@@ -289,9 +289,10 @@ assert!((penalty - 10.0 * 3f64.log10()).abs() < 0.2);
   $2^{b-1}$ below zero, by $2^{b-1}-1$ above). soundfile/libsndfile, librosa
   and torchaudio divide by $2^{b-1}$ on both sides, so positive samples differ
   by up to about $3\times10^{-5}$.
-* Integer-to-integer conversions *shift bits*: narrowing truncates towards
-  $-\infty$ (a $-\tfrac12$ LSB bias), it does not round. Go through `f64` if you
-  want rounding.
+* Signed integer-to-integer narrowing (for example `i32` to `i16`) *shifts
+  bits*: it truncates towards $-\infty$ (a $-\tfrac12$ LSB bias) rather than
+  rounding. Conversions to `u8` are the exception: they rescale and round to
+  nearest. Go through `f64` if you want rounding everywhere.
 * No dither is applied by any conversion; add it yourself before reducing bit
   depth of quiet material.
 * $6.02\,b + 1.76$ dB is for a **full-scale sine**. Speech peaks well below
