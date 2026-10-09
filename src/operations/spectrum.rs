@@ -1570,15 +1570,20 @@ pub fn melspectrogram_from_spectrogram(
     Ok(out)
 }
 
-/// `|z|^power` with numpy's rounding for the common exponents 1 and 2.
+/// `|z|^power`.
+///
+/// Computed from `re² + im²` rather than numpy's `hypot`-based `abs(z)`
+/// (the libm `hypot` call dominated spectrogram computation); the two agree to
+/// within about one ulp. STFT values are far from the range where the squares
+/// could overflow or underflow.
 fn magnitude_power(z: Complex<f64>, power: f64) -> f64 {
-    let a = z.norm();
-    if power == 1.0 {
-        a
-    } else if power == 2.0 {
-        a * a
+    let sq = z.norm_sqr();
+    if power == 2.0 {
+        sq
+    } else if power == 1.0 {
+        sq.sqrt()
     } else {
-        a.powf(power)
+        sq.sqrt().powf(power)
     }
 }
 
