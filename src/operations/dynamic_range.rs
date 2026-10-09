@@ -10,10 +10,119 @@
 //! perceived punch and clarity.
 //!
 //! All processors are accessed through the [`AudioDynamicRange`] trait. Behaviour is
-//! controlled by [`CompressorConfig`] and [`LimiterConfig`], which provide preset
-//! constructors for common use cases. The underlying gain computation uses an
-//! [`EnvelopeFollower`] for level tracking and optionally a [`LookaheadBuffer`] to
-//! apply gain reductions before peaks arrive.
+//! controlled by [`CompressorConfig`], [`LimiterConfig`], [`GateConfig`] and
+//! [`ExpanderConfig`], which provide preset constructors for common use cases.
+//!
+//! # How the processors work
+//!
+//! Every processor is a feed-forward design with three stages, run per sample `n`
+//! and per channel:
+//!
+//! 1. **Detector and ballistics.** An [`EnvelopeFollower`] turns the input `x[n]`
+//!    into a smoothed level `e[n]` (linear amplitude, full scale = 1.0).
+//! 2. **Static gain computer.** The level in dBFS, `L[n] = 20·log10(e[n])`
+//!    (an envelope of exactly 0 is mapped to −80 dBFS), is mapped to a gain reduction `r[n] ≥ 0` in dB.
+//! 3. **Gain application.** `y[n] = x[n] · 10^{−r[n]/20} · 10^{M/20}`, with `M`
+//!    the makeup gain in dB (compressor only).
+//!
+//! The gain is computed in the level domain: the envelope is smoothed first and
+//! the static curve is applied to the smoothed level.
+//!
+//! ## Detector
+//!
+//! The detector value `d[n]` depends on [`DynamicRangeMethod`]:
+//!
+//! - `Peak`: `d[n] = |x[n]|`.
+//! - `Rms`: `d[n] = sqrt(mean(x²))` over the last 10 ms (`⌊0.01·f_s⌋` samples).
+//!   A sine of peak amplitude `A` reads `A/√2`, i.e. 3.01 dB below `Peak`.
+//! - `Hybrid`: `d[n] = max(|x[n]|, RMS)`.
+//!
+//! The detector choice therefore shifts the effective threshold.
+//!
+//! ## Attack and release ballistics
+//!
+//! The envelope is a one-pole smoother with two coefficients:
+//!
+//! ```text
+//! e[n] = a·e[n−1] + (1 − a)·d[n],   a = a_A if d[n] > e[n−1] else a_R
+//! a_A = exp(−1 / (τ_A·f_s)),        a_R = exp(−1 / (τ_R·f_s))
+//! ```
+//!
+//! `τ_A` (`attack_ms`) and `τ_R` (`release_ms`) are time constants in seconds and
+//! `f_s` is the sample rate in Hz. After an upward step the envelope follows
+//! `1 − e^{−t/τ_A}`: it reaches 63.2 % of the step after `τ_A`, 99 % after about
+//! `4.6·τ_A`, and its 10–90 % rise time is `τ_A·ln 9 ≈ 2.2·τ_A`. A downward step
+//! decays as `e^{−t/τ_R}`. The envelope never reaches "full" gain reduction in
+//! finite time. Commercial units quote attack and release with different
+//! conventions (some 10–90 %, some to 63 %), so the numbers are not directly
+//! comparable between products.
+//!
+//! ## Static gain computer
+//!
+//! With input level `L` (dBFS), threshold `T` (dBFS), ratio `R` (≥ 1) and knee
+//! width `W` (dB), the compressor output level `Y = L − r` is
+//!
+//! ```text
+//! hard knee:  Y = L                         for L ≤ T
+//!             Y = T + (L − T)/R             for L > T
+//!
+//! soft knee:  Y = L                         for 2(L − T) < −W
+//!             Y = L + (1/R − 1)·(L − T + W/2)² / (2W)   for 2|L − T| ≤ W
+//!             Y = T + (L − T)/R             for 2(L − T) > W
+//! ```
+//!
+//! The soft knee is the quadratic knee of Giannoulis, Massberg & Reiss (2012),
+//! "Digital Dynamic Range Compressor Design — A Tutorial and Analysis", JAES 60(6).
+//! It is centred on `T`, spans `[T − W/2, T + W/2]`, is monotone and has a
+//! continuous slope (1 below the knee, `1/R` above it). At `L = T` it gives
+//! `Y = T − (1 − 1/R)·W/8`. `W = 0` is a hard knee.
+//!
+//! The limiter uses the same curve with `R → ∞` and the ceiling `C` in place of
+//! `T`, so its static output never exceeds `C`. With a soft knee, gain reduction
+//! starts at `C − W/2`.
+//!
+//! The gate and the expander are downward expanders: below the threshold
+//! the output level is `Y = T − R·(T − L)`, i.e. the reduction is
+//! `r = (R − 1)·(T − L)` dB for `L < T`, and `r = 0` above. A ratio `R` therefore
+//! means "1 dB below the threshold in gives `R` dB below it out" (1:R expansion).
+//! `R = 10` attenuates a signal 20 dB under the threshold by 180 dB.
+//! Ratios below 1 produce upward expansion (a boost below the threshold).
+//!
+//! ## Lookahead and latency
+//!
+//! The compressor and limiter accept `lookahead_ms`, converted to
+//! `N_L = round(lookahead_ms · 10⁻³ · f_s)` samples. The detector sees the
+//! undelayed signal, the signal path is delayed by `N_L` samples, and the gain
+//! applied to sample `n` uses the largest reduction computed for samples
+//! `n … n + N_L` (a max-hold over the lookahead window):
+//!
+//! ```text
+//! y[n] = x[n] · 10^{−max(r[n], …, r[n+N_L])/20}
+//! ```
+//!
+//! Gain reduction is thus in place up to `N_L` samples before a peak arrives.
+//! With `N_L ≥ 5·τ_A·f_s` the envelope has fully settled when the peak reaches
+//! the output. A real-time implementation would add `N_L` samples of latency;
+//! because these functions process the whole buffer, they compensate that
+//! delay, so output index `n` stays aligned with input index `n`. Beyond the
+//! end of the signal the detector is fed zeros. The gate and expander have no
+//! lookahead.
+//!
+//! ## Limitations
+//!
+//! - The limiter is not a brick-wall (clipping-free) limiter. Its detector is
+//!   the smoothed envelope above, so the ceiling is exact only once the envelope
+//!   has settled on a steady level. Transients shorter than a few `τ_A`, and the
+//!   peaks of low-frequency waveforms when `τ_A` is long compared with the
+//!   period, can exceed the ceiling.
+//! - [`LimiterConfig::isp_limiting`] is not implemented and currently has no
+//!   effect: only sample peaks are detected, not inter-sample (true) peaks.
+//! - The side-chain filter fields of [`SideChainConfig`]
+//!   (`high_pass_freq`, `low_pass_freq`, `pre_emphasis_db`, `external_mix`) are
+//!   validated but not applied. The side-chain signal drives the detector
+//!   unfiltered, and side-chain processing is mono only.
+//!
+//! [`SideChainConfig`]: crate::operations::types::SideChainConfig
 //!
 //! # Example
 //!
@@ -28,6 +137,7 @@
 //! audio.apply_compressor_in_place(&config).unwrap();
 //! ```
 
+use ndarray::{ArrayView1, ArrayViewMut1, s};
 use non_empty_slice::NonEmptySlice;
 
 use crate::operations::traits::AudioDynamicRange;
@@ -51,9 +161,14 @@ use std::num::NonZeroUsize;
 /// ## Purpose
 ///
 /// Tracks the amplitude envelope of an audio signal over time. Each call to
-/// [`process`][EnvelopeFollower::process] returns the current smoothed level, which
-/// rises during loud passages (governed by `attack_ms`) and falls during quiet passages
-/// (governed by `release_ms`).
+/// [`process`][EnvelopeFollower::process] returns the current smoothed level
+/// `e[n] = a·e[n−1] + (1 − a)·d[n]`, where `d[n]` is the detector value (peak,
+/// RMS or hybrid). The coefficient is the attack coefficient `a_A` while
+/// `d[n] > e[n−1]` (the envelope rises) and the release coefficient `a_R`
+/// otherwise (the envelope falls). Each coefficient is `a = exp(−1/(τ·f_s))`,
+/// with `τ` the time constant in seconds and `f_s` the sample rate in Hz, so a
+/// step in `d` is followed as `1 − e^{−t/τ}` (63.2 % after `τ`). See the module
+/// documentation for details.
 ///
 /// ## Intended Usage
 ///
@@ -74,8 +189,9 @@ pub struct EnvelopeFollower {
     attack_coeff: f64,
     /// Release coefficient (0.0 to 1.0)
     release_coeff: f64,
-    /// Current detector state
-    detector_state: f64,
+    /// Sample rate in Hz, kept so the RMS window can be resized when the
+    /// detection method changes.
+    sample_rate: f64,
     /// RMS window for RMS detection
     rms_window: VecDeque<f64>,
     /// RMS window size
@@ -91,10 +207,12 @@ impl EnvelopeFollower {
     ///
     /// # Arguments
     ///
-    /// - `attack_ms` - Attack time in milliseconds. Controls how quickly the envelope
-    ///   rises when the signal level increases. Use `0.0` for instantaneous response.
-    /// - `release_ms` - Release time in milliseconds. Controls how quickly the envelope
-    ///   falls when the signal level decreases. Use `0.0` for instantaneous response.
+    /// - `attack_ms` - Attack time constant `τ_A` in milliseconds: after a rising step
+    ///   the envelope reaches 63.2 % of the step after `τ_A`. Use `0.0` for
+    ///   instantaneous response.
+    /// - `release_ms` - Release time constant `τ_R` in milliseconds: after a falling
+    ///   step the envelope has covered 63.2 % of the drop after `τ_R`. Use `0.0` for
+    ///   instantaneous response.
     /// - `sample_rate` - Sample rate in Hz used to convert time constants to
     ///   per-sample coefficients.
     /// - `detection_method` - Determines whether peak, RMS, or hybrid level detection
@@ -133,19 +251,13 @@ impl EnvelopeFollower {
             0.0
         };
 
-        // RMS window size: 10ms for RMS detection
-        let rms_window_size = match detection_method {
-            DynamicRangeMethod::Rms | DynamicRangeMethod::Hybrid => {
-                (0.01 * sample_rate).max(1.0) as usize
-            }
-            DynamicRangeMethod::Peak => 1,
-        };
+        let rms_window_size = Self::rms_window_len(detection_method, sample_rate);
 
         Self {
             envelope: 0.0,
             attack_coeff,
             release_coeff,
-            detector_state: 0.0,
+            sample_rate,
             rms_window: VecDeque::with_capacity(rms_window_size),
             rms_window_size,
             rms_sum: 0.0,
@@ -156,8 +268,8 @@ impl EnvelopeFollower {
     /// Processes a single sample and returns the current envelope level.
     ///
     /// The detector value is computed from `input` according to `detection_method`,
-    /// then smoothed using the attack coefficient when rising and the release coefficient
-    /// when falling.
+    /// then smoothed with the attack coefficient when it is above the current envelope
+    /// and with the release coefficient otherwise.
     ///
     /// The detection algorithm is the one supplied to [`new`][EnvelopeFollower::new];
     /// it is not chosen per call.
@@ -230,14 +342,14 @@ impl EnvelopeFollower {
             }
         };
 
-        // Apply attack or release based on whether detector is rising or falling
-        let coeff = if detector_value > self.detector_state {
+        // Attack while the detector is above the current envelope (the
+        // envelope must rise), release while it is at or below it.
+        let coeff = if detector_value > self.envelope {
             self.attack_coeff
         } else {
             self.release_coeff
         };
 
-        self.detector_state = detector_value;
         self.envelope = coeff * self.envelope + (1.0 - coeff) * detector_value;
         self.envelope
     }
@@ -246,7 +358,9 @@ impl EnvelopeFollower {
     ///
     /// The detection method is normally fixed at construction. This setter exists
     /// for callers that reuse a single configured follower across detection modes
-    /// (for example envelope analysis); it does not reset the internal state.
+    /// (for example envelope analysis). The RMS window is resized to match the new
+    /// method (10 ms for `Rms` and `Hybrid`, one sample for `Peak`) and its
+    /// contents are cleared; the envelope value itself is kept.
     ///
     /// # Arguments
     ///
@@ -254,11 +368,24 @@ impl EnvelopeFollower {
     #[inline]
     pub fn set_detection_method(&mut self, detection_method: DynamicRangeMethod) {
         self.detection_method = detection_method;
+        self.rms_window_size = Self::rms_window_len(detection_method, self.sample_rate);
+        self.rms_window.clear();
+        self.rms_sum = 0.0;
+    }
+
+    /// RMS window length in samples: 10 ms for `Rms`/`Hybrid`, 1 for `Peak`.
+    fn rms_window_len(detection_method: DynamicRangeMethod, sample_rate: f64) -> usize {
+        match detection_method {
+            DynamicRangeMethod::Rms | DynamicRangeMethod::Hybrid => {
+                (0.01 * sample_rate).max(1.0) as usize
+            }
+            DynamicRangeMethod::Peak => 1,
+        }
     }
 
     /// Resets all internal state to zero.
     ///
-    /// Clears the envelope value, detector state, and any accumulated RMS window data.
+    /// Clears the envelope value and any accumulated RMS window data.
     /// Call this between unrelated audio segments to prevent state leaking across
     /// independent signals.
     ///
@@ -277,52 +404,104 @@ impl EnvelopeFollower {
     #[inline]
     pub fn reset(&mut self) {
         self.envelope = 0.0;
-        self.detector_state = 0.0;
         self.rms_window.clear();
         self.rms_sum = 0.0;
     }
 }
 
-/// Fixed-capacity FIFO of gain-reduction values used to apply the lookahead
-/// delay to computed gains without retaining the full O(N) history.
+/// Sliding-window maximum over the most recent `len` gain-reduction values (dB).
 ///
-/// It holds at most `capacity` (= `lookahead_samples`) of the most recently
-/// pushed gains. [`delayed`][GainDelayLine::delayed] returns the oldest stored
-/// gain - the one computed `capacity` steps ago - which is exactly the value
-/// the original code read as `gain_reductions[i - lookahead]`. Callers only
-/// invoke [`delayed`][GainDelayLine::delayed] once the line is full, matching
-/// the `i >= lookahead` / `lookahead <= len` guards in the processing loops.
+/// Implements the lookahead "max-hold": the gain applied to the delayed sample
+/// `x[n − L]` is the largest reduction computed for any of the samples
+/// `x[n − L] … x[n]`, so gain reduction is already in place when a peak that
+/// lies up to `L` samples ahead arrives. A monotonic deque gives O(1)
+/// amortised cost per sample.
 #[derive(Debug, Clone)]
-struct GainDelayLine {
-    buffer: VecDeque<f64>,
-    capacity: usize,
+struct GainMaxHold {
+    window: VecDeque<(usize, f64)>,
+    len: usize,
+    count: usize,
 }
 
-impl GainDelayLine {
+impl GainMaxHold {
     #[inline]
-    fn new(capacity: usize) -> Self {
+    fn new(len: usize) -> Self {
         Self {
-            buffer: VecDeque::with_capacity(capacity),
-            capacity,
+            window: VecDeque::with_capacity(len),
+            len: len.max(1),
+            count: 0,
         }
     }
 
-    /// Returns the oldest stored gain (the front of the FIFO).
-    ///
-    /// Only called when the line is full, so the front is the gain computed
-    /// exactly `capacity` steps before the current one.
+    /// Pushes a reduction and returns the maximum of the last `len` pushed values.
     #[inline]
-    fn delayed(&self) -> f64 {
-        self.buffer.front().copied().unwrap_or(0.0)
-    }
-
-    /// Appends a gain, evicting the oldest once `capacity` is exceeded.
-    #[inline]
-    fn push(&mut self, gain: f64) {
-        if self.buffer.len() == self.capacity {
-            self.buffer.pop_front();
+    fn push(&mut self, reduction_db: f64) -> f64 {
+        let idx = self.count;
+        self.count += 1;
+        while let Some(&(_, v)) = self.window.back() {
+            if v <= reduction_db {
+                self.window.pop_back();
+            } else {
+                break;
+            }
         }
-        self.buffer.push_back(gain);
+        self.window.push_back((idx, reduction_db));
+        while let Some(&(j, _)) = self.window.front() {
+            if j + self.len <= idx {
+                self.window.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.window.front().map_or(reduction_db, |&(_, v)| v)
+    }
+}
+
+/// Runs a feed-forward, lookahead gain stage over one channel in place.
+///
+/// The detector (envelope follower) sees the undelayed control signal: the
+/// channel itself, or `sidechain` when given. The static gain computer
+/// `reduction_db` maps the envelope level in dBFS to a gain reduction in dB.
+/// Output sample `y[n] = x[n] · 10^{−r_held[n]/20} · output_gain`, where
+/// `r_held[n] = max(r[n], …, r[n + L])` and `L = lookahead` samples. Beyond the
+/// end of the signal the detector is fed zeros. Because the whole signal is
+/// available, the `L`-sample delay is compensated: output index `n` is aligned
+/// with input index `n`.
+fn process_lookahead_channel<T, F>(
+    mut channel: ArrayViewMut1<'_, T>,
+    sidechain: Option<ArrayView1<'_, T>>,
+    mut follower: EnvelopeFollower,
+    lookahead: usize,
+    reduction_db: F,
+    output_gain: f64,
+) where
+    T: StandardSample,
+    F: Fn(f64) -> f64,
+{
+    let n = channel.len();
+    let mut delay = NonZeroUsize::new(lookahead).map(LookaheadBuffer::new);
+    let mut hold = GainMaxHold::new(lookahead + 1);
+
+    for i in 0..n + lookahead {
+        let x: f64 = if i < n { channel[i].convert_to() } else { 0.0 };
+        let detector_input: f64 = match sidechain {
+            Some(sc) if i < n => sc[i].convert_to(),
+            Some(_) => 0.0,
+            None => x,
+        };
+
+        let envelope = follower.process(detector_input);
+        let held_db = hold.push(reduction_db(linear_to_db(envelope)));
+
+        let delayed = match delay.as_mut() {
+            Some(buffer) => buffer.process(x),
+            None => x,
+        };
+
+        if i >= lookahead {
+            let output = delayed * db_to_linear(-held_db) * output_gain;
+            channel[i - lookahead] = output.convert_to();
+        }
     }
 }
 
@@ -502,9 +681,11 @@ impl LookaheadBuffer {
 
 /// Computes the gain reduction in dB for a given input level and compressor settings.
 ///
-/// Returns the amount (in dB, positive = reduction) that should be subtracted from the
-/// input to achieve the configured compression. Returns `0.0` for inputs at or below the
-/// threshold.
+/// Returns the amount `r` (in dB, positive = reduction) that is subtracted from the
+/// input level to give the output level `Y = L − r` of the static compressor curve.
+/// The hard knee gives `r = (1 − 1/R)·max(L − T, 0)`. The soft knee is the quadratic
+/// knee of width `W` centred on `T` (see the [module documentation](self)), so
+/// reduction already begins at `T − W/2`.
 ///
 /// # Arguments
 ///
@@ -513,13 +694,14 @@ impl LookaheadBuffer {
 /// - `ratio` - Compression ratio (e.g. `4.0` means 4:1). Must be ≥ 1.0.
 /// - `knee_type` - Whether the transition at the threshold is abrupt ([`KneeType::Hard`])
 ///   or gradual ([`KneeType::Soft`]).
-/// - `knee_width_db` - Width of the soft-knee region in dB. Only used when `knee_type`
-///   is [`KneeType::Soft`].
+/// - `knee_width_db` - Total width `W` of the soft-knee region in dB, spanning
+///   `[T − W/2, T + W/2]`. Only used when `knee_type` is [`KneeType::Soft`];
+///   `W ≤ 0` behaves as a hard knee.
 ///
 /// # Returns
 ///
-/// Gain reduction in dB (≥ 0.0). Subtract from the input level to obtain the compressed
-/// output level.
+/// Gain reduction in dB (≥ 0.0 for `ratio ≥ 1`). Subtract from the input level to
+/// obtain the compressed output level.
 ///
 /// # Example
 ///
@@ -530,6 +712,10 @@ impl LookaheadBuffer {
 /// // 6 dB overshoot at 4:1 ratio → 4.5 dB gain reduction
 /// let reduction = calculate_compression_gain(-6.0, -12.0, 4.0, KneeType::Hard, 2.0);
 /// assert!((reduction - 4.5).abs() < 1e-10);
+///
+/// // Soft knee, W = 12 dB: at the threshold the reduction is (1 − 1/R)·W/8 = 1.125 dB
+/// let at_threshold = calculate_compression_gain(-20.0, -20.0, 4.0, KneeType::Soft, 12.0);
+/// assert!((at_threshold - 1.125).abs() < 1e-10);
 /// ```
 #[inline]
 #[must_use]
@@ -540,48 +726,53 @@ pub fn calculate_compression_gain(
     knee_type: KneeType,
     knee_width_db: f64,
 ) -> f64 {
+    // Overshoot o = L − T. Hard knee: r = (1 − 1/R)·max(o, 0).
+    // Soft knee of width W (Giannoulis, Massberg & Reiss 2012), centred on T:
+    //   o ≤ −W/2       : r = 0
+    //   |o| ≤ W/2      : r = (1 − 1/R)·(o + W/2)² / (2W)
+    //   o ≥ W/2        : r = (1 − 1/R)·o
     let overshoot = input_level_db - threshold_db;
+    let slope = 1.0 - 1.0 / ratio;
+    quadratic_knee_reduction(overshoot, slope, knee_type, knee_width_db)
+}
 
-    if overshoot <= 0.0 {
-        return 0.0;
-    }
-
-    match knee_type {
-        KneeType::Hard => {
-            // Hard knee: abrupt transition
-            overshoot - overshoot / ratio
-        }
-        KneeType::Soft => {
-            // Soft knee: smooth transition
-            let half_knee = knee_width_db / 2.0;
-
-            if overshoot <= half_knee {
-                // In the knee region
-                let knee_ratio = overshoot / half_knee;
-                let smooth_ratio = ((ratio - 1.0) * knee_ratio).mul_add(knee_ratio, 1.0);
-                overshoot - overshoot / smooth_ratio
-            } else {
-                // Above the knee
-                let knee_gain = half_knee - half_knee / ratio;
-                knee_gain + (overshoot - half_knee) - (overshoot - half_knee) / ratio
-            }
-        }
+/// Gain reduction `slope · max(o, 0)` with an optional quadratic soft knee of
+/// width `knee_width_db` centred on `o = 0` (Giannoulis, Massberg & Reiss 2012).
+#[inline]
+fn quadratic_knee_reduction(
+    overshoot: f64,
+    slope: f64,
+    knee_type: KneeType,
+    knee_width_db: f64,
+) -> f64 {
+    let half_knee = knee_width_db / 2.0;
+    if knee_type == KneeType::Soft && half_knee > 0.0 && overshoot.abs() <= half_knee {
+        let x = overshoot + half_knee;
+        slope * x * x / (2.0 * knee_width_db)
+    } else if overshoot > 0.0 {
+        slope * overshoot
+    } else {
+        0.0
     }
 }
 
 /// Computes the gain reduction in dB for a given input level and limiter settings.
 ///
-/// Returns the amount (in dB, positive = reduction) that should be subtracted from the
-/// input to enforce the ceiling. Returns `0.0` for inputs at or below the ceiling.
+/// Returns the amount `r` (in dB, positive = reduction) that is subtracted from the
+/// input level. This is the compressor curve with `R → ∞`: the hard knee gives
+/// `r = max(L − C, 0)`; the soft knee gives `r = (L − C + W/2)²/(2W)` for
+/// `|L − C| ≤ W/2`. The static output level `L − r` never exceeds the ceiling `C`.
 ///
 /// # Arguments
 ///
 /// - `input_level_db` - Current signal level in dBFS.
-/// - `ceiling_db` - Limiting ceiling in dBFS. No output level will exceed this value.
+/// - `ceiling_db` - Limiting ceiling `C` in dBFS. The static output level never
+///   exceeds this value (the dynamic output can, see the
+///   [module documentation](self)).
 /// - `knee_type` - Whether the transition is abrupt ([`KneeType::Hard`]) or gradual
 ///   ([`KneeType::Soft`]).
-/// - `knee_width_db` - Width of the soft-knee region in dB. Only used when `knee_type`
-///   is [`KneeType::Soft`].
+/// - `knee_width_db` - Total width `W` of the soft-knee region in dB, spanning
+///   `[C − W/2, C + W/2]`. Only used when `knee_type` is [`KneeType::Soft`].
 ///
 /// # Returns
 ///
@@ -606,32 +797,9 @@ pub fn calculate_limiting_gain(
     knee_type: KneeType,
     knee_width_db: f64,
 ) -> f64 {
-    let overshoot = input_level_db - ceiling_db;
-
-    if overshoot <= 0.0 {
-        return 0.0;
-    }
-
-    match knee_type {
-        KneeType::Hard => {
-            // Hard limiting: complete attenuation of overshoot
-            overshoot
-        }
-        KneeType::Soft => {
-            // Soft limiting: smooth transition to full limiting
-            let half_knee = knee_width_db / 2.0;
-
-            if overshoot <= half_knee {
-                // In the knee region: gradual increase in limiting
-                let knee_ratio = overshoot / half_knee;
-                overshoot * knee_ratio * knee_ratio
-            } else {
-                // Above the knee: full limiting
-                let knee_gain = half_knee;
-                knee_gain + (overshoot - half_knee)
-            }
-        }
-    }
+    // The compressor knee with R → ∞ (slope 1): the static output
+    // y = L − r never exceeds the ceiling C, also inside the soft knee.
+    quadratic_knee_reduction(input_level_db - ceiling_db, 1.0, knee_type, knee_width_db)
 }
 
 impl<T> AudioDynamicRange for AudioSamples<'_, T>
@@ -641,10 +809,15 @@ where
 {
     /// Applies compression to reduce the dynamic range of the signal.
     ///
-    /// Samples above the threshold are attenuated according to the compression ratio.
-    /// Attack and release times control how quickly the compressor responds to level
-    /// changes. An optional lookahead delay allows the compressor to anticipate peaks
-    /// before they occur. Multi-channel audio is compressed independently per channel.
+    /// The detector envelope is mapped through the static curve (hard knee or quadratic
+    /// soft knee, threshold `T`, ratio `R`); levels above the threshold are reduced so
+    /// that the output level is `T + (L − T)/R`. `attack_ms` and `release_ms` are
+    /// one-pole time constants (63 % of a step after one time constant). With
+    /// `lookahead_ms > 0` gain reduction starts up to `lookahead_ms` before a peak; the
+    /// delay is compensated, so the output stays time-aligned with the input.
+    /// Multi-channel audio is compressed independently per channel (no stereo linking).
+    /// The formulas are in the [`dynamic_range`](crate::operations::dynamic_range)
+    /// module documentation.
     ///
     /// # Arguments
     ///
@@ -679,146 +852,48 @@ where
         // Validate configuration
         config.validate(sample_rate)?;
 
-        // Calculate lookahead buffer size
         let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-        let lookahead_samples = lookahead_samples.max(1);
-        // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
-        let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
+        let makeup_gain = db_to_linear(config.makeup_gain_db);
+        let reduction = |envelope_db: f64| {
+            calculate_compression_gain(
+                envelope_db,
+                config.threshold_db,
+                config.ratio,
+                config.knee_type,
+                config.knee_width_db,
+            )
+        };
+        let new_follower = || {
+            EnvelopeFollower::new(
+                config.attack_ms,
+                config.release_ms,
+                sample_rate,
+                config.detection_method,
+            )
+        };
+
         match self.data_mut() {
             AudioData::Mono(samples) => {
-                let mut envelope_follower = EnvelopeFollower::new(
-                    config.attack_ms,
-                    config.release_ms,
-                    sample_rate,
-                    config.detection_method,
+                process_lookahead_channel(
+                    samples.slice_mut(s![..]),
+                    None,
+                    new_follower(),
+                    lookahead_samples,
+                    reduction,
+                    makeup_gain,
                 );
-
-                let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                // Only the last `lookahead_samples` gain values are ever read
-                // back (the value computed `lookahead_samples` steps earlier),
-                // so a fixed-capacity ring replaces the full-length Vec.
-                let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
-                let makeup_gain = db_to_linear(config.makeup_gain_db);
-
-                // Apply gain reductions with lookahead. Envelope/gain
-                // computation is fused into the apply pass: at step `i` we
-                // compute gain[i] and apply gain[i - lookahead] to the
-                // delayed sample. Writes target index `i - lookahead < i`, so
-                // they never affect a later read of `samples[i']`.
-                let n = samples.len().get();
-                for i in 0..n {
-                    let sample_f: f64 = samples[i].convert_to();
-
-                    // Get envelope level
-                    let envelope = envelope_follower.process(sample_f);
-                    let envelope_db = linear_to_db(envelope);
-
-                    // Calculate gain reduction for this sample
-                    let gain_reduction_db = calculate_compression_gain(
-                        envelope_db,
-                        config.threshold_db,
-                        config.ratio,
-                        config.knee_type,
-                        config.knee_width_db,
-                    );
-
-                    let delayed_sample = lookahead_buffer.process(sample_f);
-
-                    if i >= lookahead_samples.get() {
-                        let gain_reduction_db = gain_reductions.delayed();
-                        let gain_linear = db_to_linear(-gain_reduction_db);
-
-                        let output_sample = delayed_sample * gain_linear * makeup_gain;
-                        samples[i - lookahead_samples.get()] = output_sample.convert_to();
-                    }
-
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                // Process remaining samples in lookahead buffer
-                for i in 0..lookahead_samples.get() {
-                    let delayed_sample = lookahead_buffer.process(0.0);
-
-                    // Check for overflow before subtraction
-                    if lookahead_samples <= samples.len() {
-                        let sample_idx = n - lookahead_samples.get() + i;
-
-                        if sample_idx < n {
-                            let gain_reduction_db = gain_reductions.delayed();
-                            gain_reductions.push(0.0);
-                            let gain_linear = db_to_linear(-gain_reduction_db);
-
-                            let output_sample = delayed_sample * gain_linear * makeup_gain;
-                            samples[sample_idx] = output_sample.convert_to();
-                        }
-                    }
-                }
             }
             AudioData::Multi(samples) => {
-                let num_channels = samples.nrows().get();
-                let num_samples = samples.ncols().get();
-
-                // Process each channel independently
-                for channel in 0..num_channels {
-                    let mut envelope_follower = EnvelopeFollower::new(
-                        config.attack_ms,
-                        config.release_ms,
-                        sample_rate,
-                        config.detection_method,
+                // Each channel is compressed independently.
+                for channel in 0..samples.nrows().get() {
+                    process_lookahead_channel(
+                        samples.row_mut(channel),
+                        None,
+                        new_follower(),
+                        lookahead_samples,
+                        reduction,
+                        makeup_gain,
                     );
-
-                    let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                    let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
-                    let makeup_gain = db_to_linear(config.makeup_gain_db);
-
-                    // Apply gain reductions with lookahead (envelope/gain
-                    // computation fused into the apply pass).
-                    for sample_idx in 0..num_samples {
-                        let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
-
-                        let envelope = envelope_follower.process(sample_f);
-                        let envelope_db = linear_to_db(envelope);
-
-                        let gain_reduction_db = calculate_compression_gain(
-                            envelope_db,
-                            config.threshold_db,
-                            config.ratio,
-                            config.knee_type,
-                            config.knee_width_db,
-                        );
-
-                        let delayed_sample = lookahead_buffer.process(sample_f);
-
-                        if sample_idx >= lookahead_samples.get() {
-                            let delayed_gain_db = gain_reductions.delayed();
-                            let gain_linear = db_to_linear(-delayed_gain_db);
-
-                            let output_sample = delayed_sample * gain_linear * makeup_gain;
-                            samples[[channel, sample_idx - lookahead_samples.get()]] =
-                                output_sample.convert_to();
-                        }
-
-                        gain_reductions.push(gain_reduction_db);
-                    }
-
-                    // Process remaining samples in lookahead buffer
-                    for i in 0..lookahead_samples.get() {
-                        let delayed_sample = lookahead_buffer.process(0.0);
-
-                        // Check for overflow before subtraction
-                        if lookahead_samples.get() <= num_samples {
-                            let sample_idx = num_samples - lookahead_samples.get() + i;
-
-                            if sample_idx < num_samples {
-                                let gain_reduction_db = gain_reductions.delayed();
-                                gain_reductions.push(0.0);
-                                let gain_linear = db_to_linear(-gain_reduction_db);
-
-                                let output_sample = delayed_sample * gain_linear * makeup_gain;
-                                samples[[channel, sample_idx]] = output_sample.convert_to();
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -828,10 +903,15 @@ where
 
     /// Prevents the signal from exceeding a specified ceiling level.
     ///
-    /// Applies gain reduction to any samples that breach the ceiling. Lookahead
-    /// processing delays the output signal while analysing future samples, allowing gain
-    /// reduction to begin before peaks arrive and minimising audible distortion.
-    /// Multi-channel audio is limited independently per channel.
+    /// Applies gain reduction when the smoothed envelope level exceeds the ceiling (the
+    /// compressor curve with an infinite ratio). The detector sees each sample up to
+    /// `lookahead_ms` before it is output and the largest reduction over that window is
+    /// applied, so gain reduction begins before peaks arrive; the delay is compensated.
+    /// This is not a brick-wall limiter: the ceiling is exact only once the envelope has
+    /// settled, and transients shorter than a few attack time constants can exceed it.
+    /// Only sample peaks are detected (`isp_limiting` currently has no effect).
+    /// Multi-channel audio is limited independently per channel. See the
+    /// [`dynamic_range`](crate::operations::dynamic_range) module documentation.
     ///
     /// # Arguments
     ///
@@ -866,134 +946,46 @@ where
         // Validate configuration
         let config = config.validate(sample_rate)?;
 
-        // Calculate lookahead buffer size
         let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-        let lookahead_samples = lookahead_samples.max(1);
-        // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
-        let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
+        let reduction = |envelope_db: f64| {
+            calculate_limiting_gain(
+                envelope_db,
+                config.ceiling_db,
+                config.knee_type,
+                config.knee_width_db,
+            )
+        };
+        let new_follower = || {
+            EnvelopeFollower::new(
+                config.attack_ms,
+                config.release_ms,
+                sample_rate,
+                config.detection_method,
+            )
+        };
+
         match self.data_mut() {
             AudioData::Mono(samples) => {
-                let mut envelope_follower = EnvelopeFollower::new(
-                    config.attack_ms,
-                    config.release_ms,
-                    sample_rate,
-                    config.detection_method,
+                process_lookahead_channel(
+                    samples.slice_mut(s![..]),
+                    None,
+                    new_follower(),
+                    lookahead_samples,
+                    reduction,
+                    1.0,
                 );
-
-                let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
-
-                // Apply gain reductions with lookahead (envelope/gain
-                // computation fused into the apply pass).
-                let n = samples.len().get();
-                for i in 0..n {
-                    let sample_f: f64 = samples[i].convert_to();
-
-                    let envelope = envelope_follower.process(sample_f);
-                    let envelope_db = linear_to_db(envelope);
-
-                    let gain_reduction_db = calculate_limiting_gain(
-                        envelope_db,
-                        config.ceiling_db,
-                        config.knee_type,
-                        config.knee_width_db,
-                    );
-
-                    let delayed_sample = lookahead_buffer.process(sample_f);
-
-                    if i >= lookahead_samples.get() {
-                        let delayed_gain_db = gain_reductions.delayed();
-                        let gain_linear = db_to_linear(-delayed_gain_db);
-
-                        let output_sample = delayed_sample * gain_linear;
-                        samples[i - lookahead_samples.get()] = output_sample.convert_to();
-                    }
-
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                // Process remaining samples in lookahead buffer
-                for i in 0..lookahead_samples.get() {
-                    let delayed_sample = lookahead_buffer.process(0.0);
-
-                    // Check for overflow before subtraction
-                    if lookahead_samples <= samples.len() {
-                        let sample_idx = n - lookahead_samples.get() + i;
-
-                        if sample_idx < n {
-                            let gain_reduction_db = gain_reductions.delayed();
-                            gain_reductions.push(0.0);
-                            let gain_linear = db_to_linear(-gain_reduction_db);
-
-                            let output_sample = delayed_sample * gain_linear;
-                            samples[sample_idx] = output_sample.convert_to();
-                        }
-                    }
-                }
             }
             AudioData::Multi(samples) => {
-                let num_channels = samples.nrows().get();
-                let num_samples = samples.ncols().get();
-
-                // Process each channel independently
-                for channel in 0..num_channels {
-                    let mut envelope_follower = EnvelopeFollower::new(
-                        config.attack_ms,
-                        config.release_ms,
-                        sample_rate,
-                        config.detection_method,
+                // Each channel is limited independently.
+                for channel in 0..samples.nrows().get() {
+                    process_lookahead_channel(
+                        samples.row_mut(channel),
+                        None,
+                        new_follower(),
+                        lookahead_samples,
+                        reduction,
+                        1.0,
                     );
-
-                    let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                    let mut gain_reductions = GainDelayLine::new(lookahead_samples.get());
-
-                    // Apply gain reductions with lookahead (envelope/gain
-                    // computation fused into the apply pass).
-                    for sample_idx in 0..num_samples {
-                        let sample_f: f64 = samples[[channel, sample_idx]].convert_to();
-
-                        let envelope = envelope_follower.process(sample_f);
-                        let envelope_db = linear_to_db(envelope);
-
-                        let gain_reduction_db = calculate_limiting_gain(
-                            envelope_db,
-                            config.ceiling_db,
-                            config.knee_type,
-                            config.knee_width_db,
-                        );
-
-                        let delayed_sample = lookahead_buffer.process(sample_f);
-
-                        if sample_idx >= lookahead_samples.get() {
-                            let delayed_gain_db = gain_reductions.delayed();
-                            let gain_linear = db_to_linear(-delayed_gain_db);
-
-                            let output_sample = delayed_sample * gain_linear;
-                            samples[[channel, sample_idx - lookahead_samples.get()]] =
-                                output_sample.convert_to();
-                        }
-
-                        gain_reductions.push(gain_reduction_db);
-                    }
-
-                    // Process remaining samples in lookahead buffer
-                    for i in 0..lookahead_samples.get() {
-                        let delayed_sample = lookahead_buffer.process(0.0);
-
-                        // Check for overflow before subtraction
-                        if lookahead_samples.get() <= num_samples {
-                            let sample_idx = num_samples - lookahead_samples.get() + i;
-
-                            if sample_idx < num_samples {
-                                let gain_reduction_db = gain_reductions.delayed();
-                                gain_reductions.push(0.0);
-                                let gain_linear = db_to_linear(-gain_reduction_db);
-
-                                let output_sample = delayed_sample * gain_linear;
-                                samples[[channel, sample_idx]] = output_sample.convert_to();
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -1006,7 +998,10 @@ where
     /// The gain reduction is determined by the level of `sidechain_signal` rather than
     /// the main audio, allowing one signal to control the dynamics of another. A common
     /// use case is ducking: a voice track causes background music to decrease in level
-    /// whenever speech is present.
+    /// whenever speech is present. Lookahead and latency compensation work as in
+    /// [`apply_compressor_in_place`](Self::apply_compressor_in_place). The filter
+    /// settings in `config.side_chain` are not applied: the side-chain signal drives the
+    /// detector unfiltered.
     ///
     /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
     /// combinations return an error.
@@ -1079,70 +1074,30 @@ where
                     )));
                 }
 
-                let mut envelope_follower = EnvelopeFollower::new(
+                let envelope_follower = EnvelopeFollower::new(
                     config.attack_ms,
                     config.release_ms,
                     sample_rate,
                     config.detection_method,
                 );
-
                 let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-                let lookahead_samples = lookahead_samples.max(1);
 
-                // safety: we ensured lookahead_samples is at least 1, so this unwrap is safe
-                let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
-                let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                let mut gain_reductions = Vec::with_capacity(main_samples.len().get());
-
-                // Process sidechain signal to get gain reductions
-                for &sc_sample in sc_samples {
-                    let sc_f: f64 = sc_sample.convert_to();
-
-                    // Mix between internal and external sidechain
-                    let envelope = envelope_follower.process(sc_f);
-                    let envelope_db = linear_to_db(envelope);
-
-                    // Calculate gain reduction
-                    let gain_reduction_db = calculate_compression_gain(
-                        envelope_db,
-                        config.threshold_db,
-                        config.ratio,
-                        config.knee_type,
-                        config.knee_width_db,
-                    );
-
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                // Apply gain reductions to main signal
-                for i in 0..main_samples.len().get() {
-                    let sample_f: f64 = main_samples[i].convert_to();
-                    let delayed_sample = lookahead_buffer.process(sample_f);
-
-                    if i >= lookahead_samples.get() {
-                        let gain_reduction_db = gain_reductions[i - lookahead_samples.get()];
-                        let gain_linear = db_to_linear(-gain_reduction_db);
-                        let makeup_gain = db_to_linear(config.makeup_gain_db);
-
-                        let output_sample = delayed_sample * gain_linear * makeup_gain;
-                        main_samples[i - lookahead_samples.get()] = output_sample.convert_to();
-                    }
-                }
-
-                // Process remaining samples in lookahead buffer
-                for i in 0..lookahead_samples.get() {
-                    let delayed_sample = lookahead_buffer.process(0.0);
-                    let sample_idx = main_samples.len().get() - lookahead_samples.get() + i;
-
-                    if sample_idx < main_samples.len().get() {
-                        let gain_reduction_db = gain_reductions[sample_idx];
-                        let gain_linear = db_to_linear(-gain_reduction_db);
-                        let makeup_gain = db_to_linear(config.makeup_gain_db);
-
-                        let output_sample = delayed_sample * gain_linear * makeup_gain;
-                        main_samples[sample_idx] = output_sample.convert_to();
-                    }
-                }
+                process_lookahead_channel(
+                    main_samples.slice_mut(s![..]),
+                    Some(sc_samples.as_view()),
+                    envelope_follower,
+                    lookahead_samples,
+                    |envelope_db| {
+                        calculate_compression_gain(
+                            envelope_db,
+                            config.threshold_db,
+                            config.ratio,
+                            config.knee_type,
+                            config.knee_width_db,
+                        )
+                    },
+                    db_to_linear(config.makeup_gain_db),
+                );
             }
             _ => {
                 return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -1159,7 +1114,9 @@ where
     ///
     /// The gain reduction ceiling is enforced based on the level of `sidechain_signal`
     /// rather than the main audio. Useful for frequency-selective limiting where a
-    /// filtered copy of the signal controls gain reduction.
+    /// filtered copy of the signal (filtered by the caller) controls gain reduction.
+    /// Lookahead works as in [`apply_limiter_in_place`](Self::apply_limiter_in_place).
+    /// The filter settings in `config.side_chain` are not applied.
     ///
     /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
     /// combinations return an error.
@@ -1227,66 +1184,29 @@ where
                     )));
                 }
 
-                let mut envelope_follower = EnvelopeFollower::new(
+                let envelope_follower = EnvelopeFollower::new(
                     config.attack_ms,
                     config.release_ms,
                     sample_rate,
                     config.detection_method,
                 );
-
                 let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-                let lookahead_samples = lookahead_samples.max(1);
-                // safety: we ensured lookahead_samples is at least 1
-                let lookahead_samples = unsafe { NonZeroUsize::new_unchecked(lookahead_samples) };
 
-                let mut lookahead_buffer = LookaheadBuffer::new(lookahead_samples);
-                let mut gain_reductions = Vec::with_capacity(main_samples.len().get());
-
-                // Process sidechain signal to get gain reductions
-                for &sc_sample in sc_samples {
-                    let sc_f: f64 = sc_sample.convert_to();
-
-                    let envelope = envelope_follower.process(sc_f);
-                    let envelope_db = linear_to_db(envelope);
-
-                    // Calculate gain reduction
-                    let gain_reduction_db = calculate_limiting_gain(
-                        envelope_db,
-                        config.ceiling_db,
-                        config.knee_type,
-                        config.knee_width_db,
-                    );
-
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                // Apply gain reductions to main signal
-                for i in 0..main_samples.len().get() {
-                    let sample_f: f64 = main_samples[i].convert_to();
-                    let delayed_sample = lookahead_buffer.process(sample_f);
-
-                    if i >= lookahead_samples.get() {
-                        let gain_reduction_db = gain_reductions[i - lookahead_samples.get()];
-                        let gain_linear = db_to_linear(-gain_reduction_db);
-
-                        let output_sample = delayed_sample * gain_linear;
-                        main_samples[i - lookahead_samples.get()] = output_sample.convert_to();
-                    }
-                }
-
-                // Process remaining samples in lookahead buffer
-                for i in 0..lookahead_samples.get() {
-                    let delayed_sample = lookahead_buffer.process(0.0);
-                    let sample_idx = main_samples.len().get() - lookahead_samples.get() + i;
-
-                    if sample_idx < main_samples.len().get() {
-                        let gain_reduction_db = gain_reductions[sample_idx];
-                        let gain_linear = db_to_linear(-gain_reduction_db);
-
-                        let output_sample = delayed_sample * gain_linear;
-                        main_samples[sample_idx] = output_sample.convert_to();
-                    }
-                }
+                process_lookahead_channel(
+                    main_samples.slice_mut(s![..]),
+                    Some(sc_samples.as_view()),
+                    envelope_follower,
+                    lookahead_samples,
+                    |envelope_db| {
+                        calculate_limiting_gain(
+                            envelope_db,
+                            config.ceiling_db,
+                            config.knee_type,
+                            config.knee_width_db,
+                        )
+                    },
+                    1.0,
+                );
             }
             _ => {
                 return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -1461,9 +1381,10 @@ where
     /// Attenuates the signal when it falls below a threshold (noise gate).
     ///
     /// A gate mutes or reduces quiet passages - typically background noise, room tone,
-    /// or bleed - while leaving louder content unaffected. Signals below `threshold_db`
-    /// are attenuated by the given ratio; signals above are passed through unchanged.
-    /// Peak detection is always used for gate processing.
+    /// or bleed - while leaving louder content unaffected. When the envelope level `L`
+    /// is below the threshold `T`, the gain is reduced by `(R − 1)·(T − L)` dB, a 1:R
+    /// downward expansion; above the threshold the signal passes unchanged. Peak
+    /// detection is always used; there is no hold time, range floor or lookahead.
     ///
     /// # Arguments
     ///
@@ -1488,7 +1409,7 @@ where
     ///
     /// let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-    /// // Gate at -20 dBFS with 10:1 ratio
+    /// // Gate at -20 dBFS, ratio 10: 1 dB under the threshold becomes 10 dB under
     /// audio.apply_gate_in_place(&GateConfig::with_params(-20.0, 10.0, 1.0, 10.0)).unwrap();
     /// ```
     fn apply_gate_in_place(&mut self, config: &GateConfig) -> AudioSampleResult<()> {
@@ -1523,7 +1444,7 @@ where
                     // Gate logic: attenuate if below threshold
                     let gain_reduction_db = if envelope_db < threshold_db {
                         let undershoot = threshold_db - envelope_db;
-                        undershoot * (ratio - 1.0) / ratio
+                        undershoot * (ratio - 1.0)
                     } else {
                         0.0
                     };
@@ -1554,7 +1475,7 @@ where
                         // Gate logic: attenuate if below threshold
                         let gain_reduction_db = if envelope_db < threshold_db {
                             let undershoot = threshold_db - envelope_db;
-                            undershoot * (ratio - 1.0) / ratio
+                            undershoot * (ratio - 1.0)
                         } else {
                             0.0
                         };
@@ -1574,9 +1495,9 @@ where
     /// Increases dynamic range by expanding signals below a threshold.
     ///
     /// An expander is the complement of compression: signals below `threshold_db` are
-    /// attenuated by an amount that grows with distance from the threshold, making quiet
-    /// passages quieter while leaving loud passages unchanged. RMS detection is always
-    /// used for expansion.
+    /// attenuated by `(R − 1)·(T − L)` dB, where `L` is the envelope level, `T` the
+    /// threshold and `R` the ratio, making quiet passages quieter while leaving loud
+    /// passages unchanged. RMS detection (10 ms window) is always used for expansion.
     ///
     /// # Arguments
     ///
@@ -2096,93 +2017,81 @@ mod tests {
     // flush). The current implementation uses a fixed-capacity ring instead;
     // its output must be bit-for-bit identical to these references.
 
+    /// Brute-force reference for the lookahead gain stage: the detector runs
+    /// over the zero-padded signal (length `n + L`), and sample `j` receives
+    /// the maximum reduction computed for samples `j ..= j + L`.
+    fn reference_lookahead_mono(
+        input: &[f64],
+        lookahead: usize,
+        mut env: EnvelopeFollower,
+        reduction: impl Fn(f64) -> f64,
+        output_gain: f64,
+    ) -> Vec<f64> {
+        let n = input.len();
+        let gains: Vec<f64> = (0..n + lookahead)
+            .map(|i| {
+                let x = if i < n { input[i] } else { 0.0 };
+                reduction(linear_to_db(env.process(x)))
+            })
+            .collect();
+        (0..n)
+            .map(|j| {
+                let held = gains[j..=j + lookahead]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                input[j] * db_to_linear(-held) * output_gain
+            })
+            .collect()
+    }
+
     fn reference_compressor_mono(
         input: &[f64],
         config: &CompressorConfig,
         sample_rate: f64,
     ) -> Vec<f64> {
-        let lookahead = ms_to_samples(config.lookahead_ms, sample_rate).max(1);
-        let mut samples = input.to_vec();
-        let mut env = EnvelopeFollower::new(
-            config.attack_ms,
-            config.release_ms,
-            sample_rate,
-            config.detection_method,
-        );
-        let mut look = LookaheadBuffer::new(NonZeroUsize::new(lookahead).unwrap());
-
-        let mut gains = Vec::with_capacity(samples.len());
-        for &s in &samples {
-            let env_db = linear_to_db(env.process(s));
-            gains.push(calculate_compression_gain(
-                env_db,
-                config.threshold_db,
-                config.ratio,
-                config.knee_type,
-                config.knee_width_db,
-            ));
-        }
-        for i in 0..samples.len() {
-            let delayed = look.process(samples[i]);
-            if i >= lookahead {
-                let g = db_to_linear(-gains[i - lookahead]);
-                let mk = db_to_linear(config.makeup_gain_db);
-                samples[i - lookahead] = delayed * g * mk;
-            }
-        }
-        for i in 0..lookahead {
-            let delayed = look.process(0.0);
-            if lookahead <= samples.len() {
-                let idx = samples.len() - lookahead + i;
-                if idx < samples.len() {
-                    let g = db_to_linear(-gains[idx]);
-                    let mk = db_to_linear(config.makeup_gain_db);
-                    samples[idx] = delayed * g * mk;
-                }
-            }
-        }
-        samples
+        reference_lookahead_mono(
+            input,
+            ms_to_samples(config.lookahead_ms, sample_rate),
+            EnvelopeFollower::new(
+                config.attack_ms,
+                config.release_ms,
+                sample_rate,
+                config.detection_method,
+            ),
+            |db| {
+                calculate_compression_gain(
+                    db,
+                    config.threshold_db,
+                    config.ratio,
+                    config.knee_type,
+                    config.knee_width_db,
+                )
+            },
+            db_to_linear(config.makeup_gain_db),
+        )
     }
 
     fn reference_limiter_mono(input: &[f64], config: &LimiterConfig, sample_rate: f64) -> Vec<f64> {
-        let lookahead = ms_to_samples(config.lookahead_ms, sample_rate).max(1);
-        let mut samples = input.to_vec();
-        let mut env = EnvelopeFollower::new(
-            config.attack_ms,
-            config.release_ms,
-            sample_rate,
-            config.detection_method,
-        );
-        let mut look = LookaheadBuffer::new(NonZeroUsize::new(lookahead).unwrap());
-
-        let mut gains = Vec::with_capacity(samples.len());
-        for &s in &samples {
-            let env_db = linear_to_db(env.process(s));
-            gains.push(calculate_limiting_gain(
-                env_db,
-                config.ceiling_db,
-                config.knee_type,
-                config.knee_width_db,
-            ));
-        }
-        for i in 0..samples.len() {
-            let delayed = look.process(samples[i]);
-            if i >= lookahead {
-                let g = db_to_linear(-gains[i - lookahead]);
-                samples[i - lookahead] = delayed * g;
-            }
-        }
-        for i in 0..lookahead {
-            let delayed = look.process(0.0);
-            if lookahead <= samples.len() {
-                let idx = samples.len() - lookahead + i;
-                if idx < samples.len() {
-                    let g = db_to_linear(-gains[idx]);
-                    samples[idx] = delayed * g;
-                }
-            }
-        }
-        samples
+        reference_lookahead_mono(
+            input,
+            ms_to_samples(config.lookahead_ms, sample_rate),
+            EnvelopeFollower::new(
+                config.attack_ms,
+                config.release_ms,
+                sample_rate,
+                config.detection_method,
+            ),
+            |db| {
+                calculate_limiting_gain(
+                    db,
+                    config.ceiling_db,
+                    config.knee_type,
+                    config.knee_width_db,
+                )
+            },
+            1.0,
+        )
     }
 
     fn assert_bit_identical(a: &[f64], b: &[f64], ctx: &str) {
@@ -2239,8 +2148,8 @@ mod tests {
 
     #[test]
     fn test_compressor_ring_buffer_short_input_no_lookahead_reached() {
-        // Input SHORTER than the lookahead: neither the main-loop apply nor the
-        // flush guard fires, so the signal must be returned unchanged.
+        // Input SHORTER than the lookahead: every sample must still be
+        // processed (an earlier version returned such inputs unchanged).
         let sr = 44100.0;
         let input: Vec<f64> = vec![0.3, -0.6, 0.2, 0.9, -0.1];
         let mut config = CompressorConfig::new();
@@ -2258,12 +2167,9 @@ mod tests {
             &expected,
             "compressor short input",
         );
-        // And specifically: unchanged from input.
-        assert_bit_identical(
-            audio.as_slice().unwrap(),
-            &input,
-            "compressor short unchanged",
-        );
+        // The makeup gain must have been applied, so the output is not the input.
+        let out = audio.as_slice().unwrap();
+        assert!((out[0] - input[0] * db_to_linear(config.makeup_gain_db)).abs() < 1e-3);
     }
 
     #[test]

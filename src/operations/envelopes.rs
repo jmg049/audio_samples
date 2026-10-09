@@ -11,6 +11,29 @@
 //! Gathering these methods behind a single trait gives callers a
 //! uniform interface regardless of the underlying sample type
 //!
+//! # Definitions
+//!
+//! For an input `x[n]`, `n = 0 … N−1`, window length `W` and hop `H`
+//! (both in samples), frame `k` starts at sample `kH` and covers
+//! `x[kH] … x[min(kH + W, N) − 1]` (the last frames may be shorter).
+//! There are `⌈N/H⌉` frames.
+//!
+//! - Rectified envelope: `a[n] = |x[n]|`.
+//! - RMS envelope: `r[k] = sqrt( (1/W_k) Σ x[m]² )` over frame `k`, with `W_k`
+//!   the actual frame length.
+//! - Moving-average envelope: `m[k] = (1/W_k) Σ |x[m]|` over frame `k`.
+//! - Analytic envelope: `|x[n] + j·H{x}[n]|`, where `H{x}` is the discrete
+//!   Hilbert transform computed with the FFT (bins `1 … ⌈N/2⌉−1` doubled,
+//!   negative frequencies zeroed, DC and, for even `N`, Nyquist kept). This
+//!   matches `numpy.abs(scipy.signal.hilbert(x))`.
+//! - Attack/decay envelopes: the one-pole follower `e[n]` of
+//!   [`EnvelopeFollower`] (time constants as described in
+//!   [`crate::operations::dynamic_range`]), split into its rising and falling
+//!   parts by sample-and-hold.
+//!
+//! All envelopes are computed in `f64` on the samples' stored values: integer
+//! samples are not rescaled to `[-1, 1]` first.
+//!
 //! Bring [`AudioEnvelopes`] into scope and call methods on any
 //! [`AudioSamples`] value.  Each method returns an [`NdResult`] that
 //! mirrors the input channel layout: mono audio yields
@@ -170,17 +193,24 @@ where
     /// Track amplitude over time with an envelope follower, separating
     /// attack and decay phases.
     ///
-    /// For each sample, the [`EnvelopeFollower`] estimates the current
-    /// signal level.  Samples where the level is rising contribute to
-    /// the *attack* envelope; samples where it is falling contribute
-    /// to the *decay* envelope.  Both output envelopes have the same
-    /// length as the input.
+    /// A copy of `follower` (reset to zero, detection switched to
+    /// `method`) produces the envelope `e[n]` described in
+    /// [`EnvelopeFollower`]. The two outputs sample-and-hold it:
+    /// `attack[n] = e[n]` when `e[n] ≥ e[n−1]`, otherwise
+    /// `attack[n] = attack[n−1]`; `decay[n] = e[n]` when
+    /// `e[n] < e[n−1]`, otherwise `decay[n] = decay[n−1]` (both start
+    /// at 0). Both output envelopes have the same length as the input.
+    /// The time constants are converted with the sample rate given to
+    /// [`EnvelopeFollower::new`], not the sample rate of `self`.
+    /// Samples are used in their stored units (integer samples are not
+    /// rescaled to `[-1, 1]`).
     ///
     /// # Arguments
-    /// - `follower` - A configured [`EnvelopeFollower`] that controls
+    /// - `follower` - A configured [`EnvelopeFollower`] that supplies the
     ///   attack and release time constants.
-    /// - `method` - Detection strategy used to estimate level:
-    ///   peak, RMS, or hybrid.
+    /// - `method` - Detection strategy used to estimate level: peak
+    ///   (`|x|`), RMS over a 10 ms window, or hybrid (the larger of the
+    ///   two). It overrides the method the follower was built with.
     ///
     /// # Returns
     /// A tuple `(attack, decay)` of [`NdResult`] values, both matching
