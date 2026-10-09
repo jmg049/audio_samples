@@ -4442,10 +4442,12 @@ pub struct PeakPickingConfig {
     /// Parameters for adaptive threshold estimation.
     pub adaptive_threshold: AdaptiveThresholdConfig,
 
-    /// Minimum distance between two consecutive detected peaks, in samples.
+    /// Minimum distance between two consecutive detected peaks, in samples of
+    /// the onset strength function (i.e. analysis frames, not audio samples).
     ///
-    /// Prevents multiple detections from a single onset event. At 44.1 kHz,
-    /// 512 samples ≈ 11.6 ms.
+    /// Prevents multiple detections from a single onset event. With a hop of
+    /// 512 audio samples at 44.1 kHz one frame is about 11.6 ms, so 3 frames
+    /// is about 35 ms.
     pub min_peak_separation: NonZeroUsize,
 
     /// Whether to apply pre-emphasis (high-pass) filtering before detection.
@@ -4615,7 +4617,7 @@ impl PeakPickingConfig {
     ///
     /// # Arguments
     ///
-    /// - `samples` - minimum separation in samples.
+    /// - `samples` - minimum separation in onset-strength frames.
     #[inline]
     pub const fn set_min_peak_separation(&mut self, samples: NonZeroUsize) {
         self.min_peak_separation = samples;
@@ -4626,7 +4628,9 @@ impl PeakPickingConfig {
     /// # Arguments
     ///
     /// - `ms` - minimum separation in milliseconds.\
-    /// - `sample_rate` - sample rate in Hz used to convert milliseconds to samples.
+    /// - `sample_rate` - rate of the onset strength function in Hz, i.e. the
+    ///   frame rate `audio_sample_rate / hop_size` (the separation is counted in
+    ///   onset-strength frames).
     ///
     /// # Panics
     ///
@@ -4695,15 +4699,31 @@ impl PeakPickingConfig {
     }
 }
 
+/// General-purpose onset peak picking, tuned for onset strength functions at
+/// typical hops (256 to 512 samples):
+///
+/// - delta thresholding over a 9-frame window (`delta` 0.07): a peak must be
+///   within 0.07 of the largest value within +-4 frames;
+/// - an absolute floor of 0.1 on the peak-normalised strength (`min_threshold`),
+///   which rejects the low-level ripple between onsets;
+/// - minimum separation of 3 frames;
+/// - pre-emphasis 0.97, no median filter, peak normalisation.
+///
+/// These values replace earlier defaults (1024-frame threshold window, 3-point
+/// median filter, 512-frame separation) that suppressed almost every onset: the
+/// median filter erased single-frame peaks, the threshold window spanned the
+/// whole signal, and the separation was about 12 s at hop 512.
 #[cfg(feature = "peak-picking")]
 impl Default for PeakPickingConfig {
     fn default() -> Self {
+        let mut adaptive_threshold = AdaptiveThresholdConfig::delta(0.07, 9);
+        adaptive_threshold.min_threshold = 0.1;
         Self {
-            adaptive_threshold: AdaptiveThresholdConfig::default(),
-            min_peak_separation: NonZeroUsize::new(512).expect("Must be non-zero"),
+            adaptive_threshold,
+            min_peak_separation: NonZeroUsize::new(3).expect("Must be non-zero"),
             pre_emphasis: true,
             pre_emphasis_coeff: 0.97,
-            median_filter: true,
+            median_filter: false,
             median_filter_length: NonZeroUsize::new(3).expect("Must be non-zero"),
             normalize_onset_strength: true,
             normalization_method: NormalizationMethod::Peak,

@@ -1407,4 +1407,40 @@ mod cqt_dedup_tests {
             assert!(onsets.iter().all(|&t| (0.0..=1.5).contains(&t)));
         }
     }
+
+    /// Regression: with the old `PeakPickingConfig::default()` (1024-frame delta
+    /// window, 3-point median filter, 512-frame separation) `detect_onsets` found
+    /// 1 of the 10 notes of this sequence. The new defaults find all of them,
+    /// each within 50 ms, without spurious detections.
+    #[test]
+    fn detect_onsets_default_finds_every_note() {
+        let sr: f64 = 22050.0;
+        let onsets: [f64; 10] = [0.25, 0.75, 1.1, 1.6, 2.3, 2.8, 3.5, 4.0, 4.6, 5.2];
+        let freqs = [
+            262.0, 330.0, 392.0, 523.0, 440.0, 349.0, 294.0, 494.0, 587.0, 220.0,
+        ];
+        let n = (6.0 * sr) as usize;
+        let mut data = vec![0.0f64; n];
+        for (&t0, &f) in onsets.iter().zip(&freqs) {
+            let start = (t0 * sr).round() as usize;
+            for (j, v) in data[start..]
+                .iter_mut()
+                .take((1.5 * sr) as usize)
+                .enumerate()
+            {
+                let t = j as f64 / sr;
+                let env = (t / 0.005).min(1.0) * (-t / 0.12).exp();
+                let w = 2.0 * std::f64::consts::PI * f * t;
+                *v += 0.3 * env * (w.sin() + 0.5 * (2.0 * w).sin() + 0.25 * (3.0 * w).sin());
+            }
+        }
+        let audio = AudioSamples::new_mono(Array1::from_vec(data), sample_rate!(22050)).unwrap();
+        let detected = audio
+            .detect_onsets(&OnsetDetectionConfig::default())
+            .unwrap();
+        assert_eq!(detected.len(), onsets.len(), "detected {detected:?}");
+        for (d, t) in detected.iter().zip(&onsets) {
+            assert!((d - t).abs() <= 0.05, "detected {detected:?}");
+        }
+    }
 }
