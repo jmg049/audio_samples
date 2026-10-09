@@ -63,7 +63,7 @@ use crate::operations::types::{FadeCurve, NoiseColor, PadSide};
 #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
 use crate::operations::types::{PerturbationConfig, PerturbationMethod};
 use crate::repr::{AudioData, ChannelCount};
-use crate::utils::{samples_to_seconds, seconds_to_samples};
+use crate::utils::seconds_to_samples;
 use crate::{
     AudioEditing, AudioSampleError, AudioSampleResult, AudioSamples, AudioStatistics,
     AudioTypeConversion, ChannelRequirement, ConvertTo, LayoutError, ParameterError,
@@ -424,9 +424,8 @@ where
     /// per channel.
     ///
     /// # Errors
-    /// Propagates any error from the underlying [`pad_to_duration`] call.
-    ///
-    /// [`pad_to_duration`]: Self::pad_to_duration
+    /// None in practice (the result is never empty); the `Result` is kept for
+    /// API consistency.
     ///
     /// # Examples
     /// ```
@@ -450,10 +449,22 @@ where
             return Ok(self.clone().into_owned());
         }
 
-        let target_num_samples_seconds: f64 =
-            samples_to_seconds(target_num_samples, self.sample_rate().get());
-
-        self.pad_to_duration(target_num_samples_seconds, pad_value, PadSide::Right)
+        // Work in samples directly: a round trip through seconds truncates
+        // and could come out one sample short.
+        match self.data() {
+            AudioData::Mono(arr) => {
+                let mut out = Array1::from_elem(target_num_samples, pad_value);
+                out.slice_mut(s![..current_num_samples])
+                    .assign(&arr.as_view());
+                AudioSamples::new_mono(out, self.sample_rate())
+            }
+            AudioData::Multi(arr) => {
+                let mut out = Array2::from_elem((arr.nrows().get(), target_num_samples), pad_value);
+                out.slice_mut(s![.., ..current_num_samples])
+                    .assign(&arr.as_view());
+                AudioSamples::new_multi_channel(out, self.sample_rate())
+            }
+        }
     }
 
     /// Pads on the right to a target sample count in place, replacing `self`.
@@ -2643,6 +2654,33 @@ mod tests {
         let r = multi.row(1).to_vec();
         for i in (0..2 * sr).step_by(97) {
             assert!((r[i] - 0.5 * l[i]).abs() < 1e-9, "channel scaling at {i}");
+        }
+    }
+
+    /// `pad_samples_right` must produce exactly the requested length (it used
+    /// to go samples -> seconds -> samples with truncation twice).
+    #[test]
+    fn test_pad_samples_right_exact_length() {
+        for sr in [22050u32, 44100, 48000, 16000, 11025] {
+            let rate = std::num::NonZeroU32::new(sr).unwrap();
+            let audio = AudioSamples::new_mono(Array1::from(vec![0.5f64; 7]), rate).unwrap();
+            for target in (8..5000).chain([sr as usize * 3 + 1, 96001]) {
+                let padded = audio.pad_samples_right(target, 0.0).unwrap();
+                assert_eq!(
+                    padded.samples_per_channel().get(),
+                    target,
+                    "sr {sr} target {target}"
+                );
+            }
+            // Shorter or equal target: returned unchanged (documented).
+            assert_eq!(
+                audio
+                    .pad_samples_right(3, 0.0)
+                    .unwrap()
+                    .samples_per_channel()
+                    .get(),
+                7
+            );
         }
     }
 

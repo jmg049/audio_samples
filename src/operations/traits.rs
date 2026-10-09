@@ -4577,13 +4577,12 @@ where
     /// - `pad_value` - the sample value used for the padded region.
     ///
     /// # Returns
-    /// A new [`AudioSamples`] with at least `target_num_samples` samples
-    /// per channel.
+    /// A new [`AudioSamples`] with exactly `max(target_num_samples, current)`
+    /// samples per channel.
     ///
     /// # Errors
-    /// Propagates any error from the underlying [`pad_to_duration`] call.
-    ///
-    /// [`pad_to_duration`]: Self::pad_to_duration
+    /// None in practice (the result is never empty); the `Result` is kept for
+    /// API consistency.
     ///
     /// # Examples
     /// ```
