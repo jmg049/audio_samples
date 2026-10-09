@@ -93,6 +93,9 @@ fn inverse_plan(n: usize) -> Arc<dyn ComplexToReal<f64>> {
     REAL_FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_inverse(n))
 }
 
+/// Frames per block in [`stft`] (see the comment there).
+const STFT_BLOCK: usize = 16;
+
 fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_value(parameter, reason))
 }
@@ -413,9 +416,12 @@ pub fn stft(
     let plan = forward_plan(n_fft);
     let mut scratch = plan.make_scratch_vec();
     let mut frame_in = vec![0.0; n_fft];
-    // Frames are computed into a (frames, bins) buffer and transposed once per channel.
-    let mut tf = Array2::<Complex<f64>>::zeros((n_frames, n_bins));
-    let mut out = Array3::<Complex<f64>>::zeros((n_channels, n_bins, n_frames));
+    // Frames are transformed in blocks of `STFT_BLOCK` into a small frame-major
+    // buffer, then scattered into the bin-major output: each bin row receives a
+    // contiguous run of `STFT_BLOCK` frames, and the block stays in cache (a
+    // whole-signal transpose is several times slower than the FFTs).
+    let mut block = vec![Complex::new(0.0, 0.0); STFT_BLOCK * n_bins];
+    let mut out = Array3::<Complex<f64>>::uninit((n_channels, n_bins, n_frames));
     let mut row_buf = Vec::new();
 
     for (c, row) in signal.outer_iter().enumerate() {
@@ -433,25 +439,37 @@ pub fn stft(
         } else {
             x
         };
-        for (t, mut spec) in tf.outer_iter_mut().enumerate() {
-            let seg = &xp[t * hop..t * hop + n_fft];
-            for ((dst, &s), &w) in frame_in.iter_mut().zip(seg).zip(&window) {
-                *dst = w * s;
+        let mut out_c = out.index_axis_mut(Axis(0), c);
+        for t0 in (0..n_frames).step_by(STFT_BLOCK) {
+            let nb = STFT_BLOCK.min(n_frames - t0);
+            for (j, spec) in block.chunks_exact_mut(n_bins).take(nb).enumerate() {
+                let t = t0 + j;
+                let seg = &xp[t * hop..t * hop + n_fft];
+                for ((dst, &s), &w) in frame_in.iter_mut().zip(seg).zip(&window) {
+                    *dst = w * s;
+                }
+                plan.process_with_scratch(&mut frame_in, spec, &mut scratch)
+                    .map_err(|e| {
+                        AudioSampleError::Processing(crate::ProcessingError::algorithm_failure(
+                            "stft",
+                            e.to_string(),
+                        ))
+                    })?;
             }
-            let spec = spec
-                .as_slice_mut()
-                .expect("rows of a standard-layout array");
-            plan.process_with_scratch(&mut frame_in, spec, &mut scratch)
-                .map_err(|e| {
-                    AudioSampleError::Processing(crate::ProcessingError::algorithm_failure(
-                        "stft",
-                        e.to_string(),
-                    ))
-                })?;
+            for (k, mut dst) in out_c.outer_iter_mut().enumerate() {
+                for (j, d) in dst
+                    .slice_mut(ndarray::s![t0..t0 + nb])
+                    .iter_mut()
+                    .enumerate()
+                {
+                    d.write(block[j * n_bins + k]);
+                }
+            }
         }
-        out.index_axis_mut(Axis(0), c).assign(&tf.t());
     }
-    Ok(out)
+    // SAFETY: every element was written above: channels `c`, bins `k` and
+    // frames `t0..t0 + nb` for consecutive blocks covering `0..n_frames`.
+    Ok(unsafe { out.assume_init() })
 }
 
 /// Reconstructs signals from an STFT matrix, equivalent to `librosa.istft`.
