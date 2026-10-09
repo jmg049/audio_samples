@@ -95,6 +95,9 @@ pub mod plotting;
 #[cfg(feature = "envelopes")]
 pub mod envelopes;
 
+#[cfg(feature = "sequence")]
+pub mod sequence;
+
 // Re-export main traits for convenience
 #[cfg(feature = "statistics")]
 pub use traits::AudioStatistics;
