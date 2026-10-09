@@ -6039,11 +6039,9 @@ where
     ///   optional timing tolerance, and onset detection parameters.
     ///
     /// # Returns
-    /// A [`BeatTrackingData`] containing the target tempo and the
-    /// detected beat timestamps in seconds.  Beat times are in
-    /// detection order (global peak first, then forward beats, then
-    /// backward beats in reverse); sort `beat_times` for
-    /// chronological order.
+    /// A [`BeatTrackingData`] containing the target tempo
+    /// (`config.tempo_bpm`, echoed: the tempo is not estimated here) and the
+    /// detected beat timestamps in seconds, sorted ascending.
     ///
     /// # Errors
     /// - [crate::AudioSampleError::Parameter] - if `config.tempo_bpm` is

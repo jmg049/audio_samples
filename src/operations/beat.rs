@@ -45,27 +45,23 @@ use crate::{
 
 /// Results of a beat tracking analysis.
 ///
-/// Holds the estimated tempo and the detected beat timestamps returned
-/// by [`AudioBeatTracking::detect_beats`].
+/// Holds the tempo the beat grid was built at and the detected beat
+/// timestamps returned by [`AudioBeatTracking::detect_beats`].
 ///
 /// # Ordering
 ///
-/// The elements of `beat_times` are **not** sorted chronologically.
-/// The first element is the timestamp of the global onset peak
-/// (highest-energy onset in the signal).  Forward beats follow in
-/// causal order; backward beats are appended afterwards in reverse
-/// temporal order.  Sort `beat_times` if you need chronological
-/// order.
+/// `beat_times` is sorted chronologically (ascending) and contains no
+/// duplicates.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct BeatTrackingData {
-    /// Estimated tempo in beats per minute.
-    pub tempo_bpm: f64,
-    /// Beat timestamps in seconds, in detection order.
+    /// The tempo, in beats per minute, at which the beats were tracked.
     ///
-    /// The first element is the global onset peak; forward beats
-    /// follow in causal order; backward beats are appended last in
-    /// reverse temporal order.  See the struct-level documentation.
+    /// [`AudioBeatTracking::detect_beats`] does not estimate the tempo: this is
+    /// `config.tempo_bpm`, the tempo the caller asked for. Use
+    /// [`AudioBeatTracking::estimate_tempo`] to estimate it from the signal.
+    pub tempo_bpm: f64,
+    /// Beat timestamps in seconds, sorted ascending.
     pub beat_times: Vec<f64>,
     /// The configuration used to produce this result.
     pub config: BeatTrackingConfig,
@@ -75,8 +71,9 @@ impl BeatTrackingData {
     /// Create a `BeatTrackingData` from pre-computed components.
     ///
     /// # Arguments
-    /// - `tempo_bpm` - Estimated tempo in beats per minute.
-    /// - `beat_times` - Beat timestamps in seconds, in detection order.
+    /// - `tempo_bpm` - Tempo in beats per minute at which the beats were
+    ///   tracked.
+    /// - `beat_times` - Beat timestamps in seconds, sorted ascending.
     /// - `config` - The [`BeatTrackingConfig`] used to produce this
     ///   result.
     ///
@@ -95,7 +92,7 @@ impl BeatTrackingData {
 
 impl core::fmt::Display for BeatTrackingData {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        writeln!(f, "Estimated Tempo: {:.2} BPM", self.tempo_bpm)?;
+        writeln!(f, "Tempo: {:.2} BPM", self.tempo_bpm)?;
         writeln!(f, "Detected Beats (s):")?;
         for &time in &self.beat_times {
             writeln!(f, "{time:.3}")?;
@@ -172,11 +169,9 @@ where
     ///   optional timing tolerance, and onset detection parameters.
     ///
     /// # Returns
-    /// A [`BeatTrackingData`] containing the target tempo and the
-    /// detected beat timestamps in seconds.  Beat times are in
-    /// detection order (global peak first, then forward beats, then
-    /// backward beats in reverse); sort `beat_times` for
-    /// chronological order.
+    /// A [`BeatTrackingData`] containing the target tempo
+    /// (`config.tempo_bpm`, echoed: the tempo is not estimated here) and the
+    /// detected beat timestamps in seconds, sorted ascending.
     ///
     /// # Errors
     /// - [crate::AudioSampleError::Parameter] - if `config.tempo_bpm` is
@@ -384,10 +379,9 @@ fn peak_index(slice: &[f64]) -> usize {
 /// expected beat position a local peak search within a tolerance
 /// window selects the actual frame.
 ///
-/// Beat times are returned in detection order: the first element is
-/// the global onset peak; forward beats follow in causal order;
-/// backward beats are appended last in reverse temporal order.
-/// Sort the result if chronological order is needed.
+/// Beat times are returned in chronological order, without
+/// duplicates (two expected positions that snap to the same onset
+/// frame give one beat).
 ///
 /// # Arguments
 /// - `onset` - Pre-computed onset strength envelope, one value per
@@ -400,7 +394,7 @@ fn peak_index(slice: &[f64]) -> usize {
 ///   interval (minimum 1 frame).
 ///
 /// # Returns
-/// Beat timestamps in seconds, in detection order.
+/// Beat timestamps in seconds, sorted ascending.
 ///
 /// # Errors
 /// - [crate::AudioSampleError::Parameter] - if `tempo_bpm` is ≤ 0 or if
@@ -505,11 +499,18 @@ pub fn track_beats_core(
         beat_frames.push(lo as isize + rel);
     }
 
+    // --- Chronological order ---
+    // The walk visits the peak, then the forward beats, then the backward beats
+    // in reverse; sort, and drop repeats (a wide tolerance can land two expected
+    // positions on the same onset frame).
+    beat_frames.sort_unstable();
+    beat_frames.dedup();
+
     // --- Convert to seconds ---
-    let mut times = Vec::with_capacity(beat_frames.len());
-    for f in beat_frames {
-        times.push(f as f64 * hop_time);
-    }
+    let times = beat_frames
+        .into_iter()
+        .map(|f| f as f64 * hop_time)
+        .collect();
 
     Ok(times)
 }
@@ -577,7 +578,7 @@ mod tests {
         }
 
         #[test]
-        fn first_beat_is_global_peak(
+        fn global_peak_is_a_beat(
             len in 128usize..2048,
             tempo in 60.0f64..180.0,
             sr in 16_000.0f64..48_000.0,
@@ -597,16 +598,20 @@ mod tests {
                 None,
             ).unwrap();
 
-            let first_frame = (beats[0] * sr / hop.get() as f64).round() as usize;
-            prop_assert_eq!(first_frame, peak_idx);
+            prop_assert!(beats
+                .iter()
+                .any(|t| (t * sr / hop.get() as f64).round() as usize == peak_idx));
         }
 
+        /// Regression: beat times used to come back in detection order (global
+        /// peak, forward beats, then backward beats in reverse).
         #[test]
-        fn insertion_order_preserves_forward_then_backward_structure(
+        fn beat_times_are_sorted_and_unique(
             len in 256usize..4096,
             tempo in 60.0f64..180.0,
             sr in 16_000.0f64..48_000.0,
             hop in 1usize..512,
+            tolerance in proptest::option::of(0.0f64..2.0),
         ) {
             let onset = synthetic_onset(len);
             let hop = NonZeroUsize::new(hop).unwrap();
@@ -615,43 +620,11 @@ mod tests {
                 tempo,
                 sr,
                 hop,
-                None,
+                tolerance,
             ).unwrap();
 
-            if beats.len() >= 2 {
-                // First forward step should move forward in time
-                prop_assert!(beats[1] >= beats[0]);
-            }
-
-            // Check structure: forward beats come before backward beats
-            // All beats after index 0 should be either all >= beats[0] (only forward)
-            // or mixed (some forward >= beats[0], then backward < beats[0])
-            if beats.len() >= 3 {
-                let first = beats[0];
-                let mut seen_forward = false;
-                let mut seen_backward = false;
-
-                for beat in beats.iter().skip(1) {
-                    if *beat >= first {
-                        // Forward beat
-                        prop_assert!(!seen_backward, "Forward beat found after backward beat");
-                        seen_forward = true;
-                    } else {
-                        // Backward beat
-                        seen_backward = true;
-                    }
-                }
-
-                if seen_forward && seen_backward {
-                    // If both forward and backward beats are present, check the order
-                    let first_backward_idx = beats.iter().position(|&t| t < first).unwrap();
-                    for (i, beat) in beats.iter().enumerate().take(first_backward_idx).skip(1) {
-                        prop_assert!(*beat >= first, "Beat at index {} should be forward", i);
-                    }
-                    for (i, beat) in beats.iter().enumerate().skip(first_backward_idx) {
-                        prop_assert!(*beat < first, "Beat at index {} should be backward", i);
-                    }
-                }
+            for pair in beats.windows(2) {
+                prop_assert!(pair[0] < pair[1], "not strictly increasing: {:?}", pair);
             }
         }
 
@@ -691,6 +664,55 @@ mod tests {
     /// recover the fundamental tempo within ~5%. Octave errors are NOT accepted
     /// here - the autocorrelation peak in the 40-240 BPM window is asserted to be
     /// the fundamental (120 BPM).
+    /// Regression: `detect_beats` returned the beats in detection order (global
+    /// peak first, then forward, then backward beats in reverse). They are now
+    /// chronological; `tempo_bpm` is the requested tempo.
+    #[test]
+    fn detect_beats_returns_sorted_times() {
+        use crate::{AudioSamples, sample_rate};
+        use ndarray::Array1;
+
+        let sr = 22_528.0;
+        let n = (sr * 6.0) as usize;
+        let period = (sr * 0.5) as usize; // 120 BPM
+        let mut data = vec![0.0f64; n];
+        let mut seed = 0x9E37_79B9u64;
+        // Start late so that the strongest click is in the middle and the
+        // tracker has to walk backwards.
+        let mut click = period / 2;
+        let mut gain = 0.3;
+        while click < n {
+            for k in 0..256 {
+                if click + k < n {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let r = ((seed >> 33) as f64 / (1u64 << 31) as f64) - 1.0;
+                    data[click + k] += gain * (-(k as f64) / 24.0).exp() * r;
+                }
+            }
+            gain = if click > n / 2 && click < n / 2 + period {
+                0.9
+            } else {
+                0.3
+            };
+            click += period;
+        }
+        let audio = AudioSamples::new_mono(Array1::from(data), sample_rate!(22528)).unwrap();
+        let config = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
+        let result = audio.detect_beats(&config).unwrap();
+
+        assert!(result.beat_times.len() > 5);
+        for pair in result.beat_times.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "beats not sorted: {:?}",
+                result.beat_times
+            );
+        }
+        assert_eq!(result.tempo_bpm, 120.0);
+    }
+
     #[test]
     fn test_estimate_tempo_click_train_120bpm() {
         use crate::{AudioSamples, sample_rate};
