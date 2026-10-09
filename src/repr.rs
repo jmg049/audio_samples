@@ -4833,6 +4833,9 @@ where
     ///
     /// This method is similar to `replace_with_vec` but validates the sample count against
     /// the provided `expected_channels` parameter rather than the current audio configuration.
+    /// Multi-channel `samples` are in channel-major (planar) order,
+    /// `[ch0[0..n], ch1[0..n], ...]` (not interleaved), and must keep the current
+    /// number of samples per channel `n`; otherwise an error is returned.
     /// This is useful when the current audio might be a placeholder or when you want to
     /// ensure the data matches a specific channel configuration.
     ///
