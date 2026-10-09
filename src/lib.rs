@@ -461,6 +461,15 @@ pub use crate::operations::spectrum::{
 
 pub use crate::utils::audio_math::MelScale;
 
+#[cfg(feature = "feature-extraction")]
+pub use crate::operations::AudioTonal;
+
+#[cfg(feature = "feature-extraction")]
+pub use crate::operations::tonal::{
+    ChromaFilterbankConfig, ChromaStftConfig, NormalizeConfig, PiptrackConfig, PiptrackReference,
+    TuningConfig,
+};
+
 #[cfg(feature = "fixed-size-audio")]
 pub use crate::fixed_audio::{FixedSizeAudioSamples, FixedSizeMultiChannelAudioSamples};
 

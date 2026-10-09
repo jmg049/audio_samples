@@ -10,6 +10,7 @@
 //! | [`AudioProcessing`] | `processing` | Normalize, filter, resample, μ-law, … |
 //! | [`AudioTransforms`] | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |
 //! | [`AudioSpectrum`] | `transforms` | librosa-compatible STFT/ISTFT, mel spectrogram, MFCC |
+//! | [`AudioTonal`] | `feature-extraction` | librosa-compatible chroma_stft, piptrack, tuning estimation |
 //! | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |
 //! | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |
 //! | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |
@@ -6480,3 +6481,6 @@ where
 
 #[cfg(feature = "transforms")]
 pub use crate::operations::spectrum::AudioSpectrum;
+
+#[cfg(feature = "feature-extraction")]
+pub use crate::operations::tonal::AudioTonal;

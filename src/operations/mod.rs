@@ -106,6 +106,9 @@ pub mod envelopes;
 #[cfg(feature = "sequence")]
 pub mod sequence;
 
+#[cfg(feature = "feature-extraction")]
+pub mod tonal;
+
 // Re-export main traits for convenience
 #[cfg(feature = "statistics")]
 pub use traits::AudioStatistics;
@@ -142,6 +145,9 @@ pub use traits::AudioTransforms;
 
 #[cfg(feature = "transforms")]
 pub use traits::AudioSpectrum;
+
+#[cfg(feature = "feature-extraction")]
+pub use traits::AudioTonal;
 
 #[cfg(feature = "decomposition")]
 pub use traits::AudioDecomposition;
