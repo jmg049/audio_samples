@@ -979,15 +979,16 @@ where
 
 /// Computes Pearson correlation between a chroma vector and a rotated key profile.
 ///
-/// `tonic` rotates `profile` so that position 0 corresponds to the tonic pitch class.
+/// `profile[0]` is the weight of the tonic; the profile is rotated so that its
+/// tonic weight lands on chroma index `tonic` (`rotated[i] = profile[(i - tonic) mod 12]`).
 fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
     debug_assert_eq!(chroma.len(), 12);
     debug_assert_eq!(profile.len(), 12);
 
-    // Rotate profile to match tonic
+    // Rotate the profile so that its tonic (index 0) sits at chroma index `tonic`.
     let mut rotated_profile = [0.0; 12];
     for i in 0..12 {
-        rotated_profile[i] = profile[(i + tonic) % 12];
+        rotated_profile[i] = profile[(i + 12 - tonic) % 12];
     }
 
     // Calculate Pearson correlation coefficient
@@ -1386,6 +1387,62 @@ mod tests {
                 median < max_median && max < max_max,
                 "sr {sr}: median {median:.2} cents, max {max:.2} cents"
             );
+        }
+    }
+
+    /// `calculate_correlation(chroma, profile, t)` must be 1 when the chroma IS the
+    /// profile transposed to tonic `t`. The old rotation `profile[(i + t) % 12]`
+    /// transposed by `-t` instead, so every key other than C was reported as its
+    /// mirror image (D major as A# major, E major as G# major).
+    #[test]
+    fn key_profile_rotation_puts_tonic_at_chroma_index() {
+        let major = [
+            6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+        ];
+        for tonic in 0..12 {
+            let chroma: Vec<f64> = (0..12).map(|i| major[(i + 12 - tonic) % 12]).collect();
+            let r = calculate_correlation(&chroma, &major, tonic);
+            assert!((r - 1.0).abs() < 1e-12, "tonic {tonic}: correlation {r}");
+        }
+    }
+
+    /// I-IV-V-I cadences of 3-harmonic major triads in D and E major.
+    #[test]
+    fn estimate_key_d_and_e_major_cadences() {
+        let sr = 22_050u32;
+        let chord = |midis: &[i32]| -> Vec<f64> {
+            let n = (0.5 * f64::from(sr)) as usize;
+            (0..n)
+                .map(|i| {
+                    let t = i as f64 / f64::from(sr);
+                    midis
+                        .iter()
+                        .map(|&m| {
+                            let f0 = 440.0 * ((f64::from(m) - 69.0) / 12.0).exp2();
+                            (1..=3)
+                                .map(|k| 0.6 / k as f64 * (2.0 * PI * f0 * k as f64 * t).sin())
+                                .sum::<f64>()
+                        })
+                        .sum()
+                })
+                .collect()
+        };
+        let stft = StftParams::new(
+            NonZeroUsize::new(4096).unwrap(),
+            NonZeroUsize::new(1024).unwrap(),
+            WindowType::Hanning,
+            true,
+        )
+        .unwrap();
+        for (root, expected) in [(62, PitchClass::D), (64, PitchClass::E)] {
+            let mut samples = Vec::new();
+            for triad in [[0, 4, 7], [5, 9, 12], [7, 11, 14], [0, 4, 7]] {
+                let midis: Vec<i32> = triad.iter().map(|i| root + i).collect();
+                samples.extend(chord(&midis));
+            }
+            let key = mono_f64(samples, sr).estimate_key(&stft).unwrap();
+            assert_eq!(key.tonic, expected, "root {root}: got {key:?}");
+            assert_eq!(key.mode, Mode::Major, "root {root}: got {key:?}");
         }
     }
 
