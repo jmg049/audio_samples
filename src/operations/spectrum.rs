@@ -1565,9 +1565,44 @@ pub fn melspectrogram_from_spectrogram(
     let basis = mel_filterbank(sample_rate, n_fft, mel)?;
     let mut out = Array3::<f64>::zeros((n_channels, basis.nrows(), n_frames));
     for (c, s) in spectrogram.outer_iter().enumerate() {
-        out.index_axis_mut(Axis(0), c).assign(&basis.dot(&s));
+        banded_dot_into(&basis, s, out.index_axis_mut(Axis(0), c));
     }
     Ok(out)
+}
+
+/// `out = basis · s` for a filterbank whose rows are each non-zero over one
+/// contiguous range of columns (mel and similar triangular filterbanks).
+///
+/// Only the non-zero range of every row is visited, so the cost is
+/// proportional to the number of non-zero filter weights rather than to
+/// `rows × columns`; each output row is accumulated as a sum of scaled
+/// spectrogram rows (contiguous, vectorisable). For finite input the result
+/// equals the dense product up to floating-point summation order.
+pub(crate) fn banded_dot_into(
+    basis: &Array2<f64>,
+    s: ArrayView2<'_, f64>,
+    mut out: ndarray::ArrayViewMut2<'_, f64>,
+) {
+    let s = s.as_standard_layout();
+    let n_frames = s.ncols();
+    for (filter, mut out_row) in basis.outer_iter().zip(out.outer_iter_mut()) {
+        out_row.fill(0.0);
+        let Some(lo) = filter.iter().position(|&w| w != 0.0) else {
+            continue;
+        };
+        let hi = filter.len() - filter.iter().rev().position(|&w| w != 0.0).unwrap_or(0);
+        let acc = out_row
+            .as_slice_mut()
+            .expect("rows of a standard-layout array");
+        for k in lo..hi {
+            let w = filter[k];
+            let src = s.row(k);
+            let src = src.as_slice().expect("rows of a standard-layout array");
+            for (a, &v) in acc[..n_frames].iter_mut().zip(src) {
+                *a += w * v;
+            }
+        }
+    }
 }
 
 /// `|z|^power`.
