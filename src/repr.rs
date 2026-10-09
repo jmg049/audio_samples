@@ -3446,7 +3446,7 @@ where
                     write!(f, "]")?;
                 }
                 AudioData::Multi(arr) => {
-                    let channels = arr.ncols().get();
+                    let channels = arr.nrows().get();
                     for ch in 0..channels {
                         let ch_data = arr.index_axis(ndarray::Axis(0), ch);
                         let len = ch_data.len();
