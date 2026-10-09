@@ -12,6 +12,7 @@
 //! | [`AudioSpectrum`] | `transforms` | librosa-compatible STFT/ISTFT, mel spectrogram, MFCC |
 //! | [`AudioTonal`] | `feature-extraction` | librosa-compatible chroma_stft, piptrack, tuning estimation |
 //! | [`AudioFeatures`] | `feature-extraction` | librosa-compatible frame-wise spectral features, RMS, ZCR |
+//! | `AudioEffects` | `effects` | librosa-compatible time stretch, pitch shift, emphasis, dB trim/split, HPSS |
 //! | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |
 //! | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |
 //! | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |
@@ -6495,3 +6496,6 @@ pub use crate::operations::tonal::AudioTonal;
 pub use crate::operations::features::AudioFeatures;
 #[cfg(feature = "pitch-analysis")]
 pub use crate::operations::pitch_tracking::AudioPitchTracking;
+
+#[cfg(feature = "effects")]
+pub use crate::operations::effects::AudioEffects;

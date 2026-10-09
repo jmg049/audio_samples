@@ -11,6 +11,7 @@
 //! - [`processing`] - Signal processing operations
 //! - [`transforms`] - FFT / spectral analysis
 //! - [`spectrum`] - librosa-compatible STFT, mel spectrogram, MFCC, dB, delta
+//! - `effects` - librosa-compatible time stretch, pitch shift, emphasis, dB trim/split, HPSS (feature `effects`)
 //! - [`filterbanks`] - window functions and mel filterbanks (librosa / SciPy semantics)
 //! - [`editing`] - Time-domain editing operations
 //! - [`channels`] - Channel manipulation operations
@@ -117,6 +118,9 @@ pub mod features;
 #[cfg(feature = "feature-extraction")]
 pub use traits::AudioFeatures;
 
+#[cfg(feature = "effects")]
+pub mod effects;
+
 // Re-export main traits for convenience
 #[cfg(feature = "statistics")]
 pub use traits::AudioStatistics;
@@ -159,6 +163,9 @@ pub use traits::AudioSpectrum;
 
 #[cfg(feature = "feature-extraction")]
 pub use traits::AudioTonal;
+
+#[cfg(feature = "effects")]
+pub use traits::AudioEffects;
 
 #[cfg(feature = "decomposition")]
 pub use traits::AudioDecomposition;

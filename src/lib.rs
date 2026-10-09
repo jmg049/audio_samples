@@ -459,6 +459,15 @@ pub use crate::operations::spectrum::{
     MfccConfig, StftConfig, StftPadMode,
 };
 
+#[cfg(feature = "effects")]
+pub use crate::operations::AudioEffects;
+
+#[cfg(feature = "effects")]
+pub use crate::operations::effects::{
+    ChannelAggregate, ClickPositions, ClicksConfig, GriffinLimConfig, GriffinLimInit,
+    HarmonicPercussiveConfig, HpssMaskConfig, NnAggregate, PitchShiftConfig, SilenceConfig,
+};
+
 pub use crate::utils::audio_math::MelScale;
 
 #[cfg(feature = "feature-extraction")]

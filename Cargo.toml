@@ -168,7 +168,7 @@ envelopes = [
 fixed-size-audio = [
 ] # Support for fixed-size audio buffers (no heap allocation)
 feature-extraction = ["transforms"] # Frame-wise (librosa-style) spectral, rhythmic and tonal features
-effects = ["transforms", "resampling", "editing"] # Time-stretch, pitch-shift, pre-emphasis, dB trim/split, librosa-style HPSS
+effects = ["transforms", "resampling", "editing", "sequence"] # Time-stretch, pitch-shift, pre-emphasis, dB trim/split, librosa-style HPSS
 sequence = [] # Sequence alignment and decoding: DTW, Viterbi, transition matrices
 
 full = ["full_no_plotting", "plotting"]

@@ -12,6 +12,12 @@
 //! 4. Generate binary or soft masks based on the filtered spectrograms
 //! 5. Apply masks to the original complex STFT and reconstruct time-domain signals
 //!
+//! For librosa-compatible separation (`librosa.effects.hpss` / `decompose.hpss`:
+//! kernel 31, power-2 soft masks, margins, SciPy `reflect` median boundaries,
+//! multichannel, output trimmed to the input length) see
+//! `operations::effects` (feature `effects`): `AudioEffects::harmonic_percussive`,
+//! `hpss_spectrogram` and `softmask`. This module keeps its own conventions.
+//!
 //! ## References
 //!
 //! - Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering"
