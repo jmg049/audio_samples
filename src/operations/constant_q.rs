@@ -3092,8 +3092,11 @@ mod tests {
         );
         assert!(a.vqt(&VqtConfig::default().with_gamma(Some(-1.0))).is_err());
         assert!(cq_to_chroma(84, nzu!(12), nzu!(5), None, true).is_err());
-        let cfg = ChromaCqtConfig::default().with_n_chroma(nzu!(7));
-        assert!(a.chroma_cqt(&cfg).is_err());
+        #[cfg(feature = "feature-extraction")]
+        {
+            let cfg = ChromaCqtConfig::default().with_n_chroma(nzu!(7));
+            assert!(a.chroma_cqt(&cfg).is_err());
+        }
         assert!(wavelet_lengths(&[440.0], 22050.0, &WaveletConfig::default()).is_err());
         assert!(wavelet_lengths(&[880.0, 440.0], 22050.0, &WaveletConfig::default()).is_err());
     }
@@ -3167,6 +3170,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "feature-extraction")]
     fn chroma_features_shapes_and_tuning_estimate() {
         let a = tone(440.0, 11025);
         let chroma = a.chroma_cqt(&ChromaCqtConfig::default()).unwrap();
