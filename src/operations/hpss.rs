@@ -12,6 +12,40 @@
 //! 4. Generate binary or soft masks based on the filtered spectrograms
 //! 5. Apply masks to the original complex STFT and reconstruct time-domain signals
 //!
+//! ## Definitions
+//!
+//! Let X[k, m] be the STFT (bin k, frame m) computed with
+//! [`AudioTransforms::stft`] and S = |X| its magnitude. Then
+//!
+//! - H = median filter of S along time (frames), kernel `median_filter_harmonic`;
+//! - P = median filter of S along frequency (bins), kernel `median_filter_percussive`;
+//! - with s = `mask_softness` ∈ [0, 1], the masks are
+//!   M_H = s·H/(H + P + ε) + (1 − s)·\[H ≥ P\] and M_P = s·P/(H + P + ε) + (1 − s)·\[P > H\],
+//!   with ε = 10⁻¹⁰ and [·] the indicator (so s = 0 is the binary mask);
+//! - the outputs are ISTFT(M_H·X) and ISTFT(M_P·X).
+//!
+//! Median-filter edges are padded by mirror reflection that excludes the edge sample
+//! (d c b | a b c d …). An even kernel takes the mean of the two middle values.
+//!
+//! Note: librosa's `decompose.hpss` differs in three ways: its soft mask uses powers
+//! (H²/(H² + P²), Fitzgerald's Wiener-style mask), its median filter
+//! (`scipy.ndimage.median_filter`) uses `reflect` edges (d c b a | a b c d), and its
+//! default STFT window is the periodic Hann rather than the symmetric Hann used here.
+//!
+//! ## Example
+//!
+//! ```rust
+//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
+//! use audio_samples::operations::hpss::HpssConfig;
+//! use audio_samples::operations::traits::AudioDecomposition;
+//! use std::time::Duration;
+//!
+//! let audio = sine_wave::<f64>(440.0, Duration::from_millis(250), sample_rate!(16000), 0.5);
+//! let (harmonic, percussive) = audio.hpss(&HpssConfig::realtime()).unwrap();
+//! assert_eq!(harmonic.sample_rate(), audio.sample_rate());
+//! assert_eq!(percussive.samples_per_channel(), harmonic.samples_per_channel());
+//! ```
+//!
 //! ## References
 //!
 //! - Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering"
@@ -46,13 +80,18 @@ pub struct HpssConfig {
     /// Percussive median filter kernel size (along frequency axis)
     /// Larger values strengthen percussive separation but may blur tonal content
     pub median_filter_percussive: usize,
-    /// Soft masking parameter (0.0 = hard mask, 1.0 = completely soft)
-    /// Soft masking provides smoother component separation but less isolation
+    /// Soft masking parameter s (0.0 = hard/binary mask, 1.0 = fully soft mask
+    /// H/(H + P) on median-filtered magnitudes, exponent 1); intermediate values blend
+    /// the two linearly. Soft masking gives smoother separation but less isolation.
     pub mask_softness: f64,
 }
 
 impl HpssConfig {
-    /// Create a new HPSS configuration with default settings.
+    /// Create a new HPSS configuration from explicit parameters.
+    ///
+    /// No validation is performed here; [`HpssConfig::validate`] (called by `hpss`)
+    /// checks the values. For defaults use [`HpssConfig::default`] or a preset such as
+    /// [`HpssConfig::musical`].
     #[inline]
     #[must_use]
     pub const fn new(
@@ -295,30 +334,33 @@ impl HpssConfig {
         Ok(())
     }
 
-    /// Calculate the number of frequency bins for this configuration.
+    /// Number of frequency bins of the one-sided STFT: `floor(n_fft / 2) + 1`.
+    ///
+    /// This equals the number of rows of [`AudioTransforms::stft`] for these
+    /// parameters, for even and odd `n_fft` alike.
     ///
     /// # Panics
     ///
-    /// Theorectically, this will never panic because the builder enforces n_fft > 0 and is a power of 2.
-    /// So we know it starts as a valid usize, and dividing by 2 and adding 1 will never exceed usize limits.
+    /// Never panics in practice: `n_fft >= 1`, so `n_fft / 2 + 1 >= 1` and cannot overflow.
     #[inline]
     #[must_use]
     pub const fn num_freq_bins(&self) -> NonZeroUsize {
-        // ceil(n_fft/2) + 1, computed without NonZero::div_ceil (MSRV 1.92) so
-        // the minimum supported Rust stays at 1.87. `n/2 + n%2` == ceil(n/2).
+        // A real FFT of length n has floor(n/2) + 1 non-negative-frequency bins.
         let n = self.stft_params.n_fft().get();
-        NonZeroUsize::new(n / 2 + (n % 2) + 1)
-            .expect("n_fft >= 1, so n/2 + n%2 + 1 >= 2 and never zero or overflowing")
+        NonZeroUsize::new(n / 2 + 1).expect("n_fft >= 1, so n/2 + 1 >= 1 and never overflows")
     }
 
-    /// Calculate the frequency resolution in Hz.
+    /// Bin spacing of the STFT in Hz: `sample_rate / n_fft`.
     #[inline]
     #[must_use]
     pub fn freq_resolution(&self, sample_rate: f64) -> f64 {
         sample_rate / self.stft_params.n_fft().get() as f64
     }
 
-    /// Calculate the time resolution in seconds.
+    /// Frame period (hop size / sample rate) in seconds.
+    ///
+    /// This is the time step between successive STFT frames. The effective time
+    /// resolution is governed by the window length, `n_fft / sample_rate`.
     #[inline]
     #[must_use]
     pub fn time_resolution(&self, sample_rate: f64) -> f64 {
@@ -630,7 +672,7 @@ fn generate_separation_masks(
                     percussive_mask[[freq_idx, time_idx]] = 1.0;
                 }
             } else {
-                // Soft masking: weighted by relative power with softness factor
+                // Soft masking: weighted by relative magnitude (exponent 1) with softness factor
                 let h_ratio = h_val / total;
                 let p_ratio = p_val / total;
 

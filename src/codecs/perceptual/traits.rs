@@ -66,14 +66,13 @@ pub trait AudioPerceptualAnalysis {
     /// Requires **mono** input. Multi-channel signals must be mixed down or a
     /// single channel extracted before calling this method.
     ///
-    /// The MDCT window size is chosen automatically as the largest power-of-two
-    /// ≤ `min(2048, signal_length)` that is at least 4 samples.
+    /// The MDCT window size is chosen automatically as the largest **even** value
+    /// ≤ `min(2048, signal_length)` (at least 4 samples); it need not be a power of two.
     ///
     /// # Arguments
-    /// - `window` - Window function applied before the MDCT.
-    ///   [`WindowType::Hanning`] is a reasonable default. Note that only the
-    ///   sine window (`MdctParams::sine_window`) gives perfect reconstruction,
-    ///   but other windows may better suit the analysis goal.
+    /// - `window` - Currently **ignored**: the MDCT always uses the sine
+    ///   (Princen-Bradley) window `sin(π(k + ½)/W)` so that TDAC reconstruction is
+    ///   exact. The argument is kept for API compatibility.
     /// - `band_layout` - Frequency-band partitioning to analyse.
     ///   Use [`BandLayout::bark`] or [`BandLayout::mel`] for standard presets.
     /// - `config` - Psychoacoustic model parameters. The number of perceptual

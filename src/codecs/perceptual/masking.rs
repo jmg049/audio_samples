@@ -5,14 +5,23 @@
 //! 1. **Absolute threshold of hearing (ATH)** - the minimum audible level at each
 //!    frequency, below which masking is never needed.
 //! 2. **Spreading function** - how a loud masker raises the masking threshold in
-//!    neighbouring Bark bands (simultaneous masking). Tonal maskers (sinusoids)
-//!    are more effective than noise maskers and use a higher gain value.
+//!    neighbouring Bark bands (simultaneous masking). Noise-like maskers are
+//!    *more* effective than tonal maskers (Hellman 1972; Johnston 1988), so they
+//!    use a smaller offset below the masker level (5.5 dB vs 14.5 dB).
 //! 3. **Masking-threshold computation** - combines ATH, band energies, masker
 //!    classification, and the spreading function to produce a per-band threshold
 //!    and signal-to-mask ratio.
 //!
-//! These primitives follow the structure of the MPEG-1 psychoacoustic model (ISO
-//! 11172-3 Annex D), simplified for use as a general-purpose analysis layer.
+//! These primitives follow the general structure of the MPEG-1 psychoacoustic
+//! model (ISO 11172-3 Annex D) but are a simplification, not that model: the
+//! masker offsets are Johnston's (1988) constants (tonal 14.5 dB, noise 5.5 dB),
+//! the spreading function is two straight lines in dB/Bark (see
+//! [`spreading_attenuation`]; the default slopes invert the real upward/downward
+//! asymmetry), and the ATH is Terhardt's (1979) formula.
+//!
+//! Levels are in dB re 1 (digital units², i.e. 10·log10 of band power), while the
+//! ATH is in dB SPL. Comparing the two assumes a playback calibration in which
+//! 0 dB re 1 unit² corresponds to 0 dB SPL; this assumption is implicit throughout.
 
 use super::{BandLayout, BandMetric, BandMetrics, PsychoacousticConfig};
 use non_empty_slice::NonEmptySlice;
@@ -21,10 +30,11 @@ use non_empty_slice::NonEmptySlice;
 
 /// Classification of a spectral masker as tonal (sinusoidal) or noise-like.
 ///
-/// The masking effectiveness differs between masker types: tonal maskers (pure
-/// tones, harmonics) create a tighter but deeper masking threshold, while noise
-/// maskers create a broader but shallower threshold. MPEG-1 uses 14.5 dB offset
-/// for tonal maskers and 5.5 dB for noise maskers.
+/// The masking effectiveness differs between masker types: noise-like maskers are
+/// *more* effective than tonal maskers (the asymmetry of masking). The masked
+/// threshold lies ≈ 5.5 dB below a noise masker but ≈ 14.5 dB below a tonal masker
+/// (Johnston 1988's offsets, used as the defaults here), so a larger offset means a
+/// *less* effective masker.
 ///
 /// Determined per-band by [`classify_masker_types`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,11 +83,16 @@ pub fn classify_masker_types(band_energy_db: &[f32], tonal_threshold_db: f32) ->
 
 /// Returns the absolute threshold of hearing at `freq_hz` in dB SPL.
 ///
-/// Uses the ISO 226 / MPEG-1 polynomial approximation:
+/// Uses Terhardt's (1979) analytic approximation of the threshold in quiet (as used
+/// by Painter & Spanias 2000; it is not ISO 226, which defines equal-loudness
+/// contours, and it is not a polynomial):
 ///
 /// ```text
 /// ATH(f) = 3.64·(f/1000)^-0.8 - 6.5·exp(-0.6·(f/1000 - 3.3)²) + 10⁻³·(f/1000)⁴
 /// ```
+///
+/// The result is in dB SPL. Comparing it with band energies in dB re 1 digital unit
+/// (as [`compute_band_metrics`] does) assumes 0 dB re 1 unit² ≙ 0 dB SPL.
 ///
 /// # Arguments
 /// - `freq_hz` - Frequency in hertz. Values ≤ 0 return 60 dB (conservative maximum).
@@ -109,9 +124,15 @@ pub fn absolute_threshold_of_hearing(freq_hz: f32) -> f32 {
 /// - At zero distance: attenuation equals the masker-type gain. For tonal maskers
 ///   this is `config.masking_gain` (e.g. 14.5 dB); for noise maskers it is
 ///   `config.noise_masking_gain` (e.g. 5.5 dB). A larger gain means the threshold
-///   sits further below the masker, so the masker is more effective.
-/// - With increasing Bark distance: attenuation grows by `upward_spread` dB/Bark
-///   upward and `downward_spread` dB/Bark downward, reducing the masker's reach.
+///   sits further below the masker, so the masker is *less* effective (noise
+///   maskers, with the smaller offset, mask more).
+/// - With increasing Bark distance dz = maskee − masker: attenuation grows by
+///   `upward_spread`·dz for dz ≥ 0 and `downward_spread`·|dz| for dz < 0.
+///
+/// Note: real masking spreads further *upward* in frequency (upper slope
+/// ≈ 10 dB/Bark at moderate levels, lower slope ≈ 25-27 dB/Bark; Schroeder et al.
+/// 1979). The presets in [`PsychoacousticConfig`] use 25 dB/Bark upward and
+/// 6 dB/Bark downward, which inverts this asymmetry.
 ///
 /// A signal is audible when its SMR (energy - threshold) is positive.
 ///
@@ -156,8 +177,8 @@ pub fn spreading_attenuation(
 /// its SMR at `base_gain` regardless of how isolated the band is.
 ///
 /// That is wrong: a band's energy does not strongly mask noise at its own
-/// frequency. Standard MPEG-style models therefore use a small per-masker
-/// self-masking offset rather than the full inter-band gain. We use `0.5 dB`,
+/// frequency with the full inter-band offset. This implementation therefore uses a
+/// small dedicated self-masking offset instead of the inter-band gain: `0.5 dB`,
 /// meaning a band's self-generated masking threshold sits essentially at its own
 /// energy (the band can tolerate quantisation noise just below its own level).
 /// This keeps a strong, isolated band's SMR near 0 dB instead of pinning it at
@@ -315,9 +336,10 @@ pub fn compute_band_metrics(
 /// - `hop_duration_ms` - Duration of each MDCT hop in milliseconds
 ///   (`hop_size / sample_rate × 1000`).
 /// - `post_masking_decay_db_per_ms` - Forward masking decay rate.
-///   Typical MPEG-1 value: `0.15` dB/ms.
+///   For example `0.15` dB/ms (a heuristic value; MPEG-1 Layers I/II specify no
+///   temporal-masking decay rate).
 /// - `pre_masking_decay_db_per_ms` - Backward masking decay rate.
-///   Typical MPEG-1 value: `3.0` dB/ms.
+///   For example `3.0` dB/ms (a heuristic value, not from ISO 11172-3).
 ///
 /// # Returns
 /// A `Vec<BandMetrics>` of the same length with masking thresholds, SMR,

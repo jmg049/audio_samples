@@ -38,7 +38,8 @@
 
 pub mod perceptual;
 
-/// Opus codec skeleton: SILK (speech) and CELT (music) modes.
+/// Opus-inspired teaching codec (not bitstream compatible with Opus): SILK-style (speech),
+/// CELT-style (music) and Hybrid modes.
 ///
 /// Requires the `opus-codec` feature flag.
 #[cfg(feature = "opus-codec")]

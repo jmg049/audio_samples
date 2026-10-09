@@ -158,7 +158,8 @@ pub struct PerceptualCodec {
     pub band_layout: BandLayout,
     /// Psychoacoustic masking model configuration.
     pub config: PsychoacousticConfig,
-    /// Window function applied to each MDCT frame.
+    /// Requested MDCT window. Currently ignored: the MDCT always uses the sine
+    /// (Princen-Bradley) window so that reconstruction is exact.
     pub window: WindowType,
     /// Total bit budget to distribute across all bands per encode call.
     pub bit_budget: u32,
@@ -181,14 +182,16 @@ pub struct PerceptualCodec {
 impl PerceptualCodec {
     /// Creates a `PerceptualCodec` without window switching.
     ///
-    /// The MDCT window size is auto-selected as `min(2048, signal_length)`.
+    /// The MDCT window size is auto-selected as the largest even value
+    /// ≤ `min(2048, signal_length)`.
     /// Use [`PerceptualCodec::with_window_size`] or
     /// [`PerceptualCodec::with_window_switching`] when explicit control is needed.
     ///
     /// # Arguments
     /// - `band_layout` - Perceptual band partitioning (Bark, Mel, or ERB).
     /// - `config` - Psychoacoustic masking model parameters.
-    /// - `window` - MDCT window function. [`WindowType::Hanning`] is a good default.
+    /// - `window` - Stored but currently ignored by the analysis: the MDCT always uses
+    ///   the sine (Princen-Bradley) window.
     /// - `bit_budget` - Total bits to allocate per encode call.
     /// - `min_bits_per_band` - Minimum bits guaranteed to every band (typically 1).
     #[inline]

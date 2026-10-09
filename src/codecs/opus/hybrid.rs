@@ -2,7 +2,8 @@
 //!
 //! ## What
 //!
-//! Implements the `Hybrid` operating mode of the Opus codec (RFC 6716 §2).
+//! Mirrors the `Hybrid` operating mode of Opus (RFC 6716 §2) in this crate's
+//! Opus-inspired teaching codec (not bitstream compatible with Opus).
 //! The signal is split at a crossover frequency (8 kHz) using a first-order
 //! IIR filter; the low band is encoded with SILK (LPC speech codec) and the
 //! high band with CELT (perceptual MDCT codec).

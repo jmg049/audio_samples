@@ -1,4 +1,4 @@
-//! Linear Prediction Coding (LPC) primitives for the Opus SILK speech codec mode.
+//! Linear Prediction Coding (LPC) primitives for the SILK-style (Opus-inspired) speech mode.
 //!
 //! ## What
 //!
@@ -38,8 +38,10 @@ use crate::operations::traits::AudioStatistics;
 /// Small diagonal loading factor applied to `R[0]` for numerical stability.
 ///
 /// Biases the autocorrelation matrix slightly away from singularity, which
-/// can occur for signals with near-zero energy. Value follows the SILK
-/// reference code convention (0.001% perturbation of the zero-lag energy).
+/// can occur for signals with near-zero energy. This 10⁻⁵ (0.001 %) white-noise
+/// correction is similar in spirit to the conditioning used by SILK's own LPC
+/// estimator (which uses Burg's method, not autocorrelation plus Levinson-Durbin);
+/// it is not taken from the SILK reference code.
 const DIAGONAL_LOADING_EPSILON: f64 = 1e-5;
 
 /// Minimum prediction error to prevent numerical underflow in Levinson-Durbin.
@@ -48,9 +50,10 @@ const DIAGONAL_LOADING_EPSILON: f64 = 1e-5;
 /// essentially an all-pass and further iterations are numerically meaningless.
 const MIN_PREDICTION_ERROR: f64 = 1e-15;
 
-/// Default LPC predictor order used by SILK.
+/// LPC predictor order used by this crate's SILK-style encoder.
 ///
-/// SILK uses a 16th-order LP filter for narrowband/wideband speech coding.
+/// Real SILK (RFC 6716 §4.2.7.5) uses order 10 for narrowband and mediumband and
+/// order 16 for wideband; this teaching implementation always uses 16.
 /// Higher orders capture more spectral detail at increased computational cost.
 pub const SILK_LPC_ORDER: usize = 16;
 
@@ -206,7 +209,9 @@ pub fn levinson_durbin(autocorr: &[f64], order: usize) -> Option<LpcCoefficients
         std::mem::swap(&mut a, &mut a_prev);
     }
 
-    let coeffs = a.iter().map(|&v| v as f32).collect();
+    // After the final swap the order-`order` solution lives in `a_prev`
+    // (`a` holds the stale order-(order-1) solution).
+    let coeffs = a_prev.iter().map(|&v| v as f32).collect();
     Some(LpcCoefficients {
         coeffs,
         prediction_error: error,
@@ -227,7 +232,7 @@ pub fn levinson_durbin(autocorr: &[f64], order: usize) -> Option<LpcCoefficients
 ///
 /// # Arguments
 /// - `samples` - Input signal frame. Must be non-empty.
-/// - `order` - Predictor order. Use [`SILK_LPC_ORDER`] for SILK-standard quality.
+/// - `order` - Predictor order. [`SILK_LPC_ORDER`] (16) matches wideband SILK.
 #[must_use]
 pub fn lpc_analysis(samples: &[f32], order: usize) -> LpcCoefficients {
     let effective_order = order.min(samples.len() / 2).max(1);

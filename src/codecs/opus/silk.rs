@@ -1,8 +1,8 @@
-//! SILK speech codec: LPC-based frame encode/decode for Opus's speech mode.
+//! SILK-style speech mode: LPC-based frame encode/decode (Opus-inspired, not bitstream compatible).
 //!
 //! ## What
 //!
-//! Implements one encode/decode cycle for a single Opus SILK audio frame using
+//! Implements one encode/decode cycle for a single SILK-style audio frame using
 //! the primitives from [`crate::codecs::opus::lpc`]:
 //!
 //! 1. **Encode** - LPC analysis → prediction residual → gain normalisation →
@@ -13,8 +13,11 @@
 //!
 //! SILK exploits the predictability of voiced speech: the LPC predictor removes
 //! the spectral envelope, leaving a spectrally flat residual that is far smaller
-//! in energy than the original. Quantising the residual at high resolution
-//! (16 bits) achieves very high SNR for speech at low bitrates.
+//! in energy than the original. This sketch quantises the residual at high
+//! resolution (16 bits per sample, i.e. 256 kbit/s at 16 kHz), which gives very
+//! high SNR but is not a low bitrate. Real SILK (RFC 6716) reaches 6-40 kbit/s
+//! with noise-shaped quantisation, LSF coding and range (entropy) coding, none of
+//! which are implemented here.
 //!
 //! For generic audio (music, noise) the LPC provides little prediction gain and
 //! [`crate::codecs::opus::celt`] should be preferred via the auto-detection in
@@ -86,8 +89,11 @@ pub struct SilkState {
 /// With `gain = max(|e[n]|)` the maximum per-sample error is `gain / 32767`.
 /// For a 440 Hz sine at amplitude 0.5:
 ///
-/// - The LPC residual energy is close to floating-point noise (≈ 10⁻⁵).
-/// - Gain ≈ 10⁻⁵, so maximum error ≈ 3 × 10⁻¹⁰.
+/// - In steady state the LPC residual is tiny, but with zero initial filter state
+///   the first `order` residual samples carry the start-up transient, so
+///   `gain = max(|e[n]|)` is set by that transient (of order 10⁻²), not by the
+///   steady-state residual.
+/// - The maximum per-sample error is therefore about `gain / 32767` (≈ 10⁻⁶).
 /// - Expected SNR > 50 dB.
 ///
 /// For white noise the LPC provides no prediction gain (residual ≈ input),

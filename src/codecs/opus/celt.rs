@@ -1,4 +1,4 @@
-//! CELT wideband audio codec: MDCT + psychoacoustic bit allocation for Opus's music mode.
+//! CELT-style music mode: MDCT + psychoacoustic bit allocation (Opus-inspired, not bitstream compatible).
 //!
 //! ## What
 //!
@@ -16,10 +16,12 @@
 //!
 //! ## Why
 //!
-//! CELT is the wideband, low-latency half of Opus. It analyses and codes the
-//! entire spectrum in one MDCT block matching the frame length, making it ideal
-//! for music and generic audio. Unlike SILK, it makes no speech-specific
-//! assumptions.
+//! Real CELT is the wideband, low-latency half of Opus; it codes per-band energies
+//! explicitly and the normalised band shapes with pyramid vector quantisation (PVQ),
+//! using a range coder. This module is only *inspired* by it: it is a generic
+//! perceptual MDCT codec that codes the whole spectrum in one MDCT block matching
+//! the frame length, with scalar quantisation. Like CELT, it makes no
+//! speech-specific assumptions, which suits music and generic audio.
 //!
 //! ## Relationship to `PerceptualCodec`
 //!
@@ -83,8 +85,8 @@ pub struct CeltEncodedFrame {
 /// - `band_layout` - Perceptual frequency-band partitioning (e.g. [`crate::BandLayout::celt`]).
 /// - `psych_config` - Psychoacoustic masking configuration. Must have the same
 ///   number of weights as `band_layout.len()`.
-/// - `window` - MDCT window function. [`spectrograms::WindowType::Hanning`] is a
-///   reasonable default.
+/// - `window` - Currently ignored: the underlying MDCT always uses the sine
+///   (Princen-Bradley) window.
 /// - `window_size` - Explicit MDCT window size (typically `= frame_length`, i.e.
 ///   the number of samples in `frame`). When `None`, an automatic size ≤ 2048 is
 ///   chosen.

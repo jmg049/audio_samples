@@ -25,6 +25,7 @@
 //!
 //! ## Notes
 //!
+//! - This is an Opus-inspired teaching codec, not bitstream compatible with Opus.
 //! - No range coding or bitstream packing - that belongs in `audio_samples_io`.
 //! - CELT window size equals the frame length (not Opus's fixed 20 ms / 960 sample block).
 
