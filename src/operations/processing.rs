@@ -1,20 +1,106 @@
 //! Signal processing operations for audio samples.
 //!
-//! This module provides the [`AudioProcessing`] trait implementation for
-//! [`AudioSamples`], covering normalization, scaling, filtering, dynamic-range
-//! compression, and windowing. Each transforming operation has an in-place
-//! primitive (`op_in_place(&mut self, …)`) and a non-mutating twin
-//! (`op(&self, …)`, provided by the trait default) that clones then mutates -
-//! enabling both zero-allocation in-place pipelines and fluent method chaining.
+//! ## What
 //!
-//! Audio signals routinely need amplitude adjustment, spectral shaping, and
-//! dynamic-range management before playback or further analysis. A single trait
-//! keeps the API discoverable and composable across all supported sample types.
+//! This module provides the [`AudioProcessing`] trait implementation for
+//! [`AudioSamples`]: normalization, gain (`scale`), DC removal, clipping,
+//! windowing, FIR filtering by convolution (`apply_filter`), μ-law
+//! companding, first-order low/high/band-pass filters and (with the
+//! `resampling` feature) sample-rate conversion. Each transforming operation
+//! has an in-place primitive (`op_in_place(&mut self, …)`) and a non-mutating
+//! twin (`op(&self, …)`, provided by the trait default) that clones then
+//! mutates - enabling both zero-allocation in-place pipelines and fluent
+//! method chaining.
+//!
+//! ## Why
+//!
+//! Audio signals routinely need amplitude adjustment, spectral shaping and
+//! offset removal before playback or further analysis. A single trait keeps
+//! the API discoverable and composable across all supported sample types.
+//!
+//! ## How
 //!
 //! Import [`AudioProcessing`] and call methods directly on an [`AudioSamples`]
 //! value. The infallible [`AudioProcessing::scale`] returns `Self` directly,
 //! allowing seamless chaining into fallible calls which return
-//! [`AudioSampleResult`].
+//! [`AudioSampleResult`]. Gains, fades and peak normalisation are computed in
+//! `f64`; for integer sample types they act on the normalised `[-1, 1]` scale
+//! and the result is rounded and saturated back to the integer range.
+//!
+//! ### Convolution: full and valid
+//!
+//! An FIR filter with taps `h[0..M]` computes the convolution sum
+//!
+//! `y[n] = Σ_{k=0}^{M−1} h[k] · x[n − k]`.
+//!
+//! For an input of `N` samples the *full* convolution (all `n` where the
+//! signal and the taps overlap at all, treating samples outside the input as
+//! zero) has `N + M − 1` samples; this is what `AudioTransforms::convolve`
+//! returns (feature `transforms`). The *valid* part keeps only the
+//! `N − M + 1` outputs for which all `M` taps fall inside the input; this is
+//! what [`AudioProcessing::apply_filter`] returns, so its output is shorter
+//! than its input. Valid output index `i` corresponds to `n = i + M − 1` in
+//! the formula above. The two agree with `numpy.convolve(x, h, 'full')` and
+//! `numpy.convolve(x, h, 'valid')` respectively. Above 160 taps
+//! `apply_filter` switches from direct summation (O(N·M)) to FFT convolution
+//! (O(N log N)); both give the same result up to rounding.
+//!
+//! ```
+//! use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+//! use ndarray::array;
+//! use non_empty_slice::NonEmptySlice;
+//!
+//! // N = 5 samples, M = 2 taps: valid output has N - M + 1 = 4 samples.
+//! let x = AudioSamples::new_mono(array![1.0f64, 2.0, 3.0, 4.0, 5.0], sample_rate!(8000)).unwrap();
+//! let h = [1.0f64, 0.5];
+//! let y = x.apply_filter(NonEmptySlice::new(&h).unwrap()).unwrap();
+//! assert_eq!(y.samples_per_channel().get(), 4);
+//! // y[0] = h[0]·x[1] + h[1]·x[0] = 2 + 0.5 (numpy.convolve(x, h, 'valid'))
+//! assert_eq!(y[0], 2.5);
+//! ```
+//!
+//! ### FIR group delay and linear phase
+//!
+//! An FIR filter has no feedback, so it is always stable. It has *linear
+//! phase* (every frequency delayed by the same number of samples) only when
+//! its taps are symmetric, `h[k] = h[M − 1 − k]`, or antisymmetric,
+//! `h[k] = −h[M − 1 − k]`. The constant group delay is then `(M − 1)/2`
+//! samples. An arbitrary FIR (for example `[1.0, 0.5]`) has a group delay
+//! that varies with frequency. `apply_filter` does not compensate the delay.
+//!
+//! ### First-order low-, high- and band-pass filters
+//!
+//! [`low_pass_filter`](AudioProcessing::low_pass_filter),
+//! [`high_pass_filter`](AudioProcessing::high_pass_filter) and
+//! [`band_pass_filter`](AudioProcessing::band_pass_filter) are first-order
+//! Butterworth designs made with the bilinear transform (identical to
+//! `scipy.signal.butter(1, …)`). They are not ideal "brick-wall" filters,
+//! which are not realisable. With `fs` the sample rate, `f` the frequency in
+//! Hz and `Ω = tan(π f / fs)` the pre-warped frequency, the magnitude
+//! responses are
+//!
+//! - low-pass, cutoff `fc`, `Ωc = tan(π fc / fs)`:
+//!   `|H(f)|² = 1 / (1 + (Ω/Ωc)²)`
+//! - high-pass: `|H(f)|² = 1 / (1 + (Ωc/Ω)²)`
+//! - band-pass, edges `fl < fh` (`Ωl`, `Ωh` pre-warped):
+//!   `|H(f)|² = 1 / (1 + ((Ω² − Ωl·Ωh) / (Ω·(Ωh − Ωl)))²)`
+//!
+//! Each is −3 dB (`|H|² = 1/2`) at its cutoff or band edges, and rolls off at
+//! 6 dB/octave well beyond them, so a band-pass still passes noticeable
+//! energy just outside its band (about −7 to −8 dB one octave out). The low-pass
+//! has a zero at the Nyquist frequency and the high-pass a zero at DC. For
+//! steeper slopes use the `butterworth_*`, `chebyshev_*` or `elliptic`
+//! designs of [`AudioIirFiltering`] with a higher order.
+//!
+//! ### DC removal
+//!
+//! [`remove_dc_offset`](AudioProcessing::remove_dc_offset) subtracts the
+//! mean, `x'[n] = x[n] − x̄`. This removes exactly the 0 Hz component of the
+//! buffer and changes no other DFT bin of that buffer. An offset that drifts
+//! over time is better removed with a high-pass filter at a low cutoff
+//! (about 5-20 Hz): its zero at DC blocks a constant exactly, and the cutoff
+//! sets how fast a changing offset is followed (time constant about
+//! `1/(2π fc)` seconds).
 //!
 //! ```
 //! use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
@@ -33,6 +119,7 @@ use crate::operations::traits::AudioIirFiltering;
 use crate::operations::types::ResamplingQuality;
 use crate::operations::types::{IirFilterDesign, NormalizationConfig, NormalizationMethod};
 use crate::repr::AudioData;
+use crate::traits::apply_gain_to_sample;
 use std::num::NonZeroUsize;
 
 #[cfg(feature = "resampling")]
@@ -123,7 +210,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// the FFT's constant overhead dominates; above it the O(N·log N) FFT path pulls
 /// far ahead (e.g. ~120x at 4096 taps on a 1 s signal).
 #[cfg(feature = "transforms")]
-const FIR_FFT_MIN_TAPS: usize = 160;
+pub(crate) const FIR_FFT_MIN_TAPS: usize = 160;
 
 /// Choose the fastest valid-region FIR convolution for the given filter length.
 ///
@@ -199,6 +286,24 @@ where
     Ok(out)
 }
 
+/// Converts a raw-valued `f64` (same scale as the sample type's own values)
+/// back to `T`: floats are cast directly; integers are rounded to nearest and
+/// saturated to `[T::MIN, T::MAX]` instead of being truncated (or, for `I24`,
+/// wrapped) by a plain cast.
+#[inline]
+fn raw_f64_to_sample<T>(v: f64) -> T
+where
+    T: StandardSample,
+{
+    if T::SAMPLE_TYPE.is_float() {
+        T::cast_from(v)
+    } else {
+        let lo: f64 = T::MIN.cast_into();
+        let hi: f64 = T::MAX.cast_into();
+        T::cast_from(v.round().clamp(lo, hi))
+    }
+}
+
 impl<T> AudioProcessing for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -206,11 +311,23 @@ where
     /// Normalizes audio samples using the specified configuration.
     ///
     /// The normalization method determines both the algorithm and parameters:
-    /// - `NormalizationConfig::min_max(min, max)` - scale to the `[min, max]` range
-    /// - `NormalizationConfig::peak(target)` - scale so the peak equals `target`
-    /// - `NormalizationConfig::mean()` - subtract the mean (center around zero)
-    /// - `NormalizationConfig::median()` - subtract the median (mono only)
-    /// - `NormalizationConfig::zscore()` - transform to zero mean, unit variance
+    /// - `NormalizationConfig::min_max(a, b)` - affine map onto `[a, b]`:
+    ///   `x' = a + (x − x_min)(b − a)/(x_max − x_min)`
+    /// - `NormalizationConfig::peak(A)` - `x' = A · x / max|x|`, so the
+    ///   largest absolute sample becomes `A`
+    /// - `NormalizationConfig::mean()` - `x' = x − x̄` (center around zero)
+    /// - `NormalizationConfig::median()` - `x' = x − median(x)`, where the
+    ///   median is the middle value of the *sorted* samples (mean of the two
+    ///   middle values for an even count); mono only
+    /// - `NormalizationConfig::zscore()` - `x' = (x − x̄)/σ` (zero mean, unit
+    ///   population standard deviation)
+    ///
+    /// MinMax and Peak evaluate the map in `f64` and round back to the sample
+    /// type, so they work for integer audio (Peak uses the normalised
+    /// `[-1, 1]` scale of the sample type, MinMax the raw sample values).
+    /// Mean, Median and ZScore work on raw sample values and truncate toward
+    /// zero when written back to an integer type; ZScore output (values of a
+    /// few units) is only meaningful for float sample types.
     ///
     /// # Arguments
     /// - `config` - Normalization configuration. Use the associated constructors
@@ -261,10 +378,18 @@ where
                 let current_min = self.min_sample();
                 let current_max = self.max_sample();
 
+                // The affine map is evaluated in f64 so that integer sample
+                // types neither overflow (e.g. `i16::MAX - i16::MIN`) nor
+                // truncate the scale factor by integer division.
+                let min_f: f64 = min.cast_into();
+                let max_f: f64 = max.cast_into();
+                let current_min: f64 = current_min.cast_into();
+                let current_max: f64 = current_max.cast_into();
+
                 // Avoid division by zero
                 if current_min == current_max {
                     // All values are the same, set to middle of target range
-                    let middle = min + (max - min) / Self::Sample::cast_from(2.0f64);
+                    let middle: T = raw_f64_to_sample(min_f + (max_f - min_f) / 2.0);
                     match self.data_mut() {
                         AudioData::Mono(arr) => arr.fill(middle),
                         AudioData::Multi(arr) => arr.fill(middle),
@@ -272,17 +397,15 @@ where
                     return Ok(());
                 }
 
-                let current_range = current_max - current_min;
-                let target_range = max - min;
-                let scale_factor = target_range / current_range;
+                let scale_factor = (max_f - min_f) / (current_max - current_min);
+                let map = |x: T| -> T {
+                    let x: f64 = x.cast_into();
+                    raw_f64_to_sample(min_f + (x - current_min) * scale_factor)
+                };
 
                 match self.data_mut() {
-                    AudioData::Mono(arr) => {
-                        arr.mapv_inplace(|x| min + (x - current_min) * scale_factor);
-                    }
-                    AudioData::Multi(arr) => {
-                        arr.mapv_inplace(|x| min + (x - current_min) * scale_factor);
-                    }
+                    AudioData::Mono(arr) => arr.mapv_inplace(map),
+                    AudioData::Multi(arr) => arr.mapv_inplace(map),
                 }
             }
 
@@ -301,11 +424,14 @@ where
                 let target_peak = target_f64.abs();
                 let peak_f64: f64 = peak.convert_to();
                 let scale_factor = target_peak / peak_f64;
-                let factor_t: T = T::cast_from(scale_factor);
 
                 match self.data_mut() {
-                    AudioData::Mono(arr) => arr.mapv_inplace(|x| x * factor_t),
-                    AudioData::Multi(arr) => arr.mapv_inplace(|x| x * factor_t),
+                    AudioData::Mono(arr) => {
+                        arr.mapv_inplace(|x| apply_gain_to_sample(x, scale_factor));
+                    }
+                    AudioData::Multi(arr) => {
+                        arr.mapv_inplace(|x| apply_gain_to_sample(x, scale_factor));
+                    }
                 }
             }
 
@@ -332,13 +458,23 @@ where
             }
 
             NormalizationMethod::Median => {
-                // Median normalization: subtract median to center around zero
-                let median: f64 = self.midpoint_sample().ok_or_else(|| {
+                // Median normalization: subtract the median (the middle order
+                // statistic of the sorted values; mean of the two central ones
+                // for an even count) to center around zero.
+                let mono = self.as_mono().ok_or_else(|| {
                     AudioSampleError::Parameter(ParameterError::InvalidValue {
                         parameter: "self".to_string(),
                         reason: "Self is not mono".to_string(),
                     })
                 })?;
+                let mut sorted: Vec<f64> = mono.iter().map(|&x| -> f64 { x.cast_into() }).collect();
+                sorted.sort_unstable_by(f64::total_cmp);
+                let n = sorted.len();
+                let median: f64 = if n.is_multiple_of(2) {
+                    0.5 * (sorted[n / 2 - 1] + sorted[n / 2])
+                } else {
+                    sorted[n / 2]
+                };
 
                 match self.data_mut() {
                     AudioData::Mono(arr) => {
@@ -407,9 +543,16 @@ where
 
     /// Scales all audio samples by a constant factor.
     ///
-    /// This is equivalent to adjusting the volume or amplitude of the signal.
-    /// A factor of 1.0 leaves the signal unchanged; values > 1.0 amplify and
-    /// values < 1.0 attenuate.
+    /// This is equivalent to adjusting the volume or amplitude of the signal:
+    /// `x'[n] = g · x[n]`. A factor of 1.0 leaves the signal unchanged,
+    /// `|g| > 1` amplifies, `|g| < 1` attenuates (a gain of `g` changes the
+    /// level by `20·log10|g|` dB) and a negative factor also inverts the
+    /// polarity.
+    ///
+    /// For float sample types the product is not clipped. For integer sample
+    /// types the gain is applied on the normalised `[-1, 1]` scale in `f64`
+    /// and the result is rounded to nearest and saturated at the type's range
+    /// (so `scale(0.5)` of `10000i16` is `5000`).
     ///
     /// # Arguments
     /// - `factor` - The scaling factor to apply to all samples.
@@ -430,17 +573,20 @@ where
     /// ```
     #[inline]
     fn scale_in_place(&mut self, factor: f64) {
-        let factor_t: T = T::cast_from(factor);
         match self.data_mut() {
-            AudioData::Mono(arr) => arr.mapv_inplace(|x| x * factor_t),
-            AudioData::Multi(arr) => arr.mapv_inplace(|x| x * factor_t),
+            AudioData::Mono(arr) => arr.mapv_inplace(|x| apply_gain_to_sample(x, factor)),
+            AudioData::Multi(arr) => arr.mapv_inplace(|x| apply_gain_to_sample(x, factor)),
         }
     }
 
     /// Removes DC offset by subtracting the mean value.
     ///
-    /// This centers the audio around zero and removes any constant bias that
-    /// may have been introduced during recording or processing.
+    /// Computes `x'[n] = x[n] − x̄`, where `x̄` is the mean over all samples
+    /// (all channels together). This centers the audio around zero and
+    /// removes any constant bias that may have been introduced during
+    /// recording or processing. Only the 0 Hz bin of a DFT over the whole
+    /// buffer changes; for a drifting offset use
+    /// [`high_pass_filter`](AudioProcessing::high_pass_filter) instead.
     ///
     /// # Returns
     /// The audio samples with the DC offset removed.
@@ -608,6 +754,15 @@ where
     /// than the original by `filter_coeffs.len() - 1` samples. Long filters
     /// (≥ 160 taps, with the `transforms` feature) use FFT convolution.
     ///
+    /// Output sample `i` corresponds to input time `n = i + M − 1`: the
+    /// first `M − 1` input samples produce no output of their own, and the
+    /// result is not delay-compensated (a symmetric, linear-phase filter still
+    /// delays its output by `(M − 1)/2` samples relative to that index).
+    /// Note: unlike `AudioTransforms::convolve` (feature `transforms`), which
+    /// returns the full convolution of length `N + M − 1`, this returns
+    /// only the valid part of length `N − M + 1`. See the module docs for the
+    /// full/valid distinction.
+    ///
     /// Computation is carried out in `f64`. For integer sample types both the
     /// samples and the coefficients are interpreted on the normalised
     /// `[-1, 1]` scale (so an `i16` coefficient of `16384` means ≈ 0.5).
@@ -651,7 +806,10 @@ where
                 if arr.len().get() < filter_len {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                         "audio_length",
-                        "Audio length must be at least as long as filter length",
+                        format!(
+                            "Audio length ({}) must be at least the filter length ({filter_len}): apply_filter returns the 'valid' convolution of length N - M + 1",
+                            arr.len().get()
+                        ),
                     )));
                 }
 
@@ -677,7 +835,10 @@ where
                 if arr.ncols().get() < filter_len {
                     return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                         "audio_length",
-                        "Audio length must be at least as long as filter length",
+                        format!(
+                            "Audio length ({}) must be at least the filter length ({filter_len}): apply_filter returns the 'valid' convolution of length N - M + 1",
+                            arr.ncols().get()
+                        ),
                     )));
                 }
 
@@ -710,11 +871,18 @@ where
 
     /// Applies μ-law compression to the audio samples.
     ///
-    /// Compresses the dynamic range of the signal using a μ-law nonlinear
-    /// transfer function. Higher `mu` values produce stronger compression.
+    /// Compresses the dynamic range of the signal with a μ-law nonlinear
+    /// transfer function. The intended curve is the continuous μ-law
+    /// characteristic `y = sgn(x) · ln(1 + μ|x|) / ln(1 + μ)`, with `x` on the
+    /// normalised `[-1, 1]` scale of the sample type. Higher `mu` values
+    /// produce stronger compression. No quantisation to 8-bit codes is done
+    /// (ITU-T G.711 uses an 8-segment piecewise-linear approximation of this
+    /// curve plus 8-bit coding).
     ///
     /// # Arguments
-    /// - `mu` - Compression parameter (typically 255 for standard μ-law).
+    /// - `mu` - Compression parameter μ (typically 255 for standard μ-law).
+    ///   It is read as a plain number (`255i16` means μ = 255), not rescaled
+    ///   like an audio sample.
     ///
     /// # Returns
     /// The compressed audio samples.
@@ -738,7 +906,10 @@ where
     /// ```
     #[inline]
     fn mu_compress_in_place(&mut self, mu: Self::Sample) -> AudioSampleResult<()> {
-        let mu_f64: f64 = mu.convert_to();
+        // `mu` is a curve parameter, not an audio sample: read its numeric
+        // value with a raw cast (an audio-aware conversion would turn
+        // `255i16` into 255/32767).
+        let mu_f64: f64 = mu.cast_into();
         let mu_plus_one: f64 = mu_f64 + 1.0;
 
         self.apply_with_error_in_place(|x: Self::Sample| {
@@ -752,11 +923,13 @@ where
 
     /// Applies μ-law expansion (decompression) to the audio samples.
     ///
-    /// This inverts μ-law compression. The `mu` parameter must match the value
-    /// used during compression for correct reconstruction.
+    /// Computes `x = sgn(y) · ((1 + μ)^|y| − 1) / μ` on the normalised
+    /// `[-1, 1]` scale, which is the inverse of the standard continuous μ-law
+    /// curve. The `mu` parameter must match the value used during compression.
     ///
     /// # Arguments
-    /// - `mu` - Expansion parameter. Must match the value used for compression.
+    /// - `mu` - Expansion parameter μ. Must match the value used for
+    ///   compression. Read as a plain number, not rescaled like a sample.
     ///
     /// # Returns
     /// The expanded audio samples.
@@ -781,7 +954,8 @@ where
     /// ```
     #[inline]
     fn mu_expand_in_place(&mut self, mu: Self::Sample) -> AudioSampleResult<()> {
-        let mu: f64 = mu.convert_to();
+        // Raw numeric value of the curve parameter (see `mu_compress_in_place`).
+        let mu: f64 = mu.cast_into();
         let mu_plus_one = mu + 1.0;
 
         self.apply_with_error_in_place(|x: Self::Sample| {
@@ -907,10 +1081,14 @@ where
         self.apply_iir_filter_in_place(&design)
     }
 
-    /// Resamples audio to a new sample rate using high-quality resampling.
+    /// Resamples audio to a new sample rate.
     ///
-    /// Delegates to the `rubato` resampling library. The `quality` parameter
-    /// controls the trade-off between speed and output fidelity.
+    /// Delegates to [`crate::resample`]. `Medium` and `High` use rubato's
+    /// windowed-sinc resampler (anti-aliased, filter delay removed so the
+    /// output is time-aligned with the input); `Fast` uses decimation or
+    /// linear interpolation with **no** anti-aliasing filter, so content
+    /// above the new Nyquist frequency aliases. The output has
+    /// `⌈N · fs_out / fs_in⌉` frames. See the [`crate::resampling`] module docs.
     ///
     /// # Arguments
     /// - `target_sample_rate` - Desired output sample rate.
@@ -959,11 +1137,11 @@ where
 
     /// Resamples audio by a specific ratio.
     ///
-    /// The output length is scaled by `ratio` relative to the input. A ratio
-    /// of 2.0 doubles the sample count; 0.5 halves it.
-    ///
-    /// Delegates to the `rubato` resampling library. The `quality` parameter
-    /// controls the trade-off between speed and output fidelity.
+    /// The target rate is `round(fs_in · ratio)`, so the output length is
+    /// scaled by (approximately) `ratio`: 2.0 doubles the sample count, 0.5
+    /// halves it. Otherwise identical to
+    /// [`resample`](AudioProcessing::resample), including the `Fast` tier's
+    /// lack of an anti-aliasing filter.
     ///
     /// # Arguments
     /// - `ratio` - Resampling ratio (`output_rate / input_rate`). Must be > 0.

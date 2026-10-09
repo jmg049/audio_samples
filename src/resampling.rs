@@ -1,5 +1,75 @@
-//! Module for handling audio sample resampling operations.
-//! Uses linear interpolation for the Fast path and rubato's FFT resampler for Medium/High quality.
+//! Sample-rate conversion (resampling).
+//!
+//! ## What
+//!
+//! Whole-buffer resampling with [`resample`] (to a target rate) and
+//! [`resample_by_ratio`] (by `fs_out / fs_in`), also available as
+//! `AudioProcessing::resample` / `resample_by_ratio`, plus
+//! [`StreamingResampler`] for chunk-by-chunk conversion of a live stream. The
+//! [`ResamplingQuality`] tier selects the algorithm.
+//!
+//! ## Why
+//!
+//! Signals recorded at different rates (44.1 kHz, 48 kHz, 16 kHz, ...) must
+//! share one rate before they can be mixed, compared sample by sample, or fed
+//! to a model trained at a fixed rate.
+//!
+//! ## How
+//!
+//! Resampling evaluates the band-limited continuous signal that the samples
+//! represent at the new sampling instants `t = m / fs_out`. Ideal
+//! reconstruction interpolates with `sinc` kernels; the new grid can only
+//! represent frequencies below the new Nyquist frequency `fs_out / 2`. When
+//! *down*-sampling, anything in the input between `fs_out / 2` and
+//! `fs_in / 2` must be removed first, or it folds back (aliases) to
+//! `|f − k·fs_out|` inside the new band, where it can no longer be separated
+//! from real content. A resampler therefore needs an anti-aliasing low-pass
+//! filter at (slightly below) the lower of the two Nyquist frequencies.
+//!
+//! The tiers:
+//!
+//! - [`ResamplingQuality::Fast`]: **no anti-aliasing filter.** Integer
+//!   down-ratios keep every N-th sample, integer up-ratios and other ratios
+//!   use linear interpolation between neighbouring samples. Content above
+//!   the new Nyquist frequency aliases at full level, and linear
+//!   interpolation also attenuates high frequencies. Use it only when speed
+//!   matters more than accuracy, or to demonstrate aliasing.
+//! - [`ResamplingQuality::Medium`] and [`ResamplingQuality::High`]: rubato's
+//!   asynchronous windowed-sinc resampler. Each output sample is a weighted
+//!   sum of input samples with a windowed `sinc` kernel whose cutoff is
+//!   0.95 × the lower Nyquist frequency, so it both interpolates and
+//!   anti-alias filters. Medium uses 128 sinc taps, a Hann² window and linear
+//!   interpolation of the oversampled kernel table; High uses 256 taps, a
+//!   Blackman-Harris² window and cubic interpolation, for a steeper
+//!   transition and deeper stop band at roughly twice the cost.
+//!
+//! Output length is `⌈N · fs_out / fs_in⌉` frames for an `N`-frame input. The
+//! whole-buffer functions are **time-aligned**: the sinc filter's delay
+//! (about half the filter length: `64 · fs_out/fs_in − 1` output frames for
+//! Medium and `128 · fs_out/fs_in − 1` for High) is removed, and the input is
+//! padded with zeros at the end so its last samples are not cut off. Input
+//! sample `n` therefore lands at output position `n · fs_out / fs_in` (to
+//! within half an output sample). [`StreamingResampler`] cannot look ahead,
+//! so its output lags the input by about
+//! [`StreamingResampler::output_delay`] frames.
+//!
+//! ```
+//! use audio_samples::{AudioSamples, sample_rate, resample};
+//! use audio_samples::operations::types::ResamplingQuality;
+//! use ndarray::Array1;
+//!
+//! // An impulse at input sample 1000 (44.1 kHz) ...
+//! let mut x = Array1::<f32>::zeros(4410);
+//! x[1000] = 1.0;
+//! let audio = AudioSamples::new_mono(x, sample_rate!(44100)).unwrap();
+//! let y = resample(&audio, sample_rate!(48000), ResamplingQuality::High).unwrap();
+//! assert_eq!(y.samples_per_channel().get(), 4800);
+//! // ... lands at output sample 1000 · 48000 / 44100 ≈ 1088.4.
+//! let peak = (0..y.samples_per_channel().get())
+//!     .max_by(|&a, &b| y[a].abs().total_cmp(&y[b].abs()))
+//!     .unwrap();
+//! assert!((peak as i64 - 1088).abs() <= 1);
+//! ```
 
 use crate::{
     AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
@@ -26,7 +96,7 @@ use std::collections::HashMap;
 const RESAMPLE_CHUNK: usize = 1024;
 
 // ---------------------------------------------------------------------------
-// Per-thread FFT resampler cache
+// Per-thread sinc resampler cache
 // ---------------------------------------------------------------------------
 //
 // Building a rubato sinc Async resampler precomputes the windowed-sinc filter
@@ -179,6 +249,12 @@ unsafe fn upsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
 
 /// Resamples audio to a new sample rate.
 ///
+/// Processing is done in `f32`. See the module docs for the algorithm of each
+/// [`ResamplingQuality`] tier; note that `Fast` has no anti-aliasing filter.
+/// The output has `⌈N · fs_out / fs_in⌉` frames and is time-aligned with the
+/// input (the sinc filter delay of `Medium`/`High` is removed). If the rates
+/// are equal the audio is returned unchanged.
+///
 /// # Arguments
 /// * `audio` - The input audio samples
 /// * `target_sample_rate` - Desired output sample rate in Hz
@@ -190,14 +266,16 @@ unsafe fn upsample_by_2_simd(src: &[f32], dst: &mut [f32]) {
 /// # Errors
 /// Returns an error if the resampling parameters are invalid or rubato fails internally.
 ///
-/// # Example
-/// ```rust,ignore
-/// use audio_samples::{AudioSamples, operations::types::ResamplingQuality};
+/// # Examples
+/// ```
+/// use audio_samples::{AudioSamples, resample, sample_rate};
+/// use audio_samples::operations::types::ResamplingQuality;
 /// use ndarray::array;
 ///
-/// let audio = AudioSamples::new_mono(array![1.0f32, 0.5, -0.5, -1.0], 44100).unwrap();
-/// let resampled = resample(&audio, 48000, ResamplingQuality::High)?;
-/// assert_eq!(resampled.sample_rate(), 48000);
+/// let audio = AudioSamples::new_mono(array![1.0f32, 0.5, -0.5, -1.0], sample_rate!(44100)).unwrap();
+/// let resampled = resample(&audio, sample_rate!(48000), ResamplingQuality::High).unwrap();
+/// assert_eq!(resampled.sample_rate(), sample_rate!(48000));
+/// assert_eq!(resampled.samples_per_channel().get(), 5); // ⌈4 · 48000 / 44100⌉
 /// ```
 #[inline]
 pub fn resample<T>(
@@ -392,7 +470,7 @@ where
 // Shared with `StreamingResampler`, which needs the exact same filter tuning
 // for a given quality tier so a track sounds identical whether it was resampled
 // offline or through the chunked streaming path.
-fn medium_sinc_params() -> SincInterpolationParameters {
+pub(crate) fn medium_sinc_params() -> SincInterpolationParameters {
     SincInterpolationParameters {
         sinc_len: 128,
         f_cutoff: 0.95,
@@ -402,7 +480,7 @@ fn medium_sinc_params() -> SincInterpolationParameters {
     }
 }
 
-fn high_sinc_params() -> SincInterpolationParameters {
+pub(crate) fn high_sinc_params() -> SincInterpolationParameters {
     SincInterpolationParameters {
         sinc_len: 256,
         f_cutoff: 0.95,
@@ -483,6 +561,7 @@ where
             resample_sinc_blocked(
                 resampler,
                 input_data,
+                sinc_output_delay(params, ratio),
                 expected_frames,
                 channels,
                 audio.num_channels(),
@@ -492,10 +571,26 @@ where
     )
 }
 
+/// Group delay, in whole output frames, of rubato's async sinc resampler.
+///
+/// An input event appears `sinc_len · ratio / 2 − 1` output frames late
+/// (measured with impulses and sines in `tests/audit_processing.rs`, and
+/// consistent with rubato starting its sinc read position at
+/// `−(sinc_len − 1)` input frames). `Resampler::output_delay` truncates
+/// `sinc_len · ratio / 2` instead, which is up to two frames too long;
+/// rounding the value here leaves at most half an output frame of
+/// misalignment.
+fn sinc_output_delay(params: &SincInterpolationParameters, ratio: f64) -> usize {
+    (params.sinc_len as f64 * ratio / 2.0 - 1.0)
+        .round()
+        .max(0.0) as usize
+}
+
 /// Block-processing loop for all channels using a multi-channel rubato sinc resampler.
 fn resample_sinc_blocked<T>(
     resampler: &mut Async<f32>,
     input_data: Vec<Vec<f32>>,
+    delay: usize,
     expected_frames: usize,
     channels: usize,
     channel_count: ChannelCount,
@@ -507,18 +602,29 @@ where
     let chunk_in = resampler.input_frames_next();
     let chunk_out = resampler.output_frames_max();
     let input_length = input_data[0].len();
+    // The sinc filter is centred on each output instant, so the resampler's
+    // output lags its input by about half the filter length (`delay`, in
+    // output frames). Those leading frames are discarded below, and zero
+    // blocks are fed after the input until `delay + expected_frames` frames
+    // exist, so the output is time-aligned with the input and the tail of
+    // the input is not cut off.
+    let needed = delay + expected_frames;
 
     let mut out: Vec<Vec<f32>> = (0..channels)
-        .map(|_| Vec::with_capacity(expected_frames + chunk_out))
+        .map(|_| Vec::with_capacity(needed + chunk_out))
         .collect();
 
     // Multi-channel scratch buffers, reused across blocks.
     let mut in_buf: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; chunk_in]).collect();
     let mut out_buf: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; chunk_out]).collect();
 
-    for block_start in (0..input_length).step_by(chunk_in) {
-        let block_end = (block_start + chunk_in).min(input_length);
+    let mut next_block = 0usize;
+    while next_block < input_length || out[0].len() < needed {
+        // Past the end of the input this is an empty range (an all-zero block).
+        let block_start = next_block.min(input_length);
+        let block_end = (next_block + chunk_in).min(input_length);
         let actual = block_end - block_start;
+        next_block += chunk_in;
 
         for ch in 0..channels {
             in_buf[ch][..actual].copy_from_slice(&input_data[ch][block_start..block_end]);
@@ -558,9 +664,10 @@ where
         }
     }
 
-    // Clamp to exact expected length; zero-padding the final block may
-    // produce a few extra frames.
+    // Drop the filter delay, then clamp to the exact expected length;
+    // zero-padding the final block may produce a few extra frames.
     for ch_data in &mut out {
+        ch_data.drain(..delay.min(ch_data.len()));
         ch_data.truncate(expected_frames.min(ch_data.len()));
     }
 
@@ -604,6 +711,14 @@ where
 /// the final, zero-padded partial block. [`reset`](Self::reset) clears both the
 /// rubato delay line and any pending input - call it after a seek, since the buffered
 /// state no longer corresponds to a contiguous position in the stream.
+///
+/// Unlike the whole-buffer [`resample`], the streaming output is **not**
+/// delay-compensated: an event at input frame `n` appears at output frame
+/// `≈ n · fs_out / fs_in + output_delay()`, and the output starts with about
+/// [`output_delay`](Self::output_delay) frames of filter start-up. Drop that
+/// many leading frames yourself if you need time alignment. The `Fast` tier
+/// here uses rubato's linear polynomial interpolator (no anti-aliasing
+/// filter), not the decimation path of [`resample`].
 pub struct StreamingResampler<T: StandardSample> {
     resampler: Async<f32>,
     chunk_in: usize,
@@ -680,6 +795,17 @@ impl<T: StandardSample> StreamingResampler<T> {
     /// Sample rate this resampler produces.
     pub fn output_sample_rate(&self) -> SampleRate {
         self.out_sample_rate
+    }
+
+    /// Latency of the resampler in output frames: how many frames any event
+    /// in the input is delayed before it appears in the output (about half
+    /// the sinc filter length, scaled by `fs_out / fs_in`; small for `Fast`).
+    ///
+    /// # Returns
+    /// The delay reported by the underlying rubato resampler, in output
+    /// frames.
+    pub fn output_delay(&self) -> usize {
+        self.resampler.output_delay()
     }
 
     /// Feed the next chunk of input audio (must have the channel count this
@@ -859,6 +985,10 @@ where
 
 /// Resamples audio by a specific ratio.
 ///
+/// The target rate is `round(fs_in · ratio)` Hz; the call is then identical to
+/// [`resample`] with that rate (so the effective ratio is the rounded rate
+/// divided by `fs_in`).
+///
 /// # Arguments
 /// * `audio` - The input audio samples
 /// * `ratio` - Resampling ratio (output_rate / input_rate)
@@ -881,7 +1011,7 @@ where
     if ratio <= 0.0 {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "ratio",
-            format!("Invalid resampling ratio: {ratio}"),
+            format!("Invalid resampling ratio: {ratio} (ratio = fs_out / fs_in must be > 0)"),
         )));
     }
 

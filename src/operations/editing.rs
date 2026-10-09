@@ -54,24 +54,18 @@
 //! [`AudioEditing`]: crate::operations::traits::AudioEditing
 
 use std::num::NonZeroUsize;
-use std::time::Duration;
 
-#[cfg(feature = "random-generation")]
-use crate::brown_noise;
 use crate::operations::types::{FadeCurve, NoiseColor, PadSide};
 
 #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
 use crate::operations::types::{PerturbationConfig, PerturbationMethod};
 use crate::repr::{AudioData, ChannelCount};
+use crate::traits::apply_gain_to_sample;
 use crate::utils::{samples_to_seconds, seconds_to_samples};
 use crate::{
-    AudioEditing, AudioSampleError, AudioSampleResult, AudioSamples, AudioStatistics,
-    AudioTypeConversion, ChannelRequirement, ConvertTo, LayoutError, ParameterError,
-    StandardSample,
+    AudioEditing, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
+    ChannelRequirement, ConvertTo, LayoutError, ParameterError, StandardSample,
 };
-
-#[cfg(feature = "random-generation")]
-use crate::{pink_noise, white_noise};
 
 use ndarray::{Array1, Array2, Axis, s};
 use non_empty_slice::{NonEmptySlice, NonEmptyVec};
@@ -112,6 +106,10 @@ fn validate_time_bounds(start: f64, end: f64, duration: f64) -> AudioSampleResul
 /// Use a negative `step` for a fade-out ramp (position counts down from
 /// `start` towards zero).  `gain_fn` is monomorphised for each call site so
 /// the gain formula is inlined directly into the loop body.
+///
+/// The gain is applied with `apply_gain_to_sample`, so integer sample types
+/// get fractional gains (rounded and saturated on the normalised scale)
+/// instead of a gain truncated to an integer.
 #[inline(always)]
 fn apply_gain_to_slice<T, F>(slice: &mut [T], step: f64, start: f64, gain_fn: F)
 where
@@ -119,7 +117,7 @@ where
     F: Fn(f64) -> f64,
 {
     for (i, x) in slice.iter_mut().enumerate() {
-        *x *= T::cast_from(gain_fn(start + i as f64 * step));
+        *x = apply_gain_to_sample(*x, gain_fn(start + i as f64 * step));
     }
 }
 
@@ -800,9 +798,12 @@ where
 
     /// Produces a weighted sum of multiple audio sources.
     ///
-    /// All sources must have the same sample rate, channel count, and
-    /// length.  When `weights` is `None`, equal weighting (1 / N per
-    /// source) is applied.
+    /// Computes `y[n] = Σ_k w_k · x_k[n]`. All sources must have the same
+    /// sample rate, channel count, and length.  When `weights` is `None`,
+    /// equal weighting (1 / N per source) is applied. The sum is not
+    /// clipped for float sample types; for integer sample types it is
+    /// computed in `f64` on the normalised `[-1, 1]` scale, then rounded and
+    /// saturated.
     ///
     /// # Arguments
     /// - `sources` - the audio signals to mix.
@@ -872,6 +873,46 @@ where
             &vec![1.0 / sources.len().get() as f64; sources.len().get()]
         };
 
+        if !T::SAMPLE_TYPE.is_float() {
+            // Integer samples: a weight converted to `T` would be meaningless
+            // (0.5 becomes 16384 for i16), so accumulate the weighted sum in
+            // f64 on the normalised [-1, 1] scale and round/saturate once.
+            let total = first.samples_per_channel().get() * first.num_channels().get() as usize;
+            let mut acc = vec![0.0f64; total];
+            for (source, &w) in sources.iter().zip(mix_weights.iter()) {
+                let add = |x: &T| -> f64 {
+                    let v: f64 = (*x).convert_to();
+                    w * v
+                };
+                match source.data() {
+                    AudioData::Mono(arr) => {
+                        for (a, x) in acc.iter_mut().zip(arr.iter()) {
+                            *a += add(x);
+                        }
+                    }
+                    AudioData::Multi(arr) => {
+                        for (a, x) in acc.iter_mut().zip(arr.iter()) {
+                            *a += add(x);
+                        }
+                    }
+                }
+            }
+            let mut result = first.clone();
+            match result.data_mut() {
+                AudioData::Mono(arr) => {
+                    for (r, &v) in arr.iter_mut().zip(acc.iter()) {
+                        *r = v.convert_to();
+                    }
+                }
+                AudioData::Multi(arr) => {
+                    for (r, &v) in arr.iter_mut().zip(acc.iter()) {
+                        *r = v.convert_to();
+                    }
+                }
+            }
+            return Ok(result.into_owned());
+        }
+
         match first.data() {
             AudioData::Mono(_) => {
                 let mut result = first.clone();
@@ -920,10 +961,13 @@ where
 
     /// Applies a fade-in envelope to the beginning of the signal.
     ///
-    /// The first `duration_seconds` of every channel are multiplied by
-    /// an amplitude ramp from 0 to 1 shaped by `curve`.  If
-    /// `duration_seconds` exceeds the signal length the entire signal
-    /// is faded.
+    /// The first `n = ⌊duration_seconds · sample_rate⌋` samples of
+    /// every channel are multiplied by `g(p)`, where `g` is the curve's gain
+    /// function (see [`FadeCurve`]) and `p = i/n` for sample `i = 0, …, n−1`.
+    /// The ramp therefore starts at gain 0 and its last sample has gain
+    /// `g((n−1)/n)`, one step short of 1; samples after the fade are
+    /// unchanged. If `duration_seconds` exceeds the signal length the entire
+    /// signal is faded.
     ///
     /// # Arguments
     /// - `duration_seconds` - fade length in seconds.  Must be `> 0`.
@@ -1006,10 +1050,13 @@ where
 
     /// Applies a fade-out envelope to the end of the signal.
     ///
-    /// The last `duration_seconds` of every channel are multiplied by
-    /// an amplitude ramp from 1 to 0 shaped by `curve`.  If
-    /// `duration_seconds` exceeds the signal length the entire signal
-    /// is faded.
+    /// The last `n = ⌊duration_seconds · sample_rate⌋` samples of
+    /// every channel are multiplied by `g(p)`, where `g` is the curve's gain
+    /// function (see [`FadeCurve`]) and `p = 1 − i/n` for the `i`-th faded
+    /// sample (`i = 0, …, n−1`). The ramp starts at gain 1 and its final
+    /// sample has gain `g(1/n)`, one step before silence. If
+    /// `duration_seconds` exceeds the signal length the entire signal is
+    /// faded.
     ///
     /// # Arguments
     /// - `duration_seconds` - fade length in seconds.  Must be `> 0`.
@@ -1032,7 +1079,7 @@ where
     ///     Array1::<f32>::ones(100), sample_rate!(100),
     /// ).unwrap();
     /// audio.fade_out_in_place(0.5, FadeCurve::Linear).unwrap();
-    /// // Last sample has position 0 in the fade ramp → gain ≈ 0
+    /// // Last sample has position p = 1/n = 1/50 → linear gain 0.02
     /// let last = *audio.as_slice().unwrap().last().unwrap();
     /// assert!(last < 0.1);
     /// ```
@@ -1055,7 +1102,7 @@ where
 
         let n = actual_fade_samples;
         let start = start_sample;
-        // Negative step: position counts down from 1.0 → ~0.0 over n samples.
+        // Negative step: position counts down from 1.0 to 1/n over n samples.
         let step = 1.0_f64 / n as f64;
 
         macro_rules! apply_fade_out {
@@ -1719,7 +1766,23 @@ where
     }
 }
 
-/// Apply Gaussian noise to audio samples
+/// Adds Gaussian noise of the requested colour at the requested SNR.
+///
+/// The signal power `P_s` is the mean square of all samples (all channels,
+/// normalised `[-1, 1]` scale). Independent noise is generated for each
+/// channel from zero-mean, unit-variance Gaussian white noise drawn from
+/// `rng`, coloured as requested, and then scaled so that its mean square is
+/// exactly `P_n = P_s / 10^(SNR/10)`. The realised SNR,
+/// `10·log10(P_s/P_n)`, therefore equals `target_snr_db` before the final
+/// rounding (and, for integer sample types, saturation) of the noisy signal.
+///
+/// Colours:
+/// - `White`: the Gaussian samples unchanged (flat spectrum).
+/// - `Pink`: Gaussian white noise through Paul Kellett's pink filter
+///   (≈ −3 dB/octave, tuned for 44.1 kHz).
+/// - `Brown`: Gaussian white noise through a leaky integrator
+///   `y[n] = a·y[n−1] + w[n]`, `a = exp(−2π·5 Hz/fs)` (≈ −6 dB/octave above
+///   about 5 Hz), with its mean removed.
 ///
 /// # Arguments
 ///
@@ -1730,7 +1793,7 @@ where
 ///
 /// # Errors
 ///
-/// - [`crate::AudioSampleError::Parameter`] if the noise color is incompatible with the audio data (e.g. brown noise on multi-channel).
+/// Currently infallible; the `Result` is kept for API stability.
 #[cfg(feature = "random-generation")]
 pub fn apply_gaussian_noise_<T, R>(
     audio: &mut AudioSamples<T>,
@@ -1742,93 +1805,80 @@ where
     R: Rng,
     T: StandardSample,
 {
-    // Calculate signal RMS
+    use crate::utils::generation::KellettPinkFilter;
+    use rand::RngExt;
 
-    let signal_rms: f64 = audio.rms();
+    let n = audio.samples_per_channel().get();
+    let n_channels = audio.num_channels().get() as usize;
+    let fs = f64::from(audio.sample_rate().get());
 
-    // Calculate target noise RMS from SNR
-    let target_noise_rms = signal_rms / 10.0f64.powf(target_snr_db / 20.0);
+    // Signal power on the normalised scale. `iter()` yields samples in
+    // channel-major order (channel 0, then channel 1, ...), matching the
+    // layout of `noise` below.
+    let to_f64 = |x: &T| -> f64 { (*x).convert_to() };
+    let signal_power = match audio.data() {
+        AudioData::Mono(arr) => arr.iter().map(|x| to_f64(x).powi(2)).sum::<f64>(),
+        AudioData::Multi(arr) => arr.iter().map(|x| to_f64(x).powi(2)).sum::<f64>(),
+    } / (n * n_channels) as f64;
+    let target_noise_power = signal_power / 10.0f64.powf(target_snr_db / 10.0);
 
-    let duration = audio.duration_seconds();
-    let duration: Duration = Duration::from_secs_f64(duration);
-    // Generate noise based on color
-    let noise_audio: AudioSamples<T> = match noise_color {
-        NoiseColor::White => {
-            let mut noise = white_noise(duration, audio.sample_rate(), target_noise_rms, None);
-            // Use custom RNG for deterministic results
-            apply_custom_noise_to_audio(&mut noise, target_noise_rms, rng);
-            noise
+    let brown_leak = (-2.0 * std::f64::consts::PI * 5.0 / fs).exp();
+    let mut noise = vec![0.0f64; n * n_channels];
+    for channel in noise.chunks_exact_mut(n) {
+        // Standard normal samples via the Box-Muller transform.
+        for v in channel.iter_mut() {
+            let u1 = 1.0 - rng.random::<f64>(); // (0, 1], so ln(u1) is finite
+            let u2: f64 = rng.random::<f64>();
+            *v = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
         }
-        NoiseColor::Pink => {
-            let mut noise = pink_noise(duration, audio.sample_rate(), target_noise_rms, None);
-            apply_custom_noise_to_audio(&mut noise, target_noise_rms, rng);
-            noise
-        }
-        NoiseColor::Brown => match audio.data() {
-            AudioData::Mono(_) => {
-                brown_noise(duration, audio.sample_rate(), 0.02, target_noise_rms, None)
-            }
-            AudioData::Multi(arr) => {
-                let mut noise_arrays = Vec::new();
-                for _ in 0..arr.nrows().get() {
-                    let noise =
-                        brown_noise(duration, audio.sample_rate(), 0.02, target_noise_rms, None);
-                    noise_arrays.push(noise);
+        match noise_color {
+            NoiseColor::White => {}
+            NoiseColor::Pink => {
+                let mut filter = KellettPinkFilter::default();
+                for v in channel.iter_mut() {
+                    *v = filter.process(*v);
                 }
-                // safety: noise_arrays is guaranteed non-empty because arr.nrows() > 0 for valid multi-channel audio
-                let noise_arrays = unsafe { NonEmptyVec::new_unchecked(noise_arrays) };
-                AudioSamples::stack(&noise_arrays)?
             }
-        },
+            NoiseColor::Brown => {
+                let mut state = 0.0f64;
+                for v in channel.iter_mut() {
+                    state = brown_leak.mul_add(state, *v);
+                    *v = state;
+                }
+                let mean = channel.iter().sum::<f64>() / n as f64;
+                for v in channel.iter_mut() {
+                    *v -= mean;
+                }
+            }
+        }
+    }
+
+    // Scale the realised noise to the exact target power.
+    let noise_power = noise.iter().map(|v| v * v).sum::<f64>() / noise.len() as f64;
+    let gain = if noise_power > 0.0 {
+        (target_noise_power / noise_power).sqrt()
+    } else {
+        0.0
     };
 
-    // Add noise to signal
-    match (audio.data_mut(), noise_audio.data()) {
-        (AudioData::Mono(signal), AudioData::Mono(noise)) => {
-            for (s, n) in signal.iter_mut().zip(noise.iter()) {
-                *s += *n;
+    let add = |x: &mut T, nv: f64| {
+        let v: f64 = (*x).convert_to();
+        *x = gain.mul_add(nv, v).convert_to();
+    };
+    match audio.data_mut() {
+        AudioData::Mono(arr) => {
+            for (x, &nv) in arr.iter_mut().zip(noise.iter()) {
+                add(x, nv);
             }
         }
-        (AudioData::Multi(signal), AudioData::Multi(noise)) => {
-            for (s, n) in signal.iter_mut().zip(noise.iter()) {
-                *s += *n;
+        AudioData::Multi(arr) => {
+            for (x, &nv) in arr.iter_mut().zip(noise.iter()) {
+                add(x, nv);
             }
-        }
-        _ => {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "input",
-                "Channel mismatch between signal and noise",
-            )));
         }
     }
 
     Ok(())
-}
-
-/// Helper to apply custom noise generation using provided RNG
-#[cfg(feature = "random-generation")]
-fn apply_custom_noise_to_audio<T, R>(noise: &mut AudioSamples<T>, amplitude: f64, rng: &mut R)
-where
-    R: Rng,
-    T: StandardSample,
-{
-    use rand::RngExt;
-    match noise.data_mut() {
-        AudioData::Mono(arr) => {
-            for sample in arr.iter_mut() {
-                let random_value: f64 = (rng.random_range(0.0..1.0) - 0.5) * 2.0;
-                let random_value: f64 = random_value;
-                *sample = (amplitude * random_value).convert_to();
-            }
-        }
-        AudioData::Multi(arr) => {
-            for sample in arr.iter_mut() {
-                let random_value = (rng.random_range(0.0..1.0) - 0.5) * 2.0;
-                let random_value: f64 = random_value;
-                *sample = (amplitude * random_value).convert_to();
-            }
-        }
-    }
 }
 
 /// Apply random gain to audio samples

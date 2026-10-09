@@ -396,7 +396,9 @@ where
 ///
 /// - `duration` - Duration of the generated signal.
 /// - `sample_rate` - Sampling rate in Hz.
-/// - `amplitude` - Peak amplitude of the noise envelope (0.0 to 1.0).
+/// - `amplitude` - Peak amplitude of the noise envelope (0.0 to 1.0). The
+///   samples are uniform in `[−amplitude, amplitude)`, so the RMS level is
+///   `amplitude/√3` and the noise is not Gaussian.
 /// - `seed` - Optional RNG seed for reproducibility. Pass `None` for non-deterministic output.
 ///
 /// # Returns
@@ -455,6 +457,35 @@ where
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
+/// Paul Kellett's refined pink-noise filter: a bank of six first-order
+/// low-pass sections plus a one-sample term, applied to white noise to give a
+/// spectrum close to −3 dB/octave. The pole positions are fixed, so the
+/// −3 dB/octave band is tuned for 44.1 kHz and shifts with other sample rates.
+#[cfg(feature = "random-generation")]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct KellettPinkFilter {
+    b: [f64; 7],
+}
+
+#[cfg(feature = "random-generation")]
+impl KellettPinkFilter {
+    /// Filters one white-noise sample and returns the next pink-noise sample.
+    #[inline]
+    pub(crate) fn process(&mut self, white: f64) -> f64 {
+        let b = &mut self.b;
+        b[0] = 0.998_86 * b[0] + white * 0.055_517_9;
+        b[1] = 0.993_32 * b[1] + white * 0.075_075_9;
+        b[2] = 0.969_00 * b[2] + white * 0.153_852_0;
+        b[3] = 0.866_50 * b[3] + white * 0.310_485_6;
+        b[4] = 0.550_00 * b[4] + white * 0.532_952_2;
+        b[5] = -0.761_6 * b[5] + white * -0.016_898_0;
+
+        let pink = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + white * 0.5362;
+        b[6] = white * 0.115_926;
+        pink * 0.11
+    }
+}
+
 /// Generates pink noise (1/f noise) with the specified parameters.
 ///
 /// Pink noise has equal energy per octave, meaning its power spectral density decreases at
@@ -500,63 +531,21 @@ where
     let mut samples = Vec::with_capacity(num_samples);
 
     // Pink noise generation using Paul Kellett's method
-    let mut b = [0.0; 7];
+    let mut filter = KellettPinkFilter::default();
     let two = 2.0;
     let half = 0.5;
-
-    let a0 = 0.998_86;
-    let b0 = 0.055_517_9;
-
-    let a1 = 0.993_32;
-    let b1 = 0.075_075_9;
-    let a2 = 0.969_00;
-    let b2 = 0.153_852_0;
-    let a3 = 0.866_50;
-    let b3 = 0.310_485_6;
-    let a4 = 0.550_00;
-    let b4 = 0.532_952_2;
-    let a5 = -0.761_6;
-    let b5 = -0.016_898_0;
-
-    let b6 = 0.115_926;
-    let pink_calc_multiplier1 = 0.5362;
-    let pink_calc_multiplier2 = 0.11;
 
     if let Some(seed) = seed {
         let mut rng = StdRng::seed_from_u64(seed);
         for _ in 0..num_samples {
             let white = (rng.random::<f64>() - half) * two;
-            b[0] = a0 * b[0] + white * b0;
-            b[1] = a1 * b[1] + white * b1;
-            b[2] = a2 * b[2] + white * b2;
-            b[3] = a3 * b[3] + white * b3;
-            b[4] = a4 * b[4] + white * b4;
-            b[5] = a5 * b[5] + white * b5;
-
-            let pink =
-                b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + white * pink_calc_multiplier1;
-            b[6] = white * b6;
-            let pink: f64 = pink * pink_calc_multiplier2;
-
-            let sample = amplitude * pink;
+            let sample = amplitude * filter.process(white);
             samples.push(sample.convert_to());
         }
     } else {
         for _ in 0..num_samples {
             let white = (rand::random::<f64>() - half) * two;
-            b[0] = a0 * b[0] + white * b0;
-            b[1] = a1 * b[1] + white * b1;
-            b[2] = a2 * b[2] + white * b2;
-            b[3] = a3 * b[3] + white * b3;
-            b[4] = a4 * b[4] + white * b4;
-            b[5] = a5 * b[5] + white * b5;
-
-            let pink =
-                b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + white * pink_calc_multiplier1;
-            b[6] = white * b6;
-            let pink: f64 = pink * pink_calc_multiplier2;
-
-            let sample = amplitude * pink;
+            let sample = amplitude * filter.process(white);
             samples.push(sample.convert_to());
         }
     }
@@ -985,6 +974,12 @@ where
 /// the harmonics below Nyquist, producing an exactly band-limited signal:
 /// `(2/π) · Σ (-1)^(k+1) sin(2π k f t)/k` for every harmonic `k·frequency < Nyquist`.
 ///
+/// Phase convention: this waveform is `0` at `t = 0` and rises (it is the
+/// series of `A·2(ft − round(ft))`), whereas [`sawtooth_wave`] starts at
+/// `−A` at `t = 0`; the two are half a period apart. Because the harmonics
+/// stop below Nyquist the peaks overshoot the ideal `±A` slightly (Gibbs
+/// phenomenon).
+///
 /// # Arguments
 ///
 /// - `frequency` - Fundamental frequency of the sawtooth wave in Hz.
@@ -1056,6 +1051,11 @@ where
 /// only the odd harmonics below Nyquist, producing an exactly band-limited signal:
 /// `(8/π²) · Σ (-1)^k sin(2π(2k+1)f t)/(2k+1)²` for `k = 0, 1, 2, …` while
 /// `(2k+1)·frequency < Nyquist`.
+///
+/// Phase convention: this waveform is `0` at `t = 0`, rising to `+A` at a
+/// quarter period, whereas [`triangle_wave`] starts at its minimum `−A` at
+/// `t = 0`; the band-limited wave leads it by a quarter period (equivalently,
+/// lags it by three quarters).
 ///
 /// # Arguments
 ///
@@ -1334,15 +1334,25 @@ where
 
 /// Generates an amplitude-modulated (AM) signal.
 ///
-/// The carrier signal is modulated by a low-frequency envelope.
+/// Standard (double-sideband, full-carrier) AM with modulation index `m`:
+///
+/// `x(t) = A · (1 + m·sin(2π f_m t)) · sin(2π f_c t) / (1 + m)`
+///
+/// The envelope `A(1 + m·sin(2π f_m t))/(1 + m)` swings between
+/// `A(1 − m)/(1 + m)` and `A`, so the peak is always `A`. `m = 0` is an
+/// unmodulated carrier, `m = 1` is 100 % modulation (the envelope just
+/// reaches zero), and `m > 1` over-modulates (the envelope changes sign). In
+/// the spectrum the carrier has amplitude `A/(1 + m)` and each sideband, at
+/// `f_c ± f_m`, has amplitude `A·m/(2(1 + m))`.
 ///
 /// # Arguments
-/// * `carrier_freq` - Frequency of the carrier signal in Hz
-/// * `modulator_freq` - Frequency of the modulating envelope in Hz
-/// * `modulation_depth` - Depth of modulation (0.0 = no modulation, 1.0 = full modulation)
+/// * `carrier_freq` - Frequency `f_c` of the carrier signal in Hz
+/// * `modulator_freq` - Frequency `f_m` of the modulating envelope in Hz
+/// * `modulation_depth` - Modulation index `m` (0.0 = no modulation,
+///   1.0 = 100 % modulation)
 /// * `duration` - Duration of the signal
 /// * `sample_rate` - Sample rate in Hz
-/// * `amplitude` - Overall amplitude
+/// * `amplitude` - Peak amplitude `A` of the output
 ///
 /// # Returns
 /// An [`AudioSamples`] instance containing the AM signal.
@@ -1359,7 +1369,7 @@ where
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// // 440 Hz carrier modulated at 2 Hz with 50% depth.
+/// // 440 Hz carrier modulated at 2 Hz with modulation index 0.5 (50 %).
 /// let audio = am_signal::<f64>(440.0, 2.0, 0.5, Duration::from_millis(100), sample_rate!(44100), 0.8);
 /// assert_eq!(audio.num_channels().get(), 1);
 /// ```
@@ -1385,10 +1395,10 @@ where
 
     for i in 0..num_samples {
         let t = i as f64 / sr_f;
-        // Envelope: (1 - depth) + depth * (0.5 + 0.5 * sin(2π * mod_freq * t))
-        // This gives envelope range from (1-depth) to 1.0
-        let envelope =
-            modulation_depth.mul_add((two_pi * modulator_freq * t).sin(), one - modulation_depth);
+        // Standard AM envelope (1 + m·sin(2π f_m t)), normalised by (1 + m)
+        // so that its maximum is 1.0 and the output peak equals `amplitude`.
+        let envelope = modulation_depth.mul_add((two_pi * modulator_freq * t).sin(), one)
+            / (one + modulation_depth);
         let carrier = (two_pi * carrier_freq * t).sin();
         let sample = amplitude * envelope * carrier;
         samples.push(sample.convert_to());
@@ -1402,10 +1412,19 @@ where
 /// Generates a signal with periodic exponential decay bursts.
 ///
 /// This creates percussive-like transients useful for testing onset detection.
+/// Each burst period `1/burst_rate` starts with an active segment lasting the
+/// first 10 % of the period, followed by silence. During the active segment
+/// the signal is `A · e^(−decay_rate·φ) · (0.7·u + 0.3·sin(2π·200 Hz·t))`,
+/// where `φ ∈ [0, 0.1)` is the fraction of the burst period elapsed and `u` is
+/// uniform noise in `[−1, 1)`. The noise comes from the thread-local RNG, so
+/// the output is not reproducible between calls.
 ///
 /// # Arguments
 /// * `burst_rate` - Number of bursts per second
-/// * `decay_rate` - Exponential decay rate (higher = faster decay)
+/// * `decay_rate` - Decay per burst period: the envelope is
+///   `e^(−decay_rate·φ)` with `φ` the elapsed fraction of the period, so the
+///   decay time constant is `1/(decay_rate·burst_rate)` seconds (higher =
+///   faster decay)
 /// * `duration` - Duration of the signal
 /// * `sample_rate` - Sample rate in Hz
 /// * `amplitude` - Peak amplitude of bursts
