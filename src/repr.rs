@@ -187,7 +187,7 @@ pub type SampleRate = NonZeroU32;
 /// [`NonZeroU32::new`] for runtime construction.
 pub type ChannelCount = NonZeroU32;
 
-use crate::traits::{ConvertFrom, StandardSample};
+use crate::traits::{CastFrom, ConvertFrom, StandardSample};
 use crate::{
     AudioSampleError, AudioSampleResult, CastInto, ConvertTo, EnumParseError, I24, LayoutError,
     ParameterError,
@@ -781,11 +781,18 @@ where
     }
 
     /// Returns the arithmetic mean of the samples.
+    ///
+    /// The sum is accumulated in `f64` (so integer samples cannot overflow) and
+    /// the result is cast back to `T`; for integer types the cast truncates
+    /// towards zero, like integer division.
     #[inline]
     pub fn mean(&self) -> T {
-        self.as_view()
-            .mean()
-            .expect("Array is guaranteed to be non-empty")
+        let view = self.as_view();
+        let sum: f64 = view
+            .iter()
+            .map(|&x| <T as CastInto<f64>>::cast_into(x))
+            .sum();
+        <T as CastFrom<f64>>::cast_from(sum / view.len() as f64)
     }
 
     /// Returns the population variance of the samples.
@@ -1449,9 +1456,18 @@ where
     }
 
     /// Returns the arithmetic mean across all samples.
+    ///
+    /// The sum is accumulated in `f64` (so integer samples cannot overflow) and
+    /// the result is cast back to `T`; for integer types the cast truncates
+    /// towards zero, like integer division.
     #[inline]
     pub fn mean(&self) -> T {
-        self.as_view().mean().expect("self is guaranteed non-empty")
+        let view = self.as_view();
+        let sum: f64 = view
+            .iter()
+            .map(|&x| <T as CastInto<f64>>::cast_into(x))
+            .sum();
+        <T as CastFrom<f64>>::cast_from(sum / view.len() as f64)
     }
 
     /// Returns the population variances across all the specificed axix
@@ -1460,26 +1476,21 @@ where
         self.variance_axis_ddof(axis, 0)
     }
 
-    /// Returns the variance with respect to the specified delta degrees of freedom across the specified axis
+    /// Returns the variance along `axis` with `ddof` delta degrees of freedom.
+    ///
+    /// Follows `ndarray::ArrayBase::var_axis`: the variance is taken over the
+    /// lanes along `axis` (for `Axis(1)`, one value per channel over its
+    /// samples; for `Axis(0)`, one value per sample position across channels),
+    /// with divisor `n - ddof` where `n` is the length of `axis`. Values are
+    /// converted to `f64` first, so integer samples cannot overflow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ddof` is not less than the length of `axis`.
     #[inline]
     pub fn variance_axis_ddof(&self, axis: Axis, ddof: usize) -> Array1<f64> {
-        let view = self.as_view();
-        let degrees_of_freedom = (view.len() - ddof) as f64;
-        let means = self.mean_axis(axis);
-
-        view.outer_iter()
-            .map(|lane| {
-                lane.iter()
-                    .zip(means.iter())
-                    .map(|(&x, &mean)| {
-                        let mean: f64 = mean.cast_into();
-                        let diff: f64 = <T as CastInto<f64>>::cast_into(x) - mean;
-                        diff * diff
-                    })
-                    .sum::<f64>()
-                    / degrees_of_freedom
-            })
-            .collect::<Array1<f64>>()
+        let as_f64 = self.as_view().mapv(|x| <T as CastInto<f64>>::cast_into(x));
+        as_f64.var_axis(axis, ddof as f64)
     }
 
     /// Returns the population variances across all samples.
