@@ -42,12 +42,18 @@
 //! ```
 
 use crate::{AudioSampleError, AudioSampleResult, NoteParseError, ParameterError};
+use std::num::NonZeroUsize;
 
 // =============================================================================
 // FREQUENCY CONVERSIONS
 // =============================================================================
 
 /// Converts a frequency expressed in Hertz into the mel perceptual scale.
+///
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
+/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
+/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`hz_to_mel_with_scale`] with
+/// [`MelScale::Slaney`] for librosa-compatible results.
 ///
 /// This function is intended for situations where linear frequency values need to be mapped
 /// into a perceptual representation, such as when constructing mel filter banks, analysing
@@ -93,6 +99,11 @@ pub fn hz_to_mel(freq_hz: f64) -> f64 {
 }
 
 /// Converts a value expressed on the mel perceptual scale back into Hertz.
+///
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
+/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
+/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`mel_to_hz_with_scale`] with
+/// [`MelScale::Slaney`] for librosa-compatible results.
 ///
 /// This function performs the inverse mapping of [`hz_to_mel`]. It is intended for cases
 /// where perceptual-domain representations need to be projected back into physical
@@ -140,6 +151,13 @@ pub fn mel_to_hz(mel: f64) -> f64 {
 }
 
 /// Generates a sequence of frequencies whose spacing is uniform in the mel domain.
+///
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
+/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
+/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`mel_frequencies_with_scale`] with
+/// [`MelScale::Slaney`] for librosa-compatible results.
+///
+/// This function is identical to [`mel_frequencies`].
 ///
 /// This function is typically used when sampling a frequency range in perceptual space,
 /// for example when constructing mel-aligned filter banks, visualisations, or validation
@@ -574,6 +592,15 @@ pub fn frames_to_time(frames: usize, sample_rate: f64, hop_size: usize) -> f64 {
 ///   a time value close to the original input, subject to rounding.
 /// * Rounding is performed to the nearest integer frame index rather than truncation.
 ///
+/// # Differences from librosa
+///
+/// `librosa.time_to_frames` truncates the time to a sample index and then *floors* to a
+/// frame ("which frame contains this time?"), keeps negative values, and accepts an
+/// `n_fft` offset. This function rounds to the *nearest* frame (so it round-trips
+/// [`frames_to_time`] robustly) and saturates negative times to 0; about half of all
+/// times differ from librosa by one frame. Use [`time_to_frames_floor`] for
+/// librosa-compatible results.
+///
 /// # Examples
 ///
 /// ```rust
@@ -659,6 +686,13 @@ pub fn samples_to_time(samples: usize, sample_rate: f64) -> f64 {
 ///   produces a time value close to the original input, subject to rounding.
 /// * Rounding is performed to the nearest integer sample index rather than truncation.
 ///
+/// # Rounding
+///
+/// This function **rounds** to the nearest sample. The similarly named
+/// [`crate::utils::seconds_to_samples`] **truncates** toward zero (as does librosa's
+/// `time_to_samples`, available as [`time_to_samples`]); for times that are not an exact
+/// multiple of the sample period the two can differ by one sample.
+///
 /// # Examples
 ///
 /// ```rust
@@ -698,6 +732,376 @@ pub fn seconds_to_samples(time_seconds: f64, sample_rate: f64) -> usize {
 #[must_use]
 pub fn ms_to_samples(ms: f64, sample_rate: f64) -> usize {
     (ms * 0.001 * sample_rate).round() as usize
+}
+
+// =============================================================================
+// LIBROSA-COMPATIBLE FRAME / SAMPLE / TIME CONVERSIONS
+// =============================================================================
+//
+// These follow librosa's conventions exactly: times are truncated to samples,
+// samples are floor-divided into frames, values may be negative, and an
+// optional `n_fft` shifts frame positions by `n_fft / 2` samples (the frame
+// centre of an un-centred STFT).
+
+/// Frame offset in samples implied by an optional `n_fft` (`n_fft / 2`, integer halving).
+#[inline]
+fn n_fft_offset(n_fft: Option<usize>) -> i64 {
+    n_fft.map_or(0, |n| (n / 2) as i64)
+}
+
+/// Converts a time in seconds to a sample index the way librosa does (truncation toward zero).
+///
+/// Equivalent to `librosa.time_to_samples(time_seconds, sr=sample_rate)`, i.e.
+/// `int(time_seconds * sample_rate)`. Unlike [`seconds_to_samples`] (which rounds to the
+/// nearest sample and saturates negatives to 0) this truncates and keeps the sign.
+///
+/// # Arguments
+///
+/// * `time_seconds` - Time in seconds; may be negative.
+/// * `sample_rate` - Sampling rate in Hz.
+///
+/// # Returns
+///
+/// `(time_seconds * sample_rate)` truncated toward zero. Values beyond the `i64` range
+/// saturate and `NaN` maps to 0 (Rust's float-to-int cast semantics).
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::time_to_samples;
+///
+/// assert_eq!(time_to_samples(0.5, 22050.0), 11025);
+/// assert_eq!(time_to_samples(-0.1, 22050.0), -2205);
+/// // Truncates rather than rounds: 0.99999 samples -> 0.
+/// assert_eq!(time_to_samples(0.99999 / 22050.0, 22050.0), 0);
+/// ```
+#[inline]
+#[must_use]
+pub fn time_to_samples(time_seconds: f64, sample_rate: f64) -> i64 {
+    (time_seconds * sample_rate) as i64
+}
+
+/// Converts a sample index to a frame index with floor division, as librosa does.
+///
+/// Equivalent to `librosa.samples_to_frames(samples, hop_length=hop_length, n_fft=n_fft)`:
+/// `floor((samples - n_fft / 2) / hop_length)`, where the `n_fft / 2` offset applies only
+/// when `n_fft` is `Some`. Use the offset when frames were computed without centring
+/// (`center=False`), so that a frame is identified by the sample at its centre.
+///
+/// # Arguments
+///
+/// * `samples` - Sample index; may be negative.
+/// * `hop_length` - Number of samples between successive frames.
+/// * `n_fft` - Optional frame length; `Some(n)` subtracts `n / 2` samples first.
+///
+/// # Returns
+///
+/// The frame index containing `samples` (negative for samples before the first frame).
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::samples_to_frames;
+///
+/// assert_eq!(samples_to_frames(1023, nzu!(512), None), 1);
+/// assert_eq!(samples_to_frames(1023, nzu!(512), Some(2048)), -1);
+/// assert_eq!(samples_to_frames(-1, nzu!(512), None), -1); // floor, not truncation
+/// ```
+#[inline]
+#[must_use]
+pub fn samples_to_frames(samples: i64, hop_length: NonZeroUsize, n_fft: Option<usize>) -> i64 {
+    samples
+        .saturating_sub(n_fft_offset(n_fft))
+        .div_euclid(hop_length.get() as i64)
+}
+
+/// Converts a frame index to the sample index where the frame starts (or is centred).
+///
+/// Equivalent to `librosa.frames_to_samples(frames, hop_length=hop_length, n_fft=n_fft)`:
+/// `frames * hop_length + n_fft / 2`, where the offset applies only when `n_fft` is `Some`.
+///
+/// # Arguments
+///
+/// * `frames` - Frame index; may be negative.
+/// * `hop_length` - Number of samples between successive frames.
+/// * `n_fft` - Optional frame length; `Some(n)` adds `n / 2` samples (the frame centre
+///   of an un-centred STFT).
+///
+/// # Returns
+///
+/// The sample index. Arithmetic saturates at the `i64` limits instead of overflowing.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::frames_to_samples;
+///
+/// assert_eq!(frames_to_samples(3, nzu!(512), None), 1536);
+/// assert_eq!(frames_to_samples(3, nzu!(512), Some(2048)), 2560);
+/// ```
+#[inline]
+#[must_use]
+pub fn frames_to_samples(frames: i64, hop_length: NonZeroUsize, n_fft: Option<usize>) -> i64 {
+    frames
+        .saturating_mul(hop_length.get() as i64)
+        .saturating_add(n_fft_offset(n_fft))
+}
+
+/// Converts a time in seconds to a frame index with librosa's floor semantics.
+///
+/// Equivalent to `librosa.time_to_frames(time_seconds, sr=sample_rate,
+/// hop_length=hop_length, n_fft=n_fft)`: the time is truncated to a sample index
+/// ([`time_to_samples`]) and then floor-divided into frames ([`samples_to_frames`]).
+/// This answers "which frame contains this time?".
+///
+/// It differs from [`time_to_frames`], which rounds to the *nearest* frame and saturates
+/// negative times to 0: for about half of all times the two differ by one frame.
+///
+/// # Arguments
+///
+/// * `time_seconds` - Time in seconds; may be negative.
+/// * `sample_rate` - Sampling rate in Hz.
+/// * `hop_length` - Number of samples between successive frames.
+/// * `n_fft` - Optional frame length; `Some(n)` shifts by `n / 2` samples as in
+///   [`samples_to_frames`].
+///
+/// # Returns
+///
+/// The frame index (negative for times before the first frame).
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::time_to_frames_floor;
+///
+/// // librosa's documented example: times 0, 0.1, ..., 0.9 s at 22050 Hz, hop 512.
+/// let frames: Vec<i64> = (0..10)
+///     .map(|i| time_to_frames_floor(i as f64 * 0.1, 22050.0, nzu!(512), None))
+///     .collect();
+/// assert_eq!(frames, vec![0, 4, 8, 12, 17, 21, 25, 30, 34, 38]);
+/// assert_eq!(time_to_frames_floor(-0.1, 22050.0, nzu!(512), None), -5);
+/// ```
+#[inline]
+#[must_use]
+pub fn time_to_frames_floor(
+    time_seconds: f64,
+    sample_rate: f64,
+    hop_length: NonZeroUsize,
+    n_fft: Option<usize>,
+) -> i64 {
+    samples_to_frames(
+        time_to_samples(time_seconds, sample_rate),
+        hop_length,
+        n_fft,
+    )
+}
+
+/// Converts a (possibly negative) frame index to seconds, with an optional `n_fft` offset.
+///
+/// Equivalent to `librosa.frames_to_time(frames, sr=sample_rate, hop_length=hop_length,
+/// n_fft=n_fft)`. With `n_fft = None` it agrees with [`frames_to_time`]; `Some(n)` reports
+/// the time of the frame centre for an un-centred STFT (`n / 2` samples later).
+///
+/// # Arguments
+///
+/// * `frames` - Frame index; may be negative.
+/// * `sample_rate` - Sampling rate in Hz.
+/// * `hop_length` - Number of samples between successive frames.
+/// * `n_fft` - Optional frame length for the `n / 2` sample offset.
+///
+/// # Returns
+///
+/// `frames_to_samples(frames, hop_length, n_fft) / sample_rate`, in seconds.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::frames_to_time_with_offset;
+///
+/// let t = frames_to_time_with_offset(10, 22050.0, nzu!(512), None);
+/// assert!((t - 5120.0 / 22050.0).abs() < 1e-15);
+/// let t_centre = frames_to_time_with_offset(10, 22050.0, nzu!(512), Some(2048));
+/// assert!((t_centre - 6144.0 / 22050.0).abs() < 1e-15);
+/// ```
+#[inline]
+#[must_use]
+pub fn frames_to_time_with_offset(
+    frames: i64,
+    sample_rate: f64,
+    hop_length: NonZeroUsize,
+    n_fft: Option<usize>,
+) -> f64 {
+    frames_to_samples(frames, hop_length, n_fft) as f64 / sample_rate
+}
+
+/// Applies [`time_to_samples`] to every element of `times`.
+///
+/// Vectorised form of `librosa.time_to_samples`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::time_to_samples_slice;
+///
+/// assert_eq!(time_to_samples_slice(&[0.0, 0.5, -0.5], 100.0), vec![0, 50, -50]);
+/// ```
+#[must_use]
+pub fn time_to_samples_slice(times: &[f64], sample_rate: f64) -> Vec<i64> {
+    times
+        .iter()
+        .map(|&t| time_to_samples(t, sample_rate))
+        .collect()
+}
+
+/// Applies [`samples_to_frames`] to every element of `samples`.
+///
+/// Vectorised form of `librosa.samples_to_frames`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::samples_to_frames_slice;
+///
+/// assert_eq!(samples_to_frames_slice(&[0, 511, 512, -1], nzu!(512), None), vec![0, 0, 1, -1]);
+/// ```
+#[must_use]
+pub fn samples_to_frames_slice(
+    samples: &[i64],
+    hop_length: NonZeroUsize,
+    n_fft: Option<usize>,
+) -> Vec<i64> {
+    samples
+        .iter()
+        .map(|&s| samples_to_frames(s, hop_length, n_fft))
+        .collect()
+}
+
+/// Applies [`frames_to_samples`] to every element of `frames`.
+///
+/// Vectorised form of `librosa.frames_to_samples`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::frames_to_samples_slice;
+///
+/// assert_eq!(frames_to_samples_slice(&[0, 1, 2], nzu!(256), Some(1024)), vec![512, 768, 1024]);
+/// ```
+#[must_use]
+pub fn frames_to_samples_slice(
+    frames: &[i64],
+    hop_length: NonZeroUsize,
+    n_fft: Option<usize>,
+) -> Vec<i64> {
+    frames
+        .iter()
+        .map(|&f| frames_to_samples(f, hop_length, n_fft))
+        .collect()
+}
+
+/// Applies [`time_to_frames_floor`] to every element of `times`.
+///
+/// Vectorised form of `librosa.time_to_frames`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::time_to_frames_floor_slice;
+///
+/// let f = time_to_frames_floor_slice(&[0.0, 0.1, 0.2], 22050.0, nzu!(512), None);
+/// assert_eq!(f, vec![0, 4, 8]);
+/// ```
+#[must_use]
+pub fn time_to_frames_floor_slice(
+    times: &[f64],
+    sample_rate: f64,
+    hop_length: NonZeroUsize,
+    n_fft: Option<usize>,
+) -> Vec<i64> {
+    times
+        .iter()
+        .map(|&t| time_to_frames_floor(t, sample_rate, hop_length, n_fft))
+        .collect()
+}
+
+/// Applies [`frames_to_time_with_offset`] to every element of `frames`.
+///
+/// Vectorised form of `librosa.frames_to_time`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::frames_to_time_with_offset_slice;
+///
+/// let t = frames_to_time_with_offset_slice(&[0, 1], 1000.0, nzu!(100), None);
+/// assert_eq!(t, vec![0.0, 0.1]);
+/// ```
+#[must_use]
+pub fn frames_to_time_with_offset_slice(
+    frames: &[i64],
+    sample_rate: f64,
+    hop_length: NonZeroUsize,
+    n_fft: Option<usize>,
+) -> Vec<f64> {
+    frames
+        .iter()
+        .map(|&f| frames_to_time_with_offset(f, sample_rate, hop_length, n_fft))
+        .collect()
+}
+
+/// Returns the time (in seconds) of each of `n_frames` consecutive frames.
+///
+/// Equivalent to `librosa.times_like(n_frames, sr=sample_rate, hop_length=hop_length,
+/// n_fft=n_fft)` when given an integer frame count: the time axis for a frame-wise
+/// feature matrix with `n_frames` columns.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::times_like;
+///
+/// let t = times_like(3, 22050.0, nzu!(512), None);
+/// assert_eq!(t, vec![0.0, 512.0 / 22050.0, 1024.0 / 22050.0]);
+/// ```
+#[must_use]
+pub fn times_like(
+    n_frames: usize,
+    sample_rate: f64,
+    hop_length: NonZeroUsize,
+    n_fft: Option<usize>,
+) -> Vec<f64> {
+    (0..n_frames as i64)
+        .map(|f| frames_to_time_with_offset(f, sample_rate, hop_length, n_fft))
+        .collect()
+}
+
+/// Returns the sample index of each of `n_frames` consecutive frames.
+///
+/// Equivalent to `librosa.samples_like(n_frames, hop_length=hop_length, n_fft=n_fft)`
+/// when given an integer frame count.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::samples_like;
+///
+/// assert_eq!(samples_like(3, nzu!(512), None), vec![0, 512, 1024]);
+/// ```
+#[must_use]
+pub fn samples_like(n_frames: usize, hop_length: NonZeroUsize, n_fft: Option<usize>) -> Vec<i64> {
+    (0..n_frames as i64)
+        .map(|f| frames_to_samples(f, hop_length, n_fft))
+        .collect()
 }
 
 // =============================================================================
@@ -1253,6 +1657,11 @@ pub fn fft_frequencies(n_fft: usize, sample_rate: f64) -> Vec<f64> {
 
 /// Generates frequencies whose spacing is uniform in the mel perceptual domain.
 ///
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
+/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
+/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`mel_frequencies_with_scale`] with
+/// [`MelScale::Slaney`] for librosa-compatible results.
+///
 /// This function samples the interval `[fmin, fmax]` evenly in the mel scale and converts
 /// the resulting points back into Hertz. It is typically used when constructing mel-aligned
 /// spectral representations or perceptual frequency grids.
@@ -1306,6 +1715,213 @@ pub fn mel_frequencies(n_mels: usize, fmin: f64, fmax: f64) -> Vec<f64> {
     let mel_points = linspace(mel_min, mel_max, n_mels);
 
     mel_points.into_iter().map(mel_to_hz).collect()
+}
+
+// =============================================================================
+// MEL SCALES (HTK AND SLANEY)
+// =============================================================================
+
+/// The mel-scale formula used to map between Hertz and mels.
+///
+/// Two mel scales are in common use and they disagree substantially (by up to
+/// hundreds of Hz for the same mel value), so every mel-aware function that
+/// takes a `MelScale` makes the choice explicit.
+///
+/// - [`MelScale::Slaney`] is the scale of Malcolm Slaney's Auditory Toolbox: linear
+///   (`f / (200/3)`) below 1 kHz and logarithmic (step `ln(6.4) / 27` per mel)
+///   above it. It is librosa's default (`htk=False`) and the default here.
+/// - [`MelScale::Htk`] is the HTK formula `2595 * log10(1 + f / 700)` (librosa
+///   `htk=True`). The older unparameterised helpers [`hz_to_mel`], [`mel_to_hz`],
+///   [`mel_scale`] and [`mel_frequencies`] always use this scale.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{MelScale, hz_to_mel_with_scale};
+///
+/// // 1 kHz is mel 15 on the Slaney scale and ~1000 mel on the HTK scale.
+/// assert!((hz_to_mel_with_scale(1000.0, MelScale::Slaney) - 15.0).abs() < 1e-12);
+/// assert!((hz_to_mel_with_scale(1000.0, MelScale::Htk) - 999.985).abs() < 1e-3);
+/// assert_eq!(MelScale::default(), MelScale::Slaney);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MelScale {
+    /// Slaney (Auditory Toolbox) scale: linear below 1 kHz, logarithmic above.
+    /// librosa's default (`htk=False`).
+    #[default]
+    Slaney,
+    /// HTK scale: `2595 * log10(1 + f / 700)` (librosa `htk=True`).
+    Htk,
+}
+
+/// Width of one mel on the linear part of the Slaney scale, in Hz (`200 / 3`).
+const SLANEY_F_SP: f64 = 200.0 / 3.0;
+/// Frequency where the Slaney scale switches from linear to logarithmic, in Hz.
+const SLANEY_MIN_LOG_HZ: f64 = 1000.0;
+
+/// Mel value at [`SLANEY_MIN_LOG_HZ`] (exactly 15).
+#[inline]
+fn slaney_min_log_mel() -> f64 {
+    SLANEY_MIN_LOG_HZ / SLANEY_F_SP
+}
+
+/// Log-region step of the Slaney scale, `ln(6.4) / 27` (natural-log units per mel).
+#[inline]
+fn slaney_logstep() -> f64 {
+    6.4f64.ln() / 27.0
+}
+
+/// Converts a frequency in Hertz to mels on the chosen mel scale.
+///
+/// This is the scale-aware counterpart of [`hz_to_mel`] (which is HTK only) and
+/// is equivalent to `librosa.hz_to_mel(freq_hz, htk=...)`.
+///
+/// # Arguments
+///
+/// * `freq_hz` - Frequency in Hz. Non-negative values are meaningful; negative
+///   values follow the linear branch of the Slaney formula (or produce `NaN`
+///   below -700 Hz on the HTK scale), exactly as librosa does.
+/// * `scale` - The mel scale to use. Pass [`MelScale::Slaney`] for librosa's default.
+///
+/// # Returns
+///
+/// The mel value. The Slaney scale is linear (`f / (200/3)`) below 1 kHz and
+/// logarithmic above (`15 + ln(f / 1000) / (ln(6.4) / 27)`); the HTK scale is
+/// `2595 * log10(1 + f / 700)`.
+///
+/// # Behavioural Guarantees
+///
+/// * Monotonically increasing for `freq_hz >= 0` on both scales.
+/// * [`mel_to_hz_with_scale`] with the same `scale` inverts it to within floating-point rounding.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{MelScale, hz_to_mel_with_scale, mel_to_hz_with_scale};
+///
+/// let m = hz_to_mel_with_scale(440.0, MelScale::Slaney);
+/// assert!((m - 6.6).abs() < 1e-12); // linear region: 440 / (200 / 3)
+/// let back = mel_to_hz_with_scale(m, MelScale::Slaney);
+/// assert!((back - 440.0).abs() < 1e-9);
+/// ```
+///
+/// # References
+///
+/// M. Slaney, *Auditory Toolbox*, Technical Report 1998-010, Interval Research Corporation, 1998;
+/// S. Young et al., *The HTK Book*; librosa `core.convert.hz_to_mel`.
+#[inline]
+#[must_use]
+pub fn hz_to_mel_with_scale(freq_hz: f64, scale: MelScale) -> f64 {
+    match scale {
+        MelScale::Htk => 2595.0 * (1.0 + freq_hz / 700.0).log10(),
+        MelScale::Slaney => {
+            if freq_hz >= SLANEY_MIN_LOG_HZ {
+                slaney_min_log_mel() + (freq_hz / SLANEY_MIN_LOG_HZ).ln() / slaney_logstep()
+            } else {
+                freq_hz / SLANEY_F_SP
+            }
+        }
+    }
+}
+
+/// Converts a mel value back to Hertz on the chosen mel scale.
+///
+/// The inverse of [`hz_to_mel_with_scale`]; equivalent to
+/// `librosa.mel_to_hz(mel, htk=...)`.
+///
+/// # Arguments
+///
+/// * `mel` - Mel value. Non-negative values are meaningful.
+/// * `scale` - The mel scale to use. Pass [`MelScale::Slaney`] for librosa's default.
+///
+/// # Returns
+///
+/// The frequency in Hz: `(200/3) * mel` below mel 15 and
+/// `1000 * exp((ln(6.4) / 27) * (mel - 15))` above it on the Slaney scale;
+/// `700 * (10^(mel / 2595) - 1)` on the HTK scale.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{MelScale, mel_to_hz_with_scale};
+///
+/// assert!((mel_to_hz_with_scale(15.0, MelScale::Slaney) - 1000.0).abs() < 1e-9);
+/// assert!(mel_to_hz_with_scale(0.0, MelScale::Htk).abs() < 1e-12);
+/// ```
+#[inline]
+#[must_use]
+pub fn mel_to_hz_with_scale(mel: f64, scale: MelScale) -> f64 {
+    match scale {
+        MelScale::Htk => 700.0 * (10.0f64.powf(mel / 2595.0) - 1.0),
+        MelScale::Slaney => {
+            let min_log_mel = slaney_min_log_mel();
+            if mel >= min_log_mel {
+                SLANEY_MIN_LOG_HZ * (slaney_logstep() * (mel - min_log_mel)).exp()
+            } else {
+                SLANEY_F_SP * mel
+            }
+        }
+    }
+}
+
+/// Generates `n_mels` frequencies evenly spaced on the chosen mel scale.
+///
+/// The scale-aware counterpart of [`mel_frequencies`] (HTK only), equivalent to
+/// `librosa.mel_frequencies(n_mels, fmin=fmin, fmax=fmax, htk=...)`. With
+/// `n_mels + 2` points these are the band edges / centres used by a mel
+/// filterbank built on the same scale.
+///
+/// # Arguments
+///
+/// * `n_mels` - Number of points. `0` gives an empty vector, `1` gives `[fmin]`.
+/// * `fmin` - Lowest frequency in Hz (librosa default `0.0`).
+/// * `fmax` - Highest frequency in Hz (librosa default `11025.0`).
+/// * `scale` - The mel scale to use. Pass [`MelScale::Slaney`] for librosa's default.
+///
+/// # Returns
+///
+/// A vector of `n_mels` frequencies in Hz, from `fmin` to `fmax` (both included,
+/// up to round-off), uniformly spaced in mels.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{MelScale, mel_frequencies_with_scale};
+///
+/// let f = mel_frequencies_with_scale(128, 0.0, 11025.0, MelScale::Slaney);
+/// assert_eq!(f.len(), 128);
+/// assert_eq!(f[0], 0.0);
+/// assert!((f[127] - 11025.0).abs() < 1e-8);
+/// ```
+#[inline]
+#[must_use]
+pub fn mel_frequencies_with_scale(
+    n_mels: usize,
+    fmin: f64,
+    fmax: f64,
+    scale: MelScale,
+) -> Vec<f64> {
+    let min_mel = hz_to_mel_with_scale(fmin, scale);
+    let max_mel = hz_to_mel_with_scale(fmax, scale);
+    numpy_linspace(min_mel, max_mel, n_mels)
+        .into_iter()
+        .map(|m| mel_to_hz_with_scale(m, scale))
+        .collect()
+}
+
+/// `numpy.linspace(start, stop, num)` with numpy's exact rounding: element `i`
+/// is `i * step + start` (no fused multiply-add) and the last element is `stop`.
+pub(crate) fn numpy_linspace(start: f64, stop: f64, num: usize) -> Vec<f64> {
+    match num {
+        0 => Vec::new(),
+        1 => vec![start],
+        _ => {
+            let step = (stop - start) / (num - 1) as f64;
+            let mut out: Vec<f64> = (0..num).map(|i| i as f64 * step + start).collect();
+            out[num - 1] = stop;
+            out
+        }
+    }
 }
 
 /// Generates a linearly spaced sequence of values between two endpoints.
@@ -1564,5 +2180,94 @@ mod tests {
         let freq_res = freqs[1] - freqs[0];
         let expected_res = 44100.0 / 1024.0;
         assert!((freq_res - expected_res).abs() < 0.001f64);
+    }
+
+    #[test]
+    fn htk_mel_round_trip_regression() {
+        // Regression for the old `mel_to_hz` formula (700 * 10^(m/2595) - 1), which was off
+        // by +699 Hz at every frequency.
+        for &f in &[0.0, 50.0, 440.0, 1000.0, 8000.0, 22050.0] {
+            let back = mel_to_hz(hz_to_mel(f));
+            assert!((back - f).abs() <= 1e-9 * f.max(1.0), "{f} -> {back}");
+            let back2 = mel_to_hz_with_scale(hz_to_mel_with_scale(f, MelScale::Htk), MelScale::Htk);
+            assert_eq!(back, back2);
+        }
+        assert_eq!(mel_to_hz(0.0), 0.0);
+    }
+
+    #[test]
+    fn slaney_mel_scale_values() {
+        // Linear region: f / (200 / 3); break point 1 kHz = mel 15.
+        assert!((hz_to_mel_with_scale(200.0, MelScale::Slaney) - 3.0).abs() < 1e-12);
+        assert!((hz_to_mel_with_scale(1000.0, MelScale::Slaney) - 15.0).abs() < 1e-12);
+        // Log region: 6400 Hz is exactly 27 mels above 1 kHz (logstep = ln(6.4)/27).
+        assert!((hz_to_mel_with_scale(6400.0, MelScale::Slaney) - 42.0).abs() < 1e-12);
+        for &f in &[0.0, 1.0, 999.0, 1000.0, 1001.0, 11025.0, 44100.0] {
+            let m = hz_to_mel_with_scale(f, MelScale::Slaney);
+            let back = mel_to_hz_with_scale(m, MelScale::Slaney);
+            assert!((back - f).abs() <= 1e-10 * f.max(1.0), "{f} -> {back}");
+        }
+        // HTK and Slaney genuinely differ.
+        assert!(hz_to_mel_with_scale(1000.0, MelScale::Htk) > 999.0);
+    }
+
+    #[test]
+    fn mel_frequencies_with_scale_matches_htk_helper_and_endpoints() {
+        let a = mel_frequencies_with_scale(40, 133.0, 6854.0, MelScale::Htk);
+        let b = mel_frequencies(40, 133.0, 6854.0);
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x - y).abs() < 1e-9);
+        }
+        let s = mel_frequencies_with_scale(5, 0.0, 8000.0, MelScale::Slaney);
+        assert_eq!(s[0], 0.0);
+        assert!((s[4] - 8000.0).abs() < 1e-9);
+        assert!(s.windows(2).all(|w| w[1] > w[0]));
+        assert!(mel_frequencies_with_scale(0, 0.0, 1.0, MelScale::Slaney).is_empty());
+        assert_eq!(
+            mel_frequencies_with_scale(1, 50.0, 100.0, MelScale::Slaney).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn numpy_linspace_matches_numpy_rounding() {
+        let v = numpy_linspace(0.0, 1.0, 11);
+        assert_eq!(v.len(), 11);
+        assert_eq!(v[3], 3.0 * 0.1); // i * step, not fused
+        assert_eq!(v[10], 1.0);
+        assert_eq!(numpy_linspace(2.0, 5.0, 1), vec![2.0]);
+        assert!(numpy_linspace(2.0, 5.0, 0).is_empty());
+    }
+
+    #[test]
+    fn librosa_frame_conversions() {
+        let hop = NonZeroUsize::new(512).unwrap();
+        // Floor division, including negatives.
+        assert_eq!(samples_to_frames(-1, hop, None), -1);
+        assert_eq!(samples_to_frames(-512, hop, None), -1);
+        assert_eq!(samples_to_frames(-513, hop, None), -2);
+        assert_eq!(samples_to_frames(1024, hop, Some(2048)), 0);
+        assert_eq!(samples_to_frames(1023, hop, Some(2048)), -1);
+        // Odd n_fft: offset is n_fft / 2 (integer halving).
+        assert_eq!(frames_to_samples(0, hop, Some(2047)), 1023);
+        // Saturation instead of overflow.
+        assert_eq!(frames_to_samples(i64::MAX, hop, Some(4)), i64::MAX);
+        // Truncation toward zero.
+        assert_eq!(time_to_samples(1.9999 / 100.0, 100.0), 1);
+        assert_eq!(time_to_samples(-1.9999 / 100.0, 100.0), -1);
+        // Composition.
+        assert_eq!(time_to_frames_floor(-0.1, 22050.0, hop, None), -5);
+        assert_eq!(time_to_frames_floor(0.9, 22050.0, hop, None), 38);
+        // The rounding helper differs from the floor helper here (documented).
+        assert_eq!(time_to_frames(0.9, 22050.0, 512), 39);
+        assert_eq!(frames_to_time_with_offset(-2, 1000.0, hop, None), -1.024);
+        assert_eq!(
+            times_like(2, 1000.0, NonZeroUsize::new(10).unwrap(), Some(4)),
+            vec![0.002, 0.012]
+        );
+        assert_eq!(
+            samples_like(2, NonZeroUsize::new(10).unwrap(), Some(4)),
+            vec![2, 12]
+        );
     }
 }
