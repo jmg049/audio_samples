@@ -68,7 +68,6 @@ use non_empty_slice::NonEmptyVec;
 use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -360,11 +359,32 @@ struct KernelKey {
     quality: ResamplingQuality,
 }
 
+/// Most kernels kept per thread.
+const KERNEL_CACHE_ENTRIES: usize = 8;
+/// Most coefficient memory kept per thread (the most recently used kernel is
+/// always kept, whatever its size).
+const KERNEL_CACHE_BYTES: usize = 64 << 20;
+
 thread_local! {
-    static KERNEL_CACHE: RefCell<HashMap<KernelKey, Arc<Kernel>>> = RefCell::new(HashMap::new());
+    /// Recently used kernels, most recent first. Small and bounded: every
+    /// distinct ratio (e.g. pitch shifts by arbitrary steps) builds a new
+    /// table of up to tens of MB, so an unbounded map grows without limit.
+    static KERNEL_CACHE: RefCell<Vec<(KernelKey, Arc<Kernel>)>> = const { RefCell::new(Vec::new()) };
+}
+
+impl Kernel {
+    /// Heap size of the coefficient table in bytes.
+    fn size_bytes(&self) -> usize {
+        self.coeffs.len() * std::mem::size_of::<f64>()
+    }
 }
 
 /// Returns the (per-thread cached) kernel for a rate pair and quality.
+///
+/// The cache is a small LRU list: a hit moves the entry to the front; a miss
+/// builds the kernel, inserts it at the front and evicts from the back until
+/// at most [`KERNEL_CACHE_ENTRIES`] kernels and [`KERNEL_CACHE_BYTES`] bytes
+/// of coefficients remain.
 fn cached_kernel(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Arc<Kernel> {
     let key = KernelKey {
         in_sr,
@@ -372,13 +392,30 @@ fn cached_kernel(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Arc<Ker
         quality,
     };
     KERNEL_CACHE.with(|cell| {
-        Arc::clone(cell.borrow_mut().entry(key).or_insert_with(|| {
-            Arc::new(Kernel::new(
-                in_sr,
-                out_sr,
-                kernel_kind(quality, in_sr, out_sr),
-            ))
-        }))
+        let mut cache = cell.borrow_mut();
+        if let Some(pos) = cache.iter().position(|(k, _)| *k == key) {
+            let entry = cache.remove(pos);
+            let kernel = Arc::clone(&entry.1);
+            cache.insert(0, entry);
+            return kernel;
+        }
+        let kernel = Arc::new(Kernel::new(
+            in_sr,
+            out_sr,
+            kernel_kind(quality, in_sr, out_sr),
+        ));
+        cache.insert(0, (key, Arc::clone(&kernel)));
+        let mut total = 0;
+        let keep = cache
+            .iter()
+            .position(|(_, k)| {
+                total += k.size_bytes();
+                total > KERNEL_CACHE_BYTES
+            })
+            .unwrap_or(cache.len())
+            .clamp(1, KERNEL_CACHE_ENTRIES);
+        cache.truncate(keep);
+        kernel
     })
 }
 
@@ -1463,6 +1500,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The per-thread kernel cache stays bounded however many distinct ratios
+    /// are used, and keeps recently used kernels.
+    #[test]
+    fn test_kernel_cache_is_bounded_lru() {
+        let len = || KERNEL_CACHE.with(|c| c.borrow().len());
+        let bytes = || {
+            KERNEL_CACHE.with(|c| {
+                c.borrow()
+                    .iter()
+                    .map(|(_, k)| k.size_bytes())
+                    .sum::<usize>()
+            })
+        };
+        let first = cached_kernel(44100, 22050, ResamplingQuality::High);
+        for out_sr in 30000..30040 {
+            let _ = cached_kernel(44100, out_sr, ResamplingQuality::High);
+            // Keep the first kernel recently used: it must survive.
+            assert!(Arc::ptr_eq(
+                &first,
+                &cached_kernel(44100, 22050, ResamplingQuality::High)
+            ));
+            assert!(len() <= KERNEL_CACHE_ENTRIES);
+            assert!(len() == 1 || bytes() <= KERNEL_CACHE_BYTES);
+        }
+        // An entry not used for a while is evicted and rebuilt.
+        let old = cached_kernel(44100, 30000, ResamplingQuality::High);
+        for out_sr in 31000..31000 + KERNEL_CACHE_ENTRIES as u32 {
+            let _ = cached_kernel(44100, out_sr, ResamplingQuality::Fast);
+        }
+        assert!(!Arc::ptr_eq(
+            &old,
+            &cached_kernel(44100, 30000, ResamplingQuality::High)
+        ));
     }
 
     #[test]
