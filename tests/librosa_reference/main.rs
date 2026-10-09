@@ -16,6 +16,7 @@ mod common;
 
 // One module per fixture area (added as the areas land).
 mod analysis_fixes;
+mod constant_q;
 mod effects;
 mod features;
 mod pitch;
