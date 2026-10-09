@@ -5,9 +5,9 @@
 //!
 //! - [`detect_silence_regions`] - time intervals where amplitude falls below a threshold
 //! - [`detect_clipping`] - intervals where the signal reaches or exceeds the sample type's full-scale value
-//! - [`detect_dynamic_range`] - peak amplitude, RMS amplitude, and dynamic range in dB
+//! - [`detect_dynamic_range`] - peak amplitude, RMS amplitude and crest factor (peak-to-RMS ratio) in dB
 //! - [`detect_fundamental_frequency`] - autocorrelation-based fundamental frequency estimate
-//! - [`estimate_noise_floor`] - approximate noise floor in dBFS from the quietest 10th percentile
+//! - [`estimate_noise_floor`] - crude noise-floor proxy in dBFS: the 10th percentile of `|x|`
 //! - [`detect_sample_rate`] *(requires `transforms` feature)* - spectral-cutoff heuristic for detecting original sample rate
 //! - [`estimate_frequency_range`] *(requires `transforms` feature)* - lowest and highest frequency with significant energy
 //!
@@ -45,10 +45,11 @@ use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 
 /// Attempts to detect the original sample rate of an audio signal from spectral content.
 ///
-/// Analyses the power spectrum of the signal for sharp high-frequency cutoffs that are
-/// characteristic of anti-aliasing filters applied during resampling. When a cutoff is
-/// detected near a common sample rate's Nyquist frequency, that rate is returned as the
-/// estimated original sample rate.
+/// Analyses the Hann-windowed power spectrum of the first channel (FFT length = next power
+/// of two ≥ signal length) for sharp high-frequency cutoffs that are characteristic of
+/// anti-aliasing filters applied during resampling. When a cutoff is detected near a common
+/// sample rate's Nyquist frequency, that rate is returned as the estimated original sample
+/// rate (see [`analyze_spectrum_for_cutoff`] for the exact test).
 ///
 /// This is a heuristic function and is not guaranteed to produce accurate results for all
 /// inputs. It is most reliable when the signal was previously down-sampled from one of the
@@ -68,8 +69,8 @@ use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 ///
 /// # Errors
 ///
-/// Returns an error if the underlying spectral computation fails or if the detected rate
-/// value is zero (which should not occur in practice).
+/// Returns an error if the underlying spectral computation fails or the sample layout is
+/// non-contiguous. Finding no cutoff is not an error (`Ok(None)`).
 ///
 /// # Feature flag
 ///
@@ -121,14 +122,11 @@ where
         .map_err(AudioSampleError::from)?;
     let nyquist_freq = audio.nyquist();
     let spectrum_slice = spectrum.as_non_empty_slice();
-    // Analyze the spectrum for sharp cutoffs that might indicate resampling
-    let detected_rate =
-        analyze_spectrum_for_cutoff(spectrum_slice, nyquist_freq).ok_or_else(|| {
-            AudioSampleError::Parameter(ParameterError::invalid_value(
-                "audio_data",
-                "Could not detect sample rate from audio content",
-            ))
-        })?;
+    // Analyze the spectrum for sharp cutoffs that might indicate resampling.
+    // No cutoff found is a normal outcome, reported as `Ok(None)`.
+    let Some(detected_rate) = analyze_spectrum_for_cutoff(spectrum_slice, nyquist_freq) else {
+        return Ok(None);
+    };
 
     let detected_rate = NonZeroU32::new(detected_rate).ok_or_else(|| {
         AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -141,9 +139,15 @@ where
 
 /// Estimates the fundamental frequency of an audio signal using autocorrelation.
 ///
-/// Searches for the period that maximises the normalised autocorrelation of the first
-/// channel, then converts the best period back into a frequency. The search range is
-/// restricted to periods corresponding to frequencies in the range 50 Hz - 2 000 Hz.
+/// Computes the normalised autocorrelation `ρ(τ) = r(τ)/r(0)` of the first channel
+/// (with the unbiased estimate `r(τ) = (1/(N−τ)) Σ x[n]·x[n+τ]`) over the lags `τ` that
+/// correspond to 50 Hz - 2 000 Hz, and returns `fs / τ*` where `τ*` is the **first** local
+/// maximum of `ρ` whose height is at least 0.9 times the highest `ρ` in that range. Taking the
+/// first such peak, rather than the global maximum, avoids reporting a sub-harmonic, since
+/// every multiple of the period gives an almost equally high peak. See
+/// [`detect_fundamental_autocorrelation`] for details. The period is an integer number of
+/// samples (no interpolation), so the frequency resolution is `f²/fs`: about 4.4 Hz at
+/// 440 Hz and 44.1 kHz.
 ///
 /// For multi-channel signals, only the first channel is analysed. This function is a
 /// lightweight pitch estimator; for production pitch tracking consider the methods on
@@ -156,7 +160,8 @@ where
 /// # Returns
 ///
 /// * `Ok(Some(freq))` - Estimated fundamental frequency in Hz.
-/// * `Ok(None)` - No clear periodic component found, or the signal is too short.
+/// * `Ok(None)` - No periodic component with `ρ > 0.1`, a silent signal, or a signal not
+///   longer than `fs / 50` samples (one period of the lowest frequency).
 ///
 /// # Errors
 ///
@@ -165,18 +170,16 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::detection::detect_fundamental_frequency;
 /// use audio_samples::utils::generation::sine_wave;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
-/// // A 1-second 440 Hz sine wave should yield a fundamental near 440 Hz.
-/// let audio = sine_wave::<f64>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
-/// let freq = detect_fundamental_frequency(&audio).unwrap();
-/// if let Some(f) = freq {
-///     assert!((f - 440.0).abs() < 50.0);
-/// }
+/// // 440 Hz at 44.1 kHz has a period of 100.2 samples; the integer lag 100 gives 441 Hz.
+/// let audio = sine_wave::<f64>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.1);
+/// let f = detect_fundamental_frequency(&audio).unwrap().unwrap();
+/// assert!((f - 440.0).abs() < 4.4);
 /// ```
 #[inline]
 pub fn detect_fundamental_frequency<T>(audio: &AudioSamples<T>) -> AudioSampleResult<Option<f64>>
@@ -240,7 +243,10 @@ where
 /// # Arguments
 ///
 /// - `audio` - The audio signal to analyse.
-/// - `threshold` - Absolute amplitude threshold. Samples with `|x| < threshold` are silent.
+/// - `threshold` - Absolute amplitude threshold, in raw sample units of `T`. Samples with
+///   `|x| < threshold` are silent. The comparison uses raw values, so for `u8`
+///   (offset-binary, silence = 128) silence is never detected near 128: convert to a signed
+///   or float type first.
 ///
 /// # Returns
 ///
@@ -344,11 +350,14 @@ where
     Ok(silence_regions)
 }
 
-/// Computes the dynamic range characteristics of an audio signal.
+/// Computes the peak level, RMS level and crest factor of an audio signal.
 ///
-/// Calculates the peak absolute amplitude, the RMS amplitude, and the dynamic range
-/// expressed in decibels as `20 log₁₀(peak / rms)`. All samples across all channels are
-/// considered together.
+/// Samples are converted to `f64` in `[-1, 1]` (audio-aware conversion, so `u8` 128 maps to
+/// 0) and all channels are pooled. It returns the peak `max |x|`, the RMS
+/// `sqrt((1/N) Σ x²)` and the crest factor `20·log10(peak / RMS)` in dB. The crest factor
+/// is the peak-to-average ratio (3.01 dB for any sine, 0 dB for a square wave); it is
+/// **not** the dynamic range of the recording (the ratio between its loudest and quietest
+/// passages), despite the function's name.
 ///
 /// # Arguments
 ///
@@ -360,7 +369,8 @@ where
 ///
 /// - `peak_amplitude` - Maximum absolute sample value across the entire buffer.
 /// - `rms_amplitude` - Root-mean-square amplitude.
-/// - `dynamic_range_db` - Crest factor in decibels. Returns `0.0` when `rms_amplitude` is zero.
+/// - `dynamic_range_db` - Crest factor `20·log10(peak / rms)` in dB. Returns `0.0` when
+///   `rms_amplitude` is zero.
 ///
 /// # Errors
 ///
@@ -375,10 +385,10 @@ where
 /// use std::time::Duration;
 ///
 /// let audio = sine_wave::<f32>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
-/// let (peak, rms, dr_db) = detect_dynamic_range(&audio).unwrap();
+/// let (peak, rms, crest_db) = detect_dynamic_range(&audio).unwrap();
 /// assert!(peak <= 1.0);
-/// assert!(rms > 0.0);
-/// assert!(dr_db >= 0.0);
+/// assert!((rms - 1.0 / 2f64.sqrt()).abs() < 1e-3); // sine RMS = A/√2
+/// assert!((crest_db - 3.0103).abs() < 0.01); // crest factor of a sine = √2 ≈ 3.01 dB
 /// ```
 #[inline]
 pub fn detect_dynamic_range<T>(audio: &AudioSamples<T>) -> AudioSampleResult<(f64, f64, f64)>
@@ -567,8 +577,15 @@ where
 
 /// Estimates the noise floor of an audio signal in dBFS.
 ///
-/// Sorts all sample amplitudes and uses the 10th percentile absolute value as a proxy for
-/// the noise floor. Only the first channel is analysed for multi-channel signals.
+/// Converts the first channel to `f64` in `[-1, 1]`, sorts the instantaneous magnitudes
+/// `|x[n]|` and returns `20·log10` of the value at index `⌊N/10⌋` (the 10th percentile) as a
+/// proxy for the noise floor, in dB relative to full scale (1.0).
+///
+/// This is a crude proxy. The percentile is taken over instantaneous sample magnitudes, not
+/// over short-time frame levels, so for tonal or speech signals it reflects the samples near
+/// the waveform's zero crossings rather than background noise: a noiseless full-scale sine
+/// reports `20·log10(sin(π·0.05)) ≈ −16.1` dBFS. It is meaningful mainly when at least 10 %
+/// of the samples are pure background noise.
 ///
 /// # Arguments
 ///
@@ -577,7 +594,8 @@ where
 /// # Returns
 ///
 /// * `Ok(Some(db))` - Estimated noise floor in dBFS (decibels relative to full scale).
-/// * `Ok(None)` - The signal is empty or the 10th-percentile amplitude is exactly zero.
+/// * `Ok(None)` - The signal has fewer than 10 samples or the 10th-percentile magnitude is
+///   exactly zero.
 ///
 /// # Errors
 ///
@@ -585,16 +603,16 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::detection::estimate_noise_floor;
 /// use audio_samples::utils::generation::sine_wave;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
 ///
+/// // A noiseless sine still reports a "floor": 20·log10(0.5·sin(π·0.05)) ≈ -22.1 dBFS.
 /// let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
-/// if let Some(floor_db) = estimate_noise_floor::<f32, ()>(&audio).unwrap() {
-///     assert!(floor_db < 0.0); // noise floor is always below 0 dBFS
-/// }
+/// let floor_db = estimate_noise_floor::<f32, ()>(&audio).unwrap().unwrap();
+/// assert!((floor_db - (-22.1)).abs() < 0.5);
 /// ```
 #[inline]
 pub fn estimate_noise_floor<T, F>(audio: &AudioSamples<T>) -> AudioSampleResult<Option<f64>>
@@ -750,25 +768,25 @@ where
 
 /// Analyses a power spectrum for spectral cutoff frequencies that indicate prior resampling.
 ///
-/// Checks candidate Nyquist frequencies (derived from common sample rates) for a 2× or
-/// greater energy drop across the spectral bin region corresponding to that frequency. If
-/// a drop is found the associated sample rate is included in the candidate list; the first
-/// (lowest-frequency) match is returned.
+/// For each candidate rate `R` (8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200,
+/// 96000 Hz) whose Nyquist `R/2` is below `nyquist_freq`, the bin
+/// `b = round((R/2) / nyquist_freq · (len − 1))` is located and the summed power of the
+/// 5 bins below it (`b−5..b`) is compared with the summed power of the 10 bins from it
+/// (`b..b+10`). If the lower sum is more than twice the upper sum, `R` is a candidate; the
+/// first (lowest) candidate is returned.
 ///
 /// # Arguments
 ///
-/// - `spectrum` - Non-empty power spectrum of the signal (output of an FFT magnitude-squared
-///   operation). Only the lower half of the bins is examined.
+/// - `spectrum` - Non-empty one-sided power spectrum of the signal (FFT magnitude squared),
+///   with `len` bins spanning 0 Hz to `nyquist_freq` inclusive (bin `k` at
+///   `k·nyquist_freq/(len − 1)`).
 /// - `nyquist_freq` - Nyquist frequency of the audio that produced `spectrum` in Hz.
 ///
 /// # Returns
 ///
 /// The first candidate sample rate (in Hz) whose Nyquist frequency shows a significant
 /// energy drop, or `None` if no candidate is found.
-///
-/// # Panics
-///
-/// Panics if `nyquist_freq` is non-finite.
+/// A non-finite `nyquist_freq` yields `None`; spectra with 10 or fewer bins yield `None`.
 #[inline]
 #[must_use]
 pub fn analyze_spectrum_for_cutoff(
@@ -777,7 +795,6 @@ pub fn analyze_spectrum_for_cutoff(
 ) -> Option<u32> {
     // Look for sharp cutoffs that might indicate resampling
     let len = spectrum.len().get();
-    let half_len = len / 2;
 
     // Check for energy drops that might indicate filtering
     let mut candidates = Vec::new();
@@ -789,8 +806,10 @@ pub fn analyze_spectrum_for_cutoff(
         let target_nyquist = f64::from(rate) / 2.0;
         if target_nyquist < nyquist_freq {
             // Check if there's a significant drop in energy around this frequency
-            let bin_index = (target_nyquist / nyquist_freq * half_len as f64) as usize;
-            if bin_index < spectrum.len().get() - 10 {
+            // The one-sided spectrum has `len` bins spanning 0..=nyquist_freq, so
+            // bin k lies at k·nyquist_freq/(len-1).
+            let bin_index = (target_nyquist / nyquist_freq * (len - 1) as f64).round() as usize;
+            if len > 10 && bin_index < len - 10 {
                 let energy_before: f64 = spectrum[bin_index.saturating_sub(5)..bin_index]
                     .iter()
                     .fold(0.0, |acc, &x| acc + x);
@@ -811,29 +830,32 @@ pub fn analyze_spectrum_for_cutoff(
 
 /// Estimates the fundamental frequency from a sample buffer using autocorrelation.
 ///
-/// Iterates over candidate periods in the range `[sample_rate / 2000, sample_rate / 50]`
-/// and returns the period that maximises the normalised sum-product autocorrelation, subject
-/// to the correlation exceeding a threshold of `0.1`.
+/// With `r(τ) = (1/(N−τ)) Σ_{n=0}^{N−1−τ} x[n]·x[n+τ]` (unbiased, no mean removal) and the
+/// normalised autocorrelation `ρ(τ) = r(τ)/r(0)`, the integer lags
+/// `τ ∈ [⌊fs/2000⌋, min(⌊fs/50⌋, ⌊N/2⌋))` are searched (50 Hz - 2 000 Hz). Let `ρ_max` be
+/// the highest `ρ` in that range. If `ρ_max ≤ 0.1` there is no periodic component.
+/// Otherwise the result is `fs / τ*`, where `τ*` is the **first** lag that is a local
+/// maximum of `ρ` (`ρ(τ) ≥ ρ(τ−1)` and `ρ(τ) ≥ ρ(τ+1)`) with `ρ(τ) ≥ 0.9·ρ_max`. Because
+/// `ρ` is normalised by `r(0)`, the result does not depend on the signal amplitude; taking
+/// the first qualifying peak avoids reporting a sub-harmonic (multiples of the period give
+/// almost equally high peaks). No interpolation is done, so `τ*` is an integer number of
+/// samples. The cost is `O(N · fs/50)`.
 ///
 /// # Arguments
 ///
 /// - `data` - Non-empty slice of audio samples (mono, f64).
-/// - `sample_rate` - Sampling rate in Hz. Must be finite and positive.
+/// - `sample_rate` - Sampling rate in Hz. Should be finite and positive; other values
+///   yield `Ok(None)`.
 ///
 /// # Returns
 ///
-/// * `Ok(Some(freq))` - Estimated fundamental frequency in Hz for the best matching period.
-/// * `Ok(None)` - No periodic component found within the search range, or the signal is too
-///   short to cover the maximum candidate period.
+/// * `Ok(Some(freq))` - Estimated fundamental frequency `fs / τ*` in Hz.
+/// * `Ok(None)` - No periodic component (`ρ_max ≤ 0.1` or no qualifying local maximum), a
+///   silent signal, or `N ≤ fs/50` (the signal is too short to cover the longest period).
 ///
 /// # Errors
 ///
 /// This function is currently infallible; the `Result` wrapper is reserved for future use.
-///
-/// # Panics
-///
-/// Panics if `sample_rate` is non-finite, causing floating-point-to-usize conversion to
-/// fail.
 #[inline]
 pub fn detect_fundamental_autocorrelation(
     data: &NonEmptySlice<f64>,
@@ -845,41 +867,66 @@ pub fn detect_fundamental_autocorrelation(
 
     let min_freq = 50.0; // Minimum fundamental frequency to detect
     let max_freq = 2000.0; // Maximum fundamental frequency to detect
+    // Minimum normalised autocorrelation rho for a periodic component.
+    const CORRELATION_THRESHOLD: f64 = 0.1;
+    // A lag qualifies as the period if its rho is at least this fraction of
+    // the highest rho in the search range.
+    const PEAK_FRACTION: f64 = 0.9;
 
-    let min_period = (sample_rate / max_freq) as usize;
+    let min_period = ((sample_rate / max_freq) as usize).max(1);
     let max_period = (sample_rate / min_freq) as usize;
     if max_period >= data.len().get() {
         return Ok(None);
     }
 
-    let mut max_correlation = 0.0;
-    let mut best_period = 0;
+    // Mean square r(0); a silent signal has no period.
+    let n = data.len().get();
+    let r0 = data.iter().map(|&x| x * x).sum::<f64>() / n as f64;
+    if r0.is_nan() || r0 <= 0.0 {
+        return Ok(None);
+    }
 
-    for period in min_period..max_period.min(data.len().get() / 2) {
-        let mut correlation = 0.0;
-        let mut count = 0;
+    // Normalised unbiased autocorrelation rho(tau) = r(tau) / r(0), with
+    // r(tau) = (1 / (N - tau)) * sum_i x[i] x[i + tau]. Normalising by r(0)
+    // makes the threshold independent of the signal amplitude.
+    let last = max_period.min(n / 2);
+    if last <= min_period + 1 {
+        return Ok(None);
+    }
+    let lo = min_period.saturating_sub(1);
+    let rho_at = |tau: usize| -> f64 {
+        let count = n - tau;
+        let acc: f64 = data[..count]
+            .iter()
+            .zip(data[tau..].iter())
+            .map(|(&a, &b)| a * b)
+            .sum();
+        acc / count as f64 / r0
+    };
+    // rho[j] holds rho(lo + j) for tau in [lo, last].
+    let rho: Vec<f64> = (lo..=last).map(rho_at).collect();
 
-        for i in 0..(data.len().get() - period) {
-            correlation += data[i] * data[i + period];
-            count += 1;
-        }
+    // Highest peak in the search range [min_period, last).
+    let max_rho = (min_period..last)
+        .map(|tau| rho[tau - lo])
+        .fold(f64::NEG_INFINITY, f64::max);
+    if max_rho.is_nan() || max_rho <= CORRELATION_THRESHOLD {
+        return Ok(None);
+    }
 
-        if count > 0 {
-            correlation /= f64::from(count);
-
-            if correlation > max_correlation {
-                max_correlation = correlation;
-                best_period = period;
-            }
+    // Every multiple of the true period is (almost) as high as the first, so
+    // taking the global maximum picks sub-harmonics. Instead take the FIRST
+    // local maximum whose height is within PEAK_FRACTION of the highest one.
+    for tau in min_period..last {
+        let j = tau - lo;
+        let v = rho[j];
+        let is_local_max = v >= rho[j.saturating_sub(1)] && v >= rho[j + 1];
+        if is_local_max && v >= PEAK_FRACTION * max_rho {
+            return Ok(Some(sample_rate / tau as f64));
         }
     }
 
-    if best_period > 0 && max_correlation > 0.1 {
-        let fundamental_freq = sample_rate / best_period as f64;
-        Ok(Some(fundamental_freq))
-    } else {
-        Ok(None)
-    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -997,15 +1044,9 @@ mod tests {
         let detected_freq: Option<f64> = detect_fundamental_frequency(&audio).unwrap();
 
         if let Some(freq) = detected_freq {
-            // Allow broader tolerance for autocorrelation-based detection on pure tones
-            // Pure sine waves can confuse autocorrelation algorithms
-            let tolerance: f64 =
-                if (freq - frequency / 2.0).abs() < 20.0 || (freq - frequency / 4.0).abs() < 20.0 {
-                    // If it's detecting a subharmonic (half or quarter frequency), that's acceptable
-                    400.0
-                } else {
-                    50.0 // Otherwise use more relaxed tolerance
-                };
+            // Integer-lag resolution at 440 Hz / 44.1 kHz is about 4.4 Hz; a
+            // sub-harmonic (220 or 110 Hz) must not be reported.
+            let tolerance: f64 = 0.01 * frequency;
 
             assert!(
                 (freq - frequency).abs() < tolerance,
