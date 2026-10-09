@@ -15,3 +15,4 @@
 mod common;
 
 // One module per fixture area (added as the areas land).
+mod sequence;
