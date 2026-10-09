@@ -10,10 +10,24 @@
 //! peak selection so that onset detectors can focus on their specific spectral or
 //! temporal features.
 //!
-//! The primary entry point is [`pick_peaks`], which applies a configurable pipeline:
-//! optional pre-emphasis → optional median filtering → optional normalisation →
-//! adaptive thresholding → local maximum detection → temporal constraint filtering.
-//! Each step is also available as a standalone function for use in custom pipelines.
+//! The primary entry point is [`pick_peaks`], which applies a configurable pipeline
+//! to an onset strength sequence o\[i\] (one value per analysis frame):
+//!
+//! 1. optional pre-emphasis `y[i] = o[i] − α·o[i−1]`;
+//! 2. optional running median of length L (replaces the sequence, so peaks
+//!    narrower than (L+1)/2 frames are removed);
+//! 3. optional normalisation (e.g. divide by max |y|);
+//! 4. adaptive threshold `thr[i]` from a centred window of w values
+//!    (`max − δ`, a percentile, or the larger of the two), clamped to
+//!    `[min_threshold, max_threshold]`;
+//! 5. candidates: interior i with `y[i] > y[i−1]`, `y[i] > y[i+1]` and
+//!    `y[i] > thr[i]`;
+//! 6. minimum separation: candidates are accepted strongest first and
+//!    rejected if closer than `min_peak_separation` to an accepted peak.
+//!
+//! All lengths are in elements of the sequence (frames for onset detection;
+//! convert to seconds with `frame · hop_size / sample_rate`). Each step is also
+//! available as a standalone function for use in custom pipelines.
 //!
 //! # Example
 //!
@@ -52,7 +66,9 @@ use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 /// - `Percentile` - threshold = percentile(local window, p). More robust to noise.
 /// - `Combined` - maximum of the delta and percentile thresholds. Balances both.
 ///
-/// The computed threshold at each position is clamped to
+/// The local window for position i is `i − ⌊w/2⌋ ..= i + ⌊w/2⌋`
+/// (w = `config.window_size` elements), truncated at the edges. The computed
+/// threshold at each position is clamped to
 /// `[config.min_threshold, config.max_threshold]`.
 ///
 /// # Arguments
@@ -137,15 +153,21 @@ pub fn adaptive_threshold(
 /// detected peaks in ascending order:
 ///
 /// 1. Pre-emphasis filtering (optional) - high-pass `y[n] = x[n] - α·x[n-1]`
-/// 2. Median filtering (optional) - noise reduction
+/// 2. Median filtering (optional) - the sequence is replaced by its running
+///    median, which also deletes peaks narrower than `(L + 1)/2` elements
 /// 3. Normalisation (optional)
-/// 4. Adaptive threshold computation
-/// 5. Local maximum detection above threshold (interior samples only)
-/// 6. Temporal constraint filtering - retains only the strongest peak within each
-///    minimum-separation window
+/// 4. Adaptive threshold computation on the processed sequence
+/// 5. Local maximum detection above threshold (interior samples only; strict
+///    `>` against both neighbours, so flat-topped peaks are not detected)
+/// 6. Temporal constraint filtering - candidates are accepted in decreasing
+///    strength and dropped if closer than `min_peak_separation` to an
+///    accepted peak
 ///
-/// Configuration window sizes and minimum separation are automatically adjusted
-/// downward when the signal is shorter than the configured values.
+/// When the sequence is shorter than `adaptive_threshold.window_size`, the
+/// window is reduced to the sequence length (at least 3); when
+/// `min_peak_separation ≥ len/2`, it is reduced to `max(len/4, 1)`. All lengths
+/// are in elements of `onset_strength` (frames for onset detection), not audio
+/// samples.
 ///
 /// # Arguments
 ///
@@ -228,7 +250,7 @@ pub fn pick_peaks(
     }
 
     // Step 2: Compute adaptive threshold
-    let thresholds = adaptive_threshold(&processed_strength, &config.adaptive_threshold)?;
+    let thresholds = adaptive_threshold(&processed_strength, &adjusted_config.adaptive_threshold)?;
 
     // Step 3: Find candidate peaks (local maxima above threshold)
     let mut candidates = Vec::new();
@@ -317,8 +339,11 @@ pub fn apply_pre_emphasis(
 
 /// Applies a median filter to reduce impulse noise while preserving peaks.
 ///
-/// Each output sample is replaced by the median of a symmetric window centred
-/// on that sample, using edge-clamped boundaries. A `filter_length` of `1`
+/// Each output sample is replaced by the median of the window
+/// `i − ⌊L/2⌋ ..= i + ⌊L/2⌋` (L = `filter_length`), truncated at the signal
+/// edges (no padding or edge replication). Near the edges the truncated window
+/// may have an even number of elements; then the upper of the two middle
+/// values is used (numpy would average them). A `filter_length` of `1`
 /// returns the signal unchanged.
 ///
 /// # Arguments
@@ -391,7 +416,8 @@ pub fn apply_median_filter(
 /// - `MinMax` - scales to `[0, 1]`.
 /// - `ZScore` - zero mean, unit variance.
 /// - `Mean` - subtracts the mean.
-/// - `Median` - subtracts the median.
+/// - `Median` - subtracts the median (for an even length, the upper of the
+///   two middle values).
 ///
 /// When the signal is constant (or all zeros for `Peak`), the input is returned
 /// unchanged.

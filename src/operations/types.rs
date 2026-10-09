@@ -110,6 +110,9 @@ pub enum ChannelReduction {
 pub enum NormalizationMethod {
     /// Min-Max normalisation - scales all values into a caller-specified `[min, max]` range.
     ///
+    /// Affine map `x' = min + (x − x_min)(max − min)/(x_max − x_min)`, so the
+    /// smallest sample becomes `min` and the largest `max`.
+    ///
     /// Good for general level adjustment and ensuring samples stay within a
     /// target amplitude bound. Requires a valid `min` and `max` in the accompanying
     /// [`NormalizationConfig`].
@@ -117,6 +120,8 @@ pub enum NormalizationMethod {
     MinMax,
 
     /// Peak normalisation - scales by the maximum absolute value to reach a target peak.
+    ///
+    /// `x' = target · x / max|x|`.
     ///
     /// Preserves the dynamic shape of the signal while bringing the loudest sample
     /// to a specified level. Requires a valid `target` in the accompanying
@@ -131,8 +136,10 @@ pub enum NormalizationMethod {
 
     /// Median normalisation - subtracts the median so the output is centred at zero.
     ///
-    /// More robust than mean normalisation when the signal contains large outlier
-    /// values, as the median is not skewed by extreme samples.
+    /// The median is the middle value of the sorted samples (the mean of the
+    /// two middle values for an even count). More robust than mean
+    /// normalisation when the signal contains large outlier values, as the
+    /// median is not skewed by extreme samples. Mono audio only.
     Median,
 
     /// Z-score normalisation - transforms to zero mean and unit variance.
@@ -375,35 +382,39 @@ impl NormalizationConfig<f64> {
 
 /// Shape of the gain envelope applied during a fade-in or fade-out.
 ///
-/// Each variant describes how the gain multiplier changes from 0.0 to 1.0 over
-/// the fade region. The default is [`Linear`][FadeCurve::Linear].
+/// Each variant is a gain function `g(p)` of the fade position `p ∈ [0, 1]`,
+/// where `p = 0` is the silent end of the fade and `p = 1` the full-level end:
+/// a fade-in runs `p` from 0 up towards 1, a fade-out runs it from 1 down
+/// towards 0. All curves have `g(0) = 0` and `g(1) = 1`; none of them is
+/// linear in dB. The default is [`Linear`][FadeCurve::Linear].
 #[cfg(feature = "editing")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FadeCurve {
-    /// Gain changes at a constant rate from start to end.
+    /// `g(p) = p`: gain changes at a constant rate from start to end.
     ///
     /// Simple and predictable, but can sound abrupt at the endpoints because
     /// there is no gradual onset or release.
     #[default]
     Linear,
 
-    /// Gain changes rapidly near the start and slowly near the end.
+    /// Quadratic gain `g(p) = p²` (despite the name, not an exponential).
     ///
-    /// Produces a fast attack or quick onset when fading in, and a slow tail
-    /// when fading out. Perceptually emphasises the early portion of the fade.
+    /// A fade-in starts slowly and finishes quickly; a fade-out drops
+    /// quickly at first and then tails off slowly towards silence.
     Exponential,
 
-    /// Gain changes slowly near the start and rapidly near the end.
+    /// Logarithmic gain `g(p) = log₂(1 + p)`.
     ///
-    /// Produces a gradual onset and a sharp cutoff. The perceptual complement
-    /// of [`Exponential`][FadeCurve::Exponential].
+    /// A fade-in rises quickly at first and then levels off; a fade-out stays
+    /// near full level for longer and then drops quickly at the end. Roughly
+    /// the mirror image of [`Exponential`][FadeCurve::Exponential].
     Logarithmic,
 
     /// S-shaped gain curve with zero first derivative at both endpoints.
     ///
-    /// Starts and ends smoothly, resulting in the most perceptually natural
-    /// transition. Implemented as a cubic Hermite interpolation (smoothstep).
+    /// `g(p) = 3p² − 2p³` (cubic Hermite "smoothstep"). Starts and ends
+    /// smoothly, with no abrupt change of slope at either end of the fade.
     SmoothStep,
 }
 
@@ -504,15 +515,18 @@ pub enum StereoConversionMethod {
 ///
 /// Each method makes different trade-offs between simplicity, computational cost,
 /// and robustness to noise. [`Energy`][VadMethod::Energy] is the default and
-/// suits clean or lightly noisy speech. For challenging conditions, prefer
-/// [`Combined`][VadMethod::Combined] or [`Spectral`][VadMethod::Spectral].
+/// suits clean or lightly noisy speech. [`Combined`][VadMethod::Combined]
+/// additionally rejects loud frames whose zero-crossing rate is outside the
+/// speech range (hum, pure low tones, broadband noise). The per-frame
+/// features are defined in the [`vad`](crate::operations::vad) module docs.
 #[cfg(feature = "vad")]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VadMethod {
     /// RMS energy threshold detection.
     ///
-    /// A frame is classified as speech when its RMS level exceeds
+    /// A frame is classified as speech when its RMS level
+    /// `20·log10(RMS)` (dBFS, RMS of samples in `[-1, 1]`) is at least
     /// [`VadConfig::energy_threshold_db`]. Fast and reliable for clean audio;
     /// sensitive to background noise.
     #[default]
@@ -520,24 +534,29 @@ pub enum VadMethod {
 
     /// Zero-crossing rate (ZCR) detection.
     ///
-    /// Uses the per-frame rate of sign changes as a proxy for voiced activity.
-    /// Speech typically produces ZCR in the range defined by
-    /// [`VadConfig::zcr_min`] and [`VadConfig::zcr_max`].
+    /// A frame is classified as speech when its ZCR (sign changes divided by
+    /// `frame_size − 1`, i.e. crossings per sample; ≈ 2f/f_s for a sinusoid of
+    /// frequency f) lies in [`VadConfig::zcr_min`]..=[`VadConfig::zcr_max`].
+    /// Energy is ignored, so silence with low-level noise can be classified as
+    /// speech.
     ZeroCrossing,
 
     /// Combined energy and zero-crossing rate detection.
     ///
     /// Both the energy threshold and the ZCR window must be satisfied for a
     /// frame to be classified as speech. Reduces false positives from either
-    /// method alone.
+    /// method alone, but rejects loud signals whose dominant frequency is
+    /// below `zcr_min·f_s/2` Hz (e.g. a 220 Hz sine at 44.1 kHz with the
+    /// default `zcr_min = 0.02`).
     Combined,
 
-    /// Spectral energy ratio detection.
+    /// Spectral speech-band energy ratio detection. **Not implemented.**
     ///
-    /// Computes the fraction of spectral energy within the speech band
-    /// (`speech_band_low_hz`..`speech_band_high_hz`) and compares it to
-    /// [`VadConfig::spectral_ratio_threshold`]. More computationally intensive
-    /// but more discriminative in noisy environments.
+    /// Intended to compare the fraction of spectral energy within
+    /// `speech_band_low_hz..speech_band_high_hz` with
+    /// [`VadConfig::spectral_ratio_threshold`]. Selecting it currently makes
+    /// [`voice_activity_mask`](crate::operations::traits::AudioVoiceActivityDetection::voice_activity_mask)
+    /// return [`AudioSampleError::Unsupported`].
     Spectral,
 }
 
@@ -651,9 +670,12 @@ pub struct VadConfig {
     /// Policy for multi-channel audio.
     pub channel_policy: VadChannelPolicy,
 
-    /// Energy threshold in dBFS (RMS). Typical values: `-60.0` (very sensitive) to `-30.0`.
+    /// Energy threshold in dBFS, applied to the frame RMS level
+    /// `20·log10(RMS)` with samples scaled to `[-1, 1]` (a full-scale sine is
+    /// −3.01 dBFS). Typical values: `-60.0` (very sensitive) to `-30.0`.
     pub energy_threshold_db: f64,
-    /// Minimum acceptable zero crossing rate (ZCR), expressed as crossings per sample in `[0, 1]`.
+    /// Minimum acceptable zero crossing rate (ZCR), expressed as crossings per sample in `[0, 1]`
+    /// (sign changes / (`frame_size` − 1); a sinusoid of frequency f gives ≈ 2f/f_s).
     pub zcr_min: f64,
     /// Maximum acceptable zero crossing rate (ZCR), expressed as crossings per sample in `[0, 1]`.
     pub zcr_max: f64,
@@ -663,16 +685,20 @@ pub struct VadConfig {
     /// Minimum number of consecutive non-speech frames to keep a silence region.
     /// Shorter silence gaps are filled as speech.
     pub min_silence_frames: usize,
-    /// Hangover in frames: keep speech active for this many frames after energy drops.
+    /// Hangover in frames: after the last active frame, this many following
+    /// frames are also marked active. Minimum 1, so hangover cannot be disabled.
     pub hangover_frames: NonZeroUsize,
     /// Majority-vote smoothing window in frames (1 = no smoothing).
     pub smooth_frames: NonZeroUsize,
 
-    /// Lower bound of the speech band in Hz (used by `VadMethod::Spectral`).
+    /// Lower bound of the speech band in Hz (reserved for `VadMethod::Spectral`,
+    /// which is not implemented; currently unused).
     pub speech_band_low_hz: f64,
-    /// Upper bound of the speech band in Hz (used by `VadMethod::Spectral`).
+    /// Upper bound of the speech band in Hz (reserved for `VadMethod::Spectral`,
+    /// which is not implemented; currently unused).
     pub speech_band_high_hz: f64,
-    /// Threshold on speech-band energy ratio (used by `VadMethod::Spectral`).
+    /// Threshold on speech-band energy ratio (reserved for `VadMethod::Spectral`,
+    /// which is not implemented; currently unused).
     pub spectral_ratio_threshold: f64,
 }
 
@@ -698,9 +724,10 @@ impl VadConfig {
     /// - `min_silence_frames` - minimum consecutive silence frames to close a region.\
     /// - `hangover_frames` - frames to remain "active" after energy drops below threshold.\
     /// - `smooth_frames` - majority-vote window size; `1` disables smoothing.\
-    /// - `speech_band_low_hz` - lower boundary of the speech band (Spectral method).\
-    /// - `speech_band_high_hz` - upper boundary of the speech band (Spectral method).\
-    /// - `spectral_ratio_threshold` - minimum in-band energy fraction; in `[0.0, 1.0]`.
+    /// - `speech_band_low_hz` - lower boundary of the speech band (reserved for the
+    ///   unimplemented Spectral method).\
+    /// - `speech_band_high_hz` - upper boundary of the speech band (reserved).\
+    /// - `spectral_ratio_threshold` - minimum in-band energy fraction; in `[0.0, 1.0]` (reserved).
     ///
     /// # Returns
     ///
@@ -1083,19 +1110,26 @@ impl Default for VadConfig {
 
 /// Discrete quality levels for resampling operations.
 ///
-/// Higher quality levels trade increased computational cost and latency
-/// for improved spectral fidelity, reduced aliasing, and more stable phase
-/// behaviour. Lower quality levels prioritise throughput and low latency.
+/// Higher quality levels trade increased computational cost for improved
+/// anti-aliasing and flatter passband response. See the
+/// [`crate::resampling`] module docs for the algorithms.
+///
+/// Note: the default is `Fast`, which has **no anti-aliasing filter**; choose
+/// `Medium` or `High` for analysis or listening.
 #[cfg(feature = "resampling")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum ResamplingQuality {
-    /// Fast but lower quality resampling.
+    /// Fastest, no anti-aliasing filter: integer down-ratios keep every
+    /// N-th sample and other ratios use linear interpolation, so content
+    /// above the new Nyquist frequency aliases at full level.
     #[default]
     Fast,
-    /// Balanced speed and quality.
+    /// Windowed-sinc resampling (rubato, 128 taps, Hann² window, cutoff
+    /// 0.95 × the lower Nyquist frequency).
     Medium,
-    /// Highest quality but slower resampling.
+    /// Windowed-sinc resampling (rubato, 256 taps, Blackman-Harris² window,
+    /// cubic kernel interpolation, cutoff 0.95 × the lower Nyquist frequency).
     High,
 }
 
@@ -1229,29 +1263,37 @@ impl TryFrom<&str> for SpectrogramScale {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum PitchDetectionMethod {
-    /// YIN pitch detection algorithm.
+    /// YIN pitch detection algorithm (de Cheveigné & Kawahara, 2002).
     ///
-    /// Provides robust and accurate fundamental frequency estimation for
+    /// Cumulative mean normalised difference, absolute threshold and
+    /// parabolic interpolation (sub-sample period). Robust and accurate for
     /// both speech and musical signals, at moderate computational cost.
     #[default]
     Yin,
 
     /// Autocorrelation-based pitch detection.
     ///
+    /// Argmax of the raw autocorrelation over integer lags (no interpolation).
     /// Simple and fast, but sensitive to noise and octave errors for
     /// complex or weakly periodic signals.
     Autocorrelation,
 
-    /// Cepstral pitch detection.
+    /// Cepstral pitch detection. **Not implemented.**
     ///
-    /// Operates in the frequency domain and performs well for voiced speech,
-    /// but can degrade for dense harmonic or noisy spectra.
+    /// Reserved for a cepstrum-based detector (peak of the real cepstrum
+    /// `IFFT(log|X|)` in the quefrency range of the expected period).
+    /// [`track_pitch`](crate::operations::traits::AudioPitchAnalysis::track_pitch)
+    /// currently returns [`AudioSampleError::Parameter`]
+    /// for this variant.
     Cepstrum,
 
-    /// Harmonic Product Spectrum (HPS).
+    /// Harmonic Product Spectrum (HPS). **Not implemented.**
     ///
-    /// Emphasises harmonic structure and is well-suited to musical signals
-    /// with strong harmonic content.
+    /// Reserved for a detector that multiplies down-sampled copies of the
+    /// magnitude spectrum to reinforce the fundamental.
+    /// [`track_pitch`](crate::operations::traits::AudioPitchAnalysis::track_pitch)
+    /// currently returns [`AudioSampleError::Parameter`]
+    /// for this variant.
     HarmonicProduct,
 }
 
@@ -2083,7 +2125,9 @@ pub enum EqBandType {
     /// Peaking (bell) filter.
     ///
     /// Boosts or attenuates a narrow frequency region centred at the target
-    /// frequency. Positive gain produces a peak; negative gain produces a notch.
+    /// frequency. Positive gain produces a peak (boost); negative gain
+    /// produces a dip (cut) of `gain_db` at the centre. A true notch (a
+    /// transmission zero) is [`EqBandType::BandStop`].
     #[default]
     Peak,
 
@@ -2266,12 +2310,15 @@ impl EqBand {
     /// Creates a low-shelf EQ band.
     ///
     /// Applies a broadband boost or cut to all frequencies below `frequency`.
+    /// This is the RBJ cookbook shelf: the full `gain_db` is reached well below
+    /// `frequency`, and at `frequency` itself the gain is `gain_db / 2`.
     ///
     /// # Arguments
     ///
-    /// - `frequency` - corner (transition) frequency in Hz.\
+    /// - `frequency` - corner (half-gain) frequency in Hz.\
     /// - `gain_db` - gain applied below the corner; positive = boost, negative = cut.\
-    /// - `q_factor` - shelf slope control; 0.707 gives a Butterworth-style shelf.
+    /// - `q_factor` - shelf slope control; 0.707 (`1/√2`, shelf slope `S = 1`)
+    ///   is the steepest shelf without overshoot.
     ///
     /// # Returns
     ///
@@ -2291,12 +2338,15 @@ impl EqBand {
     /// Creates a high-shelf EQ band.
     ///
     /// Applies a broadband boost or cut to all frequencies above `frequency`.
+    /// This is the RBJ cookbook shelf: the full `gain_db` is reached well above
+    /// `frequency`, and at `frequency` itself the gain is `gain_db / 2`.
     ///
     /// # Arguments
     ///
-    /// - `frequency` - corner (transition) frequency in Hz.\
+    /// - `frequency` - corner (half-gain) frequency in Hz.\
     /// - `gain_db` - gain applied above the corner; positive = boost, negative = cut.\
-    /// - `q_factor` - shelf slope control; 0.707 gives a Butterworth-style shelf.
+    /// - `q_factor` - shelf slope control; 0.707 (`1/√2`, shelf slope `S = 1`)
+    ///   is the steepest shelf without overshoot.
     ///
     /// # Returns
     ///
@@ -2371,7 +2421,10 @@ impl EqBand {
     /// # Arguments
     ///
     /// - `frequency` - centre frequency in Hz.\
-    /// - `q_factor` - centre frequency divided by the -3 dB bandwidth.
+    /// - `q_factor` - centre frequency divided by the -3 dB bandwidth of the
+    ///   analog prototype. After the bilinear transform this holds closely only
+    ///   for centre frequencies well below `fs/2` (at 48 kHz, `Q = 2` gives a
+    ///   measured `f₀/BW` of 2.01 at 1 kHz but 2.76 at 10 kHz).
     ///
     /// # Returns
     ///
@@ -2396,7 +2449,10 @@ impl EqBand {
     /// # Arguments
     ///
     /// - `frequency` - notch frequency in Hz.\
-    /// - `q_factor` - centre frequency divided by the -3 dB bandwidth.
+    /// - `q_factor` - centre frequency divided by the -3 dB bandwidth of the
+    ///   analog prototype. After the bilinear transform this holds closely only
+    ///   for centre frequencies well below `fs/2` (at 48 kHz, `Q = 2` gives a
+    ///   measured `f₀/BW` of 2.01 at 1 kHz but 2.76 at 10 kHz).
     ///
     /// # Returns
     ///
@@ -2897,7 +2953,11 @@ pub enum KneeType {
     /// Soft knee.
     ///
     /// Applies a gradual transition around the threshold, producing smoother
-    /// and more perceptually natural behaviour.
+    /// and more perceptually natural behaviour. In the dynamics processors this
+    /// is the quadratic knee of Giannoulis, Massberg & Reiss (2012): it spans
+    /// `[T − W/2, T + W/2]` for threshold `T` and knee width `W` (dB), is
+    /// monotone and has a continuous slope (see the `dynamic_range` module
+    /// documentation).
     #[default]
     Soft,
 }
@@ -2959,20 +3019,23 @@ pub enum DynamicRangeMethod {
     /// RMS-based level detection.
     ///
     /// Estimates average signal power over time, producing smoother and more
-    /// perceptually stable gain control.
+    /// perceptually stable gain control. The detector value is
+    /// `sqrt(mean(x²))` over the last 10 ms of samples. A sine of peak
+    /// amplitude `A` reads `A/√2` (3.01 dB below `Peak`), so thresholds in dBFS
+    /// act about 3 dB higher on sinusoids than with `Peak`.
     #[default]
     Rms,
 
     /// Peak-based level detection.
     ///
     /// Responds to instantaneous signal peaks, providing tight peak control
-    /// with increased sensitivity to transients.
+    /// with increased sensitivity to transients. The detector value is `|x[n]|`.
     Peak,
 
     /// Hybrid level detection.
     ///
     /// Combines RMS and peak estimation to balance smoothness and transient
-    /// control.
+    /// control. The detector value is `max(|x[n]|, RMS over 10 ms)`.
     Hybrid,
 }
 
@@ -3025,8 +3088,14 @@ impl TryFrom<&str> for DynamicRangeMethod {
 /// ## Purpose
 ///
 /// Controls whether gain reduction is driven by the main signal (internal) or
-/// by an external control signal, and applies optional frequency shaping to the
+/// by an external control signal, and describes optional frequency shaping of the
 /// control path.
+///
+/// Note: only `enabled` is currently used, and only by the `*_sidechain` methods
+/// of [`AudioDynamicRange`](crate::AudioDynamicRange), which return an error when
+/// it is `false`. The filter fields (`high_pass_freq`, `low_pass_freq`),
+/// `pre_emphasis_db` and `external_mix` are validated but not applied: the
+/// side-chain signal drives the detector unfiltered and unmixed.
 ///
 /// ## Intended Usage
 ///
@@ -3048,7 +3117,8 @@ impl TryFrom<&str> for DynamicRangeMethod {
 pub struct SideChainConfig {
     /// Whether side-chain processing is active.
     ///
-    /// When `false` the processor uses its own output as the gain-reduction signal.
+    /// The `*_sidechain` methods require `true`. The non-side-chain methods
+    /// ignore this flag and always detect on their own (feed-forward) input.
     pub enabled: bool,
 
     /// Optional high-pass filter on the side-chain signal, in Hz.
@@ -3079,7 +3149,7 @@ pub struct SideChainConfig {
 impl SideChainConfig {
     /// Creates a disabled side-chain configuration (the default).
     ///
-    /// The processor uses its own output as the gain-detection signal.
+    /// The processor detects the level of its own input signal.
     ///
     /// # Returns
     ///
@@ -3251,18 +3321,21 @@ pub struct CompressorConfig {
     /// Typical values: `2.0` (light) to `10.0` (heavy).
     pub ratio: f64,
 
-    /// Time for the compressor to reach full gain reduction after a threshold
-    /// crossing, in milliseconds.
+    /// Attack time constant `τ_A` of the level detector, in milliseconds.
     ///
-    /// Shorter attack catches transients; longer attack lets them through.
+    /// The detector follows an upward step as `1 − e^{−t/τ_A}`: 63.2 % after
+    /// `τ_A`, 10–90 % rise time `τ_A·ln 9 ≈ 2.2·τ_A`, 99 % after about `4.6·τ_A`.
+    /// Smoothing coefficient `a_A = e^{−1/(τ_A·f_s)}`. Shorter attack catches
+    /// transients; longer attack lets them through.
     /// Valid range: `[0.01, 1000.0]` ms.
     pub attack_ms: f64,
 
-    /// Time for the compressor to return to unity gain after the signal drops
-    /// below the threshold, in milliseconds.
+    /// Release time constant `τ_R` of the level detector, in milliseconds.
     ///
-    /// Shorter release may produce pumping artefacts; longer release sounds
-    /// more transparent. Valid range: `[1.0, 10000.0]` ms.
+    /// After the level drops, the detector decays as `e^{−t/τ_R}` (36.8 % of
+    /// the drop remains after `τ_R`). Smoothing coefficient
+    /// `a_R = e^{−1/(τ_R·f_s)}`. Shorter release may produce pumping artefacts;
+    /// longer release sounds more transparent. Valid range: `[1.0, 10000.0]` ms.
     pub release_ms: f64,
 
     /// Gain added after compression to compensate for level reduction, in dB.
@@ -3274,8 +3347,9 @@ pub struct CompressorConfig {
     /// Transition shape at the threshold.
     pub knee_type: KneeType,
 
-    /// Width of the soft-knee transition region around the threshold, in dB.
+    /// Total width `W` of the soft-knee region in dB, centred on the threshold.
     ///
+    /// The knee spans `[threshold_db − W/2, threshold_db + W/2]` (quadratic knee).
     /// Only meaningful when `knee_type = KneeType::Soft`. `0.0` is equivalent
     /// to a hard knee. Valid range: `[0.0, 20.0]` dB.
     pub knee_width_db: f64,
@@ -3286,11 +3360,14 @@ pub struct CompressorConfig {
     /// Side-chain routing and filtering configuration.
     pub side_chain: SideChainConfig,
 
-    /// Lookahead delay in milliseconds.
+    /// Lookahead time in milliseconds.
     ///
-    /// When greater than `0.0`, the compressor buffers the input and begins
-    /// gain reduction before a peak is reached, improving transparency.
-    /// Introduces latency equal to `lookahead_ms`. Valid range: `[0.0, 20.0]` ms.
+    /// The detector sees each sample `N_L = round(lookahead_ms·10⁻³·f_s)` samples
+    /// before it is output, and the largest gain reduction over that window is
+    /// applied, so gain reduction starts before a peak is reached. A real-time
+    /// compressor would add `N_L` samples of latency; the offline processing in
+    /// this crate compensates it, so the output stays aligned with the input.
+    /// Valid range: `[0.0, 20.0]` ms.
     pub lookahead_ms: f64,
 }
 
@@ -3475,13 +3552,18 @@ impl Default for CompressorConfig {
     }
 }
 
-/// Configuration for a true-peak limiter.
+/// Configuration for a sample-peak limiter.
 ///
 /// ## Purpose
 ///
 /// Specifies all parameters controlling the limiter's ceiling enforcement:
 /// the maximum output level, envelope times, knee shape, detection method,
-/// side-chain routing, lookahead, and optional inter-sample peak (ISP) limiting.
+/// side-chain routing, lookahead, and a reserved inter-sample peak (ISP) flag.
+///
+/// The limiter works on the smoothed detector envelope, so it is not a
+/// brick-wall limiter: the ceiling holds once the envelope has settled, and
+/// transients shorter than a few attack time constants can exceed it. Only
+/// sample peaks are measured; true (inter-sample) peaks are not.
 ///
 /// ## Intended Usage
 ///
@@ -3503,26 +3585,32 @@ impl Default for CompressorConfig {
 pub struct LimiterConfig {
     /// Maximum allowable output level in dBFS.
     ///
-    /// No output sample will exceed this level when limiting is active.
-    /// Must be ≤ 0. Typical range: `[-3.0, -0.1]`.
+    /// The static curve never maps an envelope level above this value, and a
+    /// steady signal settles at or below it. Short transients can overshoot it
+    /// (see the type documentation). Must be ≤ 0. Typical range: `[-3.0, -0.1]`.
     pub ceiling_db: f64,
 
-    /// Time for the limiter to react to a signal approaching the ceiling, in ms.
+    /// Attack time constant `τ_A` of the level detector, in ms.
     ///
-    /// Very short attack (< 1 ms) enables brick-wall peak control.
-    /// Valid range: `[0.001, 100.0]` ms.
+    /// The detector follows an upward step as `1 − e^{−t/τ_A}` (63.2 % after
+    /// `τ_A`). A short attack, together with a lookahead of at least `5·τ_A`,
+    /// keeps overshoot small. Valid range: `[0.001, 100.0]` ms.
     pub attack_ms: f64,
 
-    /// Time to return to unity gain after the signal recedes, in ms.
+    /// Release time constant `τ_R` of the level detector, in ms.
     ///
+    /// After the level drops, the detector decays as `e^{−t/τ_R}`.
     /// Valid range: `[1.0, 10000.0]` ms.
     pub release_ms: f64,
 
     /// Transition shape at the ceiling.
     pub knee_type: KneeType,
 
-    /// Width of the soft-knee transition region in dB.
+    /// Total width `W` of the soft-knee region in dB, spanning
+    /// `[ceiling_db − W/2, ceiling_db + W/2]`.
     ///
+    /// Gain reduction starts at `ceiling_db − W/2`; the static output reaches
+    /// the ceiling at `ceiling_db + W/2` and never exceeds it.
     /// Only meaningful when `knee_type = KneeType::Soft`. Valid range: `[0.0, 10.0]` dB.
     pub knee_width_db: f64,
 
@@ -3532,18 +3620,20 @@ pub struct LimiterConfig {
     /// Side-chain routing and filtering configuration.
     pub side_chain: SideChainConfig,
 
-    /// Lookahead delay in milliseconds.
+    /// Lookahead time in milliseconds.
     ///
-    /// Buffers audio and begins gain reduction ahead of approaching peaks,
-    /// enabling cleaner limiting at the cost of added latency.
-    /// Valid range: `[0.0, 20.0]` ms.
+    /// The detector sees each sample `N_L = round(lookahead_ms·10⁻³·f_s)` samples
+    /// before it is output and the largest gain reduction over that window is
+    /// applied, so reduction begins ahead of approaching peaks. A real-time
+    /// limiter would add `N_L` samples of latency; the offline processing here
+    /// compensates it. Valid range: `[0.0, 20.0]` ms.
     pub lookahead_ms: f64,
 
-    /// Whether inter-sample peak (ISP) limiting is enabled.
+    /// Reserved flag for inter-sample peak (ISP, true-peak) limiting.
     ///
-    /// When `true`, the limiter accounts for peaks that may exceed 0 dBFS when
-    /// the digital signal is reconstructed via a DAC, preventing audible
-    /// clipping on playback. Recommended for mastering and broadcast delivery.
+    /// Inter-sample peak limiting is not implemented and this flag currently has
+    /// no effect: the limiter measures sample peaks only. True-peak measurement
+    /// (e.g. 4× oversampling as in ITU-R BS.1770) is not performed.
     pub isp_limiting: bool,
 }
 
@@ -3560,7 +3650,7 @@ impl LimiterConfig {
     /// - `knee_width_db` - soft-knee width in dB; in `[0.0, 10.0]`.\
     /// - `detection_method` - level estimation algorithm.\
     /// - `lookahead_ms` - lookahead delay in milliseconds; in `[0.0, 20.0]`.\
-    /// - `isp_filtering` - whether inter-sample peak protection is enabled.
+    /// - `isp_filtering` - stored as `isp_limiting`; currently has no effect.
     ///
     /// # Returns
     ///
@@ -3599,7 +3689,8 @@ impl LimiterConfig {
     /// # Returns
     ///
     /// A [`LimiterConfig`] with ceiling -0.1 dBFS, attack 0.1 ms, release 100 ms,
-    /// 5 ms lookahead, and ISP limiting enabled.
+    /// 5 ms lookahead, soft knee 2 dB, peak detection, and `isp_limiting = true`
+    /// (currently no effect).
     #[inline]
     #[must_use]
     pub const fn transparent() -> Self {
@@ -3619,12 +3710,13 @@ impl LimiterConfig {
     /// A preset for mastering-grade limiting.
     ///
     /// Hybrid detection and a longer lookahead for optimal loudness management
-    /// at -0.3 dBFS. ISP limiting enabled for streaming and physical delivery.
+    /// at -0.3 dBFS.
     ///
     /// # Returns
     ///
     /// A [`LimiterConfig`] with ceiling -0.3 dBFS, attack 1 ms, release 200 ms,
-    /// 10 ms lookahead, and ISP limiting enabled.
+    /// 10 ms lookahead, soft knee 3 dB, hybrid detection, and
+    /// `isp_limiting = true` (currently no effect).
     #[inline]
     #[must_use]
     pub const fn mastering() -> Self {
@@ -3641,15 +3733,18 @@ impl LimiterConfig {
         }
     }
 
-    /// A preset for broadcast delivery compliance.
+    /// A preset for broadcast-style peak limiting.
     ///
-    /// Hard knee and fast attack enforce a strict -1.0 dBFS ceiling suitable
-    /// for loudness-normalised delivery formats. ISP limiting enabled.
+    /// Hard knee and fast attack targeting a -1.0 dBFS sample-peak ceiling. With
+    /// a 0.5 ms attack the envelope sags between the peaks of low-frequency
+    /// waveforms (a 1 kHz full-scale sine at 48 kHz comes out about 0.3 dB over
+    /// the ceiling), so this is not a compliance-grade true-peak limiter.
     ///
     /// # Returns
     ///
     /// A [`LimiterConfig`] with ceiling -1.0 dBFS, attack 0.5 ms, release 50 ms,
-    /// 2 ms lookahead, and ISP limiting enabled.
+    /// 2 ms lookahead, peak detection, and `isp_limiting = true` (currently no
+    /// effect).
     #[inline]
     #[must_use]
     pub const fn broadcast() -> Self {
@@ -3769,22 +3864,28 @@ pub struct GateConfig {
     /// Typical range: `[-80.0, 0.0]`.
     pub threshold_db: f64,
 
-    /// Attenuation ratio applied below the threshold.
+    /// Downward-expansion ratio `R` applied below the threshold (1:R).
     ///
-    /// Higher values produce more aggressive gating; values near `1.0` approach
-    /// unity gain. Must be `> 0.0`.
+    /// For an envelope level `L < T` the gain is reduced by `(R − 1)·(T − L)` dB,
+    /// so the output level is `T − R·(T − L)`: each dB below the threshold
+    /// becomes `R` dB below it. `R = 10` turns a signal 20 dB under the
+    /// threshold into one 200 dB under it (effectively closed). `R = 1` is
+    /// unity gain; `0 < R < 1` boosts signals below the threshold. There is no
+    /// range (maximum attenuation) parameter. Must be `> 0.0`.
     pub ratio: f64,
 
-    /// Attack time in milliseconds.
+    /// Attack time constant of the level detector in milliseconds.
     ///
     /// Controls how quickly the gate opens when the signal rises above the
-    /// threshold. Valid range: `[0.01, 1000.0]` ms.
+    /// threshold: the envelope follows an upward step as `1 − e^{−t/τ}`.
+    /// Valid range: `[0.01, 1000.0]` ms.
     pub attack_ms: f64,
 
-    /// Release time in milliseconds.
+    /// Release time constant of the level detector in milliseconds.
     ///
     /// Controls how quickly the gate closes when the signal falls below the
-    /// threshold. Valid range: `[1.0, 10000.0]` ms.
+    /// threshold: the envelope decays as `e^{−t/τ}`.
+    /// Valid range: `[1.0, 10000.0]` ms.
     pub release_ms: f64,
 }
 
@@ -3809,7 +3910,8 @@ impl GateConfig {
     /// # Arguments
     ///
     /// - `threshold_db` - gate threshold in dBFS.\
-    /// - `ratio` - attenuation ratio below the threshold; must be `> 0.0`.\
+    /// - `ratio` - downward-expansion ratio `R` below the threshold (reduction
+    ///   `(R − 1)·(T − L)` dB); must be `> 0.0`.\
     /// - `attack_ms` - attack time in milliseconds; in `[0.01, 1000.0]`.\
     /// - `release_ms` - release time in milliseconds; in `[1.0, 10000.0]`.
     ///
@@ -3865,8 +3967,9 @@ impl GateConfig {
     /// violated constraint (ratio, attack, or release).
     #[inline]
     pub fn validate(&self) -> AudioSampleResult<()> {
-        // A ratio of zero (or negative) causes a division by zero in the gate
-        // gain computation `(ratio - 1.0) / ratio`, producing NaN/inf output.
+        // A ratio of zero (or negative) is meaningless for a 1:R expander
+        // (it would turn the attenuation into a boost of at least the
+        // undershoot), so reject it.
         if self.ratio <= 0.0 {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "ratio",
@@ -3933,18 +4036,22 @@ pub struct ExpanderConfig {
     /// Typical range: `[-80.0, 0.0]`.
     pub threshold_db: f64,
 
-    /// Expansion ratio applied below the threshold.
+    /// Downward-expansion ratio `R` applied below the threshold (1:R).
     ///
-    /// Values greater than `1.0` produce increasing attenuation the further the
+    /// For an RMS envelope level `L < T` the gain is reduced by
+    /// `(R − 1)·(T − L)` dB, so the output level is `T − R·(T − L)`. Values
+    /// greater than `1.0` produce increasing attenuation the further the
     /// signal falls below the threshold. Must be `> 0.0`.
     pub ratio: f64,
 
-    /// Attack time in milliseconds.
+    /// Attack time constant of the level detector in milliseconds
+    /// (63.2 % of an upward step after this time).
     ///
     /// Valid range: `[0.01, 1000.0]` ms.
     pub attack_ms: f64,
 
-    /// Release time in milliseconds.
+    /// Release time constant of the level detector in milliseconds
+    /// (the envelope decays as `e^{−t/τ}` after a drop).
     ///
     /// Valid range: `[1.0, 10000.0]` ms.
     pub release_ms: f64,
@@ -4077,23 +4184,23 @@ impl Default for ExpanderConfig {
 pub enum AdaptiveThresholdMethod {
     /// Delta-based adaptive threshold.
     ///
-    /// Tracks local maxima and applies a fixed offset to determine the
-    /// detection threshold. Responds quickly to rapid changes but can be
-    /// sensitive to noise and transient outliers.
+    /// `thr[i] = max(window_i) − delta`, where `window_i` is the centred
+    /// window of `window_size` values around i. Only peaks within `delta` of
+    /// the largest value in their window pass, so a window much longer than
+    /// the spacing between onsets keeps only the strongest onset in it.
     Delta,
 
     /// Percentile-based adaptive threshold.
     ///
-    /// Estimates the threshold from rolling distribution statistics of the
-    /// onset strength function, yielding increased robustness at the cost
-    /// of slower adaptation.
+    /// `thr[i]` = the `percentile` quantile of `window_i` (linear
+    /// interpolation between order statistics, like `numpy.quantile`).
+    /// More robust to outliers, slower to adapt.
     #[default]
     Percentile,
 
     /// Combined adaptive threshold.
     ///
-    /// Combines delta-based and percentile-based thresholds to balance
-    /// responsiveness and robustness across a wide range of signals.
+    /// The larger of the delta and percentile thresholds at each position.
     Combined,
 }
 
@@ -4178,10 +4285,12 @@ pub struct AdaptiveThresholdConfig {
     /// Algorithm used to derive the adaptive threshold.
     pub method: AdaptiveThresholdMethod,
 
-    /// Fixed offset added to local maxima for delta-based thresholding.
+    /// Fixed offset subtracted from the local maximum for delta-based
+    /// thresholding (`thr = max(window) − delta`), in the units of the
+    /// (normalised) onset strength.
     ///
-    /// Larger values raise the threshold and reduce false positives at the
-    /// cost of potentially missing weak onsets. Must be ≥ 0.0.
+    /// Larger values lower the threshold and admit weaker peaks; smaller
+    /// values keep only peaks close to the local maximum. Must be ≥ 0.0.
     /// Typical range: `[0.01, 0.1]`.
     pub delta: f64,
 
@@ -4191,7 +4300,11 @@ pub struct AdaptiveThresholdConfig {
     /// and fewer detections. Must be in `[0.0, 1.0]`.
     pub percentile: f64,
 
-    /// Length of the local analysis window in samples.
+    /// Length of the local analysis window, in elements of the onset strength
+    /// function. When used by onset detection these are **frames** (one frame
+    /// = `hop_size` audio samples), not audio samples: 1024 frames at a hop of
+    /// 512 samples and 44.1 kHz span about 11.9 s. The window is centred
+    /// (`i − ⌊w/2⌋ ..= i + ⌊w/2⌋`) and truncated at the signal edges.
     ///
     /// Larger windows produce more stable thresholds but respond more slowly
     /// to changes in signal dynamics. Must be > 0.
@@ -4222,7 +4335,7 @@ impl AdaptiveThresholdConfig {
     /// - `method` - threshold estimation algorithm.\
     /// - `delta` - offset for delta-based estimation; must be ≥ 0.0.\
     /// - `percentile` - percentile for distribution-based estimation; in `[0.0, 1.0]`.\
-    /// - `window_size` - local analysis window in samples; must be > 0.\
+    /// - `window_size` - local analysis window in onset-function elements (frames); must be > 0.\
     /// - `min_threshold` - lower clamp on the computed threshold; must be ≥ 0.0.\
     /// - `max_threshold` - upper clamp on the computed threshold; must be > `min_threshold`.
     ///
@@ -4255,7 +4368,7 @@ impl AdaptiveThresholdConfig {
     /// # Arguments
     ///
     /// - `delta` - fixed offset added to local maxima; must be ≥ 0.0.\
-    /// - `window_size` - local analysis window in samples; must be > 0.
+    /// - `window_size` - local analysis window in onset-function elements (frames); must be > 0.
     ///
     /// # Returns
     ///
@@ -4279,7 +4392,7 @@ impl AdaptiveThresholdConfig {
     /// # Arguments
     ///
     /// - `percentile` - distribution percentile used as the threshold; must be in `[0.0, 1.0]`.\
-    /// - `window_size` - local analysis window in samples; must be > 0.
+    /// - `window_size` - local analysis window in onset-function elements (frames); must be > 0.
     ///
     /// # Returns
     ///
@@ -4304,7 +4417,7 @@ impl AdaptiveThresholdConfig {
     ///
     /// - `delta` - delta offset component; must be ≥ 0.0.\
     /// - `percentile` - percentile component; must be in `[0.0, 1.0]`.\
-    /// - `window_size` - local analysis window in samples; must be > 0.
+    /// - `window_size` - local analysis window in onset-function elements (frames); must be > 0.
     ///
     /// # Returns
     ///
@@ -4417,6 +4530,16 @@ impl Default for AdaptiveThresholdConfig {
 /// filtering, optional median smoothing, optional onset-strength normalisation,
 /// adaptive threshold estimation, and minimum-separation enforcement.
 ///
+/// All lengths (`adaptive_threshold.window_size`, `min_peak_separation`,
+/// `median_filter_length`) count elements of the onset strength function,
+/// i.e. **frames** in onset detection, not audio samples. The presets were
+/// sized as if in audio samples, so on onset functions they act over many
+/// seconds; with the default config (delta threshold over 1024 frames,
+/// separation 512 frames, length-3 median) a click track yields few or no
+/// onsets. For onset detection at hop 512 / 44.1 kHz, a window of about 11
+/// frames, a separation of 3-5 frames and `median_filter = false` work
+/// better.
+///
 /// ## Intended Usage
 ///
 /// Use one of the content-specific presets (`music`, `speech`, `drums`) or
@@ -4442,10 +4565,14 @@ pub struct PeakPickingConfig {
     /// Parameters for adaptive threshold estimation.
     pub adaptive_threshold: AdaptiveThresholdConfig,
 
-    /// Minimum distance between two consecutive detected peaks, in samples.
+    /// Minimum distance between two kept peaks, in elements of the onset
+    /// strength function (**frames** when used by onset detection, one frame =
+    /// `hop_size` audio samples). Peaks are kept strongest first.
     ///
-    /// Prevents multiple detections from a single onset event. At 44.1 kHz,
-    /// 512 samples ≈ 11.6 ms.
+    /// Prevents multiple detections from a single onset event. At a hop of
+    /// 512 samples and 44.1 kHz one frame is 11.6 ms, so the default of 512
+    /// frames is about 5.9 s (it is reduced to `len/4` when it is at least
+    /// half the signal length).
     pub min_peak_separation: NonZeroUsize,
 
     /// Whether to apply pre-emphasis (high-pass) filtering before detection.
@@ -4459,9 +4586,13 @@ pub struct PeakPickingConfig {
     /// when `pre_emphasis = true`.
     pub pre_emphasis_coeff: f64,
 
-    /// Whether to apply a median filter to the onset strength signal.
+    /// Whether to replace the onset strength by its running median before
+    /// thresholding.
     ///
-    /// Smooths impulsive noise while preserving genuine peak structure.
+    /// Removes impulsive noise, but also removes genuine peaks narrower than
+    /// `(median_filter_length + 1) / 2` frames: an isolated one-frame onset
+    /// peak (typical for clicks and drum hits at large hop sizes) is deleted
+    /// by a length-3 median. Disable it for impulsive onset functions.
     pub median_filter: bool,
 
     /// Kernel length of the median filter; must be an odd positive integer.
@@ -4491,7 +4622,7 @@ impl PeakPickingConfig {
     /// # Arguments
     ///
     /// - `adaptive_threshold` - adaptive threshold parameters.\
-    /// - `min_peak_separation` - minimum samples between adjacent peaks.\
+    /// - `min_peak_separation` - minimum distance between kept peaks, in onset-function frames.\
     /// - `pre_emphasis` - whether to apply pre-emphasis filtering.\
     /// - `pre_emphasis_coeff` - first-order high-pass coefficient; in `[0.0, 1.0]`.\
     /// - `median_filter` - whether to smooth with a median filter.\
@@ -4535,7 +4666,7 @@ impl PeakPickingConfig {
     /// # Returns
     ///
     /// A [`PeakPickingConfig`] with combined thresholding (delta 0.03, percentile 0.85,
-    /// window 2048), min separation 1024 samples, pre-emphasis 0.95, and median filter 5.
+    /// window 2048 frames), min separation 1024 frames, pre-emphasis 0.95, and median filter 5.
     ///
     /// # Panics
     ///
@@ -4562,8 +4693,8 @@ impl PeakPickingConfig {
     ///
     /// # Returns
     ///
-    /// A [`PeakPickingConfig`] with delta thresholding (delta 0.07, window 1024),
-    /// min separation 256 samples, pre-emphasis 0.98, and median filter 3.
+    /// A [`PeakPickingConfig`] with delta thresholding (delta 0.07, window 1024 frames),
+    /// min separation 256 frames, pre-emphasis 0.98, and median filter 3.
     ///
     /// # Panics
     ///
@@ -4590,8 +4721,8 @@ impl PeakPickingConfig {
     ///
     /// # Returns
     ///
-    /// A [`PeakPickingConfig`] with percentile thresholding (0.95, window 512),
-    /// min separation 128 samples, pre-emphasis 0.93, and median filter disabled.
+    /// A [`PeakPickingConfig`] with percentile thresholding (0.95, window 512 frames),
+    /// min separation 128 frames, pre-emphasis 0.93, and median filter disabled.
     ///
     /// # Panics
     ///
@@ -4615,7 +4746,8 @@ impl PeakPickingConfig {
     ///
     /// # Arguments
     ///
-    /// - `samples` - minimum separation in samples.
+    /// - `samples` - minimum separation in elements of the onset strength
+    ///   function (frames when used by onset detection).
     #[inline]
     pub const fn set_min_peak_separation(&mut self, samples: NonZeroUsize) {
         self.min_peak_separation = samples;
@@ -4626,7 +4758,9 @@ impl PeakPickingConfig {
     /// # Arguments
     ///
     /// - `ms` - minimum separation in milliseconds.\
-    /// - `sample_rate` - sample rate in Hz used to convert milliseconds to samples.
+    /// - `sample_rate` - rate, in elements per second, of the sequence the peaks
+    ///   are picked from. For onset detection pass the frame rate
+    ///   `audio_sample_rate / hop_size`, not the audio sample rate.
     ///
     /// # Panics
     ///
@@ -4805,8 +4939,13 @@ impl TryFrom<&str> for NoiseColor {
 pub enum PerturbationMethod {
     /// Adds coloured Gaussian noise to reach a target signal-to-noise ratio.
     ///
-    /// Noise is scaled so the SNR between the unperturbed signal's RMS level
-    /// and the added noise matches `target_snr_db`. Valid range: `[-60, 60]` dB.
+    /// Zero-mean Gaussian noise of the requested colour (white; pink ≈
+    /// −3 dB/octave; brown ≈ −6 dB/octave above about 5 Hz) is generated
+    /// independently per channel and scaled so that
+    /// `10·log10(P_signal / P_noise) = target_snr_db` exactly, where `P` is the
+    /// mean square over all samples on the normalised `[-1, 1]` scale. The
+    /// noise is drawn from the config's seeded RNG when a seed is set. Valid
+    /// range: `[-60, 60]` dB.
     GaussianNoise {
         /// Target signal-to-noise ratio in dB. Valid range: `[-60.0, 60.0]`.
         target_snr_db: f64,

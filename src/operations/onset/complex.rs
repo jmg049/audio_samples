@@ -19,8 +19,6 @@ use super::ComplexOnsetConfig;
 use ndarray::{Array2, ArrayView2, Axis, s};
 use non_empty_slice::NonEmptyVec;
 use num_complex::Complex;
-#[cfg(feature = "simd")]
-use wide::f64x4;
 
 /// Computes frame-to-frame magnitude differences in a spectrogram.
 ///
@@ -131,14 +129,20 @@ fn princarg(angle: f64) -> f64 {
     }
 }
 
-/// Computes phase deviation from expected phase progression.
+/// Computes the deviation of each bin's phase advance from that of its centre frequency.
 ///
-/// For each frequency bin, calculates the deviation between observed phase change and the
-/// expected phase change based on the bin's center frequency. Large deviations indicate
-/// transient events or changes in spectral content.
+/// For bin b with centre frequency f_b (Hz), hop H (samples) and sample rate f_s:
 ///
-/// The expected phase change for a sinusoid at frequency `f` over hop size `H` is:
-/// `2π * f * H / sample_rate`. Deviations from this indicate non-sinusoidal behavior.
+/// ```text
+/// dev[b, t] = | princarg( φ[b,t] − φ[b,t−1] − 2π·f_b·H/f_s ) |   (radians, in [0, π])
+/// ```
+///
+/// where `princarg` wraps to (−π, π]. This is a first-order measure: it is zero only for a
+/// stationary sinusoid exactly at the bin centre. A stationary sinusoid off the bin centre
+/// gives a constant non-zero value, and empty (noise-only) bins give essentially random
+/// values. Note this differs from the second-difference phase deviation
+/// `princarg(φ_t − 2φ_{t−1} + φ_{t−2})` of Bello et al. (2005) and from the complex-domain
+/// ODF `|X_t − X̂_t|`.
 ///
 /// # Arguments
 ///
@@ -203,11 +207,13 @@ pub fn phase_deviation(
 /// Combines magnitude differences and phase deviations into a single onset detection function.
 ///
 /// For each frame, computes a weighted sum of magnitude and phase contributions across all
-/// frequency bins. Optional rectification keeps only positive values, and optional logarithmic
+/// frequency bins. Each term is rectified (`max(0, ·)`) when the corresponding
+/// `*_rectify` flag is set and taken as an absolute value otherwise; optional logarithmic
 /// compression reduces dynamic range.
 ///
 /// The formula is:
-/// `odf[t] = magnitude_weight * Σ mag[b,t] + phase_weight * Σ phase[b,t]`
+/// `odf[t] = magnitude_weight · Σ_b R(mag[b,t]) + phase_weight · Σ_b R(phase[b,t])`
+/// with `R(v) = max(0, v)` (rectify) or `|v|`.
 ///
 /// If `log_compression > 0`, applies: `odf[t] = log(1 + log_compression * odf[t])`
 ///
@@ -240,100 +246,23 @@ pub fn combine_complex_odf(
     phase_dev: &Array2<f64>,
     config: &ComplexOnsetConfig,
 ) -> NonEmptyVec<f64> {
-    let (bins, frames) = mag_diff.dim();
+    let frames = mag_diff.dim().1;
     let mut odf = vec![0.0; frames];
 
     let mag_rect = config.magnitude_rectify;
     let phase_rect = config.phase_rectify;
 
-    let mag_diff = mag_diff.as_standard_layout();
-    let phase_dev = phase_dev.as_standard_layout();
-
-    for (t, odf_val) in odf.iter_mut().enumerate().take(frames) {
+    for (t, odf_val) in odf.iter_mut().enumerate() {
+        // A column of a row-major `(bins, frames)` array is strided (not
+        // contiguous), so iterate over it rather than taking slices.
         let mag_col = mag_diff.index_axis(Axis(1), t);
         let phase_col = phase_dev.index_axis(Axis(1), t);
 
-        let mut b = 0;
-
-        #[cfg(feature = "simd")]
-        let mut mag_acc = f64x4::ZERO;
-        #[cfg(feature = "simd")]
-        let mut phase_acc = f64x4::ZERO;
-
-        #[cfg(not(feature = "simd"))]
-        let mut mag_acc = 0.0_f64;
-        #[cfg(not(feature = "simd"))]
-        let mut phase_acc = 0.0_f64;
-
-        if mag_rect && phase_rect {
-            while b + 4 <= bins {
-                let m_view = mag_col.slice(s![b..b + 4]);
-                let p_view = phase_col.slice(s![b..b + 4]);
-                let m_slice = m_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                #[cfg(feature = "simd")]
-                {
-                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]])
-                        .max(f64x4::ZERO);
-                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]])
-                        .max(f64x4::ZERO);
-                    mag_acc += m;
-                    phase_acc += p;
-                }
-                #[cfg(not(feature = "simd"))]
-                {
-                    for i in 0..4 {
-                        mag_acc += m_slice[i].max(0.0);
-                        phase_acc += p_slice[i].max(0.0);
-                    }
-                }
-                b += 4;
-            }
-        } else {
-            while b + 4 <= bins {
-                let m_view = mag_col.slice(s![b..b + 4]);
-                let p_view = phase_col.slice(s![b..b + 4]);
-                let m_slice = m_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                #[cfg(feature = "simd")]
-                {
-                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]]).abs();
-                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]]).abs();
-                    mag_acc += m;
-                    phase_acc += p;
-                }
-                #[cfg(not(feature = "simd"))]
-                {
-                    for i in 0..4 {
-                        mag_acc += m_slice[i].abs();
-                        phase_acc += p_slice[i].abs();
-                    }
-                }
-                b += 4;
-            }
-        }
-
-        #[cfg(feature = "simd")]
-        let mut mag_sum = mag_acc.reduce_add();
-        #[cfg(feature = "simd")]
-        let mut phase_sum = phase_acc.reduce_add();
-
-        #[cfg(not(feature = "simd"))]
-        let mut mag_sum = mag_acc;
-        #[cfg(not(feature = "simd"))]
-        let mut phase_sum = phase_acc;
-
-        for i in b..bins {
-            mag_sum += if mag_rect {
-                mag_col[i].max(0.0)
-            } else {
-                mag_col[i].abs()
-            };
-            phase_sum += if phase_rect {
-                phase_col[i].max(0.0)
-            } else {
-                phase_col[i].abs()
-            };
+        let mut mag_sum = 0.0_f64;
+        let mut phase_sum = 0.0_f64;
+        for (&m, &p) in mag_col.iter().zip(phase_col.iter()) {
+            mag_sum += if mag_rect { m.max(0.0) } else { m.abs() };
+            phase_sum += if phase_rect { p.max(0.0) } else { p.abs() };
         }
 
         let mut v = config

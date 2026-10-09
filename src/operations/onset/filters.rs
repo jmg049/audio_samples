@@ -21,9 +21,12 @@ use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 
 /// Applies a median filter to smooth a signal.
 ///
-/// For each sample, replaces its value with the median of a window centered around it.
-/// This nonlinear filter effectively removes outliers and noise while preserving edges,
-/// making it useful for adaptive thresholding in onset detection.
+/// For each sample i, replaces its value with the median of the window
+/// `i − ⌊L/2⌋ ..= i + ⌊L/2⌋` (L = `filter_length`), truncated at the signal
+/// edges. Where truncation leaves an even number of elements the upper of the
+/// two middle values is used. This nonlinear filter removes outliers while
+/// preserving edges; it is used to form the local reference level for
+/// adaptive thresholding in onset detection.
 ///
 /// # Arguments
 ///
