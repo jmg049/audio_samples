@@ -272,7 +272,8 @@ assert!((60.0 * fs / (hop * 43.0) - 120.19).abs() < 0.005);
 assert!((60.0 * fs / (hop * 129.0) - 40.06).abs() < 0.005);
 ```
 
-Why half? The lab prints the ODF at each of the ten 80 BPM clicks: 0.88, 0.0,
+Why half? The lab (a ten-click track, slightly different from the twelve-click
+track above) prints the ODF at each of its 80 BPM clicks: 0.88, 0.0,
 2.6, 0.08, 13.42, 0.71, 0.0, 3.27, 0.03, 8.69. Every other click nearly
 vanishes (the CQT response variation again), so the envelope really does
 repeat every *two* beats: its autocorrelation at lag 129 (0.00240) is twenty
