@@ -102,6 +102,39 @@ fn validate_time_bounds(start: f64, end: f64, duration: f64) -> AudioSampleResul
     Ok(())
 }
 
+/// Returns the half-open `(start, end)` ranges that survive silence removal.
+///
+/// Every maximal run of `true` (silent) entries at least `min_run` long
+/// (and at least one entry) is removed; all other entries, including shorter
+/// silent runs, are kept. Adjacent kept entries form one range.
+fn kept_segments(silent: &[bool], min_run: usize) -> Vec<(usize, usize)> {
+    let min_run = min_run.max(1);
+    let n = silent.len();
+    let mut segments = Vec::new();
+    let mut keep_start = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        if silent[i] {
+            let run_start = i;
+            while i < n && silent[i] {
+                i += 1;
+            }
+            if i - run_start >= min_run {
+                if keep_start < run_start {
+                    segments.push((keep_start, run_start));
+                }
+                keep_start = i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if keep_start < n {
+        segments.push((keep_start, n));
+    }
+    segments
+}
+
 /// Applies a per-sample gain ramp to a contiguous slice.
 ///
 /// Position for sample `i` is computed as `start + i as f64 * step` - a
@@ -1356,9 +1389,12 @@ where
     /// Removes all silence regions throughout the signal.
     ///
     /// The signal is scanned for runs of silent samples (amplitude at
-    /// or below `threshold_db`).  Any silence run at least
-    /// `min_silence_duration_seconds` long is excised; the remaining
-    /// non-silent segments are concatenated in order.
+    /// or below `threshold_db`; for multi-channel audio, a frame is silent
+    /// when every channel is).  Any silence run at least
+    /// `min_silence_duration_seconds` long is excised, including leading and
+    /// trailing runs; everything else, including shorter silent gaps such as
+    /// the near-zero samples around a waveform's zero crossings, is kept and
+    /// concatenated in order.
     ///
     /// # Arguments
     /// - `threshold_db` - silence threshold in dB (typically negative).
@@ -1392,46 +1428,35 @@ where
         let threshold_lin: f64 = 10.0f64.powf(threshold_db / 20.0);
         let sr = self.sample_rate().get();
         let min_silence_samples = (min_silence_duration_seconds * f64::from(sr)).round() as usize;
+        let is_quiet = |x: T| -> bool {
+            let value: f64 = x.convert_to();
+            value.abs() <= threshold_lin
+        };
+
+        // A frame is silent when every channel is at or below the threshold.
+        let silent: Vec<bool> = match self.data() {
+            AudioData::Mono(arr) => arr.iter().map(|&x| is_quiet(x)).collect(),
+            AudioData::Multi(arr) => arr
+                .axis_iter(Axis(1))
+                .map(|frame| frame.iter().all(|&x| is_quiet(x)))
+                .collect(),
+        };
+        let segments = kept_segments(&silent, min_silence_samples);
+        let total_len: usize = segments.iter().map(|(s, e)| e - s).sum();
+        if total_len == 0 {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "threshold_db",
+                format!(
+                    "trim_all_silence: every sample is at or below {threshold_db} dB, \
+                     so removing silence would leave no audio"
+                ),
+            )));
+        }
 
         match self.data() {
             AudioData::Mono(arr) => {
-                let mut segments: Vec<(usize, usize)> = Vec::new();
-                let mut in_silence = true;
-                let mut silence_start = 0usize;
-                let mut segment_start = 0usize;
-
-                for (i, sample) in arr.iter().enumerate() {
-                    let value: f64 = (*sample).convert_to();
-                    let is_silent = value.abs() <= threshold_lin;
-
-                    if in_silence && !is_silent {
-                        // Entering a non-silent region
-                        segment_start = i;
-                        in_silence = false;
-                    } else if !in_silence && is_silent {
-                        // Entering silence
-                        silence_start = i;
-                        in_silence = true;
-                    } else if in_silence {
-                        // If silence has lasted long enough, finalise previous segment
-                        if i - silence_start >= min_silence_samples && segment_start < silence_start
-                        {
-                            segments.push((segment_start, silence_start));
-                            segment_start = silence_start;
-                        }
-                    }
-                }
-
-                // Handle trailing non-silent region
-                if !in_silence && segment_start < arr.len().get() {
-                    segments.push((segment_start, arr.len().get()));
-                }
-
-                // Concatenate non-silent segments
-                let total_len: usize = segments.iter().map(|(s, e)| e - s).sum();
                 let mut result = Array1::<T>::zeros(total_len);
                 let mut offset = 0usize;
-
                 for (s, e) in segments {
                     let len = e - s;
                     result
@@ -1439,47 +1464,12 @@ where
                         .assign(&arr.slice(s![s..e]));
                     offset += len;
                 }
-
                 AudioSamples::new_mono(result, self.sample_rate())
             }
-
             AudioData::Multi(arr) => {
                 let n_channels = arr.nrows().get();
-                let n_frames = arr.ncols().get();
-                let mut segments: Vec<(usize, usize)> = Vec::new();
-                let mut in_silence = true;
-                let mut silence_start = 0usize;
-                let mut segment_start = 0usize;
-
-                for i in 0..n_frames {
-                    let is_silent = arr.column(i).iter().all(|&x| {
-                        let value: f64 = x.convert_to();
-                        value.abs() <= threshold_lin
-                    });
-
-                    if in_silence && !is_silent {
-                        segment_start = i;
-                        in_silence = false;
-                    } else if !in_silence && is_silent {
-                        silence_start = i;
-                        in_silence = true;
-                    } else if in_silence
-                        && i - silence_start >= min_silence_samples
-                        && segment_start < silence_start
-                    {
-                        segments.push((segment_start, silence_start));
-                        segment_start = silence_start;
-                    }
-                }
-
-                if !in_silence && segment_start < n_frames {
-                    segments.push((segment_start, n_frames));
-                }
-
-                let total_len: usize = segments.iter().map(|(s, e)| e - s).sum();
-                let mut result = ndarray::Array2::<T>::zeros((n_channels, total_len));
+                let mut result = Array2::<T>::zeros((n_channels, total_len));
                 let mut offset = 0usize;
-
                 for (s, e) in segments {
                     let len = e - s;
                     result
@@ -1487,7 +1477,6 @@ where
                         .assign(&arr.slice(s![.., s..e]));
                     offset += len;
                 }
-
                 AudioSamples::new_multi_channel(result, self.sample_rate())
             }
         }
@@ -2487,6 +2476,70 @@ mod tests {
 
         let trimmed = audio.trim_all_silence(-10.0, 0.0001).unwrap();
         assert_eq!(trimmed.samples_per_channel().get(), 200);
+    }
+
+    /// 440 Hz cosine: starts and (for the lengths used here) ends loud, so the
+    /// tone's own edge samples never merge into adjacent silence.
+    fn tone(n: usize, sr: f64, amp: f64) -> Vec<f64> {
+        (0..n)
+            .map(|i| amp * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr).cos())
+            .collect()
+    }
+
+    /// Regression: a short silent run (e.g. the near-zero samples around each
+    /// zero crossing of a sine) restarted the current segment without saving
+    /// it, so a 1 s tone came back as 24 samples.
+    #[test]
+    fn test_trim_all_silence_keeps_continuous_tone() {
+        let x = tone(22050, 22050.0, 0.5);
+        let audio = AudioSamples::new_mono(Array1::from(x.clone()), sample_rate!(22050)).unwrap();
+        let trimmed = audio.trim_all_silence(-40.0, 0.1).unwrap();
+        assert_eq!(trimmed.samples_per_channel().get(), 22050);
+        assert_eq!(trimmed.as_mono().unwrap().to_vec(), x);
+    }
+
+    #[test]
+    fn test_trim_all_silence_tone_silence_tone() {
+        let sr = 22050usize;
+        let a = tone(sr / 4, sr as f64, 0.5);
+        let b = tone(sr / 4, sr as f64, 0.3);
+        let mut x = vec![0.0; sr / 10];
+        x.extend(&a);
+        x.extend(vec![0.0; sr / 4]);
+        x.extend(&b);
+        x.extend(vec![0.0; sr / 10]);
+        let audio = AudioSamples::new_mono(Array1::from(x), sample_rate!(22050)).unwrap();
+        // Leading, middle and trailing silences are all >= 0.05 s: removed.
+        let trimmed = audio.trim_all_silence(-40.0, 0.05).unwrap();
+        let mut expected = a.clone();
+        expected.extend(&b);
+        assert_eq!(trimmed.as_mono().unwrap().to_vec(), expected);
+
+        // A gap shorter than the minimum is kept intact.
+        let mut y = a.clone();
+        y.extend(vec![0.0; 50]);
+        y.extend(&b);
+        let audio = AudioSamples::new_mono(Array1::from(y.clone()), sample_rate!(22050)).unwrap();
+        let trimmed = audio.trim_all_silence(-40.0, 0.1).unwrap();
+        assert_eq!(trimmed.as_mono().unwrap().to_vec(), y);
+
+        // Stereo: a frame is silent only when every channel is.
+        let n = a.len() * 2 + 4000;
+        let mut data = Array2::<f64>::zeros((2, n));
+        for (i, v) in a.iter().enumerate() {
+            data[[0, i]] = *v;
+            data[[1, n - a.len() + i]] = *v;
+        }
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(22050)).unwrap();
+        let trimmed = audio.trim_all_silence(-40.0, 0.1).unwrap();
+        assert_eq!(trimmed.samples_per_channel().get(), 2 * a.len());
+        assert_eq!(trimmed.num_channels().get(), 2);
+    }
+
+    #[test]
+    fn test_trim_all_silence_all_silent_errors() {
+        let audio = AudioSamples::new_mono(Array1::<f32>::zeros(100), sample_rate!(100)).unwrap();
+        assert!(audio.trim_all_silence(-40.0, 0.1).is_err());
     }
 
     #[test]

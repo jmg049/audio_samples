@@ -5118,9 +5118,12 @@ where
     /// Removes all silence regions throughout the signal.
     ///
     /// The signal is scanned for runs of silent samples (amplitude at
-    /// or below `threshold_db`).  Any silence run at least
-    /// `min_silence_duration_seconds` long is excised; the remaining
-    /// non-silent segments are concatenated in order.
+    /// or below `threshold_db`; for multi-channel audio, a frame is silent
+    /// when every channel is).  Any silence run at least
+    /// `min_silence_duration_seconds` long is excised, including leading and
+    /// trailing runs; everything else, including shorter silent gaps such as
+    /// the near-zero samples around a waveform's zero crossings, is kept and
+    /// concatenated in order.
     ///
     /// # Arguments
     /// - `threshold_db` - silence threshold in dB (typically negative).
