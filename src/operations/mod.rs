@@ -109,6 +109,11 @@ pub mod sequence;
 #[cfg(feature = "feature-extraction")]
 pub mod tonal;
 
+#[cfg(feature = "feature-extraction")]
+pub mod features;
+#[cfg(feature = "feature-extraction")]
+pub use traits::AudioFeatures;
+
 // Re-export main traits for convenience
 #[cfg(feature = "statistics")]
 pub use traits::AudioStatistics;

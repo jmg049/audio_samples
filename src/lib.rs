@@ -470,6 +470,17 @@ pub use crate::operations::tonal::{
     TuningConfig,
 };
 
+#[cfg(feature = "feature-extraction")]
+pub use crate::operations::AudioFeatures;
+
+#[cfg(feature = "feature-extraction")]
+pub use crate::operations::features::{
+    FrequencyWeighting, PcenConfig, PolyFeaturesConfig, ReassignRefPower, ReassignedSpectrogram,
+    ReassignedSpectrogramConfig, RmsConfig, SpectralBandwidthConfig, SpectralCentroidConfig,
+    SpectralContrastConfig, SpectralFlatnessConfig, SpectralRolloffConfig, ZeroCrossingRateConfig,
+    ZeroCrossingReference,
+};
+
 #[cfg(feature = "fixed-size-audio")]
 pub use crate::fixed_audio::{FixedSizeAudioSamples, FixedSizeMultiChannelAudioSamples};
 
