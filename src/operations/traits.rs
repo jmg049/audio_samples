@@ -1161,14 +1161,22 @@ where
 
     /// Applies μ-law compression to the audio samples.
     ///
-    /// Compresses the dynamic range of the signal using a μ-law nonlinear
-    /// transfer function. Higher `mu` values produce stronger compression.
+    /// Compresses the dynamic range of the signal using the μ-law transfer
+    /// function `y = sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, applied to samples on
+    /// the normalised `[-1, 1]` scale (integer samples are converted, companded
+    /// and converted back). This equals `librosa.mu_compress(x, mu,
+    /// quantize=False)`; for librosa's default integer codes
+    /// (`quantize=True`) use [`crate::mu_law_encode`]. Higher `mu` values
+    /// produce stronger compression.
     ///
     /// # Arguments
-    /// - `mu` - Compression parameter (typically 255 for standard μ-law).
+    /// - `mu` - Compression parameter (typically 255 for standard μ-law). Its
+    ///   raw numeric value is used for every sample type: for `i16` audio
+    ///   `mu = 255` means μ = 255, not 255 / 32768.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    /// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and
+    ///   strictly positive.
     ///
     /// # See Also
     /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)
@@ -1192,13 +1200,15 @@ where
     /// Non-mutating twin of [`mu_compress_in_place`](Self::mu_compress_in_place).
     ///
     /// # Arguments
-    /// - `mu` - Compression parameter (typically 255 for standard μ-law).
+    /// - `mu` - Compression parameter (typically 255 for standard μ-law); its
+    ///   raw numeric value is used for every sample type.
     ///
     /// # Returns
     /// The compressed audio samples.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    /// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and
+    ///   strictly positive.
     ///
     /// # See Also
     /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)
@@ -1227,14 +1237,19 @@ where
 
     /// Applies μ-law expansion (decompression) to the audio samples.
     ///
-    /// This inverts μ-law compression. The `mu` parameter must match the value
-    /// used during compression for correct reconstruction.
+    /// Applies `x = sign(y) · ((1 + μ)^|y| - 1) / μ` on the normalised
+    /// `[-1, 1]` scale: the exact inverse of
+    /// [`mu_compress`](Self::mu_compress), equal to `librosa.mu_expand(y, mu,
+    /// quantize=False)` (for integer codes use [`crate::mu_law_decode`]). The
+    /// `mu` parameter must match the value used during compression.
     ///
     /// # Arguments
     /// - `mu` - Expansion parameter. Must match the value used for compression.
+    ///   Its raw numeric value is used for every sample type.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    /// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and
+    ///   strictly positive.
     ///
     /// # See Also
     /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)
@@ -1260,12 +1275,14 @@ where
     ///
     /// # Arguments
     /// - `mu` - Expansion parameter. Must match the value used for compression.
+    ///   Its raw numeric value is used for every sample type.
     ///
     /// # Returns
     /// The expanded audio samples.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    /// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and
+    ///   strictly positive.
     ///
     /// # See Also
     /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)

@@ -710,17 +710,22 @@ where
 
     /// Applies μ-law compression to the audio samples.
     ///
-    /// Compresses the dynamic range of the signal using a μ-law nonlinear
-    /// transfer function. Higher `mu` values produce stronger compression.
+    /// Each sample `x` (on the normalised `[-1, 1]` scale) is mapped to
+    /// `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, which is
+    /// `librosa.mu_compress(x, mu=mu, quantize=False)`. For the quantised
+    /// (integer code) variant see [`mu_law_encode`].
     ///
     /// # Arguments
-    /// - `mu` - Compression parameter (typically 255 for standard μ-law).
+    /// - `mu` - Compression parameter (typically 255 for standard μ-law). Its
+    ///   numeric value is used as-is for every sample type (`255` means
+    ///   μ = 255 for `i16` audio too).
     ///
     /// # Returns
     /// The compressed audio samples.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    /// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and
+    ///   strictly positive.
     ///
     /// # See Also
     /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)
@@ -738,31 +743,34 @@ where
     /// ```
     #[inline]
     fn mu_compress_in_place(&mut self, mu: Self::Sample) -> AudioSampleResult<()> {
-        let mu_f64: f64 = mu.convert_to();
-        let mu_plus_one: f64 = mu_f64 + 1.0;
-
+        // `mu` is a curve parameter, not a sample value: take its raw
+        // numeric value (no audio-aware [-1, 1] rescaling).
+        let mu: f64 = mu.cast_into();
+        validate_mu(mu, "mu_compress")?;
         self.apply_with_error_in_place(|x: Self::Sample| {
             let x: f64 = x.convert_to();
-            let sign = if x >= 0.0 { 1.0 } else { -1.0 };
-            let abs_x = x.abs();
-            let compressed = sign * mu_f64.mul_add(abs_x, mu_plus_one.ln()).ln() / mu_plus_one.ln();
-            Ok(Self::Sample::convert_from(compressed))
+            Ok(Self::Sample::convert_from(mu_law_compress_value(x, mu)))
         })
     }
 
     /// Applies μ-law expansion (decompression) to the audio samples.
     ///
-    /// This inverts μ-law compression. The `mu` parameter must match the value
-    /// used during compression for correct reconstruction.
+    /// Each sample `y` (on the normalised `[-1, 1]` scale) is mapped to
+    /// `sign(y) · ((1 + μ)^|y| - 1) / μ`, the exact inverse of
+    /// [`mu_compress`](AudioProcessing::mu_compress) and equal to
+    /// `librosa.mu_expand(y, mu=mu, quantize=False)`. For integer codes see
+    /// [`mu_law_decode`].
     ///
     /// # Arguments
     /// - `mu` - Expansion parameter. Must match the value used for compression.
+    ///   Its numeric value is used as-is for every sample type.
     ///
     /// # Returns
     /// The expanded audio samples.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if sample-type conversion fails.
+    /// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and
+    ///   strictly positive.
     ///
     /// # See Also
     /// - [μ-law algorithm (Wikipedia)](https://en.wikipedia.org/wiki/G.711)
@@ -781,15 +789,11 @@ where
     /// ```
     #[inline]
     fn mu_expand_in_place(&mut self, mu: Self::Sample) -> AudioSampleResult<()> {
-        let mu: f64 = mu.convert_to();
-        let mu_plus_one = mu + 1.0;
-
+        let mu: f64 = mu.cast_into();
+        validate_mu(mu, "mu_expand")?;
         self.apply_with_error_in_place(|x: Self::Sample| {
-            let x_f64: f64 = x.convert_to();
-            let sign = if x_f64 >= 0.0 { 1.0 } else { -1.0 };
-            let abs_x = x_f64.abs();
-            let expanded = sign * (mu_plus_one.powf(abs_x) - 1.0) / mu;
-            Ok(Self::Sample::convert_from(expanded))
+            let y: f64 = x.convert_to();
+            Ok(Self::Sample::convert_from(mu_law_expand_value(y, mu)))
         })
     }
 
@@ -1011,6 +1015,174 @@ where
     }
 }
 
+// =============================================================================
+// μ-law companding
+// =============================================================================
+
+/// Checks that a μ-law parameter is finite and strictly positive.
+fn validate_mu(mu: f64, operation: &str) -> AudioSampleResult<()> {
+    if mu.is_finite() && mu > 0.0 {
+        Ok(())
+    } else {
+        Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+            "mu",
+            mu,
+            "> 0",
+            "finite",
+            format!("{operation}: the mu-law parameter must be finite and strictly positive"),
+        )))
+    }
+}
+
+/// `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, evaluated as librosa does
+/// (`np.sign(x) * np.log1p(mu * np.abs(x)) / np.log1p(mu)`).
+#[inline]
+fn mu_law_compress_value(x: f64, mu: f64) -> f64 {
+    let sign = if x == 0.0 { 0.0 } else { x.signum() };
+    sign * (mu * x.abs()).ln_1p() / mu.ln_1p()
+}
+
+/// `sign(y) / μ · ((1 + μ)^|y| - 1)`, evaluated as librosa does
+/// (`np.sign(x) / mu * (np.power(1 + mu, np.abs(x)) - 1)`).
+#[inline]
+fn mu_law_expand_value(y: f64, mu: f64) -> f64 {
+    let sign = if y == 0.0 { 0.0 } else { y.signum() };
+    sign / mu * ((1.0 + mu).powf(y.abs()) - 1.0)
+}
+
+/// Quantises samples to integer μ-law codes, as `librosa.mu_compress(x, mu,
+/// quantize=True)` (librosa's default).
+///
+/// Each sample is first companded with `c = sign(x) · ln(1 + μ|x|) / ln(1 + μ)`
+/// (see [`AudioProcessing::mu_compress`]) and then assigned to one of
+/// `⌊1 + μ⌋` uniform bins on `[-1, 1]`: with bin edges
+/// `e = linspace(-1, 1, ⌊1 + μ⌋)` the code is `#{j : e[j] < c} - ⌊(1 + μ) / 2⌋`
+/// (`np.digitize(c, e, right=True) - (mu + 1) // 2`). For `μ = 255` the codes
+/// are the 256 integers in `[-128, 127]`; `0.0` maps to `0`, `1.0` to `127` and
+/// `-1.0` to `-128`.
+///
+/// Use this for WaveNet-style 8-bit class targets; [`mu_law_decode`] maps codes
+/// back to amplitudes. For float-in / float-out companding of a whole signal use
+/// [`AudioProcessing::mu_compress`].
+///
+/// # Arguments
+/// - `x` - Samples on the normalised `[-1, 1]` scale (e.g. the output of
+///   `audio.as_f64()`, one channel at a time).
+/// - `mu` - Compression parameter (typically 255). Need not be an integer;
+///   the number of codes is `⌊1 + μ⌋`, as in librosa.
+///
+/// # Returns
+/// One `i64` code per input sample, in `[-⌊(1 + μ) / 2⌋, ⌊1 + μ⌋ - ⌊(1 + μ) / 2⌋ - 1]`.
+///
+/// # Errors
+/// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and strictly
+///   positive, or if any sample is outside `[-1, 1]` (or NaN).
+///
+/// # Examples
+/// ```
+/// use audio_samples::mu_law_encode;
+///
+/// let codes = mu_law_encode(&[-1.0, -0.5, 0.0, 0.5, 1.0], 255.0).unwrap();
+/// assert_eq!(codes, vec![-128, -112, 0, 112, 127]);
+/// ```
+///
+/// # References
+/// - librosa `mu_compress` (`librosa/core/audio.py`).
+/// - ITU-T Recommendation G.711.
+#[inline]
+pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
+    validate_mu(mu, "mu_law_encode")?;
+    // `np.linspace(-1, 1, num=int(1 + mu), endpoint=True)`, computed exactly as
+    // numpy does (`i * step + start`, last edge pinned to `stop`) so that
+    // samples landing on an edge get the same code as librosa.
+    let num = (1.0 + mu).trunc() as usize;
+    let edges: Vec<f64> = if num == 1 {
+        vec![-1.0]
+    } else {
+        let step = 2.0 / (num - 1) as f64;
+        let mut e: Vec<f64> = (0..num).map(|i| i as f64 * step + -1.0).collect();
+        e[num - 1] = 1.0;
+        e
+    };
+    let offset = (num / 2) as i64;
+    x.iter()
+        .map(|&v| {
+            if !(-1.0..=1.0).contains(&v) {
+                return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+                    "x",
+                    v,
+                    -1.0,
+                    1.0,
+                    "mu_law_encode: input samples must lie in [-1, 1]",
+                )));
+            }
+            let c = mu_law_compress_value(v, mu);
+            // np.digitize(c, edges, right=True) == number of edges strictly below c.
+            let idx = edges.partition_point(|&e| e < c);
+            Ok(idx as i64 - offset)
+        })
+        .collect()
+}
+
+/// Maps integer μ-law codes back to amplitudes, as `librosa.mu_expand(codes,
+/// mu, quantize=True)` (librosa's default).
+///
+/// Each code `k` is rescaled to `y = 2k / (1 + μ)` and expanded with
+/// `sign(y) / μ · ((1 + μ)^|y| - 1)` (see [`AudioProcessing::mu_expand`]).
+/// Like librosa, this is not the exact inverse of [`mu_law_encode`]: codes
+/// are bin indices, so a round trip carries quantisation error (at most about
+/// 0.043 for `μ = 255`, and biased towards `-1`, e.g. code `127` decodes to
+/// `0.9574`).
+///
+/// # Arguments
+/// - `codes` - μ-law codes, typically from [`mu_law_encode`].
+/// - `mu` - The μ used for encoding.
+///
+/// # Returns
+/// One amplitude in `[-1, 1]` per code.
+///
+/// # Errors
+/// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and strictly
+///   positive, or if a code rescales to a value outside `[-1, 1]` (i.e.
+///   `|2k / (1 + μ)| > 1`).
+///
+/// # Examples
+/// ```
+/// use audio_samples::{mu_law_decode, mu_law_encode};
+///
+/// let decoded = mu_law_decode(&[-128, 0, 127], 255.0).unwrap();
+/// assert_eq!(decoded[0], -1.0);
+/// assert_eq!(decoded[1], 0.0);
+/// assert!((decoded[2] - 0.957_437).abs() < 1e-6);
+///
+/// let x = [0.25, -0.75];
+/// let back = mu_law_decode(&mu_law_encode(&x, 255.0).unwrap(), 255.0).unwrap();
+/// assert!((back[0] - x[0]).abs() < 0.05 && (back[1] - x[1]).abs() < 0.05);
+/// ```
+///
+/// # References
+/// - librosa `mu_expand` (`librosa/core/audio.py`).
+#[inline]
+pub fn mu_law_decode(codes: &[i64], mu: f64) -> AudioSampleResult<Vec<f64>> {
+    validate_mu(mu, "mu_law_decode")?;
+    codes
+        .iter()
+        .map(|&k| {
+            let y = k as f64 * 2.0 / (1.0 + mu);
+            if !(-1.0..=1.0).contains(&y) {
+                return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+                    "codes",
+                    k,
+                    -((1.0 + mu) / 2.0),
+                    (1.0 + mu) / 2.0,
+                    "mu_law_decode: code rescales outside [-1, 1]",
+                )));
+            }
+            Ok(mu_law_expand_value(y, mu))
+        })
+        .collect()
+}
+
 // Helper methods for the AudioProcessing implementation
 impl<T> AudioSamples<'_, T>
 where
@@ -1099,6 +1271,7 @@ where
 mod tests {
     use super::*;
     use crate::sample_rate;
+    use crate::traits::AudioTypeConversion;
     use approx_eq::assert_approx_eq;
     use ndarray::array;
 
@@ -1386,5 +1559,115 @@ mod tests {
         mutated.clip_in_place(-1.0, 1.0).unwrap();
 
         assert_mono_eq(&borrowed, &mutated);
+    }
+
+    /// Regression: `mu_compress` used `ln(μ|x| + ln(1 + μ))` instead of
+    /// `ln(1 + μ|x|)`, mapping 0 to 0.309 and ±1 to ±1.003.
+    #[test]
+    fn mu_compress_matches_reference_formula() {
+        let x = array![-1.0f64, -0.5, 0.0, 0.5, 1.0];
+        let audio = AudioSamples::new_mono(x, sample_rate!(8000)).unwrap();
+        let y = audio.mu_compress(255.0).unwrap();
+        // librosa.mu_compress([-1, -0.5, 0, 0.5, 1], quantize=False)
+        let expected = [-1.0, -0.875_703_07, 0.0, 0.875_703_07, 1.0];
+        for (i, e) in expected.iter().enumerate() {
+            assert!((y[i] - e).abs() < 1e-8, "sample {i}: {} vs {e}", y[i]);
+        }
+        assert_eq!(y[2], 0.0);
+    }
+
+    #[test]
+    fn mu_expand_is_exact_inverse_of_mu_compress() {
+        let x: Vec<f64> = (0..=200).map(|i| -1.0 + f64::from(i) * 0.01).collect();
+        let audio =
+            AudioSamples::new_mono(ndarray::Array1::from(x.clone()), sample_rate!(8000)).unwrap();
+        for mu in [1.0, 15.0, 255.0, 1000.5] {
+            let back = audio.mu_compress(mu).unwrap().mu_expand(mu).unwrap();
+            for (i, v) in x.iter().enumerate() {
+                assert!((back[i] - v).abs() < 1e-14, "mu {mu}: {} vs {v}", back[i]);
+            }
+        }
+    }
+
+    /// Regression: for integer sample types `mu` went through audio-aware
+    /// scaling (255i16 became 255/32768), producing garbage.
+    #[test]
+    fn mu_law_integer_samples_use_numeric_mu() {
+        let codes = array![-32768i16, -16384, 0, 8192, 16384, 32767];
+        let audio = AudioSamples::new_mono(codes.clone(), sample_rate!(8000)).unwrap();
+        let reference = audio.as_f64().mu_compress(255.0).unwrap();
+        let compressed = audio.mu_compress(255).unwrap();
+        for i in 0..codes.len() {
+            let expected: i16 = reference[i].convert_to();
+            assert!(
+                (i32::from(compressed[i]) - i32::from(expected)).abs() <= 1,
+                "sample {i}: {} vs {expected}",
+                compressed[i]
+            );
+        }
+        assert_eq!(compressed[2], 0);
+        assert_eq!(compressed[0], -32768);
+        // Round trip through i16: the slope of the expander is at most
+        // ln(256) * 256 / 255 ≈ 5.6, so the 1-LSB rounding of the compressed
+        // value grows to a few LSB.
+        let back = compressed.mu_expand(255).unwrap();
+        for i in 0..codes.len() {
+            assert!(
+                (i32::from(back[i]) - i32::from(codes[i])).abs() <= 8,
+                "sample {i}: {} vs {}",
+                back[i],
+                codes[i]
+            );
+        }
+        let i32_audio = AudioSamples::new_mono(array![0i32, 1 << 30], sample_rate!(8000)).unwrap();
+        let c = i32_audio.mu_compress(255).unwrap();
+        assert_eq!(c[0], 0);
+        let expected: i32 = mu_law_compress_value(0.5, 255.0).convert_to();
+        assert!((i64::from(c[1]) - i64::from(expected)).abs() <= 1);
+    }
+
+    #[test]
+    fn mu_law_rejects_invalid_mu() {
+        let audio = AudioSamples::new_mono(array![0.1f64, 0.2], sample_rate!(8000)).unwrap();
+        assert!(audio.mu_compress(0.0).is_err());
+        assert!(audio.mu_compress(-1.0).is_err());
+        assert!(audio.mu_expand(f64::NAN).is_err());
+        assert!(mu_law_encode(&[0.0], 0.0).is_err());
+        assert!(mu_law_decode(&[0], -2.0).is_err());
+    }
+
+    #[test]
+    fn mu_law_encode_matches_librosa_codes() {
+        let x: Vec<f64> = (0..11).map(|i| -1.0 + f64::from(i) * 0.2).collect();
+        // librosa.mu_compress(np.linspace(-1, 1, 11)) (quantize=True, mu=255)
+        assert_eq!(
+            mu_law_encode(&x, 255.0).unwrap(),
+            vec![-128, -122, -116, -107, -91, 0, 91, 107, 116, 122, 127]
+        );
+        // librosa.mu_compress(np.linspace(-1, 1, 11), mu=15)
+        assert_eq!(
+            mu_law_encode(&x, 15.0).unwrap(),
+            vec![-8, -7, -6, -5, -4, 0, 4, 5, 6, 7, 7]
+        );
+        assert!(mu_law_encode(&[1.5], 255.0).is_err());
+        assert!(mu_law_encode(&[f64::NAN], 255.0).is_err());
+    }
+
+    #[test]
+    fn mu_law_decode_matches_librosa() {
+        // librosa.mu_expand([-128, -122, -116, 0, 116, 127]) (quantize=True)
+        let y = mu_law_decode(&[-128, -122, -116, 0, 116, 127], 255.0).unwrap();
+        let expected = [
+            -1.0,
+            -0.770_207_79,
+            -0.593_013_77,
+            0.0,
+            0.593_013_77,
+            0.957_437_02,
+        ];
+        for (a, e) in y.iter().zip(expected) {
+            assert!((a - e).abs() < 1e-8, "{a} vs {e}");
+        }
+        assert!(mu_law_decode(&[129], 255.0).is_err());
     }
 }

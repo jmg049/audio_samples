@@ -427,6 +427,9 @@ pub use crate::operations::statistics::fft_alignment_lag;
 pub use crate::operations::AudioProcessing;
 
 #[cfg(feature = "processing")]
+pub use crate::operations::processing::{mu_law_decode, mu_law_encode};
+
+#[cfg(feature = "processing")]
 pub use crate::operations::types::NormalizationConfig;
 
 #[cfg(any(feature = "processing", feature = "peak-picking"))]
