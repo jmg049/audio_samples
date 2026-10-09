@@ -76,6 +76,9 @@ pub mod peak_picking;
 #[cfg(feature = "pitch-analysis")]
 pub mod pitch_analysis;
 
+#[cfg(feature = "pitch-analysis")]
+pub mod pitch_tracking;
+
 #[cfg(feature = "processing")]
 pub mod processing;
 
@@ -141,6 +144,9 @@ pub use crate::operations::peak_picking::*;
 
 #[cfg(feature = "pitch-analysis")]
 pub use traits::AudioPitchAnalysis;
+
+#[cfg(feature = "pitch-analysis")]
+pub use traits::AudioPitchTracking;
 
 #[cfg(feature = "dynamic-range")]
 pub use traits::AudioDynamicRange;

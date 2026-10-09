@@ -14,6 +14,9 @@
 //! contour. Harmonic analysis and key estimation use the `spectrograms` crate
 //! internally for FFT computation. All methods operate on mono signals only.
 //!
+//! For librosa-compatible frame-wise YIN / pYIN (centred frames, multichannel,
+//! voicing probabilities) see [`crate::operations::pitch_tracking`].
+//!
 //! # Example
 //!
 //! ```

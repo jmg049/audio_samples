@@ -332,7 +332,7 @@ fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
 }
 
 /// Pads `x` by `pad` samples at both ends with `mode`.
-fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
+pub(crate) fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
     let mut out = vec![0.0; x.len() + 2 * pad];
     out[pad..pad + x.len()].copy_from_slice(x);
     if mode != StftPadMode::Constant {

@@ -19,6 +19,7 @@
 //! | [`AudioIirFiltering`] | `iir-filtering` | Butterworth, Chebyshev IIR filters |
 //! | [`AudioParametricEq`] | `parametric-eq` | Multi-band parametric EQ |
 //! | [`AudioPitchAnalysis`] | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |
+//! | [`AudioPitchTracking`] | `pitch-analysis` | librosa-compatible frame-wise YIN and pYIN |
 //! | [`AudioVoiceActivityDetection`] | `vad` | Frame-based speech / silence classification |
 //! | [`AudioDecomposition`] | `decomposition` | Harmonic-percussive source separation (HPSS) |
 //! | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |
@@ -2827,6 +2828,10 @@ where
 /// All methods require mono audio.  Multi-channel signals must be reduced to
 /// mono (e.g. with [`AudioChannelOps::to_mono`]) before use; passing a
 /// multi-channel signal returns [crate::AudioSampleError::Unsupported].
+///
+/// For librosa-compatible frame-wise pitch tracks (`librosa.yin`, `librosa.pyin`:
+/// centred frames, multichannel, voicing probabilities) see
+/// [`AudioPitchTracking`](crate::operations::pitch_tracking::AudioPitchTracking).
 #[cfg(feature = "pitch-analysis")]
 pub trait AudioPitchAnalysis: AudioTypeConversion
 where
@@ -6488,3 +6493,5 @@ pub use crate::operations::tonal::AudioTonal;
 
 #[cfg(feature = "feature-extraction")]
 pub use crate::operations::features::AudioFeatures;
+#[cfg(feature = "pitch-analysis")]
+pub use crate::operations::pitch_tracking::AudioPitchTracking;

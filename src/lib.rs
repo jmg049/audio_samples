@@ -516,6 +516,11 @@ pub use crate::operations::traits::AudioPitchAnalysis;
 #[cfg(feature = "pitch-analysis")]
 pub use crate::operations::pitch_analysis::{Key, Mode, PitchClass, PitchContour, PitchFrame};
 
+#[cfg(feature = "pitch-analysis")]
+pub use crate::operations::pitch_tracking::{
+    AudioPitchTracking, PyinConfig, PyinResult, UnvoicedFill, YinConfig,
+};
+
 #[cfg(feature = "vad")]
 pub use crate::operations::traits::AudioVoiceActivityDetection;
 
