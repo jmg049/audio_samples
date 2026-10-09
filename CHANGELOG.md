@@ -116,7 +116,10 @@ All notable changes to this project are documented here.
   `tests/librosa_reference/` (spectrum, features, tonal, constant_q, rhythm, effects, pitch,
   sequence, resample / mu-law and the analysis fixes), and `pre-commit` hooks that run them.
   - Constant-Q (`constant_q.json`): the non-resampled top octave matches librosa to round-off;
-    decimated octaves agree to <= 3e-4 of the peak (soxr vs the crate's resampler).
+    decimated octaves agree to 1.25e-4 of the peak for the default CQT and <= 3.5e-4 away from
+    the signal edges in every configuration (soxr vs the crate's resampler); edge-dominated
+    configurations with deep decimation differ more at the edges (up to 0.28 of the peak for
+    `early_downsample`, where librosa itself moves by 0.33 when switched to `res_type="polyphase"`).
   - Rhythm (`rhythm.json`): peak, onset and beat frames and tempi match exactly; envelopes and
     tempograms match to about 1e-14.
 - `documentation/LIBROSA_MIGRATION.md`, rendered on docs.rs as the doc-only `librosa_migration`
