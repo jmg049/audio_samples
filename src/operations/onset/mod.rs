@@ -1368,4 +1368,43 @@ mod cqt_dedup_tests {
             );
         }
     }
+
+    /// Regression: `combine_complex_odf` sliced a column of the row-major
+    /// `(bins, frames)` arrays and expected it to be contiguous, so
+    /// `complex_onset_detection` hit `unreachable!` for every preset as soon as
+    /// the CQT produced more than one frame (any signal longer than ~0.37 s at
+    /// 44.1 kHz).
+    #[test]
+    fn complex_onset_detection_does_not_panic_on_long_signals() {
+        let sr = 22050usize;
+        let n = 3 * sr / 2; // 1.5 s
+        let onsets = [0.2, 0.6, 1.0];
+        let data: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                onsets
+                    .iter()
+                    .filter(|&&t0| t >= t0)
+                    .map(|&t0| {
+                        let dt = t - t0;
+                        (-dt / 0.1).exp() * (2.0 * std::f64::consts::PI * 330.0 * dt).sin()
+                    })
+                    .sum::<f64>()
+                    * 0.3
+            })
+            .collect();
+        let audio = AudioSamples::new_mono(Array1::from_vec(data), sample_rate!(22050)).unwrap();
+        for config in [
+            ComplexOnsetConfig::default(),
+            ComplexOnsetConfig::percussive(),
+            ComplexOnsetConfig::musical(),
+            ComplexOnsetConfig::speech(),
+        ] {
+            let odf = audio.onset_detection_function_complex(&config).unwrap();
+            assert!(odf.len().get() > 1, "expected several frames");
+            assert!(odf.iter().all(|v| v.is_finite()));
+            let onsets = audio.complex_onset_detection(&config).unwrap();
+            assert!(onsets.iter().all(|&t| (0.0..=1.5).contains(&t)));
+        }
+    }
 }

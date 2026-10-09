@@ -19,8 +19,6 @@ use super::ComplexOnsetConfig;
 use ndarray::{Array2, ArrayView2, Axis, s};
 use non_empty_slice::NonEmptyVec;
 use num_complex::Complex;
-#[cfg(feature = "simd")]
-use wide::f64x4;
 
 /// Computes frame-to-frame magnitude differences in a spectrogram.
 ///
@@ -240,112 +238,43 @@ pub fn combine_complex_odf(
     phase_dev: &Array2<f64>,
     config: &ComplexOnsetConfig,
 ) -> NonEmptyVec<f64> {
-    let (bins, frames) = mag_diff.dim();
-    let mut odf = vec![0.0; frames];
+    debug_assert_eq!(mag_diff.dim(), phase_dev.dim());
+    let frames = mag_diff.ncols();
 
     let mag_rect = config.magnitude_rectify;
     let phase_rect = config.phase_rectify;
 
-    let mag_diff = mag_diff.as_standard_layout();
-    let phase_dev = phase_dev.as_standard_layout();
-
-    for (t, odf_val) in odf.iter_mut().enumerate().take(frames) {
-        let mag_col = mag_diff.index_axis(Axis(1), t);
-        let phase_col = phase_dev.index_axis(Axis(1), t);
-
-        let mut b = 0;
-
-        #[cfg(feature = "simd")]
-        let mut mag_acc = f64x4::ZERO;
-        #[cfg(feature = "simd")]
-        let mut phase_acc = f64x4::ZERO;
-
-        #[cfg(not(feature = "simd"))]
-        let mut mag_acc = 0.0_f64;
-        #[cfg(not(feature = "simd"))]
-        let mut phase_acc = 0.0_f64;
-
-        if mag_rect && phase_rect {
-            while b + 4 <= bins {
-                let m_view = mag_col.slice(s![b..b + 4]);
-                let p_view = phase_col.slice(s![b..b + 4]);
-                let m_slice = m_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                #[cfg(feature = "simd")]
-                {
-                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]])
-                        .max(f64x4::ZERO);
-                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]])
-                        .max(f64x4::ZERO);
-                    mag_acc += m;
-                    phase_acc += p;
-                }
-                #[cfg(not(feature = "simd"))]
-                {
-                    for i in 0..4 {
-                        mag_acc += m_slice[i].max(0.0);
-                        phase_acc += p_slice[i].max(0.0);
-                    }
-                }
-                b += 4;
-            }
-        } else {
-            while b + 4 <= bins {
-                let m_view = mag_col.slice(s![b..b + 4]);
-                let p_view = phase_col.slice(s![b..b + 4]);
-                let m_slice = m_view.as_slice().unwrap_or_else(|| unreachable!("We made sure mag_diff array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                let p_slice = p_view.as_slice().unwrap_or_else(|| unreachable!("We made sure phase_dev array is contiguous, therefore any 1d slice from it should also be contiguous"));
-                #[cfg(feature = "simd")]
-                {
-                    let m = f64x4::new([m_slice[0], m_slice[1], m_slice[2], m_slice[3]]).abs();
-                    let p = f64x4::new([p_slice[0], p_slice[1], p_slice[2], p_slice[3]]).abs();
-                    mag_acc += m;
-                    phase_acc += p;
-                }
-                #[cfg(not(feature = "simd"))]
-                {
-                    for i in 0..4 {
-                        mag_acc += m_slice[i].abs();
-                        phase_acc += p_slice[i].abs();
-                    }
-                }
-                b += 4;
-            }
+    // Accumulate bin by bin into per-frame sums. Each bin is a row of the
+    // `(bins, frames)` arrays, so this walks the data in memory order for the
+    // standard layout and never needs a contiguous column (a column of a
+    // row-major array is strided, which is why the old column-slice code hit an
+    // `unreachable!` as soon as there was more than one frame). Works for any
+    // layout without copying.
+    let mut mag_sum = vec![0.0_f64; frames];
+    let mut phase_sum = vec![0.0_f64; frames];
+    for (mag_row, phase_row) in mag_diff.rows().into_iter().zip(phase_dev.rows()) {
+        for ((m_acc, p_acc), (&m, &p)) in mag_sum
+            .iter_mut()
+            .zip(phase_sum.iter_mut())
+            .zip(mag_row.iter().zip(phase_row.iter()))
+        {
+            *m_acc += if mag_rect { m.max(0.0) } else { m.abs() };
+            *p_acc += if phase_rect { p.max(0.0) } else { p.abs() };
         }
-
-        #[cfg(feature = "simd")]
-        let mut mag_sum = mag_acc.reduce_add();
-        #[cfg(feature = "simd")]
-        let mut phase_sum = phase_acc.reduce_add();
-
-        #[cfg(not(feature = "simd"))]
-        let mut mag_sum = mag_acc;
-        #[cfg(not(feature = "simd"))]
-        let mut phase_sum = phase_acc;
-
-        for i in b..bins {
-            mag_sum += if mag_rect {
-                mag_col[i].max(0.0)
-            } else {
-                mag_col[i].abs()
-            };
-            phase_sum += if phase_rect {
-                phase_col[i].max(0.0)
-            } else {
-                phase_col[i].abs()
-            };
-        }
-
-        let mut v = config
-            .magnitude_weight
-            .mul_add(mag_sum, config.phase_weight * phase_sum);
-
-        if config.log_compression > 0.0 {
-            v = config.log_compression.mul_add(v, 1.0).ln();
-        }
-
-        *odf_val = v;
     }
+
+    let odf: Vec<f64> = mag_sum
+        .iter()
+        .zip(&phase_sum)
+        .map(|(&m, &p)| {
+            let v = config.magnitude_weight.mul_add(m, config.phase_weight * p);
+            if config.log_compression > 0.0 {
+                config.log_compression.mul_add(v, 1.0).ln()
+            } else {
+                v
+            }
+        })
+        .collect();
 
     // safety: frames > 0 ensures odf is non-empty
     unsafe { NonEmptyVec::new_unchecked(odf) }
@@ -391,6 +320,55 @@ mod tests {
             odf[0],
             bins as f64 * phase_val
         );
+    }
+
+    /// `combine_complex_odf` must work for any number of frames and any memory
+    /// layout (it used to require contiguous columns and panicked for more than
+    /// one frame in standard layout).
+    #[test]
+    fn combine_handles_many_frames_and_any_layout() {
+        use ndarray::ShapeBuilder;
+
+        let (bins, frames) = (7, 5);
+        let mag =
+            Array2::from_shape_fn((bins, frames), |(b, t)| (b as f64 - 3.0) * (t as f64 + 0.5));
+        let phase = Array2::from_shape_fn((bins, frames), |(b, t)| ((b * 3 + t) % 5) as f64 - 1.5);
+        for mut config in [ComplexOnsetConfig::musical(), ComplexOnsetConfig::speech()] {
+            config.log_compression = 0.0;
+            let expected: Vec<f64> = (0..frames)
+                .map(|t| {
+                    let (mut m, mut p) = (0.0, 0.0);
+                    for b in 0..bins {
+                        let (x, y) = (mag[[b, t]], phase[[b, t]]);
+                        m += if config.magnitude_rectify {
+                            x.max(0.0)
+                        } else {
+                            x.abs()
+                        };
+                        p += if config.phase_rectify {
+                            y.max(0.0)
+                        } else {
+                            y.abs()
+                        };
+                    }
+                    config.magnitude_weight * m + config.phase_weight * p
+                })
+                .collect();
+
+            let standard = combine_complex_odf(&mag, &phase, &config);
+            // Column-major copies: same values, transposed strides.
+            let mut mag_f = Array2::zeros((bins, frames).f());
+            mag_f.assign(&mag);
+            let mut phase_f = Array2::zeros((bins, frames).f());
+            phase_f.assign(&phase);
+            assert!(!mag_f.is_standard_layout());
+            let fortran = combine_complex_odf(&mag_f, &phase_f, &config);
+
+            for t in 0..frames {
+                assert!((standard[t] - expected[t]).abs() < 1e-12, "frame {t}");
+                assert!((fortran[t] - expected[t]).abs() < 1e-12, "frame {t}");
+            }
+        }
     }
 
     /// Regression test for BUG 2: for a bin whose true phase advances by exactly
