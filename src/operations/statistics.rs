@@ -1011,16 +1011,11 @@ where
 
         // safety: working_vec is non-empty (see above).
         let n = unsafe { NonZeroUsize::new_unchecked(working_vec.len()) };
-        // ceil(n/2) + 1, computed without NonZero::div_ceil (MSRV 1.92) - the
-        // overflow-safe `n/2 + n%2 + 1` keeps the minimum supported Rust at 1.87.
-        let fft_output_size = NonZeroUsize::new(n.get() / 2 + (n.get() % 2) + 1).expect(
-            "n is non-zero so n/2 + n%2 + 1 >= 2; n/2 is always << usize::MAX so this cannot overflow",
-        );
         let power_spectrum =
             with_fft_planner(|planner| planner.power_spectrum(working_samples, n, None))?;
 
-        let nyquist = self.nyquist();
-        let freq_step = nyquist / (fft_output_size.get() - 1) as f64;
+        // Bin k of an n-point DFT is at k * sr / n (also for odd n).
+        let freq_step = bin_spacing_hz(self.sample_rate_hz(), n.get());
         // Compute weighted sum and total energy
         let (weighted_sum, total_energy) = power_spectrum.iter().enumerate().fold(
             (0.0, 0.0),
@@ -1107,9 +1102,9 @@ where
             planner.power_spectrum(input.as_non_empty_slice(), n, None)
         })?;
 
-        // Generate frequency bins
+        // Bin k of an n-point DFT is at k * sr / n (also for odd n).
         let nyquist = self.nyquist();
-        let freq_step = nyquist / (power_spectrum.len().get() as f64 - 1.0);
+        let freq_step = bin_spacing_hz(self.sample_rate_hz(), n.get());
 
         // Compute total energy
         let total_energy: f64 = power_spectrum.iter().fold(0.0, |acc, &x| acc + x);
@@ -1164,8 +1159,8 @@ where
             planner.magnitude_spectrum(input.as_non_empty_slice(), n, None)
         })?;
 
-        let nyquist = self.nyquist();
-        let freq_step = nyquist / (mag.len().get() as f64 - 1.0);
+        // Bin k of an n-point DFT is at k * sr / n (also for odd n).
+        let freq_step = bin_spacing_hz(self.sample_rate_hz(), n.get());
 
         // Magnitude-weighted centroid.
         let (weighted_sum, total_mag) =
@@ -1278,8 +1273,8 @@ where
             return Ok(0.0);
         }
 
-        let nyquist = self.nyquist();
-        let freq_step = nyquist / (len as f64 - 1.0);
+        // Bin k of an n-point DFT is at k * sr / n (also for odd n).
+        let freq_step = bin_spacing_hz(self.sample_rate_hz(), n.get());
 
         // OLS slope: Σ (x - x̄)(y - ȳ) / Σ (x - x̄)².
         let count = len as f64;
@@ -1381,6 +1376,16 @@ where
 
         Ok(out)
     }
+}
+
+/// Spacing in Hz between the bins of an `n_fft`-point DFT: `sample_rate / n_fft`.
+///
+/// Bin `k` lies at `k * sample_rate / n_fft` for even and odd `n_fft` alike
+/// (`numpy.fft.rfftfreq`, `librosa.fft_frequencies`). The spectral scalars once
+/// used `nyquist / (bins - 1)`, which is only equal for even `n_fft`.
+#[cfg(feature = "transforms")]
+fn bin_spacing_hz(sample_rate: f64, n_fft: usize) -> f64 {
+    sample_rate / n_fft as f64
 }
 
 /// Returns the signed lag (in samples) that maximises the FFT cross-correlation
@@ -1592,6 +1597,49 @@ mod tests {
         assert!((autocorr[0] - 0.5).abs() < 1e-12); // (1 + 1) / 4
         assert!(autocorr[1].abs() < 1e-12);
         assert!((autocorr[2] + 0.5).abs() < 1e-12); // (1 * -1) / 2
+    }
+
+    /// Regression: the spectral scalars put bin k at `k * nyquist / (bins - 1)`,
+    /// which is `k * sr / n` only for even n (odd n gave sr/(n+1) in the centroid
+    /// and sr/(n-1) in rolloff, bandwidth and slope). Tones exactly on bins 100
+    /// and 200 of an odd-length (n = 2205) signal at 22.05 kHz sit at 1000 and
+    /// 2000 Hz.
+    #[test]
+    #[cfg(feature = "transforms")]
+    fn spectral_scalars_use_exact_bin_frequencies_for_odd_length() {
+        for n in [2205usize, 4410] {
+            let sr = 22050.0;
+            let step = sr / n as f64;
+            let tone = |k: f64| -> Vec<f64> {
+                (0..n)
+                    .map(|i| (2.0 * std::f64::consts::PI * k * i as f64 / n as f64).sin())
+                    .collect()
+            };
+            let one =
+                AudioSamples::new_mono(Array1::from(tone(100.0)), sample_rate!(22050)).unwrap();
+            let centroid = one.spectral_centroid(ChannelReduction::First).unwrap();
+            assert!(
+                (centroid - 100.0 * step).abs() < 1e-6,
+                "n {n}: centroid {centroid}"
+            );
+            let rolloff = one.spectral_rolloff(0.5, ChannelReduction::First).unwrap();
+            assert!(
+                (rolloff - 100.0 * step).abs() < 1e-6,
+                "n {n}: rolloff {rolloff}"
+            );
+
+            let two: Vec<f64> = tone(100.0)
+                .iter()
+                .zip(tone(200.0))
+                .map(|(a, b)| a + b)
+                .collect();
+            let two = AudioSamples::new_mono(Array1::from(two), sample_rate!(22050)).unwrap();
+            let bandwidth = two.spectral_bandwidth(ChannelReduction::First).unwrap();
+            assert!(
+                (bandwidth - 50.0 * step).abs() < 1e-6,
+                "n {n}: bandwidth {bandwidth}"
+            );
+        }
     }
 
     /// Regression: the values were divided by the zero-padded FFT size twice (the
