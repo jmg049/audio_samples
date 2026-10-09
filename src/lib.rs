@@ -447,6 +447,20 @@ pub use crate::operations::AudioTransforms;
 #[cfg(feature = "transforms")]
 pub use crate::operations::transforms::Psd;
 
+#[cfg(feature = "transforms")]
+pub use crate::operations::AudioSpectrum;
+
+#[cfg(feature = "transforms")]
+pub use crate::operations::filterbanks::{MelFilterNorm, MelFilterbankConfig, Window};
+
+#[cfg(feature = "transforms")]
+pub use crate::operations::spectrum::{
+    DbAxes, DbConfig, DbReference, DctNorm, DctType, DeltaConfig, DeltaMode, MelSpectrogramConfig,
+    MfccConfig, StftConfig, StftPadMode,
+};
+
+pub use crate::utils::audio_math::MelScale;
+
 #[cfg(feature = "fixed-size-audio")]
 pub use crate::fixed_audio::{FixedSizeAudioSamples, FixedSizeMultiChannelAudioSamples};
 

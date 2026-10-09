@@ -9,6 +9,7 @@
 //! | [`AudioStatistics`] | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |
 //! | [`AudioProcessing`] | `processing` | Normalize, filter, resample, μ-law, … |
 //! | [`AudioTransforms`] | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |
+//! | [`AudioSpectrum`] | `transforms` | librosa-compatible STFT/ISTFT, mel spectrogram, MFCC |
 //! | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |
 //! | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |
 //! | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |
@@ -1876,6 +1877,8 @@ where
 
     /// Computes the Short-Time Fourier Transform (STFT) of a mono signal.
     ///
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix).
+    ///
     /// The signal is divided into overlapping, windowed frames and each frame
     /// is transformed to the frequency domain. The returned [`StftResult`]
     /// carries both the complex matrix and the parameters required by
@@ -1909,6 +1912,8 @@ where
     fn stft(&self, params: &StftParams) -> AudioSampleResult<StftResult>;
 
     /// Reconstructs a time-domain signal from an [`StftResult`].
+    ///
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::istft_matrix`](crate::operations::spectrum::AudioSpectrum::istft_matrix).
     ///
     /// Uses overlap-add synthesis with the window and hop parameters stored
     /// in the [`StftResult`]. The output is a mono signal at the sample rate
@@ -2181,6 +2186,8 @@ where
 
     /// Computes a mel-scaled spectrogram.
     ///
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::melspectrogram`](crate::operations::spectrum::AudioSpectrum::melspectrogram).
+    ///
     /// The mel scale approximates human auditory perception by compressing
     /// high frequencies relative to low ones.  Prefer the typed
     /// convenience methods - [`mel_mag_spectrogram`](crate::operations::AudioTransforms::mel_mag_spectrogram),
@@ -2310,6 +2317,8 @@ where
     }
 
     /// Computes Mel-Frequency Cepstral Coefficients (MFCCs).
+    ///
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::mfcc_frames`](crate::operations::spectrum::AudioSpectrum::mfcc_frames).
     ///
     /// MFCCs are a compact spectral representation widely used in speech
     /// recognition and audio classification.  They are derived by
@@ -6468,3 +6477,6 @@ where
         hop_size: NonZeroUsize,
     ) -> NdResult<Self::Sample>;
 }
+
+#[cfg(feature = "transforms")]
+pub use crate::operations::spectrum::AudioSpectrum;

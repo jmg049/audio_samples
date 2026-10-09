@@ -10,6 +10,8 @@
 //! - [`statistics`] - Statistical analysis operations
 //! - [`processing`] - Signal processing operations
 //! - [`transforms`] - FFT / spectral analysis
+//! - [`spectrum`] - librosa-compatible STFT, mel spectrogram, MFCC, dB, delta
+//! - [`filterbanks`] - window functions and mel filterbanks (librosa / SciPy semantics)
 //! - [`editing`] - Time-domain editing operations
 //! - [`channels`] - Channel manipulation operations
 //! - [`types`] - Supporting types and enums
@@ -83,6 +85,12 @@ pub mod statistics;
 #[cfg(feature = "transforms")]
 pub mod transforms;
 
+#[cfg(feature = "transforms")]
+pub mod filterbanks;
+
+#[cfg(feature = "transforms")]
+pub mod spectrum;
+
 #[cfg(feature = "vad")]
 pub mod vad;
 
@@ -131,6 +139,9 @@ pub use traits::AudioDynamicRange;
 
 #[cfg(feature = "transforms")]
 pub use traits::AudioTransforms;
+
+#[cfg(feature = "transforms")]
+pub use traits::AudioSpectrum;
 
 #[cfg(feature = "decomposition")]
 pub use traits::AudioDecomposition;
