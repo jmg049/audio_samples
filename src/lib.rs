@@ -511,6 +511,16 @@ pub use crate::fixed_audio::{FixedSizeAudioSamples, FixedSizeMultiChannelAudioSa
 #[cfg(feature = "onset-detection")]
 pub use crate::operations::traits::AudioOnsetDetection;
 
+#[cfg(feature = "beat-tracking")]
+pub use crate::operations::AudioRhythm;
+
+#[cfg(feature = "beat-tracking")]
+pub use crate::operations::rhythm::{
+    Aggregate, BeatTrack, BeatTrackConfig, FourierTempogramConfig, FrameEvents,
+    HybridTempogramConfig, OnsetDetectConfig, OnsetStrengthConfig, PeakPickConfig, PeakPickMethod,
+    PlpConfig, TempoConfig, TempoLogPrior, TempogramConfig, TempogramRatioConfig,
+};
+
 #[cfg(feature = "decomposition")]
 pub use crate::operations::traits::AudioDecomposition;
 

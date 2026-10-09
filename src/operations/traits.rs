@@ -26,6 +26,7 @@
 //! | [`AudioDecomposition`] | `decomposition` | Harmonic-percussive source separation (HPSS) |
 //! | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |
 //! | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |
+//! | [`AudioRhythm`] | `beat-tracking` | librosa-compatible onset strength/detection, tempogram, tempo, beat tracking, PLP |
 //! | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
 //!
 //! Grouping operations into separate traits keeps compile times low - only the code
@@ -5835,6 +5836,9 @@ where
 
 /// Onset detection and spectral analysis operations.
 ///
+/// For librosa-compatible onset strength / `onset_detect` see `AudioRhythm`
+/// (`operations::rhythm`, feature `beat-tracking`).
+///
 /// # Purpose
 ///
 /// Locates the moments where a new musical event begins - note attacks,
@@ -6063,6 +6067,9 @@ where
 }
 
 /// Beat tracking operations for audio signals.
+///
+/// For librosa-compatible tempo estimation and dynamic-programming beat tracking see
+/// [`AudioRhythm`].
 ///
 /// This trait provides tempo-aware beat detection via
 /// [`detect_beats`][AudioBeatTracking::detect_beats].  Configure the
@@ -6502,3 +6509,6 @@ pub use crate::operations::pitch_tracking::AudioPitchTracking;
 
 #[cfg(feature = "effects")]
 pub use crate::operations::effects::AudioEffects;
+
+#[cfg(feature = "beat-tracking")]
+pub use crate::operations::rhythm::AudioRhythm;

@@ -125,6 +125,9 @@ pub use traits::AudioFeatures;
 #[cfg(feature = "effects")]
 pub mod effects;
 
+#[cfg(feature = "beat-tracking")]
+pub mod rhythm;
+
 // Re-export main traits for convenience
 #[cfg(feature = "statistics")]
 pub use traits::AudioStatistics;
@@ -181,6 +184,9 @@ pub use traits::AudioBeatTracking;
 
 #[cfg(feature = "beat-tracking")]
 pub use beat::*;
+
+#[cfg(feature = "beat-tracking")]
+pub use traits::AudioRhythm;
 
 #[cfg(feature = "onset-detection")]
 pub use onset::*;
