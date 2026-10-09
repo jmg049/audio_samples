@@ -33,6 +33,13 @@ use crate::traits::StandardSample;
 #[cfg(feature = "processing")]
 pub(crate) mod processing;
 
+pub mod explain;
+
+pub use explain::{
+    Explain, ExplainContext, ExplainDoc, ExplainFor, Formula, Quantity, SeeAlso, Symbol, Table,
+    Topic, Warning, WarningLevel, topics,
+};
+
 /// Opaque visual explanation for one operation step.
 ///
 /// Holds Plotly inline HTML fragments when compiled with `plotting`; otherwise

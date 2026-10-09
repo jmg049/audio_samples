@@ -528,6 +528,9 @@ pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
 #[cfg(feature = "educational")]
 pub use explainable::{ExplainMode, Explainable, Explaining, Explanation};
 
+#[cfg(feature = "educational")]
+pub use crate::educational::{Explain, ExplainFor};
+
 #[cfg(all(feature = "educational", feature = "processing"))]
 pub use crate::operations::traits::AudioProcessingExt;
 

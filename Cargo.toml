@@ -288,6 +288,10 @@ name = "educational"
 required-features = ["educational", "processing"]
 
 [[example]]
+name = "explain"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
 name = "plotting_basic"
 required-features = ["plotting", "transforms"]
 
@@ -366,6 +370,10 @@ required-features = ["plotting"]
 [[test]]
 name = "educational_integration"
 required-features = ["educational", "processing"]
+
+[[test]]
+name = "explain_api"
+required-features = ["educational", "full_no_plotting"]
 
 [[bench]]
 name = "filtering"
