@@ -55,12 +55,14 @@
 //!
 //! # Limitations
 //!
-//! - The default [`PeakPickingConfig`] sizes (threshold window 1024 frames,
-//!   separation 512 frames, length-3 median) were chosen as if they were audio
-//!   samples. On an ODF they span seconds, and the median removes one-frame
-//!   peaks, so `detect_onsets(&OnsetDetectionConfig::default())` can return no
-//!   onsets for a clean click track. Shorten the window and separation and
-//!   disable the median for impulsive material, as in the example below.
+//! - The default [`PeakPickingConfig`] is sized in frames (9-frame threshold
+//!   window, 3-frame separation, no median filter) and finds the onsets of a
+//!   clean click track, but its threshold never drops below 0.1 of the
+//!   strongest (normalised) ODF peak, so much weaker onsets in the same clip
+//!   are missed; lower `adaptive_threshold.min_threshold` for material with a
+//!   wide dynamic range. The `music`, `speech` and `drums` presets still use
+//!   lengths sized as if they were audio samples (hundreds to thousands of
+//!   frames); on an ODF those span seconds.
 //! - The CQT response of the external `spectrograms` crate to identical clicks
 //!   varies strongly from click to click (up to ~100×, alternating), so
 //!   weaker clicks can fall below any threshold and tempo estimates built on
@@ -1037,9 +1039,8 @@ where
     /// Computes [`onset_detection_function`](AudioOnsetDetection::onset_detection_function)
     /// (half-wave-rectified CQT magnitude flux, optionally median-thresholded), then applies
     /// [`pick_peaks`] with `config.peak_picking` and converts frame indices to seconds as
-    /// `t·hop_size/f_s`. With the default peak-picking lengths (see the
-    /// [module docs](self#limitations)) few or no onsets may be found; shorten
-    /// `config.peak_picking` lengths for real use.
+    /// `t·hop_size/f_s`. The default peak picking ignores peaks below 0.1 of
+    /// the strongest one (see the [module docs](self#limitations)).
     ///
     /// # Arguments
     ///

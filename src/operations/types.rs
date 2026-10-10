@@ -4539,13 +4539,11 @@ impl Default for AdaptiveThresholdConfig {
 ///
 /// All lengths (`adaptive_threshold.window_size`, `min_peak_separation`,
 /// `median_filter_length`) count elements of the onset strength function,
-/// i.e. **frames** in onset detection, not audio samples. The presets were
-/// sized as if in audio samples, so on onset functions they act over many
-/// seconds; with the default config (delta threshold over 1024 frames,
-/// separation 512 frames, length-3 median) a click track yields few or no
-/// onsets. For onset detection at hop 512 / 44.1 kHz, a window of about 11
-/// frames, a separation of 3-5 frames and `median_filter = false` work
-/// better.
+/// i.e. **frames** in onset detection, not audio samples. The default is
+/// sized in frames (a 9-frame delta threshold with delta 0.07 and a floor of
+/// 0.1, a 3-frame separation, no median filter: about 104 ms and 35 ms at hop
+/// 512 / 44.1 kHz). The `music`, `speech` and `drums` presets were sized as if
+/// in audio samples, so on onset functions they act over many seconds.
 ///
 /// ## Intended Usage
 ///

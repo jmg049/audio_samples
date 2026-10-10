@@ -6159,10 +6159,10 @@ where
     /// Computes [`onset_detection_function`](AudioOnsetDetection::onset_detection_function)
     /// (half-wave-rectified CQT magnitude flux, optionally median-thresholded),
     /// applies peak picking with `config.peak_picking` (lengths in frames) and
-    /// converts frame indices to seconds as `t·hop_size/f_s`. With the default
-    /// peak-picking lengths few or no onsets may be found; see the
-    /// [`onset`](crate::operations::onset) module docs for a working
-    /// configuration and the known limitations.
+    /// converts frame indices to seconds as `t·hop_size/f_s`. The default
+    /// peak picking ignores peaks below 0.1 of the strongest one; see the
+    /// [`onset`](crate::operations::onset) module docs for the known
+    /// limitations.
     ///
     /// # Arguments
     ///
