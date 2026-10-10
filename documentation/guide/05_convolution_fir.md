@@ -11,12 +11,13 @@ scratch.
 
 ## Concept
 
-**Convolution.** For an input $x\[n\]$ of $N$ samples and taps $h\[j\]$,
-$j = 0 \dots M-1$:
+**Convolution.** For an input $x\[n\]$ of $N$ samples and taps $h\[m\]$,
+$m = 0 \dots M-1$:
 
-$$y\[n\] = \sum_{j=0}^{M-1} h\[j\] \, x\[n - j\]$$
+$$y\[n\] = \sum_{m=0}^{M-1} h\[m\] \\, x\[n - m\]$$
 
-where $n$ is the output sample index, $M$ the number of taps and $x\[\cdot\] = 0$
+where $n$ is the output sample index, $m$ the tap index, $M$ the number of taps
+and $x\[\cdot\] = 0$
 outside the signal. The **full** convolution has $N + M - 1$ samples
 ($n = 0 \dots N + M - 2$). The **valid** part, where every term of the sum uses
 a real input sample, has $N - M + 1$ samples ($n = M-1 \dots N-1$).
@@ -28,10 +29,11 @@ a real input sample, has $N - M + 1$ samples ($n = M-1 \dots N-1$).
 $\omega = 2\pi f / f_s$ (radians per sample, $f$ in Hz, $f_s$ the sample rate
 in Hz) comes out multiplied by
 
-$$H(e^{j\omega}) = \sum_{j=0}^{M-1} h\[j\] \, e^{-j\omega j}$$
+$$H(e^{j\omega}) = \sum_{m=0}^{M-1} h\[m\] \\, e^{-j\omega m}$$
 
-so a sine of amplitude $A$ leaves with amplitude $A\,|H|$, shifted by the phase
-$\arg H$. For the $M$-tap moving average $h\[j\] = 1/M$ this sums to the
+where $j = \sqrt{-1}$ (as in chapter 03; no formula in this chapter uses $j$ as an
+index). So a sine of amplitude $A$ leaves with amplitude $A\\,|H|$, shifted by the phase
+$\arg H$. For the $M$-tap moving average $h\[m\] = 1/M$ this sums to the
 **Dirichlet kernel**
 
 $$|H(f)| = \left| \frac{\sin(\pi f M / f_s)}{M \sin(\pi f / f_s)} \right|$$
@@ -40,25 +42,43 @@ with nulls at every multiple of $f_s / M$ Hz (except 0).
 
 **Linear phase and group delay.** The group delay
 
-$$\tau_g(\omega) = -\frac{d \arg H(e^{j\omega})}{d\omega} = \mathrm{Re}\left\{ \frac{\sum_j j\,h\[j\]\,e^{-j\omega j}}{H(e^{j\omega})} \right\}$$
+$$\tau_g(\omega) = -\frac{d \arg H(e^{j\omega})}{d\omega} = \mathrm{Re}\left\\{ \frac{\sum_m m\\,h\[m\]\\,e^{-j\omega m}}{H(e^{j\omega})} \right\\}$$
 
 is the delay in samples of a narrow-band signal at $\omega$. If the taps are
-symmetric, $h\[j\] = h\[M-1-j\]$, the phase is exactly $-\omega (M-1)/2$ (plus
+symmetric, $h\[m\] = h\[M-1-m\]$, the phase is exactly $-\omega (M-1)/2$ (plus
 jumps of $\pi$ where $H$ changes sign), so **every frequency is delayed by the
-same $(M-1)/2$ samples** and waveform shapes are preserved. Asymmetric taps
-delay different frequencies by different amounts.
+same $(M-1)/2$ samples** and waveform shapes are preserved. Antisymmetric
+taps, $h\[m\] = -h\[M-1-m\]$, give the same constant delay with an extra
+$90°$ phase shift. Other asymmetric taps delay different frequencies by
+different amounts.
+
+The four **linear-phase types** combine the symmetry with the parity of $M$.
+Each symmetry forces zeros of $H(z)$ at $z = 1$ (DC) or $z = -1$ (Nyquist),
+which rules out some filter shapes:
+
+| Type | Taps | Length $M$ | Forced zeros | Cannot be |
+|---|---|---|---|---|
+| I | symmetric | odd | none | (any shape is possible) |
+| II | symmetric | even | $z = -1$ (Nyquist) | high-pass, band-stop |
+| III | antisymmetric | odd | $z = 1$ and $z = -1$ | low-pass, high-pass |
+| IV | antisymmetric | even | $z = 1$ (DC) | low-pass |
+
+Types III and IV suit differentiators and Hilbert transformers.
 
 **Windowed-sinc design.** The ideal low-pass with cutoff $f_c$ Hz has the
 infinitely long impulse response
-$h_{\mathrm{ideal}}\[n\] = 2 (f_c/f_s)\, \mathrm{sinc}\big(2 (f_c / f_s)\, n\big)$,
+$h_{\mathrm{ideal}}\[n\] = 2 (f_c/f_s)\\, \mathrm{sinc}\big(2 (f_c / f_s)\\, n\big)$,
 with $\mathrm{sinc}(u) = \sin(\pi u)/(\pi u)$. Truncate it to $M$ taps centred
 on $(M-1)/2$, multiply by a window $w\[n\]$ (Hamming here) to tame the ripples,
-and scale so that $\sum_j h\[j\] = 1$ (unit gain at DC):
+and scale so that $\sum_m h\[m\] = 1$ (unit gain at DC):
 
-$$h\[n\] = c \; 2\frac{f_c}{f_s}\, \mathrm{sinc}\!\left(2 \frac{f_c}{f_s}\left(n - \frac{M-1}{2}\right)\right) w\[n\]$$
+$$h\[n\] = c \\; 2\frac{f_c}{f_s}\\, \mathrm{sinc}\\!\left(2 \frac{f_c}{f_s}\left(n - \frac{M-1}{2}\right)\right) w\[n\]$$
 
 where $c$ is the normalising constant. The response passes through about 0.5
-($-6$ dB) at $f_c$, and the transition band narrows as $M$ grows.
+($-6$ dB) at $f_c$, and the transition band narrows as $M$ grows. A Hamming
+design gives a stop-band attenuation of about 53 dB whatever $M$ is (the lab
+finds its first stop-band lobe at $-52.2$ dB); do not confuse this with the
+Hamming *window's* own peak side lobe, $-43$ dB (chapter 03).
 
 ## With the library
 
@@ -259,6 +279,11 @@ let skew = topics::fir(&[0.5, 0.3, 0.2], 16_000.0);
 assert!(skew.quantity("Group delay").is_none());
 assert!((skew.quantity("Group delay at DC").unwrap().value - 0.7).abs() < 1e-12);
 
+// Antisymmetric taps: type III (odd length) and type IV (even length, zero at DC).
+assert!(topics::fir(&[1.0, 0.0, -1.0], 16_000.0).has_warning_containing("type III"));
+let t4 = topics::fir(&[1.0, -1.0], 16_000.0);
+assert!(t4.has_warning_containing("type IV") && t4.quantity("DC gain").unwrap().value == 0.0);
+
 let long = topics::fir(&[1.0 / 200.0; 200], 16_000.0);
 assert!(long.has_warning_containing("FFT convolution"));
 println!("{ma}");
@@ -357,6 +382,11 @@ assert!(doc.has_warning_containing("type I") && doc.quantity("Group delay").unwr
 * A windowed sinc is $-6$ dB (not $-3$ dB) at its design cutoff.
 * SciPy's `lfilter(h, 1, x)` returns the full-length causal output; the crate's
   `apply_filter` equals `lfilter(h, 1, x)[M-1:]`. Compare like with like.
+
+## References
+
+* A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., Pearson, 2010. Linear-phase FIR types and window design.
+* F. J. Harris, "On the use of windows for harmonic analysis with the discrete Fourier transform", *Proceedings of the IEEE* 66(1), 51-83, 1978.
 
 ## See also
 

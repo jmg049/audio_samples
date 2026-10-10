@@ -1,19 +1,22 @@
 # 06. IIR filters: design, poles, zeros and stability
 
-A telephone channel band-limits speech, a hum filter removes 50 Hz mains, a
-pre-emphasis filter tilts the spectrum before LPC analysis: all are recursive
-(infinite impulse response, IIR) filters. They reach a steep roll-off with a
-handful of coefficients, but they feed their output back into themselves, so
-they can ring, distort phase and even become unstable. This chapter designs a
-Butterworth filter the way the library does, finds its poles, and checks
-stability and the frequency response numerically.
+A telephone channel band-limits speech, a notch filter removes 50 Hz mains
+hum, a de-emphasis filter $1/(1 - \alpha z^{-1})$ undoes the pre-emphasis of
+chapter 08 after synthesis: all are recursive (infinite impulse response, IIR)
+filters. (Pre-emphasis itself, $1 - \alpha z^{-1}$, has no feedback: it is an
+FIR filter.) IIR filters reach a steep roll-off with a handful of coefficients,
+but they feed their output back into themselves, so they can ring, distort
+phase and even become unstable. This chapter designs a Butterworth filter the
+way the library does, finds its poles, checks stability and the frequency
+response numerically, and ends the "With the library" section with a 50 Hz hum
+notch.
 
 ## Concept
 
 **Difference equation.** An IIR filter computes each output sample from the
 current and past inputs *and* past outputs:
 
-$$y\[n\] = \sum_{k=0}^{M} b_k\, x\[n-k\] - \sum_{k=1}^{N} a_k\, y\[n-k\]$$
+$$y\[n\] = \sum_{k=0}^{M} b_k\\, x\[n-k\] - \sum_{k=1}^{N} a_k\\, y\[n-k\]$$
 
 where $x\[n\]$ and $y\[n\]$ are the input and output samples (dimensionless),
 $b_k$ are the feed-forward coefficients, $a_k$ the feedback coefficients
@@ -30,7 +33,8 @@ circle, $H(e^{j\omega})$ with $\omega = 2\pi f / f_s$, where $f$ is the
 frequency in Hz and $f_s$ the sample rate in Hz.
 
 **Stability.** A causal filter is bounded-input bounded-output stable if and
-only if every pole satisfies $|p_i| < 1$. A pole at radius $r$ contributes a
+only if every pole satisfies $|p_i| < 1$ (the poles of $H(z)$ in lowest terms,
+after cancelling any factor common to $B$ and $A$). A pole at radius $r$ contributes a
 term $r^n$ to the impulse response, so the closer $r$ is to 1, the longer the
 filter rings.
 
@@ -44,7 +48,7 @@ cutoff in rad/s. At $\Omega = \Omega_c$ the power is halved:
 $10 \log_{10}(1/2) = -3.01$ dB. Its $N$ poles sit on a circle of radius
 $\Omega_c$ in the left half of the s-plane:
 
-$$s_k = \Omega_c\, e^{j\pi(2k + N + 1)/(2N)}, \quad k = 0, \dots, N-1$$
+$$s_k = \Omega_c\\, e^{j\pi(2k + N + 1)/(2N)}, \quad k = 0, \dots, N-1$$
 
 **Bilinear transform with pre-warping.** The digital filter is obtained by
 substituting
@@ -75,9 +79,19 @@ $$H(z) = \prod_{i=1}^{S} \frac{b_{0i} + b_{1i} z^{-1} + b_{2i} z^{-2}}{1 + a_{1i
 where $S = \lceil N/2 \rceil$ is the number of sections and each row is
 stored in SciPy layout `[b0, b1, b2, a0, a1, a2]` with `a0 = 1`.
 
-**Chebyshev type I** trades flatness for steepness: the pass band ripples
-between 0 and $-r_p$ dB, where $r_p$ is the ripple in dB, and at $f_c$ the gain
-is $-r_p$ dB rather than $-3.01$ dB.
+**Chebyshev type I** trades flatness for steepness. Its analogue magnitude is
+
+$$|H_a(j\Omega)|^2 = \frac{1}{1 + \varepsilon^2 T_N^2(\Omega / \Omega_c)}, \qquad \varepsilon^2 = 10^{r_p/10} - 1$$
+
+where $r_p$ is the pass-band ripple in dB, $\varepsilon$ the (dimensionless)
+ripple factor and $T_N$ the Chebyshev polynomial of order $N$:
+$T_N(x) = \cos(N \arccos x)$ for $|x| \le 1$, which oscillates between $-1$ and
+$1$, and $T_N(x) = \cosh(N \\,\mathrm{arccosh}\\, x)$ for $x > 1$, which grows
+like $2^{N-1}x^N$. So the pass band ripples between 0 and $-r_p$ dB, and at
+$\Omega_c$ ($T_N(1) = 1$) the gain is $-r_p$ dB rather than $-3.01$ dB. At DC,
+$T_N(0) = \cos(N\pi/2)$ is $\pm 1$ for even $N$ (gain $-r_p$ dB) and 0 for odd
+$N$ (gain 0 dB). As for the Butterworth, the bilinear transform with
+pre-warping turns $\Omega/\Omega_c$ into $\tan(\pi f/f_s)/\tan(\pi f_c/f_s)$.
 
 **Zero-phase filtering.** Running the filter forwards and then backwards
 (`filtfilt`) gives the overall response $|H|^2$ with zero phase: no delay,
@@ -131,8 +145,12 @@ Apply it to a signal with
 (causal, like `scipy.signal.sosfilt`) or
 [`AudioIirFiltering::filtfilt`](crate::AudioIirFiltering::filtfilt)
 (zero phase, like `sosfiltfilt`). For a 1 kHz tone the causal filter attenuates
-by 3.01 dB and delays by half a period (a 4th-order Butterworth has $-180°$ of
-phase at its cutoff); `filtfilt` attenuates by 6.02 dB and does not delay.
+by 3.01 dB and shifts the tone by half a period, 8 samples (a 4th-order
+Butterworth has $-180°$ of phase at its cutoff); `filtfilt` attenuates by
+6.02 dB and does not delay. Half a period is the **phase delay**
+$-\arg H / \omega$. The **group delay** of chapter 05, the delay of the envelope
+of a narrow-band signal, is larger there: 9.66 samples. The two differ because
+IIR phase is not linear in frequency.
 
 ```rust
 use audio_samples::operations::types::IirFilterDesign;
@@ -161,7 +179,95 @@ assert!((amp_db(o) + 3.01).abs() < 0.2);
 assert!((amp_db(w) + 6.02).abs() < 0.2);
 assert_eq!(lag(o), 8); // half of the 16-sample period: -180 degrees
 assert_eq!(lag(w), 0); // zero phase
+
+// Group delay at 1 kHz, -d(arg H)/d(omega), by a central difference on the
+// design's response. The ratio H(f + d) / H(f - d) avoids phase wrapping;
+// a 0.01 Hz step makes the difference error negligible (< 1e-6 samples).
+let (fs, d) = (16_000.0, 0.01);
+let (m, ph) = design.frequency_response(&[1_000.0 - d, 1_000.0 + d], fs).unwrap();
+let h = |i: usize| num_complex::Complex64::from_polar(m[i], ph[i]);
+let group_delay = -(h(1) / h(0)).arg() / (2.0 * std::f64::consts::PI * 2.0 * d / fs);
+assert!((group_delay - 9.66).abs() < 0.01); // samples, versus a phase delay of 8
 ```
+
+**A 50 Hz hum notch.** Mains hum is a narrow tone; removing it calls for a
+filter with a zero exactly on the unit circle at $\omega_0 = 2\pi f_0/f_s$ and
+poles just inside at the same angle, so that the response recovers within a
+few hertz. That is the band-stop biquad of the RBJ *Audio EQ Cookbook*
+(Bristow-Johnson), available as
+[`EqBand::band_stop`](crate::operations::types::EqBand::band_stop):
+
+$$H(z) = \frac{1 - 2\cos\omega_0\\, z^{-1} + z^{-2}}{(1 + \alpha) - 2\cos\omega_0\\, z^{-1} + (1 - \alpha) z^{-2}}, \qquad \alpha = \frac{\sin \omega_0}{2Q}$$
+
+where $f_0$ is the notch frequency in Hz and $Q$ (dimensionless) is $f_0$
+divided by the $-3$ dB bandwidth in Hz. The poles have radius
+$r = \sqrt{(1-\alpha)/(1+\alpha)}$, and the closer $r$ is to 1, the narrower the
+notch and the longer it takes to settle (time constant about $1/(1-r)$
+samples).
+
+```rust
+use audio_samples::operations::types::EqBand;
+use audio_samples::{AudioParametricEq, AudioSamples, sample_rate, sine_wave};
+use num_complex::Complex64;
+use std::f64::consts::PI;
+use std::time::Duration;
+
+let (fs, f0, q) = (16_000.0, 50.0, 10.0);
+
+// The cookbook coefficients, evaluated on the unit circle.
+let w0 = 2.0 * PI * f0 / fs;
+let alpha = w0.sin() / (2.0 * q);
+let (b, a) = ([1.0, -2.0 * w0.cos(), 1.0], [1.0 + alpha, -2.0 * w0.cos(), 1.0 - alpha]);
+let gain = |f: f64| {
+    let z1 = Complex64::from_polar(1.0, -2.0 * PI * f / fs); // z^-1
+    ((b[0] + b[1] * z1 + b[2] * z1 * z1) / (a[0] + a[1] * z1 + a[2] * z1 * z1)).norm()
+};
+// A true zero: |H(f0)| is 0 up to rounding (a 1e-16 numerator divided by a
+// denominator of only 2 alpha sin(w0) = 4e-5, hence 1e-9).
+assert!(gain(f0) < 1e-9);
+// The -3 dB edges (|H|^2 = 1/2), found by bisection on each side of f0.
+let edge = |mut lo: f64, mut hi: f64, rising: bool| {
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if (gain(mid).powi(2) < 0.5) == rising { lo = mid } else { hi = mid }
+    }
+    0.5 * (lo + hi)
+};
+let bandwidth = edge(f0, 2.0 * f0, true) - edge(1.0, f0, false);
+assert!((bandwidth - f0 / q).abs() < 0.01); // 5 Hz wide, as Q = 10 promises
+let r = ((1.0 - alpha) / (1.0 + alpha)).sqrt();
+assert!((1.0 / (1.0 - r) - 1019.0).abs() < 1.0); // about 1019 samples = 64 ms to settle
+
+// Apply it to 50 Hz hum plus a 1 kHz tone (a stand-in for speech), 2 s long.
+let dur = Duration::from_secs(2);
+let hum = sine_wave::<f64>(50.0, dur, sample_rate!(16000), 0.5);
+let tone = sine_wave::<f64>(1_000.0, dur, sample_rate!(16000), 0.5);
+let mix: Vec<f64> = hum.as_slice().unwrap().iter().zip(tone.as_slice().unwrap()).map(|(p, q)| p + q).collect();
+let mix = AudioSamples::new_mono(ndarray::Array1::from(mix), sample_rate!(16000)).unwrap();
+let out = mix.apply_eq_band(&EqBand::band_stop(f0, q)).unwrap();
+
+// Measure in the second half, after the notch has settled (16 time constants).
+// 16 000 samples hold whole periods of both tones, so one DFT bin each is exact.
+let tail = &out.as_slice().unwrap()[16_000..];
+let amplitude = |f: f64| {
+    let (re, im) = tail.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
+        let ph = 2.0 * PI * f * n as f64 / fs;
+        (re + v * ph.cos(), im - v * ph.sin())
+    });
+    2.0 * (re * re + im * im).sqrt() / tail.len() as f64
+};
+let hum_db = 20.0 * (amplitude(50.0) / 0.5).log10();
+let tone_db = 20.0 * (amplitude(1_000.0) / 0.5).log10();
+// Measured: the hum is 160.5 dB down (what is left is the start-up
+// transient, still decaying), the tone loses only 0.0001 dB.
+assert!(hum_db < -150.0);
+assert!(tone_db.abs() < 1e-3);
+```
+
+Once settled, the notch removes the hum by more than 150 dB (160.5 dB here)
+and leaves the 1 kHz tone untouched to 0.001 dB. Without the zero on the unit circle, a peaking cut
+([`EqBand::peak`](crate::operations::types::EqBand::peak) with a negative
+gain) can only attenuate 50 Hz by the gain you ask for.
 
 ## Under the hood
 
@@ -287,9 +393,10 @@ assert!(doc.has_warning_containing("very sensitive to rounding"));
    Butterworth low-pass (1 kHz, 16 kHz) at 1 kHz and at 2 kHz, then check with
    `frequency_response`.
 2. **Chebyshev versus Butterworth.** For a 4th-order Chebyshev I low-pass with
-   1 dB ripple at 1 kHz (16 kHz), predict the gain at 1 kHz and the largest
-   and smallest gain between 0 and 1 kHz. Is it more or less attenuating than
-   the Butterworth at 2 kHz?
+   1 dB ripple at 1 kHz (16 kHz), use the Chebyshev magnitude formula of the
+   Concept section to predict the gain at 1 kHz, the largest and smallest gain
+   between 0 and 1 kHz, and the attenuation at 2 kHz. Is it more or less
+   attenuating than the Butterworth there?
 3. **Where are the zeros of a high-pass?** The low-pass zeros sit at $z = -1$
    (Nyquist). Predict where the zeros of a 4th-order Butterworth *high-pass*
    lie, then find them from `sos_coefficients`.
@@ -320,8 +427,12 @@ assert!((predicted + 51.0).abs() < 0.05);
 ```
 
 2. At $f_c$ the Chebyshev gain is $-r_p = -1$ dB. With an even order the gain
-   at DC is also $-1$ dB and the ripple peaks touch 0 dB. At 2 kHz it gives
-   35.5 dB of attenuation, 10 dB more than the Butterworth's 25.5 dB.
+   at DC is also $-1$ dB ($T_4(0) = 1$) and the ripple peaks ($T_4 = 0$) touch
+   0 dB. At 2 kHz, $x = \tan(\pi/8)/\tan(\pi/16) = 2.0824$,
+   $T_4(x) = \cosh(4\\,\mathrm{arccosh}\\,x) = 116.7$ and
+   $\varepsilon^2 = 10^{0.1} - 1 = 0.2589$, so the attenuation is
+   $10\log_{10}(1 + \varepsilon^2 T_4^2) = 35.5$ dB, 10 dB more than the
+   Butterworth's 25.5 dB.
 
 ```rust
 use audio_samples::nzu;
@@ -335,8 +446,15 @@ assert!((db[1000] + 1.0).abs() < 1e-6); // -1 dB at fc
 assert!((db[0] + 1.0).abs() < 1e-6); // -1 dB at DC (even order)
 let max = db.iter().cloned().fold(f64::MIN, f64::max);
 assert!(max.abs() < 1e-3); // ripple peaks touch 0 dB (to the 1 Hz grid)
+// The formula's prediction at 2 kHz, and the measurement.
+let x = (std::f64::consts::PI / 8.0).tan() / (std::f64::consts::PI / 16.0).tan();
+let t4 = (4.0 * x.acosh()).cosh();
+let eps2 = 10f64.powf(0.1) - 1.0;
+let predicted = 10.0 * (1.0 + eps2 * t4 * t4).log10();
+assert!((x - 2.0824).abs() < 1e-4 && (t4 - 116.7).abs() < 0.05 && (eps2 - 0.2589).abs() < 1e-4);
+assert!((predicted - 35.5).abs() < 0.05);
 let (m2, _) = cheb.frequency_response(&[2_000.0], 16_000.0).unwrap();
-assert!((20.0 * m2[0].log10() + 35.5).abs() < 0.1);
+assert!((20.0 * m2[0].log10() + predicted).abs() < 1e-6); // the design obeys the formula
 ```
 
 3. A high-pass must block DC, so its zeros move to $z = +1$ (all four of
@@ -395,6 +513,12 @@ assert!((20.0 * peak.log10() + 51.0).abs() < 0.1);
   [`IirFilterDesign::frequency_response`](crate::operations::types::IirFilterDesign::frequency_response)
   or [`SosFilter::frequency_response`](crate::SosFilter::frequency_response).
 
+## References
+
+- A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., Pearson, 2010. The bilinear transform, Butterworth and Chebyshev design.
+- R. Bristow-Johnson, *Cookbook formulae for audio equalizer biquad filter coefficients* (the "Audio EQ Cookbook"). The notch (band-stop) biquad used above.
+- P. Virtanen et al., "SciPy 1.0: fundamental algorithms for scientific computing in Python", *Nature Methods* 17, 261-272, 2020. The `iirfilter` design pipeline the library ports.
+
 ## See also
 
 - [`IirFilterDesign`](crate::operations::types::IirFilterDesign),
@@ -403,6 +527,10 @@ assert!((20.0 * peak.log10() + 51.0).abs() < 0.1);
 - [`AudioIirFiltering::apply_iir_filter`](crate::AudioIirFiltering::apply_iir_filter),
   [`AudioIirFiltering::filtfilt`](crate::AudioIirFiltering::filtfilt),
   [`SosFilter`](crate::SosFilter) (streaming, block by block)
+- [`EqBand::band_stop`](crate::operations::types::EqBand::band_stop),
+  [`EqBand::peak`](crate::operations::types::EqBand::peak),
+  [`AudioParametricEq::apply_eq_band`](crate::AudioParametricEq::apply_eq_band)
+  (RBJ cookbook biquads)
 - [`Explain`](crate::educational::Explain), [`ExplainFor`](crate::educational::ExplainFor)
 - Previous chapter: [05. Convolution and FIR filters](crate::guide::c05_convolution_fir);
   next chapter: [07. Resampling](crate::guide::c07_resampling)

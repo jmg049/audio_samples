@@ -24,7 +24,8 @@ $$\cos(2\pi f n T) = \cos(2\pi (f + m f_s) n T)$$
 because the extra phase $2\pi m f_s n T = 2\pi m n$ is a whole number of
 turns. Here $f$ is a tone frequency in Hz. Since $\cos$ is even, $-f$ gives the
 same samples too, so the tones $f$, $f + m f_s$ and $m f_s - f$ are
-indistinguishable once sampled.
+indistinguishable once sampled (up to a reversal of phase for the
+$m f_s - f$ family: a sine comes back with its sign flipped).
 
 **Nyquist frequency and the sampling theorem.** The highest frequency that is
 represented unambiguously is the Nyquist frequency
@@ -34,7 +35,7 @@ $$f_N = f_s / 2$$
 in Hz. If $x_a$ contains no energy at or above $f_N$, it is recovered exactly
 from its samples by sinc interpolation (Whittaker-Shannon):
 
-$$x_a(t) = \sum_n x\[n\] \, \mathrm{sinc}\!\left(\frac{t - nT}{T}\right), \qquad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
+$$x_a(t) = \sum_n x\[n\] \\, \mathrm{sinc}\\!\left(\frac{t - nT}{T}\right), \qquad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
 
 where $u$ is a dimensionless time offset in sampling periods.
 
@@ -100,15 +101,48 @@ assert!((row[peak] - 1000.0).abs() < 1e-6);
 
 // The High tier low-pass filters below 8 kHz first, so the tone is removed.
 let high = resample(&hi, sample_rate!(16000), ResamplingQuality::High).unwrap();
+let hs = high.as_slice().unwrap();
+let db = |v: f64| 20.0 * v.log10();
+
+// Alias rejection, measured in the steady state: the middle 100 ms of the
+// output (samples 1200..2800) holds exactly 500 periods of 5 kHz, so one DFT
+// bin gives the amplitude of what is left at 5 kHz, compared with the 0.5 the
+// naive decimator delivers there.
+let amplitude = |x: &[f64], f: f64| {
+    let (re, im) = x.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
+        let ph = 2.0 * std::f64::consts::PI * f * n as f64 / 16_000.0;
+        (re + v * ph.cos(), im - v * ph.sin())
+    });
+    2.0 * (re * re + im * im).sqrt() / x.len() as f64
+};
+let steady_db = db(amplitude(&hs[1_200..2_800], 5_000.0) / 0.5);
+println!("steady-state alias: {steady_db:.1} dB");
+// About 142 dB down (close to the f32 floor of the resampler), as in chapter 07.
+// 1 dB tolerance: a level this low is set by f32 rounding.
+assert!((steady_db + 141.7).abs() < 1.0);
+
+// Over the whole 250 ms the picture is worse, and not because of aliasing:
+// the tone starts and stops abruptly, and those edges are broadband clicks
+// that the filter passes. The 5 kHz bin of the full output is 82 dB below the
+// naive alias, and the largest bin anywhere (at 8 kHz) only 70 dB below it.
 let high_spec = high.rfft(nzu!(4000)).unwrap();
-let largest = high_spec.iter().copied().fold(0.0, f64::max);
-let rejection_db = 20.0 * (row[peak] / largest).log10();
-assert!(rejection_db > 70.0); // measured: about 70.3 dB
+let hrow = high_spec.row(0);
+let bin_5k_db = db(row[peak] / hrow[1250]);
+let top = (0..hrow.len()).max_by(|&a, &b| hrow[a].total_cmp(&hrow[b])).unwrap();
+let largest_db = db(row[peak] / hrow[top]);
+println!("5 kHz bin {bin_5k_db:.1} dB, largest bin {largest_db:.1} dB at {} Hz", top * 4);
+assert!((bin_5k_db - 82.4).abs() < 0.1);
+assert_eq!(top * 4, 8_000);
+assert!((largest_db - 70.3).abs() < 0.1);
 ```
 
 The naive version did not lose the tone; it *moved* it to 5 kHz at full
 strength, where it is indistinguishable from a genuine 5 kHz component. The
-proper resampler leaves nothing within 70 dB of it.
+proper resampler rejects the alias by about 142 dB in the steady state. Measure
+over the whole signal and the figure drops to 82 dB at 5 kHz (70 dB for the
+largest bin, at 8 kHz): the residue there is the broadband click of a tone
+switched on and off abruptly, not aliasing. Always measure rejection away from
+the ends of a test signal, as chapter 07 does.
 
 The same happens when a waveform is synthesised. A naive square wave
 ([`square_wave`](crate::utils::generation::square_wave)) switches between
@@ -155,7 +189,7 @@ assert!(s_clean[6900] / s_clean[700] < 1e-9);
 The folding formula is a one-liner. Check it against the library over a sweep
 of frequencies, and check the identity behind it: the samples of an 11 kHz sine
 at 16 kHz are exactly those of a 5 kHz sine with inverted sign, because
-$\sin(2\pi \cdot 11000\, n/16000) = \sin(2\pi(11000 - 16000)\, n/16000) = -\sin(2\pi \cdot 5000\, n / 16000)$.
+$\sin(2\pi \cdot 11000\\, n/16000) = \sin(2\pi(11000 - 16000)\\, n/16000) = -\sin(2\pi \cdot 5000\\, n / 16000)$.
 
 ```rust
 use audio_samples::educational::topics;
@@ -266,7 +300,8 @@ let peak = (0..mag.len()).max_by(|&a, &b| mag[a].total_cmp(&mag[b])).unwrap();
 assert_eq!(peak as f64 * 5.0, 7_050.0);
 
 // 3. Search the odd harmonics h whose alias is 1300 Hz: the 21st (14 700 Hz,
-//    folded about 16 kHz). Its partner below Nyquist is absent in the clean wave.
+//    folded about 16 kHz). The band-limited wave stops at the 11th harmonic
+//    (7700 Hz), so it has nothing at 1300 Hz.
 let h = (1..200).step_by(2).find(|&h| fold(700.0 * f64::from(h), 16_000.0) == 1_300.0);
 assert_eq!(h, Some(21));
 let one_s = Duration::from_secs(1);
@@ -295,6 +330,11 @@ assert!(clean[1300] / clean[700] < 1e-9);  // absent
   as integer decimation agrees with `f64` arithmetic only to about $10^{-7}$.
 * [`rfft`](crate::AudioTransforms::rfft) returns magnitudes and needs
   `n_fft` at least the signal length (chapter 03).
+
+## References
+
+* C. E. Shannon, "Communication in the presence of noise", *Proceedings of the IRE* 37(1), 10-21, 1949.
+* A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., Pearson, 2010. Chapter 4 covers sampling, aliasing and reconstruction.
 
 ## See also
 

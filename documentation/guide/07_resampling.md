@@ -34,7 +34,7 @@ filter that removes them.
 **Ideal band-limited interpolation.** A band-limited signal is fully described
 by its samples, and its value at any time $t$ (seconds) is
 
-$$x(t) = \sum_n x\[n\]\, \mathrm{sinc}(f_{in} t - n), \quad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
+$$x(t) = \sum_n x\[n\]\\, \mathrm{sinc}(f_{in} t - n), \quad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
 
 A practical resampler truncates and windows the sinc, and scales it so that its
 cutoff is $f_c = \min(f_{in}, f_{out})/2$ (slightly less, to leave room for the
@@ -47,7 +47,9 @@ $\[1, 2, 3, 2, 1\]/3$, whose gain at frequency $f$ (Hz) is
 
 $$G(f) = \frac{3 + 4\cos\omega + 2\cos 2\omega}{9}, \quad \omega = 2\pi f / f_{out}$$
 
-where the extra $1/3$ undoes the gain of 3 that the kernel has at DC. $G$ is
+where the $1/9$ combines two factors: zero-stuffing scales the wanted
+(baseband) component by $1/L = 1/3$, and the kernel's DC gain of $9/3 = 3$
+restores it, so $G = H/3$ with $H$ the kernel's response and $G(0) = 1$. $G$ is
 not flat in the pass band and not zero at the images.
 
 **Alias (or image) rejection** is the level of the unwanted component
@@ -68,7 +70,7 @@ where $A$ is a sinusoid's amplitude. 0 dB means no rejection at all.
 
 **Time alignment.** A centred sinc filter delays the signal by half its
 length. The whole-buffer [`resample`](crate::resample) removes that delay in
-whole output frames, $\mathrm{round}(L_{sinc}\, r / 2 - 1)$ where $L_{sinc}$ is
+whole output frames, $\mathrm{round}(L_{sinc}\\, r / 2 - 1)$ where $L_{sinc}$ is
 the number of sinc taps, so input sample $n$ lands at output position $n r$ to
 within half an output frame. (The streaming
 [`StreamingResampler`](crate::StreamingResampler) cannot look ahead; it reports
@@ -78,7 +80,7 @@ its delay with `output_delay`.)
 
 Mix a 1 kHz tone (to keep) with a 10 kHz tone (to remove), both at amplitude
 0.5, and convert 48 kHz to 16 kHz with each tier. The 10 kHz tone should fold
-to $|10\,000 - 16\,000| = 6\,000$ Hz. Measure each component with one DFT bin
+to $|10\\,000 - 16\\,000| = 6\\,000$ Hz. Measure each component with one DFT bin
 over 1600 output samples (whole periods of both 1 kHz and 6 kHz, so there is
 no leakage).
 
@@ -152,7 +154,7 @@ phase of the 1 kHz tone (and $-0.331$ for Medium, predicted $-1/3$).
 ## Under the hood
 
 **`Fast` is plain decimation.** With $r = 1/3$ it returns $x\[3m\]$, and
-$\sin(2\pi\, 10\,000\, m / 16\,000) = -\sin(2\pi\, 6\,000\, m / 16\,000)$ for
+$\sin(2\pi\\, 10\\,000\\, m / 16\\,000) = -\sin(2\pi\\, 6\\,000\\, m / 16\\,000)$ for
 every integer $m$: the 10 kHz tone *is* a 6 kHz tone on the new grid.
 
 ```rust
@@ -227,8 +229,8 @@ for n in 1_200..2_800 {
 
 **Linear interpolation is a poor interpolation filter.** Upsampling a 6 kHz
 tone from 16 kHz to 48 kHz with `Fast` should, by the formula for $G(f)$, droop
-the tone to $G(6\,000) = -3.77$ dB and leave an image at
-$16\,000 - 6\,000 = 10\,000$ Hz at $G(10\,000) = -11.8$ dB.
+the tone to $G(6\\,000) = -3.77$ dB and leave an image at
+$16\\,000 - 6\\,000 = 10\\,000$ Hz at $G(10\\,000) = -11.8$ dB.
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -293,7 +295,7 @@ assert!(!topics::resampling(16_000.0, 48_000.0).has_warning_containing("Downsamp
 
 ## Answers
 
-1. $|13\,000 - 16\,000| = 3\,000$ Hz, at full level because `Fast` has no
+1. $|13\\,000 - 16\\,000| = 3\\,000$ Hz, at full level because `Fast` has no
    anti-aliasing filter.
 
 ```rust
@@ -380,6 +382,11 @@ assert!(err < 1e-3);
 - **Streaming versus offline.** [`StreamingResampler`](crate::StreamingResampler)
   output lags by `output_delay()` frames; the whole-buffer functions remove
   the delay for you.
+
+## References
+
+- R. E. Crochiere and L. R. Rabiner, *Multirate Digital Signal Processing*, Prentice-Hall, 1983.
+- A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., Pearson, 2010. Sampling-rate conversion.
 
 ## See also
 

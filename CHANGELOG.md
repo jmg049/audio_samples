@@ -158,6 +158,22 @@ their documented definitions.
 
 - `StreamingResampler` (`resampling` feature): a stateful, chunk-by-chunk resampler for continuous sources (e.g. audio being decoded live and fed to a playback device at a different sample rate). Wraps the same rubato `Async<f32>` engine and quality tuning as `resample`/`resample_by_ratio`, but keeps the delay line and any leftover input alive across calls instead of requiring the whole clip up front.
 
+### Known issues
+
+- **`mu_compress` does not follow the standard μ-law curve.** It evaluates
+  `sgn(x) ln(μ|x| + ln(1 + μ)) / ln(1 + μ)` instead of
+  `sgn(x) ln(1 + μ|x|) / ln(1 + μ)`, so for μ = 255 it maps 0 to 0.309
+  instead of 0 (`mu_expand` does invert the standard curve). The fix lands
+  with the librosa-parity work. Until then, implement the curve directly (the
+  learning guide's chapter 14 shows how).
+- Upstream limitations of the `spectrograms` crate (2.1.3) that this crate
+  inherits:
+  - `WindowType::Kaiser` is inaccurate for β > 3.75.
+  - The gammatone filterbank's default centre frequencies are spaced linearly
+    in Hz, not on the ERB-number scale.
+  - A mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`; it is
+    correct only for the range 0 Hz to Nyquist.
+
 ## 2.0.0
 
 A breaking release that unifies the public API. See

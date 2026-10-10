@@ -17,7 +17,7 @@ $\tau_0$ is not an integer.
 **Autocorrelation.** The (unnormalised) autocorrelation of an $N$-sample frame
 $x$ at lag $\tau$ (samples) is
 
-$$r(\tau) = \sum_{i=0}^{N-1-\tau} x\[i\] \, x\[i+\tau\]$$
+$$r(\tau) = \sum_{i=0}^{N-1-\tau} x\[i\] \\, x\[i+\tau\]$$
 
 It peaks at multiples of the period. The estimator searches
 $\tau_{min} = \lfloor f_s / f_{max} \rfloor \le \tau \le \tau_{max} = \lfloor f_s / f_{min} \rfloor$
@@ -27,8 +27,11 @@ spacing near $f_0$ is
 
 $$\Delta f = \frac{f_s}{\tau} - \frac{f_s}{\tau + 1} = \frac{f_s}{\tau(\tau+1)} \approx \frac{f_0^2}{f_s}$$
 
-so the worst-case error is $\Delta f / 2$: tiny for a 110 Hz voice at 16 kHz
-($\Delta f \approx 0.76$ Hz), but 12 Hz at 440 Hz and 48 Hz at 880 Hz.
+in Hz. The true $f_0$ can fall anywhere between two grid points, so the
+worst-case error is half a step, $\Delta f / 2$. At 16 kHz the step is tiny
+for a 110 Hz voice ($\Delta f \approx 0.76$ Hz, error at most 0.38 Hz) but not
+for higher pitches: $\Delta f \approx 12.0$ Hz at 440 Hz (error at most 6.0 Hz)
+and $\Delta f \approx 46.8$ Hz at 880 Hz (error at most 23.4 Hz).
 
 **YIN** (de Cheveigné and Kawahara, 2002) replaces the product by a squared
 difference, normalises it, and interpolates:
@@ -43,12 +46,22 @@ difference* (CMND). $d'$ starts at 1, stays near 1 for lags shorter than the
 period and dips towards 0 at the period. The estimate is the first lag with
 $d'(\tau) < \theta$ ($\theta$ the threshold, typically 0.1 to 0.2), moved forward
 to the bottom of that dip, and refined by fitting a parabola through
-$d'(\tau_0 - 1), d'(\tau_0), d'(\tau_0 + 1)$:
+$d'(\tau_0 - 1), d'(\tau_0), d'(\tau_0 + 1)$ (this is what the crate and
+librosa do; see the note below):
 
-$$\hat{\tau} = \tau_0 + \frac{1}{2} \, \frac{d'(\tau_0-1) - d'(\tau_0+1)}{d'(\tau_0-1) - 2 d'(\tau_0) + d'(\tau_0+1)}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}$$
+$$\hat{\tau} = \tau_0 + \frac{1}{2} \\, \frac{d'(\tau_0-1) - d'(\tau_0+1)}{d'(\tau_0-1) - 2 d'(\tau_0) + d'(\tau_0+1)}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}$$
 
 so the period is fractional and the integer grid disappears. If no lag dips
-below $\theta$ the frame is declared unvoiced.
+below $\theta$ the crate declares the frame unvoiced.
+
+*How this differs from the paper.* De Cheveigné and Kawahara's step 5
+(parabolic interpolation) fits the parabola to the **raw** difference function
+$d(\tau)$, not to $d'$, because interpolating $d'$ is slightly biased; their
+step 6 ("best local estimate") then re-runs the search around each frame's
+estimate. And when no lag dips below $\theta$, the paper takes the global
+minimum of $d'$ instead of giving up. The crate, like librosa's `yin`,
+interpolates $d'$ and has no step 6; unlike librosa it reports such frames as
+unvoiced.
 
 **Octave errors.** A signal with period $\tau_0$ also repeats at $2\tau_0$,
 $3\tau_0$, …; and if its odd harmonics are weak it *nearly* repeats at
@@ -83,6 +96,18 @@ println!("autocorrelation {ac:.2} Hz, YIN {yin:.3} Hz");
 // the 12-Hz grid step f0^2/f_s.
 assert_eq!(ac, fs / 36.0);
 assert!((ac - 440.0).abs() <= 0.5 * (fs / 36.0 - fs / 37.0));
+
+// The grid steps and worst-case errors quoted in the Concept section: the
+// step between the two integer lags that bracket fs / f0, and half of it.
+let step = |f0: f64| {
+    let tau = (fs / f0).floor();
+    fs / tau - fs / (tau + 1.0)
+};
+for (f0, df, worst) in [(110.0, 0.76, 0.38), (440.0, 12.0, 6.0), (880.0, 46.8, 23.4)] {
+    assert!((step(f0) - df).abs() < 0.05, "{f0}: {}", step(f0));
+    assert!((step(f0) / 2.0 - worst).abs() < 0.05);
+    assert!((step(f0) - f0 * f0 / fs).abs() / step(f0) < 0.1); // close to f0^2/fs
+}
 // YIN interpolates the period and lands within 0.11 Hz.
 assert!((yin - 440.0).abs() < 0.11);
 ```
@@ -133,7 +158,8 @@ while tau < max_tau && cmnd[tau + 1] < cmnd[tau] {
     tau += 1;
 }
 assert_eq!(tau, 36); // ... but the dip bottoms out at 36 (d' = 0.0019)
-// Step 4: parabolic interpolation.
+// Step 4: parabolic interpolation, here on d' (as librosa does; the paper's
+// step 5 interpolates the raw d instead).
 let (a, b, c) = (cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]);
 let tau_hat = tau as f64 + 0.5 * (a - c) / (a - 2.0 * b + c);
 let f_hat = fs / tau_hat;
@@ -180,10 +206,10 @@ assert!((at(0.01) - 200.0).abs() < 0.1); // strict threshold: the true period
 assert_eq!(weak.detect_pitch_autocorr(80.0, 500.0).unwrap().unwrap(), 400.0);
 ```
 
-At the half period the CMND dips to $d'(40) = 0.0198$ (exercise 3 computes
-it): any threshold above that accepts the half period. A strict threshold
-fixes this signal but rejects more real, slightly aperiodic speech frames:
-that is the trade-off the threshold controls.
+At the half period (lag 40) the CMND has a deep dip of its own, and any
+threshold above the bottom of that dip accepts the half period (exercise 3 asks
+how deep it is). A strict threshold fixes this signal but rejects more real,
+slightly aperiodic speech frames: that is the trade-off the threshold controls.
 
 **Tracking a glide.** [`track_pitch`](crate::AudioPitchAnalysis::track_pitch)
 cuts the signal into frames of `window_size` samples every `hop_size` samples
@@ -339,9 +365,11 @@ assert!((f(0.019) - 200.0).abs() < 0.1);
   at most $2\lfloor f_s/f_{min} \rfloor + 1$ samples always return `None`.
 - **`PitchFrame::time` is the frame start**, not its centre (librosa's
   `pyin` reports centred frames).
-- **Not librosa's `yin`.** The crate's YIN has no "best local estimate"
-  fallback: a frame with no dip below $\theta$ is unvoiced, while
-  `librosa.yin` always returns a value. The minimum frame length rule also
+- **Not librosa's `yin`, and not exactly the paper.** Like librosa, the crate
+  interpolates $d'$ (the paper interpolates $d$) and has no "best local
+  estimate" step. Unlike librosa, a frame with no dip below $\theta$ is
+  unvoiced, while `librosa.yin` (and the paper) fall back to the global
+  minimum and always return a value. The minimum frame length rule also
   differs.
 - **The autocorrelation estimate is quantised** to $f_s/\tau$; use YIN (or
   interpolate the peak yourself) when you need better than $f_0^2/f_s$.
@@ -350,6 +378,12 @@ assert!((f(0.019) - 200.0).abs() < 0.1);
   harmonics alternate in strength.
 - `detect_pitch_autocorr` requires $f_{min} > 1$ Hz; both methods reject
   multi-channel audio.
+
+## References
+
+- A. de Cheveigné and H. Kawahara, "YIN, a fundamental frequency estimator for speech and music", *Journal of the Acoustical Society of America* 111(4), 1917-1930, 2002.
+- L. R. Rabiner, "On the use of autocorrelation analysis for pitch detection", *IEEE Transactions on Acoustics, Speech, and Signal Processing* 25(1), 24-33, 1977.
+- M. Mauch and S. Dixon, "pYIN: a fundamental frequency estimator using probabilistic threshold distributions", *Proc. IEEE ICASSP*, 2014. The probabilistic extension used by librosa's `pyin`.
 
 ## See also
 

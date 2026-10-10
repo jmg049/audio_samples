@@ -13,7 +13,7 @@ how the transform is inverted, and what the dB scale of a spectrogram means.
 **Definition (as implemented).** With frame length (and FFT size) $N$, hop
 $H$ and window $w\[n\]$:
 
-$$X_m\[k\] = \sum_{n=0}^{N-1} x\[mH + n - p\] \, w\[n\] \, e^{-j 2\pi k n / N}$$
+$$X_m\[k\] = \sum_{n=0}^{N-1} x\[mH + n - p\] \\, w\[n\] \\, e^{-j 2\pi k n / N}$$
 
 where $m$ is the frame index, $k = 0 \dots \lfloor N/2 \rfloor$ the bin index,
 $p$ the padding in samples and $x\[\cdot\] = 0$ outside the signal. With
@@ -36,17 +36,24 @@ other. A smaller hop gives more frames, not sharper ones.
 multiply by the window again and overlap-add, dividing by the summed squared
 windows:
 
-$$\hat{x}\[n\] = \frac{\sum_m w\[n - mH\] \, y_m\[n - mH\]}{\sum_m w^2\[n - mH\]}$$
+$$\hat{x}\[n\] = \frac{\sum_m w\[n - mH\] \\, y_m\[n - mH\]}{\sum_m w^2\[n - mH\]}$$
 
-This is exact wherever the denominator is non-zero (the NOLA condition), for
-any window and hop, including windows whose plain sum $\sum_m w\[n - mH\]$ is not
-constant (not COLA). With centring, the output has
+This is exact wherever the denominator is non-zero, for any window and hop,
+provided the STFT has not been modified. Two overlap conditions are worth
+naming. **NOLA** (nonzero overlap-add): the summed *squared* windows
+$\sum_m w^2\[n - mH\]$ are never zero, which is all the inverse above needs.
+**COLA** (constant overlap-add): the plain summed windows $\sum_m w\[n - mH\]$
+are the same constant for every $n$, which plain overlap-add without the
+division needs. WOLA works even for windows that are not COLA. If the STFT is
+modified before inversion (masking, a phase vocoder), the frames are no longer
+consistent and the same formula gives the least-squares estimate of Griffin
+and Lim (1984) rather than an exact inverse. With centring, the output has
 $(M-1)H + N - 2\lfloor N/2\rfloor$ samples.
 
 **Spectrogram scales.** Power $P_m\[k\] = |X_m\[k\]|^2$ (no division by $N$),
 magnitude $|X_m\[k\]|$, and decibels
 
-$$P_{\mathrm{dB}} = 10 \log_{10} \max\!\left(P, \; 10^{\,\mathrm{floor}/10}\right)$$
+$$P_{\mathrm{dB}} = 10 \log_{10} \max\\!\left(P, \\; 10^{\\,\mathrm{floor}/10}\right)$$
 
 in dB **re 1** (an absolute reference), where floor is the `LogParams` value in
 dB. `LogParams::new(-80.0)` clamps at power $10^{-8}$; it is **not** librosa's
@@ -254,13 +261,16 @@ println!("{doc}");
 
 1. How many frames does `stft` produce for 2.5 s of audio at 22.05 kHz with
    $N = 2048$, $H = 512$ and centring? Predict, then check.
-2. You want one frame every 10 ms and bins no wider than 20 Hz at 16 kHz.
-   Choose $H$ and the smallest power-of-two $N$, and confirm with the
+2. At 16 kHz you want one frame every 10 ms. Choose $H$, then the smallest
+   power-of-two $N$ for each of two requirements: (a) a **bin spacing**
+   $f_s/N$ of at most 20 Hz; (b) a Hann **main lobe** ($-6$ dB width about
+   $2 f_s/N$, the real resolution) of at most 20 Hz. Confirm (a) with the
    explainer.
 3. A signal is 0.5 s of a full-scale 1 kHz sine followed by 0.5 s of silence.
    With `LogParams::new(-100.0)`, what value do the bins of the last frame
-   take, and how far below the spectrogram's peak is that? (This is the number
-   librosa's `ref=np.max` would report.)
+   take, and how far below the spectrogram's peak is that? (librosa's
+   `power_to_db(S, ref=np.max, top_db=None)` reports this distance; with its
+   default `top_db=80` it would clip it to $-80$ dB.)
 
 ## Answers
 
@@ -279,16 +289,29 @@ assert_eq!(x.samples_per_channel().get(), l);
 let p = StftParams::new(nzu!(2048), nzu!(512), WindowType::Hanning, true).unwrap();
 assert_eq!(x.stft(&p).unwrap().data.ncols(), 108);
 
-// 2. H = 0.010 * 16 000 = 160; N >= 16 000 / 20 = 800, next power of two 1024.
+// 2. H = 0.010 * 16 000 = 160.
+//    (a) bin spacing: N >= 16 000 / 20 = 800, next power of two 1024.
+//    (b) main lobe:   2 * 16 000 / N <= 20, so N >= 1600, next power of two 2048.
 let h = (0.010f64 * 16_000.0) as usize;
 let n = ((16_000.0f64 / 20.0).ceil() as usize).next_power_of_two();
-assert_eq!((h, n), (160, 1024));
+let n_lobe = ((2.0 * 16_000.0f64 / 20.0).ceil() as usize).next_power_of_two();
+assert_eq!((h, n, n_lobe), (160, 1024, 2048));
 let p = StftParams::new(nzu!(1024), nzu!(160), WindowType::Hanning, true).unwrap();
 let d = p.explain_with(&ExplainContext::new().with_sample_rate(16_000.0));
 assert_eq!(d.quantity("Frame period").unwrap().value, 10.0);
-assert_eq!(d.quantity("Frequency resolution").unwrap().value, 15.625);
+assert_eq!(d.quantity("Frequency resolution").unwrap().value, 15.625); // bin spacing
+// (b) The explainer's measured -6 dB main-lobe width: too wide at N = 1024,
+//     narrow enough at N = 2048 (about 2 bins in both cases).
+let lobe = |n: usize| {
+    let p = StftParams::new(std::num::NonZeroUsize::new(n).unwrap(), nzu!(160), WindowType::Hanning, true).unwrap();
+    p.explain_with(&ExplainContext::new().with_sample_rate(16_000.0))
+        .quantity("Main-lobe width (-6 dB)").unwrap().value
+};
+assert!(lobe(1024) > 20.0 && lobe(2048) <= 20.0);
 
-// 3. -100 dB re 1, which is 100 + 42.13 = 142.13 dB below the peak.
+// 3. -100 dB re 1, which is 100 + 42.13 = 142.13 dB below the peak. (librosa
+//    gets the same with top_db=None because its default amin = 1e-10 is the
+//    same -100 dB floor.)
 let mut v = sine_wave::<f64>(1000.0, Duration::from_millis(500), sample_rate!(16000), 1.0)
     .as_slice().unwrap().to_vec();
 v.extend(std::iter::repeat_n(0.0, 8000));
@@ -304,10 +327,12 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
 
 ## Common pitfalls
 
-* Centring pads with **zeros** (librosa `pad_mode='constant'`), not librosa's
-  default reflection, so the first and last frames differ from librosa's.
+* Centring pads with **zeros**, as librosa has done by default since 0.10
+  (`pad_mode='constant'`). Older librosa (< 0.10) and `torch.stft` default to
+  reflection, so their first and last frames differ.
 * The window is the **symmetric** Hann; librosa and SciPy use the periodic
-  one, so values differ slightly unless you pass a custom window.
+  one. Against current librosa this, not the padding, is the real difference:
+  values differ slightly unless you pass the symmetric window yourself.
 * dB values are **re 1** with an absolute floor; there is no `top_db`.
   Subtract the maximum yourself to get "dB below peak".
 * Power is $|X|^2$ with no $1/N$ or window normalisation: a full-scale sine
@@ -317,6 +342,13 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
   $f_\mathrm{min} = 0$ and $f_\mathrm{max} = f_s/2$ in `spectrograms` 2.1.3.
 * A smaller hop does not sharpen anything; only $N$ (and the window shape)
   sets resolution.
+
+## References
+
+* J. B. Allen and L. R. Rabiner, "A unified approach to short-time Fourier analysis and synthesis", *Proceedings of the IEEE* 65(11), 1558-1564, 1977.
+* D. W. Griffin and J. S. Lim, "Signal estimation from modified short-time Fourier transform", *IEEE Transactions on Acoustics, Speech, and Signal Processing* 32(2), 236-243, 1984.
+* F. J. Harris, "On the use of windows for harmonic analysis with the discrete Fourier transform", *Proceedings of the IEEE* 66(1), 51-83, 1978.
+* B. McFee et al., "librosa: audio and music signal analysis in Python", *Proceedings of the 14th Python in Science Conference*, 2015.
 
 ## See also
 

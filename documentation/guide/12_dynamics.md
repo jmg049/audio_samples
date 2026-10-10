@@ -14,17 +14,17 @@ whole processor in a dozen lines.
 non-negative value $d\[n\]$: $|x\[n\]|$ for a peak detector, or the RMS over the
 last 10 ms. A one-pole smoother then produces the envelope
 
-$$e\[n\] = a\, e\[n-1\] + (1 - a)\, d\[n\], \qquad a = e^{-1/(\tau f_s)}$$
+$$e\[n\] = a\\, e\[n-1\] + (1 - a)\\, d\[n\], \qquad a = e^{-1/(\tau f_s)}$$
 
 where $f_s$ is the sample rate in Hz and $\tau$ the time constant in seconds:
 the attack constant $\tau_A$ while $d\[n\] > e\[n-1\]$ (the level is rising) and
 the release constant $\tau_R$ otherwise. After a step from $d_0$ to $d_1$ the
 envelope follows
 
-$$e(t) = d_1 + (d_0 - d_1)\, e^{-t/\tau}$$
+$$e(t) = d_1 + (d_0 - d_1)\\, e^{-t/\tau}$$
 
-so it covers $1 - e^{-1} = 63.2\%$ of the step after one time constant, and its
-10-90 % rise time is $\tau \ln 9 \approx 2.2\,\tau$. (Equipment makers quote
+so it covers $1 - e^{-1} = 63.2\\%$ of the step after one time constant, and its
+10-90 % rise time is $\tau \ln 9 \approx 2.2\\,\tau$. (Equipment makers quote
 attack times in either convention, so numbers are not comparable across
 products.)
 
@@ -39,12 +39,12 @@ so the gain reduction is $r = L - Y = (1 - 1/R)\max(L - T, 0)$ dB. The
 quadratic **soft knee** (Giannoulis, Massberg and Reiss, *JAES* 2012) blends
 the two lines over $\[T - W/2, T + W/2\]$:
 
-$$r = (1 - 1/R)\,\frac{(L - T + W/2)^2}{2W} \quad \text{for } |L - T| \le W/2$$
+$$r = (1 - 1/R)\\,\frac{(L - T + W/2)^2}{2W} \quad \text{for } |L - T| \le W/2$$
 
 It has slope 1 at the lower edge and $1/R$ at the upper edge, so the curve has
 no corner, and at $L = T$ it already reduces by $(1 - 1/R)W/8$ dB.
 
-**Gain.** The output is $y\[n\] = x\[n\]\, 10^{-r\[n\]/20}\, 10^{M/20}$, where $M$ is
+**Gain.** The output is $y\[n\] = x\[n\]\\, 10^{-r\[n\]/20}\\, 10^{M/20}$, where $M$ is
 the make-up gain in dB. Working in dB makes the ratio a slope and the
 threshold an offset.
 
@@ -62,7 +62,7 @@ $d_1(1 - a^{N_L + 1})$, so the overshoot is
 
 $$\Delta = -20 \log_{10}\left(1 - a^{N_L + 1}\right) \ \text{dB}$$
 
-which is about $0.06$ dB for $N_L = 5\,\tau_A f_s$. (The library processes
+which is about $0.06$ dB for $N_L = 5\\,\tau_A f_s$. (The library processes
 whole buffers, so it compensates the delay: output index $n$ stays aligned
 with input index $n$.)
 
@@ -124,6 +124,8 @@ let fs: f64 = 48_000.0;
 let x: Vec<f64> = std::iter::repeat_n(0.01, 4_800).chain(std::iter::repeat_n(1.0, 9_600)).collect();
 let audio: AudioSamples<f64> = AudioSamples::from_mono_vec(NonEmptyVec::new(x).unwrap(), sample_rate!(48000));
 let mut cfg = CompressorConfig::new();
+// Set four fields at once (a destructuring assignment): threshold -20 dBFS,
+// ratio 4:1, hard knee, knee width 0 dB.
 (cfg.threshold_db, cfg.ratio, cfg.knee_type, cfg.knee_width_db) = (-20.0, 4.0, KneeType::Hard, 0.0);
 (cfg.attack_ms, cfg.release_ms, cfg.detection_method) = (5.0, 50.0, DynamicRangeMethod::Peak);
 
@@ -205,6 +207,9 @@ let fs: f64 = 48_000.0;
 let x: Vec<f64> = std::iter::repeat_n(0.0, 960).chain(std::iter::repeat_n(1.0, 2_400)).collect();
 let audio: AudioSamples<f64> = AudioSamples::from_mono_vec(NonEmptyVec::new(x).unwrap(), sample_rate!(48000));
 let peak_db = |lookahead_ms: f64| {
+    // Arguments: ceiling -6 dBFS, attack 1 ms, release 100 ms, hard knee of
+    // width 0 dB, peak detection, the lookahead in ms, and `false` for the
+    // inter-sample-peak option (left off here).
     let lim = LimiterConfig::new(-6.0, 1.0, 100.0, KneeType::Hard, 0.0, DynamicRangeMethod::Peak, lookahead_ms, false);
     let y = audio.apply_limiter(&lim).unwrap();
     20.0 * y.as_slice().unwrap().iter().fold(0.0f64, |m, v| m.max(v.abs())).log10()
@@ -304,7 +309,7 @@ assert_eq!(k, 160);
 
 4. Solve $-20\log_{10}(1 - a^{N_L+1}) < 0.01$: $a^{N_L+1} < 1 - 10^{-0.0005}$,
    so $N_L + 1 > \ln(1 - 10^{-0.0005}) / \ln a = 324.8$, i.e. $N_L \ge 324$ samples
-   (6.8 ms, about $6.8\,\tau_A$).
+   (6.8 ms, about $6.8\\,\tau_A$).
 
 ```rust
 let a: f64 = (-1.0 / 48.0f64).exp(); // 1 ms at 48 kHz
@@ -317,7 +322,7 @@ assert!(overshoot(323) >= 0.01);
 ## Common pitfalls
 
 - **Attack and release are time constants**, not "time to full reduction":
-  63.2 % after $\tau$, 10-90 % in $2.2\,\tau$. Hardware datasheets use either
+  63.2 % after $\tau$, 10-90 % in $2.2\\,\tau$. Hardware datasheets use either
   convention.
 - **Detector choice shifts the threshold.** An RMS detector reads a sine
   3.01 dB below its peak, so the same threshold compresses less than with
@@ -331,6 +336,11 @@ assert!(overshoot(323) >= 0.01);
   which can shift the stereo image.
 - `get_gain_reduction` reports the detector-and-curve reduction without
   lookahead; `apply_compressor` additionally applies the lookahead max-hold.
+
+## References
+
+- D. Giannoulis, M. Massberg and J. D. Reiss, "Digital dynamic range compressor design: a tutorial and analysis", *Journal of the Audio Engineering Society* 60(6), 399-408, 2012. The soft knee used here; the paper also compares detector topologies (where and how the envelope is smoothed).
+- U. Zölzer (ed.), *DAFX: Digital Audio Effects*, 2nd ed., Wiley, 2011.
 
 ## See also
 

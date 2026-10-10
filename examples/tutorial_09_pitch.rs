@@ -52,7 +52,9 @@ fn harmonic_complex(f0: f64, harmonics: &[(u32, f64)], n: usize) -> Vec<f64> {
         .collect()
 }
 
-/// YIN written out (de Cheveigne and Kawahara 2002, steps 2-5). Returns
+/// YIN written out (de Cheveigne and Kawahara 2002, steps 2-4, then parabolic
+/// interpolation on d' as the crate and librosa do; the paper's step 5
+/// interpolates the raw difference function d instead). Returns
 /// (period in samples, d' values for lags 0..=max_tau + 1).
 fn my_yin(x: &[f64], min_tau: usize, max_tau: usize, threshold: f64) -> (Option<f64>, Vec<f64>) {
     let n = x.len();
@@ -264,8 +266,13 @@ fn main() {
                 max_err = max_err.max((f - truth).abs());
             }
         }
+        let err_text = if full_voiced > 0 {
+            format!("{max_err:.2} Hz")
+        } else {
+            "n/a".to_string()
+        };
         println!(
-            "   N = {win:4} ({:2.0} ms), hop {hop:3}: {full_voiced:3} of {full:3} full frames voiced, max |error| {max_err:.2} Hz",
+            "   N = {win:4} ({:2.0} ms), hop {hop:3}: {full_voiced:3} of {full:3} full frames voiced, max |error| {err_text}",
             1000.0 * win as f64 / FS
         );
         if win >= need {

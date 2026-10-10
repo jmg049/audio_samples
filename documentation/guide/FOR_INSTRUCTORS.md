@@ -16,8 +16,9 @@ conventions differ from those references.
   computed in a notebook and in a Rust lab comes from the same code.
 - **Errors that teach.** Invalid parameters produce diagnostics that name the
   parameter, the value and the valid range (with the `fancy` feature, as
-  coloured `miette` reports). In Python they are raised as
-  `audio_samples.exceptions` classes carrying `.code` and `.help`.
+  coloured `miette` reports). In Python most of them are raised as
+  `audio_samples.exceptions` classes carrying `.code` and `.help` (a few
+  parameter constructors still raise a plain `ValueError`).
 - **A library that explains itself** (`educational` feature). A supported
   configuration can describe what it will do before it runs: the formula the
   code evaluates, every symbol with its unit, the derived resolution and
@@ -64,9 +65,13 @@ Each chapter has a matching Rust lab, `examples/tutorial_NN_<topic>.rs`, and a
 matching Python notebook in the Python documentation
 (`docs/source/tutorials/NN_<topic>.ipynb`).
 
-### Everything is checked
+### What is checked
 
-Every number stated in the material is computed and asserted in code:
+Every number in the guide's prose is computed and asserted, in a doctest of
+the same chapter or in its lab. The prose of the module documentation is
+checked by doctests where it has examples; explanatory text without an example
+(for instance comparisons with librosa or citations) is reviewed by hand, not
+tested. Concretely:
 
 - every guide code block is a doctest
   (`cargo test --doc --features educational,full_no_plotting -- guide`);
@@ -116,7 +121,7 @@ liquid-dsp golden fixtures (`tests/filter_reference.rs`, generator in
 | Topic | `audio_samples` | Reference default | To compare like with like |
 |---|---|---|---|
 | STFT window | symmetric Hann (`WindowType::Hanning`) | librosa and SciPy: periodic Hann | pass `scipy.signal.windows.hann(N, sym=True)` as librosa's `window=` |
-| STFT padding | `centre = true` pads ⌊N/2⌋ zeros at each end | librosa ≥ 0.10: `pad_mode="constant"` | same |
+| STFT padding | `centre = true` pads ⌊N/2⌋ zeros at each end | librosa ≥ 0.10: `pad_mode="constant"` (zeros); librosa < 0.10 and `torch.stft`: reflection | same for librosa ≥ 0.10; the remaining difference is the window (row above) |
 | `rfft` | magnitudes \|X\[k\]\| | numpy: complex spectrum | `np.abs(np.fft.rfft(x))` |
 | Mel spectrogram | Slaney mel scale, no filter normalisation, applied to power | librosa: `htk=False`, `norm="slaney"` | `librosa.filters.mel(..., norm=None)` |
 | Mel helpers in `utils::audio_math` | HTK formula | librosa default: Slaney | `librosa.hz_to_mel(f, htk=True)` |
@@ -125,17 +130,41 @@ liquid-dsp golden fixtures (`tests/filter_reference.rs`, generator in
 | Zero-crossing rate | crossings per second over the whole signal | librosa: fraction of samples per frame | divide by the sample rate; frame the signal |
 | Welch PSD | SciPy `welch(scaling="density")` scaling, symmetric Hann, no detrending | SciPy: periodic Hann, constant detrend | `window=hann(N, sym=True)`, `detrend=False` |
 | Integer to float | asymmetric: −1.0 ↔ −32768, +1.0 ↔ 32767 | soundfile: divide by 32768 | differs by at most one least significant bit |
-| YIN | de Cheveigné and Kawahara steps 1–5 with parabolic interpolation; `detect_pitch_yin` is clip-wide | `librosa.yin`: framewise | compare with `track_pitch`, framewise |
+| YIN | de Cheveigné and Kawahara steps 1–4, then parabolic interpolation of the normalised difference d′ (as librosa; the paper's step 5 interpolates the raw difference d, and its step 6 is omitted); a frame with no dip below the threshold is unvoiced; `detect_pitch_yin` is clip-wide | `librosa.yin`: framewise, interpolates d′, falls back to the global minimum | compare with `track_pitch`, framewise, on clearly voiced frames |
 
-Known limitations worth telling students about are documented in each module.
-For example, in this release `mu_compress` deviates from the standard μ-law
-curve, the external `spectrograms` crate's Kaiser window is inaccurate for
-β > 3.75, and the gammatone filterbank's default centre spacing is linear in Hz.
+Known limitations worth telling students about are documented in each module
+and listed under "Known issues" in the crate's `CHANGELOG.md`. For example, in
+this release `mu_compress` deviates from the standard μ-law curve (it does
+not map 0 to 0), the external `spectrograms` crate's Kaiser window is inaccurate for
+β > 3.75, the gammatone filterbank's default centre spacing is linear in Hz,
+and the mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`.
+
+Limitations of the teaching material itself:
+
+- **No figures in the Rust guide.** Rustdoc pages are text and code; plots of
+  spectra, spectrograms, pole-zero diagrams and so on are in the Python
+  notebooks. A few labs write CSV files to the system temporary directory that
+  you can plot with any tool.
+- **All signals are synthetic.** No speech or music recordings are bundled:
+  every example uses generated tones, chirps, noise, click tracks and
+  synthetic vowels, so that every number is reproducible. To work with real
+  recordings, load a WAV file with the companion crate `audio_samples_io`.
+- **Maths is written as LaTeX** (`$…$`). On docs.rs it is rendered by KaTeX
+  (`documentation/katex-header.html`); a plain local `cargo doc` shows the
+  LaTeX source unless you pass
+  `RUSTDOCFLAGS="--html-in-header documentation/katex-header.html"`. The
+  formulas are written to stay readable as source text.
 
 ## Setting up a course environment
 
-- Rust: `cargo add audio_samples --features educational,full_no_plotting` (add
-  `plotting` for HTML plots). Reading and writing WAV or FLAC files is in the
+- Rust: the guide's [README](crate::guide) lists the exact `[dependencies]`
+  block a student needs to compile the chapter code in their own crate
+  (`audio_samples` with the `educational` and `full_no_plotting` features, plus
+  `spectrograms`, `ndarray`, `num-complex` and `non-empty-slice`). Add
+  `plotting` for HTML plots. Reading and writing WAV or FLAC files is in the
   companion crate `audio_samples_io`.
 - Python: `pip install audio_samples`, then
-  `pip install matplotlib scipy librosa jupyter` for the notebooks.
+  `pip install matplotlib scipy librosa jupyter pytest nbmake` for the
+  notebooks and their checks. The notebooks need the `audio_samples.explain`
+  module; if the installed release does not have it yet, build the bindings
+  from source with `maturin develop --release`.

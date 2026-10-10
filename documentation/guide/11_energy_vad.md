@@ -21,13 +21,16 @@ Hz).
 $$r_m = \sqrt{\frac{1}{F} \sum_{i=0}^{F-1} x^2\[mH + i\]}, \qquad L_m = 20 \log_{10} r_m \ \text{dBFS}$$
 
 where $r_m$ is the frame RMS (dimensionless, full scale = 1) and $L_m$ the
-level in decibels relative to full scale. 0 dBFS is an RMS of 1, so a
-full-scale sine sits at $-3.01$ dBFS in this convention. dBFS has no link to
+level in decibels relative to full scale. 0 dBFS is an RMS of 1 (a full-scale
+DC or square wave), so a full-scale sine sits at $-3.01$ dBFS in this
+convention; the AES17 convention (0 dBFS = the RMS of a full-scale sine) reads
+3.01 dB higher. Where this guide means a *peak* level, $20\log_{10}$ of the
+largest absolute sample, it says "dBFS peak". dBFS has no link to
 loudness in the room: the same file can be played at any volume (chapter 14).
 
 **Zero-crossing rate (ZCR)** counts sign changes:
 
-$$z_m = \frac{\#\{\text{sign changes in frame } m\}}{F - 1}$$
+$$z_m = \frac{\\#\\{\text{sign changes in frame } m\\}}{F - 1}$$
 
 in crossings per sample. A sinusoid at $f$ Hz crosses zero $2f$ times per
 second, so $z \approx 2f / f_s$; conversely a ZCR of $z$ corresponds to a
@@ -123,7 +126,7 @@ vowel at all: frame 28 starts at sample 4480 and its last 80 samples are
 vowel, which is enough to exceed $-40$ dBFS. It ends at the end of the first
 inactive frame after the hangover: the last frame touching the fricative is
 frame 89, hangover keeps frame 90 active, and frame 91 ends at
-$91 \cdot 160 + 400 = 14\,960$. The combined region starts one frame later
+$91 \cdot 160 + 400 = 14\\,960$. The combined region starts one frame later
 because frame 28 is mostly noise floor and therefore has a noise-like ZCR.
 
 ## Under the hood
@@ -254,8 +257,9 @@ assert_eq!(doc.quantity("Frames").unwrap().value, 120.0);
 2. **Hangover.** With the energy VAD above, predict how far the end of the
    speech region moves when the hangover goes from 1 to 6 frames. Check with
    `speech_regions`.
-3. **A loud hum.** A 100 Hz tone at $-10$ dBFS is not speech. Which rule
-   rejects it, energy or combined? Predict its per-sample ZCR first.
+3. **A loud hum.** A 100 Hz tone peaking at $-10$ dBFS (amplitude 0.316) is
+   not speech. Predict its RMS level in this chapter's (RMS) convention and its
+   per-sample ZCR, then decide which rule rejects it, energy or combined.
 
 ## Answers
 
@@ -300,18 +304,22 @@ assert_eq!(end(nzu!(6)), 15_760);
 assert_eq!(end(nzu!(6)) - end(nzu!(1)), 5 * 160);
 ```
 
-3. Its ZCR is about $2 \cdot 100 / 16000 = 0.0125$ crossings per sample, below
-   $z_{min} = 0.02$, so the combined rule rejects it while the energy rule
-   ($-13$ dBFS RMS, far above $-40$) accepts it.
+3. Its RMS level is $-10 - 3.01 = -13.0$ dBFS (a sine's RMS is its peak over
+   $\sqrt 2$). Its ZCR is about $2 \cdot 100 / 16000 = 0.0125$ crossings per
+   sample, below $z_{min} = 0.02$, so the combined rule rejects it while the
+   energy rule ($-13.0$ dBFS, far above $-40$) accepts it.
 
 ```rust
 use audio_samples::operations::types::{VadConfig, VadMethod};
 use audio_samples::{AudioVoiceActivityDetection, nzu, sample_rate, sine_wave};
 use std::time::Duration;
 
-let amp = 10f64.powf(-10.0 / 20.0); // -10 dBFS peak, -13 dBFS RMS
+let amp = 10f64.powf(-10.0 / 20.0); // -10 dBFS peak
 let hum = sine_wave::<f64>(100.0, Duration::from_millis(500), sample_rate!(16000), amp);
 let x = hum.as_slice().unwrap();
+// 500 ms holds 50 whole periods, so the RMS is exactly amp / sqrt(2): -13.0 dBFS.
+let rms_db = 20.0 * (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).sqrt().log10();
+assert!((rms_db + 13.01).abs() < 0.01);
 let fr = &x[1_000..1_400];
 let zc = fr.windows(2).filter(|w| (w[0] > 0.0) != (w[1] > 0.0)).count();
 let zcr = zc as f64 / 399.0;
@@ -345,6 +353,12 @@ assert_eq!(active(VadMethod::Combined), 0);
 - **Regions are generous.** A region starts at the first frame touching speech
   and ends at the end of the first inactive frame, so it can extend a frame
   beyond the true speech on both sides.
+
+## References
+
+- L. R. Rabiner and M. R. Sambur, "An algorithm for determining the endpoints of isolated utterances", *Bell System Technical Journal* 54(2), 297-315, 1975. The classic energy and zero-crossing detector.
+- L. R. Rabiner and R. W. Schafer, *Digital Processing of Speech Signals*, Prentice-Hall, 1978.
+- AES17, *AES standard method for digital audio engineering: measurement of digital audio equipment*, Audio Engineering Society (the definition of dBFS as the RMS of a full-scale sine).
 
 ## See also
 

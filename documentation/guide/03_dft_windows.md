@@ -11,7 +11,7 @@ window can and cannot do about that.
 
 **Definition.** For a block of $N$ samples $x\[n\]$, $n = 0, \dots, N-1$:
 
-$$X\[k\] = \sum_{n=0}^{N-1} x\[n\] \, e^{-j 2\pi k n / N}$$
+$$X\[k\] = \sum_{n=0}^{N-1} x\[n\] \\, e^{-j 2\pi k n / N}$$
 
 where $k$ is the integer bin index, $j = \sqrt{-1}$ and $X\[k\]$ is a complex
 number in the units of $x$ (here: full scale) times samples. The exponent is
@@ -25,7 +25,8 @@ where $f_s$ is the sample rate in Hz and $\Delta f$ the bin spacing in Hz. For
 real $x$, $X\[N-k\] = \overline{X\[k\]}$, so only bins $0 \dots \lfloor N/2\rfloor$
 carry information; this crate returns exactly those $\lfloor N/2\rfloor + 1$.
 
-**A tone on a bin.** For $x\[n\] = A\cos(2\pi k_0 n/N)$, $X\[k_0\] = A N/2$ (real);
+**A tone on a bin.** For $x\[n\] = A\cos(2\pi k_0 n/N)$ with $0 < k_0 < N/2$,
+$X\[k_0\] = A N/2$ (real; at $k_0 = 0$ or $N/2$ it is $AN$);
 for $A\sin(\cdot)$, $X\[k_0\] = -jAN/2$. With a window $w\[n\]$ applied first,
 the peak becomes $A \sum_n w\[n\] / 2$.
 
@@ -47,7 +48,7 @@ the main lobe in dB relative to $W(0)$.
 
 This crate's `WindowType::Hanning` is the **symmetric** Hann window
 
-$$w\[n\] = 0.5 - 0.5\cos\!\left(\frac{2\pi n}{N-1}\right)$$
+$$w\[n\] = 0.5 - 0.5\cos\\!\left(\frac{2\pi n}{N-1}\right)$$
 
 (denominator $N-1$, so $w\[0\] = w\[N-1\] = 0$), not the periodic one (denominator
 $N$) that librosa and SciPy use by default for spectra.
@@ -275,7 +276,8 @@ let m = hann_mag(x.as_slice().unwrap().to_vec(), 16_000, 1024);
 // The tone's negative-frequency image leaks a little into bin 64: allow 1e-3.
 assert!((m[64] - 127.875).abs() < 1e-3);
 
-// 3. Main lobe 2 fs / N <= 10 Hz  =>  N >= 3200; the next power of two is 4096.
+// 3. -6 dB main-lobe width, about 2 fs / N for Hann, <= 10 Hz  =>  N >= 3200;
+//    the next power of two is 4096.
 let n_min = 2.0 * 16_000.0 / 10.0;
 assert_eq!(n_min, 3200.0);
 let count = |n: usize| -> usize {
@@ -307,6 +309,12 @@ assert_eq!(count(1024), 1);
 * Zero padding makes plots smoother; it does not improve resolution.
 * The Kaiser window in `spectrograms` 2.1.3 is wrong for $\beta > 3.75$; avoid
   it for teaching material.
+
+## References
+
+* F. J. Harris, "On the use of windows for harmonic analysis with the discrete Fourier transform", *Proceedings of the IEEE* 66(1), 51-83, 1978. The source of the window figures (coherent gain, ENBW, scalloping loss, side-lobe level) used here.
+* J. W. Cooley and J. W. Tukey, "An algorithm for the machine calculation of complex Fourier series", *Mathematics of Computation* 19(90), 297-301, 1965.
+* A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., Pearson, 2010.
 
 ## See also
 

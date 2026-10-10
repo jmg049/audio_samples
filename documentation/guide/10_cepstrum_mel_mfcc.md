@@ -11,7 +11,7 @@ cepstrum upwards, and checks each step against the library.
 
 **Real cepstrum.** For an $N$-point frame with DFT $X\[k\]$,
 
-$$c\[q\] = \frac{1}{N} \sum_{k=0}^{N-1} \log |X\[k\]| \, e^{j 2 \pi k q / N}$$
+$$c\[q\] = \frac{1}{N} \sum_{k=0}^{N-1} \log |X\[k\]| \\, e^{j 2 \pi k q / N}$$
 
 where $q$ is the *quefrency* in samples ($q/f_s$ seconds, $f_s$ the sample
 rate in Hz) and $\log$ is the natural logarithm. Because $|X|$ is real and
@@ -37,22 +37,22 @@ Here $f$ is in Hz and $m$ in mels; the two scales have very different units
 (1000 Hz is 1000 HTK mels but 15 Slaney mels), so never mix them.
 
 **Mel filterbank.** $M$ triangular filters with edges equally spaced in mels:
-$f_i = m^{-1}(m(f_{min}) + i \, \Delta m)$, $\Delta m = (m(f_{max}) - m(f_{min}))/(M+1)$,
+$f_i = m^{-1}(m(f_{min}) + i \\, \Delta m)$, $\Delta m = (m(f_{max}) - m(f_{min}))/(M+1)$,
 $i = 0, \dots, M+1$. Filter $i$ (with neighbours $f_{i-1} < f_i < f_{i+1}$, in Hz)
 weights FFT bin $k$ at frequency $k f_s / N_{fft}$ by
 
 $$H_i(f) = \max\left(0, \min\left(\frac{f - f_{i-1}}{f_i - f_{i-1}}, \frac{f_{i+1} - f}{f_{i+1} - f_i}\right)\right)$$
 
-and the mel power in band $i$ is $P_i = \sum_k H_i(k f_s/N_{fft}) \, |X\[k\]|^2$.
+and the mel power in band $i$ is $P_i = \sum_k H_i(k f_s/N_{fft}) \\, |X\[k\]|^2$.
 
 **MFCC, as this library computes it.** Per frame, with $M$ mel bands from 0 Hz
 to $f_s/2$ (no filter normalisation):
 
-$$L_i = 10 \log_{10} \max(P_i, 10^{-8}), \qquad c_k = \sum_{i=0}^{M-1} L_i \cos\left(\frac{\pi k (i + \frac{1}{2})}{M}\right), \qquad \tilde{c}_k = \left(1 + \frac{L}{2} \sin\frac{\pi k}{L}\right) c_k$$
+$$L_i = 10 \log_{10} \max(P_i, 10^{-8}), \qquad c_k = \sum_{i=0}^{M-1} L_i \cos\left(\frac{\pi k (i + \frac{1}{2})}{M}\right), \qquad \tilde{c}_k = \left(1 + \frac{D}{2} \sin\frac{\pi k}{D}\right) c_k$$
 
 where $L_i$ is the log mel energy in dB with an absolute floor of -80 dB,
 $c_k$ the **unnormalised** DCT-II ($k = 0, \dots, K-1$, $K$ = `n_mfcc`) and
-$\tilde{c}_k$ the liftered coefficient with lifter parameter $L = 22$ by
+$\tilde{c}_k$ the liftered coefficient with lifter parameter $D = 22$ by
 default (0 disables it). librosa's MFCC uses the orthonormal DCT,
 $c_0/\sqrt{M}$ and $c_k \sqrt{2/M}$, and no lifter, so with the lifter off this
 library's values are larger by $\sqrt{M}$ for $c_0$ and $\sqrt{M/2}$ for
@@ -241,7 +241,10 @@ for t in 0..mel.data().ncols() {
         assert!((lib_plain.data[[k, t]] - factor * ortho).abs() < 1e-9 * lib_plain.data[[k, t]].abs().max(1.0));
     }
 }
-// MFCC values here reach a few thousand; 1e-8 absolute is rounding level.
+// The liftered MFCC values here reach about 2300 in magnitude (2298), so
+// 1e-8 absolute is rounding level.
+let largest = lib.data.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+assert!((largest - 2298.06).abs() < 0.01);
 assert!(worst < 1e-8, "{worst}");
 ```
 
@@ -389,6 +392,14 @@ assert!((factor - 24.91).abs() < 0.005);
   ask `MelParams::explain_with` with the FFT size before choosing `n_mels`.
 - **Cepstral pitch needs several periods in the frame** and fails on breathy
   or weak voicing; YIN (chapter 9) is usually more robust.
+
+## References
+
+- S. B. Davis and P. Mermelstein, "Comparison of parametric representations for monosyllabic word recognition in continuously spoken sentences", *IEEE Transactions on Acoustics, Speech, and Signal Processing* 28(4), 357-366, 1980. The MFCC.
+- M. Slaney, *Auditory Toolbox, Version 2*, Technical Report 1998-010, Interval Research Corporation, 1998. The Slaney mel scale and filterbank.
+- S. Young et al., *The HTK Book*, Cambridge University Engineering Department. The HTK mel formula and the sinusoidal lifter.
+- D. O'Shaughnessy, *Speech Communication: Human and Machine*, Addison-Wesley, 1987. The $2595 \log_{10}(1 + f/700)$ mel formula.
+- A. M. Noll, "Cepstrum pitch determination", *Journal of the Acoustical Society of America* 41(2), 293-309, 1967.
 
 ## See also
 

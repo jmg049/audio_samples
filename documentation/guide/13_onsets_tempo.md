@@ -18,39 +18,40 @@ $f_s/H = 86.13$ frames per second.
 **Spectral flux.** With $|X_b\[t\]|$ the magnitude of frequency bin $b$ in frame
 $t$, the half-wave-rectified flux is
 
-$$o\[t\] = \sum_{b} \max\left(0, \, |X_b\[t\]| - |X_b\[t-1\]|\right), \qquad o\[0\] = 0$$
+$$o\[t\] = \sum_{b} \max\left(0, \\, |X_b\[t\]| - |X_b\[t-1\]|\right), \qquad o\[0\] = 0$$
 
 Only *increases* count, so note offsets do not create onsets. This crate
-evaluates it on a constant-Q transform (CQT) whose $B O$ bins (B per octave,
-O octaves) start at $f_{min}$ Hz, with an analysis window of
+evaluates it on a constant-Q transform (CQT) whose $b_o O$ bins ($b_o$ per
+octave, $O$ octaves) start at $f_{min}$ Hz, with an analysis window of
 $N_w = \lfloor 4 f_s / f_{min} \rfloor$ samples (four periods of the lowest
 bin). The magnitudes are **not** squared, despite the method's name ("energy").
-Optionally, values below $\mu$ times a running median of $L$ frames are set to
+Optionally, values below $\mu$ times a running median of $L_{med}$ frames are set to
 zero (`adaptive_threshold`, $\mu$ = `adaptive_threshold_multiplier`).
 
 **Peak picking**, as implemented by
 [`pick_peaks`](crate::operations::peak_picking::pick_peaks), all in **frames**:
 optional pre-emphasis and median filtering; normalisation by the maximum; a
-threshold $\theta\[i\] = \mathrm{clamp}(\max_{|j - i| \le w/2} o\[j\] - \delta, \, \theta_{lo}, \theta_{hi})$
+threshold $\theta\[i\] = \mathrm{clamp}(\max_{|j - i| \le w/2} o\[j\] - \delta, \\, \theta_{lo}, \theta_{hi})$
 (window $w$ frames, $\delta = 0.05$, $\theta_{lo} = 0.01$, $\theta_{hi} = 1$ by default);
 strict local maxima above it; finally, peaks are accepted strongest first and
 dropped if closer than $s$ frames to an accepted one. A peak at frame $i$ is
 reported at $t_i = i H / f_s$ seconds.
 
-**Tempo.** A tempo of $B$ beats per minute is an inter-beat interval of
-$60/B$ seconds, i.e. a lag of
+**Tempo.** A tempo of $\beta$ beats per minute (BPM) is an inter-beat
+interval of $60/\beta$ seconds, i.e. a lag of
 
-$$L = \frac{60 \, f_s}{B \, H} \ \text{frames}, \qquad B = \frac{60 \, f_s}{H \, L}$$
+$$\ell = \frac{60 \\, f_s}{\beta \\, H} \ \text{frames}, \qquad \beta = \frac{60 \\, f_s}{H \\, \ell}$$
 
 [`estimate_tempo`](crate::operations::AudioBeatTracking::estimate_tempo)
 smooths the ODF (7-frame moving average), compresses it ($\ln(1 + 0.5 x)$),
-removes the mean and computes $a(L) = \frac{1}{n - L} \sum_i c\[i\] \, c\[i-L\]$
+removes the mean and computes $a(\ell) = \frac{1}{n - \ell} \sum_i c\[i\] \\, c\[i-\ell\]$
 for the integer lags that map into 40-240 BPM. Each lag is weighted by a
-log-normal prior centred on 120 BPM, $w(B) = \exp\left(-\frac{1}{2} \log_2^2 (B/120)\right)$,
-and the best $a(L) w(B)$ wins. Two consequences: estimates lie on the grid
-$60 f_s / (H L)$ (117.45, 120.19, 123.05 BPM around 120), and a periodic
-envelope correlates at $2L$ and $3L$ too, so **octave errors** (half or a third
-of the tempo) remain possible: the prior only biases the choice.
+log-normal prior centred on 120 BPM, $w(\beta) = \exp\left(-\frac{1}{2} \log_2^2 (\beta/120)\right)$,
+and the best $a(\ell) w(\beta)$ wins. Two consequences: estimates lie on the grid
+$60 f_s / (H \ell)$ (117.45, 120.19, 123.05 BPM around 120), and a periodic
+envelope correlates at $2\ell$ and $3\ell$ too, so **metrical-level errors**
+remain possible: half the tempo (an octave error) or a third of it. The prior
+only biases the choice.
 
 ## With the library
 
@@ -339,7 +340,7 @@ assert!((ms - 52.24).abs() < 0.005);
 ```
 
 **2.** Lags 42, 43 and 44 frames: 123.05, 120.19 and 117.45 BPM. Lag 41
-(126.03 BPM) and lag 45 (114.84 BPM) fall just outside.
+(126.05 BPM) and lag 45 (114.84 BPM) fall just outside.
 
 ```rust
 let bpm = |lag: f64| 60.0 * 44_100.0 / (512.0 * lag);
@@ -349,6 +350,9 @@ let in_range: Vec<f64> = (30..60)
     .map(|b| (b * 100.0).round() / 100.0)
     .collect();
 assert_eq!(in_range, vec![123.05, 120.19, 117.45]);
+// The neighbours just outside the range, and all five values to 0.01 BPM.
+let grid: Vec<f64> = (41..=45).map(|l| (bpm(l as f64) * 100.0).round() / 100.0).collect();
+assert_eq!(grid, vec![126.05, 123.05, 120.19, 117.45, 114.84]);
 ```
 
 **3.** The lag doubles (86 frames at 120 BPM) and the spacing between grid
@@ -382,6 +386,14 @@ assert!((fine - 1.38).abs() < 0.005);
 - **librosa differs**: `librosa.onset.onset_strength` uses a mel spectrogram
   in dB with a one-frame lag and `peak_pick` uses separate pre/post windows
   in frames; numbers will not match this crate.
+
+## References
+
+- J. P. Bello, L. Daudet, S. Abdallah, C. Duxbury, M. Davies and M. B. Sandler, "A tutorial on onset detection in music signals", *IEEE Transactions on Speech and Audio Processing* 13(5), 1035-1047, 2005.
+- S. Dixon, "Onset detection revisited", *Proc. 9th International Conference on Digital Audio Effects (DAFx-06)*, 2006.
+- S. Dixon, "Automatic extraction of tempo and beat from expressive performances", *Journal of New Music Research* 30(1), 39-58, 2001.
+- D. P. W. Ellis, "Beat tracking by dynamic programming", *Journal of New Music Research* 36(1), 51-60, 2007. The log-Gaussian tempo prior.
+- J. C. Brown, "Calculation of a constant Q spectral transform", *Journal of the Acoustical Society of America* 89(1), 425-434, 1991.
 
 ## See also
 

@@ -14,14 +14,14 @@ $\[-1, 1\]$ to an integer code $q$ and back. This crate uses an *asymmetric*
 mapping (see [`conversions`](crate::conversions)) so that both $-1$ and $+1$
 are reachable and the integer round trip is exact:
 
-$$q = \mathrm{round}(x \cdot 2^{b-1}) \;\; (x < 0), \qquad q = \mathrm{round}\big(x \cdot (2^{b-1} - 1)\big) \;\; (x \ge 0)$$
+$$q = \mathrm{round}(x \cdot 2^{b-1}) \\;\\; (x < 0), \qquad q = \mathrm{round}\big(x \cdot (2^{b-1} - 1)\big) \\;\\; (x \ge 0)$$
 
 where $b$ is the word length in bits, $x$ is clamped to $\[-1, 1\]$ and
 $\mathrm{round}$ rounds half away from zero. Converting back divides by the same
 factors. The **step size** (one least-significant bit, LSB, in units of full
 scale) is therefore
 
-$$\Delta = 2^{1-b} \;\; \text{(below zero)}, \qquad \Delta_+ = \frac{1}{2^{b-1} - 1} \;\; \text{(above zero)}$$
+$$\Delta = 2^{1-b} \\;\\; \text{(below zero)}, \qquad \Delta_+ = \frac{1}{2^{b-1} - 1} \\;\\; \text{(above zero)}$$
 
 For $b = 16$: $\Delta = 1/32768$ and $\Delta_+ = 1/32767$, a difference of
 0.003 %. (libsndfile, soundfile and librosa divide by $2^{b-1}$ on both sides.)
@@ -34,10 +34,19 @@ $$\sigma_e^2 = \frac{\Delta^2}{12}$$
 
 in units of full scale squared, where $\hat{x}$ is the quantised value.
 
+**Levels in dB.** This guide quotes powers in **dB re 1**, i.e. relative to
+full scale squared ($10\log_{10}$ of a mean square, so 0 dB is the power of a
+full-scale DC level or square wave), and RMS levels as $20\log_{10}$ of the RMS
+in **dBFS** with the same reference, so a full-scale sine (power $1/2$) is at
+$-3.01$ dBFS. The AES17 standard instead defines 0 dBFS as the RMS of a
+full-scale sine, so AES17 figures are 3.01 dB higher. A level read from the
+largest absolute sample is called **dBFS peak**: a sine of amplitude 0.1 is at
+$-20$ dBFS peak and $-23.01$ dBFS RMS.
+
 **SQNR of a full-scale sine.** A sine of amplitude 1 has power $1/2$. With
 $\Delta = 2/2^b$:
 
-$$\mathrm{SQNR} = 10 \log_{10} \frac{1/2}{\Delta^2/12} = 10\log_{10}\!\left(\tfrac{3}{2} \, 4^{b}\right) \approx 6.02\,b + 1.76 \ \mathrm{dB}$$
+$$\mathrm{SQNR} = 10 \log_{10} \frac{1/2}{\Delta^2/12} = 10\log_{10}\\!\left(\tfrac{3}{2} \\, 4^{b}\right) \approx 6.02\\,b + 1.76 \ \mathrm{dB}$$
 
 Each extra bit buys about 6 dB. A signal peaking $L$ dB below full scale loses
 $L$ dB of SQNR.
@@ -91,7 +100,7 @@ assert!((predicted - 98.09).abs() < 0.01);
 assert!((measured - predicted).abs() < 0.05); // measured: 98.10 dB
 ```
 
-Now the quiet case. A 997 Hz sine only 2.5 LSB tall at 16 kHz, rounded to
+Now the quiet case. A 997 Hz sine of amplitude only 2.5 LSB at 16 kHz, rounded to
 `i16` with and without TPDF dither. The dither is built from the crate's
 [`white_noise`](crate::utils::generation::white_noise), which is uniform on
 $\[-A, A)$, so $A = \Delta/2$:
@@ -122,8 +131,10 @@ let e_plain: Vec<f64> = plain.iter().zip(&xs).map(|(y, v)| y - v).collect();
 let e_dith: Vec<f64> = dith.iter().zip(&xs).map(|(y, v)| y - v).collect();
 
 let power = |v: &[f64]| v.iter().map(|a| a * a).sum::<f64>() / v.len() as f64;
-// Dithered error power is Δ²/4 = 3 x (Δ²/12). Measured: 3.02 (1.23 without dither).
+// Dithered error power is Δ²/4 = 3 x (Δ²/12). Measured: 3.02 x, against
+// 1.23 x without dither (a deterministic error need not be uniform).
 assert!((power(&e_dith) / (lsb * lsb / 12.0) - 3.0).abs() < 0.1);
+assert!((power(&e_plain) / (lsb * lsb / 12.0) - 1.23).abs() < 0.01);
 
 // Distortion: the error's 3rd-harmonic bin (2991 Hz) against its mean bin power.
 let spur_db = |e: &[f64]| {
@@ -144,7 +155,9 @@ assert!(corr(&e_plain) < -0.5);
 assert!(corr(&e_dith).abs() < 0.03);
 ```
 
-Dither tripled the error power, yet it is the better result: the undithered
+Dither raised the error power to $3 \times \Delta^2/12$ (from $1.23 \times$
+without dither, so by a factor of about 2.45 here), yet it is the better
+result: the undithered
 error is half correlated with the signal and piles up at harmonics of 997 Hz,
 which the ear hears as a buzzy distortion, while the dithered error is
 featureless.
@@ -153,7 +166,7 @@ featureless.
 
 Write the requantiser in plain Rust with the same convention, check that it is
 *bit-identical* to the crate's 16-bit and 8-bit (`u8`, offset binary) round
-trips, then measure SQNR at several word lengths against $6.02\,b + 1.76$.
+trips, then measure SQNR at several word lengths against $6.02\\,b + 1.76$.
 
 ```rust
 use audio_samples::{AudioTypeConversion, sample_rate, sine_wave};
@@ -216,8 +229,15 @@ let rule = doc.quantity("Rule of thumb").unwrap().value;
 let dithered = doc.quantity("SQNR with TPDF dither").unwrap().value;
 assert!((sqnr - 98.09).abs() < 0.01 && (rule - 98.09).abs() < 0.01);
 assert!((sqnr - dithered - 4.77).abs() < 0.01); // 10 log10 3
-let noise = doc.quantity("Noise level").unwrap().value; // dBFS
+// Noise power Δ²/12 in dB re 1 (full scale squared) ...
+let noise = doc.quantity("Noise level").unwrap().value;
 assert!((noise - (-101.10)).abs() < 0.01);
+// ... which is -98.09 dBFS in the AES17 convention (full-scale sine = 0 dBFS),
+// 3.01 dB higher. In AES17 terms SQNR = -(noise level in dBFS).
+let aes17 = doc.quantity("Noise level (AES17 dBFS)").unwrap().value;
+assert!((aes17 - (-98.09)).abs() < 0.01);
+assert!((aes17 - noise - 10.0 * 2f64.log10()).abs() < 1e-9);
+assert!((sqnr + aes17).abs() < 1e-9);
 assert!(doc.has_warning_containing("i16"));
 println!("{doc}");
 ```
@@ -227,8 +247,8 @@ println!("{doc}");
 1. How many bits do you need for an SQNR of at least 90 dB on a full-scale
    sine? Predict from the rule, then confirm by measurement at that word length
    and one bit fewer.
-2. A sine peaks at $-20$ dBFS (amplitude 0.1) and is stored as `i16`. Predict
-   its SQNR, then measure it.
+2. A sine peaks at $-20$ dBFS peak (amplitude 0.1) and is stored as `i16`.
+   Predict its SQNR, then measure it.
 3. Predict how much TPDF dither lowers the SQNR of a loud sine (amplitude 0.9)
    quantised to 8 bits, and measure it.
 
@@ -268,6 +288,11 @@ let err: Vec<f64> = back.as_slice().unwrap().iter()
 let err = AudioSamples::new_mono(ndarray::Array1::from(err), fs).unwrap();
 let measured = snr(&quiet, &err).unwrap();
 assert!((measured - 78.09).abs() < 0.1);
+// Its levels: -20 dBFS peak, -23.01 dBFS RMS (whole periods: 997 in 1 s).
+let q = quiet.as_slice().unwrap();
+let peak_db = 20.0 * q.iter().fold(0.0f64, |a, v| a.max(v.abs())).log10();
+let rms_db = 10.0 * (q.iter().map(|v| v * v).sum::<f64>() / q.len() as f64).log10();
+assert!((peak_db + 20.0).abs() < 0.01 && (rms_db + 23.01).abs() < 0.01);
 
 // 3. 10 log10(3) = 4.77 dB. One step at 8 bits is 1/128.
 let lsb = 1.0 / 128.0;
@@ -295,10 +320,16 @@ assert!((penalty - 10.0 * 3f64.log10()).abs() < 0.2);
   nearest. Go through `f64` if you want rounding everywhere.
 * No dither is applied by any conversion; add it yourself before reducing bit
   depth of quiet material.
-* $6.02\,b + 1.76$ dB is for a **full-scale sine**. Speech peaks well below
+* $6.02\\,b + 1.76$ dB is for a **full-scale sine**. Speech peaks well below
   full scale and has a high crest factor; its SQNR is much lower.
 * `white_noise` is *uniform*, not Gaussian: amplitude $A$ gives RMS
   $A/\sqrt{3}$.
+
+## References
+
+* B. Widrow and I. Kollár, *Quantization Noise: Roundoff Error in Digital Computation, Signal Processing, Control, and Communications*, Cambridge University Press, 2008.
+* S. P. Lipshitz, R. A. Wannamaker and J. Vanderkooy, "Quantization and dither: a theoretical survey", *Journal of the Audio Engineering Society* 40(5), 355-375, 1992.
+* AES17, *AES standard method for digital audio engineering: measurement of digital audio equipment*, Audio Engineering Society (the definition of dBFS as the RMS of a full-scale sine).
 
 ## See also
 

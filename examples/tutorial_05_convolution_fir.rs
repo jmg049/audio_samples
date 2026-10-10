@@ -272,11 +272,37 @@ fn main() {
     }
     // A windowed sinc passes half the amplitude at its cutoff (-6 dB).
     assert!((gain(2000.0) - 0.5).abs() < 0.01);
-    // Stop band: measured below -59 dB from 3 kHz up (Hamming side lobes are
-    // nominally -53 dB; the sinc taper pushes them lower here).
+    // Stop band. A Hamming windowed-sinc design has a nominal stop-band
+    // attenuation of about 53 dB (not to be confused with the Hamming window's
+    // own peak side lobe, -43 dB). Scan the response densely (1 Hz steps) to
+    // find the first stop-band lobe, then check the probes above 3 kHz.
     for f in [3000.0, 4000.0, 6000.0] {
         assert!(db(gain(f)) < -59.0, "stop band at {f} Hz");
     }
+    let resp_db: Vec<(u32, f64)> = (2_000..=8_000u32)
+        .map(|f| {
+            let g = dtft(&lp, 2.0 * PI * f64::from(f) / f64::from(fs)).norm();
+            (f, db(g))
+        })
+        .collect();
+    // The first local maximum past the cutoff is the first stop-band lobe.
+    let (f_lobe, first_lobe) = resp_db
+        .windows(3)
+        .find(|w| w[1].1 > w[0].1 && w[1].1 >= w[2].1)
+        .map(|w| w[1])
+        .expect("a stop-band lobe");
+    let above_3k = resp_db
+        .iter()
+        .filter(|r| r.0 >= 3_000)
+        .map(|r| r.1)
+        .fold(f64::MIN, f64::max);
+    println!(
+        "   dense scan: first stop-band lobe {first_lobe:.1} dB at {f_lobe} Hz; \
+         largest above 3 kHz {above_3k:.1} dB"
+    );
+    assert!((first_lobe + 52.2).abs() < 0.1);
+    assert!((i64::from(f_lobe) - 2_534).abs() <= 2);
+    assert!(above_3k < -59.0);
 
     let doc = topics::fir(&lp, 16_000.0);
     assert_eq!(doc.quantity("Group delay").expect("q").value, 31.0);

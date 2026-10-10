@@ -107,7 +107,7 @@ fn main() -> AudioSampleResult<()> {
     // and the dBFS value stays the same while the SPL changes.
     let spl_of_1pa = db(1.0 / 20e-6);
     println!(
-        "   1 Pa = {spl_of_1pa:.2} dB SPL; with 0 dBFS(RMS of full-scale sine) = 94 dB SPL the tone is {:.2} dB SPL",
+        "   1 Pa = {spl_of_1pa:.2} dB SPL; with a full-scale sine calibrated to 94 dB SPL the tone is {:.2} dB SPL",
         94.0 + db(0.5)
     );
     assert!((spl_of_1pa - 93.98).abs() < 0.005);
@@ -204,11 +204,11 @@ fn main() -> AudioSampleResult<()> {
     assert!(worst < 2.0);
     let ulaw = |x: f64| f64::from(ulaw_decode(ulaw_encode((x * 8_159.0).round() as i32))) / 8_159.0;
     let lin8 = |x: f64| (x * 127.0).round().clamp(-128.0, 127.0) / 127.0;
-    println!("   level (dBFS)   SNR mu-law   SNR 8-bit linear");
+    println!("   level (dBFS peak)   SNR mu-law   SNR 8-bit linear");
     let mut rows = Vec::new();
     for level in [0.0, -10.0, -20.0, -30.0, -40.0] {
         let (su, sl) = (sine_snr(level, ulaw), sine_snr(level, lin8));
-        println!("   {level:>8.0}       {su:>6.1} dB     {sl:>6.1} dB");
+        println!("   {level:>13.0}       {su:>6.1} dB     {sl:>6.1} dB");
         rows.push((su, sl));
     }
     // mu-law: between 34 and 40 dB over the whole 40 dB range of levels ...

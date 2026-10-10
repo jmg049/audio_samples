@@ -47,6 +47,16 @@ fn argmax(v: &[f64]) -> usize {
         .expect("non-empty")
 }
 
+/// Amplitude of the component at `f` Hz in `x` (one DFT bin; exact when the
+/// block holds a whole number of periods).
+fn tone_amplitude(x: &[f64], f: f64, fs: f64) -> f64 {
+    let (re, im) = x.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
+        let ph = 2.0 * std::f64::consts::PI * f * n as f64 / fs;
+        (re + v * ph.cos(), im - v * ph.sin())
+    });
+    2.0 * (re * re + im * im).sqrt() / x.len() as f64
+}
+
 fn db(x: f64) -> f64 {
     20.0 * x.log10()
 }
@@ -129,12 +139,28 @@ fn main() {
     assert_eq!(peak_hz, 5_000.0);
     assert!((spec_naive[peak_bin] - expected_mag).abs() < 1e-6 * expected_mag);
 
-    // Rejection by the proper resampler: compare the naive alias with the
-    // *largest* bin anywhere in the High-tier spectrum (a conservative figure).
-    let high_max = spec_high.iter().copied().fold(0.0, f64::max);
-    let rejection_db = db(spec_naive[peak_bin] / high_max);
-    println!("   High tier: largest spectral peak is {rejection_db:.1} dB below the naive alias");
-    assert!(rejection_db > 70.0);
+    // Rejection by the proper resampler, measured in the steady state: the
+    // middle 100 ms (samples 1200..2800) holds exactly 500 periods of 5 kHz, so
+    // a single DFT bin gives the residual amplitude there.
+    let high_s = high.as_slice().expect("contiguous");
+    let steady_db = db(tone_amplitude(&high_s[1_200..2_800], 5_000.0, fs_lo) / 0.5);
+    println!("   High tier, steady state (middle 100 ms): 5 kHz residue at {steady_db:.1} dB");
+    // 1 dB tolerance: a level this low is set by the resampler's f32 rounding.
+    assert!((steady_db + 141.7).abs() < 1.0);
+
+    // Over the whole 250 ms, the abrupt start and end of the tone are broadband
+    // clicks that the filter passes; they, not aliasing, dominate the spectrum.
+    let bin_5k_db = db(spec_naive[peak_bin] / spec_high[1_250]);
+    let top_bin = argmax(&spec_high);
+    let largest_db = db(spec_naive[peak_bin] / spec_high[top_bin]);
+    println!(
+        "   High tier, whole signal: 5 kHz bin {bin_5k_db:.1} dB below the naive alias; \
+         largest bin ({} Hz, edge transients) {largest_db:.1} dB below",
+        top_bin as f64 * bin_hz
+    );
+    assert!((bin_5k_db - 82.4).abs() < 0.1);
+    assert_eq!(top_bin as f64 * bin_hz, 8_000.0);
+    assert!((largest_db - 70.3).abs() < 0.1);
     println!("   (an 11 kHz tone cannot exist in a 16 kHz signal: it should vanish, not move)");
 
     // ------------------------------------------------------------------

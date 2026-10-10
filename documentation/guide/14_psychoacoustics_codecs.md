@@ -1,11 +1,15 @@
 # 14. Psychoacoustics and codecs
 
-Telephone speech, MP3, AAC and Opus all throw information away, and they get
-away with it because the ear cannot hear everything that is in the signal:
-quiet sounds near loud ones are masked, very quiet sounds fall below the
-threshold of hearing, and loudness is perceived on a roughly logarithmic
-scale. This chapter puts numbers on those effects, implements G.711 μ-law
-companding from the standard, and measures the library's perceptual codec.
+Telephone speech, MP3, AAC and Opus all throw information away. Telephone
+speech (G.711) does it bluntly, by band-limiting and by companding: coarse
+steps for loud samples, fine steps for quiet ones. Perceptual codecs (MP3, AAC,
+Opus) get away with much more because the ear cannot hear everything that is
+in the signal: quiet sounds near loud ones are masked, and very quiet sounds
+fall below the threshold of hearing. (Perceived loudness, for its part, grows
+roughly as a power of sound intensity, Stevens' power law, rather than in
+proportion to it.) This chapter puts numbers on those effects, implements
+G.711 μ-law companding from the standard, and measures the library's
+perceptual codec.
 
 ## Concept
 
@@ -16,15 +20,22 @@ $$L_p = 20 \log_{10}(p / p_0) \ \text{dB SPL}, \quad p_0 = 20\ \mu\text{Pa}$$
 
 where $p$ is the RMS sound pressure in pascals; 1 Pa is 93.98 dB SPL. Digital
 audio only knows **dBFS**, decibels relative to digital full scale
-($20\log_{10}$ of an amplitude, full scale = 1). The link between the two is the
+($20\log_{10}$ of an amplitude, full scale = 1). As in chapters 02 and 11, an
+RMS level of 0 dBFS here is an RMS of 1, so a full-scale sine is $-3.01$ dBFS
+(AES17 calls the same sine 0 dBFS); a level read from the largest sample is
+labelled "dBFS peak". The link between digital and acoustic levels is the
 whole playback chain (converter, amplifier, volume knob, transducer, distance),
 so a file has no absolute level. Psychoacoustic models that compare a signal
 with the threshold of hearing must *assume* a calibration; the library's
 masking model assumes that 0 dB re one digital unit² corresponds to 0 dB SPL.
 
-**Perceptual frequency scales.** The ear's frequency resolution is roughly
-constant in Hz below about 500 Hz and roughly proportional to frequency above.
-Three scales capture this; this library implements them as follows.
+**Perceptual frequency scales.** The ear analyses sound with a bank of
+overlapping auditory filters whose bandwidth grows with frequency. Zwicker's
+*critical bandwidth* (the Bark scale) is roughly constant, about 100 Hz, below
+about 500 Hz and roughly proportional to frequency above; the *equivalent
+rectangular bandwidth* (ERB) of Glasberg and Moore grows steadily with
+frequency even at low frequencies. Three scales capture this; this library
+implements them as follows.
 
 - **Mel (HTK form)**, in
   [`utils::audio_math::hz_to_mel`](crate::utils::audio_math::hz_to_mel):
@@ -46,10 +57,11 @@ Three scales capture this; this library implements them as follows.
 **Absolute threshold of hearing.** Terhardt's (1979) fit to the threshold in
 quiet, in dB SPL with $f$ in Hz and $k = f / 1000$:
 
-$$T_q(f) = 3.64\, k^{-0.8} - 6.5\, e^{-0.6 (k - 3.3)^2} + 10^{-3} k^4$$
+$$T_q(f) = 3.64\\, k^{-0.8} - 6.5\\, e^{-0.6 (k - 3.3)^2} + 10^{-3} k^4$$
 
 It is high at low frequencies, has a minimum of about $-5$ dB SPL near
-3.3 kHz (the ear-canal resonance), and rises again above 10 kHz.
+3.3 kHz (the ear-canal resonance), and rises again above that minimum, slowly
+at first and steeply above about 10 kHz.
 
 **Simultaneous masking.** A loud component raises the threshold for other
 components nearby in frequency. Measured on the Bark scale, the masked
@@ -62,44 +74,63 @@ $$S(\Delta z) = 15.81 + 7.5(\Delta z + 0.474) - 17.5\sqrt{1 + (\Delta z + 0.474)
 
 where $\Delta z$ is the maskee's Bark position minus the masker's. Far from the
 masker its slopes approach $7.5 - 17.5 = -10$ dB/Bark above and
-$7.5 + 17.5 = +25$ dB/Bark below. Noise-like maskers mask more than tones: the
-masked threshold sits about 5.5 dB below a noise masker but about 14.5 dB below
-a tonal one (Johnston 1988). A perceptual coder may add quantisation noise up
+$7.5 + 17.5 = +25$ dB/Bark below. Noise-like maskers mask more than tones: in
+Johnston's (1988) model the masked threshold sits about 5.5 dB below a noise
+masker but $14.5 + z$ dB below a tonal one, where $z$ is the masker's Bark
+position (so about 15.5 to 38.5 dB across the 24 critical bands). A perceptual coder may add quantisation noise up
 to the masked threshold without it being audible, so it spends bits only
 where the **signal-to-mask ratio** (signal level minus masked threshold, dB)
 is positive.
 
-**What the library's masking model does.** `PsychoacousticConfig` stores the
-Johnston offsets (14.5 dB tonal, 5.5 dB noise) and two straight-line slopes.
-Its presets use **25 dB/Bark upward and 6 dB/Bark downward**, which is the
-reverse of the psychoacoustic asymmetry above (the field documentation says
-so); we demonstrate it below rather than rely on it.
+**What the library's masking model does.** `PsychoacousticConfig` stores a
+simplified form of the Johnston offsets, a **constant** 14.5 dB for tonal
+maskers (Johnston's $14.5 + z$ evaluated at $z = 0$) and 5.5 dB for noise, and
+two straight-line slopes. Its presets use **25 dB/Bark upward and 6 dB/Bark
+downward**, which is the reverse of the psychoacoustic asymmetry above (the
+field documentation says so); we demonstrate it below rather than rely on it.
+Despite its name, the `mpeg1` preset does not reproduce the ISO/IEC 11172-3
+(MPEG-1) psychoacoustic model's spreading function either.
 
 **μ-law companding (ITU-T G.711).** Speech has a wide dynamic range, and
 uniform quantisation gives quiet talkers a poor SNR (6.02 dB per bit, minus
 every dB the signal is below full scale; chapter 02). Companding quantises
 the *logarithm* of the amplitude instead. The continuous μ-law curve is
 
-$$F(x) = \mathrm{sgn}(x)\, \frac{\ln(1 + \mu |x|)}{\ln(1 + \mu)}, \quad \mu = 255$$
+$$F(x) = \mathrm{sgn}(x)\\, \frac{\ln(1 + \mu |x|)}{\ln(1 + \mu)}, \quad \mu = 255$$
 
 for $x \in \[-1, 1\]$. G.711 implements a segmented (piecewise-linear)
 approximation: a **14-bit** linear sample becomes an **8-bit** code made of a
 sign bit, a 3-bit segment number and a 4-bit mantissa. The magnitude plus a
 bias of 33 is located in one of 8 segments (each twice as wide as the last);
 16 equal steps in each segment give step sizes of 2, 4, ..., 256 (in 14-bit
-units). The result is a roughly constant SNR of 35-40 dB over a wide range of
+units; the very first code of segment 0 covers magnitude 0 alone, a step of 1). The result is a roughly constant SNR of 35-40 dB over a wide range of
 levels, with 8 bits instead of 14.
 
 Note: the library's `mu_compress` currently does not implement this formula
-(it deviates from the standard curve; a fix is in progress), so this chapter
+(it deviates from the standard curve; see "Known issues" in the crate's
+`CHANGELOG.md`), so this chapter
 implements the curve itself and uses only the library's `mu_expand`, which does
 invert the standard curve.
 
-**Perceptual transform codecs.** MP3, AAC and Opus's CELT layer share one
-structure: a modified discrete cosine transform (MDCT) with 50 % overlap and
-perfect reconstruction, a psychoacoustic model that computes the masked
-threshold per band, a bit allocator that gives more bits to bands with a high
-signal-to-mask ratio, and quantisation. The library's
+**Perceptual transform codecs.** All three codecs below split the signal into
+frequency bands with a modified discrete cosine transform (MDCT), a lapped
+transform with perfect reconstruction, but they use it differently:
+
+- **MP3** (MPEG-1 Layer III) uses a *hybrid* filterbank: a 32-band polyphase
+  filterbank followed by an MDCT in each band. A psychoacoustic model computes
+  the masked threshold per band, and a bit allocator spends bits where the
+  signal-to-mask ratio is high.
+- **AAC** uses a plain MDCT with 50 % overlap (long and short blocks) and the
+  same principle: a psychoacoustic model sets the masked threshold per band,
+  and quantisation noise is shaped to stay under it.
+- **Opus's CELT layer** uses an MDCT with a *low-overlap* window (a fixed
+  2.5 ms overlap, much less than 50 % of a 20 ms frame) to keep the delay low.
+  It runs no explicit masking model: it codes each band's energy explicitly
+  and the normalised shape of the band separately, so the energy in every band
+  is preserved (the "constrained energy" idea), and its bit allocation is
+  largely fixed or signalled.
+
+The library's
 [`PerceptualCodec`](crate::PerceptualCodec) follows this outline (MDCT,
 Bark bands, the masking model above, bit allocation, scalar quantisation),
 and [`codecs::opus`](crate::codecs::opus) is an Opus-*inspired* teaching codec
@@ -126,6 +157,10 @@ assert!((bark_to_hz(hz_to_bark(1_000.0)) - 1_000.0).abs() < 0.05);
 // Glasberg-Moore ERB *bandwidth*: 132.6 Hz at 1 kHz, 456.5 Hz at 4 kHz.
 assert!((hz_to_erb(1_000.0) - 132.639).abs() < 1e-3);
 assert!((hz_to_erb(4_000.0) - 456.456).abs() < 1e-2);
+// Johnston's tonal offset 14.5 + z dB over the 24 critical bands (z = 1..24):
+// 15.5 to 38.5 dB. The library's constant 14.5 dB is its z = 0 value.
+let johnston_tonal = |z: f64| 14.5 + z;
+assert_eq!((johnston_tonal(1.0), johnston_tonal(24.0)), (15.5, 38.5));
 // The ERB-number (perceptual coordinate) is not in the library: 15.62 Cam at 1 kHz.
 let erb_number = |f: f64| 21.4 * (1.0 + 0.00437 * f).log10();
 assert!((erb_number(1_000.0) - 15.62).abs() < 0.01);
@@ -325,7 +360,7 @@ assert!((doc.quantity("SQNR (full-scale sine)").unwrap().value - 49.92).abs() < 
 3. **Smallest and largest μ-law steps.** Using the segment structure, what is
    the ratio between the largest and the smallest G.711 step, in dB? Why does
    this keep the SNR roughly constant?
-4. **Calibration.** A recording's speech peaks at $-12$ dBFS. The playback
+4. **Calibration.** A recording's speech peaks at $-12$ dBFS peak. The playback
    chain is calibrated so that a full-scale sine (RMS $-3.01$ dBFS) is
    94 dB SPL. What SPL do the speech peaks correspond to (as a sine of that
    peak)?
@@ -389,10 +424,25 @@ assert!((spl - 82.0).abs() < 1e-12);
   `PsychoacousticConfig` presets invert the slopes, and its `conservative` /
   `aggressive` preset names are also the reverse of their effect; set the
   fields yourself if you need a faithful model.
-- **`mu_compress` deviates from the μ-law formula** at present; implement the
-  curve yourself (as here) until it is fixed.
+- **`mu_compress` deviates from the μ-law formula** at present (see "Known
+  issues" in `CHANGELOG.md`); implement the curve yourself (as here) until it
+  is fixed.
 - **Not Opus.** `codecs::opus` is a teaching codec; it cannot read or write
   `.opus` files.
+
+## References
+
+- E. Terhardt, "Calculating virtual pitch", *Hearing Research* 1(2), 155-182, 1979. The threshold-in-quiet formula.
+- H. Traunmüller, "Analytical expressions for the tonotopic sensory scale", *Journal of the Acoustical Society of America* 88(1), 97-100, 1990.
+- B. R. Glasberg and B. C. J. Moore, "Derivation of auditory filter shapes from notched-noise data", *Hearing Research* 47(1-2), 103-138, 1990.
+- E. Zwicker and H. Fastl, *Psychoacoustics: Facts and Models*, Springer. Critical bands and masking.
+- M. R. Schroeder, B. S. Atal and J. L. Hall, "Optimizing digital speech coders by exploiting masking properties of the human ear", *Journal of the Acoustical Society of America* 66(6), 1647-1652, 1979.
+- J. D. Johnston, "Transform coding of audio signals using perceptual noise criteria", *IEEE Journal on Selected Areas in Communications* 6(2), 314-323, 1988.
+- S. S. Stevens, "On the psychophysical law", *Psychological Review* 64(3), 153-181, 1957.
+- ITU-T Recommendation G.711, *Pulse code modulation (PCM) of voice frequencies*.
+- ISO/IEC 11172-3, *Coding of moving pictures and associated audio for digital storage media at up to about 1.5 Mbit/s, Part 3: Audio* (MPEG-1 audio, including Layer III).
+- J.-M. Valin, K. Vos and T. Terriberry, *Definition of the Opus Audio Codec*, RFC 6716, IETF, 2012; J.-M. Valin, G. Maxwell, T. B. Terriberry and K. Vos, "High-quality, low-delay music coding in the Opus codec", *135th Audio Engineering Society Convention*, 2013. CELT's low-overlap MDCT and energy coding.
+- AES17, *AES standard method for digital audio engineering: measurement of digital audio equipment*, Audio Engineering Society (the definition of dBFS as the RMS of a full-scale sine).
 
 ## See also
 

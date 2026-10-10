@@ -4,30 +4,36 @@ A vowel is a buzz shaped by a tube. The vocal folds produce a periodic train of
 air pulses (the *source*), and the throat, mouth and lips act as a resonant
 filter whose peaks, the *formants*, decide which vowel we hear. Linear
 predictive coding (LPC) fits an all-pole filter to a short frame of speech, so
-it hands us the filter half of that model: its roots are the formants, and its
-coefficients are what speech codecs such as SILK transmit.
+it hands us the filter half of that model: its roots are the formants, and a
+quantised form of its coefficients (line spectral frequencies) is what speech
+codecs such as SILK transmit.
 
 ## Concept
 
 **Source-filter model.** A voiced frame is modelled as
 
-$$X(z) = E(z) \, H(z), \qquad H(z) = \frac{G}{A(z)}, \qquad A(z) = 1 + \sum_{k=1}^{p} a_k z^{-k}$$
+$$X(z) = E(z) \\, H(z), \qquad H(z) = \frac{G}{A(z)}, \qquad A(z) = 1 + \sum_{k=1}^{p} a_k z^{-k}$$
 
 where $E(z)$ is the excitation (here an impulse train with one pulse every
 $1/f_0$ seconds, $f_0$ the fundamental frequency in Hz), $H(z)$ the vocal-tract
 filter, $G$ a gain, $p$ the model order and $a_k$ the (dimensionless) predictor
-coefficients. This crate writes $A(z)$ with a **plus** sign, as MATLAB and
+coefficients. The usual choice of gain is $G = \sqrt{E_p}$, the square root of
+the order-$p$ prediction-error energy defined below, so that the model driven
+by a unit-energy excitation has the frame's residual energy. This crate writes $A(z)$ with a **plus** sign, as MATLAB and
 `librosa.lpc` do; many textbooks predict $\hat{x}\[n\] = \sum_k \alpha_k x\[n-k\]$
 instead, so $\alpha_k = -a_k$.
 
 **Formants as poles.** One formant at frequency $F$ (Hz) with 3 dB bandwidth $B$
 (Hz) is a pair of complex-conjugate poles at radius $r$ and angle $\theta$:
 
-$$r = e^{-\pi B / f_s}, \qquad \theta = \frac{2 \pi F}{f_s}$$
+$$r \approx e^{-\pi B / f_s}, \qquad \theta = \frac{2 \pi F}{f_s}$$
 
-where $f_s$ is the sample rate in Hz and $\theta$ is in radians per sample. Each
-pole pair contributes a second-order factor $1 - 2 r \cos\theta \, z^{-1} + r^2 z^{-2}$
-to $A(z)$. Inverting: a root $z_i$ of $A(z)$ with $\mathrm{Im}\, z_i > 0$ gives
+where $f_s$ is the sample rate in Hz and $\theta$ is in radians per sample. The
+radius formula is a narrow-band approximation: it holds well for an isolated
+pole pair with $B \ll f_s$ and $F$ away from 0 and $f_s/2$, and this chapter uses
+it as the definition of $B$ when going both ways. Each
+pole pair contributes a second-order factor $1 - 2 r \cos\theta \\, z^{-1} + r^2 z^{-2}$
+to $A(z)$. Inverting: a root $z_i$ of $A(z)$ with $\mathrm{Im}\\, z_i > 0$ gives
 
 $$F_i = \frac{f_s \arg z_i}{2\pi}, \qquad B_i = -\frac{f_s \ln |z_i|}{\pi}$$
 
@@ -37,8 +43,10 @@ windowed frame gives the *normal* (Yule-Walker) equations
 
 $$\sum_{k=1}^{p} a_k R\[|i-k|\] = -R\[i\], \qquad i = 1, \dots, p$$
 
-with the biased autocorrelation $R\[m\] = \sum_{n=0}^{N-1-m} x_w\[n\] \, x_w\[n+m\]$ of the
-windowed frame $x_w\[n\] = w\[n\] x\[n\]$ ($N$ samples, $w$ a Hamming window). The
+with the biased autocorrelation $R\[m\] = \sum_{n=0}^{N-1-m} x_w\[n\] \\, x_w\[n+m\]$ of the
+windowed frame $x_w\[n\] = w\[n\] x\[n\]$ ($N$ samples, $w$ a Hamming window).
+(The biased estimator is usually written with a factor $1/N$; it scales every
+$R\[m\]$ equally and cancels from the solution, so the crate omits it.) The
 matrix is Toeplitz, so the **Levinson-Durbin** recursion solves it in $O(p^2)$
 operations, one order at a time ($E_0 = R\[0\]$, $m = 1, \dots, p$):
 
@@ -52,10 +60,13 @@ per kilohertz of bandwidth; two more poles absorb the spectral tilt of the
 source and lip radiation. Hence the rule of thumb $p \approx f_s/1000 + 2$
 ($f_s$ in Hz), 18 at 16 kHz.
 
-**Pre-emphasis.** Real glottal pulses fall off at about -12 dB per octave, so
-high formants are weak and the fit spends poles on the tilt. The first-order
-high-pass $y\[n\] = x\[n\] - \alpha x\[n-1\]$ with $\alpha \approx 0.97$ flattens the
-spectrum before analysis.
+**Pre-emphasis.** Real glottal pulses fall off at about -12 dB per octave, and
+radiation from the lips adds about +6 dB per octave, so voiced speech has a net
+tilt of about -6 dB per octave: high formants are weak and the fit spends poles
+on the tilt. The first-order high-pass (FIR) $y\[n\] = x\[n\] - \alpha x\[n-1\]$
+with $\alpha \approx 0.97$ adds about +6 dB per octave and so flattens that net
+tilt before analysis. (Exercise 3 uses a source with the full -12 dB per octave
+and no radiation term, so a -6 dB per octave tilt remains after pre-emphasis.)
 
 The crate's LPC routines live in the speech-codec module and are exported from
 the crate root when the `opus-codec` feature is on (it is part of
@@ -324,7 +335,7 @@ assert!((r8 - 0.96907).abs() < 5e-6);
 ```
 
 **2.** Order 10. Orders 4 and 6 find no narrow resonance and order 8 finds only
-two. Six poles would suffice for a noise-excited, unwindowed frame, but here
+two. Six poles would suffice in the limit of a long, noise-excited frame, but here
 the Hamming window, the short frame and the harmonic excitation leave some
 energy that LPC can only absorb with extra (broad) poles, exactly the slack the
 "+2" in the rule of thumb provides.
@@ -449,8 +460,9 @@ for &(f, _) in &formants {
 assert_eq!(estimates, vec![709.0, 1219.0, 2577.0]);
 ```
 
-**4.** 10 at 8 kHz (telephone speech; SILK narrowband also uses 10) and 46.1
-at 44.1 kHz, which is why speech is usually downsampled before LPC.
+**4.** 10 at 8 kHz (telephone speech; SILK narrowband also uses 10) and
+$44.1 + 2 = 46.1$, so about 46, at 44.1 kHz, which is why speech is usually
+downsampled before LPC.
 
 ```rust
 use audio_samples::educational::topics;
@@ -475,6 +487,14 @@ assert!((q(44_100.0) - 46.1).abs() < 1e-9);
   for high-pitched voices.
 - **Pre-emphasis changes the gain and the residual**, so undo it (with
   $1/(1 - \alpha z^{-1})$) if you resynthesise.
+
+## References
+
+- J. Makhoul, "Linear prediction: a tutorial review", *Proceedings of the IEEE* 63(4), 561-580, 1975.
+- N. Levinson, "The Wiener RMS (root mean square) error criterion in filter design and prediction", *Journal of Mathematics and Physics* 25, 261-278, 1947; J. Durbin, "The fitting of time-series models", *Revue de l'Institut International de Statistique* 28(3), 233-244, 1960.
+- G. Fant, *Acoustic Theory of Speech Production*, Mouton, 1960. The source-filter model.
+- L. R. Rabiner and R. W. Schafer, *Digital Processing of Speech Signals*, Prentice-Hall, 1978.
+- J.-M. Valin, K. Vos and T. Terriberry, *Definition of the Opus Audio Codec*, RFC 6716, IETF, 2012. SILK's LPC orders and line spectral frequencies.
 
 ## See also
 

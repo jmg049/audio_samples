@@ -20,3 +20,55 @@ A short, runnable course in speech and audio processing built on `audio_samples`
 | 14 | [Psychoacoustics and codecs](crate::guide::c14_psychoacoustics_codecs) | `cargo run --release --example tutorial_14_psychoacoustics_codecs --features educational,full_no_plotting` |
 
 See also [For instructors](crate::guide::for_instructors).
+
+## Reading the guide
+
+The chapter links in the table above are rustdoc links: they work in the
+rendered API documentation (`cargo doc --open --features
+educational,full_no_plotting`, then the `audio_samples::guide` module). If you
+are browsing the source repository instead, the chapters are the Markdown files
+in `documentation/guide/`:
+[01](01_sampling_aliasing.md), [02](02_quantisation_dither.md),
+[03](03_dft_windows.md), [04](04_stft_spectrograms.md),
+[05](05_convolution_fir.md), [06](06_iir_filters.md),
+[07](07_resampling.md), [08](08_lpc_formants.md), [09](09_pitch.md),
+[10](10_cepstrum_mel_mfcc.md), [11](11_energy_vad.md),
+[12](12_dynamics.md), [13](13_onsets_tempo.md),
+[14](14_psychoacoustics_codecs.md) and
+[For instructors](FOR_INSTRUCTORS.md). These relative links only work in the
+repository; in rustdoc, use the table. In the raw Markdown, code lines that
+start with `# ` are boilerplate that rustdoc hides, and `\[`, `\]` inside
+formulas are escaped brackets.
+
+The labs are the files `examples/tutorial_NN_<topic>.rs`; run them from a
+checkout of this repository with the commands in the table. A matching Python
+notebook for each chapter is in the Python bindings' documentation
+(`docs/source/tutorials/`).
+
+## Setting up
+
+Every code block in the guide is a doctest of this crate. To compile the
+snippets in a crate of your own, add these dependencies to its `Cargo.toml`
+(the versions are the ones this crate itself builds against):
+
+```toml
+[dependencies]
+audio_samples = { version = "2", features = ["educational", "full_no_plotting"] }
+spectrograms = "2.1.3"    # StftParams, WindowType, MelParams, LogParams, ...
+ndarray = "0.17"          # Array1 and the array! macro
+num-complex = "0.4"       # complex numbers in the "Under the hood" sections
+non-empty-slice = "0.6"   # NonEmptySlice / NonEmptyVec arguments
+```
+
+`audio_samples` does not re-export these crates, so they must be listed
+explicitly, with compatible versions: the `StftParams` you pass to `stft`, for
+example, must come from the same `spectrograms` release that `audio_samples`
+uses. The guide and the `educational` feature are new; if the `audio_samples`
+release on crates.io does not have them yet, use a path dependency on a
+checkout of this repository instead
+(`audio_samples = { path = "../audio_samples", features = [...] }`).
+
+The guide's signals are all generated in code. To analyse your own
+recordings, read WAV or FLAC files with the companion crate
+[`audio_samples_io`](https://github.com/jmg049/audio_samples_io), whose
+`read` function returns an `AudioSamples` value.

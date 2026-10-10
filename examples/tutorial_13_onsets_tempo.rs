@@ -14,7 +14,8 @@
 //!    peak picking from its definition, and converts frames to seconds.
 //! 4. Estimates tempo for click tracks at several tempi, re-derives
 //!    `estimate_tempo` (autocorrelation of the onset envelope with a
-//!    log-normal prior) and shows the octave errors at 80 and 174 BPM.
+//!    log-normal prior) and shows the metrical-level errors at 80 BPM
+//!    (half the tempo, an octave) and 174 BPM (a third of the tempo).
 //! 5. Prints the explanation of the tuned `OnsetDetectionConfig`.
 //!
 //! Run with:
