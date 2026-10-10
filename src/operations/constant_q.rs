@@ -98,7 +98,9 @@ use num_complex::Complex;
 
 use crate::audio_float::{audio_float_rows, finite_float_rows, float_rows_to_audio};
 use crate::operations::filterbanks::{Window, get_window, window_bandwidth};
-use crate::operations::spectrum::{StftConfig, StftPadMode, forward_plan, istft, pad_signal};
+use crate::operations::spectrum::{
+    StftConfig, StftPadMode, forward_plan, istft, padded_frame_into,
+};
 use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
 use crate::utils::audio_math::cqt_frequencies;
@@ -761,24 +763,17 @@ fn for_each_frame<F: AudioFloat>(
             row_buf.extend(row.iter().copied());
             &row_buf
         };
-        let xp = pad_signal(x, pad, pad_mode);
-        if xp.len() < n_fft {
+        let padded_len = x.len() + 2 * pad;
+        if padded_len < n_fft {
             return Err(param_err(
                 "signal",
                 "the signal is too short for the constant-Q analysis",
             ));
         }
-        let n_frames = (1 + (xp.len() - n_fft) / hop).min(max_frames);
+        let n_frames = (1 + (padded_len - n_fft) / hop).min(max_frames);
         for t in 0..n_frames {
-            let seg = &xp[t * hop..t * hop + n_fft];
-            match window {
-                Some(w) => {
-                    for ((dst, &s), &wv) in frame_in.iter_mut().zip(seg).zip(w) {
-                        *dst = s * wv;
-                    }
-                }
-                None => frame_in.copy_from_slice(seg),
-            }
+            let start = (t * hop) as isize - pad as isize;
+            padded_frame_into(x, start, window, pad_mode, &mut frame_in);
             plan.process_with_scratch(&mut frame_in, &mut spec, &mut scratch)
                 .map_err(|e| {
                     AudioSampleError::Processing(ProcessingError::algorithm_failure(

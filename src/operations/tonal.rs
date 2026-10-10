@@ -70,7 +70,7 @@ use ndarray::{
 };
 
 use crate::audio_float::finite_float_rows;
-use crate::operations::spectrum::{StftConfig, spectrogram_rows, stft};
+use crate::operations::spectrum::{StftConfig, spectrogram_rows, stft_map};
 use crate::utils::audio_math::hz_to_octs;
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
@@ -1371,7 +1371,7 @@ pub fn estimate_tuning_from_signal<F: AudioFloat>(
     config: &TuningConfig,
 ) -> AudioSampleResult<f64> {
     config.validate()?;
-    let s = stft(signal, &config.piptrack.stft)?.mapv(|z| z.norm());
+    let s = stft_map(signal, &config.piptrack.stft, |z| z.norm())?;
     estimate_tuning_from_spectrogram(s.view(), sample_rate, config)
 }
 
@@ -1996,7 +1996,7 @@ mod tests {
     #[test]
     fn piptrack_finds_tone_and_respects_range() {
         let x = tone(1000.0, 22050.0, 8192);
-        let s = stft(x.view(), &StftConfig::default())
+        let s = crate::operations::spectrum::stft(x.view(), &StftConfig::default())
             .unwrap()
             .mapv(|z| z.norm());
         let (p, m) =

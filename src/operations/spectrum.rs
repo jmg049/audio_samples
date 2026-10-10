@@ -420,6 +420,55 @@ pub fn stft<F: AudioFloat>(
     signal: ArrayView2<'_, F>,
     config: &StftConfig,
 ) -> AudioSampleResult<Array3<Complex<F>>> {
+    stft_map(signal, config, |z| z)
+}
+
+/// Fills `frame` with the windowed padded frame that starts at signal index
+/// `start` (negative or running past the end where the frame overlaps the
+/// padding), with the padding of `mode` (`numpy.pad` semantics, as
+/// [`pad_signal`]).
+#[inline]
+pub(crate) fn padded_frame_into<F: AudioFloat>(
+    x: &[F],
+    start: isize,
+    window: Option<&[F]>,
+    mode: StftPadMode,
+    frame: &mut [F],
+) {
+    let n = frame.len();
+    if start >= 0 && start as usize + n <= x.len() {
+        let seg = &x[start as usize..start as usize + n];
+        match window {
+            Some(w) => {
+                for ((dst, &s), &wv) in frame.iter_mut().zip(seg).zip(w) {
+                    *dst = wv * s;
+                }
+            }
+            None => frame.copy_from_slice(seg),
+        }
+        return;
+    }
+    for (i, dst) in frame.iter_mut().enumerate() {
+        let s = pad_source_index(start + i as isize, x.len(), mode).map_or(F::zero(), |j| x[j]);
+        *dst = match window {
+            Some(w) => w[i] * s,
+            None => s,
+        };
+    }
+}
+
+/// [`stft`] with `map` applied to every STFT value as it is written, so that
+/// a derived quantity (a magnitude, a power) is computed without holding the
+/// complex matrix.
+///
+/// The padding is not materialised: frames that overlap it are assembled
+/// from the signal by index, the others read the signal directly, so the
+/// memory beyond the output is a few frames.
+pub(crate) fn stft_map<F: AudioFloat, O>(
+    signal: ArrayView2<'_, F>,
+    config: &StftConfig,
+    map: impl Fn(Complex<F>) -> O,
+) -> AudioSampleResult<Array3<O>> {
     let (window, hop) = config.analysis_window::<F>()?;
     let n_fft = config.n_fft.get();
     let (n_channels, len) = signal.dim();
@@ -456,7 +505,7 @@ pub fn stft<F: AudioFloat>(
     // contiguous run of `STFT_BLOCK` frames, and the block stays in cache (a
     // whole-signal transpose is several times slower than the FFTs).
     let mut block = vec![Complex::new(F::zero(), F::zero()); STFT_BLOCK * n_bins];
-    let mut out = Array3::<Complex<F>>::uninit((n_channels, n_bins, n_frames));
+    let mut out = Array3::<O>::uninit((n_channels, n_bins, n_frames));
     let mut row_buf = Vec::new();
 
     for (c, row) in signal.outer_iter().enumerate() {
@@ -467,22 +516,12 @@ pub fn stft<F: AudioFloat>(
             row_buf.extend(row.iter().copied());
             &row_buf
         };
-        let padded;
-        let xp: &[F] = if pad > 0 {
-            padded = pad_signal(x, pad, config.pad_mode);
-            &padded
-        } else {
-            x
-        };
         let mut out_c = out.index_axis_mut(Axis(0), c);
         for t0 in (0..n_frames).step_by(STFT_BLOCK) {
             let nb = STFT_BLOCK.min(n_frames - t0);
             for (j, spec) in block.chunks_exact_mut(n_bins).take(nb).enumerate() {
-                let t = t0 + j;
-                let seg = &xp[t * hop..t * hop + n_fft];
-                for ((dst, &s), &w) in frame_in.iter_mut().zip(seg).zip(&window) {
-                    *dst = w * s;
-                }
+                let start = ((t0 + j) * hop) as isize - pad as isize;
+                padded_frame_into(x, start, Some(&window), config.pad_mode, &mut frame_in);
                 plan.process_with_scratch(&mut frame_in, spec, &mut scratch)
                     .map_err(|e| {
                         AudioSampleError::Processing(crate::ProcessingError::algorithm_failure(
@@ -497,7 +536,7 @@ pub fn stft<F: AudioFloat>(
                     .iter_mut()
                     .enumerate()
                 {
-                    d.write(block[j * n_bins + k]);
+                    d.write(map(block[j * n_bins + k]));
                 }
             }
         }
@@ -2481,8 +2520,13 @@ pub(crate) fn spectrogram_rows<F: AudioFloat>(
     power: f64,
 ) -> AudioSampleResult<Array3<F>> {
     validate_power(power)?;
-    let s = stft(rows, config)?;
-    Ok(s.mapv(|z| magnitude_power(z, power)))
+    if power == 2.0 {
+        stft_map(rows, config, |z| z.norm_sqr())
+    } else if power == 1.0 {
+        stft_map(rows, config, |z| z.norm_sqr().sqrt())
+    } else {
+        stft_map(rows, config, |z| magnitude_power(z, power))
+    }
 }
 
 /// The mel spectrogram of `(channels, samples)` rows sampled at
@@ -2689,6 +2733,37 @@ mod tests {
         );
         assert!(istft(s.view(), &cfg, Some(0)).is_err());
         assert!(istft(s.view(), &cfg.with_n_fft(nzu!(1024)), None).is_err());
+    }
+
+    #[test]
+    fn stft_without_padding_copy_matches_the_padded_frames() {
+        let x = Array2::from_shape_vec((1, 300), noise(300, 9)).unwrap();
+        for mode in [
+            StftPadMode::Constant,
+            StftPadMode::Edge,
+            StftPadMode::Reflect,
+        ] {
+            let cfg = StftConfig::new()
+                .with_n_fft(crate::nzu!(128))
+                .with_hop_length(Some(crate::nzu!(32)))
+                .with_pad_mode(mode);
+            let s = stft(x.view(), &cfg).unwrap();
+            let xp = pad_signal(x.row(0).as_slice().unwrap(), 64, mode);
+            let (w, _) = cfg.analysis_window::<f64>().unwrap();
+            let plan = forward_plan::<f64>(128);
+            for t in 0..s.dim().2 {
+                let mut frame: Vec<f64> = xp[t * 32..t * 32 + 128]
+                    .iter()
+                    .zip(&w)
+                    .map(|(&v, &wv)| wv * v)
+                    .collect();
+                let mut spec = plan.make_output_vec();
+                plan.process(&mut frame, &mut spec).unwrap();
+                for (k, z) in spec.iter().enumerate() {
+                    assert_eq!(s[[0, k, t]], *z);
+                }
+            }
+        }
     }
 
     #[test]
