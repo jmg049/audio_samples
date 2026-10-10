@@ -892,8 +892,8 @@ fn argmax_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
     best.0
 }
 
-fn backtrack_path(
-    steps: ArrayView2<usize>,
+fn backtrack_path<S: Copy + std::fmt::Display + num_traits::ToPrimitive>(
+    steps: ArrayView2<S>,
     sigma: &[[usize; 2]],
     subseq: bool,
     start: Option<usize>,
@@ -903,11 +903,11 @@ fn backtrack_path(
     let mut wp = vec![cur];
     while (subseq && cur[0] > 0) || (!subseq && cur != [0, 0]) {
         let k = steps[cur];
-        let Some(s) = sigma.get(k) else {
+        let Some(s) = k.to_usize().and_then(|i| sigma.get(i)) else {
             return err(
                 "steps",
                 format!(
-                    "step index {k} at {cur:?} exceeds the number of steps ({})",
+                    "step index {k} at {cur:?} is outside the step list (0..{})",
                     sigma.len()
                 ),
             );
@@ -928,7 +928,8 @@ fn backtrack_path(
 ///
 /// # Arguments
 ///
-/// - `steps` - Step matrix from [`DtwResult::steps`].
+/// - `steps` - Step matrix from [`DtwResult::steps`], or the same indices in
+///   any primitive integer type (for example librosa's `int32` matrix).
 /// - `step_sizes_sigma` - The custom steps used for the DTW (`None` for
 ///   librosa's defaults); appended to the defaults exactly as in [`dtw`].
 /// - `subseq` - Whether the DTW was a subsequence alignment.
@@ -943,8 +944,8 @@ fn backtrack_path(
 /// # Errors
 ///
 /// [`ParameterError`] if `steps` is empty, `start` is given without `subseq`
-/// or is out of range, a custom step is `[0, 0]`, or `steps` contains an
-/// index outside the step list.
+/// or is out of range, a custom step is `[0, 0]`, or the path meets an index
+/// in `steps` outside the step list (negative indices included).
 ///
 /// # Examples
 ///
@@ -958,8 +959,8 @@ fn backtrack_path(
 /// let alt = dtw_backtracking(r.steps.view(), None, true, Some(1)).unwrap();
 /// assert_eq!(alt, vec![[1, 1], [0, 0]]);
 /// ```
-pub fn dtw_backtracking(
-    steps: ArrayView2<usize>,
+pub fn dtw_backtracking<S: Copy + std::fmt::Display + num_traits::ToPrimitive>(
+    steps: ArrayView2<S>,
     step_sizes_sigma: Option<&[[usize; 2]]>,
     subseq: bool,
     start: Option<usize>,
