@@ -20,6 +20,22 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- `educational::explain` (`educational` feature): explanations computed from
+  your settings, before anything runs. `ExplainDoc` holds a summary, the
+  formulas the code evaluates, derived numbers, tables, trade-offs and
+  warnings, and renders to text (`term-maths`), Markdown (`$$` maths for
+  Jupyter) or an HTML fragment. The `Explain` trait is implemented for
+  `StftParams`, `WindowType`, `SpectrogramParams`, `MelParams`, `MfccParams`,
+  `IirFilterDesign`, `EqBand`, `CompressorConfig`, `LimiterConfig`,
+  `VadConfig` and `OnsetDetectionConfig`; `audio.explain(&config)`
+  (`ExplainFor`) uses the signal's sample rate and length; `explain::topics`
+  covers sampling, aliasing, quantisation, the DFT, windows, YIN,
+  autocorrelation pitch, LPC, the cepstrum, resampling and FIR filters.
+- Learning guide (`guide` module, `educational` + `full_no_plotting`): a
+  14-chapter course mapped to a speech and audio processing syllabus, with
+  doctested chapters, a runnable lab per chapter
+  (`examples/tutorial_NN_*.rs`) and a page for instructors.
+
 - `AudioSpectrum` trait (feature `transforms`, `operations::spectrum`): librosa-compatible
   `stft_matrix`, `istft_matrix`, `spectrogram_matrix`, `melspectrogram` and `mfcc_frames` for
   mono and multichannel audio, returning `(channels, features, frames)` arrays. Config structs
@@ -241,6 +257,62 @@ All notable changes to this project are documented here.
   period, so a huge `max_size` no longer runs for hours (results unchanged).
 - `clicks` uses saturating arithmetic when placing clicks.
 
+
+### Fixed (correctness audit for teaching use)
+
+A formula-by-formula audit checked the documentation against the code and
+against SciPy/librosa/closed-form results. Each fix below has a regression
+test (`tests/audit_*.rs`). Several change numerical output; they now match
+their documented definitions.
+
+- **Dynamics:** the envelope follower used the release time almost
+  everywhere (a 1 ms attack reached 3 % instead of 63 % after 1 ms), so every
+  compressor, limiter, gate, expander and `attack_decay_envelope` was too slow
+  to react. Lookahead had no effect. The soft knee was non-monotone (now the
+  Giannoulis/Massberg/Reiss quadratic knee); the soft limiter overshot its
+  ceiling statically; gate ratio now means a 1:R downward expander;
+  `set_detection_method` resizes the RMS window. `LimiterConfig::isp_limiting`
+  is documented as having no effect yet.
+- **Statistics:** `autocorrelation` was divided by the FFT size twice;
+  `mean`/`variance`/`cross_correlation` wrapped or panicked on integer audio
+  (also breaking `remove_dc_offset`); multi-channel `variance` now pools all
+  samples; u8 zero crossings are counted about 128; spectral centroid,
+  rolloff, bandwidth and slope used the wrong bin spacing for odd lengths;
+  `align_signals` never searched any lag; `detect_fundamental_frequency`
+  returned sub-harmonics; `detect_sample_rate` tested the wrong bins and now
+  returns `Ok(None)` when no cutoff is found.
+- **Processing:** gains, peak/min-max normalisation, fades and `mix` on
+  integer audio truncated the gain to an integer (silence on i16);
+  `mu_compress`/`mu_expand` rescaled μ like a sample; median normalisation
+  subtracted the middle sample, not the median; `GaussianNoise` perturbation
+  added uniform noise at the wrong SNR (and pink was white); `am_signal`
+  depth now follows the standard AM definition; Medium/High resampling is
+  time-aligned (the sinc delay of ~69/139 samples at 44.1→48 kHz is
+  compensated and the tail is kept).
+- **Spectral:** `power_spectral_density` now has SciPy `welch` density
+  scaling (it was off by N·Σw²/2); spectrograms, mel, MFCC, chroma, gammatone
+  and CQT of integer audio used a raw cast (i16 power 2³⁰ too large);
+  `HpssConfig::num_freq_bins` for odd FFT sizes; spectrum/phase plot axes and
+  spectrogram plot sample rate; `frequency_to_note` errors outside MIDI 0–127.
+- **LPC:** `levinson_durbin` returned the order-(p−1) solution padded with a
+  zero; it now returns the order-p predictor (LPC/SILK output changes).
+- **Pitch and rhythm:** YIN now follows de Cheveigné & Kawahara with
+  parabolic interpolation (440 Hz read as 450 Hz at 44.1 kHz, and +3.9 % at
+  100 Hz); `estimate_key` rotated its profile the wrong way (D major reported
+  as A# major); `complex_onset_detection` panicked on every input; the beat
+  grid drifted; onset envelope smoothing used a sample count as frames;
+  `pick_peaks` ignored the adjusted threshold window.
+- **VAD:** a signal shorter than one frame with `pad_end = false` returns an
+  error (was undefined behaviour); `VadMethod::Spectral` returns
+  `Unsupported` (it is not implemented).
+- **Documentation:** about 150 formulas and claims corrected so that the docs
+  state what the code computes (conventions, normalisation, units, dB
+  references), with librosa/SciPy differences called out (symmetric Hann,
+  Slaney mel on power, unnormalised DCT-II with lifter 22, absolute dB floor,
+  HTK `audio_math` mel helpers, ZCR in crossings per second). The perceptual
+  codec docs were scientifically corrected and the Opus module is described
+  as an Opus-inspired teaching codec, not bitstream compatible.
+
 ### Changed
 
 - Filter parameter validation follows SciPy: any edge in `(0, Nyquist)` is
@@ -280,6 +352,16 @@ All notable changes to this project are documented here.
   table, sampled from a per-quality prototype. `pitch_shift` with a new `n_steps` no longer pays ~30 ms to
   build a table; a sweep over 25 distinct shifts went from 777 ms to 150 ms. Common (small-L) ratios are
   bit-identical; awkward ratios change below the table-interpolation error (< -120 dB).
+
+### Known issues
+
+- Upstream limitations of the `spectrograms` crate (2.1.3) that this crate
+  inherits:
+  - `WindowType::Kaiser` is inaccurate for β > 3.75.
+  - The gammatone filterbank's default centre frequencies are spaced linearly
+    in Hz, not on the ERB-number scale.
+  - A mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`; it is
+    correct only for the range 0 Hz to Nyquist.
 
 ## 2.0.0
 

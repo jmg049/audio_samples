@@ -48,7 +48,10 @@ where
     ///
     /// # Arguments
     /// - `method` - The downmix strategy.  Available variants:
-    ///   - `Average` - arithmetic mean of all channels.
+    ///   - `Average` - arithmetic mean of all channels (`(L + R)/2` for
+    ///     stereo: identical channels keep their level, while a mono source
+    ///     panned to the centre with the equal-power `to_stereo(Pan(0.0))`
+    ///     comes back 3 dB quieter).
     ///   - `Left` - channel 0 only.
     ///   - `Right` - channel 1 only.
     ///   - `Weighted(weights)` - user-supplied per-channel weights.
@@ -659,12 +662,18 @@ where
         }
     }
 
-    /// Apply linear panning to a stereo signal in place.
+    /// Apply a linear balance-with-boost to a stereo signal in place.
     ///
-    /// The left channel is scaled by `1 - pan_value` and the right
-    /// channel by `1 + pan_value`, after clamping `pan_value` to
-    /// \[-1, 1\].  A value of 0 leaves both channels unchanged;
-    /// -1 silences the right channel; +1 silences the left channel.
+    /// The left channel is scaled by `1 - p` and the right channel by
+    /// `1 + p`, where `p` is `pan_value` clamped to \[-1, 1\].  A value
+    /// of 0 leaves both channels unchanged; -1 silences the right
+    /// channel and doubles the left (+6 dB, which can clip); +1 silences
+    /// the left channel and doubles the right.  The total power changes
+    /// with `p` (it is not a constant-power pan law); for a −3 dB-centre
+    /// equal-power pan of a mono source use
+    /// `to_stereo(StereoConversionMethod::Pan(p))`.  Gains are applied to
+    /// the raw sample values and truncated back for integer types, so
+    /// this is not meaningful for `u8` (offset-binary) audio.
     ///
     /// # Arguments
     /// - `pan_value` - Panning position in the range \[-1, 1\].
@@ -733,7 +742,9 @@ where
     ///
     /// The formula applied is identical to [`AudioChannelOps::pan`]:
     /// the left channel is scaled by `1 - balance` and the right
-    /// channel by `1 + balance`, after clamping to \[-1, 1\].
+    /// channel by `1 + balance`, after clamping to \[-1, 1\].  The
+    /// favoured channel is boosted by up to +6 dB (gain 2), so this is
+    /// not a constant-power law.
     ///
     /// # Arguments
     /// - `balance` - Balance position in the range \[-1, 1\].

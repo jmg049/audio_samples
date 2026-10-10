@@ -1,6 +1,6 @@
 //! Parametric equalizer for precise frequency shaping.
 //!
-//! This module implements parametric EQ processing: peak/notch filters, shelving
+//! This module implements parametric EQ processing: peak (boost/cut) filters, shelving
 //! filters, and pass/stop filters organised into bands. A [`ParametricEq`] configuration
 //! holds any number of [`EqBand`]s that are applied in sequence.
 //!
@@ -28,7 +28,7 @@
 //!
 //! let mut eq = ParametricEq::new();
 //! eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));        // +3 dB at 1 kHz
-//! eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707)); // -2 dB shelf below 100 Hz
+//! eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707)); // -2 dB low shelf, -1 dB (half gain) at 100 Hz
 //! audio.apply_parametric_eq_in_place(&eq).unwrap();
 //! ```
 
@@ -168,10 +168,12 @@ where
         Ok(())
     }
 
-    /// Applies a peak (or notch) filter at the specified centre frequency.
+    /// Applies a peak (bell) filter at the specified centre frequency.
     ///
-    /// A peak filter boosts or cuts a band of frequencies centred around `frequency`.
-    /// Positive `gain_db` creates a boost (peak); negative creates a cut (notch). The
+    /// A peak filter boosts or cuts a band of frequencies centred around `frequency`
+    /// (RBJ cookbook peaking EQ; the gain at `frequency` is exactly `gain_db`).
+    /// Positive `gain_db` creates a boost (peak); negative creates a cut (dip). For a
+    /// true notch (a zero of transmission) use an [`EqBand::band_stop`] band. The
     /// Q factor controls bandwidth: higher Q values produce a narrower effect.
     ///
     /// # Arguments
@@ -213,15 +215,17 @@ where
 
     /// Applies a low shelf filter that boosts or cuts frequencies below `frequency`.
     ///
-    /// All frequencies below the corner frequency receive approximately `gain_db` of
-    /// boost or cut, with a transition region controlled by `q_factor`. The shelf levels
-    /// off smoothly as frequency approaches zero.
+    /// Frequencies well below the corner frequency receive `gain_db` of boost or
+    /// cut, with a transition region controlled by `q_factor`; at the corner
+    /// frequency itself the gain is `gain_db / 2` (RBJ cookbook shelf). The shelf
+    /// levels off smoothly as frequency approaches zero.
     ///
     /// # Arguments
     ///
-    /// - `frequency` - Corner (shelf) frequency in Hz. Must be in `(0, Nyquist)`.
+    /// - `frequency` - Corner (half-gain) frequency in Hz. Must be in `(0, Nyquist)`.
     /// - `gain_db` - Shelf gain in dB. Positive boosts, negative cuts.
-    /// - `q_factor` - Shelf slope control. `0.707` gives a maximally flat shelf.
+    /// - `q_factor` - Shelf slope control. `0.707` (shelf slope `S = 1`) gives the
+    ///   steepest shelf without overshoot.
     ///   Must be > 0.
     ///
     /// # Returns
@@ -256,15 +260,17 @@ where
 
     /// Applies a high shelf filter that boosts or cuts frequencies above `frequency`.
     ///
-    /// All frequencies above the corner frequency receive approximately `gain_db` of
-    /// boost or cut, with a transition region controlled by `q_factor`. The shelf levels
-    /// off smoothly as frequency approaches the Nyquist limit.
+    /// Frequencies well above the corner frequency receive `gain_db` of boost or
+    /// cut, with a transition region controlled by `q_factor`; at the corner
+    /// frequency itself the gain is `gain_db / 2` (RBJ cookbook shelf). The shelf
+    /// levels off smoothly as frequency approaches the Nyquist limit.
     ///
     /// # Arguments
     ///
-    /// - `frequency` - Corner (shelf) frequency in Hz. Must be in `(0, Nyquist)`.
+    /// - `frequency` - Corner (half-gain) frequency in Hz. Must be in `(0, Nyquist)`.
     /// - `gain_db` - Shelf gain in dB. Positive boosts, negative cuts.
-    /// - `q_factor` - Shelf slope control. `0.707` gives a maximally flat shelf.
+    /// - `q_factor` - Shelf slope control. `0.707` (shelf slope `S = 1`) gives the
+    ///   steepest shelf without overshoot.
     ///   Must be > 0.
     ///
     /// # Returns
@@ -443,7 +449,7 @@ fn eq_band_sos(band: &EqBand, sample_rate: f64) -> [f64; 6] {
 }
 
 /// Design a filter for a parametric EQ band.
-fn design_eq_band_filter(band: &EqBand, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn design_eq_band_filter(band: &EqBand, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     match band.band_type {
         EqBandType::Peak => {
             design_peak_filter(band.frequency, band.gain_db, band.q_factor, sample_rate)
@@ -461,7 +467,7 @@ fn design_eq_band_filter(band: &EqBand, sample_rate: f64) -> (Vec<f64>, Vec<f64>
     }
 }
 
-/// Design a peak/notch filter using the RBJ (Robert Bristow-Johnson) cookbook formulas.
+/// Design a peaking (bell) filter using the RBJ (Robert Bristow-Johnson) cookbook formulas.
 fn design_peak_filter(
     frequency: f64,
     gain_db: f64,

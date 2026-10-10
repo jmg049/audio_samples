@@ -18,6 +18,25 @@
 //! Where conversions are reversible, the paired operations are exposed explicitly to avoid
 //! hidden coupling or implicit state.
 //!
+//! # Conventions
+//!
+//! - **Mel scale (HTK).** [`hz_to_mel`], [`mel_to_hz`], [`mel_scale`] and
+//!   [`mel_frequencies`] use the HTK / O'Shaughnessy (1987) formula
+//!   m = 2595·log10(1 + f/700), with f in Hz and m in mel (1000 Hz ≈ 1000 mel).
+//!   This is `librosa.hz_to_mel(f, htk=True)`. **It is not the mel scale used by
+//!   the spectrogram path:** `AudioTransforms::mel_spectrogram` and
+//!   `AudioTransforms::mfcc` (via the `spectrograms` crate) use the Slaney scale
+//!   (librosa's default, `htk=False`: linear at 200/3 Hz per mel below 1 kHz,
+//!   logarithmic above; 1000 Hz = 15 mel). Do not use these helpers to label the
+//!   bands of a mel spectrogram.
+//! - **Decibels.** [`amplitude_to_db`] uses 20·log10(a) and [`power_to_db`] uses
+//!   10·log10(p), both with reference 1 and no `top_db`. Non-positive inputs return
+//!   the sentinel −80 dB, but positive inputs are **not** clamped, so results below
+//!   −80 dB occur (e.g. `amplitude_to_db(1e-10) = -200`). librosa's
+//!   `amplitude_to_db`/`power_to_db` instead clamp at `amin` (default 1e-5 / 1e-10)
+//!   and, by default, limit the range to `top_db = 80` below the peak.
+//! - **MIDI and notes.** A4 = MIDI 69 = 440 Hz, f = 440·2^((m − 69)/12); C4 = MIDI 60.
+//!
 //! # Usage
 //!
 //! ```rust
@@ -59,6 +78,13 @@ use std::num::NonZeroUsize;
 /// into a perceptual representation, such as when constructing mel filter banks, analysing
 /// spectral content in perceptual units, or comparing pitch-related quantities on a scale
 /// that better reflects human sensitivity.
+///
+/// Uses the HTK (O'Shaughnessy 1987) formula m = 2595·log10(1 + f/700), with `f` in Hz
+/// and `m` in mel. This equals `librosa.hz_to_mel(f, htk=True)`.
+///
+/// Note: `AudioTransforms::mel_spectrogram` and `AudioTransforms::mfcc` use the Slaney
+/// mel scale (librosa's default, `htk=False`), so this function does not give the mel
+/// coordinates of their bands (at 1000 Hz, HTK gives ≈ 1000 mel and Slaney gives 15).
 ///
 /// The conversion is deterministic, monotonic for positive frequencies, and reversible via
 /// [`mel_to_hz`] within normal floating-point precision limits.
@@ -109,6 +135,9 @@ pub fn hz_to_mel(freq_hz: f64) -> f64 {
 /// where perceptual-domain representations need to be projected back into physical
 /// frequency space, such as when constructing frequency bins, interpreting mel-domain
 /// features, or synthesising frequency-aligned outputs.
+///
+/// Uses the inverse HTK formula f = 700·(10^(m/2595) − 1), with `m` in mel and `f` in Hz
+/// (`librosa.mel_to_hz(m, htk=True)`); see [`hz_to_mel`] for the Slaney-scale caveat.
 ///
 /// The conversion is deterministic, monotonic for non-negative inputs, and reversible via
 /// [`hz_to_mel`] within normal floating-point precision limits.
@@ -166,6 +195,11 @@ pub fn mel_to_hz(mel: f64) -> f64 {
 ///
 /// The sequence includes both endpoints and preserves ordering from low to high
 /// frequency when `fmin <= fmax`.
+///
+/// Spacing is uniform on the HTK mel scale (see [`hz_to_mel`]), so the result equals
+/// `librosa.mel_frequencies(n_mels, fmin=fmin, fmax=fmax, htk=True)`. It does **not**
+/// give the band centres of `AudioTransforms::mel_spectrogram`, which uses the Slaney
+/// mel scale.
 ///
 /// # Arguments
 ///
@@ -328,14 +362,19 @@ pub fn midi_to_hz(midi_note: f64) -> f64 {
 /// for example when visualising dynamic range, applying perceptual thresholds, or comparing
 /// relative signal levels.
 ///
-/// To avoid infinite values and undefined logarithms, non-positive amplitudes are mapped to
-/// a fixed floor value of `-80 dB`.
+/// Computes 20·log10(`amplitude`) (reference 1, so the result is dB re 1). To avoid
+/// infinite values, non-positive amplitudes return the sentinel value `-80 dB`. This is
+/// **not** a floor: positive inputs are not clamped, so very small amplitudes give values
+/// below −80 dB (e.g. `amplitude_to_db(1e-10) = -200`).
+///
+/// Note: unlike `librosa.amplitude_to_db`, there is no `amin` clamp, no `ref` argument
+/// and no `top_db` limit.
 ///
 /// # Arguments
 ///
 /// * `amplitude`\
 ///   The input amplitude ratio. Values greater than zero represent valid signal magnitudes.
-///   Zero or negative values are treated as silence and mapped to the floor value.
+///   Zero or negative values are treated as silence and mapped to the −80 dB sentinel.
 ///
 /// # Returns
 ///
@@ -348,7 +387,8 @@ pub fn midi_to_hz(midi_note: f64) -> f64 {
 ///   amplitude.
 /// * For `amplitude <= 0`, the returned value is exactly `-80 dB`.
 /// * Applying [`db_to_amplitude`] to a value produced by this function recovers the original
-///   amplitude up to floating-point rounding error only when the floor has not been applied.
+///   amplitude up to floating-point rounding error for positive inputs
+///   (the sentinel is not invertible).
 ///
 /// # Examples
 ///
@@ -422,15 +462,19 @@ pub fn db_to_amplitude(db: f64) -> f64 {
 /// such as when analysing spectral energy, comparing relative signal power, or applying
 /// perceptual thresholds in power-domain features.
 ///
-/// To avoid infinite values and undefined logarithms, non-positive power values are mapped
-/// to a fixed floor value of `-80 dB`. This behaviour is part of the public contract and
-/// should be considered when interpreting silence or numerical underflow.
+/// Computes 10·log10(`power`) (reference 1, so the result is dB re 1). To avoid infinite
+/// values, non-positive powers return the sentinel value `-80 dB`. This behaviour is part
+/// of the public contract. It is **not** a floor: positive inputs are not clamped, so very
+/// small powers give values below −80 dB (e.g. `power_to_db(1e-12) = -120`).
+///
+/// Note: unlike `librosa.power_to_db`, there is no `amin` clamp, no `ref` argument and no
+/// `top_db` limit.
 ///
 /// # Arguments
 ///
 /// * `power`\
 ///   The input power ratio. Values greater than zero represent valid power measurements.
-///   Zero or negative values are treated as silence and mapped to the floor value.
+///   Zero or negative values are treated as silence and mapped to the −80 dB sentinel.
 ///
 /// # Returns
 ///
@@ -443,7 +487,8 @@ pub fn db_to_amplitude(db: f64) -> f64 {
 ///   power.
 /// * For `power <= 0`, the returned value is exactly `-80 dB`.
 /// * Applying [`db_to_power`] to a value produced by this function recovers the original
-///   power up to floating-point rounding error only when the floor has not been applied.
+///   power up to floating-point rounding error for positive inputs
+///   (the sentinel is not invertible).
 ///
 /// # Examples
 ///
@@ -583,8 +628,8 @@ pub fn frames_to_time(frames: usize, sample_rate: f64, hop_size: usize) -> f64 {
 ///
 /// # Returns
 ///
-/// The nearest frame index as a `usize`. If the computed value cannot be represented as a
-/// valid `usize`, the function returns `0`.
+/// The nearest frame index as a `usize`. The float-to-integer conversion saturates:
+/// negative or NaN values give `0`, and values above `usize::MAX` give `usize::MAX`.
 ///
 /// # Behavioural Guarantees
 ///
@@ -677,8 +722,8 @@ pub fn samples_to_time(samples: usize, sample_rate: f64) -> f64 {
 ///
 /// # Returns
 ///
-/// The nearest sample index as a `usize`. If the computed value cannot be represented as a
-/// valid `usize`, the function returns `0`.
+/// The nearest sample index as a `usize`. The float-to-integer conversion saturates:
+/// negative or NaN values give `0`, and values above `usize::MAX` give `usize::MAX`.
 ///
 /// # Behavioural Guarantees
 ///
@@ -1345,8 +1390,9 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
 /// # Behavioural Guarantees
 ///
 /// * The returned string always uses sharp notation for accidentals.
-/// * For any value accepted by this function, applying [`note_to_midi`] to the returned
-///   string recovers the original MIDI value.
+/// * For MIDI 12–127, applying [`note_to_midi`] to the returned string recovers the
+///   original MIDI value. MIDI 0–11 are rendered in octave −1 (`"C-1"` … `"B-1"`), which
+///   [`note_to_midi`] does not accept.
 ///
 /// # Differences from librosa
 ///
@@ -1458,8 +1504,8 @@ pub fn note_to_frequency(note_name: &str) -> AudioSampleResult<f64> {
 ///
 /// # Behavioural Guarantees
 ///
-/// * The returned `cents` value lies in the closed interval `[-50, 50]`, subject to
-///   floating-point rounding.
+/// * The nearest note is `round(m)` with m = 69 + 12·log2(f/440); `cents` = 100·(m − round(m))
+///   and lies in `[-50, 50]`, subject to floating-point rounding.
 /// * Applying [`note_to_frequency`] to the returned `note_name` yields a frequency close
 ///   to the nearest semitone of the original input, not necessarily the original value.
 ///
@@ -1627,8 +1673,10 @@ pub fn ratio_to_cents(ratio: f64) -> f64 {
 /// A vector of length `n_fft / 2 + 1` containing frequency bin centres in Hertz, ordered
 /// from lowest to highest frequency.
 ///
-/// The first element is always `0 Hz`. The final element corresponds approximately to the
-/// Nyquist frequency (`sample_rate / 2`), subject to floating-point rounding.
+/// Element k is k·`sample_rate`/`n_fft` (the bin spacing of an `n_fft`-point DFT). The first
+/// element is always `0 Hz`. The final element is the Nyquist frequency `sample_rate / 2`
+/// for even `n_fft`, and (`n_fft` − 1)/2 · `sample_rate`/`n_fft` (below Nyquist) for odd
+/// `n_fft`.
 ///
 /// # Behavioural Guarantees
 ///

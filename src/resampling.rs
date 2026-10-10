@@ -135,6 +135,22 @@ fn kernel_kind(quality: ResamplingQuality, in_sr: u32, out_sr: u32) -> KernelKin
     }
 }
 
+/// Passband edge (fraction of the lower Nyquist frequency) and stopband
+/// attenuation in dB of a quality tier's windowed-sinc filter, or `None` when
+/// the tier uses linear interpolation (`Fast` upsampling). Used by the
+/// `educational` explanations so they report the filter that actually runs.
+#[cfg(feature = "educational")]
+pub(crate) fn quality_filter_spec(
+    quality: ResamplingQuality,
+    in_sr: u32,
+    out_sr: u32,
+) -> Option<(f64, f64)> {
+    match kernel_kind(quality, in_sr, out_sr) {
+        KernelKind::Sinc(spec) => Some((spec.passband, spec.attenuation_db)),
+        KernelKind::Linear => None,
+    }
+}
+
 /// Zeroth-order modified Bessel function of the first kind (power series).
 fn bessel_i0(x: f64) -> f64 {
     let q = x * x / 4.0;

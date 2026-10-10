@@ -41,7 +41,8 @@
 //! use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
 //! use ndarray::array;
 //!
-//! // Convert f32 audio to i16 PCM (audio-aware: scales to ±32767)
+//! // Convert f32 audio to i16 PCM (audio-aware: negative values scale by
+//! // 32768, positive by 32767, so -1.0 → -32768 and +1.0 → 32767)
 //! let audio_f32 = AudioSamples::new_mono(array![0.5f32, -0.3, 0.8], sample_rate!(44100)).unwrap();
 //! let audio_i16 = audio_f32.to_format::<i16>();
 //! assert!((audio_i16[0] - 16384).abs() <= 1); // 0.5 × 32767 ≈ 16384
@@ -50,6 +51,32 @@
 //! let audio_back: AudioSamples<'static, f32> = audio_i16.to_format::<f32>();
 //! assert!((audio_back[0] - 0.5).abs() < 1e-3);
 //! ```
+//!
+//! ## Scaling convention
+//!
+//! For a signed `B`-bit integer type the audio-aware mapping is piecewise
+//! linear: negative values are divided by `2^(B−1)` and non-negative values by
+//! `2^(B−1) − 1`, so `MIN ↔ −1.0` and `MAX ↔ +1.0` exactly. Float → integer
+//! clamps to `[−1, 1]`, scales by the same factors and rounds half away from
+//! zero, so integer → float → integer is the identity. `u8` is offset binary
+//! (`128` ↔ `0.0`) with divisors 128 (below) and 127 (above).
+//!
+//! Note: libsndfile / `soundfile`, librosa and torchaudio divide by `2^(B−1)`
+//! on both sides (32768 for `i16`), so positive samples converted here differ
+//! from `soundfile.read()` by up to about 3·10⁻⁵ (a relative gain difference
+//! of 1/32767).
+//!
+//! Integer → integer conversions shift the bit pattern: widening is an exact
+//! left shift (`i16::MAX` → `0x7FFF_0000` as `i32`, not `i32::MAX`), and
+//! narrowing is an arithmetic right shift, which rounds toward −∞ (a bias of
+//! −½ LSB of the target type) rather than to nearest.
+//!
+//! Requantising to fewer bits adds quantisation error of at most ½ LSB. For
+//! busy signals it behaves like uniform noise, giving the familiar
+//! signal-to-quantisation-noise ratio of about `6.02·B + 1.76` dB for a
+//! full-scale sine. No dither is applied anywhere in this crate; for
+//! low-level signals the error is correlated with the signal (distortion),
+//! so add TPDF dither yourself before reducing bit depth if that matters.
 //!
 //! ## Allocation and ownership
 //!
@@ -76,7 +103,8 @@ where
     /// Performs an element-wise audio-aware conversion from `T` to `O`.
     /// Amplitude meaning is preserved: integer-to-float conversions normalise
     /// into `[-1.0, 1.0]`; float-to-integer conversions scale, clamp, and
-    /// round; integer-to-integer conversions shift bit depth with saturation.
+    /// round; integer-to-integer conversions shift bit depth (narrowing
+    /// truncates toward −∞; see the module docs).
     /// For `u8`, the unsigned PCM convention applies (mid-scale `128` = silence).
     ///
     /// The source audio is not modified; a new owned value is returned.

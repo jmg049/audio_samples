@@ -155,8 +155,10 @@ use std::num::NonZeroUsize;
 /// to check loudness before normalisation, to estimate the noise floor before gating,
 /// or to drive automatic level-matching in a processing pipeline.
 ///
-/// Frequency-domain methods (`spectral_centroid`, `spectral_rolloff`,
-/// `autocorrelation`) require `feature = "transforms"`.
+/// `autocorrelation` and the spectral methods (`spectral_*`) require
+/// `feature = "transforms"`. Units and exact formulas (raw vs normalised
+/// sample units, power vs magnitude weighting) are defined in the
+/// [`statistics`](crate::operations::statistics) module documentation.
 ///
 /// # Invariants
 ///
@@ -232,8 +234,13 @@ where
 
     /// Computes the arithmetic mean of all samples across all channels.
     ///
+    /// `x̄ = (1/N) Σ x[n]` over every sample of every channel (`N` = total sample
+    /// count), accumulated in `f64` so integer sample types cannot overflow. The
+    /// value is in raw sample units: for `i16` it lies in `[-32768, 32767]`, and
+    /// for `u8` (offset-binary) a silent signal has mean `128.0`.
+    ///
     /// # Returns
-    /// The mean value as `f64`.
+    /// The mean value as `f64`, in raw sample units.
     ///
     /// # Examples
     /// ```
@@ -274,12 +281,17 @@ where
 
     /// Computes the Root Mean Square (RMS) of all samples across all channels.
     ///
-    /// RMS is the square root of the mean of squared sample values. It provides
-    /// a measure of the signal's average energy and is commonly used for
-    /// loudness estimation.
+    /// `RMS = sqrt((1/N) Σ x[n]²)` over every sample of every channel, accumulated
+    /// in `f64`. It measures the signal's average power and is commonly used for
+    /// loudness estimation. A sine of amplitude `A` has RMS `A/√2`.
+    ///
+    /// Samples are used in raw units: for `i16`, full scale is 32768, and for `u8`
+    /// the 128 offset is not removed. Convert with
+    /// [`as_f64`](crate::AudioTypeConversion::as_f64) first for an RMS relative to
+    /// full scale.
     ///
     /// # Returns
-    /// The RMS value as `f64`.
+    /// The RMS value as `f64`, in raw sample units.
     ///
     /// # Examples
     /// ```
@@ -321,13 +333,13 @@ where
 
     /// Computes the population variance of the audio samples.
     ///
-    /// Variance measures the spread of sample values around the mean.
-    /// For mono audio this is the standard population variance of all samples.
-    /// For multi-channel audio the variance is computed per sample position
-    /// across channels and the results are averaged over time.
+    /// `σ² = (1/N) Σ (x[n] − x̄)²` over every sample of every channel (all channels
+    /// pooled, `N` = total sample count, `x̄` = [`mean`](AudioStatistics::mean)),
+    /// accumulated in `f64` in raw sample units. Divide by `N` (population), not
+    /// `N − 1`.
     ///
     /// # Returns
-    /// The variance as `f64`.
+    /// The variance as `f64`, in squared raw sample units.
     ///
     /// # Examples
     /// ```
@@ -364,13 +376,17 @@ where
 
     /// Counts the number of zero crossings in the audio signal.
     ///
-    /// Zero crossings occur when the signal changes sign between adjacent samples.
-    /// This metric is useful for pitch detection, signal analysis, and estimating
-    /// the noisiness of a signal.
+    /// A zero crossing is a pair of adjacent samples `(x[n−1], x[n])` where one is
+    /// `> 0` and the other is `≤ 0` (an exact zero counts as non-positive). Samples
+    /// are first mapped with the audio-aware conversion to `f64`, so `u8`
+    /// (offset-binary) is measured about its mid-scale value 128. A sine at `f` Hz
+    /// lasting `T` seconds has about `2·f·T` crossings. The count is useful for
+    /// estimating the noisiness or dominant frequency of a signal.
     ///
     /// # Returns
-    /// The total number of zero crossings across all channels. Returns 0 if the
-    /// audio has fewer than 2 samples.
+    /// The total number of zero crossings, summed over all channels (each channel
+    /// is scanned separately). Returns 0 if the audio has fewer than 2 samples per
+    /// channel.
     ///
     /// # Examples
     /// ```
@@ -383,14 +399,19 @@ where
     /// ```
     fn zero_crossings(&self) -> usize;
 
-    /// Computes the zero crossing rate (crossings per second).
+    /// Computes the zero-crossing rate in crossings per second.
     ///
-    /// This normalises the zero crossing count by the signal duration, providing
-    /// a frequency-like measure that is independent of signal length. For
-    /// multi-channel audio it is the mean of the per-channel rates (the total
+    /// `ZCR = zero_crossings / (channels · duration_s)` with
+    /// `duration_s = samples_per_channel / sample_rate`. The unit is crossings per
+    /// second (Hz), not a fraction of samples: a sine at `f` Hz gives about `2f`.
+    /// For multi-channel audio it is the mean of the per-channel rates (the total
     /// from [`zero_crossings`](Self::zero_crossings) divided by the number of
     /// channels), so a stereo signal with two identical channels has the same
     /// rate as either channel alone.
+    ///
+    /// Note: librosa's `zero_crossing_rate` returns a per-frame fraction
+    /// (crossings / frame length). For a mono signal, divide this value by the
+    /// sample rate to get the equivalent whole-signal fraction of samples.
     ///
     /// # Returns
     /// The number of zero crossings per second as `f64`, averaged over channels.
@@ -408,16 +429,22 @@ where
     ///
     /// let data = array![1.0f32, -1.0, 1.0, -1.0];
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // 3 crossings in 4 samples = 4 / 44100 s.
     /// let zcr = audio.zero_crossing_rate();
-    /// assert!(zcr > 0.0);
+    /// assert!((zcr - 3.0 * 44100.0 / 4.0).abs() < 1e-9);
     /// ```
     fn zero_crossing_rate(&self) -> f64;
 
-    /// Computes cross-correlation with another audio signal.
+    /// Computes the cross-correlation with another audio signal for non-negative
+    /// lags.
     ///
-    /// Cross-correlation measures the similarity between two signals as a
-    /// function of the displacement of one relative to the other. It is useful
-    /// for signal alignment, pattern matching, and delay estimation.
+    /// `r[l] = (1/C_l) Σ_{i=0}^{C_l−1} self[i]·other[i+l]` for `l = 0..=max_lag`,
+    /// with `C_l = min(len_self, len_other − l)`. This is an unbiased
+    /// (overlap-normalised) estimate in squared raw sample units, with no mean
+    /// removal, accumulated in `f64`. A peak at `l = D` means `other` is `self`
+    /// delayed by `D` samples. Negative lags are not computed: to detect `other`
+    /// leading `self`, swap the arguments or use
+    /// [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag).
     ///
     /// For multi-channel audio only the first channels of both signals are
     /// correlated.
@@ -443,12 +470,14 @@ where
     /// use std::num::NonZeroUsize;
     ///
     /// let data1 = array![1.0f32, 0.0, -1.0, 0.0];
-    /// let data2 = array![0.0, 1.0, 0.0, -1.0];
+    /// let data2 = array![0.0, 1.0, 0.0, -1.0]; // data1 delayed by one sample
     /// let audio1 = AudioSamples::new_mono(data1, sample_rate!(44100)).unwrap();
     /// let audio2 = AudioSamples::new_mono(data2, sample_rate!(44100)).unwrap();
     /// let max_lag = NonZeroUsize::new(3).unwrap();
     /// let xcorr = audio1.cross_correlation(&audio2, max_lag).unwrap();
     /// assert_eq!(xcorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// // Peak at lag 1: (1·1 + 0·0 + (−1)·(−1)) / 3
+    /// assert!((xcorr[1] - 2.0 / 3.0).abs() < 1e-12);
     /// ```
     fn cross_correlation(
         &self,
@@ -458,39 +487,43 @@ where
 
     /// Computes the spectral centroid of a mono signal.
     ///
-    /// The spectral centroid is the frequency-weighted mean of the power
-    /// spectrum and serves as a measure of spectral brightness. Higher values
-    /// indicate energy concentrated at higher frequencies.
+    /// The power-weighted mean frequency `Σ f_k·|X[k]|² / Σ |X[k]|²`, where `X` is
+    /// a single FFT of the whole (channel-reduced) signal with FFT length equal to
+    /// the signal length `N` and no window (rectangular), `k = 0..=⌊N/2⌋`, and
+    /// `f_k = k·fs/N` Hz. It serves as a measure of spectral brightness: higher
+    /// values indicate energy concentrated at higher frequencies.
+    ///
+    /// Note: librosa's `spectral_centroid` is computed per STFT frame and weighted
+    /// by magnitude `|X|`, so its values are generally higher than this
+    /// power-weighted value and are not directly comparable.
     ///
     /// Reference: [Spectral centroid - Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
-    ///   policy applied to multi-channel input. [`Error`](crate::operations::types::ChannelReduction::Error)
-    ///   (the default) rejects multi-channel signals.
+    ///   policy for multi-channel input.
     ///
     /// # Returns
     /// The spectral centroid frequency in Hz. Returns `0.0` when the signal
     /// is silence (zero total spectral energy).
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel
-    ///   and `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
-    ///   or if a [`Channel`](crate::operations::types::ChannelReduction::Channel) index is out of bounds.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     ///
     /// # Examples
-    /// ```no_run
-    /// // Requires feature = "transforms"
-    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate, sine_wave};
+    /// ```
+    /// use audio_samples::{AudioStatistics, sample_rate, sine_wave};
+    /// use audio_samples::operations::types::ChannelReduction;
     /// use std::time::Duration;
     ///
-    /// use audio_samples::operations::types::ChannelReduction;
-    ///
+    /// // 100 ms at 44.1 kHz: bin spacing fs/N = 10 Hz, so 440 Hz lies on bin 44.
     /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
     /// let centroid = audio.spectral_centroid(ChannelReduction::Error).unwrap();
-    /// // A 440 Hz sine wave should have a centroid near 440 Hz.
-    /// assert!(centroid > 0.0);
+    /// assert!((centroid - 440.0).abs() < 1.0);
     /// ```
     #[cfg(feature = "transforms")]
     fn spectral_centroid(
@@ -500,11 +533,20 @@ where
 
     /// Computes the autocorrelation function up to `max_lag` samples.
     ///
-    /// Autocorrelation measures the similarity of a signal with a time-shifted
-    /// copy of itself. The value at lag 0 is the signal's mean-square value;
-    /// subsequent lags decrease as the shift increases.
+    /// Returns the unbiased estimate
+    /// `r[k] = (1/(N−k)) Σ_{n=0}^{N−1−k} x[n]·x[n+k]` for `k = 0..=max_lag`, in
+    /// squared raw sample units, with no mean removal and no normalisation by
+    /// `r[0]`. `r[0]` is the mean square (`A²/2` for a sine of amplitude `A`). The
+    /// values do not necessarily decrease with `k`: for a periodic signal `r[k]`
+    /// peaks again at every multiple of the period, and at large `k` (few
+    /// overlapping samples) the estimate is noisy and can exceed `r[0]`. It is
+    /// computed with a zero-padded FFT, so the correlation is linear, not circular.
     ///
     /// For multi-channel audio only the first channel is used.
+    ///
+    /// Note: unlike the biased estimator `(1/N) Σ …` (e.g.
+    /// `numpy.correlate(x, x, "full")[N-1:] / N`), each lag is divided by its own
+    /// overlap count `N − k`.
     ///
     /// Reference: [Autocorrelation - Wikipedia](https://en.wikipedia.org/wiki/Autocorrelation)
     ///
@@ -518,25 +560,33 @@ where
     /// fails.
     ///
     /// # Examples
-    /// ```no_run
-    /// // Requires feature = "transforms"
+    /// ```
     /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
     /// use ndarray::array;
     /// use std::num::NonZeroUsize;
     ///
-    /// let data = array![1.0f32, 0.5, -0.5, -1.0];
+    /// let data = array![1.0f32, 2.0, 3.0, 4.0];
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-    /// let autocorr = audio.autocorrelation(NonZeroUsize::new(3).unwrap()).unwrap();
-    /// assert_eq!(autocorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// let r = audio.autocorrelation(NonZeroUsize::new(3).unwrap()).unwrap();
+    /// assert_eq!(r.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// // r[0] = (1 + 4 + 9 + 16) / 4, r[1] = (2 + 6 + 12) / 3
+    /// assert!((r[0] - 7.5).abs() < 1e-9);
+    /// assert!((r[1] - 20.0 / 3.0).abs() < 1e-9);
     /// ```
     #[cfg(feature = "transforms")]
     fn autocorrelation(&self, max_lag: NonZeroUsize) -> Option<NonEmptyVec<f64>>;
 
     /// Computes the spectral rolloff frequency.
     ///
-    /// The spectral rolloff is the frequency below which a specified proportion
-    /// of the total spectral energy is contained. It is commonly used to
+    /// The smallest bin frequency `f_k = k·fs/N` at which the cumulative power
+    /// `Σ_{j≤k} |X[j]|²` reaches `rolloff_percent` of the total power, where `X`
+    /// is a single rectangular-window FFT of the whole (channel-reduced) signal with
+    /// FFT length equal to the signal length `N`. There is no interpolation
+    /// between bins, so the result is a multiple of `fs/N`. It is commonly used to
     /// distinguish harmonic signals from noise-like signals.
+    ///
+    /// Note: librosa's `spectral_rolloff` accumulates magnitude `|X|` per STFT
+    /// frame, so its values differ from this whole-signal, power-based rolloff.
     ///
     /// # Arguments
     /// - `rolloff_percent` - the energy proportion threshold. Must lie in the
@@ -558,17 +608,15 @@ where
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     ///
     /// # Examples
-    /// ```no_run
-    /// // Requires feature = "transforms"
-    /// use audio_samples::{AudioSamples, AudioStatistics, sample_rate, sine_wave};
+    /// ```
+    /// use audio_samples::{AudioStatistics, sample_rate, sine_wave};
+    /// use audio_samples::operations::types::ChannelReduction;
     /// use std::time::Duration;
     ///
-    /// use audio_samples::operations::types::ChannelReduction;
-    ///
     /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
-    /// // 85 % of spectral energy is below the rolloff frequency.
+    /// // All the power is in the 440 Hz bin, so 85 % is reached there.
     /// let rolloff = audio.spectral_rolloff(0.85, ChannelReduction::Error).unwrap();
-    /// assert!(rolloff > 0.0);
+    /// assert!((rolloff - 440.0).abs() < 1e-6);
     /// ```
     #[cfg(feature = "transforms")]
     fn spectral_rolloff(
@@ -579,11 +627,18 @@ where
 
     /// Computes the spectral bandwidth (spectral spread).
     ///
-    /// The magnitude-weighted standard deviation of the spectrum about its
-    /// [`spectral_centroid`](Self::spectral_centroid):
-    /// `sqrt( Σ (f_k - centroid)² · mag_k / Σ mag_k )`. Larger values indicate
-    /// energy spread across a wider frequency range; a single pure tone yields a
-    /// value near zero.
+    /// The magnitude-weighted standard deviation of frequency,
+    /// `sqrt( Σ (f_k − c_M)²·M_k / Σ M_k )`, where `M_k = |X[k]|` is the magnitude
+    /// of a single rectangular-window FFT of the whole (channel-reduced) signal,
+    /// `f_k = k·fs/N` Hz, and `c_M = Σ f_k·M_k / Σ M_k` is a **magnitude**-weighted
+    /// centroid computed internally. Because
+    /// [`spectral_centroid`](crate::operations::traits::AudioStatistics::spectral_centroid)
+    /// is power-weighted, the spread is not centred on that value. Larger values
+    /// indicate energy spread across a wider frequency range; a single on-bin pure
+    /// tone yields a value near zero.
+    ///
+    /// Note: this is librosa's `spectral_bandwidth` formula (`p = 2`, magnitude
+    /// weights) applied to one whole-signal FFT rather than to each STFT frame.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -608,11 +663,14 @@ where
     /// Computes the spectral flatness (Wiener entropy).
     ///
     /// The ratio of the geometric mean to the arithmetic mean of the power
-    /// spectrum: `geometric_mean(power) / arithmetic_mean(power)`. The geometric
-    /// mean is computed in the log domain with a small epsilon floor for numerical
-    /// stability. The result lies in `[0, 1]`: values near `1` indicate noise-like
-    /// (flat) spectra, while values near `0` indicate tonal spectra dominated by a
-    /// few peaks.
+    /// spectrum `P_k = |X[k]|²` of a single rectangular-window FFT of the whole
+    /// (channel-reduced) signal: `exp(mean(ln(P_k + ε))) / mean(P_k)`, with
+    /// `ε = 1e-10` so that empty bins keep the logarithm finite. The result is
+    /// clamped to `[0, 1]`: values near `1` indicate noise-like (flat) spectra,
+    /// while values near `0` indicate tonal spectra dominated by a few peaks.
+    ///
+    /// Note: librosa's `spectral_flatness` (default `power=2.0`) uses the same
+    /// ratio per STFT frame, with `max(P_k, amin)` instead of `P_k + ε`.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -636,8 +694,9 @@ where
     /// Computes the spectral crest factor.
     ///
     /// The ratio of the peak magnitude to the mean magnitude of the spectrum:
-    /// `max(mag) / mean(mag)`. High values indicate a strongly peaked (tonal)
-    /// spectrum; a flat spectrum approaches `1`.
+    /// `max(M_k) / mean(M_k)`, with `M_k = |X[k]|` the magnitude of a single
+    /// rectangular-window FFT of the whole (channel-reduced) signal. High values
+    /// indicate a strongly peaked (tonal) spectrum; a flat spectrum approaches `1`.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -662,10 +721,12 @@ where
     /// Computes the spectral slope.
     ///
     /// The slope of an ordinary least-squares linear fit of the **linear
-    /// magnitude** spectrum against frequency (Hz). Returned in units of
-    /// magnitude per Hz. A negative slope indicates energy concentrated at low
-    /// frequencies (e.g. a low-pass or pink-ish spectrum); a flat (white) spectrum
-    /// yields a slope near zero.
+    /// magnitude** spectrum `M_k = |X[k]|` against frequency `f_k = k·fs/N` (Hz),
+    /// where `X` is a single rectangular-window, unnormalised FFT of the whole
+    /// (channel-reduced) signal. Returned in units of magnitude per Hz; because the
+    /// FFT is unnormalised, the value scales with the signal length. A negative
+    /// slope indicates energy concentrated at low frequencies (e.g. a low-pass or
+    /// pink-ish spectrum); a flat (white) spectrum yields a slope near zero.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -687,22 +748,33 @@ where
         reduction: crate::operations::types::ChannelReduction,
     ) -> AudioSampleResult<f64>;
 
-    /// Computes spectral contrast across octave-spaced sub-bands (librosa-style).
+    /// Computes spectral contrast across logarithmically spaced sub-bands (after
+    /// librosa).
     ///
-    /// The spectrum is partitioned into `n_bands` octave-spaced sub-bands. Within
-    /// each band the magnitudes are sorted and the contrast is the dB difference
-    /// between the mean of the top quantile (peaks) and the mean of the bottom
-    /// quantile (valleys). High contrast indicates clear tonal/harmonic structure;
-    /// low contrast indicates noise-like content.
+    /// The Hann-windowed magnitude spectrum `M_k` of the whole (channel-reduced)
+    /// signal has `B = ⌊N/2⌋ + 1` bins. Bin 0 (DC) is excluded and the bins
+    /// `1..B` are split into `n_bands` bands with geometrically spaced edges
+    /// `e_b = ⌊r^b⌋`, `r = B^(1/n_bands)`; the last band ends at the Nyquist bin.
+    /// Each band therefore spans `log2(r)` octaves, which is exactly one octave
+    /// only when `B = 2^n_bands`. Within a band the values `10·log10(M_k + 1e-10)`
+    /// are sorted and the contrast is the mean of the top 2 % minus the mean of the
+    /// bottom 2 % (rounded, at least one bin each). High contrast indicates clear
+    /// tonal/harmonic structure; low contrast indicates noise-like content.
+    ///
+    /// Note: like librosa, this applies `10·log10` to **magnitudes**, so each value
+    /// is half the level difference in dB (multiply by 2 for a `20·log10`
+    /// difference). Unlike librosa, the band edges are fixed in bins from bin 1 to
+    /// Nyquist (librosa uses octaves above 200 Hz), and one value per band is
+    /// returned for the whole signal rather than per frame.
     ///
     /// # Arguments
-    /// - `n_bands` - the number of octave-spaced sub-bands.
+    /// - `n_bands` - the number of log-spaced sub-bands.
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
     ///   policy for multi-channel input.
     ///
     /// # Returns
-    /// A vector of `n_bands` contrast values in dB, low band to high band. Empty
-    /// bands yield `0.0`.
+    /// A vector of `n_bands` contrast values (`10·log10` of a magnitude ratio),
+    /// low band to high band. Empty bands yield `0.0`.
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
@@ -745,8 +817,11 @@ where
     /// Classifies each audio frame as speech (`true`) or silence (`false`).
     ///
     /// Divides the signal into overlapping frames according to `config.frame_size`
-    /// and `config.hop_size`, applies the detection method, and post-processes
-    /// the raw per-frame decisions through four sequential steps:
+    /// and `config.hop_size`, computes each frame's RMS level (compared in
+    /// dBFS with `config.energy_threshold_db`) and zero-crossing rate (crossings
+    /// per sample, compared with `[config.zcr_min, config.zcr_max]`), applies
+    /// the detection method, and post-processes the raw per-frame decisions
+    /// through four sequential steps:
     ///
     /// 1. Majority-vote smoothing over `config.smooth_frames`.
     /// 2. Hangover extension - extends active frames forward by `config.hangover_frames`.
@@ -755,7 +830,8 @@ where
     /// 4. Minimum silence run enforcement - silence gaps shorter than
     ///    `config.min_silence_frames` are reclassified as speech.
     ///
-    /// Multi-channel audio is handled according to `config.channel_policy`.
+    /// The formulas are given in the [`vad`](crate::operations::vad) module
+    /// docs. Multi-channel audio is handled according to `config.channel_policy`.
     ///
     /// # Arguments
     ///
@@ -772,9 +848,10 @@ where
     /// # Errors
     ///
     /// Returns [crate::AudioSampleError::Parameter] if `config` fails validation
-    /// (e.g. `hop_size > frame_size` or invalid ZCR bounds).
+    /// (e.g. `hop_size > frame_size` or invalid ZCR bounds), or if `pad_end` is
+    /// `false` and the signal is shorter than `frame_size` (no complete frame).
     /// Returns [crate::AudioSampleError::Layout] if the audio array is non-contiguous.
-    /// Returns [crate::AudioSampleError::Feature] if `config.method` is
+    /// Returns [crate::AudioSampleError::Unsupported] if `config.method` is
     /// `VadMethod::Spectral` (not yet implemented).
     ///
     /// # Example
@@ -883,11 +960,23 @@ where
     /// Normalizes audio samples using the specified configuration.
     ///
     /// The normalization method determines both the algorithm and parameters:
-    /// - `NormalizationConfig::min_max(min, max)` - scale to the `[min, max]` range
-    /// - `NormalizationConfig::peak(target)` - scale so the peak equals `target`
-    /// - `NormalizationConfig::mean()` - subtract the mean (center around zero)
-    /// - `NormalizationConfig::median()` - subtract the median (mono only)
-    /// - `NormalizationConfig::zscore()` - transform to zero mean, unit variance
+    /// - `NormalizationConfig::min_max(a, b)` - affine map onto `[a, b]`:
+    ///   `x' = a + (x − x_min)(b − a)/(x_max − x_min)`
+    /// - `NormalizationConfig::peak(A)` - `x' = A · x / max|x|`, so the
+    ///   largest absolute sample becomes `A`
+    /// - `NormalizationConfig::mean()` - `x' = x − x̄` (center around zero)
+    /// - `NormalizationConfig::median()` - `x' = x − median(x)`, where the
+    ///   median is the middle value of the *sorted* samples (mean of the two
+    ///   middle values for an even count); mono only
+    /// - `NormalizationConfig::zscore()` - `x' = (x − x̄)/σ` (zero mean, unit
+    ///   population standard deviation)
+    ///
+    /// MinMax and Peak evaluate the map in `f64` and round back to the sample
+    /// type, so they work for integer audio (Peak uses the normalised
+    /// `[-1, 1]` scale of the sample type, MinMax the raw sample values).
+    /// Mean, Median and ZScore work on raw sample values and truncate toward
+    /// zero when written back to an integer type; ZScore output (values of a
+    /// few units) is only meaningful for float sample types.
     ///
     /// # Arguments
     /// - `config` - Normalization configuration. Use the associated constructors
@@ -955,9 +1044,16 @@ where
 
     /// Scales all audio samples by a constant factor.
     ///
-    /// This is equivalent to adjusting the volume or amplitude of the signal.
-    /// A factor of 1.0 leaves the signal unchanged; values > 1.0 amplify and
-    /// values < 1.0 attenuate.
+    /// This is equivalent to adjusting the volume or amplitude of the signal:
+    /// `x'[n] = g · x[n]`. A factor of 1.0 leaves the signal unchanged,
+    /// `|g| > 1` amplifies, `|g| < 1` attenuates (a gain of `g` changes the
+    /// level by `20·log10|g|` dB) and a negative factor also inverts the
+    /// polarity.
+    ///
+    /// For float sample types the product is not clipped. For integer sample
+    /// types the gain is applied on the normalised `[-1, 1]` scale in `f64`
+    /// and the result is rounded to nearest and saturated at the type's range
+    /// (so `scale(0.5)` of `10000i16` is `5000`).
     ///
     /// # Arguments
     /// - `factor` - The scaling factor to apply to all samples.
@@ -1089,6 +1185,14 @@ where
     /// `scipy.signal.lfilter(h, 1, x)[M-1:]`. The resulting audio is shorter
     /// than the original by `filter_coeffs.len() - 1` samples. Long filters
     /// (≥ 160 taps, with the `transforms` feature) use FFT convolution.
+    ///
+    /// Output sample `i` corresponds to input time `n = i + M − 1`: the
+    /// first `M − 1` input samples produce no output of their own, and the
+    /// result is not delay-compensated (a symmetric, linear-phase filter still
+    /// delays its output by `(M − 1)/2` samples relative to that index).
+    /// Note: unlike `AudioTransforms::convolve` (feature `transforms`), which
+    /// returns the full convolution of length `N + M − 1`, this returns
+    /// only the valid part of length `N − M + 1`.
     ///
     /// Computation is carried out in `f64`. For integer sample types both the
     /// samples and the coefficients are interpreted on the normalised
@@ -1535,8 +1639,12 @@ where
 
     /// Removes DC offset by subtracting the mean value, mutating `self` in place.
     ///
-    /// This centers the audio around zero and removes any constant bias that
-    /// may have been introduced during recording or processing.
+    /// Computes `x'[n] = x[n] − x̄`, where `x̄` is the mean over all samples
+    /// (all channels together). This centers the audio around zero and
+    /// removes any constant bias that may have been introduced during
+    /// recording or processing. Only the 0 Hz bin of a DFT over the whole
+    /// buffer changes; for a drifting offset use
+    /// [`high_pass_filter`](Self::high_pass_filter) instead.
     ///
     /// # Errors
     /// Returns an error if the audio data layout is invalid or if mean computation fails.
@@ -1656,7 +1764,7 @@ where
         Ok(out)
     }
 
-    /// Resamples audio to a new sample rate using high-quality resampling.
+    /// Resamples audio to a new sample rate.
     ///
     /// Uses the crate's windowed-sinc resampler (see [`crate::resampling`]): the
     /// output is time-aligned with the input and has exactly
@@ -1778,11 +1886,23 @@ where
 /// the `spectrograms` crate and are **not** re-exported from `audio_samples`.
 /// Import them directly from `spectrograms`.
 ///
+/// # Conventions
+///
+/// Forward transforms are unnormalised one-sided DFTs,
+/// X\[k\] = Σ_n x\[n\]·e^{−j2πkn/N}, with bin k at k·f_s/N Hz. `WindowType::Hanning`
+/// is the **symmetric** Hann window (librosa/SciPy default to the periodic one).
+/// Spectrogram dB values are 10·log10(max(power, 10^(floor_db/10))) re 1 (an
+/// absolute floor, no `top_db`). Mel bands use the Slaney mel scale applied to
+/// power, without filter normalisation by default; MFCCs use an unnormalised
+/// DCT-II and an HTK lifter (L = 22) by default. The
+/// [`crate::operations::transforms`] module docs give every formula and the
+/// differences from librosa.
+///
 /// # Invariants
 ///
 /// Methods that accept an FFT length (`n_fft`) zero-pad shorter signals rather
-/// than truncating.  Signals *longer* than `n_fft` are rejected with a
-/// [crate::AudioSampleError::Parameter] error.
+/// than truncating.  Signals *longer* than `n_fft` are rejected with an error
+/// (propagated from the `spectrograms` crate).
 #[cfg(feature = "transforms")]
 pub trait AudioTransforms: AudioTypeConversion
 where
@@ -1790,19 +1910,22 @@ where
 {
     /// Computes the Fast Fourier Transform of the audio signal.
     ///
-    /// Each channel is transformed independently. The output has one row per
-    /// channel containing the complex spectral bins.
+    /// Each channel is transformed independently. Each row holds the
+    /// non-negative-frequency half of the unnormalised DFT,
+    /// X\[k\] = Σ_n x\[n\]·e^{−j2πkn/N} for k = 0 … ⌊N/2⌋ (N = `n_fft`); bin k is at
+    /// k·f_s/N Hz (see [`crate::utils::audio_math::fft_frequencies`]). No window
+    /// is applied. Like `numpy.fft.rfft`, there is no 1/N scaling.
     ///
     /// # Arguments
     /// - `n_fft` - FFT length in samples. If longer than the signal the input
-    ///   is zero-padded internally.
+    ///   is zero-padded internally; a signal longer than `n_fft` is an error.
     ///
     /// # Returns
-    /// An `Array2<Complex<f64>>` where each row is the FFT of the
-    /// corresponding channel.
+    /// An `Array2<Complex<f64>>` of shape `(channels, n_fft / 2 + 1)`.
     ///
     /// # Errors
-    /// Returns an error if the FFT computation fails.
+    /// Returns an error if the signal is longer than `n_fft` or the FFT
+    /// computation fails.
     ///
     /// # Examples
     /// ```
@@ -1846,8 +1969,11 @@ where
 
     /// Computes the magnitude spectrum of the audio signal.
     ///
-    /// Equivalent to [`fft`] followed by taking the absolute value of each complex bin.
-    /// Each channel is transformed independently.
+    /// Equivalent to [`fft`] followed by taking the absolute value of each complex bin,
+    /// |X\[k\]| for k = 0 … ⌊N/2⌋. Each channel is transformed independently.
+    ///
+    /// Note: unlike `numpy.fft.rfft`, this returns real magnitudes |X\[k\]|, not the
+    /// complex one-sided spectrum; use [`fft`] for the complex values.
     ///
     /// # Arguments
     ///
@@ -1885,10 +2011,17 @@ where
     ///
     /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix).
     ///
-    /// The signal is divided into overlapping, windowed frames and each frame
-    /// is transformed to the frequency domain. The returned [`StftResult`]
-    /// carries both the complex matrix and the parameters required by
-    /// [`istft`] for reconstruction.
+    /// Computes X\[k, m\] = Σ_n x_p\[n + mH\]·w\[n\]·e^{−j2πkn/N} (N = `n_fft`,
+    /// H = `hop_size`), an unnormalised one-sided DFT of each windowed frame
+    /// (⌊N/2⌋ + 1 bins × frames). `WindowType::Hanning` is the **symmetric** Hann
+    /// window 0.5 − 0.5·cos(2πn/(N − 1)), not the periodic Hann used by default in
+    /// librosa and SciPy. With `centre = true` the signal is zero-padded by ⌊N/2⌋
+    /// samples on both sides, so frame m is centred on sample mH. The result equals
+    /// `librosa.stft(x, n_fft=N, hop_length=H, window=scipy.signal.get_window('hann',
+    /// N, fftbins=False), pad_mode='constant')`. See the
+    /// [`crate::operations::transforms`] module docs for the frame count. The
+    /// returned [`StftResult`] carries both the complex matrix and the parameters
+    /// required by [`istft`] for reconstruction.
     ///
     /// # Arguments
     /// - `params` - STFT configuration (FFT size, hop size, window function,
@@ -1896,10 +2029,10 @@ where
     ///   [`StftParams`].
     ///
     /// # Returns
-    /// An [`StftResult`] containing the complex STFT matrix and metadata.
+    /// An [`StftResult`] whose `data` has shape `(n_fft / 2 + 1, n_frames)`.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel.
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
     /// - Errors from the underlying STFT computation.
     ///
     /// [`istft`]: Self::istft
@@ -1921,9 +2054,13 @@ where
     ///
     /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::istft_matrix`](crate::operations::spectrum::AudioSpectrum::istft_matrix).
     ///
-    /// Uses overlap-add synthesis with the window and hop parameters stored
-    /// in the [`StftResult`]. The output is a mono signal at the sample rate
-    /// that was recorded during the forward transform.
+    /// Synthesis is windowed overlap-add normalised by Σ_m w²[n − mH] (the
+    /// least-squares inverse STFT), using the window and hop stored in the
+    /// [`StftResult`]; reconstruction is exact wherever that sum is non-zero.
+    /// The output is a mono signal at the sample rate recorded during the
+    /// forward transform. Its length is (n_frames − 1)·H + N − 2⌊N/2⌋ with
+    /// centring, which can be up to `hop − 1` samples shorter than the original;
+    /// trim or pad to the original length if needed.
     ///
     /// # Arguments
     /// - `stft` - the [`StftResult`] produced by a prior call to [`stft`].
@@ -1953,6 +2090,10 @@ where
 
     /// Computes a linearly-spaced spectrogram.
     ///
+    /// Rows are the STFT bins (bin k at k·f_s/N Hz). `Power` gives |X|², `Magnitude`
+    /// gives |X|, and `Decibels` gives 10·log10(max(|X|², 10^(floor_db/10))) re 1
+    /// (an absolute floor, not a range below the peak; see the
+    /// [`crate::operations::transforms`] module docs).
     /// Prefer the typed convenience methods -
     /// [`linear_magnitude_spectrogram`](crate::operations::AudioTransforms::linear_magnitude_spectrogram), [`linear_power_spectrogram`](crate::operations::AudioTransforms::linear_power_spectrogram), or
     /// [`linear_db_spectrogram`](crate::operations::AudioTransforms::linear_db_spectrogram) - for the most common amplitude scales.
@@ -1960,6 +2101,7 @@ where
     /// # Arguments
     /// - `params` - spectrogram parameters (window, hop, FFT size).
     /// - `db` - required when `AmpScale` is `Decibels`; ignored otherwise.
+    ///   Its `floor_db` is an absolute power floor in dB re 1.
     ///
     /// # Returns
     /// A `Spectrogram<LinearHz, AmpScale>`.
@@ -2039,6 +2181,9 @@ where
     }
 
     /// Shorthand for [`linear_spectrogram`](crate::operations::AudioTransforms::linear_spectrogram) with `Decibels` amplitude scale.
+    ///
+    /// Values are 10·log10(max(P, 10^(floor_db/10))) of the power P, in dB re 1:
+    /// `floor_db` is an absolute floor, not a range below the peak (no `top_db`).
     ///
     /// # Errors
     /// Returns an error if STFT computation fails or if parameters are invalid.
@@ -2163,6 +2308,9 @@ where
 
     /// Shorthand for [`log_frequency_spectrogram`](crate::operations::AudioTransforms::log_frequency_spectrogram) with `Decibels` amplitude scale.
     ///
+    /// Values are 10·log10(max(P, 10^(floor_db/10))) of the power P, in dB re 1:
+    /// `floor_db` is an absolute floor, not a range below the peak (no `top_db`).
+    ///
     /// # Errors
     /// Returns an error if STFT computation or frequency binning fails, or if parameters are invalid.
     ///
@@ -2194,8 +2342,22 @@ where
     ///
     /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::melspectrogram`](crate::operations::spectrum::AudioSpectrum::melspectrogram).
     ///
-    /// The mel scale approximates human auditory perception by compressing
-    /// high frequencies relative to low ones.  Prefer the typed
+    /// The mel scale approximates human pitch perception by compressing
+    /// high frequencies relative to low ones. Bands use the **Slaney** mel scale
+    /// (`librosa.hz_to_mel(htk=False)`) with triangular filters in Hz, applied to the
+    /// **power** spectrogram |X|². `MelParams::new` applies no filter normalisation
+    /// (librosa's default is `norm='slaney'`; use `MelParams::with_norm(..,
+    /// MelNorm::Slaney)` to match it). The `Magnitude` output is the square root of
+    /// mel power, not a mel-weighted sum of magnitudes; `Decibels` is
+    /// 10·log10(max(mel power, 10^(floor_db/10))) re 1. See the
+    /// [`crate::operations::transforms`] module docs for the formulas.
+    ///
+    /// Note: in `spectrograms` 2.1.3 the result's `frequencies()` axis is only
+    /// correct when `f_min = 0` and `f_max` = Nyquist; for other ranges compute the
+    /// band centres yourself (the inner `n_mels` of `n_mels + 2` points equally
+    /// spaced on the Slaney mel scale between `f_min` and `f_max`).
+    ///
+    /// Prefer the typed
     /// convenience methods - [`mel_mag_spectrogram`](crate::operations::AudioTransforms::mel_mag_spectrogram),
     /// [`mel_power_spectrogram`](crate::operations::AudioTransforms::mel_power_spectrogram), or [`mel_db_spectrogram`](crate::operations::AudioTransforms::mel_db_spectrogram) - for the
     /// most common amplitude scales.
@@ -2268,6 +2430,9 @@ where
 
     /// Shorthand for [`mel_spectrogram`](crate::operations::AudioTransforms::mel_spectrogram) with `Decibels` amplitude scale.
     ///
+    /// Values are 10·log10(max(P, 10^(floor_db/10))) of the power P, in dB re 1:
+    /// `floor_db` is an absolute floor, not a range below the peak (no `top_db`).
+    ///
     /// # Errors
     /// Returns an error if STFT computation or mel filterbank application fails, or if parameters are invalid.
     ///
@@ -2327,8 +2492,17 @@ where
     /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::mfcc_frames`](crate::operations::spectrum::AudioSpectrum::mfcc_frames).
     ///
     /// MFCCs are a compact spectral representation widely used in speech
-    /// recognition and audio classification.  They are derived by
-    /// applying a DCT to log-mel filter-bank energies.
+    /// recognition and audio classification. The pipeline is: power mel
+    /// spectrogram (Slaney scale, `n_mels` bands from 0 Hz to f_s/2, no filter
+    /// normalisation) → 10·log10(max(·, 10⁻⁸)) → DCT-II **without** orthonormal
+    /// scaling, c\[q\] = Σ_b L\[b\]·cos(πq(b + ½)/`n_mels`), keeping the first
+    /// `n_mfcc` coefficients → HTK sinusoidal lifter 1 + (L/2)·sin(πq/L) with
+    /// **L = 22 by default** (`MfccParams::with_lifter(0)` disables it).
+    /// `with_c0(false)` drops c0 and returns `n_mfcc − 1` coefficients.
+    ///
+    /// Note: values therefore differ from `librosa.feature.mfcc` (orthonormal DCT,
+    /// no lifter, `top_db = 80`) by a factor √(`n_mels`/2) for q ≥ 1 (√`n_mels` for
+    /// c0) and by the lifter weights.
     ///
     /// # Arguments
     /// - `stft_params` - STFT configuration used for the underlying
@@ -2339,11 +2513,12 @@ where
     ///   [`MfccParams`].
     ///
     /// # Returns
-    /// An [`Mfcc`] containing the MFCC matrix.
+    /// An [`Mfcc`] whose `data` has shape `(n_mfcc, n_frames)` (or
+    /// `(n_mfcc − 1, n_frames)` without c0).
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
-    /// - Errors from the underlying computation.
+    /// - Errors from the underlying computation, including `n_mfcc > n_mels`.
     ///
     /// ## See Also
     /// - [MFCC - Wikipedia](https://en.wikipedia.org/wiki/Mel-frequency_cepstrum)
@@ -2407,25 +2582,37 @@ where
 
     /// Estimates the power spectral density using Welch's method.
     ///
-    /// The signal is split into overlapping segments; each is windowed
-    /// with a Hanning window and FFT'd, and the resulting periodograms
-    /// are averaged.  The final values are normalised to power per Hz.
+    /// The signal is split into segments of N = `window_size` samples with hop
+    /// H = max(1, ⌊(1 − `overlap`)·N⌋); incomplete trailing segments are dropped.
+    /// Each segment is multiplied by the **symmetric** Hann window w\[n\]
+    /// (`WindowType::Hanning`), with no detrending, and transformed with an
+    /// N-point DFT X_s\[k\]. The one-sided density estimate is
+    ///
+    /// ```text
+    /// P[k] = c_k · mean_s |X_s[k]|² / (f_s · Σ_n w[n]²),   c_k = 1 at DC and Nyquist, 2 otherwise
+    /// ```
+    ///
+    /// in units² per Hz (units of full scale), at f_k = k·f_s/N. This matches
+    /// `scipy.signal.welch(x, fs, window=scipy.signal.windows.hann(N, sym=True),
+    /// nperseg=N, noverlap=N − H, detrend=False, scaling='density')`, and
+    /// Σ_k P\[k\]·f_s/N ≈ the mean square of the signal (Parseval). Note: SciPy's
+    /// defaults differ (periodic Hann, `detrend='constant'`).
     ///
     /// # Arguments
-    /// - `window_size` - length of each segment in samples.  Must not
-    ///   exceed the signal length.
+    /// - `window_size` - segment length N in samples. Must be at least 2 and must
+    ///   not exceed the signal length.
     /// - `overlap` - fractional overlap between adjacent segments, in
     ///   the range `[0, 1)`.
     ///
     /// # Returns
-    /// A [`Psd`](crate::Psd) whose `frequencies()` and `density()` slices are of
-    /// equal length. `frequencies[i]` is the centre frequency of bin `i` in Hz;
-    /// `density[i]` is the estimated power spectral density at that frequency.
+    /// A [`Psd`](crate::Psd) whose `frequencies()` and `density()` slices both have
+    /// length ⌊N/2⌋ + 1. `frequencies[k]` = k·f_s/N in Hz; `density[k]` is P\[k\] in
+    /// units²/Hz.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if the signal is
-    ///   multi-channel, if `overlap` is outside `[0, 1)`, or if
-    ///   `window_size` exceeds the signal length.
+    /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
+    /// - [`crate::AudioSampleError::Parameter`] if `overlap` is outside `[0, 1)`,
+    ///   or if `window_size` is 1 or exceeds the signal length.
     ///
     /// ## See Also
     /// - [Welch's method - Wikipedia](https://en.wikipedia.org/wiki/Welch%27s_method)
@@ -2449,8 +2636,14 @@ where
     /// Computes a gammatone-filtered spectrogram.
     ///
     /// Gammatone filters model the bandpass response of the human
-    /// cochlea.  The filter centre frequencies are spaced according to
-    /// the ERB (Equivalent Rectangular Bandwidth) scale.  Prefer the
+    /// cochlea. Note: with the default `ErbSpacing::Linear`, `spectrograms` 2.1.3
+    /// spaces the centre frequencies uniformly in ERB **bandwidth**
+    /// 24.7·(4.37 f/1000 + 1), which is linear in Hz, **not** on the ERB-number
+    /// (Cam) scale 21.4·log10(1 + 0.00437 f) (an upstream bug). For auditory
+    /// (ERB-rate) spacing use
+    /// `GammatoneParams::new(..)?.with_spacing(ErbSpacing::AppleTr35)` (Slaney /
+    /// Patterson spacing, uniform in ln(f + 228.7), equivalent to the
+    /// Glasberg & Moore ERB-number scale). Prefer the
     /// typed convenience methods -
     /// [`gammatone_magnitude_spectrogram`](crate::operations::AudioTransforms::gammatone_magnitude_spectrogram),
     /// [`gammatone_power_spectrogram`](crate::operations::AudioTransforms::gammatone_power_spectrogram), or
@@ -2552,6 +2745,9 @@ where
 
     /// Shorthand for [`gammatone_spectrogram`](crate::operations::AudioTransforms::gammatone_spectrogram) with `Decibels` amplitude scale.
     ///
+    /// Values are 10·log10(max(P, 10^(floor_db/10))) of the power P, in dB re 1:
+    /// `floor_db` is an absolute floor, not a range below the peak (no `top_db`).
+    ///
     /// # Errors
     /// Returns an error if STFT computation or gammatone filterbank application fails, or if parameters are invalid.
     ///
@@ -2581,16 +2777,23 @@ where
 
     /// Computes the Constant-Q Transform (CQT) of a mono signal.
     ///
-    /// The CQT uses a bank of bandpass filters whose centre frequencies
-    /// are spaced logarithmically with a constant ratio
-    /// Q = f / Δf.  This gives it the same frequency resolution as the
-    /// musical scale, making it preferred for pitch and harmonic
-    /// analysis.
+    /// Bin k has centre frequency f_k = f_min·2^{k/b} (b = bins per octave;
+    /// geometric spacing with ratio 2^{1/b}) and a constant quality factor
+    /// Q = f_k/Δf_k = 1/(2^{1/b} − 1) (≈ 16.8 for b = 12), so its frequency
+    /// resolution follows the musical scale, which suits pitch and harmonic
+    /// analysis. The kernel for bin k is about Q·f_s/f_k samples long, so low
+    /// bins have long kernels (good frequency, poor time resolution).
+    ///
+    /// Note (`spectrograms` 2.1.3): frames are `min(signal_len, 16384)` samples
+    /// long and are not centred, so a signal shorter than 16384 samples yields a
+    /// single frame whatever `hop_size` is; kernels longer than the frame are
+    /// truncated, which lowers the effective Q at low frequencies.
     ///
     /// # Arguments
     /// - `params` - CQT parameters (frequency range, bins per octave,
     ///   etc.). Field-level constraints are documented on [`CqtParams`].
-    /// - `hop_size` - hop length in samples between successive frames.
+    /// - `hop_size` - hop length in samples between successive frames (only
+    ///   relevant for signals longer than the 16384-sample frame).
     ///
     /// # Returns
     /// A [`CqtResult`] containing the CQT matrix.
@@ -2718,6 +2921,9 @@ where
 
     /// Shorthand for [`cqt_spectrogram`](crate::operations::AudioTransforms::cqt_spectrogram) with `Decibels` amplitude scale.
     ///
+    /// Values are 10·log10(max(P, 10^(floor_db/10))) of the power P, in dB re 1:
+    /// `floor_db` is an absolute floor, not a range below the peak (no `top_db`).
+    ///
     /// # Errors
     /// Returns an error if the signal is multi-channel, or if STFT or CQT computation fails.
     ///
@@ -2747,9 +2953,9 @@ where
 
     /// Decomposes a complex spectrogram into magnitude and phase.
     ///
-    /// Given a complex matrix `D`, returns `(S, P)` such that
-    /// `D = S * P` elementwise, where `S` contains magnitudes raised to
-    /// `power` and `P` contains unit-magnitude complex phase factors.
+    /// Given a complex matrix `D`, returns `(S, P)` with S = |D|^p (p = `power`)
+    /// and P = D/|D| (unit-magnitude phase factors), so that `D = S^(1/p) · P`
+    /// elementwise (`D = S · P` for the default p = 1).
     /// Bins where the magnitude is zero are assigned a phase of `1 + 0i`.
     ///
     /// # Arguments
@@ -2830,7 +3036,10 @@ where
 ///
 /// All methods require mono audio.  Multi-channel signals must be reduced to
 /// mono (e.g. with [`AudioChannelOps::to_mono`]) before use; passing a
-/// multi-channel signal returns [crate::AudioSampleError::Unsupported].
+/// multi-channel signal to the pitch and harmonic methods returns
+/// [crate::AudioSampleError::Layout]. The YIN and autocorrelation formulas,
+/// and the relation between the lag range and the frequency range, are given
+/// in the [`pitch_analysis`](crate::operations::pitch_analysis) module docs.
 ///
 /// For librosa-compatible frame-wise pitch tracks (`librosa.yin`, `librosa.pyin`:
 /// centred frames, multichannel, voicing probabilities) see
@@ -2842,25 +3051,33 @@ where
 {
     /// Detects the fundamental frequency using the YIN pitch detection algorithm.
     ///
-    /// YIN computes a cumulative mean normalised difference function (CMND) and
-    /// finds the first lag below `threshold`, which corresponds to the fundamental
-    /// period. Lower thresholds are stricter and reduce false detections; values
-    /// in `[0.1, 0.2]` are typical for musical audio.
+    /// The whole signal is analysed as one frame. YIN computes the cumulative
+    /// mean normalised difference d′(τ), takes the first lag in the search
+    /// range whose d′ falls below `threshold`, descends to the bottom of that
+    /// dip and refines it by parabolic interpolation, so the period (and hence
+    /// the frequency) is not restricted to whole samples. Lower thresholds are
+    /// stricter (fewer false detections, more `None`); values in `[0.1, 0.2]`
+    /// are typical.
     ///
     /// # Arguments
     ///
-    /// - `threshold` - Confidence threshold in `[0.0, 1.0]`.
-    /// - `min_frequency` - Minimum detectable frequency in Hz (> 0).
-    /// - `max_frequency` - Maximum detectable frequency in Hz (> `min_frequency`).
+    /// - `threshold` - Absolute threshold on d′ (dimensionless), in `[0.0, 1.0]`.
+    /// - `min_frequency` - Lowest frequency searched, in Hz (> 0). Sets the
+    ///   longest lag `⌊f_s/min_frequency⌋`; the signal must be longer than
+    ///   twice that lag.
+    /// - `max_frequency` - Highest frequency searched, in Hz (> `min_frequency`).
+    ///   Sets the shortest lag `⌊f_s/max_frequency⌋`. Values above Nyquist are
+    ///   not rejected.
     ///
     /// # Returns
     ///
-    /// - `Some(frequency_hz)` - Estimated fundamental frequency.
-    /// - `None` - Signal is too short, silent, or no pitch was detected.
+    /// - `Some(frequency_hz)` - Estimated fundamental frequency `f_s/τ̂` in Hz.
+    /// - `None` - Signal of at most `2·⌊f_s/min_frequency⌋ + 1` samples,
+    ///   silent, or no lag with d′ below `threshold` (unvoiced).
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Layout] for multi-channel audio.
     /// Returns [crate::AudioSampleError::Parameter] if `threshold ∉ [0.0, 1.0]`,
     /// `min_frequency ≤ 0.0`, or `max_frequency ≤ min_frequency`.
     ///
@@ -2876,7 +3093,7 @@ where
     ///
     /// let pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
     /// assert!(pitch.is_some());
-    /// assert!((pitch.unwrap() - hz).abs() < 10.0);
+    /// assert!((pitch.unwrap() - hz).abs() < 1.0);
     /// ```
     fn detect_pitch_yin(
         &self,
@@ -2887,24 +3104,27 @@ where
 
     /// Detects the fundamental frequency using autocorrelation.
     ///
-    /// Finds the lag with maximum autocorrelation within the range implied by
-    /// `[min_frequency, max_frequency]` and converts it to a frequency. This
-    /// method is fast and effective for clean, periodic signals but less robust
-    /// than YIN on noisy or voiced speech.
+    /// The whole signal is analysed as one frame. Finds the integer lag τ̂ that
+    /// maximises the raw autocorrelation `r(τ) = Σ x[n]·x[n+τ]` within the lag
+    /// range implied by `[min_frequency, max_frequency]` and returns `f_s/τ̂`.
+    /// There is no sub-sample interpolation, so the result lies on the grid
+    /// `f_s/k` (spacing ≈ f₀²/f_s). Fast and effective for clean, periodic
+    /// signals, but less robust than YIN on noisy signals or speech.
     ///
     /// # Arguments
     ///
-    /// - `min_frequency` - Minimum detectable frequency in Hz (> 1.0).
-    /// - `max_frequency` - Maximum detectable frequency in Hz (> `min_frequency`).
+    /// - `min_frequency` - Lowest frequency searched, in Hz (> 1.0).
+    /// - `max_frequency` - Highest frequency searched, in Hz (> `min_frequency`).
     ///
     /// # Returns
     ///
-    /// - `Some(frequency_hz)` - Estimated fundamental frequency.
-    /// - `None` - Signal is too short, silent, or unpitched.
+    /// - `Some(frequency_hz)` - Estimated fundamental frequency in Hz.
+    /// - `None` - Signal of at most `2·⌊f_s/min_frequency⌋ + 1` samples,
+    ///   silent, or no positive autocorrelation in the lag range.
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Layout] for multi-channel audio.
     /// Returns [crate::AudioSampleError::Parameter] if `min_frequency ≤ 1.0` or
     /// `max_frequency ≤ min_frequency`.
     ///
@@ -2930,37 +3150,45 @@ where
 
     /// Tracks pitch over time by applying pitch detection to successive windows.
     ///
-    /// The signal is split into overlapping frames of `window_size` samples,
-    /// advancing by `hop_size` each step. Each frame is analysed independently
-    /// using `method`. Frames shorter than `window_size / 2` at the signal end
-    /// are discarded. Only [`PitchDetectionMethod::Yin`] and
-    /// [`PitchDetectionMethod::Autocorrelation`] are implemented; other variants
-    /// log a warning and return `None` for that frame.
+    /// The signal is split into frames of `window_size` samples starting at
+    /// `0, hop_size, 2·hop_size, …` (no padding, no window function). Each frame
+    /// is analysed independently with the same algorithm as
+    /// [`detect_pitch_yin`](AudioPitchAnalysis::detect_pitch_yin) or
+    /// [`detect_pitch_autocorr`](AudioPitchAnalysis::detect_pitch_autocorr).
+    /// The final, truncated frames are kept while they are at least
+    /// `window_size / 2` samples long. A frame is unvoiced (`None`) when it is
+    /// at most `2·⌊f_s/min_frequency⌋ + 1` samples long, so choose
+    /// `window_size` > 2 periods of the lowest f₀ of interest. Only
+    /// [`PitchDetectionMethod::Yin`] and [`PitchDetectionMethod::Autocorrelation`]
+    /// are implemented; other variants return an error.
     ///
     /// # Arguments
     ///
-    /// - `window_size` - Analysis window length in samples; must be ≤ signal length.
-    /// - `hop_size` - Step between successive windows in samples; must be < `window_size`.
+    /// - `window_size` - Analysis frame length in samples; must be ≤ signal length.
+    /// - `hop_size` - Step between successive frames in samples; must be < `window_size`.
     /// - `method` - Pitch detection algorithm to use per frame.
-    /// - `threshold` - YIN confidence threshold; ignored for autocorrelation.
-    /// - `min_frequency` - Minimum detectable frequency in Hz.
-    /// - `max_frequency` - Maximum detectable frequency in Hz.
+    /// - `threshold` - YIN threshold on d′; ignored for autocorrelation.
+    /// - `min_frequency` - Lowest frequency searched, in Hz.
+    /// - `max_frequency` - Highest frequency searched, in Hz.
     ///
     /// # Returns
     ///
     /// A [`PitchContour`](crate::PitchContour) of per-frame
-    /// [`PitchFrame`](crate::PitchFrame)s in time order. Each frame's
-    /// `frequency` is `None` when no pitch was found in that frame.
+    /// [`PitchFrame`](crate::PitchFrame)s in time order. `PitchFrame::time` is
+    /// the frame **start** time `k·hop_size/f_s` in seconds (not the frame
+    /// centre); `PitchFrame::frequency` is `None` when no pitch was found.
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
-    /// Returns [crate::AudioSampleError::Parameter] if `window_size > signal length`
-    /// or `hop_size >= window_size`.
+    /// Returns [crate::AudioSampleError::Layout] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Parameter] if `window_size > signal length`,
+    /// `hop_size >= window_size`, the threshold or frequency range is invalid, or
+    /// `method` is [`PitchDetectionMethod::Cepstrum`] or
+    /// [`PitchDetectionMethod::HarmonicProduct`] (not implemented).
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
     /// use std::num::NonZeroUsize;
     /// use audio_samples::operations::traits::AudioPitchAnalysis;
     /// use audio_samples::operations::types::PitchDetectionMethod;
@@ -2980,6 +3208,7 @@ where
     /// ).unwrap();
     ///
     /// assert!(!track.is_empty());
+    /// assert!((track.mean_pitch().unwrap() - hz).abs() < 1.0);
     /// ```
     fn track_pitch(
         &self,
@@ -2991,12 +3220,20 @@ where
         max_frequency: f64,
     ) -> AudioSampleResult<crate::PitchContour>;
 
-    /// Computes the harmonic-to-noise ratio (HNR) in decibels.
+    /// Computes a spectral harmonic-to-noise ratio (HNR) in decibels.
     ///
-    /// HNR measures how much of the signal's energy comes from periodic
-    /// (harmonic) components versus aperiodic (noise) components. A high HNR
-    /// indicates a clean, voiced tone; a low or negative HNR indicates
-    /// noise-dominated content.
+    /// One windowed power spectrum P\[k\] of the whole signal is computed
+    /// (bin spacing Δf = f_s/`n_fft` Hz). Bin k (frequency k·Δf, DC included)
+    /// counts as *harmonic* when |k·Δf − h·f₀| < Δf for some
+    /// h = 1..=`num_harmonics`; every other bin counts as *noise*, and
+    /// `HNR = 10·log10(Σ_harmonic P[k] / Σ_noise P[k])` dB.
+    ///
+    /// Window leakage outside that ±1-bin neighbourhood is counted as noise,
+    /// so the estimate is biased low and even a pure tone gives a small finite
+    /// value that depends on where the tone falls relative to the bins (≈3 dB
+    /// for an on-bin sine with the default Hann window, about 13 dB off-bin).
+    /// Compare values computed with the same `n_fft` and window only. This is
+    /// not the autocorrelation HNR of Boersma (1993) used by Praat.
     ///
     /// # Arguments
     ///
@@ -3007,11 +3244,12 @@ where
     ///
     /// # Returns
     ///
-    /// HNR in dB. Returns `f64::INFINITY` when noise power is zero.
+    /// HNR in dB. Returns `f64::INFINITY` only when every bin outside the
+    /// harmonic neighbourhoods is exactly zero.
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Layout] for multi-channel audio.
     /// Returns [crate::AudioSampleError::Parameter] if `fundamental_freq ≤ 0.0`.
     ///
     /// # Example
@@ -3028,7 +3266,8 @@ where
     /// let hnr = audio
     ///     .harmonic_to_noise_ratio(hz, NonZeroUsize::new(5).unwrap(), None, None)
     ///     .unwrap();
-    /// assert!(hnr > 0.0, "pure sine should have positive HNR, got {hnr:.1} dB");
+    /// // Finite, not infinite: window leakage is partly counted as noise.
+    /// assert!(hnr > 0.0 && hnr.is_finite(), "got {hnr:.1} dB");
     /// ```
     fn harmonic_to_noise_ratio(
         &self,
@@ -3060,7 +3299,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Unsupported] for multi-channel audio.
+    /// Returns [crate::AudioSampleError::Layout] for multi-channel audio.
     /// Returns [crate::AudioSampleError::Parameter] if `fundamental_freq ≤ 0.0` or
     /// `tolerance ∉ [0.0, 1.0]`.
     ///
@@ -3091,8 +3330,13 @@ where
 
     /// Estimates the musical key of the audio using chromagram analysis.
     ///
-    /// Computes a chromagram and compares the averaged chroma vector against
-    /// Krumhansl-Schmuckler major and minor key profiles via Pearson correlation.
+    /// Computes a chromagram and averages it over all frames into a 12-element
+    /// chroma vector c (index 0 = C). For each of the 24 keys the
+    /// Krumhansl-Kessler major or minor profile p (index 0 = tonic) is rotated
+    /// so the tonic weight lands on the key's pitch class t,
+    /// `p_t[i] = p[(i − t) mod 12]`, and the Pearson correlation ρ(c, p_t) is
+    /// computed (Krumhansl-Schmuckler algorithm). The key with the largest ρ is
+    /// returned and `confidence = (ρ + 1)/2`.
     ///
     /// # Arguments
     ///
@@ -3545,7 +3789,7 @@ where
     /// Deprecated placeholder: audio samples do not carry a filter, so this
     /// always returns a flat magnitude-1, phase-0 response. Use
     /// [`IirFilterDesign::frequency_response`] or
-    /// [`SosFilter::frequency_response`] instead.
+    /// [`SosFilter::frequency_response`](crate::SosFilter::frequency_response) instead.
     ///
     /// # Arguments
     /// - `frequencies` - Frequencies in Hz at which to compute the response.
@@ -3687,10 +3931,12 @@ where
         Ok(out)
     }
 
-    /// Applies a peak (or notch) filter at the specified centre frequency.
+    /// Applies a peak (bell) filter at the specified centre frequency.
     ///
-    /// A peak filter boosts or cuts a band of frequencies centred around `frequency`.
-    /// Positive `gain_db` creates a boost (peak); negative creates a cut (notch). The
+    /// A peak filter boosts or cuts a band of frequencies centred around `frequency`
+    /// (RBJ cookbook peaking EQ; the gain at `frequency` is exactly `gain_db`).
+    /// Positive `gain_db` creates a boost (peak); negative creates a cut (dip). For a
+    /// true notch (a zero of transmission) use an [`EqBand::band_stop`] band. The
     /// Q factor controls bandwidth: higher Q values produce a narrower effect.
     ///
     /// # Arguments
@@ -3726,7 +3972,7 @@ where
         q_factor: f64,
     ) -> AudioSampleResult<()>;
 
-    /// Applies a peak (or notch) filter, returning a new copy.
+    /// Applies a peak (bell) filter, returning a new copy.
     ///
     /// Non-mutating twin of [`apply_peak_filter_in_place`](Self::apply_peak_filter_in_place);
     /// leaves `self` unchanged.
@@ -3746,16 +3992,17 @@ where
 
     /// Applies a low shelf filter that boosts or cuts frequencies below `frequency`.
     ///
-    /// All frequencies below the corner frequency receive approximately `gain_db` of
-    /// boost or cut, with a transition region controlled by `q_factor`. The shelf levels
-    /// off smoothly as frequency approaches zero.
+    /// Frequencies well below the corner frequency receive `gain_db` of boost or
+    /// cut, with a transition region controlled by `q_factor`; at the corner
+    /// frequency itself the gain is `gain_db / 2` (RBJ cookbook shelf). The shelf
+    /// levels off smoothly as frequency approaches zero.
     ///
     /// # Arguments
     ///
-    /// - `frequency` - Corner (shelf) frequency in Hz. Must be in `(0, Nyquist)`.
+    /// - `frequency` - Corner (half-gain) frequency in Hz. Must be in `(0, Nyquist)`.
     /// - `gain_db` - Shelf gain in dB. Positive boosts, negative cuts.
-    /// - `q_factor` - Shelf slope control. `0.707` gives a maximally flat shelf.
-    ///   Must be > 0.
+    /// - `q_factor` - Shelf slope control. `0.707` (shelf slope `S = 1`) gives the
+    ///   steepest shelf without overshoot. Must be > 0.
     ///
     /// # Returns
     ///
@@ -3803,16 +4050,17 @@ where
 
     /// Applies a high shelf filter that boosts or cuts frequencies above `frequency`.
     ///
-    /// All frequencies above the corner frequency receive approximately `gain_db` of
-    /// boost or cut, with a transition region controlled by `q_factor`. The shelf levels
-    /// off smoothly as frequency approaches the Nyquist limit.
+    /// Frequencies well above the corner frequency receive `gain_db` of boost or
+    /// cut, with a transition region controlled by `q_factor`; at the corner
+    /// frequency itself the gain is `gain_db / 2` (RBJ cookbook shelf). The shelf
+    /// levels off smoothly as frequency approaches the Nyquist limit.
     ///
     /// # Arguments
     ///
-    /// - `frequency` - Corner (shelf) frequency in Hz. Must be in `(0, Nyquist)`.
+    /// - `frequency` - Corner (half-gain) frequency in Hz. Must be in `(0, Nyquist)`.
     /// - `gain_db` - Shelf gain in dB. Positive boosts, negative cuts.
-    /// - `q_factor` - Shelf slope control. `0.707` gives a maximally flat shelf.
-    ///   Must be > 0.
+    /// - `q_factor` - Shelf slope control. `0.707` (shelf slope `S = 1`) gives the
+    ///   steepest shelf without overshoot. Must be > 0.
     ///
     /// # Returns
     ///
@@ -3973,7 +4221,10 @@ where
 ///
 /// The standard toolkit for controlling loudness variation: compression,
 /// limiting, noise gating, and expansion.  All four processors share a
-/// threshold-based design and support optional lookahead and side-chain inputs.
+/// threshold-based, feed-forward design (envelope follower, static gain curve,
+/// gain application); the compressor and limiter also support lookahead and
+/// mono side-chain inputs.  The formulas are in the
+/// [`dynamic_range`](crate::operations::dynamic_range) module documentation.
 ///
 /// # Intended Usage
 ///
@@ -3995,10 +4246,15 @@ where
 {
     /// Applies compression to reduce the dynamic range of the signal.
     ///
-    /// Samples above the threshold are attenuated according to the compression ratio.
-    /// Attack and release times control how quickly the compressor responds to level
-    /// changes. An optional lookahead delay allows the compressor to anticipate peaks
-    /// before they occur. Multi-channel audio is compressed independently per channel.
+    /// The detector envelope is mapped through the static curve (hard knee or quadratic
+    /// soft knee, threshold `T`, ratio `R`); levels above the threshold are reduced so
+    /// that the output level is `T + (L − T)/R`. `attack_ms` and `release_ms` are
+    /// one-pole time constants (63 % of a step after one time constant). With
+    /// `lookahead_ms > 0` gain reduction starts up to `lookahead_ms` before a peak; the
+    /// delay is compensated, so the output stays time-aligned with the input.
+    /// Multi-channel audio is compressed independently per channel (no stereo linking).
+    /// The formulas are in the [`dynamic_range`](crate::operations::dynamic_range)
+    /// module documentation.
     ///
     /// # Arguments
     ///
@@ -4045,10 +4301,15 @@ where
 
     /// Prevents the signal from exceeding a specified ceiling level.
     ///
-    /// Applies gain reduction to any samples that breach the ceiling. Lookahead
-    /// processing delays the output signal while analysing future samples, allowing gain
-    /// reduction to begin before peaks arrive and minimising audible distortion.
-    /// Multi-channel audio is limited independently per channel.
+    /// Applies gain reduction when the smoothed envelope level exceeds the ceiling (the
+    /// compressor curve with an infinite ratio). The detector sees each sample up to
+    /// `lookahead_ms` before it is output and the largest reduction over that window is
+    /// applied, so gain reduction begins before peaks arrive; the delay is compensated.
+    /// This is not a brick-wall limiter: the ceiling is exact only once the envelope has
+    /// settled, and transients shorter than a few attack time constants can exceed it.
+    /// Only sample peaks are detected (`isp_limiting` currently has no effect).
+    /// Multi-channel audio is limited independently per channel. See the
+    /// [`dynamic_range`](crate::operations::dynamic_range) module documentation.
     ///
     /// # Arguments
     ///
@@ -4098,7 +4359,10 @@ where
     /// The gain reduction is determined by the level of `sidechain_signal` rather than
     /// the main audio, allowing one signal to control the dynamics of another. A common
     /// use case is ducking: a voice track causes background music to decrease in level
-    /// whenever speech is present.
+    /// whenever speech is present. Lookahead and latency compensation work as in
+    /// [`apply_compressor_in_place`](Self::apply_compressor_in_place). The filter
+    /// settings in `config.side_chain` are not applied: the side-chain signal drives the
+    /// detector unfiltered.
     ///
     /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
     /// combinations return an error.
@@ -4169,7 +4433,9 @@ where
     ///
     /// The gain reduction ceiling is enforced based on the level of `sidechain_signal`
     /// rather than the main audio. Useful for frequency-selective limiting where a
-    /// filtered copy of the signal controls gain reduction.
+    /// filtered copy of the signal (filtered by the caller) controls gain reduction.
+    /// Lookahead works as in [`apply_limiter_in_place`](Self::apply_limiter_in_place).
+    /// The filter settings in `config.side_chain` are not applied.
     ///
     /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
     /// combinations return an error.
@@ -4295,6 +4561,10 @@ where
     ///
     /// Useful for metering, visualising, and analysing compressor activity.
     ///
+    /// The values come from the detector and static curve only:
+    /// `config.lookahead_ms` is ignored here, so they show the gain reduction
+    /// without the lookahead max-hold that `apply_compressor` applies.
+    ///
     /// # Arguments
     ///
     /// - `config` - Compressor configuration parameters.
@@ -4327,9 +4597,10 @@ where
     /// Attenuates the signal when it falls below a threshold (noise gate).
     ///
     /// A gate mutes or reduces quiet passages - typically background noise, room tone,
-    /// or bleed - while leaving louder content unaffected. Signals below `threshold_db`
-    /// are attenuated by the given ratio; signals above are passed through unchanged.
-    /// Peak detection is always used for gate processing.
+    /// or bleed - while leaving louder content unaffected. When the envelope level `L`
+    /// is below the threshold `T`, the gain is reduced by `(R − 1)·(T − L)` dB, a 1:R
+    /// downward expansion; above the threshold the signal passes unchanged. Peak
+    /// detection is always used; there is no hold time, range floor or lookahead.
     ///
     /// # Arguments
     ///
@@ -4354,7 +4625,7 @@ where
     ///
     /// let data = Array1::from_vec(vec![0.001f32, 0.8, 0.002, 0.9, 0.001]);
     /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-    /// // Gate at -20 dBFS with 10:1 ratio
+    /// // Gate at -20 dBFS, ratio 10: 1 dB under the threshold becomes 10 dB under
     /// audio.apply_gate_in_place(&GateConfig::with_params(-20.0, 10.0, 1.0, 10.0)).unwrap();
     /// ```
     fn apply_gate_in_place(&mut self, config: &GateConfig) -> AudioSampleResult<()>;
@@ -4375,9 +4646,9 @@ where
     /// Increases dynamic range by expanding signals below a threshold.
     ///
     /// An expander is the complement of compression: signals below `threshold_db` are
-    /// attenuated by an amount that grows with distance from the threshold, making quiet
-    /// passages quieter while leaving loud passages unchanged. RMS detection is always
-    /// used for expansion.
+    /// attenuated by `(R − 1)·(T − L)` dB, where `L` is the envelope level, `T` the
+    /// threshold and `R` the ratio, making quiet passages quieter while leaving loud
+    /// passages unchanged. RMS detection (10 ms window) is always used for expansion.
     ///
     /// # Arguments
     ///
@@ -4790,9 +5061,12 @@ where
 
     /// Produces a weighted sum of multiple audio sources.
     ///
-    /// All sources must have the same sample rate, channel count, and
-    /// length.  When `weights` is `None`, equal weighting (1 / N per
-    /// source) is applied.
+    /// Computes `y[n] = Σ_k w_k · x_k[n]`. All sources must have the same
+    /// sample rate, channel count, and length.  When `weights` is `None`,
+    /// equal weighting (1 / N per source) is applied. The sum is not
+    /// clipped for float sample types; for integer sample types it is
+    /// computed in `f64` on the normalised `[-1, 1]` scale, then rounded and
+    /// saturated.
     ///
     /// # Arguments
     /// - `sources` - the audio signals to mix.
@@ -4827,10 +5101,14 @@ where
 
     /// Applies a fade-in envelope to the beginning of the signal.
     ///
-    /// The first `duration_seconds` of every channel are multiplied by
-    /// an amplitude ramp from 0 to 1 shaped by `curve`.  If
-    /// `duration_seconds` exceeds the signal length the entire signal
-    /// is faded.
+    /// The first `n = ⌊duration_seconds · sample_rate⌋` samples of
+    /// every channel are multiplied by `g(p)`, where `g` is the curve's gain
+    /// function (see [`FadeCurve`]) and `p = i/n` for sample `i = 0, …, n−1`.
+    /// The ramp therefore starts at gain 0 and its last sample has gain
+    /// `g((n−1)/n)`, one step short of 1; samples after the fade are
+    /// unchanged. If `duration_seconds` exceeds the signal length the entire
+    /// signal is faded. Integer sample types get fractional gains (applied
+    /// on the normalised scale, then rounded).
     ///
     /// # Arguments
     /// - `duration_seconds` - fade length in seconds.  Must be `> 0`.
@@ -4904,10 +5182,14 @@ where
 
     /// Applies a fade-out envelope to the end of the signal.
     ///
-    /// The last `duration_seconds` of every channel are multiplied by
-    /// an amplitude ramp from 1 to 0 shaped by `curve`.  If
-    /// `duration_seconds` exceeds the signal length the entire signal
-    /// is faded.
+    /// The last `n = ⌊duration_seconds · sample_rate⌋` samples of
+    /// every channel are multiplied by `g(p)`, where `g` is the curve's gain
+    /// function (see [`FadeCurve`]) and `p = 1 − i/n` for the `i`-th faded
+    /// sample (`i = 0, …, n−1`). The ramp starts at gain 1 and its final
+    /// sample has gain `g(1/n)`, one step before silence. If
+    /// `duration_seconds` exceeds the signal length the entire signal is
+    /// faded. Integer sample types get fractional gains (applied on the
+    /// normalised scale, then rounded).
     ///
     /// # Arguments
     /// - `duration_seconds` - fade length in seconds.  Must be `> 0`.
@@ -4930,7 +5212,7 @@ where
     ///     Array1::<f32>::ones(100), sample_rate!(100),
     /// ).unwrap();
     /// audio.fade_out_in_place(0.5, FadeCurve::Linear).unwrap();
-    /// // Last sample has position 0 in the fade ramp → gain ≈ 0
+    /// // Last sample has position p = 1/n = 1/50 → linear gain 0.02
     /// let last = *audio.as_slice().unwrap().last().unwrap();
     /// assert!(last < 0.1);
     /// ```
@@ -4967,7 +5249,7 @@ where
     /// ).unwrap()
     ///     .fade_out(0.5, FadeCurve::Linear)
     ///     .unwrap();
-    /// // Last sample has position 0 in the fade ramp → gain ≈ 0
+    /// // Last sample has position p = 1/n = 1/50 → linear gain 0.02
     /// let last = *audio.as_slice().unwrap().last().unwrap();
     /// assert!(last < 0.1);
     /// ```
@@ -5224,7 +5506,10 @@ where
     ///
     /// # Arguments
     /// - `method` - The downmix strategy.  Available variants:
-    ///   - `Average` - arithmetic mean of all channels.
+    ///   - `Average` - arithmetic mean of all channels (`(L + R)/2` for
+    ///     stereo: identical channels keep their level, while a mono source
+    ///     panned to the centre with the equal-power `to_stereo(Pan(0.0))`
+    ///     comes back 3 dB quieter).
     ///   - `Left` - channel 0 only.
     ///   - `Right` - channel 1 only.
     ///   - `Weighted(weights)` - user-supplied per-channel weights.
@@ -5482,12 +5767,18 @@ where
         Ok(out)
     }
 
-    /// Apply linear panning to a stereo signal in place.
+    /// Apply a linear balance-with-boost to a stereo signal in place.
     ///
-    /// The left channel is scaled by `1 - pan_value` and the right
-    /// channel by `1 + pan_value`, after clamping `pan_value` to
-    /// \[-1, 1\].  A value of 0 leaves both channels unchanged;
-    /// -1 silences the right channel; +1 silences the left channel.
+    /// The left channel is scaled by `1 - p` and the right channel by
+    /// `1 + p`, where `p` is `pan_value` clamped to \[-1, 1\].  A value
+    /// of 0 leaves both channels unchanged; -1 silences the right
+    /// channel and doubles the left (+6 dB, which can clip); +1 silences
+    /// the left channel and doubles the right.  The total power changes
+    /// with `p` (it is not a constant-power pan law); for a −3 dB-centre
+    /// equal-power pan of a mono source use
+    /// `to_stereo(StereoConversionMethod::Pan(p))`.  Gains are applied to
+    /// the raw sample values and truncated back for integer types, so
+    /// this is not meaningful for `u8` (offset-binary) audio.
     ///
     /// # Arguments
     /// - `pan_value` - Panning position in the range \[-1, 1\].
@@ -5514,7 +5805,8 @@ where
     /// ```
     fn pan_in_place(&mut self, pan_value: f64) -> AudioSampleResult<()>;
 
-    /// Apply linear panning, returning a new copy and leaving `self` unchanged.
+    /// Apply a linear balance-with-boost (see [`pan_in_place`](Self::pan_in_place)),
+    /// returning a new copy and leaving `self` unchanged.
     ///
     /// Non-mutating twin of [`pan_in_place`](Self::pan_in_place).
     ///
@@ -5542,7 +5834,9 @@ where
     ///
     /// The formula applied is identical to [`AudioChannelOps::pan`]:
     /// the left channel is scaled by `1 - balance` and the right
-    /// channel by `1 + balance`, after clamping to \[-1, 1\].
+    /// channel by `1 + balance`, after clamping to \[-1, 1\].  The
+    /// favoured channel is boosted by up to +6 dB (gain 2), so this is
+    /// not a constant-power law.
     ///
     /// # Arguments
     /// - `balance` - Balance position in the range \[-1, 1\].
@@ -5741,23 +6035,8 @@ where
 ///   harmonic (tonal, sustained) and percussive (transient, attack) components
 ///   using STFT magnitude median filtering.
 ///
-/// # Example Usage
+/// See [`AudioDecomposition::hpss`] for a runnable example and the exact masking rule.
 ///
-/// ```rust,ignore
-/// use audio_samples::{AudioSamples, operations::AudioDecomposition};
-/// use audio_samples::operations::types::HpssConfig;
-/// use ndarray::array;
-///
-/// let audio = AudioSamples::new_mono(samples, 44100).unwrap();
-/// let config = HpssConfig::new();
-///
-/// // Separate into harmonic and percussive components
-/// let (harmonic, percussive) = audio.hpss(&config)?;
-///
-/// // Process components separately
-/// let drums_isolated = percussive.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
-/// let melody_isolated = harmonic.normalize(-1.0, 1.0, NormalizationMethod::Peak)?;
-/// ```
 /// Audio source separation using spectral decomposition techniques.
 ///
 /// # Purpose
@@ -5774,9 +6053,12 @@ where
 ///
 /// # Invariants
 ///
-/// The harmonic and percussive components sum to the original signal (within
-/// floating-point precision) when soft masking is disabled.  Both outputs carry
-/// the same sample rate and channel count as the input.
+/// The harmonic and percussive masks sum to 1 (up to a 10⁻¹⁰ regulariser) in every
+/// time-frequency bin where the two median-filtered magnitudes are not both zero, for
+/// both hard and soft masking, so the two outputs sum to (almost exactly) the ISTFT
+/// reconstruction of the input. Input must be mono; both outputs are mono and
+/// carry the input's sample rate. Their length is the ISTFT output length, which can
+/// differ slightly from the input length (see [`AudioTransforms::istft`]).
 #[cfg(feature = "decomposition")]
 pub trait AudioDecomposition: AudioTransforms
 where
@@ -5785,11 +6067,17 @@ where
     /// Separates audio into harmonic and percussive components (HPSS).
     ///
     /// Harmonic-Percussive Source Separation applies median filtering to the
-    /// STFT magnitude spectrogram along the time axis to enhance tonal content
-    /// and along the frequency axis to enhance transient content.  Binary or
-    /// soft masks are derived from the filtered spectrograms and applied to
-    /// the original STFT; the resulting masked spectra are inverted to produce
-    /// two time-domain signals.
+    /// STFT magnitude spectrogram |X| along the time axis (length
+    /// `median_filter_harmonic`) to get H, and along the frequency axis (length
+    /// `median_filter_percussive`) to get P. With softness s = `mask_softness`, the
+    /// harmonic mask is M_H = s·H/(H + P) + (1 − s)·\[H ≥ P\] and the percussive mask is
+    /// M_P = s·P/(H + P) + (1 − s)·\[P > H\]. Both masks multiply the original complex
+    /// STFT, and each masked STFT is inverted with the ISTFT.
+    ///
+    /// Note: librosa's `decompose.hpss` uses a soft mask on *powers* (H²/(H² + P²))
+    /// and `scipy.ndimage.median_filter` with `reflect` edges; this implementation
+    /// uses exponent 1 on magnitudes and mirror edges (d c b | a b c d), so results
+    /// differ slightly from librosa.
     ///
     /// Reference:
     /// Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering".
@@ -5803,14 +6091,14 @@ where
     ///
     /// # Returns
     ///
-    /// A `(harmonic, percussive)` tuple.  Both signals have the same sample rate
-    /// and channel count as the input.
+    /// A `(harmonic, percussive)` tuple of mono signals at the input's sample rate.
     ///
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if `config` fields are invalid or the
     ///   signal is shorter than the specified STFT window.
-    /// - [crate::AudioSampleError::Layout] if internal STFT or ISTFT operations fail.
+    /// - [crate::AudioSampleError::Layout] if the input is multi-channel.
+    /// - Errors propagated from the internal STFT or ISTFT.
     ///
     /// # Examples
     ///
@@ -5866,16 +6154,20 @@ pub trait AudioOnsetDetection: AudioTransforms
 where
     Self::Sample: StandardSample,
 {
-    /// Detects onset times in the audio signal using spectral flux.
+    /// Detects onset times using the CQT "energy" onset detection function.
     ///
-    /// Computes an onset detection function from the signal and applies
-    /// peak-picking to find the frames where new events begin.  The
-    /// exact pipeline is controlled by `config`.
+    /// Computes [`onset_detection_function`](AudioOnsetDetection::onset_detection_function)
+    /// (half-wave-rectified CQT magnitude flux, optionally median-thresholded),
+    /// applies peak picking with `config.peak_picking` (lengths in frames) and
+    /// converts frame indices to seconds as `t·hop_size/f_s`. With the default
+    /// peak-picking lengths few or no onsets may be found; see the
+    /// [`onset`](crate::operations::onset) module docs for a working
+    /// configuration and the known limitations.
     ///
     /// # Arguments
     ///
-    /// - `config` - Onset detection parameters: STFT settings, flux method,
-    ///   peak-picking thresholds, and minimum inter-onset interval.
+    /// - `config` - Onset detection parameters: CQT settings, hop size,
+    ///   median-based ODF thresholding and peak-picking configuration.
     ///
     /// # Returns
     ///
@@ -5890,8 +6182,11 @@ where
 
     /// Computes the onset detection function and its time axis.
     ///
-    /// Returns the raw activation curve before peak-picking, together with
-    /// the corresponding frame timestamps.  Useful when you want to inspect
+    /// Returns the activation curve before peak-picking, together with the
+    /// corresponding frame timestamps: `odf[t] = Σ_b max(0, |X[b,t]| − |X[b,t−1]|)`
+    /// on the CQT magnitude (not squared), with values below
+    /// `adaptive_threshold_multiplier × running median` set to zero when
+    /// `config.adaptive_threshold` is set. Useful when you want to inspect
     /// the ODF, apply custom thresholding, or feed it into a beat tracker.
     ///
     /// # Arguments
@@ -5901,9 +6196,9 @@ where
     ///
     /// # Returns
     ///
-    /// A `(odf_values, timestamps)` tuple:
+    /// A `(timestamps, odf_values)` tuple:
+    /// - `timestamps` - Frame centre times in seconds.
     /// - `odf_values` - One activation value per analysis frame.
-    /// - `timestamps` - Corresponding frame centre times in seconds.
     ///   Both vectors have the same length.
     ///
     /// # Errors
@@ -5953,12 +6248,13 @@ where
     /// - `config` - CQT analysis parameters (bins per octave, frequency range, etc.).
     /// - `window_size` - Analysis window length in samples.
     /// - `hop_size` - Number of samples to advance between successive windows.
-    /// - `method` - Spectral flux variant to compute (e.g. positive flux,
-    ///   complex flux, or Wiener entropy).
+    /// - `method` - Spectral flux variant to compute (see
+    ///   [`SpectralFluxMethod`] for the exact formula of each variant; none
+    ///   squares the magnitudes).
     ///
     /// # Returns
     ///
-    /// A `(flux_values, timestamps)` tuple, both of equal length.
+    /// A `(timestamps, flux_values)` tuple, both of equal length.
     ///
     /// # Errors
     ///
@@ -5975,15 +6271,15 @@ where
 
     /// Detects onset times using the complex-domain onset detection function.
     ///
-    /// Combines magnitude difference and phase deviation into a single
-    /// activation curve that is sensitive to both amplitude changes and phase
-    /// discontinuities.  This makes it more robust than spectral-flux alone
-    /// for sustained or polyphonic content.
+    /// Combines the CQT magnitude difference and the phase deviation from
+    /// each bin's centre frequency into a single activation curve
+    /// (`w_m·Σ R(Δ|X|) + w_p·Σ |phase deviation|`, optionally log-compressed),
+    /// then applies peak picking (lengths in frames).
     ///
     /// # Arguments
     ///
-    /// - `onset_config` - Complex onset detection parameters: STFT settings
-    ///   and peak-picking thresholds.
+    /// - `onset_config` - Complex onset detection parameters: CQT settings,
+    ///   weights and peak-picking thresholds.
     ///
     /// # Returns
     ///
@@ -6001,8 +6297,10 @@ where
     /// Computes the complex-domain onset detection function curve.
     ///
     /// Returns the raw per-frame activation values before peak-picking.
-    /// Each value combines the magnitude difference and unwrapped phase
-    /// deviation for that frame.
+    /// Each value is `w_m·Σ_b R(|X[b,t]| − |X[b,t−1]|) + w_p·Σ_b dev[b,t]`, where
+    /// R is rectification or absolute value and `dev` is the wrapped phase
+    /// deviation (see [`phase_deviation_matrix`](AudioOnsetDetection::phase_deviation_matrix)),
+    /// optionally passed through `ln(1 + C·x)`.
     ///
     /// # Arguments
     ///
@@ -6024,18 +6322,18 @@ where
 
     /// Computes the frame-by-frame magnitude difference matrix.
     ///
-    /// Each entry `[i, j]` is the absolute difference in spectral magnitude
-    /// between consecutive STFT frames at frequency bin `j` and frame `i`.
-    /// This is an intermediate building block of the complex ODF.
+    /// Each entry `[b, t]` is the signed CQT magnitude difference
+    /// `|X[b,t]| − |X[b,t−1]|` at frequency bin `b` and frame `t` (column 0 is
+    /// zero). This is an intermediate building block of the complex ODF.
     ///
     /// # Arguments
     ///
-    /// - `config` - Complex onset detection parameters controlling the STFT
-    ///   analysis window.
+    /// - `config` - Complex onset detection parameters controlling the CQT
+    ///   analysis.
     ///
     /// # Returns
     ///
-    /// An `Array2<f64>` with shape `[frames, frequency_bins]`.
+    /// An `Array2<f64>` with shape `[frequency_bins, frames]`.
     ///
     /// # Errors
     ///
@@ -6047,19 +6345,21 @@ where
 
     /// Computes the frame-by-frame phase deviation matrix.
     ///
-    /// Each entry `[i, j]` is the second-order phase difference (phase
-    /// deviation from a constant-frequency prediction) at frequency bin `j`
-    /// and frame `i`.  This is an intermediate building block of the
-    /// complex ODF.
+    /// Each entry `[b, t]` is `|princarg(φ[b,t] − φ[b,t−1] − 2π·f_b·H/f_s)|`
+    /// in radians: the deviation of the measured phase advance from that of a
+    /// sinusoid at the bin centre frequency f_b (H = hop size). This is a
+    /// first-order measure, not the second-difference phase deviation of
+    /// Bello et al. (2005); a stationary sinusoid off the bin centre gives a
+    /// constant non-zero value. Column 0 is zero.
     ///
     /// # Arguments
     ///
-    /// - `config` - Complex onset detection parameters controlling the STFT
-    ///   analysis window.
+    /// - `config` - Complex onset detection parameters controlling the CQT
+    ///   analysis.
     ///
     /// # Returns
     ///
-    /// An `Array2<f64>` with shape `[frames, frequency_bins]`.
+    /// An `Array2<f64>` with shape `[frequency_bins, frames]`.
     ///
     /// # Errors
     ///
@@ -6087,7 +6387,12 @@ where
     /// Computes an onset strength envelope from the signal using the
     /// onset detection configuration in `config`, then locates beat
     /// frames by walking forward and backward from the global onset
-    /// peak in steps of one inter-beat interval.
+    /// peak in steps of one inter-beat interval (expected beat k is at
+    /// `peak ± k·IBI` frames with the exact, fractional
+    /// `IBI = 60·f_s/(tempo_bpm·hop_size)`, refined to the largest envelope
+    /// value within ±`tolerance`). The grid is rigid, so `config.tempo_bpm`
+    /// must be accurate: a tempo error of ΔB BPM shifts beat k by about
+    /// `k·60·ΔB/B²` seconds.
     ///
     /// # Arguments
     /// - `config` - Beat tracking configuration: target tempo,
@@ -6123,8 +6428,12 @@ where
     ///
     /// Computes the onset strength envelope (using the onset configuration in
     /// `config`), autocorrelates it, restricts the search to a plausible BPM lag
-    /// range (40-240 BPM at the envelope frame rate), and picks the dominant
-    /// autocorrelation peak, converting its lag to BPM. Unlike
+    /// range (40-240 BPM at the envelope frame rate), weights each lag by a
+    /// log-normal prior centred on 120 BPM (σ = 1 octave), and picks the
+    /// best-scoring integer lag L, converting it to BPM as
+    /// `60·f_s/(hop_size·L)`. Results therefore lie on the integer-lag grid,
+    /// and octave errors (×2, ×½, occasionally ×⅓) remain possible: the prior
+    /// only biases the choice toward 120 BPM. Unlike
     /// [`detect_beats`][AudioBeatTracking::detect_beats], this does **not** require
     /// the tempo to be known in advance - `config.tempo_bpm` is ignored here.
     ///
@@ -6380,17 +6689,24 @@ where
     /// Track amplitude over time with an envelope follower, separating
     /// attack and decay phases.
     ///
-    /// For each sample, the [`EnvelopeFollower`] estimates the current
-    /// signal level.  Samples where the level is rising contribute to
-    /// the *attack* envelope; samples where it is falling contribute
-    /// to the *decay* envelope.  Both output envelopes have the same
-    /// length as the input.
+    /// A copy of `follower` (reset to zero, detection switched to
+    /// `method`) produces the envelope `e[n]` described in
+    /// [`EnvelopeFollower`]. The two outputs sample-and-hold it:
+    /// `attack[n] = e[n]` when `e[n] ≥ e[n−1]`, otherwise
+    /// `attack[n] = attack[n−1]`; `decay[n] = e[n]` when
+    /// `e[n] < e[n−1]`, otherwise `decay[n] = decay[n−1]` (both start
+    /// at 0). Both output envelopes have the same length as the input.
+    /// The time constants are converted with the sample rate given to
+    /// [`EnvelopeFollower::new`], not the sample rate of `self`.
+    /// Samples are used in their stored units (integer samples are not
+    /// rescaled to `[-1, 1]`).
     ///
     /// # Arguments
-    /// - `follower` - A configured [`EnvelopeFollower`] that controls
+    /// - `follower` - A configured [`EnvelopeFollower`] that supplies the
     ///   attack and release time constants.
-    /// - `method` - Detection strategy used to estimate level:
-    ///   peak, RMS, or hybrid.
+    /// - `method` - Detection strategy used to estimate level: peak
+    ///   (`|x|`), RMS over a 10 ms window, or hybrid (the larger of the
+    ///   two). It overrides the method the follower was built with.
     ///
     /// # Returns
     /// A tuple `(attack, decay)` of [`NdResult`] values, both matching

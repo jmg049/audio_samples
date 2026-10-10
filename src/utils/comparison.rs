@@ -666,9 +666,12 @@ where
 /// Aligns two audio signals by estimating a time offset that maximises correlation.
 ///
 /// This function attempts to temporally align `signal` to `reference` by searching for a
-/// non-negative sample offset that maximises cross-correlation between the two signals. The
-/// returned signal is a shifted version of the input signal padded at the start, together
-/// with the estimated offset in samples.
+/// non-negative sample offset `D` such that `reference` is `signal` delayed by `D` samples
+/// (`reference[n] ≈ signal[n − D]`). For each candidate `D` it computes the Pearson
+/// correlation coefficient between `reference[D..D+L]` and `signal[0..L]`, with
+/// `L = min(len_ref − D, len_sig)`, and keeps the `D` with the largest coefficient. The
+/// returned signal is `signal` delayed by `D` samples (padded at the start and truncated to
+/// its original length), together with `D`.
 ///
 /// This is a heuristic alignment utility intended for coarse synchronisation, diagnostics,
 /// and preprocessing. It does not guarantee globally optimal alignment, sub-sample accuracy,
@@ -684,9 +687,16 @@ where
 ///
 /// # Search Behaviour
 ///
-/// * Only non-negative offsets are considered. The signal is shifted forward in time only.
-/// * The maximum offset searched is half of the shorter signal length.
-/// * For each candidate offset, correlation is computed over the overlapping region only.
+/// * Only non-negative offsets are considered: the signal can only be delayed, so a
+///   `signal` that lags `reference` cannot be corrected (the offset is then near 0).
+///   Swap the arguments, or use
+///   [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag) for a signed
+///   estimate.
+/// * Offsets `0..len/2` are searched, where `len` is the shorter signal length.
+/// * For each candidate offset, the Pearson correlation (mean-removed, normalised to
+///   `[-1, 1]`) is computed over the overlapping region only. The cost is
+///   `O(len²)`; use [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag)
+///   for long signals.
 ///
 /// These limits are part of the public contract and constrain the class of alignments that
 /// can be detected.
@@ -695,7 +705,8 @@ where
 ///
 /// When a positive offset is selected, the aligned signal is padded at the start using the
 /// default value of the sample type. This is a structural padding operation rather than an
-/// explicit silence model.
+/// explicit silence model: for `u8` the default `0` is full-scale negative, not silence
+/// (128).
 ///
 /// # Arguments
 ///
@@ -744,17 +755,20 @@ where
 ///
 /// ```rust
 /// use audio_samples::utils::comparison::align_signals;
-/// use audio_samples::AudioSamples;
+/// use audio_samples::{AudioSamples, sample_rate};
+/// use ndarray::Array1;
 ///
-/// fn example<T: audio_samples::traits::StandardSample>(
-///     reference: AudioSamples<'static, T>,
-///      signal: AudioSamples<'static, T>,
-///  ) {
-/// let (aligned, offset) = align_signals::<T>(&reference, &signal).unwrap();
+/// // A chirp has a single sharp correlation peak.
+/// let signal: Vec<f64> = (0..200).map(|i| (0.005 * (i * i) as f64).sin()).collect();
+/// // reference = signal delayed by 12 samples
+/// let mut reference = vec![0.0; 12];
+/// reference.extend_from_slice(&signal[..188]);
 ///
-/// println!("Estimated offset: {offset} samples");
-/// assert!(offset >= 0);
-///  }
+/// let sig = AudioSamples::new_mono(Array1::from(signal), sample_rate!(8000)).unwrap();
+/// let refr = AudioSamples::new_mono(Array1::from(reference), sample_rate!(8000)).unwrap();
+/// let (aligned, offset) = align_signals(&refr, &sig).unwrap();
+/// assert_eq!(offset, 12);
+/// assert_eq!(aligned[12], refr[12]);
 /// ```
 #[inline]
 pub fn align_signals<T>(
@@ -823,15 +837,10 @@ where
     let mut best_correlation = f64::NEG_INFINITY;
 
     for offset in 0..max_offset {
-        let correlation = if offset < sig_data.len() {
-            let end = (ref_data.len() - offset).min(sig_data.len() - offset);
-            correlation_1d_slice(
-                &ref_data[offset..offset + end],
-                &sig_data[offset..offset + end],
-            )?
-        } else {
-            0.0
-        };
+        // Compare reference[offset + i] with signal[i]: a peak at `offset = D`
+        // means the reference is the signal delayed by D samples.
+        let len = (ref_data.len() - offset).min(sig_data.len());
+        let correlation = correlation_1d_slice(&ref_data[offset..offset + len], &sig_data[..len])?;
 
         if correlation > best_correlation {
             best_correlation = correlation;
@@ -902,10 +911,17 @@ where
 /// LSD = sqrt( mean_over_bins[ (10·log10(Pa + eps) - 10·log10(Pb + eps))² ] )
 /// ```
 ///
-/// where `Pa` and `Pb` are the power spectra (squared magnitude of the FFT) of the two signals
-/// and `eps` is a small floor that keeps the logarithm finite for silent bins. The FFT length
-/// equals the signal length, and the distance is averaged across all frequency bins of all
-/// channels.
+/// where `Pa` and `Pb` are the power spectra (squared magnitude of the unnormalised FFT) of
+/// the two signals and `eps = 1e-10` keeps the logarithm finite for silent bins. The FFT
+/// length equals the signal length, and the distance is averaged across all frequency bins
+/// of all channels.
+///
+/// `eps` is an absolute floor (−100 dB relative to a power of 1): bins below it compare as
+/// equal, so for sparse (tonal) or very quiet signals the result is dominated by the floor.
+/// For example, an on-bin sine `x` against `0.5·x` gives about 0.02 dB rather than
+/// `20·log10(2) ≈ 6.02` dB, because almost every bin is below the floor in both signals;
+/// white noise against half its amplitude gives 6.02 dB. Note: this is one whole-signal FFT,
+/// not the per-frame LSD averaged over frames used in the speech-enhancement literature.
 ///
 /// This function requires the `transforms` feature, since it relies on the crate's FFT.
 ///

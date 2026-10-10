@@ -6,10 +6,15 @@
 //! note onsets, percussive hits, or other transient events.
 //!
 //! Four spectral flux variants are provided, each with different characteristics:
-//! - **Energy flux**: Emphasizes large amplitude changes (quadratic sensitivity)
-//! - **Magnitude flux**: Linear sensitivity to amplitude changes
-//! - **Complex flux**: Incorporates both magnitude and phase information
-//! - **Rectified complex flux**: Focuses on magnitude increases with phase awareness
+//! - **Energy flux** ([`energy_flux`]): `Σ_b max(0, X[b,t] − X[b,t−1])` on the values it is
+//!   given (no squaring); with a magnitude spectrogram this is the standard half-wave-rectified
+//!   spectral flux
+//! - **Magnitude flux** ([`magnitude_flux`]): `Σ_b |X[b,t] − X[b,t−1]|` (absolute, not
+//!   rectified: decreases count too)
+//! - **Complex flux** ([`complex_flux`]): `Σ_b |X[b,t] − X[b,t−1]|` on complex values, so phase
+//!   changes contribute
+//! - **Rectified complex flux** ([`rectified_complex_flux`]): `Σ_b max(0, |X[b,t]| − |X[b,t−1]|)`;
+//!   phase is discarded, so it equals energy flux on `|X|`
 //!
 //! All flux functions operate on 2D spectrograms with shape `(frequency_bins, frames)` and
 //! return a 1D time series of flux values, one per frame. The first frame always has zero flux.
@@ -18,13 +23,14 @@ use ndarray::Array2;
 use non_empty_slice::NonEmptyVec;
 use num_complex::Complex;
 
-/// Computes energy-based spectral flux.
+/// Computes "energy" spectral flux (half-wave-rectified difference).
 ///
-/// Calculates the sum of positive energy differences across all frequency bins:
-/// `flux[t] = Σ max(0, |X[b,t]|² - |X[b,t-1]|²)` for all bins b.
+/// Calculates the sum of positive frame-to-frame differences across all frequency bins:
+/// `flux[t] = Σ_b max(0, mag[b,t] − mag[b,t−1])`.
 ///
-/// Energy flux emphasizes large amplitude changes due to squaring, making it particularly
-/// effective for detecting percussive onsets with sharp transients.
+/// The input values are not squared. [`AudioOnsetDetection::spectral_flux`](crate::operations::traits::AudioOnsetDetection::spectral_flux)
+/// passes a CQT **magnitude** spectrogram, so the result is the half-wave-rectified magnitude
+/// flux (the standard spectral flux); pass a power spectrogram to obtain an energy flux.
 ///
 /// # Arguments
 ///
@@ -71,10 +77,10 @@ pub fn energy_flux(mag: &Array2<f64>) -> NonEmptyVec<f64> {
 /// Computes magnitude-based spectral flux.
 ///
 /// Calculates the sum of absolute magnitude differences across all frequency bins:
-/// `flux[t] = Σ |mag[b,t] - mag[b,t-1]|` for all bins b.
+/// `flux[t] = Σ_b |mag[b,t] − mag[b,t−1]|`.
 ///
-/// Magnitude flux has linear sensitivity to amplitude changes, making it more sensitive to
-/// subtle onsets compared to energy flux. Good for tonal instruments with gradual attacks.
+/// Not rectified: energy decreases (note offsets) contribute as much as increases, and a
+/// later rectification step has no effect because the values are already non-negative.
 ///
 /// # Arguments
 ///
@@ -117,8 +123,10 @@ pub fn magnitude_flux(mag: &Array2<f64>) -> NonEmptyVec<f64> {
 
 /// Computes complex domain spectral flux using magnitude and phase.
 ///
-/// Calculates the Euclidean distance between consecutive complex spectra:
-/// `flux[t] = Σ |X[b,t] - X[b,t-1]|` for all bins b, where X is complex-valued.
+/// Calculates the sum over bins of the distance between consecutive complex values:
+/// `flux[t] = Σ_b |X[b,t] − X[b,t−1]|`, where X is complex-valued (an L1 sum of per-bin
+/// moduli, not a Euclidean norm over bins). Because a stationary sinusoid's phase advances
+/// each frame, even a steady tone gives non-zero complex flux.
 ///
 /// Complex flux incorporates both magnitude and phase changes, providing the most complete
 /// measure of spectral change. More computationally expensive but most accurate for
@@ -166,11 +174,10 @@ pub fn complex_flux(spec: &Array2<Complex<f64>>) -> NonEmptyVec<f64> {
 /// Computes rectified complex domain spectral flux.
 ///
 /// Calculates the sum of positive magnitude differences:
-/// `flux[t] = Σ max(0, |X[b,t]| - |X[b,t-1]|)` for all bins b.
+/// `flux[t] = Σ_b max(0, |X[b,t]| − |X[b,t−1]|)`.
 ///
-/// This variant considers phase information when computing the norm but only keeps positive
-/// magnitude changes. Balances the robustness of complex methods with the interpretability
-/// of rectified magnitude-based approaches.
+/// Only the moduli |X| are used; phase is discarded. The result is numerically identical to
+/// [`energy_flux`] applied to `|X|` (half-wave-rectified magnitude flux).
 ///
 /// # Arguments
 ///

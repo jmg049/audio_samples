@@ -345,7 +345,8 @@ where
     // Generate frequency axis (only positive frequencies up to Nyquist as returned by fft).
     let sample_rate = f64::from(audio.sample_rate().get());
     let n_bins = phases.len();
-    let freq_bin = sample_rate / (n_fft.get() as f64);
+    // Bin spacing must use the FFT length actually computed (n_fft_nz).
+    let freq_bin = sample_rate / (n_fft_nz.get() as f64);
     let mut frequencies: Vec<f64> = (0..n_bins).map(|i| i as f64 * freq_bin).collect();
 
     // Apply frequency range filter if specified.

@@ -46,6 +46,11 @@ use super::{Band, BandLayout};
 /// Uses the Traunmüller (1990) formula:
 /// `bark = 26.81 * hz / (1960 + hz) - 0.53`
 ///
+/// This is the uncorrected formula: Traunmüller's low-end (< 2 Bark) and high-end
+/// (> 20.1 Bark) corrections are not applied. Because the result is clamped at 0 Bark,
+/// frequencies below about 39.5 Hz all map to 0 and do not round-trip through
+/// [`bark_to_hz`].
+///
 /// # Arguments
 /// - `hz` - Frequency in hertz. Values ≤ 0 are clamped to 0 Hz before conversion.
 ///
@@ -62,7 +67,8 @@ pub fn hz_to_bark(hz: f32) -> f32 {
 
 /// Converts a Bark-scale value back to a frequency in Hz.
 ///
-/// Inverse of the Traunmüller (1990) formula.
+/// Inverse of the Traunmüller (1990) formula: `hz = 1960 (bark + 0.53) / (26.28 − bark)`
+/// (26.28 = 26.81 − 0.53).
 ///
 /// # Arguments
 /// - `bark` - Bark value. Values < 0 are clamped to 0 before conversion.
@@ -78,7 +84,9 @@ pub fn bark_to_hz(bark: f32) -> f32 {
 
 /// Converts a frequency in Hz to its Mel-scale value.
 ///
-/// Uses the O'Shaughnessy formula: `mel = 2595 × log10(1 + hz / 700)`.
+/// Uses the O'Shaughnessy (HTK) formula: `mel = 2595 × log10(1 + hz / 700)`. This is an
+/// `f32` duplicate of [`crate::utils::audio_math::hz_to_mel`]; note that the crate's mel
+/// spectrogram (`AudioTransforms::mel_spectrogram`) uses the Slaney mel scale instead.
 ///
 /// # Arguments
 /// - `hz` - Frequency in hertz. Values ≤ 0 are clamped to 0 Hz.
@@ -114,8 +122,10 @@ pub fn mel_to_hz(mel: f32) -> f32 {
 
 /// Maps a frequency in Hz to the nearest integer bin index.
 ///
-/// Assumes a linear spacing from 0 Hz (bin 0) to Nyquist (bin `n_bins - 1`).
-/// The result is clamped to `[0, n_bins - 1]`.
+/// Assumes bin k lies at k·(fs/2)/(`n_bins` − 1), i.e. the real-FFT grid from 0 Hz
+/// (bin 0) to Nyquist (bin `n_bins - 1`). For MDCT coefficients (N = `n_bins`), bin k
+/// is actually centred at (k + ½)·fs/(2N), so the mapping is off by about half to one
+/// bin. The result is clamped to `[0, n_bins - 1]`.
 #[inline]
 fn hz_to_bin(hz: f32, sample_rate_hz: f32, n_bins: usize) -> usize {
     let nyquist = sample_rate_hz / 2.0;
@@ -123,28 +133,32 @@ fn hz_to_bin(hz: f32, sample_rate_hz: f32, n_bins: usize) -> usize {
     bin.clamp(0, (n_bins - 1) as isize) as usize
 }
 
-/// Converts a frequency in Hz to its ERB-bandwidth value (Glasberg & Moore, 1990).
+/// Returns the equivalent rectangular **bandwidth** (in Hz) of the auditory filter
+/// centred at `hz` (Glasberg & Moore, 1990).
 ///
-/// `ERB(f) = 24.7 × (4.37 × f/1000 + 1)`
+/// `ERB(f) = 24.7 × (4.37 × f/1000 + 1)` Hz
 ///
-/// This gives the bandwidth of the equivalent rectangular auditory filter at `f`.
-/// At 0 Hz the minimum value is 24.7. The function is linear in Hz, which makes
-/// it a good approximation for spacing perceptual filters from low to high frequency.
+/// At 0 Hz the minimum value is 24.7 Hz. This is a bandwidth, **not** a perceptual
+/// frequency coordinate: because it is affine in Hz, spacing filters uniformly in this
+/// quantity is the same as spacing them uniformly in Hz. The perceptual coordinate is
+/// the ERB-number (ERB-rate) scale E(f) = 21.4·log10(1 + 0.00437 f) Cams, which is not
+/// implemented here.
 ///
 /// # Arguments
 /// - `hz` - Frequency in hertz. Negative values are clamped to 0.
 ///
 /// # Returns
-/// ERB-bandwidth value (always ≥ 24.7).
+/// ERB bandwidth in Hz (always ≥ 24.7).
 #[inline]
 #[must_use]
 pub fn hz_to_erb(hz: f32) -> f32 {
     24.7_f32 * (4.37_f32 * hz.max(0.0) / 1000.0_f32 + 1.0_f32)
 }
 
-/// Converts an ERB-bandwidth value back to a frequency in Hz.
+/// Converts an ERB bandwidth (Hz) back to the centre frequency (Hz) whose auditory filter
+/// has that bandwidth.
 ///
-/// Inverse of the Glasberg & Moore (1990) formula:
+/// Inverse of the Glasberg & Moore (1990) bandwidth formula:
 /// `f = 1000 × (erb/24.7 - 1) / 4.37`
 ///
 /// # Arguments
@@ -203,8 +217,10 @@ impl BandLayout {
     /// Creates a Bark-scale band layout.
     ///
     /// Divides the spectrum from 0 Hz to Nyquist into `n_bands` bands spaced
-    /// evenly on the Bark scale. Bark bands closely model the ear's critical
-    /// bands and are used by MPEG psychoacoustic models.
+    /// evenly on the Bark scale (uncorrected Traunmüller formula, see
+    /// [`hz_to_bark`]). Bark bands approximate the ear's critical bands and are
+    /// used by MPEG psychoacoustic models. Band edges are mapped to bins on the
+    /// real-FFT grid k·(fs/2)/(`n_bins` − 1) (about half a bin off for MDCT bins).
     ///
     /// `n_bins` is the number of spectral bins in the caller's frequency
     /// representation (e.g. `MdctParams::n_coefficients()` for MDCT, or
@@ -276,8 +292,8 @@ impl BandLayout {
     /// Creates a Mel-scale band layout.
     ///
     /// Divides the spectrum from 0 Hz to Nyquist into `n_bands` bands spaced
-    /// evenly on the Mel scale. Mel bands are commonly used for speech and music
-    /// feature extraction.
+    /// evenly on the HTK mel scale (see [`hz_to_mel`]). Mel bands are commonly used
+    /// for speech and music feature extraction.
     ///
     /// `n_bins` is the number of spectral bins in the caller's frequency
     /// representation. Bin indices in the returned bands index into that array.
@@ -341,10 +357,15 @@ impl BandLayout {
     /// Creates an ERB-scale band layout.
     ///
     /// Divides the spectrum from 0 Hz to Nyquist into `n_bands` bands spaced
-    /// evenly on the ERB (Equivalent Rectangular Bandwidth) scale of Glasberg &
-    /// Moore (1990). ERB bands more accurately model auditory filter widths than
-    /// Bark bands, particularly at low frequencies, and are used in modern
-    /// perceptual models (Opus, EVS).
+    /// evenly in the ERB **bandwidth** function [`hz_to_erb`]. Because that function
+    /// is affine in Hz, **every band has the same width in Hz** (fs/(2·`n_bands`)):
+    /// this layout is linear in frequency, not perceptual, and has very little
+    /// low-frequency resolution.
+    ///
+    /// Warning: a perceptual ERB layout would space bands evenly on the ERB-number
+    /// scale E(f) = 21.4·log10(1 + 0.00437 f) (Glasberg & Moore 1990), giving narrow
+    /// bands at low frequencies. That is not what this constructor does; prefer
+    /// [`BandLayout::bark`] for a perceptual layout.
     ///
     /// `n_bins` is the number of spectral bins in the caller's frequency
     /// representation. Bin indices in the returned bands index into that array.
@@ -413,7 +434,7 @@ impl BandLayout {
     /// Creates a CELT-scale band layout using the RFC 6716 band edges.
     ///
     /// Divides the spectrum into up to 21 perceptual bands whose boundaries
-    /// follow the CELT specification (RFC 6716 §4.3.1, Table 2). Bands that
+    /// follow the CELT band edges of RFC 6716 (§4.3, Table 55 "MDCT Bands"). Bands that
     /// fall entirely above the Nyquist frequency of `sample_rate_hz` are
     /// omitted, so the returned layout may have fewer than 21 entries.
     ///
@@ -441,7 +462,7 @@ impl BandLayout {
     /// ```
     #[must_use]
     pub fn celt(sample_rate_hz: f32, n_bins: NonZeroUsize) -> Self {
-        /// CELT band boundary frequencies in Hz (RFC 6716 §4.3.1, Table 2).
+        /// CELT band boundary frequencies in Hz (RFC 6716 §4.3, Table 55).
         ///
         /// 22 edge values define 21 bands:
         /// `[0-200), [200-400), …, [15600-20000)`.

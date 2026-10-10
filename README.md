@@ -208,6 +208,7 @@ dependencies. Enable the rest as needed.
 | `plotting`          | Interactive HTML plots (waveform, spectrum, phase, spectrogram, Lissajous) via plotly |
 | `static-plots`      | PNG/SVG export (requires `plotting`; see [PLOTTING.md](PLOTTING.md)) |
 | `simd`              | SIMD-accelerated sample conversions via the `wide` crate (stable; results are bit-identical to the scalar path) |
+| `educational`       | The explain API (`audio_samples::educational`): configurations and topics describe their formulas, numbers and warnings; with `full_no_plotting`, also the learning guide (`audio_samples::guide`) |
 
 ### Bundles
 
@@ -225,6 +226,36 @@ Architecture notes are in [documentation/ARCHITECTURE.md](documentation/ARCHITEC
 Coming from librosa? [documentation/LIBROSA_MIGRATION.md](documentation/LIBROSA_MIGRATION.md)
 maps every librosa 1.0 function to its counterpart here, lists the differences,
 and explains the golden-fixture suite that checks agreement with librosa.
+
+---
+
+## Learning with audio_samples
+
+The crate doubles as teaching material for a speech and audio processing
+course:
+
+- **The learning guide**, fourteen chapters from sampling and aliasing to
+  psychoacoustics and codecs. It is the `audio_samples::guide` module in the
+  API documentation (built with `--features educational,full_no_plotting`);
+  the Markdown sources are in
+  [documentation/guide/](documentation/guide/README.md), which also lists the
+  dependencies needed to run the snippets in your own crate. Every code block
+  is a doctest, so every number in the text is checked.
+- **Labs**: one runnable program per chapter,
+  `examples/tutorial_NN_<topic>.rs`, for example
+  `cargo run --release --example tutorial_01_sampling_aliasing --features educational,full_no_plotting`.
+- **The explain API** (`educational` feature): `Explain`/`ExplainFor` on
+  parameter types and the functions in `educational::topics` return a
+  document with the formula the code evaluates, every symbol with its unit,
+  the derived numbers for your configuration and warnings about suspicious
+  settings. `cargo run --example explain --features educational,full_no_plotting -- all`
+  prints all of them.
+- **Python notebooks**: the same fourteen chapters as Jupyter notebooks in the
+  [Python bindings](https://github.com/jmg049/audio_samples_python)
+  (`docs/source/tutorials/`).
+- **For instructors**: [documentation/guide/FOR_INSTRUCTORS.md](documentation/guide/FOR_INSTRUCTORS.md)
+  covers lab sizing, conventions that differ from SciPy and librosa, and
+  known limitations.
 
 ---
 
@@ -246,10 +277,10 @@ A larger demo lives in a separate repository:
 ## Companion Crates
 
 - [`audio_samples_io`](https://github.com/jmg049/audio_samples_io): audio file decoding and encoding
-- [`audio_samples_streaming](https://github.com/jmg049/audio_samples_streaming): streaming functionality
-- [`audio_samples_ml](https://github.com/jmg049/audio_samples_ml): audio machine learning such as STT and TTS.
-- [`audio_samples_qoe](https://github.com/jmg049/audio_samples_streaming): audio Quality of Experience (qoe) metrics.
-- [`audio_samples_python`](https://github.com/jmg049/audio_python): Python bindings
+- [`audio_samples_streaming`](https://github.com/jmg049/audio_samples_streaming): streaming functionality
+- [`audio_samples_ml`](https://github.com/jmg049/audio_samples_ml): audio machine learning such as STT and TTS.
+- [`audio_samples_qoe`](https://github.com/jmg049/audio_samples_qoe): audio Quality of Experience (qoe) metrics.
+- [`audio_samples_python`](https://github.com/jmg049/audio_samples_python): Python bindings
 - [`spectrograms`](https://github.com/jmg049/Spectrograms): spectrograms and time-frequency transforms (used by the `transforms` feature)
 - [`i24`](https://github.com/jmg049/i24): 24-bit signed integer type for Rust
 - [`dtmf_tones`](https://github.com/jmg049/dtmf_tones): `no_std` DTMF keypad frequencies

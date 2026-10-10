@@ -1,38 +1,103 @@
 //! Statistical analysis operations for [`AudioSamples`].
 //!
-//! This module implements the [`AudioStatistics`] trait, providing statistical
-//! and signal analysis methods for mono and multi-channel audio data. Operations
-//! cover both time-domain statistics and, when the `fft` feature is enabled,
-//! frequency-domain descriptors computed via the [`spectrograms`] crate.
+//! ## What
+//!
+//! This module implements the [`AudioStatistics`] trait: descriptive statistics
+//! (peak, mean, RMS, variance), temporal descriptors (zero crossings,
+//! auto- and cross-correlation) and whole-signal spectral descriptors
+//! (centroid, rolloff, bandwidth, flatness, crest, slope, contrast). It also
+//! provides the free function [`fft_alignment_lag`] for delay estimation.
+//!
+//! ## Why
 //!
 //! Statistical measures are a core part of audio analysis. Isolating them into a
 //! single trait keeps the [`AudioSamples`] API organised and lets users access
 //! only the statistical surface they need. This module is the sole implementor of
 //! [`AudioStatistics`] for [`AudioSamples`].
 //!
+//! ## How
+//!
 //! All operations are available on any [`AudioSamples<T>`] where `T` is a
 //! supported sample type (`u8`, `i16`, `I24`, `i32`, `f32`, `f64`). Import
 //! [`AudioStatistics`] and call methods on your audio directly.
 //!
-//! ### Time-domain statistics
-//! - [`peak`](AudioStatistics::peak): Maximum absolute amplitude value.
-//! - [`min_sample`](AudioStatistics::min_sample): Minimum sample value.
-//! - [`max_sample`](AudioStatistics::max_sample): Maximum sample value.
-//! - [`mean`](AudioStatistics::mean): Arithmetic mean of all samples.
-//! - [`midpoint_sample`](AudioStatistics::midpoint_sample): Temporal midpoint value of a mono signal (the middle sample by position).
-//! - [`rms`](AudioStatistics::rms): Root Mean Square energy.
-//! - [`variance`](AudioStatistics::variance): Variance of sample values.
-//! - [`std_dev`](AudioStatistics::std_dev): Standard deviation of sample values.
+//! ### Units: raw sample values vs normalised amplitude
 //!
-//! ### Temporal signal properties
-//! - [`zero_crossings`](AudioStatistics::zero_crossings): Counts sign changes in the waveform.
-//! - [`zero_crossing_rate`](AudioStatistics::zero_crossing_rate): Normalised zero-crossing frequency (per second).
-//! - [`cross_correlation`](AudioStatistics::cross_correlation): Computes correlation between two signals.
+//! - `mean`, `variance`, `std_dev`, `rms`, `autocorrelation` and
+//!   `cross_correlation` work on **raw sample values** converted numerically to
+//!   `f64` (accumulated in `f64`, so integer types never overflow). For `i16`
+//!   input an RMS of `11585.0` means `11585 / 32768 ≈ 0.354` of full scale.
+//!   `u8` is offset-binary (silence = 128), so its mean of a silent signal is
+//!   `128.0`. Convert first (e.g. [`as_f64`](crate::AudioTypeConversion::as_f64))
+//!   if you want values in `[-1, 1]`.
+//! - `zero_crossings` / `zero_crossing_rate` and all spectral methods use the
+//!   audio-aware conversion to `f64` (integers scaled to `[-1, 1]`, `u8` 128 → 0),
+//!   so `u8` zero crossings are counted about mid-scale.
 //!
-//! ### Frequency-domain features *(requires `fft` feature)*
-//! - [`autocorrelation`](AudioStatistics::autocorrelation): Signal self-similarity up to a given lag.
-//! - [`spectral_centroid`](AudioStatistics::spectral_centroid): Spectral center of mass (mono only).
-//! - [`spectral_rolloff`](AudioStatistics::spectral_rolloff): Frequency below which a given proportion of spectral energy lies.
+//! ### Time-domain definitions
+//!
+//! For samples `x[0..N]` (all channels pooled unless stated otherwise):
+//!
+//! - Mean: `x̄ = (1/N) Σ x[n]`.
+//! - RMS: `sqrt((1/N) Σ x[n]²)`. A sine of amplitude `A` has RMS `A/√2`.
+//! - Variance: population variance `(1/N) Σ (x[n] − x̄)²` over every sample of
+//!   every channel; `std_dev` is its square root.
+//! - Crest factor (not a method here; see
+//!   [`detect_dynamic_range`](crate::utils::detection::detect_dynamic_range)):
+//!   `peak / RMS`, or `20·log10(peak/RMS)` dB. A sine has `√2` (≈ 3.01 dB).
+//! - Zero crossings: number of adjacent pairs whose sign changes, where a value
+//!   `> 0` is positive and a value `≤ 0` is non-positive (exact zeros count on
+//!   the non-positive side). Summed over channels.
+//! - Zero-crossing rate: **crossings per second**, `zero_crossings / duration_s`
+//!   with `duration_s = samples_per_channel / sample_rate`. A sine at `f` Hz
+//!   gives about `2f`. For multi-channel audio the count is summed over channels
+//!   while the duration is per channel, so the rate scales with the channel
+//!   count. Note: librosa's `zero_crossing_rate` is a per-frame **fraction of
+//!   samples** (crossings / frame length), not a rate in Hz.
+//! - Autocorrelation (first channel): the unbiased estimate
+//!   `r[k] = (1/(N−k)) Σ_{n=0}^{N−1−k} x[n]·x[n+k]`, with no mean removal and no
+//!   division by `r[0]`. `r[0]` is the mean square (`A²/2` for a sine). For
+//!   periodic signals `r[k]` peaks again at multiples of the period, and at large
+//!   `k` (few overlapping samples) the estimate is noisy and may exceed `r[0]`.
+//!   Divide by `r[0]` for the normalised autocorrelation `ρ[k] ∈ [−1, 1]`
+//!   (approximately; the unbiased estimator is not bounded exactly). Note: the
+//!   *biased* estimator `(1/N) Σ …` used by many textbooks and
+//!   `numpy.correlate(x, x, "full")/N` is smaller by the factor `(N−k)/N`.
+//! - Cross-correlation (first channels): `r_xy[l] = (1/C_l) Σ_{i<C_l} x[i]·y[i+l]`
+//!   for `l = 0..=max_lag`, with `C_l = min(N_x, N_y − l)`, `x = self`,
+//!   `y = other`. A peak at `l = D` means `other` is `self` delayed by `D`
+//!   samples. Negative lags are not produced: swap the arguments to detect the
+//!   opposite delay, or use [`fft_alignment_lag`].
+//!
+//! ### Spectral definitions
+//!
+//! The spectral methods reduce the input to one channel (see
+//! `ChannelReduction` in [`crate::operations::types`]), take a
+//! **single FFT of the whole signal** (FFT length = signal length `N`, no
+//! framing, rectangular window except `spectral_contrast`, which uses a Hann
+//! window) and use the one-sided spectrum `X[k]`, `k = 0..=⌊N/2⌋`, without
+//! normalisation. Bin `k` lies at `f_k = k·fs/N` Hz. With power `P_k = |X[k]|²`
+//! and magnitude `M_k = |X[k]|`:
+//!
+//! - Centroid (**power**-weighted): `Σ f_k·P_k / Σ P_k` Hz.
+//! - Rolloff: the smallest `f_k` such that `Σ_{j≤k} P_j ≥ p·Σ P_j` (power
+//!   cumulative sum, no interpolation between bins).
+//! - Bandwidth (**magnitude**-weighted): `sqrt(Σ (f_k − c_M)²·M_k / Σ M_k)` with
+//!   its own magnitude-weighted centroid `c_M = Σ f_k·M_k / Σ M_k`. It is
+//!   therefore not centred on [`spectral_centroid`](AudioStatistics::spectral_centroid)
+//!   (which is power-weighted).
+//! - Flatness (Wiener entropy): `exp(mean(ln(P_k + ε))) / mean(P_k)`, `ε = 1e-10`,
+//!   clamped to `[0, 1]`.
+//! - Crest: `max(M_k) / mean(M_k)`.
+//! - Slope: ordinary least-squares slope of `M_k` against `f_k` (magnitude per
+//!   Hz; depends on the signal length because the spectrum is unnormalised).
+//! - Contrast: see [`spectral_contrast`](AudioStatistics::spectral_contrast);
+//!   values are `10·log10` of **magnitudes** (librosa's convention).
+//!
+//! Note: librosa computes these features per STFT frame (Hann window,
+//! `n_fft = 2048`) and weights centroid/bandwidth by **magnitude**
+//! (`S = |X|`), so its centroid and rolloff are not directly comparable with
+//! the power-weighted, whole-signal values here.
 //!
 //! ## Example: Time-domain analysis
 //!
@@ -47,27 +112,28 @@
 //! let rms  = audio.rms();
 //! let mean = audio.mean();
 //!
-//! println!("Peak: {peak}, RMS: {rms:.4}, Mean: {mean:.4}");
+//! assert_eq!(peak, 1.0);
+//! assert!((rms - 0.625f64.sqrt()).abs() < 1e-12); // sqrt((1 + 1 + 0.25 + 0.25) / 4)
+//! assert_eq!(mean, 0.0);
 //! ```
 //!
 //! ## Example: Frequency-domain analysis
 //!
-//! ```rust,ignore
-//! // Requires the "transforms" feature.
-//! use audio_samples::{sine_wave, AudioSamples, AudioStatistics, sample_rate};
+//! ```rust
+//! # #[cfg(feature = "transforms")] {
+//! use audio_samples::{sine_wave, AudioStatistics, sample_rate};
 //! use audio_samples::operations::types::ChannelReduction;
 //! use std::time::Duration;
 //!
-//! let sr       = sample_rate!(44100);
-//! let freq     = 1000.0;
-//! let duration = Duration::from_secs(1);
-//! let audio    = sine_wave::<f64>(freq, duration, sr, 0.5);
+//! // 1 s at 44.1 kHz: the 1 kHz tone falls exactly on bin 1000 (fs/N = 1 Hz).
+//! let audio = sine_wave::<f64>(1000.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
 //!
 //! let centroid = audio.spectral_centroid(ChannelReduction::Error).unwrap();
 //! let rolloff  = audio.spectral_rolloff(0.85, ChannelReduction::Error).unwrap();
 //!
-//! println!("Spectral centroid: {:.2} Hz", centroid);
-//! println!("Spectral rolloff (85%): {:.2} Hz", rolloff);
+//! assert!((centroid - 1000.0).abs() < 1.0);
+//! assert!((rolloff - 1000.0).abs() < 1.0);
+//! # }
 //! ```
 //!
 //! ## Error Handling
@@ -79,8 +145,9 @@
 //!
 //! ## Feature Flags
 //!
-//! - `fft`: Enables spectral and autocorrelation analyses via the
-//!   [`spectrograms`] crate.
+//! - `statistics`: enables this module and the time-domain methods.
+//! - `transforms`: additionally enables `autocorrelation`, the spectral
+//!   methods and [`fft_alignment_lag`] via the [`spectrograms`] crate.
 //!
 //! ## See Also
 //!
@@ -328,8 +395,13 @@ where
 
     /// Computes the arithmetic mean of all samples across all channels.
     ///
+    /// `x̄ = (1/N) Σ x[n]` over every sample of every channel (`N` = total sample
+    /// count), accumulated in `f64` so integer sample types cannot overflow. The
+    /// value is in raw sample units: for `i16` it lies in `[-32768, 32767]`, and
+    /// for `u8` (offset-binary) a silent signal has mean `128.0`.
+    ///
     /// # Returns
-    /// The mean value as `f64`.
+    /// The mean value as `f64`, in raw sample units.
     ///
     /// # Examples
     /// ```
@@ -342,10 +414,18 @@ where
     /// ```
     #[inline]
     fn mean(&self) -> f64 {
-        match &self.data() {
-            AudioData::Mono(mono_data) => mono_data.mean().cast_into(),
-            AudioData::Multi(multi_data) => multi_data.mean().cast_into(),
-        }
+        // Accumulate in f64: summing in `T` overflows/wraps for integer types.
+        let (sum, n) = match &self.data() {
+            AudioData::Mono(arr) => (
+                arr.iter().map(|&x| -> f64 { x.cast_into() }).sum::<f64>(),
+                arr.len().get(),
+            ),
+            AudioData::Multi(arr) => (
+                arr.iter().map(|&x| -> f64 { x.cast_into() }).sum::<f64>(),
+                arr.len().get(),
+            ),
+        };
+        sum / n as f64
     }
 
     /// Returns the value at the temporal midpoint of a mono signal.
@@ -390,12 +470,17 @@ where
 
     /// Computes the Root Mean Square (RMS) of all samples across all channels.
     ///
-    /// RMS is the square root of the mean of squared sample values. It provides
-    /// a measure of the signal's average energy and is commonly used for
-    /// loudness estimation.
+    /// `RMS = sqrt((1/N) Σ x[n]²)` over every sample of every channel, accumulated
+    /// in `f64`. It measures the signal's average power and is commonly used for
+    /// loudness estimation. A sine of amplitude `A` has RMS `A/√2`.
+    ///
+    /// Samples are used in raw units: for `i16`, full scale is 32768, and for `u8`
+    /// the 128 offset is not removed. Convert with
+    /// [`as_f64`](crate::AudioTypeConversion::as_f64) first for an RMS relative to
+    /// full scale.
     ///
     /// # Returns
-    /// The RMS value as `f64`.
+    /// The RMS value as `f64`, in raw sample units.
     ///
     /// # Examples
     /// ```
@@ -601,13 +686,13 @@ where
 
     /// Computes the population variance of the audio samples.
     ///
-    /// Variance measures the spread of sample values around the mean.
-    /// For mono audio this is the standard population variance of all samples.
-    /// For multi-channel audio the variance is computed per sample position
-    /// across channels and the results are averaged over time.
+    /// `σ² = (1/N) Σ (x[n] − x̄)²` over every sample of every channel (all channels
+    /// pooled, `N` = total sample count, `x̄` = [`mean`](AudioStatistics::mean)),
+    /// accumulated in `f64` in raw sample units. Divide by `N` (population), not
+    /// `N − 1`.
     ///
     /// # Returns
-    /// The variance as `f64`.
+    /// The variance as `f64`, in squared raw sample units.
     ///
     /// # Examples
     /// ```
@@ -621,13 +706,19 @@ where
     /// ```
     #[inline]
     fn variance(&self) -> f64 {
-        match &self.data() {
-            AudioData::Mono(mono_data) => mono_data.variance(),
-            AudioData::Multi(multi_data) => multi_data
-                .variance_axis(Axis(0))
-                .mean()
-                .expect("Non empty data will produce a mean"),
-        }
+        // Two-pass population variance over every sample of every channel,
+        // accumulated in f64 (no overflow for integer sample types).
+        let mean = self.mean();
+        let sq_dev = |&x: &T| -> f64 {
+            let v: f64 = x.cast_into();
+            let d = v - mean;
+            d * d
+        };
+        let (sum_sq, n) = match &self.data() {
+            AudioData::Mono(arr) => (arr.iter().map(sq_dev).sum::<f64>(), arr.len().get()),
+            AudioData::Multi(arr) => (arr.iter().map(sq_dev).sum::<f64>(), arr.len().get()),
+        };
+        sum_sq / n as f64
     }
 
     /// Computes the standard deviation of the audio samples.
@@ -656,13 +747,17 @@ where
 
     /// Counts the number of zero crossings in the audio signal.
     ///
-    /// Zero crossings occur when the signal changes sign between adjacent samples.
-    /// This metric is useful for pitch detection, signal analysis, and estimating
-    /// the noisiness of a signal.
+    /// A zero crossing is a pair of adjacent samples `(x[n−1], x[n])` where one is
+    /// `> 0` and the other is `≤ 0` (an exact zero counts as non-positive). Samples
+    /// are first mapped with the audio-aware conversion to `f64`, so `u8`
+    /// (offset-binary) is measured about its mid-scale value 128. A sine at `f` Hz
+    /// lasting `T` seconds has about `2·f·T` crossings. The count is useful for
+    /// estimating the noisiness or dominant frequency of a signal.
     ///
     /// # Returns
-    /// The total number of zero crossings across all channels. Returns 0 if the
-    /// audio has fewer than 2 samples.
+    /// The total number of zero crossings, summed over all channels (each channel
+    /// is scanned separately). Returns 0 if the audio has fewer than 2 samples per
+    /// channel.
     ///
     /// # Examples
     /// ```
@@ -683,13 +778,13 @@ where
 
                 let mut crossings = 0;
                 for i in 1..arr.len().get() {
-                    let prev: T = arr[i - 1];
-                    let curr: T = arr[i];
+                    // Audio-aware conversion: u8 mid-scale (128) maps to 0.0, so
+                    // crossings are counted about the true zero level.
+                    let prev: f64 = arr[i - 1].convert_to();
+                    let curr: f64 = arr[i].convert_to();
 
                     // Check for sign change (zero crossing)
-                    if (prev > T::zero() && curr <= T::zero())
-                        || (prev <= T::zero() && curr > T::zero())
-                    {
+                    if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
                         crossings += 1;
                     }
                 }
@@ -705,12 +800,10 @@ where
                     }
 
                     for i in 1..channel.len() {
-                        let prev: T = channel[i - 1];
-                        let curr: T = channel[i];
+                        let prev: f64 = channel[i - 1].convert_to();
+                        let curr: f64 = channel[i].convert_to();
 
-                        if (prev > T::zero() && curr <= T::zero())
-                            || (prev <= T::zero() && curr > T::zero())
-                        {
+                        if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
                             total_crossings += 1;
                         }
                     }
@@ -720,7 +813,13 @@ where
         }
     }
 
-    /// Computes the zero crossing rate (crossings per second).
+    /// Computes the zero-crossing rate in crossings per second.
+    ///
+    /// `ZCR = zero_crossings / duration_s` with
+    /// `duration_s = samples_per_channel / sample_rate`. The unit is crossings per
+    /// second (Hz), not a fraction of samples: a sine at `f` Hz gives about `2f`.
+    /// For multi-channel audio the crossings of all channels are summed while the
+    /// duration is per channel, so the rate scales with the channel count.
     ///
     /// This normalises the zero crossing count by the signal duration, providing
     /// a frequency-like measure that is independent of signal length. For
@@ -728,6 +827,9 @@ where
     /// from [`zero_crossings`](Self::zero_crossings) divided by the number of
     /// channels), so a stereo signal with two identical channels has the same
     /// rate as either channel alone.
+    /// Note: librosa's `zero_crossing_rate` returns a per-frame fraction
+    /// (crossings / frame length). For a mono signal, divide this value by the
+    /// sample rate to get the equivalent whole-signal fraction of samples.
     ///
     /// # Returns
     /// The number of zero crossings per second as `f64`, averaged over channels.
@@ -745,8 +847,9 @@ where
     ///
     /// let data = array![1.0f32, -1.0, 1.0, -1.0];
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+    /// // 3 crossings in 4 samples = 4 / 44100 s.
     /// let zcr = audio.zero_crossing_rate();
-    /// assert!(zcr > 0.0);
+    /// assert!((zcr - 3.0 * 44100.0 / 4.0).abs() < 1e-9);
     /// ```
     #[inline]
     fn zero_crossing_rate(&self) -> f64 {
@@ -758,13 +861,20 @@ where
 
     /// Computes the autocorrelation function up to `max_lag` samples.
     ///
-    /// Autocorrelation measures the similarity of a signal with a time-shifted
-    /// copy of itself. This returns the unbiased estimate
-    /// `r[k] = (1 / (n - k)) · Σ_{j=0}^{n-1-k} x[j] · x[j+k]`, so the value at
-    /// lag 0 is the signal's mean-square value. It is computed with a
-    /// zero-padded FFT.
+    /// Returns the unbiased estimate
+    /// `r[k] = (1/(N−k)) Σ_{n=0}^{N−1−k} x[n]·x[n+k]` for `k = 0..=max_lag`, in
+    /// squared raw sample units, with no mean removal and no normalisation by
+    /// `r[0]`. `r[0]` is the mean square (`A²/2` for a sine of amplitude `A`). The
+    /// values do not necessarily decrease with `k`: for a periodic signal `r[k]`
+    /// peaks again at every multiple of the period, and at large `k` (few
+    /// overlapping samples) the estimate is noisy and can exceed `r[0]`. It is
+    /// computed with a zero-padded FFT, so the correlation is linear, not circular.
     ///
     /// For multi-channel audio only the first channel is used.
+    ///
+    /// Note: unlike the biased estimator `(1/N) Σ …` (e.g.
+    /// `numpy.correlate(x, x, "full")[N-1:] / N`), each lag is divided by its own
+    /// overlap count `N − k`.
     ///
     /// Reference: [Autocorrelation - Wikipedia](https://en.wikipedia.org/wiki/Autocorrelation)
     ///
@@ -789,14 +899,13 @@ where
     /// use ndarray::array;
     /// use std::num::NonZeroUsize;
     ///
-    /// let data = array![1.0f32, 0.5, -0.5, -1.0];
+    /// let data = array![1.0f32, 2.0, 3.0, 4.0];
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-    /// let autocorr = audio.autocorrelation(NonZeroUsize::new(3).unwrap()).unwrap();
-    /// assert_eq!(autocorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
-    /// // Lag 0 is the mean square (1 + 0.25 + 0.25 + 1) / 4.
-    /// assert!((autocorr[0] - 0.625).abs() < 1e-12);
-    /// // Lag 3 is the single product 1 * -1.
-    /// assert!((autocorr[3] + 1.0).abs() < 1e-12);
+    /// let r = audio.autocorrelation(NonZeroUsize::new(3).unwrap()).unwrap();
+    /// assert_eq!(r.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// // r[0] = (1 + 4 + 9 + 16) / 4, r[1] = (2 + 6 + 12) / 3
+    /// assert!((r[0] - 7.5).abs() < 1e-9);
+    /// assert!((r[1] - 20.0 / 3.0).abs() < 1e-9);
     /// ```
     #[cfg(feature = "transforms")]
     #[inline]
@@ -865,11 +974,16 @@ where
         Some(unsafe { NonEmptyVec::new_unchecked(correlations) })
     }
 
-    /// Computes cross-correlation with another audio signal.
+    /// Computes the cross-correlation with another audio signal for non-negative
+    /// lags.
     ///
-    /// Cross-correlation measures the similarity between two signals as a
-    /// function of the displacement of one relative to the other. It is useful
-    /// for signal alignment, pattern matching, and delay estimation.
+    /// `r[l] = (1/C_l) Σ_{i=0}^{C_l−1} self[i]·other[i+l]` for `l = 0..=max_lag`,
+    /// with `C_l = min(len_self, len_other − l)`. This is an unbiased
+    /// (overlap-normalised) estimate in squared raw sample units, with no mean
+    /// removal, accumulated in `f64`. A peak at `l = D` means `other` is `self`
+    /// delayed by `D` samples. Negative lags are not computed: to detect `other`
+    /// leading `self`, swap the arguments or use
+    /// [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag).
     ///
     /// For multi-channel audio only the first channels of both signals are
     /// correlated.
@@ -895,12 +1009,14 @@ where
     /// use std::num::NonZeroUsize;
     ///
     /// let data1 = array![1.0f32, 0.0, -1.0, 0.0];
-    /// let data2 = array![0.0, 1.0, 0.0, -1.0];
+    /// let data2 = array![0.0, 1.0, 0.0, -1.0]; // data1 delayed by one sample
     /// let audio1 = AudioSamples::new_mono(data1, sample_rate!(44100)).unwrap();
     /// let audio2 = AudioSamples::new_mono(data2, sample_rate!(44100)).unwrap();
     /// let max_lag = NonZeroUsize::new(3).unwrap();
     /// let xcorr = audio1.cross_correlation(&audio2, max_lag).unwrap();
     /// assert_eq!(xcorr.len(), NonZeroUsize::new(4).unwrap()); // lags 0..=3
+    /// // Peak at lag 1: (1·1 + 0·0 + (−1)·(−1)) / 3
+    /// assert!((xcorr[1] - 2.0 / 3.0).abs() < 1e-12);
     /// ```
     #[inline]
     fn cross_correlation(
@@ -930,16 +1046,16 @@ where
                 let mut correlations = unsafe { NonEmptyVec::new_unchecked(correlations) };
 
                 for lag in 0..=effective_max_lag {
-                    let mut correlation: T = T::zero();
+                    // Accumulate in f64: products/sums in `T` overflow for integers.
+                    let mut correlation = 0.0f64;
 
                     let count = n1.get().min(n2.get() - lag);
 
                     for i in 0..count {
-                        let s1 = arr1[i];
-                        let s2 = arr2[i + lag];
+                        let s1: f64 = arr1[i].cast_into();
+                        let s2: f64 = arr2[i + lag].cast_into();
                         correlation += s1 * s2;
                     }
-                    let mut correlation = correlation.cast_into();
                     correlation /= count as f64;
                     correlations.push(correlation);
                 }
@@ -953,22 +1069,21 @@ where
 
                 let n1 = ch1.len();
                 let n2 = ch2.len();
-                let effective_max_lag: usize = max_lag.get().min(n1.min(n2 - 1));
+                let effective_max_lag: usize = max_lag.get().min(n1.min(n2) - 1);
                 let correlations = Vec::with_capacity(effective_max_lag + 1);
                 // safety: we just allocated with capacity effective_max_lag + 1 which is at
                 // least 1
                 let mut correlations = unsafe { NonEmptyVec::new_unchecked(correlations) };
 
                 for lag in 0..=effective_max_lag {
-                    let mut correlation = T::zero();
+                    let mut correlation = 0.0f64;
                     let count = n1.min(n2 - lag);
 
                     for i in 0..count {
-                        let s1 = ch1[i];
-                        let s2 = ch2[i + lag];
+                        let s1: f64 = ch1[i].cast_into();
+                        let s2: f64 = ch2[i + lag].cast_into();
                         correlation += s1 * s2;
                     }
-                    let mut correlation: f64 = correlation.cast_into();
                     correlation /= count as f64;
                     correlations.push(correlation);
                 }
@@ -992,24 +1107,44 @@ where
 
     /// Computes the spectral centroid of a mono signal.
     ///
-    /// The spectral centroid is the frequency-weighted mean of the power
-    /// spectrum and serves as a measure of spectral brightness. Higher values
-    /// indicate energy concentrated at higher frequencies.
+    /// The power-weighted mean frequency `Σ f_k·|X[k]|² / Σ |X[k]|²`, where `X` is
+    /// a single FFT of the whole (channel-reduced) signal with FFT length equal to
+    /// the signal length `N` and no window (rectangular), `k = 0..=⌊N/2⌋`, and
+    /// `f_k = k·fs/N` Hz. It serves as a measure of spectral brightness: higher
+    /// values indicate energy concentrated at higher frequencies.
+    ///
+    /// Note: librosa's `spectral_centroid` is computed per STFT frame and weighted
+    /// by magnitude `|X|`, so its values are generally higher than this
+    /// power-weighted value and are not directly comparable.
     ///
     /// Reference: [Spectral centroid - Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
+    ///
+    /// # Arguments
+    /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
     ///
     /// # Returns
     /// The spectral centroid frequency in Hz. Returns `0.0` when the signal
     /// is silence (zero total spectral energy).
     ///
-    /// # Arguments
-    /// - `reduction` - the [`ChannelReduction`] policy for multi-channel input.
-    ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel
-    ///   and `reduction` is [`ChannelReduction::Error`], or a
-    ///   [`ChannelReduction::Channel`] index is out of bounds.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioStatistics, sample_rate, sine_wave};
+    /// use audio_samples::operations::types::ChannelReduction;
+    /// use std::time::Duration;
+    ///
+    /// // 100 ms at 44.1 kHz: bin spacing fs/N = 10 Hz, so 440 Hz lies on bin 44.
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    /// let centroid = audio.spectral_centroid(ChannelReduction::Error).unwrap();
+    /// assert!((centroid - 440.0).abs() < 1.0);
+    /// ```
     #[cfg(feature = "transforms")]
     #[inline]
     fn spectral_centroid(&self, reduction: ChannelReduction) -> AudioSampleResult<f64> {
@@ -1059,16 +1194,23 @@ where
 
     /// Computes the spectral rolloff frequency.
     ///
-    /// The spectral rolloff is the frequency below which a specified proportion
-    /// of the total spectral energy is contained. It is commonly used to
+    /// The smallest bin frequency `f_k = k·fs/N` at which the cumulative power
+    /// `Σ_{j≤k} |X[j]|²` reaches `rolloff_percent` of the total power, where `X`
+    /// is a single rectangular-window FFT of the whole (channel-reduced) signal with
+    /// FFT length equal to the signal length `N`. There is no interpolation
+    /// between bins, so the result is a multiple of `fs/N`. It is commonly used to
     /// distinguish harmonic signals from noise-like signals.
+    ///
+    /// Note: librosa's `spectral_rolloff` accumulates magnitude `|X|` per STFT
+    /// frame, so its values differ from this whole-signal, power-based rolloff.
     ///
     /// # Arguments
     /// - `rolloff_percent` - the energy proportion threshold. Must lie in the
     ///   open interval `(0.0, 1.0)`. A typical value is `0.85`.
-    /// - `reduction` - the [`ChannelReduction`] policy for multi-channel input.
-    ///   Pass [`ChannelReduction::First`] to reproduce the historical channel-0
-    ///   behaviour.
+    /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy applied to multi-channel input. Pass
+    ///   [`First`](crate::operations::types::ChannelReduction::First) to reproduce the
+    ///   historical channel-0 behaviour.
     ///
     /// # Returns
     /// The rolloff frequency in Hz. Returns `0.0` when the signal is silence
@@ -1077,9 +1219,21 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `rolloff_percent` is not in
     ///   `(0.0, 1.0)`, if the signal is multi-channel and `reduction` is
-    ///   [`ChannelReduction::Error`], or a [`ChannelReduction::Channel`] index is
-    ///   out of bounds.
+    ///   [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or if a [`Channel`](crate::operations::types::ChannelReduction::Channel) index is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioStatistics, sample_rate, sine_wave};
+    /// use audio_samples::operations::types::ChannelReduction;
+    /// use std::time::Duration;
+    ///
+    /// let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 1.0);
+    /// // All the power is in the 440 Hz bin, so 85 % is reached there.
+    /// let rolloff = audio.spectral_rolloff(0.85, ChannelReduction::Error).unwrap();
+    /// assert!((rolloff - 440.0).abs() < 1e-6);
+    /// ```
     #[cfg(feature = "transforms")]
     #[inline]
     fn spectral_rolloff(
@@ -1149,13 +1303,34 @@ where
         Ok(nyquist)
     }
 
-    /// Computes the spectral bandwidth (magnitude-weighted spread about the centroid).
+    /// Computes the spectral bandwidth (spectral spread).
     ///
-    /// `sqrt( Σ (f_k - centroid)² · mag_k / Σ mag_k )`. The centroid is computed
-    /// from the same magnitude spectrum used here.
+    /// The magnitude-weighted standard deviation of frequency,
+    /// `sqrt( Σ (f_k − c_M)²·M_k / Σ M_k )`, where `M_k = |X[k]|` is the magnitude
+    /// of a single rectangular-window FFT of the whole (channel-reduced) signal,
+    /// `f_k = k·fs/N` Hz, and `c_M = Σ f_k·M_k / Σ M_k` is a **magnitude**-weighted
+    /// centroid computed internally. Because
+    /// [`spectral_centroid`](crate::operations::traits::AudioStatistics::spectral_centroid)
+    /// is power-weighted, the spread is not centred on that value. Larger values
+    /// indicate energy spread across a wider frequency range; a single on-bin pure
+    /// tone yields a value near zero.
+    ///
+    /// Note: this is librosa's `spectral_bandwidth` formula (`p = 2`, magnitude
+    /// weights) applied to one whole-signal FFT rather than to each STFT frame.
+    ///
+    /// # Arguments
+    /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The spectral bandwidth in Hz. Returns `0.0` for silence (zero total
+    /// magnitude).
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
     #[inline]
@@ -1194,13 +1369,30 @@ where
         Ok(var.max(0.0).sqrt())
     }
 
-    /// Computes the spectral flatness (Wiener entropy): `geo_mean(power) / arith_mean(power)`.
+    /// Computes the spectral flatness (Wiener entropy).
     ///
-    /// The geometric mean is evaluated in the log domain with an epsilon floor.
-    /// Result is clamped to `[0, 1]`.
+    /// The ratio of the geometric mean to the arithmetic mean of the power
+    /// spectrum `P_k = |X[k]|²` of a single rectangular-window FFT of the whole
+    /// (channel-reduced) signal: `exp(mean(ln(P_k + ε))) / mean(P_k)`, with
+    /// `ε = 1e-10` so that empty bins keep the logarithm finite. The result is
+    /// clamped to `[0, 1]`: values near `1` indicate noise-like (flat) spectra,
+    /// while values near `0` indicate tonal spectra dominated by a few peaks.
+    ///
+    /// Note: librosa's `spectral_flatness` (default `power=2.0`) uses the same
+    /// ratio per STFT frame, with `max(P_k, amin)` instead of `P_k + ε`.
+    ///
+    /// # Arguments
+    /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The spectral flatness in `[0, 1]`. Returns `0.0` for silence.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
     #[inline]
@@ -1228,10 +1420,26 @@ where
         Ok((geo_mean / arith_mean).clamp(0.0, 1.0))
     }
 
-    /// Computes the spectral crest factor: `max(mag) / mean(mag)`.
+    /// Computes the spectral crest factor.
+    ///
+    /// The ratio of the peak magnitude to the mean magnitude of the spectrum:
+    /// `max(M_k) / mean(M_k)`, with `M_k = |X[k]|` the magnitude of a single
+    /// rectangular-window FFT of the whole (channel-reduced) signal. High values
+    /// indicate a strongly peaked (tonal) spectrum; a flat spectrum approaches `1`.
+    ///
+    /// # Arguments
+    /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The spectral crest factor (≥ 1 for non-silent signals). Returns `0.0` for
+    /// silence.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
     #[inline]
@@ -1257,11 +1465,29 @@ where
         Ok(peak / mean)
     }
 
-    /// Computes the spectral slope: ordinary least-squares slope of the **linear
-    /// magnitude** spectrum versus frequency (magnitude per Hz).
+    /// Computes the spectral slope.
+    ///
+    /// The slope of an ordinary least-squares linear fit of the **linear
+    /// magnitude** spectrum `M_k = |X[k]|` against frequency `f_k = k·fs/N` (Hz),
+    /// where `X` is a single rectangular-window, unnormalised FFT of the whole
+    /// (channel-reduced) signal. Returned in units of magnitude per Hz; because the
+    /// FFT is unnormalised, the value scales with the signal length. A negative
+    /// slope indicates energy concentrated at low frequencies (e.g. a low-pass or
+    /// pink-ish spectrum); a flat (white) spectrum yields a slope near zero.
+    ///
+    /// # Arguments
+    /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// The least-squares slope (magnitude per Hz). Returns `0.0` for silence or a
+    /// degenerate single-bin spectrum.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
     #[inline]
@@ -1310,11 +1536,39 @@ where
         Ok(num / den)
     }
 
-    /// Computes octave-band spectral contrast (librosa-style): per band, the dB
-    /// difference between the mean of the top quantile and the bottom quantile.
+    /// Computes spectral contrast across logarithmically spaced sub-bands (after
+    /// librosa).
+    ///
+    /// The Hann-windowed magnitude spectrum `M_k` of the whole (channel-reduced)
+    /// signal has `B = ⌊N/2⌋ + 1` bins. Bin 0 (DC) is excluded and the bins
+    /// `1..B` are split into `n_bands` bands with geometrically spaced edges
+    /// `e_b = ⌊r^b⌋`, `r = B^(1/n_bands)`; the last band ends at the Nyquist bin.
+    /// Each band therefore spans `log2(r)` octaves, which is exactly one octave
+    /// only when `B = 2^n_bands`. Within a band the values `10·log10(M_k + 1e-10)`
+    /// are sorted and the contrast is the mean of the top 2 % minus the mean of the
+    /// bottom 2 % (rounded, at least one bin each). High contrast indicates clear
+    /// tonal/harmonic structure; low contrast indicates noise-like content.
+    ///
+    /// Note: like librosa, this applies `10·log10` to **magnitudes**, so each value
+    /// is half the level difference in dB (multiply by 2 for a `20·log10`
+    /// difference). Unlike librosa, the band edges are fixed in bins from bin 1 to
+    /// Nyquist (librosa uses octaves above 200 Hz), and one value per band is
+    /// returned for the whole signal rather than per frame.
+    ///
+    /// # Arguments
+    /// - `n_bands` - the number of log-spaced sub-bands.
+    /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
+    ///   policy for multi-channel input.
+    ///
+    /// # Returns
+    /// A vector of `n_bands` contrast values (`10·log10` of a magnitude ratio),
+    /// low band to high band. Empty bands yield `0.0`.
     ///
     /// # Errors
-    /// - [`crate::AudioSampleError::Parameter`] on a forbidden channel layout.
+    /// - [`crate::AudioSampleError::Parameter`] if the signal is multi-channel and
+    ///   `reduction` is [`ChannelReduction::Error`](crate::operations::types::ChannelReduction::Error),
+    ///   or a [`Channel`](crate::operations::types::ChannelReduction::Channel) index
+    ///   is out of bounds.
     /// - [`crate::AudioSampleError::Processing`] if the FFT computation fails.
     #[cfg(feature = "transforms")]
     #[inline]
@@ -1399,12 +1653,47 @@ fn bin_spacing_hz(sample_rate: f64, n_fft: usize) -> f64 {
     sample_rate / n_fft as f64
 }
 
-/// Returns the signed lag (in samples) that maximises the FFT cross-correlation
-/// between `reference` and `query`, searching ±`max_lag` samples.
+/// Returns the signed lag (in samples) that maximises the cross-correlation
+/// between `reference` and `query`.
 ///
-/// Positive lag → `query` is delayed relative to `reference`; negative → `query` leads.
-/// Uses only the first channel of each signal.  Returns `None` if the FFT fails
-/// or either signal is empty.
+/// The cross-correlation is `c[L] = Σ_n reference[n]·query[n − L]`, computed as
+/// `IFFT(R·conj(Q))` with zero padding to `≥ len_ref + len_query − 1` so it is
+/// linear, not circular. Lags `L ∈ [−M, M]` are searched, with
+/// `M = min(max_lag, len_ref − 1)`. Sign convention:
+///
+/// - **Positive** `L`: `query` **leads** `reference`, i.e. the reference is the
+///   query delayed by `L` samples (`reference[n] ≈ query[n − L]`). Delay `query`
+///   by `L` samples to align it.
+/// - **Negative** `L`: `query` is **delayed** by `−L` samples relative to
+///   `reference` (`query[n] ≈ reference[n + L]`). Advance `query` by `−L`
+///   samples to align it.
+///
+/// Only the first channel of each signal is used. Samples are raw values
+/// without mean removal, so a large DC offset (e.g. `u8` audio centred on 128)
+/// biases the result towards lag 0: convert or remove the DC offset first.
+///
+/// # Arguments
+/// - `reference` - the reference signal.
+/// - `query` - the signal whose delay relative to `reference` is estimated.
+/// - `max_lag` - the largest absolute lag searched, in samples.
+///
+/// # Returns
+/// `Some(lag)` in samples (sign convention above), or `None` if the FFT fails.
+///
+/// # Examples
+/// ```
+/// use audio_samples::{AudioSamples, fft_alignment_lag, sample_rate};
+/// use ndarray::Array1;
+///
+/// // A chirp has a single sharp correlation peak.
+/// let reference: Vec<f64> = (0..64).map(|i| (0.02 * (i * i) as f64).sin()).collect();
+/// // query = reference delayed by 5 samples
+/// let mut query = vec![0.0; 5];
+/// query.extend_from_slice(&reference[..59]);
+/// let r = AudioSamples::new_mono(Array1::from(reference), sample_rate!(8000)).unwrap();
+/// let q = AudioSamples::new_mono(Array1::from(query), sample_rate!(8000)).unwrap();
+/// assert_eq!(fft_alignment_lag(&r, &q, 16), Some(-5));
+/// ```
 #[cfg(feature = "transforms")]
 pub fn fft_alignment_lag<T: StandardSample>(
     reference: &AudioSamples<'_, T>,

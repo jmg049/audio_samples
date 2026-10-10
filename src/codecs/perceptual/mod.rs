@@ -297,22 +297,38 @@ impl BandMetrics {
 /// `epsilon > 0` prevents log10(0) in energy computation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PsychoacousticConfig {
-    /// Absolute noise floor in dB - bands below this level are considered silent.
+    /// Absolute noise floor in dB. **Currently unused** by the masking model and
+    /// the codec (stored for configuration completeness only).
     pub noise_floor: f32,
-    /// Tonal masking gain in dB: how far below a tonal (sinusoidal) masker the
-    /// masking threshold sits at zero Bark distance. MPEG-1 value: 14.5 dB.
+    /// Tonal masking offset in dB: how far below a tonal (sinusoidal) masker the
+    /// masking threshold sits at zero Bark distance (Johnston 1988 uses 14.5 + z dB
+    /// at Bark band z; the constant 14.5 dB used here is a simplification).
+    /// A larger offset puts the threshold further below the masker, so the masker
+    /// masks *less*.
     pub masking_gain: f32,
-    /// Noise masking gain in dB: the equivalent offset for broadband noise maskers.
+    /// Noise masking offset in dB: the equivalent offset for noise-like maskers
+    /// (Johnston 1988: 5.5 dB).
     ///
-    /// Noise maskers are less effective than tonal maskers, so this value is
-    /// smaller - a smaller offset means the threshold is closer to (not as far
-    /// below) the masker level. MPEG-1 value: 5.5 dB.
+    /// Noise-like maskers are *more* effective than tonal maskers (the asymmetry of
+    /// masking; Hellman 1972), so this offset is smaller: the masked threshold lies
+    /// only ≈ 5.5 dB below a noise masker but 14.5 + z dB below a tone (Johnston;
+    /// simplified to a constant `masking_gain` here).
     pub noise_masking_gain: f32,
-    /// Upward masking spread slope in dB/Bark (masker raises threshold of
-    /// higher-frequency bands). Typical MPEG-1 value: ~25.
+    /// Slope in dB/Bark by which the threshold falls for maskees **above** the
+    /// masker in frequency (dz > 0). Larger values mean less upward spread.
+    ///
+    /// Psychoacoustically the upper slope is the *shallow* one (≈ 10 dB/Bark at
+    /// moderate levels, shallower for loud maskers; Zwicker; Schroeder et al. 1979),
+    /// because masking spreads further upward than downward. The presets below use
+    /// a steep value here (25 dB/Bark in [`PsychoacousticConfig::mpeg1`]), which
+    /// inverts that asymmetry.
     pub upward_spread: f32,
-    /// Downward masking spread slope in dB/Bark (masker raises threshold of
-    /// lower-frequency bands). Typical MPEG-1 value: ~6.
+    /// Slope in dB/Bark by which the threshold falls for maskees **below** the
+    /// masker in frequency (dz < 0). Larger values mean less downward spread.
+    ///
+    /// Psychoacoustically the lower slope is the *steep* one (≈ 25-27 dB/Bark). The
+    /// presets below use a shallow value here (6 dB/Bark in
+    /// [`PsychoacousticConfig::mpeg1`]), which inverts the asymmetry.
     pub downward_spread: f32,
     /// Per-band importance weights used to scale the SMR into an `importance`
     /// score. Length must equal the number of bands in the associated
@@ -327,11 +343,14 @@ impl PsychoacousticConfig {
     /// Creates a `PsychoacousticConfig` from explicit parameters.
     ///
     /// # Arguments
-    /// - `noise_floor` - Absolute noise floor in dB.
-    /// - `masking_gain` - Tonal masker gain in dB (MPEG-1: 14.5 dB).
-    /// - `noise_masking_gain` - Noise masker gain in dB (MPEG-1: 5.5 dB).
-    /// - `upward_spread` - Upward spread slope in dB/Bark.
-    /// - `downward_spread` - Downward spread slope in dB/Bark.
+    /// - `noise_floor` - Absolute noise floor in dB (currently unused).
+    /// - `masking_gain` - Tonal masker offset in dB (Johnston 1988: 14.5 + z dB at
+    ///   Bark band z; a constant such as 14.5 dB is a simplification).
+    /// - `noise_masking_gain` - Noise masker offset in dB (Johnston 1988: 5.5 dB).
+    /// - `upward_spread` - Threshold slope above the masker, in dB/Bark
+    ///   (psychoacoustically ≈ 10 dB/Bark).
+    /// - `downward_spread` - Threshold slope below the masker, in dB/Bark
+    ///   (psychoacoustically ≈ 25-27 dB/Bark).
     /// - `perceptual_weights` - Per-band importance weights (length must match
     ///   the target [`BandLayout`]).
     /// - `epsilon` - Noise floor added before log; must be > 0.
@@ -371,11 +390,21 @@ impl PsychoacousticConfig {
         self.band_count() == band_layout.len()
     }
 
-    /// MPEG-1 psychoacoustic model 1 parameters.
+    /// Johnston-style default parameters (named after, but not equal to, MPEG-1
+    /// psychoacoustic model 1).
     ///
-    /// Uses the standard MPEG-1 (ISO 11172-3 Annex D) values: -60 dB noise floor,
-    /// 14.5 dB masking gain, 25 dB/Bark upward spread, 6 dB/Bark downward spread.
-    /// Suitable for moderate-quality perceptual coding.
+    /// Uses offsets from Johnston (1988) (tonal 14.5 dB, a constant simplification
+    /// of Johnston's 14.5 + z dB; noise 5.5 dB) with linear
+    /// spreading slopes of 25 dB/Bark upward and 6 dB/Bark downward, and a -60 dB
+    /// `noise_floor` (unused). This is a simplification *inspired by* ISO 11172-3
+    /// psychoacoustic model 1, not its values: model 1 uses masking indices
+    /// −6.025 − 0.275z dB (tonal) and −2.025 − 0.175z dB (noise) and a
+    /// level-dependent piecewise spreading function.
+    ///
+    /// Warning: the slopes are the reverse of the psychoacoustic asymmetry (real
+    /// masking spreads further upward: upper slope ≈ 10 dB/Bark, lower ≈ 25 dB/Bark),
+    /// so this preset under-estimates upward masking and over-estimates downward
+    /// masking. The values are kept for compatibility.
     ///
     /// # Arguments
     /// - `perceptual_weights` - Per-band importance weights. Length must match the
@@ -387,11 +416,13 @@ impl PsychoacousticConfig {
         Self::new(-60.0, 14.5, 5.5, 25.0, 6.0, perceptual_weights, 1e-10)
     }
 
-    /// Conservative masking profile - lower noise tolerance, higher quality.
+    /// "Conservative" masking profile: offsets 10 dB (tonal) / 3 dB (noise), slopes
+    /// 20 dB/Bark upward / 4 dB/Bark downward, `noise_floor` -80 dB (unused).
     ///
-    /// Uses a lower masking gain (10 dB) and tighter spread slopes. Fewer bins
-    /// will be below the masking threshold, so less aggressive quantization is
-    /// implied. Use when audio quality is paramount.
+    /// Warning: despite its name, compared with [`PsychoacousticConfig::mpeg1`] these
+    /// smaller offsets and shallower slopes put the masking thresholds *higher* and
+    /// spread them further, so *more* quantisation noise is allowed (lower quality,
+    /// fewer bits). The name and values are kept for compatibility.
     ///
     /// # Arguments
     /// - `perceptual_weights` - Per-band importance weights.
@@ -401,11 +432,13 @@ impl PsychoacousticConfig {
         Self::new(-80.0, 10.0, 3.0, 20.0, 4.0, perceptual_weights, 1e-10)
     }
 
-    /// Aggressive masking profile - higher noise tolerance, lower bitrate.
+    /// "Aggressive" masking profile: offsets 18 dB (tonal) / 7 dB (noise), slopes
+    /// 30 dB/Bark upward / 8 dB/Bark downward, `noise_floor` -40 dB (unused).
     ///
-    /// Uses a higher masking gain (18 dB) and wider spread slopes. More bins
-    /// are considered masked, allowing coarser quantization. Use when bitrate
-    /// reduction is the priority.
+    /// Warning: despite its name, compared with [`PsychoacousticConfig::mpeg1`] these
+    /// larger offsets and steeper slopes put the masking thresholds *lower* and spread
+    /// them less, so *less* quantisation noise is allowed (higher quality, more bits).
+    /// The name and values are kept for compatibility.
     ///
     /// # Arguments
     /// - `perceptual_weights` - Per-band importance weights.
@@ -522,9 +555,9 @@ impl PerceptualAnalysisResult {
 ///
 /// # Arguments
 /// - `signal` - The audio signal to analyse. Must be mono.
-/// - `window` - Window function for the MDCT. [`WindowType::Hanning`] is a good
-///   default; only the sine window (`MdctParams::sine_window`) gives perfect
-///   reconstruction.
+/// - `window` - Currently **ignored**: the MDCT always uses the sine
+///   (Princen-Bradley) window so that time-domain aliasing cancels exactly. The
+///   argument is kept for API compatibility.
 /// - `band_layout` - Perceptual band partitioning (see [`BandLayout::bark`],
 ///   [`BandLayout::mel`]).
 /// - `config` - Psychoacoustic model configuration. The number of perceptual
@@ -554,9 +587,10 @@ where
 ///
 /// # Arguments
 /// - `signal` - The audio signal to analyse. Must be mono.
-/// - `window` - Window function for the MDCT.
+/// - `window` - Currently ignored (the MDCT always uses the sine window).
 /// - `window_size` - If `Some`, the MDCT window size to use. Must be even and
-///   at least 4. If `None`, an automatic size of `min(2048, signal_length)` is used.
+///   at least 4. If `None`, the largest even value ≤ `min(2048, signal_length)` is
+///   used.
 /// - `band_layout` - Perceptual band partitioning.
 /// - `config` - Psychoacoustic model configuration.
 ///
@@ -624,9 +658,10 @@ where
     }
 
     let window_size = NonZeroUsize::new(window_size_val).expect("validated >= 4");
-    // The MDCT only reconstructs perfectly with a Princen-Bradley window - at the
-    // 50% hop used here, that is the sine window `sin(π(k+0.5)/N)`, which uniquely
-    // satisfies `w[k]² + w[k+N]² = 1`. Standard windows (Hanning, Hamming, …) break
+    // The MDCT only reconstructs perfectly with a Princen-Bradley window, i.e. one
+    // satisfying `w[k]² + w[k+W/2]² = 1` at the 50% hop used here (W = window length).
+    // We use the sine window `w[k] = sin(π(k+0.5)/W)`, one member of that family
+    // (others: Kaiser-Bessel-derived, Vorbis). Standard windows (Hann, Hamming, …) break
     // time-domain aliasing cancellation and yield poor round-trip SNR, so the MDCT
     // always uses the sine window regardless of the requested `window`.
     let _ = window;

@@ -411,6 +411,12 @@ pub mod librosa_migration {
     #![doc = include_str!("../documentation/LIBROSA_MIGRATION.md")]
 }
 
+/// Learning guide: a short course in speech and audio processing, with one
+/// chapter per syllabus topic. Every chapter's code is a doctest and has a
+/// matching runnable lab in `examples/tutorial_NN_*.rs`.
+#[cfg(all(feature = "educational", feature = "full_no_plotting"))]
+pub mod guide;
+
 pub use crate::error::{
     AudioSampleError, AudioSampleResult, ChannelRequirement, ConversionError, EnumParseError,
     FeatureError, LayoutError, NoteParseError, ParameterError, ProcessingError,
@@ -626,6 +632,9 @@ pub use crate::utils::generation::{brown_noise, pink_noise, white_noise};
 
 #[cfg(feature = "educational")]
 pub use explainable::{ExplainMode, Explainable, Explaining, Explanation};
+
+#[cfg(feature = "educational")]
+pub use crate::educational::{Explain, ExplainFor};
 
 #[cfg(all(feature = "educational", feature = "processing"))]
 pub use crate::operations::traits::AudioProcessingExt;

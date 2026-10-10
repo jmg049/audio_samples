@@ -1,9 +1,15 @@
-//! Opus codec: SILK (speech), CELT (music), and Hybrid modes.
+//! Opus-inspired teaching codec: SILK-style (speech), CELT-style (music), and Hybrid modes.
 //!
 //! ## Overview
 //!
-//! This module implements the Opus codec (RFC 6716) within the `audio_samples`
-//! perceptual codec framework. It is gated on the `opus-codec` feature flag.
+//! An Opus-inspired teaching codec modelled on the SILK/CELT/Hybrid structure of
+//! RFC 6716, built on the `audio_samples` perceptual codec framework. **It is not
+//! the Opus codec and is not bitstream compatible with Opus:** there is no range
+//! coder, no LSF/NLSF quantisation, no PVQ or band-energy coding as in CELT, and
+//! no noise shaping. Its "CELT" mode is a generic perceptual MDCT codec, and its
+//! mode decision is a simple heuristic (see [`detect_mode`](crate::codecs::opus::mode::detect_mode)),
+//! not libopus's. Use it to study the structure of a hybrid speech/music codec, not
+//! to produce or decode `.opus` data. It is gated on the `opus-codec` feature flag.
 //!
 //! | Module | Purpose |
 //! |--------|---------|

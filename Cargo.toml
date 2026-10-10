@@ -15,8 +15,8 @@ keywords = ["audio", "dsp", "api"]
 categories = ["encoding", "multimedia", "science"]
 
 [package.metadata.docs.rs]
-features = ["full"]
-rustdoc-args = ["--cfg", "docsrs"]
+features = ["full", "educational"]
+rustdoc-args = ["--cfg", "docsrs", "--html-in-header", "documentation/katex-header.html"]
 
 [lib]
 name = "audio_samples"
@@ -297,6 +297,66 @@ name = "educational"
 required-features = ["educational", "processing"]
 
 [[example]]
+name = "explain"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_01_sampling_aliasing"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_02_quantisation_dither"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_03_dft_windows"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_04_stft_spectrograms"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_05_convolution_fir"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_06_iir_filters"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_07_resampling"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_08_lpc_formants"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_09_pitch"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_10_cepstrum_mel_mfcc"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_11_energy_vad"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_12_dynamics"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_13_onsets_tempo"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
+name = "tutorial_14_psychoacoustics_codecs"
+required-features = ["educational", "full_no_plotting"]
+
+[[example]]
 name = "plotting_basic"
 required-features = ["plotting", "transforms"]
 
@@ -384,6 +444,10 @@ required-features = ["plotting"]
 [[test]]
 name = "educational_integration"
 required-features = ["educational", "processing"]
+
+[[test]]
+name = "explain_api"
+required-features = ["educational", "full_no_plotting"]
 
 [[bench]]
 name = "filtering"

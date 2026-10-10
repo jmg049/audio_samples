@@ -17,6 +17,17 @@
 //! function is available when you already have a pre-computed onset
 //! envelope.
 //!
+//! Units: the onset envelope has one value per frame, at a frame rate of
+//! `f_s/H` frames per second (H = `hop_size` samples). A tempo of B beats per
+//! minute is an inter-beat interval of `IBI = 60·f_s/(B·H)` frames, generally
+//! fractional. [`AudioBeatTracking::estimate_tempo`] searches integer
+//! autocorrelation lags L, so its estimates lie on the grid `60·f_s/(H·L)` BPM
+//! and may be off by a factor of 2 (or 3) - an octave error; the log-normal
+//! prior only biases the choice towards 120 BPM. [`track_beats_core`] places
+//! a rigid beat grid with the exact (fractional) IBI anchored at the strongest
+//! onset; it does not adapt to tempo changes (there is no dynamic-programming
+//! beat tracker such as Ellis, 2007).
+//!
 //! ```
 //! use audio_samples::operations::beat::track_beats_core;
 //! use non_empty_slice::NonEmptyVec;
@@ -162,7 +173,12 @@ where
     /// Computes an onset strength envelope from the signal using the
     /// onset detection configuration in `config`, then locates beat
     /// frames by walking forward and backward from the global onset
-    /// peak in steps of one inter-beat interval.
+    /// peak in steps of one inter-beat interval (see [`track_beats_core`]:
+    /// expected beat k is at `peak ± k·IBI` frames with the exact,
+    /// fractional `IBI = 60·f_s/(tempo_bpm·hop_size)`, refined to the
+    /// largest envelope value within ±`tolerance`). The grid is rigid, so
+    /// `config.tempo_bpm` must be accurate: a tempo error of ΔB BPM shifts
+    /// beat k by about `k·60·ΔB/B²` seconds.
     ///
     /// # Arguments
     /// - `config` - Beat tracking configuration: target tempo,
@@ -225,12 +241,15 @@ where
     ///    `60 · frame_rate / L` BPM. Restrict the lag search to the window that
     ///    maps into `[MIN_BPM, MAX_BPM] = [40, 240]`.
     /// 4. Weight each lag's autocorrelation by a log-normal tempo prior centred
-    ///    on `PRIOR_BPM = 120` (in log2-BPM space, librosa-style). The prior
-    ///    breaks the octave ambiguity inherent in autocorrelation - a periodic
-    ///    envelope correlates almost as strongly at twice/half the true period -
-    ///    by biasing toward perceptually plausible tempi. With the default prior
-    ///    a true tempo and its octaves are disambiguated toward the fundamental.
-    /// 5. Pick the lag with the largest weighted score and convert to BPM.
+    ///    on `PRIOR_BPM = 120` with a standard deviation of one octave (in
+    ///    log2-BPM space, librosa-style). A periodic envelope correlates almost
+    ///    as strongly at twice/half the true period; the prior only biases the
+    ///    choice toward tempi near 120 BPM and cannot guarantee the right
+    ///    octave: ×2, ×½ (and ×⅓) errors remain possible, e.g. for click
+    ///    tracks at 80 or 174 BPM.
+    /// 5. Pick the lag L with the largest weighted score and convert to BPM as
+    ///    `60·f_s/(hop_size·L)`; the resolution is that of the integer-lag grid
+    ///    (at hop 512 and 44.1 kHz, 117.45 / 120.19 / 123.05 BPM around 120).
     ///
     /// `config.tempo_bpm` is ignored; only `config.onset_config` is used.
     fn estimate_tempo(&self, config: &BeatTrackingConfig) -> AudioSampleResult<f64> {
@@ -298,12 +317,20 @@ where
     }
 }
 
+/// Half-width `w`, in frames, of the moving average used by
+/// [`onset_strength_envelope`] (the average spans `2·w + 1` frames).
+const ENVELOPE_SMOOTHING_HALF_WIDTH_FRAMES: usize = 3;
+
 /// Compute a smoothed, log-compressed onset strength envelope.
 ///
-/// Runs the onset detection function on `audio`, applies a symmetric
-/// moving-average smoothing window of `config.window_size` frames
-/// (defaulting to 3 when `None`), then maps each smoothed value
-/// through `ln(1 + μ × x)` to compress the dynamic range.
+/// Runs the onset detection function on `audio` (see
+/// [`AudioOnsetDetection::onset_detection_function`]), smooths it with a
+/// centred moving average over `2·w + 1 = 7` frames (`w = 3`, truncated at
+/// the signal edges), then maps each smoothed value `x` through
+/// `ln(1 + μ·x)` to compress the dynamic range.
+///
+/// `config.window_size` is the CQT analysis window in samples and does not
+/// affect the smoothing length.
 ///
 /// # Arguments
 /// - `audio` - Input audio signal.
@@ -328,8 +355,10 @@ where
 {
     let (_times, odf) = audio.onset_detection_function(config)?;
     let odf = odf.to_vec();
-    // Simple moving average smoothing
-    let window = config.window_size.unwrap_or(crate::nzu!(3)).get();
+    // Centred moving average over 2·w + 1 frames. The half-width is a fixed
+    // number of FRAMES; it must not be taken from `config.window_size`, which is
+    // the CQT analysis window length in SAMPLES.
+    let window = ENVELOPE_SMOOTHING_HALF_WIDTH_FRAMES;
     let mut smoothed = vec![0.0; odf.len()];
     for (i, _) in odf.iter().enumerate() {
         let start = i.saturating_sub(window);
@@ -374,10 +403,13 @@ fn peak_index(slice: &[f64]) -> usize {
 
 /// Core beat tracking kernel operating on a pre-computed onset envelope.
 ///
-/// Finds the global peak of `onset`, then walks forward and backward
-/// from that peak in steps of one inter-beat interval.  At each
-/// expected beat position a local peak search within a tolerance
-/// window selects the actual frame.
+/// Finds the global peak of `onset` (frame p), then visits the expected
+/// beat positions `round(p ± k·IBI)` for k = 1, 2, … while they lie inside
+/// the envelope, with the exact (fractional) inter-beat interval
+/// `IBI = 60·sample_rate/(tempo_bpm·hop_size)` frames, so rounding does not
+/// accumulate along the grid.  At each expected position the largest
+/// envelope value within ±tolerance frames is selected; the grid itself is
+/// not re-anchored on the selected peaks.
 ///
 /// Beat times are returned in chronological order, without
 /// duplicates (two expected positions that snap to the same onset
@@ -398,7 +430,7 @@ fn peak_index(slice: &[f64]) -> usize {
 ///
 /// # Errors
 /// - [crate::AudioSampleError::Parameter] - if `tempo_bpm` is ≤ 0 or if
-///   the inter-beat interval in frames is ≤ 0.
+///   the inter-beat interval rounds to 0 frames (IBI < 0.5 frame).
 ///
 /// # Examples
 /// ```
@@ -435,7 +467,11 @@ pub fn track_beats_core(
     let hop_time = hop_size.get() as f64 / sample_rate;
     let ibi_seconds = 60.0 / tempo_bpm;
 
-    let ibi_frames = (ibi_seconds / hop_time).round() as isize;
+    // Exact (fractional) inter-beat interval in frames. Expected beat positions
+    // are computed as `start + k·ibi_exact` and only then rounded, so rounding
+    // error does not accumulate along the grid.
+    let ibi_exact = ibi_seconds / hop_time;
+    let ibi_frames = ibi_exact.round() as isize;
     if ibi_frames <= 0 {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "tempo_bpm",
@@ -470,11 +506,17 @@ pub fn track_beats_core(
     beat_frames.push(start);
 
     // --- Forward tracking ---
-    // `center` advances by exactly `ibi_frames` each step so the loop always
-    // terminates, even when the detected peak falls behind the previous position.
-    let mut center = start;
-    while center + ibi_frames < len {
-        center += ibi_frames;
+    // The k-th expected beat is at `start + k·ibi_exact` (rounded to a frame).
+    // `ibi_exact ≥ 0.5` (since `ibi_frames ≥ 1`), so `center` grows without
+    // bound and the loop always terminates, even when the detected peak falls
+    // behind the expected position.
+    let mut k = 1usize;
+    loop {
+        let center = (ibi_exact.mul_add(k as f64, start as f64)).round() as isize;
+        if center >= len {
+            break;
+        }
+        k += 1;
 
         let lo = (center - tol_frames).max(0) as usize;
         // Clamp `hi` so the window is always a valid, non-empty slice: clamping can
@@ -487,9 +529,13 @@ pub fn track_beats_core(
     }
 
     // --- Backward tracking ---
-    let mut center = start;
-    while center - ibi_frames >= 0 {
-        center -= ibi_frames;
+    let mut k = 1usize;
+    loop {
+        let center = (ibi_exact.mul_add(-(k as f64), start as f64)).round() as isize;
+        if center < 0 {
+            break;
+        }
+        k += 1;
 
         let lo = (center - tol_frames).max(0) as usize;
         // Clamp `hi` so the window is always a valid, non-empty slice (see forward pass).

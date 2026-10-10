@@ -129,14 +129,20 @@ fn princarg(angle: f64) -> f64 {
     }
 }
 
-/// Computes phase deviation from expected phase progression.
+/// Computes the deviation of each bin's phase advance from that of its centre frequency.
 ///
-/// For each frequency bin, calculates the deviation between observed phase change and the
-/// expected phase change based on the bin's center frequency. Large deviations indicate
-/// transient events or changes in spectral content.
+/// For bin b with centre frequency f_b (Hz), hop H (samples) and sample rate f_s:
 ///
-/// The expected phase change for a sinusoid at frequency `f` over hop size `H` is:
-/// `2π * f * H / sample_rate`. Deviations from this indicate non-sinusoidal behavior.
+/// ```text
+/// dev[b, t] = | princarg( φ[b,t] − φ[b,t−1] − 2π·f_b·H/f_s ) |   (radians, in [0, π])
+/// ```
+///
+/// where `princarg` wraps to (−π, π]. This is a first-order measure: it is zero only for a
+/// stationary sinusoid exactly at the bin centre. A stationary sinusoid off the bin centre
+/// gives a constant non-zero value, and empty (noise-only) bins give essentially random
+/// values. Note this differs from the second-difference phase deviation
+/// `princarg(φ_t − 2φ_{t−1} + φ_{t−2})` of Bello et al. (2005) and from the complex-domain
+/// ODF `|X_t − X̂_t|`.
 ///
 /// # Arguments
 ///
@@ -201,11 +207,13 @@ pub fn phase_deviation(
 /// Combines magnitude differences and phase deviations into a single onset detection function.
 ///
 /// For each frame, computes a weighted sum of magnitude and phase contributions across all
-/// frequency bins. Optional rectification keeps only positive values, and optional logarithmic
+/// frequency bins. Each term is rectified (`max(0, ·)`) when the corresponding
+/// `*_rectify` flag is set and taken as an absolute value otherwise; optional logarithmic
 /// compression reduces dynamic range.
 ///
 /// The formula is:
-/// `odf[t] = magnitude_weight * Σ mag[b,t] + phase_weight * Σ phase[b,t]`
+/// `odf[t] = magnitude_weight · Σ_b R(mag[b,t]) + phase_weight · Σ_b R(phase[b,t])`
+/// with `R(v) = max(0, v)` (rectify) or `|v|`.
 ///
 /// If `log_compression > 0`, applies: `odf[t] = log(1 + log_compression * odf[t])`
 ///

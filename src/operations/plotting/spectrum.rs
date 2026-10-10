@@ -32,14 +32,18 @@ use crate::{AudioSampleResult, AudioSamples, StandardSample};
 pub struct MagnitudeSpectrumParams {
     /// Base plotting parameters shared across all plot types (title, labels, legend, etc.).
     pub plot_params: PlotParams,
-    /// If `true`, magnitude values are converted to decibels (20 * log10(magnitude)).
-    /// If `false`, raw magnitude values are plotted.
+    /// If `true`, magnitude values are converted to decibels, 20·log10(|X[k]|) re 1, of
+    /// the unnormalised one-sided DFT (a full-scale sine therefore peaks well above
+    /// 0 dB); bins with |X[k]| ≤ 10⁻¹⁰ are drawn at −200 dB.
+    /// If `false`, raw magnitudes |X[k]| are plotted. No window is applied.
     pub db_scale: bool,
     /// Optional frequency range to display as `(min_hz, max_hz)`. If `None`, shows all bins.
     pub freq_range: Option<(f64, f64)>,
     /// Window type for FFT (reserved for future use; currently unused).
     pub window_type: Option<spectrograms::WindowType>,
-    /// FFT size. If `None`, defaults to next power of 2 >= signal length.
+    /// FFT size. If `None`, defaults to next power of 2 >= signal length. A value
+    /// smaller than the signal length is raised to the signal length (the whole signal
+    /// is always transformed); bin k is plotted at k·`sample_rate`/N for the N used.
     pub n_fft: Option<NonZeroUsize>,
     /// Time position in seconds for frame-based analysis (reserved; currently unused).
     /// If `None`, computes spectrum for the entire signal.
@@ -335,7 +339,9 @@ where
     // Generate frequency axis (only positive frequencies)
     let sample_rate = f64::from(audio.sample_rate().get());
     let n_bins = magnitudes.len();
-    let freq_bin = sample_rate / (n_fft.get() as f64);
+    // Bin spacing must use the FFT length actually computed (n_fft_nz), not the
+    // requested n_fft, which may be smaller than the signal length.
+    let freq_bin = sample_rate / (n_fft_nz.get() as f64);
     let mut frequencies: Vec<f64> = (0..n_bins).map(|i| i as f64 * freq_bin).collect();
 
     // Apply frequency range filter if specified
@@ -400,4 +406,48 @@ where
         _params: params.clone(),
         plot,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sample_rate;
+    use crate::utils::generation::sine_wave;
+    use std::time::Duration;
+
+    /// SPEC-11: with `n_fft` smaller than the signal, the FFT is computed with the
+    /// signal length, so the frequency axis must use that length too.
+    #[test]
+    fn spectrum_axis_uses_computed_fft_length() {
+        // 2000 samples at 8 kHz; a 1 kHz tone sits exactly on bin 250 of a 2000-point DFT.
+        let audio = sine_wave::<f64>(1000.0, Duration::from_millis(250), sample_rate!(8000), 0.5);
+        let mut params = MagnitudeSpectrumParams::linear();
+        params.n_fft = Some(crate::nzu!(1024));
+        let plot = create_magnitude_spectrum_plot(&audio, &params).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&plot.plot.to_json()).unwrap();
+        let xs: Vec<f64> = json["data"][0]["x"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let ys: Vec<f64> = json["data"][0]["y"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let peak = ys
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
+        assert!(
+            (xs[peak] - 1000.0).abs() < 1e-6,
+            "peak plotted at {} Hz",
+            xs[peak]
+        );
+        assert!((xs.last().unwrap() - 4000.0).abs() < 1e-6);
+    }
 }

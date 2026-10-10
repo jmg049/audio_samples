@@ -2,11 +2,12 @@
 //!
 //! ## Modes
 //!
-//! Opus defines three operating modes (RFC 6716 §2):
+//! Opus defines three operating modes (RFC 6716 §2); this crate's Opus-inspired
+//! teaching codec mirrors them (it is not bitstream compatible with Opus):
 //!
 //! | Mode   | Description |
 //! |--------|-------------|
-//! | `SILK` | LP codec for narrowband/wideband speech (Skype SILK). |
+//! | `SILK` | LP codec for narrowband/wideband speech (Skype SILK; LPC order 10 for NB/MB and 16 for WB in RFC 6716, always 16 here). |
 //! | `CELT` | MDCT codec for fullband music and generic audio (CELT/Xiph). |
 //! | `Hybrid` | SILK for 0-8 kHz, CELT extension for 8-20 kHz. |
 //!
@@ -15,9 +16,8 @@
 //!
 //! ## Sketch note
 //!
-//! Hybrid mode is represented in the type system but falls back to CELT in the
-//! current [`crate::codecs::opus::OpusCodec`] implementation. Full hybrid
-//! encoding (split-band LP + MDCT) is a planned extension.
+//! Hybrid mode is implemented in [`crate::codecs::opus::hybrid`]: the low band is
+//! coded with the SILK-style path and the high band with the CELT-style path.
 
 // ── OpusMode ──────────────────────────────────────────────────────────────────
 
@@ -181,28 +181,28 @@ impl OpusConfig {
 
 // ── Mode detection ────────────────────────────────────────────────────────────
 
-/// Detects the appropriate Opus mode for an audio frame using the Spectral
-/// Flatness Measure (SFM).
+/// Chooses a mode for an audio frame with a temporal flatness heuristic.
+///
+/// This is a teaching heuristic, **not** the libopus mode decision (libopus chooses
+/// the mode from the target bitrate, bandwidth and a speech/music estimate).
 ///
 /// ## Algorithm
 ///
 /// 1. Check bandwidth constraint: NarrowBand/MediumBand always → SILK; any
 ///    bandwidth that does not support SILK always → CELT.
-/// 2. Compute the SFM of the frame's sub-band energy distribution:
-///    `SFM = geometric_mean(band_energies) / arithmetic_mean(band_energies)`.
-///    SFM ≈ 1 for flat/noise-like content; SFM ≈ 0 for tonal/speech content.
+/// 2. Split the frame into 8 equal **time** sub-windows, compute their energies
+///    E_b = Σ x\[n\]² (+10⁻¹⁰), and form the temporal flatness measure
+///    `F = geometric_mean(E_b) / arithmetic_mean(E_b)` (called "SFM" in the code).
+///    F ≈ 1 for stationary signals (steady tones, noise); F ≈ 0 for bursty signals
+///    (speech with pauses, isolated transients).
 /// 3. Apply thresholds:
-///    - SFM > 0.8 → [`OpusMode::Celt`]
-///    - SFM < 0.4 → [`OpusMode::Silk`]
+///    - F > 0.8 → [`OpusMode::Celt`]
+///    - F < 0.4 → [`OpusMode::Silk`]
 ///    - Otherwise → [`OpusMode::Hybrid`]
 ///
-/// > **Note on interpretation**: because this SFM is computed from
-/// > **time-domain** sub-band energies (not a frequency-domain spectrum),
-/// > its semantics differ from classic spectral flatness. SFM ≈ 1 when energy
-/// > is distributed uniformly across the frame (e.g. sustained tones, noise);
-/// > SFM ≈ 0 for amplitude-varying content such as speech with pauses or
-/// > transients concentrated in one sub-window. Real Opus computes SFM from a
-/// > short FFT; the time-domain approximation here is a sketch heuristic.
+/// > **Note on interpretation**: F is computed from time-domain sub-window
+/// > energies, so it measures temporal stationarity, not spectral flatness
+/// > (a pure tone gives F ≈ 1 here although its spectral flatness is ≈ 0).
 ///
 /// # Arguments
 /// - `samples` - One audio frame (typically 20 ms of PCM, f32).

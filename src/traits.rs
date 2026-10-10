@@ -463,10 +463,18 @@ impl<T> MaybeSerdeAudioSample for T {}
 /// numeric casts.
 ///
 /// ## Conversion Behavior
-/// - **Integer ↔ Integer**: PCM-style bit-depth scaling (e.g. `i16::MAX` maps to `0x7FFF0000i32`)
-/// - **Integer ↔ Float**: normalized scaling into $[-1.0, 1.0]$ using asymmetric endpoints
-/// - **Float ↔ Integer**: clamp to $[-1.0, 1.0]$, then scale, round, and saturate
+/// - **Integer ↔ Integer**: PCM-style bit-depth shift. Widening is an exact
+///   left shift (`i16::MAX` maps to `0x7FFF0000i32`, not `i32::MAX`);
+///   narrowing is an arithmetic right shift, which truncates toward −∞ (a −½ LSB
+///   bias, e.g. `-1i32` → `-1i16` and `65535i32` → `0i16`), not round-to-nearest.
+/// - **Integer → Float**: normalized scaling into $[-1.0, 1.0]$ using asymmetric
+///   endpoints: negative values are divided by $2^{B-1}$ and non-negative values by
+///   $2^{B-1} - 1$, so `MIN` → −1.0 and `MAX` → +1.0
+/// - **Float → Integer**: clamp to $[-1.0, 1.0]$, scale by the same asymmetric
+///   factors (−1.0 → `MIN`, +1.0 → `MAX`), round half away from zero, and saturate;
+///   NaN maps to `MIN` for `i16`/`i32` and to silence (`0` / `128`) for `I24`/`u8`
 /// - **I24 Special Handling**: conversions treat `I24` as a 24-bit signed PCM integer
+/// - **u8**: offset binary, `128` is silence (0.0); divisors 128 below and 127 above
 ///
 /// ## Example
 /// ```rust
@@ -487,7 +495,7 @@ pub trait ConvertTo<Dst> {
     /// The converted sample as `Dst`. Conversion semantics follow the rules
     /// documented on [`ConvertTo`]: integer-to-float converts to
     /// `[-1.0, 1.0]`; float-to-integer clamps, scales, and rounds;
-    /// integer-to-integer shifts bit depth with saturation.
+    /// integer-to-integer shifts bit depth (narrowing truncates toward −∞).
     fn convert_to(self) -> Dst;
 }
 
@@ -499,8 +507,8 @@ pub trait ConvertTo<Dst> {
 ///
 /// Conversion semantics are the same as documented on [`ConvertTo`]:
 /// integer ↔ float conversions apply asymmetric normalised scaling;
-/// integer ↔ integer conversions use PCM-style bit-depth shifting with
-/// saturation; `u8` uses mid-scale unsigned PCM conventions.
+/// integer ↔ integer conversions use PCM-style bit-depth shifting (narrowing
+/// truncates toward −∞); `u8` uses mid-scale unsigned PCM conventions.
 pub trait ConvertFrom<Src> {
     /// Converts a sample of type `Src` into `Self`.
     ///
@@ -521,6 +529,28 @@ where
     #[inline]
     fn convert_to(self) -> Dst {
         Dst::convert_from(self)
+    }
+}
+
+/// Multiplies one sample by a real-valued gain.
+///
+/// Float sample types multiply directly. Integer sample types are taken to the
+/// normalised `[-1, 1]` scale with the audio-aware [`ConvertTo`] conversion,
+/// multiplied in `f64`, and converted back (rounded to nearest and saturated).
+/// A plain `T::cast_from(gain)` would truncate the gain itself to an integer
+/// (every gain in `(-1, 1)` would become `0`), and the audio-aware route also
+/// respects the mid-scale offset of `u8`.
+#[cfg(any(feature = "processing", feature = "editing"))]
+#[inline]
+pub(crate) fn apply_gain_to_sample<T>(x: T, gain: f64) -> T
+where
+    T: StandardSample,
+{
+    if T::SAMPLE_TYPE.is_float() {
+        x * T::cast_from(gain)
+    } else {
+        let v: f64 = x.convert_to();
+        (v * gain).convert_to()
     }
 }
 
@@ -1483,7 +1513,7 @@ pub trait AudioTypeConversion: Sized {
     /// amplitude meaning of each sample is preserved: integer-to-float
     /// conversions normalise into `[-1.0, 1.0]`; float-to-integer conversions
     /// clamp, scale, and round; integer-to-integer conversions shift bit depth
-    /// with saturation. For `u8`, the mid-scale unsigned PCM convention is
+    /// (narrowing truncates toward −∞). For `u8`, the mid-scale unsigned PCM convention is
     /// applied.
     ///
     /// The source audio is not modified; a new owned value is returned.

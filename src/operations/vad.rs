@@ -1,22 +1,78 @@
 //! Voice Activity Detection (VAD) operations.
 //!
+//! # What
+//!
 //! Frame-based VAD that classifies each audio frame as speech (`true`) or
 //! silence (`false`), returning per-frame boolean masks and contiguous speech
 //! regions as sample-index pairs.
 //!
+//! # Why
+//!
 //! Many audio processing pipelines (ASR pre-processing, noise suppression,
 //! speaker diarisation) need to locate voiced segments before running more
-//! expensive analysis. A fast, allocation-minimal, frame-based approach avoids
-//! unnecessary computation on silence and provides clean segmentation
-//! boundaries suitable for real-time use.
+//! expensive analysis. Two short-time features computed per frame already
+//! separate speech from silence in clean recordings: the frame *energy*
+//! (speech is louder than the background) and the *zero-crossing rate*
+//! (voiced speech has a moderate ZCR; low-frequency hum has a very low ZCR;
+//! broadband noise and fricatives have a high ZCR).
+//!
+//! # How
+//!
+//! The signal x\[n\] (samples scaled to `[-1, 1]`) is cut into frames of
+//! L = `frame_size` samples starting every H = `hop_size` samples
+//! (frame m covers `n = mH … mH + L − 1`). With `pad_end = true` a final
+//! partial frame is kept and treated as zero-padded to L samples. Multi-channel
+//! input is reduced according to [`VadChannelPolicy`].
+//!
+//! **Short-time energy (RMS level in dBFS):**
+//!
+//! ```text
+//! RMS_m   = sqrt( (1/L) · Σ_{n in frame m} x[n]² )
+//! level_m = 20·log10(RMS_m)   dBFS
+//! ```
+//!
+//! 0 dBFS is an RMS of 1.0, so a full-scale sine has an RMS level of
+//! −3.01 dBFS (the AES17 convention would call it 0 dBFS). Rather than
+//! taking the log of every frame, the threshold is converted once:
+//! `level_m ≥ energy_threshold_db  ⇔  RMS_m ≥ 10^(energy_threshold_db/20)`.
+//!
+//! **Zero-crossing rate (crossings per sample):**
+//!
+//! ```text
+//! ZCR_m = (number of sign changes between successive non-zero samples) / (L − 1)
+//! ```
+//!
+//! A sinusoid of frequency f gives ZCR ≈ 2f/f_s, so a ZCR window
+//! `[zcr_min, zcr_max]` corresponds to dominant frequencies between
+//! `zcr_min·f_s/2` and `zcr_max·f_s/2` Hz (the defaults 0.02-0.3 at 16 kHz
+//! are 160-2400 Hz; at 44.1 kHz, 441-6615 Hz). Note: this is a per-sample
+//! rate, unlike [`AudioStatistics::zero_crossing_rate`](crate::AudioStatistics::zero_crossing_rate),
+//! which returns crossings per second.
+//!
+//! **Decision** per frame ([`VadMethod`]):
+//!
+//! - `Energy`: speech if `level_m ≥ energy_threshold_db`.
+//! - `ZeroCrossing`: speech if `zcr_min ≤ ZCR_m ≤ zcr_max`.
+//! - `Combined`: both conditions must hold. A pure low tone (e.g. 220 Hz at
+//!   44.1 kHz, ZCR ≈ 0.01) is therefore rejected by the default ZCR window
+//!   even when it is loud.
+//! - `Spectral`: not implemented (returns an error).
+//!
+//! **Post-processing** of the raw decisions, in this order:
+//!
+//! 1. Majority vote over the last `smooth_frames` raw decisions (causal
+//!    window; a tie counts as speech).
+//! 2. Hangover: after the last active frame, the next `hangover_frames`
+//!    frames are also marked active (bridges short pauses such as stop
+//!    closures; minimum 1, so it cannot be disabled).
+//! 3. Speech runs shorter than `min_speech_frames` frames become silence.
+//! 4. Silence runs shorter than `min_silence_frames` frames become speech.
 //!
 //! [`AudioVoiceActivityDetection::voice_activity_mask`] is the primary entry
-//! point. It divides the signal into overlapping frames according to
-//! [`VadConfig`], applies the selected detection method (`Energy`,
-//! `ZeroCrossing`, or `Combined`), and post-processes the raw per-frame
-//! decisions with majority-vote smoothing, hangover extension, and
-//! minimum-region enforcement. [`AudioVoiceActivityDetection::speech_regions`]
-//! converts the frame mask into `(start_sample, end_sample)` pairs.
+//! point; [`AudioVoiceActivityDetection::speech_regions`] converts the frame
+//! mask into `(start_sample, end_sample)` pairs (a region starts at the first
+//! active frame's start and ends at the end of the first inactive frame
+//! after it, so regions extend by up to one frame).
 //!
 //! # Example
 //!
@@ -40,7 +96,7 @@ use crate::AudioTypeConversion;
 use crate::operations::traits::AudioVoiceActivityDetection;
 use crate::operations::types::{VadChannelPolicy, VadConfig, VadMethod};
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, FeatureError, LayoutError, ParameterError,
+    AudioSampleError, AudioSampleResult, AudioSamples, LayoutError, ParameterError,
     traits::StandardSample,
 };
 
@@ -85,8 +141,11 @@ where
     /// Classifies each audio frame as speech (`true`) or silence (`false`).
     ///
     /// Divides the signal into overlapping frames according to `config.frame_size`
-    /// and `config.hop_size`, applies the detection method, and post-processes
-    /// the raw per-frame decisions through four sequential steps:
+    /// and `config.hop_size`, computes each frame's RMS level (compared in
+    /// dBFS with `config.energy_threshold_db`) and zero-crossing rate (crossings
+    /// per sample, compared with `[config.zcr_min, config.zcr_max]`), applies
+    /// the detection method, and post-processes the raw per-frame decisions
+    /// through four sequential steps:
     ///
     /// 1. Majority-vote smoothing over `config.smooth_frames`.
     /// 2. Hangover extension - extends active frames forward by `config.hangover_frames`.
@@ -95,7 +154,8 @@ where
     /// 4. Minimum silence run enforcement - silence gaps shorter than
     ///    `config.min_silence_frames` are reclassified as speech.
     ///
-    /// Multi-channel audio is handled according to `config.channel_policy`.
+    /// The formulas are given in the [module docs](self). Multi-channel audio
+    /// is handled according to `config.channel_policy`.
     ///
     /// # Arguments
     ///
@@ -112,10 +172,11 @@ where
     /// # Errors
     ///
     /// Returns [crate::AudioSampleError::Parameter] if `config` fails validation
-    /// (e.g. `hop_size > frame_size` or invalid ZCR bounds).
+    /// (e.g. `hop_size > frame_size` or invalid ZCR bounds), or if `pad_end` is
+    /// `false` and the signal is shorter than `frame_size` (no complete frame).
     /// Returns [crate::AudioSampleError::Layout] if the audio array is non-contiguous
     /// (can occur after reversing or non-standard slicing).
-    /// Returns [crate::AudioSampleError::Feature] if `config.method` is
+    /// Returns [crate::AudioSampleError::Unsupported] if `config.method` is
     /// `VadMethod::Spectral` (not yet implemented).
     ///
     /// # Example
@@ -199,8 +260,19 @@ where
                 mask.push(decision);
             }
         }
-        // safety: mask is non-empty because total_len > 0 and frame plan yields at least one frame.
-        let mask = unsafe { NonEmptyVec::new_unchecked(mask) };
+        // With `pad_end = false` and a signal shorter than one frame the plan
+        // yields no frames; report that instead of building an empty NonEmptyVec.
+        let mask = NonEmptyVec::new(mask).map_err(|_| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frame_size",
+                format!(
+                    "signal has {} samples per channel, fewer than frame_size = {}, and pad_end is \
+                     false, so there is no complete frame; use a shorter frame_size or pad_end = true",
+                    total_len.get(),
+                    config.frame_size.get()
+                ),
+            ))
+        })?;
         // Post-processing: smoothing + hangover + min region duration.
         let mut mask = majority_smooth(mask, config.smooth_frames);
         apply_hangover(&mut mask, config.hangover_frames);
@@ -438,10 +510,10 @@ fn classify(
             let zcr_ok = zcr >= config.zcr_min && zcr <= config.zcr_max;
             Ok(rms >= energy_threshold_rms && zcr_ok)
         }
-        VadMethod::Spectral => Err(AudioSampleError::Feature(FeatureError::not_enabled(
-            "spectral-analysis",
-            "VAD spectral mode",
-        ))),
+        VadMethod::Spectral => Err(AudioSampleError::unsupported(
+            "voice_activity_mask",
+            "VadMethod::Spectral is not implemented yet; use Energy, ZeroCrossing or Combined",
+        )),
     }
 }
 

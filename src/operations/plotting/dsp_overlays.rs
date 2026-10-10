@@ -253,7 +253,10 @@ where
 /// - `time_points` are the center times of each window in seconds
 /// - `centroid_values` are the spectral centroid frequencies in Hz
 ///
-/// Windows where the spectral centroid cannot be computed (e.g., silent frames) are skipped.
+/// Each window is analysed with [`AudioStatistics::spectral_centroid`](crate::operations::traits::AudioStatistics::spectral_centroid)
+/// (a single rectangular-window FFT per frame, power-weighted). Silent (zero-energy)
+/// frames yield 0 Hz and are plotted, not skipped; only frames for which the call returns
+/// an error are skipped.
 ///
 /// # Example
 /// ```rust,no_run
@@ -319,7 +322,10 @@ where
 /// - `time_points` are the center times of each window in seconds
 /// - `rolloff_values` are the rolloff frequencies in Hz
 ///
-/// Windows where the spectral rolloff cannot be computed (e.g., silent frames) are skipped.
+/// Each window is analysed with [`AudioStatistics::spectral_rolloff`](crate::operations::traits::AudioStatistics::spectral_rolloff)
+/// (a single rectangular-window FFT per frame, power-weighted). Silent (zero-energy)
+/// frames yield 0 Hz and are plotted, not skipped; only frames for which the call returns
+/// an error are skipped.
 ///
 /// # Example
 /// ```rust,no_run

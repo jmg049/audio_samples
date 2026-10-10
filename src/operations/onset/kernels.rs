@@ -5,7 +5,7 @@
 //! features and apply adaptive thresholding.
 //!
 //! The kernels include:
-//! - Energy-based onset detection function computation
+//! - The "energy" onset detection function (half-wave-rectified magnitude flux)
 //! - Adaptive thresholding using median-based local thresholds
 //!
 //! These functions are typically used internally by higher-level onset detection implementations
@@ -14,13 +14,15 @@
 use ndarray::Array2;
 use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 
-/// Computes an energy-based onset detection function from a magnitude spectrogram.
+/// Computes the "energy" onset detection function from a magnitude spectrogram.
 ///
-/// For each frame, sums the positive differences in energy (squared magnitude) across all
-/// frequency bins. This produces a time series where peaks correspond to sudden increases
-/// in spectral energy, indicating potential onsets.
+/// For each frame, sums the positive frame-to-frame differences of the values in `mag`
+/// across all frequency bins. No squaring is done: with a magnitude spectrogram (as passed
+/// by [`AudioOnsetDetection::onset_detection_function`](crate::operations::traits::AudioOnsetDetection::onset_detection_function))
+/// this is the half-wave-rectified magnitude flux; pass a power spectrogram to obtain a
+/// true energy flux. Peaks correspond to sudden increases in spectral content.
 ///
-/// Formula: `odf[t] = Σ max(0, mag[b,t]² - mag[b,t-1]²)` for all bins b.
+/// Formula: `odf[t] = Σ_b max(0, mag[b,t] − mag[b,t−1])`, `odf[0] = 0`.
 ///
 /// # Arguments
 ///
@@ -65,7 +67,8 @@ pub fn energy_odf(mag: &Array2<f64>) -> NonEmptyVec<f64> {
 /// Applies adaptive thresholding to a signal in-place using a median-based local threshold.
 ///
 /// For each sample, if its value is below `median[i] * multiplier`, it is set to zero.
-/// Otherwise, it remains unchanged. This technique removes low-amplitude fluctuations while
+/// Otherwise, it remains unchanged (the median is only a reference level; values above it
+/// are not reduced). This technique removes low-amplitude fluctuations while
 /// preserving strong peaks, improving onset detection robustness against varying background
 /// energy levels.
 ///
