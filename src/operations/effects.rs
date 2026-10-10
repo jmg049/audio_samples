@@ -100,7 +100,8 @@ use num_complex::Complex;
 use crate::audio_float::{audio_float_rows, finite_float_rows, float_rows_to_audio};
 use crate::operations::sequence::{RecurrenceConfig, recurrence_matrix};
 use crate::operations::spectrum::{
-    DbAxes, DbConfig, DbReference, StftConfig, amplitude_to_db, istft, stft,
+    DbAxes, DbConfig, DbReference, StftConfig, StftPadMode, amplitude_to_db, frame_square_sums,
+    istft, stft,
 };
 use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
@@ -1001,18 +1002,13 @@ pub fn nonsilent_frames<F: AudioFloat>(
     let n_frames = 1 + (len + 2 * pad - fl) / hop;
     let mut rms = Array2::<F>::zeros((n_channels, n_frames));
     let fl_f = F::of_usize(fl);
+    let signal = signal.as_standard_layout();
     for (c, row) in signal.outer_iter().enumerate() {
-        for t in 0..n_frames {
-            // Padded frame [t*hop, t*hop + fl) maps to signal [t*hop - pad, ...).
-            let start = (t * hop) as isize - pad as isize;
-            let lo = start.max(0) as usize;
-            let hi = ((start + fl as isize).max(0) as usize).min(len);
-            let sum: F = if lo < hi {
-                row.slice(ndarray::s![lo..hi]).iter().map(|&v| v * v).sum()
-            } else {
-                F::zero()
-            };
-            rms[[c, t]] = (sum / fl_f).sqrt();
+        let x = row.to_slice().expect("rows of a standard-layout array");
+        // Zero padding: the padded zeros add exact zeros to the sums.
+        let sums = frame_square_sums(x, fl, hop, pad, StftPadMode::Constant, n_frames);
+        for (r, &sum) in rms.row_mut(c).iter_mut().zip(&sums) {
+            *r = (sum / fl_f).sqrt();
         }
     }
     let db_cfg = DbConfig::amplitude()

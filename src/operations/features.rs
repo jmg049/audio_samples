@@ -94,7 +94,7 @@ use num_complex::Complex;
 use crate::audio_float::finite_float_rows;
 use crate::operations::filterbanks::{Window, padded_window};
 use crate::operations::spectrum::{
-    DbConfig, StftConfig, StftPadMode, power_to_db, spectrogram_rows, stft,
+    DbConfig, StftConfig, StftPadMode, frame_square_sums, power_to_db, spectrogram_rows, stft,
 };
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
@@ -1669,16 +1669,18 @@ fn rms_rows<F: AudioFloat>(
     let pad = if config.center { fl / 2 } else { 0 };
     let n_frames = frame_count(len + 2 * pad, fl, hop)?;
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let mut row_buf = Vec::new();
     for (c, row) in signal.outer_iter().enumerate() {
-        let x: Vec<F> = row.to_vec();
-        let xp = if pad > 0 {
-            pad_signal(&x, pad, config.pad_mode)
+        let x: &[F] = if let Some(s) = row.as_slice() {
+            s
         } else {
-            x
+            row_buf.clear();
+            row_buf.extend(row.iter().copied());
+            &row_buf
         };
-        for t in 0..n_frames {
-            let sum: F = xp[t * hop..t * hop + fl].iter().map(|&v| v * v).sum();
-            out[[c, 0, t]] = (sum / F::of_usize(fl)).sqrt();
+        let sums = frame_square_sums(x, fl, hop, pad, config.pad_mode, n_frames);
+        for (o, &sum) in out.slice_mut(ndarray::s![c, 0, ..]).iter_mut().zip(&sums) {
+            *o = (sum / F::of_usize(fl)).sqrt();
         }
     }
     Ok(out)

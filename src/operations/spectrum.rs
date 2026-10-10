@@ -457,6 +457,102 @@ pub(crate) fn padded_frame_into<F: AudioFloat>(
     }
 }
 
+/// The sum of squares of every frame of a padded signal: for frame `t`,
+/// `sum_{k < frame_length} xp[t * hop + k]^2` where `xp` is `x` padded by
+/// `pad` samples at both ends with `mode` (`numpy.pad` semantics), summed in
+/// order of increasing `k` starting from zero (NumPy's order when it
+/// reduces the frame axis of `librosa.util.frame`, and the order of a
+/// sequential sum).
+///
+/// Frames are processed in tiles. The squared samples of a tile are written
+/// once into a small `(hop, width)` buffer whose row `r` holds the samples
+/// at offsets `q * hop + r`; frame `t` then reads its `k`-th square from row
+/// `k % hop` at column `t + k / hop`, so the inner loop runs over a
+/// contiguous run of frames and vectorises across frames while every frame
+/// keeps its sequential summation order. Neither the padded signal nor the
+/// framed matrix is materialised.
+///
+/// `n_frames` frames are returned; every frame must lie within the padded
+/// signal (`(n_frames - 1) * hop + frame_length <= x.len() + 2 * pad`).
+pub(crate) fn frame_square_sums<F: AudioFloat>(
+    x: &[F],
+    frame_length: usize,
+    hop: usize,
+    pad: usize,
+    mode: StftPadMode,
+    n_frames: usize,
+) -> Vec<F> {
+    let fl = frame_length;
+    let padded_len = x.len() + 2 * pad;
+    debug_assert!(n_frames == 0 || (n_frames - 1) * hop + fl <= padded_len);
+    let square_at = |i: usize| -> F {
+        let s = i as isize - pad as isize;
+        let v = if s >= 0 && (s as usize) < x.len() {
+            x[s as usize]
+        } else if i < padded_len {
+            pad_source_index(s, x.len(), mode).map_or(F::zero(), |j| x[j])
+        } else {
+            F::zero()
+        };
+        v * v
+    };
+    let mut out = vec![F::zero(); n_frames];
+    if n_frames == 0 {
+        return out;
+    }
+    if hop > fl {
+        // Frames do not overlap: sum each one directly.
+        for (t, o) in out.iter_mut().enumerate() {
+            let mut acc = F::zero();
+            for k in 0..fl {
+                acc += square_at(t * hop + k);
+            }
+            *o = acc;
+        }
+        return out;
+    }
+    let tile = (32_768 / hop).clamp(1, 64);
+    let spread = (fl - 1) / hop; // frame t reads columns t..=t + spread
+    let width = tile + spread;
+    let mut m = vec![F::zero(); hop * width];
+    let mut acc = vec![F::zero(); tile];
+    for t0 in (0..n_frames).step_by(tile) {
+        let nb = tile.min(n_frames - t0);
+        // Squares of xp[(t0 + c) * hop + r] into m[r * width + c].
+        for c in 0..nb + spread {
+            let base = (t0 + c) * hop;
+            let s0 = base as isize - pad as isize;
+            if s0 >= 0 && s0 as usize + hop <= x.len() {
+                let seg = &x[s0 as usize..s0 as usize + hop];
+                for (r, &v) in seg.iter().enumerate() {
+                    m[r * width + c] = v * v;
+                }
+            } else {
+                for r in 0..hop {
+                    m[r * width + c] = square_at(base + r);
+                }
+            }
+        }
+        let acc = &mut acc[..nb];
+        acc.fill(F::zero());
+        let mut k = 0;
+        'outer: for off in 0..=spread {
+            for r in 0..hop {
+                if k == fl {
+                    break 'outer;
+                }
+                let row = &m[r * width + off..r * width + off + nb];
+                for (a, &v) in acc.iter_mut().zip(row) {
+                    *a += v;
+                }
+                k += 1;
+            }
+        }
+        out[t0..t0 + nb].copy_from_slice(acc);
+    }
+    out
+}
+
 /// [`stft`] with `map` applied to every STFT value as it is written, so that
 /// a derived quantity (a magnitude, a power) is computed without holding the
 /// complex matrix.
@@ -2733,6 +2829,34 @@ mod tests {
         );
         assert!(istft(s.view(), &cfg, Some(0)).is_err());
         assert!(istft(s.view(), &cfg.with_n_fft(nzu!(1024)), None).is_err());
+    }
+
+    #[test]
+    fn frame_square_sums_match_sequential_sums_of_the_padded_signal() {
+        let x: Vec<f64> = noise(1000, 3);
+        let modes = [
+            StftPadMode::Constant,
+            StftPadMode::Edge,
+            StftPadMode::Reflect,
+            StftPadMode::Symmetric,
+        ];
+        for mode in modes {
+            for (fl, hop, pad) in [
+                (64, 16, 32),
+                (50, 7, 25),
+                (33, 33, 0),
+                (10, 40, 5),
+                (1, 1, 0),
+            ] {
+                let xp = pad_signal(&x, pad, mode);
+                let n_frames = 1 + (xp.len() - fl) / hop;
+                let want: Vec<f64> = (0..n_frames)
+                    .map(|t| xp[t * hop..t * hop + fl].iter().map(|&v| v * v).sum())
+                    .collect();
+                let got = frame_square_sums(&x, fl, hop, pad, mode, n_frames);
+                assert_eq!(got, want, "{mode:?} fl={fl} hop={hop} pad={pad}");
+            }
+        }
     }
 
     #[test]
