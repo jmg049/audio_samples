@@ -4642,14 +4642,15 @@ impl PeakPickingConfig {
     ///   frame rate `audio_sample_rate / hop_size` (the separation is counted in
     ///   onset-strength frames).
     ///
-    /// # Panics
-    ///
-    /// Panics if `ms * sample_rate / 1000.0` rounds to zero, which would produce
-    /// an invalid `NonZeroUsize`.
+    /// The separation is `floor(ms * sample_rate / 1000)` frames, at least 1: a
+    /// separation shorter than one frame (including zero, negative or NaN
+    /// input) means consecutive frames may both be peaks. (Before 2.1 this
+    /// panicked when the result rounded to zero.)
     #[inline]
     pub fn set_min_peak_separation_ms(&mut self, ms: f64, sample_rate: f64) {
-        self.min_peak_separation =
-            NonZeroUsize::new((ms * sample_rate / 1000.0) as usize).expect("Must be non-zero");
+        // `as usize` saturates (NaN -> 0); clamp to the smallest valid value.
+        let frames = (ms * sample_rate / 1000.0) as usize;
+        self.min_peak_separation = NonZeroUsize::new(frames).unwrap_or(NonZeroUsize::MIN);
     }
 
     /// Configures pre-emphasis filtering.

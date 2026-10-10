@@ -1287,8 +1287,9 @@ where
 /// A new `AudioSamples` instance resampled by the given ratio.
 ///
 /// # Errors
-/// - [`crate::AudioSampleError::Parameter`] if the ratio is not positive or the
-///   resulting target rate rounds to zero.
+/// - [`crate::AudioSampleError::Parameter`] if the ratio is not finite and
+///   positive, or the resulting target rate rounds to zero or exceeds `u32::MAX`
+///   Hz (or see [`resample`]).
 ///
 /// # Examples
 /// ```
@@ -1310,7 +1311,7 @@ pub fn resample_by_ratio<T>(
 where
     T: StandardSample,
 {
-    if ratio.is_nan() || ratio <= 0.0 {
+    if !(ratio.is_finite() && ratio > 0.0) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "ratio",
             format!("Invalid resampling ratio: {ratio}"),
@@ -1318,13 +1319,21 @@ where
     }
 
     let input_sample_rate = audio.sample_rate().get();
-    let target_sample_rate = (f64::from(input_sample_rate) * ratio).round() as usize;
-    let target_sample_rate = SampleRate::new(target_sample_rate as u32).ok_or_else(|| {
-        AudioSampleError::Parameter(ParameterError::invalid_value(
-            "target_sample_rate",
-            "Calculated target sample rate is invalid",
-        ))
-    })?;
+    let target = (f64::from(input_sample_rate) * ratio).round();
+    // Checked before the integer conversion (which used to wrap for ratios
+    // above ~97 000 at 44.1 kHz).
+    let target_sample_rate = (target <= f64::from(u32::MAX))
+        .then(|| SampleRate::new(target as u32))
+        .flatten()
+        .ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "ratio",
+                format!(
+                    "resampling {input_sample_rate} Hz by {ratio} gives a target rate of \
+                     {target} Hz, outside 1..=4294967295"
+                ),
+            ))
+        })?;
 
     resample(audio, target_sample_rate, quality)
 }
@@ -1462,6 +1471,10 @@ mod tests {
         assert!(resample_by_ratio(&audio, -1.0, ResamplingQuality::Fast).is_err());
         assert!(resample_by_ratio(&audio, 0.0, ResamplingQuality::Fast).is_err());
         assert!(resample_by_ratio(&audio, f64::NAN, ResamplingQuality::Fast).is_err());
+        // Regression: the target rate was cast through `usize as u32` and
+        // wrapped for huge ratios (e.g. 44100 * 1e5 -> a small, wrong rate).
+        assert!(resample_by_ratio(&audio, 1e5, ResamplingQuality::Fast).is_err());
+        assert!(resample_by_ratio(&audio, f64::INFINITY, ResamplingQuality::Fast).is_err());
     }
 
     /// Output length is exactly `ceil(n * out / in)` for every quality (this

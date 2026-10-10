@@ -899,4 +899,18 @@ mod tests {
             values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
         variance.sqrt()
     }
+
+    /// Regression: `set_min_peak_separation_ms` panicked when the separation
+    /// rounded to zero frames; it now clamps to one frame.
+    #[test]
+    fn min_peak_separation_ms_clamps_instead_of_panicking() {
+        use crate::operations::types::PeakPickingConfig;
+        let mut cfg = PeakPickingConfig::default();
+        cfg.set_min_peak_separation_ms(1.0, 86.13);
+        assert_eq!(cfg.min_peak_separation.get(), 1);
+        cfg.set_min_peak_separation_ms(f64::NAN, 86.13);
+        assert_eq!(cfg.min_peak_separation.get(), 1);
+        cfg.set_min_peak_separation_ms(100.0, 1000.0);
+        assert_eq!(cfg.min_peak_separation.get(), 100);
+    }
 }
