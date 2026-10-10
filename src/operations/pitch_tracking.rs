@@ -518,7 +518,9 @@ impl PyinConfig {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if any type-level invariant is violated.
+    /// [`ParameterError`] if any type-level invariant is violated, or
+    /// `resolution` is so small that the HMM's dense transition matrix
+    /// (`(2 * n_pitch_bins)^2` entries) would exceed 2^28 elements.
     pub fn validate(&self, sample_rate: f64) -> AudioSampleResult<()> {
         check_yin_params(sample_rate, self.fmin, self.fmax, self.frame_length)?;
         self.effective_hop_length()?;
@@ -542,6 +544,16 @@ impl PyinConfig {
             )
             .into());
         }
+        // The HMM's dense transition matrix has (2 * n_pitch_bins)^2 entries.
+        let n_states = 2.0
+            * (((12.0 * (1.0 / self.resolution).ceil()) * (self.fmax / self.fmin).log2()).floor()
+                + 1.0);
+        crate::utils::check_derived_len(
+            "resolution",
+            "the pYIN transition matrix",
+            n_states * n_states,
+            crate::utils::MAX_TABLE_ELEMENTS,
+        )?;
         if !(self.max_transition_rate.is_finite() && self.max_transition_rate > 0.0) {
             return Err(param_err("max_transition_rate", "must be finite and > 0"));
         }
@@ -2382,5 +2394,21 @@ mod tests {
         assert_eq!(v(SalienceAggregate::Max), 1.0);
         assert_eq!(v(SalienceAggregate::Min), 0.2);
         assert_eq!(v(SalienceAggregate::Median), 0.8);
+    }
+
+    /// Regression: a tiny `resolution` sized the dense pYIN transition matrix
+    /// at (2 * n_bins)^2 entries (2.9 TB for 1e-4) and aborted on allocation.
+    #[test]
+    fn pyin_rejects_resolution_needing_a_huge_matrix() {
+        let audio =
+            AudioSamples::new_mono(Array1::from(vec![0.1; 8192]), sample_rate!(22050)).unwrap();
+        let err = audio.pyin(&PyinConfig::default().with_resolution(1e-4));
+        assert!(matches!(err, Err(AudioSampleError::Parameter(_))));
+        assert!(
+            PyinConfig::default()
+                .with_resolution(0.05)
+                .validate(22050.0)
+                .is_ok()
+        );
     }
 }

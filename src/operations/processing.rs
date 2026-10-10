@@ -1080,7 +1080,7 @@ fn mu_law_expand_value(y: f64, mu: f64) -> f64 {
 ///
 /// # Errors
 /// - [`crate::AudioSampleError::Parameter`] if `mu` is not finite and strictly
-///   positive, or if any sample is outside `[-1, 1]` (or NaN).
+///   positive, `mu > 2^53`, or if any sample is outside `[-1, 1]` (or NaN).
 ///
 /// # Examples
 /// ```
@@ -1096,17 +1096,47 @@ fn mu_law_expand_value(y: f64, mu: f64) -> f64 {
 #[inline]
 pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
     validate_mu(mu, "mu_law_encode")?;
-    // `np.linspace(-1, 1, num=int(1 + mu), endpoint=True)`, computed exactly as
-    // numpy does (`i * step + start`, last edge pinned to `stop`) so that
-    // samples landing on an edge get the same code as librosa.
+    // Beyond 2^53 neither `1 + mu` nor the codes are exactly representable
+    // (librosa would try to allocate that many bin edges).
+    if mu > 9_007_199_254_740_992.0 {
+        return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
+            "mu",
+            mu,
+            "> 0",
+            "<= 2^53",
+            "mu_law_encode: the number of codes must be exactly representable",
+        )));
+    }
+    // Bin edges `np.linspace(-1, 1, num=int(1 + mu), endpoint=True)`, evaluated
+    // on demand exactly as numpy computes them (`i * step + start`, last edge
+    // pinned to `stop`) so that samples landing on an edge get the same code as
+    // librosa, without materialising `1 + mu` edges.
     let num = (1.0 + mu).trunc() as usize;
-    let edges: Vec<f64> = if num == 1 {
-        vec![-1.0]
-    } else {
-        let step = 2.0 / (num - 1) as f64;
-        let mut e: Vec<f64> = (0..num).map(|i| i as f64 * step + -1.0).collect();
-        e[num - 1] = 1.0;
-        e
+    let step = if num > 1 { 2.0 / (num - 1) as f64 } else { 0.0 };
+    let edge = |i: usize| -> f64 {
+        if num == 1 {
+            -1.0
+        } else if i == num - 1 {
+            1.0
+        } else {
+            i as f64 * step + -1.0
+        }
+    };
+    // np.digitize(c, edges, right=True) == number of edges strictly below c.
+    // Start from the analytic estimate and correct for rounding.
+    let count_below = |c: f64| -> usize {
+        let mut k = if num > 1 {
+            (((c + 1.0) / step).floor().max(0.0) as usize).min(num)
+        } else {
+            0
+        };
+        while k < num && edge(k) < c {
+            k += 1;
+        }
+        while k > 0 && edge(k - 1) >= c {
+            k -= 1;
+        }
+        k
     };
     let offset = (num / 2) as i64;
     x.iter()
@@ -1121,9 +1151,7 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
                 )));
             }
             let c = mu_law_compress_value(v, mu);
-            // np.digitize(c, edges, right=True) == number of edges strictly below c.
-            let idx = edges.partition_point(|&e| e < c);
-            Ok(idx as i64 - offset)
+            Ok(count_below(c) as i64 - offset)
         })
         .collect()
 }
@@ -1655,6 +1683,55 @@ mod tests {
         );
         assert!(mu_law_encode(&[1.5], 255.0).is_err());
         assert!(mu_law_encode(&[f64::NAN], 255.0).is_err());
+    }
+
+    /// Regression: the encoder materialised `1 + mu` bin edges, so a huge `mu`
+    /// panicked ("capacity overflow", mu = 1e19) or tried multi-GB allocations
+    /// (mu ~ 1e9 - 1e18). Codes are now computed per sample; they must equal
+    /// the explicit `np.digitize(c, linspace(-1, 1, int(1 + mu)), right=True)`.
+    #[test]
+    fn mu_law_encode_is_allocation_free_and_exact() {
+        let reference = |x: &[f64], mu: f64| -> Vec<i64> {
+            let num = (1.0 + mu).trunc() as usize;
+            let edges: Vec<f64> = if num == 1 {
+                vec![-1.0]
+            } else {
+                let step = 2.0 / (num - 1) as f64;
+                let mut e: Vec<f64> = (0..num).map(|i| i as f64 * step + -1.0).collect();
+                e[num - 1] = 1.0;
+                e
+            };
+            x.iter()
+                .map(|&v| {
+                    let c = mu_law_compress_value(v, mu);
+                    edges.partition_point(|&e| e < c) as i64 - (num / 2) as i64
+                })
+                .collect()
+        };
+        // Includes inputs that land exactly on bin edges (c = -1, 0, 1, and
+        // the companded values of the edges themselves for mu = 1).
+        let mut x: Vec<f64> = (0..=2000).map(|i| -1.0 + f64::from(i) * 0.001).collect();
+        x.extend([-1.0, 1.0, 0.0, 1e-300, -1e-300, 0.5, -0.5]);
+        for mu in [
+            0.5,
+            1.0,
+            2.0,
+            3.7,
+            15.0,
+            100.5,
+            255.0,
+            1023.0,
+            65535.0,
+            1e6 + 0.25,
+        ] {
+            assert_eq!(mu_law_encode(&x, mu).unwrap(), reference(&x, mu), "mu={mu}");
+        }
+        // Huge mu: no allocation, codes span the full range.
+        let codes = mu_law_encode(&[-1.0, 0.0, 1.0], 1e15).unwrap();
+        assert_eq!(codes[1], 0);
+        assert!(codes[0] < -(1i64 << 48) && codes[2] > 1i64 << 48);
+        assert!(mu_law_encode(&[0.5], 1e19).is_err());
+        assert!(mu_law_encode(&[0.5], 1e300).is_err());
     }
 
     #[test]

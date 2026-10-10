@@ -998,7 +998,8 @@ fn check_bins(n_bins: usize, n_fft: usize, operation: &str) -> AudioSampleResult
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `resolution` is not in `(0, 1)`.
+/// [`ParameterError`] if `resolution` is not in `(0, 1)` or so small that the
+/// histogram would exceed 2^28 bins.
 ///
 /// # Examples
 ///
@@ -1033,7 +1034,12 @@ pub fn pitch_tuning(
     }
     let bpo = bins_per_octave.get() as f64;
     // np.linspace(-0.5, 0.5, ceil(1 / resolution) + 1)
-    let n_hist = (1.0 / resolution).ceil() as usize;
+    let n_hist = crate::utils::check_derived_len(
+        "resolution",
+        "the tuning histogram",
+        (1.0 / resolution).ceil() + 1.0,
+        crate::utils::MAX_TABLE_ELEMENTS,
+    )? - 1;
     let step = 1.0 / n_hist as f64;
     let mut edges: Vec<f64> = (0..=n_hist).map(|i| i as f64 * step + -0.5).collect();
     edges[n_hist] = 0.5;
@@ -1152,7 +1158,7 @@ impl TuningConfig {
     /// # Errors
     ///
     /// [`ParameterError`] if the piptrack configuration is invalid or
-    /// `resolution` is not in `(0, 1)`.
+    /// `resolution` is not in `(0, 1)` (or needs more than 2^28 histogram bins).
     pub fn validate(&self) -> AudioSampleResult<()> {
         self.piptrack.validate()?;
         if !(self.resolution > 0.0 && self.resolution < 1.0) {
@@ -1164,6 +1170,12 @@ impl TuningConfig {
                 "the tuning resolution is a fraction of a bin",
             )));
         }
+        crate::utils::check_derived_len(
+            "resolution",
+            "the tuning histogram",
+            (1.0 / self.resolution).ceil() + 1.0,
+            crate::utils::MAX_TABLE_ELEMENTS,
+        )?;
         Ok(())
     }
 }
@@ -1975,5 +1987,18 @@ mod tests {
             assert!(key_to_notes(bad, true, false).is_err(), "{bad:?}");
             assert!(key_to_degrees(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// Regression: `resolution = 1e-9` built a 10^9-bin tuning histogram (8 GB).
+    #[test]
+    fn tuning_rejects_resolution_needing_a_huge_histogram() {
+        assert!(pitch_tuning(&[440.0, 441.0], 1e-9, crate::nzu!(12)).is_err());
+        assert!(
+            TuningConfig::new()
+                .with_resolution(1e-9)
+                .validate()
+                .is_err()
+        );
+        assert!(pitch_tuning(&[440.0, 441.0], 1e-4, crate::nzu!(12)).is_ok());
     }
 }

@@ -1504,11 +1504,18 @@ pub fn tempogram_from_envelope(
 ) -> AudioSampleResult<Array3<f64>> {
     validate_norm(config.norm)?;
     let win = config.win_length.get();
-    let window = get_window(&config.window, win, true)?;
     let (n_ch, n) = envelope.dim();
     if n_ch == 0 || n == 0 {
         return Err(param_err("onset_envelope", "the onset envelope is empty"));
     }
+    // Output is (channels, win, <= n frames); the padded input is n + win.
+    crate::utils::check_derived_len(
+        "win_length",
+        "the tempogram",
+        n_ch as f64 * win as f64 * n as f64,
+        crate::utils::MAX_SIGNAL_ELEMENTS,
+    )?;
+    let window = get_window(&config.window, win, true)?;
     let half = win / 2;
     let padded_len = if config.center { n + 2 * half } else { n };
     if padded_len < win {
@@ -1968,7 +1975,7 @@ pub fn tempo_from_tempogram(
 /// # Errors
 ///
 /// [`ParameterError`] if a parameter is invalid, `ac_size` is shorter than one frame,
-/// or the envelope is empty.
+/// the envelope is empty, or the tempogram would exceed 2^31 elements.
 ///
 /// # Examples
 ///
@@ -1992,7 +1999,15 @@ pub fn tempo_from_envelope(
     require_positive("sample_rate", sample_rate)?;
     // librosa.time_to_frames: int(t * sr) // hop
     let samples = (config.ac_size * sample_rate).trunc();
-    let win = (samples / hop_length.get() as f64).floor() as usize;
+    let win = (samples / hop_length.get() as f64).floor();
+    let (n_ch, n) = envelope.dim();
+    crate::utils::check_derived_len(
+        "ac_size",
+        "the autocorrelation tempogram",
+        n_ch as f64 * win * n as f64,
+        crate::utils::MAX_SIGNAL_ELEMENTS,
+    )?;
+    let win = win as usize;
     let win_length = NonZeroUsize::new(win).ok_or_else(|| {
         param_err(
             "ac_size",
@@ -4016,5 +4031,17 @@ mod tests {
         assert_eq!(complex_max_lex(v.into_iter()), Complex::new(3.0, 2.0));
         let v = [Complex::new(0.0, 0.0), Complex::new(-2.0, 5.0)];
         assert_eq!(complex_max_lex(v.into_iter()), Complex::new(0.0, 0.0));
+    }
+
+    /// Regression: a huge `ac_size` (or tempogram `win_length`) allocated a
+    /// `(win, n_frames)` tempogram of hundreds of GB and aborted.
+    #[test]
+    fn tempo_rejects_huge_autocorrelation_window() {
+        let env = Array2::<f64>::ones((1, 400));
+        let cfg = TempoConfig::new().with_ac_size(1e9);
+        let r = tempo_from_envelope(env.view(), 22050.0, crate::nzu!(512), &cfg);
+        assert!(matches!(r, Err(AudioSampleError::Parameter(_))));
+        let tg = TempogramConfig::new().with_win_length(NonZeroUsize::new(1 << 40).unwrap());
+        assert!(tempogram_from_envelope(env.view(), &tg).is_err());
     }
 }

@@ -68,6 +68,7 @@
 //! assert_eq!(intervals.len(), 1);
 //! ```
 
+use crate::utils::{MAX_SIGNAL_ELEMENTS, check_derived_len};
 use std::num::NonZeroUsize;
 
 use ndarray::{
@@ -333,6 +334,13 @@ fn time_stretch_rows(
             format!("rate={rate} would stretch {n} samples to an empty signal"),
         ));
     }
+    // The stretched STFT and the output both scale with n / rate.
+    check_derived_len(
+        "rate",
+        "the time-stretched signal",
+        len_stretch * rows.nrows() as f64,
+        MAX_SIGNAL_ELEMENTS,
+    )?;
     let d = stft(rows, config)?;
     let d_stretch = phase_vocoder(d.view(), rate)?;
     istft(d_stretch.view(), config, Some(len_stretch as usize))
@@ -2175,8 +2183,9 @@ impl ClicksConfig {
 /// # Errors
 ///
 /// [`ParameterError`] if the configuration is invalid, a time is negative or not
-/// finite, or `positions` is empty while `length` is `None`; an empty-data error if
-/// the default click would have no samples.
+/// finite, or `positions` is empty while `length` is `None`, or the track or the
+/// click would exceed 2^31 samples; an empty-data error if the default click
+/// would have no samples.
 ///
 /// # Differences from librosa
 ///
@@ -2211,19 +2220,36 @@ pub fn clicks(
                         "click times must be finite and non-negative",
                     ));
                 }
-                v.push((t * sr) as usize);
+                v.push(check_derived_len(
+                    "times",
+                    "a click track",
+                    (t * sr).trunc(),
+                    MAX_SIGNAL_ELEMENTS,
+                )?);
             }
             v
         }
         ClickPositions::Frames(frames) => frames
             .iter()
-            .map(|&f| f * config.hop_length.get())
-            .collect(),
+            .map(|&f| {
+                check_derived_len(
+                    "frames",
+                    "a click track",
+                    f as f64 * config.hop_length.get() as f64,
+                    MAX_SIGNAL_ELEMENTS,
+                )
+            })
+            .collect::<AudioSampleResult<_>>()?,
     };
     let click: Vec<f64> = match &config.click {
         Some(c) => c.clone(),
         None => {
-            let n = (sr * config.click_duration) as usize;
+            let n = check_derived_len(
+                "click_duration",
+                "the click",
+                (sr * config.click_duration).trunc(),
+                MAX_SIGNAL_ELEMENTS,
+            )?;
             if n == 0 {
                 return Err(AudioSampleError::empty_data("clicks"));
             }
@@ -2257,6 +2283,12 @@ pub fn clicks(
             max + click.len()
         }
     };
+    check_derived_len(
+        "length",
+        "a click track",
+        length as f64,
+        MAX_SIGNAL_ELEMENTS,
+    )?;
     let mut out = vec![0.0; length];
     for &start in &pos {
         let end = (start + click.len()).min(length);
@@ -2305,7 +2337,7 @@ pub trait AudioEffects {
     /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if `rate` is not finite and positive, the result would be
-    /// empty, or the STFT configuration is invalid.
+    /// empty or exceed 2^31 samples, or the STFT configuration is invalid.
     ///
     /// # Examples
     ///
@@ -3588,5 +3620,39 @@ mod tests {
         .unwrap();
         let y: AudioSamples<'static, i16> = x.time_stretch(2.0, &StftConfig::default()).unwrap();
         assert_eq!(y.samples_per_channel().get(), 4000);
+    }
+
+    /// Regression: extreme click times / durations and stretch rates sized
+    /// their outputs at up to 10^17 bytes and aborted on allocation.
+    #[test]
+    fn extreme_sizes_are_parameter_errors() {
+        let sr = sample_rate!(22050);
+        let cfg = ClicksConfig::default();
+        let is_param = |r: AudioSampleResult<AudioSamples<'static, f64>>| {
+            matches!(r, Err(AudioSampleError::Parameter(_)))
+        };
+        assert!(is_param(clicks(ClickPositions::Times(&[1e12]), sr, &cfg)));
+        assert!(is_param(clicks(
+            ClickPositions::Frames(&[usize::MAX]),
+            sr,
+            &cfg
+        )));
+        let long = ClicksConfig {
+            click_duration: 1e12,
+            ..ClicksConfig::default()
+        };
+        assert!(is_param(clicks(ClickPositions::Times(&[0.0]), sr, &long)));
+        let fixed = ClicksConfig {
+            length: Some(usize::MAX),
+            ..ClicksConfig::default()
+        };
+        assert!(is_param(clicks(ClickPositions::Times(&[0.0]), sr, &fixed)));
+        assert!(clicks(ClickPositions::Times(&[1.0]), sr, &cfg).is_ok());
+
+        let audio = AudioSamples::new_mono(ndarray::Array1::from(vec![0.1; 22050]), sr).unwrap();
+        assert!(matches!(
+            audio.time_stretch(1e-6, &StftConfig::default()),
+            Err(AudioSampleError::Parameter(_))
+        ));
     }
 }

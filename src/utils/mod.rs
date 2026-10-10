@@ -153,3 +153,47 @@ pub(crate) fn min_max_single_pass<A: AsRef<[f64]>>(data: A) -> (f64, f64) {
     }
     (min_val, max_val)
 }
+
+/// Largest number of elements of a signal-sized buffer whose size is derived
+/// from user parameters (2^31, 16 GiB of `f64`): output signals, click tracks,
+/// frame matrices.
+#[allow(dead_code)] // Users are behind optional features.
+pub(crate) const MAX_SIGNAL_ELEMENTS: f64 = 2_147_483_648.0;
+
+/// Largest number of elements of an auxiliary table whose size depends only
+/// on parameters, not on the data (2^28, 2 GiB of `f64`): histograms, HMM
+/// transition matrices, codebooks.
+#[allow(dead_code)] // Users are behind optional features.
+pub(crate) const MAX_TABLE_ELEMENTS: f64 = 268_435_456.0;
+
+/// Checks a buffer length derived from user parameters before allocating it.
+///
+/// Extreme but type-valid parameters (a pitch resolution of 1e-9, a click at
+/// 1e12 s, a stretch rate of 1e-6, ...) would otherwise abort the process on
+/// an allocation failure. `n` is computed in `f64` by the caller so that the
+/// computation itself cannot overflow; `limit` is [`MAX_SIGNAL_ELEMENTS`] or
+/// [`MAX_TABLE_ELEMENTS`].
+///
+/// # Errors
+/// [`crate::ParameterError`] naming `parameter` if `n` is not finite, negative
+/// or above `limit`.
+#[allow(dead_code)] // Users are behind optional features.
+pub(crate) fn check_derived_len(
+    parameter: &str,
+    what: &str,
+    n: f64,
+    limit: f64,
+) -> crate::AudioSampleResult<usize> {
+    if n.is_finite() && (0.0..=limit).contains(&n) {
+        Ok(n as usize)
+    } else {
+        Err(crate::AudioSampleError::Parameter(
+            crate::ParameterError::invalid_value(
+                parameter,
+                format!(
+                    "{what} would need {n:.3e} elements (limit {limit:.3e}); the value is too extreme"
+                ),
+            ),
+        ))
+    }
+}
