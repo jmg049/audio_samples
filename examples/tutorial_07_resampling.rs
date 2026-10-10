@@ -11,7 +11,7 @@
 //!    that alias; the lab measures the alias rejection in dB, and the
 //!    pass-band gain at 1 kHz.
 //! 3. The output is time-aligned (no delay): an impulse at input sample 3000
-//!    lands at output sample 1000, and the 1 kHz tone has no phase shift.
+//!    appears at output sample 1000, and the 1 kHz tone has no phase shift.
 //! 4. A plain-Rust windowed-sinc decimator (low-pass, then keep every third
 //!    sample) reproduces the library's behaviour: an alias rejection between
 //!    `Fast` and `Medium`, and the same pass-band output as `High`.
@@ -139,7 +139,7 @@ fn main() -> AudioSampleResult<()> {
     let naive: Vec<f64> = x.iter().step_by(3).copied().collect();
     let naive_rej = db(tone_amplitude(&naive[mid.clone()], 6_000.0, fs_out) / 0.5);
     println!("      naive: 6 kHz alias at {naive_rej:+.1} dB re the 10 kHz input");
-    // The alias comes through at full level (0 dB) ...
+    // The alias is at full level (0 dB) ...
     assert!(naive_rej.abs() < 1e-9);
     // ... and is exactly a 6 kHz sine: sin(2 pi 10k m / 16k) = -sin(2 pi 6k m / 16k).
     for (m, v) in naive.iter().enumerate().take(100) {
@@ -209,7 +209,7 @@ fn main() -> AudioSampleResult<()> {
     println!();
 
     // ---------------------------------------------------------------- 4
-    println!("4. Under the hood: windowed-sinc decimator by 3, written out");
+    println!("4. How it works: windowed-sinc decimator by 3, written out");
     let h = sinc_lowpass(0.95 * 8_000.0 / fs_in, 96);
     let mine = my_decimate(&x, 3, &h);
     let g1 = db(tone_amplitude(&mine[mid.clone()], 1_000.0, fs_out) / 0.5);
@@ -220,8 +220,8 @@ fn main() -> AudioSampleResult<()> {
     );
     // 107.5 dB: between the library's Fast (90.8) and Medium (116.7).
     assert!(g1.abs() < 1e-3 && (rej + 107.5).abs() < 0.1);
-    // Both mine and the library are centred (zero delay), so they can be
-    // compared with the ideal sine and with each other directly.
+    // Both this decimator and the library are centred (zero delay), so they
+    // can be compared with the ideal sine and with each other directly.
     let lib = &measured[2].0;
     let ideal = ideal_tone(1_000.0, fs_out);
     let lib_err = mid
@@ -234,9 +234,9 @@ fn main() -> AudioSampleResult<()> {
         .fold(0.0, f64::max);
     let diff = mid.map(|n| (mine[n] - lib[n]).abs()).fold(0.0, f64::max);
     println!("     max |library High - 1 kHz sine| = {lib_err:.1e}");
-    println!("     max |mine - 1 kHz sine|         = {my_err:.1e}");
-    println!("     max |mine - library High|       = {diff:.1e}");
-    // Library High: 3.6e-8 (pass-band ripple and the residual alias). Mine:
+    println!("     max |by hand - 1 kHz sine|      = {my_err:.1e}");
+    println!("     max |by hand - library High|    = {diff:.1e}");
+    // Library High: 3.6e-8 (pass-band ripple and the residual alias). By hand:
     // 2.3e-6 (the Blackman window's pass-band ripple), which also bounds the
     // difference between the two.
     assert!(lib_err < 1e-7 && my_err < 3e-6 && diff < 3e-6);
@@ -269,7 +269,7 @@ fn main() -> AudioSampleResult<()> {
                 assert!((g10 - db(tri(10_000.0).abs())).abs() < 1e-6);
                 assert!((g6 + 3.77).abs() < 0.01 && (g10 + 11.8).abs() < 0.05);
             }
-            // The sinc tiers pass 6 kHz flat and push the image to -116.7 dB
+            // The sinc tiers pass 6 kHz unchanged and attenuate the image to -116.7 dB
             // (Medium) and -145.5 dB (High).
             ResamplingQuality::Medium => assert!(g6.abs() < 1e-4 && (g10 + 116.7).abs() < 0.1),
             _ => assert!(g6.abs() < 1e-4 && (g10 + 145.5).abs() < 0.1),

@@ -79,7 +79,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     // --- Self-verification -------------------------------------------------
     // A symmetric tone centred on zero has ~zero mean and a peak near its
     // largest harmonic-sum amplitude (1.0 + 0.5 + 0.25 = 1.75, normalised by
-    // the generator so |peak| <= ~1.0 region; we just assert sane bounds).
+    // the generator so |peak| <= ~1.0; the checks below use loose bounds).
     assert!(
         audio.mean().abs() < 1e-2,
         "compound tone should be ~zero-mean, got {}",

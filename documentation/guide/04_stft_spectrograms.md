@@ -1,22 +1,23 @@
 # 04. STFT and spectrograms
 
 Speech and music change over time: a vowel lasts tens of milliseconds, a
-plosive burst a few. One DFT of a whole utterance (chapter 03) mixes all of
-that together. The short-time Fourier transform (STFT) takes a DFT of short,
-overlapping, windowed frames instead, giving a picture of frequency against
-time: the spectrogram. This chapter pins down exactly how the crate frames the
-signal, why you cannot have fine time and fine frequency resolution at once,
+plosive burst a few. One DFT of a whole utterance (chapter 03) combines all of
+these into one spectrum. The short-time Fourier transform (STFT) takes a DFT of
+short, overlapping, windowed frames instead, giving frequency content as a
+function of time: the spectrogram. This chapter defines exactly how the crate
+frames the signal, why fine time and fine frequency resolution cannot be had at
+once,
 how the transform is inverted, and what the dB scale of a spectrogram means.
 
 ## Concept
 
 **Definition (as implemented).** With frame length (and FFT size) $N$, hop
-$H$ and window $w\[n\]$:
+$H$ and window $w[n]$:
 
-$$X_m\[k\] = \sum_{n=0}^{N-1} x\[mH + n - p\] \\, w\[n\] \\, e^{-j 2\pi k n / N}$$
+$$X_m[k] = \sum_{n=0}^{N-1} x[mH + n - p] \, w[n] \, e^{-j 2\pi k n / N}$$
 
 where $m$ is the frame index, $k = 0 \dots \lfloor N/2 \rfloor$ the bin index,
-$p$ the padding in samples and $x\[\cdot\] = 0$ outside the signal. With
+$p$ the padding in samples and $x[\cdot] = 0$ outside the signal. With
 `centre = true`, $p = \lfloor N/2 \rfloor$, so frame $m$ is *centred* on sample
 $mH$; with `centre = false`, $p = 0$ and frame $m$ *starts* at sample $mH$. The
 window is the symmetric Hann of chapter 03.
@@ -26,23 +27,24 @@ window is the symmetric Hann of chapter 03.
 $$M = 1 + \left\lfloor \frac{L + 2p - N}{H} \right\rfloor$$
 
 **Resolution.** Bins are $\Delta f = f_s / N$ Hz apart and frames
-$\Delta t = H / f_s$ seconds apart, with $f_s$ the sample rate in Hz. But the
-real time resolution is set by the window *length* $N/f_s$, and the real
-frequency resolution by the window's main lobe (about $2\Delta f$ for Hann at
+$\Delta t = H / f_s$ seconds apart, with $f_s$ the sample rate in Hz. The
+actual time resolution, however, is set by the window *length* $N/f_s$, and the
+actual frequency resolution by the window's main lobe (about $2\Delta f$ for Hann at
 $-6$ dB). Their product is fixed by the window shape: halving one doubles the
 other. A smaller hop gives more frames, not sharper ones.
 
-**Inverse (weighted overlap-add).** Inverse-DFT each frame to $y_m\[n\]$,
+**Inverse (weighted overlap-add).** Inverse-DFT each frame to $y_m[n]$,
 multiply by the window again and overlap-add, dividing by the summed squared
 windows:
 
-$$\hat{x}\[n\] = \frac{\sum_m w\[n - mH\] \\, y_m\[n - mH\]}{\sum_m w^2\[n - mH\]}$$
+$$\hat{x}[n] = \frac{\sum_m w[n - mH] \, y_m[n - mH]}{\sum_m w^2[n - mH]}$$
 
 This is exact wherever the denominator is non-zero, for any window and hop,
-provided the STFT has not been modified. Two overlap conditions are worth
-naming. **NOLA** (nonzero overlap-add): the summed *squared* windows
-$\sum_m w^2\[n - mH\]$ are never zero, which is all the inverse above needs.
-**COLA** (constant overlap-add): the plain summed windows $\sum_m w\[n - mH\]$
+provided the STFT has not been modified. Two overlap conditions apply.
+**NOLA** (nonzero overlap-add): the summed *squared* windows
+$\sum_m w^2[n - mH]$ are never zero, which is the only condition the inverse
+above requires.
+**COLA** (constant overlap-add): the plain summed windows $\sum_m w[n - mH]$
 are the same constant for every $n$, which plain overlap-add without the
 division needs. WOLA works even for windows that are not COLA. If the STFT is
 modified before inversion (masking, a phase vocoder), the frames are no longer
@@ -50,10 +52,10 @@ consistent and the same formula gives the least-squares estimate of Griffin
 and Lim (1984) rather than an exact inverse. With centring, the output has
 $(M-1)H + N - 2\lfloor N/2\rfloor$ samples.
 
-**Spectrogram scales.** Power $P_m\[k\] = |X_m\[k\]|^2$ (no division by $N$),
-magnitude $|X_m\[k\]|$, and decibels
+**Spectrogram scales.** Power $P_m[k] = |X_m[k]|^2$ (no division by $N$),
+magnitude $|X_m[k]|$, and decibels
 
-$$P_{\mathrm{dB}} = 10 \log_{10} \max\\!\left(P, \\; 10^{\\,\mathrm{floor}/10}\right)$$
+$$P_{\mathrm{dB}} = 10 \log_{10} \max\!\left(P, \; 10^{\,\mathrm{floor}/10}\right)$$
 
 in dB **re 1** (an absolute reference), where floor is the `LogParams` value in
 dB. `LogParams::new(-80.0)` clamps at power $10^{-8}$; it is **not** librosa's
@@ -93,7 +95,7 @@ let err = x.as_slice().unwrap().iter().zip(y.as_slice().unwrap())
 assert!(err < 1e-12); // measured: about 3e-16
 ```
 
-The trade-off, measured. Two tones 50 Hz apart, and a click, analysed with a
+Measuring the trade-off: two tones 50 Hz apart, and a click, analysed with a
 16 ms and a 128 ms window (hop 2 ms in both):
 
 ```rust
@@ -129,10 +131,12 @@ let analyse = |n: usize| -> (usize, f64) {
 let (peaks_short, spread_short) = analyse(256);   // 16 ms window, Δf = 62.5 Hz
 let (peaks_long, spread_long) = analyse(2048);    // 128 ms window, Δf = 7.8 Hz
 assert_eq!((peaks_short, peaks_long), (1, 2));    // only the long window resolves 50 Hz
-assert_eq!((spread_short, spread_long), (6.0, 46.0)); // ... and smears the click 8x more
+assert_eq!((spread_short, spread_long), (6.0, 46.0)); // ... and spreads the click 8x wider
 ```
 
-Spectrogram flavours and the absolute dB floor. A full-scale 1 kHz sine is
+<!-- figure: ch04-tradeoff -->
+
+Spectrogram types and the absolute dB floor. A full-scale 1 kHz sine is
 bin-centred for $N = 512$ at 16 kHz (bin 32), so its peak power is
 $(\sum w / 2)^2$ and its dB value is $20\log_{10}(255.5/2) = 42.13$ dB re 1:
 **above** 0 dB.
@@ -156,7 +160,7 @@ assert_eq!((lin.data().nrows(), loghz.data().nrows(), mel.data().nrows()), (257,
 let peak_db = lin.data().iter().copied().fold(f64::MIN, f64::max);
 assert!((peak_db - 42.13).abs() < 0.01);
 
-// Silence sits exactly at the floor: -80 dB re 1, whatever else is in the file.
+// Silence is exactly at the floor: -80 dB re 1, whatever else is in the file.
 let quiet = silence::<f64>(Duration::from_millis(250), sample_rate!(16000));
 let q = quiet.linear_db_spectrogram(&sp, &floor).unwrap();
 assert!(q.data().iter().all(|&v| (v + 80.0).abs() < 1e-9));
@@ -168,7 +172,9 @@ let best = (0..40).max_by(|&i, &j| mel.data().row(i).sum().total_cmp(&mel.data()
 assert!((f[best] - 1031.0).abs() < 1.0);
 ```
 
-## Under the hood
+<!-- figure: ch04-chirp -->
+
+## How it works
 
 Rebuild one frame from the definition (pad, slice, window, DFT), check the
 power spectrogram is $|X|^2$, and measure the overlap-add sums that `istft`
@@ -215,7 +221,7 @@ let (lo, hi) = sum_w.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b
 let ripple = (hi - lo) / mean;
 // The symmetric Hann at 75 % overlap is *almost* COLA (sum ~ 2), not exactly.
 assert!((mean - 2.0).abs() < 0.01 && ripple > 0.0 && ripple < 0.01);
-// NOLA holds comfortably, so istft is exact anyway.
+// NOLA holds with a wide margin, so istft is exact regardless.
 assert!(sum_w2.iter().copied().fold(f64::MAX, f64::min) > 1.0);
 let doc = params.explain();
 assert!((doc.quantity("Overlap-add ripple").unwrap().value - ripple).abs() < 1e-6);
@@ -224,9 +230,9 @@ assert!((doc.quantity("Overlap-add ripple").unwrap().value - ripple).abs() < 1e-
 ## Ask the library to explain
 
 `StftParams` implements [`Explain`](crate::educational::Explain). Through a
-signal ([`ExplainFor`](crate::educational::ExplainFor)) it knows the sample
-rate and length; add the expected pitch range and it warns when the window is
-too short for the lowest voice:
+signal ([`ExplainFor`](crate::educational::ExplainFor)) it receives the sample
+rate and length; given the expected pitch range as well, it warns when the
+window is too short for the lowest expected f0:
 
 ```rust
 use audio_samples::educational::{Explain, ExplainContext, ExplainFor, WarningLevel};
@@ -261,10 +267,10 @@ println!("{doc}");
 
 1. How many frames does `stft` produce for 2.5 s of audio at 22.05 kHz with
    $N = 2048$, $H = 512$ and centring? Predict, then check.
-2. At 16 kHz you want one frame every 10 ms. Choose $H$, then the smallest
+2. At 16 kHz, one frame is required every 10 ms. Choose $H$, then the smallest
    power-of-two $N$ for each of two requirements: (a) a **bin spacing**
    $f_s/N$ of at most 20 Hz; (b) a Hann **main lobe** ($-6$ dB width about
-   $2 f_s/N$, the real resolution) of at most 20 Hz. Confirm (a) with the
+   $2 f_s/N$, the actual resolution) of at most 20 Hz. Confirm (a) with the
    explainer.
 3. A signal is 0.5 s of a full-scale 1 kHz sine followed by 0.5 s of silence.
    With `LogParams::new(-100.0)`, what value do the bins of the last frame
@@ -331,17 +337,18 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
   (`pad_mode='constant'`). Older librosa (< 0.10) and `torch.stft` default to
   reflection, so their first and last frames differ.
 * The window is the **symmetric** Hann; librosa and SciPy use the periodic
-  one. Against current librosa this, not the padding, is the real difference:
-  values differ slightly unless you pass the symmetric window yourself.
+  one. Compared with current librosa, this, not the padding, is the remaining
+  difference: values differ slightly unless librosa is given the symmetric
+  window.
 * dB values are **re 1** with an absolute floor; there is no `top_db`.
-  Subtract the maximum yourself to get "dB below peak".
+  Subtract the maximum to get "dB below peak".
 * Power is $|X|^2$ with no $1/N$ or window normalisation: a full-scale sine
   reads about $+42$ dB at $N = 512$, and the number grows with $N$.
 * `istft` can return up to $H - 1$ samples fewer than the input; trim or pad.
-* The mel spectrogram's `frequencies()` axis is only right for
+* The mel spectrogram's `frequencies()` axis is correct only for
   $f_\mathrm{min} = 0$ and $f_\mathrm{max} = f_s/2$ in `spectrograms` 2.1.3.
-* A smaller hop does not sharpen anything; only $N$ (and the window shape)
-  sets resolution.
+* A smaller hop does not improve resolution; only $N$ (and the window shape)
+  sets it.
 
 ## References
 
@@ -362,8 +369,8 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
 * [`Explain`](crate::educational::Explain),
   [`ExplainContext::with_f0_range`](crate::educational::ExplainContext::with_f0_range),
   [`topics::window`](crate::educational::topics::window)
-* Previous: [03. The DFT, windows and leakage](crate::guide::c03_dft_windows).
-  Next: [05. Convolution and FIR filters](crate::guide::c05_convolution_fir).
-  Mel features in depth: [10. Cepstrum, mel and MFCC](crate::guide::c10_cepstrum_mel_mfcc).
+* Previous: [03. The DFT, windows and leakage](03_dft_windows.md).
+  Next: [05. Convolution and FIR filters](05_convolution_fir.md).
+  Mel features in depth: [10. Cepstrum, mel and MFCC](10_cepstrum_mel_mfcc.md).
 * Lab: `examples/tutorial_04_stft_spectrograms.rs`
   (`cargo run --release --example tutorial_04_stft_spectrograms --features educational,full_no_plotting`).

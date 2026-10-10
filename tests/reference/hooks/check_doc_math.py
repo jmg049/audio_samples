@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
-"""Find LaTeX in rustdoc/markdown maths that markdown will corrupt.
+"""Find maths escaping mistakes in the doc comments and the guide.
 
-Rustdoc renders doc comments and the guide chapters as CommonMark *before*
+Two conventions are in use:
+
+* Doc comments in src/**/*.rs are rendered by rustdoc directly, so their maths
+  must be escaped for rustdoc (described below).
+* The guide chapters (documentation/guide/*.md) are plain Markdown with plain
+  LaTeX maths; build.rs escapes them for rustdoc. Rustdoc-style escapes there
+  break every other renderer, so the check reports `\\[`, `\\]` (KaTeX:
+  "Undefined control sequence") and a doubled backslash before `,;:!{}#%&_`
+  (in plain LaTeX `\\\\` is a line break).
+
+Rustdoc renders doc comments as CommonMark *before*
 KaTeX sees the page. CommonMark treats a backslash followed by ASCII
 punctuation as an escape and drops the backslash, so inside `$...$` or
 `$$...$$`:
@@ -14,7 +24,7 @@ Write the backslash twice (`\\\\,`, `\\\\{`) so that one survives markdown.
 `\\[` and `\\]` are NOT reported: they are used on purpose to render literal
 brackets (e.g. x\\[n\\]).
 
-Scans documentation/guide/*.md and the `//!` / `///` comments of src/**/*.rs.
+Scans the `//!` / `///` comments of src/**/*.rs and documentation/guide/*.md.
 Fenced code blocks and inline code spans are skipped. Prints one line per
 finding as `path:line: <escape> in <maths span>` and exits 1 if any are found.
 
@@ -83,17 +93,23 @@ def bad_escapes(span: str):
         i = j
 
 
-def scan_markdown(text: str):
+def rustdoc_escapes(span: str):
+    """Yield (offset, escape) for rustdoc-style escapes in plain-LaTeX maths."""
+    for m in re.finditer(r"(?<!\\)(?:\\\\)*(\\[\[\]]|\\\\[,;:!{}#%&_])", span):
+        yield m.start(1), m.group(1)
+
+
+def scan_markdown(text: str, find=bad_escapes):
     """Yield (offset, escape, span) for every finding in markdown `text`."""
     clean = strip_code(text)
     for m in DISPLAY.finditer(clean):
-        for off, esc in bad_escapes(m.group(1)):
+        for off, esc in find(m.group(1)):
             yield m.start(1) + off, esc, m.group(0)
     no_display = clean
     for m in reversed(list(DISPLAY.finditer(clean))):
         no_display = blank(no_display, m.start(), m.end())
     for m in INLINE.finditer(no_display):
-        for off, esc in bad_escapes(m.group(1)):
+        for off, esc in find(m.group(1)):
             yield m.start(1) + off, esc, m.group(0)
 
 
@@ -108,8 +124,10 @@ def short(span: str, width: int = 90) -> str:
 
 def check_md(path: Path, root: Path, out: list[str]) -> None:
     text = path.read_text(encoding="utf-8")
-    for off, esc, span in scan_markdown(text):
-        out.append(f"{path.relative_to(root)}:{line_of(text, off)}: {esc} in {short(span)}")
+    for off, esc, span in scan_markdown(text, rustdoc_escapes):
+        out.append(
+            f"{path.relative_to(root)}:{line_of(text, off)}: rustdoc-style {esc} in plain-LaTeX {short(span)}"
+        )
 
 
 DOC_LINE = re.compile(r"^\s*//(?:!|/(?!/))( ?)(.*)$")
@@ -146,7 +164,7 @@ def main() -> int:
         check_rs(p, root, out)
     for line in out:
         print(line)
-    print(f"{len(out)} markdown-eaten escape(s) in maths spans", file=sys.stderr)
+    print(f"{len(out)} maths escaping problem(s)", file=sys.stderr)
     return 1 if out else 0
 
 

@@ -1,13 +1,13 @@
 # 14. Psychoacoustics and codecs
 
-Telephone speech, MP3, AAC and Opus all throw information away. Telephone
-speech (G.711) does it bluntly, by band-limiting and by companding: coarse
-steps for loud samples, fine steps for quiet ones. Perceptual codecs (MP3, AAC,
-Opus) get away with much more because the ear cannot hear everything that is
-in the signal: quiet sounds near loud ones are masked, and very quiet sounds
-fall below the threshold of hearing. (Perceived loudness, for its part, grows
+Telephone speech, MP3, AAC and Opus all discard information. Telephone speech
+(G.711) does so with simple, signal-independent methods: band-limiting and
+companding (coarse steps for loud samples, fine steps for quiet ones).
+Perceptual codecs (MP3, AAC, Opus) discard much more, because not everything
+in the signal is audible: quiet sounds near loud ones are masked, and very
+quiet sounds fall below the threshold of hearing. (Perceived loudness grows
 roughly as a power of sound intensity, Stevens' power law, rather than in
-proportion to it.) This chapter puts numbers on those effects, implements
+proportion to it.) This chapter quantifies those effects, implements
 G.711 μ-law companding from the standard, and measures the library's
 perceptual codec.
 
@@ -19,7 +19,7 @@ quantity,
 $$L_p = 20 \log_{10}(p / p_0) \ \text{dB SPL}, \quad p_0 = 20\ \mu\text{Pa}$$
 
 where $p$ is the RMS sound pressure in pascals; 1 Pa is 93.98 dB SPL. Digital
-audio only knows **dBFS**, decibels relative to digital full scale
+audio has only **dBFS**, decibels relative to digital full scale
 ($20\log_{10}$ of an amplitude, full scale = 1). As in chapters 02 and 11, an
 RMS level of 0 dBFS here is an RMS of 1, so a full-scale sine is $-3.01$ dBFS
 (AES17 calls the same sine 0 dBFS); a level read from the largest sample is
@@ -34,7 +34,7 @@ overlapping auditory filters whose bandwidth grows with frequency. Zwicker's
 *critical bandwidth* (the Bark scale) is roughly constant, about 100 Hz, below
 about 500 Hz and roughly proportional to frequency above; the *equivalent
 rectangular bandwidth* (ERB) of Glasberg and Moore grows steadily with
-frequency even at low frequencies. Three scales capture this; this library
+frequency even at low frequencies. Three scales describe this; this library
 implements them as follows.
 
 - **Mel (HTK form)**, in
@@ -54,14 +54,18 @@ implements them as follows.
   ERB-number scale $E(f) = 21.4 \log_{10}(1 + 0.00437 f)$ Cam, which the
   library does not provide; we compute it below.
 
+<!-- figure: ch14-scales -->
+
 **Absolute threshold of hearing.** Terhardt's (1979) fit to the threshold in
 quiet, in dB SPL with $f$ in Hz and $k = f / 1000$:
 
-$$T_q(f) = 3.64\\, k^{-0.8} - 6.5\\, e^{-0.6 (k - 3.3)^2} + 10^{-3} k^4$$
+$$T_q(f) = 3.64\, k^{-0.8} - 6.5\, e^{-0.6 (k - 3.3)^2} + 10^{-3} k^4$$
 
 It is high at low frequencies, has a minimum of about $-5$ dB SPL near
 3.3 kHz (the ear-canal resonance), and rises again above that minimum, slowly
 at first and steeply above about 10 kHz.
+
+<!-- figure: ch14-threshold -->
 
 **Simultaneous masking.** A loud component raises the threshold for other
 components nearby in frequency. Measured on the Bark scale, the masked
@@ -75,10 +79,10 @@ $$S(\Delta z) = 15.81 + 7.5(\Delta z + 0.474) - 17.5\sqrt{1 + (\Delta z + 0.474)
 where $\Delta z$ is the maskee's Bark position minus the masker's. Far from the
 masker its slopes approach $7.5 - 17.5 = -10$ dB/Bark above and
 $7.5 + 17.5 = +25$ dB/Bark below. Noise-like maskers mask more than tones: in
-Johnston's (1988) model the masked threshold sits about 5.5 dB below a noise
+Johnston's (1988) model the masked threshold lies about 5.5 dB below a noise
 masker but $14.5 + z$ dB below a tonal one, where $z$ is the masker's Bark
 position (so about 15.5 to 38.5 dB across the 24 critical bands). A perceptual coder may add quantisation noise up
-to the masked threshold without it being audible, so it spends bits only
+to the masked threshold without it being audible, so it allocates bits only
 where the **signal-to-mask ratio** (signal level minus masked threshold, dB)
 is positive.
 
@@ -96,9 +100,9 @@ uniform quantisation gives quiet talkers a poor SNR (6.02 dB per bit, minus
 every dB the signal is below full scale; chapter 02). Companding quantises
 the *logarithm* of the amplitude instead. The continuous μ-law curve is
 
-$$F(x) = \mathrm{sgn}(x)\\, \frac{\ln(1 + \mu |x|)}{\ln(1 + \mu)}, \quad \mu = 255$$
+$$F(x) = \mathrm{sgn}(x)\, \frac{\ln(1 + \mu |x|)}{\ln(1 + \mu)}, \quad \mu = 255$$
 
-for $x \in \[-1, 1\]$. G.711 implements a segmented (piecewise-linear)
+for $x \in [-1, 1]$. G.711 implements a segmented (piecewise-linear)
 approximation: a **14-bit** linear sample becomes an **8-bit** code made of a
 sign bit, a 3-bit segment number and a 4-bit mantissa. The magnitude plus a
 bias of 33 is located in one of 8 segments (each twice as wide as the last);
@@ -117,7 +121,7 @@ transform with perfect reconstruction, but they use it differently:
 
 - **MP3** (MPEG-1 Layer III) uses a *hybrid* filterbank: a 32-band polyphase
   filterbank followed by an MDCT in each band. A psychoacoustic model computes
-  the masked threshold per band, and a bit allocator spends bits where the
+  the masked threshold per band, and a bit allocator assigns bits where the
   signal-to-mask ratio is high.
 - **AAC** uses a plain MDCT with 50 % overlap (long and short blocks) and the
   same principle: a psychoacoustic model sets the masked threshold per band,
@@ -190,7 +194,10 @@ assert!((below - 26.5).abs() < 1e-4);
 assert!((spreading_attenuation(10.0, 10.0, MaskerType::Noise, &cfg) - 5.5).abs() < 1e-6);
 ```
 
-The perceptual codec trades bits for noise. Encode half a second of a 1 kHz
+<!-- figure: ch14-masking -->
+
+In the perceptual codec, a larger bit budget gives less quantisation noise.
+Encode half a second of a 1 kHz
 tone (24 Bark bands, 2048-sample MDCT) with two bit budgets and measure the
 SNR of the decoded signal:
 
@@ -223,11 +230,13 @@ assert!((high - 50.6).abs() < 1.0);
 assert!(high > low);
 ```
 
-SNR is *not* the codec's goal, though: a perceptual codec aims to keep the
+SNR is *not* what the codec optimises: a perceptual codec aims to keep the
 noise below the masked threshold, which can sound transparent at an SNR far
 below what a waveform coder would need.
 
-## Under the hood
+<!-- figure: ch14-codec-snr -->
+
+## How it works
 
 **The threshold of hearing and the spreading function, from the formulas.**
 
@@ -316,6 +325,8 @@ assert!((sl[0] - sl[4] - 40.0).abs() < 1.5);
 assert!(su[4] > sl[4] + 20.0);
 ```
 
+<!-- figure: ch14-mulaw -->
+
 The library's compressor equals the curve written out by hand (so
 $F(0) = 0$ and $F(\pm 1) = \pm 1$), and its expander inverts it:
 
@@ -359,7 +370,7 @@ assert!((doc.quantity("SQNR (full-scale sine)").unwrap().value - 49.92).abs() < 
 
 ## Exercises
 
-1. **Where is 4 kHz?** Predict roughly how many Bark lie between 1 kHz and
+1. **Bark distance.** Predict roughly how many Bark lie between 1 kHz and
    4 kHz, then compute it with `hz_to_bark`.
 2. **Threshold at 50 Hz.** Is a 50 Hz tone at 30 dB SPL audible in quiet
    according to Terhardt's formula?
@@ -465,8 +476,8 @@ assert!((spl - 82.0).abs() < 1e-12);
 - [`PerceptualCodec`](crate::PerceptualCodec), [`codecs::encode`](crate::codecs::encode),
   [`codecs::decode`](crate::codecs::decode), [`codecs::opus`](crate::codecs::opus)
 - [`AudioProcessing::mu_expand`](crate::AudioProcessing::mu_expand)
-- Previous chapter: [13. Onsets and tempo](crate::guide::c13_onsets_tempo);
-  quantisation basics: [02. Quantisation and dither](crate::guide::c02_quantisation_dither);
-  the mel scale in practice: [10. Cepstrum, mel and MFCC](crate::guide::c10_cepstrum_mel_mfcc)
+- Previous chapter: [13. Onsets and tempo](13_onsets_tempo.md);
+  quantisation basics: [02. Quantisation and dither](02_quantisation_dither.md);
+  the mel scale in practice: [10. Cepstrum, mel and MFCC](10_cepstrum_mel_mfcc.md)
 - Lab: `examples/tutorial_14_psychoacoustics_codecs.rs`
   (`cargo run --release --example tutorial_14_psychoacoustics_codecs --features educational,full_no_plotting`)

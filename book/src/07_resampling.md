@@ -1,0 +1,1 @@
+../../documentation/guide/07_resampling.md

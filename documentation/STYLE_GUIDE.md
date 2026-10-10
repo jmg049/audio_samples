@@ -162,7 +162,7 @@ Function signatures should remain visually clean and readable.
 * Avoid deeply nested generic expressions in signatures
 * If a signature becomes difficult to scan, refactor
 
-Readability is a design constraint. This is ***hard*** at times in audio_samples due to the conversion traits, but we strive to do better.
+Readability is a design constraint. The conversion traits make this difficult in places.
 
 ---
 
@@ -199,7 +199,7 @@ Panics are not forbidden, but they are **never implicit**.
 
 * Any panic condition must be documented
 * Panics must indicate programmer error, not recoverable failure
-* Any panic will be treated with a lot of suspicion.
+* Any panic is scrutinised in review.
 
 ---
 
@@ -212,7 +212,7 @@ Unsafe code must be:
 
 Every `unsafe` block must have a comment explaining *why it is safe*. Every `unsafe fn` must document its safety contract.
 
-Unsafe is not something to be scared off. This library aims to encode a lot of invariants that cannot always be captured by the type system. Hence in those scenarious using unsafe functions is fine. As long as they are justified and correct in their assumptions.
+Unsafe code is permitted. The library encodes invariants that the type system cannot always express, and in those cases unsafe functions are acceptable as long as they are justified and their assumptions are correct.
 
 ---
 

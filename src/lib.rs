@@ -1,7 +1,8 @@
 //! # AudioSamples
 //!
-//! A typed audio processing library for Rust that treats audio as a first-class,
-//! invariant-preserving object rather than an unstructured numeric buffer.
+//! A typed audio processing library for Rust that represents audio as a typed
+//! object that keeps its sample rate, channel layout and other invariants, rather
+//! than as an unstructured numeric buffer.
 //!
 //! `audio_samples` provides a single central type, [`AudioSamples<T>`], that pairs raw
 //! PCM data (backed by [`ndarray`](https://docs.rs/ndarray)) with essential metadata:
@@ -105,7 +106,7 @@
 //! (note names, enum `FromStr`) additionally carry a source span pointing a caret
 //! at the offending character. Enable the `fancy` feature to render the coloured
 //! caret-underline output (see `examples/error_diagnostics.rs`); library consumers
-//! who do not opt in get plain [`Display`](std::fmt::Display) output and pay nothing for graphical
+//! who do not opt in get plain [`Display`](std::fmt::Display) output and do not compile the graphical
 //! dependencies.
 //!
 //! ```rust
@@ -125,7 +126,7 @@
 //!
 //! ## Full Examples
 //!
-//! Examples live in the repository (see `examples/`) and in the crate-level docs on
+//! Examples are in the repository (see `examples/`) and in the crate-level docs on
 //! <https://docs.rs/audio_samples>.
 //!
 //! ## Quick Start

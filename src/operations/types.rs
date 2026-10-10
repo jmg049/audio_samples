@@ -2761,7 +2761,7 @@ impl ParametricEq {
     /// Creates a five-band EQ preset with all gains at 0 dB.
     ///
     /// Bands: 100 Hz low shelf, 300 Hz peak, 1 kHz peak, 3 kHz peak, 8 kHz high shelf.
-    /// All gains are initialised to 0.0 dB; adjust individual bands to taste.
+    /// All gains are initialised to 0.0 dB; adjust individual bands as required.
     ///
     /// # Returns
     ///

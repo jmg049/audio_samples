@@ -1,12 +1,11 @@
 # 13. Onsets and tempo
 
-Where does each note or drum hit begin, and how fast is the music? Onset
-detection marks the instants at which new sound energy appears; tempo
-estimation looks for the period with which those instants repeat. Both are
-built on an *onset detection function* (ODF), one number per analysis frame,
-and both inherit its quirks, so this chapter is careful about units (samples,
-frames, seconds, beats per minute) and honest about where the library's
-defaults fall short.
+Onset detection marks the instants at which new sound energy appears, such as
+the start of a note or a drum hit; tempo estimation finds the period with
+which those instants repeat. Both are built on an *onset detection function*
+(ODF), one number per analysis frame, and both inherit its limitations, so this
+chapter states units explicitly (samples, frames, seconds, beats per minute)
+and notes where the library's defaults fall short.
 
 ## Concept
 
@@ -15,10 +14,10 @@ is centred at $t H / f_s$ seconds ($f_s$ the sample rate in Hz). At
 $H = 512$ and $f_s = 44.1$ kHz a frame lasts $H/f_s = 11.61$ ms and there are
 $f_s/H = 86.13$ frames per second.
 
-**Spectral flux.** With $|X_b\[t\]|$ the magnitude of frequency bin $b$ in frame
+**Spectral flux.** With $|X_b[t]|$ the magnitude of frequency bin $b$ in frame
 $t$, the half-wave-rectified flux is
 
-$$o\[t\] = \sum_{b} \max\left(0, \\, |X_b\[t\]| - |X_b\[t-1\]|\right), \qquad o\[0\] = 0$$
+$$o[t] = \sum_{b} \max\left(0, \, |X_b[t]| - |X_b[t-1]|\right), \qquad o[0] = 0$$
 
 Only *increases* count, so note offsets do not create onsets. This crate
 evaluates it on a constant-Q transform (CQT) whose $b_o O$ bins ($b_o$ per
@@ -31,7 +30,7 @@ zero (`adaptive_threshold`, $\mu$ = `adaptive_threshold_multiplier`).
 **Peak picking**, as implemented by
 [`pick_peaks`](crate::operations::peak_picking::pick_peaks), all in **frames**:
 optional pre-emphasis and median filtering; normalisation by the maximum; a
-threshold $\theta\[i\] = \mathrm{clamp}(\max_{|j - i| \le w/2} o\[j\] - \delta, \\, \theta_{lo}, \theta_{hi})$
+threshold $\theta[i] = \mathrm{clamp}(\max_{|j - i| \le w/2} o[j] - \delta, \, \theta_{lo}, \theta_{hi})$
 (window $w$ frames, $\delta = 0.05$, $\theta_{lo} = 0.01$, $\theta_{hi} = 1$ by default);
 strict local maxima above it; finally, peaks are accepted strongest first and
 dropped if closer than $s$ frames to an accepted one. A peak at frame $i$ is
@@ -40,14 +39,14 @@ reported at $t_i = i H / f_s$ seconds.
 **Tempo.** A tempo of $\beta$ beats per minute (BPM) is an inter-beat
 interval of $60/\beta$ seconds, i.e. a lag of
 
-$$\ell = \frac{60 \\, f_s}{\beta \\, H} \ \text{frames}, \qquad \beta = \frac{60 \\, f_s}{H \\, \ell}$$
+$$\ell = \frac{60 \, f_s}{\beta \, H} \ \text{frames}, \qquad \beta = \frac{60 \, f_s}{H \, \ell}$$
 
 [`estimate_tempo`](crate::operations::AudioBeatTracking::estimate_tempo)
 smooths the ODF (7-frame moving average), compresses it ($\ln(1 + 0.5 x)$),
-removes the mean and computes $a(\ell) = \frac{1}{n - \ell} \sum_i c\[i\] \\, c\[i-\ell\]$
+removes the mean and computes $a(\ell) = \frac{1}{n - \ell} \sum_i c[i] \, c[i-\ell]$
 for the integer lags that map into 40-240 BPM. Each lag is weighted by a
 log-normal prior centred on 120 BPM, $w(\beta) = \exp\left(-\frac{1}{2} \log_2^2 (\beta/120)\right)$,
-and the best $a(\ell) w(\beta)$ wins. Two consequences: estimates lie on the grid
+and the lag with the largest $a(\ell) w(\beta)$ is chosen. Two consequences: estimates lie on the grid
 $60 f_s / (H \ell)$ (117.45, 120.19, 123.05 BPM around 120), and a periodic
 envelope correlates at $2\ell$ and $3\ell$ too, so **metrical-level errors**
 remain possible: half the tempo (an octave error) or a third of it. The prior
@@ -92,7 +91,7 @@ assert!(pp.pre_emphasis && pp.pre_emphasis_coeff == 0.97 && !pp.median_filter);
 let onsets = audio.detect_onsets(&config).unwrap();
 println!("{onsets:.4?}");
 assert_eq!(onsets.len(), 4);
-// Peaks land on frames 19, 62, 105, 148: 43 frames apart (0.4992 s, not 0.5 s).
+// Peaks fall on frames 19, 62, 105, 148: 43 frames apart (0.4992 s, not 0.5 s).
 let frames: Vec<f64> = onsets.iter().map(|t| (t * 44_100.0 / 512.0).round()).collect();
 assert_eq!(frames, vec![19.0, 62.0, 105.0, 148.0]);
 // Reported times precede the bursts by 29 to 32 ms: the 72.7 ms window
@@ -106,14 +105,16 @@ for (k, t) in onsets.iter().enumerate() {
 The lead grows by 0.77 ms per burst because onset times are quantised to
 whole frames: 0.5 s is 43.07 frames, and the detector can only report 43.
 
+<!-- figure: ch13-onsets -->
+
 **The defaults, in frames.** The default
 [`PeakPickingConfig`](crate::operations::types::PeakPickingConfig) pre-emphasises
-the ODF ($o\[i\] - 0.97\, o\[i-1\]$), applies no median filter, normalises by the
+the ODF ($o[i] - 0.97\, o[i-1]$), applies no median filter, normalises by the
 maximum, and thresholds with a 9-frame window (104.5 ms), $\delta = 0.07$ and a
 floor $\theta_{lo} = 0.1$; peaks closer than 3 frames (34.8 ms) are merged.
 
-The floor has a cost. After normalisation it means that no peak weaker than
-a tenth of the strongest one in the clip is reported. On the lab's
+The floor removes weak onsets. After normalisation, no peak weaker than a
+tenth of the strongest one in the clip is reported. On the lab's
 eight-burst track the defaults find only 5 onsets: the first three bursts
 peak at 0.030, 0.025 and 0.087 of the strongest (the CQT response varies from
 click to click; see below). Lowering `adaptive_threshold.min_threshold` to
@@ -122,16 +123,16 @@ click to click; see below). Lowering `adaptive_threshold.min_threshold` to
 Earlier releases sized these lengths as if they counted audio samples
 (threshold window 1024, separation 512, median length 3). Switching such
 values on one at a time from the configuration with the 0.01 floor (the lab,
-on 8 bursts) shows why that fails: the length-3 median deletes every one-frame
+on 8 bursts) shows the effect of each: the length-3 median deletes every one-frame
 peak (0 onsets); a 1024-frame threshold window, clipped to the signal length,
 makes the threshold the global maximum minus $\delta$ (1 onset); a 512-frame
 separation, reduced to a quarter of the signal (91 frames, 1.06 s), keeps only
-3. Switching pre-emphasis off changes nothing on this signal (8). Note also
-that `threshold`, `min_onset_interval_secs` and `pre_emphasis` on
+3. Switching pre-emphasis off changes nothing on this signal (8). The fields
+`threshold`, `min_onset_interval_secs` and `pre_emphasis` on
 [`OnsetDetectionConfig`](crate::operations::onset::OnsetDetectionConfig)
 itself are not read by `detect_onsets` (the explanation below says so).
 
-## Under the hood
+## How it works
 
 **The ODF.** Compute the CQT magnitude with the same parameters and sum the
 rectified frame-to-frame increases; with the median-based zeroing switched off,
@@ -286,14 +287,16 @@ assert!((60.0 * fs / (hop * 43.0) - 120.19).abs() < 0.005);
 assert!((60.0 * fs / (hop * 129.0) - 40.06).abs() < 0.005);
 ```
 
-Why half? The lab (a ten-click track, slightly different from the twelve-click
-track above) prints the ODF at each of its 80 BPM clicks: 0.88, 0.0,
-2.6, 0.08, 13.42, 0.71, 0.0, 3.27, 0.03, 8.69. Every other click nearly
-vanishes (the CQT response variation again), so the envelope really does
-repeat every *two* beats: its autocorrelation at lag 129 (0.00240) is twenty
-times that at lag 65 (0.00012), more than the prior (0.29 against 0.84) can
-overcome. At 174 BPM the lab finds 58.07 BPM, a third of the tempo (lag 89,
-almost exactly $3 \times 29.7$). The estimate is right at 60, 100, 120 and
+<!-- figure: ch13-tempo -->
+
+The halving comes from the ODF. The lab (a ten-click track, slightly different
+from the twelve-click track above) prints the ODF at each of its 80 BPM clicks:
+0.88, 0.0, 2.6, 0.08, 13.42, 0.71, 0.0, 3.27, 0.03, 8.69. Every other click is
+close to zero (the CQT response variation again), so the envelope repeats
+every *two* beats: its autocorrelation at lag 129 (0.00240) is twenty times
+that at lag 65 (0.00012), a larger ratio than the prior weights (0.29 against
+0.84) can reverse. At 174 BPM the lab finds 58.07 BPM, a third of the tempo (lag 89,
+almost exactly $3 \times 29.7$). The estimate is correct at 60, 100, 120 and
 140 BPM (60.09, 99.38, 120.19, 139.67).
 
 ## Ask the library to explain
@@ -347,7 +350,7 @@ assert!((ms - 52.24).abs() < 0.005);
 ```
 
 **2.** Lags 42, 43 and 44 frames: 123.05, 120.19 and 117.45 BPM. Lag 41
-(126.05 BPM) and lag 45 (114.84 BPM) fall just outside.
+(126.05 BPM) and lag 45 (114.84 BPM) lie outside the range.
 
 ```rust
 let bpm = |lag: f64| 60.0 * 44_100.0 / (512.0 * lag);
@@ -357,14 +360,14 @@ let in_range: Vec<f64> = (30..60)
     .map(|b| (b * 100.0).round() / 100.0)
     .collect();
 assert_eq!(in_range, vec![123.05, 120.19, 117.45]);
-// The neighbours just outside the range, and all five values to 0.01 BPM.
+// The neighbours immediately outside the range, and all five values to 0.01 BPM.
 let grid: Vec<f64> = (41..=45).map(|l| (bpm(l as f64) * 100.0).round() / 100.0).collect();
 assert_eq!(grid, vec![126.05, 123.05, 120.19, 117.45, 114.84]);
 ```
 
 **3.** The lag doubles (86 frames at 120 BPM) and the spacing between grid
 points roughly halves: from 2.73 BPM (lags 43, 44 at $H = 512$) to 1.38 BPM
-(lags 86, 87 at $H = 256$). The estimate gets finer, at twice the cost.
+(lags 86, 87 at $H = 256$). The grid is finer, at twice the computational cost.
 
 ```rust
 let bpm = |lag: f64, hop: f64| 60.0 * 44_100.0 / (hop * lag);
@@ -378,7 +381,7 @@ assert!((fine - 1.38).abs() < 0.005);
 
 - **Frames, not samples.** Every peak-picking length counts ODF frames
   ($H$ samples each). Convert with frames = seconds $\times f_s / H$.
-- **The default floor hides weak onsets.** The ODF is normalised by its
+- **The default floor removes weak onsets.** The ODF is normalised by its
   maximum and the default threshold never drops below 0.1, so an onset whose
   (pre-emphasised) peak is under a tenth of the clip's strongest is not
   reported. Lower `adaptive_threshold.min_threshold` for material with a wide
@@ -413,7 +416,7 @@ assert!((fine - 1.38).abs() < 0.005);
 - [`AudioBeatTracking::estimate_tempo`](crate::operations::AudioBeatTracking::estimate_tempo),
   [`AudioBeatTracking::detect_beats`](crate::operations::AudioBeatTracking::detect_beats),
   [`onset_strength_envelope`](crate::operations::beat::onset_strength_envelope).
-- Previous chapter: [`c12_dynamics`](crate::guide::c12_dynamics); next:
-  [`c14_psychoacoustics_codecs`](crate::guide::c14_psychoacoustics_codecs).
+- Previous chapter: [`c12_dynamics`](12_dynamics.md); next:
+  [`c14_psychoacoustics_codecs`](14_psychoacoustics_codecs.md).
 - Lab: `examples/tutorial_13_onsets_tempo.rs`
   (`cargo run --release --example tutorial_13_onsets_tempo --features educational,full_no_plotting`).

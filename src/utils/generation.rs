@@ -11,7 +11,7 @@
 //! provided when the `channels` feature is enabled. A `MonoSampleBuilder` for constructing
 //! concatenated sequences through method chaining is available when `editing` is enabled.
 
-//! Generated signals are the backbone of audio unit tests, benchmarks, and DSP prototyping.
+//! Generated signals are used in audio unit tests, benchmarks, and DSP prototyping.
 //! By centralising generators in this module, dependent code can produce reproducible test
 //! data without reaching for external audio files.
 

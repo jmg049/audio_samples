@@ -1,8 +1,8 @@
 //! Audio utility functions demonstration.
 //!
-//! This example showcases the various audio mathematics utility functions
-//! available in the audio_samples library, demonstrating conversions between
-//! different audio-related scales and measurements.
+//! This example runs the audio mathematics utility functions in
+//! audio_samples: conversions between frequency, mel, MIDI, decibel and time
+//! scales.
 
 use audio_samples::{
     AudioSampleResult,
@@ -164,7 +164,7 @@ fn musical_theory_demo() -> AudioSampleResult<()> {
         );
     }
 
-    println!("\n🎹 Piano Range Demonstration:");
+    println!("\nPiano Range:");
     println!("  Piano typically spans MIDI notes 21-108:");
     let piano_notes = [21, 24, 36, 48, 60, 72, 84, 96, 108]; // A0, C1, C2, C3, C4, C5, C6, C7, C8
 
@@ -174,7 +174,7 @@ fn musical_theory_demo() -> AudioSampleResult<()> {
         println!("  MIDI {} ({}) = {:.2} Hz", midi, note, freq);
     }
 
-    println!("\n🎸 Guitar String Frequencies:");
+    println!("\nGuitar String Frequencies:");
     let guitar_tuning = [
         ("E2", "6th string (lowest)"),
         ("A2", "5th string"),

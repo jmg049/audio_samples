@@ -1,22 +1,19 @@
 //! Audio-domain mathematical utilities and canonical unit conversions.
 //!
-//! This module provides a coherent set of domain-level transformations commonly required
-//! when working with audio signals, spectral representations, and musical abstractions.
-//! It centralises conversions between physical units (time, frequency, amplitude, power),
-//! perceptual scales (mel, decibels, cents), and symbolic musical representations
-//! (note names, MIDI numbers), so that higher-level code can remain focused.
+//! This module provides the conversions commonly needed when working with audio signals,
+//! spectral representations, and musical abstractions: between physical units (time,
+//! frequency, amplitude, power), perceptual scales (mel, decibels, cents), and symbolic
+//! musical representations (note names, MIDI numbers).
 //!
-//! The primary role of this module within the crate is to establish a single, predictable
-//! interpretation of these conversions. Audio systems frequently accumulate subtle
-//! inconsistencies when unit handling is duplicated across pipelines or tools; by treating
-//! these transforms as part of the public API surface, the library ensures that behaviour
-//! remains stable, explicit, and auditable over time.
+//! Keeping these conversions in one module gives the crate a single definition of each.
+//! When unit handling is duplicated across pipelines or tools, small inconsistencies
+//! accumulate; making the conversions part of the public API keeps their behaviour
+//! stable and explicit.
 //!
-//! The functions are intended to be used as small, composable building blocks. Most operate
-//! directly on scalar values and return plain numeric types or lightweight domain objects,
-//! making them suitable for preprocessing, analysis, visualisation, and validation stages.
-//! Where conversions are reversible, the paired operations are exposed explicitly to avoid
-//! hidden coupling or implicit state.
+//! Most functions operate on scalar values and return plain numeric types or small domain
+//! objects, for use in preprocessing, analysis, visualisation, and validation. Where a
+//! conversion is reversible, its inverse is a separate function, with no shared or
+//! implicit state.
 //!
 //! # Conventions
 //!
@@ -1212,8 +1209,8 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 
 /// Parses a scientific pitch notation string and converts it into a MIDI note number.
 ///
-/// This function provides a lightweight bridge between human-readable musical notation
-/// (e.g. `"A4"`, `"C#3"`, `"Bb2"`) and numeric MIDI pitch indices. It is intended for
+/// This function converts human-readable musical notation
+/// (e.g. `"A4"`, `"C#3"`, `"Bb2"`) to numeric MIDI pitch indices. It is intended for
 /// configuration, annotation, testing, and tooling scenarios rather than high-throughput
 /// parsing. The grammar follows `librosa.note_to_midi`.
 ///
@@ -1241,7 +1238,7 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 ///
 /// # Errors
 ///
-/// * [`AudioSampleError::NoteParse`](crate::AudioSampleError::NoteParse), with a
+/// * [`AudioSampleError::NoteParse`], with a
 ///   span pointing at the offending part of the input, if the text does not follow
 ///   the grammar (unknown letter, unknown accidental, missing or malformed octave,
 ///   malformed cents offset).

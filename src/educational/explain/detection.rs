@@ -183,8 +183,8 @@ mod vad {
                 self.min_speech_frames,
                 self.min_silence_frames
             ));
-            doc.add_trade_off("A lower threshold catches quiet speech but also background noise.")
-                .add_trade_off("Smoothing, hangover and minimum-run rules remove flicker but delay and stretch region boundaries by a few frames.");
+            doc.add_trade_off("A lower threshold detects quieter speech but also classifies more background noise as speech.")
+                .add_trade_off("Smoothing, hangover and minimum-run rules remove rapid switching between speech and silence but delay and stretch region boundaries by a few frames.");
             if self.method == VadMethod::Spectral {
                 doc.add_warning(
                     WarningLevel::Problem,
@@ -202,7 +202,7 @@ mod vad {
             if self.smooth_frames.get() > 1 {
                 doc.add_warning(
                     WarningLevel::Info,
-                    format!("The majority vote looks only backwards, so speech onsets are reported about {} frame(s) late.", (self.smooth_frames.get() - 1) / 2),
+                    format!("The majority vote uses only past frames, so speech onsets are reported about {} frame(s) late.", (self.smooth_frames.get() - 1) / 2),
                     "",
                 );
             }
@@ -406,7 +406,7 @@ mod onset {
                 }
             }
             doc.add_trade_off("A smaller hop locates onsets more precisely in time at more computation.")
-                .add_trade_off("A long analysis window (needed for low CQT frequencies) smears fast onsets over the window length.");
+                .add_trade_off("A long analysis window (needed for low CQT frequencies) spreads fast onsets over the window length.");
             if self.adaptive_threshold && self.median_filter_length.get().is_multiple_of(2) {
                 doc.add_warning(
                     WarningLevel::Problem,

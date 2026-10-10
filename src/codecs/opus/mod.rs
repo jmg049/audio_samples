@@ -36,7 +36,7 @@
 //! - [`OpusCodec`](crate::codecs::opus::OpusCodec) segments audio into fixed-length frames and dispatches each
 //!   to SILK, CELT, or Hybrid based on [`OpusConfig`](crate::codecs::opus::OpusConfig) or per-frame detection.
 //!
-//! ## What lives in the IO crate
+//! ## What belongs in the IO crate
 //!
 //! Bitstream packing (range coding, Ogg/RIFF containers) and `.opus` file I/O
 //! are responsibilities of `audio_samples_io`. This module provides only the

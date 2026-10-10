@@ -130,7 +130,7 @@ pub fn sampling(sample_rate_hz: f64) -> ExplainDoc {
         "A higher sample rate represents more bandwidth but costs proportionally more storage and computation.",
     )
     .add_trade_off(
-        "Real converters need an analogue anti-aliasing filter whose transition band sits below f_N, so usable bandwidth is somewhat less than f_s/2.",
+        "Real converters need an analogue anti-aliasing filter whose transition band lies below f_N, so usable bandwidth is somewhat less than f_s/2.",
     );
     if nyq < 20_000.0 {
         doc.add_warning(
@@ -264,7 +264,7 @@ pub fn aliasing(signal_hz: f64, sample_rate_hz: f64) -> ExplainDoc {
     } else if f == nyq {
         doc.add_warning(
             WarningLevel::Info,
-            "The tone sits exactly at the Nyquist frequency: its samples alternate in sign and their amplitude depends on the phase (a sine gives all zeros).",
+            "The tone is exactly at the Nyquist frequency: its samples alternate in sign and their amplitude depends on the phase (a sine gives all zeros).",
             "",
         );
     }
@@ -344,7 +344,7 @@ pub fn quantisation(bits: u32) -> ExplainDoc {
 
     doc.set_summary(format!(
         "{bits}-bit quantisation maps each sample to one of {} levels, {} apart on the [-1, 1] scale. \
-         For a full-scale sine the rounding noise sits {} dB below the signal.",
+         For a full-scale sine the rounding noise is {} dB below the signal.",
         fmt_num(levels),
         fmt_num(step),
         fmt_num(sqnr)
@@ -404,7 +404,7 @@ pub fn quantisation(bits: u32) -> ExplainDoc {
             "dB",
             r"\mathrm{SQNR} - 10 \log_{10} 3",
         );
-    doc.add_trade_off("Each extra bit halves the step size and buys about 6.02 dB of SQNR.")
+    doc.add_trade_off("Each extra bit halves the step size and raises the SQNR by about 6.02 dB.")
         .add_trade_off(
             "Triangular (TPDF) dither of ±1 step adds noise of power Δ²/6, raising total noise to Δ²/4 (about 4.77 dB worse) but making the error independent of the signal, which removes distortion on quiet signals.",
         )
@@ -1122,7 +1122,7 @@ pub fn cepstrum(n_fft: usize, sample_rate_hz: f64) -> ExplainDoc {
             "Hz",
             r"2 f_s / N",
         );
-    doc.add_trade_off("A longer frame reaches lower f0 but averages over more time, smearing pitch changes.")
+    doc.add_trade_off("A longer frame reaches lower f0 but averages over more time, which blurs pitch changes.")
         .add_trade_off("In practice a few periods are needed in the frame for a clear harmonic structure, so the usable f0 floor is higher than 2f_s/N.");
     doc.add_warning(
         WarningLevel::Info,
@@ -1250,8 +1250,8 @@ pub fn resampling(from_hz: f64, to_hz: f64) -> ExplainDoc {
             rows,
         });
     }
-    doc.add_trade_off("Longer sinc kernels give a sharper transition band and better stop-band rejection at more cost per sample.")
-        .add_trade_off("The pass-band edge sits slightly below the lower Nyquist frequency so the filter has room to roll off.");
+    doc.add_trade_off("Longer sinc kernels give a sharper transition band and better stop-band rejection at a higher computational cost per sample.")
+        .add_trade_off("The pass-band edge is slightly below the lower Nyquist frequency to leave room for the transition band.");
     if r < 1.0 {
         doc.add_warning(
             WarningLevel::Caution,

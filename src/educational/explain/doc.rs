@@ -121,7 +121,7 @@ impl Display for Topic {
 /// One formula, written in LaTeX, with a plain-language caption.
 ///
 /// ## Purpose
-/// Records an equation that the explained code actually evaluates.
+/// Records an equation that the explained code evaluates.
 ///
 /// ## Intended Usage
 /// Built by explainers; read by renderers.
@@ -258,7 +258,7 @@ impl Display for WarningLevel {
 /// two pitch periods").
 ///
 /// ## Purpose
-/// Flags settings that are invalid, suspicious, or simply worth noting.
+/// Flags settings that are invalid, suspicious or worth noting.
 ///
 /// ## Intended Usage
 /// Check [`ExplainDoc::has_warning`] in tests or tooling; renderers list them.

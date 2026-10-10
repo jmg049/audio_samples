@@ -35,11 +35,11 @@
 //! caret at the offending character (see [`NoteParseError`] and
 //! [`EnumParseError`]).
 //!
-//! The rich caret-underline rendering is provided by miette's `fancy` renderer,
+//! The caret-underline rendering is provided by miette's `fancy` renderer,
 //! gated behind this crate's `fancy` feature so library consumers are not forced
-//! to pull graphical dependencies. Library users get plain [`Display`] output
+//! to pull in graphical dependencies. Library users get plain [`Display`] output
 //! unless they opt in; the `examples/` and the `educational` module enable
-//! `fancy` so the pretty output is visible out of the box.
+//! `fancy`, so their errors use the graphical rendering by default.
 
 //! Import the root type and any sub-types you intend to match on, then propagate
 //! with `?` or inspect with a `match` expression:

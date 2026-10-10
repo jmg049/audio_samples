@@ -5,7 +5,7 @@
 //! This module turns a configuration value (an [`StftParams`], an
 //! [`IirFilterDesign`], a [`CompressorConfig`], …) or a bare concept
 //! ("what happens to a 7 kHz tone sampled at 8 kHz?") into an
-//! [`ExplainDoc`]: a short summary, the formulas the code actually
+//! [`ExplainDoc`]: a short summary, the formulas the code
 //! evaluates, the symbols in those formulas with their values, numbers derived
 //! from your settings (frequency resolution, group delay, pole radii, …),
 //! trade-offs, and warnings about suspicious settings.
@@ -14,7 +14,7 @@
 //!
 //! Signal-processing parameters are easy to get subtly wrong: a window that is
 //! too short to resolve a low voice, a mel filterbank with empty bands, a
-//! filter whose cutoff sits on the Nyquist frequency. The existing
+//! filter whose cutoff is at the Nyquist frequency. The existing
 //! [`explaining`](explainable::Explainable::explaining) chain answers "what did
 //! this pipeline do to my signal" *after* processing; this module answers "what
 //! will this configuration do, and why" *before* anything runs. Every number is
@@ -40,7 +40,7 @@
 //! ```
 //! use audio_samples::educational::{Explain, ExplainContext, WarningLevel, topics};
 //!
-//! // A concept: where does a 7 kHz tone land when sampled at 8 kHz?
+//! // A concept: the alias of a 7 kHz tone sampled at 8 kHz.
 //! let doc = topics::aliasing(7_000.0, 8_000.0);
 //! assert_eq!(doc.quantity("Alias frequency").unwrap().value, 1_000.0);
 //! println!("{doc}");
@@ -95,8 +95,8 @@ use crate::traits::StandardSample;
 /// ## Intended Usage
 /// Build with [`ExplainContext::new`] and the `with_*` methods, or from a
 /// signal with [`ExplainContext::for_audio`] (which [`ExplainFor`] does for
-/// you). Every field is optional; explainers degrade gracefully, printing
-/// symbolic formulas and an informational note when a fact is missing.
+/// you). Every field is optional; when a fact is missing, explainers print
+/// symbolic formulas and an informational note instead of numbers.
 ///
 /// ## Invariants
 /// None enforced; explainers validate the values they use and report

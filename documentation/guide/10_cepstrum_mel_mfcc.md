@@ -1,7 +1,7 @@
 # 10. Cepstrum, mel and MFCC
 
-Speech recognisers rarely look at raw spectra. They warp frequency to match
-the ear (the mel scale), take logarithms to turn the source-filter product
+Speech recognisers rarely use raw spectra. They warp frequency to approximate
+the ear's frequency resolution (the mel scale), take logarithms to turn the source-filter product
 into a sum, and keep a dozen smooth "cepstral" coefficients that describe the
 vocal-tract envelope while discarding pitch. This chapter builds that
 pipeline, mel-frequency cepstral coefficients (MFCCs), from the real
@@ -9,15 +9,15 @@ cepstrum upwards, and checks each step against the library.
 
 ## Concept
 
-**Real cepstrum.** For an $N$-point frame with DFT $X\[k\]$,
+**Real cepstrum.** For an $N$-point frame with DFT $X[k]$,
 
-$$c\[q\] = \frac{1}{N} \sum_{k=0}^{N-1} \log |X\[k\]| \\, e^{j 2 \pi k q / N}$$
+$$c[q] = \frac{1}{N} \sum_{k=0}^{N-1} \log |X[k]| \, e^{j 2 \pi k q / N}$$
 
 where $q$ is the *quefrency* in samples ($q/f_s$ seconds, $f_s$ the sample
 rate in Hz) and $\log$ is the natural logarithm. Because $|X|$ is real and
-even, $c\[q\]$ is real and even. Taking logs turns the source-filter product
+even, $c[q]$ is real and even. Taking logs turns the source-filter product
 $|X| = |E| \cdot |H|$ into a sum, $\log|X| = \log|E| + \log|H|$: the smooth
-vocal-tract envelope $|H|$ lands at low quefrencies, and a periodic source
+vocal-tract envelope $|H|$ occupies the low quefrencies, and a periodic source
 with period $\tau_0$ samples produces a peak at $q = \tau_0$, so
 $\hat{f}_0 = f_s / q_{peak}$. The crate has **no cepstrum function**; we compute
 it from [`AudioTransforms::fft`](crate::AudioTransforms::fft) ourselves.
@@ -37,13 +37,13 @@ Here $f$ is in Hz and $m$ in mels; the two scales have very different units
 (1000 Hz is 1000 HTK mels but 15 Slaney mels), so never mix them.
 
 **Mel filterbank.** $M$ triangular filters with edges equally spaced in mels:
-$f_i = m^{-1}(m(f_{min}) + i \\, \Delta m)$, $\Delta m = (m(f_{max}) - m(f_{min}))/(M+1)$,
+$f_i = m^{-1}(m(f_{min}) + i \, \Delta m)$, $\Delta m = (m(f_{max}) - m(f_{min}))/(M+1)$,
 $i = 0, \dots, M+1$. Filter $i$ (with neighbours $f_{i-1} < f_i < f_{i+1}$, in Hz)
 weights FFT bin $k$ at frequency $k f_s / N_{fft}$ by
 
 $$H_i(f) = \max\left(0, \min\left(\frac{f - f_{i-1}}{f_i - f_{i-1}}, \frac{f_{i+1} - f}{f_{i+1} - f_i}\right)\right)$$
 
-and the mel power in band $i$ is $P_i = \sum_k H_i(k f_s/N_{fft}) \\, |X\[k\]|^2$.
+and the mel power in band $i$ is $P_i = \sum_k H_i(k f_s/N_{fft}) \, |X[k]|^2$.
 
 **MFCC, as this library computes it.** Per frame, with $M$ mel bands from 0 Hz
 to $f_s/2$ (no filter normalisation):
@@ -79,7 +79,7 @@ let mfcc = audio.mfcc(&stft, nzu!(40), &MfccParams::speech_standard()).unwrap();
 // 4000 samples, hop 160, centred frames: 1 + 4000/160 = 26 frames.
 assert_eq!(mel_power.data().dim(), (40, 26));
 assert_eq!(mfcc.data.dim(), (13, 26)); // 13 coefficients, c0 included, lifter 22
-// The tone lands in the band whose centre is nearest 440 Hz. Below 1 kHz the
+// The tone falls in the band whose centre is nearest 440 Hz. Below 1 kHz the
 // Slaney scale is linear, so band i (0-based) is centred at (i + 1) * 73.57 Hz.
 let frame = 13;
 let row = |b: usize| mel_power.data()[[b, frame]];
@@ -90,7 +90,7 @@ assert_eq!(loudest, 5);
 assert!((centre - 441.4).abs() < 0.05);
 ```
 
-## Under the hood
+## How it works
 
 **The real cepstrum and cepstral pitch.** A vowel-like frame (the formant
 filter of chapter 8 excited every 100 samples, $f_0 = 160$ Hz), Hann-windowed,
@@ -142,9 +142,11 @@ assert_eq!(q_peak, 100);
 assert_eq!(fs / q_peak as f64, 160.0);
 ```
 
-The lab also prints the low quefrencies ($c\[1\] = 2.32$, $c\[2\] = 0.47$),
-which describe the envelope, and shows that the pitch peak (1.55) stands well
-above everything else in the search range (at most 0.38).
+The lab also prints the low quefrencies ($c[1] = 2.32$, $c[2] = 0.47$),
+which describe the envelope, and shows that the pitch peak (1.55) is well
+above every other value in the search range (at most 0.38).
+
+<!-- figure: ch10-cepstrum -->
 
 **The two mel scales**, side by side, and the HTK round trip.
 
@@ -204,6 +206,8 @@ for t in 0..mel.ncols() {
 assert!(worst < 1e-10, "{worst}");
 ```
 
+<!-- figure: ch10-filterbank -->
+
 **MFCC, re-derived.** From the library's mel power spectrogram: the dB floor,
 the unnormalised DCT-II and the lifter, compared with
 [`AudioTransforms::mfcc`](crate::AudioTransforms::mfcc); then the factor
@@ -253,13 +257,16 @@ times librosa's and $c_k$ ($k \ge 1$) $\sqrt{20} = 4.47$ times, before any
 other differences (librosa's mel filters are Slaney-normalised by default and
 its log uses `top_db = 80` relative to the peak).
 
+<!-- figure: ch10-mfcc -->
+
 ## Ask the library to explain
 
 [`MelParams`](spectrograms::MelParams) and [`MfccParams`](spectrograms::MfccParams)
 implement [`Explain`](crate::educational::Explain). Given the FFT size, the
 mel explanation counts filters that contain no FFT bin: with 128 bands and
 `n_fft = 256` at 16 kHz the bins are 62.5 Hz apart but the lowest triangles are
-only 46.8 Hz wide. We check the prediction against a real spectrogram.
+only 46.8 Hz wide. The code below checks the prediction against a computed
+spectrogram.
 
 ```rust
 use audio_samples::educational::{Explain, ExplainContext, WarningLevel, topics};
@@ -285,7 +292,7 @@ assert_eq!(zero_rows, empty);
 // MFCC: the lifter weights 1 + 11 sin(pi k / 22) peak at k = 11.
 let mdoc = MfccParams::speech_standard().explain_with(&ExplainContext::new().with_n_mels(40));
 assert_eq!(mdoc.quantity("Largest lifter weight").unwrap().value, 12.0);
-// A lifter shorter than the number of coefficients flips signs.
+// A lifter shorter than the number of coefficients gives negative weights.
 let bad = MfccParams::speech_standard().with_lifter(10).explain_with(&ExplainContext::new().with_n_mels(40));
 assert!(bad.has_warning(WarningLevel::Caution));
 
@@ -411,7 +418,7 @@ assert!((factor - 24.91).abs() < 0.005);
 - [`hz_to_mel`](crate::utils::audio_math::hz_to_mel),
   [`mel_to_hz`](crate::utils::audio_math::mel_to_hz) (HTK).
 - [`topics::cepstrum`](crate::educational::topics::cepstrum).
-- Previous chapter: [`c09_pitch`](crate::guide::c09_pitch); next:
-  [`c11_energy_vad`](crate::guide::c11_energy_vad).
+- Previous chapter: [`c09_pitch`](09_pitch.md); next:
+  [`c11_energy_vad`](11_energy_vad.md).
 - Lab: `examples/tutorial_10_cepstrum_mel_mfcc.rs`
   (`cargo run --release --example tutorial_10_cepstrum_mel_mfcc --features educational,full_no_plotting`).

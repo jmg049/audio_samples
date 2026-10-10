@@ -8,11 +8,10 @@
 //! - **Magnitude spectrum plots** - single-frame frequency-domain views showing per-bin
 //!   magnitudes.
 //!
-//! Visual inspection is essential during audio development: for debugging signal-processing
-//! chains, validating onset or beat detection, comparing spectral representations, or
-//! generating report figures. This module isolates all plotting concerns from the core
-//! audio abstractions, keeping the main API surface clean while providing rich
-//! visualisation tools when the `plotting` feature is enabled.
+//! Plots are used during audio development to debug signal-processing chains, validate
+//! onset or beat detection, compare spectral representations, and generate report
+//! figures. This module keeps all plotting code separate from the core audio
+//! abstractions; it is compiled only when the `plotting` feature is enabled.
 //!
 //! Import the [`AudioPlotting`] trait and call its methods on any [`AudioSamples`] instance.
 //! Each method returns an opaque plot object (`WaveformPlot`, `SpectrogramPlot`,

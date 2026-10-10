@@ -1,6 +1,6 @@
 # AudioSamples Roadmap
 
-Where are we going and what do we want to achieve?
+This document lists planned work.
 
 Each section corresponds to a minor version release. Each minor release will focus on a specific theme or set of features.
 
@@ -9,8 +9,8 @@ The exact ordering of the minor releases may change and there is no guarantee th
 ## 2.0 --- A unified API
 
 AudioSamples 2.0 is a deliberate breaking release that unifies the public
-API into a single, consistent convention. The library is broad and feature
-rich; 2.0 makes its surface predictable and ergonomic.
+API into a single, consistent convention. The library covers many
+operations; 2.0 makes their signatures and naming consistent.
 
 Headline changes in 2.0:
 
@@ -51,13 +51,13 @@ Ongoing quality criteria (across releases):
 
 - A large chunk of this will be improving the `html_view` crate and its integration with `audio_samples` to allow for more interactive and informative visualizations of audio data and DSP overlays. This could include features such as live plotting of audio data, interactive controls for adjusting DSP parameters and seeing the effects in real time, and more advanced visualizations of audio features and processing results.
 
-- The plotting system is built on top of plotly and html. We can do a lot with html.
+- The plotting system is built on plotly and HTML, which leaves room for interactive features.
 
 ## Educational content
 
-- A long term / high in the sky goal of the project is to enable new and existing audio programmers to learn about audio programming concepts and techniques through the use of the library and its documentation. We often use libraries without understanding the underlying mechanisms and techniques, which is fine, but we should make it easy for users to learn about the underlying concepts if they want to.
+- A long-term goal of the project is to enable new and existing audio programmers to learn about audio programming concepts and techniques through the use of the library and its documentation. We often use libraries without understanding the underlying mechanisms and techniques, which is fine, but we should make it easy for users to learn about the underlying concepts if they want to.
 
-- Use the plotting and DSP overlay features. Use `manim` and `audio_samples_python` to create educational content that explains audio programming concepts and techniques in an accessible and engaging way. These could take the form of short form videos, interactive notebooks, or even full courses on audio programming topics.
+- Use the plotting and DSP overlay features. Use `manim` and `audio_samples_python` to create educational content that explains audio programming concepts and techniques. These could take the form of short form videos, interactive notebooks, or even full courses on audio programming topics.
 
 ## ML Integration
 

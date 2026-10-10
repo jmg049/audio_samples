@@ -29,10 +29,9 @@
 //! | [`AudioRhythm`] | `beat-tracking` | librosa-compatible onset strength/detection, tempogram, tempo, beat tracking, PLP |
 //! | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
 //!
-//! Grouping operations into separate traits keeps compile times low - only the code
-//! required for the enabled features is compiled - while providing a clean extension
-//! point for new capabilities.  Each trait is independently usable: bring only the
-//! traits you need into scope without paying for the rest.
+//! Grouping operations into separate traits means only the code for the enabled
+//! features is compiled, and new capabilities can be added as new traits. Each trait
+//! is independently usable: bring only the traits you need into scope.
 //!
 //! ## Usage
 //!
@@ -2058,7 +2057,7 @@ where
 ///
 /// # Purpose
 ///
-/// Provides FFT, STFT, and a comprehensive set of spectral representations -
+/// Provides FFT, STFT, and a range of spectral representations -
 /// linear, log-frequency, mel-scale, MFCC, chromagram, gammatone, and
 /// constant-Q - all delegating to the `spectrograms` crate for numerics.
 ///
@@ -2199,7 +2198,7 @@ where
 
     /// Computes the Short-Time Fourier Transform (STFT) of a mono signal.
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::stft_matrix`].
     ///
     /// Computes X\[k, m\] = Σ_n x_p\[n + mH\]·w\[n\]·e^{−j2πkn/N} (N = `n_fft`,
     /// H = `hop_size`), an unnormalised one-sided DFT of each windowed frame
@@ -2242,7 +2241,7 @@ where
 
     /// Reconstructs a time-domain signal from an [`StftResult`].
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::istft_matrix`](crate::operations::spectrum::AudioSpectrum::istft_matrix).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::istft_matrix`].
     ///
     /// Synthesis is windowed overlap-add normalised by Σ_m w²[n − mH] (the
     /// least-squares inverse STFT), using the window and hop stored in the
@@ -2530,7 +2529,7 @@ where
 
     /// Computes a mel-scaled spectrogram.
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::melspectrogram`](crate::operations::spectrum::AudioSpectrum::melspectrogram).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::melspectrogram`].
     ///
     /// The mel scale approximates human pitch perception by compressing
     /// high frequencies relative to low ones. Bands use the **Slaney** mel scale
@@ -2679,7 +2678,7 @@ where
 
     /// Computes Mel-Frequency Cepstral Coefficients (MFCCs).
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::mfcc_frames`](crate::operations::spectrum::AudioSpectrum::mfcc_frames).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::mfcc_frames`].
     ///
     /// MFCCs are a compact spectral representation widely used in speech
     /// recognition and audio classification. The pipeline is: power mel
@@ -3233,7 +3232,7 @@ where
 ///
 /// For librosa-compatible frame-wise pitch tracks (`librosa.yin`, `librosa.pyin`:
 /// centred frames, multichannel, voicing probabilities) see
-/// [`AudioPitchTracking`](crate::operations::pitch_tracking::AudioPitchTracking).
+/// [`AudioPitchTracking`].
 #[cfg(feature = "pitch-analysis")]
 pub trait AudioPitchAnalysis: AudioTypeConversion
 where
@@ -4409,7 +4408,7 @@ where
 ///
 /// # Purpose
 ///
-/// The standard toolkit for controlling loudness variation: compression,
+/// Processors that control loudness variation: compression,
 /// limiting, noise gating, and expansion.  All four processors share a
 /// threshold-based, feed-forward design (envelope follower, static gain curve,
 /// gain application); the compressor and limiter also support lookahead and
@@ -5667,7 +5666,7 @@ where
 ///
 /// # Purpose
 ///
-/// Provides everything needed to change the channel structure of an
+/// Provides the operations that change the channel structure of an
 /// [`AudioSamples`] buffer: mono/stereo conversion, channel duplication,
 /// per-channel extraction, panning, balance adjustment, interleaving, and
 /// element-wise channel transforms.
@@ -6230,7 +6229,7 @@ where
 ///
 /// This trait provides methods for separating audio signals into different
 /// components based on their spectral or temporal characteristics. These
-/// decomposition techniques are fundamental in music information retrieval,
+/// decomposition techniques are used in music information retrieval,
 /// audio analysis, and preprocessing for machine learning applications.
 ///
 /// # Available Decomposition Methods

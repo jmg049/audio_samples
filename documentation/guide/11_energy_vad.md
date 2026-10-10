@@ -1,8 +1,8 @@
 # 11. Short-time energy, zero crossings and VAD
 
-Before a recogniser, a codec or a diariser does any expensive work, it asks a
-cheap question: is anyone speaking in this frame? Voice activity detection
-(VAD) answers it from two per-frame features that date back to the 1970s:
+Recognisers, codecs and diarisers usually run an inexpensive test of whether a frame
+contains speech before any expensive processing. Voice activity detection
+(VAD) makes that decision from two per-frame features that date back to the 1970s:
 short-time energy (speech is louder than the background) and the
 zero-crossing rate (voiced sounds cross zero slowly, fricatives and noise
 quickly). This chapter computes both by hand on a synthetic utterance and
@@ -10,7 +10,7 @@ reproduces the library's VAD decisions exactly.
 
 ## Concept
 
-**Framing.** The signal $x\[n\]$ (samples scaled to $\[-1, 1\]$) is cut into
+**Framing.** The signal $x[n]$ (samples scaled to $[-1, 1]$) is cut into
 frames of $F$ samples that start every $H$ samples; frame $m$ covers
 $n = mH, \dots, mH + F - 1$. Typical speech settings are $F = 25$ ms and
 $H = 10$ ms, i.e. $F = 400$ and $H = 160$ at $f_s = 16$ kHz (the sample rate in
@@ -18,11 +18,11 @@ Hz).
 
 **Short-time energy** is reported as an RMS level in dBFS:
 
-$$r_m = \sqrt{\frac{1}{F} \sum_{i=0}^{F-1} x^2\[mH + i\]}, \qquad L_m = 20 \log_{10} r_m \ \text{dBFS}$$
+$$r_m = \sqrt{\frac{1}{F} \sum_{i=0}^{F-1} x^2[mH + i]}, \qquad L_m = 20 \log_{10} r_m \ \text{dBFS}$$
 
 where $r_m$ is the frame RMS (dimensionless, full scale = 1) and $L_m$ the
 level in decibels relative to full scale. 0 dBFS is an RMS of 1 (a full-scale
-DC or square wave), so a full-scale sine sits at $-3.01$ dBFS in this
+DC or square wave), so a full-scale sine is at $-3.01$ dBFS in this
 convention; the AES17 convention (0 dBFS = the RMS of a full-scale sine) reads
 3.01 dB higher. Where this guide means a *peak* level, $20\log_{10}$ of the
 largest absolute sample, it says "dBFS peak". dBFS has no link to
@@ -30,7 +30,7 @@ loudness in the room: the same file can be played at any volume (chapter 14).
 
 **Zero-crossing rate (ZCR)** counts sign changes:
 
-$$z_m = \frac{\\#\\{\text{sign changes in frame } m\\}}{F - 1}$$
+$$z_m = \frac{\#\{\text{sign changes in frame } m\}}{F - 1}$$
 
 in crossings per sample. A sinusoid at $f$ Hz crosses zero $2f$ times per
 second, so $z \approx 2f / f_s$; conversely a ZCR of $z$ corresponds to a
@@ -49,9 +49,10 @@ half of all sample pairs, $z \approx 0.5$.
 $L_m \ge T$, where $T$ is a threshold in dBFS, equivalently
 $r_m \ge 10^{T/20}$. A combined VAD also requires
 $z_{min} \le z_m \le z_{max}$, which rejects low hum and noise-like frames
-(and, as we shall see, fricatives).
+(and, as shown below, fricatives).
 
-**Post-processing.** Raw decisions flicker. The library smooths them with a
+**Post-processing.** Raw per-frame decisions switch rapidly between speech and
+non-speech. The library smooths them with a
 causal majority vote over $S$ frames, then applies **hangover**: after the last
 active frame the next $H_o$ frames stay active, which bridges short pauses
 (stop closures, the gap before a final plosive) at the cost of a later
@@ -121,18 +122,20 @@ let combined = cfg.with_method(VadMethod::Combined);
 assert_eq!(audio.speech_regions(&combined).unwrap(), vec![(4_640, 11_600)]);
 ```
 
-Why those boundaries? The region starts at the first frame that overlaps the
+The boundaries follow from the framing. The region starts at the first frame that overlaps the
 vowel at all: frame 28 starts at sample 4480 and its last 80 samples are
 vowel, which is enough to exceed $-40$ dBFS. It ends at the end of the first
 inactive frame after the hangover: the last frame touching the fricative is
 frame 89, hangover keeps frame 90 active, and frame 91 ends at
-$91 \cdot 160 + 400 = 14\\,960$. The combined region starts one frame later
+$91 \cdot 160 + 400 = 14\,960$. The combined region starts one frame later
 because frame 28 is mostly noise floor and therefore has a noise-like ZCR.
 
-## Under the hood
+<!-- figure: ch11-vad -->
+
+## How it works
 
 Compute the two features for every frame in plain Rust, check them against
-theory, and rebuild the VAD mask with nothing but a threshold and a hangover
+theory, and rebuild the VAD mask using only a threshold and a hangover
 counter.
 
 ```rust
@@ -199,7 +202,7 @@ assert_eq!(mine, audio.voice_activity_mask(&cfg).unwrap().to_vec()); // identica
 ```
 
 The library's whole-signal
-[`zero_crossing_rate`](crate::AudioStatistics::zero_crossing_rate) is simply
+[`zero_crossing_rate`](crate::AudioStatistics::zero_crossing_rate) is
 [`zero_crossings`](crate::AudioStatistics::zero_crossings) divided by the
 duration in seconds:
 
@@ -264,7 +267,7 @@ assert_eq!(doc.quantity("Frames").unwrap().value, 120.0);
 ## Answers
 
 1. (a) $20\log_{10}(1/\sqrt 2) = -3.01$ dBFS. (b) Uniform noise on
-   $\[-a, a)$ has RMS $a/\sqrt 3$, so $20\log_{10}(0.1/\sqrt 3) = -24.8$ dBFS.
+   $[-a, a)$ has RMS $a/\sqrt 3$, so $20\log_{10}(0.1/\sqrt 3) = -24.8$ dBFS.
 
 ```rust
 use audio_samples::{AudioStatistics, sample_rate, sine_wave, white_noise};
@@ -350,7 +353,7 @@ assert_eq!(active(VadMethod::Combined), 0);
   energy rule with hangover if you need whole words.
 - **Smoothing delays onsets.** The majority vote looks only backwards, so
   onsets are reported about $(S - 1)/2$ frames late; hangover delays offsets.
-- **Regions are generous.** A region starts at the first frame touching speech
+- **Regions are wider than the speech.** A region starts at the first frame touching speech
   and ends at the end of the first inactive frame, so it can extend a frame
   beyond the true speech on both sides.
 
@@ -372,7 +375,7 @@ assert_eq!(active(VadMethod::Combined), 0);
 - [`compound_tone`](crate::compound_tone), [`white_noise`](crate::white_noise),
   [`MonoSampleBuilder`](crate::utils::generation::MonoSampleBuilder)
 - [`Explain`](crate::educational::Explain), [`ExplainFor`](crate::educational::ExplainFor)
-- Previous chapter: [10. Cepstrum, mel and MFCC](crate::guide::c10_cepstrum_mel_mfcc);
-  next chapter: [12. Dynamics](crate::guide::c12_dynamics)
+- Previous chapter: [10. Cepstrum, mel and MFCC](10_cepstrum_mel_mfcc.md);
+  next chapter: [12. Dynamics](12_dynamics.md)
 - Lab: `examples/tutorial_11_energy_vad.rs`
   (`cargo run --release --example tutorial_11_energy_vad --features educational,full_no_plotting`)

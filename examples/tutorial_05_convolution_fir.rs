@@ -173,7 +173,7 @@ fn main() {
         .zip(&h)
         .map(|(a, b)| (a - b).abs())
         .fold(0.0, f64::max);
-    println!("\n2. Impulse in, taps out: max |y[n] - h[n]| = {ir_err:.1e}");
+    println!("\n2. Impulse response equals the taps: max |y[n] - h[n]| = {ir_err:.1e}");
     assert!(ir_err < 1e-12);
 
     // ------------------------------------------------------------------
@@ -309,7 +309,8 @@ fn main() {
     assert!((doc.quantity("DC gain").expect("q").value - 1.0).abs() < 1e-12);
     assert!(doc.has_warning_containing("type I"));
 
-    // Long filters (>= 160 taps) take the FFT path inside apply_filter; same result.
+    // Long filters (>= 160 taps) are convolved by FFT inside apply_filter; the
+    // result is the same.
     let long = windowed_sinc(201, 2000.0, 16_000.0);
     let y_fft = mono(x.clone(), 16_000)
         .apply_filter(NonEmptySlice::new(&long).expect("non-empty"))

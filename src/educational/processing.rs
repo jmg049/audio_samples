@@ -15,9 +15,9 @@
 //! directly. Every formula is chosen so that `term-maths` renders it without
 //! leaving raw `\commands` behind (no `\operatorname`, no `/` inside
 //! arguments, no `cases` environments), and every claim describes what the
-//! code in `src/operations` actually does.
+//! code in `src/operations` does.
 //!
-//! The explanation functions only see the signal before and after the call,
+//! The explanation functions receive only the signal before and after the call,
 //! never the arguments. Where a parameter matters (the normalisation method,
 //! a gain, the clip bounds) it is inferred from the two snapshots, and the
 //! text says that it was inferred.
@@ -44,7 +44,7 @@ fn header(op: &str, latex: &str) -> String {
 }
 
 /// Rewrites `[operation: Name]` to `[operation: Name (in-place)]` so the
-/// rendered call chain names the `_in_place` method that was actually called.
+/// rendered call chain names the `_in_place` method that was called.
 fn in_place(text: String) -> String {
     match text
         .strip_prefix("[operation: ")
@@ -272,7 +272,7 @@ fn infer_normalisation(x: &[f64], y: &[f64]) -> NormKind {
     NormKind::Unknown
 }
 
-const NORM_INFERENCE_NOTE: &str = "The explanation only sees the signal before and after the call, \
+const NORM_INFERENCE_NOTE: &str = "The explanation receives only the signal before and after the call, \
      not the `NormalizationConfig`, so the method above was inferred from how the samples changed. \
      All five `NormalizationMethod`s (Peak, MinMax, Mean, Median, ZScore) are affine maps \
      x\u{2032} = a + b\u{00b7}x applied to every sample of every channel with one pair (a, b); \
@@ -368,8 +368,8 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
                  whose coefficients depend on the method: Peak (a = 0, b = A / max|x|), MinMax (input \
                  range onto [a, b]), Mean or Median (b = 1, a = \u{2212}mean or \u{2212}median) and \
                  ZScore (a = \u{2212}mean/\u{03c3}, b = 1/\u{03c3}). The method used here could not be \
-                 identified from the samples alone (for example because integer rounding hid the exact \
-                 relation)."
+                 identified from the samples alone (for example because integer rounding made the relation \
+                 inexact)."
                     .to_string(),
             ),
         };
@@ -430,7 +430,7 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
             "{}Windowing multiplies sample n by the coefficient w[n]. The window has exactly N \
              coefficients, one per sample, and the same window is applied to every channel; the whole \
              buffer is treated as one frame. A tapering window (Hann, Hamming, Blackman, ...) brings \
-             the signal smoothly towards zero at the frame edges. Without it the DFT sees the abrupt \
+             the signal smoothly towards zero at the frame edges. Without it the DFT treats the abrupt \
              start and end of the frame as part of the signal and spreads energy into far-away bins \
              (spectral leakage). The window shape trades main-lobe width (frequency resolution) \
              against side-lobe level (leakage suppression): Hann is a common compromise, Blackman has \
@@ -535,7 +535,7 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
             "{}\u{03bc}-law expansion applies the inverse of the standard continuous \u{03bc}-law \
              compression curve, on the normalised [\u{2212}1, 1] scale: it maps a companded value y \
              back to a linear amplitude x. The \u{03bc} used here must equal the \u{03bc} used for \
-             compression; a mismatch bends every level by a different amount. Together the compressor \
+             compression; a mismatch distorts each level by a different amount. Together the compressor \
              (at the sender) and the expander (at the receiver) form a compander.{caveat}\n\
              \n\
              Peak amplitude:  {peak_before:.4}  \u{2192}  {peak_after:.4}",
@@ -794,10 +794,10 @@ pub(crate) fn explain_text_compressor<T: StandardSample>(
          taking the attack coefficient while the detector value rises above the envelope and the \
          release coefficient otherwise. After a step the envelope covers 63 % of the change in \u{03c4}, \
          and its 10\u{2013}90 % rise time is \u{03c4}\u{00b7}ln 9 \u{2248} 2.2\u{03c4}; it never reaches \
-         \"full\" reduction in finite time. A short attack catches transients, a long one lets them \
-         through; a short release can cause audible pumping.\n\
+         \"full\" reduction in finite time. A short attack reduces transients, a long one lets them \
+         pass; a short release can cause audible pumping.\n\
          \n\
-         With `lookahead_ms` > 0 the detector sees the undelayed signal and the gain applied to \
+         With `lookahead_ms` > 0 the detector runs on the undelayed signal and the gain applied to \
          sample n is the largest reduction over the next N_L = round(lookahead_ms\u{00b7}f_s/1000) \
          samples (a max-hold), so reduction is already in place when a peak arrives. Because the \
          whole buffer is processed at once, the N_L-sample delay is compensated: output and input \
@@ -825,7 +825,7 @@ pub(crate) fn explain_text_limiter<T: StandardSample>(
     format!(
         "{}A limiter is a compressor with an infinite ratio: whenever the envelope level e[n] \
          exceeds the ceiling c (`ceiling_db` = C in dBFS, linear c = 10^(C/20)), the gain g[n] is \
-         chosen so that the envelope would sit exactly at the ceiling; y[n] = g[n]\u{00b7}x[n] on each \
+         chosen so that the envelope would equal the ceiling exactly; y[n] = g[n]\u{00b7}x[n] on each \
          channel independently. The formula shows the hard knee; with a soft knee of width W the \
          reduction (L \u{2212} C + W/2)\u{00b2}/(2W) dB starts at C \u{2212} W/2. There is no makeup gain.\n\
          \n\
@@ -860,8 +860,8 @@ pub(crate) fn explain_text_eq_band<T: StandardSample>(
          \u{03b1} = sin \u{03c9}\u{2080}/(2Q) for `q_factor` Q. A higher Q gives a narrower band.\n\
          \n\
          The `band_type` selects the shape. `Peak` (bell) changes the level by G dB at f\u{2080} and \
-         leaves frequencies far from f\u{2080} unchanged; it corrects resonances or carves space for an \
-         instrument. `LowShelf` and `HighShelf` change everything below or above the corner by G dB, \
+         leaves frequencies far from f\u{2080} unchanged; typical uses are cutting a resonance or \
+         reducing a band where one instrument masks another. `LowShelf` and `HighShelf` change everything below or above the corner by G dB, \
          reaching G/2 dB at f\u{2080}; there Q sets the steepness of the transition (Q = 1/\u{221a}2 is \
          the steepest without a bump). `LowPass`, `HighPass`, `BandPass` and `BandStop` are \
          second-order RBJ filters that ignore `gain_db`. Like all IIR filters a band also shifts the \
@@ -898,7 +898,7 @@ pub(crate) fn explain_text_resample<T: StandardSample>(
          output sample, so it interpolates and anti-aliases in one step: `Fast` (the default) \
          uses a short filter with its pass band to 0.80 of the lower Nyquist frequency and 70 dB \
          of stop-band attenuation, `Medium` 0.90 and 100 dB, `High` 0.913 and 125 dB (close to \
-         librosa's default, soxr_hq). `Fast` upsampling is linear interpolation, which dulls high \
+         librosa's default, soxr_hq). `Fast` upsampling is linear interpolation, which attenuates high \
          frequencies and leaves spectral images. The filter is symmetric and centred, so the \
          output is time-aligned with the input (no delay) and the tail is flushed; computation \
          is in f64. Use `Medium` or `High` for analysis or listening.\n\

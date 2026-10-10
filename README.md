@@ -14,12 +14,12 @@
 
 ## Overview
 
-Most audio libraries hand you a bare buffer. In Python it is a NumPy array
-whose `dtype` is explicit but whose meaning is not: the sample rate, amplitude
-range, channel layout, and interleaving live elsewhere, if they are tracked at
-all. Rust libraries give you fast, safe primitives but still leave you holding
-the raw buffer, writing your own conversions, and carrying those conventions in
-your head. Mismatches between them, such as a stale sample rate after
+Most audio libraries represent audio as a bare buffer. In Python it is a NumPy
+array whose `dtype` is explicit but whose meaning is not: the sample rate,
+amplitude range, channel layout, and interleaving are stored elsewhere, if they
+are tracked at all. Rust libraries provide fast, safe primitives, but the caller
+still manages the raw buffer, writes the conversions, and keeps track of those
+conventions. Mismatches between them, such as a stale sample rate after
 resampling or a buffer that was interleaved when the next stage expected planar,
 are a recurring source of bugs.
 
@@ -231,8 +231,7 @@ and explains the golden-fixture suite that checks agreement with librosa.
 
 ## Learning with audio_samples
 
-The crate doubles as teaching material for a speech and audio processing
-course:
+The crate is also teaching material for a speech and audio processing course:
 
 - **The learning guide**, fourteen chapters from sampling and aliasing to
   psychoacoustics and codecs. It is the `audio_samples::guide` module in the
@@ -241,6 +240,10 @@ course:
   [documentation/guide/](documentation/guide/README.md), which also lists the
   dependencies needed to run the snippets in your own crate. Every code block
   is a doctest, so every number in the text is checked.
+- **The illustrated book**: the same chapters as an mdBook with figures
+  (waveforms, spectra, filter responses, pole-zero plots, spectrograms, ...)
+  computed by the library from the calculations each chapter asserts. Build it
+  with `book/build.sh`; see [book/README.md](book/README.md).
 - **Labs**: one runnable program per chapter,
   `examples/tutorial_NN_<topic>.rs`, for example
   `cargo run --release --example tutorial_01_sampling_aliasing --features educational,full_no_plotting`.
@@ -268,7 +271,7 @@ its required feature flags. Run one with, for example:
 cargo run --example transforms --features transforms,statistics
 ```
 
-A larger demo lives in a separate repository:
+A larger demo is in a separate repository:
 
 - [DTMF encoder and decoder](https://github.com/jmg049/dtmf-demo)
 

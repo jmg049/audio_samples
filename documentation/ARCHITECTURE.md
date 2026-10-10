@@ -1,6 +1,6 @@
 # AudioSamples Architecture
 
-This document provides detailed information on how the audio_samples crate is architected from its building blocks up to the highest-level API.
+This document describes how the audio_samples crate is structured, from its building blocks up to the highest-level API.
 The architecture follows core principles of **type safety**, **zero-allocation efficiency**, **trait-based composition**, and **modular feature design**.
 
 ## Core Design Principles
@@ -12,7 +12,7 @@ The type system prevents common audio processing errors like mixing incompatible
 
 ### 2. Zero-Allocation Efficiency
 
-The library leverages `ndarray`'s view system to enable zero-allocation access patterns wherever possible.
+The library uses `ndarray`'s view system to enable zero-allocation access patterns wherever possible.
 Operations prefer in-place modifications and views over copying data.
 The library adds several wrappers, ``MonoRepr/MultiRepr`` and ``MonoData/MultiData``, around `ndarray` arrays to facilitate owned and borrowed data automatically.
 The end user should never have to deal with these wrappers.
@@ -23,7 +23,7 @@ This is the entry point for a user and the impl blocks for ``AudioSamples`` conn
 
 Functionality is organized into focused, composable traits rather than monolithic implementations.
 Each trait handles a specific aspect of audio processing with clear separation of concerns.
-Traits also allow for easy feature-gating.
+Each trait can be gated behind its own cargo feature.
 
 ### 4. Metadata Integration
 
@@ -48,7 +48,7 @@ The `*_in_place` variant is the primitive; the borrowing variant clones the rece
 
 ### AudioSample/StandardSample (./traits.rs)
 
-The `AudioSample` and `StandardSample` traits are the foundation of the entire type system.
+The `AudioSample` and `StandardSample` traits are the base of the type system.
 It defines the interface for all supported audio sample formats:
 
 **Supported Types:**
@@ -91,7 +91,7 @@ The `ConvertTo<T>` and `ConvertFrom<T>` trait provides audio-aware conversions b
 - Returns `T`, designed not to fail.
 - Uses macro-generated implementations for consistency and to cut down on manual code.
 - Maintains mathematical precision across format boundaries
-- Handles edge cases like range overflows gracefully
+- Clamps out-of-range values instead of overflowing
 - The two traits provide functionality like `Into` and `From` in the standard library.
 
 **API Contracts:**
@@ -112,7 +112,7 @@ The casting trait family provides raw numeric conversions without audio-specific
 
 **Design Patterns:**
 
-Sometimes you just need to cast an int to a float and back again.
+Use these to cast between numeric types, for example an integer to a float and back.
 These traits **DO NOT** perform any audio-specific scaling/conversions.
 
 - `CastFrom<S>`: Cast from source type to Self
@@ -125,7 +125,7 @@ These traits **DO NOT** perform any audio-specific scaling/conversions.
 - Out-of-range values are clamped to target type's limits
 - No error handling - assumes well-formed input.
 
-If something like this fails then things are bad.
+A failure here indicates a bug, not a recoverable error.
 
 ### AudioSamples<'_, T: StandardSample> (repr.rs)
 
@@ -163,7 +163,7 @@ Channel **indices** are plain `usize`; channel **counts** use the dedicated `Cha
 
 - Sample rate must be positive
 - Lifetime safety ensured through Rust's borrow checker.
-But at the user level of the API, unless they are really concerned with lifetime management and reuse in their program, lifetimes should not be a concern.
+Callers who do not need to manage borrowing and buffer reuse can ignore the lifetime parameter.
 - Metadata consistency maintained across operations
 
 ### AudioSamples Iteration (iterators.rs)
@@ -256,7 +256,7 @@ Grouping by domain lets callers match a broad category in a single arm while sti
 - Built on `thiserror`; every error also implements [`miette::Diagnostic`].
 - Each variant carries a stable, namespaced **code** (`audio_samples::<domain>::<variant>`) for programmatic matching and an actionable **help** hint.
 - Text-parsing failures (note names, enum `FromStr`) carry a `SourceSpan` pointing a caret at the offending character.
-- The coloured caret-underline rendering is gated behind the `fancy` feature, so library consumers pay nothing for graphical dependencies unless they opt in.
+- The coloured caret-underline rendering is gated behind the `fancy` feature, so library consumers do not compile graphical dependencies unless they opt in.
 - `AudioSampleResult<T>` (= `Result<T, AudioSampleError>`) is the consistent return alias for fallible operations.
 
 ## Trait Extensions
@@ -309,7 +309,7 @@ Each trait addresses a specific domain of audio processing:
 
 **Purpose**: Statistical analysis operations for audio data.
 
-**Why use it?**: Essential for audio analysis, level monitoring, and processing decisions.
+**Why use it?**: Audio analysis, level monitoring, and processing decisions.
 
 **How to use it?**:
 
@@ -344,7 +344,7 @@ let flatness = audio.spectral_flatness(ChannelReduction::First)?;
 
 **Purpose**: Core signal processing operations following the dual-variant convention.
 
-**Why use it?**: Fundamental audio modifications like normalization, scaling, DC removal.
+**Why use it?**: Basic audio modifications such as normalization, scaling, DC removal.
 
 **How to use it?**:
 
@@ -370,7 +370,7 @@ buf.scale_in_place(0.8);
 - `remove_dc_offset()`: DC bias removal
 - `apply_window()`, `apply_filter()`, `mu_compress()`/`mu_expand()`, `low_pass_filter()`/`high_pass_filter()`/`band_pass_filter()`
 
-(Fades live on `AudioEditing`, not here.)
+(Fades are on `AudioEditing`, not here.)
 
 **Convention**: each operation above has both the borrowing form shown here and an `*_in_place` counterpart, as described under *Dual-Variant Operations*. Multi-parameter behaviour is captured in dedicated config structs rather than long positional argument lists.
 
@@ -378,7 +378,7 @@ buf.scale_in_place(0.8);
 
 **Purpose**: Frequency-domain analysis and transformations (requires `transforms`).
 
-**Why use it?**: Spectral analysis, filtering, and frequency-domain processing. The heavy time-frequency machinery lives in the companion `spectrograms` crate.
+**Why use it?**: Spectral analysis, filtering, and frequency-domain processing. The time-frequency computations are implemented in the companion `spectrograms` crate.
 
 **How to use it?**:
 
@@ -457,7 +457,7 @@ let extracted = multi_audio.extract_channel(0)?;
 - `extract_channel()`: Extract a specific channel.
 allocates a new ``AudioSamples`` for the extracted channel
 - `borrow_channel()`: Borrows a specific channel.
-Does not allocate a new ``AudioSamples`` for the extracted channel, it just borrows the data.
+Does not allocate a new ``AudioSamples`` for the extracted channel; it borrows the data.
 - `swap_channels()`: Channel reordering
 - `duplicate_to_channels(N)` - Duplicates mono audio to N channels
 - `pan(x)` - Applies pan control to stereo audio
@@ -597,7 +597,7 @@ A second family of traits reproduces librosa 1.0 so that librosa pipelines can b
 - Frame-wise outputs are `Array3` shaped `(channels, n_features, n_frames)` (mono gives one channel; per-frame scalars have `n_features == 1`). Envelopes and pitch tracks are `(channels, n_frames)`. Event detectors (`onset_detect`, `beat_track`) require mono audio and return frame indices (`FrameEvents`).
 - Audio-to-audio operations (`time_stretch`, `pitch_shift`, `preemphasis`, `trim_db`, `harmonic`, ...) have the `op` / `op_in_place` pair; analysis methods do not.
 - Pure helpers (filterbanks, windows, dB conversion on arrays, `delta`, `pcen`, `dtw`, ...) are free functions in the module that owns them, and most trait methods have a `*_from_spectrogram` / `*_from_envelope` form that takes a precomputed input, like librosa's `S=` / `onset_envelope=` arguments.
-- A new trait lives in its own module file with its implementation and is re-exported from `operations/traits.rs`, `operations/mod.rs` and the crate root.
+- A new trait is defined in its own module file with its implementation and is re-exported from `operations/traits.rs`, `operations/mod.rs` and the crate root.
 
 **Modules**:
 
@@ -644,7 +644,7 @@ Each returns a plot value (`WaveformPlot`, `MagnitudeSpectrumPlot`, `PhaseSpectr
 
 - Time and frequency axes are derived from the sample rate and the transform parameters.
 - Plots render to an in-memory HTML string; nothing is written to disk unless the caller asks for it.
-- Plotting is feature-gated and costs nothing when disabled.
+- Plotting is feature-gated and is not compiled when disabled.
 
 ## API Design Contracts
 
@@ -652,8 +652,8 @@ Each returns a plot value (`WaveformPlot`, `MagnitudeSpectrumPlot`, `PhaseSpectr
 
 1. **Simple operations never fail**: Basic getters return values directly
 2. **Complex operations return Results**: Type conversions, processing operations
-3. **Rich error context**: Specific error types with detailed messages
-4. **Graceful degradation**: Optional features disabled cleanly
+3. **Error context**: Specific error types with detailed messages
+4. **Feature gating**: Optional features are compiled out when disabled
 
 ### Memory Management
 

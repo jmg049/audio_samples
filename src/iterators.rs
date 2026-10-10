@@ -3,7 +3,7 @@
 //! This module defines the primary iteration abstractions for traversing
 //! [`AudioSamples`] in semantically meaningful ways. Rather than exposing raw
 //! indexing or layout-dependent access, the iterators in this module present
-//! audio data through three conceptual lenses:
+//! audio data through three views:
 //!
 //! - **Frames** - a snapshot across all channels at one time index
 //!   ([`FrameIterator`])

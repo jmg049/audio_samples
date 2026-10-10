@@ -1,8 +1,8 @@
-//! A guided tour of `audio_samples`' diagnostic errors.
+//! The diagnostic errors of `audio_samples`.
 //!
-//! Every fallible API in the crate returns [`AudioSampleError`], which now
+//! Every fallible API in the crate returns [`AudioSampleError`], which
 //! implements miette's [`Diagnostic`] trait on top of the usual
-//! [`std::error::Error`]. That buys four things this example shows off:
+//! [`std::error::Error`]. This example shows four properties:
 //!
 //! 1. **Stable error codes** (`audio_samples::<domain>::<variant>`) you can
 //!    match on or look up.
@@ -19,8 +19,8 @@
 //! cargo run --example errors --features fancy
 //! ```
 //!
-//! Without `fancy` the diagnostics still carry all of their metadata - it just
-//! prints as plain text rather than a graphical report.
+//! Without `fancy` the diagnostics still carry all of their metadata, printed
+//! as plain text rather than a graphical report.
 
 use std::error::Error;
 
@@ -74,7 +74,7 @@ fn spans_demo() {
 // 2. Programmatic inspection
 // ---------------------------------------------------------------------------
 
-/// The `Diagnostic` trait exposes the metadata as data, not just rendered text -
+/// The `Diagnostic` trait exposes the metadata as data as well as rendered text -
 /// useful for logging, telemetry, or building your own reporter.
 fn inspect_demo() {
     let err: AudioSampleError = ParameterError::out_of_range(

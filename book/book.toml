@@ -1,0 +1,51 @@
+[book]
+title = "audio_samples: a learning guide to speech and audio processing"
+authors = ["Jack Geraghty"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+# The default `index` preprocessor renames README.md to index.md, which breaks
+# the chapters' links to README.md (the guide's index page). Only the `links`
+# preprocessor is wanted, so it is enabled explicitly below.
+use-default-preprocessors = false
+create-missing = false
+
+[rust]
+edition = "2024"
+
+[preprocessor.links]
+
+# Replaces `<!-- figure: <id> -->` markers with the generated figures and turns
+# rustdoc intra-doc links (`crate::...`, `spectrograms::...`) into docs.rs
+# links. See preprocessor/guide.py.
+[preprocessor.guide]
+command = "python3 preprocessor/guide.py"
+after = ["links"]
+before = ["katex"]
+
+# Renders `$...$` and `$$...$$` with KaTeX before the Markdown is parsed.
+# throw-on-error = false makes a bad expression produce a `katex-error` span,
+# which build.sh then rejects, instead of silently leaving the raw source.
+[preprocessor.katex]
+after = ["links"]
+output = "html"
+throw-on-error = false
+error-color = "#cc0000"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-css = ["theme/figures.css"]
+git-repository-url = "https://github.com/jmg049/audio_samples"
+
+[output.html.playground]
+# The code blocks are doctests of this crate, which the Rust playground does
+# not have: no run button, no editor.
+runnable = false
+editable = false
+copyable = true
+
+[output.html.print]
+enable = true

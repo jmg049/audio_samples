@@ -9,10 +9,13 @@ readme = "README.md"
 homepage = "https://github.com/jmg049/audio_samples"
 repository = "https://github.com/jmg049/audio_samples"
 documentation = "https://docs.rs/audio_samples"
-description = "A typed audio processing library for Rust that treats audio as a first-class, invariant-preserving object rather than an unstructured numeric buffer."
+description = "An audio processing library for Rust that represents audio as a typed object carrying its sample rate, channel layout and other invariants, rather than as an unstructured numeric buffer."
 
 keywords = ["audio", "dsp", "api"]
 categories = ["encoding", "multimedia", "science"]
+# The mdBook of the learning guide and its figures crate are not part of the
+# published crate.
+exclude = ["book/"]
 
 [package.metadata.docs.rs]
 features = ["full", "educational"]
@@ -220,6 +223,8 @@ proptest = "1.11.0"
 # float_roundtrip: parse fixture floats exactly (the default parser can be 1 ulp off,
 # which flips truncations such as time_to_samples at integer boundaries).
 serde_json = { version = "1.0.150", features = ["float_roundtrip"] }
+# CommonMark parser used by rustdoc: checks that the guide maths survives it.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [[example]]
 name = "basics"

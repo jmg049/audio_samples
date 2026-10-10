@@ -15,8 +15,7 @@
 
 //! Audio pipelines typically require many small numeric helpers - converting frequencies,
 //! detecting silence, generating test tones - that do not belong to the core sample-buffer
-//! API. This module isolates those helpers so they remain composable and easy to discover
-//! without polluting the primary `AudioSamples` interface.
+//! API. This module keeps those helpers separate from the `AudioSamples` interface.
 
 //! Import individual functions by path or use the module prefix directly:
 //!
@@ -91,10 +90,10 @@ pub use generation::*;
 ///
 /// This function **truncates** toward zero, which matches librosa's `time_to_samples`
 /// for non-negative times. The similarly named
-/// [`audio_math::seconds_to_samples`](crate::utils::audio_math::seconds_to_samples)
+/// [`audio_math::seconds_to_samples`]
 /// **rounds** to the nearest sample instead, so the two can differ by one sample. For
 /// librosa-compatible conversion of possibly negative times, use
-/// [`audio_math::time_to_samples`](crate::utils::audio_math::time_to_samples).
+/// [`audio_math::time_to_samples`].
 ///
 /// # Examples
 ///

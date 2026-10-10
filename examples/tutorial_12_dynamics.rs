@@ -167,7 +167,7 @@ fn main() -> AudioSampleResult<()> {
     println!();
 
     // ---------------------------------------------------------------- 3
-    println!("3. Under the hood: follower + gain computer + gain, by hand");
+    println!("3. How it works: follower + gain computer + gain, by hand");
     let soft = compressor(-20.0, 4.0, KneeType::Soft, 6.0);
     let y_lib = x.apply_compressor(&soft)?;
     let (aa, ar) = ((-1.0 / (0.005 * FS)).exp(), (-1.0 / (0.050 * FS)).exp());

@@ -3,7 +3,7 @@
 //! This module provides a small collection of signal-level comparison operators for
 //! analysing similarity, error, and alignment between audio signals. The exposed functions
 //! operate on [`AudioSamples`] and return scalar metrics or derived signals that are suitable
-//! for validation, evaluation, diagnostics, and lightweight analysis workflows.
+//! for validation, evaluation, diagnostics, and simple analysis.
 //!
 //! The primary purpose of this module is to centralise common comparison semantics.
 //!

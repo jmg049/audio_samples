@@ -10,7 +10,8 @@
 //!    measured at several word lengths with a plain-Rust requantiser and at
 //!    16 bits through the crate's `i16` conversion, against `6.02 b + 1.76` dB;
 //! 3. triangular (TPDF) dither, implemented here because the crate has none,
-//!    turning signal-dependent distortion of a quiet sine into benign noise.
+//!    which replaces the signal-dependent distortion of a quiet sine with
+//!    noise that does not depend on the signal.
 //!
 //! Every number printed is also checked with `assert!`.
 //!

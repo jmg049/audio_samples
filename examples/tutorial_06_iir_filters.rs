@@ -14,7 +14,8 @@
 //!    same output as `apply_iir_filter`.
 //! 4. Every pole lies inside the unit circle; the margin shrinks as the cutoff
 //!    becomes a small fraction of the sample rate.
-//! 5. Chebyshev type I trades a 1 dB pass-band ripple for a steeper roll-off.
+//! 5. Chebyshev type I gives a steeper roll-off at the cost of a 1 dB
+//!    pass-band ripple.
 //! 6. Forward-backward filtering (`filtfilt`) has zero phase and squared gain
 //!    (-6.02 dB at the cutoff).
 //!
@@ -165,11 +166,11 @@ fn main() -> AudioSampleResult<()> {
             p.norm(),
             nearest
         );
-        // Both are O(1) numbers from a few dozen flops; 1e-12 is ample.
+        // Both are O(1) numbers from a few dozen flops; 1e-12 bounds the rounding.
         assert!(nearest < 1e-12);
     }
     let lib_gain: f64 = sos.iter().map(|s| s[0]).product();
-    println!("   overall gain: mine {my_gain:.6e}, library product of b0 {lib_gain:.6e}");
+    println!("   overall gain: derived {my_gain:.6e}, library product of b0 {lib_gain:.6e}");
     assert!((my_gain - lib_gain).abs() / lib_gain < 1e-10);
     for f in [100.0, 900.0, 1_000.0, 1_500.0, 3_000.0, 7_000.0] {
         let (m, _) = design.frequency_response(&[f], FS)?;

@@ -22,7 +22,7 @@
 //!
 //! Import [`AudioProcessing`] and call methods directly on an [`AudioSamples`]
 //! value. The infallible [`AudioProcessing::scale`] returns `Self` directly,
-//! allowing seamless chaining into fallible calls which return
+//! so it can be chained directly before fallible calls which return
 //! [`AudioSampleResult`]. Gains, fades and peak normalisation are computed in
 //! `f64`; for integer sample types they act on the normalised `[-1, 1]` scale
 //! and the result is rounded and saturated back to the integer range.

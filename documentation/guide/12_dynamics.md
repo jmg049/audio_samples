@@ -1,30 +1,30 @@
 # 12. Dynamics: compressors and limiters
 
 Speech varies by 30 dB or more between a whispered consonant and a shouted
-vowel, and broadcast, telephony and hearing aids all squeeze that range so the
-quiet parts stay audible and the loud parts do not clip. A compressor does it
-with three small pieces: a level detector with attack and release
+vowel, and broadcast, telephony and hearing aids all reduce that range so the
+quiet parts stay audible and the loud parts do not clip. A compressor has
+three parts: a level detector with attack and release
 *ballistics*, a *static gain computer* in decibels, and a multiplier. This
-chapter measures each piece on the library's implementation and rebuilds the
-whole processor in a dozen lines.
+chapter measures each part of the library's implementation and reimplements
+the whole processor in about a dozen lines.
 
 ## Concept
 
-**Detector and ballistics.** The detector turns the input $x\[n\]$ into a
-non-negative value $d\[n\]$: $|x\[n\]|$ for a peak detector, or the RMS over the
+**Detector and ballistics.** The detector turns the input $x[n]$ into a
+non-negative value $d[n]$: $|x[n]|$ for a peak detector, or the RMS over the
 last 10 ms. A one-pole smoother then produces the envelope
 
-$$e\[n\] = a\\, e\[n-1\] + (1 - a)\\, d\[n\], \qquad a = e^{-1/(\tau f_s)}$$
+$$e[n] = a\, e[n-1] + (1 - a)\, d[n], \qquad a = e^{-1/(\tau f_s)}$$
 
 where $f_s$ is the sample rate in Hz and $\tau$ the time constant in seconds:
-the attack constant $\tau_A$ while $d\[n\] > e\[n-1\]$ (the level is rising) and
+the attack constant $\tau_A$ while $d[n] > e[n-1]$ (the level is rising) and
 the release constant $\tau_R$ otherwise. After a step from $d_0$ to $d_1$ the
 envelope follows
 
-$$e(t) = d_1 + (d_0 - d_1)\\, e^{-t/\tau}$$
+$$e(t) = d_1 + (d_0 - d_1)\, e^{-t/\tau}$$
 
-so it covers $1 - e^{-1} = 63.2\\%$ of the step after one time constant, and its
-10-90 % rise time is $\tau \ln 9 \approx 2.2\\,\tau$. (Equipment makers quote
+so it covers $1 - e^{-1} = 63.2\%$ of the step after one time constant, and its
+10-90 % rise time is $\tau \ln 9 \approx 2.2\,\tau$. (Equipment makers quote
 attack times in either convention, so numbers are not comparable across
 products.)
 
@@ -37,14 +37,14 @@ $$Y = L \ \text{ for } L \le T, \qquad Y = T + (L - T)/R \ \text{ for } L > T$$
 
 so the gain reduction is $r = L - Y = (1 - 1/R)\max(L - T, 0)$ dB. The
 quadratic **soft knee** (Giannoulis, Massberg and Reiss, *JAES* 2012) blends
-the two lines over $\[T - W/2, T + W/2\]$:
+the two lines over $[T - W/2, T + W/2]$:
 
-$$r = (1 - 1/R)\\,\frac{(L - T + W/2)^2}{2W} \quad \text{for } |L - T| \le W/2$$
+$$r = (1 - 1/R)\,\frac{(L - T + W/2)^2}{2W} \quad \text{for } |L - T| \le W/2$$
 
 It has slope 1 at the lower edge and $1/R$ at the upper edge, so the curve has
 no corner, and at $L = T$ it already reduces by $(1 - 1/R)W/8$ dB.
 
-**Gain.** The output is $y\[n\] = x\[n\]\\, 10^{-r\[n\]/20}\\, 10^{M/20}$, where $M$ is
+**Gain.** The output is $y[n] = x[n]\, 10^{-r[n]/20}\, 10^{M/20}$, where $M$ is
 the make-up gain in dB. Working in dB makes the ratio a slope and the
 threshold an offset.
 
@@ -62,7 +62,7 @@ $d_1(1 - a^{N_L + 1})$, so the overshoot is
 
 $$\Delta = -20 \log_{10}\left(1 - a^{N_L + 1}\right) \ \text{dB}$$
 
-which is about $0.06$ dB for $N_L = 5\\,\tau_A f_s$. (The library processes
+which is about $0.06$ dB for $N_L = 5\,\tau_A f_s$. (The library processes
 whole buffers, so it compensates the delay: output index $n$ stays aligned
 with input index $n$.)
 
@@ -80,7 +80,7 @@ use audio_samples::operations::types::KneeType;
 use audio_samples::{AudioDynamicRange, AudioSamples, CompressorConfig, sample_rate};
 use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 
-// Hard knee, T = -20 dBFS, R = 4: -8 dBFS is 12 dB over, so it leaves at -20 + 12/4 = -17.
+// Hard knee, T = -20 dBFS, R = 4: -8 dBFS is 12 dB over, so the output is -20 + 12/4 = -17.
 let r = calculate_compression_gain(-8.0, -20.0, 4.0, KneeType::Hard, 0.0);
 assert!((r - 9.0).abs() < 1e-12);
 
@@ -108,7 +108,9 @@ let curve = audio.get_compression_curve(&cfg, NonEmptySlice::new(&[-30.0, -20.0,
 assert_eq!(curve, vec![-30.0, -20.0, -17.0]);
 ```
 
-The ballistics show up on a step. Feed a DC level of $-40$ dBFS for 100 ms,
+<!-- figure: ch12-static-curve -->
+
+The ballistics are visible in the response to a step. Apply a DC level of $-40$ dBFS for 100 ms,
 then 0 dBFS for 200 ms (peak detector, attack 5 ms, release 50 ms, hard knee
 at $-20$ dBFS, 4:1), and read the per-sample reduction with
 [`get_gain_reduction`](crate::AudioDynamicRange::get_gain_reduction). Above the
@@ -143,13 +145,15 @@ assert!((rise_ms - 5.0 * 9f64.ln()).abs() < 0.03); // 10.99 ms = 2.2 tau_A
 assert!((gr[14_000] - 15.0).abs() < 1e-6);
 ```
 
-## Under the hood
+<!-- figure: ch12-attack -->
+
+## How it works
 
 The whole compressor is an envelope follower, the gain computer and a
 multiplication. Written out, it matches
 [`apply_compressor`](crate::AudioDynamicRange::apply_compressor) sample for
 sample, here with a 6 dB soft knee on a step up and back down (which also
-exercises the release).
+tests the release).
 
 ```rust
 use audio_samples::operations::types::{DynamicRangeMethod, KneeType};
@@ -191,9 +195,11 @@ let err = mine.iter().zip(lib.as_slice().unwrap()).map(|(p, q)| (p - q).abs()).f
 assert!(err < 1e-12);
 ```
 
+<!-- figure: ch12-compressor-step -->
+
 The lookahead formula can be checked the same way: a limiter with a $-6$ dBFS
 ceiling and a 1 ms attack, on a step from silence to 0 dBFS. Without
-lookahead the first sample of the step passes untouched (the envelope is still
+lookahead the first sample of the step passes without reduction (the envelope is still
 at $1 - a = 0.02$, i.e. $-33.7$ dBFS), a 6 dB overshoot. With 5 ms of
 lookahead ($N_L = 240$ samples) the overshoot is
 $-20\log_{10}(1 - a^{241}) = 0.0575$ dB.
@@ -220,6 +226,8 @@ let predicted = -20.0 * (1.0 - a.powi(241)).log10();
 assert!((predicted - 0.0575).abs() < 1e-3);
 assert!((peak_db(5.0) - (-6.0 + predicted)).abs() < 1e-9);
 ```
+
+<!-- figure: ch12-lookahead -->
 
 ## Ask the library to explain
 
@@ -309,7 +317,7 @@ assert_eq!(k, 160);
 
 4. Solve $-20\log_{10}(1 - a^{N_L+1}) < 0.01$: $a^{N_L+1} < 1 - 10^{-0.0005}$,
    so $N_L + 1 > \ln(1 - 10^{-0.0005}) / \ln a = 324.8$, i.e. $N_L \ge 324$ samples
-   (6.8 ms, about $6.8\\,\tau_A$).
+   (6.8 ms, about $6.8\,\tau_A$).
 
 ```rust
 let a: f64 = (-1.0 / 48.0f64).exp(); // 1 ms at 48 kHz
@@ -322,15 +330,15 @@ assert!(overshoot(323) >= 0.01);
 ## Common pitfalls
 
 - **Attack and release are time constants**, not "time to full reduction":
-  63.2 % after $\tau$, 10-90 % in $2.2\\,\tau$. Hardware datasheets use either
+  63.2 % after $\tau$, 10-90 % in $2.2\,\tau$. Hardware datasheets use either
   convention.
 - **Detector choice shifts the threshold.** An RMS detector reads a sine
   3.01 dB below its peak, so the same threshold compresses less than with
   `Peak` (the default `CompressorConfig` uses RMS).
-- **dB of what?** Thresholds are in dBFS of the *envelope*, not of individual
+- **Threshold reference.** Thresholds are in dBFS of the *envelope*, not of individual
   samples or of loudness (LUFS).
 - **A limiter without lookahead is not a brick wall.** The start of every
-  transient passes; even with lookahead a tiny overshoot remains, and only
+  transient passes; even with lookahead a small overshoot remains, and only
   sample peaks are detected (`isp_limiting` is not implemented).
 - **Stereo is not linked.** Multi-channel audio is compressed per channel,
   which can shift the stereo image.
@@ -354,7 +362,7 @@ assert!(overshoot(323) >= 0.01);
   [`EnvelopeFollower`](crate::operations::dynamic_range::EnvelopeFollower)
 - The full derivation is in the [`dynamic_range`](crate::operations::dynamic_range) module docs.
 - [`Explain`](crate::educational::Explain), [`ExplainFor`](crate::educational::ExplainFor)
-- Previous chapter: [11. Short-time energy, zero crossings and VAD](crate::guide::c11_energy_vad);
-  next chapter: [13. Onsets and tempo](crate::guide::c13_onsets_tempo)
+- Previous chapter: [11. Short-time energy, zero crossings and VAD](11_energy_vad.md);
+  next chapter: [13. Onsets and tempo](13_onsets_tempo.md)
 - Lab: `examples/tutorial_12_dynamics.rs`
   (`cargo run --release --example tutorial_12_dynamics --features educational,full_no_plotting`)

@@ -1,10 +1,10 @@
 # 08. LPC, the source-filter model and formants
 
-A vowel is a buzz shaped by a tube. The vocal folds produce a periodic train of
-air pulses (the *source*), and the throat, mouth and lips act as a resonant
-filter whose peaks, the *formants*, decide which vowel we hear. Linear
-predictive coding (LPC) fits an all-pole filter to a short frame of speech, so
-it hands us the filter half of that model: its roots are the formants, and a
+A voiced vowel is a periodic excitation filtered by the vocal tract. The vocal
+folds produce a periodic train of air pulses (the *source*), and the throat,
+mouth and lips act as a resonant filter whose peaks, the *formants*, determine
+which vowel is heard. Linear predictive coding (LPC) fits an all-pole filter to
+a short frame of speech, so it estimates the filter half of that model: its roots are the formants, and a
 quantised form of its coefficients (line spectral frequencies) is what speech
 codecs such as SILK transmit.
 
@@ -12,7 +12,7 @@ codecs such as SILK transmit.
 
 **Source-filter model.** A voiced frame is modelled as
 
-$$X(z) = E(z) \\, H(z), \qquad H(z) = \frac{G}{A(z)}, \qquad A(z) = 1 + \sum_{k=1}^{p} a_k z^{-k}$$
+$$X(z) = E(z) \, H(z), \qquad H(z) = \frac{G}{A(z)}, \qquad A(z) = 1 + \sum_{k=1}^{p} a_k z^{-k}$$
 
 where $E(z)$ is the excitation (here an impulse train with one pulse every
 $1/f_0$ seconds, $f_0$ the fundamental frequency in Hz), $H(z)$ the vocal-tract
@@ -20,7 +20,7 @@ filter, $G$ a gain, $p$ the model order and $a_k$ the (dimensionless) predictor
 coefficients. The usual choice of gain is $G = \sqrt{E_p}$, the square root of
 the order-$p$ prediction-error energy defined below, so that the model driven
 by a unit-energy excitation has the frame's residual energy. This crate writes $A(z)$ with a **plus** sign, as MATLAB and
-`librosa.lpc` do; many textbooks predict $\hat{x}\[n\] = \sum_k \alpha_k x\[n-k\]$
+`librosa.lpc` do; many textbooks predict $\hat{x}[n] = \sum_k \alpha_k x[n-k]$
 instead, so $\alpha_k = -a_k$.
 
 **Formants as poles.** One formant at frequency $F$ (Hz) with 3 dB bandwidth $B$
@@ -32,38 +32,38 @@ where $f_s$ is the sample rate in Hz and $\theta$ is in radians per sample. The
 radius formula is a narrow-band approximation: it holds well for an isolated
 pole pair with $B \ll f_s$ and $F$ away from 0 and $f_s/2$, and this chapter uses
 it as the definition of $B$ when going both ways. Each
-pole pair contributes a second-order factor $1 - 2 r \cos\theta \\, z^{-1} + r^2 z^{-2}$
-to $A(z)$. Inverting: a root $z_i$ of $A(z)$ with $\mathrm{Im}\\, z_i > 0$ gives
+pole pair contributes a second-order factor $1 - 2 r \cos\theta \, z^{-1} + r^2 z^{-2}$
+to $A(z)$. Inverting: a root $z_i$ of $A(z)$ with $\mathrm{Im}\, z_i > 0$ gives
 
 $$F_i = \frac{f_s \arg z_i}{2\pi}, \qquad B_i = -\frac{f_s \ln |z_i|}{\pi}$$
 
 **Linear prediction.** The prediction error (residual) is
-$e\[n\] = x\[n\] + \sum_{k=1}^{p} a_k x\[n-k\]$. Minimising its energy over a
+$e[n] = x[n] + \sum_{k=1}^{p} a_k x[n-k]$. Minimising its energy over a
 windowed frame gives the *normal* (Yule-Walker) equations
 
-$$\sum_{k=1}^{p} a_k R\[|i-k|\] = -R\[i\], \qquad i = 1, \dots, p$$
+$$\sum_{k=1}^{p} a_k R[|i-k|] = -R[i], \qquad i = 1, \dots, p$$
 
-with the biased autocorrelation $R\[m\] = \sum_{n=0}^{N-1-m} x_w\[n\] \\, x_w\[n+m\]$ of the
-windowed frame $x_w\[n\] = w\[n\] x\[n\]$ ($N$ samples, $w$ a Hamming window).
+with the biased autocorrelation $R[m] = \sum_{n=0}^{N-1-m} x_w[n] \, x_w[n+m]$ of the
+windowed frame $x_w[n] = w[n] x[n]$ ($N$ samples, $w$ a Hamming window).
 (The biased estimator is usually written with a factor $1/N$; it scales every
-$R\[m\]$ equally and cancels from the solution, so the crate omits it.) The
+$R[m]$ equally and cancels from the solution, so the crate omits it.) The
 matrix is Toeplitz, so the **Levinson-Durbin** recursion solves it in $O(p^2)$
-operations, one order at a time ($E_0 = R\[0\]$, $m = 1, \dots, p$):
+operations, one order at a time ($E_0 = R[0]$, $m = 1, \dots, p$):
 
-$$k_m = -\frac{R\[m\] + \sum_{i=1}^{m-1} a_i^{(m-1)} R\[m-i\]}{E_{m-1}}, \qquad a_i^{(m)} = a_i^{(m-1)} + k_m a_{m-i}^{(m-1)}, \qquad a_m^{(m)} = k_m, \qquad E_m = (1 - k_m^2) E_{m-1}$$
+$$k_m = -\frac{R[m] + \sum_{i=1}^{m-1} a_i^{(m-1)} R[m-i]}{E_{m-1}}, \qquad a_i^{(m)} = a_i^{(m-1)} + k_m a_{m-i}^{(m-1)}, \qquad a_m^{(m)} = k_m, \qquad E_m = (1 - k_m^2) E_{m-1}$$
 
 where $k_m$ is the reflection coefficient ($|k_m| < 1$ for a stable filter) and
 $E_m$ the prediction-error energy of the order-$m$ predictor.
 
 **Choosing p.** Each formant needs two poles and there is roughly one formant
-per kilohertz of bandwidth; two more poles absorb the spectral tilt of the
+per kilohertz of bandwidth; two more poles model the spectral tilt of the
 source and lip radiation. Hence the rule of thumb $p \approx f_s/1000 + 2$
 ($f_s$ in Hz), 18 at 16 kHz.
 
 **Pre-emphasis.** Real glottal pulses fall off at about -12 dB per octave, and
 radiation from the lips adds about +6 dB per octave, so voiced speech has a net
-tilt of about -6 dB per octave: high formants are weak and the fit spends poles
-on the tilt. The first-order high-pass (FIR) $y\[n\] = x\[n\] - \alpha x\[n-1\]$
+tilt of about -6 dB per octave: high formants are weak and the fit uses poles
+to model the tilt. The first-order high-pass (FIR) $y[n] = x[n] - \alpha x[n-1]$
 with $\alpha \approx 0.97$ adds about +6 dB per octave and so flattens that net
 tilt before analysis. (Exercise 3 uses a source with the full -12 dB per octave
 and no radiation term, so a -6 dB per octave tilt remains after pre-emphasis.)
@@ -131,12 +131,12 @@ assert!((gain_db - 13.8).abs() < 0.05, "prediction gain {gain_db}");
 $a_1, \dots, a_p$ (as `f32`, index 0 is $a_1$) and the final prediction-error
 energy $E_p$. Filtering the frame with $A(z)$ ([`lpc_residual`](crate::lpc_residual))
 removes 13.8 dB of its energy: what is left is essentially the excitation
-pulses, which a predictor built from the previous 18 samples cannot foresee.
+pulses, which a predictor built from the previous 18 samples cannot predict.
 
-## Under the hood
+## How it works
 
 **Levinson-Durbin, written out.** We rebuild the windowed autocorrelation,
-apply the same tiny diagonal loading the library uses ($R\[0\] \leftarrow (1 + 10^{-5}) R\[0\]$),
+apply the same small diagonal loading the library uses ($R[0] \leftarrow (1 + 10^{-5}) R[0]$),
 run the recursion and compare. We also check the defining property: the
 coefficients satisfy all $p$ normal equations (an order-$(p-1)$ answer would not).
 
@@ -281,12 +281,16 @@ let errors: Vec<f64> = resonances.iter().zip(&formants).map(|(e, t)| (e.0 - t.0)
 assert_eq!(errors, vec![11.0, -9.0, -3.0]);
 ```
 
+<!-- figure: ch08-poles -->
+
 **The LPC envelope and the FFT.** $|G/A(e^{j\omega})|$ is a smooth curve; the
-FFT of the frame is a comb of harmonics at multiples of $f_0$. If LPC has done
-its job, the harmonic peaks sit on the envelope up to a constant gain. The lab
+FFT of the frame is a comb of harmonics at multiples of $f_0$. If the LPC fit is
+good, the harmonic peaks lie on the envelope up to a constant gain. The lab
 measures this for harmonics 1 to 33 (up to 3960 Hz): the peaks scatter about
 the shifted envelope with a standard deviation of 1.06 dB (asserted below
 1.5 dB in the lab, which also writes the curves to a CSV file).
+
+<!-- figure: ch08-envelope -->
 
 ## Ask the library to explain
 
@@ -318,7 +322,7 @@ frame length for very short frames.
 3. **Pre-emphasis.** Pass the impulse train through two real poles at
    $z = 0.95$ (a glottal-like tilt) before the vocal tract. At order 18, is the
    2600 Hz formant still found without pre-emphasis? With
-   $y\[n\] = x\[n\] - 0.97 x\[n-1\]$?
+   $y[n] = x[n] - 0.97 x[n-1]$?
 4. **Rule of thumb.** What order does $f_s/1000 + 2$ suggest at 8 kHz and at
    44.1 kHz?
 
@@ -337,8 +341,8 @@ assert!((r8 - 0.96907).abs() < 5e-6);
 **2.** Order 10. Orders 4 and 6 find no narrow resonance and order 8 finds only
 two. Six poles would suffice in the limit of a long, noise-excited frame, but here
 the Hamming window, the short frame and the harmonic excitation leave some
-energy that LPC can only absorb with extra (broad) poles, exactly the slack the
-"+2" in the rule of thumb provides.
+energy that LPC can only model with extra (broad) poles; the "+2" in the rule
+of thumb allows for these.
 
 ```rust
 # use audio_samples::lpc_analysis;
@@ -392,8 +396,8 @@ assert_eq!(counts, vec![0, 0, 2, 3, 3]);
 ```
 
 **3.** Without pre-emphasis the pole nearest 2600 Hz moves to 2701 Hz and
-broadens to $B \approx 729$ Hz: the fit spends its accuracy on the strong low
-frequencies and F3 is lost. After pre-emphasis all three formants are back
+broadens to $B \approx 729$ Hz: the strong low frequencies dominate the
+prediction error and F3 is lost. After pre-emphasis all three formants are back
 within 30 Hz (709, 1219 and 2577 Hz).
 
 ```rust
@@ -448,7 +452,7 @@ let nearest = |res: &[(f64, f64)], f: f64| {
     *res.iter().min_by(|x, y| (x.0 - f).abs().total_cmp(&(y.0 - f).abs())).unwrap()
 };
 let (f3_raw, b3_raw) = nearest(&resonances(&raw), 2600.0);
-assert!(b3_raw > 400.0); // F3 is smeared out without pre-emphasis
+assert!(b3_raw > 400.0); // without pre-emphasis F3 is too broad to count
 assert_eq!((f3_raw.round(), b3_raw.round()), (2701.0, 729.0));
 let with_pre = resonances(&pre);
 let mut estimates = Vec::new();
@@ -474,7 +478,7 @@ assert!((q(44_100.0) - 46.1).abs() < 1e-9);
 ## Common pitfalls
 
 - **Sign convention.** The crate (like MATLAB and librosa) stores $A(z)$
-  coefficients, $e\[n\] = x\[n\] + \sum a_k x\[n-k\]$; the "predictor" form uses
+  coefficients, $e[n] = x[n] + \sum a_k x[n-k]$; the "predictor" form uses
   $-a_k$.
 - **Not librosa's algorithm.** `librosa.lpc` uses Burg's method on the raw
   frame; `lpc_analysis` applies a Hamming window, the autocorrelation method
@@ -505,8 +509,8 @@ assert!((q(44_100.0) - 46.1).abs() < 1e-9);
   at your settings.
 - [`AudioTransforms::rfft`](crate::AudioTransforms::rfft) for the magnitude
   spectrum used in the lab.
-- Previous chapter: [`c07_resampling`](crate::guide::c07_resampling); next:
-  [`c09_pitch`](crate::guide::c09_pitch), which estimates the *source* half of the
+- Previous chapter: [`c07_resampling`](07_resampling.md); next:
+  [`c09_pitch`](09_pitch.md), which estimates the *source* half of the
   model.
 - Lab: `examples/tutorial_08_lpc_formants.rs`
   (`cargo run --release --example tutorial_08_lpc_formants --features educational,full_no_plotting`).

@@ -244,8 +244,8 @@ fn main() {
         );
         assert!((f.cg - q("Coherent gain")).abs() < 1e-12);
         assert!((f.enbw - q("Equivalent noise bandwidth")).abs() < 1e-12);
-        // Scalloping and PSL are read off a zero-padded FFT by both us and the
-        // library; grids may differ, so agree to 0.05 dB.
+        // Scalloping and PSL are read off a zero-padded FFT both here and in the
+        // library; the grids may differ, so they agree to 0.05 dB.
         assert!((f.scalloping_db - q("Scalloping loss")).abs() < 0.05);
         assert!((f.psl_db - q("Peak side-lobe level")).abs() < 0.05);
         assert!(

@@ -1,17 +1,17 @@
 # 01. Sampling and aliasing
 
-Every digital audio signal starts life as a list of numbers taken at a fixed
-rate: 8 kHz for narrow-band telephone speech, 16 kHz for wide-band speech and
-most speech recognisers, 44.1 or 48 kHz for music. The sample rate decides which
-frequencies the numbers can describe, and frequencies above that limit do not
-simply disappear: they come back, disguised as lower ones. This chapter shows
-where they reappear, why, and how to stop it.
+A digital audio signal is a sequence of samples taken at a fixed rate: 8 kHz
+for narrow-band telephone speech, 16 kHz for wide-band speech and most speech
+recognisers, 44.1 or 48 kHz for music. The sample rate determines which
+frequencies the samples can represent. Frequencies above that limit are not
+removed by sampling: they appear in the sampled signal as lower frequencies.
+This chapter shows where they appear, why, and how to prevent it.
 
 ## Concept
 
 **Sampling** reads an analogue signal every $T$ seconds:
 
-$$x\[n\] = x_a(nT), \qquad T = 1 / f_s$$
+$$x[n] = x_a(nT), \qquad T = 1 / f_s$$
 
 where $x_a(t)$ is the analogue signal (amplitude in units of full scale) at
 time $t$ in seconds, $n$ is the integer sample index, $T$ is the sampling
@@ -35,7 +35,7 @@ $$f_N = f_s / 2$$
 in Hz. If $x_a$ contains no energy at or above $f_N$, it is recovered exactly
 from its samples by sinc interpolation (Whittaker-Shannon):
 
-$$x_a(t) = \sum_n x\[n\] \\, \mathrm{sinc}\\!\left(\frac{t - nT}{T}\right), \qquad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
+$$x_a(t) = \sum_n x[n] \, \mathrm{sinc}\!\left(\frac{t - nT}{T}\right), \qquad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
 
 where $u$ is a dimensionless time offset in sampling periods.
 
@@ -44,11 +44,13 @@ where $u$ is a dimensionless time offset in sampling periods.
 $$f_a = |f - k f_s|, \qquad k = \mathrm{round}(f / f_s)$$
 
 where $f_a$ is the alias frequency in Hz (always between 0 and $f_N$) and $k$
-is the nearest integer multiple of the sample rate. Picture the frequency axis
-folded like a paper fan at $0$, $f_N$, $f_s$, $3f_N$, ...: every frequency lands
-somewhere in $\[0, f_N\]$.
+is the nearest integer multiple of the sample rate. Equivalently, the frequency
+axis is folded at $0$, $f_N$, $f_s$, $3f_N$, ..., which maps every frequency
+into $[0, f_N]$.
 
-Aliasing bites in three places:
+<!-- figure: ch01-folding -->
+
+Aliasing occurs in three places:
 
 * **acquisition**: an analogue anti-aliasing filter must remove energy above
   $f_N$ before the converter samples;
@@ -118,7 +120,7 @@ assert!((steady_db[0] + 83.9).abs() < 0.1);
 assert!((steady_db[1] + 130.2).abs() < 0.1);
 assert!((steady_db[2] + 144.8).abs() < 0.1);
 
-// Over the whole 250 ms the picture is worse, and not because of aliasing:
+// Over the whole 250 ms the residue is larger, and not because of aliasing:
 // the tone starts and stops abruptly, and those edges are broadband clicks
 // that the filter passes below 8 kHz. For High, the 5 kHz bin of the full
 // output is 78.4 dB below the naive alias, and the largest bin anywhere
@@ -135,7 +137,7 @@ assert!((bin_5k_db - 78.4).abs() < 0.1);
 assert_eq!(top * 4, 7_652);
 assert!(top * 4 > 7_304 && top * 4 < 8_000);
 assert!((largest_db - 74.6).abs() < 0.1);
-// The click is visible directly: the first 50 output samples reach 0.12,
+// The click is visible in the samples: the first 50 output samples reach 0.12,
 // while the middle of the output is below 1e-7.
 let hs = high.as_slice().unwrap();
 let max_abs = |x: &[f64]| x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -143,7 +145,7 @@ assert!((max_abs(&hs[..50]) - 0.12).abs() < 0.005);
 assert!(max_abs(&hs[1_200..2_800]) < 1e-7);
 ```
 
-The naive version did not lose the tone; it *moved* it to 5 kHz at full
+The naive version did not remove the tone; it *moved* it to 5 kHz at full
 strength, where it is indistinguishable from a genuine 5 kHz component. Every
 tier of the resampler removes it instead: in the steady state the residue is
 84 dB down for `Fast` (a short filter designed for 70 dB of stop-band
@@ -153,14 +155,14 @@ bin, at 7652 Hz): the residue there is the broadband click of a tone switched
 on and off abruptly, not aliasing. Always measure rejection away from the ends
 of a test signal, as chapter 07 does.
 
-The same happens when a waveform is synthesised. A naive square wave
+The same applies when a waveform is synthesised. A naive square wave
 ([`square_wave`](crate::utils::generation::square_wave)) switches between
 $\pm A$; the band-limited version
 ([`square_wave_bandlimited`](crate::utils::generation::square_wave_bandlimited))
 adds only the odd harmonics below $f_N$. With $f_0 = 700$ Hz and $f_s = 16$ kHz,
 one second holds exactly 700 periods, so every harmonic and every alias falls
-on an integer-Hz bin of a 16 000-point DFT, and we can count the power that is
-*not* at an odd harmonic of 700 Hz:
+on an integer-Hz bin of a 16 000-point DFT, and the power that is *not* at an
+odd harmonic of 700 Hz can be summed directly:
 
 ```rust
 use audio_samples::utils::generation::{square_wave, square_wave_bandlimited};
@@ -193,12 +195,16 @@ assert!((rel_db - 20.0 * (1.0f64 / 13.0).log10()).abs() < 0.3);
 assert!(s_clean[6900] / s_clean[700] < 1e-9);
 ```
 
-## Under the hood
+<!-- figure: ch01-square-spectra -->
 
-The folding formula is a one-liner. Check it against the library over a sweep
+## How it works
+
+The folding formula is one line of code. Check it against the library over a sweep
 of frequencies, and check the identity behind it: the samples of an 11 kHz sine
 at 16 kHz are exactly those of a 5 kHz sine with inverted sign, because
-$\sin(2\pi \cdot 11000\\, n/16000) = \sin(2\pi(11000 - 16000)\\, n/16000) = -\sin(2\pi \cdot 5000\\, n / 16000)$.
+$\sin(2\pi \cdot 11000\, n/16000) = \sin(2\pi(11000 - 16000)\, n/16000) = -\sin(2\pi \cdot 5000\, n / 16000)$.
+
+<!-- figure: ch01-samples -->
 
 ```rust
 use audio_samples::educational::topics;
@@ -276,9 +282,9 @@ println!("{a}"); // formulas, symbols, the table of look-alike tones, the warnin
 ## Exercises
 
 1. A telephone line samples at 8 kHz. A 7.5 kHz whistle leaks in before the
-   converter. At what frequency will you hear it?
+   converter. At what frequency does it appear after sampling?
 2. You halve the rate of a 44.1 kHz recording by keeping every second sample.
-   It contains a 15 kHz tone. Predict where it lands, then measure it.
+   It contains a 15 kHz tone. Predict its alias frequency, then measure it.
 3. In the naive 700 Hz square wave above, there is energy at 1300 Hz, which is
    not a harmonic of 700 Hz. Which harmonic folded there?
 
@@ -356,7 +362,7 @@ assert!(clean[1300] / clean[700] < 1e-9);  // absent
 * [`sine_wave`](crate::utils::generation::sine_wave),
   [`square_wave`](crate::utils::generation::square_wave),
   [`square_wave_bandlimited`](crate::utils::generation::square_wave_bandlimited)
-* Next: [02. Quantisation and dither](crate::guide::c02_quantisation_dither).
-  Resampling in depth: [07. Resampling](crate::guide::c07_resampling).
+* Next: [02. Quantisation and dither](02_quantisation_dither.md).
+  Resampling in depth: [07. Resampling](07_resampling.md).
 * Lab: `examples/tutorial_01_sampling_aliasing.rs`
   (`cargo run --release --example tutorial_01_sampling_aliasing --features educational,full_no_plotting`).
