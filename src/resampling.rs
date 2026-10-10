@@ -188,57 +188,129 @@ struct Kernel {
     exact: bool,
     /// Rows per input sample of the interpolated table (unused when `exact`).
     phases: usize,
+    /// Identity of an interpolated table (`None` for exact tables), so
+    /// kernels for different ratios can share it.
+    table_key: Option<TableKey>,
     /// Row-major coefficients.
-    coeffs: Vec<f64>,
+    coeffs: Arc<[f64]>,
     /// Whether the signal end is extended by holding the last sample.
     hold_last: bool,
     /// Use the AVX2 + FMA dot product.
     avx2_fma: bool,
 }
 
+/// Identifies an interpolated (non-exact) coefficient table. Such a table
+/// depends only on the quality tier, the relative bandwidth `min(L/M, 1)` and
+/// the row count, not on the exact ratio: every upsampling ratio of one
+/// quality shares one table (e.g. pitch shifts down by any amount).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TableKey {
+    quality: ResamplingQuality,
+    lower_bits: u64,
+    phases: usize,
+}
+
+/// Samples per lower-rate sample of the prototype filter table.
+const PROTO_RES: usize = 8192;
+
+/// Continuous Kaiser-windowed sinc low-pass for relative bandwidth `lower`:
+/// its half-length in lower-rate samples and `h(tau)`, `tau` in input samples.
+///
+/// `h_lower(tau) = lower · h_1(lower · tau)`: the filter for any ratio is the
+/// `lower = 1` prototype stretched in time.
+fn sinc_kernel(spec: FilterSpec, lower: f64) -> (f64, impl Fn(f64) -> f64) {
+    // -6 dB point midway through the transition band, as a fraction of the
+    // input Nyquist frequency.
+    let cutoff = 0.5 * (spec.passband + spec.stopband) * lower;
+    // Kaiser length estimate (in lower-rate samples) for the requested
+    // attenuation and transition width.
+    let transition = std::f64::consts::PI * (spec.stopband - spec.passband);
+    let length = (spec.attenuation_db - 7.95) / (2.285 * transition);
+    let half_lower = (length / 2.0).ceil();
+    let support = half_lower / lower;
+    let beta = kaiser_beta(spec.attenuation_db);
+    let i0_beta = bessel_i0(beta);
+    let h = move |tau: f64| -> f64 {
+        let r = tau / support;
+        if r.abs() >= 1.0 {
+            return 0.0;
+        }
+        let window = bessel_i0(beta * (1.0 - r * r).sqrt()) / i0_beta;
+        let x = std::f64::consts::PI * cutoff * tau;
+        let sinc = if x == 0.0 { 1.0 } else { x.sin() / x };
+        cutoff * sinc * window
+    };
+    (half_lower, h)
+}
+
+/// The `lower = 1` filter of a quality tier sampled at `1 / PROTO_RES` over
+/// `[0, half_lower]` (it is even). The window does not reach zero at the edge
+/// of the support (the filter steps to zero there), so the last entry holds
+/// the left limit, not the value 0 at the edge itself. Built once per process
+/// and quality (≈ 6 MB for `High`).
+fn prototype(quality: ResamplingQuality, spec: FilterSpec) -> &'static [f64] {
+    static TABLES: [std::sync::OnceLock<Vec<f64>>; 3] = [const { std::sync::OnceLock::new() }; 3];
+    let slot = match quality {
+        ResamplingQuality::Fast => 0,
+        ResamplingQuality::Medium => 1,
+        ResamplingQuality::High => 2,
+    };
+    TABLES[slot].get_or_init(|| {
+        let (half_lower, h) = sinc_kernel(spec, 1.0);
+        let n = half_lower as usize * PROTO_RES;
+        let mut g: Vec<f64> = (0..n).map(|i| h(i as f64 / PROTO_RES as f64)).collect();
+        g.push(h(half_lower * (1.0 - f64::EPSILON)));
+        g
+    })
+}
+
+/// Linear interpolation in a [`prototype`] table (zero from the edge of the
+/// support on, like the filter itself).
+#[inline]
+fn prototype_eval(g: &[f64], u: f64) -> f64 {
+    let a = u.abs() * PROTO_RES as f64;
+    let i = a as usize;
+    if i + 1 >= g.len() {
+        return 0.0;
+    }
+    let f = a - i as f64;
+    g[i] + f * (g[i + 1] - g[i])
+}
+
 impl Kernel {
-    /// Builds the table for `in_sr -> out_sr`.
+    /// Builds the table for `in_sr -> out_sr`. An interpolated table is taken
+    /// from `shared` when it returns one for the table's [`TableKey`].
+    ///
+    /// Exact tables evaluate the filter directly. Interpolated tables are
+    /// sampled from the quality's [`prototype`] (two linear interpolations
+    /// instead of a Bessel series per coefficient; each adds < 1e-8 per
+    /// coefficient), which makes building one cheap.
     ///
     /// # Errors
     /// [`ParameterError`] if the table would exceed [`MAX_KERNEL_ENTRIES`]
     /// coefficients (decimation by more than ~10^5 : 1).
-    fn new(in_sr: u32, out_sr: u32, kind: KernelKind) -> AudioSampleResult<Self> {
+    fn new(
+        in_sr: u32,
+        out_sr: u32,
+        quality: ResamplingQuality,
+        shared: &dyn Fn(TableKey) -> Option<Arc<[f64]>>,
+    ) -> AudioSampleResult<Self> {
+        let kind = kernel_kind(quality, in_sr, out_sr);
         let g = gcd(u64::from(in_sr), u64::from(out_sr));
         let l = u64::from(out_sr) / g;
         let m = u64::from(in_sr) / g;
         // Bandwidth of the lower rate relative to the input rate.
         let lower = (l as f64 / m as f64).min(1.0);
 
-        // Continuous kernel h(tau), tau in input samples, and its support.
-        let (half, h): (usize, Box<dyn Fn(f64) -> f64>) = match kind {
-            KernelKind::Linear => (1, Box::new(|tau: f64| (1.0 - tau.abs()).max(0.0))),
+        let half = match kind {
+            KernelKind::Linear => 1,
             KernelKind::Sinc(spec) => {
-                // -6 dB point midway through the transition band, as a
-                // fraction of the input Nyquist frequency.
-                let cutoff = 0.5 * (spec.passband + spec.stopband) * lower;
-                // Kaiser length estimate (in lower-rate samples) for the
-                // requested attenuation and transition width.
-                let transition = std::f64::consts::PI * (spec.stopband - spec.passband);
-                let length = (spec.attenuation_db - 7.95) / (2.285 * transition);
-                let half_lower = (length / 2.0).ceil();
-                let support = half_lower / lower;
-                let beta = kaiser_beta(spec.attenuation_db);
-                let i0_beta = bessel_i0(beta);
-                let h = move |tau: f64| -> f64 {
-                    let r = tau / support;
-                    if r.abs() >= 1.0 {
-                        return 0.0;
-                    }
-                    let window = bessel_i0(beta * (1.0 - r * r).sqrt()) / i0_beta;
-                    let x = std::f64::consts::PI * cutoff * tau;
-                    let sinc = if x == 0.0 { 1.0 } else { x.sin() / x };
-                    cutoff * sinc * window
-                };
+                let support = sinc_kernel(spec, lower).0 / lower;
                 // Round the half-width up to a multiple of 8 so rows are a
                 // whole number of 16-wide SIMD blocks (the extra taps are 0).
                 // `support` is at most ~4e11 (u32 rates), so this cannot wrap
                 // on 64-bit targets; the size check below rejects it anyway.
-                ((support.ceil() as usize).next_multiple_of(8), Box::new(h))
+                (support.ceil() as usize).next_multiple_of(8)
             }
         };
         let taps = 2 * half;
@@ -262,14 +334,31 @@ impl Kernel {
                 ),
             )));
         }
-        let mut coeffs = Vec::with_capacity(rows * taps);
-        for row in 0..rows {
-            let phi = row as f64 / denom;
-            for j in 0..taps {
-                let offset = j as f64 - (half as f64 - 1.0);
-                coeffs.push(h(phi - offset));
+        let table_key = (!exact).then_some(TableKey {
+            quality,
+            lower_bits: lower.to_bits(),
+            phases,
+        });
+        let build = |h: &dyn Fn(f64) -> f64| -> Arc<[f64]> {
+            let mut coeffs = Vec::with_capacity(rows * taps);
+            for row in 0..rows {
+                let phi = row as f64 / denom;
+                for j in 0..taps {
+                    let offset = j as f64 - (half as f64 - 1.0);
+                    coeffs.push(h(phi - offset));
+                }
             }
-        }
+            coeffs.into()
+        };
+        let coeffs = match (table_key.and_then(shared), kind) {
+            (Some(table), _) => table,
+            (None, KernelKind::Linear) => build(&|tau: f64| (1.0 - tau.abs()).max(0.0)),
+            (None, KernelKind::Sinc(spec)) if exact => build(&sinc_kernel(spec, lower).1),
+            (None, KernelKind::Sinc(spec)) => {
+                let g = prototype(quality, spec);
+                build(&|tau: f64| lower * prototype_eval(g, lower * tau))
+            }
+        };
         Ok(Self {
             l,
             m,
@@ -277,6 +366,7 @@ impl Kernel {
             taps,
             exact,
             phases,
+            table_key,
             coeffs,
             hold_last: matches!(kind, KernelKind::Linear),
             avx2_fma: has_avx2_fma(),
@@ -393,16 +483,17 @@ struct KernelKey {
     quality: ResamplingQuality,
 }
 
-/// Most kernels kept per thread.
-const KERNEL_CACHE_ENTRIES: usize = 8;
+/// Most kernels kept per thread (kernels sharing an interpolated table cost
+/// only a few bytes each; [`KERNEL_CACHE_BYTES`] is the real bound).
+const KERNEL_CACHE_ENTRIES: usize = 32;
 /// Most coefficient memory kept per thread. A kernel larger than this on its
 /// own is used for the call that built it and then dropped, never cached.
 const KERNEL_CACHE_BYTES: usize = 64 << 20;
 
 thread_local! {
-    /// Recently used kernels, most recent first. Small and bounded: every
-    /// distinct ratio (e.g. pitch shifts by arbitrary steps) builds a new
-    /// table of up to tens of MB, so an unbounded map grows without limit.
+    /// Recently used kernels, most recent first. Small and bounded: distinct
+    /// ratios (e.g. pitch shifts by arbitrary steps) can each need a table of
+    /// several MB, so an unbounded map grows without limit.
     static KERNEL_CACHE: RefCell<Vec<(KernelKey, Arc<Kernel>)>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -418,7 +509,9 @@ impl Kernel {
 /// The cache is a small LRU list: a hit moves the entry to the front; a miss
 /// builds the kernel, inserts it at the front and evicts from the back until
 /// at most [`KERNEL_CACHE_ENTRIES`] kernels and [`KERNEL_CACHE_BYTES`] bytes
-/// of coefficients remain.
+/// of coefficients remain (a table shared by several kernels counts once).
+/// A miss that needs an interpolated table already held by a cached kernel
+/// (same [`TableKey`]) reuses it instead of building a new one.
 ///
 /// # Errors
 /// See [`Kernel::new`].
@@ -440,17 +533,24 @@ fn cached_kernel(
             cache.insert(0, entry);
             return Ok(kernel);
         }
-        let kernel = Arc::new(Kernel::new(
-            in_sr,
-            out_sr,
-            kernel_kind(quality, in_sr, out_sr),
-        )?);
+        let shared = |table: TableKey| {
+            cache
+                .iter()
+                .find(|(_, k)| k.table_key == Some(table))
+                .map(|(_, k)| Arc::clone(&k.coeffs))
+        };
+        let kernel = Arc::new(Kernel::new(in_sr, out_sr, quality, &shared)?);
         cache.insert(0, (key, Arc::clone(&kernel)));
         let mut total = 0;
+        let mut counted: Vec<*const f64> = Vec::new();
         let keep = cache
             .iter()
             .position(|(_, k)| {
-                total += k.size_bytes();
+                let table = k.coeffs.as_ptr();
+                if !counted.contains(&table) {
+                    counted.push(table);
+                    total += k.size_bytes();
+                }
                 total > KERNEL_CACHE_BYTES
             })
             .unwrap_or(cache.len())
@@ -1578,12 +1678,7 @@ mod tests {
     #[test]
     fn test_interpolated_table_for_awkward_ratio() {
         // L = 44101 phases is too many for an exact table.
-        let kernel = Kernel::new(
-            44100,
-            44101,
-            kernel_kind(ResamplingQuality::High, 44100, 44101),
-        )
-        .unwrap();
+        let kernel = Kernel::new(44100, 44101, ResamplingQuality::High, &|_| None).unwrap();
         assert!(!kernel.exact);
         let x = sine(44100, 3000.0, 44100.0, 0.2);
         let y = resample(
@@ -1605,12 +1700,7 @@ mod tests {
     #[test]
     fn test_steep_decimation_table_is_bounded() {
         for (in_sr, out_sr) in [(48000u32, 101u32), (192_000, 101), (96000, 7919)] {
-            let kernel = Kernel::new(
-                in_sr,
-                out_sr,
-                kernel_kind(ResamplingQuality::High, in_sr, out_sr),
-            )
-            .unwrap();
+            let kernel = Kernel::new(in_sr, out_sr, ResamplingQuality::High, &|_| None).unwrap();
             assert!(
                 kernel.size_bytes() < 64 << 20,
                 "{in_sr} -> {out_sr}: {} bytes",
@@ -1646,6 +1736,51 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Regression (pitch_shift with many distinct steps): every awkward
+    /// upsampling ratio built its own 4097-row table (~30 ms each) and the
+    /// LRU thrashed. Upsampling tables do not depend on the ratio, so they
+    /// are now shared; downsampling tables are sampled from a per-quality
+    /// prototype instead of evaluating the window per coefficient.
+    #[test]
+    fn test_interpolated_tables_are_shared_and_accurate() {
+        // Pitch-shift style rates (2^31 and a nearby integer).
+        let base = 1u32 << 31;
+        let a = cached_kernel(base - 12345, base, ResamplingQuality::High).unwrap();
+        let b = cached_kernel(base - 999_999, base, ResamplingQuality::High).unwrap();
+        assert!(!a.exact && !b.exact);
+        assert!(Arc::ptr_eq(&a.coeffs, &b.coeffs));
+        // Different quality: different table.
+        let c = cached_kernel(base - 12345, base, ResamplingQuality::Medium).unwrap();
+        assert!(!Arc::ptr_eq(&a.coeffs, &c.coeffs));
+
+        // Tables sampled from the prototype match the directly evaluated
+        // filter to well below the interpolation error budget.
+        for (in_sr, out_sr) in [(44100u32, 44101u32), (44101, 44100), (48000, 7919)] {
+            for quality in [
+                ResamplingQuality::Fast,
+                ResamplingQuality::Medium,
+                ResamplingQuality::High,
+            ] {
+                let k = Kernel::new(in_sr, out_sr, quality, &|_| None).unwrap();
+                let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
+                    continue;
+                };
+                assert!(!k.exact);
+                let lower = (f64::from(out_sr) / f64::from(in_sr)).min(1.0);
+                let (_, h) = sinc_kernel(spec, lower);
+                let mut err = 0.0f64;
+                for row in 0..=k.phases {
+                    let phi = row as f64 / k.phases as f64;
+                    for j in 0..k.taps {
+                        let tau = phi - (j as f64 - (k.half as f64 - 1.0));
+                        err = err.max((k.coeffs[row * k.taps + j] - h(tau)).abs());
+                    }
+                }
+                assert!(err < 1e-8, "{in_sr} -> {out_sr} {quality:?}: {err:e}");
+            }
+        }
     }
 
     /// A kernel larger than the cache budget is not retained.
