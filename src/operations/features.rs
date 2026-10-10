@@ -1895,16 +1895,61 @@ pub fn rms_from_spectrogram<F: AudioFloat>(
     }
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     let (half, two, fl_f) = (F::of(0.5), F::of(2.0), F::of_usize(fl));
+    let edge = |k: usize| k == 0 || (fl.is_multiple_of(2) && k == n_bins - 1);
+    let finish = |a: F| (two * a / (fl_f * fl_f)).sqrt();
     let mut acc = vec![F::zero(); n_frames];
     for c in 0..n_ch {
+        let sc = s.index_axis(Axis(0), c);
         let o = out_row(&mut out, c);
-        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+        if n_frames > 1 && sc.strides()[0] == 1 {
+            // Contiguous frames (Fortran order): 8 frames at a time, each
+            // summed over the bins in ascending order as below.
+            const G: usize = 8;
+            let mut t = 0;
+            while t + G <= n_frames {
+                let cols: [&[F]; G] =
+                    std::array::from_fn(|j| sc.column(t + j).to_slice().expect("unit row stride"));
+                let mut a = [F::zero(); G];
+                for k in 0..n_bins {
+                    if edge(k) {
+                        for j in 0..G {
+                            let mut x = cols[j][k] * cols[j][k];
+                            x *= half;
+                            a[j] += x;
+                        }
+                    } else {
+                        for j in 0..G {
+                            a[j] += cols[j][k] * cols[j][k];
+                        }
+                    }
+                }
+                for j in 0..G {
+                    o[t + j] = finish(a[j]);
+                }
+                t += G;
+            }
+            for (tt, o) in o.iter_mut().enumerate().skip(t) {
+                let column = sc.column(tt);
+                let column = column.to_slice().expect("unit row stride");
+                let mut a = F::zero();
+                for (k, &v) in column.iter().enumerate() {
+                    let mut x = v * v;
+                    if edge(k) {
+                        x *= half;
+                    }
+                    a += x;
+                }
+                *o = finish(a);
+            }
+            continue;
+        }
+        for_each_row_tile(sc, |t0, tile| {
             let w = tile.ncols();
             let acc = &mut acc[..w];
             acc.fill(F::zero());
             for k in 0..n_bins {
                 let r = row(&tile, k);
-                if k == 0 || (fl.is_multiple_of(2) && k == n_bins - 1) {
+                if edge(k) {
                     for (a, &v) in acc.iter_mut().zip(r) {
                         let mut x = v * v;
                         x *= half;
@@ -1917,7 +1962,7 @@ pub fn rms_from_spectrogram<F: AudioFloat>(
                 }
             }
             for (o, &a) in o[t0..t0 + w].iter_mut().zip(acc.iter()) {
-                *o = (two * a / (fl_f * fl_f)).sqrt();
+                *o = finish(a);
             }
         });
     }
