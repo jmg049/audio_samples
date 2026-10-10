@@ -78,7 +78,8 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use ndarray::{
-    Array, Array2, Array3, ArrayBase, ArrayView2, ArrayView3, Axis, Data, Dimension, Slice, Zip,
+    Array, Array2, Array3, ArrayBase, ArrayView2, ArrayView3, ArrayViewMutD, Axis, Data, Dimension,
+    Slice, Zip,
 };
 use num_complex::Complex;
 use realfft::{ComplexToReal, RealToComplex};
@@ -927,48 +928,78 @@ impl DbConfig {
     }
 }
 
-/// Size of each independent block for `axes` in a standard-layout array of `shape`.
-fn db_block_size(shape: &[usize], axes: DbAxes) -> usize {
-    let total: usize = shape.iter().product();
+/// Number of leading axes whose indices select independent blocks for `axes`
+/// (`Auto` on 2-D or more: one block per index of the leading axes; otherwise
+/// the whole array is one block).
+fn db_block_axes(ndim: usize, axes: DbAxes) -> usize {
     match axes {
-        DbAxes::Auto if shape.len() >= 2 => shape[shape.len() - 2] * shape[shape.len() - 1],
-        _ => total,
+        DbAxes::Auto if ndim >= 2 => ndim - 2,
+        _ => 0,
+    }
+}
+
+/// Calls `f` on every block of `values` (see [`db_block_axes`]): each block as
+/// one slice in memory order when it is contiguous (C or Fortran order),
+/// otherwise as a copied-out buffer that is written back afterwards.
+fn for_each_db_block<F: AudioFloat>(
+    mut values: ArrayViewMutD<'_, F>,
+    lead: usize,
+    f: &mut impl FnMut(&mut [F]),
+) {
+    if lead > 0 {
+        for sub in values.outer_iter_mut() {
+            for_each_db_block(sub, lead - 1, f);
+        }
+        return;
+    }
+    if let Some(slice) = values.as_slice_memory_order_mut() {
+        f(slice);
+    } else {
+        let mut buf: Vec<F> = values.iter().copied().collect();
+        f(&mut buf);
+        for (dst, src) in values.iter_mut().zip(buf) {
+            *dst = src;
+        }
     }
 }
 
 /// Shared implementation of `power_to_db` on already-"powered" values.
 ///
-/// `values` are the power values in logical order; `refs` gives, per block, the
-/// reference value (already squared for amplitude input).
+/// `values` holds the power values (in the memory layout of the input, so
+/// Fortran-order spectrograms are processed in memory order); `ref_for_block`
+/// gives, per block, the reference value (already squared for amplitude
+/// input). Each output element depends only on its input element and on its
+/// block's maximum, so the processing order does not change the result.
 fn power_to_db_core<F: AudioFloat, D: Dimension>(
-    shape: D,
-    values: Vec<F>,
+    mut values: Array<F, D>,
     ref_for_block: impl Fn(&[F]) -> F,
     amin: F,
     top_db: Option<F>,
     axes: DbAxes,
 ) -> Array<F, D> {
-    let block = db_block_size(shape.slice(), axes).max(1);
     let ten = F::of(10.0);
-    let mut out = values;
-    for chunk in out.chunks_mut(block) {
-        let ref_value = ref_for_block(chunk);
-        let ref_db = ten * amin.max(ref_value).log10();
-        for v in chunk.iter_mut() {
-            *v = ten * amin.max(*v).log10() - ref_db;
-        }
-        if let Some(t) = top_db {
-            let max = block_max(chunk);
-            let floor = max - t;
+    let lead = db_block_axes(values.ndim(), axes);
+    for_each_db_block(
+        values.view_mut().into_dyn(),
+        lead,
+        &mut |chunk: &mut [F]| {
+            let ref_value = ref_for_block(chunk);
+            let ref_db = ten * amin.max(ref_value).log10();
             for v in chunk.iter_mut() {
-                *v = v.max(floor);
+                *v = ten * amin.max(*v).log10() - ref_db;
             }
-        }
-    }
-    Array::from_shape_vec(shape, out).expect("shape matches the number of elements")
+            if let Some(t) = top_db {
+                let max = block_max(chunk);
+                let floor = max - t;
+                for v in chunk.iter_mut() {
+                    *v = v.max(floor);
+                }
+            }
+        },
+    );
+    values
 }
 
-/// Maximum of a block (`NaN`-ignoring, `-inf` when empty).
 fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
     chunk.iter().copied().fold(F::neg_infinity(), F::max)
 }
@@ -1026,11 +1057,9 @@ where
     D: Dimension,
 {
     config.validate()?;
-    let values: Vec<F> = s.iter().copied().collect();
     let reference = config.reference;
     Ok(power_to_db_core(
-        s.raw_dim(),
-        values,
+        s.to_owned(),
         |chunk| match reference {
             DbReference::Value(r) => F::of(r).abs(),
             DbReference::Max => block_max(chunk),
@@ -1083,11 +1112,9 @@ where
     D: Dimension,
 {
     config.validate()?;
-    let power: Vec<F> = s.iter().map(|x| x.abs() * x.abs()).collect();
     let reference = config.reference;
     Ok(power_to_db_core(
-        s.raw_dim(),
-        power,
+        s.map(|x| x.abs() * x.abs()),
         |chunk| match reference {
             DbReference::Value(r) => {
                 let r = F::of(r).abs();
@@ -1130,11 +1157,7 @@ where
     D: Dimension,
 {
     let (reference, ten, tenth) = (F::of(reference), F::of(10.0), F::of(0.1));
-    let v: Vec<F> = s_db
-        .iter()
-        .map(|&x| reference * ten.powf(x * tenth))
-        .collect();
-    Array::from_shape_vec(s_db.raw_dim(), v).expect("shape matches the number of elements")
+    s_db.mapv(|x| reference * ten.powf(x * tenth))
 }
 
 /// Converts decibels back to amplitude, equivalent to
@@ -1159,11 +1182,7 @@ where
     D: Dimension,
 {
     let (r2, ten, tenth) = (F::of(reference * reference), F::of(10.0), F::of(0.1));
-    let v: Vec<F> = s_db
-        .iter()
-        .map(|&x| (r2 * ten.powf(x * tenth)).sqrt())
-        .collect();
-    Array::from_shape_vec(s_db.raw_dim(), v).expect("shape matches the number of elements")
+    s_db.mapv(|x| (r2 * ten.powf(x * tenth)).sqrt())
 }
 
 // =============================================================================
