@@ -319,6 +319,33 @@ def _sync_cases(rng) -> dict:
     return {"sync_input": data, "sync": out}
 
 
+def _float32_cases(rng) -> dict:
+    """DTW and Viterbi on float32 inputs.
+
+    Inputs are rounded to float32 and stored (exact as float64 JSON values).
+    librosa computes the DTW cost through ``scipy.spatial.distance.cdist``,
+    which works in float64, and accumulates Viterbi log-likelihoods in float64
+    (``log(prob + tiny(float32))`` is float32). The transition matrix stays
+    float64 here, as librosa's builders return; the Rust side rounds it to f32.
+    """
+    x = rng.standard_normal((12, 40)).astype(np.float32)
+    y = rng.standard_normal((12, 55)).astype(np.float32)
+    D, wp = librosa.sequence.dtw(x, y)
+    prob = rng.uniform(0.0, 1.0, (8, 120)).astype(np.float32)
+    trans = librosa.sequence.transition_local(8, 3)
+    states, logp = librosa.sequence.viterbi(prob, trans, return_logp=True)
+    trans_loop = librosa.sequence.transition_loop(8, 0.9)
+    states2, logp2 = librosa.sequence.viterbi(prob, trans_loop, return_logp=True)
+    return {
+        "dtw": {"X": x, "Y": y, "D": D, "wp": wp},
+        "viterbi": {
+            "prob": prob,
+            "local": {"transition": trans, "states": states, "logp": float(logp[0])},
+            "loop": {"transition": trans_loop, "states": states2, "logp": float(logp2[0])},
+        },
+    }
+
+
 def build(signals, sr) -> dict:
     rng = np.random.default_rng(20261009)
     out = {"dtw": _dtw_cases(signals, sr, rng), "dtw_backtracking": _backtracking_cases(rng)}
@@ -327,4 +354,5 @@ def build(signals, sr) -> dict:
     out["rqa"] = _rqa_cases(rng)
     out.update(_segment_cases(rng))
     out.update(_sync_cases(rng))
+    out["float32"] = _float32_cases(rng)
     return out

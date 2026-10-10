@@ -470,3 +470,44 @@ fn sync_matches_librosa() {
         assert_close(&format!("sync/{name}"), &r, &arr2(&case["out"]), 1e-15, 0.0);
     }
 }
+
+/// float32 inputs: librosa computes the DTW cost with scipy's float64 `cdist`
+/// and accumulates the Viterbi values in float64; ours runs in f32.
+#[test]
+fn float32_dtw_and_viterbi_match_librosa() {
+    let f = fixture();
+    let c = &f["float32"];
+    let x = arr2(&c["dtw"]["X"]).mapv(|v| v as f32);
+    let y = arr2(&c["dtw"]["Y"]).mapv(|v| v as f32);
+    let r = dtw(x.view(), y.view(), &DtwConfig::librosa()).unwrap();
+    assert_eq!(r.path.unwrap(), pairs(&c["dtw"]["wp"]), "dtw f32: path");
+    let d = arr2(&c["dtw"]["D"]);
+    let got: Vec<f64> = r.cost.iter().map(|&v| f64::from(v)).collect();
+    let (abs, rel) = errors(&got, &d);
+    eprintln!("dtw f32: max abs {abs:.3e}, rel to peak {rel:.3e}");
+    // Each local cost is an f32 Euclidean distance over 12 features (a few
+    // f32 roundings, ~2e-7 relative); the accumulated cost sums ~95 of them
+    // in f32. Error growth of an n-term f32 sum is at most n x 6e-8 = 5.7e-6
+    // relative to the peak. Measured 1.9e-7.
+    assert_close("dtw f32: D", &got, &d, 6e-6, 0.0);
+
+    let prob = arr2(&c["viterbi"]["prob"]).mapv(|v| v as f32);
+    for kind in ["local", "loop"] {
+        let case = &c["viterbi"][kind];
+        let trans = arr2(&case["transition"]).mapv(|v| v as f32);
+        let r = viterbi(prob.view(), trans.view(), None, None).unwrap();
+        assert_eq!(
+            r.states,
+            usize_vec(&case["states"]),
+            "viterbi f32 {kind}: states"
+        );
+        let e = case["logp"].as_f64().unwrap();
+        let rel = (f64::from(r.log_prob) - e).abs() / e.abs();
+        eprintln!("viterbi f32 {kind}: logp rel {rel:.3e}");
+        // 120 steps of f32 additions of log terms (each one f32 rounding of
+        // ln); the running total grows to |logp| ~ 1e2, so the sum's
+        // rounding error is at most 120 x 6e-8 = 7.2e-6 relative. Measured
+        // 9.3e-7 (both transition matrices); 1e-5 covers the worst case.
+        assert!(rel <= 1e-5, "viterbi f32 {kind}: logp rel {rel:.3e}");
+    }
+}
