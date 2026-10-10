@@ -1910,6 +1910,8 @@ pub fn rms_from_spectrogram<F: AudioFloat>(
                 let cols: [&[F]; G] =
                     std::array::from_fn(|j| sc.column(t + j).to_slice().expect("unit row stride"));
                 let mut a = [F::zero(); G];
+                // `k` indexes the 8 columns at once.
+                #[allow(clippy::needless_range_loop)]
                 for k in 0..n_bins {
                     if edge(k) {
                         for j in 0..G {
