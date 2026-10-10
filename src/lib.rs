@@ -383,6 +383,7 @@ pub mod resampling;
 pub mod traits;
 pub mod utils;
 
+mod audio_float;
 mod error;
 /// Fixed-size audio buffer types whose geometry is encoded in the type system.
 #[cfg(feature = "fixed-size-audio")]
@@ -417,6 +418,7 @@ pub mod librosa_migration {
 #[cfg(all(feature = "educational", feature = "full_no_plotting"))]
 pub mod guide;
 
+pub use crate::audio_float::AudioFloat;
 pub use crate::error::{
     AudioSampleError, AudioSampleResult, ChannelRequirement, ConversionError, EnumParseError,
     FeatureError, LayoutError, NoteParseError, ParameterError, ProcessingError,

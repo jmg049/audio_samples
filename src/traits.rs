@@ -394,6 +394,42 @@ pub trait AudioSample:
     ///
     /// Corresponds to a variant of [`SampleType`].
     const SAMPLE_TYPE: SampleType;
+
+    /// The floating-point type that analysis of this sample type computes in
+    /// and returns: the smallest float type that represents every sample value
+    /// exactly.
+    ///
+    /// `u8`, `i16`, [`I24`] and `f32` use `f32`; `i32` and `f64` use `f64`.
+    /// See [`AudioFloat`](crate::AudioFloat).
+    type Float: crate::AudioFloat;
+
+    /// Converts this sample to [`Self::Float`] with the crate's audio-aware
+    /// conversion (integers scale to `[-1.0, 1.0]`, as
+    /// [`ConvertTo`] does).
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::AudioSample;
+    ///
+    /// let x: f32 = 16384_i16.to_float();
+    /// assert!((x - 0.5).abs() < 1e-4);
+    /// ```
+    fn to_float(self) -> Self::Float;
+
+    /// Converts a [`Self::Float`] value back to this sample type with the
+    /// crate's audio-aware conversion (integers round and saturate, as
+    /// [`ConvertFrom`] does).
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use audio_samples::AudioSample;
+    ///
+    /// assert_eq!(i16::from_float(1.5), i16::MAX);
+    /// assert_eq!(i16::from_float(0.0), 0);
+    /// ```
+    fn from_float(value: Self::Float) -> Self;
 }
 
 /// Supertrait combining [`AudioSample`] with full bidirectional conversion
@@ -1191,6 +1227,15 @@ unsafe fn abs_max_f32_avx2(slice: &[f32]) -> f32 {
 // AudioSample Implementations
 // ========================
 impl AudioSample for u8 {
+    type Float = f32;
+    #[inline]
+    fn to_float(self) -> f32 {
+        ConvertTo::<f32>::convert_to(self)
+    }
+    #[inline]
+    fn from_float(value: f32) -> Self {
+        <Self as ConvertFrom<f32>>::convert_from(value)
+    }
     const MAX: Self = Self::MAX;
     const MIN: Self = Self::MIN;
     const BITS: Self = 8;
@@ -1203,6 +1248,15 @@ impl AudioSample for u8 {
 }
 
 impl AudioSample for i16 {
+    type Float = f32;
+    #[inline]
+    fn to_float(self) -> f32 {
+        ConvertTo::<f32>::convert_to(self)
+    }
+    #[inline]
+    fn from_float(value: f32) -> Self {
+        <Self as ConvertFrom<f32>>::convert_from(value)
+    }
     const MAX: Self = Self::MAX;
     const MIN: Self = Self::MIN;
     const BITS: u8 = 16;
@@ -1215,6 +1269,15 @@ impl AudioSample for i16 {
 }
 
 impl AudioSample for I24 {
+    type Float = f32;
+    #[inline]
+    fn to_float(self) -> f32 {
+        ConvertTo::<f32>::convert_to(self)
+    }
+    #[inline]
+    fn from_float(value: f32) -> Self {
+        <Self as ConvertFrom<f32>>::convert_from(value)
+    }
     #[inline]
     fn slice_to_bytes(samples: &[Self]) -> Vec<u8> {
         Self::write_i24s_ne(samples)
@@ -1232,6 +1295,15 @@ impl AudioSample for I24 {
 }
 
 impl AudioSample for i32 {
+    type Float = f64;
+    #[inline]
+    fn to_float(self) -> f64 {
+        ConvertTo::<f64>::convert_to(self)
+    }
+    #[inline]
+    fn from_float(value: f64) -> Self {
+        <Self as ConvertFrom<f64>>::convert_from(value)
+    }
     const MAX: Self = Self::MAX;
     const MIN: Self = Self::MIN;
     const BITS: u8 = 32;
@@ -1244,6 +1316,15 @@ impl AudioSample for i32 {
 }
 
 impl AudioSample for f32 {
+    type Float = f32;
+    #[inline]
+    fn to_float(self) -> f32 {
+        ConvertTo::<f32>::convert_to(self)
+    }
+    #[inline]
+    fn from_float(value: f32) -> Self {
+        <Self as ConvertFrom<f32>>::convert_from(value)
+    }
     const MAX: Self = 1.0;
     const MIN: Self = -1.0;
     const BITS: u8 = 32;
@@ -1268,6 +1349,15 @@ impl AudioSample for f32 {
 }
 
 impl AudioSample for f64 {
+    type Float = f64;
+    #[inline]
+    fn to_float(self) -> f64 {
+        ConvertTo::<f64>::convert_to(self)
+    }
+    #[inline]
+    fn from_float(value: f64) -> Self {
+        <Self as ConvertFrom<f64>>::convert_from(value)
+    }
     const MAX: Self = 1.0;
     const MIN: Self = -1.0;
     const BITS: u8 = 64;
