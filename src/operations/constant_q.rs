@@ -93,10 +93,10 @@
 
 use std::num::NonZeroUsize;
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, s};
+use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis, CowArray, Ix2, s};
 use num_complex::Complex;
 
-use crate::audio_float::{audio_float_rows, finite_float_rows, float_rows_to_audio};
+use crate::audio_float::{finite_float_rows, float_rows_to_audio};
 use crate::operations::filterbanks::{Window, get_window, window_bandwidth};
 use crate::operations::spectrum::{
     StftConfig, StftPadMode, forward_plan, istft, padded_frame_into,
@@ -105,8 +105,8 @@ use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
 use crate::utils::audio_math::cqt_frequencies;
 use crate::{
-    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, ProcessingError,
-    StandardSample,
+    AudioData, AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError,
+    ProcessingError, StandardSample,
 };
 
 // =============================================================================
@@ -803,7 +803,7 @@ fn n_centred_frames(len: usize, n_fft: usize, hop: usize) -> usize {
 /// it computes in `f64`, so for `F = f32` it holds an `f64` copy of the input
 /// and of the output while it runs.
 fn resample_rows<F: AudioFloat>(
-    y: Array2<F>,
+    y: ArrayView2<'_, F>,
     in_sr: u32,
     out_sr: u32,
     quality: ResamplingQuality,
@@ -811,16 +811,30 @@ fn resample_rows<F: AudioFloat>(
 ) -> AudioSampleResult<Array2<F>> {
     let gain = F::of(gain);
     if in_sr == out_sr {
-        return Ok(y * gain);
+        return Ok(y.mapv(|v| v * gain));
     }
     let n_out = (y.ncols() as u64 * u64::from(out_sr)).div_ceil(u64::from(in_sr)) as usize;
     let rate =
         SampleRate::new(in_sr).ok_or_else(|| param_err("sample_rate", "must be positive"))?;
-    let audio = float_rows_to_audio::<F>(y, rate, "constant-Q resampling")?;
+    // The rows are resampled in place of a borrowed view (no copy).
+    let data = if y.nrows() == 1 {
+        AudioData::from_borrowed_array1(y.index_axis(Axis(0), 0))?
+    } else {
+        AudioData::from_borrowed_array2(y)?
+    };
+    let audio = AudioSamples::new(data, rate);
     let target =
         SampleRate::new(out_sr).ok_or_else(|| param_err("sample_rate", "must be positive"))?;
     let out = crate::resample(&audio, target, quality)?;
-    let mut rows = audio_float_rows(&out);
+    // The resampled audio is moved, not copied, into the rows.
+    let mut rows = if out.num_channels().get() == 1 {
+        out.into_array1()
+            .ok_or_else(|| param_err("signal", "resampled audio is not mono"))?
+            .insert_axis(Axis(0))
+    } else {
+        out.into_array2()
+            .ok_or_else(|| param_err("signal", "resampled audio is not multi-channel"))?
+    };
     if rows.ncols() != n_out {
         let mut fixed = Array2::<F>::zeros((rows.nrows(), n_out));
         let n = n_out.min(rows.ncols());
@@ -1332,7 +1346,7 @@ fn cqt_response<F: AudioFloat>(
 /// The variable-Q transform of `(channels, samples)` rows (librosa `vqt` with
 /// resolved tuning), computed in `F`.
 fn vqt_rows<F: AudioFloat>(
-    y: Array2<F>,
+    y: CowArray<'_, F, Ix2>,
     sr: f64,
     cfg: &CqtConfig,
     tuning: f64,
@@ -1374,7 +1388,7 @@ fn vqt_rows<F: AudioFloat>(
         if !cfg.scale {
             gain *= (factor as f64).sqrt();
         }
-        y = resample_rows(y, factor as u32, 1, quality, gain)?;
+        y = CowArray::from(resample_rows(y.view(), factor as u32, 1, quality, gain)?);
         sr /= factor as f64;
     }
 
@@ -1411,7 +1425,13 @@ fn vqt_rows<F: AudioFloat>(
             if my_hop % 2 == 0 && f_max_next <= my_sr / 5.0 {
                 my_hop /= 2;
                 my_sr /= 2.0;
-                my_y = resample_rows(my_y, 2, 1, quality, std::f64::consts::SQRT_2)?;
+                my_y = CowArray::from(resample_rows(
+                    my_y.view(),
+                    2,
+                    1,
+                    quality,
+                    std::f64::consts::SQRT_2,
+                )?);
             }
         }
     }
@@ -1508,7 +1528,7 @@ fn pseudo_cqt_rows<F: AudioFloat>(
 
 /// librosa `hybrid_cqt` on rows (resolved tuning), computed in `F`.
 fn hybrid_cqt_rows<F: AudioFloat>(
-    y: Array2<F>,
+    y: CowArray<'_, F, Ix2>,
     sr: f64,
     cfg: &CqtConfig,
     tuning: f64,
@@ -1660,7 +1680,7 @@ fn icqt_rows<F: AudioFloat>(
             .with_window(Window::Rectangular);
         let y_oct = istft(d.view(), &stft_cfg, None)?;
         let factor = (sr / my_sr).floor() as u32;
-        let y_oct = resample_rows(y_oct, 1, factor.max(1), cfg.resampling_quality, 1.0)?;
+        let y_oct = resample_rows(y_oct.view(), 1, factor.max(1), cfg.resampling_quality, 1.0)?;
         match &mut y {
             None => y = Some(y_oct),
             Some(acc) => {
@@ -3047,14 +3067,14 @@ where
         config.validate()?;
         let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
-        vqt_rows(y.into_owned(), sr, config, tuning, Some(0.0))
+        vqt_rows(y, sr, config, tuning, Some(0.0))
     }
 
     fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<T::Float>>> {
         config.validate()?;
         let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.cqt.tuning, config.cqt.bins_per_octave)?;
-        vqt_rows(y.into_owned(), sr, &config.cqt, tuning, config.gamma)
+        vqt_rows(y, sr, &config.cqt, tuning, config.gamma)
     }
 
     fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<T::Float>> {
@@ -3068,7 +3088,7 @@ where
         config.validate()?;
         let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
-        hybrid_cqt_rows(y.into_owned(), sr, config, tuning)
+        hybrid_cqt_rows(y, sr, config, tuning)
     }
 
     fn icqt(
@@ -3123,7 +3143,7 @@ where
         };
         for _ in 0..n_iter {
             let inverse = icqt_rows(with_phase(&angles).view(), sr, config, len)?;
-            let next = vqt_rows(inverse, sr, &fwd, tuning, Some(0.0))?;
+            let next = vqt_rows(CowArray::from(inverse), sr, &fwd, tuning, Some(0.0))?;
             if next.dim() != magnitude.dim() {
                 return Err(config_err(
                     "griffinlim_cqt",
