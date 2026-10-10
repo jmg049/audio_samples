@@ -125,8 +125,8 @@ assert_eq!(s.dim(), (1, 128, 44));
 // librosa.power_to_db(S, ref=np.max)   (top_db = 80, applied per channel)
 let db = DbConfig { reference: DbReference::Max, ..DbConfig::default() };
 let s_db = power_to_db(&s, &db).unwrap();
-let max = s_db.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-let min = s_db.iter().copied().fold(f64::INFINITY, f64::min);
+let max = s_db.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+let min = s_db.iter().copied().fold(f32::INFINITY, f32::min);
 assert!(max.abs() < 1e-9 && min >= -80.0 - 1e-9);
 ```
 
