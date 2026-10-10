@@ -37,6 +37,7 @@ import importlib
 import json
 import math
 import pkgutil
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -192,6 +193,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--check", action="store_true", help="fail if committed fixtures are out of date")
     ap.add_argument("--only", action="append", default=[], help="only build these case modules")
+    ap.add_argument("--emit-module", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     warnings.simplefilter("ignore", FutureWarning)
@@ -209,13 +211,32 @@ def main() -> int:
     }
 
     modules = sorted(m.name for m in pkgutil.iter_modules(cases.__path__) if not m.name.startswith("_"))
+    if args.emit_module:
+        # Child process: build one case module and print its JSON on stdout.
+        mod = importlib.import_module(f"cases.{args.emit_module}")
+        sys.stdout.write(dumps(mod.build(signals, SR)))
+        return 0
+
     for mod_name in modules:
         if args.only and mod_name not in args.only:
             continue
         mod = importlib.import_module(f"cases.{mod_name}")
         name = getattr(mod, "NAME", mod_name)
         print(f"building {name} ...", file=sys.stderr)
-        outputs[f"{name}.json"] = {"meta": meta, **mod.build(signals, SR)}
+        # Each case module runs in a fresh interpreter: librosa / numba /
+        # scipy.fft keep process-wide caches, and building one module first
+        # was measured to perturb another (icqt) by ~2e-7, which made the
+        # fixtures depend on generation order.
+        child = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--emit-module", mod_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if child.returncode != 0:
+            sys.stderr.write(child.stderr)
+            raise SystemExit(f"case module {mod_name} failed")
+        outputs[f"{name}.json"] = {"meta": meta, **json.loads(child.stdout)}
 
     stale = []
     FIXTURES.mkdir(parents=True, exist_ok=True)
