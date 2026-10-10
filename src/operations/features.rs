@@ -96,6 +96,7 @@ use crate::operations::filterbanks::{Window, padded_window};
 use crate::operations::spectrum::{
     DbConfig, StftConfig, StftPadMode, frame_square_sums, power_to_db, spectrogram_rows, stft,
 };
+use crate::utils::layout::{col, for_each_col_tile, for_each_row_tile, row};
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
 };
@@ -149,13 +150,64 @@ fn check_spectrogram<F: AudioFloat>(what: &str, s: &ArrayView3<'_, F>) -> AudioS
             format!("the spectrogram must be non-empty, got shape ({c}, {b}, {t})"),
         ));
     }
-    if s.iter().any(|v| !(v.is_finite() && *v >= F::zero())) {
+    if !all_finite_non_negative(s) {
         return Err(param_err(
             "spectrogram",
             format!("{what} is only defined for finite, non-negative spectrogram values"),
         ));
     }
     Ok(())
+}
+
+/// Whether every value of `s` is finite and `>= 0`, visited in memory order.
+fn all_finite_non_negative<F: AudioFloat>(s: &ArrayView3<'_, F>) -> bool {
+    // `0 <= v <= MAX` is false for negative values, infinities and NaN. The
+    // chunks are checked without early exit inside, so the test vectorises.
+    let ok = |v: &[F]| {
+        v.chunks(256).all(|c| {
+            c.iter()
+                .fold(true, |a, &v| a & (v >= F::zero()) & (v <= F::max_value()))
+        })
+    };
+    if let Some(all) = s.as_slice_memory_order() {
+        return ok(all);
+    }
+    s.outer_iter().all(|ch| {
+        let mut good = true;
+        for_each_row_tile(ch, |_, tile| {
+            for k in 0..tile.nrows() {
+                good = good && ok(row(&tile, k));
+            }
+        });
+        good
+    })
+}
+
+/// Whether every value of `s` is finite, visited in memory order.
+fn all_finite<F: AudioFloat>(s: &ArrayView3<'_, F>) -> bool {
+    let ok = |v: &[F]| {
+        v.chunks(256)
+            .all(|c| c.iter().fold(true, |a, &v| a & (v.abs() <= F::max_value())))
+    };
+    if let Some(all) = s.as_slice_memory_order() {
+        return ok(all);
+    }
+    s.outer_iter().all(|ch| {
+        let mut good = true;
+        for_each_row_tile(ch, |_, tile| {
+            for k in 0..tile.nrows() {
+                good = good && ok(row(&tile, k));
+            }
+        });
+        good
+    })
+}
+
+/// The `(1, frames)` output row of channel `c` as a slice.
+fn out_row<F: AudioFloat>(out: &mut Array3<F>, c: usize) -> &mut [F] {
+    out.index_axis_mut(Axis(0), c)
+        .into_slice()
+        .expect("a fresh (channels, 1, frames) array")
 }
 
 fn check_freq(what: &str, freq: &[f64], n_bins: usize) -> AudioSampleResult<()> {
@@ -930,22 +982,28 @@ pub fn spectral_centroid_from_spectrogram<F: AudioFloat>(
     Ok(centroid_unchecked(&s, freq))
 }
 
-/// `sum(S, axis=bins)` with `util.normalize`'s rule: sums below the smallest
-/// positive float are replaced by 1.
-fn l1_lengths<F: AudioFloat>(s: &ArrayView2<'_, F>) -> Vec<F> {
-    let (n_bins, n_frames) = s.dim();
-    let mut len = vec![F::zero(); n_frames];
-    for k in 0..n_bins {
-        for (t, l) in len.iter_mut().enumerate() {
-            *l += s[[k, t]].abs();
+/// `sum(S, axis=bins)` of a tile (rows contiguous, see [`for_each_row_tile`])
+/// with `util.normalize`'s rule: sums below the smallest positive float are
+/// replaced by 1. Each frame is summed over the bins in ascending order.
+fn l1_lengths_tile<F: AudioFloat>(tile: &ArrayView2<'_, F>, len: &mut [F]) {
+    len.fill(F::zero());
+    for k in 0..tile.nrows() {
+        for (l, &v) in len.iter_mut().zip(row(tile, k)) {
+            *l += v.abs();
         }
     }
-    for l in &mut len {
+    for l in len.iter_mut() {
         if *l < F::min_positive_value() {
             *l = F::one();
         }
     }
-    len
+}
+
+/// `v = ln(v)` element-wise.
+fn ln_in_place<F: AudioFloat>(v: &mut [F]) {
+    for x in v {
+        *x = x.ln();
+    }
 }
 
 /// `freq` rounded to `F`.
@@ -955,16 +1013,22 @@ fn freq_as<F: AudioFloat>(freq: &[f64]) -> Vec<F> {
 
 fn centroid_unchecked<F: AudioFloat>(s: &ArrayView3<'_, F>, freq: &[f64]) -> Array3<F> {
     let freq = freq_as::<F>(freq);
-    let (n_ch, n_bins, n_frames) = s.dim();
+    let (n_ch, _, n_frames) = s.dim();
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let mut len = vec![F::zero(); n_frames];
     for c in 0..n_ch {
-        let sc = s.index_axis(Axis(0), c);
-        let len = l1_lengths(&sc);
-        for k in 0..n_bins {
-            for t in 0..n_frames {
-                out[[c, 0, t]] += freq[k] * (sc[[k, t]] / len[t]);
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let len = &mut len[..w];
+            l1_lengths_tile(&tile, len);
+            let o = &mut o[t0..t0 + w];
+            for (k, &fk) in freq.iter().enumerate() {
+                for ((o, &v), &l) in o.iter_mut().zip(row(&tile, k)).zip(len.iter()) {
+                    *o += fk * (v / l);
+                }
             }
-        }
+        });
     }
     out
 }
@@ -1043,24 +1107,46 @@ pub fn spectral_bandwidth_from_spectrogram<F: AudioFloat>(
     let p = config.p;
     let freq = freq_as::<F>(freq);
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let mut len = vec![F::one(); n_frames];
+    let mut cent = vec![F::zero(); n_frames];
     for c in 0..n_ch {
-        let sc = s.index_axis(Axis(0), c);
-        let len = if config.norm {
-            l1_lengths(&sc)
-        } else {
-            vec![F::one(); n_frames]
-        };
-        for k in 0..n_bins {
-            for t in 0..n_frames {
-                let dev = (centroid[[c, 0, t]] - freq[k]).abs();
-                let w = if config.norm {
-                    sc[[k, t]] / len[t]
-                } else {
-                    sc[[k, t]]
-                };
-                out[[c, 0, t]] += w * pow_np(dev, p);
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let len = &mut len[..w];
+            if config.norm {
+                l1_lengths_tile(&tile, len);
             }
-        }
+            let cent = &mut cent[..w];
+            for (j, ce) in cent.iter_mut().enumerate() {
+                *ce = centroid[[c, 0, t0 + j]];
+            }
+            let o = &mut o[t0..t0 + w];
+            for (k, &fk) in freq.iter().enumerate() {
+                let r = row(&tile, k);
+                let terms = o.iter_mut().zip(r).zip(cent.iter()).zip(len.iter());
+                // The same operations as `w * pow_np(|centroid - f|, p)`, with
+                // the exponent's case chosen once per row.
+                macro_rules! acc {
+                    ($pow:expr) => {
+                        for (((o, &v), &ce), &l) in terms {
+                            let dev = (ce - fk).abs();
+                            let wv = if config.norm { v / l } else { v };
+                            *o += wv * $pow(dev);
+                        }
+                    };
+                }
+                if p == 1.0 {
+                    acc!(|d: F| d)
+                } else if p == 2.0 {
+                    acc!(|d: F| d * d)
+                } else if p == 0.5 {
+                    acc!(|d: F| d.sqrt())
+                } else {
+                    acc!(|d: F| d.powf(F::of(p)))
+                }
+            }
+        });
     }
     let inv = 1.0 / p;
     out.mapv_inplace(|v| pow_np(v, inv));
@@ -1125,22 +1211,43 @@ pub fn spectral_rolloff_from_spectrogram<F: AudioFloat>(
     let freq = freq_as::<F>(freq);
     let rp = F::of(rp);
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
-    let mut cum = vec![F::zero(); n_bins];
+    let mut acc = vec![F::zero(); n_frames];
+    let mut threshold = vec![F::zero(); n_frames];
     for c in 0..n_ch {
-        for t in 0..n_frames {
-            let mut acc = F::zero();
-            for (k, v) in cum.iter_mut().enumerate() {
-                acc += s[[c, k, t]];
-                *v = acc;
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let (acc, threshold) = (&mut acc[..w], &mut threshold[..w]);
+            // Pass 1: the frame totals (cumulative sums in ascending bin order).
+            acc.fill(F::zero());
+            for k in 0..n_bins {
+                for (a, &v) in acc.iter_mut().zip(row(&tile, k)) {
+                    *a += v;
+                }
             }
-            let threshold = rp * acc;
-            out[[c, 0, t]] = cum
-                .iter()
-                .zip(&freq)
-                .filter(|(total, _)| **total >= threshold)
-                .map(|(_, f)| *f)
-                .fold(F::nan(), F::min);
-        }
+            for (th, &a) in threshold.iter_mut().zip(acc.iter()) {
+                *th = rp * a;
+            }
+            // Pass 2: the same cumulative sums again; the result is the minimum
+            // of the frequencies (in ascending bin order, starting from NaN)
+            // whose cumulative sum reaches the threshold.
+            acc.fill(F::zero());
+            let o = &mut o[t0..t0 + w];
+            o.fill(F::nan());
+            for (k, &fk) in freq.iter().enumerate() {
+                for (((a, o), &v), &th) in acc
+                    .iter_mut()
+                    .zip(o.iter_mut())
+                    .zip(row(&tile, k))
+                    .zip(threshold.iter())
+                {
+                    *a += v;
+                    if *a >= th {
+                        *o = o.min(fk);
+                    }
+                }
+            }
+        });
     }
     Ok(out)
 }
@@ -1197,19 +1304,40 @@ pub fn spectral_flatness_from_spectrogram<F: AudioFloat>(
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     let n = F::of_usize(n_bins);
     let amin = F::of(config.amin);
+    let power = config.power;
+    let mut log_sum = vec![F::zero(); n_frames];
+    let mut sum = vec![F::zero(); n_frames];
+    let mut p_row = vec![F::zero(); n_frames];
     for c in 0..n_ch {
-        let mut log_sum = vec![F::zero(); n_frames];
-        let mut sum = vec![F::zero(); n_frames];
-        for k in 0..n_bins {
-            for t in 0..n_frames {
-                let p = amin.max(pow_np(s[[c, k, t]], config.power));
-                log_sum[t] += p.ln();
-                sum[t] += p;
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let (log_sum, sum, p_row) = (&mut log_sum[..w], &mut sum[..w], &mut p_row[..w]);
+            log_sum.fill(F::zero());
+            sum.fill(F::zero());
+            for k in 0..n_bins {
+                let r = row(&tile, k);
+                if power == 2.0 {
+                    for (p, &v) in p_row.iter_mut().zip(r) {
+                        *p = amin.max(v * v);
+                    }
+                } else {
+                    for (p, &v) in p_row.iter_mut().zip(r) {
+                        *p = amin.max(pow_np(v, power));
+                    }
+                }
+                for (su, &p) in sum.iter_mut().zip(p_row.iter()) {
+                    *su += p;
+                }
+                ln_in_place(p_row);
+                for (ls, &lp) in log_sum.iter_mut().zip(p_row.iter()) {
+                    *ls += lp;
+                }
             }
-        }
-        for t in 0..n_frames {
-            out[[c, 0, t]] = (log_sum[t] / n).exp() / (sum[t] / n);
-        }
+            for ((o, &ls), &su) in o[t0..t0 + w].iter_mut().zip(log_sum.iter()).zip(sum.iter()) {
+                *o = (ls / n).exp() / (su / n);
+            }
+        });
     }
     Ok(out)
 }
@@ -1293,7 +1421,7 @@ pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
 
     let mut valley = Array3::<F>::zeros((n_ch, n_bands + 1, n_frames));
     let mut peak = Array3::<F>::zeros((n_ch, n_bands + 1, n_frames));
-    let mut buf = Vec::new();
+    let mut bands: Vec<(Vec<usize>, usize)> = Vec::with_capacity(n_bands + 1);
     for k in 0..=n_bands {
         let (f_low, f_high) = (octa[k], octa[k + 1]);
         let mut band: Vec<bool> = freq.iter().map(|&f| f >= f_low && f <= f_high).collect();
@@ -1320,27 +1448,33 @@ pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
         }
         let q = (config.quantile * count as f64).round_ties_even().max(1.0) as usize;
         let m = q.min(sel.len());
-        for c in 0..n_ch {
-            for t in 0..n_frames {
-                buf.clear();
-                buf.extend(sel.iter().map(|&i| s[[c, i, t]]));
-                // Only the m smallest and m largest values are needed, summed in
-                // ascending order: partial selection, then sort just those.
-                let n = buf.len();
-                if 2 * m < n {
-                    buf.select_nth_unstable_by(m - 1, total_cmp);
-                    buf[..m].sort_by(total_cmp);
-                    buf[m..].select_nth_unstable_by(n - 2 * m, total_cmp);
-                    buf[n - m..].sort_by(total_cmp);
-                } else {
-                    buf.sort_by(total_cmp);
+        bands.push((sel, m));
+    }
+    let mut buf = Vec::new();
+    let (mut lo_m, mut hi_m) = (Vec::new(), Vec::new());
+    for c in 0..n_ch {
+        for_each_col_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            for t in 0..tile.ncols() {
+                let column = col(&tile, t);
+                for (k, (sel, m)) in bands.iter().enumerate() {
+                    let m = *m;
+                    let (lo, hi) = if 2 * m < sel.len() {
+                        extreme_sums(sel.iter().map(|&i| column[i]), m, &mut lo_m, &mut hi_m)
+                    } else {
+                        buf.clear();
+                        buf.extend(sel.iter().map(|&i| column[i]));
+                        buf.sort_by(total_cmp);
+                        let n = buf.len();
+                        (
+                            buf[..m].iter().fold(F::zero(), |a, &v| a + v),
+                            buf[n - m..].iter().fold(F::zero(), |a, &v| a + v),
+                        )
+                    };
+                    valley[[c, k, t0 + t]] = lo / F::of_usize(m);
+                    peak[[c, k, t0 + t]] = hi / F::of_usize(m);
                 }
-                let lo: F = buf[..m].iter().fold(F::zero(), |a, &v| a + v);
-                let hi: F = buf[n - m..].iter().fold(F::zero(), |a, &v| a + v);
-                valley[[c, k, t]] = lo / F::of_usize(m);
-                peak[[c, k, t]] = hi / F::of_usize(m);
             }
-        }
+        });
     }
     if config.linear {
         Ok(peak - valley)
@@ -1350,6 +1484,53 @@ pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
         let db = DbConfig::librosa_power();
         Ok(power_to_db(&peak, &db)? - power_to_db(&valley, &db)?)
     }
+}
+
+/// Sums of the `m` smallest and of the `m` largest of `values` (at least
+/// `m` of them, non-negative or `-0.0`, no NaN), each summed in ascending order
+/// starting from `+0`.
+///
+/// One pass keeps the `m` smallest and `m` largest values seen so far in two
+/// sorted buffers; for `m` much smaller than the band, almost every value is
+/// rejected by a single comparison with each buffer's boundary. The selected
+/// values equal those of a full sort, except that `-0.0` and `+0.0` count as
+/// equal; the two sums are the same either way, since a sum that starts at
+/// `+0` is unchanged by adding a zero of either sign.
+fn extreme_sums<F: AudioFloat>(
+    mut values: impl Iterator<Item = F>,
+    m: usize,
+    lo: &mut Vec<F>,
+    hi: &mut Vec<F>,
+) -> (F, F) {
+    lo.clear();
+    lo.extend(values.by_ref().take(m));
+    lo.sort_by(total_cmp);
+    hi.clear();
+    hi.extend_from_slice(lo);
+    for v in values {
+        if v < lo[m - 1] {
+            // Insert into the m smallest, dropping the largest of them.
+            let mut i = m - 1;
+            while i > 0 && lo[i - 1] > v {
+                lo[i] = lo[i - 1];
+                i -= 1;
+            }
+            lo[i] = v;
+        }
+        if v > hi[0] {
+            // Insert into the m largest, dropping the smallest of them.
+            let mut i = 0;
+            while i + 1 < m && hi[i + 1] < v {
+                hi[i] = hi[i + 1];
+                i += 1;
+            }
+            hi[i] = v;
+        }
+    }
+    (
+        lo.iter().fold(F::zero(), |a, &v| a + v),
+        hi.iter().fold(F::zero(), |a, &v| a + v),
+    )
 }
 
 fn empty_band(k: usize, f_low: f64, f_high: f64) -> AudioSampleError {
@@ -1420,7 +1601,7 @@ pub fn poly_features_from_spectrogram<F: AudioFloat>(
         ));
     }
     check_freq("poly_features", freq, n_bins)?;
-    if s.iter().any(|v| !v.is_finite()) || freq.iter().any(|v| !v.is_finite()) {
+    if !all_finite(&s) || freq.iter().any(|v| !v.is_finite()) {
         return Err(param_err(
             "spectrogram",
             "poly_features needs finite spectrogram values and frequencies",
@@ -1505,28 +1686,29 @@ pub fn poly_features_from_spectrogram<F: AudioFloat>(
     let mut out = Array3::<F>::zeros((n_ch, m, n_frames));
     let mut y = vec![F::zero(); n_bins];
     for c in 0..n_ch {
-        for t in 0..n_frames {
-            for (k, yk) in y.iter_mut().enumerate() {
-                *yk = s[[c, k, t]];
-            }
-            for (j, (v, &beta)) in vs.iter().zip(&betas).enumerate() {
-                let dot: F = v.iter().zip(&y[j..]).map(|(&a, &b)| a * b).sum();
-                for (yi, &vi) in y[j..].iter_mut().zip(v) {
-                    *yi -= beta * dot * vi;
+        for_each_col_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            for tt in 0..tile.ncols() {
+                let t = t0 + tt;
+                y.copy_from_slice(col(&tile, tt));
+                for (j, (v, &beta)) in vs.iter().zip(&betas).enumerate() {
+                    let dot: F = v.iter().zip(&y[j..]).map(|(&a, &b)| a * b).sum();
+                    for (yi, &vi) in y[j..].iter_mut().zip(v) {
+                        *yi -= beta * dot * vi;
+                    }
+                }
+                // Back substitution R x = (Q^T y)[..m].
+                for j in (0..m).rev() {
+                    let mut acc = y[j];
+                    for l in j + 1..m {
+                        acc -= a[[j, l]] * out[[c, l, t]];
+                    }
+                    out[[c, j, t]] = acc / a[[j, j]];
+                }
+                for j in 0..m {
+                    out[[c, j, t]] /= scale[j];
                 }
             }
-            // Back substitution R x = (Q^T y)[..m].
-            for j in (0..m).rev() {
-                let mut acc = y[j];
-                for l in j + 1..m {
-                    acc -= a[[j, l]] * out[[c, l, t]];
-                }
-                out[[c, j, t]] = acc / a[[j, j]];
-            }
-            for j in 0..m {
-                out[[c, j, t]] /= scale[j];
-            }
-        }
+        });
     }
     Ok(out)
 }
@@ -1724,18 +1906,31 @@ pub fn rms_from_spectrogram<F: AudioFloat>(
     }
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     let (half, two, fl_f) = (F::of(0.5), F::of(2.0), F::of_usize(fl));
+    let mut acc = vec![F::zero(); n_frames];
     for c in 0..n_ch {
-        for t in 0..n_frames {
-            let mut sum = F::zero();
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let acc = &mut acc[..w];
+            acc.fill(F::zero());
             for k in 0..n_bins {
-                let mut x = s[[c, k, t]] * s[[c, k, t]];
+                let r = row(&tile, k);
                 if k == 0 || (fl.is_multiple_of(2) && k == n_bins - 1) {
-                    x *= half;
+                    for (a, &v) in acc.iter_mut().zip(r) {
+                        let mut x = v * v;
+                        x *= half;
+                        *a += x;
+                    }
+                } else {
+                    for (a, &v) in acc.iter_mut().zip(r) {
+                        *a += v * v;
+                    }
                 }
-                sum += x;
             }
-            out[[c, 0, t]] = (two * sum / (fl_f * fl_f)).sqrt();
-        }
+            for (o, &a) in o[t0..t0 + w].iter_mut().zip(acc.iter()) {
+                *o = (two * a / (fl_f * fl_f)).sqrt();
+            }
+        });
     }
     Ok(out)
 }
