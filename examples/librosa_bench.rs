@@ -199,25 +199,25 @@ fn main() {
     b.run("power_to_db", || power_to_db(&mel, &db_cfg).unwrap());
 
     // --- tonal / constant-Q ---------------------------------------------
-    let chroma_cfg = ChromaStftConfig::default();
+    let chroma_cfg = ChromaStftConfig::librosa();
     b.run("chroma_stft", || y.chroma_stft(&chroma_cfg).unwrap());
-    let cqt_cfg = CqtConfig::default();
+    let cqt_cfg = CqtConfig::librosa();
     b.run("cqt", || y.cqt(&cqt_cfg).unwrap());
-    let chroma_cqt_cfg = ChromaCqtConfig::default();
+    let chroma_cqt_cfg = ChromaCqtConfig::librosa();
     b.run("chroma_cqt", || y.chroma_cqt(&chroma_cqt_cfg).unwrap());
 
     // --- features -------------------------------------------------------
-    let c = SpectralCentroidConfig::default();
+    let c = SpectralCentroidConfig::librosa();
     b.run("spectral_centroid_frames", || {
         y.spectral_centroid_frames(&c).unwrap()
     });
-    let c = SpectralContrastConfig::default();
+    let c = SpectralContrastConfig::librosa();
     b.run("spectral_contrast_frames", || {
         y.spectral_contrast_frames(&c).unwrap()
     });
-    let c = RmsConfig::default();
+    let c = RmsConfig::librosa();
     b.run("rms_frames", || y.rms_frames(&c).unwrap());
-    let c = ZeroCrossingRateConfig::default();
+    let c = ZeroCrossingRateConfig::librosa();
     b.run("zero_crossing_rate_frames", || {
         y.zero_crossing_rate_frames(&c).unwrap()
     });

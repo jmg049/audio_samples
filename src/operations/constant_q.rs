@@ -31,15 +31,31 @@
 //! normalisation and time alignment (it differs from librosa by several percent and
 //! returns fewer frames). Code ported from Python, and chroma or tonnetz features
 //! compared with published librosa results, need librosa's exact transform. Every
-//! config struct here defaults to librosa's defaults.
+//! config struct has a `librosa()` constructor that returns librosa 1.0's
+//! defaults. `Default` is the same except for [`ChromaCqtConfig`] (and the
+//! [`ChromaCensConfig`] and [`TonnetzConfig`] built on it), whose default fixes
+//! the tuning at A440 instead of estimating it from the signal.
 //!
 //! ## How
 //!
 //! Bring [`AudioConstantQ`] into scope and call it on any [`AudioSamples`]. Outputs
-//! are `(channels, n_bins, n_frames)` arrays (`Complex<f64>` for the transforms,
-//! `f64` for magnitudes and features); mono input gives one channel. Frame `t` is
-//! centred on sample `t * hop_length`, as in every other frame-wise feature of the
-//! crate.
+//! are `(channels, n_bins, n_frames)` arrays (complex for the transforms, real for
+//! magnitudes and features); mono input gives one channel. Frame `t` is centred on
+//! sample `t * hop_length`, as in every other frame-wise feature of the crate.
+//!
+//! The output precision follows the input: the element type is the sample
+//! type's [`AudioSample::Float`](crate::AudioSample::Float). `u8`, `i16`, `I24`
+//! and `f32` audio gives `f32` (or `Complex<f32>`); `i32` and `f64` audio gives
+//! `f64`. The framing, FFTs and filter products run in that type. The filter
+//! bases (wavelets, their spectra, the chroma mapping) are computed in `f64` and
+//! rounded to the output type once. [`AudioConstantQ::icqt`] and
+//! [`AudioConstantQ::griffinlim_cqt`] return audio of the receiver's sample type.
+//!
+//! The per-octave resampling goes through [`crate::resample`], which computes in
+//! `f64` whatever the sample type. For `f32` analysis each resampling call
+//! therefore holds an `f64` copy of the signal being resampled and of its output
+//! (the input of the top octave when early downsampling applies, then signals of
+//! half the length per octave), on top of the `f32` arrays.
 //!
 //! ```rust
 //! use audio_samples::operations::constant_q::{AudioConstantQ, ChromaCqtConfig, CqtConfig};
@@ -79,15 +95,15 @@ use std::num::NonZeroUsize;
 
 use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis, s};
 use num_complex::Complex;
-use rustfft::FftPlanner;
 
+use crate::audio_float::{audio_float_rows, finite_float_rows, float_rows_to_audio};
 use crate::operations::filterbanks::{Window, get_window, window_bandwidth};
 use crate::operations::spectrum::{StftConfig, StftPadMode, forward_plan, istft, pad_signal};
 use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
 use crate::utils::audio_math::cqt_frequencies;
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, ProcessingError,
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, ProcessingError,
     StandardSample,
 };
 
@@ -293,9 +309,17 @@ impl Default for WaveletConfig {
 }
 
 impl WaveletConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's `filters.wavelet` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -579,17 +603,17 @@ pub fn wavelet(
 // Sparse FFT basis (librosa's __vqt_filter_fft + util.sparsify_rows)
 // =============================================================================
 
-/// One sparse row of a frequency-domain basis.
+/// One sparse row of a frequency-domain basis with `Complex<F>` values.
 #[derive(Debug, Clone)]
-struct SparseRow {
+struct SparseRow<F> {
     idx: Vec<usize>,
-    val: Vec<Complex<f64>>,
+    val: Vec<Complex<F>>,
 }
 
-impl SparseRow {
+impl<F: AudioFloat> SparseRow<F> {
     #[inline]
-    fn dot(&self, x: &[Complex<f64>]) -> Complex<f64> {
-        let mut acc = Complex::new(0.0, 0.0);
+    fn dot(&self, x: &[Complex<F>]) -> Complex<F> {
+        let mut acc = Complex::new(F::zero(), F::zero());
         for (&j, &v) in self.idx.iter().zip(&self.val) {
             acc += v * x[j];
         }
@@ -597,8 +621,8 @@ impl SparseRow {
     }
 
     #[inline]
-    fn dot_abs(&self, x: &[f64]) -> f64 {
-        let mut acc = 0.0;
+    fn dot_abs(&self, x: &[F]) -> F {
+        let mut acc = F::zero();
         for (&j, &v) in self.idx.iter().zip(&self.val) {
             acc += v.re * x[j];
         }
@@ -607,15 +631,38 @@ impl SparseRow {
 }
 
 /// A sparse frequency-domain filter basis (rows = filters, columns = rFFT bins).
+/// The basis is built in `f64` and rounded to the analysis type with
+/// [`FftBasis::cast`].
 #[derive(Debug, Clone)]
-struct FftBasis {
+struct FftBasis<F> {
     n_fft: usize,
-    rows: Vec<SparseRow>,
+    rows: Vec<SparseRow<F>>,
+}
+
+impl FftBasis<f64> {
+    /// The basis with every value rounded to `F` (the identity for `f64`).
+    fn cast<F: AudioFloat>(&self) -> FftBasis<F> {
+        FftBasis {
+            n_fft: self.n_fft,
+            rows: self
+                .rows
+                .iter()
+                .map(|r| SparseRow {
+                    idx: r.idx.clone(),
+                    val: r
+                        .val
+                        .iter()
+                        .map(|z| Complex::new(F::of(z.re), F::of(z.im)))
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// `librosa.util.sparsify_rows` of one row: keeps the largest magnitudes holding
 /// `1 - quantile` of the row's L1 mass.
-fn sparsify_row(x: &[Complex<f64>], quantile: f64) -> SparseRow {
+fn sparsify_row(x: &[Complex<f64>], quantile: f64) -> SparseRow<f64> {
     let mags: Vec<f64> = x.iter().map(|z| z.norm()).collect();
     let norm: f64 = mags.iter().sum();
     let mut sorted = mags.clone();
@@ -645,7 +692,8 @@ fn sparsify_row(x: &[Complex<f64>], quantile: f64) -> SparseRow {
 
 /// librosa's `__vqt_filter_fft`: wavelets scaled by `length / n_fft`, FFT'd,
 /// truncated to the non-negative frequencies and sparsified. `min_hop` enlarges
-/// `n_fft` to at least `2^(1 + ceil(log2(hop)))` (pseudo-CQT).
+/// `n_fft` to at least `2^(1 + ceil(log2(hop)))` (pseudo-CQT). The basis is a
+/// filter table and is computed in `f64` for every analysis type.
 #[allow(clippy::too_many_arguments)]
 fn vqt_filter_fft(
     sr: f64,
@@ -657,7 +705,7 @@ fn vqt_filter_fft(
     sparsity: f64,
     min_hop: Option<usize>,
     gain: f64,
-) -> AudioSampleResult<FftBasis> {
+) -> AudioSampleResult<FftBasis<f64>> {
     let basis = wavelet_impl(freqs, sr, window, lengths, norm, true)?;
     debug_assert_eq!(alpha.len(), freqs.len());
     let mut n_fft = basis.ncols();
@@ -667,7 +715,7 @@ fn vqt_filter_fft(
             n_fft = min_n as usize;
         }
     }
-    let fft = FftPlanner::<f64>::new().plan_fft_forward(n_fft);
+    let fft = <f64 as AudioFloat>::with_fft_planner(|p| p.plan_fft_forward(n_fft));
     let mut buf = vec![Complex::new(0.0, 0.0); n_fft];
     let mut rows = Vec::with_capacity(freqs.len());
     for (row, &len) in basis.outer_iter().zip(lengths) {
@@ -690,23 +738,23 @@ fn vqt_filter_fft(
 
 /// Calls `f(channel, frame, spectrum)` for every centred frame of every channel,
 /// with `window` (`None` = rectangular) and librosa's padding.
-fn for_each_frame(
-    y: ArrayView2<'_, f64>,
+fn for_each_frame<F: AudioFloat>(
+    y: ArrayView2<'_, F>,
     n_fft: usize,
     hop: usize,
     pad_mode: StftPadMode,
-    window: Option<&[f64]>,
+    window: Option<&[F]>,
     max_frames: usize,
-    mut f: impl FnMut(usize, usize, &[Complex<f64>]),
+    mut f: impl FnMut(usize, usize, &[Complex<F>]),
 ) -> AudioSampleResult<()> {
-    let plan = forward_plan(n_fft);
+    let plan = forward_plan::<F>(n_fft);
     let mut scratch = plan.make_scratch_vec();
-    let mut frame_in = vec![0.0; n_fft];
+    let mut frame_in = vec![F::zero(); n_fft];
     let mut spec = plan.make_output_vec();
     let pad = n_fft / 2;
     let mut row_buf = Vec::new();
     for (c, row) in y.outer_iter().enumerate() {
-        let x: &[f64] = if let Some(s) = row.as_slice() {
+        let x: &[F] = if let Some(s) = row.as_slice() {
             s
         } else {
             row_buf.clear();
@@ -753,37 +801,33 @@ fn n_centred_frames(len: usize, n_fft: usize, hop: usize) -> usize {
 // Resampling helpers
 // =============================================================================
 
-fn rows_to_audio(y: Array2<f64>, sr: u32) -> AudioSampleResult<AudioSamples<'static, f64>> {
-    let rate = SampleRate::new(sr).ok_or_else(|| param_err("sample_rate", "must be positive"))?;
-    if y.nrows() == 1 {
-        AudioSamples::new_mono(y.index_axis_move(Axis(0), 0), rate)
-    } else {
-        AudioSamples::new_multi_channel(y, rate)
-    }
-}
-
-use crate::operations::spectrum::{audio_f64_rows as audio_rows, finite_audio_rows};
-
 /// Resamples every row from `in_sr` to `out_sr` (integers; only the ratio matters),
 /// fixing the length to `ceil(n * out / in)` and multiplying by `gain`.
-fn resample_rows(
-    y: Array2<f64>,
+///
+/// The rows are resampled by [`crate::resample`] on audio of sample type `F`;
+/// it computes in `f64`, so for `F = f32` it holds an `f64` copy of the input
+/// and of the output while it runs.
+fn resample_rows<F: AudioFloat>(
+    y: Array2<F>,
     in_sr: u32,
     out_sr: u32,
     quality: ResamplingQuality,
     gain: f64,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
+    let gain = F::of(gain);
     if in_sr == out_sr {
         return Ok(y * gain);
     }
     let n_out = (y.ncols() as u64 * u64::from(out_sr)).div_ceil(u64::from(in_sr)) as usize;
-    let audio = rows_to_audio(y, in_sr)?;
+    let rate =
+        SampleRate::new(in_sr).ok_or_else(|| param_err("sample_rate", "must be positive"))?;
+    let audio = float_rows_to_audio::<F>(y, rate, "constant-Q resampling")?;
     let target =
         SampleRate::new(out_sr).ok_or_else(|| param_err("sample_rate", "must be positive"))?;
     let out = crate::resample(&audio, target, quality)?;
-    let mut rows = audio_rows(&out);
+    let mut rows = audio_float_rows(&out);
     if rows.ncols() != n_out {
-        let mut fixed = Array2::<f64>::zeros((rows.nrows(), n_out));
+        let mut fixed = Array2::<F>::zeros((rows.nrows(), n_out));
         let n = n_out.min(rows.ncols());
         fixed
             .slice_mut(s![.., ..n])
@@ -902,9 +946,17 @@ impl Default for CqtConfig {
 }
 
 impl CqtConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's `cqt` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -1064,10 +1116,21 @@ pub struct VqtConfig {
 }
 
 impl VqtConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `vqt` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            cqt: CqtConfig::librosa(),
+            gamma: None,
+        }
     }
 
     /// Sets the CQT parameters.
@@ -1255,14 +1318,14 @@ fn trim_stack<A: Clone + num_traits::Zero>(resp: &[Array3<A>], n_bins: usize) ->
 
 /// librosa's `__cqt_response` (complex): rectangular-window centred STFT, then the
 /// sparse basis product.
-fn cqt_response(
-    y: ArrayView2<'_, f64>,
-    basis: &FftBasis,
+fn cqt_response<F: AudioFloat>(
+    y: ArrayView2<'_, F>,
+    basis: &FftBasis<F>,
     hop: usize,
     pad_mode: StftPadMode,
-) -> AudioSampleResult<Array3<Complex<f64>>> {
+) -> AudioSampleResult<Array3<Complex<F>>> {
     let frames = n_centred_frames(y.ncols(), basis.n_fft, hop);
-    let mut out = Array3::<Complex<f64>>::zeros((y.nrows(), basis.rows.len(), frames));
+    let mut out = Array3::<Complex<F>>::zeros((y.nrows(), basis.rows.len(), frames));
     for_each_frame(y, basis.n_fft, hop, pad_mode, None, frames, |c, t, spec| {
         for (k, row) in basis.rows.iter().enumerate() {
             out[[c, k, t]] = row.dot(spec);
@@ -1272,14 +1335,14 @@ fn cqt_response(
 }
 
 /// The variable-Q transform of `(channels, samples)` rows (librosa `vqt` with
-/// resolved tuning).
-fn vqt_rows(
-    y: Array2<f64>,
+/// resolved tuning), computed in `F`.
+fn vqt_rows<F: AudioFloat>(
+    y: Array2<F>,
     sr: f64,
     cfg: &CqtConfig,
     tuning: f64,
     gamma: Option<f64>,
-) -> AudioSampleResult<Array3<Complex<f64>>> {
+) -> AudioSampleResult<Array3<Complex<F>>> {
     cfg.validate()?;
     if y.ncols() == 0 {
         return Err(param_err("signal", "cannot transform an empty signal"));
@@ -1345,7 +1408,8 @@ fn vqt_rows(
             cfg.sparsity,
             None,
             (sr / my_sr).sqrt(),
-        )?;
+        )?
+        .cast::<F>();
         responses.push(cqt_response(my_y.view(), &basis, my_hop, cfg.pad_mode)?);
         if i + 1 < n_octaves {
             let f_max_next = fb.freqs[lo - 1];
@@ -1367,20 +1431,20 @@ fn vqt_rows(
             &fb.alpha,
         );
         for (k, &len) in lengths.iter().enumerate() {
-            let d = len.sqrt();
+            let d = F::of(len.sqrt());
             v.slice_mut(s![.., k, ..]).mapv_inplace(|z| z / d);
         }
     }
     Ok(v)
 }
 
-/// librosa `pseudo_cqt` on rows (resolved tuning).
-fn pseudo_cqt_rows(
-    y: ArrayView2<'_, f64>,
+/// librosa `pseudo_cqt` on rows (resolved tuning), computed in `F`.
+fn pseudo_cqt_rows<F: AudioFloat>(
+    y: ArrayView2<'_, F>,
     sr: f64,
     cfg: &CqtConfig,
     tuning: f64,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     cfg.validate()?;
     if y.ncols() == 0 {
         return Err(param_err("signal", "cannot transform an empty signal"));
@@ -1410,12 +1474,16 @@ fn pseudo_cqt_rows(
             *v = Complex::new(v.norm(), 0.0);
         }
     }
+    let basis = basis.cast::<F>();
     let n_fft = basis.n_fft;
     let hop = cfg.hop_length.get();
-    let window = get_window(&Window::Hann, n_fft, true)?.to_vec();
+    let window: Vec<F> = get_window(&Window::Hann, n_fft, true)?
+        .iter()
+        .map(|&w| F::of(w))
+        .collect();
     let frames = n_centred_frames(y.ncols(), n_fft, hop);
-    let mut out = Array3::<f64>::zeros((y.nrows(), fb.freqs.len(), frames));
-    let mut mag = vec![0.0; n_fft / 2 + 1];
+    let mut out = Array3::<F>::zeros((y.nrows(), fb.freqs.len(), frames));
+    let mut mag = vec![F::zero(); n_fft / 2 + 1];
     for_each_frame(
         y,
         n_fft,
@@ -1433,23 +1501,23 @@ fn pseudo_cqt_rows(
         },
     )?;
     for (k, &len) in lengths.iter().enumerate() {
-        let factor = if cfg.scale {
+        let factor = F::of(if cfg.scale {
             1.0 / (n_fft as f64).sqrt()
         } else {
             (len / n_fft as f64).sqrt()
-        };
+        });
         out.slice_mut(s![.., k, ..]).mapv_inplace(|v| v * factor);
     }
     Ok(out)
 }
 
-/// librosa `hybrid_cqt` on rows (resolved tuning).
-fn hybrid_cqt_rows(
-    y: Array2<f64>,
+/// librosa `hybrid_cqt` on rows (resolved tuning), computed in `F`.
+fn hybrid_cqt_rows<F: AudioFloat>(
+    y: Array2<F>,
     sr: f64,
     cfg: &CqtConfig,
     tuning: f64,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     cfg.validate()?;
     let fb = filterbank(cfg, sr, tuning, Some(0.0), FreqLayout::Cqt)?;
     let (lengths, _) = wavelet_lengths_impl(
@@ -1496,13 +1564,13 @@ fn hybrid_cqt_rows(
     Ok(trim_stack(&resp, n_bins))
 }
 
-/// librosa `icqt` on a `(channels, n_bins, frames)` matrix.
-fn icqt_rows(
-    c: ArrayView3<'_, Complex<f64>>,
+/// librosa `icqt` on a `(channels, n_bins, frames)` matrix, computed in `F`.
+fn icqt_rows<F: AudioFloat>(
+    c: ArrayView3<'_, Complex<F>>,
     sr: f64,
     cfg: &CqtConfig,
     length: Option<usize>,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     cfg.validate()?;
     let tuning = cfg.tuning.ok_or_else(|| {
         param_err(
@@ -1542,7 +1610,7 @@ fn icqt_rows(
         }
     }
 
-    let mut y: Option<Array2<f64>> = None;
+    let mut y: Option<Array2<F>> = None;
     for (i, (&my_sr, &my_hop)) in srs.iter().zip(&hops).enumerate() {
         let lo = bpo * i;
         let n_filters = bpo.min(n_bins - lo);
@@ -1569,17 +1637,18 @@ fn icqt_rows(
         let n_fft = basis.n_fft;
         let n_freq = n_fft / 2 + 1;
         // Per-filter weights: 1 / ||filter||^2 * n_fft / L (and sqrt(L) when scaled).
-        let weights: Vec<f64> = basis
+        let weights: Vec<F> = basis
             .rows
             .iter()
             .zip(&lengths[lo..hi])
             .map(|(row, &len)| {
                 let power: f64 = row.val.iter().map(Complex::norm_sqr).sum();
                 let fp = 1.0 / power * (n_fft as f64 / len);
-                if cfg.scale { len.sqrt() * fp } else { fp }
+                F::of(if cfg.scale { len.sqrt() * fp } else { fp })
             })
             .collect();
-        let mut d = Array3::<Complex<f64>>::zeros((channels, n_freq, n_frames));
+        let basis = basis.cast::<F>();
+        let mut d = Array3::<Complex<F>>::zeros((channels, n_freq, n_frames));
         for ch in 0..channels {
             for (k, (row, &w)) in basis.rows.iter().zip(&weights).enumerate() {
                 for t in 0..n_frames {
@@ -1608,7 +1677,7 @@ fn icqt_rows(
     }
     let mut y = y.expect("at least one octave");
     if let Some(len) = length {
-        let mut fixed = Array2::<f64>::zeros((channels, len));
+        let mut fixed = Array2::<F>::zeros((channels, len));
         let n = len.min(y.ncols());
         fixed.slice_mut(s![.., ..n]).assign(&y.slice(s![.., ..n]));
         y = fixed;
@@ -1706,7 +1775,10 @@ pub fn cq_to_chroma(
 
 /// librosa `util.normalize(S, norm, axis=-2)` on a `(channels, features, frames)` array.
 #[cfg(feature = "feature-extraction")]
-fn normalize_features(x: &mut Array3<f64>, norm: Option<f64>) -> AudioSampleResult<()> {
+fn normalize_features<F: AudioFloat>(
+    x: &mut Array3<F>,
+    norm: Option<f64>,
+) -> AudioSampleResult<()> {
     use crate::operations::tonal::{NormalizeConfig, normalize_array};
     if norm.is_some() {
         *x = normalize_array(
@@ -1717,11 +1789,13 @@ fn normalize_features(x: &mut Array3<f64>, norm: Option<f64>) -> AudioSampleResu
     Ok(())
 }
 
-/// `chroma[c, :, t] = M · X[c, :, t]` for a `(n_chroma, n_bins)` matrix `M`.
+/// `chroma[c, :, t] = M · X[c, :, t]` for a `(n_chroma, n_bins)` matrix `M`
+/// (computed in `f64`, rounded to `F` once).
 #[cfg(feature = "feature-extraction")]
-fn project(m: &Array2<f64>, x: &Array3<f64>) -> Array3<f64> {
+fn project<F: AudioFloat>(m: &Array2<f64>, x: &Array3<F>) -> Array3<F> {
+    let m = m.mapv(F::of);
     let (channels, _, frames) = x.dim();
-    let mut out = Array3::<f64>::zeros((channels, m.nrows(), frames));
+    let mut out = Array3::<F>::zeros((channels, m.nrows(), frames));
     for c in 0..channels {
         out.index_axis_mut(Axis(0), c)
             .assign(&m.dot(&x.index_axis(Axis(0), c)));
@@ -1758,9 +1832,11 @@ pub enum CqtMode {
 ///
 /// ## Intended usage
 ///
-/// `ChromaCqtConfig::default()` reproduces `librosa.feature.chroma_cqt(y=y, sr=sr)`:
-/// 12 chroma bins from a 7-octave CQT with 36 bins per octave, each frame scaled to
-/// a maximum of 1, and the tuning estimated from the signal (`tuning = None`).
+/// `ChromaCqtConfig::default()`: 12 chroma bins from a 7-octave CQT with 36 bins
+/// per octave, each frame scaled to a maximum of 1, and A440 tuning
+/// (`tuning = Some(0.0)`). [`ChromaCqtConfig::librosa`] reproduces
+/// `librosa.feature.chroma_cqt(y=y, sr=sr)`, which differs only in estimating the
+/// tuning from the signal (`tuning = None`).
 ///
 /// ## Invariants
 ///
@@ -1789,8 +1865,8 @@ pub struct ChromaCqtConfig {
     /// Chroma values below this are set to 0 before normalisation; `None` disables
     /// it. librosa default `Some(0.0)`.
     pub threshold: Option<f64>,
-    /// Tuning offset in fractions of a CQT bin; `None` (librosa's default) estimates
-    /// it from the signal.
+    /// Tuning offset in fractions of a CQT bin. Default `Some(0.0)` (A440).
+    /// `None` estimates it from the signal, as librosa's default does.
     pub tuning: Option<f64>,
     /// Number of chroma bins. librosa default 12.
     pub n_chroma: NonZeroUsize,
@@ -1811,7 +1887,7 @@ impl Default for ChromaCqtConfig {
             fmin: None,
             norm: Some(f64::INFINITY),
             threshold: Some(0.0),
-            tuning: None,
+            tuning: Some(0.0),
             n_chroma: crate::nzu!(12),
             n_octaves: crate::nzu!(7),
             bins_per_octave: Some(crate::nzu!(36)),
@@ -1822,10 +1898,20 @@ impl Default for ChromaCqtConfig {
 
 #[cfg(feature = "feature-extraction")]
 impl ChromaCqtConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.chroma_cqt` defaults: as [`Default`], but with
+    /// `tuning = None` (the tuning is estimated from the signal).
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            tuning: None,
+            ..Self::default()
+        }
     }
 
     /// Sets the hop length.
@@ -1944,8 +2030,9 @@ impl ChromaCqtConfig {
 ///
 /// ## Intended usage
 ///
-/// `ChromaCensConfig::default()` reproduces `librosa.feature.chroma_cens(y=y, sr=sr)`.
-/// The chroma is computed from `chroma` (its `norm` and `threshold` are not used:
+/// [`ChromaCensConfig::librosa`] reproduces `librosa.feature.chroma_cens(y=y, sr=sr)`;
+/// `ChromaCensConfig::default()` differs only in the A440 tuning of its
+/// [`ChromaCqtConfig::default`]. The chroma is computed from `chroma` (its `norm` and `threshold` are not used:
 /// CENS starts from the unnormalised chroma, as librosa does), L1-normalised,
 /// quantised, smoothed over time and normalised by `norm`.
 ///
@@ -1992,10 +2079,20 @@ impl Default for ChromaCensConfig {
 
 #[cfg(feature = "feature-extraction")]
 impl ChromaCensConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.chroma_cens` defaults: as [`Default`], with
+    /// [`ChromaCqtConfig::librosa`] (the tuning is estimated from the signal).
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            chroma: ChromaCqtConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the chroma parameters.
@@ -2106,9 +2203,17 @@ impl Default for ChromaVqtConfig {
 
 #[cfg(feature = "feature-extraction")]
 impl ChromaVqtConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's `feature.chroma_vqt` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -2201,8 +2306,9 @@ impl ChromaVqtConfig {
 ///
 /// ## Intended usage
 ///
-/// `TonnetzConfig::default()` reproduces `librosa.feature.tonnetz(y=y, sr=sr)`, which
-/// computes the chroma with `chroma_cqt` defaults. To use another chromagram (e.g.
+/// [`TonnetzConfig::librosa`] reproduces `librosa.feature.tonnetz(y=y, sr=sr)`, which
+/// computes the chroma with `chroma_cqt` defaults; `TonnetzConfig::default()`
+/// uses [`ChromaCqtConfig::default`] (A440 tuning). To use another chromagram (e.g.
 /// an STFT chroma), call [`tonnetz_from_chroma`] directly.
 ///
 /// ## Invariants
@@ -2227,10 +2333,19 @@ pub struct TonnetzConfig {
 
 #[cfg(feature = "feature-extraction")]
 impl TonnetzConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.tonnetz` defaults: the chroma uses
+    /// [`ChromaCqtConfig::librosa`] (the tuning is estimated from the signal).
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            chroma: ChromaCqtConfig::librosa(),
+        }
     }
 
     /// Sets the chroma parameters.
@@ -2260,14 +2375,15 @@ impl TonnetzConfig {
 ///
 /// # Arguments
 ///
-/// * `chroma` - `(channels, n_chroma, frames)` non-negative chromagram.
+/// * `chroma` - `(channels, n_chroma, frames)` non-negative chromagram of element
+///   type `F` (`f32` or `f64`).
 /// * `norm` - Final per-frame normalisation (see [`WaveletConfig::norm`]).
 /// * `win_len_smooth` - Smoothing length in frames; `None` disables smoothing.
-/// * `smoothing_window` - Window shape.
+/// * `smoothing_window` - Window shape (computed in `f64`, rounded to `F`).
 ///
 /// # Returns
 ///
-/// The CENS features, same shape as `chroma`.
+/// The CENS features, same shape and element type as `chroma`.
 ///
 /// # Errors
 ///
@@ -2282,7 +2398,7 @@ impl TonnetzConfig {
 /// use audio_samples::operations::constant_q::chroma_cens_from_chroma;
 /// use ndarray::Array3;
 ///
-/// let chroma = Array3::from_shape_fn((1, 12, 50), |(_, k, _)| if k == 9 { 1.0 } else { 0.01 });
+/// let chroma = Array3::from_shape_fn((1, 12, 50), |(_, k, _)| if k == 9 { 1.0_f64 } else { 0.01 });
 /// let cens = chroma_cens_from_chroma(&chroma, Some(2.0), Some(nzu!(41)), &Window::Hann).unwrap();
 /// assert!((cens[[0, 9, 25]] - 1.0).abs() < 1e-12);
 /// ```
@@ -2292,17 +2408,18 @@ impl TonnetzConfig {
 /// M. Müller, F. Kurth and M. Clausen, "Audio matching via chroma-based statistical
 /// features," ISMIR 2005; librosa `feature.chroma_cens`.
 #[cfg(feature = "feature-extraction")]
-pub fn chroma_cens_from_chroma(
-    chroma: &Array3<f64>,
+pub fn chroma_cens_from_chroma<F: AudioFloat>(
+    chroma: &Array3<F>,
     norm: Option<f64>,
     win_len_smooth: Option<NonZeroUsize>,
     smoothing_window: &Window,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     validate_norm("norm", norm)?;
     let mut x = chroma.clone();
     normalize_features(&mut x, Some(1.0))?;
-    const STEPS: [f64; 4] = [0.4, 0.2, 0.1, 0.05];
-    x.mapv_inplace(|v| STEPS.iter().filter(|&&s| v > s).count() as f64 * 0.25);
+    let steps = [0.4, 0.2, 0.1, 0.05].map(F::of);
+    let quarter = F::of(0.25);
+    x.mapv_inplace(|v| F::of_usize(steps.iter().filter(|&&s| v > s).count()) * quarter);
     if let Some(wl) = win_len_smooth {
         let m = wl.get() + 2;
         let mut win = get_window(smoothing_window, m, false)?.to_vec();
@@ -2310,13 +2427,14 @@ pub fn chroma_cens_from_chroma(
         for w in &mut win {
             *w /= sum;
         }
+        let win: Vec<F> = win.iter().map(|&w| F::of(w)).collect();
         let (channels, bins, frames) = x.dim();
         let centre = (m / 2) as isize;
-        let mut smoothed = Array3::<f64>::zeros(x.dim());
+        let mut smoothed = Array3::<F>::zeros(x.dim());
         for c in 0..channels {
             for k in 0..bins {
                 for t in 0..frames {
-                    let mut acc = 0.0;
+                    let mut acc = F::zero();
                     for (j, &w) in win.iter().enumerate() {
                         let src = t as isize + centre - j as isize;
                         if (0..frames as isize).contains(&src) {
@@ -2342,12 +2460,14 @@ pub fn chroma_cens_from_chroma(
 ///
 /// # Arguments
 ///
-/// * `chroma` - `(channels, n_chroma, frames)` chromagram (any `n_chroma`; pitch
-///   classes are spread evenly over 12 semitones).
+/// * `chroma` - `(channels, n_chroma, frames)` chromagram of element type `F`
+///   (`f32` or `f64`; any `n_chroma`, pitch classes are spread evenly over 12
+///   semitones).
 ///
 /// # Returns
 ///
-/// A `(channels, 6, frames)` array.
+/// A `(channels, 6, frames)` array of element type `F`. The projection matrix is
+/// computed in `f64` and rounded to `F` once.
 ///
 /// # Errors
 ///
@@ -2371,7 +2491,7 @@ pub fn chroma_cens_from_chroma(
 /// C. Harte, M. Sandler and M. Gasser, "Detecting harmonic change in musical
 /// audio," ACM AMCMM 2006; librosa `feature.tonnetz`.
 #[cfg(feature = "feature-extraction")]
-pub fn tonnetz_from_chroma(chroma: &Array3<f64>) -> AudioSampleResult<Array3<f64>> {
+pub fn tonnetz_from_chroma<F: AudioFloat>(chroma: &Array3<F>) -> AudioSampleResult<Array3<F>> {
     let n_chroma = chroma.dim().1;
     let mut x = chroma.clone();
     normalize_features(&mut x, Some(1.0))?;
@@ -2399,9 +2519,10 @@ pub fn tonnetz_from_chroma(chroma: &Array3<f64>) -> AudioSampleResult<Array3<f64
 }
 
 #[cfg(feature = "feature-extraction")]
-fn apply_threshold(x: &mut Array3<f64>, threshold: Option<f64>) {
+fn apply_threshold<F: AudioFloat>(x: &mut Array3<F>, threshold: Option<f64>) {
     if let Some(th) = threshold {
-        x.mapv_inplace(|v| if v < th { 0.0 } else { v });
+        let th = F::of(th);
+        x.mapv_inplace(|v| if v < th { F::zero() } else { v });
     }
 }
 
@@ -2413,9 +2534,22 @@ fn apply_threshold(x: &mut Array3<f64>, threshold: Option<f64>) {
 /// hybrid CQT, inverse CQT, and the chroma / tonnetz features built on the CQT.
 ///
 /// All analysis outputs are shaped `(channels, n_bins, n_frames)` with
-/// `n_frames = 1 + len / hop_length` (frames centred on multiples of the hop);
-/// samples are converted to `f64` first.
+/// `n_frames = 1 + len / hop_length` (frames centred on multiples of the hop).
+/// Outputs have the element type [`Float`](Self::Float) (or
+/// `Complex<Self::Float>`): `f32` for `u8`, `i16`, `I24` and `f32` audio, `f64`
+/// for `i32` and `f64` audio. The computation runs in that type, except the
+/// per-octave resampling, which [`crate::resample`] performs in `f64`. The
+/// reconstructions ([`icqt`](Self::icqt), [`griffinlim_cqt`](Self::griffinlim_cqt))
+/// return audio of the sample type [`Sample`](Self::Sample).
 pub trait AudioConstantQ {
+    /// The float type of the outputs and of the computation: the sample type's
+    /// [`AudioSample::Float`](crate::AudioSample::Float).
+    type Float: AudioFloat;
+
+    /// The sample type of the audio. [`icqt`](Self::icqt) and
+    /// [`griffinlim_cqt`](Self::griffinlim_cqt) return audio of this type.
+    type Sample: StandardSample;
+
     /// Computes the constant-Q transform, equivalent to `librosa.cqt`.
     ///
     /// Bin `k` is centred at `fmin * 2^((k + tuning) / bins_per_octave)` Hz and
@@ -2470,7 +2604,7 @@ pub trait AudioConstantQ {
     ///
     /// C. Schörkhuber and A. Klapuri, "Constant-Q transform toolbox for music
     /// processing," SMC 2010; librosa `core.cqt`.
-    fn cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Complex<f64>>>;
+    fn cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Complex<Self::Float>>>;
 
     /// Computes the variable-Q transform, equivalent to `librosa.vqt`
     /// (`intervals="equal"`).
@@ -2516,7 +2650,7 @@ pub trait AudioConstantQ {
     /// V. Lostanlen, S. Sridhar et al., "Time-frequency scattering accurately models
     /// auditory similarities between instrumental playing techniques," EURASIP JASMP
     /// 2021 (the ERB-based `gamma`); librosa `core.vqt`.
-    fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<f64>>>;
+    fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<Self::Float>>>;
 
     /// Computes the pseudo constant-Q transform (magnitudes), equivalent to
     /// `librosa.pseudo_cqt`.
@@ -2554,7 +2688,7 @@ pub trait AudioConstantQ {
     /// let p = audio.pseudo_cqt(&cfg).unwrap();
     /// assert_eq!(p.dim(), (1, 24, 22));
     /// ```
-    fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<f64>>;
+    fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the hybrid constant-Q transform (magnitudes), equivalent to
     /// `librosa.hybrid_cqt`.
@@ -2589,7 +2723,7 @@ pub trait AudioConstantQ {
     /// let h = audio.hybrid_cqt(&CqtConfig::default()).unwrap();
     /// assert_eq!(h.dim(), (1, 84, 22));
     /// ```
-    fn hybrid_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<f64>>;
+    fn hybrid_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Reconstructs audio from a constant-Q transform, equivalent to `librosa.icqt`.
     ///
@@ -2598,7 +2732,9 @@ pub trait AudioConstantQ {
     /// inverted with a rectangular-window ISTFT, upsampled to the original rate and
     /// summed. This is an approximate inverse: for a CQT computed with the same
     /// parameters it recovers the signal's band-limited content between `fmin` and
-    /// the top bin.
+    /// the top bin. The reconstruction runs in [`Float`](Self::Float) and is
+    /// converted to [`Sample`](Self::Sample) with the crate's audio-aware
+    /// conversion (integer types round and saturate).
     ///
     /// # Arguments
     ///
@@ -2610,7 +2746,7 @@ pub trait AudioConstantQ {
     ///
     /// # Returns
     ///
-    /// The reconstructed `f64` audio.
+    /// The reconstructed audio, of sample type [`Sample`](Self::Sample).
     ///
     /// # Errors
     ///
@@ -2636,11 +2772,11 @@ pub trait AudioConstantQ {
     /// assert_eq!(y.samples_per_channel().get(), 22050);
     /// ```
     fn icqt(
-        c: &Array3<Complex<f64>>,
+        c: &Array3<Complex<Self::Float>>,
         config: &CqtConfig,
         sample_rate: SampleRate,
         length: Option<NonZeroUsize>,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>>;
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
     /// Reconstructs audio from a constant-Q magnitude by Griffin-Lim phase
     /// retrieval, equivalent to `librosa.griffinlim_cqt` with `init=None`.
@@ -2660,7 +2796,8 @@ pub trait AudioConstantQ {
     ///
     /// # Returns
     ///
-    /// The reconstructed `f64` audio.
+    /// The reconstructed audio, of sample type [`Sample`](Self::Sample). The
+    /// iterations run in [`Float`](Self::Float).
     ///
     /// # Errors
     ///
@@ -2693,13 +2830,13 @@ pub trait AudioConstantQ {
     /// N. Perraudin, P. Balazs and P. L. Søndergaard, "A fast Griffin-Lim
     /// algorithm," WASPAA 2013; librosa `core.griffinlim_cqt`.
     fn griffinlim_cqt(
-        magnitude: &Array3<f64>,
+        magnitude: &Array3<Self::Float>,
         config: &CqtConfig,
         sample_rate: SampleRate,
         n_iter: usize,
         momentum: f64,
         length: Option<NonZeroUsize>,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>>;
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
     /// Computes a constant-Q chromagram, equivalent to `librosa.feature.chroma_cqt`.
     ///
@@ -2709,7 +2846,9 @@ pub trait AudioConstantQ {
     ///
     /// # Arguments
     ///
-    /// * `config` - Parameters ([`ChromaCqtConfig::default`] = librosa defaults).
+    /// * `config` - Parameters ([`ChromaCqtConfig::default`], or
+    ///   [`ChromaCqtConfig::librosa`] for librosa's defaults, which estimate the
+    ///   tuning).
     ///
     /// # Returns
     ///
@@ -2736,7 +2875,7 @@ pub trait AudioConstantQ {
     /// assert!((chroma[[0, 7, 11]] - 1.0).abs() < 1e-12); // G
     /// ```
     #[cfg(feature = "feature-extraction")]
-    fn chroma_cqt(&self, config: &ChromaCqtConfig) -> AudioSampleResult<Array3<f64>>;
+    fn chroma_cqt(&self, config: &ChromaCqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes chroma energy normalised statistics (CENS), equivalent to
     /// `librosa.feature.chroma_cens`.
@@ -2745,7 +2884,8 @@ pub trait AudioConstantQ {
     ///
     /// # Arguments
     ///
-    /// * `config` - Parameters ([`ChromaCensConfig::default`] = librosa defaults).
+    /// * `config` - Parameters ([`ChromaCensConfig::default`], or
+    ///   [`ChromaCensConfig::librosa`] for librosa's defaults).
     ///
     /// # Returns
     ///
@@ -2771,7 +2911,7 @@ pub trait AudioConstantQ {
     /// assert_eq!(cens.dim(), (1, 12, 22));
     /// ```
     #[cfg(feature = "feature-extraction")]
-    fn chroma_cens(&self, config: &ChromaCensConfig) -> AudioSampleResult<Array3<f64>>;
+    fn chroma_cens(&self, config: &ChromaCensConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes a variable-Q chromagram, equivalent to
     /// `librosa.feature.chroma_vqt(intervals="equal")`.
@@ -2803,7 +2943,7 @@ pub trait AudioConstantQ {
     /// assert_eq!(chroma.dim(), (1, 12, 22));
     /// ```
     #[cfg(feature = "feature-extraction")]
-    fn chroma_vqt(&self, config: &ChromaVqtConfig) -> AudioSampleResult<Array3<f64>>;
+    fn chroma_vqt(&self, config: &ChromaVqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the tonal centroid features, equivalent to `librosa.feature.tonnetz`.
     ///
@@ -2812,7 +2952,8 @@ pub trait AudioConstantQ {
     ///
     /// # Arguments
     ///
-    /// * `config` - Parameters ([`TonnetzConfig::default`] = librosa defaults).
+    /// * `config` - Parameters ([`TonnetzConfig::default`], or
+    ///   [`TonnetzConfig::librosa`] for librosa's defaults).
     ///
     /// # Returns
     ///
@@ -2838,13 +2979,13 @@ pub trait AudioConstantQ {
     /// assert_eq!(t.dim(), (1, 6, 22));
     /// ```
     #[cfg(feature = "feature-extraction")]
-    fn tonnetz(&self, config: &TonnetzConfig) -> AudioSampleResult<Array3<f64>>;
+    fn tonnetz(&self, config: &TonnetzConfig) -> AudioSampleResult<Array3<Self::Float>>;
 }
 
 /// Resolves `tuning = None` with librosa's `estimate_tuning` (feature
 /// `feature-extraction`; without it `None` is an error).
-fn resolve_tuning(
-    y: ArrayView2<'_, f64>,
+fn resolve_tuning<F: AudioFloat>(
+    y: ArrayView2<'_, F>,
     sr: f64,
     tuning: Option<f64>,
     bins_per_octave: NonZeroUsize,
@@ -2876,7 +3017,7 @@ fn cqt_magnitude<T: StandardSample>(
     audio: &AudioSamples<'_, T>,
     cfg: &CqtConfig,
     mode: CqtMode,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<T::Float>> {
     match mode {
         CqtMode::Full => Ok(audio.cqt(cfg)?.mapv(|z| z.norm())),
         CqtMode::Hybrid => audio.hybrid_cqt(cfg),
@@ -2890,7 +3031,7 @@ fn chroma_cqt_impl<T: StandardSample>(
     config: &ChromaCqtConfig,
     norm: Option<f64>,
     threshold: Option<f64>,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<T::Float>> {
     config.validate()?;
     let c = cqt_magnitude(audio, &config.cqt_config(), config.cqt_mode)?;
     let m = cq_to_chroma(c.dim().1, config.bpo(), config.n_chroma, config.fmin, true)?;
@@ -2904,57 +3045,60 @@ impl<T> AudioConstantQ for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
-    fn cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Complex<f64>>> {
+    type Float = T::Float;
+    type Sample = T;
+
+    fn cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Complex<T::Float>>> {
         config.validate()?;
-        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
+        let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
         vqt_rows(y, sr, config, tuning, Some(0.0))
     }
 
-    fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<f64>>> {
+    fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<T::Float>>> {
         config.validate()?;
-        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
+        let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.cqt.tuning, config.cqt.bins_per_octave)?;
         vqt_rows(y, sr, &config.cqt, tuning, config.gamma)
     }
 
-    fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<f64>> {
+    fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
+        let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
         pseudo_cqt_rows(y.view(), sr, config, tuning)
     }
 
-    fn hybrid_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<f64>> {
+    fn hybrid_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
+        let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
         hybrid_cqt_rows(y, sr, config, tuning)
     }
 
     fn icqt(
-        c: &Array3<Complex<f64>>,
+        c: &Array3<Complex<T::Float>>,
         config: &CqtConfig,
         sample_rate: SampleRate,
         length: Option<NonZeroUsize>,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>> {
+    ) -> AudioSampleResult<AudioSamples<'static, T>> {
         let y = icqt_rows(
             c.view(),
             f64::from(sample_rate.get()),
             config,
             length.map(NonZeroUsize::get),
         )?;
-        rows_to_audio(y, sample_rate.get())
+        float_rows_to_audio::<T>(y, sample_rate, "icqt")
     }
 
     fn griffinlim_cqt(
-        magnitude: &Array3<f64>,
+        magnitude: &Array3<T::Float>,
         config: &CqtConfig,
         sample_rate: SampleRate,
         n_iter: usize,
         momentum: f64,
         length: Option<NonZeroUsize>,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>> {
+    ) -> AudioSampleResult<AudioSamples<'static, T>> {
         if !(momentum.is_finite() && momentum >= 0.0) {
             return Err(param_err(
                 "momentum",
@@ -2972,9 +3116,12 @@ where
         let n_bins = NonZeroUsize::new(magnitude.dim().1)
             .ok_or_else(|| param_err("magnitude", "the magnitude has no bins"))?;
         let fwd = config.clone().with_n_bins(Some(n_bins));
-        let mut angles = Array3::<Complex<f64>>::from_elem(magnitude.dim(), Complex::new(1.0, 0.0));
-        let mut rebuilt: Option<Array3<Complex<f64>>> = None;
-        let with_phase = |angles: &Array3<Complex<f64>>| {
+        let mut angles = Array3::<Complex<T::Float>>::from_elem(
+            magnitude.dim(),
+            Complex::new(T::Float::of(1.0), T::Float::of(0.0)),
+        );
+        let mut rebuilt: Option<Array3<Complex<T::Float>>> = None;
+        let with_phase = |angles: &Array3<Complex<T::Float>>| {
             ndarray::Zip::from(magnitude)
                 .and(angles)
                 .map_collect(|&m, &a| a * m)
@@ -2992,7 +3139,7 @@ where
                     ),
                 ));
             }
-            let k = momentum / (1.0 + momentum);
+            let k = T::Float::of(momentum / (1.0 + momentum));
             match &rebuilt {
                 Some(prev) => ndarray::Zip::from(&mut angles)
                     .and(&next)
@@ -3000,20 +3147,22 @@ where
                     .for_each(|a, &r, &p| *a = r - p * k),
                 None => angles.assign(&next),
             }
-            angles.mapv_inplace(|a| a / (a.norm() + f64::MIN_POSITIVE));
+            angles.mapv_inplace(|a| {
+                a / (a.norm() + <T::Float as num_traits::Float>::min_positive_value())
+            });
             rebuilt = Some(next);
         }
         let y = icqt_rows(with_phase(&angles).view(), sr, config, len)?;
-        rows_to_audio(y, sample_rate.get())
+        float_rows_to_audio::<T>(y, sample_rate, "griffinlim_cqt")
     }
 
     #[cfg(feature = "feature-extraction")]
-    fn chroma_cqt(&self, config: &ChromaCqtConfig) -> AudioSampleResult<Array3<f64>> {
+    fn chroma_cqt(&self, config: &ChromaCqtConfig) -> AudioSampleResult<Array3<T::Float>> {
         chroma_cqt_impl(self, config, config.norm, config.threshold)
     }
 
     #[cfg(feature = "feature-extraction")]
-    fn chroma_cens(&self, config: &ChromaCensConfig) -> AudioSampleResult<Array3<f64>> {
+    fn chroma_cens(&self, config: &ChromaCensConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
         let chroma = chroma_cqt_impl(self, &config.chroma, None, Some(0.0))?;
         chroma_cens_from_chroma(
@@ -3025,7 +3174,7 @@ where
     }
 
     #[cfg(feature = "feature-extraction")]
-    fn chroma_vqt(&self, config: &ChromaVqtConfig) -> AudioSampleResult<Array3<f64>> {
+    fn chroma_vqt(&self, config: &ChromaVqtConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
         let vcfg = config.vqt_config();
         let v = self.vqt(&vcfg)?.mapv(|z| z.norm());
@@ -3043,7 +3192,7 @@ where
     }
 
     #[cfg(feature = "feature-extraction")]
-    fn tonnetz(&self, config: &TonnetzConfig) -> AudioSampleResult<Array3<f64>> {
+    fn tonnetz(&self, config: &TonnetzConfig) -> AudioSampleResult<Array3<T::Float>> {
         let chroma = self.chroma_cqt(&config.chroma)?;
         tonnetz_from_chroma(&chroma)
     }
@@ -3052,6 +3201,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AudioTypeConversion;
+    use crate::audio_float::audio_float_rows as audio_rows;
     use crate::sample_rate;
     use ndarray::Array1;
 
@@ -3238,5 +3389,101 @@ mod tests {
         // Three bins per chroma, the centre bin on the pitch class: C gets 35, 0, 1.
         assert_eq!(m.row(0).iter().filter(|&&v| v == 1.0).count(), 3);
         assert_eq!((m[[0, 35]], m[[0, 0]], m[[0, 1]]), (1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn output_types_follow_the_sample_type() {
+        let a = tone(440.0, 8192);
+        let a16 = a.to_format::<i16>();
+        let a32 = a.to_format::<i32>();
+        let c16: Array3<Complex<f32>> = a16.cqt(&CqtConfig::default()).unwrap();
+        let c32: Array3<Complex<f64>> = a32.cqt(&CqtConfig::default()).unwrap();
+        assert_eq!(c16.dim(), c32.dim());
+        let p: Array3<f32> = a16.pseudo_cqt(&CqtConfig::default()).unwrap();
+        assert_eq!(p.dim(), c32.dim());
+        #[cfg(feature = "feature-extraction")]
+        {
+            let ch: Array3<f32> = a16.chroma_cqt(&ChromaCqtConfig::default()).unwrap();
+            assert_eq!(ch.dim(), (1, 12, c16.dim().2));
+        }
+    }
+
+    #[test]
+    fn f32_cqt_agrees_with_f64_cqt() {
+        // The same i16 samples analysed in f32 and in f64. The resampler runs in
+        // f64 for both, so the difference is f32 round-off of the FFTs, filter
+        // products and resampler outputs: measured 2.7e-7 of the peak. Bound
+        // 2e-6 (17 f32 eps).
+        let a16 = tone(440.0, 22050).to_format::<i16>();
+        let c32 = a16.cqt(&CqtConfig::default()).unwrap();
+        let c64 = a16.to_format::<f64>().cqt(&CqtConfig::default()).unwrap();
+        let peak = c64.iter().fold(0.0f64, |m, z| m.max(z.norm()));
+        let err = c32.iter().zip(c64.iter()).fold(0.0f64, |m, (p, q)| {
+            m.max((Complex::new(f64::from(p.re), f64::from(p.im)) - q).norm())
+        });
+        eprintln!("f32 vs f64 cqt: {:.3e} of the peak", err / peak);
+        assert!(err / peak < 2e-6, "{:e}", err / peak);
+    }
+
+    #[test]
+    fn icqt_and_griffinlim_return_the_receiver_sample_type() {
+        // i16 in, i16 out, close to the f64 path re-quantised to i16.
+        let n = 22050;
+        let a16 = tone(440.0, n).to_format::<i16>();
+        let cfg = CqtConfig::default();
+        let c = a16.cqt(&cfg).unwrap();
+        let y: AudioSamples<'static, i16> =
+            AudioSamples::<i16>::icqt(&c, &cfg, sample_rate!(22050), NonZeroUsize::new(n)).unwrap();
+        let c64 = a16.to_format::<f64>().cqt(&cfg).unwrap();
+        let y64 = AudioSamples::<f64>::icqt(&c64, &cfg, sample_rate!(22050), NonZeroUsize::new(n))
+            .unwrap()
+            .to_format::<i16>();
+        let max_diff = |p: &AudioSamples<'static, i16>, q: &AudioSamples<'static, i16>| {
+            let (p, q) = (
+                p.as_mono().unwrap().as_view(),
+                q.as_mono().unwrap().as_view(),
+            );
+            assert_eq!(p.len(), q.len());
+            p.iter()
+                .zip(q.iter())
+                .map(|(&a, &b)| (i32::from(a) - i32::from(b)).abs())
+                .max()
+                .unwrap()
+        };
+        // The f32 and f64 reconstructions differ by f32 round-off of a signal of
+        // amplitude ~0.5 (about 1e-7 of full scale, below one LSB = 3e-5); a
+        // value near a rounding boundary can still round to the neighbouring
+        // code, so the bound is one LSB (measured 1).
+        eprintln!("icqt i16 vs f64 re-quantised: {} LSB", max_diff(&y, &y64));
+        assert!(max_diff(&y, &y64) <= 1);
+
+        let mag = c.mapv(|z| z.norm());
+        let g: AudioSamples<'static, i16> = AudioSamples::<i16>::griffinlim_cqt(
+            &mag,
+            &cfg,
+            sample_rate!(22050),
+            2,
+            0.99,
+            NonZeroUsize::new(n),
+        )
+        .unwrap();
+        let g64 = AudioSamples::<f64>::griffinlim_cqt(
+            &c64.mapv(|z| z.norm()),
+            &cfg,
+            sample_rate!(22050),
+            2,
+            0.99,
+            NonZeroUsize::new(n),
+        )
+        .unwrap()
+        .to_format::<i16>();
+        assert_eq!(g.samples_per_channel().get(), n);
+        // Two iterations, each through icqt and cqt in f32: the phase estimates
+        // differ by f32 round-off. Measured 1 LSB; bound 2 LSB.
+        eprintln!(
+            "griffinlim_cqt i16 vs f64 re-quantised: {} LSB",
+            max_diff(&g, &g64)
+        );
+        assert!(max_diff(&g, &g64) <= 2, "{}", max_diff(&g, &g64));
     }
 }
