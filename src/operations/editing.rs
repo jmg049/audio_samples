@@ -448,18 +448,35 @@ where
         }
 
         // Work in samples directly: a round trip through seconds truncates
-        // and could come out one sample short.
+        // and could come out one sample short. Each output sample is written
+        // once: the samples are copied, then the padding is appended.
+        let pad = target_num_samples - current_num_samples;
+        let push_row = |out: &mut Vec<T>, row: ndarray::ArrayView1<'_, T>| {
+            match row.as_slice() {
+                Some(x) => out.extend_from_slice(x),
+                None => out.extend(row.iter().copied()),
+            }
+            out.extend(std::iter::repeat_n(pad_value, pad));
+        };
         match self.data() {
             AudioData::Mono(arr) => {
-                let mut out = Array1::from_elem(target_num_samples, pad_value);
-                out.slice_mut(s![..current_num_samples])
-                    .assign(&arr.as_view());
-                AudioSamples::new_mono(out, self.sample_rate())
+                let mut out = Vec::with_capacity(target_num_samples);
+                push_row(&mut out, arr.as_view());
+                AudioSamples::new_mono(Array1::from_vec(out), self.sample_rate())
             }
             AudioData::Multi(arr) => {
-                let mut out = Array2::from_elem((arr.nrows().get(), target_num_samples), pad_value);
-                out.slice_mut(s![.., ..current_num_samples])
-                    .assign(&arr.as_view());
+                let n_rows = arr.nrows().get();
+                let mut out = Vec::with_capacity(n_rows * target_num_samples);
+                for row in arr.as_view().outer_iter() {
+                    push_row(&mut out, row);
+                }
+                let out =
+                    Array2::from_shape_vec((n_rows, target_num_samples), out).map_err(|e| {
+                        crate::AudioSampleError::Layout(crate::LayoutError::shape_error(
+                            "pad_samples_right",
+                            e,
+                        ))
+                    })?;
                 AudioSamples::new_multi_channel(out, self.sample_rate())
             }
         }
