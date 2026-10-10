@@ -115,7 +115,7 @@ fn add_ballistics(
         doc.add_warning(
             WarningLevel::Info,
             "No lookahead: the gain reacts only after the envelope has risen, so the start of each transient passes partly unreduced (for roughly the attack time).",
-            "A lookahead of about the attack time lets the gain anticipate peaks.",
+            "A lookahead of about the attack time starts the gain reduction before each peak.",
         );
     }
     if release_ms < attack_ms {
@@ -231,8 +231,8 @@ impl Explain for CompressorConfig {
             fmt_num(self.release_ms),
             fmt_num(self.makeup_gain_db)
         ));
-        doc.add_trade_off("A fast attack catches transients but dulls them; a slow attack lets them through and keeps punch.")
-            .add_trade_off("A fast release restores level quickly but can pump; a slow release is smoother but holds down the following material.")
+        doc.add_trade_off("A fast attack reduces transients and softens them; a slow attack lets them pass at close to their original level.")
+            .add_trade_off("A fast release restores the level quickly but can cause audible pumping; a slow release is smoother but keeps reducing the gain of the material that follows.")
             .add_trade_off("RMS detection follows loudness; peak detection follows the waveform and reacts to short spikes.");
         if r <= 1.0 {
             doc.add_warning(

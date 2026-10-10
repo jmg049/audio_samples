@@ -420,7 +420,7 @@ impl Explain for IirFilterDesign {
             doc.add_warning(
                 WarningLevel::Caution,
                 format!(
-                    "Poles sit within {} of the unit circle (normalised edge {} of f_s, order {order}); the response is very sensitive to rounding and rings for a long time.",
+                    "Poles lie within {} of the unit circle (normalised edge {} of f_s, order {order}); the response is very sensitive to rounding and rings for a long time.",
                     fmt_num(1.0 - max_r),
                     fmt_num(edges.iter().copied().fold(f64::INFINITY, f64::min) / fs)
                 ),

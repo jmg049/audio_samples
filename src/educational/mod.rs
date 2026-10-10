@@ -151,7 +151,7 @@ impl<T: StandardSample> RenderVisual for AudioSamples<'static, T> {
 
 impl<T: StandardSample> Explainable for AudioSamples<'static, T> {}
 
-/// Assemble all explanations from a chain into a single polished HTML document.
+/// Assemble all explanations from a chain into a single HTML document.
 ///
 /// The document is self-contained: CSS is inline, KaTeX and Plotly are loaded
 /// from CDN. It includes the full Rust call chain that produced the explanations,

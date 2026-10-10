@@ -208,13 +208,13 @@ pub(crate) fn explain_window(window: &WindowType, n: usize, fs: Option<f64>) -> 
     }
     add_window_quantities(&mut doc, &m, fs);
     doc.set_summary(format!(
-        "A {n}-point {name} window. Its main lobe is {} bins wide at -6 dB and its highest side lobe sits at {} dB; \
+        "A {n}-point {name} window. Its main lobe is {} bins wide at -6 dB and its highest side lobe is at {} dB; \
          each bin collects noise from {} bins' worth of bandwidth.",
         m.width_6db_bins.map_or_else(|| "?".into(), fmt_num),
         m.peak_side_lobe_db.map_or_else(|| "?".into(), fmt_num),
         fmt_num(m.enbw_bins)
     ));
-    doc.add_trade_off("A wider main lobe (poorer frequency resolution) buys lower side lobes (less leakage from strong components into weak ones).")
+    doc.add_trade_off("A wider main lobe (poorer frequency resolution) gives lower side lobes (less leakage from strong components into weak ones).")
         .add_trade_off("Higher ENBW means more noise per bin; low coherent gain means smaller peak values, which amplitude-calibrated plots must correct for.");
     let constant = w.iter().all(|v| (v - w[0]).abs() <= 1e-12);
     if m.symmetric && n > 1 && !constant {
@@ -256,7 +256,7 @@ impl Explain for WindowType {
         if defaulted {
             doc.add_warning(
                 WarningLevel::Info,
-                format!("No window length given; figures are for N = {DEFAULT_WINDOW_LEN}. In bins they barely depend on N."),
+                format!("No window length given; figures are for N = {DEFAULT_WINDOW_LEN}. In bins they change little with N."),
                 "Use ExplainContext::with_n_fft to choose the length.",
             );
         }
@@ -435,7 +435,7 @@ impl Explain for StftParams {
                 fmt_num(1000.0 * hop as f64 / fs)
             ))
         ));
-        doc.add_trade_off("A longer window sharpens frequency resolution (Δf = f_s/N) but blurs timing; you cannot have both (time-frequency uncertainty).")
+        doc.add_trade_off("A longer window sharpens frequency resolution (Δf = f_s/N) but lowers time resolution; the two cannot both be improved (time-frequency uncertainty).")
             .add_trade_off("A smaller hop gives smoother tracks over time at proportionally more computation; it does not improve frequency resolution.")
             .add_trade_off("The window shape trades main-lobe width (resolution) against side-lobe level (leakage); see the window explanation.");
 
@@ -732,7 +732,7 @@ impl Explain for MelParams {
             self.norm()
         ));
         doc.add_trade_off("More mel bands give finer spectral detail but narrower low-frequency bands, which may contain no FFT bin.")
-            .add_trade_off("Mel spacing mimics the ear: roughly linear resolution below 1 kHz and logarithmic above.");
+            .add_trade_off("Mel spacing approximates the frequency resolution of the ear: roughly linear below 1 kHz and logarithmic above.");
         match ctx.valid_sample_rate() {
             Some(fs) => {
                 let nyq = fs / 2.0;

@@ -1,5 +1,5 @@
 //! Demonstrates the `educational` feature: step-by-step operation explanations
-//! rendered as a polished HTML document.
+//! rendered as an HTML document.
 //!
 //! Run with:
 //!   cargo run --example educational --features educational,processing
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 fn main() {
     // Generate a 440 Hz sine wave and add a DC bias of 0.35 so the
-    // remove_dc_offset step produces a clearly visible waveform shift
+    // remove_dc_offset step produces a visible waveform shift
     // (asymmetric → centred) rather than a no-op on a perfectly balanced signal.
     let sine = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(2000), 0.8);
     let dc_bias = 0.35_f32;
