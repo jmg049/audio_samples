@@ -2969,6 +2969,39 @@ pub fn cross_similarity<F: AudioFloat>(
     Ok(out)
 }
 
+/// The `(rows, cols)` matrix `out[i, j] = src[(i - j) mod n, j]` for an
+/// `(n, cols)` source, `rows <= n`, `cols <= n` (the shear of
+/// [`lag_to_recurrence`]).
+///
+/// The source is read along diagonals, so the output is filled in blocks of
+/// 64 columns: consecutive output rows of a block then read overlapping,
+/// cache-resident row segments of the source. Each output element is written
+/// once.
+fn shear<T: Copy>(src: ArrayView2<T>, rows: usize) -> Array2<T> {
+    const B: usize = 64;
+    let (n, cols) = src.dim();
+    let src = src.as_standard_layout();
+    let s = src.as_slice().expect("standard layout");
+    let mut out = Array2::<T>::uninit((rows, cols));
+    {
+        let o = out.as_slice_mut().expect("standard layout");
+        for cb in (0..cols).step_by(B) {
+            let ce = (cb + B).min(cols);
+            for i in 0..rows {
+                let orow = &mut o[i * cols + cb..i * cols + ce];
+                for (dst, j) in orow.iter_mut().zip(cb..ce) {
+                    // Source row (i - j) mod n, with i < n and j < n.
+                    let r = if i >= j { i - j } else { i + n - j };
+                    *dst = std::mem::MaybeUninit::new(s[r * cols + j]);
+                }
+            }
+        }
+    }
+    // SAFETY: the loops above write every element (each column block, every
+    // row).
+    unsafe { out.assume_init() }
+}
+
 /// Converts a recurrence matrix into a time-lag matrix.
 ///
 /// `lag[l, i] = rec[(i + l) mod T, i]` with `T = 2t` when `pad` is true (the
@@ -2996,10 +3029,10 @@ pub fn cross_similarity<F: AudioFloat>(
 /// assert_eq!(lag.dim(), (8, 4));
 /// assert_eq!(lag_to_recurrence(lag.view()).unwrap(), rec);
 /// ```
-pub fn recurrence_to_lag<F: AudioFloat>(
-    rec: ArrayView2<F>,
+pub fn recurrence_to_lag<T: Copy + Default>(
+    rec: ArrayView2<T>,
     pad: bool,
-) -> AudioSampleResult<Array2<F>> {
+) -> AudioSampleResult<Array2<T>> {
     let (r, c) = rec.dim();
     if r != c {
         return err(
@@ -3008,12 +3041,27 @@ pub fn recurrence_to_lag<F: AudioFloat>(
         );
     }
     let n = if pad { 2 * r } else { r };
-    let mut lag = Array2::<F>::zeros((n, c));
-    for ((row, col), &v) in rec.indexed_iter() {
-        // shear(factor = -1): row index moves to (row - col) mod n.
-        lag[[(row + n - col) % n, col]] = v;
+    // shear(factor = -1): lag[l, col] = rec[(l + col) mod n, col], zero where
+    // that row is in the padding.
+    // shear(factor = -1): rec[row, col] moves to lag[(row - col) mod n, col];
+    // the rows no element moves to stay zero (vec! of a zero-valued
+    // primitive is a zeroed allocation, so only the moved elements are
+    // written). The source is read in blocks of 64 columns, so that the
+    // diagonal writes of consecutive rows hit the same cache lines.
+    const B: usize = 64;
+    let rec = rec.as_standard_layout();
+    let src = rec.as_slice().expect("standard layout");
+    let mut out = vec![T::default(); n * c];
+    for cb in (0..c).step_by(B) {
+        let ce = (cb + B).min(c);
+        for row in 0..r {
+            for col in cb..ce {
+                let dst = if row >= col { row - col } else { row + n - col };
+                out[dst * c + col] = src[row * c + col];
+            }
+        }
     }
-    Ok(lag)
+    Ok(Array2::from_shape_vec((n, c), out).expect("n * c elements"))
 }
 
 /// Converts a time-lag matrix back into a recurrence matrix.
@@ -3044,7 +3092,7 @@ pub fn recurrence_to_lag<F: AudioFloat>(
 /// let rec = lag_to_recurrence(lag.view()).unwrap();
 /// assert_eq!(rec, array![[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
 /// ```
-pub fn lag_to_recurrence<F: AudioFloat>(lag: ArrayView2<F>) -> AudioSampleResult<Array2<F>> {
+pub fn lag_to_recurrence<T: Copy + Default>(lag: ArrayView2<T>) -> AudioSampleResult<Array2<T>> {
     let (n, t) = lag.dim();
     if n != t && n != 2 * t {
         return err(
@@ -3052,15 +3100,9 @@ pub fn lag_to_recurrence<F: AudioFloat>(lag: ArrayView2<F>) -> AudioSampleResult
             format!("invalid lag matrix shape ({n}, {t}): must be (t, t) or (2t, t)"),
         );
     }
-    let mut rec = Array2::<F>::zeros((t, t));
-    for ((row, col), &v) in lag.indexed_iter() {
-        // shear(factor = +1): row index moves to (row + col) mod n.
-        let r = (row + col) % n;
-        if r < t {
-            rec[[r, col]] = v;
-        }
-    }
-    Ok(rec)
+    // shear(factor = +1): rec[row, col] = lag[(row - col) mod n, col].
+    // rec[row, col] = lag[(row - col) mod n, col].
+    Ok(shear(lag, t))
 }
 
 // ---------------------------------------------------------------------------
@@ -3695,5 +3737,17 @@ mod tests {
     fn dtw_matches_reference_accumulation() {
         check_dtw_matches_reference::<f32>();
         check_dtw_matches_reference::<f64>();
+    }
+
+    #[test]
+    fn lag_conversions_take_bool_matrices() {
+        let rec = Array2::from_shape_fn((5, 5), |(i, j)| (i * 3 + j) % 4 == 0);
+        let as_f = rec.mapv(|b| if b { 1.0f32 } else { 0.0 });
+        for pad in [false, true] {
+            let lag = recurrence_to_lag(rec.view(), pad).unwrap();
+            let lag_f = recurrence_to_lag(as_f.view(), pad).unwrap();
+            assert_eq!(lag.mapv(|b| if b { 1.0f32 } else { 0.0 }), lag_f);
+            assert_eq!(lag_to_recurrence(lag.view()).unwrap(), rec);
+        }
     }
 }
