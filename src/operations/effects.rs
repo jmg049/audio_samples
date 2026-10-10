@@ -2089,10 +2089,7 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
     recurrence: &RecurrenceConfig,
     aggregate: NnAggregate,
 ) -> AudioSampleResult<Array2<F>> {
-    // TRANSITIONAL(f64): `recurrence_matrix` takes f64 data; compute the
-    // recurrence in f64 and round it to F until it is generic.
-    let data64 = data.mapv(F::as_f64);
-    let rec = recurrence_matrix(data64.view(), recurrence)?.mapv(F::of);
+    let rec = recurrence_matrix(data, recurrence)?;
     nn_filter(data, rec.view(), aggregate)
 }
 

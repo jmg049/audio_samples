@@ -90,8 +90,7 @@ use crate::operations::filterbanks::{
 use crate::repr::SampleRate;
 use crate::utils::{MAX_SIGNAL_ELEMENTS, check_derived_len};
 use crate::{
-    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
-    ParameterError, StandardSample,
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
 };
 
 /// The forward real-FFT plan of length `n` from this thread's planner for `F`.
@@ -2498,56 +2497,6 @@ pub(crate) fn mfcc_rows<F: AudioFloat>(
     mfcc_from_mel_db(&mel_db, config)
 }
 
-/// The audio as a `(channels, samples)` `f64` array (no validation; for audio
-/// the crate produced itself).
-///
-/// TRANSITIONAL(f64): used by the analysis modules that still compute in `f64`;
-/// new code uses [`audio_float_rows`](crate::audio_float::audio_float_rows).
-#[allow(dead_code)] // unused when only `transforms` is enabled
-pub(crate) fn audio_f64_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
-    let w = audio.to_format::<f64>();
-    if let Some(m) = w.as_mono() {
-        m.as_view().insert_axis(Axis(0)).to_owned()
-    } else if let Some(m) = w.as_multi_channel() {
-        m.as_view().to_owned()
-    } else {
-        unreachable!("audio is either mono or multi-channel")
-    }
-}
-
-/// The audio as a `(channels, samples)` `f64` array, rejecting NaN and
-/// infinite samples.
-///
-/// The shared entry check of the librosa-compatible audio-level operations
-/// (`AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
-/// `AudioRhythm`, `AudioEffects`), mirroring librosa's `util.valid_audio`
-/// ("Audio buffer is not finite everywhere"). Integer sample types cannot hold
-/// non-finite values and skip the scan.
-///
-/// TRANSITIONAL(f64): used by the analysis modules that still compute in `f64`;
-/// new code uses [`finite_float_rows`], which computes in the sample type's
-/// float type.
-///
-/// # Errors
-/// [`ParameterError`] if any sample is NaN or infinite.
-#[allow(dead_code)] // unused when only `transforms` is enabled
-pub(crate) fn finite_audio_rows<T: StandardSample>(
-    audio: &AudioSamples<'_, T>,
-) -> AudioSampleResult<Array2<f64>> {
-    let rows = audio_f64_rows(audio);
-    let float = matches!(
-        T::SAMPLE_TYPE,
-        crate::repr::SampleType::F32 | crate::repr::SampleType::F64
-    );
-    if float && !rows.iter().all(|v| v.is_finite()) {
-        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-            "audio",
-            "audio buffer is not finite everywhere (contains NaN or infinity)",
-        )));
-    }
-    Ok(rows)
-}
-
 impl<T> AudioSpectrum for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -2594,7 +2543,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sample_rate;
+    use crate::{AudioTypeConversion, sample_rate};
     use ndarray::{Array1, array};
 
     #[test]

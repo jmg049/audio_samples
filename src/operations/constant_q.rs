@@ -93,7 +93,7 @@
 
 use std::num::NonZeroUsize;
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis, s};
+use ndarray::{Array2, Array3, ArrayView2, ArrayView3, s};
 use num_complex::Complex;
 
 use crate::audio_float::{audio_float_rows, finite_float_rows, float_rows_to_audio};
@@ -1797,8 +1797,8 @@ fn project<F: AudioFloat>(m: &Array2<f64>, x: &Array3<F>) -> Array3<F> {
     let (channels, _, frames) = x.dim();
     let mut out = Array3::<F>::zeros((channels, m.nrows(), frames));
     for c in 0..channels {
-        out.index_axis_mut(Axis(0), c)
-            .assign(&m.dot(&x.index_axis(Axis(0), c)));
+        out.index_axis_mut(ndarray::Axis(0), c)
+            .assign(&m.dot(&x.index_axis(ndarray::Axis(0), c)));
     }
     out
 }
@@ -3205,6 +3205,7 @@ mod tests {
     use crate::audio_float::audio_float_rows as audio_rows;
     use crate::sample_rate;
     use ndarray::Array1;
+    use ndarray::Axis;
 
     #[test]
     fn extreme_sizes_are_parameter_errors() {
