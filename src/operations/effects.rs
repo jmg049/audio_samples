@@ -2232,14 +2232,22 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
 /// J. P. Burg, "Maximum entropy spectral analysis," PhD thesis, Stanford, 1975;
 /// librosa `core.lpc`.
 pub fn lpc<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec<F>> {
-    let y: Vec<f64> = y.iter().map(|&v| v.as_f64()).collect();
-    Ok(lpc_f64(&y, order)?.into_iter().map(F::of).collect())
+    Ok(lpc_f64(y, order)?.into_iter().map(F::of).collect())
 }
 
-/// Burg's recursion in `f64` (see [`lpc`]).
-fn lpc_f64(y: &[f64], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
+/// Burg's recursion in `f64` on samples of type `F` (widened as they are
+/// read).
+///
+/// The forward and backward prediction errors live in two buffers updated in
+/// place: at iteration `i` the forward errors are `fwd[i..i + m]` and the
+/// backward errors `bwd[..m]` (`m = n - 1 - i`), which is the same pairing as
+/// dropping the first forward and the last backward error after every
+/// update. The first update reads the samples directly, and the dot product
+/// of the next iteration is accumulated in the update loop, in the same
+/// order as a separate pass.
+fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
     let order = order.get();
-    if y.iter().any(|v| !v.is_finite()) {
+    if !y.iter().fold(true, |ok, v| ok & v.is_finite()) {
         return Err(param_err("y", "audio buffer is not finite everywhere"));
     }
     if y.len() <= order {
@@ -2255,24 +2263,61 @@ fn lpc_f64(y: &[f64], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
     let mut ar_prev = vec![0.0; order + 1];
     ar[0] = 1.0;
     ar_prev[0] = 1.0;
-    let mut fwd: Vec<f64> = y[1..].to_vec();
-    let mut bwd: Vec<f64> = y[..y.len() - 1].to_vec();
-    let mut den: f64 = fwd.iter().zip(&bwd).map(|(&f, &b)| f * f + b * b).sum();
+    let m0 = y.len() - 1;
     let (minus_two, tiny) = (-2.0, f64::MIN_POSITIVE);
+    // Initial errors: fwd = y[1..], bwd = y[..n - 1].
+    let mut den: f64 = y[1..]
+        .iter()
+        .zip(&y[..m0])
+        .map(|(&f, &b)| {
+            let (f, b) = (f.as_f64(), b.as_f64());
+            f * f + b * b
+        })
+        .sum();
+    let mut dot: f64 = y[..m0]
+        .iter()
+        .zip(&y[1..])
+        .map(|(&b, &f)| b.as_f64() * f.as_f64())
+        .sum();
+    let mut fwd = vec![0.0_f64; m0];
+    let mut bwd = vec![0.0_f64; m0];
     for i in 0..order {
-        let dot: f64 = bwd.iter().zip(&fwd).map(|(&b, &f)| b * f).sum();
         let k = dot * minus_two / (den + tiny);
         std::mem::swap(&mut ar, &mut ar_prev);
         for j in 1..=i + 1 {
             ar[j] = ar_prev[j] + k * ar_prev[i + 1 - j];
         }
-        let fwd_new: Vec<f64> = fwd.iter().zip(&bwd).map(|(&f, &b)| f + k * b).collect();
-        let bwd_new: Vec<f64> = bwd.iter().zip(&fwd).map(|(&b, &f)| b + k * f).collect();
+        let m = m0 - i;
+        let fw = &mut fwd[i..i + m];
+        let bw = &mut bwd[..m];
+        // Update both error sequences; accumulate the next iteration's dot
+        // product sum_t bwd'[t] * fwd'[t + 1] as soon as both factors exist.
+        let mut next_dot = -0.0_f64;
+        if i == 0 {
+            for t in 0..m {
+                let (f, b) = (y[t + 1].as_f64(), y[t].as_f64());
+                fw[t] = f + k * b;
+                bw[t] = b + k * f;
+            }
+            for t in 1..m {
+                next_dot += bw[t - 1] * fw[t];
+            }
+        } else {
+            let (f, b) = (fw[0], bw[0]);
+            fw[0] = f + k * b;
+            bw[0] = b + k * f;
+            for t in 1..m {
+                let (f, b) = (fw[t], bw[t]);
+                let f_new = f + k * b;
+                fw[t] = f_new;
+                bw[t] = b + k * f;
+                next_dot += bw[t - 1] * f_new;
+            }
+        }
         let q = 1.0 - k * k;
-        let (b_last, f_first) = (bwd_new[bwd_new.len() - 1], fwd_new[0]);
+        let (b_last, f_first) = (bw[m - 1], fw[0]);
         den = q * den - b_last * b_last - f_first * f_first;
-        fwd = fwd_new[1..].to_vec();
-        bwd = bwd_new[..bwd_new.len() - 1].to_vec();
+        dot = next_dot;
     }
     Ok(ar)
 }
@@ -3532,8 +3577,12 @@ where
     fn lpc(&self, order: NonZeroUsize) -> AudioSampleResult<Array2<T::Float>> {
         let rows = finite_float_rows(self)?;
         let mut out = Array2::<T::Float>::zeros((rows.nrows(), order.get() + 1));
+        let rows = rows.as_standard_layout();
         for (c, row) in rows.outer_iter().enumerate() {
-            let a = lpc(&row.to_vec(), order)?;
+            let a = lpc(
+                row.as_slice().expect("rows of a standard-layout array"),
+                order,
+            )?;
             out.row_mut(c).assign(&Array1::from(a));
         }
         Ok(out)
