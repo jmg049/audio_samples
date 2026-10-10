@@ -40,10 +40,11 @@
 //! assert!((rms(&[3.0_f32, 4.0]) - 12.5_f32.sqrt()).abs() < 1e-6);
 //! ```
 
+use std::any::{Any, TypeId};
 use std::iter::{Product, Sum};
 
-use ndarray::{Array2, Axis, NdFloat};
-use num_traits::{Float, FloatConst, NumAssign};
+use ndarray::{Array2, ArrayView2, Axis, CowArray, Ix2, NdFloat};
+use num_traits::{FloatConst, NumAssign};
 
 use crate::repr::SampleRate;
 use crate::{
@@ -195,45 +196,92 @@ impl AudioFloat for f64 {
     }
 }
 
-/// The audio as a `(channels, samples)` array of its analysis float type,
-/// converted with the crate's audio-aware conversion (no validation).
-#[allow(dead_code)] // used by the analysis modules as they move to `T::Float`
-pub(crate) fn audio_float_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<T::Float> {
+/// The audio as a `(channels, samples)` view of its own sample type (a mono
+/// signal is one row).
+fn audio_rows_view<'a, T: StandardSample>(audio: &'a AudioSamples<'_, T>) -> ArrayView2<'a, T> {
     if let Some(m) = audio.as_mono() {
-        m.as_view().mapv(T::to_float).insert_axis(Axis(0))
+        m.as_view().insert_axis(Axis(0))
     } else if let Some(m) = audio.as_multi_channel() {
-        m.as_view().mapv(T::to_float)
+        m.as_view()
     } else {
         unreachable!("audio is either mono or multi-channel")
     }
 }
 
-/// [`audio_float_rows`], rejecting NaN and infinite samples (librosa's
-/// `util.valid_audio`). Integer sample types cannot hold non-finite values.
+/// `view` as a view of `F` when `T` and `F` are the same type, else `None`.
+fn same_type_view<'a, T: 'static, F: 'static>(
+    view: ArrayView2<'a, T>,
+) -> Option<ArrayView2<'a, F>> {
+    if TypeId::of::<T>() == TypeId::of::<F>() {
+        // SAFETY: `T` and `F` are the same type, so the two view types are
+        // identical; views are `Copy` and own nothing.
+        Some(unsafe { std::mem::transmute_copy::<ArrayView2<'a, T>, ArrayView2<'a, F>>(&view) })
+    } else {
+        None
+    }
+}
+
+/// `rows` as an `Array2<T>` without copying when `F` and `T` are the same
+/// type, else `Err(rows)`.
+fn same_type_array<F: 'static, T: 'static>(rows: Array2<F>) -> Result<Array2<T>, Array2<F>> {
+    if TypeId::of::<T>() == TypeId::of::<F>() {
+        let any: Box<dyn Any> = Box::new(rows);
+        Ok(*any.downcast::<Array2<T>>().expect("the type ids are equal"))
+    } else {
+        Err(rows)
+    }
+}
+
+/// Whether every element of `x` is finite. Contiguous data is checked in
+/// fixed-size blocks without branching inside a block, so the check
+/// vectorises.
+fn all_finite<F: AudioFloat>(x: ArrayView2<'_, F>) -> bool {
+    match x.as_slice_memory_order() {
+        Some(s) => s
+            .chunks(512)
+            .all(|c| c.iter().fold(true, |ok, v| ok & v.is_finite())),
+        None => x.iter().all(|v| v.is_finite()),
+    }
+}
+
+/// The audio as a `(channels, samples)` array of its analysis float type,
+/// converted with the crate's audio-aware conversion (no validation).
+#[allow(dead_code)] // used by the analysis modules as they move to `T::Float`
+pub(crate) fn audio_float_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<T::Float> {
+    audio_rows_view(audio).mapv(T::to_float)
+}
+
+/// The audio as `(channels, samples)` rows of its analysis float type,
+/// rejecting NaN and infinite samples (librosa's `util.valid_audio`). Integer
+/// sample types cannot hold non-finite values.
+///
+/// Audio of type `f32` or `f64` (`T == T::Float`) is borrowed, not copied;
+/// other sample types are converted with the crate's audio-aware conversion.
 ///
 /// # Errors
 /// [`ParameterError`] if any sample is NaN or infinite.
 #[allow(dead_code)] // used by the analysis modules as they move to `T::Float`
-pub(crate) fn finite_float_rows<T: StandardSample>(
-    audio: &AudioSamples<'_, T>,
-) -> AudioSampleResult<Array2<T::Float>> {
-    let rows = audio_float_rows(audio);
-    let float = matches!(
-        T::SAMPLE_TYPE,
-        crate::repr::SampleType::F32 | crate::repr::SampleType::F64
-    );
-    if float && !rows.iter().all(|v| v.is_finite()) {
+pub(crate) fn finite_float_rows<'a, T: StandardSample>(
+    audio: &'a AudioSamples<'_, T>,
+) -> AudioSampleResult<CowArray<'a, T::Float, Ix2>> {
+    let view = audio_rows_view(audio);
+    let Some(rows) = same_type_view::<T, T::Float>(view) else {
+        // Integer samples are always finite.
+        return Ok(CowArray::from(view.mapv(T::to_float)));
+    };
+    if !all_finite(rows) {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "audio",
             "audio buffer is not finite everywhere (contains NaN or infinity)",
         )));
     }
-    Ok(rows)
+    Ok(CowArray::from(rows))
 }
 
 /// Builds audio of sample type `T` from `(channels, samples)` float rows,
 /// converting every value with the crate's audio-aware conversion (integer
-/// types round and saturate).
+/// types round and saturate). When `T` is the float type itself the rows are
+/// moved into the audio without a copy.
 ///
 /// # Errors
 /// An empty-data error naming `operation` if `rows` has no samples or no
@@ -247,7 +295,10 @@ pub(crate) fn float_rows_to_audio<T: StandardSample>(
     if rows.is_empty() {
         return Err(AudioSampleError::empty_data(operation));
     }
-    let converted = rows.mapv(T::from_float);
+    let converted = match same_type_array::<T::Float, T>(rows) {
+        Ok(same) => same,
+        Err(rows) => rows.mapv(T::from_float),
+    };
     if converted.nrows() == 1 {
         AudioSamples::new_mono(converted.index_axis_move(Axis(0), 0), sample_rate)
     } else {
@@ -290,7 +341,7 @@ mod tests {
             sample_rate!(8000),
         )
         .unwrap();
-        let rows: Array2<f32> = finite_float_rows(&audio).unwrap();
+        let rows: Array2<f32> = finite_float_rows(&audio).unwrap().into_owned();
         let back: AudioSamples<'static, i16> =
             float_rows_to_audio(rows, audio.sample_rate(), "test").unwrap();
         assert_eq!(back, audio);

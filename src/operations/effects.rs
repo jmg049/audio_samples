@@ -126,7 +126,8 @@ fn finite_f64_rows<T: StandardSample>(
     audio: &AudioSamples<'_, T>,
 ) -> AudioSampleResult<Array2<f64>> {
     use crate::AudioTypeConversion;
-    finite_float_rows(&audio.to_format::<f64>())
+    let audio = audio.to_format::<f64>();
+    Ok(finite_float_rows(&audio)?.into_owned())
 }
 
 /// `a.total_cmp(b)` for either float type (`f32` to `f64` is exact and keeps
@@ -3312,7 +3313,7 @@ where
     }
 
     fn preemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = finite_float_rows(self)?;
+        let mut rows = finite_float_rows(self)?.into_owned();
         for mut row in rows.outer_iter_mut() {
             let y = match row.as_slice() {
                 Some(x) => preemphasis_with_state(x, coef, None)?.0,
@@ -3329,7 +3330,7 @@ where
     }
 
     fn deemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = finite_float_rows(self)?;
+        let mut rows = finite_float_rows(self)?.into_owned();
         for mut row in rows.outer_iter_mut() {
             let y = match row.as_slice() {
                 Some(x) => deemphasis_with_state(x, coef, None)?.0,

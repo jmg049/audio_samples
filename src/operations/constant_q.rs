@@ -3052,14 +3052,14 @@ where
         config.validate()?;
         let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
-        vqt_rows(y, sr, config, tuning, Some(0.0))
+        vqt_rows(y.into_owned(), sr, config, tuning, Some(0.0))
     }
 
     fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<T::Float>>> {
         config.validate()?;
         let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.cqt.tuning, config.cqt.bins_per_octave)?;
-        vqt_rows(y, sr, &config.cqt, tuning, config.gamma)
+        vqt_rows(y.into_owned(), sr, &config.cqt, tuning, config.gamma)
     }
 
     fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<T::Float>> {
@@ -3073,7 +3073,7 @@ where
         config.validate()?;
         let (y, sr) = (finite_float_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
-        hybrid_cqt_rows(y, sr, config, tuning)
+        hybrid_cqt_rows(y.into_owned(), sr, config, tuning)
     }
 
     fn icqt(
