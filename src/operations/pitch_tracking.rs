@@ -81,6 +81,7 @@ use ndarray::{Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3};
 use crate::audio_float::finite_float_rows;
 use crate::operations::sequence::{TransitionWindow, transition_local, transition_loop, viterbi};
 use crate::operations::spectrum::{StftPadMode, pad_signal};
+use crate::utils::layout::{for_each_row_tile, row};
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
 };
@@ -1587,6 +1588,74 @@ impl<F: AudioFloat> Interp1d<F> {
     }
 }
 
+/// One output bin of a harmonic interpolation on a fixed frequency grid
+/// (SciPy `interp1d` linear, see [`Interp1d::eval_scipy`]): either the fill
+/// value, or `a * S[hi] + b * S[lo]` with the weights precomputed exactly as
+/// `eval_scipy` computes them.
+#[derive(Debug, Clone, Copy)]
+enum HarmonicCell<F> {
+    Fill,
+    Lin { lo: usize, hi: usize, a: F, b: F },
+}
+
+impl<F: AudioFloat> HarmonicCell<F> {
+    /// `o[t]` for every frame `t` of a tile (rows contiguous).
+    #[inline]
+    fn eval_row(&self, tile: &ArrayView2<'_, F>, fill: F, o: &mut [F]) {
+        match *self {
+            Self::Fill => o.fill(fill),
+            Self::Lin { lo, hi, a, b } => {
+                let (rl, rh) = (row(tile, lo), row(tile, hi));
+                for ((o, &yl), &yh) in o.iter_mut().zip(rl).zip(rh) {
+                    *o = a * yh + b * yl;
+                }
+            }
+        }
+    }
+}
+
+/// The interpolation of every harmonic of every bin of a fixed grid,
+/// `cells[h * n_bins + k]`, computed once for all frames.
+struct HarmonicPlan<F> {
+    cells: Vec<HarmonicCell<F>>,
+}
+
+impl<F: AudioFloat> HarmonicPlan<F> {
+    fn new(grid: &[F], harmonics: &[F]) -> Self {
+        // Interp1d sorts the grid; the frame values are permuted the same way
+        // for every frame, so the sorted positions map back to bins.
+        let order = stable_argsort(grid);
+        let x: Vec<F> = order.iter().map(|&i| grid[i]).collect();
+        let n = x.len();
+        let mut cells = Vec::with_capacity(harmonics.len() * n);
+        for &h in harmonics {
+            for &f in grid {
+                let v = h * f;
+                // The operations of `Interp1d::eval_scipy`.
+                if v < x[0] || v > x[n - 1] {
+                    cells.push(HarmonicCell::Fill);
+                    continue;
+                }
+                let idx = if v.is_nan() {
+                    n
+                } else {
+                    x.partition_point(|&xi| xi < v)
+                };
+                let hi = idx.clamp(1, n - 1);
+                let lo = hi - 1;
+                let (xl, xh) = (x[lo], x[hi]);
+                cells.push(HarmonicCell::Lin {
+                    lo: order[lo],
+                    hi: order[hi],
+                    a: (v - xl) / (xh - xl),
+                    b: (xh - v) / (xh - xl),
+                });
+            }
+        }
+        Self { cells }
+    }
+}
+
 fn check_harmonics(harmonics: &[f64]) -> AudioSampleResult<()> {
     if harmonics.is_empty() {
         return Err(param_err("harmonics", "must contain at least one harmonic"));
@@ -1653,6 +1722,22 @@ pub fn interp_harmonics<F: AudioFloat>(
     let n_h = harmonics.len();
     let fill_value = F::of(fill_value);
     let harmonics: Vec<F> = harmonics.iter().map(|&h| F::of(h)).collect();
+    if let FrequencyGrid::Fixed(grid) = freqs {
+        let plan = HarmonicPlan::new(&grid.to_vec(), &harmonics);
+        let mut out = Array4::<F>::zeros((n_ch, n_h, n_bins, n_frames));
+        for c in 0..n_ch {
+            let mut oc = out.index_axis_mut(ndarray::Axis(0), c);
+            let oc = oc.as_slice_mut().expect("a fresh standard-layout array");
+            for_each_row_tile(x.index_axis(ndarray::Axis(0), c), |t0, tile| {
+                let w = tile.ncols();
+                for (hk, cell) in plan.cells.iter().enumerate() {
+                    let o = &mut oc[hk * n_frames + t0..hk * n_frames + t0 + w];
+                    cell.eval_row(&tile, fill_value, o);
+                }
+            });
+        }
+        return Ok(out);
+    }
     let mut out = Array4::<F>::zeros((n_ch, n_h, n_bins, n_frames));
     for c in 0..n_ch {
         for t in 0..n_frames {
@@ -1904,6 +1989,9 @@ pub fn salience<F: AudioFloat>(
 ) -> AudioSampleResult<Array3<F>> {
     check_harmonics(harmonics)?;
     config.validate(harmonics.len())?;
+    if let FrequencyGrid::Fixed(_) = freqs {
+        return salience_fixed(s, freqs, harmonics, config);
+    }
     let s_harm = interp_harmonics(s, freqs, harmonics, 0.0)?;
     let (n_ch, n_bins, n_frames) = s.dim();
     let n_h = harmonics.len();
@@ -1960,6 +2048,107 @@ pub fn salience<F: AudioFloat>(
                 }
             }
         }
+    }
+    Ok(out)
+}
+
+/// [`salience`] on a fixed frequency grid: the harmonics of each bin are
+/// interpolated for a tile of frames at a time and aggregated at once,
+/// without the `(channels, harmonics, bins, frames)` intermediate. The
+/// values and their order of operations are those of the general path.
+fn salience_fixed<F: AudioFloat>(
+    s: ArrayView3<F>,
+    freqs: FrequencyGrid<'_, F>,
+    harmonics: &[f64],
+    config: &SalienceConfig,
+) -> AudioSampleResult<Array3<F>> {
+    let (n_ch, n_bins, n_frames) = s.dim();
+    freqs.check(s.dim())?;
+    if n_bins < 2 {
+        return Err(param_err("x", "need at least two frequency bins"));
+    }
+    let FrequencyGrid::Fixed(grid) = freqs else {
+        unreachable!("called with a fixed grid")
+    };
+    let n_h = harmonics.len();
+    let hs: Vec<F> = harmonics.iter().map(|&h| F::of(h)).collect();
+    let plan = HarmonicPlan::new(&grid.to_vec(), &hs);
+    let weights: Vec<F> = config.weights.as_ref().map_or_else(
+        || vec![F::one(); n_h],
+        |w| w.iter().map(|&v| F::of(v)).collect(),
+    );
+    let mut scl = F::zero();
+    for &w in &weights {
+        scl += w;
+    }
+    let fill_value = F::of(config.fill_value);
+    // interp_harmonics is called with fill_value 0 by the general path.
+    let zero = F::zero();
+    let mut out = Array3::<F>::zeros((n_ch, n_bins, n_frames));
+    let mut harm: Vec<F> = Vec::new();
+    let mut buf = vec![F::zero(); n_h];
+    for c in 0..n_ch {
+        let mut oc = out.index_axis_mut(ndarray::Axis(0), c);
+        let oc = oc.as_slice_mut().expect("a fresh standard-layout array");
+        for_each_row_tile(s.index_axis(ndarray::Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            harm.resize(n_h * w, F::zero());
+            for k in 0..n_bins {
+                let o = &mut oc[k * n_frames + t0..k * n_frames + t0 + w];
+                if config.filter_peaks && (k == 0 || k + 1 == n_bins) {
+                    o.fill(fill_value);
+                    continue;
+                }
+                for h in 0..n_h {
+                    plan.cells[h * n_bins + k].eval_row(&tile, zero, &mut harm[h * w..(h + 1) * w]);
+                }
+                match config.aggregate {
+                    SalienceAggregate::Average => {
+                        o.fill(F::zero());
+                        for (h, &wh) in weights.iter().enumerate() {
+                            for (a, &v) in o.iter_mut().zip(&harm[h * w..(h + 1) * w]) {
+                                *a += v * wh;
+                            }
+                        }
+                        for a in o.iter_mut() {
+                            *a /= scl;
+                        }
+                    }
+                    SalienceAggregate::Sum => {
+                        o.fill(F::zero());
+                        for h in 0..n_h {
+                            for (a, &v) in o.iter_mut().zip(&harm[h * w..(h + 1) * w]) {
+                                *a += v;
+                            }
+                        }
+                    }
+                    agg => {
+                        for (j, o) in o.iter_mut().enumerate() {
+                            for (h, b) in buf.iter_mut().enumerate() {
+                                *b = harm[h * w + j];
+                            }
+                            *o = match agg {
+                                SalienceAggregate::Max => {
+                                    buf[1..].iter().fold(buf[0], |m, &v| nan_max(m, v))
+                                }
+                                SalienceAggregate::Min => {
+                                    buf[1..].iter().fold(buf[0], |m, &v| nan_min(m, v))
+                                }
+                                _ => median(&mut buf),
+                            };
+                        }
+                    }
+                }
+                if config.filter_peaks {
+                    let (rp, rk, rn) = (row(&tile, k - 1), row(&tile, k), row(&tile, k + 1));
+                    for (((o, &p), &v), &nx) in o.iter_mut().zip(rp).zip(rk).zip(rn) {
+                        if !(v > p && v > nx) {
+                            *o = fill_value;
+                        }
+                    }
+                }
+            }
+        });
     }
     Ok(out)
 }
