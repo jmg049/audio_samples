@@ -29,8 +29,10 @@
 //! These are the standard building blocks of librosa-based pipelines (data
 //! augmentation with stretch/shift, speech front-ends with pre-emphasis and
 //! silence trimming, source separation with HPSS and soft masks). Every config
-//! struct defaults to librosa's defaults, so `X::default()` gives librosa-equivalent
-//! output, and the spectral steps reuse the librosa-compatible STFT of
+//! struct has a `librosa()` constructor with librosa 1.0's defaults. `Default`
+//! equals it except where noted: [`SilenceConfig`] has no `Default` (the
+//! threshold is required), and [`GriffinLimConfig::default`] seeds its random
+//! initial phase. The spectral steps reuse the librosa-compatible STFT of
 //! [`crate::operations::spectrum`].
 //!
 //! The older [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss) and
@@ -40,11 +42,21 @@
 //! ## How
 //!
 //! Bring [`AudioEffects`] into scope and call it on any [`AudioSamples`]. Audio is
-//! processed in `f64` (converted with the crate's audio-aware conversion) and
-//! returned in the input's sample type; every audio-to-audio operation has an
+//! processed in the sample type's float type
+//! ([`AudioSample::Float`](crate::AudioSample::Float): `f32` for `u8`, `i16`,
+//! `I24` and `f32` audio, `f64` for `i32` and `f64` audio) and returned in the
+//! input's sample type, converted with the crate's audio-aware conversion
+//! (integer types round and saturate). Every audio-to-audio operation has an
 //! `_in_place` variant. Spectrogram-level helpers take
 //! `(channels, n_bins, n_frames)` arrays as produced by
-//! [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix).
+//! [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix)
+//! and are generic over the element type ([`AudioFloat`]: `f32` or `f64`); they
+//! compute in and return that type. Parameters in the config structs stay `f64`
+//! and are rounded to the element type once.
+//!
+//! [`AudioEffects::pitch_shift`] resamples with the crate's resampler, which
+//! filters in `f64`: for `f32` computation that stage holds an `f64` copy of the
+//! time-stretched signal and of its resampled output.
 //!
 //! ```rust
 //! use audio_samples::operations::effects::{AudioEffects, PitchShiftConfig, SilenceConfig};
@@ -64,8 +76,14 @@
 //! assert_eq!(up.samples_per_channel().get(), n);
 //!
 //! // librosa.effects.split(y): one non-silent interval.
-//! let intervals = audio.split_db(&SilenceConfig::default()).unwrap();
+//! let intervals = audio.split_db(&SilenceConfig::librosa()).unwrap();
 //! assert_eq!(intervals.len(), 1);
+//!
+//! // 16-bit audio is processed in f32 and returned as i16.
+//! let pcm = sine_wave::<i16>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
+//! let fast: audio_samples::AudioSamples<'static, i16> =
+//!     pcm.time_stretch(2.0, &StftConfig::default()).unwrap();
+//! assert_eq!(fast.samples_per_channel().get(), n / 2);
 //! ```
 
 use crate::utils::{MAX_SIGNAL_ELEMENTS, check_derived_len};
@@ -74,16 +92,18 @@ use std::num::NonZeroUsize;
 use ndarray::{
     Array, Array1, Array2, Array3, ArrayBase, ArrayView2, ArrayView3, Axis, Data, Dimension,
 };
-use non_empty_slice::NonEmptyVec;
 use num_complex::Complex;
 
+use crate::audio_float::{audio_float_rows, finite_float_rows, float_rows_to_audio};
 use crate::operations::sequence::{RecurrenceConfig, recurrence_matrix};
 use crate::operations::spectrum::{
     DbAxes, DbConfig, DbReference, StftConfig, amplitude_to_db, istft, stft,
 };
 use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
-use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
+use crate::{
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
+};
 
 fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_value(parameter, reason))
@@ -93,38 +113,11 @@ fn config_err(operation: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_configuration(operation, reason))
 }
 
-// =============================================================================
-// AudioSamples <-> f64 rows
-// =============================================================================
-
-use crate::operations::spectrum::{audio_f64_rows as audio_rows, finite_audio_rows};
-
-/// Builds audio of sample type `T` from `(channels, samples)` rows; one row gives
-/// mono audio.
-fn rows_to_audio<T: StandardSample>(
-    rows: Array2<f64>,
-    sample_rate: SampleRate,
-    operation: &str,
-) -> AudioSampleResult<AudioSamples<'static, T>> {
-    let n_channels = rows.nrows();
-    // Channel-major data: the array's own buffer when it is in standard layout.
-    let flat: Vec<f64> = if rows.is_standard_layout() {
-        let (v, offset) = rows.into_raw_vec_and_offset();
-        debug_assert_eq!(offset.unwrap_or(0), 0);
-        v
-    } else {
-        rows.iter().copied().collect()
-    };
-    let data = NonEmptyVec::new(flat).map_err(|_| AudioSampleError::empty_data(operation))?;
-    if n_channels == 1 {
-        Ok(AudioSamples::from_mono_vec::<f64>(data, sample_rate))
-    } else {
-        let channels = u32::try_from(n_channels)
-            .ok()
-            .and_then(std::num::NonZeroU32::new)
-            .ok_or_else(|| AudioSampleError::empty_data(operation))?;
-        AudioSamples::new_multi_channel_from_vec::<f64>(data, channels, sample_rate)
-    }
+/// `a.total_cmp(b)` for either float type (`f32` to `f64` is exact and keeps
+/// the total order, including signed zeros).
+#[inline]
+fn total_cmp<F: AudioFloat>(a: &F, b: &F) -> std::cmp::Ordering {
+    a.as_f64().total_cmp(&b.as_f64())
 }
 
 // =============================================================================
@@ -145,7 +138,9 @@ fn rows_to_audio<T: StandardSample>(
 ///
 /// # Returns
 ///
-/// A `(channels, n_bins, ceil(n_frames / rate))` complex array.
+/// A `(channels, n_bins, ceil(n_frames / rate))` complex array of the input's
+/// element type (`Complex<f32>` or `Complex<f64>`); the computation runs in that
+/// type.
 ///
 /// # Errors
 ///
@@ -173,10 +168,10 @@ fn rows_to_audio<T: StandardSample>(
 ///
 /// J. L. Flanagan and R. M. Golden, "Phase vocoder," *Bell System Technical
 /// Journal* 45(9), 1966; librosa `core.phase_vocoder`.
-pub fn phase_vocoder(
-    stft_matrix: ArrayView3<'_, Complex<f64>>,
+pub fn phase_vocoder<F: AudioFloat>(
+    stft_matrix: ArrayView3<'_, Complex<F>>,
     rate: f64,
-) -> AudioSampleResult<Array3<Complex<f64>>> {
+) -> AudioSampleResult<Array3<Complex<F>>> {
     if !(rate.is_finite() && rate > 0.0) {
         return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
             "rate",
@@ -211,10 +206,14 @@ pub fn phase_vocoder(
 /// * `stft_matrix` - `(channels, n_bins, n_frames)` complex STFT.
 /// * `t_out` - Output positions in frames, each in `[0, n_frames)`. Non-monotone
 ///   positions are allowed (librosa warns that phase estimation may be unstable).
+///   The positions are `f64`; each interpolation weight is rounded to the element
+///   type once.
 ///
 /// # Returns
 ///
-/// A `(channels, n_bins, t_out.len())` complex array.
+/// A `(channels, n_bins, t_out.len())` complex array of the input's element
+/// type. The magnitudes, phases and the phase accumulator are computed in that
+/// type, as librosa does for `complex64` input.
 ///
 /// # Errors
 ///
@@ -233,10 +232,10 @@ pub fn phase_vocoder(
 /// let y = phase_vocoder_at(d.view(), &[0.0, 1.0, 2.0, 3.0]).unwrap();
 /// assert!((y[[0, 2, 3]].norm() - d[[0, 2, 3]].norm()).abs() < 1e-12);
 /// ```
-pub fn phase_vocoder_at(
-    stft_matrix: ArrayView3<'_, Complex<f64>>,
+pub fn phase_vocoder_at<F: AudioFloat>(
+    stft_matrix: ArrayView3<'_, Complex<F>>,
     t_out: &[f64],
-) -> AudioSampleResult<Array3<Complex<f64>>> {
+) -> AudioSampleResult<Array3<Complex<F>>> {
     let (n_channels, n_bins, n_frames) = stft_matrix.dim();
     if n_channels == 0 || n_bins == 0 || n_frames == 0 {
         return Err(param_err(
@@ -279,11 +278,11 @@ pub fn phase_vocoder_at(
         })
         .collect();
 
-    let mut out = Array3::<Complex<f64>>::zeros((n_channels, n_bins, n_out));
+    let mut out = Array3::<Complex<F>>::zeros((n_channels, n_bins, n_out));
     // Phase and magnitude of every input frame, computed once per bin (each is
     // used by up to two outputs per neighbouring frame pair).
-    let mut arg = vec![0.0; n_frames];
-    let mut mag_in = vec![0.0; n_frames];
+    let mut arg = vec![F::zero(); n_frames];
+    let mut mag_in = vec![F::zero(); n_frames];
     for c in 0..n_channels {
         for k in 0..n_bins {
             let row = stft_matrix.slice(ndarray::s![c, k, ..]);
@@ -301,7 +300,7 @@ pub fn phase_vocoder_at(
                     mag_in[0]
                 } else {
                     let (y_lo, y_hi) = (mag_in[lo], mag_in[hi]);
-                    (y_hi - y_lo) / ((hi - lo) as f64) * (t_out[j] - lo as f64) + y_lo
+                    (y_hi - y_lo) / F::of_usize(hi - lo) * F::of(t_out[j] - lo as f64) + y_lo
                 };
                 out[[c, k, j]] = Complex::new(phase.cos() * mag, phase.sin() * mag);
             }
@@ -311,11 +310,11 @@ pub fn phase_vocoder_at(
 }
 
 /// `librosa.effects.time_stretch` on `(channels, samples)` rows.
-fn time_stretch_rows(
-    rows: ArrayView2<'_, f64>,
+fn time_stretch_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
     rate: f64,
     config: &StftConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     if !(rate.is_finite() && rate > 0.0) {
         return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
             "rate",
@@ -350,12 +349,15 @@ fn time_stretch_rows(
 /// crate's windowed-sinc resampler.
 ///
 /// The resampler works with integer rates, so the ratio is represented by two
-/// integers near 2^31 (relative ratio error below 1e-9).
-fn resample_rows_by_ratio(
-    rows: Array2<f64>,
+/// integers near 2^31 (relative ratio error below 1e-9). It filters in `f64`
+/// whatever the element type: `f32` rows are widened to `f64` inside
+/// [`resample`](crate::resampling::resample) and the result is rounded back to
+/// `f32`.
+fn resample_rows_by_ratio<F: AudioFloat>(
+    rows: Array2<F>,
     ratio: f64,
     quality: ResamplingQuality,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     const BASE: f64 = 2_147_483_648.0; // 2^31
     let (in_sr, out_sr) = if ratio <= 1.0 {
         (BASE, (BASE * ratio).round())
@@ -368,9 +370,9 @@ fn resample_rows_by_ratio(
     };
     let (in_sr, out_sr) = (to_rate(in_sr)?, to_rate(out_sr)?);
     let n_channels = rows.nrows();
-    let audio: AudioSamples<'static, f64> = rows_to_audio(rows, in_sr, "pitch_shift")?;
+    let audio: AudioSamples<'static, F> = float_rows_to_audio(rows, in_sr, "pitch_shift")?;
     let y = crate::resampling::resample(&audio, out_sr, quality)?;
-    let out = audio_rows(&y);
+    let out = audio_float_rows(&y);
     debug_assert_eq!(out.nrows(), n_channels);
     Ok(out)
 }
@@ -385,9 +387,10 @@ fn resample_rows_by_ratio(
 ///
 /// ## Intended usage
 ///
-/// `Default` reproduces librosa's defaults (12 bins per octave, n_fft 2048, hop
-/// 512, periodic Hann) with [`ResamplingQuality::High`], this crate's closest match
-/// to librosa's default `res_type="soxr_hq"`.
+/// `Default` (and [`PitchShiftConfig::librosa`]) uses librosa's defaults (12 bins
+/// per octave, n_fft 2048, hop 512, periodic Hann) with
+/// [`ResamplingQuality::High`], this crate's closest match to librosa's default
+/// `res_type="soxr_hq"`.
 ///
 /// ## Invariants
 ///
@@ -406,12 +409,14 @@ fn resample_rows_by_ratio(
 #[derive(Debug, Clone, PartialEq)]
 pub struct PitchShiftConfig {
     /// Steps per octave: `n_steps` is measured in `1 / bins_per_octave` octaves.
-    /// librosa default: 12 (semitones).
+    /// Default: 12 (semitones), as librosa.
     pub bins_per_octave: NonZeroUsize,
-    /// Quality of the final resampling step. librosa uses soxr (`soxr_hq`); the
-    /// default here is [`ResamplingQuality::High`].
+    /// Quality of the final resampling step. Default:
+    /// [`ResamplingQuality::High`]. librosa uses soxr (`soxr_hq`), which this
+    /// crate does not include.
     pub quality: ResamplingQuality,
-    /// STFT used by the phase-vocoder time stretch. librosa default.
+    /// STFT used by the phase-vocoder time stretch. Default:
+    /// [`StftConfig::default`], librosa's STFT defaults.
     pub stft: StftConfig,
 }
 
@@ -426,10 +431,22 @@ impl Default for PitchShiftConfig {
 }
 
 impl PitchShiftConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's defaults, with [`ResamplingQuality::High`] in place of
+    /// librosa's `soxr_hq` resampler. Currently the same as [`Default`]; use this
+    /// constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            bins_per_octave: crate::nzu!(12),
+            quality: ResamplingQuality::High,
+            stft: StftConfig::librosa(),
+        }
     }
 
     /// Sets the number of steps per octave.
@@ -464,11 +481,11 @@ impl PitchShiftConfig {
 }
 
 /// `librosa.effects.pitch_shift` on `(channels, samples)` rows.
-fn pitch_shift_rows(
-    rows: ArrayView2<'_, f64>,
+fn pitch_shift_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
     n_steps: f64,
     config: &PitchShiftConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     config.validate()?;
     if !n_steps.is_finite() {
         return Err(param_err("n_steps", "n_steps must be finite"));
@@ -482,8 +499,8 @@ fn pitch_shift_rows(
 }
 
 /// Truncates or zero-pads every row to `n` samples (`librosa.util.fix_length`).
-fn fix_length(rows: ArrayView2<'_, f64>, n: usize) -> Array2<f64> {
-    let mut out = Array2::<f64>::zeros((rows.nrows(), n));
+fn fix_length<F: AudioFloat>(rows: ArrayView2<'_, F>, n: usize) -> Array2<F> {
+    let mut out = Array2::<F>::zeros((rows.nrows(), n));
     let m = rows.ncols().min(n);
     out.slice_mut(ndarray::s![.., ..m])
         .assign(&rows.slice(ndarray::s![.., ..m]));
@@ -513,14 +530,16 @@ fn check_coef(coef: f64) -> AudioSampleResult<()> {
 ///
 /// # Arguments
 ///
-/// * `x` - Input samples.
+/// * `x` - Input samples (`f32` or `f64`).
 /// * `coef` - Pre-emphasis coefficient (librosa default 0.97). Any finite value;
-///   `0` is the identity (apart from `zi`), `1` a first difference.
+///   `0` is the identity (apart from `zi`), `1` a first difference. It is rounded
+///   to the element type of `x` once.
 /// * `zi` - Initial filter state. `None` uses librosa's default `2 x[0] - x[1]`.
 ///
 /// # Returns
 ///
-/// `(y, zf)`: the filtered samples and the final state `-coef * x[n - 1]`.
+/// `(y, zf)`: the filtered samples and the final state `-coef * x[n - 1]`, in the
+/// element type of `x`; the filter runs in that type.
 ///
 /// # Errors
 ///
@@ -532,22 +551,22 @@ fn check_coef(coef: f64) -> AudioSampleResult<()> {
 /// ```rust
 /// use audio_samples::operations::effects::preemphasis_with_state;
 ///
-/// let (y, zf) = preemphasis_with_state(&[1.0, 3.0, 0.5], 0.97, None).unwrap();
+/// let (y, zf) = preemphasis_with_state(&[1.0_f64, 3.0, 0.5], 0.97, None).unwrap();
 /// // zi = 2 * 1 - 3 = -1, so y[0] = 1 + (-1) = 0.
 /// assert_eq!(y[0], 0.0);
 /// assert!((y[1] - (3.0 - 0.97)).abs() < 1e-15);
 /// assert!((zf + 0.97 * 0.5).abs() < 1e-15);
 /// ```
-pub fn preemphasis_with_state(
-    x: &[f64],
+pub fn preemphasis_with_state<F: AudioFloat>(
+    x: &[F],
     coef: f64,
-    zi: Option<f64>,
-) -> AudioSampleResult<(Vec<f64>, f64)> {
+    zi: Option<F>,
+) -> AudioSampleResult<(Vec<F>, F)> {
     check_coef(coef)?;
     let zi = match zi {
         Some(z) if z.is_finite() => z,
         Some(_) => return Err(param_err("zi", "the initial state must be finite")),
-        None if x.len() >= 2 => 2.0 * x[0] - x[1],
+        None if x.len() >= 2 => F::of(2.0) * x[0] - x[1],
         None => {
             return Err(param_err(
                 "x",
@@ -558,11 +577,12 @@ pub fn preemphasis_with_state(
     if x.is_empty() {
         return Err(AudioSampleError::empty_data("preemphasis"));
     }
+    let neg_coef = F::of(-coef);
     let mut y = Vec::with_capacity(x.len());
     let mut z = zi;
     for &v in x {
         y.push(v + z);
-        z = -coef * v;
+        z = neg_coef * v;
     }
     Ok((y, z))
 }
@@ -579,16 +599,18 @@ pub fn preemphasis_with_state(
 ///
 /// # Arguments
 ///
-/// * `x` - Input samples.
+/// * `x` - Input samples (`f32` or `f64`).
 /// * `coef` - Coefficient (librosa default 0.97); any finite value (`coef = 3` is
-///   only allowed with an explicit `zi`).
+///   only allowed with an explicit `zi`). It is rounded to the element type of
+///   `x` once.
 /// * `zi` - Initial filter state, or `None` for librosa's default.
 ///
 /// # Returns
 ///
 /// `(y, zf)`: the filtered samples and the final filter state `coef * y'[n - 1]`,
 /// where `y'` is the output *before* the default-state correction (as librosa
-/// returns it).
+/// returns it). Both are in the element type of `x`; the filter runs in that
+/// type.
 ///
 /// # Errors
 ///
@@ -600,16 +622,16 @@ pub fn preemphasis_with_state(
 /// ```rust
 /// use audio_samples::operations::effects::{deemphasis_with_state, preemphasis_with_state};
 ///
-/// let x = [0.1, -0.4, 0.25, 0.9, -0.3];
+/// let x = [0.1_f64, -0.4, 0.25, 0.9, -0.3];
 /// let (pre, _) = preemphasis_with_state(&x, 0.97, None).unwrap();
 /// let (back, _) = deemphasis_with_state(&pre, 0.97, None).unwrap();
 /// assert!(back.iter().zip(&x).all(|(a, b)| (a - b).abs() < 1e-12));
 /// ```
-pub fn deemphasis_with_state(
-    x: &[f64],
+pub fn deemphasis_with_state<F: AudioFloat>(
+    x: &[F],
     coef: f64,
-    zi: Option<f64>,
-) -> AudioSampleResult<(Vec<f64>, f64)> {
+    zi: Option<F>,
+) -> AudioSampleResult<(Vec<F>, F)> {
     check_coef(coef)?;
     if x.is_empty() {
         return Err(AudioSampleError::empty_data("deemphasis"));
@@ -630,9 +652,13 @@ pub fn deemphasis_with_state(
                     "coef = 3 makes librosa's default initial state undefined; pass zi explicitly",
                 ));
             }
-            (0.0, Some(((2.0 - coef) * x[0] - x[1]) / (3.0 - coef)))
+            (
+                F::zero(),
+                Some((F::of(2.0 - coef) * x[0] - x[1]) / F::of(3.0 - coef)),
+            )
         }
     };
+    let coef = F::of(coef);
     let mut y = Vec::with_capacity(x.len());
     let mut z = z0;
     for &v in x {
@@ -641,7 +667,7 @@ pub fn deemphasis_with_state(
         z = coef * out;
     }
     if let Some(c) = correction {
-        let mut p = 1.0;
+        let mut p = F::one();
         for v in &mut y {
             *v -= c * p;
             p *= coef;
@@ -679,9 +705,11 @@ pub enum ChannelAggregate {
 ///
 /// ## Intended usage
 ///
-/// `Default` reproduces librosa's defaults: `top_db = 60`, reference = the loudest
-/// frame (`ref=numpy.max`), 2048-sample frames, 512-sample hop, `numpy.max` over
-/// channels.
+/// The threshold depends on the material (speech, music, noise floor of the
+/// recording), so there is no `Default`: [`SilenceConfig::new`] takes `top_db`
+/// and sets the other fields to librosa's defaults (reference = the loudest frame,
+/// `ref=numpy.max`; 2048-sample frames; 512-sample hop; `numpy.max` over
+/// channels). [`SilenceConfig::librosa`] is librosa's full default, `top_db = 60`.
 ///
 /// ## Invariants
 ///
@@ -693,44 +721,51 @@ pub enum ChannelAggregate {
 /// ```rust
 /// use audio_samples::operations::effects::SilenceConfig;
 ///
-/// let cfg = SilenceConfig::new().with_top_db(30.0);
+/// let cfg = SilenceConfig::new(30.0);
 /// assert_eq!(cfg.frame_length.get(), 2048);
 /// assert!(cfg.validate().is_ok());
+/// assert_eq!(SilenceConfig::librosa(), SilenceConfig::new(60.0));
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct SilenceConfig {
     /// Threshold in dB below the reference under which a frame is silent.
-    /// librosa default: 60.
+    /// Required ([`SilenceConfig::new`]); librosa's default is 60.
     pub top_db: f64,
-    /// Reference level (0 dB). [`DbReference::Max`] (librosa's default) uses the
-    /// loudest frame over all channels; `Value(r)` an absolute RMS amplitude.
+    /// Reference level (0 dB). [`DbReference::Max`] (set by [`SilenceConfig::new`],
+    /// librosa's default) uses the loudest frame over all channels; `Value(r)` an
+    /// absolute RMS amplitude.
     pub reference: DbReference,
-    /// Samples per RMS frame (frames are centred, zero padded). librosa default: 2048.
+    /// Samples per RMS frame (frames are centred, zero padded). Set to 2048 by
+    /// [`SilenceConfig::new`], as librosa.
     pub frame_length: NonZeroUsize,
     /// Samples between frames; also the resolution of the returned sample
-    /// indices. librosa default: 512.
+    /// indices. Set to 512 by [`SilenceConfig::new`], as librosa.
     pub hop_length: NonZeroUsize,
-    /// Combination of the channels' dB levels. librosa default: `Max`.
+    /// Combination of the channels' dB levels. Set to `Max` by
+    /// [`SilenceConfig::new`], as librosa.
     pub aggregate: ChannelAggregate,
 }
 
-impl Default for SilenceConfig {
-    fn default() -> Self {
+impl SilenceConfig {
+    /// A configuration with threshold `top_db` (dB below the reference) and
+    /// librosa's defaults for the other fields: reference = loudest frame, frame
+    /// length 2048, hop 512, `Max` over channels.
+    #[must_use]
+    pub fn new(top_db: f64) -> Self {
         Self {
-            top_db: 60.0,
+            top_db,
             reference: DbReference::Max,
             frame_length: crate::nzu!(2048),
             hop_length: crate::nzu!(512),
             aggregate: ChannelAggregate::Max,
         }
     }
-}
 
-impl SilenceConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// librosa 1.0's defaults for `effects.trim` / `effects.split`: `top_db = 60`
+    /// and the defaults of [`SilenceConfig::new`].
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn librosa() -> Self {
+        Self::new(60.0)
     }
 
     /// Sets the threshold in dB below the reference.
@@ -797,13 +832,15 @@ impl SilenceConfig {
 ///
 /// # Arguments
 ///
-/// * `signal` - `(channels, samples)` array with at least one sample.
+/// * `signal` - `(channels, samples)` array (`f32` or `f64`) with at least one
+///   sample.
 /// * `config` - Threshold, reference, framing and channel aggregation.
 ///
 /// # Returns
 ///
 /// One flag per frame (`1 + len / hop` frames); frame `t` covers samples centred
-/// on `t * hop`.
+/// on `t * hop`. The RMS and dB levels are computed in the element type of
+/// `signal`; `top_db` and a `Value` reference are rounded to it once.
 ///
 /// # Errors
 ///
@@ -811,9 +848,9 @@ impl SilenceConfig {
 ///
 /// # Differences from librosa
 ///
-/// librosa computes the RMS in `float32` (`feature.rms` default dtype); this
-/// function uses `f64`, so a frame whose level is within about 1e-6 dB of the
-/// threshold can be classified differently.
+/// librosa sums the squared samples of a frame in NumPy's order (`numpy.mean`),
+/// this function sequentially, so a frame whose level lies within round-off of
+/// the threshold can be classified differently.
 ///
 /// # Examples
 ///
@@ -823,14 +860,14 @@ impl SilenceConfig {
 /// use ndarray::Array2;
 ///
 /// // Silence, then a loud segment.
-/// let x = Array2::from_shape_fn((1, 4096), |(_, n)| if n >= 2048 { 0.5 } else { 0.0 });
-/// let cfg = SilenceConfig::new().with_frame_length(nzu!(512)).with_hop_length(nzu!(256));
+/// let x = Array2::from_shape_fn((1, 4096), |(_, n)| if n >= 2048 { 0.5_f64 } else { 0.0 });
+/// let cfg = SilenceConfig::librosa().with_frame_length(nzu!(512)).with_hop_length(nzu!(256));
 /// let flags = nonsilent_frames(x.view(), &cfg).unwrap();
 /// assert_eq!(flags.len(), 17);
 /// assert!(!flags[0] && flags[16]);
 /// ```
-pub fn nonsilent_frames(
-    signal: ArrayView2<'_, f64>,
+pub fn nonsilent_frames<F: AudioFloat>(
+    signal: ArrayView2<'_, F>,
     config: &SilenceConfig,
 ) -> AudioSampleResult<Vec<bool>> {
     config.validate()?;
@@ -842,19 +879,20 @@ pub fn nonsilent_frames(
     let hop = config.hop_length.get();
     let pad = fl / 2;
     let n_frames = 1 + (len + 2 * pad - fl) / hop;
-    let mut rms = Array2::<f64>::zeros((n_channels, n_frames));
+    let mut rms = Array2::<F>::zeros((n_channels, n_frames));
+    let fl_f = F::of_usize(fl);
     for (c, row) in signal.outer_iter().enumerate() {
         for t in 0..n_frames {
             // Padded frame [t*hop, t*hop + fl) maps to signal [t*hop - pad, ...).
             let start = (t * hop) as isize - pad as isize;
             let lo = start.max(0) as usize;
             let hi = ((start + fl as isize).max(0) as usize).min(len);
-            let sum: f64 = if lo < hi {
-                row.slice(ndarray::s![lo..hi]).iter().map(|v| v * v).sum()
+            let sum: F = if lo < hi {
+                row.slice(ndarray::s![lo..hi]).iter().map(|&v| v * v).sum()
             } else {
-                0.0
+                F::zero()
             };
-            rms[[c, t]] = (sum / fl as f64).sqrt();
+            rms[[c, t]] = (sum / fl_f).sqrt();
         }
     }
     let db_cfg = DbConfig::amplitude()
@@ -862,14 +900,15 @@ pub fn nonsilent_frames(
         .with_top_db(None)
         .with_axes(DbAxes::All);
     let db = amplitude_to_db(&rms, &db_cfg)?;
-    let threshold = -config.top_db;
+    let threshold = F::of(-config.top_db);
+    let n_channels_f = F::of_usize(n_channels);
     Ok((0..n_frames)
         .map(|t| {
             let col = db.column(t);
             let v = match config.aggregate {
-                ChannelAggregate::Max => col.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                ChannelAggregate::Min => col.iter().copied().fold(f64::INFINITY, f64::min),
-                ChannelAggregate::Mean => col.iter().sum::<f64>() / n_channels as f64,
+                ChannelAggregate::Max => col.iter().copied().fold(F::neg_infinity(), F::max),
+                ChannelAggregate::Min => col.iter().copied().fold(F::infinity(), F::min),
+                ChannelAggregate::Mean => col.iter().copied().sum::<F>() / n_channels_f,
             };
             v > threshold
         })
@@ -913,11 +952,11 @@ fn split_intervals(flags: &[bool], hop: usize, len: usize) -> Vec<(usize, usize)
 
 /// Indices `i` where `librosa.zero_crossings(y, threshold=1e-10, zero_pos=True,
 /// pad=True)` is true (index 0 always included), followed by `len`.
-fn zero_crossing_positions(y: &[f64]) -> Vec<usize> {
-    const THRESHOLD: f64 = 1e-10;
-    let clip = |v: f64| {
-        if (-THRESHOLD..=THRESHOLD).contains(&v) {
-            0.0
+fn zero_crossing_positions<F: AudioFloat>(y: &[F]) -> Vec<usize> {
+    let threshold = F::of(1e-10);
+    let clip = |v: F| {
+        if (-threshold..=threshold).contains(&v) {
+            F::zero()
         } else {
             v
         }
@@ -960,17 +999,17 @@ fn match_event(v: usize, sorted_to: &[usize]) -> usize {
 }
 
 /// `librosa.effects.remix` on `(channels, samples)` rows.
-fn remix_rows(
-    rows: ArrayView2<'_, f64>,
+fn remix_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
     intervals: &[(usize, usize)],
     align_zeros: bool,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     if intervals.is_empty() {
         return Err(param_err("intervals", "at least one interval is required"));
     }
     let (n_channels, len) = rows.dim();
     let zeros = if align_zeros {
-        let mono: Vec<f64> = if n_channels == 1 {
+        let mono: Vec<F> = if n_channels == 1 {
             rows.row(0).to_vec()
         } else {
             rows.mean_axis(Axis(0))
@@ -1006,7 +1045,7 @@ fn remix_rows(
 
 /// `x^p` with numpy's exact fast paths for the common exponents.
 #[inline]
-fn pow_fast(x: f64, p: f64) -> f64 {
+fn pow_fast<F: AudioFloat>(x: F, p: f64, p_f: F) -> F {
     if p == 1.0 {
         x
     } else if p == 2.0 {
@@ -1014,7 +1053,7 @@ fn pow_fast(x: f64, p: f64) -> f64 {
     } else if p == 0.5 {
         x.sqrt()
     } else {
-        x.powf(p)
+        x.powf(p_f)
     }
 }
 
@@ -1023,20 +1062,24 @@ fn pow_fast(x: f64, p: f64) -> f64 {
 ///
 /// With `Z = max(X, X_ref)` the mask is
 /// `(X / Z)^p / ((X / Z)^p + (X_ref / Z)^p)`, i.e. `X^p / (X^p + X_ref^p)`
-/// computed without overflow. Where both inputs are (numerically) zero the mask is
-/// `0.5` if `split_zeros`, else `0`. With `power = f64::INFINITY` the mask is
-/// binary: `1` where `X > X_ref` (ties give `0`).
+/// computed without overflow. Where both inputs are (numerically) zero, that is
+/// `Z` below the smallest positive normal value of the element type (librosa's
+/// `tiny`), the mask is `0.5` if `split_zeros`, else `0`. With
+/// `power = f64::INFINITY` the mask is binary: `1` where `X > X_ref` (ties give
+/// `0`).
 ///
 /// # Arguments
 ///
-/// * `x` - Non-negative values the mask selects.
-/// * `x_ref` - Non-negative reference values, same shape.
-/// * `power` - Exponent, positive (`f64::INFINITY` for a hard mask).
+/// * `x` - Non-negative values the mask selects (`f32` or `f64`).
+/// * `x_ref` - Non-negative reference values, same shape and element type.
+/// * `power` - Exponent, positive (`f64::INFINITY` for a hard mask). It is
+///   rounded to the element type once.
 /// * `split_zeros` - Value of the mask where both inputs are zero: `0.5` or `0`.
 ///
 /// # Returns
 ///
-/// An array of the same shape with values in `[0, 1]`.
+/// An array of the same shape and element type with values in `[0, 1]`,
+/// computed in that type.
 ///
 /// # Errors
 ///
@@ -1049,22 +1092,23 @@ fn pow_fast(x: f64, p: f64) -> f64 {
 /// use audio_samples::operations::effects::softmask;
 /// use ndarray::array;
 ///
-/// let x = array![3.0, 0.0, 1.0];
-/// let r = array![4.0, 0.0, 1.0];
+/// let x = array![3.0_f64, 0.0, 1.0];
+/// let r = array![4.0_f64, 0.0, 1.0];
 /// let m = softmask(&x, &r, 2.0, true).unwrap();
 /// assert!((m[0] - 9.0 / 25.0).abs() < 1e-15);
 /// assert_eq!(m[1], 0.5);
 /// assert_eq!(softmask(&x, &r, f64::INFINITY, false).unwrap(), array![0.0, 0.0, 0.0]);
 /// ```
-pub fn softmask<S1, S2, D>(
+pub fn softmask<F, S1, S2, D>(
     x: &ArrayBase<S1, D>,
     x_ref: &ArrayBase<S2, D>,
     power: f64,
     split_zeros: bool,
-) -> AudioSampleResult<Array<f64, D>>
+) -> AudioSampleResult<Array<F, D>>
 where
-    S1: Data<Elem = f64>,
-    S2: Data<Elem = f64>,
+    F: AudioFloat,
+    S1: Data<Elem = F>,
+    S2: Data<Elem = F>,
     D: Dimension,
 {
     if x.shape() != x_ref.shape() {
@@ -1073,30 +1117,35 @@ where
             format!("shape mismatch: {:?} != {:?}", x.shape(), x_ref.shape()),
         ));
     }
-    if x.iter().chain(x_ref.iter()).any(|v| v.is_nan() || *v < 0.0) {
+    if x.iter()
+        .chain(x_ref.iter())
+        .any(|v| v.is_nan() || *v < F::zero())
+    {
         return Err(param_err("x", "X and X_ref must be non-negative"));
     }
     if power.is_nan() || power <= 0.0 {
         return Err(param_err("power", "power must be strictly positive"));
     }
-    let mut out = Array::<f64, D>::zeros(x.raw_dim());
+    let power_f = F::of(power);
+    let zero_value = if split_zeros { F::of(0.5) } else { F::zero() };
+    let mut out = Array::<F, D>::zeros(x.raw_dim());
     ndarray::Zip::from(&mut out)
         .and(x)
         .and(x_ref)
         .for_each(|m, &a, &b| {
             *m = if power.is_finite() {
                 let z = a.max(b);
-                if z < f64::MIN_POSITIVE {
-                    if split_zeros { 0.5 } else { 0.0 }
+                if z < F::min_positive_value() {
+                    zero_value
                 } else {
-                    let ma = pow_fast(a / z, power);
-                    let mb = pow_fast(b / z, power);
+                    let ma = pow_fast(a / z, power, power_f);
+                    let mb = pow_fast(b / z, power, power_f);
                     ma / (ma + mb)
                 }
             } else if a > b {
-                1.0
+                F::one()
             } else {
-                0.0
+                F::zero()
             };
         });
     Ok(out)
@@ -1107,8 +1156,8 @@ where
 /// `mode="reflect"` (half-sample symmetric: `d c b a | a b c d | d c b a`) and
 /// size 1 on the other axes. Even kernels select the upper median (SciPy's rank
 /// `k / 2`), centred as SciPy does (`k / 2` samples before, `k / 2 - 1` after).
-fn median_filter_axis(s: ArrayView3<'_, f64>, axis: usize, k: usize) -> Array3<f64> {
-    let mut out = Array3::<f64>::zeros(s.raw_dim());
+fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize) -> Array3<F> {
+    let mut out = Array3::<F>::zeros(s.raw_dim());
     let n = s.len_of(Axis(axis));
     let half = (k / 2) as isize;
     let reflect = |i: isize| -> usize {
@@ -1123,8 +1172,8 @@ fn median_filter_axis(s: ArrayView3<'_, f64>, axis: usize, k: usize) -> Array3<f
     let idx: Vec<Vec<usize>> = (0..n as isize)
         .map(|i| (0..k as isize).map(|j| reflect(i - half + j)).collect())
         .collect();
-    let mut line = vec![0.0; n];
-    let mut buf = vec![0.0; k];
+    let mut line = vec![F::zero(); n];
+    let mut buf = vec![F::zero(); k];
     for (src, mut dst) in s
         .lanes(Axis(axis))
         .into_iter()
@@ -1137,7 +1186,7 @@ fn median_filter_axis(s: ArrayView3<'_, f64>, axis: usize, k: usize) -> Array3<f
             for (b, &j) in buf.iter_mut().zip(window) {
                 *b = line[j];
             }
-            let (_, m, _) = buf.select_nth_unstable_by(k / 2, f64::total_cmp);
+            let (_, m, _) = buf.select_nth_unstable_by(k / 2, total_cmp);
             dst[i] = *m;
         }
     }
@@ -1155,8 +1204,8 @@ fn median_filter_axis(s: ArrayView3<'_, f64>, axis: usize, k: usize) -> Array3<f
 /// ## Intended usage
 ///
 /// Pass to [`hpss_spectrogram`] / [`hpss_magnitude`] / [`hpss_masks`], or embed in a
-/// [`HarmonicPercussiveConfig`]. `Default` reproduces librosa's defaults: kernel
-/// size 31 for both filters, power 2, margin 1.
+/// [`HarmonicPercussiveConfig`]. `Default` (and [`HpssMaskConfig::librosa`]) uses
+/// librosa's defaults: kernel size 31 for both filters, power 2, margin 1.
 ///
 /// ## Invariants
 ///
@@ -1176,19 +1225,19 @@ fn median_filter_axis(s: ArrayView3<'_, f64>, axis: usize, k: usize) -> Array3<f
 #[derive(Debug, Clone, PartialEq)]
 pub struct HpssMaskConfig {
     /// Length (in frames) of the median filter along time that estimates the
-    /// harmonic component. librosa default: 31.
+    /// harmonic component. Default: 31, as librosa.
     pub kernel_harmonic: NonZeroUsize,
     /// Length (in bins) of the median filter along frequency that estimates the
-    /// percussive component. librosa default: 31.
+    /// percussive component. Default: 31, as librosa.
     pub kernel_percussive: NonZeroUsize,
     /// Mask exponent ([`softmask`]); `f64::INFINITY` gives binary masks.
-    /// librosa default: 2.
+    /// Default: 2, as librosa.
     pub power: f64,
     /// Harmonic margin: the harmonic mask is `softmask(H, margin * P)`. Values above 1
-    /// make the separation stricter and leave a residual. librosa default: 1.
+    /// make the separation stricter and leave a residual. Default: 1, as librosa.
     pub margin_harmonic: f64,
     /// Percussive margin (as `margin_harmonic`, for `softmask(P, margin * H)`).
-    /// librosa default: 1.
+    /// Default: 1, as librosa.
     pub margin_percussive: f64,
 }
 
@@ -1205,10 +1254,24 @@ impl Default for HpssMaskConfig {
 }
 
 impl HpssMaskConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's defaults of `decompose.hpss`. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            kernel_harmonic: crate::nzu!(31),
+            kernel_percussive: crate::nzu!(31),
+            power: 2.0,
+            margin_harmonic: 1.0,
+            margin_percussive: 1.0,
+        }
     }
 
     /// Sets both median-filter sizes (librosa's scalar `kernel_size`).
@@ -1287,13 +1350,16 @@ impl HpssMaskConfig {
 ///
 /// # Arguments
 ///
-/// * `magnitude` - `(channels, n_bins, n_frames)` non-negative spectrogram.
-/// * `config` - Filter sizes, mask power and margins.
+/// * `magnitude` - `(channels, n_bins, n_frames)` non-negative spectrogram
+///   (`f32` or `f64`).
+/// * `config` - Filter sizes, mask power and margins (rounded to the element
+///   type once).
 ///
 /// # Returns
 ///
-/// `(mask_harmonic, mask_percussive)`, each the shape of `magnitude`. With margins
-/// of 1 and finite power they sum to 1.
+/// `(mask_harmonic, mask_percussive)`, each the shape and element type of
+/// `magnitude`, computed in that type. With margins of 1 and finite power they
+/// sum to 1.
 ///
 /// # Errors
 ///
@@ -1307,7 +1373,7 @@ impl HpssMaskConfig {
 /// use ndarray::Array3;
 ///
 /// // A horizontal line (harmonic) in an otherwise empty spectrogram.
-/// let s = Array3::from_shape_fn((1, 40, 50), |(_, k, _)| if k == 20 { 1.0 } else { 0.0 });
+/// let s = Array3::from_shape_fn((1, 40, 50), |(_, k, _)| if k == 20 { 1.0_f64 } else { 0.0 });
 /// let (mh, mp) = hpss_masks(s.view(), &HpssMaskConfig::default()).unwrap();
 /// assert_eq!(mh[[0, 20, 25]], 1.0);
 /// assert_eq!(mp[[0, 20, 25]], 0.0);
@@ -1318,12 +1384,12 @@ impl HpssMaskConfig {
 /// D. FitzGerald, "Harmonic/percussive separation using median filtering," DAFx
 /// 2010; J. Driedger, M. Müller and S. Disch, "Extending harmonic-percussive
 /// separation of audio signals," ISMIR 2014 (margins).
-pub fn hpss_masks(
-    magnitude: ArrayView3<'_, f64>,
+pub fn hpss_masks<F: AudioFloat>(
+    magnitude: ArrayView3<'_, F>,
     config: &HpssMaskConfig,
-) -> AudioSampleResult<(Array3<f64>, Array3<f64>)> {
+) -> AudioSampleResult<(Array3<F>, Array3<F>)> {
     config.validate()?;
-    if magnitude.iter().any(|v| v.is_nan() || *v < 0.0) {
+    if magnitude.iter().any(|v| v.is_nan() || *v < F::zero()) {
         return Err(param_err(
             "magnitude",
             "the spectrogram must be non-negative",
@@ -1332,15 +1398,19 @@ pub fn hpss_masks(
     let harm = median_filter_axis(magnitude, 2, config.kernel_harmonic.get());
     let perc = median_filter_axis(magnitude, 1, config.kernel_percussive.get());
     let split_zeros = config.margin_harmonic == 1.0 && config.margin_percussive == 1.0;
+    let (margin_h, margin_p) = (
+        F::of(config.margin_harmonic),
+        F::of(config.margin_percussive),
+    );
     let mh = softmask(
         &harm,
-        &perc.mapv(|v| v * config.margin_harmonic),
+        &perc.mapv(|v| v * margin_h),
         config.power,
         split_zeros,
     )?;
     let mp = softmask(
         &perc,
-        &harm.mapv(|v| v * config.margin_percussive),
+        &harm.mapv(|v| v * margin_p),
         config.power,
         split_zeros,
     )?;
@@ -1352,12 +1422,14 @@ pub fn hpss_masks(
 ///
 /// # Arguments
 ///
-/// * `magnitude` - `(channels, n_bins, n_frames)` non-negative spectrogram.
+/// * `magnitude` - `(channels, n_bins, n_frames)` non-negative spectrogram
+///   (`f32` or `f64`).
 /// * `config` - Filter sizes, mask power and margins.
 ///
 /// # Returns
 ///
-/// `(S * mask_harmonic, S * mask_percussive)`; see [`hpss_masks`].
+/// `(S * mask_harmonic, S * mask_percussive)` in the element type of `S`; see
+/// [`hpss_masks`].
 ///
 /// # Errors
 ///
@@ -1369,14 +1441,14 @@ pub fn hpss_masks(
 /// use audio_samples::operations::effects::{HpssMaskConfig, hpss_magnitude};
 /// use ndarray::Array3;
 ///
-/// let s = Array3::from_shape_fn((1, 64, 64), |(_, k, t)| if k == 10 || t == 32 { 1.0 } else { 0.0 });
+/// let s = Array3::from_shape_fn((1, 64, 64), |(_, k, t)| if k == 10 || t == 32 { 1.0_f64 } else { 0.0 });
 /// let (h, p) = hpss_magnitude(s.view(), &HpssMaskConfig::default()).unwrap();
 /// assert!(h[[0, 10, 5]] > 0.9 && p[[0, 40, 32]] > 0.9);
 /// ```
-pub fn hpss_magnitude(
-    magnitude: ArrayView3<'_, f64>,
+pub fn hpss_magnitude<F: AudioFloat>(
+    magnitude: ArrayView3<'_, F>,
     config: &HpssMaskConfig,
-) -> AudioSampleResult<(Array3<f64>, Array3<f64>)> {
+) -> AudioSampleResult<(Array3<F>, Array3<F>)> {
     let (mh, mp) = hpss_masks(magnitude, config)?;
     Ok((&magnitude * &mh, &magnitude * &mp))
 }
@@ -1389,12 +1461,14 @@ pub fn hpss_magnitude(
 ///
 /// # Arguments
 ///
-/// * `stft_matrix` - `(channels, n_bins, n_frames)` complex STFT.
+/// * `stft_matrix` - `(channels, n_bins, n_frames)` complex STFT
+///   (`Complex<f32>` or `Complex<f64>`).
 /// * `config` - Filter sizes, mask power and margins.
 ///
 /// # Returns
 ///
-/// `(D_harmonic, D_percussive)`, each the shape of `stft_matrix`.
+/// `(D_harmonic, D_percussive)`, each the shape and element type of
+/// `stft_matrix`, computed in that type.
 ///
 /// # Errors
 ///
@@ -1415,22 +1489,22 @@ pub fn hpss_magnitude(
 /// assert!(energy(&h) > 100.0 * energy(&p)); // a steady tone is harmonic
 /// ```
 #[allow(clippy::type_complexity)]
-pub fn hpss_spectrogram(
-    stft_matrix: ArrayView3<'_, Complex<f64>>,
+pub fn hpss_spectrogram<F: AudioFloat>(
+    stft_matrix: ArrayView3<'_, Complex<F>>,
     config: &HpssMaskConfig,
-) -> AudioSampleResult<(Array3<Complex<f64>>, Array3<Complex<f64>>)> {
+) -> AudioSampleResult<(Array3<Complex<F>>, Array3<Complex<F>>)> {
     let mag = stft_matrix.mapv(Complex::norm);
     let (mh, mp) = hpss_masks(mag.view(), config)?;
-    let apply = |mask: &Array3<f64>| {
-        let mut out = Array3::<Complex<f64>>::zeros(stft_matrix.raw_dim());
+    let apply = |mask: &Array3<F>| {
+        let mut out = Array3::<Complex<F>>::zeros(stft_matrix.raw_dim());
         ndarray::Zip::from(&mut out)
             .and(&stft_matrix)
             .and(&mag)
             .and(mask)
             .for_each(|o, d, &s, &m| {
                 // librosa.magphase: phase = D / |D|, or 1 where |D| == 0.
-                let phase = if s == 0.0 {
-                    Complex::new(1.0, d.im)
+                let phase = if s == F::zero() {
+                    Complex::new(F::one(), d.im)
                 } else {
                     Complex::new(d.re / s, d.im / s)
                 };
@@ -1452,7 +1526,8 @@ pub fn hpss_spectrogram(
 ///
 /// ## Intended usage
 ///
-/// `Default` reproduces `librosa.effects.hpss(y)`.
+/// `Default` (and [`HarmonicPercussiveConfig::librosa`]) reproduces
+/// `librosa.effects.hpss(y)`.
 ///
 /// ## Invariants
 ///
@@ -1468,17 +1543,30 @@ pub fn hpss_spectrogram(
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HarmonicPercussiveConfig {
-    /// STFT for analysis and resynthesis. librosa default.
+    /// STFT for analysis and resynthesis. Default: [`StftConfig::default`],
+    /// librosa's STFT defaults.
     pub stft: StftConfig,
-    /// Median-filter and mask parameters. librosa default.
+    /// Median-filter and mask parameters. Default: [`HpssMaskConfig::default`],
+    /// librosa's defaults.
     pub hpss: HpssMaskConfig,
 }
 
 impl HarmonicPercussiveConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's defaults of `effects.hpss`. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            hpss: HpssMaskConfig::librosa(),
+        }
     }
 
     /// Sets the STFT configuration.
@@ -1514,11 +1602,11 @@ enum HpssPart {
 }
 
 /// `librosa.effects.harmonic` / `percussive` on rows.
-fn hpss_rows(
-    rows: ArrayView2<'_, f64>,
+fn hpss_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
     config: &HarmonicPercussiveConfig,
     parts: &[HpssPart],
-) -> AudioSampleResult<Vec<Array2<f64>>> {
+) -> AudioSampleResult<Vec<Array2<F>>> {
     config.validate()?;
     let n = rows.ncols();
     let d = stft(rows, &config.stft)?;
@@ -1540,10 +1628,14 @@ fn hpss_rows(
 // =============================================================================
 
 /// Initial phase estimate of [`griffinlim`] (librosa's `init`).
+///
+/// The default is `Random(Some(0))`: random phases from a fixed seed, so the same
+/// input gives the same output on every run. librosa's default draws a fresh
+/// seed (`Random(None)`, used by [`GriffinLimConfig::librosa`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GriffinLimInit {
-    /// Uniformly random phases (librosa `init="random"`, the default). `Some(seed)`
-    /// makes the result reproducible; `None` draws a fresh seed.
+    /// Uniformly random phases (librosa `init="random"`). `Some(seed)` makes the
+    /// result reproducible; `None` draws a fresh seed on every call.
     Random(Option<u64>),
     /// All phases zero (librosa `init=None`): fully deterministic.
     ZeroPhase,
@@ -1551,7 +1643,7 @@ pub enum GriffinLimInit {
 
 impl Default for GriffinLimInit {
     fn default() -> Self {
-        Self::Random(None)
+        Self::Random(Some(0))
     }
 }
 
@@ -1564,8 +1656,10 @@ impl Default for GriffinLimInit {
 ///
 /// ## Intended usage
 ///
-/// `Default` reproduces librosa's defaults (32 iterations, momentum 0.99, random
-/// initial phase, default STFT). `stft.n_fft` must match the spectrogram
+/// `Default` uses librosa's values (32 iterations, momentum 0.99, default STFT)
+/// with a seeded random initial phase (`GriffinLimInit::Random(Some(0))`), so
+/// results are reproducible. [`GriffinLimConfig::librosa`] draws a fresh seed on
+/// every call, as librosa does. `stft.n_fft` must match the spectrogram
 /// (`n_bins = n_fft / 2 + 1`); librosa infers it from the bin count.
 ///
 /// ## Invariants
@@ -1583,14 +1677,16 @@ impl Default for GriffinLimInit {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct GriffinLimConfig {
-    /// Number of iterations. librosa default: 32.
+    /// Number of iterations. Default: 32, as librosa.
     pub n_iter: usize,
     /// Momentum of the fast Griffin-Lim update (0 gives the original algorithm).
-    /// Values above 1 can be unstable. librosa default: 0.99.
+    /// Values above 1 can be unstable. Default: 0.99, as librosa.
     pub momentum: f64,
-    /// Initial phase. librosa default: random.
+    /// Initial phase. Default: `Random(Some(0))` (seeded); librosa:
+    /// `Random(None)` (a fresh seed per call).
     pub init: GriffinLimInit,
-    /// STFT parameters of the magnitude spectrogram. librosa default.
+    /// STFT parameters of the magnitude spectrogram. Default:
+    /// [`StftConfig::default`], librosa's STFT defaults.
     pub stft: StftConfig,
     /// Exact output length in samples (`None`: as the inverse STFT gives).
     pub length: Option<usize>,
@@ -1609,10 +1705,23 @@ impl Default for GriffinLimConfig {
 }
 
 impl GriffinLimConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's defaults of `griffinlim`: as [`Default`], but with
+    /// `init = GriffinLimInit::Random(None)`, so every call draws a fresh seed.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            n_iter: 32,
+            momentum: 0.99,
+            init: GriffinLimInit::Random(None),
+            stft: StftConfig::librosa(),
+            length: None,
+        }
     }
 
     /// Sets the number of iterations.
@@ -1684,12 +1793,14 @@ impl GriffinLimConfig {
 /// # Arguments
 ///
 /// * `magnitude` - `(channels, n_fft / 2 + 1, n_frames)` non-negative magnitude
-///   spectrogram.
+///   spectrogram (`f32` or `f64`).
 /// * `config` - Iterations, momentum, initial phase, STFT and output length.
 ///
 /// # Returns
 ///
-/// A `(channels, samples)` array.
+/// A `(channels, samples)` array of the element type of `magnitude`. Every
+/// iteration runs in that type; random initial phases are drawn in `f64` and
+/// rounded once.
 ///
 /// # Errors
 ///
@@ -1728,31 +1839,35 @@ impl GriffinLimConfig {
 /// D. W. Griffin and J. S. Lim, "Signal estimation from modified short-time Fourier
 /// transform," *IEEE Trans. ASSP* 32(2), 1984; N. Perraudin, P. Balazs and
 /// P. L. Søndergaard, "A fast Griffin-Lim algorithm," WASPAA 2013.
-pub fn griffinlim(
-    magnitude: ArrayView3<'_, f64>,
+pub fn griffinlim<F: AudioFloat>(
+    magnitude: ArrayView3<'_, F>,
     config: &GriffinLimConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     config.validate()?;
-    if magnitude.iter().any(|v| !(*v >= 0.0 && v.is_finite())) {
+    if magnitude
+        .iter()
+        .any(|v| !(*v >= F::zero() && v.is_finite()))
+    {
         return Err(param_err(
             "magnitude",
             "the magnitude spectrogram must be finite and non-negative",
         ));
     }
-    let mut angles: Array3<Complex<f64>> = match config.init {
-        GriffinLimInit::ZeroPhase => magnitude.mapv(|s| Complex::new(s, 0.0)),
+    let mut angles: Array3<Complex<F>> = match config.init {
+        GriffinLimInit::ZeroPhase => magnitude.mapv(|s| Complex::new(s, F::zero())),
         GriffinLimInit::Random(seed) => {
             use rand::rngs::StdRng;
             use rand::{RngExt, SeedableRng};
             let mut rng = StdRng::seed_from_u64(seed.unwrap_or_else(rand::random::<u64>));
             magnitude.mapv(|s| {
                 let phi = 2.0 * std::f64::consts::PI * rng.random::<f64>();
-                Complex::new(phi.cos() * s, phi.sin() * s)
+                Complex::new(F::of(phi.cos()) * s, F::of(phi.sin()) * s)
             })
         }
     };
-    let beta = config.momentum / (1.0 + config.momentum);
-    let mut tprev: Option<Array3<Complex<f64>>> = None;
+    let beta = F::of(config.momentum / (1.0 + config.momentum));
+    let tiny = F::min_positive_value();
+    let mut tprev: Option<Array3<Complex<F>>> = None;
     for _ in 0..config.n_iter {
         let inverse = istft(angles.view(), &config.stft, config.length)?;
         let rebuilt = stft(inverse.view(), &config.stft)?;
@@ -1775,7 +1890,7 @@ pub fn griffinlim(
         ndarray::Zip::from(&mut angles)
             .and(&magnitude)
             .for_each(|a, &s| {
-                let d = a.norm() + f64::MIN_POSITIVE;
+                let d = a.norm() + tiny;
                 *a = Complex::new(a.re / d * s, a.im / d * s);
             });
         tprev = Some(rebuilt);
@@ -1810,13 +1925,15 @@ pub enum NnAggregate {
 /// # Arguments
 ///
 /// * `data` - `(n_features, n_frames)` features (e.g. a chromagram or magnitude
-///   spectrogram).
-/// * `rec` - `(n_frames, n_frames)` recurrence matrix (connectivity or affinity).
+///   spectrogram), `f32` or `f64`.
+/// * `rec` - `(n_frames, n_frames)` recurrence matrix (connectivity or affinity)
+///   of the same element type.
 /// * `aggregate` - Mean, median or recurrence-weighted average.
 ///
 /// # Returns
 ///
-/// The filtered `(n_features, n_frames)` array.
+/// The filtered `(n_features, n_frames)` array, computed in the element type of
+/// `data`.
 ///
 /// # Errors
 ///
@@ -1829,7 +1946,7 @@ pub enum NnAggregate {
 /// use audio_samples::operations::effects::{NnAggregate, nn_filter};
 /// use ndarray::{Array2, array};
 ///
-/// let data = array![[1.0, 2.0, 3.0]];
+/// let data = array![[1.0_f64, 2.0, 3.0]];
 /// // Frame 0's neighbours are frames 1 and 2; the others have none.
 /// let mut rec = Array2::zeros((3, 3));
 /// rec[[1, 0]] = 1.0;
@@ -1842,11 +1959,11 @@ pub enum NnAggregate {
 ///
 /// Z. Rafii and B. Pardo, "Music/voice separation using the similarity matrix,"
 /// ISMIR 2012 (REPET-SIM).
-pub fn nn_filter(
-    data: ArrayView2<'_, f64>,
-    rec: ArrayView2<'_, f64>,
+pub fn nn_filter<F: AudioFloat>(
+    data: ArrayView2<'_, F>,
+    rec: ArrayView2<'_, F>,
     aggregate: NnAggregate,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     let (n_features, n_frames) = data.dim();
     if rec.dim() != (n_frames, n_frames) {
         return Err(config_err(
@@ -1861,12 +1978,14 @@ pub fn nn_filter(
     let mut out = data.to_owned();
     let mut values = Vec::new();
     for i in 0..n_frames {
-        let targets: Vec<usize> = (0..n_frames).filter(|&j| rec[[j, i]] != 0.0).collect();
+        let targets: Vec<usize> = (0..n_frames)
+            .filter(|&j| rec[[j, i]] != F::zero())
+            .collect();
         if targets.is_empty() {
             continue;
         }
-        let weight_sum: f64 = targets.iter().map(|&j| rec[[j, i]]).sum();
-        if aggregate == NnAggregate::WeightedAverage && weight_sum == 0.0 {
+        let weight_sum: F = targets.iter().map(|&j| rec[[j, i]]).sum();
+        if aggregate == NnAggregate::WeightedAverage && weight_sum == F::zero() {
             return Err(param_err(
                 "rec",
                 format!("the recurrence weights of frame {i} sum to zero"),
@@ -1875,24 +1994,24 @@ pub fn nn_filter(
         for f in 0..n_features {
             out[[f, i]] = match aggregate {
                 NnAggregate::Mean => {
-                    targets.iter().map(|&j| data[[f, j]]).sum::<f64>() / targets.len() as f64
+                    targets.iter().map(|&j| data[[f, j]]).sum::<F>() / F::of_usize(targets.len())
                 }
                 NnAggregate::WeightedAverage => {
                     targets
                         .iter()
                         .map(|&j| data[[f, j]] * rec[[j, i]])
-                        .sum::<f64>()
+                        .sum::<F>()
                         / weight_sum
                 }
                 NnAggregate::Median => {
                     values.clear();
                     values.extend(targets.iter().map(|&j| data[[f, j]]));
-                    values.sort_by(f64::total_cmp);
+                    values.sort_by(total_cmp);
                     let m = values.len();
                     if m % 2 == 1 {
                         values[m / 2]
                     } else {
-                        (values[m / 2 - 1] + values[m / 2]) / 2.0
+                        (values[m / 2 - 1] + values[m / 2]) / F::of(2.0)
                     }
                 }
             };
@@ -1907,7 +2026,7 @@ pub fn nn_filter(
 ///
 /// # Arguments
 ///
-/// * `data` - `(n_features, n_frames)` features.
+/// * `data` - `(n_features, n_frames)` features, `f32` or `f64`.
 /// * `recurrence` - Neighbourhood parameters; [`RecurrenceConfig::default`] is
 ///   librosa's default (connectivity, `k = 2 ceil(sqrt(t - 2 width + 1))`, width 1).
 /// * `aggregate` - Mean, median or weighted average (use an affinity mode for
@@ -1915,7 +2034,9 @@ pub fn nn_filter(
 ///
 /// # Returns
 ///
-/// The filtered `(n_features, n_frames)` array.
+/// The filtered `(n_features, n_frames)` array in the element type of `data`.
+/// The recurrence matrix is currently computed in `f64` and rounded to that type;
+/// the filtering runs in it.
 ///
 /// # Errors
 ///
@@ -1933,12 +2054,15 @@ pub fn nn_filter(
 ///     .unwrap();
 /// assert_eq!(y.dim(), (3, 40));
 /// ```
-pub fn nn_filter_recurrence(
-    data: ArrayView2<'_, f64>,
+pub fn nn_filter_recurrence<F: AudioFloat>(
+    data: ArrayView2<'_, F>,
     recurrence: &RecurrenceConfig,
     aggregate: NnAggregate,
-) -> AudioSampleResult<Array2<f64>> {
-    let rec = recurrence_matrix(data, recurrence)?;
+) -> AudioSampleResult<Array2<F>> {
+    // TRANSITIONAL(f64): `recurrence_matrix` takes f64 data; compute the
+    // recurrence in f64 and round it to F until it is generic.
+    let data64 = data.mapv(F::as_f64);
+    let rec = recurrence_matrix(data64.view(), recurrence)?.mapv(F::of);
     nn_filter(data, rec.view(), aggregate)
 }
 
@@ -1951,17 +2075,28 @@ pub fn nn_filter_recurrence(
 ///
 /// # Arguments
 ///
-/// * `y` - Signal, finite, with more than `order` samples.
+/// * `y` - Signal (`f32` or `f64`), finite, with more than `order` samples.
 /// * `order` - Prediction order.
 ///
 /// # Returns
 ///
 /// `order + 1` coefficients `[1, a_1, ..., a_order]` of the prediction-error
-/// filter `A(z) = 1 + a_1 z^-1 + ... + a_order z^-order`.
+/// filter `A(z) = 1 + a_1 z^-1 + ... + a_order z^-order`, in the element type of
+/// `y`. The recursion runs in that type, as librosa's does.
 ///
 /// # Errors
 ///
 /// [`ParameterError`] if `y` has a non-finite value or no more than `order` samples.
+///
+/// # Numerical accuracy
+///
+/// Burg's recursion amplifies round-off on strongly tonal signals, and more so
+/// with each order. On a test signal of three tones and a chirp, the `f32`
+/// coefficients differ from the `f64` ones by 1.3e-3 (relative to the largest
+/// coefficient) at order 4, the same as librosa's `float32` against `float64`;
+/// librosa's `float32` result is off by more than 100 % from order 10 on. On
+/// noise the `f32` coefficients agree with the `f64` ones to 3e-8 at order 16.
+/// Pass `f64` samples for high orders on tonal material.
 ///
 /// # Examples
 ///
@@ -1982,7 +2117,7 @@ pub fn nn_filter_recurrence(
 ///
 /// J. P. Burg, "Maximum entropy spectral analysis," PhD thesis, Stanford, 1975;
 /// librosa `core.lpc`.
-pub fn lpc(y: &[f64], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
+pub fn lpc<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec<F>> {
     let order = order.get();
     if y.iter().any(|v| !v.is_finite()) {
         return Err(param_err("y", "audio buffer is not finite everywhere"));
@@ -1996,23 +2131,24 @@ pub fn lpc(y: &[f64], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
             ),
         ));
     }
-    let mut ar = vec![0.0; order + 1];
-    let mut ar_prev = vec![0.0; order + 1];
-    ar[0] = 1.0;
-    ar_prev[0] = 1.0;
-    let mut fwd: Vec<f64> = y[1..].to_vec();
-    let mut bwd: Vec<f64> = y[..y.len() - 1].to_vec();
-    let mut den: f64 = fwd.iter().zip(&bwd).map(|(f, b)| f * f + b * b).sum();
+    let mut ar = vec![F::zero(); order + 1];
+    let mut ar_prev = vec![F::zero(); order + 1];
+    ar[0] = F::one();
+    ar_prev[0] = F::one();
+    let mut fwd: Vec<F> = y[1..].to_vec();
+    let mut bwd: Vec<F> = y[..y.len() - 1].to_vec();
+    let mut den: F = fwd.iter().zip(&bwd).map(|(&f, &b)| f * f + b * b).sum();
+    let (minus_two, tiny) = (F::of(-2.0), F::min_positive_value());
     for i in 0..order {
-        let dot: f64 = bwd.iter().zip(&fwd).map(|(b, f)| b * f).sum();
-        let k = dot * -2.0 / (den + f64::MIN_POSITIVE);
+        let dot: F = bwd.iter().zip(&fwd).map(|(&b, &f)| b * f).sum();
+        let k = dot * minus_two / (den + tiny);
         std::mem::swap(&mut ar, &mut ar_prev);
         for j in 1..=i + 1 {
             ar[j] = ar_prev[j] + k * ar_prev[i + 1 - j];
         }
-        let fwd_new: Vec<f64> = fwd.iter().zip(&bwd).map(|(f, b)| f + k * b).collect();
-        let bwd_new: Vec<f64> = bwd.iter().zip(&fwd).map(|(b, f)| b + k * f).collect();
-        let q = 1.0 - k * k;
+        let fwd_new: Vec<F> = fwd.iter().zip(&bwd).map(|(&f, &b)| f + k * b).collect();
+        let bwd_new: Vec<F> = bwd.iter().zip(&fwd).map(|(&b, &f)| b + k * f).collect();
+        let q = F::one() - k * k;
         let (b_last, f_first) = (bwd_new[bwd_new.len() - 1], fwd_new[0]);
         den = q * den - b_last * b_last - f_first * f_first;
         fwd = fwd_new[1..].to_vec();
@@ -2031,20 +2167,27 @@ pub enum ClickPositions<'a> {
     /// Times in seconds (librosa `times=`); sample index `floor(t * sr)`.
     Times(&'a [f64]),
     /// Frame indices (librosa `frames=`); sample index `frame * hop_length`.
-    Frames(&'a [usize]),
+    Frames {
+        /// The frame indices.
+        frames: &'a [usize],
+        /// Samples per frame: the hop of the analysis that produced `frames`
+        /// (librosa's `hop_length`, default 512).
+        hop_length: NonZeroUsize,
+    },
 }
 
 /// Configuration of [`clicks`], mirroring `librosa.clicks`'s keyword arguments.
 ///
 /// ## Purpose
 ///
-/// Sets the click waveform (a decaying sine burst unless `click` is given), the
-/// frame hop for frame positions, and the output length.
+/// Sets the click waveform (a decaying sine burst unless `click` is given) and the
+/// output length. The hop of frame positions is part of
+/// [`ClickPositions::Frames`].
 ///
 /// ## Intended usage
 ///
-/// `Default` reproduces librosa's defaults: a 1 kHz, 100 ms click, hop 512, length
-/// up to the end of the last click.
+/// `Default` (and [`ClicksConfig::librosa`]) uses librosa's defaults: a 1 kHz,
+/// 100 ms click, length up to the end of the last click.
 ///
 /// ## Invariants
 ///
@@ -2062,13 +2205,12 @@ pub enum ClickPositions<'a> {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClicksConfig {
-    /// Samples per frame for [`ClickPositions::Frames`]. librosa default: 512.
-    pub hop_length: NonZeroUsize,
-    /// Frequency (Hz) of the default click. librosa default: 1000.
+    /// Frequency (Hz) of the default click. Default: 1000, as librosa.
     pub click_freq: f64,
-    /// Duration (s) of the default click. librosa default: 0.1.
+    /// Duration (s) of the default click. Default: 0.1, as librosa.
     pub click_duration: f64,
-    /// Custom click waveform used instead of the default one.
+    /// Custom click waveform used instead of the default one. It is rounded to
+    /// the output's float type once.
     pub click: Option<Vec<f64>>,
     /// Output length in samples; clicks starting at or after it are dropped.
     /// `None`: up to the end of the last click.
@@ -2078,7 +2220,6 @@ pub struct ClicksConfig {
 impl Default for ClicksConfig {
     fn default() -> Self {
         Self {
-            hop_length: crate::nzu!(512),
             click_freq: 1000.0,
             click_duration: 0.1,
             click: None,
@@ -2088,17 +2229,22 @@ impl Default for ClicksConfig {
 }
 
 impl ClicksConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Sets the hop length used for frame positions.
+    /// librosa 1.0's defaults of `clicks`. Currently the same as [`Default`]; use
+    /// this constructor where agreement with librosa is the requirement.
     #[must_use]
-    pub fn with_hop_length(mut self, hop_length: NonZeroUsize) -> Self {
-        self.hop_length = hop_length;
-        self
+    pub fn librosa() -> Self {
+        Self {
+            click_freq: 1000.0,
+            click_duration: 0.1,
+            click: None,
+            length: None,
+        }
     }
 
     /// Sets the frequency of the default click.
@@ -2170,15 +2316,21 @@ impl ClicksConfig {
 /// floor(sr * duration)` with `u` going linearly from 0 to 1 (a sine burst decaying
 /// by 60 dB). Clicks are added (overlapping clicks sum) and truncated at the end.
 ///
+/// The output sample type `T` is chosen by the caller, as for
+/// [`sine_wave`](crate::sine_wave). The default click is computed in `f64`
+/// and rounded to `T`'s float type ([`AudioSample::Float`](crate::AudioSample::Float))
+/// once; the clicks are summed in that type and then converted to `T` with the
+/// crate's audio-aware conversion (integer types round and saturate).
+///
 /// # Arguments
 ///
-/// * `positions` - Click times (seconds) or frame indices.
+/// * `positions` - Click times (seconds), or frame indices with their hop.
 /// * `sample_rate` - Output sample rate.
-/// * `config` - Click waveform, hop and length.
+/// * `config` - Click waveform and length.
 ///
 /// # Returns
 ///
-/// Mono `f64` audio.
+/// Mono audio of sample type `T`.
 ///
 /// # Errors
 ///
@@ -2189,25 +2341,35 @@ impl ClicksConfig {
 ///
 /// # Differences from librosa
 ///
-/// librosa returns `float32`; this function returns `f64` audio (values agree to
-/// `float32` rounding). Multichannel custom clicks are not supported.
+/// librosa returns `float32` by default (`dtype=numpy.float32`); `clicks::<f32>`
+/// is the equivalent here. Multichannel custom clicks are not supported.
 ///
 /// # Examples
 ///
 /// ```rust
+/// use audio_samples::nzu;
 /// use audio_samples::operations::effects::{ClickPositions, ClicksConfig, clicks};
 /// use audio_samples::sample_rate;
 ///
-/// let y = clicks(ClickPositions::Times(&[0.0, 0.5]), sample_rate!(22050), &ClicksConfig::default())
-///     .unwrap();
+/// let y = clicks::<f32>(
+///     ClickPositions::Times(&[0.0, 0.5]),
+///     sample_rate!(22050),
+///     &ClicksConfig::default(),
+/// )
+/// .unwrap();
 /// // Last click starts at 11025 and lasts 2205 samples.
 /// assert_eq!(y.samples_per_channel().get(), 11025 + 2205);
+///
+/// // Frame positions carry their hop: frames 0 and 10 at hop 256.
+/// let positions = ClickPositions::Frames { frames: &[0, 10], hop_length: nzu!(256) };
+/// let y = clicks::<i16>(positions, sample_rate!(22050), &ClicksConfig::default()).unwrap();
+/// assert_eq!(y.samples_per_channel().get(), 2560 + 2205);
 /// ```
-pub fn clicks(
+pub fn clicks<T: StandardSample>(
     positions: ClickPositions<'_>,
     sample_rate: SampleRate,
     config: &ClicksConfig,
-) -> AudioSampleResult<AudioSamples<'static, f64>> {
+) -> AudioSampleResult<AudioSamples<'static, T>> {
     config.validate()?;
     let sr = f64::from(sample_rate.get());
     let mut pos: Vec<usize> = match positions {
@@ -2229,20 +2391,20 @@ pub fn clicks(
             }
             v
         }
-        ClickPositions::Frames(frames) => frames
+        ClickPositions::Frames { frames, hop_length } => frames
             .iter()
             .map(|&f| {
                 check_derived_len(
                     "frames",
                     "a click track",
-                    f as f64 * config.hop_length.get() as f64,
+                    f as f64 * hop_length.get() as f64,
                     MAX_SIGNAL_ELEMENTS,
                 )
             })
             .collect::<AudioSampleResult<_>>()?,
     };
-    let click: Vec<f64> = match &config.click {
-        Some(c) => c.clone(),
+    let click: Vec<T::Float> = match &config.click {
+        Some(c) => c.iter().map(|&v| T::Float::of(v)).collect(),
         None => {
             let n = check_derived_len(
                 "click_duration",
@@ -2263,7 +2425,7 @@ pub fn clicks(
                     } else {
                         i as f64 * step
                     };
-                    2.0f64.powf(e) * (w * i as f64).sin()
+                    T::Float::of(2.0f64.powf(e) * (w * i as f64).sin())
                 })
                 .collect()
         }
@@ -2289,17 +2451,18 @@ pub fn clicks(
         length as f64,
         MAX_SIGNAL_ELEMENTS,
     )?;
-    let mut out = vec![0.0; length];
+    let mut out = vec![T::Float::of(0.0); length];
     // Positions are < length here (filtered above, or length = max + click
     // length); the guard and saturating add keep the slice in bounds anyway.
     for &start in pos.iter().filter(|&&p| p < length) {
         let end = start.saturating_add(click.len()).min(length);
-        for (o, c) in out[start..end].iter_mut().zip(&click) {
+        for (o, &c) in out[start..end].iter_mut().zip(&click) {
             *o += c;
         }
     }
-    let data = NonEmptyVec::new(out).map_err(|_| AudioSampleError::empty_data("clicks"))?;
-    Ok(AudioSamples::from_mono_vec::<f64>(data, sample_rate))
+    let rows = Array2::from_shape_vec((1, length), out)
+        .map_err(|e| AudioSampleError::Layout(crate::LayoutError::shape_error("clicks", e)))?;
+    float_rows_to_audio::<T>(rows, sample_rate, "clicks")
 }
 
 // =============================================================================
@@ -2308,12 +2471,21 @@ pub fn clicks(
 
 /// librosa-compatible audio effects on [`AudioSamples`].
 ///
-/// All methods process every channel (mono gives one channel) in `f64` and return
-/// audio of the input's sample type and sample rate. Each audio-to-audio method has
-/// an `_in_place` variant that replaces the audio (its length may change). See the
+/// All methods process every channel (mono gives one channel) in the sample
+/// type's float type [`Float`](Self::Float) (`f32` for `u8`, `i16`, `I24` and
+/// `f32` audio; `f64` for `i32` and `f64` audio) and return audio of the input's
+/// sample type and sample rate, converted with the crate's audio-aware conversion
+/// (integer types round and saturate). Each audio-to-audio method has an
+/// `_in_place` variant that replaces the audio (its length may change). See the
 /// [module documentation](self) for the librosa correspondence.
 pub trait AudioEffects {
-    /// The sample type of the audio.
+    /// The float type of the computation and of the array outputs
+    /// ([`lpc`](Self::lpc)): the sample type's
+    /// [`AudioSample::Float`](crate::AudioSample::Float).
+    type Float: AudioFloat;
+
+    /// The sample type of the audio. The audio-to-audio methods and
+    /// [`griffinlim_audio`](Self::griffinlim_audio) return audio of this type.
     type Sample: StandardSample;
 
     /// Changes the speed without changing the pitch, equivalent to
@@ -2349,6 +2521,14 @@ pub trait AudioEffects {
     /// phases that the phase vocoder accumulates, so round-off is amplified:
     /// agreement drops to ~30 dB SNR there. librosa against itself with a
     /// 1e-15 relative STFT perturbation differs by the same amount (~27 dB).
+    ///
+    /// For `f32` computation (`u8`, `i16`, `I24`, `f32` audio) the STFT runs in
+    /// `f32`, while librosa's `float32` STFT is computed in `float64` and rounded.
+    /// The same amplification then applies to bins at the `f32` round-off level
+    /// (about 1e-7 of the peak), for example bins that a chirp reaches only
+    /// later: on the reference chirp-and-tones signal the `f32` result agrees
+    /// with librosa's `float32` result and with this crate's `f64` result to
+    /// 43-46 dB SNR. Signals without such bins agree to `f32` round-off.
     ///
     /// # Examples
     ///
@@ -2424,9 +2604,14 @@ pub trait AudioEffects {
     /// which approximates the arbitrary ratio `rate` by a ratio of two integers near
     /// 2^31. The time-stretch stage matches librosa to round-off (amplified on
     /// input containing exact digital silence, see
-    /// [`time_stretch`](Self::time_stretch)); the final signal agrees within the
-    /// resampler difference (about 68 dB SNR on the reference test signal, see
-    /// `tests/librosa_reference/effects.rs`).
+    /// [`time_stretch`](Self::time_stretch), including the `f32` case); the final
+    /// signal agrees within the resampler difference (about 68 dB SNR on the
+    /// reference test signal, see `tests/librosa_reference/effects.rs`).
+    ///
+    /// The resampler filters in `f64`. For `f32` computation the time-stretched
+    /// rows are widened to `f64` for that stage and the result is rounded back,
+    /// so the stage temporarily holds `f64` copies of the stretched and the
+    /// resampled signal.
     ///
     /// # Examples
     ///
@@ -2503,6 +2688,11 @@ pub trait AudioEffects {
     /// let y = x.preemphasis(0.97).unwrap();
     /// let y = y.as_mono().unwrap();
     /// assert!((y[1] - (2.0 - 0.97)).abs() < 1e-15);
+    ///
+    /// // 16-bit audio is filtered in f32 and returned as i16.
+    /// let pcm = AudioSamples::new_mono(array![1000_i16, 2000, 3000], sample_rate!(8000)).unwrap();
+    /// let y: AudioSamples<'static, i16> = pcm.preemphasis(0.5).unwrap();
+    /// assert_eq!(y.as_mono().unwrap()[2], 3000 - 1000);
     /// ```
     fn preemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
@@ -2594,7 +2784,7 @@ pub trait AudioEffects {
     /// # Arguments
     ///
     /// * `config` - Threshold, reference, framing and channel aggregation
-    ///   ([`SilenceConfig::default`] = librosa's).
+    ///   ([`SilenceConfig::librosa`] = librosa's defaults).
     ///
     /// # Returns
     ///
@@ -2615,7 +2805,7 @@ pub trait AudioEffects {
     /// Not to be confused with
     /// [`AudioEditing::trim_silence`](crate::AudioEditing::trim_silence), which
     /// thresholds individual samples in absolute dBFS. See also [`nonsilent_frames`]
-    /// (RMS in `f64` instead of librosa's `float32`).
+    /// (frame RMS summation order).
     ///
     /// # Examples
     ///
@@ -2626,7 +2816,7 @@ pub trait AudioEffects {
     ///
     /// let x = Array1::from_shape_fn(22050, |n| if (8000..14000).contains(&n) { (n as f64 * 0.1).sin() } else { 0.0 });
     /// let audio = AudioSamples::new_mono(x, sample_rate!(22050)).unwrap();
-    /// let (trimmed, (start, end)) = audio.trim_db(&SilenceConfig::default()).unwrap();
+    /// let (trimmed, (start, end)) = audio.trim_db(&SilenceConfig::librosa()).unwrap();
     /// assert_eq!((start, end), (7168, 15360)); // frame-aligned (hop 512, centred frames)
     /// assert_eq!(trimmed.samples_per_channel().get(), end - start);
     /// ```
@@ -2658,7 +2848,7 @@ pub trait AudioEffects {
     ///
     /// let x = Array1::from_shape_fn(22050, |n| if n >= 11025 { 0.5 } else { 0.0 });
     /// let mut audio = AudioSamples::new_mono(x, sample_rate!(22050)).unwrap();
-    /// let (start, end) = audio.trim_db_in_place(&SilenceConfig::default()).unwrap();
+    /// let (start, end) = audio.trim_db_in_place(&SilenceConfig::new(60.0)).unwrap();
     /// assert_eq!(end, 22050);
     /// assert_eq!(audio.samples_per_channel().get(), end - start);
     /// ```
@@ -2694,7 +2884,7 @@ pub trait AudioEffects {
     ///     if (5000..10000).contains(&n) || (30000..35000).contains(&n) { 0.5 } else { 0.0 }
     /// });
     /// let audio = AudioSamples::new_mono(x, sample_rate!(22050)).unwrap();
-    /// let parts = audio.split_db(&SilenceConfig::default()).unwrap();
+    /// let parts = audio.split_db(&SilenceConfig::librosa()).unwrap();
     /// assert_eq!(parts.len(), 2);
     /// ```
     fn split_db(&self, config: &SilenceConfig) -> AudioSampleResult<Vec<(usize, usize)>>;
@@ -2949,7 +3139,9 @@ pub trait AudioEffects {
     ///
     /// # Returns
     ///
-    /// A `(channels, order + 1)` array; row `c` is `[1, a_1, ..., a_order]`.
+    /// A `(channels, order + 1)` array of [`Float`](Self::Float); row `c` is
+    /// `[1, a_1, ..., a_order]`. For `f32` see the accuracy note of [`lpc`]:
+    /// convert the audio to `f64` first for high orders on tonal material.
     ///
     /// # Errors
     ///
@@ -2973,20 +3165,26 @@ pub trait AudioEffects {
     /// assert!((a[[0, 1]] + 2.0 * w.cos()).abs() < 1e-3);
     /// assert!((a[[0, 2]] - 1.0).abs() < 1e-3);
     /// ```
-    fn lpc(&self, order: NonZeroUsize) -> AudioSampleResult<Array2<f64>>;
+    fn lpc(&self, order: NonZeroUsize) -> AudioSampleResult<Array2<Self::Float>>;
 
     /// Reconstructs audio from a magnitude spectrogram with Griffin-Lim, equivalent
     /// to `librosa.griffinlim(S)`; see [`griffinlim`].
     ///
     /// # Arguments
     ///
-    /// * `magnitude` - `(channels, n_fft / 2 + 1, n_frames)` magnitude spectrogram.
+    /// * `magnitude` - `(channels, n_fft / 2 + 1, n_frames)` magnitude spectrogram
+    ///   of [`Float`](Self::Float), as produced by
+    ///   [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix)
+    ///   on audio of the same sample type.
     /// * `config` - Iterations, momentum, initial phase, STFT, length.
     /// * `sample_rate` - Sample rate of the returned audio.
     ///
     /// # Returns
     ///
-    /// Mono `f64` audio for one channel, multi-channel otherwise.
+    /// Audio of sample type [`Sample`](Self::Sample): mono for one channel,
+    /// multi-channel otherwise. The reconstruction runs in
+    /// [`Float`](Self::Float) and is converted with the crate's audio-aware
+    /// conversion (integer types round and saturate).
     ///
     /// # Errors
     ///
@@ -3009,12 +3207,19 @@ pub trait AudioEffects {
     /// let cfg = GriffinLimConfig::new().with_n_iter(4).with_init(GriffinLimInit::Random(Some(1)));
     /// let y = AudioSamples::<f64>::griffinlim_audio(&mag, &cfg, sample_rate!(22050)).unwrap();
     /// assert_eq!(y.sample_rate(), sample_rate!(22050));
+    ///
+    /// // 16-bit audio: an f32 magnitude in, i16 audio out.
+    /// let pcm = sine_wave::<i16>(440.0, Duration::from_millis(300), sample_rate!(22050), 0.5);
+    /// let mag = pcm.spectrogram_matrix(&StftConfig::default(), 1.0).unwrap();
+    /// let y: AudioSamples<'static, i16> =
+    ///     AudioSamples::<i16>::griffinlim_audio(&mag, &cfg, sample_rate!(22050)).unwrap();
+    /// assert_eq!(y.num_channels().get(), 1);
     /// ```
     fn griffinlim_audio(
-        magnitude: &Array3<f64>,
+        magnitude: &Array3<Self::Float>,
         config: &GriffinLimConfig,
         sample_rate: SampleRate,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>>
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>
     where
         Self: Sized;
 }
@@ -3023,6 +3228,7 @@ impl<T> AudioEffects for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
+    type Float = T::Float;
     type Sample = T;
 
     fn time_stretch(
@@ -3030,8 +3236,8 @@ where
         rate: f64,
         stft: &StftConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = time_stretch_rows(finite_audio_rows(self)?.view(), rate, stft)?;
-        rows_to_audio(y, self.sample_rate(), "time_stretch")
+        let y = time_stretch_rows(finite_float_rows(self)?.view(), rate, stft)?;
+        float_rows_to_audio(y, self.sample_rate(), "time_stretch")
     }
 
     fn time_stretch_in_place(&mut self, rate: f64, stft: &StftConfig) -> AudioSampleResult<()> {
@@ -3044,8 +3250,8 @@ where
         n_steps: f64,
         config: &PitchShiftConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = pitch_shift_rows(finite_audio_rows(self)?.view(), n_steps, config)?;
-        rows_to_audio(y, self.sample_rate(), "pitch_shift")
+        let y = pitch_shift_rows(finite_float_rows(self)?.view(), n_steps, config)?;
+        float_rows_to_audio(y, self.sample_rate(), "pitch_shift")
     }
 
     fn pitch_shift_in_place(
@@ -3058,7 +3264,7 @@ where
     }
 
     fn preemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = finite_audio_rows(self)?;
+        let mut rows = finite_float_rows(self)?;
         for mut row in rows.outer_iter_mut() {
             let y = match row.as_slice() {
                 Some(x) => preemphasis_with_state(x, coef, None)?.0,
@@ -3066,7 +3272,7 @@ where
             };
             row.assign(&Array1::from(y));
         }
-        rows_to_audio(rows, self.sample_rate(), "preemphasis")
+        float_rows_to_audio(rows, self.sample_rate(), "preemphasis")
     }
 
     fn preemphasis_in_place(&mut self, coef: f64) -> AudioSampleResult<()> {
@@ -3075,7 +3281,7 @@ where
     }
 
     fn deemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = finite_audio_rows(self)?;
+        let mut rows = finite_float_rows(self)?;
         for mut row in rows.outer_iter_mut() {
             let y = match row.as_slice() {
                 Some(x) => deemphasis_with_state(x, coef, None)?.0,
@@ -3083,7 +3289,7 @@ where
             };
             row.assign(&Array1::from(y));
         }
-        rows_to_audio(rows, self.sample_rate(), "deemphasis")
+        float_rows_to_audio(rows, self.sample_rate(), "deemphasis")
     }
 
     fn deemphasis_in_place(&mut self, coef: f64) -> AudioSampleResult<()> {
@@ -3095,7 +3301,7 @@ where
         &self,
         config: &SilenceConfig,
     ) -> AudioSampleResult<(AudioSamples<'static, T>, (usize, usize))> {
-        let rows = finite_audio_rows(self)?;
+        let rows = finite_float_rows(self)?;
         let flags = nonsilent_frames(rows.view(), config)?;
         let (start, end) = trim_bounds(&flags, config.hop_length.get(), rows.ncols());
         if start >= end {
@@ -3103,7 +3309,7 @@ where
         }
         let kept = rows.slice(ndarray::s![.., start..end]).to_owned();
         Ok((
-            rows_to_audio(kept, self.sample_rate(), "trim_db")?,
+            float_rows_to_audio(kept, self.sample_rate(), "trim_db")?,
             (start, end),
         ))
     }
@@ -3115,7 +3321,7 @@ where
     }
 
     fn split_db(&self, config: &SilenceConfig) -> AudioSampleResult<Vec<(usize, usize)>> {
-        let rows = finite_audio_rows(self)?;
+        let rows = finite_float_rows(self)?;
         let flags = nonsilent_frames(rows.view(), config)?;
         Ok(split_intervals(
             &flags,
@@ -3129,8 +3335,8 @@ where
         intervals: &[(usize, usize)],
         align_zeros: bool,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = remix_rows(finite_audio_rows(self)?.view(), intervals, align_zeros)?;
-        rows_to_audio(y, self.sample_rate(), "remix")
+        let y = remix_rows(finite_float_rows(self)?.view(), intervals, align_zeros)?;
+        float_rows_to_audio(y, self.sample_rate(), "remix")
     }
 
     fn remix_in_place(
@@ -3147,11 +3353,11 @@ where
         config: &HarmonicPercussiveConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
         let mut parts = hpss_rows(
-            finite_audio_rows(self)?.view(),
+            finite_float_rows(self)?.view(),
             config,
             &[HpssPart::Harmonic],
         )?;
-        rows_to_audio(parts.remove(0), self.sample_rate(), "harmonic")
+        float_rows_to_audio(parts.remove(0), self.sample_rate(), "harmonic")
     }
 
     fn harmonic_in_place(&mut self, config: &HarmonicPercussiveConfig) -> AudioSampleResult<()> {
@@ -3164,11 +3370,11 @@ where
         config: &HarmonicPercussiveConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
         let mut parts = hpss_rows(
-            finite_audio_rows(self)?.view(),
+            finite_float_rows(self)?.view(),
             config,
             &[HpssPart::Percussive],
         )?;
-        rows_to_audio(parts.remove(0), self.sample_rate(), "percussive")
+        float_rows_to_audio(parts.remove(0), self.sample_rate(), "percussive")
     }
 
     fn percussive_in_place(&mut self, config: &HarmonicPercussiveConfig) -> AudioSampleResult<()> {
@@ -3181,7 +3387,7 @@ where
         config: &HarmonicPercussiveConfig,
     ) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)> {
         let mut parts = hpss_rows(
-            finite_audio_rows(self)?.view(),
+            finite_float_rows(self)?.view(),
             config,
             &[HpssPart::Harmonic, HpssPart::Percussive],
         )?;
@@ -3192,14 +3398,14 @@ where
             .pop()
             .ok_or_else(|| AudioSampleError::empty_data("hpss"))?;
         Ok((
-            rows_to_audio(h, self.sample_rate(), "harmonic_percussive")?,
-            rows_to_audio(p, self.sample_rate(), "harmonic_percussive")?,
+            float_rows_to_audio(h, self.sample_rate(), "harmonic_percussive")?,
+            float_rows_to_audio(p, self.sample_rate(), "harmonic_percussive")?,
         ))
     }
 
-    fn lpc(&self, order: NonZeroUsize) -> AudioSampleResult<Array2<f64>> {
-        let rows = finite_audio_rows(self)?;
-        let mut out = Array2::<f64>::zeros((rows.nrows(), order.get() + 1));
+    fn lpc(&self, order: NonZeroUsize) -> AudioSampleResult<Array2<T::Float>> {
+        let rows = finite_float_rows(self)?;
+        let mut out = Array2::<T::Float>::zeros((rows.nrows(), order.get() + 1));
         for (c, row) in rows.outer_iter().enumerate() {
             let a = lpc(&row.to_vec(), order)?;
             out.row_mut(c).assign(&Array1::from(a));
@@ -3208,12 +3414,12 @@ where
     }
 
     fn griffinlim_audio(
-        magnitude: &Array3<f64>,
+        magnitude: &Array3<T::Float>,
         config: &GriffinLimConfig,
         sample_rate: SampleRate,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>> {
+    ) -> AudioSampleResult<AudioSamples<'static, T>> {
         let y = griffinlim(magnitude.view(), config)?;
-        rows_to_audio(y, sample_rate, "griffinlim")
+        float_rows_to_audio(y, sample_rate, "griffinlim")
     }
 }
 
@@ -3254,14 +3460,14 @@ mod tests {
 
     #[test]
     fn phase_vocoder_rejects_bad_input() {
-        let d = Array3::from_elem((1, 3, 4), Complex::new(1.0, 0.0));
+        let d = Array3::from_elem((1, 3, 4), Complex::new(1.0_f64, 0.0));
         assert!(phase_vocoder(d.view(), 0.0).is_err());
         assert!(phase_vocoder(d.view(), f64::NAN).is_err());
         assert!(phase_vocoder_at(d.view(), &[4.0]).is_err());
         assert!(phase_vocoder_at(d.view(), &[-0.1]).is_err());
         assert!(phase_vocoder_at(d.view(), &[]).is_err());
         // A single frame is handled (librosa's interp1d cannot).
-        let one = Array3::from_elem((1, 3, 1), Complex::new(0.0, 2.0));
+        let one = Array3::from_elem((1, 3, 1), Complex::new(0.0_f64, 2.0));
         let y = phase_vocoder(one.view(), 0.5).unwrap();
         assert_eq!(y.dim(), (1, 3, 2));
         assert!((y[[0, 0, 1]].norm() - 2.0).abs() < 1e-12);
@@ -3331,12 +3537,12 @@ mod tests {
     #[test]
     fn preemphasis_state_matches_lfilter() {
         // Values from scipy / librosa (see the module tests in the reference suite).
-        let (y, zf) = preemphasis_with_state(&[1.0, 3.0, 0.5], 0.97, None).unwrap();
+        let (y, zf) = preemphasis_with_state(&[1.0_f64, 3.0, 0.5], 0.97, None).unwrap();
         assert_eq!(y[0], 0.0);
         assert!((y[1] - 2.03).abs() < 1e-15);
         assert!((y[2] + 2.41).abs() < 1e-15);
         assert!((zf + 0.485).abs() < 1e-15);
-        let (y, zf) = deemphasis_with_state(&[1.0, 3.0, 0.5], 0.97, Some(0.5)).unwrap();
+        let (y, zf) = deemphasis_with_state(&[1.0_f64, 3.0, 0.5], 0.97, Some(0.5)).unwrap();
         assert_eq!(y, vec![1.5, 4.455, 4.82135]);
         assert!((zf - 4.676_709_5).abs() < 1e-12);
         // Block processing with zf -> zi equals one pass.
@@ -3375,7 +3581,7 @@ mod tests {
             })
             .collect();
         let audio = mono(x);
-        let cfg = SilenceConfig::default();
+        let cfg = SilenceConfig::librosa();
         let parts = audio.split_db(&cfg).unwrap();
         assert_eq!(parts.len(), 2);
         let (trimmed, (s, e)) = audio.trim_db(&cfg).unwrap();
@@ -3386,14 +3592,10 @@ mod tests {
         let zeros = mono(vec![0.0; 3000]);
         assert_eq!(zeros.split_db(&cfg).unwrap(), vec![(0, 3000)]);
         // Absolute reference far above the signal: everything silent.
-        let quiet = SilenceConfig::new().with_reference(DbReference::Value(1e6));
+        let quiet = SilenceConfig::librosa().with_reference(DbReference::Value(1e6));
         assert!(audio.split_db(&quiet).unwrap().is_empty());
         assert!(audio.trim_db(&quiet).is_err());
-        assert!(
-            audio
-                .split_db(&SilenceConfig::new().with_top_db(f64::NAN))
-                .is_err()
-        );
+        assert!(audio.split_db(&SilenceConfig::new(f64::NAN)).is_err());
     }
 
     #[test]
@@ -3579,10 +3781,13 @@ mod tests {
         let cfg = ClicksConfig::new()
             .with_click(Some(vec![1.0, 0.5]))
             .with_length(Some(10));
-        let y = clicks(
-            ClickPositions::Frames(&[0, 2, 4, 5]),
+        let y = clicks::<f64>(
+            ClickPositions::Frames {
+                frames: &[0, 2, 4, 5],
+                hop_length: crate::nzu!(2),
+            },
             sample_rate!(100),
-            &cfg.clone().with_hop_length(crate::nzu!(2)),
+            &cfg,
         )
         .unwrap();
         // Positions 0, 4, 8 (10 dropped); the click at 8 is truncated after 2 samples.
@@ -3590,14 +3795,14 @@ mod tests {
             y.as_mono().unwrap().to_vec(),
             vec![1.0, 0.5, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 1.0, 0.5]
         );
-        let y = clicks(
+        let y = clicks::<f64>(
             ClickPositions::Times(&[0.0, 0.01]),
             sample_rate!(100),
             &cfg.with_length(None),
         )
         .unwrap();
         assert_eq!(y.as_mono().unwrap().to_vec(), vec![1.0, 1.5, 0.5]);
-        let d = clicks(
+        let d = clicks::<f64>(
             ClickPositions::Times(&[0.0]),
             sample_rate!(22050),
             &ClicksConfig::default(),
@@ -3607,7 +3812,7 @@ mod tests {
         assert_eq!(d.len().get(), 2205);
         assert_eq!(d[0], 0.0);
         assert!(
-            clicks(
+            clicks::<f64>(
                 ClickPositions::Times(&[]),
                 sample_rate!(100),
                 &ClicksConfig::default()
@@ -3615,7 +3820,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            clicks(
+            clicks::<f64>(
                 ClickPositions::Times(&[-1.0]),
                 sample_rate!(100),
                 &ClicksConfig::default()
@@ -3635,6 +3840,162 @@ mod tests {
         assert_eq!(y.samples_per_channel().get(), 4000);
     }
 
+    /// 16-bit test audio: two steady tones and a little noise after a
+    /// digital-silence lead-in of 2000 samples.
+    fn pcm16() -> AudioSamples<'static, i16> {
+        let nz = noise(12000, 21);
+        AudioSamples::new_mono(
+            Array1::from_shape_fn(12000, |n| {
+                if n < 2000 {
+                    return 0;
+                }
+                let t = n as f64 / 16000.0;
+                let v = 0.4 * (2.0 * std::f64::consts::PI * 330.0 * t).sin()
+                    + 0.2 * (2.0 * std::f64::consts::PI * 1250.0 * t).sin()
+                    + 0.01 * nz[n];
+                (v * 32768.0).round() as i16
+            }),
+            sample_rate!(16000),
+        )
+        .unwrap()
+    }
+
+    /// Largest difference in LSB between the i16 result (computed in f32) and
+    /// the f64 computation re-quantised to i16.
+    fn max_lsb(
+        x: &AudioSamples<'static, i16>,
+        op: impl Fn(&AudioSamples<'static, i16>) -> AudioSamples<'static, i16>,
+        op64: impl Fn(&AudioSamples<'static, f64>) -> AudioSamples<'static, f64>,
+    ) -> i32 {
+        use crate::AudioTypeConversion;
+        let y = op(x);
+        let y64 = op64(&x.to_format::<f64>()).to_format::<i16>();
+        let (a, b) = (y.as_mono().unwrap(), y64.as_mono().unwrap());
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b.iter())
+            .map(|(&p, &q)| (i32::from(p) - i32::from(q)).abs())
+            .max()
+            .unwrap()
+    }
+
+    #[test]
+    fn i16_effects_return_i16_close_to_the_f64_path() {
+        let x = pcm16();
+        let stft = StftConfig::default();
+        let ps = PitchShiftConfig::default();
+        let hp = HarmonicPercussiveConfig::default();
+        // Measured: 1 LSB for every operation except trim_db (0: it copies
+        // samples). The f32 and f64 results differ by round-off well below one
+        // LSB (3.1e-5); a 1-LSB difference appears where the two values fall on
+        // opposite sides of a rounding boundary.
+        let cases: [(&str, i32, i32); 5] = [
+            (
+                "time_stretch",
+                max_lsb(
+                    &x,
+                    |a| a.time_stretch(1.25, &stft).unwrap(),
+                    |a| a.time_stretch(1.25, &stft).unwrap(),
+                ),
+                1,
+            ),
+            (
+                "pitch_shift",
+                max_lsb(
+                    &x,
+                    |a| a.pitch_shift(2.0, &ps).unwrap(),
+                    |a| a.pitch_shift(2.0, &ps).unwrap(),
+                ),
+                1,
+            ),
+            (
+                "preemphasis",
+                max_lsb(
+                    &x,
+                    |a| a.preemphasis(0.97).unwrap(),
+                    |a| a.preemphasis(0.97).unwrap(),
+                ),
+                1,
+            ),
+            (
+                "harmonic",
+                max_lsb(
+                    &x,
+                    |a| a.harmonic(&hp).unwrap(),
+                    |a| a.harmonic(&hp).unwrap(),
+                ),
+                1,
+            ),
+            (
+                "trim_db",
+                max_lsb(
+                    &x,
+                    |a| a.trim_db(&SilenceConfig::librosa()).unwrap().0,
+                    |a| a.trim_db(&SilenceConfig::librosa()).unwrap().0,
+                ),
+                0,
+            ),
+        ];
+        for (name, lsb, bound) in cases {
+            eprintln!("i16 {name}: max {lsb} LSB from the re-quantised f64 path (bound {bound})");
+            assert!(lsb <= bound, "i16 {name}: {lsb} LSB > {bound}");
+        }
+        // A chirp sweeps into bins whose STFT values were at the round-off level
+        // before it arrives. The phase vocoder (librosa 1.0's algorithm) carries
+        // the phase of those bins forward, so the f32 round-off there sets the
+        // phase of the chirp once it arrives: the stretched outputs differ by more
+        // than 1 LSB. Measured: time_stretch 46.7 dB SNR (max 139 LSB),
+        // pitch_shift 51.0 dB (max 113 LSB), harmonic 1 LSB. Bound: 40 dB.
+        let chirp = AudioSamples::new_mono(
+            Array1::from_shape_fn(22050, |n| {
+                let t = n as f64 / 22050.0;
+                let v = 0.3 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                    + 0.15
+                        * (2.0 * std::f64::consts::PI * (100.0 * t + 0.5 * 3900.0 * t * t)).sin();
+                (v * 32768.0).round() as i16
+            }),
+            sample_rate!(22050),
+        )
+        .unwrap();
+        let snr_db =
+            |op: &dyn Fn(&AudioSamples<'static, i16>) -> AudioSamples<'static, i16>,
+             op64: &dyn Fn(&AudioSamples<'static, f64>) -> AudioSamples<'static, f64>| {
+                use crate::AudioTypeConversion;
+                let y = op(&chirp);
+                let y64 = op64(&chirp.to_format::<f64>()).to_format::<i16>();
+                let (a, b) = (y.as_mono().unwrap(), y64.as_mono().unwrap());
+                let sig: f64 = b.iter().map(|&v| f64::from(v).powi(2)).sum();
+                let err: f64 = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(&p, &q)| (f64::from(p) - f64::from(q)).powi(2))
+                    .sum();
+                10.0 * (sig / err).log10()
+            };
+        let ts = snr_db(&|a| a.time_stretch(1.5, &stft).unwrap(), &|a| {
+            a.time_stretch(1.5, &stft).unwrap()
+        });
+        let ps = snr_db(&|a| a.pitch_shift(2.0, &ps).unwrap(), &|a| {
+            a.pitch_shift(2.0, &ps).unwrap()
+        });
+        eprintln!(
+            "i16 chirp: time_stretch {ts:.1} dB, pitch_shift {ps:.1} dB SNR from the f64 path"
+        );
+        assert!(ts > 40.0 && ps > 40.0, "chirp SNR {ts:.1} / {ps:.1} dB");
+        assert!(
+            max_lsb(
+                &chirp,
+                |a| a.harmonic(&hp).unwrap(),
+                |a| a.harmonic(&hp).unwrap()
+            ) <= 1
+        );
+
+        // The output type is the input type.
+        let _: AudioSamples<'static, i16> = x.percussive(&hp).unwrap();
+        let _: AudioSamples<'static, i16> = x.deemphasis(0.97).unwrap();
+        let _: AudioSamples<'static, i16> = x.remix(&[(3000, 5000)], true).unwrap();
+    }
+
     /// Regression: extreme click times / durations and stretch rates sized
     /// their outputs at up to 10^17 bytes and aborted on allocation.
     #[test]
@@ -3647,7 +4008,10 @@ mod tests {
         assert!(is_param(clicks(ClickPositions::Times(&[1e12]), sr, &cfg)));
         assert!(is_param(clicks(ClickPositions::Times(&[1e20]), sr, &cfg)));
         assert!(is_param(clicks(
-            ClickPositions::Frames(&[usize::MAX]),
+            ClickPositions::Frames {
+                frames: &[usize::MAX],
+                hop_length: crate::nzu!(512),
+            },
             sr,
             &cfg
         )));
@@ -3661,7 +4025,7 @@ mod tests {
             ..ClicksConfig::default()
         };
         assert!(is_param(clicks(ClickPositions::Times(&[0.0]), sr, &fixed)));
-        assert!(clicks(ClickPositions::Times(&[1.0]), sr, &cfg).is_ok());
+        assert!(clicks::<f64>(ClickPositions::Times(&[1.0]), sr, &cfg).is_ok());
 
         let audio = AudioSamples::new_mono(ndarray::Array1::from(vec![0.1; 22050]), sr).unwrap();
         assert!(matches!(

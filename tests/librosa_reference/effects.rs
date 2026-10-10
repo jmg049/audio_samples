@@ -96,7 +96,7 @@ fn subset<T: Clone>(a: &Array3<T>, case: &Value) -> Array2<T> {
 }
 
 fn mix_stft() -> Array3<Complex<f64>> {
-    mono("mix").stft_matrix(&StftConfig::default()).unwrap()
+    mono("mix").stft_matrix(&StftConfig::librosa()).unwrap()
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn time_stretch_matches() {
     let x = mono("mix");
     for rate in ["1.5", "0.75"] {
         let y = x
-            .time_stretch(rate.parse().unwrap(), &StftConfig::default())
+            .time_stretch(rate.parse().unwrap(), &StftConfig::librosa())
             .unwrap();
         let y = samples(&y);
         assert_eq!(y.len(), usize_of(&f[rate]["len"]), "length rate {rate}");
@@ -148,7 +148,7 @@ fn time_stretch_matches() {
         );
     }
     let fs = &fixture()["time_stretch_stereo"];
-    let y = stereo().time_stretch(1.5, &StftConfig::default()).unwrap();
+    let y = stereo().time_stretch(1.5, &StftConfig::librosa()).unwrap();
     let y = y.as_multi_channel().unwrap().as_view().to_owned();
     assert_eq!(y.ncols(), usize_of(&fs["len"]));
     let e = arr2(&fs["y"]);
@@ -167,7 +167,7 @@ fn pitch_shift_matches() {
         let rate = case["rate"].as_f64().unwrap();
         // The resampler-free stage (time stretch by `rate`) is librosa-exact up to
         // the vocoder round-off (bound as in time_stretch_matches).
-        let st = samples(&x.time_stretch(rate, &StftConfig::default()).unwrap());
+        let st = samples(&x.time_stretch(rate, &StftConfig::librosa()).unwrap());
         assert_eq!(st.len(), usize_of(&case["stretched_len"]));
         check(
             &format!("pitch_shift {n_steps}: stretched"),
@@ -182,7 +182,7 @@ fn pitch_shift_matches() {
         // below the 10 kHz band edge) they agree to 67-69 dB SNR (measured: +2 st 67.6 dB,
         // -3 st 68.5 dB). Bound: 55 dB, leaving margin for resampler tuning.
         let y = samples(
-            &x.pitch_shift(n_steps.parse().unwrap(), &PitchShiftConfig::default())
+            &x.pitch_shift(n_steps.parse().unwrap(), &PitchShiftConfig::librosa())
                 .unwrap(),
         );
         assert_eq!(y.len(), n);
@@ -263,17 +263,17 @@ fn trim_split_match() {
     let f = &fixture()["trim_split"];
     let burst = mono("burst");
     let cases: [(&str, SilenceConfig); 4] = [
-        ("default", SilenceConfig::default()),
-        ("top_db30", SilenceConfig::new().with_top_db(30.0)),
+        ("default", SilenceConfig::librosa()),
+        ("top_db30", SilenceConfig::new(30.0)),
         (
             "frame1024_hop256",
-            SilenceConfig::new()
+            SilenceConfig::librosa()
                 .with_frame_length(nzu!(1024))
                 .with_hop_length(nzu!(256)),
         ),
         (
             "ref_abs",
-            SilenceConfig::new()
+            SilenceConfig::librosa()
                 .with_reference(DbReference::Value(0.01))
                 .with_top_db(20.0),
         ),
@@ -290,7 +290,7 @@ fn trim_split_match() {
         );
         eprintln!("trim/split {name:<20} {bounds:?} (exact)");
     }
-    let cfg20 = SilenceConfig::new().with_top_db(20.0);
+    let cfg20 = SilenceConfig::new(20.0);
     assert_eq!(
         mono("mix").split_db(&cfg20).unwrap(),
         pairs(&f["mix_split"])
@@ -326,13 +326,13 @@ fn remix_matches() {
 
 fn hpss_cfg(name: &str) -> HpssMaskConfig {
     match name {
-        "default" => HpssMaskConfig::default(),
-        "margin2" => HpssMaskConfig::new().with_margin(2.0),
-        "kernel_17_9_power1" => HpssMaskConfig::new()
+        "default" => HpssMaskConfig::librosa(),
+        "margin2" => HpssMaskConfig::librosa().with_margin(2.0),
+        "kernel_17_9_power1" => HpssMaskConfig::librosa()
             .with_kernel_sizes(nzu!(17), nzu!(9))
             .with_power(1.0),
-        "hard" => HpssMaskConfig::new().with_power(f64::INFINITY),
-        "kernel_even" => HpssMaskConfig::new()
+        "hard" => HpssMaskConfig::librosa().with_power(f64::INFINITY),
+        "kernel_even" => HpssMaskConfig::librosa()
             .with_kernel_sizes(nzu!(10), nzu!(12))
             .with_margins(1.0, 3.0),
         other => panic!("unknown hpss case {other}"),
@@ -346,7 +346,7 @@ fn hpss_spectrogram_matches() {
     // differ by the STFT round-off (~1e-16 relative). Hard masks can flip only
     // where H == P to round-off; none does on this signal.
     let f = &fixture()["hpss_spectrogram"];
-    let d = mono("notes").stft_matrix(&StftConfig::default()).unwrap();
+    let d = mono("notes").stft_matrix(&StftConfig::librosa()).unwrap();
     for name in [
         "default",
         "margin2",
@@ -393,7 +393,7 @@ fn hpss_spectrogram_matches() {
         );
     }
     let mag = d.mapv(Complex::norm);
-    let (h, p) = hpss_magnitude(mag.view(), &HpssMaskConfig::default()).unwrap();
+    let (h, p) = hpss_magnitude(mag.view(), &HpssMaskConfig::librosa()).unwrap();
     let case = &f["magnitude_default"];
     let (a, e) = (subset(&h, &case["harm"]), arr2(&case["harm"]["subset"]));
     check("hpss magnitude: harmonic", a.iter(), e.iter(), 1e-10);
@@ -407,7 +407,7 @@ fn hpss_audio_matches() {
     let f = &fixture()["hpss_audio"];
     let k = step("sparse_step");
     let x = mono("notes");
-    let def = HarmonicPercussiveConfig::default();
+    let def = HarmonicPercussiveConfig::librosa();
     let (h, p) = x.harmonic_percussive(&def).unwrap();
     check(
         "effects.hpss harmonic",
@@ -421,7 +421,8 @@ fn hpss_audio_matches() {
         &f64s(&f["percussive"]),
         1e-10,
     );
-    let m2 = HarmonicPercussiveConfig::new().with_hpss(HpssMaskConfig::new().with_margin(2.0));
+    let m2 =
+        HarmonicPercussiveConfig::librosa().with_hpss(HpssMaskConfig::librosa().with_margin(2.0));
     let h2 = samples(&x.harmonic(&m2).unwrap());
     let p2 = samples(&x.percussive(&m2).unwrap());
     check(
@@ -464,10 +465,10 @@ fn griffinlim_matches() {
     let k = step("sig_step");
     let n = usize_of(&f["len"]);
     let x = signal("mix");
-    let cfg = StftConfig::new().with_n_fft(nzu!(512));
+    let cfg = StftConfig::librosa().with_n_fft(nzu!(512));
     let xa = Array2::from_shape_vec((1, n), x[..n].to_vec()).unwrap();
     let mag = stft(xa.view(), &cfg).unwrap().mapv(Complex::norm);
-    let base = GriffinLimConfig::new()
+    let base = GriffinLimConfig::librosa()
         .with_stft(cfg)
         .with_n_iter(usize_of(&f["n_iter"]))
         .with_init(GriffinLimInit::ZeroPhase)
@@ -567,21 +568,24 @@ fn clicks_match() {
     let f = &fixture()["clicks"];
     let k = step("sig_step");
     let rate = std::num::NonZeroU32::new(sr()).unwrap();
-    let y = clicks(
+    let y = clicks::<f64>(
         ClickPositions::Times(&[0.1, 0.5, 0.52]),
         rate,
-        &ClicksConfig::default(),
+        &ClicksConfig::librosa(),
     )
     .unwrap();
     let y = samples(&y);
     assert_eq!(y.len(), usize_of(&f["times_len"]));
     check("clicks times", &strided(&y, k), &f64s(&f["times"]), 1e-6);
-    let cfg = ClicksConfig::new()
-        .with_hop_length(nzu!(256))
+    let cfg = ClicksConfig::librosa()
         .with_click_freq(2000.0)
         .with_click_duration(0.05)
         .with_length(Some(11000));
-    let y = samples(&clicks(ClickPositions::Frames(&[3, 20, 40]), rate, &cfg).unwrap());
+    let frames = ClickPositions::Frames {
+        frames: &[3, 20, 40],
+        hop_length: nzu!(256),
+    };
+    let y = samples(&clicks::<f64>(frames, rate, &cfg).unwrap());
     check(
         "clicks frames + length",
         &strided(&y, k),
@@ -597,8 +601,8 @@ fn istft_of_vocoded_length() {
     let d = mix_stft();
     let pv = phase_vocoder(d.view(), 1.5).unwrap();
     let n = (x.samples_per_channel().get() as f64 / 1.5).round_ties_even() as usize;
-    let chain = istft(pv.view(), &StftConfig::default(), Some(n)).unwrap();
-    let ts = samples(&x.time_stretch(1.5, &StftConfig::default()).unwrap());
+    let chain = istft(pv.view(), &StftConfig::librosa(), Some(n)).unwrap();
+    let ts = samples(&x.time_stretch(1.5, &StftConfig::librosa()).unwrap());
     check(
         "time_stretch == chain",
         &ts,
