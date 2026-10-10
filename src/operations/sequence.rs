@@ -195,36 +195,47 @@ impl DistanceMetric {
     }
 }
 
-/// Pairwise distances between the columns of `x` (rows of the result) and the
-/// columns of `y` (columns of the result), like `scipy.spatial.distance.cdist`.
+/// Distances from single feature vectors to every column of `y`, one row of
+/// a `scipy.spatial.distance.cdist` result at a time.
 ///
 /// Each distance is accumulated feature by feature in the same order as
-/// [`DistanceMetric::distance`] (so the results are identical), but one row
-/// of the result at a time across all columns of `y`, which vectorises.
-fn pairwise<F: AudioFloat>(
-    x: ArrayView2<F>,
-    y: ArrayView2<F>,
+/// [`DistanceMetric::distance`] (so the results are identical), but across
+/// all columns of `y` at once, which vectorises.
+struct RowDistances<'a, F: AudioFloat> {
+    y: ndarray::CowArray<'a, F, ndarray::Ix2>,
     metric: DistanceMetric,
-) -> Array2<F> {
-    let ny = y.ncols();
-    let mut out = Array2::zeros((x.ncols(), ny));
-    if ny == 0 {
-        return out;
+    /// Squared norms of the columns of `y` (cosine only), summed as in
+    /// `distance`.
+    nv: Vec<F>,
+}
+
+impl<'a, F: AudioFloat> RowDistances<'a, F> {
+    fn new(y: ArrayView2<'a, F>, metric: DistanceMetric) -> Self {
+        let y = if y.is_standard_layout() {
+            ndarray::CowArray::from(y)
+        } else {
+            ndarray::CowArray::from(y.as_standard_layout().into_owned())
+        };
+        let nv = if metric == DistanceMetric::Cosine {
+            y.columns()
+                .into_iter()
+                .map(|v| v.iter().fold(F::zero(), |acc, &b| acc + b * b))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self { y, metric, nv }
     }
-    let y = y.as_standard_layout();
-    let ys = y.as_slice().expect("standard layout");
-    let zero = F::zero();
-    // Squared norms of the columns of y (cosine only), summed as in `distance`.
-    let nv: Vec<F> = if metric == DistanceMetric::Cosine {
-        y.columns()
-            .into_iter()
-            .map(|v| v.iter().fold(zero, |acc, &b| acc + b * b))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    for (xi, mut row) in x.columns().into_iter().zip(out.rows_mut()) {
-        let row = row.as_slice_mut().expect("standard layout");
+
+    /// Writes the distances from `xi` to each column of `y` into `row`.
+    fn row(&self, xi: ArrayView1<F>, row: &mut [F]) {
+        let ny = self.y.ncols();
+        row.fill(F::zero());
+        if ny == 0 {
+            return;
+        }
+        let ys = self.y.as_slice().expect("standard layout");
+        let metric = self.metric;
         for (&a, yf) in xi.iter().zip(ys.chunks_exact(ny)) {
             match metric {
                 DistanceMetric::Euclidean | DistanceMetric::SqEuclidean => {
@@ -252,13 +263,27 @@ fn pairwise<F: AudioFloat>(
         match metric {
             DistanceMetric::Euclidean => row.iter_mut().for_each(|o| *o = o.sqrt()),
             DistanceMetric::Cosine => {
-                let nu = xi.iter().fold(zero, |acc, &a| acc + a * a);
-                for (o, &nv) in row.iter_mut().zip(&nv) {
+                let nu = xi.iter().fold(F::zero(), |acc, &a| acc + a * a);
+                for (o, &nv) in row.iter_mut().zip(&self.nv) {
                     *o = F::one() - *o / (nu.sqrt() * nv.sqrt());
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Pairwise distances between the columns of `x` (rows of the result) and the
+/// columns of `y` (columns of the result), like `scipy.spatial.distance.cdist`.
+fn pairwise<F: AudioFloat>(
+    x: ArrayView2<F>,
+    y: ArrayView2<F>,
+    metric: DistanceMetric,
+) -> Array2<F> {
+    let mut out = Array2::zeros((x.ncols(), y.ncols()));
+    let dist = RowDistances::new(y, metric);
+    for (xi, mut row) in x.columns().into_iter().zip(out.rows_mut()) {
+        dist.row(xi, row.as_slice_mut().expect("standard layout"));
     }
     out
 }
@@ -2522,30 +2547,26 @@ impl CrossSimilarityConfig {
     }
 }
 
-/// Distance for nearest-neighbour search, following sklearn's conventions
-/// (librosa delegates to `sklearn.neighbors.NearestNeighbors`): cosine
-/// distances of zero vectors are 1 and results are clipped to `[0, 2]`.
-fn knn_distances<F: AudioFloat>(
-    x: ArrayView2<F>,
-    y: ArrayView2<F>,
-    metric: DistanceMetric,
-) -> Array2<F> {
-    let mut d = pairwise(x, y, metric);
-    if metric == DistanceMetric::Cosine {
+/// Writes the nearest-neighbour distances from `xi` to the columns of `y`
+/// into `row`, following sklearn's conventions (librosa delegates to
+/// `sklearn.neighbors.NearestNeighbors`): cosine distances of zero vectors
+/// are 1 and results are clipped to `[0, 2]`.
+fn knn_row<F: AudioFloat>(dist: &RowDistances<'_, F>, xi: ArrayView1<F>, row: &mut [F]) {
+    dist.row(xi, row);
+    if dist.metric == DistanceMetric::Cosine {
         let two = F::of(2.0);
-        d.mapv_inplace(|v| {
-            if v.is_nan() {
+        for v in row.iter_mut() {
+            *v = if v.is_nan() {
                 F::one()
-            } else if v < F::zero() {
+            } else if *v < F::zero() {
                 F::zero()
-            } else if v > two {
+            } else if *v > two {
                 two
             } else {
-                v
-            }
-        });
+                *v
+            };
+        }
     }
-    d
 }
 
 /// `f64::total_cmp` for `F` (the conversion to `f64` is exact).
@@ -2553,20 +2574,32 @@ fn total_cmp<F: AudioFloat>(a: F, b: F) -> std::cmp::Ordering {
     a.as_f64().total_cmp(&b.as_f64())
 }
 
-/// Indices of the `n` nearest columns of `dist.row(i)` (excluding `skip`),
-/// ordered by (distance, index).
-fn nearest<F: AudioFloat>(row: ArrayView1<F>, n: usize, skip: Option<usize>) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..row.len()).filter(|&j| Some(j) != skip).collect();
-    idx.sort_by(|&a, &b| total_cmp(row[a], row[b]).then(a.cmp(&b)));
-    idx.truncate(n);
-    idx
+/// Puts into `idx` the indices of the `n` nearest entries of `row` (excluding
+/// `skip`) under the (distance, index) order, in no particular order.
+///
+/// The order is total, so the selected set is the same as the first `n`
+/// of a full sort.
+fn nearest<F: AudioFloat>(row: &[F], n: usize, skip: Option<usize>, idx: &mut Vec<usize>) {
+    idx.clear();
+    idx.extend((0..row.len()).filter(|&j| Some(j) != skip));
+    if n < idx.len() {
+        if n > 0 {
+            idx.select_nth_unstable_by(n - 1, |&a, &b| total_cmp(row[a], row[b]).then(a.cmp(&b)));
+        }
+        idx.truncate(n);
+    }
 }
 
 /// Keep the `k` smallest stored (non-zero) values of each row, ties by column
 /// (librosa's stable `argsort` over the row's links).
 fn trim_rows<F: AudioFloat>(rec: &mut Array2<F>, k: usize) {
+    let mut links: Vec<usize> = Vec::new();
     for mut row in rec.rows_mut() {
-        let mut links: Vec<usize> = (0..row.len()).filter(|&j| row[j] != F::zero()).collect();
+        links.clear();
+        links.extend((0..row.len()).filter(|&j| row[j] != F::zero()));
+        if links.len() <= k {
+            continue;
+        }
         links.sort_by(|&a, &b| total_cmp(row[a], row[b]).then(a.cmp(&b)));
         for &j in links.iter().skip(k) {
             row[j] = F::zero();
@@ -2574,28 +2607,43 @@ fn trim_rows<F: AudioFloat>(rec: &mut Array2<F>, k: usize) {
     }
 }
 
+/// Transposes a square row-major matrix in place.
+fn transpose_square_in_place<F: Copy>(a: &mut [F], n: usize) {
+    const B: usize = 32;
+    for bi in (0..n).step_by(B) {
+        for bj in (bi..n).step_by(B) {
+            for i in bi..(bi + B).min(n) {
+                let j0 = if bi == bj { i + 1 } else { bj };
+                for j in j0..(bj + B).min(n) {
+                    a.swap(i * n + j, j * n + i);
+                }
+            }
+        }
+    }
+}
+
 /// Converts stored distances to affinities in place (`rec` in librosa's
 /// pre-transpose orientation; stored = non-zero, negative = stored zero).
 fn apply_affinity<F: AudioFloat>(
-    rec: &mut Array2<F>,
+    mut rec: ndarray::ArrayViewMut2<F>,
     bandwidth: &Bandwidth,
     k: usize,
 ) -> AudioSampleResult<()> {
     let zero = F::zero();
     let (t, ncols) = rec.dim();
-    let stored: Array2<bool> = rec.mapv(|v| v != zero);
-    rec.mapv_inplace(|v| if v < zero { zero } else { v });
+    // Whether a cell is stored, and its distance (stored zeros are negative).
+    let stored = |v: F| v != zero;
+    let clip = |v: F| if v < zero { zero } else { v };
 
     // Per-row statistics over the k smallest stored values.
-    let row_stats = || -> (Vec<F>, Vec<F>, Vec<bool>) {
+    let row_stats = |rec: &ndarray::ArrayViewMut2<F>| -> (Vec<F>, Vec<F>, Vec<bool>) {
         let mut dist_to_k = vec![F::nan(); t];
         let mut avg = vec![F::nan(); t];
         let mut empty = vec![false; t];
-        for i in 0..t {
-            let mut vals: Vec<F> = (0..ncols)
-                .filter(|&j| stored[[i, j]])
-                .map(|j| rec[[i, j]])
-                .collect();
+        let mut vals: Vec<F> = Vec::new();
+        for (i, row) in rec.rows().into_iter().enumerate() {
+            vals.clear();
+            vals.extend(row.iter().filter(|&&v| stored(v)).map(|&v| clip(v)));
             if vals.is_empty() {
                 empty[i] = true;
                 continue;
@@ -2603,19 +2651,23 @@ fn apply_affinity<F: AudioFloat>(
             vals.sort_by(|a, b| total_cmp(*a, *b));
             vals.truncate(k);
             dist_to_k[i] = vals[vals.len() - 1];
-            avg[i] = vals.iter().sum::<F>() / F::of_usize(vals.len());
+            avg[i] = vals.iter().copied().sum::<F>() / F::of_usize(vals.len());
         }
         (dist_to_k, avg, empty)
     };
 
-    let scalar = |bw: F, rec: &mut Array2<F>| {
-        Zip::from(rec)
-            .and(&stored)
-            .for_each(|v, &s| *v = if s { (*v / -bw).exp() } else { zero });
+    let scalar = |bw: F, rec: &mut ndarray::ArrayViewMut2<F>| {
+        rec.map_inplace(|v| {
+            *v = if stored(*v) {
+                (clip(*v) / -bw).exp()
+            } else {
+                zero
+            }
+        });
     };
 
     match bandwidth {
-        Bandwidth::Scalar(bw) => scalar(F::of(*bw), rec),
+        Bandwidth::Scalar(bw) => scalar(F::of(*bw), &mut rec),
         Bandwidth::Matrix(m) => {
             if m.dim() != (t, ncols) {
                 return err(
@@ -2627,13 +2679,16 @@ fn apply_affinity<F: AudioFloat>(
                     ),
                 );
             }
-            Zip::from(&mut *rec)
-                .and(&stored)
-                .and(m)
-                .for_each(|v, &s, &bw| *v = if s { (*v / -F::of(bw)).exp() } else { zero });
+            Zip::from(&mut rec).and(m).for_each(|v, &bw| {
+                *v = if stored(*v) {
+                    (clip(*v) / -F::of(bw)).exp()
+                } else {
+                    zero
+                }
+            });
         }
         Bandwidth::MedKScalar => {
-            let (dist_to_k, _, _) = row_stats();
+            let (dist_to_k, _, _) = row_stats(&rec);
             let mut finite: Vec<F> = dist_to_k.into_iter().filter(|v| !v.is_nan()).collect();
             if finite.is_empty() {
                 return err("bandwidth", "cannot estimate bandwidth from an empty graph");
@@ -2645,10 +2700,10 @@ fn apply_affinity<F: AudioFloat>(
             } else {
                 (finite[n / 2 - 1] + finite[n / 2]) / F::of(2.0)
             };
-            scalar(med, rec);
+            scalar(med, &mut rec);
         }
         heuristic => {
-            let (dist_to_k, avg, empty) = row_stats();
+            let (dist_to_k, avg, empty) = row_stats(&rec);
             if let Some(i) = empty.iter().position(|&e| e) {
                 return err(
                     "bandwidth",
@@ -2661,7 +2716,8 @@ fn apply_affinity<F: AudioFloat>(
             };
             for i in 0..t {
                 for j in 0..ncols {
-                    if !stored[[i, j]] {
+                    let v = rec[[i, j]];
+                    if !stored(v) {
                         rec[[i, j]] = zero;
                         continue;
                     }
@@ -2673,7 +2729,7 @@ fn apply_affinity<F: AudioFloat>(
                         );
                     };
                     let si = stat[i];
-                    let d = rec[[i, j]];
+                    let d = clip(v);
                     let bw = match heuristic {
                         Bandwidth::MeanK | Bandwidth::MeanKAvg => (si + sj) / F::of(2.0),
                         Bandwidth::GmeanK | Bandwidth::GmeanKAvg => (si * sj).sqrt(),
@@ -2757,22 +2813,30 @@ pub fn recurrence_matrix<F: AudioFloat>(
         k
     };
     let n_nb = (t - 1).min(k + 2 * w);
-    let dist = knn_distances(data, data, cfg.metric);
 
+    // The distances are computed one row at a time, straight into the output
+    // (no t x t distance matrix).
     let (zero, one) = (F::zero(), F::one());
     let mut rec = Array2::<F>::zeros((t, t));
-    for i in 0..t {
-        for j in nearest(dist.row(i), n_nb, Some(i)) {
-            rec[[i, j]] = match cfg.mode {
-                RecurrenceMode::Connectivity => one,
-                _ => dist[[i, j]],
-            };
+    {
+        let dists = RowDistances::new(data, cfg.metric);
+        let mut drow = vec![zero; t];
+        let mut idx = Vec::with_capacity(t);
+        for (i, mut row) in rec.rows_mut().into_iter().enumerate() {
+            knn_row(&dists, data.column(i), &mut drow);
+            nearest(&drow, n_nb, Some(i), &mut idx);
+            for &j in &idx {
+                row[j] = match cfg.mode {
+                    RecurrenceMode::Connectivity => one,
+                    _ => drow[j],
+                };
+            }
         }
     }
     if !cfg.full {
-        for ((i, j), v) in rec.indexed_iter_mut() {
-            if i.abs_diff(j) < w {
-                *v = zero;
+        for i in 0..t {
+            for j in i.saturating_sub(w - 1)..(i + w).min(t) {
+                rec[[i, j]] = zero;
             }
         }
         trim_rows(&mut rec, k);
@@ -2787,15 +2851,21 @@ pub fn recurrence_matrix<F: AudioFloat>(
         rec[[i, i]] = diag;
     }
     if cfg.sym {
-        let tr = rec.t().to_owned();
-        Zip::from(&mut rec).and(&tr).for_each(|a, &b| *a = a.min(b));
+        for i in 0..t {
+            for j in i + 1..t {
+                let (a, b) = (rec[[i, j]], rec[[j, i]]);
+                rec[[i, j]] = a.min(b);
+                rec[[j, i]] = b.min(a);
+            }
+        }
     }
     match cfg.mode {
         RecurrenceMode::Connectivity => rec.mapv_inplace(|v| if v != zero { one } else { zero }),
         RecurrenceMode::Distance => {}
-        RecurrenceMode::Affinity => apply_affinity(&mut rec, &cfg.bandwidth, bandwidth_k)?,
+        RecurrenceMode::Affinity => apply_affinity(rec.view_mut(), &cfg.bandwidth, bandwidth_k)?,
     }
-    Ok(rec.reversed_axes().as_standard_layout().into_owned())
+    transpose_square_in_place(rec.as_slice_mut().expect("standard layout"), t);
+    Ok(rec)
 }
 
 /// Cross-similarity matrix between a query and a reference feature sequence.
@@ -2866,26 +2936,37 @@ pub fn cross_similarity<F: AudioFloat>(
         k
     };
     let n_nb = n_ref.min(k);
-    let dist = knn_distances(data, data_ref, cfg.metric);
+    // librosa returns the transpose of the (query, reference) matrix built
+    // here, so it is built directly in the transposed storage, one row of
+    // distances at a time (no distance matrix, no transposed copy).
     let (zero, one) = (F::zero(), F::one());
-    let mut xsim = Array2::<F>::zeros((n, n_ref));
-    for i in 0..n {
-        for j in nearest(dist.row(i), n_nb, None) {
-            xsim[[i, j]] = match cfg.mode {
-                RecurrenceMode::Connectivity => one,
-                _ => dist[[i, j]],
-            };
+    let mut out = Array2::<F>::zeros((n_ref, n));
+    {
+        let mut xsim = out.view_mut().reversed_axes();
+        let dists = RowDistances::new(data_ref, cfg.metric);
+        let mut drow = vec![zero; n_ref];
+        let mut idx = Vec::with_capacity(n_ref);
+        for i in 0..n {
+            knn_row(&dists, data.column(i), &mut drow);
+            nearest(&drow, n_nb, None, &mut idx);
+            for &j in &idx {
+                xsim[[i, j]] = match cfg.mode {
+                    RecurrenceMode::Connectivity => one,
+                    _ => drow[j],
+                };
+            }
+        }
+        // Each row holds at most n_nb <= k links, so librosa's trimming to
+        // the k nearest (when `full` is false) never removes any.
+        match cfg.mode {
+            RecurrenceMode::Connectivity => {
+                xsim.mapv_inplace(|v| if v != zero { one } else { zero });
+            }
+            RecurrenceMode::Distance => {}
+            RecurrenceMode::Affinity => apply_affinity(xsim, &cfg.bandwidth, bandwidth_k)?,
         }
     }
-    if !cfg.full {
-        trim_rows(&mut xsim, k);
-    }
-    match cfg.mode {
-        RecurrenceMode::Connectivity => xsim.mapv_inplace(|v| if v != zero { one } else { zero }),
-        RecurrenceMode::Distance => {}
-        RecurrenceMode::Affinity => apply_affinity(&mut xsim, &cfg.bandwidth, bandwidth_k)?,
-    }
-    Ok(xsim.reversed_axes().as_standard_layout().into_owned())
+    Ok(out)
 }
 
 /// Converts a recurrence matrix into a time-lag matrix.
