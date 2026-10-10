@@ -146,6 +146,8 @@ All notable changes to this project are documented here.
 - `examples/librosa_bench.rs`: wall-clock benchmark of the librosa-compatible operations (JSON
   output; the companion librosa script lives outside the repository).
 
+- `PeakPickConfig::new()` (same as `Default`).
+
 ### Fixed
 
 
@@ -206,13 +208,30 @@ All notable changes to this project are documented here.
 - `mu_compress` used `ln(mu|x| + ln(1+mu))` instead of `ln(1 + mu|x|)` (0 mapped to 0.309, ±1 to ±1.003); it now equals `librosa.mu_compress(quantize=False)`. `mu_compress`/`mu_expand` on integer sample types rescaled `mu` like a sample (255 became 255/32768); the raw numeric value is now used. Both reject non-finite or non-positive `mu`.
 - `trim_all_silence` discarded the audio before every silent gap shorter than the minimum (a 1 s tone came back as 24 samples); it now removes exactly the silent runs at least `min_silence_duration_seconds` long.
 - Resampling (`resample`, `resample_by_ratio`, `AudioProcessing::resample*`): Medium/High output was delayed by the filter delay (64/128 input samples) and lost the tail; `Fast` downsampling was plain decimation with no anti-aliasing. All sinc paths now use a delay-free Kaiser-windowed sinc interpolator at exact rational positions (f64), with exact output length `ceil(n * out / in)`; `High` follows soxr_hq's passband/attenuation (agrees with `librosa.resample` to 129-135 dB on band-limited content). `Fast` downsampling is anti-aliased; `Fast` upsampling is unchanged (linear interpolation).
-- `to_mono(Average)` averaged stereo f64/i32 in f32 (precision loss) and summed >2 integer channels in the sample type (overflow); `to_stereo(Left/Right)` on mono returned mono / errored; it now gives `[m, 0]` / `[0, m]` (multi-channel input unchanged, as for `Duplicate`/`Pan`).
+- `to_mono(Average)` averaged stereo f64/i32 in f32 (precision loss) and summed >2 integer channels in the sample type (overflow); `to_stereo(Left/Right)` on **mono** input returned mono / errored; it now gives `[m, 0]` / `[0, m]`. On multi-channel input `Left`/`Right` still extract channel 0 / 1 as a mono signal, exactly as in 2.0 (unchanged; use `extract_channel` for clarity).
 - Pitch-shift perturbation (`PerturbationMethod::PitchShift`): wrong instantaneous-frequency estimate (no bin de-trending, sign-preserving `%` wrap), incoherent phases for colliding bins, output 68 samples short, and multichannel input failed with a shape error. A 440 Hz tone shifted +2 st now peaks at 494.0 Hz (was 505.7 Hz).
 - `pad_samples_right` could return one sample fewer than requested (samples -> seconds -> samples truncation).
 
 - Resampling: the per-thread filter-table cache is now a bounded LRU (at most 8 tables / 64 MiB per
   thread). It previously grew without limit, by up to tens of MB per distinct rate pair (e.g. pitch
   shifting by arbitrary steps).
+
+- **Resampling: memory blow-up for steep decimation.** Awkward strongly decimating ratios built a huge
+  interpolated filter table (48000 -> 101 Hz at `High`: 2.8 GB and 12 s, kept in the per-thread cache;
+  192000 -> 101 Hz aborted the process). The interpolated table now uses `ceil(4096 * L/M)` rows per input
+  sample when downsampling (same interpolation accuracy), kernels larger than the 64 MiB cache budget are
+  not retained, and ratios that would need more than 2^25 coefficients return a `ParameterError` from
+  `resample`, `resample_by_ratio` and `StreamingResampler::new` instead of aborting.
+- **Non-finite audio is rejected by the librosa-compatible operations** (`AudioSpectrum`, `AudioFeatures`,
+  `AudioTonal`, `AudioConstantQ`, `AudioRhythm`, `AudioEffects`) with a `ParameterError`, as librosa does;
+  previously a single NaN gave silent garbage.
+- **Extreme parameters no longer abort the process**: `mu_law_encode` (huge `mu`; `mu > 2^53` is an error),
+  `pyin` (tiny `resolution`), `tempo`/tempograms (huge `ac_size`/`win_length`), `estimate_tuning`/
+  `pitch_tuning` (tiny `resolution`), `clicks` and `time_stretch` (tiny `rate`) validate derived buffer sizes.
+- `peak_pick` no longer overflows with huge window/`wait` parameters.
+- `PeakPickingConfig::set_min_peak_separation_ms` no longer panics when the separation rounds to zero
+  frames (or is NaN / negative); it clamps to one frame.
+- `resample_by_ratio` rejects ratios whose target rate exceeds `u32::MAX` Hz, and non-finite ratios.
 
 ### Changed
 
@@ -247,6 +266,12 @@ All notable changes to this project are documented here.
     (~1.45x / ~1.5x faster, bit-identical).
   - Fewer whole-signal copies in `AudioEffects` methods returning audio.
 - The `resampling` feature names `realfft` explicitly (already a dependency through `rubato`).
+
+- **Resampling / `pitch_shift`: filter tables are shared and cheap to build.** Interpolated (awkward-ratio)
+  tables depend only on quality and relative bandwidth, so all upsampling ratios of one quality share one
+  table, sampled from a per-quality prototype. `pitch_shift` with a new `n_steps` no longer pays ~30 ms to
+  build a table; a sweep over 25 distinct shifts went from 777 ms to 150 ms. Common (small-L) ratios are
+  bit-identical; awkward ratios change below the table-interpolation error (< -120 dB).
 
 ## 2.0.0
 
