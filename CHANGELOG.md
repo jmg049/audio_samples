@@ -263,7 +263,10 @@ All notable changes to this project are documented here.
 A formula-by-formula audit checked the documentation against the code and
 against SciPy/librosa/closed-form results. Each fix below has a regression
 test (`tests/audit_*.rs`). Several change numerical output; they now match
-their documented definitions.
+their documented definitions. The audit also found bugs that are listed once,
+under *Fixed* above: YIN, `estimate_key`, `autocorrelation` scaling,
+`levinson_durbin`, the resampler, `complex_onset_detection`, the odd-length
+spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
 
 - **Dynamics:** the envelope follower used the release time almost
   everywhere (a 1 ms attack reached 3 % instead of 63 % after 1 ms), so every
@@ -273,35 +276,24 @@ their documented definitions.
   ceiling statically; gate ratio now means a 1:R downward expander;
   `set_detection_method` resizes the RMS window. `LimiterConfig::isp_limiting`
   is documented as having no effect yet.
-- **Statistics:** `autocorrelation` was divided by the FFT size twice;
-  `mean`/`variance`/`cross_correlation` wrapped or panicked on integer audio
-  (also breaking `remove_dc_offset`); multi-channel `variance` now pools all
-  samples; u8 zero crossings are counted about 128; spectral centroid,
-  rolloff, bandwidth and slope used the wrong bin spacing for odd lengths;
+- **Statistics:** `mean`/`variance`/`cross_correlation` wrapped or panicked
+  on integer audio (also breaking `remove_dc_offset`); multi-channel
+  `variance` now pools all samples; u8 zero crossings are counted about 128;
   `align_signals` never searched any lag; `detect_fundamental_frequency`
   returned sub-harmonics; `detect_sample_rate` tested the wrong bins and now
   returns `Ok(None)` when no cutoff is found.
 - **Processing:** gains, peak/min-max normalisation, fades and `mix` on
-  integer audio truncated the gain to an integer (silence on i16);
-  `mu_compress`/`mu_expand` rescaled μ like a sample; median normalisation
-  subtracted the middle sample, not the median; `GaussianNoise` perturbation
-  added uniform noise at the wrong SNR (and pink was white); `am_signal`
-  depth now follows the standard AM definition; Medium/High resampling is
-  time-aligned (the sinc delay of ~69/139 samples at 44.1→48 kHz is
-  compensated and the tail is kept).
+  integer audio truncated the gain to an integer (silence on i16); median
+  normalisation subtracted the middle sample, not the median; `GaussianNoise`
+  perturbation added uniform noise at the wrong SNR (and pink was white);
+  `am_signal` depth now follows the standard AM definition.
 - **Spectral:** `power_spectral_density` now has SciPy `welch` density
   scaling (it was off by N·Σw²/2); spectrograms, mel, MFCC, chroma, gammatone
   and CQT of integer audio used a raw cast (i16 power 2³⁰ too large);
   `HpssConfig::num_freq_bins` for odd FFT sizes; spectrum/phase plot axes and
-  spectrogram plot sample rate; `frequency_to_note` errors outside MIDI 0–127.
-- **LPC:** `levinson_durbin` returned the order-(p−1) solution padded with a
-  zero; it now returns the order-p predictor (LPC/SILK output changes).
-- **Pitch and rhythm:** YIN now follows de Cheveigné & Kawahara with
-  parabolic interpolation (440 Hz read as 450 Hz at 44.1 kHz, and +3.9 % at
-  100 Hz); `estimate_key` rotated its profile the wrong way (D major reported
-  as A# major); `complex_onset_detection` panicked on every input; the beat
-  grid drifted; onset envelope smoothing used a sample count as frames;
-  `pick_peaks` ignored the adjusted threshold window.
+  spectrogram plot sample rate.
+- **Rhythm:** the beat grid drifted; onset envelope smoothing used a sample
+  count as frames; `pick_peaks` ignored the adjusted threshold window.
 - **VAD:** a signal shorter than one frame with `pad_end = false` returns an
   error (was undefined behaviour); `VadMethod::Spectral` returns
   `Unsupported` (it is not implemented).
