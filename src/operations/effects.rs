@@ -2339,6 +2339,15 @@ pub trait AudioEffects {
     /// [`ParameterError`] if `rate` is not finite and positive, the result would be
     /// empty or exceed 2^31 samples, or the STFT configuration is invalid.
     ///
+    /// # Differences from librosa
+    ///
+    /// Same algorithm; on ordinary signals the output matches librosa to
+    /// floating-point round-off. Where the input contains exact digital silence
+    /// (e.g. a zero lead-in), STFT bins of ~0 magnitude have ill-conditioned
+    /// phases that the phase vocoder accumulates, so round-off is amplified:
+    /// agreement drops to ~30 dB SNR there. librosa against itself with a
+    /// 1e-15 relative STFT perturbation differs by the same amount (~27 dB).
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -2411,9 +2420,11 @@ pub trait AudioEffects {
     /// librosa resamples with soxr (`res_type="soxr_hq"`); this method uses the
     /// crate's windowed-sinc resampler ([`ResamplingQuality::High`] by default),
     /// which approximates the arbitrary ratio `rate` by a ratio of two integers near
-    /// 2^31. The time-stretch stage matches librosa to round-off; the final signal
-    /// agrees within the resampler difference (about 68 dB SNR on the reference test signal,
-    /// see `tests/librosa_reference/effects.rs`).
+    /// 2^31. The time-stretch stage matches librosa to round-off (amplified on
+    /// input containing exact digital silence, see
+    /// [`time_stretch`](Self::time_stretch)); the final signal agrees within the
+    /// resampler difference (about 68 dB SNR on the reference test signal, see
+    /// `tests/librosa_reference/effects.rs`).
     ///
     /// # Examples
     ///

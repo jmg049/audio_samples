@@ -424,7 +424,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 
 | librosa | audio_samples | status | notes |
 |---|---|---|---|
-| `time_stretch` | `AudioEffects::time_stretch` | equivalent | |
+| `time_stretch` | `AudioEffects::time_stretch` | equivalent | Round-off is amplified on input containing exact digital silence (ill-conditioned phases of ~0-magnitude bins): ~30 dB SNR there, the same as librosa against itself with a 1e-15 perturbation |
 | `pitch_shift` | `AudioEffects::pitch_shift` (`PitchShiftConfig`) | equivalent with differences | The final resampling uses the crate's resampler, not soxr (about 68 dB SNR against librosa) |
 | `preemphasis` | `AudioEffects::preemphasis`, `operations::effects::preemphasis_with_state` (`zi`, returns `zf`) | equivalent | |
 | `deemphasis` | `AudioEffects::deemphasis`, `operations::effects::deemphasis_with_state` | equivalent | |
@@ -581,8 +581,9 @@ in the API docs, gathered here by theme.
   88200 samples from 44100 Hz to 48000 Hz). Fractional sample rates and librosa's
   `scale` option are not supported.
 - **Operations that resample internally inherit the difference:**
-  - `pitch_shift`: the time-stretch stage matches librosa to round-off; the
-    final signal agrees to about 68 dB SNR.
+  - `pitch_shift`: the time-stretch stage matches librosa to round-off (except
+    on exact digital silence, see `time_stretch`); the final signal agrees to
+    about 68 dB SNR.
   - `cqt`, `vqt`, `hybrid_cqt`, `chroma_cqt`, `chroma_cens`, `chroma_vqt`,
     `tonnetz`: the top octave (no decimation) matches librosa to round-off.
     Decimated octaves agree to about 1e-4 of the peak, which is the same size as

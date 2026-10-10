@@ -36,7 +36,7 @@ repos:
         entry: tests/reference/hooks/check_librosa.sh
         language: system
         pass_filenames: false
-        files: ^(src/operations/(spectrum|filterbanks|features|constant_q|rhythm|effects|pitch_tracking|sequence|transforms|statistics|processing|editing|hpss|pitch_analysis|beat|peak_picking|onset/.*)\.rs|src/(resampling|conversions|traits)\.rs|src/utils/audio_math\.rs|tests/librosa_reference/.*|tests/fixtures/librosa/.*|Cargo\.toml)$
+        files: ^(src/operations/(spectrum|filterbanks|features|tonal|constant_q|rhythm|effects|pitch_tracking|sequence|transforms|statistics|processing|editing|channels|hpss|pitch_analysis|beat|peak_picking|types|traits|mod|onset/.*)\.rs|src/(resampling|conversions|traits|repr|lib)\.rs|src/utils/(audio_math|mod)\.rs|tests/librosa_reference/.*|tests/fixtures/librosa/.*|Cargo\.toml)$
 
       - id: librosa-fixtures-fresh
         name: librosa fixtures match their generator
