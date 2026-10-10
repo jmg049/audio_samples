@@ -199,4 +199,47 @@ def build(signals, sr):
         "frames_len": librosa.clicks(frames=[3, 20, 40], sr=sr, hop_length=256, click_freq=2000.0, click_duration=0.05, length=11000).astype(np.float64)[::SIG_STEP],
         "times_len": len(librosa.clicks(times=[0.1, 0.5, 0.52], sr=sr)),
     }
+
+    # float32 input: librosa keeps float32 (complex64) throughout. The Rust side
+    # compares AudioSamples<f32> built from the same PCM signal.
+    mix32 = mix.astype(np.float32)
+    notes32 = notes.astype(np.float32)
+    burst32 = burst.astype(np.float32)
+    f32: dict = {}
+    f32["time_stretch"] = {
+        str(rate): {"len": len(y), "dtype": str(y.dtype), "y": y[::SIG_STEP]}
+        for rate in (1.5, 0.75)
+        for y in [librosa.effects.time_stretch(mix32, rate=rate)]
+    }
+    pre32 = librosa.effects.preemphasis(mix32)
+    de32 = librosa.effects.deemphasis(mix32)
+    f32["emphasis"] = {"dtype": str(pre32.dtype), "pre": pre32[::SPARSE_STEP], "de": de32[::SPARSE_STEP]}
+    dn32 = librosa.stft(notes32)
+    h32, p32 = librosa.decompose.hpss(dn32)
+    f32["hpss_spectrogram"] = {
+        "dtype": str(h32.dtype),
+        "harm": _spec_subset(h32, 32, 3),
+        "perc": _spec_subset(p32, 32, 3),
+    }
+    yh32, yp32 = librosa.effects.hpss(notes32)
+    f32["hpss_audio"] = {"dtype": str(yh32.dtype), "harmonic": yh32[::SPARSE_STEP], "percussive": yp32[::SPARSE_STEP]}
+    tr32 = {}
+    for name, kw in {
+        "default": {},
+        "top_db30": dict(top_db=30),
+        "frame1024_hop256": dict(frame_length=1024, hop_length=256),
+        "ref_abs": dict(ref=0.01, top_db=20),
+    }.items():
+        _, idx = librosa.effects.trim(burst32, **kw)
+        tr32[name] = {"trim": idx, "split": librosa.effects.split(burst32, **kw)}
+    tr32["mix_split"] = librosa.effects.split(mix32, top_db=20)
+    f32["trim_split"] = tr32
+    # Burg's recursion in float32 loses accuracy quickly with the order on tonal
+    # signals (librosa float32 vs float64 on `mix`: 1.3e-3 at order 4, 0.14 at
+    # order 8); the cases stay where float32 is meaningful.
+    f32["lpc"] = {
+        f"{name}_{order}": librosa.lpc(sig.astype(np.float32), order=order)
+        for name, sig, order in (("mix", mix, 4), ("notes", notes, 8), ("noise", noise, 16))
+    }
+    out["float32"] = f32
     return out
