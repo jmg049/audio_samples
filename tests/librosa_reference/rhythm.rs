@@ -62,7 +62,7 @@ fn check(what: &str, actual: &[f64], expected: &[f64], rtol: f64) {
 }
 
 fn onset_cfg(case: &str) -> OnsetStrengthConfig {
-    let d = OnsetStrengthConfig::default();
+    let d = OnsetStrengthConfig::librosa();
     match case {
         "default" => d,
         "lag2" => d.with_lag(nzu!(2)),
@@ -71,8 +71,8 @@ fn onset_cfg(case: &str) -> OnsetStrengthConfig {
         "nocenter" => d.with_center(false),
         "detrend" => d.with_detrend(true),
         "hop256_nfft1024" => d.with_mel(
-            MelSpectrogramConfig::default().with_stft(
-                StftConfig::default()
+            MelSpectrogramConfig::librosa().with_stft(
+                StftConfig::librosa()
                     .with_n_fft(nzu!(1024))
                     .with_hop_length(Some(nzu!(256))),
             ),
@@ -103,7 +103,7 @@ fn onset_strength() {
         }
     }
     let env = stereo()
-        .onset_strength(&OnsetStrengthConfig::default())
+        .onset_strength(&OnsetStrengthConfig::librosa())
         .unwrap();
     let e = arr2(&f["stereo"]["default"]);
     assert_eq!(env.dim(), e.dim());
@@ -120,7 +120,7 @@ fn onset_strength_multi() {
     let f = &fixture()["onset_strength_multi"];
     let bounds = usizes(&f["bounds"]);
     let notes = mono("notes");
-    let d = OnsetStrengthConfig::default();
+    let d = OnsetStrengthConfig::librosa();
     let cases: Vec<(&str, Array3<f64>, Array3<f64>)> = vec![
         (
             "notes_default",
@@ -211,8 +211,8 @@ fn onset_detect_exact() {
     for sig in ["clicks120", "notes", "mix"] {
         let g = &f[sig];
         let a = mono(sig);
-        let env = env_row(&a, &OnsetStrengthConfig::default());
-        let d = OnsetDetectConfig::default();
+        let env = env_row(&a, &OnsetStrengthConfig::librosa());
+        let d = OnsetDetectConfig::librosa();
         let det = |cfg: &OnsetDetectConfig, energy: Option<&[f64]>| {
             onset_detect_from_envelope(&env, srf, hop, cfg, energy).unwrap()
         };
@@ -228,7 +228,7 @@ fn onset_detect_exact() {
         let nn = d
             .clone()
             .with_normalize(false)
-            .with_peak_pick(Some(PeakPickConfig::default().with_delta(0.5)));
+            .with_peak_pick(Some(PeakPickConfig::for_onsets(srf, hop).with_delta(0.5)));
         assert_eq!(
             det(&nn, None),
             usizes(&g["no_normalize"]),
@@ -292,7 +292,7 @@ fn tempograms() {
             g["bin_step"].as_u64().unwrap() as usize,
             g["frame_step"].as_u64().unwrap() as usize,
         );
-        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::default()).unwrap();
+        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::librosa()).unwrap();
         let shape: Vec<usize> = usizes(&g["tempogram_shape"]);
         assert_eq!([tg.dim().1, tg.dim().2], [shape[0], shape[1]]);
         let sub = tg.slice(s![0, ..;bs, ..;fs]).to_owned();
@@ -304,7 +304,7 @@ fn tempograms() {
             1e-9,
         );
 
-        let cfg = TempogramConfig::new()
+        let cfg = TempogramConfig::librosa()
             .with_win_length(nzu!(32))
             .with_center(false)
             .with_norm(Some(2.0));
@@ -318,7 +318,7 @@ fn tempograms() {
             1e-9,
         );
 
-        let cfg = TempogramConfig::new()
+        let cfg = TempogramConfig::librosa()
             .with_win_length(nzu!(33))
             .with_window(audio_samples::operations::filterbanks::Window::Hamming)
             .with_norm(None);
@@ -332,7 +332,7 @@ fn tempograms() {
             1e-9,
         );
 
-        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::default())
+        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::librosa())
             .unwrap();
         let shape = usizes(&g["fourier_shape"]);
         assert_eq!([ft.dim().1, ft.dim().2], [shape[0], shape[1]]);
@@ -349,7 +349,7 @@ fn tempograms() {
         let (er, ei): (Vec<f64>, Vec<f64>) = e.iter().map(|z| (z.re, z.im)).unzip();
         check(&format!("fourier re {sig}"), &ar, &er, 1e-9);
         check(&format!("fourier im {sig}"), &ai, &ei, 1e-9);
-        let cfg = FourierTempogramConfig::new()
+        let cfg = FourierTempogramConfig::librosa()
             .with_win_length(nzu!(40))
             .with_center(false);
         let ft = fourier_tempogram_from_envelope(env.view(), &cfg).unwrap();
@@ -362,7 +362,7 @@ fn tempograms() {
         check(&format!("fourier w40 im {sig}"), &ai, &ei, 1e-9);
     }
     // Stereo from audio (onset envelope round-off adds ~1e-12).
-    let tg = stereo().tempogram(&TempogramConfig::default()).unwrap();
+    let tg = stereo().tempogram(&TempogramConfig::librosa()).unwrap();
     let shape = usizes(&f["stereo"]["tempogram_shape"]);
     assert_eq!(vec![tg.dim().0, tg.dim().1, tg.dim().2], shape);
     let sub = tg.slice(s![.., ..;16, ..;4]).to_owned();
@@ -382,9 +382,9 @@ fn tempo_exact() {
     for sig in ["clicks120", "notes", "mix"] {
         let g = &f[sig];
         let a = mono(sig);
-        let env = a.onset_strength(&OnsetStrengthConfig::default()).unwrap();
+        let env = a.onset_strength(&OnsetStrengthConfig::librosa()).unwrap();
         let t = |cfg: &TempoConfig| tempo_from_envelope(env.view(), srf, hop, cfg).unwrap();
-        let d = TempoConfig::default();
+        let d = TempoConfig::librosa();
         assert_eq!(t(&d)[[0, 0]], scalar(&g["default"]), "{sig} default");
         assert_eq!(
             a.tempo(&d).unwrap()[[0, 0]],
@@ -419,7 +419,7 @@ fn tempo_exact() {
             .with_max_tempo(Some(200.0));
         assert_eq!(t(&c)[[0, 0]], scalar(&g["median_max200"]), "{sig} median");
     }
-    let st = stereo().tempo(&TempoConfig::default()).unwrap();
+    let st = stereo().tempo(&TempoConfig::librosa()).unwrap();
     assert_eq!(
         st.column(0).to_vec(),
         arr2(&f["stereo_f64"]["default"]).column(0).to_vec()
@@ -438,7 +438,7 @@ fn beat_track_exact() {
     for sig in ["clicks120", "notes", "mix"] {
         let g = &f[sig];
         let env = f64s(&g["envelope"]);
-        let d = BeatTrackConfig::default();
+        let d = BeatTrackConfig::librosa();
         let run = |cfg: &BeatTrackConfig| beat_track_from_envelope(&env, srf, hop, cfg).unwrap();
         let cases = [
             ("default", d.clone()),
@@ -482,7 +482,7 @@ fn beat_track_exact() {
     let env = f64s(&g["envelope"]);
     let curve = f64s(&g["curve"]);
     let fr = srf / 512.0;
-    let bt = beat_track_from_envelope(&env, srf, hop, &BeatTrackConfig::default()).unwrap();
+    let bt = beat_track_from_envelope(&env, srf, hop, &BeatTrackConfig::librosa()).unwrap();
     assert_eq!(bt.beats.frames, usizes(&g["default"]));
     assert_eq!(bt.tempo, scalar(&g["tempo"]));
     assert_eq!(
@@ -511,16 +511,16 @@ fn plp() {
         let e = f64s(&bt[sig]["envelope"]);
         let env = Array2::from_shape_vec((1, e.len()), e).unwrap();
         let cases = [
-            ("default", PlpConfig::default()),
+            ("default", PlpConfig::librosa()),
             (
                 "range_60_200_w256",
-                PlpConfig::default()
+                PlpConfig::librosa()
                     .with_tempo_range(Some(60.0), Some(200.0))
                     .with_win_length(nzu!(256)),
             ),
             (
                 "unbounded",
-                PlpConfig::default().with_tempo_range(None, None),
+                PlpConfig::librosa().with_tempo_range(None, None),
             ),
         ];
         for (name, cfg) in &cases {
@@ -533,7 +533,7 @@ fn plp() {
                 1e-9,
             );
         }
-        let p = mono(sig).plp(&PlpConfig::default()).unwrap();
+        let p = mono(sig).plp(&PlpConfig::librosa()).unwrap();
         check(
             &format!("plp {sig} from audio"),
             p.as_slice().unwrap(),
@@ -552,14 +552,14 @@ fn tempogram_variants() {
         let g = &f[sig];
         let e = f64s(&fixture()["tempogram"][sig]["envelope"]);
         let env = Array2::from_shape_vec((1, e.len()), e).unwrap();
-        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::default()).unwrap();
+        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::librosa()).unwrap();
 
         // Linear interpolation of the tempogram at exact per-frame tempi: FFT round-off.
         let r = tempogram_ratio_from_tempogram(
             tg.view(),
             srf,
             hop,
-            &TempogramRatioConfig::default(),
+            &TempogramRatioConfig::librosa(),
             None,
         )
         .unwrap();
@@ -569,7 +569,7 @@ fn tempogram_variants() {
             arr2(&g["ratio"]).as_slice().unwrap(),
             1e-9,
         );
-        let cfg = TempogramRatioConfig::default().with_aggregate(Some(Aggregate::Mean));
+        let cfg = TempogramRatioConfig::librosa().with_aggregate(Some(Aggregate::Mean));
         let r = tempogram_ratio_from_tempogram(tg.view(), srf, hop, &cfg, None).unwrap();
         check(
             &format!("tempogram_ratio mean {sig}"),
@@ -577,7 +577,7 @@ fn tempogram_variants() {
             &f64s(&g["ratio_mean"]),
             1e-9,
         );
-        let mut cfg = TempogramRatioConfig::default().with_factors(vec![1.0, 0.5, 2.0]);
+        let mut cfg = TempogramRatioConfig::librosa().with_factors(vec![1.0, 0.5, 2.0]);
         cfg.tempo = cfg.tempo.with_start_bpm(90.0);
         cfg.fill_value = -1.0;
         let r = tempogram_ratio_from_tempogram(tg.view(), srf, hop, &cfg, None).unwrap();
@@ -589,7 +589,7 @@ fn tempogram_variants() {
         );
 
         let h =
-            hybrid_tempogram_from_envelope(env.view(), srf, hop, &HybridTempogramConfig::default())
+            hybrid_tempogram_from_envelope(env.view(), srf, hop, &HybridTempogramConfig::librosa())
                 .unwrap();
         let shape = usizes(&g["hybrid_shape"]);
         assert_eq!([h.dim().1, h.dim().2], [shape[0], shape[1]]);
@@ -603,7 +603,7 @@ fn tempogram_variants() {
         println!("hybrid {sig}: max abs {abs:.3e}, peak-rel {rel:.3e}");
         assert_close(&format!("hybrid {sig}"), sub.iter(), e.iter(), 1e-12, 2e-7);
 
-        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::default())
+        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::librosa())
             .unwrap();
         let n = ft.dim().2 - 1;
         let mag = ft.slice(s![.., .., ..n]).mapv(|z| z.norm());

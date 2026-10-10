@@ -242,13 +242,13 @@ fn main() {
     b.run("preemphasis", || y.preemphasis(0.97).unwrap());
 
     // --- rhythm ---------------------------------------------------------
-    let c = OnsetStrengthConfig::default();
+    let c = OnsetStrengthConfig::librosa();
     b.run("onset_strength", || y.onset_strength(&c).unwrap());
-    let c = OnsetDetectConfig::default();
+    let c = OnsetDetectConfig::librosa();
     b.run("onset_detect", || y.onset_detect(&c).unwrap());
-    let c = TempoConfig::default();
+    let c = TempoConfig::librosa();
     b.run("tempo", || y.tempo(&c).unwrap());
-    let c = BeatTrackConfig::default();
+    let c = BeatTrackConfig::librosa();
     b.run("beat_track", || y.beat_track(&c).unwrap());
 
     // --- resampling -----------------------------------------------------
