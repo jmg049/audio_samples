@@ -233,6 +233,14 @@ All notable changes to this project are documented here.
   frames (or is NaN / negative); it clamps to one frame.
 - `resample_by_ratio` rejects ratios whose target rate exceeds `u32::MAX` Hz, and non-finite ratios.
 
+- Size-driven building blocks return `ParameterError` instead of aborting on a failed allocation (or
+  panicking with "capacity overflow"): `get_window`, `window_bandwidth`, `window_sumsquare`,
+  `mel_filterbank`, `stft`, `istft`, `frame`, `stack_memory`, `transition_*` (`n_states^2 > 2^28`),
+  `chroma_filterbank`, `cq_to_chroma`, `wavelet`, `beat_track_with_bpm`.
+- The maximum filters behind `onset_strength(max_size=)` and `pcen(max_size=)` scan at most one padding
+  period, so a huge `max_size` no longer runs for hours (results unchanged).
+- `clicks` uses saturating arithmetic when placing clicks.
+
 ### Changed
 
 - Filter parameter validation follows SciPy: any edge in `(0, Nyquist)` is
