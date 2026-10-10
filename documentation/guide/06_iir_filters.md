@@ -16,9 +16,9 @@ notch.
 **Difference equation.** An IIR filter computes each output sample from the
 current and past inputs *and* past outputs:
 
-$$y\[n\] = \sum_{k=0}^{M} b_k\\, x\[n-k\] - \sum_{k=1}^{N} a_k\\, y\[n-k\]$$
+$$y[n] = \sum_{k=0}^{M} b_k\, x[n-k] - \sum_{k=1}^{N} a_k\, y[n-k]$$
 
-where $x\[n\]$ and $y\[n\]$ are the input and output samples (dimensionless),
+where $x[n]$ and $y[n]$ are the input and output samples (dimensionless),
 $b_k$ are the feed-forward coefficients, $a_k$ the feedback coefficients
 (with $a_0 = 1$), and $M$, $N$ the numerator and denominator orders.
 
@@ -48,7 +48,7 @@ cutoff in rad/s. At $\Omega = \Omega_c$ the power is halved:
 $10 \log_{10}(1/2) = -3.01$ dB. Its $N$ poles sit on a circle of radius
 $\Omega_c$ in the left half of the s-plane:
 
-$$s_k = \Omega_c\\, e^{j\pi(2k + N + 1)/(2N)}, \quad k = 0, \dots, N-1$$
+$$s_k = \Omega_c\, e^{j\pi(2k + N + 1)/(2N)}, \quad k = 0, \dots, N-1$$
 
 **Bilinear transform with pre-warping.** The digital filter is obtained by
 substituting
@@ -86,7 +86,7 @@ $$|H_a(j\Omega)|^2 = \frac{1}{1 + \varepsilon^2 T_N^2(\Omega / \Omega_c)}, \qqua
 where $r_p$ is the pass-band ripple in dB, $\varepsilon$ the (dimensionless)
 ripple factor and $T_N$ the Chebyshev polynomial of order $N$:
 $T_N(x) = \cos(N \arccos x)$ for $|x| \le 1$, which oscillates between $-1$ and
-$1$, and $T_N(x) = \cosh(N \\,\mathrm{arccosh}\\, x)$ for $x > 1$, which grows
+$1$, and $T_N(x) = \cosh(N \,\mathrm{arccosh}\, x)$ for $x > 1$, which grows
 like $2^{N-1}x^N$. So the pass band ripples between 0 and $-r_p$ dB, and at
 $\Omega_c$ ($T_N(1) = 1$) the gain is $-r_p$ dB rather than $-3.01$ dB. At DC,
 $T_N(0) = \cos(N\pi/2)$ is $\pm 1$ for even $N$ (gain $-r_p$ dB) and 0 for odd
@@ -197,7 +197,7 @@ few hertz. That is the band-stop biquad of the RBJ *Audio EQ Cookbook*
 (Bristow-Johnson), available as
 [`EqBand::band_stop`](crate::operations::types::EqBand::band_stop):
 
-$$H(z) = \frac{1 - 2\cos\omega_0\\, z^{-1} + z^{-2}}{(1 + \alpha) - 2\cos\omega_0\\, z^{-1} + (1 - \alpha) z^{-2}}, \qquad \alpha = \frac{\sin \omega_0}{2Q}$$
+$$H(z) = \frac{1 - 2\cos\omega_0\, z^{-1} + z^{-2}}{(1 + \alpha) - 2\cos\omega_0\, z^{-1} + (1 - \alpha) z^{-2}}, \qquad \alpha = \frac{\sin \omega_0}{2Q}$$
 
 where $f_0$ is the notch frequency in Hz and $Q$ (dimensionless) is $f_0$
 divided by the $-3$ dB bandwidth in Hz. The poles have radius
@@ -429,7 +429,7 @@ assert!((predicted + 51.0).abs() < 0.05);
 2. At $f_c$ the Chebyshev gain is $-r_p = -1$ dB. With an even order the gain
    at DC is also $-1$ dB ($T_4(0) = 1$) and the ripple peaks ($T_4 = 0$) touch
    0 dB. At 2 kHz, $x = \tan(\pi/8)/\tan(\pi/16) = 2.0824$,
-   $T_4(x) = \cosh(4\\,\mathrm{arccosh}\\,x) = 116.7$ and
+   $T_4(x) = \cosh(4\,\mathrm{arccosh}\,x) = 116.7$ and
    $\varepsilon^2 = 10^{0.1} - 1 = 0.2589$, so the attenuation is
    $10\log_{10}(1 + \varepsilon^2 T_4^2) = 35.5$ dB, 10 dB more than the
    Butterworth's 25.5 dB.
@@ -532,7 +532,7 @@ assert!((20.0 * peak.log10() + 51.0).abs() < 0.1);
   [`AudioParametricEq::apply_eq_band`](crate::AudioParametricEq::apply_eq_band)
   (RBJ cookbook biquads)
 - [`Explain`](crate::educational::Explain), [`ExplainFor`](crate::educational::ExplainFor)
-- Previous chapter: [05. Convolution and FIR filters](crate::guide::c05_convolution_fir);
-  next chapter: [07. Resampling](crate::guide::c07_resampling)
+- Previous chapter: [05. Convolution and FIR filters](05_convolution_fir.md);
+  next chapter: [07. Resampling](07_resampling.md)
 - Lab: `examples/tutorial_06_iir_filters.rs`
   (`cargo run --release --example tutorial_06_iir_filters --features educational,full_no_plotting`)

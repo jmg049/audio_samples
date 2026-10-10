@@ -11,12 +11,12 @@ how the transform is inverted, and what the dB scale of a spectrogram means.
 ## Concept
 
 **Definition (as implemented).** With frame length (and FFT size) $N$, hop
-$H$ and window $w\[n\]$:
+$H$ and window $w[n]$:
 
-$$X_m\[k\] = \sum_{n=0}^{N-1} x\[mH + n - p\] \\, w\[n\] \\, e^{-j 2\pi k n / N}$$
+$$X_m[k] = \sum_{n=0}^{N-1} x[mH + n - p] \, w[n] \, e^{-j 2\pi k n / N}$$
 
 where $m$ is the frame index, $k = 0 \dots \lfloor N/2 \rfloor$ the bin index,
-$p$ the padding in samples and $x\[\cdot\] = 0$ outside the signal. With
+$p$ the padding in samples and $x[\cdot] = 0$ outside the signal. With
 `centre = true`, $p = \lfloor N/2 \rfloor$, so frame $m$ is *centred* on sample
 $mH$; with `centre = false`, $p = 0$ and frame $m$ *starts* at sample $mH$. The
 window is the symmetric Hann of chapter 03.
@@ -32,17 +32,17 @@ frequency resolution by the window's main lobe (about $2\Delta f$ for Hann at
 $-6$ dB). Their product is fixed by the window shape: halving one doubles the
 other. A smaller hop gives more frames, not sharper ones.
 
-**Inverse (weighted overlap-add).** Inverse-DFT each frame to $y_m\[n\]$,
+**Inverse (weighted overlap-add).** Inverse-DFT each frame to $y_m[n]$,
 multiply by the window again and overlap-add, dividing by the summed squared
 windows:
 
-$$\hat{x}\[n\] = \frac{\sum_m w\[n - mH\] \\, y_m\[n - mH\]}{\sum_m w^2\[n - mH\]}$$
+$$\hat{x}[n] = \frac{\sum_m w[n - mH] \, y_m[n - mH]}{\sum_m w^2[n - mH]}$$
 
 This is exact wherever the denominator is non-zero, for any window and hop,
 provided the STFT has not been modified. Two overlap conditions are worth
 naming. **NOLA** (nonzero overlap-add): the summed *squared* windows
-$\sum_m w^2\[n - mH\]$ are never zero, which is all the inverse above needs.
-**COLA** (constant overlap-add): the plain summed windows $\sum_m w\[n - mH\]$
+$\sum_m w^2[n - mH]$ are never zero, which is all the inverse above needs.
+**COLA** (constant overlap-add): the plain summed windows $\sum_m w[n - mH]$
 are the same constant for every $n$, which plain overlap-add without the
 division needs. WOLA works even for windows that are not COLA. If the STFT is
 modified before inversion (masking, a phase vocoder), the frames are no longer
@@ -50,10 +50,10 @@ consistent and the same formula gives the least-squares estimate of Griffin
 and Lim (1984) rather than an exact inverse. With centring, the output has
 $(M-1)H + N - 2\lfloor N/2\rfloor$ samples.
 
-**Spectrogram scales.** Power $P_m\[k\] = |X_m\[k\]|^2$ (no division by $N$),
-magnitude $|X_m\[k\]|$, and decibels
+**Spectrogram scales.** Power $P_m[k] = |X_m[k]|^2$ (no division by $N$),
+magnitude $|X_m[k]|$, and decibels
 
-$$P_{\mathrm{dB}} = 10 \log_{10} \max\\!\left(P, \\; 10^{\\,\mathrm{floor}/10}\right)$$
+$$P_{\mathrm{dB}} = 10 \log_{10} \max\!\left(P, \; 10^{\,\mathrm{floor}/10}\right)$$
 
 in dB **re 1** (an absolute reference), where floor is the `LogParams` value in
 dB. `LogParams::new(-80.0)` clamps at power $10^{-8}$; it is **not** librosa's
@@ -362,8 +362,8 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
 * [`Explain`](crate::educational::Explain),
   [`ExplainContext::with_f0_range`](crate::educational::ExplainContext::with_f0_range),
   [`topics::window`](crate::educational::topics::window)
-* Previous: [03. The DFT, windows and leakage](crate::guide::c03_dft_windows).
-  Next: [05. Convolution and FIR filters](crate::guide::c05_convolution_fir).
-  Mel features in depth: [10. Cepstrum, mel and MFCC](crate::guide::c10_cepstrum_mel_mfcc).
+* Previous: [03. The DFT, windows and leakage](03_dft_windows.md).
+  Next: [05. Convolution and FIR filters](05_convolution_fir.md).
+  Mel features in depth: [10. Cepstrum, mel and MFCC](10_cepstrum_mel_mfcc.md).
 * Lab: `examples/tutorial_04_stft_spectrograms.rs`
   (`cargo run --release --example tutorial_04_stft_spectrograms --features educational,full_no_plotting`).

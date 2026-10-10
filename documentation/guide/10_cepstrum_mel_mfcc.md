@@ -9,13 +9,13 @@ cepstrum upwards, and checks each step against the library.
 
 ## Concept
 
-**Real cepstrum.** For an $N$-point frame with DFT $X\[k\]$,
+**Real cepstrum.** For an $N$-point frame with DFT $X[k]$,
 
-$$c\[q\] = \frac{1}{N} \sum_{k=0}^{N-1} \log |X\[k\]| \\, e^{j 2 \pi k q / N}$$
+$$c[q] = \frac{1}{N} \sum_{k=0}^{N-1} \log |X[k]| \, e^{j 2 \pi k q / N}$$
 
 where $q$ is the *quefrency* in samples ($q/f_s$ seconds, $f_s$ the sample
 rate in Hz) and $\log$ is the natural logarithm. Because $|X|$ is real and
-even, $c\[q\]$ is real and even. Taking logs turns the source-filter product
+even, $c[q]$ is real and even. Taking logs turns the source-filter product
 $|X| = |E| \cdot |H|$ into a sum, $\log|X| = \log|E| + \log|H|$: the smooth
 vocal-tract envelope $|H|$ lands at low quefrencies, and a periodic source
 with period $\tau_0$ samples produces a peak at $q = \tau_0$, so
@@ -37,13 +37,13 @@ Here $f$ is in Hz and $m$ in mels; the two scales have very different units
 (1000 Hz is 1000 HTK mels but 15 Slaney mels), so never mix them.
 
 **Mel filterbank.** $M$ triangular filters with edges equally spaced in mels:
-$f_i = m^{-1}(m(f_{min}) + i \\, \Delta m)$, $\Delta m = (m(f_{max}) - m(f_{min}))/(M+1)$,
+$f_i = m^{-1}(m(f_{min}) + i \, \Delta m)$, $\Delta m = (m(f_{max}) - m(f_{min}))/(M+1)$,
 $i = 0, \dots, M+1$. Filter $i$ (with neighbours $f_{i-1} < f_i < f_{i+1}$, in Hz)
 weights FFT bin $k$ at frequency $k f_s / N_{fft}$ by
 
 $$H_i(f) = \max\left(0, \min\left(\frac{f - f_{i-1}}{f_i - f_{i-1}}, \frac{f_{i+1} - f}{f_{i+1} - f_i}\right)\right)$$
 
-and the mel power in band $i$ is $P_i = \sum_k H_i(k f_s/N_{fft}) \\, |X\[k\]|^2$.
+and the mel power in band $i$ is $P_i = \sum_k H_i(k f_s/N_{fft}) \, |X[k]|^2$.
 
 **MFCC, as this library computes it.** Per frame, with $M$ mel bands from 0 Hz
 to $f_s/2$ (no filter normalisation):
@@ -142,7 +142,7 @@ assert_eq!(q_peak, 100);
 assert_eq!(fs / q_peak as f64, 160.0);
 ```
 
-The lab also prints the low quefrencies ($c\[1\] = 2.32$, $c\[2\] = 0.47$),
+The lab also prints the low quefrencies ($c[1] = 2.32$, $c[2] = 0.47$),
 which describe the envelope, and shows that the pitch peak (1.55) stands well
 above everything else in the search range (at most 0.38).
 
@@ -411,7 +411,7 @@ assert!((factor - 24.91).abs() < 0.005);
 - [`hz_to_mel`](crate::utils::audio_math::hz_to_mel),
   [`mel_to_hz`](crate::utils::audio_math::mel_to_hz) (HTK).
 - [`topics::cepstrum`](crate::educational::topics::cepstrum).
-- Previous chapter: [`c09_pitch`](crate::guide::c09_pitch); next:
-  [`c11_energy_vad`](crate::guide::c11_energy_vad).
+- Previous chapter: [`c09_pitch`](09_pitch.md); next:
+  [`c11_energy_vad`](11_energy_vad.md).
 - Lab: `examples/tutorial_10_cepstrum_mel_mfcc.rs`
   (`cargo run --release --example tutorial_10_cepstrum_mel_mfcc --features educational,full_no_plotting`).

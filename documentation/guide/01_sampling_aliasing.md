@@ -11,7 +11,7 @@ where they reappear, why, and how to stop it.
 
 **Sampling** reads an analogue signal every $T$ seconds:
 
-$$x\[n\] = x_a(nT), \qquad T = 1 / f_s$$
+$$x[n] = x_a(nT), \qquad T = 1 / f_s$$
 
 where $x_a(t)$ is the analogue signal (amplitude in units of full scale) at
 time $t$ in seconds, $n$ is the integer sample index, $T$ is the sampling
@@ -35,7 +35,7 @@ $$f_N = f_s / 2$$
 in Hz. If $x_a$ contains no energy at or above $f_N$, it is recovered exactly
 from its samples by sinc interpolation (Whittaker-Shannon):
 
-$$x_a(t) = \sum_n x\[n\] \\, \mathrm{sinc}\\!\left(\frac{t - nT}{T}\right), \qquad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
+$$x_a(t) = \sum_n x[n] \, \mathrm{sinc}\!\left(\frac{t - nT}{T}\right), \qquad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
 
 where $u$ is a dimensionless time offset in sampling periods.
 
@@ -46,7 +46,7 @@ $$f_a = |f - k f_s|, \qquad k = \mathrm{round}(f / f_s)$$
 where $f_a$ is the alias frequency in Hz (always between 0 and $f_N$) and $k$
 is the nearest integer multiple of the sample rate. Picture the frequency axis
 folded like a paper fan at $0$, $f_N$, $f_s$, $3f_N$, ...: every frequency lands
-somewhere in $\[0, f_N\]$.
+somewhere in $[0, f_N]$.
 
 Aliasing bites in three places:
 
@@ -198,7 +198,7 @@ assert!(s_clean[6900] / s_clean[700] < 1e-9);
 The folding formula is a one-liner. Check it against the library over a sweep
 of frequencies, and check the identity behind it: the samples of an 11 kHz sine
 at 16 kHz are exactly those of a 5 kHz sine with inverted sign, because
-$\sin(2\pi \cdot 11000\\, n/16000) = \sin(2\pi(11000 - 16000)\\, n/16000) = -\sin(2\pi \cdot 5000\\, n / 16000)$.
+$\sin(2\pi \cdot 11000\, n/16000) = \sin(2\pi(11000 - 16000)\, n/16000) = -\sin(2\pi \cdot 5000\, n / 16000)$.
 
 ```rust
 use audio_samples::educational::topics;
@@ -356,7 +356,7 @@ assert!(clean[1300] / clean[700] < 1e-9);  // absent
 * [`sine_wave`](crate::utils::generation::sine_wave),
   [`square_wave`](crate::utils::generation::square_wave),
   [`square_wave_bandlimited`](crate::utils::generation::square_wave_bandlimited)
-* Next: [02. Quantisation and dither](crate::guide::c02_quantisation_dither).
-  Resampling in depth: [07. Resampling](crate::guide::c07_resampling).
+* Next: [02. Quantisation and dither](02_quantisation_dither.md).
+  Resampling in depth: [07. Resampling](07_resampling.md).
 * Lab: `examples/tutorial_01_sampling_aliasing.rs`
   (`cargo run --release --example tutorial_01_sampling_aliasing --features educational,full_no_plotting`).

@@ -50,4 +50,11 @@ repos:
         entry: tests/reference/hooks/check_educational.sh
         language: system
         pass_filenames: true
-        files: ^(src/educational/.*|src/guide\.rs|documentation/guide/.*|examples/tutorial_.*\.rs|tests/explain_api\.rs|tests/educational_integration\.rs)$
+        files: ^(src/educational/.*|src/guide\.rs|build\.rs|build_support/.*|documentation/guide/.*|examples/tutorial_.*\.rs|tests/explain_api\.rs|tests/educational_integration\.rs)$
+
+      - id: doc-maths
+        name: documentation maths (rustdoc escaping, guide round trip)
+        entry: tests/reference/hooks/check_doc_maths.sh
+        language: system
+        pass_filenames: true
+        files: ^(src/.*\.rs|documentation/guide/.*\.md|build\.rs|build_support/.*|tests/guide_math_roundtrip\.rs|tests/reference/hooks/check_(doc_math|guide_rustdoc_math)\.py)$

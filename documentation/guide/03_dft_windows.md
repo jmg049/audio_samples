@@ -9,11 +9,11 @@ window can and cannot do about that.
 
 ## Concept
 
-**Definition.** For a block of $N$ samples $x\[n\]$, $n = 0, \dots, N-1$:
+**Definition.** For a block of $N$ samples $x[n]$, $n = 0, \dots, N-1$:
 
-$$X\[k\] = \sum_{n=0}^{N-1} x\[n\] \\, e^{-j 2\pi k n / N}$$
+$$X[k] = \sum_{n=0}^{N-1} x[n] \, e^{-j 2\pi k n / N}$$
 
-where $k$ is the integer bin index, $j = \sqrt{-1}$ and $X\[k\]$ is a complex
+where $k$ is the integer bin index, $j = \sqrt{-1}$ and $X[k]$ is a complex
 number in the units of $x$ (here: full scale) times samples. The exponent is
 **negative** and there is **no** $1/N$ factor (the same as `numpy.fft.fft`).
 
@@ -22,21 +22,21 @@ number in the units of $x$ (here: full scale) times samples. The exponent is
 $$f_k = \frac{k f_s}{N}, \qquad \Delta f = \frac{f_s}{N}$$
 
 where $f_s$ is the sample rate in Hz and $\Delta f$ the bin spacing in Hz. For
-real $x$, $X\[N-k\] = \overline{X\[k\]}$, so only bins $0 \dots \lfloor N/2\rfloor$
+real $x$, $X[N-k] = \overline{X[k]}$, so only bins $0 \dots \lfloor N/2\rfloor$
 carry information; this crate returns exactly those $\lfloor N/2\rfloor + 1$.
 
-**A tone on a bin.** For $x\[n\] = A\cos(2\pi k_0 n/N)$ with $0 < k_0 < N/2$,
-$X\[k_0\] = A N/2$ (real; at $k_0 = 0$ or $N/2$ it is $AN$);
-for $A\sin(\cdot)$, $X\[k_0\] = -jAN/2$. With a window $w\[n\]$ applied first,
-the peak becomes $A \sum_n w\[n\] / 2$.
+**A tone on a bin.** For $x[n] = A\cos(2\pi k_0 n/N)$ with $0 < k_0 < N/2$,
+$X[k_0] = A N/2$ (real; at $k_0 = 0$ or $N/2$ it is $AN$);
+for $A\sin(\cdot)$, $X[k_0] = -jAN/2$. With a window $w[n]$ applied first,
+the peak becomes $A \sum_n w[n] / 2$.
 
 **Leakage.** The DFT treats the block as one period of a periodic signal. If
 the tone does not complete a whole number of cycles in the block, the implied
 periodic signal has a jump at the block edge, and the energy spreads over all
 bins. Multiplying by a window that tapers to zero removes the jump. The price
-is a wider main lobe. A window $w\[n\]$ is summarised by:
+is a wider main lobe. A window $w[n]$ is summarised by:
 
-$$\mathrm{CG} = \frac{1}{N}\sum_n w\[n\], \qquad \mathrm{ENBW} = \frac{N \sum_n w^2\[n\]}{\left(\sum_n w\[n\]\right)^2}$$
+$$\mathrm{CG} = \frac{1}{N}\sum_n w[n], \qquad \mathrm{ENBW} = \frac{N \sum_n w^2[n]}{\left(\sum_n w[n]\right)^2}$$
 
 where the coherent gain CG (dimensionless) scales the peak of a bin-centred
 tone relative to no window, and the equivalent noise bandwidth ENBW (in bins)
@@ -48,9 +48,9 @@ the main lobe in dB relative to $W(0)$.
 
 This crate's `WindowType::Hanning` is the **symmetric** Hann window
 
-$$w\[n\] = 0.5 - 0.5\cos\\!\left(\frac{2\pi n}{N-1}\right)$$
+$$w[n] = 0.5 - 0.5\cos\!\left(\frac{2\pi n}{N-1}\right)$$
 
-(denominator $N-1$, so $w\[0\] = w\[N-1\] = 0$), not the periodic one (denominator
+(denominator $N-1$, so $w[0] = w[N-1] = 0$), not the periodic one (denominator
 $N$) that librosa and SciPy use by default for spectra.
 
 **Zero padding** (appending zeros before the DFT) samples the same spectrum on
@@ -241,7 +241,7 @@ components into quiet ones) cost a wider main lobe and more noise per bin.
    what is its centre frequency? Check that a Hann-windowed 440 Hz tone peaks
    there.
 2. A sine of amplitude 0.5 sits exactly on a bin, Hann window, $N = 1024$.
-   Predict $|X\[k\]|$ at the peak, then measure.
+   Predict $|X[k]|$ at the peak, then measure.
 3. With a Hann window (main lobe about 2 bins wide at $-6$ dB), what is the
    smallest $N$ that should separate two tones 10 Hz apart at 16 kHz? Check
    that a power of two above it separates 1000 Hz and 1010 Hz, and that
@@ -325,7 +325,7 @@ assert_eq!(count(1024), 1);
 * [`topics::dft`](crate::educational::topics::dft),
   [`topics::window`](crate::educational::topics::window)
 * The [`transforms`](crate::operations::transforms) module docs (conventions)
-* Previous: [02. Quantisation and dither](crate::guide::c02_quantisation_dither).
-  Next: [04. STFT and spectrograms](crate::guide::c04_stft_spectrograms).
+* Previous: [02. Quantisation and dither](02_quantisation_dither.md).
+  Next: [04. STFT and spectrograms](04_stft_spectrograms.md).
 * Lab: `examples/tutorial_03_dft_windows.rs`
   (`cargo run --release --example tutorial_03_dft_windows --features educational,full_no_plotting`).

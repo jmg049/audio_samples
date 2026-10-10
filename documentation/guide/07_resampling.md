@@ -22,7 +22,7 @@ $f_{out}/2$ reappears at
 
 $$f_a = |f - k f_{out}|$$
 
-where $k$ is the integer that brings $f_a$ into $\[0, f_{out}/2\]$ (chapter 01).
+where $k$ is the integer that brings $f_a$ into $[0, f_{out}/2]$ (chapter 01).
 Once folded it is indistinguishable from real content, so a resampler must
 **low-pass filter before decimating**, with a cutoff at or below
 $\min(f_{in}, f_{out})/2$.
@@ -35,7 +35,7 @@ filter that removes them.
 **Ideal band-limited interpolation.** A band-limited signal is fully described
 by its samples, and its value at any time $t$ (seconds) is
 
-$$x(t) = \sum_n x\[n\]\\, \mathrm{sinc}(f_{in} t - n), \quad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
+$$x(t) = \sum_n x[n]\, \mathrm{sinc}(f_{in} t - n), \quad \mathrm{sinc}(u) = \frac{\sin(\pi u)}{\pi u}$$
 
 A practical resampler truncates and windows the sinc, and scales it so that its
 cutoff is $f_c = \min(f_{in}, f_{out})/2$ (slightly less, to leave room for the
@@ -44,7 +44,7 @@ anti-aliasing.
 
 **Linear interpolation** uses a triangular kernel instead of a sinc. For
 integer upsampling by $L = 3$ it equals zero-stuffing followed by the FIR
-$\[1, 2, 3, 2, 1\]/3$, whose gain at frequency $f$ (Hz) is
+$[1, 2, 3, 2, 1]/3$, whose gain at frequency $f$ (Hz) is
 
 $$G(f) = \frac{3 + 4\cos\omega + 2\cos 2\omega}{9}, \quad \omega = 2\pi f / f_{out}$$
 
@@ -191,7 +191,7 @@ for q in [ResamplingQuality::Fast, ResamplingQuality::Medium, ResamplingQuality:
 ## Under the hood
 
 **Naive decimation is plain sampling.** With $r = 1/3$, keeping every
-third sample returns $x\[3m\]$, and
+third sample returns $x[3m]$, and
 $\sin(2\pi\, 10\,000\, m / 16\,000) = -\sin(2\pi\, 6\,000\, m / 16\,000)$ for
 every integer $m$: the 10 kHz tone *is* a 6 kHz tone on the new grid. No
 filter afterwards can tell the two apart, which is why every tier filters
@@ -278,8 +278,8 @@ assert!((1_200..2_800).all(|n| (lib[n] - y[n]).abs() < 1e-5));
 
 **Linear interpolation is a poor interpolation filter.** Upsampling a 6 kHz
 tone from 16 kHz to 48 kHz with `Fast` should, by the formula for $G(f)$, droop
-the tone to $G(6\\,000) = -3.77$ dB and leave an image at
-$16\\,000 - 6\\,000 = 10\\,000$ Hz at $G(10\\,000) = -11.8$ dB.
+the tone to $G(6\,000) = -3.77$ dB and leave an image at
+$16\,000 - 6\,000 = 10\,000$ Hz at $G(10\,000) = -11.8$ dB.
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -491,8 +491,8 @@ assert!(1e-7 / slope < 5.1e-7);
   [`StreamingResampler`](crate::StreamingResampler)
 - [`topics::resampling`](crate::educational::topics::resampling),
   [`topics::aliasing`](crate::educational::topics::aliasing)
-- Previous chapter: [06. IIR filters](crate::guide::c06_iir_filters);
-  next chapter: [08. LPC, the source-filter model and formants](crate::guide::c08_lpc_formants);
-  aliasing basics: [01. Sampling and aliasing](crate::guide::c01_sampling_aliasing)
+- Previous chapter: [06. IIR filters](06_iir_filters.md);
+  next chapter: [08. LPC, the source-filter model and formants](08_lpc_formants.md);
+  aliasing basics: [01. Sampling and aliasing](01_sampling_aliasing.md)
 - Lab: `examples/tutorial_07_resampling.rs`
   (`cargo run --release --example tutorial_07_resampling --features educational,full_no_plotting`)

@@ -17,7 +17,7 @@ $\tau_0$ is not an integer.
 **Autocorrelation.** The (unnormalised) autocorrelation of an $N$-sample frame
 $x$ at lag $\tau$ (samples) is
 
-$$r(\tau) = \sum_{i=0}^{N-1-\tau} x\[i\] \\, x\[i+\tau\]$$
+$$r(\tau) = \sum_{i=0}^{N-1-\tau} x[i] \, x[i+\tau]$$
 
 It peaks at multiples of the period. The estimator searches
 $\tau_{min} = \lfloor f_s / f_{max} \rfloor \le \tau \le \tau_{max} = \lfloor f_s / f_{min} \rfloor$
@@ -36,7 +36,7 @@ and $\Delta f \approx 46.8$ Hz at 880 Hz (error at most 23.4 Hz).
 **YIN** (de Cheveigné and Kawahara, 2002) replaces the product by a squared
 difference, normalises it, and interpolates:
 
-$$d(\tau) = \sum_{j=0}^{N-1-\tau} \left( x\[j\] - x\[j+\tau\] \right)^2$$
+$$d(\tau) = \sum_{j=0}^{N-1-\tau} \left( x[j] - x[j+\tau] \right)^2$$
 
 $$d'(0) = 1, \qquad d'(\tau) = \frac{d(\tau)}{\frac{1}{\tau} \sum_{i=1}^{\tau} d(i)}$$
 
@@ -50,7 +50,7 @@ $d'(\tau_0 - 1), d'(\tau_0), d'(\tau_0 + 1)$ (this is what the crate and
 librosa do; see the note below). With $a = d'(\tau_0+1) + d'(\tau_0-1) - 2d'(\tau_0)$
 and $b = (d'(\tau_0+1) - d'(\tau_0-1))/2$ the vertex lies at $\tau_0 - b/a$:
 
-$$\hat{\tau} = \tau_0 + \frac{1}{2} \\, \frac{d'(\tau_0-1) - d'(\tau_0+1)}{d'(\tau_0-1) - 2 d'(\tau_0) + d'(\tau_0+1)}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}$$
+$$\hat{\tau} = \tau_0 + \frac{1}{2} \, \frac{d'(\tau_0-1) - d'(\tau_0+1)}{d'(\tau_0-1) - 2 d'(\tau_0) + d'(\tau_0+1)}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}$$
 
 so the period is fractional and the integer grid disappears. Following
 librosa, the shift is skipped (left at 0) when $\tau_0$ is at either end of the
@@ -386,7 +386,7 @@ assert!((f(0.019) - 200.0).abs() < 0.1);
 - **The autocorrelation estimate is quantised** to $f_s/\tau$; use YIN (or
   interpolate the peak yourself) when you need better than $f_0^2/f_s$.
 - **Octave errors are a property of the signal**, not a bug: narrow
-  $\[f_{min}, f_{max}\]$ when you know the speaker, and lower $\theta$ when
+  $[f_{min}, f_{max}]$ when you know the speaker, and lower $\theta$ when
   harmonics alternate in strength.
 - `detect_pitch_autocorr` requires $f_{min} > 1$ Hz; both methods reject
   multi-channel audio.
@@ -407,8 +407,8 @@ assert!((f(0.019) - 200.0).abs() < 0.1);
   [`autocorr_pitch_detection`](crate::operations::pitch_analysis::autocorr_pitch_detection).
 - Explanations: [`topics::yin`](crate::educational::topics::yin),
   [`topics::autocorrelation_pitch`](crate::educational::topics::autocorrelation_pitch).
-- Previous chapter: [`c08_lpc_formants`](crate::guide::c08_lpc_formants); next:
-  [`c10_cepstrum_mel_mfcc`](crate::guide::c10_cepstrum_mel_mfcc), which finds the
+- Previous chapter: [`c08_lpc_formants`](08_lpc_formants.md); next:
+  [`c10_cepstrum_mel_mfcc`](10_cepstrum_mel_mfcc.md), which finds the
   pitch a third way, in the cepstrum.
 - Lab: `examples/tutorial_09_pitch.rs`
   (`cargo run --release --example tutorial_09_pitch --features educational,full_no_plotting`).

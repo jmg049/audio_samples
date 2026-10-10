@@ -15,10 +15,10 @@ is centred at $t H / f_s$ seconds ($f_s$ the sample rate in Hz). At
 $H = 512$ and $f_s = 44.1$ kHz a frame lasts $H/f_s = 11.61$ ms and there are
 $f_s/H = 86.13$ frames per second.
 
-**Spectral flux.** With $|X_b\[t\]|$ the magnitude of frequency bin $b$ in frame
+**Spectral flux.** With $|X_b[t]|$ the magnitude of frequency bin $b$ in frame
 $t$, the half-wave-rectified flux is
 
-$$o\[t\] = \sum_{b} \max\left(0, \\, |X_b\[t\]| - |X_b\[t-1\]|\right), \qquad o\[0\] = 0$$
+$$o[t] = \sum_{b} \max\left(0, \, |X_b[t]| - |X_b[t-1]|\right), \qquad o[0] = 0$$
 
 Only *increases* count, so note offsets do not create onsets. This crate
 evaluates it on a constant-Q transform (CQT) whose $b_o O$ bins ($b_o$ per
@@ -31,7 +31,7 @@ zero (`adaptive_threshold`, $\mu$ = `adaptive_threshold_multiplier`).
 **Peak picking**, as implemented by
 [`pick_peaks`](crate::operations::peak_picking::pick_peaks), all in **frames**:
 optional pre-emphasis and median filtering; normalisation by the maximum; a
-threshold $\theta\[i\] = \mathrm{clamp}(\max_{|j - i| \le w/2} o\[j\] - \delta, \\, \theta_{lo}, \theta_{hi})$
+threshold $\theta[i] = \mathrm{clamp}(\max_{|j - i| \le w/2} o[j] - \delta, \, \theta_{lo}, \theta_{hi})$
 (window $w$ frames, $\delta = 0.05$, $\theta_{lo} = 0.01$, $\theta_{hi} = 1$ by default);
 strict local maxima above it; finally, peaks are accepted strongest first and
 dropped if closer than $s$ frames to an accepted one. A peak at frame $i$ is
@@ -40,11 +40,11 @@ reported at $t_i = i H / f_s$ seconds.
 **Tempo.** A tempo of $\beta$ beats per minute (BPM) is an inter-beat
 interval of $60/\beta$ seconds, i.e. a lag of
 
-$$\ell = \frac{60 \\, f_s}{\beta \\, H} \ \text{frames}, \qquad \beta = \frac{60 \\, f_s}{H \\, \ell}$$
+$$\ell = \frac{60 \, f_s}{\beta \, H} \ \text{frames}, \qquad \beta = \frac{60 \, f_s}{H \, \ell}$$
 
 [`estimate_tempo`](crate::operations::AudioBeatTracking::estimate_tempo)
 smooths the ODF (7-frame moving average), compresses it ($\ln(1 + 0.5 x)$),
-removes the mean and computes $a(\ell) = \frac{1}{n - \ell} \sum_i c\[i\] \\, c\[i-\ell\]$
+removes the mean and computes $a(\ell) = \frac{1}{n - \ell} \sum_i c[i] \, c[i-\ell]$
 for the integer lags that map into 40-240 BPM. Each lag is weighted by a
 log-normal prior centred on 120 BPM, $w(\beta) = \exp\left(-\frac{1}{2} \log_2^2 (\beta/120)\right)$,
 and the best $a(\ell) w(\beta)$ wins. Two consequences: estimates lie on the grid
@@ -108,7 +108,7 @@ whole frames: 0.5 s is 43.07 frames, and the detector can only report 43.
 
 **The defaults, in frames.** The default
 [`PeakPickingConfig`](crate::operations::types::PeakPickingConfig) pre-emphasises
-the ODF ($o\[i\] - 0.97\, o\[i-1\]$), applies no median filter, normalises by the
+the ODF ($o[i] - 0.97\, o[i-1]$), applies no median filter, normalises by the
 maximum, and thresholds with a 9-frame window (104.5 ms), $\delta = 0.07$ and a
 floor $\theta_{lo} = 0.1$; peaks closer than 3 frames (34.8 ms) are merged.
 
@@ -413,7 +413,7 @@ assert!((fine - 1.38).abs() < 0.005);
 - [`AudioBeatTracking::estimate_tempo`](crate::operations::AudioBeatTracking::estimate_tempo),
   [`AudioBeatTracking::detect_beats`](crate::operations::AudioBeatTracking::detect_beats),
   [`onset_strength_envelope`](crate::operations::beat::onset_strength_envelope).
-- Previous chapter: [`c12_dynamics`](crate::guide::c12_dynamics); next:
-  [`c14_psychoacoustics_codecs`](crate::guide::c14_psychoacoustics_codecs).
+- Previous chapter: [`c12_dynamics`](12_dynamics.md); next:
+  [`c14_psychoacoustics_codecs`](14_psychoacoustics_codecs.md).
 - Lab: `examples/tutorial_13_onsets_tempo.rs`
   (`cargo run --release --example tutorial_13_onsets_tempo --features educational,full_no_plotting`).

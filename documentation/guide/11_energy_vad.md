@@ -10,7 +10,7 @@ reproduces the library's VAD decisions exactly.
 
 ## Concept
 
-**Framing.** The signal $x\[n\]$ (samples scaled to $\[-1, 1\]$) is cut into
+**Framing.** The signal $x[n]$ (samples scaled to $[-1, 1]$) is cut into
 frames of $F$ samples that start every $H$ samples; frame $m$ covers
 $n = mH, \dots, mH + F - 1$. Typical speech settings are $F = 25$ ms and
 $H = 10$ ms, i.e. $F = 400$ and $H = 160$ at $f_s = 16$ kHz (the sample rate in
@@ -18,7 +18,7 @@ Hz).
 
 **Short-time energy** is reported as an RMS level in dBFS:
 
-$$r_m = \sqrt{\frac{1}{F} \sum_{i=0}^{F-1} x^2\[mH + i\]}, \qquad L_m = 20 \log_{10} r_m \ \text{dBFS}$$
+$$r_m = \sqrt{\frac{1}{F} \sum_{i=0}^{F-1} x^2[mH + i]}, \qquad L_m = 20 \log_{10} r_m \ \text{dBFS}$$
 
 where $r_m$ is the frame RMS (dimensionless, full scale = 1) and $L_m$ the
 level in decibels relative to full scale. 0 dBFS is an RMS of 1 (a full-scale
@@ -30,7 +30,7 @@ loudness in the room: the same file can be played at any volume (chapter 14).
 
 **Zero-crossing rate (ZCR)** counts sign changes:
 
-$$z_m = \frac{\\#\\{\text{sign changes in frame } m\\}}{F - 1}$$
+$$z_m = \frac{\#\{\text{sign changes in frame } m\}}{F - 1}$$
 
 in crossings per sample. A sinusoid at $f$ Hz crosses zero $2f$ times per
 second, so $z \approx 2f / f_s$; conversely a ZCR of $z$ corresponds to a
@@ -126,7 +126,7 @@ vowel at all: frame 28 starts at sample 4480 and its last 80 samples are
 vowel, which is enough to exceed $-40$ dBFS. It ends at the end of the first
 inactive frame after the hangover: the last frame touching the fricative is
 frame 89, hangover keeps frame 90 active, and frame 91 ends at
-$91 \cdot 160 + 400 = 14\\,960$. The combined region starts one frame later
+$91 \cdot 160 + 400 = 14\,960$. The combined region starts one frame later
 because frame 28 is mostly noise floor and therefore has a noise-like ZCR.
 
 ## Under the hood
@@ -264,7 +264,7 @@ assert_eq!(doc.quantity("Frames").unwrap().value, 120.0);
 ## Answers
 
 1. (a) $20\log_{10}(1/\sqrt 2) = -3.01$ dBFS. (b) Uniform noise on
-   $\[-a, a)$ has RMS $a/\sqrt 3$, so $20\log_{10}(0.1/\sqrt 3) = -24.8$ dBFS.
+   $[-a, a)$ has RMS $a/\sqrt 3$, so $20\log_{10}(0.1/\sqrt 3) = -24.8$ dBFS.
 
 ```rust
 use audio_samples::{AudioStatistics, sample_rate, sine_wave, white_noise};
@@ -372,7 +372,7 @@ assert_eq!(active(VadMethod::Combined), 0);
 - [`compound_tone`](crate::compound_tone), [`white_noise`](crate::white_noise),
   [`MonoSampleBuilder`](crate::utils::generation::MonoSampleBuilder)
 - [`Explain`](crate::educational::Explain), [`ExplainFor`](crate::educational::ExplainFor)
-- Previous chapter: [10. Cepstrum, mel and MFCC](crate::guide::c10_cepstrum_mel_mfcc);
-  next chapter: [12. Dynamics](crate::guide::c12_dynamics)
+- Previous chapter: [10. Cepstrum, mel and MFCC](10_cepstrum_mel_mfcc.md);
+  next chapter: [12. Dynamics](12_dynamics.md)
 - Lab: `examples/tutorial_11_energy_vad.rs`
   (`cargo run --release --example tutorial_11_energy_vad --features educational,full_no_plotting`)

@@ -57,7 +57,7 @@ implements them as follows.
 **Absolute threshold of hearing.** Terhardt's (1979) fit to the threshold in
 quiet, in dB SPL with $f$ in Hz and $k = f / 1000$:
 
-$$T_q(f) = 3.64\\, k^{-0.8} - 6.5\\, e^{-0.6 (k - 3.3)^2} + 10^{-3} k^4$$
+$$T_q(f) = 3.64\, k^{-0.8} - 6.5\, e^{-0.6 (k - 3.3)^2} + 10^{-3} k^4$$
 
 It is high at low frequencies, has a minimum of about $-5$ dB SPL near
 3.3 kHz (the ear-canal resonance), and rises again above that minimum, slowly
@@ -96,9 +96,9 @@ uniform quantisation gives quiet talkers a poor SNR (6.02 dB per bit, minus
 every dB the signal is below full scale; chapter 02). Companding quantises
 the *logarithm* of the amplitude instead. The continuous μ-law curve is
 
-$$F(x) = \mathrm{sgn}(x)\\, \frac{\ln(1 + \mu |x|)}{\ln(1 + \mu)}, \quad \mu = 255$$
+$$F(x) = \mathrm{sgn}(x)\, \frac{\ln(1 + \mu |x|)}{\ln(1 + \mu)}, \quad \mu = 255$$
 
-for $x \in \[-1, 1\]$. G.711 implements a segmented (piecewise-linear)
+for $x \in [-1, 1]$. G.711 implements a segmented (piecewise-linear)
 approximation: a **14-bit** linear sample becomes an **8-bit** code made of a
 sign bit, a 3-bit segment number and a 4-bit mantissa. The magnitude plus a
 bias of 33 is located in one of 8 segments (each twice as wide as the last);
@@ -465,8 +465,8 @@ assert!((spl - 82.0).abs() < 1e-12);
 - [`PerceptualCodec`](crate::PerceptualCodec), [`codecs::encode`](crate::codecs::encode),
   [`codecs::decode`](crate::codecs::decode), [`codecs::opus`](crate::codecs::opus)
 - [`AudioProcessing::mu_expand`](crate::AudioProcessing::mu_expand)
-- Previous chapter: [13. Onsets and tempo](crate::guide::c13_onsets_tempo);
-  quantisation basics: [02. Quantisation and dither](crate::guide::c02_quantisation_dither);
-  the mel scale in practice: [10. Cepstrum, mel and MFCC](crate::guide::c10_cepstrum_mel_mfcc)
+- Previous chapter: [13. Onsets and tempo](13_onsets_tempo.md);
+  quantisation basics: [02. Quantisation and dither](02_quantisation_dither.md);
+  the mel scale in practice: [10. Cepstrum, mel and MFCC](10_cepstrum_mel_mfcc.md)
 - Lab: `examples/tutorial_14_psychoacoustics_codecs.rs`
   (`cargo run --release --example tutorial_14_psychoacoustics_codecs --features educational,full_no_plotting`)

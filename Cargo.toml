@@ -220,6 +220,8 @@ proptest = "1.11.0"
 # float_roundtrip: parse fixture floats exactly (the default parser can be 1 ulp off,
 # which flips truncations such as time_to_samples at integer boundaries).
 serde_json = { version = "1.0.150", features = ["float_roundtrip"] }
+# CommonMark parser used by rustdoc: checks that the guide maths survives it.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [[example]]
 name = "basics"

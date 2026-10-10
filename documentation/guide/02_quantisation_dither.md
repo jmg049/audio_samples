@@ -10,24 +10,24 @@ such as a fading voice or a reverb tail.
 ## Concept
 
 **Uniform quantisation** maps a sample $x$ on the normalised scale
-$\[-1, 1\]$ to an integer code $q$ and back. This crate uses an *asymmetric*
+$[-1, 1]$ to an integer code $q$ and back. This crate uses an *asymmetric*
 mapping (see [`conversions`](crate::conversions)) so that both $-1$ and $+1$
 are reachable and the integer round trip is exact:
 
-$$q = \mathrm{round}(x \cdot 2^{b-1}) \\;\\; (x < 0), \qquad q = \mathrm{round}\big(x \cdot (2^{b-1} - 1)\big) \\;\\; (x \ge 0)$$
+$$q = \mathrm{round}(x \cdot 2^{b-1}) \;\; (x < 0), \qquad q = \mathrm{round}\big(x \cdot (2^{b-1} - 1)\big) \;\; (x \ge 0)$$
 
-where $b$ is the word length in bits, $x$ is clamped to $\[-1, 1\]$ and
+where $b$ is the word length in bits, $x$ is clamped to $[-1, 1]$ and
 $\mathrm{round}$ rounds half away from zero. Converting back divides by the same
 factors. The **step size** (one least-significant bit, LSB, in units of full
 scale) is therefore
 
-$$\Delta = 2^{1-b} \\;\\; \text{(below zero)}, \qquad \Delta_+ = \frac{1}{2^{b-1} - 1} \\;\\; \text{(above zero)}$$
+$$\Delta = 2^{1-b} \;\; \text{(below zero)}, \qquad \Delta_+ = \frac{1}{2^{b-1} - 1} \;\; \text{(above zero)}$$
 
 For $b = 16$: $\Delta = 1/32768$ and $\Delta_+ = 1/32767$, a difference of
 0.003 %. (libsndfile, soundfile and librosa divide by $2^{b-1}$ on both sides.)
 
 **Quantisation noise.** If the signal is busy enough, the rounding error
-$e = \hat{x} - x$ is spread uniformly over one step, $\[-\Delta/2, \Delta/2\]$,
+$e = \hat{x} - x$ is spread uniformly over one step, $[-\Delta/2, \Delta/2]$,
 so its power is
 
 $$\sigma_e^2 = \frac{\Delta^2}{12}$$
@@ -46,7 +46,7 @@ $-20$ dBFS peak and $-23.01$ dBFS RMS.
 **SQNR of a full-scale sine.** A sine of amplitude 1 has power $1/2$. With
 $\Delta = 2/2^b$:
 
-$$\mathrm{SQNR} = 10 \log_{10} \frac{1/2}{\Delta^2/12} = 10\log_{10}\\!\left(\tfrac{3}{2} \\, 4^{b}\right) \approx 6.02\\,b + 1.76 \ \mathrm{dB}$$
+$$\mathrm{SQNR} = 10 \log_{10} \frac{1/2}{\Delta^2/12} = 10\log_{10}\!\left(\tfrac{3}{2} \, 4^{b}\right) \approx 6.02\,b + 1.76 \ \mathrm{dB}$$
 
 Each extra bit buys about 6 dB. A signal peaking $L$ dB below full scale loses
 $L$ dB of SQNR.
@@ -55,8 +55,8 @@ $L$ dB of SQNR.
 uniform noise: it is a deterministic function of the signal, so it repeats with
 the signal and shows up as harmonics (distortion). **TPDF dither** adds, before
 rounding, a random value $d = u_1 + u_2$ where $u_1, u_2$ are independent and
-uniform on $\[-\Delta/2, \Delta/2)$; $d$ has a triangular density on
-$\[-\Delta, \Delta\]$ and power $\Delta^2/6$. The total error power becomes
+uniform on $[-\Delta/2, \Delta/2)$; $d$ has a triangular density on
+$[-\Delta, \Delta]$ and power $\Delta^2/6$. The total error power becomes
 
 $$\sigma^2_{e,\mathrm{TPDF}} = \frac{\Delta^2}{12} + \frac{\Delta^2}{6} = \frac{\Delta^2}{4}$$
 
@@ -103,7 +103,7 @@ assert!((measured - predicted).abs() < 0.05); // measured: 98.10 dB
 Now the quiet case. A 997 Hz sine of amplitude only 2.5 LSB at 16 kHz, rounded to
 `i16` with and without TPDF dither. The dither is built from the crate's
 [`white_noise`](crate::utils::generation::white_noise), which is uniform on
-$\[-A, A)$, so $A = \Delta/2$:
+$[-A, A)$, so $A = \Delta/2$:
 
 ```rust
 use audio_samples::{AudioSamples, AudioTransforms, AudioTypeConversion, nzu, sample_rate,
@@ -166,7 +166,7 @@ featureless.
 
 Write the requantiser in plain Rust with the same convention, check that it is
 *bit-identical* to the crate's 16-bit and 8-bit (`u8`, offset binary) round
-trips, then measure SQNR at several word lengths against $6.02\\,b + 1.76$.
+trips, then measure SQNR at several word lengths against $6.02\,b + 1.76$.
 
 ```rust
 use audio_samples::{AudioTypeConversion, sample_rate, sine_wave};
@@ -320,7 +320,7 @@ assert!((penalty - 10.0 * 3f64.log10()).abs() < 0.2);
   nearest. Go through `f64` if you want rounding everywhere.
 * No dither is applied by any conversion; add it yourself before reducing bit
   depth of quiet material.
-* $6.02\\,b + 1.76$ dB is for a **full-scale sine**. Speech peaks well below
+* $6.02\,b + 1.76$ dB is for a **full-scale sine**. Speech peaks well below
   full scale and has a high crest factor; its SQNR is much lower.
 * `white_noise` is *uniform*, not Gaussian: amplitude $A$ gives RMS
   $A/\sqrt{3}$.
@@ -338,7 +338,7 @@ assert!((penalty - 10.0 * 3f64.log10()).abs() < 0.2);
   the [`conversions`](crate::conversions) module (scaling convention)
 * [`comparison::snr`](crate::utils::comparison::snr),
   [`white_noise`](crate::utils::generation::white_noise)
-* Previous: [01. Sampling and aliasing](crate::guide::c01_sampling_aliasing).
-  Next: [03. The DFT, windows and leakage](crate::guide::c03_dft_windows).
+* Previous: [01. Sampling and aliasing](01_sampling_aliasing.md).
+  Next: [03. The DFT, windows and leakage](03_dft_windows.md).
 * Lab: `examples/tutorial_02_quantisation_dither.rs`
   (`cargo run --release --example tutorial_02_quantisation_dither --features educational,full_no_plotting`).

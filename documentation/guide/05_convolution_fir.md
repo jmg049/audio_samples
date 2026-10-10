@@ -11,29 +11,29 @@ scratch.
 
 ## Concept
 
-**Convolution.** For an input $x\[n\]$ of $N$ samples and taps $h\[m\]$,
+**Convolution.** For an input $x[n]$ of $N$ samples and taps $h[m]$,
 $m = 0 \dots M-1$:
 
-$$y\[n\] = \sum_{m=0}^{M-1} h\[m\] \\, x\[n - m\]$$
+$$y[n] = \sum_{m=0}^{M-1} h[m] \, x[n - m]$$
 
 where $n$ is the output sample index, $m$ the tap index, $M$ the number of taps
-and $x\[\cdot\] = 0$
+and $x[\cdot] = 0$
 outside the signal. The **full** convolution has $N + M - 1$ samples
 ($n = 0 \dots N + M - 2$). The **valid** part, where every term of the sum uses
 a real input sample, has $N - M + 1$ samples ($n = M-1 \dots N-1$).
 
-**Impulse response.** Feeding the unit impulse $\delta\[n\]$ (1 at $n = 0$,
-0 elsewhere) returns $y\[n\] = h\[n\]$: the taps *are* the impulse response.
+**Impulse response.** Feeding the unit impulse $\delta[n]$ (1 at $n = 0$,
+0 elsewhere) returns $y[n] = h[n]$: the taps *are* the impulse response.
 
 **Frequency response.** A complex exponential at angular frequency
 $\omega = 2\pi f / f_s$ (radians per sample, $f$ in Hz, $f_s$ the sample rate
 in Hz) comes out multiplied by
 
-$$H(e^{j\omega}) = \sum_{m=0}^{M-1} h\[m\] \\, e^{-j\omega m}$$
+$$H(e^{j\omega}) = \sum_{m=0}^{M-1} h[m] \, e^{-j\omega m}$$
 
 where $j = \sqrt{-1}$ (as in chapter 03; no formula in this chapter uses $j$ as an
-index). So a sine of amplitude $A$ leaves with amplitude $A\\,|H|$, shifted by the phase
-$\arg H$. For the $M$-tap moving average $h\[m\] = 1/M$ this sums to the
+index). So a sine of amplitude $A$ leaves with amplitude $A\,|H|$, shifted by the phase
+$\arg H$. For the $M$-tap moving average $h[m] = 1/M$ this sums to the
 **Dirichlet kernel**
 
 $$|H(f)| = \left| \frac{\sin(\pi f M / f_s)}{M \sin(\pi f / f_s)} \right|$$
@@ -42,13 +42,13 @@ with nulls at every multiple of $f_s / M$ Hz (except 0).
 
 **Linear phase and group delay.** The group delay
 
-$$\tau_g(\omega) = -\frac{d \arg H(e^{j\omega})}{d\omega} = \mathrm{Re}\left\\{ \frac{\sum_m m\\,h\[m\]\\,e^{-j\omega m}}{H(e^{j\omega})} \right\\}$$
+$$\tau_g(\omega) = -\frac{d \arg H(e^{j\omega})}{d\omega} = \mathrm{Re}\left\{ \frac{\sum_m m\,h[m]\,e^{-j\omega m}}{H(e^{j\omega})} \right\}$$
 
 is the delay in samples of a narrow-band signal at $\omega$. If the taps are
-symmetric, $h\[m\] = h\[M-1-m\]$, the phase is exactly $-\omega (M-1)/2$ (plus
+symmetric, $h[m] = h[M-1-m]$, the phase is exactly $-\omega (M-1)/2$ (plus
 jumps of $\pi$ where $H$ changes sign), so **every frequency is delayed by the
 same $(M-1)/2$ samples** and waveform shapes are preserved. Antisymmetric
-taps, $h\[m\] = -h\[M-1-m\]$, give the same constant delay with an extra
+taps, $h[m] = -h[M-1-m]$, give the same constant delay with an extra
 $90°$ phase shift. Other asymmetric taps delay different frequencies by
 different amounts.
 
@@ -67,12 +67,12 @@ Types III and IV suit differentiators and Hilbert transformers.
 
 **Windowed-sinc design.** The ideal low-pass with cutoff $f_c$ Hz has the
 infinitely long impulse response
-$h_{\mathrm{ideal}}\[n\] = 2 (f_c/f_s)\\, \mathrm{sinc}\big(2 (f_c / f_s)\\, n\big)$,
+$h_{\mathrm{ideal}}[n] = 2 (f_c/f_s)\, \mathrm{sinc}\big(2 (f_c / f_s)\, n\big)$,
 with $\mathrm{sinc}(u) = \sin(\pi u)/(\pi u)$. Truncate it to $M$ taps centred
-on $(M-1)/2$, multiply by a window $w\[n\]$ (Hamming here) to tame the ripples,
-and scale so that $\sum_m h\[m\] = 1$ (unit gain at DC):
+on $(M-1)/2$, multiply by a window $w[n]$ (Hamming here) to tame the ripples,
+and scale so that $\sum_m h[m] = 1$ (unit gain at DC):
 
-$$h\[n\] = c \\; 2\frac{f_c}{f_s}\\, \mathrm{sinc}\\!\left(2 \frac{f_c}{f_s}\left(n - \frac{M-1}{2}\right)\right) w\[n\]$$
+$$h[n] = c \; 2\frac{f_c}{f_s}\, \mathrm{sinc}\!\left(2 \frac{f_c}{f_s}\left(n - \frac{M-1}{2}\right)\right) w[n]$$
 
 where $c$ is the normalising constant. The response passes through about 0.5
 ($-6$ dB) at $f_c$, and the transition band narrows as $M$ grows. A Hamming
@@ -296,7 +296,7 @@ println!("{ma}");
 2. You low-pass 1 s of 16 kHz audio with the 63-tap filter above using
    `apply_filter`. How many samples come out, and which input sample is output
    sample $i$ aligned with? Check with a 100 Hz sine.
-3. *Spectral inversion*: $h_{hp}\[n\] = \delta\[n - (M-1)/2\] - h_{lp}\[n\]$ turns
+3. *Spectral inversion*: $h_{hp}[n] = \delta[n - (M-1)/2] - h_{lp}[n]$ turns
    the low-pass into a high-pass. Predict its gain at DC, at the 2 kHz cutoff
    and at 6 kHz, then measure.
 
@@ -394,7 +394,7 @@ assert!(doc.has_warning_containing("type I") && doc.quantity("Group delay").unwr
   [`AudioTransforms::convolve`](crate::AudioTransforms::convolve),
   [`impulse`](crate::utils::generation::impulse)
 * [`topics::fir`](crate::educational::topics::fir)
-* Previous: [04. STFT and spectrograms](crate::guide::c04_stft_spectrograms).
-  Next: [06. IIR filters](crate::guide::c06_iir_filters).
+* Previous: [04. STFT and spectrograms](04_stft_spectrograms.md).
+  Next: [06. IIR filters](06_iir_filters.md).
 * Lab: `examples/tutorial_05_convolution_fir.rs`
   (`cargo run --release --example tutorial_05_convolution_fir --features educational,full_no_plotting`).

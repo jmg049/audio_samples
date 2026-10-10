@@ -51,7 +51,7 @@ conventions differ from those references.
 
 ## How the material is organised
 
-The [guide](crate::guide) has one chapter per topic of a typical module, from
+The [guide](README.md) has one chapter per topic of a typical module, from
 sampling and quantisation to codecs. Every chapter follows the same pattern:
 
 1. **Concept**: the theory, with every symbol and unit defined.
@@ -156,7 +156,7 @@ Limitations of the teaching material itself:
 
 ## Setting up a course environment
 
-- Rust: the guide's [README](crate::guide) lists the exact `[dependencies]`
+- Rust: the guide's [README](README.md) lists the exact `[dependencies]`
   block a student needs to compile the chapter code in their own crate
   (`audio_samples` with the `educational` and `full_no_plotting` features, plus
   `spectrograms`, `ndarray`, `num-complex` and `non-empty-slice`). Add
