@@ -278,7 +278,7 @@ function under `audio_samples::`.
 | `get_duration` | `AudioSamples::duration_seconds` | – | equivalent with differences | Audio only; no `S=` or `path=` forms |
 | `resample` | `AudioProcessing::resample`, `AudioProcessing::resample_by_ratio`, `resample`, `resample_by_ratio` | `resampling` | equivalent with differences | Own Kaiser-windowed sinc instead of soxr; output length is exactly `ceil(n * out / in)` |
 | `to_mono` | `AudioChannelOps::to_mono(MonoConversionMethod::Average)` | `channels` | equivalent | |
-| `to_stereo` | `AudioChannelOps::to_stereo(StereoConversionMethod::...)` | `channels` | equivalent with differences | `Duplicate` is `to_stereo(left=m, right=m)`; `Left`/`Right` give `[m, 0]` / `[0, m]`. There is no two-signal form; use `AudioEditing::stack` |
+| `to_stereo` | `AudioChannelOps::to_stereo(StereoConversionMethod::...)` | `channels` | equivalent with differences | `Duplicate` is `to_stereo(left=m, right=m)`; `Left`/`Right` give `[m, 0]` / `[0, m]` for mono input (on multi-channel input they extract channel 0 / 1 as mono, kept from 2.0). There is no two-signal form; use `AudioEditing::stack` |
 | `to_multi` | `AudioEditing::stack` | `editing` | equivalent with differences | No pad or trim to a common length |
 | `autocorrelate` | `AudioStatistics::autocorrelation` | `statistics` | equivalent with differences | Returns the unbiased estimate: `r[k] * (n - k)` equals librosa's raw sum. librosa also autocorrelates every channel |
 | `lpc` | `AudioEffects::lpc`, `operations::effects::lpc` | `effects` | equivalent | Burg's method, one row per channel |

@@ -494,9 +494,13 @@ pub enum StereoConversionMethod {
     Pan(f64),
 
     /// Route the mono signal to the left channel; fill the right with silence.
+    ///
+    /// Multi-channel input: channel 0 is extracted as a mono signal.
     Left,
 
     /// Route the mono signal to the right channel; fill the left with silence.
+    ///
+    /// Multi-channel input: channel 1 is extracted as a mono signal.
     Right,
 }
 

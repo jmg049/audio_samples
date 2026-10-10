@@ -5275,18 +5275,20 @@ where
     ///   centre, +1 is hard right.  Multi-channel input is returned
     ///   unchanged.
     /// - `Left` - routes mono input to the left channel and fills the
-    ///   right with silence (`[m, 0]`, like `librosa.to_stereo(left=m)`).
-    ///   Multi-channel input is returned unchanged.
+    ///   right with silence (`[m, 0]`). For multi-channel input, extracts
+    ///   channel 0 as a mono signal (as in 2.0; prefer
+    ///   [`extract_channel`](AudioChannelOps::extract_channel) for that).
     /// - `Right` - routes mono input to the right channel and fills the
-    ///   left with silence (`[0, m]`). Multi-channel input is returned
-    ///   unchanged.
+    ///   left with silence (`[0, m]`). For multi-channel input, extracts
+    ///   channel 1 as a mono signal.
     ///
     /// # Arguments
     /// - `method` - The conversion strategy.
     ///
     /// # Returns
     /// An owned [`AudioSamples`] at the same sample rate: two channels for
-    /// mono input, the input unchanged for multi-channel input.
+    /// mono input; for multi-channel input, the input unchanged
+    /// (`Duplicate`, `Pan`) or one extracted channel (`Left`, `Right`).
     ///
     /// # Errors
     /// - [crate::AudioSampleError::Layout] - only if the internal stereo

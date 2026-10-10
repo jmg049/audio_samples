@@ -291,18 +291,20 @@ where
     ///   centre, +1 is hard right.  Multi-channel input is returned
     ///   unchanged.
     /// - `Left` - routes mono input to the left channel and fills the
-    ///   right with silence (`[m, 0]`, like `librosa.to_stereo(left=m)`).
-    ///   Multi-channel input is returned unchanged.
+    ///   right with silence (`[m, 0]`). For multi-channel input, extracts
+    ///   channel 0 as a mono signal (as in 2.0; prefer
+    ///   [`extract_channel`](AudioChannelOps::extract_channel) for that).
     /// - `Right` - routes mono input to the right channel and fills the
-    ///   left with silence (`[0, m]`). Multi-channel input is returned
-    ///   unchanged.
+    ///   left with silence (`[0, m]`). For multi-channel input, extracts
+    ///   channel 1 as a mono signal.
     ///
     /// # Arguments
     /// - `method` - The conversion strategy.
     ///
     /// # Returns
     /// An owned [`AudioSamples`] at the same sample rate: two channels for
-    /// mono input, the input unchanged for multi-channel input.
+    /// mono input; for multi-channel input, the input unchanged
+    /// (`Duplicate`, `Pan`) or one extracted channel (`Left`, `Right`).
     ///
     /// # Errors
     /// - [crate::AudioSampleError::Layout] - only if the internal stereo
@@ -393,9 +395,12 @@ where
                         self.sample_rate(),
                     ))
                 }
-                // Already multi-channel: returned unchanged, as for
-                // `Duplicate` and `Pan`.
-                AudioData::Multi(_) => Ok(self.clone().into_owned()),
+                // Multi-channel input: extract channel 0 / 1 as a mono
+                // signal (the behaviour of 2.0, kept for compatibility).
+                AudioData::Multi(_) => {
+                    let channel = usize::from(matches!(method, StereoConversionMethod::Right));
+                    self.extract_channel(channel)
+                }
             },
         }
     }
@@ -1313,14 +1318,26 @@ mod tests {
         let r = right.as_multi_channel().unwrap();
         assert_eq!(r.row(0).to_vec(), vec![0.0, 0.0]);
         assert_eq!(r.row(1).to_vec(), vec![0.5, -0.25]);
+    }
 
-        // Multi-channel input is returned unchanged.
-        let stereo = audio.to_stereo(StereoConversionMethod::Duplicate).unwrap();
-        let same = stereo.to_stereo(StereoConversionMethod::Right).unwrap();
+    /// Multi-channel input keeps the 2.0 behaviour: `Left` / `Right` extract
+    /// channel 0 / 1 as mono (an intermediate change returned the input
+    /// unchanged, which silently broke existing callers).
+    #[test]
+    fn test_to_stereo_left_right_on_multichannel_extracts_channel() {
+        let stereo = AudioSamples::new_multi_channel(
+            ndarray::array![[1.0f32, 2.0], [3.0, 4.0]],
+            sample_rate!(44100),
+        )
+        .unwrap();
+        let left = stereo.to_stereo(StereoConversionMethod::Left).unwrap();
+        assert!(left.is_mono());
+        assert_eq!(left.as_mono().unwrap().to_vec(), vec![1.0, 2.0]);
+        let right = stereo.to_stereo(StereoConversionMethod::Right).unwrap();
+        assert!(right.is_mono());
+        assert_eq!(right.as_mono().unwrap().to_vec(), vec![3.0, 4.0]);
+        // Duplicate still returns multi-channel input unchanged.
+        let same = stereo.to_stereo(StereoConversionMethod::Duplicate).unwrap();
         assert_eq!(same.num_channels().get(), 2);
-        assert_eq!(
-            same.as_multi_channel().unwrap().to_owned(),
-            stereo.as_multi_channel().unwrap().to_owned()
-        );
     }
 }
