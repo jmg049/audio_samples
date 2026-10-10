@@ -593,6 +593,19 @@ pub fn preemphasis_with_state<F: AudioFloat>(
     coef: f64,
     zi: Option<F>,
 ) -> AudioSampleResult<(Vec<F>, F)> {
+    let mut y = vec![F::zero(); x.len()];
+    let zf = preemphasis_into(x, coef, zi, &mut y)?;
+    Ok((y, zf))
+}
+
+/// [`preemphasis_with_state`] writing the output into `out` (same length as
+/// `x`); returns the final state.
+fn preemphasis_into<F: AudioFloat>(
+    x: &[F],
+    coef: f64,
+    zi: Option<F>,
+    out: &mut [F],
+) -> AudioSampleResult<F> {
     check_coef(coef)?;
     let zi = match zi {
         Some(z) if z.is_finite() => z,
@@ -605,17 +618,18 @@ pub fn preemphasis_with_state<F: AudioFloat>(
             ));
         }
     };
-    if x.is_empty() {
+    let Some((&last, _)) = x.split_last() else {
         return Err(AudioSampleError::empty_data("preemphasis"));
-    }
+    };
+    assert_eq!(out.len(), x.len(), "output length must match the input");
     let neg_coef = F::of(-coef);
-    let mut y = Vec::with_capacity(x.len());
-    let mut z = zi;
-    for &v in x {
-        y.push(v + z);
-        z = neg_coef * v;
+    // y[0] = x[0] + zi, y[n] = x[n] + (-coef * x[n - 1]): no recursion, so the
+    // loop vectorises.
+    out[0] = x[0] + zi;
+    for ((o, &v), &prev) in out[1..].iter_mut().zip(&x[1..]).zip(x) {
+        *o = v + neg_coef * prev;
     }
-    Ok((y, z))
+    Ok(neg_coef * last)
 }
 
 /// De-emphasis filter `y[n] = x[n] + coef * y[n - 1]` (the inverse of
@@ -663,10 +677,37 @@ pub fn deemphasis_with_state<F: AudioFloat>(
     coef: f64,
     zi: Option<F>,
 ) -> AudioSampleResult<(Vec<F>, F)> {
+    let mut y = vec![F::zero(); x.len()];
+    let zf = deemphasis_into(x, coef, zi, &mut y)?;
+    Ok((y, zf))
+}
+
+/// [`deemphasis_with_state`] writing the output into `out` (same length as
+/// `x`); returns the final state.
+///
+/// The result is the same, operation for operation, as the direct recursion
+/// `y = x + coef * y_prev` followed by `y[n] -= c * p_n` with `p_0 = 1`,
+/// `p_{n+1} = p_n * coef`. Two exact shortcuts avoid long runs of subnormal
+/// arithmetic, which is about a hundred times slower than normal arithmetic
+/// on x86:
+///
+/// - in the recursion, once the output is a non-zero subnormal value `y`
+///   with `coef * y == y` (the decay has stopped at its rounding fixed point)
+///   and the input is zero, every further output is `y` until the input
+///   becomes non-zero;
+/// - in the correction, once `p_{n+1} == p_n` the term `c * p_n` is the same
+///   constant for every later sample.
+fn deemphasis_into<F: AudioFloat>(
+    x: &[F],
+    coef: f64,
+    zi: Option<F>,
+    out: &mut [F],
+) -> AudioSampleResult<F> {
     check_coef(coef)?;
     if x.is_empty() {
         return Err(AudioSampleError::empty_data("deemphasis"));
     }
+    assert_eq!(out.len(), x.len(), "output length must match the input");
     let (z0, correction) = match zi {
         Some(z) if z.is_finite() => (z, None),
         Some(_) => return Err(param_err("zi", "the initial state must be finite")),
@@ -690,21 +731,69 @@ pub fn deemphasis_with_state<F: AudioFloat>(
         }
     };
     let coef = F::of(coef);
-    let mut y = Vec::with_capacity(x.len());
+    let tiny = F::min_positive_value();
+    let n = x.len();
     let mut z = z0;
-    for &v in x {
-        let out = v + z;
-        y.push(out);
-        z = coef * out;
+    let mut i = 0;
+    while i < n {
+        let y = x[i] + z;
+        out[i] = y;
+        z = coef * y;
+        i += 1;
+        if y.abs() < tiny && y != F::zero() && z == y {
+            // Fixed point of the decay: y = 0 + z = z while the input is zero.
+            while i < n && x[i] == F::zero() {
+                out[i] = y;
+                i += 1;
+            }
+        }
     }
     if let Some(c) = correction {
         let mut p = F::one();
-        for v in &mut y {
-            *v -= c * p;
-            p *= coef;
+        let mut k = 0;
+        while k < n {
+            out[k] -= c * p;
+            k += 1;
+            let next = p * coef;
+            if next == p {
+                break;
+            }
+            p = next;
+        }
+        if k < n {
+            // `p` no longer changes: subtract the constant term.
+            let t = c * p;
+            for v in &mut out[k..] {
+                *v -= t;
+            }
         }
     }
-    Ok((y, z))
+    Ok(z)
+}
+
+/// Applies `filter(row, out_row)` to every row of `rows`, writing a new
+/// `(channels, samples)` array. Non-contiguous rows are copied into a buffer
+/// first.
+fn filter_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
+    mut filter: impl FnMut(&[F], &mut [F]) -> AudioSampleResult<()>,
+) -> AudioSampleResult<Array2<F>> {
+    let mut out = Array2::<F>::zeros(rows.raw_dim());
+    let mut buf = Vec::new();
+    for (row, mut dst) in rows.outer_iter().zip(out.outer_iter_mut()) {
+        let x: &[F] = if let Some(s) = row.as_slice() {
+            s
+        } else {
+            buf.clear();
+            buf.extend(row.iter().copied());
+            &buf
+        };
+        let dst = dst
+            .as_slice_mut()
+            .expect("rows of a new standard-layout array");
+        filter(x, dst)?;
+    }
+    Ok(out)
 }
 
 // =============================================================================
@@ -3313,15 +3402,11 @@ where
     }
 
     fn preemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = finite_float_rows(self)?.into_owned();
-        for mut row in rows.outer_iter_mut() {
-            let y = match row.as_slice() {
-                Some(x) => preemphasis_with_state(x, coef, None)?.0,
-                None => preemphasis_with_state(&row.to_vec(), coef, None)?.0,
-            };
-            row.assign(&Array1::from(y));
-        }
-        float_rows_to_audio(rows, self.sample_rate(), "preemphasis")
+        let rows = finite_float_rows(self)?;
+        let y = filter_rows(rows.view(), |x, out| {
+            preemphasis_into(x, coef, None, out).map(|_| ())
+        })?;
+        float_rows_to_audio(y, self.sample_rate(), "preemphasis")
     }
 
     fn preemphasis_in_place(&mut self, coef: f64) -> AudioSampleResult<()> {
@@ -3330,15 +3415,11 @@ where
     }
 
     fn deemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = finite_float_rows(self)?.into_owned();
-        for mut row in rows.outer_iter_mut() {
-            let y = match row.as_slice() {
-                Some(x) => deemphasis_with_state(x, coef, None)?.0,
-                None => deemphasis_with_state(&row.to_vec(), coef, None)?.0,
-            };
-            row.assign(&Array1::from(y));
-        }
-        float_rows_to_audio(rows, self.sample_rate(), "deemphasis")
+        let rows = finite_float_rows(self)?;
+        let y = filter_rows(rows.view(), |x, out| {
+            deemphasis_into(x, coef, None, out).map(|_| ())
+        })?;
+        float_rows_to_audio(y, self.sample_rate(), "deemphasis")
     }
 
     fn deemphasis_in_place(&mut self, coef: f64) -> AudioSampleResult<()> {
@@ -3494,6 +3575,53 @@ mod tests {
 
     fn mono(x: Vec<f64>) -> AudioSamples<'static, f64> {
         AudioSamples::new_mono(Array1::from(x), sample_rate!(22050)).unwrap()
+    }
+
+    /// The direct recursion and correction pass of `deemphasis`.
+    fn deemphasis_reference<F: AudioFloat>(x: &[F], coef: f64) -> Vec<F> {
+        let c = (F::of(2.0 - coef) * x[0] - x[1]) / F::of(3.0 - coef);
+        let coef = F::of(coef);
+        let mut y = Vec::with_capacity(x.len());
+        let mut z = F::zero();
+        for &v in x {
+            let out = v + z;
+            y.push(out);
+            z = coef * out;
+        }
+        let mut p = F::one();
+        for v in &mut y {
+            *v -= c * p;
+            p *= coef;
+        }
+        y
+    }
+
+    #[test]
+    fn deemphasis_shortcuts_are_exact_through_subnormal_decay() {
+        // A burst followed by a long digital silence: the recursion decays
+        // into subnormal values and the correction term underflows.
+        let mut x32 = vec![0.0_f32; 40_000];
+        let mut x64 = vec![0.0_f64; 40_000];
+        for (i, v) in noise(500, 4).iter().enumerate() {
+            x32[i + 100] = *v as f32;
+            x64[i + 100] = *v;
+        }
+        x32[0] = 0.25;
+        x64[0] = 0.25;
+        for coef in [0.97, 0.5, -0.9, 0.0] {
+            let (y, _) = deemphasis_with_state(&x32, coef, None).unwrap();
+            let want = deemphasis_reference(&x32, coef);
+            assert!(
+                y.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "f32 {coef}"
+            );
+            let (y, _) = deemphasis_with_state(&x64, coef, None).unwrap();
+            let want = deemphasis_reference(&x64, coef);
+            assert!(
+                y.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "f64 {coef}"
+            );
+        }
     }
 
     #[test]
