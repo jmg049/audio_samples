@@ -31,9 +31,19 @@
 //!
 //! All functions are free functions over `ndarray` arrays. Feature matrices
 //! follow librosa's layout `(n_features, n_frames)`: one column per frame.
-//! Probability matrices are `(n_states, n_steps)`. Everything is computed in
-//! `f64` and reported through [`AudioSampleResult`]; invalid input yields a
-//! [`ParameterError`], never a panic.
+//! Probability matrices are `(n_states, n_steps)`. Results are reported through
+//! [`AudioSampleResult`]; invalid input yields a [`ParameterError`], never a
+//! panic.
+//!
+//! The functions are generic over the element type ([`AudioFloat`]: `f32` or
+//! `f64`). The computation runs in the element type of the input matrices and
+//! the float outputs (costs, scores, log-likelihoods, similarity matrices) have
+//! that type, so `f32` features (for example from `f32` or `i16` audio) are
+//! processed without conversion. Index outputs (paths, state sequences, step
+//! matrices) are `usize`. Parameters in the config structs stay `f64` and are
+//! rounded to the element type once. The transition-matrix builders
+//! ([`transition_loop`], ...) compute in `f64` and round each entry to the
+//! requested type once.
 //!
 //! ```
 //! use audio_samples::operations::sequence::{dtw, DtwConfig};
@@ -57,12 +67,16 @@
 //! - Only 2-D inputs are accepted (librosa also broadcasts over leading
 //!   axes); loop over channels yourself.
 //! - `recurrence_matrix` / `cross_similarity` return dense matrices only
-//!   (no `sparse=True`), and connectivity matrices are `f64` (`0.0`/`1.0`)
+//!   (no `sparse=True`), and connectivity matrices are floats (`0.0`/`1.0`)
 //!   rather than `bool`. Only librosa's default `axis=-1` layout is supported.
 //! - `sync` with an empty index list and `pad = true` returns one segment
 //!   (librosa returns none).
 //! - `rqa` follows the move actually taken when backtracking through the
 //!   second column (librosa stores a wrong pointer there).
+//! - With `f32` input, the Viterbi decoders accumulate log-likelihoods in
+//!   `f32`; librosa accumulates them in `float64` for every input type.
+//!   DTW costs of `f32` features are computed in `f32`; librosa computes
+//!   them with SciPy's `float64` `cdist`.
 //! - `path_enhance`, `timelag_filter`, `agglomerative`, `subsegment` and
 //!   `path_to_steps` are not provided.
 
@@ -71,14 +85,23 @@ use ndarray::{
     RemoveAxis, Slice, Zip,
 };
 
-use crate::{AudioSampleResult, ParameterError};
+use crate::{AudioFloat, AudioSampleResult, ParameterError};
 
-/// `numpy.finfo(float64).tiny`, the clipping constant librosa adds before logs.
-const TINY: f64 = f64::MIN_POSITIVE;
+/// `numpy.finfo(dtype).tiny` (the smallest positive normal value of `F`), the
+/// clipping constant librosa adds before logs (`util.tiny(prob)`).
+fn tiny<F: AudioFloat>() -> F {
+    F::min_positive_value()
+}
 
 /// `numpy.allclose` for scalars with its default tolerances.
 fn allclose(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-8 + 1e-5 * b.abs()
+}
+
+/// The sum of `x` in `f64` (for validation: rows of `f32` matrices are
+/// checked against `numpy.allclose` without `f32` summation error).
+fn sum_f64<'a, F: AudioFloat>(x: impl IntoIterator<Item = &'a F>) -> f64 {
+    x.into_iter().map(|v| v.as_f64()).sum()
 }
 
 fn err<T>(parameter: &str, reason: impl ToString) -> AudioSampleResult<T> {
@@ -121,8 +144,9 @@ impl DistanceMetric {
     ///
     /// # Returns
     ///
-    /// The distance under this metric. For [`DistanceMetric::Cosine`] the
-    /// result is NaN if either vector has zero norm.
+    /// The distance under this metric, in the element type `F` of the vectors.
+    /// For [`DistanceMetric::Cosine`] the result is NaN if either vector has
+    /// zero norm.
     ///
     /// # Panics
     ///
@@ -141,30 +165,31 @@ impl DistanceMetric {
     /// assert_eq!(DistanceMetric::Chebyshev.distance(u.view(), v.view()), 4.0);
     /// ```
     #[must_use]
-    pub fn distance(self, u: ArrayView1<f64>, v: ArrayView1<f64>) -> f64 {
+    pub fn distance<F: AudioFloat>(self, u: ArrayView1<F>, v: ArrayView1<F>) -> F {
         assert_eq!(u.len(), v.len(), "vectors must have equal length");
+        let zero = F::zero();
         match self {
             Self::Euclidean => Zip::from(&u)
                 .and(&v)
-                .fold(0.0, |acc, &a, &b| acc + (a - b) * (a - b))
+                .fold(zero, |acc, &a, &b| acc + (a - b) * (a - b))
                 .sqrt(),
             Self::SqEuclidean => Zip::from(&u)
                 .and(&v)
-                .fold(0.0, |acc, &a, &b| acc + (a - b) * (a - b)),
+                .fold(zero, |acc, &a, &b| acc + (a - b) * (a - b)),
             Self::Cityblock => Zip::from(&u)
                 .and(&v)
-                .fold(0.0, |acc, &a, &b| acc + (a - b).abs()),
+                .fold(zero, |acc, &a, &b| acc + (a - b).abs()),
             Self::Chebyshev => Zip::from(&u)
                 .and(&v)
-                .fold(0.0, |acc: f64, &a, &b| acc.max((a - b).abs())),
+                .fold(zero, |acc: F, &a, &b| acc.max((a - b).abs())),
             Self::Cosine => {
-                let (mut dot, mut nu, mut nv) = (0.0, 0.0, 0.0);
+                let (mut dot, mut nu, mut nv) = (zero, zero, zero);
                 Zip::from(&u).and(&v).for_each(|&a, &b| {
                     dot += a * b;
                     nu += a * a;
                     nv += b * b;
                 });
-                1.0 - dot / (nu.sqrt() * nv.sqrt())
+                F::one() - dot / (nu.sqrt() * nv.sqrt())
             }
         }
     }
@@ -172,7 +197,11 @@ impl DistanceMetric {
 
 /// Pairwise distances between the columns of `x` (rows of the result) and the
 /// columns of `y` (columns of the result), like `scipy.spatial.distance.cdist`.
-fn pairwise(x: ArrayView2<f64>, y: ArrayView2<f64>, metric: DistanceMetric) -> Array2<f64> {
+fn pairwise<F: AudioFloat>(
+    x: ArrayView2<F>,
+    y: ArrayView2<F>,
+    metric: DistanceMetric,
+) -> Array2<F> {
     let mut out = Array2::zeros((x.ncols(), y.ncols()));
     for (i, xi) in x.columns().into_iter().enumerate() {
         for (j, yj) in y.columns().into_iter().enumerate() {
@@ -182,8 +211,11 @@ fn pairwise(x: ArrayView2<f64>, y: ArrayView2<f64>, metric: DistanceMetric) -> A
     out
 }
 
-fn check_finite(name: &str, a: impl IntoIterator<Item = f64>) -> AudioSampleResult<()> {
-    if a.into_iter().all(f64::is_finite) {
+fn check_finite<F: AudioFloat>(
+    name: &str,
+    a: impl IntoIterator<Item = F>,
+) -> AudioSampleResult<()> {
+    if a.into_iter().all(F::is_finite) {
         Ok(())
     } else {
         err(name, "must contain only finite values")
@@ -202,10 +234,13 @@ const DEFAULT_STEPS: [[usize; 2]; 3] = [[1, 1], [0, 1], [1, 0]];
 
 /// Configuration for [`dtw`] and [`dtw_with_cost`].
 ///
-/// Mirrors the keyword arguments of `librosa.sequence.dtw`. `Default` is
-/// librosa's default: Euclidean metric, steps `(1,1), (0,1), (1,0)` with unit
-/// weights, full (not subsequence) alignment, backtracking enabled, no global
-/// constraint.
+/// Mirrors the keyword arguments of `librosa.sequence.dtw`.
+/// [`DtwConfig::librosa`] gives librosa's defaults: Euclidean metric, steps
+/// `(1,1), (0,1), (1,0)` with unit weights, full (not subsequence) alignment,
+/// backtracking enabled, no global constraint. `Default` is currently the same.
+///
+/// The weights and `band_rad` are `f64`; [`dtw`] rounds the weights to the
+/// element type of its input once.
 ///
 /// # Invariants
 ///
@@ -249,8 +284,8 @@ pub struct DtwConfig {
     /// Apply a Sakoe-Chiba band: cells further than `band_rad` from the
     /// diagonal get infinite cost.
     pub global_constraints: bool,
-    /// Band half-width as a fraction of the shorter sequence length (librosa
-    /// default 0.25). Only used when `global_constraints` is true.
+    /// Band half-width as a fraction of the shorter sequence length. Default
+    /// 0.25 (librosa's default). Only used when `global_constraints` is true.
     pub band_rad: f64,
 }
 
@@ -270,9 +305,17 @@ impl Default for DtwConfig {
 }
 
 impl DtwConfig {
-    /// librosa's default configuration (same as [`Default::default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults for `librosa.sequence.dtw`.
+    ///
+    /// Currently the same as [`Default`].
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -408,16 +451,18 @@ impl DtwConfig {
 
 /// Output of [`dtw`] / [`dtw_with_cost`].
 ///
+/// `F` is the element type of the input (`f32` or `f64`).
+///
 /// # Invariants
 ///
 /// `cost` and `steps` have the shape of the local cost matrix (`(N, M)` for
 /// `X` with `N` frames and `Y` with `M` frames, transposed when a subsequence
 /// alignment swapped the roles, as in librosa).
 #[derive(Debug, Clone, PartialEq)]
-pub struct DtwResult {
+pub struct DtwResult<F = f64> {
     /// Accumulated cost matrix `D` (librosa's first return value).
-    /// Unreachable cells are `f64::INFINITY`.
-    pub cost: Array2<f64>,
+    /// Unreachable cells are infinite.
+    pub cost: Array2<F>,
     /// Optimal warping path as `[index_in_x, index_in_y]` pairs, **from the
     /// end of the alignment back to its start** (librosa order). `None` when
     /// [`DtwConfig::backtrack`] is false.
@@ -433,7 +478,8 @@ pub struct DtwResult {
 /// Builds the local cost matrix `C[n, m] = metric(x[:, n], y[:, m])` and
 /// accumulates it with dynamic programming:
 /// `D[n, m] = min_k D[n - s_k0, m - s_k1] + w_mul_k * C[n, m] + w_add_k`.
-/// Equivalent to `librosa.sequence.dtw(X, Y, ...)`.
+/// Equivalent to `librosa.sequence.dtw(X, Y, ...)`. The costs are computed in
+/// the element type `F` of `x` and `y` (`f32` or `f64`).
 ///
 /// # Arguments
 ///
@@ -474,11 +520,11 @@ pub struct DtwResult {
 ///
 /// Meinard Müller, *Fundamentals of Music Processing*, Springer 2015, ch. 3.2
 /// and 7.2; `librosa.sequence.dtw`.
-pub fn dtw(
-    x: ArrayView2<f64>,
-    y: ArrayView2<f64>,
+pub fn dtw<F: AudioFloat>(
+    x: ArrayView2<F>,
+    y: ArrayView2<F>,
     cfg: &DtwConfig,
-) -> AudioSampleResult<DtwResult> {
+) -> AudioSampleResult<DtwResult<F>> {
     if x.nrows() != y.nrows() {
         return err(
             "y",
@@ -503,7 +549,8 @@ pub fn dtw(
 /// Dynamic time warping on a precomputed local cost matrix.
 ///
 /// Equivalent to `librosa.sequence.dtw(C=c, ...)`; [`DtwConfig::metric`] is
-/// ignored. Infinite costs are allowed (they forbid cells).
+/// ignored. Infinite costs are allowed (they forbid cells). The accumulation
+/// runs in the element type `F` of `c`.
 ///
 /// # Arguments
 ///
@@ -532,7 +579,10 @@ pub fn dtw(
 /// assert_eq!(r.cost[[1, 2]], 1.0);
 /// assert_eq!(r.path.unwrap(), vec![[1, 2], [1, 1], [0, 0]]);
 /// ```
-pub fn dtw_with_cost(c: ArrayView2<f64>, cfg: &DtwConfig) -> AudioSampleResult<DtwResult> {
+pub fn dtw_with_cost<F: AudioFloat>(
+    c: ArrayView2<F>,
+    cfg: &DtwConfig,
+) -> AudioSampleResult<DtwResult<F>> {
     if c.is_empty() {
         return err("c", "cost matrix must be non-empty");
     }
@@ -540,7 +590,7 @@ pub fn dtw_with_cost(c: ArrayView2<f64>, cfg: &DtwConfig) -> AudioSampleResult<D
 }
 
 /// librosa's `fill_off_diagonal(x, radius, value)` (Sakoe-Chiba band).
-fn fill_off_diagonal(x: &mut Array2<f64>, radius: f64, value: f64) {
+fn fill_off_diagonal<F: AudioFloat>(x: &mut Array2<F>, radius: f64, value: F) {
     let (nx, ny) = x.dim();
     let r = (radius * nx.min(ny) as f64).round_ties_even() as i64;
     let offset = nx.abs_diff(ny) as i64;
@@ -557,19 +607,25 @@ fn fill_off_diagonal(x: &mut Array2<f64>, radius: f64, value: f64) {
     }
 }
 
-fn dtw_core(mut c: Array2<f64>, cfg: &DtwConfig, transposed: bool) -> AudioSampleResult<DtwResult> {
+fn dtw_core<F: AudioFloat>(
+    mut c: Array2<F>,
+    cfg: &DtwConfig,
+    transposed: bool,
+) -> AudioSampleResult<DtwResult<F>> {
     let (sigma, w_add, w_mul) = cfg.resolve()?;
+    let w_add: Vec<F> = w_add.into_iter().map(F::of).collect();
+    let w_mul: Vec<F> = w_mul.into_iter().map(F::of).collect();
     if c.iter().any(|v| v.is_nan()) {
         return err("c", "DTW cost matrix contains NaN values");
     }
     if cfg.global_constraints {
-        fill_off_diagonal(&mut c, cfg.band_rad, f64::INFINITY);
+        fill_off_diagonal(&mut c, cfg.band_rad, F::infinity());
     }
     let (n, m) = c.dim();
     let max0 = sigma.iter().map(|s| s[0]).max().unwrap_or(0);
     let max1 = sigma.iter().map(|s| s[1]).max().unwrap_or(0);
 
-    let mut d = Array2::from_elem((n + max0, m + max1), f64::INFINITY);
+    let mut d = Array2::from_elem((n + max0, m + max1), F::infinity());
     d[[max0, max1]] = c[[0, 0]];
     if cfg.subseq {
         for j in 0..m {
@@ -642,8 +698,8 @@ fn dtw_core(mut c: Array2<f64>, cfg: &DtwConfig, transposed: bool) -> AudioSampl
 }
 
 /// Index of the first minimum (`numpy.argmin`); NaN-free input assumed.
-fn argmin_first(it: impl Iterator<Item = f64>) -> usize {
-    let mut best = (0, f64::INFINITY);
+fn argmin_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
+    let mut best = (0, F::infinity());
     let mut first = true;
     for (i, v) in it.enumerate() {
         if first || v < best.1 {
@@ -655,8 +711,8 @@ fn argmin_first(it: impl Iterator<Item = f64>) -> usize {
 }
 
 /// Index of the first maximum (`numpy.argmax`); NaN-free input assumed.
-fn argmax_first(it: impl Iterator<Item = f64>) -> usize {
-    let mut best = (0, f64::NEG_INFINITY);
+fn argmax_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
+    let mut best = (0, F::neg_infinity());
     let mut first = true;
     for (i, v) in it.enumerate() {
         if first || v > best.1 {
@@ -771,7 +827,11 @@ pub fn dtw_backtracking(
 // RQA
 // ---------------------------------------------------------------------------
 
-/// Configuration for [`rqa`]; `Default` equals librosa's defaults.
+/// Configuration for [`rqa`].
+///
+/// [`RqaConfig::librosa`] gives librosa's defaults (unit gap penalties, knight
+/// moves, backtracking); `Default` is currently the same. The penalties are
+/// `f64` and are rounded to the element type of the similarity matrix once.
 ///
 /// # Examples
 ///
@@ -784,14 +844,16 @@ pub fn dtw_backtracking(
 #[derive(Debug, Clone, PartialEq)]
 pub struct RqaConfig {
     /// Penalty for starting a gap (a non-recurrent cell right after a
-    /// recurrent one). Finite and `>= 0`; librosa default 1.
+    /// recurrent one). Finite and `>= 0`. Default 1 (librosa's default).
     pub gap_onset: f64,
-    /// Penalty for extending a gap. Finite and `>= 0`; librosa default 1.
+    /// Penalty for extending a gap. Finite and `>= 0`. Default 1 (librosa's
+    /// default).
     pub gap_extend: f64,
     /// Allow knight moves `(1, 2)` / `(2, 1)` in addition to the diagonal,
-    /// tolerating small tempo deviations. librosa default true.
+    /// tolerating small tempo deviations. Default `true` (librosa's default).
     pub knight_moves: bool,
-    /// Compute the optimal path ([`RqaResult::path`]). librosa default true.
+    /// Compute the optimal path ([`RqaResult::path`]). Default `true`
+    /// (librosa's default).
     pub backtrack: bool,
 }
 
@@ -807,9 +869,17 @@ impl Default for RqaConfig {
 }
 
 impl RqaConfig {
-    /// librosa's default configuration.
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults for `librosa.sequence.rqa`.
+    ///
+    /// Currently the same as [`Default`].
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -866,11 +936,12 @@ impl RqaConfig {
     }
 }
 
-/// Output of [`rqa`].
+/// Output of [`rqa`]. `F` is the element type of the similarity matrix.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RqaResult {
-    /// Alignment score matrix, same shape as the similarity matrix.
-    pub score: Array2<f64>,
+pub struct RqaResult<F = f64> {
+    /// Alignment score matrix, same shape and element type as the similarity
+    /// matrix.
+    pub score: Array2<F>,
     /// Optimal local alignment path as `[row, col]` pairs **from start to end**
     /// (librosa order for `rqa`). Empty if there is no recurrence. `None` when
     /// [`RqaConfig::backtrack`] is false.
@@ -882,7 +953,8 @@ pub struct RqaResult {
 ///
 /// A Smith-Waterman-like dynamic program that rewards runs of recurrent cells
 /// along diagonals (optionally with knight moves) and penalises gaps.
-/// Equivalent to `librosa.sequence.rqa`.
+/// Equivalent to `librosa.sequence.rqa`. The scores are computed in the
+/// element type `F` of `sim`.
 ///
 /// # Arguments
 ///
@@ -925,7 +997,7 @@ pub struct RqaResult {
 ///
 /// J. Serrà, X. Serra and R. G. Andrzejak, "Cross recurrence quantification
 /// for cover song identification", New Journal of Physics 11 (2009).
-pub fn rqa(sim: ArrayView2<f64>, cfg: &RqaConfig) -> AudioSampleResult<RqaResult> {
+pub fn rqa<F: AudioFloat>(sim: ArrayView2<F>, cfg: &RqaConfig) -> AudioSampleResult<RqaResult<F>> {
     cfg.validate()?;
     if sim.is_empty() {
         return err("sim", "similarity matrix must be non-empty");
@@ -933,68 +1005,75 @@ pub fn rqa(sim: ArrayView2<f64>, cfg: &RqaConfig) -> AudioSampleResult<RqaResult
     if sim.iter().any(|v| v.is_nan()) {
         return err("sim", "similarity matrix must not contain NaN");
     }
-    let (score, ptr) = rqa_dp(sim, cfg.gap_onset, cfg.gap_extend, cfg.knight_moves);
+    let (score, ptr) = rqa_dp(
+        sim,
+        F::of(cfg.gap_onset),
+        F::of(cfg.gap_extend),
+        cfg.knight_moves,
+    );
     let path = cfg.backtrack.then(|| rqa_backtrack(&score, &ptr));
     Ok(RqaResult { score, path })
 }
 
 /// Back-pointer codes: -2 path start, -1 no path, 0 diag, 1 (-1,-2), 2 (-2,-1).
-fn rqa_dp(
-    sim: ArrayView2<f64>,
-    gap_onset: f64,
-    gap_extend: f64,
+fn rqa_dp<F: AudioFloat>(
+    sim: ArrayView2<F>,
+    gap_onset: F,
+    gap_extend: F,
     knight: bool,
-) -> (Array2<f64>, Array2<i8>) {
+) -> (Array2<F>, Array2<i8>) {
+    let zero = F::zero();
     let (rows, cols) = sim.dim();
-    let mut score = Array2::<f64>::zeros((rows, cols));
+    let mut score = Array2::<F>::zeros((rows, cols));
     let mut bt = Array2::<i8>::zeros((rows, cols));
     let (init_limit, limit) = if knight { (2, 3) } else { (1, 1) };
     score.row_mut(0).assign(&sim.row(0));
     score.column_mut(0).assign(&sim.column(0));
     for i in 0..rows {
-        bt[[i, 0]] = if sim[[i, 0]] != 0.0 { -2 } else { -1 };
+        bt[[i, 0]] = if sim[[i, 0]] != zero { -2 } else { -1 };
     }
     for j in 0..cols {
-        bt[[0, j]] = if sim[[0, j]] != 0.0 { -2 } else { -1 };
+        bt[[0, j]] = if sim[[0, j]] != zero { -2 } else { -1 };
     }
     if rows == 1 || cols == 1 {
         return (score, bt);
     }
-    let penalty = |prev_sim: f64| {
-        if prev_sim > 0.0 {
+    let penalty = |prev_sim: F| {
+        if prev_sim > zero {
             gap_onset
         } else {
             gap_extend
         }
     };
 
-    if sim[[1, 1]] > 0.0 {
+    if sim[[1, 1]] > zero {
         score[[1, 1]] = score[[0, 0]] + sim[[1, 1]];
         bt[[1, 1]] = 0;
     } else {
         let v = score[[0, 0]] - penalty(sim[[0, 0]]);
-        score[[1, 1]] = if v > 0.0 { v } else { 0.0 };
-        bt[[1, 1]] = if score[[1, 1]] > 0.0 { 0 } else { -1 };
+        score[[1, 1]] = if v > zero { v } else { zero };
+        bt[[1, 1]] = if score[[1, 1]] > zero { 0 } else { -1 };
     }
 
     // One cell update: candidates are (score, sim, pointer code) per move.
-    let update = |score: &mut Array2<f64>,
-                  bt: &mut Array2<i8>,
-                  i: usize,
-                  j: usize,
-                  cands: &[(f64, f64, i8)]| {
-        if sim[[i, j]] > 0.0 {
-            let k = argmax_first(cands.iter().map(|c| c.0));
-            bt[[i, j]] = cands[k].2;
-            score[[i, j]] = cands[k].0 + sim[[i, j]];
-        } else {
-            let gapped: Vec<f64> = cands.iter().map(|c| c.0 - penalty(c.1)).collect();
-            let k = argmax_first(gapped.iter().copied());
-            let v = gapped[k];
-            score[[i, j]] = if v > 0.0 { v } else { 0.0 };
-            bt[[i, j]] = if score[[i, j]] == 0.0 { -1 } else { cands[k].2 };
-        }
-    };
+    let update =
+        |score: &mut Array2<F>, bt: &mut Array2<i8>, i: usize, j: usize, cands: &[(F, F, i8)]| {
+            if sim[[i, j]] > zero {
+                let k = argmax_first(cands.iter().map(|c| c.0));
+                bt[[i, j]] = cands[k].2;
+                score[[i, j]] = cands[k].0 + sim[[i, j]];
+            } else {
+                let gapped: Vec<F> = cands.iter().map(|c| c.0 - penalty(c.1)).collect();
+                let k = argmax_first(gapped.iter().copied());
+                let v = gapped[k];
+                score[[i, j]] = if v > zero { v } else { zero };
+                bt[[i, j]] = if score[[i, j]] == zero {
+                    -1
+                } else {
+                    cands[k].2
+                };
+            }
+        };
 
     let i = 1;
     for j in 2..cols {
@@ -1025,7 +1104,7 @@ fn rqa_dp(
     (score, bt)
 }
 
-fn rqa_backtrack(score: &Array2<f64>, ptr: &Array2<i8>) -> Vec<[usize; 2]> {
+fn rqa_backtrack<F: AudioFloat>(score: &Array2<F>, ptr: &Array2<i8>) -> Vec<[usize; 2]> {
     let cols = score.ncols();
     let flat = argmax_first(score.iter().copied());
     let mut idx = [flat / cols, flat % cols];
@@ -1058,26 +1137,31 @@ fn rqa_backtrack(score: &Array2<f64>, ptr: &Array2<i8>) -> Vec<[usize; 2]> {
 // Viterbi
 // ---------------------------------------------------------------------------
 
-/// Output of [`viterbi`] / [`viterbi_discriminative`].
+/// Output of [`viterbi`] / [`viterbi_discriminative`]. `F` is the element
+/// type of the probability matrix.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ViterbiResult {
+pub struct ViterbiResult<F = f64> {
     /// Most likely state index per time step (`n_steps` entries).
     pub states: Vec<usize>,
     /// Log-likelihood of `states` (librosa's `logp` with `return_logp=True`).
     /// Unnormalised for the discriminative variant.
-    pub log_prob: f64,
+    pub log_prob: F,
 }
 
-/// Output of [`viterbi_binary`].
+/// Output of [`viterbi_binary`]. `F` is the element type of the probability
+/// matrix.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ViterbiBinaryResult {
+pub struct ViterbiBinaryResult<F = f64> {
     /// `(n_states, n_steps)` matrix of `0`/`1` activations per state.
     pub states: Array2<usize>,
     /// Log-likelihood of each state's binary sequence (`n_states` entries).
-    pub log_prob: Array1<f64>,
+    pub log_prob: Array1<F>,
 }
 
-fn check_square_transition(transition: ArrayView2<f64>, n_states: usize) -> AudioSampleResult<()> {
+fn check_square_transition<F: AudioFloat>(
+    transition: ArrayView2<F>,
+    n_states: usize,
+) -> AudioSampleResult<()> {
     if transition.dim() != (n_states, n_states) {
         return err(
             "transition",
@@ -1090,9 +1174,9 @@ fn check_square_transition(transition: ArrayView2<f64>, n_states: usize) -> Audi
     check_stochastic_rows(transition)
 }
 
-fn check_stochastic_rows(transition: ArrayView2<f64>) -> AudioSampleResult<()> {
+fn check_stochastic_rows<F: AudioFloat>(transition: ArrayView2<F>) -> AudioSampleResult<()> {
     for row in transition.rows() {
-        if row.iter().any(|&v| !v.is_finite() || v < 0.0) || !allclose(row.sum(), 1.0) {
+        if row.iter().any(|&v| !v.is_finite() || v < F::zero()) || !allclose(sum_f64(&row), 1.0) {
             return err(
                 "transition",
                 "invalid transition matrix: must be non-negative and sum to 1 on each row",
@@ -1102,10 +1186,14 @@ fn check_stochastic_rows(transition: ArrayView2<f64>) -> AudioSampleResult<()> {
     Ok(())
 }
 
-fn check_distribution(name: &str, p: ArrayView1<f64>, n_states: usize) -> AudioSampleResult<()> {
+fn check_distribution<F: AudioFloat>(
+    name: &str,
+    p: ArrayView1<F>,
+    n_states: usize,
+) -> AudioSampleResult<()> {
     if p.len() != n_states
-        || p.iter().any(|&v| !v.is_finite() || v < 0.0)
-        || !allclose(p.sum(), 1.0)
+        || p.iter().any(|&v| !v.is_finite() || v < F::zero())
+        || !allclose(sum_f64(&p), 1.0)
     {
         return err(
             name,
@@ -1115,10 +1203,10 @@ fn check_distribution(name: &str, p: ArrayView1<f64>, n_states: usize) -> AudioS
     Ok(())
 }
 
-fn log_threshold(transition_min_prob: Option<f64>) -> AudioSampleResult<Option<f64>> {
+fn log_threshold<F: AudioFloat>(transition_min_prob: Option<f64>) -> AudioSampleResult<Option<F>> {
     match transition_min_prob {
         None | Some(0.0) => Ok(None),
-        Some(p) if p > 0.0 && p.is_finite() => Ok(Some((p + TINY).ln())),
+        Some(p) if p > 0.0 && p.is_finite() => Ok(Some((F::of(p) + tiny::<F>()).ln())),
         Some(p) => Err(ParameterError::out_of_range(
             "transition_min_prob",
             p,
@@ -1130,7 +1218,7 @@ fn log_threshold(transition_min_prob: Option<f64>) -> AudioSampleResult<Option<f
     }
 }
 
-fn check_prob_shape(prob: ArrayView2<f64>) -> AudioSampleResult<()> {
+fn check_prob_shape<F: AudioFloat>(prob: ArrayView2<F>) -> AudioSampleResult<()> {
     if prob.nrows() == 0 || prob.ncols() == 0 {
         return err("prob", "must have at least one state and one time step");
     }
@@ -1141,14 +1229,14 @@ fn check_prob_shape(prob: ArrayView2<f64>) -> AudioSampleResult<()> {
 ///
 /// `log_prob` is `(n_states, n_steps)`. Ties are broken towards the lowest
 /// state index, as in librosa.
-fn viterbi_core(
-    log_prob: &Array2<f64>,
-    log_trans: &Array2<f64>,
-    log_p_init: &Array1<f64>,
-    threshold: Option<f64>,
-) -> AudioSampleResult<ViterbiResult> {
+fn viterbi_core<F: AudioFloat>(
+    log_prob: &Array2<F>,
+    log_trans: &Array2<F>,
+    log_p_init: &Array1<F>,
+    threshold: Option<F>,
+) -> AudioSampleResult<ViterbiResult<F>> {
     let (n_states, n_steps) = log_prob.dim();
-    let mut value = Array2::<f64>::zeros((n_steps, n_states));
+    let mut value = Array2::<F>::zeros((n_steps, n_states));
     let mut ptr = Array2::<usize>::zeros((n_steps, n_states));
     for j in 0..n_states {
         value[[0, j]] = log_prob[[j, 0]] + log_p_init[j];
@@ -1174,7 +1262,7 @@ fn viterbi_core(
     };
     for t in 1..n_steps {
         for j in 0..n_states {
-            let mut best = f64::NEG_INFINITY;
+            let mut best = F::neg_infinity();
             for &k in &preds[j] {
                 let cost = value[[t - 1, k]] + log_trans[[k, j]];
                 if cost > best {
@@ -1199,9 +1287,15 @@ fn viterbi_core(
 /// Computes the most likely hidden-state sequence of an HMM given
 /// `prob[s, t] = P[observation t | state s]`, the transition matrix and the
 /// initial distribution, in the log domain (each probability is clipped as
-/// `ln(p + tiny)`). Equivalent to
-/// `librosa.sequence.viterbi(prob, transition, p_init=..., return_logp=True,
-/// transition_min_prob=...)`.
+/// `ln(p + tiny)`, where `tiny` is the smallest positive normal value of `F`).
+/// Equivalent to `librosa.sequence.viterbi(prob, transition, p_init=...,
+/// return_logp=True, transition_min_prob=...)`.
+///
+/// The recursion runs in the element type `F` of `prob` (`f32` or `f64`).
+/// librosa accumulates the path log-likelihoods in `float64` for every input
+/// type; with `f32` input this function accumulates in `f32`, so paths whose
+/// log-likelihoods differ by less than the `f32` resolution of the running
+/// totals (about `1e-7` relative) may be decoded differently.
 ///
 /// # Arguments
 ///
@@ -1232,7 +1326,7 @@ fn viterbi_core(
 /// use ndarray::array;
 ///
 /// // The Wikipedia "healthy / fever" example.
-/// let p_init = array![0.6, 0.4];
+/// let p_init = array![0.6_f64, 0.4];
 /// let p_emit = array![[0.5, 0.4, 0.1], [0.1, 0.3, 0.6]];
 /// let p_trans = array![[0.7, 0.3], [0.4, 0.6]];
 /// let r = viterbi(p_emit.view(), p_trans.view(), Some(p_init.view()), None).unwrap();
@@ -1244,28 +1338,29 @@ fn viterbi_core(
 ///
 /// A. Viterbi, "Error bounds for convolutional codes and an asymptotically
 /// optimum decoding algorithm", IEEE Trans. Inf. Theory 13(2), 1967.
-pub fn viterbi(
-    prob: ArrayView2<f64>,
-    transition: ArrayView2<f64>,
-    p_init: Option<ArrayView1<f64>>,
+pub fn viterbi<F: AudioFloat>(
+    prob: ArrayView2<F>,
+    transition: ArrayView2<F>,
+    p_init: Option<ArrayView1<F>>,
     transition_min_prob: Option<f64>,
-) -> AudioSampleResult<ViterbiResult> {
+) -> AudioSampleResult<ViterbiResult<F>> {
     check_prob_shape(prob)?;
     let n_states = prob.nrows();
     check_square_transition(transition, n_states)?;
-    if prob.iter().any(|&v| !(0.0..=1.0).contains(&v)) {
+    if prob.iter().any(|&v| !(F::zero()..=F::one()).contains(&v)) {
         return err("prob", "probability values must be between 0 and 1");
     }
+    let tiny = tiny::<F>();
     let log_p_init = match p_init {
         Some(p) => {
             check_distribution("p_init", p, n_states)?;
-            p.mapv(|v| (v + TINY).ln())
+            p.mapv(|v| (v + tiny).ln())
         }
-        None => Array1::from_elem(n_states, (1.0 / n_states as f64 + TINY).ln()),
+        None => Array1::from_elem(n_states, (F::one() / F::of_usize(n_states) + tiny).ln()),
     };
     let threshold = log_threshold(transition_min_prob)?;
-    let log_trans = transition.mapv(|v| (v + TINY).ln());
-    let log_prob = prob.mapv(|v| (v + TINY).ln());
+    let log_trans = transition.mapv(|v| (v + tiny).ln());
+    let log_prob = prob.mapv(|v| (v + tiny).ln());
     viterbi_core(&log_prob, &log_trans, &log_p_init, threshold)
 }
 
@@ -1273,8 +1368,9 @@ pub fn viterbi(
 ///
 /// `prob[s, t] = P[state s | observation t]` (each column a distribution) is
 /// turned into a scaled likelihood by dividing by the marginal `p_state`,
-/// then decoded as in [`viterbi`]. Equivalent to
-/// `librosa.sequence.viterbi_discriminative(..., return_logp=True)`.
+/// then decoded as in [`viterbi`] (in the element type `F` of `prob`).
+/// Equivalent to `librosa.sequence.viterbi_discriminative(...,
+/// return_logp=True)`.
 ///
 /// # Arguments
 ///
@@ -1304,22 +1400,22 @@ pub fn viterbi(
 /// let r = viterbi_discriminative(prob.view(), trans.view(), None, None, None).unwrap();
 /// assert_eq!(r.states, vec![0, 0, 0, 0, 0]);
 /// ```
-pub fn viterbi_discriminative(
-    prob: ArrayView2<f64>,
-    transition: ArrayView2<f64>,
-    p_state: Option<ArrayView1<f64>>,
-    p_init: Option<ArrayView1<f64>>,
+pub fn viterbi_discriminative<F: AudioFloat>(
+    prob: ArrayView2<F>,
+    transition: ArrayView2<F>,
+    p_state: Option<ArrayView1<F>>,
+    p_init: Option<ArrayView1<F>>,
     transition_min_prob: Option<f64>,
-) -> AudioSampleResult<ViterbiResult> {
+) -> AudioSampleResult<ViterbiResult<F>> {
     check_prob_shape(prob)?;
     let n_states = prob.nrows();
     check_square_transition(transition, n_states)?;
     for col in prob.columns() {
-        if col.iter().any(|&v| !v.is_finite() || v < 0.0) || !allclose(col.sum(), 1.0) {
+        if col.iter().any(|&v| !v.is_finite() || v < F::zero()) || !allclose(sum_f64(&col), 1.0) {
             return err("prob", "each column must be non-negative and sum to 1");
         }
     }
-    let uniform = || Array1::from_elem(n_states, 1.0 / n_states as f64);
+    let uniform = || Array1::from_elem(n_states, F::one() / F::of_usize(n_states));
     let p_state = match p_state {
         Some(p) => {
             check_distribution("p_state", p, n_states)?;
@@ -1335,10 +1431,11 @@ pub fn viterbi_discriminative(
         None => uniform(),
     };
     let threshold = log_threshold(transition_min_prob)?;
-    let log_p_init = p_init.mapv(|v| (v + TINY).ln());
-    let log_trans = transition.mapv(|v| (v + TINY).ln());
-    let log_marginal = p_state.mapv(|v| (v + TINY).ln());
-    let mut log_prob = prob.mapv(|v| (v + TINY).ln());
+    let tiny = tiny::<F>();
+    let log_p_init = p_init.mapv(|v| (v + tiny).ln());
+    let log_trans = transition.mapv(|v| (v + tiny).ln());
+    let log_marginal = p_state.mapv(|v| (v + tiny).ln());
+    let mut log_prob = prob.mapv(|v| (v + tiny).ln());
     for (mut row, &m) in log_prob.rows_mut().into_iter().zip(log_marginal.iter()) {
         row.mapv_inplace(|v| v - m);
     }
@@ -1349,7 +1446,7 @@ pub fn viterbi_discriminative(
 ///
 /// Each of the `n_states` rows of `prob` is treated as an independent
 /// two-state (off/on) HMM with `P[on | observation t] = prob[s, t]` and decoded
-/// with [`viterbi_discriminative`]. Equivalent to
+/// with [`viterbi_discriminative`] (in the element type `F` of `prob`). Equivalent to
 /// `librosa.sequence.viterbi_binary(..., return_logp=True)`. Typical use:
 /// smoothing frame-wise voice-activity or note-activity probabilities.
 ///
@@ -1384,13 +1481,13 @@ pub fn viterbi_discriminative(
 ///     .unwrap();
 /// assert_eq!(r.states.row(0).to_vec(), vec![0, 0, 1, 1, 1, 1, 1, 0]);
 /// ```
-pub fn viterbi_binary(
-    prob: ArrayView2<f64>,
-    transition: ArrayView3<f64>,
-    p_state: Option<ArrayView1<f64>>,
-    p_init: Option<ArrayView1<f64>>,
+pub fn viterbi_binary<F: AudioFloat>(
+    prob: ArrayView2<F>,
+    transition: ArrayView3<F>,
+    p_state: Option<ArrayView1<F>>,
+    p_init: Option<ArrayView1<F>>,
     transition_min_prob: Option<f64>,
-) -> AudioSampleResult<ViterbiBinaryResult> {
+) -> AudioSampleResult<ViterbiBinaryResult<F>> {
     check_prob_shape(prob)?;
     let (n_states, n_steps) = prob.dim();
     let (nt, r, c) = transition.dim();
@@ -1406,14 +1503,15 @@ pub fn viterbi_binary(
     for t in transition.outer_iter() {
         check_stochastic_rows(t)?;
     }
-    if prob.iter().any(|&v| !(0.0..=1.0).contains(&v)) {
+    let unit = F::zero()..=F::one();
+    if prob.iter().any(|v| !unit.contains(v)) {
         return err("prob", "probability values must be between 0 and 1");
     }
-    let per_state = |name: &str, p: Option<ArrayView1<f64>>| -> AudioSampleResult<Array1<f64>> {
+    let per_state = |name: &str, p: Option<ArrayView1<F>>| -> AudioSampleResult<Array1<F>> {
         match p {
-            None => Ok(Array1::from_elem(n_states, 0.5)),
+            None => Ok(Array1::from_elem(n_states, F::of(0.5))),
             Some(p) => {
-                if p.len() != n_states || p.iter().any(|v| !(0.0..=1.0).contains(v)) {
+                if p.len() != n_states || p.iter().any(|v| !unit.contains(v)) {
                     return err(name, format!("must have {n_states} values, each in [0, 1]"));
                 }
                 Ok(p.to_owned())
@@ -1424,15 +1522,15 @@ pub fn viterbi_binary(
     let p_init = per_state("p_init", p_init)?;
 
     let mut states = Array2::<usize>::zeros((n_states, n_steps));
-    let mut logp = Array1::<f64>::zeros(n_states);
-    let mut prob_bin = Array2::<f64>::zeros((2, n_steps));
+    let mut logp = Array1::<F>::zeros(n_states);
+    let mut prob_bin = Array2::<F>::zeros((2, n_steps));
     for s in 0..n_states {
         for t in 0..n_steps {
-            prob_bin[[0, t]] = 1.0 - prob[[s, t]];
+            prob_bin[[0, t]] = F::one() - prob[[s, t]];
             prob_bin[[1, t]] = prob[[s, t]];
         }
-        let ps = ndarray::arr1(&[1.0 - p_state[s], p_state[s]]);
-        let pi = ndarray::arr1(&[1.0 - p_init[s], p_init[s]]);
+        let ps = ndarray::arr1(&[F::one() - p_state[s], p_state[s]]);
+        let pi = ndarray::arr1(&[F::one() - p_init[s], p_init[s]]);
         let trans = transition.index_axis(Axis(0), if nt == 1 { 0 } else { s });
         let r = viterbi_discriminative(
             prob_bin.view(),
@@ -1458,7 +1556,9 @@ pub fn viterbi_binary(
 
 /// Uniform transition matrix: every transition has probability `1 / n_states`.
 ///
-/// Equivalent to `librosa.sequence.transition_uniform`.
+/// Equivalent to `librosa.sequence.transition_uniform`. The entries are
+/// computed in `f64` and rounded to `F` (`f32` or `f64`, usually inferred from
+/// the decoder call) once.
 ///
 /// # Errors
 ///
@@ -1470,17 +1570,17 @@ pub fn viterbi_binary(
 /// ```
 /// use audio_samples::operations::sequence::transition_uniform;
 ///
-/// let t = transition_uniform(4).unwrap();
+/// let t = transition_uniform::<f64>(4).unwrap();
 /// assert!(t.iter().all(|&p| p == 0.25));
 /// ```
-pub fn transition_uniform(n_states: usize) -> AudioSampleResult<Array2<f64>> {
+pub fn transition_uniform<F: AudioFloat>(n_states: usize) -> AudioSampleResult<Array2<F>> {
     if n_states == 0 {
         return err("n_states", "must be a positive integer");
     }
     check_n_states(n_states)?;
     Ok(Array2::from_elem(
         (n_states, n_states),
-        1.0 / n_states as f64,
+        F::of(1.0 / n_states as f64),
     ))
 }
 
@@ -1522,7 +1622,8 @@ fn per_state_probs(n_states: usize, prob: &[f64]) -> AudioSampleResult<Vec<f64>>
 /// other state uniformly otherwise.
 ///
 /// Equivalent to `librosa.sequence.transition_loop`. Useful to discourage
-/// rapid switching (e.g. chord or voicing smoothing).
+/// rapid switching (e.g. chord or voicing smoothing). The entries are computed
+/// in `f64` and rounded to `F` once.
 ///
 /// # Arguments
 ///
@@ -1540,15 +1641,18 @@ fn per_state_probs(n_states: usize, prob: &[f64]) -> AudioSampleResult<Vec<f64>>
 /// ```
 /// use audio_samples::operations::sequence::transition_loop;
 ///
-/// let t = transition_loop(3, &[0.5]).unwrap();
+/// let t = transition_loop::<f64>(3, &[0.5]).unwrap();
 /// assert_eq!(t.row(0).to_vec(), vec![0.5, 0.25, 0.25]);
 /// ```
-pub fn transition_loop(n_states: usize, prob: &[f64]) -> AudioSampleResult<Array2<f64>> {
+pub fn transition_loop<F: AudioFloat>(
+    n_states: usize,
+    prob: &[f64],
+) -> AudioSampleResult<Array2<F>> {
     let p = per_state_probs(n_states, prob)?;
     let mut t = Array2::zeros((n_states, n_states));
     for (i, &pi) in p.iter().enumerate() {
-        t.row_mut(i).fill((1.0 - pi) / (n_states - 1) as f64);
-        t[[i, i]] = pi;
+        t.row_mut(i).fill(F::of((1.0 - pi) / (n_states - 1) as f64));
+        t[[i, i]] = F::of(pi);
     }
     Ok(t)
 }
@@ -1557,7 +1661,8 @@ pub fn transition_loop(n_states: usize, prob: &[f64]) -> AudioSampleResult<Array
 /// to state `(i + 1) % n_states`.
 ///
 /// Equivalent to `librosa.sequence.transition_cycle` (e.g. beat-position or
-/// metrical-cycle models).
+/// metrical-cycle models). The entries are computed in `f64` and rounded to
+/// `F` once.
 ///
 /// # Arguments
 ///
@@ -1573,15 +1678,18 @@ pub fn transition_loop(n_states: usize, prob: &[f64]) -> AudioSampleResult<Array
 /// ```
 /// use audio_samples::operations::sequence::transition_cycle;
 ///
-/// let t = transition_cycle(3, &[0.9]).unwrap();
+/// let t = transition_cycle::<f64>(3, &[0.9]).unwrap();
 /// assert_eq!(t.row(2).to_vec(), vec![1.0 - 0.9, 0.0, 0.9]);
 /// ```
-pub fn transition_cycle(n_states: usize, prob: &[f64]) -> AudioSampleResult<Array2<f64>> {
+pub fn transition_cycle<F: AudioFloat>(
+    n_states: usize,
+    prob: &[f64],
+) -> AudioSampleResult<Array2<F>> {
     let p = per_state_probs(n_states, prob)?;
     let mut t = Array2::zeros((n_states, n_states));
     for (i, &pi) in p.iter().enumerate() {
-        t[[i, (i + 1) % n_states]] = 1.0 - pi;
-        t[[i, i]] = pi;
+        t[[i, (i + 1) % n_states]] = F::of(1.0 - pi);
+        t[[i, i]] = F::of(pi);
     }
     Ok(t)
 }
@@ -1660,7 +1768,8 @@ impl TransitionWindow {
 ///
 /// Equivalent to `librosa.sequence.transition_local(n_states, width,
 /// window=..., wrap=...)`. Typical for pitch tracking (pYIN), where the
-/// pitch may only move a few bins per frame.
+/// pitch may only move a few bins per frame. Each row is computed and
+/// normalised in `f64` and rounded to `F` once.
 ///
 /// # Arguments
 ///
@@ -1687,18 +1796,18 @@ impl TransitionWindow {
 /// ```
 /// use audio_samples::operations::sequence::{transition_local, TransitionWindow};
 ///
-/// let t = transition_local(5, &[3], TransitionWindow::Triangle, false).unwrap();
+/// let t = transition_local::<f64>(5, &[3], TransitionWindow::Triangle, false).unwrap();
 /// // Interior state 2 moves to 1, 2 or 3 with weights 1/4, 1/2, 1/4.
 /// assert_eq!(t.row(2).to_vec(), vec![0.0, 0.25, 0.5, 0.25, 0.0]);
 /// // Edge state 0 is truncated and renormalised.
 /// assert!((t[[0, 0]] - 2.0 / 3.0).abs() < 1e-15);
 /// ```
-pub fn transition_local(
+pub fn transition_local<F: AudioFloat>(
     n_states: usize,
     width: &[usize],
     window: TransitionWindow,
     wrap: bool,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     if n_states < 2 {
         return err("n_states", "must be an integer > 1");
     }
@@ -1713,7 +1822,7 @@ pub fn transition_local(
             );
         }
     };
-    let mut t = Array2::<f64>::zeros((n_states, n_states));
+    let mut t = Array2::<F>::zeros((n_states, n_states));
     for (i, &w) in widths.iter().enumerate() {
         if w < 1 || w > n_states {
             return Err(ParameterError::out_of_range(
@@ -1749,7 +1858,7 @@ pub fn transition_local(
             );
         }
         for (j, v) in row.into_iter().enumerate() {
-            t[[i, j]] = v / sum;
+            t[[i, j]] = F::of(v / sum);
         }
     }
     Ok(t)
@@ -1793,16 +1902,20 @@ pub enum Bandwidth {
     /// Per link: mean of both frames' average k-nearest distances and the
     /// link's own distance (`'mean_k_avg_and_pair'`).
     MeanKAvgAndPair,
-    /// A fixed positive bandwidth.
+    /// A fixed positive bandwidth (rounded to the element type of the data).
     Scalar(f64),
     /// A per-link bandwidth matrix, all entries `> 0`, indexed
     /// `[query_frame, neighbour_frame]` as in librosa, i.e. the **transpose**
     /// of the output layout (`(t, t)` for a recurrence matrix, `(n, n_ref)`
-    /// for a cross-similarity matrix).
+    /// for a cross-similarity matrix). Entries are rounded to the element type
+    /// of the data.
     Matrix(Array2<f64>),
 }
 
-/// Configuration for [`recurrence_matrix`]; `Default` equals librosa's defaults.
+/// Configuration for [`recurrence_matrix`].
+///
+/// [`RecurrenceConfig::librosa`] gives librosa's defaults; `Default` is
+/// currently the same.
 ///
 /// # Examples
 ///
@@ -1821,7 +1934,8 @@ pub struct RecurrenceConfig {
     /// `2 * ceil(sqrt(t - 2 * width + 1))`. Must be `>= 1` when given.
     pub k: Option<usize>,
     /// Frames closer than `width` in time are never linked (suppresses the
-    /// trivial near-diagonal). `1 <= width < (t - 1) / 2`; librosa default 1.
+    /// trivial near-diagonal). `1 <= width < (t - 1) / 2`. Default 1 (librosa's
+    /// default).
     pub width: usize,
     /// Distance between feature vectors.
     pub metric: DistanceMetric,
@@ -1855,9 +1969,17 @@ impl Default for RecurrenceConfig {
 }
 
 impl RecurrenceConfig {
-    /// librosa's default configuration.
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults for `librosa.segment.recurrence_matrix`.
+    ///
+    /// Currently the same as [`Default`].
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -1960,7 +2082,10 @@ fn validate_bandwidth(b: &Bandwidth) -> AudioSampleResult<()> {
     }
 }
 
-/// Configuration for [`cross_similarity`]; `Default` equals librosa's defaults.
+/// Configuration for [`cross_similarity`].
+///
+/// [`CrossSimilarityConfig::librosa`] gives librosa's defaults; `Default` is
+/// currently the same.
 ///
 /// # Examples
 ///
@@ -2001,9 +2126,17 @@ impl Default for CrossSimilarityConfig {
 }
 
 impl CrossSimilarityConfig {
-    /// librosa's default configuration.
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults for `librosa.segment.cross_similarity`.
+    ///
+    /// Currently the same as [`Default`].
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -2058,49 +2191,74 @@ impl CrossSimilarityConfig {
 /// Distance for nearest-neighbour search, following sklearn's conventions
 /// (librosa delegates to `sklearn.neighbors.NearestNeighbors`): cosine
 /// distances of zero vectors are 1 and results are clipped to `[0, 2]`.
-fn knn_distances(x: ArrayView2<f64>, y: ArrayView2<f64>, metric: DistanceMetric) -> Array2<f64> {
+fn knn_distances<F: AudioFloat>(
+    x: ArrayView2<F>,
+    y: ArrayView2<F>,
+    metric: DistanceMetric,
+) -> Array2<F> {
     let mut d = pairwise(x, y, metric);
     if metric == DistanceMetric::Cosine {
-        d.mapv_inplace(|v| if v.is_nan() { 1.0 } else { v.clamp(0.0, 2.0) });
+        let two = F::of(2.0);
+        d.mapv_inplace(|v| {
+            if v.is_nan() {
+                F::one()
+            } else if v < F::zero() {
+                F::zero()
+            } else if v > two {
+                two
+            } else {
+                v
+            }
+        });
     }
     d
 }
 
+/// `f64::total_cmp` for `F` (the conversion to `f64` is exact).
+fn total_cmp<F: AudioFloat>(a: F, b: F) -> std::cmp::Ordering {
+    a.as_f64().total_cmp(&b.as_f64())
+}
+
 /// Indices of the `n` nearest columns of `dist.row(i)` (excluding `skip`),
 /// ordered by (distance, index).
-fn nearest(row: ArrayView1<f64>, n: usize, skip: Option<usize>) -> Vec<usize> {
+fn nearest<F: AudioFloat>(row: ArrayView1<F>, n: usize, skip: Option<usize>) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..row.len()).filter(|&j| Some(j) != skip).collect();
-    idx.sort_by(|&a, &b| row[a].total_cmp(&row[b]).then(a.cmp(&b)));
+    idx.sort_by(|&a, &b| total_cmp(row[a], row[b]).then(a.cmp(&b)));
     idx.truncate(n);
     idx
 }
 
 /// Keep the `k` smallest stored (non-zero) values of each row, ties by column
 /// (librosa's stable `argsort` over the row's links).
-fn trim_rows(rec: &mut Array2<f64>, k: usize) {
+fn trim_rows<F: AudioFloat>(rec: &mut Array2<F>, k: usize) {
     for mut row in rec.rows_mut() {
-        let mut links: Vec<usize> = (0..row.len()).filter(|&j| row[j] != 0.0).collect();
-        links.sort_by(|&a, &b| row[a].total_cmp(&row[b]).then(a.cmp(&b)));
+        let mut links: Vec<usize> = (0..row.len()).filter(|&j| row[j] != F::zero()).collect();
+        links.sort_by(|&a, &b| total_cmp(row[a], row[b]).then(a.cmp(&b)));
         for &j in links.iter().skip(k) {
-            row[j] = 0.0;
+            row[j] = F::zero();
         }
     }
 }
 
 /// Converts stored distances to affinities in place (`rec` in librosa's
 /// pre-transpose orientation; stored = non-zero, negative = stored zero).
-fn apply_affinity(rec: &mut Array2<f64>, bandwidth: &Bandwidth, k: usize) -> AudioSampleResult<()> {
+fn apply_affinity<F: AudioFloat>(
+    rec: &mut Array2<F>,
+    bandwidth: &Bandwidth,
+    k: usize,
+) -> AudioSampleResult<()> {
+    let zero = F::zero();
     let (t, ncols) = rec.dim();
-    let stored: Array2<bool> = rec.mapv(|v| v != 0.0);
-    rec.mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
+    let stored: Array2<bool> = rec.mapv(|v| v != zero);
+    rec.mapv_inplace(|v| if v < zero { zero } else { v });
 
     // Per-row statistics over the k smallest stored values.
-    let row_stats = || -> (Vec<f64>, Vec<f64>, Vec<bool>) {
-        let mut dist_to_k = vec![f64::NAN; t];
-        let mut avg = vec![f64::NAN; t];
+    let row_stats = || -> (Vec<F>, Vec<F>, Vec<bool>) {
+        let mut dist_to_k = vec![F::nan(); t];
+        let mut avg = vec![F::nan(); t];
         let mut empty = vec![false; t];
         for i in 0..t {
-            let mut vals: Vec<f64> = (0..ncols)
+            let mut vals: Vec<F> = (0..ncols)
                 .filter(|&j| stored[[i, j]])
                 .map(|j| rec[[i, j]])
                 .collect();
@@ -2108,22 +2266,22 @@ fn apply_affinity(rec: &mut Array2<f64>, bandwidth: &Bandwidth, k: usize) -> Aud
                 empty[i] = true;
                 continue;
             }
-            vals.sort_by(f64::total_cmp);
+            vals.sort_by(|a, b| total_cmp(*a, *b));
             vals.truncate(k);
             dist_to_k[i] = vals[vals.len() - 1];
-            avg[i] = vals.iter().sum::<f64>() / vals.len() as f64;
+            avg[i] = vals.iter().sum::<F>() / F::of_usize(vals.len());
         }
         (dist_to_k, avg, empty)
     };
 
-    let scalar = |bw: f64, rec: &mut Array2<f64>| {
+    let scalar = |bw: F, rec: &mut Array2<F>| {
         Zip::from(rec)
             .and(&stored)
-            .for_each(|v, &s| *v = if s { (*v / -bw).exp() } else { 0.0 });
+            .for_each(|v, &s| *v = if s { (*v / -bw).exp() } else { zero });
     };
 
     match bandwidth {
-        Bandwidth::Scalar(bw) => scalar(*bw, rec),
+        Bandwidth::Scalar(bw) => scalar(F::of(*bw), rec),
         Bandwidth::Matrix(m) => {
             if m.dim() != (t, ncols) {
                 return err(
@@ -2138,20 +2296,20 @@ fn apply_affinity(rec: &mut Array2<f64>, bandwidth: &Bandwidth, k: usize) -> Aud
             Zip::from(&mut *rec)
                 .and(&stored)
                 .and(m)
-                .for_each(|v, &s, &bw| *v = if s { (*v / -bw).exp() } else { 0.0 });
+                .for_each(|v, &s, &bw| *v = if s { (*v / -F::of(bw)).exp() } else { zero });
         }
         Bandwidth::MedKScalar => {
             let (dist_to_k, _, _) = row_stats();
-            let mut finite: Vec<f64> = dist_to_k.into_iter().filter(|v| !v.is_nan()).collect();
+            let mut finite: Vec<F> = dist_to_k.into_iter().filter(|v| !v.is_nan()).collect();
             if finite.is_empty() {
                 return err("bandwidth", "cannot estimate bandwidth from an empty graph");
             }
-            finite.sort_by(f64::total_cmp);
+            finite.sort_by(|a, b| total_cmp(*a, *b));
             let n = finite.len();
             let med = if n % 2 == 1 {
                 finite[n / 2]
             } else {
-                (finite[n / 2 - 1] + finite[n / 2]) / 2.0
+                (finite[n / 2 - 1] + finite[n / 2]) / F::of(2.0)
             };
             scalar(med, rec);
         }
@@ -2170,7 +2328,7 @@ fn apply_affinity(rec: &mut Array2<f64>, bandwidth: &Bandwidth, k: usize) -> Aud
             for i in 0..t {
                 for j in 0..ncols {
                     if !stored[[i, j]] {
-                        rec[[i, j]] = 0.0;
+                        rec[[i, j]] = zero;
                         continue;
                     }
                     let Some(&sj) = stat.get(j) else {
@@ -2183,9 +2341,9 @@ fn apply_affinity(rec: &mut Array2<f64>, bandwidth: &Bandwidth, k: usize) -> Aud
                     let si = stat[i];
                     let d = rec[[i, j]];
                     let bw = match heuristic {
-                        Bandwidth::MeanK | Bandwidth::MeanKAvg => (si + sj) / 2.0,
+                        Bandwidth::MeanK | Bandwidth::MeanKAvg => (si + sj) / F::of(2.0),
                         Bandwidth::GmeanK | Bandwidth::GmeanKAvg => (si * sj).sqrt(),
-                        _ => (si + sj + d) / 3.0,
+                        _ => (si + sj + d) / F::of(3.0),
                     };
                     rec[[i, j]] = (d / -bw).exp();
                 }
@@ -2199,7 +2357,8 @@ fn apply_affinity(rec: &mut Array2<f64>, bandwidth: &Bandwidth, k: usize) -> Aud
 ///
 /// Frame `j` is linked to frame `i` if it is among the `k` nearest neighbours
 /// of `i` and at least `width` frames away. Equivalent to
-/// `librosa.segment.recurrence_matrix(data, ..., sparse=False)`.
+/// `librosa.segment.recurrence_matrix(data, ..., sparse=False)`. Distances and
+/// affinities are computed in the element type `F` of `data`.
 ///
 /// # Arguments
 ///
@@ -2246,10 +2405,10 @@ fn apply_affinity(rec: &mut Array2<f64>, bandwidth: &Bandwidth, k: usize) -> Aud
 ///   neighbours outside the width band, the `k` with the *lowest frame
 ///   index* (its sort over equal link values preserves index order). This
 ///   function reproduces that behaviour exactly.
-pub fn recurrence_matrix(
-    data: ArrayView2<f64>,
+pub fn recurrence_matrix<F: AudioFloat>(
+    data: ArrayView2<F>,
     cfg: &RecurrenceConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     let t = data.ncols();
     cfg.validate(t)?;
     check_finite("data", data.iter().copied())?;
@@ -2266,11 +2425,12 @@ pub fn recurrence_matrix(
     let n_nb = (t - 1).min(k + 2 * w);
     let dist = knn_distances(data, data, cfg.metric);
 
-    let mut rec = Array2::<f64>::zeros((t, t));
+    let (zero, one) = (F::zero(), F::one());
+    let mut rec = Array2::<F>::zeros((t, t));
     for i in 0..t {
         for j in nearest(dist.row(i), n_nb, Some(i)) {
             rec[[i, j]] = match cfg.mode {
-                RecurrenceMode::Connectivity => 1.0,
+                RecurrenceMode::Connectivity => one,
                 _ => dist[[i, j]],
             };
         }
@@ -2278,17 +2438,17 @@ pub fn recurrence_matrix(
     if !cfg.full {
         for ((i, j), v) in rec.indexed_iter_mut() {
             if i.abs_diff(j) < w {
-                *v = 0.0;
+                *v = zero;
             }
         }
         trim_rows(&mut rec, k);
     }
     for i in 0..t {
         let diag = match (cfg.self_links, cfg.mode) {
-            (true, RecurrenceMode::Connectivity) => 1.0,
-            (true, RecurrenceMode::Affinity) => -1.0,
+            (true, RecurrenceMode::Connectivity) => one,
+            (true, RecurrenceMode::Affinity) => -one,
             (true, RecurrenceMode::Distance) => rec[[i, i]],
-            (false, _) => 0.0,
+            (false, _) => zero,
         };
         rec[[i, i]] = diag;
     }
@@ -2297,7 +2457,7 @@ pub fn recurrence_matrix(
         Zip::from(&mut rec).and(&tr).for_each(|a, &b| *a = a.min(b));
     }
     match cfg.mode {
-        RecurrenceMode::Connectivity => rec.mapv_inplace(|v| if v != 0.0 { 1.0 } else { 0.0 }),
+        RecurrenceMode::Connectivity => rec.mapv_inplace(|v| if v != zero { one } else { zero }),
         RecurrenceMode::Distance => {}
         RecurrenceMode::Affinity => apply_affinity(&mut rec, &cfg.bandwidth, bandwidth_k)?,
     }
@@ -2308,7 +2468,7 @@ pub fn recurrence_matrix(
 ///
 /// Each query frame is linked to its `k` nearest reference frames.
 /// Equivalent to `librosa.segment.cross_similarity(data, data_ref, ...,
-/// sparse=False)`.
+/// sparse=False)`. Computed in the element type `F` of the inputs.
 ///
 /// # Arguments
 ///
@@ -2340,11 +2500,11 @@ pub fn recurrence_matrix(
 /// assert_eq!(x.column(0).to_vec(), vec![0.0, 1.0, 0.0]);
 /// assert_eq!(x.column(1).to_vec(), vec![1.0, 0.0, 0.0]);
 /// ```
-pub fn cross_similarity(
-    data: ArrayView2<f64>,
-    data_ref: ArrayView2<f64>,
+pub fn cross_similarity<F: AudioFloat>(
+    data: ArrayView2<F>,
+    data_ref: ArrayView2<F>,
     cfg: &CrossSimilarityConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     cfg.validate()?;
     if data.nrows() != data_ref.nrows() {
         return err(
@@ -2373,11 +2533,12 @@ pub fn cross_similarity(
     };
     let n_nb = n_ref.min(k);
     let dist = knn_distances(data, data_ref, cfg.metric);
-    let mut xsim = Array2::<f64>::zeros((n, n_ref));
+    let (zero, one) = (F::zero(), F::one());
+    let mut xsim = Array2::<F>::zeros((n, n_ref));
     for i in 0..n {
         for j in nearest(dist.row(i), n_nb, None) {
             xsim[[i, j]] = match cfg.mode {
-                RecurrenceMode::Connectivity => 1.0,
+                RecurrenceMode::Connectivity => one,
                 _ => dist[[i, j]],
             };
         }
@@ -2386,7 +2547,7 @@ pub fn cross_similarity(
         trim_rows(&mut xsim, k);
     }
     match cfg.mode {
-        RecurrenceMode::Connectivity => xsim.mapv_inplace(|v| if v != 0.0 { 1.0 } else { 0.0 }),
+        RecurrenceMode::Connectivity => xsim.mapv_inplace(|v| if v != zero { one } else { zero }),
         RecurrenceMode::Distance => {}
         RecurrenceMode::Affinity => apply_affinity(&mut xsim, &cfg.bandwidth, bandwidth_k)?,
     }
@@ -2420,7 +2581,10 @@ pub fn cross_similarity(
 /// assert_eq!(lag.dim(), (8, 4));
 /// assert_eq!(lag_to_recurrence(lag.view()).unwrap(), rec);
 /// ```
-pub fn recurrence_to_lag(rec: ArrayView2<f64>, pad: bool) -> AudioSampleResult<Array2<f64>> {
+pub fn recurrence_to_lag<F: AudioFloat>(
+    rec: ArrayView2<F>,
+    pad: bool,
+) -> AudioSampleResult<Array2<F>> {
     let (r, c) = rec.dim();
     if r != c {
         return err(
@@ -2429,7 +2593,7 @@ pub fn recurrence_to_lag(rec: ArrayView2<f64>, pad: bool) -> AudioSampleResult<A
         );
     }
     let n = if pad { 2 * r } else { r };
-    let mut lag = Array2::<f64>::zeros((n, c));
+    let mut lag = Array2::<F>::zeros((n, c));
     for ((row, col), &v) in rec.indexed_iter() {
         // shear(factor = -1): row index moves to (row - col) mod n.
         lag[[(row + n - col) % n, col]] = v;
@@ -2465,7 +2629,7 @@ pub fn recurrence_to_lag(rec: ArrayView2<f64>, pad: bool) -> AudioSampleResult<A
 /// let rec = lag_to_recurrence(lag.view()).unwrap();
 /// assert_eq!(rec, array![[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
 /// ```
-pub fn lag_to_recurrence(lag: ArrayView2<f64>) -> AudioSampleResult<Array2<f64>> {
+pub fn lag_to_recurrence<F: AudioFloat>(lag: ArrayView2<F>) -> AudioSampleResult<Array2<F>> {
     let (n, t) = lag.dim();
     if n != t && n != 2 * t {
         return err(
@@ -2473,7 +2637,7 @@ pub fn lag_to_recurrence(lag: ArrayView2<f64>) -> AudioSampleResult<Array2<f64>>
             format!("invalid lag matrix shape ({n}, {t}): must be (t, t) or (2t, t)"),
         );
     }
-    let mut rec = Array2::<f64>::zeros((t, t));
+    let mut rec = Array2::<F>::zeros((t, t));
     for ((row, col), &v) in lag.indexed_iter() {
         // shear(factor = +1): row index moves to (row + col) mod n.
         let r = (row + col) % n;
@@ -2505,24 +2669,24 @@ pub enum SyncAggregate {
 }
 
 impl SyncAggregate {
-    fn apply(self, x: ArrayView1<f64>) -> f64 {
+    fn apply<F: AudioFloat>(self, x: ArrayView1<F>) -> F {
         if x.iter().any(|v| v.is_nan()) {
             // numpy reductions propagate NaN.
-            return f64::NAN;
+            return F::nan();
         }
         match self {
-            Self::Mean => x.sum() / x.len() as f64,
+            Self::Mean => x.sum() / F::of_usize(x.len()),
             Self::Sum => x.sum(),
-            Self::Max => x.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            Self::Min => x.iter().copied().fold(f64::INFINITY, f64::min),
+            Self::Max => x.iter().copied().fold(F::neg_infinity(), F::max),
+            Self::Min => x.iter().copied().fold(F::infinity(), F::min),
             Self::Median => {
                 let mut v = x.to_vec();
-                v.sort_by(f64::total_cmp);
+                v.sort_by(|a, b| total_cmp(*a, *b));
                 let n = v.len();
                 if n % 2 == 1 {
                     v[n / 2]
                 } else {
-                    (v[n / 2 - 1] + v[n / 2]) / 2.0
+                    (v[n / 2 - 1] + v[n / 2]) / F::of(2.0)
                 }
             }
         }
@@ -2566,7 +2730,8 @@ fn sync_segments(idx: &[usize], n: usize, pad: bool) -> Vec<(usize, usize)> {
 ///
 /// # Returns
 ///
-/// `data` with the last axis replaced by one entry per segment.
+/// `data` with the last axis replaced by one entry per segment, in the element
+/// type `F` of `data` (`f32` or `f64`).
 ///
 /// # Errors
 ///
@@ -2591,13 +2756,14 @@ fn sync_segments(idx: &[usize], n: usize, pad: bool) -> Vec<(usize, usize)> {
 /// segment `[0, n_frames)`); librosa treats an empty list as a list of zero
 /// slices and returns zero columns. Only frame indices are accepted (librosa
 /// also takes a list of slices).
-pub fn sync<D>(
-    data: ArrayView<f64, D>,
+pub fn sync<F, D>(
+    data: ArrayView<F, D>,
     idx: &[usize],
     aggregate: SyncAggregate,
     pad: bool,
-) -> AudioSampleResult<Array<f64, D>>
+) -> AudioSampleResult<Array<F, D>>
 where
+    F: AudioFloat,
     D: Dimension + RemoveAxis,
 {
     sync_with(data, idx, pad, |x| aggregate.apply(x))
@@ -2623,15 +2789,16 @@ where
 /// let peak = sync_with(x.view(), &[2], true, |s| s.fold(0.0, |m: f64, v| m.max(v.abs()))).unwrap();
 /// assert_eq!(peak, array![[2.0, 4.0]]);
 /// ```
-pub fn sync_with<D, F>(
-    data: ArrayView<f64, D>,
+pub fn sync_with<F, D, A>(
+    data: ArrayView<F, D>,
     idx: &[usize],
     pad: bool,
-    mut aggregate: F,
-) -> AudioSampleResult<Array<f64, D>>
+    mut aggregate: A,
+) -> AudioSampleResult<Array<F, D>>
 where
+    F: AudioFloat,
     D: Dimension + RemoveAxis,
-    F: FnMut(ArrayView1<f64>) -> f64,
+    A: FnMut(ArrayView1<F>) -> F,
 {
     if data.ndim() == 0 {
         return err("data", "must have at least one dimension (frames last)");
@@ -2640,7 +2807,7 @@ where
     let segments = sync_segments(idx, data.len_of(axis), pad);
     let mut shape = data.raw_dim();
     shape[axis.index()] = segments.len();
-    let mut out = Array::<f64, D>::zeros(shape);
+    let mut out = Array::<F, D>::zeros(shape);
     for (s, &(a, b)) in segments.iter().enumerate() {
         let seg = data.slice_axis(axis, Slice::from(a..b));
         let out_s = out.index_axis_mut(axis, s);
@@ -2666,13 +2833,13 @@ mod tests {
         assert!(is_param(transition_uniform(usize::MAX)));
         assert!(is_param(transition_loop(n, &[0.5])));
         assert!(is_param(transition_cycle(n, &[0.5])));
-        assert!(is_param(transition_local(
+        assert!(is_param(transition_local::<f64>(
             n,
             &[3],
             TransitionWindow::default(),
             true
         )));
-        assert!(transition_uniform(1 << 14).is_ok());
+        assert!(transition_uniform::<f32>(1 << 14).is_ok());
     }
 
     #[test]
@@ -2786,7 +2953,7 @@ mod tests {
     #[test]
     fn transitions_are_row_stochastic() {
         for t in [
-            transition_uniform(4).unwrap(),
+            transition_uniform::<f64>(4).unwrap(),
             transition_loop(4, &[0.3]).unwrap(),
             transition_cycle(4, &[0.1, 0.2, 0.3, 0.4]).unwrap(),
             transition_local(6, &[3], TransitionWindow::Hann, true).unwrap(),
@@ -2796,13 +2963,13 @@ mod tests {
                 assert!((row.sum() - 1.0).abs() < 1e-12);
             }
         }
-        assert!(transition_uniform(0).is_err());
-        assert!(transition_loop(1, &[0.5]).is_err());
-        assert!(transition_loop(3, &[0.5, 0.5]).is_err());
-        assert!(transition_cycle(3, &[1.5]).is_err());
-        assert!(transition_local(4, &[0], TransitionWindow::Triangle, false).is_err());
-        assert!(transition_local(4, &[5], TransitionWindow::Triangle, false).is_err());
-        assert!(transition_local(4, &[2], TransitionWindow::Hann, false).is_err());
+        assert!(transition_uniform::<f64>(0).is_err());
+        assert!(transition_loop::<f64>(1, &[0.5]).is_err());
+        assert!(transition_loop::<f64>(3, &[0.5, 0.5]).is_err());
+        assert!(transition_cycle::<f64>(3, &[1.5]).is_err());
+        assert!(transition_local::<f64>(4, &[0], TransitionWindow::Triangle, false).is_err());
+        assert!(transition_local::<f64>(4, &[5], TransitionWindow::Triangle, false).is_err());
+        assert!(transition_local::<f64>(4, &[2], TransitionWindow::Hann, false).is_err());
     }
 
     #[test]

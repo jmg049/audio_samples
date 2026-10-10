@@ -130,3 +130,17 @@ fn non_finite_f32_audio_is_rejected_by_rhythm() {
         assert_rejected("beat_track f32", y.beat_track(&BeatTrackConfig::librosa()));
     }
 }
+
+#[test]
+fn non_finite_audio_is_rejected_by_pitch_tracking() {
+    use audio_samples::{AudioPitchTracking, PyinConfig, YinConfig};
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let y = signal(bad);
+        assert_rejected("yin", y.yin(&YinConfig::librosa(65.0, 2093.0)));
+        assert_rejected("pyin", y.pyin(&PyinConfig::librosa(65.0, 2093.0)));
+        let mut x32: Vec<f32> = vec![0.1; 8192];
+        x32[100] = bad as f32;
+        let y32 = AudioSamples::new_mono(Array1::from(x32), sample_rate!(22050)).unwrap();
+        assert_rejected("yin f32", y32.yin(&YinConfig::librosa(65.0, 2093.0)));
+    }
+}

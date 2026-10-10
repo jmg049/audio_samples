@@ -34,6 +34,23 @@ const RTOL_PROB: f64 = 1e-11;
 /// Interpolation and aggregation of identical inputs with identical formulas:
 /// only summation-order / ulp differences remain.
 const RTOL_INTERP: f64 = 1e-12;
+/// YIN f0 from f32 audio, relative to librosa's float32 run and to our f64
+/// run. Ours computes the CMND, the parabolic shift and `sr / period` in f32;
+/// librosa computes the autocorrelation and energy terms in float32 and the
+/// rest in float64. The error is a few f32 roundings of the CMND (eps
+/// 1.19e-7) carried into the parabolic shift, divided by the period (>= 10
+/// samples), plus the final rounding of f0. Measured <= 1.3e-7 (librosa) and
+/// <= 1.1e-7 (our f64) on the fixture signals; 1e-6 is about 8 f32 ulps.
+const RTOL_F0_F32: f64 = 1e-6;
+/// pYIN f0 from f32 audio is a pitch-bin centre frequency computed in f64
+/// and rounded to f32 once: at most half an ulp (6e-8 relative) when the bin
+/// decisions agree. Measured <= 4.9e-8.
+const RTOL_PYIN_F0_F32: f64 = 1.2e-7;
+/// pYIN voicing probability from f32 audio: a sum of up to 100 Beta-prior
+/// masses (each rounded to f32) weighted by f32 Boltzmann masses, accumulated
+/// in f32. Rounding-error growth of a 100-term f32 sum of values <= 1 is about
+/// sqrt(100) x 1.19e-7 = 1.2e-6 (random walk). Measured <= 2.1e-7.
+const ATOL_PROB_F32: f64 = 2e-6;
 
 fn fixture() -> &'static Value {
     use std::sync::OnceLock;
@@ -180,10 +197,10 @@ fn yin_matches_librosa() {
 
 #[test]
 fn yin_default_config_is_librosa_default() {
-    // librosa requires fmin/fmax; everything else equals YinConfig::default().
+    // librosa requires fmin/fmax; everything else equals YinConfig::librosa().
     let c = &fixture()["yin"]["notes_default"]["config"];
     let cfg = yin_config(c);
-    let d = YinConfig::default().with_fmin(cfg.fmin).with_fmax(cfg.fmax);
+    let d = YinConfig::librosa(cfg.fmin, cfg.fmax);
     assert_eq!(cfg, d);
 }
 
@@ -235,10 +252,7 @@ fn pyin_matches_librosa() {
 fn pyin_default_config_is_librosa_default() {
     let c = &fixture()["pyin"]["notes_default"]["config"];
     let cfg = pyin_config(c);
-    let d = PyinConfig::default()
-        .with_fmin(cfg.fmin)
-        .with_fmax(cfg.fmax)
-        .with_fill(UnvoicedFill::BestGuess);
+    let d = PyinConfig::librosa(cfg.fmin, cfg.fmax).with_fill(UnvoicedFill::BestGuess);
     assert_eq!(cfg, d);
 }
 
@@ -307,21 +321,21 @@ fn salience_matches_librosa() {
     let fixed = FrequencyGrid::Fixed(d.freqs.view());
     let tv = FrequencyGrid::TimeVarying(d.freqs_tv.view());
     let nofilter = |a| {
-        SalienceConfig::new()
+        SalienceConfig::librosa()
             .with_aggregate(a)
             .with_filter_peaks(false)
     };
     let cases = [
-        ("default", fixed, SalienceConfig::default()),
+        ("default", fixed, SalienceConfig::librosa()),
         (
             "weighted",
             fixed,
-            SalienceConfig::new().with_weights(Some(w.clone())),
+            SalienceConfig::librosa().with_weights(Some(w.clone())),
         ),
         (
             "weighted_fill0",
             fixed,
-            SalienceConfig::new()
+            SalienceConfig::librosa()
                 .with_weights(Some(w.clone()))
                 .with_fill_value(0.0),
         ),
@@ -336,7 +350,7 @@ fn salience_matches_librosa() {
         (
             "time_varying",
             tv,
-            SalienceConfig::new().with_weights(Some(w)),
+            SalienceConfig::librosa().with_weights(Some(w)),
         ),
     ];
     for (key, grid, cfg) in cases {
@@ -370,6 +384,129 @@ fn f0_harmonics_matches_librosa() {
             want.iter(),
             RTOL_INTERP,
             0.0,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// float32 input
+// ---------------------------------------------------------------------------
+
+/// A fixture signal as f32 audio (exact: the signals are 16-bit PCM codes).
+fn input_f32(name: &str) -> AudioSamples<'static, f32> {
+    let a = input(name);
+    let rate = a.sample_rate();
+    let rows = if let Some(m) = a.as_mono() {
+        m.as_view().mapv(|v| v as f32).insert_axis(Axis(0))
+    } else {
+        a.as_multi_channel().unwrap().as_view().mapv(|v| v as f32)
+    };
+    if rows.nrows() == 1 {
+        AudioSamples::new_mono(rows.row(0).to_owned(), rate).unwrap()
+    } else {
+        AudioSamples::new_multi_channel(rows, rate).unwrap()
+    }
+}
+
+/// Per-element relative errors `|a - e| / |e|`.
+fn rel_errors(a: impl IntoIterator<Item = f64>, e: &[f64]) -> Vec<f64> {
+    a.into_iter()
+        .zip(e)
+        .map(|(x, y)| (x - y).abs() / y.abs())
+        .collect()
+}
+
+#[test]
+fn yin_float32_matches_librosa_float32() {
+    let f = &fixture()["float32"]["yin"];
+    let fmin = fixture()["fmin"].as_f64().unwrap();
+    let fmax = fixture()["fmax"].as_f64().unwrap();
+    for (name, case) in f.as_object().unwrap() {
+        let sig = case["signal"].as_str().unwrap();
+        let cfg = YinConfig::librosa(fmin, fmax);
+        let got: Array2<f32> = input_f32(sig).yin(&cfg).unwrap();
+        let want = rows_f64(&case["f0"]);
+        assert_eq!(got.dim(), want.dim(), "yin f32 {name}: shape");
+        let ours64 = input(sig).yin(&cfg).unwrap();
+        let rel = rel_errors(got.iter().map(|&v| f64::from(v)), want.as_slice().unwrap());
+        let rel64 = rel_errors(
+            got.iter().map(|&v| f64::from(v)),
+            ours64.as_slice().unwrap(),
+        );
+        let max_rel = rel.iter().copied().fold(0.0, f64::max);
+        let max_rel64 = rel64.iter().copied().fold(0.0, f64::max);
+        eprintln!(
+            "yin f32 {name}: max rel vs librosa float32 {max_rel:.3e}, vs our f64 {max_rel64:.3e}"
+        );
+        // Same trough decision in every frame, so the error stays at round-off.
+        assert!(max_rel <= RTOL_F0_F32, "yin f32 {name}: {max_rel:.3e}");
+        assert!(
+            max_rel64 <= RTOL_F0_F32,
+            "yin f32 {name} vs f64: {max_rel64:.3e}"
+        );
+    }
+}
+
+#[test]
+fn pyin_float32_matches_librosa_float32() {
+    let f = &fixture()["float32"]["pyin"];
+    let fmin = fixture()["fmin"].as_f64().unwrap();
+    let fmax = fixture()["fmax"].as_f64().unwrap();
+    for (name, case) in f.as_object().unwrap() {
+        let sig = case["signal"].as_str().unwrap();
+        let cfg = PyinConfig::librosa(fmin, fmax).with_fill(UnvoicedFill::BestGuess);
+        let got = input_f32(sig).pyin(&cfg).unwrap();
+        let want_flag = rows_bool(&case["voiced_flag"]);
+        let want_f0 = rows_f64(&case["f0"]);
+        let want_p = rows_f64(&case["voiced_prob"]);
+        let flag_diff: Vec<usize> = got
+            .voiced_flag
+            .iter()
+            .zip(&want_flag)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        // librosa's float32 run and ours reach the same voicing decision in
+        // every frame of the fixture signals.
+        assert!(
+            flag_diff.is_empty(),
+            "pyin f32 {name}: voiced_flag differs at {flag_diff:?}"
+        );
+        let pabs = got
+            .voiced_prob
+            .iter()
+            .zip(&want_p)
+            .map(|(a, b)| (f64::from(*a) - b).abs())
+            .fold(0.0, f64::max);
+        let f0rel = rel_errors(
+            got.f0.iter().map(|&v| f64::from(v)),
+            want_f0.as_slice().unwrap(),
+        )
+        .into_iter()
+        .fold(0.0, f64::max);
+        eprintln!("pyin f32 {name}: f0 max rel {f0rel:.3e}; voiced_prob max abs {pabs:.3e}");
+        assert!(f0rel <= RTOL_PYIN_F0_F32, "pyin f32 {name} f0: {f0rel:.3e}");
+        assert!(
+            pabs <= ATOL_PROB_F32,
+            "pyin f32 {name} voiced_prob: {pabs:.3e}"
+        );
+
+        // Against our own f64 run: same decisions, f0 equal up to rounding.
+        let ours64 = input(sig).pyin(&cfg).unwrap();
+        assert_eq!(
+            got.voiced_flag, ours64.voiced_flag,
+            "pyin f32 {name} vs f64"
+        );
+        let rel64 = rel_errors(
+            got.f0.iter().map(|&v| f64::from(v)),
+            ours64.f0.as_slice().unwrap(),
+        )
+        .into_iter()
+        .fold(0.0, f64::max);
+        assert!(
+            rel64 <= RTOL_PYIN_F0_F32,
+            "pyin f32 {name} vs f64: {rel64:.3e}"
         );
     }
 }

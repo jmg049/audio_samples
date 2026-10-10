@@ -196,16 +196,16 @@ for k in 0..8 {
 let audio = AudioSamples::new_mono(y, sample_rate!(22050)).unwrap();
 
 // librosa.onset.onset_strength(y=y, sr=sr): (channels, n_frames)
-let env = audio.onset_strength(&OnsetStrengthConfig::default()).unwrap();
+let env = audio.onset_strength(&OnsetStrengthConfig::librosa()).unwrap();
 assert_eq!(env.nrows(), 1);
 
 // librosa.onset.onset_detect(y=y, sr=sr, units="time")
-let onsets = audio.onset_detect(&OnsetDetectConfig::default()).unwrap();
+let onsets = audio.onset_detect(&OnsetDetectConfig::librosa()).unwrap();
 let onset_times: Vec<f64> = onsets.times();
 assert!(onset_times.len() >= 7);
 
 // tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-let track = audio.beat_track(&BeatTrackConfig::default()).unwrap();
+let track = audio.beat_track(&BeatTrackConfig::librosa()).unwrap();
 assert!((track.tempo - 120.0).abs() < 5.0);
 let beat_times = track.beats.times();
 assert!(!beat_times.is_empty());
@@ -250,11 +250,11 @@ use std::time::Duration;
 let y = sine_wave::<f32>(220.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 
 // librosa.yin(y, fmin=65.4, fmax=2093.0, sr=sr): (channels, n_frames)
-let f0 = y.yin(&YinConfig::default()).unwrap();
+let f0 = y.yin(&YinConfig::new(65.4, 2093.0)).unwrap();
 assert!((f0[[0, 11]] - 220.0).abs() < 1.0);
 
 // f0, voiced_flag, voiced_prob = librosa.pyin(y, fmin=65.4, fmax=2093.0, sr=sr)
-let r = y.pyin(&PyinConfig::default()).unwrap();
+let r = y.pyin(&PyinConfig::new(65.4, 2093.0)).unwrap();
 assert!(r.voiced_flag[[0, 11]]);
 assert!((r.f0[[0, 11]] - 220.0).abs() < 2.0);
 assert_eq!(r.voiced_prob.dim(), r.f0.dim());
@@ -338,7 +338,7 @@ function under `audio_samples::`.
 
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
-| `yin` | `AudioPitchTracking::yin`, `operations::pitch_tracking::yin` (`YinConfig`) | `pitch-analysis` | equivalent | librosa requires `fmin`/`fmax`; here they default to C2..C7 |
+| `yin` | `AudioPitchTracking::yin`, `operations::pitch_tracking::yin` (`YinConfig`) | `pitch-analysis` | equivalent | `fmin`/`fmax` are required, as in librosa: `YinConfig::new(fmin, fmax)` |
 | `pyin` | `AudioPitchTracking::pyin`, `operations::pitch_tracking::pyin` (`PyinConfig`, `PyinResult`) | `pitch-analysis` | equivalent | `UnvoicedFill` is librosa's `fill_na` |
 | `piptrack` | `AudioTonal::piptrack`, `operations::tonal::piptrack_from_spectrogram` | `feature-extraction` | equivalent | |
 | `estimate_tuning` | `AudioTonal::estimate_tuning`, `operations::tonal::estimate_tuning_from_signal`, `operations::tonal::estimate_tuning_from_spectrogram` | `feature-extraction` | equivalent | Pools all channels, as librosa does |
@@ -641,8 +641,6 @@ in the API docs, gathered here by theme.
   `[0, n_frames)`; librosa returns zero columns.
 - `chroma_stft` with an odd `n_fft`: librosa's tuning estimate re-infers the FFT
   length as `2 * (bins - 1)`. Here the configured `n_fft` is used throughout.
-- `yin` / `pyin`: librosa requires `fmin` and `fmax`. Here they default to
-  librosa's recommended C2 (65.4 Hz) and C7 (2093 Hz).
 - `recurrence_matrix`: exact brute-force neighbour search (librosa uses
   scikit-learn, whose distances can differ by round-off). librosa's
   connectivity-mode tie-breaking (lowest frame index wins) is reproduced exactly.

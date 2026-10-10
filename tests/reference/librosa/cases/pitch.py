@@ -8,6 +8,12 @@ Rust side does not depend on its own STFT for these cases.
 
 Non-finite values (NaN f0 of unvoiced frames, NaN fill of salience) are stored
 as ``null``.
+
+The ``*_float32`` cases run librosa on ``y.astype(np.float32)``. librosa
+computes the framing, the autocorrelation and the energy cumsum in float32 and
+the CMND division (and everything after it) in float64; the Rust side computes
+the whole f32 analysis in f32. The shared signals are 16-bit PCM codes, exact in
+float32.
 """
 
 from __future__ import annotations
@@ -53,6 +59,21 @@ def _yin(signals, sr):
                trough_threshold=0.1, center=True, pad_mode="constant")
     out["stereo_default"] = {"signal": "stereo", "config": cfg, "f0": librosa.yin(stereo, sr=sr, **cfg)}
     return out
+
+
+def _float32(signals, sr):
+    """yin / pyin on float32 input with librosa's defaults (fill_na=None)."""
+    stereo = np.stack([signals["stereo_l"], signals["stereo_r"]])
+    inputs = {"notes": signals["notes"], "mix": signals["mix"], "stereo": stereo}
+    yin_out = {}
+    pyin_out = {}
+    for sig in ("notes", "mix", "stereo"):
+        y32 = inputs[sig].astype(np.float32)
+        assert np.array_equal(y32.astype(np.float64), inputs[sig])
+        yin_out[sig] = {"signal": sig, "f0": librosa.yin(y32, fmin=FMIN, fmax=FMAX, sr=sr)}
+        f0, flag, prob = librosa.pyin(y32, fmin=FMIN, fmax=FMAX, sr=sr, fill_na=None)
+        pyin_out[sig] = {"signal": sig, "f0": f0, "voiced_flag": flag, "voiced_prob": prob}
+    return {"yin": yin_out, "pyin": pyin_out}
 
 
 def _pyin(signals, sr):
@@ -147,4 +168,5 @@ def build(signals, sr):
         "yin": _yin(signals, sr),
         "pyin": _pyin(signals, sr),
         "harmonics": _harmonics(signals, sr),
+        "float32": _float32(signals, sr),
     }

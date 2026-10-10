@@ -223,9 +223,11 @@ fn main() {
     });
 
     // --- pitch ----------------------------------------------------------
-    let c = YinConfig::default();
+    // librosa requires fmin/fmax; C2..C7 (note_to_hz('C2'), note_to_hz('C7')).
+    let (c2, c7) = (65.406_391_325_149_66, 2_093.004_522_404_789);
+    let c = YinConfig::librosa(c2, c7);
     b.run("yin", || y.yin(&c).unwrap());
-    let c = PyinConfig::default();
+    let c = PyinConfig::librosa(c2, c7);
     b.run("pyin_5s", || y5.pyin(&c).unwrap());
 
     // --- effects --------------------------------------------------------
@@ -276,7 +278,7 @@ fn main() {
     // --- sequence -------------------------------------------------------
     let xa = random_matrix(12, 500, 1);
     let xb = random_matrix(12, 500, 2);
-    let dc = DtwConfig::default();
+    let dc = DtwConfig::librosa();
     b.run("dtw_12x500", || dtw(xa.view(), xb.view(), &dc).unwrap());
     let n_states = 100;
     let prob = random_matrix(n_states, 2000, 3);
