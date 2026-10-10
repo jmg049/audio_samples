@@ -10,8 +10,8 @@
 //! 2. Writes YIN out (difference function, cumulative-mean-normalised
 //!    difference, absolute threshold, parabolic interpolation) and checks it
 //!    against `detect_pitch_yin`.
-//! 3. Shows the missing fundamental (the pitch is found although no energy
-//!    sits at f0) and an octave error on a signal with weak odd harmonics.
+//! 3. Shows the missing fundamental (the pitch is found although there is no
+//!    energy at f0) and an octave error on a signal with weak odd harmonics.
 //! 4. Tracks a pitch glide with `track_pitch` and shows what happens when
 //!    the frame is shorter than two periods of the lowest pitch.
 //! 5. Prints the explanations `topics::yin` and `topics::autocorrelation_pitch`.
@@ -185,7 +185,7 @@ fn main() {
     println!("\n3. Missing fundamental: harmonics 2..6 of 200 Hz, equal amplitudes");
     println!("   |X| at 200 Hz = {at200:.1e}, at 400 Hz = {at400:.0}: no energy at f0");
     println!(
-        "   YIN {yin_missing:.2} Hz, autocorrelation {ac_missing:.2} Hz: both hear the 200 Hz period"
+        "   YIN {yin_missing:.2} Hz, autocorrelation {ac_missing:.2} Hz: both find the 200 Hz period"
     );
     assert!(at200 < 1e-9 * at400);
     assert!((yin_missing - 200.0).abs() < 0.1);

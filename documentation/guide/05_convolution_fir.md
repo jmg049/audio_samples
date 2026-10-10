@@ -1,7 +1,7 @@
 # 05. Convolution and FIR filters
 
 A finite impulse response (FIR) filter replaces each sample by a weighted sum
-of the most recent input samples. That one operation, convolution, smooths
+of the most recent input samples. This operation, convolution, smooths
 noisy envelopes, removes hum, band-limits a signal before downsampling,
 simulates a room from its impulse response, and implements the pre-emphasis
 step of every speech front end. This chapter defines convolution precisely,
@@ -27,13 +27,13 @@ a real input sample, has $N - M + 1$ samples ($n = M-1 \dots N-1$).
 
 **Frequency response.** A complex exponential at angular frequency
 $\omega = 2\pi f / f_s$ (radians per sample, $f$ in Hz, $f_s$ the sample rate
-in Hz) comes out multiplied by
+in Hz) is multiplied by
 
 $$H(e^{j\omega}) = \sum_{m=0}^{M-1} h[m] \, e^{-j\omega m}$$
 
 where $j = \sqrt{-1}$ (as in chapter 03; no formula in this chapter uses $j$ as an
-index). So a sine of amplitude $A$ leaves with amplitude $A\,|H|$, shifted by the phase
-$\arg H$. For the $M$-tap moving average $h[m] = 1/M$ this sums to the
+index). A sine of amplitude $A$ at the input therefore has amplitude $A\,|H|$
+at the output, shifted by the phase $\arg H$. For the $M$-tap moving average $h[m] = 1/M$ this sums to the
 **Dirichlet kernel**
 
 $$|H(f)| = \left| \frac{\sin(\pi f M / f_s)}{M \sin(\pi f / f_s)} \right|$$
@@ -63,13 +63,14 @@ which rules out some filter shapes:
 | III | antisymmetric | odd | $z = 1$ and $z = -1$ | low-pass, high-pass |
 | IV | antisymmetric | even | $z = 1$ (DC) | low-pass |
 
-Types III and IV suit differentiators and Hilbert transformers.
+Types III and IV are used for differentiators and Hilbert transformers.
 
 **Windowed-sinc design.** The ideal low-pass with cutoff $f_c$ Hz has the
 infinitely long impulse response
 $h_{\mathrm{ideal}}[n] = 2 (f_c/f_s)\, \mathrm{sinc}\big(2 (f_c / f_s)\, n\big)$,
 with $\mathrm{sinc}(u) = \sin(\pi u)/(\pi u)$. Truncate it to $M$ taps centred
-on $(M-1)/2$, multiply by a window $w[n]$ (Hamming here) to tame the ripples,
+on $(M-1)/2$, multiply by a window $w[n]$ (Hamming here) to reduce the ripple that
+truncation causes,
 and scale so that $\sum_m h[m] = 1$ (unit gain at DC):
 
 $$h[n] = c \; 2\frac{f_c}{f_s}\, \mathrm{sinc}\!\left(2 \frac{f_c}{f_s}\left(n - \frac{M-1}{2}\right)\right) w[n]$$
@@ -79,6 +80,8 @@ where $c$ is the normalising constant. The response passes through about 0.5
 design gives a stop-band attenuation of about 53 dB whatever $M$ is (the lab
 finds its first stop-band lobe at $-52.2$ dB); do not confuse this with the
 Hamming *window's* own peak side lobe, $-43$ dB (chapter 03).
+
+<!-- figure: ch05-impulse-response -->
 
 ## With the library
 
@@ -103,7 +106,7 @@ assert_eq!(valid.samples_per_channel().get(), 970);  // N - M + 1
 let (f, v) = (full.as_slice().unwrap(), valid.as_slice().unwrap());
 assert!(f[30..1000].iter().zip(v).all(|(a, b)| (a - b).abs() < 1e-12));
 
-// An impulse in gives the taps out.
+// An impulse as input returns the taps.
 let mut delta = vec![0.0; 64];
 delta[0] = 1.0;
 let ir = mono(delta).convolve(&mono(h.clone())).unwrap();
@@ -154,7 +157,7 @@ for f in [1000.0, 2000.0, 3000.0] {
 }
 ```
 
-## Under the hood
+## How it works
 
 The convolution sum, a group-delay calculation, and the delay seen in the time
 domain, all for a 63-tap windowed-sinc low-pass ($f_c = 2$ kHz,
@@ -250,8 +253,12 @@ for f in [3000.0, 4000.0, 6000.0] {
 }
 ```
 
-Long filters take a different path: from 160 taps up, `apply_filter` convolves
-by FFT. The lab checks that a 201-tap design agrees with the direct sum to
+<!-- figure: ch05-convolution -->
+
+<!-- figure: ch05-magnitude-response -->
+
+Long filters are computed differently: from 160 taps up, `apply_filter`
+convolves by FFT. The lab checks that a 201-tap design agrees with the direct sum to
 better than $10^{-12}$.
 
 ## Ask the library to explain
@@ -293,9 +300,9 @@ println!("{ma}");
 
 1. Where are the nulls of a 5-tap moving average at $f_s = 10$ kHz? Check two
    of them by filtering sines.
-2. You low-pass 1 s of 16 kHz audio with the 63-tap filter above using
-   `apply_filter`. How many samples come out, and which input sample is output
-   sample $i$ aligned with? Check with a 100 Hz sine.
+2. 1 s of 16 kHz audio is low-pass filtered with the 63-tap filter above using
+   `apply_filter`. How many output samples are there, and which input sample is
+   output sample $i$ aligned with? Check with a 100 Hz sine.
 3. *Spectral inversion*: $h_{hp}[n] = \delta[n - (M-1)/2] - h_{lp}[n]$ turns
    the low-pass into a high-pass. Predict its gain at DC, at the 2 kHz cutoff
    and at 6 kHz, then measure.
@@ -374,14 +381,15 @@ assert!(doc.has_warning_containing("type I") && doc.quantity("Group delay").unwr
   a linear-phase filter still lags by $(M-1)/2$ on top. `convolve` returns the
   **full** convolution.
 * For integer sample types, `apply_filter` interprets the *taps* on the
-  normalised scale too (an `i16` tap of 16384 means about 0.5); keep taps in a
-  float signal.
+  normalised scale too (an `i16` tap of 16384 means about 0.5); filter a float
+  signal to avoid this.
 * `convolve` needs both signals mono and of the same sample type.
 * Even-length symmetric filters (type II) always have a zero at Nyquist and
   cannot be high-pass; spectral inversion needs an odd length.
 * A windowed sinc is $-6$ dB (not $-3$ dB) at its design cutoff.
 * SciPy's `lfilter(h, 1, x)` returns the full-length causal output; the crate's
-  `apply_filter` equals `lfilter(h, 1, x)[M-1:]`. Compare like with like.
+  `apply_filter` equals `lfilter(h, 1, x)[M-1:]`. Drop the first $M - 1$
+  samples of the SciPy output before comparing.
 
 ## References
 

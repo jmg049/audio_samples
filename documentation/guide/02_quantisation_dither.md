@@ -2,9 +2,9 @@
 
 Sampling (chapter 01) makes time discrete; quantisation makes amplitude
 discrete. A 16-bit file can store only 65 536 different values, so every sample
-is rounded, and the rounding error behaves like added noise. How loud that noise
-is, and whether it sounds like noise or like distortion, decides how many bits a
-recording needs and how to reduce bit depth without damaging quiet passages
+is rounded, and the rounding error behaves like added noise. The level of that
+noise, and whether it is heard as noise or as distortion, determine how many
+bits a recording needs and how to reduce bit depth without damaging quiet passages
 such as a fading voice or a reverb tail.
 
 ## Concept
@@ -26,7 +26,8 @@ $$\Delta = 2^{1-b} \;\; \text{(below zero)}, \qquad \Delta_+ = \frac{1}{2^{b-1} 
 For $b = 16$: $\Delta = 1/32768$ and $\Delta_+ = 1/32767$, a difference of
 0.003 %. (libsndfile, soundfile and librosa divide by $2^{b-1}$ on both sides.)
 
-**Quantisation noise.** If the signal is busy enough, the rounding error
+**Quantisation noise.** If the signal is large and varied compared with one
+step, the rounding error
 $e = \hat{x} - x$ is spread uniformly over one step, $[-\Delta/2, \Delta/2]$,
 so its power is
 
@@ -48,12 +49,12 @@ $\Delta = 2/2^b$:
 
 $$\mathrm{SQNR} = 10 \log_{10} \frac{1/2}{\Delta^2/12} = 10\log_{10}\!\left(\tfrac{3}{2} \, 4^{b}\right) \approx 6.02\,b + 1.76 \ \mathrm{dB}$$
 
-Each extra bit buys about 6 dB. A signal peaking $L$ dB below full scale loses
+Each extra bit adds about 6 dB. A signal peaking $L$ dB below full scale loses
 $L$ dB of SQNR.
 
 **Dither.** For a quiet signal only a few steps tall, the error is *not*
 uniform noise: it is a deterministic function of the signal, so it repeats with
-the signal and shows up as harmonics (distortion). **TPDF dither** adds, before
+the signal and appears as harmonics (distortion). **TPDF dither** adds, before
 rounding, a random value $d = u_1 + u_2$ where $u_1, u_2$ are independent and
 uniform on $[-\Delta/2, \Delta/2)$; $d$ has a triangular density on
 $[-\Delta, \Delta]$ and power $\Delta^2/6$. The total error power becomes
@@ -61,7 +62,8 @@ $[-\Delta, \Delta]$ and power $\Delta^2/6$. The total error power becomes
 $$\sigma^2_{e,\mathrm{TPDF}} = \frac{\Delta^2}{12} + \frac{\Delta^2}{6} = \frac{\Delta^2}{4}$$
 
 i.e. $10\log_{10} 3 \approx 4.77$ dB more noise, but the error's mean and
-variance no longer depend on the signal: distortion becomes a steady hiss.
+variance no longer depend on the signal: the distortion is replaced by a steady
+hiss.
 This crate applies **no** dither anywhere, so the chapter implements it.
 
 ## With the library
@@ -100,7 +102,7 @@ assert!((predicted - 98.09).abs() < 0.01);
 assert!((measured - predicted).abs() < 0.05); // measured: 98.10 dB
 ```
 
-Now the quiet case. A 997 Hz sine of amplitude only 2.5 LSB at 16 kHz, rounded to
+The quiet case: a 997 Hz sine of amplitude 2.5 LSB at 16 kHz, rounded to
 `i16` with and without TPDF dither. The dither is built from the crate's
 [`white_noise`](crate::utils::generation::white_noise), which is uniform on
 $[-A, A)$, so $A = \Delta/2$:
@@ -144,7 +146,7 @@ let spur_db = |e: &[f64]| {
     10.0 * (m[2991] * m[2991] / mean).log10()
 };
 assert!(spur_db(&e_plain) > 30.0); // measured +31.9 dB: a clear harmonic
-assert!(spur_db(&e_dith) < 3.0);   // measured -4.5 dB: just noise
+assert!(spur_db(&e_dith) < 3.0);   // measured -4.5 dB: noise only
 
 // Correlation between error and signal: -0.516 undithered, about 0 dithered.
 let corr = |e: &[f64]| {
@@ -155,14 +157,17 @@ assert!(corr(&e_plain) < -0.5);
 assert!(corr(&e_dith).abs() < 0.03);
 ```
 
-Dither raised the error power to $3 \times \Delta^2/12$ (from $1.23 \times$
-without dither, so by a factor of about 2.45 here), yet it is the better
-result: the undithered
-error is half correlated with the signal and piles up at harmonics of 997 Hz,
-which the ear hears as a buzzy distortion, while the dithered error is
-featureless.
+<!-- figure: ch02-staircase -->
 
-## Under the hood
+Dither raised the error power to $3 \times \Delta^2/12$ (from $1.23 \times$
+without dither, so by a factor of about 2.45 here), and the result is still
+better: the undithered error has a correlation of about $-0.5$ with the signal
+and is concentrated at harmonics of 997 Hz, which is heard as distortion, while
+the dithered error has a flat spectrum with no harmonics.
+
+<!-- figure: ch02-dither-spectra -->
+
+## How it works
 
 Write the requantiser in plain Rust with the same convention, check that it is
 *bit-identical* to the crate's 16-bit and 8-bit (`u8`, offset binary) round
@@ -201,8 +206,8 @@ for (b, expected) in [(4u32, 25.62), (8, 49.98), (12, 74.03), (16, 98.10)] {
     assert!((sqnr - rule).abs() < if b >= 12 { 0.05 } else { 0.25 });
 }
 
-// How much does the asymmetry matter at 16 bits? The steps differ by a
-// factor 32768/32767 (0.003 %); averaging the two halves' noise powers:
+// Effect of the asymmetry at 16 bits: the steps differ by a factor
+// 32768/32767 (0.003 %); averaging the two halves' noise powers:
 let eps = 32768.0f64 / 32767.0 - 1.0;
 assert!((eps - 3.05e-5).abs() < 1e-7);
 let noise_ratio = (1.0 + (1.0 + eps).powi(2)) / 2.0;
@@ -210,15 +215,15 @@ assert!((noise_ratio - 1.0 - 3.05e-5).abs() < 1e-7);
 assert!(10.0 * noise_ratio.log10() < 1.4e-4); // about 0.0001 dB
 ```
 
-The asymmetric steps barely matter: at 16 bits the positive-half step is larger
+The asymmetric steps have a negligible effect: at 16 bits the positive-half step is larger
 by a factor $32768/32767$, which changes the noise power by about $3\times10^{-5}$
 (0.0001 dB), as the last lines check.
 
 ## Ask the library to explain
 
 [`topics::quantisation`](crate::educational::topics::quantisation) states the
-convention, the step sizes, the noise level, the SQNR and the SQNR you would
-get with TPDF dither:
+convention, the step sizes, the noise level, the SQNR and the SQNR with TPDF
+dither:
 
 ```rust
 use audio_samples::educational::topics;
@@ -244,7 +249,7 @@ println!("{doc}");
 
 ## Exercises
 
-1. How many bits do you need for an SQNR of at least 90 dB on a full-scale
+1. How many bits are needed for an SQNR of at least 90 dB on a full-scale
    sine? Predict from the rule, then confirm by measurement at that word length
    and one bit fewer.
 2. A sine peaks at $-20$ dBFS peak (amplitude 0.1) and is stored as `i16`.
@@ -317,9 +322,9 @@ assert!((penalty - 10.0 * 3f64.log10()).abs() < 0.2);
 * Signed integer-to-integer narrowing (for example `i32` to `i16`) *shifts
   bits*: it truncates towards $-\infty$ (a $-\tfrac12$ LSB bias) rather than
   rounding. Conversions to `u8` are the exception: they rescale and round to
-  nearest. Go through `f64` if you want rounding everywhere.
-* No dither is applied by any conversion; add it yourself before reducing bit
-  depth of quiet material.
+  nearest. Convert through `f64` to round in every case.
+* No conversion applies dither; add it before reducing the bit depth of quiet
+  material.
 * $6.02\,b + 1.76$ dB is for a **full-scale sine**. Speech peaks well below
   full scale and has a high crest factor; its SQNR is much lower.
 * `white_noise` is *uniform*, not Gaussian: amplitude $A$ gives RMS

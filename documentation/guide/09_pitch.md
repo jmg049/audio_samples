@@ -28,7 +28,7 @@ spacing near $f_0$ is
 $$\Delta f = \frac{f_s}{\tau} - \frac{f_s}{\tau + 1} = \frac{f_s}{\tau(\tau+1)} \approx \frac{f_0^2}{f_s}$$
 
 in Hz. The true $f_0$ can fall anywhere between two grid points, so the
-worst-case error is half a step, $\Delta f / 2$. At 16 kHz the step is tiny
+worst-case error is half a step, $\Delta f / 2$. At 16 kHz the step is small
 for a 110 Hz voice ($\Delta f \approx 0.76$ Hz, error at most 0.38 Hz) but not
 for higher pitches: $\Delta f \approx 12.0$ Hz at 440 Hz (error at most 6.0 Hz)
 and $\Delta f \approx 46.8$ Hz at 880 Hz (error at most 23.4 Hz).
@@ -52,7 +52,8 @@ and $b = (d'(\tau_0+1) - d'(\tau_0-1))/2$ the vertex lies at $\tau_0 - b/a$:
 
 $$\hat{\tau} = \tau_0 + \frac{1}{2} \, \frac{d'(\tau_0-1) - d'(\tau_0+1)}{d'(\tau_0-1) - 2 d'(\tau_0) + d'(\tau_0+1)}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}$$
 
-so the period is fractional and the integer grid disappears. Following
+so the period is fractional and the estimate is no longer restricted to the
+integer grid. Following
 librosa, the shift is skipped (left at 0) when $\tau_0$ is at either end of the
 search range or when $|b| \ge |a|$ (the vertex would lie more than one lag
 away). If no lag dips below $\theta$ the crate declares the frame unvoiced.
@@ -62,7 +63,7 @@ away). If no lag dips below $\theta$ the crate declares the frame unvoiced.
 $d(\tau)$, not to $d'$, because interpolating $d'$ is slightly biased; their
 step 6 ("best local estimate") then re-runs the search around each frame's
 estimate. And when no lag dips below $\theta$, the paper takes the global
-minimum of $d'$ instead of giving up. The crate, like librosa's `yin`,
+minimum of $d'$ instead of declaring the frame unvoiced. The crate, like librosa's `yin`,
 interpolates $d'$ and has no step 6; unlike librosa it reports such frames as
 unvoiced. Finally, the paper and librosa sum $d(\tau)$ over a fixed window of
 $W$ samples starting at the beginning of the frame; the crate sums over all
@@ -115,7 +116,7 @@ for (f0, df, worst) in [(110.0, 0.76, 0.38), (440.0, 12.0, 6.0), (880.0, 46.8, 2
     assert!((step(f0) / 2.0 - worst).abs() < 0.05);
     assert!((step(f0) - f0 * f0 / fs).abs() / step(f0) < 0.1); // close to f0^2/fs
 }
-// YIN interpolates the period and lands within 0.1 Hz (440.0986 Hz).
+// YIN interpolates the period and is within 0.1 Hz (440.0986 Hz).
 assert!((yin - 440.0986).abs() < 5e-5);
 assert!((yin - 440.0).abs() < 0.1);
 ```
@@ -124,7 +125,7 @@ The lab repeats this for 110, 220, 440 and 880 Hz: the autocorrelation errors
 are +0.34, -0.82, +4.44 and +8.89 Hz, always within half a grid step; YIN's
 are +0.0006, +0.0124, +0.0986 and +1.2354 Hz.
 
-## Under the hood
+## How it works
 
 Both estimators are short enough to write out. We implement them exactly as
 the formulas above and compare with the library on the same 440 Hz frame.
@@ -164,7 +165,7 @@ assert!((cmnd[34] - 0.0756).abs() < 1e-4 && (cmnd[36] - 0.0019).abs() < 1e-4);
 while tau < max_tau && cmnd[tau + 1] < cmnd[tau] {
     tau += 1;
 }
-assert_eq!(tau, 36); // ... but the dip bottoms out at 36 (d' = 0.0019)
+assert_eq!(tau, 36); // ... but the minimum of the dip is at 36 (d' = 0.0019)
 // Step 4: parabolic interpolation, here on d' (as librosa does; the paper's
 // step 5 interpolates the raw d instead), skipped at the ends of the range or
 // when |b| >= |a|.
@@ -181,6 +182,10 @@ let lib = audio.detect_pitch_yin(theta, 80.0, 1000.0).unwrap().unwrap();
 assert!((f_hat - lib).abs() < 1e-9, "{f_hat} vs {lib}");
 ```
 
+<!-- figure: ch09-autocorr -->
+
+<!-- figure: ch09-yin -->
+
 **Octave errors and the missing fundamental.** First, harmonics 2 to 6 of
 200 Hz with equal amplitudes and nothing at 200 Hz itself. Then a signal whose
 odd harmonics (1, 3, 5) are 20 dB weaker than its even ones: its true period is
@@ -192,7 +197,7 @@ use ndarray::Array1;
 use std::f64::consts::PI;
 
 let fs = 16_000.0;
-let n = 1600; // 0.1 s: 20 periods of 200 Hz, so FFT bins land on harmonics
+let n = 1600; // 0.1 s: 20 periods of 200 Hz, so FFT bins fall on harmonics
 let complex = |harmonics: &[(f64, f64)]| {
     let x: Vec<f64> = (0..n)
         .map(|i| harmonics.iter().map(|&(h, a)| a * (2.0 * PI * h * 200.0 * i as f64 / fs).cos()).sum())
@@ -222,11 +227,13 @@ threshold above the bottom of that dip accepts the half period (exercise 3 asks
 how deep it is). A strict threshold fixes this signal but rejects more real,
 slightly aperiodic speech frames: that is the trade-off the threshold controls.
 
+<!-- figure: ch09-octave -->
+
 **Tracking a glide.** [`track_pitch`](crate::AudioPitchAnalysis::track_pitch)
 cuts the signal into frames of `window_size` samples every `hop_size` samples
 (no window function, no padding) and runs the detector on each. Each
 [`PitchFrame`](crate::PitchFrame)'s `time` is the frame **start**; for a
-linear glide the fairest reference is the frequency at the frame centre.
+linear glide the appropriate reference is the frequency at the frame centre.
 
 ```rust
 use audio_samples::operations::types::PitchDetectionMethod;
@@ -262,6 +269,8 @@ assert_eq!(short.mean_pitch(), None);
 The lab tracks a 1 s glide from 100 to 300 Hz: with 64 ms and with 32 ms
 frames every full frame is voiced and the worst error is well below 1 Hz
 (0.24 and 0.12 Hz); with 16 ms frames none is.
+
+<!-- figure: ch09-track -->
 
 ## Ask the library to explain
 
@@ -317,7 +326,7 @@ assert!((doc.quantity("Pitch step at f_max").unwrap().value - step).abs() < 1e-9
 **2.** $\tau_{max} = \lfloor 16000/60 \rfloor = 266$, so $N_{min} = 2 \cdot 267 = 534$
 samples (33.4 ms). With 512-sample frames every frame is unvoiced, even though
 512 samples hold more than two 70 Hz periods (2 × 228.6 = 457): the frame must
-cover the whole *search* range, not just the actual pitch.
+cover the whole *search* range, not only the actual pitch.
 
 ```rust
 use audio_samples::educational::topics;

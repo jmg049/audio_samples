@@ -162,7 +162,7 @@ fn main() -> AudioSampleResult<()> {
     .sqrt();
     println!("     predicted vowel level {:.1} dBFS", db(vowel_rms));
     // A 25 ms frame holds exactly 5 periods of 200 Hz, so the frame RMS equals
-    // the long-term RMS up to the tiny noise floor.
+    // the long-term RMS up to the contribution of the low noise floor.
     assert!((db(vow.0) - db(vowel_rms)).abs() < 0.05);
     // Fricative: uniform noise of amplitude 0.1 -> RMS 0.1/sqrt(3) = -24.8 dBFS.
     assert!((db(fri.0) + 24.8).abs() < 0.5);
@@ -249,7 +249,7 @@ fn main() -> AudioSampleResult<()> {
     println!();
 
     // ---------------------------------------------------------------- 6
-    println!("6. What the library says about the default configuration at 16 kHz:\n");
+    println!("6. The library's explanation of the default configuration at 16 kHz:\n");
     let doc = audio.explain(&VadConfig::default());
     println!("{doc}");
     assert_eq!(doc.quantity("Frame duration").unwrap().value, 64.0); // 1024 samples
@@ -263,7 +263,7 @@ fn main() -> AudioSampleResult<()> {
     assert_eq!(doc.quantity("Hop duration").unwrap().value, 10.0);
     assert_eq!(doc.quantity("Frames").unwrap().value, 120.0);
 
-    // Bonus: a pure tone's ZCR is 2 f / fs.
+    // Additional check: a pure tone's ZCR is 2 f / fs.
     let tone: Vec<f64> = (0..FRAME)
         .map(|n| (2.0 * PI * 500.0 * (n as f64 + 0.5) / FS).sin())
         .collect();

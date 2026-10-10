@@ -190,7 +190,7 @@ fn main() {
     assert!((ratio - 8.0).abs() < 0.6);
 
     // ------------------------------------------------------------------
-    // 4. Spectrogram flavours and the dB floor.
+    // 4. Spectrogram types and the dB floor.
     // ------------------------------------------------------------------
     println!("\n4. Linear / log-Hz / mel spectrograms of a full-scale 1 kHz sine");
     let sine = sine_wave::<f64>(1000.0, one_s, sr, 1.0);
@@ -218,7 +218,7 @@ fn main() {
     let predicted_db = 20.0 * (sum_w / 2.0).log10();
     let peak_db = lin.data().iter().copied().fold(f64::MIN, f64::max);
     println!(
-        "   linear dB peak = {peak_db:.2} dB re 1 (predicted 20 log10(Σw/2) = {predicted_db:.2} dB): above 0 dB!"
+        "   linear dB peak = {peak_db:.2} dB re 1 (predicted 20 log10(Σw/2) = {predicted_db:.2} dB), above 0 dB"
     );
     assert!((peak_db - predicted_db).abs() < 0.01);
     assert!((predicted_db - 42.13).abs() < 0.01);

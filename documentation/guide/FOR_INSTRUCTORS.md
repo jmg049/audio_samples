@@ -14,12 +14,12 @@ conventions differ from those references.
 - **Rust and Python with the same core.** The Python package
   (`audio_samples` on PyPI) is a thin binding over this crate, so a result
   computed in a notebook and in a Rust lab comes from the same code.
-- **Errors that teach.** Invalid parameters produce diagnostics that name the
+- **Descriptive errors.** Invalid parameters produce diagnostics that name the
   parameter, the value and the valid range (with the `fancy` feature, as
   coloured `miette` reports). In Python most of them are raised as
   `audio_samples.exceptions` classes carrying `.code` and `.help` (a few
   parameter constructors still raise a plain `ValueError`).
-- **A library that explains itself** (`educational` feature). A supported
+- **Built-in explanations** (`educational` feature). A supported
   configuration can describe what it will do before it runs: the formula the
   code evaluates, every symbol with its unit, the derived resolution and
   latency numbers, and warnings about suspicious settings.
@@ -56,7 +56,7 @@ sampling and quantisation to codecs. Every chapter follows the same pattern:
 
 1. **Concept**: the theory, with every symbol and unit defined.
 2. **With the library**: the API that does it.
-3. **Under the hood**: the same result re-derived from first principles in a
+3. **How it works**: the same result re-derived from first principles in a
    few lines of plain code, checked against the library.
 4. **Ask the library to explain**: the explain API for that topic.
 5. **Exercises**, with an answer key that is itself executable.
@@ -83,16 +83,16 @@ tested. Concretely:
   changed labs whenever teaching material changes.
 
 If you adapt a chapter, keep this property: change the number in the code, and
-the test tells you whether the prose is now wrong.
+the test fails if the prose no longer matches.
 
 ## Suggested labs
 
 Each lab is sized for a two-hour session. The Rust lab and the Python notebook
-cover the same ground, so pick the language that suits the cohort.
+cover the same material, so pick the language that suits the cohort.
 
-| Lab | Topic | Students should leave able to |
+| Lab | Topic | Afterwards, students should be able to |
 |---|---|---|
-| 01 | Sampling and aliasing | predict where a tone above Nyquist lands; explain why decimation needs a low-pass filter |
+| 01 | Sampling and aliasing | predict the alias frequency of a tone above Nyquist; explain why decimation needs a low-pass filter |
 | 02 | Quantisation and dither | derive and measure SQNR ≈ 6.02 b + 1.76 dB; show what TPDF dither does to quiet signals |
 | 03 | DFT, windows and leakage | map bins to hertz; choose a window from its main-lobe width and side-lobe level |
 | 04 | STFT and spectrograms | trade time resolution against frequency resolution; compute frame counts; read a mel spectrogram |

@@ -67,7 +67,7 @@ fn sensitive() -> OnsetDetectionConfig {
 }
 
 /// Pre-emphasis y[i] = x[i] - c x[i-1] (first value unchanged), then
-/// normalisation by the maximum absolute value: the ODF the threshold sees.
+/// normalisation by the maximum absolute value: the ODF the threshold is applied to.
 fn pre_emphasised(odf: &[f64], c: f64) -> Vec<f64> {
     let y: Vec<f64> = (0..odf.len())
         .map(|i| {
@@ -168,7 +168,8 @@ fn main() {
             "     {t:.4} s (true {want:.2} s, {:+.1} ms)",
             1000.0 * (t - want)
         );
-        // Frame centres: the burst enters the 72.7 ms window early.
+        // Frame centres: the 72.7 ms window contains the burst before the
+        // frame centre reaches it, so the reported time is early.
         assert!((t - want) < 0.0 && (t - want) > -0.035);
     }
     // 0.5 s is 43.07 frames; frames are 43 apart, so the lead grows by 0.77 ms per burst.
@@ -177,7 +178,7 @@ fn main() {
     assert!((43.0 * HOP / SR - 0.4992).abs() < 5e-5);
     let lead = 1000.0 * (onsets[0] - truth[0]);
     assert!((lead + 29.4).abs() < 0.05);
-    // What the threshold sees: the pre-emphasised, normalised ODF at each burst.
+    // The threshold's input: the pre-emphasised, normalised ODF at each burst.
     let (_, odf_default) = audio
         .onset_detection_function(&OnsetDetectionConfig::default())
         .expect("odf");
@@ -233,7 +234,7 @@ fn main() {
         assert_eq!(n, expected, "{name}");
     }
 
-    // ------------------------------------------------------------ 3. Under the hood
+    // ------------------------------------------------------------ 3. How it works
     println!("\n3. The onset detection function and peak picking, re-derived");
     let mut raw_cfg = OnsetDetectionConfig::default();
     raw_cfg.adaptive_threshold = false;
@@ -367,7 +368,7 @@ fn main() {
             .map(|v| (v * 100.0).round() / 100.0)
             .collect::<Vec<_>>()
     );
-    println!("   every other click nearly vanishes, so the envelope repeats every two beats");
+    println!("   every other click is close to zero, so the envelope repeats every two beats");
     let rounded: Vec<f64> = per_click
         .iter()
         .map(|v| (v * 100.0).round() / 100.0)

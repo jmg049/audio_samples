@@ -1,9 +1,9 @@
 # 07. Resampling
 
 Speech models are trained at 16 kHz, CDs are 44.1 kHz, video is 48 kHz:
-almost every audio pipeline converts sample rates somewhere. Done carelessly,
-downsampling folds high frequencies back into the band as aliases and
-upsampling leaves spectral images. This chapter measures both effects on the
+most audio pipelines convert sample rates at some stage. Without adequate
+filtering, downsampling folds high frequencies back into the band as aliases
+and upsampling leaves spectral images. This chapter measures both effects on the
 library's three quality tiers, compares them with naive decimation, and
 rebuilds a windowed-sinc decimator by hand.
 
@@ -39,7 +39,7 @@ $$x(t) = \sum_n x[n]\, \mathrm{sinc}(f_{in} t - n), \quad \mathrm{sinc}(u) = \fr
 
 A practical resampler truncates and windows the sinc, and scales it so that its
 cutoff is $f_c = \min(f_{in}, f_{out})/2$ (slightly less, to leave room for the
-transition band). Then one formula does both jobs: interpolation and
+transition band). The same formula then performs both interpolation and
 anti-aliasing.
 
 **Linear interpolation** uses a triangular kernel instead of a sinc. For
@@ -58,7 +58,7 @@ relative to the input component that produced it:
 
 $$R = 20 \log_{10}(A_{alias} / A_{in}) \ \text{dB}$$
 
-where $A$ is a sinusoid's amplitude. 0 dB means no rejection at all.
+where $A$ is a sinusoid's amplitude. 0 dB means no rejection.
 
 **The library's tiers** ([`ResamplingQuality`](crate::operations::types::ResamplingQuality)).
 Every tier except `Fast` upsampling is a Kaiser-windowed sinc low-pass whose
@@ -74,6 +74,8 @@ $f_N = \min(f_{in}, f_{out})/2$; the stop band starts at $f_N$:
 
 The filter is computed in `f64` whatever the sample type of the buffer.
 
+<!-- figure: ch07-tier-responses -->
+
 **Time alignment.** Output sample $m$ is the band-limited reconstruction of
 the input at the exact input position $m / r = m f_{in} / f_{out}$: the sinc
 is centred on that position, so the filter is symmetric (linear phase) and
@@ -87,7 +89,8 @@ filter's look-ahead and emits the same samples as the whole-buffer
 
 Mix a 1 kHz tone (to keep) with a 10 kHz tone (to remove), both at amplitude
 0.5, and convert 48 kHz to 16 kHz by naive decimation (keep every third
-sample, written by hand) and with each tier. The 10 kHz tone should fold to
+sample, written by hand) and with each tier. The folding formula puts the
+10 kHz alias at
 $|10\,000 - 16\,000| = 6\,000$ Hz. Measure each component with one DFT bin
 over 1600 output samples (whole periods of both 1 kHz and 6 kHz, so there is
 no leakage), and measure the time shift of the output from the phase of the
@@ -127,7 +130,7 @@ let db = |v: f64| 20.0 * v.log10();
 let ideal: Vec<f64> = (0..4_000).map(|n| 0.5 * (2.0 * PI * 1_000.0 * n as f64 / 16_000.0).sin()).collect();
 let ideal_phase = phase(&ideal[mid.clone()], 1_000.0, 16_000.0);
 
-// Naive decimation: the alias arrives at full level, 0 dB.
+// Naive decimation: the alias is at full level, 0 dB.
 let naive: Vec<f64> = x.iter().step_by(3).copied().collect();
 assert!(db(amplitude(&naive[mid.clone()], 6_000.0, 16_000.0) / 0.5).abs() < 1e-9);
 
@@ -152,7 +155,9 @@ assert!((results[2].1 + 145.5).abs() < 0.1);
 assert!(results.iter().all(|(_, _, s)| s.abs() < 1e-9));
 ```
 
-The time alignment shows up on an impulse too: one at input sample 3000
+<!-- figure: ch07-alias-suppression -->
+
+An impulse shows the same time alignment: one at input sample 3000
 (48 kHz) peaks at output sample $3000/3 = 1000$ (16 kHz) for every tier, and
 the streaming resampler, fed in chunks, produces the same output.
 
@@ -188,14 +193,14 @@ for q in [ResamplingQuality::Fast, ResamplingQuality::Medium, ResamplingQuality:
 }
 ```
 
-## Under the hood
+## How it works
 
 **Naive decimation is plain sampling.** With $r = 1/3$, keeping every
 third sample returns $x[3m]$, and
 $\sin(2\pi\, 10\,000\, m / 16\,000) = -\sin(2\pi\, 6\,000\, m / 16\,000)$ for
-every integer $m$: the 10 kHz tone *is* a 6 kHz tone on the new grid. No
-filter afterwards can tell the two apart, which is why every tier filters
-first.
+every integer $m$: on the new grid the 10 kHz tone has exactly the samples of
+a 6 kHz tone. No filter applied afterwards can separate the two, which is why
+every tier filters first.
 
 ```rust
 use audio_samples::{sample_rate, sine_wave};
@@ -218,7 +223,7 @@ Blackman-windowed sinc whose cutoff is $0.95 \times 8$ kHz $= 7.6$ kHz, then
 keep every third sample. The filter is centred (no delay), so the 1 kHz output
 matches the ideal 16 kHz sine, and the 6 kHz alias is 107.5 dB down, between
 the library's `Fast` (90.8 dB) and `Medium` (116.7 dB) tiers. Since the library
-adds no delay either, its `High` output and ours agree sample by sample.
+adds no delay either, its `High` output and this one agree sample by sample.
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -276,9 +281,9 @@ let lib = lib.as_slice().unwrap();
 assert!((1_200..2_800).all(|n| (lib[n] - y[n]).abs() < 1e-5));
 ```
 
-**Linear interpolation is a poor interpolation filter.** Upsampling a 6 kHz
-tone from 16 kHz to 48 kHz with `Fast` should, by the formula for $G(f)$, droop
-the tone to $G(6\,000) = -3.77$ dB and leave an image at
+**Linear interpolation is a poor interpolation filter.** For a 6 kHz tone
+upsampled from 16 kHz to 48 kHz with `Fast`, the formula for $G(f)$ predicts
+an attenuation of the tone to $G(6\,000) = -3.77$ dB and an image at
 $16\,000 - 6\,000 = 10\,000$ Hz at $G(10\,000) = -11.8$ dB.
 
 ```rust
@@ -308,8 +313,8 @@ assert!((level(10_000.0) - g(10_000.0)).abs() < 1e-6);
 assert!((g(6_000.0) + 3.77).abs() < 0.01 && (g(10_000.0) + 11.8).abs() < 0.05);
 ```
 
-The sinc tiers, in contrast, pass the 6 kHz tone flat (to 0.0001 dB) and push
-the image down to $-116.7$ dB for `Medium` and $-145.5$ dB for `High`:
+The sinc tiers pass the 6 kHz tone unchanged (to 0.0001 dB) and attenuate the
+image to $-116.7$ dB for `Medium` and $-145.5$ dB for `High`:
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -333,11 +338,13 @@ for (q, image_db) in [(ResamplingQuality::Medium, -116.7), (ResamplingQuality::H
 }
 ```
 
+<!-- figure: ch07-upsampling-images -->
+
 ## Ask the library to explain
 
 [`topics::resampling`](crate::educational::topics::resampling) summarises a
 conversion: ratio, both Nyquist frequencies, the pass-band edge of the sinc
-tiers, a table of the three tiers, and a warning when you downsample.
+tiers, a table of the three tiers, and a warning for downsampling.
 
 ```rust
 use audio_samples::educational::topics;
@@ -355,15 +362,15 @@ assert!(!topics::resampling(16_000.0, 48_000.0).has_warning_containing("Downsamp
 
 ## Exercises
 
-1. **Where does 13 kHz go?** A 13 kHz tone is converted from 48 kHz to 16 kHz
+1. **Alias of a 13 kHz tone.** A 13 kHz tone is converted from 48 kHz to 16 kHz
    by keeping every third sample. Predict the output frequency, then confirm
    with [`topics::aliasing`](crate::educational::topics::aliasing) and by
-   measuring. How much of it does each tier of `resample` leave?
+   measuring. Measure the residue that each tier of `resample` leaves.
 2. **Droop at 2 kHz.** Predict the gain of `Fast` upsampling 16 kHz → 48 kHz
    at 2 kHz from $G(f)$, then measure it.
-3. **Alignment at an awkward ratio.** Convert a 1 kHz tone from 44.1 kHz to
-   16 kHz ($r = 160/441$) with `High`. Is the output still time-aligned? Bound
-   the shift by comparing with the ideal 16 kHz sine.
+3. **Alignment at a non-integer ratio.** Convert a 1 kHz tone from 44.1 kHz to
+   16 kHz ($r = 160/441$) with `High`. Determine whether the output is still
+   time-aligned, and bound the shift by comparing with the ideal 16 kHz sine.
 
 ## Answers
 
@@ -430,7 +437,7 @@ let measured = 20.0 * (2.0 * (re * re + im * im).sqrt() / y.len() as f64 / 0.5).
 assert!((measured - predicted).abs() < 0.01);
 ```
 
-3. Yes. Output sample $m$ is evaluated at the exact input position
+3. It is. Output sample $m$ is evaluated at the exact input position
    $441 m / 160$, so there is no delay to remove and nothing is rounded to
    whole frames. In the middle 100 ms the output differs from the ideal
    16 kHz sine by less than $10^{-7}$; a shift of $\tau$ output frames would
@@ -462,7 +469,7 @@ assert!(1e-7 / slope < 5.1e-7);
   everything above the new Nyquist frequency back at full level; every
   `ResamplingQuality` filters first.
 - **`Fast` trades bandwidth and rejection for speed.** Its downsampling
-  filter starts rolling off at $0.80 f_N$ and gives 70 dB by design; when
+  filter starts to roll off at $0.80 f_N$ and is designed for 70 dB; when
   upsampling it is linear interpolation, which droops the pass band and leaves
   images. Use `Medium` or `High` for analysis or listening.
 - **Measure rejection away from the ends.** The input is treated as zero

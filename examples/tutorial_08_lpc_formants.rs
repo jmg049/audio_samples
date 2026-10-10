@@ -441,5 +441,5 @@ fn main() {
     println!();
 
     // ------------------------------------------------------------ 7. Explain
-    println!("\n7. What the library says (topics::lpc({order}, {FS})):\n\n{doc}");
+    println!("\n7. The library's explanation (topics::lpc({order}, {FS})):\n\n{doc}");
 }

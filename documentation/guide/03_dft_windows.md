@@ -1,11 +1,10 @@
 # 03. The DFT, windows and leakage
 
-The discrete Fourier transform (DFT) is how a computer "hears" frequency: it
-turns a block of samples into amplitudes and phases at evenly spaced
-frequencies. Almost everything later in this guide (spectrograms, mel features,
-pitch, filtering by FFT) is built on it, so it pays to know exactly what it
-returns, why a pure tone often smears over many bins (leakage), and what a
-window can and cannot do about that.
+The discrete Fourier transform (DFT) converts a block of samples into
+amplitudes and phases at evenly spaced frequencies. Most of the later chapters
+of this guide (spectrograms, mel features, pitch, filtering by FFT) build on it.
+This chapter covers exactly what it returns, why a pure tone often spreads over
+many bins (leakage), and what a window can and cannot do about that.
 
 ## Concept
 
@@ -17,7 +16,7 @@ where $k$ is the integer bin index, $j = \sqrt{-1}$ and $X[k]$ is a complex
 number in the units of $x$ (here: full scale) times samples. The exponent is
 **negative** and there is **no** $1/N$ factor (the same as `numpy.fft.fft`).
 
-**Bin frequencies.** Bin $k$ sits at
+**Bin frequencies.** Bin $k$ is at
 
 $$f_k = \frac{k f_s}{N}, \qquad \Delta f = \frac{f_s}{N}$$
 
@@ -33,14 +32,14 @@ the peak becomes $A \sum_n w[n] / 2$.
 **Leakage.** The DFT treats the block as one period of a periodic signal. If
 the tone does not complete a whole number of cycles in the block, the implied
 periodic signal has a jump at the block edge, and the energy spreads over all
-bins. Multiplying by a window that tapers to zero removes the jump. The price
-is a wider main lobe. A window $w[n]$ is summarised by:
+bins. Multiplying by a window that tapers to zero removes the jump, at the cost
+of a wider main lobe. A window $w[n]$ is summarised by:
 
 $$\mathrm{CG} = \frac{1}{N}\sum_n w[n], \qquad \mathrm{ENBW} = \frac{N \sum_n w^2[n]}{\left(\sum_n w[n]\right)^2}$$
 
 where the coherent gain CG (dimensionless) scales the peak of a bin-centred
 tone relative to no window, and the equivalent noise bandwidth ENBW (in bins)
-is how much broadband noise each bin collects. Two more figures are read off
+is the bandwidth of broadband noise each bin collects. Two more figures are read off
 the window's spectrum $W(f)$ (with $f$ in bins): the **scalloping loss**
 $-20\log_{10}|W(1/2)/W(0)|$ in dB, the worst-case peak drop for a tone halfway
 between bins, and the **peak side-lobe level** (PSL), the highest lobe outside
@@ -86,7 +85,7 @@ let mags = audio.rfft(nzu!(64)).unwrap();
 assert!((mags[[0, 4]] - 32.0).abs() < 1e-9); // a real number: |X[4]|
 ```
 
-Leakage, measured. At $f_s = 16$ kHz and $N = 512$, $\Delta f = 31.25$ Hz, so
+Measuring leakage: at $f_s = 16$ kHz and $N = 512$, $\Delta f = 31.25$ Hz, so
 1000 Hz is bin 32 and 1015.625 Hz is bin 32.5, the worst case. Window the tone
 with [`apply_window`](crate::AudioProcessing::apply_window) and the
 coefficients from `spectrograms::make_window`:
@@ -105,13 +104,13 @@ let spectrum = |f: f64, wt: WindowType| -> Vec<f64> {
 let db = |r: f64| 20.0 * r.log10();
 let peak = |s: &[f64]| s.iter().copied().fold(0.0, f64::max);
 
-// Rectangular (no window): peak drops 3.86 dB off-bin, and 19.5 bins away the
-// leakage is still only 34 dB down.
+// Rectangular (no window): the peak drops by 3.86 dB off-bin, and 19.5 bins
+// away the leakage is 34 dB down.
 let (on, off) = (spectrum(1000.0, WindowType::Rectangular), spectrum(1015.625, WindowType::Rectangular));
 assert!((db(peak(&on) / peak(&off)) - 3.86).abs() < 0.01);
 assert!((db(off[52] / peak(&off)) + 34.0).abs() < 0.1);
 
-// Hann: the peak drops only 1.42 dB, and 19.5 bins away the leakage is 86 dB down.
+// Hann: the peak drops by 1.42 dB, and 19.5 bins away the leakage is 86 dB down.
 let (on, off) = (spectrum(1000.0, WindowType::Hanning), spectrum(1015.625, WindowType::Hanning));
 assert!((db(peak(&on) / peak(&off)) - 1.42).abs() < 0.01);
 assert!((db(off[52] / peak(&off)) + 86.0).abs() < 0.1);
@@ -120,6 +119,8 @@ assert!((db(off[52] / peak(&off)) + 86.0).abs() < 0.1);
 (The rectangular drop of 3.86 dB is slightly less than the window's 3.92 dB
 scalloping loss because a real sine also has a negative-frequency image whose
 leakage adds to the bins near the peak.)
+
+<!-- figure: ch03-leakage -->
 
 Zero padding versus a longer signal: two tones 20 Hz apart, Hann window.
 
@@ -147,9 +148,11 @@ assert_eq!(peaks_near_1khz(Duration::from_millis(32), 8192), 1);  // zero-padded
 assert_eq!(peaks_near_1khz(Duration::from_millis(256), 8192), 2); // 4096 samples: resolved
 ```
 
-## Under the hood
+<!-- figure: ch03-zero-padding -->
 
-Three things to re-derive: the DFT itself, the symmetric-Hann figures in closed
+## How it works
+
+The code below re-derives three results: the DFT itself, the symmetric-Hann figures in closed
 form, and the rectangular window's scalloping loss.
 
 ```rust
@@ -232,15 +235,18 @@ assert!(hann.has_warning_containing("symmetric"));
 println!("{hann}");
 ```
 
-The table is the classic trade-off: lower side lobes (less leakage from loud
-components into quiet ones) cost a wider main lobe and more noise per bin.
+The table shows the standard trade-off: lower side lobes (less leakage from
+loud components into quiet ones) come with a wider main lobe and more noise per
+bin.
+
+<!-- figure: ch03-windows -->
 
 ## Exercises
 
 1. At $f_s = 44.1$ kHz with $N = 4096$, which bin is nearest to 440 Hz, and
    what is its centre frequency? Check that a Hann-windowed 440 Hz tone peaks
    there.
-2. A sine of amplitude 0.5 sits exactly on a bin, Hann window, $N = 1024$.
+2. A sine of amplitude 0.5 lies exactly on a bin, Hann window, $N = 1024$.
    Predict $|X[k]|$ at the peak, then measure.
 3. With a Hann window (main lobe about 2 bins wide at $-6$ dB), what is the
    smallest $N$ that should separate two tones 10 Hz apart at 16 kHz? Check
@@ -306,7 +312,8 @@ assert_eq!(count(1024), 1);
 * `WindowType::Hanning` is the **symmetric** Hann; SciPy's
   `get_window('hann', N)` and librosa use the periodic one. Values differ by a
   fraction of a percent; use `WindowType::Custom` to match them exactly.
-* Zero padding makes plots smoother; it does not improve resolution.
+* Zero padding interpolates the spectrum onto a finer grid; it does not improve
+  resolution.
 * The Kaiser window in `spectrograms` 2.1.3 is wrong for $\beta > 3.75$; avoid
   it for teaching material.
 

@@ -172,7 +172,9 @@ fn main() {
     );
     assert!((edge - 0.12).abs() < 0.005);
     assert!(middle < 1e-7);
-    println!("   (an 11 kHz tone cannot exist in a 16 kHz signal: it should vanish, not move)");
+    println!(
+        "   (a 16 kHz signal cannot represent an 11 kHz tone: resampling must remove it, not move it)"
+    );
 
     // ------------------------------------------------------------------
     // 3. Naive versus band-limited square wave.
