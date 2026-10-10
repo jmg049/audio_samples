@@ -1,0 +1,88 @@
+[package]
+name = "guide_figures"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Computes the learning guide's figures with audio_samples and draws them as SVG for the mdBook in book/."
+license = "MIT"
+
+# Not part of any parent workspace: the root crate has no workspace, but this
+# keeps it that way if one is added, and keeps book/figures/Cargo.lock separate.
+[workspace]
+
+# One binary per chapter, so that each can be built and run on its own.
+[[bin]]
+name = "ch01"
+path = "src/chapters/ch01.rs"
+
+[[bin]]
+name = "ch02"
+path = "src/chapters/ch02.rs"
+
+[[bin]]
+name = "ch03"
+path = "src/chapters/ch03.rs"
+
+[[bin]]
+name = "ch04"
+path = "src/chapters/ch04.rs"
+
+[[bin]]
+name = "ch05"
+path = "src/chapters/ch05.rs"
+
+[[bin]]
+name = "ch06"
+path = "src/chapters/ch06.rs"
+
+[[bin]]
+name = "ch07"
+path = "src/chapters/ch07.rs"
+
+[[bin]]
+name = "ch08"
+path = "src/chapters/ch08.rs"
+
+[[bin]]
+name = "ch09"
+path = "src/chapters/ch09.rs"
+
+[[bin]]
+name = "ch10"
+path = "src/chapters/ch10.rs"
+
+[[bin]]
+name = "ch11"
+path = "src/chapters/ch11.rs"
+
+[[bin]]
+name = "ch12"
+path = "src/chapters/ch12.rs"
+
+[[bin]]
+name = "ch13"
+path = "src/chapters/ch13.rs"
+
+[[bin]]
+name = "ch14"
+path = "src/chapters/ch14.rs"
+
+[dependencies]
+audio_samples = { path = "../..", features = ["educational", "full_no_plotting"] }
+plotters = { version = "0.3.7", default-features = false, features = [
+    "svg_backend",
+    "bitmap_backend",
+    "all_series",
+    "full_palette",
+] }
+# PNG encoding for raster layers (spectrograms) embedded in the SVGs.
+plotters-svg = { version = "0.3.7", features = ["bitmap_encoder"] }
+serde_json = "1.0"
+ndarray = "0.17"
+num-complex = "0.4"
+spectrograms = "2.1.3"
+non-empty-slice = "0.6"
+
+[profile.release]
+debug = false
+incremental = true
