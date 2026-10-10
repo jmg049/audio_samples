@@ -26,6 +26,9 @@
 //! [`AudioSampleResult`]. Gains, fades and peak normalisation are computed in
 //! `f64`; for integer sample types they act on the normalised `[-1, 1]` scale
 //! and the result is rounded and saturated back to the integer range.
+//! Window and FIR coefficients are given as `f64` for every sample type
+//! ([`AudioProcessing::apply_window_f64`], [`AudioProcessing::apply_filter_f64`]),
+//! and every operation returns audio in the input's sample type.
 //!
 //! ### Convolution: full and valid
 //!
@@ -145,20 +148,16 @@ use non_empty_slice::NonEmptySlice;
 ///
 /// `output_len` must equal `input.len() - coeffs.len() + 1`.
 #[inline]
-fn fir_valid_convolve<T>(input: &[T], coeffs: &[T], output_len: usize) -> Vec<T>
+fn fir_valid_convolve<T>(input: &[T], coeffs: &[f64], output_len: usize) -> Vec<T>
 where
     T: StandardSample,
 {
     // True convolution, `y[i] = Σ_j h[j] · x[i + M - 1 - j]` (the "valid" part
     // of `numpy.convolve(x, h)`): dot each window with the reversed taps.
     // Accumulates in f64 using the audio-aware sample conversion, so integer
-    // samples and taps are interpreted on the normalised [-1, 1] scale and
-    // cannot overflow.
-    let h_rev: Vec<f64> = coeffs
-        .iter()
-        .rev()
-        .map(|&c| -> f64 { c.convert_to() })
-        .collect();
+    // samples are interpreted on the normalised [-1, 1] scale and cannot
+    // overflow; the result is converted back with rounding and saturation.
+    let h_rev: Vec<f64> = coeffs.iter().rev().copied().collect();
     let x: Vec<f64> = input.iter().map(|&s| -> f64 { s.convert_to() }).collect();
     let filter_len = h_rev.len();
     let mut out = Vec::with_capacity(output_len);
@@ -224,7 +223,7 @@ pub(crate) const FIR_FFT_MIN_TAPS: usize = 160;
 #[cfg(feature = "transforms")]
 fn fir_valid_convolve_dispatch<T>(
     input: &[T],
-    coeffs: &[T],
+    coeffs: &[f64],
     output_len: usize,
 ) -> AudioSampleResult<Vec<T>>
 where
@@ -242,7 +241,7 @@ where
 #[cfg(not(feature = "transforms"))]
 fn fir_valid_convolve_dispatch<T>(
     input: &[T],
-    coeffs: &[T],
+    coeffs: &[f64],
     output_len: usize,
 ) -> AudioSampleResult<Vec<T>>
 where
@@ -259,7 +258,7 @@ where
 #[cfg(feature = "transforms")]
 fn fir_valid_convolve_fft<T>(
     input: &[T],
-    coeffs: &[T],
+    coeffs: &[f64],
     output_len: usize,
 ) -> AudioSampleResult<Vec<T>>
 where
@@ -268,12 +267,11 @@ where
     use non_empty_slice::NonEmptySlice;
 
     let x: Vec<f64> = input.iter().map(|&s| -> f64 { s.convert_to() }).collect();
-    let h: Vec<f64> = coeffs.iter().map(|&c| -> f64 { c.convert_to() }).collect();
 
     let x_ne = NonEmptySlice::new(x.as_slice()).ok_or_else(|| {
         AudioSampleError::Parameter(ParameterError::invalid_value("audio", "empty signal"))
     })?;
-    let h_ne = NonEmptySlice::new(h.as_slice()).ok_or_else(|| {
+    let h_ne = NonEmptySlice::new(coeffs).ok_or_else(|| {
         AudioSampleError::Parameter(ParameterError::invalid_value("filter", "empty filter"))
     })?;
 
@@ -287,6 +285,98 @@ where
         .map(|&v| -> T { v.convert_to() })
         .collect();
     Ok(out)
+}
+
+/// Checks that a window has one coefficient per sample (per channel).
+fn check_window_len<T>(audio: &AudioSamples<'_, T>, window_len: usize) -> AudioSampleResult<()>
+where
+    T: StandardSample,
+{
+    let num_samples = audio.samples_per_channel().get();
+    if window_len == num_samples {
+        return Ok(());
+    }
+    Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
+        format!("window length ({window_len})"),
+        format!("audio length ({num_samples})"),
+        "apply_window",
+    )))
+}
+
+/// Valid-mode FIR convolution of every channel with the `f64` taps `coeffs`,
+/// replacing the audio buffer (see [`AudioProcessing::apply_filter_f64`]).
+fn apply_fir_in_place<T>(audio: &mut AudioSamples<'_, T>, coeffs: &[f64]) -> AudioSampleResult<()>
+where
+    T: StandardSample,
+{
+    let filter_len = coeffs.len();
+
+    match audio.data_mut() {
+        AudioData::Mono(arr) => {
+            if arr.len().get() < filter_len {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_length",
+                    format!(
+                        "Audio length ({}) must be at least the filter length ({filter_len}): apply_filter returns the 'valid' convolution of length N - M + 1",
+                        arr.len().get()
+                    ),
+                )));
+            }
+
+            let output_len = arr.len().get() - filter_len + 1;
+
+            // Operate on a flat contiguous slice. The previous version indexed
+            // `arr[i + j]`, which dispatched through the `MonoData` enum on every
+            // single sample access; a raw slice lets the inner dot product
+            // autovectorize and removes that per-element overhead entirely.
+            let owned_fallback;
+            let input: &[T] = match arr.as_slice() {
+                Some(s) => s,
+                None => {
+                    owned_fallback = arr.to_vec();
+                    &owned_fallback
+                }
+            };
+
+            let output = fir_valid_convolve_dispatch(input, coeffs, output_len)?;
+            *arr = ndarray::Array1::from_vec(output).try_into()?;
+        }
+        AudioData::Multi(arr) => {
+            if arr.ncols().get() < filter_len {
+                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                    "audio_length",
+                    format!(
+                        "Audio length ({}) must be at least the filter length ({filter_len}): apply_filter returns the 'valid' convolution of length N - M + 1",
+                        arr.ncols().get()
+                    ),
+                )));
+            }
+
+            let output_len = arr.ncols().get() - filter_len + 1;
+            let num_channels = arr.nrows().get();
+
+            let mut output = Array2::zeros((num_channels, output_len));
+
+            for (ch, mut output_channel) in output.axis_iter_mut(Axis(0)).enumerate() {
+                let row = arr.index_axis(Axis(0), ch);
+                let owned_fallback;
+                let input: &[T] = match row.as_slice() {
+                    Some(s) => s,
+                    None => {
+                        owned_fallback = row.to_vec();
+                        &owned_fallback
+                    }
+                };
+                let filtered = fir_valid_convolve_dispatch(input, coeffs, output_len)?;
+                for (dst, src) in output_channel.iter_mut().zip(filtered) {
+                    *dst = src;
+                }
+            }
+
+            *arr = output.try_into()?;
+        }
+    }
+    Ok(())
 }
 
 /// Subtracts `offset` (on the raw scale of the sample values) from every
@@ -626,66 +716,31 @@ where
         Ok(())
     }
 
-    /// Applies a windowing function to the audio samples.
+    /// Multiplies each sample by the corresponding window coefficient, with
+    /// the window given in the sample type.
     ///
-    /// Multiplies each sample by the corresponding window coefficient
-    /// element-wise. Windowing is commonly used before FFT operations to
-    /// reduce spectral leakage. Applied independently to each channel.
-    ///
-    /// # Arguments
-    /// - `window` - Window coefficients. Length must equal the number of
-    ///   samples in the audio.
-    ///
-    /// # Returns
-    /// The windowed audio samples.
+    /// Deprecated: an integer sample type cannot hold window coefficients
+    /// between 0 and 1. Use
+    /// [`apply_window_f64_in_place`](AudioProcessing::apply_window_f64_in_place).
+    /// The product is computed in the sample type, so for integer types it can
+    /// overflow; for float types the result is unchanged from 2.0.
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the window length does not
     ///   match the audio length.
-    ///
-    /// # Examples
-    /// ```
-    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
-    /// use ndarray::array;
-    /// use non_empty_slice::NonEmptySlice;
-    ///
-    /// let data = array![1.0f32, 1.0, 1.0, 1.0];
-    /// let window = [1.0f32, 0.5, 0.5, 1.0];
-    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-    /// audio.apply_window_in_place(NonEmptySlice::new(&window).unwrap()).unwrap();
-    /// assert_eq!(audio[0], 1.0);
-    /// assert_eq!(audio[1], 0.5);
-    /// ```
     #[inline]
     fn apply_window_in_place(
         &mut self,
         window: &NonEmptySlice<Self::Sample>,
     ) -> AudioSampleResult<()> {
+        check_window_len(self, window.len().get())?;
         match self.data_mut() {
             AudioData::Mono(arr) => {
-                if window.len() != arr.len() {
-                    return Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
-                        format!("window length ({})", window.len()),
-                        format!("audio length ({})", arr.len()),
-                        "apply_window",
-                    )));
-                }
-
                 for (sample, &win_coeff) in arr.iter_mut().zip(window.iter()) {
                     *sample *= win_coeff;
                 }
             }
             AudioData::Multi(arr) => {
-                let num_samples = arr.ncols();
-                if window.len() != num_samples {
-                    return Err(AudioSampleError::Layout(LayoutError::dimension_mismatch(
-                        format!("window length ({})", window.len()),
-                        format!("audio length ({num_samples})"),
-                        "apply_window",
-                    )));
-                }
-
-                // Apply window to each channel
                 for mut channel in arr.axis_iter_mut(Axis(0)) {
                     for (sample, &win_coeff) in channel.iter_mut().zip(window.iter()) {
                         *sample *= win_coeff;
@@ -696,129 +751,76 @@ where
         Ok(())
     }
 
-    /// Applies an FIR filter to the audio samples by linear convolution.
+    /// Multiplies each sample by the corresponding `f64` window coefficient.
     ///
-    /// Computes the fully-overlapping ("valid") part of the convolution of each
-    /// channel with `filter_coeffs`, i.e. `y[i] = Σ_j h[j] · x[i + M - 1 - j]`
-    /// for a filter of length `M` - identical to
-    /// `numpy.convolve(x, h, mode='valid')`, and to
-    /// `scipy.signal.lfilter(h, 1, x)[M-1:]`. The resulting audio is shorter
-    /// than the original by `filter_coeffs.len() - 1` samples. Long filters
-    /// (≥ 160 taps, with the `transforms` feature) use FFT convolution.
+    /// Each sample is converted to `f64` with the audio-aware conversion,
+    /// multiplied by `w[n]` and converted back; integer results are rounded to
+    /// nearest and saturated. The same window is applied to every channel.
     ///
-    /// Output sample `i` corresponds to input time `n = i + M − 1`: the
-    /// first `M − 1` input samples produce no output of their own, and the
-    /// result is not delay-compensated (a symmetric, linear-phase filter still
-    /// delays its output by `(M − 1)/2` samples relative to that index).
-    /// Note: unlike `AudioTransforms::convolve` (feature `transforms`), which
-    /// returns the full convolution of length `N + M − 1`, this returns
-    /// only the valid part of length `N − M + 1`. See the module docs for the
-    /// full/valid distinction.
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the window length does not
+    ///   match the audio length.
+    #[inline]
+    fn apply_window_f64_in_place(&mut self, window: &NonEmptySlice<f64>) -> AudioSampleResult<()> {
+        check_window_len(self, window.len().get())?;
+        let mul = |sample: &mut T, w: f64| {
+            let x: f64 = (*sample).convert_to();
+            *sample = (x * w).convert_to();
+        };
+        match self.data_mut() {
+            AudioData::Mono(arr) => {
+                for (sample, &w) in arr.iter_mut().zip(window.iter()) {
+                    mul(sample, w);
+                }
+            }
+            AudioData::Multi(arr) => {
+                for mut channel in arr.axis_iter_mut(Axis(0)) {
+                    for (sample, &w) in channel.iter_mut().zip(window.iter()) {
+                        mul(sample, w);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies an FIR filter whose taps are given in the sample type.
     ///
-    /// Computation is carried out in `f64`. For integer sample types both the
-    /// samples and the coefficients are interpreted on the normalised
-    /// `[-1, 1]` scale (so an `i16` coefficient of `16384` means ≈ 0.5).
-    ///
-    /// # Arguments
-    /// - `filter_coeffs` - FIR filter coefficients. A single-element slice
-    ///   `[1.0]` leaves the signal unchanged.
-    ///
-    /// # Returns
-    /// The filtered audio samples, with length reduced by `filter_coeffs.len() - 1`.
+    /// The taps are converted to `f64` with the audio-aware conversion (an
+    /// `i16` tap of `16384` means about 0.5) and the filter is then applied as
+    /// by [`apply_filter_f64_in_place`](AudioProcessing::apply_filter_f64_in_place).
+    /// See [`AudioProcessing::apply_filter`] for the convolution convention.
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if the audio is shorter than
     ///   the filter.
-    ///
-    /// # Examples
-    /// ```
-    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
-    /// use ndarray::array;
-    /// use non_empty_slice::NonEmptySlice;
-    ///
-    /// let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-    /// let coeffs = [1.0f32, -1.0]; // first difference: y[n] = x[n] - x[n-1]
-    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-    /// audio.apply_filter_in_place(NonEmptySlice::new(&coeffs).unwrap()).unwrap();
-    /// assert_eq!(audio.samples_per_channel().get(), 4);
-    /// assert_eq!(audio[0], 1.0); // 2 - 1
-    /// assert_eq!(audio[3], 1.0); // 5 - 4
-    /// ```
     #[inline]
     fn apply_filter_in_place(
         &mut self,
         filter_coeffs: &NonEmptySlice<Self::Sample>,
     ) -> AudioSampleResult<()> {
-        // Filter coefficients as a flat slice (used by every dot product below).
-        let coeffs: &[Self::Sample] = filter_coeffs.as_ref();
-        let filter_len = coeffs.len();
+        let coeffs: Vec<f64> = filter_coeffs
+            .iter()
+            .map(|&c| -> f64 { c.convert_to() })
+            .collect();
+        apply_fir_in_place(self, &coeffs)
+    }
 
-        match self.data_mut() {
-            AudioData::Mono(arr) => {
-                if arr.len().get() < filter_len {
-                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "audio_length",
-                        format!(
-                            "Audio length ({}) must be at least the filter length ({filter_len}): apply_filter returns the 'valid' convolution of length N - M + 1",
-                            arr.len().get()
-                        ),
-                    )));
-                }
-
-                let output_len = arr.len().get() - filter_len + 1;
-
-                // Operate on a flat contiguous slice. The previous version indexed
-                // `arr[i + j]`, which dispatched through the `MonoData` enum on every
-                // single sample access; a raw slice lets the inner dot product
-                // autovectorize and removes that per-element overhead entirely.
-                let owned_fallback;
-                let input: &[Self::Sample] = match arr.as_slice() {
-                    Some(s) => s,
-                    None => {
-                        owned_fallback = arr.to_vec();
-                        &owned_fallback
-                    }
-                };
-
-                let output = fir_valid_convolve_dispatch(input, coeffs, output_len)?;
-                *arr = ndarray::Array1::from_vec(output).try_into()?;
-            }
-            AudioData::Multi(arr) => {
-                if arr.ncols().get() < filter_len {
-                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "audio_length",
-                        format!(
-                            "Audio length ({}) must be at least the filter length ({filter_len}): apply_filter returns the 'valid' convolution of length N - M + 1",
-                            arr.ncols().get()
-                        ),
-                    )));
-                }
-
-                let output_len = arr.ncols().get() - filter_len + 1;
-                let num_channels = arr.nrows().get();
-
-                let mut output = Array2::zeros((num_channels, output_len));
-
-                for (ch, mut output_channel) in output.axis_iter_mut(Axis(0)).enumerate() {
-                    let row = arr.index_axis(Axis(0), ch);
-                    let owned_fallback;
-                    let input: &[Self::Sample] = match row.as_slice() {
-                        Some(s) => s,
-                        None => {
-                            owned_fallback = row.to_vec();
-                            &owned_fallback
-                        }
-                    };
-                    let filtered = fir_valid_convolve_dispatch(input, coeffs, output_len)?;
-                    for (dst, src) in output_channel.iter_mut().zip(filtered) {
-                        *dst = src;
-                    }
-                }
-
-                *arr = output.try_into()?;
-            }
-        }
-        Ok(())
+    /// Applies an FIR filter with `f64` taps (valid-mode convolution).
+    ///
+    /// See [`AudioProcessing::apply_filter_f64`] for the convolution
+    /// convention. Samples are converted to `f64` with the audio-aware
+    /// conversion; integer results are rounded to nearest and saturated.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the audio is shorter than
+    ///   the filter.
+    #[inline]
+    fn apply_filter_f64_in_place(
+        &mut self,
+        filter_coeffs: &NonEmptySlice<f64>,
+    ) -> AudioSampleResult<()> {
+        apply_fir_in_place(self, filter_coeffs.as_ref())
     }
 
     /// Applies μ-law compression to the audio samples.
@@ -1443,7 +1445,8 @@ mod tests {
 
         // Reference: direct slice convolution (same convention).
         let output_len = n - m + 1;
-        let reference = fir_valid_convolve(&input, &coeffs, output_len);
+        let h: Vec<f64> = coeffs.iter().map(|&c| f64::from(c)).collect();
+        let reference = fir_valid_convolve(&input, &h, output_len);
 
         // Public API path (routes to FFT because m >= threshold).
         let audio: AudioSamples<f32> =
@@ -1533,6 +1536,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // checks that the deprecated sample-typed window keeps its float behaviour
     fn test_apply_window() {
         let data = array![1.0f32, 1.0, 1.0, 1.0];
         let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();

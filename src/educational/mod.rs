@@ -229,6 +229,8 @@ fn op_name_to_method(name: &str) -> String {
         "Scale" => "scale",
         "Apply Window" => "apply_window",
         "Apply FIR Filter" => "apply_filter",
+        "Apply Window (f64)" => "apply_window_f64",
+        "Apply FIR Filter (f64)" => "apply_filter_f64",
         "\u{03bc}-law Compress" => "mu_compress",
         "\u{03bc}-law Expand" => "mu_expand",
         "Low-Pass Filter" => "low_pass_filter",
@@ -1099,6 +1101,8 @@ mod tests {
             Edu::explain_text_scale(&a, &b),
             Edu::explain_text_apply_window(&a, &b),
             Edu::explain_text_apply_filter(&a, &b),
+            Edu::explain_text_apply_window_f64(&a, &b),
+            Edu::explain_text_apply_filter_f64(&a, &b),
             Edu::explain_text_mu_compress(&a, &b),
             Edu::explain_text_mu_expand(&a, &b),
             Edu::explain_text_low_pass_filter(&a, &b),
@@ -1230,6 +1234,26 @@ mod tests {
         assert!(
             !mean.contains(r"\max_m"),
             "peak formula shown for mean: {mean}"
+        );
+    }
+
+    #[test]
+    fn f64_variant_texts_name_their_methods() {
+        let a = sample();
+        let w = Edu::explain_text_apply_window_f64_in_place(&a, &a);
+        assert!(
+            w.starts_with("[operation: Apply Window (f64) (in-place)]"),
+            "{w}"
+        );
+        assert_eq!(
+            op_name_to_method("Apply Window (f64) (in-place)"),
+            "apply_window_f64_in_place"
+        );
+        let f = Edu::explain_text_apply_filter_f64(&a, &a);
+        assert!(f.starts_with("[operation: Apply FIR Filter (f64)]"), "{f}");
+        assert_eq!(
+            op_name_to_method("Apply FIR Filter (f64)"),
+            "apply_filter_f64"
         );
     }
 
