@@ -8,12 +8,12 @@ use std::num::NonZeroUsize;
 
 use audio_samples::operations::rhythm::{fourier_tempo_frequencies, tempo_frequencies};
 use audio_samples::utils::audio_math::{
-    MelScale, a4_to_tuning, cqt_frequencies, fft_frequencies, frames_to_samples_slice,
-    frames_to_time_with_offset_slice, frequency_to_note, hz_to_mel_with_scale, hz_to_midi,
-    hz_to_octs, key_to_degrees, key_to_notes, mel_frequencies_with_scale, mel_to_hz_with_scale,
-    midi_to_hz, midi_to_note, note_to_frequency, note_to_midi, octs_to_hz, samples_like,
-    samples_to_frames_slice, samples_to_time, time_to_frames_floor_slice, time_to_samples_slice,
-    times_like, tuning_to_a4,
+    MelScale, a4_to_tuning_slice, cqt_frequencies, fft_frequencies, frames_to_samples_slice,
+    frames_to_time_with_offset_slice, frequency_to_note, hz_to_mel_with_scale, hz_to_midi_slice,
+    hz_to_octs_slice, key_to_degrees, key_to_notes, mel_frequencies_with_scale,
+    mel_to_hz_with_scale, midi_to_hz, midi_to_note, note_to_frequency, note_to_midi, octs_to_hz,
+    samples_like, samples_to_frames_slice, samples_to_time, time_to_frames_floor_slice,
+    time_to_samples_slice, times_like, tuning_to_a4,
 };
 use audio_samples::{AudioFloat, nzu};
 
@@ -165,11 +165,20 @@ pub fn vec<'a, F: AudioFloat>(case: &str, x: &'a VecCtx<F>) -> Option<Thunk<'a>>
         "mel_to_hz" => map(f64s(x, 0.0, 45.0), |v| {
             mel_to_hz_with_scale(v, MelScale::Slaney)
         }),
-        "hz_to_midi" => map(f64s(x, 20.0, 11025.0), hz_to_midi),
+        "hz_to_midi" => {
+            let v = f64s(x, 20.0, 11025.0);
+            thunk(move || hz_to_midi_slice(&v))
+        }
         "midi_to_hz" => map(f64s(x, 0.0, 127.0), midi_to_hz),
-        "hz_to_octs" => map(f64s(x, 20.0, 11025.0), |v| hz_to_octs(v, 0.0, BPO)),
+        "hz_to_octs" => {
+            let v = f64s(x, 20.0, 11025.0);
+            thunk(move || hz_to_octs_slice(&v, 0.0, BPO))
+        }
         "octs_to_hz" => map(f64s(x, 0.0, 9.0), |v| octs_to_hz(v, 0.0, BPO)),
-        "A4_to_tuning" => map(f64s(x, 430.0, 450.0), |v| a4_to_tuning(v, BPO)),
+        "A4_to_tuning" => {
+            let v = f64s(x, 430.0, 450.0);
+            thunk(move || a4_to_tuning_slice(&v, BPO))
+        }
         "tuning_to_A4" => map(f64s(x, -0.5, 0.5), |v| tuning_to_a4(v, BPO)),
         _ => None,
     }

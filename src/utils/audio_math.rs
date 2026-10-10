@@ -993,10 +993,7 @@ pub fn frames_to_time_with_offset(
 /// ```
 #[must_use]
 pub fn time_to_samples_slice(times: &[f64], sample_rate: f64) -> Vec<i64> {
-    times
-        .iter()
-        .map(|&t| time_to_samples(t, sample_rate))
-        .collect()
+    truncate_scaled(times, sample_rate, |s| s)
 }
 
 /// Applies [`samples_to_frames`] to every element of `samples`.
@@ -1017,10 +1014,18 @@ pub fn samples_to_frames_slice(
     hop_length: NonZeroUsize,
     n_fft: Option<usize>,
 ) -> Vec<i64> {
-    samples
-        .iter()
-        .map(|&s| samples_to_frames(s, hop_length, n_fft))
-        .collect()
+    let off = n_fft_offset(n_fft);
+    let div = FloorDiv::new(hop_length.get() as i64);
+    match div {
+        FloorDiv::Shift(k) => samples
+            .iter()
+            .map(|&s| s.saturating_sub(off) >> k)
+            .collect(),
+        _ => samples
+            .iter()
+            .map(|&s| div.apply(s.saturating_sub(off)))
+            .collect(),
+    }
 }
 
 /// Applies [`frames_to_samples`] to every element of `frames`.
@@ -1067,10 +1072,132 @@ pub fn time_to_frames_floor_slice(
     hop_length: NonZeroUsize,
     n_fft: Option<usize>,
 ) -> Vec<i64> {
-    times
-        .iter()
-        .map(|&t| time_to_frames_floor(t, sample_rate, hop_length, n_fft))
-        .collect()
+    let off = n_fft_offset(n_fft);
+    let div = FloorDiv::new(hop_length.get() as i64);
+    match div {
+        FloorDiv::Shift(k) => truncate_scaled(times, sample_rate, |s| s.saturating_sub(off) >> k),
+        _ => truncate_scaled(times, sample_rate, |s| div.apply(s.saturating_sub(off))),
+    }
+}
+
+/// `post((t * scale) as i64)` for every `t`, where the cast truncates
+/// toward zero, saturates and maps NaN to 0, exactly as [`time_to_samples`].
+fn truncate_scaled(times: &[f64], scale: f64, post: impl Fn(i64) -> i64) -> Vec<i64> {
+    let mut out = vec![0i64; times.len()];
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 is available (checked above).
+            unsafe { truncate_scaled_avx2(times, scale, &mut out, post) };
+            return out;
+        }
+    }
+    truncate_scaled_into(times, scale, &mut out, post);
+    out
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn truncate_scaled_avx2(times: &[f64], scale: f64, out: &mut [i64], post: impl Fn(i64) -> i64) {
+    truncate_scaled_into(times, scale, out, post);
+}
+
+/// The body of [`truncate_scaled`]. Blocks whose products are all below
+/// 2^51 in magnitude are truncated with `f64::trunc` and converted exactly
+/// through the bits of `x + 1.5 * 2^52` (no scalar conversion); blocks within
+/// the `i64` range use a plain truncating conversion; others take the
+/// saturating cast.
+#[inline(always)]
+fn truncate_scaled_into(times: &[f64], scale: f64, out: &mut [i64], post: impl Fn(i64) -> i64) {
+    // 1.5 * 2^52: adding it to an integer-valued |x| < 2^51 puts x in the low
+    // mantissa bits.
+    const MAGIC: f64 = 6_755_399_441_055_744.0;
+    const SMALL: f64 = 2_251_799_813_685_248.0; // 2^51
+    // 2^63: products in (-2^63, 2^63) convert without saturation.
+    const LIM: f64 = 9_223_372_036_854_775_808.0;
+    let mut src = times.chunks_exact(8);
+    let mut dst = out.chunks_exact_mut(8);
+    for (c, o) in (&mut src).zip(&mut dst) {
+        let mut p = [0.0f64; 8];
+        for (b, &t) in p.iter_mut().zip(c) {
+            *b = t * scale;
+        }
+        // NaN fails the comparisons, so blocks with NaN take the last path.
+        if p.iter().all(|&v| v.abs() < SMALL) {
+            for (o, &v) in o.iter_mut().zip(&p) {
+                let bits = (v.trunc() + MAGIC).to_bits() as i64;
+                *o = post(bits - MAGIC.to_bits() as i64);
+            }
+        } else if p.iter().all(|&v| v.abs() < LIM) {
+            for (o, &v) in o.iter_mut().zip(&p) {
+                // SAFETY: `v` is finite and strictly inside the i64 range,
+                // where the unchecked conversion truncates like `as`.
+                *o = post(unsafe { v.to_int_unchecked::<i64>() });
+            }
+        } else {
+            for (o, &v) in o.iter_mut().zip(&p) {
+                *o = post(v as i64);
+            }
+        }
+    }
+    for (o, &t) in dst.into_remainder().iter_mut().zip(src.remainder()) {
+        *o = post((t * scale) as i64);
+    }
+}
+
+/// `x.div_euclid(d)` for a fixed `d`, without a hardware division for the
+/// usual inputs.
+///
+/// A power-of-two `d > 0` is an arithmetic shift (floor division for every
+/// `i64`). Otherwise non-negative values use the round-up multiplier of
+/// Granlund and Montgomery ("Division by invariant integers using
+/// multiplication", 1994, theorem 4.2 with N = 63): with
+/// `l = ceil(log2 d)` and `m = ceil(2^(63 + l) / d)`,
+/// `floor(x / d) = floor(x * m / 2^(63 + l))` for `0 <= x < 2^63`. Negative
+/// values, and `d <= 0`, use `div_euclid`. The result is the same as
+/// `div_euclid` for every input.
+#[derive(Clone, Copy)]
+enum FloorDiv {
+    Shift(u32),
+    Magic { d: i64, m: u64, shift: u32 },
+    Plain(i64),
+}
+
+impl FloorDiv {
+    fn new(d: i64) -> Self {
+        if d <= 0 {
+            return Self::Plain(d);
+        }
+        let du = d as u64;
+        if du.is_power_of_two() {
+            return Self::Shift(du.trailing_zeros());
+        }
+        // d is not a power of two, so 2^(l - 1) < d < 2^l with 2 <= l <= 63
+        // and m < 2^64.
+        let l = 64 - (du - 1).leading_zeros();
+        let shift = 63 + l;
+        let m = (1u128 << shift).div_ceil(u128::from(du));
+        Self::Magic {
+            d,
+            m: m as u64,
+            shift,
+        }
+    }
+
+    #[inline]
+    fn apply(self, x: i64) -> i64 {
+        match self {
+            Self::Shift(k) => x >> k,
+            Self::Magic { d, m, shift } => {
+                if x >= 0 {
+                    ((u128::from(x as u64) * u128::from(m)) >> shift) as i64
+                } else {
+                    x.div_euclid(d)
+                }
+            }
+            Self::Plain(d) => x.div_euclid(d),
+        }
+    }
 }
 
 /// Applies [`frames_to_time_with_offset`] to every element of `frames`.
@@ -2129,6 +2256,84 @@ pub fn a4_to_tuning(a4_hz: f64, bins_per_octave: NonZeroUsize) -> f64 {
     bins_per_octave.get() as f64 * (a4_hz.log2() - 440.0f64.log2())
 }
 
+/// Applies [`hz_to_midi`] to every element of `freqs` (vectorised form of
+/// `librosa.hz_to_midi`); the results are identical to the scalar function.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{hz_to_midi, hz_to_midi_slice};
+///
+/// let f = [27.5, 440.0, 1000.0];
+/// let m = hz_to_midi_slice(&f);
+/// assert_eq!(m, f.map(hz_to_midi).to_vec());
+/// ```
+#[must_use]
+pub fn hz_to_midi_slice(freqs: &[f64]) -> Vec<f64> {
+    let mut out: Vec<f64> = freqs.iter().map(|&f| (f / 440.0).log2()).collect();
+    mul_add_in_place(&mut out, 12.0, 69.0);
+    out
+}
+
+/// `v = a.mul_add(v, b)` for every element. `mul_add` is a single correctly
+/// rounded operation, so the hardware instruction (used when the CPU has
+/// it) gives the same results as the portable call.
+fn mul_add_in_place(v: &mut [f64], a: f64, b: f64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: AVX2 and FMA are available (checked above).
+            unsafe { mul_add_in_place_fma(v, a, b) };
+            return;
+        }
+    }
+    v.iter_mut().for_each(|x| *x = a.mul_add(*x, b));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn mul_add_in_place_fma(v: &mut [f64], a: f64, b: f64) {
+    v.iter_mut().for_each(|x| *x = a.mul_add(*x, b));
+}
+
+/// Applies [`hz_to_octs`] to every element of `freqs` (vectorised form of
+/// `librosa.hz_to_octs`); the results are identical to the scalar function.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::{hz_to_octs, hz_to_octs_slice};
+///
+/// let f = [27.5, 440.0];
+/// assert_eq!(hz_to_octs_slice(&f, 0.0, nzu!(12)), f.map(|v| hz_to_octs(v, 0.0, nzu!(12))).to_vec());
+/// ```
+#[must_use]
+pub fn hz_to_octs_slice(freqs: &[f64], tuning: f64, bins_per_octave: NonZeroUsize) -> Vec<f64> {
+    let base = tuned_a440(tuning, bins_per_octave) / 16.0;
+    freqs.iter().map(|&f| (f / base).log2()).collect()
+}
+
+/// Applies [`a4_to_tuning`] to every element of `a4_hz` (vectorised form of
+/// `librosa.A4_to_tuning`); the results are identical to the scalar function.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::{a4_to_tuning, a4_to_tuning_slice};
+///
+/// let a = [432.0, 440.0, 446.0];
+/// assert_eq!(a4_to_tuning_slice(&a, nzu!(12)), a.map(|v| a4_to_tuning(v, nzu!(12))).to_vec());
+/// ```
+#[must_use]
+pub fn a4_to_tuning_slice(a4_hz: &[f64], bins_per_octave: NonZeroUsize) -> Vec<f64> {
+    let bpo = bins_per_octave.get() as f64;
+    let ref_log = 440.0f64.log2();
+    a4_hz.iter().map(|&a| bpo * (a.log2() - ref_log)).collect()
+}
+
 /// Converts a tuning deviation in fractional bins to the A4 reference frequency.
 ///
 /// This is `librosa.tuning_to_A4(tuning, bins_per_octave=...)`:
@@ -2935,6 +3140,100 @@ mod tests {
         assert_eq!(
             samples_like(2, NonZeroUsize::new(10).unwrap(), Some(4)),
             vec![2, 12]
+        );
+    }
+
+    #[test]
+    fn slice_conversions_match_scalar_functions() {
+        let mut seed = 1u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed
+        };
+        let mut floats: Vec<f64> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e300,
+            -1e300,
+            9.3e18,
+            -9.3e18,
+            4.5e15,
+            f64::MIN_POSITIVE,
+        ];
+        for _ in 0..4000 {
+            let u = (next() >> 11) as f64 / (1u64 << 53) as f64;
+            floats.push(u * 30000.0);
+            floats.push((u - 0.5) * 120.0);
+        }
+        let mut ints: Vec<i64> = vec![
+            0,
+            -1,
+            1,
+            i64::MIN,
+            i64::MAX,
+            (1 << 52) - 1,
+            1 << 52,
+            -(1 << 52),
+        ];
+        for _ in 0..4000 {
+            ints.push((next() >> 40) as i64);
+            ints.push((next() >> 12) as i64 - (1 << 51));
+            ints.push(next() as i64);
+        }
+        for hop in [
+            1usize,
+            2,
+            3,
+            7,
+            512,
+            513,
+            1 << 51,
+            (1 << 52) + 1,
+            1 << 62,
+            (1 << 62) + 3,
+            i64::MAX as usize,
+        ] {
+            let h = NonZeroUsize::new(hop).unwrap();
+            for n_fft in [None, Some(2048)] {
+                let want: Vec<i64> = ints
+                    .iter()
+                    .map(|&s| samples_to_frames(s, h, n_fft))
+                    .collect();
+                assert_eq!(samples_to_frames_slice(&ints, h, n_fft), want, "hop {hop}");
+                for sr in [22050.0, 16000.0, 1.0] {
+                    let want: Vec<i64> = floats
+                        .iter()
+                        .map(|&t| time_to_frames_floor(t, sr, h, n_fft))
+                        .collect();
+                    assert_eq!(time_to_frames_floor_slice(&floats, sr, h, n_fft), want);
+                }
+            }
+        }
+        for sr in [22050.0, 1e10, 0.5] {
+            let want: Vec<i64> = floats.iter().map(|&t| time_to_samples(t, sr)).collect();
+            assert_eq!(time_to_samples_slice(&floats, sr), want);
+        }
+        let bits = |v: Vec<f64>| v.into_iter().map(f64::to_bits).collect::<Vec<_>>();
+        let pos: Vec<f64> = floats.iter().map(|v| v.abs()).collect();
+        let bpo = NonZeroUsize::new(12).unwrap();
+        assert_eq!(
+            bits(hz_to_midi_slice(&pos)),
+            bits(pos.iter().map(|&f| hz_to_midi(f)).collect())
+        );
+        assert_eq!(
+            bits(hz_to_octs_slice(&pos, 0.3, bpo)),
+            bits(pos.iter().map(|&f| hz_to_octs(f, 0.3, bpo)).collect())
+        );
+        assert_eq!(
+            bits(a4_to_tuning_slice(&pos, bpo)),
+            bits(pos.iter().map(|&f| a4_to_tuning(f, bpo)).collect())
         );
     }
 }
