@@ -143,6 +143,9 @@ All notable changes to this project are documented here.
 
 - `StreamingResampler` (`resampling` feature): a stateful, chunk-by-chunk resampler for continuous sources (e.g. audio being decoded live and fed to a playback device at a different sample rate). Uses the same delay-free windowed-sinc engine as `resample`/`resample_by_ratio` (no delay, exact total length, output equal to `resample` of the whole input), but keeps its filter state and any leftover input alive across calls instead of requiring the whole clip up front.
 
+- `examples/librosa_bench.rs`: wall-clock benchmark of the librosa-compatible operations (JSON
+  output; the companion librosa script lives outside the repository).
+
 ### Fixed
 
 
@@ -207,6 +210,10 @@ All notable changes to this project are documented here.
 - Pitch-shift perturbation (`PerturbationMethod::PitchShift`): wrong instantaneous-frequency estimate (no bin de-trending, sign-preserving `%` wrap), incoherent phases for colliding bins, output 68 samples short, and multichannel input failed with a shape error. A 440 Hz tone shifted +2 st now peaks at 494.0 Hz (was 505.7 Hz).
 - `pad_samples_right` could return one sample fewer than requested (samples -> seconds -> samples truncation).
 
+- Resampling: the per-thread filter-table cache is now a bounded LRU (at most 8 tables / 64 MiB per
+  thread). It previously grew without limit, by up to tens of MB per distinct rate pair (e.g. pitch
+  shifting by arbitrary steps).
+
 ### Changed
 
 - Filter parameter validation follows SciPy: any edge in `(0, Nyquist)` is
@@ -228,6 +235,18 @@ All notable changes to this project are documented here.
 - Documentation: `hz_to_mel`, `mel_to_hz`, `mel_scale` and `mel_frequencies` state that they use
   the HTK scale (librosa's default is Slaney); `time_to_frames` documents how its rounding differs
   from librosa; the two `seconds_to_samples` functions document their different rounding.
+
+- Performance (results unchanged up to floating-point round-off):
+  - `stft`: blocked output transpose, no whole-signal scratch buffer (~2x faster).
+  - Spectrogram magnitudes use `re² + im²` instead of `hypot`; mel products visit only each
+    filter's non-zero bins (melspectrogram ~2.8x, mfcc ~2.4x faster).
+  - Whole-buffer resampling with small rate ratios (2:1, 1:2, 3:1, 3:2, ...) evaluates the same
+    polyphase filter with FFTs (44100 -> 22050 Hz ~4x faster; `cqt` ~3x faster).
+  - `spectral_contrast` uses partial selection for the band quantiles (~2.4x faster, bit-identical).
+  - Phase vocoder (`time_stretch`, `pitch_shift`) computes each frame's phase and magnitude once
+    (~1.45x / ~1.5x faster, bit-identical).
+  - Fewer whole-signal copies in `AudioEffects` methods returning audio.
+- The `resampling` feature names `realfft` explicitly (already a dependency through `rubato`).
 
 ## 2.0.0
 
