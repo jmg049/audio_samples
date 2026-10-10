@@ -197,15 +197,67 @@ impl DistanceMetric {
 
 /// Pairwise distances between the columns of `x` (rows of the result) and the
 /// columns of `y` (columns of the result), like `scipy.spatial.distance.cdist`.
+///
+/// Each distance is accumulated feature by feature in the same order as
+/// [`DistanceMetric::distance`] (so the results are identical), but one row
+/// of the result at a time across all columns of `y`, which vectorises.
 fn pairwise<F: AudioFloat>(
     x: ArrayView2<F>,
     y: ArrayView2<F>,
     metric: DistanceMetric,
 ) -> Array2<F> {
-    let mut out = Array2::zeros((x.ncols(), y.ncols()));
-    for (i, xi) in x.columns().into_iter().enumerate() {
-        for (j, yj) in y.columns().into_iter().enumerate() {
-            out[[i, j]] = metric.distance(xi, yj);
+    let ny = y.ncols();
+    let mut out = Array2::zeros((x.ncols(), ny));
+    if ny == 0 {
+        return out;
+    }
+    let y = y.as_standard_layout();
+    let ys = y.as_slice().expect("standard layout");
+    let zero = F::zero();
+    // Squared norms of the columns of y (cosine only), summed as in `distance`.
+    let nv: Vec<F> = if metric == DistanceMetric::Cosine {
+        y.columns()
+            .into_iter()
+            .map(|v| v.iter().fold(zero, |acc, &b| acc + b * b))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for (xi, mut row) in x.columns().into_iter().zip(out.rows_mut()) {
+        let row = row.as_slice_mut().expect("standard layout");
+        for (&a, yf) in xi.iter().zip(ys.chunks_exact(ny)) {
+            match metric {
+                DistanceMetric::Euclidean | DistanceMetric::SqEuclidean => {
+                    for (o, &b) in row.iter_mut().zip(yf) {
+                        *o += (a - b) * (a - b);
+                    }
+                }
+                DistanceMetric::Cityblock => {
+                    for (o, &b) in row.iter_mut().zip(yf) {
+                        *o += (a - b).abs();
+                    }
+                }
+                DistanceMetric::Chebyshev => {
+                    for (o, &b) in row.iter_mut().zip(yf) {
+                        *o = o.max((a - b).abs());
+                    }
+                }
+                DistanceMetric::Cosine => {
+                    for (o, &b) in row.iter_mut().zip(yf) {
+                        *o += a * b;
+                    }
+                }
+            }
+        }
+        match metric {
+            DistanceMetric::Euclidean => row.iter_mut().for_each(|o| *o = o.sqrt()),
+            DistanceMetric::Cosine => {
+                let nu = xi.iter().fold(zero, |acc, &a| acc + a * a);
+                for (o, &nv) in row.iter_mut().zip(&nv) {
+                    *o = F::one() - *o / (nu.sqrt() * nv.sqrt());
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -538,11 +590,15 @@ pub fn dtw<F: AudioFloat>(
     if x.ncols() == 0 || y.ncols() == 0 {
         return err("x / y", "sequences must contain at least one frame");
     }
-    let mut c = pairwise(x, y, cfg.metric);
+    // A subsequence alignment of a longer `x` runs on the transposed cost
+    // matrix (as in librosa); every metric is symmetric, so it is computed
+    // directly as the distances from `y` to `x`.
     let transposed = cfg.subseq && x.ncols() > y.ncols();
-    if transposed {
-        c = c.reversed_axes().as_standard_layout().into_owned();
-    }
+    let c = if transposed {
+        pairwise(y, x, cfg.metric)
+    } else {
+        pairwise(x, y, cfg.metric)
+    };
     dtw_core(c, cfg, transposed)
 }
 
@@ -608,7 +664,7 @@ fn fill_off_diagonal<F: AudioFloat>(x: &mut Array2<F>, radius: f64, value: F) {
 }
 
 fn dtw_core<F: AudioFloat>(
-    mut c: Array2<F>,
+    c: Array2<F>,
     cfg: &DtwConfig,
     transposed: bool,
 ) -> AudioSampleResult<DtwResult<F>> {
@@ -618,41 +674,25 @@ fn dtw_core<F: AudioFloat>(
     if c.iter().any(|v| v.is_nan()) {
         return err("c", "DTW cost matrix contains NaN values");
     }
+    let mut d = if c.is_standard_layout() {
+        c
+    } else {
+        c.as_standard_layout().into_owned()
+    };
     if cfg.global_constraints {
-        fill_off_diagonal(&mut c, cfg.band_rad, F::infinity());
+        fill_off_diagonal(&mut d, cfg.band_rad, F::infinity());
     }
-    let (n, m) = c.dim();
-    let max0 = sigma.iter().map(|s| s[0]).max().unwrap_or(0);
-    let max1 = sigma.iter().map(|s| s[1]).max().unwrap_or(0);
-
-    let mut d = Array2::from_elem((n + max0, m + max1), F::infinity());
-    d[[max0, max1]] = c[[0, 0]];
-    if cfg.subseq {
-        for j in 0..m {
-            d[[max0, max1 + j]] = c[[0, j]];
-        }
-    }
-    let mut steps = Array2::<usize>::zeros(d.dim());
-    steps.row_mut(0).fill(1);
-    steps.column_mut(0).fill(2);
-
-    for cur_n in max0..d.nrows() {
-        for cur_m in max1..d.ncols() {
-            let local = c[[cur_n - max0, cur_m - max1]];
-            for (k, s) in sigma.iter().enumerate() {
-                let cur_d = d[[cur_n - s[0], cur_m - s[1]]];
-                let mut cur_c = w_mul[k] * local;
-                cur_c += w_add[k];
-                let cur_cost = cur_d + cur_c;
-                if cur_cost < d[[cur_n, cur_m]] {
-                    d[[cur_n, cur_m]] = cur_cost;
-                    steps[[cur_n, cur_m]] = k;
-                }
-            }
-        }
-    }
-    let d = d.slice(ndarray::s![max0.., max1..]).to_owned();
-    let steps = steps.slice(ndarray::s![max0.., max1..]).to_owned();
+    let (n, m) = d.dim();
+    let mut steps = Array2::<usize>::zeros((n, m));
+    accumulate(
+        d.as_slice_mut().expect("standard layout"),
+        steps.as_slice_mut().expect("standard layout"),
+        m,
+        &sigma,
+        &w_add,
+        &w_mul,
+        cfg.subseq,
+    );
 
     let path = if cfg.backtrack {
         let mut wp = if cfg.subseq {
@@ -695,6 +735,110 @@ fn dtw_core<F: AudioFloat>(
         path,
         steps,
     })
+}
+
+/// librosa's `__dtw_calc_accu_cost`, in place: `d` holds the local cost
+/// matrix (`m` columns, row-major) on entry and the accumulated cost on exit;
+/// `steps` (zeros on entry) receives the index of the step taken into each
+/// cell.
+///
+/// librosa pads the accumulated matrix with infinite rows and columns so that
+/// every step has a predecessor. A step from the padding adds to `inf` and can
+/// never improve a cell (the sum is `inf` or NaN, and the comparison is a
+/// strict `<`), so here such steps are skipped instead, which gives the same
+/// values without the padded copies.
+fn accumulate<F: AudioFloat>(
+    d: &mut [F],
+    steps: &mut [usize],
+    m: usize,
+    sigma: &[[usize; 2]],
+    w_add: &[F],
+    w_mul: &[F],
+    subseq: bool,
+) {
+    let inf = F::infinity();
+    let n = d.len() / m;
+    // Cell (r, j): its local cost is still in d[r * m + j] when it is reached.
+    // The first row starts from the local cost in a subsequence alignment, and
+    // cell (0, 0) always does; every other cell starts from infinity.
+    let start = |r: usize, j: usize, local: F| {
+        if r == 0 && (subseq || j == 0) {
+            local
+        } else {
+            inf
+        }
+    };
+    let generic_cell = |d: &mut [F], steps: &mut [usize], r: usize, j: usize| {
+        let idx = r * m + j;
+        let local = d[idx];
+        let mut best = start(r, j, local);
+        let mut arg = 0;
+        for (k, s) in sigma.iter().enumerate() {
+            if r >= s[0] && j >= s[1] {
+                let cur_d = d[idx - s[0] * m - s[1]];
+                let mut cur_c = w_mul[k] * local;
+                cur_c += w_add[k];
+                let cost = cur_d + cur_c;
+                if cost < best {
+                    best = cost;
+                    arg = k;
+                }
+            }
+        }
+        d[idx] = best;
+        steps[idx] = arg;
+    };
+    if sigma != DEFAULT_STEPS {
+        for r in 0..n {
+            for j in 0..m {
+                generic_cell(d, steps, r, j);
+            }
+        }
+        return;
+    }
+    // librosa's default steps: diagonal (1, 1), horizontal (0, 1), vertical
+    // (1, 0). The first row and column have fewer predecessors.
+    for j in 0..m {
+        generic_cell(d, steps, 0, j);
+    }
+    let (wm0, wm1, wm2) = (w_mul[0], w_mul[1], w_mul[2]);
+    let (wa0, wa1, wa2) = (w_add[0], w_add[1], w_add[2]);
+    for r in 1..n {
+        generic_cell(d, steps, r, 0);
+        let (above, rest) = d.split_at_mut(r * m);
+        let prev = &above[(r - 1) * m..];
+        let cur = &mut rest[..m];
+        let st = &mut steps[r * m..(r + 1) * m];
+        let mut left = cur[0];
+        for j in 1..m {
+            let local = cur[j];
+            let mut best = inf;
+            let mut arg = 0;
+            let mut c0 = wm0 * local;
+            c0 += wa0;
+            let cost = prev[j - 1] + c0;
+            if cost < best {
+                best = cost;
+            }
+            let mut c1 = wm1 * local;
+            c1 += wa1;
+            let cost = left + c1;
+            if cost < best {
+                best = cost;
+                arg = 1;
+            }
+            let mut c2 = wm2 * local;
+            c2 += wa2;
+            let cost = prev[j] + c2;
+            if cost < best {
+                best = cost;
+                arg = 2;
+            }
+            cur[j] = best;
+            st[j] = arg;
+            left = best;
+        }
+    }
 }
 
 /// Index of the first minimum (`numpy.argmin`); NaN-free input assumed.
@@ -3011,7 +3155,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{Array3, array};
+    use ndarray::{Array3, ShapeBuilder, array};
 
     #[test]
     fn huge_transition_matrices_are_parameter_errors() {
@@ -3346,5 +3490,129 @@ mod tests {
     fn viterbi_matches_reference_recursion() {
         check_viterbi_matches_reference::<f32>();
         check_viterbi_matches_reference::<f64>();
+    }
+
+    /// The previous DTW implementation (padded accumulation, per-pair
+    /// distances), as the reference for `dtw_core` / `pairwise`.
+    fn reference_dtw<F: AudioFloat>(
+        x: Option<(ArrayView2<F>, ArrayView2<F>)>,
+        cost: Option<ArrayView2<F>>,
+        cfg: &DtwConfig,
+    ) -> (Array2<F>, Array2<usize>) {
+        let mut c = match (x, cost) {
+            (Some((x, y)), _) => {
+                let mut out = Array2::zeros((x.ncols(), y.ncols()));
+                for (i, xi) in x.columns().into_iter().enumerate() {
+                    for (j, yj) in y.columns().into_iter().enumerate() {
+                        out[[i, j]] = cfg.metric.distance(xi, yj);
+                    }
+                }
+                if cfg.subseq && x.ncols() > y.ncols() {
+                    out = out.reversed_axes().as_standard_layout().into_owned();
+                }
+                out
+            }
+            (None, Some(c)) => c.to_owned(),
+            _ => unreachable!(),
+        };
+        let (sigma, w_add, w_mul) = cfg.resolve().unwrap();
+        let w_add: Vec<F> = w_add.into_iter().map(F::of).collect();
+        let w_mul: Vec<F> = w_mul.into_iter().map(F::of).collect();
+        if cfg.global_constraints {
+            fill_off_diagonal(&mut c, cfg.band_rad, F::infinity());
+        }
+        let (n, m) = c.dim();
+        let max0 = sigma.iter().map(|s| s[0]).max().unwrap();
+        let max1 = sigma.iter().map(|s| s[1]).max().unwrap();
+        let mut d = Array2::from_elem((n + max0, m + max1), F::infinity());
+        d[[max0, max1]] = c[[0, 0]];
+        if cfg.subseq {
+            for j in 0..m {
+                d[[max0, max1 + j]] = c[[0, j]];
+            }
+        }
+        let mut steps = Array2::<usize>::zeros(d.dim());
+        for cur_n in max0..d.nrows() {
+            for cur_m in max1..d.ncols() {
+                let local = c[[cur_n - max0, cur_m - max1]];
+                for (k, s) in sigma.iter().enumerate() {
+                    let cur_d = d[[cur_n - s[0], cur_m - s[1]]];
+                    let mut cur_c = w_mul[k] * local;
+                    cur_c += w_add[k];
+                    let cur_cost = cur_d + cur_c;
+                    if cur_cost < d[[cur_n, cur_m]] {
+                        d[[cur_n, cur_m]] = cur_cost;
+                        steps[[cur_n, cur_m]] = k;
+                    }
+                }
+            }
+        }
+        (
+            d.slice(ndarray::s![max0.., max1..]).to_owned(),
+            steps.slice(ndarray::s![max0.., max1..]).to_owned(),
+        )
+    }
+
+    fn bits<F: AudioFloat>(a: &Array2<F>) -> Vec<u64> {
+        a.iter().map(|v| v.as_f64().to_bits()).collect()
+    }
+
+    fn check_dtw_matches_reference<F: AudioFloat>() {
+        let mut seed = 11u64;
+        let metrics = [
+            DistanceMetric::Euclidean,
+            DistanceMetric::SqEuclidean,
+            DistanceMetric::Cosine,
+            DistanceMetric::Cityblock,
+            DistanceMetric::Chebyshev,
+        ];
+        let cfgs = [
+            DtwConfig::new(),
+            DtwConfig::new().with_subseq(true),
+            DtwConfig::new()
+                .with_global_constraints(true)
+                .with_band_rad(0.3),
+            DtwConfig::new()
+                .with_step_sizes_sigma(Some(vec![[2, 1], [1, 2]]))
+                .with_weights_add(Some(vec![0.5, 0.25]))
+                .with_weights_mul(Some(vec![2.0, 1.5])),
+            DtwConfig::new()
+                .with_weights_add(Some(vec![0.1, -0.2, 0.0]))
+                .with_weights_mul(Some(vec![1.0, 2.0, 0.0])),
+            DtwConfig::new()
+                .with_subseq(true)
+                .with_step_sizes_sigma(Some(vec![[1, 2]])),
+        ];
+        for &(nx, ny) in &[(1usize, 1usize), (1, 5), (5, 1), (7, 9), (13, 6), (20, 20)] {
+            let x = Array2::from_shape_fn((3, nx), |_| F::of(lcg(&mut seed) + 0.01));
+            let y = Array2::from_shape_fn((3, ny), |_| F::of(lcg(&mut seed) + 0.01));
+            for metric in metrics {
+                for cfg in &cfgs {
+                    let cfg = cfg.clone().with_metric(metric).with_backtrack(false);
+                    let (wd, ws) = reference_dtw(Some((x.view(), y.view())), None, &cfg);
+                    let r = dtw(x.view(), y.view(), &cfg).unwrap();
+                    assert_eq!(bits(&r.cost), bits(&wd), "{nx}x{ny} {cfg:?}");
+                    assert_eq!(r.steps, ws, "{nx}x{ny} {cfg:?}");
+                }
+            }
+            // Precomputed costs with infinities, in Fortran order.
+            let mut c = Array2::from_shape_fn((nx, ny).f(), |_| F::of(lcg(&mut seed) - 0.2));
+            if nx * ny > 2 {
+                c[[nx / 2, ny / 2]] = F::infinity();
+            }
+            for cfg in &cfgs {
+                let cfg = cfg.clone().with_backtrack(false);
+                let (wd, ws) = reference_dtw(None, Some(c.view()), &cfg);
+                let r = dtw_with_cost(c.view(), &cfg).unwrap();
+                assert_eq!(bits(&r.cost), bits(&wd), "cost {nx}x{ny} {cfg:?}");
+                assert_eq!(r.steps, ws, "cost {nx}x{ny} {cfg:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn dtw_matches_reference_accumulation() {
+        check_dtw_matches_reference::<f32>();
+        check_dtw_matches_reference::<f64>();
     }
 }
