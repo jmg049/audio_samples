@@ -143,6 +143,156 @@ pub(crate) fn log10_f32(v: &mut [f32]) {
     log10_f32_generic(v);
 }
 
+/// Matrix product `out = w · x` with `x` given as rows: `out` holds
+/// `w.len() / rows.len()` rows of `width` values (row stride `out_stride`,
+/// starting at `out[0]`), and `out[q][t] = sum_m (w[q][m] * rows[m][t])`,
+/// summed over `m` in ascending order starting from `-0.0`, i.e. exactly
+/// `(0..n).map(|m| w[q][m] * rows[m][t]).sum()`.
+///
+/// Register-blocked over 4 output rows and 16 columns, vectorised across
+/// columns; the order of operations of every output value is the same in
+/// the blocked and the remainder paths.
+pub(crate) fn matmul_rows<F: AudioFloat>(
+    out: &mut [F],
+    out_stride: usize,
+    width: usize,
+    w: &[F],
+    rows: &[&[F]],
+) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        // SAFETY: AVX2 is available (checked at run time).
+        unsafe { matmul_rows_avx2(out, out_stride, width, w, rows) };
+        return;
+    }
+    matmul_rows_generic(out, out_stride, width, w, rows);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn matmul_rows_avx2<F: AudioFloat>(
+    out: &mut [F],
+    out_stride: usize,
+    width: usize,
+    w: &[F],
+    rows: &[&[F]],
+) {
+    matmul_rows_generic(out, out_stride, width, w, rows);
+}
+
+#[inline(always)]
+fn matmul_rows_generic<F: AudioFloat>(
+    out: &mut [F],
+    out_stride: usize,
+    width: usize,
+    w: &[F],
+    rows: &[&[F]],
+) {
+    // 4 x 2 vectors of accumulators per block with 256-bit vectors.
+    if size_of::<F>() == 4 {
+        matmul_rows_tb::<F, 16>(out, out_stride, width, w, rows);
+    } else {
+        matmul_rows_tb::<F, 8>(out, out_stride, width, w, rows);
+    }
+}
+
+#[inline(always)]
+fn matmul_rows_tb<F: AudioFloat, const TB: usize>(
+    out: &mut [F],
+    out_stride: usize,
+    width: usize,
+    w: &[F],
+    rows: &[&[F]],
+) {
+    const QB: usize = 4;
+    let n = rows.len();
+    let n_q = w.len() / n.max(1);
+    // The last partial block of columns, zero-padded to TB columns.
+    let full = width / TB * TB;
+    let rem = width - full;
+    let pad: Vec<F> = if rem > 0 {
+        let mut p = vec![F::zero(); n * TB];
+        for (m, r) in rows.iter().enumerate() {
+            p[m * TB..m * TB + rem].copy_from_slice(&r[full..width]);
+        }
+        p
+    } else {
+        Vec::new()
+    };
+    let pad_rows: Vec<&[F]> = pad.chunks(TB).collect();
+    let mut wb: Vec<[F; QB]> = vec![[F::zero(); QB]; n];
+    let mut q = 0;
+    while q < n_q {
+        let qb = QB.min(n_q - q);
+        // The block's weights by column of `w`; rows past the end get weight
+        // 0 and are not stored.
+        for (m, wm) in wb.iter_mut().enumerate() {
+            for (qi, v) in wm.iter_mut().enumerate() {
+                *v = if qi < qb {
+                    w[(q + qi) * n + m]
+                } else {
+                    F::zero()
+                };
+            }
+        }
+        let mut t = 0;
+        while t < full {
+            let a = block::<F, QB, TB>(rows, t, &wb);
+            store_block(out, out_stride, q, qb, t, TB, &a);
+            t += TB;
+        }
+        if rem > 0 {
+            let a = block::<F, QB, TB>(&pad_rows, 0, &wb);
+            store_block(out, out_stride, q, qb, full, rem, &a);
+        }
+        q += qb;
+    }
+}
+
+/// `4 x TB` block of `w · x` from columns `off..off + TB` of `src`.
+#[inline(always)]
+fn block<F: AudioFloat, const QB: usize, const TB: usize>(
+    src: &[&[F]],
+    off: usize,
+    wb: &[[F; QB]],
+) -> [[F; TB]; QB] {
+    const { assert!(QB == 4) };
+    let z = -F::zero();
+    let (mut a0, mut a1, mut a2, mut a3) = ([z; TB], [z; TB], [z; TB], [z; TB]);
+    for (r, wm) in src.iter().zip(wb) {
+        let x = &r[off..off + TB];
+        let (w0, w1, w2, w3) = (wm[0], wm[1], wm[2], wm[3]);
+        for (j, &xj) in x.iter().enumerate() {
+            a0[j] += w0 * xj;
+            a1[j] += w1 * xj;
+            a2[j] += w2 * xj;
+            a3[j] += w3 * xj;
+        }
+    }
+    std::array::from_fn(|qi| match qi {
+        0 => a0,
+        1 => a1,
+        2 => a2,
+        _ => a3,
+    })
+}
+
+#[inline(always)]
+fn store_block<F: AudioFloat, const QB: usize, const TB: usize>(
+    out: &mut [F],
+    out_stride: usize,
+    q: usize,
+    qb: usize,
+    t: usize,
+    len: usize,
+    a: &[[F; TB]; QB],
+) {
+    for (qi, row) in a.iter().enumerate().take(qb) {
+        let o = (q + qi) * out_stride + t;
+        out[o..o + len].copy_from_slice(&row[..len]);
+    }
+}
+
 /// The slice as `&mut [f32]` when `F` is `f32`.
 fn as_f32<F: AudioFloat>(v: &mut [F]) -> Option<&mut [f32]> {
     if TypeId::of::<F>() == TypeId::of::<f32>() {
@@ -237,5 +387,60 @@ mod tests {
         );
         assert_eq!(ln[xs.len() - 11], 0.0); // ln(1)
         assert_eq!(lg[xs.len() - 9], 1.0); // log10(10)
+    }
+
+    fn check_matmul<F: AudioFloat + Bits>() {
+        for &(n_q, n, width) in &[
+            (1, 1, 1),
+            (3, 5, 7),
+            (4, 128, 16),
+            (20, 128, 431),
+            (7, 3, 33),
+        ] {
+            let w: Vec<F> = (0..n_q * n)
+                .map(|i| F::of(((i * 37) % 11) as f64 * 0.37 - 1.3))
+                .collect();
+            let x: Vec<Vec<F>> = (0..n)
+                .map(|m| {
+                    (0..width)
+                        .map(|t| F::of(((m * 13 + t * 7) % 17) as f64 * 0.11 - 0.9))
+                        .collect()
+                })
+                .collect();
+            let rows: Vec<&[F]> = x.iter().map(Vec::as_slice).collect();
+            let stride = width + 3;
+            let mut out = vec![F::nan(); n_q * stride];
+            matmul_rows(&mut out, stride, width, &w, &rows);
+            for q in 0..n_q {
+                for t in 0..width {
+                    let want: F = (0..n).map(|m| w[q * n + m] * x[m][t]).sum();
+                    assert_eq!(out[q * stride + t].to_bits_u64(), want.to_bits_u64());
+                }
+            }
+        }
+    }
+
+    trait Bits {
+        fn to_bits_u64(self) -> u64;
+    }
+    impl Bits for f32 {
+        fn to_bits_u64(self) -> u64 {
+            u64::from(self.to_bits())
+        }
+    }
+    impl Bits for f64 {
+        fn to_bits_u64(self) -> u64 {
+            self.to_bits()
+        }
+    }
+
+    #[test]
+    fn matmul_rows_equals_the_ordered_sum_bitwise() {
+        check_matmul_t::<f32>();
+        check_matmul_t::<f64>();
+    }
+
+    fn check_matmul_t<F: AudioFloat + Bits>() {
+        check_matmul::<F>();
     }
 }

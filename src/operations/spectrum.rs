@@ -1768,31 +1768,93 @@ where
     }
     config.validate_cepstrum(n_mels)?;
     let n_mfcc = config.n_mfcc.get();
-    let mut basis = dct_matrix(n_mfcc, n_mels, config.dct_type, config.dct_norm);
-    if config.lifter > 0.0 {
-        let l = config.lifter;
+    let basis = cepstrum_basis(
+        n_mfcc,
+        n_mels,
+        config.dct_type,
+        config.dct_norm,
+        config.lifter,
+    );
+    let basis: Vec<F> = basis.iter().map(|&b| F::of(b)).collect();
+    let mut shape = mel_db.raw_dim();
+    shape[ndim - 2] = n_mfcc;
+    let mut out = Array::<F, D>::zeros(shape);
+    mfcc_blocks(
+        mel_db.view().into_dyn(),
+        out.view_mut().into_dyn(),
+        &basis,
+        n_mels,
+    );
+    Ok(out)
+}
+
+/// The `(n_mfcc, n_mels)` DCT matrix with the lifter applied, row-major, in
+/// `f64` (computed once per thread and parameter set).
+fn cepstrum_basis(
+    n_mfcc: usize,
+    n_mels: usize,
+    dct_type: DctType,
+    norm: DctNorm,
+    lifter: f64,
+) -> Arc<Vec<f64>> {
+    type Key = (usize, usize, DctType, DctNorm, u64);
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<(Key, Arc<Vec<f64>>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let key: Key = (n_mfcc, n_mels, dct_type, norm, lifter.to_bits());
+    if let Some(b) = CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, b)| b.clone())
+    }) {
+        return b;
+    }
+    let mut basis = dct_matrix(n_mfcc, n_mels, dct_type, norm);
+    if lifter > 0.0 {
+        let l = lifter;
         for (k, mut row) in basis.outer_iter_mut().enumerate() {
             let li = (std::f64::consts::PI * (k + 1) as f64 / l).sin();
             let g = 1.0 + (l / 2.0) * li;
             row.mapv_inplace(|b| b * g);
         }
     }
-    let basis = basis.mapv(F::of);
-    let mut shape = mel_db.raw_dim();
-    shape[ndim - 2] = n_mfcc;
-    let mut out = Array::<F, D>::zeros(shape);
-    let mut lane_buf = vec![F::zero(); n_mels];
-    Zip::from(out.lanes_mut(ax))
-        .and(mel_db.lanes(ax))
-        .for_each(|mut o, x| {
-            for (dst, &v) in lane_buf.iter_mut().zip(x.iter()) {
-                *dst = v;
-            }
-            for (y, row) in o.iter_mut().zip(basis.outer_iter()) {
-                *y = row.iter().zip(&lane_buf).map(|(&b, &v)| b * v).sum();
-            }
-        });
-    Ok(out)
+    let b = Arc::new(basis.iter().copied().collect::<Vec<f64>>());
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 8 {
+            c.remove(0);
+        }
+        c.push((key, b.clone()));
+    });
+    b
+}
+
+/// `out = basis · x` over the last two axes of every block of the leading axes.
+fn mfcc_blocks<F: AudioFloat>(
+    x: ndarray::ArrayViewD<'_, F>,
+    mut out: ArrayViewMutD<'_, F>,
+    basis: &[F],
+    n_mels: usize,
+) {
+    if x.ndim() > 2 {
+        for (xs, os) in x.outer_iter().zip(out.outer_iter_mut()) {
+            mfcc_blocks(xs, os, basis, n_mels);
+        }
+        return;
+    }
+    let x = x.into_dimensionality::<ndarray::Ix2>().expect("two axes");
+    let mut out = out.into_dimensionality::<ndarray::Ix2>().expect("two axes");
+    let w_all = x.ncols();
+    let out_slice = out.as_slice_mut().expect("a fresh standard-layout array");
+    crate::utils::layout::for_each_row_tile(x, |t0, tile| {
+        let w = tile.ncols();
+        let rows: Vec<&[F]> = (0..n_mels)
+            .map(|m| crate::utils::layout::row(&tile, m))
+            .collect();
+        crate::utils::vmath::matmul_rows(&mut out_slice[t0..], w_all, w, basis, &rows);
+    });
 }
 
 /// Projects a (power or magnitude) spectrogram onto mel bands, equivalent to
