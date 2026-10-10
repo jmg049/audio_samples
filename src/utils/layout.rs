@@ -11,14 +11,15 @@
 
 use ndarray::{ArrayView2, ShapeBuilder};
 
-/// Target size in bytes of one copied tile (well inside L2).
-const TILE_BYTES: usize = 64 * 1024;
+/// Target size in bytes of one copied tile (inside L2).
+const TILE_BYTES: usize = 256 * 1024;
 
 /// Number of frames per copied tile for `rows` rows of `T`.
 fn tile_width<T>(rows: usize, cols: usize) -> usize {
     let w = TILE_BYTES / (rows.max(1) * size_of::<T>().max(1));
-    // A multiple of 8 frames (a full vector of f32 lanes), at least 8.
-    (w / 8 * 8).max(8).min(cols)
+    // A multiple of 8 frames (a full vector of f32 lanes), at least 32 so
+    // that the row-wise loops of the kernels are long enough to vectorise.
+    (w / 8 * 8).max(32).min(cols)
 }
 
 /// Calls `f(t0, tile)` for consecutive tiles of columns of `x`, where `tile`

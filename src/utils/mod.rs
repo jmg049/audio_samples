@@ -66,6 +66,7 @@ pub mod detection;
 pub(crate) mod fast_math;
 pub mod generation;
 pub(crate) mod layout;
+pub(crate) mod vmath;
 
 pub use audio_math::*;
 pub use comparison::*;

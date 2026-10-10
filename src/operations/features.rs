@@ -97,6 +97,7 @@ use crate::operations::spectrum::{
     DbConfig, StftConfig, StftPadMode, frame_square_sums, power_to_db, spectrogram_rows, stft,
 };
 use crate::utils::layout::{col, for_each_col_tile, for_each_row_tile, row};
+use crate::utils::vmath::ln_in_place;
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
 };
@@ -996,13 +997,6 @@ fn l1_lengths_tile<F: AudioFloat>(tile: &ArrayView2<'_, F>, len: &mut [F]) {
         if *l < F::min_positive_value() {
             *l = F::one();
         }
-    }
-}
-
-/// `v = ln(v)` element-wise.
-fn ln_in_place<F: AudioFloat>(v: &mut [F]) {
-    for x in v {
-        *x = x.ln();
     }
 }
 
