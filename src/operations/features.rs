@@ -224,12 +224,6 @@ fn check_freq(what: &str, freq: &[f64], n_bins: usize) -> AudioSampleResult<()> 
     Ok(())
 }
 
-/// `f64::total_cmp` for `F` (exact: every `F` value converts to `f64` exactly
-/// and the conversion preserves the order, including signed zeros).
-fn total_cmp<F: AudioFloat>(a: &F, b: &F) -> std::cmp::Ordering {
-    a.as_f64().total_cmp(&b.as_f64())
-}
-
 /// `x^p` with numpy's exact fast paths for the common exponents.
 fn pow_np<F: AudioFloat>(x: F, p: f64) -> F {
     if p == 1.0 {
@@ -1444,28 +1438,23 @@ pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
         let m = q.min(sel.len());
         bands.push((sel, m));
     }
-    let mut buf = Vec::new();
-    let (mut lo_m, mut hi_m) = (Vec::new(), Vec::new());
+    let (mut lo, mut hi, mut v) = (Vec::new(), Vec::new(), Vec::new());
     for c in 0..n_ch {
-        for_each_col_tile(s.index_axis(Axis(0), c), |t0, tile| {
-            for t in 0..tile.ncols() {
-                let column = col(&tile, t);
-                for (k, (sel, m)) in bands.iter().enumerate() {
-                    let m = *m;
-                    let (lo, hi) = if 2 * m < sel.len() {
-                        extreme_sums(sel.iter().map(|&i| column[i]), m, &mut lo_m, &mut hi_m)
-                    } else {
-                        buf.clear();
-                        buf.extend(sel.iter().map(|&i| column[i]));
-                        buf.sort_by(total_cmp);
-                        let n = buf.len();
-                        (
-                            buf[..m].iter().fold(F::zero(), |a, &v| a + v),
-                            buf[n - m..].iter().fold(F::zero(), |a, &v| a + v),
-                        )
-                    };
-                    valley[[c, k, t0 + t]] = lo / F::of_usize(m);
-                    peak[[c, k, t0 + t]] = hi / F::of_usize(m);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            for (k, (sel, m)) in bands.iter().enumerate() {
+                let m = *m;
+                extreme_sums_rows(&tile, sel, m, &mut lo, &mut hi, &mut v);
+                let inv_m = F::of_usize(m);
+                for j in 0..w {
+                    // Sums in ascending order from +0, as a sorted band.
+                    let (mut l, mut h) = (F::zero(), F::zero());
+                    for q in 0..m {
+                        l += lo[q * w + j];
+                        h += hi[q * w + j];
+                    }
+                    valley[[c, k, t0 + j]] = l / inv_m;
+                    peak[[c, k, t0 + j]] = h / inv_m;
                 }
             }
         });
@@ -1480,51 +1469,57 @@ pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
     }
 }
 
-/// Sums of the `m` smallest and of the `m` largest of `values` (at least
-/// `m` of them, non-negative or `-0.0`, no NaN), each summed in ascending order
-/// starting from `+0`.
+/// For every frame (column) of `tile` (rows contiguous), the `m` smallest
+/// and the `m` largest values over the rows `sel`, each in ascending order:
+/// `lo[q * w + j]` and `hi[q * w + j]` (`q < m`) for frame `j` of `w`.
 ///
-/// One pass keeps the `m` smallest and `m` largest values seen so far in two
-/// sorted buffers; for `m` much smaller than the band, almost every value is
-/// rejected by a single comparison with each buffer's boundary. The selected
+/// Each new value is inserted with a chain of compare-exchanges (`min` /
+/// `max`), the same for every frame, so the loops run across frames without
+/// branches. The values are non-negative or `-0.0` and never NaN; the kept
 /// values equal those of a full sort, except that `-0.0` and `+0.0` count as
-/// equal; the two sums are the same either way, since a sum that starts at
-/// `+0` is unchanged by adding a zero of either sign.
-fn extreme_sums<F: AudioFloat>(
-    mut values: impl Iterator<Item = F>,
+/// equal, which does not change a sum that starts at `+0`.
+fn extreme_sums_rows<F: AudioFloat>(
+    tile: &ArrayView2<'_, F>,
+    sel: &[usize],
     m: usize,
     lo: &mut Vec<F>,
     hi: &mut Vec<F>,
-) -> (F, F) {
+    v: &mut Vec<F>,
+) {
+    let w = tile.ncols();
     lo.clear();
-    lo.extend(values.by_ref().take(m));
-    lo.sort_by(total_cmp);
+    lo.resize(m * w, F::infinity());
     hi.clear();
-    hi.extend_from_slice(lo);
-    for v in values {
-        if v < lo[m - 1] {
-            // Insert into the m smallest, dropping the largest of them.
-            let mut i = m - 1;
-            while i > 0 && lo[i - 1] > v {
-                lo[i] = lo[i - 1];
-                i -= 1;
-            }
-            lo[i] = v;
+    hi.resize(m * w, F::neg_infinity());
+    v.resize(w, F::zero());
+    let v = &mut v[..w];
+    for &i in sel {
+        let r = row(tile, i);
+        // Insert into the m smallest (ascending), dropping the largest.
+        v.copy_from_slice(r);
+        for q in 0..m {
+            exchange(&mut lo[q * w..(q + 1) * w], v);
         }
-        if v > hi[0] {
-            // Insert into the m largest, dropping the smallest of them.
-            let mut i = 0;
-            while i + 1 < m && hi[i + 1] < v {
-                hi[i] = hi[i + 1];
-                i += 1;
-            }
-            hi[i] = v;
+        // Insert into the m largest (ascending), dropping the smallest.
+        v.copy_from_slice(r);
+        for q in (0..m).rev() {
+            exchange(v, &mut hi[q * w..(q + 1) * w]);
         }
     }
-    (
-        lo.iter().fold(F::zero(), |a, &v| a + v),
-        hi.iter().fold(F::zero(), |a, &v| a + v),
-    )
+}
+
+/// Compare-exchange of two equal-length slices: `small[j]` becomes the
+/// smaller and `large[j]` the larger of the two values (no NaN). Not
+/// inlined, so that the two slices are known not to overlap and the loop
+/// vectorises without a run-time overlap check.
+#[inline(never)]
+fn exchange<F: AudioFloat>(small: &mut [F], large: &mut [F]) {
+    for (s, l) in small.iter_mut().zip(large.iter_mut()) {
+        let (a, b) = (*s, *l);
+        let lt = b < a;
+        *s = if lt { b } else { a };
+        *l = if lt { a } else { b };
+    }
 }
 
 fn empty_band(k: usize, f_low: f64, f_high: f64) -> AudioSampleError {
