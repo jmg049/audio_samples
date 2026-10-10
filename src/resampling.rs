@@ -31,8 +31,11 @@
 //! (Nyquist of the lower of the two rates.) Where the ratio
 //! `out_rate / in_rate = L / M` (in lowest terms) has a small enough `L`, one
 //! exact filter phase is precomputed per output phase; otherwise the filter is
-//! tabulated at 4096 phases per sample and linearly interpolated (error below
-//! -120 dB). Filter tables are cached per thread.
+//! tabulated at 4096 phases per sample (proportionally fewer when
+//! downsampling, where the filter is wider) and linearly interpolated (error
+//! below -120 dB). Filter tables are cached per thread (a few recent ratios,
+//! at most 64 MiB). Ratios needing a table of more than 2^25 coefficients
+//! (decimation by more than ~10^5 : 1) are rejected with an error.
 //!
 //! # Differences from librosa
 //!
@@ -79,8 +82,15 @@ use std::sync::Arc;
 const MAX_EXACT_PHASES: u64 = 4096;
 /// Upper bound on the size of an exact polyphase table (entries).
 const MAX_TABLE_ENTRIES: u64 = 1 << 22;
-/// Phase resolution of the interpolated table used for awkward ratios.
+/// Phase resolution (rows per input sample) of the interpolated table used for
+/// awkward ratios when upsampling; downsampling by `lower = L / M` uses
+/// `ceil(INTERP_PHASES · lower)` rows, which gives the same interpolation
+/// error because the filter is `1 / lower` times wider.
 const INTERP_PHASES: usize = 4096;
+/// Hard limit on the coefficients of any filter table (256 MiB). Only reached
+/// for decimation by more than ~10^5 : 1, which is rejected with an error
+/// instead of attempting the allocation.
+const MAX_KERNEL_ENTRIES: u64 = 1 << 25;
 
 /// Low-pass specification, relative to the Nyquist frequency of the lower of
 /// the two sample rates.
@@ -173,9 +183,11 @@ struct Kernel {
     half: usize,
     /// Row length (`2 · half`).
     taps: usize,
-    /// `true`: one row per phase `p`; `false`: `INTERP_PHASES + 1` rows over
+    /// `true`: one row per phase `p`; `false`: `phases + 1` rows over
     /// `[0, 1]`, linearly interpolated.
     exact: bool,
+    /// Rows per input sample of the interpolated table (unused when `exact`).
+    phases: usize,
     /// Row-major coefficients.
     coeffs: Vec<f64>,
     /// Whether the signal end is extended by holding the last sample.
@@ -185,17 +197,22 @@ struct Kernel {
 }
 
 impl Kernel {
-    fn new(in_sr: u32, out_sr: u32, kind: KernelKind) -> Self {
+    /// Builds the table for `in_sr -> out_sr`.
+    ///
+    /// # Errors
+    /// [`ParameterError`] if the table would exceed [`MAX_KERNEL_ENTRIES`]
+    /// coefficients (decimation by more than ~10^5 : 1).
+    fn new(in_sr: u32, out_sr: u32, kind: KernelKind) -> AudioSampleResult<Self> {
         let g = gcd(u64::from(in_sr), u64::from(out_sr));
         let l = u64::from(out_sr) / g;
         let m = u64::from(in_sr) / g;
+        // Bandwidth of the lower rate relative to the input rate.
+        let lower = (l as f64 / m as f64).min(1.0);
 
         // Continuous kernel h(tau), tau in input samples, and its support.
         let (half, h): (usize, Box<dyn Fn(f64) -> f64>) = match kind {
             KernelKind::Linear => (1, Box::new(|tau: f64| (1.0 - tau.abs()).max(0.0))),
             KernelKind::Sinc(spec) => {
-                // Bandwidth of the lower rate relative to the input rate.
-                let lower = (l as f64 / m as f64).min(1.0);
                 // -6 dB point midway through the transition band, as a
                 // fraction of the input Nyquist frequency.
                 let cutoff = 0.5 * (spec.passband + spec.stopband) * lower;
@@ -219,16 +236,32 @@ impl Kernel {
                 };
                 // Round the half-width up to a multiple of 8 so rows are a
                 // whole number of 16-wide SIMD blocks (the extra taps are 0).
+                // `support` is at most ~4e11 (u32 rates), so this cannot wrap
+                // on 64-bit targets; the size check below rejects it anyway.
                 ((support.ceil() as usize).next_multiple_of(8), Box::new(h))
             }
         };
         let taps = 2 * half;
-        let exact = l <= MAX_EXACT_PHASES && l * taps as u64 <= MAX_TABLE_ENTRIES;
+        // The interpolated table needs fewer rows per input sample when the
+        // filter is wider (downsampling): its error depends on the row
+        // spacing relative to the filter's bandwidth.
+        let phases = ((INTERP_PHASES as f64 * lower).ceil() as usize).clamp(1, INTERP_PHASES);
+        let exact = l <= MAX_EXACT_PHASES && l.saturating_mul(taps as u64) <= MAX_TABLE_ENTRIES;
         let (rows, denom) = if exact {
             (l as usize, l as f64)
         } else {
-            (INTERP_PHASES + 1, INTERP_PHASES as f64)
+            (phases + 1, phases as f64)
         };
+        let entries = (rows as u64).saturating_mul(taps as u64);
+        if entries > MAX_KERNEL_ENTRIES {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "target_sample_rate",
+                format!(
+                    "resampling {in_sr} Hz -> {out_sr} Hz needs a {taps}-tap filter table of \
+                     {entries} coefficients (limit {MAX_KERNEL_ENTRIES}); decimate in stages"
+                ),
+            )));
+        }
         let mut coeffs = Vec::with_capacity(rows * taps);
         for row in 0..rows {
             let phi = row as f64 / denom;
@@ -237,16 +270,17 @@ impl Kernel {
                 coeffs.push(h(phi - offset));
             }
         }
-        Self {
+        Ok(Self {
             l,
             m,
             half,
             taps,
             exact,
+            phases,
             coeffs,
             hold_last: matches!(kind, KernelKind::Linear),
             avx2_fma: has_avx2_fma(),
-        }
+        })
     }
 
     /// Integer part and phase of output `k`'s input position.
@@ -273,8 +307,8 @@ impl Kernel {
             let row = &self.coeffs[p as usize * taps..(p as usize + 1) * taps];
             dot(row, window, self.avx2_fma)
         } else {
-            let pos = p as f64 / self.l as f64 * INTERP_PHASES as f64;
-            let i = (pos.floor() as usize).min(INTERP_PHASES - 1);
+            let pos = p as f64 / self.l as f64 * self.phases as f64;
+            let i = (pos.floor() as usize).min(self.phases - 1);
             let frac = pos - i as f64;
             let r0 = &self.coeffs[i * taps..(i + 1) * taps];
             let r1 = &self.coeffs[(i + 1) * taps..(i + 2) * taps];
@@ -361,8 +395,8 @@ struct KernelKey {
 
 /// Most kernels kept per thread.
 const KERNEL_CACHE_ENTRIES: usize = 8;
-/// Most coefficient memory kept per thread (the most recently used kernel is
-/// always kept, whatever its size).
+/// Most coefficient memory kept per thread. A kernel larger than this on its
+/// own is used for the call that built it and then dropped, never cached.
 const KERNEL_CACHE_BYTES: usize = 64 << 20;
 
 thread_local! {
@@ -385,7 +419,14 @@ impl Kernel {
 /// builds the kernel, inserts it at the front and evicts from the back until
 /// at most [`KERNEL_CACHE_ENTRIES`] kernels and [`KERNEL_CACHE_BYTES`] bytes
 /// of coefficients remain.
-fn cached_kernel(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Arc<Kernel> {
+///
+/// # Errors
+/// See [`Kernel::new`].
+fn cached_kernel(
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResamplingQuality,
+) -> AudioSampleResult<Arc<Kernel>> {
     let key = KernelKey {
         in_sr,
         out_sr,
@@ -397,13 +438,13 @@ fn cached_kernel(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Arc<Ker
             let entry = cache.remove(pos);
             let kernel = Arc::clone(&entry.1);
             cache.insert(0, entry);
-            return kernel;
+            return Ok(kernel);
         }
         let kernel = Arc::new(Kernel::new(
             in_sr,
             out_sr,
             kernel_kind(quality, in_sr, out_sr),
-        ));
+        )?);
         cache.insert(0, (key, Arc::clone(&kernel)));
         let mut total = 0;
         let keep = cache
@@ -413,9 +454,9 @@ fn cached_kernel(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Arc<Ker
                 total > KERNEL_CACHE_BYTES
             })
             .unwrap_or(cache.len())
-            .clamp(1, KERNEL_CACHE_ENTRIES);
+            .min(KERNEL_CACHE_ENTRIES);
         cache.truncate(keep);
-        kernel
+        Ok(kernel)
     })
 }
 
@@ -774,8 +815,9 @@ impl FftPolyphase {
 /// if the rates are equal).
 ///
 /// # Errors
-/// - [`crate::AudioSampleError::Parameter`] if the channel data cannot be read
-///   (never for well-formed audio).
+/// - [`crate::AudioSampleError::Parameter`] if the rate ratio is too extreme
+///   for a filter table (decimation by more than ~10^5 : 1), or if the channel
+///   data cannot be read (never for well-formed audio).
 ///
 /// # Examples
 /// ```
@@ -811,7 +853,7 @@ where
         KernelKind::Linear => resample_linear(&audio.as_f32(), target_sample_rate),
         KernelKind::Sinc(_) => {
             let data = channel_data_f64(audio)?;
-            let kernel = cached_kernel(in_sr, out_sr, quality);
+            let kernel = cached_kernel(in_sr, out_sr, quality)?;
             let n_in = data.first().map_or(0, Vec::len);
             if let Some(fft) = FftPolyphase::new(&kernel, n_in) {
                 let n_out = kernel.output_len(n_in as u64) as usize;
@@ -973,8 +1015,8 @@ impl<T: StandardSample> StreamingResampler<T> {
     /// `channels` channels of audio, at the given quality tier.
     ///
     /// # Errors
-    /// Currently infallible for valid (non-zero) rates and channel counts; the
-    /// `Result` is kept for API stability.
+    /// [`crate::AudioSampleError::Parameter`] if the rate ratio is too extreme
+    /// for a filter table (decimation by more than ~10^5 : 1).
     pub fn new(
         in_sample_rate: SampleRate,
         out_sample_rate: SampleRate,
@@ -982,11 +1024,7 @@ impl<T: StandardSample> StreamingResampler<T> {
         quality: ResamplingQuality,
     ) -> AudioSampleResult<Self> {
         let nbr_channels = channels.get() as usize;
-        let kernel = Arc::new(Kernel::new(
-            in_sample_rate.get(),
-            out_sample_rate.get(),
-            kernel_kind(quality, in_sample_rate.get(), out_sample_rate.get()),
-        ));
+        let kernel = cached_kernel(in_sample_rate.get(), out_sample_rate.get(), quality)?;
         Ok(Self {
             state: PolyphaseState::new(kernel, nbr_channels),
             channels: nbr_channels,
@@ -1470,7 +1508,7 @@ mod tests {
                 ResamplingQuality::Medium,
                 ResamplingQuality::High,
             ] {
-                let kernel = cached_kernel(in_sr, out_sr, quality);
+                let kernel = cached_kernel(in_sr, out_sr, quality).unwrap();
                 for n in [FFT_MIN_INPUT, 20011, 65537] {
                     let x: Vec<f64> = (0..n)
                         .map(|i| (i as f64 * 0.37).sin() + 0.3 * (i as f64 * 0.0123).cos())
@@ -1515,25 +1553,25 @@ mod tests {
                     .sum::<usize>()
             })
         };
-        let first = cached_kernel(44100, 22050, ResamplingQuality::High);
+        let first = cached_kernel(44100, 22050, ResamplingQuality::High).unwrap();
         for out_sr in 30000..30040 {
-            let _ = cached_kernel(44100, out_sr, ResamplingQuality::High);
+            let _ = cached_kernel(44100, out_sr, ResamplingQuality::High).unwrap();
             // Keep the first kernel recently used: it must survive.
             assert!(Arc::ptr_eq(
                 &first,
-                &cached_kernel(44100, 22050, ResamplingQuality::High)
+                &cached_kernel(44100, 22050, ResamplingQuality::High).unwrap()
             ));
             assert!(len() <= KERNEL_CACHE_ENTRIES);
-            assert!(len() == 1 || bytes() <= KERNEL_CACHE_BYTES);
+            assert!(bytes() <= KERNEL_CACHE_BYTES);
         }
         // An entry not used for a while is evicted and rebuilt.
-        let old = cached_kernel(44100, 30000, ResamplingQuality::High);
+        let old = cached_kernel(44100, 30000, ResamplingQuality::High).unwrap();
         for out_sr in 31000..31000 + KERNEL_CACHE_ENTRIES as u32 {
-            let _ = cached_kernel(44100, out_sr, ResamplingQuality::Fast);
+            let _ = cached_kernel(44100, out_sr, ResamplingQuality::Fast).unwrap();
         }
         assert!(!Arc::ptr_eq(
             &old,
-            &cached_kernel(44100, 30000, ResamplingQuality::High)
+            &cached_kernel(44100, 30000, ResamplingQuality::High).unwrap()
         ));
     }
 
@@ -1544,7 +1582,8 @@ mod tests {
             44100,
             44101,
             kernel_kind(ResamplingQuality::High, 44100, 44101),
-        );
+        )
+        .unwrap();
         assert!(!kernel.exact);
         let x = sine(44100, 3000.0, 44100.0, 0.2);
         let y = resample(
@@ -1556,6 +1595,66 @@ mod tests {
         let expected = sine(44101, 3000.0, 44101.0, 0.2);
         let snr = snr_db(&y.as_mono().unwrap().to_vec(), &expected, 2000..42000);
         assert!(snr > 130.0, "SNR {snr:.1} dB");
+    }
+
+    /// Regression: strongly decimating awkward ratios built a 4097-row table
+    /// of ~10^5 taps (48000 -> 101 Hz: 2.9 GB, 12 s, kept in the cache;
+    /// 192000 -> 101 Hz aborted on allocation). The interpolated table now has
+    /// `ceil(4096 · L / M)` rows, oversized kernels are not cached, and
+    /// impossible sizes are an error.
+    #[test]
+    fn test_steep_decimation_table_is_bounded() {
+        for (in_sr, out_sr) in [(48000u32, 101u32), (192_000, 101), (96000, 7919)] {
+            let kernel = Kernel::new(
+                in_sr,
+                out_sr,
+                kernel_kind(ResamplingQuality::High, in_sr, out_sr),
+            )
+            .unwrap();
+            assert!(
+                kernel.size_bytes() < 64 << 20,
+                "{in_sr} -> {out_sr}: {} bytes",
+                kernel.size_bytes()
+            );
+        }
+        // A band-limited input survives decimation (2 s of a 20 Hz tone,
+        // well inside the 50.5 Hz output Nyquist).
+        let in_sr = 48000u32;
+        let x = sine(2 * in_sr as usize, 20.0, f64::from(in_sr), 0.4);
+        let y = resample(
+            &mono(x, SampleRate::new(in_sr).unwrap()),
+            sample_rate!(101),
+            ResamplingQuality::High,
+        )
+        .unwrap();
+        let y = y.as_mono().unwrap().to_vec();
+        assert_eq!(y.len(), 202);
+        let expected = sine(202, 20.0, 101.0, 0.4);
+        // The filter spans ~4.6 s of input, so only the middle is free of
+        // edge effects; compare there.
+        let snr = snr_db(&y, &expected, 95..107);
+        assert!(snr > 120.0, "SNR {snr:.1} dB");
+        // Impossible ratios are an error, not an allocation failure.
+        let tiny = mono(vec![0.5; 16], SampleRate::new(4_000_000_000).unwrap());
+        assert!(resample(&tiny, sample_rate!(1), ResamplingQuality::High).is_err());
+        assert!(
+            StreamingResampler::<f64>::new(
+                SampleRate::new(4_000_000_000).unwrap(),
+                sample_rate!(1),
+                channels!(1),
+                ResamplingQuality::Medium,
+            )
+            .is_err()
+        );
+    }
+
+    /// A kernel larger than the cache budget is not retained.
+    #[test]
+    fn test_oversized_kernel_is_not_cached() {
+        // 192 kHz -> 8 Hz needs a ~72 MB table.
+        let k = cached_kernel(192_000, 8, ResamplingQuality::High).unwrap();
+        assert!(k.size_bytes() > KERNEL_CACHE_BYTES);
+        KERNEL_CACHE.with(|c| assert!(c.borrow().iter().all(|(_, e)| !Arc::ptr_eq(e, &k))));
     }
 
     fn sine_mono(n: usize, sample_rate: SampleRate) -> AudioSamples<'static, f32> {
