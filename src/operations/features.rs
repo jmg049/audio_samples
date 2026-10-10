@@ -216,20 +216,6 @@ fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
     }
 }
 
-/// Pads `x` by `pad` samples at both ends with `numpy.pad(mode)` semantics.
-fn pad_signal<F: AudioFloat>(x: &[F], pad: usize, mode: StftPadMode) -> Vec<F> {
-    let mut out = vec![F::zero(); x.len() + 2 * pad];
-    out[pad..pad + x.len()].copy_from_slice(x);
-    if mode != StftPadMode::Constant {
-        for p in (0..pad).chain(pad + x.len()..out.len()) {
-            if let Some(src) = pad_source_index(p as isize - pad as isize, x.len(), mode) {
-                out[p] = x[src];
-            }
-        }
-    }
-    out
-}
-
 /// Number of frames `librosa.util.frame` produces, or an error if the (padded)
 /// signal is shorter than one frame.
 fn frame_count(len: usize, frame_length: usize, hop: usize) -> AudioSampleResult<usize> {
@@ -1943,25 +1929,24 @@ fn zcr_rows<F: AudioFloat>(
     let hop = config.hop_length.get();
     let pad = if config.center { fl / 2 } else { 0 };
     let n_frames = frame_count(len + 2 * pad, fl, hop)?;
-    let padded: Vec<Vec<F>> = signal
-        .outer_iter()
-        .map(|row| {
-            let x = row.to_vec();
-            if pad > 0 {
-                pad_signal(&x, pad, StftPadMode::Edge)
-            } else {
-                x
-            }
-        })
-        .collect();
+    // The edge padding repeats x[0] and x[len - 1], so the padded frames
+    // contain no crossings inside the padding, and the samples of the padded
+    // signal the frames cover are the samples of x[..hi] (plus copies of its
+    // end samples).
     let covered = (n_frames - 1) * hop + fl;
+    let hi = len.min(covered - pad);
+    let signal = signal.as_standard_layout();
+    let rows: Vec<&[F]> = signal
+        .outer_iter()
+        .map(|row| row.to_slice().expect("rows of a standard-layout array"))
+        .collect();
     let threshold = match config.ref_magnitude {
         ZeroCrossingReference::None => F::of(config.threshold),
         ZeroCrossingReference::Value(v) => F::of(config.threshold * v),
         ZeroCrossingReference::Max => {
-            let max = padded
+            let max = rows
                 .iter()
-                .flat_map(|x| x[..covered].iter())
+                .flat_map(|x| x[..hi].iter())
                 .fold(F::neg_infinity(), |m, v| m.max(v.abs()));
             F::of(config.threshold) * max
         }
@@ -1973,21 +1958,52 @@ fn zcr_rows<F: AudioFloat>(
             v
         }
     };
+    let zero_pos = config.zero_pos;
+    let crossing = |prev: F, cur: F| -> bool {
+        let (x1, x0) = (clean(prev), clean(cur));
+        if zero_pos {
+            x0.is_sign_negative() != x1.is_sign_negative()
+        } else {
+            np_sign(x0) != np_sign(x1)
+        }
+    };
+    // Frame t covers the pairs (xp[i - 1], xp[i]) for i in t*hop + 1 ..
+    // t*hop + fl, i.e. the pairs (x[m - 1], x[m]) of the signal for m in
+    // clamp(t*hop + 1 - pad) .. clamp(t*hop + fl - pad). With D(j) the number
+    // of crossings among the pairs m < j, the frame count is
+    // D(end_t) - D(start_t); D is evaluated at the (sorted) frame bounds in
+    // one pass over the signal.
+    let clamp = |i: usize| i.saturating_sub(pad).min(len);
+    let mut bounds: Vec<usize> = Vec::with_capacity(2 * n_frames);
+    for t in 0..n_frames {
+        bounds.push(clamp(t * hop + 1));
+        bounds.push(clamp(t * hop + fl));
+    }
+    let mut sorted = bounds.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut d_at = vec![0_usize; sorted.len()];
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
-    for (c, xp) in padded.iter().enumerate() {
-        for t in 0..n_frames {
-            let frame = &xp[t * hop..t * hop + fl];
-            let mut count = usize::from(config.pad);
-            for w in frame.windows(2) {
-                let (x1, x0) = (clean(w[0]), clean(w[1]));
-                let crossing = if config.zero_pos {
-                    x0.is_sign_negative() != x1.is_sign_negative()
-                } else {
-                    let (a, b) = (np_sign(x0), np_sign(x1));
-                    a != b
-                };
-                count += usize::from(crossing);
+    for (c, x) in rows.iter().enumerate() {
+        let mut total = 0_usize;
+        let mut prev = 1_usize; // pairs start at m = 1
+        for (d, &j) in d_at.iter_mut().zip(&sorted) {
+            if j > prev {
+                total += x[prev - 1..j]
+                    .windows(2)
+                    .map(|w| usize::from(crossing(w[0], w[1])))
+                    .sum::<usize>();
+                prev = j;
             }
+            *d = total;
+        }
+        let d_of = |j: usize| {
+            d_at[sorted
+                .binary_search(&j)
+                .expect("bound is in the sorted list")]
+        };
+        for t in 0..n_frames {
+            let count = usize::from(config.pad) + d_of(bounds[2 * t + 1]) - d_of(bounds[2 * t]);
             out[[c, 0, t]] = F::of_usize(count) / F::of_usize(fl);
         }
     }
@@ -3544,6 +3560,73 @@ mod tests {
     use crate::sample_rate;
     use ndarray::{Array1, array, s};
 
+    /// librosa's zero_crossing_rate computed literally: edge-pad, frame,
+    /// count the crossings of every frame.
+    fn zcr_reference(x: &[f64], cfg: &ZeroCrossingRateConfig) -> Vec<f64> {
+        let fl = cfg.frame_length.get();
+        let hop = cfg.hop_length.get();
+        let pad = if cfg.center { fl / 2 } else { 0 };
+        let xp = crate::operations::spectrum::pad_signal(x, pad, StftPadMode::Edge);
+        let n_frames = 1 + (xp.len() - fl) / hop;
+        let covered = (n_frames - 1) * hop + fl;
+        let thr = match cfg.ref_magnitude {
+            ZeroCrossingReference::None => cfg.threshold,
+            ZeroCrossingReference::Value(v) => cfg.threshold * v,
+            ZeroCrossingReference::Max => {
+                cfg.threshold
+                    * xp[..covered]
+                        .iter()
+                        .fold(f64::NEG_INFINITY, |m, v| m.max(v.abs()))
+            }
+        };
+        let clean = |v: f64| if -thr <= v && v <= thr { 0.0 } else { v };
+        (0..n_frames)
+            .map(|t| {
+                let f = &xp[t * hop..t * hop + fl];
+                let mut n = usize::from(cfg.pad);
+                for w in f.windows(2) {
+                    let (a, b) = (clean(w[0]), clean(w[1]));
+                    n += usize::from(if cfg.zero_pos {
+                        a.is_sign_negative() != b.is_sign_negative()
+                    } else {
+                        np_sign(a) != np_sign(b)
+                    });
+                }
+                n as f64 / fl as f64
+            })
+            .collect()
+    }
+
+    #[test]
+    fn zcr_matches_the_framed_count() {
+        let mut x = noise(3000, 5);
+        x[..200].fill(0.0);
+        x[1000..1300].fill(0.0);
+        for (fl, hop) in [(2048, 512), (100, 30), (64, 64), (16, 50)] {
+            for center in [true, false] {
+                for (zero_pos, pad) in [(true, false), (false, true)] {
+                    for r in [
+                        ZeroCrossingReference::None,
+                        ZeroCrossingReference::Max,
+                        ZeroCrossingReference::Value(2.0),
+                    ] {
+                        let cfg = ZeroCrossingRateConfig::new()
+                            .with_frame_length(NonZeroUsize::new(fl).unwrap())
+                            .with_hop_length(NonZeroUsize::new(hop).unwrap())
+                            .with_center(center)
+                            .with_threshold(0.1)
+                            .with_ref_magnitude(r)
+                            .with_pad(pad)
+                            .with_zero_pos(zero_pos);
+                        let rows = Array2::from_shape_vec((1, x.len()), x.clone()).unwrap();
+                        let got = zcr_rows(rows.view(), &cfg).unwrap();
+                        let want = zcr_reference(&x, &cfg);
+                        assert_eq!(got.iter().copied().collect::<Vec<_>>(), want);
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn huge_max_filter_equals_one_period() {
         let s = Array3::from_shape_fn((1, 6, 4), |(_, k, t)| ((k * 7 + t * 3) % 13) as f64);
