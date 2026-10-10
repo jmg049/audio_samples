@@ -273,6 +273,73 @@ where
     }
 }
 
+/// The raw autocorrelation sums `r[k] = sum_j x[j] x[j + k]` for
+/// `k = 0..=max_lag` (`max_lag < x.len()`), computed in `f64`.
+///
+/// Only `max_lag + 1` lags are needed, so the signal is processed in blocks
+/// (overlap-save): block `b` of `B` samples is correlated with the `B +
+/// max_lag` samples starting at the same position, through real FFTs of a
+/// fixed size `N >= B + max_lag` (no circular wrap-around for those lags),
+/// and the cross spectra of all blocks are summed before one inverse
+/// transform. The memory is a few `N`-sized buffers, independent of the
+/// signal length, and the transforms are shorter than a whole-signal
+/// transform of size `>= 2 len - 1`.
+#[cfg(feature = "transforms")]
+fn autocorrelation_sums<T: StandardSample>(x: &[T], max_lag: usize) -> Option<Vec<f64>> {
+    use crate::AudioFloat;
+    let n = x.len();
+    // Block transform size: four times the lag span (at least 1024), or a
+    // single block covering the whole signal when that is shorter.
+    let n_fft = (4 * (max_lag + 1))
+        .max(1024)
+        .next_power_of_two()
+        .min((n + max_lag).next_power_of_two());
+    let block = n_fft - max_lag;
+    let (fwd, inv) =
+        f64::with_real_fft_planner(|p| (p.plan_fft_forward(n_fft), p.plan_fft_inverse(n_fft)));
+    let mut a_in = vec![0.0_f64; n_fft];
+    let mut s_in = vec![0.0_f64; n_fft];
+    let mut a_spec = fwd.make_output_vec();
+    let mut s_spec = fwd.make_output_vec();
+    let mut acc = vec![Complex::new(0.0_f64, 0.0); n_fft / 2 + 1];
+    let mut scratch = fwd.make_scratch_vec();
+    for start in (0..n).step_by(block) {
+        let a_len = block.min(n - start);
+        let s_len = n_fft.min(n - start);
+        for (d, &v) in a_in.iter_mut().zip(&x[start..start + a_len]) {
+            *d = v.cast_into();
+        }
+        a_in[a_len..].fill(0.0);
+        for (d, &v) in s_in.iter_mut().zip(&x[start..start + s_len]) {
+            *d = v.cast_into();
+        }
+        s_in[s_len..].fill(0.0);
+        fwd.process_with_scratch(&mut a_in, &mut a_spec, &mut scratch)
+            .ok()?;
+        fwd.process_with_scratch(&mut s_in, &mut s_spec, &mut scratch)
+            .ok()?;
+        for ((c, a), s) in acc.iter_mut().zip(&a_spec).zip(&s_spec) {
+            *c += a.conj() * s;
+        }
+    }
+    // The imaginary parts of the DC and Nyquist bins are zero in exact
+    // arithmetic; the inverse real FFT requires them to be zero.
+    acc[0].im = 0.0;
+    if let Some(last) = acc.last_mut() {
+        last.im = 0.0;
+    }
+    let mut out = vec![0.0_f64; n_fft];
+    let mut iscratch = inv.make_scratch_vec();
+    inv.process_with_scratch(&mut acc, &mut out, &mut iscratch)
+        .ok()?;
+    let scale = 1.0 / n_fft as f64;
+    out.truncate(max_lag + 1);
+    for v in &mut out {
+        *v *= scale;
+    }
+    Some(out)
+}
+
 impl<T> AudioStatistics for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -910,65 +977,27 @@ where
     #[cfg(feature = "transforms")]
     #[inline]
     fn autocorrelation(&self, max_lag: NonZeroUsize) -> Option<NonEmptyVec<f64>> {
-        let max_lag = max_lag.get();
-
-        // Extract signal as Vec<f64> - mono uses the array directly,
-        // multi-channel uses the first channel (row 0).
-        let (signal, n) = match &self.data() {
-            AudioData::Mono(arr) => {
-                let n = arr.len().get();
-                let sig: Vec<f64> = arr.iter().map(|&x| x.cast_into()).collect();
-                (sig, n)
-            }
-            AudioData::Multi(arr) => {
-                let first_channel = arr.row(0);
-                let n = first_channel.len();
-                let sig: Vec<f64> = first_channel.iter().map(|&x| x.cast_into()).collect();
-                (sig, n)
-            }
+        let row = match &self.data() {
+            AudioData::Mono(arr) => arr.as_view(),
+            AudioData::Multi(arr) => arr.row(0),
         };
+        let n = row.len();
+        let effective_max_lag = max_lag.get().min(n - 1);
+        let owned;
+        let x: &[T] = if let Some(s) = row.as_slice() {
+            s
+        } else {
+            owned = row.to_vec();
+            &owned
+        };
+        let raw = autocorrelation_sums(x, effective_max_lag)?;
 
-        let effective_max_lag = max_lag.min(n - 1);
-
-        // Zero-pad to next power of two of (2n - 1) to avoid circular correlation
-        let fft_size = (2 * n - 1).next_power_of_two();
-        let mut padded: Vec<f64> = Vec::with_capacity(fft_size);
-        padded.extend_from_slice(&signal);
-        padded.resize(fft_size, 0.0);
-
-        // safety: padded is non-empty (fft_size >= 1)
-        let padded_slice = unsafe { NonEmptySlice::new_unchecked(&padded[..]) };
-        let fft_size_nz =
-            // safety: fft_size is a next_power_of_two of a value >= 1
-            unsafe { NonZeroUsize::new_unchecked(fft_size) };
-
-        // Inverse real FFT → NonEmptyVec<f64> of length fft_size
-        let raw = with_fft_planner(|planner| {
-            // Forward FFT → Array1<Complex<f64>> of length fft_size/2 + 1
-            let spectrum = planner.fft(padded_slice, fft_size_nz).ok()?;
-
-            // Power spectrum: |X[k]|² as complex values for irfft
-            let power: Vec<Complex<f64>> = spectrum
-                .iter()
-                .map(|c| Complex {
-                    re: c.norm_sqr(),
-                    im: 0.0,
-                })
-                .collect();
-            // safety: power has the same length as spectrum (fft_size/2 + 1 >= 1)
-            let power_slice = unsafe { NonEmptySlice::new_unchecked(&power[..]) };
-
-            planner.irfft(power_slice, fft_size_nz).ok()
-        })?;
-
-        // Unbiased normalisation by the overlap count (n - lag). The inverse FFT
-        // of the planner already applies the 1/fft_size scaling, so `raw[lag]` is
-        // the plain sum of products.
-        let mut correlations: Vec<f64> = Vec::with_capacity(effective_max_lag + 1);
-        for lag in 0..=effective_max_lag {
-            let overlap_count = (n - lag) as f64;
-            correlations.push(raw[lag] / overlap_count);
-        }
+        // Unbiased normalisation by the overlap count (n - lag).
+        let correlations: Vec<f64> = raw
+            .iter()
+            .enumerate()
+            .map(|(lag, &r)| r / (n - lag) as f64)
+            .collect();
 
         // safety: correlations has effective_max_lag + 1 >= 1 elements
         Some(unsafe { NonEmptyVec::new_unchecked(correlations) })
@@ -1977,7 +2006,14 @@ mod tests {
     #[test]
     #[cfg(feature = "transforms")]
     fn autocorrelation_matches_direct_sum() {
-        for n in [1000usize, 4096, 777] {
+        for (n, max_lag) in [
+            (1000usize, 300),
+            (4096, 300),
+            (777, 300),
+            (20_000, 300),
+            (50, 49),
+            (3000, 2999),
+        ] {
             let x: Vec<f64> = (0..n)
                 .map(|i| {
                     let t = i as f64;
@@ -1986,7 +2022,6 @@ mod tests {
                 .collect();
             let audio =
                 AudioSamples::new_mono(Array1::from(x.clone()), sample_rate!(22050)).unwrap();
-            let max_lag = 300;
             let r = audio
                 .autocorrelation(NonZeroUsize::new(max_lag).unwrap())
                 .unwrap();
