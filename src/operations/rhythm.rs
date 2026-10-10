@@ -804,6 +804,13 @@ impl Default for PeakPickConfig {
 }
 
 impl PeakPickConfig {
+    /// Returns the default configuration (same as [`Default`]): the
+    /// [`for_onsets`](Self::for_onsets) parameters at 22050 Hz with a hop of 512.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// The parameters `librosa.onset.onset_detect` uses for a frame rate of
     /// `sample_rate / hop_length`: `pre_max = 0.03 sr // hop`, `post_max = 1`,
     /// `pre_avg = 0.1 sr // hop`, `post_avg = 0.1 sr // hop + 1`, `wait = 0.03 sr // hop`,
@@ -4088,5 +4095,6 @@ mod tests {
             // At most one peak with an unbounded wait.
             assert!(peak_pick(&x, &huge_wait).unwrap().len() <= 1, "{method:?}");
         }
+        assert_eq!(PeakPickConfig::new(), PeakPickConfig::default());
     }
 }
