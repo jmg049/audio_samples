@@ -1241,7 +1241,7 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 ///
 /// # Errors
 ///
-/// * [`AudioSampleError::NoteParse`](crate::AudioSampleError::NoteParse), with a
+/// * [`AudioSampleError::NoteParse`], with a
 ///   span pointing at the offending part of the input, if the text does not follow
 ///   the grammar (unknown letter, unknown accidental, missing or malformed octave,
 ///   malformed cents offset).

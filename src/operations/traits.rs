@@ -2009,7 +2009,7 @@ where
 
     /// Computes the Short-Time Fourier Transform (STFT) of a mono signal.
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::stft_matrix`].
     ///
     /// Computes X\[k, m\] = Σ_n x_p\[n + mH\]·w\[n\]·e^{−j2πkn/N} (N = `n_fft`,
     /// H = `hop_size`), an unnormalised one-sided DFT of each windowed frame
@@ -2052,7 +2052,7 @@ where
 
     /// Reconstructs a time-domain signal from an [`StftResult`].
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::istft_matrix`](crate::operations::spectrum::AudioSpectrum::istft_matrix).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::istft_matrix`].
     ///
     /// Synthesis is windowed overlap-add normalised by Σ_m w²[n − mH] (the
     /// least-squares inverse STFT), using the window and hop stored in the
@@ -2340,7 +2340,7 @@ where
 
     /// Computes a mel-scaled spectrogram.
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::melspectrogram`](crate::operations::spectrum::AudioSpectrum::melspectrogram).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::melspectrogram`].
     ///
     /// The mel scale approximates human pitch perception by compressing
     /// high frequencies relative to low ones. Bands use the **Slaney** mel scale
@@ -2489,7 +2489,7 @@ where
 
     /// Computes Mel-Frequency Cepstral Coefficients (MFCCs).
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::mfcc_frames`](crate::operations::spectrum::AudioSpectrum::mfcc_frames).
+    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::mfcc_frames`].
     ///
     /// MFCCs are a compact spectral representation widely used in speech
     /// recognition and audio classification. The pipeline is: power mel
@@ -3043,7 +3043,7 @@ where
 ///
 /// For librosa-compatible frame-wise pitch tracks (`librosa.yin`, `librosa.pyin`:
 /// centred frames, multichannel, voicing probabilities) see
-/// [`AudioPitchTracking`](crate::operations::pitch_tracking::AudioPitchTracking).
+/// [`AudioPitchTracking`].
 #[cfg(feature = "pitch-analysis")]
 pub trait AudioPitchAnalysis: AudioTypeConversion
 where
