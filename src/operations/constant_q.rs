@@ -2423,14 +2423,14 @@ impl TonnetzConfig {
 /// M. Müller, F. Kurth and M. Clausen, "Audio matching via chroma-based statistical
 /// features," ISMIR 2005; librosa `feature.chroma_cens`.
 #[cfg(feature = "feature-extraction")]
-pub fn chroma_cens_from_chroma<F: AudioFloat>(
-    chroma: &Array3<F>,
+pub fn chroma_cens_from_chroma<F: AudioFloat, S: ndarray::Data<Elem = F>>(
+    chroma: &ndarray::ArrayBase<S, ndarray::Ix3>,
     norm: Option<f64>,
     win_len_smooth: Option<NonZeroUsize>,
     smoothing_window: &Window,
 ) -> AudioSampleResult<Array3<F>> {
     validate_norm("norm", norm)?;
-    let mut x = chroma.clone();
+    let mut x = chroma.to_owned();
     normalize_features(&mut x, Some(1.0))?;
     let steps = [0.4, 0.2, 0.1, 0.05].map(F::of);
     let quarter = F::of(0.25);
@@ -2506,9 +2506,11 @@ pub fn chroma_cens_from_chroma<F: AudioFloat>(
 /// C. Harte, M. Sandler and M. Gasser, "Detecting harmonic change in musical
 /// audio," ACM AMCMM 2006; librosa `feature.tonnetz`.
 #[cfg(feature = "feature-extraction")]
-pub fn tonnetz_from_chroma<F: AudioFloat>(chroma: &Array3<F>) -> AudioSampleResult<Array3<F>> {
+pub fn tonnetz_from_chroma<F: AudioFloat, S: ndarray::Data<Elem = F>>(
+    chroma: &ndarray::ArrayBase<S, ndarray::Ix3>,
+) -> AudioSampleResult<Array3<F>> {
     let n_chroma = chroma.dim().1;
-    let mut x = chroma.clone();
+    let mut x = chroma.to_owned();
     normalize_features(&mut x, Some(1.0))?;
     let scale = [
         7.0 / 6.0,
