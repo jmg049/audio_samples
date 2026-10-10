@@ -175,7 +175,7 @@ fn main() {
     let spectrum = |f: f64, w: &non_empty_slice::NonEmptySlice<f64>| -> Vec<f64> {
         let tone = sine_wave::<f64>(f, dur, sample_rate!(16000), 1.0);
         assert_eq!(tone.samples_per_channel().get(), n);
-        tone.apply_window(w)
+        tone.apply_window_f64(w)
             .expect("window")
             .rfft(nz(n))
             .expect("rfft")
@@ -289,7 +289,7 @@ fn main() {
         let len = v.len();
         let w = make_window::<f64>(WindowType::Hanning, nz(len));
         let mag = mono(v)
-            .apply_window(&w)
+            .apply_window_f64(&w)
             .expect("window")
             .rfft(nz(n_fft))
             .expect("rfft")

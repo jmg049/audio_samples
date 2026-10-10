@@ -417,6 +417,10 @@ name = "channel_pipeline"
 required-features = ["channels", "processing", "editing"]
 
 [[test]]
+name = "integer_round_trip"
+required-features = ["processing", "channels"]
+
+[[test]]
 name = "filter_reference"
 required-features = ["iir-filtering", "parametric-eq", "processing", "channels"]
 

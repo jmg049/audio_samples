@@ -52,6 +52,13 @@
 //! assert_eq!(audio.sample_rate().get(), 44100);
 //! ```
 
+// The `explainable` attribute (feature `educational`) generates a chain
+// wrapper that calls every `AudioProcessing` method, including the deprecated
+// `apply_window` / `apply_window_in_place`. The generated code is emitted into
+// this module and cannot carry its own attribute, so the deprecation lint is
+// allowed here for that feature only.
+#![cfg_attr(feature = "educational", allow(deprecated))]
+
 #[cfg(feature = "envelopes")]
 use crate::{NdResult, operations::dynamic_range::EnvelopeFollower};
 
@@ -974,9 +981,11 @@ where
     /// MinMax and Peak evaluate the map in `f64` and round back to the sample
     /// type, so they work for integer audio (Peak uses the normalised
     /// `[-1, 1]` scale of the sample type, MinMax the raw sample values).
-    /// Mean, Median and ZScore work on raw sample values and truncate toward
-    /// zero when written back to an integer type; ZScore output (values of a
-    /// few units) is only meaningful for float sample types.
+    /// Mean and Median work on raw sample values; for integer types the result
+    /// is rounded to nearest (half away from zero) and saturated to the type's
+    /// range. ZScore output (dimensionless values of a few units) cannot be
+    /// stored in an integer type, so ZScore returns an error for integer
+    /// sample types; convert to `f32` or `f64` first.
     ///
     /// # Arguments
     /// - `config` - Normalization configuration. Use the associated constructors
@@ -985,6 +994,8 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `min >= max` (MinMax), or if
     ///   the input is multi-channel (Median).
+    /// - [`crate::AudioSampleError::Unsupported`] for ZScore with an integer
+    ///   sample type (`u8`, `i16`, `I24`, `i32`).
     ///
     /// # Panics
     /// Panics if the configuration fields required by the selected method are
@@ -1020,6 +1031,8 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `min >= max` (MinMax), or if
     ///   the input is multi-channel (Median).
+    /// - [`crate::AudioSampleError::Unsupported`] for ZScore with an integer
+    ///   sample type (`u8`, `i16`, `I24`, `i32`).
     ///
     /// # Examples
     /// ```
@@ -1104,11 +1117,16 @@ where
         out
     }
 
-    /// Applies a windowing function to the audio samples.
+    /// Multiplies each sample by a window coefficient given in the sample type.
     ///
-    /// Multiplies each sample by the corresponding window coefficient
-    /// element-wise. Windowing is commonly used before FFT operations to
-    /// reduce spectral leakage. Applied independently to each channel.
+    /// Deprecated in favour of
+    /// [`apply_window_f64_in_place`](Self::apply_window_f64_in_place). The
+    /// window has the sample type and the product is computed in the sample
+    /// type, so for integer types the only usable coefficients are `0` and
+    /// `1`: a fractional coefficient cannot be represented, and a window
+    /// scaled to the integer range overflows. For `f32` and `f64` audio the
+    /// behaviour is unchanged from 2.0, and `apply_window_f64_in_place` with
+    /// the same coefficients gives the same result.
     ///
     /// # Arguments
     /// - `window` - Window coefficients. Length must equal the number of
@@ -1117,29 +1135,21 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the window length does not
     ///   match the audio length.
-    ///
-    /// # Examples
-    /// ```
-    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
-    /// use ndarray::array;
-    /// use non_empty_slice::NonEmptySlice;
-    ///
-    /// let data = array![1.0f32, 1.0, 1.0, 1.0];
-    /// let window = [1.0f32, 0.5, 0.5, 1.0];
-    /// let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-    /// audio.apply_window_in_place(NonEmptySlice::new(&window).unwrap()).unwrap();
-    /// assert_eq!(audio[0], 1.0);
-    /// assert_eq!(audio[1], 0.5);
-    /// ```
+    #[deprecated(
+        since = "2.1.0",
+        note = "integer sample types cannot hold fractional window coefficients; use apply_window_f64_in_place"
+    )]
     fn apply_window_in_place(
         &mut self,
         window: &NonEmptySlice<Self::Sample>,
     ) -> AudioSampleResult<()>;
 
-    /// Applies a windowing function, returning a new windowed copy and leaving
-    /// `self` unchanged.
+    /// Multiplies each sample by a window coefficient given in the sample
+    /// type, returning a new copy.
     ///
-    /// Non-mutating twin of [`apply_window_in_place`](Self::apply_window_in_place).
+    /// Deprecated in favour of [`apply_window_f64`](Self::apply_window_f64);
+    /// see [`apply_window_in_place`](Self::apply_window_in_place) for the
+    /// reason.
     ///
     /// # Arguments
     /// - `window` - Window coefficients. Length must equal the number of
@@ -1151,6 +1161,85 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the window length does not
     ///   match the audio length.
+    #[deprecated(
+        since = "2.1.0",
+        note = "integer sample types cannot hold fractional window coefficients; use apply_window_f64"
+    )]
+    #[inline]
+    fn apply_window(&self, window: &NonEmptySlice<Self::Sample>) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        #[allow(deprecated)] // the deprecated twin delegates to the deprecated primitive
+        out.apply_window_in_place(window)?;
+        Ok(out)
+    }
+
+    /// Applies a window function with `f64` coefficients, in place.
+    ///
+    /// Computes `x'[n] = w[n] · x[n]` for every channel, with the same window
+    /// for each channel. Windowing is commonly used before a DFT to reduce
+    /// spectral leakage. Each sample is converted to `f64` with the
+    /// audio-aware conversion (integer samples on the normalised `[-1, 1]`
+    /// scale), multiplied by its coefficient, and converted back: integer
+    /// results are rounded to nearest and saturated at the type's range, and
+    /// float results are rounded to the sample type. The sample type of the
+    /// audio is preserved (`i16` in, `i16` out).
+    ///
+    /// # Arguments
+    /// - `window` - Window coefficients, one per sample. Length must equal the
+    ///   number of samples per channel. Any finite values are accepted;
+    ///   coefficients above 1 amplify.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the window length does not
+    ///   match the audio length.
+    /// - [`crate::AudioSampleError::Unsupported`] from the default
+    ///   implementation, which exists only so that implementors outside this
+    ///   crate keep compiling; [`AudioSamples`](crate::AudioSamples) overrides
+    ///   it.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptySlice;
+    ///
+    /// // i16 audio, a window with fractional coefficients.
+    /// let mut audio = AudioSamples::new_mono(array![16384i16, 16384, 16384, 16384], sample_rate!(8000)).unwrap();
+    /// let window = [1.0, 0.5, 0.25, 0.0];
+    /// audio.apply_window_f64_in_place(NonEmptySlice::new(&window).unwrap()).unwrap();
+    /// assert_eq!(audio[1], 8192);
+    /// assert_eq!(audio[2], 4096);
+    /// assert_eq!(audio[3], 0);
+    /// ```
+    #[inline]
+    fn apply_window_f64_in_place(&mut self, window: &NonEmptySlice<f64>) -> AudioSampleResult<()> {
+        let _ = window;
+        Err(crate::AudioSampleError::unsupported(
+            "apply_window_f64_in_place",
+            "this AudioProcessing implementation does not provide apply_window_f64_in_place",
+        ))
+    }
+
+    /// Applies a window function with `f64` coefficients, returning a new
+    /// windowed copy and leaving `self` unchanged.
+    ///
+    /// Non-mutating twin of
+    /// [`apply_window_f64_in_place`](Self::apply_window_f64_in_place); see that
+    /// method for the arithmetic and the handling of integer sample types.
+    ///
+    /// # Arguments
+    /// - `window` - Window coefficients, one per sample. Length must equal the
+    ///   number of samples per channel.
+    ///
+    /// # Returns
+    /// The windowed audio, in the same sample type as `self`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Layout`] if the window length does not
+    ///   match the audio length.
     ///
     /// # Examples
     /// ```
@@ -1159,20 +1248,20 @@ where
     /// use non_empty_slice::NonEmptySlice;
     ///
     /// let data = array![1.0f32, 1.0, 1.0, 1.0];
-    /// let window = [1.0f32, 0.5, 0.5, 1.0];
+    /// let window = [1.0, 0.5, 0.5, 1.0];
     /// let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap()
-    ///     .apply_window(NonEmptySlice::new(&window).unwrap())
+    ///     .apply_window_f64(NonEmptySlice::new(&window).unwrap())
     ///     .unwrap();
     /// assert_eq!(audio[0], 1.0);
     /// assert_eq!(audio[1], 0.5);
     /// ```
     #[inline]
-    fn apply_window(&self, window: &NonEmptySlice<Self::Sample>) -> AudioSampleResult<Self>
+    fn apply_window_f64(&self, window: &NonEmptySlice<f64>) -> AudioSampleResult<Self>
     where
         Self: Sized + Clone,
     {
         let mut out = self.clone();
-        out.apply_window_in_place(window)?;
+        out.apply_window_f64_in_place(window)?;
         Ok(out)
     }
 
@@ -1196,7 +1285,13 @@ where
     ///
     /// Computation is carried out in `f64`. For integer sample types both the
     /// samples and the coefficients are interpreted on the normalised
-    /// `[-1, 1]` scale (so an `i16` coefficient of `16384` means ≈ 0.5).
+    /// `[-1, 1]` scale (so an `i16` coefficient of `16384` means ≈ 0.5), and
+    /// the output is rounded to nearest and saturated. Integer taps are
+    /// therefore limited to `[-1, 1]` and to the resolution of the sample
+    /// type (`1/32768` for `i16`). For taps with a magnitude above 1 (for
+    /// example `[1.5, -0.5]`) or at full `f64` precision, use
+    /// [`apply_filter_f64_in_place`](Self::apply_filter_f64_in_place), which
+    /// takes the taps as `f64` for every sample type.
     ///
     /// # Arguments
     /// - `filter_coeffs` - FIR filter coefficients. A single-element slice
@@ -1233,7 +1328,9 @@ where
     ///
     /// Non-mutating twin of [`apply_filter_in_place`](Self::apply_filter_in_place).
     /// The returned audio is shorter than the original by `filter_coeffs.len() - 1`
-    /// samples.
+    /// samples. For integer sample types the taps are limited to `[-1, 1]`
+    /// and the sample type's resolution; [`apply_filter_f64`](Self::apply_filter_f64)
+    /// takes `f64` taps.
     ///
     /// # Arguments
     /// - `filter_coeffs` - FIR filter coefficients. A single-element slice
@@ -1267,6 +1364,96 @@ where
     {
         let mut out = self.clone();
         out.apply_filter_in_place(filter_coeffs)?;
+        Ok(out)
+    }
+
+    /// Applies an FIR filter with `f64` taps by linear convolution, in place.
+    ///
+    /// Same convolution as [`apply_filter_in_place`](Self::apply_filter_in_place):
+    /// the valid part `y[i] = Σ_j h[j] · x[i + M - 1 - j]`, of length
+    /// `N − M + 1` (`numpy.convolve(x, h, mode='valid')`), using FFT
+    /// convolution for 160 taps or more when the `transforms` feature is
+    /// enabled. The taps are `f64` for every sample type, so integer audio can
+    /// use taps of any magnitude at full precision. Samples are converted to
+    /// `f64` with the audio-aware conversion (integer samples on the
+    /// normalised `[-1, 1]` scale); the result is converted back to the sample
+    /// type, rounded to nearest and saturated for integer types. For `f32`
+    /// and `f64` audio the result equals `apply_filter_in_place` with the
+    /// same taps.
+    ///
+    /// # Arguments
+    /// - `filter_coeffs` - FIR filter taps `h[0..M]`. `[1.0]` leaves the
+    ///   signal unchanged.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the audio is shorter than
+    ///   the filter.
+    /// - [`crate::AudioSampleError::Unsupported`] from the default
+    ///   implementation, which exists only so that implementors outside this
+    ///   crate keep compiling; [`AudioSamples`](crate::AudioSamples) overrides
+    ///   it.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptySlice;
+    ///
+    /// // i16 audio with a tap above 1: y[n] = 1.5·x[n] − 0.5·x[n−1].
+    /// let mut audio = AudioSamples::new_mono(array![1000i16, 2000, 3000], sample_rate!(8000)).unwrap();
+    /// audio.apply_filter_f64_in_place(NonEmptySlice::new(&[1.5, -0.5]).unwrap()).unwrap();
+    /// assert_eq!(audio.samples_per_channel().get(), 2);
+    /// assert_eq!(audio[0], 2500); // 1.5·2000 − 0.5·1000
+    /// assert_eq!(audio[1], 3500); // 1.5·3000 − 0.5·2000
+    /// ```
+    #[inline]
+    fn apply_filter_f64_in_place(
+        &mut self,
+        filter_coeffs: &NonEmptySlice<f64>,
+    ) -> AudioSampleResult<()> {
+        let _ = filter_coeffs;
+        Err(crate::AudioSampleError::unsupported(
+            "apply_filter_f64_in_place",
+            "this AudioProcessing implementation does not provide apply_filter_f64_in_place",
+        ))
+    }
+
+    /// Applies an FIR filter with `f64` taps, returning a new filtered copy
+    /// and leaving `self` unchanged.
+    ///
+    /// Non-mutating twin of
+    /// [`apply_filter_f64_in_place`](Self::apply_filter_f64_in_place). The
+    /// returned audio is shorter than the original by `filter_coeffs.len() - 1`
+    /// samples and has the same sample type.
+    ///
+    /// # Arguments
+    /// - `filter_coeffs` - FIR filter taps `h[0..M]`.
+    ///
+    /// # Returns
+    /// The filtered audio samples, with length reduced by `filter_coeffs.len() - 1`.
+    ///
+    /// # Errors
+    /// - [`crate::AudioSampleError::Parameter`] if the audio is shorter than
+    ///   the filter.
+    ///
+    /// # Examples
+    /// ```
+    /// use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
+    /// use ndarray::array;
+    /// use non_empty_slice::NonEmptySlice;
+    ///
+    /// let x = AudioSamples::new_mono(array![1.0f64, 2.0, 3.0, 4.0, 5.0], sample_rate!(8000)).unwrap();
+    /// let y = x.apply_filter_f64(NonEmptySlice::new(&[1.0, 0.5]).unwrap()).unwrap();
+    /// assert_eq!(y.samples_per_channel().get(), 4);
+    /// assert_eq!(y[0], 2.5); // 1.0·2 + 0.5·1
+    /// ```
+    #[inline]
+    fn apply_filter_f64(&self, filter_coeffs: &NonEmptySlice<f64>) -> AudioSampleResult<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let mut out = self.clone();
+        out.apply_filter_f64_in_place(filter_coeffs)?;
         Ok(out)
     }
 
@@ -1645,6 +1832,9 @@ where
     /// recording or processing. Only the 0 Hz bin of a DFT over the whole
     /// buffer changes; for a drifting offset use
     /// [`high_pass_filter`](Self::high_pass_filter) instead.
+    ///
+    /// The subtraction is done in `f64` on the raw sample values; for integer
+    /// sample types the result is rounded to nearest and saturated.
     ///
     /// # Errors
     /// Returns an error if the audio data layout is invalid or if mean computation fails.
@@ -5516,6 +5706,11 @@ where
     ///   - `Center` - surround center channel (≥ 6 ch), or average
     ///     of left and right for stereo.
     ///
+    /// For integer sample types `Average` and `Center` average the raw
+    /// sample values and `Weighted` sums on the normalised `[-1, 1]` scale,
+    /// both in `f64`; the result is rounded to nearest and saturated at the
+    /// type's range.
+    ///
     /// # Returns
     /// An owned mono [`AudioSamples`] at the same sample rate.
     ///
@@ -5558,7 +5753,8 @@ where
     /// - `Pan(value)` - applies equal-power panning to mono input.
     ///   The value is clamped to \[-1, 1\]: -1 is hard left, 0 is
     ///   centre, +1 is hard right.  Multi-channel input is returned
-    ///   unchanged.
+    ///   unchanged. For integer sample types the gains are applied on the
+    ///   normalised `[-1, 1]` scale and the result is rounded and saturated.
     /// - `Left` - routes mono input to the left channel and fills the
     ///   right with silence (`[m, 0]`). For multi-channel input, extracts
     ///   channel 0 as a mono signal (as in 2.0; prefer
@@ -5776,9 +5972,12 @@ where
     /// the left channel and doubles the right.  The total power changes
     /// with `p` (it is not a constant-power pan law); for a −3 dB-centre
     /// equal-power pan of a mono source use
-    /// `to_stereo(StereoConversionMethod::Pan(p))`.  Gains are applied to
-    /// the raw sample values and truncated back for integer types, so
-    /// this is not meaningful for `u8` (offset-binary) audio.
+    /// `to_stereo(StereoConversionMethod::Pan(p))`.
+    ///
+    /// For integer sample types the gains are applied on the normalised
+    /// `[-1, 1]` scale in `f64`, and the result is rounded to nearest and
+    /// saturated at the type's range (for `u8` the gain scales the distance
+    /// from the mid-scale value 128).
     ///
     /// # Arguments
     /// - `pan_value` - Panning position in the range \[-1, 1\].
@@ -5837,6 +6036,11 @@ where
     /// channel by `1 + balance`, after clamping to \[-1, 1\].  The
     /// favoured channel is boosted by up to +6 dB (gain 2), so this is
     /// not a constant-power law.
+    ///
+    /// For integer sample types the gains are applied on the normalised
+    /// `[-1, 1]` scale in `f64`, and the result is rounded to nearest and
+    /// saturated at the type's range (for `u8` the gain scales the distance
+    /// from the mid-scale value 128).
     ///
     /// # Arguments
     /// - `balance` - Balance position in the range \[-1, 1\].

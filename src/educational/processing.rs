@@ -61,6 +61,18 @@ fn in_place(text: String) -> String {
     }
 }
 
+/// Renames the `[operation: …]` header of `text` from `from` to `to`, so the
+/// `f64`-coefficient variants share the explanation of their sample-typed
+/// counterparts while the rendered call chain names the method that was
+/// called.
+fn rename_op(text: String, from: &str, to: &str) -> String {
+    let old = format!("[operation: {from}]");
+    match text.strip_prefix(&old) {
+        Some(rest) => format!("[operation: {to}]{rest}"),
+        None => text,
+    }
+}
+
 /// All samples of all channels, as raw `f64` values (no rescaling of
 /// integer types), in the buffer's logical order.
 fn raw_values<T: StandardSample>(a: &AudioSamples<'static, T>) -> Vec<f64> {
@@ -457,6 +469,22 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
         )
     }
 
+    fn explain_text_apply_window_f64(before: &Self, after: &Self) -> String {
+        rename_op(
+            Self::explain_text_apply_window(before, after),
+            "Apply Window",
+            "Apply Window (f64)",
+        )
+    }
+
+    fn explain_text_apply_filter_f64(before: &Self, after: &Self) -> String {
+        rename_op(
+            Self::explain_text_apply_filter(before, after),
+            "Apply FIR Filter",
+            "Apply FIR Filter (f64)",
+        )
+    }
+
     fn explain_text_mu_compress(before: &Self, after: &Self) -> String {
         let latex = r"y = \mathrm{sgn}(x) \frac{\ln(1 + \mu |x|)}{\ln(1 + \mu)}";
         let caveat = match mu_law_probe() {
@@ -629,6 +657,14 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
 
     fn explain_text_apply_filter_in_place(before: &Self, after: &Self) -> String {
         in_place(Self::explain_text_apply_filter(before, after))
+    }
+
+    fn explain_text_apply_window_f64_in_place(before: &Self, after: &Self) -> String {
+        in_place(Self::explain_text_apply_window_f64(before, after))
+    }
+
+    fn explain_text_apply_filter_f64_in_place(before: &Self, after: &Self) -> String {
+        in_place(Self::explain_text_apply_filter_f64(before, after))
     }
 
     fn explain_text_mu_compress_in_place(before: &Self, after: &Self) -> String {

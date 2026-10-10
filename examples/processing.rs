@@ -59,7 +59,7 @@ pub fn main() -> AudioSampleResult<()> {
 
     let num_samples = audio.samples_per_channel().get() as usize;
     let window = spectrograms::hanning_window(core::num::NonZeroUsize::new(num_samples).unwrap());
-    let audio = audio.apply_window(&window)?;
+    let audio = audio.apply_window_f64(&window)?;
     println!("Windowed: peak={:.4}  rms={:.4}", audio.peak(), audio.rms());
 
     // FIR filtering (moving average).

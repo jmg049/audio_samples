@@ -28,7 +28,7 @@
 
 use crate::{
     AudioChannelOps, AudioData, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
-    CastFrom, LayoutError, ParameterError, SampleType, StandardSample,
+    ConvertTo, LayoutError, ParameterError, SampleType, StandardSample,
     operations::types::{MonoConversionMethod, StereoConversionMethod},
     repr::MonoData,
 };
@@ -36,6 +36,29 @@ use ndarray::{Array1, Array2, Axis};
 
 use non_empty_slice::NonEmptySlice;
 use num_traits::FloatConst;
+
+use crate::traits::raw_f64_to_sample;
+
+/// Multiplies one sample by a channel gain (pan, balance).
+///
+/// Float sample types are multiplied in `f64` on their raw values and cast
+/// back, as in 2.0. Integer sample types are taken to the normalised
+/// `[-1, 1]` scale with the audio-aware conversion, multiplied in `f64`, and
+/// converted back (rounded to nearest and saturated); for `u8` this scales
+/// around the mid-scale value 128.
+#[inline]
+fn apply_channel_gain<T>(x: T, gain: f64) -> T
+where
+    T: StandardSample,
+{
+    if T::SAMPLE_TYPE.is_float() {
+        let v: f64 = x.cast_into();
+        T::cast_from(v * gain)
+    } else {
+        let v: f64 = x.convert_to();
+        (v * gain).convert_to()
+    }
+}
 
 impl<T> AudioChannelOps for AudioSamples<'_, T>
 where
@@ -57,6 +80,11 @@ where
     ///   - `Weighted(weights)` - user-supplied per-channel weights.
     ///   - `Center` - surround center channel (≥ 6 ch), or average
     ///     of left and right for stereo.
+    ///
+    /// For integer sample types `Average` and `Center` average the raw
+    /// sample values and `Weighted` sums on the normalised `[-1, 1]` scale,
+    /// both in `f64`; the result is rounded to nearest and saturated at the
+    /// type's range.
     ///
     /// # Returns
     /// An owned mono [`AudioSamples`] at the same sample rate.
@@ -122,7 +150,7 @@ where
                                 // capacity n, so dst.add(i) is in bounds and the
                                 // slot is uninitialised until this write.
                                 unsafe {
-                                    dst.add(i).write(T::cast_from(avg));
+                                    dst.add(i).write(raw_f64_to_sample::<T>(avg));
                                 }
                             }
                         } else {
@@ -135,7 +163,7 @@ where
                                 // and mono_vec was allocated with capacity n, so
                                 // dst.add(i) is in bounds for every write.
                                 unsafe {
-                                    dst.add(i).write(T::cast_from(avg));
+                                    dst.add(i).write(raw_f64_to_sample::<T>(avg));
                                 }
                             }
                         }
@@ -159,8 +187,10 @@ where
                                 *acc += v;
                             }
                         }
-                        let mono_data: Array1<T> =
-                            sums.into_iter().map(|s| T::cast_from(s / n_ch)).collect();
+                        let mono_data: Array1<T> = sums
+                            .into_iter()
+                            .map(|s| raw_f64_to_sample(s / n_ch))
+                            .collect();
                         Ok(AudioSamples::new_mono(mono_data, self.sample_rate())?)
                     }
                 }
@@ -213,8 +243,7 @@ where
                                     multi[(channel_idx, sample_idx)].convert_to();
                                 weighted_sum += sample_value * weight;
                             }
-                            mono_samples[sample_idx] =
-                                <T as CastFrom<f64>>::cast_from(weighted_sum);
+                            mono_samples[sample_idx] = weighted_sum.convert_to();
                         }
 
                         Ok(AudioSamples::new_mono(
@@ -240,10 +269,10 @@ where
                             let two: f64 = 2.0;
                             let mut mono_samples = vec![T::default(); samples_per_channel];
                             for sample_idx in 0..samples_per_channel {
-                                let left: f64 = multi[(0, sample_idx)].convert_to();
-                                let right: f64 = multi[(1, sample_idx)].convert_to();
+                                let left: f64 = multi[(0, sample_idx)].cast_into();
+                                let right: f64 = multi[(1, sample_idx)].cast_into();
                                 let avg = (left + right) / two;
-                                mono_samples[sample_idx] = <T as CastFrom<f64>>::cast_from(avg);
+                                mono_samples[sample_idx] = raw_f64_to_sample(avg);
                             }
                             mono_samples
                         } else {
@@ -253,11 +282,11 @@ where
                                 let mut sum = 0.0;
                                 for channel_idx in 0..num_channels {
                                     let sample_value: f64 =
-                                        multi[(channel_idx, sample_idx)].convert_to();
+                                        multi[(channel_idx, sample_idx)].cast_into();
                                     sum += sample_value;
                                 }
                                 let avg = sum / num_channels as f64;
-                                mono_samples[sample_idx] = <T as CastFrom<f64>>::cast_from(avg);
+                                mono_samples[sample_idx] = raw_f64_to_sample(avg);
                             }
                             mono_samples
                         };
@@ -292,7 +321,8 @@ where
     /// - `Pan(value)` - applies equal-power panning to mono input.
     ///   The value is clamped to \[-1, 1\]: -1 is hard left, 0 is
     ///   centre, +1 is hard right.  Multi-channel input is returned
-    ///   unchanged.
+    ///   unchanged. For integer sample types the gains are applied on the
+    ///   normalised `[-1, 1]` scale and the result is rounded and saturated.
     /// - `Left` - routes mono input to the left channel and fills the
     ///   right with silence (`[m, 0]`). For multi-channel input, extracts
     ///   channel 0 as a mono signal (as in 2.0; prefer
@@ -359,13 +389,8 @@ where
                         let mut right_channel = vec![T::default(); samples_per_channel];
 
                         for (i, &sample) in mono.iter().enumerate() {
-                            let sample_f: f64 = sample.cast_into();
-                            let left = sample_f * left_gain;
-                            let right = sample_f * right_gain;
-                            let left = <T as CastFrom<f64>>::cast_from(left);
-                            let right = <T as CastFrom<f64>>::cast_from(right);
-                            left_channel[i] = left;
-                            right_channel[i] = right;
+                            left_channel[i] = apply_channel_gain(sample, left_gain);
+                            right_channel[i] = apply_channel_gain(sample, right_gain);
                         }
 
                         let mut stereo_matrix = Array2::<T>::zeros((2, samples_per_channel));
@@ -671,9 +696,12 @@ where
     /// the left channel and doubles the right.  The total power changes
     /// with `p` (it is not a constant-power pan law); for a −3 dB-centre
     /// equal-power pan of a mono source use
-    /// `to_stereo(StereoConversionMethod::Pan(p))`.  Gains are applied to
-    /// the raw sample values and truncated back for integer types, so
-    /// this is not meaningful for `u8` (offset-binary) audio.
+    /// `to_stereo(StereoConversionMethod::Pan(p))`.
+    ///
+    /// For integer sample types the gains are applied on the normalised
+    /// `[-1, 1]` scale in `f64`, and the result is rounded to nearest and
+    /// saturated at the type's range (for `u8` the gain scales the distance
+    /// from the mid-scale value 128).
     ///
     /// # Arguments
     /// - `pan_value` - Panning position in the range \[-1, 1\].
@@ -715,22 +743,14 @@ where
                 {
                     let left = &mut data.index_axis_mut(Axis(0), 0);
                     let left_gain = 1.0 - pan_value.clamp(-1.0, 1.0);
-                    left.mapv_inplace(|x| {
-                        let x: f64 = x.cast_into();
-                        let diff = x * left_gain;
-                        T::cast_from(diff)
-                    });
+                    left.mapv_inplace(|x| apply_channel_gain(x, left_gain));
                 }
 
                 // right
                 {
                     let right = &mut data.index_axis_mut(Axis(0), 1);
                     let right_gain = 1.0 + pan_value.clamp(-1.0, 1.0);
-                    right.mapv_inplace(|x| {
-                        let x: f64 = x.cast_into();
-                        let diff = x * right_gain;
-                        T::cast_from(diff)
-                    });
+                    right.mapv_inplace(|x| apply_channel_gain(x, right_gain));
                 }
 
                 Ok(())
@@ -745,6 +765,11 @@ where
     /// channel by `1 + balance`, after clamping to \[-1, 1\].  The
     /// favoured channel is boosted by up to +6 dB (gain 2), so this is
     /// not a constant-power law.
+    ///
+    /// For integer sample types the gains are applied on the normalised
+    /// `[-1, 1]` scale in `f64`, and the result is rounded to nearest and
+    /// saturated at the type's range (for `u8` the gain scales the distance
+    /// from the mid-scale value 128).
     ///
     /// # Arguments
     /// - `balance` - Balance position in the range \[-1, 1\].
@@ -787,22 +812,14 @@ where
                 {
                     let left = &mut data.index_axis_mut(Axis(0), 0);
                     let left_gain = 1.0 - balance.clamp(-1.0, 1.0);
-                    left.mapv_inplace(|x| {
-                        let x: f64 = x.cast_into();
-                        let diff = x * left_gain;
-                        T::cast_from(diff)
-                    });
+                    left.mapv_inplace(|x| apply_channel_gain(x, left_gain));
                 }
 
                 // right
                 {
                     let right = &mut data.index_axis_mut(Axis(0), 1);
                     let right_gain = 1.0 + balance.clamp(-1.0, 1.0);
-                    right.mapv_inplace(|x| {
-                        let x: f64 = x.cast_into();
-                        let diff = x * right_gain;
-                        T::cast_from(diff)
-                    });
+                    right.mapv_inplace(|x| apply_channel_gain(x, right_gain));
                 }
 
                 Ok(())
