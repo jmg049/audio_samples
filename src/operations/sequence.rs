@@ -1225,28 +1225,123 @@ fn check_prob_shape<F: AudioFloat>(prob: ArrayView2<F>) -> AudioSampleResult<()>
     Ok(())
 }
 
+/// Candidate predecessors of one target state in [`viterbi_core`].
+enum Live {
+    /// The contiguous range `lo..hi`.
+    Range(usize, usize),
+    /// An arbitrary (sorted) list.
+    List(Vec<usize>),
+}
+
+/// Largest `a[i] + b[i]` (NaN sums never win; `-inf` for empty input). The
+/// eight independent accumulators let the compiler vectorise the reduction;
+/// the result is exact because a maximum does not round.
+#[inline]
+fn max_of_sums<F: AudioFloat>(a: &[F], b: &[F]) -> F {
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let ninf = F::neg_infinity();
+    let mut acc = [ninf; 8];
+    let mut ca = a.chunks_exact(8);
+    let mut cb = b.chunks_exact(8);
+    for (x, y) in (&mut ca).zip(&mut cb) {
+        for i in 0..8 {
+            let c = x[i] + y[i];
+            acc[i] = if c > acc[i] { c } else { acc[i] };
+        }
+    }
+    let mut m = ninf;
+    for &v in &acc {
+        if v > m {
+            m = v;
+        }
+    }
+    for (&x, &y) in ca.remainder().iter().zip(cb.remainder()) {
+        let c = x + y;
+        if c > m {
+            m = c;
+        }
+    }
+    m
+}
+
+/// librosa's inner loop over the candidates `lo..hi`: the first index `k`
+/// with the largest `prev[k] + lt[k]` that exceeds `-inf`, and that sum.
+#[inline(always)]
+fn best_in_range<F: AudioFloat>(prev: &[F], lt: &[F], lo: usize, hi: usize) -> (F, Option<usize>) {
+    let (p, l) = (&prev[lo..hi], &lt[lo..hi]);
+    if p.len() <= 16 {
+        // Short ranges (banded matrices): one branch-free pass.
+        let mut best = F::neg_infinity();
+        let mut arg = usize::MAX;
+        for (i, (&a, &b)) in p.iter().zip(l).enumerate() {
+            let c = a + b;
+            let gt = c > best;
+            best = if gt { c } else { best };
+            arg = if gt { i } else { arg };
+        }
+        return (best, (arg != usize::MAX).then(|| lo + arg));
+    }
+    let m = max_of_sums(p, l);
+    if m > F::neg_infinity() {
+        let i = p.iter().zip(l).position(|(&a, &b)| a + b == m);
+        (m, i.map(|i| lo + i))
+    } else {
+        (m, None)
+    }
+}
+
+/// librosa's inner loop over an explicit candidate list.
+#[inline]
+fn best_in_list<F: AudioFloat>(prev: &[F], lt: &[F], ks: &[usize]) -> (F, Option<usize>) {
+    let mut best = F::neg_infinity();
+    let mut arg = None;
+    for &k in ks {
+        let cost = prev[k] + lt[k];
+        if cost > best {
+            best = cost;
+            arg = Some(k);
+        }
+    }
+    (best, arg)
+}
+
 /// The core log-domain Viterbi recursion (librosa's `_viterbi`).
 ///
-/// `log_prob` is `(n_states, n_steps)`. Ties are broken towards the lowest
-/// state index, as in librosa.
+/// `fill_log_prob(t, col)` writes the `n_states` observation log-likelihoods of
+/// step `t` into `col`; `log_trans_t[j * n_states + k]` is the log-transition
+/// `k -> j` (the transposed log matrix, so that the candidates of one target
+/// state are contiguous). Ties are broken towards the lowest state index, as in
+/// librosa.
+///
+/// Transitions whose log value is exactly `ln(tiny)` (zero probabilities) all
+/// add the same constant, so their best total is bounded by the best previous
+/// value among them plus that constant. They are only scanned when that bound
+/// reaches the best total of the other candidates; otherwise none of them can
+/// be the (first) maximum and skipping them gives librosa's result exactly.
 fn viterbi_core<F: AudioFloat>(
-    log_prob: &Array2<F>,
-    log_trans: &Array2<F>,
-    log_p_init: &Array1<F>,
+    n_states: usize,
+    n_steps: usize,
+    mut fill_log_prob: impl FnMut(usize, &mut [F]),
+    log_trans_t: &[F],
+    log_p_init: &[F],
     threshold: Option<F>,
 ) -> AudioSampleResult<ViterbiResult<F>> {
-    let (n_states, n_steps) = log_prob.dim();
-    let mut value = Array2::<F>::zeros((n_steps, n_states));
-    let mut ptr = Array2::<usize>::zeros((n_steps, n_states));
-    for j in 0..n_states {
-        value[[0, j]] = log_prob[[j, 0]] + log_p_init[j];
-    }
-    let preds: Vec<Vec<usize>> = match threshold {
-        Some(th) => {
-            let mut preds = Vec::with_capacity(n_states);
-            for j in 0..n_states {
-                let p: Vec<usize> = (0..n_states).filter(|&k| log_trans[[k, j]] >= th).collect();
-                if p.is_empty() {
+    let n = n_states;
+    let ninf = F::neg_infinity();
+    let l0 = tiny::<F>().ln();
+    // Candidates of each target state (librosa's `pred_states` with a
+    // threshold, every state otherwise), split into the live ones and a flag
+    // for structural zeros among them.
+    let mut cands: Vec<Vec<usize>> = Vec::new();
+    let mut live: Vec<Live> = Vec::with_capacity(n);
+    let mut has_zero = vec![false; n];
+    for j in 0..n {
+        let lt = &log_trans_t[j * n..(j + 1) * n];
+        let c: Vec<usize> = match threshold {
+            Some(th) => {
+                let c: Vec<usize> = (0..n).filter(|&k| lt[k] >= th).collect();
+                if c.is_empty() {
                     return err(
                         "transition_min_prob",
                         format!(
@@ -1254,34 +1349,108 @@ fn viterbi_core<F: AudioFloat>(
                         ),
                     );
                 }
-                preds.push(p);
+                c
             }
-            preds
+            None => Vec::new(),
+        };
+        let all = threshold.is_none();
+        let is_live = |k: usize| lt[k] != l0;
+        let (n_cand, n_live, first, last) = if all {
+            let first = (0..n).find(|&k| is_live(k));
+            let last = (0..n).rev().find(|&k| is_live(k));
+            let n_live = (0..n).filter(|&k| is_live(k)).count();
+            (n, n_live, first, last)
+        } else {
+            let first = c.iter().copied().find(|&k| is_live(k));
+            let last = c.iter().copied().rev().find(|&k| is_live(k));
+            let n_live = c.iter().filter(|&&k| is_live(k)).count();
+            (c.len(), n_live, first, last)
+        };
+        has_zero[j] = n_live < n_cand;
+        live.push(match (first, last) {
+            (Some(lo), Some(hi)) if hi - lo + 1 == n_live => Live::Range(lo, hi + 1),
+            _ if all => Live::List((0..n).filter(|&k| is_live(k)).collect()),
+            _ => Live::List(c.iter().copied().filter(|&k| is_live(k)).collect()),
+        });
+        if !all {
+            cands.push(c);
         }
-        None => vec![(0..n_states).collect(); n_states],
-    };
+    }
+    let any_zero = has_zero.iter().any(|&z| z);
+
+    let mut ptr = vec![0u32; n_steps * n];
+    let mut col = vec![F::zero(); n];
+    let mut prev = vec![F::zero(); n];
+    let mut cur = vec![F::zero(); n];
+    // pre[i] = max(prev[..i]), suf[i] = max(prev[i..]).
+    let mut pre = vec![ninf; n + 1];
+    let mut suf = vec![ninf; n + 1];
+    fill_log_prob(0, &mut col);
+    for j in 0..n {
+        prev[j] = col[j] + log_p_init[j];
+    }
     for t in 1..n_steps {
-        for j in 0..n_states {
-            let mut best = F::neg_infinity();
-            for &k in &preds[j] {
-                let cost = value[[t - 1, k]] + log_trans[[k, j]];
-                if cost > best {
-                    ptr[[t, j]] = k;
-                    best = cost;
+        fill_log_prob(t, &mut col);
+        if any_zero {
+            for k in 0..n {
+                pre[k + 1] = if prev[k] > pre[k] { prev[k] } else { pre[k] };
+            }
+            for k in (0..n).rev() {
+                suf[k] = if prev[k] > suf[k + 1] {
+                    prev[k]
+                } else {
+                    suf[k + 1]
+                };
+            }
+        }
+        let row = &mut ptr[t * n..(t + 1) * n];
+        for j in 0..n {
+            let lt = &log_trans_t[j * n..(j + 1) * n];
+            let (mut best, mut arg) = match &live[j] {
+                Live::Range(lo, hi) => best_in_range(&prev, lt, *lo, *hi),
+                Live::List(ks) => best_in_list(&prev, lt, ks),
+            };
+            if has_zero[j] {
+                let zmax = match (&live[j], threshold) {
+                    (Live::Range(lo, hi), None) => {
+                        if pre[*lo] > suf[*hi] {
+                            pre[*lo]
+                        } else {
+                            suf[*hi]
+                        }
+                    }
+                    _ => suf[0],
+                };
+                let zeros_lose = zmax + l0 < best;
+                if !zeros_lose {
+                    (best, arg) = match threshold {
+                        None => best_in_range(&prev, lt, 0, n),
+                        Some(_) => best_in_list(&prev, lt, &cands[j]),
+                    };
                 }
             }
-            value[[t, j]] = log_prob[[j, t]] + best;
+            // `n_states` fits in u32: the `n_states x n_states` transition
+            // matrix is in memory.
+            row[j] = arg.unwrap_or(0) as u32;
+            cur[j] = col[j] + best;
         }
+        std::mem::swap(&mut prev, &mut cur);
     }
     let mut states = vec![0usize; n_steps];
-    states[n_steps - 1] = argmax_first(value.row(n_steps - 1).iter().copied());
+    states[n_steps - 1] = argmax_first(prev.iter().copied());
     for t in (0..n_steps - 1).rev() {
-        states[t] = ptr[[t + 1, states[t + 1]]];
+        states[t] = ptr[(t + 1) * n + states[t + 1]] as usize;
     }
-    let log_prob = value[[n_steps - 1, states[n_steps - 1]]];
+    let log_prob = prev[states[n_steps - 1]];
     Ok(ViterbiResult { states, log_prob })
 }
 
+/// `ln(transition + tiny)`, transposed and flattened for [`viterbi_core`].
+fn log_transition_t<F: AudioFloat>(transition: ArrayView2<F>) -> Vec<F> {
+    let tiny = tiny::<F>();
+    let t = transition.t();
+    t.iter().map(|&v| (v + tiny).ln()).collect()
+}
 /// Viterbi decoding from observation likelihoods.
 ///
 /// Computes the most likely hidden-state sequence of an HMM given
@@ -1351,17 +1520,29 @@ pub fn viterbi<F: AudioFloat>(
         return err("prob", "probability values must be between 0 and 1");
     }
     let tiny = tiny::<F>();
-    let log_p_init = match p_init {
+    let log_p_init: Vec<F> = match p_init {
         Some(p) => {
             check_distribution("p_init", p, n_states)?;
-            p.mapv(|v| (v + tiny).ln())
+            p.iter().map(|&v| (v + tiny).ln()).collect()
         }
-        None => Array1::from_elem(n_states, (F::one() / F::of_usize(n_states) + tiny).ln()),
+        None => vec![(F::one() / F::of_usize(n_states) + tiny).ln(); n_states],
     };
     let threshold = log_threshold(transition_min_prob)?;
-    let log_trans = transition.mapv(|v| (v + tiny).ln());
-    let log_prob = prob.mapv(|v| (v + tiny).ln());
-    viterbi_core(&log_prob, &log_trans, &log_p_init, threshold)
+    let log_trans_t = log_transition_t(transition);
+    let fill = |t: usize, col: &mut [F]| {
+        for (c, &p) in col.iter_mut().zip(prob.column(t)) {
+            *c = (p + tiny).ln();
+        }
+    };
+    let (n_states, n_steps) = prob.dim();
+    viterbi_core(
+        n_states,
+        n_steps,
+        fill,
+        &log_trans_t,
+        &log_p_init,
+        threshold,
+    )
 }
 
 /// Viterbi decoding from discriminative (posterior) state predictions.
@@ -1432,14 +1613,23 @@ pub fn viterbi_discriminative<F: AudioFloat>(
     };
     let threshold = log_threshold(transition_min_prob)?;
     let tiny = tiny::<F>();
-    let log_p_init = p_init.mapv(|v| (v + tiny).ln());
-    let log_trans = transition.mapv(|v| (v + tiny).ln());
-    let log_marginal = p_state.mapv(|v| (v + tiny).ln());
-    let mut log_prob = prob.mapv(|v| (v + tiny).ln());
-    for (mut row, &m) in log_prob.rows_mut().into_iter().zip(log_marginal.iter()) {
-        row.mapv_inplace(|v| v - m);
-    }
-    viterbi_core(&log_prob, &log_trans, &log_p_init, threshold)
+    let log_p_init: Vec<F> = p_init.iter().map(|&v| (v + tiny).ln()).collect();
+    let log_trans_t = log_transition_t(transition);
+    let log_marginal: Vec<F> = p_state.iter().map(|&v| (v + tiny).ln()).collect();
+    let fill = |t: usize, col: &mut [F]| {
+        for ((c, &p), &m) in col.iter_mut().zip(prob.column(t)).zip(&log_marginal) {
+            *c = (p + tiny).ln() - m;
+        }
+    };
+    let (n_states, n_steps) = prob.dim();
+    viterbi_core(
+        n_states,
+        n_steps,
+        fill,
+        &log_trans_t,
+        &log_p_init,
+        threshold,
+    )
 }
 
 /// Viterbi decoding for multi-label (independent binary) state activations.
@@ -3036,5 +3226,125 @@ mod tests {
         let x3 = Array3::<f64>::ones((2, 3, 4));
         let s3 = sync(x3.view(), &[2], SyncAggregate::Sum, true).unwrap();
         assert_eq!(s3, Array3::from_elem((2, 3, 2), 2.0));
+    }
+
+    /// The straightforward recursion (the previous implementation), as the
+    /// reference for the pruned one in `viterbi_core`.
+    fn reference_viterbi<F: AudioFloat>(
+        log_prob: &Array2<F>,
+        log_trans: &Array2<F>,
+        log_p_init: &Array1<F>,
+        threshold: Option<F>,
+    ) -> ViterbiResult<F> {
+        let (n_states, n_steps) = log_prob.dim();
+        let mut value = Array2::<F>::zeros((n_steps, n_states));
+        let mut ptr = Array2::<usize>::zeros((n_steps, n_states));
+        for j in 0..n_states {
+            value[[0, j]] = log_prob[[j, 0]] + log_p_init[j];
+        }
+        let preds: Vec<Vec<usize>> = (0..n_states)
+            .map(|j| {
+                (0..n_states)
+                    .filter(|&k| threshold.is_none_or(|th| log_trans[[k, j]] >= th))
+                    .collect()
+            })
+            .collect();
+        for t in 1..n_steps {
+            for j in 0..n_states {
+                let mut best = F::neg_infinity();
+                for &k in &preds[j] {
+                    let cost = value[[t - 1, k]] + log_trans[[k, j]];
+                    if cost > best {
+                        ptr[[t, j]] = k;
+                        best = cost;
+                    }
+                }
+                value[[t, j]] = log_prob[[j, t]] + best;
+            }
+        }
+        let mut states = vec![0usize; n_steps];
+        states[n_steps - 1] = argmax_first(value.row(n_steps - 1).iter().copied());
+        for t in (0..n_steps - 1).rev() {
+            states[t] = ptr[[t + 1, states[t + 1]]];
+        }
+        let log_prob = value[[n_steps - 1, states[n_steps - 1]]];
+        ViterbiResult { states, log_prob }
+    }
+
+    /// Deterministic uniform values in `[0, 1)`.
+    fn lcg(seed: &mut u64) -> f64 {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*seed >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn check_viterbi_matches_reference<F: AudioFloat>() {
+        let mut seed = 7u64;
+        let tiny = tiny::<F>();
+        for &n in &[1usize, 2, 3, 7, 9, 17, 40] {
+            for kind in 0..5 {
+                // Transition: dense, banded, sparse random, cycle, and one
+                // with a zero column (a state nothing can reach).
+                let mut t = Array2::<f64>::zeros((n, n));
+                for i in 0..n {
+                    for j in 0..n {
+                        let keep = match kind {
+                            0 => true,
+                            1 => i.abs_diff(j) <= 2,
+                            2 => i == j || lcg(&mut seed) < 0.3,
+                            3 => j == i || j == (i + 1) % n,
+                            _ => j != n / 2 || n == 1,
+                        };
+                        if keep {
+                            t[[i, j]] = 0.05 + lcg(&mut seed);
+                        }
+                    }
+                    let s: f64 = t.row(i).sum();
+                    t.row_mut(i).mapv_inplace(|v| v / s);
+                }
+                let t = t.mapv(F::of);
+                // Likelihoods with exact zeros and tiny values, so that the
+                // pruning bound sometimes fails.
+                let steps = 60;
+                let prob = Array2::from_shape_fn((n, steps), |_| {
+                    let u = lcg(&mut seed);
+                    F::of(if u < 0.15 {
+                        0.0
+                    } else if u < 0.25 {
+                        1e-30
+                    } else {
+                        u
+                    })
+                });
+                for thr in [None, Some(1e-3), Some(0.2)] {
+                    let lt = t.mapv(|v| (v + tiny).ln());
+                    let th = log_threshold::<F>(thr).unwrap();
+                    let lp = prob.mapv(|v| (v + tiny).ln());
+                    let init = Array1::from_elem(n, (F::one() / F::of_usize(n) + tiny).ln());
+                    let got = viterbi(prob.view(), t.view(), None, thr);
+                    let feasible =
+                        th.is_none_or(|th| (0..n).all(|j| (0..n).any(|k| lt[[k, j]] >= th)));
+                    if !feasible {
+                        assert!(got.is_err());
+                        continue;
+                    }
+                    let want = reference_viterbi(&lp, &lt, &init, th);
+                    let got = got.unwrap();
+                    assert_eq!(got.states, want.states, "n={n} kind={kind} thr={thr:?}");
+                    assert_eq!(
+                        got.log_prob.as_f64().to_bits(),
+                        want.log_prob.as_f64().to_bits(),
+                        "n={n} kind={kind} thr={thr:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn viterbi_matches_reference_recursion() {
+        check_viterbi_matches_reference::<f32>();
+        check_viterbi_matches_reference::<f64>();
     }
 }
