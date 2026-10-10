@@ -225,15 +225,15 @@ let y = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5
 let n = y.samples_per_channel().get();
 
 // librosa.effects.time_stretch(y, rate=2.0): half the length
-let fast = y.time_stretch(2.0, &StftConfig::default()).unwrap();
+let fast = y.time_stretch(2.0, &StftConfig::librosa()).unwrap();
 assert_eq!(fast.samples_per_channel().get(), n / 2);
 
 // librosa.effects.pitch_shift(y, sr=sr, n_steps=2): same length
-let up = y.pitch_shift(2.0, &PitchShiftConfig::default()).unwrap();
+let up = y.pitch_shift(2.0, &PitchShiftConfig::librosa()).unwrap();
 assert_eq!(up.samples_per_channel().get(), n);
 
 // y_trimmed, (start, end) = librosa.effects.trim(y)  (top_db = 60)
-let (trimmed, (start, end)) = y.trim_db(&SilenceConfig::default()).unwrap();
+let (trimmed, (start, end)) = y.trim_db(&SilenceConfig::librosa()).unwrap();
 assert_eq!(trimmed.samples_per_channel().get(), end - start);
 
 // librosa.resample(y, orig_sr=22050, target_sr=16000)

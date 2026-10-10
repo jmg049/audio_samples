@@ -96,7 +96,7 @@ fn subset<T: Clone>(a: &Array3<T>, case: &Value) -> Array2<T> {
 }
 
 fn mix_stft() -> Array3<Complex<f64>> {
-    mono("mix").stft_matrix(&StftConfig::default()).unwrap()
+    mono("mix").stft_matrix(&StftConfig::librosa()).unwrap()
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn time_stretch_matches() {
     let x = mono("mix");
     for rate in ["1.5", "0.75"] {
         let y = x
-            .time_stretch(rate.parse().unwrap(), &StftConfig::default())
+            .time_stretch(rate.parse().unwrap(), &StftConfig::librosa())
             .unwrap();
         let y = samples(&y);
         assert_eq!(y.len(), usize_of(&f[rate]["len"]), "length rate {rate}");
@@ -148,7 +148,7 @@ fn time_stretch_matches() {
         );
     }
     let fs = &fixture()["time_stretch_stereo"];
-    let y = stereo().time_stretch(1.5, &StftConfig::default()).unwrap();
+    let y = stereo().time_stretch(1.5, &StftConfig::librosa()).unwrap();
     let y = y.as_multi_channel().unwrap().as_view().to_owned();
     assert_eq!(y.ncols(), usize_of(&fs["len"]));
     let e = arr2(&fs["y"]);
@@ -167,7 +167,7 @@ fn pitch_shift_matches() {
         let rate = case["rate"].as_f64().unwrap();
         // The resampler-free stage (time stretch by `rate`) is librosa-exact up to
         // the vocoder round-off (bound as in time_stretch_matches).
-        let st = samples(&x.time_stretch(rate, &StftConfig::default()).unwrap());
+        let st = samples(&x.time_stretch(rate, &StftConfig::librosa()).unwrap());
         assert_eq!(st.len(), usize_of(&case["stretched_len"]));
         check(
             &format!("pitch_shift {n_steps}: stretched"),
@@ -182,7 +182,7 @@ fn pitch_shift_matches() {
         // below the 10 kHz band edge) they agree to 67-69 dB SNR (measured: +2 st 67.6 dB,
         // -3 st 68.5 dB). Bound: 55 dB, leaving margin for resampler tuning.
         let y = samples(
-            &x.pitch_shift(n_steps.parse().unwrap(), &PitchShiftConfig::default())
+            &x.pitch_shift(n_steps.parse().unwrap(), &PitchShiftConfig::librosa())
                 .unwrap(),
         );
         assert_eq!(y.len(), n);
@@ -263,17 +263,17 @@ fn trim_split_match() {
     let f = &fixture()["trim_split"];
     let burst = mono("burst");
     let cases: [(&str, SilenceConfig); 4] = [
-        ("default", SilenceConfig::default()),
-        ("top_db30", SilenceConfig::new().with_top_db(30.0)),
+        ("default", SilenceConfig::librosa()),
+        ("top_db30", SilenceConfig::new(30.0)),
         (
             "frame1024_hop256",
-            SilenceConfig::new()
+            SilenceConfig::librosa()
                 .with_frame_length(nzu!(1024))
                 .with_hop_length(nzu!(256)),
         ),
         (
             "ref_abs",
-            SilenceConfig::new()
+            SilenceConfig::librosa()
                 .with_reference(DbReference::Value(0.01))
                 .with_top_db(20.0),
         ),
@@ -290,7 +290,7 @@ fn trim_split_match() {
         );
         eprintln!("trim/split {name:<20} {bounds:?} (exact)");
     }
-    let cfg20 = SilenceConfig::new().with_top_db(20.0);
+    let cfg20 = SilenceConfig::new(20.0);
     assert_eq!(
         mono("mix").split_db(&cfg20).unwrap(),
         pairs(&f["mix_split"])
@@ -326,13 +326,13 @@ fn remix_matches() {
 
 fn hpss_cfg(name: &str) -> HpssMaskConfig {
     match name {
-        "default" => HpssMaskConfig::default(),
-        "margin2" => HpssMaskConfig::new().with_margin(2.0),
-        "kernel_17_9_power1" => HpssMaskConfig::new()
+        "default" => HpssMaskConfig::librosa(),
+        "margin2" => HpssMaskConfig::librosa().with_margin(2.0),
+        "kernel_17_9_power1" => HpssMaskConfig::librosa()
             .with_kernel_sizes(nzu!(17), nzu!(9))
             .with_power(1.0),
-        "hard" => HpssMaskConfig::new().with_power(f64::INFINITY),
-        "kernel_even" => HpssMaskConfig::new()
+        "hard" => HpssMaskConfig::librosa().with_power(f64::INFINITY),
+        "kernel_even" => HpssMaskConfig::librosa()
             .with_kernel_sizes(nzu!(10), nzu!(12))
             .with_margins(1.0, 3.0),
         other => panic!("unknown hpss case {other}"),
@@ -346,7 +346,7 @@ fn hpss_spectrogram_matches() {
     // differ by the STFT round-off (~1e-16 relative). Hard masks can flip only
     // where H == P to round-off; none does on this signal.
     let f = &fixture()["hpss_spectrogram"];
-    let d = mono("notes").stft_matrix(&StftConfig::default()).unwrap();
+    let d = mono("notes").stft_matrix(&StftConfig::librosa()).unwrap();
     for name in [
         "default",
         "margin2",
@@ -393,7 +393,7 @@ fn hpss_spectrogram_matches() {
         );
     }
     let mag = d.mapv(Complex::norm);
-    let (h, p) = hpss_magnitude(mag.view(), &HpssMaskConfig::default()).unwrap();
+    let (h, p) = hpss_magnitude(mag.view(), &HpssMaskConfig::librosa()).unwrap();
     let case = &f["magnitude_default"];
     let (a, e) = (subset(&h, &case["harm"]), arr2(&case["harm"]["subset"]));
     check("hpss magnitude: harmonic", a.iter(), e.iter(), 1e-10);
@@ -407,7 +407,7 @@ fn hpss_audio_matches() {
     let f = &fixture()["hpss_audio"];
     let k = step("sparse_step");
     let x = mono("notes");
-    let def = HarmonicPercussiveConfig::default();
+    let def = HarmonicPercussiveConfig::librosa();
     let (h, p) = x.harmonic_percussive(&def).unwrap();
     check(
         "effects.hpss harmonic",
@@ -421,7 +421,8 @@ fn hpss_audio_matches() {
         &f64s(&f["percussive"]),
         1e-10,
     );
-    let m2 = HarmonicPercussiveConfig::new().with_hpss(HpssMaskConfig::new().with_margin(2.0));
+    let m2 =
+        HarmonicPercussiveConfig::librosa().with_hpss(HpssMaskConfig::librosa().with_margin(2.0));
     let h2 = samples(&x.harmonic(&m2).unwrap());
     let p2 = samples(&x.percussive(&m2).unwrap());
     check(
@@ -464,10 +465,10 @@ fn griffinlim_matches() {
     let k = step("sig_step");
     let n = usize_of(&f["len"]);
     let x = signal("mix");
-    let cfg = StftConfig::new().with_n_fft(nzu!(512));
+    let cfg = StftConfig::librosa().with_n_fft(nzu!(512));
     let xa = Array2::from_shape_vec((1, n), x[..n].to_vec()).unwrap();
     let mag = stft(xa.view(), &cfg).unwrap().mapv(Complex::norm);
-    let base = GriffinLimConfig::new()
+    let base = GriffinLimConfig::librosa()
         .with_stft(cfg)
         .with_n_iter(usize_of(&f["n_iter"]))
         .with_init(GriffinLimInit::ZeroPhase)
@@ -567,21 +568,24 @@ fn clicks_match() {
     let f = &fixture()["clicks"];
     let k = step("sig_step");
     let rate = std::num::NonZeroU32::new(sr()).unwrap();
-    let y = clicks(
+    let y = clicks::<f64>(
         ClickPositions::Times(&[0.1, 0.5, 0.52]),
         rate,
-        &ClicksConfig::default(),
+        &ClicksConfig::librosa(),
     )
     .unwrap();
     let y = samples(&y);
     assert_eq!(y.len(), usize_of(&f["times_len"]));
     check("clicks times", &strided(&y, k), &f64s(&f["times"]), 1e-6);
-    let cfg = ClicksConfig::new()
-        .with_hop_length(nzu!(256))
+    let cfg = ClicksConfig::librosa()
         .with_click_freq(2000.0)
         .with_click_duration(0.05)
         .with_length(Some(11000));
-    let y = samples(&clicks(ClickPositions::Frames(&[3, 20, 40]), rate, &cfg).unwrap());
+    let frames = ClickPositions::Frames {
+        frames: &[3, 20, 40],
+        hop_length: nzu!(256),
+    };
+    let y = samples(&clicks::<f64>(frames, rate, &cfg).unwrap());
     check(
         "clicks frames + length",
         &strided(&y, k),
@@ -597,12 +601,264 @@ fn istft_of_vocoded_length() {
     let d = mix_stft();
     let pv = phase_vocoder(d.view(), 1.5).unwrap();
     let n = (x.samples_per_channel().get() as f64 / 1.5).round_ties_even() as usize;
-    let chain = istft(pv.view(), &StftConfig::default(), Some(n)).unwrap();
-    let ts = samples(&x.time_stretch(1.5, &StftConfig::default()).unwrap());
+    let chain = istft(pv.view(), &StftConfig::librosa(), Some(n)).unwrap();
+    let ts = samples(&x.time_stretch(1.5, &StftConfig::librosa()).unwrap());
     check(
         "time_stretch == chain",
         &ts,
         chain.index_axis(Axis(0), 0).to_vec().iter(),
         0.0,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// float32: AudioSamples<f32> against librosa run on float32 input
+// ---------------------------------------------------------------------------
+
+/// A shared test signal as mono f32 audio (exact: the signals are 16-bit PCM).
+fn mono32(name: &str) -> AudioSamples<'static, f32> {
+    let x: Vec<f32> = signal(name).iter().map(|&v| v as f32).collect();
+    let rate = std::num::NonZeroU32::new(sr()).unwrap();
+    AudioSamples::new_mono(ndarray::Array1::from(x), rate).unwrap()
+}
+
+/// Mono f32 audio samples widened to f64 (exact).
+fn samples32(a: &AudioSamples<'_, f32>) -> Vec<f64> {
+    a.as_mono()
+        .expect("mono")
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect()
+}
+
+fn f32_case() -> &'static Value {
+    &fixture()["float32"]
+}
+
+/// Peak-relative error of `a` against `e` (for reporting f32-vs-f64 differences).
+fn peak_rel(a: &[f64], e: &[f64]) -> f64 {
+    errors(a, e).1
+}
+
+#[test]
+fn f32_time_stretch_matches_librosa_float32() {
+    // librosa's float32 STFT multiplies the frames by a float64 window, so its
+    // FFT runs in float64 and only the result is rounded to complex64. f32
+    // time_stretch does the same (f64 STFT of the samples, rounded once to
+    // Complex<f32>), then runs the phase vocoder and the inverse STFT in f32.
+    // Measured against librosa float32: 1.9e-7 (rate 1.5) / 1.8e-7 (rate 0.75)
+    // peak-relative. Bound 1e-6 (about 8 f32 eps of 1.19e-7: angle, cos/sin,
+    // interpolation and the inverse FFT each round in f32).
+    //
+    // Against our f64 path the rounding of the STFT to Complex<f32> is the
+    // difference; the vocoder accumulates the phase of every bin, including
+    // bins at the round-off level of the transform, so it grows beyond f32
+    // eps: measured 2.1e-6 / 1.9e-6. Bound 1e-5.
+    let f = &f32_case()["time_stretch"];
+    let k = step("sig_step");
+    let x32 = mono32("mix");
+    let x64 = mono("mix");
+    for rate in ["1.5", "0.75"] {
+        let r: f64 = rate.parse().unwrap();
+        let y = samples32(&x32.time_stretch(r, &StftConfig::librosa()).unwrap());
+        assert_eq!(y.len(), usize_of(&f[rate]["len"]), "length rate {rate}");
+        check(
+            &format!("f32 time_stretch rate {rate} vs librosa float32"),
+            &strided(&y, k),
+            &f64s(&f[rate]["y"]),
+            1e-6,
+        );
+        let y64 = samples(&x64.time_stretch(r, &StftConfig::librosa()).unwrap());
+        check(
+            &format!("f32 time_stretch rate {rate} vs our f64"),
+            &y,
+            &y64,
+            1e-5,
+        );
+    }
+}
+
+#[test]
+fn f32_emphasis_matches_librosa_float32() {
+    let f = &f32_case()["emphasis"];
+    let k = step("sparse_step");
+    let x32 = mono32("mix");
+    let pre = samples32(&x32.preemphasis(0.97).unwrap());
+    let de = samples32(&x32.deemphasis(0.97).unwrap());
+    // scipy.signal.lfilter runs the same float32 recursion: measured identical
+    // (0 error). Bound: one f32 eps (1.19e-7) of the peak.
+    check(
+        "f32 preemphasis",
+        &strided(&pre, k),
+        &f64s(&f["pre"]),
+        1.2e-7,
+    );
+    check("f32 deemphasis", &strided(&de, k), &f64s(&f["de"]), 1.2e-7);
+    let x64 = mono("mix");
+    eprintln!(
+        "f32 preemphasis vs f64 path peak-rel {:.3e}; deemphasis {:.3e}",
+        peak_rel(&pre, &samples(&x64.preemphasis(0.97).unwrap())),
+        peak_rel(&de, &samples(&x64.deemphasis(0.97).unwrap()))
+    );
+}
+
+/// `Complex<f32>` array widened to `Complex<f64>`.
+fn widen_c(a: &Array3<Complex<f32>>) -> Array3<Complex<f64>> {
+    a.mapv(|z| Complex::new(f64::from(z.re), f64::from(z.im)))
+}
+
+#[test]
+fn f32_hpss_matches_librosa_float32() {
+    let f = &f32_case()["hpss_spectrogram"];
+    // Our f32 STFT is computed in f32, librosa's in float64 and rounded; the
+    // median filters select the same values and the masks repeat the arithmetic
+    // in f32. Measured: spectrogram 3.3e-8 (harmonic) / 2.4e-7 (percussive),
+    // audio 2.6e-7 / 1.8e-7 peak-relative. Bound 1e-6 (about 8 f32 eps: the
+    // 2048-point FFT and inverse FFT round in f32 at every stage).
+    let d32 = mono32("notes").stft_matrix(&StftConfig::librosa()).unwrap();
+    let (h, p) = hpss_spectrogram(d32.view(), &HpssMaskConfig::librosa()).unwrap();
+    let (h, p) = (widen_c(&h), widen_c(&p));
+    check_complex(
+        "f32 hpss harmonic",
+        &subset(&h, &f["harm"]),
+        &carr2(&f["harm"]["subset"]),
+        1e-6,
+    );
+    check_complex(
+        "f32 hpss percussive",
+        &subset(&p, &f["perc"]),
+        &carr2(&f["perc"]["subset"]),
+        1e-6,
+    );
+
+    let f = &f32_case()["hpss_audio"];
+    let k = step("sparse_step");
+    let (yh, yp) = mono32("notes")
+        .harmonic_percussive(&HarmonicPercussiveConfig::librosa())
+        .unwrap();
+    let (yh, yp) = (samples32(&yh), samples32(&yp));
+    check(
+        "f32 effects.hpss harmonic",
+        &strided(&yh, k),
+        &f64s(&f["harmonic"]),
+        1e-6,
+    );
+    check(
+        "f32 effects.hpss percussive",
+        &strided(&yp, k),
+        &f64s(&f["percussive"]),
+        1e-6,
+    );
+    let (h64, p64) = mono("notes")
+        .harmonic_percussive(&HarmonicPercussiveConfig::librosa())
+        .unwrap();
+    eprintln!(
+        "f32 effects.hpss vs f64 path peak-rel harmonic {:.3e} percussive {:.3e}",
+        peak_rel(&yh, &samples(&h64)),
+        peak_rel(&yp, &samples(&p64))
+    );
+}
+
+#[test]
+fn f32_trim_split_match_librosa_float32() {
+    // Frame RMS and dB levels in f32 as librosa's float32 run: the decisions are
+    // exact unless a frame lies within f32 round-off of the threshold; none does.
+    let f = &f32_case()["trim_split"];
+    let burst = mono32("burst");
+    let cases: [(&str, SilenceConfig); 4] = [
+        ("default", SilenceConfig::librosa()),
+        ("top_db30", SilenceConfig::new(30.0)),
+        (
+            "frame1024_hop256",
+            SilenceConfig::librosa()
+                .with_frame_length(nzu!(1024))
+                .with_hop_length(nzu!(256)),
+        ),
+        (
+            "ref_abs",
+            SilenceConfig::new(20.0).with_reference(DbReference::Value(0.01)),
+        ),
+    ];
+    for (name, cfg) in cases {
+        let (trimmed, bounds) = burst.trim_db(&cfg).unwrap();
+        let e = pairs(&serde_json::json!([f[name]["trim"]]))[0];
+        assert_eq!(bounds, e, "f32 trim {name}");
+        assert_eq!(trimmed.samples_per_channel().get(), e.1 - e.0);
+        assert_eq!(
+            burst.split_db(&cfg).unwrap(),
+            pairs(&f[name]["split"]),
+            "f32 split {name}"
+        );
+        eprintln!("f32 trim/split {name:<20} {bounds:?} (exact)");
+    }
+    assert_eq!(
+        mono32("mix").split_db(&SilenceConfig::new(20.0)).unwrap(),
+        pairs(&f["mix_split"])
+    );
+}
+
+#[test]
+fn f32_lpc_matches_librosa() {
+    // The recursion runs in f64 for every input type and the coefficients are
+    // rounded to f32 once. f32 input holds the same PCM values as the f64
+    // signal, so the result is the f64 result rounded: compared with librosa's
+    // float64 coefficients the error is half an f32 ulp plus the f64 agreement.
+    // Measured: mix order 4 2.9e-8, mix order 16 1.9e-8, noise order 16 3.7e-10
+    // peak-relative. Bound 1.2e-7 (one f32 eps).
+    let f = &fixture()["lpc"];
+    for (sig, order) in [("mix", 4usize), ("mix", 16), ("noise", 16)] {
+        let x: Vec<f32> = signal(sig).iter().map(|&v| v as f32).collect();
+        let a = lpc(&x, std::num::NonZeroUsize::new(order).unwrap()).unwrap();
+        let a: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
+        check(
+            &format!("f32 lpc {sig} order {order} vs librosa float64"),
+            &a,
+            &f64s(&f[format!("{sig}_{order}")]),
+            1.2e-7,
+        );
+    }
+    // Against librosa's float32 recursion only where it is stable (noise). Its
+    // float32 round-off is the difference: measured 3.2e-8 at orders 4 and 16.
+    // Bound 1e-6.
+    let f = &f32_case()["lpc"];
+    for order in [4usize, 16] {
+        let x: Vec<f32> = signal("noise").iter().map(|&v| v as f32).collect();
+        let a = lpc(&x, std::num::NonZeroUsize::new(order).unwrap()).unwrap();
+        let a: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
+        check(
+            &format!("f32 lpc noise order {order} vs librosa float32"),
+            &a,
+            &f64s(&f[format!("noise_{order}")]),
+            1e-6,
+        );
+    }
+    // The trait method on f32 audio gives the same rounded coefficients.
+    let a = mono32("mix").lpc(nzu!(16)).unwrap();
+    let x: Vec<f32> = signal("mix").iter().map(|&v| v as f32).collect();
+    let b = lpc(&x, nzu!(16)).unwrap();
+    assert_eq!(a.row(0).to_vec(), b);
+}
+
+#[test]
+fn f32_clicks_match_librosa_float32() {
+    // librosa.clicks returns float32 by default; clicks::<f32> is the equivalent.
+    let f = &fixture()["clicks"];
+    let k = step("sig_step");
+    let rate = std::num::NonZeroU32::new(sr()).unwrap();
+    let y = clicks::<f32>(
+        ClickPositions::Times(&[0.1, 0.5, 0.52]),
+        rate,
+        &ClicksConfig::librosa(),
+    )
+    .unwrap();
+    // The click is computed in f64 and rounded to f32 once, then summed in f32
+    // (librosa does the same in float32): measured 5.3e-8 peak-relative. Bound:
+    // two f32 eps (2.4e-7).
+    let y = samples32(&y);
+    check(
+        "f32 clicks times",
+        &strided(&y, k),
+        &f64s(&f["times"]),
+        2.4e-7,
     );
 }

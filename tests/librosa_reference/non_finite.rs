@@ -85,12 +85,12 @@ fn non_finite_audio_is_rejected() {
         assert_rejected("time_stretch", y.time_stretch(1.5, &StftConfig::default()));
         assert_rejected(
             "pitch_shift",
-            y.pitch_shift(2.0, &PitchShiftConfig::default()),
+            y.pitch_shift(2.0, &PitchShiftConfig::librosa()),
         );
         assert_rejected("preemphasis", y.preemphasis(0.97));
-        assert_rejected("trim_db", y.trim_db(&SilenceConfig::default()));
-        assert_rejected("split_db", y.split_db(&SilenceConfig::default()));
-        assert_rejected("harmonic", y.harmonic(&HarmonicPercussiveConfig::default()));
+        assert_rejected("trim_db", y.trim_db(&SilenceConfig::librosa()));
+        assert_rejected("split_db", y.split_db(&SilenceConfig::librosa()));
+        assert_rejected("harmonic", y.harmonic(&HarmonicPercussiveConfig::librosa()));
         assert_rejected("lpc", y.lpc(nzu!(4)));
         let mut z = y.clone();
         assert_rejected(
@@ -143,4 +143,21 @@ fn non_finite_audio_is_rejected_by_pitch_tracking() {
         let y32 = AudioSamples::new_mono(Array1::from(x32), sample_rate!(22050)).unwrap();
         assert_rejected("yin f32", y32.yin(&YinConfig::librosa(65.0, 2093.0)));
     }
+}
+
+#[test]
+fn non_finite_f32_audio_is_rejected_by_effects() {
+    // f32 audio is processed in f32; the entry check is the same.
+    let mut x: Vec<f32> = (0..22050)
+        .map(|i| 0.3 * (i as f32 * 0.0627).sin())
+        .collect();
+    x[5000] = f32::NAN;
+    let y = AudioSamples::new_mono(Array1::from(x), sample_rate!(22050)).unwrap();
+    assert_rejected(
+        "f32 time_stretch",
+        y.time_stretch(1.5, &StftConfig::librosa()),
+    );
+    assert_rejected("f32 preemphasis", y.preemphasis(0.97));
+    assert_rejected("f32 trim_db", y.trim_db(&SilenceConfig::librosa()));
+    assert_rejected("f32 lpc", y.lpc(nzu!(4)));
 }

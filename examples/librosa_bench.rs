@@ -234,11 +234,11 @@ fn main() {
     b.run("time_stretch_1.25", || {
         y.time_stretch(1.25, &stft_cfg).unwrap()
     });
-    let c = PitchShiftConfig::default();
+    let c = PitchShiftConfig::librosa();
     b.run("pitch_shift_+4", || y.pitch_shift(4.0, &c).unwrap());
-    let c = HarmonicPercussiveConfig::default();
+    let c = HarmonicPercussiveConfig::librosa();
     b.run("hpss", || y.harmonic_percussive(&c).unwrap());
-    let c = SilenceConfig::default();
+    let c = SilenceConfig::librosa();
     b.run("trim_db", || y.trim_db(&c).unwrap());
     b.run("split_db", || y.split_db(&c).unwrap());
     b.run("preemphasis", || y.preemphasis(0.97).unwrap());
