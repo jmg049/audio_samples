@@ -106,11 +106,10 @@ bias of 33 is located in one of 8 segments (each twice as wide as the last);
 units; the very first code of segment 0 covers magnitude 0 alone, a step of 1). The result is a roughly constant SNR of 35-40 dB over a wide range of
 levels, with 8 bits instead of 14.
 
-Note: the library's `mu_compress` currently does not implement this formula
-(it deviates from the standard curve; see "Known issues" in the crate's
-`CHANGELOG.md`), so this chapter
-implements the curve itself and uses only the library's `mu_expand`, which does
-invert the standard curve.
+The library's [`mu_compress`](crate::AudioProcessing::mu_compress) implements
+this curve (it equals `librosa.mu_compress(quantize=False)`, and maps 0 to 0),
+and [`mu_expand`](crate::AudioProcessing::mu_expand) inverts it. This chapter
+also writes the curve out by hand and checks both against it.
 
 **Perceptual transform codecs.** All three codecs below split the signal into
 frequency bands with a modified discrete cosine transform (MDCT), a lapped
@@ -317,7 +316,8 @@ assert!((sl[0] - sl[4] - 40.0).abs() < 1.5);
 assert!(su[4] > sl[4] + 20.0);
 ```
 
-The continuous curve composed with the library's expander is the identity:
+The library's compressor equals the curve written out by hand (so
+$F(0) = 0$ and $F(\pm 1) = \pm 1$), and its expander inverts it:
 
 ```rust
 use audio_samples::{AudioProcessing, AudioSamples, sample_rate};
@@ -327,8 +327,14 @@ let mu: f64 = 255.0;
 let f = |x: f64| x.signum() * (1.0 + mu * x.abs()).ln() / (1.0 + mu).ln();
 let xs = [-0.9, -0.3, -0.01, 0.0, 0.02, 0.5, 1.0];
 let audio: AudioSamples<f64> =
-    AudioSamples::from_mono_vec(NonEmptyVec::new(xs.iter().map(|&x| f(x)).collect()).unwrap(), sample_rate!(8000));
-let back = audio.mu_expand(255.0).unwrap();
+    AudioSamples::from_mono_vec(NonEmptyVec::new(xs.to_vec()).unwrap(), sample_rate!(8000));
+let compressed = audio.mu_compress(255.0).unwrap();
+for (x, y) in xs.iter().zip(compressed.as_slice().unwrap()) {
+    assert!((f(*x) - y).abs() < 1e-12);
+}
+assert_eq!(compressed.as_slice().unwrap()[3], 0.0); // F(0) = 0
+assert!((compressed.as_slice().unwrap()[6] - 1.0).abs() < 1e-12); // F(1) = 1
+let back = compressed.mu_expand(255.0).unwrap();
 for (x, y) in xs.iter().zip(back.as_slice().unwrap()) {
     assert!((x - y).abs() < 1e-12);
 }
@@ -424,9 +430,11 @@ assert!((spl - 82.0).abs() < 1e-12);
   `PsychoacousticConfig` presets invert the slopes, and its `conservative` /
   `aggressive` preset names are also the reverse of their effect; set the
   fields yourself if you need a faithful model.
-- **`mu_compress` deviates from the μ-law formula** at present (see "Known
-  issues" in `CHANGELOG.md`); implement the curve yourself (as here) until it
-  is fixed.
+- **`mu_compress` is the continuous curve, not G.711.** It applies $F(x)$
+  without quantising (like `librosa.mu_compress(quantize=False)`); the 8-bit
+  segmented codes of G.711 are a different, piecewise-linear approximation.
+  For librosa's quantised μ-law use
+  [`mu_law_encode`](crate::mu_law_encode) / [`mu_law_decode`](crate::mu_law_decode).
 - **Not Opus.** `codecs::opus` is a teaching codec; it cannot read or write
   `.opus` files.
 

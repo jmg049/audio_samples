@@ -218,16 +218,21 @@ fn main() -> AudioSampleResult<()> {
     assert!((rows[0].1 - 49.9).abs() < 0.5);
     assert!((rows[0].1 - rows[4].1 - 40.0).abs() < 1.5);
     assert!(rows[4].0 > rows[4].1 + 20.0);
-    // Continuous mu-law + the library's mu_expand round-trips exactly.
+    // The library's mu_compress is the continuous curve (F(0) = 0) and its
+    // mu_expand inverts it exactly.
     let xs = [-0.9, -0.3, -0.01, 0.0, 0.02, 0.5, 1.0];
-    let compressed: Vec<f64> = xs.iter().map(|&x| mu_law(x, 255.0)).collect();
     let audio: AudioSamples<f64> =
-        AudioSamples::from_mono_vec(NonEmptyVec::new(compressed).unwrap(), sample_rate!(8000));
-    let expanded = audio.mu_expand(255.0)?;
+        AudioSamples::from_mono_vec(NonEmptyVec::new(xs.to_vec()).unwrap(), sample_rate!(8000));
+    let compressed = audio.mu_compress(255.0)?;
+    for (x, y) in xs.iter().zip(compressed.as_slice().unwrap()) {
+        assert!((mu_law(*x, 255.0) - y).abs() < 1e-12);
+    }
+    assert_eq!(compressed.as_slice().unwrap()[3], 0.0);
+    let expanded = compressed.mu_expand(255.0)?;
     for (x, y) in xs.iter().zip(expanded.as_slice().unwrap()) {
         assert!((x - y).abs() < 1e-12);
     }
-    println!("   library mu_expand inverts the standard curve to 1e-12");
+    println!("   library mu_compress equals F(x) and mu_expand inverts it, to 1e-12");
     println!();
 
     // ---------------------------------------------------------------- 6

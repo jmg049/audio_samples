@@ -134,8 +134,7 @@ liquid-dsp golden fixtures (`tests/filter_reference.rs`, generator in
 
 Known limitations worth telling students about are documented in each module
 and listed under "Known issues" in the crate's `CHANGELOG.md`. For example, in
-this release `mu_compress` deviates from the standard μ-law curve (it does
-not map 0 to 0), the external `spectrograms` crate's Kaiser window is inaccurate for
+this release the external `spectrograms` crate's Kaiser window is inaccurate for
 β > 3.75, the gammatone filterbank's default centre spacing is linear in Hz,
 and the mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`.
 
