@@ -974,9 +974,11 @@ where
     /// MinMax and Peak evaluate the map in `f64` and round back to the sample
     /// type, so they work for integer audio (Peak uses the normalised
     /// `[-1, 1]` scale of the sample type, MinMax the raw sample values).
-    /// Mean, Median and ZScore work on raw sample values and truncate toward
-    /// zero when written back to an integer type; ZScore output (values of a
-    /// few units) is only meaningful for float sample types.
+    /// Mean and Median work on raw sample values; for integer types the result
+    /// is rounded to nearest (half away from zero) and saturated to the type's
+    /// range. ZScore output (dimensionless values of a few units) cannot be
+    /// stored in an integer type, so ZScore returns an error for integer
+    /// sample types; convert to `f32` or `f64` first.
     ///
     /// # Arguments
     /// - `config` - Normalization configuration. Use the associated constructors
@@ -985,6 +987,8 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `min >= max` (MinMax), or if
     ///   the input is multi-channel (Median).
+    /// - [`crate::AudioSampleError::Unsupported`] for ZScore with an integer
+    ///   sample type (`u8`, `i16`, `I24`, `i32`).
     ///
     /// # Panics
     /// Panics if the configuration fields required by the selected method are
@@ -1020,6 +1024,8 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `min >= max` (MinMax), or if
     ///   the input is multi-channel (Median).
+    /// - [`crate::AudioSampleError::Unsupported`] for ZScore with an integer
+    ///   sample type (`u8`, `i16`, `I24`, `i32`).
     ///
     /// # Examples
     /// ```
@@ -1645,6 +1651,9 @@ where
     /// recording or processing. Only the 0 Hz bin of a DFT over the whole
     /// buffer changes; for a drifting offset use
     /// [`high_pass_filter`](Self::high_pass_filter) instead.
+    ///
+    /// The subtraction is done in `f64` on the raw sample values; for integer
+    /// sample types the result is rounded to nearest and saturated.
     ///
     /// # Errors
     /// Returns an error if the audio data layout is invalid or if mean computation fails.

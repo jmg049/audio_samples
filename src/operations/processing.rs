@@ -119,7 +119,7 @@ use crate::operations::traits::AudioIirFiltering;
 use crate::operations::types::ResamplingQuality;
 use crate::operations::types::{IirFilterDesign, NormalizationConfig, NormalizationMethod};
 use crate::repr::AudioData;
-use crate::traits::apply_gain_to_sample;
+use crate::traits::{apply_gain_to_sample, raw_f64_to_sample};
 use std::num::NonZeroUsize;
 
 #[cfg(feature = "resampling")]
@@ -289,21 +289,21 @@ where
     Ok(out)
 }
 
-/// Converts a raw-valued `f64` (same scale as the sample type's own values)
-/// back to `T`: floats are cast directly; integers are rounded to nearest and
-/// saturated to `[T::MIN, T::MAX]` instead of being truncated (or, for `I24`,
-/// wrapped) by a plain cast.
+/// Subtracts `offset` (on the raw scale of the sample values) from every
+/// sample. The difference is computed in `f64`; integer results are rounded to
+/// nearest and saturated (see [`raw_f64_to_sample`]), float results are cast.
 #[inline]
-fn raw_f64_to_sample<T>(v: f64) -> T
+fn subtract_raw_offset<T>(audio: &mut AudioSamples<'_, T>, offset: f64)
 where
     T: StandardSample,
 {
-    if T::SAMPLE_TYPE.is_float() {
-        T::cast_from(v)
-    } else {
-        let lo: f64 = T::MIN.cast_into();
-        let hi: f64 = T::MAX.cast_into();
-        T::cast_from(v.round().clamp(lo, hi))
+    let map = |x: T| -> T {
+        let x: f64 = x.cast_into();
+        raw_f64_to_sample(x - offset)
+    };
+    match audio.data_mut() {
+        AudioData::Mono(arr) => arr.mapv_inplace(map),
+        AudioData::Multi(arr) => arr.mapv_inplace(map),
     }
 }
 
@@ -328,9 +328,11 @@ where
     /// MinMax and Peak evaluate the map in `f64` and round back to the sample
     /// type, so they work for integer audio (Peak uses the normalised
     /// `[-1, 1]` scale of the sample type, MinMax the raw sample values).
-    /// Mean, Median and ZScore work on raw sample values and truncate toward
-    /// zero when written back to an integer type; ZScore output (values of a
-    /// few units) is only meaningful for float sample types.
+    /// Mean and Median work on raw sample values; for integer types the result
+    /// is rounded to nearest (half away from zero) and saturated to the type's
+    /// range. ZScore output (dimensionless values of a few units) cannot be
+    /// stored in an integer type, so ZScore returns an error for integer
+    /// sample types; convert to `f32` or `f64` first.
     ///
     /// # Arguments
     /// - `config` - Normalization configuration. Use the associated constructors
@@ -342,6 +344,8 @@ where
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if `min >= max` (MinMax), or if
     ///   the input is multi-channel (Median).
+    /// - [`crate::AudioSampleError::Unsupported`] for ZScore with an integer
+    ///   sample type (`u8`, `i16`, `I24`, `i32`).
     ///
     /// # Panics
     /// Panics if the configuration fields required by the selected method are
@@ -439,25 +443,10 @@ where
             }
 
             NormalizationMethod::Mean => {
-                // Mean normalization: subtract mean to center around zero
+                // Mean normalization: subtract the mean (of the raw sample
+                // values) to center around zero.
                 let mean: f64 = self.mean();
-
-                match self.data_mut() {
-                    AudioData::Mono(arr) => {
-                        arr.mapv_inplace(|x| {
-                            let x: f64 = x.cast_into();
-                            let diff = x - mean;
-                            Self::Sample::cast_from(diff)
-                        });
-                    }
-                    AudioData::Multi(arr) => {
-                        arr.mapv_inplace(|x| {
-                            let x: f64 = x.cast_into();
-                            let diff = x - mean;
-                            Self::Sample::cast_from(diff)
-                        });
-                    }
-                }
+                subtract_raw_offset(self, mean);
             }
 
             NormalizationMethod::Median => {
@@ -478,64 +467,37 @@ where
                 } else {
                     sorted[n / 2]
                 };
-
-                match self.data_mut() {
-                    AudioData::Mono(arr) => {
-                        arr.mapv_inplace(|x| {
-                            let x: f64 = x.cast_into();
-                            let diff = x - median;
-                            Self::Sample::cast_from(diff)
-                        });
-                    }
-                    AudioData::Multi(arr) => {
-                        arr.mapv_inplace(|x| {
-                            let x: f64 = x.cast_into();
-                            let diff = x - median;
-                            Self::Sample::cast_from(diff)
-                        });
-                    }
-                }
+                subtract_raw_offset(self, median);
             }
 
             NormalizationMethod::ZScore => {
+                // Z-scores are dimensionless values of a few units; an integer
+                // sample type would round them to a handful of codes around
+                // zero, which is silence, so integer input is rejected.
+                if !T::SAMPLE_TYPE.is_float() {
+                    return Err(AudioSampleError::unsupported(
+                        "normalize (ZScore)",
+                        format!(
+                            "z-score output (zero mean, unit standard deviation) cannot be represented by the integer sample type {}; convert to f32 or f64 first (e.g. audio.to_format::<f64>())",
+                            T::SAMPLE_TYPE
+                        ),
+                    ));
+                }
                 // Z-Score normalization: zero mean, unit variance
                 let mean: f64 = self.mean();
                 let std_dev: f64 = self.std_dev();
 
                 if std_dev == 0.0f64 {
                     // All values are the same, just subtract mean
-                    match self.data_mut() {
-                        AudioData::Mono(arr) => {
-                            arr.mapv_inplace(|x| {
-                                let x: f64 = x.cast_into();
-                                let diff = x - mean;
-                                Self::Sample::cast_from(diff)
-                            });
-                        }
-                        AudioData::Multi(arr) => {
-                            arr.mapv_inplace(|x| {
-                                let x: f64 = x.cast_into();
-                                let diff = x - mean;
-                                Self::Sample::cast_from(diff)
-                            });
-                        }
-                    }
+                    subtract_raw_offset(self, mean);
                 } else {
+                    let map = |x: T| -> T {
+                        let x: f64 = x.cast_into();
+                        Self::Sample::cast_from((x - mean) / std_dev)
+                    };
                     match self.data_mut() {
-                        AudioData::Mono(arr) => {
-                            arr.mapv_inplace(|x| {
-                                let x: f64 = x.cast_into();
-                                let diff = x - mean;
-                                Self::Sample::cast_from(diff / std_dev)
-                            });
-                        }
-                        AudioData::Multi(arr) => {
-                            arr.mapv_inplace(|x| {
-                                let x: f64 = x.cast_into();
-                                let diff = x - mean;
-                                Self::Sample::cast_from(diff / std_dev)
-                            });
-                        }
+                        AudioData::Mono(arr) => arr.mapv_inplace(map),
+                        AudioData::Multi(arr) => arr.mapv_inplace(map),
                     }
                 }
             }
@@ -591,6 +553,9 @@ where
     /// buffer changes; for a drifting offset use
     /// [`high_pass_filter`](AudioProcessing::high_pass_filter) instead.
     ///
+    /// The subtraction is done in `f64` on the raw sample values; for integer
+    /// sample types the result is rounded to nearest and saturated.
+    ///
     /// # Returns
     /// The audio samples with the DC offset removed.
     ///
@@ -608,23 +573,7 @@ where
     #[inline]
     fn remove_dc_offset_in_place(&mut self) -> AudioSampleResult<()> {
         let mean: f64 = self.mean();
-
-        match self.data_mut() {
-            AudioData::Mono(arr) => {
-                arr.mapv_inplace(|x| {
-                    let x: f64 = x.cast_into();
-                    let diff = x - mean;
-                    Self::Sample::cast_from(diff)
-                });
-            }
-            AudioData::Multi(arr) => {
-                arr.mapv_inplace(|x| {
-                    let x: f64 = x.cast_into();
-                    let diff = x - mean;
-                    Self::Sample::cast_from(diff)
-                });
-            }
-        }
+        subtract_raw_offset(self, mean);
         Ok(())
     }
 

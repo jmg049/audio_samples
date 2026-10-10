@@ -590,6 +590,27 @@ where
     }
 }
 
+/// Converts a raw-valued `f64` (on the same scale as the sample type's own
+/// values, e.g. `-32768.0..=32767.0` for `i16`) back to `T`.
+///
+/// Float sample types are cast directly. Integer sample types are rounded to
+/// nearest (half away from zero) and saturated to `[T::MIN, T::MAX]`. A plain
+/// [`CastFrom`] would truncate toward zero and, for `I24`, wrap on overflow.
+#[cfg(feature = "processing")]
+#[inline]
+pub(crate) fn raw_f64_to_sample<T>(v: f64) -> T
+where
+    T: StandardSample,
+{
+    if T::SAMPLE_TYPE.is_float() {
+        T::cast_from(v)
+    } else {
+        let lo: f64 = T::MIN.cast_into();
+        let hi: f64 = T::MAX.cast_into();
+        T::cast_from(v.round().clamp(lo, hi))
+    }
+}
+
 // Identity
 macro_rules! impl_identity_conversion {
     ($ty:ty) => {
