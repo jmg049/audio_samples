@@ -9,16 +9,114 @@ All notable changes to this project are documented here.
   `AudioRhythm`, `AudioEffects` and `AudioPitchTracking` traits, the
   `operations::sequence` module and librosa unit conversions in
   `utils::audio_math`, with new features `feature-extraction`, `effects` and
-  `sequence` (all in `full_no_plotting`). Every new config's `Default` reproduces
-  librosa's defaults, outputs are `(channels, features, frames)` arrays, and
-  results are verified against librosa 1.0.0 golden fixtures
+  `sequence` (all in `full_no_plotting`). Every new config has a `librosa()`
+  constructor with librosa's defaults; `Default` equals it except where librosa's
+  default changes the data without being asked (see *librosa-compatible API:
+  precision and defaults*). Outputs are `(channels, features, frames)` arrays in
+  the input's float type (`f32` for `u8`/`i16`/`I24`/`f32` audio, `f64` for
+  `i32`/`f64`), and results are verified against librosa 1.0.0 golden fixtures
   (`tests/librosa_reference/`). The audit behind it also fixed bugs in existing
   analysis code (YIN, `estimate_key`, autocorrelation, mu-law, the resampler,
   ...; see *Fixed*) and made the default onset peak picker usable (see *Changed*). `documentation/LIBROSA_MIGRATION.md`
   (rendered as the `librosa_migration` module on docs.rs) maps every librosa
   function to its counterpart and lists every difference.
 
+### Output changes in released (2.0.x) APIs
+
+These change the output of existing operations for **integer** sample types
+(`u8`, `i16`, `I24`, `i32`). Output for `f32` and `f64` audio is unchanged.
+
+- **`normalize` with `NormalizationMethod::ZScore` returns
+  `AudioSampleError::Unsupported` for integer sample types.** It used to return
+  z-scores truncated to the integers -1..=1, which is silence. Convert first
+  with `to_format::<f64>()`.
+- **`to_mono(MonoConversionMethod::Weighted(..))` and
+  `to_mono(MonoConversionMethod::Center)` returned all-zero output** for integer
+  audio; they now return the weighted sum and the channel average.
+- `normalize` with `Mean` or `Median`, and `remove_dc_offset`, round integer
+  results to the nearest value and saturate, instead of truncating toward zero
+  (Mean of `[1, 2, 4]` as `i16` is now `[-1, 0, 2]`, was `[-1, 0, 1]`). `I24`
+  no longer wraps on overflow.
+- `to_mono(Average)`, `to_stereo(StereoConversionMethod::Pan(..))`, `pan` and
+  `balance` round and saturate integer results instead of truncating. `pan` and
+  `balance` no longer wrap `I24` on overflow, and for `u8` they scale around the
+  mid-scale value 128.
+
+### librosa-compatible API: precision and defaults
+
+The librosa-compatible API is unreleased, so these are changes to the
+`[Unreleased]` additions listed below, not to 2.0.x.
+
+- **Analysis output follows the input precision.** The traits gain
+  `type Float` (= `T::Float`), and their outputs are `Array*<Self::Float>` /
+  `Array*<Complex<Self::Float>>`: `f32` for `u8`, `i16`, `I24` and `f32` audio,
+  `f64` for `i32` and `f64` audio. The computation runs natively in that type,
+  so `f32` analysis needs half the memory. The free functions on arrays are
+  generic over `F: AudioFloat` and return the element type of their input;
+  untyped float literals passed to them can need a suffix (`1.0_f64`). Filter
+  tables (windows, mel and chroma bases, wavelets, weightings) stay `f64`
+  functions and are rounded once when applied. Tempo, tuning estimates and
+  event times stay `f64`. Result structs take a type parameter defaulting to
+  `f64` (`PyinResult<F>`, `ReassignedSpectrogram<F>`, `DtwResult<F>`,
+  `RqaResult<F>`, `ViterbiResult<F>`, `ViterbiBinaryResult<F>`,
+  `FrequencyGrid<'a, F>`); unconstrained `transition_*` calls need `::<f64>`.
+  Exceptions that compute in `f64` and round once: LPC's Burg recursion,
+  the analysis STFT of `time_stretch` / `pitch_shift`, the polynomial fit of
+  `poly_features`, and the resampling inside `pitch_shift` and the CQT.
+- **Audio-returning operations return the input's sample type.**
+  `AudioSpectrum::istft_matrix`, `AudioConstantQ::icqt`,
+  `AudioConstantQ::griffinlim_cqt` and `AudioEffects::griffinlim_audio` return
+  `AudioSamples<Self::Sample>` (they returned `AudioSamples<f64>`), and
+  `operations::effects::clicks` is generic: `clicks::<T>`. The `AudioEffects`
+  methods (`time_stretch`, `pitch_shift`, `preemphasis`, `trim_db`, `remix`,
+  `harmonic`, ...) compute in `T::Float` instead of `f64`; `i16` results are
+  within 1 LSB of the `f64` path re-quantised.
+- **`librosa()` constructors** on every librosa-compatible config return
+  librosa 1.0's defaults exactly (`DbConfig::librosa_power()` /
+  `librosa_amplitude()` for the dB configs; `YinConfig::librosa(fmin, fmax)` and
+  `PyinConfig::librosa(fmin, fmax)`). The golden-fixture tests use them.
+- **Defaults that no longer follow librosa,** because librosa's default changes
+  the data without being asked:
+  - `DbConfig::power()` / `amplitude()` (and so `DbConfig::default()` and
+    `MfccConfig::default()`) apply no dynamic-range floor (librosa:
+    `top_db=80`).
+  - `ChromaStftConfig.tuning` and `ChromaCqtConfig.tuning` (and
+    `ChromaCensConfig`, `TonnetzConfig`) default to `Some(0.0)`; `None` still
+    estimates the tuning from the signal (librosa's default).
+  - `BeatTrackConfig.trim` defaults to `false` (librosa: `True`, which drops
+    weak leading and trailing beats).
+  - `GriffinLimInit::default()` is `Random(Some(0))`, so repeated calls give
+    the same output (librosa: unseeded).
+- **Values the caller must give:** `YinConfig` and `PyinConfig` have no
+  `Default` (`new(fmin, fmax)`; librosa requires both, the crate used to
+  supply C2..C7). `PeakPickConfig` has no `Default`/`new()`; use
+  `for_onsets(sample_rate, hop_length)` (the old default hard-coded 22050 Hz
+  and hop 512). `PcenConfig` has no `Default` (`new(hop_length)`; it must equal
+  the spectrogram's hop). `SilenceConfig` has no `Default` (`new(top_db)`; the
+  threshold decides how much `trim_db` removes). `ClicksConfig.hop_length` moved
+  into `ClickPositions::Frames { frames, hop_length }`.
+- Every other default equals librosa's. The defaults review, with the open
+  questions (frame sizes in samples rather than seconds, `n_mels`, the mel
+  scale, chroma and tempogram normalisation, tempo priors, CQT range), is
+  summarised in `documentation/LIBROSA_MIGRATION.md` under *Defaults that
+  differ from librosa*.
+
 ### Added
+
+- `AudioFloat`, a sealed trait implemented by `f32` and `f64` that bundles what
+  generic analysis code needs (`num_traits::Float` and `FloatConst` through
+  `ndarray::NdFloat`, `Sum`, `Product`, `rustfft::FftNum` with `transforms`),
+  with `F::of(f64)`, `F::of_usize(usize)` and `x.as_f64()` for conversions.
+  `AudioSample` gains the associated type `Float` (the analysis float type of
+  the sample type) and `to_float` / `from_float`. Implementations of
+  `AudioSample` outside this crate must add them.
+- `AudioProcessing::apply_window_f64` / `apply_window_f64_in_place` and
+  `apply_filter_f64` / `apply_filter_f64_in_place` take the window or FIR taps
+  as `f64` for every sample type, compute in `f64` and return the input's
+  sample type (integer results rounded and saturated). For integer audio this
+  allows fractional windows and taps outside [-1, 1] (`apply_filter` with `i16`
+  taps clamps `[1.5, -0.5]` to `[32767, -16384]`). For `f32` / `f64` audio
+  they give the same results as `apply_window` / `apply_filter`.
 
 - `educational::explain` (`educational` feature): explanations computed from
   your settings, before anything runs. `ExplainDoc` holds a summary, the
@@ -171,6 +269,13 @@ All notable changes to this project are documented here.
   output; the companion librosa script lives outside the repository).
 
 - `PeakPickConfig::new()` (same as `Default`).
+
+### Deprecated
+
+- `AudioProcessing::apply_window` / `apply_window_in_place`: the window has the
+  sample type and the product is computed in that type, so integer audio can
+  only use the coefficients 0 and 1, and larger values overflow. Use
+  `apply_window_f64`. Behaviour is unchanged.
 
 ### Fixed
 

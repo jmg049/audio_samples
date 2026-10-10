@@ -20,19 +20,27 @@ from librosa, the cause is listed under
   layout, so methods take no `sr` argument. Free functions that work on bare
   arrays (filterbanks, unit conversions, `*_from_spectrogram` forms) take the
   rate explicitly.
-- **Defaults are librosa's defaults.** Every librosa-compatible operation takes a
-  config struct (`StftConfig`, `MelSpectrogramConfig`, `OnsetStrengthConfig`,
-  ...) whose `Default` (and `new()`) reproduces librosa 1.0's keyword defaults.
-  `X::default()` therefore gives librosa's output. Change one field with
-  struct-update syntax (`StftConfig { n_fft: nzu!(1024), ..Default::default() }`)
-  or with the chainable `with_<field>` builders. The operation validates the config
-  and returns a typed error for invalid values. It does not panic.
+- **`X::librosa()` gives librosa's defaults; `X::default()` gives this crate's.**
+  Every librosa-compatible operation takes a config struct (`StftConfig`,
+  `MelSpectrogramConfig`, `OnsetStrengthConfig`, ...). Each config has a
+  `librosa()` constructor that reproduces librosa 1.0's keyword defaults exactly;
+  use it when porting a librosa pipeline or comparing results. `Default` (and
+  `new()`) is this crate's default, which equals librosa's except where librosa's
+  default changes the data without the caller asking for it (see
+  [Defaults that differ from librosa](#defaults-that-differ-from-librosa)).
+  Where librosa has no default (`yin` / `pyin` `fmin` and `fmax`,
+  `util.peak_pick`'s windows) or where no single value suits all inputs (the
+  `trim` threshold, the PCEN hop), the config has no `Default` and its `new`
+  takes the value. Change one field with struct-update syntax
+  (`StftConfig { n_fft: nzu!(1024), ..StftConfig::librosa() }`) or with the
+  chainable `with_<field>` builders. The operation validates the config and
+  returns a typed error for invalid values. It does not panic.
 - **`op` / `op_in_place`.** Every audio-to-audio operation (`time_stretch`,
   `pitch_shift`, `preemphasis`, `trim_db`, `harmonic`, ...) borrows and returns a
   new `AudioSamples`. Each also has an `_in_place` twin that mutates the receiver.
   Analysis methods return arrays or structs and have no in-place form.
 - **Shapes always include the channel axis.** Frame-wise outputs are
-  `ndarray::Array3<f64>` (or `Array3<Complex<f64>>`) shaped
+  `ndarray::Array3<F>` (or `Array3<Complex<F>>`, with `F` as below) shaped
   `(channels, n_features, n_frames)`. Mono input gives `channels == 1`, where
   librosa would drop the leading axis. Per-frame scalars (centroid, RMS, ZCR)
   are `(channels, 1, n_frames)`. Onset envelopes and pitch tracks are
@@ -45,9 +53,26 @@ from librosa, the cause is listed under
   slightly stricter than librosa, which skips the check in a few functions
   (e.g. `preemphasis`, `remix` without `align_zeros`). Free functions on bare
   arrays (`power_to_db`, `*_from_spectrogram`, ...) do not check.
-- **Everything is `f64`.** Input samples of any type (`i16`, `f32`, ...) are
-  converted with the crate's audio-aware conversion. Outputs are always `f64` or
-  `Complex<f64>`; librosa keeps `float32`/`complex64` for `float32` input.
+- **Output precision follows the input.** Analysis runs in, and returns,
+  `T::Float`: the smallest float type that holds every sample of the input type
+  `T` exactly. `u8`, `i16`, `I24` and `f32` audio give `f32` / `Complex<f32>`;
+  `i32` and `f64` audio give `f64` / `Complex<f64>`. The computation itself runs
+  in that type, so `f32` analysis needs half the memory of `f64`. Samples are
+  converted with the crate's audio-aware conversion. librosa also keeps
+  `float32` / `complex64` for `float32` input. Free functions on arrays are
+  generic over `f32` and `f64` and return the element type of their input.
+  Filter tables (windows, mel and chroma bases, CQT wavelets) are computed in
+  `f64` and rounded once. Discrete or scalar summaries stay `f64`: tempo in BPM,
+  tuning estimates and event times. See
+  [Output precision](#output-precision) for the remaining differences from
+  librosa's `float32` path.
+- **Audio-to-audio operations return the input's sample type.** `time_stretch`,
+  `pitch_shift`, `preemphasis`, `trim_db`, `harmonic`, `remix`, ... on
+  `AudioSamples<i16>` return `AudioSamples<i16>`, computed in `T::Float` and
+  converted back with rounding and saturation. The constructors that build audio
+  from a matrix (`istft_matrix`, `icqt`, `griffinlim_cqt`, `griffinlim_audio`)
+  return the sample type of the `AudioSamples` type they are called on, and
+  `clicks::<T>` is generic like the other signal generators.
 - **Names.** librosa's name is kept unless it clashes with an existing method.
   Clashing frame-wise variants take a `_frames` suffix (`mfcc_frames`,
   `spectral_centroid_frames`, `rms_frames`, ...), and the complex STFT is
@@ -98,13 +123,13 @@ use std::time::Duration;
 let y = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
 
 // D = librosa.stft(y)  -> librosa shape (1025, 44); here (channels, 1025, 44)
-let d = y.stft_matrix(&StftConfig::default()).unwrap();
+let d = y.stft_matrix(&StftConfig::librosa()).unwrap();
 assert_eq!(d.dim(), (1, 1025, 44));
 
 // librosa.istft(D, length=len(y))
 let n = y.samples_per_channel();
 let y_hat =
-    AudioSamples::<f32>::istft_matrix(&d, &StftConfig::default(), sample_rate!(22050), Some(n))
+    AudioSamples::<f32>::istft_matrix(&d, &StftConfig::librosa(), sample_rate!(22050), Some(n))
         .unwrap();
 assert_eq!(y_hat.samples_per_channel(), n);
 ```
@@ -119,7 +144,7 @@ use std::time::Duration;
 let y = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
 
 // S = librosa.feature.melspectrogram(y=y, sr=sr)   (128 Slaney mel bands, power 2)
-let s = y.melspectrogram(&MelSpectrogramConfig::default()).unwrap();
+let s = y.melspectrogram(&MelSpectrogramConfig::librosa()).unwrap();
 assert_eq!(s.dim(), (1, 128, 44));
 
 // librosa.power_to_db(S, ref=np.max)   (top_db = 80, applied per channel)
@@ -144,8 +169,8 @@ let mfcc = y.mfcc_frames(&MfccConfig::librosa()).unwrap();
 assert_eq!(mfcc.dim(), (1, 20, 44));
 
 // librosa.feature.delta(mfcc) and librosa.feature.delta(mfcc, order=2)
-let d1 = delta(&mfcc, &DeltaConfig::default()).unwrap();
-let d2 = delta(&mfcc, &DeltaConfig { order: 2, ..DeltaConfig::default() }).unwrap();
+let d1 = delta(&mfcc, &DeltaConfig::librosa()).unwrap();
+let d2 = delta(&mfcc, &DeltaConfig { order: 2, ..DeltaConfig::librosa() }).unwrap();
 assert_eq!(d1.dim(), mfcc.dim());
 assert_eq!(d2.dim(), mfcc.dim());
 ```
@@ -162,16 +187,16 @@ use std::time::Duration;
 let y = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
 
 // librosa.feature.spectral_centroid / rms / zero_crossing_rate: (1, 1, 44) each
-let centroid = y.spectral_centroid_frames(&SpectralCentroidConfig::default()).unwrap();
-let rms = y.rms_frames(&RmsConfig::default()).unwrap();
-let zcr = y.zero_crossing_rate_frames(&ZeroCrossingRateConfig::default()).unwrap();
+let centroid = y.spectral_centroid_frames(&SpectralCentroidConfig::librosa()).unwrap();
+let rms = y.rms_frames(&RmsConfig::librosa()).unwrap();
+let zcr = y.zero_crossing_rate_frames(&ZeroCrossingRateConfig::librosa()).unwrap();
 assert_eq!(centroid.dim(), (1, 1, 44));
 assert_eq!(rms.dim(), (1, 1, 44));
 assert_eq!(zcr.dim(), (1, 1, 44));
 assert!((centroid[[0, 0, 20]] - 440.0).abs() < 20.0);
 
 // librosa.feature.chroma_stft(y=y, sr=sr): A (pitch class 9) is the maximum
-let chroma = y.chroma_stft(&ChromaStftConfig::default()).unwrap();
+let chroma = y.chroma_stft(&ChromaStftConfig::librosa()).unwrap();
 assert_eq!(chroma.dim(), (1, 12, 44));
 assert_eq!(chroma[[0, 9, 20]], 1.0);
 ```
@@ -291,7 +316,7 @@ function under `audio_samples::`.
 | `autocorrelate` | `AudioStatistics::autocorrelation` | `statistics` | equivalent with differences | Returns the unbiased estimate: `r[k] * (n - k)` equals librosa's raw sum. librosa also autocorrelates every channel |
 | `lpc` | `AudioEffects::lpc`, `operations::effects::lpc` | `effects` | equivalent | Burg's method, one row per channel |
 | `zero_crossings` | `AudioStatistics::zero_crossings` | `statistics` | equivalent with differences | Returns a count, not a per-sample boolean mask; no `threshold` / `ref_magnitude` / `zero_pos` options. The librosa-compatible frame-wise rate is `AudioFeatures::zero_crossing_rate_frames` |
-| `clicks` | `operations::effects::clicks` (`ClicksConfig`, `ClickPositions`) | `effects` | equivalent with differences | Returns `f64` audio. No multichannel custom click |
+| `clicks` | `operations::effects::clicks` (`ClicksConfig`, `ClickPositions`) | `effects` | equivalent with differences | `clicks::<T>` returns audio of any sample type; frame positions carry their hop (`ClickPositions::Frames { frames, hop_length }`). No multichannel custom click |
 | `tone` | `sine_wave` | – | equivalent with differences | No `phi`; the duration is a `Duration` |
 | `chirp` | `chirp` (linear), `exponential_chirp` (logarithmic, librosa's default `linear=False`) | – | equivalent with differences | No `phi` |
 | `mu_compress` | `AudioProcessing::mu_compress`, `mu_law_encode` | `processing` | equivalent | `mu_compress` equals `quantize=False`; `mu_law_encode` returns librosa's default integer codes (`quantize=True`) |
@@ -306,7 +331,7 @@ function under `audio_samples::`.
 | `magphase` | `AudioTransforms::magphase` | `transforms` | equivalent with differences | 2-D input only; `power` is an integer (librosa accepts any float) |
 | `reassigned_spectrogram` | `AudioFeatures::reassigned_spectrogram` (`ReassignedSpectrogramConfig`) | `feature-extraction` | equivalent | |
 | `phase_vocoder` | `operations::effects::phase_vocoder`, `operations::effects::phase_vocoder_at` (`t_out`) | `effects` | equivalent with differences | The deprecated `hop_length` / `n_fft` arguments are not accepted |
-| `griffinlim` | `operations::effects::griffinlim`, `AudioEffects::griffinlim_audio` (`GriffinLimConfig`) | `effects` | equivalent with differences | `GriffinLimInit::ZeroPhase` matches `init=None`. Random phases come from this crate's RNG |
+| `griffinlim` | `operations::effects::griffinlim`, `AudioEffects::griffinlim_audio` (`GriffinLimConfig`) | `effects` | equivalent with differences | `GriffinLimInit::ZeroPhase` matches `init=None`. Random phases come from this crate's RNG; the default seed is 0 (librosa: unseeded) |
 | `iirt` | – | – | not provided: deferred | Needs elliptic order selection (`ellipord`) for its semitone filterbank |
 | `fmt` | – | – | not provided: deferred | Rarely used; needs a cubic-spline exponential resampler |
 | `pcen` | `operations::features::pcen`, `operations::features::pcen_with_state` (`zi`/`zf`) | `feature-extraction` | equivalent | |
@@ -391,8 +416,8 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
-| `melspectrogram` | `AudioSpectrum::melspectrogram`, `operations::spectrum::melspectrogram_from_spectrogram` | `transforms` | equivalent with differences | `f64` mel basis (librosa: `float32`, ~1e-7 relative) |
-| `mfcc` | `AudioSpectrum::mfcc_frames` (`MfccConfig`), `operations::spectrum::mfcc_from_mel_db` | `transforms` | equivalent with differences | `f64` mel basis; `n_mfcc > n_mels` is an error |
+| `melspectrogram` | `AudioSpectrum::melspectrogram`, `operations::spectrum::melspectrogram_from_spectrogram` | `transforms` | equivalent with differences | Mel basis computed in `f64` and rounded to the output type (librosa's default basis is `float32`, ~1e-7 relative for `f64` output) |
+| `mfcc` | `AudioSpectrum::mfcc_frames` (`MfccConfig`), `operations::spectrum::mfcc_from_mel_db` | `transforms` | equivalent with differences | As `melspectrogram`; no 80 dB floor by default (`MfccConfig::librosa()` has it); `n_mfcc > n_mels` is an error |
 | `delta` | `operations::spectrum::delta` (`DeltaConfig`, `DeltaMode`) | `transforms` | equivalent | |
 | `stack_memory` | `operations::spectrum::stack_memory` | `transforms` | equivalent | |
 | `spectral_centroid` | `AudioFeatures::spectral_centroid_frames`, `operations::features::spectral_centroid_from_spectrogram` | `feature-extraction` | equivalent | |
@@ -401,9 +426,9 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `spectral_flatness` | `AudioFeatures::spectral_flatness_frames`, `operations::features::spectral_flatness_from_spectrogram` | `feature-extraction` | equivalent | |
 | `spectral_rolloff` | `AudioFeatures::spectral_rolloff_frames`, `operations::features::spectral_rolloff_from_spectrogram` | `feature-extraction` | equivalent | |
 | `poly_features` | `AudioFeatures::poly_features`, `operations::features::poly_features_from_spectrogram` | `feature-extraction` | equivalent with differences | Rank-deficient fits are an error (NumPy warns and returns a minimum-norm solution) |
-| `rms` | `AudioFeatures::rms_frames`, `operations::features::rms_from_spectrogram` | `feature-extraction` | equivalent with differences | Computed in `f64` (librosa: `float32`, ~1e-7 relative) |
+| `rms` | `AudioFeatures::rms_frames`, `operations::features::rms_from_spectrogram` | `feature-extraction` | equivalent with differences | Computed in `T::Float`; librosa computes the mean square in `float32` even for `float64` input (~1e-7 relative for `f64` output) |
 | `zero_crossing_rate` | `AudioFeatures::zero_crossing_rate_frames` | `feature-extraction` | equivalent | |
-| `chroma_stft` | `AudioTonal::chroma_stft`, `operations::tonal::chroma_stft_from_spectrogram` | `feature-extraction` | equivalent with differences | `f64` chroma basis; with odd `n_fft` the configured `n_fft` is used for tuning |
+| `chroma_stft` | `AudioTonal::chroma_stft`, `operations::tonal::chroma_stft_from_spectrogram` | `feature-extraction` | equivalent with differences | Chroma basis computed in `f64`; `tuning` defaults to `0.0` (librosa: estimated); with odd `n_fft` the configured `n_fft` is used for tuning |
 | `chroma_cqt` | `AudioConstantQ::chroma_cqt` | `transforms` + `resampling` + `feature-extraction` | equivalent with differences | Inherits the CQT resampler difference |
 | `chroma_cens` | `AudioConstantQ::chroma_cens`, `operations::constant_q::chroma_cens_from_chroma` | as above | equivalent with differences | As `chroma_cqt` |
 | `chroma_vqt` | `AudioConstantQ::chroma_vqt` | as above | equivalent with differences | As `vqt` |
@@ -428,7 +453,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `pitch_shift` | `AudioEffects::pitch_shift` (`PitchShiftConfig`) | equivalent with differences | The final resampling uses the crate's resampler, not soxr (about 68 dB SNR against librosa) |
 | `preemphasis` | `AudioEffects::preemphasis`, `operations::effects::preemphasis_with_state` (`zi`, returns `zf`) | equivalent | |
 | `deemphasis` | `AudioEffects::deemphasis`, `operations::effects::deemphasis_with_state` | equivalent | |
-| `trim` | `AudioEffects::trim_db` (`SilenceConfig`) | equivalent with differences | Returns `(trimmed, (start, end))`. Frame RMS is `f64` (librosa: `float32`), so a frame within ~1e-6 dB of the threshold can be classified differently |
+| `trim` | `AudioEffects::trim_db` (`SilenceConfig`) | equivalent with differences | Returns `(trimmed, (start, end))`. `SilenceConfig::new(top_db)` takes the threshold (`SilenceConfig::librosa()` is 60 dB). For `f64` input the frame RMS is `f64` (librosa: `float32`), so a frame within ~1e-6 dB of the threshold can be classified differently |
 | `split` | `AudioEffects::split_db`, `operations::effects::nonsilent_frames` | equivalent with differences | As `trim` |
 | `remix` | `AudioEffects::remix` | equivalent | |
 | `hpss` | `AudioEffects::harmonic_percussive` (`HarmonicPercussiveConfig`) | equivalent with differences | `config.stft.window` is used (librosa accepts `window` but always uses Hann) |
@@ -439,7 +464,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
-| `onset.onset_strength` | `AudioRhythm::onset_strength` (`OnsetStrengthConfig`), `operations::rhythm::onset_strength_from_db` | `beat-tracking` | equivalent | `f64` mel basis |
+| `onset.onset_strength` | `AudioRhythm::onset_strength` (`OnsetStrengthConfig`), `operations::rhythm::onset_strength_from_db` | `beat-tracking` | equivalent | Mel basis computed in `f64`; keeps librosa's 80 dB floor |
 | `onset.onset_strength_multi` | `AudioRhythm::onset_strength_multi`, `operations::rhythm::onset_strength_multi_from_db` | `beat-tracking` | equivalent | |
 | `onset.onset_detect` | `AudioRhythm::onset_detect` (`OnsetDetectConfig`), `operations::rhythm::onset_detect_from_envelope` | `beat-tracking` | equivalent with differences | Mono audio only. Returns `FrameEvents` (frames, plus `samples()` and `times()` for librosa's `units=`) |
 | `onset.onset_backtrack` | `operations::rhythm::onset_backtrack`, or `OnsetDetectConfig::backtrack` | `beat-tracking` | equivalent with differences | An empty event list returns an empty vector (librosa raises) |
@@ -459,7 +484,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
 | `get_window` | `operations::filterbanks::get_window` (`Window`) | `transforms` | equivalent | Periodic (`fftbins=True`) or symmetric |
-| `mel` | `operations::filterbanks::mel_filterbank` (`MelFilterbankConfig`, `MelFilterNorm`, `MelScale`) | `transforms` | equivalent with differences | `f64` weights (librosa: `float32`); empty filters are returned silently as zero rows (librosa warns) |
+| `mel` | `operations::filterbanks::mel_filterbank` (`MelFilterbankConfig`, `MelFilterNorm`, `MelScale`) | `transforms` | equivalent with differences | `f64` weights (librosa: `float32`), rounded to the spectrogram's type when applied; empty filters are returned silently as zero rows (librosa warns) |
 | `chroma` | `operations::tonal::chroma_filterbank` (`ChromaFilterbankConfig`) | `feature-extraction` | equivalent with differences | `f64` weights (librosa: `float32`) |
 | `cq_to_chroma` | `operations::constant_q::cq_to_chroma` | `transforms` + `resampling` | equivalent with differences | No smoothing `window` |
 | `wavelet` | `operations::constant_q::wavelet` (`WaveletConfig`) | `transforms` + `resampling` | equivalent with differences | `Complex<f64>` filters (librosa: `complex64`) |
@@ -543,18 +568,20 @@ in the API docs, gathered here by theme.
 - **The channel axis is always present.** librosa drops the leading axis for
   mono input; here frame-wise outputs are `(channels, n_features, n_frames)`,
   envelopes and pitch tracks `(channels, n_frames)`, and tempi `(channels, 1)`.
-- **Outputs are `f64` / `Complex<f64>`.** librosa preserves `float32` and
-  `complex64`, and several librosa bases default to single precision even for
-  `float64` input. Here they are `f64`:
-  - the mel basis (`filters.mel`, so `melspectrogram`, `mfcc`, `onset_strength`):
-    about 1e-7 relative to librosa's default. Pass `dtype=np.float64` to librosa
-    to agree to round-off;
-  - the chroma basis (`filters.chroma`, `chroma_stft`): about 1e-7 relative;
+- **Output types follow the input's float type** (see
+  [Output precision](#output-precision)). Several librosa bases default to
+  single precision even for `float64` input. Here they are computed in `f64`
+  and rounded once to the output type, so for `f64` output they differ from
+  librosa's defaults by about 1e-7 relative:
+  - the mel basis (`filters.mel`, so `melspectrogram`, `mfcc`, `onset_strength`).
+    Pass `dtype=np.float64` to librosa to agree to round-off;
+  - the chroma basis (`filters.chroma`, `chroma_stft`);
   - CQT wavelets (`filters.wavelet`): librosa's `complex64` filters move its
     top-octave CQT by up to ~4e-8 of the peak;
   - `rms` and the RMS behind `trim` / `split`: librosa computes the mean square
-    in `float32`;
-  - `window_sumsquare`, `cq_to_chroma` and `clicks` return `f64`.
+    in `float32`.
+  `window_sumsquare`, `cq_to_chroma`, `wavelet`, `chroma_filterbank` and the
+  frequency weightings are tables and return `f64`.
 - **Event outputs are typed.** `onset_detect` and `beat_track` return
   `FrameEvents` (frame indices, convertible with `samples()` / `times()`) in place
   of librosa's `units=` argument. `trim_db` returns `(audio, (start, end))`, and
@@ -563,6 +590,65 @@ in the API docs, gathered here by theme.
   leading axes; loop over channels yourself. Recurrence and cross-similarity
   matrices are dense `f64` (no `sparse=True`, connectivity is `0.0`/`1.0` rather
   than `bool`), and only the default `axis=-1` layout is supported.
+
+### Output precision
+
+`f32` analysis (for `u8`, `i16`, `I24` and `f32` audio) runs in `f32`. librosa
+also returns `float32` for `float32` input, but some of its steps run in
+`float64` internally. The `float32` golden cases (see
+[Verification](#verification)) measure the result:
+
+- **STFT.** librosa's window is `float64`, so its `float32` STFT is the `float64`
+  FFT rounded once. Here the FFT runs in `f32`. The two agree to a few `f32`
+  ulps of the peak (spectral features 1e-6 to 3e-6, chroma 6e-7, CQT top octave
+  3e-8). Quantities taken from bins far below the peak lose relative accuracy:
+  `spectral_contrast` on a tonal signal differs by up to 9.2e-3 of its range
+  (about 0.2 dB), the same against librosa `float32` as against this crate's
+  `f64` path.
+- **Phase vocoder.** `time_stretch` and `pitch_shift` compute their analysis
+  STFT in `f64` and round it once to `Complex<f32>`, as librosa does, because the
+  vocoder carries phase forward from bins at round-off level. This holds an
+  `f64` copy of the signal and the `f64` STFT while the STFT is computed.
+- **LPC.** Burg's recursion runs in `f64` for every input type and the
+  coefficients are rounded once. librosa's `float32` recursion is unstable on
+  tonal input (1.3e-3 off its `float64` result at order 4, more than 100 % from
+  order 10); this crate does not reproduce that.
+- **Resampling inside an analysis** (`pitch_shift`, CQT octave decimation) uses
+  the crate's resampler, which filters in `f64`; it holds an `f64` copy of the
+  signal being resampled.
+- **Outputs librosa returns as `float64` for `float32` input:** `yin`, `pyin`,
+  `tempogram`, `tempogram_ratio` and `hybrid_tempogram` (librosa promotes through
+  a `float64` window or division). Here they are `f32`.
+- **Sequence decoding.** `viterbi` log-probabilities and `dtw` costs accumulate
+  in `f32` for `f32` input; librosa accumulates in `float64`. Paths and state
+  sequences agree in the golden cases.
+- **Tempo and tuning** are always `f64`: tempo is an entry of the `f64` tempo
+  grid, and tuning a multiple of the resolution. Event frames (onsets, beats,
+  trim and split boundaries) match librosa's `float32` run exactly in the golden
+  cases.
+
+### Defaults that differ from librosa
+
+`X::librosa()` returns librosa 1.0's defaults for every config. `X::default()`
+differs only where librosa's default changes the data without being asked, or
+where librosa has no default:
+
+| Config | librosa | `Default` / `new` | Reason |
+|---|---|---|---|
+| `DbConfig.top_db` (`power()`, `amplitude()`) | 80 | `None` | An 80 dB floor discards dynamic range. `DbConfig::librosa_power()` / `librosa_amplitude()` keep it |
+| `MfccConfig.db` | `power_to_db` defaults (80 dB floor) | no floor | As above. `MfccConfig::librosa()` keeps the floor |
+| `ChromaStftConfig.tuning`, `ChromaCqtConfig.tuning` (and `ChromaCensConfig`, `TonnetzConfig`) | `None` (estimate from the signal) | `Some(0.0)` | Estimation retunes the filterbank from the data. `None` still estimates |
+| `BeatTrackConfig.trim` | `True` | `false` | Trimming drops weak leading and trailing beats |
+| `GriffinLimInit` | random, unseeded | `Random(Some(0))` | Repeated calls give the same output. `ZeroPhase` is `init=None` |
+| `YinConfig`, `PyinConfig` (`fmin`, `fmax`) | required | required: `new(fmin, fmax)` | librosa has no default |
+| `PeakPickConfig` | all windows required | `for_onsets(sample_rate, hop_length)` | The windows depend on the rate and hop |
+| `PcenConfig.hop_length` | 512 | required: `new(hop_length)` | It must equal the spectrogram's hop; `librosa()` is `new(512)` |
+| `SilenceConfig.top_db` | 60 | required: `new(top_db)` | The threshold alone decides how much `trim_db` removes; `librosa()` is 60 dB |
+| `ClicksConfig.hop_length` | 512 | part of `ClickPositions::Frames` | Only frame positions need a hop |
+
+`OnsetStrengthConfig` and `spectral_contrast` keep librosa's 80 dB floor, which
+is part of those features' definitions. All other fields of all configs equal
+librosa's defaults.
 
 ### Resampling (no soxr)
 
@@ -610,9 +696,10 @@ in the API docs, gathered here by theme.
 
 - `griffinlim` with `GriffinLimInit::Random` (librosa's default `init="random"`)
   draws phases from this crate's RNG, not NumPy's, so results differ from
-  librosa's for the same seed (both are valid reconstructions).
-  `GriffinLimInit::ZeroPhase` is deterministic and matches `init=None` to
-  round-off. `Random(Some(seed))` is reproducible.
+  librosa's for the same seed (both are valid reconstructions). The default is
+  `Random(Some(0))`, which is reproducible; `GriffinLimConfig::librosa()` uses
+  `Random(None)` (a fresh seed per call). `GriffinLimInit::ZeroPhase` is
+  deterministic and matches `init=None` to round-off.
 - `griffinlim_cqt` offers only the deterministic `init=None` start.
 
 ### Options that are not supported
@@ -687,7 +774,12 @@ librosa itself:
   `features`, `tonal`, `constant_q`, `rhythm`, `effects`, `pitch`, `sequence`,
   `resample`, `analysis_fixes`.
 - **Tests:** `tests/librosa_reference/<area>.rs`. Every tolerance has a comment
-  that says why it is needed.
+  that says why it is needed. The tests build their configs with the
+  `X::librosa()` presets.
+- **`float32` cases:** each area's fixture also has a `float32` entry: librosa
+  run on the same signals cast to `float32`, compared with this crate's output
+  for `AudioSamples<f32>` (and, in the unit tests, with this crate's own `f64`
+  path).
 
 Run the suite (add `-- --nocapture` to print the measured error of every case):
 
@@ -722,6 +814,12 @@ librosa-compatible code, the generator or the fixtures change.
   - **Looser, justified bounds** for different algorithms: CQT octaves below the
     top (resampler difference, about 1e-4 of the peak, bounds 5e-4 to 1e-2
     depending on the case) and `float32`-basis comparisons (1e-6).
+  - **`float32` cases** are bounded by `f32` round-off (eps = 1.19e-7) times
+    the growth of the computation, measured and stated per case: 1.2e-7 to
+    2e-7 for single passes (emphasis filters, LPC, CQT top octave, pYIN f0),
+    1e-6 to 5e-6 for STFT-based features and tempograms, 2e-5 for the onset
+    envelope (dB of small values), 2e-2 for `spectral_contrast` on a tonal
+    signal (dB of valleys near the `f32` FFT noise floor).
 - **Discrete outputs are compared exactly:** onset, peak and beat frames, tempi,
   DTW and RQA paths, Viterbi state sequences, trim and split boundaries,
   mu-law codes and tuning estimates.
@@ -749,3 +847,17 @@ Worst case per area, from `cargo test --release --features full_no_plotting
 | CQT top octave / pseudo-CQT | 1.7e-16 (with `complex128` filters) / 3e-8 | Lower octaves: up to 1.3e-4 of the peak; chroma_cqt ≤ 1e-4 |
 | DTW, Viterbi, RQA, recurrence, sync | ≤ 3.5e-16 | Paths and state sequences identical |
 | resample (`High`) | 129 to 135 dB SNR (band-limited, middle) | 50 to 58 dB on white noise |
+
+`float32` input against librosa on `float32` input (`AudioSamples<f32>`;
+peak-relative unless stated):
+
+| Area | Worst measured | Notes |
+|---|---|---|
+| Spectral centroid / bandwidth / flatness / RMS | ≤ 2.6e-6 | ZCR exact |
+| spectral_contrast | 3.9e-6 (noise), 9.2e-3 (tonal signal, about 0.2 dB) | `f32` FFT round-off in the valleys; same against the `f64` path |
+| chroma_stft | ≤ 6.0e-7 | Tuning estimate identical |
+| CQT top octave / decimated octaves / chroma_cqt | 3.4e-8 / 1.25e-4 / 5.7e-5 | Lower octaves: resampler difference, as for `f64` |
+| Onset strength / tempogram / Fourier tempogram / PLP | 4.4e-6 / 1.4e-6 / 7.1e-7 / 3.6e-7 | Tempo, onset and beat frames identical |
+| yin / pyin | f0 ≤ 1.3e-7 / 4.9e-8 | Voiced flags identical; voicing probability ≤ 2.1e-7 absolute |
+| DTW / Viterbi | 1.9e-7 / 9.3e-7 | Path and states identical |
+| Emphasis / HPSS / time_stretch / LPC (noise) | 0 / ≤ 2.6e-7 / 1.9e-7 / 3.2e-8 | trim / split boundaries identical |

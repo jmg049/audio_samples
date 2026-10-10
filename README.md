@@ -156,10 +156,12 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 The full transform set (FFT, MFCC, chromagram, CQT, PSD, inverse STFT) and the
 rest of the spectral features are listed under [Features](#features).
 
-For results that match librosa 1.0 (periodic windows, librosa's defaults,
-multichannel `(channels, features, frames)` arrays), use the librosa-compatible
-traits instead: `AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
-`AudioRhythm`, `AudioEffects` and `AudioPitchTracking`. See the
+For results that match librosa 1.0 (periodic windows, multichannel
+`(channels, features, frames)` arrays, librosa's defaults through each config's
+`librosa()` constructor), use the librosa-compatible traits instead:
+`AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`, `AudioRhythm`,
+`AudioEffects` and `AudioPitchTracking`. Their outputs are `f32` for `u8`,
+`i16`, `I24` and `f32` audio and `f64` for `i32` and `f64` audio. See the
 [migration guide](documentation/LIBROSA_MIGRATION.md).
 
 ---

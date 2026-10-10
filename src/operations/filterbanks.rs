@@ -657,7 +657,8 @@ impl Default for MelFilterbankConfig {
 }
 
 impl MelFilterbankConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
