@@ -198,7 +198,7 @@ use crate::{
     LayoutError, ParameterError, StandardSample,
 };
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use non_empty_slice::NonEmptySlice;
 use num_complex::Complex;
 use spectrograms::{
@@ -1579,38 +1579,67 @@ where
         complex_spect: &Array2<Complex<f64>>,
         power: Option<NonZeroUsize>,
     ) -> (Array2<f64>, Array2<Complex<f64>>) {
-        // Magnitude: elementwise absolute value
-
-        let mut mag = complex_spect.mapv(num_complex::Complex::norm);
-
-        // zeros_to_ones: 1.0 where mag == 0, else 0.0
-        let zeros_to_ones = mag.mapv(|x| if x == 0.0 { 1.0 } else { 0.0 });
-
-        // mag_nonzero = mag + zeros_to_ones
-        let mag_nonzero = &mag + &zeros_to_ones;
-
-        // Compute phase = D / mag_nonzero, but handle zeros separately
-        let mut phase = complex_spect.clone();
-
-        let power = power.map_or(1.0, |p| p.get() as f64);
-
-        // Perform elementwise division for real and imaginary parts
-        ndarray::Zip::from(&mut phase)
-            .and(&mag_nonzero)
-            .and(&zeros_to_ones)
-            .for_each(|p, &m_nz, &z| {
-                let div = Complex {
-                    re: p.re / m_nz + z, // add 1.0 if originally zero
-                    im: p.im / m_nz,
-                };
-                *p = div;
-            });
-
-        // Raise magnitude to the given power
-        mag.mapv_inplace(|x| x.powf(power));
-
-        (mag, phase)
+        magphase(complex_spect.view(), power)
     }
+}
+
+/// Splits a complex spectrogram into magnitude and phase, equivalent to
+/// `librosa.magphase(D, power=power)`.
+///
+/// This is [`AudioTransforms::magphase`] on a view, so callers holding a
+/// borrowed or Fortran-order matrix (a numpy array, for example) need no copy.
+/// Both outputs have the memory layout of the input when it is contiguous.
+///
+/// # Arguments
+///
+/// * `complex_spect` - Complex spectrogram.
+/// * `power` - Exponent of the magnitude (`None` means 1).
+///
+/// # Returns
+///
+/// `(magnitude ** power, phase)` with `phase = D / |D|`, and `1 + 0i` where
+/// `|D| == 0`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::transforms::magphase;
+/// use ndarray::array;
+/// use num_complex::Complex;
+///
+/// let d = array![[Complex::new(3.0, 4.0), Complex::new(0.0, 0.0)]];
+/// let (mag, phase) = magphase(d.view(), None);
+/// assert_eq!(mag, array![[5.0, 0.0]]);
+/// assert_eq!(phase, array![[Complex::new(0.6, 0.8), Complex::new(1.0, 0.0)]]);
+/// ```
+#[must_use]
+pub fn magphase(
+    complex_spect: ArrayView2<'_, Complex<f64>>,
+    power: Option<NonZeroUsize>,
+) -> (Array2<f64>, Array2<Complex<f64>>) {
+    // One pass for the magnitude and one for the phase, both in the
+    // memory order of the input (`mapv` keeps a contiguous layout, so a
+    // Fortran-order spectrogram is not traversed with strides). The
+    // phase is `D / m + 0` for `m != 0` and `D / 1 + 1` for `m == 0`
+    // (librosa's `zeros_to_ones` trick), written so that it rounds
+    // exactly as before (`x + 0.0` turns `-0.0` into `+0.0`).
+    let mut mag = complex_spect.mapv(num_complex::Complex::norm);
+    let mut phase = complex_spect.to_owned();
+    ndarray::Zip::from(&mut phase).and(&mag).for_each(|p, &m| {
+        let (m_nz, z) = if m == 0.0 { (1.0, 1.0) } else { (m, 0.0) };
+        *p = Complex {
+            re: p.re / m_nz + z,
+            im: p.im / m_nz,
+        };
+    });
+
+    // Raise magnitude to the given power (`powf(1.0)` is the identity).
+    if let Some(p) = power.filter(|p| p.get() != 1) {
+        let p = p.get() as f64;
+        mag.mapv_inplace(|x| x.powf(p));
+    }
+
+    (mag, phase)
 }
 
 /// Extracts the single mono channel of `audio` as an owned `Vec<f64>`, erroring
