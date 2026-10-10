@@ -318,6 +318,69 @@ fn normalize_slice<F: AudioFloat>(
     }
 }
 
+/// [`normalize_slice`] on every lane along `axis` when the lanes are not
+/// contiguous in memory (for example the columns of a C-order matrix): the
+/// norms are accumulated one `axis` index at a time over all lanes at once, so
+/// memory is read in order. Each lane's norm adds its elements in the same
+/// order as [`slice_norm`] (with the same starting value), so the results are
+/// identical. Not used for `norm = 0`.
+fn normalize_strided_lanes<F: AudioFloat>(
+    mut out: ndarray::ArrayViewMutD<'_, F>,
+    axis: Axis,
+    norm: f64,
+    threshold: F,
+    fill: Option<bool>,
+) {
+    use ndarray::Zip;
+    fn accumulate<F: AudioFloat>(
+        out: &ndarray::ArrayViewMutD<'_, F>,
+        axis: Axis,
+        init: F,
+        f: impl Fn(F, F) -> F,
+    ) -> ndarray::ArrayD<F> {
+        let mut acc = Array::from_elem(out.index_axis(axis, 0).raw_dim(), init);
+        for sub in out.axis_iter(axis) {
+            Zip::from(&mut acc)
+                .and(&sub)
+                .for_each(|a, &x| *a = f(*a, x));
+        }
+        acc
+    }
+    // `Sum` starts from this value (-0.0 for floats); use the same.
+    let sum0: F = std::iter::empty::<F>().sum();
+    let lengths = if norm == f64::INFINITY {
+        accumulate(&out, axis, F::neg_infinity(), |m, x| m.max(x.abs()))
+    } else if norm == f64::NEG_INFINITY {
+        accumulate(&out, axis, F::infinity(), |m, x| m.min(x.abs()))
+    } else if norm == 2.0 {
+        accumulate(&out, axis, sum0, |s, x| s + x * x).mapv_into(|s| s.sqrt())
+    } else if norm == 1.0 {
+        accumulate(&out, axis, sum0, |s, x| s + x.abs())
+    } else {
+        let p = F::of(norm);
+        let inv = F::of(1.0 / norm);
+        accumulate(&out, axis, sum0, |s, x| s + x.abs().powf(p)).mapv_into(|s| s.powf(inv))
+    };
+    let fill_norm = if norm.is_infinite() {
+        F::one()
+    } else {
+        F::of_usize(out.len_of(axis)).powf(F::of(-1.0 / norm))
+    };
+    for mut sub in out.axis_iter_mut(axis) {
+        Zip::from(&mut sub).and(&lengths).for_each(|x, &length| {
+            if length < threshold {
+                match fill {
+                    None => {}
+                    Some(false) => *x /= F::infinity(),
+                    Some(true) => *x = fill_norm,
+                }
+            } else {
+                *x /= length;
+            }
+        });
+    }
+}
+
 /// Scales every slice of an array along an axis to unit norm, equivalent to
 /// `librosa.util.normalize`.
 ///
@@ -371,7 +434,11 @@ where
     D: Dimension,
 {
     let axis = config.validate(data.ndim())?;
-    if data.iter().any(|x| !x.is_finite()) {
+    let non_finite = match data.as_slice_memory_order() {
+        Some(flat) => flat.iter().any(|x| !x.is_finite()),
+        None => data.iter().any(|x| !x.is_finite()),
+    };
+    if non_finite {
         return Err(param_err("data", "input must be finite"));
     }
     let mut out = data.to_owned();
@@ -385,6 +452,15 @@ where
         .threshold
         .map_or_else(F::min_positive_value, |t| F::of(t));
     match axis {
+        Some(ax) if out.stride_of(Axis(ax)).unsigned_abs() != 1 && norm != 0.0 => {
+            normalize_strided_lanes(
+                out.view_mut().into_dyn(),
+                Axis(ax),
+                norm,
+                threshold,
+                config.fill,
+            );
+        }
         Some(ax) => {
             for lane in out.lanes_mut(Axis(ax)) {
                 normalize_slice(lane, norm, threshold, config.fill);
@@ -1895,6 +1971,54 @@ mod tests {
         assert_eq!(whole, array![[0.25, 0.5], [1.0, 0.75]]);
         let none = normalize_array(&s, &NormalizeConfig::new().with_norm(None)).unwrap();
         assert_eq!(none, s);
+    }
+
+    #[test]
+    fn normalize_is_bit_identical_in_either_memory_order() {
+        // Lanes along axis 0 of a C-order matrix take the strided path; the same
+        // data in Fortran order takes the per-lane path. Results must match bit
+        // for bit, for every norm and fill policy, including small lanes.
+        let c = Array2::from_shape_fn((37, 23), |(i, j)| {
+            let v = ((i * 31 + j * 17) % 13) as f64 - 6.0;
+            if j == 5 {
+                0.0
+            } else if j == 7 {
+                v * 1e-310
+            } else {
+                v * 0.37
+            }
+        });
+        let f = {
+            let mut f = Array2::<f64>::zeros(ndarray::ShapeBuilder::f(c.raw_dim()));
+            f.assign(&c);
+            f
+        };
+        for norm in [f64::INFINITY, f64::NEG_INFINITY, 1.0, 2.0, 3.5, 0.5] {
+            for fill in [None, Some(false), Some(true)] {
+                for axis in [0isize, 1, -1] {
+                    let cfg = NormalizeConfig::new()
+                        .with_norm(Some(norm))
+                        .with_axis(Some(axis))
+                        .with_fill(fill);
+                    let a = normalize_array(&c, &cfg).unwrap();
+                    let b = normalize_array(&f, &cfg).unwrap();
+                    assert!(
+                        a.iter()
+                            .zip(b.iter())
+                            .all(|(x, y)| x.to_bits() == y.to_bits()),
+                        "norm {norm} fill {fill:?} axis {axis}"
+                    );
+                    let a32 = normalize_array(&c.mapv(|v| v as f32), &cfg).unwrap();
+                    let b32 = normalize_array(&f.mapv(|v| v as f32), &cfg).unwrap();
+                    assert!(
+                        a32.iter()
+                            .zip(b32.iter())
+                            .all(|(x, y)| x.to_bits() == y.to_bits()),
+                        "f32 norm {norm} fill {fill:?} axis {axis}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
