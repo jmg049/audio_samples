@@ -15,6 +15,12 @@ Algorithms that librosa delegates:
 * ``scipy.fft`` (tempogram autocorrelation, Fourier tempogram / PLP STFT);
 * numba kernels for peak picking and the dynamic-programming beat tracker.
 
+``float32`` cases (``float32.<sig>``) run librosa on ``y.astype(np.float32)`` with
+its default ``float32`` mel basis: the onset envelope, Fourier tempogram and PLP
+stay ``float32``; the autocorrelation tempogram (and so the tempo) is computed in
+``float64`` because librosa's ``float64`` window promotes the ``float32`` envelope.
+audio_samples analyses ``f32`` audio in ``f32`` throughout.
+
 Large matrices are stored as strided subsets (``[::bin_step, ::frame_step]``).
 Envelopes used as direct inputs (``inputs``) are stored in full so the Rust side
 can test peak picking, tempo and beat tracking on librosa's exact input.
@@ -247,6 +253,32 @@ def _tempogram_variants(signals, sr):
     return out
 
 
+def _float32(signals, sr):
+    out = {}
+    for sig in ("clicks120", "notes", "mix"):
+        y = signals[sig].astype(np.float32)
+        env = librosa.onset.onset_strength(y=y, sr=sr)
+        env_median = librosa.onset.onset_strength(y=y, sr=sr, aggregate=np.median)
+        tg = librosa.feature.tempogram(onset_envelope=env, sr=sr)
+        ftg = librosa.feature.fourier_tempogram(onset_envelope=env, sr=sr)
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+        tempo_nt, beats_nt = librosa.beat.beat_track(y=y, sr=sr, trim=False)
+        out[sig] = {
+            "dtypes": [str(env.dtype), str(tg.dtype), str(ftg.dtype)],
+            "onset_strength": env,
+            "onset_strength_median": env_median,
+            "tempogram_shape": list(tg.shape),
+            "tempogram": tg[::8, ::4],
+            "fourier_mag": np.abs(ftg[::8, ::4]),
+            "tempo": librosa.feature.tempo(y=y, sr=sr),
+            "onset_detect": librosa.onset.onset_detect(y=y, sr=sr),
+            "beat_track": {"tempo": tempo, "beats": beats},
+            "beat_track_no_trim": {"tempo": tempo_nt, "beats": beats_nt},
+            "plp": librosa.beat.plp(y=y, sr=sr),
+        }
+    return out
+
+
 def build(signals, sr):
     rng = np.random.default_rng(1234)
     return {
@@ -259,4 +291,5 @@ def build(signals, sr):
         "beat_track": _beat_track(signals, sr, rng),
         "plp": _plp(signals, sr),
         "tempogram_variants": _tempogram_variants(signals, sr),
+        "float32": _float32(signals, sr),
     }
