@@ -5525,6 +5525,11 @@ where
     ///   - `Center` - surround center channel (≥ 6 ch), or average
     ///     of left and right for stereo.
     ///
+    /// For integer sample types `Average` and `Center` average the raw
+    /// sample values and `Weighted` sums on the normalised `[-1, 1]` scale,
+    /// both in `f64`; the result is rounded to nearest and saturated at the
+    /// type's range.
+    ///
     /// # Returns
     /// An owned mono [`AudioSamples`] at the same sample rate.
     ///
@@ -5567,7 +5572,8 @@ where
     /// - `Pan(value)` - applies equal-power panning to mono input.
     ///   The value is clamped to \[-1, 1\]: -1 is hard left, 0 is
     ///   centre, +1 is hard right.  Multi-channel input is returned
-    ///   unchanged.
+    ///   unchanged. For integer sample types the gains are applied on the
+    ///   normalised `[-1, 1]` scale and the result is rounded and saturated.
     /// - `Left` - routes mono input to the left channel and fills the
     ///   right with silence (`[m, 0]`). For multi-channel input, extracts
     ///   channel 0 as a mono signal (as in 2.0; prefer
@@ -5785,9 +5791,12 @@ where
     /// the left channel and doubles the right.  The total power changes
     /// with `p` (it is not a constant-power pan law); for a −3 dB-centre
     /// equal-power pan of a mono source use
-    /// `to_stereo(StereoConversionMethod::Pan(p))`.  Gains are applied to
-    /// the raw sample values and truncated back for integer types, so
-    /// this is not meaningful for `u8` (offset-binary) audio.
+    /// `to_stereo(StereoConversionMethod::Pan(p))`.
+    ///
+    /// For integer sample types the gains are applied on the normalised
+    /// `[-1, 1]` scale in `f64`, and the result is rounded to nearest and
+    /// saturated at the type's range (for `u8` the gain scales the distance
+    /// from the mid-scale value 128).
     ///
     /// # Arguments
     /// - `pan_value` - Panning position in the range \[-1, 1\].
@@ -5846,6 +5855,11 @@ where
     /// channel by `1 + balance`, after clamping to \[-1, 1\].  The
     /// favoured channel is boosted by up to +6 dB (gain 2), so this is
     /// not a constant-power law.
+    ///
+    /// For integer sample types the gains are applied on the normalised
+    /// `[-1, 1]` scale in `f64`, and the result is rounded to nearest and
+    /// saturated at the type's range (for `u8` the gain scales the distance
+    /// from the mid-scale value 128).
     ///
     /// # Arguments
     /// - `balance` - Balance position in the range \[-1, 1\].

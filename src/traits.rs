@@ -596,7 +596,7 @@ where
 /// Float sample types are cast directly. Integer sample types are rounded to
 /// nearest (half away from zero) and saturated to `[T::MIN, T::MAX]`. A plain
 /// [`CastFrom`] would truncate toward zero and, for `I24`, wrap on overflow.
-#[cfg(feature = "processing")]
+#[cfg(any(feature = "processing", feature = "channels"))]
 #[inline]
 pub(crate) fn raw_f64_to_sample<T>(v: f64) -> T
 where
