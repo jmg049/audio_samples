@@ -1256,7 +1256,9 @@ pub fn spectral_contrast_from_spectrogram(
     if config.linear {
         Ok(peak - valley)
     } else {
-        let db = DbConfig::default();
+        // librosa's spectral_contrast converts peak and valley with power_to_db's
+        // defaults (80 dB floor); the floor is part of the feature's definition.
+        let db = DbConfig::librosa_power();
         Ok(power_to_db(&peak, &db)? - power_to_db(&valley, &db)?)
     }
 }

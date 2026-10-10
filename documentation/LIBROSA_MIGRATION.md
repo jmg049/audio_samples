@@ -123,7 +123,7 @@ let s = y.melspectrogram(&MelSpectrogramConfig::default()).unwrap();
 assert_eq!(s.dim(), (1, 128, 44));
 
 // librosa.power_to_db(S, ref=np.max)   (top_db = 80, applied per channel)
-let db = DbConfig { reference: DbReference::Max, ..DbConfig::default() };
+let db = DbConfig { reference: DbReference::Max, ..DbConfig::librosa_power() };
 let s_db = power_to_db(&s, &db).unwrap();
 let max = s_db.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 let min = s_db.iter().copied().fold(f32::INFINITY, f32::min);
@@ -140,7 +140,7 @@ use std::time::Duration;
 let y = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
 
 // mfcc = librosa.feature.mfcc(y=y, sr=sr)   (20 coefficients, DCT-II ortho)
-let mfcc = y.mfcc_frames(&MfccConfig::default()).unwrap();
+let mfcc = y.mfcc_frames(&MfccConfig::librosa()).unwrap();
 assert_eq!(mfcc.dim(), (1, 20, 44));
 
 // librosa.feature.delta(mfcc) and librosa.feature.delta(mfcc, order=2)

@@ -192,10 +192,10 @@ fn main() {
     });
     let mel_cfg = MelSpectrogramConfig::default();
     b.run("melspectrogram", || y.melspectrogram(&mel_cfg).unwrap());
-    let mfcc_cfg = MfccConfig::default();
+    let mfcc_cfg = MfccConfig::librosa();
     b.run("mfcc_frames", || y.mfcc_frames(&mfcc_cfg).unwrap());
     let mel = y.melspectrogram(&mel_cfg).unwrap();
-    let db_cfg = DbConfig::default();
+    let db_cfg = DbConfig::librosa_power();
     b.run("power_to_db", || power_to_db(&mel, &db_cfg).unwrap());
 
     // --- tonal / constant-Q ---------------------------------------------

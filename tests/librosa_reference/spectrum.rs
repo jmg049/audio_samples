@@ -491,7 +491,7 @@ fn db_conversions() {
     // O(100), so 1e-12 relative to the peak is ~1e-10 dB.
     let tol = 1e-12;
     let mel_in = arr2(&fixture()["melspectrogram"]["default"]);
-    let cfg = DbConfig::default();
+    let cfg = DbConfig::librosa_power();
     check(
         "power_to_db default",
         &power_to_db(&mel_in, &cfg).unwrap(),
@@ -530,7 +530,7 @@ fn db_conversions() {
         "amplitude_to_db ref=max",
         &amplitude_to_db(
             &mag,
-            &DbConfig::amplitude().with_reference(DbReference::Max),
+            &DbConfig::librosa_amplitude().with_reference(DbReference::Max),
         )
         .unwrap(),
         &arr2(&f["amplitude_ref_max"]),
@@ -538,7 +538,7 @@ fn db_conversions() {
     );
     check(
         "amplitude_to_db default",
-        &amplitude_to_db(&mag, &DbConfig::amplitude()).unwrap(),
+        &amplitude_to_db(&mag, &DbConfig::librosa_amplitude()).unwrap(),
         &arr2(&f["amplitude_default"]),
         tol,
     );
@@ -566,17 +566,17 @@ fn mfcc_cases() {
     // SciPy. Bins floored by top_db agree exactly. 1e-11 relative to the peak.
     let tol = 1e-11;
     let cases: Vec<(&str, MfccConfig)> = vec![
-        ("default", MfccConfig::default()),
-        ("lifter22", MfccConfig::default().with_lifter(22.0)),
-        ("dct3", MfccConfig::default().with_dct_type(DctType::Three)),
-        ("dct1", MfccConfig::default().with_dct_type(DctType::One)),
+        ("default", MfccConfig::librosa()),
+        ("lifter22", MfccConfig::librosa().with_lifter(22.0)),
+        ("dct3", MfccConfig::librosa().with_dct_type(DctType::Three)),
+        ("dct1", MfccConfig::librosa().with_dct_type(DctType::One)),
         (
             "norm_none",
-            MfccConfig::default().with_dct_norm(DctNorm::Unnormalized),
+            MfccConfig::librosa().with_dct_norm(DctNorm::Unnormalized),
         ),
         (
             "htk_13_40",
-            MfccConfig::default()
+            MfccConfig::librosa()
                 .with_n_mfcc(nzu!(13))
                 .with_mel_spectrogram(
                     MelSpectrogramConfig::default().with_mel(
@@ -596,7 +596,7 @@ fn mfcc_cases() {
             tol,
         );
     }
-    let m = stereo().mfcc_frames(&MfccConfig::default()).unwrap();
+    let m = stereo().mfcc_frames(&MfccConfig::librosa()).unwrap();
     check("mfcc stereo", &m, &arr3(&f["stereo"]), tol);
 }
 

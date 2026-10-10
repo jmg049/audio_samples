@@ -221,9 +221,17 @@ impl Default for StftConfig {
 }
 
 impl StftConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults. Currently the same as [`Default`]; use this
+    /// constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -764,9 +772,13 @@ pub enum DbAxes {
 ///
 /// ## Intended usage
 ///
-/// [`DbConfig::default`] (= [`DbConfig::power`]) is librosa's `power_to_db`
-/// default; use [`DbConfig::amplitude`] for `amplitude_to_db`'s defaults (its
-/// `amin` is `1e-5`).
+/// [`DbConfig::default`] (= [`DbConfig::power`]) converts power values to dB
+/// with no dynamic-range floor; use [`DbConfig::amplitude`] for amplitudes (its
+/// `amin` is `1e-5`). Neither clips the output: set `top_db` to request a floor.
+///
+/// librosa's `power_to_db` and `amplitude_to_db` floor the output at 80 dB below
+/// the maximum by default. [`DbConfig::librosa_power`] and
+/// [`DbConfig::librosa_amplitude`] reproduce those defaults exactly.
 ///
 /// ## Invariants
 ///
@@ -791,7 +803,8 @@ pub struct DbConfig {
     /// `power_to_db`), `1e-5` for amplitude (`amplitude_to_db`). Must be positive.
     pub amin: f64,
     /// If `Some(t)`, the output is floored at `max - t` dB, where `max` is taken over
-    /// the same axes as the reference ([`DbAxes`]). librosa default: `Some(80.0)`.
+    /// the same axes as the reference ([`DbAxes`]). `None` (the default) applies no
+    /// floor, so values below `max - t` are kept. librosa's default is `Some(80.0)`.
     pub top_db: Option<f64>,
     /// Reduction axes for [`DbReference::Max`] and `top_db`. librosa default: `Auto`.
     pub axes: DbAxes,
@@ -804,23 +817,44 @@ impl Default for DbConfig {
 }
 
 impl DbConfig {
-    /// librosa `power_to_db` defaults: `ref=1.0`, `amin=1e-10`, `top_db=80`, `axes="auto"`.
+    /// Power to dB with no floor: `reference = Value(1.0)`, `amin = 1e-10`,
+    /// `top_db = None`, `axes = Auto`.
     #[must_use]
     pub fn power() -> Self {
         Self {
             reference: DbReference::Value(1.0),
             amin: 1e-10,
-            top_db: Some(80.0),
+            top_db: None,
             axes: DbAxes::Auto,
         }
     }
 
-    /// librosa `amplitude_to_db` defaults: `ref=1.0`, `amin=1e-5`, `top_db=80`, `axes="auto"`.
+    /// Amplitude to dB with no floor: as [`DbConfig::power`] with `amin = 1e-5`.
     #[must_use]
     pub fn amplitude() -> Self {
         Self {
             amin: 1e-5,
             ..Self::power()
+        }
+    }
+
+    /// librosa `power_to_db` defaults: `ref=1.0`, `amin=1e-10`, `top_db=80`,
+    /// `axes="auto"`. The output is floored at 80 dB below the maximum.
+    #[must_use]
+    pub fn librosa_power() -> Self {
+        Self {
+            top_db: Some(80.0),
+            ..Self::power()
+        }
+    }
+
+    /// librosa `amplitude_to_db` defaults: `ref=1.0`, `amin=1e-5`, `top_db=80`,
+    /// `axes="auto"`. The output is floored at 80 dB below the maximum.
+    #[must_use]
+    pub fn librosa_amplitude() -> Self {
+        Self {
+            top_db: Some(80.0),
+            ..Self::amplitude()
         }
     }
 
@@ -971,8 +1005,13 @@ fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
 /// use ndarray::array;
 ///
 /// let s = array![[1.0, 0.1], [0.01, 0.0]];
+/// // The default applies no floor: 0.0 is clamped to amin = 1e-10, i.e. -100 dB.
 /// let db = power_to_db(&s, &DbConfig::default()).unwrap();
-/// assert_eq!(db, array![[0.0, -10.0], [-20.0, -80.0]]); // floored at max - 80
+/// assert_eq!(db, array![[0.0, -10.0], [-20.0, -100.0]]);
+///
+/// // librosa's default floors the output at max - 80 dB.
+/// let floored = power_to_db(&s, &DbConfig::librosa_power()).unwrap();
+/// assert_eq!(floored, array![[0.0, -10.0], [-20.0, -80.0]]);
 ///
 /// let rel = power_to_db(&s, &DbConfig::default().with_reference(DbReference::Max).with_top_db(None))
 ///     .unwrap();
@@ -1184,9 +1223,17 @@ impl Default for MelSpectrogramConfig {
 }
 
 impl MelSpectrogramConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults. Currently the same as [`Default`]; use this
+    /// constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -1299,8 +1346,10 @@ pub enum DctNorm {
 pub struct MfccConfig {
     /// Mel spectrogram parameters (librosa's `**kwargs` and `mel_norm`). librosa defaults.
     pub mel_spectrogram: MelSpectrogramConfig,
-    /// Conversion of the mel power spectrogram to dB. librosa uses `power_to_db`
-    /// defaults ([`DbConfig::power`]).
+    /// Conversion of the mel power spectrogram to dB. Default: [`DbConfig::power`]
+    /// (no dynamic-range floor). librosa applies `power_to_db`'s defaults, which
+    /// floor the mel spectrogram at 80 dB below its maximum
+    /// ([`DbConfig::librosa_power`], used by [`MfccConfig::librosa`]).
     pub db: DbConfig,
     /// Number of cepstral coefficients kept (the first `n_mfcc` DCT outputs).
     /// librosa default: 20. Must not exceed the number of mel bands.
@@ -1329,10 +1378,22 @@ impl Default for MfccConfig {
 }
 
 impl MfccConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]). It differs from
+    /// librosa only in `db`, which applies no dynamic-range floor.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.mfcc` defaults, including the 80 dB floor of the
+    /// mel spectrogram (`db = DbConfig::librosa_power()`).
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            mel_spectrogram: MelSpectrogramConfig::librosa(),
+            db: DbConfig::librosa_power(),
+            ..Self::default()
+        }
     }
 
     /// Sets the mel spectrogram parameters.
@@ -1775,9 +1836,17 @@ impl Default for DeltaConfig {
 }
 
 impl DeltaConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults. Currently the same as [`Default`]; use this
+    /// constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -2723,11 +2792,11 @@ mod tests {
     #[test]
     fn power_to_db_top_db_is_per_channel_with_auto_axes() {
         let s = array![[[1.0_f64, 1e-12]], [[1e-6, 1e-12]]];
-        let db = power_to_db(&s, &DbConfig::default()).unwrap();
+        let db = power_to_db(&s, &DbConfig::librosa_power()).unwrap();
         assert_eq!(db[[0, 0, 1]], -80.0);
         // Channel 1: max is -60 dB, so 1e-12 (clamped to amin = 1e-10, -100 dB) is not floored.
         assert!((db[[1, 0, 1]] + 100.0).abs() < 1e-9);
-        let all = power_to_db(&s, &DbConfig::default().with_axes(DbAxes::All)).unwrap();
+        let all = power_to_db(&s, &DbConfig::librosa_power().with_axes(DbAxes::All)).unwrap();
         assert_eq!(all[[1, 0, 1]], -80.0);
         assert!(power_to_db(&s, &DbConfig::default().with_amin(0.0)).is_err());
         assert!(power_to_db(&s, &DbConfig::default().with_top_db(Some(-1.0))).is_err());

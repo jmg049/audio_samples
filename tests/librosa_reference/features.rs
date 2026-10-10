@@ -515,20 +515,30 @@ fn perceptual_weighting_cases() {
     // floor (D_no_top_db) bins near amin are kept: measured 6.5e-12; others ~1e-14.
     let tol = 1e-10;
     let cases = [
-        ("A_default", FrequencyWeighting::A, DbConfig::default(), &p),
+        (
+            "A_default",
+            FrequencyWeighting::A,
+            DbConfig::librosa_power(),
+            &p,
+        ),
         (
             "C_ref_max",
             FrequencyWeighting::C,
-            DbConfig::default().with_reference(DbReference::Max),
+            DbConfig::librosa_power().with_reference(DbReference::Max),
             &p,
         ),
         (
             "D_no_top_db",
             FrequencyWeighting::D,
-            DbConfig::default().with_top_db(None),
+            DbConfig::librosa_power().with_top_db(None),
             &p,
         ),
-        ("A_stereo", FrequencyWeighting::A, DbConfig::default(), &pst),
+        (
+            "A_stereo",
+            FrequencyWeighting::A,
+            DbConfig::librosa_power(),
+            &pst,
+        ),
     ];
     for (name, k, db, spec) in cases {
         let w = perceptual_weighting(spec.view(), &freqs, k, &db).unwrap();

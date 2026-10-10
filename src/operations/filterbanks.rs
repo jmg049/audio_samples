@@ -663,6 +663,13 @@ impl MelFilterbankConfig {
         Self::default()
     }
 
+    /// librosa 1.0's `filters.mel` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self::default()
+    }
+
     /// Sets the number of mel bands.
     #[must_use]
     pub fn with_n_mels(mut self, n_mels: NonZeroUsize) -> Self {

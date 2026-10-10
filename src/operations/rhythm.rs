@@ -397,8 +397,10 @@ pub struct OnsetStrengthConfig {
     /// Mel spectrogram parameters (librosa's `n_fft`, `hop_length` and mel `**kwargs`).
     /// The STFT `n_fft` and hop also set the centring shift of the envelope.
     pub mel: MelSpectrogramConfig,
-    /// dB conversion applied to the mel spectrogram. librosa default:
-    /// [`DbConfig::power`].
+    /// dB conversion applied to the mel spectrogram. Default:
+    /// [`DbConfig::librosa_power`], librosa's 80 dB floor below the maximum. The
+    /// floor limits the flux that near-silent passages contribute to the envelope;
+    /// set `top_db` to `None` to remove it.
     pub db: DbConfig,
     /// Time lag, in frames, of the difference. Larger lags respond to slower rises.
     /// librosa default: 1.
@@ -425,7 +427,9 @@ impl Default for OnsetStrengthConfig {
     fn default() -> Self {
         Self {
             mel: MelSpectrogramConfig::default(),
-            db: DbConfig::power(),
+            // The 80 dB floor of librosa's onset_strength is kept: it limits the
+            // flux contributed by near-silent passages (see the field docs).
+            db: DbConfig::librosa_power(),
             lag: crate::nzu!(1),
             max_size: crate::nzu!(1),
             detrend: false,
