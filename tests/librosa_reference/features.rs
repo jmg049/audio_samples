@@ -28,7 +28,7 @@ use audio_samples::{AudioSamples, Window, nzu};
 use ndarray::{Array2, Array3, Axis, s};
 use serde_json::Value;
 
-use crate::common::{arr2, arr3, assert_close, errors, f64s, load, mono, sr, stereo};
+use crate::common::{arr2, arr3, assert_close, errors, f64s, load, mono, signal, sr, stereo};
 
 /// See the comment in `spectral_defaults` (dB of the smallest band magnitudes).
 const CONTRAST_DB_TOL: f64 = 5e-10;
@@ -101,14 +101,14 @@ fn spectral_defaults() {
         let tol = 1e-12;
         check_rows(
             &format!("{name} centroid"),
-            &x.spectral_centroid_frames(&SpectralCentroidConfig::default())
+            &x.spectral_centroid_frames(&SpectralCentroidConfig::librosa())
                 .unwrap(),
             &case["centroid"],
             tol,
         );
         check_rows(
             &format!("{name} bandwidth"),
-            &x.spectral_bandwidth_frames(&SpectralBandwidthConfig::default())
+            &x.spectral_bandwidth_frames(&SpectralBandwidthConfig::librosa())
                 .unwrap(),
             &case["bandwidth"],
             tol,
@@ -117,7 +117,7 @@ fn spectral_defaults() {
         // round-off of the threshold (it does not for these signals).
         check_rows(
             &format!("{name} rolloff"),
-            &x.spectral_rolloff_frames(&SpectralRolloffConfig::default())
+            &x.spectral_rolloff_frames(&SpectralRolloffConfig::librosa())
                 .unwrap(),
             &case["rolloff"],
             0.0,
@@ -126,7 +126,7 @@ fn spectral_defaults() {
         // amplified in nearly-silent edge frames whose bins sit at amin.
         check_rows(
             &format!("{name} flatness"),
-            &x.spectral_flatness_frames(&SpectralFlatnessConfig::default())
+            &x.spectral_flatness_frames(&SpectralFlatnessConfig::librosa())
                 .unwrap(),
             &case["flatness"],
             1e-11,
@@ -139,7 +139,7 @@ fn spectral_defaults() {
         // linear contrast below agrees to 7e-14).
         check_rows(
             &format!("{name} contrast"),
-            &x.spectral_contrast_frames(&SpectralContrastConfig::default())
+            &x.spectral_contrast_frames(&SpectralContrastConfig::librosa())
                 .unwrap(),
             &case["contrast"],
             CONTRAST_DB_TOL,
@@ -149,21 +149,21 @@ fn spectral_defaults() {
         // solutions agree to cond(A) * eps (cond ~ 3 for order 1).
         check_rows(
             &format!("{name} poly1"),
-            &x.poly_features(&PolyFeaturesConfig::default()).unwrap(),
+            &x.poly_features(&PolyFeaturesConfig::librosa()).unwrap(),
             &case["poly1"],
             1e-11,
         );
         // Mean of squares, sqrt: summation order only.
         check_rows(
             &format!("{name} rms"),
-            &x.rms_frames(&RmsConfig::default()).unwrap(),
+            &x.rms_frames(&RmsConfig::librosa()).unwrap(),
             &case["rms"],
             1e-13,
         );
         // Integer crossing counts / frame_length: exact.
         check_rows(
             &format!("{name} zcr"),
-            &x.zero_crossing_rate_frames(&ZeroCrossingRateConfig::default())
+            &x.zero_crossing_rate_frames(&ZeroCrossingRateConfig::librosa())
                 .unwrap(),
             &case["zcr"],
             0.0,
@@ -175,31 +175,31 @@ fn spectral_defaults() {
 fn spectral_nondefault_parameters() {
     for (name, case) in fixture()["nondefault"].as_object().unwrap() {
         let x = mono(name);
-        let nc = StftConfig::new()
+        let nc = StftConfig::librosa()
             .with_n_fft(nzu!(1024))
             .with_hop_length(Some(nzu!(256)))
             .with_center(false);
         let tol = 1e-12;
         check_rows(
             &format!("{name} centroid_nocenter"),
-            &x.spectral_centroid_frames(&SpectralCentroidConfig::new().with_stft(nc.clone()))
+            &x.spectral_centroid_frames(&SpectralCentroidConfig::librosa().with_stft(nc.clone()))
                 .unwrap(),
             &case["centroid_nocenter"],
             tol,
         );
-        let hr = StftConfig::new()
+        let hr = StftConfig::librosa()
             .with_window(Window::Hamming)
             .with_pad_mode(StftPadMode::Reflect);
         check_rows(
             &format!("{name} centroid_hamming_reflect"),
-            &x.spectral_centroid_frames(&SpectralCentroidConfig::new().with_stft(hr))
+            &x.spectral_centroid_frames(&SpectralCentroidConfig::librosa().with_stft(hr))
                 .unwrap(),
             &case["centroid_hamming_reflect"],
             tol,
         );
         check_rows(
             &format!("{name} bandwidth_p1"),
-            &x.spectral_bandwidth_frames(&SpectralBandwidthConfig::new().with_p(1.0))
+            &x.spectral_bandwidth_frames(&SpectralBandwidthConfig::librosa().with_p(1.0))
                 .unwrap(),
             &case["bandwidth_p1"],
             tol,
@@ -208,14 +208,16 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} bandwidth_p3_nonorm"),
             &x.spectral_bandwidth_frames(
-                &SpectralBandwidthConfig::new().with_p(3.0).with_norm(false),
+                &SpectralBandwidthConfig::librosa()
+                    .with_p(3.0)
+                    .with_norm(false),
             )
             .unwrap(),
             &case["bandwidth_p3_nonorm"],
             tol,
         );
         // S= path with an explicit centroid.
-        let c1024 = StftConfig::new()
+        let c1024 = StftConfig::librosa()
             .with_n_fft(nzu!(1024))
             .with_hop_length(Some(nzu!(256)));
         let s1024 = x.spectrogram_matrix(&c1024, 1.0).unwrap();
@@ -227,7 +229,7 @@ fn spectral_nondefault_parameters() {
                 s1024.view(),
                 &f1024,
                 Some(cen.view()),
-                &SpectralBandwidthConfig::default(),
+                &SpectralBandwidthConfig::librosa(),
             )
             .unwrap(),
             &case["bandwidth_S_centroid"],
@@ -236,7 +238,7 @@ fn spectral_nondefault_parameters() {
         // Bin selection: exact.
         check_rows(
             &format!("{name} rolloff_050"),
-            &x.spectral_rolloff_frames(&SpectralRolloffConfig::new().with_roll_percent(0.5))
+            &x.spectral_rolloff_frames(&SpectralRolloffConfig::librosa().with_roll_percent(0.5))
                 .unwrap(),
             &case["rolloff_050"],
             0.0,
@@ -244,7 +246,7 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} rolloff_099_nocenter"),
             &x.spectral_rolloff_frames(
-                &SpectralRolloffConfig::new()
+                &SpectralRolloffConfig::librosa()
                     .with_roll_percent(0.99)
                     .with_stft(nc.clone()),
             )
@@ -255,14 +257,14 @@ fn spectral_nondefault_parameters() {
         // As the default flatness case.
         check_rows(
             &format!("{name} flatness_power1"),
-            &x.spectral_flatness_frames(&SpectralFlatnessConfig::new().with_power(1.0))
+            &x.spectral_flatness_frames(&SpectralFlatnessConfig::librosa().with_power(1.0))
                 .unwrap(),
             &case["flatness_power1"],
             1e-11,
         );
         check_rows(
             &format!("{name} flatness_amin"),
-            &x.spectral_flatness_frames(&SpectralFlatnessConfig::new().with_amin(1e-4))
+            &x.spectral_flatness_frames(&SpectralFlatnessConfig::librosa().with_amin(1e-4))
                 .unwrap(),
             &case["flatness_amin"],
             1e-11,
@@ -270,7 +272,7 @@ fn spectral_nondefault_parameters() {
         // Linear contrast: no logarithm, so only the means' round-off.
         check_rows(
             &format!("{name} contrast_linear"),
-            &x.spectral_contrast_frames(&SpectralContrastConfig::new().with_linear(true))
+            &x.spectral_contrast_frames(&SpectralContrastConfig::librosa().with_linear(true))
                 .unwrap(),
             &case["contrast_linear"],
             1e-12,
@@ -279,7 +281,7 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} contrast_b4_f300_q01"),
             &x.spectral_contrast_frames(
-                &SpectralContrastConfig::new()
+                &SpectralContrastConfig::librosa()
                     .with_n_bands(nzu!(4))
                     .with_fmin(300.0)
                     .with_quantile(0.1),
@@ -290,22 +292,24 @@ fn spectral_nondefault_parameters() {
         );
         check_rows(
             &format!("{name} contrast_nfft1024"),
-            &x.spectral_contrast_frames(&SpectralContrastConfig::new().with_stft(c1024.clone()))
-                .unwrap(),
+            &x.spectral_contrast_frames(
+                &SpectralContrastConfig::librosa().with_stft(c1024.clone()),
+            )
+            .unwrap(),
             &case["contrast_nfft1024"],
             CONTRAST_DB_TOL,
         );
         // As poly1; order 2 has cond(A) ~ 20 after column scaling.
         check_rows(
             &format!("{name} poly0"),
-            &x.poly_features(&PolyFeaturesConfig::new().with_order(0))
+            &x.poly_features(&PolyFeaturesConfig::librosa().with_order(0))
                 .unwrap(),
             &case["poly0"],
             1e-11,
         );
         check_rows(
             &format!("{name} poly2"),
-            &x.poly_features(&PolyFeaturesConfig::new().with_order(2))
+            &x.poly_features(&PolyFeaturesConfig::librosa().with_order(2))
                 .unwrap(),
             &case["poly2"],
             1e-11,
@@ -314,7 +318,7 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} rms_nocenter"),
             &x.rms_frames(
-                &RmsConfig::new()
+                &RmsConfig::librosa()
                     .with_frame_length(nzu!(1024))
                     .with_hop_length(nzu!(256))
                     .with_center(false),
@@ -326,7 +330,7 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} rms_reflect_odd"),
             &x.rms_frames(
-                &RmsConfig::new()
+                &RmsConfig::librosa()
                     .with_frame_length(nzu!(1001))
                     .with_hop_length(nzu!(300))
                     .with_pad_mode(StftPadMode::Reflect),
@@ -336,7 +340,7 @@ fn spectral_nondefault_parameters() {
             1e-13,
         );
         // Parseval sum over STFT magnitudes: FFT round-off.
-        let sd = x.spectrogram_matrix(&StftConfig::default(), 1.0).unwrap();
+        let sd = x.spectrogram_matrix(&StftConfig::librosa(), 1.0).unwrap();
         check_rows(
             &format!("{name} rms_S"),
             &rms_from_spectrogram(sd.view(), nzu!(2048)).unwrap(),
@@ -347,7 +351,7 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} zcr_nocenter"),
             &x.zero_crossing_rate_frames(
-                &ZeroCrossingRateConfig::new()
+                &ZeroCrossingRateConfig::librosa()
                     .with_frame_length(nzu!(1024))
                     .with_hop_length(nzu!(256))
                     .with_center(false),
@@ -359,7 +363,7 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} zcr_thresh_max"),
             &x.zero_crossing_rate_frames(
-                &ZeroCrossingRateConfig::new()
+                &ZeroCrossingRateConfig::librosa()
                     .with_threshold(0.05)
                     .with_ref_magnitude(ZeroCrossingReference::Max),
             )
@@ -370,7 +374,7 @@ fn spectral_nondefault_parameters() {
         check_rows(
             &format!("{name} zcr_zero_neg_pad"),
             &x.zero_crossing_rate_frames(
-                &ZeroCrossingRateConfig::new()
+                &ZeroCrossingRateConfig::librosa()
                     .with_threshold(0.01)
                     .with_zero_pos(false)
                     .with_pad(true),
@@ -389,7 +393,7 @@ fn pcen_cases() {
     let rate = f64::from(sr());
     let scale = 2f64.powi(31);
     let mel = mono("mix")
-        .melspectrogram(&MelSpectrogramConfig::default())
+        .melspectrogram(&MelSpectrogramConfig::librosa())
         .unwrap()
         * scale;
     let sub = |a: Array3<f64>| a.slice(s![.., ..;rs, ..]).to_owned();
@@ -398,13 +402,13 @@ fn pcen_cases() {
     // the mel input's (FFT + matrix product) round-off and log/exp ulps.
     let tol = 1e-12;
     let cases: [(&str, PcenConfig); 5] = [
-        ("default", PcenConfig::default()),
-        ("max_size3", PcenConfig::new().with_max_size(nzu!(3))),
-        ("power0", PcenConfig::new().with_power(0.0)),
-        ("bias0", PcenConfig::new().with_bias(0.0).with_gain(0.8)),
+        ("default", PcenConfig::librosa()),
+        ("max_size3", PcenConfig::librosa().with_max_size(nzu!(3))),
+        ("power0", PcenConfig::librosa().with_power(0.0)),
+        ("bias0", PcenConfig::librosa().with_bias(0.0).with_gain(0.8)),
         (
             "b_explicit_hop256",
-            PcenConfig::new()
+            PcenConfig::librosa()
                 .with_hop_length(nzu!(256))
                 .with_b(Some(0.2))
                 .with_time_constant(0.1),
@@ -419,21 +423,21 @@ fn pcen_cases() {
         );
     }
     let mel_st = stereo()
-        .melspectrogram(&MelSpectrogramConfig::default())
+        .melspectrogram(&MelSpectrogramConfig::librosa())
         .unwrap()
         * scale;
     check_rows(
         "pcen stereo",
-        &sub(pcen(mel_st.view(), rate, &PcenConfig::default()).unwrap()),
+        &sub(pcen(mel_st.view(), rate, &PcenConfig::librosa()).unwrap()),
         &f["stereo"],
         tol,
     );
     let ms = step(&f["stft_notes_mag_step"]);
     let mag = mono("notes")
-        .spectrogram_matrix(&StftConfig::default(), 1.0)
+        .spectrogram_matrix(&StftConfig::librosa(), 1.0)
         .unwrap()
         * scale;
-    let p = pcen(mag.view(), rate, &PcenConfig::default()).unwrap();
+    let p = pcen(mag.view(), rate, &PcenConfig::librosa()).unwrap();
     check_rows(
         "pcen stft notes",
         &p.slice(s![.., ..;ms, ..]).to_owned(),
@@ -503,10 +507,10 @@ fn perceptual_weighting_cases() {
     let bs = step(&f["bin_step"]);
     let freqs = fft_freqs(2048);
     let p = mono("mix")
-        .spectrogram_matrix(&StftConfig::default(), 2.0)
+        .spectrogram_matrix(&StftConfig::librosa(), 2.0)
         .unwrap();
     let pst = stereo()
-        .spectrogram_matrix(&StftConfig::default(), 2.0)
+        .spectrogram_matrix(&StftConfig::librosa(), 2.0)
         .unwrap();
     let sub = |a: Array3<f64>| a.slice(s![.., ..;bs, ..]).to_owned();
     // dB of FFT power: the absolute error of 10 log10(P) is ~4.3 * relative error of
@@ -578,7 +582,7 @@ fn reassigned_spectrogram_cases() {
             continue;
         }
         let p = &case["params"];
-        let mut stft = StftConfig::default();
+        let mut stft = StftConfig::librosa();
         if let Some(v) = p.get("n_fft") {
             stft.n_fft = nz(step(v));
         }
@@ -594,7 +598,7 @@ fn reassigned_spectrogram_cases() {
         if p.get("window").is_some() {
             stft.window = Window::Hamming;
         }
-        let mut cfg = ReassignedSpectrogramConfig::new().with_stft(stft);
+        let mut cfg = ReassignedSpectrogramConfig::librosa().with_stft(stft);
         if let Some(v) = p.get("fill_nan") {
             cfg.fill_nan = v.as_bool().unwrap();
         }
@@ -646,6 +650,118 @@ fn reassigned_spectrogram_cases() {
                 &arr2(&case[what]),
                 1e-11,
             );
+        }
+    }
+}
+
+/// A shared test signal as mono `f32` audio (exact: the signals are 16-bit PCM).
+fn mono_f32(name: &str) -> AudioSamples<'static, f32> {
+    let x: Vec<f32> = signal(name).iter().map(|&v| v as f32).collect();
+    let rate = std::num::NonZeroU32::new(sr()).expect("sr > 0");
+    AudioSamples::new_mono(ndarray::Array1::from(x), rate).expect("valid mono audio")
+}
+
+/// Compare `(channels, rows, frames)` arrays row by row (each row against its
+/// own peak).
+#[track_caller]
+fn check_rows_arr(what: &str, actual: &Array3<f64>, expected: &Array3<f64>, rtol: f64) {
+    assert_eq!(actual.shape(), expected.shape(), "{what}: shape");
+    for c in 0..expected.dim().0 {
+        for r in 0..expected.dim().1 {
+            let a = actual.slice(s![c, r, ..]).to_vec();
+            let e = expected.slice(s![c, r, ..]).to_vec();
+            check(&format!("{what} [ch {c}, row {r}]"), &a, &e, rtol);
+        }
+    }
+}
+
+/// `f32` audio against librosa run on the same samples cast to `float32`, and
+/// against this crate's `f64` path.
+///
+/// librosa's float32 STFT multiplies the frames by a float64 window, so numpy
+/// computes the FFT in float64 and rounds the result to complex64: its output is
+/// the float64 result rounded once. Here the whole computation runs in `f32`, so
+/// both comparisons measure the `f32` round-off of this crate (the two measured
+/// errors agree to within 2e-7 of each other).
+///
+/// Tolerances (peak-relative per row; f32 epsilon 1.19e-7):
+/// - centroid, bandwidth: FFT round-off grows as log2(2048) = 11 eps, plus the
+///   sums over 1025 bins; measured <= 1.9e-6, bound 4e-6 (34 eps).
+/// - flatness: log / exp of the power on top; measured <= 2.6e-6, bound 5e-6.
+/// - rms: a sequential sum of 2048 squares (librosa: numpy's pairwise float32
+///   sum); measured <= 1.3e-6, bound 4e-6.
+/// - contrast (dB): the valley is the mean of the 1-3 smallest magnitudes of a
+///   band. For noise they are within a few orders of magnitude of the band
+///   peak (measured 3.9e-6, bound 1e-5). For the tonal `mix` signal they lie far
+///   below the peak, where the f32 FFT's absolute round-off (about 11 eps of the
+///   frame peak) is a large relative error of the valley: measured up to
+///   0.22 dB (9.2e-3 of the row peak), bound 2e-2. The linear quantities are
+///   checked tightly above.
+/// - zcr: crossing counts of identical samples; exact.
+#[test]
+fn float32_input() {
+    let f = &fixture()["float32"];
+    for (name, case) in f.as_object().unwrap() {
+        let x = mono_f32(name);
+        let x64 = mono(name);
+        let contrast_tol = if name == "mix" { 2e-2 } else { 1e-5 };
+        let cases: [(&str, Array3<f32>, Array3<f64>, f64); 6] = [
+            (
+                "centroid",
+                x.spectral_centroid_frames(&SpectralCentroidConfig::librosa())
+                    .unwrap(),
+                x64.spectral_centroid_frames(&SpectralCentroidConfig::librosa())
+                    .unwrap(),
+                4e-6,
+            ),
+            (
+                "bandwidth",
+                x.spectral_bandwidth_frames(&SpectralBandwidthConfig::librosa())
+                    .unwrap(),
+                x64.spectral_bandwidth_frames(&SpectralBandwidthConfig::librosa())
+                    .unwrap(),
+                4e-6,
+            ),
+            (
+                "flatness",
+                x.spectral_flatness_frames(&SpectralFlatnessConfig::librosa())
+                    .unwrap(),
+                x64.spectral_flatness_frames(&SpectralFlatnessConfig::librosa())
+                    .unwrap(),
+                5e-6,
+            ),
+            (
+                "contrast",
+                x.spectral_contrast_frames(&SpectralContrastConfig::librosa())
+                    .unwrap(),
+                x64.spectral_contrast_frames(&SpectralContrastConfig::librosa())
+                    .unwrap(),
+                contrast_tol,
+            ),
+            (
+                "rms",
+                x.rms_frames(&RmsConfig::librosa()).unwrap(),
+                x64.rms_frames(&RmsConfig::librosa()).unwrap(),
+                4e-6,
+            ),
+            (
+                "zcr",
+                x.zero_crossing_rate_frames(&ZeroCrossingRateConfig::librosa())
+                    .unwrap(),
+                x64.zero_crossing_rate_frames(&ZeroCrossingRateConfig::librosa())
+                    .unwrap(),
+                0.0,
+            ),
+        ];
+        for (what, ours, ours64, tol) in cases {
+            let ours = ours.mapv(f64::from);
+            check_rows(
+                &format!("f32 {name} {what} vs librosa float32"),
+                &ours,
+                &case[what],
+                tol,
+            );
+            check_rows_arr(&format!("f32 {name} {what} vs f64"), &ours, &ours64, tol);
         }
     }
 }

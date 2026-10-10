@@ -147,29 +147,29 @@ fn check_piptrack(what: &str, pitches: &Array3<f64>, mags: &Array3<f64>, case: &
 fn piptrack_cases() {
     let f = &fixture()["piptrack"];
     let notes = mono("notes");
-    let (p, m) = notes.piptrack(&PiptrackConfig::default()).unwrap();
+    let (p, m) = notes.piptrack(&PiptrackConfig::librosa()).unwrap();
     check_piptrack("piptrack notes default", &p, &m, &f["notes_default"]);
 
-    let cfg = PiptrackConfig::default()
-        .with_stft(StftConfig::default().with_n_fft(nzu!(1024)))
+    let cfg = PiptrackConfig::librosa()
+        .with_stft(StftConfig::librosa().with_n_fft(nzu!(1024)))
         .with_fmin(100.0)
         .with_fmax(1500.0)
         .with_threshold(0.3);
     let (p, m) = notes.piptrack(&cfg).unwrap();
     check_piptrack("piptrack notes range/thr", &p, &m, &f["notes_range_thr"]);
 
-    let cfg = PiptrackConfig::default()
+    let cfg = PiptrackConfig::librosa()
         .with_threshold(1.0)
         .with_reference(PiptrackReference::FrameMean);
     let (p, m) = notes.piptrack(&cfg).unwrap();
     check_piptrack("piptrack notes ref=mean", &p, &m, &f["notes_ref_mean"]);
 
-    let cfg = PiptrackConfig::default().with_reference(PiptrackReference::Value(2.0));
+    let cfg = PiptrackConfig::librosa().with_reference(PiptrackReference::Value(2.0));
     let (p, m) = notes.piptrack(&cfg).unwrap();
     check_piptrack("piptrack notes ref=2.0", &p, &m, &f["notes_ref_value"]);
 
     let step = f["stereo_frame_step"].as_u64().unwrap() as isize;
-    let (p, m) = stereo().piptrack(&PiptrackConfig::default()).unwrap();
+    let (p, m) = stereo().piptrack(&PiptrackConfig::librosa()).unwrap();
     let p = p.slice(s![.., .., ..;step]).to_owned();
     let m = m.slice(s![.., .., ..;step]).to_owned();
     check_piptrack("piptrack stereo", &p, &m, &f["stereo_default"]);
@@ -179,7 +179,7 @@ fn piptrack_cases() {
 fn estimate_tuning_cases() {
     let f = &fixture()["estimate_tuning"];
     let notes = mono("notes");
-    let def = TuningConfig::default();
+    let def = TuningConfig::librosa();
     // A histogram argmax over identical peak sets: the estimates must agree to
     // the last bit of the bin edge (1e-12 only absorbs printing of the edge).
     let cases: Vec<(&str, f64)> = vec![
@@ -198,7 +198,7 @@ fn estimate_tuning_cases() {
         ),
         ("notes_power_S", {
             let s = notes
-                .spectrogram_matrix(&StftConfig::default(), 2.0)
+                .spectrogram_matrix(&StftConfig::librosa(), 2.0)
                 .unwrap();
             estimate_tuning_from_spectrogram(s.view(), f64::from(sr()), &def).unwrap()
         }),
@@ -208,8 +208,8 @@ fn estimate_tuning_cases() {
             detuned()
                 .estimate_tuning(
                     &def.clone().with_piptrack(
-                        PiptrackConfig::default()
-                            .with_stft(StftConfig::default().with_n_fft(nzu!(4096))),
+                        PiptrackConfig::librosa()
+                            .with_stft(StftConfig::librosa().with_n_fft(nzu!(4096))),
                     ),
                 )
                 .unwrap(),
@@ -251,7 +251,7 @@ fn pitch_tuning_cases() {
 fn chroma_stft_cases() {
     let f = &fixture()["chroma_stft"];
     let notes = mono("notes");
-    let def = ChromaStftConfig::default();
+    let def = ChromaStftConfig::librosa();
     // Same STFT, f64 basis, same per-frame norm: FFT / matmul round-off only.
     let tight = 1e-10;
     let cases: Vec<(&str, Array3<f64>, f64)> = vec![
@@ -304,7 +304,7 @@ fn chroma_stft_cases() {
             "notes_magnitude_S",
             {
                 let s = notes
-                    .spectrogram_matrix(&StftConfig::default(), 1.0)
+                    .spectrogram_matrix(&StftConfig::librosa(), 1.0)
                     .unwrap();
                 chroma_stft_from_spectrogram(s.view(), f64::from(sr()), &def).unwrap()
             },
@@ -333,34 +333,36 @@ fn normalize_cases() {
     let f = &fixture()["normalize"];
     let x = arr2(&f["input"]);
     let cases: Vec<(&str, NormalizeConfig)> = vec![
-        ("inf_axis0", NormalizeConfig::default()),
+        ("inf_axis0", NormalizeConfig::librosa()),
         (
             "l2_axis1",
-            NormalizeConfig::new()
+            NormalizeConfig::librosa()
                 .with_norm(Some(2.0))
                 .with_axis(Some(1)),
         ),
-        ("l1_axis0", NormalizeConfig::new().with_norm(Some(1.0))),
+        ("l1_axis0", NormalizeConfig::librosa().with_norm(Some(1.0))),
         (
             "l3_axis1",
-            NormalizeConfig::new()
+            NormalizeConfig::librosa()
                 .with_norm(Some(3.0))
                 .with_axis(Some(1)),
         ),
-        ("l0_axis0", NormalizeConfig::new().with_norm(Some(0.0))),
+        ("l0_axis0", NormalizeConfig::librosa().with_norm(Some(0.0))),
         (
             "neg_inf_axis1",
-            NormalizeConfig::new()
+            NormalizeConfig::librosa()
                 .with_norm(Some(f64::NEG_INFINITY))
                 .with_axis(Some(1)),
         ),
         (
             "none_axis_l2",
-            NormalizeConfig::new().with_norm(Some(2.0)).with_axis(None),
+            NormalizeConfig::librosa()
+                .with_norm(Some(2.0))
+                .with_axis(None),
         ),
         (
             "thr_fill_true_l2_axis1",
-            NormalizeConfig::new()
+            NormalizeConfig::librosa()
                 .with_norm(Some(2.0))
                 .with_axis(Some(1))
                 .with_threshold(Some(1e-3))
@@ -368,20 +370,20 @@ fn normalize_cases() {
         ),
         (
             "thr_fill_false_inf_axis1",
-            NormalizeConfig::new()
+            NormalizeConfig::librosa()
                 .with_axis(Some(1))
                 .with_threshold(Some(1e-3))
                 .with_fill(Some(false)),
         ),
         (
             "thr_fill_none_inf_axis1",
-            NormalizeConfig::new()
+            NormalizeConfig::librosa()
                 .with_axis(Some(1))
                 .with_threshold(Some(1e-3)),
         ),
         (
             "fill_true_inf_axis0",
-            NormalizeConfig::new().with_fill(Some(true)),
+            NormalizeConfig::librosa().with_fill(Some(true)),
         ),
     ];
     for (name, cfg) in cases {
@@ -515,18 +517,18 @@ fn chroma_filterbank_matches_chroma_stft_basis() {
     // spectrogram followed by max-normalisation (internal consistency).
     let notes = mono("notes");
     let s = notes
-        .spectrogram_matrix(&StftConfig::default().with_hop_length(Some(nzu!(512))), 2.0)
+        .spectrogram_matrix(&StftConfig::librosa().with_hop_length(Some(nzu!(512))), 2.0)
         .unwrap();
     let fb = chroma_filterbank(
         f64::from(sr()),
         nzu!(2048),
-        &ChromaFilterbankConfig::default(),
+        &ChromaFilterbankConfig::librosa(),
     )
     .unwrap();
     let raw = fb.dot(&s.slice(s![0, .., ..]));
-    let norm = normalize_array(&raw, &NormalizeConfig::new().with_axis(Some(0))).unwrap();
+    let norm = normalize_array(&raw, &NormalizeConfig::librosa().with_axis(Some(0))).unwrap();
     let c = notes
-        .chroma_stft(&ChromaStftConfig::default().with_tuning(Some(0.0)))
+        .chroma_stft(&ChromaStftConfig::librosa().with_tuning(Some(0.0)))
         .unwrap();
     check(
         "chroma_stft == normalize(fb . S)",
@@ -534,4 +536,69 @@ fn chroma_filterbank_matches_chroma_stft_basis() {
         norm.iter(),
         1e-15,
     );
+}
+
+/// A shared test signal as mono `f32` audio (exact: the signals are 16-bit PCM).
+fn mono_f32(name: &str) -> AudioSamples<'static, f32> {
+    let x: Vec<f32> = crate::common::signal(name)
+        .iter()
+        .map(|&v| v as f32)
+        .collect();
+    AudioSamples::new_mono(Array1::from(x), std::num::NonZeroU32::new(sr()).unwrap()).unwrap()
+}
+
+/// `f32` audio against librosa run on the same samples cast to `float32`
+/// (float32 STFT, float32 filterbank), and against this crate's `f64` path.
+///
+/// The chromagrams are max-normalised (peak 1). The remaining error is the f32
+/// round-off of the power STFT (about log2(2048) = 11 eps) and of the
+/// 1025-term projection: measured <= 6.0e-7 against librosa and <= 3.8e-7
+/// against the f64 path; bound 2e-6 (17 f32 eps). The f32 tuning estimate must
+/// equal librosa's float32 estimate (both 0.0 for `notes`), so `notes_default`
+/// (tuning estimated) uses the same filterbank.
+#[test]
+fn chroma_stft_float32() {
+    let f = &fixture()["chroma_stft_float32"];
+    let notes = mono_f32("notes");
+    let lib = ChromaStftConfig::librosa();
+    let t = notes.estimate_tuning(&TuningConfig::librosa()).unwrap();
+    let t_lib = f["notes_estimated_tuning"].as_f64().unwrap();
+    eprintln!("f32 estimated tuning {t} (librosa float32 {t_lib})");
+    assert_eq!(t, t_lib);
+    let tol = 2e-6;
+    let tuning0 = lib.clone().with_tuning(Some(0.0));
+    let cases: Vec<(&str, Array3<f32>, Array3<f64>)> = vec![
+        (
+            "notes_tuning0",
+            notes.chroma_stft(&tuning0).unwrap(),
+            mono("notes").chroma_stft(&tuning0).unwrap(),
+        ),
+        (
+            "notes_default",
+            notes.chroma_stft(&lib).unwrap(),
+            mono("notes").chroma_stft(&lib).unwrap(),
+        ),
+        (
+            "mix_tuning0",
+            mono_f32("mix").chroma_stft(&tuning0).unwrap(),
+            mono("mix").chroma_stft(&tuning0).unwrap(),
+        ),
+    ];
+    for (name, got, got64) in cases {
+        let got = got.mapv(f64::from);
+        let want = arr2(&f[name]).insert_axis(ndarray::Axis(0));
+        assert_eq!(got.shape(), want.shape(), "chroma_stft f32 {name}: shape");
+        check(
+            &format!("chroma_stft f32 {name} vs librosa float32"),
+            got.iter(),
+            want.iter(),
+            tol,
+        );
+        check(
+            &format!("chroma_stft f32 {name} vs f64"),
+            got.iter(),
+            got64.iter(),
+            tol,
+        );
+    }
 }

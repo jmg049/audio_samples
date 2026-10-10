@@ -92,7 +92,7 @@ fn mono_rows(c: &Array3<Complex<f64>>, step: usize) -> Array2<Complex<f64>> {
 }
 
 fn cqt_config(params: &Value) -> CqtConfig {
-    let mut cfg = CqtConfig::default();
+    let mut cfg = CqtConfig::librosa();
     if let Some(v) = params.get("fmin") {
         cfg.fmin = Some(v.as_f64().unwrap());
     }
@@ -127,7 +127,7 @@ fn cqt_config(params: &Value) -> CqtConfig {
 #[test]
 fn cqt_default_per_octave() {
     let fx = load("constant_q");
-    let ours = mono_rows(&mono("mix").cqt(&CqtConfig::default()).unwrap(), 1);
+    let ours = mono_rows(&mono("mix").cqt(&CqtConfig::librosa()).unwrap(), 1);
     let stock = carr2(&fx["cqt_full_mix_default"]);
     let f64_basis = carr2(&fx["cqt_f64_basis_mix_default"]);
     assert_eq!(ours.dim(), stock.dim());
@@ -278,7 +278,7 @@ fn vqt_variants() {
     for (name, case) in fx["vqt"].as_object().unwrap() {
         let p = &case["params"];
         let gamma = p.get("gamma").map(|v| v.as_f64().unwrap());
-        let cfg = VqtConfig::default()
+        let cfg = VqtConfig::librosa()
             .with_cqt(cqt_config(p))
             .with_gamma(gamma);
         let ours = mono("mix").vqt(&cfg).unwrap();
@@ -312,14 +312,14 @@ fn pseudo_and_hybrid_cqt() {
     let step = fx["frame_step"].as_u64().unwrap() as usize;
     let mix = mono("mix");
     // pseudo_cqt: a single STFT, no resampling (source 1).
-    let p = mix.pseudo_cqt(&CqtConfig::default()).unwrap();
+    let p = mix.pseudo_cqt(&CqtConfig::librosa()).unwrap();
     check_r(
         "pseudo_cqt default",
         &mono_real(&p, step),
         arr2(&fx["pseudo_cqt"]["default"]).as_slice().unwrap(),
         NO_RESAMPLING,
     );
-    let cfg = CqtConfig::default()
+    let cfg = CqtConfig::librosa()
         .with_fmin(Some(220.0))
         .with_n_bins(Some(nzu!(48)))
         .with_scale(false);
@@ -333,14 +333,14 @@ fn pseudo_and_hybrid_cqt() {
         NO_RESAMPLING,
     );
 
-    let h = mix.hybrid_cqt(&CqtConfig::default()).unwrap();
+    let h = mix.hybrid_cqt(&CqtConfig::librosa()).unwrap();
     check_r(
         "hybrid_cqt default",
         &mono_real(&h, step),
         arr2(&fx["hybrid_cqt"]["default"]).as_slice().unwrap(),
         RESAMPLED,
     );
-    let cfg = CqtConfig::default()
+    let cfg = CqtConfig::librosa()
         .with_bins_per_octave(nzu!(36))
         .with_n_bins(Some(nzu!(252)));
     let h = mono("notes").hybrid_cqt(&cfg).unwrap();
@@ -390,7 +390,7 @@ fn icqt_of_librosa_cqt() {
     let n = mono("mix").samples_per_channel().get();
     let y = AudioSamples::<f64>::icqt(
         &c,
-        &CqtConfig::default(),
+        &CqtConfig::librosa(),
         sample_rate!(22050),
         NonZeroUsize::new(n),
     )
@@ -406,7 +406,7 @@ fn icqt_of_librosa_cqt() {
     check_icqt("icqt default", &y, &f64s(&fx["icqt"]["default"]), istep);
 
     // Round trip through our own forward transform (scale = false).
-    let cfg = CqtConfig::default().with_scale(false);
+    let cfg = CqtConfig::librosa().with_scale(false);
     let c = mono("mix").cqt(&cfg).unwrap();
     let y = AudioSamples::<f64>::icqt(&c, &cfg, sample_rate!(22050), NonZeroUsize::new(n)).unwrap();
     let y: Vec<f64> = y
@@ -457,7 +457,7 @@ fn cq_to_chroma_matrices() {
 const CENS: f64 = 1e-12;
 
 fn chroma_cfg(tuning: f64) -> ChromaCqtConfig {
-    ChromaCqtConfig::default().with_tuning(Some(tuning))
+    ChromaCqtConfig::librosa().with_tuning(Some(tuning))
 }
 
 #[test]
@@ -469,7 +469,7 @@ fn chroma_features() {
     let est = audio_samples::operations::tonal::estimate_tuning_from_signal(
         notes_rows().view(),
         22050.0,
-        &audio_samples::operations::tonal::TuningConfig::default().with_bins_per_octave(nzu!(36)),
+        &audio_samples::operations::tonal::TuningConfig::librosa().with_bins_per_octave(nzu!(36)),
     )
     .unwrap();
     eprintln!("estimate_tuning(notes, bpo=36): ours {est}, librosa {t_notes}");
@@ -489,7 +489,7 @@ fn chroma_features() {
     // tuning=None (the default): estimated from the signal, as librosa does.
     check_r(
         "chroma_cqt notes tuning=None",
-        &flat(&notes.chroma_cqt(&ChromaCqtConfig::default()).unwrap()),
+        &flat(&notes.chroma_cqt(&ChromaCqtConfig::librosa()).unwrap()),
         &a2(&cc["notes_tuning_none"]),
         RESAMPLED,
     );
@@ -527,7 +527,7 @@ fn chroma_features() {
     );
 
     let ce = &fx["chroma_cens"];
-    let cens = |c: ChromaCqtConfig| ChromaCensConfig::default().with_chroma(c);
+    let cens = |c: ChromaCqtConfig| ChromaCensConfig::librosa().with_chroma(c);
     check_r(
         "chroma_cens notes tuning=0",
         &flat(&notes.chroma_cens(&cens(chroma_cfg(0.0))).unwrap()),
@@ -536,7 +536,7 @@ fn chroma_features() {
     );
     check_r(
         "chroma_cens notes tuning=None",
-        &flat(&notes.chroma_cens(&ChromaCensConfig::default()).unwrap()),
+        &flat(&notes.chroma_cens(&ChromaCensConfig::librosa()).unwrap()),
         &a2(&ce["notes_tuning_none"]),
         CENS,
     );
@@ -551,7 +551,7 @@ fn chroma_features() {
     let cv = &fx["chroma_vqt"];
     check_r(
         "chroma_vqt mix",
-        &flat(&mix.chroma_vqt(&ChromaVqtConfig::default()).unwrap()),
+        &flat(&mix.chroma_vqt(&ChromaVqtConfig::librosa()).unwrap()),
         &a2(&cv["mix_equal"]),
         RESAMPLED,
     );
@@ -559,7 +559,7 @@ fn chroma_features() {
         "chroma_vqt notes gamma=None",
         &flat(
             &notes
-                .chroma_vqt(&ChromaVqtConfig::default().with_gamma(None))
+                .chroma_vqt(&ChromaVqtConfig::librosa().with_gamma(None))
                 .unwrap(),
         ),
         &a2(&cv["notes_gamma_none"]),
@@ -567,7 +567,7 @@ fn chroma_features() {
     );
 
     let tz = &fx["tonnetz"];
-    let tcfg = |t: f64| TonnetzConfig::default().with_chroma(chroma_cfg(t));
+    let tcfg = |t: f64| TonnetzConfig::librosa().with_chroma(chroma_cfg(t));
     check_r(
         "tonnetz notes tuning=0",
         &flat(&notes.tonnetz(&tcfg(0.0)).unwrap()),
@@ -576,7 +576,7 @@ fn chroma_features() {
     );
     check_r(
         "tonnetz notes tuning=None",
-        &flat(&notes.tonnetz(&TonnetzConfig::default()).unwrap()),
+        &flat(&notes.tonnetz(&TonnetzConfig::librosa()).unwrap()),
         &a2(&tz["notes_tuning_none"]),
         RESAMPLED,
     );
@@ -588,4 +588,73 @@ fn notes_rows() -> Array2<f64> {
         crate::common::signal("notes"),
     )
     .unwrap()
+}
+
+/// A shared test signal as mono `f32` audio (exact: the signals are 16-bit PCM).
+fn mono_f32(name: &str) -> AudioSamples<'static, f32> {
+    let x: Vec<f32> = crate::common::signal(name)
+        .iter()
+        .map(|&v| v as f32)
+        .collect();
+    AudioSamples::new_mono(ndarray::Array1::from(x), sample_rate!(22050)).unwrap()
+}
+
+/// `f32` audio against librosa run on the same samples cast to `float32`
+/// (complex64 CQT), and against this crate's `f64` path.
+///
+/// - Top octave (no resampling): f32 FFT and filter-product round-off. Measured
+///   3.4e-8 of the peak against librosa and 2.9e-8 against the f64 path; bound
+///   2e-7 (1.7 f32 eps).
+/// - Decimated octaves against librosa: the resampler difference of the f64
+///   comparison (`cqt_default_per_octave`), measured up to 1.3e-4; bound 2e-3 as
+///   there.
+/// - Every octave against the f64 path: the resampler runs in f64 for both, so
+///   only f32 round-off remains; measured <= 2.5e-7, bound 1e-6 (8 eps).
+/// - chroma_cqt: against librosa the resampled octaves dominate (measured
+///   5.7e-5, bound `RESAMPLED`); against the f64 path measured 1.7e-7, bound
+///   1e-6.
+#[test]
+fn float32_input() {
+    let fx = load("constant_q");
+    let f = &fx["float32"];
+    let c32 = mono_f32("mix").cqt(&CqtConfig::librosa()).unwrap();
+    let ours = mono_rows(
+        &c32.mapv(|z| Complex::new(f64::from(z.re), f64::from(z.im))),
+        1,
+    );
+    let lib32 = carr2(&f["cqt_mix_default"]);
+    let ours64 = mono_rows(&mono("mix").cqt(&CqtConfig::librosa()).unwrap(), 1);
+    let oct_lib = octave_errors(&ours, &lib32, 12);
+    let oct_64 = octave_errors(&ours, &ours64, 12);
+    eprintln!("f32 cqt per-octave error vs librosa float32, top first: {oct_lib:.2e}");
+    eprintln!("f32 cqt per-octave error vs f64 path, top first: {oct_64:.2e}");
+    assert!(oct_lib[0] < 2e-7, "top octave vs librosa: {:e}", oct_lib[0]);
+    for (i, &e) in oct_lib.iter().enumerate().skip(1) {
+        assert!(e < 2e-3, "octave {i} vs librosa: {e:e}");
+    }
+    for (i, &e) in oct_64.iter().enumerate() {
+        assert!(e < 1e-6, "octave {i} vs f64: {e:e}");
+    }
+    let flat = |x: &Array3<f64>| x.iter().copied().collect::<Vec<_>>();
+    let a2 = |v: &Value| arr2(v).iter().copied().collect::<Vec<_>>();
+    for (name, sig) in [
+        ("chroma_cqt_notes_tuning0", "notes"),
+        ("chroma_cqt_mix_tuning0", "mix"),
+    ] {
+        let cfg = chroma_cfg(0.0);
+        let got = mono_f32(sig).chroma_cqt(&cfg).unwrap().mapv(f64::from);
+        check_r(
+            &format!("f32 {name} vs librosa float32"),
+            &flat(&got),
+            &a2(&f[name]),
+            RESAMPLED,
+        );
+        let got64 = mono(sig).chroma_cqt(&cfg).unwrap();
+        check_r(
+            &format!("f32 {name} vs f64"),
+            &flat(&got),
+            &flat(&got64),
+            1e-6,
+        );
+    }
 }

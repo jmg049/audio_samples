@@ -10,6 +10,10 @@ icqt case and the per-octave error analysis use it.
 
 ``tuning=None`` cases also store librosa's estimated tuning, so the Rust side can
 reproduce the rest of the pipeline with that value.
+
+``float32`` holds results for the PCM signals cast to ``np.float32``: librosa
+then computes the CQT in complex64 (wavelets, FFTs and resampling in single
+precision). The Rust side compares ``AudioSamples<f32>`` output with them.
 """
 
 from __future__ import annotations
@@ -137,6 +141,13 @@ def build(signals, sr):
     out["chroma_vqt"] = {
         "mix_equal": librosa.feature.chroma_vqt(y=mix, sr=sr, intervals="equal"),
         "notes_gamma_none": librosa.feature.chroma_vqt(y=notes, sr=sr, intervals="equal", gamma=None),
+    }
+    mix32 = mix.astype(np.float32)
+    notes32 = notes.astype(np.float32)
+    out["float32"] = {
+        "cqt_mix_default": librosa.cqt(mix32, sr=sr),
+        "chroma_cqt_notes_tuning0": librosa.feature.chroma_cqt(y=notes32, sr=sr, tuning=0.0),
+        "chroma_cqt_mix_tuning0": librosa.feature.chroma_cqt(y=mix32, sr=sr, tuning=0.0),
     }
     out["tonnetz"] = {
         "notes_tuning0": librosa.feature.tonnetz(y=notes, sr=sr, tuning=0.0),

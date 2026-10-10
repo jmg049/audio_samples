@@ -26,14 +26,26 @@
 //! magnitude spectrogram, L2 normalisation and no tuning estimation, so its
 //! profiles are much flatter than librosa's. Code ported from Python (key
 //! detection, chord recognition, cover-song features) expects librosa's exact
-//! chroma. Every config struct here defaults to librosa's defaults, so
-//! `X::default()` gives librosa-equivalent output (to floating-point round-off).
+//! chroma. Every config struct has a `librosa()` constructor that returns
+//! librosa 1.0's defaults, so `X::librosa()` gives librosa-equivalent output (to
+//! floating-point round-off). `Default` is the same except for
+//! [`ChromaStftConfig`], whose default fixes the tuning at A440 instead of
+//! estimating it.
 //!
 //! ## How
 //!
 //! Bring [`AudioTonal`] into scope and call it on any [`AudioSamples`]. Frame-wise
-//! outputs are `f64` arrays shaped `(channels, n_features, n_frames)`; mono input
+//! outputs are arrays shaped `(channels, n_features, n_frames)`; mono input
 //! gives one channel. Tuning estimates pool all channels, as librosa does.
+//!
+//! The output precision follows the input: the element type is the sample
+//! type's [`AudioSample::Float`](crate::AudioSample::Float). `u8`, `i16`, `I24`
+//! and `f32` audio gives `f32` arrays; `i32` and `f64` audio gives `f64`. The
+//! whole computation runs in that type. The chroma filterbank is computed in
+//! `f64` and rounded to the output type once. Tuning estimates are `f64`
+//! scalars. The free functions on arrays ([`normalize_array`],
+//! [`chroma_stft_from_spectrogram`], [`piptrack_from_spectrogram`], ...) are
+//! generic over the element type ([`AudioFloat`]: `f32` or `f64`).
 //!
 //! ```rust
 //! use audio_samples::operations::tonal::{AudioTonal, ChromaStftConfig, TuningConfig};
@@ -57,10 +69,12 @@ use ndarray::{
     Array, Array2, Array3, ArrayBase, ArrayView2, ArrayView3, ArrayViewMut1, Axis, Data, Dimension,
 };
 
-// TRANSITIONAL(f64): `finite_audio_rows` / `spectrogram_rows` on f64 rows.
-use crate::operations::spectrum::{StftConfig, finite_audio_rows, spectrogram_rows, stft};
+use crate::audio_float::finite_float_rows;
+use crate::operations::spectrum::{StftConfig, spectrogram_rows, stft};
 use crate::utils::audio_math::hz_to_octs;
-use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
+use crate::{
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
+};
 
 fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_value(parameter, reason))
@@ -100,7 +114,8 @@ fn np_remainder(a: f64, b: f64) -> f64 {
 /// chromagram, each filter of a filterbank, ...) so that its norm is 1. It makes
 /// features comparable across frames of different loudness. `Default` reproduces
 /// librosa's defaults: max-norm (`np.inf`) along axis 0, threshold = smallest
-/// positive normal `f64`, quiet slices left unchanged.
+/// positive normal value of the array's element type, quiet slices left
+/// unchanged.
 ///
 /// ## Invariants
 ///
@@ -136,8 +151,9 @@ pub struct NormalizeConfig {
     pub axis: Option<isize>,
     /// Slices whose norm is below this value are treated as silent and handled
     /// according to `fill`. `None` (librosa's default) means the smallest
-    /// positive normal `f64` (`numpy.finfo(float).tiny`), so only all-zero
-    /// slices count. Must be positive when set.
+    /// positive normal value of the array's element type
+    /// (`numpy.finfo(dtype).tiny`: about `2.2e-308` for `f64`, `1.2e-38` for
+    /// `f32`), so only all-zero slices count. Must be positive when set.
     pub threshold: Option<f64>,
     /// What happens to slices below `threshold`: `None` (default) leaves them
     /// unchanged, `Some(false)` sets them to zero, `Some(true)` fills them with
@@ -158,9 +174,18 @@ impl Default for NormalizeConfig {
 }
 
 impl NormalizeConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's `util.normalize` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -178,7 +203,8 @@ impl NormalizeConfig {
         self
     }
 
-    /// Sets the small-norm threshold (`None` = smallest positive normal `f64`).
+    /// Sets the small-norm threshold (`None` = smallest positive normal value
+    /// of the element type).
     #[must_use]
     pub fn with_threshold(mut self, threshold: Option<f64>) -> Self {
         self.threshold = threshold;
@@ -247,42 +273,42 @@ impl NormalizeConfig {
 }
 
 /// The norm of one slice (librosa's `length`), from the magnitudes.
-fn slice_norm(values: impl Iterator<Item = f64>, norm: f64) -> f64 {
+fn slice_norm<F: AudioFloat>(values: impl Iterator<Item = F>, norm: f64) -> F {
     if norm == f64::INFINITY {
-        values.fold(f64::NEG_INFINITY, |m, x| m.max(x.abs()))
+        values.fold(F::neg_infinity(), |m, x| m.max(x.abs()))
     } else if norm == f64::NEG_INFINITY {
-        values.fold(f64::INFINITY, |m, x| m.min(x.abs()))
+        values.fold(F::infinity(), |m, x| m.min(x.abs()))
     } else if norm == 0.0 {
-        values.filter(|x| x.abs() > 0.0).count() as f64
+        F::of_usize(values.filter(|x| x.abs() > F::zero()).count())
     } else if norm == 2.0 {
-        values.map(|x| x * x).sum::<f64>().sqrt()
+        values.map(|x| x * x).sum::<F>().sqrt()
     } else if norm == 1.0 {
-        values.map(f64::abs).sum::<f64>()
+        values.map(|x| x.abs()).sum::<F>()
     } else {
         values
-            .map(|x| x.abs().powf(norm))
-            .sum::<f64>()
-            .powf(1.0 / norm)
+            .map(|x| x.abs().powf(F::of(norm)))
+            .sum::<F>()
+            .powf(F::of(1.0 / norm))
     }
 }
 
 /// Normalises one slice in place.
-fn normalize_slice(
-    mut lane: ArrayViewMut1<'_, f64>,
+fn normalize_slice<F: AudioFloat>(
+    mut lane: ArrayViewMut1<'_, F>,
     norm: f64,
-    threshold: f64,
+    threshold: F,
     fill: Option<bool>,
 ) {
     let length = slice_norm(lane.iter().copied(), norm);
     if length < threshold {
         match fill {
             None => {}
-            Some(false) => lane.mapv_inplace(|x| x / f64::INFINITY),
+            Some(false) => lane.mapv_inplace(|x| x / F::infinity()),
             Some(true) => {
                 let fill_norm = if norm.is_infinite() {
-                    1.0
+                    F::one()
                 } else {
-                    (lane.len() as f64).powf(-1.0 / norm)
+                    F::of_usize(lane.len()).powf(F::of(-1.0 / norm))
                 };
                 lane.fill(fill_norm);
             }
@@ -302,13 +328,15 @@ fn normalize_slice(
 ///
 /// # Arguments
 ///
-/// * `data` - Array of any dimensionality. Must contain only finite values.
+/// * `data` - Array of any dimensionality and element type `F` (`f32` or
+///   `f64`). Must contain only finite values.
 /// * `config` - Norm, axis, threshold and fill policy ([`NormalizeConfig::default`] =
-///   librosa defaults).
+///   librosa defaults). The norm exponent and threshold are rounded to `F`.
 ///
 /// # Returns
 ///
-/// A new array of the same shape. With `norm = None` it is a copy of `data`.
+/// A new array of the same shape and element type. With `norm = None` it is a
+/// copy of `data`.
 ///
 /// # Errors
 ///
@@ -333,12 +361,13 @@ fn normalize_slice(
 /// # References
 ///
 /// librosa `util.normalize`.
-pub fn normalize_array<S, D>(
+pub fn normalize_array<F, S, D>(
     data: &ArrayBase<S, D>,
     config: &NormalizeConfig,
-) -> AudioSampleResult<Array<f64, D>>
+) -> AudioSampleResult<Array<F, D>>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
     let axis = config.validate(data.ndim())?;
@@ -352,7 +381,9 @@ where
     if out.is_empty() {
         return Ok(out);
     }
-    let threshold = config.threshold.unwrap_or(f64::MIN_POSITIVE);
+    let threshold = config
+        .threshold
+        .map_or_else(F::min_positive_value, |t| F::of(t));
     match axis {
         Some(ax) => {
             for lane in out.lanes_mut(Axis(ax)) {
@@ -439,9 +470,18 @@ impl Default for ChromaFilterbankConfig {
 }
 
 impl ChromaFilterbankConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's `filters.chroma` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -560,7 +600,8 @@ impl ChromaFilterbankConfig {
 ///
 /// The basis is computed and returned in `f64`; librosa returns `float32` by
 /// default (`dtype=np.float32`). Pass `dtype=np.float64` to librosa for an
-/// exact comparison.
+/// exact comparison. [`chroma_stft_from_spectrogram`] rounds the basis to the
+/// spectrogram's element type once.
 ///
 /// # References
 ///
@@ -731,10 +772,21 @@ impl Default for PiptrackConfig {
 }
 
 impl PiptrackConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `piptrack` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT parameters.
@@ -807,13 +859,13 @@ impl PiptrackConfig {
 
 /// Pitch candidates of one channel's magnitude spectrogram, written into
 /// `pitches` / `mags` (pre-zeroed, same shape as `s`).
-fn piptrack_channel(
-    s: ArrayView2<'_, f64>,
+fn piptrack_channel<F: AudioFloat>(
+    s: ArrayView2<'_, F>,
     sample_rate: f64,
     n_fft: usize,
     config: &PiptrackConfig,
-    mut pitches: ndarray::ArrayViewMut2<'_, f64>,
-    mut mags: ndarray::ArrayViewMut2<'_, f64>,
+    mut pitches: ndarray::ArrayViewMut2<'_, F>,
+    mut mags: ndarray::ArrayViewMut2<'_, F>,
 ) {
     let (n_bins, n_frames) = s.dim();
     let fmin = config.fmin.max(0.0);
@@ -826,23 +878,26 @@ fn piptrack_channel(
             fmin <= f && f < fmax
         })
         .collect();
-    let mut col = vec![0.0; n_bins];
-    let mut thresholded = vec![0.0; n_bins];
+    let threshold = F::of(config.threshold);
+    let (two, half) = (F::of(2.0), F::of(0.5));
+    let (sr, n_fft_f) = (F::of(sample_rate), F::of_usize(n_fft));
+    let mut col = vec![F::zero(); n_bins];
+    let mut thresholded = vec![F::zero(); n_bins];
     for t in 0..n_frames {
         for (c, &x) in col.iter_mut().zip(s.column(t)) {
             *c = x.abs();
         }
         let reference = match config.reference {
             PiptrackReference::FrameMax => {
-                config.threshold * col.iter().fold(f64::NEG_INFINITY, |m, &x| m.max(x))
+                threshold * col.iter().fold(F::neg_infinity(), |m, &x| m.max(x))
             }
             PiptrackReference::FrameMean => {
-                config.threshold * (col.iter().sum::<f64>() / n_bins as f64)
+                threshold * (col.iter().copied().sum::<F>() / F::of_usize(n_bins))
             }
-            PiptrackReference::Value(v) => v.abs(),
+            PiptrackReference::Value(v) => F::of(v).abs(),
         };
         for (th, &x) in thresholded.iter_mut().zip(&col) {
-            *th = if x > reference { x } else { 0.0 };
+            *th = if x > reference { x } else { F::zero() };
         }
         for k in 0..n_bins {
             if !in_range[k] {
@@ -862,15 +917,19 @@ fn piptrack_channel(
             }
             // Parabolic interpolation (0 at the edges) and numpy.gradient.
             let (shift, avg) = if k == n_bins - 1 {
-                (0.0, col[k] - col[k - 1])
+                (F::zero(), col[k] - col[k - 1])
             } else {
-                let a = col[k + 1] + col[k - 1] - 2.0 * col[k];
-                let b = (col[k + 1] - col[k - 1]) / 2.0;
-                let shift = if b.abs() >= a.abs() { 0.0 } else { -b / a };
-                (shift, (col[k + 1] - col[k - 1]) / 2.0)
+                let a = col[k + 1] + col[k - 1] - two * col[k];
+                let b = (col[k + 1] - col[k - 1]) / two;
+                let shift = if b.abs() >= a.abs() {
+                    F::zero()
+                } else {
+                    -b / a
+                };
+                (shift, (col[k + 1] - col[k - 1]) / two)
             };
-            pitches[[k, t]] = (k as f64 + shift) * sample_rate / n_fft as f64;
-            mags[[k, t]] = col[k] + 0.5 * avg * shift;
+            pitches[[k, t]] = (F::of_usize(k) + shift) * sr / n_fft_f;
+            mags[[k, t]] = col[k] + half * avg * shift;
         }
     }
 }
@@ -888,16 +947,17 @@ fn piptrack_channel(
 /// # Arguments
 ///
 /// * `spectrogram` - `(channels, 1 + n_fft / 2, frames)` magnitude (or power)
-///   spectrogram; negative values are rectified.
+///   spectrogram of element type `F` (`f32` or `f64`); negative values are
+///   rectified.
 /// * `sample_rate` - Sampling rate in Hz.
 /// * `config` - Thresholds and frequency range; only `config.stft.n_fft` of the
 ///   STFT parameters is used.
 ///
 /// # Returns
 ///
-/// `(pitches, magnitudes)`, both shaped like `spectrogram`. Entries are 0
-/// except at detected peaks, where `pitches` holds the interpolated frequency
-/// in Hz and `magnitudes` the interpolated magnitude.
+/// `(pitches, magnitudes)`, both shaped like `spectrogram` and of element type
+/// `F`. Entries are 0 except at detected peaks, where `pitches` holds the
+/// interpolated frequency in Hz and `magnitudes` the interpolated magnitude.
 ///
 /// # Errors
 ///
@@ -932,11 +992,11 @@ fn piptrack_channel(
 /// J. O. Smith III, "Quadratic Interpolation of Spectral Peaks", *Spectral Audio
 /// Signal Processing*, <https://ccrma.stanford.edu/~jos/sasp/Quadratic_Interpolation_Spectral_Peaks.html>;
 /// librosa `core.pitch.piptrack`.
-pub fn piptrack_from_spectrogram(
-    spectrogram: ArrayView3<'_, f64>,
+pub fn piptrack_from_spectrogram<F: AudioFloat>(
+    spectrogram: ArrayView3<'_, F>,
     sample_rate: f64,
     config: &PiptrackConfig,
-) -> AudioSampleResult<(Array3<f64>, Array3<f64>)> {
+) -> AudioSampleResult<(Array3<F>, Array3<F>)> {
     config.validate()?;
     validate_sample_rate(sample_rate)?;
     let n_fft = config.stft.n_fft.get();
@@ -947,8 +1007,8 @@ pub fn piptrack_from_spectrogram(
             "piptrack needs at least 2 frequency bins",
         ));
     }
-    let mut pitches = Array3::<f64>::zeros(spectrogram.dim());
-    let mut mags = Array3::<f64>::zeros(spectrogram.dim());
+    let mut pitches = Array3::<F>::zeros(spectrogram.dim());
+    let mut mags = Array3::<F>::zeros(spectrogram.dim());
     for (c, s) in spectrogram.outer_iter().enumerate() {
         piptrack_channel(
             s,
@@ -1134,10 +1194,22 @@ impl Default for TuningConfig {
 }
 
 impl TuningConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `estimate_tuning` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            piptrack: PiptrackConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the piptrack parameters.
@@ -1197,7 +1269,8 @@ impl TuningConfig {
 ///
 /// # Arguments
 ///
-/// * `spectrogram` - `(channels, 1 + n_fft / 2, frames)` magnitude or power spectrogram.
+/// * `spectrogram` - `(channels, 1 + n_fft / 2, frames)` magnitude or power
+///   spectrogram of element type `F` (`f32` or `f64`); peak tracking runs in `F`.
 /// * `sample_rate` - Sampling rate in Hz.
 /// * `config` - Tuning parameters; `config.piptrack.stft.n_fft` must match the
 ///   spectrogram's bin count.
@@ -1205,7 +1278,8 @@ impl TuningConfig {
 /// # Returns
 ///
 /// The estimated tuning deviation in fractions of a bin, in `[-0.5, 0.5)`; 0.0
-/// when no peaks are found.
+/// when no peaks are found. The estimate is a multiple of `config.resolution`
+/// and is returned as `f64` for every `F`.
 ///
 /// # Errors
 ///
@@ -1230,25 +1304,25 @@ impl TuningConfig {
 /// # References
 ///
 /// librosa `core.pitch.estimate_tuning`.
-pub fn estimate_tuning_from_spectrogram(
-    spectrogram: ArrayView3<'_, f64>,
+pub fn estimate_tuning_from_spectrogram<F: AudioFloat>(
+    spectrogram: ArrayView3<'_, F>,
     sample_rate: f64,
     config: &TuningConfig,
 ) -> AudioSampleResult<f64> {
     config.validate()?;
     let (pitches, mags) = piptrack_from_spectrogram(spectrogram, sample_rate, &config.piptrack)?;
-    let mut voiced: Vec<f64> = pitches
+    let mut voiced: Vec<F> = pitches
         .iter()
         .zip(mags.iter())
-        .filter(|&(&p, _)| p > 0.0)
+        .filter(|&(&p, _)| p > F::zero())
         .map(|(_, &m)| m)
         .collect();
-    let threshold = median(&mut voiced).unwrap_or(0.0);
+    let threshold = median(&mut voiced).unwrap_or_else(F::zero);
     let selected: Vec<f64> = pitches
         .iter()
         .zip(mags.iter())
-        .filter(|&(&p, &m)| p > 0.0 && m >= threshold)
-        .map(|(&p, _)| p)
+        .filter(|&(&p, &m)| p > F::zero() && m >= threshold)
+        .map(|(&p, _)| p.as_f64())
         .collect();
     pitch_tuning(&selected, config.resolution, config.bins_per_octave)
 }
@@ -1261,13 +1335,15 @@ pub fn estimate_tuning_from_spectrogram(
 ///
 /// # Arguments
 ///
-/// * `signal` - `(channels, samples)` signal.
+/// * `signal` - `(channels, samples)` signal of element type `F` (`f32` or
+///   `f64`); the STFT and peak tracking run in `F`.
 /// * `sample_rate` - Sampling rate in Hz.
 /// * `config` - Tuning parameters ([`TuningConfig::default`] = librosa defaults).
 ///
 /// # Returns
 ///
-/// The estimated tuning deviation in fractions of a bin, in `[-0.5, 0.5)`.
+/// The estimated tuning deviation in fractions of a bin, in `[-0.5, 0.5)`, as
+/// `f64`.
 ///
 /// # Errors
 ///
@@ -1289,8 +1365,8 @@ pub fn estimate_tuning_from_spectrogram(
 /// # References
 ///
 /// librosa `core.pitch.estimate_tuning`.
-pub fn estimate_tuning_from_signal(
-    signal: ArrayView2<'_, f64>,
+pub fn estimate_tuning_from_signal<F: AudioFloat>(
+    signal: ArrayView2<'_, F>,
     sample_rate: f64,
     config: &TuningConfig,
 ) -> AudioSampleResult<f64> {
@@ -1299,17 +1375,23 @@ pub fn estimate_tuning_from_signal(
     estimate_tuning_from_spectrogram(s.view(), sample_rate, config)
 }
 
+/// `f64::total_cmp` for `F` (exact: every `F` value converts to `f64` exactly
+/// and the conversion preserves the order, including signed zeros).
+fn total_cmp<F: AudioFloat>(a: &F, b: &F) -> std::cmp::Ordering {
+    a.as_f64().total_cmp(&b.as_f64())
+}
+
 /// numpy.median: the middle value, or the mean of the two middle values.
-fn median(values: &mut [f64]) -> Option<f64> {
+fn median<F: AudioFloat>(values: &mut [F]) -> Option<F> {
     if values.is_empty() {
         return None;
     }
-    values.sort_by(f64::total_cmp);
+    values.sort_by(total_cmp);
     let n = values.len();
     Some(if n % 2 == 1 {
         values[n / 2]
     } else {
-        (values[n / 2 - 1] + values[n / 2]) / 2.0
+        (values[n / 2 - 1] + values[n / 2]) / F::of(2.0)
     })
 }
 
@@ -1321,10 +1403,15 @@ fn median(values: &mut [f64]) -> Option<f64> {
 ///
 /// A chromagram folds the spectrum into pitch classes, giving a
 /// `(n_chroma, frames)` profile of harmonic content that is robust to octave
-/// and timbre. `Default` reproduces librosa's defaults: a power spectrogram
-/// with `n_fft = 2048`, `hop = 512` and a Hann window, tuning estimated from
-/// the signal, 12 chroma bins, the default chroma filterbank, and each frame
-/// scaled to a maximum of 1.
+/// and timbre. `Default`: a power spectrogram with `n_fft = 2048`, `hop = 512`
+/// and a Hann window, A440 tuning (`tuning = Some(0.0)`), 12 chroma bins, the
+/// default chroma filterbank, and each frame scaled to a maximum of 1.
+///
+/// [`ChromaStftConfig::librosa`] returns librosa 1.0's defaults, which differ
+/// only in `tuning = None`: librosa estimates the tuning from the signal by
+/// default. A fixed tuning makes the chroma of a signal independent of its
+/// peak content; an estimated tuning compensates for recordings that are not
+/// tuned to A440.
 ///
 /// ## Invariants
 ///
@@ -1355,10 +1442,10 @@ pub struct ChromaStftConfig {
     /// `None` returns raw chroma energy. librosa default: `Some(f64::INFINITY)`
     /// (each frame's maximum is 1; silent frames stay 0).
     pub norm: Option<f64>,
-    /// Tuning deviation from A440 in fractions of a chroma bin. `None`
-    /// (librosa's default) estimates it from the spectrogram with
+    /// Tuning deviation from A440 in fractions of a chroma bin. Default
+    /// `Some(0.0)` (A440). `None` estimates it from the spectrogram with
     /// [`estimate_tuning_from_spectrogram`] (default piptrack parameters,
-    /// `bins_per_octave = n_chroma`).
+    /// `bins_per_octave = n_chroma`); librosa's default is `None`.
     pub tuning: Option<f64>,
     /// Number of chroma bins. librosa default: 12.
     pub n_chroma: NonZeroUsize,
@@ -1377,7 +1464,7 @@ impl Default for ChromaStftConfig {
         Self {
             stft: StftConfig::default().with_hop_length(Some(crate::nzu!(512))),
             norm: Some(f64::INFINITY),
-            tuning: None,
+            tuning: Some(0.0),
             n_chroma: crate::nzu!(12),
             ctroct: 5.0,
             octwidth: Some(2.0),
@@ -1387,10 +1474,21 @@ impl Default for ChromaStftConfig {
 }
 
 impl ChromaStftConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.chroma_stft` defaults: as [`Default`], but with
+    /// `tuning = None` (the tuning is estimated from the signal).
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa().with_hop_length(Some(crate::nzu!(512))),
+            tuning: None,
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT parameters.
@@ -1479,15 +1577,17 @@ impl ChromaStftConfig {
 ///
 /// # Arguments
 ///
-/// * `spectrogram` - `(channels, 1 + n_fft / 2, frames)` spectrogram. librosa
-///   expects a power spectrogram; a magnitude spectrogram gives "energy" chroma.
+/// * `spectrogram` - `(channels, 1 + n_fft / 2, frames)` spectrogram of element
+///   type `F` (`f32` or `f64`). librosa expects a power spectrogram; a
+///   magnitude spectrogram gives "energy" chroma.
 /// * `sample_rate` - Sampling rate in Hz.
 /// * `config` - Chroma parameters; only `config.stft.n_fft` of the STFT
 ///   parameters is used.
 ///
 /// # Returns
 ///
-/// A `(channels, n_chroma, frames)` chromagram.
+/// A `(channels, n_chroma, frames)` chromagram of element type `F`. The
+/// filterbank is computed in `f64` and rounded to `F` once.
 ///
 /// # Errors
 ///
@@ -1503,13 +1603,19 @@ impl ChromaStftConfig {
 /// let s = Array3::<f64>::ones((2, 1025, 3));
 /// let chroma = chroma_stft_from_spectrogram(s.view(), 22050.0, &ChromaStftConfig::default()).unwrap();
 /// assert_eq!(chroma.dim(), (2, 12, 3));
+///
+/// // An f32 spectrogram gives an f32 chromagram.
+/// let s32 = Array3::<f32>::ones((1, 1025, 3));
+/// let c32 = chroma_stft_from_spectrogram(s32.view(), 22050.0, &ChromaStftConfig::default()).unwrap();
+/// assert_eq!(c32.dim(), (1, 12, 3));
 /// ```
 ///
 /// # Differences from librosa
 ///
-/// - The filterbank is `f64`; librosa builds it in `float32` by default
-///   (`dtype=np.float32`), which perturbs librosa's chroma by about 1e-7
-///   relative. Pass `dtype=np.float64` to librosa for an exact comparison.
+/// - The filterbank is computed in `f64`; librosa builds it in `float32` by
+///   default (`dtype=np.float32`), which perturbs librosa's chroma by about
+///   1e-7 relative. Pass `dtype=np.float64` to librosa for an exact comparison
+///   of `f64` output.
 /// - With an odd `n_fft`, librosa's tuning estimate re-infers the FFT length
 ///   from the spectrogram as `2 * (bins - 1)` (one less than `n_fft`); here the
 ///   configured `n_fft` is used throughout.
@@ -1517,11 +1623,11 @@ impl ChromaStftConfig {
 /// # References
 ///
 /// D. P. W. Ellis, "Chroma feature analysis and synthesis", 2007; librosa `feature.chroma_stft`.
-pub fn chroma_stft_from_spectrogram(
-    spectrogram: ArrayView3<'_, f64>,
+pub fn chroma_stft_from_spectrogram<F: AudioFloat>(
+    spectrogram: ArrayView3<'_, F>,
     sample_rate: f64,
     config: &ChromaStftConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     config.validate()?;
     validate_sample_rate(sample_rate)?;
     let n_fft = config.stft.n_fft;
@@ -1537,9 +1643,9 @@ pub fn chroma_stft_from_spectrogram(
             estimate_tuning_from_spectrogram(spectrogram, sample_rate, &tc)?
         }
     };
-    let basis = chroma_filterbank(sample_rate, n_fft, &config.filterbank(tuning))?;
+    let basis = chroma_filterbank(sample_rate, n_fft, &config.filterbank(tuning))?.mapv(F::of);
     let (n_channels, _, n_frames) = spectrogram.dim();
-    let mut raw = Array3::<f64>::zeros((n_channels, basis.nrows(), n_frames));
+    let mut raw = Array3::<F>::zeros((n_channels, basis.nrows(), n_frames));
     for (c, s) in spectrogram.outer_iter().enumerate() {
         raw.index_axis_mut(Axis(0), c).assign(&basis.dot(&s));
     }
@@ -1558,8 +1664,10 @@ pub fn chroma_stft_from_spectrogram(
 /// librosa-compatible tonal analysis of [`AudioSamples`]: chroma, tuning and
 /// spectral pitch tracking.
 ///
-/// All methods convert samples to `f64` first. Frame-wise outputs are shaped
-/// `(channels, n_features, n_frames)`; tuning estimates pool all channels.
+/// Frame-wise outputs are shaped `(channels, n_features, n_frames)` and have
+/// the element type [`Float`](Self::Float): `f32` for `u8`, `i16`, `I24` and
+/// `f32` audio, `f64` for `i32` and `f64` audio. The computation runs in that
+/// type. Tuning estimates are `f64` and pool all channels.
 ///
 /// # Examples
 ///
@@ -1574,17 +1682,24 @@ pub fn chroma_stft_from_spectrogram(
 /// assert_eq!(pitches.dim(), (1, 1025, 11));
 /// ```
 pub trait AudioTonal {
+    /// The float type of the outputs and of the computation: the sample type's
+    /// [`AudioSample::Float`](crate::AudioSample::Float).
+    type Float: AudioFloat;
+
     /// Computes a chromagram from the power STFT, equivalent to
     /// `librosa.feature.chroma_stft(y=..., sr=...)`.
     ///
     /// # Arguments
     ///
-    /// * `config` - Chroma parameters ([`ChromaStftConfig::default`] = librosa defaults).
+    /// * `config` - Chroma parameters ([`ChromaStftConfig::default`], or
+    ///   [`ChromaStftConfig::librosa`] for librosa's defaults, which estimate
+    ///   the tuning).
     ///
     /// # Returns
     ///
-    /// A `(channels, n_chroma, n_frames)` chromagram; with the default max-norm
-    /// every non-silent frame has a maximum of 1.
+    /// A `(channels, n_chroma, n_frames)` chromagram of element type
+    /// [`Float`](Self::Float); with the default max-norm every non-silent frame
+    /// has a maximum of 1.
     ///
     /// # Errors
     ///
@@ -1611,8 +1726,8 @@ pub trait AudioTonal {
     ///
     /// # Differences from librosa
     ///
-    /// See [`chroma_stft_from_spectrogram`] (f64 filterbank).
-    fn chroma_stft(&self, config: &ChromaStftConfig) -> AudioSampleResult<Array3<f64>>;
+    /// See [`chroma_stft_from_spectrogram`] (filterbank computed in `f64`).
+    fn chroma_stft(&self, config: &ChromaStftConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Tracks spectral peaks with parabolic interpolation, equivalent to
     /// `librosa.piptrack(y=..., sr=...)`.
@@ -1623,8 +1738,8 @@ pub trait AudioTonal {
     ///
     /// # Returns
     ///
-    /// `(pitches, magnitudes)`, each `(channels, 1 + n_fft / 2, n_frames)`; see
-    /// [`piptrack_from_spectrogram`].
+    /// `(pitches, magnitudes)`, each `(channels, 1 + n_fft / 2, n_frames)` of
+    /// element type [`Float`](Self::Float); see [`piptrack_from_spectrogram`].
     ///
     /// # Errors
     ///
@@ -1647,7 +1762,11 @@ pub trait AudioTonal {
     /// let p = pitches.slice(ndarray::s![0, .., 10]).iter().copied().fold(0.0, f64::max);
     /// assert!((p - 440.0).abs() < 2.0);
     /// ```
-    fn piptrack(&self, config: &PiptrackConfig) -> AudioSampleResult<(Array3<f64>, Array3<f64>)>;
+    #[allow(clippy::type_complexity)] // (pitches, magnitudes)
+    fn piptrack(
+        &self,
+        config: &PiptrackConfig,
+    ) -> AudioSampleResult<(Array3<Self::Float>, Array3<Self::Float>)>;
 
     /// Estimates the tuning deviation from A440, equivalent to
     /// `librosa.estimate_tuning(y=..., sr=...)`.
@@ -1659,7 +1778,8 @@ pub trait AudioTonal {
     /// # Returns
     ///
     /// The deviation in fractions of a bin (`config.bins_per_octave` per
-    /// octave), in `[-0.5, 0.5)`; all channels are pooled.
+    /// octave), in `[-0.5, 0.5)`, as `f64`; all channels are pooled. The
+    /// spectrogram and peak tracking are computed in [`Float`](Self::Float).
     ///
     /// # Errors
     ///
@@ -1688,24 +1808,26 @@ impl<T> AudioTonal for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
-    fn chroma_stft(&self, config: &ChromaStftConfig) -> AudioSampleResult<Array3<f64>> {
+    type Float = T::Float;
+
+    fn chroma_stft(&self, config: &ChromaStftConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 2.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 2.0)?;
         chroma_stft_from_spectrogram(s.view(), self.sample_rate_hz(), config)
     }
 
-    fn piptrack(&self, config: &PiptrackConfig) -> AudioSampleResult<(Array3<f64>, Array3<f64>)> {
+    fn piptrack(
+        &self,
+        config: &PiptrackConfig,
+    ) -> AudioSampleResult<(Array3<T::Float>, Array3<T::Float>)> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 1.0)?;
         piptrack_from_spectrogram(s.view(), self.sample_rate_hz(), config)
     }
 
     fn estimate_tuning(&self, config: &TuningConfig) -> AudioSampleResult<f64> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.piptrack.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.piptrack.stft, 1.0)?;
         estimate_tuning_from_spectrogram(s.view(), self.sample_rate_hz(), config)
     }
 }
@@ -1713,6 +1835,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AudioTypeConversion;
     use crate::sample_rate;
     use crate::utils::audio_math::{
         a4_to_tuning, cqt_frequencies, key_to_degrees, key_to_notes, octs_to_hz, tuning_to_a4,
@@ -2020,5 +2143,30 @@ mod tests {
                 .is_err()
         );
         assert!(pitch_tuning(&[440.0, 441.0], 1e-4, crate::nzu!(12)).is_ok());
+    }
+
+    #[test]
+    fn output_type_follows_sample_type_and_f32_agrees_with_f64() {
+        let x = tone(392.0, 22050.0, 11025).mapv(|v| 0.5 * v);
+        let a64 = AudioSamples::new_mono(x.row(0).to_owned(), sample_rate!(22050)).unwrap();
+        let a16 = a64.to_format::<i16>();
+        let r = a16.to_format::<f64>();
+        let cfg = ChromaStftConfig::default();
+        let c32: Array3<f32> = a16.chroma_stft(&cfg).unwrap();
+        let c64 = r.chroma_stft(&cfg).unwrap();
+        let err = c32
+            .iter()
+            .zip(c64.iter())
+            .fold(0.0f64, |m, (&p, &q)| m.max((f64::from(p) - q).abs()));
+        // Max-normalised chroma (peak 1): f32 round-off of the power STFT and
+        // the 1025-term projection; measured 6.4e-8, bound 4e-6 (34 f32 eps).
+        eprintln!("f32 vs f64 chroma_stft: {err:.3e}");
+        assert!(err < 4e-6, "{err:e}");
+        let (p32, m32): (Array3<f32>, Array3<f32>) =
+            a16.piptrack(&PiptrackConfig::default()).unwrap();
+        assert_eq!(p32.dim(), m32.dim());
+        let t32 = a16.estimate_tuning(&TuningConfig::default()).unwrap();
+        let t64 = r.estimate_tuning(&TuningConfig::default()).unwrap();
+        assert!((t32 - t64).abs() <= 0.01 + 1e-12, "{t32} vs {t64}");
     }
 }
