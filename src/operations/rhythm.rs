@@ -882,6 +882,8 @@ impl PeakPickConfig {
 /// # Errors
 ///
 /// [`ParameterError`] if the configuration is invalid or `x` has non-finite values.
+/// Window sizes and `wait` larger than the signal (up to `usize::MAX`) are
+/// valid and simply cover the whole signal.
 ///
 /// # Examples
 ///
@@ -925,24 +927,24 @@ pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<us
                 x[0] >= np_max(&x[..post_max.min(n)]) && x[0] >= mean(0, post_avg.min(n)) + delta;
             let mut i = if first {
                 peaks.push(0);
-                wait + 1
+                wait.saturating_add(1)
             } else {
                 1
             };
             while i < n {
-                let maxn = np_max(&x[i.saturating_sub(pre_max)..(i + post_max).min(n)]);
+                let maxn = np_max(&x[i.saturating_sub(pre_max)..i.saturating_add(post_max).min(n)]);
                 if x[i] != maxn {
                     i += 1;
                     continue;
                 }
-                let avgn = mean(i.saturating_sub(pre_avg), (i + post_avg).min(n));
+                let avgn = mean(i.saturating_sub(pre_avg), i.saturating_add(post_avg).min(n));
                 // Inputs are finite, so this is librosa's `not x[n] >= avg + delta`.
                 if x[i] < avgn + delta {
                     i += 1;
                     continue;
                 }
                 peaks.push(i);
-                i += wait + 1;
+                i = i.saturating_add(wait).saturating_add(1);
             }
         }
         PeakPickMethod::DpCount | PeakPickMethod::DpValue => {
@@ -960,19 +962,19 @@ pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<us
             for i in (0..n).rev() {
                 values[i] = values[i + 1];
                 pointers[i] = (i + 1) as isize;
-                let maxn = np_max(&x[i.saturating_sub(pre_max)..(i + post_max).min(n)]);
+                let maxn = np_max(&x[i.saturating_sub(pre_max)..i.saturating_add(post_max).min(n)]);
                 if x[i] < maxn {
                     continue;
                 }
                 let idx_prev = i.saturating_sub(pre_avg);
-                let idx_post = (i + post_avg).min(n);
+                let idx_post = i.saturating_add(post_avg).min(n);
                 let avgn = if idx_prev == 0 {
                     cumulate[idx_post - 1] / idx_post as f64
                 } else {
                     (cumulate[idx_post - 1] - cumulate[idx_prev - 1]) / (idx_post - idx_prev) as f64
                 };
                 let v = if count { 1.0 } else { x[i] };
-                let next = n.min(i + wait + 1);
+                let next = n.min(i.saturating_add(wait).saturating_add(1));
                 if x[i] >= avgn + delta && values[next] + v > values[i + 1] {
                     values[i] = values[next] + v;
                     pointers[i] = next as isize;
@@ -4043,5 +4045,48 @@ mod tests {
         assert!(matches!(r, Err(AudioSampleError::Parameter(_))));
         let tg = TempogramConfig::new().with_win_length(NonZeroUsize::new(1 << 40).unwrap());
         assert!(tempogram_from_envelope(env.view(), &tg).is_err());
+    }
+
+    /// Regression: `i + post_max`, `wait + 1` and `i += wait + 1` overflowed
+    /// for huge values (`post_max = usize::MAX` panicked with an out-of-bounds
+    /// index; `wait = usize::MAX` wrapped to `i += 0` and looped, pushing peaks
+    /// until an allocation failure).
+    #[test]
+    fn peak_pick_huge_windows_do_not_overflow() {
+        let x = [0.0, 1.0, 0.0, 0.5, 0.0, 2.0, 0.0];
+        for method in [
+            PeakPickMethod::Greedy,
+            PeakPickMethod::DpCount,
+            PeakPickMethod::DpValue,
+        ] {
+            let base = PeakPickConfig {
+                pre_max: 1,
+                post_max: 2,
+                pre_avg: 1,
+                post_avg: 2,
+                delta: 0.0,
+                wait: 0,
+                method,
+            };
+            let huge_max = PeakPickConfig {
+                pre_max: usize::MAX,
+                post_max: usize::MAX,
+                ..base.clone()
+            };
+            // Only the global maximum survives a whole-signal max window.
+            assert_eq!(peak_pick(&x, &huge_max).unwrap(), vec![5], "{method:?}");
+            let huge_avg = PeakPickConfig {
+                pre_avg: usize::MAX,
+                post_avg: usize::MAX,
+                ..base.clone()
+            };
+            assert!(peak_pick(&x, &huge_avg).is_ok());
+            let huge_wait = PeakPickConfig {
+                wait: usize::MAX,
+                ..base.clone()
+            };
+            // At most one peak with an unbounded wait.
+            assert!(peak_pick(&x, &huge_wait).unwrap().len() <= 1, "{method:?}");
+        }
     }
 }
