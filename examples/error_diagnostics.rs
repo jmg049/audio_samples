@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Without `fancy`, the same errors print as plain `Display` text - the
-//! diagnostic metadata (code, help, spans) is still present, just not rendered
+//! diagnostic metadata (code, help, spans) is still present but is not rendered
 //! graphically.
 
 use audio_samples::utils::audio_math::note_to_midi;

@@ -15,8 +15,7 @@
 
 //! Audio pipelines typically require many small numeric helpers - converting frequencies,
 //! detecting silence, generating test tones - that do not belong to the core sample-buffer
-//! API. This module isolates those helpers so they remain composable and easy to discover
-//! without polluting the primary `AudioSamples` interface.
+//! API. This module keeps those helpers separate from the `AudioSamples` interface.
 
 //! Import individual functions by path or use the module prefix directly:
 //!

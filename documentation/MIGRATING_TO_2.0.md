@@ -79,7 +79,7 @@ These now borrow `&self`. Chaining still works; the only difference is the
 original is no longer moved, so you can keep using it.
 
 Why: borrowing is consistent with the rest of the API and avoids forcing a move
-just to read a transformed copy.
+only to read a transformed copy.
 
 Affected (`AudioProcessing`): `normalize`, `scale`, `clip`, `apply_window`,
 `apply_filter`, `mu_compress`, `mu_expand`, `low_pass_filter`,
@@ -323,7 +323,7 @@ implements `Display` and `to_index()` / `from_index()`).
 
 Why: multi-channel handling was inconsistent (one errored, one silently used
 channel 0). Both now take a trailing `ChannelReduction` argument so the policy
-is explicit. These methods live on `AudioStatistics`.
+is explicit. These methods are on `AudioStatistics`.
 
 ```rust
 // before (1.x)

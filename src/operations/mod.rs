@@ -1,8 +1,7 @@
 //! Audio processing operations and transformations.
 //!
-//! This module provides a comprehensive set of audio processing capabilities
-//! organized into focused, composable traits. Each trait handles a specific
-//! aspect of audio processing to maintain clean separation of concerns.
+//! This module provides the audio processing operations, organized into
+//! composable traits. Each trait covers one area of audio processing.
 //!
 //! ## Module Organization
 //!

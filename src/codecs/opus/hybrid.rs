@@ -11,7 +11,7 @@
 //! ## Why
 //!
 //! Hybrid mode is designed for super-wideband speech: the vocal-tract model
-//! (SILK) is appropriate for the low band where speech formants live, while
+//! (SILK) is appropriate for the low band where the speech formants lie, while
 //! CELT handles the high-frequency breath and sibilance that SILK cannot model
 //! efficiently.
 //!

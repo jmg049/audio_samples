@@ -5928,7 +5928,7 @@ where
 
     /// Consumes the AudioSamples and returns an iterator over the samples in interleaved order.
     ///
-    /// For mono audio, this is simply the samples in order.
+    /// For mono audio, this is the samples in order.
     /// For multi-channel audio, this interleaves samples from each channel.
     ///
     /// # Examples

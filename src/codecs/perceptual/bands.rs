@@ -85,7 +85,7 @@ pub fn bark_to_hz(bark: f32) -> f32 {
 /// Converts a frequency in Hz to its Mel-scale value.
 ///
 /// Uses the O'Shaughnessy (HTK) formula: `mel = 2595 × log10(1 + hz / 700)`. This is an
-/// `f32` duplicate of [`crate::utils::audio_math::hz_to_mel`]; note that the crate's mel
+/// `f32` duplicate of [`crate::utils::audio_math::hz_to_mel`]. The crate's mel
 /// spectrogram (`AudioTransforms::mel_spectrogram`) uses the Slaney mel scale instead.
 ///
 /// # Arguments

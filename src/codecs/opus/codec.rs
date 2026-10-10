@@ -130,7 +130,7 @@ pub struct OpusEncodedAudio {
 /// - Hybrid mode splits at 8 kHz: SILK encodes the low band, CELT the high band.
 /// - SILK frames carry cross-frame LPC state and long-term prediction (LTP).
 ///
-/// ## What lives in the IO crate
+/// ## What belongs in the IO crate
 ///
 /// Bitstream packing, range coding, Ogg encapsulation, and the `.opus` container
 /// format are responsibilities of `audio_samples_io`, not this crate.

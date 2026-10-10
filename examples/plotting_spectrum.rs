@@ -66,6 +66,6 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         println!("Note: Enable 'html_view' feature to open in browser");
     }
 
-    println!("All magnitude spectrum tests passed!");
+    println!("All magnitude spectrum tests passed.");
     Ok(())
 }

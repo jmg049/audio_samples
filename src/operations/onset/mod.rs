@@ -36,8 +36,8 @@
 //!   optionally log-compressed.
 //!
 //! The half-wave-rectified magnitude difference is the standard *spectral flux*:
-//! only increases in level count, so note offsets do not create onsets. Note
-//! that the "Energy" variants do **not** square the magnitudes; pass a power
+//! only increases in level count, so note offsets do not create onsets. The
+//! "Energy" variants do **not** square the magnitudes; pass a power
 //! spectrogram to [`flux::energy_flux`] if a true energy flux is wanted. In the
 //! complex method, R is rectification or absolute value and the phase term
 //! measures how far each bin's phase advance departs from that of its centre

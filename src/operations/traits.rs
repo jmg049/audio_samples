@@ -29,10 +29,9 @@
 //! | [`AudioRhythm`] | `beat-tracking` | librosa-compatible onset strength/detection, tempogram, tempo, beat tracking, PLP |
 //! | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
 //!
-//! Grouping operations into separate traits keeps compile times low - only the code
-//! required for the enabled features is compiled - while providing a clean extension
-//! point for new capabilities.  Each trait is independently usable: bring only the
-//! traits you need into scope without paying for the rest.
+//! Grouping operations into separate traits means only the code for the enabled
+//! features is compiled, and new capabilities can be added as new traits. Each trait
+//! is independently usable: bring only the traits you need into scope.
 //!
 //! ## Usage
 //!
@@ -1868,7 +1867,7 @@ where
 ///
 /// # Purpose
 ///
-/// Provides FFT, STFT, and a comprehensive set of spectral representations -
+/// Provides FFT, STFT, and a range of spectral representations -
 /// linear, log-frequency, mel-scale, MFCC, chromagram, gammatone, and
 /// constant-Q - all delegating to the `spectrograms` crate for numerics.
 ///
@@ -4219,7 +4218,7 @@ where
 ///
 /// # Purpose
 ///
-/// The standard toolkit for controlling loudness variation: compression,
+/// Processors that control loudness variation: compression,
 /// limiting, noise gating, and expansion.  All four processors share a
 /// threshold-based, feed-forward design (envelope follower, static gain curve,
 /// gain application); the compressor and limiter also support lookahead and
@@ -5477,7 +5476,7 @@ where
 ///
 /// # Purpose
 ///
-/// Provides everything needed to change the channel structure of an
+/// Provides the operations that change the channel structure of an
 /// [`AudioSamples`] buffer: mono/stereo conversion, channel duplication,
 /// per-channel extraction, panning, balance adjustment, interleaving, and
 /// element-wise channel transforms.
@@ -6026,7 +6025,7 @@ where
 ///
 /// This trait provides methods for separating audio signals into different
 /// components based on their spectral or temporal characteristics. These
-/// decomposition techniques are fundamental in music information retrieval,
+/// decomposition techniques are used in music information retrieval,
 /// audio analysis, and preprocessing for machine learning applications.
 ///
 /// # Available Decomposition Methods

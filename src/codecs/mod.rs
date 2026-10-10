@@ -13,10 +13,10 @@
 //!
 //! ## Why
 //!
-//! `audio_samples` exposes the full signal-processing toolkit that perceptual codecs
+//! `audio_samples` provides the signal-processing components that perceptual codecs
 //! need (MDCT, masking models, bit allocation, quantization), but leaves the codec
 //! contract - how those building blocks are composed and how state is packaged for
-//! transmission - to this layer. The [`AudioCodec`] trait is the glue.
+//! transmission - to this layer. The [`AudioCodec`] trait defines that contract.
 //!
 //! ## How
 //!

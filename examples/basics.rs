@@ -64,11 +64,11 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
 
     println!("-----\n");
 
-    // AudioSamples can be converted between different sample types easily due to the underlying AudioSampel and ConvertTo traits.
+    // AudioSamples converts between sample types through the AudioSample and ConvertTo traits.
     let stereo_i16 = stereo_audio.to_type::<i16>();
     println!("Converted stereo audio to i16: {:#}\n", stereo_i16);
 
-    // Let's get some more useful audio data
+    // Generate a 440 Hz sine wave.
     let sine_wave = audio_samples::sine_wave::<f32>(
         440.0,                                      // Frequency in Hz
         Duration::from_secs(2),                     // Duration
@@ -79,8 +79,7 @@ pub fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Generated sine wave audio: {:#}\n", sine_wave);
     println!("-----\n");
 
-    // Sine waves are useful, but let's get something more practical.
-    // Create 440 Hz with harmonics
+    // A 440 Hz tone with two harmonics.
     let components = [
         ToneComponent::new(440.0, 1.0),   // fundamental
         ToneComponent::new(880.0, 0.5),   // 2nd harmonic
