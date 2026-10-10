@@ -25,7 +25,7 @@ fn spectrum(f: f64, wt: WindowType) -> Result<Vec<f64>> {
     let w = make_window::<f64>(wt, nzu!(512));
     Ok(
         sine_wave::<f64>(f, Duration::from_millis(32), sample_rate!(16000), 1.0)
-            .apply_window(&w)?
+            .apply_window_f64(&w)?
             .rfft(nzu!(512))?
             .row(0)
             .to_vec(),
@@ -237,7 +237,7 @@ fn zero_padding(figs: &mut Figures) -> Result {
             .collect();
         let w = make_window::<f64>(WindowType::Hanning, nz(v.len())?);
         let m = AudioSamples::new_mono(ndarray::Array1::from(v), sample_rate!(16000))?
-            .apply_window(&w)?
+            .apply_window_f64(&w)?
             .rfft(nz(n_fft)?)?
             .row(0)
             .to_vec();

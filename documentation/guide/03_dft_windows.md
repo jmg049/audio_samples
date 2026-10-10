@@ -87,7 +87,7 @@ assert!((mags[[0, 4]] - 32.0).abs() < 1e-9); // a real number: |X[4]|
 
 Measuring leakage: at $f_s = 16$ kHz and $N = 512$, $\Delta f = 31.25$ Hz, so
 1000 Hz is bin 32 and 1015.625 Hz is bin 32.5, the worst case. Window the tone
-with [`apply_window`](crate::AudioProcessing::apply_window) and the
+with [`apply_window_f64`](crate::AudioProcessing::apply_window_f64) and the
 coefficients from `spectrograms::make_window`:
 
 ```rust
@@ -98,7 +98,7 @@ use std::time::Duration;
 let spectrum = |f: f64, wt: WindowType| -> Vec<f64> {
     let w = make_window::<f64>(wt, nzu!(512));
     sine_wave::<f64>(f, Duration::from_millis(32), sample_rate!(16000), 1.0) // 512 samples
-        .apply_window(&w).unwrap()
+        .apply_window_f64(&w).unwrap()
         .rfft(nzu!(512)).unwrap().row(0).to_vec()
 };
 let db = |r: f64| 20.0 * r.log10();
@@ -136,7 +136,7 @@ let peaks_near_1khz = |dur: Duration, n_fft: usize| -> usize {
     let v: Vec<f64> = a.as_slice().unwrap().iter().zip(b.as_slice().unwrap()).map(|(p, q)| p + q).collect();
     let w = make_window::<f64>(WindowType::Hanning, NonZeroUsize::new(v.len()).unwrap());
     let m = AudioSamples::new_mono(ndarray::Array1::from(v), sample_rate!(16000)).unwrap()
-        .apply_window(&w).unwrap()
+        .apply_window_f64(&w).unwrap()
         .rfft(NonZeroUsize::new(n_fft).unwrap()).unwrap().row(0).to_vec();
     let bin = 16_000.0 / n_fft as f64;
     let (lo, hi) = ((900.0 / bin) as usize, (1120.0 / bin) as usize);
@@ -265,7 +265,7 @@ let nz = |n: usize| NonZeroUsize::new(n).unwrap();
 let hann_mag = |v: Vec<f64>, fs: u32, n_fft: usize| -> Vec<f64> {
     let w = make_window::<f64>(WindowType::Hanning, nz(v.len()));
     AudioSamples::new_mono(ndarray::Array1::from(v), std::num::NonZeroU32::new(fs).unwrap()).unwrap()
-        .apply_window(&w).unwrap().rfft(nz(n_fft)).unwrap().row(0).to_vec()
+        .apply_window_f64(&w).unwrap().rfft(nz(n_fft)).unwrap().row(0).to_vec()
 };
 let argmax = |m: &[f64]| (0..m.len()).max_by(|&a, &b| m[a].total_cmp(&m[b])).unwrap();
 
@@ -327,7 +327,7 @@ assert_eq!(count(1024), 1);
 
 * [`AudioTransforms::fft`](crate::AudioTransforms::fft),
   [`AudioTransforms::rfft`](crate::AudioTransforms::rfft),
-  [`AudioProcessing::apply_window`](crate::AudioProcessing::apply_window),
+  [`AudioProcessing::apply_window_f64`](crate::AudioProcessing::apply_window_f64),
   [`fft_frequencies`](crate::utils::audio_math::fft_frequencies)
 * [`topics::dft`](crate::educational::topics::dft),
   [`topics::window`](crate::educational::topics::window)

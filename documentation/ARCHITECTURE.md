@@ -368,7 +368,7 @@ buf.scale_in_place(0.8);
 - `scale()`: amplitude scaling (infallible)
 - `clip()`: hard limiting to prevent overflows
 - `remove_dc_offset()`: DC bias removal
-- `apply_window()`, `apply_filter()`, `mu_compress()`/`mu_expand()`, `low_pass_filter()`/`high_pass_filter()`/`band_pass_filter()`
+- `apply_window_f64()` (replaces the deprecated `apply_window()`), `apply_filter()` / `apply_filter_f64()`, `mu_compress()`/`mu_expand()`, `low_pass_filter()`/`high_pass_filter()`/`band_pass_filter()`
 
 (Fades are on `AudioEditing`, not here.)
 
