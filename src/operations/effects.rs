@@ -292,19 +292,27 @@ pub fn phase_vocoder_at(
         .collect();
 
     let mut out = Array3::<Complex<f64>>::zeros((n_channels, n_bins, n_out));
+    // Phase and magnitude of every input frame, computed once per bin (each is
+    // used by up to two outputs per neighbouring frame pair).
+    let mut arg = vec![0.0; n_frames];
+    let mut mag_in = vec![0.0; n_frames];
     for c in 0..n_channels {
         for k in 0..n_bins {
             let row = stft_matrix.slice(ndarray::s![c, k, ..]);
-            let mut phase = row[i0[0]].arg();
+            for ((a, m), z) in arg.iter_mut().zip(&mut mag_in).zip(row.iter()) {
+                *a = z.arg();
+                *m = z.norm();
+            }
+            let mut phase = arg[i0[0]];
             for j in 0..n_out {
                 if j > 0 {
-                    phase += row[i1[j - 1]].arg() - row[i0[j - 1]].arg();
+                    phase += arg[i1[j - 1]] - arg[i0[j - 1]];
                 }
                 let (lo, hi) = seg[j];
                 let mag = if n_frames == 1 {
-                    row[0].norm()
+                    mag_in[0]
                 } else {
-                    let (y_lo, y_hi) = (row[lo].norm(), row[hi].norm());
+                    let (y_lo, y_hi) = (mag_in[lo], mag_in[hi]);
                     (y_hi - y_lo) / ((hi - lo) as f64) * (t_out[j] - lo as f64) + y_lo
                 };
                 out[[c, k, j]] = Complex::new(phase.cos() * mag, phase.sin() * mag);
