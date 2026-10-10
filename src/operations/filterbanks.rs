@@ -54,7 +54,7 @@ use ndarray::{Array1, Array2};
 pub use crate::utils::audio_math::MelScale;
 use crate::utils::audio_math::mel_frequencies_with_scale;
 use crate::utils::{MAX_SIGNAL_ELEMENTS, MAX_TABLE_ELEMENTS, check_derived_len};
-use crate::{AudioSampleError, AudioSampleResult, ParameterError};
+use crate::{AudioFloat, AudioSampleError, AudioSampleResult, ParameterError};
 
 // =============================================================================
 // Windows
@@ -475,15 +475,16 @@ pub fn window_sumsquare(
     ))
 }
 
-/// Overlap-adds an already squared, `n_fft`-long window (librosa `__window_ss_fill`).
-pub(crate) fn window_sumsquare_from_squared(
-    win_sq: &[f64],
+/// Overlap-adds an already squared, `n_fft`-long window (librosa `__window_ss_fill`)
+/// in the window's float type.
+pub(crate) fn window_sumsquare_from_squared<F: AudioFloat>(
+    win_sq: &[F],
     n_frames: usize,
     hop: usize,
-) -> Array1<f64> {
+) -> Array1<F> {
     let n_fft = win_sq.len();
     let n = n_fft + hop * (n_frames - 1);
-    let mut x = vec![0.0; n];
+    let mut x = vec![F::zero(); n];
     for i in 0..n_frames {
         let start = i * hop;
         let len = n_fft.min(n - start);

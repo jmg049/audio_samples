@@ -57,7 +57,8 @@ use ndarray::{
     Array, Array2, Array3, ArrayBase, ArrayView2, ArrayView3, ArrayViewMut1, Axis, Data, Dimension,
 };
 
-use crate::operations::spectrum::{AudioSpectrum, StftConfig, stft};
+// TRANSITIONAL(f64): `finite_audio_rows` / `spectrogram_rows` on f64 rows.
+use crate::operations::spectrum::{StftConfig, finite_audio_rows, spectrogram_rows, stft};
 use crate::utils::audio_math::hz_to_octs;
 use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
 
@@ -1689,19 +1690,22 @@ where
 {
     fn chroma_stft(&self, config: &ChromaStftConfig) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.stft, 2.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 2.0)?;
         chroma_stft_from_spectrogram(s.view(), self.sample_rate_hz(), config)
     }
 
     fn piptrack(&self, config: &PiptrackConfig) -> AudioSampleResult<(Array3<f64>, Array3<f64>)> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
         piptrack_from_spectrogram(s.view(), self.sample_rate_hz(), config)
     }
 
     fn estimate_tuning(&self, config: &TuningConfig) -> AudioSampleResult<f64> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.piptrack.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.piptrack.stft, 1.0)?;
         estimate_tuning_from_spectrogram(s.view(), self.sample_rate_hz(), config)
     }
 }

@@ -56,7 +56,8 @@
 //! use audio_samples::{sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
-//! let audio = sine_wave::<f32>(1000.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
+//! # // TRANSITIONAL(f64): f64 audio until the `*_from_spectrogram` functions are generic.
+//! let audio = sine_wave::<f64>(1000.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
 //!
 //! // librosa.feature.spectral_centroid(y=y, sr=22050): (1, 1, 44).
 //! let centroid = audio.spectral_centroid_frames(&SpectralCentroidConfig::default()).unwrap();
@@ -78,9 +79,7 @@ use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis};
 use num_complex::Complex;
 
 use crate::operations::filterbanks::{Window, padded_window};
-use crate::operations::spectrum::{
-    AudioSpectrum, DbConfig, StftConfig, StftPadMode, power_to_db, stft,
-};
+use crate::operations::spectrum::{DbConfig, StftConfig, StftPadMode, power_to_db, stft};
 use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
 
 // =============================================================================
@@ -101,7 +100,8 @@ fn range_err(parameter: &str, value: f64, min: &str, max: &str, reason: &str) ->
     ))
 }
 
-use crate::operations::spectrum::finite_audio_rows;
+// TRANSITIONAL(f64): `finite_audio_rows` / `spectrogram_rows` on f64 rows.
+use crate::operations::spectrum::{finite_audio_rows, spectrogram_rows};
 
 /// `numpy.fft.rfftfreq(n_fft, 1 / sr)`, rounded exactly as numpy does
 /// (`k * (1 / (n_fft * (1 / sr)))`), i.e. librosa's `fft_frequencies`.
@@ -3268,7 +3268,8 @@ where
         config: &SpectralCentroidConfig,
     ) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         spectral_centroid_from_spectrogram(s.view(), &freq)
     }
@@ -3278,7 +3279,8 @@ where
         config: &SpectralBandwidthConfig,
     ) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         spectral_bandwidth_from_spectrogram(s.view(), &freq, None, config)
     }
@@ -3288,7 +3290,8 @@ where
         config: &SpectralRolloffConfig,
     ) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         spectral_rolloff_from_spectrogram(s.view(), &freq, config)
     }
@@ -3298,7 +3301,8 @@ where
         config: &SpectralFlatnessConfig,
     ) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
         spectral_flatness_from_spectrogram(s.view(), config)
     }
 
@@ -3308,14 +3312,16 @@ where
     ) -> AudioSampleResult<Array3<f64>> {
         let sr = self.sample_rate_hz();
         config.validate(sr)?;
-        let s = self.spectrogram_matrix(&config.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), sr);
         spectral_contrast_from_spectrogram(s.view(), &freq, sr, config)
     }
 
     fn poly_features(&self, config: &PolyFeaturesConfig) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let s = self.spectrogram_matrix(&config.stft, 1.0)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         poly_features_from_spectrogram(s.view(), &freq, config)
     }
@@ -3347,6 +3353,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operations::spectrum::AudioSpectrum;
     use crate::sample_rate;
     use ndarray::{Array1, array, s};
 

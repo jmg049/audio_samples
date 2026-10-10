@@ -33,9 +33,23 @@
 //! ## How
 //!
 //! Bring [`AudioSpectrum`] into scope and call it on any [`AudioSamples`].
-//! All outputs are `f64` (or `Complex<f64>`) arrays shaped
-//! `(channels, n_features, n_frames)`; mono input gives one channel. Input samples
-//! are converted to `f64` with the crate's audio-aware conversion.
+//! Outputs are arrays shaped `(channels, n_features, n_frames)`; mono input gives
+//! one channel.
+//!
+//! The output precision follows the input: the element type is the sample
+//! type's [`AudioSample::Float`](crate::AudioSample::Float), the smallest float
+//! type that holds every input sample exactly. `u8`, `i16`, `I24` and `f32`
+//! audio gives `f32` (or `Complex<f32>`); `i32` and `f64` audio gives `f64`.
+//! Samples are converted with the crate's audio-aware conversion and the whole
+//! computation runs in that type, so `f32` analysis uses half the memory of
+//! `f64`. Parameters in the config structs stay `f64` and are rounded to the
+//! output type once; filter tables (windows, mel bases, DCT matrices) are
+//! computed in `f64` and rounded once. [`AudioSpectrum::istft_matrix`] returns
+//! audio of the receiver's sample type.
+//!
+//! The free functions on bare arrays ([`stft`], [`power_to_db`], [`delta`],
+//! ...) are generic over the element type ([`AudioFloat`]: `f32` or `f64`) and
+//! return arrays of the same type.
 //!
 //! ```rust
 //! use audio_samples::operations::spectrum::{AudioSpectrum, MfccConfig, StftConfig};
@@ -44,9 +58,10 @@
 //!
 //! let audio = sine_wave::<f32>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //!
-//! // librosa.stft(y): (1, 1025, 22) complex.
+//! // librosa.stft(y): (1, 1025, 22) complex. f32 audio gives Complex<f32>.
 //! let stft = audio.stft_matrix(&StftConfig::default()).unwrap();
 //! assert_eq!(stft.dim(), (1, 1025, 22));
+//! let _: &ndarray::Array3<num_complex::Complex<f32>> = &stft;
 //!
 //! // librosa.istft(D, length=len(y)) reconstructs the signal.
 //! let n = audio.samples_per_channel();
@@ -59,7 +74,6 @@
 //! assert_eq!(mfcc.dim(), (1, 20, 22));
 //! ```
 
-use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -67,31 +81,31 @@ use ndarray::{
     Array, Array2, Array3, ArrayBase, ArrayView2, ArrayView3, Axis, Data, Dimension, Slice, Zip,
 };
 use num_complex::Complex;
-use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use realfft::{ComplexToReal, RealToComplex};
 
+use crate::audio_float::{finite_float_rows, float_rows_to_audio};
 use crate::operations::filterbanks::{
     MelFilterbankConfig, Window, mel_filterbank, padded_window, window_sumsquare_from_squared,
 };
 use crate::repr::SampleRate;
 use crate::utils::{MAX_SIGNAL_ELEMENTS, check_derived_len};
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
-    StandardSample,
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
+    ParameterError, StandardSample,
 };
 
-thread_local! {
-    /// Per-thread real-FFT planner. realfft caches plans (twiddles) by length, so
-    /// repeated transforms of the same size reuse them; plans are fetched once per
-    /// call and every frame is processed with caller-owned scratch buffers.
-    static REAL_FFT_PLANNER: RefCell<RealFftPlanner<f64>> = RefCell::new(RealFftPlanner::new());
+/// The forward real-FFT plan of length `n` from this thread's planner for `F`.
+///
+/// realfft caches plans (twiddle factors) by length, so repeated transforms of
+/// the same size reuse them. Callers fetch a plan once per call and process
+/// every frame with their own scratch buffers.
+pub(crate) fn forward_plan<F: AudioFloat>(n: usize) -> Arc<dyn RealToComplex<F>> {
+    F::with_real_fft_planner(|p| p.plan_fft_forward(n))
 }
 
-pub(crate) fn forward_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
-    REAL_FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_forward(n))
-}
-
-fn inverse_plan(n: usize) -> Arc<dyn ComplexToReal<f64>> {
-    REAL_FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_inverse(n))
+/// The inverse real-FFT plan of length `n` from this thread's planner for `F`.
+fn inverse_plan<F: AudioFloat>(n: usize) -> Arc<dyn ComplexToReal<F>> {
+    F::with_real_fft_planner(|p| p.plan_fft_inverse(n))
 }
 
 /// Frames per block in [`stft`] (see the comment there).
@@ -296,11 +310,12 @@ impl StftConfig {
         padded_window(&self.window, self.win_length, self.n_fft).map(|_| ())
     }
 
-    /// The periodic window zero-padded to `n_fft`, plus the hop length.
-    fn analysis_window(&self) -> AudioSampleResult<(Vec<f64>, usize)> {
+    /// The periodic window zero-padded to `n_fft` (computed in `f64`, rounded
+    /// to `F`), plus the hop length.
+    fn analysis_window<F: AudioFloat>(&self) -> AudioSampleResult<(Vec<F>, usize)> {
         let hop = self.effective_hop_length()?.get();
         let w = padded_window(&self.window, self.win_length, self.n_fft)?;
-        Ok((w.to_vec(), hop))
+        Ok((w.iter().map(|&v| F::of(v)).collect(), hop))
     }
 }
 
@@ -336,8 +351,8 @@ fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
 }
 
 /// Pads `x` by `pad` samples at both ends with `mode`.
-pub(crate) fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
-    let mut out = vec![0.0; x.len() + 2 * pad];
+pub(crate) fn pad_signal<F: AudioFloat>(x: &[F], pad: usize, mode: StftPadMode) -> Vec<F> {
+    let mut out = vec![F::zero(); x.len() + 2 * pad];
     out[pad..pad + x.len()].copy_from_slice(x);
     if mode != StftPadMode::Constant {
         for p in (0..pad).chain(pad + x.len()..out.len()) {
@@ -355,6 +370,9 @@ pub(crate) fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
 /// This is the array-level function behind [`AudioSpectrum::stft_matrix`]; use it
 /// when the signal is not held in an [`AudioSamples`].
 ///
+/// The transform runs in the element type `F` of `signal` (`f32` or `f64`); the
+/// window is computed in `f64` and rounded to `F` once.
+///
 /// # Arguments
 ///
 /// * `signal` - `(channels, samples)` array of samples (at least one sample).
@@ -362,7 +380,7 @@ pub(crate) fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
 ///
 /// # Returns
 ///
-/// A complex array of shape `(channels, n_fft / 2 + 1, n_frames)` where
+/// A complex array of element type `Complex<F>` and shape `(channels, n_fft / 2 + 1, n_frames)` where
 /// `n_frames = 1 + (len + 2 * (n_fft / 2) - n_fft) / hop` when centred and
 /// `1 + (len - n_fft) / hop` otherwise. Frame `t`, bin `k` is
 /// `sum_n w[n] x[t * hop + n - pad] exp(-2 pi i k n / n_fft)`.
@@ -390,11 +408,11 @@ pub(crate) fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
 ///
 /// J. B. Allen, "Short term spectral analysis, synthesis, and modification by
 /// discrete Fourier transform," *IEEE Trans. ASSP* 25(3), 1977; librosa `core.stft`.
-pub fn stft(
-    signal: ArrayView2<'_, f64>,
+pub fn stft<F: AudioFloat>(
+    signal: ArrayView2<'_, F>,
     config: &StftConfig,
-) -> AudioSampleResult<Array3<Complex<f64>>> {
-    let (window, hop) = config.analysis_window()?;
+) -> AudioSampleResult<Array3<Complex<F>>> {
+    let (window, hop) = config.analysis_window::<F>()?;
     let n_fft = config.n_fft.get();
     let (n_channels, len) = signal.dim();
     if len == 0 || n_channels == 0 {
@@ -422,19 +440,19 @@ pub fn stft(
         MAX_SIGNAL_ELEMENTS,
     )?;
 
-    let plan = forward_plan(n_fft);
+    let plan = forward_plan::<F>(n_fft);
     let mut scratch = plan.make_scratch_vec();
-    let mut frame_in = vec![0.0; n_fft];
+    let mut frame_in = vec![F::zero(); n_fft];
     // Frames are transformed in blocks of `STFT_BLOCK` into a small frame-major
     // buffer, then scattered into the bin-major output: each bin row receives a
     // contiguous run of `STFT_BLOCK` frames, and the block stays in cache (a
     // whole-signal transpose is several times slower than the FFTs).
-    let mut block = vec![Complex::new(0.0, 0.0); STFT_BLOCK * n_bins];
-    let mut out = Array3::<Complex<f64>>::uninit((n_channels, n_bins, n_frames));
+    let mut block = vec![Complex::new(F::zero(), F::zero()); STFT_BLOCK * n_bins];
+    let mut out = Array3::<Complex<F>>::uninit((n_channels, n_bins, n_frames));
     let mut row_buf = Vec::new();
 
     for (c, row) in signal.outer_iter().enumerate() {
-        let x: &[f64] = if let Some(s) = row.as_slice() {
+        let x: &[F] = if let Some(s) = row.as_slice() {
             s
         } else {
             row_buf.clear();
@@ -442,7 +460,7 @@ pub fn stft(
             &row_buf
         };
         let padded;
-        let xp: &[f64] = if pad > 0 {
+        let xp: &[F] = if pad > 0 {
             padded = pad_signal(x, pad, config.pad_mode);
             &padded
         } else {
@@ -486,7 +504,8 @@ pub fn stft(
 /// Each frame is inverse-FFT'd, windowed with the same (periodic, zero-padded)
 /// window and overlap-added; the sum is divided by the window's sum-squared envelope
 /// ([`window_sumsquare`](crate::operations::filterbanks::window_sumsquare)) wherever
-/// that envelope exceeds the smallest positive `f64`. With centred frames the
+/// that envelope exceeds the smallest positive normal value of `F` (librosa's
+/// `tiny`). The computation runs in the element type `F` of `stft_matrix`. With centred frames the
 /// `n_fft / 2` padding is trimmed. This is the least-squares inverse of [`stft`]
 /// (Griffin and Lim), so `istft(stft(x)) == x` up to round-off.
 ///
@@ -502,7 +521,7 @@ pub fn stft(
 ///
 /// # Returns
 ///
-/// A `(channels, length)` array of samples.
+/// A `(channels, length)` array of samples of type `F`.
 ///
 /// # Errors
 ///
@@ -534,12 +553,12 @@ pub fn stft(
 ///
 /// D. W. Griffin and J. S. Lim, "Signal estimation from modified short-time Fourier
 /// transform," *IEEE Trans. ASSP* 32(2), 1984; librosa `core.istft`.
-pub fn istft(
-    stft_matrix: ArrayView3<'_, Complex<f64>>,
+pub fn istft<F: AudioFloat>(
+    stft_matrix: ArrayView3<'_, Complex<F>>,
     config: &StftConfig,
     length: Option<usize>,
-) -> AudioSampleResult<Array2<f64>> {
-    let (window, hop) = config.analysis_window()?;
+) -> AudioSampleResult<Array2<F>> {
+    let (window, hop) = config.analysis_window::<F>()?;
     let n_fft = config.n_fft.get();
     let (n_channels, n_bins, total_frames) = stft_matrix.dim();
     if n_bins != n_fft / 2 + 1 {
@@ -603,26 +622,26 @@ pub fn istft(
         ));
     }
 
-    let win_sq: Vec<f64> = window.iter().map(|w| w * w).collect();
+    let win_sq: Vec<F> = window.iter().map(|&w| w * w).collect();
     let wss = window_sumsquare_from_squared(&win_sq, n_frames, hop);
-    let scale = 1.0 / n_fft as f64;
-    let plan = inverse_plan(n_fft);
+    let scale = F::one() / F::of_usize(n_fft);
+    let plan = inverse_plan::<F>(n_fft);
     let mut scratch = plan.make_scratch_vec();
-    let mut spec = vec![Complex::new(0.0, 0.0); n_bins];
-    let mut frame_out = vec![0.0; n_fft];
-    let mut ybuf = vec![0.0; full_len];
-    let mut out = Array2::<f64>::zeros((n_channels, out_len));
+    let mut spec = vec![Complex::new(F::zero(), F::zero()); n_bins];
+    let mut frame_out = vec![F::zero(); n_fft];
+    let mut ybuf = vec![F::zero(); full_len];
+    let mut out = Array2::<F>::zeros((n_channels, out_len));
 
     for (c, chan) in stft_matrix.outer_iter().enumerate() {
-        ybuf.iter_mut().for_each(|v| *v = 0.0);
+        ybuf.iter_mut().for_each(|v| *v = F::zero());
         for t in 0..n_frames {
             for (dst, src) in spec.iter_mut().zip(chan.column(t)) {
                 *dst = *src;
             }
             // numpy's irfft ignores the imaginary parts of the DC and Nyquist bins.
-            spec[0].im = 0.0;
+            spec[0].im = F::zero();
             if n_fft.is_multiple_of(2) {
-                spec[n_bins - 1].im = 0.0;
+                spec[n_bins - 1].im = F::zero();
             }
             plan.process_with_scratch(&mut spec, &mut frame_out, &mut scratch)
                 .map_err(|e| {
@@ -641,7 +660,7 @@ pub fn istft(
             let src = start + i;
             if src < full_len {
                 let norm = wss[src];
-                *y = if norm > f64::MIN_POSITIVE {
+                *y = if norm > F::min_positive_value() {
                     ybuf[src] / norm
                 } else {
                     ybuf[src]
@@ -657,7 +676,7 @@ pub fn istft(
 ///
 /// # Arguments
 ///
-/// * `x` - The signal.
+/// * `x` - The signal (`f32` or `f64`).
 /// * `frame_length` - Samples per frame.
 /// * `hop_length` - Samples between the starts of successive frames.
 ///
@@ -684,11 +703,11 @@ pub fn istft(
 /// assert_eq!(f.dim(), (4, 3));
 /// assert_eq!(f.column(1).to_vec(), vec![3.0, 4.0, 5.0, 6.0]);
 /// ```
-pub fn frame(
-    x: &[f64],
+pub fn frame<F: AudioFloat>(
+    x: &[F],
     frame_length: NonZeroUsize,
     hop_length: NonZeroUsize,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     let (fl, hop) = (frame_length.get(), hop_length.get());
     if x.len() < fl {
         return Err(param_err(
@@ -888,24 +907,25 @@ fn db_block_size(shape: &[usize], axes: DbAxes) -> usize {
 ///
 /// `values` are the power values in logical order; `refs` gives, per block, the
 /// reference value (already squared for amplitude input).
-fn power_to_db_core<D: Dimension>(
+fn power_to_db_core<F: AudioFloat, D: Dimension>(
     shape: D,
-    values: Vec<f64>,
-    ref_for_block: impl Fn(&[f64]) -> f64,
-    amin: f64,
-    top_db: Option<f64>,
+    values: Vec<F>,
+    ref_for_block: impl Fn(&[F]) -> F,
+    amin: F,
+    top_db: Option<F>,
     axes: DbAxes,
-) -> Array<f64, D> {
+) -> Array<F, D> {
     let block = db_block_size(shape.slice(), axes).max(1);
+    let ten = F::of(10.0);
     let mut out = values;
     for chunk in out.chunks_mut(block) {
         let ref_value = ref_for_block(chunk);
-        let ref_db = 10.0 * amin.max(ref_value).log10();
+        let ref_db = ten * amin.max(ref_value).log10();
         for v in chunk.iter_mut() {
-            *v = 10.0 * amin.max(*v).log10() - ref_db;
+            *v = ten * amin.max(*v).log10() - ref_db;
         }
         if let Some(t) = top_db {
-            let max = chunk.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let max = block_max(chunk);
             let floor = max - t;
             for v in chunk.iter_mut() {
                 *v = v.max(floor);
@@ -916,8 +936,8 @@ fn power_to_db_core<D: Dimension>(
 }
 
 /// Maximum of a block (`NaN`-ignoring, `-inf` when empty).
-fn block_max(chunk: &[f64]) -> f64 {
-    chunk.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
+    chunk.iter().copied().fold(F::neg_infinity(), F::max)
 }
 
 /// Converts a power spectrogram (or any power-like array) to decibels, equivalent to
@@ -937,7 +957,8 @@ fn block_max(chunk: &[f64]) -> f64 {
 ///
 /// # Returns
 ///
-/// An array of the same shape (standard layout) in dB.
+/// An array of the same shape (standard layout) in dB, in the element type `F`
+/// of `s` (`f32` or `f64`). The `f64` parameters of `config` are rounded to `F`.
 ///
 /// # Errors
 ///
@@ -957,23 +978,27 @@ fn block_max(chunk: &[f64]) -> f64 {
 ///     .unwrap();
 /// assert_eq!(rel[[1, 1]], -100.0); // amin = 1e-10
 /// ```
-pub fn power_to_db<S, D>(s: &ArrayBase<S, D>, config: &DbConfig) -> AudioSampleResult<Array<f64, D>>
+pub fn power_to_db<F, S, D>(
+    s: &ArrayBase<S, D>,
+    config: &DbConfig,
+) -> AudioSampleResult<Array<F, D>>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
     config.validate()?;
-    let values: Vec<f64> = s.iter().copied().collect();
+    let values: Vec<F> = s.iter().copied().collect();
     let reference = config.reference;
     Ok(power_to_db_core(
         s.raw_dim(),
         values,
         |chunk| match reference {
-            DbReference::Value(r) => r.abs(),
+            DbReference::Value(r) => F::of(r).abs(),
             DbReference::Max => block_max(chunk),
         },
-        config.amin,
-        config.top_db,
+        F::of(config.amin),
+        config.top_db.map(F::of),
         config.axes,
     ))
 }
@@ -994,7 +1019,7 @@ where
 ///
 /// # Returns
 ///
-/// An array of the same shape in dB.
+/// An array of the same shape in dB, in the element type `F` of `s`.
 ///
 /// # Errors
 ///
@@ -1006,31 +1031,35 @@ where
 /// use audio_samples::operations::spectrum::{DbConfig, amplitude_to_db};
 /// use ndarray::array;
 ///
-/// let db = amplitude_to_db(&array![1.0, 0.1, -0.01], &DbConfig::amplitude()).unwrap();
+/// let db = amplitude_to_db(&array![1.0_f64, 0.1, -0.01], &DbConfig::amplitude()).unwrap();
 /// assert!((db[1] + 20.0).abs() < 1e-12);
 /// assert!((db[2] + 40.0).abs() < 1e-12);
 /// ```
-pub fn amplitude_to_db<S, D>(
+pub fn amplitude_to_db<F, S, D>(
     s: &ArrayBase<S, D>,
     config: &DbConfig,
-) -> AudioSampleResult<Array<f64, D>>
+) -> AudioSampleResult<Array<F, D>>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
     config.validate()?;
-    let power: Vec<f64> = s.iter().map(|x| x.abs() * x.abs()).collect();
+    let power: Vec<F> = s.iter().map(|x| x.abs() * x.abs()).collect();
     let reference = config.reference;
     Ok(power_to_db_core(
         s.raw_dim(),
         power,
         |chunk| match reference {
-            DbReference::Value(r) => r.abs() * r.abs(),
+            DbReference::Value(r) => {
+                let r = F::of(r).abs();
+                r * r
+            }
             // max(|S|)^2 == max(|S|^2): squaring is monotonic and rounds identically.
             DbReference::Max => block_max(chunk),
         },
-        config.amin * config.amin,
-        config.top_db,
+        F::of(config.amin * config.amin),
+        config.top_db.map(F::of),
         config.axes,
     ))
 }
@@ -1039,6 +1068,7 @@ where
 /// `reference * 10^(S_db / 10)`.
 ///
 /// This inverts [`power_to_db`] for values above the `amin` / `top_db` floors.
+/// The result has the element type `F` of `s_db`; `reference` is rounded to `F`.
 ///
 /// # Examples
 ///
@@ -1046,25 +1076,32 @@ where
 /// use audio_samples::operations::spectrum::db_to_power;
 /// use ndarray::array;
 ///
-/// let p = db_to_power(&array![0.0, -10.0, 20.0], 1.0);
+/// let p = db_to_power(&array![0.0_f64, -10.0, 20.0], 1.0);
 /// assert!((p[1] - 0.1).abs() < 1e-15);
 /// assert!((p[2] - 100.0).abs() < 1e-12);
+///
+/// // f32 input gives f32 output.
+/// let p32 = db_to_power(&array![-10.0_f32], 1.0);
+/// assert!((p32[0] - 0.1_f32).abs() < 1e-7);
 /// ```
 #[must_use]
-pub fn db_to_power<S, D>(s_db: &ArrayBase<S, D>, reference: f64) -> Array<f64, D>
+pub fn db_to_power<F, S, D>(s_db: &ArrayBase<S, D>, reference: f64) -> Array<F, D>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
-    let v: Vec<f64> = s_db
+    let (reference, ten, tenth) = (F::of(reference), F::of(10.0), F::of(0.1));
+    let v: Vec<F> = s_db
         .iter()
-        .map(|&x| reference * 10f64.powf(x * 0.1))
+        .map(|&x| reference * ten.powf(x * tenth))
         .collect();
     Array::from_shape_vec(s_db.raw_dim(), v).expect("shape matches the number of elements")
 }
 
 /// Converts decibels back to amplitude, equivalent to
 /// `librosa.db_to_amplitude(S_db, ref=reference)`: `sqrt(reference^2 * 10^(S_db / 10))`.
+/// The result has the element type `F` of `s_db`; `reference^2` is rounded to `F`.
 ///
 /// # Examples
 ///
@@ -1072,20 +1109,21 @@ where
 /// use audio_samples::operations::spectrum::db_to_amplitude;
 /// use ndarray::array;
 ///
-/// let a = db_to_amplitude(&array![-20.0, 0.0], 1.0);
+/// let a = db_to_amplitude(&array![-20.0_f64, 0.0], 1.0);
 /// assert!((a[0] - 0.1).abs() < 1e-15);
 /// assert_eq!(a[1], 1.0);
 /// ```
 #[must_use]
-pub fn db_to_amplitude<S, D>(s_db: &ArrayBase<S, D>, reference: f64) -> Array<f64, D>
+pub fn db_to_amplitude<F, S, D>(s_db: &ArrayBase<S, D>, reference: f64) -> Array<F, D>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
-    let r2 = reference * reference;
-    let v: Vec<f64> = s_db
+    let (r2, ten, tenth) = (F::of(reference * reference), F::of(10.0), F::of(0.1));
+    let v: Vec<F> = s_db
         .iter()
-        .map(|&x| (r2 * 10f64.powf(x * 0.1)).sqrt())
+        .map(|&x| (r2 * ten.powf(x * tenth)).sqrt())
         .collect();
     Array::from_shape_vec(s_db.raw_dim(), v).expect("shape matches the number of elements")
 }
@@ -1460,7 +1498,8 @@ fn dct_matrix(n_out: usize, n_in: usize, dct_type: DctType, norm: DctNorm) -> Ar
 /// # Returns
 ///
 /// An array with the same shape as `mel_db` except that the mel axis has `n_mfcc`
-/// entries.
+/// entries, in the element type `F` of `mel_db`. The DCT matrix (with the lifter
+/// applied) is computed in `f64` and rounded to `F` once.
 ///
 /// # Errors
 ///
@@ -1492,12 +1531,13 @@ fn dct_matrix(n_out: usize, n_in: usize, dct_type: DctType, norm: DctNorm) -> Ar
 /// S. Davis and P. Mermelstein, "Comparison of parametric representations for
 /// monosyllabic word recognition in continuously spoken sentences," *IEEE Trans. ASSP*
 /// 28(4), 1980; librosa `feature.mfcc`.
-pub fn mfcc_from_mel_db<S, D>(
+pub fn mfcc_from_mel_db<F, S, D>(
     mel_db: &ArrayBase<S, D>,
     config: &MfccConfig,
-) -> AudioSampleResult<Array<f64, D>>
+) -> AudioSampleResult<Array<F, D>>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
     let ndim = mel_db.ndim();
@@ -1523,10 +1563,11 @@ where
             row.mapv_inplace(|b| b * g);
         }
     }
+    let basis = basis.mapv(F::of);
     let mut shape = mel_db.raw_dim();
     shape[ndim - 2] = n_mfcc;
-    let mut out = Array::<f64, D>::zeros(shape);
-    let mut lane_buf = vec![0.0; n_mels];
+    let mut out = Array::<F, D>::zeros(shape);
+    let mut lane_buf = vec![F::zero(); n_mels];
     Zip::from(out.lanes_mut(ax))
         .and(mel_db.lanes(ax))
         .for_each(|mut o, x| {
@@ -1534,7 +1575,7 @@ where
                 *dst = v;
             }
             for (y, row) in o.iter_mut().zip(basis.outer_iter()) {
-                *y = row.iter().zip(&lane_buf).map(|(b, v)| b * v).sum();
+                *y = row.iter().zip(&lane_buf).map(|(&b, &v)| b * v).sum();
             }
         });
     Ok(out)
@@ -1553,7 +1594,9 @@ where
 ///
 /// # Returns
 ///
-/// A `(channels, n_mels, n_frames)` mel spectrogram.
+/// A `(channels, n_mels, n_frames)` mel spectrogram in the element type `F` of
+/// `spectrogram`. The filterbank is computed in `f64` and rounded to `F` once
+/// (for `f32` this matches librosa's default `float32` filterbank closely).
 ///
 /// # Errors
 ///
@@ -1574,12 +1617,12 @@ where
 /// ).unwrap();
 /// assert_eq!(m.dim(), (1, 40, 4));
 /// ```
-pub fn melspectrogram_from_spectrogram(
-    spectrogram: ArrayView3<'_, f64>,
+pub fn melspectrogram_from_spectrogram<F: AudioFloat>(
+    spectrogram: ArrayView3<'_, F>,
     sample_rate: f64,
     n_fft: NonZeroUsize,
     mel: &MelFilterbankConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let (n_channels, n_bins, n_frames) = spectrogram.dim();
     if n_bins != n_fft.get() / 2 + 1 {
         return Err(AudioSampleError::Parameter(
@@ -1593,8 +1636,8 @@ pub fn melspectrogram_from_spectrogram(
             ),
         ));
     }
-    let basis = mel_filterbank(sample_rate, n_fft, mel)?;
-    let mut out = Array3::<f64>::zeros((n_channels, basis.nrows(), n_frames));
+    let basis = mel_filterbank(sample_rate, n_fft, mel)?.mapv(F::of);
+    let mut out = Array3::<F>::zeros((n_channels, basis.nrows(), n_frames));
     for (c, s) in spectrogram.outer_iter().enumerate() {
         banded_dot_into(&basis, s, out.index_axis_mut(Axis(0), c));
     }
@@ -1609,19 +1652,24 @@ pub fn melspectrogram_from_spectrogram(
 /// `rows × columns`; each output row is accumulated as a sum of scaled
 /// spectrogram rows (contiguous, vectorisable). For finite input the result
 /// equals the dense product up to floating-point summation order.
-pub(crate) fn banded_dot_into(
-    basis: &Array2<f64>,
-    s: ArrayView2<'_, f64>,
-    mut out: ndarray::ArrayViewMut2<'_, f64>,
+pub(crate) fn banded_dot_into<F: AudioFloat>(
+    basis: &Array2<F>,
+    s: ArrayView2<'_, F>,
+    mut out: ndarray::ArrayViewMut2<'_, F>,
 ) {
     let s = s.as_standard_layout();
     let n_frames = s.ncols();
     for (filter, mut out_row) in basis.outer_iter().zip(out.outer_iter_mut()) {
-        out_row.fill(0.0);
-        let Some(lo) = filter.iter().position(|&w| w != 0.0) else {
+        out_row.fill(F::zero());
+        let Some(lo) = filter.iter().position(|&w| w != F::zero()) else {
             continue;
         };
-        let hi = filter.len() - filter.iter().rev().position(|&w| w != 0.0).unwrap_or(0);
+        let hi = filter.len()
+            - filter
+                .iter()
+                .rev()
+                .position(|&w| w != F::zero())
+                .unwrap_or(0);
         let acc = out_row
             .as_slice_mut()
             .expect("rows of a standard-layout array");
@@ -1642,14 +1690,14 @@ pub(crate) fn banded_dot_into(
 /// (the libm `hypot` call dominated spectrogram computation); the two agree to
 /// within about one ulp. STFT values are far from the range where the squares
 /// could overflow or underflow.
-fn magnitude_power(z: Complex<f64>, power: f64) -> f64 {
+fn magnitude_power<F: AudioFloat>(z: Complex<F>, power: f64) -> F {
     let sq = z.norm_sqr();
     if power == 2.0 {
         sq
     } else if power == 1.0 {
         sq.sqrt()
     } else {
-        sq.sqrt().powf(power)
+        sq.sqrt().powf(F::of(power))
     }
 }
 
@@ -1839,18 +1887,19 @@ fn solve_small(mut g: Vec<Vec<f64>>, mut rhs: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
 }
 
 /// Savitzky-Golay helper: the least-squares polynomial fit over a window of `width`
-/// samples, in the scaled coordinate `u = (j - h) / h`.
-struct SavGol {
+/// samples, in the scaled coordinate `u = (j - h) / h`. The coefficients are
+/// computed in `f64` and rounded to `F` once.
+struct SavGol<F> {
     width: usize,
     half: usize,
     order: usize,
     /// `(order + 1) x width` pseudo-inverse: polynomial coefficients `a = pinv * x`.
-    pinv: Vec<Vec<f64>>,
+    pinv: Vec<Vec<F>>,
     /// Centre derivative weights (SciPy `savgol_coeffs(..., use="dot")`).
-    centre: Vec<f64>,
+    centre: Vec<F>,
 }
 
-impl SavGol {
+impl<F: AudioFloat> SavGol<F> {
     fn new(width: usize, order: usize) -> Self {
         let half = width / 2;
         let h = half as f64;
@@ -1869,7 +1918,11 @@ impl SavGol {
             .collect();
         let pinv = solve_small(gram, vt);
         let scale = factorial(order) / h.powi(order as i32);
-        let centre = pinv[order].iter().map(|v| v * scale).collect();
+        let centre = pinv[order].iter().map(|v| F::of(v * scale)).collect();
+        let pinv = pinv
+            .iter()
+            .map(|row| row.iter().map(|&v| F::of(v)).collect())
+            .collect();
         Self {
             width,
             half,
@@ -1881,16 +1934,16 @@ impl SavGol {
 
     /// The `order`-th derivative at window position `pos` (0-based) of the polynomial
     /// fitted to `window` (length `width`).
-    fn edge_derivative(&self, window: &[f64], pos: usize) -> f64 {
+    fn edge_derivative(&self, window: &[F], pos: usize) -> F {
         let h = self.half as f64;
-        let u0 = (pos as f64 - h) / h;
+        let u0 = F::of((pos as f64 - h) / h);
         let d = self.order;
-        let mut acc = 0.0;
+        let mut acc = F::zero();
         for q in d..self.pinv.len() {
-            let a_q: f64 = self.pinv[q].iter().zip(window).map(|(p, x)| p * x).sum();
-            acc += falling_factorial(q, d) * a_q * u0.powi((q - d) as i32);
+            let a_q: F = self.pinv[q].iter().zip(window).map(|(&p, &x)| p * x).sum();
+            acc += F::of(falling_factorial(q, d)) * a_q * u0.powi((q - d) as i32);
         }
-        acc / h.powi(d as i32)
+        acc / F::of(h.powi(d as i32))
     }
 }
 
@@ -1929,7 +1982,8 @@ fn delta_source_index(i: isize, len: usize, mode: DeltaMode) -> Option<usize> {
 /// # Returns
 ///
 /// An array of the same shape holding the `order`-th derivative estimate along the
-/// chosen axis.
+/// chosen axis, in the element type `F` of `data`. The filter coefficients are
+/// computed in `f64` and rounded to `F` once.
 ///
 /// # Errors
 ///
@@ -1953,9 +2007,13 @@ fn delta_source_index(i: isize, len: usize, mode: DeltaMode) -> Option<usize> {
 /// A. Savitzky and M. J. E. Golay, "Smoothing and differentiation of data by
 /// simplified least squares procedures," *Analytical Chemistry* 36(8), 1964;
 /// librosa `feature.delta`.
-pub fn delta<S, D>(data: &ArrayBase<S, D>, config: &DeltaConfig) -> AudioSampleResult<Array<f64, D>>
+pub fn delta<F, S, D>(
+    data: &ArrayBase<S, D>,
+    config: &DeltaConfig,
+) -> AudioSampleResult<Array<F, D>>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
     let ax = config.validate(data.ndim())?;
@@ -1969,10 +2027,10 @@ where
             ),
         ));
     }
-    let sg = SavGol::new(config.width, config.order);
+    let sg = SavGol::<F>::new(config.width, config.order);
     let (w, h) = (sg.width, sg.half);
-    let mut out = Array::<f64, D>::zeros(data.raw_dim());
-    let mut x = vec![0.0; len];
+    let mut out = Array::<F, D>::zeros(data.raw_dim());
+    let mut x = vec![F::zero(); len];
     Zip::from(out.lanes_mut(Axis(ax)))
         .and(data.lanes(Axis(ax)))
         .for_each(|mut o, lane| {
@@ -1985,7 +2043,7 @@ where
                     sg.centre
                         .iter()
                         .zip(&x[i - h..i - h + w])
-                        .map(|(c, v)| c * v)
+                        .map(|(&c, &v)| c * v)
                         .sum()
                 } else if config.mode == DeltaMode::Interp {
                     if i < h {
@@ -1999,7 +2057,8 @@ where
                         .enumerate()
                         .map(|(j, c)| {
                             let src = i as isize + j as isize - h as isize;
-                            delta_source_index(src, len, config.mode).map_or(0.0, |s| c * x[s])
+                            delta_source_index(src, len, config.mode)
+                                .map_or(F::zero(), |s| *c * x[s])
                         })
                         .sum()
                 };
@@ -2025,7 +2084,7 @@ where
 ///
 /// # Returns
 ///
-/// An array of shape `(..., features * n_steps, frames)`.
+/// An array of shape `(..., features * n_steps, frames)` and element type `F`.
 ///
 /// # Errors
 ///
@@ -2043,13 +2102,14 @@ where
 /// let s = stack_memory(&x, nzu!(2), 1).unwrap();
 /// assert_eq!(s, array![[1.0, 2.0, 3.0], [0.0, 1.0, 2.0]]);
 /// ```
-pub fn stack_memory<S, D>(
+pub fn stack_memory<F, S, D>(
     data: &ArrayBase<S, D>,
     n_steps: NonZeroUsize,
     delay: isize,
-) -> AudioSampleResult<Array<f64, D>>
+) -> AudioSampleResult<Array<F, D>>
 where
-    S: Data<Elem = f64>,
+    F: AudioFloat,
+    S: Data<Elem = F>,
     D: Dimension,
 {
     if delay == 0 {
@@ -2079,7 +2139,7 @@ where
     )?;
     let mut shape = data.raw_dim();
     shape[ndim - 2] = d * n_steps.get();
-    let mut out = Array::<f64, D>::zeros(shape);
+    let mut out = Array::<F, D>::zeros(shape);
     for k in 0..n_steps.get() {
         let shift = (k as isize).saturating_mul(delay);
         let s = shift.unsigned_abs();
@@ -2106,13 +2166,24 @@ where
 /// librosa-compatible spectral analysis on [`AudioSamples`].
 ///
 /// Every method works on all channels: outputs are shaped
-/// `(channels, n_features, n_frames)` (mono gives one channel), always `f64` /
-/// `Complex<f64>`. Each config's `Default` reproduces librosa 1.0's defaults.
-/// See the [module documentation](self) for the librosa correspondence.
+/// `(channels, n_features, n_frames)` (mono gives one channel). Outputs have the
+/// element type [`Float`](Self::Float) (or `Complex<Self::Float>`): `f32` for
+/// `u8`, `i16`, `I24` and `f32` audio, `f64` for `i32` and `f64` audio (see
+/// [`AudioSample::Float`](crate::AudioSample::Float)). The computation runs in
+/// that type. Each config's `Default` reproduces librosa 1.0's defaults. See the
+/// [module documentation](self) for the librosa correspondence.
 ///
 /// The existing [`AudioTransforms`](crate::AudioTransforms) spectrogram methods are
 /// unchanged; they follow the `spectrograms` crate's conventions instead.
 pub trait AudioSpectrum {
+    /// The float type of the outputs and of the computation: the sample type's
+    /// [`AudioSample::Float`](crate::AudioSample::Float).
+    type Float: AudioFloat;
+
+    /// The sample type of the audio. [`istft_matrix`](Self::istft_matrix)
+    /// returns audio of this type.
+    type Sample: StandardSample;
+
     /// Computes the complex STFT of every channel, equivalent to `librosa.stft`.
     ///
     /// # Arguments
@@ -2143,9 +2214,13 @@ pub trait AudioSpectrum {
     /// let s = stereo.stft_matrix(&StftConfig::default()).unwrap();
     /// assert_eq!(s.dim(), (2, 1025, 44));
     /// ```
-    fn stft_matrix(&self, config: &StftConfig) -> AudioSampleResult<Array3<Complex<f64>>>;
+    fn stft_matrix(&self, config: &StftConfig) -> AudioSampleResult<Array3<Complex<Self::Float>>>;
 
     /// Inverts an STFT matrix to audio, equivalent to `librosa.istft`.
+    ///
+    /// The inverse transform runs in [`Float`](Self::Float), and the result is
+    /// converted to the sample type [`Sample`](Self::Sample) with the crate's
+    /// audio-aware conversion (integer types round and saturate).
     ///
     /// # Arguments
     ///
@@ -2157,7 +2232,8 @@ pub trait AudioSpectrum {
     ///
     /// # Returns
     ///
-    /// Mono `f64` audio for a one-channel matrix, multi-channel audio otherwise.
+    /// Mono audio of type [`Sample`](Self::Sample) for a one-channel matrix,
+    /// multi-channel audio otherwise.
     ///
     /// # Errors
     ///
@@ -2179,11 +2255,11 @@ pub trait AudioSpectrum {
     /// assert!(a.iter().zip(b.iter()).all(|(p, q)| (p - q).abs() < 1e-12));
     /// ```
     fn istft_matrix(
-        stft: &Array3<Complex<f64>>,
+        stft: &Array3<Complex<Self::Float>>,
         config: &StftConfig,
         sample_rate: SampleRate,
         length: Option<NonZeroUsize>,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>>
+    ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>
     where
         Self: Sized;
 
@@ -2219,8 +2295,11 @@ pub trait AudioSpectrum {
     /// assert_eq!(p.dim().1, 1025);
     /// assert!(p.iter().all(|&v| v >= 0.0));
     /// ```
-    fn spectrogram_matrix(&self, config: &StftConfig, power: f64)
-    -> AudioSampleResult<Array3<f64>>;
+    fn spectrogram_matrix(
+        &self,
+        config: &StftConfig,
+        power: f64,
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes a mel spectrogram, equivalent to `librosa.feature.melspectrogram`.
     ///
@@ -2242,9 +2321,10 @@ pub trait AudioSpectrum {
     ///
     /// # Differences from librosa
     ///
-    /// The filterbank is `f64`; librosa's default builds it in `float32`, which changes
-    /// results by about 1e-7 relative (pass `dtype=numpy.float64` to librosa for
-    /// round-off agreement).
+    /// The filterbank is computed in `f64` and rounded to [`Float`](Self::Float).
+    /// librosa's default builds it in `float32`; for `f64` output the two differ by
+    /// about 1e-7 relative (pass `dtype=numpy.float64` to librosa for round-off
+    /// agreement).
     ///
     /// # Examples
     ///
@@ -2257,7 +2337,10 @@ pub trait AudioSpectrum {
     /// let m = x.melspectrogram(&MelSpectrogramConfig::default()).unwrap();
     /// assert_eq!(m.dim(), (1, 128, 44));
     /// ```
-    fn melspectrogram(&self, config: &MelSpectrogramConfig) -> AudioSampleResult<Array3<f64>>;
+    fn melspectrogram(
+        &self,
+        config: &MelSpectrogramConfig,
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes MFCCs, equivalent to `librosa.feature.mfcc(y=..., sr=...)`.
     ///
@@ -2282,7 +2365,7 @@ pub trait AudioSpectrum {
     ///
     /// # Differences from librosa
     ///
-    /// As for [`melspectrogram`](Self::melspectrogram) (the mel basis is `f64`). This is a
+    /// As for [`melspectrogram`](Self::melspectrogram) (the mel basis). This is a
     /// different method from [`AudioTransforms::mfcc`](crate::AudioTransforms::mfcc),
     /// which keeps the `spectrograms` crate's HTK-like conventions.
     ///
@@ -2298,11 +2381,60 @@ pub trait AudioSpectrum {
     /// let m = x.mfcc_frames(&MfccConfig::new().with_n_mfcc(nzu!(13)).with_lifter(22.0)).unwrap();
     /// assert_eq!(m.dim(), (1, 13, 44));
     /// ```
-    fn mfcc_frames(&self, config: &MfccConfig) -> AudioSampleResult<Array3<f64>>;
+    fn mfcc_frames(&self, config: &MfccConfig) -> AudioSampleResult<Array3<Self::Float>>;
+}
+
+/// `|STFT|^power` of `(channels, samples)` rows, computed in `F`.
+///
+/// # Errors
+/// As for [`AudioSpectrum::spectrogram_matrix`] (without the finiteness check).
+pub(crate) fn spectrogram_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
+    config: &StftConfig,
+    power: f64,
+) -> AudioSampleResult<Array3<F>> {
+    validate_power(power)?;
+    let s = stft(rows, config)?;
+    Ok(s.mapv(|z| magnitude_power(z, power)))
+}
+
+/// The mel spectrogram of `(channels, samples)` rows sampled at
+/// `sample_rate` Hz, computed in `F`.
+///
+/// # Errors
+/// As for [`AudioSpectrum::melspectrogram`] (without the finiteness check).
+pub(crate) fn melspectrogram_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
+    sample_rate: f64,
+    config: &MelSpectrogramConfig,
+) -> AudioSampleResult<Array3<F>> {
+    config.validate(sample_rate)?;
+    let s = spectrogram_rows(rows, &config.stft, config.power)?;
+    melspectrogram_from_spectrogram(s.view(), sample_rate, config.stft.n_fft, &config.mel)
+}
+
+/// The MFCCs of `(channels, samples)` rows sampled at `sample_rate` Hz,
+/// computed in `F`.
+///
+/// # Errors
+/// As for [`AudioSpectrum::mfcc_frames`] (without the finiteness check).
+pub(crate) fn mfcc_rows<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
+    sample_rate: f64,
+    config: &MfccConfig,
+) -> AudioSampleResult<Array3<F>> {
+    config.validate(sample_rate)?;
+    let mel = melspectrogram_rows(rows, sample_rate, &config.mel_spectrogram)?;
+    let mel_db = power_to_db(&mel, &config.db)?;
+    mfcc_from_mel_db(&mel_db, config)
 }
 
 /// The audio as a `(channels, samples)` `f64` array (no validation; for audio
 /// the crate produced itself).
+///
+/// TRANSITIONAL(f64): used by the analysis modules that still compute in `f64`;
+/// new code uses [`audio_float_rows`](crate::audio_float::audio_float_rows).
+#[allow(dead_code)] // unused when only `transforms` is enabled
 pub(crate) fn audio_f64_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
     let w = audio.to_format::<f64>();
     if let Some(m) = w.as_mono() {
@@ -2323,8 +2455,13 @@ pub(crate) fn audio_f64_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> 
 /// ("Audio buffer is not finite everywhere"). Integer sample types cannot hold
 /// non-finite values and skip the scan.
 ///
+/// TRANSITIONAL(f64): used by the analysis modules that still compute in `f64`;
+/// new code uses [`finite_float_rows`], which computes in the sample type's
+/// float type.
+///
 /// # Errors
 /// [`ParameterError`] if any sample is NaN or infinite.
+#[allow(dead_code)] // unused when only `transforms` is enabled
 pub(crate) fn finite_audio_rows<T: StandardSample>(
     audio: &AudioSamples<'_, T>,
 ) -> AudioSampleResult<Array2<f64>> {
@@ -2346,46 +2483,42 @@ impl<T> AudioSpectrum for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
-    fn stft_matrix(&self, config: &StftConfig) -> AudioSampleResult<Array3<Complex<f64>>> {
-        stft(finite_audio_rows(self)?.view(), config)
+    type Float = T::Float;
+    type Sample = T;
+
+    fn stft_matrix(&self, config: &StftConfig) -> AudioSampleResult<Array3<Complex<T::Float>>> {
+        stft(finite_float_rows(self)?.view(), config)
     }
 
     fn istft_matrix(
-        stft: &Array3<Complex<f64>>,
+        stft: &Array3<Complex<T::Float>>,
         config: &StftConfig,
         sample_rate: SampleRate,
         length: Option<NonZeroUsize>,
-    ) -> AudioSampleResult<AudioSamples<'static, f64>> {
+    ) -> AudioSampleResult<AudioSamples<'static, T>> {
         let y = istft(stft.view(), config, length.map(NonZeroUsize::get))?;
-        if y.nrows() == 1 {
-            AudioSamples::new_mono(y.index_axis_move(Axis(0), 0), sample_rate)
-        } else {
-            AudioSamples::new_multi_channel(y, sample_rate)
-        }
+        float_rows_to_audio::<T>(y, sample_rate, "istft")
     }
 
     fn spectrogram_matrix(
         &self,
         config: &StftConfig,
         power: f64,
-    ) -> AudioSampleResult<Array3<f64>> {
+    ) -> AudioSampleResult<Array3<T::Float>> {
         validate_power(power)?;
-        let s = self.stft_matrix(config)?;
-        Ok(s.mapv(|z| magnitude_power(z, power)))
+        spectrogram_rows(finite_float_rows(self)?.view(), config, power)
     }
 
-    fn melspectrogram(&self, config: &MelSpectrogramConfig) -> AudioSampleResult<Array3<f64>> {
+    fn melspectrogram(&self, config: &MelSpectrogramConfig) -> AudioSampleResult<Array3<T::Float>> {
         let sr = self.sample_rate_hz();
         config.validate(sr)?;
-        let s = self.spectrogram_matrix(&config.stft, config.power)?;
-        melspectrogram_from_spectrogram(s.view(), sr, config.stft.n_fft, &config.mel)
+        melspectrogram_rows(finite_float_rows(self)?.view(), sr, config)
     }
 
-    fn mfcc_frames(&self, config: &MfccConfig) -> AudioSampleResult<Array3<f64>> {
-        config.validate(self.sample_rate_hz())?;
-        let mel = self.melspectrogram(&config.mel_spectrogram)?;
-        let mel_db = power_to_db(&mel, &config.db)?;
-        mfcc_from_mel_db(&mel_db, config)
+    fn mfcc_frames(&self, config: &MfccConfig) -> AudioSampleResult<Array3<T::Float>> {
+        let sr = self.sample_rate_hz();
+        config.validate(sr)?;
+        mfcc_rows(finite_float_rows(self)?.view(), sr, config)
     }
 }
 
@@ -2459,7 +2592,7 @@ mod tests {
 
     #[test]
     fn stft_of_dc_has_energy_only_in_bin_zero() {
-        let x = Array2::from_elem((1, 4096), 1.0);
+        let x = Array2::from_elem((1, 4096), 1.0_f64);
         let s = stft(x.view(), &StftConfig::default().with_center(false)).unwrap();
         // Periodic Hann sums to n_fft / 2.
         assert!((s[[0, 0, 0]].re - 1024.0).abs() < 1e-9);
@@ -2589,7 +2722,7 @@ mod tests {
 
     #[test]
     fn power_to_db_top_db_is_per_channel_with_auto_axes() {
-        let s = array![[[1.0, 1e-12]], [[1e-6, 1e-12]]];
+        let s = array![[[1.0_f64, 1e-12]], [[1e-6, 1e-12]]];
         let db = power_to_db(&s, &DbConfig::default()).unwrap();
         assert_eq!(db[[0, 0, 1]], -80.0);
         // Channel 1: max is -60 dB, so 1e-12 (clamped to amin = 1e-10, -100 dB) is not floored.
@@ -2602,7 +2735,7 @@ mod tests {
 
     #[test]
     fn db_round_trips() {
-        let p = array![1e-3, 0.5, 2.0];
+        let p = array![1e-3_f64, 0.5, 2.0];
         let back = db_to_power(
             &power_to_db(&p, &DbConfig::default().with_top_db(None)).unwrap(),
             1.0,
@@ -2610,7 +2743,7 @@ mod tests {
         for (a, b) in back.iter().zip(&p) {
             assert!((a / b - 1.0).abs() < 1e-12);
         }
-        let a = array![1e-3, 0.5, 2.0];
+        let a = array![1e-3_f64, 0.5, 2.0];
         let back = db_to_amplitude(
             &amplitude_to_db(&a, &DbConfig::amplitude().with_top_db(None)).unwrap(),
             1.0,
@@ -2685,5 +2818,120 @@ mod tests {
         let f = frame(&x, nzu!(2048), nzu!(512)).unwrap();
         assert_eq!(f.dim(), (2048, 1 + (5000 - 2048) / 512));
         assert!(frame(&x[..10], nzu!(11), nzu!(1)).is_err());
+    }
+
+    /// A 1 s test tone plus noise at 22.05 kHz, in `f64`.
+    fn tone_and_noise() -> AudioSamples<'static, f64> {
+        let x: Vec<f64> = noise(22050, 11)
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 0.5 * (0.05 * i as f64).sin() + 0.4 * v)
+            .collect();
+        AudioSamples::new_mono(Array1::from(x), sample_rate!(22050)).unwrap()
+    }
+
+    /// Largest `|a - b|` over the elements, divided by the largest `|b|`.
+    fn rel_err_to_peak(a: impl Iterator<Item = f64>, b: impl Iterator<Item = f64> + Clone) -> f64 {
+        let peak = b.clone().fold(0.0f64, |m, v| m.max(v.abs()));
+        let err = a.zip(b).fold(0.0f64, |m, (p, q)| m.max((p - q).abs()));
+        err / peak
+    }
+
+    #[test]
+    fn output_float_type_follows_sample_type() {
+        let audio = tone_and_noise();
+        let i16_audio = audio.to_format::<i16>();
+        let i32_audio = audio.to_format::<i32>();
+        let mel_cfg = MelSpectrogramConfig::default();
+        let m16: Array3<f32> = i16_audio.melspectrogram(&mel_cfg).unwrap();
+        let m32: Array3<f64> = i32_audio.melspectrogram(&mel_cfg).unwrap();
+        assert_eq!(m16.dim(), m32.dim());
+        let s16: Array3<Complex<f32>> = i16_audio.stft_matrix(&StftConfig::default()).unwrap();
+        let s32: Array3<Complex<f64>> = i32_audio.stft_matrix(&StftConfig::default()).unwrap();
+        assert_eq!(s16.dim(), s32.dim());
+        let c: Array3<f32> = audio
+            .to_format::<f32>()
+            .mfcc_frames(&MfccConfig::default())
+            .unwrap();
+        assert_eq!(c.dim(), (1, 20, 44));
+    }
+
+    #[test]
+    fn f32_path_agrees_with_f64_path() {
+        // Each f32 result is compared with the f64 path on the same input samples
+        // (i16 and f32 samples are exact in f64). The measured worst case is
+        // 3.2 * f32::EPSILON of the peak (stft ~1.1e-7, mel ~2.4e-7, mfcc
+        // ~3.8e-7). The tolerance of 8 * f32::EPSILON (9.5e-7) leaves headroom
+        // below the O(log2(n_fft) * eps) = 11 * eps round-off bound of a
+        // 2048-point FFT; a computation that lost precision (for example a mel
+        // basis or window rounded to f32 twice) would exceed it.
+        let tol = 8.0 * f64::from(f32::EPSILON);
+        let audio = tone_and_noise();
+        let stft_cfg = StftConfig::default();
+        let mel_cfg = MelSpectrogramConfig::default();
+        let mfcc_cfg = MfccConfig::default();
+        let check = |name: &str,
+                     s32: Array3<Complex<f32>>,
+                     m32: Array3<f32>,
+                     c32: Array3<f32>,
+                     reference: AudioSamples<'static, f64>| {
+            let s64 = reference.stft_matrix(&stft_cfg).unwrap();
+            let e = rel_err_to_peak(
+                s32.iter()
+                    .map(|z| Complex::new(f64::from(z.re), f64::from(z.im)).norm()),
+                s64.iter().map(|z| z.norm()),
+            );
+            // Magnitudes only bound part of the error; also compare the parts.
+            let e_parts = rel_err_to_peak(
+                s32.iter().flat_map(|z| [f64::from(z.re), f64::from(z.im)]),
+                s64.iter().flat_map(|z| [z.re, z.im]),
+            );
+            assert!(e < tol && e_parts < tol, "{name} stft: {e:e} / {e_parts:e}");
+            let m64 = reference.melspectrogram(&mel_cfg).unwrap();
+            let e = rel_err_to_peak(m32.iter().map(|&v| f64::from(v)), m64.iter().copied());
+            assert!(e < tol, "{name} melspectrogram: {e:e}");
+            let c64 = reference.mfcc_frames(&mfcc_cfg).unwrap();
+            let e = rel_err_to_peak(c32.iter().map(|&v| f64::from(v)), c64.iter().copied());
+            assert!(e < tol, "{name} mfcc: {e:e}");
+        };
+        let a16 = audio.to_format::<i16>();
+        check(
+            "i16",
+            a16.stft_matrix(&stft_cfg).unwrap(),
+            a16.melspectrogram(&mel_cfg).unwrap(),
+            a16.mfcc_frames(&mfcc_cfg).unwrap(),
+            a16.to_format::<f64>(),
+        );
+        let a32 = audio.to_format::<f32>();
+        check(
+            "f32",
+            a32.stft_matrix(&stft_cfg).unwrap(),
+            a32.melspectrogram(&mel_cfg).unwrap(),
+            a32.mfcc_frames(&mfcc_cfg).unwrap(),
+            a32.to_format::<f64>(),
+        );
+    }
+
+    #[test]
+    fn istft_matrix_returns_the_receiver_sample_type() {
+        let a16 = tone_and_noise().to_format::<i16>();
+        let cfg = StftConfig::default();
+        let len = Some(nzu!(22050));
+        let s = a16.stft_matrix(&cfg).unwrap();
+        let y: AudioSamples<'static, i16> =
+            AudioSamples::<i16>::istft_matrix(&s, &cfg, sample_rate!(22050), len).unwrap();
+        // The f64 path re-quantised to i16 must agree within one LSB.
+        let s64 = a16.to_format::<f64>().stft_matrix(&cfg).unwrap();
+        let y64 = AudioSamples::<f64>::istft_matrix(&s64, &cfg, sample_rate!(22050), len)
+            .unwrap()
+            .to_format::<i16>();
+        let (y, y64) = (
+            y.as_mono().unwrap().as_view(),
+            y64.as_mono().unwrap().as_view(),
+        );
+        assert_eq!(y.len(), 22050);
+        for (&p, &q) in y.iter().zip(y64.iter()) {
+            assert!((i32::from(p) - i32::from(q)).abs() <= 1, "{p} vs {q}");
+        }
     }
 }

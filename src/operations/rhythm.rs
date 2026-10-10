@@ -78,9 +78,10 @@ use num_complex::Complex;
 use realfft::RealFftPlanner;
 
 use crate::operations::filterbanks::{Window, get_window};
+// TRANSITIONAL(f64): `finite_audio_rows` / `melspectrogram_rows` on f64 rows.
 use crate::operations::spectrum::{
-    AudioSpectrum, DbConfig, MelSpectrogramConfig, StftConfig, StftPadMode, istft, power_to_db,
-    stft,
+    DbConfig, MelSpectrogramConfig, StftConfig, StftPadMode, finite_audio_rows, istft,
+    melspectrogram_rows, power_to_db, stft,
 };
 use crate::{
     AudioSampleError, AudioSampleResult, AudioSamples, ChannelRequirement, LayoutError,
@@ -3679,7 +3680,12 @@ fn envelope_of<T: StandardSample>(
     config: &OnsetStrengthConfig,
 ) -> AudioSampleResult<Array2<f64>> {
     config.validate(audio.sample_rate_hz())?;
-    let mel = audio.melspectrogram(&config.mel)?;
+    // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+    let mel = melspectrogram_rows(
+        finite_audio_rows(audio)?.view(),
+        audio.sample_rate_hz(),
+        &config.mel,
+    )?;
     let s_db = power_to_db(&mel, &config.db)?;
     onset_strength_from_db(s_db.view(), config)
 }
@@ -3698,7 +3704,12 @@ where
         channels: Option<&[usize]>,
     ) -> AudioSampleResult<Array3<f64>> {
         config.validate(self.sample_rate_hz())?;
-        let mel = self.melspectrogram(&config.mel)?;
+        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
+        let mel = melspectrogram_rows(
+            finite_audio_rows(self)?.view(),
+            self.sample_rate_hz(),
+            &config.mel,
+        )?;
         let s_db = power_to_db(&mel, &config.db)?;
         onset_strength_multi_from_db(s_db.view(), None, config, channels)
     }
