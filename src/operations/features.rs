@@ -1248,9 +1248,19 @@ pub fn spectral_contrast_from_spectrogram(
             for t in 0..n_frames {
                 buf.clear();
                 buf.extend(sel.iter().map(|&i| s[[c, i, t]]));
-                buf.sort_by(f64::total_cmp);
+                // Only the m smallest and m largest values are needed, summed in
+                // ascending order: partial selection, then sort just those.
+                let n = buf.len();
+                if 2 * m < n {
+                    buf.select_nth_unstable_by(m - 1, f64::total_cmp);
+                    buf[..m].sort_by(f64::total_cmp);
+                    buf[m..].select_nth_unstable_by(n - 2 * m, f64::total_cmp);
+                    buf[n - m..].sort_by(f64::total_cmp);
+                } else {
+                    buf.sort_by(f64::total_cmp);
+                }
                 let lo: f64 = buf[..m].iter().fold(0.0, |a, &v| a + v);
-                let hi: f64 = buf[buf.len() - m..].iter().fold(0.0, |a, &v| a + v);
+                let hi: f64 = buf[n - m..].iter().fold(0.0, |a, &v| a + v);
                 valley[[c, k, t]] = lo / m as f64;
                 peak[[c, k, t]] = hi / m as f64;
             }
