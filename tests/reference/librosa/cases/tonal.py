@@ -6,6 +6,10 @@ tests float32 rounding); one chroma_stft case keeps the float32 default to
 document that difference. piptrack outputs are sparse, so only the non-zero
 entries are stored (as flat indices + values). The detuned test tone is stored
 as 16-bit PCM codes so both sides analyse identical samples.
+
+``chroma_stft_float32`` runs chroma_stft on the PCM signals cast to
+``np.float32`` with librosa's defaults (float32 STFT and float32 basis); the
+Rust side compares ``AudioSamples<f32>`` output with it.
 """
 
 from __future__ import annotations
@@ -124,6 +128,14 @@ def build(signals, sr) -> dict:
         "stereo_default": librosa.feature.chroma_stft(y=stereo, sr=sr, **f64),
         "detuned_default": librosa.feature.chroma_stft(y=detuned, sr=sr, **f64),
         "notes_magnitude_S": librosa.feature.chroma_stft(S=np.abs(librosa.stft(notes)), sr=sr, **f64),
+    }
+
+    notes32 = notes.astype(np.float32)
+    out["chroma_stft_float32"] = {
+        "notes_tuning0": librosa.feature.chroma_stft(y=notes32, sr=sr, tuning=0.0),
+        "notes_default": librosa.feature.chroma_stft(y=notes32, sr=sr),
+        "notes_estimated_tuning": float(librosa.estimate_tuning(y=notes32, sr=sr)),
+        "mix_tuning0": librosa.feature.chroma_stft(y=mix.astype(np.float32), sr=sr, tuning=0.0),
     }
 
     # util.normalize
