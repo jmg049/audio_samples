@@ -119,7 +119,14 @@ fn rows_to_audio<T: StandardSample>(
     operation: &str,
 ) -> AudioSampleResult<AudioSamples<'static, T>> {
     let n_channels = rows.nrows();
-    let flat: Vec<f64> = rows.iter().copied().collect();
+    // Channel-major data: the array's own buffer when it is in standard layout.
+    let flat: Vec<f64> = if rows.is_standard_layout() {
+        let (v, offset) = rows.into_raw_vec_and_offset();
+        debug_assert_eq!(offset.unwrap_or(0), 0);
+        v
+    } else {
+        rows.iter().copied().collect()
+    };
     let data = NonEmptyVec::new(flat).map_err(|_| AudioSampleError::empty_data(operation))?;
     if n_channels == 1 {
         Ok(AudioSamples::from_mono_vec::<f64>(data, sample_rate))
@@ -2956,7 +2963,10 @@ where
     fn preemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
         let mut rows = audio_rows(self);
         for mut row in rows.outer_iter_mut() {
-            let (y, _) = preemphasis_with_state(&row.to_vec(), coef, None)?;
+            let y = match row.as_slice() {
+                Some(x) => preemphasis_with_state(x, coef, None)?.0,
+                None => preemphasis_with_state(&row.to_vec(), coef, None)?.0,
+            };
             row.assign(&Array1::from(y));
         }
         rows_to_audio(rows, self.sample_rate(), "preemphasis")
@@ -2970,7 +2980,10 @@ where
     fn deemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
         let mut rows = audio_rows(self);
         for mut row in rows.outer_iter_mut() {
-            let (y, _) = deemphasis_with_state(&row.to_vec(), coef, None)?;
+            let y = match row.as_slice() {
+                Some(x) => deemphasis_with_state(x, coef, None)?.0,
+                None => deemphasis_with_state(&row.to_vec(), coef, None)?.0,
+            };
             row.assign(&Array1::from(y));
         }
         rows_to_audio(rows, self.sample_rate(), "deemphasis")
