@@ -1233,10 +1233,16 @@ where
             format!("shape mismatch: {:?} != {:?}", x.shape(), x_ref.shape()),
         ));
     }
-    if x.iter()
-        .chain(x_ref.iter())
-        .any(|v| v.is_nan() || *v < F::zero())
-    {
+    // Read each input in its memory order (NumPy spectrograms are often
+    // Fortran-order).
+    let bad = |a: ndarray::ArrayView<'_, F, D>| -> bool {
+        let neg = |v: &F| v.is_nan() || *v < F::zero();
+        match a.as_slice_memory_order() {
+            Some(flat) => flat.iter().any(neg),
+            None => a.iter().any(neg),
+        }
+    };
+    if bad(x.view()) || bad(x_ref.view()) {
         return Err(param_err("x", "X and X_ref must be non-negative"));
     }
     if power.is_nan() || power <= 0.0 {
@@ -1244,7 +1250,14 @@ where
     }
     let power_f = F::of(power);
     let zero_value = if split_zeros { F::of(0.5) } else { F::zero() };
-    let mut out = Array::<F, D>::zeros(x.raw_dim());
+    // The output takes `x`'s memory order so that the zip below walks all
+    // three arrays contiguously for Fortran-order input too.
+    let fortran = x.ndim() > 1 && !x.is_standard_layout() && x.t().is_standard_layout();
+    let mut out = if fortran {
+        Array::<F, D>::zeros(ndarray::ShapeBuilder::f(x.raw_dim()))
+    } else {
+        Array::<F, D>::zeros(x.raw_dim())
+    };
     ndarray::Zip::from(&mut out)
         .and(x)
         .and(x_ref)
