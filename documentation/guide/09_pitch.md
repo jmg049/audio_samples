@@ -47,12 +47,15 @@ period and dips towards 0 at the period. The estimate is the first lag with
 $d'(\tau) < \theta$ ($\theta$ the threshold, typically 0.1 to 0.2), moved forward
 to the bottom of that dip, and refined by fitting a parabola through
 $d'(\tau_0 - 1), d'(\tau_0), d'(\tau_0 + 1)$ (this is what the crate and
-librosa do; see the note below):
+librosa do; see the note below). With $a = d'(\tau_0+1) + d'(\tau_0-1) - 2d'(\tau_0)$
+and $b = (d'(\tau_0+1) - d'(\tau_0-1))/2$ the vertex lies at $\tau_0 - b/a$:
 
 $$\hat{\tau} = \tau_0 + \frac{1}{2} \\, \frac{d'(\tau_0-1) - d'(\tau_0+1)}{d'(\tau_0-1) - 2 d'(\tau_0) + d'(\tau_0+1)}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}$$
 
-so the period is fractional and the integer grid disappears. If no lag dips
-below $\theta$ the crate declares the frame unvoiced.
+so the period is fractional and the integer grid disappears. Following
+librosa, the shift is skipped (left at 0) when $\tau_0$ is at either end of the
+search range or when $|b| \ge |a|$ (the vertex would lie more than one lag
+away). If no lag dips below $\theta$ the crate declares the frame unvoiced.
 
 *How this differs from the paper.* De Cheveigné and Kawahara's step 5
 (parabolic interpolation) fits the parabola to the **raw** difference function
@@ -112,13 +115,14 @@ for (f0, df, worst) in [(110.0, 0.76, 0.38), (440.0, 12.0, 6.0), (880.0, 46.8, 2
     assert!((step(f0) / 2.0 - worst).abs() < 0.05);
     assert!((step(f0) - f0 * f0 / fs).abs() / step(f0) < 0.1); // close to f0^2/fs
 }
-// YIN interpolates the period and lands within 0.11 Hz.
-assert!((yin - 440.0).abs() < 0.11);
+// YIN interpolates the period and lands within 0.1 Hz (440.0986 Hz).
+assert!((yin - 440.0986).abs() < 5e-5);
+assert!((yin - 440.0).abs() < 0.1);
 ```
 
 The lab repeats this for 110, 220, 440 and 880 Hz: the autocorrelation errors
 are +0.34, -0.82, +4.44 and +8.89 Hz, always within half a grid step; YIN's
-are 0.001, 0.014, 0.108 and 1.28 Hz.
+are +0.0006, +0.0124, +0.0986 and +1.2354 Hz.
 
 ## Under the hood
 
@@ -155,16 +159,20 @@ for tau in 1..=max_tau {
 // Step 3: first lag below theta, then down to the bottom of the dip.
 let theta = 0.1;
 let mut tau = (min_tau..=max_tau).find(|&t| cmnd[t] < theta).unwrap();
-assert_eq!(tau, 34); // d'(34) = 0.077 is already below 0.1 ...
-assert!((cmnd[34] - 0.0768).abs() < 1e-4 && (cmnd[36] - 0.0019).abs() < 1e-4);
+assert_eq!(tau, 34); // d'(34) = 0.0756 is already below 0.1 ...
+assert!((cmnd[34] - 0.0756).abs() < 1e-4 && (cmnd[36] - 0.0019).abs() < 1e-4);
 while tau < max_tau && cmnd[tau + 1] < cmnd[tau] {
     tau += 1;
 }
 assert_eq!(tau, 36); // ... but the dip bottoms out at 36 (d' = 0.0019)
 // Step 4: parabolic interpolation, here on d' (as librosa does; the paper's
-// step 5 interpolates the raw d instead).
-let (a, b, c) = (cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]);
-let tau_hat = tau as f64 + 0.5 * (a - c) / (a - 2.0 * b + c);
+// step 5 interpolates the raw d instead), skipped at the ends of the range or
+// when |b| >= |a|.
+let a = cmnd[tau + 1] + cmnd[tau - 1] - 2.0 * cmnd[tau];
+let b = (cmnd[tau + 1] - cmnd[tau - 1]) / 2.0;
+let shift = if tau > min_tau && tau < max_tau && b.abs() < a.abs() { -b / a } else { 0.0 };
+assert!((shift - 0.3555).abs() < 1e-4); // the true period is 36.3636 samples
+let tau_hat = tau as f64 + shift;
 let f_hat = fs / tau_hat;
 println!("d'(34..=38) = {:.4?}; period {tau_hat:.4} samples, f0 {f_hat:.4} Hz", &cmnd[34..=38]);
 
@@ -241,6 +249,7 @@ for frame in track.frames().iter().filter(|f| f.time + 512.0 / fs <= 0.5) {
 }
 println!("worst error {worst:.2} Hz over {} frames", track.len());
 assert!(worst < 1.0);
+assert!((worst - 0.12).abs() < 0.005);
 
 // 256 samples (16 ms) cannot hold two periods of 80 Hz: every frame is unvoiced.
 let short = glide
@@ -251,8 +260,8 @@ assert_eq!(short.mean_pitch(), None);
 ```
 
 The lab tracks a 1 s glide from 100 to 300 Hz: with 64 ms and with 32 ms
-frames every full frame is voiced and the worst error is below 1 Hz (0.88 and
-0.94 Hz); with 16 ms frames none is.
+frames every full frame is voiced and the worst error is well below 1 Hz
+(0.24 and 0.12 Hz); with 16 ms frames none is.
 
 ## Ask the library to explain
 
@@ -331,7 +340,7 @@ let track = low
 assert!((track.mean_pitch().unwrap() - 70.0).abs() < 0.5);
 ```
 
-**3.** $d'(40) = 0.0198$, the deepest point of the half-period dip, so
+**3.** $d'(40) = 0.0196$, the deepest point of the half-period dip, so
 $\theta = 0.021$ accepts lag 40 (400 Hz) and $\theta = 0.019$ rejects it and
 continues to the true period (200 Hz).
 
@@ -346,14 +355,14 @@ let x: Vec<f64> = (0..1600)
     .map(|i| amps.iter().map(|&(h, a): &(f64, f64)| a * (2.0 * PI * h * 200.0 * i as f64 / fs).cos()).sum())
     .collect();
 
-// d'(tau) for the library's lag range (80-500 Hz: lags 32..=200).
+// d'(tau) for the library's lag range (80-500 Hz: lags 32..=200), with d
+// summed over all N - tau overlapping pairs as in the Concept section.
 let max_tau = 200;
-let w = x.len() - max_tau - 1;
-let d: Vec<f64> = (0..=max_tau + 1)
-    .map(|tau| (0..w).map(|j| (x[j] - x[j + tau]).powi(2)).sum())
+let d: Vec<f64> = (0..=max_tau)
+    .map(|tau| (0..x.len() - tau).map(|j| (x[j] - x[j + tau]).powi(2)).sum())
     .collect();
 let cmnd = |tau: usize| d[tau] * tau as f64 / d[1..=tau].iter().sum::<f64>();
-assert!((cmnd(40) - 0.0198).abs() < 5e-5);
+assert!((cmnd(40) - 0.0196).abs() < 5e-5);
 assert!((32..40).all(|t| cmnd(t) > cmnd(40))); // 40 is the bottom of the dip
 
 let audio = AudioSamples::new_mono(Array1::from(x), sample_rate!(16000)).unwrap();

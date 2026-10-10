@@ -98,10 +98,10 @@ fn main() {
     println!("   f0 (Hz) | period (samples) | grid step | f0^2/f_s | autocorr (Hz) | YIN (Hz)");
     // (f0, autocorrelation error, YIN error) in Hz, as quoted in the guide.
     let quoted = [
-        (110.0, 0.34, 0.001),
-        (220.0, -0.82, 0.014),
-        (440.0, 4.44, 0.108),
-        (880.0, 8.89, 1.283),
+        (110.0, 0.34, 0.0006),
+        (220.0, -0.82, 0.0124),
+        (440.0, 4.44, 0.0986),
+        (880.0, 8.89, 1.2354),
     ];
     for (f0, ac_err, yin_err) in quoted {
         let x = sine_wave::<f64>(f0, Duration::from_millis(50), sample_rate!(16000), 0.8);
@@ -116,7 +116,7 @@ fn main() {
         let tau = FS / f0;
         let step = FS / tau.floor() - FS / tau.ceil();
         println!(
-            "   {f0:7.0} | {tau:16.2} | {step:9.2} | {:8.2} | {ac:13.3} | {yin:8.3}",
+            "   {f0:7.0} | {tau:16.2} | {step:9.2} | {:8.2} | {ac:13.3} | {yin:8.4}",
             f0 * f0 / FS
         );
         // Autocorrelation returns f_s / integer lag, so it is never further
@@ -128,14 +128,14 @@ fn main() {
         // YIN interpolates: much finer than the grid.
         assert!((yin - f0).abs() < step / 10.0);
         assert!(((ac - f0) - ac_err).abs() < 0.005);
-        assert!(((yin - f0) - yin_err).abs() < 0.0005);
+        assert!(((yin - f0) - yin_err).abs() < 5e-5);
     }
     let x440 = sine_wave::<f64>(440.0, Duration::from_millis(50), sample_rate!(16000), 0.8);
     let ac440 = x440.detect_pitch_autocorr(80.0, 1000.0).unwrap().unwrap();
     let yin440 = x440.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap().unwrap();
     assert!((ac440 - 16_000.0 / 36.0).abs() < 1e-9); // 444.44 Hz, lag 36
-    assert!((yin440 - 440.108).abs() < 5e-4);
-    println!("   440 Hz: autocorr picks lag 36 -> {ac440:.2} Hz; YIN gives {yin440:.3} Hz");
+    assert!((yin440 - 440.0986).abs() < 5e-5);
+    println!("   440 Hz: autocorr picks lag 36 -> {ac440:.2} Hz; YIN gives {yin440:.4} Hz");
 
     // ------------------------------------------------------------ 2. YIN
     let min_tau = (FS / 1000.0) as usize;
@@ -157,7 +157,9 @@ fn main() {
         tau.unwrap()
     );
     assert_eq!(first, 34);
+    assert!((cmnd[34] - 0.0756).abs() < 1e-4 && (cmnd[36] - 0.0019).abs() < 1e-4);
     assert_eq!(tau.unwrap().round(), 36.0);
+    assert!((tau.unwrap() - 36.3555).abs() < 1e-4); // true period 36.3636
     println!("   ours {mine:.6} Hz, detect_pitch_yin {yin440:.6} Hz");
     // Same arithmetic in the same order: identical up to rounding.
     assert!((mine - yin440).abs() < 1e-9);
@@ -219,7 +221,7 @@ fn main() {
         "   YIN theta = 0.1 -> {yin_01:.2} Hz (octave error); theta = 0.01 -> {yin_001:.2} Hz"
     );
     println!("   autocorrelation -> {ac_weak:.2} Hz (octave error)");
-    assert!((c[40] - 0.0198).abs() < 5e-5);
+    assert!((c[40] - 0.0196).abs() < 5e-5);
     assert!(c[80] < 1e-6);
     assert!((yin_01 - 400.0).abs() < 1.0);
     assert!((yin_001 - 200.0).abs() < 0.1);
@@ -282,6 +284,9 @@ fn main() {
         if win >= need {
             assert_eq!(full_voiced, full);
             assert!(max_err < 1.0, "glide error {max_err}");
+            // Quoted in the guide: 0.24 Hz (64 ms frames) and 0.12 Hz (32 ms).
+            let quoted = if win == 1024 { 0.24 } else { 0.12 };
+            assert!((max_err - quoted).abs() < 0.005, "glide error {max_err}");
         } else {
             assert_eq!(full_voiced, 0); // too short to hold two 80 Hz periods
         }

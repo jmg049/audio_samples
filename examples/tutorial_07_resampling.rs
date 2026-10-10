@@ -4,16 +4,17 @@
 //!
 //! What this lab shows, with every number checked by an `assert!`:
 //!
-//! 1. Downsampling 48 kHz -> 16 kHz with `ResamplingQuality::Fast` (no
-//!    anti-aliasing filter) keeps every third sample, so a 10 kHz tone comes
-//!    out as a full-level 6 kHz alias (|10 000 - 16 000| = 6 000 Hz).
-//! 2. The windowed-sinc tiers (`Medium`, `High`) suppress that alias; the lab
-//!    measures the alias rejection in dB, and the pass-band gain at 1 kHz.
-//! 3. The output is time-aligned: an impulse at input sample 3000 lands at
-//!    output sample 1000.
+//! 1. Downsampling 48 kHz -> 16 kHz by naive decimation (keep every third
+//!    sample, written by hand) turns a 10 kHz tone into a full-level 6 kHz
+//!    alias (|10 000 - 16 000| = 6 000 Hz).
+//! 2. Every `ResamplingQuality` tier low-pass filters first and suppresses
+//!    that alias; the lab measures the alias rejection in dB, and the
+//!    pass-band gain at 1 kHz.
+//! 3. The output is time-aligned (no delay): an impulse at input sample 3000
+//!    lands at output sample 1000, and the 1 kHz tone has no phase shift.
 //! 4. A plain-Rust windowed-sinc decimator (low-pass, then keep every third
-//!    sample) reproduces the library's behaviour: same alias rejection class,
-//!    same pass-band output.
+//!    sample) reproduces the library's behaviour: an alias rejection between
+//!    `Fast` and `Medium`, and the same pass-band output as `High`.
 //! 5. Upsampling 16 kHz -> 48 kHz with linear interpolation (`Fast`) droops
 //!    the pass band and leaves spectral images; the sinc tiers do not.
 //!
@@ -123,8 +124,8 @@ fn main() -> AudioSampleResult<()> {
     let doc = topics::resampling(fs_in, fs_out);
     println!("{doc}");
     assert!((doc.quantity("Ratio").unwrap().value - 1.0 / 3.0).abs() < 1e-12);
-    // 0.95 is stored as f32 in the resampler settings, hence the 1e-3 Hz tolerance.
-    assert!((doc.quantity("Sinc pass-band edge").unwrap().value - 7_600.0).abs() < 1e-3);
+    // Medium's pass band ends at 0.90 x 8 kHz.
+    assert!((doc.quantity("Sinc pass-band edge").unwrap().value - 7_200.0).abs() < 1e-9);
     assert!(doc.has_warning_containing("Downsampling"));
 
     // ---------------------------------------------------------------- 1, 2
@@ -133,6 +134,20 @@ fn main() -> AudioSampleResult<()> {
     // Analyse the middle 100 ms of the output: 1600 samples hold whole periods
     // of both 1 kHz and 6 kHz, so the single-bin DFT has no leakage.
     let mid = 1_200..2_800;
+
+    // Naive decimation, by hand: keep every third sample.
+    let naive: Vec<f64> = x.iter().step_by(3).copied().collect();
+    let naive_rej = db(tone_amplitude(&naive[mid.clone()], 6_000.0, fs_out) / 0.5);
+    println!("      naive: 6 kHz alias at {naive_rej:+.1} dB re the 10 kHz input");
+    // The alias comes through at full level (0 dB) ...
+    assert!(naive_rej.abs() < 1e-9);
+    // ... and is exactly a 6 kHz sine: sin(2 pi 10k m / 16k) = -sin(2 pi 6k m / 16k).
+    for (m, v) in naive.iter().enumerate().take(100) {
+        let six = -0.5 * (2.0 * PI * 6_000.0 * m as f64 / fs_out).sin();
+        let one = 0.5 * (2.0 * PI * 1_000.0 * m as f64 / fs_out).sin();
+        assert!((v - (one + six)).abs() < 1e-12);
+    }
+
     let mut measured = Vec::new();
     for q in [
         ResamplingQuality::Fast,
@@ -148,23 +163,15 @@ fn main() -> AudioSampleResult<()> {
         );
         measured.push((y, g1, rej));
     }
-    // Fast keeps every third input sample (to f32 precision) ...
-    let fast = &measured[0].0;
-    assert!((0..fast.len()).all(|m| (fast[m] - x[3 * m]).abs() < 1e-6));
-    // ... so the alias comes through at full level (0 dB) ...
-    assert!(measured[0].2.abs() < 0.01);
-    // ... and is exactly a 6 kHz sine: sin(2 pi 10k m / 16k) = -sin(2 pi 6k m / 16k).
-    for (m, v) in fast.iter().enumerate().take(100) {
-        let six = -0.5 * (2.0 * PI * 6_000.0 * m as f64 / fs_out).sin();
-        let one = 0.5 * (2.0 * PI * 1_000.0 * m as f64 / fs_out).sin();
-        assert!((v - (one + six)).abs() < 1e-6);
-    }
-    // The sinc tiers keep the pass band (better than 0.001 dB) and reject the alias.
+    // Every tier keeps the pass band (better than 0.001 dB) and rejects the
+    // alias; the resampler computes in f64, so the levels are set by the
+    // filters (0.1 dB tolerance).
     for (_, g1, _) in &measured {
         assert!(g1.abs() < 1e-3);
     }
-    assert!((measured[1].2 + 101.8).abs() < 1.0); // Medium: about -102 dB
-    assert!((measured[2].2 + 141.6).abs() < 1.0); // High: about -142 dB (f32 floor)
+    assert!((measured[0].2 + 90.8).abs() < 0.1); // Fast: short 70 dB design filter
+    assert!((measured[1].2 + 116.7).abs() < 0.1); // Medium
+    assert!((measured[2].2 + 145.5).abs() < 0.1); // High
     println!();
 
     // ---------------------------------------------------------------- 3
@@ -175,7 +182,11 @@ fn main() -> AudioSampleResult<()> {
         non_empty_slice::NonEmptyVec::new(imp).unwrap(),
         sample_rate!(48000),
     );
-    for q in [ResamplingQuality::Medium, ResamplingQuality::High] {
+    for q in [
+        ResamplingQuality::Fast,
+        ResamplingQuality::Medium,
+        ResamplingQuality::High,
+    ] {
         let y = samples(&resample(&imp, sample_rate!(16000), q)?);
         let peak = (0..y.len())
             .max_by(|&a, &b| y[a].abs().total_cmp(&y[b].abs()))
@@ -183,24 +194,17 @@ fn main() -> AudioSampleResult<()> {
         println!("     {q:>6}: impulse at input 3000 -> output peak at {peak} (3000 / 3 = 1000)");
         assert_eq!(peak, 1_000);
     }
-    // Sub-sample check with the 1 kHz tone's phase: the library removes a whole
-    // number of output frames, round(sinc_len * r / 2 - 1), so a fraction of a
-    // frame remains: 42 - 41.667 = +1/3 (High), 20 - 20.333 = -1/3 (Medium).
+    // Sub-sample check with the 1 kHz tone's phase: each output sample is the
+    // band-limited reconstruction at the exact input position 3m, so the
+    // shift is zero (to rounding error) for every tier.
     let ideal_phase = tone_phase(&ideal_tone(1_000.0, fs_out)[mid.clone()], 1_000.0, fs_out);
-    for (i, sinc_len) in [(1usize, 128.0), (2, 256.0)] {
+    for (i, q) in ["Fast", "Medium", "High"].iter().enumerate() {
         let ph = tone_phase(&measured[i].0[mid.clone()], 1_000.0, fs_out);
         let mut dphi = ph - ideal_phase;
         dphi = (dphi + PI).rem_euclid(2.0 * PI) - PI;
         let tau = dphi / (2.0 * PI * 1_000.0 / fs_out); // output frames the output leads by
-        let exact: f64 = sinc_len / 3.0 / 2.0 - 1.0;
-        let predicted = exact.round() - exact;
-        println!(
-            "     sinc_len {sinc_len}: residual shift {tau:+.4} output frames (predicted {predicted:+.4})"
-        );
-        // 0.01 frames: the phase estimate is exact up to f32 rounding, but the
-        // interpolated sinc table adds a small phase error (0.003 frames for Medium).
-        assert!((tau - predicted).abs() < 0.01);
-        assert!(tau.abs() <= 0.5);
+        println!("     {q:>6}: shift of the 1 kHz tone {tau:+.1e} output frames");
+        assert!(tau.abs() < 1e-9);
     }
     println!();
 
@@ -214,23 +218,28 @@ fn main() -> AudioSampleResult<()> {
         "     {} taps, Blackman window, cutoff 7.6 kHz: 1 kHz gain {g1:+.4} dB, alias {rej:+.1} dB",
         h.len()
     );
-    assert!(g1.abs() < 1e-3 && rej < -100.0);
-    // Mine is centred (zero delay); compare with the library after removing the
-    // library's residual +1/3-frame shift from the ideal reference.
+    // 107.5 dB: between the library's Fast (90.8) and Medium (116.7).
+    assert!(g1.abs() < 1e-3 && (rej + 107.5).abs() < 0.1);
+    // Both mine and the library are centred (zero delay), so they can be
+    // compared with the ideal sine and with each other directly.
     let lib = &measured[2].0;
-    let shifted = |n: usize| 0.5 * (2.0 * PI * 1_000.0 * (n as f64 + 1.0 / 3.0) / fs_out).sin();
+    let ideal = ideal_tone(1_000.0, fs_out);
     let lib_err = mid
         .clone()
-        .map(|n| (lib[n] - shifted(n)).abs())
+        .map(|n| (lib[n] - ideal[n]).abs())
         .fold(0.0, f64::max);
-    let ideal = ideal_tone(1_000.0, fs_out);
-    let my_err = mid.map(|n| (mine[n] - ideal[n]).abs()).fold(0.0, f64::max);
-    println!("     max |library High - 1 kHz sine shifted by 1/3 frame| = {lib_err:.1e}");
-    println!("     max |mine - 1 kHz sine|                             = {my_err:.1e}");
-    // Mine (f64, exact centring) is a clean sine to 1e-5. The library differs by
-    // 2.5e-4: its shift is 0.3346 rather than exactly 1/3 frame, and
-    // 0.5 * 2 pi (1/16) * 0.0013 = 2.5e-4, so 5e-4 bounds it.
-    assert!(lib_err < 5e-4 && my_err < 1e-5);
+    let my_err = mid
+        .clone()
+        .map(|n| (mine[n] - ideal[n]).abs())
+        .fold(0.0, f64::max);
+    let diff = mid.map(|n| (mine[n] - lib[n]).abs()).fold(0.0, f64::max);
+    println!("     max |library High - 1 kHz sine| = {lib_err:.1e}");
+    println!("     max |mine - 1 kHz sine|         = {my_err:.1e}");
+    println!("     max |mine - library High|       = {diff:.1e}");
+    // Library High: 3.6e-8 (pass-band ripple and the residual alias). Mine:
+    // 2.3e-6 (the Blackman window's pass-band ripple), which also bounds the
+    // difference between the two.
+    assert!(lib_err < 1e-7 && my_err < 3e-6 && diff < 3e-6);
     println!();
 
     // ---------------------------------------------------------------- 5
@@ -254,12 +263,16 @@ fn main() -> AudioSampleResult<()> {
         println!("     {q:>6}: 6 kHz gain {g6:+.2} dB, image at 10 kHz {g10:+.1} dB");
         match q {
             ResamplingQuality::Fast => {
-                // Theory: -3.77 dB droop and a -11.8 dB image; 0.01 dB covers f32.
-                assert!((g6 - db(tri(6_000.0).abs())).abs() < 0.01);
-                assert!((g10 - db(tri(10_000.0).abs())).abs() < 0.01);
+                // Theory: -3.77 dB droop and a -11.8 dB image, met to 1e-6 dB
+                // (the resampler computes in f64).
+                assert!((g6 - db(tri(6_000.0).abs())).abs() < 1e-6);
+                assert!((g10 - db(tri(10_000.0).abs())).abs() < 1e-6);
                 assert!((g6 + 3.77).abs() < 0.01 && (g10 + 11.8).abs() < 0.05);
             }
-            _ => assert!(g6.abs() < 0.01 && g10 < -95.0),
+            // The sinc tiers pass 6 kHz flat and push the image to -116.7 dB
+            // (Medium) and -145.5 dB (High).
+            ResamplingQuality::Medium => assert!(g6.abs() < 1e-4 && (g10 + 116.7).abs() < 0.1),
+            _ => assert!(g6.abs() < 1e-4 && (g10 + 145.5).abs() < 0.1),
         }
     }
     println!("\nAll checks passed.");

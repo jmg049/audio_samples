@@ -1164,7 +1164,7 @@ pub fn resampling(from_hz: f64, to_hz: f64) -> ExplainDoc {
         )
         .add_formula(
             r"y[m] = \sum_{n} x[n] \, h\left(\frac{m}{r} - n\right)",
-            "Band-limited interpolation with a windowed-sinc kernel h (Medium and High quality)",
+            "Band-limited interpolation with a windowed-sinc kernel h (every tier except Fast upsampling, which interpolates linearly)",
         );
     doc.add_see_also("Offline", "audio_samples::resample")
         .add_see_also("Offline (Python)", "audio_samples.AudioSamples.resample")

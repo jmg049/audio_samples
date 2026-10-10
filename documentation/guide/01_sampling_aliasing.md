@@ -63,9 +63,9 @@ Aliasing bites in three places:
 ## With the library
 
 Generate an 11 kHz tone at 48 kHz, then reduce it to 16 kHz (new Nyquist
-frequency 8 kHz) in two ways: naively, by keeping every third sample, and with
-the anti-aliased resampler. The folding formula predicts
-$|11000 - 1 \cdot 16000| = 5000$ Hz.
+frequency 8 kHz) in two ways: naively, by keeping every third sample (written
+by hand below), and with the library's resampler at each of its three quality
+tiers. The folding formula predicts $|11000 - 1 \cdot 16000| = 5000$ Hz.
 
 ```rust
 use audio_samples::educational::topics;
@@ -84,13 +84,6 @@ let hi = sine_wave::<f64>(11_000.0, Duration::from_millis(250), sample_rate!(480
 let naive: Vec<f64> = hi.as_slice().unwrap().iter().step_by(3).copied().collect();
 let naive = AudioSamples::new_mono(ndarray::Array1::from(naive), sample_rate!(16000)).unwrap();
 
-// The Fast tier has no anti-aliasing filter: for an integer ratio it keeps
-// every third sample too (it computes in f32, hence the 1e-6 tolerance).
-let fast = resample(&hi, sample_rate!(16000), ResamplingQuality::Fast).unwrap();
-let same = naive.as_slice().unwrap().iter().zip(fast.as_slice().unwrap())
-    .all(|(a, b)| (a - b).abs() < 1e-6);
-assert!(same);
-
 // A 4000-point DFT of 4000 samples at 16 kHz has 4 Hz bins.
 let spec = naive.rfft(nzu!(4000)).unwrap();
 let row = spec.row(0);
@@ -99,15 +92,12 @@ assert_eq!(peak as f64 * 4.0, 5_000.0); // the alias, exactly where predicted
 // A bin-centred sine of amplitude A gives |X| = A N / 2 = 1000: full strength.
 assert!((row[peak] - 1000.0).abs() < 1e-6);
 
-// The High tier low-pass filters below 8 kHz first, so the tone is removed.
-let high = resample(&hi, sample_rate!(16000), ResamplingQuality::High).unwrap();
-let hs = high.as_slice().unwrap();
+// Every resampler tier low-pass filters below 8 kHz before it decimates.
+// Measure what is left at 5 kHz in the steady state: the middle 100 ms of
+// the output (samples 1200..2800) holds exactly 500 periods of 5 kHz, so one
+// DFT bin gives its amplitude, compared with the 0.5 the naive decimator
+// delivers there.
 let db = |v: f64| 20.0 * v.log10();
-
-// Alias rejection, measured in the steady state: the middle 100 ms of the
-// output (samples 1200..2800) holds exactly 500 periods of 5 kHz, so one DFT
-// bin gives the amplitude of what is left at 5 kHz, compared with the 0.5 the
-// naive decimator delivers there.
 let amplitude = |x: &[f64], f: f64| {
     let (re, im) = x.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
         let ph = 2.0 * std::f64::consts::PI * f * n as f64 / 16_000.0;
@@ -115,34 +105,53 @@ let amplitude = |x: &[f64], f: f64| {
     });
     2.0 * (re * re + im * im).sqrt() / x.len() as f64
 };
-let steady_db = db(amplitude(&hs[1_200..2_800], 5_000.0) / 0.5);
-println!("steady-state alias: {steady_db:.1} dB");
-// About 142 dB down (close to the f32 floor of the resampler), as in chapter 07.
-// 1 dB tolerance: a level this low is set by f32 rounding.
-assert!((steady_db + 141.7).abs() < 1.0);
+let mut steady_db = Vec::new();
+for q in [ResamplingQuality::Fast, ResamplingQuality::Medium, ResamplingQuality::High] {
+    let y = resample(&hi, sample_rate!(16000), q).unwrap();
+    assert_eq!(y.samples_per_channel().get(), 4_000);
+    steady_db.push(db(amplitude(&y.as_slice().unwrap()[1_200..2_800], 5_000.0) / 0.5));
+}
+println!("steady-state alias, Fast/Medium/High: {steady_db:.1?} dB");
+// About 84, 130 and 145 dB down (the resampler computes in f64, so these are
+// set by the filters, not by rounding).
+assert!((steady_db[0] + 83.9).abs() < 0.1);
+assert!((steady_db[1] + 130.2).abs() < 0.1);
+assert!((steady_db[2] + 144.8).abs() < 0.1);
 
 // Over the whole 250 ms the picture is worse, and not because of aliasing:
 // the tone starts and stops abruptly, and those edges are broadband clicks
-// that the filter passes. The 5 kHz bin of the full output is 82 dB below the
-// naive alias, and the largest bin anywhere (at 8 kHz) only 70 dB below it.
+// that the filter passes below 8 kHz. For High, the 5 kHz bin of the full
+// output is 78.4 dB below the naive alias, and the largest bin anywhere
+// (7652 Hz, in the filter's transition band between 0.913 x 8 kHz = 7304 Hz
+// and 8 kHz) only 74.6 dB below it.
+let high = resample(&hi, sample_rate!(16000), ResamplingQuality::High).unwrap();
 let high_spec = high.rfft(nzu!(4000)).unwrap();
 let hrow = high_spec.row(0);
 let bin_5k_db = db(row[peak] / hrow[1250]);
 let top = (0..hrow.len()).max_by(|&a, &b| hrow[a].total_cmp(&hrow[b])).unwrap();
 let largest_db = db(row[peak] / hrow[top]);
 println!("5 kHz bin {bin_5k_db:.1} dB, largest bin {largest_db:.1} dB at {} Hz", top * 4);
-assert!((bin_5k_db - 82.4).abs() < 0.1);
-assert_eq!(top * 4, 8_000);
-assert!((largest_db - 70.3).abs() < 0.1);
+assert!((bin_5k_db - 78.4).abs() < 0.1);
+assert_eq!(top * 4, 7_652);
+assert!(top * 4 > 7_304 && top * 4 < 8_000);
+assert!((largest_db - 74.6).abs() < 0.1);
+// The click is visible directly: the first 50 output samples reach 0.12,
+// while the middle of the output is below 1e-7.
+let hs = high.as_slice().unwrap();
+let max_abs = |x: &[f64]| x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+assert!((max_abs(&hs[..50]) - 0.12).abs() < 0.005);
+assert!(max_abs(&hs[1_200..2_800]) < 1e-7);
 ```
 
 The naive version did not lose the tone; it *moved* it to 5 kHz at full
-strength, where it is indistinguishable from a genuine 5 kHz component. The
-proper resampler rejects the alias by about 142 dB in the steady state. Measure
-over the whole signal and the figure drops to 82 dB at 5 kHz (70 dB for the
-largest bin, at 8 kHz): the residue there is the broadband click of a tone
-switched on and off abruptly, not aliasing. Always measure rejection away from
-the ends of a test signal, as chapter 07 does.
+strength, where it is indistinguishable from a genuine 5 kHz component. Every
+tier of the resampler removes it instead: in the steady state the residue is
+84 dB down for `Fast` (a short filter designed for 70 dB of stop-band
+attenuation), 130 dB for `Medium` and 145 dB for `High`. Measure over the whole
+signal and `High`'s figure drops to 78.4 dB at 5 kHz (74.6 dB for the largest
+bin, at 7652 Hz): the residue there is the broadband click of a tone switched
+on and off abruptly, not aliasing. Always measure rejection away from the ends
+of a test signal, as chapter 07 does.
 
 The same happens when a waveform is synthesised. A naive square wave
 ([`square_wave`](crate::utils::generation::square_wave)) switches between
@@ -315,9 +324,11 @@ assert!(clean[1300] / clean[700] < 1e-9);  // absent
 
 ## Common pitfalls
 
-* [`ResamplingQuality::Fast`](crate::operations::types::ResamplingQuality::Fast)
-  is the *default* tier and has no anti-aliasing filter; use `Medium` or `High`
-  whenever you go down in rate.
+* Keeping every $M$-th sample is not resampling: it aliases. Every
+  [`ResamplingQuality`](crate::operations::types::ResamplingQuality) filters
+  first, but the default, `Fast`, uses a short filter whose pass band ends at
+  0.8 times the new Nyquist frequency; use `Medium` or `High` when the top of
+  the band matters (chapter 07).
 * [`square_wave`](crate::utils::generation::square_wave),
   [`sawtooth_wave`](crate::utils::generation::sawtooth_wave) and
   [`triangle_wave`](crate::utils::generation::triangle_wave) are naive and
@@ -326,8 +337,6 @@ assert!(clean[1300] / clean[700] < 1e-9);  // absent
   all zeros.
 * An alias may come back with inverted phase (the 11 kHz example above
   returns as $-\sin$ at 5 kHz).
-* The resampler computes in `f32` internally, so even an exact operation such
-  as integer decimation agrees with `f64` arithmetic only to about $10^{-7}$.
 * [`rfft`](crate::AudioTransforms::rfft) returns magnitudes and needs
   `n_fft` at least the signal length (chapter 03).
 

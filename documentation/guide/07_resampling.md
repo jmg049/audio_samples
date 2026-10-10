@@ -4,7 +4,8 @@ Speech models are trained at 16 kHz, CDs are 44.1 kHz, video is 48 kHz:
 almost every audio pipeline converts sample rates somewhere. Done carelessly,
 downsampling folds high frequencies back into the band as aliases and
 upsampling leaves spectral images. This chapter measures both effects on the
-library's three quality tiers and rebuilds a windowed-sinc decimator by hand.
+library's three quality tiers, compares them with naive decimation, and
+rebuilds a windowed-sinc decimator by hand.
 
 ## Concept
 
@@ -59,30 +60,38 @@ $$R = 20 \log_{10}(A_{alias} / A_{in}) \ \text{dB}$$
 
 where $A$ is a sinusoid's amplitude. 0 dB means no rejection at all.
 
-**The library's tiers** ([`ResamplingQuality`](crate::operations::types::ResamplingQuality)):
+**The library's tiers** ([`ResamplingQuality`](crate::operations::types::ResamplingQuality)).
+Every tier except `Fast` upsampling is a Kaiser-windowed sinc low-pass whose
+cut-off is set relative to the lower Nyquist frequency
+$f_N = \min(f_{in}, f_{out})/2$; the stop band starts at $f_N$:
 
-- `Fast`: **no anti-aliasing filter.** Integer down-ratios keep every $q$-th
-  sample; other ratios use linear interpolation.
-- `Medium`: windowed sinc (rubato), 128 taps, Hann² window, cutoff
-  $0.95 \times$ the lower Nyquist frequency.
-- `High`: windowed sinc, 256 taps, Blackman-Harris² window, cubic
-  interpolation of the kernel table, same cutoff.
+- `Fast` (the default): when downsampling, a short filter with its pass band
+  to $0.80 f_N$ and 70 dB of stop-band attenuation; when upsampling, linear
+  interpolation (no anti-imaging filter).
+- `Medium`: pass band to $0.90 f_N$, 100 dB.
+- `High`: pass band to $0.913 f_N$, 125 dB (close to librosa's default,
+  soxr's `soxr_hq`).
 
-**Time alignment.** A centred sinc filter delays the signal by half its
-length. The whole-buffer [`resample`](crate::resample) removes that delay in
-whole output frames, $\mathrm{round}(L_{sinc}\\, r / 2 - 1)$ where $L_{sinc}$ is
-the number of sinc taps, so input sample $n$ lands at output position $n r$ to
-within half an output frame. (The streaming
-[`StreamingResampler`](crate::StreamingResampler) cannot look ahead; it reports
-its delay with `output_delay`.)
+The filter is computed in `f64` whatever the sample type of the buffer.
+
+**Time alignment.** Output sample $m$ is the band-limited reconstruction of
+the input at the exact input position $m / r = m f_{in} / f_{out}$: the sinc
+is centred on that position, so the filter is symmetric (linear phase) and
+adds **no delay**. Input before the start and after the end counts as zeros,
+and the output has exactly $\lceil N r \rceil$ samples for $N$ input samples.
+The streaming [`StreamingResampler`](crate::StreamingResampler) holds back the
+filter's look-ahead and emits the same samples as the whole-buffer
+[`resample`](crate::resample), chunk by chunk.
 
 ## With the library
 
 Mix a 1 kHz tone (to keep) with a 10 kHz tone (to remove), both at amplitude
-0.5, and convert 48 kHz to 16 kHz with each tier. The 10 kHz tone should fold
-to $|10\\,000 - 16\\,000| = 6\\,000$ Hz. Measure each component with one DFT bin
+0.5, and convert 48 kHz to 16 kHz by naive decimation (keep every third
+sample, written by hand) and with each tier. The 10 kHz tone should fold to
+$|10\,000 - 16\,000| = 6\,000$ Hz. Measure each component with one DFT bin
 over 1600 output samples (whole periods of both 1 kHz and 6 kHz, so there is
-no leakage).
+no leakage), and measure the time shift of the output from the phase of the
+1 kHz tone.
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -91,95 +100,130 @@ use non_empty_slice::NonEmptyVec;
 use std::f64::consts::PI;
 use std::time::Duration;
 
-/// Amplitude of the component at f Hz (one DFT bin; exact for whole periods).
-fn amplitude(x: &[f64], f: f64, fs: f64) -> f64 {
-    let (re, im) = x.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
+/// DFT bin of the component at f Hz (one bin; exact for whole periods).
+fn bin(x: &[f64], f: f64, fs: f64) -> (f64, f64) {
+    x.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
         let ph = 2.0 * PI * f * n as f64 / fs;
         (re + v * ph.cos(), im - v * ph.sin())
-    });
+    })
+}
+fn amplitude(x: &[f64], f: f64, fs: f64) -> f64 {
+    let (re, im) = bin(x, f, fs);
     2.0 * (re * re + im * im).sqrt() / x.len() as f64
+}
+fn phase(x: &[f64], f: f64, fs: f64) -> f64 {
+    let (re, im) = bin(x, f, fs);
+    im.atan2(re)
 }
 
 let dur = Duration::from_millis(250);
 let a = sine_wave::<f64>(1_000.0, dur, sample_rate!(48000), 0.5);
 let b = sine_wave::<f64>(10_000.0, dur, sample_rate!(48000), 0.5);
 let x: Vec<f64> = a.as_slice().unwrap().iter().zip(b.as_slice().unwrap()).map(|(p, q)| p + q).collect();
-let input: AudioSamples<f64> = AudioSamples::from_mono_vec(NonEmptyVec::new(x).unwrap(), sample_rate!(48000));
+let input: AudioSamples<f64> = AudioSamples::from_mono_vec(NonEmptyVec::new(x.clone()).unwrap(), sample_rate!(48000));
 
 let mid = 1_200..2_800; // middle 100 ms of the 16 kHz output
+let db = |v: f64| 20.0 * v.log10();
+let ideal: Vec<f64> = (0..4_000).map(|n| 0.5 * (2.0 * PI * 1_000.0 * n as f64 / 16_000.0).sin()).collect();
+let ideal_phase = phase(&ideal[mid.clone()], 1_000.0, 16_000.0);
+
+// Naive decimation: the alias arrives at full level, 0 dB.
+let naive: Vec<f64> = x.iter().step_by(3).copied().collect();
+assert!(db(amplitude(&naive[mid.clone()], 6_000.0, 16_000.0) / 0.5).abs() < 1e-9);
+
 let mut results = Vec::new();
 for q in [ResamplingQuality::Fast, ResamplingQuality::Medium, ResamplingQuality::High] {
     let y = resample(&input, sample_rate!(16000), q).unwrap();
     assert_eq!(y.samples_per_channel().get(), 4_000); // ceil(12000 / 3)
     let y = y.as_slice().unwrap();
-    let pass_db = 20.0 * (amplitude(&y[mid.clone()], 1_000.0, 16_000.0) / 0.5).log10();
-    let alias_db = 20.0 * (amplitude(&y[mid.clone()], 6_000.0, 16_000.0) / 0.5).log10();
-    results.push((pass_db, alias_db));
+    let pass_db = db(amplitude(&y[mid.clone()], 1_000.0, 16_000.0) / 0.5);
+    let alias_db = db(amplitude(&y[mid.clone()], 6_000.0, 16_000.0) / 0.5);
+    // Shift in output frames: phase difference / (2 pi f / fs).
+    let shift = (phase(&y[mid.clone()], 1_000.0, 16_000.0) - ideal_phase) / (2.0 * PI / 16.0);
+    results.push((pass_db, alias_db, shift));
 }
-// Every tier passes 1 kHz unchanged (better than 0.001 dB).
-assert!(results.iter().all(|(p, _)| p.abs() < 1e-3));
-// Fast: the alias arrives at full level, 0 dB.
-assert!(results[0].1.abs() < 0.01);
-// Medium rejects it by about 102 dB, High by about 142 dB (close to the
-// f32 noise floor; the resampler computes in f32). 1 dB tolerances.
-assert!((results[1].1 + 101.8).abs() < 1.0);
-assert!((results[2].1 + 141.6).abs() < 1.0);
+// Every tier passes 1 kHz unchanged (better than 0.001 dB) ...
+assert!(results.iter().all(|(p, _, _)| p.abs() < 1e-3));
+// ... rejects the alias: Fast by about 90.8 dB, Medium 116.7 dB, High 145.5 dB ...
+assert!((results[0].1 + 90.8).abs() < 0.1);
+assert!((results[1].1 + 116.7).abs() < 0.1);
+assert!((results[2].1 + 145.5).abs() < 0.1);
+// ... and adds no delay: the shift is zero to rounding error.
+assert!(results.iter().all(|(_, _, s)| s.abs() < 1e-9));
 ```
 
-The sinc tiers are also time-aligned: an impulse at input sample 3000
-(48 kHz) peaks at output sample $3000/3 = 1000$ (16 kHz).
+The time alignment shows up on an impulse too: one at input sample 3000
+(48 kHz) peaks at output sample $3000/3 = 1000$ (16 kHz) for every tier, and
+the streaming resampler, fed in chunks, produces the same output.
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
-use audio_samples::{AudioSamples, resample, sample_rate};
+use audio_samples::{AudioSamples, StreamingResampler, channels, resample, sample_rate};
 use non_empty_slice::NonEmptyVec;
 
 let mut x = vec![0.0f64; 12_000];
 x[3_000] = 1.0;
-let input: AudioSamples<f64> = AudioSamples::from_mono_vec(NonEmptyVec::new(x).unwrap(), sample_rate!(48000));
-for q in [ResamplingQuality::Medium, ResamplingQuality::High] {
+let input: AudioSamples<f64> = AudioSamples::from_mono_vec(NonEmptyVec::new(x.clone()).unwrap(), sample_rate!(48000));
+for q in [ResamplingQuality::Fast, ResamplingQuality::Medium, ResamplingQuality::High] {
     let y = resample(&input, sample_rate!(16000), q).unwrap();
     let y = y.as_slice().unwrap();
     let peak = (0..y.len()).max_by(|&a, &b| y[a].abs().total_cmp(&y[b].abs())).unwrap();
     assert_eq!(peak, 1_000);
+    // Symmetric filter: the response is symmetric about the peak.
+    assert!((y[peak - 1] - y[peak + 1]).abs() < 1e-12);
+
+    let mut stream = StreamingResampler::<f64>::new(sample_rate!(48000), sample_rate!(16000), channels!(1), q).unwrap();
+    let mut streamed = Vec::new();
+    for chunk in x.chunks(1_000) {
+        let piece = AudioSamples::from_mono_vec(NonEmptyVec::new(chunk.to_vec()).unwrap(), sample_rate!(48000));
+        if let Some(out) = stream.process_chunk(&piece).unwrap() {
+            streamed.extend_from_slice(out.as_slice().unwrap());
+        }
+    }
+    if let Some(out) = stream.finish().unwrap() {
+        streamed.extend_from_slice(out.as_slice().unwrap());
+    }
+    assert_eq!(streamed.len(), y.len());
+    assert!(streamed.iter().zip(y).all(|(a, b)| (a - b).abs() < 1e-12));
 }
 ```
 
-The alignment is exact only to within half an output frame. For this
-conversion the removed delay is $\mathrm{round}(256/3/2 - 1) = 42$ frames
-against an exact $41.667$ for High, so the output *leads* by about one third of
-an output frame (one input sample); the lab measures $+0.335$ frames from the
-phase of the 1 kHz tone (and $-0.331$ for Medium, predicted $-1/3$).
-
 ## Under the hood
 
-**`Fast` is plain decimation.** With $r = 1/3$ it returns $x\[3m\]$, and
-$\sin(2\pi\\, 10\\,000\\, m / 16\\,000) = -\sin(2\pi\\, 6\\,000\\, m / 16\\,000)$ for
-every integer $m$: the 10 kHz tone *is* a 6 kHz tone on the new grid.
+**Naive decimation is plain sampling.** With $r = 1/3$, keeping every
+third sample returns $x\[3m\]$, and
+$\sin(2\pi\, 10\,000\, m / 16\,000) = -\sin(2\pi\, 6\,000\, m / 16\,000)$ for
+every integer $m$: the 10 kHz tone *is* a 6 kHz tone on the new grid. No
+filter afterwards can tell the two apart, which is why every tier filters
+first.
 
 ```rust
-use audio_samples::operations::types::ResamplingQuality;
-use audio_samples::{resample, sample_rate, sine_wave};
+use audio_samples::{sample_rate, sine_wave};
 use std::f64::consts::PI;
 use std::time::Duration;
 
 let x = sine_wave::<f64>(10_000.0, Duration::from_millis(100), sample_rate!(48000), 0.5);
-let y = resample(&x, sample_rate!(16000), ResamplingQuality::Fast).unwrap();
-let (x, y) = (x.as_slice().unwrap(), y.as_slice().unwrap());
-for m in 0..y.len() {
-    assert!((y[m] - x[3 * m]).abs() < 1e-6); // the resampler works in f32
+let x = x.as_slice().unwrap();
+let y: Vec<f64> = x.iter().step_by(3).copied().collect(); // 1600 samples at 16 kHz
+assert_eq!(y.len(), 1_600);
+for (m, &v) in y.iter().enumerate() {
     let six_khz = -0.5 * (2.0 * PI * 6_000.0 * m as f64 / 16_000.0).sin();
-    assert!((y[m] - six_khz).abs() < 1e-6);
+    // Tolerance: sin of arguments up to ~6e3 rad carries ~1e-12 of rounding.
+    assert!((v - six_khz).abs() < 1e-9);
 }
 ```
 
 **A windowed-sinc decimator, written out.** Low-pass with a 193-tap
 Blackman-windowed sinc whose cutoff is $0.95 \times 8$ kHz $= 7.6$ kHz, then
 keep every third sample. The filter is centred (no delay), so the 1 kHz output
-matches the ideal 16 kHz sine, and the 6 kHz alias is more than 100 dB down,
-in the same class as the library's `Medium` tier.
+matches the ideal 16 kHz sine, and the 6 kHz alias is 107.5 dB down, between
+the library's `Fast` (90.8 dB) and `Medium` (116.7 dB) tiers. Since the library
+adds no delay either, its `High` output and ours agree sample by sample.
 
 ```rust
+use audio_samples::operations::types::ResamplingQuality;
+use audio_samples::{AudioSamples, resample, sample_rate};
+use non_empty_slice::NonEmptyVec;
 use std::f64::consts::PI;
 
 let (fs_in, fs_out, half) = (48_000.0, 16_000.0, 96usize);
@@ -219,12 +263,17 @@ let amp = |f: f64| {
     2.0 * (re * re + im * im).sqrt() / 1_600.0
 };
 assert!((20.0 * (amp(1_000.0) / 0.5).log10()).abs() < 1e-3); // pass band intact
-assert!(20.0 * (amp(6_000.0) / 0.5).log10() < -100.0); // alias > 100 dB down
+assert!((20.0 * (amp(6_000.0) / 0.5).log10() + 107.5).abs() < 0.1); // alias 107.5 dB down
 // Matches the ideal 16 kHz sine to 1e-5 (window ripple in the pass band).
 for n in 1_200..2_800 {
     let ideal = 0.5 * (2.0 * PI * 1_000.0 * n as f64 / fs_out).sin();
     assert!((y[n] - ideal).abs() < 1e-5);
 }
+// And the library's High tier, also centred, gives the same samples to 1e-5.
+let input: AudioSamples<f64> = AudioSamples::from_mono_vec(NonEmptyVec::new(x).unwrap(), sample_rate!(48000));
+let lib = resample(&input, sample_rate!(16000), ResamplingQuality::High).unwrap();
+let lib = lib.as_slice().unwrap();
+assert!((1_200..2_800).all(|n| (lib[n] - y[n]).abs() < 1e-5));
 ```
 
 **Linear interpolation is a poor interpolation filter.** Upsampling a 6 kHz
@@ -253,20 +302,42 @@ let level = |f: f64| {
     });
     20.0 * (2.0 * (re * re + im * im).sqrt() / y.len() as f64 / 0.5).log10()
 };
-// Measured equals predicted to 0.01 dB (the resampler computes in f32).
-assert!((level(6_000.0) - g(6_000.0)).abs() < 0.01);
-assert!((level(10_000.0) - g(10_000.0)).abs() < 0.01);
+// Measured equals predicted to 1e-6 dB (the resampler computes in f64).
+assert!((level(6_000.0) - g(6_000.0)).abs() < 1e-6);
+assert!((level(10_000.0) - g(10_000.0)).abs() < 1e-6);
 assert!((g(6_000.0) + 3.77).abs() < 0.01 && (g(10_000.0) + 11.8).abs() < 0.05);
 ```
 
-The sinc tiers, in contrast, pass the 6 kHz tone flat and push the image below
-$-95$ dB (the lab prints $-98$ dB for Medium and $-145$ dB for High).
+The sinc tiers, in contrast, pass the 6 kHz tone flat (to 0.0001 dB) and push
+the image down to $-116.7$ dB for `Medium` and $-145.5$ dB for `High`:
+
+```rust
+use audio_samples::operations::types::ResamplingQuality;
+use audio_samples::{resample, sample_rate, sine_wave};
+use std::f64::consts::PI;
+use std::time::Duration;
+
+let x = sine_wave::<f64>(6_000.0, Duration::from_millis(250), sample_rate!(16000), 0.5);
+for (q, image_db) in [(ResamplingQuality::Medium, -116.7), (ResamplingQuality::High, -145.5)] {
+    let y = resample(&x, sample_rate!(48000), q).unwrap();
+    let y = &y.as_slice().unwrap()[3_600..8_400];
+    let level = |f: f64| {
+        let (re, im) = y.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
+            let ph = 2.0 * PI * f * n as f64 / 48_000.0;
+            (re + v * ph.cos(), im - v * ph.sin())
+        });
+        20.0 * (2.0 * (re * re + im * im).sqrt() / y.len() as f64 / 0.5).log10()
+    };
+    assert!(level(6_000.0).abs() < 1e-4);
+    assert!((level(10_000.0) - image_db).abs() < 0.1);
+}
+```
 
 ## Ask the library to explain
 
 [`topics::resampling`](crate::educational::topics::resampling) summarises a
 conversion: ratio, both Nyquist frequencies, the pass-band edge of the sinc
-tiers, and a warning when you downsample.
+tiers, a table of the three tiers, and a warning when you downsample.
 
 ```rust
 use audio_samples::educational::topics;
@@ -275,8 +346,8 @@ let doc = topics::resampling(48_000.0, 16_000.0);
 println!("{doc}");
 assert!((doc.quantity("Ratio").unwrap().value - 1.0 / 3.0).abs() < 1e-12);
 assert_eq!(doc.quantity("Output Nyquist").unwrap().value, 8_000.0);
-// 0.95 x 8 kHz; the 0.95 is stored as f32, hence the 1e-3 Hz tolerance.
-assert!((doc.quantity("Sinc pass-band edge").unwrap().value - 7_600.0).abs() < 1e-3);
+// Medium's pass band ends at 0.90 x 8 kHz.
+assert!((doc.quantity("Sinc pass-band edge").unwrap().value - 7_200.0).abs() < 1e-9);
 assert!(doc.has_warning_containing("Downsampling"));
 // Upsampling discards nothing, so there is no such warning.
 assert!(!topics::resampling(16_000.0, 48_000.0).has_warning_containing("Downsampling"));
@@ -285,18 +356,22 @@ assert!(!topics::resampling(16_000.0, 48_000.0).has_warning_containing("Downsamp
 ## Exercises
 
 1. **Where does 13 kHz go?** A 13 kHz tone is converted from 48 kHz to 16 kHz
-   with `Fast`. Predict the output frequency, then confirm with
-   [`topics::aliasing`](crate::educational::topics::aliasing) and by measuring.
+   by keeping every third sample. Predict the output frequency, then confirm
+   with [`topics::aliasing`](crate::educational::topics::aliasing) and by
+   measuring. How much of it does each tier of `resample` leave?
 2. **Droop at 2 kHz.** Predict the gain of `Fast` upsampling 16 kHz → 48 kHz
    at 2 kHz from $G(f)$, then measure it.
-3. **When is the alignment exact?** For 48 kHz → 24 kHz with `High`
-   ($L_{sinc} = 256$), compute $L_{sinc} r/2 - 1$. Is the removed delay exact?
-   Measure the residual shift of a 1 kHz tone.
+3. **Alignment at an awkward ratio.** Convert a 1 kHz tone from 44.1 kHz to
+   16 kHz ($r = 160/441$) with `High`. Is the output still time-aligned? Bound
+   the shift by comparing with the ideal 16 kHz sine.
 
 ## Answers
 
-1. $|13\\,000 - 16\\,000| = 3\\,000$ Hz, at full level because `Fast` has no
-   anti-aliasing filter.
+1. $|13\,000 - 16\,000| = 3\,000$ Hz, at full level after naive decimation.
+   Every tier removes it: measured over the middle 50 ms, `Fast` leaves
+   $-85.5$ dB, `Medium` $-122.8$ dB and `High` $-151.3$ dB. Over the whole
+   100 ms all three read about $-74$ dB, set by the clicks at the ends of the
+   tone (chapter 01).
 
 ```rust
 use audio_samples::educational::topics;
@@ -305,16 +380,30 @@ use audio_samples::{resample, sample_rate, sine_wave};
 use std::f64::consts::PI;
 use std::time::Duration;
 
+let amp = |y: &[f64]| {
+    let (re, im) = y.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
+        let ph = 2.0 * PI * 3_000.0 * n as f64 / 16_000.0;
+        (re + v * ph.cos(), im - v * ph.sin())
+    });
+    2.0 * (re * re + im * im).sqrt() / y.len() as f64
+};
 assert_eq!(topics::aliasing(13_000.0, 16_000.0).quantity("Alias frequency").unwrap().value, 3_000.0);
 let x = sine_wave::<f64>(13_000.0, Duration::from_millis(100), sample_rate!(48000), 0.5);
-let y = resample(&x, sample_rate!(16000), ResamplingQuality::Fast).unwrap();
-let y = y.as_slice().unwrap(); // 1600 samples = 300 whole periods of 3 kHz
-let (re, im) = y.iter().enumerate().fold((0.0, 0.0), |(re, im), (n, &v)| {
-    let ph = 2.0 * PI * 3_000.0 * n as f64 / 16_000.0;
-    (re + v * ph.cos(), im - v * ph.sin())
-});
-let amp = 2.0 * (re * re + im * im).sqrt() / y.len() as f64;
-assert!((amp - 0.5).abs() < 1e-6);
+let naive: Vec<f64> = x.as_slice().unwrap().iter().step_by(3).copied().collect();
+assert_eq!(naive.len(), 1_600); // 300 whole periods of 3 kHz
+assert!((amp(&naive) - 0.5).abs() < 1e-9);
+
+for (q, mid_db) in [
+    (ResamplingQuality::Fast, -85.5),
+    (ResamplingQuality::Medium, -122.8),
+    (ResamplingQuality::High, -151.3),
+] {
+    let y = resample(&x, sample_rate!(16000), q).unwrap();
+    let y = y.as_slice().unwrap();
+    let db = |a: f64| 20.0 * (a / 0.5).log10();
+    assert!((db(amp(&y[400..1_200])) - mid_db).abs() < 0.1); // middle 50 ms: 150 periods
+    assert!((db(amp(y)) + 74.0).abs() < 0.5); // whole signal: the edge clicks
+}
 ```
 
 2. $\omega = 2\pi \cdot 2000/48000 = \pi/12$, so
@@ -341,9 +430,12 @@ let measured = 20.0 * (2.0 * (re * re + im * im).sqrt() / y.len() as f64 / 0.5).
 assert!((measured - predicted).abs() < 0.01);
 ```
 
-3. $256 \cdot 0.5 / 2 - 1 = 63$ exactly, so rounding loses nothing and the
-   output is aligned to within the filter's tiny phase error (the measured
-   residual is below 0.01 output frames).
+3. Yes. Output sample $m$ is evaluated at the exact input position
+   $441 m / 160$, so there is no delay to remove and nothing is rounded to
+   whole frames. In the middle 100 ms the output differs from the ideal
+   16 kHz sine by less than $10^{-7}$; a shift of $\tau$ output frames would
+   cause an error of up to $0.5 \cdot (2\pi/16) \cdot \tau \approx 0.196\,\tau$, so
+   $|\tau| < 5.1 \times 10^{-7}$ frames.
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -351,28 +443,31 @@ use audio_samples::{resample, sample_rate, sine_wave};
 use std::f64::consts::PI;
 use std::time::Duration;
 
-let exact: f64 = 256.0 * 0.5 / 2.0 - 1.0;
-assert_eq!(exact.round() - exact, 0.0);
-
-let x = sine_wave::<f64>(1_000.0, Duration::from_millis(250), sample_rate!(48000), 0.5);
-let y = resample(&x, sample_rate!(24000), ResamplingQuality::High).unwrap();
+let x = sine_wave::<f64>(1_000.0, Duration::from_millis(250), sample_rate!(44100), 0.5);
+let y = resample(&x, sample_rate!(16000), ResamplingQuality::High).unwrap();
 let y = y.as_slice().unwrap();
-// Compare with the ideal 24 kHz sine in the middle 100 ms. A shift of tau
-// output frames would cause an error of up to 0.5 * (2 pi / 24) * tau, so an
-// error below 1e-3 means tau < 0.008 frames.
-let err = (1_200..3_600)
-    .map(|n| (y[n] - 0.5 * (2.0 * PI * 1_000.0 * n as f64 / 24_000.0).sin()).abs())
+assert_eq!(y.len(), 4_000); // ceil(11025 * 160 / 441)
+let err = (800..2_400)
+    .map(|n| (y[n] - 0.5 * (2.0 * PI * 1_000.0 * n as f64 / 16_000.0).sin()).abs())
     .fold(0.0, f64::max);
-assert!(err < 1e-3);
+assert!(err < 1e-7);
+let slope = 0.5 * 2.0 * PI / 16.0; // largest error per frame of shift
+assert!((slope - 0.196).abs() < 0.001);
+assert!(1e-7 / slope < 5.1e-7);
 ```
 
 ## Common pitfalls
 
-- **`Fast` is not "slightly worse"; it has no anti-aliasing at all** when
-  downsampling. Use `Medium` or `High` whenever the input may contain energy
-  above the new Nyquist frequency.
-- **Resampling is done in `f32`**, so rejection bottoms out around
-  $-140$ dB, whatever the sample type of your buffer.
+- **Naive decimation is not resampling.** Keeping every $q$-th sample folds
+  everything above the new Nyquist frequency back at full level; every
+  `ResamplingQuality` filters first.
+- **`Fast` trades bandwidth and rejection for speed.** Its downsampling
+  filter starts rolling off at $0.80 f_N$ and gives 70 dB by design; when
+  upsampling it is linear interpolation, which droops the pass band and leaves
+  images. Use `Medium` or `High` for analysis or listening.
+- **Measure rejection away from the ends.** The input is treated as zero
+  outside the buffer, so a signal that starts or stops abruptly produces
+  broadband clicks that no anti-aliasing filter removes.
 - **librosa / SciPy differ in defaults.** `librosa.resample` uses soxr by
   default and `scipy.signal.resample` uses the FFT (assuming a periodic
   signal); `resample_poly` uses a Kaiser-windowed FIR. Expect small differences
@@ -380,8 +475,9 @@ assert!(err < 1e-3);
 - **Output length** is $\lceil N r \rceil$ frames; durations that are not whole
   numbers of output samples round up.
 - **Streaming versus offline.** [`StreamingResampler`](crate::StreamingResampler)
-  output lags by `output_delay()` frames; the whole-buffer functions remove
-  the delay for you.
+  gives the same, time-aligned samples as [`resample`](crate::resample); it
+  holds back the filter's look-ahead until more input (or
+  [`finish`](crate::StreamingResampler::finish)) arrives.
 
 ## References
 

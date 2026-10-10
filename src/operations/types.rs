@@ -1118,8 +1118,9 @@ impl Default for VadConfig {
 /// anti-aliasing and flatter passband response. See the
 /// [`crate::resampling`] module docs for the algorithms.
 ///
-/// Note: the default is `Fast`, which has **no anti-aliasing filter**; choose
-/// `Medium` or `High` for analysis or listening.
+/// Note: the default is `Fast`, whose downsampling filter is short (pass band
+/// to 0.80 · Nyquist, 70 dB) and whose upsampling is linear interpolation;
+/// choose `Medium` or `High` for analysis or listening.
 #[cfg(feature = "resampling")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]

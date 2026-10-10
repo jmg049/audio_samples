@@ -857,15 +857,15 @@ pub(crate) fn explain_text_resample<T: StandardSample>(
          The new grid can only represent frequencies below its Nyquist frequency f_s,out/2. When \
          downsampling, input content between f_s,out/2 and f_s,in/2 must be removed first, or it \
          folds back (aliases) into the band as spurious tones that cannot be undone. The \
-         `ResamplingQuality` tier decides how this is done. `Fast` (the default) has no \
-         anti-aliasing filter: integer down-ratios keep every N-th sample and other ratios use \
-         linear interpolation, so content above the new Nyquist frequency aliases at full level and \
-         linear interpolation also dulls high frequencies. `Medium` and `High` use rubato's \
-         asynchronous windowed-sinc resampler with its cutoff at 0.95 of the lower Nyquist \
-         frequency, so they interpolate and anti-alias in one step (`Medium`: 128 taps, Hann\u{00b2} \
-         window; `High`: 256 taps, Blackman-Harris\u{00b2} window, steeper and slower). For these \
-         tiers the sinc filter's delay is removed and the input is zero-padded at the end, so the \
-         output is time-aligned with the input. Use `Medium` or `High` for analysis or listening.\n\
+         `ResamplingQuality` tier decides how this is done. Every tier except `Fast` upsampling \
+         evaluates a Kaiser-windowed sinc low-pass, centred on the exact input position of each \
+         output sample, so it interpolates and anti-aliases in one step: `Fast` (the default) \
+         uses a short filter with its pass band to 0.80 of the lower Nyquist frequency and 70 dB \
+         of stop-band attenuation, `Medium` 0.90 and 100 dB, `High` 0.913 and 125 dB (close to \
+         librosa's default, soxr_hq). `Fast` upsampling is linear interpolation, which dulls high \
+         frequencies and leaves spectral images. The filter is symmetric and centred, so the \
+         output is time-aligned with the input (no delay) and the tail is flushed; computation \
+         is in f64. Use `Medium` or `High` for analysis or listening.\n\
          \n\
          Sample rate:  {fs_in} Hz  \u{2192}  {fs_out} Hz     |     Length:  {before_len}  \u{2192}  \
          {after_len} samples",

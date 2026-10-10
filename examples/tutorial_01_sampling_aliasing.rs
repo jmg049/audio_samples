@@ -6,8 +6,8 @@
 //! What it teaches:
 //! 1. the folding formula `f_a = |f - k f_s|`, `k = round(f / f_s)`;
 //! 2. that an 11 kHz tone generated at 48 kHz and *naively* decimated to
-//!    16 kHz (keep every third sample) reappears at 5 kHz, while a proper
-//!    anti-aliased resampler removes it;
+//!    16 kHz (keep every third sample, written by hand) reappears at 5 kHz,
+//!    while every quality tier of the library's resampler removes it;
 //! 3. that a naive (hard-switched) square wave aliases and a band-limited one
 //!    does not, measured from the spectrum.
 //!
@@ -101,32 +101,13 @@ fn main() {
     // (a) Naive decimation in plain Rust: keep every third sample.
     let naive: Vec<f64> = hi_s.iter().step_by(3).copied().collect();
     assert_eq!(naive.len(), 4_000);
-    let naive_audio =
-        AudioSamples::new_mono(ndarray::Array1::from(naive.clone()), sample_rate!(16000))
-            .expect("non-empty");
-
-    // (b) The library's Fast tier: an integer down-ratio keeps every 3rd sample too.
-    let fast = resample(&hi, sample_rate!(16000), ResamplingQuality::Fast).expect("resample");
-    let fast_s = fast.as_slice().expect("contiguous");
-    // The resampler works in f32, so agreement is to f32 precision (~6e-8 relative).
-    let max_diff = naive
-        .iter()
-        .zip(fast_s)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0, f64::max);
-    println!("   Fast tier vs naive decimation: max |difference| = {max_diff:.2e}");
-    assert_eq!(fast_s.len(), naive.len());
-    assert!(max_diff < 1e-6);
-
-    // (c) The library's High tier: windowed-sinc with an anti-aliasing low-pass.
-    let high = resample(&hi, sample_rate!(16000), ResamplingQuality::High).expect("resample");
-    assert_eq!(high.samples_per_channel().get(), 4_000);
+    let naive_audio = AudioSamples::new_mono(ndarray::Array1::from(naive), sample_rate!(16000))
+        .expect("non-empty");
 
     // 4000 samples at 16 kHz: a 4000-point DFT has 4 Hz bins, so 5 kHz is bin 1250.
     let n_fft = 4_000;
     let bin_hz = fs_lo / n_fft as f64;
     let spec_naive = magnitude_spectrum(&naive_audio, n_fft);
-    let spec_high = magnitude_spectrum(&high, n_fft);
     let peak_bin = argmax(&spec_naive);
     let peak_hz = peak_bin as f64 * bin_hz;
     // A bin-centred sine of amplitude A gives |X| = A N / 2.
@@ -139,28 +120,58 @@ fn main() {
     assert_eq!(peak_hz, 5_000.0);
     assert!((spec_naive[peak_bin] - expected_mag).abs() < 1e-6 * expected_mag);
 
-    // Rejection by the proper resampler, measured in the steady state: the
-    // middle 100 ms (samples 1200..2800) holds exactly 500 periods of 5 kHz, so
-    // a single DFT bin gives the residual amplitude there.
-    let high_s = high.as_slice().expect("contiguous");
-    let steady_db = db(tone_amplitude(&high_s[1_200..2_800], 5_000.0, fs_lo) / 0.5);
-    println!("   High tier, steady state (middle 100 ms): 5 kHz residue at {steady_db:.1} dB");
-    // 1 dB tolerance: a level this low is set by the resampler's f32 rounding.
-    assert!((steady_db + 141.7).abs() < 1.0);
+    // (b) The library's resampler: every tier low-pass filters below the new
+    // Nyquist frequency before decimating. Rejection is measured in the
+    // steady state: the middle 100 ms (samples 1200..2800) holds exactly 500
+    // periods of 5 kHz, so a single DFT bin gives the residual amplitude there.
+    // Expected (dB re the 0.5 the naive decimator delivers): Fast -83.9,
+    // Medium -130.2, High -144.8. The resampler computes in f64, so these are
+    // set by the filters; 0.1 dB tolerance.
+    let expected_steady = [-83.9, -130.2, -144.8];
+    for (q, want) in [
+        ResamplingQuality::Fast,
+        ResamplingQuality::Medium,
+        ResamplingQuality::High,
+    ]
+    .into_iter()
+    .zip(expected_steady)
+    {
+        let y = resample(&hi, sample_rate!(16000), q).expect("resample");
+        assert_eq!(y.samples_per_channel().get(), 4_000);
+        let ys = y.as_slice().expect("contiguous");
+        let steady_db = db(tone_amplitude(&ys[1_200..2_800], 5_000.0, fs_lo) / 0.5);
+        println!(
+            "   {q:>6} tier, steady state (middle 100 ms): 5 kHz residue at {steady_db:.1} dB"
+        );
+        assert!((steady_db - want).abs() < 0.1, "{q}: {steady_db}");
+    }
 
     // Over the whole 250 ms, the abrupt start and end of the tone are broadband
     // clicks that the filter passes; they, not aliasing, dominate the spectrum.
+    let high = resample(&hi, sample_rate!(16000), ResamplingQuality::High).expect("resample");
+    let spec_high = magnitude_spectrum(&high, n_fft);
     let bin_5k_db = db(spec_naive[peak_bin] / spec_high[1_250]);
     let top_bin = argmax(&spec_high);
+    let top_hz = top_bin as f64 * bin_hz;
     let largest_db = db(spec_naive[peak_bin] / spec_high[top_bin]);
     println!(
         "   High tier, whole signal: 5 kHz bin {bin_5k_db:.1} dB below the naive alias; \
-         largest bin ({} Hz, edge transients) {largest_db:.1} dB below",
-        top_bin as f64 * bin_hz
+         largest bin ({top_hz} Hz, edge transients) {largest_db:.1} dB below"
     );
-    assert!((bin_5k_db - 82.4).abs() < 0.1);
-    assert_eq!(top_bin as f64 * bin_hz, 8_000.0);
-    assert!((largest_db - 70.3).abs() < 0.1);
+    assert!((bin_5k_db - 78.4).abs() < 0.1);
+    // 7652 Hz lies in High's transition band, between its pass-band edge
+    // (0.913 x 8 kHz = 7304 Hz) and the new Nyquist frequency.
+    assert_eq!(top_hz, 7_652.0);
+    assert!(top_hz > 0.913 * 8_000.0 && top_hz < 8_000.0);
+    assert!((largest_db - 74.6).abs() < 0.1);
+    let high_s = high.as_slice().expect("contiguous");
+    let max_abs = |x: &[f64]| x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let (edge, middle) = (max_abs(&high_s[..50]), max_abs(&high_s[1_200..2_800]));
+    println!(
+        "   High tier: max |y| over the first 50 samples {edge:.3}, over the middle {middle:.1e}"
+    );
+    assert!((edge - 0.12).abs() < 0.005);
+    assert!(middle < 1e-7);
     println!("   (an 11 kHz tone cannot exist in a 16 kHz signal: it should vanish, not move)");
 
     // ------------------------------------------------------------------

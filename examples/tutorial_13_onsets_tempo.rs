@@ -6,17 +6,19 @@
 //! What it does:
 //!
 //! 1. Builds a click track (decaying noise bursts every 0.5 s) and runs
-//!    `detect_onsets` with the default configuration (no onsets) and with the
-//!    configuration from the onset module documentation (all eight).
-//! 2. Switches the four peak-picking settings one at a time to show which
-//!    default is responsible for which loss.
+//!    `detect_onsets` with the default configuration (five of the eight
+//!    bursts: the 0.1 threshold floor drops the three weakest) and with the
+//!    floor lowered to 0.01 (all eight).
+//! 2. Switches peak-picking lengths sized as if they counted audio samples
+//!    (as in earlier releases) on one at a time, to show which setting loses
+//!    which onsets.
 //! 3. Re-derives the onset detection function from the CQT magnitude and the
 //!    peak picking from its definition, and converts frames to seconds.
 //! 4. Estimates tempo for click tracks at several tempi, re-derives
 //!    `estimate_tempo` (autocorrelation of the onset envelope with a
 //!    log-normal prior) and shows the metrical-level errors at 80 BPM
 //!    (half the tempo, an octave) and 174 BPM (a third of the tempo).
-//! 5. Prints the explanation of the tuned `OnsetDetectionConfig`.
+//! 5. Prints the explanation of the default `OnsetDetectionConfig`.
 //!
 //! Run with:
 //!
@@ -56,30 +58,50 @@ fn click_track(times: &[f64], seconds: f64) -> AudioSamples<'static, f64> {
     AudioSamples::new_mono(Array1::from(x), sample_rate!(44100)).expect("non-empty")
 }
 
-/// The configuration of the onset module example: no median, no
-/// pre-emphasis, an 11-frame threshold window and a 5-frame separation.
-fn tuned() -> OnsetDetectionConfig {
+/// The default configuration with the threshold floor lowered from 0.1 to
+/// 0.01, so that weak clicks are kept.
+fn sensitive() -> OnsetDetectionConfig {
     let mut c = OnsetDetectionConfig::default();
-    c.peak_picking.median_filter = false;
-    c.peak_picking.pre_emphasis = false;
-    c.peak_picking.adaptive_threshold.window_size = 11;
-    c.peak_picking.min_peak_separation = NonZeroUsize::new(5).expect("nz");
+    c.peak_picking.adaptive_threshold.min_threshold = 0.01;
     c
 }
 
-/// Peak picking as implemented, for a config without pre-emphasis and median:
-/// peak-normalise, threshold = clamp(local max over +-w/2 - delta, min, max),
-/// strict local maxima above it, then strongest-first minimum separation.
-fn my_pick_peaks(odf: &[f64], window: usize, delta: f64, sep: usize) -> Vec<usize> {
-    let max = odf.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    let o: Vec<f64> = odf.iter().map(|v| v / max).collect();
+/// Pre-emphasis y[i] = x[i] - c x[i-1] (first value unchanged), then
+/// normalisation by the maximum absolute value: the ODF the threshold sees.
+fn pre_emphasised(odf: &[f64], c: f64) -> Vec<f64> {
+    let y: Vec<f64> = (0..odf.len())
+        .map(|i| {
+            if i == 0 {
+                odf[0]
+            } else {
+                c.mul_add(-odf[i - 1], odf[i])
+            }
+        })
+        .collect();
+    let max = y.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    y.iter().map(|v| v / max).collect()
+}
+
+/// Peak picking as implemented, for a config with pre-emphasis and no median:
+/// pre-emphasise and peak-normalise, threshold = clamp(local max over +-w/2 -
+/// delta, floor, 1), strict local maxima above it, then strongest-first
+/// minimum separation.
+fn my_pick_peaks(
+    odf: &[f64],
+    pre_coeff: f64,
+    window: usize,
+    delta: f64,
+    floor: f64,
+    sep: usize,
+) -> Vec<usize> {
+    let o = pre_emphasised(odf, pre_coeff);
     let half = window.min(o.len()).max(3) / 2;
     let mut cand: Vec<(usize, f64)> = (1..o.len() - 1)
         .filter(|&i| {
             let lo = i.saturating_sub(half);
             let hi = (i + half + 1).min(o.len());
             let local_max = o[lo..hi].iter().fold(f64::NEG_INFINITY, |m, v| m.max(*v));
-            let thr = (local_max - delta).clamp(0.01, 1.0);
+            let thr = (local_max - delta).clamp(floor, 1.0);
             o[i] > o[i - 1] && o[i] > o[i + 1] && o[i] > thr
         })
         .map(|i| (i, o[i]))
@@ -132,9 +154,14 @@ fn main() {
         .detect_onsets(&OnsetDetectionConfig::default())
         .expect("detect");
     println!("   default configuration: {} onsets", default_onsets.len());
-    assert!(default_onsets.is_empty());
-    let onsets = audio.detect_onsets(&tuned()).expect("detect");
-    println!("   tuned configuration:   {} onsets", onsets.len());
+    // The three weakest bursts (the first three) fall below the 0.1 floor;
+    // bursts 4 to 8 are found, each 29-35 ms early (see below).
+    assert_eq!(default_onsets.len(), 5);
+    for (t, want) in default_onsets.iter().zip(&truth[3..]) {
+        assert!((t - want) < 0.0 && (t - want) > -0.035);
+    }
+    let onsets = audio.detect_onsets(&sensitive()).expect("detect");
+    println!("   threshold floor 0.01:  {} onsets", onsets.len());
     assert_eq!(onsets.len(), 8);
     for (t, want) in onsets.iter().zip(&truth) {
         println!(
@@ -150,43 +177,65 @@ fn main() {
     assert!((43.0 * HOP / SR - 0.4992).abs() < 5e-5);
     let lead = 1000.0 * (onsets[0] - truth[0]);
     assert!((lead + 29.4).abs() < 0.05);
+    // What the threshold sees: the pre-emphasised, normalised ODF at each burst.
+    let (_, odf_default) = audio
+        .onset_detection_function(&OnsetDetectionConfig::default())
+        .expect("odf");
+    let seen = pre_emphasised(&odf_default, 0.97);
+    let burst_peaks: Vec<f64> = truth
+        .iter()
+        .map(|t| {
+            let f = (t * SR / HOP).round() as usize;
+            (f - 6..=f).map(|i| seen[i]).fold(f64::MIN, f64::max)
+        })
+        .collect();
+    let rounded: Vec<f64> = burst_peaks
+        .iter()
+        .map(|h| (h * 1000.0).round() / 1000.0)
+        .collect();
+    println!("   normalised peaks per burst (the floor is 0.1): {rounded:?}");
+    assert_eq!(
+        rounded,
+        vec![0.030, 0.025, 0.087, 0.172, 0.288, 0.315, 1.0, 0.904]
+    );
+    assert_eq!(burst_peaks.iter().filter(|&&h| h < 0.1).count(), 3);
 
     // ------------------------------------------------------------ 2. Settings
-    println!("\n2. Which default setting loses the onsets? (one change at a time)");
+    println!("\n2. Peak-picking lengths sized in samples instead of frames (one change at a time)");
     type Change = fn(&mut OnsetDetectionConfig);
     let cases: [(&str, Change, usize); 4] = [
         (
-            "tuned + median_filter (length 3)",
+            "floor 0.01 + median_filter (length 3)",
             |c| c.peak_picking.median_filter = true,
             0,
         ),
         (
-            "tuned + threshold window 1024 frames",
+            "floor 0.01 + threshold window 1024 frames",
             |c| c.peak_picking.adaptive_threshold.window_size = 1024,
             1,
         ),
         (
-            "tuned + min separation 512 frames",
+            "floor 0.01 + min separation 512 frames",
             |c| c.peak_picking.min_peak_separation = NonZeroUsize::new(512).expect("nz"),
             3,
         ),
         (
-            "tuned + pre-emphasis 0.97",
-            |c| c.peak_picking.pre_emphasis = true,
+            "floor 0.01 without pre-emphasis",
+            |c| c.peak_picking.pre_emphasis = false,
             8,
         ),
     ];
     for (name, change, expected) in cases {
-        let mut c = tuned();
+        let mut c = sensitive();
         change(&mut c);
         let n = audio.detect_onsets(&c).expect("detect").len();
-        println!("   {name:40} -> {n} onsets");
+        println!("   {name:42} -> {n} onsets");
         assert_eq!(n, expected, "{name}");
     }
 
     // ------------------------------------------------------------ 3. Under the hood
     println!("\n3. The onset detection function and peak picking, re-derived");
-    let mut raw_cfg = tuned();
+    let mut raw_cfg = OnsetDetectionConfig::default();
     raw_cfg.adaptive_threshold = false;
     let (_, odf_raw) = audio.onset_detection_function(&raw_cfg).expect("odf");
     let win = raw_cfg.effective_window_size(SR);
@@ -246,11 +295,13 @@ fn main() {
     assert_eq!(reduced, 91);
     assert!((reduced as f64 * HOP / SR - 1.06).abs() < 0.005);
 
-    let (_, odf) = audio.onset_detection_function(&tuned()).expect("odf");
-    let frames = my_pick_peaks(&odf, 11, 0.05, 5);
-    let seconds: Vec<f64> = frames.iter().map(|&i| i as f64 * HOP / SR).collect();
-    println!("   our peak picking: frames {frames:?}");
-    assert_eq!(seconds, onsets);
+    // Same ODF for both configurations (they differ only in the floor).
+    for (floor, expected) in [(0.1, &default_onsets), (0.01, &onsets)] {
+        let frames = my_pick_peaks(&odf_default, 0.97, 9, 0.07, floor, 3);
+        let seconds: Vec<f64> = frames.iter().map(|&i| i as f64 * HOP / SR).collect();
+        println!("   our peak picking, floor {floor}: frames {frames:?}");
+        assert_eq!(&seconds, expected);
+    }
     println!("   t = i H / f_s reproduces detect_onsets exactly");
 
     // ------------------------------------------------------------ 4. Tempo
@@ -327,12 +378,13 @@ fn main() {
     );
 
     // ------------------------------------------------------------ 5. Explain
-    let doc = tuned().explain_with(&ExplainContext::new().with_sample_rate(SR));
+    let doc =
+        OnsetDetectionConfig::default().explain_with(&ExplainContext::new().with_sample_rate(SR));
     let w = doc.quantity("Window size").expect("q").value;
     let res = doc.quantity("Time resolution").expect("q").value;
     let sep = doc.quantity("Minimum peak separation").expect("q").value;
     assert_eq!(w, 3207.0);
     assert!((res - 11.61).abs() < 0.005);
-    assert!((sep - 58.05).abs() < 0.005);
-    println!("\n5. The tuned configuration explained:\n\n{doc}");
+    assert!((sep - 34.83).abs() < 0.005); // 3 frames
+    println!("\n5. The default configuration explained:\n\n{doc}");
 }

@@ -1263,11 +1263,13 @@ mod tests {
     fn resample_and_clip_texts_match_implementation() {
         let a = sample();
         let rs = explain_text_for_op("Resample", &a, &a).unwrap();
+        assert!(rs.contains("70 dB"), "{rs}");
+        assert!(rs.contains("no delay"), "{rs}");
+        assert!(rs.contains("time-aligned"), "{rs}");
         assert!(
-            rs.contains("no \nanti-aliasing") || rs.contains("no anti-aliasing"),
+            !rs.contains("rubato") && !rs.contains("no anti-aliasing"),
             "{rs}"
         );
-        assert!(rs.contains("time-aligned"), "{rs}");
         assert!(!rs.contains("linear interpolation) is fast but rolls off"));
         let b = a.clip(-0.5, 0.5).unwrap();
         let clip = Edu::explain_text_clip(&a, &b);

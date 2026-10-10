@@ -55,15 +55,13 @@ only biases the choice.
 
 ## With the library
 
-A click track: eight decaying noise bursts, one every 0.5 s (120 BPM). We use
-the configuration from the [onset module example](crate::operations::onset):
-the default configuration finds nothing here (see below).
+A click track: four decaying noise bursts, one every 0.5 s (120 BPM). The
+default configuration finds all four.
 
 ```rust
 use audio_samples::operations::onset::OnsetDetectionConfig;
 use audio_samples::{AudioOnsetDetection, AudioSamples, sample_rate};
 use ndarray::Array1;
-use std::num::NonZeroUsize;
 
 // Bursts at 0.25, 0.75, 1.25 and 1.75 s; 2 s at 44.1 kHz.
 let sr = 44_100usize;
@@ -81,13 +79,16 @@ for k in 0..4 {
 }
 let audio = AudioSamples::new_mono(Array1::from(x), sample_rate!(44100)).unwrap();
 
-assert!(audio.detect_onsets(&OnsetDetectionConfig::default()).unwrap().is_empty());
+let config = OnsetDetectionConfig::default();
+// Peak-picking lengths count frames: a 9-frame threshold window (104.5 ms at
+// hop 512 and 44.1 kHz) and a 3-frame minimum separation (34.8 ms).
+let pp = &config.peak_picking;
+assert_eq!((pp.adaptive_threshold.window_size, pp.min_peak_separation.get()), (9, 3));
+assert!((1000.0f64 * 9.0 * 512.0 / 44_100.0 - 104.5).abs() < 0.05);
+assert!((1000.0f64 * 3.0 * 512.0 / 44_100.0 - 34.8).abs() < 0.05);
+assert_eq!((pp.adaptive_threshold.delta, pp.adaptive_threshold.min_threshold), (0.07, 0.1));
+assert!(pp.pre_emphasis && pp.pre_emphasis_coeff == 0.97 && !pp.median_filter);
 
-let mut config = OnsetDetectionConfig::default();
-config.peak_picking.median_filter = false; // keep one-frame peaks
-config.peak_picking.pre_emphasis = false;
-config.peak_picking.adaptive_threshold.window_size = 11; // frames, about 0.13 s
-config.peak_picking.min_peak_separation = NonZeroUsize::new(5).unwrap(); // frames, about 58 ms
 let onsets = audio.detect_onsets(&config).unwrap();
 println!("{onsets:.4?}");
 assert_eq!(onsets.len(), 4);
@@ -105,16 +106,29 @@ for (k, t) in onsets.iter().enumerate() {
 The lead grows by 0.77 ms per burst because onset times are quantised to
 whole frames: 0.5 s is 43.07 frames, and the detector can only report 43.
 
-**Why the defaults fail.** The default [`PeakPickingConfig`](crate::operations::types::PeakPickingConfig)
-sizes (threshold window 1024, separation 512, median length 3) were chosen as
-if they counted audio samples, but they count ODF frames. Switching them on one
-at a time from the working configuration (the lab, on 8 bursts) gives: the
-length-3 median deletes every one-frame peak (0 onsets); a 1024-frame
-threshold window, clipped to the signal length, makes the threshold the global
-maximum minus 0.05 (1 onset); a 512-frame separation, reduced to a quarter of
-the signal (91 frames, 1.06 s), keeps only 3; pre-emphasis changes nothing on
-this signal (8). Note also that `threshold`, `min_onset_interval_secs` and
-`pre_emphasis` on [`OnsetDetectionConfig`](crate::operations::onset::OnsetDetectionConfig)
+**The defaults, in frames.** The default
+[`PeakPickingConfig`](crate::operations::types::PeakPickingConfig) pre-emphasises
+the ODF ($o\[i\] - 0.97\, o\[i-1\]$), applies no median filter, normalises by the
+maximum, and thresholds with a 9-frame window (104.5 ms), $\delta = 0.07$ and a
+floor $\theta_{lo} = 0.1$; peaks closer than 3 frames (34.8 ms) are merged.
+
+The floor has a cost. After normalisation it means that no peak weaker than
+a tenth of the strongest one in the clip is reported. On the lab's
+eight-burst track the defaults find only 5 onsets: the first three bursts
+peak at 0.030, 0.025 and 0.087 of the strongest (the CQT response varies from
+click to click; see below). Lowering `adaptive_threshold.min_threshold` to
+0.01 finds all 8.
+
+Earlier releases sized these lengths as if they counted audio samples
+(threshold window 1024, separation 512, median length 3). Switching such
+values on one at a time from the configuration with the 0.01 floor (the lab,
+on 8 bursts) shows why that fails: the length-3 median deletes every one-frame
+peak (0 onsets); a 1024-frame threshold window, clipped to the signal length,
+makes the threshold the global maximum minus $\delta$ (1 onset); a 512-frame
+separation, reduced to a quarter of the signal (91 frames, 1.06 s), keeps only
+3. Switching pre-emphasis off changes nothing on this signal (8). Note also
+that `threshold`, `min_onset_interval_secs` and `pre_emphasis` on
+[`OnsetDetectionConfig`](crate::operations::onset::OnsetDetectionConfig)
 itself are not read by `detect_onsets` (the explanation below says so).
 
 ## Under the hood
@@ -123,15 +137,14 @@ itself are not read by `detect_onsets` (the explanation below says so).
 rectified frame-to-frame increases; with the median-based zeroing switched off,
 the result must equal
 [`onset_detection_function`](crate::AudioOnsetDetection::onset_detection_function).
-Then re-implement peak picking for this configuration and convert frames to
-seconds.
+Then re-implement peak picking for the default configuration and convert
+frames to seconds.
 
 ```rust
 use audio_samples::operations::onset::OnsetDetectionConfig;
 use audio_samples::{AudioOnsetDetection, AudioSamples, AudioTransforms, sample_rate};
 use ndarray::Array1;
 use spectrograms::{SpectrogramParams, StftParams};
-use std::num::NonZeroUsize;
 
 # let sr = 44_100usize;
 # let mut x = vec![0.0f64; 2 * sr];
@@ -146,11 +159,7 @@ use std::num::NonZeroUsize;
 # }
 # let audio = AudioSamples::new_mono(Array1::from(x), sample_rate!(44100)).unwrap();
 let fs = 44_100.0;
-let mut config = OnsetDetectionConfig::default();
-config.peak_picking.median_filter = false;
-config.peak_picking.pre_emphasis = false;
-config.peak_picking.adaptive_threshold.window_size = 11;
-config.peak_picking.min_peak_separation = NonZeroUsize::new(5).unwrap();
+let config = OnsetDetectionConfig::default();
 
 // 1. Spectral flux on the CQT magnitude.
 let mut raw = config.clone();
@@ -175,17 +184,21 @@ for t in 1..m.ncols() {
     assert_eq!(flux, odf_lib[t]);
 }
 
-// 2. Peak picking with the configured threshold (on the ODF detect_onsets uses).
+// 2. Peak picking with the default settings (on the ODF detect_onsets uses):
+//    pre-emphasis, peak normalisation, threshold, local maxima, separation.
 let (_, odf) = audio.onset_detection_function(&config).unwrap();
-let max = odf.iter().fold(0.0f64, |a, v| a.max(v.abs()));
-let o: Vec<f64> = odf.iter().map(|v| v / max).collect();
-let (half, delta, sep) = (11 / 2, 0.05, 5);
+let pre: Vec<f64> = (0..odf.len().get())
+    .map(|i| if i == 0 { odf[0] } else { 0.97f64.mul_add(-odf[i - 1], odf[i]) })
+    .collect();
+let max = pre.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+let o: Vec<f64> = pre.iter().map(|v| v / max).collect();
+let (half, delta, floor, sep) = (9 / 2, 0.07, 0.1, 3);
 let mut candidates: Vec<(usize, f64)> = (1..o.len() - 1)
     .filter(|&i| {
         let local_max = o[i.saturating_sub(half)..(i + half + 1).min(o.len())]
             .iter()
             .fold(f64::NEG_INFINITY, |a, v| a.max(*v));
-        o[i] > o[i - 1] && o[i] > o[i + 1] && o[i] > (local_max - delta).clamp(0.01, 1.0)
+        o[i] > o[i - 1] && o[i] > o[i + 1] && o[i] > (local_max - delta).clamp(floor, 1.0)
     })
     .map(|i| (i, o[i]))
     .collect();
@@ -288,20 +301,14 @@ almost exactly $3 \times 29.7$). The estimate is right at 60, 100, 120 and
 ```rust
 use audio_samples::educational::{Explain, ExplainContext};
 use audio_samples::operations::onset::OnsetDetectionConfig;
-use std::num::NonZeroUsize;
 
-let mut config = OnsetDetectionConfig::default();
-config.peak_picking.median_filter = false;
-config.peak_picking.pre_emphasis = false;
-config.peak_picking.adaptive_threshold.window_size = 11;
-config.peak_picking.min_peak_separation = NonZeroUsize::new(5).unwrap();
-
+let config = OnsetDetectionConfig::default();
 let doc = config.explain_with(&ExplainContext::new().with_sample_rate(44_100.0));
 println!("{doc}");
 assert_eq!(doc.quantity("Window size").unwrap().value, 3207.0);
 assert!((doc.quantity("Window duration").unwrap().value - 72.72).abs() < 0.005);
 assert!((doc.quantity("Time resolution").unwrap().value - 11.61).abs() < 0.005);
-assert!((doc.quantity("Minimum peak separation").unwrap().value - 58.05).abs() < 0.005);
+assert!((doc.quantity("Minimum peak separation").unwrap().value - 34.83).abs() < 0.005);
 assert_eq!(doc.quantity("CQT bins").unwrap().value, 144.0);
 assert!(doc.has_warning_containing("counts onset-function frames"));
 assert!(doc.has_warning_containing("not read by detect_onsets"));
@@ -371,10 +378,11 @@ assert!((fine - 1.38).abs() < 0.005);
 
 - **Frames, not samples.** Every peak-picking length counts ODF frames
   ($H$ samples each). Convert with frames = seconds $\times f_s / H$.
-- **The default `OnsetDetectionConfig` finds no onsets on a clean click
-  track** (length-3 median, 1024-frame threshold window, 512-frame separation).
-  Start from the configuration in this chapter and check it with
-  `explain_with`.
+- **The default floor hides weak onsets.** The ODF is normalised by its
+  maximum and the default threshold never drops below 0.1, so an onset whose
+  (pre-emphasised) peak is under a tenth of the clip's strongest is not
+  reported. Lower `adaptive_threshold.min_threshold` for material with a wide
+  dynamic range, and check the result with `explain_with`.
 - **Reported times are frame centres** and lead the true onset by up to half
   the CQT window (about 30 ms at the default 55 Hz lower edge), and are
   quantised to $H/f_s$.

@@ -124,13 +124,13 @@ liquid-dsp golden fixtures (`tests/filter_reference.rs`, generator in
 | STFT padding | `centre = true` pads ⌊N/2⌋ zeros at each end | librosa ≥ 0.10: `pad_mode="constant"` (zeros); librosa < 0.10 and `torch.stft`: reflection | same for librosa ≥ 0.10; the remaining difference is the window (row above) |
 | `rfft` | magnitudes \|X\[k\]\| | numpy: complex spectrum | `np.abs(np.fft.rfft(x))` |
 | Mel spectrogram | Slaney mel scale, no filter normalisation, applied to power | librosa: `htk=False`, `norm="slaney"` | `librosa.filters.mel(..., norm=None)` |
-| Mel helpers in `utils::audio_math` | HTK formula | librosa default: Slaney | `librosa.hz_to_mel(f, htk=True)` |
+| Mel helpers in `utils::audio_math` | `hz_to_mel` etc.: HTK formula; `hz_to_mel_with_scale` etc. take a `MelScale` | librosa default: Slaney | `librosa.hz_to_mel(f, htk=True)`, or `MelScale::Slaney` |
 | dB | 10·log10(max(P, floor)) re 1: an absolute floor | librosa `power_to_db`: `top_db=80` relative to the maximum | `top_db=None` and the same `amin` |
 | MFCC | unnormalised DCT-II, lifter 22 | librosa: DCT-II `norm="ortho"`, lifter 0 | rescale by the DCT normalisation factors; set the lifter |
 | Zero-crossing rate | crossings per second over the whole signal | librosa: fraction of samples per frame | divide by the sample rate; frame the signal |
 | Welch PSD | SciPy `welch(scaling="density")` scaling, symmetric Hann, no detrending | SciPy: periodic Hann, constant detrend | `window=hann(N, sym=True)`, `detrend=False` |
 | Integer to float | asymmetric: −1.0 ↔ −32768, +1.0 ↔ 32767 | soundfile: divide by 32768 | differs by at most one least significant bit |
-| YIN | de Cheveigné and Kawahara steps 1–4, then parabolic interpolation of the normalised difference d′ (as librosa; the paper's step 5 interpolates the raw difference d, and its step 6 is omitted); a frame with no dip below the threshold is unvoiced; `detect_pitch_yin` is clip-wide | `librosa.yin`: framewise, interpolates d′, falls back to the global minimum | compare with `track_pitch`, framewise, on clearly voiced frames |
+| YIN | de Cheveigné and Kawahara steps 1–4, then parabolic interpolation of the normalised difference d′ (as librosa; the paper's step 5 interpolates the raw difference d, and its step 6 is omitted), with d summed over all N − τ overlapping pairs; a frame with no dip below the threshold is unvoiced; `detect_pitch_yin` is clip-wide | `librosa.yin`: framewise, sums d over a fixed window, interpolates d′, falls back to the global minimum | compare with `track_pitch`, framewise, on clearly voiced frames |
 
 Known limitations worth telling students about are documented in each module
 and listed under "Known issues" in the crate's `CHANGELOG.md`. For example, in
