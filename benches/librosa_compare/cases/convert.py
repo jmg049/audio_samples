@@ -3,12 +3,10 @@
 Array conversions run on ``vec_f64`` (VEC_N values; the audio_samples
 conversions are float64 for every input). Frequency tables run on ``const``.
 
-Scalar-only bindings are called in a Python loop over the inputs while librosa
-gets the whole array in one call, so those cases compare per-call overhead (see
-each case's ``note``): ``samples_to_time`` (VEC_N values) and the note-name
-functions ``hz_to_note``, ``midi_to_note``, ``note_to_hz``, ``note_to_midi``
-(N_STR inputs). ``key_to_notes`` and ``key_to_degrees`` take one key in both
-libraries and are looped in both.
+``samples_to_time`` (VEC_N values) and the note-name functions ``hz_to_note``,
+``midi_to_note``, ``note_to_hz``, ``note_to_midi`` (N_STR inputs) take the whole
+array in one call in both libraries. ``key_to_notes`` and ``key_to_degrees``
+take one key in both libraries and are looped in both.
 
 Note names: audio_samples spells sharps in ASCII (``#``), so librosa is called
 with ``unicode=False`` where it has the option.
@@ -94,9 +92,8 @@ register(
     Case(
         "samples_to_time", G, "vec_f64",
         librosa=lambda c: partial(librosa.samples_to_time, _samples(c), sr=SR),
-        ours=lambda c: _loop(lambda s: U.samples_to_time(s, SR), _samples(c).tolist()),
+        ours=lambda c: partial(U.samples_to_time, _samples(c), SR),
         func="samples_to_time",
-        note="binding is scalar-only: a Python loop of VEC_N calls (per-call overhead)",
     ),
     Case(
         "time_to_frames", G, "vec_f64",
@@ -211,31 +208,30 @@ register(
     Case(
         "hz_to_note", G, "const",
         librosa=lambda c: partial(librosa.hz_to_note, _str_hz(), unicode=False),
-        ours=lambda c: _loop(U.frequency_to_note, _str_hz().tolist()),
+        ours=lambda c: partial(U.frequency_to_note, _str_hz()),
         func="hz_to_note",
-        note="1000 frequencies; binding is scalar-only (Python loop, per-call overhead); "
-        "ours also returns the cents",
+        note="1000 frequencies; ours also returns the cents",
     ),
     Case(
         "midi_to_note", G, "const",
         librosa=lambda c: partial(librosa.midi_to_note, _str_midi(), unicode=False),
-        ours=lambda c: _loop(U.midi_to_note, _str_midi().tolist()),
+        ours=lambda c: partial(U.midi_to_note, _str_midi()),
         func="midi_to_note",
-        note="1000 MIDI numbers; binding is scalar-only (Python loop, per-call overhead)",
+        note="1000 MIDI numbers",
     ),
     Case(
         "note_to_hz", G, "const",
         librosa=lambda c: partial(librosa.note_to_hz, _str_notes()),
-        ours=lambda c: _loop(U.note_to_frequency, _str_notes()),
+        ours=lambda c: partial(U.note_to_frequency, _str_notes()),
         func="note_to_hz",
-        note="1000 note names; binding is scalar-only (Python loop, per-call overhead)",
+        note="1000 note names",
     ),
     Case(
         "note_to_midi", G, "const",
         librosa=lambda c: partial(librosa.note_to_midi, _str_notes()),
-        ours=lambda c: _loop(U.note_to_midi, _str_notes()),
+        ours=lambda c: partial(U.note_to_midi, _str_notes()),
         func="note_to_midi",
-        note="1000 note names; binding is scalar-only (Python loop, per-call overhead)",
+        note="1000 note names",
     ),
     Case(
         "key_to_notes", G, "const",
