@@ -73,6 +73,7 @@ use crate::operations::filterbanks::{
     MelFilterbankConfig, Window, mel_filterbank, padded_window, window_sumsquare_from_squared,
 };
 use crate::repr::SampleRate;
+use crate::utils::{MAX_SIGNAL_ELEMENTS, check_derived_len};
 use crate::{
     AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
     StandardSample,
@@ -370,6 +371,8 @@ pub(crate) fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
 ///
 /// - [`ParameterError`] if the configuration is invalid ([`StftConfig::validate`]),
 ///   the signal is empty, or `center` is `false` and the signal is shorter than `n_fft`.
+/// - [`ParameterError`] if `n_fft` exceeds 2^31 or the STFT matrix would exceed
+///   2^31 elements.
 ///
 /// # Examples
 ///
@@ -412,6 +415,12 @@ pub fn stft(
     }
     let n_frames = 1 + (padded_len - n_fft) / hop;
     let n_bins = n_fft / 2 + 1;
+    check_derived_len(
+        "n_fft",
+        "the STFT matrix",
+        n_channels as f64 * n_bins as f64 * n_frames as f64,
+        MAX_SIGNAL_ELEMENTS,
+    )?;
 
     let plan = forward_plan(n_fft);
     let mut scratch = plan.make_scratch_vec();
@@ -498,7 +507,8 @@ pub fn stft(
 /// # Errors
 ///
 /// [`ParameterError`] if the configuration is invalid, the bin count does not match
-/// `n_fft`, there are no frames, or the resulting length is 0.
+/// `n_fft`, there are no frames, the resulting length is 0, or the output would
+/// exceed 2^31 samples.
 ///
 /// # Differences from librosa
 ///
@@ -555,6 +565,14 @@ pub fn istft(
             "the requested output length must be positive",
         ));
     }
+    if let Some(len) = length {
+        check_derived_len(
+            "length",
+            "the inverse STFT",
+            n_channels as f64 * len as f64,
+            MAX_SIGNAL_ELEMENTS,
+        )?;
+    }
     let n_frames = match length {
         Some(len) => {
             let padded = if config.center {
@@ -566,6 +584,12 @@ pub fn istft(
         }
         None => total_frames,
     };
+    check_derived_len(
+        "hop_length",
+        "the inverse STFT",
+        n_channels as f64 * (n_fft as f64 + hop as f64 * (n_frames - 1) as f64),
+        MAX_SIGNAL_ELEMENTS,
+    )?;
     let full_len = n_fft + hop * (n_frames - 1);
     let start = if config.center { n_fft / 2 } else { 0 };
     let out_len = match length {
@@ -646,7 +670,8 @@ pub fn istft(
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `x` is shorter than `frame_length`.
+/// [`ParameterError`] if `x` is shorter than `frame_length`, or the frame matrix
+/// would exceed 2^31 elements.
 ///
 /// # Examples
 ///
@@ -672,6 +697,12 @@ pub fn frame(
         ));
     }
     let n_frames = 1 + (x.len() - fl) / hop;
+    check_derived_len(
+        "frame_length",
+        "the frame matrix",
+        fl as f64 * n_frames as f64,
+        MAX_SIGNAL_ELEMENTS,
+    )?;
     Ok(Array2::from_shape_fn((fl, n_frames), |(i, t)| {
         x[t * hop + i]
     }))
@@ -1998,7 +2029,8 @@ where
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `delay` is 0, `data` has fewer than two dimensions, or no frames.
+/// [`ParameterError`] if `delay` is 0, `data` has fewer than two dimensions or no frames,
+/// or the output would exceed 2^31 elements.
 ///
 /// # Examples
 ///
@@ -2039,6 +2071,12 @@ where
         ));
     }
     let d = data.len_of(feat_ax);
+    check_derived_len(
+        "n_steps",
+        "the stacked memory",
+        data.len() as f64 * n_steps.get() as f64,
+        MAX_SIGNAL_ELEMENTS,
+    )?;
     let mut shape = data.raw_dim();
     shape[ndim - 2] = d * n_steps.get();
     let mut out = Array::<f64, D>::zeros(shape);
@@ -2356,6 +2394,41 @@ mod tests {
     use super::*;
     use crate::sample_rate;
     use ndarray::{Array1, array};
+
+    #[test]
+    fn extreme_sizes_are_parameter_errors() {
+        let x = Array2::<f64>::zeros((1, 4096));
+        let huge = StftConfig::new().with_n_fft(NonZeroUsize::new(1 << 40).unwrap());
+        assert!(matches!(
+            stft(x.view(), &huge),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        let cfg = StftConfig::new().with_n_fft(crate::nzu!(512));
+        let d = stft(x.view(), &cfg).unwrap();
+        assert!(matches!(
+            istft(d.view(), &cfg, Some(usize::MAX)),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        let wide_hop = cfg.with_hop_length(NonZeroUsize::new(usize::MAX / 2));
+        assert!(matches!(
+            istft(d.view(), &wide_hop, None),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        // 50_000 x 50_001 frames of a 100_000-sample signal: 2.5e9 elements.
+        let long = vec![0.0; 100_000];
+        assert!(matches!(
+            frame(&long, crate::nzu!(50_000), crate::nzu!(1)),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        assert!(matches!(
+            stack_memory(
+                &Array2::<f64>::zeros((4, 100)),
+                NonZeroUsize::new(1 << 40).unwrap(),
+                1
+            ),
+            Err(AudioSampleError::Parameter(_))
+        ));
+    }
 
     fn noise(n: usize, seed: u64) -> Vec<f64> {
         // Small deterministic LCG; good enough for round-trip tests.

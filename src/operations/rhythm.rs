@@ -534,10 +534,14 @@ fn maximum_filter_freq(s: ArrayView2<'_, f64>, size: usize) -> Array2<f64> {
         (if m < n { m } else { period - 1 - m }) as usize
     };
     let half = (size / 2) as isize;
+    // A window of 2 * n_bins or more covers a whole reflection period, so it
+    // sees every value of the column: scanning one period gives the same
+    // maximum and keeps a huge `max_size` from looping for hours.
+    let span = size.min(2 * n_bins) as isize;
     Array2::from_shape_fn((n_bins, n_t), |(i, t)| {
         let start = i as isize - half;
         let mut m = s[[reflect(start), t]];
-        for j in 1..size as isize {
+        for j in 1..span {
             let v = s[[reflect(start + j), t]];
             if v > m {
                 m = v;
@@ -2380,8 +2384,9 @@ fn trim_beats(localscore: &[f64], beats: &mut [bool], trim: bool) {
 /// # Errors
 ///
 /// [`ParameterError`] if `bpm` is empty, has the wrong length or non-positive values,
-/// a tempo is so fast that its period rounds to less than one frame, or `tightness` or
-/// `frame_rate` is not finite and positive.
+/// a tempo is so fast that its period rounds to less than one frame, `tightness` or
+/// `frame_rate` is not finite and positive, or a beat period is so long (an extreme
+/// `frame_rate`) that the local-score window would exceed 2^31 frames.
 ///
 /// # Examples
 ///
@@ -2433,6 +2438,14 @@ pub fn beat_track_with_bpm(
             "tempo too fast for the frame rate: fewer than one frame per beat",
         ));
     }
+    // The local-score window spans 2 * frames_per_beat + 1 frames.
+    let max_fpb = fpb.iter().copied().fold(0.0, f64::max);
+    crate::utils::check_derived_len(
+        "frame_rate",
+        "the beat-tracking window",
+        2.0 * max_fpb + 1.0,
+        crate::utils::MAX_SIGNAL_ELEMENTS,
+    )?;
     let norm = std_ddof1(envelope) + f64::MIN_POSITIVE;
     let onsets: Vec<f64> = envelope.iter().map(|&v| v / norm).collect();
     let mut localscore = vec![0.0; n];
@@ -3784,6 +3797,34 @@ mod tests {
     use super::*;
     use crate::sample_rate;
     use ndarray::{Array1, array};
+
+    #[test]
+    fn huge_max_filter_equals_one_period() {
+        let s = Array2::from_shape_fn((7, 5), |(i, t)| ((i * 3 + t * 5) % 11) as f64);
+        let col_max: Vec<f64> = s
+            .columns()
+            .into_iter()
+            .map(|c| c.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+            .collect();
+        for size in [14, 15, 1000, 1 << 40] {
+            let m = maximum_filter_freq(s.view(), size);
+            for ((_, t), &v) in m.indexed_iter() {
+                assert_eq!(v, col_max[t], "size {size}");
+            }
+        }
+    }
+
+    #[test]
+    fn beat_track_with_huge_frame_rate_is_parameter_error() {
+        let env: Vec<f64> = (0..300)
+            .map(|t| if t % 22 == 3 { 1.0 } else { 0.05 })
+            .collect();
+        assert!(matches!(
+            beat_track_with_bpm(&env, &[120.0], 1e12, 100.0, true),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        assert!(beat_track_with_bpm(&env, &[120.0], 43.0, 100.0, true).is_ok());
+    }
 
     fn clicks(sr: usize, secs: usize, period: usize) -> AudioSamples<'static, f64> {
         let mut y = Array1::<f64>::zeros(secs * sr);

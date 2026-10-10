@@ -53,6 +53,7 @@ use ndarray::{Array1, Array2};
 
 pub use crate::utils::audio_math::MelScale;
 use crate::utils::audio_math::mel_frequencies_with_scale;
+use crate::utils::{MAX_SIGNAL_ELEMENTS, MAX_TABLE_ELEMENTS, check_derived_len};
 use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 
 // =============================================================================
@@ -158,8 +159,8 @@ fn cosine_coefficients(window: &Window) -> Option<&'static [f64]> {
 /// # Errors
 ///
 /// [`ParameterError`] if a window parameter is out of range (non-finite Kaiser
-/// `beta`, non-positive Gaussian `std`), or if a [`Window::Custom`] has a length
-/// other than `n` or a non-finite value.
+/// `beta`, non-positive Gaussian `std`), if a [`Window::Custom`] has a length
+/// other than `n` or a non-finite value, or if `n` exceeds 2^31 samples.
 ///
 /// # Examples
 ///
@@ -178,6 +179,7 @@ fn cosine_coefficients(window: &Window) -> Option<&'static [f64]> {
 /// Fourier transform," *Proc. IEEE* 66(1), 1978; SciPy `scipy.signal.get_window`.
 pub fn get_window(window: &Window, n: usize, periodic: bool) -> AudioSampleResult<Array1<f64>> {
     validate_window(window)?;
+    check_derived_len("n", "a window", n as f64, MAX_SIGNAL_ELEMENTS)?;
     if let Window::Custom(coeffs) = window {
         if coeffs.len() != n {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -427,7 +429,8 @@ pub(crate) fn pad_center(data: &[f64], size: usize) -> Vec<f64> {
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `n_frames` is 0, `win_length > n_fft`, or the window is invalid.
+/// [`ParameterError`] if `n_frames` is 0, `win_length > n_fft`, the window is invalid,
+/// or the envelope (or `n_fft`) would exceed 2^31 samples.
 ///
 /// # Differences from librosa
 ///
@@ -458,6 +461,12 @@ pub fn window_sumsquare(
             "must be at least 1",
         )));
     }
+    check_derived_len(
+        "n_frames",
+        "the window envelope",
+        n_fft.get() as f64 + hop_length.get() as f64 * (n_frames - 1) as f64,
+        MAX_SIGNAL_ELEMENTS,
+    )?;
     let win_sq = padded_window(window, win_length, n_fft)?.mapv(|w| w * w);
     Ok(window_sumsquare_from_squared(
         win_sq.as_slice().expect("freshly allocated"),
@@ -493,6 +502,7 @@ pub(crate) fn padded_window(
     n_fft: NonZeroUsize,
 ) -> AudioSampleResult<Array1<f64>> {
     let win_length = win_length.map_or(n_fft.get(), NonZeroUsize::get);
+    check_derived_len("n_fft", "a window", n_fft.get() as f64, MAX_SIGNAL_ELEMENTS)?;
     if win_length > n_fft.get() {
         return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
             "win_length",
@@ -761,7 +771,8 @@ impl MelFilterbankConfig {
 ///
 /// # Errors
 ///
-/// [`ParameterError`] from [`MelFilterbankConfig::validate`].
+/// [`ParameterError`] from [`MelFilterbankConfig::validate`], or if the
+/// `n_mels x (1 + n_fft / 2)` matrix would exceed 2^28 elements.
 ///
 /// # Differences from librosa
 ///
@@ -795,6 +806,12 @@ pub fn mel_filterbank(
     let n_mels = config.n_mels.get();
     let n_fft = n_fft.get();
     let n_bins = 1 + n_fft / 2;
+    check_derived_len(
+        "n_mels",
+        "a mel filterbank",
+        n_mels as f64 * n_bins as f64,
+        MAX_TABLE_ELEMENTS,
+    )?;
     let fmax = config.resolved_fmax(sample_rate);
 
     // numpy.fft.rfftfreq(n_fft, d=1/sr): k * (1 / (n_fft * d)).
@@ -855,6 +872,40 @@ fn lp_norm(values: impl Iterator<Item = f64>, p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extreme_window_sizes_are_parameter_errors() {
+        let is_param =
+            |r: AudioSampleResult<Array1<f64>>| matches!(r, Err(AudioSampleError::Parameter(_)));
+        let big = 1usize << 40;
+        assert!(is_param(get_window(&Window::Hann, big, true)));
+        assert!(window_bandwidth(&Window::Hann, NonZeroUsize::new(big).unwrap()).is_err());
+        assert!(is_param(window_sumsquare(
+            &Window::Hann,
+            big,
+            nzu!(512),
+            None,
+            nzu!(2048)
+        )));
+        assert!(is_param(window_sumsquare(
+            &Window::Hann,
+            3,
+            NonZeroUsize::new(usize::MAX).unwrap(),
+            None,
+            nzu!(2048)
+        )));
+        assert!(is_param(padded_window(
+            &Window::Hann,
+            None,
+            NonZeroUsize::new(big).unwrap()
+        )));
+        let huge_mels = MelFilterbankConfig::new().with_n_mels(NonZeroUsize::new(1 << 30).unwrap());
+        assert!(matches!(
+            mel_filterbank(22050.0, nzu!(2048), &huge_mels),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        assert!(get_window(&Window::Hann, 1024, true).is_ok());
+    }
 
     #[test]
     fn hann_periodic_and_symmetric() {

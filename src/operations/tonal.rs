@@ -538,7 +538,8 @@ impl ChromaFilterbankConfig {
 /// # Errors
 ///
 /// [`ParameterError`] if the configuration is invalid, the sample rate is not
-/// finite and positive, or `n_fft < 2`.
+/// finite and positive, `n_fft < 2`, or the `n_chroma x (1 + n_fft / 2)` matrix
+/// would exceed 2^28 elements.
 ///
 /// # Examples
 ///
@@ -578,6 +579,12 @@ pub fn chroma_filterbank(
     let n_chroma = config.n_chroma.get();
     let nc = n_chroma as f64;
     let n_out = 1 + n_fft / 2;
+    crate::utils::check_derived_len(
+        "n_chroma",
+        "a chroma filterbank",
+        nc * n_out as f64,
+        crate::utils::MAX_TABLE_ELEMENTS,
+    )?;
 
     // FFT-bin positions in chroma units for bins 0..=n_out (one extra bin for the
     // width of the last kept column). numpy: linspace(0, sr, n_fft, endpoint=False).
@@ -1707,6 +1714,15 @@ mod tests {
         a4_to_tuning, cqt_frequencies, key_to_degrees, key_to_notes, octs_to_hz, tuning_to_a4,
     };
     use ndarray::array;
+
+    #[test]
+    fn huge_chroma_filterbank_is_parameter_error() {
+        let cfg = ChromaFilterbankConfig::new().with_n_chroma(NonZeroUsize::new(1 << 30).unwrap());
+        assert!(matches!(
+            chroma_filterbank(22050.0, crate::nzu!(2048), &cfg),
+            Err(AudioSampleError::Parameter(_))
+        ));
+    }
 
     fn tone(f: f64, sr: f64, n: usize) -> Array2<f64> {
         Array2::from_shape_fn((1, n), |(_, i)| {

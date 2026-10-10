@@ -476,10 +476,17 @@ fn wavelet_impl(
 ) -> AudioSampleResult<Array2<Complex<f64>>> {
     let max_len = lengths.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let width = if pad_fft {
-        2.0f64.powf(max_len.log2().ceil()) as usize
+        2.0f64.powf(max_len.log2().ceil())
     } else {
-        max_len.ceil() as usize
+        max_len.ceil()
     };
+    crate::utils::check_derived_len(
+        "sample_rate",
+        "the wavelet basis",
+        width * freqs.len() as f64,
+        crate::utils::MAX_SIGNAL_ELEMENTS,
+    )?;
+    let width = width as usize;
     let mut out = Array2::<Complex<f64>>::zeros((freqs.len(), width.max(1)));
     for ((&ilen, &freq), mut row) in lengths.iter().zip(freqs).zip(out.outer_iter_mut()) {
         // np.arange(-ilen // 2, ilen // 2): floor(-L/2) .. floor(L/2) (exclusive).
@@ -531,7 +538,8 @@ fn wavelet_impl(
 ///
 /// # Errors
 ///
-/// As for [`wavelet_lengths`].
+/// As for [`wavelet_lengths`]; also a [`ParameterError`] if the filter basis would
+/// exceed 2^31 elements (an extreme `sample_rate` makes the filters that long).
 ///
 /// # Differences from librosa
 ///
@@ -1635,8 +1643,8 @@ fn icqt_rows(
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `bins_per_octave` is not a multiple of `n_chroma`, or
-/// `fmin` is not finite and positive.
+/// [`ParameterError`] if `bins_per_octave` is not a multiple of `n_chroma`,
+/// `fmin` is not finite and positive, or the matrix would exceed 2^28 elements.
 ///
 /// # Differences from librosa
 ///
@@ -1674,6 +1682,12 @@ pub fn cq_to_chroma(
     }
     let fmin = fmin.unwrap_or_else(c1_hz);
     require_finite_positive("fmin", fmin)?;
+    crate::utils::check_derived_len(
+        "n_input",
+        "a chroma mapping",
+        nc as f64 * n_input as f64,
+        crate::utils::MAX_TABLE_ELEMENTS,
+    )?;
     let n_merge = bpo / nc;
     let shift = n_merge / 2;
     let midi_0 = hz_to_midi_librosa(fmin).rem_euclid(12.0);
@@ -3040,6 +3054,20 @@ mod tests {
     use super::*;
     use crate::sample_rate;
     use ndarray::Array1;
+
+    #[test]
+    fn extreme_sizes_are_parameter_errors() {
+        assert!(matches!(
+            cq_to_chroma(1 << 40, crate::nzu!(12), crate::nzu!(12), None, true),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        let freqs = [100.0, 200.0, 400.0];
+        assert!(matches!(
+            wavelet(&freqs, 1e15, &WaveletConfig::default()),
+            Err(AudioSampleError::Parameter(_))
+        ));
+        assert!(wavelet(&freqs, 22050.0, &WaveletConfig::default()).is_ok());
+    }
 
     fn tone(freq: f64, n: usize) -> AudioSamples<'static, f64> {
         let x = Array1::from_iter(

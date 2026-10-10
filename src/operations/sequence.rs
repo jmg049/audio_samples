@@ -1462,7 +1462,8 @@ pub fn viterbi_binary(
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `n_states == 0`.
+/// [`ParameterError`] if `n_states == 0` or the `n_states x n_states`
+/// matrix would exceed 2^28 elements.
 ///
 /// # Examples
 ///
@@ -1476,16 +1477,31 @@ pub fn transition_uniform(n_states: usize) -> AudioSampleResult<Array2<f64>> {
     if n_states == 0 {
         return err("n_states", "must be a positive integer");
     }
+    check_n_states(n_states)?;
     Ok(Array2::from_elem(
         (n_states, n_states),
         1.0 / n_states as f64,
     ))
 }
 
+/// Rejects transition matrices too large to allocate (`n_states**2` above
+/// [`MAX_TABLE_ELEMENTS`](crate::utils::MAX_TABLE_ELEMENTS)).
+fn check_n_states(n_states: usize) -> AudioSampleResult<()> {
+    let n = n_states as f64;
+    crate::utils::check_derived_len(
+        "n_states",
+        "a transition matrix",
+        n * n,
+        crate::utils::MAX_TABLE_ELEMENTS,
+    )
+    .map(|_| ())
+}
+
 fn per_state_probs(n_states: usize, prob: &[f64]) -> AudioSampleResult<Vec<f64>> {
     if n_states < 2 {
         return err("n_states", "must be an integer > 1");
     }
+    check_n_states(n_states)?;
     let p = match prob.len() {
         1 => vec![prob[0]; n_states],
         n if n == n_states => prob.to_vec(),
@@ -1516,8 +1532,8 @@ fn per_state_probs(n_states: usize, prob: &[f64]) -> AudioSampleResult<Vec<f64>>
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `n_states < 2`, `prob` has the wrong length or a
-/// value outside `[0, 1]`.
+/// [`ParameterError`] if `n_states < 2`, the matrix would exceed 2^28
+/// elements, `prob` has the wrong length or a value outside `[0, 1]`.
 ///
 /// # Examples
 ///
@@ -1661,7 +1677,8 @@ impl TransitionWindow {
 ///
 /// # Errors
 ///
-/// [`ParameterError`] if `n_states < 2`, `width` has the wrong length or a
+/// [`ParameterError`] if `n_states < 2`, the matrix would exceed 2^28
+/// elements, `width` has the wrong length or a
 /// value outside `1..=n_states`, or a row has zero total weight (e.g. a
 /// width-2 Hann window).
 ///
@@ -1685,6 +1702,7 @@ pub fn transition_local(
     if n_states < 2 {
         return err("n_states", "must be an integer > 1");
     }
+    check_n_states(n_states)?;
     let widths = match width.len() {
         1 => vec![width[0]; n_states],
         n if n == n_states => width.to_vec(),
@@ -2637,6 +2655,25 @@ where
 mod tests {
     use super::*;
     use ndarray::{Array3, array};
+
+    #[test]
+    fn huge_transition_matrices_are_parameter_errors() {
+        let n = 1usize << 31;
+        let is_param = |r: AudioSampleResult<Array2<f64>>| {
+            matches!(r, Err(crate::AudioSampleError::Parameter(_)))
+        };
+        assert!(is_param(transition_uniform(n)));
+        assert!(is_param(transition_uniform(usize::MAX)));
+        assert!(is_param(transition_loop(n, &[0.5])));
+        assert!(is_param(transition_cycle(n, &[0.5])));
+        assert!(is_param(transition_local(
+            n,
+            &[3],
+            TransitionWindow::default(),
+            true
+        )));
+        assert!(transition_uniform(1 << 14).is_ok());
+    }
 
     #[test]
     fn dtw_identical_sequences_have_zero_cost_diagonal_path() {

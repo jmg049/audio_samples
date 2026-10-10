@@ -2280,7 +2280,7 @@ pub fn clicks(
                     "at least one click position is required when length is None",
                 )
             })?;
-            max + click.len()
+            max.saturating_add(click.len())
         }
     };
     check_derived_len(
@@ -2290,8 +2290,10 @@ pub fn clicks(
         MAX_SIGNAL_ELEMENTS,
     )?;
     let mut out = vec![0.0; length];
-    for &start in &pos {
-        let end = (start + click.len()).min(length);
+    // Positions are < length here (filtered above, or length = max + click
+    // length); the guard and saturating add keep the slice in bounds anyway.
+    for &start in pos.iter().filter(|&&p| p < length) {
+        let end = start.saturating_add(click.len()).min(length);
         for (o, c) in out[start..end].iter_mut().zip(&click) {
             *o += c;
         }
@@ -3643,6 +3645,7 @@ mod tests {
             matches!(r, Err(AudioSampleError::Parameter(_)))
         };
         assert!(is_param(clicks(ClickPositions::Times(&[1e12]), sr, &cfg)));
+        assert!(is_param(clicks(ClickPositions::Times(&[1e20]), sr, &cfg)));
         assert!(is_param(clicks(
             ClickPositions::Frames(&[usize::MAX]),
             sr,

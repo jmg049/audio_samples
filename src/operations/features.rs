@@ -2223,12 +2223,16 @@ pub fn pcen_with_state(
 fn maximum_filter_bins(s: &ArrayView3<'_, f64>, size: usize) -> Array3<f64> {
     let (n_ch, n_bins, n_frames) = s.dim();
     let lo = (size / 2) as isize;
+    // A window of 2 * n_bins or more covers a whole symmetric-padding period
+    // and so sees every value of the column (NaN included): scanning one
+    // period gives the same result and bounds the work for a huge `max_size`.
+    let span = size.min(2 * n_bins) as isize;
     let mut out = Array3::<f64>::zeros((n_ch, n_bins, n_frames));
     for c in 0..n_ch {
         for k in 0..n_bins {
             for t in 0..n_frames {
                 let mut m = f64::NEG_INFINITY;
-                for j in 0..size as isize {
+                for j in 0..span {
                     let src = pad_source_index(k as isize - lo + j, n_bins, StftPadMode::Symmetric)
                         .expect("symmetric padding always has a source");
                     let v = s[[c, src, t]];
@@ -3345,6 +3349,25 @@ mod tests {
     use super::*;
     use crate::sample_rate;
     use ndarray::{Array1, array, s};
+
+    #[test]
+    fn huge_max_filter_equals_one_period() {
+        let s = Array3::from_shape_fn((1, 6, 4), |(_, k, t)| ((k * 7 + t * 3) % 13) as f64);
+        let one_period = maximum_filter_bins(&s.view(), 12);
+        for size in [13, 500, 1 << 40] {
+            assert_eq!(
+                maximum_filter_bins(&s.view(), size),
+                one_period,
+                "size {size}"
+            );
+        }
+        for t in 0..4 {
+            let col_max = (0..6)
+                .map(|k| s[[0, k, t]])
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!((0..6).all(|k| one_period[[0, k, t]] == col_max));
+        }
+    }
 
     fn mono(x: Vec<f64>) -> AudioSamples<'static, f64> {
         AudioSamples::new_mono(Array1::from(x), sample_rate!(22050)).unwrap()
