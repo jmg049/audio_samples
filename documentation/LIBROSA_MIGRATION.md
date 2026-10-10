@@ -37,6 +37,14 @@ from librosa, the cause is listed under
   librosa would drop the leading axis. Per-frame scalars (centroid, RMS, ZCR)
   are `(channels, 1, n_frames)`. Onset envelopes and pitch tracks are
   `(channels, n_frames)`.
+- **Non-finite audio is an error.** Like librosa's `valid_audio` ("Audio
+  buffer is not finite everywhere"), every audio-level method of
+  `AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
+  `AudioRhythm`, `AudioEffects` and `AudioPitchTracking` returns a
+  `ParameterError` when the input contains a NaN or infinite sample. This is
+  slightly stricter than librosa, which skips the check in a few functions
+  (e.g. `preemphasis`, `remix` without `align_zeros`). Free functions on bare
+  arrays (`power_to_db`, `*_from_spectrogram`, ...) do not check.
 - **Everything is `f64`.** Input samples of any type (`i16`, `f32`, ...) are
   converted with the crate's audio-aware conversion. Outputs are always `f64` or
   `Complex<f64>`; librosa keeps `float32`/`complex64` for `float32` input.

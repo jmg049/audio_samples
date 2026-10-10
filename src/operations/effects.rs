@@ -82,10 +82,7 @@ use crate::operations::spectrum::{
 };
 use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
-use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
-    StandardSample,
-};
+use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
 
 fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_value(parameter, reason))
@@ -99,17 +96,7 @@ fn config_err(operation: &str, reason: impl ToString) -> AudioSampleError {
 // AudioSamples <-> f64 rows
 // =============================================================================
 
-/// The audio as a `(channels, samples)` `f64` array.
-fn audio_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
-    let w = audio.to_format::<f64>();
-    if let Some(m) = w.as_mono() {
-        m.as_view().insert_axis(Axis(0)).to_owned()
-    } else if let Some(m) = w.as_multi_channel() {
-        m.as_view().to_owned()
-    } else {
-        unreachable!("audio is either mono or multi-channel")
-    }
-}
+use crate::operations::spectrum::{audio_f64_rows as audio_rows, finite_audio_rows};
 
 /// Builds audio of sample type `T` from `(channels, samples)` rows; one row gives
 /// mono audio.
@@ -2314,6 +2301,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if `rate` is not finite and positive, the result would be
     /// empty, or the STFT configuration is invalid.
     ///
@@ -2338,6 +2328,9 @@ pub trait AudioEffects {
     /// In-place [`time_stretch`](Self::time_stretch).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`time_stretch`](Self::time_stretch); the audio is unchanged on error.
     ///
@@ -2375,6 +2368,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if `n_steps` is not finite, the configuration is invalid,
     /// or the shift is so large that the stretched signal is empty.
     ///
@@ -2407,6 +2403,9 @@ pub trait AudioEffects {
     /// In-place [`pitch_shift`](Self::pitch_shift).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`pitch_shift`](Self::pitch_shift); the audio is unchanged on error.
     ///
@@ -2442,6 +2441,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if `coef` is not finite or a channel has fewer than two
     /// samples.
     ///
@@ -2462,6 +2464,9 @@ pub trait AudioEffects {
     /// In-place [`preemphasis`](Self::preemphasis).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`preemphasis`](Self::preemphasis).
     ///
@@ -2493,6 +2498,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if `coef` is not finite or 3, or a channel has fewer than
     /// two samples.
     ///
@@ -2513,6 +2521,9 @@ pub trait AudioEffects {
     /// In-place [`deemphasis`](Self::deemphasis).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`deemphasis`](Self::deemphasis).
     ///
@@ -2546,6 +2557,9 @@ pub trait AudioEffects {
     /// sample range `start..end` of the input.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid; an empty-data error if
     /// every frame is silent (librosa returns an empty array and `[0, 0]`; use
@@ -2585,6 +2599,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// As [`trim_db`](Self::trim_db); the audio is unchanged on error.
     ///
     /// # Examples
@@ -2615,6 +2632,9 @@ pub trait AudioEffects {
     /// frame-aligned and clipped to the signal length. Empty if everything is silent.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -2653,6 +2673,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if `intervals` is empty; an empty-data error if every
     /// interval is empty.
     ///
@@ -2677,6 +2700,9 @@ pub trait AudioEffects {
     /// In-place [`remix`](Self::remix).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`remix`](Self::remix); the audio is unchanged on error.
     ///
@@ -2712,6 +2738,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
     /// # Differences from librosa
@@ -2742,6 +2771,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// As [`harmonic`](Self::harmonic).
     ///
     /// # Examples
@@ -2769,6 +2801,9 @@ pub trait AudioEffects {
     /// The percussive component, same length as the input.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -2798,6 +2833,9 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// As [`percussive`](Self::percussive).
     ///
     /// # Examples
@@ -2826,6 +2864,9 @@ pub trait AudioEffects {
     /// to the input (up to round-off).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -2866,6 +2907,9 @@ pub trait AudioEffects {
     /// A `(channels, order + 1)` array; row `c` is `[1, a_1, ..., a_order]`.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if a channel is too short or not finite.
     ///
@@ -2941,7 +2985,7 @@ where
         rate: f64,
         stft: &StftConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = time_stretch_rows(audio_rows(self).view(), rate, stft)?;
+        let y = time_stretch_rows(finite_audio_rows(self)?.view(), rate, stft)?;
         rows_to_audio(y, self.sample_rate(), "time_stretch")
     }
 
@@ -2955,7 +2999,7 @@ where
         n_steps: f64,
         config: &PitchShiftConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = pitch_shift_rows(audio_rows(self).view(), n_steps, config)?;
+        let y = pitch_shift_rows(finite_audio_rows(self)?.view(), n_steps, config)?;
         rows_to_audio(y, self.sample_rate(), "pitch_shift")
     }
 
@@ -2969,7 +3013,7 @@ where
     }
 
     fn preemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = audio_rows(self);
+        let mut rows = finite_audio_rows(self)?;
         for mut row in rows.outer_iter_mut() {
             let y = match row.as_slice() {
                 Some(x) => preemphasis_with_state(x, coef, None)?.0,
@@ -2986,7 +3030,7 @@ where
     }
 
     fn deemphasis(&self, coef: f64) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut rows = audio_rows(self);
+        let mut rows = finite_audio_rows(self)?;
         for mut row in rows.outer_iter_mut() {
             let y = match row.as_slice() {
                 Some(x) => deemphasis_with_state(x, coef, None)?.0,
@@ -3006,7 +3050,7 @@ where
         &self,
         config: &SilenceConfig,
     ) -> AudioSampleResult<(AudioSamples<'static, T>, (usize, usize))> {
-        let rows = audio_rows(self);
+        let rows = finite_audio_rows(self)?;
         let flags = nonsilent_frames(rows.view(), config)?;
         let (start, end) = trim_bounds(&flags, config.hop_length.get(), rows.ncols());
         if start >= end {
@@ -3026,7 +3070,7 @@ where
     }
 
     fn split_db(&self, config: &SilenceConfig) -> AudioSampleResult<Vec<(usize, usize)>> {
-        let rows = audio_rows(self);
+        let rows = finite_audio_rows(self)?;
         let flags = nonsilent_frames(rows.view(), config)?;
         Ok(split_intervals(
             &flags,
@@ -3040,7 +3084,7 @@ where
         intervals: &[(usize, usize)],
         align_zeros: bool,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = remix_rows(audio_rows(self).view(), intervals, align_zeros)?;
+        let y = remix_rows(finite_audio_rows(self)?.view(), intervals, align_zeros)?;
         rows_to_audio(y, self.sample_rate(), "remix")
     }
 
@@ -3057,7 +3101,11 @@ where
         &self,
         config: &HarmonicPercussiveConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut parts = hpss_rows(audio_rows(self).view(), config, &[HpssPart::Harmonic])?;
+        let mut parts = hpss_rows(
+            finite_audio_rows(self)?.view(),
+            config,
+            &[HpssPart::Harmonic],
+        )?;
         rows_to_audio(parts.remove(0), self.sample_rate(), "harmonic")
     }
 
@@ -3070,7 +3118,11 @@ where
         &self,
         config: &HarmonicPercussiveConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let mut parts = hpss_rows(audio_rows(self).view(), config, &[HpssPart::Percussive])?;
+        let mut parts = hpss_rows(
+            finite_audio_rows(self)?.view(),
+            config,
+            &[HpssPart::Percussive],
+        )?;
         rows_to_audio(parts.remove(0), self.sample_rate(), "percussive")
     }
 
@@ -3084,7 +3136,7 @@ where
         config: &HarmonicPercussiveConfig,
     ) -> AudioSampleResult<(AudioSamples<'static, T>, AudioSamples<'static, T>)> {
         let mut parts = hpss_rows(
-            audio_rows(self).view(),
+            finite_audio_rows(self)?.view(),
             config,
             &[HpssPart::Harmonic, HpssPart::Percussive],
         )?;
@@ -3101,7 +3153,7 @@ where
     }
 
     fn lpc(&self, order: NonZeroUsize) -> AudioSampleResult<Array2<f64>> {
-        let rows = audio_rows(self);
+        let rows = finite_audio_rows(self)?;
         let mut out = Array2::<f64>::zeros((rows.nrows(), order.get() + 1));
         for (c, row) in rows.outer_iter().enumerate() {
             let a = lpc(&row.to_vec(), order)?;

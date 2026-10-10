@@ -81,10 +81,7 @@ use crate::operations::filterbanks::{Window, padded_window};
 use crate::operations::spectrum::{
     AudioSpectrum, DbConfig, StftConfig, StftPadMode, power_to_db, stft,
 };
-use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
-    StandardSample,
-};
+use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
 
 // =============================================================================
 // Shared helpers
@@ -104,17 +101,7 @@ fn range_err(parameter: &str, value: f64, min: &str, max: &str, reason: &str) ->
     ))
 }
 
-/// The audio as a `(channels, samples)` `f64` array.
-fn audio_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
-    let w = audio.to_format::<f64>();
-    if let Some(m) = w.as_mono() {
-        m.as_view().insert_axis(Axis(0)).to_owned()
-    } else if let Some(m) = w.as_multi_channel() {
-        m.as_view().to_owned()
-    } else {
-        unreachable!("audio is either mono or multi-channel")
-    }
-}
+use crate::operations::spectrum::finite_audio_rows;
 
 /// `numpy.fft.rfftfreq(n_fft, 1 / sr)`, rounded exactly as numpy does
 /// (`k * (1 / (n_fft * (1 / sr)))`), i.e. librosa's `fft_frequencies`.
@@ -2939,6 +2926,9 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid or the signal is too short
     /// for an uncentred STFT.
     ///
@@ -2974,6 +2964,9 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
     /// # Examples
@@ -3006,6 +2999,9 @@ pub trait AudioFeatures {
     /// [`spectral_rolloff_from_spectrogram`].
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -3040,6 +3036,9 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
     /// # Examples
@@ -3072,6 +3071,9 @@ pub trait AudioFeatures {
     /// [`spectral_contrast_from_spectrogram`].
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid for the sample rate or a
     /// band contains no bins.
@@ -3106,6 +3108,9 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
     /// # Examples
@@ -3135,6 +3140,9 @@ pub trait AudioFeatures {
     /// centred, `1 + (len - frame_length) / hop_length` otherwise.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the (padded) signal is shorter than `frame_length`.
     ///
@@ -3175,6 +3183,9 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid or the (padded) signal is
     /// shorter than `frame_length`.
     ///
@@ -3214,6 +3225,9 @@ pub trait AudioFeatures {
     /// times and magnitudes.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -3304,21 +3318,25 @@ where
 
     fn rms_frames(&self, config: &RmsConfig) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        rms_rows(audio_rows(self).view(), config)
+        rms_rows(finite_audio_rows(self)?.view(), config)
     }
 
     fn zero_crossing_rate_frames(
         &self,
         config: &ZeroCrossingRateConfig,
     ) -> AudioSampleResult<Array3<f64>> {
-        zcr_rows(audio_rows(self).view(), config)
+        zcr_rows(finite_audio_rows(self)?.view(), config)
     }
 
     fn reassigned_spectrogram(
         &self,
         config: &ReassignedSpectrogramConfig,
     ) -> AudioSampleResult<ReassignedSpectrogram> {
-        reassigned_rows(audio_rows(self).view(), self.sample_rate_hz(), config)
+        reassigned_rows(
+            finite_audio_rows(self)?.view(),
+            self.sample_rate_hz(),
+            config,
+        )
     }
 }
 

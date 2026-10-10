@@ -3325,6 +3325,9 @@ pub trait AudioRhythm {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid or `aggregate` is `None`.
     ///
     /// # Examples
@@ -3354,6 +3357,9 @@ pub trait AudioRhythm {
     /// A `(channels, n_bands, n_frames)` array.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration or boundaries are invalid.
     ///
@@ -3389,6 +3395,9 @@ pub trait AudioRhythm {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// - [`LayoutError::ChannelCountUnsupported`] if the audio is not mono.
     /// - [`ParameterError`] if the configuration is invalid.
     ///
@@ -3418,6 +3427,9 @@ pub trait AudioRhythm {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid or the signal is too short
     /// for an uncentred window.
     ///
@@ -3442,6 +3454,9 @@ pub trait AudioRhythm {
     /// A complex `(channels, win_length / 2 + 1, n_frames + 1)` array (centred).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -3469,6 +3484,9 @@ pub trait AudioRhythm {
     /// `config.aggregate = None`.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -3499,6 +3517,9 @@ pub trait AudioRhythm {
     /// The tempo and beat frames ([`BeatTrack`]).
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// - [`LayoutError::ChannelCountUnsupported`] if the audio is not mono.
     /// - [`ParameterError`] if the configuration is invalid.
@@ -3532,6 +3553,9 @@ pub trait AudioRhythm {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
     /// # Examples
@@ -3556,6 +3580,9 @@ pub trait AudioRhythm {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
     /// # Examples
@@ -3579,6 +3606,9 @@ pub trait AudioRhythm {
     /// `(channels, win_length / 2 + 1, n_frames)`.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///

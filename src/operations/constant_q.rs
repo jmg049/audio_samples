@@ -87,8 +87,8 @@ use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
 use crate::utils::audio_math::cqt_frequencies;
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
-    ProcessingError, StandardSample,
+    AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, ProcessingError,
+    StandardSample,
 };
 
 // =============================================================================
@@ -754,16 +754,7 @@ fn rows_to_audio(y: Array2<f64>, sr: u32) -> AudioSampleResult<AudioSamples<'sta
     }
 }
 
-fn audio_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
-    let w = audio.to_format::<f64>();
-    if let Some(m) = w.as_mono() {
-        m.as_view().insert_axis(Axis(0)).to_owned()
-    } else if let Some(m) = w.as_multi_channel() {
-        m.as_view().to_owned()
-    } else {
-        unreachable!("audio is either mono or multi-channel")
-    }
-}
+use crate::operations::spectrum::{audio_f64_rows as audio_rows, finite_audio_rows};
 
 /// Resamples every row from `in_sr` to `out_sr` (integers; only the ratio matters),
 /// fixing the length to `ceil(n * out / in)` and multiplying by `gain`.
@@ -2430,6 +2421,9 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// - [`ParameterError`] if the configuration is invalid, `fmin` (after tuning)
     ///   is not below the Nyquist frequency, the highest filter's cut-off exceeds
     ///   the Nyquist frequency (reduce `n_bins`), or the signal is too short.
@@ -2481,6 +2475,9 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// As [`cqt`](Self::cqt), and [`ParameterError`] for an invalid `gamma`.
     ///
     /// # Differences from librosa
@@ -2525,6 +2522,9 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// As [`cqt`](Self::cqt).
     ///
     /// # Examples
@@ -2558,6 +2558,9 @@ pub trait AudioConstantQ {
     /// A real, non-negative `(channels, n_bins, frames)` array.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`cqt`](Self::cqt).
     ///
@@ -2700,6 +2703,9 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// As [`cqt`](Self::cqt), and [`ParameterError`] if `bins_per_octave` is not a
     /// multiple of `n_chroma`.
     ///
@@ -2733,6 +2739,9 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// As [`chroma_cqt`](Self::chroma_cqt).
     ///
     /// # Examples
@@ -2762,6 +2771,9 @@ pub trait AudioConstantQ {
     /// A `(channels, bins_per_octave, frames)` array.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`vqt`](Self::vqt).
     ///
@@ -2793,6 +2805,9 @@ pub trait AudioConstantQ {
     /// A `(channels, 6, frames)` array.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// As [`chroma_cqt`](Self::chroma_cqt).
     ///
@@ -2877,28 +2892,28 @@ where
 {
     fn cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Complex<f64>>> {
         config.validate()?;
-        let (y, sr) = (audio_rows(self), self.sample_rate_hz());
+        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
         vqt_rows(y, sr, config, tuning, Some(0.0))
     }
 
     fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<f64>>> {
         config.validate()?;
-        let (y, sr) = (audio_rows(self), self.sample_rate_hz());
+        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.cqt.tuning, config.cqt.bins_per_octave)?;
         vqt_rows(y, sr, &config.cqt, tuning, config.gamma)
     }
 
     fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let (y, sr) = (audio_rows(self), self.sample_rate_hz());
+        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
         pseudo_cqt_rows(y.view(), sr, config, tuning)
     }
 
     fn hybrid_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<f64>> {
         config.validate()?;
-        let (y, sr) = (audio_rows(self), self.sample_rate_hz());
+        let (y, sr) = (finite_audio_rows(self)?, self.sample_rate_hz());
         let tuning = resolve_tuning(y.view(), sr, config.tuning, config.bins_per_octave)?;
         hybrid_cqt_rows(y, sr, config, tuning)
     }

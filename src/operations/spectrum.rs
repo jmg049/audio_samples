@@ -2087,6 +2087,9 @@ pub trait AudioSpectrum {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid, or `center` is `false` and the
     /// signal is shorter than `n_fft`.
     ///
@@ -2160,6 +2163,9 @@ pub trait AudioSpectrum {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if `power` is not finite and positive, or as for
     /// [`stft_matrix`](Self::stft_matrix).
     ///
@@ -2190,6 +2196,9 @@ pub trait AudioSpectrum {
     /// A `(channels, n_mels, n_frames)` array.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid for the signal's sample rate.
     ///
@@ -2228,6 +2237,9 @@ pub trait AudioSpectrum {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid for the signal's sample rate.
     ///
     /// # Differences from librosa
@@ -2251,8 +2263,9 @@ pub trait AudioSpectrum {
     fn mfcc_frames(&self, config: &MfccConfig) -> AudioSampleResult<Array3<f64>>;
 }
 
-/// The audio as a `(channels, samples)` `f64` array.
-fn audio_f64_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
+/// The audio as a `(channels, samples)` `f64` array (no validation; for audio
+/// the crate produced itself).
+pub(crate) fn audio_f64_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
     let w = audio.to_format::<f64>();
     if let Some(m) = w.as_mono() {
         m.as_view().insert_axis(Axis(0)).to_owned()
@@ -2263,12 +2276,40 @@ fn audio_f64_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64>
     }
 }
 
+/// The audio as a `(channels, samples)` `f64` array, rejecting NaN and
+/// infinite samples.
+///
+/// The shared entry check of the librosa-compatible audio-level operations
+/// (`AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
+/// `AudioRhythm`, `AudioEffects`), mirroring librosa's `util.valid_audio`
+/// ("Audio buffer is not finite everywhere"). Integer sample types cannot hold
+/// non-finite values and skip the scan.
+///
+/// # Errors
+/// [`ParameterError`] if any sample is NaN or infinite.
+pub(crate) fn finite_audio_rows<T: StandardSample>(
+    audio: &AudioSamples<'_, T>,
+) -> AudioSampleResult<Array2<f64>> {
+    let rows = audio_f64_rows(audio);
+    let float = matches!(
+        T::SAMPLE_TYPE,
+        crate::repr::SampleType::F32 | crate::repr::SampleType::F64
+    );
+    if float && !rows.iter().all(|v| v.is_finite()) {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "audio",
+            "audio buffer is not finite everywhere (contains NaN or infinity)",
+        )));
+    }
+    Ok(rows)
+}
+
 impl<T> AudioSpectrum for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
     fn stft_matrix(&self, config: &StftConfig) -> AudioSampleResult<Array3<Complex<f64>>> {
-        stft(audio_f64_rows(self).view(), config)
+        stft(finite_audio_rows(self)?.view(), config)
     }
 
     fn istft_matrix(

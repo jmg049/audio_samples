@@ -1568,6 +1568,9 @@ pub trait AudioTonal {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid or the signal is too
     /// short for an uncentred STFT.
     ///
@@ -1605,6 +1608,9 @@ pub trait AudioTonal {
     ///
     /// # Errors
     ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
+    ///
     /// [`ParameterError`] if the configuration is invalid or the signal is too
     /// short for an uncentred STFT.
     ///
@@ -1636,6 +1642,9 @@ pub trait AudioTonal {
     /// octave), in `[-0.5, 0.5)`; all channels are pooled.
     ///
     /// # Errors
+    ///
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
+    /// librosa's "Audio buffer is not finite everywhere").
     ///
     /// [`ParameterError`] if the configuration is invalid or the signal is too
     /// short for an uncentred STFT.

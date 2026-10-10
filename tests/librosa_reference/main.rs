@@ -19,6 +19,7 @@ mod analysis_fixes;
 mod constant_q;
 mod effects;
 mod features;
+mod non_finite;
 mod pitch;
 mod resample;
 mod rhythm;
