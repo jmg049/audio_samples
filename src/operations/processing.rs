@@ -864,6 +864,26 @@ where
         // numeric value (no audio-aware [-1, 1] rescaling).
         let mu: f64 = mu.cast_into();
         validate_mu(mu, "mu_compress")?;
+        if Self::Sample::SAMPLE_TYPE == crate::repr::SampleType::F32 {
+            // f32 samples: the curve is evaluated in f64 with a branch-free
+            // logarithm that vectorises (see `mu_law_compress_f64_fast`) and
+            // rounded to f32 once.
+            let inv_den = 1.0 / mu.ln_1p();
+            if let Some(xs) = self.as_slice_mut() {
+                if std::any::TypeId::of::<Self::Sample>() == std::any::TypeId::of::<f32>() {
+                    // SAFETY: the sample type is f32, so the slice is a &mut [f32].
+                    let xs = unsafe { &mut *(std::ptr::from_mut(xs) as *mut [f32]) };
+                    mu_compress_f32_slice(xs, mu, inv_den);
+                    return Ok(());
+                }
+            }
+            return self.apply_with_error_in_place(|x: Self::Sample| {
+                let x: f64 = x.convert_to();
+                Ok(Self::Sample::convert_from(mu_law_compress_f64_fast(
+                    x, mu, inv_den,
+                )))
+            });
+        }
         self.apply_with_error_in_place(|x: Self::Sample| {
             let x: f64 = x.convert_to();
             Ok(Self::Sample::convert_from(mu_law_compress_value(x, mu)))
@@ -1161,6 +1181,90 @@ fn validate_mu(mu: f64, operation: &str) -> AudioSampleResult<()> {
 fn mu_law_compress_value(x: f64, mu: f64) -> f64 {
     let sign = if x == 0.0 { 0.0 } else { x.signum() };
     sign * (mu * x.abs()).ln_1p() / mu.ln_1p()
+}
+
+/// Natural logarithm of a positive, finite, normal `x` by fdlibm's
+/// `__ieee754_log` algorithm and constants (error below 1 ulp), written without branches
+/// or calls so that loops over it vectorise.
+#[inline(always)]
+fn ln_branch_free(x: f64) -> f64 {
+    const LN2_HI: f64 = f64::from_bits(0x3fe6_2e42_fee0_0000);
+    const LN2_LO: f64 = f64::from_bits(0x3dea_39ef_3579_3c76);
+    const LG1: f64 = f64::from_bits(0x3fe5_5555_5555_5593);
+    const LG2: f64 = f64::from_bits(0x3fd9_9999_9997_fa04);
+    const LG3: f64 = f64::from_bits(0x3fd2_4924_9422_9359);
+    const LG4: f64 = f64::from_bits(0x3fcc_71c5_1d8e_78af);
+    const LG5: f64 = f64::from_bits(0x3fc7_4664_96cb_03de);
+    const LG6: f64 = f64::from_bits(0x3fc3_9a09_d078_c69f);
+    const LG7: f64 = f64::from_bits(0x3fc2_f112_df3e_5244);
+    let bits = x.to_bits();
+    // x = 2^k m with m in [1, 2); fold m into [sqrt(2)/2, sqrt(2)).
+    let k = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    let m = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000);
+    let big = m > std::f64::consts::SQRT_2;
+    let m = if big { m * 0.5 } else { m };
+    let dk = f64::from(k + i32::from(big));
+    let f = m - 1.0;
+    let hfsq = 0.5 * f * f;
+    let s = f / (2.0 + f);
+    let z = s * s;
+    let w = z * z;
+    let t1 = w * (LG2 + w * (LG4 + w * LG6));
+    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+    let r = t2 + t1;
+    dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+}
+
+/// [`mu_law_compress_f64_fast`] over f32 samples in place, with AVX2 when the
+/// CPU has it (the arithmetic is the same: no fused operations).
+fn mu_compress_f32_slice(xs: &mut [f32], mu: f64, inv_den: f64) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2.
+        unsafe { mu_compress_f32_slice_avx2(xs, mu, inv_den) };
+        return;
+    }
+    mu_compress_f32_slice_portable(xs, mu, inv_den);
+}
+
+#[inline(always)]
+fn mu_compress_f32_slice_portable(xs: &mut [f32], mu: f64, inv_den: f64) {
+    for v in xs {
+        *v = mu_law_compress_f64_fast(f64::from(*v), mu, inv_den) as f32;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn mu_compress_f32_slice_avx2(xs: &mut [f32], mu: f64, inv_den: f64) {
+    mu_compress_f32_slice_portable(xs, mu, inv_den);
+}
+
+/// `sign(x) ln(1 + mu |x|) / ln(1 + mu)` (as `... * inv_den`), for f32 samples
+/// widened to f64 (so `u = mu |x|` is exact for f32 `mu`).
+///
+/// For `u >= 2^-10` the logarithm is `ln(1 + u)` by [`ln_branch_free`]
+/// (`1 + u` is exact for `mu = 255` and otherwise rounds by at most 2^-53,
+/// a relative error below 2^-43 in the logarithm); below, the Taylor series
+/// of `log1p` to `u^7` (truncation below 2^-73 relative). Both are far more
+/// accurate than the final rounding to f32. Infinite and NaN input give the
+/// same result as `mu_law_compress_value`.
+#[inline(always)]
+fn mu_law_compress_f64_fast(x: f64, mu: f64, inv_den: f64) -> f64 {
+    let u = mu * x.abs();
+    let w = 1.0 + u;
+    let big = ln_branch_free(w);
+    let series = u
+        * (1.0
+            + u * (-0.5
+                + u * (1.0 / 3.0 + u * (-0.25 + u * (0.2 + u * (-1.0 / 6.0 + u * (1.0 / 7.0)))))));
+    let l = if u >= 1.0 / 1024.0 {
+        if w == f64::INFINITY { w } else { big }
+    } else {
+        series
+    };
+    let sign = if x == 0.0 { 0.0 } else { x.signum() };
+    sign * l * inv_den
 }
 
 /// `sign(y) / μ · ((1 + μ)^|y| - 1)`, evaluated as librosa does
@@ -1710,6 +1814,48 @@ mod tests {
         mutated.clip_in_place(-1.0, 1.0).unwrap();
 
         assert_mono_eq(&borrowed, &mutated);
+    }
+
+    #[test]
+    fn branch_free_ln_is_within_one_ulp_of_ln() {
+        let mut x = 1.0e-300_f64;
+        while x < 1.0e300 {
+            for v in [
+                x,
+                x * std::f64::consts::SQRT_2,
+                x * 1.414_213_562_373_096,
+                x * 1.999_999,
+            ] {
+                let (a, b) = (ln_branch_free(v), v.ln());
+                let ulp = f64::EPSILON * b.abs().max(f64::MIN_POSITIVE);
+                assert!((a - b).abs() <= ulp, "ln({v}): {a} vs {b}");
+            }
+            x *= 1.37;
+        }
+    }
+
+    #[test]
+    fn fast_mu_compress_agrees_with_the_reference_formula() {
+        let mut x = -1.0_f32;
+        while x <= 1.0 {
+            for v in [x, x * 1e-3, x * 1e-6, x * 1e-30] {
+                let v = f64::from(v);
+                let a = mu_law_compress_f64_fast(v, 255.0, 1.0 / 255.0_f64.ln_1p());
+                let b = mu_law_compress_value(v, 255.0);
+                assert!(
+                    (a - b).abs() <= 4.0 * f64::EPSILON * b.abs(),
+                    "{v}: {a} vs {b}"
+                );
+            }
+            x += 0.000_37;
+        }
+        let den = 1.0 / 255.0_f64.ln_1p();
+        assert_eq!(mu_law_compress_f64_fast(0.0, 255.0, den), 0.0);
+        assert!(mu_law_compress_f64_fast(f64::NAN, 255.0, den).is_nan());
+        assert_eq!(
+            mu_law_compress_f64_fast(f64::NEG_INFINITY, 255.0, den),
+            mu_law_compress_value(f64::NEG_INFINITY, 255.0)
+        );
     }
 
     /// Regression: `mu_compress` used `ln(μ|x| + ln(1 + μ))` instead of
