@@ -34,17 +34,29 @@
 //! conventions), and [`AudioEnvelopes`](crate::operations::traits::AudioEnvelopes) frames signals
 //! differently from librosa. Machine-learning pipelines and code ported from
 //! Python need librosa's per-frame features with its exact framing, centring and
-//! formulas. Every config here defaults to librosa's defaults, so
-//! `X::default()` gives librosa-equivalent output (to floating-point round-off).
+//! formulas. Every config has a `librosa()` constructor that returns librosa
+//! 1.0's defaults, so `X::librosa()` gives librosa-equivalent output (to
+//! floating-point round-off). `Default` currently equals `librosa()` for every
+//! config except [`PcenConfig`], which has no default: its hop length must equal
+//! the analysed spectrogram's ([`PcenConfig::new`]).
 //!
 //! ## How
 //!
 //! Bring [`AudioFeatures`] into scope and call it on any [`AudioSamples`]. Outputs
-//! are `f64` arrays shaped `(channels, n_features, n_frames)` exactly like
-//! librosa's `(..., n, t)`; per-frame scalars have `n_features == 1`. When several
+//! are arrays shaped `(channels, n_features, n_frames)` exactly like librosa's
+//! `(..., n, t)`; per-frame scalars have `n_features == 1`. When several
 //! features share one STFT, compute the magnitude spectrogram once with
 //! [`AudioSpectrum::spectrogram_matrix`] and call the `*_from_spectrogram`
 //! functions (librosa's `S=` argument).
+//!
+//! The output precision follows the input: the element type is the sample
+//! type's [`AudioSample::Float`](crate::AudioSample::Float). `u8`, `i16`, `I24`
+//! and `f32` audio gives `f32` arrays; `i32` and `f64` audio gives `f64`. The
+//! whole computation runs in that type. The free functions on arrays are
+//! generic over the element type ([`AudioFloat`]: `f32` or `f64`); their
+//! frequency arguments and config parameters stay `f64` and are rounded to the
+//! element type once. The frequency-weighting curves ([`a_weighting`], ...) are
+//! tables of frequency and return `f64`.
 //!
 //! ```rust
 //! use audio_samples::operations::features::{
@@ -56,11 +68,12 @@
 //! use audio_samples::{sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
-//! # // TRANSITIONAL(f64): f64 audio until the `*_from_spectrogram` functions are generic.
-//! let audio = sine_wave::<f64>(1000.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
+//! let audio = sine_wave::<f32>(1000.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
 //!
-//! // librosa.feature.spectral_centroid(y=y, sr=22050): (1, 1, 44).
+//! // librosa.feature.spectral_centroid(y=y, sr=22050): (1, 1, 44). f32 audio
+//! // gives f32 output.
 //! let centroid = audio.spectral_centroid_frames(&SpectralCentroidConfig::default()).unwrap();
+//! let _: &ndarray::Array3<f32> = &centroid;
 //! assert_eq!(centroid.dim(), (1, 1, 44));
 //! assert!((centroid[[0, 0, 20]] - 1000.0).abs() < 20.0);
 //!
@@ -78,9 +91,14 @@ use std::num::NonZeroUsize;
 use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis};
 use num_complex::Complex;
 
+use crate::audio_float::finite_float_rows;
 use crate::operations::filterbanks::{Window, padded_window};
-use crate::operations::spectrum::{DbConfig, StftConfig, StftPadMode, power_to_db, stft};
-use crate::{AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
+use crate::operations::spectrum::{
+    DbConfig, StftConfig, StftPadMode, power_to_db, spectrogram_rows, stft,
+};
+use crate::{
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
+};
 
 // =============================================================================
 // Shared helpers
@@ -99,9 +117,6 @@ fn range_err(parameter: &str, value: f64, min: &str, max: &str, reason: &str) ->
         parameter, value, min, max, reason,
     ))
 }
-
-// TRANSITIONAL(f64): `finite_audio_rows` / `spectrogram_rows` on f64 rows.
-use crate::operations::spectrum::{finite_audio_rows, spectrogram_rows};
 
 /// `numpy.fft.rfftfreq(n_fft, 1 / sr)`, rounded exactly as numpy does
 /// (`k * (1 / (n_fft * (1 / sr)))`), i.e. librosa's `fft_frequencies`.
@@ -126,7 +141,7 @@ fn validate_sample_rate(sample_rate: f64) -> AudioSampleResult<()> {
 
 /// librosa rejects negative (and, through `util.normalize`, non-finite) spectra in
 /// the spectral shape descriptors.
-fn check_spectrogram(what: &str, s: &ArrayView3<'_, f64>) -> AudioSampleResult<()> {
+fn check_spectrogram<F: AudioFloat>(what: &str, s: &ArrayView3<'_, F>) -> AudioSampleResult<()> {
     let (c, b, t) = s.dim();
     if c == 0 || b == 0 || t == 0 {
         return Err(config_err(
@@ -134,7 +149,7 @@ fn check_spectrogram(what: &str, s: &ArrayView3<'_, f64>) -> AudioSampleResult<(
             format!("the spectrogram must be non-empty, got shape ({c}, {b}, {t})"),
         ));
     }
-    if s.iter().any(|v| !(v.is_finite() && *v >= 0.0)) {
+    if s.iter().any(|v| !(v.is_finite() && *v >= F::zero())) {
         return Err(param_err(
             "spectrogram",
             format!("{what} is only defined for finite, non-negative spectrogram values"),
@@ -156,8 +171,14 @@ fn check_freq(what: &str, freq: &[f64], n_bins: usize) -> AudioSampleResult<()> 
     Ok(())
 }
 
+/// `f64::total_cmp` for `F` (exact: every `F` value converts to `f64` exactly
+/// and the conversion preserves the order, including signed zeros).
+fn total_cmp<F: AudioFloat>(a: &F, b: &F) -> std::cmp::Ordering {
+    a.as_f64().total_cmp(&b.as_f64())
+}
+
 /// `x^p` with numpy's exact fast paths for the common exponents.
-fn pow_np(x: f64, p: f64) -> f64 {
+fn pow_np<F: AudioFloat>(x: F, p: f64) -> F {
     if p == 1.0 {
         x
     } else if p == 2.0 {
@@ -165,7 +186,7 @@ fn pow_np(x: f64, p: f64) -> f64 {
     } else if p == 0.5 {
         x.sqrt()
     } else {
-        x.powf(p)
+        x.powf(F::of(p))
     }
 }
 
@@ -196,8 +217,8 @@ fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
 }
 
 /// Pads `x` by `pad` samples at both ends with `numpy.pad(mode)` semantics.
-fn pad_signal(x: &[f64], pad: usize, mode: StftPadMode) -> Vec<f64> {
-    let mut out = vec![0.0; x.len() + 2 * pad];
+fn pad_signal<F: AudioFloat>(x: &[F], pad: usize, mode: StftPadMode) -> Vec<F> {
+    let mut out = vec![F::zero(); x.len() + 2 * pad];
     out[pad..pad + x.len()].copy_from_slice(x);
     if mode != StftPadMode::Constant {
         for p in (0..pad).chain(pad + x.len()..out.len()) {
@@ -259,10 +280,20 @@ pub struct SpectralCentroidConfig {
 }
 
 impl SpectralCentroidConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.spectral_centroid` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+        }
     }
 
     /// Sets the STFT configuration.
@@ -334,10 +365,21 @@ impl Default for SpectralBandwidthConfig {
 }
 
 impl SpectralBandwidthConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.spectral_bandwidth` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT configuration.
@@ -419,10 +461,21 @@ impl Default for SpectralRolloffConfig {
 }
 
 impl SpectralRolloffConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.spectral_rolloff` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT configuration.
@@ -508,10 +561,21 @@ impl Default for SpectralFlatnessConfig {
 }
 
 impl SpectralFlatnessConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.spectral_flatness` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT configuration.
@@ -626,10 +690,21 @@ impl Default for SpectralContrastConfig {
 }
 
 impl SpectralContrastConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.spectral_contrast` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT configuration.
@@ -758,10 +833,21 @@ impl Default for PolyFeaturesConfig {
 }
 
 impl PolyFeaturesConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.poly_features` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT configuration.
@@ -810,19 +896,21 @@ impl PolyFeaturesConfig {
 ///
 /// Each frame is normalised to unit sum and the centroid is
 /// `sum_k f[k] * S[k] / sum_k S[k]`. Frames whose sum is below the smallest
-/// positive `f64` are left unnormalised (librosa `util.normalize`), so silent
-/// frames give 0.
+/// positive normal value of the element type are left unnormalised (librosa
+/// `util.normalize`), so silent frames give 0.
 ///
 /// # Arguments
 ///
-/// * `s` - `(channels, bins, frames)` magnitude (or power) spectrogram, finite and
-///   non-negative, e.g. from [`AudioSpectrum::spectrogram_matrix`] with power 1.
+/// * `s` - `(channels, bins, frames)` magnitude (or power) spectrogram of element
+///   type `F` (`f32` or `f64`), finite and non-negative, e.g. from
+///   [`AudioSpectrum::spectrogram_matrix`] with power 1.
 /// * `freq` - Centre frequency of each bin in Hz (length `bins`), e.g.
-///   [`fft_frequencies(n_fft, sr)`](crate::utils::audio_math::fft_frequencies).
+///   [`fft_frequencies(n_fft, sr)`](crate::utils::audio_math::fft_frequencies);
+///   rounded to `F` once.
 ///
 /// # Returns
 ///
-/// A `(channels, 1, frames)` array of centroids in Hz.
+/// A `(channels, 1, frames)` array of centroids in Hz, of element type `F`.
 ///
 /// # Errors
 ///
@@ -847,10 +935,10 @@ impl PolyFeaturesConfig {
 ///
 /// Klapuri and Davy, *Signal Processing Methods for Music Transcription*, 2007;
 /// librosa `feature.spectral_centroid`.
-pub fn spectral_centroid_from_spectrogram(
-    s: ArrayView3<'_, f64>,
+pub fn spectral_centroid_from_spectrogram<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     freq: &[f64],
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     check_spectrogram("spectral_centroid", &s)?;
     check_freq("spectral_centroid", freq, s.dim().1)?;
     Ok(centroid_unchecked(&s, freq))
@@ -858,25 +946,31 @@ pub fn spectral_centroid_from_spectrogram(
 
 /// `sum(S, axis=bins)` with `util.normalize`'s rule: sums below the smallest
 /// positive float are replaced by 1.
-fn l1_lengths(s: &ArrayView2<'_, f64>) -> Vec<f64> {
+fn l1_lengths<F: AudioFloat>(s: &ArrayView2<'_, F>) -> Vec<F> {
     let (n_bins, n_frames) = s.dim();
-    let mut len = vec![0.0; n_frames];
+    let mut len = vec![F::zero(); n_frames];
     for k in 0..n_bins {
         for (t, l) in len.iter_mut().enumerate() {
             *l += s[[k, t]].abs();
         }
     }
     for l in &mut len {
-        if *l < f64::MIN_POSITIVE {
-            *l = 1.0;
+        if *l < F::min_positive_value() {
+            *l = F::one();
         }
     }
     len
 }
 
-fn centroid_unchecked(s: &ArrayView3<'_, f64>, freq: &[f64]) -> Array3<f64> {
+/// `freq` rounded to `F`.
+fn freq_as<F: AudioFloat>(freq: &[f64]) -> Vec<F> {
+    freq.iter().map(|&f| F::of(f)).collect()
+}
+
+fn centroid_unchecked<F: AudioFloat>(s: &ArrayView3<'_, F>, freq: &[f64]) -> Array3<F> {
+    let freq = freq_as::<F>(freq);
     let (n_ch, n_bins, n_frames) = s.dim();
-    let mut out = Array3::<f64>::zeros((n_ch, 1, n_frames));
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     for c in 0..n_ch {
         let sc = s.index_axis(Axis(0), c);
         let len = l1_lengths(&sc);
@@ -897,7 +991,8 @@ fn centroid_unchecked(s: &ArrayView3<'_, f64>, freq: &[f64]) -> Array3<f64> {
 ///
 /// # Arguments
 ///
-/// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram.
+/// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram of element
+///   type `F` (`f32` or `f64`).
 /// * `freq` - Bin centre frequencies in Hz (length `bins`).
 /// * `centroid` - Optional precomputed `(channels, 1, frames)` centroid; `None`
 ///   computes it with [`spectral_centroid_from_spectrogram`].
@@ -905,7 +1000,7 @@ fn centroid_unchecked(s: &ArrayView3<'_, f64>, freq: &[f64]) -> Array3<f64> {
 ///
 /// # Returns
 ///
-/// A `(channels, 1, frames)` array in Hz.
+/// A `(channels, 1, frames)` array in Hz, of element type `F`.
 ///
 /// # Errors
 ///
@@ -928,12 +1023,12 @@ fn centroid_unchecked(s: &ArrayView3<'_, f64>, freq: &[f64]) -> Array3<f64> {
 /// ).unwrap();
 /// assert!((bw[[0, 0, 0]] - 50.0).abs() < 1e-12);
 /// ```
-pub fn spectral_bandwidth_from_spectrogram(
-    s: ArrayView3<'_, f64>,
+pub fn spectral_bandwidth_from_spectrogram<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     freq: &[f64],
-    centroid: Option<ArrayView3<'_, f64>>,
+    centroid: Option<ArrayView3<'_, F>>,
     config: &SpectralBandwidthConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     if !(config.p.is_finite() && config.p != 0.0) {
         return Err(param_err("p", "p must be finite and non-zero"));
     }
@@ -960,13 +1055,14 @@ pub fn spectral_bandwidth_from_spectrogram(
         }
     };
     let p = config.p;
-    let mut out = Array3::<f64>::zeros((n_ch, 1, n_frames));
+    let freq = freq_as::<F>(freq);
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     for c in 0..n_ch {
         let sc = s.index_axis(Axis(0), c);
         let len = if config.norm {
             l1_lengths(&sc)
         } else {
-            vec![1.0; n_frames]
+            vec![F::one(); n_frames]
         };
         for k in 0..n_bins {
             for t in 0..n_frames {
@@ -994,13 +1090,14 @@ pub fn spectral_bandwidth_from_spectrogram(
 ///
 /// # Arguments
 ///
-/// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram.
+/// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram of element
+///   type `F` (`f32` or `f64`).
 /// * `freq` - Bin centre frequencies in Hz (length `bins`).
 /// * `config` - Only `roll_percent` is used (`config.stft` is ignored).
 ///
 /// # Returns
 ///
-/// A `(channels, 1, frames)` array in Hz.
+/// A `(channels, 1, frames)` array in Hz, of element type `F`.
 ///
 /// # Errors
 ///
@@ -1021,11 +1118,11 @@ pub fn spectral_bandwidth_from_spectrogram(
 /// ).unwrap();
 /// assert_eq!(r[[0, 0, 0]], 10.0);
 /// ```
-pub fn spectral_rolloff_from_spectrogram(
-    s: ArrayView3<'_, f64>,
+pub fn spectral_rolloff_from_spectrogram<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     freq: &[f64],
     config: &SpectralRolloffConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let rp = config.roll_percent;
     if !(rp > 0.0 && rp < 1.0) {
         return Err(range_err(
@@ -1039,11 +1136,13 @@ pub fn spectral_rolloff_from_spectrogram(
     check_spectrogram("spectral_rolloff", &s)?;
     let (n_ch, n_bins, n_frames) = s.dim();
     check_freq("spectral_rolloff", freq, n_bins)?;
-    let mut out = Array3::<f64>::zeros((n_ch, 1, n_frames));
-    let mut cum = vec![0.0; n_bins];
+    let freq = freq_as::<F>(freq);
+    let rp = F::of(rp);
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let mut cum = vec![F::zero(); n_bins];
     for c in 0..n_ch {
         for t in 0..n_frames {
-            let mut acc = 0.0;
+            let mut acc = F::zero();
             for (k, v) in cum.iter_mut().enumerate() {
                 acc += s[[c, k, t]];
                 *v = acc;
@@ -1051,10 +1150,10 @@ pub fn spectral_rolloff_from_spectrogram(
             let threshold = rp * acc;
             out[[c, 0, t]] = cum
                 .iter()
-                .zip(freq)
+                .zip(&freq)
                 .filter(|(total, _)| **total >= threshold)
                 .map(|(_, f)| *f)
-                .fold(f64::NAN, f64::min);
+                .fold(F::nan(), F::min);
         }
     }
     Ok(out)
@@ -1068,12 +1167,13 @@ pub fn spectral_rolloff_from_spectrogram(
 /// # Arguments
 ///
 /// * `s` - `(channels, bins, frames)` finite, non-negative **magnitude**
-///   spectrogram (the exponent is applied here).
+///   spectrogram of element type `F` (`f32` or `f64`); the exponent is applied
+///   here.
 /// * `config` - Only `amin` and `power` are used (`config.stft` is ignored).
 ///
 /// # Returns
 ///
-/// A `(channels, 1, frames)` array with values in `(0, 1]`.
+/// A `(channels, 1, frames)` array with values in `(0, 1]`, of element type `F`.
 ///
 /// # Errors
 ///
@@ -1097,10 +1197,10 @@ pub fn spectral_rolloff_from_spectrogram(
 ///
 /// S. Dubnov, "Generalization of spectral flatness measure for non-gaussian linear
 /// processes," *IEEE Signal Processing Letters* 11(8), 2004.
-pub fn spectral_flatness_from_spectrogram(
-    s: ArrayView3<'_, f64>,
+pub fn spectral_flatness_from_spectrogram<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     config: &SpectralFlatnessConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     SpectralFlatnessConfig {
         stft: StftConfig::default(),
         ..config.clone()
@@ -1108,14 +1208,15 @@ pub fn spectral_flatness_from_spectrogram(
     .validate()?;
     check_spectrogram("spectral_flatness", &s)?;
     let (n_ch, n_bins, n_frames) = s.dim();
-    let mut out = Array3::<f64>::zeros((n_ch, 1, n_frames));
-    let n = n_bins as f64;
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let n = F::of_usize(n_bins);
+    let amin = F::of(config.amin);
     for c in 0..n_ch {
-        let mut log_sum = vec![0.0; n_frames];
-        let mut sum = vec![0.0; n_frames];
+        let mut log_sum = vec![F::zero(); n_frames];
+        let mut sum = vec![F::zero(); n_frames];
         for k in 0..n_bins {
             for t in 0..n_frames {
-                let p = config.amin.max(pow_np(s[[c, k, t]], config.power));
+                let p = amin.max(pow_np(s[[c, k, t]], config.power));
                 log_sum[t] += p.ln();
                 sum[t] += p;
             }
@@ -1140,14 +1241,16 @@ pub fn spectral_flatness_from_spectrogram(
 ///
 /// # Arguments
 ///
-/// * `s` - `(channels, bins, frames)` magnitude spectrogram (finite, non-negative).
-/// * `freq` - Bin centre frequencies in Hz (length `bins`).
+/// * `s` - `(channels, bins, frames)` magnitude spectrogram (finite, non-negative)
+///   of element type `F` (`f32` or `f64`).
+/// * `freq` - Bin centre frequencies in Hz (length `bins`); the band selection is
+///   done in `f64`.
 /// * `sample_rate` - Sampling rate in Hz (for the Nyquist check on the band edges).
 /// * `config` - `fmin`, `n_bands`, `quantile`, `linear` (`config.stft` is ignored).
 ///
 /// # Returns
 ///
-/// A `(channels, n_bands + 1, frames)` array: `peak - valley` if `linear`, else
+/// A `(channels, n_bands + 1, frames)` array of element type `F`: `peak - valley` if `linear`, else
 /// `power_to_db(peak) - power_to_db(valley)` with librosa's default dB settings
 /// (`ref = 1`, `amin = 1e-10`, `top_db = 80` per channel).
 ///
@@ -1184,12 +1287,12 @@ pub fn spectral_flatness_from_spectrogram(
 ///
 /// D.-N. Jiang, L. Lu, H.-J. Zhang, J.-H. Tao and L.-H. Cai, "Music type
 /// classification by spectral contrast feature," *Proc. ICME*, 2002.
-pub fn spectral_contrast_from_spectrogram(
-    s: ArrayView3<'_, f64>,
+pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     freq: &[f64],
     sample_rate: f64,
     config: &SpectralContrastConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     config.validate_params(sample_rate)?;
     check_spectrogram("spectral_contrast", &s)?;
     let (n_ch, n_bins, n_frames) = s.dim();
@@ -1202,8 +1305,8 @@ pub fn spectral_contrast_from_spectrogram(
         *o = config.fmin * 2f64.powi((k - 1) as i32);
     }
 
-    let mut valley = Array3::<f64>::zeros((n_ch, n_bands + 1, n_frames));
-    let mut peak = Array3::<f64>::zeros((n_ch, n_bands + 1, n_frames));
+    let mut valley = Array3::<F>::zeros((n_ch, n_bands + 1, n_frames));
+    let mut peak = Array3::<F>::zeros((n_ch, n_bands + 1, n_frames));
     let mut buf = Vec::new();
     for k in 0..=n_bands {
         let (f_low, f_high) = (octa[k], octa[k + 1]);
@@ -1239,17 +1342,17 @@ pub fn spectral_contrast_from_spectrogram(
                 // ascending order: partial selection, then sort just those.
                 let n = buf.len();
                 if 2 * m < n {
-                    buf.select_nth_unstable_by(m - 1, f64::total_cmp);
-                    buf[..m].sort_by(f64::total_cmp);
-                    buf[m..].select_nth_unstable_by(n - 2 * m, f64::total_cmp);
-                    buf[n - m..].sort_by(f64::total_cmp);
+                    buf.select_nth_unstable_by(m - 1, total_cmp);
+                    buf[..m].sort_by(total_cmp);
+                    buf[m..].select_nth_unstable_by(n - 2 * m, total_cmp);
+                    buf[n - m..].sort_by(total_cmp);
                 } else {
-                    buf.sort_by(f64::total_cmp);
+                    buf.sort_by(total_cmp);
                 }
-                let lo: f64 = buf[..m].iter().fold(0.0, |a, &v| a + v);
-                let hi: f64 = buf[n - m..].iter().fold(0.0, |a, &v| a + v);
-                valley[[c, k, t]] = lo / m as f64;
-                peak[[c, k, t]] = hi / m as f64;
+                let lo: F = buf[..m].iter().fold(F::zero(), |a, &v| a + v);
+                let hi: F = buf[n - m..].iter().fold(F::zero(), |a, &v| a + v);
+                valley[[c, k, t]] = lo / F::of_usize(m);
+                peak[[c, k, t]] = hi / F::of_usize(m);
             }
         }
     }
@@ -1278,18 +1381,22 @@ fn empty_band(k: usize, f_low: f64, f_high: f64) -> AudioSampleError {
 ///
 /// The Vandermonde matrix of `freq` (columns scaled to unit norm, as `numpy.polyfit`
 /// does) is factorised once with Householder QR and every frame is solved in the
-/// least-squares sense.
+/// least-squares sense. The factorisation depends only on `freq` and is computed
+/// in `f64`; it is rounded to the element type `F` once, and the per-frame solves
+/// run in `F`.
 ///
 /// # Arguments
 ///
-/// * `s` - `(channels, bins, frames)` spectrogram (any finite values).
+/// * `s` - `(channels, bins, frames)` spectrogram (any finite values) of element
+///   type `F` (`f32` or `f64`).
 /// * `freq` - Bin centre frequencies in Hz (length `bins`).
 /// * `config` - Only `order` is used (`config.stft` is ignored).
 ///
 /// # Returns
 ///
-/// A `(channels, order + 1, frames)` array of coefficients, highest degree first
-/// (row 0 is the `freq^order` coefficient, the last row the constant term).
+/// A `(channels, order + 1, frames)` array of coefficients of element type `F`,
+/// highest degree first (row 0 is the `freq^order` coefficient, the last row the
+/// constant term).
 ///
 /// # Errors
 ///
@@ -1314,11 +1421,11 @@ fn empty_band(k: usize, f_low: f64, f_high: f64) -> AudioSampleError {
 /// assert!((p[[0, 0, 0]] - 2.0).abs() < 1e-12); // slope
 /// assert!((p[[0, 1, 0]] - 1.0).abs() < 1e-12); // intercept
 /// ```
-pub fn poly_features_from_spectrogram(
-    s: ArrayView3<'_, f64>,
+pub fn poly_features_from_spectrogram<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     freq: &[f64],
     config: &PolyFeaturesConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let (n_ch, n_bins, n_frames) = s.dim();
     if n_ch == 0 || n_bins == 0 || n_frames == 0 {
         return Err(config_err(
@@ -1327,7 +1434,7 @@ pub fn poly_features_from_spectrogram(
         ));
     }
     check_freq("poly_features", freq, n_bins)?;
-    if s.iter().chain(freq).any(|v| !v.is_finite()) {
+    if s.iter().any(|v| !v.is_finite()) || freq.iter().any(|v| !v.is_finite()) {
         return Err(param_err(
             "spectrogram",
             "poly_features needs finite spectrogram values and frequencies",
@@ -1401,16 +1508,24 @@ pub fn poly_features_from_spectrogram(
         return Err(rank_deficient());
     }
 
-    let mut out = Array3::<f64>::zeros((n_ch, m, n_frames));
-    let mut y = vec![0.0; n_bins];
+    // The factorisation, rounded to F once.
+    let vs: Vec<Vec<F>> = vs
+        .iter()
+        .map(|v| v.iter().map(|&x| F::of(x)).collect())
+        .collect();
+    let betas: Vec<F> = betas.iter().map(|&b| F::of(b)).collect();
+    let a = a.mapv(F::of);
+    let scale: Vec<F> = scale.iter().map(|&x| F::of(x)).collect();
+    let mut out = Array3::<F>::zeros((n_ch, m, n_frames));
+    let mut y = vec![F::zero(); n_bins];
     for c in 0..n_ch {
         for t in 0..n_frames {
             for (k, yk) in y.iter_mut().enumerate() {
                 *yk = s[[c, k, t]];
             }
             for (j, (v, &beta)) in vs.iter().zip(&betas).enumerate() {
-                let dot: f64 = v.iter().zip(&y[j..]).map(|(a, b)| a * b).sum();
-                for (yi, vi) in y[j..].iter_mut().zip(v) {
+                let dot: F = v.iter().zip(&y[j..]).map(|(&a, &b)| a * b).sum();
+                for (yi, &vi) in y[j..].iter_mut().zip(v) {
                     *yi -= beta * dot * vi;
                 }
             }
@@ -1491,9 +1606,17 @@ impl Default for RmsConfig {
 }
 
 impl RmsConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's `feature.rms` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -1536,23 +1659,26 @@ impl RmsConfig {
 }
 
 /// Frame-wise RMS of every row of `signal`; see [`AudioFeatures::rms_frames`].
-fn rms_rows(signal: ArrayView2<'_, f64>, config: &RmsConfig) -> AudioSampleResult<Array3<f64>> {
+fn rms_rows<F: AudioFloat>(
+    signal: ArrayView2<'_, F>,
+    config: &RmsConfig,
+) -> AudioSampleResult<Array3<F>> {
     let (n_ch, len) = signal.dim();
     let fl = config.frame_length.get();
     let hop = config.hop_length.get();
     let pad = if config.center { fl / 2 } else { 0 };
     let n_frames = frame_count(len + 2 * pad, fl, hop)?;
-    let mut out = Array3::<f64>::zeros((n_ch, 1, n_frames));
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     for (c, row) in signal.outer_iter().enumerate() {
-        let x: Vec<f64> = row.to_vec();
+        let x: Vec<F> = row.to_vec();
         let xp = if pad > 0 {
             pad_signal(&x, pad, config.pad_mode)
         } else {
             x
         };
         for t in 0..n_frames {
-            let sum: f64 = xp[t * hop..t * hop + fl].iter().map(|v| v * v).sum();
-            out[[c, 0, t]] = (sum / fl as f64).sqrt();
+            let sum: F = xp[t * hop..t * hop + fl].iter().map(|&v| v * v).sum();
+            out[[c, 0, t]] = (sum / F::of_usize(fl)).sqrt();
         }
     }
     Ok(out)
@@ -1567,12 +1693,13 @@ fn rms_rows(signal: ArrayView2<'_, f64>, config: &RmsConfig) -> AudioSampleResul
 ///
 /// # Arguments
 ///
-/// * `s` - `(channels, frame_length / 2 + 1, frames)` STFT magnitudes.
+/// * `s` - `(channels, frame_length / 2 + 1, frames)` STFT magnitudes of element
+///   type `F` (`f32` or `f64`).
 /// * `frame_length` - The FFT length used to compute `s`.
 ///
 /// # Returns
 ///
-/// A `(channels, 1, frames)` array.
+/// A `(channels, 1, frames)` array of element type `F`.
 ///
 /// # Errors
 ///
@@ -1591,10 +1718,10 @@ fn rms_rows(signal: ArrayView2<'_, f64>, config: &RmsConfig) -> AudioSampleResul
 /// let r = rms_from_spectrogram(s.view(), nzu!(8)).unwrap();
 /// assert!((r[[0, 0, 0]] - 1.0).abs() < 1e-12);
 /// ```
-pub fn rms_from_spectrogram(
-    s: ArrayView3<'_, f64>,
+pub fn rms_from_spectrogram<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     frame_length: NonZeroUsize,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let (n_ch, n_bins, n_frames) = s.dim();
     let fl = frame_length.get();
     if n_bins != fl / 2 + 1 {
@@ -1607,18 +1734,19 @@ pub fn rms_from_spectrogram(
             ),
         ));
     }
-    let mut out = Array3::<f64>::zeros((n_ch, 1, n_frames));
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let (half, two, fl_f) = (F::of(0.5), F::of(2.0), F::of_usize(fl));
     for c in 0..n_ch {
         for t in 0..n_frames {
-            let mut sum = 0.0;
+            let mut sum = F::zero();
             for k in 0..n_bins {
                 let mut x = s[[c, k, t]] * s[[c, k, t]];
                 if k == 0 || (fl.is_multiple_of(2) && k == n_bins - 1) {
-                    x *= 0.5;
+                    x *= half;
                 }
                 sum += x;
             }
-            out[[c, 0, t]] = (2.0 * sum / (fl as f64 * fl as f64)).sqrt();
+            out[[c, 0, t]] = (two * sum / (fl_f * fl_f)).sqrt();
         }
     }
     Ok(out)
@@ -1701,9 +1829,18 @@ impl Default for ZeroCrossingRateConfig {
 }
 
 impl ZeroCrossingRateConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's `feature.zero_crossing_rate` defaults. Currently the same
+    /// as [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -1782,29 +1919,29 @@ impl ZeroCrossingRateConfig {
 }
 
 /// numpy's `sign` (NaN propagates).
-fn np_sign(x: f64) -> f64 {
-    if x > 0.0 {
-        1.0
-    } else if x < 0.0 {
-        -1.0
-    } else if x == 0.0 {
-        0.0
+fn np_sign<F: AudioFloat>(x: F) -> F {
+    if x > F::zero() {
+        F::one()
+    } else if x < F::zero() {
+        -F::one()
+    } else if x == F::zero() {
+        F::zero()
     } else {
-        f64::NAN
+        F::nan()
     }
 }
 
-fn zcr_rows(
-    signal: ArrayView2<'_, f64>,
+fn zcr_rows<F: AudioFloat>(
+    signal: ArrayView2<'_, F>,
     config: &ZeroCrossingRateConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     config.validate()?;
     let (n_ch, len) = signal.dim();
     let fl = config.frame_length.get();
     let hop = config.hop_length.get();
     let pad = if config.center { fl / 2 } else { 0 };
     let n_frames = frame_count(len + 2 * pad, fl, hop)?;
-    let padded: Vec<Vec<f64>> = signal
+    let padded: Vec<Vec<F>> = signal
         .outer_iter()
         .map(|row| {
             let x = row.to_vec();
@@ -1817,24 +1954,24 @@ fn zcr_rows(
         .collect();
     let covered = (n_frames - 1) * hop + fl;
     let threshold = match config.ref_magnitude {
-        ZeroCrossingReference::None => config.threshold,
-        ZeroCrossingReference::Value(v) => config.threshold * v,
+        ZeroCrossingReference::None => F::of(config.threshold),
+        ZeroCrossingReference::Value(v) => F::of(config.threshold * v),
         ZeroCrossingReference::Max => {
             let max = padded
                 .iter()
                 .flat_map(|x| x[..covered].iter())
-                .fold(f64::NEG_INFINITY, |m, v| m.max(v.abs()));
-            config.threshold * max
+                .fold(F::neg_infinity(), |m, v| m.max(v.abs()));
+            F::of(config.threshold) * max
         }
     };
-    let clean = |v: f64| {
+    let clean = |v: F| {
         if -threshold <= v && v <= threshold {
-            0.0
+            F::zero()
         } else {
             v
         }
     };
-    let mut out = Array3::<f64>::zeros((n_ch, 1, n_frames));
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     for (c, xp) in padded.iter().enumerate() {
         for t in 0..n_frames {
             let frame = &xp[t * hop..t * hop + fl];
@@ -1849,7 +1986,7 @@ fn zcr_rows(
                 };
                 count += usize::from(crossing);
             }
-            out[[c, 0, t]] = count as f64 / fl as f64;
+            out[[c, 0, t]] = F::of_usize(count) / F::of_usize(fl);
         }
     }
     Ok(out)
@@ -1872,10 +2009,13 @@ fn zcr_rows(
 /// ## Intended usage
 ///
 /// Pass to [`pcen`] / [`pcen_with_state`] with the sample rate of the analysed
-/// audio. [`Default`] is librosa's default (`gain = 0.98`, `bias = 2`,
-/// `power = 0.5`, `time_constant = 0.4` s, `eps = 1e-6`, `hop_length = 512`,
-/// `max_size = 1`). librosa recommends scaling integer-PCM-range input, e.g.
-/// `S * 2^31` for a mel spectrogram of `[-1, 1]` audio.
+/// audio. There is no `Default`: [`PcenConfig::new`] takes the hop length,
+/// which must be the hop of the spectrogram being normalised (it converts
+/// `time_constant` from seconds to frames). The other parameters take librosa's
+/// defaults (`gain = 0.98`, `bias = 2`, `power = 0.5`, `time_constant = 0.4` s,
+/// `eps = 1e-6`, `max_size = 1`). [`PcenConfig::librosa`] also sets librosa's
+/// default `hop_length = 512`. librosa recommends scaling integer-PCM-range
+/// input, e.g. `S * 2^31` for a mel spectrogram of `[-1, 1]` audio.
 ///
 /// ## Invariants
 ///
@@ -1886,17 +2026,20 @@ fn zcr_rows(
 /// # Examples
 ///
 /// ```rust
+/// use audio_samples::nzu;
 /// use audio_samples::operations::features::PcenConfig;
 ///
-/// let cfg = PcenConfig::new().with_power(0.25);
+/// let cfg = PcenConfig::new(nzu!(512)).with_power(0.25);
 /// // b from the time constant: 0.4 s at 22050 Hz / 512 hop.
 /// let b = cfg.smoothing_coefficient(22050.0).unwrap();
 /// assert!((b - 0.0573).abs() < 1e-3);
+/// assert_eq!(PcenConfig::librosa().hop_length.get(), 512);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct PcenConfig {
     /// Hop length of the spectrogram in samples; with the sample rate it converts
-    /// `time_constant` to frames.
+    /// `time_constant` to frames. Required ([`PcenConfig::new`]); librosa's
+    /// default is 512.
     pub hop_length: NonZeroUsize,
     /// Gain-normalisation exponent `alpha` (typically 0.7 to 1). Non-negative.
     pub gain: f64,
@@ -1916,10 +2059,15 @@ pub struct PcenConfig {
     pub max_size: NonZeroUsize,
 }
 
-impl Default for PcenConfig {
-    fn default() -> Self {
+impl PcenConfig {
+    /// PCEN for a spectrogram with hop length `hop_length`, with librosa's
+    /// defaults for the other parameters (`gain = 0.98`, `bias = 2`,
+    /// `power = 0.5`, `time_constant = 0.4` s, `eps = 1e-6`, `b` derived from
+    /// the time constant, `max_size = 1`).
+    #[must_use]
+    pub fn new(hop_length: NonZeroUsize) -> Self {
         Self {
-            hop_length: crate::nzu!(512),
+            hop_length,
             gain: 0.98,
             bias: 2.0,
             power: 0.5,
@@ -1929,13 +2077,12 @@ impl Default for PcenConfig {
             max_size: crate::nzu!(1),
         }
     }
-}
 
-impl PcenConfig {
-    /// Returns the librosa-default configuration.
+    /// librosa 1.0's `pcen` defaults, including `hop_length = 512` (the hop of
+    /// librosa's default STFT).
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn librosa() -> Self {
+        Self::new(crate::nzu!(512))
     }
 
     /// Sets the hop length.
@@ -2063,13 +2210,14 @@ impl PcenConfig {
 /// # Arguments
 ///
 /// * `s` - `(channels, bins, frames)` non-negative spectrogram (typically a mel
-///   power spectrogram).
+///   power spectrogram) of element type `F` (`f32` or `f64`).
 /// * `sample_rate` - Sample rate of the analysed audio in Hz.
-/// * `config` - PCEN parameters ([`PcenConfig::default`] = librosa defaults).
+/// * `config` - PCEN parameters ([`PcenConfig::new`] with the spectrogram's hop
+///   length, or [`PcenConfig::librosa`]).
 ///
 /// # Returns
 ///
-/// The PCEN-normalised spectrogram, same shape as `s`.
+/// The PCEN-normalised spectrogram, same shape and element type as `s`.
 ///
 /// # Errors
 ///
@@ -2082,7 +2230,7 @@ impl PcenConfig {
 /// use ndarray::Array3;
 ///
 /// let s = Array3::<f64>::from_elem((1, 4, 10), 1e3);
-/// let p = pcen(s.view(), 22050.0, &PcenConfig::default()).unwrap();
+/// let p = pcen(s.view(), 22050.0, &PcenConfig::librosa()).unwrap();
 /// assert_eq!(p.dim(), (1, 4, 10));
 /// assert!(p.iter().all(|v| v.is_finite() && *v >= 0.0));
 /// ```
@@ -2093,11 +2241,11 @@ impl PcenConfig {
 /// frontend for robust and far-field keyword spotting," *Proc. ICASSP*, 2017;
 /// V. Lostanlen et al., "Per-channel energy normalization: Why and how,"
 /// *IEEE Signal Processing Letters* 26(1), 2019.
-pub fn pcen(
-    s: ArrayView3<'_, f64>,
+pub fn pcen<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     sample_rate: f64,
     config: &PcenConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     pcen_with_state(s, sample_rate, config, None, None).map(|(out, _)| out)
 }
 
@@ -2114,6 +2262,10 @@ pub fn pcen(
 /// 4. `power == 0`: `ln1p(S G)`; `bias == 0`: `exp(power (ln S + ln G))`;
 ///    otherwise `bias^power expm1(power ln1p(S G / bias))`.
 ///
+/// The smoothing filter and the compression run in the element type `F` of
+/// `s` (`f32` or `f64`); `b` and the other parameters are computed in `f64`
+/// and rounded to `F` once.
+///
 /// # Arguments
 ///
 /// * `s` - `(channels, bins, frames)` spectrogram.
@@ -2127,7 +2279,7 @@ pub fn pcen(
 /// # Returns
 ///
 /// `(pcen, zf)`: the normalised spectrogram and the `(channels, bins)` final filter
-/// state.
+/// state, both of element type `F`.
 ///
 /// # Errors
 ///
@@ -2137,11 +2289,12 @@ pub fn pcen(
 /// # Examples
 ///
 /// ```rust
+/// use audio_samples::nzu;
 /// use audio_samples::operations::features::{PcenConfig, pcen, pcen_with_state};
 /// use ndarray::{Array3, s};
 ///
 /// let x = Array3::from_shape_fn((1, 3, 20), |(_, k, t)| 1.0 + (k + t) as f64);
-/// let cfg = PcenConfig::default();
+/// let cfg = PcenConfig::new(nzu!(512));
 /// let whole = pcen(x.view(), 22050.0, &cfg).unwrap();
 /// // Streaming in two blocks gives the same result.
 /// let (a, zf) = pcen_with_state(x.slice(s![.., .., ..8]), 22050.0, &cfg, None, None).unwrap();
@@ -2149,14 +2302,15 @@ pub fn pcen(
 /// assert!((a[[0, 1, 7]] - whole[[0, 1, 7]]).abs() < 1e-12);
 /// assert!((b[[0, 1, 0]] - whole[[0, 1, 8]]).abs() < 1e-12);
 /// ```
-pub fn pcen_with_state(
-    s: ArrayView3<'_, f64>,
+pub fn pcen_with_state<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     sample_rate: f64,
     config: &PcenConfig,
-    reference: Option<ArrayView3<'_, f64>>,
-    zi: Option<ArrayView2<'_, f64>>,
-) -> AudioSampleResult<(Array3<f64>, Array2<f64>)> {
-    let b = config.smoothing_coefficient(sample_rate)?;
+    reference: Option<ArrayView3<'_, F>>,
+    zi: Option<ArrayView2<'_, F>>,
+) -> AudioSampleResult<(Array3<F>, Array2<F>)> {
+    let b64 = config.smoothing_coefficient(sample_rate)?;
+    let b = F::of(b64);
     let (n_ch, n_bins, n_frames) = s.dim();
     let filtered;
     let reference = match reference {
@@ -2186,31 +2340,38 @@ pub fn pcen_with_state(
             z.to_owned()
         }
         None => {
-            // scipy.signal.lfilter_zi([b], [1, b - 1]) evaluated as SciPy does.
-            let a1 = b - 1.0;
-            let y_inf = b / (1.0 + a1);
-            Array2::from_elem((n_ch, n_bins), 0.0 - y_inf * a1)
+            // scipy.signal.lfilter_zi([b], [1, b - 1]) evaluated as SciPy does
+            // (in f64, as SciPy does for the float64 coefficients).
+            let a1 = b64 - 1.0;
+            let y_inf = b64 / (1.0 + a1);
+            Array2::from_elem((n_ch, n_bins), F::of(0.0 - y_inf * a1))
         }
     };
-    let a1 = b - 1.0;
-    let ln_eps = config.eps.ln();
-    let bias_pow = config.bias.powf(config.power);
-    let mut out = Array3::<f64>::zeros((n_ch, n_bins, n_frames));
+    let a1 = F::of(b64 - 1.0);
+    let ln_eps = F::of(config.eps.ln());
+    let bias_pow = F::of(config.bias.powf(config.power));
+    let (gain, eps, power, bias) = (
+        F::of(config.gain),
+        F::of(config.eps),
+        F::of(config.power),
+        F::of(config.bias),
+    );
+    let mut out = Array3::<F>::zeros((n_ch, n_bins, n_frames));
     for c in 0..n_ch {
         for k in 0..n_bins {
             let mut z = state[[c, k]];
             for t in 0..n_frames {
                 // Direct-form II transposed, as scipy.signal.lfilter.
                 let m = b * reference[[c, k, t]] + z;
-                z = 0.0 * reference[[c, k, t]] - a1 * m;
-                let smooth = (-config.gain * (ln_eps + (m / config.eps).ln_1p())).exp();
+                z = F::zero() * reference[[c, k, t]] - a1 * m;
+                let smooth = (-gain * (ln_eps + (m / eps).ln_1p())).exp();
                 let x = s[[c, k, t]];
                 out[[c, k, t]] = if config.power == 0.0 {
                     (x * smooth).ln_1p()
                 } else if config.bias == 0.0 {
-                    (config.power * (x.ln() + smooth.ln())).exp()
+                    (power * (x.ln() + smooth.ln())).exp()
                 } else {
-                    bias_pow * (config.power * (x * smooth / config.bias).ln_1p()).exp_m1()
+                    bias_pow * (power * (x * smooth / bias).ln_1p()).exp_m1()
                 };
             }
             state[[c, k]] = z;
@@ -2222,18 +2383,18 @@ pub fn pcen_with_state(
 /// `scipy.ndimage.maximum_filter1d(S, size, axis=bins)` with mode `reflect`
 /// (numpy `symmetric`): output bin `i` is the maximum over bins
 /// `i - size / 2 ..= i + (size - 1) / 2`.
-fn maximum_filter_bins(s: &ArrayView3<'_, f64>, size: usize) -> Array3<f64> {
+fn maximum_filter_bins<F: AudioFloat>(s: &ArrayView3<'_, F>, size: usize) -> Array3<F> {
     let (n_ch, n_bins, n_frames) = s.dim();
     let lo = (size / 2) as isize;
     // A window of 2 * n_bins or more covers a whole symmetric-padding period
     // and so sees every value of the column (NaN included): scanning one
     // period gives the same result and bounds the work for a huge `max_size`.
     let span = size.min(2 * n_bins) as isize;
-    let mut out = Array3::<f64>::zeros((n_ch, n_bins, n_frames));
+    let mut out = Array3::<F>::zeros((n_ch, n_bins, n_frames));
     for c in 0..n_ch {
         for k in 0..n_bins {
             for t in 0..n_frames {
-                let mut m = f64::NEG_INFINITY;
+                let mut m = F::neg_infinity();
                 for j in 0..span {
                     let src = pad_source_index(k as isize - lo + j, n_bins, StftPadMode::Symmetric)
                         .expect("symmetric padding always has a source");
@@ -2568,15 +2729,17 @@ pub fn multi_frequency_weighting(
 /// # Arguments
 ///
 /// * `s` - `(channels, bins, frames)` power spectrogram (e.g. `|STFT|^2`, a CQT
-///   power, ...).
+///   power, ...) of element type `F` (`f32` or `f64`).
 /// * `frequencies` - Centre frequency of each bin in Hz (length `bins`).
 /// * `kind` - Weighting curve (librosa default A).
-/// * `db` - dB conversion settings (`DbConfig::default()` = `power_to_db`'s defaults:
-///   `ref = 1`, `amin = 1e-10`, `top_db = 80`).
+/// * `db` - dB conversion settings. [`DbConfig::librosa_power`] gives librosa's
+///   `power_to_db` defaults (`ref = 1`, `amin = 1e-10`, `top_db = 80`);
+///   [`DbConfig::default`] applies no `top_db` floor.
 ///
 /// # Returns
 ///
-/// A `(channels, bins, frames)` array in dB.
+/// A `(channels, bins, frames)` array in dB, of element type `F`. The weighting
+/// curve is computed in `f64` and rounded to `F` once.
 ///
 /// # Errors
 ///
@@ -2595,15 +2758,15 @@ pub fn multi_frequency_weighting(
 ///     .unwrap();
 /// assert!(w[[0, 0, 0]] < -15.0); // 100 Hz is strongly attenuated by A-weighting
 /// ```
-pub fn perceptual_weighting(
-    s: ArrayView3<'_, f64>,
+pub fn perceptual_weighting<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
     frequencies: &[f64],
     kind: FrequencyWeighting,
     db: &DbConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let n_bins = s.dim().1;
     check_freq("perceptual_weighting", frequencies, n_bins)?;
-    let offset = frequency_weighting(frequencies, kind, Some(-80.0));
+    let offset = freq_as::<F>(&frequency_weighting(frequencies, kind, Some(-80.0)));
     let mut out = power_to_db(&s, db)?;
     for mut ch in out.outer_iter_mut() {
         for (mut row, &o) in ch.outer_iter_mut().zip(&offset) {
@@ -2689,10 +2852,22 @@ impl Default for ReassignedSpectrogramConfig {
 }
 
 impl ReassignedSpectrogramConfig {
-    /// Returns the librosa-default configuration.
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `reassigned_spectrogram` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            stft: StftConfig::librosa(),
+            ..Self::default()
+        }
     }
 
     /// Sets the STFT configuration.
@@ -2766,45 +2941,46 @@ impl ReassignedSpectrogramConfig {
 }
 
 /// Output of [`AudioFeatures::reassigned_spectrogram`]: per-cell reassigned
-/// frequencies and times plus the STFT magnitudes, each `(channels, bins, frames)`.
+/// frequencies and times plus the STFT magnitudes, each `(channels, bins, frames)`
+/// of element type `F` (the audio's [`AudioFeatures::Float`]).
 ///
 /// Thresholded or undefined cells hold `NaN` unless `fill_nan` was set.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReassignedSpectrogram {
+pub struct ReassignedSpectrogram<F = f64> {
     /// Reassigned frequency of each cell in Hz.
-    pub freqs: Array3<f64>,
+    pub freqs: Array3<F>,
     /// Reassigned time of each cell in seconds.
-    pub times: Array3<f64>,
+    pub times: Array3<F>,
     /// STFT magnitude `|S|` of each cell.
-    pub mags: Array3<f64>,
+    pub mags: Array3<F>,
 }
 
 /// Complex division with numpy's algorithm (Smith's method, and numpy's handling of
 /// a zero divisor), so `0 / 0` and `x / 0` give the same NaN / inf as librosa.
-fn np_cdiv(a: Complex<f64>, b: Complex<f64>) -> Complex<f64> {
+fn np_cdiv<F: AudioFloat>(a: Complex<F>, b: Complex<F>) -> Complex<F> {
     let (ar, ai, br, bi) = (a.re, a.im, b.re, b.im);
     let abs_br = br.abs();
     let abs_bi = bi.abs();
     if abs_br >= abs_bi {
-        if abs_br == 0.0 && abs_bi == 0.0 {
+        if abs_br == F::zero() && abs_bi == F::zero() {
             Complex::new(ar / abs_br, ai / abs_bi)
         } else {
             let rat = bi / br;
-            let scl = 1.0 / (br + bi * rat);
+            let scl = F::one() / (br + bi * rat);
             Complex::new((ar + ai * rat) * scl, (ai - ar * rat) * scl)
         }
     } else {
         let rat = br / bi;
-        let scl = 1.0 / (bi + br * rat);
+        let scl = F::one() / (bi + br * rat);
         Complex::new((ar * rat + ai) * scl, (ai * rat - ar) * scl)
     }
 }
 
-fn reassigned_rows(
-    y: ArrayView2<'_, f64>,
+fn reassigned_rows<F: AudioFloat>(
+    y: ArrayView2<'_, F>,
     sample_rate: f64,
     config: &ReassignedSpectrogramConfig,
-) -> AudioSampleResult<ReassignedSpectrogram> {
+) -> AudioSampleResult<ReassignedSpectrogram<F>> {
     config.validate()?;
     validate_sample_rate(sample_rate)?;
     let n_fft = config.stft.n_fft.get();
@@ -2822,16 +2998,18 @@ fn reassigned_rows(
         ..config.stft.clone()
     };
 
-    let bin_freqs = rfft_frequencies(n_fft, sample_rate);
+    // Bin frequencies and frame times are computed in f64 and rounded to F once.
+    let bin_freqs = freq_as::<F>(&rfft_frequencies(n_fft, sample_rate));
     let offset = if config.stft.center { 0 } else { n_fft / 2 };
-    let frame_times: Vec<f64> = (0..n_frames)
-        .map(|t| (t * hop + offset) as f64 / sample_rate)
+    let frame_times: Vec<F> = (0..n_frames)
+        .map(|t| F::of((t * hop + offset) as f64 / sample_rate))
         .collect();
+    let (sr, nyquist) = (F::of(sample_rate), F::of(sample_rate / 2.0));
 
     let mags = s_h.mapv(|z| z.norm());
     let ref_p = match config.ref_power {
-        ReassignRefPower::Value(v) => v,
-        ReassignRefPower::Max => mags.iter().fold(f64::NEG_INFINITY, |m, &a| m.max(a * a)),
+        ReassignRefPower::Value(v) => F::of(v),
+        ReassignRefPower::Max => mags.iter().fold(F::neg_infinity(), |m, &a| m.max(a * a)),
     };
     let thresh = ref_p.sqrt();
     let low = |c: usize, k: usize, t: usize| mags[[c, k, t]] < thresh;
@@ -2843,19 +3021,19 @@ fn reassigned_rows(
             .map(|n| (w[(n + 1) % n_fft] - w[(n + n_fft - 1) % n_fft]) / 2.0)
             .collect();
         let s_dh = stft(y, &custom(deriv))?;
-        let scale = 0.5 * sample_rate / std::f64::consts::PI;
-        let mut f = Array3::<f64>::zeros((n_ch, n_bins, n_frames));
+        let scale = F::of(0.5 * sample_rate / std::f64::consts::PI);
+        let mut f = Array3::<F>::zeros((n_ch, n_bins, n_frames));
         for ((c, k, t), v) in f.indexed_iter_mut() {
             let correction = -np_cdiv(s_dh[[c, k, t]], s_h[[c, k, t]]).im;
             let mut x = bin_freqs[k] + correction * scale;
-            if ref_p > 0.0 && low(c, k, t) {
-                x = f64::NAN;
+            if ref_p > F::zero() && low(c, k, t) {
+                x = F::nan();
             }
             if config.fill_nan && x.is_nan() {
                 x = bin_freqs[k];
             }
             if config.clip {
-                x = x.clamp(0.0, sample_rate / 2.0);
+                x = x.clamp(F::zero(), nyquist);
             }
             *v = x;
         }
@@ -2878,19 +3056,19 @@ fn reassigned_rows(
             })
             .collect();
         let s_th = stft(y, &custom(weighted))?;
-        let duration = y.ncols() as f64 / sample_rate;
-        let mut tt = Array3::<f64>::zeros((n_ch, n_bins, n_frames));
+        let duration = F::of(y.ncols() as f64 / sample_rate);
+        let mut tt = Array3::<F>::zeros((n_ch, n_bins, n_frames));
         for ((c, k, t), v) in tt.indexed_iter_mut() {
             let correction = np_cdiv(s_th[[c, k, t]], s_h[[c, k, t]]).re;
-            let mut x = frame_times[t] + correction / sample_rate;
-            if ref_p > 0.0 && low(c, k, t) {
-                x = f64::NAN;
+            let mut x = frame_times[t] + correction / sr;
+            if ref_p > F::zero() && low(c, k, t) {
+                x = F::nan();
             }
             if config.fill_nan && x.is_nan() {
                 x = frame_times[t];
             }
             if config.clip {
-                x = x.clamp(0.0, duration);
+                x = x.clamp(F::zero(), duration);
             }
             *v = x;
         }
@@ -2909,15 +3087,21 @@ fn reassigned_rows(
 /// librosa-compatible frame-wise features on [`AudioSamples`].
 ///
 /// Every method works on all channels: outputs are shaped
-/// `(channels, n_features, n_frames)` (mono gives one channel), always `f64`. Each
-/// config's `Default` reproduces librosa 1.0's defaults. See the
-/// [module documentation](self) for the librosa correspondence and the
+/// `(channels, n_features, n_frames)` (mono gives one channel). Outputs have the
+/// element type [`Float`](Self::Float): `f32` for `u8`, `i16`, `I24` and `f32`
+/// audio, `f64` for `i32` and `f64` audio. The computation runs in that type.
+/// Each config's `librosa()` constructor reproduces librosa 1.0's defaults. See
+/// the [module documentation](self) for the librosa correspondence and the
 /// `*_from_spectrogram` forms that reuse a precomputed spectrogram.
 ///
 /// The whole-signal scalar descriptors of [`AudioStatistics`](crate::AudioStatistics)
 /// (`spectral_centroid`, `zero_crossing_rate`, ...) are unchanged; they summarise a
 /// signal with one number and are different features.
 pub trait AudioFeatures {
+    /// The float type of the outputs and of the computation: the sample type's
+    /// [`AudioSample::Float`](crate::AudioSample::Float).
+    type Float: AudioFloat;
+
     /// Computes the spectral centroid of every frame, equivalent to
     /// `librosa.feature.spectral_centroid(y=y, sr=sr, ...)`.
     ///
@@ -2953,7 +3137,7 @@ pub trait AudioFeatures {
     fn spectral_centroid_frames(
         &self,
         config: &SpectralCentroidConfig,
-    ) -> AudioSampleResult<Array3<f64>>;
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the order-`p` spectral bandwidth of every frame, equivalent to
     /// `librosa.feature.spectral_bandwidth(y=y, sr=sr, p=p, norm=norm, ...)`.
@@ -2989,7 +3173,7 @@ pub trait AudioFeatures {
     fn spectral_bandwidth_frames(
         &self,
         config: &SpectralBandwidthConfig,
-    ) -> AudioSampleResult<Array3<f64>>;
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the spectral rolloff of every frame, equivalent to
     /// `librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=..., ...)`.
@@ -3025,7 +3209,7 @@ pub trait AudioFeatures {
     fn spectral_rolloff_frames(
         &self,
         config: &SpectralRolloffConfig,
-    ) -> AudioSampleResult<Array3<f64>>;
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the spectral flatness of every frame, equivalent to
     /// `librosa.feature.spectral_flatness(y=y, amin=..., power=..., ...)`.
@@ -3061,7 +3245,7 @@ pub trait AudioFeatures {
     fn spectral_flatness_frames(
         &self,
         config: &SpectralFlatnessConfig,
-    ) -> AudioSampleResult<Array3<f64>>;
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the spectral contrast of every frame, equivalent to
     /// `librosa.feature.spectral_contrast(y=y, sr=sr, ...)`.
@@ -3098,7 +3282,7 @@ pub trait AudioFeatures {
     fn spectral_contrast_frames(
         &self,
         config: &SpectralContrastConfig,
-    ) -> AudioSampleResult<Array3<f64>>;
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Fits a polynomial to every magnitude-spectrum frame, equivalent to
     /// `librosa.feature.poly_features(y=y, sr=sr, order=..., ...)`.
@@ -3130,7 +3314,7 @@ pub trait AudioFeatures {
     /// let p = x.poly_features(&PolyFeaturesConfig::new().with_order(2)).unwrap();
     /// assert_eq!(p.dim(), (1, 3, 22));
     /// ```
-    fn poly_features(&self, config: &PolyFeaturesConfig) -> AudioSampleResult<Array3<f64>>;
+    fn poly_features(&self, config: &PolyFeaturesConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the RMS of every frame, equivalent to
     /// `librosa.feature.rms(y=y, frame_length=..., hop_length=..., center=..., pad_mode=...)`.
@@ -3154,9 +3338,11 @@ pub trait AudioFeatures {
     ///
     /// # Differences from librosa
     ///
-    /// librosa computes the mean square in `float32` by default (`dtype=np.float32`)
-    /// and returns `float32`; this computes in `f64` (librosa with
-    /// `dtype=np.float64`). The difference is about 1e-7 relative.
+    /// librosa computes the mean square in `float32` by default
+    /// (`dtype=np.float32`) and returns `float32`, whatever the input type. Here
+    /// the computation runs in [`Float`](Self::Float): `f32` audio matches
+    /// librosa's default to `f32` round-off, and `f64` audio matches librosa with
+    /// `dtype=np.float64`.
     ///
     /// # Examples
     ///
@@ -3170,7 +3356,7 @@ pub trait AudioFeatures {
     /// assert_eq!(r.dim(), (1, 1, 44));
     /// assert!((r[[0, 0, 20]] - 0.5f64.sqrt()).abs() < 1e-3);
     /// ```
-    fn rms_frames(&self, config: &RmsConfig) -> AudioSampleResult<Array3<f64>>;
+    fn rms_frames(&self, config: &RmsConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the zero-crossing rate of every frame, equivalent to
     /// `librosa.feature.zero_crossing_rate(y, frame_length=..., hop_length=..., center=..., ...)`.
@@ -3210,7 +3396,7 @@ pub trait AudioFeatures {
     fn zero_crossing_rate_frames(
         &self,
         config: &ZeroCrossingRateConfig,
-    ) -> AudioSampleResult<Array3<f64>>;
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the time-frequency reassigned spectrogram, equivalent to
     /// `librosa.reassigned_spectrogram(y=y, sr=sr, ...)`.
@@ -3258,20 +3444,21 @@ pub trait AudioFeatures {
     fn reassigned_spectrogram(
         &self,
         config: &ReassignedSpectrogramConfig,
-    ) -> AudioSampleResult<ReassignedSpectrogram>;
+    ) -> AudioSampleResult<ReassignedSpectrogram<Self::Float>>;
 }
 
 impl<T> AudioFeatures for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
+    type Float = T::Float;
+
     fn spectral_centroid_frames(
         &self,
         config: &SpectralCentroidConfig,
-    ) -> AudioSampleResult<Array3<f64>> {
+    ) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         spectral_centroid_from_spectrogram(s.view(), &freq)
     }
@@ -3279,10 +3466,9 @@ where
     fn spectral_bandwidth_frames(
         &self,
         config: &SpectralBandwidthConfig,
-    ) -> AudioSampleResult<Array3<f64>> {
+    ) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         spectral_bandwidth_from_spectrogram(s.view(), &freq, None, config)
     }
@@ -3290,10 +3476,9 @@ where
     fn spectral_rolloff_frames(
         &self,
         config: &SpectralRolloffConfig,
-    ) -> AudioSampleResult<Array3<f64>> {
+    ) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         spectral_rolloff_from_spectrogram(s.view(), &freq, config)
     }
@@ -3301,51 +3486,48 @@ where
     fn spectral_flatness_frames(
         &self,
         config: &SpectralFlatnessConfig,
-    ) -> AudioSampleResult<Array3<f64>> {
+    ) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 1.0)?;
         spectral_flatness_from_spectrogram(s.view(), config)
     }
 
     fn spectral_contrast_frames(
         &self,
         config: &SpectralContrastConfig,
-    ) -> AudioSampleResult<Array3<f64>> {
+    ) -> AudioSampleResult<Array3<T::Float>> {
         let sr = self.sample_rate_hz();
         config.validate(sr)?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), sr);
         spectral_contrast_from_spectrogram(s.view(), &freq, sr, config)
     }
 
-    fn poly_features(&self, config: &PolyFeaturesConfig) -> AudioSampleResult<Array3<f64>> {
+    fn poly_features(&self, config: &PolyFeaturesConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let s = spectrogram_rows(finite_audio_rows(self)?.view(), &config.stft, 1.0)?;
+        let s = spectrogram_rows(finite_float_rows(self)?.view(), &config.stft, 1.0)?;
         let freq = rfft_frequencies(config.stft.n_fft.get(), self.sample_rate_hz());
         poly_features_from_spectrogram(s.view(), &freq, config)
     }
 
-    fn rms_frames(&self, config: &RmsConfig) -> AudioSampleResult<Array3<f64>> {
+    fn rms_frames(&self, config: &RmsConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate()?;
-        rms_rows(finite_audio_rows(self)?.view(), config)
+        rms_rows(finite_float_rows(self)?.view(), config)
     }
 
     fn zero_crossing_rate_frames(
         &self,
         config: &ZeroCrossingRateConfig,
-    ) -> AudioSampleResult<Array3<f64>> {
-        zcr_rows(finite_audio_rows(self)?.view(), config)
+    ) -> AudioSampleResult<Array3<T::Float>> {
+        zcr_rows(finite_float_rows(self)?.view(), config)
     }
 
     fn reassigned_spectrogram(
         &self,
         config: &ReassignedSpectrogramConfig,
-    ) -> AudioSampleResult<ReassignedSpectrogram> {
+    ) -> AudioSampleResult<ReassignedSpectrogram<T::Float>> {
         reassigned_rows(
-            finite_audio_rows(self)?.view(),
+            finite_float_rows(self)?.view(),
             self.sample_rate_hz(),
             config,
         )
@@ -3355,6 +3537,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AudioTypeConversion;
     use crate::operations::spectrum::AudioSpectrum;
     use crate::sample_rate;
     use ndarray::{Array1, array, s};
@@ -3539,24 +3722,24 @@ mod tests {
         );
         assert!(
             pcen(
-                Array3::zeros((1, 2, 3)).view(),
+                Array3::<f64>::zeros((1, 2, 3)).view(),
                 22050.0,
-                &PcenConfig::new().with_eps(0.0)
+                &PcenConfig::librosa().with_eps(0.0)
             )
             .is_err()
         );
         assert!(
             pcen(
-                Array3::zeros((1, 2, 3)).view(),
+                Array3::<f64>::zeros((1, 2, 3)).view(),
                 22050.0,
-                &PcenConfig::new().with_b(Some(1.5))
+                &PcenConfig::librosa().with_b(Some(1.5))
             )
             .is_err()
         );
         let neg = Array3::from_elem((1, 3, 2), -1.0);
         assert!(spectral_centroid_from_spectrogram(neg.view(), &[0.0, 1.0, 2.0]).is_err());
         assert!(
-            spectral_centroid_from_spectrogram(Array3::ones((1, 3, 2)).view(), &[0.0, 1.0])
+            spectral_centroid_from_spectrogram(Array3::<f64>::ones((1, 3, 2)).view(), &[0.0, 1.0])
                 .is_err()
         );
         assert!(
@@ -3571,7 +3754,7 @@ mod tests {
 
     #[test]
     fn rolloff_and_flatness_hand_values() {
-        let s = array![[[0.0, 1.0], [0.0, 3.0], [0.0, 0.0], [0.0, 4.0]]];
+        let s = array![[[0.0_f64, 1.0], [0.0, 3.0], [0.0, 0.0], [0.0, 4.0]]];
         let freq = [0.0, 10.0, 20.0, 30.0];
         let r =
             spectral_rolloff_from_spectrogram(s.view(), &freq, &SpectralRolloffConfig::default())
@@ -3612,7 +3795,7 @@ mod tests {
         // Duplicate frequencies: rank deficient.
         assert!(
             poly_features_from_spectrogram(
-                Array3::ones((1, 3, 1)).view(),
+                Array3::<f64>::ones((1, 3, 1)).view(),
                 &[1.0, 1.0, 1.0],
                 &PolyFeaturesConfig::default()
             )
@@ -3624,7 +3807,7 @@ mod tests {
     fn pcen_constant_input_and_streaming() {
         // Steady state: M = S everywhere when S is the unit input matching zi.
         let s = Array3::<f64>::ones((1, 2, 30));
-        let cfg = PcenConfig::default();
+        let cfg = PcenConfig::librosa();
         let p = pcen(s.view(), 22050.0, &cfg).unwrap();
         let g = (1e-6f64 + 1.0).powf(-0.98);
         let expected = 2f64.sqrt() * ((1.0 + g / 2.0).sqrt() - 1.0);
@@ -3724,5 +3907,65 @@ mod tests {
             .reassigned_spectrogram(&ReassignedSpectrogramConfig::default())
             .unwrap();
         assert!(raw.freqs.iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn output_type_follows_sample_type_and_f32_agrees_with_f64() {
+        let x: Vec<f64> = noise(8192, 9)
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 0.4 * (0.07 * i as f64).sin() + 0.3 * v)
+            .collect();
+        let a64 = mono(x);
+        let a16 = a64.to_format::<i16>();
+        let r = a16.to_format::<f64>();
+        let c32: Array3<f32> = a16
+            .spectral_centroid_frames(&SpectralCentroidConfig::default())
+            .unwrap();
+        let c64 = r
+            .spectral_centroid_frames(&SpectralCentroidConfig::default())
+            .unwrap();
+        let rms32: Array3<f32> = a16.rms_frames(&RmsConfig::default()).unwrap();
+        let rms64 = r.rms_frames(&RmsConfig::default()).unwrap();
+        let reas: ReassignedSpectrogram<f32> = a16
+            .reassigned_spectrogram(&ReassignedSpectrogramConfig::default())
+            .unwrap();
+        assert_eq!(reas.mags.dim().1, 1025);
+        let i32_out: Array3<f64> = a64
+            .to_format::<i32>()
+            .rms_frames(&RmsConfig::default())
+            .unwrap();
+        assert_eq!(i32_out.dim(), rms64.dim());
+        // f32 round-off of the FFT (about log2(2048) eps) and of the sums:
+        // measured centroid 1.2e-6, rms 7.3e-7, pcen 5.6e-7 of the peak; bound
+        // 4e-6 (34 f32 eps).
+        let rel = |a: &Array3<f32>, b: &Array3<f64>| {
+            let peak = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            a.iter()
+                .zip(b.iter())
+                .fold(0.0f64, |m, (&p, &q)| m.max((f64::from(p) - q).abs()))
+                / peak
+        };
+        eprintln!(
+            "f32 vs f64: centroid {:.3e}, rms {:.3e}",
+            rel(&c32, &c64),
+            rel(&rms32, &rms64)
+        );
+        assert!(rel(&c32, &c64) < 4e-6, "{:e}", rel(&c32, &c64));
+        assert!(rel(&rms32, &rms64) < 4e-6, "{:e}", rel(&rms32, &rms64));
+        let p32 = pcen(
+            rms32.view(),
+            22050.0,
+            &PcenConfig::new(nzu!(512)).with_time_constant(0.06),
+        )
+        .unwrap();
+        let p64 = pcen(
+            rms64.view(),
+            22050.0,
+            &PcenConfig::new(nzu!(512)).with_time_constant(0.06),
+        )
+        .unwrap();
+        eprintln!("f32 vs f64: pcen {:.3e}", rel(&p32, &p64));
+        assert!(rel(&p32, &p64) < 4e-6, "{:e}", rel(&p32, &p64));
     }
 }

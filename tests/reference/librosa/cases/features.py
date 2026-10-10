@@ -8,6 +8,11 @@ strided subsets whose steps are stored next to the data. librosa's ``rms``
 defaults to float32 arithmetic; it is called with ``dtype=np.float64`` here
 (audio_samples computes in f64; the difference is documented). Mel spectrograms
 are built with a float64 basis for the same reason.
+
+``float32`` holds librosa's results for the same PCM signals cast to
+``np.float32``: librosa then computes the STFT in complex64 and keeps float32
+for the spectrogram (and computes ``rms`` with its float32 default). The Rust
+side compares ``AudioSamples<f32>`` output with them.
 """
 
 from __future__ import annotations
@@ -153,6 +158,19 @@ def _reassigned(signals, sr):
     return out
 
 
+def _float32(y, sr):
+    """Default-parameter features of float32 input (librosa keeps float32)."""
+    y = y.astype(np.float32)
+    return {
+        "centroid": librosa.feature.spectral_centroid(y=y, sr=sr),
+        "bandwidth": librosa.feature.spectral_bandwidth(y=y, sr=sr),
+        "flatness": librosa.feature.spectral_flatness(y=y),
+        "contrast": librosa.feature.spectral_contrast(y=y, sr=sr),
+        "rms": librosa.feature.rms(y=y),
+        "zcr": librosa.feature.zero_crossing_rate(y),
+    }
+
+
 def build(signals, sr):
     out = {"spectral": {}, "nondefault": {}}
     for name in SIGNALS:
@@ -164,4 +182,5 @@ def build(signals, sr):
     out["pcen"] = _pcen(signals, sr)
     out["weighting"] = _weighting(signals, sr)
     out["reassigned"] = _reassigned(signals, sr)
+    out["float32"] = {name: _float32(signals[name], sr) for name in ("mix", "noise")}
     return out
