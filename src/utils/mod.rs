@@ -63,6 +63,7 @@
 pub mod audio_math;
 pub mod comparison;
 pub mod detection;
+pub(crate) mod fast_math;
 pub mod generation;
 
 pub use audio_math::*;

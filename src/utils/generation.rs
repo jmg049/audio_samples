@@ -38,6 +38,7 @@ use std::time::Duration;
 #[cfg(feature = "editing")]
 use crate::AudioSampleResult;
 
+use crate::utils::fast_math;
 use crate::{AudioSamples, ConvertTo, StandardSample};
 #[cfg(feature = "editing")]
 use non_empty_slice::NonEmptyVec;
@@ -235,20 +236,81 @@ where
 {
     let sample_rate_f = f64::from(sample_rate.get());
     let num_samples = (duration.as_secs_f64() * sample_rate_f) as usize;
-    let mut samples = Vec::with_capacity(num_samples);
     let two = 2.0;
     let pi = f64::PI();
     let two_pi_frrq = two * pi * frequency;
 
-    for i in 0..num_samples {
-        let t = i as f64 / sample_rate_f;
-        let sample = amplitude * (two_pi_frrq * t).sin();
-        samples.push(sample.convert_to());
-    }
+    let samples: Vec<T> = sine_samples(num_samples, amplitude, |start, phases| {
+        for (j, p) in phases.iter_mut().enumerate() {
+            let t = (start + j) as f64 / sample_rate_f;
+            *p = two_pi_frrq * t;
+        }
+    });
 
     let array = Array1::from_vec(samples);
     // safety: we just created the data so is non-empty
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
+}
+
+/// `amplitude * sin(phase)` for `n` samples, converted to `T`. `fill(start,
+/// phases)` writes the phases of samples `start..start + phases.len()`.
+///
+/// Blocks of phases within the range of the branch-free
+/// [`fast_math::sin_kernel`] (within 1 ulp of `f64::sin`) use it, so the loop
+/// vectorises; other blocks (huge or non-finite phases) use `f64::sin`. On
+/// x86-64 CPUs with AVX2 and FMA a version compiled for them is used (the
+/// same arithmetic; `mul_add` in `fill` is fused in both).
+fn sine_samples<T: StandardSample>(
+    n: usize,
+    amplitude: f64,
+    fill: impl Fn(usize, &mut [f64]),
+) -> Vec<T> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+        // SAFETY: the CPU supports AVX2 and FMA.
+        return unsafe { sine_samples_avx2(n, amplitude, fill) };
+    }
+    sine_samples_portable(n, amplitude, fill)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn sine_samples_avx2<T: StandardSample>(
+    n: usize,
+    amplitude: f64,
+    fill: impl Fn(usize, &mut [f64]),
+) -> Vec<T> {
+    sine_samples_portable(n, amplitude, fill)
+}
+
+#[inline(always)]
+fn sine_samples_portable<T: StandardSample>(
+    n: usize,
+    amplitude: f64,
+    fill: impl Fn(usize, &mut [f64]),
+) -> Vec<T> {
+    const BLOCK: usize = 256;
+    let mut out = Vec::with_capacity(n);
+    let mut buf = [0.0_f64; BLOCK];
+    for start in (0..n).step_by(BLOCK) {
+        let phases = &mut buf[..BLOCK.min(n - start)];
+        fill(start, phases);
+        // NaN compares false, so non-finite phases take the libm path.
+        let in_range = phases
+            .iter()
+            .fold(true, |ok, p| ok & (p.abs() <= fast_math::SIN_MAX_ARG));
+        if in_range {
+            for p in phases.iter_mut() {
+                *p = amplitude * fast_math::sin_kernel(*p);
+            }
+        } else {
+            for p in phases.iter_mut() {
+                *p = amplitude * p.sin();
+            }
+        }
+        out.extend(phases.iter().map(|&v| -> T { v.convert_to() }));
+    }
+    out
 }
 
 /// Generates a cosine wave with the specified parameters.
@@ -792,7 +854,6 @@ where
     T: StandardSample,
 {
     let num_samples = ((duration.as_secs_f64()) * f64::from(sample_rate.get())) as usize;
-    let mut samples = Vec::with_capacity(num_samples);
 
     let sr_f = f64::from(sample_rate.get());
     let f0 = start_freq;
@@ -802,15 +863,13 @@ where
 
     let two_pi = 2.0 * f64::PI();
 
-    for i in 0..num_samples {
-        let t = i as f64 / sr_f;
-
-        // Analytic phase: φ(t) = 2π (f0 t + 0.5 k t^2)
-        let phase = two_pi * f0.mul_add(t, 0.5 * k * t * t);
-
-        let value = amplitude * phase.sin();
-        samples.push(value.convert_to());
-    }
+    let samples: Vec<T> = sine_samples(num_samples, amplitude, |start, phases| {
+        for (j, p) in phases.iter_mut().enumerate() {
+            let t = (start + j) as f64 / sr_f;
+            // Analytic phase: φ(t) = 2π (f0 t + 0.5 k t^2)
+            *p = two_pi * f0.mul_add(t, 0.5 * k * t * t);
+        }
+    });
 
     let array = Array1::from_vec(samples);
     // safety: we just created the data so is non-empty
@@ -872,7 +931,6 @@ where
 
     let sr_f = f64::from(sample_rate.get());
     let num_samples = (duration.as_secs_f64() * sr_f) as usize;
-    let mut samples = Vec::with_capacity(num_samples);
 
     let duration_f = duration.as_secs_f64();
     let two_pi = 2.0 * f64::PI();
@@ -880,22 +938,65 @@ where
     let k = (end_freq / start_freq).powf(1.0 / duration_f);
     let ln_k = k.ln();
 
-    for i in 0..num_samples {
-        let t = i as f64 / sr_f;
-        // Analytic phase. For k == 1 (start == end) ln_k == 0 and the limit of
-        // (k^t - 1)/ln k as ln_k -> 0 is t, i.e. a pure tone at start_freq.
-        let phase = if ln_k == 0.0 {
-            two_pi * start_freq * t
-        } else {
-            two_pi * start_freq * ((k.powf(t) - 1.0) / ln_k)
-        };
-        let value = amplitude * phase.sin();
-        samples.push(value.convert_to());
-    }
+    let samples: Vec<T> = sine_samples(num_samples, amplitude, |start, phases| {
+        if ln_k == 0.0 {
+            // For k == 1 (start == end) the limit of (k^t - 1)/ln k as
+            // ln_k -> 0 is t, i.e. a pure tone at start_freq.
+            for (j, p) in phases.iter_mut().enumerate() {
+                let t = (start + j) as f64 / sr_f;
+                *p = two_pi * start_freq * t;
+            }
+            return;
+        }
+        // Analytic phase 2π f0 (k^t - 1) / ln k. Within a block,
+        // k^t = k^t0 · k^(t - t0) with one `powf` for k^t0 and
+        // k^(t - t0) - 1 = expm1((t - t0) ln k) from its series, which
+        // vectorises; the series is used while |(t - t0) ln k| <= 1/16.
+        let t0 = start as f64 / sr_f;
+        let a = k.powf(t0);
+        for (j, p) in phases.iter_mut().enumerate() {
+            *p = (j as f64 / sr_f) * ln_k;
+        }
+        let small = phases.iter().fold(true, |ok, e| ok & (e.abs() <= 0.0625));
+        for (j, p) in phases.iter_mut().enumerate() {
+            let kt = if small {
+                a + a * expm1_series(*p)
+            } else {
+                k.powf((start + j) as f64 / sr_f)
+            };
+            *p = two_pi * start_freq * ((kt - 1.0) / ln_k);
+        }
+    });
 
     let array = Array1::from_vec(samples);
     // safety: we just created the data so is non-empty
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
+}
+
+/// `exp(x) - 1` for `|x| <= 1/16` from its Taylor series to `x^13` (the
+/// truncation error is below 2^-78 relative to the result).
+#[inline(always)]
+fn expm1_series(x: f64) -> f64 {
+    const C: [f64; 13] = [
+        1.0,
+        1.0 / 2.0,
+        1.0 / 6.0,
+        1.0 / 24.0,
+        1.0 / 120.0,
+        1.0 / 720.0,
+        1.0 / 5040.0,
+        1.0 / 40_320.0,
+        1.0 / 362_880.0,
+        1.0 / 3_628_800.0,
+        1.0 / 39_916_800.0,
+        1.0 / 479_001_600.0,
+        1.0 / 6_227_020_800.0,
+    ];
+    let mut acc = C[12];
+    for &c in C[..12].iter().rev() {
+        acc = c + x * acc;
+    }
+    x * acc
 }
 
 /// Generates a band-limited (alias-free) square wave via additive synthesis.
