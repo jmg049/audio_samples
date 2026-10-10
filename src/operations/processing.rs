@@ -1418,6 +1418,20 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
 #[inline]
 pub fn mu_law_decode(codes: &[i64], mu: f64) -> AudioSampleResult<Vec<f64>> {
     validate_mu(mu, "mu_law_decode")?;
+    let decode_one = |k: i64| mu_law_expand_value(k as f64 * 2.0 / (1.0 + mu), mu);
+    let in_range = |k: i64| (-1.0..=1.0).contains(&(k as f64 * 2.0 / (1.0 + mu)));
+    // Codes take few distinct values (256 for mu = 255): when every code is
+    // valid and the code range is small, decode each value once into a table.
+    if let (Some(&lo), Some(&hi)) = (codes.iter().min(), codes.iter().max()) {
+        let span = hi.abs_diff(lo);
+        if in_range(lo) && in_range(hi) && span < (codes.len() as u64).min(1 << 16) {
+            let table: Vec<f64> = (lo..=hi).map(decode_one).collect();
+            return Ok(codes
+                .iter()
+                .map(|&k| table[k.abs_diff(lo) as usize])
+                .collect());
+        }
+    }
     codes
         .iter()
         .map(|&k| {
