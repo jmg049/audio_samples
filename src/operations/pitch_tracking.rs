@@ -24,17 +24,29 @@
 //! conventions: centred frames, the cumulative-mean-normalised difference
 //! computed through an FFT autocorrelation, parabolic refinement, the
 //! global-minimum fallback of YIN, and the probabilistic HMM decoding of pYIN.
-//! Every config struct here defaults to librosa's defaults.
+//! Every config struct has a `librosa` constructor with librosa's defaults.
+//! librosa requires the frequency range of YIN and pYIN, so [`YinConfig`] and
+//! [`PyinConfig`] have no `Default` and take `fmin` and `fmax` in `new`.
 //!
 //! ## How
 //!
 //! Bring [`AudioPitchTracking`] into scope and call [`yin`](AudioPitchTracking::yin)
 //! or [`pyin`](AudioPitchTracking::pyin) on any [`AudioSamples`]. Outputs are
-//! `f64` arrays shaped `(channels, n_frames)`; frame `t` is centred on sample
+//! arrays shaped `(channels, n_frames)`; frame `t` is centred on sample
 //! `t * hop_length` when `center` is `true`. The harmonic helpers are free
 //! functions on `(channels, n_bins, n_frames)` magnitude spectrograms, such as
 //! the output of
 //! [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix).
+//!
+//! The output precision follows the input: f0 tracks and voicing
+//! probabilities have the sample type's
+//! [`AudioSample::Float`](crate::AudioSample::Float) (`f32` for `u8`, `i16`,
+//! `I24` and `f32` audio; `f64` for `i32` and `f64` audio), and the whole
+//! computation, including the pYIN observation and transition matrices and
+//! the Viterbi decoding, runs in that type. The free functions are generic
+//! over the element type ([`AudioFloat`]). Config parameters stay `f64`;
+//! tables derived from them (threshold grid, Beta prior masses, pitch-bin
+//! frequencies, transition matrix) are computed in `f64` and rounded once.
 //!
 //! ```rust
 //! use audio_samples::operations::pitch_tracking::{AudioPitchTracking, PyinConfig, YinConfig};
@@ -44,12 +56,13 @@
 //! let audio = sine_wave::<f32>(220.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //!
 //! // librosa.yin(y, fmin=65.4, fmax=2093.0, sr=22050): one estimate per frame.
-//! let f0 = audio.yin(&YinConfig::default()).unwrap();
+//! // f32 audio gives an f32 track.
+//! let f0: ndarray::Array2<f32> = audio.yin(&YinConfig::new(65.4, 2093.0)).unwrap();
 //! assert_eq!(f0.dim(), (1, 22));
 //! assert!((f0[[0, 11]] - 220.0).abs() < 1.0);
 //!
 //! // librosa.pyin(...): f0, voiced flags and voicing probabilities.
-//! let r = audio.pyin(&PyinConfig::default()).unwrap();
+//! let r = audio.pyin(&PyinConfig::new(65.4, 2093.0)).unwrap();
 //! assert!(r.voiced_flag[[0, 11]]);
 //! assert!((r.f0[[0, 11]] - 220.0).abs() < 2.0);
 //! ```
@@ -61,31 +74,16 @@
 //! - M. Mauch and S. Dixon, "pYIN: A fundamental frequency estimator using
 //!   probabilistic threshold distributions", ICASSP 2014.
 
-use std::cell::RefCell;
 use std::num::NonZeroUsize;
 
-use ndarray::{Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, Axis};
-use realfft::RealFftPlanner;
+use ndarray::{Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3};
 
+use crate::audio_float::finite_float_rows;
 use crate::operations::sequence::{TransitionWindow, transition_local, transition_loop, viterbi};
 use crate::operations::spectrum::{StftPadMode, pad_signal};
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ParameterError,
-    StandardSample,
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
 };
-
-thread_local! {
-    /// Per-thread real-FFT planner for the autocorrelations (plans are cached by length).
-    static PLANNER: RefCell<RealFftPlanner<f64>> = RefCell::new(RealFftPlanner::new());
-}
-
-/// `numpy.finfo(float64).tiny`, librosa's `util.tiny` guard in the CMND denominator.
-const TINY: f64 = f64::MIN_POSITIVE;
-
-/// librosa's recommended minimum frequency, `note_to_hz('C2')`.
-const C2_HZ: f64 = 65.406_391_325_149_66;
-/// librosa's recommended maximum frequency, `note_to_hz('C7')`.
-const C7_HZ: f64 = 2_093.004_522_404_789;
 
 fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_value(parameter, reason))
@@ -104,11 +102,14 @@ fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioPitchTracking::yin`] or [`yin`]. `Default` reproduces librosa's
-/// defaults (`frame_length = 2048`, `hop_length = frame_length / 4`,
-/// `trough_threshold = 0.1`, centred frames, zero padding). librosa has no
-/// default for `fmin` / `fmax`; here they default to librosa's recommended range
-/// `note_to_hz('C2')` to `note_to_hz('C7')` (about 65.4 Hz to 2093 Hz).
+/// Pass to [`AudioPitchTracking::yin`] or [`yin`]. librosa requires the
+/// frequency range, so there is no `Default`: [`YinConfig::new`] takes `fmin`
+/// and `fmax` and sets the other fields to librosa's defaults
+/// (`frame_length = 2048`, `hop_length = frame_length / 4`,
+/// `trough_threshold = 0.1`, centred frames, zero padding).
+/// [`YinConfig::librosa`] is currently the same as `new`. librosa's
+/// documentation suggests `note_to_hz('C2')` to `note_to_hz('C7')` (about
+/// 65.4 Hz to 2093 Hz) as a range for general use.
 ///
 /// ## Invariants
 ///
@@ -122,13 +123,16 @@ fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
 /// use audio_samples::nzu;
 /// use audio_samples::operations::pitch_tracking::YinConfig;
 ///
-/// let cfg = YinConfig::new()
-///     .with_fmin(80.0)
-///     .with_fmax(1000.0)
+/// let cfg = YinConfig::new(80.0, 1000.0)
 ///     .with_frame_length(nzu!(1024))
 ///     .with_trough_threshold(0.2);
 /// assert_eq!(cfg.effective_hop_length().unwrap().get(), 256);
 /// assert!(cfg.validate(22050.0).is_ok());
+///
+/// // The C2..C7 range librosa suggests (MIDI notes 36 and 96).
+/// use audio_samples::utils::audio_math::midi_to_hz;
+/// let wide = YinConfig::new(midi_to_hz(36.0), midi_to_hz(96.0));
+/// assert!((wide.fmin - 65.406).abs() < 1e-3 && (wide.fmax - 2093.005).abs() < 1e-3);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct YinConfig {
@@ -138,27 +142,34 @@ pub struct YinConfig {
     /// Highest frequency searched, in Hz (`fmin < fmax <= sample_rate / 2`). Sets
     /// the shortest period `floor(sample_rate / fmax)`.
     pub fmax: f64,
-    /// Samples per analysis frame. librosa default: 2048.
+    /// Samples per analysis frame. Default 2048 (librosa's default).
     pub frame_length: NonZeroUsize,
-    /// Samples between successive estimates. `None` means `frame_length / 4`.
+    /// Samples between successive estimates. `None` (the default, as in
+    /// librosa) means `frame_length / 4`.
     pub hop_length: Option<NonZeroUsize>,
     /// Absolute threshold on the cumulative mean normalised difference: the first
-    /// trough below it gives the period. librosa default: 0.1.
+    /// trough below it gives the period. Default 0.1 (librosa's default).
     pub trough_threshold: f64,
     /// If `true`, the signal is padded by `frame_length / 2` samples at both ends so
     /// that frame `t` is centred on sample `t * hop_length`. If `false`, frame `t`
     /// starts at sample `t * hop_length` and the signal must be at least
     /// `frame_length` samples long.
     pub center: bool,
-    /// Padding used when `center` is `true`. librosa default: zeros.
+    /// Padding used when `center` is `true`. Default zeros (librosa's default).
     pub pad_mode: StftPadMode,
 }
 
-impl Default for YinConfig {
-    fn default() -> Self {
+impl YinConfig {
+    /// The search range `fmin..fmax` in Hz, with librosa's defaults for every
+    /// other field (see the type-level documentation).
+    ///
+    /// The range is checked by [`validate`](Self::validate) when the
+    /// configuration is used.
+    #[must_use]
+    pub fn new(fmin: f64, fmax: f64) -> Self {
         Self {
-            fmin: C2_HZ,
-            fmax: C7_HZ,
+            fmin,
+            fmax,
             frame_length: crate::nzu!(2048),
             hop_length: None,
             trough_threshold: 0.1,
@@ -166,13 +177,13 @@ impl Default for YinConfig {
             pad_mode: StftPadMode::Constant,
         }
     }
-}
 
-impl YinConfig {
-    /// Returns the default configuration (same as [`Default`]).
+    /// librosa 1.0's defaults for `librosa.yin(fmin=fmin, fmax=fmax)`.
+    ///
+    /// Currently the same as [`YinConfig::new`].
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn librosa(fmin: f64, fmax: f64) -> Self {
+        Self::new(fmin, fmax)
     }
 
     /// Sets the lowest searched frequency in Hz.
@@ -261,12 +272,13 @@ impl YinConfig {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum UnvoicedFill {
-    /// `f64::NAN` (librosa's default `fill_na=np.nan`).
+    /// NaN (the default, as librosa's `fill_na=np.nan`).
     #[default]
     Nan,
     /// The decoded best-guess pitch of the unvoiced state (librosa's `fill_na=None`).
     BestGuess,
-    /// A fixed value, e.g. `0.0` (librosa's `fill_na=<float>`).
+    /// A fixed value, e.g. `0.0` (librosa's `fill_na=<float>`), rounded to the
+    /// output type.
     Value(f64),
 }
 
@@ -280,13 +292,15 @@ pub enum UnvoicedFill {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioPitchTracking::pyin`] or [`pyin`]. `Default` reproduces
-/// librosa 1.0's defaults (`frame_length = 2048`, `hop_length = frame_length / 4`,
-/// 100 thresholds, Beta(2, 18) threshold prior, Boltzmann parameter 2, 0.1
-/// semitone resolution, 35.92 octaves/s maximum transition rate, switch and
-/// no-trough probabilities 0.01, NaN for unvoiced frames, centred frames with zero
-/// padding, `transition_min_prob = 1e-4`). As for [`YinConfig`], `fmin` / `fmax`
-/// default to librosa's recommended C2 to C7 range.
+/// Pass to [`AudioPitchTracking::pyin`] or [`pyin`]. librosa requires the
+/// frequency range, so there is no `Default`: [`PyinConfig::new`] takes `fmin`
+/// and `fmax` and sets the other fields to librosa 1.0's defaults
+/// (`frame_length = 2048`, `hop_length = frame_length / 4`, 100 thresholds,
+/// Beta(2, 18) threshold prior, Boltzmann parameter 2, 0.1 semitone
+/// resolution, 35.92 octaves/s maximum transition rate, switch and no-trough
+/// probabilities 0.01, NaN for unvoiced frames, centred frames with zero
+/// padding, `transition_min_prob = 1e-4`). [`PyinConfig::librosa`] is
+/// currently the same as `new`.
 ///
 /// ## Invariants
 ///
@@ -300,10 +314,7 @@ pub enum UnvoicedFill {
 /// ```rust
 /// use audio_samples::operations::pitch_tracking::{PyinConfig, UnvoicedFill};
 ///
-/// let cfg = PyinConfig::new()
-///     .with_fmin(80.0)
-///     .with_fmax(800.0)
-///     .with_fill(UnvoicedFill::Value(0.0));
+/// let cfg = PyinConfig::new(80.0, 800.0).with_fill(UnvoicedFill::Value(0.0));
 /// assert!(cfg.validate(22050.0).is_ok());
 /// // 0.1-semitone bins over 80..800 Hz.
 /// assert_eq!(cfg.n_pitch_bins(), 399);
@@ -314,45 +325,56 @@ pub struct PyinConfig {
     pub fmin: f64,
     /// Highest frequency searched, in Hz (`fmin < fmax <= sample_rate / 2`).
     pub fmax: f64,
-    /// Samples per analysis frame. librosa default: 2048.
+    /// Samples per analysis frame. Default 2048 (librosa's default).
     pub frame_length: NonZeroUsize,
-    /// Samples between successive estimates. `None` means `frame_length / 4`.
+    /// Samples between successive estimates. `None` (the default, as in
+    /// librosa) means `frame_length / 4`.
     pub hop_length: Option<NonZeroUsize>,
-    /// Number of thresholds the Beta prior is discretised into. librosa default: 100.
+    /// Number of thresholds the Beta prior is discretised into. Default 100
+    /// (librosa's default).
     pub n_thresholds: NonZeroUsize,
     /// Shape parameters `(alpha, beta)` of the Beta prior over thresholds.
-    /// librosa default: `(2, 18)` (mean threshold 0.1).
+    /// Default `(2, 18)` (librosa's default; mean threshold 0.1).
     pub beta_parameters: (f64, f64),
     /// Shape parameter of the Boltzmann prior over trough rank; larger values put
-    /// more mass on shorter periods. librosa default: 2.
+    /// more mass on shorter periods. Default 2 (librosa's default).
     pub boltzmann_parameter: f64,
-    /// Pitch-bin width in semitones, in `(0, 1)`. librosa default: 0.1.
+    /// Pitch-bin width in semitones, in `(0, 1)`. Default 0.1 (librosa's
+    /// default).
     pub resolution: f64,
-    /// Maximum pitch change between frames, in octaves per second. librosa
-    /// default: 35.92.
+    /// Maximum pitch change between frames, in octaves per second. Default
+    /// 35.92 (librosa's default).
     pub max_transition_rate: f64,
     /// Probability of switching between voiced and unvoiced between frames.
-    /// librosa default: 0.01.
+    /// Default 0.01 (librosa's default).
     pub switch_prob: f64,
     /// Probability mass given to the global minimum when no trough is below a
-    /// threshold. librosa default: 0.01.
+    /// threshold. Default 0.01 (librosa's default).
     pub no_trough_prob: f64,
-    /// Value reported in `f0` for unvoiced frames. librosa default: NaN.
+    /// Value reported in `f0` for unvoiced frames. Default NaN (librosa's
+    /// default).
     pub fill: UnvoicedFill,
     /// If `true`, frames are centred on `t * hop_length` (see [`YinConfig::center`]).
     pub center: bool,
-    /// Padding used when `center` is `true`. librosa default: zeros.
+    /// Padding used when `center` is `true`. Default zeros (librosa's default).
     pub pad_mode: StftPadMode,
     /// Viterbi pruning: only transitions with probability `>= p` are searched.
-    /// `None` (or `Some(0.0)`) decodes exactly. librosa default: `Some(1e-4)`.
+    /// `None` (or `Some(0.0)`) decodes exactly. Default `Some(1e-4)` (librosa's
+    /// default).
     pub transition_min_prob: Option<f64>,
 }
 
-impl Default for PyinConfig {
-    fn default() -> Self {
+impl PyinConfig {
+    /// The search range `fmin..fmax` in Hz, with librosa's defaults for every
+    /// other field (see the type-level documentation).
+    ///
+    /// The range is checked by [`validate`](Self::validate) when the
+    /// configuration is used.
+    #[must_use]
+    pub fn new(fmin: f64, fmax: f64) -> Self {
         Self {
-            fmin: C2_HZ,
-            fmax: C7_HZ,
+            fmin,
+            fmax,
             frame_length: crate::nzu!(2048),
             hop_length: None,
             n_thresholds: crate::nzu!(100),
@@ -368,13 +390,13 @@ impl Default for PyinConfig {
             transition_min_prob: Some(1e-4),
         }
     }
-}
 
-impl PyinConfig {
-    /// Returns the default configuration (same as [`Default`]).
+    /// librosa 1.0's defaults for `librosa.pyin(fmin=fmin, fmax=fmax)`.
+    ///
+    /// Currently the same as [`PyinConfig::new`].
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn librosa(fmin: f64, fmax: f64) -> Self {
+        Self::new(fmin, fmax)
     }
 
     /// Sets the lowest searched frequency in Hz.
@@ -593,6 +615,10 @@ impl PyinConfig {
 
 /// Output of [`AudioPitchTracking::pyin`]: one value per channel and frame.
 ///
+/// `F` is the float type of the computation (`f32` or `f64`; the sample
+/// type's [`AudioSample::Float`](crate::AudioSample::Float) for the trait
+/// method).
+///
 /// # Examples
 ///
 /// ```rust
@@ -601,20 +627,20 @@ impl PyinConfig {
 /// use std::time::Duration;
 ///
 /// let audio = sine_wave::<f64>(330.0, Duration::from_millis(300), sample_rate!(22050), 0.5);
-/// let r = audio.pyin(&PyinConfig::default()).unwrap();
+/// let r = audio.pyin(&PyinConfig::new(65.4, 2093.0)).unwrap();
 /// assert_eq!(r.f0.dim(), r.voiced_flag.dim());
 /// assert_eq!(r.f0.dim(), r.voiced_prob.dim());
 /// ```
 #[derive(Debug, Clone, PartialEq)]
-pub struct PyinResult {
+pub struct PyinResult<F = f64> {
     /// `(channels, n_frames)` fundamental frequency in Hz. Unvoiced frames hold
     /// the value selected by [`PyinConfig::fill`] (NaN by default).
-    pub f0: Array2<f64>,
+    pub f0: Array2<F>,
     /// `(channels, n_frames)`: `true` where the decoded state is voiced.
     pub voiced_flag: Array2<bool>,
     /// `(channels, n_frames)` probability in `[0, 1]` that the frame is voiced
     /// (before HMM smoothing).
-    pub voiced_prob: Array2<f64>,
+    pub voiced_prob: Array2<F>,
 }
 
 fn effective_hop(
@@ -726,13 +752,13 @@ fn next_fast_len_real(n: usize) -> usize {
 }
 
 /// Pads (if centred) and frames one channel; returns the frames as rows.
-fn frames_of(
-    y: &[f64],
+fn frames_of<F: AudioFloat>(
+    y: &[F],
     frame_length: usize,
     hop: usize,
     center: bool,
     pad_mode: StftPadMode,
-) -> AudioSampleResult<Vec<Vec<f64>>> {
+) -> AudioSampleResult<Vec<Vec<F>>> {
     let padded;
     let y = if center {
         padded = pad_signal(y, frame_length / 2, pad_mode);
@@ -757,76 +783,87 @@ fn frames_of(
 
 /// librosa's `_cumulative_mean_normalized_difference` for one frame:
 /// returns `cmnd[tau - min_period]` for `tau in min_period..=max_period`.
-fn cmnd_frame(
-    frame: &[f64],
+///
+/// The `tiny` guard in the denominator is the smallest positive normal value
+/// of `F` (librosa's `util.tiny`).
+fn cmnd_frame<F: AudioFloat>(
+    frame: &[F],
     min_period: usize,
     max_period: usize,
-    fft: &FftScratch,
-    work: &mut Vec<f64>,
-    spec: &mut [realfft::num_complex::Complex<f64>],
-) -> Vec<f64> {
+    fft: &FftScratch<F>,
+    work: &mut Vec<F>,
+    spec: &mut [realfft::num_complex::Complex<F>],
+) -> Vec<F> {
+    let zero = F::zero();
     let n_pad = fft.n_pad;
     // Autocorrelation via the power spectrum (audio.autocorrelate, real input).
     work.clear();
     work.extend_from_slice(frame);
-    work.resize(n_pad, 0.0);
+    work.resize(n_pad, zero);
     fft.forward
         .process(work, spec)
         .expect("buffer lengths match the plan");
     for z in spec.iter_mut() {
-        *z = realfft::num_complex::Complex::new(z.re * z.re + z.im * z.im, 0.0);
+        *z = realfft::num_complex::Complex::new(z.re * z.re + z.im * z.im, zero);
     }
     fft.inverse
         .process(spec, work)
         .expect("buffer lengths match the plan");
-    let scale = 1.0 / n_pad as f64;
+    let scale = F::one() / F::of_usize(n_pad);
     let acf = |k: usize| work[k] * scale;
 
     // Energy cumsum c[m] = sum_{i<=m} y_i^2, with c[0] replaced by 0 before use
     // (librosa zeroes row 0 of the shared buffer first).
-    let mut csum = vec![0.0; max_period];
-    let mut acc = 0.0;
+    let mut csum = vec![zero; max_period];
+    let mut acc = zero;
     for (m, c) in csum.iter_mut().enumerate() {
         acc += frame[m] * frame[m];
         *c = acc;
     }
     if let Some(c0) = csum.first_mut() {
-        *c0 = 0.0;
+        *c0 = zero;
     }
     let acf0 = acf(0);
+    let two = F::of(2.0);
     // d[k] = 2 (acf0 - acf_k) - c[k-1], k = 1..=max_period.
-    let mut d = vec![0.0; max_period + 1];
+    let mut d = vec![zero; max_period + 1];
     for k in 1..=max_period {
-        d[k] = 2.0 * (acf0 - acf(k)) - csum[k - 1];
+        d[k] = two * (acf0 - acf(k)) - csum[k - 1];
     }
     // Cumulative mean of d[1..=k] divided by k.
+    let tiny = F::min_positive_value();
     let mut out = Vec::with_capacity(max_period - min_period + 1);
-    let mut run = 0.0;
+    let mut run = zero;
     for (k, &dk) in d.iter().enumerate().skip(1) {
         run += dk;
         if k >= min_period {
-            let mean = run / k as f64;
-            out.push(dk / (mean + TINY));
+            let mean = run / F::of_usize(k);
+            out.push(dk / (mean + tiny));
         }
     }
     out
 }
 
 /// librosa's `_parabolic_interpolation` (the `_pi_stencil` rule) for one frame.
-fn parabolic_shifts(x: &[f64]) -> Vec<f64> {
+fn parabolic_shifts<F: AudioFloat>(x: &[F]) -> Vec<F> {
     let n = x.len();
-    let mut s = vec![0.0; n];
+    let two = F::of(2.0);
+    let mut s = vec![F::zero(); n];
     for i in 1..n.saturating_sub(1) {
-        let a = x[i + 1] + x[i - 1] - 2.0 * x[i];
-        let b = (x[i + 1] - x[i - 1]) / 2.0;
-        s[i] = if b.abs() >= a.abs() { 0.0 } else { -b / a };
+        let a = x[i + 1] + x[i - 1] - two * x[i];
+        let b = (x[i + 1] - x[i - 1]) / two;
+        s[i] = if b.abs() >= a.abs() {
+            F::zero()
+        } else {
+            -b / a
+        };
     }
     s
 }
 
 /// librosa's `util.localmin` along a frame, with YIN's first-element rule
 /// (`is_trough[0] = x[0] < x[1]`). Requires `x.len() >= 2`.
-fn troughs(x: &[f64]) -> Vec<bool> {
+fn troughs<F: AudioFloat>(x: &[F]) -> Vec<bool> {
     let n = x.len();
     let mut t = vec![false; n];
     for i in 1..n - 1 {
@@ -838,7 +875,7 @@ fn troughs(x: &[f64]) -> Vec<bool> {
 }
 
 /// First index of the minimum (`numpy.argmin`, NaN wins as in NumPy).
-fn argmin_first(x: &[f64]) -> usize {
+fn argmin_first<F: AudioFloat>(x: &[F]) -> usize {
     let mut best = 0;
     for (i, &v) in x.iter().enumerate() {
         if x[best].is_nan() {
@@ -851,19 +888,18 @@ fn argmin_first(x: &[f64]) -> usize {
     best
 }
 
-struct FftScratch {
+struct FftScratch<F: AudioFloat> {
     n_pad: usize,
-    forward: std::sync::Arc<dyn realfft::RealToComplex<f64>>,
-    inverse: std::sync::Arc<dyn realfft::ComplexToReal<f64>>,
+    forward: std::sync::Arc<dyn realfft::RealToComplex<F>>,
+    inverse: std::sync::Arc<dyn realfft::ComplexToReal<F>>,
 }
 
-impl FftScratch {
+impl<F: AudioFloat> FftScratch<F> {
     fn new(frame_length: usize) -> Self {
         let n_pad = next_fast_len_real(2 * frame_length - 1);
-        let (forward, inverse) = PLANNER.with(|p| {
-            let mut p = p.borrow_mut();
-            (p.plan_fft_forward(n_pad), p.plan_fft_inverse(n_pad))
-        });
+        // Plans come from this thread's planner for `F` (cached by length).
+        let (forward, inverse) =
+            F::with_real_fft_planner(|p| (p.plan_fft_forward(n_pad), p.plan_fft_inverse(n_pad)));
         Self {
             n_pad,
             forward,
@@ -873,17 +909,17 @@ impl FftScratch {
 }
 
 /// Per-channel CMND and parabolic shifts for every frame.
-struct YinFrames {
+struct YinFrames<F> {
     min_period: usize,
     /// `cmnd[t][tau - min_period]`.
-    cmnd: Vec<Vec<f64>>,
+    cmnd: Vec<Vec<F>>,
     /// `shifts[t][tau - min_period]`.
-    shifts: Vec<Vec<f64>>,
+    shifts: Vec<Vec<F>>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn yin_frames(
-    y: &[f64],
+fn yin_frames<F: AudioFloat>(
+    y: &[F],
     sr: f64,
     fmin: f64,
     fmax: f64,
@@ -891,16 +927,16 @@ fn yin_frames(
     hop: usize,
     center: bool,
     pad_mode: StftPadMode,
-) -> AudioSampleResult<YinFrames> {
+) -> AudioSampleResult<YinFrames<F>> {
     if y.iter().any(|v| !v.is_finite()) {
         return Err(param_err("audio", "audio buffer is not finite everywhere"));
     }
     let frames = frames_of(y, frame_length, hop, center, pad_mode)?;
     let (min_period, max_period) = periods(sr, fmin, fmax, frame_length);
-    let fft = FftScratch::new(frame_length);
+    let fft = FftScratch::<F>::new(frame_length);
     let mut work = fft.forward.make_input_vec();
     let mut spec = fft.forward.make_output_vec();
-    let cmnd: Vec<Vec<f64>> = frames
+    let cmnd: Vec<Vec<F>> = frames
         .iter()
         .map(|f| cmnd_frame(f, min_period, max_period, &fft, &mut work, &mut spec))
         .collect();
@@ -1046,18 +1082,18 @@ fn boltzmann_pmf(k: usize, lambda: f64, n: usize) -> f64 {
     fact * (-lambda * k as f64).exp()
 }
 
-/// NumPy's pairwise summation (`numpy.sum` of a contiguous 1-D `float64` array).
-fn np_sum(a: &[f64]) -> f64 {
-    fn pairwise(a: &[f64]) -> f64 {
+/// NumPy's pairwise summation (`numpy.sum` of a contiguous 1-D array).
+fn np_sum<F: AudioFloat>(a: &[F]) -> F {
+    fn pairwise<F: AudioFloat>(a: &[F]) -> F {
         let n = a.len();
         if n < 8 {
-            let mut res = 0.0;
+            let mut res = F::zero();
             for &v in a {
                 res += v;
             }
             res
         } else if n <= 128 {
-            let mut r = [0.0; 8];
+            let mut r = [F::zero(); 8];
             r.copy_from_slice(&a[..8]);
             let mut i = 8;
             while i < n - (n % 8) {
@@ -1082,19 +1118,21 @@ fn np_sum(a: &[f64]) -> f64 {
 
 /// librosa's `__pyin_helper` for one frame: `(trough lag index, probability)` for
 /// every trough with non-zero probability, in increasing lag order.
-fn pyin_frame_candidates(
-    cmnd: &[f64],
-    thresholds: &[f64],
-    beta_probs: &[f64],
+///
+/// The Boltzmann prior masses are computed in `f64` and rounded to `F`.
+fn pyin_frame_candidates<F: AudioFloat>(
+    cmnd: &[F],
+    thresholds: &[F],
+    beta_probs: &[F],
     boltzmann: f64,
-    no_trough_prob: f64,
-) -> Vec<(usize, f64)> {
+    no_trough_prob: F,
+) -> Vec<(usize, F)> {
     let is_trough = troughs(cmnd);
     let idx: Vec<usize> = (0..cmnd.len()).filter(|&i| is_trough[i]).collect();
     if idx.is_empty() {
         return Vec::new();
     }
-    let heights: Vec<f64> = idx.iter().map(|&i| cmnd[i]).collect();
+    let heights: Vec<F> = idx.iter().map(|&i| cmnd[i]).collect();
     let n_thr = beta_probs.len();
     // below[i][j]: trough i is below thresholds[j + 1].
     let below: Vec<Vec<bool>> = heights
@@ -1108,12 +1146,12 @@ fn pyin_frame_candidates(
         }
     }
     let mut position = vec![0usize; n_thr];
-    let mut probs = vec![0.0; idx.len()];
+    let mut probs = vec![F::zero(); idx.len()];
     for (i, row) in below.iter().enumerate() {
-        let mut p = 0.0;
+        let mut p = F::zero();
         for j in 0..n_thr {
             if row[j] {
-                let prior = boltzmann_pmf(position[j], boltzmann, n_troughs[j]);
+                let prior = F::of(boltzmann_pmf(position[j], boltzmann, n_troughs[j]));
                 position[j] += 1;
                 p += prior * beta_probs[j];
             }
@@ -1125,7 +1163,7 @@ fn pyin_frame_candidates(
     probs[gmin] += no_trough_prob * np_sum(&beta_probs[..n_not_below]);
     idx.into_iter()
         .zip(probs)
-        .filter(|&(_, p)| p != 0.0)
+        .filter(|&(_, p)| p != F::zero())
         .collect()
 }
 
@@ -1133,7 +1171,7 @@ fn pyin_frame_candidates(
 // Array-level YIN / pYIN
 // =============================================================================
 
-fn check_signal(signal: &ArrayView2<f64>) -> AudioSampleResult<()> {
+fn check_signal<F>(signal: &ArrayView2<F>) -> AudioSampleResult<()> {
     if signal.nrows() == 0 {
         return Err(param_err("signal", "must have at least one channel"));
     }
@@ -1143,7 +1181,8 @@ fn check_signal(signal: &ArrayView2<f64>) -> AudioSampleResult<()> {
 /// Frame-wise YIN fundamental-frequency estimation of every row of `signal`,
 /// equivalent to `librosa.yin`.
 ///
-/// This is the array-level function behind [`AudioPitchTracking::yin`].
+/// This is the array-level function behind [`AudioPitchTracking::yin`]. The
+/// computation runs in the element type `F` of `signal` (`f32` or `f64`).
 ///
 /// # Arguments
 ///
@@ -1153,7 +1192,7 @@ fn check_signal(signal: &ArrayView2<f64>) -> AudioSampleResult<()> {
 ///
 /// # Returns
 ///
-/// A `(channels, n_frames)` array of f0 estimates in Hz, with `n_frames =
+/// A `(channels, n_frames)` array of f0 estimates in Hz (type `F`), with `n_frames =
 /// 1 + samples / hop` when centred and `1 + (samples - frame_length) / hop`
 /// otherwise. Every frame gets a value: when no trough is below the threshold,
 /// the global minimum of the difference function is used (as in librosa).
@@ -1173,19 +1212,21 @@ fn check_signal(signal: &ArrayView2<f64>) -> AudioSampleResult<()> {
 /// let y = Array2::from_shape_fn((1, 8192), |(_, n)| {
 ///     (2.0 * std::f64::consts::PI * 440.0 * n as f64 / sr).sin()
 /// });
-/// let f0 = yin(y.view(), sr, &YinConfig::default()).unwrap();
+/// let f0 = yin(y.view(), sr, &YinConfig::new(65.4, 2093.0)).unwrap();
 /// assert_eq!(f0.dim(), (1, 17));
 /// assert!((f0[[0, 8]] - 440.0).abs() < 0.5);
 /// ```
-pub fn yin(
-    signal: ArrayView2<f64>,
+pub fn yin<F: AudioFloat>(
+    signal: ArrayView2<F>,
     sample_rate: f64,
     config: &YinConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     config.validate(sample_rate)?;
     check_signal(&signal)?;
     let hop = config.effective_hop_length()?.get();
     let fl = config.frame_length.get();
+    let sr = F::of(sample_rate);
+    let threshold = F::of(config.trough_threshold);
     let mut rows = Vec::with_capacity(signal.nrows());
     for row in signal.rows() {
         let y = row.to_vec();
@@ -1199,16 +1240,16 @@ pub fn yin(
             config.center,
             config.pad_mode,
         )?;
-        let f0: Vec<f64> = yf
+        let f0: Vec<F> = yf
             .cmnd
             .iter()
             .zip(&yf.shifts)
             .map(|(c, s)| {
                 let tr = troughs(c);
                 let i = (0..c.len())
-                    .find(|&i| tr[i] && c[i] < config.trough_threshold)
+                    .find(|&i| tr[i] && c[i] < threshold)
                     .unwrap_or_else(|| argmin_first(c));
-                sample_rate / (yf.min_period as f64 + i as f64 + s[i])
+                sr / (F::of_usize(yf.min_period) + F::of_usize(i) + s[i])
             })
             .collect();
         rows.push(f0);
@@ -1232,6 +1273,11 @@ fn stack_rows<T: Clone>(rows: Vec<Vec<T>>) -> AudioSampleResult<Array2<T>> {
 /// to `resolution`-semitone pitch bins and decoded by Viterbi over an HMM with
 /// voiced and unvoiced copies of every bin, a local (triangular) pitch transition
 /// and a voiced/unvoiced switch probability.
+///
+/// The computation runs in the element type `F` of `signal` (`f32` or `f64`),
+/// including the observation and transition matrices and the Viterbi decoding.
+/// The threshold grid, the Beta and Boltzmann prior masses and the pitch-bin
+/// frequencies are computed in `f64` and rounded to `F`.
 ///
 /// # Arguments
 ///
@@ -1260,16 +1306,16 @@ fn stack_rows<T: Clone>(rows: Vec<Vec<T>>) -> AudioSampleResult<Array2<T>> {
 /// let y = Array2::from_shape_fn((1, 8192), |(_, n)| {
 ///     0.5 * (2.0 * std::f64::consts::PI * 196.0 * n as f64 / sr).sin()
 /// });
-/// let r = pyin(y.view(), sr, &PyinConfig::default()).unwrap();
+/// let r = pyin(y.view(), sr, &PyinConfig::new(65.4, 2093.0)).unwrap();
 /// assert!(r.voiced_flag[[0, 8]]);
 /// // f0 is quantised to 0.1-semitone bins.
 /// assert!((r.f0[[0, 8]] / 196.0).log2().abs() * 1200.0 < 6.0);
 /// ```
-pub fn pyin(
-    signal: ArrayView2<f64>,
+pub fn pyin<F: AudioFloat>(
+    signal: ArrayView2<F>,
     sample_rate: f64,
     config: &PyinConfig,
-) -> AudioSampleResult<PyinResult> {
+) -> AudioSampleResult<PyinResult<F>> {
     config.validate(sample_rate)?;
     check_signal(&signal)?;
     let hop = config.effective_hop_length()?.get();
@@ -1279,21 +1325,29 @@ pub fn pyin(
     let thresholds = unit_linspace(n_thr);
     let (a, b) = config.beta_parameters;
     let cdf: Vec<f64> = thresholds.iter().map(|&t| beta_cdf(t, a, b)).collect();
-    let beta_probs: Vec<f64> = cdf.windows(2).map(|w| w[1] - w[0]).collect();
+    let beta_probs: Vec<F> = cdf.windows(2).map(|w| F::of(w[1] - w[0])).collect();
+    let thresholds: Vec<F> = thresholds.into_iter().map(F::of).collect();
+    let no_trough_prob = F::of(config.no_trough_prob);
 
     let bps = config.bins_per_semitone();
     let n_bins = config.n_pitch_bins();
-    let bins_per_octave = (12 * bps) as f64;
-    let freqs = config.pitch_bin_frequencies();
+    let bins_per_octave = F::of((12 * bps) as f64);
+    let freqs: Vec<F> = config
+        .pitch_bin_frequencies()
+        .into_iter()
+        .map(F::of)
+        .collect();
+    let sr = F::of(sample_rate);
+    let fmin = F::of(config.fmin);
 
     // Transition matrix: kron(switch, local).
     let max_semitones =
         (config.max_transition_rate * 12.0 * hop as f64 / sample_rate).round_ties_even() as usize;
     let width = max_semitones * bps + 1;
-    let local = transition_local(n_bins, &[width], TransitionWindow::Triangle, false)?;
-    let switch = transition_loop(2, &[1.0 - config.switch_prob])?;
+    let local = transition_local::<F>(n_bins, &[width], TransitionWindow::Triangle, false)?;
+    let switch = transition_loop::<F>(2, &[1.0 - config.switch_prob])?;
     let n_states = 2 * n_bins;
-    let mut transition = Array2::<f64>::zeros((n_states, n_states));
+    let mut transition = Array2::<F>::zeros((n_states, n_states));
     for bi in 0..2 {
         for bj in 0..2 {
             let s = switch[[bi, bj]];
@@ -1322,19 +1376,22 @@ pub fn pyin(
             config.pad_mode,
         )?;
         let n_frames = yf.cmnd.len();
-        let mut obs = Array2::<f64>::zeros((n_states, n_frames));
-        let mut voiced_prob = vec![0.0; n_frames];
+        let mut obs = Array2::<F>::zeros((n_states, n_frames));
+        let mut voiced_prob = vec![F::zero(); n_frames];
         for (t, (c, s)) in yf.cmnd.iter().zip(&yf.shifts).enumerate() {
             for (i, p) in pyin_frame_candidates(
                 c,
                 &thresholds,
                 &beta_probs,
                 config.boltzmann_parameter,
-                config.no_trough_prob,
+                no_trough_prob,
             ) {
-                let period = yf.min_period as f64 + i as f64 + s[i];
-                let f0 = sample_rate / period;
-                let bin = (bins_per_octave * (f0 / config.fmin).log2()).round_ties_even();
+                let period = F::of_usize(yf.min_period) + F::of_usize(i) + s[i];
+                let f0 = sr / period;
+                // Rounding in f64 is exact for an f32 value.
+                let bin = (bins_per_octave * (f0 / fmin).log2())
+                    .as_f64()
+                    .round_ties_even();
                 let bin = bin.clamp(0.0, n_bins as f64) as usize;
                 // Bin n_bins (above fmax after refinement) lands in the first unvoiced
                 // row in librosa and is overwritten below, i.e. dropped.
@@ -1342,13 +1399,19 @@ pub fn pyin(
                     obs[[bin, t]] = p;
                 }
             }
-            let mut sum = 0.0;
+            let mut sum = F::zero();
             for k in 0..n_bins {
                 sum += obs[[k, t]];
             }
-            let vp = sum.clamp(0.0, 1.0);
+            let vp = if sum < F::zero() {
+                F::zero()
+            } else if sum > F::one() {
+                F::one()
+            } else {
+                sum
+            };
             voiced_prob[t] = vp;
-            let unvoiced = (1.0 - vp) / n_bins as f64;
+            let unvoiced = (F::one() - vp) / F::of_usize(n_bins);
             for k in n_bins..n_states {
                 obs[[k, t]] = unvoiced;
             }
@@ -1366,8 +1429,8 @@ pub fn pyin(
             let guess = freqs[state % n_bins];
             f0.push(match (voiced, config.fill) {
                 (true, _) | (false, UnvoicedFill::BestGuess) => guess,
-                (false, UnvoicedFill::Nan) => f64::NAN,
-                (false, UnvoicedFill::Value(v)) => v,
+                (false, UnvoicedFill::Nan) => F::nan(),
+                (false, UnvoicedFill::Value(v)) => F::of(v),
             });
             flag.push(voiced);
         }
@@ -1389,6 +1452,9 @@ pub fn pyin(
 /// The frequency of every element of a spectrogram, for [`interp_harmonics`],
 /// [`salience`] and [`f0_harmonics`] (librosa's `freqs` argument).
 ///
+/// `F` is the element type of the spectrogram (`f32` or `f64`); the
+/// frequencies have the same type.
+///
 /// # Examples
 ///
 /// ```rust
@@ -1400,16 +1466,16 @@ pub fn pyin(
 /// assert!(matches!(grid, FrequencyGrid::Fixed(_)));
 /// ```
 #[derive(Debug, Clone, Copy)]
-pub enum FrequencyGrid<'a> {
+pub enum FrequencyGrid<'a, F> {
     /// One frequency per bin shared by all frames (e.g. `fft_frequencies`),
     /// length `n_bins`.
-    Fixed(ArrayView1<'a, f64>),
+    Fixed(ArrayView1<'a, F>),
     /// A frequency per element, shaped like the spectrogram
     /// `(channels, n_bins, n_frames)` (e.g. a reassigned spectrogram).
-    TimeVarying(ArrayView3<'a, f64>),
+    TimeVarying(ArrayView3<'a, F>),
 }
 
-impl FrequencyGrid<'_> {
+impl<F: AudioFloat> FrequencyGrid<'_, F> {
     fn check(&self, shape: (usize, usize, usize)) -> AudioSampleResult<()> {
         match self {
             Self::Fixed(f) if f.len() == shape.1 => Ok(()),
@@ -1433,7 +1499,7 @@ impl FrequencyGrid<'_> {
     }
 
     /// The grid of channel `c`, frame `t`.
-    fn column(&self, c: usize, t: usize) -> Vec<f64> {
+    fn column(&self, c: usize, t: usize) -> Vec<F> {
         match self {
             Self::Fixed(f) => f.to_vec(),
             Self::TimeVarying(f) => f.slice(ndarray::s![c, .., t]).to_vec(),
@@ -1442,9 +1508,14 @@ impl FrequencyGrid<'_> {
 }
 
 /// `numpy.argsort(x, kind="mergesort")` (stable, NaN last).
-fn stable_argsort(x: &[f64]) -> Vec<usize> {
+fn stable_argsort<F: AudioFloat>(x: &[F]) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..x.len()).collect();
-    idx.sort_by(|&i, &j| x[i].total_cmp(&x[j]).then(std::cmp::Ordering::Equal));
+    // The conversion to f64 is exact, so the order is that of `F`.
+    idx.sort_by(|&i, &j| {
+        x[i].as_f64()
+            .total_cmp(&x[j].as_f64())
+            .then(std::cmp::Ordering::Equal)
+    });
     // total_cmp orders -NaN first; NumPy puts every NaN last.
     let (nan, rest): (Vec<usize>, Vec<usize>) = idx.into_iter().partition(|&i| x[i].is_nan());
     rest.into_iter().chain(nan).collect()
@@ -1452,13 +1523,13 @@ fn stable_argsort(x: &[f64]) -> Vec<usize> {
 
 /// A sorted linear interpolant, `scipy.interpolate.interp1d(kind="linear",
 /// bounds_error=False, fill_value=fill)` on one column.
-struct Interp1d {
-    x: Vec<f64>,
-    y: Vec<f64>,
+struct Interp1d<F> {
+    x: Vec<F>,
+    y: Vec<F>,
 }
 
-impl Interp1d {
-    fn new(x: &[f64], y: &[f64]) -> Self {
+impl<F: AudioFloat> Interp1d<F> {
+    fn new(x: &[F], y: &[F]) -> Self {
         let order = stable_argsort(x);
         Self {
             x: order.iter().map(|&i| x[i]).collect(),
@@ -1466,12 +1537,12 @@ impl Interp1d {
         }
     }
 
-    fn out_of_bounds(&self, v: f64) -> bool {
+    fn out_of_bounds(&self, v: F) -> bool {
         v < self.x[0] || v > self.x[self.x.len() - 1]
     }
 
     /// `numpy.interp` (the path SciPy takes for 1-D float64 data).
-    fn eval_np(&self, v: f64, fill: f64) -> f64 {
+    fn eval_np(&self, v: F, fill: F) -> F {
         let (x, y) = (&self.x, &self.y);
         let n = x.len();
         if v.is_nan() {
@@ -1497,7 +1568,7 @@ impl Interp1d {
     }
 
     /// SciPy's `_call_linear` (the path taken for 2-D data).
-    fn eval_scipy(&self, v: f64, fill: f64) -> f64 {
+    fn eval_scipy(&self, v: F, fill: F) -> F {
         let (x, y) = (&self.x, &self.y);
         let n = x.len();
         if self.out_of_bounds(v) {
@@ -1532,7 +1603,9 @@ fn check_harmonics(harmonics: &[f64]) -> AudioSampleResult<()> {
 ///
 /// `out[c, h, k, t]` is the linear interpolation of `x[c, :, t]` (as a function
 /// of frequency) at `harmonics[h] * freqs[k]`; targets outside the frequency
-/// range get `fill_value`. Harmonics below 1 give sub-harmonics.
+/// range get `fill_value`. Harmonics below 1 give sub-harmonics. The
+/// interpolation runs in the element type `F` of `x` (`f32` or `f64`);
+/// `harmonics` and `fill_value` are rounded to `F`.
 ///
 /// # Arguments
 ///
@@ -1565,12 +1638,12 @@ fn check_harmonics(harmonics: &[f64]) -> AudioSampleResult<()> {
 /// assert_eq!(h[[0, 1, 1, 0]], 2.0); // x at 200 Hz
 /// assert_eq!(h[[0, 1, 2, 0]], 0.0); // 400 Hz is out of range
 /// ```
-pub fn interp_harmonics(
-    x: ArrayView3<f64>,
-    freqs: FrequencyGrid<'_>,
+pub fn interp_harmonics<F: AudioFloat>(
+    x: ArrayView3<F>,
+    freqs: FrequencyGrid<'_, F>,
     harmonics: &[f64],
     fill_value: f64,
-) -> AudioSampleResult<Array4<f64>> {
+) -> AudioSampleResult<Array4<F>> {
     let (n_ch, n_bins, n_frames) = x.dim();
     freqs.check(x.dim())?;
     check_harmonics(harmonics)?;
@@ -1578,7 +1651,9 @@ pub fn interp_harmonics(
         return Err(param_err("x", "need at least two frequency bins"));
     }
     let n_h = harmonics.len();
-    let mut out = Array4::<f64>::zeros((n_ch, n_h, n_bins, n_frames));
+    let fill_value = F::of(fill_value);
+    let harmonics: Vec<F> = harmonics.iter().map(|&h| F::of(h)).collect();
+    let mut out = Array4::<F>::zeros((n_ch, n_h, n_bins, n_frames));
     for c in 0..n_ch {
         for t in 0..n_frames {
             let grid = freqs.column(c, t);
@@ -1633,8 +1708,10 @@ pub enum SalienceAggregate {
 ///
 /// ## Intended usage
 ///
-/// `Default` reproduces librosa's defaults: uniform weights, weighted average,
-/// output only at peaks (local maxima along frequency) and NaN elsewhere.
+/// [`SalienceConfig::librosa`] gives librosa's defaults: uniform weights,
+/// weighted average, output only at peaks (local maxima along frequency) and
+/// NaN elsewhere. `Default` is currently the same. Weights and the fill value
+/// are `f64` and are rounded to the element type of the spectrogram.
 ///
 /// ## Invariants
 ///
@@ -1663,7 +1740,8 @@ pub struct SalienceConfig {
     /// If `true`, only frequencies that are strict local maxima of the input along
     /// frequency keep their salience; all others get `fill_value`.
     pub filter_peaks: bool,
-    /// Value of non-peak elements when `filter_peaks` is `true`. librosa default: NaN.
+    /// Value of non-peak elements when `filter_peaks` is `true`. Default NaN
+    /// (librosa's default).
     pub fill_value: f64,
 }
 
@@ -1682,6 +1760,14 @@ impl SalienceConfig {
     /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// librosa 1.0's defaults for `librosa.salience`.
+    ///
+    /// Currently the same as [`Default`].
+    #[must_use]
+    pub fn librosa() -> Self {
         Self::default()
     }
 
@@ -1741,32 +1827,32 @@ impl SalienceConfig {
     }
 }
 
-fn nan_max(a: f64, b: f64) -> f64 {
+fn nan_max<F: AudioFloat>(a: F, b: F) -> F {
     if a.is_nan() || b.is_nan() {
-        f64::NAN
+        F::nan()
     } else {
         a.max(b)
     }
 }
 
-fn nan_min(a: f64, b: f64) -> f64 {
+fn nan_min<F: AudioFloat>(a: F, b: F) -> F {
     if a.is_nan() || b.is_nan() {
-        f64::NAN
+        F::nan()
     } else {
         a.min(b)
     }
 }
 
-fn median(v: &mut [f64]) -> f64 {
+fn median<F: AudioFloat>(v: &mut [F]) -> F {
     if v.iter().any(|x| x.is_nan()) {
-        return f64::NAN;
+        return F::nan();
     }
-    v.sort_by(f64::total_cmp);
+    v.sort_by(|a, b| a.as_f64().total_cmp(&b.as_f64()));
     let n = v.len();
     if n % 2 == 1 {
         v[n / 2]
     } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
+        (v[n / 2 - 1] + v[n / 2]) / F::of(2.0)
     }
 }
 
@@ -1777,6 +1863,7 @@ fn median(v: &mut [f64]) -> f64 {
 /// For every bin, the energy at its harmonics (from [`interp_harmonics`] with
 /// fill 0) is aggregated; with `filter_peaks`, only bins that are strict local
 /// maxima of `s` along frequency (`scipy.signal.argrelmax`) keep the value.
+/// The computation runs in the element type `F` of `s`.
 ///
 /// # Arguments
 ///
@@ -1800,7 +1887,7 @@ fn median(v: &mut [f64]) -> f64 {
 /// use audio_samples::operations::pitch_tracking::{FrequencyGrid, SalienceConfig, salience};
 /// use ndarray::{Array3, array};
 ///
-/// let freqs = array![0.0, 100.0, 200.0, 300.0, 400.0, 500.0];
+/// let freqs = array![0.0_f64, 100.0, 200.0, 300.0, 400.0, 500.0];
 /// // A 100 Hz tone with harmonics: peaks at 100, 200 and 300 Hz.
 /// let s = Array3::from_shape_vec((1, 6, 1), vec![0.0, 1.0, 0.5, 0.6, 0.1, 0.0]).unwrap();
 /// let cfg = SalienceConfig::new().with_fill_value(0.0);
@@ -1809,24 +1896,28 @@ fn median(v: &mut [f64]) -> f64 {
 /// assert!((sal[[0, 1, 0]] - (1.0 + 0.5 + 0.6) / 3.0).abs() < 1e-15);
 /// assert_eq!(sal[[0, 2, 0]], 0.0); // not a peak
 /// ```
-pub fn salience(
-    s: ArrayView3<f64>,
-    freqs: FrequencyGrid<'_>,
+pub fn salience<F: AudioFloat>(
+    s: ArrayView3<F>,
+    freqs: FrequencyGrid<'_, F>,
     harmonics: &[f64],
     config: &SalienceConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     check_harmonics(harmonics)?;
     config.validate(harmonics.len())?;
     let s_harm = interp_harmonics(s, freqs, harmonics, 0.0)?;
     let (n_ch, n_bins, n_frames) = s.dim();
     let n_h = harmonics.len();
-    let weights: Vec<f64> = config.weights.clone().unwrap_or_else(|| vec![1.0; n_h]);
-    let mut scl = 0.0;
+    let weights: Vec<F> = config.weights.as_ref().map_or_else(
+        || vec![F::one(); n_h],
+        |w| w.iter().map(|&v| F::of(v)).collect(),
+    );
+    let mut scl = F::zero();
     for &w in &weights {
         scl += w;
     }
-    let mut out = Array3::<f64>::zeros((n_ch, n_bins, n_frames));
-    let mut buf = vec![0.0; n_h];
+    let fill_value = F::of(config.fill_value);
+    let mut out = Array3::<F>::zeros((n_ch, n_bins, n_frames));
+    let mut buf = vec![F::zero(); n_h];
     for c in 0..n_ch {
         for k in 0..n_bins {
             for t in 0..n_frames {
@@ -1835,15 +1926,15 @@ pub fn salience(
                 }
                 out[[c, k, t]] = match config.aggregate {
                     SalienceAggregate::Average => {
-                        let mut acc = 0.0;
-                        for (v, w) in buf.iter().zip(&weights) {
+                        let mut acc = F::zero();
+                        for (&v, &w) in buf.iter().zip(&weights) {
                             acc += v * w;
                         }
                         acc / scl
                     }
                     SalienceAggregate::Sum => {
-                        let mut acc = 0.0;
-                        for v in &buf {
+                        let mut acc = F::zero();
+                        for &v in &buf {
                             acc += v;
                         }
                         acc
@@ -1864,7 +1955,7 @@ pub fn salience(
                         && s[[c, k, t]] > s[[c, k - 1, t]]
                         && s[[c, k, t]] > s[[c, k + 1, t]];
                     if !peak {
-                        out[[c, k, t]] = config.fill_value;
+                        out[[c, k, t]] = fill_value;
                     }
                 }
             }
@@ -1880,8 +1971,9 @@ pub fn salience(
 /// `out[c, h, t]` is the linear interpolation of `x[c, :, t]` at
 /// `harmonics[h] * f0[c, t]`. Non-finite grid frequencies are ignored; targets
 /// outside the grid, and NaN results (e.g. a NaN `f0` from an unvoiced
-/// [`pyin`] frame), get `fill_value`; infinite results are clamped to
-/// `±f64::MAX` (`numpy.nan_to_num`).
+/// [`pyin`] frame), get `fill_value`; infinite results are clamped to the
+/// largest finite values of `F` (`numpy.nan_to_num`). The interpolation runs
+/// in the element type `F` of `x` and `f0`.
 ///
 /// # Arguments
 ///
@@ -1916,13 +2008,13 @@ pub fn salience(
 /// assert_eq!(h[[0, 1, 0]], 3.0); // x at 300 Hz
 /// assert_eq!(h[[0, 0, 1]], 0.0); // unvoiced frame
 /// ```
-pub fn f0_harmonics(
-    x: ArrayView3<f64>,
-    f0: ArrayView2<f64>,
-    freqs: FrequencyGrid<'_>,
+pub fn f0_harmonics<F: AudioFloat>(
+    x: ArrayView3<F>,
+    f0: ArrayView2<F>,
+    freqs: FrequencyGrid<'_, F>,
     harmonics: &[f64],
     fill_value: f64,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let (n_ch, _, n_frames) = x.dim();
     freqs.check(x.dim())?;
     check_harmonics(harmonics)?;
@@ -1936,12 +2028,14 @@ pub fn f0_harmonics(
         ));
     }
     let n_h = harmonics.len();
-    let mut out = Array3::<f64>::zeros((n_ch, n_h, n_frames));
+    let fill_value = F::of(fill_value);
+    let harmonics: Vec<F> = harmonics.iter().map(|&h| F::of(h)).collect();
+    let mut out = Array3::<F>::zeros((n_ch, n_h, n_frames));
     for c in 0..n_ch {
         for t in 0..n_frames {
             let grid = freqs.column(c, t);
             let col = x.slice(ndarray::s![c, .., t]);
-            let (gx, gy): (Vec<f64>, Vec<f64>) = grid
+            let (gx, gy): (Vec<F>, Vec<F>) = grid
                 .iter()
                 .zip(col.iter())
                 .filter(|(f, _)| f.is_finite())
@@ -1958,10 +2052,10 @@ pub fn f0_harmonics(
                 let v = interp.eval_np(h * f0[[c, t]], fill_value);
                 out[[c, hi, t]] = if v.is_nan() {
                     fill_value
-                } else if v == f64::INFINITY {
-                    f64::MAX
-                } else if v == f64::NEG_INFINITY {
-                    f64::MIN
+                } else if v == F::infinity() {
+                    F::max_value()
+                } else if v == F::neg_infinity() {
+                    F::min_value()
                 } else {
                     v
                 };
@@ -1993,23 +2087,31 @@ pub fn f0_harmonics(
 /// # Invariants
 ///
 /// Outputs are `(channels, n_frames)`; channels are processed independently.
-/// Samples are converted to `f64` with the crate's audio-aware conversion.
+/// Samples are converted to [`Float`](Self::Float) (the sample type's
+/// [`AudioSample::Float`](crate::AudioSample::Float)) with the crate's
+/// audio-aware conversion, and the computation runs in that type.
 pub trait AudioPitchTracking {
+    /// The float type of the outputs and of the computation: `f32` for `u8`,
+    /// `i16`, `I24` and `f32` audio, `f64` for `i32` and `f64` audio.
+    type Float: AudioFloat;
+
     /// YIN f0 estimation per frame and channel, equivalent to `librosa.yin`.
     ///
     /// # Arguments
     ///
-    /// * `config` - YIN parameters ([`YinConfig::default`] = librosa defaults with
-    ///   `fmin = C2`, `fmax = C7`).
+    /// * `config` - YIN parameters ([`YinConfig::librosa`] = librosa's
+    ///   defaults for a given frequency range).
     ///
     /// # Returns
     ///
-    /// A `(channels, n_frames)` array of f0 values in Hz; see [`yin`].
+    /// A `(channels, n_frames)` array of f0 values in Hz, of type
+    /// [`Float`](Self::Float); see [`yin`].
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the configuration is invalid for the sample rate or
-    /// (uncentred) the signal is shorter than `frame_length`.
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample, the
+    /// configuration is invalid for the sample rate or (uncentred) the signal
+    /// is shorter than `frame_length`.
     ///
     /// # Examples
     ///
@@ -2024,29 +2126,31 @@ pub trait AudioPitchTracking {
     ///     (2.0 * std::f64::consts::PI * f * n as f64 / sr).sin() as f32
     /// });
     /// let audio = AudioSamples::new_multi_channel(data, sample_rate!(22050)).unwrap();
-    /// let f0 = audio.yin(&YinConfig::default()).unwrap();
+    /// let f0 = audio.yin(&YinConfig::new(65.4, 2093.0)).unwrap();
     /// assert_eq!(f0.dim(), (2, 22));
     /// assert!((f0[[0, 10]] - 220.0).abs() < 0.5);
     /// assert!((f0[[1, 10]] - 330.0).abs() < 0.5);
     /// ```
-    fn yin(&self, config: &YinConfig) -> AudioSampleResult<Array2<f64>>;
+    fn yin(&self, config: &YinConfig) -> AudioSampleResult<Array2<Self::Float>>;
 
     /// Probabilistic YIN per frame and channel, equivalent to `librosa.pyin`.
     ///
     /// # Arguments
     ///
-    /// * `config` - pYIN parameters ([`PyinConfig::default`] = librosa defaults
-    ///   with `fmin = C2`, `fmax = C7`).
+    /// * `config` - pYIN parameters ([`PyinConfig::librosa`] = librosa's
+    ///   defaults for a given frequency range).
     ///
     /// # Returns
     ///
     /// The f0 track, voiced flags and voicing probabilities, each
-    /// `(channels, n_frames)`; see [`pyin`].
+    /// `(channels, n_frames)`, with f0 and probabilities of type
+    /// [`Float`](Self::Float); see [`pyin`].
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the configuration is invalid for the sample rate or
-    /// (uncentred) the signal is shorter than `frame_length`.
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample, the
+    /// configuration is invalid for the sample rate or (uncentred) the signal
+    /// is shorter than `frame_length`.
     ///
     /// # Examples
     ///
@@ -2061,35 +2165,33 @@ pub trait AudioPitchTracking {
     ///     if n < 5512 { 0.0 } else { 0.5 * (2.0 * std::f64::consts::PI * 261.6 * n as f64 / sr).sin() }
     /// });
     /// let audio = AudioSamples::new_mono(y, sample_rate!(22050)).unwrap();
-    /// let r = audio.pyin(&PyinConfig::default()).unwrap();
+    /// let r = audio.pyin(&PyinConfig::new(65.4, 2093.0)).unwrap();
     /// assert!(!r.voiced_flag[[0, 2]] && r.f0[[0, 2]].is_nan());
     /// assert!(r.voiced_flag[[0, 18]]);
     /// ```
-    fn pyin(&self, config: &PyinConfig) -> AudioSampleResult<PyinResult>;
-}
-
-/// The audio as a `(channels, samples)` `f64` array.
-fn audio_f64_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -> Array2<f64> {
-    let w = audio.to_format::<f64>();
-    if let Some(m) = w.as_mono() {
-        m.as_view().insert_axis(Axis(0)).to_owned()
-    } else if let Some(m) = w.as_multi_channel() {
-        m.as_view().to_owned()
-    } else {
-        unreachable!("audio is either mono or multi-channel")
-    }
+    fn pyin(&self, config: &PyinConfig) -> AudioSampleResult<PyinResult<Self::Float>>;
 }
 
 impl<T> AudioPitchTracking for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
-    fn yin(&self, config: &YinConfig) -> AudioSampleResult<Array2<f64>> {
-        yin(audio_f64_rows(self).view(), self.sample_rate_hz(), config)
+    type Float = T::Float;
+
+    fn yin(&self, config: &YinConfig) -> AudioSampleResult<Array2<T::Float>> {
+        yin(
+            finite_float_rows(self)?.view(),
+            self.sample_rate_hz(),
+            config,
+        )
     }
 
-    fn pyin(&self, config: &PyinConfig) -> AudioSampleResult<PyinResult> {
-        pyin(audio_f64_rows(self).view(), self.sample_rate_hz(), config)
+    fn pyin(&self, config: &PyinConfig) -> AudioSampleResult<PyinResult<T::Float>> {
+        pyin(
+            finite_float_rows(self)?.view(),
+            self.sample_rate_hz(),
+            config,
+        )
     }
 }
 
@@ -2097,7 +2199,12 @@ where
 mod tests {
     use super::*;
     use crate::sample_rate;
-    use ndarray::{Array1, array};
+    use ndarray::{Array1, Axis, array};
+
+    /// `note_to_hz('C2')`, the lower end of librosa's suggested range.
+    const C2_HZ: f64 = 65.406_391_325_149_66;
+    /// `note_to_hz('C7')`, the upper end of librosa's suggested range.
+    const C7_HZ: f64 = 2_093.004_522_404_789;
 
     fn tone(f: f64, n: usize, sr: f64) -> Array2<f64> {
         Array2::from_shape_fn((1, n), |(_, i)| {
@@ -2184,7 +2291,7 @@ mod tests {
     fn yin_shapes_and_accuracy() {
         let sr = 22050.0;
         let y = tone(440.0, 22050, sr);
-        let f0 = yin(y.view(), sr, &YinConfig::default()).unwrap();
+        let f0 = yin(y.view(), sr, &YinConfig::new(C2_HZ, C7_HZ)).unwrap();
         assert_eq!(f0.dim(), (1, 44));
         for t in 4..40 {
             // YIN's parabolic refinement is within a few cents of the true pitch.
@@ -2194,7 +2301,7 @@ mod tests {
                 f0[[0, t]]
             );
         }
-        let nc = YinConfig::default().with_center(false);
+        let nc = YinConfig::new(C2_HZ, C7_HZ).with_center(false);
         let f0 = yin(y.view(), sr, &nc).unwrap();
         assert_eq!(f0.dim(), (1, 1 + (22050 - 2048) / 512));
     }
@@ -2203,7 +2310,7 @@ mod tests {
     fn yin_silence_falls_back_to_shortest_period() {
         let sr = 22050.0;
         let y = Array2::<f64>::zeros((1, 4096));
-        let f0 = yin(y.view(), sr, &YinConfig::default()).unwrap();
+        let f0 = yin(y.view(), sr, &YinConfig::new(C2_HZ, C7_HZ)).unwrap();
         let min_period = (sr / C7_HZ).floor();
         assert!(f0.iter().all(|&v| v == sr / min_period));
     }
@@ -2213,23 +2320,30 @@ mod tests {
         let sr = 22050.0;
         let y = tone(440.0, 4096, sr);
         let bad = [
-            YinConfig::default().with_fmax(20000.0),
-            YinConfig::default().with_fmin(3000.0),
-            YinConfig::default().with_fmin(0.0),
-            YinConfig::default().with_fmin(10.0),
-            YinConfig::default().with_trough_threshold(f64::NAN),
-            YinConfig::default().with_frame_length(crate::nzu!(2)),
+            YinConfig::new(C2_HZ, C7_HZ).with_fmax(20000.0),
+            YinConfig::new(C2_HZ, C7_HZ).with_fmin(3000.0),
+            YinConfig::new(C2_HZ, C7_HZ).with_fmin(0.0),
+            YinConfig::new(C2_HZ, C7_HZ).with_fmin(10.0),
+            YinConfig::new(C2_HZ, C7_HZ).with_trough_threshold(f64::NAN),
+            YinConfig::new(C2_HZ, C7_HZ).with_frame_length(crate::nzu!(2)),
         ];
         for cfg in bad {
             assert!(yin(y.view(), sr, &cfg).is_err(), "{cfg:?}");
         }
         // Uncentred and too short.
         let short = tone(440.0, 1000, sr);
-        assert!(yin(short.view(), sr, &YinConfig::default().with_center(false)).is_err());
+        assert!(
+            yin(
+                short.view(),
+                sr,
+                &YinConfig::new(C2_HZ, C7_HZ).with_center(false)
+            )
+            .is_err()
+        );
         // Non-finite input.
         let mut nan = tone(440.0, 4096, sr);
         nan[[0, 10]] = f64::NAN;
-        assert!(yin(nan.view(), sr, &YinConfig::default()).is_err());
+        assert!(yin(nan.view(), sr, &YinConfig::new(C2_HZ, C7_HZ)).is_err());
     }
 
     #[test]
@@ -2237,7 +2351,7 @@ mod tests {
         let sr = 22050.0;
         let mut y = tone(261.63, 11025, sr);
         y.slice_mut(ndarray::s![0, ..5512]).fill(0.0);
-        let r = pyin(y.view(), sr, &PyinConfig::default()).unwrap();
+        let r = pyin(y.view(), sr, &PyinConfig::new(C2_HZ, C7_HZ)).unwrap();
         assert_eq!(r.f0.dim(), (1, 22));
         assert!(!r.voiced_flag[[0, 1]]);
         assert!(r.f0[[0, 1]].is_nan());
@@ -2248,14 +2362,14 @@ mod tests {
         let r0 = pyin(
             y.view(),
             sr,
-            &PyinConfig::default().with_fill(UnvoicedFill::Value(0.0)),
+            &PyinConfig::new(C2_HZ, C7_HZ).with_fill(UnvoicedFill::Value(0.0)),
         )
         .unwrap();
         assert_eq!(r0.f0[[0, 1]], 0.0);
         let rg = pyin(
             y.view(),
             sr,
-            &PyinConfig::default().with_fill(UnvoicedFill::BestGuess),
+            &PyinConfig::new(C2_HZ, C7_HZ).with_fill(UnvoicedFill::BestGuess),
         )
         .unwrap();
         assert!(rg.f0.iter().all(|v| v.is_finite()));
@@ -2267,15 +2381,15 @@ mod tests {
         let sr = 22050.0;
         let y = tone(440.0, 4096, sr);
         let bad = [
-            PyinConfig::default().with_beta_parameters(0.0, 18.0),
-            PyinConfig::default().with_boltzmann_parameter(-1.0),
-            PyinConfig::default().with_resolution(1.0),
-            PyinConfig::default().with_max_transition_rate(0.0),
-            PyinConfig::default().with_switch_prob(1.5),
-            PyinConfig::default().with_no_trough_prob(-0.1),
-            PyinConfig::default().with_transition_min_prob(Some(-1.0)),
-            PyinConfig::default().with_fill(UnvoicedFill::Value(f64::INFINITY)),
-            PyinConfig::default().with_fmax(30000.0),
+            PyinConfig::new(C2_HZ, C7_HZ).with_beta_parameters(0.0, 18.0),
+            PyinConfig::new(C2_HZ, C7_HZ).with_boltzmann_parameter(-1.0),
+            PyinConfig::new(C2_HZ, C7_HZ).with_resolution(1.0),
+            PyinConfig::new(C2_HZ, C7_HZ).with_max_transition_rate(0.0),
+            PyinConfig::new(C2_HZ, C7_HZ).with_switch_prob(1.5),
+            PyinConfig::new(C2_HZ, C7_HZ).with_no_trough_prob(-0.1),
+            PyinConfig::new(C2_HZ, C7_HZ).with_transition_min_prob(Some(-1.0)),
+            PyinConfig::new(C2_HZ, C7_HZ).with_fill(UnvoicedFill::Value(f64::INFINITY)),
+            PyinConfig::new(C2_HZ, C7_HZ).with_fmax(30000.0),
         ];
         for cfg in bad {
             assert!(pyin(y.view(), sr, &cfg).is_err(), "{cfg:?}");
@@ -2292,27 +2406,29 @@ mod tests {
             data[[1, i]] = b[[0, i]] as f32;
         }
         let audio = AudioSamples::new_multi_channel(data.clone(), sample_rate!(22050)).unwrap();
-        let f0 = audio.yin(&YinConfig::default()).unwrap();
-        let rows = data.mapv(f64::from);
+        // f32 audio is analysed in f32: the trait equals the free function on
+        // the same f32 rows.
+        let f0: Array2<f32> = audio.yin(&YinConfig::new(C2_HZ, C7_HZ)).unwrap();
+        let rows = data;
         assert_eq!(
             f0,
-            yin(rows.view(), 22050.0, &YinConfig::default()).unwrap()
+            yin(rows.view(), 22050.0, &YinConfig::new(C2_HZ, C7_HZ)).unwrap()
         );
         let single = yin(
             rows.slice(ndarray::s![1..2, ..]),
             22050.0,
-            &YinConfig::default(),
+            &YinConfig::new(C2_HZ, C7_HZ),
         )
         .unwrap();
         assert_eq!(f0.row(1), single.row(0));
-        let r = audio.pyin(&PyinConfig::default()).unwrap();
+        let r = audio.pyin(&PyinConfig::new(C2_HZ, C7_HZ)).unwrap();
         assert_eq!(r.f0.nrows(), 2);
     }
 
     #[test]
     fn interp_and_salience_basics() {
-        let freqs = array![0.0, 100.0, 200.0, 300.0, 400.0];
-        let x = Array3::from_shape_vec((1, 5, 1), vec![0.0, 1.0, 0.2, 0.8, 0.1]).unwrap();
+        let freqs = array![0.0_f64, 100.0, 200.0, 300.0, 400.0];
+        let x = Array3::<f64>::from_shape_vec((1, 5, 1), vec![0.0, 1.0, 0.2, 0.8, 0.1]).unwrap();
         let h =
             interp_harmonics(x.view(), FrequencyGrid::Fixed(freqs.view()), &[1.0], 0.0).unwrap();
         assert_eq!(h.index_axis(Axis(1), 0), x);
@@ -2379,8 +2495,8 @@ mod tests {
 
     #[test]
     fn salience_aggregates() {
-        let freqs = array![0.0, 100.0, 200.0, 300.0, 400.0];
-        let x = Array3::from_shape_vec((1, 5, 1), vec![0.0, 1.0, 0.2, 0.8, 0.1]).unwrap();
+        let freqs = array![0.0_f64, 100.0, 200.0, 300.0, 400.0];
+        let x = Array3::<f64>::from_shape_vec((1, 5, 1), vec![0.0, 1.0, 0.2, 0.8, 0.1]).unwrap();
         let g = FrequencyGrid::Fixed(freqs.view());
         let cfg = |a| {
             SalienceConfig::default()
@@ -2396,16 +2512,36 @@ mod tests {
         assert_eq!(v(SalienceAggregate::Median), 0.8);
     }
 
+    #[test]
+    fn output_precision_follows_the_sample_type() {
+        let x = tone(220.0, 11025, 22050.0);
+        let pcm: Array1<i16> = x.row(0).mapv(|v| (v * 32767.0).round() as i16);
+        let as_f64 = pcm.mapv(|v| f64::from(v) / 32768.0);
+        let a16 = AudioSamples::new_mono(pcm, sample_rate!(22050)).unwrap();
+        let a64 = AudioSamples::new_mono(as_f64, sample_rate!(22050)).unwrap();
+        let cfg = YinConfig::new(C2_HZ, C7_HZ);
+        // i16 audio is analysed in f32, f64 audio in f64.
+        let f32_track: Array2<f32> = a16.yin(&cfg).unwrap();
+        let f64_track: Array2<f64> = a64.yin(&cfg).unwrap();
+        for (a, b) in f32_track.iter().zip(&f64_track) {
+            assert!((f64::from(*a) - b).abs() / b < 1e-5, "{a} vs {b}");
+        }
+        let pcfg = PyinConfig::new(C2_HZ, C7_HZ);
+        let p32: PyinResult<f32> = a16.pyin(&pcfg).unwrap();
+        let p64 = a64.pyin(&pcfg).unwrap();
+        assert_eq!(p32.voiced_flag, p64.voiced_flag);
+    }
+
     /// Regression: a tiny `resolution` sized the dense pYIN transition matrix
     /// at (2 * n_bins)^2 entries (2.9 TB for 1e-4) and aborted on allocation.
     #[test]
     fn pyin_rejects_resolution_needing_a_huge_matrix() {
         let audio =
             AudioSamples::new_mono(Array1::from(vec![0.1; 8192]), sample_rate!(22050)).unwrap();
-        let err = audio.pyin(&PyinConfig::default().with_resolution(1e-4));
+        let err = audio.pyin(&PyinConfig::new(C2_HZ, C7_HZ).with_resolution(1e-4));
         assert!(matches!(err, Err(AudioSampleError::Parameter(_))));
         assert!(
-            PyinConfig::default()
+            PyinConfig::new(C2_HZ, C7_HZ)
                 .with_resolution(0.05)
                 .validate(22050.0)
                 .is_ok()

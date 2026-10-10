@@ -180,10 +180,10 @@ fn yin_matches_librosa() {
 
 #[test]
 fn yin_default_config_is_librosa_default() {
-    // librosa requires fmin/fmax; everything else equals YinConfig::default().
+    // librosa requires fmin/fmax; everything else equals YinConfig::librosa().
     let c = &fixture()["yin"]["notes_default"]["config"];
     let cfg = yin_config(c);
-    let d = YinConfig::default().with_fmin(cfg.fmin).with_fmax(cfg.fmax);
+    let d = YinConfig::librosa(cfg.fmin, cfg.fmax);
     assert_eq!(cfg, d);
 }
 
@@ -235,10 +235,7 @@ fn pyin_matches_librosa() {
 fn pyin_default_config_is_librosa_default() {
     let c = &fixture()["pyin"]["notes_default"]["config"];
     let cfg = pyin_config(c);
-    let d = PyinConfig::default()
-        .with_fmin(cfg.fmin)
-        .with_fmax(cfg.fmax)
-        .with_fill(UnvoicedFill::BestGuess);
+    let d = PyinConfig::librosa(cfg.fmin, cfg.fmax).with_fill(UnvoicedFill::BestGuess);
     assert_eq!(cfg, d);
 }
 
@@ -307,21 +304,21 @@ fn salience_matches_librosa() {
     let fixed = FrequencyGrid::Fixed(d.freqs.view());
     let tv = FrequencyGrid::TimeVarying(d.freqs_tv.view());
     let nofilter = |a| {
-        SalienceConfig::new()
+        SalienceConfig::librosa()
             .with_aggregate(a)
             .with_filter_peaks(false)
     };
     let cases = [
-        ("default", fixed, SalienceConfig::default()),
+        ("default", fixed, SalienceConfig::librosa()),
         (
             "weighted",
             fixed,
-            SalienceConfig::new().with_weights(Some(w.clone())),
+            SalienceConfig::librosa().with_weights(Some(w.clone())),
         ),
         (
             "weighted_fill0",
             fixed,
-            SalienceConfig::new()
+            SalienceConfig::librosa()
                 .with_weights(Some(w.clone()))
                 .with_fill_value(0.0),
         ),
@@ -336,7 +333,7 @@ fn salience_matches_librosa() {
         (
             "time_varying",
             tv,
-            SalienceConfig::new().with_weights(Some(w)),
+            SalienceConfig::librosa().with_weights(Some(w)),
         ),
     ];
     for (key, grid, cfg) in cases {

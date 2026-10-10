@@ -101,7 +101,7 @@ fn metric(name: &str) -> DistanceMetric {
 }
 
 fn dtw_config(cfg: &Value) -> DtwConfig {
-    let mut c = DtwConfig::default();
+    let mut c = DtwConfig::librosa();
     if let Some(m) = cfg.get("metric") {
         c.metric = metric(m.as_str().unwrap());
     }
@@ -312,7 +312,7 @@ fn rqa_matches_librosa() {
     let sims = &f["rqa"]["sims"];
     for (name, case) in f["rqa"]["cases"].as_object().unwrap() {
         let sim = arr2(&sims[case["sim"].as_str().unwrap()]);
-        let cfg = RqaConfig::new()
+        let cfg = RqaConfig::librosa()
             .with_gap_onset(case["gap_onset"].as_f64().unwrap())
             .with_gap_extend(case["gap_extend"].as_f64().unwrap())
             .with_knight_moves(case["knight_moves"].as_bool().unwrap());
