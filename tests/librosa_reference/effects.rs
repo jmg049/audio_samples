@@ -642,56 +642,39 @@ fn peak_rel(a: &[f64], e: &[f64]) -> f64 {
 
 #[test]
 fn f32_time_stretch_matches_librosa_float32() {
+    // librosa's float32 STFT multiplies the frames by a float64 window, so its
+    // FFT runs in float64 and only the result is rounded to complex64. f32
+    // time_stretch does the same (f64 STFT of the samples, rounded once to
+    // Complex<f32>), then runs the phase vocoder and the inverse STFT in f32.
+    // Measured against librosa float32: 1.9e-7 (rate 1.5) / 1.8e-7 (rate 0.75)
+    // peak-relative. Bound 1e-6 (about 8 f32 eps of 1.19e-7: angle, cos/sin,
+    // interpolation and the inverse FFT each round in f32).
+    //
+    // Against our f64 path the rounding of the STFT to Complex<f32> is the
+    // difference; the vocoder accumulates the phase of every bin, including
+    // bins at the round-off level of the transform, so it grows beyond f32
+    // eps: measured 2.1e-6 / 1.9e-6. Bound 1e-5.
     let f = &f32_case()["time_stretch"];
     let k = step("sig_step");
     let x32 = mono32("mix");
     let x64 = mono("mix");
-    // librosa's float32 STFT multiplies the frames by a float64 window, so its
-    // FFT runs in float64 and only the result is rounded to complex64. The same
-    // input (our f64 STFT rounded to Complex<f32>) through the f32 phase vocoder
-    // and inverse STFT checks the f32 arithmetic of both stages: measured
-    // 1.9e-7 / 1.8e-7 peak-relative. Bound 1e-6 (about 8 f32 eps of 1.19e-7:
-    // angle, cos/sin, interpolation and the inverse FFT each round in f32).
-    let d32 = mix_stft().mapv(|z| Complex::new(z.re as f32, z.im as f32));
     for rate in ["1.5", "0.75"] {
         let r: f64 = rate.parse().unwrap();
-        let n = usize_of(&f[rate]["len"]);
-        let pv = phase_vocoder(d32.view(), r).unwrap();
-        let y = istft(pv.view(), &StftConfig::librosa(), Some(n)).unwrap();
-        let y: Vec<f64> = y.iter().map(|&v| f64::from(v)).collect();
+        let y = samples32(&x32.time_stretch(r, &StftConfig::librosa()).unwrap());
+        assert_eq!(y.len(), usize_of(&f[rate]["len"]), "length rate {rate}");
         check(
-            &format!("f32 vocoder chain rate {rate}"),
+            &format!("f32 time_stretch rate {rate} vs librosa float32"),
             &strided(&y, k),
             &f64s(&f[rate]["y"]),
             1e-6,
         );
-
-        // The full method computes the STFT in f32 as well. Its round-off (about
-        // 1e-7 of the peak) dominates the STFT bins that the chirp in `mix` has
-        // not reached yet; the vocoder carries their phase forward to the frames
-        // where the chirp arrives (as for digital silence in f64, see
-        // time_stretch_matches). Measured against librosa float32: 46.1 dB SNR
-        // (rate 1.5), 43.6 dB (rate 0.75); against our f64 path the same.
-        // Bound: 38 dB.
-        let y = samples32(&x32.time_stretch(r, &StftConfig::librosa()).unwrap());
-        assert_eq!(y.len(), n, "length rate {rate}");
         let y64 = samples(&x64.time_stretch(r, &StftConfig::librosa()).unwrap());
-        let (a, e) = (strided(&y, k), f64s(&f[rate]["y"]));
-        let snr = |a: &[f64], e: &[f64]| {
-            let sig: f64 = e.iter().map(|v| v * v).sum();
-            let err: f64 = a.iter().zip(e).map(|(p, q)| (p - q) * (p - q)).sum();
-            10.0 * (sig / err).log10()
-        };
-        eprintln!(
-            "f32 time_stretch {rate}: vs librosa float32 SNR {:.1} dB peak-rel {:.3e}; \
-             vs our f64 SNR {:.1} dB peak-rel {:.3e}",
-            snr(&a, &e),
-            peak_rel(&a, &e),
-            snr(&y, &y64),
-            peak_rel(&y, &y64)
+        check(
+            &format!("f32 time_stretch rate {rate} vs our f64"),
+            &y,
+            &y64,
+            1e-5,
         );
-        assert!(snr(&a, &e) > 38.0, "f32 time_stretch {rate} vs librosa");
-        assert!(snr(&y, &y64) > 38.0, "f32 time_stretch {rate} vs f64");
     }
 }
 
@@ -815,30 +798,45 @@ fn f32_trim_split_match_librosa_float32() {
 }
 
 #[test]
-fn f32_lpc_matches_librosa_float32() {
-    // The same float32 Burg recursion as librosa's numba kernel. Measured
-    // against librosa float32: mix order 4 3.0e-7, notes order 8 1.2e-8, noise
-    // order 16 4.7e-9 peak-relative. The recursion amplifies round-off on tonal
-    // signals (our f32 against our f64: 1.3e-3 for mix order 4, as librosa's own
-    // float32 against float64), so the two f32 results agree only because they
-    // round alike. Bound 2e-6.
-    let f = &f32_case()["lpc"];
-    for (sig, order) in [("mix", 4usize), ("notes", 8), ("noise", 16)] {
+fn f32_lpc_matches_librosa() {
+    // The recursion runs in f64 for every input type and the coefficients are
+    // rounded to f32 once. f32 input holds the same PCM values as the f64
+    // signal, so the result is the f64 result rounded: compared with librosa's
+    // float64 coefficients the error is half an f32 ulp plus the f64 agreement.
+    // Measured: mix order 4 2.9e-8, mix order 16 1.9e-8, noise order 16 3.7e-10
+    // peak-relative. Bound 1.2e-7 (one f32 eps).
+    let f = &fixture()["lpc"];
+    for (sig, order) in [("mix", 4usize), ("mix", 16), ("noise", 16)] {
         let x: Vec<f32> = signal(sig).iter().map(|&v| v as f32).collect();
         let a = lpc(&x, std::num::NonZeroUsize::new(order).unwrap()).unwrap();
         let a: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
-        let a64 = lpc(&signal(sig), std::num::NonZeroUsize::new(order).unwrap()).unwrap();
-        eprintln!(
-            "f32 lpc {sig} {order}: vs our f64 peak-rel {:.3e}",
-            peak_rel(&a, &a64)
-        );
         check(
-            &format!("f32 lpc {sig} order {order}"),
+            &format!("f32 lpc {sig} order {order} vs librosa float64"),
             &a,
             &f64s(&f[format!("{sig}_{order}")]),
-            2e-6,
+            1.2e-7,
         );
     }
+    // Against librosa's float32 recursion only where it is stable (noise). Its
+    // float32 round-off is the difference: measured 3.2e-8 at orders 4 and 16.
+    // Bound 1e-6.
+    let f = &f32_case()["lpc"];
+    for order in [4usize, 16] {
+        let x: Vec<f32> = signal("noise").iter().map(|&v| v as f32).collect();
+        let a = lpc(&x, std::num::NonZeroUsize::new(order).unwrap()).unwrap();
+        let a: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
+        check(
+            &format!("f32 lpc noise order {order} vs librosa float32"),
+            &a,
+            &f64s(&f[format!("noise_{order}")]),
+            1e-6,
+        );
+    }
+    // The trait method on f32 audio gives the same rounded coefficients.
+    let a = mono32("mix").lpc(nzu!(16)).unwrap();
+    let x: Vec<f32> = signal("mix").iter().map(|&v| v as f32).collect();
+    let b = lpc(&x, nzu!(16)).unwrap();
+    assert_eq!(a.row(0).to_vec(), b);
 }
 
 #[test]

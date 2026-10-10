@@ -54,9 +54,12 @@
 //! compute in and return that type. Parameters in the config structs stay `f64`
 //! and are rounded to the element type once.
 //!
-//! [`AudioEffects::pitch_shift`] resamples with the crate's resampler, which
-//! filters in `f64`: for `f32` computation that stage holds an `f64` copy of the
-//! time-stretched signal and of its resampled output.
+//! Three steps run in `f64` for every sample type and round their result to the
+//! float type once: the analysis STFT of [`AudioEffects::time_stretch`] and
+//! [`AudioEffects::pitch_shift`] (the phase vocoder amplifies the round-off of
+//! an `f32` STFT), the resampling stage of `pitch_shift` (the crate's resampler
+//! filters in `f64`), and Burg's recursion in [`lpc`] (unstable in `f32` on
+//! tonal signals). Each holds transient `f64` copies of its input and output.
 //!
 //! ```rust
 //! use audio_samples::operations::effects::{AudioEffects, PitchShiftConfig, SilenceConfig};
@@ -111,6 +114,19 @@ fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
 
 fn config_err(operation: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_configuration(operation, reason))
+}
+
+/// The audio as `(channels, samples)` `f64` rows, converted with the crate's
+/// audio-aware conversion, rejecting NaN and infinite samples.
+///
+/// The vocoder-based operations analyse these rows (see [`time_stretch_rows`]):
+/// `f64` samples of integer audio are the exact integer ratios, while the `f32`
+/// conversion rounds them, and the phase vocoder amplifies that rounding.
+fn finite_f64_rows<T: StandardSample>(
+    audio: &AudioSamples<'_, T>,
+) -> AudioSampleResult<Array2<f64>> {
+    use crate::AudioTypeConversion;
+    finite_float_rows(&audio.to_format::<f64>())
 }
 
 /// `a.total_cmp(b)` for either float type (`f32` to `f64` is exact and keeps
@@ -309,9 +325,23 @@ pub fn phase_vocoder_at<F: AudioFloat>(
     Ok(out)
 }
 
-/// `librosa.effects.time_stretch` on `(channels, samples)` rows.
+/// `librosa.effects.time_stretch` on `(channels, samples)` rows of `f64`,
+/// computed in `F`.
+///
+/// The analysis STFT is computed in `f64` from the `f64` samples and rounded
+/// once to `Complex<F>`; the phase vocoder and the inverse STFT run in `F`.
+/// librosa's `float32` path does the same (its `float64` window promotes the
+/// frames, so its FFT runs in `float64`). The phase vocoder sums the frame-to-frame
+/// phase differences of every bin, including bins whose value is at the
+/// round-off level of the transform, and their phases decide the output where a
+/// signal later reaches them: an `f32` FFT would put those bins at about 1e-7
+/// of the peak and change the output by far more than `f32` round-off.
+///
+/// Memory: for `F = f32` the `f64` rows and the `f64` complex STFT (twice the
+/// size of the `f32` one) are held until the STFT is rounded. For `F = f64` the
+/// rounding reuses the STFT's buffer.
 fn time_stretch_rows<F: AudioFloat>(
-    rows: ArrayView2<'_, F>,
+    rows: ArrayView2<'_, f64>,
     rate: f64,
     config: &StftConfig,
 ) -> AudioSampleResult<Array2<F>> {
@@ -340,7 +370,7 @@ fn time_stretch_rows<F: AudioFloat>(
         len_stretch * rows.nrows() as f64,
         MAX_SIGNAL_ELEMENTS,
     )?;
-    let d = stft(rows, config)?;
+    let d = stft(rows, config)?.mapv_into_any(|z| Complex::new(F::of(z.re), F::of(z.im)));
     let d_stretch = phase_vocoder(d.view(), rate)?;
     istft(d_stretch.view(), config, Some(len_stretch as usize))
 }
@@ -482,7 +512,7 @@ impl PitchShiftConfig {
 
 /// `librosa.effects.pitch_shift` on `(channels, samples)` rows.
 fn pitch_shift_rows<F: AudioFloat>(
-    rows: ArrayView2<'_, F>,
+    rows: ArrayView2<'_, f64>,
     n_steps: f64,
     config: &PitchShiftConfig,
 ) -> AudioSampleResult<Array2<F>> {
@@ -492,7 +522,7 @@ fn pitch_shift_rows<F: AudioFloat>(
     }
     let n = rows.ncols();
     let rate = 2.0f64.powf(-n_steps / config.bins_per_octave.get() as f64);
-    let stretched = time_stretch_rows(rows, rate, &config.stft)?;
+    let stretched = time_stretch_rows::<F>(rows, rate, &config.stft)?;
     // librosa: resample(orig_sr = sr / rate, target_sr = sr), i.e. by the ratio `rate`.
     let shifted = resample_rows_by_ratio(stretched, rate, config.quality)?;
     Ok(fix_length(shifted.view(), n))
@@ -2082,21 +2112,22 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
 ///
 /// `order + 1` coefficients `[1, a_1, ..., a_order]` of the prediction-error
 /// filter `A(z) = 1 + a_1 z^-1 + ... + a_order z^-order`, in the element type of
-/// `y`. The recursion runs in that type, as librosa's does.
+/// `y`. The recursion runs in `f64` (see below).
 ///
 /// # Errors
 ///
 /// [`ParameterError`] if `y` has a non-finite value or no more than `order` samples.
 ///
-/// # Numerical accuracy
+/// # Differences from librosa
 ///
-/// Burg's recursion amplifies round-off on strongly tonal signals, and more so
-/// with each order. On a test signal of three tones and a chirp, the `f32`
-/// coefficients differ from the `f64` ones by 1.3e-3 (relative to the largest
-/// coefficient) at order 4, the same as librosa's `float32` against `float64`;
-/// librosa's `float32` result is off by more than 100 % from order 10 on. On
-/// noise the `f32` coefficients agree with the `f64` ones to 3e-8 at order 16.
-/// Pass `f64` samples for high orders on tonal material.
+/// The recursion always runs in `f64`; `f32` input is widened (exactly) and the
+/// coefficients are rounded to `f32` once, at the cost of one `f64` copy of the
+/// signal. librosa runs the recursion in the input's dtype, and its `float32`
+/// Burg recursion is unstable on tonal input at high orders: on a test signal
+/// of three tones and a chirp its `float32` coefficients differ from its
+/// `float64` ones by 1.3e-3 (relative to the largest coefficient) at order 4,
+/// 0.14 at order 8 and by more than 100 % from order 10 on. For such input this
+/// function deliberately does not reproduce librosa's `float32` result.
 ///
 /// # Examples
 ///
@@ -2118,6 +2149,12 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
 /// J. P. Burg, "Maximum entropy spectral analysis," PhD thesis, Stanford, 1975;
 /// librosa `core.lpc`.
 pub fn lpc<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec<F>> {
+    let y: Vec<f64> = y.iter().map(|&v| v.as_f64()).collect();
+    Ok(lpc_f64(&y, order)?.into_iter().map(F::of).collect())
+}
+
+/// Burg's recursion in `f64` (see [`lpc`]).
+fn lpc_f64(y: &[f64], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
     let order = order.get();
     if y.iter().any(|v| !v.is_finite()) {
         return Err(param_err("y", "audio buffer is not finite everywhere"));
@@ -2131,24 +2168,24 @@ pub fn lpc<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
             ),
         ));
     }
-    let mut ar = vec![F::zero(); order + 1];
-    let mut ar_prev = vec![F::zero(); order + 1];
-    ar[0] = F::one();
-    ar_prev[0] = F::one();
-    let mut fwd: Vec<F> = y[1..].to_vec();
-    let mut bwd: Vec<F> = y[..y.len() - 1].to_vec();
-    let mut den: F = fwd.iter().zip(&bwd).map(|(&f, &b)| f * f + b * b).sum();
-    let (minus_two, tiny) = (F::of(-2.0), F::min_positive_value());
+    let mut ar = vec![0.0; order + 1];
+    let mut ar_prev = vec![0.0; order + 1];
+    ar[0] = 1.0;
+    ar_prev[0] = 1.0;
+    let mut fwd: Vec<f64> = y[1..].to_vec();
+    let mut bwd: Vec<f64> = y[..y.len() - 1].to_vec();
+    let mut den: f64 = fwd.iter().zip(&bwd).map(|(&f, &b)| f * f + b * b).sum();
+    let (minus_two, tiny) = (-2.0, f64::MIN_POSITIVE);
     for i in 0..order {
-        let dot: F = bwd.iter().zip(&fwd).map(|(&b, &f)| b * f).sum();
+        let dot: f64 = bwd.iter().zip(&fwd).map(|(&b, &f)| b * f).sum();
         let k = dot * minus_two / (den + tiny);
         std::mem::swap(&mut ar, &mut ar_prev);
         for j in 1..=i + 1 {
             ar[j] = ar_prev[j] + k * ar_prev[i + 1 - j];
         }
-        let fwd_new: Vec<F> = fwd.iter().zip(&bwd).map(|(&f, &b)| f + k * b).collect();
-        let bwd_new: Vec<F> = bwd.iter().zip(&fwd).map(|(&b, &f)| b + k * f).collect();
-        let q = F::one() - k * k;
+        let fwd_new: Vec<f64> = fwd.iter().zip(&bwd).map(|(&f, &b)| f + k * b).collect();
+        let bwd_new: Vec<f64> = bwd.iter().zip(&fwd).map(|(&b, &f)| b + k * f).collect();
+        let q = 1.0 - k * k;
         let (b_last, f_first) = (bwd_new[bwd_new.len() - 1], fwd_new[0]);
         den = q * den - b_last * b_last - f_first * f_first;
         fwd = fwd_new[1..].to_vec();
@@ -2522,13 +2559,22 @@ pub trait AudioEffects {
     /// agreement drops to ~30 dB SNR there. librosa against itself with a
     /// 1e-15 relative STFT perturbation differs by the same amount (~27 dB).
     ///
-    /// For `f32` computation (`u8`, `i16`, `I24`, `f32` audio) the STFT runs in
-    /// `f32`, while librosa's `float32` STFT is computed in `float64` and rounded.
-    /// The same amplification then applies to bins at the `f32` round-off level
-    /// (about 1e-7 of the peak), for example bins that a chirp reaches only
-    /// later: on the reference chirp-and-tones signal the `f32` result agrees
-    /// with librosa's `float32` result and with this crate's `f64` result to
-    /// 43-46 dB SNR. Signals without such bins agree to `f32` round-off.
+    /// # Precision and memory
+    ///
+    /// For `f32` computation (`u8`, `i16`, `I24`, `f32` audio) the analysis STFT
+    /// is computed in `f64` from the samples converted to `f64` and rounded once
+    /// to `Complex<f32>`; the phase vocoder and the inverse STFT run in `f32`.
+    /// librosa's `float32` path also computes its STFT in `float64`. An `f32`
+    /// STFT would put the bins that a signal reaches only later (a chirp, an
+    /// onset) at the `f32` round-off level, and the phase vocoder carries their
+    /// phase into the output. On the reference chirp-and-tones signal the `f32`
+    /// result agrees with librosa's `float32` result to 1.9e-7 of the peak and
+    /// with this crate's `f64` result to 2.1e-6; `i16` output is within 1 LSB of
+    /// the `f64` result re-quantised.
+    ///
+    /// The cost: while the STFT is computed, an `f64` copy of the samples and the
+    /// `f64` complex STFT (twice the size of the `f32` one) are held; the `f64`
+    /// STFT is freed once it is rounded.
     ///
     /// # Examples
     ///
@@ -2608,10 +2654,15 @@ pub trait AudioEffects {
     /// signal agrees within the resampler difference (about 68 dB SNR on the
     /// reference test signal, see `tests/librosa_reference/effects.rs`).
     ///
-    /// The resampler filters in `f64`. For `f32` computation the time-stretched
-    /// rows are widened to `f64` for that stage and the result is rounded back,
-    /// so the stage temporarily holds `f64` copies of the stretched and the
-    /// resampled signal.
+    /// # Precision and memory
+    ///
+    /// The time-stretch stage computes its STFT in `f64` and rounds it once, with
+    /// the transient `f64` copies described under
+    /// [`time_stretch`](Self::time_stretch). The resampler filters in `f64`: for
+    /// `f32` computation the time-stretched rows are widened to `f64` for that
+    /// stage and the result is rounded back, so the stage temporarily holds `f64`
+    /// copies of the stretched and the resampled signal. `i16` output is within
+    /// 1 LSB of the `f64` result re-quantised on the reference test signals.
     ///
     /// # Examples
     ///
@@ -3140,8 +3191,8 @@ pub trait AudioEffects {
     /// # Returns
     ///
     /// A `(channels, order + 1)` array of [`Float`](Self::Float); row `c` is
-    /// `[1, a_1, ..., a_order]`. For `f32` see the accuracy note of [`lpc`]:
-    /// convert the audio to `f64` first for high orders on tonal material.
+    /// `[1, a_1, ..., a_order]`. The recursion runs in `f64` for every sample
+    /// type (see [`lpc`]).
     ///
     /// # Errors
     ///
@@ -3236,7 +3287,7 @@ where
         rate: f64,
         stft: &StftConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = time_stretch_rows(finite_float_rows(self)?.view(), rate, stft)?;
+        let y = time_stretch_rows::<T::Float>(finite_f64_rows(self)?.view(), rate, stft)?;
         float_rows_to_audio(y, self.sample_rate(), "time_stretch")
     }
 
@@ -3250,7 +3301,7 @@ where
         n_steps: f64,
         config: &PitchShiftConfig,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        let y = pitch_shift_rows(finite_float_rows(self)?.view(), n_steps, config)?;
+        let y = pitch_shift_rows::<T::Float>(finite_f64_rows(self)?.view(), n_steps, config)?;
         float_rows_to_audio(y, self.sample_rate(), "pitch_shift")
     }
 
@@ -3940,12 +3991,13 @@ mod tests {
             eprintln!("i16 {name}: max {lsb} LSB from the re-quantised f64 path (bound {bound})");
             assert!(lsb <= bound, "i16 {name}: {lsb} LSB > {bound}");
         }
-        // A chirp sweeps into bins whose STFT values were at the round-off level
-        // before it arrives. The phase vocoder (librosa 1.0's algorithm) carries
-        // the phase of those bins forward, so the f32 round-off there sets the
-        // phase of the chirp once it arrives: the stretched outputs differ by more
-        // than 1 LSB. Measured: time_stretch 46.7 dB SNR (max 139 LSB),
-        // pitch_shift 51.0 dB (max 113 LSB), harmonic 1 LSB. Bound: 40 dB.
+        // A chirp sweeps into bins whose STFT values are at the round-off level
+        // before it arrives, and the phase vocoder (librosa 1.0's algorithm)
+        // carries the phase of those bins forward. The vocoder operations
+        // therefore analyse the exact f64 samples with an f64 STFT and round it
+        // to f32 once (as librosa's float32 path does); an f32 STFT of the f32
+        // samples gave 139 LSB here. Measured: 1 LSB for time_stretch (rates 1.5
+        // and 0.75), pitch_shift (+2, -3) and harmonic. Bound: 1 LSB.
         let chirp = AudioSamples::new_mono(
             Array1::from_shape_fn(22050, |n| {
                 let t = n as f64 / 22050.0;
@@ -3957,38 +4009,52 @@ mod tests {
             sample_rate!(22050),
         )
         .unwrap();
-        let snr_db =
-            |op: &dyn Fn(&AudioSamples<'static, i16>) -> AudioSamples<'static, i16>,
-             op64: &dyn Fn(&AudioSamples<'static, f64>) -> AudioSamples<'static, f64>| {
-                use crate::AudioTypeConversion;
-                let y = op(&chirp);
-                let y64 = op64(&chirp.to_format::<f64>()).to_format::<i16>();
-                let (a, b) = (y.as_mono().unwrap(), y64.as_mono().unwrap());
-                let sig: f64 = b.iter().map(|&v| f64::from(v).powi(2)).sum();
-                let err: f64 = a
-                    .iter()
-                    .zip(b.iter())
-                    .map(|(&p, &q)| (f64::from(p) - f64::from(q)).powi(2))
-                    .sum();
-                10.0 * (sig / err).log10()
-            };
-        let ts = snr_db(&|a| a.time_stretch(1.5, &stft).unwrap(), &|a| {
-            a.time_stretch(1.5, &stft).unwrap()
-        });
-        let ps = snr_db(&|a| a.pitch_shift(2.0, &ps).unwrap(), &|a| {
-            a.pitch_shift(2.0, &ps).unwrap()
-        });
-        eprintln!(
-            "i16 chirp: time_stretch {ts:.1} dB, pitch_shift {ps:.1} dB SNR from the f64 path"
-        );
-        assert!(ts > 40.0 && ps > 40.0, "chirp SNR {ts:.1} / {ps:.1} dB");
-        assert!(
-            max_lsb(
-                &chirp,
-                |a| a.harmonic(&hp).unwrap(),
-                |a| a.harmonic(&hp).unwrap()
-            ) <= 1
-        );
+        let chirp_cases = [
+            (
+                "time_stretch 1.5",
+                max_lsb(
+                    &chirp,
+                    |a| a.time_stretch(1.5, &stft).unwrap(),
+                    |a| a.time_stretch(1.5, &stft).unwrap(),
+                ),
+            ),
+            (
+                "time_stretch 0.75",
+                max_lsb(
+                    &chirp,
+                    |a| a.time_stretch(0.75, &stft).unwrap(),
+                    |a| a.time_stretch(0.75, &stft).unwrap(),
+                ),
+            ),
+            (
+                "pitch_shift +2",
+                max_lsb(
+                    &chirp,
+                    |a| a.pitch_shift(2.0, &ps).unwrap(),
+                    |a| a.pitch_shift(2.0, &ps).unwrap(),
+                ),
+            ),
+            (
+                "pitch_shift -3",
+                max_lsb(
+                    &chirp,
+                    |a| a.pitch_shift(-3.0, &ps).unwrap(),
+                    |a| a.pitch_shift(-3.0, &ps).unwrap(),
+                ),
+            ),
+            (
+                "harmonic",
+                max_lsb(
+                    &chirp,
+                    |a| a.harmonic(&hp).unwrap(),
+                    |a| a.harmonic(&hp).unwrap(),
+                ),
+            ),
+        ];
+        for (name, lsb) in chirp_cases {
+            eprintln!("i16 chirp {name}: max {lsb} LSB from the re-quantised f64 path (bound 1)");
+            assert!(lsb <= 1, "i16 chirp {name}: {lsb} LSB > 1");
+        }
 
         // The output type is the input type.
         let _: AudioSamples<'static, i16> = x.percussive(&hp).unwrap();

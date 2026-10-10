@@ -234,12 +234,11 @@ def build(signals, sr):
         tr32[name] = {"trim": idx, "split": librosa.effects.split(burst32, **kw)}
     tr32["mix_split"] = librosa.effects.split(mix32, top_db=20)
     f32["trim_split"] = tr32
-    # Burg's recursion in float32 loses accuracy quickly with the order on tonal
-    # signals (librosa float32 vs float64 on `mix`: 1.3e-3 at order 4, 0.14 at
-    # order 8); the cases stay where float32 is meaningful.
-    f32["lpc"] = {
-        f"{name}_{order}": librosa.lpc(sig.astype(np.float32), order=order)
-        for name, sig, order in (("mix", mix, 4), ("notes", notes, 8), ("noise", noise, 16))
-    }
+    # librosa runs Burg's recursion in float32 for float32 input; on tonal signals
+    # that is unstable at higher orders (`mix`: 1.3e-3 from float64 at order 4,
+    # 0.14 at order 8). audio_samples runs it in f64 for every input, so only the
+    # noise signal, where librosa's float32 result is stable, is stored here; the
+    # Rust test compares f32 input on `mix` with the float64 cases above.
+    f32["lpc"] = {f"noise_{order}": librosa.lpc(noise.astype(np.float32), order=order) for order in (4, 16)}
     out["float32"] = f32
     return out
