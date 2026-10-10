@@ -19,6 +19,10 @@
 //!   kernels reproduce librosa's numba arithmetic order (sequential means, numpy
 //!   pairwise sums, `float32` tightness, round-half-even).
 //!
+//! - `float32` cases: `AudioSamples<f32>` (computed in `f32`) against librosa on
+//!   `y.astype(np.float32)`; tolerances are derived from f32 round-off next to
+//!   their constants. Events, tempi and beats are compared exactly there too.
+//!
 //! Measured errors are printed with `--nocapture`.
 
 use audio_samples::operations::rhythm::{
@@ -35,7 +39,30 @@ use audio_samples::{AudioSamples, nzu};
 use ndarray::{Array2, Array3, s};
 use serde_json::Value;
 
-use crate::common::{arr2, arr3, assert_close, carr2, errors, f64s, load, mono, sr, stereo};
+use crate::common::{
+    arr2, arr3, assert_close, carr2, errors, f64s, load, mono, signal, sr, stereo,
+};
+
+// float32 tolerances (peak-relative) for `float32_input`; f32 eps = 1.19e-7.
+//
+// Onset envelopes: measured worst 4.4e-6 (`mix`), 1.4e-6 or less elsewhere. The
+// envelope is a mean of differences of dB values of up to ~80 dB in magnitude,
+// where one f32 ulp is 7.6e-6 dB; librosa and this crate round the mel power
+// (different FFTs, same f32 basis values) and the log10 independently, so a
+// difference carries ~1e-5 dB absolute error. `mix` has a steady spectrum and
+// an envelope peak of only ~2 dB, which turns that into ~5e-6 relative. Bound:
+// 2e-5 (a factor of 4.6).
+const TOL_F32_ENVELOPE: f64 = 2e-5;
+// Tempogram and Fourier tempogram magnitude: measured worst 1.4e-6 (`mix`
+// tempogram; librosa's autocorrelation runs in float64, ours in f32) and 7.1e-7
+// (Fourier). The input envelope's own f32 error (above) propagates, plus
+// O(log2(768) * eps) ~ 1.1e-6 from the f32 FFTs. Bound: 5e-6 (~42 eps, a
+// factor of 3.7).
+const TOL_F32_TEMPOGRAM: f64 = 5e-6;
+// PLP: measured worst 3.6e-7 (both sides in float32: STFT, peak selection,
+// inverse STFT of 384-point frames, max-normalisation). Bound: 2e-6 (~17 eps,
+// a factor of 5.6).
+const TOL_F32_PLP: f64 = 2e-6;
 
 fn fixture() -> &'static Value {
     static F: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
@@ -62,7 +89,7 @@ fn check(what: &str, actual: &[f64], expected: &[f64], rtol: f64) {
 }
 
 fn onset_cfg(case: &str) -> OnsetStrengthConfig {
-    let d = OnsetStrengthConfig::default();
+    let d = OnsetStrengthConfig::librosa();
     match case {
         "default" => d,
         "lag2" => d.with_lag(nzu!(2)),
@@ -71,8 +98,8 @@ fn onset_cfg(case: &str) -> OnsetStrengthConfig {
         "nocenter" => d.with_center(false),
         "detrend" => d.with_detrend(true),
         "hop256_nfft1024" => d.with_mel(
-            MelSpectrogramConfig::default().with_stft(
-                StftConfig::default()
+            MelSpectrogramConfig::librosa().with_stft(
+                StftConfig::librosa()
                     .with_n_fft(nzu!(1024))
                     .with_hop_length(Some(nzu!(256))),
             ),
@@ -103,7 +130,7 @@ fn onset_strength() {
         }
     }
     let env = stereo()
-        .onset_strength(&OnsetStrengthConfig::default())
+        .onset_strength(&OnsetStrengthConfig::librosa())
         .unwrap();
     let e = arr2(&f["stereo"]["default"]);
     assert_eq!(env.dim(), e.dim());
@@ -120,7 +147,7 @@ fn onset_strength_multi() {
     let f = &fixture()["onset_strength_multi"];
     let bounds = usizes(&f["bounds"]);
     let notes = mono("notes");
-    let d = OnsetStrengthConfig::default();
+    let d = OnsetStrengthConfig::librosa();
     let cases: Vec<(&str, Array3<f64>, Array3<f64>)> = vec![
         (
             "notes_default",
@@ -211,8 +238,8 @@ fn onset_detect_exact() {
     for sig in ["clicks120", "notes", "mix"] {
         let g = &f[sig];
         let a = mono(sig);
-        let env = env_row(&a, &OnsetStrengthConfig::default());
-        let d = OnsetDetectConfig::default();
+        let env = env_row(&a, &OnsetStrengthConfig::librosa());
+        let d = OnsetDetectConfig::librosa();
         let det = |cfg: &OnsetDetectConfig, energy: Option<&[f64]>| {
             onset_detect_from_envelope(&env, srf, hop, cfg, energy).unwrap()
         };
@@ -228,7 +255,7 @@ fn onset_detect_exact() {
         let nn = d
             .clone()
             .with_normalize(false)
-            .with_peak_pick(Some(PeakPickConfig::default().with_delta(0.5)));
+            .with_peak_pick(Some(PeakPickConfig::for_onsets(srf, hop).with_delta(0.5)));
         assert_eq!(
             det(&nn, None),
             usizes(&g["no_normalize"]),
@@ -292,7 +319,7 @@ fn tempograms() {
             g["bin_step"].as_u64().unwrap() as usize,
             g["frame_step"].as_u64().unwrap() as usize,
         );
-        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::default()).unwrap();
+        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::librosa()).unwrap();
         let shape: Vec<usize> = usizes(&g["tempogram_shape"]);
         assert_eq!([tg.dim().1, tg.dim().2], [shape[0], shape[1]]);
         let sub = tg.slice(s![0, ..;bs, ..;fs]).to_owned();
@@ -304,7 +331,7 @@ fn tempograms() {
             1e-9,
         );
 
-        let cfg = TempogramConfig::new()
+        let cfg = TempogramConfig::librosa()
             .with_win_length(nzu!(32))
             .with_center(false)
             .with_norm(Some(2.0));
@@ -318,7 +345,7 @@ fn tempograms() {
             1e-9,
         );
 
-        let cfg = TempogramConfig::new()
+        let cfg = TempogramConfig::librosa()
             .with_win_length(nzu!(33))
             .with_window(audio_samples::operations::filterbanks::Window::Hamming)
             .with_norm(None);
@@ -332,7 +359,7 @@ fn tempograms() {
             1e-9,
         );
 
-        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::default())
+        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::librosa())
             .unwrap();
         let shape = usizes(&g["fourier_shape"]);
         assert_eq!([ft.dim().1, ft.dim().2], [shape[0], shape[1]]);
@@ -349,7 +376,7 @@ fn tempograms() {
         let (er, ei): (Vec<f64>, Vec<f64>) = e.iter().map(|z| (z.re, z.im)).unzip();
         check(&format!("fourier re {sig}"), &ar, &er, 1e-9);
         check(&format!("fourier im {sig}"), &ai, &ei, 1e-9);
-        let cfg = FourierTempogramConfig::new()
+        let cfg = FourierTempogramConfig::librosa()
             .with_win_length(nzu!(40))
             .with_center(false);
         let ft = fourier_tempogram_from_envelope(env.view(), &cfg).unwrap();
@@ -362,7 +389,7 @@ fn tempograms() {
         check(&format!("fourier w40 im {sig}"), &ai, &ei, 1e-9);
     }
     // Stereo from audio (onset envelope round-off adds ~1e-12).
-    let tg = stereo().tempogram(&TempogramConfig::default()).unwrap();
+    let tg = stereo().tempogram(&TempogramConfig::librosa()).unwrap();
     let shape = usizes(&f["stereo"]["tempogram_shape"]);
     assert_eq!(vec![tg.dim().0, tg.dim().1, tg.dim().2], shape);
     let sub = tg.slice(s![.., ..;16, ..;4]).to_owned();
@@ -382,9 +409,9 @@ fn tempo_exact() {
     for sig in ["clicks120", "notes", "mix"] {
         let g = &f[sig];
         let a = mono(sig);
-        let env = a.onset_strength(&OnsetStrengthConfig::default()).unwrap();
+        let env = a.onset_strength(&OnsetStrengthConfig::librosa()).unwrap();
         let t = |cfg: &TempoConfig| tempo_from_envelope(env.view(), srf, hop, cfg).unwrap();
-        let d = TempoConfig::default();
+        let d = TempoConfig::librosa();
         assert_eq!(t(&d)[[0, 0]], scalar(&g["default"]), "{sig} default");
         assert_eq!(
             a.tempo(&d).unwrap()[[0, 0]],
@@ -419,7 +446,7 @@ fn tempo_exact() {
             .with_max_tempo(Some(200.0));
         assert_eq!(t(&c)[[0, 0]], scalar(&g["median_max200"]), "{sig} median");
     }
-    let st = stereo().tempo(&TempoConfig::default()).unwrap();
+    let st = stereo().tempo(&TempoConfig::librosa()).unwrap();
     assert_eq!(
         st.column(0).to_vec(),
         arr2(&f["stereo_f64"]["default"]).column(0).to_vec()
@@ -438,7 +465,7 @@ fn beat_track_exact() {
     for sig in ["clicks120", "notes", "mix"] {
         let g = &f[sig];
         let env = f64s(&g["envelope"]);
-        let d = BeatTrackConfig::default();
+        let d = BeatTrackConfig::librosa();
         let run = |cfg: &BeatTrackConfig| beat_track_from_envelope(&env, srf, hop, cfg).unwrap();
         let cases = [
             ("default", d.clone()),
@@ -482,7 +509,7 @@ fn beat_track_exact() {
     let env = f64s(&g["envelope"]);
     let curve = f64s(&g["curve"]);
     let fr = srf / 512.0;
-    let bt = beat_track_from_envelope(&env, srf, hop, &BeatTrackConfig::default()).unwrap();
+    let bt = beat_track_from_envelope(&env, srf, hop, &BeatTrackConfig::librosa()).unwrap();
     assert_eq!(bt.beats.frames, usizes(&g["default"]));
     assert_eq!(bt.tempo, scalar(&g["tempo"]));
     assert_eq!(
@@ -511,16 +538,16 @@ fn plp() {
         let e = f64s(&bt[sig]["envelope"]);
         let env = Array2::from_shape_vec((1, e.len()), e).unwrap();
         let cases = [
-            ("default", PlpConfig::default()),
+            ("default", PlpConfig::librosa()),
             (
                 "range_60_200_w256",
-                PlpConfig::default()
+                PlpConfig::librosa()
                     .with_tempo_range(Some(60.0), Some(200.0))
                     .with_win_length(nzu!(256)),
             ),
             (
                 "unbounded",
-                PlpConfig::default().with_tempo_range(None, None),
+                PlpConfig::librosa().with_tempo_range(None, None),
             ),
         ];
         for (name, cfg) in &cases {
@@ -533,7 +560,7 @@ fn plp() {
                 1e-9,
             );
         }
-        let p = mono(sig).plp(&PlpConfig::default()).unwrap();
+        let p = mono(sig).plp(&PlpConfig::librosa()).unwrap();
         check(
             &format!("plp {sig} from audio"),
             p.as_slice().unwrap(),
@@ -552,14 +579,14 @@ fn tempogram_variants() {
         let g = &f[sig];
         let e = f64s(&fixture()["tempogram"][sig]["envelope"]);
         let env = Array2::from_shape_vec((1, e.len()), e).unwrap();
-        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::default()).unwrap();
+        let tg = tempogram_from_envelope(env.view(), &TempogramConfig::librosa()).unwrap();
 
         // Linear interpolation of the tempogram at exact per-frame tempi: FFT round-off.
         let r = tempogram_ratio_from_tempogram(
             tg.view(),
             srf,
             hop,
-            &TempogramRatioConfig::default(),
+            &TempogramRatioConfig::librosa(),
             None,
         )
         .unwrap();
@@ -569,7 +596,7 @@ fn tempogram_variants() {
             arr2(&g["ratio"]).as_slice().unwrap(),
             1e-9,
         );
-        let cfg = TempogramRatioConfig::default().with_aggregate(Some(Aggregate::Mean));
+        let cfg = TempogramRatioConfig::librosa().with_aggregate(Some(Aggregate::Mean));
         let r = tempogram_ratio_from_tempogram(tg.view(), srf, hop, &cfg, None).unwrap();
         check(
             &format!("tempogram_ratio mean {sig}"),
@@ -577,7 +604,7 @@ fn tempogram_variants() {
             &f64s(&g["ratio_mean"]),
             1e-9,
         );
-        let mut cfg = TempogramRatioConfig::default().with_factors(vec![1.0, 0.5, 2.0]);
+        let mut cfg = TempogramRatioConfig::librosa().with_factors(vec![1.0, 0.5, 2.0]);
         cfg.tempo = cfg.tempo.with_start_bpm(90.0);
         cfg.fill_value = -1.0;
         let r = tempogram_ratio_from_tempogram(tg.view(), srf, hop, &cfg, None).unwrap();
@@ -589,7 +616,7 @@ fn tempogram_variants() {
         );
 
         let h =
-            hybrid_tempogram_from_envelope(env.view(), srf, hop, &HybridTempogramConfig::default())
+            hybrid_tempogram_from_envelope(env.view(), srf, hop, &HybridTempogramConfig::librosa())
                 .unwrap();
         let shape = usizes(&g["hybrid_shape"]);
         assert_eq!([h.dim().1, h.dim().2], [shape[0], shape[1]]);
@@ -603,7 +630,7 @@ fn tempogram_variants() {
         println!("hybrid {sig}: max abs {abs:.3e}, peak-rel {rel:.3e}");
         assert_close(&format!("hybrid {sig}"), sub.iter(), e.iter(), 1e-12, 2e-7);
 
-        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::default())
+        let ft = fourier_tempogram_from_envelope(env.view(), &FourierTempogramConfig::librosa())
             .unwrap();
         let n = ft.dim().2 - 1;
         let mag = ft.slice(s![.., .., ..n]).mapv(|z| z.norm());
@@ -629,5 +656,96 @@ fn tempogram_variants() {
             arr2(&g["metrogram_max"]).as_slice().unwrap(),
             1e-9,
         );
+    }
+}
+
+/// A shared test signal as mono `f32` audio (exact: 16-bit PCM codes).
+fn mono_f32(name: &str) -> AudioSamples<'static, f32> {
+    let x: Vec<f32> = signal(name).iter().map(|&v| v as f32).collect();
+    let rate = std::num::NonZeroU32::new(sr()).expect("sr > 0");
+    AudioSamples::new_mono(ndarray::Array1::from(x), rate).expect("valid mono audio")
+}
+
+fn widen(x: impl IntoIterator<Item = f32>) -> Vec<f64> {
+    x.into_iter().map(f64::from).collect()
+}
+
+/// `f32` audio against librosa run on `y.astype(np.float32)` (fixture
+/// `float32.<sig>`). The outputs are computed in `f32` here.
+#[test]
+fn float32_input() {
+    let f = &fixture()["float32"];
+    for sig in ["clicks120", "notes", "mix"] {
+        let g = &f[sig];
+        let a = mono_f32(sig);
+
+        let env = a.onset_strength(&OnsetStrengthConfig::librosa()).unwrap();
+        check(
+            &format!("f32 onset_strength {sig}"),
+            &widen(env.iter().copied()),
+            &f64s(&g["onset_strength"]),
+            TOL_F32_ENVELOPE,
+        );
+        let median = OnsetStrengthConfig::librosa().with_aggregate(Some(Aggregate::Median));
+        let env_m = a.onset_strength(&median).unwrap();
+        check(
+            &format!("f32 onset_strength median {sig}"),
+            &widen(env_m.iter().copied()),
+            &f64s(&g["onset_strength_median"]),
+            TOL_F32_ENVELOPE,
+        );
+
+        let tg = a.tempogram(&TempogramConfig::librosa()).unwrap();
+        let shape = usizes(&g["tempogram_shape"]);
+        assert_eq!([tg.dim().1, tg.dim().2], [shape[0], shape[1]]);
+        let sub = tg.slice(s![0, ..;8, ..;4]).to_owned();
+        check(
+            &format!("f32 tempogram {sig}"),
+            &widen(sub.iter().copied()),
+            arr2(&g["tempogram"]).as_slice().unwrap(),
+            TOL_F32_TEMPOGRAM,
+        );
+        let ft = a
+            .fourier_tempogram(&FourierTempogramConfig::librosa())
+            .unwrap();
+        let mag = ft.slice(s![0, ..;8, ..;4]).mapv(|z| f64::from(z.norm()));
+        check(
+            &format!("f32 fourier mag {sig}"),
+            mag.as_slice().unwrap(),
+            arr2(&g["fourier_mag"]).as_slice().unwrap(),
+            TOL_F32_TEMPOGRAM,
+        );
+        let p = a.plp(&PlpConfig::librosa()).unwrap();
+        check(
+            &format!("f32 plp {sig}"),
+            &widen(p.iter().copied()),
+            &f64s(&g["plp"]),
+            TOL_F32_PLP,
+        );
+
+        // Events and tempi: exact.
+        assert_eq!(
+            a.tempo(&TempoConfig::librosa()).unwrap()[[0, 0]],
+            scalar(&g["tempo"]),
+            "{sig} f32 tempo"
+        );
+        assert_eq!(
+            a.onset_detect(&OnsetDetectConfig::librosa())
+                .unwrap()
+                .frames,
+            usizes(&g["onset_detect"]),
+            "{sig} f32 onset_detect"
+        );
+        for (key, cfg) in [
+            ("beat_track", BeatTrackConfig::librosa()),
+            (
+                "beat_track_no_trim",
+                BeatTrackConfig::librosa().with_trim(false),
+            ),
+        ] {
+            let bt = a.beat_track(&cfg).unwrap();
+            assert_eq!(bt.beats.frames, usizes(&g[key]["beats"]), "{sig} f32 {key}");
+            assert_eq!(bt.tempo, scalar(&g[key]["tempo"]), "{sig} f32 {key} tempo");
+        }
     }
 }

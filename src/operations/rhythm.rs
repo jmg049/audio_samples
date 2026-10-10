@@ -27,8 +27,10 @@
 //! [`AudioBeatTracking`](crate::operations::AudioBeatTracking) traits use their own detection
 //! functions, peak picker and a fixed-tempo beat grid; their results are not
 //! comparable with librosa's. Code ported from Python, and results compared with
-//! published librosa features, need librosa's exact algorithms. Every config here
-//! defaults to librosa's defaults, so `X::default()` reproduces librosa's output.
+//! published librosa features, need librosa's exact algorithms. Every config has a
+//! `librosa()` constructor that returns librosa 1.0's defaults, so `X::librosa()`
+//! reproduces librosa's output. `Default` gives the same values except where noted
+//! on the config ([`BeatTrackConfig`] does not trim weak beats by default).
 //!
 //! ## How
 //!
@@ -38,6 +40,17 @@
 //! audio and return frame indices in a [`FrameEvents`], which converts them to
 //! samples or seconds. The `*_from_*` free functions accept a precomputed envelope or
 //! spectrogram, like librosa's `onset_envelope=` / `S=` arguments.
+//!
+//! The precision of the frame-wise outputs follows the input: onset envelopes,
+//! tempograms (including the complex Fourier tempogram), PLP pulses and the
+//! tempogram variants have the element type
+//! [`AudioSample::Float`](crate::AudioSample::Float) of the sample type, and the
+//! computation runs in that type. `u8`, `i16`, `I24` and `f32` audio gives `f32`;
+//! `i32` and `f64` audio gives `f64`. The free functions are generic over the
+//! element type ([`AudioFloat`]: `f32` or `f64`) of their envelope or spectrogram.
+//! Tempo estimates are BPM values taken from the `f64` grid of [`tempo_frequencies`]
+//! and stay `f64` for every input type, as librosa returns them; event outputs are
+//! frame indices.
 //!
 //! ```rust
 //! use audio_samples::operations::rhythm::{AudioRhythm, BeatTrackConfig, OnsetDetectConfig};
@@ -54,17 +67,22 @@
 //! }
 //! let audio = AudioSamples::new_mono(y, sample_rate!(22050)).unwrap();
 //!
-//! let onsets = audio.onset_detect(&OnsetDetectConfig::default()).unwrap();
+//! let onsets = audio.onset_detect(&OnsetDetectConfig::librosa()).unwrap();
 //! assert!(onsets.len() >= 7);
 //!
-//! let beats = audio.beat_track(&BeatTrackConfig::default()).unwrap();
+//! let beats = audio.beat_track(&BeatTrackConfig::librosa()).unwrap();
 //! assert!((beats.tempo - 120.0).abs() < 5.0);
 //! ```
 //!
 //! ## Differences from librosa
 //!
-//! - The mel basis behind [`OnsetStrengthConfig`] is computed in `f64` (librosa's
-//!   default basis is `float32`, a relative rounding of ~6e-8 in the weights).
+//! - The mel basis behind [`OnsetStrengthConfig`] is computed in `f64` and rounded
+//!   to the output type once (librosa's default basis is `float32`, a relative
+//!   rounding of ~6e-8 in the weights).
+//! - For `f32` input, librosa computes the autocorrelation tempogram (and so the
+//!   tempo estimate, the tempogram ratio and the hybrid tempogram) in `float64`,
+//!   because its `float64` window promotes the `float32` envelope. Here these run
+//!   in `f32`; the results differ from librosa's by `f32` round-off.
 //! - Event detectors take 1-D (mono) input; librosa only broadcasts them in its
 //!   dense (`sparse=False`) mode.
 //! - Inputs that crash or read out of bounds in librosa (empty envelopes,
@@ -75,16 +93,15 @@ use std::num::NonZeroUsize;
 
 use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis};
 use num_complex::Complex;
-use realfft::RealFftPlanner;
 
+use crate::audio_float::finite_float_rows;
 use crate::operations::filterbanks::{Window, get_window};
-// TRANSITIONAL(f64): `finite_audio_rows` / `melspectrogram_rows` on f64 rows.
 use crate::operations::spectrum::{
-    DbConfig, MelSpectrogramConfig, StftConfig, StftPadMode, finite_audio_rows, istft,
-    melspectrogram_rows, power_to_db, stft,
+    DbConfig, MelSpectrogramConfig, StftConfig, StftPadMode, istft, melspectrogram_rows,
+    power_to_db, stft,
 };
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, ChannelRequirement, LayoutError,
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ChannelRequirement, LayoutError,
     ParameterError, ProcessingError, StandardSample,
 };
 
@@ -139,16 +156,17 @@ fn require_positive(name: &str, v: f64) -> AudioSampleResult<()> {
 
 /// numpy's pairwise summation of a contiguous array (`numpy.sum` / `numpy.mean`
 /// along the last axis), reproduced so that sums round exactly like numpy's.
-fn pairwise_sum(a: &[f64]) -> f64 {
+/// numpy accumulates `float32` arrays in `float32`, as this does for `F = f32`.
+fn pairwise_sum<F: AudioFloat>(a: &[F]) -> F {
     let n = a.len();
     if n < 8 {
-        let mut res = 0.0;
+        let mut res = F::zero();
         for &v in a {
             res += v;
         }
         res
     } else if n <= 128 {
-        let mut r = [0.0; 8];
+        let mut r = [F::zero(); 8];
         r.copy_from_slice(&a[..8]);
         let mut i = 8;
         while i < n - (n % 8) {
@@ -170,12 +188,12 @@ fn pairwise_sum(a: &[f64]) -> f64 {
     }
 }
 
-fn sequential_sum(a: &[f64]) -> f64 {
-    a.iter().fold(0.0, |acc, &v| acc + v)
+fn sequential_sum<F: AudioFloat>(a: &[F]) -> F {
+    a.iter().fold(F::zero(), |acc, &v| acc + v)
 }
 
 /// `numpy.max` (NaN propagates). `a` must be non-empty.
-fn np_max(a: &[f64]) -> f64 {
+fn np_max<F: AudioFloat>(a: &[F]) -> F {
     let mut m = a[0];
     for &v in &a[1..] {
         if m.is_nan() {
@@ -189,13 +207,14 @@ fn np_max(a: &[f64]) -> f64 {
 }
 
 /// `numpy.median` of the values in `buf` (sorted in place). `buf` must be non-empty.
-fn median_in_place(buf: &mut [f64]) -> f64 {
-    buf.sort_unstable_by(f64::total_cmp);
+fn median_in_place<F: AudioFloat>(buf: &mut [F]) -> F {
+    // Widening to f64 is exact and preserves the total order (NaNs included).
+    buf.sort_unstable_by(|a, b| a.as_f64().total_cmp(&b.as_f64()));
     let n = buf.len();
     if n % 2 == 1 {
         buf[n / 2]
     } else {
-        (buf[n / 2 - 1] + buf[n / 2]) / 2.0
+        (buf[n / 2 - 1] + buf[n / 2]) / F::of(2.0)
     }
 }
 
@@ -228,28 +247,30 @@ fn next_fast_len(n: usize) -> usize {
 }
 
 /// Divides `x` by its `norm` (librosa `util.normalize` with `threshold=None`,
-/// `fill=None`: vectors whose norm is below the smallest positive `f64` are left as is).
-fn normalize_in_place(x: &mut [f64], norm: Option<f64>) {
+/// `fill=None`: vectors whose norm is below the smallest positive normal value of
+/// `F`, librosa's `tiny`, are left as is).
+fn normalize_in_place<F: AudioFloat>(x: &mut [F], norm: Option<f64>) {
     let Some(p) = norm else { return };
     if x.is_empty() {
         return;
     }
     let length = if p == f64::INFINITY {
-        x.iter().fold(f64::NEG_INFINITY, |m, v| m.max(v.abs()))
+        x.iter().fold(F::neg_infinity(), |m, v| m.max(v.abs()))
     } else if p == f64::NEG_INFINITY {
-        x.iter().fold(f64::INFINITY, |m, v| m.min(v.abs()))
+        x.iter().fold(F::infinity(), |m, v| m.min(v.abs()))
     } else if p == 0.0 {
-        x.iter().filter(|v| v.abs() > 0.0).count() as f64
+        F::of_usize(x.iter().filter(|v| v.abs() > F::zero()).count())
     } else {
+        let pf = F::of(p);
         let s = sequential_sum(
             &x.iter()
-                .map(|v| if p == 2.0 { v * v } else { v.abs().powf(p) })
+                .map(|&v| if p == 2.0 { v * v } else { v.abs().powf(pf) })
                 .collect::<Vec<_>>(),
         );
-        s.powf(1.0 / p)
+        s.powf(F::of(1.0 / p))
     };
-    let length = if length < f64::MIN_POSITIVE {
-        1.0
+    let length = if length < F::min_positive_value() {
+        F::one()
     } else {
         length
     };
@@ -298,7 +319,8 @@ pub enum Aggregate {
     Min,
     /// Sum (`numpy.sum`). librosa's default for [`metrogram`].
     Sum,
-    /// A user function of the (non-empty) values.
+    /// A user function of the (non-empty) values. For `f32` analysis the values
+    /// are widened to `f64` (exactly) and the result is rounded to `f32`.
     Custom(fn(&[f64]) -> f64),
 }
 
@@ -319,7 +341,8 @@ impl PartialEq for Aggregate {
 impl Aggregate {
     /// Reduces non-empty `values`; `scratch` is reused for the median. `pairwise`
     /// selects numpy's summation order for a contiguous axis (otherwise sequential).
-    fn reduce(self, values: &[f64], scratch: &mut Vec<f64>, pairwise: bool) -> f64 {
+    /// The reduction runs in `F`, as numpy reduces `float32` arrays in `float32`.
+    fn reduce<F: AudioFloat>(self, values: &[F], scratch: &mut Vec<F>, pairwise: bool) -> F {
         match self {
             Self::Mean => {
                 let s = if pairwise {
@@ -327,7 +350,7 @@ impl Aggregate {
                 } else {
                     sequential_sum(values)
                 };
-                s / values.len() as f64
+                s / F::of_usize(values.len())
             }
             Self::Sum => {
                 if pairwise {
@@ -354,7 +377,10 @@ impl Aggregate {
                 }
                 m
             }
-            Self::Custom(f) => f(values),
+            Self::Custom(f) => {
+                let wide: Vec<f64> = values.iter().map(|v| v.as_f64()).collect();
+                F::of(f(&wide))
+            }
         }
     }
 }
@@ -374,10 +400,11 @@ impl Aggregate {
 /// ## Intended usage
 ///
 /// Pass to [`AudioRhythm::onset_strength`] and embed in the other rhythm configs.
-/// `Default` reproduces librosa: 128-band Slaney mel power spectrogram (`n_fft = 2048`,
-/// `hop_length = 512`, centred, zero padding), `power_to_db` with `ref = 1`,
-/// `amin = 1e-10`, `top_db = 80`, `lag = 1`, `max_size = 1`, no detrending, centred
-/// output and mean aggregation.
+/// [`OnsetStrengthConfig::librosa`] reproduces librosa: 128-band Slaney mel power
+/// spectrogram (`n_fft = 2048`, `hop_length = 512`, centred, zero padding),
+/// `power_to_db` with `ref = 1`, `amin = 1e-10`, `top_db = 80`, `lag = 1`,
+/// `max_size = 1`, no detrending, centred output and mean aggregation. `Default` is
+/// currently the same.
 ///
 /// ## Invariants
 ///
@@ -440,10 +467,28 @@ impl Default for OnsetStrengthConfig {
 }
 
 impl OnsetStrengthConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `onset.onset_strength` defaults, including the 80 dB floor of
+    /// the mel spectrogram (`db = DbConfig::librosa_power()`). Currently the same
+    /// as [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            mel: MelSpectrogramConfig::librosa(),
+            db: DbConfig::librosa_power(),
+            lag: crate::nzu!(1),
+            max_size: crate::nzu!(1),
+            detrend: false,
+            center: true,
+            aggregate: Some(Aggregate::Mean),
+        }
     }
 
     /// Sets the mel spectrogram parameters.
@@ -530,7 +575,7 @@ fn band_ranges(bounds: &[usize], n_bins: usize) -> AudioSampleResult<Vec<(usize,
 }
 
 /// `scipy.ndimage.maximum_filter1d(s, size, axis=0)` with the default reflect boundary.
-fn maximum_filter_freq(s: ArrayView2<'_, f64>, size: usize) -> Array2<f64> {
+fn maximum_filter_freq<F: AudioFloat>(s: ArrayView2<'_, F>, size: usize) -> Array2<F> {
     let (n_bins, n_t) = s.dim();
     let n = n_bins as isize;
     let reflect = |i: isize| -> usize {
@@ -577,7 +622,8 @@ fn maximum_filter_freq(s: ArrayView2<'_, f64>, size: usize) -> Array2<f64> {
 /// `(channels, n_bands, n_frames_out)` where `n_frames_out = n_frames` when centred
 /// and `n_frames` otherwise too (the lag is compensated by zero padding at the start).
 /// With `aggregate = None` the middle axis has one row per bin and `channels` is
-/// ignored.
+/// ignored. The element type is the element type `F` of `s_db` (`f32` or `f64`),
+/// and the computation runs in `F`.
 ///
 /// # Errors
 ///
@@ -597,12 +643,12 @@ fn maximum_filter_freq(s: ArrayView2<'_, f64>, size: usize) -> Array2<f64> {
 /// // The rise at frame 5 (mean of bins 4..8) lands at frame 5 - lag + (lag + 2048 / 1024) = 7.
 /// assert_eq!(env[[0, 1, 7]], 5.5);
 /// ```
-pub fn onset_strength_multi_from_db(
-    s_db: ArrayView3<'_, f64>,
-    reference: Option<ArrayView3<'_, f64>>,
+pub fn onset_strength_multi_from_db<F: AudioFloat>(
+    s_db: ArrayView3<'_, F>,
+    reference: Option<ArrayView3<'_, F>>,
     config: &OnsetStrengthConfig,
     channels: Option<&[usize]>,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let (n_ch, n_bins, n_t) = s_db.dim();
     if n_ch == 0 || n_bins == 0 || n_t == 0 {
         return Err(param_err("S", "the spectrogram must not be empty"));
@@ -640,12 +686,12 @@ pub fn onset_strength_multi_from_db(
     } else {
         n_bins
     };
-    let mut out = Array3::<f64>::zeros((n_ch, n_rows, out_len));
-    let mut diff = vec![0.0; n_bins];
+    let mut out = Array3::<F>::zeros((n_ch, n_rows, out_len));
+    let mut diff = vec![F::zero(); n_bins];
     let mut scratch = Vec::with_capacity(n_bins);
     for c in 0..n_ch {
         let sc = s_db.index_axis(Axis(0), c);
-        let filtered: Array2<f64>;
+        let filtered: Array2<F>;
         let rc = match &reference {
             Some(r) => r.index_axis(Axis(0), c),
             None if max_size == 1 => sc,
@@ -663,7 +709,7 @@ pub fn onset_strength_multi_from_db(
             for (b, d) in diff.iter_mut().enumerate() {
                 let v = sc[[b, t + lag]] - rc[[b, t]];
                 // numpy.maximum(0, v): NaN propagates.
-                *d = if v < 0.0 { 0.0 } else { v };
+                *d = if v < F::zero() { F::zero() } else { v };
             }
             match config.aggregate {
                 Some(agg) => {
@@ -680,12 +726,13 @@ pub fn onset_strength_multi_from_db(
         }
         if config.detrend {
             // scipy.signal.lfilter([1, -1], [1, -0.99]) (transposed direct form II).
+            let a1 = F::of(-0.99);
             for mut row in oc.outer_iter_mut() {
-                let mut z = 0.0;
+                let mut z = F::zero();
                 for v in row.iter_mut() {
                     let x = *v;
                     let y = z + x;
-                    z = (-x) - (-0.99 * y);
+                    z = (-x) - (a1 * y);
                     *v = y;
                 }
             }
@@ -706,7 +753,7 @@ pub fn onset_strength_multi_from_db(
 ///
 /// # Returns
 ///
-/// A `(channels, n_frames)` envelope.
+/// A `(channels, n_frames)` envelope in the element type `F` of `s_db`.
 ///
 /// # Errors
 ///
@@ -723,10 +770,10 @@ pub fn onset_strength_multi_from_db(
 /// assert_eq!(env.dim(), (2, 6));
 /// assert_eq!(env[[1, 5]], 1.0);
 /// ```
-pub fn onset_strength_from_db(
-    s_db: ArrayView3<'_, f64>,
+pub fn onset_strength_from_db<F: AudioFloat>(
+    s_db: ArrayView3<'_, F>,
     config: &OnsetStrengthConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     if config.aggregate.is_none() {
         return Err(param_err(
             "aggregate",
@@ -766,9 +813,11 @@ pub enum PeakPickMethod {
 ///
 /// ## Intended usage
 ///
-/// Use [`PeakPickConfig::for_onsets`] to get the parameters `librosa.onset.onset_detect`
-/// derives from the frame rate (30 ms, 0 ms, 100 ms, 100 ms windows, 30 ms wait,
-/// `delta = 0.07`); `Default` is that set at 22050 Hz with a hop of 512. Unrelated to
+/// Construct with [`PeakPickConfig::for_onsets`], which derives the parameters
+/// `librosa.onset.onset_detect` uses from the frame rate (30 ms, 0 ms, 100 ms, 100 ms
+/// windows, 30 ms wait, `delta = 0.07`), or with a struct literal. There is no
+/// `Default`: the window sizes are in frames, so they depend on the sample rate and
+/// hop length (librosa's `util.peak_pick` has no defaults either). Unrelated to
 /// [`PeakPickingConfig`](crate::operations::types::PeakPickingConfig), which drives the
 /// older non-librosa peak picker.
 ///
@@ -785,7 +834,9 @@ pub enum PeakPickMethod {
 ///
 /// let p = PeakPickConfig::for_onsets(22050.0, nzu!(512));
 /// assert_eq!((p.pre_max, p.post_max, p.pre_avg, p.post_avg, p.wait), (1, 1, 4, 5, 1));
-/// assert_eq!(p, PeakPickConfig::default());
+/// // At 44.1 kHz the same durations span twice as many frames.
+/// let p = PeakPickConfig::for_onsets(44100.0, nzu!(512));
+/// assert_eq!((p.pre_max, p.pre_avg, p.post_avg, p.wait), (2, 8, 9, 2));
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeakPickConfig {
@@ -806,20 +857,7 @@ pub struct PeakPickConfig {
     pub method: PeakPickMethod,
 }
 
-impl Default for PeakPickConfig {
-    fn default() -> Self {
-        Self::for_onsets(22050.0, crate::nzu!(512))
-    }
-}
-
 impl PeakPickConfig {
-    /// Returns the default configuration (same as [`Default`]): the
-    /// [`for_onsets`](Self::for_onsets) parameters at 22050 Hz with a hop of 512.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// The parameters `librosa.onset.onset_detect` uses for a frame rate of
     /// `sample_rate / hop_length`: `pre_max = 0.03 sr // hop`, `post_max = 1`,
     /// `pre_avg = 0.1 sr // hop`, `post_avg = 0.1 sr // hop + 1`, `wait = 0.03 sr // hop`,
@@ -884,7 +922,8 @@ impl PeakPickConfig {
 ///
 /// Sample 0 is special-cased as in librosa: it only has to be the maximum of
 /// `x[..post_max]` and at least `delta` above the mean of `x[..post_avg]`. Means are
-/// accumulated left to right, matching librosa's numba kernels bit for bit.
+/// accumulated left to right in the element type `F` of `x` and divided in `f64`,
+/// matching librosa's numba kernels bit for bit for `f32` and `f64` input.
 ///
 /// # Arguments
 ///
@@ -904,11 +943,11 @@ impl PeakPickConfig {
 /// # Examples
 ///
 /// ```rust
-/// use audio_samples::operations::rhythm::{PeakPickConfig, peak_pick};
+/// use audio_samples::operations::rhythm::{PeakPickConfig, PeakPickMethod, peak_pick};
 ///
 /// let x = [0.0, 1.0, 0.0, 0.0, 0.9, 0.0, 0.2, 0.0];
 /// let cfg = PeakPickConfig { pre_max: 1, post_max: 2, pre_avg: 2, post_avg: 3, delta: 0.1, wait: 0,
-///     ..PeakPickConfig::default() };
+///     method: PeakPickMethod::Greedy };
 /// // 0.2 at index 6 is a local maximum but not 0.1 above its local mean (0.275).
 /// assert_eq!(peak_pick(&x, &cfg).unwrap(), vec![1, 4]);
 /// ```
@@ -917,7 +956,7 @@ impl PeakPickConfig {
 ///
 /// S. Böck, F. Krebs and M. Schedl, "Evaluating the online capabilities of onset
 /// detection methods," ISMIR 2012; librosa `util.peak_pick`.
-pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<usize>> {
+pub fn peak_pick<F: AudioFloat>(x: &[F], config: &PeakPickConfig) -> AudioSampleResult<Vec<usize>> {
     config.validate()?;
     if x.iter().any(|v| !v.is_finite()) {
         return Err(param_err("x", "peak_pick input must be finite"));
@@ -938,9 +977,11 @@ pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<us
     let mut peaks = Vec::new();
     match method {
         PeakPickMethod::Greedy => {
-            let mean = |lo: usize, hi: usize| sequential_sum(&x[lo..hi]) / (hi - lo) as f64;
-            let first =
-                x[0] >= np_max(&x[..post_max.min(n)]) && x[0] >= mean(0, post_avg.min(n)) + delta;
+            // numba sums in the array's type and divides by the integer count in f64.
+            let mean =
+                |lo: usize, hi: usize| sequential_sum(&x[lo..hi]).as_f64() / (hi - lo) as f64;
+            let first = x[0] >= np_max(&x[..post_max.min(n)])
+                && x[0].as_f64() >= mean(0, post_avg.min(n)) + delta;
             let mut i = if first {
                 peaks.push(0);
                 wait.saturating_add(1)
@@ -955,7 +996,7 @@ pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<us
                 }
                 let avgn = mean(i.saturating_sub(pre_avg), i.saturating_add(post_avg).min(n));
                 // Inputs are finite, so this is librosa's `not x[n] >= avg + delta`.
-                if x[i] < avgn + delta {
+                if x[i].as_f64() < avgn + delta {
                     i += 1;
                     continue;
                 }
@@ -965,11 +1006,11 @@ pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<us
         }
         PeakPickMethod::DpCount | PeakPickMethod::DpValue => {
             let count = method == PeakPickMethod::DpCount;
-            let mut values = vec![0.0; n + 1];
+            let mut values = vec![0.0f64; n + 1];
             let mut pointers = vec![0isize; n + 1];
             let mut taken = vec![false; n + 1];
             let mut cumulate = Vec::with_capacity(n);
-            let mut acc = 0.0;
+            let mut acc = F::zero();
             for &v in x {
                 acc += v;
                 cumulate.push(acc);
@@ -985,13 +1026,14 @@ pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<us
                 let idx_prev = i.saturating_sub(pre_avg);
                 let idx_post = i.saturating_add(post_avg).min(n);
                 let avgn = if idx_prev == 0 {
-                    cumulate[idx_post - 1] / idx_post as f64
+                    cumulate[idx_post - 1].as_f64() / idx_post as f64
                 } else {
-                    (cumulate[idx_post - 1] - cumulate[idx_prev - 1]) / (idx_post - idx_prev) as f64
+                    (cumulate[idx_post - 1] - cumulate[idx_prev - 1]).as_f64()
+                        / (idx_post - idx_prev) as f64
                 };
-                let v = if count { 1.0 } else { x[i] };
+                let v = if count { 1.0 } else { x[i].as_f64() };
                 let next = n.min(i.saturating_add(wait).saturating_add(1));
-                if x[i] >= avgn + delta && values[next] + v > values[i + 1] {
+                if x[i].as_f64() >= avgn + delta && values[next] + v > values[i + 1] {
                     values[i] = values[next] + v;
                     pointers[i] = next as isize;
                     taken[i] = true;
@@ -1038,7 +1080,7 @@ pub fn peak_pick(x: &[f64], config: &PeakPickConfig) -> AudioSampleResult<Vec<us
 /// assert_eq!(onset_backtrack(&[4, 7, 0], &energy), vec![2, 5, 0]);
 /// ```
 #[must_use]
-pub fn onset_backtrack(events: &[usize], energy: &[f64]) -> Vec<usize> {
+pub fn onset_backtrack<F: AudioFloat>(events: &[usize], energy: &[F]) -> Vec<usize> {
     let mut minima = vec![0usize];
     for i in 1..energy.len().saturating_sub(1) {
         if energy[i] <= energy[i - 1] && energy[i] < energy[i + 1] && i != 0 {
@@ -1128,8 +1170,9 @@ impl FrameEvents {
 /// ## Intended usage
 ///
 /// Pass to [`AudioRhythm::onset_detect`] or [`onset_detect_from_envelope`].
-/// `Default` reproduces librosa: default onset strength, normalisation to `[0, 1]`,
-/// peak-picking parameters derived from the frame rate, no backtracking.
+/// [`OnsetDetectConfig::librosa`] reproduces librosa: librosa's onset strength,
+/// normalisation to `[0, 1]`, peak-picking parameters derived from the frame rate, no
+/// backtracking. `Default` is currently the same.
 ///
 /// ## Invariants
 ///
@@ -1170,10 +1213,24 @@ impl Default for OnsetDetectConfig {
 }
 
 impl OnsetDetectConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `onset.onset_detect` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            onset: OnsetStrengthConfig::librosa(),
+            peak_pick: None,
+            normalize: true,
+            backtrack: false,
+        }
     }
 
     /// Sets the onset envelope parameters.
@@ -1223,7 +1280,8 @@ impl OnsetDetectConfig {
 ///
 /// # Arguments
 ///
-/// * `envelope` - Onset strength envelope (one channel).
+/// * `envelope` - Onset strength envelope (one channel), `f32` or `f64`. The
+///   normalisation runs in its element type `F`, as librosa's does.
 /// * `sample_rate` - Sampling rate of the analysed audio in Hz (for the default
 ///   peak-picking parameters).
 /// * `hop_length` - Hop of the envelope in samples.
@@ -1246,19 +1304,19 @@ impl OnsetDetectConfig {
 /// use audio_samples::nzu;
 /// use audio_samples::operations::rhythm::{OnsetDetectConfig, onset_detect_from_envelope};
 ///
-/// let mut env = vec![0.0; 40];
+/// let mut env = vec![0.0_f64; 40];
 /// env[10] = 1.0;
 /// env[25] = 0.8;
-/// let onsets = onset_detect_from_envelope(&env, 22050.0, nzu!(512), &OnsetDetectConfig::default(), None)
+/// let onsets = onset_detect_from_envelope(&env, 22050.0, nzu!(512), &OnsetDetectConfig::librosa(), None)
 ///     .unwrap();
 /// assert_eq!(onsets, vec![10, 25]);
 /// ```
-pub fn onset_detect_from_envelope(
-    envelope: &[f64],
+pub fn onset_detect_from_envelope<F: AudioFloat>(
+    envelope: &[F],
     sample_rate: f64,
     hop_length: NonZeroUsize,
     config: &OnsetDetectConfig,
-    energy: Option<&[f64]>,
+    energy: Option<&[F]>,
 ) -> AudioSampleResult<Vec<usize>> {
     require_positive("sample_rate", sample_rate)?;
     if let Some(p) = &config.peak_pick {
@@ -1269,16 +1327,17 @@ pub fn onset_detect_from_envelope(
     }
     let mut env = envelope.to_vec();
     if config.normalize {
-        let min = env.iter().copied().fold(f64::INFINITY, f64::min);
+        let min = env.iter().copied().fold(F::infinity(), F::min);
         for v in &mut env {
             *v -= min;
         }
-        let max = np_max(&env) + f64::MIN_POSITIVE;
+        // librosa adds `util.tiny` of the envelope's type.
+        let max = np_max(&env) + F::min_positive_value();
         for v in &mut env {
             *v /= max;
         }
     }
-    if !env.iter().any(|&v| v != 0.0) || env.iter().any(|v| !v.is_finite()) {
+    if !env.iter().any(|&v| v != F::zero()) || env.iter().any(|v| !v.is_finite()) {
         return Ok(Vec::new());
     }
     let pp = config
@@ -1365,9 +1424,10 @@ pub fn fourier_tempo_frequencies(
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioRhythm::tempogram`] or [`tempogram_from_envelope`]. `Default`
-/// reproduces librosa: default onset strength, `win_length = 384` frames (~8.9 s at
-/// 22050 Hz / 512), centred windows, periodic Hann window, max-normalised columns.
+/// Pass to [`AudioRhythm::tempogram`] or [`tempogram_from_envelope`].
+/// [`TempogramConfig::librosa`] reproduces librosa: librosa's onset strength,
+/// `win_length = 384` frames (~8.9 s at 22050 Hz / 512), centred windows, periodic
+/// Hann window, max-normalised columns. `Default` is currently the same.
 ///
 /// ## Invariants
 ///
@@ -1414,10 +1474,25 @@ impl Default for TempogramConfig {
 }
 
 impl TempogramConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.tempogram` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            onset: OnsetStrengthConfig::librosa(),
+            win_length: crate::nzu!(384),
+            center: true,
+            window: Window::Hann,
+            norm: Some(f64::INFINITY),
+        }
     }
 
     /// Sets the onset envelope parameters.
@@ -1467,16 +1542,17 @@ impl TempogramConfig {
     }
 }
 
-/// numpy `pad(mode="linear_ramp", end_values=0)` by `w` at both ends.
-fn linear_ramp_pad(x: &[f64], w: usize, out: &mut Vec<f64>) {
+/// numpy `pad(mode="linear_ramp", end_values=0)` by `w` at both ends, computed
+/// in the element type `F` (numpy computes the ramp in the array's type).
+fn linear_ramp_pad<F: AudioFloat>(x: &[F], w: usize, out: &mut Vec<F>) {
     out.clear();
     let n = x.len();
     let (first, last) = (x[0], x[n - 1]);
-    let wf = w as f64;
+    let wf = F::of_usize(w);
     let (s0, s1) = (first / wf, last / wf);
-    out.extend((0..w).map(|i| i as f64 * s0));
+    out.extend((0..w).map(|i| F::of_usize(i) * s0));
     out.extend_from_slice(x);
-    out.extend((0..w).map(|j| (w - 1 - j) as f64 * s1));
+    out.extend((0..w).map(|j| F::of_usize(w - 1 - j) * s1));
 }
 
 /// Computes the autocorrelation tempogram of onset envelopes, equivalent to
@@ -1490,7 +1566,10 @@ fn linear_ramp_pad(x: &[f64], w: usize, out: &mut Vec<f64>) {
 /// # Returns
 ///
 /// A `(channels, win_length, n_frames)` array (`n_frames - win_length + 1` frames when
-/// not centred).
+/// not centred) in the element type `F` of `envelope`. The window is computed in
+/// `f64` and rounded to `F` once; the autocorrelation FFTs run in `F`. (librosa
+/// computes this in `float64` even for a `float32` envelope, because its `float64`
+/// window promotes the product.)
 ///
 /// # Errors
 ///
@@ -1516,10 +1595,10 @@ fn linear_ramp_pad(x: &[f64], w: usize, out: &mut Vec<f64>) {
 ///
 /// P. Grosche, M. Müller and F. Kurth, "Cyclic tempogram - a mid-level tempo
 /// representation for music signals," ICASSP 2010; librosa `feature.tempogram`.
-pub fn tempogram_from_envelope(
-    envelope: ArrayView2<'_, f64>,
+pub fn tempogram_from_envelope<F: AudioFloat>(
+    envelope: ArrayView2<'_, F>,
     config: &TempogramConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     validate_norm(config.norm)?;
     let win = config.win_length.get();
     let (n_ch, n) = envelope.dim();
@@ -1533,7 +1612,10 @@ pub fn tempogram_from_envelope(
         n_ch as f64 * win as f64 * n as f64,
         crate::utils::MAX_SIGNAL_ELEMENTS,
     )?;
-    let window = get_window(&config.window, win, true)?;
+    let window: Vec<F> = get_window(&config.window, win, true)?
+        .iter()
+        .map(|&v| F::of(v))
+        .collect();
     let half = win / 2;
     let padded_len = if config.center { n + 2 * half } else { n };
     if padded_len < win {
@@ -1547,22 +1629,21 @@ pub fn tempogram_from_envelope(
         n_frames = n_frames.min(n);
     }
     let n_pad = next_fast_len(2 * win - 1);
-    let mut planner = RealFftPlanner::<f64>::new();
-    let fwd = planner.plan_fft_forward(n_pad);
-    let inv = planner.plan_fft_inverse(n_pad);
+    let (fwd, inv) =
+        F::with_real_fft_planner(|p| (p.plan_fft_forward(n_pad), p.plan_fft_inverse(n_pad)));
     let mut time_buf = fwd.make_input_vec();
     let mut spec = fwd.make_output_vec();
     let mut s_fwd = fwd.make_scratch_vec();
     let mut s_inv = inv.make_scratch_vec();
     let mut row_buf = Vec::with_capacity(n);
     let mut padded = Vec::with_capacity(padded_len);
-    let scale = 1.0 / n_pad as f64;
-    let mut tf = Array2::<f64>::zeros((n_frames, win));
-    let mut out = Array3::<f64>::zeros((n_ch, win, n_frames));
+    let scale = F::one() / F::of_usize(n_pad);
+    let mut tf = Array2::<F>::zeros((n_frames, win));
+    let mut out = Array3::<F>::zeros((n_ch, win, n_frames));
     for (c, row) in envelope.outer_iter().enumerate() {
         row_buf.clear();
         row_buf.extend(row.iter().copied());
-        let x: &[f64] = if config.center {
+        let x: &[F] = if config.center {
             linear_ramp_pad(&row_buf, half, &mut padded);
             &padded
         } else {
@@ -1570,12 +1651,16 @@ pub fn tempogram_from_envelope(
         };
         for (t, mut dst) in tf.outer_iter_mut().enumerate() {
             for (k, slot) in time_buf.iter_mut().enumerate() {
-                *slot = if k < win { x[t + k] * window[k] } else { 0.0 };
+                *slot = if k < win {
+                    x[t + k] * window[k]
+                } else {
+                    F::zero()
+                };
             }
             fwd.process_with_scratch(&mut time_buf, &mut spec, &mut s_fwd)
                 .map_err(fft_err)?;
             for z in spec.iter_mut() {
-                *z = Complex::new(z.re * z.re + z.im * z.im, 0.0);
+                *z = Complex::new(z.re * z.re + z.im * z.im, F::zero());
             }
             inv.process_with_scratch(&mut spec, &mut time_buf, &mut s_inv)
                 .map_err(fft_err)?;
@@ -1600,8 +1685,9 @@ pub fn tempogram_from_envelope(
 /// ## Intended usage
 ///
 /// Pass to [`AudioRhythm::fourier_tempogram`] or [`fourier_tempogram_from_envelope`].
-/// `Default` reproduces librosa: default onset strength, `win_length = 384`, centred
-/// (zero padding), periodic Hann window.
+/// [`FourierTempogramConfig::librosa`] reproduces librosa: librosa's onset strength,
+/// `win_length = 384`, centred (zero padding), periodic Hann window. `Default` is
+/// currently the same.
 ///
 /// ## Invariants
 ///
@@ -1639,10 +1725,24 @@ impl Default for FourierTempogramConfig {
 }
 
 impl FourierTempogramConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.fourier_tempogram` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            onset: OnsetStrengthConfig::librosa(),
+            win_length: crate::nzu!(384),
+            center: true,
+            window: Window::Hann,
+        }
     }
 
     /// Sets the onset envelope parameters.
@@ -1674,7 +1774,7 @@ impl FourierTempogramConfig {
     }
 
     fn stft_config(&self) -> StftConfig {
-        StftConfig::new()
+        StftConfig::librosa()
             .with_n_fft(self.win_length)
             .with_hop_length(Some(crate::nzu!(1)))
             .with_window(self.window.clone())
@@ -1704,7 +1804,9 @@ impl FourierTempogramConfig {
 /// # Returns
 ///
 /// A complex `(channels, win_length / 2 + 1, n_frames + 1)` array when centred
-/// (`1 + n_frames - win_length` frames otherwise), as [`stft`] with a hop of 1.
+/// (`1 + n_frames - win_length` frames otherwise), as [`stft`] with a hop of 1. The
+/// element type is `Complex<F>` for an envelope of element type `F`; the transform
+/// runs in `F` (librosa returns `complex64` for a `float32` envelope).
 ///
 /// # Errors
 ///
@@ -1722,10 +1824,10 @@ impl FourierTempogramConfig {
 /// let ft = fourier_tempogram_from_envelope(env.view(), &cfg).unwrap();
 /// assert_eq!(ft.dim(), (1, 33, 101));
 /// ```
-pub fn fourier_tempogram_from_envelope(
-    envelope: ArrayView2<'_, f64>,
+pub fn fourier_tempogram_from_envelope<F: AudioFloat>(
+    envelope: ArrayView2<'_, F>,
     config: &FourierTempogramConfig,
-) -> AudioSampleResult<Array3<Complex<f64>>> {
+) -> AudioSampleResult<Array3<Complex<F>>> {
     stft(envelope, &config.stft_config())
 }
 
@@ -1743,9 +1845,10 @@ pub fn fourier_tempogram_from_envelope(
 /// ## Intended usage
 ///
 /// Pass to [`AudioRhythm::tempo`], [`tempo_from_envelope`] or [`tempo_from_tempogram`].
-/// `Default` reproduces librosa: default onset strength, `start_bpm = 120`,
-/// `std_bpm = 1`, an 8 s autocorrelation window, tempi of 320 BPM and above excluded,
-/// and a global (time-averaged) estimate.
+/// [`TempoConfig::librosa`] reproduces librosa: librosa's onset strength,
+/// `start_bpm = 120`, `std_bpm = 1`, an 8 s autocorrelation window, tempi of 320 BPM
+/// and above excluded, and a global (time-averaged) estimate. `Default` is currently
+/// the same.
 ///
 /// ## Invariants
 ///
@@ -1799,10 +1902,26 @@ impl Default for TempoConfig {
 }
 
 impl TempoConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.tempo` defaults. Currently the same as [`Default`];
+    /// use this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            onset: OnsetStrengthConfig::librosa(),
+            start_bpm: 120.0,
+            std_bpm: 1.0,
+            ac_size: 8.0,
+            max_tempo: Some(320.0),
+            aggregate: Some(Aggregate::Mean),
+            prior: None,
+        }
     }
 
     /// Sets the onset envelope parameters.
@@ -1889,7 +2008,12 @@ impl TempoConfig {
 /// # Returns
 ///
 /// `(channels, 1)` tempi in BPM, or `(channels, n_frames)` when `config.aggregate` is
-/// `None`. Values are on the [`tempo_frequencies`] grid.
+/// `None`. Values are on the [`tempo_frequencies`] grid and are `f64` for either
+/// element type of `tempogram` (librosa also returns `float64`).
+///
+/// The time aggregation runs in the element type `F` of `tempogram`; the score
+/// `log1p(1e6 * tempogram)` is computed in `F` and the `f64` log-prior is added in
+/// `f64`, as numpy does.
 ///
 /// # Errors
 ///
@@ -1907,8 +2031,8 @@ impl TempoConfig {
 /// let bpm = tempo_from_tempogram(tg.view(), 22050.0, nzu!(512), &TempoConfig::default()).unwrap();
 /// assert!((bpm[[0, 0]] - 117.45383522727273).abs() < 1e-9);
 /// ```
-pub fn tempo_from_tempogram(
-    tempogram: ArrayView3<'_, f64>,
+pub fn tempo_from_tempogram<F: AudioFloat>(
+    tempogram: ArrayView3<'_, F>,
     sample_rate: f64,
     hop_length: NonZeroUsize,
     config: &TempoConfig,
@@ -1938,7 +2062,8 @@ pub fn tempo_from_tempogram(
     }
     let n_out = if config.aggregate.is_some() { 1 } else { n_t };
     let mut out = Array2::<f64>::zeros((n_ch, n_out));
-    let mut col = vec![0.0; win];
+    let mut col = vec![F::zero(); win];
+    let scale = F::of(1e6);
     let mut series = Vec::with_capacity(n_t);
     let mut scratch = Vec::with_capacity(n_t);
     for c in 0..n_ch {
@@ -1958,7 +2083,7 @@ pub fn tempo_from_tempogram(
             let mut best = 0usize;
             let mut best_v = f64::NAN;
             for (k, (&g, &lp)) in col.iter().zip(&logprior).enumerate() {
-                let v = (1e6 * g).ln_1p() + lp;
+                let v = (scale * g).ln_1p().as_f64() + lp;
                 if v.is_nan() {
                     best = k;
                     break;
@@ -1988,7 +2113,9 @@ pub fn tempo_from_tempogram(
 ///
 /// # Returns
 ///
-/// `(channels, 1)` tempi (or `(channels, n_frames)` for time-varying estimation).
+/// `(channels, 1)` tempi in BPM (or `(channels, n_frames)` for time-varying
+/// estimation), `f64` for either element type of `envelope`. The tempogram is
+/// computed in the envelope's element type `F`.
 ///
 /// # Errors
 ///
@@ -2007,8 +2134,8 @@ pub fn tempo_from_tempogram(
 /// let bpm = tempo_from_envelope(env.view(), 22050.0, nzu!(512), &TempoConfig::default()).unwrap();
 /// assert!((bpm[[0, 0]] - 117.45).abs() < 0.01);
 /// ```
-pub fn tempo_from_envelope(
-    envelope: ArrayView2<'_, f64>,
+pub fn tempo_from_envelope<F: AudioFloat>(
+    envelope: ArrayView2<'_, F>,
     sample_rate: f64,
     hop_length: NonZeroUsize,
     config: &TempoConfig,
@@ -2032,9 +2159,10 @@ pub fn tempo_from_envelope(
             "ac_size is shorter than one frame; the autocorrelation window is empty",
         )
     })?;
+    // librosa's `tempo` calls `tempogram` with its defaults apart from the window.
     let tg_cfg = TempogramConfig {
         win_length,
-        ..TempogramConfig::default()
+        ..TempogramConfig::librosa()
     };
     let tg = tempogram_from_envelope(envelope, &tg_cfg)?;
     tempo_from_tempogram(tg.view(), sample_rate, hop_length, config)
@@ -2054,9 +2182,12 @@ pub fn tempo_from_envelope(
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioRhythm::beat_track`] or [`beat_track_from_envelope`]. `Default`
-/// reproduces librosa: onset strength with **median** aggregation, tempo estimated
-/// with `start_bpm = 120`, `tightness = 100`, weak leading/trailing beats trimmed.
+/// Pass to [`AudioRhythm::beat_track`] or [`beat_track_from_envelope`].
+/// [`BeatTrackConfig::librosa`] reproduces librosa: onset strength with **median**
+/// aggregation, tempo estimated with `start_bpm = 120`, `tightness = 100`, weak
+/// leading/trailing beats trimmed. `Default` differs only in `trim = false`: every
+/// beat on the tracked path is kept, so a beat at the start or end of the signal is
+/// not dropped because its onset is weaker than the others.
 ///
 /// ## Invariants
 ///
@@ -2068,8 +2199,10 @@ pub fn tempo_from_envelope(
 /// ```rust
 /// use audio_samples::operations::rhythm::{Aggregate, BeatTrackConfig};
 ///
-/// let cfg = BeatTrackConfig::new().with_bpm(Some(100.0)).with_trim(false);
+/// let cfg = BeatTrackConfig::new().with_bpm(Some(100.0));
 /// assert_eq!(cfg.onset.aggregate, Some(Aggregate::Median));
+/// assert!(!cfg.trim);
+/// assert!(BeatTrackConfig::librosa().trim);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeatTrackConfig {
@@ -2082,8 +2215,10 @@ pub struct BeatTrackConfig {
     /// beat period more. librosa default: 100. (librosa passes it to its kernel as
     /// `float32`; the value is rounded the same way here.)
     pub tightness: f64,
-    /// If `true`, beats at the start and end whose local score is below half the RMS
-    /// of the smoothed beat scores are removed. librosa default: `true`.
+    /// If `true`, beats at the start and end whose local score is at most half the
+    /// RMS of the smoothed beat scores are removed. If `false`, only leading and
+    /// trailing beats with a local score of zero or less are removed. Default:
+    /// `false`; librosa's default is `true` ([`BeatTrackConfig::librosa`]).
     pub trim: bool,
     /// Tempo in BPM to track at. `None` estimates it as [`TempoConfig`] does with
     /// `start_bpm` and `prior`. librosa default: `None`.
@@ -2098,7 +2233,7 @@ impl Default for BeatTrackConfig {
             onset: OnsetStrengthConfig::default().with_aggregate(Some(Aggregate::Median)),
             start_bpm: 120.0,
             tightness: 100.0,
-            trim: true,
+            trim: false,
             bpm: None,
             prior: None,
         }
@@ -2106,10 +2241,24 @@ impl Default for BeatTrackConfig {
 }
 
 impl BeatTrackConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`]). It differs from
+    /// librosa only in `trim`, which is `false`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `beat.beat_track` defaults, including `trim = true`.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            onset: OnsetStrengthConfig::librosa().with_aggregate(Some(Aggregate::Median)),
+            start_bpm: 120.0,
+            tightness: 100.0,
+            trim: true,
+            bpm: None,
+            prior: None,
+        }
     }
 
     /// Sets the onset envelope parameters.
@@ -2203,23 +2352,26 @@ pub struct BeatTrack {
     pub beats: FrameEvents,
 }
 
-/// Sample standard deviation (`ddof=1`) computed as numpy does.
-fn std_ddof1(x: &[f64]) -> f64 {
-    let n = x.len() as f64;
+/// Sample standard deviation (`ddof=1`) computed as numpy does (in `F`).
+fn std_ddof1<F: AudioFloat>(x: &[F]) -> F {
+    let n = F::of_usize(x.len());
     let mean = pairwise_sum(x) / n;
-    let sq: Vec<f64> = x
+    let sq: Vec<F> = x
         .iter()
         .map(|&v| {
             let d = v - mean;
             d * d
         })
         .collect();
-    (pairwise_sum(&sq) / (n - 1.0)).sqrt()
+    (pairwise_sum(&sq) / (n - F::one())).sqrt()
 }
 
 /// librosa `__beat_local_score`: a same-mode Gaussian smoothing of the envelope whose
 /// width follows the (possibly time-varying) beat period.
-fn beat_local_score(onsets: &[f64], fpb: &[f64], out: &mut [f64]) {
+///
+/// The window is `f64`. As in librosa's numba kernel, each product is formed in `f64`
+/// and the running sum is stored in the output's type `F` after every addition.
+fn beat_local_score<F: AudioFloat>(onsets: &[F], fpb: &[f64], out: &mut [F]) {
     let n = onsets.len();
     let mut window: Vec<f64> = Vec::new();
     let mut cached = f64::NAN;
@@ -2238,30 +2390,34 @@ fn beat_local_score(onsets: &[f64], fpb: &[f64], out: &mut [f64]) {
         let half = k_len / 2;
         let lo = (i + half + 1).saturating_sub(n);
         let hi = (i + half).min(k_len);
-        let mut acc = 0.0;
+        let mut acc = F::zero();
         for (k, &w) in window.iter().enumerate().take(hi).skip(lo) {
-            acc += w * onsets[i + half - k];
+            acc = F::of(acc.as_f64() + w * onsets[i + half - k].as_f64());
         }
         out[i] = acc;
     }
 }
 
 /// librosa `__beat_track_dp`: cumulative score and back-links.
-fn beat_track_dp(
-    localscore: &[f64],
+///
+/// librosa compiles this kernel for `float32` and `float64` scores. The candidate
+/// scores are formed in `f64`; `ln(frames_per_beat)` is taken in the score type
+/// `F`, and the cumulative score is stored in `F`.
+fn beat_track_dp<F: AudioFloat>(
+    localscore: &[F],
     fpb: &[f64],
     tightness: f64,
     backlink: &mut [isize],
-    cumscore: &mut [f64],
+    cumscore: &mut [F],
 ) {
-    let score_thresh = 0.01 * np_max(localscore);
+    let score_thresh = 0.01 * np_max(localscore).as_f64();
     let mut first_beat = true;
     backlink[0] = -1;
     cumscore[0] = localscore[0];
     let tv = fpb.len() > 1;
     for (i, &score_i) in localscore.iter().enumerate() {
         let f = fpb[if tv { i } else { 0 }];
-        let ln_f = f.ln();
+        let ln_f = F::of(f).ln().as_f64();
         let start = i as isize - (f / 2.0).round_ties_even() as isize;
         let stop = (i as f64 - 2.0 * f - 1.0) as isize;
         let mut best = f64::NEG_INFINITY;
@@ -2272,7 +2428,7 @@ fn beat_track_dp(
                 break;
             }
             let d = ((i as isize - loc) as f64).ln() - ln_f;
-            let score = cumscore[loc as usize] - tightness * (d * d);
+            let score = cumscore[loc as usize].as_f64() - tightness * (d * d);
             if score > best {
                 best = score;
                 loc_best = loc;
@@ -2280,11 +2436,11 @@ fn beat_track_dp(
             loc -= 1;
         }
         cumscore[i] = if loc_best >= 0 {
-            score_i + best
+            F::of(score_i.as_f64() + best)
         } else {
             score_i
         };
-        if first_beat && score_i < score_thresh {
+        if first_beat && score_i.as_f64() < score_thresh {
             backlink[i] = -1;
         } else {
             backlink[i] = loc_best;
@@ -2295,7 +2451,7 @@ fn beat_track_dp(
 
 /// librosa `__last_beat`: the last local maximum of the cumulative score that reaches
 /// half the median of all its local maxima.
-fn last_beat(cumscore: &[f64]) -> usize {
+fn last_beat<F: AudioFloat>(cumscore: &[F]) -> usize {
     let n = cumscore.len();
     let mut is_max = vec![false; n];
     if n >= 2 {
@@ -2304,15 +2460,15 @@ fn last_beat(cumscore: &[f64]) -> usize {
         }
         is_max[n - 1] = cumscore[n - 1] > cumscore[n - 2];
     }
-    let mut maxima: Vec<f64> = cumscore
+    let mut maxima: Vec<F> = cumscore
         .iter()
         .zip(&is_max)
         .filter_map(|(&c, &m)| m.then_some(c))
         .collect();
     let threshold = if maxima.is_empty() {
-        0.0
+        F::zero()
     } else {
-        0.5 * median_in_place(&mut maxima)
+        F::of(0.5) * median_in_place(&mut maxima)
     };
     (0..n)
         .rev()
@@ -2320,14 +2476,15 @@ fn last_beat(cumscore: &[f64]) -> usize {
         .unwrap_or(n - 1)
 }
 
-/// librosa `__trim_beats`.
-fn trim_beats(localscore: &[f64], beats: &mut [bool], trim: bool) {
+/// librosa `__trim_beats`. The threshold is computed in `f64` (numpy convolves
+/// the beat scores with a `float64` Hann window).
+fn trim_beats<F: AudioFloat>(localscore: &[F], beats: &mut [bool], trim: bool) {
     let n = localscore.len();
     let threshold = if trim {
         let bl: Vec<f64> = localscore
             .iter()
             .zip(beats.iter())
-            .filter_map(|(&s, &b)| b.then_some(s))
+            .filter_map(|(&s, &b)| b.then_some(s.as_f64()))
             .collect();
         let b = bl.len();
         let w = [0.0, 0.5, 1.0, 0.5, 0.0];
@@ -2353,12 +2510,12 @@ fn trim_beats(localscore: &[f64], beats: &mut [bool], trim: bool) {
         0.0
     };
     let mut k = 0;
-    while k < n && localscore[k] <= threshold {
+    while k < n && localscore[k].as_f64() <= threshold {
         beats[k] = false;
         k += 1;
     }
     let mut k = n;
-    while k > 0 && localscore[k - 1] <= threshold {
+    while k > 0 && localscore[k - 1].as_f64() <= threshold {
         beats[k - 1] = false;
         k -= 1;
     }
@@ -2376,7 +2533,8 @@ fn trim_beats(localscore: &[f64], beats: &mut [bool], trim: bool) {
 ///
 /// # Arguments
 ///
-/// * `envelope` - Onset strength envelope.
+/// * `envelope` - Onset strength envelope, `f32` or `f64`. The local and cumulative
+///   scores are kept in its element type, as librosa's kernels do.
 /// * `bpm` - Tempo in BPM: one value, or one per frame of `envelope` (time-varying).
 /// * `frame_rate` - Envelope frames per second (`sample_rate / hop_length`).
 /// * `tightness` - Tempo-consistency weight (rounded to `f32` like librosa).
@@ -2400,6 +2558,9 @@ fn trim_beats(localscore: &[f64], beats: &mut [bool], trim: bool) {
 ///
 /// let env: Vec<f64> = (0..200).map(|t| if t % 20 == 5 { 1.0 } else { 0.0 }).collect();
 /// let beats = beat_track_with_bpm(&env, &[129.2], 22050.0 / 512.0, 100.0, true).unwrap();
+/// // An f32 envelope gives the same frames here.
+/// let env32: Vec<f32> = env.iter().map(|&v| v as f32).collect();
+/// assert_eq!(beat_track_with_bpm(&env32, &[129.2], 22050.0 / 512.0, 100.0, true).unwrap(), beats);
 /// // Same frames as librosa.beat.beat_track(onset_envelope=env, bpm=129.2).
 /// assert_eq!(beats, vec![5, 25, 45, 65, 85, 105, 125, 145, 165, 182]);
 /// ```
@@ -2408,8 +2569,8 @@ fn trim_beats(localscore: &[f64], beats: &mut [bool], trim: bool) {
 ///
 /// D. P. W. Ellis, "Beat tracking by dynamic programming," *J. New Music Research*
 /// 36(1), 2007; librosa `beat.beat_track`.
-pub fn beat_track_with_bpm(
-    envelope: &[f64],
+pub fn beat_track_with_bpm<F: AudioFloat>(
+    envelope: &[F],
     bpm: &[f64],
     frame_rate: f64,
     tightness: f64,
@@ -2451,12 +2612,13 @@ pub fn beat_track_with_bpm(
         2.0 * max_fpb + 1.0,
         crate::utils::MAX_SIGNAL_ELEMENTS,
     )?;
-    let norm = std_ddof1(envelope) + f64::MIN_POSITIVE;
-    let onsets: Vec<f64> = envelope.iter().map(|&v| v / norm).collect();
-    let mut localscore = vec![0.0; n];
+    // librosa adds `util.tiny` of the envelope's type.
+    let norm = std_ddof1(envelope) + F::min_positive_value();
+    let onsets: Vec<F> = envelope.iter().map(|&v| v / norm).collect();
+    let mut localscore = vec![F::zero(); n];
     beat_local_score(&onsets, &fpb, &mut localscore);
     let mut backlink = vec![-1isize; n];
-    let mut cumscore = vec![0.0; n];
+    let mut cumscore = vec![F::zero(); n];
     beat_track_dp(
         &localscore,
         &fpb,
@@ -2484,14 +2646,14 @@ pub fn beat_track_with_bpm(
 ///
 /// # Arguments
 ///
-/// * `envelope` - Onset strength envelope (one channel).
+/// * `envelope` - Onset strength envelope (one channel), `f32` or `f64`.
 /// * `sample_rate`, `hop_length` - Frame geometry of the envelope.
 /// * `config` - Tracking parameters (`config.onset` is not used).
 ///
 /// # Returns
 ///
-/// The tempo and the beat frames. An all-zero envelope gives tempo `0.0` and no
-/// beats (as librosa).
+/// The tempo (`f64` BPM) and the beat frames. An all-zero envelope gives tempo `0.0`
+/// and no beats (as librosa).
 ///
 /// # Errors
 ///
@@ -2504,12 +2666,12 @@ pub fn beat_track_with_bpm(
 /// use audio_samples::operations::rhythm::{BeatTrackConfig, beat_track_from_envelope};
 ///
 /// let env: Vec<f64> = (0..300).map(|t| if t % 22 == 3 { 1.0 } else { 0.05 }).collect();
-/// let bt = beat_track_from_envelope(&env, 22050.0, nzu!(512), &BeatTrackConfig::default()).unwrap();
+/// let bt = beat_track_from_envelope(&env, 22050.0, nzu!(512), &BeatTrackConfig::librosa()).unwrap();
 /// assert!((bt.tempo - 117.45).abs() < 0.01);
 /// assert!(bt.beats.frames.iter().all(|b| b % 22 == 3));
 /// ```
-pub fn beat_track_from_envelope(
-    envelope: &[f64],
+pub fn beat_track_from_envelope<F: AudioFloat>(
+    envelope: &[F],
     sample_rate: f64,
     hop_length: NonZeroUsize,
     config: &BeatTrackConfig,
@@ -2524,7 +2686,7 @@ pub fn beat_track_from_envelope(
             hop_length,
         },
     };
-    if !envelope.iter().any(|&v| v != 0.0) {
+    if !envelope.iter().any(|&v| v != F::zero()) {
         return Ok(empty(0.0));
     }
     let tempo = match config.bpm {
@@ -2532,10 +2694,12 @@ pub fn beat_track_from_envelope(
         None => {
             let env = ndarray::ArrayView2::from_shape((1, envelope.len()), envelope)
                 .expect("a slice is a valid 1-row array");
+            // librosa's `beat_track` calls `tempo` with its defaults apart from
+            // `start_bpm` and `prior`.
             let cfg = TempoConfig {
                 start_bpm: config.start_bpm,
                 prior: config.prior,
-                ..TempoConfig::default()
+                ..TempoConfig::librosa()
             };
             tempo_from_envelope(env, sample_rate, hop_length, &cfg)?[[0, 0]]
         }
@@ -2573,9 +2737,9 @@ pub fn beat_track_from_envelope(
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioRhythm::plp`] or [`plp_from_envelope`]. `Default` reproduces
-/// librosa: onset strength with median aggregation, `win_length = 384`, tempi limited
-/// to 30-300 BPM, no prior.
+/// Pass to [`AudioRhythm::plp`] or [`plp_from_envelope`]. [`PlpConfig::librosa`]
+/// reproduces librosa: onset strength with median aggregation, `win_length = 384`,
+/// tempi limited to 30-300 BPM, no prior. `Default` is currently the same.
 ///
 /// ## Invariants
 ///
@@ -2618,10 +2782,24 @@ impl Default for PlpConfig {
 }
 
 impl PlpConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `beat.plp` defaults. Currently the same as [`Default`]; use
+    /// this constructor where agreement with librosa is the requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            onset: OnsetStrengthConfig::librosa().with_aggregate(Some(Aggregate::Median)),
+            win_length: crate::nzu!(384),
+            tempo_min: Some(30.0),
+            tempo_max: Some(300.0),
+            prior: None,
+        }
     }
 
     /// Sets the onset envelope parameters.
@@ -2678,7 +2856,7 @@ impl PlpConfig {
 }
 
 /// numpy's `maximum` reduction over complex values (lexicographic order).
-fn complex_max_lex(values: impl Iterator<Item = Complex<f64>>) -> Complex<f64> {
+fn complex_max_lex<F: AudioFloat>(values: impl Iterator<Item = Complex<F>>) -> Complex<F> {
     let mut it = values;
     let mut m = it.next().unwrap_or_default();
     for v in it {
@@ -2705,7 +2883,9 @@ fn complex_max_lex(values: impl Iterator<Item = Complex<f64>>) -> Complex<f64> {
 /// # Returns
 ///
 /// A `(channels, n_frames)` pulse curve, non-negative and scaled to a maximum of 1 per
-/// channel.
+/// channel, in the element type `F` of `envelope`. The Fourier tempogram, the peak
+/// selection and the inverse transform run in `F` (librosa keeps `float32` for a
+/// `float32` envelope too); the log-prior is added after rounding it to `F`.
 ///
 /// # Errors
 ///
@@ -2733,12 +2913,12 @@ fn complex_max_lex(values: impl Iterator<Item = Complex<f64>>) -> Complex<f64> {
 ///
 /// P. Grosche and M. Müller, "Extracting predominant local pulse information from
 /// music recordings," *IEEE Trans. ASLP* 19(6), 2011; librosa `beat.plp`.
-pub fn plp_from_envelope(
-    envelope: ArrayView2<'_, f64>,
+pub fn plp_from_envelope<F: AudioFloat>(
+    envelope: ArrayView2<'_, F>,
     sample_rate: f64,
     hop_length: NonZeroUsize,
     config: &PlpConfig,
-) -> AudioSampleResult<Array2<f64>> {
+) -> AudioSampleResult<Array2<F>> {
     config.validate_range()?;
     require_positive("sample_rate", sample_rate)?;
     let n = envelope.ncols();
@@ -2747,17 +2927,20 @@ pub fn plp_from_envelope(
     }
     let ft_cfg = FourierTempogramConfig {
         win_length: config.win_length,
-        ..FourierTempogramConfig::default()
+        ..FourierTempogramConfig::librosa()
     };
     let mut ft = fourier_tempogram_from_envelope(envelope, &ft_cfg)?;
     let freqs = fourier_tempo_frequencies(sample_rate, hop_length, config.win_length);
-    let prior: Vec<f64> = freqs
+    let prior: Vec<F> = freqs
         .iter()
-        .map(|&f| config.prior.map_or(0.0, |p| (p.0)(f)))
+        .map(|&f| F::of(config.prior.map_or(0.0, |p| (p.0)(f))))
         .collect();
     let (n_ch, n_bins, n_frames) = ft.dim();
-    let mut mag = vec![0.0; n_bins];
-    let tiny_sqrt = f64::MIN_POSITIVE.sqrt();
+    let mut mag = vec![F::zero(); n_bins];
+    // librosa: `util.tiny(ftgram) ** 0.5` of the tempogram's type.
+    let tiny_sqrt = F::min_positive_value().sqrt();
+    let scale = F::of(1e6);
+    let zero = Complex::new(F::zero(), F::zero());
     for c in 0..n_ch {
         for t in 0..n_frames {
             let mut col = ft.slice_mut(ndarray::s![c, .., t]);
@@ -2766,20 +2949,20 @@ pub fn plp_from_envelope(
                 if config.tempo_min.is_some_and(|lo| f < lo)
                     || config.tempo_max.is_some_and(|hi| f > hi)
                 {
-                    *z = Complex::new(0.0, 0.0);
+                    *z = zero;
                 }
             }
             for (k, z) in col.iter().enumerate() {
                 mag[k] = if config.prior.is_some() {
-                    (1e6 * z.norm()).ln_1p() + prior[k]
+                    (scale * z.norm()).ln_1p() + prior[k]
                 } else {
-                    (1e6 * z.norm()).ln_1p()
+                    (scale * z.norm()).ln_1p()
                 };
             }
             let peak = np_max(&mag);
             for (k, z) in col.iter_mut().enumerate() {
                 if mag[k] < peak {
-                    *z = Complex::new(0.0, 0.0);
+                    *z = zero;
                 }
             }
             let denom = tiny_sqrt + complex_max_lex(col.iter().copied()).norm();
@@ -2791,8 +2974,8 @@ pub fn plp_from_envelope(
     let mut pulse = istft(ft.view(), &ft_cfg.stft_config(), Some(n))?;
     for mut row in pulse.outer_iter_mut() {
         for v in row.iter_mut() {
-            if *v < 0.0 {
-                *v = 0.0;
+            if *v < F::zero() {
+                *v = F::zero();
             }
         }
         normalize_in_place(
@@ -2809,16 +2992,17 @@ pub fn plp_from_envelope(
 
 /// Linear interpolation of `(x, y)` at `xq` with scipy `interp1d(kind="linear",
 /// bounds_error=False, fill_value=fill)` semantics. `x` must be sorted ascending and
-/// have at least two points.
-fn interp_linear(x: &[f64], y: &[f64], xq: f64, fill: f64) -> f64 {
+/// have at least two points. The grid differences are computed in `f64` and
+/// rounded to `F`; the rest runs in `F`.
+fn interp_linear<F: AudioFloat>(x: &[f64], y: &[F], xq: f64, fill: F) -> F {
     let n = x.len();
     if xq < x[0] || xq > x[n - 1] {
         return fill;
     }
     let idx = x.partition_point(|&v| v < xq).clamp(1, n - 1);
     let (lo, hi) = (idx - 1, idx);
-    let slope = (y[hi] - y[lo]) / (x[hi] - x[lo]);
-    slope * (xq - x[lo]) + y[lo]
+    let slope = (y[hi] - y[lo]) / F::of(x[hi] - x[lo]);
+    slope * F::of(xq - x[lo]) + y[lo]
 }
 
 /// Stable ascending sort permutation (numpy `argsort(kind="mergesort")`).
@@ -2861,9 +3045,10 @@ pub fn default_tempogram_ratio_factors() -> Vec<f64> {
 /// ## Intended usage
 ///
 /// Pass to [`AudioRhythm::tempogram_ratio`] or [`tempogram_ratio_from_tempogram`].
-/// `Default` reproduces librosa: default tempogram, per-frame tempo with the default
-/// prior (`start_bpm = 120`, `std_bpm = 1`, `max_tempo = 320`), Prockup's 13 factors,
-/// linear interpolation filled with 0, no time aggregation.
+/// [`TempogramRatioConfig::librosa`] reproduces librosa: librosa's tempogram,
+/// per-frame tempo with the default prior (`start_bpm = 120`, `std_bpm = 1`,
+/// `max_tempo = 320`), Prockup's 13 factors, linear interpolation filled with 0, no
+/// time aggregation. `Default` is currently the same.
 ///
 /// ## Invariants
 ///
@@ -2906,10 +3091,25 @@ impl Default for TempogramRatioConfig {
 }
 
 impl TempogramRatioConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.tempogram_ratio` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            tempogram: TempogramConfig::librosa(),
+            tempo: TempoConfig::librosa(),
+            factors: default_tempogram_ratio_factors(),
+            aggregate: None,
+            fill_value: 0.0,
+        }
     }
 
     /// Sets the factors.
@@ -2955,13 +3155,15 @@ impl TempogramRatioConfig {
 ///   BPM grid is [`tempo_frequencies`] (the infinite zero-lag bin is not used).
 /// * `sample_rate`, `hop_length` - Frame geometry.
 /// * `config` - Factors, aggregation, fill value and tempo-estimation parameters.
-/// * `bpm` - Optional `(channels, n_frames)` per-frame tempo; `None` estimates it with
+/// * `bpm` - Optional `(channels, n_frames)` per-frame tempo in BPM (`f64`, like
+///   the output of [`tempo_from_tempogram`]); `None` estimates it with
 ///   [`tempo_from_tempogram`] (`aggregate = None`).
 ///
 /// # Returns
 ///
 /// `(channels, n_factors, n_frames)`, or `(channels, n_factors, 1)` when
-/// `config.aggregate` is set (librosa drops the time axis instead).
+/// `config.aggregate` is set (librosa drops the time axis instead), in the element
+/// type `F` of `tempogram`. `fill_value` is rounded to `F`.
 ///
 /// # Errors
 ///
@@ -2989,13 +3191,13 @@ impl TempogramRatioConfig {
 /// M. Prockup, A. F. Ehmann, F. Gouyon, E. M. Schmidt and Y. E. Kim, "Modeling
 /// musical rhythm at scale with the music genome project," WASPAA 2015; librosa
 /// `feature.tempogram_ratio`.
-pub fn tempogram_ratio_from_tempogram(
-    tempogram: ArrayView3<'_, f64>,
+pub fn tempogram_ratio_from_tempogram<F: AudioFloat>(
+    tempogram: ArrayView3<'_, F>,
     sample_rate: f64,
     hop_length: NonZeroUsize,
     config: &TempogramRatioConfig,
     bpm: Option<ArrayView2<'_, f64>>,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     config.validate_ratio()?;
     let (n_ch, win, n_t) = tempogram.dim();
     if win < 3 || n_t == 0 || n_ch == 0 {
@@ -3040,8 +3242,9 @@ pub fn tempogram_ratio_from_tempogram(
     };
     let xs: Vec<f64> = order.iter().map(|&k| freqs[k]).collect();
     let n_h = config.factors.len();
-    let mut tgr = Array3::<f64>::zeros((n_ch, n_h, n_t));
-    let mut ys = vec![0.0; order.len()];
+    let fill = F::of(config.fill_value);
+    let mut tgr = Array3::<F>::zeros((n_ch, n_h, n_t));
+    let mut ys = vec![F::zero(); order.len()];
     for c in 0..n_ch {
         for t in 0..n_t {
             for (y, &k) in ys.iter_mut().zip(&order) {
@@ -3049,14 +3252,14 @@ pub fn tempogram_ratio_from_tempogram(
             }
             let b = bpm[[c, t]];
             for (h, &factor) in config.factors.iter().enumerate() {
-                tgr[[c, h, t]] = interp_linear(&xs, &ys, b * factor, config.fill_value);
+                tgr[[c, h, t]] = interp_linear(&xs, &ys, b * factor, fill);
             }
         }
     }
     match config.aggregate {
         None => Ok(tgr),
         Some(agg) => {
-            let mut out = Array3::<f64>::zeros((n_ch, n_h, 1));
+            let mut out = Array3::<F>::zeros((n_ch, n_h, 1));
             let mut series = Vec::with_capacity(n_t);
             let mut scratch = Vec::new();
             for c in 0..n_ch {
@@ -3083,8 +3286,9 @@ pub fn tempogram_ratio_from_tempogram(
 /// ## Intended usage
 ///
 /// Pass to [`AudioRhythm::hybrid_tempogram`] or [`hybrid_tempogram_from_envelope`].
-/// `Default` reproduces librosa: default onset strength, `win_length = 384`, centred,
-/// Hann window, interpolation filled with 0 outside the autocorrelation range.
+/// [`HybridTempogramConfig::librosa`] reproduces librosa: librosa's onset strength,
+/// `win_length = 384`, centred, Hann window, interpolation filled with 0 outside the
+/// autocorrelation range. `Default` is currently the same.
 ///
 /// ## Invariants
 ///
@@ -3121,10 +3325,24 @@ impl Default for HybridTempogramConfig {
 }
 
 impl HybridTempogramConfig {
-    /// Returns the librosa-default configuration (same as [`Default`]).
+    /// Returns the default configuration (same as [`Default`], which equals
+    /// librosa 1.0's defaults).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// librosa 1.0's `feature.hybrid_tempogram` defaults. Currently the same as
+    /// [`Default`]; use this constructor where agreement with librosa is the
+    /// requirement.
+    #[must_use]
+    pub fn librosa() -> Self {
+        Self {
+            onset: OnsetStrengthConfig::librosa(),
+            win_length: crate::nzu!(384),
+            center: true,
+            window: Window::Hann,
+        }
     }
 
     /// Sets the window length.
@@ -3157,7 +3375,8 @@ impl HybridTempogramConfig {
 /// # Returns
 ///
 /// `(channels, win_length / 2 + 1, n)` on the [`fourier_tempo_frequencies`] grid,
-/// where `n` is the smaller frame count of the two tempograms.
+/// where `n` is the smaller frame count of the two tempograms, in the element type
+/// `F` of `envelope`. Both tempograms are computed in `F`.
 ///
 /// # Errors
 ///
@@ -3176,12 +3395,12 @@ impl HybridTempogramConfig {
 ///     .unwrap();
 /// assert_eq!(h.dim(), (1, 193, 300));
 /// ```
-pub fn hybrid_tempogram_from_envelope(
-    envelope: ArrayView2<'_, f64>,
+pub fn hybrid_tempogram_from_envelope<F: AudioFloat>(
+    envelope: ArrayView2<'_, F>,
     sample_rate: f64,
     hop_length: NonZeroUsize,
     config: &HybridTempogramConfig,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     require_positive("sample_rate", sample_rate)?;
     let win = config.win_length;
     if win.get() < 3 {
@@ -3193,7 +3412,7 @@ pub fn hybrid_tempogram_from_envelope(
             win_length: win,
             center: config.center,
             window: config.window.clone(),
-            ..FourierTempogramConfig::default()
+            ..FourierTempogramConfig::librosa()
         },
     )?;
     let tg = tempogram_from_envelope(
@@ -3202,7 +3421,7 @@ pub fn hybrid_tempogram_from_envelope(
             win_length: win,
             center: config.center,
             window: config.window.clone(),
-            ..TempogramConfig::default()
+            ..TempogramConfig::librosa()
         },
     )?;
     let freqs = fourier_tempo_frequencies(sample_rate, hop_length, win);
@@ -3216,17 +3435,17 @@ pub fn hybrid_tempogram_from_envelope(
     let xs: Vec<f64> = order.iter().map(|&k| lags[k]).collect();
     let (n_ch, n_bins, n_f) = ft.dim();
     let n = n_f.min(tg.dim().2);
-    let mut out = Array3::<f64>::zeros((n_ch, n_bins, n));
-    let mut ys = vec![0.0; order.len()];
+    let mut out = Array3::<F>::zeros((n_ch, n_bins, n));
+    let mut ys = vec![F::zero(); order.len()];
     for c in 0..n_ch {
         for t in 0..n {
             for (y, &k) in ys.iter_mut().zip(&order) {
                 *y = tg[[c, k, t]];
             }
             for (k, &f) in freqs.iter().enumerate() {
-                let a = interp_linear(&xs, &ys, f, 0.0);
+                let a = interp_linear(&xs, &ys, f, F::zero());
                 let p = ft[[c, k, t]].norm() * a.abs();
-                out[[c, k, t]] = (if p < 0.0 { 0.0 } else { p }).sqrt();
+                out[[c, k, t]] = (if p < F::zero() { F::zero() } else { p }).sqrt();
             }
         }
     }
@@ -3243,14 +3462,17 @@ pub fn hybrid_tempogram_from_envelope(
 ///
 /// # Arguments
 ///
-/// * `tempogram` - `(channels, n_freqs, n_frames)` tempogram (magnitude).
+/// * `tempogram` - `(channels, n_freqs, n_frames)` tempogram (magnitude), `f32` or
+///   `f64`. The output has its element type `F`, and the product and aggregation
+///   run in `F`.
 /// * `freqs` - Tempo (BPM) of each tempogram bin, any order, at least two values. An
 ///   infinite value (the zero-lag bin of [`tempo_frequencies`]) yields NaN results,
 ///   as in librosa; drop it first.
 /// * `factors` - Subharmonic factors; `None` uses librosa's `[1/3, 1/4, 1/5, 1/7]`.
 /// * `aggregate` - Reduction over the tempo axis; librosa's default is
 ///   [`Aggregate::Sum`].
-/// * `fill_value` - Value outside the frequency grid. librosa default: 0.
+/// * `fill_value` - Value outside the frequency grid (rounded to `F`). librosa
+///   default: 0.
 ///
 /// # Returns
 ///
@@ -3278,13 +3500,13 @@ pub fn hybrid_tempogram_from_envelope(
 /// // 120 BPM (bin 23) has its quarter, 30 BPM (bin 5), in the tempogram.
 /// assert!(m[[0, 1, 0]] > 0.9);
 /// ```
-pub fn metrogram(
-    tempogram: ArrayView3<'_, f64>,
+pub fn metrogram<F: AudioFloat>(
+    tempogram: ArrayView3<'_, F>,
     freqs: &[f64],
     factors: Option<&[f64]>,
     aggregate: Aggregate,
     fill_value: f64,
-) -> AudioSampleResult<Array3<f64>> {
+) -> AudioSampleResult<Array3<F>> {
     let default_factors = [1.0 / 3.0, 1.0 / 4.0, 1.0 / 5.0, 1.0 / 7.0];
     let factors = factors.unwrap_or(&default_factors);
     let (n_ch, n_f, n_t) = tempogram.dim();
@@ -3302,10 +3524,11 @@ pub fn metrogram(
     }
     let order = argsort_stable(freqs);
     let xs: Vec<f64> = order.iter().map(|&k| freqs[k]).collect();
-    let mut ys = vec![0.0; n_f];
-    let mut prod = vec![0.0; n_f];
+    let fill = F::of(fill_value);
+    let mut ys = vec![F::zero(); n_f];
+    let mut prod = vec![F::zero(); n_f];
     let mut scratch = Vec::new();
-    let mut out = Array3::<f64>::zeros((n_ch, factors.len(), n_t));
+    let mut out = Array3::<F>::zeros((n_ch, factors.len(), n_t));
     for c in 0..n_ch {
         for t in 0..n_t {
             for (y, &k) in ys.iter_mut().zip(&order) {
@@ -3313,8 +3536,7 @@ pub fn metrogram(
             }
             for (h, &factor) in factors.iter().enumerate() {
                 for (f, p) in prod.iter_mut().enumerate() {
-                    *p = interp_linear(&xs, &ys, factor * freqs[f], fill_value)
-                        * tempogram[[c, f, t]];
+                    *p = interp_linear(&xs, &ys, factor * freqs[f], fill) * tempogram[[c, f, t]];
                 }
                 out[[c, h, t]] = aggregate.reduce(&prod, &mut scratch, false);
             }
@@ -3333,8 +3555,8 @@ pub fn metrogram(
 /// # Purpose
 ///
 /// Reproduces `librosa.onset`, `librosa.feature.{tempogram, fourier_tempogram, tempo}`
-/// and `librosa.beat` on [`AudioSamples`]. Every config's `Default` is librosa's
-/// default, so results match librosa 1.0 for the same signal.
+/// and `librosa.beat` on [`AudioSamples`]. With each config's `librosa()` constructor
+/// the results match librosa 1.0 for the same signal.
 ///
 /// # Intended usage
 ///
@@ -3346,24 +3568,33 @@ pub fn metrogram(
 ///
 /// # Invariants
 ///
-/// Input samples are converted to `f64` with the crate's audio-aware conversion;
-/// all outputs are `f64`. The hop length of every output is the onset config's mel
-/// STFT hop (512 by default).
+/// Input samples are converted to the sample type's float type
+/// [`Float`](Self::Float) with the crate's audio-aware conversion, and envelopes,
+/// tempograms and pulses are computed and returned in that type: `f32` for `u8`,
+/// `i16`, `I24` and `f32` audio, `f64` for `i32` and `f64` audio (see
+/// [`AudioSample::Float`](crate::AudioSample::Float)). Tempo estimates are `f64` BPM
+/// values. The hop length of every output is the onset config's mel STFT hop (512
+/// by default).
 ///
 /// [`onset_detect`]: AudioRhythm::onset_detect
 /// [`beat_track`]: AudioRhythm::beat_track
 /// [`onset_strength`]: AudioRhythm::onset_strength
 pub trait AudioRhythm {
+    /// The float type of the envelopes, tempograms and pulses, and of the
+    /// computation: the sample type's [`AudioSample::Float`](crate::AudioSample::Float).
+    type Float: AudioFloat;
+
     /// Computes the onset strength envelope, equivalent to
     /// `librosa.onset.onset_strength(y=y, sr=sr)`.
     ///
     /// # Arguments
     ///
-    /// * `config` - Envelope parameters ([`OnsetStrengthConfig::default`] = librosa).
+    /// * `config` - Envelope parameters ([`OnsetStrengthConfig::librosa`] = librosa).
     ///
     /// # Returns
     ///
-    /// A `(channels, n_frames)` envelope with `n_frames = 1 + len / hop` (centred).
+    /// A `(channels, n_frames)` envelope of type [`Float`](Self::Float) with
+    /// `n_frames = 1 + len / hop` (centred).
     ///
     /// # Errors
     ///
@@ -3380,10 +3611,15 @@ pub trait AudioRhythm {
     /// use std::time::Duration;
     ///
     /// let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
-    /// let env = audio.onset_strength(&OnsetStrengthConfig::default()).unwrap();
+    /// let env = audio.onset_strength(&OnsetStrengthConfig::librosa()).unwrap();
     /// assert_eq!(env.dim(), (1, 44));
+    /// // f32 audio gives an f32 envelope.
+    /// let _: &ndarray::Array2<f32> = &env;
     /// ```
-    fn onset_strength(&self, config: &OnsetStrengthConfig) -> AudioSampleResult<Array2<f64>>;
+    fn onset_strength(
+        &self,
+        config: &OnsetStrengthConfig,
+    ) -> AudioSampleResult<Array2<Self::Float>>;
 
     /// Computes onset strength per frequency sub-band, equivalent to
     /// `librosa.onset.onset_strength_multi(y=y, sr=sr, channels=channels)`.
@@ -3396,7 +3632,7 @@ pub trait AudioRhythm {
     ///
     /// # Returns
     ///
-    /// A `(channels, n_bands, n_frames)` array.
+    /// A `(channels, n_bands, n_frames)` array of type [`Float`](Self::Float).
     ///
     /// # Errors
     ///
@@ -3422,7 +3658,7 @@ pub trait AudioRhythm {
         &self,
         config: &OnsetStrengthConfig,
         channels: Option<&[usize]>,
-    ) -> AudioSampleResult<Array3<f64>>;
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Detects onsets, equivalent to `librosa.onset.onset_detect(y=y, sr=sr)`.
     ///
@@ -3455,7 +3691,7 @@ pub trait AudioRhythm {
     ///     y[n] = 0.5;
     /// }
     /// let audio = AudioSamples::new_mono(y, sample_rate!(22050)).unwrap();
-    /// let onsets = audio.onset_detect(&OnsetDetectConfig::default()).unwrap();
+    /// let onsets = audio.onset_detect(&OnsetDetectConfig::librosa()).unwrap();
     /// assert!(onsets.times().iter().any(|t| (t - 0.5).abs() < 0.05));
     /// ```
     fn onset_detect(&self, config: &OnsetDetectConfig) -> AudioSampleResult<FrameEvents>;
@@ -3465,7 +3701,7 @@ pub trait AudioRhythm {
     ///
     /// # Returns
     ///
-    /// A `(channels, win_length, n_frames)` array.
+    /// A `(channels, win_length, n_frames)` array of type [`Float`](Self::Float).
     ///
     /// # Errors
     ///
@@ -3486,14 +3722,15 @@ pub trait AudioRhythm {
     /// let tg = audio.tempogram(&TempogramConfig::default()).unwrap();
     /// assert_eq!(tg.dim(), (1, 384, 44));
     /// ```
-    fn tempogram(&self, config: &TempogramConfig) -> AudioSampleResult<Array3<f64>>;
+    fn tempogram(&self, config: &TempogramConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the Fourier tempogram, equivalent to
     /// `librosa.feature.fourier_tempogram(y=y, sr=sr)`.
     ///
     /// # Returns
     ///
-    /// A complex `(channels, win_length / 2 + 1, n_frames + 1)` array (centred).
+    /// A complex `(channels, win_length / 2 + 1, n_frames + 1)` array (centred) of
+    /// type `Complex<Self::Float>`.
     ///
     /// # Errors
     ///
@@ -3516,14 +3753,15 @@ pub trait AudioRhythm {
     fn fourier_tempogram(
         &self,
         config: &FourierTempogramConfig,
-    ) -> AudioSampleResult<Array3<Complex<f64>>>;
+    ) -> AudioSampleResult<Array3<Complex<Self::Float>>>;
 
     /// Estimates the tempo, equivalent to `librosa.feature.tempo(y=y, sr=sr)`.
     ///
     /// # Returns
     ///
     /// `(channels, 1)` tempi in BPM, or `(channels, n_frames)` with
-    /// `config.aggregate = None`.
+    /// `config.aggregate = None`. The values are `f64` for every sample type: they
+    /// are entries of the [`tempo_frequencies`] grid, which `f32` would round.
     ///
     /// # Errors
     ///
@@ -3547,7 +3785,7 @@ pub trait AudioRhythm {
     ///     }
     /// }
     /// let audio = AudioSamples::new_mono(y, sample_rate!(22050)).unwrap();
-    /// let bpm = audio.tempo(&TempoConfig::default()).unwrap();
+    /// let bpm = audio.tempo(&TempoConfig::librosa()).unwrap();
     /// assert!((bpm[[0, 0]] - 120.0).abs() < 5.0);
     /// ```
     fn tempo(&self, config: &TempoConfig) -> AudioSampleResult<Array2<f64>>;
@@ -3581,7 +3819,7 @@ pub trait AudioRhythm {
     ///     }
     /// }
     /// let audio = AudioSamples::new_mono(y, sample_rate!(22050)).unwrap();
-    /// let bt = audio.beat_track(&BeatTrackConfig::default()).unwrap();
+    /// let bt = audio.beat_track(&BeatTrackConfig::librosa()).unwrap();
     /// assert!(bt.beats.len() >= 8);
     /// ```
     fn beat_track(&self, config: &BeatTrackConfig) -> AudioSampleResult<BeatTrack>;
@@ -3591,7 +3829,7 @@ pub trait AudioRhythm {
     ///
     /// # Returns
     ///
-    /// A `(channels, n_frames)` pulse curve in `[0, 1]`.
+    /// A `(channels, n_frames)` pulse curve in `[0, 1]` of type [`Float`](Self::Float).
     ///
     /// # Errors
     ///
@@ -3611,14 +3849,15 @@ pub trait AudioRhythm {
     /// let pulse = audio.plp(&PlpConfig::default()).unwrap();
     /// assert_eq!(pulse.dim(), (1, 44));
     /// ```
-    fn plp(&self, config: &PlpConfig) -> AudioSampleResult<Array2<f64>>;
+    fn plp(&self, config: &PlpConfig) -> AudioSampleResult<Array2<Self::Float>>;
 
     /// Computes the tempogram ratio, equivalent to
     /// `librosa.feature.tempogram_ratio(y=y, sr=sr)`.
     ///
     /// # Returns
     ///
-    /// `(channels, n_factors, n_frames)` (or `(channels, n_factors, 1)` aggregated).
+    /// `(channels, n_factors, n_frames)` (or `(channels, n_factors, 1)` aggregated) of
+    /// type [`Float`](Self::Float).
     ///
     /// # Errors
     ///
@@ -3638,14 +3877,17 @@ pub trait AudioRhythm {
     /// let r = audio.tempogram_ratio(&TempogramRatioConfig::default()).unwrap();
     /// assert_eq!(r.dim(), (1, 13, 44));
     /// ```
-    fn tempogram_ratio(&self, config: &TempogramRatioConfig) -> AudioSampleResult<Array3<f64>>;
+    fn tempogram_ratio(
+        &self,
+        config: &TempogramRatioConfig,
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 
     /// Computes the hybrid tempogram, equivalent to
     /// `librosa.feature.hybrid_tempogram(y=y, sr=sr)`.
     ///
     /// # Returns
     ///
-    /// `(channels, win_length / 2 + 1, n_frames)`.
+    /// `(channels, win_length / 2 + 1, n_frames)` of type [`Float`](Self::Float).
     ///
     /// # Errors
     ///
@@ -3665,7 +3907,10 @@ pub trait AudioRhythm {
     /// let h = audio.hybrid_tempogram(&HybridTempogramConfig::default()).unwrap();
     /// assert_eq!(h.dim(), (1, 193, 44));
     /// ```
-    fn hybrid_tempogram(&self, config: &HybridTempogramConfig) -> AudioSampleResult<Array3<f64>>;
+    fn hybrid_tempogram(
+        &self,
+        config: &HybridTempogramConfig,
+    ) -> AudioSampleResult<Array3<Self::Float>>;
 }
 
 fn require_mono<T: StandardSample>(audio: &AudioSamples<'_, T>, op: &str) -> AudioSampleResult<()> {
@@ -3679,17 +3924,29 @@ fn require_mono<T: StandardSample>(audio: &AudioSamples<'_, T>, op: &str) -> Aud
     }
 }
 
+/// The `(channels, n_bands, n_frames)` onset strength of `audio`, computed in
+/// `T::Float`.
+fn onset_multi_of<T: StandardSample>(
+    audio: &AudioSamples<'_, T>,
+    config: &OnsetStrengthConfig,
+    channels: Option<&[usize]>,
+) -> AudioSampleResult<Array3<T::Float>> {
+    let sr = audio.sample_rate_hz();
+    config.validate(sr)?;
+    let mel = melspectrogram_rows(finite_float_rows(audio)?.view(), sr, &config.mel)?;
+    let s_db = power_to_db(&mel, &config.db)?;
+    onset_strength_multi_from_db(s_db.view(), None, config, channels)
+}
+
+/// The `(channels, n_frames)` onset strength envelope of `audio`, computed in
+/// `T::Float`.
 fn envelope_of<T: StandardSample>(
     audio: &AudioSamples<'_, T>,
     config: &OnsetStrengthConfig,
-) -> AudioSampleResult<Array2<f64>> {
-    config.validate(audio.sample_rate_hz())?;
-    // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-    let mel = melspectrogram_rows(
-        finite_audio_rows(audio)?.view(),
-        audio.sample_rate_hz(),
-        &config.mel,
-    )?;
+) -> AudioSampleResult<Array2<T::Float>> {
+    let sr = audio.sample_rate_hz();
+    config.validate(sr)?;
+    let mel = melspectrogram_rows(finite_float_rows(audio)?.view(), sr, &config.mel)?;
     let s_db = power_to_db(&mel, &config.db)?;
     onset_strength_from_db(s_db.view(), config)
 }
@@ -3698,7 +3955,9 @@ impl<T> AudioRhythm for AudioSamples<'_, T>
 where
     T: StandardSample,
 {
-    fn onset_strength(&self, config: &OnsetStrengthConfig) -> AudioSampleResult<Array2<f64>> {
+    type Float = T::Float;
+
+    fn onset_strength(&self, config: &OnsetStrengthConfig) -> AudioSampleResult<Array2<T::Float>> {
         envelope_of(self, config)
     }
 
@@ -3706,16 +3965,8 @@ where
         &self,
         config: &OnsetStrengthConfig,
         channels: Option<&[usize]>,
-    ) -> AudioSampleResult<Array3<f64>> {
-        config.validate(self.sample_rate_hz())?;
-        // TRANSITIONAL(f64): f64 rows until this module computes in T::Float.
-        let mel = melspectrogram_rows(
-            finite_audio_rows(self)?.view(),
-            self.sample_rate_hz(),
-            &config.mel,
-        )?;
-        let s_db = power_to_db(&mel, &config.db)?;
-        onset_strength_multi_from_db(s_db.view(), None, config, channels)
+    ) -> AudioSampleResult<Array3<T::Float>> {
+        onset_multi_of(self, config, channels)
     }
 
     fn onset_detect(&self, config: &OnsetDetectConfig) -> AudioSampleResult<FrameEvents> {
@@ -3733,7 +3984,7 @@ where
         })
     }
 
-    fn tempogram(&self, config: &TempogramConfig) -> AudioSampleResult<Array3<f64>> {
+    fn tempogram(&self, config: &TempogramConfig) -> AudioSampleResult<Array3<T::Float>> {
         config.validate(self.sample_rate_hz())?;
         let env = envelope_of(self, &config.onset)?;
         tempogram_from_envelope(env.view(), config)
@@ -3742,7 +3993,7 @@ where
     fn fourier_tempogram(
         &self,
         config: &FourierTempogramConfig,
-    ) -> AudioSampleResult<Array3<Complex<f64>>> {
+    ) -> AudioSampleResult<Array3<Complex<T::Float>>> {
         config.validate(self.sample_rate_hz())?;
         let env = envelope_of(self, &config.onset)?;
         fourier_tempogram_from_envelope(env.view(), config)
@@ -3772,7 +4023,7 @@ where
         )
     }
 
-    fn plp(&self, config: &PlpConfig) -> AudioSampleResult<Array2<f64>> {
+    fn plp(&self, config: &PlpConfig) -> AudioSampleResult<Array2<T::Float>> {
         config.validate(self.sample_rate_hz())?;
         let env = envelope_of(self, &config.onset)?;
         plp_from_envelope(
@@ -3783,7 +4034,10 @@ where
         )
     }
 
-    fn tempogram_ratio(&self, config: &TempogramRatioConfig) -> AudioSampleResult<Array3<f64>> {
+    fn tempogram_ratio(
+        &self,
+        config: &TempogramRatioConfig,
+    ) -> AudioSampleResult<Array3<T::Float>> {
         config.validate(self.sample_rate_hz())?;
         let tg = self.tempogram(&config.tempogram)?;
         tempogram_ratio_from_tempogram(
@@ -3795,7 +4049,10 @@ where
         )
     }
 
-    fn hybrid_tempogram(&self, config: &HybridTempogramConfig) -> AudioSampleResult<Array3<f64>> {
+    fn hybrid_tempogram(
+        &self,
+        config: &HybridTempogramConfig,
+    ) -> AudioSampleResult<Array3<T::Float>> {
         config.validate(self.sample_rate_hz())?;
         let env = envelope_of(self, &config.onset)?;
         hybrid_tempogram_from_envelope(
@@ -3935,8 +4192,8 @@ mod tests {
 
     #[test]
     fn peak_pick_edge_cases() {
-        let cfg = PeakPickConfig::default();
-        assert!(peak_pick(&[], &cfg).unwrap().is_empty());
+        let cfg = PeakPickConfig::for_onsets(22050.0, nzu!(512));
+        assert!(peak_pick::<f64>(&[], &cfg).unwrap().is_empty());
         // 1.0 < mean(1.0) + 0.07, so a single sample is only a peak with delta = 0.
         assert!(peak_pick(&[1.0], &cfg).unwrap().is_empty());
         assert_eq!(
@@ -3954,7 +4211,7 @@ mod tests {
     #[test]
     fn backtrack_edges() {
         assert!(onset_backtrack(&[], &[1.0, 2.0]).is_empty());
-        assert_eq!(onset_backtrack(&[3], &[]), vec![0]);
+        assert_eq!(onset_backtrack::<f64>(&[3], &[]), vec![0]);
     }
 
     #[test]
@@ -4019,7 +4276,7 @@ mod tests {
         assert!(beat_track_with_bpm(&env, &[120.0], 43.0, 0.0, true).is_err());
         assert!(beat_track_with_bpm(&env, &[1e6], 43.0, 100.0, true).is_err());
         assert!(
-            beat_track_with_bpm(&[], &[120.0], 43.0, 100.0, true)
+            beat_track_with_bpm::<f64>(&[], &[120.0], 43.0, 100.0, true)
                 .unwrap()
                 .is_empty()
         );
@@ -4151,6 +4408,138 @@ mod tests {
             // At most one peak with an unbounded wait.
             assert!(peak_pick(&x, &huge_wait).unwrap().len() <= 1, "{method:?}");
         }
-        assert_eq!(PeakPickConfig::new(), PeakPickConfig::default());
+    }
+
+    #[test]
+    fn librosa_presets() {
+        assert!(BeatTrackConfig::librosa().trim);
+        assert!(!BeatTrackConfig::default().trim);
+        assert_eq!(
+            BeatTrackConfig::librosa(),
+            BeatTrackConfig::default().with_trim(true)
+        );
+        assert_eq!(
+            OnsetStrengthConfig::librosa(),
+            OnsetStrengthConfig::default()
+        );
+        assert_eq!(OnsetDetectConfig::librosa(), OnsetDetectConfig::default());
+        assert_eq!(TempogramConfig::librosa(), TempogramConfig::default());
+        assert_eq!(
+            FourierTempogramConfig::librosa(),
+            FourierTempogramConfig::default()
+        );
+        assert_eq!(TempoConfig::librosa(), TempoConfig::default());
+        assert_eq!(PlpConfig::librosa(), PlpConfig::default());
+        assert_eq!(
+            TempogramRatioConfig::librosa(),
+            TempogramRatioConfig::default()
+        );
+        assert_eq!(
+            HybridTempogramConfig::librosa(),
+            HybridTempogramConfig::default()
+        );
+    }
+
+    /// `clicks` as `f32`, `i16` and `i32` audio (every sample of `clicks` is
+    /// rounded to the 16-bit grid first, so it is exact in all four types).
+    fn clicks_typed(
+        secs: usize,
+    ) -> (
+        AudioSamples<'static, f64>,
+        AudioSamples<'static, f32>,
+        AudioSamples<'static, i16>,
+    ) {
+        let a = clicks(22050, secs, 11025);
+        let q: Array1<f64> = a
+            .as_mono()
+            .unwrap()
+            .as_view()
+            .mapv(|v| (v * 32768.0).round() / 32768.0);
+        let a64 = AudioSamples::new_mono(q.clone(), sample_rate!(22050)).unwrap();
+        let a32 = AudioSamples::new_mono(q.mapv(|v| v as f32), sample_rate!(22050)).unwrap();
+        let a16 =
+            AudioSamples::new_mono(q.mapv(|v| (v * 32768.0) as i16), sample_rate!(22050)).unwrap();
+        (a64, a32, a16)
+    }
+
+    /// Largest `|a - b|` divided by the largest `|b|`.
+    fn rel_err(a: impl Iterator<Item = f64>, b: impl Iterator<Item = f64> + Clone) -> f64 {
+        let peak = b.clone().fold(0.0f64, |m, v| m.max(v.abs()));
+        a.zip(b).fold(0.0f64, |m, (p, q)| m.max((p - q).abs())) / peak
+    }
+
+    #[test]
+    fn output_float_type_follows_sample_type() {
+        let (a64, a32, a16) = clicks_typed(2);
+        let cfg = OnsetStrengthConfig::librosa();
+        let e32: Array2<f32> = a32.onset_strength(&cfg).unwrap();
+        let e16: Array2<f32> = a16.onset_strength(&cfg).unwrap();
+        let e64: Array2<f64> = a64.onset_strength(&cfg).unwrap();
+        assert_eq!(e32.dim(), e64.dim());
+        assert_eq!(e16.dim(), e64.dim());
+        let i32_audio: AudioSamples<'static, i32> = crate::AudioTypeConversion::to_format(&a64);
+        let _: Array3<f64> = i32_audio.tempogram(&TempogramConfig::librosa()).unwrap();
+        let _: Array3<Complex<f32>> = a16
+            .fourier_tempogram(&FourierTempogramConfig::librosa())
+            .unwrap();
+        let _: Array2<f32> = a16.plp(&PlpConfig::librosa()).unwrap();
+        let _: Array3<f32> = a16
+            .tempogram_ratio(&TempogramRatioConfig::librosa())
+            .unwrap();
+        let _: Array3<f32> = a16
+            .hybrid_tempogram(&HybridTempogramConfig::librosa())
+            .unwrap();
+        let _: Array3<f32> = a16.onset_strength_multi(&cfg, Some(&[0, 64, 128])).unwrap();
+        // Tempo values stay f64 BPM.
+        let _: Array2<f64> = a16.tempo(&TempoConfig::librosa()).unwrap();
+    }
+
+    #[test]
+    fn f32_path_agrees_with_f64_path() {
+        // The same 16-bit samples analysed in f32 and in f64 (peak-relative
+        // errors). Measured: onset envelope 3.0e-7 (2.5 f32 eps), tempogram
+        // 2.2e-7, PLP 1.1e-6 (9 eps). The envelope and the tempogram are bounded
+        // by 1.5e-6 (~13 eps): the O(log2(n) * eps) round-off of the 2048-point
+        // STFT and 768-point autocorrelation FFTs, with a factor of 5 over the
+        // measurement. PLP adds a 384-point forward and inverse transform, an
+        // overlap-add over 384 frames and the max-normalisation, so it gets
+        // 4e-6 (~34 eps, a factor of 3.7). A computation that lost precision (a
+        // window or basis rounded twice, f32 accumulation over the whole signal)
+        // exceeds these bounds.
+        let tol = 1.5e-6;
+        let tol_plp = 4e-6;
+        let (a64, a32, _) = clicks_typed(6);
+        let e64 = a64.onset_strength(&OnsetStrengthConfig::librosa()).unwrap();
+        let e32 = a32.onset_strength(&OnsetStrengthConfig::librosa()).unwrap();
+        let e = rel_err(e32.iter().map(|&v| f64::from(v)), e64.iter().copied());
+        println!("onset envelope f32 vs f64: {e:e}");
+        assert!(e < tol, "onset envelope {e:e}");
+        let t64 = a64.tempogram(&TempogramConfig::librosa()).unwrap();
+        let t32 = a32.tempogram(&TempogramConfig::librosa()).unwrap();
+        let e = rel_err(t32.iter().map(|&v| f64::from(v)), t64.iter().copied());
+        println!("tempogram f32 vs f64: {e:e}");
+        assert!(e < tol, "tempogram {e:e}");
+        let p64 = a64.plp(&PlpConfig::librosa()).unwrap();
+        let p32 = a32.plp(&PlpConfig::librosa()).unwrap();
+        let e = rel_err(p32.iter().map(|&v| f64::from(v)), p64.iter().copied());
+        println!("plp f32 vs f64: {e:e}");
+        assert!(e < tol_plp, "plp {e:e}");
+        // Event outputs and tempo agree exactly on this signal.
+        assert_eq!(
+            a32.tempo(&TempoConfig::librosa()).unwrap(),
+            a64.tempo(&TempoConfig::librosa()).unwrap()
+        );
+        let b32 = a32.beat_track(&BeatTrackConfig::librosa()).unwrap();
+        let b64 = a64.beat_track(&BeatTrackConfig::librosa()).unwrap();
+        assert_eq!(b32.tempo, b64.tempo);
+        assert_eq!(b32.beats.frames, b64.beats.frames);
+        assert_eq!(
+            a32.onset_detect(&OnsetDetectConfig::librosa())
+                .unwrap()
+                .frames,
+            a64.onset_detect(&OnsetDetectConfig::librosa())
+                .unwrap()
+                .frames
+        );
     }
 }

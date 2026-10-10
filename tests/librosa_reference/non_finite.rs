@@ -104,3 +104,29 @@ fn non_finite_audio_is_rejected() {
         AudioSamples::new_mono(Array1::from(vec![100i16; 4096]), sample_rate!(22050)).unwrap();
     assert!(pcm.melspectrogram(&MelSpectrogramConfig::default()).is_ok());
 }
+
+/// `f32` audio is analysed in `f32` by `AudioRhythm`; the finiteness check
+/// applies there too.
+#[test]
+fn non_finite_f32_audio_is_rejected_by_rhythm() {
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut x: Vec<f32> = signal(0.0)
+            .as_mono()
+            .unwrap()
+            .iter()
+            .map(|&v| v as f32)
+            .collect();
+        x[5000] = bad;
+        let y = AudioSamples::new_mono(Array1::from(x), sample_rate!(22050)).unwrap();
+        assert_rejected(
+            "onset_strength f32",
+            y.onset_strength(&OnsetStrengthConfig::librosa()),
+        );
+        assert_rejected(
+            "onset_detect f32",
+            y.onset_detect(&OnsetDetectConfig::librosa()),
+        );
+        assert_rejected("tempo f32", y.tempo(&TempoConfig::librosa()));
+        assert_rejected("beat_track f32", y.beat_track(&BeatTrackConfig::librosa()));
+    }
+}
