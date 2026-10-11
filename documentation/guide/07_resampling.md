@@ -315,7 +315,7 @@ assert!((g(6_000.0) + 3.77).abs() < 0.01 && (g(10_000.0) + 11.8).abs() < 0.05);
 ```
 
 The sinc tiers pass the 6 kHz tone unchanged (to 0.0001 dB) and attenuate the
-image to $-114.8$ dB for `Medium` and $-145.2$ dB for `High`:
+image to $-114.8$ dB for `Medium` and $-146.0$ dB for `High`:
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -324,7 +324,7 @@ use std::f64::consts::PI;
 use std::time::Duration;
 
 let x = sine_wave::<f64>(6_000.0, Duration::from_millis(250), sample_rate!(16000), 0.5);
-for (q, image_db) in [(ResamplingQuality::Medium, -114.8), (ResamplingQuality::High, -145.2)] {
+for (q, image_db) in [(ResamplingQuality::Medium, -114.8), (ResamplingQuality::High, -146.0)] {
     let y = resample(&x, sample_rate!(48000), q).unwrap();
     let y = &y.as_slice().unwrap()[3_600..8_400];
     let level = |f: f64| {

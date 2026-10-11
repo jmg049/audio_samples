@@ -475,7 +475,7 @@ const STAGE_B_EXTRA_DB: f64 = 30.0;
 /// Cost of one stage-A output sample (FFT work, spectrum products and
 /// copies) in units of one stage-B multiply-add, measured with AVX2: used to
 /// choose stage A's rate.
-const STAGE_A_COST: f64 = 20.0;
+const STAGE_A_COST: f64 = 18.0;
 /// Decimation factors (powers of two) up to this run as a single FFT stage.
 const FFT_MAX_FACTOR: u64 = 64;
 /// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;
@@ -504,19 +504,41 @@ enum Plan {
 }
 
 /// Shape of stage B when stage A runs at `up · in_sr`: `(l, m, half,
-/// transition)` with `l / m = out_sr / (up · in_sr)` in lowest terms, the
-/// half-width (a multiple of 2) and the transition band in radians per
-/// stage-A sample.
-fn stage_b_shape(in_sr: u32, out_sr: u32, spec: FilterSpec, up: u64) -> (u64, u64, usize, f64) {
+/// transition, cutoff)` with `l / m = out_sr / (up · in_sr)` in lowest
+/// terms, the half-width (a multiple of 2), the transition band in radians
+/// per stage-A sample and the cut-off as a fraction of stage A's Nyquist
+/// frequency.
+///
+/// Stage B attenuates from the first image of stage A's band,
+/// `up · in_sr - f_low / 2`, on. It is flat up to `f_low / 2`, or only up to
+/// stage A's passband edge `passband · f_low / 2` when that rounds to fewer
+/// taps: rolling off over stage A's transition band only steepens the
+/// cascade's transition, since stage A alone sets the attenuation from
+/// `f_low / 2` on.
+fn stage_b_shape(
+    in_sr: u32,
+    out_sr: u32,
+    spec: FilterSpec,
+    up: u64,
+) -> (u64, u64, usize, f64, f64) {
     let fs_a = up * u64::from(in_sr);
     let g = gcd(fs_a, u64::from(out_sr));
     let (l, m) = (u64::from(out_sr) / g, fs_a / g);
+    // f_low / 2 as a fraction of stage A's Nyquist frequency.
     let r = f64::from(in_sr.min(out_sr)) / fs_a as f64;
     let attenuation = spec.attenuation_db + STAGE_B_EXTRA_DB;
-    let transition = 2.0 * std::f64::consts::PI * (1.0 - r);
-    let length = (attenuation - 7.95) / (2.285 * transition);
-    let half = ((length / 2.0).ceil() as usize).next_multiple_of(2);
-    (l, m, half, transition)
+    let shape = |pass: f64, stop: f64| {
+        let transition = std::f64::consts::PI * (stop - pass);
+        let length = (attenuation - 7.95) / (2.285 * transition);
+        let half = ((length / 2.0).ceil() as usize).next_multiple_of(2);
+        (half, transition, 0.5 * (pass + stop))
+    };
+    // Flat over all of stage A's band (cut-off at stage A's Nyquist
+    // frequency), unless flat up to stage A's passband edge saves taps.
+    let wide = shape(r, 2.0 - r);
+    let narrow = shape(spec.passband * r, 2.0 - r);
+    let (half, transition, cutoff) = if narrow.0 < wide.0 { narrow } else { wide };
+    (l, m, half, transition, cutoff)
 }
 
 /// Most phases of an exact stage-B table. Its rows are stored in the order
@@ -540,7 +562,7 @@ fn stage_a_up(in_sr: u32, out_sr: u32, spec: FilterSpec) -> u64 {
     }
     let ratio = f64::from(out_sr) / f64::from(in_sr);
     let cost = |up: u64| {
-        let (l, _, half, _) = stage_b_shape(in_sr, out_sr, spec, up);
+        let (l, _, half, _, _) = stage_b_shape(in_sr, out_sr, spec, up);
         let rows = if stage_b_exact(l, 2 * half) { 1.0 } else { 2.0 };
         up as f64 * STAGE_A_COST + ratio * (2 * half) as f64 * rows
     };
@@ -644,7 +666,7 @@ impl Kernel {
             unreachable!("two-stage plans are only made for windowed-sinc kernels")
         };
         let up = stage_a_up(in_sr, out_sr, spec);
-        let (l, m, half, transition) = stage_b_shape(in_sr, out_sr, spec, up);
+        let (l, m, half, transition, cutoff) = stage_b_shape(in_sr, out_sr, spec, up);
         // The rounded-up length allows more attenuation for the same
         // transition band: use all of it (Kaiser's estimate solved for A).
         let attenuation = 2.285 * transition * (2 * half) as f64 + 7.95;
@@ -672,9 +694,9 @@ impl Kernel {
                 if r.abs() >= 1.0 {
                     return 0.0;
                 }
-                let x = std::f64::consts::PI * tau;
+                let x = std::f64::consts::PI * cutoff * tau;
                 let sinc = if x == 0.0 { 1.0 } else { x.sin() / x };
-                sinc * bessel_i0(beta * (1.0 - r * r).sqrt()) / i0_beta
+                cutoff * sinc * bessel_i0(beta * (1.0 - r * r).sqrt()) / i0_beta
             };
             let mut coeffs = Vec::with_capacity(rows * taps);
             for row in 0..rows {

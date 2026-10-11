@@ -270,9 +270,9 @@ fn main() -> AudioSampleResult<()> {
                 assert!((g6 + 3.77).abs() < 0.01 && (g10 + 11.8).abs() < 0.05);
             }
             // The sinc tiers pass 6 kHz unchanged and attenuate the image to -114.8 dB
-            // (Medium) and -145.2 dB (High).
+            // (Medium) and -146.0 dB (High).
             ResamplingQuality::Medium => assert!(g6.abs() < 1e-4 && (g10 + 114.8).abs() < 0.1),
-            _ => assert!(g6.abs() < 1e-4 && (g10 + 145.2).abs() < 0.1),
+            _ => assert!(g6.abs() < 1e-4 && (g10 + 146.0).abs() < 0.1),
         }
     }
     println!("\nAll checks passed.");
