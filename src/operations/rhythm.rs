@@ -601,6 +601,13 @@ fn maximum_filter_freq<F: AudioFloat>(s: ArrayView2<'_, F>, size: usize) -> Arra
     })
 }
 
+/// The rows of `m` as slices, if every row is contiguous.
+fn contiguous_rows<F>(m: ArrayView2<'_, F>) -> Option<Vec<&[F]>> {
+    (0..m.nrows())
+        .map(|b| m.index_axis_move(Axis(0), b).to_slice())
+        .collect()
+}
+
 /// Computes multi-band onset strength from a dB spectrogram, equivalent to
 /// `librosa.onset.onset_strength_multi(S=s_db, ref=reference, channels=...)`.
 ///
@@ -701,25 +708,56 @@ pub fn onset_strength_multi_from_db<F: AudioFloat>(
             }
         };
         let mut oc = out.index_axis_mut(Axis(0), c);
-        for t in 0..n_diff {
-            let o = t + pad;
-            if o >= out_len {
-                break;
-            }
-            for (b, d) in diff.iter_mut().enumerate() {
-                let v = sc[[b, t + lag]] - rc[[b, t]];
-                // numpy.maximum(0, v): NaN propagates.
-                *d = if v < F::zero() { F::zero() } else { v };
-            }
-            match config.aggregate {
-                Some(agg) => {
-                    for (i, &(lo, hi)) in bands.iter().enumerate() {
-                        oc[[i, o]] = agg.reduce(&diff[lo..hi], &mut scratch, false);
+        // Sum and mean over contiguous rows: accumulate whole rows, bin by bin
+        // in order (the same sequential sum as `reduce`), which vectorises
+        // and reads the spectrogram in memory order.
+        let summed = matches!(config.aggregate, Some(Aggregate::Sum | Aggregate::Mean));
+        let rows = if summed {
+            contiguous_rows(sc).zip(contiguous_rows(rc))
+        } else {
+            None
+        };
+        if let Some((srows, rrows)) = rows {
+            let len = n_diff.min(out_len.saturating_sub(pad));
+            // (Nothing to write when the spectrogram is no longer than the
+            // lag or the padding fills the output.)
+            for (i, &(lo, hi)) in bands.iter().enumerate().filter(|_| len > 0) {
+                let mut orow = oc.row_mut(i);
+                let acc = &mut orow.as_slice_mut().expect("standard layout")[pad..pad + len];
+                for b in lo..hi {
+                    let (sr, rr) = (&srows[b][lag..lag + len], &rrows[b][..len]);
+                    for ((a, &x), &y) in acc.iter_mut().zip(sr).zip(rr) {
+                        let v = x - y;
+                        // numpy.maximum(0, v): NaN propagates.
+                        *a += if v < F::zero() { F::zero() } else { v };
                     }
                 }
-                None => {
-                    for (b, &d) in diff.iter().enumerate() {
-                        oc[[b, o]] = d;
+                if config.aggregate == Some(Aggregate::Mean) {
+                    let n = F::of_usize(hi - lo);
+                    acc.iter_mut().for_each(|a| *a /= n);
+                }
+            }
+        } else {
+            for t in 0..n_diff {
+                let o = t + pad;
+                if o >= out_len {
+                    break;
+                }
+                for (b, d) in diff.iter_mut().enumerate() {
+                    let v = sc[[b, t + lag]] - rc[[b, t]];
+                    // numpy.maximum(0, v): NaN propagates.
+                    *d = if v < F::zero() { F::zero() } else { v };
+                }
+                match config.aggregate {
+                    Some(agg) => {
+                        for (i, &(lo, hi)) in bands.iter().enumerate() {
+                            oc[[i, o]] = agg.reduce(&diff[lo..hi], &mut scratch, false);
+                        }
+                    }
+                    None => {
+                        for (b, &d) in diff.iter().enumerate() {
+                            oc[[b, o]] = d;
+                        }
                     }
                 }
             }
@@ -4175,7 +4213,7 @@ where
 mod tests {
     use super::*;
     use crate::sample_rate;
-    use ndarray::{Array1, array};
+    use ndarray::{Array1, ShapeBuilder, array};
 
     #[test]
     fn huge_max_filter_equals_one_period() {
@@ -4723,5 +4761,42 @@ mod tests {
     fn metrogram_matches_reference() {
         check_metrogram_matches_reference::<f32>();
         check_metrogram_matches_reference::<f64>();
+    }
+
+    #[test]
+    fn onset_strength_rows_match_per_frame_path() {
+        // Fortran-order input takes the per-frame path; standard layout the
+        // row-wise one. Both must agree bit for bit.
+        let mut seed = 5u64;
+        let s = Array3::from_shape_fn((2, 40, 57), |_| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 40) as f64 / 1e5 - 50.0
+        });
+        let f_order = {
+            let mut a = Array3::<f64>::zeros((2, 40, 57).f());
+            a.assign(&s);
+            a
+        };
+        for agg in [Aggregate::Mean, Aggregate::Sum] {
+            for (max_size, lag, center, detrend) in
+                [(1, 1, true, false), (3, 2, false, true), (1, 4, true, true)]
+            {
+                let mut cfg = OnsetStrengthConfig::librosa();
+                cfg.aggregate = Some(agg);
+                cfg.max_size = NonZeroUsize::new(max_size).unwrap();
+                cfg.lag = NonZeroUsize::new(lag).unwrap();
+                cfg.center = center;
+                cfg.detrend = detrend;
+                for bands in [None, Some(&[0usize, 7, 7, 40][..])] {
+                    let a = onset_strength_multi_from_db(s.view(), None, &cfg, bands).unwrap();
+                    let b =
+                        onset_strength_multi_from_db(f_order.view(), None, &cfg, bands).unwrap();
+                    let bits = |x: &Array3<f64>| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(bits(&a), bits(&b), "{agg:?} {max_size} {lag} {bands:?}");
+                }
+            }
+        }
     }
 }
