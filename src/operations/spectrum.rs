@@ -867,18 +867,47 @@ pub fn frame<F: AudioFloat>(
         MAX_SIGNAL_ELEMENTS,
     )?;
     // Row-major output, filled in blocks of 16 frames: each row of a block
-    // reads 16 sequential streams of x and writes 16 contiguous values.
+    // reads 16 sequential streams of x and writes 16 contiguous values. The
+    // allocation is not zeroed first (a zeroed one is fresh pages that fault
+    // on the first write).
     const B: usize = 16;
-    let mut out = vec![F::zero(); fl * n_frames];
-    for tb in (0..n_frames).step_by(B) {
-        let te = (tb + B).min(n_frames);
-        for (i, row) in out.chunks_exact_mut(n_frames).enumerate() {
-            for (o, t) in row[tb..te].iter_mut().zip(tb..te) {
-                *o = x[t * hop + i];
+    let mut out = Array2::<F>::uninit((fl, n_frames));
+    {
+        let o = out.as_slice_mut().expect("standard layout");
+        let empty: &[F] = &[];
+        for tb in (0..n_frames).step_by(B) {
+            let te = (tb + B).min(n_frames);
+            // The frames of the block, each exactly `fl` long.
+            let mut cols = [empty; B];
+            for (c, t) in cols.iter_mut().zip(tb..te) {
+                *c = &x[t * hop..t * hop + fl];
+            }
+            let cols = &cols[..te - tb];
+            // Tiles of R rows: one read of R consecutive samples per frame.
+            const R: usize = 8;
+            let mut rows = o.chunks_exact_mut(n_frames);
+            let mut i = 0;
+            while i + R <= fl {
+                let mut tile: [&mut [std::mem::MaybeUninit<F>]; R] =
+                    std::array::from_fn(|_| rows.next().expect("fl rows"));
+                for (k, c) in cols.iter().enumerate() {
+                    let vals = &c[i..i + R];
+                    for (row, &v) in tile.iter_mut().zip(vals) {
+                        row[tb + k] = std::mem::MaybeUninit::new(v);
+                    }
+                }
+                i += R;
+            }
+            for (row, i) in rows.zip(i..fl) {
+                for (v, c) in row[tb..te].iter_mut().zip(cols) {
+                    *v = std::mem::MaybeUninit::new(c[i]);
+                }
             }
         }
     }
-    Ok(Array2::from_shape_vec((fl, n_frames), out).expect("fl * n_frames values"))
+    // SAFETY: every element was written above (each block of frames, every
+    // row).
+    Ok(unsafe { out.assume_init() })
 }
 
 /// Overlapping frames of a signal as a strided view, without copying.

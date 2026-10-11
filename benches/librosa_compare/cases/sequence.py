@@ -253,8 +253,15 @@ register(
     Case(
         "frame", G, "mono",
         librosa=lambda c: partial(librosa.util.frame, c.y, frame_length=2048, hop_length=512),
+        ours=lambda c: partial(S.frame, c.y, frame_length=2048, hop_length=512, copy=False),
+        func="util.frame",
+        note="both return a read-only strided view (audio_samples with copy=False; its default copies)",
+    ),
+    Case(
+        "frame_copy", G, "mono",
+        librosa=lambda c: lambda: librosa.util.frame(c.y, frame_length=2048, hop_length=512).copy(),
         ours=lambda c: partial(S.frame, c.y, frame_length=2048, hop_length=512),
         func="util.frame",
-        note="librosa returns a strided view (no copy); audio_samples returns a copy",
+        note="owned frames: librosa's view copied with .copy(); audio_samples' default (copy=True)",
     ),
 )
