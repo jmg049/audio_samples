@@ -2027,12 +2027,62 @@ pub fn melspectrogram_from_spectrogram<F: AudioFloat>(
             ),
         ));
     }
-    let basis = mel_filterbank_bands::<F>(sample_rate, n_fft, mel)?;
+    let basis = mel_bands_cached::<F>(sample_rate, n_fft, mel)?;
     let mut out = Array3::<F>::zeros((n_channels, basis.len(), n_frames));
     for (c, s) in spectrogram.outer_iter().enumerate() {
         banded_dot_into(&basis, s, out.index_axis_mut(Axis(0), c));
     }
     Ok(out)
+}
+
+/// Mel filter bands, `(first column, weights)` per filter.
+type MelBands<F> = Vec<(usize, Vec<F>)>;
+
+/// [`mel_filterbank_bands`] for `F`, kept per thread for the last few
+/// parameter sets (the bands depend only on the parameters).
+fn mel_bands_cached<F: AudioFloat>(
+    sample_rate: f64,
+    n_fft: NonZeroUsize,
+    mel: &MelFilterbankConfig,
+) -> AudioSampleResult<Arc<MelBands<F>>> {
+    use std::any::{Any, TypeId};
+    type Entry = (
+        TypeId,
+        u64,
+        usize,
+        MelFilterbankConfig,
+        Arc<dyn Any + Send + Sync>,
+    );
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<Entry>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let (tid, sr, n) = (TypeId::of::<F>(), sample_rate.to_bits(), n_fft.get());
+    let hit = CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|e| e.0 == tid && e.1 == sr && e.2 == n && e.3 == *mel)
+            .map(|e| e.4.clone())
+    });
+    if let Some(b) = hit {
+        return Ok(b
+            .downcast::<MelBands<F>>()
+            .expect("entries are keyed by their type"));
+    }
+    let bands = Arc::new(mel_filterbank_bands::<F>(sample_rate, n_fft, mel)?);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 8 {
+            c.remove(0);
+        }
+        c.push((
+            tid,
+            sr,
+            n,
+            mel.clone(),
+            bands.clone() as Arc<dyn Any + Send + Sync>,
+        ));
+    });
+    Ok(bands)
 }
 
 /// `out = basis · s` for a filterbank whose rows are each non-zero over one
@@ -2049,21 +2099,24 @@ pub(crate) fn banded_dot_into<F: AudioFloat>(
     s: ArrayView2<'_, F>,
     mut out: ndarray::ArrayViewMut2<'_, F>,
 ) {
-    let s = s.as_standard_layout();
-    let n_frames = s.ncols();
-    for ((lo, weights), mut out_row) in basis.iter().zip(out.outer_iter_mut()) {
-        out_row.fill(F::zero());
-        let acc = out_row
-            .as_slice_mut()
-            .expect("rows of a standard-layout array");
-        for (k, &w) in weights.iter().enumerate() {
-            let src = s.row(lo + k);
-            let src = src.as_slice().expect("rows of a standard-layout array");
-            for (a, &v) in acc[..n_frames].iter_mut().zip(src) {
-                *a += w * v;
+    out.fill(F::zero());
+    // Row tiles of `s` (C-order input in place, other layouts copied one
+    // tile at a time); each output value is accumulated over its filter's
+    // bins in ascending order, as before.
+    crate::utils::layout::for_each_row_tile(s, |t0, tile| {
+        let w = tile.ncols();
+        for ((lo, weights), mut out_row) in basis.iter().zip(out.outer_iter_mut()) {
+            let acc = out_row
+                .as_slice_mut()
+                .expect("rows of a standard-layout array");
+            let acc = &mut acc[t0..t0 + w];
+            for (k, &wk) in weights.iter().enumerate() {
+                for (a, &v) in acc.iter_mut().zip(crate::utils::layout::row(&tile, lo + k)) {
+                    *a += wk * v;
+                }
             }
         }
-    }
+    });
 }
 
 /// `|z|^power`.
