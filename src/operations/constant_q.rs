@@ -51,11 +51,8 @@
 //! rounded to the output type once. [`AudioConstantQ::icqt`] and
 //! [`AudioConstantQ::griffinlim_cqt`] return audio of the receiver's sample type.
 //!
-//! The per-octave resampling goes through [`crate::resample`], which computes in
-//! `f64` whatever the sample type. For `f32` analysis each resampling call
-//! therefore holds an `f64` copy of the signal being resampled and of its output
-//! (the input of the top octave when early downsampling applies, then signals of
-//! half the length per octave), on top of the `f32` arrays.
+//! The per-octave resampling uses [`crate::resample`]'s filters in the same
+//! float type, reading the signal in place and writing its output directly.
 //!
 //! ```rust
 //! use audio_samples::operations::constant_q::{AudioConstantQ, ChromaCqtConfig, CqtConfig};
@@ -2525,8 +2522,8 @@ fn apply_threshold<F: AudioFloat>(x: &mut Array3<F>, threshold: Option<f64>) {
 /// `n_frames = 1 + len / hop_length` (frames centred on multiples of the hop).
 /// Outputs have the element type [`Float`](Self::Float) (or
 /// `Complex<Self::Float>`): `f32` for `u8`, `i16`, `I24` and `f32` audio, `f64`
-/// for `i32` and `f64` audio. The computation runs in that type, except the
-/// per-octave resampling, which [`crate::resample`] performs in `f64`. The
+/// for `i32` and `f64` audio. The computation, including the per-octave
+/// resampling, runs in that type. The
 /// reconstructions ([`icqt`](Self::icqt), [`griffinlim_cqt`](Self::griffinlim_cqt))
 /// return audio of the sample type [`Sample`](Self::Sample).
 pub trait AudioConstantQ {
@@ -3399,10 +3396,9 @@ mod tests {
 
     #[test]
     fn f32_cqt_agrees_with_f64_cqt() {
-        // The same i16 samples analysed in f32 and in f64. The resampler runs in
-        // f64 for both, so the difference is f32 round-off of the FFTs, filter
-        // products and resampler outputs: measured 2.7e-7 of the peak. Bound
-        // 2e-6 (17 f32 eps).
+        // The same i16 samples analysed in f32 and in f64, so the difference is
+        // f32 round-off of the FFTs, filter products and resampling: measured
+        // 4.8e-7 of the peak. Bound 2e-6 (17 f32 eps).
         let a16 = tone(440.0, 22050).to_format::<i16>();
         let c32 = a16.cqt(&CqtConfig::default()).unwrap();
         let c64 = a16.to_format::<f64>().cqt(&CqtConfig::default()).unwrap();

@@ -54,12 +54,12 @@
 //! compute in and return that type. Parameters in the config structs stay `f64`
 //! and are rounded to the element type once.
 //!
-//! Three steps run in `f64` for every sample type and round their result to the
+//! Two steps run in `f64` for every sample type and round their result to the
 //! float type once: the analysis STFT of [`AudioEffects::time_stretch`] and
 //! [`AudioEffects::pitch_shift`] (the phase vocoder amplifies the round-off of
-//! an `f32` STFT), the resampling stage of `pitch_shift` (the crate's resampler
-//! filters in `f64`), and Burg's recursion in [`lpc`] (unstable in `f32` on
-//! tonal signals). Each holds transient `f64` copies of its input and output.
+//! an `f32` STFT), and Burg's recursion in [`lpc`] (unstable in `f32` on tonal
+//! signals). Each holds transient `f64` copies of its input and output. The
+//! resampling stage of `pitch_shift` runs in the float type.
 //!
 //! ```rust
 //! use audio_samples::operations::effects::{AudioEffects, PitchShiftConfig, SilenceConfig};
@@ -2784,11 +2784,10 @@ pub trait AudioEffects {
     ///
     /// The time-stretch stage computes its STFT in `f64` and rounds it once, with
     /// the transient `f64` copies described under
-    /// [`time_stretch`](Self::time_stretch). The resampler filters in `f64`: for
-    /// `f32` computation the time-stretched rows are widened to `f64` for that
-    /// stage and the result is rounded back, so the stage temporarily holds `f64`
-    /// copies of the stretched and the resampled signal. `i16` output is within
-    /// 1 LSB of the `f64` result re-quantised on the reference test signals.
+    /// [`time_stretch`](Self::time_stretch). The resampling stage filters the
+    /// time-stretched rows in the float type and writes the output (already cut
+    /// or padded to the input length) directly. `i16` output is within 1 LSB of
+    /// the `f64` result re-quantised on the reference test signals.
     ///
     /// # Examples
     ///

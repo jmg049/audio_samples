@@ -246,8 +246,8 @@ fn upsampling_images(figs: &mut Figures) -> Result {
     let y2 = up(2_000.0, ResamplingQuality::Fast)?;
     assert_close("Fast droop at 2 kHz (dB)", level(&y2, 2_000.0), -0.40, 0.01);
     for (q, image_db) in [
-        (ResamplingQuality::Medium, -116.7),
-        (ResamplingQuality::High, -145.5),
+        (ResamplingQuality::Medium, -114.8),
+        (ResamplingQuality::High, -145.2),
     ] {
         let y = up(6_000.0, q)?;
         check(

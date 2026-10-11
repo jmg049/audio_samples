@@ -19,7 +19,10 @@
 //! tail is flushed), and the output always has exactly
 //! `ceil(n · out_rate / in_rate)` samples. The filter cut-off is placed just
 //! below the Nyquist frequency of the lower of the two rates, so downsampling
-//! is anti-aliased and upsampling is anti-imaged. Processing is done in `f64`.
+//! is anti-aliased and upsampling is anti-imaged. [`resample`] computes in the
+//! sample type's float type ([`AudioSample::Float`]: `f32` for `u8`, `i16`,
+//! `I24` and `f32`, `f64` for `i32` and `f64`), reading the input in place and
+//! writing the output buffer directly; [`StreamingResampler`] computes in `f64`.
 //!
 //! | Quality | Passband edge | Stopband | Use |
 //! |---|---|---|---|
@@ -28,14 +31,20 @@
 //! | `Medium` | 0.90 · Nyquist | 100 dB from Nyquist | general use |
 //! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis; close to `librosa.resample` (`soxr_hq`) |
 //!
-//! (Nyquist of the lower of the two rates.) Where the ratio
-//! `out_rate / in_rate = L / M` (in lowest terms) has a small enough `L`, one
-//! exact filter phase is precomputed per output phase; otherwise the filter is
-//! tabulated at 4096 phases per sample (proportionally fewer when
-//! downsampling, where the filter is wider) and linearly interpolated (error
-//! below -120 dB). Filter tables are cached per thread (a few recent ratios,
-//! at most 64 MiB). Ratios needing a table of more than 2^25 coefficients
-//! (decimation by more than ~10^5 : 1) are rejected with an error.
+//! (Nyquist of the lower of the two rates.) The filter runs in two stages:
+//! the low-pass with the passband, transition band and attenuation above at
+//! the input rate or twice it, evaluated by FFT, then a short interpolator
+//! (12-48 taps, 30 dB more attenuation) from that rate to the exact output
+//! positions. 1 : 2 upsampling and decimation by a power of two up to 64 are
+//! the first stage alone. The interpolator has one exact filter phase per
+//! output phase when the ratio `L / M` (in lowest terms) has at most 2^15
+//! output phases, otherwise a table of 4096 phases per sample, linearly
+//! interpolated. Ratios whose low-pass is longer than 2^14 taps (decimation by
+//! more than ~170 : 1) run as one filter evaluated directly (exact phases for
+//! small `L`, otherwise the interpolated table). Filters and tables are cached
+//! per thread (a few recent ratios, bounded in size). Ratios needing a table of
+//! more than 2^25 coefficients (decimation by more than ~10^5 : 1) are
+//! rejected with an error.
 //!
 //! # Differences from librosa
 //!
