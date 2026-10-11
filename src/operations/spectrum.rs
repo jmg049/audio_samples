@@ -872,6 +872,28 @@ pub fn frame<F: AudioFloat>(
     // on the first write).
     const B: usize = 16;
     let mut out = Array2::<F>::uninit((fl, n_frames));
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx") {
+        use std::any::TypeId;
+        let o = out.as_slice_mut().expect("standard layout");
+        if TypeId::of::<F>() == TypeId::of::<f32>() {
+            // SAFETY: F is f32 (checked), so the slices have f32 layout;
+            // AVX is available (checked).
+            unsafe {
+                let xs = std::slice::from_raw_parts(x.as_ptr().cast::<f32>(), x.len());
+                frame_copy_avx_f32(xs, fl, hop, n_frames, o.as_mut_ptr().cast::<f32>());
+                return Ok(out.assume_init());
+            }
+        }
+        if TypeId::of::<F>() == TypeId::of::<f64>() {
+            // SAFETY: as above, for f64.
+            unsafe {
+                let xs = std::slice::from_raw_parts(x.as_ptr().cast::<f64>(), x.len());
+                frame_copy_avx_f64(xs, fl, hop, n_frames, o.as_mut_ptr().cast::<f64>());
+                return Ok(out.assume_init());
+            }
+        }
+    }
     {
         let o = out.as_slice_mut().expect("standard layout");
         let empty: &[F] = &[];
@@ -908,6 +930,129 @@ pub fn frame<F: AudioFloat>(
     // SAFETY: every element was written above (each block of frames, every
     // row).
     Ok(unsafe { out.assume_init() })
+}
+
+/// The row-major `(fl, n)` frame matrix of `x` (frame `t` starts at
+/// `t * hop`) written to `out`, transposing 8 x 8 blocks of frames with AVX.
+///
+/// # Safety
+///
+/// AVX must be available; `x` must hold `(n - 1) * hop + fl` samples and
+/// `out` must be valid for `fl * n` writes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn frame_copy_avx_f32(x: &[f32], fl: usize, hop: usize, n: usize, out: *mut f32) {
+    use std::arch::x86_64::{
+        _mm256_loadu_ps, _mm256_permute2f128_ps, _mm256_shuffle_ps, _mm256_storeu_ps,
+        _mm256_unpackhi_ps, _mm256_unpacklo_ps,
+    };
+    debug_assert!(n == 0 || x.len() >= (n - 1) * hop + fl);
+    let p = x.as_ptr();
+    let mut t = 0;
+    while t + 8 <= n {
+        let mut i = 0;
+        while i + 8 <= fl {
+            // SAFETY: frames t..t + 8 cover samples i..i + 8 (i + 8 <= fl),
+            // and rows i..i + 8, columns t..t + 8 are inside `out`.
+            unsafe {
+                let r = |k: usize| _mm256_loadu_ps(p.add((t + k) * hop + i));
+                let (r0, r1, r2, r3) = (r(0), r(1), r(2), r(3));
+                let (r4, r5, r6, r7) = (r(4), r(5), r(6), r(7));
+                let (t0, t1) = (_mm256_unpacklo_ps(r0, r1), _mm256_unpackhi_ps(r0, r1));
+                let (t2, t3) = (_mm256_unpacklo_ps(r2, r3), _mm256_unpackhi_ps(r2, r3));
+                let (t4, t5) = (_mm256_unpacklo_ps(r4, r5), _mm256_unpackhi_ps(r4, r5));
+                let (t6, t7) = (_mm256_unpacklo_ps(r6, r7), _mm256_unpackhi_ps(r6, r7));
+                let s0 = _mm256_shuffle_ps::<0x44>(t0, t2);
+                let s1 = _mm256_shuffle_ps::<0xee>(t0, t2);
+                let s2 = _mm256_shuffle_ps::<0x44>(t1, t3);
+                let s3 = _mm256_shuffle_ps::<0xee>(t1, t3);
+                let s4 = _mm256_shuffle_ps::<0x44>(t4, t6);
+                let s5 = _mm256_shuffle_ps::<0xee>(t4, t6);
+                let s6 = _mm256_shuffle_ps::<0x44>(t5, t7);
+                let s7 = _mm256_shuffle_ps::<0xee>(t5, t7);
+                let rows = [
+                    _mm256_permute2f128_ps::<0x20>(s0, s4),
+                    _mm256_permute2f128_ps::<0x20>(s1, s5),
+                    _mm256_permute2f128_ps::<0x20>(s2, s6),
+                    _mm256_permute2f128_ps::<0x20>(s3, s7),
+                    _mm256_permute2f128_ps::<0x31>(s0, s4),
+                    _mm256_permute2f128_ps::<0x31>(s1, s5),
+                    _mm256_permute2f128_ps::<0x31>(s2, s6),
+                    _mm256_permute2f128_ps::<0x31>(s3, s7),
+                ];
+                for (j, v) in rows.into_iter().enumerate() {
+                    _mm256_storeu_ps(out.add((i + j) * n + t), v);
+                }
+            }
+            i += 8;
+        }
+        for i in i..fl {
+            for k in 0..8 {
+                // SAFETY: inside `out` (row i < fl, column t + k < n).
+                unsafe { *out.add(i * n + t + k) = x[(t + k) * hop + i] };
+            }
+        }
+        t += 8;
+    }
+    for i in 0..fl {
+        for tt in t..n {
+            // SAFETY: inside `out` (row i < fl, column tt < n).
+            unsafe { *out.add(i * n + tt) = x[tt * hop + i] };
+        }
+    }
+}
+
+/// [`frame_copy_avx_f32`] for `f64`, transposing 4 x 4 blocks.
+///
+/// # Safety
+///
+/// As [`frame_copy_avx_f32`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn frame_copy_avx_f64(x: &[f64], fl: usize, hop: usize, n: usize, out: *mut f64) {
+    use std::arch::x86_64::{
+        _mm256_loadu_pd, _mm256_permute2f128_pd, _mm256_storeu_pd, _mm256_unpackhi_pd,
+        _mm256_unpacklo_pd,
+    };
+    debug_assert!(n == 0 || x.len() >= (n - 1) * hop + fl);
+    let p = x.as_ptr();
+    let mut t = 0;
+    while t + 4 <= n {
+        let mut i = 0;
+        while i + 4 <= fl {
+            // SAFETY: frames t..t + 4 cover samples i..i + 4 (i + 4 <= fl),
+            // and rows i..i + 4, columns t..t + 4 are inside `out`.
+            unsafe {
+                let r = |k: usize| _mm256_loadu_pd(p.add((t + k) * hop + i));
+                let (r0, r1, r2, r3) = (r(0), r(1), r(2), r(3));
+                let (t0, t1) = (_mm256_unpacklo_pd(r0, r1), _mm256_unpackhi_pd(r0, r1));
+                let (t2, t3) = (_mm256_unpacklo_pd(r2, r3), _mm256_unpackhi_pd(r2, r3));
+                let rows = [
+                    _mm256_permute2f128_pd::<0x20>(t0, t2),
+                    _mm256_permute2f128_pd::<0x20>(t1, t3),
+                    _mm256_permute2f128_pd::<0x31>(t0, t2),
+                    _mm256_permute2f128_pd::<0x31>(t1, t3),
+                ];
+                for (j, v) in rows.into_iter().enumerate() {
+                    _mm256_storeu_pd(out.add((i + j) * n + t), v);
+                }
+            }
+            i += 4;
+        }
+        for i in i..fl {
+            for k in 0..4 {
+                // SAFETY: inside `out` (row i < fl, column t + k < n).
+                unsafe { *out.add(i * n + t + k) = x[(t + k) * hop + i] };
+            }
+        }
+        t += 4;
+    }
+    for i in 0..fl {
+        for tt in t..n {
+            // SAFETY: inside `out` (row i < fl, column tt < n).
+            unsafe { *out.add(i * n + tt) = x[tt * hop + i] };
+        }
+    }
 }
 
 /// Overlapping frames of a signal as a strided view, without copying.
@@ -2927,7 +3072,17 @@ mod tests {
     #[test]
     fn frame_copy_matches_view() {
         let x: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.37).sin()).collect();
-        for (fl, hop) in [(1, 1), (7, 3), (64, 16), (100, 1), (1000, 5), (33, 40)] {
+        for (fl, hop) in [
+            (1, 1),
+            (7, 3),
+            (64, 16),
+            (100, 1),
+            (1000, 5),
+            (33, 40),
+            (17, 9),
+            (8, 8),
+            (12, 1),
+        ] {
             let (fl, hop) = (
                 NonZeroUsize::new(fl).unwrap(),
                 NonZeroUsize::new(hop).unwrap(),
@@ -2935,6 +3090,9 @@ mod tests {
             let c = frame(&x, fl, hop).unwrap();
             assert!(c.is_standard_layout());
             assert_eq!(c, frame_view(&x, fl, hop).unwrap());
+            let x32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+            let c32 = frame(&x32, fl, hop).unwrap();
+            assert_eq!(c32, frame_view(&x32, fl, hop).unwrap());
         }
     }
     use crate::{AudioTypeConversion, sample_rate};
