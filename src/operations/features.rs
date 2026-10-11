@@ -1297,8 +1297,13 @@ pub fn spectral_flatness_from_spectrogram<F: AudioFloat>(
     let mut sum = vec![F::zero(); n_frames];
     let mut p_row = vec![F::zero(); n_frames];
     for c in 0..n_ch {
+        let sc = s.index_axis(Axis(0), c);
         let o = out_row(&mut out, c);
-        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+        if n_frames > 1 && sc.strides()[0] == 1 {
+            flatness_columns(sc, o, amin, power, n);
+            continue;
+        }
+        for_each_row_tile(sc, |t0, tile| {
             let w = tile.ncols();
             let (log_sum, sum, p_row) = (&mut log_sum[..w], &mut sum[..w], &mut p_row[..w]);
             log_sum.fill(F::zero());
@@ -1328,6 +1333,63 @@ pub fn spectral_flatness_from_spectrogram<F: AudioFloat>(
         });
     }
     Ok(out)
+}
+
+/// [`spectral_flatness_from_spectrogram`] for one channel whose frames are
+/// contiguous (Fortran order): the values of 8 frames at a time are mapped
+/// and their logarithms taken over each contiguous column, then the 8
+/// frames are summed over the bins in lockstep (ascending bin order, the
+/// same operations as the row-wise path).
+fn flatness_columns<F: AudioFloat>(sc: ArrayView2<'_, F>, o: &mut [F], amin: F, power: f64, n: F) {
+    const G: usize = 8;
+    let (n_bins, n_frames) = sc.dim();
+    let mut p = vec![F::zero(); G * n_bins];
+    let mut t = 0;
+    while t < n_frames {
+        let g = G.min(n_frames - t);
+        for j in 0..g {
+            let column = sc.column(t + j);
+            let column = column.to_slice().expect("unit row stride");
+            let pj = &mut p[j * n_bins..(j + 1) * n_bins];
+            if power == 2.0 {
+                for (p, &v) in pj.iter_mut().zip(column) {
+                    *p = amin.max(v * v);
+                }
+            } else {
+                for (p, &v) in pj.iter_mut().zip(column) {
+                    *p = amin.max(pow_np(v, power));
+                }
+            }
+        }
+        let mut su = [F::zero(); G];
+        lockstep_sums(&p, n_bins, g, &mut su);
+        ln_in_place(&mut p[..g * n_bins]);
+        let mut ls = [F::zero(); G];
+        lockstep_sums(&p, n_bins, g, &mut ls);
+        for j in 0..g {
+            o[t + j] = (ls[j] / n).exp() / (su[j] / n);
+        }
+        t += g;
+    }
+}
+
+/// `acc[j] += cols[j][k]` for `k` ascending, for the `g <= 8` columns of
+/// `n` values stored one after another in `p` (the columns advance in
+/// lockstep, eight independent sums).
+fn lockstep_sums<F: AudioFloat>(p: &[F], n: usize, g: usize, acc: &mut [F; 8]) {
+    let cols: [&[F]; 8] = std::array::from_fn(|j| {
+        let j = j.min(g - 1);
+        &p[j * n..(j + 1) * n]
+    });
+    let mut a = [F::zero(); 8];
+    // `k` indexes the eight columns at once.
+    #[allow(clippy::needless_range_loop)]
+    for k in 0..n {
+        for j in 0..8 {
+            a[j] += cols[j][k];
+        }
+    }
+    acc[..g].copy_from_slice(&a[..g]);
 }
 
 /// Computes the spectral contrast of every frame, equivalent to
