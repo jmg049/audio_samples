@@ -664,8 +664,12 @@ impl FftBasis<f64> {
 fn sparsify_row(x: &[Complex<f64>], quantile: f64) -> SparseRow<f64> {
     let mags: Vec<f64> = x.iter().map(|z| z.norm()).collect();
     let norm: f64 = mags.iter().sum();
-    let mut sorted = mags.clone();
-    sorted.sort_by(f64::total_cmp);
+    // Magnitudes are non-negative and not NaN, so their bit patterns sort in
+    // the same order as the values (and as `f64::total_cmp`); an unstable
+    // integer sort gives the same sorted sequence as a stable float sort.
+    let mut sorted_bits: Vec<u64> = mags.iter().map(|m| m.to_bits()).collect();
+    sorted_bits.sort_unstable();
+    let sorted: Vec<f64> = sorted_bits.into_iter().map(f64::from_bits).collect();
     let mut cum = 0.0;
     let mut thresh_idx = 0;
     for (i, &m) in sorted.iter().enumerate() {
