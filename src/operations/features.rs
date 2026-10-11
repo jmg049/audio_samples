@@ -97,7 +97,7 @@ use crate::operations::spectrum::{
     DbConfig, StftConfig, StftPadMode, frame_square_sums, power_to_db, spectrogram_rows, stft,
 };
 use crate::utils::layout::{col, for_each_col_tile, for_each_row_tile, row};
-use crate::utils::vmath::ln_in_place;
+use crate::utils::vmath::{ln_in_place, log10_f64};
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
 };
@@ -2795,6 +2795,47 @@ pub enum FrequencyWeighting {
     Z,
 }
 
+/// `log10(x)` with the vectorised kernel ([`log10_f64`]).
+fn log10_one(x: f64) -> f64 {
+    let mut v = [x];
+    log10_f64(&mut v);
+    v[0]
+}
+
+/// Evaluates a weighting curve that is a combination of logarithms:
+/// `combine([log10(a_k(f^2))])` for every frequency, then the `min_db` floor.
+/// Works in blocks of 256 frequencies, each logarithm term taken over the
+/// block with the vectorised [`log10_f64`].
+fn weighting_by_logs<const K: usize>(
+    frequencies: &[f64],
+    min_db: Option<f64>,
+    args: impl Fn(f64) -> [f64; K],
+    combine: impl Fn(&[f64; K]) -> f64,
+) -> Vec<f64> {
+    const B: usize = 256;
+    let mut out = Vec::with_capacity(frequencies.len());
+    let mut t = [[0.0f64; B]; K];
+    for chunk in frequencies.chunks(B) {
+        let m = chunk.len();
+        for (j, &f) in chunk.iter().enumerate() {
+            let a = args(f * f);
+            for k in 0..K {
+                t[k][j] = a[k];
+            }
+        }
+        for row in t.iter_mut() {
+            log10_f64(&mut row[..m]);
+        }
+        // `j` indexes the K term rows at once.
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..m {
+            let l: [f64; K] = std::array::from_fn(|k| t[k][j]);
+            out.push(apply_min_db(combine(&l), min_db));
+        }
+    }
+    out
+}
+
 fn apply_min_db(w: f64, min_db: Option<f64>) -> f64 {
     match min_db {
         // numpy.maximum propagates NaN.
@@ -2840,20 +2881,13 @@ pub fn a_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
         107.65265 * 107.65265,
         737.86223 * 737.86223,
     ];
-    frequencies
-        .iter()
-        .map(|&f| {
-            let f_sq = f * f;
-            let w = 2.0
-                + 20.0
-                    * (c[0].log10() + 2.0 * f_sq.log10()
-                        - (f_sq + c[0]).log10()
-                        - (f_sq + c[1]).log10()
-                        - 0.5 * (f_sq + c[2]).log10()
-                        - 0.5 * (f_sq + c[3]).log10());
-            apply_min_db(w, min_db)
-        })
-        .collect()
+    let lc0 = log10_one(c[0]);
+    weighting_by_logs(
+        frequencies,
+        min_db,
+        |f_sq| [f_sq, f_sq + c[0], f_sq + c[1], f_sq + c[2], f_sq + c[3]],
+        |l| 2.0 + 20.0 * (lc0 + 2.0 * l[0] - l[1] - l[2] - 0.5 * l[3] - 0.5 * l[4]),
+    )
 }
 
 /// Computes the B-weighting of a set of frequencies, equivalent to
@@ -2886,19 +2920,13 @@ pub fn b_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
         20.598997 * 20.598997,
         158.48932 * 158.48932,
     ];
-    frequencies
-        .iter()
-        .map(|&f| {
-            let f_sq = f * f;
-            let w = 0.17
-                + 20.0
-                    * (c[0].log10() + 1.5 * f_sq.log10()
-                        - (f_sq + c[0]).log10()
-                        - (f_sq + c[1]).log10()
-                        - 0.5 * (f_sq + c[2]).log10());
-            apply_min_db(w, min_db)
-        })
-        .collect()
+    let lc0 = log10_one(c[0]);
+    weighting_by_logs(
+        frequencies,
+        min_db,
+        |f_sq| [f_sq, f_sq + c[0], f_sq + c[1], f_sq + c[2]],
+        |l| 0.17 + 20.0 * (lc0 + 1.5 * l[0] - l[1] - l[2] - 0.5 * l[3]),
+    )
 }
 
 /// Computes the C-weighting of a set of frequencies, equivalent to
@@ -2927,16 +2955,13 @@ pub fn b_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
 #[must_use]
 pub fn c_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     let c = [12194.217f64 * 12194.217, 20.598997 * 20.598997];
-    frequencies
-        .iter()
-        .map(|&f| {
-            let f_sq = f * f;
-            let w = 0.062
-                + 20.0
-                    * (c[0].log10() + f_sq.log10() - (f_sq + c[0]).log10() - (f_sq + c[1]).log10());
-            apply_min_db(w, min_db)
-        })
-        .collect()
+    let lc0 = log10_one(c[0]);
+    weighting_by_logs(
+        frequencies,
+        min_db,
+        |f_sq| [f_sq, f_sq + c[0], f_sq + c[1]],
+        |l| 0.062 + 20.0 * (lc0 + l[0] - l[1] - l[2]),
+    )
 }
 
 /// Computes the D-weighting of a set of frequencies, equivalent to
@@ -2974,20 +2999,21 @@ pub fn d_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
         sq(282.7),
         sq(1160.0),
     ];
-    frequencies
-        .iter()
-        .map(|&f| {
-            let f_sq = f * f;
-            let w = 20.0
-                * (0.5 * f_sq.log10() - c[0].log10()
-                    + 0.5
-                        * ((sq(c[1] - f_sq) + c[2] * f_sq).log10()
-                            - (sq(c[3] - f_sq) + c[4] * f_sq).log10()
-                            - (c[5] + f_sq).log10()
-                            - (c[6] + f_sq).log10()));
-            apply_min_db(w, min_db)
-        })
-        .collect()
+    let lc0 = log10_one(c[0]);
+    weighting_by_logs(
+        frequencies,
+        min_db,
+        |f_sq| {
+            [
+                f_sq,
+                sq(c[1] - f_sq) + c[2] * f_sq,
+                sq(c[3] - f_sq) + c[4] * f_sq,
+                c[5] + f_sq,
+                c[6] + f_sq,
+            ]
+        },
+        |l| 20.0 * (0.5 * l[0] - lc0 + 0.5 * (l[1] - l[2] - l[3] - l[4])),
+    )
 }
 
 /// The flat Z-weighting (0 dB everywhere, raised to `min_db` if that is positive),

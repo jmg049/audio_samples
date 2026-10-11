@@ -420,6 +420,18 @@ spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
 
 ### Changed
 
+- **`f64` decimal logarithms are correctly rounded.** `power_to_db`,
+  `amplitude_to_db`, `perceptual_weighting`, the `A`/`B`/`C`/`D` frequency
+  weightings (`frequency_weighting`, `multi_frequency_weighting`) and the
+  features built on them (`mfcc`, `spectral_contrast`) take `log10` of `f64`
+  values with a vectorised kernel instead of the C library's `log10`. Each
+  logarithm is the correctly rounded value except within about 2^-70 of a
+  rounding boundary, and differs from glibc's (which is not correctly rounded)
+  by at most 1 ulp, toward the exact result. On the benchmark inputs 2 % to
+  22 % of the output values change, by at most 2 ulp for the dB conversions
+  and at most 8e-14 dB for the weightings. Results are the same on machines
+  with and without FMA.
+
 - Filter parameter validation follows SciPy: any edge in `(0, Nyquist)` is
   accepted (the previous Chebyshev/elliptic `0.95·Nyquist` limit is gone), any
   positive ripple is accepted (was ≤ 5 dB), and the maximum order is 24

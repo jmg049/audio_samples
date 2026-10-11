@@ -338,8 +338,8 @@ fn store_block<F: AudioFloat, const QB: usize, const TB: usize>(
 }
 
 /// `x = log10(max(amin, x))` element-wise, returning the maximum of the
-/// results (NaN-ignoring, `-inf` for an empty slice): the vectorised
-/// logarithm for `f32`, the standard library's `log10` for `f64`.
+/// results (NaN-ignoring, `-inf` for an empty slice), with the vectorised
+/// logarithms ([`log10_f32`], [`log10_f64`]).
 pub(crate) fn log10_max_in_place<F: AudioFloat>(v: &mut [F], amin: F) -> F {
     match as_f32(v) {
         Some(v32) => {
@@ -351,12 +351,23 @@ pub(crate) fn log10_max_in_place<F: AudioFloat>(v: &mut [F], amin: F) -> F {
             F::of(f64::from(max_f32(v32)))
         }
         None => {
-            let mut m = F::neg_infinity();
             for x in v.iter_mut() {
-                *x = amin.max(*x).log10();
-                m = m.max(*x);
+                *x = amin.max(*x);
             }
-            m
+            log10_in_place(v);
+            let mut acc = [F::neg_infinity(); 8];
+            let mut it = v.chunks_exact(8);
+            for c in &mut it {
+                for (a, &x) in acc.iter_mut().zip(c) {
+                    *a = a.max(x);
+                }
+            }
+            let m = it
+                .remainder()
+                .iter()
+                .copied()
+                .fold(F::neg_infinity(), F::max);
+            acc.iter().copied().fold(m, F::max)
         }
     }
 }
@@ -447,6 +458,340 @@ pub(crate) fn exp10_f32(v: &mut [f32]) {
         return;
     }
     generic(v);
+}
+
+// -----------------------------------------------------------------------------
+// f64 logarithm in double-double
+
+/// `ln(1 + j / 64)` for `j = -19..=27` (index `j + 19`) as `hi + lo`, exact
+/// to about 2^-106 (computed with 60-digit decimal arithmetic); padded to 64
+/// entries so that a masked index needs no bounds check.
+#[rustfmt::skip]
+static LN_C_HI: [f64; 64] = [
+    f64::from_bits(0xBFD68AC83E9C6A14),
+    f64::from_bits(0xBFD522AE0738A3D8),
+    f64::from_bits(0xBFD3C25277333184),
+    f64::from_bits(0xBFD269621134DB92),
+    f64::from_bits(0xBFD1178E8227E47C),
+    f64::from_bits(0xBFCF991C6CB3B379),
+    f64::from_bits(0xBFCD1037F2655E7B),
+    f64::from_bits(0xBFCA93ED3C8AD9E3),
+    f64::from_bits(0xBFC823C16551A3C2),
+    f64::from_bits(0xBFC5BF406B543DB2),
+    f64::from_bits(0xBFC365FCB0159016),
+    f64::from_bits(0xBFC1178E8227E47C),
+    f64::from_bits(0xBFBDA727638446A2),
+    f64::from_bits(0xBFB9335E5D594989),
+    f64::from_bits(0xBFB4D3115D207EAC),
+    f64::from_bits(0xBFB08598B59E3A07),
+    f64::from_bits(0xBFA894AA149FB343),
+    f64::from_bits(0xBFA0415D89E74444),
+    f64::from_bits(0xBF90205658935847),
+    f64::from_bits(0x0000000000000000),
+    f64::from_bits(0x3F8FC0A8B0FC03E4),
+    f64::from_bits(0x3F9F829B0E783300),
+    f64::from_bits(0x3FA77458F632DCFC),
+    f64::from_bits(0x3FAF0A30C01162A6),
+    f64::from_bits(0x3FB341D7961BD1D1),
+    f64::from_bits(0x3FB6F0D28AE56B4C),
+    f64::from_bits(0x3FBA926D3A4AD563),
+    f64::from_bits(0x3FBE27076E2AF2E6),
+    f64::from_bits(0x3FC0D77E7CD08E59),
+    f64::from_bits(0x3FC29552F81FF523),
+    f64::from_bits(0x3FC44D2B6CCB7D1E),
+    f64::from_bits(0x3FC5FF3070A793D4),
+    f64::from_bits(0x3FC7AB890210D909),
+    f64::from_bits(0x3FC9525A9CF456B4),
+    f64::from_bits(0x3FCAF3C94E80BFF3),
+    f64::from_bits(0x3FCC8FF7C79A9A22),
+    f64::from_bits(0x3FCE27076E2AF2E6),
+    f64::from_bits(0x3FCFB9186D5E3E2B),
+    f64::from_bits(0x3FD0A324E27390E3),
+    f64::from_bits(0x3FD1675CABABA60E),
+    f64::from_bits(0x3FD22941FBCF7966),
+    f64::from_bits(0x3FD2E8E2BAE11D31),
+    f64::from_bits(0x3FD3A64C556945EA),
+    f64::from_bits(0x3FD4618BC21C5EC2),
+    f64::from_bits(0x3FD51AAD872DF82D),
+    f64::from_bits(0x3FD5D1BDBF5809CA),
+    f64::from_bits(0x3FD686C81E9B14AF),
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+];
+
+/// Low parts of [`LN_C_HI`].
+#[rustfmt::skip]
+static LN_C_LO: [f64; 64] = [
+    f64::from_bits(0xBC5A64EADD740178),
+    f64::from_bits(0x3C68F7E9B38A6979),
+    f64::from_bits(0x3C72AD27E50A8EC6),
+    f64::from_bits(0xBC7E0EFADD9DB02B),
+    f64::from_bits(0x3C60E63A5F01C691),
+    f64::from_bits(0xBC6F665066F980A2),
+    f64::from_bits(0xBC660629242471A2),
+    f64::from_bits(0xBC6BCAFA9DE97203),
+    f64::from_bits(0x3C61232CE70BE781),
+    f64::from_bits(0x3C21F5B44C0DF7E7),
+    f64::from_bits(0xBC57D411A5B944AD),
+    f64::from_bits(0x3C50E63A5F01C691),
+    f64::from_bits(0xBC5401FA71733019),
+    f64::from_bits(0x3C5478A85704CCB7),
+    f64::from_bits(0xBC5769F42C7842CC),
+    f64::from_bits(0x3C5DD7009902BF32),
+    f64::from_bits(0xBC3A8BE97660A23D),
+    f64::from_bits(0xBC4C05CF1D753622),
+    f64::from_bits(0xBC327C8E8416E71F),
+    f64::from_bits(0x0000000000000000),
+    f64::from_bits(0xBC183092C59642A1),
+    f64::from_bits(0x3C333E3F04F1EF23),
+    f64::from_bits(0x3C418D3CA87B9296),
+    f64::from_bits(0x3C485F325C5BBACD),
+    f64::from_bits(0xBC5B599F227BECBB),
+    f64::from_bits(0xBC5906D99184B992),
+    f64::from_bits(0x3C5942F48AA70EA9),
+    f64::from_bits(0xBC361578001E0162),
+    f64::from_bits(0x3C69A5DC5E9030AC),
+    f64::from_bits(0x3C6301771C407DBF),
+    f64::from_bits(0x3C69F4F6543E1F88),
+    f64::from_bits(0xBC5BC60EFAFC6F6E),
+    f64::from_bits(0x3C4BE36B2D6A0608),
+    f64::from_bits(0x3C6D904C1D4E2E26),
+    f64::from_bits(0xBC5398CFF3641985),
+    f64::from_bits(0xBC64F689F8434012),
+    f64::from_bits(0xBC461578001E0162),
+    f64::from_bits(0xBC6CAAAE64F21ACB),
+    f64::from_bits(0x3C77DCFDE8061C03),
+    f64::from_bits(0x3C2CE63EAB883717),
+    f64::from_bits(0xBC776F5EB09628AF),
+    f64::from_bits(0xBC78F4CDB95EBDF9),
+    f64::from_bits(0xBC6C68651945F97C),
+    f64::from_bits(0x3C7F42DECDECCF1D),
+    f64::from_bits(0x3C43927AC19F55E3),
+    f64::from_bits(0x3C74236383DC7FE1),
+    f64::from_bits(0xBC6DDEA0F7F58E3D),
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+];
+
+const LN2_HI: f64 = f64::from_bits(0x3FE6_2E42_FEE0_0000); // 32 significant bits
+const LN2_LO: f64 = f64::from_bits(0x3DEA_39EF_3579_3C76);
+const LOG10E_HI: f64 = f64::from_bits(0x3FDB_CB7B_1526_E50E);
+const LOG10E_LO: f64 = f64::from_bits(0x3C69_5355_BAAA_FAD3);
+/// 1.5 * 2^52: adding and subtracting it rounds to the nearest integer.
+const ROUND_SHIFT: f64 = 6_755_399_441_055_744.0;
+
+/// Dekker's split of `a` into a 26-bit high part and the rest.
+#[inline(always)]
+fn split(a: f64) -> (f64, f64) {
+    let c = 134_217_729.0 * a;
+    let hi = c - (c - a);
+    (hi, a - hi)
+}
+
+/// `a + b` as `s + e` exactly (Knuth).
+#[inline(always)]
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bb = s - a;
+    (s, (a - (s - bb)) + (b - bb))
+}
+
+/// `ln(x)` as a double-double `hi + lo` (relative error about 2^-70) for a
+/// positive normal finite `x`.
+///
+/// `x = 2^e m` with `m` in `[sqrt(1/2), sqrt(2))`, `m = c (1 + r)` with
+/// `c = 1 + j/64` (so `m - c` is exact and `|r| <= 1/128`), and
+/// `ln(x) = e ln 2 + ln(c) + ln(1 + r)` with `ln(c)` from a table and
+/// `ln(1 + r)` from its series, the leading terms carried exactly.
+#[inline(always)]
+fn ln_dd<const FMA: bool>(x: f64) -> (f64, f64) {
+    let bits = x.to_bits();
+    let mant = bits & 0x000F_FFFF_FFFF_FFFF;
+    // m > sqrt(2) <=> mantissa bits > those of sqrt(2) = 0x3FF6A09E667F3BCD
+    let big = mant > 0x0006_A09E_667F_3BCD;
+    let m = f64::from_bits(
+        mant | if big {
+            0x3FE0_0000_0000_0000
+        } else {
+            0x3FF0_0000_0000_0000
+        },
+    );
+    // The exponent as f64 without an integer conversion: 2^52 + biased
+    // exponent, minus 2^52 + 1023.
+    let biased = f64::from_bits(0x4330_0000_0000_0000 | ((bits >> 52) + u64::from(big)));
+    let e = biased - (4_503_599_627_370_496.0 + 1023.0);
+    let shifted = (m - 1.0) * 64.0 + ROUND_SHIFT;
+    let jf = shifted - ROUND_SHIFT;
+    let idx = (shifted.to_bits().wrapping_add(19) & 63) as usize;
+    let c = 1.0 + jf * (1.0 / 64.0);
+    let u = m - c;
+    // r = u / c as r_hi + r_lo (c has at most 7 significant bits, so the
+    // products of c with the halves of r_hi are exact).
+    // r_hi is u / c to within a few ulp; r_lo carries the exact remainder
+    // (u - r_hi c) / c, so r_hi + r_lo = u / c to about 2^-100.
+    let inv_c = 1.0 / c;
+    let r_hi = u * inv_c;
+    // The residual u - r_hi c and the rounding error of r_hi^2 are exact
+    // (Dekker's products, or one fused multiply-add each: the same values),
+    // so both paths give identical results.
+    let s_hi = r_hi * r_hi;
+    let (r_lo, s_lo) = if FMA {
+        ((-r_hi).mul_add(c, u) * inv_c, r_hi.mul_add(r_hi, -s_hi))
+    } else {
+        let (rh, rl) = split(r_hi);
+        (
+            ((u - rh * c) - rl * c) * inv_c,
+            ((rh * rh - s_hi) + 2.0 * (rh * rl)) + rl * rl,
+        )
+    };
+    let r = r_hi;
+    let tail = r
+        * s_hi
+        * (1.0 / 3.0
+            - r * (1.0 / 4.0
+                - r * (1.0 / 5.0
+                    - r * (1.0 / 6.0
+                        - r * (1.0 / 7.0
+                            - r * (1.0 / 8.0
+                                - r * (1.0 / 9.0 - r * (1.0 / 10.0 - r * (1.0 / 11.0)))))))));
+    // ln(1 + r) = r - r^2/2 + tail, with r = r_hi + r_lo and
+    // r^2 / 2 = s_hi / 2 + s_lo / 2 + r_hi r_lo + ...
+    let small = r_lo - r_hi * r_lo - 0.5 * s_lo + tail;
+    let (lc_hi, lc_lo) = (LN_C_HI[idx], LN_C_LO[idx]);
+    let (h1, l1) = two_sum(e * LN2_HI, lc_hi);
+    let (h2, l2) = two_sum(h1, r_hi);
+    let (h3, l3) = two_sum(h2, -0.5 * s_hi);
+    let lo = l1 + l2 + l3 + (e * LN2_LO + lc_lo + small);
+    let hi = h3 + lo;
+    (hi, lo - (hi - h3))
+}
+
+/// Whether `bits` is a positive normal finite `f64`.
+#[inline(always)]
+fn positive_normal_f64(bits: u64) -> bool {
+    bits.wrapping_sub(0x0010_0000_0000_0000) < 0x7FE0_0000_0000_0000
+}
+
+/// `log10(x)` of a positive normal finite `f64`: the double-double natural
+/// logarithm times `log10(e)` in double-double, rounded once.
+#[inline(always)]
+fn log10_f64_normal<const FMA: bool>(x: f64) -> f64 {
+    // log10(e)_hi split into 26-bit halves (constant).
+    const E_H: f64 = f64::from_bits(0x3FDB_CB7B_1800_0000);
+    const E_L: f64 = LOG10E_HI - E_H;
+    let (h, l) = ln_dd::<FMA>(x);
+    let p = h * LOG10E_HI;
+    let pe = if FMA {
+        h.mul_add(LOG10E_HI, -p)
+    } else {
+        let (hh, hl) = split(h);
+        ((hh * E_H - p) + hh * E_L + hl * E_H) + hl * E_L
+    };
+    p + (pe + (h * LOG10E_LO + l * LOG10E_HI))
+}
+
+#[inline(always)]
+fn log10_f64_generic<const FMA: bool>(v: &mut [f64]) {
+    for chunk in v.chunks_mut(64) {
+        if chunk
+            .iter()
+            .fold(true, |a, x| a & positive_normal_f64(x.to_bits()))
+        {
+            for x in chunk.iter_mut() {
+                *x = log10_f64_normal::<FMA>(*x);
+            }
+        } else {
+            for x in chunk.iter_mut() {
+                *x = if positive_normal_f64(x.to_bits()) {
+                    log10_f64_normal::<FMA>(*x)
+                } else {
+                    x.log10()
+                };
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn log10_f64_avx2_fma(v: &mut [f64]) {
+    log10_f64_generic::<true>(v);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn log10_f64_avx2(v: &mut [f64]) {
+    log10_f64_generic::<false>(v);
+}
+
+/// `x = log10(x)` for every element of an `f64` slice, vectorised.
+///
+/// The result is the correctly rounded `log10(x)` except when the exact value
+/// lies within about 2^-70 (relative) of a rounding boundary; it differs from
+/// the C library's `log10` (which is not correctly rounded) by at most one
+/// unit in the last place. Zero, negative, subnormal, infinite and NaN inputs
+/// go to the standard library, so the special values are unchanged.
+pub(crate) fn log10_f64(v: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        if std::arch::is_x86_feature_detected!("fma") {
+            // SAFETY: AVX2 and FMA are available (checked at run time).
+            unsafe { log10_f64_avx2_fma(v) };
+        } else {
+            // SAFETY: AVX2 is available (checked at run time).
+            unsafe { log10_f64_avx2(v) };
+        }
+        return;
+    }
+    log10_f64_generic::<false>(v);
+}
+
+/// `x = log10(x)` element-wise for `f32` or `f64` slices (the vectorised
+/// kernels above).
+pub(crate) fn log10_in_place<F: AudioFloat>(v: &mut [F]) {
+    if let Some(v32) = as_f32(v) {
+        log10_f32(v32);
+        return;
+    }
+    if TypeId::of::<F>() == TypeId::of::<f64>() {
+        // SAFETY: F is f64 (same type, so same size, alignment and validity).
+        let v64 = unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<f64>(), v.len()) };
+        log10_f64(v64);
+        return;
+    }
+    for x in v {
+        *x = x.log10();
+    }
 }
 
 /// The slice as `&mut [f32]` when `F` is `f32`.
@@ -620,5 +965,112 @@ mod tests {
         assert!(worst <= 1, "{worst} ulp");
         assert_eq!(v[ys.len() - 15], 1.0);
         assert_eq!(v[ys.len() - 12], 100.0);
+    }
+
+    fn ulps64(a: f64, b: f64) -> u64 {
+        if a == b || (a.is_nan() && b.is_nan()) {
+            return 0;
+        }
+        (a.to_bits() as i128 - b.to_bits() as i128).unsigned_abs() as u64
+    }
+
+    #[test]
+    fn log10_f64_close_to_the_c_library() {
+        let mut st = 0x9e37_79b9_7f4a_7c15u64;
+        let mut xs = Vec::new();
+        for n in 0..3_000_000u64 {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            xs.push(match n % 4 {
+                0 => f64::from_bits(st >> 1),
+                1 => f64::from_bits((st >> 12) | 0x3fe0_0000_0000_0000),
+                2 => 1.0 + ((st >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 1e-6,
+                _ => (st >> 11) as f64 * 1e-10,
+            });
+        }
+        xs.extend([
+            0.0,
+            -0.0,
+            -1.0,
+            1.0,
+            10.0,
+            1e-300,
+            5e-324,
+            2.2e-308,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            0.1,
+            1000.0,
+            1e22,
+            1e-22,
+            std::f64::consts::SQRT_2,
+        ]);
+        let mut v = xs.clone();
+        log10_f64(&mut v);
+        if let Ok(path) = std::env::var("AUDIO_SAMPLES_DUMP_LOG10") {
+            let mut out = String::new();
+            for (x, y) in xs
+                .iter()
+                .zip(&v)
+                .filter(|(x, y)| ulps64(**y, x.log10()) > 0)
+                .take(400_000)
+            {
+                out.push_str(&format!(
+                    "{:016x} {:016x} {:016x}\n",
+                    x.to_bits(),
+                    y.to_bits(),
+                    x.log10().to_bits()
+                ));
+            }
+            std::fs::write(path, out).unwrap();
+        }
+        let mut worst = 0;
+        for (&x, &got) in xs.iter().zip(&v) {
+            let want = x.log10();
+            if !(x > 0.0 && x.is_finite()) || x < f64::MIN_POSITIVE {
+                assert_eq!(got.to_bits(), want.to_bits(), "special {x:e}");
+            }
+            worst = worst.max(ulps64(got, want));
+        }
+        // glibc's log10 is within about 2 ulp of the exact value just around
+        // x = 1 and within 1 ulp elsewhere; every result above that differs
+        // from it was checked against 50-digit decimal arithmetic to be the
+        // correctly rounded value.
+        assert!(worst <= 2, "{worst} ulp");
+        for k in -22..=22 {
+            let x = 10f64.powi(k);
+            if x == format!("1e{k}").parse::<f64>().unwrap() && k >= 0 {
+                let mut y = [x];
+                log10_f64(&mut y);
+                assert_eq!(y[0], f64::from(k), "1e{k}");
+            }
+        }
+    }
+
+    #[test]
+    fn log10_f64_fused_and_unfused_paths_agree() {
+        let mut st = 0x2545_f491_4f6c_dd1du64;
+        let xs: Vec<f64> = (0..1_000_000)
+            .map(|n| {
+                st = st
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                if n % 2 == 0 {
+                    f64::from_bits((st >> 2) | 0x0010_0000_0000_0000)
+                } else {
+                    f64::from_bits((st >> 12) | 0x3fe0_0000_0000_0000)
+                }
+            })
+            .collect();
+        let mut a = xs.clone();
+        log10_f64_generic::<false>(&mut a);
+        let mut b = xs.clone();
+        log10_f64_generic::<true>(&mut b);
+        for ((x, p), q) in xs.iter().zip(&a).zip(&b) {
+            assert_eq!(p.to_bits(), q.to_bits(), "{x:e}");
+        }
     }
 }
