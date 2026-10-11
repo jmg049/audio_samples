@@ -2606,27 +2606,81 @@ pub fn pcen_with_state<F: AudioFloat>(
         F::of(config.bias),
     );
     let mut out = Array3::<F>::zeros((n_ch, n_bins, n_frames));
+    let mut x_buf = Vec::new();
     for c in 0..n_ch {
-        for k in 0..n_bins {
-            let mut z = state[[c, k]];
-            for t in 0..n_frames {
-                // Direct-form II transposed, as scipy.signal.lfilter.
-                let m = b * reference[[c, k, t]] + z;
-                z = F::zero() * reference[[c, k, t]] - a1 * m;
-                let smooth = (-gain * (ln_eps + (m / eps).ln_1p())).exp();
-                let x = s[[c, k, t]];
-                out[[c, k, t]] = if config.power == 0.0 {
-                    (x * smooth).ln_1p()
-                } else if config.bias == 0.0 {
-                    (power * (x.ln() + smooth.ln())).exp()
-                } else {
-                    bias_pow * (power * (x * smooth / bias).ln_1p()).exp_m1()
-                };
+        let rc = reference.index_axis(Axis(0), c);
+        let rc = rc.as_standard_layout();
+        let rc = rc.as_slice().expect("standard layout");
+        let mut oc = out.index_axis_mut(Axis(0), c);
+        let oc = oc.as_slice_mut().expect("a fresh standard-layout array");
+        // Direct-form II transposed, as scipy.signal.lfilter: out = M. Four
+        // bins at a time, so that their recurrences overlap.
+        let mut k = 0;
+        while k < n_bins {
+            let g = (n_bins - k).min(4);
+            let mut z = [F::zero(); 4];
+            for (j, zj) in z.iter_mut().enumerate().take(g) {
+                *zj = state[[c, k + j]];
             }
-            state[[c, k]] = z;
+            for t in 0..n_frames {
+                for j in 0..g {
+                    let rv = rc[(k + j) * n_frames + t];
+                    let m = b * rv + z[j];
+                    z[j] = F::zero() * rv - a1 * m;
+                    oc[(k + j) * n_frames + t] = m;
+                }
+            }
+            for (j, &zj) in z.iter().enumerate().take(g) {
+                state[[c, k + j]] = zj;
+            }
+            k += g;
+        }
+        for (k, o) in oc.chunks_exact_mut(n_frames.max(1)).enumerate() {
+            let x = contiguous_or_copy(s.slice(ndarray::s![c, k, ..]), &mut x_buf);
+            // One function per loop over the row, with the operations of a
+            // per-element evaluation.
+            // o = G = exp(-gain (ln eps + ln1p(M / eps)))
+            for o in o.iter_mut() {
+                *o = (*o / eps).ln_1p();
+            }
+            for o in o.iter_mut() {
+                *o = (-gain * (ln_eps + *o)).exp();
+            }
+            if config.power == 0.0 {
+                for (o, &xv) in o.iter_mut().zip(x) {
+                    *o = (xv * *o).ln_1p();
+                }
+            } else if config.bias == 0.0 {
+                for (o, &xv) in o.iter_mut().zip(x) {
+                    *o = (power * (xv.ln() + o.ln())).exp();
+                }
+            } else {
+                for (o, &xv) in o.iter_mut().zip(x) {
+                    *o = (xv * *o / bias).ln_1p();
+                }
+                for o in o.iter_mut() {
+                    *o = bias_pow * (power * *o).exp_m1();
+                }
+            }
         }
     }
     Ok((out, state))
+}
+
+/// The values of a 1-D view as a slice: the view itself when contiguous,
+/// otherwise copied into `buf`.
+fn contiguous_or_copy<'a, F: AudioFloat>(
+    v: ndarray::ArrayView1<'a, F>,
+    buf: &'a mut Vec<F>,
+) -> &'a [F] {
+    match v.to_slice() {
+        Some(sl) => sl,
+        None => {
+            buf.clear();
+            buf.extend(v.iter().copied());
+            buf
+        }
+    }
 }
 
 /// `scipy.ndimage.maximum_filter1d(S, size, axis=bins)` with mode `reflect`
