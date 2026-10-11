@@ -172,7 +172,7 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
                 length: Some(60 * 22050),
                 ..ClicksConfig::librosa()
             };
-            thunk(move || clicks::<f64>(ClickPositions::Times(&times), sr, &c).unwrap())
+            thunk(move || clicks::<f32>(ClickPositions::Times(&times), sr, &c).unwrap())
         }
         "tone" => thunk(move || sine_wave::<f64>(440.0, secs, sr, 1.0)),
         "chirp" => thunk(move || exponential_chirp::<f64>(110.0, 8000.0, secs, sr, 1.0)),

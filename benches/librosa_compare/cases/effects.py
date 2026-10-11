@@ -149,9 +149,9 @@ register(
     Case(
         "clicks", G, "const",
         librosa=lambda c: partial(librosa.clicks, times=CLICK_TIMES, sr=CLICK_SR, length=CLICK_LEN),
-        ours=lambda c: partial(E.clicks, times=CLICK_TIMES, sr=CLICK_SR, length=CLICK_LEN),
+        ours=lambda c: partial(E.clicks, times=CLICK_TIMES, sr=CLICK_SR, length=CLICK_LEN, dtype=np.float32),
         func="clicks",
-        note="120 clicks, 60 s at 22050 Hz; librosa float32, ours float64",
+        note="120 clicks, 60 s at 22050 Hz; float32 output in both (ours: dtype=numpy.float32)",
     ),
     Case(
         "tone", G, "const",
