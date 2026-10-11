@@ -9,11 +9,12 @@ use std::num::NonZeroUsize;
 use audio_samples::operations::rhythm::{fourier_tempo_frequencies, tempo_frequencies};
 use audio_samples::utils::audio_math::{
     MelScale, a4_to_tuning_slice, cqt_frequencies, fft_frequencies, frames_to_samples_slice,
-    frames_to_time_with_offset_slice, frequency_to_note, hz_to_mel_with_scale, hz_to_midi_slice,
-    hz_to_octs_slice, key_to_degrees, key_to_notes, mel_frequencies_with_scale,
-    mel_to_hz_with_scale, midi_to_hz, midi_to_note, note_to_frequency, note_to_midi, octs_to_hz,
-    samples_like, samples_to_frames_slice, samples_to_time, time_to_frames_floor_slice,
-    time_to_samples_slice, times_like, tuning_to_a4,
+    frames_to_time_with_offset_slice, frequency_to_note_static, hz_to_mel_with_scale,
+    hz_to_midi_slice, hz_to_octs_slice, key_to_degrees, key_to_notes_static,
+    mel_frequencies_with_scale, mel_to_hz_with_scale, midi_to_hz, midi_to_note,
+    midi_to_note_static, note_to_frequency, note_to_midi, octs_to_hz, samples_like,
+    samples_to_frames_slice, samples_to_time, time_to_frames_floor_slice, time_to_samples_slice,
+    times_like, tuning_to_a4,
 };
 use audio_samples::{AudioFloat, nzu};
 
@@ -70,17 +71,20 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
         "fourier_tempo_frequencies" => thunk(|| fourier_tempo_frequencies(SR, HOP, nzu!(384))),
         "hz_to_note" => {
             let hz = geomspace(30.0, 4000.0, N_STR);
+            // Note names as &'static str (frequency_to_note_static): no
+            // allocation per name, as librosa's array of fixed-width strings.
             thunk(move || {
                 hz.iter()
-                    .map(|&f| frequency_to_note(f).unwrap())
+                    .map(|&f| frequency_to_note_static(f).unwrap())
                     .collect::<Vec<_>>()
             })
         }
         "midi_to_note" => {
             let m = midis();
+            // Note names as &'static str (midi_to_note_static).
             thunk(move || {
                 m.iter()
-                    .map(|&v| midi_to_note(v).unwrap())
+                    .map(|&v| midi_to_note_static(v).unwrap())
                     .collect::<Vec<_>>()
             })
         }
@@ -104,9 +108,11 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
         }
         "key_to_notes" => {
             let k = keys();
+            // Cached tables (key_to_notes_static), as librosa's lru-cached
+            // key_to_notes: the loop holds references, not new strings.
             thunk(move || {
                 k.iter()
-                    .map(|k| key_to_notes(k, true, false).unwrap())
+                    .map(|k| key_to_notes_static(k, true, false).unwrap())
                     .collect::<Vec<_>>()
             })
         }

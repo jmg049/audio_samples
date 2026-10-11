@@ -1550,6 +1550,65 @@ pub fn midi_to_note(midi_note: u8) -> AudioSampleResult<String> {
     Ok(format!("{note_name}{octave}"))
 }
 
+/// [`midi_to_note`] as a `&'static str` from a table built on first use, so
+/// a call allocates nothing.
+///
+/// # Errors
+///
+/// As [`midi_to_note`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{midi_to_note, midi_to_note_static};
+///
+/// assert_eq!(midi_to_note_static(69).unwrap(), "A4");
+/// assert_eq!(midi_to_note_static(60).unwrap(), midi_to_note(60).unwrap());
+/// ```
+pub fn midi_to_note_static(midi_note: u8) -> AudioSampleResult<&'static str> {
+    static NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+        (0..=127u8)
+            .map(|m| midi_to_note(m).expect("0..=127 is valid"))
+            .collect()
+    });
+    if midi_note > 127 {
+        // The same error as midi_to_note.
+        return Err(midi_to_note(midi_note).expect_err("out of range"));
+    }
+    Ok(NAMES[usize::from(midi_note)].as_str())
+}
+
+/// [`frequency_to_note`] with the note name as a `&'static str` (see
+/// [`midi_to_note_static`]), so a call allocates nothing.
+///
+/// # Errors
+///
+/// As [`frequency_to_note`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{frequency_to_note, frequency_to_note_static};
+///
+/// let (name, cents) = frequency_to_note_static(445.0).unwrap();
+/// let (owned, cents_owned) = frequency_to_note(445.0).unwrap();
+/// assert_eq!((name, cents), (owned.as_str(), cents_owned));
+/// ```
+pub fn frequency_to_note_static(freq_hz: f64) -> AudioSampleResult<(&'static str, f64)> {
+    // Invalid or out-of-range input: the same error as frequency_to_note.
+    let invalid = || Err(frequency_to_note(freq_hz).expect_err("invalid frequency"));
+    if !(freq_hz.is_finite() && freq_hz > 0.0) {
+        return invalid();
+    }
+    let midi_float = hz_to_midi(freq_hz);
+    let midi_rounded = midi_float.round();
+    let cents = (midi_float - midi_rounded) * 100.0;
+    if !(0.0..=127.0).contains(&midi_rounded) {
+        return invalid();
+    }
+    Ok((midi_to_note_static(midi_rounded as u8)?, cents))
+}
+
 /// Converts a scientific pitch notation string into a frequency expressed in Hertz.
 ///
 /// This is a convenience wrapper that combines [`note_to_midi`] and [`midi_to_hz`] to allow
@@ -2802,6 +2861,55 @@ pub fn key_to_notes(key: &str, unicode: bool, natural: bool) -> AudioSampleResul
     Ok(notes)
 }
 
+/// [`key_to_notes`] as a reference to a cached table: the first call for a
+/// key (and flags) computes the twelve names and keeps them for the life of
+/// the process (one entry per distinct key string); later calls allocate
+/// nothing.
+///
+/// # Errors
+///
+/// As [`key_to_notes`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::utils::audio_math::{key_to_notes, key_to_notes_static};
+///
+/// let notes = key_to_notes_static("F#:maj", true, false).unwrap();
+/// assert_eq!(notes.to_vec(), key_to_notes("F#:maj", true, false).unwrap());
+/// ```
+pub fn key_to_notes_static(
+    key: &str,
+    unicode: bool,
+    natural: bool,
+) -> AudioSampleResult<&'static [&'static str; 12]> {
+    type Entry = [Option<&'static [&'static str; 12]>; 4];
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Entry>>> =
+        std::sync::LazyLock::new(Default::default);
+    let slot = usize::from(unicode) * 2 + usize::from(natural);
+    if let Some(&Some(t)) = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .map(|e| &e[slot])
+    {
+        return Ok(t);
+    }
+    let notes = key_to_notes(key, unicode, natural)?;
+    let names: Vec<&'static str> = notes
+        .into_iter()
+        .map(|n| &*Box::leak(n.into_boxed_str()))
+        .collect();
+    let table: [&'static str; 12] = names.try_into().expect("key_to_notes returns twelve names");
+    let table: &'static [&'static str; 12] = Box::leak(Box::new(table));
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = cache.entry(key.to_string()).or_insert([None; 4]);
+    // A concurrent first call may have filled the slot; keep the first.
+    Ok(*entry[slot].get_or_insert(table))
+}
+
 /// The seven diatonic scale degrees of a key or mode, as pitch classes (0 = C).
 ///
 /// This is `librosa.key_to_degrees(key)`: the pitch classes of the scale
@@ -3270,5 +3378,49 @@ mod tests {
             a4_to_tuning_slice(&pos, bpo),
             pos.iter().map(|&f| a4_to_tuning(f, bpo)).collect(),
         );
+    }
+
+    #[test]
+    fn static_note_names_match_owned() {
+        for m in 0..=255u8 {
+            match (midi_to_note(m), midi_to_note_static(m)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b),
+                (Err(a), Err(b)) => assert_eq!(format!("{a:?}"), format!("{b:?}")),
+                _ => panic!("midi {m}"),
+            }
+        }
+        for f in [
+            -1.0,
+            0.0,
+            1.0,
+            7.0,
+            8.2,
+            27.5,
+            440.0,
+            445.0,
+            1000.0,
+            12543.0,
+            13000.0,
+            f64::NAN,
+        ] {
+            match (frequency_to_note(f), frequency_to_note_static(f)) {
+                (Ok((a, ca)), Ok((b, cb))) => assert_eq!((a.as_str(), ca), (b, cb)),
+                (Err(a), Err(b)) => assert_eq!(format!("{a:?}"), format!("{b:?}")),
+                _ => panic!("freq {f}"),
+            }
+        }
+        for key in [
+            "C:maj", "F#:maj", "Eb:min", "C##:maj", "Bbb:min", "D:dorian", "X:maj",
+        ] {
+            for (u, n) in [(false, false), (true, false), (false, true), (true, true)] {
+                for _ in 0..2 {
+                    match (key_to_notes(key, u, n), key_to_notes_static(key, u, n)) {
+                        (Ok(a), Ok(b)) => assert_eq!(a, b.to_vec(), "{key} {u} {n}"),
+                        (Err(_), Err(_)) => {}
+                        _ => panic!("key {key}"),
+                    }
+                }
+            }
+        }
     }
 }
