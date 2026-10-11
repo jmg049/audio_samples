@@ -1552,7 +1552,21 @@ where
     D: Dimension,
 {
     let (reference, ten, tenth) = (F::of(reference), F::of(10.0), F::of(0.1));
-    s_db.mapv(|x| reference * ten.powf(x * tenth))
+    if std::any::TypeId::of::<F>() != std::any::TypeId::of::<f32>() {
+        return s_db.mapv(|x| reference * ten.powf(x * tenth));
+    }
+    let mut out = s_db.mapv(|x| x * tenth);
+    if let Some(v) = out
+        .as_slice_memory_order_mut()
+        .and_then(crate::utils::vmath::as_f32)
+    {
+        // f32: the vectorised 10^y (see `utils::vmath`).
+        crate::utils::vmath::exp10_f32(v);
+        out.mapv_inplace(|p| reference * p);
+        return out;
+    }
+    out.mapv_inplace(|y| reference * ten.powf(y));
+    out
 }
 
 /// Converts decibels back to amplitude, equivalent to
@@ -1577,7 +1591,20 @@ where
     D: Dimension,
 {
     let (r2, ten, tenth) = (F::of(reference * reference), F::of(10.0), F::of(0.1));
-    s_db.mapv(|x| (r2 * ten.powf(x * tenth)).sqrt())
+    if std::any::TypeId::of::<F>() != std::any::TypeId::of::<f32>() {
+        return s_db.mapv(|x| (r2 * ten.powf(x * tenth)).sqrt());
+    }
+    let mut out = s_db.mapv(|x| x * tenth);
+    if let Some(v) = out
+        .as_slice_memory_order_mut()
+        .and_then(crate::utils::vmath::as_f32)
+    {
+        crate::utils::vmath::exp10_f32(v);
+        out.mapv_inplace(|p| (r2 * p).sqrt());
+        return out;
+    }
+    out.mapv_inplace(|y| (r2 * ten.powf(y)).sqrt());
+    out
 }
 
 // =============================================================================

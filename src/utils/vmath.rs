@@ -379,8 +379,78 @@ fn max_f32(v: &[f32]) -> f32 {
     acc.iter().copied().fold(m, f32::max)
 }
 
+/// `10^y` of an `f32` value with `|y| <= 300`, in `f64` (relative error
+/// below 1e-15): `2^k * e^(r ln 2)` with `t = y log2(10) = k + r`.
+#[inline(always)]
+fn exp10_f64_of_f32(y: f32) -> f64 {
+    const LOG2_10: f64 = std::f64::consts::LOG2_10;
+    const LN_2: f64 = std::f64::consts::LN_2;
+    // Round to nearest by the 1.5 * 2^52 shift; its low bits hold k.
+    const SHIFT: f64 = 6_755_399_441_055_744.0;
+    let t = f64::from(y) * LOG2_10;
+    let shifted = t + SHIFT;
+    let k = shifted - SHIFT;
+    let r = t - k;
+    let u = r * LN_2;
+    // e^u, |u| <= 0.35: Taylor series to u^13 / 13!.
+    let mut p = 1.0 / 6_227_020_800.0;
+    p = 1.0 / 479_001_600.0 + u * p;
+    p = 1.0 / 39_916_800.0 + u * p;
+    p = 1.0 / 3_628_800.0 + u * p;
+    p = 1.0 / 362_880.0 + u * p;
+    p = 1.0 / 40_320.0 + u * p;
+    p = 1.0 / 5_040.0 + u * p;
+    p = 1.0 / 720.0 + u * p;
+    p = 1.0 / 120.0 + u * p;
+    p = 1.0 / 24.0 + u * p;
+    p = 1.0 / 6.0 + u * p;
+    p = 0.5 + u * p;
+    p = 1.0 + u * p;
+    p = 1.0 + u * p;
+    let k_bits = shifted.to_bits().wrapping_sub(SHIFT.to_bits());
+    let scale = f64::from_bits(k_bits.wrapping_add(1023) << 52);
+    p * scale
+}
+
+/// `x = 10^x` for every element of an `f32` slice: evaluated in `f64` and
+/// rounded to `f32` once (the correctly rounded value except within about
+/// 1e-15 of a rounding boundary); NaN and `|x| > 300` go to `f32::powf`.
+pub(crate) fn exp10_f32(v: &mut [f32]) {
+    #[inline(always)]
+    fn generic(v: &mut [f32]) {
+        for chunk in v.chunks_mut(64) {
+            let fast = chunk.iter().fold(true, |a, &y| a & (y.abs() <= 300.0));
+            if fast {
+                for y in chunk.iter_mut() {
+                    *y = exp10_f64_of_f32(*y) as f32;
+                }
+            } else {
+                for y in chunk.iter_mut() {
+                    *y = if y.abs() <= 300.0 {
+                        exp10_f64_of_f32(*y) as f32
+                    } else {
+                        10f32.powf(*y)
+                    };
+                }
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    fn avx2(v: &mut [f32]) {
+        generic(v);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        // SAFETY: AVX2 is available (checked at run time).
+        unsafe { avx2(v) };
+        return;
+    }
+    generic(v);
+}
+
 /// The slice as `&mut [f32]` when `F` is `f32`.
-fn as_f32<F: AudioFloat>(v: &mut [F]) -> Option<&mut [f32]> {
+pub(crate) fn as_f32<F: AudioFloat>(v: &mut [F]) -> Option<&mut [f32]> {
     if TypeId::of::<F>() == TypeId::of::<f32>() {
         // SAFETY: F is f32 (same type, so same size, alignment and validity).
         Some(unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<f32>(), v.len()) })
@@ -514,5 +584,41 @@ mod tests {
 
     fn check_matmul_t<F: AudioFloat + Bits>() {
         check_matmul::<F>();
+    }
+
+    #[test]
+    fn exp10_f32_within_one_ulp() {
+        let mut ys: Vec<f32> = (0..2_000_000).map(|i| -120.0 + i as f32 * 1.6e-4).collect();
+        ys.extend([
+            0.0,
+            -0.0,
+            1.0,
+            2.0,
+            -1.0,
+            38.0,
+            39.0,
+            -45.0,
+            -46.0,
+            300.0,
+            301.0,
+            -301.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ]);
+        let mut v = ys.clone();
+        exp10_f32(&mut v);
+        let mut worst = 0;
+        for (&y, &got) in ys.iter().zip(&v) {
+            let want = 10f64.powf(f64::from(y)) as f32;
+            if y.is_nan() {
+                assert!(got.is_nan());
+                continue;
+            }
+            worst = worst.max(ulps(got, want));
+        }
+        assert!(worst <= 1, "{worst} ulp");
+        assert_eq!(v[ys.len() - 15], 1.0);
+        assert_eq!(v[ys.len() - 12], 100.0);
     }
 }
