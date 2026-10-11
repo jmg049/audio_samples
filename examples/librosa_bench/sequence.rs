@@ -12,7 +12,7 @@ use audio_samples::operations::sequence::{
     TransitionWindow, cross_similarity, cross_similarity_bool, dtw, dtw_backtracking,
     lag_to_recurrence, recurrence_matrix, recurrence_matrix_bool, recurrence_to_lag, rqa, sync,
     transition_cycle, transition_local, transition_loop, transition_uniform, viterbi,
-    viterbi_binary, viterbi_discriminative,
+    viterbi_binary, viterbi_binary_u16, viterbi_discriminative,
 };
 use audio_samples::operations::spectrum::{MfccConfig, frame};
 use audio_samples::operations::tonal::{ChromaStftConfig, NormalizeConfig, normalize_array};
@@ -176,6 +176,13 @@ pub fn seq<'a, F: AudioFloat>(case: &str, x: &'a SeqCtx<F>) -> Option<Thunk<'a>>
             prob /= &sums;
             let t = band();
             thunk(move || viterbi_discriminative(prob.view(), t.view(), None, None, None).unwrap())
+        }
+        "viterbi_binary_u16" => {
+            let prob = x.matrix(N_STATES, N_STEPS, 4);
+            let t = transition_loop::<F>(2, &[0.9])
+                .unwrap()
+                .insert_axis(Axis(0));
+            thunk(move || viterbi_binary_u16(prob.view(), t.view(), None, None, None).unwrap())
         }
         "viterbi_binary" => {
             let prob = x.matrix(N_STATES, N_STEPS, 4);

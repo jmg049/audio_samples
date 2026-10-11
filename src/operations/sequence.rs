@@ -1318,12 +1318,13 @@ pub struct ViterbiResult<F = f64> {
     pub log_prob: F,
 }
 
-/// Output of [`viterbi_binary`]. `F` is the element type of the probability
-/// matrix.
+/// Output of [`viterbi_binary`] / [`viterbi_binary_u16`]. `F` is the element
+/// type of the probability matrix, `S` that of the state matrix.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ViterbiBinaryResult<F = f64> {
-    /// `(n_states, n_steps)` matrix of `0`/`1` activations per state.
-    pub states: Array2<usize>,
+pub struct ViterbiBinaryResult<F = f64, S = usize> {
+    /// `(n_states, n_steps)` matrix of `0`/`1` activations per state
+    /// (`usize` from [`viterbi_binary`], `u16` from [`viterbi_binary_u16`]).
+    pub states: Array2<S>,
     /// Log-likelihood of each state's binary sequence (`n_states` entries).
     pub log_prob: Array1<F>,
 }
@@ -1848,6 +1849,48 @@ pub fn viterbi_binary<F: AudioFloat>(
     p_init: Option<ArrayView1<F>>,
     transition_min_prob: Option<f64>,
 ) -> AudioSampleResult<ViterbiBinaryResult<F>> {
+    viterbi_binary_core(prob, transition, p_state, p_init, transition_min_prob)
+}
+
+/// [`viterbi_binary`] with the states as `u16`, as librosa returns them
+/// (`librosa.sequence.viterbi_binary`, dtype `uint16`). The decoding is the
+/// same; the state matrix takes two bytes per entry instead of eight.
+///
+/// # Errors
+///
+/// As [`viterbi_binary`].
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::operations::sequence::{transition_loop, viterbi_binary_u16};
+/// use ndarray::{array, Axis};
+///
+/// let prob = array![[0.1, 0.2, 0.9, 0.3, 0.8, 0.9, 0.9, 0.2]];
+/// let trans = transition_loop(2, &[0.8]).unwrap();
+/// let r = viterbi_binary_u16(prob.view(), trans.view().insert_axis(Axis(0)), None, None, None)
+///     .unwrap();
+/// assert_eq!(r.states.row(0).to_vec(), vec![0u16, 0, 1, 1, 1, 1, 1, 0]);
+/// ```
+pub fn viterbi_binary_u16<F: AudioFloat>(
+    prob: ArrayView2<F>,
+    transition: ArrayView3<F>,
+    p_state: Option<ArrayView1<F>>,
+    p_init: Option<ArrayView1<F>>,
+    transition_min_prob: Option<f64>,
+) -> AudioSampleResult<ViterbiBinaryResult<F, u16>> {
+    viterbi_binary_core(prob, transition, p_state, p_init, transition_min_prob)
+}
+
+/// The shared body of [`viterbi_binary`] and [`viterbi_binary_u16`]; the
+/// states (0 or 1) are stored as `S`.
+fn viterbi_binary_core<F: AudioFloat, S: Copy + From<u8>>(
+    prob: ArrayView2<F>,
+    transition: ArrayView3<F>,
+    p_state: Option<ArrayView1<F>>,
+    p_init: Option<ArrayView1<F>>,
+    transition_min_prob: Option<f64>,
+) -> AudioSampleResult<ViterbiBinaryResult<F, S>> {
     check_prob_shape(prob)?;
     let (n_states, n_steps) = prob.dim();
     let (nt, r, c) = transition.dim();
@@ -1881,7 +1924,7 @@ pub fn viterbi_binary<F: AudioFloat>(
     let p_state = per_state("p_state", p_state)?;
     let p_init = per_state("p_init", p_init)?;
 
-    let mut states = Array2::<usize>::zeros((n_states, n_steps));
+    let mut states = Array2::<S>::from_elem((n_states, n_steps), S::from(0));
     let mut logp = Array1::<F>::zeros(n_states);
     let mut prob_bin = Array2::<F>::zeros((2, n_steps));
     for s in 0..n_states {
@@ -1900,7 +1943,7 @@ pub fn viterbi_binary<F: AudioFloat>(
             transition_min_prob,
         )?;
         for (t, &v) in r.states.iter().enumerate() {
-            states[[s, t]] = v;
+            states[[s, t]] = S::from(u8::from(v != 0));
         }
         logp[s] = r.log_prob;
     }
@@ -3937,5 +3980,18 @@ mod tests {
         let dist = RecurrenceConfig::new().with_mode(RecurrenceMode::Distance);
         let data = Array2::<f64>::zeros((1, 8));
         assert!(recurrence_matrix_bool(data.view(), &dist).is_err());
+    }
+
+    #[test]
+    fn viterbi_binary_u16_matches_usize_states() {
+        let mut seed = 9u64;
+        let prob = Array2::from_shape_fn((5, 300), |_| lcg(&mut seed));
+        let t = transition_loop::<f64>(2, &[0.9])
+            .unwrap()
+            .insert_axis(Axis(0));
+        let a = viterbi_binary(prob.view(), t.view(), None, None, None).unwrap();
+        let b = viterbi_binary_u16(prob.view(), t.view(), None, None, None).unwrap();
+        assert_eq!(a.states.mapv(|v| v as u16), b.states);
+        assert_eq!(a.log_prob, b.log_prob);
     }
 }
