@@ -14,7 +14,7 @@ use audio_samples::operations::sequence::{
     transition_cycle, transition_local, transition_loop, transition_uniform, viterbi,
     viterbi_binary, viterbi_binary_u16, viterbi_discriminative,
 };
-use audio_samples::operations::spectrum::{MfccConfig, frame};
+use audio_samples::operations::spectrum::{MfccConfig, frame_view};
 use audio_samples::operations::tonal::{ChromaStftConfig, NormalizeConfig, normalize_array};
 use audio_samples::{AudioFloat, AudioSpectrum, AudioTonal, nzu};
 use ndarray::{Array2, Axis, s};
@@ -107,7 +107,9 @@ pub fn audio<'a, F: AudioFloat>(case: &str, x: &'a AudioCtx<F>) -> Option<Thunk<
         }
         "frame" => {
             let y = x.mono().to_vec();
-            thunk(move || frame(&y, nzu!(2048), nzu!(512)).unwrap())
+            // librosa returns a strided view; frame_view is the zero-copy
+            // equivalent (frame makes an owned copy).
+            thunk(move || frame_view(&y, nzu!(2048), nzu!(512)).unwrap().dim())
         }
         _ => None,
     }

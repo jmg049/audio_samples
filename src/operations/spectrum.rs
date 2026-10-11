@@ -871,6 +871,57 @@ pub fn frame<F: AudioFloat>(
     }))
 }
 
+/// Overlapping frames of a signal as a strided view, without copying.
+///
+/// The same frames as [`frame`] (a `(frame_length, n_frames)` matrix whose
+/// column `t` is `x[t * hop_length .. t * hop_length + frame_length]`), as a
+/// read-only view into `x` with strides `(1, hop_length)`, like the view
+/// `librosa.util.frame` returns. Use [`frame`] for an owned copy.
+///
+/// # Arguments
+///
+/// * `x` - The signal.
+/// * `frame_length` - Samples per frame.
+/// * `hop_length` - Samples between the starts of successive frames.
+///
+/// # Errors
+///
+/// [`ParameterError`] if `x` is shorter than `frame_length`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::operations::spectrum::{frame, frame_view};
+///
+/// let x: Vec<f64> = (0..10).map(f64::from).collect();
+/// let v = frame_view(&x, nzu!(4), nzu!(3)).unwrap();
+/// assert_eq!(v.dim(), (4, 3));
+/// assert_eq!(v.column(1).to_vec(), vec![3.0, 4.0, 5.0, 6.0]);
+/// assert_eq!(v, frame(&x, nzu!(4), nzu!(3)).unwrap());
+/// ```
+pub fn frame_view<T>(
+    x: &[T],
+    frame_length: NonZeroUsize,
+    hop_length: NonZeroUsize,
+) -> AudioSampleResult<ndarray::ArrayView2<'_, T>> {
+    use ndarray::ShapeBuilder;
+    let (fl, hop) = (frame_length.get(), hop_length.get());
+    if x.len() < fl {
+        return Err(param_err(
+            "frame_length",
+            format!("input is too short (n={}) for frame_length={fl}", x.len()),
+        ));
+    }
+    let n_frames = 1 + (x.len() - fl) / hop;
+    // The last element read is x[(n_frames - 1) * hop + fl - 1] < x.len(), and
+    // read-only views may overlap.
+    Ok(
+        ndarray::ArrayView2::from_shape((fl, n_frames).strides((1, hop)), x)
+            .expect("the frames lie inside x"),
+    )
+}
+
 // =============================================================================
 // dB scaling
 // =============================================================================
