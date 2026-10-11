@@ -1190,12 +1190,19 @@ pub fn pitch_tuning(
 
     let mut counts = vec![0usize; n_hist];
     let mut any = false;
+    // hz_to_octs(f, 0.0, 12) = log2(f / (A440 / 16)), with the constant
+    // (exactly 27.5) hoisted out of the loop.
+    let a_ref = 440.0 * 2.0f64.powf(0.0 / 12.0) / 16.0;
+    let n_f = n_hist as f64;
     for &f in frequencies {
         if !(f > 0.0 && f.is_finite()) {
             continue;
         }
         any = true;
-        let mut residual = np_remainder(bpo * hz_to_octs(f, 0.0, crate::nzu!(12)), 1.0);
+        // numpy.mod(x, 1.0): for finite x, `x - floor(x)` is the same value
+        // (both are the exact fractional part, rounded once when x < 0).
+        let x = bpo * (f / a_ref).log2();
+        let mut residual = x - x.floor();
         if residual >= 0.5 {
             residual -= 1.0;
         }
@@ -1203,10 +1210,15 @@ pub fn pitch_tuning(
         if residual < edges[0] || residual > edges[n_hist] {
             continue;
         }
-        let i = edges
-            .partition_point(|&e| e <= residual)
-            .saturating_sub(1)
-            .min(n_hist - 1);
+        // The bin from the uniform spacing, then moved to where a search over
+        // the edges places it.
+        let mut i = (((residual + 0.5) * n_f) as usize).min(n_hist - 1);
+        while i > 0 && residual < edges[i] {
+            i -= 1;
+        }
+        while i + 1 < n_hist && residual >= edges[i + 1] {
+            i += 1;
+        }
         counts[i] += 1;
     }
     if !any {
@@ -1910,6 +1922,88 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// The previous pitch_tuning loop (hz_to_octs, numpy-style remainder,
+    /// search over the edges), the reference for the optimised one.
+    fn pitch_tuning_reference(frequencies: &[f64], resolution: f64) -> f64 {
+        let n_hist = ((1.0 / resolution).ceil() + 1.0) as usize - 1;
+        let step = 1.0 / n_hist as f64;
+        let mut edges: Vec<f64> = (0..=n_hist).map(|i| i as f64 * step + -0.5).collect();
+        edges[n_hist] = 0.5;
+        let mut counts = vec![0usize; n_hist];
+        let mut any = false;
+        for &f in frequencies {
+            if !(f > 0.0 && f.is_finite()) {
+                continue;
+            }
+            any = true;
+            let mut residual = np_remainder(12.0 * hz_to_octs(f, 0.0, crate::nzu!(12)), 1.0);
+            if residual >= 0.5 {
+                residual -= 1.0;
+            }
+            if residual < edges[0] || residual > edges[n_hist] {
+                continue;
+            }
+            let i = edges
+                .partition_point(|&e| e <= residual)
+                .saturating_sub(1)
+                .min(n_hist - 1);
+            counts[i] += 1;
+        }
+        if !any {
+            return 0.0;
+        }
+        let (mut best, mut best_count) = (0usize, 0usize);
+        for (i, &c) in counts.iter().enumerate() {
+            if c > best_count {
+                best = i;
+                best_count = c;
+            }
+        }
+        edges[best]
+    }
+
+    #[test]
+    fn pitch_tuning_matches_the_reference_loop() {
+        let mut s = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for &res in &[0.01, 0.003, 0.1, 0.37] {
+            for trial in 0..40 {
+                let n = 1 + trial * 37;
+                let v: Vec<f64> = (0..n)
+                    .map(|i| match i % 7 {
+                        0 => 27.5 * 2f64.powf((next() * 120.0).round() / 12.0),
+                        1 => -next(),
+                        _ => 1e-3 + next() * 2e4,
+                    })
+                    .collect();
+                let got = pitch_tuning(&v, res, crate::nzu!(12)).unwrap();
+                assert_eq!(got.to_bits(), pitch_tuning_reference(&v, res).to_bits());
+            }
+            // Exact semitones (residual exactly 0).
+            let v: Vec<f64> = (0..200)
+                .map(|k| 27.5 * 2f64.powf(k as f64 / 12.0))
+                .collect();
+            assert_eq!(
+                pitch_tuning(&v, res, crate::nzu!(12)).unwrap().to_bits(),
+                pitch_tuning_reference(&v, res).to_bits()
+            );
+        }
+        // x - floor(x) equals numpy.mod(x, 1).
+        for _ in 0..100_000 {
+            let x = (next() - 0.5) * 10f64.powi((next() * 12.0) as i32 - 4);
+            assert_eq!(
+                (x - x.floor()).to_bits(),
+                np_remainder(x, 1.0).to_bits(),
+                "{x}"
+            );
+        }
+    }
     use super::*;
     use crate::AudioTypeConversion;
     use crate::sample_rate;
