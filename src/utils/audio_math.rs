@@ -2493,12 +2493,37 @@ pub fn cqt_frequencies(
     bins_per_octave: NonZeroUsize,
     tuning: f64,
 ) -> Vec<f64> {
+    let mut out = vec![0.0; n_bins];
+    cqt_frequencies_into(&mut out, fmin, bins_per_octave, tuning);
+    out
+}
+
+/// [`cqt_frequencies`] written into `out` (one frequency per element, so
+/// `out.len()` is the number of bins), for callers that own the output
+/// buffer (e.g. a NumPy array). Same values as [`cqt_frequencies`].
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::{cqt_frequencies, cqt_frequencies_into};
+///
+/// let mut out = [0.0; 24];
+/// cqt_frequencies_into(&mut out, 32.70319566257483, nzu!(12), 0.0);
+/// assert_eq!(out.to_vec(), cqt_frequencies(24, 32.70319566257483, nzu!(12), 0.0));
+/// ```
+pub fn cqt_frequencies_into(
+    out: &mut [f64],
+    fmin: f64,
+    bins_per_octave: NonZeroUsize,
+    tuning: f64,
+) {
     let bpo = bins_per_octave.get() as f64;
     let correction = 2.0f64.powf(tuning / bpo);
     // Same evaluation order as librosa: (correction * fmin) * 2^(k / bpo).
-    (0..n_bins)
-        .map(|k| correction * fmin * 2.0f64.powf(k as f64 / bpo))
-        .collect()
+    for (k, o) in out.iter_mut().enumerate() {
+        *o = correction * fmin * 2.0f64.powf(k as f64 / bpo);
+    }
 }
 
 /// Pitch class (0 = C) of each natural note letter.
