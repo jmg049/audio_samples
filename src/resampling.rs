@@ -467,7 +467,7 @@ const STAGE_B_EXTRA_DB: f64 = 30.0;
 /// copies) in units of one stage-B multiply-add, measured with AVX2: used to
 /// choose stage A's rate.
 const STAGE_A_COST: f64 = 20.0;
-/// Integer factors (powers of two) up to this run as a single FFT stage.
+/// Decimation factors (powers of two) up to this run as a single FFT stage.
 const FFT_MAX_FACTOR: u64 = 64;
 /// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;
 /// longer filters (decimation by more than ~170 : 1) run directly.
@@ -479,7 +479,7 @@ enum Plan {
     /// One polyphase filter evaluated directly (linear interpolation, and
     /// ratios whose stage-A filter is too long for the FFT path).
     Direct(Arc<Kernel>),
-    /// One filter, an integer up- or down-sampling by a power of two
+    /// One filter, 1 : 2 upsampling or downsampling by a power of two
     /// (`kernel` has `l = up`, `m = down`), evaluated by FFT.
     Fft {
         kernel: Arc<Kernel>,
@@ -557,7 +557,11 @@ fn plan(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> AudioSampleResul
     let g = gcd(u64::from(in_sr), u64::from(out_sr));
     let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
     let power = |f: u64| f.is_power_of_two() && (2..=FFT_MAX_FACTOR).contains(&f);
-    if (m == 1 && power(l)) || (l == 1 && power(m)) {
+    // Upsampling by more than 2 runs as 1 : 2 then a short interpolator:
+    // a single FFT stage would need FFT sizes (and work buffers) of several
+    // times the filter length at the output rate, more than short inputs
+    // need.
+    if (m == 1 && l == 2) || (l == 1 && power(m)) {
         let kernel = cached_kernel(in_sr, out_sr, quality)?;
         if kernel.half * l as usize <= FFT_MAX_HALF {
             return Ok(Plan::Fft {
