@@ -466,7 +466,7 @@ const STAGE_B_EXTRA_DB: f64 = 30.0;
 /// Cost of one stage-A output sample (FFT work, spectrum products and
 /// copies) in units of one stage-B multiply-add, measured with AVX2: used to
 /// choose stage A's rate.
-const STAGE_A_COST: f64 = 30.0;
+const STAGE_A_COST: f64 = 20.0;
 /// Integer factors (powers of two) up to this run as a single FFT stage.
 const FFT_MAX_FACTOR: u64 = 64;
 /// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;
@@ -510,9 +510,16 @@ fn stage_b_shape(in_sr: u32, out_sr: u32, spec: FilterSpec, up: u64) -> (u64, u6
     (l, m, half, transition)
 }
 
+/// Most phases of an exact stage-B table. Its rows are stored in the order
+/// the outputs visit them (see `engine::Interp`), so even a table larger
+/// than the L2 cache is read sequentially.
+const STAGE_B_MAX_EXACT_PHASES: u64 = 1 << 15;
+/// Most coefficients of an exact stage-B table (8 MiB in `f64`).
+const STAGE_B_MAX_EXACT_ENTRIES: u64 = 1 << 20;
+
 /// Whether stage B with `l` phases and `taps` taps gets an exact table.
 fn stage_b_exact(l: u64, taps: usize) -> bool {
-    l <= MAX_EXACT_PHASES && l.saturating_mul(taps as u64) <= MAX_TABLE_ENTRIES
+    l <= STAGE_B_MAX_EXACT_PHASES && l.saturating_mul(taps as u64) <= STAGE_B_MAX_EXACT_ENTRIES
 }
 
 /// Stage A's rate factor for a two-stage conversion: 2 when upsampling;

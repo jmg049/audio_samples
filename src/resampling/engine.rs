@@ -369,7 +369,7 @@ fn fft_size(g: usize, up: usize, down: usize) -> usize {
     let unit = up.max(down);
     let fft = |s: usize| {
         let lg = (s as f64).log2();
-        s as f64 * lg * (1.0 + 0.1 * (lg - 11.0).max(0.0))
+        s as f64 * lg * (1.0 + 0.2 * (lg - 11.0).max(0.0))
     };
     (6..=20)
         .map(|e| 1usize << e)
@@ -609,9 +609,21 @@ impl<F: RsFloat> Interp<F> {
         let taps = kernel.taps.next_multiple_of(lanes);
         let rows = kernel.coeffs.len() / kernel.taps;
         let mut coeffs = Vec::with_capacity(rows * taps);
-        for row in kernel.coeffs.chunks_exact(kernel.taps) {
+        let mut push = |row: &[f64]| {
             coeffs.extend(row.iter().map(|&c| F::of(c)));
             coeffs.resize(coeffs.len() + taps - kernel.taps, F::zero());
+        };
+        if kernel.exact {
+            // Output k uses phase (k · m) mod l: store the rows in that order,
+            // so that consecutive outputs read consecutive rows.
+            let mut p = 0u64;
+            for _ in 0..rows {
+                let r = p as usize * kernel.taps;
+                push(&kernel.coeffs[r..r + kernel.taps]);
+                p = (p + kernel.m) % kernel.l;
+            }
+        } else {
+            kernel.coeffs.chunks_exact(kernel.taps).for_each(&mut push);
         }
         Self {
             l: kernel.l,
@@ -648,13 +660,16 @@ impl<F: RsFloat> Interp<F> {
         let last_row = self.phases as i64 - 1;
         let pos_scale = self.pos_scale;
         let coeffs = &self.coeffs[..];
+        let rows = l as usize;
+        let mut q = if EXACT { (j as u64 % l) as usize } else { 0 };
         // Window start of output j, relative to `buf`.
         let mut s = n0 - self.half as i64 + 1 - buf_start;
         let s_end = buf.len() as i64 - taps as i64;
         while j < out.len() && s <= s_end {
             let window = &buf[s as usize..s as usize + taps];
             let v = if EXACT {
-                let r = p as usize * taps;
+                // Rows are in visiting order: output j uses row j mod l.
+                let r = q * taps;
                 F::dot::<FMA>(&coeffs[r..r + taps], window)
             } else {
                 let pos = p as f64 * pos_scale;
@@ -670,6 +685,12 @@ impl<F: RsFloat> Interp<F> {
             };
             out[j].write(from_f(v));
             j += 1;
+            if EXACT {
+                q += 1;
+                if q == rows {
+                    q = 0;
+                }
+            }
             // Branch-free phase step (the wrap pattern is irregular).
             p += step_frac;
             let wrap = u64::from(p >= l);
