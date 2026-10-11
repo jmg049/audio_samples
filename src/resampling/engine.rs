@@ -51,6 +51,14 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
         p: &[Complex<Self>],
         q: &[Complex<Self>],
     );
+    /// [`RsFloat::down2_bins`] with `Zb = 0`: `w = Z · P + conj(Z[-k]) · Q`
+    /// (see [`FftStage::pair_fir2`]).
+    fn fir2_bins(
+        w: &mut [Complex<Self>],
+        z: &[Complex<Self>],
+        p: &[Complex<Self>],
+        q: &[Complex<Self>],
+    );
     /// Complex products `dst[i] = a[i] · b[i]` (`ACC`: `dst[i] += ...`).
     fn cmul<const ACC: bool>(dst: &mut [Complex<Self>], a: &[Complex<Self>], b: &[Complex<Self>]);
     /// Runs `f` with this thread's complex FFT planner for this type.
@@ -105,10 +113,26 @@ macro_rules! rs_float {
                 #[cfg(target_arch = "x86_64")]
                 if super::has_avx2_fma_cached() {
                     // SAFETY: AVX2 and FMA support was checked just above.
-                    unsafe { simd::$down2(w, za, zb, p, q) };
+                    unsafe { simd::$down2::<true>(w, za, zb, p, q) };
                     return;
                 }
-                down2_bins_portable(w, za, zb, p, q, 0, w.len());
+                down2_bins_portable::<_, true>(w, za, zb, p, q, 0, w.len());
+            }
+
+            #[inline(always)]
+            fn fir2_bins(
+                w: &mut [Complex<Self>],
+                z: &[Complex<Self>],
+                p: &[Complex<Self>],
+                q: &[Complex<Self>],
+            ) {
+                #[cfg(target_arch = "x86_64")]
+                if super::has_avx2_fma_cached() {
+                    // SAFETY: AVX2 and FMA support was checked just above.
+                    unsafe { simd::$down2::<false>(w, z, z, p, q) };
+                    return;
+                }
+                down2_bins_portable::<_, false>(w, z, z, p, q, 0, w.len());
             }
 
             #[inline(always)]
@@ -407,6 +431,10 @@ struct FftStage<F> {
     /// `spec` is then empty and these are `P = (G_e - i G_o) / 2` and
     /// `Q = (G_e + i G_o) / 2` (`n / 2` bins each).
     down2: Option<Down2<F>>,
+    /// Plain FIR (`up = down = 1`, `f64`) in polyphase form (see
+    /// [`FftStage::pair_fir2`]): `spec` is then empty and these are
+    /// `P = G_e + i (G_o - G_o') / 2` and `Q = i (G_o + G_o') / 2`.
+    fir2: Option<Down2<F>>,
 }
 
 /// The `P` and `Q` spectra of the polyphase 2 : 1 stage.
@@ -496,6 +524,61 @@ impl<F: RsFloat> FftStage<F> {
                 fwd,
                 inv,
                 down2: Some(pq),
+                fir2: None,
+            };
+        }
+        // f64 only: there the size-n transforms cost ~2.5x the size-n/2 ones
+        // (L1 cache), so two half-size transforms per block win; in f32 the
+        // ratio is ~2.2 and the extra spectrum pass eats the gain.
+        if up == 1 && down == 1 && std::mem::size_of::<F>() == 8 {
+            // Polyphase FIR: with x_e[k] = x[2k], x_o[k] = x[2k + 1],
+            // g_e[e] = g[2e], g_o[e] = g[2e + 1], g_o'[e] = g[2e - 1]:
+            // y_e = g_e * x_e + g_o' * x_o and y_o = g_o * x_e + g_e * x_o,
+            // so W = Y_e + i Y_o = Z P + Z* Q with Z = FFT(x_e + i x_o).
+            let half_n = n / 2;
+            let zero = Complex::new(0.0f64, 0.0);
+            let (mut ge, mut go, mut gp) =
+                (vec![zero; half_n], vec![zero; half_n], vec![zero; half_n]);
+            for (i, c) in gw.iter().enumerate() {
+                let d = if i < n / 2 {
+                    i as i64
+                } else {
+                    i as i64 - n as i64
+                };
+                let v = Complex::new(c.re * 2.0, 0.0); // scale 1 / (n / 2)
+                let at = |e: i64| e.rem_euclid(half_n as i64) as usize;
+                if d.rem_euclid(2) == 0 {
+                    ge[at(d / 2)] = v;
+                } else {
+                    go[at((d - 1) / 2)] = v;
+                    gp[at((d + 1) / 2)] = v;
+                }
+            }
+            let plan = f64::with_planner(|p| p.plan_fft_forward(half_n));
+            for v in [&mut ge, &mut go, &mut gp] {
+                plan.process(v);
+            }
+            let i = Complex::new(0.0, 1.0);
+            let pq: (Vec<_>, Vec<_>) = (0..half_n)
+                .map(|k| {
+                    let p = ge[k] + i * (go[k] - gp[k]) * 0.5;
+                    let q = i * (go[k] + gp[k]) * 0.5;
+                    (to_f(&p), to_f(&q))
+                })
+                .unzip();
+            let (fwd, inv) =
+                F::with_planner(|p| (p.plan_fft_forward(half_n), p.plan_fft_inverse(half_n)));
+            return Self {
+                up,
+                down,
+                n,
+                g,
+                hop,
+                spec: Vec::new(),
+                fwd,
+                inv,
+                down2: None,
+                fir2: Some(pq),
             };
         }
         let plan = f64::with_planner(|p| p.plan_fft_forward(n));
@@ -513,6 +596,7 @@ impl<F: RsFloat> FftStage<F> {
             fwd,
             inv,
             down2: None,
+            fir2: None,
         }
     }
 
@@ -524,6 +608,10 @@ impl<F: RsFloat> FftStage<F> {
     fn pair<T: Copy>(&self, x: &[T], to_f: &impl Fn(T) -> F, m0: i64, bufs: &mut PairBufs<F>) {
         if let Some((p, q)) = &self.down2 {
             self.pair_down2(x, to_f, m0, bufs, p, q);
+            return;
+        }
+        if let Some((p, q)) = &self.fir2 {
+            self.pair_fir2(x, to_f, m0, bufs, p, q);
             return;
         }
         let up = self.up as i64;
@@ -610,6 +698,44 @@ impl<F: RsFloat> FftStage<F> {
     }
 }
 
+impl<F: RsFloat> FftStage<F> {
+    /// [`FftStage::pair`] for a plain FIR in polyphase form: each block's
+    /// segment is read as `x_e + i x_o` (half-size transform) and its even and
+    /// odd outputs come out of one half-size inverse transform as real and
+    /// imaginary parts, i.e. interleaved in memory.
+    #[inline(always)]
+    fn pair_fir2<T: Copy>(
+        &self,
+        x: &[T],
+        to_f: &impl Fn(T) -> F,
+        m0: i64,
+        bufs: &mut PairBufs<F>,
+        p: &[Complex<F>],
+        q: &[Complex<F>],
+    ) {
+        let half_n = self.n / 2;
+        let first = self.g / 2;
+        let per = self.hop / 2;
+        for (blk, dst) in [(0, &mut bufs.ya), (1, &mut bufs.yb)] {
+            let start = m0 - self.g as i64 + blk * self.hop as i64;
+            let z = &mut bufs.z[..half_n];
+            load_even_odd(x, to_f, start, z);
+            let zf = &mut bufs.zf[..half_n];
+            self.fwd
+                .process_outofplace_with_scratch(z, zf, &mut bufs.scratch);
+            let w = &mut bufs.w[..half_n];
+            F::fir2_bins(w, zf, p, q);
+            let y = &mut bufs.y[..half_n];
+            self.inv
+                .process_outofplace_with_scratch(w, y, &mut bufs.scratch);
+            for (d, v) in dst.chunks_exact_mut(2).zip(&y[first..first + per]) {
+                d[0] = v.re;
+                d[1] = v.im;
+            }
+        }
+    }
+}
+
 /// Fills `z[k]` with `(x[start + 2k], x[start + 2k + 1])`, zero outside `x`.
 #[inline(always)]
 fn load_even_odd<T: Copy, F: RsFloat>(
@@ -676,7 +802,7 @@ impl<F: RsFloat> PairBufs<F> {
 
 /// [`RsFloat::down2_bins`] for bins `from..to`, portable.
 #[inline(always)]
-fn down2_bins_portable<F: RsFloat>(
+fn down2_bins_portable<F: RsFloat, const TWO: bool>(
     w: &mut [Complex<F>],
     za: &[Complex<F>],
     zb: &[Complex<F>],
@@ -688,8 +814,9 @@ fn down2_bins_portable<F: RsFloat>(
     let n = w.len();
     for k in from..to {
         let kr = if k == 0 { 0 } else { n - k };
-        let (a, b) = (za[k], zb[k]);
-        let (ar, br) = (za[kr], zb[kr]);
+        let zero = Complex::new(F::zero(), F::zero());
+        let (a, b) = (za[k], if TWO { zb[k] } else { zero });
+        let (ar, br) = (za[kr], if TWO { zb[kr] } else { zero });
         let av = Complex::new(a.re - b.im, a.im + b.re);
         let bv = Complex::new(ar.re + br.im, br.re - ar.im);
         let (pk, qk) = (p[k], q[k]);
@@ -1067,7 +1194,7 @@ mod simd {
     /// # Safety
     /// The CPU must support AVX2 and FMA; all slices have `w.len()` elements.
     #[target_feature(enable = "avx2,fma")]
-    pub(super) unsafe fn down2_f64(
+    pub(super) unsafe fn down2_f64<const TWO: bool>(
         w: &mut [Complex<f64>],
         za: &[Complex<f64>],
         zb: &[Complex<f64>],
@@ -1076,7 +1203,7 @@ mod simd {
     ) {
         let n = w.len();
         assert!(za.len() == n && zb.len() == n && p.len() == n && q.len() == n);
-        super::down2_bins_portable(w, za, zb, p, q, 0, 1.min(n));
+        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, 0, 1.min(n));
         let (pw, pa, pb) = (
             w.as_mut_ptr().cast::<f64>(),
             za.as_ptr().cast::<f64>(),
@@ -1091,16 +1218,24 @@ mod simd {
             // bounds (1 <= k, k + 2 <= n).
             unsafe {
                 let a = _mm256_loadu_pd(pa.add(2 * k));
-                let b = _mm256_loadu_pd(pb.add(2 * k));
+                let b = if TWO {
+                    _mm256_loadu_pd(pb.add(2 * k))
+                } else {
+                    _mm256_setzero_pd()
+                };
                 // Mirrors: load bins n - k - 1, n - k and swap the halves.
                 let ar = _mm256_permute2f128_pd::<1>(
                     _mm256_loadu_pd(pa.add(2 * (n - k - 1))),
                     _mm256_loadu_pd(pa.add(2 * (n - k - 1))),
                 );
-                let br = _mm256_permute2f128_pd::<1>(
-                    _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
-                    _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
-                );
+                let br = if TWO {
+                    _mm256_permute2f128_pd::<1>(
+                        _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
+                        _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
+                    )
+                } else {
+                    _mm256_setzero_pd()
+                };
                 // A = a + i b = (a.re - b.im, a.im + b.re).
                 let av = _mm256_addsub_pd(a, _mm256_permute_pd::<0b0101>(b));
                 // B = conj(ar) + i conj(br) = (ar.re + br.im, br.re - ar.im).
@@ -1113,7 +1248,7 @@ mod simd {
             }
             k += 2;
         }
-        super::down2_bins_portable(w, za, zb, p, q, k, n);
+        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, k, n);
     }
 
     /// `super::RsFloat::down2_bins` for `f32`, four bins per vector.
@@ -1121,7 +1256,7 @@ mod simd {
     /// # Safety
     /// The CPU must support AVX2 and FMA; all slices have `w.len()` elements.
     #[target_feature(enable = "avx2,fma")]
-    pub(super) unsafe fn down2_f32(
+    pub(super) unsafe fn down2_f32<const TWO: bool>(
         w: &mut [Complex<f32>],
         za: &[Complex<f32>],
         zb: &[Complex<f32>],
@@ -1130,7 +1265,7 @@ mod simd {
     ) {
         let n = w.len();
         assert!(za.len() == n && zb.len() == n && p.len() == n && q.len() == n);
-        super::down2_bins_portable(w, za, zb, p, q, 0, 1.min(n));
+        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, 0, 1.min(n));
         let (pw, pa, pb) = (
             w.as_mut_ptr().cast::<f32>(),
             za.as_ptr().cast::<f32>(),
@@ -1146,9 +1281,17 @@ mod simd {
             // in bounds (1 <= k, k + 4 <= n).
             unsafe {
                 let a = _mm256_loadu_ps(pa.add(2 * k));
-                let b = _mm256_loadu_ps(pb.add(2 * k));
+                let b = if TWO {
+                    _mm256_loadu_ps(pb.add(2 * k))
+                } else {
+                    _mm256_setzero_ps()
+                };
                 let ar = _mm256_permutevar8x32_ps(_mm256_loadu_ps(pa.add(2 * (n - k - 3))), rev);
-                let br = _mm256_permutevar8x32_ps(_mm256_loadu_ps(pb.add(2 * (n - k - 3))), rev);
+                let br = if TWO {
+                    _mm256_permutevar8x32_ps(_mm256_loadu_ps(pb.add(2 * (n - k - 3))), rev)
+                } else {
+                    _mm256_setzero_ps()
+                };
                 let av = _mm256_addsub_ps(a, _mm256_permute_ps::<0b1011_0001>(b));
                 let bv = _mm256_add_ps(
                     _mm256_xor_ps(ar, conj),
@@ -1162,7 +1305,7 @@ mod simd {
             }
             k += 4;
         }
-        super::down2_bins_portable(w, za, zb, p, q, k, n);
+        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, k, n);
     }
 
     /// `dst[i] (+)= a[i] · b[i]` over the common length.
