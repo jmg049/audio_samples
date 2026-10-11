@@ -6,7 +6,9 @@ Writes, into OUT_DIR:
 
 * ``table_full.md``: every case and configuration;
 * ``table_main.md``: one row per case at the canonical configuration;
-* ``slower.md``: every row where audio_samples is slower or uses more memory;
+* ``slower.md``: every row where audio_samples is slower or uses more memory by more than 5%;
+* ``not_faster.md``: every row with any ratio above 1;
+* ``before_after.md`` (with ``--baseline``): one row per case, before and after;
 * ``aggregates.md``: geometric-mean time ratios by input property;
 * ``rss.md``, ``default_threads.md``;
 * ``merged.json``: the merged records.
@@ -32,6 +34,7 @@ sys.path.insert(0, HERE)
 ap = argparse.ArgumentParser()
 ap.add_argument("out")
 ap.add_argument("--canonical", default="22050_10s_mono_f32")
+ap.add_argument("--baseline", default=None, help="an earlier run's directory (with merged.json): adds before/after tables")
 args = ap.parse_args()
 
 BAND = 0.05
@@ -255,6 +258,9 @@ write_table("table_main.md", f"One row per case ({args.canonical} where the case
 slower = [r for r in rows if (r["ratio_py"] or 0) > 1 + BAND or (r["ratio_rust"] or 0) > 1 + BAND
           or (r["mem_ratio"] or 0) > 1 + BAND]
 write_table("slower.md", "Rows where audio_samples is slower or larger", slower, INTRO)
+strict = [r for r in rows if (r["ratio_py"] or 0) > 1 or (r["ratio_rust"] or 0) > 1 or (r["mem_ratio"] or 0) > 1]
+write_table("not_faster.md", "Rows where audio_samples is not faster or not smaller (any ratio above 1)",
+            strict, INTRO)
 
 
 # aggregates
@@ -323,5 +329,32 @@ with open(os.path.join(args.out, "default_threads.md"), "w") as f:
         f.write(f"| {r['func']} [{r['case']}] | {r['config']} | {fms(r['librosa_ms'])} | {fms(r['librosa_default_ms'])} "
                 f"| {fms(r['ours_py_ms'])} | {fms(r['ours_default_ms'])} | {fms(r['rust_ms'])} "
                 f"| {fms(r['rust_default_ms'])} |\n")
+
+if args.baseline:
+    base = {(r["case"], r["config"]): r for r in json.load(open(os.path.join(args.baseline, "merged.json")))}
+
+    def ba(key, r, b):
+        x, y = b.get(key) if b else None, r.get(key)
+        return f"{fms(x)} -> {fms(y)}"
+
+    with open(os.path.join(args.out, "before_after.md"), "w") as f:
+        f.write("# Before (baseline) and after, one row per case\n\n"
+                "Median ms and memray peak; librosa from the current run. Ratio = ours (py) / librosa.\n\n"
+                "| function | input | librosa ms | ours py ms before -> after | ours rust ms before -> after "
+                "| ratio py before -> after | peak py before -> after | librosa peak |\n"
+                "|---|---|---:|---:|---:|---:|---:|---:|\n")
+        for r in main_rows:
+            b = base.get((r["case"], r["config"]))
+            rb = b.get("ratio_py") if b else None
+            f.write(f"| {r['func']} [{r['case']}] | {r['config']} | {fms(r['librosa_ms'])} "
+                    f"| {ba('ours_py_ms', r, b)} | {ba('rust_ms', r, b)} | {fratio(rb)} -> {fratio(r['ratio_py'])} "
+                    f"| {fbytes(b.get('ours_peak') if b else None)} -> {fbytes(r['ours_peak'])} "
+                    f"| {fbytes(r['librosa_peak'])} |\n")
+        both = [(base[(r["case"], r["config"])], r) for r in rows if (r["case"], r["config"]) in base]
+        f.write("\nGeometric-mean ratios over the rows present in both runs (py, rust, memory py): before "
+                f"{fratio(gmean(b['ratio_py'] for b, _ in both))}, {fratio(gmean(b['ratio_rust'] for b, _ in both))}, "
+                f"{fratio(gmean(b['mem_ratio'] for b, _ in both))}; after "
+                f"{fratio(gmean(r['ratio_py'] for _, r in both))}, {fratio(gmean(r['ratio_rust'] for _, r in both))}, "
+                f"{fratio(gmean(r['mem_ratio'] for _, r in both))}\n")
 
 print(f"{len(rows)} rows; {len(slower)} with audio_samples slower or larger; written to {args.out}")
