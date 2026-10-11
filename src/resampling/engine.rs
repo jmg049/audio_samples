@@ -41,6 +41,16 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
     fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self;
     /// `(1 - frac) · (a · w) + frac · (b · w)` in one pass over `w`.
     fn interp<const FMA: bool>(a: &[Self], b: &[Self], w: &[Self], frac: Self) -> Self;
+    /// The 2 : 1 polyphase spectrum (see [`FftStage::pair_down2`]):
+    /// `w[k] = A[k] P[k] + B[k] Q[k]` with `A = Za + i Zb` and
+    /// `B[k] = conj(Za[-k]) + i conj(Zb[-k])`.
+    fn down2_bins(
+        w: &mut [Complex<Self>],
+        za: &[Complex<Self>],
+        zb: &[Complex<Self>],
+        p: &[Complex<Self>],
+        q: &[Complex<Self>],
+    );
     /// Complex products `dst[i] = a[i] · b[i]` (`ACC`: `dst[i] += ...`).
     fn cmul<const ACC: bool>(dst: &mut [Complex<Self>], a: &[Complex<Self>], b: &[Complex<Self>]);
     /// Runs `f` with this thread's complex FFT planner for this type.
@@ -61,7 +71,7 @@ thread_local! {
 }
 
 macro_rules! rs_float {
-    ($t:ty, $dot:ident, $interp:ident, $cmul:ident, $planner:ident, $engines:ident) => {
+    ($t:ty, $dot:ident, $interp:ident, $cmul:ident, $down2:ident, $planner:ident, $engines:ident) => {
         impl RsFloat for $t {
             #[inline(always)]
             fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self {
@@ -82,6 +92,23 @@ macro_rules! rs_float {
                     return unsafe { simd::$interp(a, b, w, frac) };
                 }
                 (1.0 - frac) * dot_portable(a, w) + frac * dot_portable(b, w)
+            }
+
+            #[inline(always)]
+            fn down2_bins(
+                w: &mut [Complex<Self>],
+                za: &[Complex<Self>],
+                zb: &[Complex<Self>],
+                p: &[Complex<Self>],
+                q: &[Complex<Self>],
+            ) {
+                #[cfg(target_arch = "x86_64")]
+                if super::has_avx2_fma_cached() {
+                    // SAFETY: AVX2 and FMA support was checked just above.
+                    unsafe { simd::$down2(w, za, zb, p, q) };
+                    return;
+                }
+                down2_bins_portable(w, za, zb, p, q, 0, w.len());
             }
 
             #[inline(always)]
@@ -110,8 +137,24 @@ macro_rules! rs_float {
     };
 }
 
-rs_float!(f32, dot_f32, interp_f32, cmul_f32, PLANNER_F32, ENGINES_F32);
-rs_float!(f64, dot_f64, interp_f64, cmul_f64, PLANNER_F64, ENGINES_F64);
+rs_float!(
+    f32,
+    dot_f32,
+    interp_f32,
+    cmul_f32,
+    down2_f32,
+    PLANNER_F32,
+    ENGINES_F32
+);
+rs_float!(
+    f64,
+    dot_f64,
+    interp_f64,
+    cmul_f64,
+    down2_f64,
+    PLANNER_F64,
+    ENGINES_F64
+);
 
 /// Most engines kept per thread and float type.
 const ENGINE_CACHE_ENTRIES: usize = 16;
@@ -412,9 +455,7 @@ impl<F: RsFloat> FftStage<F> {
             }
         }
         let to_f = |c: &Complex<f64>| Complex::new(F::of(c.re), F::of(c.im));
-        // In f32 the FFTs are cheap enough that the extra spectrum pass of the
-        // polyphase form costs more than the smaller forward transform saves.
-        if up == 1 && down == 2 && std::mem::size_of::<F>() == 8 {
+        if up == 1 && down == 2 {
             // Polyphase: c[2t] = (g_e * s_e)[t] + (g_o * s_o)[t] with
             // g_e[e] = g[2e], g_o[e] = g[2e - 1], s_e[k] = s[2k], s_o[k] = s[2k + 1].
             let half_n = n / 2;
@@ -556,19 +597,7 @@ impl<F: RsFloat> FftStage<F> {
         self.fwd
             .process_outofplace_with_scratch(zb, fb, &mut bufs.scratch);
         let w = &mut bufs.w[..half_n];
-        for k in 0..half_n {
-            let kr = if k == 0 { 0 } else { half_n - k };
-            // A = Za + i Zb, B = conj(Za[-k]) + i conj(Zb[-k]).
-            let (a, b) = (fa[k], fb[k]);
-            let (ar, br) = (fa[kr], fb[kr]);
-            let av = Complex::new(a.re - b.im, a.im + b.re);
-            let bv = Complex::new(ar.re + br.im, br.re - ar.im);
-            let (pk, qk) = (p[k], q[k]);
-            w[k] = Complex::new(
-                av.re * pk.re - av.im * pk.im + bv.re * qk.re - bv.im * qk.im,
-                av.re * pk.im + av.im * pk.re + bv.re * qk.im + bv.im * qk.re,
-            );
-        }
+        F::down2_bins(w, fa, fb, p, q);
         let y = &mut bufs.y[..half_n];
         self.inv
             .process_outofplace_with_scratch(w, y, &mut bufs.scratch);
@@ -642,6 +671,32 @@ impl<F: RsFloat> PairBufs<F> {
             yb: vec![F::zero(); a.hop / a.down],
             scratch: vec![zero; scratch],
         }
+    }
+}
+
+/// [`RsFloat::down2_bins`] for bins `from..to`, portable.
+#[inline(always)]
+fn down2_bins_portable<F: RsFloat>(
+    w: &mut [Complex<F>],
+    za: &[Complex<F>],
+    zb: &[Complex<F>],
+    p: &[Complex<F>],
+    q: &[Complex<F>],
+    from: usize,
+    to: usize,
+) {
+    let n = w.len();
+    for k in from..to {
+        let kr = if k == 0 { 0 } else { n - k };
+        let (a, b) = (za[k], zb[k]);
+        let (ar, br) = (za[kr], zb[kr]);
+        let av = Complex::new(a.re - b.im, a.im + b.re);
+        let bv = Complex::new(ar.re + br.im, br.re - ar.im);
+        let (pk, qk) = (p[k], q[k]);
+        w[k] = Complex::new(
+            av.re * pk.re - av.im * pk.im + bv.re * qk.re - bv.im * qk.im,
+            av.re * pk.im + av.im * pk.re + bv.re * qk.im + bv.im * qk.re,
+        );
     }
 }
 
@@ -983,6 +1038,131 @@ mod simd {
         }
         let d = _mm256_sub_pd(acc_b, acc_a);
         hsum_pd(_mm256_fmadd_pd(_mm256_set1_pd(frac), d, acc_a))
+    }
+
+    /// Complex product of interleaved (re, im) pairs: `a · b`.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn cmul_pd(a: __m256d, b: __m256d) -> __m256d {
+        let br = _mm256_movedup_pd(b);
+        let bi = _mm256_permute_pd::<0b1111>(b);
+        _mm256_fmaddsub_pd(a, br, _mm256_mul_pd(_mm256_permute_pd::<0b0101>(a), bi))
+    }
+
+    /// Complex product of interleaved (re, im) pairs: `a · b`.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn cmul_ps(a: __m256, b: __m256) -> __m256 {
+        let br = _mm256_moveldup_ps(b);
+        let bi = _mm256_movehdup_ps(b);
+        _mm256_fmaddsub_ps(
+            a,
+            br,
+            _mm256_mul_ps(_mm256_permute_ps::<0b1011_0001>(a), bi),
+        )
+    }
+
+    /// `super::RsFloat::down2_bins` for `f64`, two bins per vector.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA; all slices have `w.len()` elements.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn down2_f64(
+        w: &mut [Complex<f64>],
+        za: &[Complex<f64>],
+        zb: &[Complex<f64>],
+        p: &[Complex<f64>],
+        q: &[Complex<f64>],
+    ) {
+        let n = w.len();
+        assert!(za.len() == n && zb.len() == n && p.len() == n && q.len() == n);
+        super::down2_bins_portable(w, za, zb, p, q, 0, 1.min(n));
+        let (pw, pa, pb) = (
+            w.as_mut_ptr().cast::<f64>(),
+            za.as_ptr().cast::<f64>(),
+            zb.as_ptr().cast::<f64>(),
+        );
+        let (pp, pq) = (p.as_ptr().cast::<f64>(), q.as_ptr().cast::<f64>());
+        // Imaginary parts negated: conj.
+        let conj = _mm256_set_pd(-0.0, 0.0, -0.0, 0.0);
+        let mut k = 1;
+        while k + 2 <= n {
+            // SAFETY: bins k, k + 1 and their mirrors n - k - 1, n - k are in
+            // bounds (1 <= k, k + 2 <= n).
+            unsafe {
+                let a = _mm256_loadu_pd(pa.add(2 * k));
+                let b = _mm256_loadu_pd(pb.add(2 * k));
+                // Mirrors: load bins n - k - 1, n - k and swap the halves.
+                let ar = _mm256_permute2f128_pd::<1>(
+                    _mm256_loadu_pd(pa.add(2 * (n - k - 1))),
+                    _mm256_loadu_pd(pa.add(2 * (n - k - 1))),
+                );
+                let br = _mm256_permute2f128_pd::<1>(
+                    _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
+                    _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
+                );
+                // A = a + i b = (a.re - b.im, a.im + b.re).
+                let av = _mm256_addsub_pd(a, _mm256_permute_pd::<0b0101>(b));
+                // B = conj(ar) + i conj(br) = (ar.re + br.im, br.re - ar.im).
+                let bv = _mm256_add_pd(_mm256_xor_pd(ar, conj), _mm256_permute_pd::<0b0101>(br));
+                let r = _mm256_add_pd(
+                    cmul_pd(av, _mm256_loadu_pd(pp.add(2 * k))),
+                    cmul_pd(bv, _mm256_loadu_pd(pq.add(2 * k))),
+                );
+                _mm256_storeu_pd(pw.add(2 * k), r);
+            }
+            k += 2;
+        }
+        super::down2_bins_portable(w, za, zb, p, q, k, n);
+    }
+
+    /// `super::RsFloat::down2_bins` for `f32`, four bins per vector.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA; all slices have `w.len()` elements.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn down2_f32(
+        w: &mut [Complex<f32>],
+        za: &[Complex<f32>],
+        zb: &[Complex<f32>],
+        p: &[Complex<f32>],
+        q: &[Complex<f32>],
+    ) {
+        let n = w.len();
+        assert!(za.len() == n && zb.len() == n && p.len() == n && q.len() == n);
+        super::down2_bins_portable(w, za, zb, p, q, 0, 1.min(n));
+        let (pw, pa, pb) = (
+            w.as_mut_ptr().cast::<f32>(),
+            za.as_ptr().cast::<f32>(),
+            zb.as_ptr().cast::<f32>(),
+        );
+        let (pp, pq) = (p.as_ptr().cast::<f32>(), q.as_ptr().cast::<f32>());
+        let conj = _mm256_set_ps(-0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0);
+        // Reverses the order of the four complex values in a vector.
+        let rev = _mm256_set_epi32(1, 0, 3, 2, 5, 4, 7, 6);
+        let mut k = 1;
+        while k + 4 <= n {
+            // SAFETY: bins k .. k + 4 and their mirrors n - k - 3 ..= n - k are
+            // in bounds (1 <= k, k + 4 <= n).
+            unsafe {
+                let a = _mm256_loadu_ps(pa.add(2 * k));
+                let b = _mm256_loadu_ps(pb.add(2 * k));
+                let ar = _mm256_permutevar8x32_ps(_mm256_loadu_ps(pa.add(2 * (n - k - 3))), rev);
+                let br = _mm256_permutevar8x32_ps(_mm256_loadu_ps(pb.add(2 * (n - k - 3))), rev);
+                let av = _mm256_addsub_ps(a, _mm256_permute_ps::<0b1011_0001>(b));
+                let bv = _mm256_add_ps(
+                    _mm256_xor_ps(ar, conj),
+                    _mm256_permute_ps::<0b1011_0001>(br),
+                );
+                let r = _mm256_add_ps(
+                    cmul_ps(av, _mm256_loadu_ps(pp.add(2 * k))),
+                    cmul_ps(bv, _mm256_loadu_ps(pq.add(2 * k))),
+                );
+                _mm256_storeu_ps(pw.add(2 * k), r);
+            }
+            k += 4;
+        }
+        super::down2_bins_portable(w, za, zb, p, q, k, n);
     }
 
     /// `dst[i] (+)= a[i] · b[i]` over the common length.

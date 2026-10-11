@@ -2042,6 +2042,51 @@ mod tests {
         }
     }
 
+    /// The `f32` engine (its own SIMD kernels) computes the same filter as the
+    /// `f64` one, to `f32` round-off.
+    #[test]
+    fn test_f32_engine_matches_f64() {
+        for (in_sr, out_sr) in [
+            (44100, 22050),
+            (22050, 44100),
+            (22050, 16000),
+            (16000, 22050),
+            (22050, 17501),
+            (1, 8),
+            (8, 1),
+        ] {
+            let n = 20011;
+            let x: Vec<f64> = (0..n)
+                .map(|i| 0.5 * (i as f64 * 0.37).sin() + 0.3 * (i as f64 * 0.0123).cos())
+                .collect();
+            let x32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+            let r64 = resample(
+                &mono(x, SampleRate::new(in_sr).unwrap()),
+                SampleRate::new(out_sr).unwrap(),
+                ResamplingQuality::High,
+            )
+            .unwrap();
+            let a32 =
+                AudioSamples::new_mono(Array1::from(x32), SampleRate::new(in_sr).unwrap()).unwrap();
+            let r32 = resample(
+                &a32,
+                SampleRate::new(out_sr).unwrap(),
+                ResamplingQuality::High,
+            )
+            .unwrap();
+            let (y64, y32) = (
+                r64.as_mono().unwrap().to_vec(),
+                r32.as_mono().unwrap().to_vec(),
+            );
+            assert_eq!(y64.len(), y32.len());
+            let err = y64
+                .iter()
+                .zip(&y32)
+                .fold(0.0f64, |m, (a, b)| m.max((a - f64::from(*b)).abs()));
+            assert!(err < 2e-6, "{in_sr} -> {out_sr}: {err:e}");
+        }
+    }
+
     /// The per-thread kernel cache stays bounded however many distinct ratios
     /// are used, and keeps recently used kernels.
     #[test]
