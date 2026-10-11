@@ -3525,24 +3525,122 @@ pub fn metrogram<F: AudioFloat>(
     let order = argsort_stable(freqs);
     let xs: Vec<f64> = order.iter().map(|&k| freqs[k]).collect();
     let fill = F::of(fill_value);
-    let mut ys = vec![F::zero(); n_f];
-    let mut prod = vec![F::zero(); n_f];
-    let mut scratch = Vec::new();
+    // The interpolation points `factor * freqs[f]` do not depend on the
+    // channel or the frame, so each one's bracketing bins and weights are
+    // found once. The values are then computed with the operations of
+    // `interp_linear` (identical results), whole rows at a time.
+    let points: Vec<Vec<Bracket<F>>> = factors
+        .iter()
+        .map(|&factor| {
+            freqs
+                .iter()
+                .map(|&f| Bracket::new(&xs, &order, factor * f))
+                .collect()
+        })
+        .collect();
     let mut out = Array3::<F>::zeros((n_ch, factors.len(), n_t));
+    if n_t == 0 {
+        return Ok(out);
+    }
+    let mut prod = vec![F::zero(); n_t];
+    let mut column = vec![F::zero(); n_f];
+    let mut products = Vec::new();
+    let mut scratch = Vec::new();
     for c in 0..n_ch {
-        for t in 0..n_t {
-            for (y, &k) in ys.iter_mut().zip(&order) {
-                *y = tempogram[[c, k, t]];
+        // Rows of the channel as contiguous slices (copied once if the input
+        // rows are strided).
+        let chan = tempogram.index_axis(Axis(0), c);
+        let chan = chan.as_standard_layout();
+        let rows: Vec<&[F]> = chan
+            .as_slice()
+            .expect("standard layout")
+            .chunks_exact(n_t)
+            .collect();
+        for (h, pts) in points.iter().enumerate() {
+            let mut acc = out.slice_mut(ndarray::s![c, h, ..]);
+            let acc = acc.as_slice_mut().expect("standard layout");
+            let sum = matches!(aggregate, Aggregate::Sum | Aggregate::Mean);
+            if !sum {
+                products.clear();
+                products.resize(n_f * n_t, F::zero());
             }
-            for (h, &factor) in factors.iter().enumerate() {
-                for (f, p) in prod.iter_mut().enumerate() {
-                    *p = interp_linear(&xs, &ys, factor * freqs[f], fill) * tempogram[[c, f, t]];
+            for (f, b) in pts.iter().enumerate() {
+                let tgf = rows[f];
+                // prod[t] = interp(t) * tg[f, t]
+                match *b {
+                    Bracket::Fill => {
+                        for (p, &v) in prod.iter_mut().zip(tgf) {
+                            *p = fill * v;
+                        }
+                    }
+                    Bracket::Inside { lo, hi, den, off } => {
+                        let (ylo, yhi) = (rows[lo], rows[hi]);
+                        for (((p, &v), &a), &b2) in prod.iter_mut().zip(tgf).zip(ylo).zip(yhi) {
+                            let slope = (b2 - a) / den;
+                            *p = (slope * off + a) * v;
+                        }
+                    }
                 }
-                out[[c, h, t]] = aggregate.reduce(&prod, &mut scratch, false);
+                if sum {
+                    // Sequential sum over the bins (as `reduce` without
+                    // pairwise summation).
+                    for (s, &p) in acc.iter_mut().zip(&prod) {
+                        *s += p;
+                    }
+                } else {
+                    products[f * n_t..(f + 1) * n_t].copy_from_slice(&prod);
+                }
+            }
+            match aggregate {
+                Aggregate::Sum => {}
+                Aggregate::Mean => {
+                    let n = F::of_usize(n_f);
+                    acc.iter_mut().for_each(|s| *s /= n);
+                }
+                _ => {
+                    for (t, o) in acc.iter_mut().enumerate() {
+                        for (f, v) in column.iter_mut().enumerate() {
+                            *v = products[f * n_t + t];
+                        }
+                        *o = aggregate.reduce(&column, &mut scratch, false);
+                    }
+                }
             }
         }
     }
     Ok(out)
+}
+
+/// Where `xq` falls on the sorted grid `xs` for [`interp_linear`]: outside
+/// (the fill value) or between the bins `lo` and `hi` (indices into the
+/// unsorted rows, through `order`), with the grid step `den` and the offset
+/// `off = xq - xs[lo]` already rounded to `F`.
+#[derive(Clone, Copy)]
+enum Bracket<F> {
+    Fill,
+    Inside {
+        lo: usize,
+        hi: usize,
+        den: F,
+        off: F,
+    },
+}
+
+impl<F: AudioFloat> Bracket<F> {
+    fn new(xs: &[f64], order: &[usize], xq: f64) -> Self {
+        let n = xs.len();
+        if xq < xs[0] || xq > xs[n - 1] {
+            return Self::Fill;
+        }
+        let idx = xs.partition_point(|&v| v < xq).clamp(1, n - 1);
+        let (lo, hi) = (idx - 1, idx);
+        Self::Inside {
+            lo: order[lo],
+            hi: order[hi],
+            den: F::of(xs[hi] - xs[lo]),
+            off: F::of(xq - xs[lo]),
+        }
+    }
 }
 
 // =============================================================================
@@ -4541,5 +4639,80 @@ mod tests {
                 .unwrap()
                 .frames
         );
+    }
+
+    /// The previous per-frame metrogram, as the reference for the row-wise
+    /// one.
+    fn reference_metrogram<F: AudioFloat>(
+        tempogram: ArrayView3<'_, F>,
+        freqs: &[f64],
+        factors: &[f64],
+        aggregate: Aggregate,
+        fill_value: f64,
+    ) -> Array3<F> {
+        let (n_ch, n_f, n_t) = tempogram.dim();
+        let order = argsort_stable(freqs);
+        let xs: Vec<f64> = order.iter().map(|&k| freqs[k]).collect();
+        let fill = F::of(fill_value);
+        let mut ys = vec![F::zero(); n_f];
+        let mut prod = vec![F::zero(); n_f];
+        let mut scratch = Vec::new();
+        let mut out = Array3::<F>::zeros((n_ch, factors.len(), n_t));
+        for c in 0..n_ch {
+            for t in 0..n_t {
+                for (y, &k) in ys.iter_mut().zip(&order) {
+                    *y = tempogram[[c, k, t]];
+                }
+                for (h, &factor) in factors.iter().enumerate() {
+                    for (f, p) in prod.iter_mut().enumerate() {
+                        *p =
+                            interp_linear(&xs, &ys, factor * freqs[f], fill) * tempogram[[c, f, t]];
+                    }
+                    out[[c, h, t]] = aggregate.reduce(&prod, &mut scratch, false);
+                }
+            }
+        }
+        out
+    }
+
+    fn check_metrogram_matches_reference<F: AudioFloat>() {
+        let mut seed = 3u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let tg = Array3::from_shape_fn((2, 9, 17), |_| F::of(next()));
+        // Unsorted, with a repeated value; the transposed copy has strided rows.
+        let freqs = [0.0, 3.0, 1.5, 7.0, 7.0, 2.25, 9.5, 4.0, 12.0];
+        let tg_t = tg.view().permuted_axes([0, 2, 1]).to_owned();
+        let tg_t = tg_t.view().permuted_axes([0, 2, 1]);
+        for factors in [vec![1.0 / 3.0, 0.25, 0.2, 1.0 / 7.0], vec![2.0, 0.5, 1.0]] {
+            for agg in [
+                Aggregate::Sum,
+                Aggregate::Mean,
+                Aggregate::Max,
+                Aggregate::Min,
+                Aggregate::Median,
+            ] {
+                for fill in [0.0, -1.5] {
+                    let want = reference_metrogram(tg.view(), &freqs, &factors, agg, fill);
+                    for input in [tg.view(), tg_t] {
+                        let got = metrogram(input, &freqs, Some(&factors), agg, fill).unwrap();
+                        let bits = |a: &Array3<F>| -> Vec<u64> {
+                            a.iter().map(|v| v.as_f64().to_bits()).collect()
+                        };
+                        assert_eq!(bits(&got), bits(&want), "{agg:?} {fill} {factors:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metrogram_matches_reference() {
+        check_metrogram_matches_reference::<f32>();
+        check_metrogram_matches_reference::<f64>();
     }
 }
