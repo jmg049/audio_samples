@@ -556,6 +556,38 @@ pub(crate) fn padded_window(
 /// assert!((bw - 1.5).abs() < 1e-12);
 /// ```
 pub fn window_bandwidth(window: &Window, n: NonZeroUsize) -> AudioSampleResult<f64> {
+    // The value depends only on (window, n): remember the last few per
+    // thread (as librosa keeps a table), except for explicit coefficients.
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<(Window, usize, f64)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let cacheable = !matches!(window, Window::Custom(_));
+    if cacheable {
+        let hit = CACHE.with(|c| {
+            c.borrow()
+                .iter()
+                .find(|(w, len, _)| *len == n.get() && w == window)
+                .map(|e| e.2)
+        });
+        if let Some(b) = hit {
+            return Ok(b);
+        }
+    }
+    let b = window_bandwidth_uncached(window, n)?;
+    if cacheable {
+        CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() >= 16 {
+                c.remove(0);
+            }
+            c.push((window.clone(), n.get(), b));
+        });
+    }
+    Ok(b)
+}
+
+fn window_bandwidth_uncached(window: &Window, n: NonZeroUsize) -> AudioSampleResult<f64> {
     let w = get_window(window, n.get(), true)?;
     let sum: f64 = w.sum();
     let sum_sq: f64 = w.iter().map(|x| x * x).sum();
