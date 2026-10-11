@@ -145,6 +145,17 @@ register(
         func="sequence.viterbi_binary",
         note="100 independent states x 2000 steps, shared transition_loop(2, 0.9)",
     ),
+    Case(
+        "viterbi_binary_u16", G, "seq",
+        librosa=lambda c: partial(
+            librosa.sequence.viterbi_binary, _prob(c), librosa.sequence.transition_loop(2, 0.9)
+        ),
+        ours=lambda c: partial(
+            Q.viterbi_binary, _prob(c), librosa.sequence.transition_loop(2, 0.9), dtype=np.uint16
+        ),
+        func="sequence.viterbi_binary",
+        note="as viterbi_binary, uint16 states in both (ours: dtype=numpy.uint16; native: viterbi_binary_u16)",
+    ),
     # --- transition matrices ----------------------------------------------------------
     Case(
         "transition_uniform", G, "const",
@@ -183,6 +194,13 @@ register(
         note="chroma_stft (12 x frames), connectivity",
     ),
     Case(
+        "recurrence_matrix_bool", G, "derived",
+        librosa=lambda c: partial(librosa.segment.recurrence_matrix, c.chroma),
+        ours=lambda c: partial(Q.recurrence_matrix, c.chroma),
+        func="segment.recurrence_matrix",
+        note="as recurrence_matrix; the native side calls recurrence_matrix_bool, which the binding uses for connectivity",
+    ),
+    Case(
         "recurrence_matrix_affinity", G, "derived",
         librosa=lambda c: partial(librosa.segment.recurrence_matrix, c.mfcc, mode="affinity", sym=True),
         ours=lambda c: partial(Q.recurrence_matrix, c.mfcc, mode="affinity", sym=True),
@@ -195,6 +213,13 @@ register(
         ours=lambda c: partial(Q.cross_similarity, *_halves(c)),
         func="segment.cross_similarity",
         note="first half of the chroma against the second half, connectivity",
+    ),
+    Case(
+        "cross_similarity_bool", G, "derived",
+        librosa=lambda c: partial(librosa.segment.cross_similarity, *_halves(c)),
+        ours=lambda c: partial(Q.cross_similarity, *_halves(c)),
+        func="segment.cross_similarity",
+        note="as cross_similarity; the native side calls cross_similarity_bool, which the binding uses for connectivity",
     ),
     Case(
         "recurrence_to_lag", G, "derived",
