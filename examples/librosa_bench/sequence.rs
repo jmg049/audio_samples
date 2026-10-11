@@ -9,9 +9,10 @@
 
 use audio_samples::operations::sequence::{
     CrossSimilarityConfig, DtwConfig, RecurrenceConfig, RecurrenceMode, RqaConfig, SyncAggregate,
-    TransitionWindow, cross_similarity, dtw, dtw_backtracking, lag_to_recurrence,
-    recurrence_matrix, recurrence_to_lag, rqa, sync, transition_cycle, transition_local,
-    transition_loop, transition_uniform, viterbi, viterbi_binary, viterbi_discriminative,
+    TransitionWindow, cross_similarity, cross_similarity_bool, dtw, dtw_backtracking,
+    lag_to_recurrence, recurrence_matrix, recurrence_matrix_bool, recurrence_to_lag, rqa, sync,
+    transition_cycle, transition_local, transition_loop, transition_uniform, viterbi,
+    viterbi_binary, viterbi_discriminative,
 };
 use audio_samples::operations::spectrum::{MfccConfig, frame};
 use audio_samples::operations::tonal::{ChromaStftConfig, NormalizeConfig, normalize_array};
@@ -60,6 +61,21 @@ pub fn audio<'a, F: AudioFloat>(case: &str, x: &'a AudioCtx<F>) -> Option<Thunk<
                 .with_mode(RecurrenceMode::Affinity)
                 .with_sym(true);
             thunk(move || recurrence_matrix(m.view(), &cfg).unwrap())
+        }
+        "recurrence_matrix_bool" => {
+            let c = chroma(x);
+            let cfg = RecurrenceConfig::librosa();
+            thunk(move || recurrence_matrix_bool(c.view(), &cfg).unwrap())
+        }
+        "cross_similarity_bool" => {
+            let c = chroma(x);
+            let h = c.ncols() / 2;
+            let (a, b) = (
+                c.slice(s![.., ..h]).to_owned(),
+                c.slice(s![.., h..]).to_owned(),
+            );
+            let cfg = CrossSimilarityConfig::librosa();
+            thunk(move || cross_similarity_bool(a.view(), b.view(), &cfg).unwrap())
         }
         "cross_similarity" => {
             let c = chroma(x);

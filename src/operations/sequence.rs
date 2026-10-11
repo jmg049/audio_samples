@@ -2591,19 +2591,54 @@ fn nearest<F: AudioFloat>(row: &[F], n: usize, skip: Option<usize>, idx: &mut Ve
     }
 }
 
+/// Element of a recurrence / cross-similarity matrix: a float (`0` = no
+/// link) or a `bool` connectivity flag.
+trait RecCell: Copy + PartialEq {
+    fn zero() -> Self;
+    /// Sort key of a stored value for [`trim_rows`] (the value itself; every
+    /// `bool` link is equal).
+    fn key(self) -> f64;
+    /// Symmetrisation of a pair of entries (`min`, `&&` for flags).
+    fn sym(self, other: Self) -> Self;
+}
+
+impl<F: AudioFloat> RecCell for F {
+    fn zero() -> Self {
+        F::zero()
+    }
+    fn key(self) -> f64 {
+        self.as_f64()
+    }
+    fn sym(self, other: Self) -> Self {
+        self.min(other)
+    }
+}
+
+impl RecCell for bool {
+    fn zero() -> Self {
+        false
+    }
+    fn key(self) -> f64 {
+        1.0
+    }
+    fn sym(self, other: Self) -> Self {
+        self && other
+    }
+}
+
 /// Keep the `k` smallest stored (non-zero) values of each row, ties by column
 /// (librosa's stable `argsort` over the row's links).
-fn trim_rows<F: AudioFloat>(rec: &mut Array2<F>, k: usize) {
+fn trim_rows<C: RecCell>(rec: &mut Array2<C>, k: usize) {
     let mut links: Vec<usize> = Vec::new();
     for mut row in rec.rows_mut() {
         links.clear();
-        links.extend((0..row.len()).filter(|&j| row[j] != F::zero()));
+        links.extend((0..row.len()).filter(|&j| row[j] != C::zero()));
         if links.len() <= k {
             continue;
         }
-        links.sort_by(|&a, &b| total_cmp(row[a], row[b]).then(a.cmp(&b)));
+        links.sort_by(|&a, &b| row[a].key().total_cmp(&row[b].key()).then(a.cmp(&b)));
         for &j in links.iter().skip(k) {
-            row[j] = F::zero();
+            row[j] = C::zero();
         }
     }
 }
@@ -2800,6 +2835,81 @@ pub fn recurrence_matrix<F: AudioFloat>(
     data: ArrayView2<F>,
     cfg: &RecurrenceConfig,
 ) -> AudioSampleResult<Array2<F>> {
+    let one = F::one();
+    let mode = cfg.mode;
+    let link = |d: F| match mode {
+        RecurrenceMode::Connectivity => one,
+        _ => d,
+    };
+    let diag = |v: F| match (cfg.self_links, mode) {
+        (true, RecurrenceMode::Connectivity) => one,
+        (true, RecurrenceMode::Affinity) => -one,
+        (true, RecurrenceMode::Distance) => v,
+        (false, _) => F::zero(),
+    };
+    let (mut rec, bandwidth_k) = recurrence_core(data, cfg, link, diag)?;
+    // Connectivity entries are already 0 or 1, distances need no change.
+    if mode == RecurrenceMode::Affinity {
+        apply_affinity(rec.view_mut(), &cfg.bandwidth, bandwidth_k)?;
+    }
+    let t = rec.nrows();
+    transpose_square_in_place(rec.as_slice_mut().expect("standard layout"), t);
+    Ok(rec)
+}
+
+/// [`recurrence_matrix`] in connectivity mode with `bool` entries, as
+/// librosa returns it (`librosa.segment.recurrence_matrix(data, ...,
+/// mode='connectivity')`, dtype `bool`). The links are the same as those of
+/// [`recurrence_matrix`] (which stores them as `1.0`); the matrix takes one
+/// byte per entry instead of four or eight.
+///
+/// # Errors
+///
+/// As [`recurrence_matrix`], and [`ParameterError`] if `cfg.mode` is not
+/// [`RecurrenceMode::Connectivity`].
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::operations::sequence::{
+///     recurrence_matrix, recurrence_matrix_bool, RecurrenceConfig,
+/// };
+/// use ndarray::Array2;
+///
+/// let data = Array2::from_shape_fn((2, 20), |(f, t)| ((t * (f + 3)) % 7) as f64);
+/// let cfg = RecurrenceConfig::new();
+/// let flags = recurrence_matrix_bool(data.view(), &cfg).unwrap();
+/// let floats = recurrence_matrix(data.view(), &cfg).unwrap();
+/// assert_eq!(flags.mapv(|b| if b { 1.0 } else { 0.0 }), floats);
+/// ```
+pub fn recurrence_matrix_bool<F: AudioFloat>(
+    data: ArrayView2<F>,
+    cfg: &RecurrenceConfig,
+) -> AudioSampleResult<Array2<bool>> {
+    if cfg.mode != RecurrenceMode::Connectivity {
+        return err(
+            "mode",
+            "boolean output is only defined for connectivity mode",
+        );
+    }
+    let self_links = cfg.self_links;
+    let (mut rec, _) = recurrence_core(data, cfg, |_| true, |_| self_links)?;
+    let t = rec.nrows();
+    transpose_square_in_place(rec.as_slice_mut().expect("standard layout"), t);
+    Ok(rec)
+}
+
+/// The shared part of [`recurrence_matrix`] and [`recurrence_matrix_bool`]:
+/// the `(t, t)` link matrix in librosa's pre-transpose orientation (row =
+/// query frame) and the `k` for bandwidth estimation. `link(d)` is the entry
+/// stored for a neighbour at distance `d`; `diag(v)` the diagonal entry given
+/// its current value.
+fn recurrence_core<F: AudioFloat, C: RecCell>(
+    data: ArrayView2<F>,
+    cfg: &RecurrenceConfig,
+    link: impl Fn(F) -> C,
+    diag: impl Fn(C) -> C,
+) -> AudioSampleResult<(Array2<C>, usize)> {
     let t = data.ncols();
     cfg.validate(t)?;
     check_finite("data", data.iter().copied())?;
@@ -2817,56 +2927,40 @@ pub fn recurrence_matrix<F: AudioFloat>(
 
     // The distances are computed one row at a time, straight into the output
     // (no t x t distance matrix).
-    let (zero, one) = (F::zero(), F::one());
-    let mut rec = Array2::<F>::zeros((t, t));
+    let mut rec = Array2::<C>::from_elem((t, t), C::zero());
     {
         let dists = RowDistances::new(data, cfg.metric);
-        let mut drow = vec![zero; t];
+        let mut drow = vec![F::zero(); t];
         let mut idx = Vec::with_capacity(t);
         for (i, mut row) in rec.rows_mut().into_iter().enumerate() {
             knn_row(&dists, data.column(i), &mut drow);
             nearest(&drow, n_nb, Some(i), &mut idx);
             for &j in &idx {
-                row[j] = match cfg.mode {
-                    RecurrenceMode::Connectivity => one,
-                    _ => drow[j],
-                };
+                row[j] = link(drow[j]);
             }
         }
     }
     if !cfg.full {
         for i in 0..t {
             for j in i.saturating_sub(w - 1)..(i + w).min(t) {
-                rec[[i, j]] = zero;
+                rec[[i, j]] = C::zero();
             }
         }
         trim_rows(&mut rec, k);
     }
     for i in 0..t {
-        let diag = match (cfg.self_links, cfg.mode) {
-            (true, RecurrenceMode::Connectivity) => one,
-            (true, RecurrenceMode::Affinity) => -one,
-            (true, RecurrenceMode::Distance) => rec[[i, i]],
-            (false, _) => zero,
-        };
-        rec[[i, i]] = diag;
+        rec[[i, i]] = diag(rec[[i, i]]);
     }
     if cfg.sym {
         for i in 0..t {
             for j in i + 1..t {
                 let (a, b) = (rec[[i, j]], rec[[j, i]]);
-                rec[[i, j]] = a.min(b);
-                rec[[j, i]] = b.min(a);
+                rec[[i, j]] = a.sym(b);
+                rec[[j, i]] = b.sym(a);
             }
         }
     }
-    match cfg.mode {
-        RecurrenceMode::Connectivity => rec.mapv_inplace(|v| if v != zero { one } else { zero }),
-        RecurrenceMode::Distance => {}
-        RecurrenceMode::Affinity => apply_affinity(rec.view_mut(), &cfg.bandwidth, bandwidth_k)?,
-    }
-    transpose_square_in_place(rec.as_slice_mut().expect("standard layout"), t);
-    Ok(rec)
+    Ok((rec, bandwidth_k))
 }
 
 /// Cross-similarity matrix between a query and a reference feature sequence.
@@ -2910,6 +3004,73 @@ pub fn cross_similarity<F: AudioFloat>(
     data_ref: ArrayView2<F>,
     cfg: &CrossSimilarityConfig,
 ) -> AudioSampleResult<Array2<F>> {
+    let one = F::one();
+    let mode = cfg.mode;
+    let link = |d: F| match mode {
+        RecurrenceMode::Connectivity => one,
+        _ => d,
+    };
+    let (mut out, bandwidth_k) = cross_similarity_core(data, data_ref, cfg, link)?;
+    // Connectivity entries are already 0 or 1, distances need no change.
+    if mode == RecurrenceMode::Affinity {
+        apply_affinity(out.view_mut().reversed_axes(), &cfg.bandwidth, bandwidth_k)?;
+    }
+    Ok(out)
+}
+
+/// [`cross_similarity`] in connectivity mode with `bool` entries, as librosa
+/// returns it (`librosa.segment.cross_similarity(data, data_ref, ...,
+/// mode='connectivity')`, dtype `bool`). The links are the same as those of
+/// [`cross_similarity`] (which stores them as `1.0`); the matrix takes one
+/// byte per entry instead of four or eight.
+///
+/// # Errors
+///
+/// As [`cross_similarity`], and [`ParameterError`] if `cfg.mode` is not
+/// [`RecurrenceMode::Connectivity`].
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::operations::sequence::{
+///     cross_similarity, cross_similarity_bool, CrossSimilarityConfig,
+/// };
+/// use ndarray::array;
+///
+/// let query = array![[0.0, 5.0]];
+/// let reference = array![[5.1, 0.1, 9.0]];
+/// let cfg = CrossSimilarityConfig::new().with_k(Some(1));
+/// let x = cross_similarity_bool(query.view(), reference.view(), &cfg).unwrap();
+/// assert_eq!(x.column(0).to_vec(), vec![false, true, false]);
+/// assert_eq!(
+///     x.mapv(|b| if b { 1.0 } else { 0.0 }),
+///     cross_similarity(query.view(), reference.view(), &cfg).unwrap()
+/// );
+/// ```
+pub fn cross_similarity_bool<F: AudioFloat>(
+    data: ArrayView2<F>,
+    data_ref: ArrayView2<F>,
+    cfg: &CrossSimilarityConfig,
+) -> AudioSampleResult<Array2<bool>> {
+    if cfg.mode != RecurrenceMode::Connectivity {
+        return err(
+            "mode",
+            "boolean output is only defined for connectivity mode",
+        );
+    }
+    Ok(cross_similarity_core(data, data_ref, cfg, |_| true)?.0)
+}
+
+/// The shared part of [`cross_similarity`] and [`cross_similarity_bool`]:
+/// the `(n_ref, n)` link matrix (librosa's output orientation) and the `k`
+/// for bandwidth estimation. `link(d)` is the entry stored for a neighbour
+/// at distance `d`.
+fn cross_similarity_core<F: AudioFloat, C: RecCell>(
+    data: ArrayView2<F>,
+    data_ref: ArrayView2<F>,
+    cfg: &CrossSimilarityConfig,
+    link: impl Fn(F) -> C,
+) -> AudioSampleResult<(Array2<C>, usize)> {
     cfg.validate()?;
     if data.nrows() != data_ref.nrows() {
         return err(
@@ -2939,35 +3100,24 @@ pub fn cross_similarity<F: AudioFloat>(
     let n_nb = n_ref.min(k);
     // librosa returns the transpose of the (query, reference) matrix built
     // here, so it is built directly in the transposed storage, one row of
-    // distances at a time (no distance matrix, no transposed copy).
-    let (zero, one) = (F::zero(), F::one());
-    let mut out = Array2::<F>::zeros((n_ref, n));
+    // distances at a time (no distance matrix, no transposed copy). Each row
+    // holds at most n_nb <= k links, so librosa's trimming to the k nearest
+    // (when `full` is false) never removes any.
+    let mut out = Array2::<C>::from_elem((n_ref, n), C::zero());
     {
         let mut xsim = out.view_mut().reversed_axes();
         let dists = RowDistances::new(data_ref, cfg.metric);
-        let mut drow = vec![zero; n_ref];
+        let mut drow = vec![F::zero(); n_ref];
         let mut idx = Vec::with_capacity(n_ref);
         for i in 0..n {
             knn_row(&dists, data.column(i), &mut drow);
             nearest(&drow, n_nb, None, &mut idx);
             for &j in &idx {
-                xsim[[i, j]] = match cfg.mode {
-                    RecurrenceMode::Connectivity => one,
-                    _ => drow[j],
-                };
+                xsim[[i, j]] = link(drow[j]);
             }
-        }
-        // Each row holds at most n_nb <= k links, so librosa's trimming to
-        // the k nearest (when `full` is false) never removes any.
-        match cfg.mode {
-            RecurrenceMode::Connectivity => {
-                xsim.mapv_inplace(|v| if v != zero { one } else { zero });
-            }
-            RecurrenceMode::Distance => {}
-            RecurrenceMode::Affinity => apply_affinity(xsim, &cfg.bandwidth, bandwidth_k)?,
         }
     }
-    Ok(out)
+    Ok((out, bandwidth_k))
 }
 
 /// The `(rows, cols)` matrix `out[i, j] = src[(i - j) mod n, j]` for an
@@ -3750,5 +3900,42 @@ mod tests {
             assert_eq!(lag.mapv(|b| if b { 1.0f32 } else { 0.0 }), lag_f);
             assert_eq!(lag_to_recurrence(lag.view()).unwrap(), rec);
         }
+    }
+
+    #[test]
+    fn bool_recurrence_matches_float_connectivity() {
+        let mut seed = 21u64;
+        for &t in &[8usize, 17, 40] {
+            let data = Array2::from_shape_fn((3, t), |_| (lcg(&mut seed) * 4.0).floor() / 4.0);
+            for sym in [false, true] {
+                for self_links in [false, true] {
+                    for full in [false, true] {
+                        for (width, k) in [(1usize, None), (2, Some(3))] {
+                            let cfg = RecurrenceConfig::new()
+                                .with_sym(sym)
+                                .with_self_links(self_links)
+                                .with_full(full)
+                                .with_width(width)
+                                .with_k(k);
+                            let b = recurrence_matrix_bool(data.view(), &cfg).unwrap();
+                            let f = recurrence_matrix(data.view(), &cfg).unwrap();
+                            assert_eq!(b.mapv(|v| if v { 1.0 } else { 0.0 }), f);
+                            let h = t / 2;
+                            let ccfg = CrossSimilarityConfig::new().with_full(full).with_k(k);
+                            let (q, r) = (
+                                data.slice(ndarray::s![.., ..h]),
+                                data.slice(ndarray::s![.., h..]),
+                            );
+                            let b = cross_similarity_bool(q, r, &ccfg).unwrap();
+                            let f = cross_similarity(q, r, &ccfg).unwrap();
+                            assert_eq!(b.mapv(|v| if v { 1.0 } else { 0.0 }), f);
+                        }
+                    }
+                }
+            }
+        }
+        let dist = RecurrenceConfig::new().with_mode(RecurrenceMode::Distance);
+        let data = Array2::<f64>::zeros((1, 8));
+        assert!(recurrence_matrix_bool(data.view(), &dist).is_err());
     }
 }
