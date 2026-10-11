@@ -884,9 +884,19 @@ where
                 )))
             });
         }
+        if std::any::TypeId::of::<Self::Sample>() == std::any::TypeId::of::<f64>() {
+            let den = mu.ln_1p();
+            if let Some(xs) = self.as_slice_mut() {
+                // SAFETY: the sample type is f64, so the slice is a &mut [f64].
+                let xs = unsafe { &mut *(std::ptr::from_mut(xs) as *mut [f64]) };
+                mu_compress_f64_slice(xs, mu, den);
+                return Ok(());
+            }
+        }
+        let law = MuLaw::new(mu);
         self.apply_with_error_in_place(|x: Self::Sample| {
             let x: f64 = x.convert_to();
-            Ok(Self::Sample::convert_from(mu_law_compress_value(x, mu)))
+            Ok(Self::Sample::convert_from(law.compress(x)))
         })
     }
 
@@ -928,9 +938,10 @@ where
     fn mu_expand_in_place(&mut self, mu: Self::Sample) -> AudioSampleResult<()> {
         let mu: f64 = mu.cast_into();
         validate_mu(mu, "mu_expand")?;
+        let law = MuLaw::new(mu);
         self.apply_with_error_in_place(|x: Self::Sample| {
             let y: f64 = x.convert_to();
-            Ok(Self::Sample::convert_from(mu_law_expand_value(y, mu)))
+            Ok(Self::Sample::convert_from(law.expand(y)))
         })
     }
 
@@ -1177,10 +1188,62 @@ fn validate_mu(mu: f64, operation: &str) -> AudioSampleResult<()> {
 
 /// `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, evaluated as librosa does
 /// (`np.sign(x) * np.log1p(mu * np.abs(x)) / np.log1p(mu)`).
-#[inline]
+#[cfg(test)]
 fn mu_law_compress_value(x: f64, mu: f64) -> f64 {
-    let sign = if x == 0.0 { 0.0 } else { x.signum() };
-    sign * (mu * x.abs()).ln_1p() / mu.ln_1p()
+    MuLaw::new(mu).compress(x)
+}
+
+/// The μ-law curve for one `μ`, with the per-signal constants computed once.
+#[derive(Clone, Copy)]
+struct MuLaw {
+    mu: f64,
+    /// `ln(1 + μ)`.
+    den: f64,
+    /// `1 + μ`.
+    base: f64,
+    /// `log2(1 + μ)` when it is a power of two (`1 + μ = 2^(2^j)`, e.g.
+    /// `μ = 255`), so that `(1 + μ)^a = exp2(log2(1 + μ) · a)` with an exact
+    /// product.
+    log2_base: Option<f64>,
+}
+
+impl MuLaw {
+    fn new(mu: f64) -> Self {
+        let base = 1.0 + mu;
+        let bits = base.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i64 - 1023;
+        let log2_base = (base.is_finite()
+            && bits & 0x000f_ffff_ffff_ffff == 0
+            && exponent > 0
+            && (exponent as u64).is_power_of_two())
+        .then_some(exponent as f64);
+        Self {
+            mu,
+            den: mu.ln_1p(),
+            base,
+            log2_base,
+        }
+    }
+
+    /// `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`.
+    #[inline]
+    fn compress(&self, x: f64) -> f64 {
+        let sign = if x == 0.0 { 0.0 } else { x.signum() };
+        sign * (self.mu * x.abs()).ln_1p() / self.den
+    }
+
+    /// `sign(y) / μ · ((1 + μ)^|y| - 1)`, as librosa evaluates it
+    /// (`np.sign(x) / mu * (np.power(1 + mu, np.abs(x)) - 1)`), with the
+    /// power as `exp2` when `1 + μ` is a power of two.
+    #[inline]
+    fn expand(&self, y: f64) -> f64 {
+        let sign = if y == 0.0 { 0.0 } else { y.signum() };
+        let p = match self.log2_base {
+            Some(k) => (k * y.abs()).exp2(),
+            None => self.base.powf(y.abs()),
+        };
+        sign / self.mu * (p - 1.0)
+    }
 }
 
 /// Natural logarithm of a positive, finite, normal `x` by fdlibm's
@@ -1213,6 +1276,62 @@ fn ln_branch_free(x: f64) -> f64 {
     let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
     let r = t2 + t1;
     dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+}
+
+/// `ln(1 + u)` for `u >= 0` without branches or calls, within about 1 ulp:
+/// the series of `log1p` to `u^7` below `u = 2^-10` (truncation below 2^-60
+/// relative), else [`ln_branch_free`] of `w = 1 + u` plus the first-order
+/// correction `e / w` for the exact rounding error `e = (1 + u) - w`.
+/// Infinite and NaN `u` return `u`.
+#[inline(always)]
+fn ln_1p_branch_free(u: f64) -> f64 {
+    let w = 1.0 + u;
+    // Fast2Sum error of 1 + u, ordering the operands by magnitude.
+    let e = if u < 1.0 {
+        u - (w - 1.0)
+    } else {
+        1.0 - (w - u)
+    };
+    let big = ln_branch_free(w) + e / w;
+    let series = u
+        * (1.0
+            + u * (-0.5
+                + u * (1.0 / 3.0 + u * (-0.25 + u * (0.2 + u * (-1.0 / 6.0 + u * (1.0 / 7.0)))))));
+    if u >= 1.0 / 1024.0 {
+        if w.is_finite() { big } else { w }
+    } else if u.is_nan() {
+        u
+    } else {
+        series
+    }
+}
+
+/// μ-law companding of f64 samples in place, `sign(x) ln(1 + μ|x|) / den`
+/// with `den = ln(1 + μ)` and [`ln_1p_branch_free`]; the loop vectorises,
+/// with an AVX2 version selected at run time (the same arithmetic).
+fn mu_compress_f64_slice(xs: &mut [f64], mu: f64, den: f64) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2.
+        unsafe { mu_compress_f64_slice_avx2(xs, mu, den) };
+        return;
+    }
+    mu_compress_f64_slice_portable(xs, mu, den);
+}
+
+#[inline(always)]
+fn mu_compress_f64_slice_portable(xs: &mut [f64], mu: f64, den: f64) {
+    for v in xs {
+        let x = *v;
+        let sign = if x == 0.0 { 0.0 } else { x.signum() };
+        *v = sign * ln_1p_branch_free(mu * x.abs()) / den;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn mu_compress_f64_slice_avx2(xs: &mut [f64], mu: f64, den: f64) {
+    mu_compress_f64_slice_portable(xs, mu, den);
 }
 
 /// [`mu_law_compress_f64_fast`] over f32 samples in place, with AVX2 when the
@@ -1265,14 +1384,6 @@ fn mu_law_compress_f64_fast(x: f64, mu: f64, inv_den: f64) -> f64 {
     };
     let sign = if x == 0.0 { 0.0 } else { x.signum() };
     sign * l * inv_den
-}
-
-/// `sign(y) / μ · ((1 + μ)^|y| - 1)`, evaluated as librosa does
-/// (`np.sign(x) / mu * (np.power(1 + mu, np.abs(x)) - 1)`).
-#[inline]
-fn mu_law_expand_value(y: f64, mu: f64) -> f64 {
-    let sign = if y == 0.0 { 0.0 } else { y.signum() };
-    sign / mu * ((1.0 + mu).powf(y.abs()) - 1.0)
 }
 
 /// Quantises samples to integer μ-law codes, as `librosa.mu_compress(x, mu,
@@ -1360,6 +1471,7 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
         k
     };
     let offset = (num / 2) as i64;
+    let law = MuLaw::new(mu);
     x.iter()
         .map(|&v| {
             if !(-1.0..=1.0).contains(&v) {
@@ -1371,7 +1483,7 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
                     "mu_law_encode: input samples must lie in [-1, 1]",
                 )));
             }
-            let c = mu_law_compress_value(v, mu);
+            let c = law.compress(v);
             Ok(count_below(c) as i64 - offset)
         })
         .collect()
@@ -1418,7 +1530,8 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
 #[inline]
 pub fn mu_law_decode(codes: &[i64], mu: f64) -> AudioSampleResult<Vec<f64>> {
     validate_mu(mu, "mu_law_decode")?;
-    let decode_one = |k: i64| mu_law_expand_value(k as f64 * 2.0 / (1.0 + mu), mu);
+    let law = MuLaw::new(mu);
+    let decode_one = |k: i64| law.expand(k as f64 * 2.0 / (1.0 + mu));
     let in_range = |k: i64| (-1.0..=1.0).contains(&(k as f64 * 2.0 / (1.0 + mu)));
     // Codes take few distinct values (256 for mu = 255): when every code is
     // valid and the code range is small, decode each value once into a table.
@@ -1445,7 +1558,7 @@ pub fn mu_law_decode(codes: &[i64], mu: f64) -> AudioSampleResult<Vec<f64>> {
                     "mu_law_decode: code rescales outside [-1, 1]",
                 )));
             }
-            Ok(mu_law_expand_value(y, mu))
+            Ok(law.expand(y))
         })
         .collect()
 }
@@ -1846,6 +1959,24 @@ mod tests {
             }
             x *= 1.37;
         }
+    }
+
+    #[test]
+    fn branch_free_ln_1p_is_within_two_ulp_of_ln_1p() {
+        let mut u = 1.0e-300_f64;
+        while u < 1.0e300 {
+            for v in [u, u * 1.000_001, u * 1.7] {
+                let (a, b) = (ln_1p_branch_free(v), v.ln_1p());
+                assert!(
+                    (a - b).abs() <= 2.0 * f64::EPSILON * b,
+                    "ln_1p({v}): {a} vs {b}"
+                );
+            }
+            u *= 1.21;
+        }
+        assert_eq!(ln_1p_branch_free(0.0), 0.0);
+        assert!(ln_1p_branch_free(f64::NAN).is_nan());
+        assert_eq!(ln_1p_branch_free(f64::INFINITY), f64::INFINITY);
     }
 
     #[test]
