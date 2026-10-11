@@ -86,7 +86,7 @@ use realfft::{ComplexToReal, RealToComplex};
 
 use crate::audio_float::{finite_float_rows, float_rows_to_audio};
 use crate::operations::filterbanks::{
-    MelFilterbankConfig, Window, mel_filterbank, padded_window, window_sumsquare_from_squared,
+    MelFilterbankConfig, Window, mel_filterbank_bands, padded_window, window_sumsquare_from_squared,
 };
 use crate::repr::SampleRate;
 use crate::utils::{MAX_SIGNAL_ELEMENTS, check_derived_len};
@@ -1964,8 +1964,8 @@ pub fn melspectrogram_from_spectrogram<F: AudioFloat>(
             ),
         ));
     }
-    let basis = mel_filterbank(sample_rate, n_fft, mel)?.mapv(F::of);
-    let mut out = Array3::<F>::zeros((n_channels, basis.nrows(), n_frames));
+    let basis = mel_filterbank_bands::<F>(sample_rate, n_fft, mel)?;
+    let mut out = Array3::<F>::zeros((n_channels, basis.len(), n_frames));
     for (c, s) in spectrogram.outer_iter().enumerate() {
         banded_dot_into(&basis, s, out.index_axis_mut(Axis(0), c));
     }
@@ -1973,7 +1973,8 @@ pub fn melspectrogram_from_spectrogram<F: AudioFloat>(
 }
 
 /// `out = basis · s` for a filterbank whose rows are each non-zero over one
-/// contiguous range of columns (mel and similar triangular filterbanks).
+/// contiguous range of columns (mel and similar triangular filterbanks),
+/// given as `(first column, weights)` per row ([`mel_filterbank_bands`]).
 ///
 /// Only the non-zero range of every row is visited, so the cost is
 /// proportional to the number of non-zero filter weights rather than to
@@ -1981,29 +1982,19 @@ pub fn melspectrogram_from_spectrogram<F: AudioFloat>(
 /// spectrogram rows (contiguous, vectorisable). For finite input the result
 /// equals the dense product up to floating-point summation order.
 pub(crate) fn banded_dot_into<F: AudioFloat>(
-    basis: &Array2<F>,
+    basis: &[(usize, Vec<F>)],
     s: ArrayView2<'_, F>,
     mut out: ndarray::ArrayViewMut2<'_, F>,
 ) {
     let s = s.as_standard_layout();
     let n_frames = s.ncols();
-    for (filter, mut out_row) in basis.outer_iter().zip(out.outer_iter_mut()) {
+    for ((lo, weights), mut out_row) in basis.iter().zip(out.outer_iter_mut()) {
         out_row.fill(F::zero());
-        let Some(lo) = filter.iter().position(|&w| w != F::zero()) else {
-            continue;
-        };
-        let hi = filter.len()
-            - filter
-                .iter()
-                .rev()
-                .position(|&w| w != F::zero())
-                .unwrap_or(0);
         let acc = out_row
             .as_slice_mut()
             .expect("rows of a standard-layout array");
-        for k in lo..hi {
-            let w = filter[k];
-            let src = s.row(k);
+        for (k, &w) in weights.iter().enumerate() {
+            let src = s.row(lo + k);
             let src = src.as_slice().expect("rows of a standard-layout array");
             for (a, &v) in acc[..n_frames].iter_mut().zip(src) {
                 *a += w * v;

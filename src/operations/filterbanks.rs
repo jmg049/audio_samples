@@ -853,35 +853,100 @@ pub fn mel_filterbank(
         n_mels as f64 * n_bins as f64,
         MAX_TABLE_ELEMENTS,
     )?;
-    let fmax = config.resolved_fmax(sample_rate);
-
-    // numpy.fft.rfftfreq(n_fft, d=1/sr): k * (1 / (n_fft * d)).
-    let d = 1.0 / sample_rate;
-    let val = 1.0 / (n_fft as f64 * d);
-    let fftfreqs: Vec<f64> = (0..n_bins).map(|k| k as f64 * val).collect();
-
-    let mel_f = mel_frequencies_with_scale(n_mels + 2, config.fmin, fmax, config.scale);
-    let fdiff: Vec<f64> = mel_f.windows(2).map(|w| w[1] - w[0]).collect();
-
+    let rows = MelRows::new(sample_rate, n_fft, n_mels, config);
     let mut weights = Array2::<f64>::zeros((n_mels, n_bins));
     for (i, mut row) in weights.outer_iter_mut().enumerate() {
-        for (k, w) in row.iter_mut().enumerate() {
-            let lower = -(mel_f[i] - fftfreqs[k]) / fdiff[i];
-            let upper = (mel_f[i + 2] - fftfreqs[k]) / fdiff[i + 1];
-            *w = 0.0f64.max(lower.min(upper));
+        rows.fill(
+            i,
+            row.as_slice_mut()
+                .expect("rows of a new standard-layout array"),
+        );
+    }
+    Ok(weights)
+}
+
+/// The rows of [`mel_filterbank`], each as the first column with a non-zero
+/// weight and the weights (rounded to `F`) up to the last non-zero one.
+/// Rows without a non-zero weight are `(0, [])`. The weights are those of
+/// the dense matrix; only the zeros outside each triangle are not stored.
+///
+/// # Errors
+/// As [`mel_filterbank`].
+pub(crate) fn mel_filterbank_bands<F: AudioFloat>(
+    sample_rate: f64,
+    n_fft: NonZeroUsize,
+    config: &MelFilterbankConfig,
+) -> AudioSampleResult<Vec<(usize, Vec<F>)>> {
+    config.validate(sample_rate)?;
+    let n_mels = config.n_mels.get();
+    let n_fft = n_fft.get();
+    let n_bins = 1 + n_fft / 2;
+    check_derived_len(
+        "n_mels",
+        "a mel filterbank",
+        n_mels as f64 * n_bins as f64,
+        MAX_TABLE_ELEMENTS,
+    )?;
+    let rows = MelRows::new(sample_rate, n_fft, n_mels, config);
+    let mut row = vec![0.0_f64; n_bins];
+    Ok((0..n_mels)
+        .map(|i| {
+            rows.fill(i, &mut row);
+            let w: Vec<F> = row.iter().map(|&v| F::of(v)).collect();
+            match w.iter().position(|&v| v != F::zero()) {
+                None => (0, Vec::new()),
+                Some(lo) => {
+                    let hi = w.len() - w.iter().rev().position(|&v| v != F::zero()).unwrap_or(0);
+                    (lo, w[lo..hi].to_vec())
+                }
+            }
+        })
+        .collect())
+}
+
+/// The quantities shared by the rows of a mel filterbank.
+struct MelRows<'a> {
+    fftfreqs: Vec<f64>,
+    mel_f: Vec<f64>,
+    fdiff: Vec<f64>,
+    config: &'a MelFilterbankConfig,
+}
+
+impl<'a> MelRows<'a> {
+    fn new(sample_rate: f64, n_fft: usize, n_mels: usize, config: &'a MelFilterbankConfig) -> Self {
+        let n_bins = 1 + n_fft / 2;
+        let fmax = config.resolved_fmax(sample_rate);
+        // numpy.fft.rfftfreq(n_fft, d=1/sr): k * (1 / (n_fft * d)).
+        let d = 1.0 / sample_rate;
+        let val = 1.0 / (n_fft as f64 * d);
+        let fftfreqs: Vec<f64> = (0..n_bins).map(|k| k as f64 * val).collect();
+        let mel_f = mel_frequencies_with_scale(n_mels + 2, config.fmin, fmax, config.scale);
+        let fdiff: Vec<f64> = mel_f.windows(2).map(|w| w[1] - w[0]).collect();
+        Self {
+            fftfreqs,
+            mel_f,
+            fdiff,
+            config,
         }
     }
 
-    match config.norm {
-        MelFilterNorm::None => {}
-        MelFilterNorm::Slaney => {
-            for (i, mut row) in weights.outer_iter_mut().enumerate() {
-                let enorm = 2.0 / (mel_f[i + 2] - mel_f[i]);
-                row.mapv_inplace(|w| w * enorm);
-            }
+    /// Writes the (normalised) weights of band `i` into `row`.
+    fn fill(&self, i: usize, row: &mut [f64]) {
+        let (mel_f, fdiff) = (&self.mel_f, &self.fdiff);
+        for (w, &f) in row.iter_mut().zip(&self.fftfreqs) {
+            let lower = -(mel_f[i] - f) / fdiff[i];
+            let upper = (mel_f[i + 2] - f) / fdiff[i + 1];
+            *w = 0.0f64.max(lower.min(upper));
         }
-        MelFilterNorm::Lp(p) => {
-            for mut row in weights.outer_iter_mut() {
+        match self.config.norm {
+            MelFilterNorm::None => {}
+            MelFilterNorm::Slaney => {
+                let enorm = 2.0 / (mel_f[i + 2] - mel_f[i]);
+                for w in row.iter_mut() {
+                    *w *= enorm;
+                }
+            }
+            MelFilterNorm::Lp(p) => {
                 let length = lp_norm(row.iter().copied(), p);
                 // librosa.util.normalize(fill=None): rows below `tiny` are left as is.
                 let length = if length < f64::MIN_POSITIVE {
@@ -889,11 +954,12 @@ pub fn mel_filterbank(
                 } else {
                     length
                 };
-                row.mapv_inplace(|w| w / length);
+                for w in row.iter_mut() {
+                    *w /= length;
+                }
             }
         }
     }
-    Ok(weights)
 }
 
 /// The `librosa.util.normalize` "length" of a vector for norm `p`.
