@@ -1172,14 +1172,22 @@ fn power_to_db_core<F: AudioFloat, D: Dimension>(
         &mut |chunk: &mut [F]| {
             let ref_value = ref_for_block(chunk);
             let ref_db = ten * amin.max(ref_value).log10();
-            for v in chunk.iter_mut() {
-                *v = ten * amin.max(*v).log10() - ref_db;
-            }
-            if let Some(t) = top_db {
-                let max = block_max(chunk);
-                let floor = max - t;
-                for v in chunk.iter_mut() {
-                    *v = v.max(floor);
+            // l = log10(max(amin, v)) (vectorised for f32, see `utils::vmath`)
+            // and its maximum, then ten * l - ref_db and the top_db floor in
+            // one pass. `l -> ten * l - ref_db` is non-decreasing in floating
+            // point, so the dB maximum is `ten * max(l) - ref_db`.
+            let l_max = crate::utils::vmath::log10_max_in_place(chunk, amin);
+            match top_db {
+                Some(t) => {
+                    let floor = (ten * l_max - ref_db) - t;
+                    for v in chunk.iter_mut() {
+                        *v = (ten * *v - ref_db).max(floor);
+                    }
+                }
+                None => {
+                    for v in chunk.iter_mut() {
+                        *v = ten * *v - ref_db;
+                    }
                 }
             }
         },
@@ -1187,8 +1195,24 @@ fn power_to_db_core<F: AudioFloat, D: Dimension>(
     values
 }
 
+/// Maximum of a block (`NaN`-ignoring, `-inf` when empty). Eight running
+/// maxima, so that the loop vectorises; the result is the same value as a
+/// sequential fold (only the sign of a zero maximum may differ, which no
+/// caller distinguishes).
 fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
-    chunk.iter().copied().fold(F::neg_infinity(), F::max)
+    let mut acc = [F::neg_infinity(); 8];
+    let mut it = chunk.chunks_exact(8);
+    for c in &mut it {
+        for (a, &v) in acc.iter_mut().zip(c) {
+            *a = a.max(v);
+        }
+    }
+    let m = it
+        .remainder()
+        .iter()
+        .copied()
+        .fold(F::neg_infinity(), F::max);
+    acc.iter().copied().fold(m, F::max)
 }
 
 /// Converts a power spectrogram (or any power-like array) to decibels, equivalent to

@@ -293,6 +293,48 @@ fn store_block<F: AudioFloat, const QB: usize, const TB: usize>(
     }
 }
 
+/// `x = log10(max(amin, x))` element-wise, returning the maximum of the
+/// results (NaN-ignoring, `-inf` for an empty slice): the vectorised
+/// logarithm for `f32`, the standard library's `log10` for `f64`.
+pub(crate) fn log10_max_in_place<F: AudioFloat>(v: &mut [F], amin: F) -> F {
+    match as_f32(v) {
+        Some(v32) => {
+            let amin32 = amin.to_f32().expect("f32 input has an f32 amin");
+            for x in v32.iter_mut() {
+                *x = amin32.max(*x);
+            }
+            log10_f32(v32);
+            F::of(f64::from(max_f32(v32)))
+        }
+        None => {
+            let mut m = F::neg_infinity();
+            for x in v.iter_mut() {
+                *x = amin.max(*x).log10();
+                m = m.max(*x);
+            }
+            m
+        }
+    }
+}
+
+/// Maximum of an `f32` slice (NaN-ignoring, `-inf` when empty), eight
+/// running maxima so that it vectorises.
+fn max_f32(v: &[f32]) -> f32 {
+    let mut acc = [f32::NEG_INFINITY; 8];
+    let mut it = v.chunks_exact(8);
+    for c in &mut it {
+        for (a, &x) in acc.iter_mut().zip(c) {
+            *a = a.max(x);
+        }
+    }
+    let m = it
+        .remainder()
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    acc.iter().copied().fold(m, f32::max)
+}
+
 /// The slice as `&mut [f32]` when `F` is `f32`.
 fn as_f32<F: AudioFloat>(v: &mut [F]) -> Option<&mut [f32]> {
     if TypeId::of::<F>() == TypeId::of::<f32>() {
@@ -311,20 +353,6 @@ pub(crate) fn ln_in_place<F: AudioFloat>(v: &mut [F]) {
         None => {
             for x in v {
                 *x = x.ln();
-            }
-        }
-    }
-}
-
-/// `x = log10(x)` element-wise: the vectorised kernel for `f32`, the
-/// standard library's `log10` for `f64`.
-#[allow(dead_code)] // used by the dB conversions
-pub(crate) fn log10_in_place<F: AudioFloat>(v: &mut [F]) {
-    match as_f32(v) {
-        Some(v) => log10_f32(v),
-        None => {
-            for x in v {
-                *x = x.log10();
             }
         }
     }
