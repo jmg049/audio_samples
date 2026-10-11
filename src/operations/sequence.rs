@@ -3235,23 +3235,46 @@ pub fn recurrence_to_lag<T: Copy + Default>(
         );
     }
     let n = if pad { 2 * r } else { r };
-    // shear(factor = -1): lag[l, col] = rec[(l + col) mod n, col], zero where
-    // that row is in the padding.
     // shear(factor = -1): rec[row, col] moves to lag[(row - col) mod n, col];
     // the rows no element moves to stay zero (vec! of a zero-valued
     // primitive is a zeroed allocation, so only the moved elements are
     // written). The source is read in blocks of 64 columns, so that the
     // diagonal writes of consecutive rows hit the same cache lines.
     const B: usize = 64;
-    let rec = rec.as_standard_layout();
-    let src = rec.as_slice().expect("standard layout");
     let mut out = vec![T::default(); n * c];
-    for cb in (0..c).step_by(B) {
-        let ce = (cb + B).min(c);
-        for row in 0..r {
-            for col in cb..ce {
-                let dst = if row >= col { row - col } else { row + n - col };
-                out[dst * c + col] = src[row * c + col];
+    let dst = |row: usize, col: usize| {
+        let d = if row >= col { row - col } else { row + n - col };
+        d * c + col
+    };
+    if let Some(src) = rec.as_slice() {
+        for cb in (0..c).step_by(B) {
+            let ce = (cb + B).min(c);
+            for row in 0..r {
+                for col in cb..ce {
+                    out[dst(row, col)] = src[row * c + col];
+                }
+            }
+        }
+    } else if let Some(src) = rec.t().as_slice() {
+        // Fortran order (librosa's recurrence matrices): each column is
+        // contiguous; read it in place instead of copying the matrix.
+        for cb in (0..c).step_by(B) {
+            let ce = (cb + B).min(c);
+            for row in 0..r {
+                for col in cb..ce {
+                    out[dst(row, col)] = src[col * r + row];
+                }
+            }
+        }
+    } else {
+        let rec = rec.as_standard_layout();
+        let src = rec.as_slice().expect("standard layout");
+        for cb in (0..c).step_by(B) {
+            let ce = (cb + B).min(c);
+            for row in 0..r {
+                for col in cb..ce {
+                    out[dst(row, col)] = src[row * c + col];
+                }
             }
         }
     }
@@ -3346,11 +3369,10 @@ impl SyncAggregate {
 
 /// Segment boundaries as librosa's `index_to_slice(idx, idx_min=0,
 /// idx_max=n, pad=pad)`.
-fn sync_segments(idx: &[usize], n: usize, pad: bool) -> Vec<(usize, usize)> {
-    let mut b: Vec<usize> = idx
-        .iter()
-        .map(|&i| if pad { i.min(n) } else { i })
-        .collect();
+fn sync_boundaries(idx: &[usize], n: usize, pad: bool) -> Vec<usize> {
+    // One allocation of the final size (the two padding entries included).
+    let mut b = Vec::with_capacity(idx.len() + 2);
+    b.extend(idx.iter().map(|&i| if pad { i.min(n) } else { i }));
     if pad {
         b.push(0);
         b.push(n);
@@ -3358,7 +3380,7 @@ fn sync_segments(idx: &[usize], n: usize, pad: bool) -> Vec<(usize, usize)> {
     b.retain(|&i| i <= n);
     b.sort_unstable();
     b.dedup();
-    b.windows(2).map(|w| (w[0], w[1])).collect()
+    b
 }
 
 /// Aggregates a feature array between frame boundaries (e.g. beats).
@@ -3455,11 +3477,13 @@ where
         return err("data", "must have at least one dimension (frames last)");
     }
     let axis = Axis(data.ndim() - 1);
-    let segments = sync_segments(idx, data.len_of(axis), pad);
+    // Segment s is [bounds[s], bounds[s + 1]).
+    let bounds = sync_boundaries(idx, data.len_of(axis), pad);
     let mut shape = data.raw_dim();
-    shape[axis.index()] = segments.len();
+    shape[axis.index()] = bounds.len().saturating_sub(1);
     let mut out = Array::<F, D>::zeros(shape);
-    for (s, &(a, b)) in segments.iter().enumerate() {
+    for (s, w) in bounds.windows(2).enumerate() {
+        let (a, b) = (w[0], w[1]);
         let seg = data.slice_axis(axis, Slice::from(a..b));
         let out_s = out.index_axis_mut(axis, s);
         Zip::from(out_s)
@@ -3942,6 +3966,13 @@ mod tests {
             let lag_f = recurrence_to_lag(as_f.view(), pad).unwrap();
             assert_eq!(lag.mapv(|b| if b { 1.0f32 } else { 0.0 }), lag_f);
             assert_eq!(lag_to_recurrence(lag.view()).unwrap(), rec);
+            // Fortran-order and strided input give the same lag matrix.
+            let mut f_order = Array2::from_elem((5, 5).f(), false);
+            f_order.assign(&rec);
+            assert_eq!(recurrence_to_lag(f_order.view(), pad).unwrap(), lag);
+            let big = Array2::from_shape_fn((5, 10), |(i, j)| j % 2 == 0 && rec[[i, j / 2]]);
+            let strided = big.slice(ndarray::s![.., ..;2]);
+            assert_eq!(recurrence_to_lag(strided, pad).unwrap(), lag);
         }
     }
 
