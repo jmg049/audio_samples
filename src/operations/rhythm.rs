@@ -168,17 +168,17 @@ fn pairwise_sum<F: AudioFloat>(a: &[F]) -> F {
     } else if n <= 128 {
         let mut r = [F::zero(); 8];
         r.copy_from_slice(&a[..8]);
-        let mut i = 8;
-        while i < n - (n % 8) {
-            for j in 0..8 {
-                r[j] += a[i + j];
+        let m = n - (n % 8);
+        // Eight independent accumulators over the blocks of eight (numpy's
+        // unrolled loop), as fixed-size chunks so that they vectorise.
+        for c in a[8..m].chunks_exact(8) {
+            for (rj, &v) in r.iter_mut().zip(c) {
+                *rj += v;
             }
-            i += 8;
         }
         let mut res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-        while i < n {
-            res += a[i];
-            i += 1;
+        for &v in &a[m..] {
+            res += v;
         }
         res
     } else {
@@ -2064,17 +2064,26 @@ pub fn tempo_from_tempogram<F: AudioFloat>(
     let mut out = Array2::<f64>::zeros((n_ch, n_out));
     let mut col = vec![F::zero(); win];
     let scale = F::of(1e6);
-    let mut series = Vec::with_capacity(n_t);
-    let mut scratch = Vec::with_capacity(n_t);
+    let mut series = Vec::new();
+    let mut scratch = Vec::new();
     for c in 0..n_ch {
         let tc = tempogram.index_axis(Axis(0), c);
         for t in 0..n_out {
             for (k, v) in col.iter_mut().enumerate() {
                 *v = match config.aggregate {
                     Some(agg) => {
-                        series.clear();
-                        series.extend(tc.row(k).iter().copied());
-                        agg.reduce(&series, &mut scratch, true)
+                        let row = tc.row(k);
+                        // Contiguous rows are reduced in place; others are
+                        // gathered first.
+                        let values = match row.as_slice() {
+                            Some(r) => r,
+                            None => {
+                                series.clear();
+                                series.extend(row.iter().copied());
+                                &series[..]
+                            }
+                        };
+                        agg.reduce(values, &mut scratch, true)
                     }
                     None => tc[[k, t]],
                 };
