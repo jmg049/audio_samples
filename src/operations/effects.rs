@@ -97,7 +97,7 @@ use ndarray::{
 };
 use num_complex::Complex;
 
-use crate::audio_float::{audio_float_rows, finite_float_rows, float_rows_to_audio};
+use crate::audio_float::{finite_float_rows, float_rows_to_audio};
 use crate::operations::sequence::{RecurrenceConfig, recurrence_matrix};
 use crate::operations::spectrum::{
     DbAxes, DbConfig, DbReference, StftConfig, StftPadMode, amplitude_to_db, frame_square_sums,
@@ -378,17 +378,17 @@ fn time_stretch_rows<F: AudioFloat>(
 }
 
 /// Resamples rows by an arbitrary positive ratio `out_rate / in_rate` with the
-/// crate's windowed-sinc resampler.
+/// crate's windowed-sinc resampler, fixing the length to `n_out` samples when
+/// given (`librosa.util.fix_length`).
 ///
 /// The resampler works with integer rates, so the ratio is represented by two
-/// integers near 2^31 (relative ratio error below 1e-9). It filters in `f64`
-/// whatever the element type: `f32` rows are widened to `f64` inside
-/// [`resample`](crate::resampling::resample) and the result is rounded back to
-/// `f32`.
+/// integers near 2^31 (relative ratio error below 1e-9). It filters in the
+/// element type `F`.
 fn resample_rows_by_ratio<F: AudioFloat>(
-    rows: Array2<F>,
+    rows: ArrayView2<'_, F>,
     ratio: f64,
     quality: ResamplingQuality,
+    n_out: Option<usize>,
 ) -> AudioSampleResult<Array2<F>> {
     const BASE: f64 = 2_147_483_648.0; // 2^31
     let (in_sr, out_sr) = if ratio <= 1.0 {
@@ -401,12 +401,7 @@ fn resample_rows_by_ratio<F: AudioFloat>(
             .ok_or_else(|| param_err("ratio", format!("resampling ratio {ratio} is out of range")))
     };
     let (in_sr, out_sr) = (to_rate(in_sr)?, to_rate(out_sr)?);
-    let n_channels = rows.nrows();
-    let audio: AudioSamples<'static, F> = float_rows_to_audio(rows, in_sr, "pitch_shift")?;
-    let y = crate::resampling::resample(&audio, out_sr, quality)?;
-    let out = audio_float_rows(&y);
-    debug_assert_eq!(out.nrows(), n_channels);
-    Ok(out)
+    crate::resampling::resample_float_rows(rows, in_sr.get(), out_sr.get(), quality, n_out)
 }
 
 /// Configuration of [`AudioEffects::pitch_shift`], mirroring the keyword
@@ -526,17 +521,7 @@ fn pitch_shift_rows<F: AudioFloat>(
     let rate = 2.0f64.powf(-n_steps / config.bins_per_octave.get() as f64);
     let stretched = time_stretch_rows::<F>(rows, rate, &config.stft)?;
     // librosa: resample(orig_sr = sr / rate, target_sr = sr), i.e. by the ratio `rate`.
-    let shifted = resample_rows_by_ratio(stretched, rate, config.quality)?;
-    Ok(fix_length(shifted.view(), n))
-}
-
-/// Truncates or zero-pads every row to `n` samples (`librosa.util.fix_length`).
-fn fix_length<F: AudioFloat>(rows: ArrayView2<'_, F>, n: usize) -> Array2<F> {
-    let mut out = Array2::<F>::zeros((rows.nrows(), n));
-    let m = rows.ncols().min(n);
-    out.slice_mut(ndarray::s![.., ..m])
-        .assign(&rows.slice(ndarray::s![.., ..m]));
-    out
+    resample_rows_by_ratio(stretched.view(), rate, config.quality, Some(n))
 }
 
 // =============================================================================
@@ -3765,7 +3750,7 @@ mod tests {
     fn resample_by_arbitrary_ratio_length() {
         let rows = Array2::from_shape_vec((1, 1000), noise(1000, 3)).unwrap();
         let r = 2.0f64.powf(-2.0 / 12.0);
-        let y = resample_rows_by_ratio(rows, r, ResamplingQuality::High).unwrap();
+        let y = resample_rows_by_ratio(rows.view(), r, ResamplingQuality::High, None).unwrap();
         assert!((y.ncols() as f64 - 1000.0 * r).abs() <= 1.0);
     }
 

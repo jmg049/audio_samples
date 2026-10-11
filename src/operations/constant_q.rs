@@ -93,7 +93,7 @@
 
 use std::num::NonZeroUsize;
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis, CowArray, Ix2, s};
+use ndarray::{Array2, Array3, ArrayView2, ArrayView3, CowArray, Ix2, s};
 use num_complex::Complex;
 
 use crate::audio_float::{finite_float_rows, float_rows_to_audio};
@@ -105,8 +105,8 @@ use crate::operations::types::ResamplingQuality;
 use crate::repr::SampleRate;
 use crate::utils::audio_math::cqt_frequencies;
 use crate::{
-    AudioData, AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError,
-    ProcessingError, StandardSample,
+    AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, ProcessingError,
+    StandardSample,
 };
 
 // =============================================================================
@@ -799,9 +799,9 @@ fn n_centred_frames(len: usize, n_fft: usize, hop: usize) -> usize {
 /// Resamples every row from `in_sr` to `out_sr` (integers; only the ratio matters),
 /// fixing the length to `ceil(n * out / in)` and multiplying by `gain`.
 ///
-/// The rows are resampled by [`crate::resample`] on audio of sample type `F`;
-/// it computes in `f64`, so for `F = f32` it holds an `f64` copy of the input
-/// and of the output while it runs.
+/// The rows are resampled with [`crate::resample`]'s filters in the element
+/// type `F`, read from the view and written straight into the result (no
+/// copy of the input, no `f64` round trip).
 fn resample_rows<F: AudioFloat>(
     y: ArrayView2<'_, F>,
     in_sr: u32,
@@ -813,36 +813,7 @@ fn resample_rows<F: AudioFloat>(
     if in_sr == out_sr {
         return Ok(y.mapv(|v| v * gain));
     }
-    let n_out = (y.ncols() as u64 * u64::from(out_sr)).div_ceil(u64::from(in_sr)) as usize;
-    let rate =
-        SampleRate::new(in_sr).ok_or_else(|| param_err("sample_rate", "must be positive"))?;
-    // The rows are resampled in place of a borrowed view (no copy).
-    let data = if y.nrows() == 1 {
-        AudioData::from_borrowed_array1(y.index_axis(Axis(0), 0))?
-    } else {
-        AudioData::from_borrowed_array2(y)?
-    };
-    let audio = AudioSamples::new(data, rate);
-    let target =
-        SampleRate::new(out_sr).ok_or_else(|| param_err("sample_rate", "must be positive"))?;
-    let out = crate::resample(&audio, target, quality)?;
-    // The resampled audio is moved, not copied, into the rows.
-    let mut rows = if out.num_channels().get() == 1 {
-        out.into_array1()
-            .ok_or_else(|| param_err("signal", "resampled audio is not mono"))?
-            .insert_axis(Axis(0))
-    } else {
-        out.into_array2()
-            .ok_or_else(|| param_err("signal", "resampled audio is not multi-channel"))?
-    };
-    if rows.ncols() != n_out {
-        let mut fixed = Array2::<F>::zeros((rows.nrows(), n_out));
-        let n = n_out.min(rows.ncols());
-        fixed
-            .slice_mut(s![.., ..n])
-            .assign(&rows.slice(s![.., ..n]));
-        rows = fixed;
-    }
+    let mut rows = crate::resampling::resample_float_rows(y, in_sr, out_sr, quality, None)?;
     rows.mapv_inplace(|v| v * gain);
     Ok(rows)
 }

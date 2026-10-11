@@ -61,17 +61,17 @@
 //! ```
 
 use crate::{
-    AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion, ConvertTo,
-    ParameterError,
+    AudioFloat, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,
+    AudioTypeConversion, ConvertTo, ParameterError,
     operations::types::ResamplingQuality,
-    repr::{ChannelCount, SampleRate},
+    repr::{ChannelCount, SampleRate, SampleType},
     traits::StandardSample,
 };
 use non_empty_slice::NonEmptyVec;
-use realfft::num_complex::Complex;
-use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use std::cell::RefCell;
 use std::sync::Arc;
+
+mod engine;
 
 // ---------------------------------------------------------------------------
 // Windowed-sinc interpolation kernel
@@ -222,7 +222,12 @@ struct Kernel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TableKey {
     quality: ResamplingQuality,
-    lower_bits: u64,
+    stage: Stage,
+    /// `lower` (single-stage tables) or the transition band (stage-B
+    /// tables), as `f64` bits.
+    param_bits: u64,
+    /// Half-width (stage-B tables; 0 otherwise).
+    half: usize,
     phases: usize,
 }
 
@@ -352,7 +357,9 @@ impl Kernel {
         }
         let table_key = (!exact).then_some(TableKey {
             quality,
-            lower_bits: lower.to_bits(),
+            stage: Stage::Single,
+            param_bits: lower.to_bits(),
+            half: 0,
             phases,
         });
         let build = |h: &dyn Fn(f64) -> f64| -> Arc<[f64]> {
@@ -385,16 +392,8 @@ impl Kernel {
             table_key,
             coeffs,
             hold_last: matches!(kind, KernelKind::Linear),
-            avx2_fma: has_avx2_fma(),
+            avx2_fma: has_avx2_fma_cached(),
         })
-    }
-
-    /// Integer part and phase of output `k`'s input position.
-    #[inline]
-    fn position(&self, k: u64) -> (u64, u64) {
-        let num = u128::from(k) * u128::from(self.m);
-        let l = u128::from(self.l);
-        ((num / l) as u64, (num % l) as u64)
     }
 
     /// Number of output samples for `n` input samples: `ceil(n · L / M)`.
@@ -419,6 +418,264 @@ impl Kernel {
             let r0 = &self.coeffs[i * taps..(i + 1) * taps];
             let r1 = &self.coeffs[(i + 1) * taps..(i + 2) * taps];
             (1.0 - frac) * dot(r0, window, self.avx2_fma) + frac * dot(r1, window, self.avx2_fma)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Two-stage conversion
+// ---------------------------------------------------------------------------
+//
+// A single polyphase filter evaluated directly costs `taps` multiply-adds per
+// output sample, and `taps` is large (≈ 190 / lower for `High`) because the
+// transition band is narrow. Most ratios therefore run in two stages:
+//
+// * Stage A is the same Kaiser-windowed sinc low-pass (same passband edge,
+//   transition band and attenuation) sampled at `up · in_rate` (`up` = 1 or
+//   2): a plain FIR or a 1 : 2 interpolator. It runs by FFT, so its cost
+//   hardly depends on its length.
+// * Stage B interpolates stage A's output `y1` at the exact output positions.
+//   `y1` has no content (above the attenuation) between the lower Nyquist
+//   frequency `f_low / 2` and its first image at `up · in_rate - f_low / 2`,
+//   so stage B only needs a transition band that wide: a short filter
+//   (12-48 taps), flat over all of stage A's band, with its cut-off at
+//   `y1`'s Nyquist frequency.
+//
+// The cascade has stage A's passband edge and transition band; its stopband
+// is stage A's attenuation below the image band and stage B's (set higher,
+// see [`STAGE_B_EXTRA_DB`]) in it. Stage A's output is computed outside the
+// signal too (the zero-padded input filtered by stage A), so the edges match
+// the single filter as well.
+
+/// Which filter of a conversion a kernel is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Stage {
+    /// The whole conversion in one polyphase filter.
+    Single,
+    /// Stage A of a two-stage conversion (the low-pass at `up · in_rate`).
+    A,
+    /// Stage B of a two-stage conversion (the interpolator to `out_rate`).
+    B,
+}
+
+/// Stage B's stopband attenuation above the quality tier's. Stage B's
+/// passband ripple adds to stage A's; 30 dB more keeps the cascade's
+/// passband error at the single filter's level (measured on tones across the
+/// passband).
+const STAGE_B_EXTRA_DB: f64 = 30.0;
+/// Cost of one stage-A output sample (FFT work, spectrum products and
+/// copies) in units of one stage-B multiply-add, measured with AVX2: used to
+/// choose stage A's rate.
+const STAGE_A_COST: f64 = 30.0;
+/// Integer factors (powers of two) up to this run as a single FFT stage.
+const FFT_MAX_FACTOR: u64 = 64;
+/// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;
+/// longer filters (decimation by more than ~170 : 1) run directly.
+const FFT_MAX_HALF: usize = 1 << 14;
+
+/// How a conversion is evaluated.
+#[derive(Debug, Clone)]
+enum Plan {
+    /// One polyphase filter evaluated directly (linear interpolation, and
+    /// ratios whose stage-A filter is too long for the FFT path).
+    Direct(Arc<Kernel>),
+    /// One filter, an integer up- or down-sampling by a power of two
+    /// (`kernel` has `l = up`, `m = down`), evaluated by FFT.
+    Fft {
+        kernel: Arc<Kernel>,
+        up: usize,
+        down: usize,
+    },
+    /// Stage A at `up · in_rate` (FFT), then stage B.
+    TwoStage {
+        a: Arc<Kernel>,
+        up: usize,
+        b: Arc<Kernel>,
+    },
+}
+
+/// Shape of stage B when stage A runs at `up · in_sr`: `(l, m, half,
+/// transition)` with `l / m = out_sr / (up · in_sr)` in lowest terms, the
+/// half-width (a multiple of 2) and the transition band in radians per
+/// stage-A sample.
+fn stage_b_shape(in_sr: u32, out_sr: u32, spec: FilterSpec, up: u64) -> (u64, u64, usize, f64) {
+    let fs_a = up * u64::from(in_sr);
+    let g = gcd(fs_a, u64::from(out_sr));
+    let (l, m) = (u64::from(out_sr) / g, fs_a / g);
+    let r = f64::from(in_sr.min(out_sr)) / fs_a as f64;
+    let attenuation = spec.attenuation_db + STAGE_B_EXTRA_DB;
+    let transition = 2.0 * std::f64::consts::PI * (1.0 - r);
+    let length = (attenuation - 7.95) / (2.285 * transition);
+    let half = ((length / 2.0).ceil() as usize).next_multiple_of(2);
+    (l, m, half, transition)
+}
+
+/// Whether stage B with `l` phases and `taps` taps gets an exact table.
+fn stage_b_exact(l: u64, taps: usize) -> bool {
+    l <= MAX_EXACT_PHASES && l.saturating_mul(taps as u64) <= MAX_TABLE_ENTRIES
+}
+
+/// Stage A's rate factor for a two-stage conversion: 2 when upsampling;
+/// when downsampling, 1 or 2, whichever the cost model prefers (close to
+/// 1 : 1, stage B at the input rate needs many taps).
+fn stage_a_up(in_sr: u32, out_sr: u32, spec: FilterSpec) -> u64 {
+    if out_sr > in_sr {
+        return 2;
+    }
+    let ratio = f64::from(out_sr) / f64::from(in_sr);
+    let cost = |up: u64| {
+        let (l, _, half, _) = stage_b_shape(in_sr, out_sr, spec, up);
+        let rows = if stage_b_exact(l, 2 * half) { 1.0 } else { 2.0 };
+        up as f64 * STAGE_A_COST + ratio * (2 * half) as f64 * rows
+    };
+    if cost(2) < cost(1) { 2 } else { 1 }
+}
+
+/// Half-width (input samples, a multiple of 8) of the single-stage filter
+/// for the ratio `l / m`, as `f64` so that absurd ratios do not overflow.
+fn stage_a_half(spec: FilterSpec, l: u64, m: u64) -> f64 {
+    let lower = (l as f64 / m as f64).min(1.0);
+    let half = (sinc_kernel(spec, lower).0 / lower).ceil();
+    (half / 8.0).ceil() * 8.0
+}
+
+/// Chooses how to evaluate `in_sr -> out_sr` at `quality`.
+///
+/// # Errors
+/// See [`Kernel::new`].
+fn plan(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> AudioSampleResult<Plan> {
+    let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
+        return Ok(Plan::Direct(cached_kernel(in_sr, out_sr, quality)?));
+    };
+    let g = gcd(u64::from(in_sr), u64::from(out_sr));
+    let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
+    let power = |f: u64| f.is_power_of_two() && (2..=FFT_MAX_FACTOR).contains(&f);
+    if (m == 1 && power(l)) || (l == 1 && power(m)) {
+        let kernel = cached_kernel(in_sr, out_sr, quality)?;
+        if kernel.half * l as usize <= FFT_MAX_HALF {
+            return Ok(Plan::Fft {
+                kernel,
+                up: l as usize,
+                down: m as usize,
+            });
+        }
+        return Ok(Plan::Direct(kernel));
+    }
+    if stage_a_half(spec, l, m) * stage_a_up(in_sr, out_sr, spec) as f64 > FFT_MAX_HALF as f64 {
+        return Ok(Plan::Direct(cached_kernel(in_sr, out_sr, quality)?));
+    }
+    let a = cached_stage_kernel(in_sr, out_sr, quality, Stage::A)?;
+    let b = cached_stage_kernel(in_sr, out_sr, quality, Stage::B)?;
+    Ok(Plan::TwoStage {
+        up: a.l as usize,
+        a,
+        b,
+    })
+}
+
+impl Kernel {
+    /// Stage A of `in_sr -> out_sr`: the quality's low-pass for the lower of
+    /// the two rates, with `up` exact rows (`l = up`, `m = 1`). For
+    /// upsampling this is the single-stage kernel of `in_sr -> 2 in_sr`.
+    fn stage_a(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Self {
+        let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
+            unreachable!("two-stage plans are only made for windowed-sinc kernels")
+        };
+        let up = stage_a_up(in_sr, out_sr, spec);
+        let g = gcd(u64::from(in_sr), u64::from(out_sr));
+        let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
+        let lower = (l as f64 / m as f64).min(1.0);
+        let (_, h) = sinc_kernel(spec, lower);
+        let half = stage_a_half(spec, l, m) as usize;
+        let taps = 2 * half;
+        let mut coeffs = Vec::with_capacity(up as usize * taps);
+        for row in 0..up {
+            let phi = row as f64 / up as f64;
+            for j in 0..taps {
+                coeffs.push(h(phi - (j as f64 - (half as f64 - 1.0))));
+            }
+        }
+        Self {
+            l: up,
+            m: 1,
+            half,
+            taps,
+            exact: true,
+            phases: 1,
+            table_key: None,
+            coeffs: coeffs.into(),
+            hold_last: false,
+            avx2_fma: has_avx2_fma_cached(),
+        }
+    }
+
+    /// Stage B of `in_sr -> out_sr`: from stage A's rate `up · in_sr` to
+    /// `out_sr`, flat up to the lower Nyquist frequency `f_low / 2` and
+    /// attenuating from `up · in_sr - f_low / 2` on. Its cut-off (−6 dB) is
+    /// therefore stage A's Nyquist frequency; its half-width follows from
+    /// Kaiser's length estimate (see [`stage_b_shape`]).
+    fn stage_b(
+        in_sr: u32,
+        out_sr: u32,
+        quality: ResamplingQuality,
+        shared: &dyn Fn(TableKey) -> Option<Arc<[f64]>>,
+    ) -> Self {
+        let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
+            unreachable!("two-stage plans are only made for windowed-sinc kernels")
+        };
+        let up = stage_a_up(in_sr, out_sr, spec);
+        let (l, m, half, transition) = stage_b_shape(in_sr, out_sr, spec, up);
+        // The rounded-up length allows more attenuation for the same
+        // transition band: use all of it (Kaiser's estimate solved for A).
+        let attenuation = 2.285 * transition * (2 * half) as f64 + 7.95;
+        let taps = 2 * half;
+        let exact = stage_b_exact(l, taps);
+        let phases = INTERP_PHASES;
+        let (rows, denom) = if exact {
+            (l as usize, l as f64)
+        } else {
+            (phases + 1, phases as f64)
+        };
+        let table_key = (!exact).then_some(TableKey {
+            quality,
+            stage: Stage::B,
+            param_bits: transition.to_bits(),
+            half,
+            phases,
+        });
+        let coeffs = table_key.and_then(shared).unwrap_or_else(|| {
+            let support = half as f64;
+            let beta = kaiser_beta(attenuation);
+            let i0_beta = bessel_i0(beta);
+            let h = |tau: f64| -> f64 {
+                let r = tau / support;
+                if r.abs() >= 1.0 {
+                    return 0.0;
+                }
+                let x = std::f64::consts::PI * tau;
+                let sinc = if x == 0.0 { 1.0 } else { x.sin() / x };
+                sinc * bessel_i0(beta * (1.0 - r * r).sqrt()) / i0_beta
+            };
+            let mut coeffs = Vec::with_capacity(rows * taps);
+            for row in 0..rows {
+                let phi = row as f64 / denom;
+                for j in 0..taps {
+                    coeffs.push(h(phi - (j as f64 - (half as f64 - 1.0))));
+                }
+            }
+            coeffs.into()
+        });
+        Self {
+            l,
+            m,
+            half,
+            taps,
+            exact,
+            phases,
+            table_key,
+            coeffs,
+            hold_last: false,
+            avx2_fma: has_avx2_fma_cached(),
         }
     }
 }
@@ -469,6 +726,12 @@ unsafe fn dot_avx2_fma(a: &[f64], b: &[f64]) -> f64 {
     sum
 }
 
+/// [`has_avx2_fma`], detected once per process.
+fn has_avx2_fma_cached() -> bool {
+    static DETECTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DETECTED.get_or_init(has_avx2_fma)
+}
+
 /// Whether the AVX2 + FMA dot product can be used on this CPU.
 fn has_avx2_fma() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -492,11 +755,12 @@ fn dot(a: &[f64], b: &[f64], avx2_fma: bool) -> f64 {
     dot_portable(a, b)
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 struct KernelKey {
     in_sr: u32,
     out_sr: u32,
     quality: ResamplingQuality,
+    stage: Stage,
 }
 
 /// Most kernels kept per thread (kernels sharing an interpolated table cost
@@ -536,10 +800,24 @@ fn cached_kernel(
     out_sr: u32,
     quality: ResamplingQuality,
 ) -> AudioSampleResult<Arc<Kernel>> {
+    cached_stage_kernel(in_sr, out_sr, quality, Stage::Single)
+}
+
+/// [`cached_kernel`] for one stage of a conversion.
+///
+/// # Errors
+/// See [`Kernel::new`].
+fn cached_stage_kernel(
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResamplingQuality,
+    stage: Stage,
+) -> AudioSampleResult<Arc<Kernel>> {
     let key = KernelKey {
         in_sr,
         out_sr,
         quality,
+        stage,
     };
     KERNEL_CACHE.with(|cell| {
         let mut cache = cell.borrow_mut();
@@ -555,7 +833,11 @@ fn cached_kernel(
                 .find(|(_, k)| k.table_key == Some(table))
                 .map(|(_, k)| Arc::clone(&k.coeffs))
         };
-        let kernel = Arc::new(Kernel::new(in_sr, out_sr, quality, &shared)?);
+        let kernel = Arc::new(match stage {
+            Stage::Single => Kernel::new(in_sr, out_sr, quality, &shared)?,
+            Stage::A => Kernel::stage_a(in_sr, out_sr, quality),
+            Stage::B => Kernel::stage_b(in_sr, out_sr, quality, &shared),
+        });
         cache.insert(0, (key, Arc::clone(&kernel)));
         let mut total = 0;
         let mut counted: Vec<*const f64> = Vec::new();
@@ -576,11 +858,14 @@ fn cached_kernel(
     })
 }
 
-/// Incremental polyphase resampling state shared by the whole-buffer and the
-/// streaming paths, so both produce identical output for the same input.
+/// Incremental direct evaluation of one polyphase kernel: the streaming path,
+/// and the whole-buffer path for [`Plan::Direct`].
 ///
 /// Each channel buffer holds input samples from absolute index `buf_start`
-/// on; the signal before index 0 is zeros (pre-filled).
+/// on. The first pushed sample has index `in_start`; `prefill` zeros before
+/// it stand for the signal before the start. Outputs are numbered from
+/// `first_out` (negative for a stage A that also produces the part of its
+/// output before the signal start, which stage B needs).
 #[derive(Debug)]
 struct PolyphaseState {
     kernel: Arc<Kernel>,
@@ -588,53 +873,79 @@ struct PolyphaseState {
     /// Absolute input index of `buffers[c][0]`.
     buf_start: i64,
     /// Next output index to produce.
-    next_out: u64,
-    /// Total input samples received per channel.
+    next_out: i64,
+    /// Absolute index one past the last input sample received.
+    in_end: i64,
+    /// Input samples received per channel.
     received: u64,
     /// Last input sample per channel (for `hold_last` kernels).
     last: Vec<f64>,
+    in_start: i64,
+    first_out: i64,
+    prefill: usize,
 }
 
 impl PolyphaseState {
+    /// State for a signal starting at index 0 (zeros before it), producing
+    /// outputs from index 0.
     fn new(kernel: Arc<Kernel>, channels: usize) -> Self {
         let half = kernel.half;
-        Self {
-            buffers: vec![vec![0.0; half]; channels],
-            buf_start: -(half as i64),
+        Self::with_layout(kernel, channels, 0, 0, half)
+    }
+
+    fn with_layout(
+        kernel: Arc<Kernel>,
+        channels: usize,
+        in_start: i64,
+        first_out: i64,
+        prefill: usize,
+    ) -> Self {
+        let mut state = Self {
+            buffers: vec![Vec::new(); channels],
+            buf_start: 0,
             next_out: 0,
+            in_end: 0,
             received: 0,
             last: vec![0.0; channels],
             kernel,
-        }
+            in_start,
+            first_out,
+            prefill,
+        };
+        state.reset();
+        state
     }
 
     fn reset(&mut self) {
-        let half = self.kernel.half;
         for b in &mut self.buffers {
             b.clear();
-            b.resize(half, 0.0);
+            b.resize(self.prefill, 0.0);
         }
-        self.buf_start = -(half as i64);
-        self.next_out = 0;
+        self.buf_start = self.in_start - self.prefill as i64;
+        self.next_out = self.first_out;
+        self.in_end = self.in_start;
         self.received = 0;
         self.last.fill(0.0);
     }
 
     /// Appends one block of input (one slice per channel, equal lengths).
-    fn push(&mut self, input: &[&[f64]]) {
+    fn push<S: AsRef<[f64]>>(&mut self, input: &[S]) {
         for ((buf, src), last) in self.buffers.iter_mut().zip(input).zip(&mut self.last) {
+            let src = src.as_ref();
             buf.extend_from_slice(src);
             if let Some(&v) = src.last() {
                 *last = v;
             }
         }
-        self.received += input.first().map_or(0, |c| c.len()) as u64;
+        let n = input.first().map_or(0, |c| c.as_ref().len());
+        self.received += n as u64;
+        self.in_end += n as i64;
     }
 
     /// Produces every output sample whose input window lies before absolute
     /// index `available` (exclusive), stopping at output index `limit`, then
     /// discards input that is no longer needed.
-    fn produce(&mut self, available: i64, limit: Option<u64>) -> Vec<Vec<f64>> {
+    fn produce(&mut self, available: i64, limit: Option<i64>) -> Vec<Vec<f64>> {
         let kernel = Arc::clone(&self.kernel);
         let half = kernel.half as i64;
         let taps = kernel.taps;
@@ -642,8 +953,9 @@ impl PolyphaseState {
         // Step the position incrementally: output k + 1 is M / L input
         // samples after output k.
         let (step_int, step_frac) = ((kernel.m / kernel.l) as i64, kernel.m % kernel.l);
-        let (n0, mut p) = kernel.position(self.next_out);
-        let mut n0 = n0 as i64;
+        let num = i128::from(self.next_out) * i128::from(kernel.m);
+        let l = i128::from(kernel.l);
+        let (mut n0, mut p) = (num.div_euclid(l) as i64, num.rem_euclid(l) as u64);
         loop {
             if limit.is_some_and(|lim| self.next_out >= lim) || n0 + half >= available {
                 break;
@@ -674,240 +986,125 @@ impl PolyphaseState {
 
     /// Produces what the input so far allows (the look-ahead of `half`
     /// samples is held back until more input or [`finish`](Self::finish)).
-    fn process(&mut self, input: &[&[f64]]) -> Vec<Vec<f64>> {
+    fn process<S: AsRef<[f64]>>(&mut self, input: &[S]) -> Vec<Vec<f64>> {
         self.push(input);
-        let available = self.received as i64;
-        self.produce(available, None)
+        self.produce(self.in_end, None)
     }
 
     /// Flushes the tail: extends the input (zeros, or the held last sample for
     /// linear interpolation) and produces the remaining outputs, so that the
     /// total output is exactly `ceil(received · L / M)` samples.
     fn finish(&mut self) -> Vec<Vec<f64>> {
-        let half = self.kernel.half;
+        let total = self.kernel.output_len(self.received) as i64;
+        self.finish_with(self.kernel.half, total)
+    }
+
+    /// Extends the input by `pad` samples (zeros, or the held last sample)
+    /// and produces the outputs before index `end`.
+    fn finish_with(&mut self, pad: usize, end: i64) -> Vec<Vec<f64>> {
         let hold = self.kernel.hold_last;
         for (buf, &last) in self.buffers.iter_mut().zip(&self.last) {
-            let pad = if hold { last } else { 0.0 };
-            buf.extend(std::iter::repeat_n(pad, half));
+            let v = if hold { last } else { 0.0 };
+            buf.extend(std::iter::repeat_n(v, pad));
         }
-        let available = self.received as i64 + half as i64;
-        let total = self.kernel.output_len(self.received);
-        self.produce(available, Some(total))
+        self.produce(self.in_end + pad as i64, Some(end))
     }
 }
 
-// ---------------------------------------------------------------------------
-// FFT evaluation of the polyphase filter (small L and M)
-// ---------------------------------------------------------------------------
-
-/// Largest `L · M` for which the FFT path is considered (one filter spectrum
-/// is precomputed per `(output phase, input residue)` pair).
-const FFT_MAX_SPECTRA: usize = 64;
-/// Inputs shorter than this always use the direct path.
-const FFT_MIN_INPUT: usize = 8192;
-
-thread_local! {
-    static RESAMPLE_FFT_PLANNER: RefCell<RealFftPlanner<f64>> = RefCell::new(RealFftPlanner::new());
+/// Streaming evaluation of a [`Plan::TwoStage`]: stage A's output (from index
+/// `-half_b` on, i.e. including the part before the signal start) feeds
+/// stage B.
+#[derive(Debug)]
+struct ChainState {
+    a: PolyphaseState,
+    b: PolyphaseState,
+    /// Overall output samples per period.
+    l: u64,
+    /// Overall input samples per period.
+    m: u64,
 }
 
-/// Exact FFT (overlap-save) evaluation of a whole-buffer polyphase resample,
-/// for ratios `L / M` with small `L` and `M` (e.g. 2:1 decimation, 1:2
-/// interpolation, 3:1, 2:3).
-///
-/// It computes the same sums as [`Kernel::eval`] with the same coefficients,
-/// only in a different order, so the result equals the direct path up to
-/// floating-point round-off. Output `k = q · L + i` (sub-stream `i`) is
-///
-/// ```text
-/// y[q L + i] = Σ_j c[p_i][j] · x[q M + d_i − half + 1 + j]
-///            = Σ_r Σ_t G_{i,r}[t] · x_r[q + t0 + t]
-/// ```
-///
-/// with `p_i = i M mod L`, `d_i = ⌊i M / L⌋`, `x_r[v] = x[M v + r]` the input
-/// split into its `M` residue streams, and `G_{i,r}` the taps of row `p_i`
-/// that land on residue `r`. Each block of every sub-stream is therefore a sum
-/// of `M` correlations at the input rate divided by `M`, which share the
-/// residue streams' forward FFTs: per block, `M` forward and `L` inverse real
-/// FFTs replace `L · block · taps` multiply-adds.
-struct FftPolyphase {
-    l: usize,
-    m: usize,
-    /// FFT size.
-    fft_len: usize,
-    /// Taps per `(i, r)` filter.
-    filter_len: usize,
-    /// Valid outputs per sub-stream per block (`fft_len - filter_len + 1`).
-    block: usize,
-    /// Residue-stream index of the first filter tap (may be negative).
-    t0: i64,
-    /// Spectra of the time-reversed `G_{i,r}`, scaled by `1 / fft_len`;
-    /// index `i * m + r`.
-    spectra: Vec<Vec<Complex<f64>>>,
-    forward: Arc<dyn RealToComplex<f64>>,
-    inverse: Arc<dyn ComplexToReal<f64>>,
-}
-
-impl FftPolyphase {
-    /// Builds the FFT evaluator when it is applicable and estimated to be
-    /// faster than the direct dot products for an input of `n` samples.
-    fn new(kernel: &Kernel, n: usize) -> Option<Self> {
-        if !kernel.exact || kernel.hold_last || n < FFT_MIN_INPUT {
-            return None;
-        }
-        let (l, m) = (kernel.l as usize, kernel.m as usize);
-        if l.saturating_mul(m) > FFT_MAX_SPECTRA {
-            return None;
-        }
-        let (half, taps) = (kernel.half as i64, kernel.taps);
-        let a_len = taps.div_ceil(m);
-        let mi = m as i64;
-        // Per sub-stream: phase row, input offset of tap 0, first residue index.
-        let subs: Vec<(usize, i64, i64)> = (0..l)
-            .map(|i| {
-                let p = (i * m) % l;
-                let b = (i * m / l) as i64 - half + 1;
-                (p, b, b.div_euclid(mi))
-            })
-            .collect();
-        let t0 = subs.iter().map(|s| s.2).min()?;
-        let t_end = subs.iter().map(|s| s.2 + a_len as i64 + 1).max()?;
-        let filter_len = (t_end - t0) as usize;
-
-        // Cost model (CPU cycles per output sample, measured on AVX2 + FMA):
-        // the direct path costs ~0.35 cycles per tap; a real FFT of size F
-        // ~0.45 F log2 F, a complex multiply-add per bin ~1.
-        let direct = 0.35 * taps as f64 + 10.0;
-        let (fft_len, cost) = (8..=16)
-            .map(|e| 1usize << e)
-            .filter(|&f| f >= 2 * filter_len)
-            .map(|f| {
-                let block = (f - filter_len + 1) as f64;
-                let fft = 0.45 * f as f64 * (f as f64).log2();
-                let macs = (l * m * (f / 2 + 1)) as f64;
-                (f, ((l + m) as f64 * fft + macs) / (l as f64 * block))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))?;
-        if cost >= 0.8 * direct {
-            return None;
-        }
-
-        let (forward, inverse) = RESAMPLE_FFT_PLANNER.with(|p| {
-            let mut p = p.borrow_mut();
-            (p.plan_fft_forward(fft_len), p.plan_fft_inverse(fft_len))
-        });
-        let scale = 1.0 / fft_len as f64;
-        let mut buf = vec![0.0; fft_len];
-        let mut spectra = Vec::with_capacity(l * m);
-        for &(p, b, _) in &subs {
-            let row = &kernel.coeffs[p * taps..(p + 1) * taps];
-            let mut g = vec![vec![0.0; filter_len]; m];
-            for s in 0..m {
-                let u = b + s as i64;
-                let (r, e) = (u.rem_euclid(mi) as usize, u.div_euclid(mi));
-                for a in 0..a_len {
-                    if let Some(&c) = row.get(m * a + s) {
-                        g[r][(e - t0) as usize + a] = c;
-                    }
-                }
-            }
-            for g_r in g {
-                buf.fill(0.0);
-                for (dst, &v) in buf.iter_mut().zip(g_r.iter().rev()) {
-                    *dst = v * scale;
-                }
-                let mut spec = forward.make_output_vec();
-                forward.process(&mut buf, &mut spec).ok()?;
-                spectra.push(spec);
-            }
-        }
-        Some(Self {
+impl ChainState {
+    fn new(a: Arc<Kernel>, b: Arc<Kernel>, channels: usize, l: u64, m: u64) -> Self {
+        let up = a.l as i64;
+        let first = -(b.half as i64);
+        // Stage A output `first` sits at input position floor(first / up) and
+        // needs the input from `half_a - 1` samples before that.
+        let prefill = (a.half as i64 - 1 - first.div_euclid(up)) as usize;
+        Self {
+            a: PolyphaseState::with_layout(a, channels, 0, first, prefill),
+            b: PolyphaseState::with_layout(b, channels, first, 0, 0),
             l,
             m,
-            fft_len,
-            filter_len,
-            block: fft_len - filter_len + 1,
-            t0,
-            spectra,
-            forward,
-            inverse,
-        })
+        }
     }
 
-    /// Fills `dst` with `x[M (t0 + q0 + v) + r]` for `v in 0..dst.len()`
-    /// (zero where the index falls outside `x`).
-    fn gather(&self, x: &[f64], r: usize, q0: usize, dst: &mut [f64]) {
-        let m = self.m as i64;
-        let start = (self.t0 + q0 as i64) * m + r as i64;
-        // Leading entries with a negative input index.
-        let lead = if start < 0 {
-            usize::try_from((-start + m - 1) / m).unwrap_or(usize::MAX)
-        } else {
-            0
-        }
-        .min(dst.len());
-        dst[..lead].fill(0.0);
-        let first = start + lead as i64 * m;
-        let mut filled = lead;
-        if let Ok(first) = usize::try_from(first)
-            && first < x.len()
-        {
-            for (d, &v) in dst[lead..]
-                .iter_mut()
-                .zip(x[first..].iter().step_by(self.m))
-            {
-                *d = v;
-                filled += 1;
-            }
-        }
-        dst[filled..].fill(0.0);
+    fn reset(&mut self) {
+        self.a.reset();
+        self.b.reset();
     }
 
-    /// Resamples one channel, producing `n_out` samples.
-    fn process(&self, x: &[f64], n_out: usize) -> Vec<f64> {
-        let (l, m, f) = (self.l, self.m, self.fft_len);
-        let n_q = n_out.div_ceil(l);
-        let n_blocks = n_q.div_ceil(self.block);
-        let n_bins = f / 2 + 1;
-        let mut y = vec![0.0; n_out];
-        let mut time = vec![0.0; f];
-        let mut fwd_scratch = self.forward.make_scratch_vec();
-        let mut inv_scratch = self.inverse.make_scratch_vec();
-        let mut x_spec = vec![vec![Complex::new(0.0, 0.0); n_bins]; m];
-        let mut acc = vec![Complex::new(0.0, 0.0); n_bins];
-        for blk in 0..n_blocks {
-            let q0 = blk * self.block;
-            for (r, spec) in x_spec.iter_mut().enumerate() {
-                // Residue stream r: time[v] = x[M (t0 + q0 + v) + r], zero outside x.
-                self.gather(x, r, q0, &mut time);
-                // Infallible: buffer lengths come from the plan itself.
-                let _ = self
-                    .forward
-                    .process_with_scratch(&mut time, spec, &mut fwd_scratch);
+    fn process(&mut self, input: &[&[f64]]) -> Vec<Vec<f64>> {
+        let y1 = self.a.process(input);
+        self.b.process(&y1)
+    }
+
+    fn finish(&mut self) -> Vec<Vec<f64>> {
+        let n = self.a.received;
+        let up = self.a.kernel.l;
+        let half_b = self.b.kernel.half as u64;
+        // Stage B's last output needs stage A's output up to
+        // `up · n + half_b - 1`, which needs the input up to
+        // `n + ceil(half_b / up) + half_a - 1`.
+        let end_a = (up * n + half_b) as i64;
+        let pad = self.a.kernel.half + half_b.div_ceil(up) as usize + 1;
+        let y1 = self.a.finish_with(pad, end_a);
+        self.b.push(&y1);
+        let total = (u128::from(n) * u128::from(self.l)).div_ceil(u128::from(self.m)) as i64;
+        self.b.produce(self.b.in_end, Some(total))
+    }
+}
+
+/// Streaming state for any [`Plan`].
+#[derive(Debug)]
+enum StreamState {
+    Single(PolyphaseState),
+    Chain(ChainState),
+}
+
+impl StreamState {
+    fn new(plan: Plan, channels: usize, in_sr: u32, out_sr: u32) -> Self {
+        match plan {
+            Plan::Direct(kernel) | Plan::Fft { kernel, .. } => {
+                Self::Single(PolyphaseState::new(kernel, channels))
             }
-            for i in 0..l {
-                acc.fill(Complex::new(0.0, 0.0));
-                for (r, spec) in x_spec.iter().enumerate() {
-                    for ((a, &xv), &hv) in acc.iter_mut().zip(spec).zip(&self.spectra[i * m + r]) {
-                        *a += xv * hv;
-                    }
-                }
-                // Real inputs: the DC and Nyquist bins are real.
-                acc[0].im = 0.0;
-                acc[n_bins - 1].im = 0.0;
-                let _ = self
-                    .inverse
-                    .process_with_scratch(&mut acc, &mut time, &mut inv_scratch);
-                let valid = &time[self.filter_len - 1..];
-                for (qq, &v) in valid.iter().enumerate().take(self.block) {
-                    let k = (q0 + qq) * l + i;
-                    if k >= n_out {
-                        break;
-                    }
-                    y[k] = v;
-                }
+            Plan::TwoStage { a, b, .. } => {
+                let g = gcd(u64::from(in_sr), u64::from(out_sr));
+                let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
+                Self::Chain(ChainState::new(a, b, channels, l, m))
             }
         }
-        y
+    }
+
+    fn process(&mut self, input: &[&[f64]]) -> Vec<Vec<f64>> {
+        match self {
+            Self::Single(s) => s.process(input),
+            Self::Chain(c) => c.process(input),
+        }
+    }
+
+    fn finish(&mut self) -> Vec<Vec<f64>> {
+        match self {
+            Self::Single(s) => s.finish(),
+            Self::Chain(c) => c.finish(),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Single(s) => s.reset(),
+            Self::Chain(c) => c.reset(),
+        }
     }
 }
 
@@ -967,25 +1164,176 @@ where
     match kernel_kind(quality, in_sr, out_sr) {
         // Linear interpolation: dedicated (SIMD) loops, f32.
         KernelKind::Linear => resample_linear(&audio.as_f32(), target_sample_rate),
-        KernelKind::Sinc(_) => {
-            let data = channel_data_f64(audio)?;
-            let kernel = cached_kernel(in_sr, out_sr, quality)?;
-            let n_in = data.first().map_or(0, Vec::len);
-            if let Some(fft) = FftPolyphase::new(&kernel, n_in) {
-                let n_out = kernel.output_len(n_in as u64) as usize;
-                let out: Vec<Vec<f64>> = data.iter().map(|x| fft.process(x, n_out)).collect();
-                return assemble_output(out, n_out, audio.num_channels(), target_sample_rate);
+        KernelKind::Sinc(_) => match <T::Float as AudioSample>::SAMPLE_TYPE {
+            SampleType::F32 => resample_sinc::<T, f32>(audio, target_sample_rate, quality),
+            _ => resample_sinc::<T, f64>(audio, target_sample_rate, quality),
+        },
+    }
+}
+
+/// Number of output samples for `n` input samples: `ceil(n · out / in)`.
+fn output_len(in_sr: u32, out_sr: u32, n: usize) -> usize {
+    (n as u128 * u128::from(out_sr)).div_ceil(u128::from(in_sr)) as usize
+}
+
+/// Windowed-sinc resampling in `F` (the sample type's float): the cached
+/// engine for the plan writes every channel straight into the output buffer.
+fn resample_sinc<T, F>(
+    audio: &AudioSamples<T>,
+    target_sample_rate: SampleRate,
+    quality: ResamplingQuality,
+) -> AudioSampleResult<AudioSamples<'static, T>>
+where
+    T: StandardSample,
+    F: engine::RsFloat,
+{
+    let in_sr = audio.sample_rate().get();
+    let out_sr = target_sample_rate.get();
+    let Some(engine) = engine::cached_engine::<F>(in_sr, out_sr, quality)? else {
+        return resample_direct(audio, target_sample_rate, quality);
+    };
+    let n_out = output_len(in_sr, out_sr, audio.samples_per_channel().get());
+    let channels = audio.num_channels().get() as usize;
+    // Every sample is written by the engine: no zero-initialisation pass.
+    let mut flat: Vec<T> = Vec::with_capacity(channels * n_out);
+    let to_f = |s: T| F::of(s.to_float().as_f64());
+    let from_f = |v: F| T::from_float(<T::Float as AudioFloat>::of(v.as_f64()));
+    let spare = &mut flat.spare_capacity_mut()[..channels * n_out];
+    let mut run = |c: usize, x: &[T]| {
+        engine.run(x, &mut spare[c * n_out..(c + 1) * n_out], &to_f, &from_f);
+    };
+    if let Some(mono) = audio.as_mono() {
+        match mono.as_slice() {
+            Some(x) => run(0, x),
+            None => run(0, &mono.to_vec()),
+        }
+    } else {
+        let multi = audio.as_multi_channel().ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Failed to get multi-channel data",
+            ))
+        })?;
+        for c in 0..channels {
+            let row = multi.row(c);
+            match row.as_slice() {
+                Some(x) => run(c, x),
+                None => run(c, &row.to_vec()),
             }
-            let mut state = PolyphaseState::new(kernel, data.len());
-            let slices: Vec<&[f64]> = data.iter().map(Vec::as_slice).collect();
-            let mut out = state.process(&slices);
-            for (o, tail) in out.iter_mut().zip(state.finish()) {
-                o.extend(tail);
-            }
-            let frames = out[0].len();
-            assemble_output(out, frames, audio.num_channels(), target_sample_rate)
         }
     }
+    // SAFETY: `Engine::run` wrote every element of each channel's range, and
+    // the ranges cover the first `channels * n_out` elements.
+    unsafe { flat.set_len(channels * n_out) };
+    if channels == 1 {
+        AudioSamples::new_mono(ndarray::Array1::from_vec(flat), target_sample_rate)
+    } else {
+        let data = ndarray::Array2::from_shape_vec((channels, n_out), flat).map_err(|e| {
+            AudioSampleError::Parameter(ParameterError::invalid_value("audio", e.to_string()))
+        })?;
+        AudioSamples::new_multi_channel(data, target_sample_rate)
+    }
+}
+
+/// Direct single-stage evaluation in `f64` ([`Plan::Direct`]).
+fn resample_direct<T: StandardSample>(
+    audio: &AudioSamples<T>,
+    target_sample_rate: SampleRate,
+    quality: ResamplingQuality,
+) -> AudioSampleResult<AudioSamples<'static, T>> {
+    let in_sr = audio.sample_rate().get();
+    let out_sr = target_sample_rate.get();
+    let data = channel_data_f64(audio)?;
+    let kernel = cached_kernel(in_sr, out_sr, quality)?;
+    let mut state = PolyphaseState::new(kernel, data.len());
+    let slices: Vec<&[f64]> = data.iter().map(Vec::as_slice).collect();
+    let mut out = state.process(&slices);
+    for (o, tail) in out.iter_mut().zip(state.finish()) {
+        o.extend(tail);
+    }
+    let frames = out[0].len();
+    assemble_output(out, frames, audio.num_channels(), target_sample_rate)
+}
+
+/// Resamples `(channels, samples)` float rows from `in_sr` to `out_sr`
+/// without wrapping them in [`AudioSamples`] and without converting them:
+/// the same result as [`resample`] on audio of sample type `F`, truncated or
+/// zero-padded to `n_out` samples per row when given
+/// (`librosa.util.fix_length`), computing only the samples kept.
+///
+/// # Errors
+/// See [`resample`]; also if a rate is zero or `rows` is empty.
+pub(crate) fn resample_float_rows<F: AudioFloat>(
+    rows: ndarray::ArrayView2<'_, F>,
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResamplingQuality,
+    n_out: Option<usize>,
+) -> AudioSampleResult<ndarray::Array2<F>> {
+    match F::SAMPLE_TYPE {
+        SampleType::F32 => resample_rows_in::<F, f32>(rows, in_sr, out_sr, quality, n_out),
+        _ => resample_rows_in::<F, f64>(rows, in_sr, out_sr, quality, n_out),
+    }
+}
+
+fn resample_rows_in<T: AudioFloat, F: engine::RsFloat>(
+    rows: ndarray::ArrayView2<'_, T>,
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResamplingQuality,
+    n_out: Option<usize>,
+) -> AudioSampleResult<ndarray::Array2<T>> {
+    let rate = |v: u32| {
+        SampleRate::new(v).ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "sample_rate",
+                "must be positive",
+            ))
+        })
+    };
+    let (in_rate, out_rate) = (rate(in_sr)?, rate(out_sr)?);
+    if rows.is_empty() {
+        return Err(AudioSampleError::empty_data("resample"));
+    }
+    let natural = output_len(in_sr, out_sr, rows.ncols());
+    let n_out = n_out.unwrap_or(natural);
+    let engine =
+        if in_sr == out_sr || matches!(kernel_kind(quality, in_sr, out_sr), KernelKind::Linear) {
+            None
+        } else {
+            engine::cached_engine::<F>(in_sr, out_sr, quality)?
+        };
+    let Some(engine) = engine else {
+        // Identity, linear interpolation and direct plans: through `resample`.
+        let audio =
+            crate::audio_float::float_rows_to_audio::<T>(rows.to_owned(), in_rate, "resample")?;
+        let y = resample(&audio, out_rate, quality)?;
+        let y = crate::audio_float::audio_float_rows(&y);
+        let mut out = ndarray::Array2::<T>::zeros((rows.nrows(), n_out));
+        let n = n_out.min(y.ncols());
+        out.slice_mut(ndarray::s![.., ..n])
+            .assign(&y.slice(ndarray::s![.., ..n]));
+        return Ok(out);
+    };
+    let mut out = ndarray::Array2::<T>::zeros((rows.nrows(), n_out));
+    let keep = n_out.min(natural);
+    let to_f = |s: T| F::of(s.as_f64());
+    let from_f = |v: F| T::of(v.as_f64());
+    for (row, mut dst) in rows.outer_iter().zip(out.outer_iter_mut()) {
+        let dst = dst
+            .as_slice_mut()
+            .expect("rows of a new standard-layout array are contiguous");
+        // SAFETY: `MaybeUninit<T>` has the layout of `T`, and the engine only
+        // writes valid values.
+        let dst = unsafe {
+            &mut *(std::ptr::from_mut(&mut dst[..keep]) as *mut [std::mem::MaybeUninit<T>])
+        };
+        match row.as_slice() {
+            Some(x) => engine.run(x, dst, &to_f, &from_f),
+            None => engine.run(&row.to_vec(), dst, &to_f, &from_f),
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,7 +1467,7 @@ where
 /// ```
 #[derive(Debug)]
 pub struct StreamingResampler<T: StandardSample> {
-    state: PolyphaseState,
+    state: StreamState,
     channels: usize,
     channel_count: ChannelCount,
     out_sample_rate: SampleRate,
@@ -1140,9 +1488,10 @@ impl<T: StandardSample> StreamingResampler<T> {
         quality: ResamplingQuality,
     ) -> AudioSampleResult<Self> {
         let nbr_channels = channels.get() as usize;
-        let kernel = cached_kernel(in_sample_rate.get(), out_sample_rate.get(), quality)?;
+        let (in_sr, out_sr) = (in_sample_rate.get(), out_sample_rate.get());
+        let plan = plan(in_sr, out_sr, quality)?;
         Ok(Self {
-            state: PolyphaseState::new(kernel, nbr_channels),
+            state: StreamState::new(plan, nbr_channels, in_sr, out_sr),
             channels: nbr_channels,
             channel_count: channels,
             out_sample_rate,
@@ -1617,8 +1966,9 @@ mod tests {
         }
     }
 
-    /// The FFT evaluation computes the same filter sums as the direct
-    /// polyphase loop (only the summation order differs).
+    /// The whole-buffer evaluation (FFT stage A, stage B over blocks)
+    /// computes the same sums as the direct streaming evaluation of the same
+    /// plan (only the summation order differs).
     #[test]
     fn test_fft_path_matches_direct_path() {
         let cases = [
@@ -1630,6 +1980,13 @@ mod tests {
             (44100, 29400),
             (29400, 44100),
             (48000, 8000),
+            (22050, 16000),
+            (16000, 22050),
+            (22050, 17501),
+            (16000, 12699),
+            (48000, 44100),
+            (44100, 44101),
+            (1, 64),
         ];
         for (in_sr, out_sr) in cases {
             for quality in [
@@ -1637,25 +1994,21 @@ mod tests {
                 ResamplingQuality::Medium,
                 ResamplingQuality::High,
             ] {
-                let kernel = cached_kernel(in_sr, out_sr, quality).unwrap();
-                for n in [FFT_MIN_INPUT, 20011, 65537] {
+                if matches!(kernel_kind(quality, in_sr, out_sr), KernelKind::Linear) {
+                    continue;
+                }
+                for n in [1, 37, 8192, 20011] {
                     let x: Vec<f64> = (0..n)
                         .map(|i| (i as f64 * 0.37).sin() + 0.3 * (i as f64 * 0.0123).cos())
                         .collect();
-                    let Some(fft) = FftPolyphase::new(&kernel, n) else {
-                        assert!(
-                            kernel.hold_last
-                                || n == FFT_MIN_INPUT
-                                || quality != ResamplingQuality::High,
-                            "FFT path not used for {in_sr} -> {out_sr} {quality:?} (n={n})"
-                        );
-                        continue;
-                    };
-                    let mut state = PolyphaseState::new(Arc::clone(&kernel), 1);
+                    let mut state =
+                        StreamState::new(plan(in_sr, out_sr, quality).unwrap(), 1, in_sr, out_sr);
                     let mut direct = state.process(&[&x]).remove(0);
                     direct.extend(state.finish().remove(0));
-                    let fast = fft.process(&x, direct.len());
-                    assert_eq!(fast.len(), direct.len());
+                    let audio = mono(x, SampleRate::new(in_sr).unwrap());
+                    let fast = resample(&audio, SampleRate::new(out_sr).unwrap(), quality).unwrap();
+                    let fast = fast.as_mono().unwrap().to_vec();
+                    assert_eq!(fast.len(), direct.len(), "{in_sr} -> {out_sr} n={n}");
                     let err = fast
                         .iter()
                         .zip(&direct)
