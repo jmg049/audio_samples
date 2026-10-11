@@ -44,8 +44,10 @@ fn mfcc<F: AudioFloat>(x: &AudioCtx<F>) -> Array2<F> {
         .index_axis_move(Axis(0), 0)
 }
 
-fn rec<F: AudioFloat>(x: &AudioCtx<F>) -> Array2<F> {
-    recurrence_matrix(chroma(x).view(), &RecurrenceConfig::librosa()).unwrap()
+/// The bool connectivity recurrence matrix of the chroma (librosa's lag
+/// conversion input is its bool recurrence matrix).
+fn rec<F: AudioFloat>(x: &AudioCtx<F>) -> Array2<bool> {
+    recurrence_matrix_bool(chroma(x).view(), &RecurrenceConfig::librosa()).unwrap()
 }
 
 pub fn audio<'a, F: AudioFloat>(case: &str, x: &'a AudioCtx<F>) -> Option<Thunk<'a>> {
