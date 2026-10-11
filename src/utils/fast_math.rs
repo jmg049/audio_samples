@@ -1,6 +1,6 @@
-//! A branch-free `sin` kernel for loops that should vectorise.
+//! Branch-free `sin` and `log2` kernels for loops that should vectorise.
 //!
-//! It follows FreeBSD's msun (fdlibm) algorithm and coefficients: the
+//! They follow FreeBSD's msun (fdlibm) algorithms and coefficients: the
 //! result is within 1 ulp of the exact value, like the C library's, but is
 //! not always bit-identical to it. Every step is plain arithmetic and bit
 //! manipulation (no table lookups, branches or calls), so the compiler can
@@ -98,6 +98,64 @@ pub(crate) fn sin_kernel(x: f64) -> f64 {
     if n & 2 == 0 { base } else { -base }
 }
 
+// k_log.h / e_log.c: the log1p polynomial.
+const LG1: f64 = f(0x3fe5_5555_5555_5593);
+const LG2: f64 = f(0x3fd9_9999_9997_fa04);
+const LG3: f64 = f(0x3fd2_4924_9422_9359);
+const LG4: f64 = f(0x3fcc_71c5_1d8e_78af);
+const LG5: f64 = f(0x3fc7_4664_96cb_03de);
+const LG6: f64 = f(0x3fc3_9a09_d078_c69f);
+const LG7: f64 = f(0x3fc2_f112_df3e_5244);
+// e_log2.c: 1/ln 2 split into a 33-bit head and its tail.
+const IVLN2HI: f64 = f(0x3ff7_1547_6520_0000);
+const IVLN2LO: f64 = f(0x3de7_05fc_2eef_a200);
+
+/// Whether `x` is positive, normal and finite (the domain of
+/// [`log2_kernel`]).
+#[inline(always)]
+pub(crate) fn positive_normal_f64(x: f64) -> bool {
+    // exponent field in 1..=2046 and sign bit clear
+    x.to_bits().wrapping_sub(0x0010_0000_0000_0000) < 0x7fe0_0000_0000_0000
+}
+
+/// `log2(x)` for positive normal finite `x`, within 1 ulp (msun's
+/// `__ieee754_log2`).
+///
+/// `x = 2^k · m` with `m` folded into `[sqrt(2)/2, sqrt(2))`; `log(m)` is
+/// `f - f^2/2 + s (f^2/2 + R(s^2))` with `f = m - 1`, `s = f / (2 + f)`, and
+/// the head of `f - f^2/2` is kept to 33 bits so that its product with the
+/// head of `1/ln 2` is exact.
+#[inline(always)]
+pub(crate) fn log2_kernel(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let hx = (bits >> 32) as i32;
+    let lx = bits & 0xffff_ffff;
+    let mut k = (hx >> 20) - 1023;
+    let hm = hx & 0x000f_ffff;
+    // i = 0x100000 when the mantissa is at least sqrt(2) / 2 * 2: then m is
+    // halved (k incremented).
+    let i = (hm + 0x95f64) & 0x10_0000;
+    let m = f64::from_bits((u64::from((hm | (i ^ 0x3ff0_0000)) as u32) << 32) | lx);
+    k += i >> 20;
+    let y = f64::from(k);
+    let fm = m - 1.0;
+    let hfsq = 0.5 * fm * fm;
+    // k_log1p(fm)
+    let s = fm / (2.0 + fm);
+    let z = s * s;
+    let w = z * z;
+    let t1 = w * (LG2 + w * (LG4 + w * LG6));
+    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+    let r = s * (hfsq + (t2 + t1));
+    let hi = f64::from_bits((fm - hfsq).to_bits() & 0xffff_ffff_0000_0000);
+    let lo = (fm - hi) - hfsq + r;
+    let val_hi = hi * IVLN2HI;
+    let mut val_lo = (lo + hi) * IVLN2LO + lo * IVLN2HI;
+    let w = y + val_hi;
+    val_lo += (y - w) + val_hi;
+    val_lo + w
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +185,44 @@ mod tests {
         }
         assert!(worst <= 1.0, "worst error {worst} ulp");
         assert_eq!(sin_kernel(0.0), 0.0);
+    }
+
+    #[test]
+    fn log2_kernel_is_within_one_ulp() {
+        let mut worst = 0.0_f64;
+        let mut seed = 1u64;
+        for _ in 0..2_000_000 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // Random positive normal doubles over the whole exponent range,
+            // and values near 1 (where log2 is small).
+            let x = f64::from_bits((seed >> 2) % 0x7fe0_0000_0000_0000 + 0x0010_0000_0000_0000);
+            let near1 = 1.0 + ((seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 1e-3;
+            for v in [x, near1] {
+                assert!(positive_normal_f64(v));
+                let want = v.log2();
+                if want != 0.0 {
+                    worst = worst.max(ulp_diff(log2_kernel(v), want));
+                }
+            }
+        }
+        for v in [
+            1.0,
+            2.0,
+            0.5,
+            1024.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            440.0,
+            27.5,
+        ] {
+            assert!(ulp_diff(log2_kernel(v), v.log2()) <= 1.0 || log2_kernel(v) == v.log2());
+        }
+        assert_eq!(log2_kernel(1.0), 0.0);
+        assert!(worst <= 1.0, "worst {worst} ulp");
+        for v in [0.0, -1.0, f64::INFINITY, f64::NAN, 1e-310] {
+            assert!(!positive_normal_f64(v));
+        }
     }
 }

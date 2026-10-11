@@ -16,7 +16,10 @@
 //! run time). FMA is not enabled, so the results are identical on every
 //! machine.
 //!
-//! `f64` slices use the standard library's scalar functions unchanged.
+//! `f64` slices use the standard library's scalar functions unchanged,
+//! except [`log2_f64`], which uses the msun `log2` kernel of
+//! [`crate::utils::fast_math`] (within 1 ulp, not always bit-identical to the
+//! C library).
 
 use std::any::TypeId;
 
@@ -141,6 +144,47 @@ pub(crate) fn log10_f32(v: &mut [f32]) {
         return;
     }
     log10_f32_generic(v);
+}
+
+#[inline(always)]
+fn log2_f64_generic(v: &mut [f64]) {
+    use crate::utils::fast_math::{log2_kernel, positive_normal_f64};
+    for chunk in v.chunks_mut(64) {
+        if chunk.iter().fold(true, |a, &x| a & positive_normal_f64(x)) {
+            for x in chunk.iter_mut() {
+                *x = log2_kernel(*x);
+            }
+        } else {
+            for x in chunk.iter_mut() {
+                *x = if positive_normal_f64(*x) {
+                    log2_kernel(*x)
+                } else {
+                    x.log2()
+                };
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn log2_f64_avx2(v: &mut [f64]) {
+    log2_f64_generic(v);
+}
+
+/// `x = log2(x)` for every element of an `f64` slice, within 1 ulp.
+///
+/// Positive normal finite values use the vectorising msun kernel; zero,
+/// negative, subnormal, infinite and NaN values the standard library (so
+/// the special values are its own).
+pub(crate) fn log2_f64(v: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        // SAFETY: AVX2 is available (checked at run time).
+        unsafe { log2_f64_avx2(v) };
+        return;
+    }
+    log2_f64_generic(v);
 }
 
 /// Matrix product `out = w · x` with `x` given as rows: `out` holds

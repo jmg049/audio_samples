@@ -2257,7 +2257,11 @@ pub fn a4_to_tuning(a4_hz: f64, bins_per_octave: NonZeroUsize) -> f64 {
 }
 
 /// Applies [`hz_to_midi`] to every element of `freqs` (vectorised form of
-/// `librosa.hz_to_midi`); the results are identical to the scalar function.
+/// `librosa.hz_to_midi`).
+///
+/// The logarithms are evaluated with a vectorised kernel within 1 ulp of
+/// the exact value (the scalar function calls the C library's `log2`), so a
+/// result can differ from the scalar function's in the last bits.
 ///
 /// # Examples
 ///
@@ -2266,11 +2270,14 @@ pub fn a4_to_tuning(a4_hz: f64, bins_per_octave: NonZeroUsize) -> f64 {
 ///
 /// let f = [27.5, 440.0, 1000.0];
 /// let m = hz_to_midi_slice(&f);
-/// assert_eq!(m, f.map(hz_to_midi).to_vec());
+/// for (a, b) in m.iter().zip(f.map(hz_to_midi)) {
+///     assert!((a - b).abs() <= 1e-13 * b.abs());
+/// }
 /// ```
 #[must_use]
 pub fn hz_to_midi_slice(freqs: &[f64]) -> Vec<f64> {
-    let mut out: Vec<f64> = freqs.iter().map(|&f| (f / 440.0).log2()).collect();
+    let mut out: Vec<f64> = freqs.iter().map(|&f| f / 440.0).collect();
+    crate::utils::vmath::log2_f64(&mut out);
     mul_add_in_place(&mut out, 12.0, 69.0);
     out
 }
@@ -2298,7 +2305,11 @@ fn mul_add_in_place_fma(v: &mut [f64], a: f64, b: f64) {
 }
 
 /// Applies [`hz_to_octs`] to every element of `freqs` (vectorised form of
-/// `librosa.hz_to_octs`); the results are identical to the scalar function.
+/// `librosa.hz_to_octs`).
+///
+/// The logarithms are evaluated with a vectorised kernel within 1 ulp of
+/// the exact value (the scalar function calls the C library's `log2`), so a
+/// result can differ from the scalar function's in the last bits.
 ///
 /// # Examples
 ///
@@ -2307,16 +2318,25 @@ fn mul_add_in_place_fma(v: &mut [f64], a: f64, b: f64) {
 /// use audio_samples::utils::audio_math::{hz_to_octs, hz_to_octs_slice};
 ///
 /// let f = [27.5, 440.0];
-/// assert_eq!(hz_to_octs_slice(&f, 0.0, nzu!(12)), f.map(|v| hz_to_octs(v, 0.0, nzu!(12))).to_vec());
+/// let o = hz_to_octs_slice(&f, 0.0, nzu!(12));
+/// for (a, b) in o.iter().zip(f.map(|v| hz_to_octs(v, 0.0, nzu!(12)))) {
+///     assert!((a - b).abs() <= 1e-13 * b.abs());
+/// }
 /// ```
 #[must_use]
 pub fn hz_to_octs_slice(freqs: &[f64], tuning: f64, bins_per_octave: NonZeroUsize) -> Vec<f64> {
     let base = tuned_a440(tuning, bins_per_octave) / 16.0;
-    freqs.iter().map(|&f| (f / base).log2()).collect()
+    let mut out: Vec<f64> = freqs.iter().map(|&f| f / base).collect();
+    crate::utils::vmath::log2_f64(&mut out);
+    out
 }
 
 /// Applies [`a4_to_tuning`] to every element of `a4_hz` (vectorised form of
-/// `librosa.A4_to_tuning`); the results are identical to the scalar function.
+/// `librosa.A4_to_tuning`).
+///
+/// The logarithms are evaluated with a vectorised kernel within 1 ulp of
+/// the exact value (the scalar function calls the C library's `log2`), so a
+/// result can differ from the scalar function's in the last bits.
 ///
 /// # Examples
 ///
@@ -2325,13 +2345,19 @@ pub fn hz_to_octs_slice(freqs: &[f64], tuning: f64, bins_per_octave: NonZeroUsiz
 /// use audio_samples::utils::audio_math::{a4_to_tuning, a4_to_tuning_slice};
 ///
 /// let a = [432.0, 440.0, 446.0];
-/// assert_eq!(a4_to_tuning_slice(&a, nzu!(12)), a.map(|v| a4_to_tuning(v, nzu!(12))).to_vec());
+/// let t = a4_to_tuning_slice(&a, nzu!(12));
+/// for (x, y) in t.iter().zip(a.map(|v| a4_to_tuning(v, nzu!(12)))) {
+///     assert!((x - y).abs() <= 1e-12);
+/// }
 /// ```
 #[must_use]
 pub fn a4_to_tuning_slice(a4_hz: &[f64], bins_per_octave: NonZeroUsize) -> Vec<f64> {
     let bpo = bins_per_octave.get() as f64;
     let ref_log = 440.0f64.log2();
-    a4_hz.iter().map(|&a| bpo * (a.log2() - ref_log)).collect()
+    let mut out = a4_hz.to_vec();
+    crate::utils::vmath::log2_f64(&mut out);
+    out.iter_mut().for_each(|v| *v = bpo * (*v - ref_log));
+    out
 }
 
 /// Converts a tuning deviation in fractional bins to the A4 reference frequency.
@@ -3220,20 +3246,29 @@ mod tests {
             let want: Vec<i64> = floats.iter().map(|&t| time_to_samples(t, sr)).collect();
             assert_eq!(time_to_samples_slice(&floats, sr), want);
         }
-        let bits = |v: Vec<f64>| v.into_iter().map(f64::to_bits).collect::<Vec<_>>();
         let pos: Vec<f64> = floats.iter().map(|v| v.abs()).collect();
         let bpo = NonZeroUsize::new(12).unwrap();
-        assert_eq!(
-            bits(hz_to_midi_slice(&pos)),
-            bits(pos.iter().map(|&f| hz_to_midi(f)).collect())
+        // The log2 conversions use a vectorised log2 within 1 ulp of the
+        // C library's.
+        let close = |a: Vec<f64>, b: Vec<f64>| {
+            for (x, y) in a.into_iter().zip(b) {
+                assert!(
+                    x.to_bits() == y.to_bits() || (x - y).abs() <= 1e-12 * y.abs().max(1.0),
+                    "{x} vs {y}"
+                );
+            }
+        };
+        close(
+            hz_to_midi_slice(&pos),
+            pos.iter().map(|&f| hz_to_midi(f)).collect(),
         );
-        assert_eq!(
-            bits(hz_to_octs_slice(&pos, 0.3, bpo)),
-            bits(pos.iter().map(|&f| hz_to_octs(f, 0.3, bpo)).collect())
+        close(
+            hz_to_octs_slice(&pos, 0.3, bpo),
+            pos.iter().map(|&f| hz_to_octs(f, 0.3, bpo)).collect(),
         );
-        assert_eq!(
-            bits(a4_to_tuning_slice(&pos, bpo)),
-            bits(pos.iter().map(|&f| a4_to_tuning(f, bpo)).collect())
+        close(
+            a4_to_tuning_slice(&pos, bpo),
+            pos.iter().map(|&f| a4_to_tuning(f, bpo)).collect(),
         );
     }
 }
