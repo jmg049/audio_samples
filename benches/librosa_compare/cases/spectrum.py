@@ -189,8 +189,9 @@ register(
     Case(
         "window_sumsquare", G, "const",
         librosa=lambda c: partial(librosa.filters.window_sumsquare, window="hann", n_frames=WSS_FRAMES),
-        ours=lambda c: partial(S.window_sumsquare, window="hann", n_frames=WSS_FRAMES),
+        ours=lambda c: partial(S.window_sumsquare, window="hann", n_frames=WSS_FRAMES, dtype=np.float32),
         func="filters.window_sumsquare",
-        note=f"hann, {WSS_FRAMES} frames, hop 512, n_fft 2048; librosa's default dtype is float32, ours float64",
+        note=f"hann, {WSS_FRAMES} frames, hop 512, n_fft 2048; float32 in all paths (librosa's default "
+        "dtype; the binding's default is float64)",
     ),
 )

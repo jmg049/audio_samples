@@ -15,7 +15,7 @@ use audio_samples::operations::features::{
     perceptual_weighting, z_weighting,
 };
 use audio_samples::operations::filterbanks::{
-    MelFilterbankConfig, get_window, mel_filterbank, window_bandwidth, window_sumsquare,
+    MelFilterbankConfig, get_window, mel_filterbank, window_bandwidth, window_sumsquare_as,
 };
 use audio_samples::operations::spectrum::{
     DbConfig, MelSpectrogramConfig, StftConfig, amplitude_to_db, db_to_amplitude, db_to_power,
@@ -145,7 +145,9 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
         }
         "window_bandwidth" => thunk(|| window_bandwidth(&Window::Hann, nzu!(1000)).unwrap()),
         "window_sumsquare" => thunk(|| {
-            window_sumsquare(&Window::Hann, WSS_FRAMES, nzu!(512), None, nzu!(2048)).unwrap()
+            // librosa's default dtype is float32
+            window_sumsquare_as::<f32>(&Window::Hann, WSS_FRAMES, nzu!(512), None, nzu!(2048))
+                .unwrap()
         }),
         _ => None,
     }

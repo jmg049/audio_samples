@@ -455,6 +455,39 @@ pub fn window_sumsquare(
     win_length: Option<NonZeroUsize>,
     n_fft: NonZeroUsize,
 ) -> AudioSampleResult<Array1<f64>> {
+    window_sumsquare_as::<f64>(window, n_frames, hop_length, win_length, n_fft)
+}
+
+/// [`window_sumsquare`] with the envelope in the element type `F`,
+/// equivalent to `librosa.filters.window_sumsquare(..., dtype=F)` (librosa's
+/// default `dtype` is `float32`).
+///
+/// The squared window is computed in `f64`; each overlap-add step adds an
+/// `f64` window value to the `F` envelope in `f64` and rounds the sum to `F`,
+/// as librosa's fill loop does for a `float32` output. For `F = f64` this is
+/// [`window_sumsquare`].
+///
+/// # Errors
+///
+/// As [`window_sumsquare`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::operations::filterbanks::{Window, window_sumsquare_as};
+///
+/// let wss = window_sumsquare_as::<f32>(&Window::Hann, 10, nzu!(256), None, nzu!(1024)).unwrap();
+/// assert_eq!(wss.len(), 1024 + 256 * 9);
+/// assert!((wss[1500] - 1.5).abs() < 1e-6);
+/// ```
+pub fn window_sumsquare_as<F: AudioFloat>(
+    window: &Window,
+    n_frames: usize,
+    hop_length: NonZeroUsize,
+    win_length: Option<NonZeroUsize>,
+    n_fft: NonZeroUsize,
+) -> AudioSampleResult<Array1<F>> {
     if n_frames == 0 {
         return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
             "n_frames",
@@ -468,11 +501,18 @@ pub fn window_sumsquare(
         MAX_SIGNAL_ELEMENTS,
     )?;
     let win_sq = padded_window(window, win_length, n_fft)?.mapv(|w| w * w);
-    Ok(window_sumsquare_from_squared(
-        win_sq.as_slice().expect("freshly allocated"),
-        n_frames,
-        hop_length.get(),
-    ))
+    let win_sq = win_sq.as_slice().expect("freshly allocated");
+    let hop = hop_length.get();
+    let n = n_fft.get() + hop * (n_frames - 1);
+    let mut x = vec![F::zero(); n];
+    for i in 0..n_frames {
+        let start = i * hop;
+        let len = n_fft.get().min(n - start);
+        for (xs, &w) in x[start..start + len].iter_mut().zip(&win_sq[..len]) {
+            *xs = F::of(xs.as_f64() + w);
+        }
+    }
+    Ok(Array1::from(x))
 }
 
 /// Overlap-adds an already squared, `n_fft`-long window (librosa `__window_ss_fill`)
@@ -1066,6 +1106,26 @@ mod tests {
         // I0(1) = 1.2660658777520082, I0(10) = 2815.716628466254
         assert!((bessel_i0(1.0) - 1.266_065_877_752_008_2).abs() < 1e-14);
         assert!((bessel_i0(10.0) / 2_815.716_628_466_254 - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn window_sumsquare_as_f32_rounds_each_step() {
+        let a =
+            window_sumsquare_as::<f32>(&Window::Hann, 431, nzu!(512), None, nzu!(2048)).unwrap();
+        let w = get_window(&Window::Hann, 2048, true).unwrap();
+        let mut want = vec![0f32; a.len()];
+        for i in 0..431 {
+            for (j, &v) in w.iter().enumerate() {
+                want[i * 512 + j] = (f64::from(want[i * 512 + j]) + v * v) as f32;
+            }
+        }
+        assert_eq!(a.to_vec(), want);
+        let b = window_sumsquare_as::<f64>(&Window::Hann, 7, nzu!(100), Some(nzu!(300)), nzu!(400))
+            .unwrap();
+        assert_eq!(
+            b,
+            window_sumsquare(&Window::Hann, 7, nzu!(100), Some(nzu!(300)), nzu!(400)).unwrap()
+        );
     }
 
     #[test]
