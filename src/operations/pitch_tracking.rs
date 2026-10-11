@@ -1524,6 +1524,33 @@ fn stable_argsort<F: AudioFloat>(x: &[F]) -> Vec<usize> {
 
 /// A sorted linear interpolant, `scipy.interpolate.interp1d(kind="linear",
 /// bounds_error=False, fill_value=fill)` on one column.
+/// `numpy.interp(v, x, y, left=fill, right=fill)` for sorted `x` (non-empty),
+/// with `y[j]` given by `y(j)`.
+fn interp_np<F: AudioFloat>(x: &[F], y: impl Fn(usize) -> F, v: F, fill: F) -> F {
+    let n = x.len();
+    if v.is_nan() {
+        return v;
+    }
+    if v < x[0] || v > x[n - 1] {
+        return fill;
+    }
+    // j with x[j] <= v < x[j + 1].
+    let j = x.partition_point(|&xi| xi <= v).saturating_sub(1);
+    if j >= n - 1 || x[j] == v {
+        return y(j);
+    }
+    let (yj, yj1) = (y(j), y(j + 1));
+    let slope = (yj1 - yj) / (x[j + 1] - x[j]);
+    let mut r = slope * (v - x[j]) + yj;
+    if r.is_nan() {
+        r = slope * (v - x[j + 1]) + yj1;
+        if r.is_nan() && yj == yj1 {
+            r = yj;
+        }
+    }
+    r
+}
+
 struct Interp1d<F> {
     x: Vec<F>,
     y: Vec<F>,
@@ -1544,28 +1571,8 @@ impl<F: AudioFloat> Interp1d<F> {
 
     /// `numpy.interp` (the path SciPy takes for 1-D float64 data).
     fn eval_np(&self, v: F, fill: F) -> F {
-        let (x, y) = (&self.x, &self.y);
-        let n = x.len();
-        if v.is_nan() {
-            return v;
-        }
-        if self.out_of_bounds(v) {
-            return fill;
-        }
-        // j with x[j] <= v < x[j + 1].
-        let j = x.partition_point(|&xi| xi <= v).saturating_sub(1);
-        if j >= n - 1 || x[j] == v {
-            return y[j];
-        }
-        let slope = (y[j + 1] - y[j]) / (x[j + 1] - x[j]);
-        let mut r = slope * (v - x[j]) + y[j];
-        if r.is_nan() {
-            r = slope * (v - x[j + 1]) + y[j + 1];
-            if r.is_nan() && y[j] == y[j + 1] {
-                r = y[j];
-            }
-        }
-        r
+        let y = &self.y;
+        interp_np(&self.x, |j| y[j], v, fill)
     }
 
     /// SciPy's `_call_linear` (the path taken for 2-D data).
@@ -2220,6 +2227,36 @@ pub fn f0_harmonics<F: AudioFloat>(
     let fill_value = F::of(fill_value);
     let harmonics: Vec<F> = harmonics.iter().map(|&h| F::of(h)).collect();
     let mut out = Array3::<F>::zeros((n_ch, n_h, n_frames));
+    let clamp = |v: F| {
+        if v.is_nan() {
+            fill_value
+        } else if v == F::infinity() {
+            F::max_value()
+        } else if v == F::neg_infinity() {
+            F::min_value()
+        } else {
+            v
+        }
+    };
+    if let FrequencyGrid::Fixed(grid) = freqs {
+        if !grid.is_empty() && grid.iter().all(|f| f.is_finite()) {
+            // The same interpolation as below with the grid sorted once: only
+            // the n_h looked-up values of each frame are read.
+            let grid = grid.to_vec();
+            let order = stable_argsort(&grid);
+            let xs: Vec<F> = order.iter().map(|&i| grid[i]).collect();
+            for c in 0..n_ch {
+                for t in 0..n_frames {
+                    let col = x.slice(ndarray::s![c, .., t]);
+                    for (hi, &h) in harmonics.iter().enumerate() {
+                        let v = interp_np(&xs, |j| col[order[j]], h * f0[[c, t]], fill_value);
+                        out[[c, hi, t]] = clamp(v);
+                    }
+                }
+            }
+            return Ok(out);
+        }
+    }
     for c in 0..n_ch {
         for t in 0..n_frames {
             let grid = freqs.column(c, t);
