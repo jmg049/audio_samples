@@ -3315,7 +3315,6 @@ fn reassigned_rows<F: AudioFloat>(
         ReassignRefPower::Max => mags.iter().fold(F::neg_infinity(), |m, &a| m.max(a * a)),
     };
     let thresh = ref_p.sqrt();
-    let low = |c: usize, k: usize, t: usize| mags[[c, k, t]] < thresh;
 
     let freqs = if config.reassign_frequencies {
         // Cyclic gradient of the (padded) window: (w[n + 1] - w[n - 1]) / 2.
@@ -3326,20 +3325,24 @@ fn reassigned_rows<F: AudioFloat>(
         let s_dh = stft(y, &custom(deriv))?;
         let scale = F::of(0.5 * sample_rate / std::f64::consts::PI);
         let mut f = Array3::<F>::zeros((n_ch, n_bins, n_frames));
-        for ((c, k, t), v) in f.indexed_iter_mut() {
-            let correction = -np_cdiv(s_dh[[c, k, t]], s_h[[c, k, t]]).im;
-            let mut x = bin_freqs[k] + correction * scale;
-            if ref_p > F::zero() && low(c, k, t) {
-                x = F::nan();
-            }
-            if config.fill_nan && x.is_nan() {
-                x = bin_freqs[k];
-            }
-            if config.clip {
-                x = x.clamp(F::zero(), nyquist);
-            }
-            *v = x;
-        }
+        ndarray::Zip::indexed(&mut f)
+            .and(&s_dh)
+            .and(&s_h)
+            .and(&mags)
+            .for_each(|(_, k, _), v, &dh, &h, &m| {
+                let correction = -np_cdiv(dh, h).im;
+                let mut x = bin_freqs[k] + correction * scale;
+                if ref_p > F::zero() && m < thresh {
+                    x = F::nan();
+                }
+                if config.fill_nan && x.is_nan() {
+                    x = bin_freqs[k];
+                }
+                if config.clip {
+                    x = x.clamp(F::zero(), nyquist);
+                }
+                *v = x;
+            });
         f
     } else {
         Array3::from_shape_fn((n_ch, n_bins, n_frames), |(_, k, _)| bin_freqs[k])
@@ -3361,20 +3364,24 @@ fn reassigned_rows<F: AudioFloat>(
         let s_th = stft(y, &custom(weighted))?;
         let duration = F::of(y.ncols() as f64 / sample_rate);
         let mut tt = Array3::<F>::zeros((n_ch, n_bins, n_frames));
-        for ((c, k, t), v) in tt.indexed_iter_mut() {
-            let correction = np_cdiv(s_th[[c, k, t]], s_h[[c, k, t]]).re;
-            let mut x = frame_times[t] + correction / sr;
-            if ref_p > F::zero() && low(c, k, t) {
-                x = F::nan();
-            }
-            if config.fill_nan && x.is_nan() {
-                x = frame_times[t];
-            }
-            if config.clip {
-                x = x.clamp(F::zero(), duration);
-            }
-            *v = x;
-        }
+        ndarray::Zip::indexed(&mut tt)
+            .and(&s_th)
+            .and(&s_h)
+            .and(&mags)
+            .for_each(|(_, _, t), v, &th, &h, &m| {
+                let correction = np_cdiv(th, h).re;
+                let mut x = frame_times[t] + correction / sr;
+                if ref_p > F::zero() && m < thresh {
+                    x = F::nan();
+                }
+                if config.fill_nan && x.is_nan() {
+                    x = frame_times[t];
+                }
+                if config.clip {
+                    x = x.clamp(F::zero(), duration);
+                }
+                *v = x;
+            });
         tt
     } else {
         Array3::from_shape_fn((n_ch, n_bins, n_frames), |(_, _, t)| frame_times[t])
