@@ -360,7 +360,14 @@ struct FftStage<F> {
     fwd: Arc<dyn Fft<F>>,
     /// Inverse FFT of size `n / down`.
     inv: Arc<dyn Fft<F>>,
+    /// 2 : 1 decimation in polyphase form (see [`FftStage::pair_down2`]):
+    /// `spec` is then empty and these are `P = (G_e - i G_o) / 2` and
+    /// `Q = (G_e + i G_o) / 2` (`n / 2` bins each).
+    down2: Option<Down2<F>>,
 }
+
+/// The `P` and `Q` spectra of the polyphase 2 : 1 stage.
+type Down2<F> = (Vec<Complex<F>>, Vec<Complex<F>>);
 
 /// FFT size for a filter spanning `[-g, g]`: minimises a cost model (FFT
 /// work and spectrum products per valid output; sizes above 2048 are
@@ -404,12 +411,55 @@ impl<F: RsFloat> FftStage<F> {
                 gw[d.rem_euclid(n as i64) as usize] = Complex::new(c * scale, 0.0);
             }
         }
+        let to_f = |c: &Complex<f64>| Complex::new(F::of(c.re), F::of(c.im));
+        // In f32 the FFTs are cheap enough that the extra spectrum pass of the
+        // polyphase form costs more than the smaller forward transform saves.
+        if up == 1 && down == 2 && std::mem::size_of::<F>() == 8 {
+            // Polyphase: c[2t] = (g_e * s_e)[t] + (g_o * s_o)[t] with
+            // g_e[e] = g[2e], g_o[e] = g[2e - 1], s_e[k] = s[2k], s_o[k] = s[2k + 1].
+            let half_n = n / 2;
+            let mut ge = vec![Complex::new(0.0f64, 0.0); half_n];
+            let mut go = vec![Complex::new(0.0f64, 0.0); half_n];
+            for (i, c) in gw.iter().enumerate() {
+                // `gw` holds g[d] at d mod n (already scaled by 1 / n).
+                let d = if i < n / 2 {
+                    i as i64
+                } else {
+                    i as i64 - n as i64
+                };
+                let v = Complex::new(c.re * 2.0, 0.0); // scale 1 / (n / 2)
+                if d.rem_euclid(2) == 0 {
+                    ge[(d / 2).rem_euclid(half_n as i64) as usize] = v;
+                } else {
+                    go[((d + 1) / 2).rem_euclid(half_n as i64) as usize] = v;
+                }
+            }
+            let plan = f64::with_planner(|p| p.plan_fft_forward(half_n));
+            plan.process(&mut ge);
+            plan.process(&mut go);
+            let i = Complex::new(0.0, 1.0);
+            let pq: (Vec<_>, Vec<_>) = ge
+                .iter()
+                .zip(&go)
+                .map(|(e, o)| (to_f(&((e - i * o) * 0.5)), to_f(&((e + i * o) * 0.5))))
+                .unzip();
+            let (fwd, inv) =
+                F::with_planner(|p| (p.plan_fft_forward(half_n), p.plan_fft_inverse(half_n)));
+            return Self {
+                up,
+                down,
+                n,
+                g,
+                hop,
+                spec: Vec::new(),
+                fwd,
+                inv,
+                down2: Some(pq),
+            };
+        }
         let plan = f64::with_planner(|p| p.plan_fft_forward(n));
         plan.process(&mut gw);
-        let spec = gw
-            .iter()
-            .map(|c| Complex::new(F::of(c.re), F::of(c.im)))
-            .collect();
+        let spec = gw.iter().map(to_f).collect();
         let (fwd, inv) =
             F::with_planner(|p| (p.plan_fft_forward(n / up), p.plan_fft_inverse(n / down)));
         Self {
@@ -421,6 +471,7 @@ impl<F: RsFloat> FftStage<F> {
             spec,
             fwd,
             inv,
+            down2: None,
         }
     }
 
@@ -430,6 +481,10 @@ impl<F: RsFloat> FftStage<F> {
     /// `max(up, down)`.
     #[inline(always)]
     fn pair<T: Copy>(&self, x: &[T], to_f: &impl Fn(T) -> F, m0: i64, bufs: &mut PairBufs<F>) {
+        if let Some((p, q)) = &self.down2 {
+            self.pair_down2(x, to_f, m0, bufs, p, q);
+            return;
+        }
         let up = self.up as i64;
         let start = (m0 - self.g as i64).div_euclid(up);
         load_pair(x, to_f, start, start + self.hop as i64 / up, &mut bufs.z);
@@ -470,6 +525,88 @@ impl<F: RsFloat> FftStage<F> {
             *a = v.re;
             *b = v.im;
         }
+    }
+}
+
+impl<F: RsFloat> FftStage<F> {
+    /// [`FftStage::pair`] for 2 : 1 decimation in polyphase form. Each block's
+    /// segment `s` is read as the complex signal `s_e + i s_o` (even and odd
+    /// samples), so its transform has half the size; with `Z = FFT(s_e + i s_o)`
+    /// and `Z*[k] = conj(Z[-k])`, the decimated block's spectrum is
+    /// `Z · P + Z* · Q`. Two blocks share the inverse transform as real and
+    /// imaginary parts.
+    #[inline(always)]
+    fn pair_down2<T: Copy>(
+        &self,
+        x: &[T],
+        to_f: &impl Fn(T) -> F,
+        m0: i64,
+        bufs: &mut PairBufs<F>,
+        p: &[Complex<F>],
+        q: &[Complex<F>],
+    ) {
+        let half_n = self.n / 2;
+        let start = m0 - self.g as i64;
+        let (za, zb) = bufs.z.split_at_mut(half_n);
+        load_even_odd(x, to_f, start, za);
+        load_even_odd(x, to_f, start + self.hop as i64, zb);
+        let (fa, fb) = bufs.zf.split_at_mut(half_n);
+        self.fwd
+            .process_outofplace_with_scratch(za, fa, &mut bufs.scratch);
+        self.fwd
+            .process_outofplace_with_scratch(zb, fb, &mut bufs.scratch);
+        let w = &mut bufs.w[..half_n];
+        for k in 0..half_n {
+            let kr = if k == 0 { 0 } else { half_n - k };
+            // A = Za + i Zb, B = conj(Za[-k]) + i conj(Zb[-k]).
+            let (a, b) = (fa[k], fb[k]);
+            let (ar, br) = (fa[kr], fb[kr]);
+            let av = Complex::new(a.re - b.im, a.im + b.re);
+            let bv = Complex::new(ar.re + br.im, br.re - ar.im);
+            let (pk, qk) = (p[k], q[k]);
+            w[k] = Complex::new(
+                av.re * pk.re - av.im * pk.im + bv.re * qk.re - bv.im * qk.im,
+                av.re * pk.im + av.im * pk.re + bv.re * qk.im + bv.im * qk.re,
+            );
+        }
+        let y = &mut bufs.y[..half_n];
+        self.inv
+            .process_outofplace_with_scratch(w, y, &mut bufs.scratch);
+        let first = self.g / 2;
+        let valid = &y[first..first + bufs.ya.len()];
+        for ((a, b), v) in bufs.ya.iter_mut().zip(bufs.yb.iter_mut()).zip(valid) {
+            *a = v.re;
+            *b = v.im;
+        }
+    }
+}
+
+/// Fills `z[k]` with `(x[start + 2k], x[start + 2k + 1])`, zero outside `x`.
+#[inline(always)]
+fn load_even_odd<T: Copy, F: RsFloat>(
+    x: &[T],
+    to_f: &impl Fn(T) -> F,
+    start: i64,
+    z: &mut [Complex<F>],
+) {
+    let len = 2 * z.len() as i64;
+    if start >= 0 && start + len <= x.len() as i64 {
+        let src = &x[start as usize..(start + len) as usize];
+        for (c, pair) in z.iter_mut().zip(src.chunks_exact(2)) {
+            *c = Complex::new(to_f(pair[0]), to_f(pair[1]));
+        }
+        return;
+    }
+    let get = |i: i64| {
+        if i >= 0 && i < x.len() as i64 {
+            to_f(x[i as usize])
+        } else {
+            F::zero()
+        }
+    };
+    for (k, c) in z.iter_mut().enumerate() {
+        let i = start + 2 * k as i64;
+        *c = Complex::new(get(i), get(i + 1));
     }
 }
 
