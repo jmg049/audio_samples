@@ -100,9 +100,15 @@ impl<F: AudioFloat> AudioCtx<F> {
 /// output type where the function has one.
 pub struct ConstCtx<F: AudioFloat>(PhantomData<F>);
 
+impl<F: AudioFloat> Default for ConstCtx<F> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
 impl<F: AudioFloat> ConstCtx<F> {
     pub fn new() -> Self {
-        Self(PhantomData)
+        Self::default()
     }
 }
 
@@ -112,9 +118,15 @@ pub const VEC_N: usize = 100_000;
 /// A `vec` configuration: unit conversions on 1-D arrays.
 pub struct VecCtx<F: AudioFloat>(PhantomData<F>);
 
+impl<F: AudioFloat> Default for VecCtx<F> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
 impl<F: AudioFloat> VecCtx<F> {
     pub fn new() -> Self {
-        Self(PhantomData)
+        Self::default()
     }
 
     /// `VEC_N` values over `[lo, hi]`, log-spaced when `lo > 0`
@@ -137,9 +149,15 @@ impl<F: AudioFloat> VecCtx<F> {
 /// decoding.
 pub struct SeqCtx<F: AudioFloat>(PhantomData<F>);
 
+impl<F: AudioFloat> Default for SeqCtx<F> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
 impl<F: AudioFloat> SeqCtx<F> {
     pub fn new() -> Self {
-        Self(PhantomData)
+        Self::default()
     }
 
     /// Deterministic uniform `[0, 1)` matrix (64-bit LCG). The Python half

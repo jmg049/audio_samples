@@ -56,8 +56,11 @@ fn grow(n: u64) {
     PEAK.fetch_max(live, Relaxed);
 }
 
+// SAFETY: every method forwards to `System` with the caller's arguments and
+// only updates counters, so `System`'s guarantees carry over.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: forwarded unchanged; the caller upholds `alloc`'s contract.
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
             ALLOCS.fetch_add(1, Relaxed);
@@ -68,6 +71,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: forwarded unchanged; the caller upholds `alloc_zeroed`'s contract.
         let p = unsafe { System.alloc_zeroed(layout) };
         if !p.is_null() {
             ALLOCS.fetch_add(1, Relaxed);
@@ -78,11 +82,13 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr` was allocated by `System` through this allocator with `layout`.
         unsafe { System.dealloc(ptr, layout) };
         LIVE.fetch_sub(layout.size() as u64, Relaxed);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: `ptr` was allocated by `System` through this allocator with `layout`.
         let p = unsafe { System.realloc(ptr, layout, new_size) };
         if !p.is_null() {
             ALLOCS.fetch_add(1, Relaxed);
@@ -202,7 +208,7 @@ fn build<'a, F: AudioFloat>(case: &str, ctx: &'a Ctxs<F>) -> Option<Thunk<'a>> {
 }
 
 enum Ctxs<F: AudioFloat> {
-    Audio(AudioCtx<F>),
+    Audio(Box<AudioCtx<F>>),
     Const(ConstCtx<F>),
     Vec(VecCtx<F>),
     Seq(SeqCtx<F>),
@@ -213,7 +219,7 @@ fn make_ctx<F: AudioFloat>(config: &str, signals: &str) -> Ctxs<F> {
         "const" => Ctxs::Const(ConstCtx::new()),
         "vec" => Ctxs::Vec(VecCtx::new()),
         "seq" => Ctxs::Seq(SeqCtx::new()),
-        _ => Ctxs::Audio(AudioCtx::load(config, signals)),
+        _ => Ctxs::Audio(Box::new(AudioCtx::load(config, signals))),
     }
 }
 
@@ -257,19 +263,18 @@ fn run<F: AudioFloat>(pairs: &[(String, String)], opts: &Opts, out: &mut impl Wr
     }
 }
 
+/// A `(case, config)` pair to run.
+type Pair = (String, String);
+
 fn main() {
     let opts = parse_args();
     let text = std::fs::read_to_string(&opts.pairs).expect("read --pairs");
-    let pairs: Vec<(String, String)> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            let mut it = l.split_whitespace();
-            (it.next().unwrap().to_owned(), it.next().unwrap().to_owned())
-        })
-        .collect();
-    let (mut f32s, mut f64s): (Vec<_>, Vec<_>) =
-        pairs.into_iter().partition(|(_, c)| c.ends_with("_f32"));
+    let pairs = text.lines().filter(|l| !l.trim().is_empty()).map(|l| {
+        let mut it = l.split_whitespace();
+        (it.next().unwrap().to_owned(), it.next().unwrap().to_owned())
+    });
+    let (mut f32s, mut f64s): (Vec<Pair>, Vec<Pair>) =
+        pairs.partition(|(_, c)| c.ends_with("_f32"));
     // group by configuration so each input is loaded once
     f32s.sort_by(|a, b| a.1.cmp(&b.1));
     f64s.sort_by(|a, b| a.1.cmp(&b.1));
