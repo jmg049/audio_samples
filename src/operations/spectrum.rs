@@ -866,9 +866,19 @@ pub fn frame<F: AudioFloat>(
         fl as f64 * n_frames as f64,
         MAX_SIGNAL_ELEMENTS,
     )?;
-    Ok(Array2::from_shape_fn((fl, n_frames), |(i, t)| {
-        x[t * hop + i]
-    }))
+    // Row-major output, filled in blocks of 16 frames: each row of a block
+    // reads 16 sequential streams of x and writes 16 contiguous values.
+    const B: usize = 16;
+    let mut out = vec![F::zero(); fl * n_frames];
+    for tb in (0..n_frames).step_by(B) {
+        let te = (tb + B).min(n_frames);
+        for (i, row) in out.chunks_exact_mut(n_frames).enumerate() {
+            for (o, t) in row[tb..te].iter_mut().zip(tb..te) {
+                *o = x[t * hop + i];
+            }
+        }
+    }
+    Ok(Array2::from_shape_vec((fl, n_frames), out).expect("fl * n_frames values"))
 }
 
 /// Overlapping frames of a signal as a strided view, without copying.
@@ -2831,6 +2841,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_copy_matches_view() {
+        let x: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.37).sin()).collect();
+        for (fl, hop) in [(1, 1), (7, 3), (64, 16), (100, 1), (1000, 5), (33, 40)] {
+            let (fl, hop) = (
+                NonZeroUsize::new(fl).unwrap(),
+                NonZeroUsize::new(hop).unwrap(),
+            );
+            let c = frame(&x, fl, hop).unwrap();
+            assert!(c.is_standard_layout());
+            assert_eq!(c, frame_view(&x, fl, hop).unwrap());
+        }
+    }
     use crate::{AudioTypeConversion, sample_rate};
     use ndarray::{Array1, array};
 
