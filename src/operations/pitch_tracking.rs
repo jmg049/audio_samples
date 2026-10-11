@@ -80,7 +80,7 @@ use ndarray::{Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3};
 
 use crate::audio_float::finite_float_rows;
 use crate::operations::sequence::{TransitionWindow, transition_local, transition_loop, viterbi};
-use crate::operations::spectrum::{StftPadMode, pad_signal};
+use crate::operations::spectrum::{StftPadMode, padded_frame_into};
 use crate::utils::layout::{for_each_row_tile, row};
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ParameterError, StandardSample,
@@ -752,34 +752,26 @@ fn next_fast_len_real(n: usize) -> usize {
     best
 }
 
-/// Pads (if centred) and frames one channel; returns the frames as rows.
-fn frames_of<F: AudioFloat>(
-    y: &[F],
+/// Number of frames of one channel of `len` samples, padded by
+/// `frame_length / 2` at both ends if centred.
+fn frame_count(
+    len: usize,
     frame_length: usize,
     hop: usize,
     center: bool,
-    pad_mode: StftPadMode,
-) -> AudioSampleResult<Vec<Vec<F>>> {
-    let padded;
-    let y = if center {
-        padded = pad_signal(y, frame_length / 2, pad_mode);
-        &padded[..]
+) -> AudioSampleResult<usize> {
+    let padded_len = if center {
+        len + 2 * (frame_length / 2)
     } else {
-        y
+        len
     };
-    if y.len() < frame_length {
+    if padded_len < frame_length {
         return Err(param_err(
             "frame_length",
-            format!(
-                "input is too short (n={}) for frame_length={frame_length}",
-                y.len()
-            ),
+            format!("input is too short (n={padded_len}) for frame_length={frame_length}"),
         ));
     }
-    let n_frames = 1 + (y.len() - frame_length) / hop;
-    Ok((0..n_frames)
-        .map(|t| y[t * hop..t * hop + frame_length].to_vec())
-        .collect())
+    Ok(1 + (padded_len - frame_length) / hop)
 }
 
 /// librosa's `_cumulative_mean_normalized_difference` for one frame:
@@ -932,14 +924,20 @@ fn yin_frames<F: AudioFloat>(
     if y.iter().any(|v| !v.is_finite()) {
         return Err(param_err("audio", "audio buffer is not finite everywhere"));
     }
-    let frames = frames_of(y, frame_length, hop, center, pad_mode)?;
+    let n_frames = frame_count(y.len(), frame_length, hop, center)?;
+    let pad = if center { frame_length / 2 } else { 0 };
     let (min_period, max_period) = periods(sr, fmin, fmax, frame_length);
     let fft = FftScratch::<F>::new(frame_length);
     let mut work = fft.forward.make_input_vec();
     let mut spec = fft.forward.make_output_vec();
-    let cmnd: Vec<Vec<F>> = frames
-        .iter()
-        .map(|f| cmnd_frame(f, min_period, max_period, &fft, &mut work, &mut spec))
+    // Each (padded) frame is assembled in one buffer when it is needed.
+    let mut frame = vec![F::zero(); frame_length];
+    let cmnd: Vec<Vec<F>> = (0..n_frames)
+        .map(|t| {
+            let start = (t * hop) as isize - pad as isize;
+            padded_frame_into(y, start, None, pad_mode, &mut frame);
+            cmnd_frame(&frame, min_period, max_period, &fft, &mut work, &mut spec)
+        })
         .collect();
     let shifts = cmnd.iter().map(|c| parabolic_shifts(c)).collect();
     Ok(YinFrames {
@@ -1229,10 +1227,11 @@ pub fn yin<F: AudioFloat>(
     let sr = F::of(sample_rate);
     let threshold = F::of(config.trough_threshold);
     let mut rows = Vec::with_capacity(signal.nrows());
+    let signal = signal.as_standard_layout();
     for row in signal.rows() {
-        let y = row.to_vec();
+        let y = row.to_slice().expect("rows of a standard-layout array");
         let yf = yin_frames(
-            &y,
+            y,
             sample_rate,
             config.fmin,
             config.fmax,
@@ -1364,10 +1363,11 @@ pub fn pyin<F: AudioFloat>(
     let mut f0_rows = Vec::with_capacity(n_ch);
     let mut flag_rows = Vec::with_capacity(n_ch);
     let mut prob_rows = Vec::with_capacity(n_ch);
+    let signal = signal.as_standard_layout();
     for row in signal.rows() {
-        let y = row.to_vec();
+        let y = row.to_slice().expect("rows of a standard-layout array");
         let yf = yin_frames(
-            &y,
+            y,
             sample_rate,
             config.fmin,
             config.fmax,

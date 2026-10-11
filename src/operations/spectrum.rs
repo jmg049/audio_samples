@@ -358,7 +358,9 @@ fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
     }
 }
 
-/// Pads `x` by `pad` samples at both ends with `mode`.
+/// Pads `x` by `pad` samples at both ends with `mode` (the reference for the
+/// index-based padding of [`padded_frame_into`]).
+#[cfg(test)]
 pub(crate) fn pad_signal<F: AudioFloat>(x: &[F], pad: usize, mode: StftPadMode) -> Vec<F> {
     let mut out = vec![F::zero(); x.len() + 2 * pad];
     out[pad..pad + x.len()].copy_from_slice(x);
@@ -425,8 +427,7 @@ pub fn stft<F: AudioFloat>(
 
 /// Fills `frame` with the windowed padded frame that starts at signal index
 /// `start` (negative or running past the end where the frame overlaps the
-/// padding), with the padding of `mode` (`numpy.pad` semantics, as
-/// [`pad_signal`]).
+/// padding), with the padding of `mode` (`numpy.pad` semantics).
 #[inline]
 pub(crate) fn padded_frame_into<F: AudioFloat>(
     x: &[F],
