@@ -1617,21 +1617,51 @@ pub fn magphase(
     complex_spect: ArrayView2<'_, Complex<f64>>,
     power: Option<NonZeroUsize>,
 ) -> (Array2<f64>, Array2<Complex<f64>>) {
-    // One pass for the magnitude and one for the phase, both in the
-    // memory order of the input (`mapv` keeps a contiguous layout, so a
-    // Fortran-order spectrogram is not traversed with strides). The
-    // phase is `D / m + 0` for `m != 0` and `D / 1 + 1` for `m == 0`
-    // (librosa's `zeros_to_ones` trick), written so that it rounds
-    // exactly as before (`x + 0.0` turns `-0.0` into `+0.0`).
-    let mut mag = complex_spect.mapv(num_complex::Complex::norm);
-    let mut phase = complex_spect.to_owned();
-    ndarray::Zip::from(&mut phase).and(&mag).for_each(|p, &m| {
-        let (m_nz, z) = if m == 0.0 { (1.0, 1.0) } else { (m, 0.0) };
+    // One fused pass in the memory order of the input (outputs in the same
+    // layout, so a Fortran-order spectrogram is not traversed with strides).
+    // |z| = sqrt(re² + im²) (within 1 ulp of `hypot`, and branch-free so the
+    // loop vectorises) wherever re² + im² is a normal finite number; the rare
+    // other elements (overflow, or so small that the squares underflow) are
+    // redone with `hypot` afterwards. The phase is `D / m + 0` for `m != 0`
+    // and `D / 1 + 1` for `m == 0` (librosa's `zeros_to_ones` trick), where
+    // `x + 0.0` turns `-0.0` into `+0.0`.
+    use ndarray::ShapeBuilder;
+    let dim = complex_spect.dim();
+    let fortran = !complex_spect.is_standard_layout() && complex_spect.t().is_standard_layout();
+    let mut mag = Array2::<f64>::zeros(dim.set_f(fortran));
+    let mut phase = Array2::<Complex<f64>>::zeros(dim.set_f(fortran));
+    let split = |z: &Complex<f64>, m: &mut f64, p: &mut Complex<f64>| {
+        let s = z.re * z.re + z.im * z.im;
+        let ok = (f64::MIN_POSITIVE..=f64::MAX).contains(&s);
+        let mv = if ok { s.sqrt() } else { f64::NAN };
+        let (m_nz, zo) = if mv == 0.0 { (1.0, 1.0) } else { (mv, 0.0) };
+        *m = mv;
         *p = Complex {
-            re: p.re / m_nz + z,
-            im: p.im / m_nz,
+            re: z.re / m_nz + zo,
+            im: z.im / m_nz,
         };
-    });
+    };
+    ndarray::Zip::from(&mut mag)
+        .and(&mut phase)
+        .and(&complex_spect)
+        .for_each(|m, p, z| split(z, m, p));
+    // Elements whose squares overflow or underflow (or a NaN input): hypot.
+    if mag.iter().any(|m| m.is_nan()) {
+        ndarray::Zip::from(&mut mag)
+            .and(&mut phase)
+            .and(&complex_spect)
+            .for_each(|m, p, z| {
+                if m.is_nan() {
+                    let mv = z.norm();
+                    let (m_nz, zo) = if mv == 0.0 { (1.0, 1.0) } else { (mv, 0.0) };
+                    *m = mv;
+                    *p = Complex {
+                        re: z.re / m_nz + zo,
+                        im: z.im / m_nz,
+                    };
+                }
+            });
+    }
 
     // Raise magnitude to the given power (`powf(1.0)` is the identity).
     if let Some(p) = power.filter(|p| p.get() != 1) {
@@ -1768,5 +1798,60 @@ mod psd_tests {
         let (freqs, density) = psd.into_parts();
         assert_eq!(freqs, vec![0.0, 10.0, 20.0]);
         assert_eq!(density, vec![1.0, 0.5, 0.25]);
+    }
+}
+
+#[cfg(test)]
+mod magphase_tests {
+    use super::magphase;
+    use ndarray::Array2;
+    use num_complex::Complex;
+
+    /// The fused pass agrees with `hypot` to 1 ulp, takes the `hypot` path
+    /// for squares that overflow or underflow, follows librosa at zero, and
+    /// gives the same result for either memory order.
+    #[test]
+    fn magphase_edge_cases_and_layouts() {
+        let vals = [
+            Complex::new(3.0, 4.0),
+            Complex::new(0.0, 0.0),
+            Complex::new(-0.0, 0.0),
+            Complex::new(1e200, -3e200),
+            Complex::new(1e-200, 2e-200),
+            Complex::new(-1.5, 1e-300),
+            Complex::new(f64::NAN, 1.0),
+            Complex::new(0.1, -0.7),
+        ];
+        let d = Array2::from_shape_fn((4, 6), |(i, j)| {
+            vals[(i * 6 + j) % vals.len()] * (1.0 + j as f64)
+        });
+        let (m, p) = magphase(d.view(), None);
+        for ((z, mv), pv) in d.iter().zip(&m).zip(&p) {
+            let h = z.norm();
+            if h.is_nan() {
+                assert!(mv.is_nan());
+                continue;
+            }
+            assert!((mv - h).abs() <= h * f64::EPSILON, "{z}: {mv} vs {h}");
+            if h == 0.0 {
+                assert_eq!(*pv, Complex::new(z.re + 1.0, z.im));
+            } else {
+                assert!((pv.norm() - 1.0).abs() < 4.0 * f64::EPSILON, "{z}: {pv}");
+            }
+        }
+        // Fortran-order input gives the same values.
+        let f = d.t().as_standard_layout().reversed_axes().to_owned();
+        assert!(!f.is_standard_layout());
+        let (mf, pf) = magphase(f.view(), None);
+        assert!(
+            m.iter()
+                .zip(&mf)
+                .all(|(a, b)| a == b || (a.is_nan() && b.is_nan()))
+        );
+        assert!(
+            p.iter()
+                .zip(&pf)
+                .all(|(a, b)| a == b || (a.re.is_nan() && b.re.is_nan()))
+        );
     }
 }

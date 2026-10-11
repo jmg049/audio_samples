@@ -56,6 +56,11 @@ except for the resampler (below).
 The librosa-compatible API is unreleased, so these are changes to the
 `[Unreleased]` additions listed below, not to 2.0.x.
 
+- **`magphase` computes `|D|` as `sqrt(re² + im²)`** in one vectorised pass
+  (`hypot` only where the squares overflow or underflow), about 2-3x faster.
+  The magnitude differs from `hypot` by at most 1 ulp (about 11% of the values
+  of a 10 s STFT change, max relative change 2.2e-16), and the phase, divided
+  by it, by at most 1-2 ulp.
 - **`phase_vocoder` / `phase_vocoder_at` in `f64` carry the phase as a unit
   phasor** (`D / |D|` products) instead of summing `atan2` angles and taking
   `cos` / `sin`: the same quantity without the transcendental calls (about 6x
