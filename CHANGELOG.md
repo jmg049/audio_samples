@@ -24,7 +24,8 @@ All notable changes to this project are documented here.
 ### Output changes in released (2.0.x) APIs
 
 These change the output of existing operations for **integer** sample types
-(`u8`, `i16`, `I24`, `i32`). Output for `f32` and `f64` audio is unchanged.
+(`u8`, `i16`, `I24`, `i32`). Output for `f32` and `f64` audio is unchanged
+except for the resampler (below).
 
 - **`normalize` with `NormalizationMethod::ZScore` returns
   `AudioSampleError::Unsupported` for integer sample types.** It used to return
@@ -37,6 +38,14 @@ These change the output of existing operations for **integer** sample types
   results to the nearest value and saturate, instead of truncating toward zero
   (Mean of `[1, 2, 4]` as `i16` is now `[-1, 0, 2]`, was `[-1, 0, 1]`). `I24`
   no longer wraps on overflow.
+- `resample`, `resample_by_ratio` and `StreamingResampler` (windowed-sinc
+  tiers) evaluate the same filter specification as a two-stage cascade (FFT
+  low-pass, then a short interpolator) and compute in the sample type's float
+  (`f32` for `f32`, `i16`, `I24`, `u8`). This changes `f32` and `f64` output
+  too: by about 1e-15 of the peak for 2:1 and 1:2, up to 3.5e-8 (f64) for
+  other ratios, and by f32 round-off (about 4e-7) for `f32` input. Passband
+  ripple, passband edge and stopband attenuation are unchanged (measured within
+  0.5 dB).
 - `to_mono(Average)`, `to_stereo(StereoConversionMethod::Pan(..))`, `pan` and
   `balance` round and saturate integer results instead of truncating. `pan` and
   `balance` no longer wrap `I24` on overflow, and for `u8` they scale around the
@@ -46,6 +55,13 @@ These change the output of existing operations for **integer** sample types
 
 The librosa-compatible API is unreleased, so these are changes to the
 `[Unreleased]` additions listed below, not to 2.0.x.
+
+- **`phase_vocoder` / `phase_vocoder_at` in `f64` carry the phase as a unit
+  phasor** (`D / |D|` products) instead of summing `atan2` angles and taking
+  `cos` / `sin`: the same quantity without the transcendental calls (about 6x
+  faster). Output differs from the angle form by round-off (2.6e-14 of the peak
+  on a 10 s STFT), within the existing 1e-9 agreement with librosa. `f32`
+  keeps librosa's float32 angle arithmetic and is unchanged.
 
 - **Analysis output follows the input precision.** The traits gain
   `type Float` (= `T::Float`), and their outputs are `Array*<Self::Float>` /

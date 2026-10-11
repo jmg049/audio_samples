@@ -297,34 +297,147 @@ pub fn phase_vocoder_at<F: AudioFloat>(
         .collect();
 
     let mut out = Array3::<Complex<F>>::zeros((n_channels, n_bins, n_out));
-    // Phase and magnitude of every input frame, computed once per bin (each is
-    // used by up to two outputs per neighbouring frame pair).
-    let mut arg = vec![F::zero(); n_frames];
-    let mut mag_in = vec![F::zero(); n_frames];
-    for c in 0..n_channels {
-        for k in 0..n_bins {
-            let row = stft_matrix.slice(ndarray::s![c, k, ..]);
-            for ((a, m), z) in arg.iter_mut().zip(&mut mag_in).zip(row.iter()) {
-                *a = z.arg();
-                *m = z.norm();
-            }
-            let mut phase = arg[i0[0]];
-            for j in 0..n_out {
-                if j > 0 {
-                    phase += arg[i1[j - 1]] - arg[i0[j - 1]];
+    if std::mem::size_of::<F>() != 8 {
+        // f32: angles as librosa's float32 path computes them (the phasor
+        // products below would round differently from librosa float32 by
+        // more than f32 round-off over many frames).
+        vocoder_by_angle(stft_matrix, t_out, &i0, &i1, &seg, &mut out);
+        return Ok(out);
+    }
+    // f64: the phase is carried as a unit phasor instead of an angle: the output is
+    // `mag · e^{i phi_j}` with `phi_j = arg D[i0_0] + sum (arg D[i1] - arg D[i0])`,
+    // i.e. `u[i0_0] · prod u[i1] · conj(u[i0])` with `u = D / |D|`. That is the
+    // same quantity without `atan2`, `sin` and `cos` (the bulk of the cost), and
+    // without the round-off of `cos` / `sin` of a large accumulated angle.
+    // `u` and `|D|` are computed once per element (see [`for_bin_blocks`]).
+    for_bin_blocks(stft_matrix, unit_and_norm, |c, k, u_row, m_row| {
+        let mut out_row = out.slice_mut(ndarray::s![c, k, ..]);
+        let mut phase = u_row[i0[0]];
+        for j in 0..n_out {
+            if j > 0 {
+                let (a, b) = (u_row[i1[j - 1]], u_row[i0[j - 1]]);
+                // phase · a · conj(b)
+                let w = Complex::new(a.re * b.re + a.im * b.im, a.im * b.re - a.re * b.im);
+                phase = Complex::new(
+                    phase.re * w.re - phase.im * w.im,
+                    phase.re * w.im + phase.im * w.re,
+                );
+                // Keep |phase| = 1 against the round-off of the products.
+                if j % 64 == 0 {
+                    phase = phase / phase.norm();
                 }
-                let (lo, hi) = seg[j];
-                let mag = if n_frames == 1 {
-                    mag_in[0]
-                } else {
-                    let (y_lo, y_hi) = (mag_in[lo], mag_in[hi]);
-                    (y_hi - y_lo) / F::of_usize(hi - lo) * F::of(t_out[j] - lo as f64) + y_lo
-                };
-                out[[c, k, j]] = Complex::new(phase.cos() * mag, phase.sin() * mag);
+            }
+            let (lo, hi) = seg[j];
+            let mag = if n_frames == 1 {
+                m_row[0]
+            } else {
+                let (y_lo, y_hi) = (m_row[lo], m_row[hi]);
+                (y_hi - y_lo) / F::of_usize(hi - lo) * F::of(t_out[j] - lo as f64) + y_lo
+            };
+            out_row[j] = Complex::new(phase.re * mag, phase.im * mag);
+        }
+    });
+    Ok(out)
+}
+
+/// [`phase_vocoder_at`]'s loop with the phase as an angle: `atan2` of every
+/// input value, the accumulated angle differences, `cos` and `sin` per output.
+fn vocoder_by_angle<F: AudioFloat>(
+    stft_matrix: ArrayView3<'_, Complex<F>>,
+    t_out: &[f64],
+    i0: &[usize],
+    i1: &[usize],
+    seg: &[(usize, usize)],
+    out: &mut Array3<Complex<F>>,
+) {
+    let n_frames = stft_matrix.dim().2;
+    let angle_and_norm = |z: Complex<F>| (z.arg(), z.norm());
+    for_bin_blocks(stft_matrix, angle_and_norm, |c, k, arg, mag_in| {
+        let mut out_row = out.slice_mut(ndarray::s![c, k, ..]);
+        let mut phase = arg[i0[0]];
+        for j in 0..t_out.len() {
+            if j > 0 {
+                phase += arg[i1[j - 1]] - arg[i0[j - 1]];
+            }
+            let (lo, hi) = seg[j];
+            let mag = if n_frames == 1 {
+                mag_in[0]
+            } else {
+                let (y_lo, y_hi) = (mag_in[lo], mag_in[hi]);
+                (y_hi - y_lo) / F::of_usize(hi - lo) * F::of(t_out[j] - lo as f64) + y_lo
+            };
+            out_row[j] = Complex::new(phase.cos() * mag, phase.sin() * mag);
+        }
+    });
+}
+
+/// Bins per block in [`for_bin_blocks`].
+const VOCODER_BIN_BLOCK: usize = 16;
+
+/// Calls `body(channel, bin, a_row, b_row)` for every bin of the STFT, where
+/// `(a_row[t], b_row[t]) = f(D[channel, bin, t])` over all frames.
+///
+/// The values are computed in blocks of [`VOCODER_BIN_BLOCK`] bins, reading the
+/// input in its memory order: for a Fortran-order STFT (librosa's layout, bins
+/// contiguous within a frame) each frame's run of block bins is contiguous,
+/// for a C-order one each bin's row. The scratch is two `16 × n_frames`
+/// arrays.
+fn for_bin_blocks<F: AudioFloat, A: Copy + Default, B: Copy + Default>(
+    stft_matrix: ArrayView3<'_, Complex<F>>,
+    f: impl Fn(Complex<F>) -> (A, B),
+    mut body: impl FnMut(usize, usize, &[A], &[B]),
+) {
+    let (n_channels, n_bins, n_frames) = stft_matrix.dim();
+    let mut a = vec![A::default(); VOCODER_BIN_BLOCK * n_frames];
+    let mut b = vec![B::default(); VOCODER_BIN_BLOCK * n_frames];
+    for c in 0..n_channels {
+        let d = stft_matrix.index_axis(Axis(0), c);
+        let frame_major = d.strides()[0].unsigned_abs() < d.strides()[1].unsigned_abs();
+        for k0 in (0..n_bins).step_by(VOCODER_BIN_BLOCK) {
+            let kb = VOCODER_BIN_BLOCK.min(n_bins - k0);
+            if frame_major {
+                for t in 0..n_frames {
+                    for kk in 0..kb {
+                        let (x, y) = f(d[[k0 + kk, t]]);
+                        a[kk * n_frames + t] = x;
+                        b[kk * n_frames + t] = y;
+                    }
+                }
+            } else {
+                for kk in 0..kb {
+                    let row = d.row(k0 + kk);
+                    let (ra, rb) = (&mut a[kk * n_frames..], &mut b[kk * n_frames..]);
+                    for ((x, y), z) in ra.iter_mut().zip(rb.iter_mut()).zip(row.iter()) {
+                        (*x, *y) = f(*z);
+                    }
+                }
+            }
+            for kk in 0..kb {
+                let r = kk * n_frames..(kk + 1) * n_frames;
+                body(c, k0 + kk, &a[r.clone()], &b[r]);
             }
         }
     }
-    Ok(out)
+}
+
+/// The unit phasor `e^{i arg z}` and `|z|` of one STFT value. `|z|` is
+/// `sqrt(re² + im²)` where that cannot overflow or lose precision to
+/// underflow, else `hypot`; a zero value keeps the phasor of `atan2(im, re)`
+/// (`±1`, as the signs of the zeros give).
+#[inline]
+fn unit_and_norm<F: AudioFloat>(z: Complex<F>) -> (Complex<F>, F) {
+    let s = z.re * z.re + z.im * z.im;
+    let m = if s > F::min_positive_value() && s < F::max_value() {
+        s.sqrt()
+    } else {
+        z.re.hypot(z.im)
+    };
+    if m > F::zero() {
+        (Complex::new(z.re / m, z.im / m), m)
+    } else {
+        let a = z.im.atan2(z.re);
+        (Complex::new(a.cos(), a.sin()), m)
+    }
 }
 
 /// `librosa.effects.time_stretch` on `(channels, samples)` rows of `f64`,
