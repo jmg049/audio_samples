@@ -827,7 +827,7 @@ struct PairBufs<'a, F> {
 }
 
 /// One allocation holding the complex buffers of [`PairBufs`], each
-/// starting on a 4 KiB boundary. With separate vectors, which start wherever
+/// starting on a 64-byte (cache-line) boundary. With separate vectors, which start wherever
 /// the allocator puts them, the conversion runs 5-8 % slower (16 kHz to
 /// 22.05 kHz and 22.05 kHz to 16 kHz by ratio, `f64`).
 struct PairArena<F> {
@@ -844,16 +844,16 @@ impl<F: RsFloat> PairArena<F> {
             .max(a.inv.get_outofplace_scratch_len());
         let lens = [a.n / a.up, a.n / a.up, a.n / a.down, a.n / a.down, scratch];
         let size = std::mem::size_of::<Complex<F>>();
-        // Elements per 4 KiB.
-        let page = 4096 / size;
-        let total: usize = lens.iter().map(|&l| l + page).sum();
+        // Elements per cache line.
+        let line = 64 / size;
+        let total: usize = lens.iter().map(|&l| l + line).sum();
         let mem = vec![Complex::new(F::zero(), F::zero()); total];
-        // Position of `mem[0]` within its 4 KiB page, in elements.
-        let base = (mem.as_ptr() as usize / size) % page;
+        // Position of `mem[0]` within its cache line, in elements.
+        let base = (mem.as_ptr() as usize / size) % line;
         let mut parts = [(0, 0); 5];
         let mut pos = 0usize;
         for (part, &len) in parts.iter_mut().zip(&lens) {
-            let start = (base + pos).div_ceil(page) * page - base;
+            let start = (base + pos).div_ceil(line) * line - base;
             *part = (start, len);
             pos = start + len;
         }
