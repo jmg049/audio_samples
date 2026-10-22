@@ -244,12 +244,13 @@ The librosa-compatible API is unreleased, so these are changes to the
   - `dtw`, `dtw_with_cost`, `dtw_backtracking` with `DtwConfig` (metrics euclidean / sqeuclidean /
     cosine / cityblock / chebyshev, custom steps and weights, subsequence alignment, Sakoe-Chiba band)
     and `DtwResult` (accumulated cost, step matrix, warping path in librosa order).
-  - `viterbi`, `viterbi_discriminative`, `viterbi_binary` (log-domain HMM decoding, librosa
+  - `viterbi`, `viterbi_discriminative`, `viterbi_binary` (`bool` states; log-domain HMM decoding, librosa
     tie-breaking, optional `transition_min_prob` pruning).
   - Transition matrix builders `transition_uniform`, `transition_loop`, `transition_cycle`,
     `transition_local` (`TransitionWindow`: triangle, hann, hamming, blackman, boxcar).
   - `rqa` (recurrence quantification analysis) with `RqaConfig`.
-  - `recurrence_matrix`, `cross_similarity` (dense; connectivity / distance / affinity modes and all
+  - `recurrence_matrix`, `cross_similarity` (dense `bool` connectivity links, as librosa) and
+    `recurrence_matrix_weighted`, `cross_similarity_weighted` (distance / affinity weights with all
     librosa bandwidth heuristics), `recurrence_to_lag`, `lag_to_recurrence`.
   - `sync` / `sync_with` (beat-synchronous aggregation over the last axis; mean, median, max, min,
     sum or a custom reduction).

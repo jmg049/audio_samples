@@ -98,7 +98,7 @@ use ndarray::{
 use num_complex::Complex;
 
 use crate::audio_float::{finite_float_rows, float_rows_to_audio};
-use crate::operations::sequence::{RecurrenceConfig, recurrence_matrix};
+use crate::operations::sequence::{RecurrenceConfig, recurrence_matrix_weighted};
 use crate::operations::spectrum::{
     DbAxes, DbConfig, DbReference, StftConfig, StftPadMode, amplitude_to_db, frame_square_sums,
     istft, stft,
@@ -2147,7 +2147,7 @@ pub enum NnAggregate {
 ///
 /// For output frame `i` the neighbours are the frames `j` with `rec[j, i] != 0`
 /// (librosa's orientation, as produced by
-/// [`recurrence_matrix`]); a frame with no neighbours is copied unchanged.
+/// [`recurrence_matrix_weighted`]); a frame with no neighbours is copied unchanged.
 ///
 /// # Arguments
 ///
@@ -2267,7 +2267,7 @@ pub fn nn_filter<F: AudioFloat>(
 ///
 /// # Errors
 ///
-/// As [`recurrence_matrix`] and [`nn_filter`].
+/// As [`recurrence_matrix_weighted`] and [`nn_filter`].
 ///
 /// # Examples
 ///
@@ -2286,7 +2286,7 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
     recurrence: &RecurrenceConfig,
     aggregate: NnAggregate,
 ) -> AudioSampleResult<Array2<F>> {
-    let rec = recurrence_matrix(data, recurrence)?;
+    let rec = recurrence_matrix_weighted(data, recurrence)?;
     nn_filter(data, rec.view(), aggregate)
 }
 

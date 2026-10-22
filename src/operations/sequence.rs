@@ -1318,13 +1318,13 @@ pub struct ViterbiResult<F = f64> {
     pub log_prob: F,
 }
 
-/// Output of [`viterbi_binary`] / [`viterbi_binary_u16`]. `F` is the element
-/// type of the probability matrix, `S` that of the state matrix.
+/// Output of [`viterbi_binary`]. `F` is the element type of the probability
+/// matrix.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ViterbiBinaryResult<F = f64, S = usize> {
-    /// `(n_states, n_steps)` matrix of `0`/`1` activations per state
-    /// (`usize` from [`viterbi_binary`], `u16` from [`viterbi_binary_u16`]).
-    pub states: Array2<S>,
+pub struct ViterbiBinaryResult<F = f64> {
+    /// `(n_states, n_steps)` matrix of activations per state: `true` where the
+    /// state is on.
+    pub states: Array2<bool>,
     /// Log-likelihood of each state's binary sequence (`n_states` entries).
     pub log_prob: Array1<F>,
 }
@@ -1824,7 +1824,8 @@ pub fn viterbi_discriminative<F: AudioFloat>(
 ///
 /// # Returns
 ///
-/// A `(n_states, n_steps)` 0/1 matrix and per-state log-likelihoods.
+/// A `(n_states, n_steps)` `bool` matrix (`true` = on) and per-state
+/// log-likelihoods.
 ///
 /// # Errors
 ///
@@ -1840,8 +1841,14 @@ pub fn viterbi_discriminative<F: AudioFloat>(
 /// let trans = transition_loop(2, &[0.8]).unwrap();
 /// let r = viterbi_binary(prob.view(), trans.view().insert_axis(Axis(0)), None, None, None)
 ///     .unwrap();
-/// assert_eq!(r.states.row(0).to_vec(), vec![0, 0, 1, 1, 1, 1, 1, 0]);
+/// let on: Vec<bool> = [0, 0, 1, 1, 1, 1, 1, 0].iter().map(|&v| v == 1).collect();
+/// assert_eq!(r.states.row(0).to_vec(), on);
 /// ```
+///
+/// # Differences from librosa
+///
+/// librosa returns the states as `uint16` `0`/`1`; this function returns
+/// `bool` (one byte per entry).
 pub fn viterbi_binary<F: AudioFloat>(
     prob: ArrayView2<F>,
     transition: ArrayView3<F>,
@@ -1852,45 +1859,14 @@ pub fn viterbi_binary<F: AudioFloat>(
     viterbi_binary_core(prob, transition, p_state, p_init, transition_min_prob)
 }
 
-/// [`viterbi_binary`] with the states as `u16`, as librosa returns them
-/// (`librosa.sequence.viterbi_binary`, dtype `uint16`). The decoding is the
-/// same; the state matrix takes two bytes per entry instead of eight.
-///
-/// # Errors
-///
-/// As [`viterbi_binary`].
-///
-/// # Examples
-///
-/// ```
-/// use audio_samples::operations::sequence::{transition_loop, viterbi_binary_u16};
-/// use ndarray::{array, Axis};
-///
-/// let prob = array![[0.1, 0.2, 0.9, 0.3, 0.8, 0.9, 0.9, 0.2]];
-/// let trans = transition_loop(2, &[0.8]).unwrap();
-/// let r = viterbi_binary_u16(prob.view(), trans.view().insert_axis(Axis(0)), None, None, None)
-///     .unwrap();
-/// assert_eq!(r.states.row(0).to_vec(), vec![0u16, 0, 1, 1, 1, 1, 1, 0]);
-/// ```
-pub fn viterbi_binary_u16<F: AudioFloat>(
+/// The body of [`viterbi_binary`].
+fn viterbi_binary_core<F: AudioFloat>(
     prob: ArrayView2<F>,
     transition: ArrayView3<F>,
     p_state: Option<ArrayView1<F>>,
     p_init: Option<ArrayView1<F>>,
     transition_min_prob: Option<f64>,
-) -> AudioSampleResult<ViterbiBinaryResult<F, u16>> {
-    viterbi_binary_core(prob, transition, p_state, p_init, transition_min_prob)
-}
-
-/// The shared body of [`viterbi_binary`] and [`viterbi_binary_u16`]; the
-/// states (0 or 1) are stored as `S`.
-fn viterbi_binary_core<F: AudioFloat, S: Copy + From<u8>>(
-    prob: ArrayView2<F>,
-    transition: ArrayView3<F>,
-    p_state: Option<ArrayView1<F>>,
-    p_init: Option<ArrayView1<F>>,
-    transition_min_prob: Option<f64>,
-) -> AudioSampleResult<ViterbiBinaryResult<F, S>> {
+) -> AudioSampleResult<ViterbiBinaryResult<F>> {
     check_prob_shape(prob)?;
     let (n_states, n_steps) = prob.dim();
     let (nt, r, c) = transition.dim();
@@ -1924,7 +1900,7 @@ fn viterbi_binary_core<F: AudioFloat, S: Copy + From<u8>>(
     let p_state = per_state("p_state", p_state)?;
     let p_init = per_state("p_init", p_init)?;
 
-    let mut states = Array2::<S>::from_elem((n_states, n_steps), S::from(0));
+    let mut states = Array2::<bool>::from_elem((n_states, n_steps), false);
     let mut logp = Array1::<F>::zeros(n_states);
     let mut prob_bin = Array2::<F>::zeros((2, n_steps));
     for s in 0..n_states {
@@ -1943,7 +1919,7 @@ fn viterbi_binary_core<F: AudioFloat, S: Copy + From<u8>>(
             transition_min_prob,
         )?;
         for (t, &v) in r.states.iter().enumerate() {
-            states[[s, t]] = S::from(u8::from(v != 0));
+            states[[s, t]] = v != 0;
         }
         logp[s] = r.log_prob;
     }
@@ -2822,12 +2798,83 @@ fn apply_affinity<F: AudioFloat>(
     Ok(())
 }
 
-/// Recurrence (self-similarity) matrix of a feature sequence.
+/// Recurrence (self-similarity) matrix of a feature sequence, as links.
 ///
 /// Frame `j` is linked to frame `i` if it is among the `k` nearest neighbours
 /// of `i` and at least `width` frames away. Equivalent to
-/// `librosa.segment.recurrence_matrix(data, ..., sparse=False)`. Distances and
-/// affinities are computed in the element type `F` of `data`.
+/// `librosa.segment.recurrence_matrix(data, ..., mode='connectivity',
+/// sparse=False)`, including its `bool` element type (one byte per entry).
+/// Distances are computed in the element type `F` of `data`. For distance or
+/// affinity weights use [`recurrence_matrix_weighted`].
+///
+/// # Arguments
+///
+/// - `data` - Features `(n_features, t)`, finite.
+/// - `cfg` - Neighbourhood size, width, metric, symmetry. `cfg.mode` must be
+///   [`RecurrenceMode::Connectivity`] (the default).
+///
+/// # Returns
+///
+/// A `(t, t)` matrix `R` with `R[j, i]` true iff frame `j` is a neighbour of
+/// frame `i` (librosa's orientation).
+///
+/// # Errors
+///
+/// [`ParameterError`] for an invalid config (see
+/// [`RecurrenceConfig::validate`]), non-finite data, or a `cfg.mode` other
+/// than [`RecurrenceMode::Connectivity`].
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::operations::sequence::{recurrence_matrix, RecurrenceConfig};
+/// use ndarray::Array2;
+///
+/// let data = Array2::from_shape_fn((1, 12), |(_, t)| (t % 6) as f64 + 0.01 * (t / 6) as f64);
+/// let cfg = RecurrenceConfig::new().with_k(Some(2));
+/// let rec = recurrence_matrix(data.view(), &cfg).unwrap();
+/// assert_eq!(rec.dim(), (12, 12));
+/// // Every frame has exactly k = 2 links, and none to itself.
+/// for i in 0..12 {
+///     assert_eq!(rec.column(i).iter().filter(|&&v| v).count(), 2);
+///     assert!(!rec[[i, i]]);
+/// }
+/// ```
+///
+/// # Differences from librosa
+///
+/// - Dense output only.
+/// - Brute-force exact neighbour search (librosa uses sklearn, whose
+///   brute-force Euclidean distances can differ by round-off).
+/// - Among the `k + 2 * width` nearest neighbours outside the width band,
+///   librosa keeps the `k` with the *lowest frame index* (its sort over
+///   equal link values preserves index order). This function reproduces that
+///   behaviour exactly.
+pub fn recurrence_matrix<F: AudioFloat>(
+    data: ArrayView2<F>,
+    cfg: &RecurrenceConfig,
+) -> AudioSampleResult<Array2<bool>> {
+    if cfg.mode != RecurrenceMode::Connectivity {
+        return err(
+            "mode",
+            "recurrence_matrix returns connectivity links; use recurrence_matrix_weighted for distance or affinity weights",
+        );
+    }
+    let self_links = cfg.self_links;
+    let (mut rec, _) = recurrence_core(data, cfg, |_| true, |_| self_links)?;
+    let t = rec.nrows();
+    transpose_square_in_place(rec.as_slice_mut().expect("standard layout"), t);
+    Ok(rec)
+}
+
+/// Recurrence matrix with distance or affinity weights.
+///
+/// The same neighbourhood as [`recurrence_matrix`], but each link stores a
+/// value of type `F`: the distance ([`RecurrenceMode::Distance`]),
+/// `exp(-distance / bandwidth)` ([`RecurrenceMode::Affinity`]), or `1.0`
+/// ([`RecurrenceMode::Connectivity`]). Equivalent to
+/// `librosa.segment.recurrence_matrix(data, ..., sparse=False)` in those
+/// modes. Computed in the element type `F` of `data`.
 ///
 /// # Arguments
 ///
@@ -2849,32 +2896,25 @@ fn apply_affinity<F: AudioFloat>(
 ///
 /// ```
 /// use audio_samples::operations::sequence::{
-///     recurrence_matrix, RecurrenceConfig, RecurrenceMode,
+///     recurrence_matrix_weighted, RecurrenceConfig, RecurrenceMode,
 /// };
 /// use ndarray::Array2;
 ///
-/// // A sequence that (almost) repeats after 6 frames.
 /// let data = Array2::from_shape_fn((1, 12), |(_, t)| (t % 6) as f64 + 0.01 * (t / 6) as f64);
 /// let cfg = RecurrenceConfig::new()
 ///     .with_k(Some(1))
 ///     .with_mode(RecurrenceMode::Distance);
-/// let rec = recurrence_matrix(data.view(), &cfg).unwrap();
+/// let rec = recurrence_matrix_weighted(data.view(), &cfg).unwrap();
 /// // Each frame's nearest neighbour is its repetition, 0.01 away.
 /// assert!((rec[[6, 0]] - 0.01).abs() < 1e-12);
-/// assert!((rec[[0, 6]] - 0.01).abs() < 1e-12);
 /// assert_eq!(rec.column(0).iter().filter(|&&v| v != 0.0).count(), 1);
 /// ```
 ///
 /// # Differences from librosa
 ///
-/// - Dense output only; connectivity entries are `1.0`/`0.0` instead of `bool`.
-/// - Brute-force exact neighbour search (librosa uses sklearn, whose
-///   brute-force Euclidean distances can differ by round-off).
-/// - In connectivity mode librosa keeps, among the `k + 2 * width` nearest
-///   neighbours outside the width band, the `k` with the *lowest frame
-///   index* (its sort over equal link values preserves index order). This
-///   function reproduces that behaviour exactly.
-pub fn recurrence_matrix<F: AudioFloat>(
+/// As [`recurrence_matrix`]. In connectivity mode librosa returns `bool`;
+/// this function returns `1.0`/`0.0` (use [`recurrence_matrix`] for `bool`).
+pub fn recurrence_matrix_weighted<F: AudioFloat>(
     data: ArrayView2<F>,
     cfg: &RecurrenceConfig,
 ) -> AudioSampleResult<Array2<F>> {
@@ -2900,49 +2940,7 @@ pub fn recurrence_matrix<F: AudioFloat>(
     Ok(rec)
 }
 
-/// [`recurrence_matrix`] in connectivity mode with `bool` entries, as
-/// librosa returns it (`librosa.segment.recurrence_matrix(data, ...,
-/// mode='connectivity')`, dtype `bool`). The links are the same as those of
-/// [`recurrence_matrix`] (which stores them as `1.0`); the matrix takes one
-/// byte per entry instead of four or eight.
-///
-/// # Errors
-///
-/// As [`recurrence_matrix`], and [`ParameterError`] if `cfg.mode` is not
-/// [`RecurrenceMode::Connectivity`].
-///
-/// # Examples
-///
-/// ```
-/// use audio_samples::operations::sequence::{
-///     recurrence_matrix, recurrence_matrix_bool, RecurrenceConfig,
-/// };
-/// use ndarray::Array2;
-///
-/// let data = Array2::from_shape_fn((2, 20), |(f, t)| ((t * (f + 3)) % 7) as f64);
-/// let cfg = RecurrenceConfig::new();
-/// let flags = recurrence_matrix_bool(data.view(), &cfg).unwrap();
-/// let floats = recurrence_matrix(data.view(), &cfg).unwrap();
-/// assert_eq!(flags.mapv(|b| if b { 1.0 } else { 0.0 }), floats);
-/// ```
-pub fn recurrence_matrix_bool<F: AudioFloat>(
-    data: ArrayView2<F>,
-    cfg: &RecurrenceConfig,
-) -> AudioSampleResult<Array2<bool>> {
-    if cfg.mode != RecurrenceMode::Connectivity {
-        return err(
-            "mode",
-            "boolean output is only defined for connectivity mode",
-        );
-    }
-    let self_links = cfg.self_links;
-    let (mut rec, _) = recurrence_core(data, cfg, |_| true, |_| self_links)?;
-    let t = rec.nrows();
-    transpose_square_in_place(rec.as_slice_mut().expect("standard layout"), t);
-    Ok(rec)
-}
-
-/// The shared part of [`recurrence_matrix`] and [`recurrence_matrix_bool`]:
+/// The shared part of [`recurrence_matrix`] and [`recurrence_matrix_weighted`]:
 /// the `(t, t)` link matrix in librosa's pre-transpose orientation (row =
 /// query frame) and the `k` for bandwidth estimation. `link(d)` is the entry
 /// stored for a neighbour at distance `d`; `diag(v)` the diagonal entry given
@@ -3006,27 +3004,31 @@ fn recurrence_core<F: AudioFloat, C: RecCell>(
     Ok((rec, bandwidth_k))
 }
 
-/// Cross-similarity matrix between a query and a reference feature sequence.
+/// Cross-similarity matrix between a query and a reference feature sequence,
+/// as links.
 ///
 /// Each query frame is linked to its `k` nearest reference frames.
 /// Equivalent to `librosa.segment.cross_similarity(data, data_ref, ...,
-/// sparse=False)`. Computed in the element type `F` of the inputs.
+/// mode='connectivity', sparse=False)`, including its `bool` element type.
+/// For distance or affinity weights use [`cross_similarity_weighted`].
 ///
 /// # Arguments
 ///
 /// - `data` - Query features `(n_features, n)`, finite.
 /// - `data_ref` - Reference features `(n_features, n_ref)`, finite.
-/// - `cfg` - Neighbourhood size, metric, mode, bandwidth.
+/// - `cfg` - Neighbourhood size and metric. `cfg.mode` must be
+///   [`RecurrenceMode::Connectivity`] (the default).
 ///
 /// # Returns
 ///
-/// A `(n_ref, n)` matrix; entry `[r, q]` links reference frame `r` to query
-/// frame `q`.
+/// A `(n_ref, n)` matrix; entry `[r, q]` is true iff reference frame `r` is
+/// linked to query frame `q`.
 ///
 /// # Errors
 ///
 /// [`ParameterError`] if the feature counts differ, either input is empty or
-/// non-finite, the config is invalid, or a bandwidth cannot be computed.
+/// non-finite, the config is invalid, or `cfg.mode` is not
+/// [`RecurrenceMode::Connectivity`].
 ///
 /// # Examples
 ///
@@ -3039,10 +3041,65 @@ fn recurrence_core<F: AudioFloat, C: RecCell>(
 /// let cfg = CrossSimilarityConfig::new().with_k(Some(1));
 /// let x = cross_similarity(query.view(), reference.view(), &cfg).unwrap();
 /// assert_eq!(x.dim(), (3, 2));
-/// assert_eq!(x.column(0).to_vec(), vec![0.0, 1.0, 0.0]);
-/// assert_eq!(x.column(1).to_vec(), vec![1.0, 0.0, 0.0]);
+/// assert_eq!(x.column(0).to_vec(), vec![false, true, false]);
+/// assert_eq!(x.column(1).to_vec(), vec![true, false, false]);
 /// ```
 pub fn cross_similarity<F: AudioFloat>(
+    data: ArrayView2<F>,
+    data_ref: ArrayView2<F>,
+    cfg: &CrossSimilarityConfig,
+) -> AudioSampleResult<Array2<bool>> {
+    if cfg.mode != RecurrenceMode::Connectivity {
+        return err(
+            "mode",
+            "cross_similarity returns connectivity links; use cross_similarity_weighted for distance or affinity weights",
+        );
+    }
+    Ok(cross_similarity_core(data, data_ref, cfg, |_| true)?.0)
+}
+
+/// Cross-similarity matrix with distance or affinity weights.
+///
+/// The same links as [`cross_similarity`], but each stores a value of type
+/// `F`: the distance, the affinity `exp(-distance / bandwidth)`, or `1.0` in
+/// connectivity mode. Equivalent to `librosa.segment.cross_similarity(data,
+/// data_ref, ..., sparse=False)` in those modes. Computed in the element type
+/// `F` of the inputs.
+///
+/// # Arguments
+///
+/// - `data` - Query features `(n_features, n)`, finite.
+/// - `data_ref` - Reference features `(n_features, n_ref)`, finite.
+/// - `cfg` - Neighbourhood size, metric, mode, bandwidth.
+///
+/// # Returns
+///
+/// A `(n_ref, n)` matrix; entry `[r, q]` weights the link from reference
+/// frame `r` to query frame `q` (`0` where there is none).
+///
+/// # Errors
+///
+/// [`ParameterError`] if the feature counts differ, either input is empty or
+/// non-finite, the config is invalid, or a bandwidth cannot be computed.
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::operations::sequence::{
+///     cross_similarity_weighted, CrossSimilarityConfig, RecurrenceMode,
+/// };
+/// use ndarray::array;
+///
+/// let query = array![[0.0_f64, 5.0]];
+/// let reference = array![[5.1_f64, 0.1, 9.0]];
+/// let cfg = CrossSimilarityConfig::new()
+///     .with_k(Some(1))
+///     .with_mode(RecurrenceMode::Distance);
+/// let x = cross_similarity_weighted(query.view(), reference.view(), &cfg).unwrap();
+/// assert!((x[[1, 0]] - 0.1).abs() < 1e-12);
+/// assert!((x[[0, 1]] - 0.1).abs() < 1e-12);
+/// ```
+pub fn cross_similarity_weighted<F: AudioFloat>(
     data: ArrayView2<F>,
     data_ref: ArrayView2<F>,
     cfg: &CrossSimilarityConfig,
@@ -3061,50 +3118,7 @@ pub fn cross_similarity<F: AudioFloat>(
     Ok(out)
 }
 
-/// [`cross_similarity`] in connectivity mode with `bool` entries, as librosa
-/// returns it (`librosa.segment.cross_similarity(data, data_ref, ...,
-/// mode='connectivity')`, dtype `bool`). The links are the same as those of
-/// [`cross_similarity`] (which stores them as `1.0`); the matrix takes one
-/// byte per entry instead of four or eight.
-///
-/// # Errors
-///
-/// As [`cross_similarity`], and [`ParameterError`] if `cfg.mode` is not
-/// [`RecurrenceMode::Connectivity`].
-///
-/// # Examples
-///
-/// ```
-/// use audio_samples::operations::sequence::{
-///     cross_similarity, cross_similarity_bool, CrossSimilarityConfig,
-/// };
-/// use ndarray::array;
-///
-/// let query = array![[0.0, 5.0]];
-/// let reference = array![[5.1, 0.1, 9.0]];
-/// let cfg = CrossSimilarityConfig::new().with_k(Some(1));
-/// let x = cross_similarity_bool(query.view(), reference.view(), &cfg).unwrap();
-/// assert_eq!(x.column(0).to_vec(), vec![false, true, false]);
-/// assert_eq!(
-///     x.mapv(|b| if b { 1.0 } else { 0.0 }),
-///     cross_similarity(query.view(), reference.view(), &cfg).unwrap()
-/// );
-/// ```
-pub fn cross_similarity_bool<F: AudioFloat>(
-    data: ArrayView2<F>,
-    data_ref: ArrayView2<F>,
-    cfg: &CrossSimilarityConfig,
-) -> AudioSampleResult<Array2<bool>> {
-    if cfg.mode != RecurrenceMode::Connectivity {
-        return err(
-            "mode",
-            "boolean output is only defined for connectivity mode",
-        );
-    }
-    Ok(cross_similarity_core(data, data_ref, cfg, |_| true)?.0)
-}
-
-/// The shared part of [`cross_similarity`] and [`cross_similarity_bool`]:
+/// The shared part of [`cross_similarity`] and [`cross_similarity_weighted`]:
 /// the `(n_ref, n)` link matrix (librosa's output orientation) and the `k`
 /// for bandwidth estimation. `link(d)` is the entry stored for a neighbour
 /// at distance `d`.
@@ -3617,7 +3631,7 @@ mod tests {
         let t = transition_loop(2, &[0.5]).unwrap();
         let t3 = t.view().insert_axis(Axis(0));
         let r = viterbi_binary(p.view(), t3, None, None, None).unwrap();
-        assert_eq!(r.states, array![[1, 1, 0], [0, 0, 1]]);
+        assert_eq!(r.states, array![[true, true, false], [false, false, true]]);
         assert_eq!(r.log_prob.len(), 2);
         let wrong = Array3::<f64>::from_elem((3, 2, 2), 0.5);
         assert!(viterbi_binary(p.view(), wrong.view(), None, None, None).is_err());
@@ -3991,8 +4005,8 @@ mod tests {
                                 .with_full(full)
                                 .with_width(width)
                                 .with_k(k);
-                            let b = recurrence_matrix_bool(data.view(), &cfg).unwrap();
-                            let f = recurrence_matrix(data.view(), &cfg).unwrap();
+                            let b = recurrence_matrix(data.view(), &cfg).unwrap();
+                            let f = recurrence_matrix_weighted(data.view(), &cfg).unwrap();
                             assert_eq!(b.mapv(|v| if v { 1.0 } else { 0.0 }), f);
                             let h = t / 2;
                             let ccfg = CrossSimilarityConfig::new().with_full(full).with_k(k);
@@ -4000,8 +4014,8 @@ mod tests {
                                 data.slice(ndarray::s![.., ..h]),
                                 data.slice(ndarray::s![.., h..]),
                             );
-                            let b = cross_similarity_bool(q, r, &ccfg).unwrap();
-                            let f = cross_similarity(q, r, &ccfg).unwrap();
+                            let b = cross_similarity(q, r, &ccfg).unwrap();
+                            let f = cross_similarity_weighted(q, r, &ccfg).unwrap();
                             assert_eq!(b.mapv(|v| if v { 1.0 } else { 0.0 }), f);
                         }
                     }
@@ -4010,19 +4024,6 @@ mod tests {
         }
         let dist = RecurrenceConfig::new().with_mode(RecurrenceMode::Distance);
         let data = Array2::<f64>::zeros((1, 8));
-        assert!(recurrence_matrix_bool(data.view(), &dist).is_err());
-    }
-
-    #[test]
-    fn viterbi_binary_u16_matches_usize_states() {
-        let mut seed = 9u64;
-        let prob = Array2::from_shape_fn((5, 300), |_| lcg(&mut seed));
-        let t = transition_loop::<f64>(2, &[0.9])
-            .unwrap()
-            .insert_axis(Axis(0));
-        let a = viterbi_binary(prob.view(), t.view(), None, None, None).unwrap();
-        let b = viterbi_binary_u16(prob.view(), t.view(), None, None, None).unwrap();
-        assert_eq!(a.states.mapv(|v| v as u16), b.states);
-        assert_eq!(a.log_prob, b.log_prob);
+        assert!(recurrence_matrix(data.view(), &dist).is_err());
     }
 }

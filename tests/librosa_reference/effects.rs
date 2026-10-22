@@ -21,7 +21,9 @@ use audio_samples::operations::effects::{
     nn_filter, nn_filter_recurrence, phase_vocoder, phase_vocoder_at, preemphasis_with_state,
     softmask,
 };
-use audio_samples::operations::sequence::{RecurrenceConfig, RecurrenceMode, recurrence_matrix};
+use audio_samples::operations::sequence::{
+    RecurrenceConfig, RecurrenceMode, recurrence_matrix_weighted,
+};
 use audio_samples::operations::spectrum::{AudioSpectrum, DbReference, StftConfig, istft, stft};
 use audio_samples::{AudioSamples, nzu};
 use ndarray::{Array2, Array3, Axis, s};
@@ -527,7 +529,7 @@ fn nn_filter_matches() {
         arr2(&f["median"]).iter(),
         1e-12,
     );
-    let rec = recurrence_matrix(
+    let rec = recurrence_matrix_weighted(
         chroma.view(),
         &RecurrenceConfig::new()
             .with_mode(RecurrenceMode::Affinity)

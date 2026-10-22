@@ -526,8 +526,8 @@ All of these are free functions in `operations::sequence` (feature
 
 | librosa | audio_samples | status | notes |
 |---|---|---|---|
-| `segment.recurrence_matrix` | `recurrence_matrix` (`RecurrenceConfig`, `RecurrenceMode`, `Bandwidth`) | equivalent with differences | Dense only (no `sparse=True`); connectivity entries are `0.0`/`1.0`; `axis=-1` only |
-| `segment.cross_similarity` | `cross_similarity` (`CrossSimilarityConfig`) | equivalent with differences | As `recurrence_matrix` |
+| `segment.recurrence_matrix` | `recurrence_matrix` (connectivity, `bool`); `recurrence_matrix_weighted` (distance / affinity) (`RecurrenceConfig`, `RecurrenceMode`, `Bandwidth`) | equivalent with differences | Dense only (no `sparse=True`); `axis=-1` only |
+| `segment.cross_similarity` | `cross_similarity` (connectivity, `bool`); `cross_similarity_weighted` (distance / affinity) (`CrossSimilarityConfig`) | equivalent with differences | As `recurrence_matrix` |
 | `segment.recurrence_to_lag` | `recurrence_to_lag` | equivalent | |
 | `segment.lag_to_recurrence` | `lag_to_recurrence` | equivalent | |
 | `segment.path_enhance` | – | not provided: deferred | Needs `filters.diagonal_filter` |
@@ -539,7 +539,7 @@ All of these are free functions in `operations::sequence` (feature
 | `sequence.rqa` | `rqa` (`RqaConfig`, `RqaResult`) | equivalent with differences | Same scores; backtracking through the second column follows the move actually taken (librosa stores a wrong pointer there) |
 | `sequence.viterbi` | `viterbi` | equivalent | |
 | `sequence.viterbi_discriminative` | `viterbi_discriminative` | equivalent | |
-| `sequence.viterbi_binary` | `viterbi_binary` | equivalent | |
+| `sequence.viterbi_binary` | `viterbi_binary` | equivalent with differences | States are `bool` (librosa: `uint16`) |
 | `sequence.transition_uniform` | `transition_uniform` | equivalent | |
 | `sequence.transition_loop` | `transition_loop` | equivalent | |
 | `sequence.transition_cycle` | `transition_cycle` | equivalent | |

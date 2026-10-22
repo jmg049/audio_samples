@@ -11,10 +11,10 @@
 
 use audio_samples::operations::sequence::{
     Bandwidth, CrossSimilarityConfig, DistanceMetric, DtwConfig, RecurrenceConfig, RecurrenceMode,
-    RqaConfig, SyncAggregate, TransitionWindow, cross_similarity, dtw, dtw_backtracking,
-    dtw_with_cost, lag_to_recurrence, recurrence_matrix, recurrence_to_lag, rqa, sync,
-    transition_cycle, transition_local, transition_loop, transition_uniform, viterbi,
-    viterbi_binary, viterbi_discriminative,
+    RqaConfig, SyncAggregate, TransitionWindow, cross_similarity, cross_similarity_weighted, dtw,
+    dtw_backtracking, dtw_with_cost, lag_to_recurrence, recurrence_matrix,
+    recurrence_matrix_weighted, recurrence_to_lag, rqa, sync, transition_cycle, transition_local,
+    transition_loop, transition_uniform, viterbi, viterbi_binary, viterbi_discriminative,
 };
 use ndarray::{Array1, Array2, Array3};
 use serde_json::Value;
@@ -252,7 +252,11 @@ fn viterbi_matches_librosa() {
             min_prob(case),
         )
         .unwrap();
-        assert_eq!(r.states, usize2(&case["states"]), "binary/{name}: states");
+        assert_eq!(
+            r.states.mapv(usize::from),
+            usize2(&case["states"]),
+            "binary/{name}: states"
+        );
         let e = arr1(&case["logp"]);
         assert_close(
             &format!("binary/{name}: logp"),
@@ -379,8 +383,13 @@ fn recurrence_matrix_matches_librosa() {
             self_links: c.get("self").and_then(Value::as_bool).unwrap_or(false),
             full: c.get("full").and_then(Value::as_bool).unwrap_or(false),
         };
-        let r = recurrence_matrix(data.view(), &cfg).unwrap();
+        let r = recurrence_matrix_weighted(data.view(), &cfg).unwrap();
         let e = arr2(&case["R"]);
+        if cfg.mode == RecurrenceMode::Connectivity {
+            // librosa's connectivity output is bool; so is ours.
+            let links = recurrence_matrix(data.view(), &cfg).unwrap();
+            assert_eq!(links, e.mapv(|v| v != 0.0), "recurrence/{name}: bool links");
+        }
         assert_eq!(r.dim(), e.dim(), "recurrence/{name}: shape");
         let pattern_ok = r.iter().zip(&e).all(|(a, b)| (*a != 0.0) == (*b != 0.0));
         assert!(pattern_ok, "recurrence/{name}: link pattern differs");
@@ -410,13 +419,17 @@ fn cross_similarity_matches_librosa() {
             .get("ref_cols")
             .and_then(Value::as_u64)
             .map_or(reference.ncols(), |n| n as usize);
-        let r = cross_similarity(
-            data.view(),
-            reference.slice(ndarray::s![.., ..ref_cols]),
-            &cfg,
-        )
-        .unwrap();
+        let refs = reference.slice(ndarray::s![.., ..ref_cols]);
+        let r = cross_similarity_weighted(data.view(), refs, &cfg).unwrap();
         let e = arr2(&case["R"]);
+        if cfg.mode == RecurrenceMode::Connectivity {
+            let links = cross_similarity(data.view(), refs, &cfg).unwrap();
+            assert_eq!(
+                links,
+                e.mapv(|v| v != 0.0),
+                "cross_similarity/{name}: bool links"
+            );
+        }
         assert_eq!(r.dim(), e.dim(), "cross_similarity/{name}: shape");
         let pattern_ok = r.iter().zip(&e).all(|(a, b)| (*a != 0.0) == (*b != 0.0));
         assert!(pattern_ok, "cross_similarity/{name}: link pattern differs");
