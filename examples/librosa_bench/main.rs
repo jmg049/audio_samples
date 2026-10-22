@@ -175,6 +175,25 @@ fn time_call(f: &mut Thunk<'_>, min_time: f64) -> Vec<f64> {
     times
 }
 
+/// Keeps the core busy for half a second before the first measurement.
+///
+/// After an idle spell, the first 0.2-0.3 s of work on this machine (i7-13700KF,
+/// pinned P-core) run about 10 % slower: 16 kHz to 22.05 kHz `f64` resampling
+/// took 1.15 ms per call in 7 of 7 fresh processes, against 1.05 ms after this
+/// warm-up (7 of 7), at the same reported clock. The Python runs start after
+/// more than a second of interpreter start-up and imports, so they are not
+/// affected.
+fn warm_up_core() {
+    let t = Instant::now();
+    let mut x = 1u64;
+    while t.elapsed().as_secs_f64() < 0.5 {
+        for _ in 0..1000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+        }
+    }
+    std::hint::black_box(x);
+}
+
 fn percentile(sorted: &[f64], q: f64) -> f64 {
     // numpy's default (linear) percentile
     let pos = q * (sorted.len() - 1) as f64;
@@ -267,6 +286,7 @@ fn run<F: AudioFloat>(pairs: &[(String, String)], opts: &Opts, out: &mut impl Wr
 type Pair = (String, String);
 
 fn main() {
+    warm_up_core();
     let opts = parse_args();
     let text = std::fs::read_to_string(&opts.pairs).expect("read --pairs");
     let pairs = text.lines().filter(|l| !l.trim().is_empty()).map(|l| {

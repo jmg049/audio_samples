@@ -39,6 +39,12 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
     /// width (8 `f32`, 4 `f64`). `FMA`: AVX2 + FMA code, only used from
     /// [`run_avx2_fma`].
     fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self;
+    /// Whether stage B computes four outputs per step with
+    /// [`RsFloat::dot4`] (faster for `f32`; for `f64` the single products are).
+    const BATCH4: bool;
+    /// Four [`RsFloat::dot`] products at once, each with the same result as
+    /// `dot` (the same operations in the same order).
+    fn dot4<const FMA: bool>(a: [&[Self]; 4], b: [&[Self]; 4]) -> [Self; 4];
     /// `(1 - frac) · (a · w) + frac · (b · w)` in one pass over `w`.
     fn interp<const FMA: bool>(a: &[Self], b: &[Self], w: &[Self], frac: Self) -> Self;
     /// The 2 : 1 polyphase spectrum (see [`FftStage::pair_down2`]):
@@ -79,8 +85,10 @@ thread_local! {
 }
 
 macro_rules! rs_float {
-    ($t:ty, $dot:ident, $interp:ident, $cmul:ident, $down2:ident, $planner:ident, $engines:ident) => {
+    ($t:ty, $batch4:literal, $dot:ident, $dot4:ident, $interp:ident, $cmul:ident, $down2:ident, $planner:ident, $engines:ident) => {
         impl RsFloat for $t {
+            const BATCH4: bool = $batch4;
+
             #[inline(always)]
             fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self {
                 #[cfg(target_arch = "x86_64")]
@@ -90,6 +98,16 @@ macro_rules! rs_float {
                     return unsafe { simd::$dot(a, b) };
                 }
                 dot_portable(a, b)
+            }
+
+            #[inline(always)]
+            fn dot4<const FMA: bool>(a: [&[Self]; 4], b: [&[Self]; 4]) -> [Self; 4] {
+                #[cfg(target_arch = "x86_64")]
+                if FMA {
+                    // SAFETY: as in `dot`.
+                    return unsafe { simd::$dot4(a, b) };
+                }
+                [0, 1, 2, 3].map(|t| dot_portable(a[t], b[t]))
             }
 
             #[inline(always)]
@@ -163,7 +181,9 @@ macro_rules! rs_float {
 
 rs_float!(
     f32,
+    true,
     dot_f32,
+    dot4_f32,
     interp_f32,
     cmul_f32,
     down2_f32,
@@ -172,7 +192,9 @@ rs_float!(
 );
 rs_float!(
     f64,
+    false,
     dot_f64,
+    dot4_f64,
     interp_f64,
     cmul_f64,
     down2_f64,
@@ -304,24 +326,26 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     from_f: &impl Fn(F) -> T,
 ) {
     let a = &e.a;
-    let mut bufs = PairBufs::new(a);
+    let mut arena = PairArena::new(a);
+    let mut bufs = arena.bufs();
     // Stage-A outputs per block.
     let blk = a.hop / a.down;
     let n_out = out.len() as i64;
     let Some(b) = &e.b else {
-        // Stage A is the whole conversion: write its blocks straight out.
+        // Stage A is the whole conversion: write its blocks out.
+        let (mut ya, mut yb) = (vec![F::zero(); blk], vec![F::zero(); blk]);
         let mut k0 = 0i64;
         while k0 < n_out {
-            a.pair(x, to_f, k0 * a.down as i64, &mut bufs);
+            a.pair(x, to_f, k0 * a.down as i64, &mut bufs, &mut ya, &mut yb);
             let start = k0 as usize;
             let n_a = (n_out - k0).min(blk as i64) as usize;
-            for (o, &v) in out[start..start + n_a].iter_mut().zip(&bufs.ya) {
+            for (o, &v) in out[start..start + n_a].iter_mut().zip(&ya) {
                 o.write(from_f(v));
             }
             if k0 + (blk as i64) < n_out {
                 let start = start + blk;
                 let n_b = (n_out - k0 - blk as i64).min(blk as i64) as usize;
-                for (o, &v) in out[start..start + n_b].iter_mut().zip(&bufs.yb) {
+                for (o, &v) in out[start..start + n_b].iter_mut().zip(&yb) {
                     o.write(from_f(v));
                 }
             }
@@ -349,10 +373,13 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     let mut st = BState { j: 0, n0: 0, p: 0 };
     let n_out = n_out as usize;
     while st.j < n_out && k0 < k_hi {
-        a.pair(x, to_f, k0, &mut bufs);
+        // Stage A writes its two blocks straight onto the end of `buf`.
         let take = |from: i64| (k_hi - from).clamp(0, blk as i64) as usize;
-        buf.extend_from_slice(&bufs.ya[..take(k0)]);
-        buf.extend_from_slice(&bufs.yb[..take(k0 + blk as i64)]);
+        let (n_a, n_b) = (take(k0), take(k0 + blk as i64));
+        let len = buf.len();
+        buf.resize(len + n_a + n_b, F::zero());
+        let (ya, yb) = buf[len..].split_at_mut(n_a);
+        a.pair(x, to_f, k0, &mut bufs, ya, yb);
         k0 += 2 * blk as i64;
         st = run_b::<T, F, FMA>(b, &buf, buf_start, out, from_f, st, step_int, step_frac);
         let drop = ((st.n0 - half_b + 1 - buf_start).max(0) as usize).min(buf.len());
@@ -605,29 +632,31 @@ impl<F: RsFloat> FftStage<F> {
     /// into `bufs.ya` and `bufs.yb`. `m0` must be a multiple of
     /// `max(up, down)`.
     #[inline(always)]
-    fn pair<T: Copy>(&self, x: &[T], to_f: &impl Fn(T) -> F, m0: i64, bufs: &mut PairBufs<F>) {
+    fn pair<T: Copy>(
+        &self,
+        x: &[T],
+        to_f: &impl Fn(T) -> F,
+        m0: i64,
+        bufs: &mut PairBufs<F>,
+        ya: &mut [F],
+        yb: &mut [F],
+    ) {
         if let Some((p, q)) = &self.down2 {
-            self.pair_down2(x, to_f, m0, bufs, p, q);
+            self.pair_down2(x, to_f, m0, bufs, p, q, ya, yb);
             return;
         }
         if let Some((p, q)) = &self.fir2 {
-            self.pair_fir2(x, to_f, m0, bufs, p, q);
+            self.pair_fir2(x, to_f, m0, bufs, p, q, ya, yb);
             return;
         }
         let up = self.up as i64;
         let start = (m0 - self.g as i64).div_euclid(up);
-        load_pair(x, to_f, start, start + self.hop as i64 / up, &mut bufs.z);
+        load_pair(x, to_f, start, start + self.hop as i64 / up, bufs.z);
         // Out of place: the in-place transforms copy through scratch.
         self.fwd
-            .process_outofplace_with_scratch(&mut bufs.z, &mut bufs.zf, &mut bufs.scratch);
+            .process_outofplace_with_scratch(bufs.z, bufs.zf, bufs.scratch);
         let PairBufs {
-            zf,
-            w,
-            y,
-            ya,
-            yb,
-            scratch,
-            ..
+            zf, w, y, scratch, ..
         } = bufs;
         if self.down == 1 {
             // Zero-stuffing by `up` repeats the spectrum `up` times.
@@ -648,12 +677,7 @@ impl<F: RsFloat> FftStage<F> {
             }
         }
         self.inv.process_outofplace_with_scratch(w, y, scratch);
-        let first = self.g / self.down;
-        let valid = &y[first..first + ya.len()];
-        for ((a, b), v) in ya.iter_mut().zip(yb.iter_mut()).zip(valid) {
-            *a = v.re;
-            *b = v.im;
-        }
+        split_re_im(&y[self.g / self.down..], ya, yb);
     }
 }
 
@@ -673,6 +697,8 @@ impl<F: RsFloat> FftStage<F> {
         bufs: &mut PairBufs<F>,
         p: &[Complex<F>],
         q: &[Complex<F>],
+        ya: &mut [F],
+        yb: &mut [F],
     ) {
         let half_n = self.n / 2;
         let start = m0 - self.g as i64;
@@ -681,20 +707,14 @@ impl<F: RsFloat> FftStage<F> {
         load_even_odd(x, to_f, start + self.hop as i64, zb);
         let (fa, fb) = bufs.zf.split_at_mut(half_n);
         self.fwd
-            .process_outofplace_with_scratch(za, fa, &mut bufs.scratch);
+            .process_outofplace_with_scratch(za, fa, bufs.scratch);
         self.fwd
-            .process_outofplace_with_scratch(zb, fb, &mut bufs.scratch);
+            .process_outofplace_with_scratch(zb, fb, bufs.scratch);
         let w = &mut bufs.w[..half_n];
         F::down2_bins(w, fa, fb, p, q);
         let y = &mut bufs.y[..half_n];
-        self.inv
-            .process_outofplace_with_scratch(w, y, &mut bufs.scratch);
-        let first = self.g / 2;
-        let valid = &y[first..first + bufs.ya.len()];
-        for ((a, b), v) in bufs.ya.iter_mut().zip(bufs.yb.iter_mut()).zip(valid) {
-            *a = v.re;
-            *b = v.im;
-        }
+        self.inv.process_outofplace_with_scratch(w, y, bufs.scratch);
+        split_re_im(&y[self.g / 2..], ya, yb);
     }
 }
 
@@ -712,26 +732,54 @@ impl<F: RsFloat> FftStage<F> {
         bufs: &mut PairBufs<F>,
         p: &[Complex<F>],
         q: &[Complex<F>],
+        ya: &mut [F],
+        yb: &mut [F],
     ) {
         let half_n = self.n / 2;
         let first = self.g / 2;
-        let per = self.hop / 2;
-        for (blk, dst) in [(0, &mut bufs.ya), (1, &mut bufs.yb)] {
+        for (blk, dst) in [(0, ya), (1, yb)] {
+            if dst.is_empty() {
+                continue;
+            }
+            let dst_len = dst.len();
             let start = m0 - self.g as i64 + blk * self.hop as i64;
             let z = &mut bufs.z[..half_n];
             load_even_odd(x, to_f, start, z);
             let zf = &mut bufs.zf[..half_n];
             self.fwd
-                .process_outofplace_with_scratch(z, zf, &mut bufs.scratch);
+                .process_outofplace_with_scratch(z, zf, bufs.scratch);
             let w = &mut bufs.w[..half_n];
             F::fir2_bins(w, zf, p, q);
             let y = &mut bufs.y[..half_n];
-            self.inv
-                .process_outofplace_with_scratch(w, y, &mut bufs.scratch);
-            for (d, v) in dst.chunks_exact_mut(2).zip(&y[first..first + per]) {
+            self.inv.process_outofplace_with_scratch(w, y, bufs.scratch);
+            // Even and odd outputs are the real and imaginary parts.
+            let mut pairs = dst.chunks_exact_mut(2);
+            for (d, v) in pairs.by_ref().zip(&y[first..]) {
                 d[0] = v.re;
                 d[1] = v.im;
             }
+            if let [d] = pairs.into_remainder() {
+                *d = y[first + dst_len / 2].re;
+            }
+        }
+    }
+}
+
+/// Writes the real parts of `y` into `a` and the imaginary parts into `b`
+/// (as many as each holds).
+#[inline(always)]
+fn split_re_im<F: RsFloat>(y: &[Complex<F>], a: &mut [F], b: &mut [F]) {
+    if a.len() == b.len() {
+        for ((a, b), v) in a.iter_mut().zip(b.iter_mut()).zip(y) {
+            *a = v.re;
+            *b = v.im;
+        }
+    } else {
+        for (a, v) in a.iter_mut().zip(y) {
+            *a = v.re;
+        }
+        for (b, v) in b.iter_mut().zip(y) {
+            *b = v.im;
         }
     }
 }
@@ -766,36 +814,71 @@ fn load_even_odd<T: Copy, F: RsFloat>(
 }
 
 /// Work buffers of [`FftStage::pair`].
-struct PairBufs<F> {
+struct PairBufs<'a, F> {
     /// Input segments (`n / up`).
-    z: Vec<Complex<F>>,
+    z: &'a mut [Complex<F>],
     /// Their spectrum.
-    zf: Vec<Complex<F>>,
+    zf: &'a mut [Complex<F>],
     /// Product spectrum (`n / down`).
-    w: Vec<Complex<F>>,
+    w: &'a mut [Complex<F>],
     /// Inverse transform.
-    y: Vec<Complex<F>>,
-    /// The two output blocks (`hop / down` samples each).
-    ya: Vec<F>,
-    yb: Vec<F>,
-    scratch: Vec<Complex<F>>,
+    y: &'a mut [Complex<F>],
+    scratch: &'a mut [Complex<F>],
 }
 
-impl<F: RsFloat> PairBufs<F> {
+/// One allocation holding the complex buffers of [`PairBufs`], each
+/// starting on a 4 KiB boundary. With separate vectors, which start wherever
+/// the allocator puts them, the conversion runs 5-8 % slower (16 kHz to
+/// 22.05 kHz and 22.05 kHz to 16 kHz by ratio, `f64`).
+struct PairArena<F> {
+    mem: Vec<Complex<F>>,
+    /// Start and length of `z`, `zf`, `w`, `y` and `scratch`.
+    parts: [(usize, usize); 5],
+}
+
+impl<F: RsFloat> PairArena<F> {
     fn new(a: &FftStage<F>) -> Self {
-        let zero = Complex::new(F::zero(), F::zero());
         let scratch = a
             .fwd
             .get_outofplace_scratch_len()
             .max(a.inv.get_outofplace_scratch_len());
-        Self {
-            z: vec![zero; a.n / a.up],
-            zf: vec![zero; a.n / a.up],
-            w: vec![zero; a.n / a.down],
-            y: vec![zero; a.n / a.down],
-            ya: vec![F::zero(); a.hop / a.down],
-            yb: vec![F::zero(); a.hop / a.down],
-            scratch: vec![zero; scratch],
+        let lens = [a.n / a.up, a.n / a.up, a.n / a.down, a.n / a.down, scratch];
+        let size = std::mem::size_of::<Complex<F>>();
+        // Elements per 4 KiB.
+        let page = 4096 / size;
+        let total: usize = lens.iter().map(|&l| l + page).sum();
+        let mem = vec![Complex::new(F::zero(), F::zero()); total];
+        // Position of `mem[0]` within its 4 KiB page, in elements.
+        let base = (mem.as_ptr() as usize / size) % page;
+        let mut parts = [(0, 0); 5];
+        let mut pos = 0usize;
+        for (part, &len) in parts.iter_mut().zip(&lens) {
+            let start = (base + pos).div_ceil(page) * page - base;
+            *part = (start, len);
+            pos = start + len;
+        }
+        debug_assert!(pos <= total);
+        Self { mem, parts }
+    }
+
+    fn bufs(&mut self) -> PairBufs<'_, F> {
+        let mut rest: &mut [Complex<F>] = &mut self.mem;
+        let mut done = 0;
+        let mut take = |(start, len): (usize, usize)| {
+            let r = std::mem::take(&mut rest);
+            let (_, r) = r.split_at_mut(start - done);
+            let (part, r) = r.split_at_mut(len);
+            rest = r;
+            done = start + len;
+            part
+        };
+        let [pz, pzf, pw, py, ps] = self.parts;
+        PairBufs {
+            z: take(pz),
+            zf: take(pzf),
+            w: take(pw),
+            y: take(py),
+            scratch: take(ps),
         }
     }
 }
@@ -984,6 +1067,37 @@ impl<F: RsFloat> Interp<F> {
         // Window start of output j, relative to `buf`.
         let mut s = n0 - self.half as i64 + 1 - buf_start;
         let s_end = buf.len() as i64 - taps as i64;
+        if EXACT && F::BATCH4 {
+            // Four outputs at a time while all four windows lie in `buf`.
+            while j + 4 <= out.len() {
+                let (mut s4, mut p4, mut q4) = (s, p, q);
+                let mut at = [(0i64, 0usize); 4];
+                for slot in &mut at {
+                    *slot = (s4, q4 * taps);
+                    q4 += 1;
+                    if q4 == rows {
+                        q4 = 0;
+                    }
+                    p4 += step_frac;
+                    let wrap = u64::from(p4 >= l);
+                    p4 -= wrap * l;
+                    s4 += step_int + wrap as i64;
+                }
+                // The window starts increase, so the last is the furthest.
+                if at[3].0 > s_end {
+                    break;
+                }
+                let v = F::dot4::<FMA>(
+                    at.map(|(_, r)| &coeffs[r..r + taps]),
+                    at.map(|(w, _)| &buf[w as usize..w as usize + taps]),
+                );
+                for (o, v) in out[j..j + 4].iter_mut().zip(v) {
+                    o.write(from_f(v));
+                }
+                j += 4;
+                (s, p, q) = (s4, p4, q4);
+            }
+        }
         while j < out.len() && s <= s_end {
             let window = &buf[s as usize..s as usize + taps];
             let v = if EXACT {
@@ -1142,6 +1256,28 @@ mod simd {
             }
         }
         hsum_pd(_mm256_add_pd(acc0, acc1))
+    }
+
+    /// Four [`dot_f32`] products.
+    ///
+    /// # Safety
+    /// As [`dot_f32`], for each pair.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn dot4_f32(a: [&[f32]; 4], b: [&[f32]; 4]) -> [f32; 4] {
+        // SAFETY: forwarded.
+        [0, 1, 2, 3].map(|t| unsafe { dot_f32(a[t], b[t]) })
+    }
+
+    /// Four [`dot_f64`] products.
+    ///
+    /// # Safety
+    /// As [`dot_f64`], for each pair.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn dot4_f64(a: [&[f64]; 4], b: [&[f64]; 4]) -> [f64; 4] {
+        // SAFETY: forwarded.
+        [0, 1, 2, 3].map(|t| unsafe { dot_f64(a[t], b[t]) })
     }
 
     /// # Safety
