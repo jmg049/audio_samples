@@ -98,7 +98,7 @@ use ndarray::{
 use num_complex::Complex;
 
 use crate::audio_float::{finite_float_rows, float_rows_to_audio};
-use crate::operations::sequence::{RecurrenceConfig, recurrence_matrix_weighted};
+use crate::operations::sequence::{RecurrenceConfig, recurrence_links, recurrence_matrix_weighted};
 use crate::operations::spectrum::{
     DbAxes, DbConfig, DbReference, StftConfig, StftPadMode, amplitude_to_db, frame_square_sums,
     istft, stft,
@@ -2191,7 +2191,7 @@ pub fn nn_filter<F: AudioFloat>(
     rec: ArrayView2<'_, F>,
     aggregate: NnAggregate,
 ) -> AudioSampleResult<Array2<F>> {
-    let (n_features, n_frames) = data.dim();
+    let n_frames = data.ncols();
     if rec.dim() != (n_frames, n_frames) {
         return Err(config_err(
             "nn_filter",
@@ -2203,48 +2203,83 @@ pub fn nn_filter<F: AudioFloat>(
         ));
     }
     let mut out = data.to_owned();
-    let mut values = Vec::new();
+    let mut scratch = NnScratch::default();
     for i in 0..n_frames {
-        let targets: Vec<usize> = (0..n_frames)
-            .filter(|&j| rec[[j, i]] != F::zero())
-            .collect();
-        if targets.is_empty() {
-            continue;
+        scratch.targets.clear();
+        scratch.weights.clear();
+        for j in 0..n_frames {
+            let w = rec[[j, i]];
+            if w != F::zero() {
+                scratch.targets.push(j);
+                scratch.weights.push(w);
+            }
         }
-        let weight_sum: F = targets.iter().map(|&j| rec[[j, i]]).sum();
-        if aggregate == NnAggregate::WeightedAverage && weight_sum == F::zero() {
-            return Err(param_err(
-                "rec",
-                format!("the recurrence weights of frame {i} sum to zero"),
-            ));
-        }
-        for f in 0..n_features {
-            out[[f, i]] = match aggregate {
-                NnAggregate::Mean => {
-                    targets.iter().map(|&j| data[[f, j]]).sum::<F>() / F::of_usize(targets.len())
-                }
-                NnAggregate::WeightedAverage => {
-                    targets
-                        .iter()
-                        .map(|&j| data[[f, j]] * rec[[j, i]])
-                        .sum::<F>()
-                        / weight_sum
-                }
-                NnAggregate::Median => {
-                    values.clear();
-                    values.extend(targets.iter().map(|&j| data[[f, j]]));
-                    values.sort_by(total_cmp);
-                    let m = values.len();
-                    if m % 2 == 1 {
-                        values[m / 2]
-                    } else {
-                        (values[m / 2 - 1] + values[m / 2]) / F::of(2.0)
-                    }
-                }
-            };
-        }
+        nn_filter_frame(data, &mut out, i, aggregate, &mut scratch)?;
     }
     Ok(out)
+}
+
+/// Buffers for [`nn_filter_frame`].
+#[derive(Default)]
+struct NnScratch<F> {
+    /// The neighbours of the frame, ascending.
+    targets: Vec<usize>,
+    /// Their recurrence values (all non-zero).
+    weights: Vec<F>,
+    values: Vec<F>,
+}
+
+/// Writes frame `i` of [`nn_filter`]'s output from the neighbours in
+/// `scratch` (no neighbours: the frame is left as it is).
+fn nn_filter_frame<F: AudioFloat>(
+    data: ArrayView2<'_, F>,
+    out: &mut Array2<F>,
+    i: usize,
+    aggregate: NnAggregate,
+    scratch: &mut NnScratch<F>,
+) -> AudioSampleResult<()> {
+    let NnScratch {
+        targets,
+        weights,
+        values,
+    } = scratch;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let weight_sum: F = weights.iter().copied().sum();
+    if aggregate == NnAggregate::WeightedAverage && weight_sum == F::zero() {
+        return Err(param_err(
+            "rec",
+            format!("the recurrence weights of frame {i} sum to zero"),
+        ));
+    }
+    for f in 0..data.nrows() {
+        out[[f, i]] = match aggregate {
+            NnAggregate::Mean => {
+                targets.iter().map(|&j| data[[f, j]]).sum::<F>() / F::of_usize(targets.len())
+            }
+            NnAggregate::WeightedAverage => {
+                targets
+                    .iter()
+                    .zip(weights.iter())
+                    .map(|(&j, &w)| data[[f, j]] * w)
+                    .sum::<F>()
+                    / weight_sum
+            }
+            NnAggregate::Median => {
+                values.clear();
+                values.extend(targets.iter().map(|&j| data[[f, j]]));
+                values.sort_by(total_cmp);
+                let m = values.len();
+                if m % 2 == 1 {
+                    values[m / 2]
+                } else {
+                    (values[m / 2 - 1] + values[m / 2]) / F::of(2.0)
+                }
+            }
+        };
+    }
+    Ok(())
 }
 
 /// [`nn_filter`] with the recurrence matrix computed from `data` itself,
@@ -2262,8 +2297,10 @@ pub fn nn_filter<F: AudioFloat>(
 /// # Returns
 ///
 /// The filtered `(n_features, n_frames)` array in the element type of `data`.
-/// The recurrence matrix is currently computed in `f64` and rounded to that type;
-/// the filtering runs in it.
+/// The recurrence links and the filtering are computed in that type. The links
+/// are kept as per-frame neighbour lists (memory proportional to `t k`, like
+/// librosa's sparse matrix); only `full` distance or affinity mode, which links
+/// every pair, builds the dense `(t, t)` matrix.
 ///
 /// # Errors
 ///
@@ -2286,8 +2323,27 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
     recurrence: &RecurrenceConfig,
     aggregate: NnAggregate,
 ) -> AudioSampleResult<Array2<F>> {
-    let rec = recurrence_matrix_weighted(data, recurrence)?;
-    nn_filter(data, rec.view(), aggregate)
+    // The neighbour lists, without the dense (t, t) matrix.
+    let Some(links) = recurrence_links(data, recurrence)? else {
+        let rec = recurrence_matrix_weighted(data, recurrence)?;
+        return nn_filter(data, rec.view(), aggregate);
+    };
+    let mut out = data.to_owned();
+    let mut scratch = NnScratch::default();
+    for i in 0..links.n_frames() {
+        scratch.targets.clear();
+        scratch.weights.clear();
+        let (cols, vals) = links.row(i);
+        for (&j, &w) in cols.iter().zip(vals) {
+            // An affinity that underflowed to zero is no link.
+            if w != F::zero() {
+                scratch.targets.push(j);
+                scratch.weights.push(w);
+            }
+        }
+        nn_filter_frame(data, &mut out, i, aggregate, &mut scratch)?;
+    }
+    Ok(out)
 }
 
 // =============================================================================
@@ -4083,6 +4139,101 @@ mod tests {
             2.5
         );
         assert!(nn_filter(data.view(), Array2::zeros((3, 3)).view(), NnAggregate::Mean).is_err());
+    }
+
+    /// The neighbour-list path of `nn_filter_recurrence` gives exactly the
+    /// result of `nn_filter` on the dense recurrence matrix.
+    #[test]
+    fn nn_filter_recurrence_matches_dense() {
+        use crate::operations::sequence::{Bandwidth, DistanceMetric, RecurrenceMode};
+        fn check<F: AudioFloat>(data: ArrayView2<'_, F>, cfg: &RecurrenceConfig) {
+            for agg in [
+                NnAggregate::Mean,
+                NnAggregate::Median,
+                NnAggregate::WeightedAverage,
+            ] {
+                let sparse = nn_filter_recurrence(data, cfg, agg);
+                let dense = recurrence_matrix_weighted(data, cfg)
+                    .and_then(|rec| nn_filter(data, rec.view(), agg));
+                match (sparse, dense) {
+                    (Ok(a), Ok(b)) => {
+                        assert!(
+                            a.iter()
+                                .zip(&b)
+                                .all(|(x, y)| x.as_f64().to_bits() == y.as_f64().to_bits()),
+                            "{cfg:?} {agg:?}"
+                        );
+                    }
+                    (Err(_), Err(_)) => {}
+                    (a, b) => panic!("{cfg:?} {agg:?}: {:?} vs {:?}", a.is_ok(), b.is_ok()),
+                }
+            }
+        }
+        let raw = noise(5 * 60, 7);
+        // Repeated frames give zero distances and tied neighbours.
+        let data =
+            Array2::from_shape_fn(
+                (5, 60),
+                |(f, t)| {
+                    if t % 10 == 3 { raw[f] } else { raw[f * 60 + t] }
+                },
+            );
+        let mut configs = Vec::new();
+        for mode in [
+            RecurrenceMode::Connectivity,
+            RecurrenceMode::Distance,
+            RecurrenceMode::Affinity,
+        ] {
+            for sym in [false, true] {
+                for self_links in [false, true] {
+                    for (k, width) in [(None, 1), (Some(3), 2), (Some(70), 1), (Some(5), 4)] {
+                        configs.push(
+                            RecurrenceConfig::new()
+                                .with_mode(mode)
+                                .with_sym(sym)
+                                .with_self_links(self_links)
+                                .with_k(k)
+                                .with_width(width),
+                        );
+                    }
+                }
+            }
+            configs.push(RecurrenceConfig::new().with_mode(mode).with_full(true));
+        }
+        for metric in [
+            DistanceMetric::SqEuclidean,
+            DistanceMetric::Cosine,
+            DistanceMetric::Cityblock,
+            DistanceMetric::Chebyshev,
+        ] {
+            configs.push(
+                RecurrenceConfig::new()
+                    .with_metric(metric)
+                    .with_mode(RecurrenceMode::Affinity)
+                    .with_sym(true),
+            );
+        }
+        for bandwidth in [
+            Bandwidth::MeanK,
+            Bandwidth::GmeanK,
+            Bandwidth::MeanKAvg,
+            Bandwidth::GmeanKAvg,
+            Bandwidth::MeanKAvgAndPair,
+            Bandwidth::Scalar(0.01),
+            Bandwidth::Matrix(Array2::from_elem((60, 60), 0.5)),
+            Bandwidth::Matrix(Array2::from_elem((3, 3), 0.5)),
+        ] {
+            configs.push(
+                RecurrenceConfig::new()
+                    .with_mode(RecurrenceMode::Affinity)
+                    .with_bandwidth(bandwidth),
+            );
+        }
+        let data32 = data.mapv(|v| v as f32);
+        for cfg in &configs {
+            check(data.view(), cfg);
+            check(data32.view(), cfg);
+        }
     }
 
     #[test]

@@ -2677,52 +2677,93 @@ fn transpose_square_in_place<F: Copy>(a: &mut [F], n: usize) {
     }
 }
 
+/// Stored links of a recurrence or cross-similarity matrix, row by row (row
+/// = query frame): a dense matrix, where a stored value is non-zero, or
+/// [`RecurrenceLinks`]. A stored zero distance is negative.
+trait LinkRows<F: AudioFloat> {
+    /// `(rows, columns)`.
+    fn shape(&self) -> (usize, usize);
+    /// Appends the stored values of row `i` to `out`, in column order.
+    fn stored_values(&self, i: usize, out: &mut Vec<F>);
+    /// Replaces each stored value `v` at `(i, j)` by `f(i, j, v)`, row by row
+    /// in column order; unstored cells become zero.
+    fn map_stored(
+        &mut self,
+        f: impl FnMut(usize, usize, F) -> AudioSampleResult<F>,
+    ) -> AudioSampleResult<()>;
+}
+
+impl<F: AudioFloat> LinkRows<F> for ndarray::ArrayViewMut2<'_, F> {
+    fn shape(&self) -> (usize, usize) {
+        self.dim()
+    }
+    fn stored_values(&self, i: usize, out: &mut Vec<F>) {
+        out.extend(self.row(i).iter().copied().filter(|&v| v != F::zero()));
+    }
+    fn map_stored(
+        &mut self,
+        mut f: impl FnMut(usize, usize, F) -> AudioSampleResult<F>,
+    ) -> AudioSampleResult<()> {
+        let (t, ncols) = self.dim();
+        for i in 0..t {
+            for j in 0..ncols {
+                let v = self[[i, j]];
+                self[[i, j]] = if v == F::zero() {
+                    F::zero()
+                } else {
+                    f(i, j, v)?
+                };
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Per-row statistics over the `k` smallest stored (clipped) values: the
+/// `k`-th smallest, the mean, and whether the row has no links.
+fn link_row_stats<F: AudioFloat>(rec: &impl LinkRows<F>, k: usize) -> (Vec<F>, Vec<F>, Vec<bool>) {
+    let t = rec.shape().0;
+    let zero = F::zero();
+    let mut dist_to_k = vec![F::nan(); t];
+    let mut avg = vec![F::nan(); t];
+    let mut empty = vec![false; t];
+    let mut vals: Vec<F> = Vec::new();
+    for i in 0..t {
+        vals.clear();
+        rec.stored_values(i, &mut vals);
+        if vals.is_empty() {
+            empty[i] = true;
+            continue;
+        }
+        for v in &mut vals {
+            if *v < zero {
+                *v = zero;
+            }
+        }
+        vals.sort_by(|a, b| total_cmp(*a, *b));
+        vals.truncate(k);
+        dist_to_k[i] = vals[vals.len() - 1];
+        avg[i] = vals.iter().copied().sum::<F>() / F::of_usize(vals.len());
+    }
+    (dist_to_k, avg, empty)
+}
+
 /// Converts stored distances to affinities in place (`rec` in librosa's
 /// pre-transpose orientation; stored = non-zero, negative = stored zero).
 fn apply_affinity<F: AudioFloat>(
-    mut rec: ndarray::ArrayViewMut2<F>,
+    rec: &mut impl LinkRows<F>,
     bandwidth: &Bandwidth,
     k: usize,
 ) -> AudioSampleResult<()> {
     let zero = F::zero();
-    let (t, ncols) = rec.dim();
-    // Whether a cell is stored, and its distance (stored zeros are negative).
-    let stored = |v: F| v != zero;
+    let (t, ncols) = rec.shape();
     let clip = |v: F| if v < zero { zero } else { v };
 
-    // Per-row statistics over the k smallest stored values.
-    let row_stats = |rec: &ndarray::ArrayViewMut2<F>| -> (Vec<F>, Vec<F>, Vec<bool>) {
-        let mut dist_to_k = vec![F::nan(); t];
-        let mut avg = vec![F::nan(); t];
-        let mut empty = vec![false; t];
-        let mut vals: Vec<F> = Vec::new();
-        for (i, row) in rec.rows().into_iter().enumerate() {
-            vals.clear();
-            vals.extend(row.iter().filter(|&&v| stored(v)).map(|&v| clip(v)));
-            if vals.is_empty() {
-                empty[i] = true;
-                continue;
-            }
-            vals.sort_by(|a, b| total_cmp(*a, *b));
-            vals.truncate(k);
-            dist_to_k[i] = vals[vals.len() - 1];
-            avg[i] = vals.iter().copied().sum::<F>() / F::of_usize(vals.len());
-        }
-        (dist_to_k, avg, empty)
-    };
-
-    let scalar = |bw: F, rec: &mut ndarray::ArrayViewMut2<F>| {
-        rec.map_inplace(|v| {
-            *v = if stored(*v) {
-                (clip(*v) / -bw).exp()
-            } else {
-                zero
-            }
-        });
-    };
-
     match bandwidth {
-        Bandwidth::Scalar(bw) => scalar(F::of(*bw), &mut rec),
+        Bandwidth::Scalar(bw) => {
+            let bw = F::of(*bw);
+            rec.map_stored(|_, _, v| Ok((clip(v) / -bw).exp()))
+        }
         Bandwidth::Matrix(m) => {
             if m.dim() != (t, ncols) {
                 return err(
@@ -2734,16 +2775,10 @@ fn apply_affinity<F: AudioFloat>(
                     ),
                 );
             }
-            Zip::from(&mut rec).and(m).for_each(|v, &bw| {
-                *v = if stored(*v) {
-                    (clip(*v) / -F::of(bw)).exp()
-                } else {
-                    zero
-                }
-            });
+            rec.map_stored(|i, j, v| Ok((clip(v) / -F::of(m[[i, j]])).exp()))
         }
         Bandwidth::MedKScalar => {
-            let (dist_to_k, _, _) = row_stats(&rec);
+            let (dist_to_k, _, _) = link_row_stats(rec, k);
             let mut finite: Vec<F> = dist_to_k.into_iter().filter(|v| !v.is_nan()).collect();
             if finite.is_empty() {
                 return err("bandwidth", "cannot estimate bandwidth from an empty graph");
@@ -2755,10 +2790,10 @@ fn apply_affinity<F: AudioFloat>(
             } else {
                 (finite[n / 2 - 1] + finite[n / 2]) / F::of(2.0)
             };
-            scalar(med, &mut rec);
+            rec.map_stored(|_, _, v| Ok((clip(v) / -med).exp()))
         }
         heuristic => {
-            let (dist_to_k, avg, empty) = row_stats(&rec);
+            let (dist_to_k, avg, empty) = link_row_stats(rec, k);
             if let Some(i) = empty.iter().position(|&e| e) {
                 return err(
                     "bandwidth",
@@ -2769,33 +2804,198 @@ fn apply_affinity<F: AudioFloat>(
                 Bandwidth::MeanK | Bandwidth::GmeanK => &dist_to_k,
                 _ => &avg,
             };
-            for i in 0..t {
-                for j in 0..ncols {
-                    let v = rec[[i, j]];
-                    if !stored(v) {
-                        rec[[i, j]] = zero;
-                        continue;
-                    }
-                    let Some(&sj) = stat.get(j) else {
-                        return err(
-                            "bandwidth",
-                            "per-link bandwidth heuristics need n_ref <= n (librosa indexes \
-                             per-query statistics by reference frame)",
-                        );
-                    };
-                    let si = stat[i];
-                    let d = clip(v);
-                    let bw = match heuristic {
-                        Bandwidth::MeanK | Bandwidth::MeanKAvg => (si + sj) / F::of(2.0),
-                        Bandwidth::GmeanK | Bandwidth::GmeanKAvg => (si * sj).sqrt(),
-                        _ => (si + sj + d) / F::of(3.0),
-                    };
-                    rec[[i, j]] = (d / -bw).exp();
+            rec.map_stored(|i, j, v| {
+                let Some(&sj) = stat.get(j) else {
+                    return err(
+                        "bandwidth",
+                        "per-link bandwidth heuristics need n_ref <= n (librosa indexes \
+                         per-query statistics by reference frame)",
+                    );
+                };
+                let si = stat[i];
+                let d = clip(v);
+                let bw = match heuristic {
+                    Bandwidth::MeanK | Bandwidth::MeanKAvg => (si + sj) / F::of(2.0),
+                    Bandwidth::GmeanK | Bandwidth::GmeanKAvg => (si * sj).sqrt(),
+                    _ => (si + sj + d) / F::of(3.0),
+                };
+                Ok((d / -bw).exp())
+            })
+        }
+    }
+}
+
+/// The links of a recurrence matrix in librosa's pre-transpose orientation,
+/// row by row (compressed sparse rows, columns ascending): row `i` holds the
+/// neighbours of frame `i`, which after librosa's transpose are column `i`.
+/// A stored value may be zero only after an affinity underflows; the dense
+/// matrix holds no link there.
+#[derive(Debug, Clone)]
+pub(crate) struct RecurrenceLinks<F> {
+    ptr: Vec<usize>,
+    cols: Vec<usize>,
+    vals: Vec<F>,
+}
+
+impl<F: AudioFloat> RecurrenceLinks<F> {
+    /// Number of frames.
+    pub(crate) fn n_frames(&self) -> usize {
+        self.ptr.len() - 1
+    }
+
+    /// The neighbours of frame `i` and their values, columns ascending.
+    pub(crate) fn row(&self, i: usize) -> (&[usize], &[F]) {
+        let r = self.ptr[i]..self.ptr[i + 1];
+        (&self.cols[r.clone()], &self.vals[r])
+    }
+
+    fn lookup(&self, i: usize, j: usize) -> Option<F> {
+        let (cols, vals) = self.row(i);
+        cols.binary_search(&j).ok().map(|p| vals[p])
+    }
+}
+
+impl<F: AudioFloat> LinkRows<F> for RecurrenceLinks<F> {
+    fn shape(&self) -> (usize, usize) {
+        (self.n_frames(), self.n_frames())
+    }
+    fn stored_values(&self, i: usize, out: &mut Vec<F>) {
+        out.extend(self.row(i).1.iter().copied().filter(|&v| v != F::zero()));
+    }
+    fn map_stored(
+        &mut self,
+        mut f: impl FnMut(usize, usize, F) -> AudioSampleResult<F>,
+    ) -> AudioSampleResult<()> {
+        for i in 0..self.n_frames() {
+            for p in self.ptr[i]..self.ptr[i + 1] {
+                let v = self.vals[p];
+                if v != F::zero() {
+                    self.vals[p] = f(i, self.cols[p], v)?;
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
+}
+
+/// The recurrence links of [`recurrence_matrix_weighted`] without the dense
+/// `(t, t)` matrix: memory `O(t k)`. The values are bit-identical to the
+/// dense matrix's non-zero entries (`rec[j, i]` is the value at column `j`
+/// of row `i`).
+///
+/// Returns `None` in `full` distance / affinity mode, where every pair is
+/// linked and the dense matrix is the smaller representation.
+pub(crate) fn recurrence_links<F: AudioFloat>(
+    data: ArrayView2<F>,
+    cfg: &RecurrenceConfig,
+) -> AudioSampleResult<Option<RecurrenceLinks<F>>> {
+    if cfg.full && cfg.mode != RecurrenceMode::Connectivity {
+        return Ok(None);
+    }
+    let (t, w, k, bandwidth_k, n_nb) = recurrence_params(data, cfg)?;
+    let mode = cfg.mode;
+    let one = F::one();
+    let link = |d: F| match mode {
+        RecurrenceMode::Connectivity => one,
+        _ => d,
+    };
+    // The diagonal entry (always zero before this step).
+    let diag = match (cfg.self_links, mode) {
+        (true, RecurrenceMode::Connectivity) => one,
+        (true, RecurrenceMode::Affinity) => -one,
+        _ => F::zero(),
+    };
+    let per_row = if cfg.full { n_nb } else { k.min(n_nb) } + 1;
+    let mut links = RecurrenceLinks {
+        ptr: Vec::with_capacity(t + 1),
+        cols: Vec::with_capacity(t * per_row),
+        vals: Vec::with_capacity(t * per_row),
+    };
+    links.ptr.push(0);
+    {
+        let dists = RowDistances::new(data, cfg.metric);
+        let mut drow = vec![F::zero(); t];
+        let mut idx = Vec::with_capacity(t);
+        let mut row: Vec<(usize, F)> = Vec::with_capacity(n_nb + 1);
+        for i in 0..t {
+            knn_row(&dists, data.column(i), &mut drow);
+            nearest(&drow, n_nb, Some(i), &mut idx);
+            row.clear();
+            // A zero link value is no link (as in the dense matrix); outside
+            // `full`, frames within `width` of `i` are dropped.
+            row.extend(
+                idx.iter()
+                    .filter(|&&j| cfg.full || j.abs_diff(i) >= w)
+                    .map(|&j| (j, link(drow[j])))
+                    .filter(|&(_, v)| v != F::zero()),
+            );
+            if !cfg.full && row.len() > k {
+                // `trim_rows`: the k smallest values, ties by column.
+                row.sort_by(|a, b| a.1.key().total_cmp(&b.1.key()).then(a.0.cmp(&b.0)));
+                row.truncate(k);
+            }
+            if diag != F::zero() {
+                row.push((i, diag));
+            }
+            row.sort_unstable_by_key(|&(j, _)| j);
+            links.cols.extend(row.iter().map(|&(j, _)| j));
+            links.vals.extend(row.iter().map(|&(_, v)| v));
+            links.ptr.push(links.cols.len());
+        }
+    }
+    if cfg.sym {
+        // Keep the mutual links, with the smaller value (`RecCell::sym`).
+        let mut sym = RecurrenceLinks {
+            ptr: Vec::with_capacity(t + 1),
+            cols: Vec::with_capacity(links.cols.len()),
+            vals: Vec::with_capacity(links.cols.len()),
+        };
+        sym.ptr.push(0);
+        for i in 0..t {
+            let (cols, vals) = links.row(i);
+            for (&j, &a) in cols.iter().zip(vals) {
+                let v = if j == i {
+                    a
+                } else {
+                    a.sym(links.lookup(j, i).unwrap_or_else(F::zero))
+                };
+                if v != F::zero() {
+                    sym.cols.push(j);
+                    sym.vals.push(v);
+                }
+            }
+            sym.ptr.push(sym.cols.len());
+        }
+        links = sym;
+    }
+    if mode == RecurrenceMode::Affinity {
+        apply_affinity(&mut links, &cfg.bandwidth, bandwidth_k)?;
+    }
+    Ok(Some(links))
+}
+
+/// Validates `cfg` and `data` and returns `(t, width, k, bandwidth_k, n_nb)`:
+/// the frame count, the width, the number of links kept per frame, the `k`
+/// for bandwidth estimation, and the number of nearest neighbours searched.
+fn recurrence_params<F: AudioFloat>(
+    data: ArrayView2<F>,
+    cfg: &RecurrenceConfig,
+) -> AudioSampleResult<(usize, usize, usize, usize, usize)> {
+    let t = data.ncols();
+    cfg.validate(t)?;
+    check_finite("data", data.iter().copied())?;
+    let w = cfg.width;
+    let k = cfg
+        .k
+        .unwrap_or_else(|| 2 * ((t - 2 * w + 1) as f64).sqrt().ceil() as usize);
+    let bandwidth_k = k;
+    let k = if cfg.full && cfg.mode != RecurrenceMode::Connectivity {
+        t
+    } else {
+        k
+    };
+    let n_nb = (t - 1).min(k + 2 * w);
+    Ok((t, w, k, bandwidth_k, n_nb))
 }
 
 /// Recurrence (self-similarity) matrix of a feature sequence, as links.
@@ -2933,7 +3133,7 @@ pub fn recurrence_matrix_weighted<F: AudioFloat>(
     let (mut rec, bandwidth_k) = recurrence_core(data, cfg, link, diag)?;
     // Connectivity entries are already 0 or 1, distances need no change.
     if mode == RecurrenceMode::Affinity {
-        apply_affinity(rec.view_mut(), &cfg.bandwidth, bandwidth_k)?;
+        apply_affinity(&mut rec.view_mut(), &cfg.bandwidth, bandwidth_k)?;
     }
     let t = rec.nrows();
     transpose_square_in_place(rec.as_slice_mut().expect("standard layout"), t);
@@ -2951,20 +3151,7 @@ fn recurrence_core<F: AudioFloat, C: RecCell>(
     link: impl Fn(F) -> C,
     diag: impl Fn(C) -> C,
 ) -> AudioSampleResult<(Array2<C>, usize)> {
-    let t = data.ncols();
-    cfg.validate(t)?;
-    check_finite("data", data.iter().copied())?;
-    let w = cfg.width;
-    let k = cfg
-        .k
-        .unwrap_or_else(|| 2 * ((t - 2 * w + 1) as f64).sqrt().ceil() as usize);
-    let bandwidth_k = k;
-    let k = if cfg.full && cfg.mode != RecurrenceMode::Connectivity {
-        t
-    } else {
-        k
-    };
-    let n_nb = (t - 1).min(k + 2 * w);
+    let (t, w, k, bandwidth_k, n_nb) = recurrence_params(data, cfg)?;
 
     // The distances are computed one row at a time, straight into the output
     // (no t x t distance matrix).
@@ -3113,7 +3300,11 @@ pub fn cross_similarity_weighted<F: AudioFloat>(
     let (mut out, bandwidth_k) = cross_similarity_core(data, data_ref, cfg, link)?;
     // Connectivity entries are already 0 or 1, distances need no change.
     if mode == RecurrenceMode::Affinity {
-        apply_affinity(out.view_mut().reversed_axes(), &cfg.bandwidth, bandwidth_k)?;
+        apply_affinity(
+            &mut out.view_mut().reversed_axes(),
+            &cfg.bandwidth,
+            bandwidth_k,
+        )?;
     }
     Ok(out)
 }
