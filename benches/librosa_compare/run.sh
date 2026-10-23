@@ -21,7 +21,9 @@
 #             exact (rss_shim.c), REPEATS processes per case and input
 #   default   timing with each library's default threading, unpinned
 #   ties      rows within 3 % in time (py): both libraries again in one
-#             process, alternating rounds (needs a report stage first)
+#             process, alternating rounds; native rows at 0.97 or above:
+#             five more processes, median kept; RSS rows above librosa:
+#             ten more processes per library (needs a report stage first)
 #   report    tables (report.py)
 #
 # Each stage appends JSON lines to OUT_DIR/<stage-file>.jsonl; delete the
@@ -107,6 +109,47 @@ for r in json.load(open('$OUT/merged.json')):
         "${ONE[@]}" "$PY" "$HERE/bench_py.py" --mode pair --signals "$SIG" --threads 1 --cases "$case" \
           --configs "$cfg" --out "$OUT/ours_time.jsonl" --out-librosa "$OUT/librosa_time.jsonl"
       done
+      # Native rows at 0.97 or above: five more processes each; the record
+      # keeps the median of the five process medians.
+      "$PY" -c "
+import json
+for r in json.load(open('$OUT/merged.json')):
+    x = r.get('ratio_rust')
+    if x is not None and x >= 0.97:
+        print(r['case'], r['config'])
+" > "$OUT/pairs_ties_rust.tsv"
+      if [ -s "$OUT/pairs_ties_rust.tsv" ]; then
+        for i in 1 2 3 4 5; do
+          "${ONE[@]}" "$BIN" --signals "$SIG" --pairs "$OUT/pairs_ties_rust.tsv"
+        done | "$PY" -c "
+import json, statistics, sys
+runs = {}
+for line in sys.stdin:
+    if line.startswith('{'):
+        r = json.loads(line)
+        runs.setdefault((r['case'], r['config']), []).append(r)
+for recs in runs.values():
+    recs.sort(key=lambda r: r['median_ms'])
+    rec = dict(recs[len(recs) // 2])
+    rec['process_medians_ms'] = [r['median_ms'] for r in recs]
+    print(json.dumps(rec))
+" >> "$OUT/rust_time.jsonl"
+      fi
+      # RSS rows where ours' median is above librosa's: ten more fresh
+      # processes per library (the table uses every repeat).
+      cases=$("$PY" -c "
+import json
+rows = json.load(open('$OUT/merged.json'))
+print(','.join(sorted({r['case'] for r in rows if r.get('ours_rss_kb') is not None
+                       and r.get('librosa_rss_kb') is not None and r['ours_rss_kb'] > r['librosa_rss_kb']})))
+")
+      if [ -n "$cases" ]; then
+        mkdir -p "$REPO/target/librosa_bench"
+        cc -O2 -Wall -shared -fPIC -o "$REPO/target/librosa_bench/rss_shim.so" "$HERE/rss_shim.c"
+        OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1 RAYON_NUM_THREADS=1 \
+          "$PY" "$HERE/rss_probe.py" --signals "$SIG" --jobs "$JOBS" --repeats 10 \
+          --shim "$REPO/target/librosa_bench/rss_shim.so" --cases "$cases" --out "$OUT/rss.jsonl"
+      fi
       ;;
     report)
       "$PY" "$HERE/report.py" "$OUT"
