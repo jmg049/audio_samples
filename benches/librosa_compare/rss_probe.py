@@ -10,7 +10,8 @@ mode's description) ``--repeats`` times and collects the JSON lines it prints
 
 ``--shim`` preloads the exact peak-RSS tracker built from ``rss_shim.c``
 (``run.sh`` builds it); without it the probes fall back to the kernel's
-``VmHWM``, which can be off by a few hundred KB.
+``VmHWM``, which can be off by a few hundred KB. Every probe runs with
+glibc's mmap threshold fixed at 128 KiB (see the comment at ``env``).
 
 The probes run in parallel (``--jobs``); peak RSS does not depend on timing.
 """
@@ -51,6 +52,15 @@ pairs = json.loads(
 jobs = [(lib, p["case"], p["config"], rep)
         for rep in range(args.repeats) for p in pairs for lib in args.libs.split(",")]
 env = dict(os.environ)
+# A fixed malloc mmap threshold (glibc's default 128 KiB, without its dynamic
+# raising): every allocation of 128 KiB or more gets its own mapping, freed
+# when released. Otherwise whether a large result comes from the heap, and
+# so whether its first page or a 2 MiB huge page around it is already
+# resident, depends on what the process freed before, which differs between
+# the two libraries' processes for the same work.
+env["GLIBC_TUNABLES"] = ":".join(
+    t for t in (env.get("GLIBC_TUNABLES"), "glibc.malloc.mmap_threshold=131072") if t
+)
 if args.shim:
     env["LD_PRELOAD"] = os.path.abspath(args.shim)
 

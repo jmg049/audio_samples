@@ -15,6 +15,12 @@ Modes:
   numpy allocations; it does not see allocations made inside the Rust
   extension) and one call under ``memray`` (every ``malloc``/``mmap`` in the
   process, numpy and Rust alike): peak heap bytes and allocation count.
+* ``pair``: librosa and audio_samples in one process, timed in alternating
+  rounds (``--rounds``, the order swapped every round), for rows whose two
+  separate ``time`` runs are within a few percent: both see the same clock
+  and cache state. Each library's record has the median over all its timed
+  calls; ``--out`` takes audio_samples' records and ``--out-librosa``
+  librosa's.
 * ``rss``: run by ``rss_probe.py`` in a fresh process per case and
   configuration: warm up on a 1 s input of the same rate, layout and dtype,
   make one call on the real input and report the peak resident size during
@@ -46,7 +52,9 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--lib", choices=("librosa", "ours"))
 ap.add_argument("--signals", default=os.path.join(HERE, "..", "..", "target", "librosa_bench", "signals"))
 ap.add_argument("--out", default=None)
-ap.add_argument("--mode", default="time", choices=("time", "mem", "rss"))
+ap.add_argument("--mode", default="time", choices=("time", "mem", "rss", "pair"))
+ap.add_argument("--out-librosa", default=None, help="with --mode pair: file for librosa's records")
+ap.add_argument("--rounds", type=int, default=40, help="with --mode pair: alternating rounds")
 ap.add_argument("--threads", default="1")
 ap.add_argument("--cases", default=None)
 ap.add_argument("--groups", default=None)
@@ -56,6 +64,17 @@ ap.add_argument("--list", action="store_true")
 ap.add_argument("--tsv", action="store_true", help="with --list: `case config` lines")
 ap.add_argument("--min-time", type=float, default=None)
 args = ap.parse_args()
+
+if args.mode == "rss":
+    # Count resident memory in 4 KiB pages only: with transparent huge pages
+    # a first touch can map a whole 2 MiB page, depending on alignment and on
+    # whether the kernel has a free huge page at that moment, which made the
+    # same call differ by up to 1.4 MB between processes. Same for both
+    # libraries; set before any large mapping is touched.
+    import ctypes
+
+    PR_SET_THP_DISABLE = 41
+    ctypes.CDLL(None, use_errno=True).prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0)
 
 if args.threads != "default":
     for v in THREAD_VARS:
@@ -99,7 +118,7 @@ if args.list:
     print(json.dumps([{"case": c.name, "group": c.group, "config": cfg.id} for c, cfg in selected()]))
     sys.exit(0)
 
-if args.lib is None:
+if args.lib is None and args.mode != "pair":
     sys.exit("--lib is required")
 
 
@@ -179,6 +198,29 @@ def run():
         emit(rec, out)
 
 
+def run_pair():
+    """``--mode pair``: alternating rounds of both libraries in this process."""
+    outs = {"ours": open(args.out, "a") if args.out else None,
+            "librosa": open(args.out_librosa, "a") if args.out_librosa else None}
+    for case, cfg in selected():
+        if case.librosa is None or case.ours is None:
+            continue
+        ctx = Ctx(cfg, args.signals)
+        fs = {"librosa": case.librosa(ctx), "ours": case.ours(ctx)}
+        times = {lib: [] for lib in fs}
+        outs_desc = {lib: describe(f()) for lib, f in fs.items()}
+        for k in range(args.rounds):
+            order = ("librosa", "ours") if k % 2 == 0 else ("ours", "librosa")
+            for lib in order:
+                times[lib] += time_call(fs[lib], min_time=0.01, min_reps=5, max_reps=30)
+        for lib in fs:
+            rec = {"lib": lib, "case": case.name, "group": case.group, "config": cfg.id, "mode": "time",
+                   "threads": args.threads, "out": outs_desc[lib], "interleaved_rounds": args.rounds}
+            rec.update(summarise(times[lib]))
+            print(f"{lib:8} {case.name:34} {cfg.id:22} {rec['median_ms']:10.4f} ms (interleaved)", file=sys.stderr)
+            emit(rec, outs[lib])
+
+
 def measure_mem(f):
     import tempfile
     import tracemalloc
@@ -256,4 +298,7 @@ def rss_shim():
 
 
 if __name__ == "__main__":
-    run()
+    if args.mode == "pair":
+        run_pair()
+    else:
+        run()

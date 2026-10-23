@@ -20,6 +20,8 @@
 #   rss       peak-RSS growth per call in fresh processes (both Python paths),
 #             exact (rss_shim.c), REPEATS processes per case and input
 #   default   timing with each library's default threading, unpinned
+#   ties      rows within 3 % in time (py): both libraries again in one
+#             process, alternating rounds (needs a report stage first)
 #   report    tables (report.py)
 #
 # Each stage appends JSON lines to OUT_DIR/<stage-file>.jsonl; delete the
@@ -89,6 +91,21 @@ for stage in "${STAGES[@]}"; do
       for lib in librosa ours; do
         "$PY" "$HERE/bench_py.py" --lib "$lib" --signals "$SIG" --threads default --config-set default $SEL \
           --out "$OUT/${lib}_default.jsonl"
+      done
+      ;;
+    ties)
+      # Rows whose separate librosa and ours runs are within 3 %: time both
+      # again in one process, alternating (bench_py.py --mode pair). Needs
+      # merged.json from a report stage.
+      "$PY" -c "
+import json
+for r in json.load(open('$OUT/merged.json')):
+    x = r.get('ratio_py')
+    if x is not None and 0.97 <= x <= 1.03:
+        print(r['case'], r['config'])
+" | while read -r case cfg; do
+        "${ONE[@]}" "$PY" "$HERE/bench_py.py" --mode pair --signals "$SIG" --threads 1 --cases "$case" \
+          --configs "$cfg" --out "$OUT/ours_time.jsonl" --out-librosa "$OUT/librosa_time.jsonl"
       done
       ;;
     report)
