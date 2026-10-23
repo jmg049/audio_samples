@@ -3671,7 +3671,7 @@ pub fn sync_with<F, D, A>(
     data: ArrayView<F, D>,
     idx: &[usize],
     pad: bool,
-    mut aggregate: A,
+    aggregate: A,
 ) -> AudioSampleResult<Array<F, D>>
 where
     F: AudioFloat,
@@ -3681,19 +3681,60 @@ where
     if data.ndim() == 0 {
         return err("data", "must have at least one dimension (frames last)");
     }
+    let n = data.len_of(Axis(data.ndim() - 1));
+    // Indices in increasing order (the usual case, e.g. beat frames) are
+    // walked in place; others are sorted into a vector first. Both give the
+    // same sorted, de-duplicated boundaries.
+    if idx.is_sorted() {
+        let count = sorted_sync_boundaries(idx, n, pad).count();
+        sync_segments(data, count, sorted_sync_boundaries(idx, n, pad), aggregate)
+    } else {
+        let bounds = sync_boundaries(idx, n, pad);
+        sync_segments(data, bounds.len(), bounds.into_iter(), aggregate)
+    }
+}
+
+/// The boundaries of [`sync_boundaries`] for indices in increasing order,
+/// without sorting or allocating: `0` (with `pad`), the indices clipped to
+/// `n` (with `pad`) or those `<= n` (without), and `n` (with `pad`), with
+/// repeats dropped. The sequence is already sorted, so dropping repeated
+/// neighbours de-duplicates it.
+fn sorted_sync_boundaries(idx: &[usize], n: usize, pad: bool) -> impl Iterator<Item = usize> + '_ {
+    let mut last = None;
+    pad.then_some(0)
+        .into_iter()
+        .chain(idx.iter().map(move |&i| if pad { i.min(n) } else { i }))
+        .filter(move |&i| i <= n)
+        .chain(pad.then_some(n))
+        .filter(move |&b| last.replace(b) != Some(b))
+}
+
+/// Reduces the segments `[b[s], b[s + 1])` of the last axis of `data`, for
+/// `count` sorted boundaries `b`.
+fn sync_segments<F, D, A>(
+    data: ArrayView<F, D>,
+    count: usize,
+    mut bounds: impl Iterator<Item = usize>,
+    mut aggregate: A,
+) -> AudioSampleResult<Array<F, D>>
+where
+    F: AudioFloat,
+    D: Dimension + RemoveAxis,
+    A: FnMut(ArrayView1<F>) -> F,
+{
     let axis = Axis(data.ndim() - 1);
-    // Segment s is [bounds[s], bounds[s + 1]).
-    let bounds = sync_boundaries(idx, data.len_of(axis), pad);
     let mut shape = data.raw_dim();
-    shape[axis.index()] = bounds.len().saturating_sub(1);
+    shape[axis.index()] = count.saturating_sub(1);
     let mut out = Array::<F, D>::zeros(shape);
-    for (s, w) in bounds.windows(2).enumerate() {
-        let (a, b) = (w[0], w[1]);
-        let seg = data.slice_axis(axis, Slice::from(a..b));
-        let out_s = out.index_axis_mut(axis, s);
-        Zip::from(out_s)
-            .and(seg.lanes(axis))
-            .for_each(|o, lane| *o = aggregate(lane));
+    if let Some(mut a) = bounds.next() {
+        for (s, b) in bounds.enumerate() {
+            let seg = data.slice_axis(axis, Slice::from(a..b));
+            let out_s = out.index_axis_mut(axis, s);
+            Zip::from(out_s)
+                .and(seg.lanes(axis))
+                .for_each(|o, lane| *o = aggregate(lane));
+            a = b;
+        }
     }
     Ok(out)
 }
@@ -3916,6 +3957,32 @@ mod tests {
         let x3 = Array3::<f64>::ones((2, 3, 4));
         let s3 = sync(x3.view(), &[2], SyncAggregate::Sum, true).unwrap();
         assert_eq!(s3, Array3::from_elem((2, 3, 2), 2.0));
+    }
+
+    #[test]
+    fn sorted_sync_boundaries_match_the_sorting_path() {
+        let cases: [&[usize]; 9] = [
+            &[],
+            &[0],
+            &[0, 0, 3, 3, 5],
+            &[2, 4],
+            &[0, 21, 42],
+            &[4, 5, 9, 12],
+            &[5, 5, 5],
+            &[10, 10],
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        ];
+        for idx in cases {
+            for n in [0, 1, 5, 10, 20] {
+                for pad in [true, false] {
+                    assert_eq!(
+                        sorted_sync_boundaries(idx, n, pad).collect::<Vec<_>>(),
+                        sync_boundaries(idx, n, pad),
+                        "idx {idx:?}, n {n}, pad {pad}"
+                    );
+                }
+            }
+        }
     }
 
     /// The straightforward recursion (the previous implementation), as the
