@@ -10,7 +10,9 @@ Writes, into OUT_DIR:
 * ``not_faster.md``: every row with any ratio above 1;
 * ``before_after.md`` (with ``--baseline``): one row per case, before and after;
 * ``aggregates.md``: geometric-mean time ratios by input property;
-* ``rss.md``, ``default_threads.md``;
+* ``rss.md`` (median and range over the fresh-process repeats), ``default_threads.md``;
+* ``comparison.md``: per measure, the rows where audio_samples is below, equal
+  to or above librosa, and every row where it is not strictly below;
 * ``merged.json``: the merged records.
 
 Time ratio = audio_samples / librosa (below 1: audio_samples is faster). The
@@ -63,9 +65,30 @@ lib_t = by_key(load("librosa_time.jsonl"), "librosa")
 our_t = by_key(load("ours_time.jsonl"), "ours")
 lib_m = by_key(load("librosa_mem.jsonl"), "librosa")
 our_m = by_key(load("ours_mem.jsonl"), "ours")
-rss = load("rss.jsonl")
-lib_rss = by_key(rss, "librosa")
-our_rss = by_key(rss, "ours")
+def load_rss(name):
+    """Every repeat of the RSS probe: {(case, config, lib): [rss_delta_kb, ...]}."""
+    path = os.path.join(args.out, name)
+    out = defaultdict(list)
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("{"):
+                    r = json.loads(line)
+                    if "rss_delta_kb" in r:
+                        out[(r["case"], r["config"], r.get("lib"))].append(r["rss_delta_kb"])
+    return out
+
+
+def median_of(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    return None if n == 0 else (xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2)
+
+
+rss_all = load_rss("rss.jsonl")
+lib_rss = {(c, cfg): v for (c, cfg, lb), v in rss_all.items() if lb == "librosa"}
+our_rss = {(c, cfg): v for (c, cfg, lb), v in rss_all.items() if lb == "ours"}
 rust_d = by_key(load("rust_default.jsonl"), "rust")
 lib_d = by_key(load("librosa_default.jsonl"), "librosa")
 our_d = by_key(load("ours_default.jsonl"), "ours")
@@ -169,8 +192,10 @@ for k in keys:
         "rust_alloc_bytes": rr.get("alloc_bytes"),
         "librosa_tracemalloc": lm.get("tm_peak"),
         "ours_tracemalloc": om.get("tm_peak"),
-        "librosa_rss_kb": lib_rss.get(k, {}).get("rss_delta_kb"),
-        "ours_rss_kb": our_rss.get(k, {}).get("rss_delta_kb"),
+        "librosa_rss_kb": median_of(lib_rss.get(k, [])),
+        "ours_rss_kb": median_of(our_rss.get(k, [])),
+        "librosa_rss_all": sorted(lib_rss.get(k, [])),
+        "ours_rss_all": sorted(our_rss.get(k, [])),
         "librosa_default_ms": med(lib_d, k),
         "ours_default_ms": med(our_d, k),
         "rust_default_ms": med(rust_d, k),
@@ -258,7 +283,13 @@ write_table("table_main.md", f"One row per case ({args.canonical} where the case
 slower = [r for r in rows if (r["ratio_py"] or 0) > 1 + BAND or (r["ratio_rust"] or 0) > 1 + BAND
           or (r["mem_ratio"] or 0) > 1 + BAND]
 write_table("slower.md", "Rows where audio_samples is slower or larger", slower, INTRO)
-strict = [r for r in rows if (r["ratio_py"] or 0) > 1 or (r["ratio_rust"] or 0) > 1 or (r["mem_ratio"] or 0) > 1]
+def larger(a, b):
+    return a is not None and b is not None and a > b
+
+
+# Any measure above librosa, including a peak above librosa's 0 B (no ratio).
+strict = [r for r in rows if larger(r["ours_py_ms"], r["librosa_ms"]) or larger(r["rust_ms"], r["librosa_ms"])
+          or larger(r["ours_peak"], r["librosa_peak"])]
 write_table("not_faster.md", "Rows where audio_samples is not faster or not smaller (any ratio above 1)",
             strict, INTRO)
 
@@ -307,17 +338,65 @@ with open(os.path.join(args.out, "aggregates.md"), "w") as f:
         tw[r["time_winner"]] += 1
     f.write(f"\nTime winner, one row per case: {dict(tw)}\n")
 
+def fkb(xs):
+    """Median KB and range of the repeats."""
+    if not xs:
+        return "–"
+    m = median_of(xs)
+    rng = f" ({xs[0]}-{xs[-1]})" if xs[0] != xs[-1] else ""
+    return f"{m:g}{rng}"
+
+
 with open(os.path.join(args.out, "rss.md"), "w") as f:
-    f.write("# Peak RSS growth per call (fresh process, after a warm-up on 1 s of input)\n\n")
-    f.write("| function | input | librosa | ours (py) | ratio | tracemalloc librosa / ours |\n"
+    f.write("# Peak RSS growth per call (fresh process, after a warm-up on 1 s of input)\n\n"
+            "Exact peak resident size during the call minus the resident size before it (rss_shim.c), "
+            "in KB: median over the fresh-process repeats, range in brackets. "
+            "Ratio = ours median / librosa median.\n\n")
+    f.write("| function | input | repeats librosa / ours | librosa KB | ours (py) KB | ratio |\n"
             "|---|---|---:|---:|---:|---:|\n")
     for r in rows:
-        if r["librosa_rss_kb"] is None and r["ours_rss_kb"] is None:
+        la, oa = r["librosa_rss_all"], r["ours_rss_all"]
+        if not la and not oa:
             continue
         lk, ok = r["librosa_rss_kb"], r["ours_rss_kb"]
-        f.write(f"| {r['func']} [{r['case']}] | {r['config']} | {fbytes(lk * 1024 if lk is not None else None)} "
-                f"| {fbytes(ok * 1024 if ok is not None else None)} | {fratio(ratio(ok, lk) if lk else None)} "
-                f"| {fbytes(r['librosa_tracemalloc'])} / {fbytes(r['ours_tracemalloc'])} |\n")
+        f.write(f"| {r['func']} [{r['case']}] | {r['config']} | {len(la)} / {len(oa)} | {fkb(la)} | {fkb(oa)} "
+                f"| {fratio(ratio(ok, lk) if lk else None)} |\n")
+
+# Every measure, ours against librosa: below / equal / above, and the rows not strictly below.
+MEASURES = [
+    ("time, Python (ms)", "librosa_ms", "ours_py_ms", fms),
+    ("time, native Rust (ms)", "librosa_ms", "rust_ms", fms),
+    ("memray peak, Python (bytes)", "librosa_peak", "ours_peak", lambda x: f"{x:.0f}"),
+    ("native peak vs librosa memray peak (bytes)", "librosa_peak", "rust_peak", lambda x: f"{x:.0f}"),
+    ("time, default threads, Python (ms)", "librosa_default_ms", "ours_default_ms", fms),
+    ("time, default threads, native Rust (ms)", "librosa_default_ms", "rust_default_ms", fms),
+    ("peak RSS growth, median of repeats (KB)", "librosa_rss_kb", "ours_rss_kb", lambda x: f"{x:g}"),
+]
+with open(os.path.join(args.out, "comparison.md"), "w") as f:
+    f.write("# audio_samples against librosa, every measure\n\n"
+            "Counts of rows where ours is below, equal to or above librosa (exact comparison of the "
+            "recorded values, no tolerance band), then every row where ours is not strictly below.\n\n"
+            "| measure | rows | ours lower | equal | ours higher |\n|---|---:|---:|---:|---:|\n")
+    detail = []
+    for title, lk, ok, fmt in MEASURES:
+        lo = eq = hi = 0
+        for r in rows:
+            a, b = r[ok], r[lk]
+            if a is None or b is None:
+                continue
+            if a < b:
+                lo += 1
+            elif a == b:
+                eq += 1
+                detail.append((title, r, fmt(a), fmt(b), "equal"))
+            else:
+                hi += 1
+                detail.append((title, r, fmt(a), fmt(b), "OURS HIGHER"))
+        f.write(f"| {title} | {lo + eq + hi} | {lo} | {eq} | {hi} |\n")
+    f.write("\n## Rows where ours is not strictly lower\n\n"
+            "| measure | function | input | ours | librosa | result |\n|---|---|---|---:|---:|---|\n")
+    for title, r, a, b, res in detail:
+        f.write(f"| {title} | {r['func']} [{r['case']}] | {r['config']} | ours {a} | librosa {b} | {res} |\n")
 
 with open(os.path.join(args.out, "default_threads.md"), "w") as f:
     f.write("# Default threading (no thread limits, not pinned)\n\n")

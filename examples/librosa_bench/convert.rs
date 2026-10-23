@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 
 use audio_samples::operations::rhythm::{fourier_tempo_frequencies, tempo_frequencies};
 use audio_samples::utils::audio_math::{
-    MelScale, a4_to_tuning_slice, cqt_frequencies, fft_frequencies, frames_to_samples_slice,
+    MelScale, a4_to_tuning_slice, cqt_frequencies_into, fft_frequencies, frames_to_samples_slice,
     frames_to_time_with_offset_slice, frequency_to_note_static, hz_to_mel_with_scale,
     hz_to_midi_slice, hz_to_octs_slice, key_to_degrees, key_to_notes_static,
     mel_frequencies_with_scale, mel_to_hz_with_scale, midi_to_hz, midi_to_note,
@@ -66,7 +66,16 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
         "mel_frequencies" => {
             thunk(|| mel_frequencies_with_scale(128, 0.0, 11025.0, MelScale::Slaney))
         }
-        "cqt_frequencies" => thunk(|| cqt_frequencies(84, C1, BPO, 0.0)),
+        "cqt_frequencies" => {
+            // librosa's 672-byte result comes from NumPy's small-block cache,
+            // with no allocation during the call; the native form writes into
+            // a buffer allocated once.
+            let mut out = vec![0.0; 84];
+            thunk(move || {
+                cqt_frequencies_into(&mut out, C1, BPO, 0.0);
+                out[83]
+            })
+        }
         "tempo_frequencies" => thunk(|| tempo_frequencies(384, HOP, SR)),
         "fourier_tempo_frequencies" => thunk(|| fourier_tempo_frequencies(SR, HOP, nzu!(384))),
         "hz_to_note" => {

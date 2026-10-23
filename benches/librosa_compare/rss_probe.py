@@ -2,9 +2,15 @@
 
 For every case and configuration of the ``rss`` set (see ``common.RSS_CONFIGS``)
 and each library, starts ``bench_py.py --mode rss`` in a new process (see that
-mode's description) and collects the JSON lines it prints.
+mode's description) ``--repeats`` times and collects the JSON lines it prints
+(one per process, with a ``rep`` field).
 
-    rss_probe.py --out rss.jsonl [--jobs 6] [--cases a,b] [--groups g]
+    rss_probe.py --out rss.jsonl [--jobs 6] [--repeats 5] [--shim rss_shim.so]
+                 [--cases a,b] [--groups g]
+
+``--shim`` preloads the exact peak-RSS tracker built from ``rss_shim.c``
+(``run.sh`` builds it); without it the probes fall back to the kernel's
+``VmHWM``, which can be off by a few hundred KB.
 
 The probes run in parallel (``--jobs``); peak RSS does not depend on timing.
 """
@@ -28,6 +34,8 @@ ap.add_argument("--signals", default=None)
 ap.add_argument("--cases", default=None)
 ap.add_argument("--groups", default=None)
 ap.add_argument("--libs", default="librosa,ours")
+ap.add_argument("--repeats", type=int, default=5)
+ap.add_argument("--shim", default=None, help="rss_shim.so to preload for exact peaks")
 args = ap.parse_args()
 
 sel = []
@@ -40,21 +48,29 @@ sig = ["--signals", args.signals] if args.signals else []
 pairs = json.loads(
     subprocess.check_output([sys.executable, BENCH, "--list", "--config-set", "rss", *sel, *sig])
 )
-jobs = [(lib, p["case"], p["config"]) for p in pairs for lib in args.libs.split(",")]
+jobs = [(lib, p["case"], p["config"], rep)
+        for rep in range(args.repeats) for p in pairs for lib in args.libs.split(",")]
+env = dict(os.environ)
+if args.shim:
+    env["LD_PRELOAD"] = os.path.abspath(args.shim)
 
 
 def probe(job):
-    lib, case, cfg = job
+    lib, case, cfg, rep = job
     r = subprocess.run(
         [sys.executable, BENCH, "--mode", "rss", "--lib", lib, "--cases", case, "--configs", cfg, *sig],
         capture_output=True,
         text=True,
+        env=env,
     )
     lines = [ln for ln in r.stdout.splitlines() if ln.startswith("{")]
     if lines:
-        return lines[-1]
-    err = (r.stderr.strip().splitlines() or ["no output"])[-1]
-    return json.dumps({"lib": lib, "case": case, "config": cfg, "mode": "rss", "error": err})
+        rec = json.loads(lines[-1])
+    else:
+        err = (r.stderr.strip().splitlines() or ["no output"])[-1]
+        rec = {"lib": lib, "case": case, "config": cfg, "mode": "rss", "error": err}
+    rec["rep"] = rep
+    return json.dumps(rec)
 
 
 with open(args.out, "a") as out, ThreadPoolExecutor(args.jobs) as pool:

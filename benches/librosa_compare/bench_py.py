@@ -17,8 +17,11 @@ Modes:
   process, numpy and Rust alike): peak heap bytes and allocation count.
 * ``rss``: run by ``rss_probe.py`` in a fresh process per case and
   configuration: warm up on a 1 s input of the same rate, layout and dtype,
-  reset the peak-RSS counter (``/proc/self/clear_refs``), make one call on the
-  real input and report ``VmHWM - VmRSS(before)``.
+  make one call on the real input and report the peak resident size during
+  the call minus the resident size before it. With ``rss_shim.so`` preloaded
+  (``rss_probe.py`` does this) the peak is exact (see ``rss_shim.c``);
+  without it the kernel's ``VmHWM`` is used, which can be off by a few
+  hundred KB.
 
 ``--threads 1`` sets the BLAS/OpenMP/numba/rayon thread counts to 1 before numpy
 is imported (pin the process to one core with ``taskset`` as well);
@@ -218,15 +221,38 @@ def measure_rss(case, cfg, build, ctx):
     f = build(ctx)
     gc.collect()
     malloc_trim()
+    shim = rss_shim()
     with open("/proc/self/clear_refs", "w") as fh:
         fh.write("5")
-    before = rss_kb("VmRSS")
+    if shim is None:
+        before = rss_kb("VmRSS")
+    else:
+        before = shim.rss_shim_begin()
     t = time.perf_counter()
     r = f()
     dt = time.perf_counter() - t
-    peak = rss_kb("VmHWM")
+    # End the exact tracking before reading VmHWM: reading /proc/self/status
+    # from Python allocates.
+    peak = None if shim is None else shim.rss_shim_end()
+    hwm = rss_kb("VmHWM")
+    if peak is None:
+        peak = hwm
     del r
-    return {"rss_delta_kb": peak - before, "rss_before_kb": before, "cold_ms": dt * 1e3}
+    return {"rss_delta_kb": peak - before, "rss_before_kb": before, "cold_ms": dt * 1e3,
+            "rss_method": "VmHWM" if shim is None else "exact", "hwm_delta_kb": hwm - before}
+
+
+def rss_shim():
+    """The exact peak-RSS tracker (``rss_shim.c``) if it is preloaded, else None."""
+    import ctypes
+
+    try:
+        lib = ctypes.CDLL(None)
+        begin, end = lib.rss_shim_begin, lib.rss_shim_end
+    except (OSError, AttributeError):
+        return None
+    begin.restype = end.restype = ctypes.c_long
+    return lib
 
 
 if __name__ == "__main__":

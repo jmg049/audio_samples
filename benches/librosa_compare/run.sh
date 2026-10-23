@@ -8,6 +8,7 @@
 #           (default: ../audio_samples_python/.venv/bin/python)
 #   CORE    CPU to pin the single-thread runs to (default 10)
 #   JOBS    parallel RSS probes (default 6)
+#   REPEATS fresh-process repeats per RSS probe (default 5)
 #   SEL     extra selection arguments for bench_py.py, e.g. "--groups spectrum"
 #
 # Stages (default: all, in this order):
@@ -16,7 +17,8 @@
 #   rust      native timing + allocation counts, pinned, 1 thread
 #   py        librosa and audio_samples-through-Python timing, pinned, 1 thread
 #   mem       tracemalloc and memray per call (both Python paths)
-#   rss       peak-RSS growth per call in fresh processes (both Python paths)
+#   rss       peak-RSS growth per call in fresh processes (both Python paths),
+#             exact (rss_shim.c), REPEATS processes per case and input
 #   default   timing with each library's default threading, unpinned
 #   report    tables (report.py)
 #
@@ -34,6 +36,7 @@ STAGES=("$@")
 PY="${PY:-$REPO/../audio_samples_python/.venv/bin/python}"
 CORE="${CORE:-10}"
 JOBS="${JOBS:-6}"
+REPEATS="${REPEATS:-5}"
 SEL="${SEL:-}"
 SIG="$REPO/target/librosa_bench/signals"
 # Same release settings as the Python bindings (thin LTO, one codegen unit), so
@@ -73,8 +76,12 @@ for stage in "${STAGES[@]}"; do
       done
       ;;
     rss)
+      # Exact peak-RSS tracker (see rss_shim.c), preloaded into every probe.
+      mkdir -p "$REPO/target/librosa_bench"
+      cc -O2 -Wall -shared -fPIC -o "$REPO/target/librosa_bench/rss_shim.so" "$HERE/rss_shim.c"
       OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1 RAYON_NUM_THREADS=1 \
-        "$PY" "$HERE/rss_probe.py" --signals "$SIG" --jobs "$JOBS" $SEL --out "$OUT/rss.jsonl"
+        "$PY" "$HERE/rss_probe.py" --signals "$SIG" --jobs "$JOBS" --repeats "$REPEATS" \
+        --shim "$REPO/target/librosa_bench/rss_shim.so" $SEL --out "$OUT/rss.jsonl"
       ;;
     default)
       "$PY" "$HERE/bench_py.py" --list --tsv --config-set default $SEL > "$OUT/pairs_default.tsv"

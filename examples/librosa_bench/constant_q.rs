@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 
 use audio_samples::operations::constant_q::{
     ChromaCensConfig, ChromaCqtConfig, ChromaVqtConfig, TonnetzConfig, cq_to_chroma,
-    tonnetz_from_chroma, wavelet, wavelet_lengths,
+    tonnetz_from_chroma, wavelet, wavelet_lengths_into,
 };
 use audio_samples::utils::audio_math::cqt_frequencies;
 use audio_samples::{
@@ -89,7 +89,11 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
         "wavelet_lengths" => {
             let freqs = cqt_freqs();
             let c = WaveletConfig::librosa();
-            thunk(move || wavelet_lengths(&freqs, 22050.0, &c).unwrap())
+            // librosa's 672-byte lengths come from NumPy's small-block cache,
+            // with no allocation during the call; the native form writes into
+            // a buffer allocated once.
+            let mut lengths = vec![0.0; freqs.len()];
+            thunk(move || wavelet_lengths_into(&freqs, 22050.0, &c, &mut lengths).unwrap())
         }
         "cq_to_chroma" => thunk(|| cq_to_chroma(84, nzu!(12), nzu!(12), None, true).unwrap()),
         _ => None,
