@@ -65,7 +65,25 @@ pub mod comparison;
 pub mod detection;
 pub(crate) mod fast_math;
 pub mod generation;
+// Used by the spectrum, feature and pitch modules; with only some of those
+// features enabled, parts of these helpers are unused.
+#[cfg_attr(
+    not(all(
+        feature = "transforms",
+        feature = "feature-extraction",
+        feature = "pitch-analysis"
+    )),
+    allow(dead_code)
+)]
 pub(crate) mod layout;
+#[cfg_attr(
+    not(all(
+        feature = "transforms",
+        feature = "feature-extraction",
+        feature = "pitch-analysis"
+    )),
+    allow(dead_code)
+)]
 pub(crate) mod vmath;
 
 pub use audio_math::*;
