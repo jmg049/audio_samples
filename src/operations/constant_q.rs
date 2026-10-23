@@ -472,19 +472,71 @@ pub fn wavelet_lengths(
     sample_rate: f64,
     config: &WaveletConfig,
 ) -> AudioSampleResult<(Vec<f64>, f64)> {
+    let mut lengths = vec![0.0; freqs.len()];
+    let cutoff = wavelet_lengths_into(freqs, sample_rate, config, &mut lengths)?;
+    Ok((lengths, cutoff))
+}
+
+/// [`wavelet_lengths`] writing the lengths into `lengths` (one per
+/// frequency) and returning the cut-off, without allocating.
+///
+/// # Errors
+///
+/// As [`wavelet_lengths`], and [`ParameterError`] if `lengths` does not have
+/// one element per frequency.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::constant_q::{WaveletConfig, wavelet_lengths, wavelet_lengths_into};
+///
+/// let freqs: Vec<f64> = (0..12).map(|k| 440.0 * 2f64.powf(k as f64 / 12.0)).collect();
+/// let cfg = WaveletConfig::default();
+/// let mut lengths = [0.0; 12];
+/// let cutoff = wavelet_lengths_into(&freqs, 22050.0, &cfg, &mut lengths).unwrap();
+/// assert_eq!((lengths.to_vec(), cutoff), wavelet_lengths(&freqs, 22050.0, &cfg).unwrap());
+/// ```
+pub fn wavelet_lengths_into(
+    freqs: &[f64],
+    sample_rate: f64,
+    config: &WaveletConfig,
+    lengths: &mut [f64],
+) -> AudioSampleResult<f64> {
     config.validate()?;
     validate_freqs(freqs)?;
     require_finite_positive("sample_rate", sample_rate)?;
-    let wbw = librosa_window_bandwidth(&config.window)?;
-    let alpha = relative_bandwidth(freqs);
-    Ok(wavelet_lengths_impl(
-        freqs,
-        sample_rate,
-        wbw,
-        config.filter_scale,
-        config.gamma,
-        &alpha,
-    ))
+    let window_bw = librosa_window_bandwidth(&config.window)?;
+    if lengths.len() != freqs.len() {
+        return Err(param_err(
+            "lengths",
+            format!(
+                "needs one element per frequency ({}), got {}",
+                freqs.len(),
+                lengths.len()
+            ),
+        ));
+    }
+    // The same arithmetic as `wavelet_lengths_impl` with `relative_bandwidth`
+    // and `gamma_values`, one bin at a time.
+    let n = freqs.len();
+    let log2f = |k: usize| freqs[k].log2();
+    let mut cutoff = f64::NEG_INFINITY;
+    for (k, (&f, len)) in freqs.iter().zip(lengths.iter_mut()).enumerate() {
+        let bpo = if k == 0 {
+            1.0 / (log2f(1) - log2f(0))
+        } else if k == n - 1 {
+            1.0 / (log2f(n - 1) - log2f(n - 2))
+        } else {
+            2.0 / (log2f(k + 1) - log2f(k - 1))
+        };
+        let p = 2.0f64.powf(2.0 / bpo);
+        let a = (p - 1.0) / (p + 1.0);
+        let g = config.gamma.unwrap_or(a * 24.7 / 0.108);
+        let q = config.filter_scale / a;
+        cutoff = cutoff.max(f * (1.0 + 0.5 * window_bw / q) + 0.5 * g);
+        *len = q * sample_rate / (f + g / a);
+    }
+    Ok(cutoff)
 }
 
 /// Builds the time-domain filters (internal form with explicit `alpha`): each row is
