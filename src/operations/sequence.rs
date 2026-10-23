@@ -1175,112 +1175,187 @@ pub fn rqa<F: AudioFloat>(sim: ArrayView2<F>, cfg: &RqaConfig) -> AudioSampleRes
     if sim.iter().any(|v| v.is_nan()) {
         return err("sim", "similarity matrix must not contain NaN");
     }
-    let (score, ptr) = rqa_dp(
-        sim,
-        F::of(cfg.gap_onset),
-        F::of(cfg.gap_extend),
-        cfg.knight_moves,
-    );
-    let path = cfg.backtrack.then(|| rqa_backtrack(&score, &ptr));
+    let (gap_onset, gap_extend) = (F::of(cfg.gap_onset), F::of(cfg.gap_extend));
+    let score = rqa_dp(sim, gap_onset, gap_extend, cfg.knight_moves);
+    let path = cfg
+        .backtrack
+        .then(|| rqa_backtrack(&score, &sim, gap_onset, gap_extend, cfg.knight_moves));
     Ok(RqaResult { score, path })
 }
 
+/// The candidate moves into cell `(i, j)` (`i, j >= 1`, not `(1, 1)`):
+/// `(score, sim, back-pointer code)` of each predecessor, and how many apply.
 /// Back-pointer codes: -2 path start, -1 no path, 0 diag, 1 (-1,-2), 2 (-2,-1).
+fn rqa_cands<F: AudioFloat>(
+    score: &Array2<F>,
+    sim: &ArrayView2<F>,
+    i: usize,
+    j: usize,
+    knight: bool,
+) -> ([(F, F, i8); 3], usize) {
+    let (init_limit, limit) = if knight { (2, 3) } else { (1, 1) };
+    let diag = (score[[i - 1, j - 1]], sim[[i - 1, j - 1]], 0i8);
+    let zero = (F::zero(), F::zero(), 0i8);
+    if i == 1 {
+        let c = (score[[i - 1, j - 2]], sim[[i - 1, j - 2]], 1i8);
+        ([diag, c, zero], init_limit)
+    } else if j == 1 {
+        let c = (score[[i - 2, j - 1]], sim[[i - 2, j - 1]], 2i8);
+        ([diag, c, zero], init_limit)
+    } else {
+        let c1 = (score[[i - 1, j - 2]], sim[[i - 1, j - 2]], 1i8);
+        let c2 = (score[[i - 2, j - 1]], sim[[i - 2, j - 1]], 2i8);
+        ([diag, c1, c2], limit)
+    }
+}
+
+/// Gap penalty after a predecessor with similarity `prev_sim`.
+#[inline]
+fn rqa_penalty<F: AudioFloat>(prev_sim: F, gap_onset: F, gap_extend: F) -> F {
+    if prev_sim > F::zero() {
+        gap_onset
+    } else {
+        gap_extend
+    }
+}
+
+/// The score of cell `(i, j)` and its back-pointer code from its candidates.
+fn rqa_cell<F: AudioFloat>(s: F, cands: &[(F, F, i8)], gap_onset: F, gap_extend: F) -> (F, i8) {
+    let zero = F::zero();
+    if s > zero {
+        let k = argmax_first(cands.iter().map(|c| c.0));
+        (cands[k].0 + s, cands[k].2)
+    } else {
+        // At most three candidates: gapped scores on the stack.
+        let mut gapped = [zero; 3];
+        for (g, c) in gapped.iter_mut().zip(cands) {
+            *g = c.0 - rqa_penalty(c.1, gap_onset, gap_extend);
+        }
+        let k = argmax_first(gapped[..cands.len()].iter().copied());
+        let v = gapped[k];
+        let v = if v > zero { v } else { zero };
+        (v, if v == zero { -1 } else { cands[k].2 })
+    }
+}
+
+/// The score matrix of the alignment. The back-pointers are not stored:
+/// [`rqa_pointer`] recomputes them from the scores for the cells on the path.
 fn rqa_dp<F: AudioFloat>(
     sim: ArrayView2<F>,
     gap_onset: F,
     gap_extend: F,
     knight: bool,
-) -> (Array2<F>, Array2<i8>) {
+) -> Array2<F> {
     let zero = F::zero();
     let (rows, cols) = sim.dim();
     let mut score = Array2::<F>::zeros((rows, cols));
-    let mut bt = Array2::<i8>::zeros((rows, cols));
     let (init_limit, limit) = if knight { (2, 3) } else { (1, 1) };
     score.row_mut(0).assign(&sim.row(0));
     score.column_mut(0).assign(&sim.column(0));
-    for i in 0..rows {
-        bt[[i, 0]] = if sim[[i, 0]] != zero { -2 } else { -1 };
-    }
-    for j in 0..cols {
-        bt[[0, j]] = if sim[[0, j]] != zero { -2 } else { -1 };
-    }
     if rows == 1 || cols == 1 {
-        return (score, bt);
+        return score;
     }
-    let penalty = |prev_sim: F| {
-        if prev_sim > zero {
-            gap_onset
+    score[[1, 1]] = rqa_cell_11(&score, &sim, gap_onset, gap_extend).0;
+
+    // One cell update: candidates are (score, sim) per move. The same
+    // comparisons as `rqa_cell`, without the back-pointer.
+    let update = |score: &mut Array2<F>, i: usize, j: usize, cands: &[(F, F)]| {
+        let s = sim[[i, j]];
+        if s > zero {
+            let k = argmax_first(cands.iter().map(|c| c.0));
+            score[[i, j]] = cands[k].0 + s;
         } else {
-            gap_extend
+            let mut gapped = [zero; 3];
+            for (g, c) in gapped.iter_mut().zip(cands) {
+                *g = c.0 - rqa_penalty(c.1, gap_onset, gap_extend);
+            }
+            let k = argmax_first(gapped[..cands.len()].iter().copied());
+            let v = gapped[k];
+            score[[i, j]] = if v > zero { v } else { zero };
         }
     };
-
-    if sim[[1, 1]] > zero {
-        score[[1, 1]] = score[[0, 0]] + sim[[1, 1]];
-        bt[[1, 1]] = 0;
-    } else {
-        let v = score[[0, 0]] - penalty(sim[[0, 0]]);
-        score[[1, 1]] = if v > zero { v } else { zero };
-        bt[[1, 1]] = if score[[1, 1]] > zero { 0 } else { -1 };
-    }
-
-    // One cell update: candidates are (score, sim, pointer code) per move.
-    let update =
-        |score: &mut Array2<F>, bt: &mut Array2<i8>, i: usize, j: usize, cands: &[(F, F, i8)]| {
-            if sim[[i, j]] > zero {
-                let k = argmax_first(cands.iter().map(|c| c.0));
-                bt[[i, j]] = cands[k].2;
-                score[[i, j]] = cands[k].0 + sim[[i, j]];
-            } else {
-                let gapped: Vec<F> = cands.iter().map(|c| c.0 - penalty(c.1)).collect();
-                let k = argmax_first(gapped.iter().copied());
-                let v = gapped[k];
-                score[[i, j]] = if v > zero { v } else { zero };
-                bt[[i, j]] = if score[[i, j]] == zero {
-                    -1
-                } else {
-                    cands[k].2
-                };
-            }
-        };
 
     let i = 1;
     for j in 2..cols {
         let cands = [
-            (score[[i - 1, j - 1]], sim[[i - 1, j - 1]], 0i8),
-            (score[[i - 1, j - 2]], sim[[i - 1, j - 2]], 1i8),
+            (score[[i - 1, j - 1]], sim[[i - 1, j - 1]]),
+            (score[[i - 1, j - 2]], sim[[i - 1, j - 2]]),
         ];
-        update(&mut score, &mut bt, i, j, &cands[..init_limit]);
+        update(&mut score, i, j, &cands[..init_limit]);
     }
     let j = 1;
     for i in 2..rows {
         let cands = [
-            (score[[i - 1, j - 1]], sim[[i - 1, j - 1]], 0i8),
-            (score[[i - 2, j - 1]], sim[[i - 2, j - 1]], 2i8),
+            (score[[i - 1, j - 1]], sim[[i - 1, j - 1]]),
+            (score[[i - 2, j - 1]], sim[[i - 2, j - 1]]),
         ];
-        update(&mut score, &mut bt, i, j, &cands[..init_limit]);
+        update(&mut score, i, j, &cands[..init_limit]);
     }
     for i in 2..rows {
         for j in 2..cols {
             let cands = [
-                (score[[i - 1, j - 1]], sim[[i - 1, j - 1]], 0i8),
-                (score[[i - 1, j - 2]], sim[[i - 1, j - 2]], 1i8),
-                (score[[i - 2, j - 1]], sim[[i - 2, j - 1]], 2i8),
+                (score[[i - 1, j - 1]], sim[[i - 1, j - 1]]),
+                (score[[i - 1, j - 2]], sim[[i - 1, j - 2]]),
+                (score[[i - 2, j - 1]], sim[[i - 2, j - 1]]),
             ];
-            update(&mut score, &mut bt, i, j, &cands[..limit]);
+            update(&mut score, i, j, &cands[..limit]);
         }
     }
-    (score, bt)
+    score
 }
 
-fn rqa_backtrack<F: AudioFloat>(score: &Array2<F>, ptr: &Array2<i8>) -> Vec<[usize; 2]> {
+/// Cell `(1, 1)`: a diagonal step from `(0, 0)` only.
+fn rqa_cell_11<F: AudioFloat>(
+    score: &Array2<F>,
+    sim: &ArrayView2<F>,
+    gap_onset: F,
+    gap_extend: F,
+) -> (F, i8) {
+    let zero = F::zero();
+    if sim[[1, 1]] > zero {
+        (score[[0, 0]] + sim[[1, 1]], 0)
+    } else {
+        let v = score[[0, 0]] - rqa_penalty(sim[[0, 0]], gap_onset, gap_extend);
+        let v = if v > zero { v } else { zero };
+        (v, if v > zero { 0 } else { -1 })
+    }
+}
+
+/// The back-pointer of cell `(i, j)`, recomputed from the final scores with
+/// the same comparisons as [`rqa_dp`] (every score it reads is final when the
+/// cell is computed and never changes afterwards).
+fn rqa_pointer<F: AudioFloat>(
+    score: &Array2<F>,
+    sim: &ArrayView2<F>,
+    [i, j]: [usize; 2],
+    gap_onset: F,
+    gap_extend: F,
+    knight: bool,
+) -> i8 {
+    let (rows, cols) = sim.dim();
+    if i == 0 || j == 0 || rows == 1 || cols == 1 {
+        return if sim[[i, j]] != F::zero() { -2 } else { -1 };
+    }
+    if i == 1 && j == 1 {
+        return rqa_cell_11(score, sim, gap_onset, gap_extend).1;
+    }
+    let (c, n) = rqa_cands(score, sim, i, j, knight);
+    rqa_cell(sim[[i, j]], &c[..n], gap_onset, gap_extend).1
+}
+
+fn rqa_backtrack<F: AudioFloat>(
+    score: &Array2<F>,
+    sim: &ArrayView2<F>,
+    gap_onset: F,
+    gap_extend: F,
+    knight: bool,
+) -> Vec<[usize; 2]> {
     let cols = score.ncols();
     let flat = argmax_first(score.iter().copied());
     let mut idx = [flat / cols, flat % cols];
     let mut path = Vec::new();
     loop {
-        let p = ptr[idx];
+        let p = rqa_pointer(score, sim, idx, gap_onset, gap_extend, knight);
         if p == -1 {
             break;
         }
@@ -3957,6 +4032,180 @@ mod tests {
         let x3 = Array3::<f64>::ones((2, 3, 4));
         let s3 = sync(x3.view(), &[2], SyncAggregate::Sum, true).unwrap();
         assert_eq!(s3, Array3::from_elem((2, 3, 2), 2.0));
+    }
+
+    /// The previous implementation, which stored every back-pointer (codes as
+    /// in `rqa_cands`), as the reference for the recomputed pointers.
+    fn stored_pointer_rqa_dp<F: AudioFloat>(
+        sim: ArrayView2<F>,
+        gap_onset: F,
+        gap_extend: F,
+        knight: bool,
+    ) -> (Array2<F>, Array2<i8>) {
+        let zero = F::zero();
+        let (rows, cols) = sim.dim();
+        let mut score = Array2::<F>::zeros((rows, cols));
+        let mut bt = Array2::<i8>::zeros((rows, cols));
+        let (init_limit, limit) = if knight { (2, 3) } else { (1, 1) };
+        score.row_mut(0).assign(&sim.row(0));
+        score.column_mut(0).assign(&sim.column(0));
+        for i in 0..rows {
+            bt[[i, 0]] = if sim[[i, 0]] != zero { -2 } else { -1 };
+        }
+        for j in 0..cols {
+            bt[[0, j]] = if sim[[0, j]] != zero { -2 } else { -1 };
+        }
+        if rows == 1 || cols == 1 {
+            return (score, bt);
+        }
+        let penalty = |prev_sim: F| {
+            if prev_sim > zero {
+                gap_onset
+            } else {
+                gap_extend
+            }
+        };
+
+        if sim[[1, 1]] > zero {
+            score[[1, 1]] = score[[0, 0]] + sim[[1, 1]];
+            bt[[1, 1]] = 0;
+        } else {
+            let v = score[[0, 0]] - penalty(sim[[0, 0]]);
+            score[[1, 1]] = if v > zero { v } else { zero };
+            bt[[1, 1]] = if score[[1, 1]] > zero { 0 } else { -1 };
+        }
+
+        // One cell update: candidates are (score, sim, pointer code) per move.
+        let update = |score: &mut Array2<F>,
+                      bt: &mut Array2<i8>,
+                      i: usize,
+                      j: usize,
+                      cands: &[(F, F, i8)]| {
+            if sim[[i, j]] > zero {
+                let k = argmax_first(cands.iter().map(|c| c.0));
+                bt[[i, j]] = cands[k].2;
+                score[[i, j]] = cands[k].0 + sim[[i, j]];
+            } else {
+                // At most three candidates: gapped scores on the stack.
+                let mut gapped = [zero; 3];
+                for (g, c) in gapped.iter_mut().zip(cands) {
+                    *g = c.0 - penalty(c.1);
+                }
+                let k = argmax_first(gapped[..cands.len()].iter().copied());
+                let v = gapped[k];
+                score[[i, j]] = if v > zero { v } else { zero };
+                bt[[i, j]] = if score[[i, j]] == zero {
+                    -1
+                } else {
+                    cands[k].2
+                };
+            }
+        };
+
+        let i = 1;
+        for j in 2..cols {
+            let cands = [
+                (score[[i - 1, j - 1]], sim[[i - 1, j - 1]], 0i8),
+                (score[[i - 1, j - 2]], sim[[i - 1, j - 2]], 1i8),
+            ];
+            update(&mut score, &mut bt, i, j, &cands[..init_limit]);
+        }
+        let j = 1;
+        for i in 2..rows {
+            let cands = [
+                (score[[i - 1, j - 1]], sim[[i - 1, j - 1]], 0i8),
+                (score[[i - 2, j - 1]], sim[[i - 2, j - 1]], 2i8),
+            ];
+            update(&mut score, &mut bt, i, j, &cands[..init_limit]);
+        }
+        for i in 2..rows {
+            for j in 2..cols {
+                let cands = [
+                    (score[[i - 1, j - 1]], sim[[i - 1, j - 1]], 0i8),
+                    (score[[i - 1, j - 2]], sim[[i - 1, j - 2]], 1i8),
+                    (score[[i - 2, j - 1]], sim[[i - 2, j - 1]], 2i8),
+                ];
+                update(&mut score, &mut bt, i, j, &cands[..limit]);
+            }
+        }
+        (score, bt)
+    }
+
+    fn stored_pointer_rqa_backtrack<F: AudioFloat>(
+        score: &Array2<F>,
+        ptr: &Array2<i8>,
+    ) -> Vec<[usize; 2]> {
+        let cols = score.ncols();
+        let flat = argmax_first(score.iter().copied());
+        let mut idx = [flat / cols, flat % cols];
+        let mut path = Vec::new();
+        loop {
+            let p = ptr[idx];
+            if p == -1 {
+                break;
+            }
+            path.push(idx);
+            if p == -2 {
+                break;
+            }
+            let (di, dj) = match p {
+                0 => (1, 1),
+                1 => (1, 2),
+                _ => (2, 1),
+            };
+            if idx[0] < di || idx[1] < dj {
+                // Cannot happen for pointers produced by `rqa_dp`; stop defensively.
+                break;
+            }
+            idx = [idx[0] - di, idx[1] - dj];
+        }
+        path.reverse();
+        path
+    }
+
+    #[test]
+    fn recomputed_rqa_pointers_match_stored_ones() {
+        let mut state = 12345u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as f64 / (1u64 << 31) as f64
+        };
+        for &(rows, cols) in &[
+            (1, 1),
+            (1, 5),
+            (5, 1),
+            (2, 2),
+            (2, 7),
+            (7, 2),
+            (9, 11),
+            (40, 33),
+        ] {
+            for density in [0.2, 0.5, 0.9] {
+                for affinity in [false, true] {
+                    let sim = Array2::from_shape_fn((rows, cols), |_| {
+                        let u = next();
+                        if u < density {
+                            if affinity { 0.25 + next() } else { 1.0 }
+                        } else {
+                            0.0
+                        }
+                    });
+                    for knight in [false, true] {
+                        for (go, ge) in [(1.0, 1.0), (0.5, 0.25), (0.0, 0.0)] {
+                            let (score_ref, ptr) =
+                                stored_pointer_rqa_dp(sim.view(), go, ge, knight);
+                            let path_ref = stored_pointer_rqa_backtrack(&score_ref, &ptr);
+                            let score = rqa_dp(sim.view(), go, ge, knight);
+                            let path = rqa_backtrack(&score, &sim.view(), go, ge, knight);
+                            assert_eq!(score, score_ref);
+                            assert_eq!(path, path_ref, "{rows}x{cols} knight {knight}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
