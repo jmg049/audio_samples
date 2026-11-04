@@ -62,9 +62,7 @@ jobs:
 
   test:
     needs: verify
-    # librosa_reference's float32 time_stretch check fails with the glibc 2.39
-    # of ubuntu-24.04 (7.2e-7 against a 6.2e-7 bound) and passes with 2.43.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:

@@ -40,16 +40,12 @@ jobs:
       # Lint levels are configured via the [lints] table in Cargo.toml; `-D
       # warnings` is scoped to the clippy step (not a global RUSTFLAGS) so it
       # does not force every test/doc/build job to treat warnings as errors.
-      # chunks_exact_to_as_chunks is new in clippy 1.99 and flags 12 hot loops. It is
-      # allowed here rather than in Cargo.toml, where older toolchains reject the name.
-      - run: cargo clippy --all-targets --features full_no_plotting -- -D warnings -A clippy::chunks_exact_to_as_chunks
-      - run: cargo clippy --all-targets --features full -- -D warnings -A clippy::chunks_exact_to_as_chunks
+      - run: cargo clippy --all-targets --features full_no_plotting -- -D warnings
+      - run: cargo clippy --all-targets --features full -- -D warnings
 
   test:
     name: test (${{ matrix.features }})
-    # librosa_reference's float32 time_stretch check fails with the glibc 2.39 of
-    # ubuntu-24.04 (7.2e-7 against a 6.2e-7 bound) and passes with 2.43.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -96,11 +92,7 @@ jobs:
           rustup default stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo doc --no-deps --features full_no_plotting
-      # rustdoc 1.99 reports one redundant link with no source location under this
-      # feature set, which it does not report in full_no_plotting.
       - run: cargo doc --no-deps --features full
-        env:
-          RUSTDOCFLAGS: -D warnings -A rustdoc::redundant_explicit_links
 
   msrv:
     name: msrv (1.95)
