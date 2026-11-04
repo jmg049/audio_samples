@@ -1,3 +1,7 @@
+#[cfg(all(feature = "plotting", feature = "transforms"))]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(all(feature = "plotting", feature = "transforms")))]
 fn main() {
     eprintln!("error: This example requires the `plotting` and `transforms` features.");
@@ -41,6 +45,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .build()?;
 
     let vertical_html = vertical.html()?;
+    plots::keep("plotting_composite_basics", &vertical_html);
     // A composite embeds each sub-plot as a base64-encoded iframe, so we check
     // for the composite container and the embedded iframes rather than "plotly".
     assert!(

@@ -1,3 +1,7 @@
+#[cfg(all(feature = "plotting", feature = "transforms"))]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(all(feature = "plotting", feature = "transforms")))]
 fn main() {
     eprintln!("error: This example requires the `plotting` and `transforms` features.");
@@ -57,6 +61,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         let waveform_html = waveform_plot
             .html()
             .expect("Failed to render waveform plot");
+        plots::keep("plotting_overlays", &waveform_html);
         assert!(
             !waveform_html.is_empty() && waveform_html.contains("plotly"),
             "waveform overlay HTML should be a non-empty Plotly document"

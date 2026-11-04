@@ -10,6 +10,10 @@
 //! cargo run --example plotting_dsp_overlays --features plotting,statistics
 //! ```
 
+#[cfg(all(feature = "plotting", feature = "statistics"))]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(all(feature = "plotting", feature = "statistics")))]
 fn main() {
     eprintln!("error: This example requires the `plotting` and `statistics` features.");
@@ -45,6 +49,7 @@ fn assert_plot_html<P: audio_samples::operations::PlotUtils>(
     name: &str,
 ) -> audio_samples::AudioSampleResult<()> {
     let html = plot.html()?;
+    plots::keep(&format!("plotting_dsp_overlays_{name}"), &html);
     assert!(
         !html.is_empty() && html.contains("plotly"),
         "{name} overlay HTML should be a non-empty Plotly document"

@@ -17,6 +17,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     use audio_samples::{
         AudioEditing, AudioSamples, AudioStatistics,
+        operations::{AudioDecomposition, hpss::HpssConfig},
         utils::generation::{impulse, sine_wave},
     };
     println!("Harmonic/Percussive Source Separation (HPSS) Example");
@@ -77,7 +78,23 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     println!("  • Mixed RMS: {:.3}", mixed_signal.rms());
     println!("  • Mixed peak: {:.3}", mixed_signal.peak());
 
+    // Separate the mix back into a harmonic and a percussive part.
+    println!("\nSeparating with HPSS...");
+    let (harmonic, percussive) = mixed_signal.hpss(&HpssConfig::default())?;
+    println!("  • Harmonic RMS: {:.3}", harmonic.rms());
+    println!("  • Percussive RMS: {:.3}", percussive.rms());
+    println!("  • Percussive peak: {:.3}", percussive.peak());
+
     // --- Self-verification -------------------------------------------------
+    // The tone dominates the harmonic part and the impulses the percussive part.
+    assert!(
+        harmonic.rms() > percussive.rms(),
+        "the harmonic part must hold the sine's energy"
+    );
+    assert!(
+        f64::from(percussive.peak()) > percussive.rms() * 3.0,
+        "the percussive part must be impulsive"
+    );
     // We placed an impulse every 0.5 s starting at 0.5 s over a 3 s signal.
     assert_eq!(
         impulses.len().get(),

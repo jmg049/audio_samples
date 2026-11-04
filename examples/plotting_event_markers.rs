@@ -16,6 +16,15 @@
     feature = "beat-tracking",
     feature = "statistics"
 ))]
+#[path = "support/plots.rs"]
+mod plots;
+
+#[cfg(all(
+    feature = "plotting",
+    feature = "onset-detection",
+    feature = "beat-tracking",
+    feature = "statistics"
+))]
 fn create_percussive_audio() -> audio_samples::AudioSamples<'static, f32> {
     // Generate a percussive pattern: kick drum on beats 1 and 3, snare on 2 and 4
     // 120 BPM = 0.5 seconds per beat
@@ -91,6 +100,7 @@ fn assert_plot_html<P: audio_samples::operations::PlotUtils>(
     name: &str,
 ) -> audio_samples::AudioSampleResult<()> {
     let html = plot.html()?;
+    plots::keep(&format!("plotting_event_markers_{name}"), &html);
     assert!(
         !html.is_empty() && html.contains("plotly"),
         "{name} marker plot HTML should be a non-empty Plotly document"

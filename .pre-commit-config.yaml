@@ -60,8 +60,8 @@ repos:
         files: ^(src/.*\.rs|documentation/guide/.*\.md|build\.rs|build_support/.*|tests/guide_math_roundtrip\.rs|tests/reference/hooks/check_(doc_math|guide_rustdoc_math)\.py)$
 
       - id: book
-        name: learning guide mdBook (figures, KaTeX, links)
+        name: learning guide mdBook (figures, examples, KaTeX, links)
         entry: tests/reference/hooks/check_book.sh
         language: system
         pass_filenames: false
-        files: ^(book/.*|documentation/guide/.*)$
+        files: ^(book/.*|documentation/guide/.*|examples/.*)$

@@ -1,3 +1,7 @@
+#[cfg(all(feature = "plotting", feature = "transforms"))]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(all(feature = "plotting", feature = "transforms")))]
 fn main() {
     eprintln!("error: This example requires the `plotting` and `transforms` features.");
@@ -38,6 +42,10 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
         let plot = audio.plot_spectrogram(&params)?;
         let html = plot.html()?;
+        plots::keep(
+            &format!("plotting_configurable_padding_{:.0}", padding * 100.0),
+            &html,
+        );
         assert!(
             !html.is_empty() && html.contains("plotly"),
             "spectrogram HTML for {:.0}% padding should be a non-empty Plotly document",

@@ -10,6 +10,10 @@ only the book can use:
   (``src/figures/*.json``) that the figures crate (``book/figures``) writes.
   A marker whose figure is missing is an error; figures that no marker uses
   are reported on stderr.
+* ``<!-- output: <example> -->`` and ``<!-- plot: <name> <caption> -->`` markers
+  of the gallery chapter. They show what ``gallery_outputs.py`` saved from running
+  the example: its standard output in a collapsible block, or its Plotly page
+  in a frame. A marker with nothing saved is an error.
 * rustdoc intra-doc links such as ``[`resample`](crate::resample)`` or
   ``[`MelParams`](spectrograms::MelParams)``. They become docs.rs search
   links, which resolve to the item whatever its kind (function, method,
@@ -30,6 +34,8 @@ import sys
 from pathlib import Path
 
 MARKER = re.compile(r"^[ \t]*<!--\s*figure:\s*([A-Za-z0-9_-]+)\s*-->[ \t]*$")
+OUTPUT_MARKER = re.compile(r"^[ \t]*<!--\s*output:\s*([A-Za-z0-9_]+)\s*-->[ \t]*$")
+PLOT_MARKER = re.compile(r"^[ \t]*<!--\s*plot:\s*([A-Za-z0-9_]+)\s+(.*?)\s*-->[ \t]*$")
 FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 # A Markdown link target that is a Rust path: `crate::a::b`, `spectrograms::X`.
 RUST_PATH_LINK = re.compile(r"\]\(((?:[A-Za-z_][A-Za-z0-9_]*)(?:::[A-Za-z_][A-Za-z0-9_]*)+)\)")
@@ -79,7 +85,33 @@ def figure_html(fig: dict, number: str) -> str:
     return "\n" + "\n".join(lines) + "\n"
 
 
-def process(content: str, source: str, figures: dict, used: set, errors: list) -> str:
+# Long outputs are cut on the page; the whole text is one run of the example away.
+OUTPUT_LINES = 40
+
+
+def output_html(text: str) -> str:
+    lines = text.rstrip().split("\n")
+    if len(lines) > OUTPUT_LINES:
+        lines = lines[:OUTPUT_LINES] + [f"... {len(lines) - OUTPUT_LINES} more lines"]
+    # Escaped: `$` and `*` in an example's output are not maths or Markdown here.
+    body = html.escape("\n".join(lines), quote=False).replace("$", "&#36;").replace("\n", "&#10;")
+    return (
+        '\n<details class="example-output"><summary>Output</summary>'
+        f"<pre>{body}</pre></details>\n"
+    )
+
+
+def plot_html(name: str, caption: str) -> str:
+    safe = html.escape(caption, quote=True)
+    return (
+        '\n<figure class="guide-figure example-plot">'
+        f'<iframe src="figures/gallery/{name}.html" title="{safe}" loading="lazy"></iframe>'
+        f'<figcaption>{safe} <a class="figure-interactive" href="figures/gallery/{name}.html">'
+        "Open in its own page</a></figcaption></figure>\n"
+    )
+
+
+def process(content: str, source: str, figures: dict, used: set, errors: list, gallery: Path | None = None) -> str:
     m = CHAPTER_NUMBER.match(Path(source).name)
     chapter = str(int(m.group(1))) if m else None
     count = 0
@@ -95,6 +127,21 @@ def process(content: str, source: str, figures: dict, used: set, errors: list) -
         if f:
             fence = f.group(1)
             out.append(line)
+            continue
+        output = OUTPUT_MARKER.match(line)
+        if output and gallery is not None:
+            saved = gallery / f"{output.group(1)}.txt"
+            if saved.exists():
+                out.append(output_html(saved.read_text(encoding="utf-8")))
+            else:
+                errors.append(f"{source}: no saved output for example '{output.group(1)}'")
+            continue
+        plot = PLOT_MARKER.match(line)
+        if plot and gallery is not None:
+            if (gallery / f"{plot.group(1)}.html").exists():
+                out.append(plot_html(plot.group(1), plot.group(2)))
+            else:
+                errors.append(f"{source}: no saved plot '{plot.group(1)}'")
             continue
         marker = MARKER.match(line)
         if marker:
@@ -133,7 +180,7 @@ def main() -> int:
 
     def fix(ch: dict) -> None:
         source = ch.get("source_path") or ch.get("path") or ch["name"]
-        ch["content"] = process(ch["content"], source, figures, used, errors)
+        ch["content"] = process(ch["content"], source, figures, used, errors, src / "figures" / "gallery")
 
     walk(book["items"], fix)
 

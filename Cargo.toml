@@ -447,6 +447,10 @@ name = "proptest_invariants"
 required-features = ["processing", "channels", "iir-filtering", "editing"]
 
 [[test]]
+name = "examples_gallery"
+path = "tests/examples_gallery.rs"
+
+[[test]]
 name = "plotting_integration"
 required-features = ["plotting"]
 

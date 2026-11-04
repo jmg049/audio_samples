@@ -67,6 +67,10 @@ path = "src/chapters/ch13.rs"
 name = "ch14"
 path = "src/chapters/ch14.rs"
 
+[[bin]]
+name = "ch15"
+path = "src/chapters/ch15.rs"
+
 [dependencies]
 audio_samples = { path = "../..", features = ["educational", "full_no_plotting"] }
 plotters = { version = "0.3.7", default-features = false, features = [
