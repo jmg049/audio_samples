@@ -225,7 +225,10 @@ dependencies. Enable the rest as needed.
 
 Full API documentation: [https://docs.rs/audio_samples](https://docs.rs/audio_samples).
 Architecture notes are in [documentation/ARCHITECTURE.md](documentation/ARCHITECTURE.md).
-Coming from librosa? [documentation/LIBROSA_MIGRATION.md](documentation/LIBROSA_MIGRATION.md)
+Coming from librosa? [Moving from librosa](https://github.com/jmg049/audio_samples_python/blob/main/docs/source/moving_from_librosa.rst)
+compares the two on measurements, shows a pipeline in both and lists what is worse
+here. [documentation/MOVING_FROM_LIBROSA_RUST.md](documentation/MOVING_FROM_LIBROSA_RUST.md)
+is its Rust companion, and [documentation/LIBROSA_MIGRATION.md](documentation/LIBROSA_MIGRATION.md)
 maps every librosa 1.0 function to its counterpart here, lists the differences,
 and explains the golden-fixture suite that checks agreement with librosa.
 

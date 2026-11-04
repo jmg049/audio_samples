@@ -413,6 +413,15 @@ pub mod librosa_migration {
     #![doc = include_str!("../documentation/LIBROSA_MIGRATION.md")]
 }
 
+/// Documentation only: porting a librosa pipeline to Rust.
+///
+/// This module contains no items. It renders
+/// `documentation/MOVING_FROM_LIBROSA_RUST.md` and runs its examples as doctests.
+#[cfg(all(feature = "full_no_plotting", any(doc, doctest)))]
+pub mod moving_from_librosa_rust {
+    #![doc = include_str!("../documentation/MOVING_FROM_LIBROSA_RUST.md")]
+}
+
 /// Learning guide: a short course in speech and audio processing, with one
 /// chapter per syllabus topic. Every chapter's code is a doctest and has a
 /// matching runnable lab in `examples/tutorial_NN_*.rs`.

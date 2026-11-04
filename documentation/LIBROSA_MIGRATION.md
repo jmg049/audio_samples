@@ -1,6 +1,13 @@
 # Migrating from librosa
 
-This guide maps [librosa](https://librosa.org) 1.0 onto `audio_samples`. It covers
+This page is the lookup table. If you are deciding whether to move, or porting a
+pipeline, start with the guide
+[Moving from librosa](https://github.com/jmg049/audio_samples_python/blob/main/docs/source/moving_from_librosa.rst)
+(measurements on both sides, a pipeline side by side, the differences that trip people
+up, what is worse here) and its Rust companion
+[documentation/MOVING_FROM_LIBROSA_RUST.md](MOVING_FROM_LIBROSA_RUST.md).
+
+This page maps [librosa](https://librosa.org) 1.0 onto `audio_samples`. It covers
 every public function of `librosa.core` (including `convert`), `feature`,
 `effects`, `onset`, `beat`, `decompose`, `filters`, `util`, `segment`,
 `sequence` and `display`. For each one it lists the Rust equivalent, the cargo
@@ -328,7 +335,7 @@ function under `audio_samples::`.
 |---|---|---|---|---|
 | `stft` | `AudioSpectrum::stft_matrix`, `operations::spectrum::stft` | `transforms` | equivalent | All `pad_mode`s, `win_length`, any `Window`. `AudioSpectrum::spectrogram_matrix` gives `abs(stft) ** power` |
 | `istft` | `AudioSpectrum::istft_matrix`, `operations::spectrum::istft` | `transforms` | equivalent with differences | `n_fft` comes from the config, and a bin-count mismatch is an error; `length = 0` is rejected |
-| `magphase` | `AudioTransforms::magphase` | `transforms` | equivalent with differences | 2-D input only; `power` is an integer (librosa accepts any float) |
+| `magphase` | `AudioTransforms::magphase` (`f64`), `operations::transforms::magphase` (`f32` or `f64`, on a view) | `transforms` | equivalent with differences | 2-D input only; `power` is an integer (librosa accepts any float) |
 | `reassigned_spectrogram` | `AudioFeatures::reassigned_spectrogram` (`ReassignedSpectrogramConfig`) | `feature-extraction` | equivalent | |
 | `phase_vocoder` | `operations::effects::phase_vocoder`, `operations::effects::phase_vocoder_at` (`t_out`) | `effects` | equivalent with differences | The deprecated `hop_length` / `n_fft` arguments are not accepted |
 | `griffinlim` | `operations::effects::griffinlim`, `AudioEffects::griffinlim_audio` (`GriffinLimConfig`) | `effects` | equivalent with differences | `GriffinLimInit::ZeroPhase` matches `init=None`. Random phases come from this crate's RNG; the default seed is 0 (librosa: unseeded) |
@@ -392,20 +399,20 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `mel_frequencies` | `mel_frequencies_with_scale(.., MelScale::Slaney)` | equivalent | The older `mel_frequencies` / `mel_scale` use the HTK scale |
 | `hz_to_mel` | `hz_to_mel_with_scale` | equivalent | `MelScale::Slaney` is librosa's default, `MelScale::Htk` is `htk=True` |
 | `mel_to_hz` | `mel_to_hz_with_scale` | equivalent | As above |
-| `cqt_frequencies` | `cqt_frequencies` | equivalent | |
+| `cqt_frequencies` | `cqt_frequencies`, `cqt_frequencies_into` (into a caller's slice) | equivalent | |
 | `tempo_frequencies` | `operations::rhythm::tempo_frequencies` (`beat-tracking`) | equivalent | |
 | `fourier_tempo_frequencies` | `operations::rhythm::fourier_tempo_frequencies` (`beat-tracking`) | equivalent | |
 | `hz_to_midi` | `hz_to_midi` | equivalent | |
 | `midi_to_hz` | `midi_to_hz` | equivalent | |
-| `hz_to_note` | `frequency_to_note` | equivalent with differences | Returns `(name, cents)`; ASCII `#`; MIDI 0..=127 only (otherwise an error) |
-| `midi_to_note` | `midi_to_note` | equivalent with differences | ASCII `#` (librosa `unicode=False`); integer MIDI 0..=127 only; no cents, no `octave=False` |
+| `hz_to_note` | `frequency_to_note`, `frequency_to_note_static` | equivalent with differences | Returns `(name, cents)`; ASCII `#`; MIDI 0..=127 only (otherwise an error) |
+| `midi_to_note` | `midi_to_note`, `midi_to_note_static` (no allocation) | equivalent with differences | ASCII `#` (librosa `unicode=False`); integer MIDI 0..=127 only; no cents, no `octave=False` |
 | `note_to_hz` | `note_to_frequency` | equivalent with differences | Same grammar and limits as `note_to_midi` |
 | `note_to_midi` | `note_to_midi` | equivalent with differences | librosa's full grammar (Unicode accidentals, cents suffix, signed octaves); the octave is required and the result is a `u8` in 0..=127 |
 | `hz_to_octs` | `hz_to_octs` | equivalent | |
 | `octs_to_hz` | `octs_to_hz` | equivalent | |
 | `A4_to_tuning` | `a4_to_tuning` | equivalent | |
 | `tuning_to_A4` | `tuning_to_a4` | equivalent | |
-| `key_to_notes` | `key_to_notes` | equivalent | |
+| `key_to_notes` | `key_to_notes`, `key_to_notes_static` | equivalent | |
 | `key_to_degrees` | `key_to_degrees` | equivalent | |
 | `interval_frequencies`, `pythagorean_intervals`, `plimit_intervals` | – | not provided: deferred | Tuning-system generators; low use |
 | `interval_to_fjs`, `hz_to_fjs`, `fifths_to_note` | – | not provided: deferred | Functional Just System notation; low use |
@@ -488,9 +495,9 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `chroma` | `operations::tonal::chroma_filterbank` (`ChromaFilterbankConfig`) | `feature-extraction` | equivalent with differences | `f64` weights (librosa: `float32`) |
 | `cq_to_chroma` | `operations::constant_q::cq_to_chroma` | `transforms` + `resampling` | equivalent with differences | No smoothing `window` |
 | `wavelet` | `operations::constant_q::wavelet` (`WaveletConfig`) | `transforms` + `resampling` | equivalent with differences | `Complex<f64>` filters (librosa: `complex64`) |
-| `wavelet_lengths` | `operations::constant_q::wavelet_lengths` | `transforms` + `resampling` | equivalent with differences | The single-frequency-with-explicit-`alpha` form is internal |
+| `wavelet_lengths` | `operations::constant_q::wavelet_lengths`, `operations::constant_q::wavelet_lengths_into` (into a caller's slice) | `transforms` + `resampling` | equivalent with differences | The single-frequency-with-explicit-`alpha` form is internal |
 | `window_bandwidth` | `operations::filterbanks::window_bandwidth` | `transforms` | equivalent with differences | Always evaluates the formula; librosa returns a hard-coded table value for named windows (up to ~1e-4 relative apart) |
-| `window_sumsquare` | `operations::filterbanks::window_sumsquare` | `transforms` | equivalent with differences | No `norm`; `f64` output |
+| `window_sumsquare` | `operations::filterbanks::window_sumsquare` (`f64`), `operations::filterbanks::window_sumsquare_as::<F>` | `transforms` | equivalent with differences | No `norm` |
 | `diagonal_filter` | – | – | not provided: deferred | Needs SciPy's spline image rotation; only used by `segment.path_enhance` |
 | `mr_frequencies` | – | – | not provided: deferred | Only used by `iirt` |
 | `semitone_filterbank` | – | – | not provided: deferred | Needs elliptic order selection (`ellipord`) |
@@ -499,7 +506,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
-| `frame` | `operations::spectrum::frame` | `transforms` | equivalent with differences | 1-D input, last-axis framing. `AudioSampleIterators::windows` pads trailing frames; `windows_ref` / `PaddingMode::Skip` gives librosa's count |
+| `frame` | `operations::spectrum::frame` (a copy), `operations::spectrum::frame_view` (read-only strided view, as librosa's) | `transforms` | equivalent with differences | 1-D input, last-axis framing. `AudioSampleIterators::windows` pads trailing frames; `windows_ref` / `PaddingMode::Skip` gives librosa's count |
 | `normalize` | `operations::tonal::normalize_array` (`NormalizeConfig`) | `feature-extraction` | equivalent | inf / -inf / 0 / p norms, `axis`, `threshold`, `fill` |
 | `peak_pick` | `operations::rhythm::peak_pick` (`PeakPickConfig`, `PeakPickMethod`) | `beat-tracking` | equivalent | |
 | `sync` | `operations::sequence::sync`, `operations::sequence::sync_with` (`SyncAggregate`) | `sequence` | equivalent with differences | Frame indices only (no slices); an empty index list with `pad = true` gives one segment |
@@ -539,7 +546,7 @@ All of these are free functions in `operations::sequence` (feature
 | `sequence.rqa` | `rqa` (`RqaConfig`, `RqaResult`) | equivalent with differences | Same scores; backtracking through the second column follows the move actually taken (librosa stores a wrong pointer there) |
 | `sequence.viterbi` | `viterbi` | equivalent | |
 | `sequence.viterbi_discriminative` | `viterbi_discriminative` | equivalent | |
-| `sequence.viterbi_binary` | `viterbi_binary` | equivalent with differences | States are `bool` (librosa: `uint16`) |
+| `sequence.viterbi_binary` | `viterbi_binary` | equivalent with differences | States are `bool` (librosa: `uint16`); `ViterbiBinaryResult` takes the state type as a parameter |
 | `sequence.transition_uniform` | `transition_uniform` | equivalent | |
 | `sequence.transition_loop` | `transition_loop` | equivalent | |
 | `sequence.transition_cycle` | `transition_cycle` | equivalent | |
@@ -588,8 +595,9 @@ in the API docs, gathered here by theme.
   `split_db` returns `(start, end)` sample pairs.
 - **`operations::sequence` takes 2-D input only.** librosa broadcasts over
   leading axes; loop over channels yourself. Recurrence and cross-similarity
-  matrices are dense `f64` (no `sparse=True`, connectivity is `0.0`/`1.0` rather
-  than `bool`), and only the default `axis=-1` layout is supported.
+  matrices are dense (no `sparse=True`): `Array2<bool>` for connectivity, as
+  librosa's, and float from the `_weighted` functions for distance and affinity. Only
+  the default `axis=-1` layout is supported.
 
 ### Output precision
 
@@ -614,8 +622,7 @@ also returns `float32` for `float32` input, but some of its steps run in
   tonal input (1.3e-3 off its `float64` result at order 4, more than 100 % from
   order 10); this crate does not reproduce that.
 - **Resampling inside an analysis** (`pitch_shift`, CQT octave decimation) uses
-  the crate's resampler, which filters in `f64`; it holds an `f64` copy of the
-  signal being resampled.
+  the crate's resampler, which filters in `T::Float`: `f32` for `f32` input.
 - **Outputs librosa returns as `float64` for `float32` input:** `yin`, `pyin`,
   `tempogram`, `tempogram_ratio` and `hybrid_tempogram` (librosa promotes through
   a `float64` window or division). Here they are `f32`.
