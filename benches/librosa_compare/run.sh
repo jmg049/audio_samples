@@ -26,6 +26,16 @@
 #             ten more processes per library (needs a report stage first)
 #   report    tables (report.py)
 #
+# Not part of the default list (file reading, start-up and install costs; see
+# the header of each script):
+#   load      load_bench.py: librosa.load / librosa.stream against the read path:
+#             time pinned, memray peak, peak RSS growth in fresh processes
+#   startup   startup_bench.py: import time, first-call latency, process start
+#             to first MFCC, pinned and default threading, warm and cold cache
+#   footprint footprint.py: wheel size, fresh environments, dependency count
+#             (needs network)
+#   guide     guide_numbers.py: every figure quoted in the librosa guide
+#
 # Each stage appends JSON lines to OUT_DIR/<stage-file>.jsonl; delete the
 # file to re-run a stage from scratch.
 set -euo pipefail
@@ -153,6 +163,28 @@ print(','.join(sorted({r['case'] for r in rows if r.get('ours_rss_kb') is not No
       ;;
     report)
       "$PY" "$HERE/report.py" "$OUT"
+      ;;
+    load)
+      "$PY" "$HERE/load_bench.py" --write-files
+      for lib in librosa ours; do
+        "${ONE[@]}" "$PY" -W ignore "$HERE/load_bench.py" --lib "$lib" --out "$OUT/load_time.jsonl"
+        "${ONE[@]}" "$PY" -W ignore "$HERE/load_bench.py" --lib "$lib" --mode mem --out "$OUT/load_mem.jsonl"
+      done
+      mkdir -p "$REPO/target/librosa_bench"
+      cc -O2 -Wall -shared -fPIC -o "$REPO/target/librosa_bench/rss_shim.so" "$HERE/rss_shim.c"
+      "$PY" -W ignore "$HERE/load_bench.py" --mode rss-run --repeats "$REPEATS" --jobs "$JOBS" \
+        --shim "$REPO/target/librosa_bench/rss_shim.so" --inputs wav16_60s,flac16_60s,wavf32_60s --out "$OUT/load_rss.jsonl"
+      ;;
+    startup)
+      "$PY" "$HERE/load_bench.py" --write-files
+      "$PY" "$HERE/startup_bench.py" --core "$CORE" --out "$OUT/startup.jsonl"
+      "$PY" "$HERE/startup_bench.py" --core "" --stages import,mfcc --out "$OUT/startup_default.jsonl"
+      ;;
+    footprint)
+      "$PY" "$HERE/footprint.py" --python-repo "$REPO/../audio_samples_python" --out "$OUT/footprint.json"
+      ;;
+    guide)
+      "$PY" "$HERE/guide_numbers.py" "$OUT"
       ;;
     *)
       echo "unknown stage $stage" >&2
