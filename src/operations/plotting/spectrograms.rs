@@ -1469,15 +1469,15 @@ fn assign_y_axis(layout: plotly::Layout, index: usize, axis: Axis) -> plotly::La
 
 #[cfg(test)]
 #[cfg(feature = "transforms")]
-mod audit_tests {
+mod mel_axis_tests {
     use super::*;
     use crate::sample_rate;
     use crate::utils::generation::sine_wave;
     use std::time::Duration;
 
-    /// SPEC-10: the mel axis must follow `MelParams::f_min/f_max`. Reference values:
+    /// The mel axis must follow `MelParams::f_min/f_max`. Reference values:
     /// `librosa.mel_frequencies(42, fmin=300, fmax=6000, htk=False)[1:-1]`
-    /// (librosa 1.0.0, educational venv).
+    /// (librosa 1.0.0).
     #[test]
     fn mel_axis_matches_librosa_band_centres() {
         let mel = MelParams::new(crate::nzu!(40), 300.0, 6000.0).unwrap();

@@ -62,7 +62,7 @@ fn windows(case: &Value) -> Vec<Window<'_>> {
 /// | mix | 59.0 / 90.0 / 95.9 | 129.0 / 135.0 / 135.3 | 97.9 / 104.3 / 90.9 |
 /// | noise | 55.2 / 54.9 / 53.2 | 53.5 / 52.6 / 54.6 | 50.5 / 56.9 / 58.2 |
 ///
-/// (Before the delay fix the audit measured -2 to -5 dB for every ratio.)
+/// (Before the delay fix the SNR was -2 to -5 dB for every ratio.)
 /// Each bound is about 3-4 dB under the lowest measured value of its group.
 ///
 /// Why they differ: in the middle of `mix` (tones and a chirp below 4.1 kHz,

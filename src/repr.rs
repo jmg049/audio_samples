@@ -6818,15 +6818,15 @@ mod tests {
     }
 
     #[test]
-    fn test_user_workflow_with_channels_validation() {
-        // Simulate the user's corrected use case
+    fn test_replace_with_vec_channels_validation() {
+        // Interleaved samples replacing the data of a 2-channel buffer
         let mut audio =
             AudioSamples::new_multi_channel(array![[0.0f32, 0.0], [0.0, 0.0]], sample_rate!(44100))
                 .unwrap();
 
-        // Simulate converted data from their function
+        // Interleaved data of three samples per channel
         let converted_samples: NonEmptyVec<f32> = non_empty_vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let num_channels = channels!(2); // This comes from the function parameter, not audio.num_channels()
+        let num_channels = channels!(2); // Given by the caller, not audio.num_channels()
 
         // Validate against the parameter, not the existing audio configuration
         assert!(

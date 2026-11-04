@@ -15,7 +15,7 @@ All notable changes to this project are documented here.
   precision and defaults*). Outputs are `(channels, features, frames)` arrays in
   the input's float type (`f32` for `u8`/`i16`/`I24`/`f32` audio, `f64` for
   `i32`/`f64`), and results are verified against librosa 1.0.0 golden fixtures
-  (`tests/librosa_reference/`). The audit behind it also fixed bugs in existing
+  (`tests/librosa_reference/`). The same work also fixed bugs in existing
   analysis code (YIN, `estimate_key`, autocorrelation, mu-law, the resampler,
   ...; see *Fixed*) and made the default onset peak picker usable (see *Changed*). `documentation/LIBROSA_MIGRATION.md`
   (rendered as the `librosa_migration` module on docs.rs) maps every librosa
@@ -116,7 +116,7 @@ The librosa-compatible API is unreleased, so these are changes to the
   the spectrogram's hop). `SilenceConfig` has no `Default` (`new(top_db)`; the
   threshold decides how much `trim_db` removes). `ClicksConfig.hop_length` moved
   into `ClickPositions::Frames { frames, hop_length }`.
-- Every other default equals librosa's. The defaults review, with the open
+- Every other default equals librosa's. The defaults, with the open
   questions (frame sizes in samples rather than seconds, `n_mels`, the mel
   scale, chroma and tempogram normalisation, tempo priors, CQT range), is
   summarised in `documentation/LIBROSA_MIGRATION.md` under *Defaults that
@@ -393,12 +393,12 @@ The librosa-compatible API is unreleased, so these are changes to the
 - `clicks` uses saturating arithmetic when placing clicks.
 
 
-### Fixed (correctness audit for teaching use)
+### Fixed (correctness for teaching use)
 
-A formula-by-formula audit checked the documentation against the code and
-against SciPy/librosa/closed-form results. Each fix below has a regression
-test (`tests/audit_*.rs`). Several change numerical output; they now match
-their documented definitions. The audit also found bugs that are listed once,
+The documentation was checked formula by formula against the code and against
+SciPy/librosa/closed-form results. Each fix below has a regression
+test (`tests/*_regressions.rs`). Several change numerical output; they now match
+their documented definitions. Bugs found the same way are listed once,
 under *Fixed* above: YIN, `estimate_key`, `autocorrelation` scaling,
 `levinson_durbin`, the resampler, `complex_onset_detection`, the odd-length
 spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.

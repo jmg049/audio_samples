@@ -1078,7 +1078,7 @@ mod tests {
         assert_eq!(op_name_to_method("Bogus (in-place)"), "operation");
     }
 
-    // ── Corrected teaching claims (audit FILT-*, SPEC-12, Task B) ─────────────
+    // ── Explanatory text states the correct formulas ────────────────────────
 
     use crate::NormalizationConfig;
     use crate::operations::traits::{AudioProcessing, AudioProcessingExplainText};

@@ -1,5 +1,6 @@
-//! Regression tests for the Phase-1 spectral audit fixes (SPEC-01, SPEC-08, SPEC-14,
-//! ANAL-01, and the integer-input unit consistency of the spectrogram methods).
+//! Regression tests for Welch PSD scaling, the HPSS bin count, the range of
+//! `frequency_to_note`, Levinson-Durbin and the integer-input unit consistency
+//! of the spectrogram methods.
 #![cfg(all(
     feature = "transforms",
     feature = "decomposition",
@@ -32,7 +33,7 @@ fn rel_err(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs()
 }
 
-// ── SPEC-01: Welch PSD density scaling ─────────────────────────────────────────
+// ── Welch PSD density scaling ─────────────────────────────────────────
 
 /// Reference values generated with SciPy 1.18.1 (educational venv):
 ///
@@ -145,7 +146,7 @@ fn integer_input_spectrogram_matches_stft_power() {
     }
 }
 
-// ── SPEC-08: HPSS bin count ─────────────────────────────────────────────────────
+// ── HPSS bin count ─────────────────────────────────────────────────────
 
 #[test]
 fn hpss_num_freq_bins_matches_stft_rows() {
@@ -166,7 +167,7 @@ fn hpss_num_freq_bins_matches_stft_rows() {
     }
 }
 
-// ── SPEC-14: frequency_to_note range ───────────────────────────────────────────
+// ── frequency_to_note range ───────────────────────────────────────────
 
 #[test]
 fn frequency_to_note_rejects_out_of_range_midi() {
@@ -182,7 +183,7 @@ fn frequency_to_note_rejects_out_of_range_midi() {
     assert!(cents.abs() < 1e-9);
 }
 
-// ── ANAL-01: Levinson-Durbin returns the final-order solution ───────────────────
+// ── Levinson-Durbin returns the final-order solution ───────────────────
 
 /// AR(2) process x[n] = 1.3·x[n−1] − 0.8·x[n−2] + e[n], i.e. A(z) = 1 − 1.3 z⁻¹ + 0.8 z⁻²,
 /// so the crate's convention (e[n] = x[n] + Σ a[k] x[n−1−k]) expects a = [−1.3, 0.8].

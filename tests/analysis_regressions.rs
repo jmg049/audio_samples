@@ -5,8 +5,7 @@
     feature = "peak-picking",
     feature = "vad"
 ))]
-//! Regression tests for the analysis-side audit findings (ANAL-03, 05, 12, 15,
-//! 18, 30 and related example issues).
+//! Regression tests for pitch, key, onset, beat and VAD analysis.
 
 use std::f64::consts::PI;
 use std::num::NonZeroUsize;
@@ -38,7 +37,7 @@ fn sine(f: f64, sr: u32, n: usize) -> Vec<f64> {
 }
 
 // ---------------------------------------------------------------------------
-// ANAL-15: YIN (CMND from tau = 1, fixed window, parabolic interpolation)
+// YIN (CMND from tau = 1, fixed window, parabolic interpolation)
 // ---------------------------------------------------------------------------
 
 /// Pure sines: the old integer-lag YIN gave 444.44 Hz (16 kHz), 450 Hz
@@ -46,7 +45,7 @@ fn sine(f: f64, sr: u32, n: usize) -> Vec<f64> {
 /// librosa 1.0 `yin` gives 440.31 / 440.30 / 100.18 / 150.18 Hz on the same
 /// tones. Requirement: within 0.5 % of the true f0.
 #[test]
-fn anal15_yin_pure_sines_within_half_percent() {
+fn yin_pure_sines_within_half_percent() {
     let cases = [
         (16_000u32, 440.0f64),
         (44_100, 440.0),
@@ -68,11 +67,11 @@ fn anal15_yin_pure_sines_within_half_percent() {
     }
 }
 
-/// Harmonic tones from the audit evidence (`anal_pitch.rs`): 2048-sample
+/// Harmonic tones: 2048-sample
 /// frames at 16 kHz, amplitudes [1, 0.6, 0.4, 0.3], search 60-800 Hz.
 /// librosa: 100.03, 155.05, 220.06, 311.39, 440.18 Hz.
 #[test]
-fn anal15_yin_harmonic_tones_match_reference() {
+fn yin_harmonic_tones_match_reference() {
     let sr = 16_000u32;
     let amps = [1.0, 0.6, 0.4, 0.3];
     for f0 in [100.0, 155.0, 220.0, 311.3, 440.0] {
@@ -101,7 +100,7 @@ fn anal15_yin_harmonic_tones_match_reference() {
 /// The low-level primitive returns a fractional period, and `track_pitch`
 /// (which shares it) is consistent with the single-shot estimate.
 #[test]
-fn anal15_yin_fractional_period_and_track_pitch_consistent() {
+fn yin_fractional_period_and_track_pitch_consistent() {
     let sr = 44_100u32;
     let f0 = 440.0;
     let x = sine(f0, sr, 8192);
@@ -132,20 +131,20 @@ fn anal15_yin_fractional_period_and_track_pitch_consistent() {
 
 /// Silence stays unvoiced.
 #[test]
-fn anal15_yin_silence_is_none() {
+fn yin_silence_is_none() {
     let audio = mono(vec![0.0; 16_000], 16_000);
     assert!(audio.detect_pitch_yin(0.1, 60.0, 800.0).unwrap().is_none());
 }
 
 // ---------------------------------------------------------------------------
-// ANAL-03: key-profile rotation
+// key-profile rotation
 // ---------------------------------------------------------------------------
 
 /// A D major chord (D, F#, A plus the other D-major scale tones weighted by
 /// the Krumhansl major profile) must be estimated as D major. The old
 /// rotation `profile[(i + tonic) % 12]` mirrored keys about C (D -> A#).
 #[test]
-fn anal03_key_d_major() {
+fn key_d_major() {
     let sr = 22_050u32;
     let n = sr as usize * 2;
     // Krumhansl-Kessler major profile, index 0 = tonic.
@@ -176,7 +175,7 @@ fn anal03_key_d_major() {
 }
 
 // ---------------------------------------------------------------------------
-// ANAL-05: complex onset detection must not panic on real input
+// complex onset detection must not panic on real input
 // ---------------------------------------------------------------------------
 
 fn click_track(sr: u32, secs: f64, first: f64, period: f64) -> Vec<f64> {
@@ -201,7 +200,7 @@ fn click_track(sr: u32, secs: f64, first: f64, period: f64) -> Vec<f64> {
 }
 
 #[test]
-fn anal05_complex_onset_detection_runs_on_clicks() {
+fn complex_onset_detection_runs_on_clicks() {
     let sr = 44_100;
     let audio = mono(click_track(sr, 2.0, 0.25, 0.5), sr);
     let onsets = audio
@@ -215,12 +214,12 @@ fn anal05_complex_onset_detection_runs_on_clicks() {
 }
 
 // ---------------------------------------------------------------------------
-// ANAL-12: envelope smoothing width is in frames, independent of the CQT
+// envelope smoothing width is in frames, independent of the CQT
 // window length in samples
 // ---------------------------------------------------------------------------
 
 #[test]
-fn anal12_envelope_smoothing_independent_of_cqt_window() {
+fn envelope_smoothing_independent_of_cqt_window() {
     let sr = 44_100;
     let audio = mono(click_track(sr, 3.0, 0.25, 0.5), sr);
     let mut config = OnsetDetectionConfig::default();
@@ -250,12 +249,12 @@ fn anal12_envelope_smoothing_independent_of_cqt_window() {
 }
 
 // ---------------------------------------------------------------------------
-// ANAL-18: beat grid must not drift when the IBI is not an integer number of
+// beat grid must not drift when the IBI is not an integer number of
 // frames
 // ---------------------------------------------------------------------------
 
 #[test]
-fn anal18_beat_grid_no_drift_over_120s() {
+fn beat_grid_no_drift_over_120s() {
     let sr = 44_100.0;
     let hop = 512usize;
     let bpm = 120.0;
@@ -290,11 +289,11 @@ fn anal18_beat_grid_no_drift_over_120s() {
 }
 
 // ---------------------------------------------------------------------------
-// ANAL-30: VadMethod::Spectral is not implemented and says so
+// VadMethod::Spectral is not implemented and says so
 // ---------------------------------------------------------------------------
 
 #[test]
-fn anal30_vad_spectral_returns_unsupported() {
+fn vad_spectral_returns_unsupported() {
     let audio = mono(sine(440.0, 16_000, 16_000), 16_000);
     let cfg = VadConfig::default().with_method(VadMethod::Spectral);
     let err = audio.voice_activity_mask(&cfg).unwrap_err();
@@ -306,7 +305,7 @@ fn anal30_vad_spectral_returns_unsupported() {
 
 /// Pitch methods that are not implemented return an error from `track_pitch`.
 #[test]
-fn anal30_unimplemented_pitch_methods_error() {
+fn unimplemented_pitch_methods_error() {
     let audio = mono(sine(220.0, 16_000, 16_000), 16_000);
     for m in [
         PitchDetectionMethod::Cepstrum,

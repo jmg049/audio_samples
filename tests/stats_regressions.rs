@@ -1,6 +1,5 @@
 #![cfg(all(feature = "statistics", feature = "transforms", feature = "processing"))]
-//! Regression tests for the statistics / comparison / detection audit fixes
-//! (ANAL-02/04/06/07/08/09/10/11/24/31, SPEC-06/07, FILT-13).
+//! Regression tests for statistics, signal comparison and sample-rate detection.
 
 use std::f64::consts::PI;
 use std::num::NonZeroUsize;
@@ -39,7 +38,7 @@ fn noise(n: usize, seed: u64) -> Vec<f64> {
         .collect()
 }
 
-// ANAL-02 / SPEC-06: the autocorrelation was divided by the FFT size twice.
+// the autocorrelation was divided by the FFT size twice.
 #[test]
 fn autocorrelation_is_unbiased_estimate() {
     let audio = AudioSamples::new_mono(array![1.0f64, 2.0, 3.0, 4.0], sample_rate!(8000)).unwrap();
@@ -60,7 +59,7 @@ fn autocorrelation_is_unbiased_estimate() {
     );
 }
 
-// ANAL-06: cross-correlation accumulated in the sample type (i16 overflow).
+// cross-correlation accumulated in the sample type (i16 overflow).
 #[test]
 fn cross_correlation_i16_accumulates_in_f64() {
     let x: Vec<i16> = sine(440.0, 16000.0, 16000, 0.5 * 32767.0)
@@ -89,7 +88,7 @@ fn cross_correlation_i16_accumulates_in_f64() {
     assert_eq!(argmax, 7);
 }
 
-// ANAL-07 / FILT-13: mean/variance summed in the sample type (overflow, panic).
+// mean/variance summed in the sample type (overflow, panic).
 #[test]
 fn mean_and_variance_do_not_overflow_integer_types() {
     let audio =
@@ -105,7 +104,7 @@ fn mean_and_variance_do_not_overflow_integer_types() {
     assert_eq!(audio.mean(), 30000.0);
 }
 
-// FILT-13: DC removal on i16 used the overflowed mean.
+// DC removal on i16 used the overflowed mean.
 #[test]
 fn remove_dc_offset_i16_constant_gives_zero() {
     let mut audio =
@@ -116,7 +115,7 @@ fn remove_dc_offset_i16_constant_gives_zero() {
     }
 }
 
-// ANAL-24: multi-channel variance was the inter-channel spread (0 for L = R).
+// multi-channel variance was the inter-channel spread (0 for L = R).
 #[test]
 fn variance_multichannel_is_population_variance_of_all_samples() {
     let x = sine(440.0, 16000.0, 16000, 0.5);
@@ -131,7 +130,7 @@ fn variance_multichannel_is_population_variance_of_all_samples() {
     assert!((stereo.std_dev() - var.sqrt()).abs() < 1e-15);
 }
 
-// ANAL-08: u8 is offset-binary, so zero crossings must be counted about 128.
+// u8 is offset-binary, so zero crossings must be counted about 128.
 #[test]
 fn zero_crossings_u8_counted_about_mid_scale() {
     let x: Vec<u8> = sine(440.0, 44100.0, 44100, 0.5)
@@ -145,7 +144,7 @@ fn zero_crossings_u8_counted_about_mid_scale() {
     assert!((audio.zero_crossing_rate() - zc as f64).abs() < 1e-9);
 }
 
-// ANAL-09: pin the documented sign convention of fft_alignment_lag.
+// pin the documented sign convention of fft_alignment_lag.
 #[test]
 fn fft_alignment_lag_sign_convention() {
     let reference = noise(1000, 3);
@@ -159,7 +158,7 @@ fn fft_alignment_lag_sign_convention() {
     assert_eq!(fft_alignment_lag(&q, &r, 100), Some(25));
 }
 
-// ANAL-31 / SPEC-07: bin frequency must be k * fs / N, also for odd N.
+// bin frequency must be k * fs / N, also for odd N.
 #[test]
 fn spectral_frequencies_exact_for_odd_length() {
     for &n in &[9usize, 15, 101] {
@@ -180,7 +179,7 @@ fn spectral_frequencies_exact_for_odd_length() {
     }
 }
 
-// ANAL-04: align_signals never applied a lag between the two signals.
+// align_signals never applied a lag between the two signals.
 #[test]
 fn align_signals_finds_delay() {
     let signal = noise(2000, 11);
@@ -195,7 +194,7 @@ fn align_signals_finds_delay() {
     }
 }
 
-// ANAL-10: sub-harmonic picks and amplitude-dependent `None`.
+// sub-harmonic picks and amplitude-dependent `None`.
 #[test]
 fn fundamental_frequency_sines_within_one_percent() {
     for &f in &[440.0, 220.0] {
@@ -213,7 +212,7 @@ fn fundamental_frequency_sines_within_one_percent() {
     }
 }
 
-// ANAL-11: candidate Nyquist frequencies were mapped to half their bin.
+// candidate Nyquist frequencies were mapped to half their bin.
 #[test]
 fn spectrum_cutoff_maps_frequency_to_correct_bin() {
     let len = 4097; // n_fft = 8192, nyquist 8 kHz (fs = 16 kHz)
@@ -236,7 +235,7 @@ fn spectrum_cutoff_maps_frequency_to_correct_bin() {
     assert_eq!(r, None);
 }
 
-// ANAL-11: detect_sample_rate documented Ok(None) when nothing is found but
+// detect_sample_rate documented Ok(None) when nothing is found but
 // returned Err.
 #[test]
 fn detect_sample_rate_returns_none_without_cutoff() {

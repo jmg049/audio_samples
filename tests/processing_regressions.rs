@@ -1,5 +1,5 @@
-//! Regression tests for the processing / editing / generation / resampling
-//! findings of the educational maths audit (FILT-09, 10, 11, 12, 17, 18, 19).
+//! Regression tests for processing, editing, generation and resampling: each
+//! result is checked against the operation's mathematical definition.
 #![cfg(all(
     feature = "processing",
     feature = "editing",
@@ -41,11 +41,11 @@ fn assert_close_i16(got: &[i16], want: &[i32], tol: i32) {
 }
 
 // ---------------------------------------------------------------------------
-// FILT-10: integer gains, peak normalisation and fades
+// integer gains, peak normalisation and fades
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filt10_scale_i16_uses_fractional_gain() {
+fn scale_i16_uses_fractional_gain() {
     let a = mono_i16(&[10000, -20000, 3000]);
     assert_close_i16(&to_vec(&a.scale(0.5)), &[5000, -10000, 1500], 1);
     assert_close_i16(&to_vec(&a.scale(0.99)), &[9900, -19800, 2970], 1);
@@ -56,7 +56,7 @@ fn filt10_scale_i16_uses_fractional_gain() {
 }
 
 #[test]
-fn filt10_peak_normalise_i16_reaches_full_scale() {
+fn peak_normalise_i16_reaches_full_scale() {
     for start in [8000i16, 20000] {
         let a = mono_i16(&[start, -start / 2, 100]);
         let out = to_vec(&a.normalize(NormalizationConfig::peak(i16::MAX)).unwrap());
@@ -65,7 +65,7 @@ fn filt10_peak_normalise_i16_reaches_full_scale() {
 }
 
 #[test]
-fn filt10_fade_in_i16_matches_f64_fade() {
+fn fade_in_i16_matches_f64_fade() {
     let n = 200;
     let ones_i16 =
         AudioSamples::new_mono(Array1::from_elem(n, 30000i16), sample_rate!(100)).unwrap();
@@ -102,11 +102,11 @@ fn mix_i16_weights_are_fractional() {
 }
 
 // ---------------------------------------------------------------------------
-// FILT-11: integer min-max normalisation
+// integer min-max normalisation
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filt11_min_max_i16() {
+fn min_max_i16() {
     let a = mono_i16(&[-20000, 0, 20000]);
     let out = to_vec(
         &a.normalize(NormalizationConfig::min_max(-1000, 1000))
@@ -125,11 +125,11 @@ fn filt11_min_max_i16() {
 }
 
 // ---------------------------------------------------------------------------
-// FILT-12: median normalisation subtracts the true median
+// median normalisation subtracts the true median
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filt12_median_is_order_statistic() {
+fn median_is_order_statistic() {
     let a = AudioSamples::new_mono(array![5.0f64, 9.0, 1.0, 7.0], sample_rate!(8000)).unwrap();
     let out = to_vec(&a.normalize(NormalizationConfig::median()).unwrap());
     assert_eq!(out, vec![-1.0, 3.0, -5.0, 1.0]);
@@ -140,11 +140,11 @@ fn filt12_median_is_order_statistic() {
 }
 
 // ---------------------------------------------------------------------------
-// FILT-09: mu is a curve parameter, not a sample value
+// mu is a curve parameter, not a sample value
 // ---------------------------------------------------------------------------
 
 #[test]
-fn filt09_mu_law_i16_matches_f64() {
+fn mu_law_i16_matches_f64() {
     let x = mono_i16(&[16384, 1000, -16384, -3000]);
     let got = to_vec(&x.mu_compress(255).unwrap());
     let want_f = x
@@ -154,7 +154,7 @@ fn filt09_mu_law_i16_matches_f64() {
         .to_format::<i16>();
     let want: Vec<i32> = to_vec(&want_f).iter().map(|&v| i32::from(v)).collect();
     assert_close_i16(&got, &want, 1);
-    // Sign is preserved (the audit saw -32768 for positive inputs).
+    // Sign is preserved (it once gave -32768 for positive inputs).
     assert!(
         got[0] > 0 && got[1] > 0 && got[2] < 0 && got[3] < 0,
         "{got:?}"
@@ -172,7 +172,7 @@ fn filt09_mu_law_i16_matches_f64() {
 }
 
 // ---------------------------------------------------------------------------
-// FILT-17: GaussianNoise perturbation
+// GaussianNoise perturbation
 // ---------------------------------------------------------------------------
 
 fn sine(n: usize, fs: u32, f: f64, a: f64) -> AudioSamples<'static, f64> {
@@ -212,7 +212,7 @@ fn band_power(noise: &[f64], lo: f64, hi: f64) -> f64 {
 }
 
 #[test]
-fn filt17_gaussian_noise_snr_kurtosis_and_colour() {
+fn gaussian_noise_snr_kurtosis_and_colour() {
     for color in [NoiseColor::White, NoiseColor::Pink, NoiseColor::Brown] {
         for snr in [0.0, 20.0, 40.0] {
             let (c, n) = added_noise(color, snr, 7);
@@ -253,7 +253,7 @@ fn filt17_gaussian_noise_snr_kurtosis_and_colour() {
 }
 
 // ---------------------------------------------------------------------------
-// FILT-18: standard AM definition
+// standard AM definition
 // ---------------------------------------------------------------------------
 
 /// Amplitude of the component at `f` (integer number of cycles in the buffer).
@@ -268,7 +268,7 @@ fn tone_amplitude(x: &[f64], fs: f64, f: f64) -> f64 {
 }
 
 #[test]
-fn filt18_am_signal_is_standard_am() {
+fn am_signal_is_standard_am() {
     let fs = 8000.0;
     let a = 0.8;
     for m in [0.0, 0.5, 1.0] {
@@ -297,7 +297,7 @@ fn filt18_am_signal_is_standard_am() {
 }
 
 // ---------------------------------------------------------------------------
-// FILT-19: sinc resampling is time-aligned and keeps the tail
+// sinc resampling is time-aligned and keeps the tail
 // ---------------------------------------------------------------------------
 
 fn argmax_abs(v: &[f32]) -> usize {
@@ -307,7 +307,7 @@ fn argmax_abs(v: &[f32]) -> usize {
 }
 
 #[test]
-fn filt19_impulse_lands_at_scaled_time() {
+fn impulse_lands_at_scaled_time() {
     let n_in = 20000usize;
     let rates: [(u32, u32); 4] = [
         (44100, 48000),
@@ -342,7 +342,7 @@ fn filt19_impulse_lands_at_scaled_time() {
 }
 
 #[test]
-fn filt19_sine_matches_analytic_after_resampling() {
+fn sine_matches_analytic_after_resampling() {
     let f = 440.0;
     let x: Vec<f32> = (0..44100)
         .map(|i| (2.0 * std::f64::consts::PI * f * i as f64 / 44100.0).sin() as f32)
@@ -368,8 +368,8 @@ fn filt19_sine_matches_analytic_after_resampling() {
         assert_eq!(best_lag, 0, "{quality:?}: best lag {best_lag}");
         // Fractional residual delay from the quadrature correlation:
         // y ≈ sin(ω m − φ), delay = φ/ω output samples. The delay removed is
-        // a whole number of frames, so up to half a sample remains (the audit
-        // measured ~69 / ~139 samples before the fix).
+        // a whole number of frames, so up to half a sample remains (before
+        // the delay fix it was ~69 / ~139 samples).
         let w = 2.0 * std::f64::consts::PI * f / 48000.0;
         let (mut s_acc, mut c_acc) = (0.0, 0.0);
         for (m, &ym) in y.iter().enumerate().take(hi).skip(lo) {

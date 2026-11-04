@@ -415,7 +415,7 @@ mod tests {
     use crate::utils::generation::sine_wave;
     use std::time::Duration;
 
-    /// SPEC-11: with `n_fft` smaller than the signal, the FFT is computed with the
+    /// With `n_fft` smaller than the signal, the FFT is computed with the
     /// signal length, so the frequency axis must use that length too.
     #[test]
     fn spectrum_axis_uses_computed_fft_length() {

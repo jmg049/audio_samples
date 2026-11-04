@@ -1,6 +1,5 @@
 #![cfg(all(feature = "dynamic-range", feature = "envelopes"))]
-//! Regression tests for the dynamics / envelope audit fixes
-//! (FILT-01, 02, 03, 05, 06, 07, 20, 31).
+//! Regression tests for dynamics processors and envelope followers.
 //!
 //! Every expected value comes from the textbook definition of the operation,
 //! not from the library itself.
@@ -38,12 +37,10 @@ fn db(x: f64) -> f64 {
     20.0 * x.log10()
 }
 
-// ---------------------------------------------------------------- FILT-01/20
-
 /// A one-pole follower with time constant τ follows a unit step as
 /// 1 − e^{−t/τ}: 0.632 after τ, > 0.99 after 5τ.
 #[test]
-fn filt01_attack_step_response_reaches_63_percent_after_tau() {
+fn attack_step_response_reaches_63_percent_after_tau() {
     let attack_ms = 1.0;
     let tau_samples = (attack_ms * 1e-3 * FS) as usize; // 48
     let mut f = EnvelopeFollower::new(attack_ms, 100.0, FS, DynamicRangeMethod::Peak);
@@ -60,7 +57,7 @@ fn filt01_attack_step_response_reaches_63_percent_after_tau() {
 
 /// After a downward step the envelope decays as e^{−t/τ_R}: 0.368 after τ_R.
 #[test]
-fn filt01_release_step_response_reaches_37_percent_after_tau() {
+fn release_step_response_reaches_37_percent_after_tau() {
     let release_ms = 20.0;
     let tau_samples = (release_ms * 1e-3 * FS) as usize; // 960
     let mut f = EnvelopeFollower::new(0.1, release_ms, FS, DynamicRangeMethod::Peak);
@@ -80,7 +77,7 @@ fn filt01_release_step_response_reaches_37_percent_after_tau() {
 /// A peak follower with a short attack and long release holds close to the
 /// peak amplitude of a steady sine.
 #[test]
-fn filt01_peak_follower_holds_sine_peak() {
+fn peak_follower_holds_sine_peak() {
     let mut f = EnvelopeFollower::new(0.1, 100.0, FS, DynamicRangeMethod::Peak);
     let x = sine(1000.0, 4800, 1.0);
     let env: Vec<f64> = x.iter().map(|&v| f.process(v)).collect();
@@ -94,7 +91,7 @@ fn filt01_peak_follower_holds_sine_peak() {
 /// Hard-knee compressor, peak detection, steady 0 dBFS sine, T = −20 dB, R = 4:
 /// the static curve predicts an output level of T + (0 − T)/R = −15 dBFS.
 #[test]
-fn filt01_compressor_steady_state_matches_static_curve() {
+fn compressor_steady_state_matches_static_curve() {
     let mut cfg = CompressorConfig::new();
     cfg.threshold_db = -20.0;
     cfg.ratio = 4.0;
@@ -114,8 +111,6 @@ fn filt01_compressor_steady_state_matches_static_curve() {
         "steady output peak {steady} dBFS, expected -15 dBFS"
     );
 }
-
-// ------------------------------------------------------------------- FILT-02
 
 fn burst_compressor(lookahead_ms: f64) -> Vec<f64> {
     let mut cfg = CompressorConfig::new();
@@ -139,7 +134,7 @@ fn burst_compressor(lookahead_ms: f64) -> Vec<f64> {
 /// arrives, the output stays time-aligned with the input, and the result
 /// differs from the zero-lookahead output.
 #[test]
-fn filt02_lookahead_attenuates_burst_onset_without_shifting_it() {
+fn lookahead_attenuates_burst_onset_without_shifting_it() {
     let onset = 4800;
     let no_la = burst_compressor(0.0);
     let la = burst_compressor(5.0); // 5 ms = 10 τ_A
@@ -162,8 +157,6 @@ fn filt02_lookahead_attenuates_burst_onset_without_shifting_it() {
     assert!(la[onset] > 0.0);
 }
 
-// ------------------------------------------------------------------- FILT-03
-
 fn limiter_steady_peak_db(cfg: &LimiterConfig, x: Vec<f64>, skip: usize) -> f64 {
     let mut audio = mono(x);
     audio.apply_limiter_in_place(cfg).unwrap();
@@ -174,7 +167,7 @@ fn limiter_steady_peak_db(cfg: &LimiterConfig, x: Vec<f64>, skip: usize) -> f64 
 /// |x| = 1), the envelope converges to 1 and the hard-knee limiter output
 /// settles exactly at the ceiling: 20·log10(g·1) = C.
 #[test]
-fn filt03_limiter_settles_at_ceiling_for_constant_level() {
+fn limiter_settles_at_ceiling_for_constant_level() {
     let cfg = LimiterConfig::broadcast(); // hard knee, C = -1 dBFS
     let square: Vec<f64> = (0..48_000)
         .map(|i| if (i / 24) % 2 == 0 { 1.0 } else { -1.0 })
@@ -189,9 +182,9 @@ fn filt03_limiter_settles_at_ceiling_for_constant_level() {
 
 /// A 0 dBFS, 1 kHz sine through the `transparent` and `mastering` presets
 /// comes out at or below the ceiling after the attack transient (sample
-/// peaks). Before the FILT-01/02 fixes all presets output 0.00 dBFS.
+/// peaks). An earlier follower bug made all presets output 0.00 dBFS.
 #[test]
-fn filt03_limiter_presets_hold_ceiling_for_full_scale_sine() {
+fn limiter_presets_hold_ceiling_for_full_scale_sine() {
     for (name, cfg) in [
         ("transparent", LimiterConfig::transparent()),
         ("mastering", LimiterConfig::mastering()),
@@ -214,13 +207,11 @@ fn filt03_limiter_presets_hold_ceiling_for_full_scale_sine() {
     assert!(out < -0.5, "broadcast: steady peak {out} dBFS");
 }
 
-// ---------------------------------------------------------------- FILT-05/06
-
 /// Quadratic soft knee (Giannoulis, Massberg & Reiss 2012), T = −20, R = 4,
 /// W = 12: y(T − W/2) = T − W/2, y(T) = T + (1/R − 1)·W/8,
 /// y(T + W/2) = T + W/(2R); the curve is monotone and C¹.
 #[test]
-fn filt05_soft_knee_static_curve_matches_quadratic_knee() {
+fn soft_knee_static_curve_matches_quadratic_knee() {
     let (t, r, w) = (-20.0, 4.0, 12.0);
     let y = |x: f64| x - calculate_compression_gain(x, t, r, KneeType::Soft, w);
 
@@ -264,7 +255,7 @@ fn filt05_soft_knee_static_curve_matches_quadratic_knee() {
 /// The soft-knee limiter static curve never exceeds the ceiling and reaches
 /// it exactly at C + W/2.
 #[test]
-fn filt06_soft_limiter_static_curve_never_exceeds_ceiling() {
+fn soft_limiter_static_curve_never_exceeds_ceiling() {
     let (c, w) = (-1.0, 6.0);
     let y = |x: f64| x - calculate_limiting_gain(x, c, KneeType::Soft, w);
     let max = (0..=4000)
@@ -278,12 +269,10 @@ fn filt06_soft_limiter_static_curve_never_exceeds_ceiling() {
     assert!((y(c - w / 2.0) - (c - w / 2.0)).abs() < 1e-12);
 }
 
-// ------------------------------------------------------------------- FILT-07
-
 /// A gate with ratio R is a 1:R downward expander: a steady −60 dBFS tone with
 /// T = −40 dBFS, R = 10 is reduced by (T − L)(R − 1) = 180 dB.
 #[test]
-fn filt07_gate_ratio_is_downward_expansion_ratio() {
+fn gate_ratio_is_downward_expansion_ratio() {
     let cfg = GateConfig::with_params(-40.0, 10.0, 0.1, 100.0);
     let mut audio = mono(sine(1000.0, 24_000, 1e-3));
     audio.apply_gate_in_place(&cfg).unwrap();
@@ -295,12 +284,10 @@ fn filt07_gate_ratio_is_downward_expansion_ratio() {
     );
 }
 
-// ------------------------------------------------------------------- FILT-31
-
 /// `attack_decay_envelope(method = Rms)` must use a 10 ms RMS window even when
 /// the follower was built for peak detection: a unit sine has RMS 1/√2.
 #[test]
-fn filt31_attack_decay_rms_method_uses_rms_window() {
+fn attack_decay_rms_method_uses_rms_window() {
     let follower = EnvelopeFollower::new(1.0, 10.0, FS, DynamicRangeMethod::Peak);
     let audio = mono(sine(1000.0, 48_000, 1.0));
     let (attack, _decay) = audio.attack_decay_envelope(&follower, DynamicRangeMethod::Rms);

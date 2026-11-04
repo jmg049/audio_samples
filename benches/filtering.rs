@@ -155,7 +155,6 @@ fn bench_fir(c: &mut Criterion) {
 }
 
 /// Real-time room-correction streaming path: block=1024, taps=4096 @ 44.1k.
-/// Mirrors the user's app config (10.17 ms/buffer, RT 0.48x with direct conv).
 /// Compares direct streaming FIR vs the overlap-save FFT convolver.
 fn bench_room_correction_streaming(c: &mut Criterion) {
     let total = SR as usize * SECONDS;

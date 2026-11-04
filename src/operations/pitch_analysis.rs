@@ -1359,7 +1359,7 @@ mod tests {
     use non_empty_slice::{NonEmptyVec, non_empty_vec};
     use std::f64::consts::PI;
 
-    /// A 5-harmonic tone (amplitudes 0.6/k), as used by the librosa-parity audit.
+    /// A 5-harmonic tone with amplitudes 0.6/k.
     fn harmonic_tone(f0: f64, sr: f64, seconds: f64) -> Vec<f64> {
         let n = (sr * seconds) as usize;
         (0..n)
