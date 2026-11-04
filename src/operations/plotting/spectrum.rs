@@ -32,10 +32,10 @@ use crate::{AudioSampleResult, AudioSamples, StandardSample};
 pub struct MagnitudeSpectrumParams {
     /// Base plotting parameters shared across all plot types (title, labels, legend, etc.).
     pub plot_params: PlotParams,
-    /// If `true`, magnitude values are converted to decibels, 20·log10(|X[k]|) re 1, of
+    /// If `true`, magnitude values are converted to decibels, `20·log10(|X[k]|)` re 1, of
     /// the unnormalised one-sided DFT (a full-scale sine therefore peaks well above
-    /// 0 dB); bins with |X[k]| ≤ 10⁻¹⁰ are drawn at −200 dB.
-    /// If `false`, raw magnitudes |X[k]| are plotted. No window is applied.
+    /// 0 dB); bins with `|X[k]|` ≤ 10⁻¹⁰ are drawn at −200 dB.
+    /// If `false`, raw magnitudes `|X[k]|` are plotted. No window is applied.
     pub db_scale: bool,
     /// Optional frequency range to display as `(min_hz, max_hz)`. If `None`, shows all bins.
     pub freq_range: Option<(f64, f64)>,
