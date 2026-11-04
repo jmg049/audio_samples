@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest a new capability or a change to an existing one
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: Example code for the API you have in mind helps.
+    validations:
+      required: true
