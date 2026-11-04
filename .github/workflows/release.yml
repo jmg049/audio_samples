@@ -1,0 +1,167 @@
+# Runs on a v* tag: checks the tag against Cargo.toml and CHANGELOG.md, runs the
+# tests, publishes to crates.io with trusted publishing and creates a GitHub
+# Release whose body is the version's changelog section.
+#
+# Actions > Release > Run workflow with dry_run set runs the same checks and
+# `cargo publish --dry-run` from any branch. It publishes nothing and creates no
+# release, and a missing changelog section is only a warning.
+#
+# crates.io accepts trusted publishing only for a crate that already exists, so
+# a crate's first version has to be published once with an API token.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run cargo publish --dry-run; publish nothing and create no release"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+  RELEASE_META: .github/release/release_meta.py
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the release script
+        run: python3 -m unittest discover -s .github/release
+      - name: Check the tag, manifest and changelog
+        id: meta
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          version="$(python3 "$RELEASE_META" version)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          python3 "$RELEASE_META" check-manifest
+          if [ "$DRY_RUN" = true ]; then
+            python3 "$RELEASE_META" notes "$version" > /dev/null \
+              || echo "::warning file=CHANGELOG.md::a release of $version needs a section for it"
+          else
+            python3 "$RELEASE_META" check-tag "$GITHUB_REF_NAME"
+            python3 "$RELEASE_META" notes "$version" > /dev/null
+          fi
+
+  test:
+    needs: verify
+    # librosa_reference's float32 time_stretch check fails with the glibc 2.39
+    # of ubuntu-24.04 (7.2e-7 against a 6.2e-7 bound) and passes with 2.43.
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+      - run: cargo test --features full_no_plotting
+
+  dry-run:
+    if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Check the package size
+        run: |
+          cargo package --no-verify
+          python3 "$RELEASE_META" check-size target/package/*.crate
+      - run: cargo publish --dry-run --features full_no_plotting,educational
+
+  publish:
+    if: github.event_name == 'push' || !inputs.dry_run
+    needs: [verify, test]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Check the package size
+        run: |
+          cargo package --no-verify
+          python3 "$RELEASE_META" check-size target/package/*.crate
+      # A version that is already there means an earlier run published it and
+      # failed later, so a re-run goes on to the GitHub Release.
+      - name: Check crates.io for this version
+        id: state
+        run: |
+          code=0
+          python3 "$RELEASE_META" published || code=$?
+          case "$code" in
+            0) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+            3) echo "::error::publish the first version with an API token, then add the trusted publisher"; exit 1 ;;
+            *) exit "$code" ;;
+          esac
+      - name: Get a crates.io token
+        if: steps.state.outputs.publish == 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish
+        if: steps.state.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --features full_no_plotting,educational
+
+  github-release:
+    needs: [verify, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          notes="$RUNNER_TEMP/notes.md"
+          python3 "$RELEASE_META" notes "$VERSION" > "$notes"
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$notes"
+          else
+            prerelease=()
+            case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes-file "$notes" "${prerelease[@]}"
+          fi

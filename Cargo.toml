@@ -13,9 +13,10 @@ description = "An audio processing library for Rust that represents audio as a t
 
 keywords = ["audio", "dsp", "signal-processing", "resampling", "spectrogram"]
 categories = ["multimedia::audio", "science"]
-# The mdBook of the learning guide and its figures crate are not part of the
-# published crate.
-exclude = ["book/"]
+# Not part of the published crate: the mdBook of the learning guide and its
+# figures crate, the benchmark comparison and repository tooling. crates.io limits
+# an upload to 10 MiB; the release workflow checks the packaged size.
+exclude = ["book/", "benchmarks/", ".github/", ".pre-commit-config.yaml"]
 
 [package.metadata.docs.rs]
 features = ["full", "educational"]
