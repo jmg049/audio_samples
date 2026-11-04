@@ -5,7 +5,8 @@
 //! Four sub-modules expose signal generation, signal comparison, audio analysis, and
 //! mathematical building blocks respectively:
 //!
-//! - [`generation`]: synthesize common test signals (sine, chirp, impulse, silence, …)
+//! - [`generation`]: synthesize common test signals (sine, chirp, impulse, silence, …) and
+//!   named [`example_clips`] of realistic audio
 //! - [`comparison`]: similarity metrics (correlation, MSE, SNR, signal alignment)
 //! - [`detection`]: lightweight analysis helpers (fundamental frequency, silence regions, …)
 //! - [`audio_math`]: domain-level conversions between frequency, amplitude, MIDI, mel, and time
@@ -63,6 +64,7 @@
 pub mod audio_math;
 pub mod comparison;
 pub mod detection;
+pub mod example_clips;
 pub(crate) mod fast_math;
 pub mod generation;
 // Used by the spectrum, feature and pitch modules; with only some of those

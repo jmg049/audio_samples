@@ -446,9 +446,9 @@ pub use crate::iterators::{AudioSampleIterators, ChannelIterator, FrameIterator,
 pub use crate::iterators::{WindowIterator, WindowRefIterator, WindowView};
 
 pub use crate::utils::generation::{
-    ToneComponent, am_signal, chirp, compound_tone, cosine_wave, exponential_chirp, fm_signal,
-    impulse, sawtooth_wave, sawtooth_wave_bandlimited, silence, sine_wave, square_wave,
-    square_wave_bandlimited, triangle_wave, triangle_wave_bandlimited,
+    ExampleClip, ToneComponent, am_signal, chirp, compound_tone, cosine_wave, example_clip,
+    exponential_chirp, fm_signal, impulse, sawtooth_wave, sawtooth_wave_bandlimited, silence,
+    sine_wave, square_wave, square_wave_bandlimited, triangle_wave, triangle_wave_bandlimited,
 };
 
 #[cfg(feature = "channels")]
