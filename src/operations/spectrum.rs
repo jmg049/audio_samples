@@ -628,11 +628,10 @@ pub(crate) fn stft_map<F: AudioFloat, O>(
                     })?;
             }
             for (k, mut dst) in out_c.outer_iter_mut().enumerate() {
-                for (j, d) in dst
-                    .slice_mut(ndarray::s![t0..t0 + nb])
-                    .iter_mut()
-                    .enumerate()
-                {
+                let dst = dst
+                    .as_slice_mut()
+                    .expect("rows of a new standard-layout array are contiguous");
+                for (j, d) in dst[t0..t0 + nb].iter_mut().enumerate() {
                     d.write(map(block[j * n_bins + k]));
                 }
             }

@@ -880,6 +880,7 @@ fn argmin_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
 }
 
 /// Index of the first maximum (`numpy.argmax`); NaN-free input assumed.
+#[inline(always)]
 fn argmax_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
     let mut best = (0, F::neg_infinity());
     let mut first = true;
@@ -1246,7 +1247,6 @@ fn rqa_dp<F: AudioFloat>(
     gap_extend: F,
     knight: bool,
 ) -> Array2<F> {
-    let zero = F::zero();
     let (rows, cols) = sim.dim();
     let mut score = Array2::<F>::zeros((rows, cols));
     let (init_limit, limit) = if knight { (2, 3) } else { (1, 1) };
@@ -1259,7 +1259,16 @@ fn rqa_dp<F: AudioFloat>(
 
     // One cell update: candidates are (score, sim) per move. The same
     // comparisons as `rqa_cell`, without the back-pointer.
-    let update = |score: &mut Array2<F>, i: usize, j: usize, cands: &[(F, F)]| {
+    #[inline(always)]
+    fn update<F: AudioFloat>(
+        score: &mut Array2<F>,
+        sim: &ArrayView2<F>,
+        (gap_onset, gap_extend): (F, F),
+        i: usize,
+        j: usize,
+        cands: &[(F, F)],
+    ) {
+        let zero = F::zero();
         let s = sim[[i, j]];
         if s > zero {
             let k = argmax_first(cands.iter().map(|c| c.0));
@@ -1273,7 +1282,8 @@ fn rqa_dp<F: AudioFloat>(
             let v = gapped[k];
             score[[i, j]] = if v > zero { v } else { zero };
         }
-    };
+    }
+    let gaps = (gap_onset, gap_extend);
 
     let i = 1;
     for j in 2..cols {
@@ -1281,7 +1291,7 @@ fn rqa_dp<F: AudioFloat>(
             (score[[i - 1, j - 1]], sim[[i - 1, j - 1]]),
             (score[[i - 1, j - 2]], sim[[i - 1, j - 2]]),
         ];
-        update(&mut score, i, j, &cands[..init_limit]);
+        update(&mut score, &sim, gaps, i, j, &cands[..init_limit]);
     }
     let j = 1;
     for i in 2..rows {
@@ -1289,7 +1299,7 @@ fn rqa_dp<F: AudioFloat>(
             (score[[i - 1, j - 1]], sim[[i - 1, j - 1]]),
             (score[[i - 2, j - 1]], sim[[i - 2, j - 1]]),
         ];
-        update(&mut score, i, j, &cands[..init_limit]);
+        update(&mut score, &sim, gaps, i, j, &cands[..init_limit]);
     }
     for i in 2..rows {
         for j in 2..cols {
@@ -1298,7 +1308,7 @@ fn rqa_dp<F: AudioFloat>(
                 (score[[i - 1, j - 2]], sim[[i - 1, j - 2]]),
                 (score[[i - 2, j - 1]], sim[[i - 2, j - 1]]),
             ];
-            update(&mut score, i, j, &cands[..limit]);
+            update(&mut score, &sim, gaps, i, j, &cands[..limit]);
         }
     }
     score
