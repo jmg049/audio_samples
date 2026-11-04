@@ -160,6 +160,12 @@ if f:
         ["Fresh environment, with dependencies", MB(f["ours"]["site_packages_bytes"]), MB(f["librosa"]["site_packages_bytes"])],
         ["Packages installed", f["ours"]["package_count"], f["librosa"]["package_count"]],
     ], [50, 25, 25])
+# FLAC encoding at matched levels, from the criterion results of flac_rust.json.
+p = os.path.join(G, "flac_rust.json")
+if os.path.exists(p):
+    fr = json.load(open(p))
+    OUT["FLACWRITE"] = table(["Compression level", "Ours / libFLAC, median", "Lowest", "Highest"],
+                             [[r["level"], f"{r['median']:.2f}", f"{r['min']:.2f}", f"{r['max']:.2f}"] for r in fr], [40, 24, 18, 18])
 OUT["WHEN"]=vers["when"][:10]
 OUT["RUST"]=vers["rust_commit"]; OUT["PY"]=vers["python_commit"]
 os.makedirs(DEST, exist_ok=True)

@@ -34,7 +34,8 @@
 #             to first MFCC, pinned and default threading, warm and cold cache
 #   footprint footprint.py: wheel size, fresh environments, dependency count
 #             (needs network)
-#   guide     guide_numbers.py: every figure quoted in the librosa guide
+#   guide     guide_numbers.py, guide_tables.py: every figure quoted in the librosa guide,
+#             and the tables its page includes
 #
 # Each stage appends JSON lines to OUT_DIR/<stage-file>.jsonl; delete the
 # file to re-run a stage from scratch.
@@ -185,6 +186,7 @@ print(','.join(sorted({r['case'] for r in rows if r.get('ours_rss_kb') is not No
       ;;
     guide)
       "$PY" "$HERE/guide_numbers.py" "$OUT"
+      "$PY" "$HERE/guide_tables.py" "$OUT" "$REPO/../audio_samples_python/docs/source/_guide_tables"
       ;;
     *)
       echo "unknown stage $stage" >&2
