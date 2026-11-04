@@ -3096,7 +3096,7 @@ macro_rules! impl_audio_data_ops {
     ($(
         $trait:ident, $method:ident,
         $assign_trait:ident, $assign_method:ident,
-        $op:tt,
+        $sample_op:ident,
         $mono_err:literal,
         $multi_err:literal,
         $mismatch_err:literal
@@ -3121,7 +3121,9 @@ macro_rules! impl_audio_data_ops {
                                 panic!($mono_err);
                             }
                             // operate on views; convert to owned to ensure operation works
-                            let arr: Array1<T> = &lhs.as_view() $op &rhs.as_view();
+                            let arr: Array1<T> = ndarray::Zip::from(&lhs.as_view())
+                                .and(&rhs.as_view())
+                                .map_collect(|&a, &b| a.$sample_op(b));
                             // safety: arr is already non-empty
                             unsafe {
                                 AudioData::Mono(MonoData::from_array1(arr))
@@ -3133,7 +3135,13 @@ macro_rules! impl_audio_data_ops {
                             }
                 // safety: input array is not empty therefore output wont be
 
-                            AudioData::Multi(unsafe { MultiData::from_array2(&lhs.as_view() $op &rhs.as_view()) })
+                            AudioData::Multi(unsafe {
+                                MultiData::from_array2(
+                                    ndarray::Zip::from(&lhs.as_view())
+                                        .and(&rhs.as_view())
+                                        .map_collect(|&a, &b| a.$sample_op(b)),
+                                )
+                            })
                         }
                         _ => panic!($mismatch_err),
                     }
@@ -3154,9 +3162,9 @@ macro_rules! impl_audio_data_ops {
                 fn $method(self, rhs: T) -> Self::Output {
                     match self {
                         // safety: input array is not empty therefore output wont be
-                        AudioData::Mono(a) => AudioData::Mono(unsafe { MonoData::from_array1(a.as_view().mapv(|x| x $op rhs)) }),
+                        AudioData::Mono(a) => AudioData::Mono(unsafe { MonoData::from_array1(a.as_view().mapv(|x| x.$sample_op(rhs))) }),
                         // safety: input array is not empty therefore output wont be
-                        AudioData::Multi(a) => AudioData::Multi(unsafe { MultiData::from_array2(a.as_view().mapv(|x| x $op rhs)) }),
+                        AudioData::Multi(a) => AudioData::Multi(unsafe { MultiData::from_array2(a.as_view().mapv(|x| x.$sample_op(rhs))) }),
                     }
                 }
             }
@@ -3180,7 +3188,7 @@ macro_rules! impl_audio_data_ops {
                             let mut lhs_mut = lhs.to_mut();
                             let rhs_view = rhs.as_view();
                             // Use zip_mut_with for element-wise in-place operations
-                            lhs_mut.zip_mut_with(&rhs_view, |a, &b| *a = *a $op b);
+                            lhs_mut.zip_mut_with(&rhs_view, |a, &b| *a = a.$sample_op(b));
                         }
                         (AudioData::Multi(lhs), AudioData::Multi(rhs)) => {
                             if lhs.as_view().dim() != rhs.as_view().dim() {
@@ -3188,7 +3196,7 @@ macro_rules! impl_audio_data_ops {
                             }
                             let mut lhs_mut = lhs.to_mut();
                             let rhs_view = rhs.as_view();
-                            lhs_mut.zip_mut_with(&rhs_view, |a, &b| *a = *a $op b);
+                            lhs_mut.zip_mut_with(&rhs_view, |a, &b| *a = a.$sample_op(b));
                         }
                         _ => panic!($mismatch_err),
                     }
@@ -3209,11 +3217,11 @@ macro_rules! impl_audio_data_ops {
                         AudioData::Mono(lhs) => {
                             let mut lhs_mut = lhs.to_mut();
                             // Use element-wise iteration for scalar assignment operations
-                            lhs_mut.iter_mut().for_each(|x| *x = *x $op rhs);
+                            lhs_mut.iter_mut().for_each(|x| *x = x.$sample_op(rhs));
                         }
                         AudioData::Multi(lhs) => {
                             let mut lhs_mut = lhs.to_mut();
-                            lhs_mut.iter_mut().for_each(|x| *x = *x $op rhs);
+                            lhs_mut.iter_mut().for_each(|x| *x = x.$sample_op(rhs));
                         }
                     }
                 }
@@ -3223,19 +3231,19 @@ macro_rules! impl_audio_data_ops {
 }
 
 impl_audio_data_ops!(
-    Add, add, AddAssign, add_assign, +,
+    Add, add, AddAssign, add_assign, sample_add,
     "Cannot add mono audio with different lengths",
     "Cannot add multi-channel audio with different shapes",
     "Cannot add mono and multi-channel audio";
-    Sub, sub, SubAssign, sub_assign, -,
+    Sub, sub, SubAssign, sub_assign, sample_sub,
     "Cannot subtract mono audio with different lengths",
     "Cannot subtract multi-channel audio with different shapes",
     "Cannot subtract mono and multi-channel audio";
-    Mul, mul, MulAssign, mul_assign, *,
+    Mul, mul, MulAssign, mul_assign, sample_mul,
     "Cannot multiply mono audio with different lengths",
     "Cannot multiply multi-channel audio with different shapes",
     "Cannot multiply mono and multi-channel audio";
-    Div, div, DivAssign, div_assign, /,
+    Div, div, DivAssign, div_assign, sample_div,
     "Cannot divide mono audio with different lengths",
     "Cannot divide multi-channel audio with different shapes",
     "Cannot divide mono and multi-channel audio";
@@ -3256,11 +3264,15 @@ where
         match self {
             AudioData::Mono(arr) => {
                 // safety: input array is not empty therefore output wont be
-                AudioData::Mono(unsafe { MonoData::from_array1(arr.as_view().mapv(|x| -x)) })
+                AudioData::Mono(unsafe {
+                    MonoData::from_array1(arr.as_view().mapv(|x| T::zero().sample_sub(x)))
+                })
             }
             AudioData::Multi(arr) => {
                 // safety: input array is not empty therefore output wont be
-                AudioData::Multi(unsafe { MultiData::from_array2(arr.as_view().mapv(|x| -x)) })
+                AudioData::Multi(unsafe {
+                    MultiData::from_array2(arr.as_view().mapv(|x| T::zero().sample_sub(x)))
+                })
             }
         }
     }

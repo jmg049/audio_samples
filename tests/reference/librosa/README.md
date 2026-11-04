@@ -23,7 +23,9 @@ uv run --project tests/reference/librosa tests/reference/librosa/generate_libros
 ```
 
 `--check` compares with a relative tolerance of 1e-9: librosa's numba and BLAS
-reductions are not bit-identical across machines.
+reductions are not bit-identical across machines. The generator sets every thread
+count to 1 before NumPy loads, because the rounding of a float32 BLAS product
+depends on how the work is split between threads.
 
 The `pre-commit` hooks (`.pre-commit-config.yaml`, scripts in `../hooks/`) run
 the reference tests whenever the librosa-compatible code or the fixtures change,
