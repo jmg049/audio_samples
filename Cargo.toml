@@ -2,7 +2,7 @@
 name = "audio_samples"
 version = "2.0.1"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.95"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
 readme = "README.md"
@@ -78,9 +78,7 @@ unsafe_derive_deserialize = "allow"
 multiple_unsafe_ops_per_block = "allow"
 doc_markdown = "allow"
 
-# `NonZero::div_ceil` is stable since 1.92 but the crate MSRV is 1.87. The two
-# Guards against using stdlib items newer than rust-version (1.87). The former
-# NonZero::div_ceil (1.92) call sites were rewritten with plain arithmetic.
+# Guards against using stdlib items newer than rust-version.
 incompatible_msrv = "warn"
 
 [dependencies]

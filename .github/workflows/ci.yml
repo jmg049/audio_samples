@@ -74,15 +74,11 @@ jobs:
       - run: cargo doc --no-deps --features full
 
   msrv:
-    name: msrv (1.87)
+    name: msrv (1.95)
     runs-on: ubuntu-latest
-    # KNOWN GAP: two call sites use `NonZero::div_ceil` (stable since 1.92), so
-    # this currently does not build on the declared MSRV 1.87. Resolving it is an
-    # MSRV bump or a rewrite of those sites - tracked separately, out of scope of
-    # the lint-config migration. Left in place so the gap stays visible.
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --features full_no_plotting
 

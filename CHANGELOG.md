@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Minimum supported Rust version is now 1.95**, the version the `non-empty-slice`,
+  `non-empty-iter` and `non-zero-size` dependencies require.
 - **librosa parity.** A librosa 1.0-compatible API alongside the existing one:
   the `AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
   `AudioRhythm`, `AudioEffects` and `AudioPitchTracking` traits, the
