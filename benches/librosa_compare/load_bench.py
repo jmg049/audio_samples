@@ -130,7 +130,27 @@ def rows():
             r.seek_to_frame(5 * RATE)
             return r.read_frames(2 * RATE, F32)
 
+    # Writing: soundfile is what librosa users write with; librosa has no write function.
+    written = {}
+    work = tempfile.gettempdir()
+
+    def save_s(p):
+        import soundfile as sf
+
+        if p not in written:
+            written[p] = (*sf.read(p, dtype=SPEC[os.path.basename(p).split(".")[0]][3] or "int32"), sf.info(p).subtype)
+        data, rate, subtype = written[p]
+        out = os.path.join(work, f"save_librosa_{os.getpid()}" + os.path.splitext(p)[1])
+        sf.write(out, data, rate, subtype=subtype)
+
+    def save_o(p):
+        if p not in written:
+            written[p] = aus.io.read(p)
+        out = os.path.join(work, f"save_ours_{os.getpid()}" + os.path.splitext(p)[1])
+        aus.io.save(out, written[p])
+
     return {
+        "save": (SHORT, save_s, save_o),
         # Whole file, nothing changed but the sample type asked for.
         "read_f32": (ALL, lambda p: L.load(p, sr=None, mono=False), lambda p: aus.io.read(p, as_type=F32)),
         "read_f64": (SHORT, lambda p: L.load(p, sr=None, mono=False, dtype=np.float64), lambda p: aus.io.read(p, as_type=F64)),
