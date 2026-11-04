@@ -650,6 +650,10 @@ fn f32_time_stretch_matches_librosa_float32() {
     // peak-relative. Bound 1e-6 (about 8 f32 eps of 1.19e-7: angle, cos/sin,
     // interpolation and the inverse FFT each round in f32).
     //
+    // The angles are computed with f64 atan2 and rounded. With atan2f the error
+    // was 7.2e-7 under glibc 2.39, over the bound, and 1.2e-7 under 2.43; f64
+    // atan2 gives one result under both. Measured 1.2e-7 on 2.39, 2.43 and 2.44.
+    //
     // Against our f64 path the rounding of the STFT to Complex<f32> is the
     // difference; the vocoder accumulates the phase of every bin, including
     // bins at the round-off level of the transform, so it grows beyond f32

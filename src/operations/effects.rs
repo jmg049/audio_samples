@@ -303,7 +303,9 @@ pub fn phase_vocoder_at<F: AudioFloat>(
         for k in 0..n_bins {
             let row = stft_matrix.slice(ndarray::s![c, k, ..]);
             for ((a, m), z) in arg.iter_mut().zip(&mut mag_in).zip(row.iter()) {
-                *a = z.arg();
+                // atan2 in f64, rounded once. glibc's atan2f changed in 2.41, so
+                // calling it here would make the f32 result depend on the system.
+                *a = F::of(z.im.as_f64().atan2(z.re.as_f64()));
                 *m = z.norm();
             }
             let mut phase = arg[i0[0]];
@@ -971,7 +973,9 @@ fn split_intervals(flags: &[bool], hop: usize, len: usize) -> Vec<(usize, usize)
         edges.push(flags.len());
     }
     edges
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| ((p[0] * hop).min(len), (p[1] * hop).min(len)))
         .collect()
 }
