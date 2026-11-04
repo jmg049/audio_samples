@@ -211,6 +211,38 @@ pub trait AudioSample:
         self
     }
 
+
+    /// `self + rhs` as audio. Integer types saturate at their limits rather than overflowing, and
+    /// `u8` samples are offset binary, so 128 is silence: `128 + x == x`.
+    #[inline]
+    #[must_use]
+    fn sample_add(self, rhs: Self) -> Self {
+        self + rhs
+    }
+
+    /// `self - rhs` as audio. See [`sample_add`](Self::sample_add).
+    #[inline]
+    #[must_use]
+    fn sample_sub(self, rhs: Self) -> Self {
+        self - rhs
+    }
+
+    /// `self * rhs` on the raw values, with the `u8` offset removed. See
+    /// [`sample_add`](Self::sample_add).
+    #[inline]
+    #[must_use]
+    fn sample_mul(self, rhs: Self) -> Self {
+        self * rhs
+    }
+
+    /// `self / rhs` on the raw values, with the `u8` offset removed. See
+    /// [`sample_add`](Self::sample_add). An integer divided by zero gives the limit with its sign,
+    /// and silence divided by zero gives silence.
+    #[inline]
+    #[must_use]
+    fn sample_div(self, rhs: Self) -> Self {
+        self / rhs
+    }
     /// Clamps `self` to the closed interval `[min, max]`.
     ///
     /// This is a per-type hook used internally by [`clip`][crate::AudioProcessing::clip]
@@ -1247,7 +1279,44 @@ unsafe fn abs_max_f32_avx2(slice: &[f32]) -> f32 {
 // ========================
 // AudioSample Implementations
 // ========================
+/// The saturating arithmetic of an integer sample type: `$to` gives the value to work on, in `i64`,
+/// with silence at zero, and `$from` turns a result in that range back into a sample.
+macro_rules! integer_sample_arithmetic {
+    ($min:expr, $max:expr, $to:expr, $from:expr) => {
+        #[inline]
+        fn sample_add(self, rhs: Self) -> Self {
+            $from(($to(self) + $to(rhs)).clamp($min, $max))
+        }
+        #[inline]
+        fn sample_sub(self, rhs: Self) -> Self {
+            $from(($to(self) - $to(rhs)).clamp($min, $max))
+        }
+        #[inline]
+        fn sample_mul(self, rhs: Self) -> Self {
+            $from(($to(self) * $to(rhs)).clamp($min, $max))
+        }
+        #[inline]
+        fn sample_div(self, rhs: Self) -> Self {
+            let (a, b): (i64, i64) = ($to(self), $to(rhs));
+            let quotient = match (a, b) {
+                (0, 0) => 0,
+                (_, 0) if a > 0 => $max,
+                (_, 0) => $min,
+                _ => a / b,
+            };
+            $from(quotient.clamp($min, $max))
+        }
+    };
+}
+
 impl AudioSample for u8 {
+    integer_sample_arithmetic!(
+        -128,
+        127,
+        |x: Self| <i64 as From<Self>>::from(x) - 128,
+        |x: i64| (x + 128) as Self
+    );
+
     type Float = f32;
     #[inline]
     fn to_float(self) -> f32 {
@@ -1269,6 +1338,8 @@ impl AudioSample for u8 {
 }
 
 impl AudioSample for i16 {
+    integer_sample_arithmetic!(-32768, 32767, <i64 as From<Self>>::from, |x: i64| x as Self);
+
     type Float = f32;
     #[inline]
     fn to_float(self) -> f32 {
@@ -1290,6 +1361,13 @@ impl AudioSample for i16 {
 }
 
 impl AudioSample for I24 {
+    integer_sample_arithmetic!(
+        -8_388_608,
+        8_388_607,
+        |x: Self| <i64 as From<i32>>::from(x.to_i32()),
+        |x: i64| Self::saturating_from_i32(x as i32)
+    );
+
     type Float = f32;
     #[inline]
     fn to_float(self) -> f32 {
@@ -1316,6 +1394,13 @@ impl AudioSample for I24 {
 }
 
 impl AudioSample for i32 {
+    integer_sample_arithmetic!(
+        -2_147_483_648,
+        2_147_483_647,
+        <i64 as From<Self>>::from,
+        |x: i64| x as Self
+    );
+
     type Float = f64;
     #[inline]
     fn to_float(self) -> f64 {

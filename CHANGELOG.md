@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Integer arithmetic saturates.** `+`, `-`, `*`, `/` and negation of integer `AudioSamples` overflowed the
+  sample type, which panicked in a debug build and wrapped in a release build; dividing by zero panicked. They now saturate
+  at the type's limits, and an integer divided by zero gives the limit with its sign (zero divided by zero gives
+  zero). `u8` is offset binary, so its arithmetic works on the offset value and 128 is the neutral element of `+`.
 - **Example clips.** `utils::generation::example_clip` renders named clips of music and speech
   (`ExampleClip::{Chords, DrumLoop, ChordsAndDrums, Speech, NoisyRecording}`) at any sample rate,
   duration and sample type. Nothing is stored or downloaded. Rendering uses only basic IEEE 754

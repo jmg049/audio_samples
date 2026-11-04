@@ -51,3 +51,74 @@ fn multichannel_variance_axis_follows_ndarray() {
     let per_sample = m.variance_axis_ddof(ndarray::Axis(0), 0);
     assert_eq!(per_sample.to_vec(), vec![0.25, 0.25]);
 }
+
+fn mono<T: audio_samples::StandardSample + 'static>(samples: Vec<T>) -> AudioSamples<'static, T> {
+    AudioSamples::new_mono(ndarray::Array1::from_vec(samples), sample_rate!(8000)).unwrap()
+}
+
+/// Integer arithmetic saturated in neither build profile: it overflowed the sample type, which
+/// panics in a debug build and wraps in a release build.
+#[test]
+fn integer_arithmetic_saturates() {
+    let a = mono(vec![30000i16, -30000, 100]);
+    assert_eq!(
+        (a.clone() + a.clone()).as_slice().unwrap(),
+        &[32767, -32768, 200]
+    );
+    assert_eq!(
+        (a.clone() + 10000).as_slice().unwrap(),
+        &[32767, -20000, 10100]
+    );
+    assert_eq!(
+        (a.clone() - 10000).as_slice().unwrap(),
+        &[20000, -32768, -9900]
+    );
+    assert_eq!(
+        (a.clone() * a.clone()).as_slice().unwrap(),
+        &[32767, 32767, 10000]
+    );
+
+    let wide = mono(vec![i32::MAX, i32::MIN]);
+    assert_eq!(
+        (wide.clone() + wide.clone()).as_slice().unwrap(),
+        &[i32::MAX, i32::MIN]
+    );
+    assert_eq!((-wide).as_slice().unwrap(), &[-i32::MAX, i32::MAX]);
+
+    let top = audio_samples::I24::saturating_from_i32(8_388_607);
+    let sum = mono(vec![top]) + mono(vec![top]);
+    assert_eq!(sum.as_slice().unwrap()[0].to_i32(), 8_388_607);
+
+    let mut in_place = mono(vec![30000i16]);
+    in_place += mono(vec![30000i16]);
+    assert_eq!(in_place.as_slice().unwrap(), &[32767]);
+}
+
+#[test]
+fn integer_division_by_zero_gives_the_limit() {
+    let a = mono(vec![100i16, -100, 0, 9]);
+    let b = mono(vec![0i16, 0, 0, 2]);
+    assert_eq!((a / b).as_slice().unwrap(), &[32767, -32768, 0, 4]);
+}
+
+/// `u8` samples are offset binary: 128 is silence.
+#[test]
+fn u8_arithmetic_respects_the_offset() {
+    let a = mono(vec![128u8, 138, 255, 0]);
+    let silence = mono(vec![128u8; 4]);
+    assert_eq!(
+        (a.clone() + silence).as_slice().unwrap(),
+        a.as_slice().unwrap()
+    );
+    assert_eq!((a.clone() - a.clone()).as_slice().unwrap(), &[128; 4]);
+    assert_eq!((a.clone() + a).as_slice().unwrap(), &[128, 148, 255, 0]);
+}
+
+#[test]
+fn float_arithmetic_is_plain() {
+    let a = mono(vec![0.5f32, -0.25]);
+    assert_eq!((a.clone() + a.clone()).as_slice().unwrap(), &[1.0, -0.5]);
+    assert_eq!((a.clone() * a.clone()).as_slice().unwrap(), &[0.25, 0.0625]);
+    assert_eq!((a.clone() / a.clone()).as_slice().unwrap(), &[1.0, 1.0]);
+    assert_eq!((-a).as_slice().unwrap(), &[-0.5, 0.25]);
+}
