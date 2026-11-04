@@ -1434,7 +1434,7 @@ mod tests {
     #[test]
     fn unsupported_latex_falls_back_to_plain_text() {
         assert_eq!(
-            block_math(r"M = \left\lfloor \frac{L - N}{H} \right\rfloor + 1"),
+            latex_to_plain(r"M = \left\lfloor \frac{L - N}{H} \right\rfloor + 1"),
             "M = ⌊(L - N)/H⌋ + 1"
         );
         assert_eq!(latex_to_plain(r"\tau_{min}"), "τₘᵢₙ");
