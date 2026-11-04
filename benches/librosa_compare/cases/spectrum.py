@@ -60,7 +60,14 @@ register(
         librosa=lambda c: partial(librosa.magphase, c.D),
         ours=lambda c: partial(aus.AudioSamples.magphase, c.D),
         func="magphase",
-        note="float64 only: the binding takes complex128 2-D input",
+        note="complex128 input",
+    ),
+    Case(
+        "magphase_c64", G, "derived_f32",
+        librosa=lambda c: partial(librosa.magphase, c.D),
+        ours=lambda c: partial(aus.AudioSamples.magphase, c.D),
+        func="magphase",
+        note="complex64 input",
     ),
     Case(
         "reassigned_spectrogram", G, "full",

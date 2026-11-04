@@ -1613,10 +1613,10 @@ where
 /// assert_eq!(phase, array![[Complex::new(0.6, 0.8), Complex::new(1.0, 0.0)]]);
 /// ```
 #[must_use]
-pub fn magphase(
-    complex_spect: ArrayView2<'_, Complex<f64>>,
+pub fn magphase<F: num_traits::Float>(
+    complex_spect: ArrayView2<'_, Complex<F>>,
     power: Option<NonZeroUsize>,
-) -> (Array2<f64>, Array2<Complex<f64>>) {
+) -> (Array2<F>, Array2<Complex<F>>) {
     // One fused pass in the memory order of the input (outputs in the same
     // layout, so a Fortran-order spectrogram is not traversed with strides).
     // |z| = sqrt(re² + im²) (within 1 ulp of `hypot`, and branch-free so the
@@ -1628,13 +1628,14 @@ pub fn magphase(
     use ndarray::ShapeBuilder;
     let dim = complex_spect.dim();
     let fortran = !complex_spect.is_standard_layout() && complex_spect.t().is_standard_layout();
-    let mut mag = Array2::<f64>::zeros(dim.set_f(fortran));
-    let mut phase = Array2::<Complex<f64>>::zeros(dim.set_f(fortran));
-    let split = |z: &Complex<f64>, m: &mut f64, p: &mut Complex<f64>| {
+    let (zero, one) = (F::zero(), F::one());
+    let mut mag = Array2::<F>::zeros(dim.set_f(fortran));
+    let mut phase = Array2::<Complex<F>>::zeros(dim.set_f(fortran));
+    let split = |z: &Complex<F>, m: &mut F, p: &mut Complex<F>| {
         let s = z.re * z.re + z.im * z.im;
-        let ok = (f64::MIN_POSITIVE..=f64::MAX).contains(&s);
-        let mv = if ok { s.sqrt() } else { f64::NAN };
-        let (m_nz, zo) = if mv == 0.0 { (1.0, 1.0) } else { (mv, 0.0) };
+        let ok = s >= F::min_positive_value() && s <= F::max_value();
+        let mv = if ok { s.sqrt() } else { F::nan() };
+        let (m_nz, zo) = if mv == zero { (one, one) } else { (mv, zero) };
         *m = mv;
         *p = Complex {
             re: z.re / m_nz + zo,
@@ -1653,7 +1654,7 @@ pub fn magphase(
             .for_each(|m, p, z| {
                 if m.is_nan() {
                     let mv = z.norm();
-                    let (m_nz, zo) = if mv == 0.0 { (1.0, 1.0) } else { (mv, 0.0) };
+                    let (m_nz, zo) = if mv == zero { (one, one) } else { (mv, zero) };
                     *m = mv;
                     *p = Complex {
                         re: z.re / m_nz + zo,
@@ -1665,7 +1666,7 @@ pub fn magphase(
 
     // Raise magnitude to the given power (`powf(1.0)` is the identity).
     if let Some(p) = power.filter(|p| p.get() != 1) {
-        let p = p.get() as f64;
+        let p = F::from(p.get()).unwrap_or_else(F::infinity);
         mag.mapv_inplace(|x| x.powf(p));
     }
 

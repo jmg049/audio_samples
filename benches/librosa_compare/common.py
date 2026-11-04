@@ -88,6 +88,7 @@ CONFIG_SETS = {
     # derived arrays (spectrograms, envelopes) from 10 s and 60 s mono at 22050 Hz
     "derived": [Config("audio", 22050, d, 1, dt) for d in (10, 60) for dt in DTYPES],
     "derived_f64": [Config("audio", 22050, d, 1, "f64") for d in (10, 60)],
+    "derived_f32": [Config("audio", 22050, d, 1, "f32") for d in (10, 60)],
     "const": [Config("const", dtype="f64")],
     "vec": [Config("vec", dtype=dt) for dt in DTYPES],
     "vec_f64": [Config("vec", dtype="f64")],

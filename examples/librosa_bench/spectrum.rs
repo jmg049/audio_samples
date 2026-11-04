@@ -81,6 +81,11 @@ pub fn audio<'a, F: AudioFloat>(case: &str, x: &'a AudioCtx<F>) -> Option<Thunk<
                 .mapv(|c| Complex::new(c.re.as_f64(), c.im.as_f64()));
             thunk(move || AudioSamples::<f64>::magphase(&d, None))
         }
+        "magphase_c64" => {
+            // Channel 0 of the complex64 STFT.
+            let d = x.stft().index_axis(Axis(0), 0).to_owned();
+            thunk(move || audio_samples::operations::transforms::magphase(d.view(), None))
+        }
         "reassigned_spectrogram" => {
             let c = ReassignedSpectrogramConfig::librosa();
             thunk(move || x.audio.reassigned_spectrogram(&c).unwrap())
