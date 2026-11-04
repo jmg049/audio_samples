@@ -302,8 +302,7 @@ where
                 return result;
             }
             let mut acc = [zero; 4];
-            let chunks = slice.chunks_exact(4);
-            let rem = chunks.remainder();
+            let (chunks, rem) = slice.as_chunks::<4>();
             for chunk in chunks {
                 for j in 0..4 {
                     let x = chunk[j];
@@ -499,8 +498,7 @@ where
         // without -ffast-math. Falls back to ndarray iter for non-contiguous views.
         let sum_sq_slice = |slice: &[T]| -> f64 {
             let mut acc = [0.0f64; 4];
-            let chunks = slice.chunks_exact(4);
-            let rem = chunks.remainder();
+            let (chunks, rem) = slice.as_chunks::<4>();
             for chunk in chunks {
                 let f0: f64 = chunk[0].cast_into();
                 let f1: f64 = chunk[1].cast_into();
@@ -562,8 +560,7 @@ where
             // and pack both sq and pk into SIMD via SLP vectorisation.
             let mut sq = [0.0f64; 8];
             let mut pk = [zero; 8];
-            let chunks = slice.chunks_exact(8);
-            let rem = chunks.remainder();
+            let (chunks, rem) = slice.as_chunks::<8>();
             for chunk in chunks {
                 // Load all 8 elements once; compiler keeps them in registers.
                 let x0 = chunk[0];
