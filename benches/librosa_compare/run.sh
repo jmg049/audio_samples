@@ -35,6 +35,8 @@
 #   footprint footprint.py: wheel size, fresh environments, dependency count
 #             (needs network)
 #   guide     guide_numbers.py: every figure quoted in the librosa guide
+#   threads   thread_scaling.py: batch MFCC, STFT and resampling against the
+#             number of Python threads, on whichever interpreter PY is
 #
 # Each stage appends JSON lines to OUT_DIR/<stage-file>.jsonl; delete the
 # file to re-run a stage from scratch.
@@ -185,6 +187,9 @@ print(','.join(sorted({r['case'] for r in rows if r.get('ours_rss_kb') is not No
       ;;
     guide)
       "$PY" "$HERE/guide_numbers.py" "$OUT"
+      ;;
+    threads)
+      "$PY" "$HERE/thread_scaling.py" --out "$OUT/thread_scaling.jsonl"
       ;;
     *)
       echo "unknown stage $stage" >&2
