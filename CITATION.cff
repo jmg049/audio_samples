@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: If you use AudioSamples in research, please cite the paper below.
+title: audio_samples
+type: software
+authors:
+  - family-names: Geraghty
+    given-names: Jack
+license: MIT
+repository-code: https://github.com/jmg049/audio_samples
+preferred-citation:
+  type: conference-paper
+  title: "Audio Made Simple: A Modern Framework for Audio Processing"
+  authors:
+    - family-names: Geraghty
+      given-names: Jack
+    - family-names: Golpayegani
+      given-names: Fatemeh
+    - family-names: Hines
+      given-names: Andrew
+  collection-title: Proceedings of the ACM Multimedia Systems Conference 2026
+  conference:
+    name: "MMSys '26"
+    city: Hong Kong
+  publisher:
+    name: Association for Computing Machinery
+  year: 2026
+  start: 436
+  end: 442
+  isbn: "9798400724817"
+  doi: 10.1145/3793853.3799811
+  url: https://doi.org/10.1145/3793853.3799811
