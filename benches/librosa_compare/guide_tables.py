@@ -84,7 +84,8 @@ labels={"read_f32":("Whole file as float32","``read(p, as_type=F32)``","``load(p
 "read_resample_stereo":("Stereo float32 at 22050 Hz","``read_and_resample(p, 22050)``","``load(p, mono=False)``"),
 "read_part":("2 s from 5 s in","``StreamedAudioReader`` seek and read","``load(p, sr=None, mono=False, offset=5, duration=2)``"),
 "stream_blocks_stereo":("Stream, overlapping blocks","``windows(...)``","``stream(...)``"),
-"stream_chunks_stereo":("Stream, 4096 frames","``frames(4096)``","``stream(...)``")}
+"stream_chunks_stereo":("Stream, 4096 frames","``frames(4096)``","``stream(...)``"),
+"save":("Save, against ``soundfile.write``","``save``","``soundfile.write``")}
 body=[]
 for key,(lab,ours,theirs) in labels.items():
     for inp,inpl in (("wav16_60s","WAV"),("flac16_60s","FLAC")):
