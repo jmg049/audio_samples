@@ -524,7 +524,9 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `axis_sort`, `sparsify_rows`, `shear`, `cyclic_gradient`, `fill_off_diagonal`, `index_to_slice`, `count_unique`, `is_unique`, `interp_broadcast` | – | – | not provided: out of scope | Generic array utilities; the ones the ported algorithms need exist privately |
 | `match_intervals` | – | – | not provided: out of scope | Annotation alignment, no audio meaning |
 | `is_positive_int`, `valid_int`, `valid_intervals`, `rename_kw`, `Deprecated` | – | – | not provided: out of scope | Python argument validation and deprecation plumbing; Rust uses types and typed errors |
-| `example`, `ex`, `example_info`, `list_examples`, `find_files`, `cite` | – | – | not provided: out of scope | Example-data download, file discovery and citation helpers |
+| `example`, `ex` | `utils::generation::example_clip` | – | with differences | Returns audio rather than a file path. The clips are synthesised, so they are not librosa's recordings |
+| `list_examples` | `ExampleClip::ALL`, `ExampleClip::name` | – | with differences | An array of clips rather than a printed table |
+| `example_info`, `find_files`, `cite` | – | – | not provided: out of scope | File discovery and citation helpers, and details of librosa's recordings |
 
 ### `librosa.segment` and `librosa.sequence`
 
