@@ -1433,10 +1433,11 @@ mod tests {
 
     #[test]
     fn unsupported_latex_falls_back_to_plain_text() {
-        assert_eq!(
-            block_math(r"M = \left\lfloor \frac{L - N}{H} \right\rfloor + 1"),
-            "M = ⌊(L - N)/H⌋ + 1"
-        );
+        // How much of this a release of term-maths renders itself varies, so the
+        // fallback is tested directly and block_math only for leaving no raw LaTeX.
+        let floor = r"M = \left\lfloor \frac{L - N}{H} \right\rfloor + 1";
+        assert_eq!(latex_to_plain(floor), "M = ⌊(L - N)/H⌋ + 1");
+        assert!(!block_math(floor).contains('\\'));
         assert_eq!(latex_to_plain(r"\tau_{min}"), "τₘᵢₙ");
         assert_eq!(latex_to_plain(r"10^{T/20}"), "10^(T/20)");
         assert_eq!(
