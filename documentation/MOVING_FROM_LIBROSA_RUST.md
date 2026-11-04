@@ -36,7 +36,7 @@ let audio = AudioSamples::new_mono(y, sample_rate!(22050)).unwrap();
 
 // D = librosa.stft(y): the channel axis is always there.
 let d = audio.stft_matrix(&StftConfig::librosa()).unwrap();
-assert_eq!(d.nrows(), 1);
+assert_eq!(d.dim().0, 1);
 assert_eq!(d.dim().1, 1025);
 
 // S = librosa.feature.melspectrogram(y=y, sr=sr)
