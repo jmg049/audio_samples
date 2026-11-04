@@ -171,6 +171,20 @@ print(','.join(sorted({r['case'] for r in rows if r.get('ours_rss_kb') is not No
         "${ONE[@]}" "$PY" -W ignore "$HERE/load_bench.py" --lib "$lib" --out "$OUT/load_time.jsonl"
         "${ONE[@]}" "$PY" -W ignore "$HERE/load_bench.py" --lib "$lib" --mode mem --out "$OUT/load_mem.jsonl"
       done
+      # Rows at 0.97 or above: both libraries again in one process, alternating.
+      "$PY" -c "
+import json
+t = {}
+for line in open('$OUT/load_time.jsonl'):
+    r = json.loads(line)
+    if 'median_ms' in r:
+        t[(r['row'], r['input'], r['lib'])] = r['median_ms']
+for (row, inp, lib), v in t.items():
+    if lib == 'ours' and row != 'defaults' and (row, inp, 'librosa') in t and v / t[(row, inp, 'librosa')] >= 0.97:
+        print(row, inp)
+" | while read -r row inp; do
+        "${ONE[@]}" "$PY" -W ignore "$HERE/load_bench.py" --mode pair --rows "$row" --inputs "$inp" --out "$OUT/load_time.jsonl"
+      done
       mkdir -p "$REPO/target/librosa_bench"
       cc -O2 -Wall -shared -fPIC -o "$REPO/target/librosa_bench/rss_shim.so" "$HERE/rss_shim.c"
       "$PY" -W ignore "$HERE/load_bench.py" --mode rss-run --repeats "$REPEATS" --jobs "$JOBS" \
