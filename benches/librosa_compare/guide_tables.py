@@ -166,6 +166,9 @@ if os.path.exists(p):
     fr = json.load(open(p))
     OUT["FLACWRITE"] = table(["Compression level", "Ours / libFLAC, median", "Lowest", "Highest"],
                              [[r["level"], f"{r['median']:.2f}", f"{r['min']:.2f}", f"{r['max']:.2f}"] for r in fr], [40, 24, 18, 18])
+OUT["ROWS"] = str(len(rows))
+OUT["CASES"] = str(len({r["case"] for r in rows}))
+OUT["LOADROWS"] = str(len({k[:2] for k in t if k[0] != "defaults"}))
 OUT["WHEN"]=vers["when"][:10]
 OUT["RUST"]=vers["rust_commit"]; OUT["PY"]=vers["python_commit"]
 os.makedirs(DEST, exist_ok=True)
