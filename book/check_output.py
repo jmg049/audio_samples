@@ -17,6 +17,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ATTR = re.compile(r'\b(?:href|src)="([^"]*)"')
+# `site-url` in book.toml. mdBook writes 404.html with links rooted at it.
+SITE_PATH = "/audio_samples/"
 
 
 def main() -> int:
@@ -43,7 +45,10 @@ def main() -> int:
             path = unquote(parts.path)
             if not path:
                 continue
-            dest = (page.parent / path).resolve()
+            if path.startswith(SITE_PATH):
+                dest = (out / path.removeprefix(SITE_PATH)).resolve()
+            else:
+                dest = (page.parent / path).resolve()
             if not dest.exists():
                 problems.append(f"{page.name}: broken link {target}")
             elif path.startswith("figures/") and dest.stat().st_size == 0:

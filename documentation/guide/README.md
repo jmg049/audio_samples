@@ -30,8 +30,8 @@ from the same files:
 * in the API documentation, as the `audio_samples::guide` module
   (`cargo doc --open --features educational,full_no_plotting`), where every code
   block is a doctest;
-* as an illustrated book with figures computed by the library (`book/`; see
-  `book/README.md` to build it);
+* as an [illustrated book](https://jmg049.github.io/audio_samples/) with figures computed by the library
+  (`book/README.md` in the repository says how to build it);
 * as plain Markdown, readable in any Markdown viewer with maths support.
 
 In the raw Markdown, code lines that start with `# ` are setup lines that

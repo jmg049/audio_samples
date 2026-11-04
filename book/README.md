@@ -1,5 +1,7 @@
 # The learning guide as an mdBook
 
+Published at https://jmg049.github.io/audio_samples/.
+
 This directory builds the learning guide (`documentation/guide/`) as an
 illustrated [mdBook](https://rust-lang.github.io/mdBook/) with KaTeX maths and
 figures computed by `audio_samples` itself.

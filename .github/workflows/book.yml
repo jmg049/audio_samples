@@ -1,0 +1,77 @@
+# Builds the learning guide's mdBook and deploys it to GitHub Pages. The figures
+# are computed by the library, so a change under src/ that alters them reaches the
+# site at the next book change or a manual run.
+name: Book
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "book/**"
+      - "documentation/guide/**"
+      - ".github/workflows/book.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+  MDBOOK_VERSION: "0.5.4"
+  MDBOOK_KATEX_VERSION: "0.10.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Restore the book tools
+        id: tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/mdbook
+            ~/.cargo/bin/mdbook-katex
+          key: book-tools-${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-mdbook-${{ env.MDBOOK_VERSION }}-katex-${{ env.MDBOOK_KATEX_VERSION }}
+      - name: Install the book tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        # --locked keeps the build reproducible. mdbook-katex's lock file pins
+        # mdbook-preprocessor 0.5.3, so it warns about mdbook 0.5.4 on every build;
+        # the warning is harmless.
+        run: |
+          cargo install mdbook --version "$MDBOOK_VERSION" --locked
+          cargo install mdbook-katex --version "$MDBOOK_KATEX_VERSION" --locked
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: book/figures
+      - name: Build the book
+        run: book/build.sh
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: book/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

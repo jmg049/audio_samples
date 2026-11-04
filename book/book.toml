@@ -39,6 +39,8 @@ default-theme = "light"
 preferred-dark-theme = "navy"
 additional-css = ["theme/figures.css"]
 git-repository-url = "https://github.com/jmg049/audio_samples"
+# The site is served from a sub-path of jmg049.github.io; the 404 page needs it.
+site-url = "/audio_samples/"
 
 [output.html.playground]
 # The code blocks are doctests of this crate, which the Rust playground does

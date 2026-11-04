@@ -242,10 +242,10 @@ The crate is also teaching material for a speech and audio processing course:
   [documentation/guide/](documentation/guide/README.md), which also lists the
   dependencies needed to run the snippets in your own crate. Every code block
   is a doctest, so every number in the text is checked.
-- **The illustrated book**: the same chapters as an mdBook with figures
-  (waveforms, spectra, filter responses, pole-zero plots, spectrograms, ...)
-  computed by the library from the calculations each chapter asserts. Build it
-  with `book/build.sh`; see [book/README.md](book/README.md).
+- **[The illustrated book](https://jmg049.github.io/audio_samples/)**: the same chapters as an mdBook with
+  figures (waveforms, spectra, filter responses, pole-zero plots, spectrograms,
+  ...) computed by the library from the calculations each chapter asserts. Build
+  it locally with `book/build.sh`; see [book/README.md](book/README.md).
 - **Labs**: one runnable program per chapter,
   `examples/tutorial_NN_<topic>.rs`, for example
   `cargo run --release --example tutorial_01_sampling_aliasing --features educational,full_no_plotting`.
