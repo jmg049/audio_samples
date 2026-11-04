@@ -21,13 +21,18 @@
 //!     --signals target/librosa_bench/signals --pairs pairs.tsv
 //! ```
 
+mod array_ops;
 mod constant_q;
 mod convert;
 mod ctx;
 mod effects;
 mod features;
+mod inverse;
+mod notation;
 mod pitch;
+mod pitch_filterbank;
 mod rhythm;
+mod segment;
 mod sequence;
 mod spectrum;
 mod tonal;
@@ -216,6 +221,11 @@ fn build<'a, F: AudioFloat>(case: &str, ctx: &'a Ctxs<F>) -> Option<Thunk<'a>> {
                 .or_else(|| rhythm::$kind(case, $x))
                 .or_else(|| sequence::$kind(case, $x))
                 .or_else(|| convert::$kind(case, $x))
+                .or_else(|| inverse::$kind(case, $x))
+                .or_else(|| pitch_filterbank::$kind(case, $x))
+                .or_else(|| segment::$kind(case, $x))
+                .or_else(|| array_ops::$kind(case, $x))
+                .or_else(|| notation::$kind(case, $x))
         };
     }
     match ctx {

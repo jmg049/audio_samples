@@ -171,12 +171,17 @@ def register(*cases: Case) -> None:
 def all_cases() -> list[Case]:
     if not REGISTRY:
         from . import (  # noqa: F401
+            array_ops,
             constant_q,
             convert,
             effects,
             features,
+            inverse,
+            notation,
             pitch,
+            pitch_filterbank,
             rhythm,
+            segment,
             sequence,
             spectrum,
             tonal,

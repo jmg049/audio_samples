@@ -16,13 +16,21 @@ mod common;
 
 // One module per fixture area (added as the areas land).
 mod analysis_fixes;
+mod array_ops;
 mod constant_q;
 mod effects;
+mod factorization;
 mod features;
+mod inverse;
+mod linalg;
+mod mellin;
 mod non_finite;
+mod notation;
 mod pitch;
+mod pitch_filterbank;
 mod resample;
 mod rhythm;
+mod segment;
 mod sequence;
 mod spectrum;
 mod tonal;
