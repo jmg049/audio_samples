@@ -53,7 +53,7 @@ JOBS="${JOBS:-6}"
 REPEATS="${REPEATS:-5}"
 SEL="${SEL:-}"
 SIG="$REPO/target/librosa_bench/signals"
-# Same release settings as the Python bindings (thin LTO, one codegen unit), so
+# Same release settings as the Python bindings (fat LTO, one codegen unit), so
 # that "ours (py)" minus "ours (rust)" is the binding overhead; separate target
 # directory so the overrides do not invalidate target/release.
 TARGET_DIR="$REPO/target/librosa_bench/build"
@@ -67,7 +67,7 @@ for stage in "${STAGES[@]}"; do
   echo "== $stage" >&2
   case "$stage" in
     build)
-      (cd "$REPO" && CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+      (cd "$REPO" && CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
         cargo build --release --example librosa_bench --features full_no_plotting --target-dir "$TARGET_DIR")
       ;;
     signals)
