@@ -1939,7 +1939,7 @@ fn median<F: AudioFloat>(v: &mut [F]) -> F {
     if v.iter().any(|x| x.is_nan()) {
         return F::nan();
     }
-    v.sort_by(|a, b| a.as_f64().total_cmp(&b.as_f64()));
+    v.sort_unstable_by(|a, b| a.as_f64().total_cmp(&b.as_f64()));
     let n = v.len();
     if n % 2 == 1 {
         v[n / 2]

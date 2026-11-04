@@ -2269,7 +2269,7 @@ fn nn_filter_frame<F: AudioFloat>(
             NnAggregate::Median => {
                 values.clear();
                 values.extend(targets.iter().map(|&j| data[[f, j]]));
-                values.sort_by(total_cmp);
+                values.sort_unstable_by(total_cmp);
                 let m = values.len();
                 if m % 2 == 1 {
                     values[m / 2]

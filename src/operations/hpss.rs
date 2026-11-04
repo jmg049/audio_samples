@@ -569,7 +569,7 @@ fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
         }
 
         // Compute median
-        window.sort_by(f64::total_cmp);
+        window.sort_unstable_by(f64::total_cmp);
         let median = if kernel_size % 2 == 1 {
             window[kernel_size / 2]
         } else {
@@ -635,7 +635,7 @@ fn median_filter_1d_view<F>(
         }
 
         // Compute median
-        window.sort_by(f64::total_cmp);
+        window.sort_unstable_by(f64::total_cmp);
         let median = if kernel_size % 2 == 1 {
             window[kernel_size / 2]
         } else {

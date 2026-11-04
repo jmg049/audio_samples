@@ -74,7 +74,7 @@ pub fn median_filter(
         let lo = i.saturating_sub(half);
         let hi = (i + half + 1).min(signal.len().get());
         let mut window = signal[lo..hi].to_vec();
-        window.sort_by(f64::total_cmp);
+        window.sort_unstable_by(f64::total_cmp);
 
         out.push(window[window.len() / 2]);
     }

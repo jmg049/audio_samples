@@ -2815,7 +2815,7 @@ fn link_row_stats<F: AudioFloat>(rec: &impl LinkRows<F>, k: usize) -> (Vec<F>, V
                 *v = zero;
             }
         }
-        vals.sort_by(|a, b| total_cmp(*a, *b));
+        vals.sort_unstable_by(|a, b| total_cmp(*a, *b));
         vals.truncate(k);
         dist_to_k[i] = vals[vals.len() - 1];
         avg[i] = vals.iter().copied().sum::<F>() / F::of_usize(vals.len());
@@ -2858,7 +2858,7 @@ fn apply_affinity<F: AudioFloat>(
             if finite.is_empty() {
                 return err("bandwidth", "cannot estimate bandwidth from an empty graph");
             }
-            finite.sort_by(|a, b| total_cmp(*a, *b));
+            finite.sort_unstable_by(|a, b| total_cmp(*a, *b));
             let n = finite.len();
             let med = if n % 2 == 1 {
                 finite[n / 2]
@@ -3635,7 +3635,7 @@ impl SyncAggregate {
             Self::Min => x.iter().copied().fold(F::infinity(), F::min),
             Self::Median => {
                 let mut v = x.to_vec();
-                v.sort_by(|a, b| total_cmp(*a, *b));
+                v.sort_unstable_by(|a, b| total_cmp(*a, *b));
                 let n = v.len();
                 if n % 2 == 1 {
                     v[n / 2]
