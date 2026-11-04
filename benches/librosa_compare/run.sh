@@ -178,7 +178,7 @@ print(','.join(sorted({r['case'] for r in rows if r.get('ours_rss_kb') is not No
     startup)
       "$PY" "$HERE/load_bench.py" --write-files
       "$PY" "$HERE/startup_bench.py" --core "$CORE" --out "$OUT/startup.jsonl"
-      "$PY" "$HERE/startup_bench.py" --core "" --stages import,mfcc --out "$OUT/startup_default.jsonl"
+      "$PY" "$HERE/startup_bench.py" --core "" --stages import,mfcc,batch --out "$OUT/startup_default.jsonl"
       ;;
     footprint)
       "$PY" "$HERE/footprint.py" --python-repo "$REPO/../audio_samples_python" --out "$OUT/footprint.json"

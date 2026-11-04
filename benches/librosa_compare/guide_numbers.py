@@ -219,6 +219,16 @@ for fname, title in (("startup.jsonl", "## Start-up, pinned to one core, one thr
             table(["input", "settings", "ours ms", "librosa ms", "ratio"],
                   [(*k, rng(v["ours"]), rng(v["librosa"]), f"{v['ours']['median_ms'] / v['librosa']['median_ms']:.2f}") for k, v in d.items()])
 
+    for r in recs:
+        if r["stage"] == "batch":
+            w(f"Batch, {r['files']} files of {r['seconds_each']} s, {r['kind']}, {r['lib']}: " + ", ".join(f"{k} threads {v:.0f} ms" for k, v in r["ms_by_threads"].items()))
+            w()
+        if r["stage"] == "interop":
+            w("Interop (us): " + json.dumps(r["us"]))
+            w()
+            w("Shares: " + json.dumps(r["shares"]))
+            w()
+
 # ---------------------------------------------------------------------------
 p = os.path.join(out_dir, "footprint.json")
 if os.path.exists(p):

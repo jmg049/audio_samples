@@ -12,6 +12,8 @@ Stages:
   and computes MFCCs with librosa's settings.
 * ``cold``: ``import`` and ``mfcc`` with the Python installation's files evicted
   from the page cache before each process (``posix_fadvise``, no root needed).
+* ``interop``: the cost of moving 60 s of audio to and from NumPy.
+* ``batch``: MFCC of a directory of files with 1 to 16 Python threads.
 
 Set ``CORE`` to pin the processes (``taskset``), as the other stages do; the
 thread variables are set to 1 when it is given.
@@ -235,6 +237,97 @@ def stage_cold():
         record({"stage": "cold_mfcc", "name": name, "lib": lib, "input": "wav16_10s.wav", "pinned": bool(args.core)}, v)
 
 
+BATCH_CHILD = """
+import glob, json, os, time
+LIB
+from concurrent.futures import ThreadPoolExecutor
+files = sorted(glob.glob(os.path.join(DIR, "*")))
+def job(p):
+    CALL
+out = {}
+for n in (1, 2, 4, 8, 16):
+    best = []
+    for _ in range(3):
+        t = time.perf_counter()
+        if n == 1:
+            list(map(job, files))
+        else:
+            with ThreadPoolExecutor(n) as ex:
+                list(ex.map(job, files))
+        best.append(time.perf_counter() - t)
+    out[n] = sorted(best)[1] * 1e3
+print(json.dumps(out))
+"""
+
+
+def stage_batch():
+    """A directory of files, MFCC of each, 1 to 16 Python threads, default native threading."""
+    import shutil
+    import tempfile
+
+    work = tempfile.mkdtemp(prefix="batch")
+    try:
+        for kind, src in (("wav", "wav16_60s.wav"), ("flac", "flac16_60s.flac")):
+            d = os.path.join(work, kind)
+            os.makedirs(d)
+            for i in range(16):
+                shutil.copy(os.path.join(args.files, src), os.path.join(d, f"{i:02d}_{src}"))
+            for lib, lib_line, call in (
+                ("librosa", "import librosa", "y, sr = librosa.load(p); return librosa.feature.mfcc(y=y, sr=sr)"),
+                ("ours", "import audio_samples as aus",
+                 "a = aus.io.read(p, as_type=aus.SampleType.F32).to_mono().resample(22050, 'high'); return a.mfcc_frames(top_db=80.0)"),
+            ):
+                code = BATCH_CHILD.replace("LIB", lib_line).replace("DIR", repr(d)).replace("CALL", call)
+                cp = subprocess.run([sys.executable, "-W", "ignore", "-c", code], capture_output=True, text=True,
+                                    env=dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1"))
+                if cp.returncode != 0:
+                    raise SystemExit(cp.stderr[-600:])
+                rec = {"stage": "batch", "kind": kind, "lib": lib, "files": 16, "seconds_each": 60,
+                       "ms_by_threads": json.loads(cp.stdout.strip().splitlines()[-1])}
+                print(rec, file=sys.stderr)
+                with open(args.out, "a") as fh:
+                    fh.write(json.dumps(rec) + "\n")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def stage_interop():
+    """What crossing the NumPy boundary costs, 60 s of float32 at 22050 Hz."""
+    code = '''
+import json, time
+import numpy as np, audio_samples as aus
+y = np.random.default_rng(0).standard_normal(22050 * 60).astype(np.float32)
+a = aus.AudioSamples.new_mono(y, 22050)
+owned = a.resample(16000, "high")
+stereo = aus.AudioSamples.new_multi(np.stack([y, y]), 22050)
+def med(f, n=201):
+    ts = []
+    for _ in range(n):
+        t = time.perf_counter_ns(); r = f(); ts.append(time.perf_counter_ns() - t); del r
+    return sorted(ts)[n // 2] / 1e3
+out = {
+  "new_mono (wrap a NumPy array)": med(lambda: aus.AudioSamples.new_mono(y, 22050)),
+  "new_multi (wrap a NumPy array)": med(lambda: aus.AudioSamples.new_multi(stereo.to_numpy(), 22050)),
+  "to_numpy, audio wrapping a NumPy array": med(lambda: a.to_numpy()),
+  "numpy.asarray, audio wrapping a NumPy array": med(lambda: np.asarray(a)),
+  "to_numpy, audio made by a method (copy)": med(lambda: owned.to_numpy(), 51),
+  "numpy.asarray, audio made by a method": med(lambda: np.asarray(owned), 51),
+  "melspectrogram result (already an ndarray)": 0.0,
+}
+shares = {"new_mono shares memory": bool(np.shares_memory(a.to_numpy(), y)), "to_numpy of owned shares between calls": bool(np.shares_memory(owned.to_numpy(), owned.to_numpy())),
+          "asarray of owned shares between calls": bool(np.shares_memory(np.asarray(owned), np.asarray(owned)))}
+print(json.dumps({"us": out, "shares": shares}))
+'''
+    env = child_env(bool(args.core))
+    cp = subprocess.run(prefix() + [sys.executable, "-W", "ignore", "-c", code], env=env, capture_output=True, text=True)
+    if cp.returncode != 0:
+        raise SystemExit(cp.stderr[-600:])
+    rec = {"stage": "interop", **json.loads(cp.stdout.strip().splitlines()[-1])}
+    print(rec, file=sys.stderr)
+    with open(args.out, "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
 ap = argparse.ArgumentParser()
 ap.add_argument("--files", default=os.path.join(HERE, "..", "..", "target", "librosa_bench", "files"))
 ap.add_argument("--signals", default=os.path.join(HERE, "..", "..", "target", "librosa_bench", "signals"))
@@ -242,10 +335,11 @@ ap.add_argument("--out", required=True)
 ap.add_argument("--repeats", type=int, default=30)
 ap.add_argument("--first-repeats", type=int, default=7)
 ap.add_argument("--cold-repeats", type=int, default=10)
-ap.add_argument("--stages", default="import,first,mfcc,cold")
+ap.add_argument("--stages", default="import,first,mfcc,cold,interop")
 ap.add_argument("--core", default=os.environ.get("CORE", ""))
 args = ap.parse_args()
 
 if __name__ == "__main__":
     for stage in args.stages.split(","):
-        {"import": stage_import, "first": stage_first, "mfcc": stage_mfcc, "cold": stage_cold}[stage]()
+        {"import": stage_import, "first": stage_first, "mfcc": stage_mfcc, "cold": stage_cold,
+         "batch": stage_batch, "interop": stage_interop}[stage]()
