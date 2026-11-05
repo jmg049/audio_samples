@@ -622,41 +622,6 @@ where
     }
 }
 
-/// Runs an in-place operation on integer audio through its `f64` version, so
-/// that integer sample types share that one compiled copy: every sample goes to
-/// `f64` and back with the audio-aware conversion, which is what the operation
-/// does per sample for those types.
-#[cfg(any(
-    feature = "processing",
-    feature = "editing",
-    feature = "iir-filtering",
-    feature = "channels"
-))]
-pub(crate) fn in_place_via_f64<T, R>(
-    audio: &mut crate::AudioSamples<'_, T>,
-    f: impl FnOnce(&mut crate::AudioSamples<'static, f64>) -> R,
-) -> R
-where
-    T: StandardSample,
-{
-    let mut float: crate::AudioSamples<'static, f64> = audio.map_into(T::convert_to);
-    let result = f(&mut float);
-    match (audio.data_mut(), float.data()) {
-        (crate::AudioData::Mono(dst), crate::AudioData::Mono(src)) => {
-            for (d, &s) in dst.iter_mut().zip(src.iter()) {
-                *d = s.convert_to();
-            }
-        }
-        (crate::AudioData::Multi(dst), crate::AudioData::Multi(src)) => {
-            for (d, &s) in dst.iter_mut().zip(src.iter()) {
-                *d = s.convert_to();
-            }
-        }
-        _ => unreachable!("the layout does not change"),
-    }
-    result
-}
-
 /// Converts a raw-valued `f64` (on the same scale as the sample type's own
 /// values, e.g. `-32768.0..=32767.0` for `i16`) back to `T`.
 ///
@@ -1479,7 +1444,6 @@ impl AudioSample for f32 {
     }
 
     #[inline]
-    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
     fn avx2_abs_max(slice: &[Self]) -> Option<Self> {
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") {

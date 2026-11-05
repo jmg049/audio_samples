@@ -750,9 +750,6 @@ where
     /// stereo.pan_in_place(0.5).unwrap();
     /// ```
     fn pan_in_place(&mut self, pan_value: f64) -> AudioSampleResult<()> {
-        if !T::SAMPLE_TYPE.is_float() {
-            return crate::traits::in_place_via_f64(self, |a| a.pan_in_place(pan_value));
-        }
         match self.data_mut() {
             AudioData::Mono(_) => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "audio_data",
@@ -821,9 +818,6 @@ where
     /// stereo.balance_in_place(-0.3).unwrap();
     /// ```
     fn balance_in_place(&mut self, balance: f64) -> AudioSampleResult<()> {
-        if !T::SAMPLE_TYPE.is_float() {
-            return crate::traits::in_place_via_f64(self, |a| a.balance_in_place(balance));
-        }
         match self.data_mut() {
             AudioData::Mono(_) => Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "audio_data",
@@ -836,11 +830,21 @@ where
                         "Balancing requires stereo audio",
                     )));
                 }
-                let clamped = balance.clamp(-1.0, 1.0);
-                data.index_axis_mut(Axis(0), 0)
-                    .mapv_inplace(|x| apply_channel_gain(x, 1.0 - clamped));
-                data.index_axis_mut(Axis(0), 1)
-                    .mapv_inplace(|x| apply_channel_gain(x, 1.0 + clamped));
+
+                // left
+                {
+                    let left = &mut data.index_axis_mut(Axis(0), 0);
+                    let left_gain = 1.0 - balance.clamp(-1.0, 1.0);
+                    left.mapv_inplace(|x| apply_channel_gain(x, left_gain));
+                }
+
+                // right
+                {
+                    let right = &mut data.index_axis_mut(Axis(0), 1);
+                    let right_gain = 1.0 + balance.clamp(-1.0, 1.0);
+                    right.mapv_inplace(|x| apply_channel_gain(x, right_gain));
+                }
+
                 Ok(())
             }
         }

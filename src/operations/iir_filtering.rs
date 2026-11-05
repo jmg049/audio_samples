@@ -1204,10 +1204,6 @@ where
 /// are converted to `f64`, filtered, and converted back (clamped to full scale
 /// for integer types) in a single pass without intermediate buffers.
 pub(crate) fn apply_sos_to_audio<T: StandardSample>(audio: &mut AudioSamples<'_, T>, sos: &[Sos]) {
-    if !T::SAMPLE_TYPE.is_float() {
-        crate::traits::in_place_via_f64(audio, |a| apply_sos_to_audio(a, sos));
-        return;
-    }
     let template = biquads(sos);
     match audio.data_mut() {
         AudioData::Mono(samples) => {

@@ -1236,9 +1236,11 @@ where
     let channels = audio.num_channels().get() as usize;
     // Every sample is written by the engine: no zero-initialisation pass.
     let mut flat: Vec<T> = Vec::with_capacity(channels * n_out);
+    let to_f = |s: T| F::of(s.to_float().as_f64());
+    let from_f = |v: F| T::from_float(<T::Float as AudioFloat>::of(v.as_f64()));
     let spare = &mut flat.spare_capacity_mut()[..channels * n_out];
     let mut run = |c: usize, x: &[T]| {
-        run_engine_on(&engine, x, &mut spare[c * n_out..(c + 1) * n_out]);
+        engine.run(x, &mut spare[c * n_out..(c + 1) * n_out], &to_f, &from_f);
     };
     if let Some(mono) = audio.as_mono() {
         match mono.as_slice() {
@@ -1270,38 +1272,6 @@ where
             AudioSampleError::Parameter(ParameterError::invalid_value("audio", e.to_string()))
         })?;
         AudioSamples::new_multi_channel(data, target_sample_rate)
-    }
-}
-
-/// Runs the engine for one channel. The engine is only compiled for its own
-/// float type: floats go through it in place, and other sample types through a
-/// float copy of the input and of the output.
-fn run_engine_on<T, F>(engine: &engine::Engine<F>, x: &[T], out: &mut [std::mem::MaybeUninit<T>])
-where
-    T: StandardSample,
-    F: engine::RsFloat,
-{
-    if T::SAMPLE_TYPE == F::SAMPLE_TYPE {
-        // SAFETY: the sample types are equal, so `T` and `F` are the same type.
-        let (x, out) = unsafe {
-            (
-                std::slice::from_raw_parts(x.as_ptr().cast::<F>(), x.len()),
-                std::slice::from_raw_parts_mut(
-                    out.as_mut_ptr().cast::<std::mem::MaybeUninit<F>>(),
-                    out.len(),
-                ),
-            )
-        };
-        engine.run(x, out);
-    } else {
-        let x_f: Vec<F> = x.iter().map(|&s| F::of(s.to_float().as_f64())).collect();
-        let mut y_f: Vec<F> = Vec::with_capacity(out.len());
-        engine.run(&x_f, &mut y_f.spare_capacity_mut()[..out.len()]);
-        // SAFETY: `Engine::run` wrote every element of the range.
-        unsafe { y_f.set_len(out.len()) };
-        for (o, &v) in out.iter_mut().zip(&y_f) {
-            o.write(T::from_float(<T::Float as AudioFloat>::of(v.as_f64())));
-        }
     }
 }
 
@@ -1346,7 +1316,7 @@ pub(crate) fn resample_float_rows<F: AudioFloat>(
     }
 }
 
-fn resample_rows_in<T: AudioFloat + StandardSample, F: engine::RsFloat>(
+fn resample_rows_in<T: AudioFloat, F: engine::RsFloat>(
     rows: ndarray::ArrayView2<'_, T>,
     in_sr: u32,
     out_sr: u32,
@@ -1387,6 +1357,8 @@ fn resample_rows_in<T: AudioFloat + StandardSample, F: engine::RsFloat>(
     };
     let mut out = ndarray::Array2::<T>::zeros((rows.nrows(), n_out));
     let keep = n_out.min(natural);
+    let to_f = |s: T| F::of(s.as_f64());
+    let from_f = |v: F| T::of(v.as_f64());
     for (row, mut dst) in rows.outer_iter().zip(out.outer_iter_mut()) {
         let dst = dst
             .as_slice_mut()
@@ -1397,8 +1369,8 @@ fn resample_rows_in<T: AudioFloat + StandardSample, F: engine::RsFloat>(
             &mut *(std::ptr::from_mut(&mut dst[..keep]) as *mut [std::mem::MaybeUninit<T>])
         };
         match row.as_slice() {
-            Some(x) => run_engine_on(&engine, x, dst),
-            None => run_engine_on(&engine, &row.to_vec(), dst),
+            Some(x) => engine.run(x, dst, &to_f, &from_f),
+            None => engine.run(&row.to_vec(), dst, &to_f, &from_f),
         }
     }
     Ok(out)

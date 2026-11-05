@@ -255,7 +255,6 @@ pub(super) fn cached_engine<F: RsFloat>(
 pub(super) struct Engine<F> {
     a: FftStage<F>,
     b: Option<Interp<F>>,
-    #[cfg(target_arch = "x86_64")]
     avx2_fma: bool,
 }
 
@@ -270,7 +269,6 @@ impl<F: RsFloat> Engine<F> {
         Some(Self {
             a,
             b,
-            #[cfg(target_arch = "x86_64")]
             avx2_fma: super::has_avx2_fma_cached(),
         })
     }
@@ -286,14 +284,20 @@ impl<F: RsFloat> Engine<F> {
     /// Resamples one channel `x` into `out`, whose length is the number of
     /// output samples to produce (at most the full output length). Every
     /// element of `out` is written.
-    pub(super) fn run(&self, x: &[F], out: &mut [MaybeUninit<F>]) {
+    pub(super) fn run<T: Copy>(
+        &self,
+        x: &[T],
+        out: &mut [MaybeUninit<T>],
+        to_f: &impl Fn(T) -> F,
+        from_f: &impl Fn(F) -> T,
+    ) {
         #[cfg(target_arch = "x86_64")]
         if self.avx2_fma {
             // SAFETY: `avx2_fma` is only true when the CPU supports AVX2 and FMA.
-            unsafe { run_avx2_fma(self, x, out) };
+            unsafe { run_avx2_fma(self, x, out, to_f, from_f) };
             return;
         }
-        run_impl::<F, F, false>(self, x, out, &|s| s, &|v| v);
+        run_impl::<T, F, false>(self, x, out, to_f, from_f);
     }
 }
 
@@ -303,8 +307,14 @@ impl<F: RsFloat> Engine<F> {
 /// The CPU must support `avx2` and `fma`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn run_avx2_fma<F: RsFloat>(e: &Engine<F>, x: &[F], out: &mut [MaybeUninit<F>]) {
-    run_impl::<F, F, true>(e, x, out, &|s| s, &|v| v);
+unsafe fn run_avx2_fma<T: Copy, F: RsFloat>(
+    e: &Engine<F>,
+    x: &[T],
+    out: &mut [MaybeUninit<T>],
+    to_f: &impl Fn(T) -> F,
+    from_f: &impl Fn(F) -> T,
+) {
+    run_impl::<T, F, true>(e, x, out, to_f, from_f);
 }
 
 #[inline(always)]

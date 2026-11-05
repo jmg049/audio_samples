@@ -340,18 +340,32 @@ fn autocorrelation_sums<T: StandardSample>(x: &[T], max_lag: usize) -> Option<Ve
     Some(out)
 }
 
-/// Sign changes between consecutive samples. Audio-aware conversion: u8
-/// mid-scale (128) maps to 0.0, so crossings are counted about the true zero
-/// level. Written without branches so that the loop vectorises.
+/// Sign changes between consecutive samples, compared in the sample's own type. Mid-scale, which
+/// converts to 0.0 (128 for u8), is the zero level. Written without branches and counted in a word
+/// of the width of `T`, over blocks for narrower types, so that the loop vectorises.
 fn count_zero_crossings<T: StandardSample>(samples: &[T]) -> usize {
-    samples
-        .windows(2)
-        .map(|w| {
-            let prev: f64 = w[0].convert_to();
-            let curr: f64 = w[1].convert_to();
-            usize::from(((prev > 0.0) & (curr <= 0.0)) | ((prev <= 0.0) & (curr > 0.0)))
-        })
-        .sum()
+    const BLOCK: usize = 1 << 16;
+    let zero: T = crate::traits::ConvertTo::convert_to(0.0f64);
+    if size_of::<T>() == 8 {
+        return samples
+            .windows(2)
+            .map(|w| {
+                let (p, c) = (w[0], w[1]);
+                usize::from(((p > zero) & (c <= zero)) | ((p <= zero) & (c > zero)))
+            })
+            .sum();
+    }
+    let (mut previous, mut total) = (samples, 0usize);
+    while previous.len() >= 2 {
+        let pairs = previous.len().min(BLOCK + 1);
+        let mut count = 0u32;
+        for (&p, &c) in previous[..pairs - 1].iter().zip(&previous[1..pairs]) {
+            count += u32::from(((p > zero) & (c <= zero)) | ((p <= zero) & (c > zero)));
+        }
+        total += count as usize;
+        previous = &previous[pairs - 1..];
+    }
+    total
 }
 
 impl<T> AudioStatistics for AudioSamples<'_, T>

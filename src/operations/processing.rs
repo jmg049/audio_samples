@@ -623,10 +623,6 @@ where
     /// ```
     #[inline]
     fn scale_in_place(&mut self, factor: f64) {
-        if !T::SAMPLE_TYPE.is_float() {
-            crate::traits::in_place_via_f64(self, |a| a.scale_in_place(factor));
-            return;
-        }
         match self.data_mut() {
             AudioData::Mono(arr) => arr.mapv_inplace(|x| apply_gain_to_sample(x, factor)),
             AudioData::Multi(arr) => arr.mapv_inplace(|x| apply_gain_to_sample(x, factor)),
