@@ -10,6 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
 
 jobs:
   fmt:
@@ -21,8 +22,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --no-self-update
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
       - run: cargo fmt --all --check
 
   clippy:
@@ -34,8 +35,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy --no-self-update
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Lint levels are configured via the [lints] table in Cargo.toml; `-D
       # warnings` is scoped to the clippy step (not a global RUSTFLAGS) so it
@@ -62,8 +63,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: test
         env:
@@ -88,8 +89,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo doc --no-deps --features full_no_plotting
       - run: cargo doc --no-deps --features full
@@ -117,8 +118,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cargo-hack
