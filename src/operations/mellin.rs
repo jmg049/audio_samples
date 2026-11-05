@@ -196,12 +196,8 @@ pub fn mellin_transform<F: AudioFloat>(
         return invalid("n_fmt", "the grid has repeated positions");
     }
 
-    let xi = Array1::from(grid);
-    let window: Vec<F> = xi
-        .iter()
-        .map(|&x| of::<F>(x.powf(config.beta) * nf.sqrt() / n_fmt as f64))
-        .collect();
-    let resampled = interp1d(
+    let mut xi = Array1::from(grid);
+    let mut resampled = interp1d(
         &positions,
         y,
         xi.view().into_dyn(),
@@ -209,26 +205,40 @@ pub fn mellin_transform<F: AudioFloat>(
         F::zero(),
         axis,
     )?;
+    drop(positions);
+    // The window replaces the grid, and the windowed samples replace the resampled ones.
+    xi.mapv_inplace(|x| x.powf(config.beta) * nf.sqrt() / n_fmt as f64);
+    for mut lane in resampled.lanes_mut(axis) {
+        for (v, &w) in lane.iter_mut().zip(&xi) {
+            *v *= of::<F>(w);
+        }
+    }
+    drop(xi);
     let plan = F::with_real_fft_planner(|p| p.plan_fft_forward(n_fmt));
     let mut shape = resampled.shape().to_vec();
     shape[axis.index()] = n_fmt / 2 + 1;
     let mut out = ArrayD::from_elem(IxDyn(&shape), Complex::new(F::zero(), F::zero()));
-    let mut input = plan.make_input_vec();
-    let mut output = plan.make_output_vec();
     let mut scratch = plan.make_scratch_vec();
+    let (mut input, mut output) = (Vec::new(), Vec::new());
     Zip::from(out.lanes_mut(axis))
-        .and(resampled.lanes(axis))
-        .for_each(|mut o, lane| {
-            for ((slot, v), w) in input.iter_mut().zip(lane.iter()).zip(&window) {
-                *slot = *v * *w;
+        .and(resampled.lanes_mut(axis))
+        .for_each(|mut o, mut lane| {
+            // The buffers have this plan's lengths, so the transforms cannot fail. Contiguous
+            // lanes, which a one-dimensional input has, are transformed where they are.
+            if let (Some(from), Some(to)) = (lane.as_slice_mut(), o.as_slice_mut()) {
+                let done = plan.process_with_scratch(from, to, &mut scratch);
+                debug_assert!(done.is_ok());
+                return;
             }
-            // The buffers come from this plan, so their lengths are right.
+            input.clear();
+            input.extend(lane.iter().copied());
+            output.resize(o.len(), Complex::new(F::zero(), F::zero()));
             if plan
                 .process_with_scratch(&mut input, &mut output, &mut scratch)
                 .is_ok()
             {
                 for (slot, v) in o.iter_mut().zip(&output) {
-                    *slot = Complex::new(v.re, v.im);
+                    *slot = *v;
                 }
             }
         });
