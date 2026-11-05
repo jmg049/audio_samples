@@ -276,7 +276,9 @@ pub fn valid_intervals(intervals: ArrayView2<'_, f64>) -> AudioSampleResult<()> 
         return invalid("intervals", "must have shape (n, 2)");
     }
     let reversed = if let Some(flat) = intervals.as_slice() {
-        flat.chunks_exact(2)
+        flat.as_chunks::<2>()
+            .0
+            .iter()
             .fold(false, |bad, r| bad | (r[0] > r[1]))
     } else {
         intervals.rows().into_iter().any(|r| r[0] > r[1])
@@ -686,18 +688,14 @@ fn copy_run<'a, A: Clone>(
         (false, false) | (true, true) => write_all(segment, source),
         _ => {
             // Blocks of a fixed size let the reversed copy vectorise.
-            let mut blocks = segment.chunks_exact_mut(8);
+            let (blocks, tail) = segment.as_chunks_mut::<8>();
             let mut sources = source.rchunks_exact(8);
-            for (o, v) in (&mut blocks).zip(&mut sources) {
+            for (o, v) in blocks.iter_mut().zip(&mut sources) {
                 for (slot, value) in o.iter_mut().zip(v.iter().rev()) {
                     slot.write(value.clone());
                 }
             }
-            for (o, v) in blocks
-                .into_remainder()
-                .iter_mut()
-                .zip(sources.remainder().iter().rev())
-            {
+            for (o, v) in tail.iter_mut().zip(sources.remainder().iter().rev()) {
                 o.write(v.clone());
             }
         }
