@@ -1153,7 +1153,7 @@ mod tests {
         let interleaved = Array2::from_shape_vec(ndarray::ShapeBuilder::f((2, frames)), v).unwrap();
         assert!(interleaved_stereo(interleaved.view()).is_some());
         let sr = crate::sample_rate!(8000);
-        let a = AudioSamples::new_multi_channel(planar.clone(), sr)
+        let a = AudioSamples::new_multi_channel(planar, sr)
             .unwrap()
             .to_mono(MonoConversionMethod::Average)
             .unwrap();

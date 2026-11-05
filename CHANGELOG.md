@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Faster, with the same results.** The median filter behind `hpss_masks` and `hpss_magnitude` slides a
+  sorted window. `melspectrogram` and `mfcc_frames` project each block of frames rather than
+  holding the whole spectrogram. `to_mono` makes one pass over interleaved stereo.
+- **Plotting.** A spectrogram zoomed below 1 kHz is labelled in kHz, the unit of its values.
 - **librosa parity.** A librosa 1.0-compatible API alongside the existing one:
   the `AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
   `AudioRhythm`, `AudioEffects` and `AudioPitchTracking` traits, the
