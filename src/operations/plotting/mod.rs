@@ -282,19 +282,15 @@ pub(crate) fn configure_time_axis(
     axis
 }
 
-/// Configures an axis for frequency display with automatic Hz/kHz switching.
-///
-/// If `max_freq > 1000.0`, tick values are formatted in kHz with one decimal place
-/// and the title is suffixed with `" (kHz)"`. Otherwise, integer Hz formatting is used
-/// and the title is suffixed with `" (Hz)"`.
+/// Configures an axis for frequency display in Hz or kHz.
 ///
 /// # Arguments
 ///
 /// - `axis` - The Plotly axis to configure.
 /// - `title` - Optional title string. If `None`, defaults to `"Frequency (Hz)"` or
-///   `"Frequency (kHz)"` based on `max_freq`. If provided without parentheses, the
-///   appropriate unit suffix is auto-appended.
-/// - `max_freq` - Maximum frequency value used to decide the unit.
+///   `"Frequency (kHz)"`. If provided without parentheses, the unit is appended.
+/// - `use_khz` - Whether the plotted values are in kHz.
+/// - `max_freq_hz` - The top of the visible range in Hz, which sets the tick decimals.
 ///
 /// # Returns
 ///
@@ -302,16 +298,15 @@ pub(crate) fn configure_time_axis(
 ///
 /// # Note
 ///
-/// When kHz formatting is selected, the **caller** must divide tick values by `1000.0`
-/// when setting trace data; this function only adjusts axis display settings.
+/// The caller scales the trace data; this function only adjusts axis display settings.
 pub(crate) fn configure_frequency_axis(
     mut axis: plotly::layout::Axis,
     title: Option<String>,
-    max_freq: f64,
+    use_khz: bool,
+    max_freq_hz: f64,
 ) -> plotly::layout::Axis {
-    // Use kHz if max frequency is above 1000 Hz
-    let use_khz = max_freq > 1000.0;
-
+    // `use_khz` is the unit of the plotted values, which the caller chose from
+    // the whole frequency axis; the visible range can be narrower.
     let title_text = title.map_or_else(
         || {
             if use_khz {
@@ -332,15 +327,14 @@ pub(crate) fn configure_frequency_axis(
     );
     axis = axis.title(title_text);
 
-    // Format ticks appropriately
-    if use_khz {
-        // One decimal place for kHz
-        axis = axis.tick_format(".1f");
-        // Note: Tick values will need to be divided by 1000 when setting data
+    // Enough decimals that ticks stay distinct when zoomed in on low frequencies.
+    axis = if !use_khz {
+        axis.tick_format(".0f")
+    } else if max_freq_hz < 2000.0 {
+        axis.tick_format(".2f")
     } else {
-        // Integer formatting for Hz
-        axis = axis.tick_format(".0f");
-    }
+        axis.tick_format(".1f")
+    };
 
     axis
 }
