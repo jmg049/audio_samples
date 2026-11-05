@@ -6,6 +6,25 @@ All notable changes to this project are documented here.
 
 - **Minimum supported Rust version is now 1.95**, the version the `non-empty-slice`,
   `non-empty-iter` and `non-zero-size` dependencies require.
+- **Everything else librosa 1.0 computes.** New modules: `operations::linalg` (feature `linalg`:
+  `nnls`, `nnls_matrix`, `pinv`, `eigh`, `svd`, `randomized_svd`); `operations::inverse` (feature
+  `feature-inversion`: `mel_to_stft`, `mel_to_audio`, `mfcc_to_mel`, `mfcc_to_audio`);
+  `operations::factorization` (feature `factorization`: `nmf`, `nmf_transform`, `decompose`, with
+  coordinate descent and multiplicative updates and the NNDSVD initialisations);
+  `operations::pitch_filterbank` (feature `pitch-filterbank`: `mr_frequencies`,
+  `semitone_filterbank`, `iirt`); `operations::mellin` (feature `mellin`: `mellin_transform`);
+  `operations::segment` (feature `segmentation`: `diagonal_filter`, `path_enhance`,
+  `timelag_filter`, `agglomerative`, `subsegment`); `operations::plotting::matrix` (`plot_matrix`,
+  `plot_waveform_bars`, `plot_waveform_f0`); `utils::array_ops` (`localmax`, `localmin`,
+  `match_events`, `match_intervals`, `interp1d`, `pad_center`, `axis_sort`, `sparsify_rows`,
+  `zero_crossings`, `tone`, `chirp` and others); `utils::notation` (tuning systems, the Functional Just System, svara, mela and thaat
+  names, and `midi_name` with `octave`, `cents`, `key` and `unicode`). Also
+  `sequence::path_to_steps`, `audio_math::blocks_to_{frames,samples,time}`,
+  `audio_math::note_to_midi_fractional`, `ExampleClip::description`,
+  `constant_q::vqt_with_intervals` for bins in any tuning system, and
+  `constant_q::{wavelet_with_alpha, wavelet_lengths_with_alpha}` for explicit bandwidths. All of
+  them are checked against librosa 1.0.0 golden fixtures; `documentation/LIBROSA_MIGRATION.md`
+  maps each librosa name.
 - **Integer arithmetic saturates.** `+`, `-`, `*`, `/` and negation of integer `AudioSamples` overflowed the
   sample type, which panicked in a debug build and wrapped in a release build; dividing by zero panicked. They now saturate
   at the type's limits, and an integer divided by zero gives the limit with its sign (zero divided by zero gives

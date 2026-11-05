@@ -45,6 +45,9 @@ pub mod composite;
 pub mod dsp_overlays;
 /// Lissajous (stereo X-Y) correlation plotting.
 pub mod lissajous;
+
+/// Feature matrices and simplified waveforms.
+pub mod matrix;
 /// Phase spectrum visualization.
 pub mod phase_spectrum;
 /// Spectrogram plotting with various frequency scales and amplitude encodings.

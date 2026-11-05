@@ -93,6 +93,29 @@ impl ExampleClip {
         }
     }
 
+    /// One sentence on what the clip contains.
+    ///
+    /// # Returns
+    /// A description with the clip's known contents.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Chords => {
+                "C, G, Am and F in equal temperament, one chord per four beats at 110 BPM."
+            }
+            Self::DrumLoop => {
+                "Kick on beats 1 and 3, snare on beats 2 and 4, hi-hat on every eighth note, at 110 BPM."
+            }
+            Self::ChordsAndDrums => "The chords and the drum loop, mixed at equal gain.",
+            Self::Speech => {
+                "Source-filter synthesis of sung vowels with formant resonators, repeating every 6 s."
+            }
+            Self::NoisyRecording => {
+                "The speech clip plus low-passed noise and 50 Hz mains hum, at 15 dB SNR over the voiced parts."
+            }
+        }
+    }
+
     /// Finds a clip by the name given by [`name`](Self::name).
     ///
     /// # Returns

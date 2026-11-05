@@ -3849,6 +3849,66 @@ where
     Ok(out)
 }
 
+/// The fractional index on one side of an alignment path for each frame on the other.
+///
+/// Frames between two path points are interpolated linearly. A frame that several path
+/// points share takes the last of them in the path's order.
+///
+/// # Arguments
+/// - `path`: `[x, y]` index pairs, in any order.
+/// - `inverse`: false gives `x` for each frame of `y`, true gives `y` for each frame of `x`.
+///
+/// # Returns
+/// One value per frame from the smallest to the largest frame on the path.
+///
+/// # Errors
+/// [`ParameterError`] if `path` has fewer than two points.
+///
+/// # Examples
+/// ```
+/// use audio_samples::operations::sequence::path_to_steps;
+///
+/// let steps = path_to_steps(&[[0, 0], [2, 2]], false).unwrap();
+/// assert_eq!(steps.to_vec(), vec![0.0, 1.0, 2.0]);
+/// ```
+pub fn path_to_steps(path: &[[usize; 2]], inverse: bool) -> AudioSampleResult<Array1<f64>> {
+    if path.len() < 2 {
+        return err("path", "must have at least two points");
+    }
+    let (from, to) = if inverse { (1, 0) } else { (0, 1) };
+    let (first, last) = path.iter().fold((usize::MAX, 0), |(lo, hi), p| {
+        (lo.min(p[to]), hi.max(p[to]))
+    });
+    // The value of the last path point at each frame, in the path's order.
+    let span = last - first + 1;
+    let mut value = vec![f64::NAN; span];
+    for p in path {
+        value[p[to] - first] = p[from] as f64;
+    }
+    // Frames with no point lie on the line between their neighbours with a point; the first
+    // point of a frame starts the next segment, so it is the source of the slope.
+    let mut leading = vec![f64::NAN; span];
+    for p in path.iter().rev() {
+        leading[p[to] - first] = p[from] as f64;
+    }
+    let mut out = value;
+    let mut previous = 0;
+    for frame in 1..span {
+        if out[frame].is_nan() {
+            continue;
+        }
+        if frame - previous > 1 {
+            let (y0, y1) = (out[previous], leading[frame]);
+            let gap = (frame - previous) as f64;
+            for (k, slot) in out[previous + 1..frame].iter_mut().enumerate() {
+                *slot = y0 + (y1 - y0) * (k + 1) as f64 / gap;
+            }
+        }
+        previous = frame;
+    }
+    Ok(Array1::from(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

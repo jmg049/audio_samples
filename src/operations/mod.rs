@@ -113,6 +113,24 @@ pub mod envelopes;
 #[cfg(feature = "sequence")]
 pub mod sequence;
 
+#[cfg(feature = "linalg")]
+pub mod linalg;
+
+#[cfg(feature = "feature-inversion")]
+pub mod inverse;
+
+#[cfg(feature = "factorization")]
+pub mod factorization;
+
+#[cfg(feature = "pitch-filterbank")]
+pub mod pitch_filterbank;
+
+#[cfg(feature = "mellin")]
+pub mod mellin;
+
+#[cfg(feature = "segmentation")]
+pub mod segment;
+
 #[cfg(feature = "feature-extraction")]
 pub mod tonal;
 

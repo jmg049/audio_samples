@@ -172,6 +172,12 @@ fixed-size-audio = [
 feature-extraction = ["transforms"] # Frame-wise (librosa-style) spectral, rhythmic and tonal features
 effects = ["transforms", "resampling", "editing", "sequence"] # Time-stretch, pitch-shift, pre-emphasis, dB trim/split, librosa-style HPSS
 sequence = [] # Sequence alignment and decoding: DTW, Viterbi, transition matrices
+linalg = [] # Dense linear algebra: symmetric eigenproblem, SVD, pseudo-inverse, non-negative least squares
+feature-inversion = ["feature-extraction", "effects", "linalg"] # Mel and MFCC inversion to spectrograms and audio
+factorization = ["linalg"] # Non-negative matrix factorisation of spectrograms
+pitch-filterbank = ["iir-filtering", "resampling", "transforms"] # Multirate semitone filterbank and IIR time-frequency representation
+mellin = ["transforms"] # Fast Mellin (scale) transform
+segmentation = ["sequence", "transforms"] # Path enhancement, temporally constrained clustering, subsegmentation
 
 full = ["full_no_plotting", "plotting"]
 
@@ -200,6 +206,12 @@ full_no_plotting = [
     "feature-extraction",
     "effects",
     "sequence",
+    "linalg",
+    "feature-inversion",
+    "factorization",
+    "pitch-filterbank",
+    "mellin",
+    "segmentation",
 ]
 
 educational = ["dep:explainable", "dep:term-maths", "dep:open", "processing", "fancy"]

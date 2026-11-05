@@ -61,12 +61,14 @@
 //! assert!(!regions.is_empty());
 //! ```
 
+pub mod array_ops;
 pub mod audio_math;
 pub mod comparison;
 pub mod detection;
 pub mod example_clips;
 pub(crate) mod fast_math;
 pub mod generation;
+pub mod notation;
 // Used by the spectrum, feature and pitch modules; with only some of those
 // features enabled, parts of these helpers are unused.
 #[cfg_attr(

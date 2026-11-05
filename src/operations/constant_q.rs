@@ -650,6 +650,136 @@ pub fn wavelet(
     Ok((filters, lengths))
 }
 
+/// Smooths each row of a [`cq_to_chroma`] map by centred convolution with `window` along the
+/// constant-Q bins, keeping their number.
+///
+/// # Arguments
+/// - `map`: the map; rows are chroma bins and columns constant-Q bins.
+/// - `window`: the weights.
+///
+/// # Examples
+/// ```rust
+/// use audio_samples::operations::constant_q::smooth_chroma_map;
+/// use ndarray::array;
+///
+/// let mut map = array![[0.0, 1.0, 0.0]];
+/// smooth_chroma_map(&mut map, &[0.25, 0.5, 0.25]);
+/// assert_eq!(map, array![[0.25, 0.5, 0.25]]);
+/// ```
+pub fn smooth_chroma_map(map: &mut Array2<f64>, window: &[f64]) {
+    if window.is_empty() {
+        return;
+    }
+    let start = (window.len() - 1) / 2;
+    let mut source = vec![0.0; map.ncols()];
+    for mut row in map.rows_mut() {
+        for (o, &v) in source.iter_mut().zip(row.iter()) {
+            *o = v;
+        }
+        for (j, slot) in row.iter_mut().enumerate() {
+            let position = j + start;
+            *slot = window
+                .iter()
+                .take(position + 1)
+                .enumerate()
+                .filter_map(|(i, &weight)| source.get(position - i).map(|&v| weight * v))
+                .sum();
+        }
+    }
+}
+
+/// [`wavelet_lengths`] with the relative bandwidth of each filter given.
+///
+/// # Arguments
+/// - `freqs`: centre frequencies, ascending and positive.
+/// - `sample_rate`: in Hz.
+/// - `config`: the filter settings.
+/// - `alpha`: the relative bandwidth per frequency; finite and positive.
+///
+/// # Returns
+/// The lengths and the highest cut-off, as for [`wavelet_lengths`].
+///
+/// # Errors
+/// As [`wavelet_lengths`], and [`ParameterError`] for an invalid `alpha`.
+///
+/// # Examples
+/// ```rust
+/// use audio_samples::operations::constant_q::{WaveletConfig, wavelet_lengths_with_alpha};
+///
+/// let cfg = WaveletConfig::default();
+/// let (lengths, _) = wavelet_lengths_with_alpha(&[440.0, 880.0], 22050.0, &cfg, &[0.5, 0.5]).unwrap();
+/// assert!((lengths[0] - 2.0 * lengths[1]).abs() < 1e-9);
+/// ```
+pub fn wavelet_lengths_with_alpha(
+    freqs: &[f64],
+    sample_rate: f64,
+    config: &WaveletConfig,
+    alpha: &[f64],
+) -> AudioSampleResult<(Vec<f64>, f64)> {
+    config.validate()?;
+    validate_freqs(freqs)?;
+    require_finite_positive("sample_rate", sample_rate)?;
+    if alpha.len() != freqs.len() {
+        return Err(param_err(
+            "alpha",
+            format!(
+                "needs one value per frequency ({}), got {}",
+                freqs.len(),
+                alpha.len()
+            ),
+        ));
+    }
+    for &a in alpha {
+        require_finite_positive("alpha", a)?;
+    }
+    let window_bw = librosa_window_bandwidth(&config.window)?;
+    Ok(wavelet_lengths_impl(
+        freqs,
+        sample_rate,
+        window_bw,
+        config.filter_scale,
+        config.gamma,
+        alpha,
+    ))
+}
+
+/// [`wavelet`] with the relative bandwidth of each filter given.
+///
+/// # Arguments
+/// As [`wavelet_lengths_with_alpha`].
+///
+/// # Returns
+/// The filters and their lengths, as for [`wavelet`].
+///
+/// # Errors
+/// As [`wavelet_lengths_with_alpha`].
+///
+/// # Examples
+/// ```rust
+/// use audio_samples::operations::constant_q::{WaveletConfig, wavelet_with_alpha};
+///
+/// let cfg = WaveletConfig::default();
+/// let (filters, lengths) = wavelet_with_alpha(&[440.0, 880.0], 22050.0, &cfg, &[0.5, 0.5]).unwrap();
+/// assert_eq!(filters.nrows(), lengths.len());
+/// ```
+pub fn wavelet_with_alpha(
+    freqs: &[f64],
+    sample_rate: f64,
+    config: &WaveletConfig,
+    alpha: &[f64],
+) -> AudioSampleResult<(Array2<Complex<f64>>, Vec<f64>)> {
+    let (lengths, _) = wavelet_lengths_with_alpha(freqs, sample_rate, config, alpha)?;
+    let filters = wavelet_impl(
+        freqs,
+        sample_rate,
+        &config.window,
+        &lengths,
+        config.norm,
+        config.pad_fft,
+    )?;
+    Ok((filters, lengths))
+}
+
 // =============================================================================
 // Sparse FFT basis (librosa's __vqt_filter_fft + util.sparsify_rows)
 // =============================================================================
@@ -1213,11 +1343,13 @@ struct Filterbank {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum FreqLayout {
+enum FreqLayout<'a> {
     /// `interval_frequencies(intervals="equal")` (vqt / cqt).
     Interval,
     /// `cqt_frequencies` (pseudo / hybrid / icqt).
     Cqt,
+    /// The sorted octaves of these ratios to `fmin`, in ascending order.
+    Ratios(&'a [f64]),
 }
 
 /// librosa's `__clip_freqs`: drops the bins whose filters would exceed Nyquist.
@@ -1267,7 +1399,7 @@ fn filterbank(
     sr: f64,
     tuning: f64,
     gamma: Option<f64>,
-    layout: FreqLayout,
+    layout: FreqLayout<'_>,
 ) -> AudioSampleResult<Filterbank> {
     let bpo = cfg.bins_per_octave.get();
     let fmin = cfg.fmin_or_c1() * 2.0f64.powf(tuning / bpo as f64);
@@ -1291,6 +1423,13 @@ fn filterbank(
     let mut freqs = match layout {
         FreqLayout::Interval => equal_interval_freqs(n_bins, fmin, bpo),
         FreqLayout::Cqt => cqt_frequencies(n_bins, fmin, cfg.bins_per_octave, 0.0),
+        FreqLayout::Ratios(ratios) => {
+            let mut all: Vec<f64> = (0..n_bins)
+                .map(|k| fmin * 2f64.powi((k / bpo) as i32) * ratios[k % bpo])
+                .collect();
+            all.sort_by(f64::total_cmp);
+            all
+        }
     };
     if auto {
         freqs = clip_freqs(freqs, window_bw, cfg.filter_scale, gamma, sr)?;
@@ -1376,11 +1515,23 @@ fn vqt_rows<F: AudioFloat>(
     tuning: f64,
     gamma: Option<f64>,
 ) -> AudioSampleResult<Array3<Complex<F>>> {
+    vqt_rows_in(y, sr, cfg, tuning, gamma, FreqLayout::Interval)
+}
+
+/// [`vqt_rows`] for a given layout of the centre frequencies.
+fn vqt_rows_in<F: AudioFloat>(
+    y: CowArray<'_, F, Ix2>,
+    sr: f64,
+    cfg: &CqtConfig,
+    tuning: f64,
+    gamma: Option<f64>,
+    layout: FreqLayout<'_>,
+) -> AudioSampleResult<Array3<Complex<F>>> {
     cfg.validate()?;
     if y.ncols() == 0 {
         return Err(param_err("signal", "cannot transform an empty signal"));
     }
-    let fb = filterbank(cfg, sr, tuning, gamma, FreqLayout::Interval)?;
+    let fb = filterbank(cfg, sr, tuning, gamma, layout)?;
     let n_bins = fb.freqs.len();
     let bpo = cfg.bins_per_octave.get();
     let n_octaves = n_bins.div_ceil(bpo);
@@ -1475,6 +1626,67 @@ fn vqt_rows<F: AudioFloat>(
         }
     }
     Ok(v)
+}
+
+/// A variable-Q transform whose bins follow a tuning system rather than equal temperament.
+///
+/// One octave of `ratios` repeats over the bins, each octave twice the frequency of the
+/// last. The number of ratios replaces `bins_per_octave` of the configuration.
+///
+/// # Arguments
+/// - `audio`: the signal.
+/// - `config`: the transform.
+/// - `ratios`: the frequencies of one octave relative to `fmin`; finite and positive.
+///
+/// # Returns
+/// The response, shape `(channels, n_bins, frames)`.
+///
+/// # Errors
+/// [`ParameterError`] if `ratios` is empty or holds a value that is not finite and positive,
+/// or for the conditions of [`AudioConstantQ::vqt`].
+///
+/// # Examples
+/// ```rust
+/// use audio_samples::operations::constant_q::{CqtConfig, VqtConfig, vqt_with_intervals};
+/// use audio_samples::{sample_rate, sine_wave};
+/// use std::num::NonZeroUsize;
+/// use std::time::Duration;
+///
+/// let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
+/// let ratios = [1.0, 9.0 / 8.0, 5.0 / 4.0, 4.0 / 3.0, 3.0 / 2.0, 5.0 / 3.0, 15.0 / 8.0];
+/// let cqt = CqtConfig::new().with_fmin(Some(110.0)).with_n_bins(NonZeroUsize::new(21));
+/// let config = VqtConfig::new().with_cqt(cqt);
+/// let v = vqt_with_intervals(&audio, &config, &ratios).unwrap();
+/// assert_eq!(v.dim().1, 21);
+/// ```
+pub fn vqt_with_intervals<T: StandardSample>(
+    audio: &AudioSamples<'_, T>,
+    config: &VqtConfig,
+    ratios: &[f64],
+) -> AudioSampleResult<Array3<Complex<T::Float>>> {
+    let Some(bins_per_octave) = NonZeroUsize::new(ratios.len()) else {
+        return Err(param_err("ratios", "must not be empty"));
+    };
+    if ratios.iter().any(|r| !r.is_finite() || *r <= 0.0) {
+        return Err(param_err("ratios", "must be finite and positive"));
+    }
+    let mut cfg = config.cqt.clone();
+    cfg.bins_per_octave = bins_per_octave;
+    let scoped = VqtConfig {
+        cqt: cfg,
+        gamma: config.gamma,
+    };
+    scoped.validate()?;
+    let (y, sr) = (finite_float_rows(audio)?, audio.sample_rate_hz());
+    let tuning = resolve_tuning(y.view(), sr, scoped.cqt.tuning, bins_per_octave)?;
+    vqt_rows_in(
+        y,
+        sr,
+        &scoped.cqt,
+        tuning,
+        scoped.gamma,
+        FreqLayout::Ratios(ratios),
+    )
 }
 
 /// librosa `pseudo_cqt` on rows (resolved tuning), computed in `F`.
