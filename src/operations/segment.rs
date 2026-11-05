@@ -594,13 +594,21 @@ pub fn agglomerative<F: AudioFloat>(
     }
     // Node storage: leaves, then one new node per merge.
     let capacity = 2 * n - k;
-    let mut means = vec![0.0_f64; capacity * d];
+    // Means, then sizes; short inputs need no allocation for them.
+    let mut small = [0.0_f64; 256];
+    let mut large = Vec::new();
+    let store = if capacity * (d + 1) <= small.len() {
+        &mut small[..capacity * (d + 1)]
+    } else {
+        large.resize(capacity * (d + 1), 0.0);
+        &mut large[..]
+    };
+    let (means, sizes) = store.split_at_mut(capacity * d);
     for (j, column) in data.columns().into_iter().enumerate() {
         for (m, v) in means[j * d..(j + 1) * d].iter_mut().zip(column.iter()) {
             *m = v.to_f64().unwrap_or(f64::NAN);
         }
     }
-    let mut sizes = vec![0.0_f64; capacity];
     let mut alive = vec![false; capacity];
     let mut left = vec![u32::MAX; capacity];
     let mut right = vec![u32::MAX; capacity];
@@ -624,7 +632,7 @@ pub fn agglomerative<F: AudioFloat>(
     let mut heap = BinaryHeap::with_capacity(2 * n);
     for j in 0..n - 1 {
         heap.push(Merge {
-            distance: ward(&means, &sizes, j, j + 1),
+            distance: ward(means, sizes, j, j + 1),
             first: j as u32,
             second: j as u32 + 1,
         });
@@ -667,7 +675,7 @@ pub fn agglomerative<F: AudioFloat>(
                     left[w] = new as u32;
                 }
                 heap.push(Merge {
-                    distance: ward(&means, &sizes, new, w),
+                    distance: ward(means, sizes, new, w),
                     first: new as u32,
                     second: neighbour,
                 });
