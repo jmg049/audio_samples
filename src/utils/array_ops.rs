@@ -43,11 +43,12 @@
 //! Numerische Mathematik 27, 1977).
 
 use std::cmp::Ordering;
+use std::mem::MaybeUninit;
 use std::path::{Component, Path, PathBuf};
 
 use ndarray::{
     Array, Array2, ArrayBase, ArrayD, ArrayView1, ArrayView2, ArrayViewD, ArrayViewMut2, Axis,
-    Data, Dimension, IxDyn, RemoveAxis, Slice, Zip,
+    Data, Dimension, IxDyn, RemoveAxis, Zip,
 };
 use num_complex::Complex;
 
@@ -653,14 +654,21 @@ pub enum PadMode<A> {
     Wrap,
 }
 
+/// Writes clones of `source` into `out`, in order.
+fn write_all<A: Clone>(out: &mut [MaybeUninit<A>], source: &[A]) {
+    for (o, v) in out.iter_mut().zip(source) {
+        o.write(v.clone());
+    }
+}
+
 /// Copies `source`, forwards or reversed, into `out`, which is walked outwards from the
 /// data: from its start, or from its end when `backwards`. Returns what is left of `out`.
 fn copy_run<'a, A: Clone>(
-    out: &'a mut [A],
+    out: &'a mut [MaybeUninit<A>],
     source: &[A],
     reversed: bool,
     backwards: bool,
-) -> &'a mut [A] {
+) -> &'a mut [MaybeUninit<A>] {
     let len = source.len().min(out.len());
     let (segment, rest) = if backwards {
         let at = out.len() - len;
@@ -675,14 +683,14 @@ fn copy_run<'a, A: Clone>(
         &source[..len]
     };
     match (backwards, reversed) {
-        (false, false) | (true, true) => segment.clone_from_slice(source),
+        (false, false) | (true, true) => write_all(segment, source),
         _ => {
             // Blocks of a fixed size let the reversed copy vectorise.
             let mut blocks = segment.chunks_exact_mut(8);
             let mut sources = source.rchunks_exact(8);
             for (o, v) in (&mut blocks).zip(&mut sources) {
                 for (slot, value) in o.iter_mut().zip(v.iter().rev()) {
-                    *slot = value.clone();
+                    slot.write(value.clone());
                 }
             }
             for (o, v) in blocks
@@ -690,7 +698,7 @@ fn copy_run<'a, A: Clone>(
                 .iter_mut()
                 .zip(sources.remainder().iter().rev())
             {
-                *o = v.clone();
+                o.write(v.clone());
             }
         }
     }
@@ -698,15 +706,22 @@ fn copy_run<'a, A: Clone>(
 }
 
 /// Fills `out` going outwards from the data: `Reflect` and `Symmetric` bounce between the
-/// ends, `Wrap` cycles, and `Edge` repeats. `backwards` fills towards index 0.
-fn pad_side<A: Clone>(out: &mut [A], data: &[A], kind: PadSide, backwards: bool) {
+/// ends, `Wrap` cycles, `Edge` repeats, and `Value` repeats a given value. `backwards` fills
+/// towards index 0.
+fn pad_side<A: Clone>(out: &mut [MaybeUninit<A>], data: &[A], kind: &PadSide<A>, backwards: bool) {
     let n = data.len();
     match kind {
-        PadSide::Edge => out.fill(if backwards {
-            data[0].clone()
-        } else {
-            data[n - 1].clone()
-        }),
+        PadSide::Value(value) => {
+            for o in out.iter_mut() {
+                o.write(value.clone());
+            }
+        }
+        PadSide::Edge => {
+            let edge = if backwards { &data[0] } else { &data[n - 1] };
+            for o in out.iter_mut() {
+                o.write(edge.clone());
+            }
+        }
         PadSide::Wrap => {
             // Going right repeats from the start, in order; going left repeats from the end.
             let mut rest = out;
@@ -741,8 +756,8 @@ fn pad_side<A: Clone>(out: &mut [A], data: &[A], kind: PadSide, backwards: bool)
     }
 }
 
-#[derive(Clone, Copy)]
-enum PadSide {
+enum PadSide<A> {
+    Value(A),
     Edge,
     Wrap,
     Mirror { repeat_edge: bool },
@@ -796,55 +811,42 @@ where
     let mut dim = data.raw_dim();
     dim[axis.index()] = size;
     crate::utils::check_derived_len("size", "padding", dim.size() as f64, 1e12)?;
-    if let PadMode::Constant(value) = mode {
-        let mut out = Array::from_elem(dim, value);
-        match (out.as_slice_mut(), data.as_slice(), data.ndim()) {
-            (Some(target), Some(source), 1) => {
-                target[lpad..lpad + n].clone_from_slice(source);
-            }
-            _ => {
-                out.slice_axis_mut(axis, Slice::from(lpad..lpad + n))
-                    .assign(data);
-            }
-        }
-        return Ok(out);
-    }
-    if data.is_empty() {
+    if data.is_empty() && !matches!(mode, PadMode::Constant(_)) {
         return invalid("data", "cannot extend an empty axis with this pad mode");
     }
     let kind = match mode {
+        PadMode::Constant(value) => PadSide::Value(value),
         PadMode::Edge => PadSide::Edge,
         PadMode::Wrap => PadSide::Wrap,
         PadMode::Reflect => PadSide::Mirror { repeat_edge: false },
         _ => PadSide::Mirror { repeat_edge: true },
     };
-    // A zero element is allocated without touching the pages, which the runs then fill.
-    let mut out = Array::from_elem(dim, A::default());
+    let mut out = Array::<A, D>::uninit(dim);
+    let fill = |o: &mut [MaybeUninit<A>], lane: &[A]| {
+        let (head, rest) = o.split_at_mut(lpad);
+        let (mid, tail) = rest.split_at_mut(n);
+        write_all(mid, lane);
+        pad_side(head, lane, &kind, true);
+        pad_side(tail, lane, &kind, false);
+    };
     Zip::from(out.lanes_mut(axis))
         .and(data.lanes(axis))
         .for_each(|mut o, lane| {
             if let (Some(os), Some(ls)) = (o.as_slice_mut(), lane.as_slice()) {
-                let (head, rest) = os.split_at_mut(lpad);
-                let (mid, tail) = rest.split_at_mut(n);
-                mid.clone_from_slice(ls);
-                pad_side(head, ls, kind, true);
-                pad_side(tail, ls, kind, false);
+                fill(os, ls);
             } else {
                 let copied: Vec<A> = lane.iter().cloned().collect();
-                let mut buffer: Vec<A> = vec![A::default(); size];
-                {
-                    let (head, rest) = buffer.split_at_mut(lpad);
-                    let (mid, tail) = rest.split_at_mut(n);
-                    mid.clone_from_slice(&copied);
-                    pad_side(head, &copied, kind, true);
-                    pad_side(tail, &copied, kind, false);
-                }
+                let mut buffer: Vec<MaybeUninit<A>> = Vec::with_capacity(size);
+                buffer.resize_with(size, MaybeUninit::uninit);
+                fill(&mut buffer, &copied);
                 for (slot, v) in o.iter_mut().zip(buffer) {
                     *slot = v;
                 }
             }
         });
-    Ok(out)
+    // SAFETY: every lane was written in full: its centre by `write_all` and both of its
+    // ends by `pad_side`, which leaves no element of the slices it is given.
+    Ok(unsafe { out.assume_init() })
 }
 
 /// Normalises a set of frame indices: clips, optionally adds the bounds, removes

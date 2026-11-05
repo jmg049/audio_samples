@@ -581,10 +581,10 @@ struct PassiveFactor {
 }
 
 impl PassiveFactor {
-    fn new() -> Self {
+    fn with_capacity(columns: usize) -> Self {
         Self {
-            passive: Vec::new(),
-            l: Vec::new(),
+            passive: Vec::with_capacity(columns),
+            l: Vec::with_capacity(columns * (columns + 1) / 2),
         }
     }
 
@@ -649,10 +649,27 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
     let (m, n) = a.dim();
     let capacity = m.min(n);
     let mut x = Array1::<f64>::zeros(n);
-    let mut factor = PassiveFactor::new();
+    let mut factor = PassiveFactor::with_capacity(capacity);
     // 1 for a column in the passive set, 2 for one rejected until the set next changes.
     let mut state = vec![0_u8; n];
-    let at_b = a.t().dot(b);
+    let mut at_b = Array1::<f64>::zeros(n);
+    let mut gram = Array2::<f64>::zeros((n, n));
+    // One row at a time, the upper triangle only; the lower is mirrored below.
+    for (row, &bi) in a.rows().into_iter().zip(b.iter()) {
+        at_b.scaled_add(bi, &row);
+        for (p, &rp) in row.iter().enumerate() {
+            if rp != 0.0 {
+                gram.row_mut(p)
+                    .slice_mut(s![p..])
+                    .scaled_add(rp, &row.slice(s![p..]));
+            }
+        }
+    }
+    for p in 0..n {
+        for q in 0..p {
+            gram[[p, q]] = gram[[q, p]];
+        }
+    }
     let tol = {
         let mut norm1 = vec![0.0_f64; n];
         for row in a.rows() {
@@ -664,9 +681,8 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
         10.0 * m.max(n) as f64 * f64::EPSILON * largest.max(f64::MIN_POSITIVE)
     };
     // The gradient follows from the Gram matrix, without the residual.
-    let gram = a.t().dot(&a).as_standard_layout().into_owned();
     let mut w = at_b.clone();
-    let mut s: Vec<f64> = Vec::new();
+    let mut s: Vec<f64> = Vec::with_capacity(capacity);
     let max_iter = 3 * n.max(1);
     let mut iter = 0;
     let solve_passive = |factor: &PassiveFactor, s: &mut Vec<f64>| {

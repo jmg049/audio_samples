@@ -359,8 +359,16 @@ fn coordinate_sweep<F: AudioFloat>(
         let hess = hht_data[t * k + t];
         let row_t = &hht_data[t * k..(t + 1) * k];
         for (wi, xi) in row_data.chunks_exact_mut(k).zip(xht_data.chunks_exact(k)) {
-            let mut grad = F::zero() - xi[t];
-            for (a, b) in row_t.iter().zip(wi.iter()) {
+            // Four running sums let the products vectorise.
+            let mut lanes = [F::zero(); 4];
+            let (mut left, mut right) = (row_t.chunks_exact(4), wi.chunks_exact(4));
+            for (a, b) in (&mut left).zip(&mut right) {
+                for (lane, (x, y)) in lanes.iter_mut().zip(a.iter().zip(b)) {
+                    *lane += *x * *y;
+                }
+            }
+            let mut grad = lanes[0] + lanes[1] + lanes[2] + lanes[3] - xi[t];
+            for (a, b) in left.remainder().iter().zip(right.remainder()) {
                 grad += *a * *b;
             }
             let pg = if wi[t] == F::zero() {
