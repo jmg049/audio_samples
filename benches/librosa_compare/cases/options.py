@@ -111,7 +111,7 @@ register(
     pair("wavelet_lengths_alpha", "const", lambda c: partial(librosa.filters.wavelet_lengths, freqs=FREQS, sr=SR, alpha=ALPHA), lambda c: partial(features.wavelet_lengths, freqs=FREQS, sr=SR, alpha=ALPHA), "filters.wavelet_lengths"),
     pair("wavelet_alpha", "const", lambda c: partial(librosa.filters.wavelet, freqs=FREQS, sr=SR, alpha=ALPHA, dtype=np.complex128), lambda c: partial(features.wavelet, freqs=FREQS, sr=SR, alpha=ALPHA), "filters.wavelet"),
     pair("cq_to_chroma_window", "const", lambda c: partial(librosa.filters.cq_to_chroma, 72, bins_per_octave=36, fmin=55.0, window=WINDOW, dtype=np.float64), lambda c: partial(features.cq_to_chroma, 72, bins_per_octave=36, fmin=55.0, window=WINDOW), "filters.cq_to_chroma"),
-    pair("vqt_intervals", "short_mono", lambda c: partial(librosa.vqt, c.y, sr=c.sr, fmin=110.0, n_bins=48, gamma=0.0, tuning=0.0, intervals=RATIOS), lambda c: partial(c.audio.vqt, fmin=110.0, n_bins=48, gamma=0.0, tuning=0.0, intervals=RATIOS), "vqt"),
+    pair("vqt_intervals", "short_mono", lambda c: partial(librosa.vqt, c.y, sr=c.sr, fmin=110.0, n_bins=48, gamma=0.0, tuning=0.0, intervals=RATIOS), lambda c: partial(AudioSamples.new_mono(c.y, c.sr).vqt, fmin=110.0, n_bins=48, gamma=0.0, tuning=0.0, intervals=RATIOS), "vqt"),
     pair("to_mono_form", "short_mono", lambda c: partial(librosa.to_mono, _stereo(c)), lambda c: partial(forms.to_mono, _stereo(c)), "to_mono"),
     pair("to_stereo_form", "short_mono", lambda c: partial(librosa.to_stereo, left=c.y, right=c.y), lambda c: partial(forms.to_stereo, left=c.y, right=c.y), "to_stereo"),
     pair("to_multi_form", "short_mono", lambda c: partial(librosa.to_multi, c.y, c.y), lambda c: partial(forms.to_multi, c.y, c.y), "to_multi"),
