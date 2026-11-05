@@ -367,7 +367,9 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     // First `y1` index: the first output's window starts at `1 - half_b`;
     // blocks start at multiples of `up`.
     let mut k0 = (-half_b).div_euclid(up) * up;
-    let mut buf: Vec<F> = Vec::with_capacity(2 * blk + b.taps + 1);
+    // A short signal fills less than the two blocks and the window that `buf` can hold.
+    let mut buf: Vec<F> =
+        Vec::with_capacity((2 * blk + b.taps + 1).min((k_hi - k0).max(0) as usize));
     let mut buf_start = k0;
     let (step_int, step_frac) = ((m / l) as i64, m % l);
     let mut st = BState { j: 0, n0: 0, p: 0 };
@@ -842,7 +844,12 @@ impl<F: RsFloat> PairArena<F> {
             .fwd
             .get_outofplace_scratch_len()
             .max(a.inv.get_outofplace_scratch_len());
-        let lens = [a.n / a.up, a.n / a.up, a.n / a.down, a.n / a.down, scratch];
+        // The polyphase FIR runs every transform at half size.
+        let lens = if a.fir2.is_some() {
+            [a.n / 2, a.n / 2, a.n / 2, a.n / 2, scratch]
+        } else {
+            [a.n / a.up, a.n / a.up, a.n / a.down, a.n / a.down, scratch]
+        };
         let size = std::mem::size_of::<Complex<F>>();
         // Elements per cache line.
         let line = 64 / size;
