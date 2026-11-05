@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Integer arithmetic saturates.** `+`, `-`, `*`, `/` and negation of integer `AudioSamples` overflowed the
+  sample type, which panicked in a debug build and wrapped in a release build; dividing by zero panicked. They now saturate
+  at the type's limits, and an integer divided by zero gives the limit with its sign (zero divided by zero gives
+  zero). `u8` is offset binary, so its arithmetic works on the offset value and 128 is the neutral element of `+`.
+- **Example clips.** `utils::generation::example_clip` renders named clips of music and speech
+  (`ExampleClip::{Chords, DrumLoop, ChordsAndDrums, Speech, NoisyRecording}`) at any sample rate,
+  duration and sample type. Nothing is stored or downloaded. Rendering uses only basic IEEE 754
+  arithmetic, so the same arguments give the same bytes on any platform with IEEE 754 `f64`
+  (checked on x86-64 glibc and musl, and on aarch64 musl under QEMU). `EXAMPLE_TEMPO_BPM`,
+  `EXAMPLE_NOISY_SNR_DB` and `example_speech_f0` give the known contents.
 - **librosa parity.** A librosa 1.0-compatible API alongside the existing one:
   the `AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
   `AudioRhythm`, `AudioEffects` and `AudioPitchTracking` traits, the

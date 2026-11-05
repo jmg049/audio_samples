@@ -1433,10 +1433,20 @@ mod tests {
 
     #[test]
     fn unsupported_latex_falls_back_to_plain_text() {
+        // term-maths leaves a command it does not know in its output.
         assert_eq!(
-            block_math(r"M = \left\lfloor \frac{L - N}{H} \right\rfloor + 1"),
-            "M = ⌊(L - N)/H⌋ + 1"
+            block_math(r"\notacommand{x} + 1"),
+            latex_to_plain(r"\notacommand{x} + 1")
         );
+        assert!(!block_math(r"\notacommand{x} + 1").contains('\\'));
+
+        // A formula it knows is rendered by term-maths, here over several lines.
+        let floor = r"M = \left\lfloor \frac{L - N}{H} \right\rfloor + 1";
+        assert!(block_math(floor).contains('⌊') && !block_math(floor).contains('\\'));
+        assert_eq!(latex_to_plain(floor), "M = ⌊(L - N)/H⌋ + 1");
+        // Inline maths stays on one line either way.
+        assert_eq!(inline_math(floor), "M = ⌊(L - N)/H⌋ + 1");
+
         assert_eq!(latex_to_plain(r"\tau_{min}"), "τₘᵢₙ");
         assert_eq!(latex_to_plain(r"10^{T/20}"), "10^(T/20)");
         assert_eq!(

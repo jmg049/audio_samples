@@ -31,9 +31,16 @@
 //! - `MonoSampleBuilder` requires `feature = "editing"`.
 //! - Noise generators (`white_noise`, `pink_noise`, `brown_noise`, `exponential_bursts`) require `feature = "random-generation"`.
 //! - `stereo_*` and `multichannel_compound_tone` require `feature = "channels"`.
+//!
+//! For realistic audio rather than a test signal, [`example_clip`] renders named clips of music
+//! and speech with known contents. See [`example_clips`](crate::utils::example_clips).
 
 use std::num::NonZeroU32;
 use std::time::Duration;
+
+pub use crate::utils::example_clips::{
+    EXAMPLE_NOISY_SNR_DB, EXAMPLE_TEMPO_BPM, ExampleClip, example_clip, example_speech_f0,
+};
 
 #[cfg(feature = "editing")]
 use crate::AudioSampleResult;

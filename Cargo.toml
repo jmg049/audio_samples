@@ -434,6 +434,11 @@ name = "librosa_reference"
 path = "tests/librosa_reference/main.rs"
 required-features = ["full_no_plotting"]
 
+
+[[test]]
+name = "example_clips"
+required-features = ["full_no_plotting"]
+
 [[test]]
 name = "effects_chain"
 required-features = ["channels", "iir-filtering", "dynamic-range", "parametric-eq"]

@@ -27,7 +27,8 @@ Usage
 
 ``--check`` regenerates in memory and fails if the committed fixtures differ by
 more than a relative 1e-9 (librosa/numba/BLAS reductions are not bit-identical
-across machines, so an exact comparison would be flaky).
+across machines, so an exact comparison would be flaky). The generator always
+runs single-threaded, so the result does not depend on how many CPUs it can use.
 """
 
 from __future__ import annotations
@@ -36,13 +37,33 @@ import argparse
 import importlib
 import json
 import math
+import os
 import pkgutil
+import platform
 import subprocess
 import sys
 import warnings
 from pathlib import Path
 
-import numpy as np
+# BLAS splits a matrix product into one block per thread, and the rounding of a
+# float32 product depends on those blocks. With OpenBLAS's default of one thread
+# per available CPU, the fixtures changed by up to 2e-7 relative with the CPU
+# affinity of the process (24 CPUs against 8). These must be set before NumPy
+# loads, and the child processes below inherit them.
+for _variable in (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMBA_NUM_THREADS",
+):
+    os.environ[_variable] = "1"
+# The kernels differ in rounding too, so x86-64 machines all use the AVX2 ones.
+if platform.machine() in ("x86_64", "AMD64"):
+    os.environ["OPENBLAS_CORETYPE"] = "Haswell"
+
+import numpy as np  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
