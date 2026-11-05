@@ -1,0 +1,28 @@
+{
+  "title": "audio_samples: typed audio processing for Rust",
+  "description": "An audio processing library for Rust that represents audio as a typed object carrying its sample rate, channel layout and other invariants, rather than as an unstructured numeric buffer.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Geraghty, Jack"
+    }
+  ],
+  "keywords": [
+    "audio",
+    "signal processing",
+    "dsp",
+    "rust",
+    "resampling",
+    "spectrogram"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.1145/3793853.3799811",
+      "scheme": "doi",
+      "relation": "isDescribedBy",
+      "resource_type": "publication-conferencepaper"
+    }
+  ]
+}

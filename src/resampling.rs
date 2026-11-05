@@ -726,10 +726,9 @@ impl Kernel {
 #[inline(always)]
 fn dot_portable(a: &[f64], b: &[f64]) -> f64 {
     let mut acc = [0.0f64; 8];
-    let ca = a.chunks_exact(8);
-    let cb = b.chunks_exact(8);
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..8 {
             acc[i] += x[i] * y[i];
         }
@@ -750,10 +749,9 @@ fn dot_portable(a: &[f64], b: &[f64]) -> f64 {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_avx2_fma(a: &[f64], b: &[f64]) -> f64 {
     let mut acc = [0.0f64; 16];
-    let ca = a.chunks_exact(16);
-    let cb = b.chunks_exact(16);
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    let (ca, ra) = a.as_chunks::<16>();
+    let (cb, rb) = b.as_chunks::<16>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..16 {
             acc[i] = x[i].mul_add(y[i], acc[i]);
         }

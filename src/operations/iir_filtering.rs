@@ -1221,21 +1221,15 @@ pub(crate) fn apply_sos_to_audio<T: StandardSample>(audio: &mut AudioSamples<'_,
                 // Row-major (channels × samples): process four, then two,
                 // then one channel at a time.
                 let mut rows: Vec<&mut [T]> = flat.chunks_exact_mut(n).collect();
-                let mut chunks = rows.chunks_exact_mut(4);
-                for group in &mut chunks {
-                    let mut lanes: [&mut [T]; 4] = {
-                        let [a, b, c, d] = group else { unreachable!() };
-                        [&mut **a, &mut **b, &mut **c, &mut **d]
-                    };
-                    filter_lanes(&template, &mut lanes);
+                let (quads, rest) = rows.as_chunks_mut::<4>();
+                for [a, b, c, d] in quads {
+                    filter_lanes(&template, &mut [&mut **a, &mut **b, &mut **c, &mut **d]);
                 }
-                let rest = chunks.into_remainder();
-                let mut it = rest.chunks_exact_mut(2);
-                for group in &mut it {
-                    let [a, b] = group else { unreachable!() };
+                let (pairs, rest) = rest.as_chunks_mut::<2>();
+                for [a, b] in pairs {
                     filter_lanes(&template, &mut [&mut **a, &mut **b]);
                 }
-                for row in it.into_remainder() {
+                for row in rest {
                     let mut bqs = template.clone();
                     filter_samples(&mut bqs, row.iter_mut());
                 }

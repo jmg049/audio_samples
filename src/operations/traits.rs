@@ -1196,7 +1196,7 @@ where
     ///   match the audio length.
     /// - [`crate::AudioSampleError::Unsupported`] from the default
     ///   implementation, which exists only so that implementors outside this
-    ///   crate keep compiling; [`AudioSamples`](crate::AudioSamples) overrides
+    ///   crate keep compiling; [`AudioSamples`] overrides
     ///   it.
     ///
     /// # Examples
@@ -1389,7 +1389,7 @@ where
     ///   the filter.
     /// - [`crate::AudioSampleError::Unsupported`] from the default
     ///   implementation, which exists only so that implementors outside this
-    ///   crate keep compiling; [`AudioSamples`](crate::AudioSamples) overrides
+    ///   crate keep compiling; [`AudioSamples`] overrides
     ///   it.
     ///
     /// # Examples

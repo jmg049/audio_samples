@@ -6,7 +6,7 @@
 
 <img src="logo.png" title="AudioSamples Logo -- Ferrous' Mustachioed Cousin From East Berlin, Eisenhaltig" width="200"/>
 
-[![Crates.io][crate-img]][crate] [![Docs.rs][docs-img]][docs] [![License: MIT][license-img]][license]
+[![Crates.io][crate-img]][crate] [![Docs.rs][docs-img]][docs] [![License: MIT][license-img]][license] [![DOI][doi-img]][doi]
 
 </div>
 
@@ -245,10 +245,10 @@ The crate is also teaching material for a speech and audio processing course:
   [documentation/guide/](documentation/guide/README.md), which also lists the
   dependencies needed to run the snippets in your own crate. Every code block
   is a doctest, so every number in the text is checked.
-- **The illustrated book**: the same chapters as an mdBook with figures
-  (waveforms, spectra, filter responses, pole-zero plots, spectrograms, ...)
-  computed by the library from the calculations each chapter asserts. Build it
-  with `book/build.sh`; see [book/README.md](book/README.md).
+- **[The illustrated book](https://jmg049.github.io/audio_samples/)**: the same chapters as an mdBook with
+  figures (waveforms, spectra, filter responses, pole-zero plots, spectrograms,
+  ...) computed by the library from the calculations each chapter asserts. Build
+  it locally with `book/build.sh`; see [book/README.md](book/README.md).
 - **Labs**: one runnable program per chapter,
   `examples/tutorial_NN_<topic>.rs`, for example
   `cargo run --release --example tutorial_01_sampling_aliasing --features educational,full_no_plotting`.
@@ -309,13 +309,17 @@ If you use AudioSamples in research, please cite:
 @inproceedings{geraghty2026audio,
   author    = {Geraghty, Jack and Golpayegani, Fatemeh and Hines, Andrew},
   title     = {Audio Made Simple: A Modern Framework for Audio Processing},
-  booktitle = {ACM Multimedia Systems Conference 2026 (MMSys '26)},
+  booktitle = {Proceedings of the ACM Multimedia Systems Conference 2026},
+  series    = {MMSys '26},
   year      = {2026},
-  month     = apr,
-  publisher = {ACM},
-  address   = {Hong Kong, Hong Kong},
-  doi       = {10.1145/3793853.3799811},
-  note      = {Accepted for publication}
+  pages     = {436--442},
+  numpages  = {7},
+  isbn      = {9798400724817},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  location  = {Hong Kong},
+  url       = {https://doi.org/10.1145/3793853.3799811},
+  doi       = {10.1145/3793853.3799811}
 }
 ```
 
@@ -332,3 +336,5 @@ Contributions are welcome. Please open an issue or pull request, and see
 [docs-img]: https://img.shields.io/badge/docs.rs-online-009E73?style=for-the-badge&labelColor=gray
 [license-img]: https://img.shields.io/crates/l/audio_samples?style=for-the-badge&label=license&labelColor=gray
 [license]: https://github.com/jmg049/audio_samples/blob/main/LICENSE
+[doi-img]: https://img.shields.io/badge/DOI-10.1145%2F3793853.3799811-009E73?style=for-the-badge&labelColor=gray
+[doi]: https://doi.org/10.1145/3793853.3799811

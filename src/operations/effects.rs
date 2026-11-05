@@ -351,7 +351,9 @@ fn vocoder_by_angle<F: AudioFloat>(
     out: &mut Array3<Complex<F>>,
 ) {
     let n_frames = stft_matrix.dim().2;
-    let angle_and_norm = |z: Complex<F>| (z.arg(), z.norm());
+    // atan2 in f64, rounded once. glibc's atan2f changed in 2.41, so calling it here
+    // would make the f32 result depend on the system.
+    let angle_and_norm = |z: Complex<F>| (F::of(z.im.as_f64().atan2(z.re.as_f64())), z.norm());
     for_bin_blocks(stft_matrix, angle_and_norm, |c, k, arg, mag_in| {
         let mut out_row = out.slice_mut(ndarray::s![c, k, ..]);
         let mut phase = arg[i0[0]];
@@ -1155,7 +1157,9 @@ fn split_intervals(flags: &[bool], hop: usize, len: usize) -> Vec<(usize, usize)
         edges.push(flags.len());
     }
     edges
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| ((p[0] * hop).min(len), (p[1] * hop).min(len)))
         .collect()
 }

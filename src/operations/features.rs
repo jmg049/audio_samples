@@ -46,7 +46,8 @@
 //! are arrays shaped `(channels, n_features, n_frames)` exactly like librosa's
 //! `(..., n, t)`; per-frame scalars have `n_features == 1`. When several
 //! features share one STFT, compute the magnitude spectrogram once with
-//! [`AudioSpectrum::spectrogram_matrix`] and call the `*_from_spectrogram`
+//! [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix)
+//! and call the `*_from_spectrogram`
 //! functions (librosa's `S=` argument).
 //!
 //! The output precision follows the input: the element type is the sample
@@ -936,7 +937,8 @@ impl PolyFeaturesConfig {
 ///
 /// * `s` - `(channels, bins, frames)` magnitude (or power) spectrogram of element
 ///   type `F` (`f32` or `f64`), finite and non-negative, e.g. from
-///   [`AudioSpectrum::spectrogram_matrix`] with power 1.
+///   [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix)
+///   with power 1.
 /// * `freq` - Centre frequency of each bin in Hz (length `bins`), e.g.
 ///   [`fft_frequencies(n_fft, sr)`](crate::utils::audio_math::fft_frequencies);
 ///   rounded to `F` once.

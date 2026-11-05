@@ -190,19 +190,14 @@ where
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     const L: usize = 8;
     let mut acc = [0.0f64; L];
-    let mut ca = a.chunks_exact(L);
-    let mut cb = b.chunks_exact(L);
-    for (xa, xb) in (&mut ca).zip(&mut cb) {
+    let (ca, ra) = a.as_chunks::<L>();
+    let (cb, rb) = b.as_chunks::<L>();
+    for (xa, xb) in ca.iter().zip(cb) {
         for k in 0..L {
             acc[k] += xa[k] * xb[k];
         }
     }
-    let tail: f64 = ca
-        .remainder()
-        .iter()
-        .zip(cb.remainder())
-        .map(|(p, q)| p * q)
-        .sum();
+    let tail: f64 = ra.iter().zip(rb).map(|(p, q)| p * q).sum();
     acc.iter().sum::<f64>() + tail
 }
 

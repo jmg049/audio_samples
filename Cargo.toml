@@ -2,7 +2,7 @@
 name = "audio_samples"
 version = "2.0.1"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.95"
 authors = ["Jack Geraghty <jgeraghty049@gmail.com>"]
 license = "MIT"
 readme = "README.md"
@@ -11,11 +11,12 @@ repository = "https://github.com/jmg049/audio_samples"
 documentation = "https://docs.rs/audio_samples"
 description = "An audio processing library for Rust that represents audio as a typed object carrying its sample rate, channel layout and other invariants, rather than as an unstructured numeric buffer."
 
-keywords = ["audio", "dsp", "api"]
-categories = ["encoding", "multimedia", "science"]
-# The mdBook of the learning guide and its figures crate are not part of the
-# published crate.
-exclude = ["book/"]
+keywords = ["audio", "dsp", "signal-processing", "resampling", "spectrogram"]
+categories = ["multimedia::audio", "science"]
+# Not part of the published crate: the mdBook of the learning guide and its
+# figures crate, the benchmark comparison and repository tooling. crates.io limits
+# an upload to 10 MiB; the release workflow checks the packaged size.
+exclude = ["book/", "benchmarks/", ".github/", ".pre-commit-config.yaml"]
 
 [package.metadata.docs.rs]
 features = ["full", "educational"]
@@ -78,9 +79,7 @@ unsafe_derive_deserialize = "allow"
 multiple_unsafe_ops_per_block = "allow"
 doc_markdown = "allow"
 
-# `NonZero::div_ceil` is stable since 1.92 but the crate MSRV is 1.87. The two
-# Guards against using stdlib items newer than rust-version (1.87). The former
-# NonZero::div_ceil (1.92) call sites were rewritten with plain arithmetic.
+# Guards against using stdlib items newer than rust-version.
 incompatible_msrv = "warn"
 
 [dependencies]
