@@ -3096,7 +3096,12 @@ fn mel_of_blocks<F: AudioFloat>(
     let mut values = vec![F::zero(); STFT_BLOCK * n_bins];
     frames.for_each_block(rows, &config.stft, |c, t0, nb, block| {
         // Bin-major, so that each filter weight scales a contiguous run of frames.
-        for (k, bin) in values.chunks_exact_mut(STFT_BLOCK).enumerate() {
+        for (k, bin) in values
+            .as_chunks_mut::<STFT_BLOCK>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             for (j, v) in bin[..nb].iter_mut().enumerate() {
                 *v = map(block[j * n_bins + k]);
             }

@@ -166,7 +166,7 @@ where
                         } else if let Some(pairs) = interleaved_stereo(data.as_view()) {
                             // Interleaved frames, as files decode: one pass over
                             // memory in order.
-                            for (i, pair) in pairs.chunks_exact(2).enumerate() {
+                            for (i, pair) in pairs.as_chunks::<2>().0.iter().enumerate() {
                                 let lf: f32 = pair[0].cast_into();
                                 let rf: f32 = pair[1].cast_into();
                                 let avg: f64 = ((lf + rf) * 0.5f32) as f64;
