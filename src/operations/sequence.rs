@@ -880,6 +880,7 @@ fn argmin_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
 }
 
 /// Index of the first maximum (`numpy.argmax`); NaN-free input assumed.
+#[inline(always)]
 fn argmax_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
     let mut best = (0, F::neg_infinity());
     let mut first = true;
@@ -1246,7 +1247,6 @@ fn rqa_dp<F: AudioFloat>(
     gap_extend: F,
     knight: bool,
 ) -> Array2<F> {
-    let zero = F::zero();
     let (rows, cols) = sim.dim();
     let mut score = Array2::<F>::zeros((rows, cols));
     let (init_limit, limit) = if knight { (2, 3) } else { (1, 1) };
@@ -1259,7 +1259,16 @@ fn rqa_dp<F: AudioFloat>(
 
     // One cell update: candidates are (score, sim) per move. The same
     // comparisons as `rqa_cell`, without the back-pointer.
-    let update = |score: &mut Array2<F>, i: usize, j: usize, cands: &[(F, F)]| {
+    #[inline(always)]
+    fn update<F: AudioFloat>(
+        score: &mut Array2<F>,
+        sim: &ArrayView2<F>,
+        (gap_onset, gap_extend): (F, F),
+        i: usize,
+        j: usize,
+        cands: &[(F, F)],
+    ) {
+        let zero = F::zero();
         let s = sim[[i, j]];
         if s > zero {
             let k = argmax_first(cands.iter().map(|c| c.0));
@@ -1273,7 +1282,8 @@ fn rqa_dp<F: AudioFloat>(
             let v = gapped[k];
             score[[i, j]] = if v > zero { v } else { zero };
         }
-    };
+    }
+    let gaps = (gap_onset, gap_extend);
 
     let i = 1;
     for j in 2..cols {
@@ -1281,7 +1291,7 @@ fn rqa_dp<F: AudioFloat>(
             (score[[i - 1, j - 1]], sim[[i - 1, j - 1]]),
             (score[[i - 1, j - 2]], sim[[i - 1, j - 2]]),
         ];
-        update(&mut score, i, j, &cands[..init_limit]);
+        update(&mut score, &sim, gaps, i, j, &cands[..init_limit]);
     }
     let j = 1;
     for i in 2..rows {
@@ -1289,7 +1299,7 @@ fn rqa_dp<F: AudioFloat>(
             (score[[i - 1, j - 1]], sim[[i - 1, j - 1]]),
             (score[[i - 2, j - 1]], sim[[i - 2, j - 1]]),
         ];
-        update(&mut score, i, j, &cands[..init_limit]);
+        update(&mut score, &sim, gaps, i, j, &cands[..init_limit]);
     }
     for i in 2..rows {
         for j in 2..cols {
@@ -1298,7 +1308,7 @@ fn rqa_dp<F: AudioFloat>(
                 (score[[i - 1, j - 2]], sim[[i - 1, j - 2]]),
                 (score[[i - 2, j - 1]], sim[[i - 2, j - 1]]),
             ];
-            update(&mut score, i, j, &cands[..limit]);
+            update(&mut score, &sim, gaps, i, j, &cands[..limit]);
         }
     }
     score
@@ -2674,15 +2684,37 @@ fn total_cmp<F: AudioFloat>(a: F, b: F) -> std::cmp::Ordering {
 ///
 /// The order is total, so the selected set is the same as the first `n`
 /// of a full sort.
-fn nearest<F: AudioFloat>(row: &[F], n: usize, skip: Option<usize>, idx: &mut Vec<usize>) {
+///
+/// Selects on integers packing (distance, index), with distances mapped so that
+/// integer order is `total_cmp` order: a plain comparison stays inlined in the
+/// selection loop at any inlining threshold.
+fn nearest<F: AudioFloat>(
+    row: &[F],
+    n: usize,
+    skip: Option<usize>,
+    keys: &mut Vec<u128>,
+    idx: &mut Vec<usize>,
+) {
     idx.clear();
-    idx.extend((0..row.len()).filter(|&j| Some(j) != skip));
-    if n < idx.len() {
-        if n > 0 {
-            idx.select_nth_unstable_by(n - 1, |&a, &b| total_cmp(row[a], row[b]).then(a.cmp(&b)));
-        }
-        idx.truncate(n);
+    if n >= row.len() - usize::from(skip.is_some_and(|j| j < row.len())) {
+        idx.extend((0..row.len()).filter(|&j| Some(j) != skip));
+        return;
     }
+    keys.clear();
+    keys.extend(
+        row.iter()
+            .enumerate()
+            .filter(|&(j, _)| Some(j) != skip)
+            .map(|(j, v)| {
+                let bits = v.as_f64().to_bits();
+                let ordered = bits ^ (((bits as i64 >> 63) as u64) >> 1) ^ (1 << 63);
+                (u128::from(ordered) << 64) | j as u128
+            }),
+    );
+    if n > 0 {
+        keys.select_nth_unstable(n - 1);
+    }
+    idx.extend(keys[..n].iter().map(|&k| k as u64 as usize));
 }
 
 /// Element of a recurrence / cross-similarity matrix: a float (`0` = no
@@ -2815,7 +2847,7 @@ fn link_row_stats<F: AudioFloat>(rec: &impl LinkRows<F>, k: usize) -> (Vec<F>, V
                 *v = zero;
             }
         }
-        vals.sort_by(|a, b| total_cmp(*a, *b));
+        vals.sort_unstable_by(|a, b| total_cmp(*a, *b));
         vals.truncate(k);
         dist_to_k[i] = vals[vals.len() - 1];
         avg[i] = vals.iter().copied().sum::<F>() / F::of_usize(vals.len());
@@ -2858,7 +2890,7 @@ fn apply_affinity<F: AudioFloat>(
             if finite.is_empty() {
                 return err("bandwidth", "cannot estimate bandwidth from an empty graph");
             }
-            finite.sort_by(|a, b| total_cmp(*a, *b));
+            finite.sort_unstable_by(|a, b| total_cmp(*a, *b));
             let n = finite.len();
             let med = if n % 2 == 1 {
                 finite[n / 2]
@@ -2991,10 +3023,11 @@ pub(crate) fn recurrence_links<F: AudioFloat>(
         let dists = RowDistances::new(data, cfg.metric);
         let mut drow = vec![F::zero(); t];
         let mut idx = Vec::with_capacity(t);
+        let mut keys = Vec::new();
         let mut row: Vec<(usize, F)> = Vec::with_capacity(n_nb + 1);
         for i in 0..t {
             knn_row(&dists, data.column(i), &mut drow);
-            nearest(&drow, n_nb, Some(i), &mut idx);
+            nearest(&drow, n_nb, Some(i), &mut keys, &mut idx);
             row.clear();
             // A zero link value is no link (as in the dense matrix); outside
             // `full`, frames within `width` of `i` are dropped.
@@ -3235,9 +3268,10 @@ fn recurrence_core<F: AudioFloat, C: RecCell>(
         let dists = RowDistances::new(data, cfg.metric);
         let mut drow = vec![F::zero(); t];
         let mut idx = Vec::with_capacity(t);
+        let mut keys = Vec::new();
         for (i, mut row) in rec.rows_mut().into_iter().enumerate() {
             knn_row(&dists, data.column(i), &mut drow);
-            nearest(&drow, n_nb, Some(i), &mut idx);
+            nearest(&drow, n_nb, Some(i), &mut keys, &mut idx);
             for &j in &idx {
                 row[j] = link(drow[j]);
             }
@@ -3432,9 +3466,10 @@ fn cross_similarity_core<F: AudioFloat, C: RecCell>(
         let dists = RowDistances::new(data_ref, cfg.metric);
         let mut drow = vec![F::zero(); n_ref];
         let mut idx = Vec::with_capacity(n_ref);
+        let mut keys = Vec::new();
         for i in 0..n {
             knn_row(&dists, data.column(i), &mut drow);
-            nearest(&drow, n_nb, None, &mut idx);
+            nearest(&drow, n_nb, None, &mut keys, &mut idx);
             for &j in &idx {
                 xsim[[i, j]] = link(drow[j]);
             }
@@ -3635,7 +3670,7 @@ impl SyncAggregate {
             Self::Min => x.iter().copied().fold(F::infinity(), F::min),
             Self::Median => {
                 let mut v = x.to_vec();
-                v.sort_by(|a, b| total_cmp(*a, *b));
+                v.sort_unstable_by(|a, b| total_cmp(*a, *b));
                 let n = v.len();
                 if n % 2 == 1 {
                     v[n / 2]

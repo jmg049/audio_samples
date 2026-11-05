@@ -1474,7 +1474,7 @@ fn median<F: AudioFloat>(values: &mut [F]) -> Option<F> {
     if values.is_empty() {
         return None;
     }
-    values.sort_by(total_cmp);
+    values.sort_unstable_by(total_cmp);
     let n = values.len();
     Some(if n % 2 == 1 {
         values[n / 2]

@@ -60,7 +60,7 @@ use crate::operations::types::{FadeCurve, NoiseColor, PadSide};
 #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
 use crate::operations::types::{PerturbationConfig, PerturbationMethod};
 use crate::repr::{AudioData, ChannelCount};
-use crate::traits::apply_gain_to_sample;
+use crate::traits::{apply_gain_to_sample, in_place_via_f64};
 use crate::utils::seconds_to_samples;
 use crate::{
     AudioEditing, AudioSampleError, AudioSampleResult, AudioSamples, AudioTypeConversion,
@@ -1066,6 +1066,10 @@ where
             )));
         }
 
+        if !T::SAMPLE_TYPE.is_float() {
+            return in_place_via_f64(self, |a| a.fade_in_in_place(duration_seconds, curve));
+        }
+
         let fade_samples = seconds_to_samples(duration_seconds, self.sample_rate());
         let total_samples = self.samples_per_channel().get();
         let actual_fade_samples = fade_samples.min(total_samples);
@@ -1154,6 +1158,10 @@ where
                 "parameter",
                 "Fade duration must be positive",
             )));
+        }
+
+        if !T::SAMPLE_TYPE.is_float() {
+            return in_place_via_f64(self, |a| a.fade_out_in_place(duration_seconds, curve));
         }
 
         let fade_samples = seconds_to_samples(duration_seconds, self.sample_rate());
@@ -1448,6 +1456,10 @@ where
     ///   pitch shift, etc.).
     #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
     fn perturb_in_place(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()> {
+        // Not for u8: its pitch-shift perturbation works on the raw values.
+        if !T::SAMPLE_TYPE.is_float() && T::SAMPLE_TYPE != crate::repr::SampleType::U8 {
+            return in_place_via_f64(self, |a| a.perturb_in_place(config));
+        }
         config.validate(f64::from(self.sample_rate().get()))?;
         // Apply perturbation based on seed or use thread-local randomness
         if let Some(seed) = config.seed {

@@ -81,3 +81,6 @@ docs/_build/
 results/
 scripts/
 output/
+
+# Written by benchmarks/run.sh and benchmarks/visualise.py
+benchmarks/results.*

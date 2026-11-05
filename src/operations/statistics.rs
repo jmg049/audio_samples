@@ -340,6 +340,20 @@ fn autocorrelation_sums<T: StandardSample>(x: &[T], max_lag: usize) -> Option<Ve
     Some(out)
 }
 
+/// Sign changes between consecutive samples. Audio-aware conversion: u8
+/// mid-scale (128) maps to 0.0, so crossings are counted about the true zero
+/// level. Written without branches so that the loop vectorises.
+fn count_zero_crossings<T: StandardSample>(samples: &[T]) -> usize {
+    samples
+        .windows(2)
+        .map(|w| {
+            let prev: f64 = w[0].convert_to();
+            let curr: f64 = w[1].convert_to();
+            usize::from(((prev > 0.0) & (curr <= 0.0)) | ((prev <= 0.0) & (curr > 0.0)))
+        })
+        .sum()
+}
+
 impl<T> AudioStatistics for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -842,20 +856,10 @@ where
                 if arr.len() < nzu!(2) {
                     return 0;
                 }
-
-                let mut crossings = 0;
-                for i in 1..arr.len().get() {
-                    // Audio-aware conversion: u8 mid-scale (128) maps to 0.0, so
-                    // crossings are counted about the true zero level.
-                    let prev: f64 = arr[i - 1].convert_to();
-                    let curr: f64 = arr[i].convert_to();
-
-                    // Check for sign change (zero crossing)
-                    if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
-                        crossings += 1;
-                    }
+                match arr.as_slice() {
+                    Some(s) => count_zero_crossings(s),
+                    None => count_zero_crossings(&arr.to_vec()),
                 }
-                crossings
             }
             AudioData::Multi(arr) => {
                 // For multi-channel, count zero crossings in each channel and sum them
@@ -865,15 +869,10 @@ where
                     if channel.len() < 2 {
                         continue;
                     }
-
-                    for i in 1..channel.len() {
-                        let prev: f64 = channel[i - 1].convert_to();
-                        let curr: f64 = channel[i].convert_to();
-
-                        if (prev > 0.0 && curr <= 0.0) || (prev <= 0.0 && curr > 0.0) {
-                            total_crossings += 1;
-                        }
-                    }
+                    total_crossings += match channel.as_slice() {
+                        Some(s) => count_zero_crossings(s),
+                        None => count_zero_crossings(&channel.to_vec()),
+                    };
                 }
                 total_crossings
             }
