@@ -24,11 +24,11 @@ _PATH = []
 
 
 def _v(c):
-    return c.cached("v", lambda: np.sin(vec_values(0.0, 20.0, c.dtype)))
+    return c.cached("opt_v", lambda: np.sin(vec_values(0.0, 20.0, c.dtype)))
 
 
 def _stereo(c):
-    return c.cached("stereo", lambda: np.stack([c.y, c.y[::-1]]))
+    return c.cached("opt_stereo", lambda: np.stack([c.y, c.y[::-1]]))
 
 
 def _midi():
@@ -55,15 +55,15 @@ def _wav():
 
 
 def _C(c):
-    return c.cached("C", lambda: np.abs(librosa.cqt(c.y, sr=SR, fmin=55.0, n_bins=72, bins_per_octave=36, tuning=0.0)))
+    return c.cached("opt_C", lambda: np.abs(librosa.cqt(c.y, sr=SR, fmin=55.0, n_bins=72, bins_per_octave=36, tuning=0.0)))
 
 
 def _S(c):
-    return c.cached("S", lambda: np.abs(librosa.stft(c.y, n_fft=1024, hop_length=256)))
+    return c.cached("opt_S", lambda: np.abs(librosa.stft(c.y, n_fft=1024, hop_length=256)))
 
 
 def _Sc(c):
-    return c.cached("Sc", lambda: librosa.stft(c.y, n_fft=512, hop_length=128))
+    return c.cached("opt_Sc", lambda: librosa.stft(c.y, n_fft=512, hop_length=128))
 
 
 def _hf(c):
@@ -75,7 +75,7 @@ def _tg(c):
         env = librosa.onset.onset_strength(y=c.y, sr=SR, hop_length=256)
         return librosa.feature.tempogram(onset_envelope=env, sr=SR, hop_length=256, win_length=128)
 
-    return c.cached("tg", make)
+    return c.cached("opt_tg", make)
 
 
 def _tg_args(c):

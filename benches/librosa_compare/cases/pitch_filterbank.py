@@ -18,7 +18,7 @@ TINY = 64
 
 
 def _v(c):
-    return c.cached("v", lambda: np.exp(-vec_values(0.0, 20.0, c.dtype)))
+    return c.cached("pf_v", lambda: np.exp(-vec_values(0.0, 20.0, c.dtype)))
 
 
 def _t():

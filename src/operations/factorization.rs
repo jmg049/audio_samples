@@ -45,6 +45,7 @@ use ndarray::{Array1, Array2, ArrayView2, Axis, Zip};
 use crate::operations::linalg::{SmallRng, truncated_svd};
 use crate::utils::array_ops::{AxisSortKey, axis_sort};
 use crate::{AudioFloat, AudioSampleResult, ParameterError};
+use ndarray::linalg::general_mat_mul;
 
 fn invalid<T>(parameter: &str, reason: impl Into<String>) -> AudioSampleResult<T> {
     Err(ParameterError::invalid_value(parameter, reason.into()).into())
@@ -349,7 +350,6 @@ fn coordinate_sweep<F: AudioFloat>(
     let k = w.ncols();
     let mut violation = F::zero();
     let hht = hht.as_standard_layout();
-    let xht = xht.as_standard_layout();
     let (Some(row_data), Some(hht_data), Some(xht_data)) =
         (w.as_slice_mut(), hht.as_slice(), xht.as_slice())
     else {
@@ -400,13 +400,12 @@ impl Regularisation {
 fn update_coordinates<F: AudioFloat>(
     target: &mut Array2<F>,
     other: ArrayView2<'_, F>,
-    x_other_t: Array2<F>,
+    x_other_t: &mut Array2<F>,
     l1: f64,
     l2: f64,
     order: &[usize],
 ) -> F {
     let mut oot = other.dot(&other.t());
-    let mut xot = x_other_t;
     if l2 != 0.0 {
         let l2 = of::<F>(l2);
         for t in 0..oot.nrows() {
@@ -415,9 +414,9 @@ fn update_coordinates<F: AudioFloat>(
     }
     if l1 != 0.0 {
         let l1 = of::<F>(l1);
-        xot.mapv_inplace(|v| v - l1);
+        x_other_t.mapv_inplace(|v| v - l1);
     }
-    coordinate_sweep(target, &oot, &xot, order)
+    coordinate_sweep(target, &oot, x_other_t, order)
 }
 
 fn shuffled(k: usize, rng: &mut SmallRng) -> Vec<usize> {
@@ -446,6 +445,8 @@ fn run_coordinate_descent<F: AudioFloat>(
     // H is updated through its transpose, whose rows are the coordinates of each frame.
     let mut ht = h.t().as_standard_layout().into_owned();
     *h = Array2::zeros((0, 0));
+    let mut xht = Array2::<F>::zeros((x.nrows(), k));
+    let mut xtw = Array2::<F>::zeros(if update_h { (x.ncols(), k) } else { (0, 0) });
     while iter < cfg.max_iter {
         iter += 1;
         let order_w = if cfg.shuffle {
@@ -453,16 +454,16 @@ fn run_coordinate_descent<F: AudioFloat>(
         } else {
             in_order.clone()
         };
-        let xht = x.dot(&ht);
-        let mut violation = update_coordinates(w, ht.t(), xht, reg.l1_w, reg.l2_w, &order_w);
+        general_mat_mul(F::one(), &x, &ht, F::zero(), &mut xht);
+        let mut violation = update_coordinates(w, ht.t(), &mut xht, reg.l1_w, reg.l2_w, &order_w);
         if update_h {
             let order_h = if cfg.shuffle {
                 shuffled(k, &mut rng)
             } else {
                 in_order.clone()
             };
-            let xtw = x.t().dot(&*w);
-            violation += update_coordinates(&mut ht, w.t(), xtw, reg.l1_h, reg.l2_h, &order_h);
+            general_mat_mul(F::one(), &x.t(), &*w, F::zero(), &mut xtw);
+            violation += update_coordinates(&mut ht, w.t(), &mut xtw, reg.l1_h, reg.l2_h, &order_h);
         }
         match first {
             None => {

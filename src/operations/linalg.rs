@@ -41,6 +41,7 @@
 //! non-negative least squares problem*, CAIP 2005; N. Halko, P.-G. Martinsson and
 //! J. A. Tropp, *Finding structure with randomness*, SIAM Review 53, 2011.
 
+use ndarray::linalg::general_mat_mul;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 
 use crate::{AudioFloat, AudioSampleResult, ParameterError};
@@ -416,12 +417,14 @@ pub(crate) fn truncated_svd<F: AudioFloat>(
     drop(omega);
     orthonormalise(&mut q, 1);
     // One round keeps the power iterations stable; the last result gets a second one.
+    let mut z = Array2::<F>::zeros((n, size));
     for _ in 0..n_iter {
-        let mut z = q.t().dot(&a).reversed_axes();
+        general_mat_mul(F::one(), &a.t(), &q, F::zero(), &mut z);
         orthonormalise(&mut z, 1);
-        q = a.dot(&z);
+        general_mat_mul(F::one(), &a, &z, F::zero(), &mut q);
         orthonormalise(&mut q, 1);
     }
+    drop(z);
     orthonormalise(&mut q, 1);
     let b = q.t().dot(&a);
     let small = svd(b.view())?;
@@ -570,51 +573,39 @@ pub fn nnls<F: AudioFloat>(
     Ok(active_set(copy.view(), &b).mapv(of::<F>))
 }
 
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
 /// The lower Cholesky factor of the Gram matrix of the passive columns, in packed rows,
-/// grown one column at a time, and a contiguous copy of those columns.
+/// grown one column at a time.
 struct PassiveFactor {
     passive: Vec<usize>,
-    columns: Vec<f64>,
-    rows: usize,
     l: Vec<f64>,
 }
 
 impl PassiveFactor {
-    fn new(rows: usize) -> Self {
+    fn new() -> Self {
         Self {
             passive: Vec::new(),
-            columns: Vec::new(),
-            rows,
             l: Vec::new(),
         }
     }
 
     /// Adds column `t`. Returns false if it is numerically dependent on the others.
-    fn push(&mut self, a: ArrayView2<'_, f64>, t: usize) -> bool {
+    fn push(&mut self, gram: &Array2<f64>, t: usize) -> bool {
         let p = self.passive.len();
-        let start_col = self.columns.len();
-        self.columns.extend(a.column(t).iter().copied());
-        let (held, col) = self.columns.split_at(start_col);
         let start = self.l.len();
         self.l.resize(start + p + 1, 0.0);
         let mut offset = 0;
-        for (i, other) in held.chunks_exact(self.rows).enumerate() {
-            let mut v = dot(other, col);
+        for i in 0..p {
+            let mut v = gram[[self.passive[i], t]];
             for k in 0..i {
                 v -= self.l[offset + k] * self.l[start + k];
             }
             self.l[start + i] = v / self.l[offset + i];
             offset += i + 1;
         }
-        let diag = dot(col, col);
+        let diag = gram[[t, t]];
         let d2 = diag - self.l[start..start + p].iter().map(|v| v * v).sum::<f64>();
         if d2.is_nan() || d2 <= diag * 1e-14 {
             self.l.truncate(start);
-            self.columns.truncate(start_col);
             return false;
         }
         self.l[start + p] = d2.sqrt();
@@ -622,12 +613,11 @@ impl PassiveFactor {
         true
     }
 
-    fn rebuild(&mut self, a: ArrayView2<'_, f64>, keep: &[usize]) {
+    fn rebuild(&mut self, gram: &Array2<f64>, keep: &[usize]) {
         self.passive.clear();
-        self.columns.clear();
         self.l.clear();
         for &t in keep {
-            self.push(a, t);
+            self.push(gram, t);
         }
     }
 
@@ -659,28 +649,23 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
     let (m, n) = a.dim();
     let capacity = m.min(n);
     let mut x = Array1::<f64>::zeros(n);
-    let mut factor = PassiveFactor::new(m);
-    let mut in_passive = vec![false; n];
-    let mut rejected = vec![false; n];
-    let mut norm1 = vec![0.0_f64; n];
-    for row in a.rows() {
-        for (s, v) in norm1.iter_mut().zip(row.iter()) {
-            *s += v.abs();
-        }
-    }
-    let norm1 = norm1.iter().copied().fold(0.0, f64::max);
-    let tol = 10.0 * m.max(n) as f64 * f64::EPSILON * norm1.max(f64::MIN_POSITIVE);
-    let mut residual = b.clone();
-    let mut w = vec![0.0_f64; n];
-    let at_b: Vec<f64> = {
-        let mut v = vec![0.0_f64; n];
-        for (row, &bi) in a.rows().into_iter().zip(b.iter()) {
-            for (o, e) in v.iter_mut().zip(row.iter()) {
-                *o += e * bi;
+    let mut factor = PassiveFactor::new();
+    // 1 for a column in the passive set, 2 for one rejected until the set next changes.
+    let mut state = vec![0_u8; n];
+    let at_b = a.t().dot(b);
+    let tol = {
+        let mut norm1 = vec![0.0_f64; n];
+        for row in a.rows() {
+            for (s, v) in norm1.iter_mut().zip(row.iter()) {
+                *s += v.abs();
             }
         }
-        v
+        let largest = norm1.iter().copied().fold(0.0, f64::max);
+        10.0 * m.max(n) as f64 * f64::EPSILON * largest.max(f64::MIN_POSITIVE)
     };
+    // The gradient follows from the Gram matrix, without the residual.
+    let gram = a.t().dot(&a).as_standard_layout().into_owned();
+    let mut w = at_b.clone();
     let mut s: Vec<f64> = Vec::new();
     let max_iter = 3 * n.max(1);
     let mut iter = 0;
@@ -691,27 +676,25 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
     };
     while factor.passive.len() < capacity && iter < max_iter {
         iter += 1;
-        w.fill(0.0);
-        for (row, &r) in a.rows().into_iter().zip(residual.iter()) {
-            for (o, e) in w.iter_mut().zip(row.iter()) {
-                *o += e * r;
-            }
-        }
         let mut best: Option<(usize, f64)> = None;
-        for t in 0..n {
-            if !in_passive[t] && !rejected[t] && w[t] > tol && best.is_none_or(|(_, b)| w[t] > b) {
-                best = Some((t, w[t]));
+        for (t, (&w_t, &flag)) in w.iter().zip(&state).enumerate() {
+            if flag == 0 && w_t > tol && best.is_none_or(|(_, b)| w_t > b) {
+                best = Some((t, w_t));
             }
         }
         let Some((t, _)) = best else {
             break;
         };
-        if !factor.push(a, t) {
-            rejected[t] = true;
+        if !factor.push(&gram, t) {
+            state[t] = 2;
             continue;
         }
-        in_passive[t] = true;
-        rejected.fill(false);
+        state[t] = 1;
+        for flag in &mut state {
+            if *flag == 2 {
+                *flag = 0;
+            }
+        }
         loop {
             solve_passive(&factor, &mut s);
             if s.iter().all(|&v| v > 0.0) {
@@ -736,33 +719,31 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
                         Some(j)
                     } else {
                         x[j] = 0.0;
-                        in_passive[j] = false;
+                        state[j] = 0;
                         None
                     }
                 })
                 .collect();
-            factor.rebuild(a, &keep);
+            factor.rebuild(&gram, &keep);
             if factor.passive.is_empty() {
                 break;
             }
         }
-        residual.assign(b);
-        if let Some(left) = residual.as_slice_mut() {
-            for (&j, column) in factor.passive.iter().zip(factor.columns.chunks_exact(m)) {
-                let weight = x[j];
-                for (r, &e) in left.iter_mut().zip(column) {
-                    *r -= weight * e;
-                }
-            }
+        w.assign(&at_b);
+        for &j in &factor.passive {
+            w.scaled_add(-x[j], &gram.row(j));
         }
     }
     // One step of iterative refinement recovers what the normal equations lose.
     if !factor.passive.is_empty() {
-        let left = residual.as_slice().unwrap_or(&[]);
+        let mut residual = b.clone();
+        for &j in &factor.passive {
+            residual.scaled_add(-x[j], &a.column(j));
+        }
         let mut d: Vec<f64> = factor
-            .columns
-            .chunks_exact(m)
-            .map(|c| dot(c, left))
+            .passive
+            .iter()
+            .map(|&t| a.column(t).dot(&residual))
             .collect();
         factor.solve(&mut d);
         for (&j, v) in factor.passive.iter().zip(&d) {

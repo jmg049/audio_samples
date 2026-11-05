@@ -29,7 +29,7 @@ BL, HOP, SR = 16, 512, 22050
 
 
 def _v(c):
-    return c.cached("v", lambda: np.sin(vec_values(0.0, 3000.0, c.dtype)))
+    return c.cached("ao_v", lambda: np.sin(vec_values(0.0, 3000.0, c.dtype)))
 
 
 def _tv(c):

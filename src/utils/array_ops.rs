@@ -677,8 +677,21 @@ fn copy_run<'a, A: Clone>(
     match (backwards, reversed) {
         (false, false) | (true, true) => segment.clone_from_slice(source),
         _ => {
-            segment.clone_from_slice(source);
-            segment.reverse();
+            // Blocks of a fixed size let the reversed copy vectorise.
+            let mut blocks = segment.chunks_exact_mut(8);
+            let mut sources = source.rchunks_exact(8);
+            for (o, v) in (&mut blocks).zip(&mut sources) {
+                for (slot, value) in o.iter_mut().zip(v.iter().rev()) {
+                    *slot = value.clone();
+                }
+            }
+            for (o, v) in blocks
+                .into_remainder()
+                .iter_mut()
+                .zip(sources.remainder().iter().rev())
+            {
+                *o = v.clone();
+            }
         }
     }
     rest
