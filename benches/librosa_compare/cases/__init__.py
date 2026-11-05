@@ -178,6 +178,7 @@ def all_cases() -> list[Case]:
             features,
             inverse,
             notation,
+            options,
             pitch,
             pitch_filterbank,
             rhythm,

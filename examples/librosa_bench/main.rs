@@ -29,6 +29,7 @@ mod effects;
 mod features;
 mod inverse;
 mod notation;
+mod options;
 mod pitch;
 mod pitch_filterbank;
 mod rhythm;
@@ -226,6 +227,7 @@ fn build<'a, F: AudioFloat>(case: &str, ctx: &'a Ctxs<F>) -> Option<Thunk<'a>> {
                 .or_else(|| segment::$kind(case, $x))
                 .or_else(|| array_ops::$kind(case, $x))
                 .or_else(|| notation::$kind(case, $x))
+                .or_else(|| options::$kind(case, $x))
         };
     }
     match ctx {
