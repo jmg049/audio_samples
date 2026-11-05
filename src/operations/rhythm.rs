@@ -171,7 +171,7 @@ fn pairwise_sum<F: AudioFloat>(a: &[F]) -> F {
         let m = n - (n % 8);
         // Eight independent accumulators over the blocks of eight (numpy's
         // unrolled loop), as fixed-size chunks so that they vectorise.
-        for c in a[8..m].chunks_exact(8) {
+        for c in a[8..m].as_chunks::<8>().0 {
             for (rj, &v) in r.iter_mut().zip(c) {
                 *rj += v;
             }

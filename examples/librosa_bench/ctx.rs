@@ -44,8 +44,10 @@ impl<F: AudioFloat> AudioCtx<F> {
         let path = format!("{signals}/sig_{sr}_{seconds}s_{channels}ch.f64");
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let v: Vec<F> = bytes
-            .chunks_exact(8)
-            .map(|b| F::of(f64::from_le_bytes(b.try_into().unwrap())))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| F::of(f64::from_le_bytes(*b)))
             .collect();
         let n = v.len() / channels;
         let y = Array2::from_shape_vec((channels, n), v).unwrap();

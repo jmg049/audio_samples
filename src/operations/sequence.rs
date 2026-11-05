@@ -1498,9 +1498,9 @@ fn max_of_sums<F: AudioFloat>(a: &[F], b: &[F]) -> F {
     let (a, b) = (&a[..n], &b[..n]);
     let ninf = F::neg_infinity();
     let mut acc = [ninf; 8];
-    let mut ca = a.chunks_exact(8);
-    let mut cb = b.chunks_exact(8);
-    for (x, y) in (&mut ca).zip(&mut cb) {
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..8 {
             let c = x[i] + y[i];
             acc[i] = if c > acc[i] { c } else { acc[i] };
@@ -1512,7 +1512,7 @@ fn max_of_sums<F: AudioFloat>(a: &[F], b: &[F]) -> F {
             m = v;
         }
     }
-    for (&x, &y) in ca.remainder().iter().zip(cb.remainder()) {
+    for (&x, &y) in ra.iter().zip(rb) {
         let c = x + y;
         if c > m {
             m = c;

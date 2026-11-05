@@ -743,12 +743,12 @@ impl<F: RsFloat> FftStage<F> {
             let y = &mut bufs.y[..half_n];
             self.inv.process_outofplace_with_scratch(w, y, bufs.scratch);
             // Even and odd outputs are the real and imaginary parts.
-            let mut pairs = dst.chunks_exact_mut(2);
-            for (d, v) in pairs.by_ref().zip(&y[first..]) {
+            let (pairs, rest) = dst.as_chunks_mut::<2>();
+            for (d, v) in pairs.iter_mut().zip(&y[first..]) {
                 d[0] = v.re;
                 d[1] = v.im;
             }
-            if let [d] = pairs.into_remainder() {
+            if let [d] = rest {
                 *d = y[first + dst_len / 2].re;
             }
         }
@@ -785,7 +785,7 @@ fn load_even_odd<T: Copy, F: RsFloat>(
     let len = 2 * z.len() as i64;
     if start >= 0 && start + len <= x.len() as i64 {
         let src = &x[start as usize..(start + len) as usize];
-        for (c, pair) in z.iter_mut().zip(src.chunks_exact(2)) {
+        for (c, pair) in z.iter_mut().zip(src.as_chunks::<2>().0) {
             *c = Complex::new(to_f(pair[0]), to_f(pair[1]));
         }
         return;
@@ -1137,13 +1137,10 @@ fn hsum8<F: RsFloat>(a: [F; 8]) -> F {
 #[inline(always)]
 fn dot_portable<F: RsFloat>(a: &[F], b: &[F]) -> F {
     let mut acc = [F::zero(); 8];
-    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
-    let tail = ca
-        .remainder()
-        .iter()
-        .zip(cb.remainder())
-        .fold(F::zero(), |s, (x, y)| s + *x * *y);
-    for (x, y) in ca.zip(cb) {
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    let tail = ra.iter().zip(rb).fold(F::zero(), |s, (x, y)| s + *x * *y);
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..8 {
             acc[i] += x[i] * y[i];
         }

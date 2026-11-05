@@ -1384,17 +1384,13 @@ fn power_to_db_core<F: AudioFloat, D: Dimension>(
 /// caller distinguishes).
 fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
     let mut acc = [F::neg_infinity(); 8];
-    let mut it = chunk.chunks_exact(8);
-    for c in &mut it {
+    let (blocks, rem) = chunk.as_chunks::<8>();
+    for c in blocks {
         for (a, &v) in acc.iter_mut().zip(c) {
             *a = a.max(v);
         }
     }
-    let m = it
-        .remainder()
-        .iter()
-        .copied()
-        .fold(F::neg_infinity(), F::max);
+    let m = rem.iter().copied().fold(F::neg_infinity(), F::max);
     acc.iter().copied().fold(m, F::max)
 }
 

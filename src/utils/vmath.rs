@@ -356,17 +356,13 @@ pub(crate) fn log10_max_in_place<F: AudioFloat>(v: &mut [F], amin: F) -> F {
             }
             log10_in_place(v);
             let mut acc = [F::neg_infinity(); 8];
-            let mut it = v.chunks_exact(8);
-            for c in &mut it {
+            let (blocks, rem) = v.as_chunks::<8>();
+            for c in blocks {
                 for (a, &x) in acc.iter_mut().zip(c) {
                     *a = a.max(x);
                 }
             }
-            let m = it
-                .remainder()
-                .iter()
-                .copied()
-                .fold(F::neg_infinity(), F::max);
+            let m = rem.iter().copied().fold(F::neg_infinity(), F::max);
             acc.iter().copied().fold(m, F::max)
         }
     }
@@ -376,17 +372,13 @@ pub(crate) fn log10_max_in_place<F: AudioFloat>(v: &mut [F], amin: F) -> F {
 /// running maxima so that it vectorises.
 fn max_f32(v: &[f32]) -> f32 {
     let mut acc = [f32::NEG_INFINITY; 8];
-    let mut it = v.chunks_exact(8);
-    for c in &mut it {
+    let (blocks, rem) = v.as_chunks::<8>();
+    for c in blocks {
         for (a, &x) in acc.iter_mut().zip(c) {
             *a = a.max(x);
         }
     }
-    let m = it
-        .remainder()
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let m = rem.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     acc.iter().copied().fold(m, f32::max)
 }
 

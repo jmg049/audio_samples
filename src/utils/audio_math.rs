@@ -1115,9 +1115,9 @@ fn truncate_scaled_into(times: &[f64], scale: f64, out: &mut [i64], post: impl F
     const SMALL: f64 = 2_251_799_813_685_248.0; // 2^51
     // 2^63: products in (-2^63, 2^63) convert without saturation.
     const LIM: f64 = 9_223_372_036_854_775_808.0;
-    let mut src = times.chunks_exact(8);
-    let mut dst = out.chunks_exact_mut(8);
-    for (c, o) in (&mut src).zip(&mut dst) {
+    let (src, src_rem) = times.as_chunks::<8>();
+    let (dst, dst_rem) = out.as_chunks_mut::<8>();
+    for (c, o) in src.iter().zip(dst) {
         let mut p = [0.0f64; 8];
         for (b, &t) in p.iter_mut().zip(c) {
             *b = t * scale;
@@ -1140,7 +1140,7 @@ fn truncate_scaled_into(times: &[f64], scale: f64, out: &mut [i64], post: impl F
             }
         }
     }
-    for (o, &t) in dst.into_remainder().iter_mut().zip(src.remainder()) {
+    for (o, &t) in dst_rem.iter_mut().zip(src_rem) {
         *o = post((t * scale) as i64);
     }
 }
