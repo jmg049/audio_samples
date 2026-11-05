@@ -425,6 +425,101 @@ pub fn stft<F: AudioFloat>(
     stft_map(signal, config, |z| z)
 }
 
+/// The number of frames [`stft`] gives for `samples` samples per channel.
+///
+/// # Arguments
+///
+/// * `samples` - Samples per channel.
+/// * `config` - STFT parameters.
+///
+/// # Returns
+///
+/// `1 + (samples + 2 * (n_fft / 2) - n_fft) / hop` when centred and
+/// `1 + (samples - n_fft) / hop` otherwise.
+///
+/// # Errors
+///
+/// [`ParameterError`] if the hop length is invalid, or `center` is `false` and the signal
+/// is shorter than `n_fft`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::operations::spectrum::{StftConfig, stft_n_frames};
+///
+/// let frames = stft_n_frames(4096, &StftConfig::new().with_n_fft(nzu!(512))).unwrap();
+/// assert_eq!(frames, 33);
+/// ```
+pub fn stft_n_frames(samples: usize, config: &StftConfig) -> AudioSampleResult<usize> {
+    let hop = config.effective_hop_length()?.get();
+    let n_fft = config.n_fft.get();
+    let padded_len = samples + if config.center { 2 * (n_fft / 2) } else { 0 };
+    if padded_len < n_fft {
+        return Err(param_err(
+            "n_fft",
+            format!(
+                "n_fft={n_fft} is too large for uncentred analysis of a signal of length {samples}"
+            ),
+        ));
+    }
+    Ok(1 + (padded_len - n_fft) / hop)
+}
+
+/// [`stft`] written into a given array, which needs no memory for the matrix.
+///
+/// # Arguments
+///
+/// * `signal` - `(channels, samples)` array of samples (at least one sample).
+/// * `config` - STFT parameters.
+/// * `out` - Of shape `(channels, n_fft / 2 + 1, n_frames)`, in any memory layout, with
+///   `n_frames` from [`stft_n_frames`].
+///
+/// # Errors
+///
+/// As [`stft`], and [`ParameterError`] if `out` has another shape.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::operations::spectrum::{StftConfig, stft, stft_into};
+/// use ndarray::{Array2, Array3};
+/// use num_complex::Complex;
+///
+/// let x = Array2::from_shape_fn((2, 4096), |(c, n)| ((n * (c + 1)) as f64 * 0.01).sin());
+/// let config = StftConfig::new().with_n_fft(nzu!(512));
+/// let mut out = Array3::<Complex<f64>>::zeros((2, 257, 33));
+/// stft_into(x.view(), &config, out.view_mut()).unwrap();
+/// assert_eq!(out, stft(x.view(), &config).unwrap());
+/// ```
+pub fn stft_into<F: AudioFloat>(
+    signal: ArrayView2<'_, F>,
+    config: &StftConfig,
+    mut out: ndarray::ArrayViewMut3<'_, Complex<F>>,
+) -> AudioSampleResult<()> {
+    let frames = StftFrames::new(signal, config)?;
+    let (n_channels, n_bins, n_frames) = (signal.nrows(), frames.n_bins, frames.n_frames);
+    if out.dim() != (n_channels, n_bins, n_frames) {
+        return Err(param_err(
+            "out",
+            format!(
+                "has shape {:?}, expected {:?}",
+                out.dim(),
+                (n_channels, n_bins, n_frames)
+            ),
+        ));
+    }
+    frames.for_each_block(signal, config, |c, t0, nb, block| {
+        for (k, mut dst) in out.index_axis_mut(Axis(0), c).outer_iter_mut().enumerate() {
+            let mut dst = dst.slice_mut(ndarray::s![t0..t0 + nb]);
+            for (j, d) in dst.iter_mut().enumerate() {
+                *d = block[j * n_bins + k];
+            }
+        }
+    })
+}
+
 /// Fills `frame` with the windowed padded frame that starts at signal index
 /// `start` (negative or running past the end where the frame overlaps the
 /// padding), with the padding of `mode` (`numpy.pad` semantics).
@@ -607,16 +702,7 @@ impl<F: AudioFloat> StftFrames<F> {
             ));
         }
         let pad = if config.center { n_fft / 2 } else { 0 };
-        let padded_len = len + 2 * pad;
-        if padded_len < n_fft {
-            return Err(param_err(
-                "n_fft",
-                format!(
-                    "n_fft={n_fft} is too large for uncentred analysis of a signal of length {len}"
-                ),
-            ));
-        }
-        let n_frames = 1 + (padded_len - n_fft) / hop;
+        let n_frames = stft_n_frames(len, config)?;
         let n_bins = n_fft / 2 + 1;
         check_derived_len(
             "n_fft",
@@ -2870,6 +2956,24 @@ pub trait AudioSpectrum {
     /// ```
     fn stft_matrix(&self, config: &StftConfig) -> AudioSampleResult<Array3<Complex<Self::Float>>>;
 
+    /// [`AudioSpectrum::stft_matrix`] written into a given array, which needs no memory
+    /// for the matrix.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - STFT parameters.
+    /// * `out` - Of shape `(channels, n_fft / 2 + 1, n_frames)`, in any memory layout, with
+    ///   `n_frames` from [`stft_n_frames`].
+    ///
+    /// # Errors
+    ///
+    /// As [`AudioSpectrum::stft_matrix`], and [`ParameterError`] if `out` has another shape.
+    fn stft_matrix_into(
+        &self,
+        config: &StftConfig,
+        out: ndarray::ArrayViewMut3<'_, Complex<Self::Float>>,
+    ) -> AudioSampleResult<()>;
+
     /// Inverts an STFT matrix to audio, equivalent to `librosa.istft`.
     ///
     /// The inverse transform runs in [`Float`](Self::Float), and the result is
@@ -3148,6 +3252,14 @@ where
 
     fn stft_matrix(&self, config: &StftConfig) -> AudioSampleResult<Array3<Complex<T::Float>>> {
         stft(finite_float_rows(self)?.view(), config)
+    }
+
+    fn stft_matrix_into(
+        &self,
+        config: &StftConfig,
+        out: ndarray::ArrayViewMut3<'_, Complex<T::Float>>,
+    ) -> AudioSampleResult<()> {
+        stft_into(finite_float_rows(self)?.view(), config, out)
     }
 
     fn istft_matrix(
