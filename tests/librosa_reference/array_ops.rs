@@ -366,3 +366,101 @@ fn blocks() {
         .collect();
     assert_eq!(time, f64s(&f["time"]));
 }
+
+#[test]
+fn zero_crossings_match() {
+    let f = &fixture()["zero_crossings"];
+    let y = ndarray::Array1::from(f64s(&f["y"]));
+    let check = |z: ndarray::Array1<bool>, key: &str| {
+        let got: Vec<f64> = z.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
+        assert_eq!(got, f64s(&f[key]), "{key}");
+    };
+    check(
+        zero_crossings(&y, 1e-10, true, true, Axis(0)).unwrap(),
+        "default",
+    );
+    check(
+        zero_crossings(&y, 1e-10, false, true, Axis(0)).unwrap(),
+        "no_pad",
+    );
+    check(
+        zero_crossings(&y, 0.5, true, false, Axis(0)).unwrap(),
+        "zero_sign",
+    );
+    let peak = y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    check(
+        zero_crossings(&y, 0.1 * peak, true, true, Axis(0)).unwrap(),
+        "ref",
+    );
+    let negative = y.mapv(|v| -v);
+    let both = ndarray::stack(Axis(0), &[y.view(), negative.view()]).unwrap();
+    let z = zero_crossings(&both, 1e-10, true, true, Axis(0)).unwrap();
+    assert_eq!(bools(&z), arr2(&f["axis0"]));
+}
+
+#[test]
+fn generators_match() {
+    let f = &fixture()["generators"];
+    let start = -std::f64::consts::FRAC_PI_2;
+    close(
+        &tone::<f64>(441.0, 22050.0, 512, start),
+        &f64s(&f["tone"]),
+        1e-12,
+        "tone",
+    );
+    close(
+        &tone::<f64>(441.0, 22050.0, 512, 0.7),
+        &f64s(&f["tone_phi"]),
+        1e-12,
+        "tone phi",
+    );
+    let sweep = chirp::<f64>(110.0, 3520.0, 22050.0, 2048, false, start).unwrap();
+    close(&sweep, &f64s(&f["chirp_log"]), 1e-12, "chirp");
+    let sweep = chirp::<f64>(110.0, 3520.0, 22050.0, 2048, true, 0.3).unwrap();
+    close(&sweep, &f64s(&f["chirp_lin"]), 1e-12, "linear chirp");
+}
+
+#[test]
+fn note_names_match() {
+    use audio_samples::utils::notation::midi_name;
+    let f = &fixture()["note_names"];
+    let text = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let midi = f64s(&f["midi"]);
+    let c: Vec<String> = midi
+        .iter()
+        .map(|&m| midi_name(m, true, false, "C:maj", false).unwrap())
+        .collect();
+    assert_eq!(c, text(&f["c"]));
+    let plain: Vec<String> = [60.0, 61.0, 70.0]
+        .iter()
+        .map(|&m| midi_name(m, false, false, "F:maj", false).unwrap())
+        .collect();
+    assert_eq!(plain, text(&f["f_major_no_octave"]));
+    let unicode: Vec<String> = [61.0, 70.0]
+        .iter()
+        .map(|&m| midi_name(m, true, false, "Db:maj", true).unwrap())
+        .collect();
+    assert_eq!(unicode, text(&f["unicode"]));
+    let cents: Vec<String> = [69.25, 69.0, 68.75]
+        .iter()
+        .map(|&m| midi_name(m, true, true, "C:maj", false).unwrap())
+        .collect();
+    assert_eq!(cents, text(&f["cents"]));
+    let notes = text(&f["fractional_notes"]);
+    let fractional: Vec<f64> = notes
+        .iter()
+        .map(|n| audio_samples::utils::audio_math::note_to_midi_fractional(n).unwrap())
+        .collect();
+    close(
+        &fractional,
+        &f64s(&f["fractional"]),
+        1e-14,
+        "fractional midi",
+    );
+}

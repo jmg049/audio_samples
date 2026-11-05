@@ -1626,8 +1626,8 @@ enum Plan {
     Linear(Vec<Option<(usize, f64)>>),
     /// Index of the sample to copy, or `None` to fill.
     Copy(Vec<Option<usize>>),
-    /// `(span, basis)` per point.
-    Spline(SplineSolver, Vec<Option<(usize, [f64; 4])>>),
+    /// The solver, with the points evaluated as each lane needs them.
+    Spline(SplineSolver),
 }
 
 fn build_plan(x: &[f64], xi: &[f64], kind: InterpKind) -> AudioSampleResult<Plan> {
@@ -1679,19 +1679,7 @@ fn build_plan(x: &[f64], xi: &[f64], kind: InterpKind) -> AudioSampleResult<Plan
         ),
         InterpKind::Quadratic | InterpKind::Cubic => {
             let k = if kind == InterpKind::Cubic { 3 } else { 2 };
-            let solver = SplineSolver::new(x, k)?;
-            let points = xi
-                .iter()
-                .map(|&v| {
-                    inside(v).then(|| {
-                        let span = knot_span(&solver.knots, k, n, v);
-                        let mut basis = [0.0; 4];
-                        bspline_basis(&solver.knots, k, span, v, &mut basis);
-                        (span, basis)
-                    })
-                })
-                .collect();
-            Plan::Spline(solver, points)
+            Plan::Spline(SplineSolver::new(x, k)?)
         }
     })
 }
@@ -1720,7 +1708,7 @@ fn build_plan(x: &[f64], xi: &[f64], kind: InterpKind) -> AudioSampleResult<Plan
 /// use audio_samples::utils::array_ops::{InterpKind, interp1d};
 /// use ndarray::{Axis, array};
 ///
-/// let y = array![0.0, 1.0, 8.0, 27.0].into_dyn();
+/// let y = array![0.0_f64, 1.0, 8.0, 27.0].into_dyn();
 /// let xi = array![1.5].into_dyn();
 /// let v = interp1d(&[0.0, 1.0, 2.0, 3.0], y.view(), xi.view(), InterpKind::Cubic, 0.0, Axis(0)).unwrap();
 /// assert!((v[[0]] - 3.375).abs() < 1e-12);
@@ -1804,16 +1792,24 @@ pub fn interp1d<F: AudioFloat>(
                         }
                     }
                 }
-                Plan::Spline(solver, points) => {
+                Plan::Spline(solver) => {
                     for (c, v) in coefficients.iter_mut().zip(lane.iter()) {
                         *c = v.to_f64().unwrap_or(f64::NAN);
                     }
                     solver.solve(&mut coefficients);
-                    for (slot, p) in o.iter_mut().zip(points) {
-                        if let Some((span, basis)) = p {
+                    let k = solver.k;
+                    let mut basis = [0.0; 4];
+                    let mut span = k;
+                    for (slot, &v) in o.iter_mut().zip(xi_flat) {
+                        if v >= x[0] && v <= x[x.len() - 1] {
+                            // Queries are usually in order, so try the last span first.
+                            if !(solver.knots[span] <= v && v < solver.knots[span + 1]) {
+                                span = knot_span(&solver.knots, k, solver.n, v);
+                            }
+                            bspline_basis(&solver.knots, k, span, v, &mut basis);
                             let mut sum = 0.0;
-                            for (j, b) in basis.iter().enumerate().take(solver.k + 1) {
-                                sum += b * coefficients[span + j - solver.k];
+                            for (j, b) in basis.iter().enumerate().take(k + 1) {
+                                sum += b * coefficients[span + j - k];
                             }
                             *slot = to_float::<F>(sum);
                         }
@@ -2072,6 +2068,158 @@ fn all_finite<F: AudioFloat>(values: &[F]) -> bool {
             .all(|c| c.iter().fold(0_u64, |a, x| a | (x - x).to_bits()) == 0);
     }
     values.iter().all(|v| v.is_finite())
+}
+
+/// Marks the sign changes of a signal along one axis.
+///
+/// Values within `threshold` of zero count as zero. An element is marked when its sign
+/// differs from the previous element's.
+///
+/// # Arguments
+/// - `y`: the signal, of any dimension.
+/// - `threshold`: magnitudes up to this are zero; not negative.
+/// - `pad`: the mark of the first element.
+/// - `zero_pos`: zero counts as positive; otherwise it is a sign of its own.
+/// - `axis`: the time axis.
+///
+/// # Returns
+/// A boolean array of the same shape.
+///
+/// # Errors
+/// [`ParameterError`] if `axis` is out of range or `threshold` is negative or not finite.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::array_ops::zero_crossings;
+/// use ndarray::{Axis, array};
+///
+/// let z = zero_crossings(&array![1.0, -1.0, 2.0], 0.0, true, true, Axis(0)).unwrap();
+/// assert_eq!(z, array![true, true, true]);
+/// ```
+pub fn zero_crossings<F, S, D>(
+    y: &ArrayBase<S, D>,
+    threshold: F,
+    pad: bool,
+    zero_pos: bool,
+    axis: Axis,
+) -> AudioSampleResult<Array<bool, D>>
+where
+    F: AudioFloat,
+    S: Data<Elem = F>,
+    D: Dimension + RemoveAxis,
+{
+    check_axis("axis", axis, y.ndim())?;
+    if !threshold.is_finite() || threshold < F::zero() {
+        return invalid("threshold", "must be finite and not negative");
+    }
+    let sign = |v: F| -> i8 {
+        let v = if v.abs() <= threshold { F::zero() } else { v };
+        if zero_pos {
+            if v.is_sign_negative() && v != F::zero() {
+                -1
+            } else {
+                1
+            }
+        } else if v > F::zero() {
+            1
+        } else if v < F::zero() {
+            -1
+        } else {
+            0
+        }
+    };
+    let mut out = Array::from_elem(y.raw_dim(), false);
+    Zip::from(out.lanes_mut(axis))
+        .and(y.lanes(axis))
+        .for_each(|mut o, lane| {
+            let mut previous = None;
+            for (slot, &v) in o.iter_mut().zip(lane.iter()) {
+                let current = sign(v);
+                *slot = previous.map_or(pad, |p| p != current);
+                previous = Some(current);
+            }
+        });
+    Ok(out)
+}
+
+/// A cosine of a given frequency and phase.
+///
+/// # Arguments
+/// - `frequency`: in Hz.
+/// - `sample_rate`: in Hz.
+/// - `length`: samples.
+/// - `phi`: phase offset in radians; `-pi / 2` starts like a sine.
+///
+/// # Returns
+/// The samples.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::array_ops::tone;
+///
+/// let y: Vec<f64> = tone(100.0, 400.0, 4, 0.0);
+/// assert!((y[0] - 1.0).abs() < 1e-12);
+/// assert!(y[1].abs() < 1e-12);
+/// ```
+#[must_use]
+pub fn tone<F: AudioFloat>(frequency: f64, sample_rate: f64, length: usize, phi: f64) -> Vec<F> {
+    let w = std::f64::consts::TAU * frequency / sample_rate;
+    (0..length)
+        .map(|i| to_float((w * i as f64 + phi).cos()))
+        .collect()
+}
+
+/// A swept cosine from `fmin` to `fmax` over its length.
+///
+/// # Arguments
+/// - `fmin`: starting frequency in Hz.
+/// - `fmax`: frequency at the end in Hz.
+/// - `sample_rate`: in Hz.
+/// - `length`: samples.
+/// - `linear`: sweep linearly; otherwise exponentially.
+/// - `phi`: phase offset in radians.
+///
+/// # Returns
+/// The samples.
+///
+/// # Errors
+/// [`ParameterError`] if an exponential sweep has a frequency that is not positive.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::array_ops::chirp;
+///
+/// let y: Vec<f64> = chirp(110.0, 880.0, 8000.0, 800, false, 0.0).unwrap();
+/// assert_eq!(y.len(), 800);
+/// assert!((y[0] - 1.0).abs() < 1e-12);
+/// ```
+pub fn chirp<F: AudioFloat>(
+    fmin: f64,
+    fmax: f64,
+    sample_rate: f64,
+    length: usize,
+    linear: bool,
+    phi: f64,
+) -> AudioSampleResult<Vec<F>> {
+    if !linear && (fmin.is_nan() || fmax.is_nan() || fmin <= 0.0 || fmax <= 0.0) {
+        return invalid("fmin", "an exponential sweep needs positive frequencies");
+    }
+    let duration = length as f64 / sample_rate;
+    let tau = std::f64::consts::TAU;
+    let ratio = fmax / fmin;
+    Ok((0..length)
+        .map(|i| {
+            let t = i as f64 / sample_rate;
+            let phase = if linear {
+                tau * (fmin * t + 0.5 * (fmax - fmin) / duration * t * t)
+            } else if fmin == fmax {
+                tau * fmin * t
+            } else {
+                tau * fmin * duration / ratio.ln() * (ratio.powf(t / duration) - 1.0)
+            };
+            to_float((phase + phi).cos())
+        })
+        .collect())
 }
 
 /// Whether an integer is positive.

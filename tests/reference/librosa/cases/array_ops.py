@@ -201,4 +201,33 @@ def build(signals, sr) -> dict:
         "samples": _l(librosa.blocks_to_samples(blocks, block_length=16, hop_length=512)),
         "time": _l(librosa.blocks_to_time(blocks, block_length=16, hop_length=512, sr=22050)),
     }
+    y = rng.normal(size=64)
+    y[10:14] = [1e-12, -1e-12, 0.0, -0.0]
+    y2 = np.stack([y, -y])
+    out["zero_crossings"] = {
+        "y": _l(y),
+        "default": _l(librosa.zero_crossings(y).astype(float)),
+        "no_pad": _l(librosa.zero_crossings(y, pad=False).astype(float)),
+        "zero_sign": _l(librosa.zero_crossings(y, zero_pos=False, threshold=0.5).astype(float)),
+        "ref": _l(librosa.zero_crossings(y, threshold=0.1, ref_magnitude=np.max).astype(float)),
+        "axis0": _l(librosa.zero_crossings(y2, axis=0).astype(float)),
+    }
+    out["generators"] = {
+        "tone": _l(librosa.tone(441.0, sr=22050, length=512)),
+        "tone_phi": _l(librosa.tone(441.0, sr=22050, length=512, phi=0.7)),
+        "chirp_log": _l(librosa.chirp(fmin=110.0, fmax=3520.0, sr=22050, length=2048)),
+        "chirp_lin": _l(librosa.chirp(fmin=110.0, fmax=3520.0, sr=22050, length=2048, linear=True, phi=0.3)),
+    }
+    out["note_names"] = {
+        "midi": [60.0, 61.0, 69.25, 70.0, 12.0, 3.0],
+        "c": [str(librosa.midi_to_note(m, unicode=False)) for m in [60.0, 61.0, 69.25, 70.0, 12.0, 3.0]],
+        "f_major_no_octave": [str(librosa.midi_to_note(m, octave=False, key="F:maj", unicode=False)) for m in [60.0, 61.0, 70.0]],
+        "unicode": [str(librosa.midi_to_note(m, key="Db:maj")) for m in [61.0, 70.0]],
+        "cents": [str(librosa.midi_to_note(m, cents=True, unicode=False)) for m in [69.25, 69.0, 68.75]],
+        "fractional_notes": ["C4+25", "A4-50", "Db3", "G#5+10"],
+        "fractional": [float(librosa.note_to_midi(n, round_midi=False)) for n in ["C4+25", "A4-50", "Db3", "G#5+10"]],
+        "rounded": [float(librosa.note_to_midi(n, round_midi=True)) for n in ["C4+25", "A4-50", "Db3", "G#5+10"]],
+        "hz": _l(librosa.note_to_hz(["C4+25", "A4-50", "Db3", "G#5+10"])),
+        "hz_rounded": _l(librosa.note_to_hz(["C4+25", "A4-50", "Db3", "G#5+10"], round_midi=True)),
+    }
     return out

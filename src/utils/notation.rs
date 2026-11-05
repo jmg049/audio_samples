@@ -1004,6 +1004,54 @@ pub fn mela_to_svara(mela: u8, abbr: bool, unicode: bool) -> AudioSampleResult<V
     ])
 }
 
+/// The name of a MIDI number in a key.
+///
+/// # Arguments
+/// - `midi`: the MIDI number. A non-finite value gives an empty string.
+/// - `octave`: include the octave.
+/// - `cents`: include the deviation in cents; needs `octave`.
+/// - `key`: the key, such as `"C:maj"`, that decides the spelling.
+/// - `unicode`: Unicode accidentals; otherwise ASCII.
+///
+/// # Returns
+/// The name.
+///
+/// # Errors
+/// [`ParameterError`] if `cents` is asked for without `octave`, or the key is invalid.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::notation::midi_name;
+///
+/// assert_eq!(midi_name(69.25, true, true, "C:maj", false).unwrap(), "A4+25");
+/// assert_eq!(midi_name(70.0, false, false, "F:maj", false).unwrap(), "Bb");
+/// ```
+pub fn midi_name(
+    midi: f64,
+    octave: bool,
+    cents: bool,
+    key: &str,
+    unicode: bool,
+) -> AudioSampleResult<String> {
+    if cents && !octave {
+        return invalid("cents", "needs octave information");
+    }
+    if !midi.is_finite() {
+        return Ok(String::new());
+    }
+    let notes = crate::utils::audio_math::key_to_notes(key, unicode, false)?;
+    let number = round_half_even(midi) as i64;
+    let mut out = notes[number.rem_euclid(12) as usize].clone();
+    if octave {
+        out.push_str(&(number / 12 - 1).to_string());
+    }
+    if cents {
+        let c = round_half_even((midi - number as f64) * 100.0) as i64;
+        out.push_str(&format!("{c:+}"));
+    }
+    Ok(out)
+}
+
 /// Adds the octave mark: a dot above or `'` for the octave above Sa, a dot below or `,`
 /// for the octave below.
 fn decorate(mut svara: String, number: i64, octave: bool, unicode: bool) -> String {
