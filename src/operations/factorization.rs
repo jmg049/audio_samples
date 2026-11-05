@@ -264,19 +264,11 @@ fn nndsvd<F: AudioFloat>(
     seed: u64,
 ) -> AudioSampleResult<(Array2<F>, Array2<F>)> {
     let small_rank = (k as f64) < 0.1 * x.nrows().min(x.ncols()) as f64;
-    let (u, s_values, vt) = truncated_svd(x, k, 10, if small_rank { 7 } else { 4 }, seed)?;
-    let (rows, cols) = x.dim();
-    let mut w = Array2::<F>::zeros((rows, k));
-    let mut h = Array2::<F>::zeros((k, cols));
+    // The factors overwrite the singular vectors they are made from.
+    let (mut w, s_values, mut h) = truncated_svd(x, k, 10, if small_rank { 7 } else { 4 }, seed)?;
     let root = of::<F>(s_values[0].sqrt());
-    w.column_mut(0)
-        .iter_mut()
-        .zip(u.column(0))
-        .for_each(|(o, &v)| *o = root * v.abs());
-    h.row_mut(0)
-        .iter_mut()
-        .zip(vt.row(0))
-        .for_each(|(o, &v)| *o = root * v.abs());
+    w.column_mut(0).mapv_inplace(|v| root * v.abs());
+    h.row_mut(0).mapv_inplace(|v| root * v.abs());
     // Norms of the positive and negative parts, without storing the parts.
     let norms = |v: ndarray::ArrayView1<'_, F>| -> (F, F) {
         let (mut pos, mut neg) = (F::zero(), F::zero());
@@ -290,29 +282,23 @@ fn nndsvd<F: AudioFloat>(
         (pos.sqrt(), neg.sqrt())
     };
     for (j, &singular) in s_values.iter().enumerate().take(k).skip(1) {
-        let (up, un) = norms(u.column(j));
-        let (vp, vn) = norms(vt.row(j));
+        let (up, un) = norms(w.column(j));
+        let (vp, vn) = norms(h.row(j));
         let (mp, mn) = (up * vp, un * vn);
         let positive = mp > mn;
         let (sigma, nu, nv) = if positive { (mp, up, vp) } else { (mn, un, vn) };
         let lambda = of::<F>((singular * sigma.to_f64().unwrap_or(0.0)).sqrt());
-        let take = |e: F| -> F {
+        let take = move |e: F, norm: F| -> F {
             let part = if positive { e } else { F::zero() - e };
-            if part > F::zero() { part } else { F::zero() }
+            if part > F::zero() && norm > F::zero() {
+                lambda * part / norm
+            } else {
+                F::zero()
+            }
         };
-        if nu > F::zero() {
-            for (o, &e) in w.column_mut(j).iter_mut().zip(u.column(j)) {
-                *o = lambda * take(e) / nu;
-            }
-        }
-        if nv > F::zero() {
-            for (o, &e) in h.row_mut(j).iter_mut().zip(vt.row(j)) {
-                *o = lambda * take(e) / nv;
-            }
-        }
+        w.column_mut(j).mapv_inplace(|e| take(e, nu));
+        h.row_mut(j).mapv_inplace(|e| take(e, nv));
     }
-    drop(u);
-    drop(vt);
     let small = of::<F>(1e-6);
     w.mapv_inplace(|v| if v < small { F::zero() } else { v });
     h.mapv_inplace(|v| if v < small { F::zero() } else { v });

@@ -650,6 +650,44 @@ pub fn wavelet(
     Ok((filters, lengths))
 }
 
+/// Smooths each row of a [`cq_to_chroma`] map by centred convolution with `window` along the
+/// constant-Q bins, keeping their number.
+///
+/// # Arguments
+/// - `map`: the map; rows are chroma bins and columns constant-Q bins.
+/// - `window`: the weights.
+///
+/// # Examples
+/// ```rust
+/// use audio_samples::operations::constant_q::smooth_chroma_map;
+/// use ndarray::array;
+///
+/// let mut map = array![[0.0, 1.0, 0.0]];
+/// smooth_chroma_map(&mut map, &[0.25, 0.5, 0.25]);
+/// assert_eq!(map, array![[0.25, 0.5, 0.25]]);
+/// ```
+pub fn smooth_chroma_map(map: &mut Array2<f64>, window: &[f64]) {
+    if window.is_empty() {
+        return;
+    }
+    let start = (window.len() - 1) / 2;
+    let mut source = vec![0.0; map.ncols()];
+    for mut row in map.rows_mut() {
+        for (o, &v) in source.iter_mut().zip(row.iter()) {
+            *o = v;
+        }
+        for (j, slot) in row.iter_mut().enumerate() {
+            let position = j + start;
+            *slot = window
+                .iter()
+                .take(position + 1)
+                .enumerate()
+                .filter_map(|(i, &weight)| source.get(position - i).map(|&v| weight * v))
+                .sum();
+        }
+    }
+}
+
 /// [`wavelet_lengths`] with the relative bandwidth of each filter given.
 ///
 /// # Arguments

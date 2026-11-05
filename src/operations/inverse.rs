@@ -37,7 +37,8 @@
 
 use std::num::NonZeroUsize;
 
-use ndarray::{Array2, Array3, ArrayView3, Axis};
+use ndarray::linalg::general_mat_mul;
+use ndarray::{Array2, Array3, ArrayView3, Axis, s};
 
 use crate::audio_float::float_rows_to_audio;
 use crate::operations::effects::{GriffinLimConfig, griffinlim};
@@ -347,15 +348,21 @@ impl Default for MfccInversionConfig {
     }
 }
 
-/// The `(n, k)` matrix of the inverse DCT of length `n` restricted to the first `k`
-/// coefficients.
-fn inverse_dct_matrix(n: usize, k: usize, dct_type: DctType, norm: DctNorm) -> Array2<f64> {
+/// The first `rows` rows of the `(n, k)` matrix of the inverse DCT of length `n` restricted to
+/// the first `k` coefficients.
+fn inverse_dct_rows<F: AudioFloat>(
+    rows: usize,
+    n: usize,
+    k: usize,
+    dct_type: DctType,
+    norm: DctNorm,
+) -> Array2<F> {
     use std::f64::consts::PI;
     let nf = n as f64;
     let ortho = matches!(norm, DctNorm::Ortho);
-    Array2::from_shape_fn((n, k), |(i, c)| {
+    Array2::from_shape_fn((rows, k), |(i, c)| {
         let (i_f, c_f) = (i as f64, c as f64);
-        match dct_type {
+        of::<F>(match dct_type {
             DctType::Two => {
                 let basis = (PI * c_f * (2.0 * i_f + 1.0) / (2.0 * nf)).cos();
                 if ortho {
@@ -402,7 +409,7 @@ fn inverse_dct_matrix(n: usize, k: usize, dct_type: DctType, norm: DctNorm) -> A
                     w * basis / (2.0 * m)
                 }
             }
-        }
+        })
     })
 }
 
@@ -444,38 +451,89 @@ pub fn mfcc_to_mel<F: AudioFloat>(
     let (channels, n_mfcc, frames) = mfcc.dim();
     let n_mels = config.n_mels.get();
     let used = n_mfcc.min(n_mels);
-    let matrix: Array2<F> =
-        inverse_dct_matrix(n_mels, used, config.dct_type, config.dct_norm).mapv(of::<F>);
     let gains: Vec<F> = (0..used)
         .map(|k| {
-            if config.lifter > 0.0 {
-                let sine = 1.0
-                    + config.lifter
-                        * 0.5
-                        * (std::f64::consts::PI * (k + 1) as f64 / config.lifter).sin();
-                F::one() / (of::<F>(sine) + F::min_positive_value())
-            } else {
-                F::one()
-            }
+            let sine = 1.0
+                + config.lifter
+                    * 0.5
+                    * (std::f64::consts::PI * (k + 1) as f64 / config.lifter).sin();
+            F::one() / (of::<F>(sine) + F::min_positive_value())
         })
-        .collect();
-    let mut log_mel = Array3::<F>::zeros((channels, n_mels, frames));
+        .collect::<Vec<F>>();
     let liftered = config.lifter > 0.0;
+    let mut log_mel = Array3::<F>::zeros((channels, n_mels, frames));
+    // The basis of a type-2 inverse is even in its even coefficients and odd in its odd ones
+    // about the middle row, so half of it is enough: each half of the output holds one sum.
+    let symmetric = matches!(config.dct_type, DctType::Two);
+    let stored = if symmetric {
+        n_mels.div_ceil(2)
+    } else {
+        n_mels
+    };
+    let basis: Array2<F> = inverse_dct_rows(stored, n_mels, used, config.dct_type, config.dct_norm);
     for (mut out, input) in log_mel.axis_iter_mut(Axis(0)).zip(mfcc.axis_iter(Axis(0))) {
-        for (frame, column) in input.axis_iter(Axis(1)).enumerate() {
-            for (row, slot) in out.index_axis_mut(Axis(1), frame).iter_mut().enumerate() {
-                let basis = matrix.row(row);
-                let mut sum = F::zero();
-                for (k, (&b, &c)) in basis.iter().zip(column.iter()).enumerate() {
-                    sum += b * if liftered { c * gains[k] } else { c };
-                }
-                *slot = sum;
+        let lifted;
+        let coefficients = if liftered {
+            let mut copy = input.slice(s![..used, ..]).to_owned();
+            for (mut row, &gain) in copy.rows_mut().into_iter().zip(&gains) {
+                row.mapv_inplace(|v| v * gain);
+            }
+            lifted = copy;
+            lifted.view()
+        } else {
+            input.slice(s![..used, ..])
+        };
+        if !symmetric {
+            general_mat_mul(F::one(), &basis, &coefficients, F::zero(), &mut out);
+            continue;
+        }
+        let (mut even, mut odd) = out.view_mut().split_at(Axis(0), stored);
+        general_mat_mul(
+            F::one(),
+            &basis.slice(s![.., ..;2]),
+            &coefficients.slice(s![..;2, ..]),
+            F::zero(),
+            &mut even,
+        );
+        if used > 1 && odd.nrows() > 0 {
+            general_mat_mul(
+                F::one(),
+                &basis.slice(s![..odd.nrows(), 1..;2]),
+                &coefficients.slice(s![1..;2, ..]),
+                F::zero(),
+                &mut odd,
+            );
+        }
+        // Row r holds even + odd, and its mirror image even - odd.
+        for (mut upper, mut lower) in even.rows_mut().into_iter().zip(odd.rows_mut()) {
+            for (a, b) in upper.iter_mut().zip(lower.iter_mut()) {
+                let (sum, difference) = (*a + *b, *a - *b);
+                *a = sum;
+                *b = difference;
+            }
+        }
+        let count = odd.nrows();
+        for r in 0..count / 2 {
+            for c in 0..frames {
+                odd.swap([r, c], [count - 1 - r, c]);
             }
         }
     }
-    let reference = of::<F>(config.reference);
-    let (ten, tenth) = (of::<F>(10.0), of::<F>(0.1));
-    log_mel.mapv_inplace(|x| reference * ten.powf(x * tenth));
+    let tenth = of::<F>(0.1);
+    log_mel.mapv_inplace(|x| x * tenth);
+    if let Some(v) = log_mel
+        .as_slice_memory_order_mut()
+        .and_then(crate::utils::vmath::as_f32)
+    {
+        crate::utils::vmath::exp10_f32(v);
+    } else {
+        let ten = of::<F>(10.0);
+        log_mel.mapv_inplace(|y| ten.powf(y));
+    }
+    if config.reference != 1.0 {
+        let reference = of::<F>(config.reference);
+        log_mel.mapv_inplace(|p| reference * p);
+    }
     Ok(log_mel)
 }
 

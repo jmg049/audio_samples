@@ -367,10 +367,10 @@ pub fn svd<F: AudioFloat>(a: ArrayView2<'_, F>) -> AudioSampleResult<Svd> {
     })
 }
 
-/// Orthonormalises the columns of `q` in place by modified Gram-Schmidt, twice.
-fn orthonormalise<F: AudioFloat>(q: &mut Array2<F>) {
+/// Orthonormalises the columns of `q` in place by `passes` rounds of modified Gram-Schmidt.
+fn orthonormalise<F: AudioFloat>(q: &mut Array2<F>, passes: usize) {
     let cols = q.ncols();
-    for _ in 0..2 {
+    for _ in 0..passes {
         for j in 0..cols {
             let (done, mut rest) = q.view_mut().split_at(Axis(1), j);
             let mut col = rest.column_mut(0);
@@ -414,13 +414,15 @@ pub(crate) fn truncated_svd<F: AudioFloat>(
     let omega = Array2::from_shape_simple_fn((n, size), || of::<F>(rng.normal()));
     let mut q = a.dot(&omega);
     drop(omega);
-    orthonormalise(&mut q);
+    orthonormalise(&mut q, 1);
+    // One round keeps the power iterations stable; the last result gets a second one.
     for _ in 0..n_iter {
         let mut z = q.t().dot(&a).reversed_axes();
-        orthonormalise(&mut z);
+        orthonormalise(&mut z, 1);
         q = a.dot(&z);
-        orthonormalise(&mut q);
+        orthonormalise(&mut q, 1);
     }
+    orthonormalise(&mut q, 1);
     let b = q.t().dot(&a);
     let small = svd(b.view())?;
     drop(b);
@@ -568,17 +570,25 @@ pub fn nnls<F: AudioFloat>(
     Ok(active_set(copy.view(), &b).mapv(of::<F>))
 }
 
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
 /// The lower Cholesky factor of the Gram matrix of the passive columns, in packed rows,
-/// grown one column at a time.
+/// grown one column at a time, and a contiguous copy of those columns.
 struct PassiveFactor {
     passive: Vec<usize>,
+    columns: Vec<f64>,
+    rows: usize,
     l: Vec<f64>,
 }
 
 impl PassiveFactor {
-    fn new() -> Self {
+    fn new(rows: usize) -> Self {
         Self {
             passive: Vec::new(),
+            columns: Vec::new(),
+            rows,
             l: Vec::new(),
         }
     }
@@ -586,22 +596,25 @@ impl PassiveFactor {
     /// Adds column `t`. Returns false if it is numerically dependent on the others.
     fn push(&mut self, a: ArrayView2<'_, f64>, t: usize) -> bool {
         let p = self.passive.len();
-        let col = a.column(t);
+        let start_col = self.columns.len();
+        self.columns.extend(a.column(t).iter().copied());
+        let (held, col) = self.columns.split_at(start_col);
         let start = self.l.len();
         self.l.resize(start + p + 1, 0.0);
         let mut offset = 0;
-        for i in 0..p {
-            let mut v = a.column(self.passive[i]).dot(&col);
+        for (i, other) in held.chunks_exact(self.rows).enumerate() {
+            let mut v = dot(other, col);
             for k in 0..i {
                 v -= self.l[offset + k] * self.l[start + k];
             }
             self.l[start + i] = v / self.l[offset + i];
             offset += i + 1;
         }
-        let diag = col.dot(&col);
+        let diag = dot(col, col);
         let d2 = diag - self.l[start..start + p].iter().map(|v| v * v).sum::<f64>();
         if d2.is_nan() || d2 <= diag * 1e-14 {
             self.l.truncate(start);
+            self.columns.truncate(start_col);
             return false;
         }
         self.l[start + p] = d2.sqrt();
@@ -611,6 +624,7 @@ impl PassiveFactor {
 
     fn rebuild(&mut self, a: ArrayView2<'_, f64>, keep: &[usize]) {
         self.passive.clear();
+        self.columns.clear();
         self.l.clear();
         for &t in keep {
             self.push(a, t);
@@ -645,7 +659,7 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
     let (m, n) = a.dim();
     let capacity = m.min(n);
     let mut x = Array1::<f64>::zeros(n);
-    let mut factor = PassiveFactor::new();
+    let mut factor = PassiveFactor::new(m);
     let mut in_passive = vec![false; n];
     let mut rejected = vec![false; n];
     let mut norm1 = vec![0.0_f64; n];
@@ -733,16 +747,22 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
             }
         }
         residual.assign(b);
-        for &j in &factor.passive {
-            residual.scaled_add(-x[j], &a.column(j));
+        if let Some(left) = residual.as_slice_mut() {
+            for (&j, column) in factor.passive.iter().zip(factor.columns.chunks_exact(m)) {
+                let weight = x[j];
+                for (r, &e) in left.iter_mut().zip(column) {
+                    *r -= weight * e;
+                }
+            }
         }
     }
     // One step of iterative refinement recovers what the normal equations lose.
     if !factor.passive.is_empty() {
+        let left = residual.as_slice().unwrap_or(&[]);
         let mut d: Vec<f64> = factor
-            .passive
-            .iter()
-            .map(|&t| a.column(t).dot(&residual))
+            .columns
+            .chunks_exact(m)
+            .map(|c| dot(c, left))
             .collect();
         factor.solve(&mut d);
         for (&j, v) in factor.passive.iter().zip(&d) {

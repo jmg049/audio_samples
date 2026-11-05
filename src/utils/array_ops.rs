@@ -677,9 +677,8 @@ fn copy_run<'a, A: Clone>(
     match (backwards, reversed) {
         (false, false) | (true, true) => segment.clone_from_slice(source),
         _ => {
-            for (o, v) in segment.iter_mut().zip(source.iter().rev()) {
-                *o = v.clone();
-            }
+            segment.clone_from_slice(source);
+            segment.reverse();
         }
     }
     rest
@@ -1620,14 +1619,18 @@ impl SplineSolver {
     }
 }
 
+/// `(span, basis)` of each query point, or `None` to fill.
+type SplinePoints = Vec<Option<(usize, [f64; 4])>>;
+
 /// Where each query point falls, independent of the sample values.
 enum Plan {
     /// `(index of the sample below, fraction towards the next)`, or `None` to fill.
     Linear(Vec<Option<(usize, f64)>>),
     /// Index of the sample to copy, or `None` to fill.
     Copy(Vec<Option<usize>>),
-    /// The solver, with the points evaluated as each lane needs them.
-    Spline(SplineSolver),
+    /// The solver, and with more than one lane `(span, basis)` per point; a single lane
+    /// evaluates its points as it goes.
+    Spline(SplineSolver, Option<SplinePoints>),
 }
 
 fn build_plan(x: &[f64], xi: &[f64], kind: InterpKind) -> AudioSampleResult<Plan> {
@@ -1679,7 +1682,7 @@ fn build_plan(x: &[f64], xi: &[f64], kind: InterpKind) -> AudioSampleResult<Plan
         ),
         InterpKind::Quadratic | InterpKind::Cubic => {
             let k = if kind == InterpKind::Cubic { 3 } else { 2 };
-            Plan::Spline(SplineSolver::new(x, k)?)
+            Plan::Spline(SplineSolver::new(x, k)?, None)
         }
     })
 }
@@ -1763,7 +1766,26 @@ pub fn interp1d<F: AudioFloat>(
         flat = xi.iter().copied().collect();
         &flat
     };
-    let plan = build_plan(x, xi_flat, kind)?;
+    let mut plan = build_plan(x, xi_flat, kind)?;
+    if let Plan::Spline(solver, points) = &mut plan
+        && y.len() != y.len_of(axis)
+    {
+        let (first, last) = (x[0], x[x.len() - 1]);
+        let k = solver.k;
+        *points = Some(
+            xi_flat
+                .iter()
+                .map(|&v| {
+                    (v >= first && v <= last).then(|| {
+                        let span = knot_span(&solver.knots, k, solver.n, v);
+                        let mut basis = [0.0; 4];
+                        bspline_basis(&solver.knots, k, span, v, &mut basis);
+                        (span, basis)
+                    })
+                })
+                .collect(),
+        );
+    }
     let nans: Vec<usize> = xi_flat
         .iter()
         .enumerate()
@@ -1792,7 +1814,23 @@ pub fn interp1d<F: AudioFloat>(
                         }
                     }
                 }
-                Plan::Spline(solver) => {
+                Plan::Spline(solver, Some(points)) => {
+                    for (c, v) in coefficients.iter_mut().zip(lane.iter()) {
+                        *c = v.to_f64().unwrap_or(f64::NAN);
+                    }
+                    solver.solve(&mut coefficients);
+                    let k = solver.k;
+                    for (slot, point) in o.iter_mut().zip(points) {
+                        if let Some((span, basis)) = point {
+                            let mut sum = 0.0;
+                            for (j, b) in basis.iter().enumerate().take(k + 1) {
+                                sum += b * coefficients[span + j - k];
+                            }
+                            *slot = to_float::<F>(sum);
+                        }
+                    }
+                }
+                Plan::Spline(solver, None) => {
                     for (c, v) in coefficients.iter_mut().zip(lane.iter()) {
                         *c = v.to_f64().unwrap_or(f64::NAN);
                     }

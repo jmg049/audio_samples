@@ -115,6 +115,7 @@ def build(signals, sr) -> dict:
     env_y = signals["clicks120"].astype(np.float64)
     out["forms"] = {
         "to_mono": librosa.to_mono(stereo).tolist(),
+        "to_mono_mixed": librosa.to_mono(stereo, y).tolist(),
         "to_mono_sum": librosa.to_mono(y, short, pad=True, norm=False).tolist(),
         "to_stereo": librosa.to_stereo(left=y, right=short, pad=True).tolist(),
         "to_multi": librosa.to_multi(y, short, stereo, pad=False, norm=False).tolist(),

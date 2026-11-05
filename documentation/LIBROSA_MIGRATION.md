@@ -311,21 +311,21 @@ function under `audio_samples::`.
 
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
-| `load` | not in this crate | – | not provided: file I/O | Use `audio_samples_io` |
+| `load` | not in this crate | – | not provided: file I/O | Use `audio_samples_io`; in Python, `io.read` and `forms.read_segment` |
 | `loadx` | `utils::generation::example_clip` | – | with differences | Renders a synthesised clip as audio rather than loading a recording |
-| `stream` | – | – | not provided: file I/O | Block streaming belongs to `audio_samples_io`; `StreamingResampler` resamples chunked audio |
-| `get_samplerate` | – | – | not provided: file I/O | `AudioSamples::sample_rate` gives the rate of loaded audio |
-| `get_duration` | `AudioSamples::duration_seconds` | – | equivalent with differences | Audio only; no `S=` or `path=` forms |
+| `stream` | – | – | not provided: file I/O | Block streaming belongs to `audio_samples_io`; `StreamingResampler` resamples chunked audio; in Python, `forms.stream_blocks` |
+| `get_samplerate` | – | – | not provided: file I/O | `AudioSamples::sample_rate` gives the rate of loaded audio; in Python, `io.info` |
+| `get_duration` | `AudioSamples::duration_seconds` | – | equivalent with differences | Audio only; `S=` and `path=` are in Python, `forms.get_duration` |
 | `resample` | `AudioProcessing::resample`, `AudioProcessing::resample_by_ratio`, `resample`, `resample_by_ratio` | `resampling` | equivalent with differences | Own Kaiser-windowed sinc instead of soxr; output length is exactly `ceil(n * out / in)` |
 | `to_mono` | `AudioChannelOps::to_mono(MonoConversionMethod::Average)` | `channels` | equivalent | |
 | `to_stereo` | `AudioChannelOps::to_stereo(StereoConversionMethod::...)` | `channels` | equivalent with differences | `Duplicate` is `to_stereo(left=m, right=m)`; `Left`/`Right` give `[m, 0]` / `[0, m]` for mono input (on multi-channel input they extract channel 0 / 1 as mono, kept from 2.0). There is no two-signal form; use `AudioEditing::stack` |
 | `to_multi` | `AudioEditing::stack` | `editing` | equivalent with differences | No pad or trim to a common length |
 | `autocorrelate` | `AudioStatistics::autocorrelation` | `statistics` | equivalent with differences | Returns the unbiased estimate: `r[k] * (n - k)` equals librosa's raw sum. librosa also autocorrelates every channel |
 | `lpc` | `AudioEffects::lpc`, `operations::effects::lpc` | `effects` | equivalent | Burg's method, one row per channel |
-| `zero_crossings` | `AudioStatistics::zero_crossings` | `statistics` | equivalent with differences | Returns a count, not a per-sample boolean mask; no `threshold` / `ref_magnitude` / `zero_pos` options. The librosa-compatible frame-wise rate is `AudioFeatures::zero_crossing_rate_frames` |
+| `zero_crossings` | `utils::array_ops::zero_crossings`, `AudioStatistics::zero_crossings` | – | equivalent | `array_ops::zero_crossings` gives the mask with `threshold`, `pad`, `zero_pos` and the axis; scale `threshold` yourself for `ref_magnitude`. The trait method returns a count |
 | `clicks` | `operations::effects::clicks` (`ClicksConfig`, `ClickPositions`) | `effects` | equivalent with differences | `clicks::<T>` returns audio of any sample type; frame positions carry their hop (`ClickPositions::Frames { frames, hop_length }`). No multichannel custom click |
-| `tone` | `sine_wave` | – | equivalent with differences | No `phi`; the duration is a `Duration` |
-| `chirp` | `chirp` (linear), `exponential_chirp` (logarithmic, librosa's default `linear=False`) | – | equivalent with differences | No `phi` |
+| `tone` | `utils::array_ops::tone`, `sine_wave` | – | equivalent | `tone` takes `phi` and a length; `sine_wave` makes audio from a `Duration` |
+| `chirp` | `utils::array_ops::chirp`, `chirp` (linear), `exponential_chirp` (logarithmic, librosa's default `linear=False`) | – | equivalent | `array_ops::chirp` takes `phi` and a length |
 | `mu_compress` | `AudioProcessing::mu_compress`, `mu_law_encode` | `processing` | equivalent | `mu_compress` equals `quantize=False`; `mu_law_encode` returns librosa's default integer codes (`quantize=True`) |
 | `mu_expand` | `AudioProcessing::mu_expand`, `mu_law_decode` | `processing` | equivalent | As above |
 
@@ -360,7 +360,7 @@ function under `audio_samples::`.
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
 | `cqt` | `AudioConstantQ::cqt` (`CqtConfig`) | `transforms` + `resampling` | equivalent with differences | Octave decimation uses the crate's resampler, not soxr |
-| `vqt` | `AudioConstantQ::vqt` (`VqtConfig`) | `transforms` + `resampling` | equivalent with differences | As `cqt`; only equal-tempered `intervals` |
+| `vqt` | `AudioConstantQ::vqt` (`VqtConfig`) | `transforms` + `resampling` | equivalent with differences | As `cqt`; `operations::constant_q::vqt_with_intervals` for other tunings |
 | `pseudo_cqt` | `AudioConstantQ::pseudo_cqt` | `transforms` + `resampling` | equivalent | No resampling involved |
 | `hybrid_cqt` | `AudioConstantQ::hybrid_cqt` | `transforms` + `resampling` | equivalent with differences | Low octaves as `cqt` |
 | `icqt` | `AudioConstantQ::icqt` | `transforms` + `resampling` | equivalent with differences | Upsampling uses the crate's resampler |
@@ -404,10 +404,10 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `fourier_tempo_frequencies` | `operations::rhythm::fourier_tempo_frequencies` (`beat-tracking`) | equivalent | |
 | `hz_to_midi` | `hz_to_midi` | equivalent | |
 | `midi_to_hz` | `midi_to_hz` | equivalent | |
-| `hz_to_note` | `frequency_to_note`, `frequency_to_note_static` | equivalent with differences | Returns `(name, cents)`; ASCII `#`; MIDI 0..=127 only (otherwise an error) |
-| `midi_to_note` | `midi_to_note`, `midi_to_note_static` (no allocation) | equivalent with differences | ASCII `#` (librosa `unicode=False`); integer MIDI 0..=127 only; no cents, no `octave=False` |
-| `note_to_hz` | `note_to_frequency` | equivalent with differences | Same grammar and limits as `note_to_midi` |
-| `note_to_midi` | `note_to_midi` | equivalent with differences | librosa's full grammar (Unicode accidentals, cents suffix, signed octaves); the octave is required and the result is a `u8` in 0..=127 |
+| `hz_to_note` | `frequency_to_note`, `frequency_to_note_static` | equivalent with differences | `utils::notation::midi_name` takes `octave`, `cents`, `key` and `unicode`, for the MIDI number of the frequency. Returns `(name, cents)`; ASCII `#`; MIDI 0..=127 only (otherwise an error) |
+| `midi_to_note` | `midi_to_note`, `midi_to_note_static` (no allocation) | equivalent with differences | `utils::notation::midi_name` takes `octave`, `cents`, `key` and `unicode`. ASCII `#` (librosa `unicode=False`); integer MIDI 0..=127 only; no cents, no `octave=False` |
+| `note_to_hz` | `note_to_frequency` | equivalent with differences | `utils::audio_math::note_to_midi_fractional` keeps the cents. Same grammar and limits as `note_to_midi` |
+| `note_to_midi` | `note_to_midi` | equivalent with differences | `utils::audio_math::note_to_midi_fractional` for `round_midi=False`. librosa's full grammar (Unicode accidentals, cents suffix, signed octaves); the octave is required and the result is a `u8` in 0..=127 |
 | `hz_to_octs` | `hz_to_octs` | equivalent | |
 | `octs_to_hz` | `octs_to_hz` | equivalent | |
 | `A4_to_tuning` | `a4_to_tuning` | equivalent | |
@@ -493,9 +493,9 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `get_window` | `operations::filterbanks::get_window` (`Window`) | `transforms` | equivalent | Periodic (`fftbins=True`) or symmetric |
 | `mel` | `operations::filterbanks::mel_filterbank` (`MelFilterbankConfig`, `MelFilterNorm`, `MelScale`) | `transforms` | equivalent with differences | `f64` weights (librosa: `float32`), rounded to the spectrogram's type when applied; empty filters are returned silently as zero rows (librosa warns) |
 | `chroma` | `operations::tonal::chroma_filterbank` (`ChromaFilterbankConfig`) | `feature-extraction` | equivalent with differences | `f64` weights (librosa: `float32`) |
-| `cq_to_chroma` | `operations::constant_q::cq_to_chroma` | `transforms` + `resampling` | equivalent with differences | No smoothing `window` |
-| `wavelet` | `operations::constant_q::wavelet` (`WaveletConfig`) | `transforms` + `resampling` | equivalent with differences | `Complex<f64>` filters (librosa: `complex64`) |
-| `wavelet_lengths` | `operations::constant_q::wavelet_lengths`, `operations::constant_q::wavelet_lengths_into` (into a caller's slice) | `transforms` + `resampling` | equivalent with differences | The single-frequency-with-explicit-`alpha` form is internal |
+| `cq_to_chroma` | `operations::constant_q::cq_to_chroma` | `transforms` + `resampling` | equivalent with differences | `operations::constant_q::smooth_chroma_map` applies a smoothing `window`; `f64` tables |
+| `wavelet` | `operations::constant_q::wavelet` (`WaveletConfig`) | `transforms` + `resampling` | equivalent with differences | `Complex<f64>` filters (librosa: `complex64`); `wavelet_with_alpha` for explicit bandwidths |
+| `wavelet_lengths` | `operations::constant_q::wavelet_lengths`, `operations::constant_q::wavelet_lengths_into` (into a caller's slice) | `transforms` + `resampling` | equivalent with differences | `wavelet_lengths_with_alpha` for explicit bandwidths |
 | `window_bandwidth` | `operations::filterbanks::window_bandwidth` | `transforms` | equivalent with differences | Always evaluates the formula; librosa returns a hard-coded table value for named windows (up to ~1e-4 relative apart) |
 | `window_sumsquare` | `operations::filterbanks::window_sumsquare` (`f64`), `operations::filterbanks::window_sumsquare_as::<F>` | `transforms` | equivalent with differences | No `norm` |
 | `diagonal_filter` | `operations::segment::diagonal_filter` | `segmentation` | equivalent | Rotation by quintic B-spline weights in the crate |
@@ -545,7 +545,7 @@ All of these are free functions in `operations::sequence` (feature
 
 | librosa | audio_samples | status | notes |
 |---|---|---|---|
-| `segment.recurrence_matrix` | `recurrence_matrix` (connectivity, `bool`); `recurrence_matrix_weighted` (distance / affinity) (`RecurrenceConfig`, `RecurrenceMode`, `Bandwidth`) | equivalent with differences | Dense only (no `sparse=True`); `axis=-1` only |
+| `segment.recurrence_matrix` | `recurrence_matrix` (connectivity, `bool`); `recurrence_matrix_weighted` (distance / affinity) (`RecurrenceConfig`, `RecurrenceMode`, `Bandwidth`) | equivalent with differences | Dense; `utils::array_ops::sparsify_rows` gives compressed rows, and the frames are on the last axis (in Python, `sparse=` and `axis=`) |
 | `segment.cross_similarity` | `cross_similarity` (connectivity, `bool`); `cross_similarity_weighted` (distance / affinity) (`CrossSimilarityConfig`) | equivalent with differences | As `recurrence_matrix` |
 | `segment.recurrence_to_lag` | `recurrence_to_lag` | equivalent | |
 | `segment.lag_to_recurrence` | `lag_to_recurrence` | equivalent | |
