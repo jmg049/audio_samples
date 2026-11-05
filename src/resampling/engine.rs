@@ -368,24 +368,36 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     // blocks start at multiples of `up`.
     let mut k0 = (-half_b).div_euclid(up) * up;
     // A short signal fills less than the two blocks and the window that `buf` can hold.
-    let mut buf: Vec<F> =
-        Vec::with_capacity((2 * blk + b.taps + 1).min((k_hi - k0).max(0) as usize));
+    let mut buf = vec![F::zero(); (2 * blk + b.taps + 1).min((k_hi - k0).max(0) as usize)];
+    let mut filled = 0;
     let mut buf_start = k0;
     let (step_int, step_frac) = ((m / l) as i64, m % l);
     let mut st = BState { j: 0, n0: 0, p: 0 };
     let n_out = n_out as usize;
     while st.j < n_out && k0 < k_hi {
-        // Stage A writes its two blocks straight onto the end of `buf`.
+        // Stage A writes its two blocks straight after what `buf` holds.
         let take = |from: i64| (k_hi - from).clamp(0, blk as i64) as usize;
         let (n_a, n_b) = (take(k0), take(k0 + blk as i64));
-        let len = buf.len();
-        buf.resize(len + n_a + n_b, F::zero());
-        let (ya, yb) = buf[len..].split_at_mut(n_a);
+        let end = filled + n_a + n_b;
+        if end > buf.len() {
+            buf.resize(end, F::zero());
+        }
+        let (ya, yb) = buf[filled..end].split_at_mut(n_a);
         a.pair(x, to_f, k0, &mut bufs, ya, yb);
         k0 += 2 * blk as i64;
-        st = run_b::<T, F, FMA>(b, &buf, buf_start, out, from_f, st, step_int, step_frac);
-        let drop = ((st.n0 - half_b + 1 - buf_start).max(0) as usize).min(buf.len());
-        buf.drain(..drop);
+        st = run_b::<T, F, FMA>(
+            b,
+            &buf[..end],
+            buf_start,
+            out,
+            from_f,
+            st,
+            step_int,
+            step_frac,
+        );
+        let drop = ((st.n0 - half_b + 1 - buf_start).max(0) as usize).min(end);
+        buf.copy_within(drop..end, 0);
+        filled = end - drop;
         buf_start += drop as i64;
     }
     debug_assert_eq!(st.j, n_out);
