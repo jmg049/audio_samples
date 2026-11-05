@@ -51,7 +51,7 @@ fn invalid<T>(parameter: &str, reason: impl Into<String>) -> AudioSampleResult<T
 }
 
 fn to_f64<F: AudioFloat>(a: ArrayView2<'_, F>, name: &str) -> AudioSampleResult<Array2<f64>> {
-    if a.iter().any(|v| !v.is_finite()) {
+    if !a.fold(true, |ok, v| ok && v.is_finite()) {
         return invalid(name, "must be finite");
     }
     Ok(a.mapv(|v| v.to_f64().unwrap_or(f64::NAN)))
@@ -132,7 +132,7 @@ pub fn eigh(a: ArrayView2<'_, f64>) -> AudioSampleResult<(Array1<f64>, Array2<f6
     if a.ncols() != n {
         return invalid("a", "must be square");
     }
-    if a.iter().any(|v| !v.is_finite()) {
+    if !a.fold(true, |ok, v| ok && v.is_finite()) {
         return invalid("a", "must be finite");
     }
     if n == 0 {
@@ -407,7 +407,7 @@ pub(crate) fn truncated_svd<F: AudioFloat>(
     if k == 0 || k > m.min(n) {
         return invalid("k", format!("must lie in 1..={}, got {k}", m.min(n)));
     }
-    if a.iter().any(|v| !v.is_finite()) {
+    if !a.fold(true, |ok, v| ok && v.is_finite()) {
         return invalid("a", "must be finite");
     }
     let size = (k + oversampling).min(m.min(n));
@@ -548,7 +548,7 @@ pub fn nnls<F: AudioFloat>(
     if b.iter().any(|v| !v.is_finite()) {
         return invalid("b", "must be finite");
     }
-    if a.iter().any(|v| !v.is_finite()) {
+    if !a.fold(true, |ok, v| ok && v.is_finite()) {
         return invalid("a", "must be finite");
     }
     let b: Array1<f64> = b.mapv(|v| v.to_f64().unwrap_or(f64::NAN));
@@ -655,13 +655,25 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
     let mut at_b = Array1::<f64>::zeros(n);
     let mut gram = Array2::<f64>::zeros((n, n));
     // One row at a time, the upper triangle only; the lower is mirrored below.
-    for (row, &bi) in a.rows().into_iter().zip(b.iter()) {
-        at_b.scaled_add(bi, &row);
-        for (p, &rp) in row.iter().enumerate() {
-            if rp != 0.0 {
-                gram.row_mut(p)
-                    .slice_mut(s![p..])
-                    .scaled_add(rp, &row.slice(s![p..]));
+    if let (Some(g), Some(atb)) = (gram.as_slice_mut(), at_b.as_slice_mut()) {
+        let mut scratch = vec![0.0; n];
+        for (row, &bi) in a.rows().into_iter().zip(b.iter()) {
+            let values = row.as_slice().unwrap_or_else(|| {
+                for (o, &v) in scratch.iter_mut().zip(row.iter()) {
+                    *o = v;
+                }
+                &scratch
+            });
+            for (o, &v) in atb.iter_mut().zip(values) {
+                *o += bi * v;
+            }
+            for (p, &rp) in values.iter().enumerate() {
+                if rp != 0.0 {
+                    let target = &mut g[p * n + p..(p + 1) * n];
+                    for (t, &v) in target.iter_mut().zip(&values[p..]) {
+                        *t += rp * v;
+                    }
+                }
             }
         }
     }
@@ -746,8 +758,13 @@ fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
             }
         }
         w.assign(&at_b);
-        for &j in &factor.passive {
-            w.scaled_add(-x[j], &gram.row(j));
+        if let (Some(left), Some(g)) = (w.as_slice_mut(), gram.as_slice()) {
+            for &j in &factor.passive {
+                let weight = x[j];
+                for (o, &v) in left.iter_mut().zip(&g[j * n..(j + 1) * n]) {
+                    *o -= weight * v;
+                }
+            }
         }
     }
     // One step of iterative refinement recovers what the normal equations lose.

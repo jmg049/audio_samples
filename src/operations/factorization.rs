@@ -303,7 +303,7 @@ fn nndsvd<F: AudioFloat>(
     let small = of::<F>(1e-6);
     w.mapv_inplace(|v| if v < small { F::zero() } else { v });
     h.mapv_inplace(|v| if v < small { F::zero() } else { v });
-    let mean = x.iter().fold(0.0, |a, v| a + v.to_f64().unwrap_or(0.0)) / x.len() as f64;
+    let mean = x.fold(0.0, |a, v| a + v.to_f64().unwrap_or(0.0)) / x.len() as f64;
     match init {
         NmfInit::Nndsvda => {
             let m = of::<F>(mean);
@@ -330,7 +330,7 @@ fn nndsvd<F: AudioFloat>(
 }
 
 fn random_init<F: AudioFloat>(x: ArrayView2<'_, F>, k: usize, seed: u64) -> (Array2<F>, Array2<F>) {
-    let mean = x.iter().fold(0.0, |a, v| a + v.to_f64().unwrap_or(0.0)) / x.len() as f64;
+    let mean = x.fold(0.0, |a, v| a + v.to_f64().unwrap_or(0.0)) / x.len() as f64;
     let avg = (mean / k as f64).sqrt();
     let mut rng = SmallRng::new(seed);
     let (rows, cols) = x.dim();
@@ -760,7 +760,7 @@ pub fn nmf_transform<F: AudioFloat>(
             format!("{} features for a matrix of {}", h.ncols(), x.ncols()),
         );
     }
-    let mean = x.iter().fold(0.0, |a, v| a + v.to_f64().unwrap_or(0.0)) / x.len() as f64;
+    let mean = x.fold(0.0, |a, v| a + v.to_f64().unwrap_or(0.0)) / x.len() as f64;
     let avg = of::<F>((mean / cfg.n_components as f64).sqrt());
     let mut w = Array2::from_elem((x.nrows(), cfg.n_components), avg);
     let mut fixed = h.to_owned();
