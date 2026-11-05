@@ -962,6 +962,83 @@ pub(crate) fn iirfilter_sos(
     zpk2sos(&bilinear_zpk(&analog, FS))
 }
 
+/// The minimum order and critical frequencies, in Hz, of a digital band-pass filter that
+/// meets a specification on its pass band and stop band.
+///
+/// Frequencies are in Hz at `sample_rate`. The stop band edges must lie outside the pass
+/// band. The order is the prototype's: the band-pass filter has twice as many poles. The
+/// order formulas follow from the standard selectivity and discrimination factors
+/// (A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., 2010).
+pub(crate) fn bandpass_order(
+    filter_type: IirFilterType,
+    pass: (f64, f64),
+    stop: (f64, f64),
+    ripple_db: f64,
+    attenuation_db: f64,
+    sample_rate: f64,
+) -> AudioSampleResult<(usize, f64, f64)> {
+    let nyquist = sample_rate / 2.0;
+    for f in [pass.0, pass.1, stop.0, stop.1] {
+        if !(f.is_finite() && f > 0.0 && f < nyquist) {
+            return Err(param_err(
+                "frequency",
+                format!("band edge {f} Hz is outside (0, {nyquist}) Hz"),
+            ));
+        }
+    }
+    if !(stop.0 < pass.0 && pass.0 < pass.1 && pass.1 < stop.1) {
+        return Err(param_err(
+            "frequency",
+            "the band edges must increase: stop, pass, pass, stop",
+        ));
+    }
+    let warp = |f: f64| (PI * f / sample_rate).tan();
+    let (p0, p1) = (warp(pass.0), warp(pass.1));
+    let (s0, s1) = (warp(stop.0), warp(stop.1));
+    let selectivity = ((s0 * s0 - p0 * p1) / (s0 * (p0 - p1)))
+        .abs()
+        .min(((s1 * s1 - p0 * p1) / (s1 * (p0 - p1))).abs());
+    let gain_stop = 10f64.powf(0.1 * attenuation_db);
+    let gain_pass = 10f64.powf(0.1 * ripple_db);
+    let discrimination = (gain_stop - 1.0) / (gain_pass - 1.0);
+    let unwarp = |w: f64| w.atan() * sample_rate / PI;
+    Ok(match filter_type {
+        IirFilterType::Butterworth => {
+            let order = (discrimination.log10() / (2.0 * selectivity.log10())).ceil() as usize;
+            let w0 = (gain_pass - 1.0).powf(-1.0 / (2.0 * order as f64));
+            let half = w0 * (p1 - p0) / 2.0;
+            let root = (half * half + p0 * p1).sqrt();
+            (order, unwarp(root - half), unwarp(root + half))
+        }
+        IirFilterType::ChebyshevI => (
+            (discrimination.sqrt().acosh() / selectivity.acosh()).ceil() as usize,
+            pass.0,
+            pass.1,
+        ),
+        IirFilterType::ChebyshevII => {
+            let order = (discrimination.sqrt().acosh() / selectivity.acosh()).ceil() as usize;
+            let new_freq = 1.0 / ((discrimination.sqrt().acosh() / order as f64).cosh());
+            let half = (p1 - p0) / (2.0 * new_freq);
+            let root = (half * half + p0 * p1).sqrt();
+            let low = root - half;
+            (order, unwarp(low), unwarp(p0 * p1 / low))
+        }
+        IirFilterType::Elliptic => {
+            let k = 1.0 / selectivity;
+            let k1 = 1.0 / discrimination;
+            let order = (ellipk(k * k) * ellipk(1.0 - k1) / (ellipk(1.0 - k * k) * ellipk(k1)))
+                .ceil() as usize;
+            (order, pass.0, pass.1)
+        }
+        IirFilterType::Bessel => {
+            return Err(param_err(
+                "filter_type",
+                "order selection supports Butterworth, Chebyshev and elliptic filters",
+            ));
+        }
+    })
+}
+
 fn param_err(name: &str, msg: impl Into<String>) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_value(name, msg.into()))
 }
