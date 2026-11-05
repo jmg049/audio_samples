@@ -119,6 +119,98 @@ fn log10_f32_avx2(v: &mut [f32]) {
     log10_f32_generic(v);
 }
 
+/// Polynomial in `z²` for `atan(z) / z` on `(0, 1]`, relative error about 6e-11, a thousandth of
+/// the unit in the last place of an `f32` result.
+const ATAN_COEFFS: [f64; 12] = [
+    0.999_999_999_941_231,
+    -0.333_333_315_711_632_5,
+    0.199_999_120_502_528_02,
+    -0.142_839_807_478_299_39,
+    0.110_932_412_013_734_95,
+    -0.089_802_389_268_321_9,
+    0.072_457_179_657_229_77,
+    -0.054_279_102_391_517_856,
+    0.034_209_602_643_339_526,
+    -0.016_111_676_035_663_52,
+    0.004_850_931_474_355_162,
+    -0.000_684_791_995_686_280_5,
+];
+
+/// `atan2(y, x)` and `sqrt(x² + y²)` of one pair, with no branch and no call into libm. The result
+/// is NaN for a pair this does not cover, for [`atan2_norm_f32`] to redo.
+#[inline(always)]
+fn atan2_norm_pair(y: f32, x: f32) -> (f32, f32) {
+    let (x, y) = (f64::from(x), f64::from(y));
+    let (ax, ay) = (x.abs(), y.abs());
+    let steep = ay > ax;
+    let (n, d) = if steep { (ax, ay) } else { (ay, ax) };
+    let z = n / d;
+    let w = z * z;
+    let mut p = ATAN_COEFFS[11];
+    for c in ATAN_COEFFS[..11].iter().rev() {
+        p = p * w + *c;
+    }
+    let p = p * z;
+    let r = if steep {
+        std::f64::consts::FRAC_PI_2 - p
+    } else {
+        p
+    };
+    let r = if x.is_sign_negative() {
+        std::f64::consts::PI - r
+    } else {
+        r
+    };
+    // The squares of `f32` values neither overflow nor underflow in `f64`.
+    (r.copysign(y) as f32, (x * x + y * y).sqrt() as f32)
+}
+
+#[inline(always)]
+fn atan2_norm_f32_generic(y: &[f32], x: &[f32], angle: &mut [f32], norm: &mut [f32]) {
+    for (((a, m), &yi), &xi) in angle.iter_mut().zip(norm.iter_mut()).zip(y).zip(x) {
+        (*a, *m) = atan2_norm_pair(yi, xi);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn atan2_norm_f32_avx2(y: &[f32], x: &[f32], angle: &mut [f32], norm: &mut [f32]) {
+    atan2_norm_f32_generic(y, x, angle, norm);
+}
+
+/// `angle[i] = atan2(y[i], x[i])` and `norm[i] = hypot(x[i], y[i])`, vectorised.
+///
+/// The usual path uses only addition, multiplication, division and square root in `f64`, which
+/// IEEE 754 defines exactly and Rust never contracts, and rounds once, so the result does not
+/// depend on the system's libm or on the vector width. Pairs outside that path (zero over zero,
+/// two infinities, NaN) go through `f64::atan2` and `f32::hypot`, whose answers there are exact.
+pub(crate) fn atan2_norm_f32(y: &[f32], x: &[f32], angle: &mut [f32], norm: &mut [f32]) {
+    assert!(y.len() == x.len() && y.len() == angle.len() && y.len() == norm.len());
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        // SAFETY: AVX2 is available (checked at run time).
+        unsafe { atan2_norm_f32_avx2(y, x, angle, norm) };
+    } else {
+        atan2_norm_f32_generic(y, x, angle, norm);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    atan2_norm_f32_generic(y, x, angle, norm);
+    let redo = angle
+        .iter()
+        .zip(norm.iter())
+        .fold(false, |any, (a, m)| any | a.is_nan() | m.is_nan());
+    if redo {
+        for (((a, m), &yi), &xi) in angle.iter_mut().zip(norm.iter_mut()).zip(y).zip(x) {
+            if a.is_nan() {
+                *a = f64::from(yi).atan2(f64::from(xi)) as f32;
+            }
+            if m.is_nan() {
+                *m = xi.hypot(yi);
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 fn has_avx2() -> bool {
     std::arch::is_x86_feature_detected!("avx2")
@@ -796,6 +888,16 @@ pub(crate) fn as_f32<F: AudioFloat>(v: &mut [F]) -> Option<&mut [f32]> {
     }
 }
 
+/// [`as_f32`] of a shared slice.
+pub(crate) fn as_f32_slice<F: AudioFloat>(v: &[F]) -> Option<&[f32]> {
+    if TypeId::of::<F>() == TypeId::of::<f32>() {
+        // SAFETY: F is f32 (same type, so same size, alignment and validity).
+        Some(unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<f32>(), v.len()) })
+    } else {
+        None
+    }
+}
+
 /// `x = ln(x)` element-wise: the vectorised kernel for `f32`, the standard
 /// library's `ln` for `f64`.
 pub(crate) fn ln_in_place<F: AudioFloat>(v: &mut [F]) {
@@ -812,6 +914,81 @@ pub(crate) fn ln_in_place<F: AudioFloat>(v: &mut [F]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ulp_distance(a: f32, b: f32) -> i64 {
+        let key = |v: f32| {
+            let bits = v.to_bits() as i64;
+            if v.is_sign_negative() {
+                (1i64 << 31) - bits
+            } else {
+                bits
+            }
+        };
+        (key(a) - key(b)).abs()
+    }
+
+    #[test]
+    fn atan2_norm_is_close_to_the_f64_result() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let bits = (state >> 32) as u32;
+            let exp = (bits >> 8) % 254;
+            f32::from_bits((bits & 0x8000_0000) | (exp << 23) | (bits.rotate_left(7) & 0x7f_ffff))
+        };
+        let n = 2_000_000;
+        let (y, x): (Vec<f32>, Vec<f32>) = (0..n).map(|_| (next(), next())).unzip();
+        let (mut a, mut m) = (vec![0.0; n], vec![0.0; n]);
+        atan2_norm_f32(&y, &x, &mut a, &mut m);
+        let (mut worst, mut worst_norm) = (0, 0);
+        for i in 0..n {
+            let (yi, xi) = (f64::from(y[i]), f64::from(x[i]));
+            worst = worst.max(ulp_distance(a[i], yi.atan2(xi) as f32));
+            worst_norm = worst_norm.max(ulp_distance(m[i], yi.hypot(xi) as f32));
+        }
+        assert!(worst <= 1, "angle {worst} ulps");
+        assert!(worst_norm <= 1, "norm {worst_norm} ulps");
+    }
+
+    #[test]
+    fn atan2_norm_special_values_match_f64() {
+        let specials = [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            f32::MIN_POSITIVE,
+            1e-30,
+            -1e-30,
+            1e30,
+            -1e30,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        for &yi in &specials {
+            for &xi in &specials {
+                let (mut a, mut m) = ([0.0f32; 16], [0.0f32; 16]);
+                atan2_norm_f32(&[yi; 16], &[xi; 16], &mut a, &mut m);
+                let want = f64::from(yi).atan2(f64::from(xi)) as f32;
+                let want_norm = xi.hypot(yi);
+                for (got, got_norm) in a.iter().zip(&m) {
+                    assert!(
+                        ulp_distance(*got, want) <= 1 || (got.is_nan() && want.is_nan()),
+                        "atan2({yi}, {xi}) = {got}, want {want}"
+                    );
+                    assert!(
+                        ulp_distance(*got_norm, want_norm) <= 1
+                            || (got_norm.is_nan() && want_norm.is_nan()),
+                        "hypot({xi}, {yi}) = {got_norm}, want {want_norm}"
+                    );
+                }
+            }
+        }
+    }
 
     fn ulps(a: f32, b: f32) -> u32 {
         if a == b || (a.is_nan() && b.is_nan()) {

@@ -351,26 +351,40 @@ fn vocoder_by_angle<F: AudioFloat>(
     out: &mut Array3<Complex<F>>,
 ) {
     let n_frames = stft_matrix.dim().2;
-    // atan2 in f64, rounded once. glibc's atan2f changed in 2.41, so calling it here
-    // would make the f32 result depend on the system.
-    let angle_and_norm = |z: Complex<F>| (F::of(z.im.as_f64().atan2(z.re.as_f64())), z.norm());
-    for_bin_blocks(stft_matrix, angle_and_norm, |c, k, arg, mag_in| {
-        let mut out_row = out.slice_mut(ndarray::s![c, k, ..]);
-        let mut phase = arg[i0[0]];
-        for j in 0..t_out.len() {
-            if j > 0 {
-                phase += arg[i1[j - 1]] - arg[i0[j - 1]];
-            }
-            let (lo, hi) = seg[j];
-            let mag = if n_frames == 1 {
-                mag_in[0]
-            } else {
-                let (y_lo, y_hi) = (mag_in[lo], mag_in[hi]);
-                (y_hi - y_lo) / F::of_usize(hi - lo) * F::of(t_out[j] - lo as f64) + y_lo
+    let (mut arg, mut mag_in) = (vec![F::zero(); n_frames], vec![F::zero(); n_frames]);
+    for_bin_blocks(
+        stft_matrix,
+        |z: Complex<F>| (z.im, z.re),
+        |c, k, im, re| {
+            use crate::utils::vmath::{as_f32, as_f32_slice, atan2_norm_f32};
+            // Not the system's atan2f, whose result differs between versions of glibc.
+            let (Some(im), Some(re), Some(angle), Some(norm)) = (
+                as_f32_slice(im),
+                as_f32_slice(re),
+                as_f32(&mut arg),
+                as_f32(&mut mag_in),
+            ) else {
+                unreachable!("the phase is carried as a phasor for f64");
             };
-            out_row[j] = Complex::new(phase.cos() * mag, phase.sin() * mag);
-        }
-    });
+            atan2_norm_f32(im, re, angle, norm);
+            let (arg, mag_in) = (&arg, &mag_in);
+            let mut out_row = out.slice_mut(ndarray::s![c, k, ..]);
+            let mut phase = arg[i0[0]];
+            for j in 0..t_out.len() {
+                if j > 0 {
+                    phase += arg[i1[j - 1]] - arg[i0[j - 1]];
+                }
+                let (lo, hi) = seg[j];
+                let mag = if n_frames == 1 {
+                    mag_in[0]
+                } else {
+                    let (y_lo, y_hi) = (mag_in[lo], mag_in[hi]);
+                    (y_hi - y_lo) / F::of_usize(hi - lo) * F::of(t_out[j] - lo as f64) + y_lo
+                };
+                out_row[j] = Complex::new(phase.cos() * mag, phase.sin() * mag);
+            }
+        },
+    );
 }
 
 /// Bins per block in [`for_bin_blocks`].
