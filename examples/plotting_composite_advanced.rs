@@ -1,3 +1,7 @@
+#[cfg(all(feature = "plotting", feature = "envelopes"))]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(all(feature = "plotting", feature = "envelopes")))]
 fn main() {
     eprintln!("error: This example requires the `plotting` and `envelopes` features.");
@@ -88,6 +92,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .build()?;
 
     let composite_html = composite.html()?;
+    plots::keep("plotting_composite_advanced", &composite_html);
     // A composite embeds each sub-plot as a base64-encoded iframe, so we check
     // for the composite container and the embedded iframes rather than "plotly".
     assert!(

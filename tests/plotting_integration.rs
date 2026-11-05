@@ -95,3 +95,18 @@ fn lissajous_rejects_mono() {
     let result = mono().plot_lissajous(&LissajousParams::new());
     assert!(result.is_err(), "lissajous should reject a mono signal");
 }
+
+/// The plotted values are in kHz because the whole axis reaches past 1 kHz, so
+/// the label says kHz even when the automatic zoom shows less than 1 kHz.
+#[test]
+fn spectrogram_zoomed_below_1khz_is_labelled_in_khz() {
+    let audio = sine_wave::<f64>(220.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
+    let params = SpectrogramPlotParams::mel_db();
+    assert!(params.auto_zoom_freq);
+    let html = audio.plot_spectrogram(&params).unwrap().html().unwrap();
+    assert!(
+        html.contains("Frequency (kHz)"),
+        "label must match the data"
+    );
+    assert!(!html.contains("Frequency (Hz)"));
+}

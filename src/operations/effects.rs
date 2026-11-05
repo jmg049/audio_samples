@@ -1387,7 +1387,13 @@ fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize
     let mut out = Array3::<F>::zeros(s.raw_dim());
     let n = s.len_of(Axis(axis));
     let half = (k / 2) as isize;
+    if n == 0 {
+        return out;
+    }
     let reflect = |i: isize| -> usize {
+        if i >= 0 && (i as usize) < n {
+            return i as usize;
+        }
         let period = 2 * n as isize;
         let m = i.rem_euclid(period);
         if m < n as isize {
@@ -1396,11 +1402,9 @@ fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize
             (period - 1 - m) as usize
         }
     };
-    let idx: Vec<Vec<usize>> = (0..n as isize)
-        .map(|i| (0..k as isize).map(|j| reflect(i - half + j)).collect())
-        .collect();
     let mut line = vec![F::zero(); n];
-    let mut buf = vec![F::zero(); k];
+    let mut window = vec![F::zero(); k];
+    let rank = k / 2;
     for (src, mut dst) in s
         .lanes(Axis(axis))
         .into_iter()
@@ -1409,12 +1413,30 @@ fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize
         for (l, v) in line.iter_mut().zip(src.iter()) {
             *l = *v;
         }
-        for (i, window) in idx.iter().enumerate() {
-            for (b, &j) in buf.iter_mut().zip(window) {
-                *b = line[j];
+        // The window is kept sorted. Moving it by one sample removes one value
+        // and inserts one, so each output costs two binary searches and one
+        // short move rather than a selection over the whole window. Values
+        // equal under `total_cmp` have the same bits, so which of them is
+        // removed makes no difference to the result.
+        for (w, j) in window.iter_mut().zip(0..k as isize) {
+            *w = line[reflect(j - half)];
+        }
+        window.sort_unstable_by(total_cmp);
+        dst[0] = window[rank];
+        for i in 1..n as isize {
+            let gone = line[reflect(i - 1 - half)];
+            let new = line[reflect(i - half + k as isize - 1)];
+            let from = window.partition_point(|v| total_cmp(v, &gone).is_lt());
+            let to = window.partition_point(|v| total_cmp(v, &new).is_lt());
+            if to > from {
+                // Everything between moves down by one.
+                window.copy_within(from + 1..to, from);
+                window[to - 1] = new;
+            } else {
+                window.copy_within(to..from, to + 1);
+                window[to] = new;
             }
-            let (_, m, _) = buf.select_nth_unstable_by(k / 2, total_cmp);
-            dst[i] = *m;
+            dst[i as usize] = window[rank];
         }
     }
     out
@@ -3769,6 +3791,63 @@ mod tests {
     use super::*;
     use crate::sample_rate;
     use ndarray::array;
+
+    /// The median at each position against sorting each window.
+    fn brute_median<F: AudioFloat>(line: &[F], k: usize) -> Vec<F> {
+        let n = line.len() as isize;
+        let half = (k / 2) as isize;
+        let reflect = |i: isize| {
+            let m = i.rem_euclid(2 * n);
+            if m < n { m } else { 2 * n - 1 - m }
+        };
+        (0..n)
+            .map(|i| {
+                let mut w: Vec<F> = (0..k as isize)
+                    .map(|j| line[reflect(i - half + j) as usize])
+                    .collect();
+                w.sort_by(total_cmp);
+                w[k / 2]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn median_filter_matches_sorting_each_window() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Repeated values, both zeros and NaN, so that ties and ordering matter.
+        let values: Vec<f32> = (0..2_000)
+            .map(|_| match next() % 11 {
+                0 => 0.0,
+                1 => -0.0,
+                2 => f32::NAN,
+                3 => 1.0,
+                _ => (next() % 1000) as f32 / 37.0 - 13.0,
+            })
+            .collect();
+        for &(rows, cols) in &[(1, 2000), (50, 40), (40, 50), (2000, 1), (3, 7)] {
+            let s = ndarray::Array3::from_shape_fn((1, rows, cols), |(_, r, c)| {
+                values[(r * cols + c) % values.len()]
+            });
+            for &k in &[1, 2, 3, 4, 17, 31, 32, 101] {
+                for axis in [1, 2] {
+                    let got = median_filter_axis(s.view(), axis, k);
+                    for (src, dst) in s.lanes(Axis(axis)).into_iter().zip(got.lanes(Axis(axis))) {
+                        let line: Vec<f32> = src.iter().copied().collect();
+                        let want = brute_median(&line, k);
+                        for (a, b) in dst.iter().zip(&want) {
+                            assert_eq!(a.to_bits(), b.to_bits(), "{rows}x{cols} k={k} axis={axis}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn noise(n: usize, seed: u64) -> Vec<f64> {
         let mut s = seed

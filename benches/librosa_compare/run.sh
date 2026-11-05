@@ -36,6 +36,8 @@
 #             (needs network)
 #   guide     guide_numbers.py, guide_tables.py: every figure quoted in the librosa guide,
 #             and the tables its page includes
+#   threads   thread_scaling.py: batch MFCC, STFT and resampling against the
+#             number of Python threads, on whichever interpreter PY is
 #
 # Each stage appends JSON lines to OUT_DIR/<stage-file>.jsonl; delete the
 # file to re-run a stage from scratch.
@@ -201,6 +203,9 @@ for (row, inp, lib), v in t.items():
     guide)
       "$PY" "$HERE/guide_numbers.py" "$OUT"
       "$PY" "$HERE/guide_tables.py" "$OUT" "$REPO/../audio_samples_python/docs/source/_guide_tables"
+      ;;
+    threads)
+      "$PY" "$HERE/thread_scaling.py" --out "$OUT/thread_scaling.jsonl"
       ;;
     *)
       echo "unknown stage $stage" >&2

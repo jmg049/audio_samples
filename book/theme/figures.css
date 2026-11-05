@@ -29,3 +29,29 @@ figure.guide-figure figcaption .figure-number {
 figure.guide-figure .figure-interactive {
     font-size: 0.85em;
 }
+
+/* The gallery chapter: Plotly pages in a frame and collapsible example output. */
+figure.example-plot iframe {
+    width: 100%;
+    height: 480px;
+    background: #ffffff;
+    border: 1px solid var(--table-border-color, #d0d0d0);
+    border-radius: 4px;
+}
+
+details.example-output {
+    margin: 0.75em 0;
+}
+
+details.example-output summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+details.example-output pre {
+    overflow-x: auto;
+    font-size: 0.85em;
+    padding: 0.6em;
+    background: var(--quote-bg, #f4f4f4);
+    border-radius: 4px;
+}

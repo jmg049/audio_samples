@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds the learning guide's mdBook: computes the figures with the library,
-# builds the book and checks the output (KaTeX errors, broken links, figures).
+# Builds the learning guide's mdBook: computes the figures with the library, runs
+# the examples for the gallery chapter, builds the book and checks the output
+# (KaTeX errors, broken links, figures).
 #
 #   book/build.sh           generate figures (when stale) and build into book/book/
 #   book/build.sh clean     delete the generated figures and the built book
@@ -66,7 +67,11 @@ for src in "$figures_crate"/src/chapters/ch*.rs; do
     fi
 done
 
-# 2. Book.
+# 2. Examples for the gallery chapter: all must compile and run.
+echo "== gallery examples"
+python3 "$here/gallery_outputs.py"
+
+# 3. Book.
 if [ "$cmd" = serve ]; then
     exec mdbook serve "$@"
 fi
@@ -80,7 +85,7 @@ if ! mdbook build >"$log" 2>&1; then
 fi
 grep -v ' INFO ' "$log" || true
 
-# 3. Output checks: KaTeX errors, broken relative links, empty figures.
+# 4. Output checks: KaTeX errors, broken relative links, empty figures.
 echo "== checks"
 python3 "$here/check_output.py" "$here/book"
 echo "book written to $here/book/index.html"

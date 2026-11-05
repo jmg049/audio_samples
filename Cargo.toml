@@ -273,6 +273,10 @@ name = "iir_filtering"
 required-features = ["iir-filtering", "editing", "statistics"]
 
 [[example]]
+name = "block_processing"
+required-features = ["iir-filtering", "statistics"]
+
+[[example]]
 name = "parametric_eq"
 required-features = ["parametric-eq", "statistics"]
 
@@ -450,6 +454,10 @@ required-features = ["pitch-analysis", "vad"]
 [[test]]
 name = "proptest_invariants"
 required-features = ["processing", "channels", "iir-filtering", "editing"]
+
+[[test]]
+name = "examples_gallery"
+path = "tests/examples_gallery.rs"
 
 [[test]]
 name = "plotting_integration"

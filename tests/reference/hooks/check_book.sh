@@ -3,7 +3,8 @@
 #
 # Builds the figures crate (release, incremental, reusing book/figures/target),
 # re-runs the figure programs whose binaries changed (their assertions keep the
-# figures in line with the numbers the chapters state), builds the book with
+# figures in line with the numbers the chapters state), compiles every example and
+# runs those the gallery chapter shows, builds the book with
 # mdbook + mdbook-katex and checks the output: no KaTeX errors, no broken
 # relative links, no missing or empty figures, and every figure marker in the
 # chapters resolves (the preprocessor fails the build otherwise).

@@ -19,5 +19,9 @@
 
 ---
 
+- [Example gallery](gallery.md)
+
+---
+
 [For instructors](FOR_INSTRUCTORS.md)
 [Guide index and setup](README.md)

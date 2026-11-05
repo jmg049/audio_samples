@@ -566,80 +566,116 @@ pub(crate) fn stft_map<F: AudioFloat, O>(
     config: &StftConfig,
     map: impl Fn(Complex<F>) -> O,
 ) -> AudioSampleResult<Array3<O>> {
-    let (window, hop) = config.analysis_window::<F>()?;
-    let n_fft = config.n_fft.get();
-    let (n_channels, len) = signal.dim();
-    if len == 0 || n_channels == 0 {
-        return Err(param_err(
-            "signal",
-            "cannot compute the STFT of an empty signal",
-        ));
-    }
-    let pad = if config.center { n_fft / 2 } else { 0 };
-    let padded_len = len + 2 * pad;
-    if padded_len < n_fft {
-        return Err(param_err(
-            "n_fft",
-            format!(
-                "n_fft={n_fft} is too large for uncentred analysis of a signal of length {len}"
-            ),
-        ));
-    }
-    let n_frames = 1 + (padded_len - n_fft) / hop;
-    let n_bins = n_fft / 2 + 1;
-    check_derived_len(
-        "n_fft",
-        "the STFT matrix",
-        n_channels as f64 * n_bins as f64 * n_frames as f64,
-        MAX_SIGNAL_ELEMENTS,
-    )?;
-
-    let plan = forward_plan::<F>(n_fft);
-    let mut scratch = plan.make_scratch_vec();
-    let mut frame_in = vec![F::zero(); n_fft];
-    // Frames are transformed in blocks of `STFT_BLOCK` into a small frame-major
-    // buffer, then scattered into the bin-major output: each bin row receives a
-    // contiguous run of `STFT_BLOCK` frames, and the block stays in cache (a
-    // whole-signal transpose is several times slower than the FFTs).
-    let mut block = vec![Complex::new(F::zero(), F::zero()); STFT_BLOCK * n_bins];
+    let frames = StftFrames::new(signal, config)?;
+    let (n_channels, n_bins, n_frames) = (signal.nrows(), frames.n_bins, frames.n_frames);
     let mut out = Array3::<O>::uninit((n_channels, n_bins, n_frames));
-    let mut row_buf = Vec::new();
-
-    for (c, row) in signal.outer_iter().enumerate() {
-        let x: &[F] = if let Some(s) = row.as_slice() {
-            s
-        } else {
-            row_buf.clear();
-            row_buf.extend(row.iter().copied());
-            &row_buf
-        };
+    frames.for_each_block(signal, config, |c, t0, nb, block| {
         let mut out_c = out.index_axis_mut(Axis(0), c);
-        for t0 in (0..n_frames).step_by(STFT_BLOCK) {
-            let nb = STFT_BLOCK.min(n_frames - t0);
-            for (j, spec) in block.chunks_exact_mut(n_bins).take(nb).enumerate() {
-                let start = ((t0 + j) * hop) as isize - pad as isize;
-                padded_frame_into(x, start, Some(&window), config.pad_mode, &mut frame_in);
-                plan.process_with_scratch(&mut frame_in, spec, &mut scratch)
-                    .map_err(|e| {
-                        AudioSampleError::Processing(crate::ProcessingError::algorithm_failure(
-                            "stft",
-                            e.to_string(),
-                        ))
-                    })?;
-            }
-            for (k, mut dst) in out_c.outer_iter_mut().enumerate() {
-                let dst = dst
-                    .as_slice_mut()
-                    .expect("rows of a new standard-layout array are contiguous");
-                for (j, d) in dst[t0..t0 + nb].iter_mut().enumerate() {
-                    d.write(map(block[j * n_bins + k]));
-                }
+        for (k, mut dst) in out_c.outer_iter_mut().enumerate() {
+            let dst = dst
+                .as_slice_mut()
+                .expect("rows of a new standard-layout array are contiguous");
+            for (j, d) in dst[t0..t0 + nb].iter_mut().enumerate() {
+                d.write(map(block[j * n_bins + k]));
             }
         }
-    }
+    })?;
     // SAFETY: every element was written above: channels `c`, bins `k` and
     // frames `t0..t0 + nb` for consecutive blocks covering `0..n_frames`.
     Ok(unsafe { out.assume_init() })
+}
+
+/// The layout of an STFT: the analysis window and the frame and bin counts.
+struct StftFrames<F> {
+    window: Vec<F>,
+    hop: usize,
+    pad: usize,
+    n_bins: usize,
+    n_frames: usize,
+}
+
+impl<F: AudioFloat> StftFrames<F> {
+    /// Validates the signal and configuration.
+    fn new(signal: ArrayView2<'_, F>, config: &StftConfig) -> AudioSampleResult<Self> {
+        let (window, hop) = config.analysis_window::<F>()?;
+        let n_fft = config.n_fft.get();
+        let (n_channels, len) = signal.dim();
+        if len == 0 || n_channels == 0 {
+            return Err(param_err(
+                "signal",
+                "cannot compute the STFT of an empty signal",
+            ));
+        }
+        let pad = if config.center { n_fft / 2 } else { 0 };
+        let padded_len = len + 2 * pad;
+        if padded_len < n_fft {
+            return Err(param_err(
+                "n_fft",
+                format!(
+                    "n_fft={n_fft} is too large for uncentred analysis of a signal of length {len}"
+                ),
+            ));
+        }
+        let n_frames = 1 + (padded_len - n_fft) / hop;
+        let n_bins = n_fft / 2 + 1;
+        check_derived_len(
+            "n_fft",
+            "the STFT matrix",
+            n_channels as f64 * n_bins as f64 * n_frames as f64,
+            MAX_SIGNAL_ELEMENTS,
+        )?;
+        Ok(Self {
+            window,
+            hop,
+            pad,
+            n_bins,
+            n_frames,
+        })
+    }
+
+    /// Transforms the frames of every channel in blocks of up to `STFT_BLOCK`
+    /// and calls `sink(channel, first frame, frames in the block, block)`. The
+    /// block is frame-major, `n_bins` values per frame, and stays in cache, so
+    /// the sink can move it to its destination without a whole-signal
+    /// transpose, which is several times slower than the FFTs.
+    fn for_each_block(
+        &self,
+        signal: ArrayView2<'_, F>,
+        config: &StftConfig,
+        mut sink: impl FnMut(usize, usize, usize, &[Complex<F>]),
+    ) -> AudioSampleResult<()> {
+        let n_bins = self.n_bins;
+        let plan = forward_plan::<F>(config.n_fft.get());
+        let mut scratch = plan.make_scratch_vec();
+        let mut frame_in = vec![F::zero(); config.n_fft.get()];
+        let mut block = vec![Complex::new(F::zero(), F::zero()); STFT_BLOCK * n_bins];
+        let mut row_buf = Vec::new();
+        for (c, row) in signal.outer_iter().enumerate() {
+            let x: &[F] = if let Some(s) = row.as_slice() {
+                s
+            } else {
+                row_buf.clear();
+                row_buf.extend(row.iter().copied());
+                &row_buf
+            };
+            for t0 in (0..self.n_frames).step_by(STFT_BLOCK) {
+                let nb = STFT_BLOCK.min(self.n_frames - t0);
+                for (j, spec) in block.chunks_exact_mut(n_bins).take(nb).enumerate() {
+                    let start = ((t0 + j) * self.hop) as isize - self.pad as isize;
+                    padded_frame_into(x, start, Some(&self.window), config.pad_mode, &mut frame_in);
+                    plan.process_with_scratch(&mut frame_in, spec, &mut scratch)
+                        .map_err(|e| {
+                            AudioSampleError::Processing(crate::ProcessingError::algorithm_failure(
+                                "stft",
+                                e.to_string(),
+                            ))
+                        })?;
+                }
+                sink(c, t0, nb, &block);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Reconstructs signals from an STFT matrix, equivalent to `librosa.istft`.
@@ -1446,10 +1482,18 @@ where
     S: Data<Elem = F>,
     D: Dimension,
 {
+    power_to_db_owned(s.to_owned(), config)
+}
+
+/// [`power_to_db`] that converts `s` in place.
+fn power_to_db_owned<F: AudioFloat, D: Dimension>(
+    s: Array<F, D>,
+    config: &DbConfig,
+) -> AudioSampleResult<Array<F, D>> {
     config.validate()?;
     let reference = config.reference;
     Ok(power_to_db_core(
-        s.to_owned(),
+        s,
         |chunk| match reference {
             DbReference::Value(r) => F::of(r).abs(),
             DbReference::Max => block_max(chunk),
@@ -3024,8 +3068,54 @@ pub(crate) fn melspectrogram_rows<F: AudioFloat>(
     config: &MelSpectrogramConfig,
 ) -> AudioSampleResult<Array3<F>> {
     config.validate(sample_rate)?;
-    let s = spectrogram_rows(rows, &config.stft, config.power)?;
-    melspectrogram_from_spectrogram(s.view(), sample_rate, config.stft.n_fft, &config.mel)
+    validate_power(config.power)?;
+    let power = config.power;
+    if power == 2.0 {
+        mel_of_blocks(rows, sample_rate, config, |z| z.norm_sqr())
+    } else if power == 1.0 {
+        mel_of_blocks(rows, sample_rate, config, |z| z.norm_sqr().sqrt())
+    } else {
+        mel_of_blocks(rows, sample_rate, config, |z| magnitude_power(z, power))
+    }
+}
+
+/// The mel spectrogram, projected one block of frames at a time, so that the
+/// whole `(bins, frames)` spectrogram is never held in memory: the memory touched
+/// beyond the output is a block. Each output value adds its filter's bins in
+/// ascending order, as [`banded_dot_into`] does, so the result is the same.
+fn mel_of_blocks<F: AudioFloat>(
+    rows: ArrayView2<'_, F>,
+    sample_rate: f64,
+    config: &MelSpectrogramConfig,
+    map: impl Fn(Complex<F>) -> F,
+) -> AudioSampleResult<Array3<F>> {
+    let frames = StftFrames::new(rows, &config.stft)?;
+    let (n_bins, n_frames) = (frames.n_bins, frames.n_frames);
+    let basis = mel_bands_cached::<F>(sample_rate, config.stft.n_fft, &config.mel)?;
+    let mut out = Array3::<F>::zeros((rows.nrows(), basis.len(), n_frames));
+    let mut values = vec![F::zero(); STFT_BLOCK * n_bins];
+    frames.for_each_block(rows, &config.stft, |c, t0, nb, block| {
+        // Bin-major, so that each filter weight scales a contiguous run of frames.
+        for (k, bin) in values.chunks_exact_mut(STFT_BLOCK).enumerate() {
+            for (j, v) in bin[..nb].iter_mut().enumerate() {
+                *v = map(block[j * n_bins + k]);
+            }
+        }
+        let mut out_c = out.index_axis_mut(Axis(0), c);
+        for ((lo, weights), mut out_row) in basis.iter().zip(out_c.outer_iter_mut()) {
+            let acc = out_row
+                .as_slice_mut()
+                .expect("rows of a standard-layout array");
+            let acc = &mut acc[t0..t0 + nb];
+            for (i, &wk) in weights.iter().enumerate() {
+                let bin = &values[(lo + i) * STFT_BLOCK..(lo + i) * STFT_BLOCK + nb];
+                for (a, &v) in acc.iter_mut().zip(bin) {
+                    *a += wk * v;
+                }
+            }
+        }
+    })?;
+    Ok(out)
 }
 
 /// The MFCCs of `(channels, samples)` rows sampled at `sample_rate` Hz,
@@ -3040,7 +3130,7 @@ pub(crate) fn mfcc_rows<F: AudioFloat>(
 ) -> AudioSampleResult<Array3<F>> {
     config.validate(sample_rate)?;
     let mel = melspectrogram_rows(rows, sample_rate, &config.mel_spectrogram)?;
-    let mel_db = power_to_db(&mel, &config.db)?;
+    let mel_db = power_to_db_owned(mel, &config.db)?;
     mfcc_from_mel_db(&mel_db, config)
 }
 
@@ -3090,6 +3180,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Projecting block by block gives the same bits as projecting the whole
+    /// spectrogram, for every power path, block boundary and channel count.
+    #[test]
+    fn mel_of_blocks_matches_the_whole_spectrogram() {
+        let rows = Array2::from_shape_fn((2, 12_345), |(c, n)| {
+            ((n as f32 * (0.01 + 0.03 * c as f32)).sin() + (n as f32 * 0.37).cos()) * 0.4
+        });
+        for power in [2.0, 1.0, 1.5] {
+            let mut config = MelSpectrogramConfig::default();
+            config.power = power;
+            config.stft = config.stft.with_n_fft(crate::nzu!(512));
+            config.mel = config.mel.with_n_mels(crate::nzu!(40));
+            let direct = melspectrogram_rows(rows.view(), 16_000.0, &config).unwrap();
+            let s = spectrogram_rows(rows.view(), &config.stft, power).unwrap();
+            let whole =
+                melspectrogram_from_spectrogram(s.view(), 16_000.0, config.stft.n_fft, &config.mel)
+                    .unwrap();
+            assert_eq!(direct.dim(), whole.dim());
+            assert!(
+                direct
+                    .iter()
+                    .zip(whole.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "power {power}"
+            );
+        }
+    }
 
     #[test]
     fn frame_copy_matches_view() {

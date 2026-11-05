@@ -47,6 +47,16 @@ use crate::traits::raw_f64_to_sample;
 /// converted back (rounded to nearest and saturated); for `u8` this scales
 /// around the mid-scale value 128.
 #[inline]
+/// The samples of `(2, frames)` audio whose frames are interleaved in memory,
+/// in memory order (left, right, left, right, ...).
+fn interleaved_stereo<'a, T>(view: ndarray::ArrayView2<'a, T>) -> Option<&'a [T]> {
+    if view.strides() == [1, 2] {
+        view.to_slice_memory_order()
+    } else {
+        None
+    }
+}
+
 fn apply_channel_gain<T>(x: T, gain: f64) -> T
 where
     T: StandardSample,
@@ -149,6 +159,19 @@ where
                                 // SAFETY: i < n and mono_vec was allocated with
                                 // capacity n, so dst.add(i) is in bounds and the
                                 // slot is uninitialised until this write.
+                                unsafe {
+                                    dst.add(i).write(raw_f64_to_sample::<T>(avg));
+                                }
+                            }
+                        } else if let Some(pairs) = interleaved_stereo(data.as_view()) {
+                            // Interleaved frames, as files decode: one pass over
+                            // memory in order.
+                            for (i, pair) in pairs.chunks_exact(2).enumerate() {
+                                let lf: f32 = pair[0].cast_into();
+                                let rf: f32 = pair[1].cast_into();
+                                let avg: f64 = ((lf + rf) * 0.5f32) as f64;
+                                // SAFETY: `pairs` holds n frames, so i < n and
+                                // mono_vec was allocated with capacity n.
                                 unsafe {
                                     dst.add(i).write(raw_f64_to_sample::<T>(avg));
                                 }
@@ -1110,6 +1133,32 @@ pub fn deinterleave<T: AudioSample + 'static>(
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+
+    /// Interleaved stereo averages to the same bits as separate channels.
+    #[test]
+    fn to_mono_of_interleaved_stereo_matches_planar() {
+        let frames = 1003;
+        let planar = Array2::from_shape_fn((2, frames), |(c, n)| {
+            ((n as f32 * (0.013 + c as f32 * 0.07)).sin() * 0.7) * (1.0 + c as f32 * 1e-3)
+        });
+        let mut v = Vec::with_capacity(2 * frames);
+        for n in 0..frames {
+            v.push(planar[[0, n]]);
+            v.push(planar[[1, n]]);
+        }
+        let interleaved = Array2::from_shape_vec(ndarray::ShapeBuilder::f((2, frames)), v).unwrap();
+        assert!(interleaved_stereo(interleaved.view()).is_some());
+        let sr = crate::sample_rate!(8000);
+        let a = AudioSamples::new_multi_channel(planar, sr)
+            .unwrap()
+            .to_mono(MonoConversionMethod::Average)
+            .unwrap();
+        let b = AudioSamples::new_multi_channel(interleaved, sr)
+            .unwrap()
+            .to_mono(MonoConversionMethod::Average)
+            .unwrap();
+        assert_eq!(a.as_slice().unwrap(), b.as_slice().unwrap());
+    }
 
     use super::*;
     use crate::sample_rate;

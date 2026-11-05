@@ -1,3 +1,7 @@
+#[cfg(feature = "plotting")]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(feature = "plotting"))]
 fn main() {
     eprintln!("error: This example requires the `plotting` feature.");
@@ -41,6 +45,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     params_zoomed.freq_range = Some((0.0, 2000.0));
     let spec_zoomed = audio.plot_magnitude_spectrum(&params_zoomed)?;
     let html_zoomed = spec_zoomed.html()?;
+    plots::keep("plotting_spectrum", &html_zoomed);
     println!("Rendered zoomed spectrum ({} bytes)", html_zoomed.len());
 
     for (name, html) in [

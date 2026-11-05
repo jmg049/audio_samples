@@ -33,6 +33,8 @@ FORCE_FIGURES=1 book/build.sh   # re-run every figure program
 The book is written to `book/book/index.html`. `build.sh` fails if:
 
 * a figure program fails (each one asserts the numbers its chapter asserts);
+* an example does not compile with `full,educational`, or one that the gallery
+  chapter runs exits with an error (`gallery_outputs.py`);
 * `mdbook build` fails, which includes a figure marker without a figure;
 * the output contains a KaTeX error (`katex-error` or `ParseError`), a
   relative link or image whose target does not exist, or an empty figure

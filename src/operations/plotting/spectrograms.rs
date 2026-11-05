@@ -960,6 +960,7 @@ where
                 layout_kind,
                 &params.plot_params,
                 freq_range,
+                use_khz,
                 max_freq_for_axis,
             );
         }
@@ -972,6 +973,7 @@ where
                 .y_label
                 .clone()
                 .or_else(|| Some("Frequency".to_string())),
+            use_khz,
             max_freq_for_axis,
         );
 
@@ -1300,15 +1302,28 @@ fn configure_separate_axes(
     layout_kind: Layout,
     plot_params: &PlotParams,
     freq_range: Option<(f64, f64)>,
+    use_khz: bool,
     max_freq: f64,
 ) -> plotly::Layout {
     match layout_kind {
-        Layout::Vertical => {
-            configure_vertical_axes(layout, rows, cols, plot_params, freq_range, max_freq)
-        }
-        Layout::Horizontal => {
-            configure_horizontal_axes(layout, rows, cols, plot_params, freq_range, max_freq)
-        }
+        Layout::Vertical => configure_vertical_axes(
+            layout,
+            rows,
+            cols,
+            plot_params,
+            freq_range,
+            use_khz,
+            max_freq,
+        ),
+        Layout::Horizontal => configure_horizontal_axes(
+            layout,
+            rows,
+            cols,
+            plot_params,
+            freq_range,
+            use_khz,
+            max_freq,
+        ),
     }
 }
 
@@ -1318,6 +1333,7 @@ fn configure_vertical_axes(
     cols: usize,
     plot_params: &PlotParams,
     freq_range: Option<(f64, f64)>,
+    use_khz: bool,
     max_freq: f64,
 ) -> plotly::Layout {
     if rows == 0 {
@@ -1361,6 +1377,7 @@ fn configure_vertical_axes(
                         .y_label
                         .clone()
                         .or_else(|| Some("Frequency".to_string())),
+                    use_khz,
                     max_freq,
                 );
             }
@@ -1383,6 +1400,7 @@ fn configure_horizontal_axes(
     cols: usize,
     plot_params: &PlotParams,
     freq_range: Option<(f64, f64)>,
+    use_khz: bool,
     max_freq: f64,
 ) -> plotly::Layout {
     if cols == 0 {
@@ -1423,6 +1441,7 @@ fn configure_horizontal_axes(
                         .y_label
                         .clone()
                         .or_else(|| Some("Frequency".to_string())),
+                    use_khz,
                     max_freq,
                 );
             }

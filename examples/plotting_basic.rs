@@ -1,3 +1,7 @@
+#[cfg(all(feature = "plotting", feature = "transforms"))]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(all(feature = "plotting", feature = "transforms")))]
 fn main() {
     eprintln!("error: This example requires the `plotting` and `transforms` features.");
@@ -71,6 +75,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
         .plot_spectrogram(&spec_params)
         .expect("Failed to create spectrogram plot");
     let spec_html = spec_plot.html().expect("Failed to render spectrogram plot");
+    plots::keep("plotting_basic", &spec_html);
     println!(
         "Rendered spectrogram plot ({} bytes of HTML)",
         spec_html.len()

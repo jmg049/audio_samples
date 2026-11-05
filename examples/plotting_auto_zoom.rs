@@ -1,3 +1,7 @@
+#[cfg(feature = "plotting")]
+#[path = "support/plots.rs"]
+mod plots;
+
 #[cfg(not(feature = "plotting"))]
 fn main() {
     eprintln!("error: This example requires the `plotting` feature.");
@@ -26,6 +30,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     let params_auto = SpectrogramPlotParams::mel_db();
     let plot_auto = audio.plot_spectrogram(&params_auto)?;
     let html_auto = plot_auto.html()?;
+    plots::keep("plotting_auto_zoom", &html_auto);
     println!("Rendered auto-zoom spectrogram ({} bytes)", html_auto.len());
 
     // Test 2: Auto-zoom disabled (show full range)
