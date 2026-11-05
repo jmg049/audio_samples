@@ -273,6 +273,10 @@ name = "iir_filtering"
 required-features = ["iir-filtering", "editing", "statistics"]
 
 [[example]]
+name = "block_processing"
+required-features = ["iir-filtering", "statistics"]
+
+[[example]]
 name = "parametric_eq"
 required-features = ["parametric-eq", "statistics"]
 

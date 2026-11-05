@@ -422,6 +422,18 @@ cargo run --example iir_filtering --features iir-filtering,editing,statistics
 
 <!-- output: iir_filtering -->
 
+### Process a long signal in blocks
+
+Low-pass filters a minute of audio 4096 samples at a time with `SosFilter`, which keeps its state between blocks, and checks the result equals filtering the whole signal.
+
+[`examples/block_processing.rs`](https://github.com/jmg049/audio_samples/blob/main/examples/block_processing.rs)
+
+```sh
+cargo run --example block_processing --features iir-filtering,statistics
+```
+
+<!-- output: block_processing -->
+
 ### Parametric EQ
 
 A three-band equaliser and a single band applied to a harmonic tone, with the response at chosen frequencies.
@@ -644,8 +656,5 @@ cargo run --example librosa_bench --features full_no_plotting
 
 ## Gaps
 
-Tasks with no Rust example yet:
-
-- Reading and writing files. That code is in the `audio_samples_io` crate, and this
-  crate does not depend on it.
-- Streaming or block-by-block processing of a long signal.
+Reading and writing files has no Rust example yet. That code is in the `audio_samples_io`
+crate, and this crate does not depend on it.
