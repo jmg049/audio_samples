@@ -44,7 +44,7 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
         }
         "timelag_filter_tiny" => {
             let r = uniform(12, 12, 31);
-            thunk(move || timelag_filter(r.view(), true, |m| Ok(m.to_owned())).unwrap())
+            thunk(move || timelag_filter(r.view(), true, Ok).unwrap())
         }
         "agglomerative_tiny" => {
             let x = uniform(4, 24, 32);
@@ -79,7 +79,7 @@ pub fn seq<'a, F: AudioFloat>(case: &str, x: &'a SeqCtx<F>) -> Option<Thunk<'a>>
         }
         "timelag_filter" => {
             let r = x.matrix(N, N, 31);
-            thunk(move || timelag_filter(r.view(), true, |m| Ok(m.to_owned())).unwrap())
+            thunk(move || timelag_filter(r.view(), true, Ok).unwrap())
         }
         "agglomerative" => {
             let d = x.matrix(12, 2000, 32);

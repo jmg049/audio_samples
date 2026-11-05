@@ -26,7 +26,7 @@
 //! use audio_samples::operations::linalg::{nnls, pinv};
 //! use ndarray::array;
 //!
-//! let a = array![[1.0, 0.0], [0.0, 2.0], [0.0, 0.0]];
+//! let a = array![[1.0_f64, 0.0], [0.0, 2.0], [0.0, 0.0]];
 //! let x = nnls(a.view(), array![1.0, -2.0, 0.0].view()).unwrap();
 //! assert_eq!(x.to_vec(), vec![1.0, 0.0]);
 //!
@@ -368,7 +368,7 @@ pub fn svd<F: AudioFloat>(a: ArrayView2<'_, F>) -> AudioSampleResult<Svd> {
 }
 
 /// Orthonormalises the columns of `q` in place by modified Gram-Schmidt, twice.
-fn orthonormalise(q: &mut Array2<f64>) {
+fn orthonormalise<F: AudioFloat>(q: &mut Array2<F>) {
     let cols = q.ncols();
     for _ in 0..2 {
         for j in 0..cols {
@@ -376,15 +376,57 @@ fn orthonormalise(q: &mut Array2<f64>) {
             let mut col = rest.column_mut(0);
             for i in 0..j {
                 let prev = done.column(i);
-                let proj = prev.dot(&col);
+                let proj = prev
+                    .iter()
+                    .zip(col.iter())
+                    .fold(F::zero(), |acc, (&p, &c)| acc + p * c);
                 col.zip_mut_with(&prev, |c, &p| *c -= proj * p);
             }
-            let norm = col.dot(&col).sqrt();
-            if norm > 0.0 {
+            let norm = col.iter().fold(F::zero(), |acc, &c| acc + c * c).sqrt();
+            if norm > F::zero() {
                 col.mapv_inplace(|v| v / norm);
             }
         }
     }
+}
+
+/// The leading `k` singular triplets in `a`'s float type, found by randomised range
+/// finding.
+///
+/// # Errors
+/// [`ParameterError`] if `a` is not finite or `k` is out of range.
+pub(crate) fn truncated_svd<F: AudioFloat>(
+    a: ArrayView2<'_, F>,
+    k: usize,
+    oversampling: usize,
+    n_iter: usize,
+    seed: u64,
+) -> AudioSampleResult<(Array2<F>, Vec<f64>, Array2<F>)> {
+    let (m, n) = a.dim();
+    if k == 0 || k > m.min(n) {
+        return invalid("k", format!("must lie in 1..={}, got {k}", m.min(n)));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return invalid("a", "must be finite");
+    }
+    let size = (k + oversampling).min(m.min(n));
+    let mut rng = SmallRng::new(seed);
+    let omega = Array2::from_shape_simple_fn((n, size), || of::<F>(rng.normal()));
+    let mut q = a.dot(&omega);
+    drop(omega);
+    orthonormalise(&mut q);
+    for _ in 0..n_iter {
+        let mut z = q.t().dot(&a).reversed_axes();
+        orthonormalise(&mut z);
+        q = a.dot(&z);
+        orthonormalise(&mut q);
+    }
+    let b = q.t().dot(&a);
+    let small = svd(b.view())?;
+    drop(b);
+    let u = q.dot(&small.u.slice(s![.., ..k]).mapv(of::<F>));
+    let vt = small.vt.slice(s![..k, ..]).mapv(of::<F>);
+    Ok((u, small.s.iter().take(k).copied().collect(), vt))
 }
 
 /// Truncated singular value decomposition by randomised range finding.
@@ -418,28 +460,12 @@ pub fn randomized_svd<F: AudioFloat>(
     n_iter: usize,
     seed: u64,
 ) -> AudioSampleResult<Svd> {
-    let (m, n) = a.dim();
-    if k == 0 || k > m.min(n) {
-        return invalid("k", format!("must lie in 1..={}, got {k}", m.min(n)));
-    }
-    let a = to_f64(a, "a")?;
-    let size = (k + oversampling).min(m.min(n));
-    let mut rng = SmallRng::new(seed);
-    let omega = Array2::from_shape_simple_fn((n, size), || rng.normal());
-    let mut q = a.dot(&omega);
-    orthonormalise(&mut q);
-    for _ in 0..n_iter {
-        let mut z = a.t().dot(&q);
-        orthonormalise(&mut z);
-        q = a.dot(&z);
-        orthonormalise(&mut q);
-    }
-    let b = q.t().dot(&a);
-    let small = svd(b.view())?;
+    let (u, s_values, vt) = truncated_svd(a, k, oversampling, n_iter, seed)?;
+    let widen = |m: Array2<F>| m.mapv(|v| v.to_f64().unwrap_or(f64::NAN));
     Ok(Svd {
-        u: q.dot(&small.u).slice_move(s![.., ..k]),
-        s: small.s.slice_move(s![..k]),
-        vt: small.vt.slice_move(s![..k, ..]),
+        u: widen(u),
+        s: Array1::from(s_values),
+        vt: widen(vt),
     })
 }
 
@@ -461,7 +487,7 @@ pub fn randomized_svd<F: AudioFloat>(
 /// use audio_samples::operations::linalg::pinv;
 /// use ndarray::array;
 ///
-/// let p = pinv(array![[2.0, 0.0]].view(), 1e-15).unwrap();
+/// let p = pinv(array![[2.0_f64, 0.0]].view(), 1e-15).unwrap();
 /// assert!((p[[0, 0]] - 0.5).abs() < 1e-12);
 /// assert_eq!(p[[1, 0]], 0.0);
 /// ```
@@ -517,133 +543,163 @@ pub fn nnls<F: AudioFloat>(
     if b.iter().any(|v| !v.is_finite()) {
         return invalid("b", "must be finite");
     }
-    let a = to_f64(a, "a")?;
+    if a.iter().any(|v| !v.is_finite()) {
+        return invalid("a", "must be finite");
+    }
     let b: Array1<f64> = b.mapv(|v| v.to_f64().unwrap_or(f64::NAN));
-    Ok(active_set(&a, &b).mapv(of::<F>))
+    let strides = a.strides();
+    if std::any::TypeId::of::<F>() == std::any::TypeId::of::<f64>()
+        && strides.iter().all(|&v| v >= 0)
+    {
+        // SAFETY: F is f64 (the same type, so the same layout); the shape and the
+        // non-negative strides are those of `a`, whose elements outlive the call.
+        let view = unsafe {
+            ArrayView2::from_shape_ptr(
+                ndarray::ShapeBuilder::strides(
+                    a.raw_dim(),
+                    ndarray::Ix2(strides[0] as usize, strides[1] as usize),
+                ),
+                a.as_ptr().cast::<f64>(),
+            )
+        };
+        return Ok(active_set(view, &b).mapv(of::<F>));
+    }
+    let copy = a.mapv(|v| v.to_f64().unwrap_or(f64::NAN));
+    Ok(active_set(copy.view(), &b).mapv(of::<F>))
 }
 
-/// The lower Cholesky factor of the Gram matrix of the passive columns, grown one
-/// column at a time.
+/// The lower Cholesky factor of the Gram matrix of the passive columns, in packed rows,
+/// grown one column at a time.
 struct PassiveFactor {
     passive: Vec<usize>,
     l: Vec<f64>,
 }
 
 impl PassiveFactor {
-    fn new(capacity: usize) -> Self {
+    fn new() -> Self {
         Self {
-            passive: Vec::with_capacity(capacity),
-            l: vec![0.0; capacity * capacity],
+            passive: Vec::new(),
+            l: Vec::new(),
         }
     }
 
     /// Adds column `t`. Returns false if it is numerically dependent on the others.
-    fn push(&mut self, a: &Array2<f64>, t: usize, capacity: usize) -> bool {
+    fn push(&mut self, a: ArrayView2<'_, f64>, t: usize) -> bool {
         let p = self.passive.len();
         let col = a.column(t);
-        let mut row = vec![0.0; p];
+        let start = self.l.len();
+        self.l.resize(start + p + 1, 0.0);
+        let mut offset = 0;
         for i in 0..p {
             let mut v = a.column(self.passive[i]).dot(&col);
-            for (k, &rk) in row.iter().enumerate().take(i) {
-                v -= self.l[i * capacity + k] * rk;
+            for k in 0..i {
+                v -= self.l[offset + k] * self.l[start + k];
             }
-            row[i] = v / self.l[i * capacity + i];
+            self.l[start + i] = v / self.l[offset + i];
+            offset += i + 1;
         }
         let diag = col.dot(&col);
-        let d2 = diag - row.iter().map(|v| v * v).sum::<f64>();
+        let d2 = diag - self.l[start..start + p].iter().map(|v| v * v).sum::<f64>();
         if d2.is_nan() || d2 <= diag * 1e-14 {
+            self.l.truncate(start);
             return false;
         }
-        self.l[p * capacity..p * capacity + p].copy_from_slice(&row);
-        self.l[p * capacity + p] = d2.sqrt();
+        self.l[start + p] = d2.sqrt();
         self.passive.push(t);
         true
     }
 
-    fn rebuild(&mut self, a: &Array2<f64>, keep: &[usize], capacity: usize) {
+    fn rebuild(&mut self, a: ArrayView2<'_, f64>, keep: &[usize]) {
         self.passive.clear();
+        self.l.clear();
         for &t in keep {
-            self.push(a, t, capacity);
+            self.push(a, t);
         }
     }
 
     /// Solves the normal equations for the right-hand side `rhs` of the passive set.
-    fn solve(&self, rhs: &mut [f64], capacity: usize) {
+    fn solve(&self, rhs: &mut [f64]) {
         let p = self.passive.len();
+        let mut offset = 0;
         for i in 0..p {
             let mut v = rhs[i];
-            for (k, rk) in rhs.iter().enumerate().take(i) {
-                v -= self.l[i * capacity + k] * rk;
+            for (l, r) in self.l[offset..offset + i].iter().zip(rhs.iter()) {
+                v -= l * r;
             }
-            rhs[i] = v / self.l[i * capacity + i];
+            rhs[i] = v / self.l[offset + i];
+            offset += i + 1;
         }
+        // Back substitution walks the packed rows in reverse, column by column.
         for i in (0..p).rev() {
-            let mut v = rhs[i];
-            for (k, rk) in rhs.iter().enumerate().take(p).skip(i + 1) {
-                v -= self.l[k * capacity + i] * rk;
+            offset -= i + 1;
+            let v = rhs[i] / self.l[offset + i];
+            rhs[i] = v;
+            for (l, r) in self.l[offset..offset + i].iter().zip(rhs.iter_mut()) {
+                *r -= l * v;
             }
-            rhs[i] = v / self.l[i * capacity + i];
         }
-    }
-
-    /// The least-squares solution over the passive columns, with one step of iterative
-    /// refinement to recover what the normal equations lose.
-    fn least_squares(&self, a: &Array2<f64>, b: &Array1<f64>, capacity: usize) -> Vec<f64> {
-        let p = self.passive.len();
-        let mut s: Vec<f64> = self.passive.iter().map(|&t| a.column(t).dot(b)).collect();
-        self.solve(&mut s, capacity);
-        let mut r = b.clone();
-        for (i, &t) in self.passive.iter().enumerate() {
-            r.scaled_add(-s[i], &a.column(t));
-        }
-        let mut d: Vec<f64> = self.passive.iter().map(|&t| a.column(t).dot(&r)).collect();
-        self.solve(&mut d, capacity);
-        for i in 0..p {
-            s[i] += d[i];
-        }
-        s
     }
 }
 
-fn active_set(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
+fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
     let (m, n) = a.dim();
     let capacity = m.min(n);
     let mut x = Array1::<f64>::zeros(n);
-    let mut factor = PassiveFactor::new(capacity);
+    let mut factor = PassiveFactor::new();
     let mut in_passive = vec![false; n];
     let mut rejected = vec![false; n];
-    let norm1 = a
-        .columns()
-        .into_iter()
-        .map(|c| c.iter().map(|v| v.abs()).sum::<f64>())
-        .fold(0.0, f64::max);
+    let mut norm1 = vec![0.0_f64; n];
+    for row in a.rows() {
+        for (s, v) in norm1.iter_mut().zip(row.iter()) {
+            *s += v.abs();
+        }
+    }
+    let norm1 = norm1.iter().copied().fold(0.0, f64::max);
     let tol = 10.0 * m.max(n) as f64 * f64::EPSILON * norm1.max(f64::MIN_POSITIVE);
     let mut residual = b.clone();
+    let mut w = vec![0.0_f64; n];
+    let at_b: Vec<f64> = {
+        let mut v = vec![0.0_f64; n];
+        for (row, &bi) in a.rows().into_iter().zip(b.iter()) {
+            for (o, e) in v.iter_mut().zip(row.iter()) {
+                *o += e * bi;
+            }
+        }
+        v
+    };
+    let mut s: Vec<f64> = Vec::new();
     let max_iter = 3 * n.max(1);
     let mut iter = 0;
+    let solve_passive = |factor: &PassiveFactor, s: &mut Vec<f64>| {
+        s.clear();
+        s.extend(factor.passive.iter().map(|&t| at_b[t]));
+        factor.solve(s);
+    };
     while factor.passive.len() < capacity && iter < max_iter {
         iter += 1;
+        w.fill(0.0);
+        for (row, &r) in a.rows().into_iter().zip(residual.iter()) {
+            for (o, e) in w.iter_mut().zip(row.iter()) {
+                *o += e * r;
+            }
+        }
         let mut best: Option<(usize, f64)> = None;
         for t in 0..n {
-            if in_passive[t] || rejected[t] {
-                continue;
-            }
-            let w = a.column(t).dot(&residual);
-            if w > tol && best.is_none_or(|(_, b)| w > b) {
-                best = Some((t, w));
+            if !in_passive[t] && !rejected[t] && w[t] > tol && best.is_none_or(|(_, b)| w[t] > b) {
+                best = Some((t, w[t]));
             }
         }
         let Some((t, _)) = best else {
             break;
         };
-        if !factor.push(a, t, capacity) {
+        if !factor.push(a, t) {
             rejected[t] = true;
             continue;
         }
         in_passive[t] = true;
         rejected.fill(false);
         loop {
-            let s = factor.least_squares(a, b, capacity);
+            solve_passive(&factor, &mut s);
             if s.iter().all(|&v| v > 0.0) {
                 for (i, &j) in factor.passive.iter().enumerate() {
                     x[j] = s[i];
@@ -671,15 +727,28 @@ fn active_set(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
                     }
                 })
                 .collect();
-            factor.rebuild(a, &keep, capacity);
+            factor.rebuild(a, &keep);
             if factor.passive.is_empty() {
                 break;
             }
         }
         residual.assign(b);
-        for (j, &v) in x.iter().enumerate() {
-            if v != 0.0 {
-                residual.scaled_add(-v, &a.column(j));
+        for &j in &factor.passive {
+            residual.scaled_add(-x[j], &a.column(j));
+        }
+    }
+    // One step of iterative refinement recovers what the normal equations lose.
+    if !factor.passive.is_empty() {
+        let mut d: Vec<f64> = factor
+            .passive
+            .iter()
+            .map(|&t| a.column(t).dot(&residual))
+            .collect();
+        factor.solve(&mut d);
+        for (&j, v) in factor.passive.iter().zip(&d) {
+            let refined = x[j] + v;
+            if refined > 0.0 {
+                x[j] = refined;
             }
         }
     }

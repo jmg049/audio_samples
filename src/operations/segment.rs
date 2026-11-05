@@ -327,27 +327,64 @@ impl Default for PathEnhanceConfig {
     }
 }
 
-/// Convolves `input`, already extended by `pad` on each side, into `out`.
-fn convolve_extended<F: AudioFloat>(
-    extended: &Array2<F>,
-    pad: (usize, usize),
+/// Adds `weight` times the row of `source` shifted by `dx` to `out`, extending the row
+/// beyond its ends by `mode`.
+fn add_shifted_row<F: AudioFloat>(
+    out: &mut [F],
+    source: Option<&[F]>,
+    dx: isize,
+    weight: F,
+    mode: BoundaryMode,
+    fill: F,
+) {
+    let cols = out.len() as isize;
+    let Some(row) = source else {
+        for o in out.iter_mut() {
+            *o += weight * fill;
+        }
+        return;
+    };
+    // Columns whose source lies inside the row: 0 <= column - dx < cols.
+    let start = dx.max(0).min(cols);
+    let end = (cols + dx.min(0)).max(start);
+    for column in (0..start).chain(end..cols) {
+        let value = match boundary_index(column - dx, cols, mode) {
+            Some(i) => row[i],
+            None => fill,
+        };
+        out[column as usize] += weight * value;
+    }
+    let (first, last) = (start as usize, end as usize);
+    let shift = (start - dx) as usize;
+    for (o, &v) in out[first..last]
+        .iter_mut()
+        .zip(&row[shift..shift + (last - first)])
+    {
+        *o += weight * v;
+    }
+}
+
+/// Convolves `r` with the non-zero `kernel` entries into `out`.
+fn convolve_rows<F: AudioFloat>(
+    r: ArrayView2<'_, F>,
     kernel: &[(isize, isize, F)],
+    mode: BoundaryMode,
+    fill: F,
     out: &mut Array2<F>,
 ) {
     let (rows, cols) = out.dim();
     out.fill(F::zero());
-    let stride = extended.ncols();
-    let data = extended.as_slice().unwrap_or(&[]);
+    let Some(source) = r.to_slice() else {
+        return;
+    };
+    let Some(target) = out.as_slice_mut() else {
+        return;
+    };
     for &(dy, dx, w) in kernel {
-        for r in 0..rows {
-            let start = (r as isize + pad.0 as isize - dy) as usize * stride
-                + (pad.1 as isize - dx) as usize;
-            let source = &data[start..start + cols];
-            if let Some(row) = out.row_mut(r).into_slice() {
-                for (o, &v) in row.iter_mut().zip(source) {
-                    *o += w * v;
-                }
-            }
+        for (row, chunk) in target.chunks_exact_mut(cols).enumerate() {
+            let line = boundary_index(row as isize - dy, rows as isize, mode)
+                .map(|i| &source[i * cols..(i + 1) * cols]);
+            add_shifted_row(chunk, line, dx, w, mode, fill);
         }
     }
 }
@@ -404,7 +441,6 @@ pub fn path_enhance<F: AudioFloat>(
     }
     let (lo, hi) = (min_ratio.log2(), config.max_ratio.log2());
     let mut kernels: Vec<Vec<(isize, isize, F)>> = Vec::with_capacity(config.n_filters);
-    let (mut pad_y, mut pad_x) = (0_usize, 0_usize);
     for i in 0..config.n_filters {
         let t = if config.n_filters == 1 {
             0.0
@@ -424,12 +460,6 @@ pub fn path_enhance<F: AudioFloat>(
                 entries.push((y as isize - cy, x as isize - cx, of::<F>(v)));
             }
         }
-        pad_y = pad_y
-            .max(cy.unsigned_abs())
-            .max((h as isize - 1 - cy).unsigned_abs());
-        pad_x = pad_x
-            .max(cx.unsigned_abs())
-            .max((w as isize - 1 - cx).unsigned_abs());
         kernels.push(entries);
     }
     let (rows, cols) = r.dim();
@@ -437,28 +467,18 @@ pub fn path_enhance<F: AudioFloat>(
         BoundaryMode::Constant(c) => of::<F>(c),
         _ => F::zero(),
     };
-    let mut extended = Array2::from_elem((rows + 2 * pad_y, cols + 2 * pad_x), fill);
-    let map_x: Vec<Option<usize>> = (0..cols + 2 * pad_x)
-        .map(|x| boundary_index(x as isize - pad_x as isize, cols as isize, config.mode))
-        .collect();
-    for y in 0..rows + 2 * pad_y {
-        if let Some(ry) = boundary_index(y as isize - pad_y as isize, rows as isize, config.mode) {
-            let source = r.row(ry);
-            let mut target = extended.row_mut(y);
-            for (slot, m) in target.iter_mut().zip(&map_x) {
-                if let Some(i) = m {
-                    *slot = source[*i];
-                }
-            }
-        }
-    }
+    let standard = r.as_standard_layout();
     let mut out = Array2::<F>::zeros((rows, cols));
-    let mut scratch = Array2::<F>::zeros((rows, cols));
+    let mut scratch = Array2::<F>::zeros(if kernels.len() > 1 {
+        (rows, cols)
+    } else {
+        (0, 0)
+    });
     for (i, entries) in kernels.iter().enumerate() {
         if i == 0 {
-            convolve_extended(&extended, (pad_y, pad_x), entries, &mut out);
+            convolve_rows(standard.view(), entries, config.mode, fill, &mut out);
         } else {
-            convolve_extended(&extended, (pad_y, pad_x), entries, &mut scratch);
+            convolve_rows(standard.view(), entries, config.mode, fill, &mut scratch);
             out.zip_mut_with(&scratch, |a, &b| {
                 if b > *a {
                     *a = b;
@@ -495,17 +515,18 @@ pub fn path_enhance<F: AudioFloat>(
 /// use ndarray::Array2;
 ///
 /// let r = Array2::from_shape_fn((4, 4), |(i, j)| (i * 4 + j) as f64);
-/// let same = timelag_filter(r.view(), true, |m| Ok(m.to_owned())).unwrap();
+/// let same = timelag_filter(r.view(), true, Ok).unwrap();
 /// assert_eq!(same, r);
 /// ```
 pub fn timelag_filter<T: Copy + Default>(
     r: ArrayView2<'_, T>,
     pad: bool,
-    filter: impl FnOnce(ArrayView2<'_, T>) -> AudioSampleResult<Array2<T>>,
+    filter: impl FnOnce(Array2<T>) -> AudioSampleResult<Array2<T>>,
 ) -> AudioSampleResult<Array2<T>> {
     let lag = recurrence_to_lag(r, pad)?;
-    let filtered = filter(lag.view())?;
-    if filtered.dim() != lag.dim() {
+    let dim = lag.dim();
+    let filtered = filter(lag)?;
+    if filtered.dim() != dim {
         return invalid("filter", "must keep the shape of its input");
     }
     lag_to_recurrence(filtered.view())

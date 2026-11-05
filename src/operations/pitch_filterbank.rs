@@ -72,7 +72,7 @@ fn of<F: AudioFloat>(v: f64) -> F {
 /// - `tuning`: deviation from A440 in fractions of a semitone.
 ///
 /// # Returns
-/// Two vectors of length 85: the centre frequencies and the sample rates, in Hz.
+/// Two arrays of length 85: the centre frequencies and the sample rates, in Hz.
 ///
 /// # Examples
 /// ```
@@ -85,17 +85,17 @@ fn of<F: AudioFloat>(v: f64) -> F {
 /// assert_eq!(rates[84], 22050.0);
 /// ```
 #[must_use]
-pub fn mr_frequencies(tuning: f64) -> (Vec<f64>, Vec<f64>) {
-    let freqs = (0..85)
-        .map(|i| midi_to_hz(24.0 + tuning + f64::from(i)))
-        .collect();
-    let rates = (0..85)
-        .map(|i| match i {
+pub fn mr_frequencies(tuning: f64) -> ([f64; 85], [f64; 85]) {
+    let mut freqs = [0.0; 85];
+    let mut rates = [0.0; 85];
+    for i in 0..85 {
+        freqs[i] = midi_to_hz(24.0 + tuning + i as f64);
+        rates[i] = match i {
             0..=35 => 882.0,
             36..=69 => 4410.0,
             _ => 22050.0,
-        })
-        .collect();
+        };
+    }
     (freqs, rates)
 }
 
@@ -538,10 +538,10 @@ pub fn iirt<F: AudioFloat>(
             format!("{} samples are too few for a frame of {win}", y.ncols()),
         );
     }
-    let (freqs, rates) = config
-        .bands
-        .clone()
-        .unwrap_or_else(|| mr_frequencies(config.tuning));
+    let (freqs, rates) = config.bands.clone().unwrap_or_else(|| {
+        let (f, r) = mr_frequencies(config.tuning);
+        (f.to_vec(), r.to_vec())
+    });
     let bank = semitone_filterbank(&freqs, &rates, &config.filter, config.layout)?;
     let n_frames = 1 + (y.ncols() - win) / hop;
     let mut out = Array3::<F>::zeros((y.nrows(), freqs.len(), n_frames));

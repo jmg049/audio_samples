@@ -43,7 +43,7 @@ use crate::audio_float::float_rows_to_audio;
 use crate::operations::effects::{GriffinLimConfig, griffinlim};
 use crate::operations::filterbanks::{MelFilterbankConfig, mel_filterbank};
 use crate::operations::linalg::{NnlsConfig, NnlsSolver};
-use crate::operations::spectrum::{DctNorm, DctType, db_to_power};
+use crate::operations::spectrum::{DctNorm, DctType};
 use crate::repr::SampleRate;
 use crate::{AudioFloat, AudioSampleResult, AudioSamples, ParameterError, StandardSample};
 
@@ -460,16 +460,23 @@ pub fn mfcc_to_mel<F: AudioFloat>(
         })
         .collect();
     let mut log_mel = Array3::<F>::zeros((channels, n_mels, frames));
+    let liftered = config.lifter > 0.0;
     for (mut out, input) in log_mel.axis_iter_mut(Axis(0)).zip(mfcc.axis_iter(Axis(0))) {
-        let mut scaled = input.slice(ndarray::s![..used, ..]).to_owned();
-        for (mut row, &g) in scaled.rows_mut().into_iter().zip(&gains) {
-            if g != F::one() {
-                row.mapv_inplace(|v| v * g);
+        for (frame, column) in input.axis_iter(Axis(1)).enumerate() {
+            for (row, slot) in out.index_axis_mut(Axis(1), frame).iter_mut().enumerate() {
+                let basis = matrix.row(row);
+                let mut sum = F::zero();
+                for (k, (&b, &c)) in basis.iter().zip(column.iter()).enumerate() {
+                    sum += b * if liftered { c * gains[k] } else { c };
+                }
+                *slot = sum;
             }
         }
-        out.assign(&matrix.dot(&scaled));
     }
-    Ok(db_to_power(&log_mel, config.reference))
+    let reference = of::<F>(config.reference);
+    let (ten, tenth) = (of::<F>(10.0), of::<F>(0.1));
+    log_mel.mapv_inplace(|x| reference * ten.powf(x * tenth));
+    Ok(log_mel)
 }
 
 /// Estimates audio from MFCCs: [`mfcc_to_mel`], then [`mel_to_audio`].

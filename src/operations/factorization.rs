@@ -42,7 +42,7 @@
 
 use ndarray::{Array1, Array2, ArrayView2, Axis, Zip};
 
-use crate::operations::linalg::{SmallRng, randomized_svd};
+use crate::operations::linalg::{SmallRng, truncated_svd};
 use crate::utils::array_ops::{AxisSortKey, axis_sort};
 use crate::{AudioFloat, AudioSampleResult, ParameterError};
 
@@ -264,50 +264,71 @@ fn nndsvd<F: AudioFloat>(
     seed: u64,
 ) -> AudioSampleResult<(Array2<F>, Array2<F>)> {
     let small_rank = (k as f64) < 0.1 * x.nrows().min(x.ncols()) as f64;
-    let d = randomized_svd(x, k, 10, if small_rank { 7 } else { 4 }, seed)?;
+    let (u, s_values, vt) = truncated_svd(x, k, 10, if small_rank { 7 } else { 4 }, seed)?;
     let (rows, cols) = x.dim();
-    let mut w = Array2::<f64>::zeros((rows, k));
-    let mut h = Array2::<f64>::zeros((k, cols));
-    let root = d.s[0].sqrt();
+    let mut w = Array2::<F>::zeros((rows, k));
+    let mut h = Array2::<F>::zeros((k, cols));
+    let root = of::<F>(s_values[0].sqrt());
     w.column_mut(0)
-        .assign(&d.u.column(0).mapv(|v| root * v.abs()));
-    h.row_mut(0).assign(&d.vt.row(0).mapv(|v| root * v.abs()));
-    let norm = |v: &[f64]| v.iter().map(|e| e * e).sum::<f64>().sqrt();
-    for j in 1..k {
-        let up: Vec<f64> = d.u.column(j).iter().map(|v| v.max(0.0)).collect();
-        let un: Vec<f64> = d.u.column(j).iter().map(|v| (-v).max(0.0)).collect();
-        let vp: Vec<f64> = d.vt.row(j).iter().map(|v| v.max(0.0)).collect();
-        let vn: Vec<f64> = d.vt.row(j).iter().map(|v| (-v).max(0.0)).collect();
-        let (nup, nvp, nun, nvn) = (norm(&up), norm(&vp), norm(&un), norm(&vn));
-        let (mp, mn) = (nup * nvp, nun * nvn);
-        let (u, v, sigma, nu, nv) = if mp > mn {
-            (up, vp, mp, nup, nvp)
-        } else {
-            (un, vn, mn, nun, nvn)
-        };
-        let lambda = (d.s[j] * sigma).sqrt();
-        for (o, &e) in w.column_mut(j).iter_mut().zip(&u) {
-            *o = if nu > 0.0 { lambda * e / nu } else { 0.0 };
+        .iter_mut()
+        .zip(u.column(0))
+        .for_each(|(o, &v)| *o = root * v.abs());
+    h.row_mut(0)
+        .iter_mut()
+        .zip(vt.row(0))
+        .for_each(|(o, &v)| *o = root * v.abs());
+    // Norms of the positive and negative parts, without storing the parts.
+    let norms = |v: ndarray::ArrayView1<'_, F>| -> (F, F) {
+        let (mut pos, mut neg) = (F::zero(), F::zero());
+        for &e in v {
+            if e > F::zero() {
+                pos += e * e;
+            } else {
+                neg += e * e;
+            }
         }
-        for (o, &e) in h.row_mut(j).iter_mut().zip(&v) {
-            *o = if nv > 0.0 { lambda * e / nv } else { 0.0 };
+        (pos.sqrt(), neg.sqrt())
+    };
+    for (j, &singular) in s_values.iter().enumerate().take(k).skip(1) {
+        let (up, un) = norms(u.column(j));
+        let (vp, vn) = norms(vt.row(j));
+        let (mp, mn) = (up * vp, un * vn);
+        let positive = mp > mn;
+        let (sigma, nu, nv) = if positive { (mp, up, vp) } else { (mn, un, vn) };
+        let lambda = of::<F>((singular * sigma.to_f64().unwrap_or(0.0)).sqrt());
+        let take = |e: F| -> F {
+            let part = if positive { e } else { F::zero() - e };
+            if part > F::zero() { part } else { F::zero() }
+        };
+        if nu > F::zero() {
+            for (o, &e) in w.column_mut(j).iter_mut().zip(u.column(j)) {
+                *o = lambda * take(e) / nu;
+            }
+        }
+        if nv > F::zero() {
+            for (o, &e) in h.row_mut(j).iter_mut().zip(vt.row(j)) {
+                *o = lambda * take(e) / nv;
+            }
         }
     }
-    const SMALL: f64 = 1e-6;
-    w.mapv_inplace(|v| if v < SMALL { 0.0 } else { v });
-    h.mapv_inplace(|v| if v < SMALL { 0.0 } else { v });
+    drop(u);
+    drop(vt);
+    let small = of::<F>(1e-6);
+    w.mapv_inplace(|v| if v < small { F::zero() } else { v });
+    h.mapv_inplace(|v| if v < small { F::zero() } else { v });
     let mean = x.iter().fold(0.0, |a, v| a + v.to_f64().unwrap_or(0.0)) / x.len() as f64;
     match init {
         NmfInit::Nndsvda => {
-            w.mapv_inplace(|v| if v == 0.0 { mean } else { v });
-            h.mapv_inplace(|v| if v == 0.0 { mean } else { v });
+            let m = of::<F>(mean);
+            w.mapv_inplace(|v| if v == F::zero() { m } else { v });
+            h.mapv_inplace(|v| if v == F::zero() { m } else { v });
         }
         NmfInit::Nndsvdar => {
             let mut rng = SmallRng::new(seed.wrapping_add(1));
-            let mut fill = |a: &mut Array2<f64>| {
+            let mut fill = |a: &mut Array2<F>| {
                 a.mapv_inplace(|v| {
-                    if v == 0.0 {
-                        mean * rng.normal().abs() / 100.0
+                    if v == F::zero() {
+                        of::<F>(mean * rng.normal().abs() / 100.0)
                     } else {
                         v
                     }
@@ -318,7 +339,7 @@ fn nndsvd<F: AudioFloat>(
         }
         _ => {}
     }
-    Ok((w.mapv(of::<F>), h.mapv(of::<F>)))
+    Ok((w, h))
 }
 
 fn random_init<F: AudioFloat>(x: ArrayView2<'_, F>, k: usize, seed: u64) -> (Array2<F>, Array2<F>) {
@@ -339,16 +360,22 @@ fn coordinate_sweep<F: AudioFloat>(
     xht: &Array2<F>,
     order: &[usize],
 ) -> F {
-    let (rows, k) = w.dim();
+    let k = w.ncols();
     let mut violation = F::zero();
+    let hht = hht.as_standard_layout();
+    let xht = xht.as_standard_layout();
+    let (Some(row_data), Some(hht_data), Some(xht_data)) =
+        (w.as_slice_mut(), hht.as_slice(), xht.as_slice())
+    else {
+        unreachable!("the coordinates and their products are in standard layout");
+    };
     for &t in order {
-        let hess = hht[[t, t]];
-        let row_t = hht.row(t);
-        for i in 0..rows {
-            let mut wi = w.row_mut(i);
-            let mut grad = F::zero() - xht[[i, t]];
-            for r in 0..k {
-                grad += row_t[r] * wi[r];
+        let hess = hht_data[t * k + t];
+        let row_t = &hht_data[t * k..(t + 1) * k];
+        for (wi, xi) in row_data.chunks_exact_mut(k).zip(xht_data.chunks_exact(k)) {
+            let mut grad = F::zero() - xi[t];
+            for (a, b) in row_t.iter().zip(wi.iter()) {
+                grad += *a * *b;
             }
             let pg = if wi[t] == F::zero() {
                 grad.min(F::zero())
@@ -386,7 +413,7 @@ impl Regularisation {
 
 fn update_coordinates<F: AudioFloat>(
     target: &mut Array2<F>,
-    other: &Array2<F>,
+    other: ArrayView2<'_, F>,
     x_other_t: Array2<F>,
     l1: f64,
     l2: f64,
@@ -430,7 +457,9 @@ fn run_coordinate_descent<F: AudioFloat>(
     let tol = of::<F>(cfg.tol);
     let mut first: Option<F> = None;
     let mut iter = 0;
-    let mut ht = h.t().to_owned();
+    // H is updated through its transpose, whose rows are the coordinates of each frame.
+    let mut ht = h.t().as_standard_layout().into_owned();
+    *h = Array2::zeros((0, 0));
     while iter < cfg.max_iter {
         iter += 1;
         let order_w = if cfg.shuffle {
@@ -439,8 +468,7 @@ fn run_coordinate_descent<F: AudioFloat>(
             in_order.clone()
         };
         let xht = x.dot(&ht);
-        let mut violation =
-            update_coordinates(w, &ht.t().to_owned(), xht, reg.l1_w, reg.l2_w, &order_w);
+        let mut violation = update_coordinates(w, ht.t(), xht, reg.l1_w, reg.l2_w, &order_w);
         if update_h {
             let order_h = if cfg.shuffle {
                 shuffled(k, &mut rng)
@@ -448,14 +476,7 @@ fn run_coordinate_descent<F: AudioFloat>(
                 in_order.clone()
             };
             let xtw = x.t().dot(&*w);
-            violation += update_coordinates(
-                &mut ht,
-                &w.t().to_owned(),
-                xtw,
-                reg.l1_h,
-                reg.l2_h,
-                &order_h,
-            );
+            violation += update_coordinates(&mut ht, w.t(), xtw, reg.l1_h, reg.l2_h, &order_h);
         }
         match first {
             None => {
@@ -471,7 +492,7 @@ fn run_coordinate_descent<F: AudioFloat>(
             }
         }
     }
-    h.assign(&ht.t());
+    *h = ht.t().as_standard_layout().into_owned();
     iter
 }
 
@@ -724,7 +745,7 @@ pub fn nmf_from<F: AudioFloat>(
 /// use audio_samples::operations::factorization::{NmfConfig, nmf_transform};
 /// use ndarray::array;
 ///
-/// let x = array![[2.0, 0.0], [0.0, 3.0]];
+/// let x = array![[2.0_f64, 0.0], [0.0, 3.0]];
 /// let h = array![[1.0, 0.0], [0.0, 1.0]];
 /// let w = nmf_transform(x.view(), h.view(), &NmfConfig::new(2)).unwrap();
 /// assert!((w[[0, 0]] - 2.0).abs() < 1e-6);

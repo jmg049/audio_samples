@@ -47,7 +47,7 @@ fn frequencies() {
     for (tuning, key) in [(0.0, "mr_0.0"), (0.25, "mr_0.25")] {
         let (freqs, rates) = mr_frequencies(tuning);
         close(&freqs, &f64s(&f[key]["freqs"]), 1e-13, key);
-        assert_eq!(rates, f64s(&f[key]["rates"]));
+        assert_eq!(rates.to_vec(), f64s(&f[key]["rates"]));
     }
 }
 

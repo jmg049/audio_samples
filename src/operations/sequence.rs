@@ -3841,23 +3841,35 @@ pub fn path_to_steps(path: &[[usize; 2]], inverse: bool) -> AudioSampleResult<Ar
         return err("path", "must have at least two points");
     }
     let (from, to) = if inverse { (1, 0) } else { (0, 1) };
-    let mut order: Vec<usize> = (0..path.len()).collect();
-    order.sort_by_key(|&i| path[i][to]);
-    let at = |o: usize| (path[order[o]][to] as f64, path[order[o]][from] as f64);
-    let (first, last) = (path[order[0]][to], path[order[path.len() - 1]][to]);
-    let mut out = Vec::with_capacity(last - first + 1);
-    let mut j = 0;
-    for frame in first..=last {
-        while j + 1 < order.len() && path[order[j + 1]][to] <= frame {
-            j += 1;
+    let (first, last) = path.iter().fold((usize::MAX, 0), |(lo, hi), p| {
+        (lo.min(p[to]), hi.max(p[to]))
+    });
+    // The value of the last path point at each frame, in the path's order.
+    let span = last - first + 1;
+    let mut value = vec![f64::NAN; span];
+    for p in path {
+        value[p[to] - first] = p[from] as f64;
+    }
+    // Frames with no point lie on the line between their neighbours with a point; the first
+    // point of a frame starts the next segment, so it is the source of the slope.
+    let mut leading = vec![f64::NAN; span];
+    for p in path.iter().rev() {
+        leading[p[to] - first] = p[from] as f64;
+    }
+    let mut out = value;
+    let mut previous = 0;
+    for frame in 1..span {
+        if out[frame].is_nan() {
+            continue;
         }
-        let (x0, y0) = at(j);
-        out.push(if x0 == frame as f64 || j + 1 == order.len() {
-            y0
-        } else {
-            let (x1, y1) = at(j + 1);
-            y0 + (y1 - y0) * (frame as f64 - x0) / (x1 - x0)
-        });
+        if frame - previous > 1 {
+            let (y0, y1) = (out[previous], leading[frame]);
+            let gap = (frame - previous) as f64;
+            for (k, slot) in out[previous + 1..frame].iter_mut().enumerate() {
+                *slot = y0 + (y1 - y0) * (k + 1) as f64 / gap;
+            }
+        }
+        previous = frame;
     }
     Ok(Array1::from(out))
 }
