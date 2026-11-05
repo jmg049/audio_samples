@@ -891,6 +891,107 @@ pub fn frames_to_samples(frames: i64, hop_length: NonZeroUsize, n_fft: Option<us
         .saturating_add(n_fft_offset(n_fft))
 }
 
+/// Converts block indices to frame indices: `blocks * block_length`.
+///
+/// A block is a run of consecutive frames read together from a stream.
+///
+/// # Arguments
+/// - `blocks`: block index; negative indices are allowed.
+/// - `block_length`: frames per block.
+///
+/// # Returns
+/// The index of the block's first frame, saturating at the limits of `i64`.
+///
+/// # Examples
+/// ```
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::blocks_to_frames;
+///
+/// assert_eq!(blocks_to_frames(3, nzu!(16)), 48);
+/// ```
+#[inline]
+#[must_use]
+pub const fn blocks_to_frames(blocks: i64, block_length: NonZeroUsize) -> i64 {
+    blocks.saturating_mul(block_length.get() as i64)
+}
+
+/// Converts block indices to sample indices: `blocks * block_length * hop_length`.
+///
+/// # Arguments
+/// - `blocks`: block index; negative indices are allowed.
+/// - `block_length`: frames per block.
+/// - `hop_length`: samples between frames.
+///
+/// # Returns
+/// The index of the block's first sample, saturating at the limits of `i64`.
+///
+/// # Examples
+/// ```
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::blocks_to_samples;
+///
+/// assert_eq!(blocks_to_samples(3, nzu!(16), nzu!(512)), 24576);
+/// ```
+#[inline]
+#[must_use]
+pub const fn blocks_to_samples(
+    blocks: i64,
+    block_length: NonZeroUsize,
+    hop_length: NonZeroUsize,
+) -> i64 {
+    blocks_to_frames(blocks, block_length).saturating_mul(hop_length.get() as i64)
+}
+
+/// Converts block indices to the time in seconds at which each block starts.
+///
+/// # Arguments
+/// - `blocks`: block index; negative indices are allowed.
+/// - `block_length`: frames per block.
+/// - `hop_length`: samples between frames.
+/// - `sample_rate`: samples per second.
+///
+/// # Returns
+/// `blocks * block_length * hop_length / sample_rate`.
+///
+/// # Examples
+/// ```
+/// use audio_samples::nzu;
+/// use audio_samples::utils::audio_math::blocks_to_time;
+///
+/// assert_eq!(blocks_to_time(1, nzu!(4), nzu!(100), 400.0), 1.0);
+/// ```
+#[inline]
+#[must_use]
+pub fn blocks_to_time(
+    blocks: i64,
+    block_length: NonZeroUsize,
+    hop_length: NonZeroUsize,
+    sample_rate: f64,
+) -> f64 {
+    blocks_to_samples(blocks, block_length, hop_length) as f64 / sample_rate
+}
+
+/// Multiplies block indices by `scale` into `out`, wrapping at the limits of `i64`.
+///
+/// # Arguments
+/// - `blocks`: block indices.
+/// - `scale`: frames per block, or samples per block.
+/// - `out`: receives one index per block; must be the same length as `blocks`.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::audio_math::blocks_scale_into;
+///
+/// let mut out = [0_i64; 2];
+/// blocks_scale_into(&[1, 2], 16, &mut out);
+/// assert_eq!(out, [16, 32]);
+/// ```
+pub fn blocks_scale_into(blocks: &[i64], scale: i64, out: &mut [i64]) {
+    for (o, &b) in out.iter_mut().zip(blocks) {
+        *o = b.wrapping_mul(scale);
+    }
+}
+
 /// Converts a time in seconds to a frame index with librosa's floor semantics.
 ///
 /// Equivalent to `librosa.time_to_frames(time_seconds, sr=sample_rate,
@@ -1607,6 +1708,94 @@ pub fn frequency_to_note_static(freq_hz: f64) -> AudioSampleResult<(&'static str
         return invalid();
     }
     Ok((midi_to_note_static(midi_rounded as u8)?, cents))
+}
+
+/// Converts a note name to a fractional MIDI number, keeping any cents and allowing any
+/// octave.
+///
+/// The grammar is a pitch letter, any number of accidentals (`#`, `♯`, `𝄪`, `b`, `!`,
+/// `♭`, `𝄫`, `♮`, `n`), an optional octave (0 when absent) and an optional cents suffix
+/// such as `+25`. Unlike [`note_to_midi`], the result is not limited to 0..=127.
+///
+/// # Arguments
+/// - `note_name`: the note, such as `"A#4+25"`.
+///
+/// # Returns
+/// The MIDI number, with cents as a fraction.
+///
+/// # Errors
+/// [`ParameterError`] if the name does not follow the grammar.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::audio_math::note_to_midi_fractional;
+///
+/// assert_eq!(note_to_midi_fractional("A4+50").unwrap(), 69.5);
+/// assert_eq!(note_to_midi_fractional("C").unwrap(), 12.0);
+/// assert_eq!(note_to_midi_fractional("C-2").unwrap(), -12.0);
+/// ```
+pub fn note_to_midi_fractional(note_name: &str) -> AudioSampleResult<f64> {
+    let bad = || {
+        AudioSampleError::Parameter(ParameterError::invalid_value(
+            "note",
+            format!("improper note format: {note_name:?}"),
+        ))
+    };
+    let mut chars = note_name.chars().peekable();
+    let semitone = match chars.next().map(|c| c.to_ascii_uppercase()) {
+        Some('C') => 0_i64,
+        Some('D') => 2,
+        Some('E') => 4,
+        Some('F') => 5,
+        Some('G') => 7,
+        Some('A') => 9,
+        Some('B') => 11,
+        _ => return Err(bad()),
+    };
+    let mut offset = 0_i64;
+    while let Some(&c) = chars.peek() {
+        offset += match c {
+            '#' | '♯' => 1,
+            'b' | '!' | '♭' => -1,
+            '𝄪' => 2,
+            '𝄫' => -2,
+            'n' | '♮' => 0,
+            _ => break,
+        };
+        chars.next();
+    }
+    let number = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>| -> Option<i64> {
+        let mut text = String::new();
+        if let Some(&c) = chars.peek() {
+            if c == '+' || c == '-' {
+                text.push(c);
+                chars.next();
+            }
+        }
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                text.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        text.parse().ok()
+    };
+    let mut octave = 0;
+    let mut cents = 0;
+    let rest: String = chars.clone().collect();
+    if !rest.is_empty() {
+        // A leading sign without a following octave is a cents suffix only after an octave.
+        octave = number(&mut chars).ok_or_else(bad)?;
+        if chars.peek().is_some() {
+            cents = number(&mut chars).ok_or_else(bad)?;
+        }
+        if chars.next().is_some() {
+            return Err(bad());
+        }
+    }
+    Ok((12 * (octave + 1) + semitone + offset) as f64 + cents as f64 * 0.01)
 }
 
 /// Converts a scientific pitch notation string into a frequency expressed in Hertz.
