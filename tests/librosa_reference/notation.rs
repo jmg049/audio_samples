@@ -216,7 +216,7 @@ fn thaat_and_mela() {
         let unicode = key.ends_with("True");
         for (i, want) in table.as_array().unwrap().iter().enumerate() {
             assert_eq!(
-                mela_to_svara(i as u8 + 1, abbr, unicode).unwrap(),
+                mela_to_svara(i as u8 + 1, abbr, unicode).unwrap().to_vec(),
                 strings(want),
                 "{key} {i}"
             );

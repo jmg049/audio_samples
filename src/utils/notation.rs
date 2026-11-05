@@ -779,6 +779,21 @@ const MELAS: [&str; 72] = [
     "rasikapriya",
 ];
 
+/// Where a name given in any letter case stands among lower-case names. ASCII input does
+/// not allocate; other input goes through Unicode lower-casing, which maps a few non-ASCII
+/// letters to ASCII ones.
+fn position_ignoring_case<'a>(
+    mut names: impl Iterator<Item = &'a str>,
+    wanted: &str,
+) -> Option<usize> {
+    if wanted.is_ascii() {
+        names.position(|name| name.eq_ignore_ascii_case(wanted))
+    } else {
+        let lower = wanted.to_lowercase();
+        names.position(|name| name == lower)
+    }
+}
+
 /// The ten thaats, by name.
 ///
 /// # Returns
@@ -814,11 +829,8 @@ pub fn list_thaat() -> [&'static str; 10] {
 /// assert_eq!(thaat_to_degrees("Kafi").unwrap(), [0, 2, 3, 5, 7, 9, 10]);
 /// ```
 pub fn thaat_to_degrees(thaat: &str) -> AudioSampleResult<[u8; 7]> {
-    let lower = thaat.to_lowercase();
-    THAATS
-        .iter()
-        .find(|(name, _)| *name == lower)
-        .map(|(_, d)| *d)
+    position_ignoring_case(THAATS.iter().map(|(name, _)| *name), thaat)
+        .map(|i| THAATS[i].1)
         .ok_or_else(|| {
             ParameterError::invalid_value("thaat", format!("unknown thaat {thaat:?}")).into()
         })
@@ -858,10 +870,7 @@ pub const fn list_mela() -> &'static [&'static str; 72] {
 /// assert_eq!(mela_number("Kanakangi").unwrap(), 1);
 /// ```
 pub fn mela_number(name: &str) -> AudioSampleResult<u8> {
-    let lower = name.to_lowercase();
-    MELAS
-        .iter()
-        .position(|m| *m == lower)
+    position_ignoring_case(MELAS.iter().copied(), name)
         .map(|i| (i + 1) as u8)
         .ok_or_else(|| {
             ParameterError::invalid_value("mela", format!("unknown mela {name:?}")).into()
@@ -917,27 +926,126 @@ pub fn mela_to_degrees(mela: u8) -> AudioSampleResult<[u8; 7]> {
     Ok([0, ri, ga, ma, 7, dha, ni])
 }
 
+/// The name of a svara, held inline so that it needs no allocation.
+///
+/// It reads as a `str` and compares equal to strings with the same text.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::notation::midi_to_svara_h;
+///
+/// let name = midi_to_svara_h(61.0, 60.0, false, true, false);
+/// assert_eq!(name, "re");
+/// assert_eq!(name.len(), 2);
+/// assert_eq!(name.to_string(), "re");
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Svara {
+    /// UTF-8; the longest name, a three-letter stem with a subscript digit and a combining
+    /// dot, takes eight bytes.
+    bytes: [u8; 15],
+    len: u8,
+}
+
+impl Svara {
+    /// The name as a string slice.
+    ///
+    /// # Returns
+    /// The text of the name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Only whole characters are ever appended.
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+
+    fn push(&mut self, c: char) {
+        let start = usize::from(self.len);
+        let added = c.encode_utf8(&mut self.bytes[start..]).len();
+        self.len += added as u8;
+    }
+
+    fn push_str(&mut self, text: &str) {
+        text.chars().for_each(|c| self.push(c));
+    }
+
+    /// A name from its long form: all of it, or its first letter when `abbr`.
+    fn stem(long: &str, abbr: bool) -> Self {
+        let mut name = Self::default();
+        if abbr {
+            name.push_str(&long[..1]);
+        } else {
+            name.push_str(long);
+        }
+        name
+    }
+}
+
+impl std::ops::Deref for Svara {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for Svara {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for Svara {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Debug for Svara {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl From<Svara> for String {
+    fn from(name: Svara) -> Self {
+        name.as_str().to_owned()
+    }
+}
+
+impl PartialEq<str> for Svara {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for Svara {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for Svara {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
 fn subscript_digit(unicode: bool, digit: char) -> char {
     if unicode {
         match digit {
-            '1' => '₁',
-            '2' => '₂',
-            _ => '₃',
+            '1' => '\u{2081}',
+            '2' => '\u{2082}',
+            _ => '\u{2083}',
         }
     } else {
         digit
     }
 }
 
-fn svara_name(stem: &str, digit: char, abbr: bool, unicode: bool) -> String {
-    let mut s = String::with_capacity(6);
-    if abbr {
-        s.extend(stem.chars().take(1));
-    } else {
-        s.push_str(stem);
-    }
-    s.push(subscript_digit(unicode, digit));
-    s
+fn svara_name(stem: &str, digit: char, abbr: bool, unicode: bool) -> Svara {
+    let mut name = Svara::stem(stem, abbr);
+    name.push(subscript_digit(unicode, digit));
+    name
 }
 
 /// The names of the twelve svaras of a melakarta raga, from Sa.
@@ -961,19 +1069,12 @@ fn svara_name(stem: &str, digit: char, abbr: bool, unicode: bool) -> String {
 /// assert_eq!(names[0], "Sa");
 /// assert_eq!(names[2], "Ga1");
 /// ```
-pub fn mela_to_svara(mela: u8, abbr: bool, unicode: bool) -> AudioSampleResult<Vec<String>> {
+pub fn mela_to_svara(mela: u8, abbr: bool, unicode: bool) -> AudioSampleResult<[Svara; 12]> {
     let index = check_mela(mela)?;
     let lower = index % 36;
     let upper = index % 6;
-    let fixed = |long: &'static str| -> String {
-        if abbr {
-            long[..1].to_owned()
-        } else {
-            long.to_owned()
-        }
-    };
-    Ok(vec![
-        fixed("Sa"),
+    Ok([
+        Svara::stem("Sa", abbr),
         svara_name("Ri", '1', abbr, unicode),
         if lower < 6 {
             svara_name("Ga", '1', abbr, unicode)
@@ -988,7 +1089,7 @@ pub fn mela_to_svara(mela: u8, abbr: bool, unicode: bool) -> AudioSampleResult<V
         svara_name("Ga", '3', abbr, unicode),
         svara_name("Ma", '1', abbr, unicode),
         svara_name("Ma", '2', abbr, unicode),
-        fixed("Pa"),
+        Svara::stem("Pa", abbr),
         svara_name("Dha", '1', abbr, unicode),
         if upper == 0 {
             svara_name("Ni", '1', abbr, unicode)
@@ -1054,7 +1155,7 @@ pub fn midi_name(
 
 /// Adds the octave mark: a dot above or `'` for the octave above Sa, a dot below or `,`
 /// for the octave below.
-fn decorate(mut svara: String, number: i64, octave: bool, unicode: bool) -> String {
+fn decorate(svara: Svara, number: i64, octave: bool, unicode: bool) -> Svara {
     if !octave {
         return svara;
     }
@@ -1065,15 +1166,22 @@ fn decorate(mut svara: String, number: i64, octave: bool, unicode: bool) -> Stri
     } else {
         None
     };
-    if let Some((combining, ascii)) = mark {
-        if unicode {
-            let first = svara.chars().next().map_or(0, char::len_utf8);
-            svara.insert(first, combining);
-        } else {
-            svara.push(ascii);
+    let Some((combining, ascii)) = mark else {
+        return svara;
+    };
+    let mut out = Svara::default();
+    if unicode {
+        let mut chars = svara.chars();
+        if let Some(first) = chars.next() {
+            out.push(first);
         }
+        out.push(combining);
+        out.push_str(chars.as_str());
+    } else {
+        out.push_str(svara.as_str());
+        out.push(ascii);
     }
-    svara
+    out
 }
 
 /// The Hindustani svara of a MIDI number.
@@ -1096,20 +1204,15 @@ fn decorate(mut svara: String, number: i64, octave: bool, unicode: bool) -> Stri
 /// assert_eq!(midi_to_svara_h(72.0, 60.0, true, true, false), "S'");
 /// ```
 #[must_use]
-pub fn midi_to_svara_h(midi: f64, sa: f64, abbr: bool, octave: bool, unicode: bool) -> String {
+pub fn midi_to_svara_h(midi: f64, sa: f64, abbr: bool, octave: bool, unicode: bool) -> Svara {
     const NAMES: [&str; 12] = [
         "Sa", "re", "Re", "ga", "Ga", "ma", "Ma", "Pa", "dha", "Dha", "ni", "Ni",
     ];
     if !midi.is_finite() {
-        return String::new();
+        return Svara::default();
     }
     let number = round_half_even(midi - sa) as i64;
-    let name = NAMES[number.rem_euclid(12) as usize];
-    let svara = if abbr {
-        name[..1].to_owned()
-    } else {
-        name.to_owned()
-    };
+    let svara = Svara::stem(NAMES[number.rem_euclid(12) as usize], abbr);
     decorate(svara, number, octave, unicode)
 }
 
@@ -1140,13 +1243,13 @@ pub fn midi_to_svara_c(
     abbr: bool,
     octave: bool,
     unicode: bool,
-) -> AudioSampleResult<String> {
+) -> AudioSampleResult<Svara> {
     let names = mela_to_svara(mela, abbr, unicode)?;
     if !midi.is_finite() {
-        return Ok(String::new());
+        return Ok(Svara::default());
     }
     let number = round_half_even(midi - sa) as i64;
-    let svara = names[number.rem_euclid(12) as usize].clone();
+    let svara = names[number.rem_euclid(12) as usize];
     Ok(decorate(svara, number, octave, unicode))
 }
 
@@ -1160,7 +1263,7 @@ pub fn midi_to_svara_c(
 /// # Returns
 /// The svara.
 #[must_use]
-pub fn hz_to_svara_h(frequency: f64, sa: f64, abbr: bool, octave: bool, unicode: bool) -> String {
+pub fn hz_to_svara_h(frequency: f64, sa: f64, abbr: bool, octave: bool, unicode: bool) -> Svara {
     midi_to_svara_h(hz_to_midi(frequency), hz_to_midi(sa), abbr, octave, unicode)
 }
 
@@ -1183,7 +1286,7 @@ pub fn hz_to_svara_c(
     abbr: bool,
     octave: bool,
     unicode: bool,
-) -> AudioSampleResult<String> {
+) -> AudioSampleResult<Svara> {
     midi_to_svara_c(
         hz_to_midi(frequency),
         hz_to_midi(sa),
@@ -1216,7 +1319,7 @@ pub fn note_to_svara_h(
     abbr: bool,
     octave: bool,
     unicode: bool,
-) -> AudioSampleResult<String> {
+) -> AudioSampleResult<Svara> {
     Ok(midi_to_svara_h(
         note_midi(note)?,
         note_midi(sa)?,
@@ -1245,7 +1348,7 @@ pub fn note_to_svara_c(
     abbr: bool,
     octave: bool,
     unicode: bool,
-) -> AudioSampleResult<String> {
+) -> AudioSampleResult<Svara> {
     midi_to_svara_c(
         note_midi(note)?,
         note_midi(sa)?,
