@@ -312,7 +312,7 @@ function under `audio_samples::`.
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
 | `load` | not in this crate | – | not provided: file I/O | Use `audio_samples_io` |
-| `loadx` | – | – | not provided: file I/O | |
+| `loadx` | `utils::generation::example_clip` | – | with differences | Renders a synthesised clip as audio rather than loading a recording |
 | `stream` | – | – | not provided: file I/O | Block streaming belongs to `audio_samples_io`; `StreamingResampler` resamples chunked audio |
 | `get_samplerate` | – | – | not provided: file I/O | `AudioSamples::sample_rate` gives the rate of loaded audio |
 | `get_duration` | `AudioSamples::duration_seconds` | – | equivalent with differences | Audio only; no `S=` or `path=` forms |
@@ -339,8 +339,8 @@ function under `audio_samples::`.
 | `reassigned_spectrogram` | `AudioFeatures::reassigned_spectrogram` (`ReassignedSpectrogramConfig`) | `feature-extraction` | equivalent | |
 | `phase_vocoder` | `operations::effects::phase_vocoder`, `operations::effects::phase_vocoder_at` (`t_out`) | `effects` | equivalent with differences | The deprecated `hop_length` / `n_fft` arguments are not accepted |
 | `griffinlim` | `operations::effects::griffinlim`, `AudioEffects::griffinlim_audio` (`GriffinLimConfig`) | `effects` | equivalent with differences | `GriffinLimInit::ZeroPhase` matches `init=None`. Random phases come from this crate's RNG; the default seed is 0 (librosa: unseeded) |
-| `iirt` | – | – | not provided: deferred | Needs elliptic order selection (`ellipord`) for its semitone filterbank |
-| `fmt` | – | – | not provided: deferred | Rarely used; needs a cubic-spline exponential resampler |
+| `iirt` | `AudioPitchFilterbank::iirt`, `operations::pitch_filterbank::iirt` (`IirtConfig`) | `pitch-filterbank` | with differences | The two lower rates use this crate's resampler; top-rate bands agree to 2e-5 of the peak |
+| `fmt` | `operations::mellin::mellin_transform` (`MellinConfig`) | `mellin` | equivalent | Implemented with the crate's own not-a-knot B-spline |
 | `pcen` | `operations::features::pcen`, `operations::features::pcen_with_state` (`zi`/`zf`) | `feature-extraction` | equivalent | |
 | `amplitude_to_db` | `operations::spectrum::amplitude_to_db` (`DbConfig`) | `transforms` | equivalent | `ref` as `DbReference::Value` or `DbReference::Max`; `amin`, `top_db`, per-channel `DbAxes` |
 | `power_to_db` | `operations::spectrum::power_to_db` | `transforms` | equivalent | As above |
@@ -392,7 +392,7 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `samples_to_time` | `samples_to_time` | equivalent | |
 | `time_to_frames` | `time_to_frames_floor`, `time_to_frames_floor_slice` | equivalent | The older `time_to_frames` rounds to the nearest frame |
 | `time_to_samples` | `time_to_samples`, `time_to_samples_slice` | equivalent | |
-| `blocks_to_frames`, `blocks_to_samples`, `blocks_to_time` | – | not provided: block streaming is file I/O | One multiplication each |
+| `blocks_to_frames`, `blocks_to_samples`, `blocks_to_time` | `utils::audio_math::blocks_to_frames`, `blocks_to_samples`, `blocks_to_time` | equivalent | Scalar `i64` block indices; `blocks_to_time` takes the rate last |
 | `times_like` | `times_like` | equivalent | |
 | `samples_like` | `samples_like` | equivalent | |
 | `fft_frequencies` | `fft_frequencies` | equivalent | |
@@ -414,10 +414,10 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `tuning_to_A4` | `tuning_to_a4` | equivalent | |
 | `key_to_notes` | `key_to_notes`, `key_to_notes_static` | equivalent | |
 | `key_to_degrees` | `key_to_degrees` | equivalent | |
-| `interval_frequencies`, `pythagorean_intervals`, `plimit_intervals` | – | not provided: deferred | Tuning-system generators; low use |
-| `interval_to_fjs`, `hz_to_fjs`, `fifths_to_note` | – | not provided: deferred | Functional Just System notation; low use |
-| `hz_to_svara_c`, `hz_to_svara_h`, `midi_to_svara_c`, `midi_to_svara_h`, `note_to_svara_c`, `note_to_svara_h` | – | not provided: deferred | Carnatic / Hindustani notation tables; low use |
-| `list_mela`, `list_thaat`, `mela_to_degrees`, `mela_to_svara`, `thaat_to_degrees` | – | not provided: deferred | As above |
+| `interval_frequencies`, `pythagorean_intervals`, `plimit_intervals` | `utils::notation::interval_frequencies` (`TuningSystem`), `pythagorean_intervals`, `pythagorean_factors`, `plimit_intervals`, `plimit_factors` | equivalent | |
+| `interval_to_fjs`, `hz_to_fjs`, `fifths_to_note` | `utils::notation::interval_to_fjs`, `hz_to_fjs`, `fifths_to_note` | with differences | Recognises any ratio built from the primes up to 23 |
+| `hz_to_svara_c`, `hz_to_svara_h`, `midi_to_svara_c`, `midi_to_svara_h`, `note_to_svara_c`, `note_to_svara_h` | `utils::notation::` the same names | equivalent | |
+| `list_mela`, `list_thaat`, `mela_to_degrees`, `mela_to_svara`, `thaat_to_degrees` | `utils::notation::` the same names, `mela_number` | equivalent | |
 
 ### `librosa.feature`
 
@@ -446,8 +446,8 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `tempogram_ratio` | `AudioRhythm::tempogram_ratio`, `operations::rhythm::tempogram_ratio_from_tempogram` | `beat-tracking` | equivalent | |
 | `hybrid_tempogram` | `AudioRhythm::hybrid_tempogram`, `operations::rhythm::hybrid_tempogram_from_envelope` | `beat-tracking` | equivalent | |
 | `metrogram` | `operations::rhythm::metrogram` | `beat-tracking` | equivalent with differences | `aggregate=None` (the 4-D per-bin product) is not offered |
-| `inverse.mel_to_stft`, `inverse.mel_to_audio` | – | – | not provided: deferred | Needs a non-negative least-squares solver; compose `griffinlim` with your own mel inversion |
-| `inverse.mfcc_to_mel`, `inverse.mfcc_to_audio` | – | – | not provided: deferred | As above |
+| `inverse.mel_to_stft`, `inverse.mel_to_audio` | `operations::inverse::mel_to_stft`, `mel_to_audio`, `mel_to_audio_samples` (`MelInversionConfig`) | `feature-inversion` | with differences | Coordinate descent from the same start reaches a better fit than the early-stopped L-BFGS-B |
+| `inverse.mfcc_to_mel`, `inverse.mfcc_to_audio` | `operations::inverse::mfcc_to_mel`, `mfcc_to_audio` (`MfccInversionConfig`) | `feature-inversion` | equivalent, with differences for `mfcc_to_audio` as above | |
 
 ### `librosa.effects`
 
@@ -482,7 +482,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
-| `decompose` | – | – | not provided: deferred | NMF through scikit-learn; no decomposition library in this crate |
+| `decompose` | `operations::factorization::decompose`, `nmf`, `nmf_from`, `nmf_transform` (`NmfConfig`, `NmfInit`, `NmfSolver`) | `factorization` | with differences | Implemented in the crate: coordinate descent and multiplicative updates with any β-divergence; another generator in the SVD start |
 | `hpss` | `operations::effects::hpss_spectrogram`, `operations::effects::hpss_magnitude`, `operations::effects::hpss_masks` (`HpssMaskConfig`) | `effects` | equivalent | Kernel sizes, power, margins, `mask=True` |
 | `nn_filter` | `operations::effects::nn_filter`, `operations::effects::nn_filter_recurrence` (`NnAggregate`) | `effects` | equivalent | |
 
@@ -498,9 +498,9 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `wavelet_lengths` | `operations::constant_q::wavelet_lengths`, `operations::constant_q::wavelet_lengths_into` (into a caller's slice) | `transforms` + `resampling` | equivalent with differences | The single-frequency-with-explicit-`alpha` form is internal |
 | `window_bandwidth` | `operations::filterbanks::window_bandwidth` | `transforms` | equivalent with differences | Always evaluates the formula; librosa returns a hard-coded table value for named windows (up to ~1e-4 relative apart) |
 | `window_sumsquare` | `operations::filterbanks::window_sumsquare` (`f64`), `operations::filterbanks::window_sumsquare_as::<F>` | `transforms` | equivalent with differences | No `norm` |
-| `diagonal_filter` | – | – | not provided: deferred | Needs SciPy's spline image rotation; only used by `segment.path_enhance` |
-| `mr_frequencies` | – | – | not provided: deferred | Only used by `iirt` |
-| `semitone_filterbank` | – | – | not provided: deferred | Needs elliptic order selection (`ellipord`) |
+| `diagonal_filter` | `operations::segment::diagonal_filter` | `segmentation` | equivalent | Rotation by quintic B-spline weights in the crate |
+| `mr_frequencies` | `operations::pitch_filterbank::mr_frequencies` | `pitch-filterbank` | equivalent | |
+| `semitone_filterbank` | `operations::pitch_filterbank::semitone_filterbank` (`MultirateFilterConfig`, `FilterLayout`, `BandFilter`) | `pitch-filterbank` | equivalent | Order selection for elliptic, Butterworth and both Chebyshev families |
 
 ### `librosa.util`
 
@@ -512,21 +512,31 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `sync` | `operations::sequence::sync`, `operations::sequence::sync_with` (`SyncAggregate`) | `sequence` | equivalent with differences | Frame indices only (no slices); an empty index list with `pad = true` gives one segment |
 | `softmask` | `operations::effects::softmask` | `effects` | equivalent | |
 | `fix_length` | `AudioEditing::pad_samples_right` | `editing` | equivalent with differences | Pads only; it does not truncate a longer signal |
-| `localmax`, `localmin` | – | – | not provided: internal helpers | Used privately by peak picking and beat tracking |
-| `match_events` | – | – | not provided: internal helper | Used privately by `remix(align_zeros)` |
-| `nnls` | – | – | not provided: deferred | Only needed by `feature.inverse` |
-| `pad_center` | – | – | not provided: internal | `StftConfig::win_length` pads the window to `n_fft` |
-| `fix_frames` | – | – | not provided: out of scope | Index-set helper; `sync` takes frame indices directly |
-| `buf_to_float` | – | – | not provided: out of scope | Byte decoding is file I/O. For integer-to-float use `to_format` / `as_f64`, which scale asymmetrically (see below) |
-| `valid_audio` | – | – | not provided: out of scope | `AudioSamples` enforces its invariants by construction |
-| `stack` | – | – | not provided: out of scope | Generic NumPy stacking (`AudioEditing::stack` stacks audio channels) |
-| `abs2`, `phasor`, `tiny`, `expand_to`, `dtype_c2r`, `dtype_r2c`, `MAX_MEM_BLOCK` | – | – | not provided: out of scope | NumPy one-liners and dtype plumbing (`Complex::from_polar`, `f64::MIN_POSITIVE`) |
-| `axis_sort`, `sparsify_rows`, `shear`, `cyclic_gradient`, `fill_off_diagonal`, `index_to_slice`, `count_unique`, `is_unique`, `interp_broadcast` | – | – | not provided: out of scope | Generic array utilities; the ones the ported algorithms need exist privately |
-| `match_intervals` | – | – | not provided: out of scope | Annotation alignment, no audio meaning |
-| `is_positive_int`, `valid_int`, `valid_intervals`, `rename_kw`, `Deprecated` | – | – | not provided: out of scope | Python argument validation and deprecation plumbing; Rust uses types and typed errors |
+| `localmax`, `localmin` | `utils::array_ops::localmax`, `utils::array_ops::localmin` | – | equivalent | Any ordered element type; any dimension |
+| `match_events` | `utils::array_ops::match_events` | – | equivalent with differences | `f64` events and `usize` indices; a tie at equal distance goes to the later target |
+| `match_intervals` | `utils::array_ops::match_intervals` | – | equivalent with differences | With `strict = false`, an interval that overlaps nothing goes to the true nearest target |
+| `nnls` | `operations::linalg::nnls`, `nnls_matrix`, `NnlsSolver` (`NnlsConfig`) | `linalg` | with differences | A vector is exact; a matrix reaches a better objective than the early-stopped L-BFGS-B |
+| `pad_center` | `utils::array_ops::pad_center` (`PadMode`) | – | equivalent | Constant, edge, reflect, symmetric and wrap |
+| `fix_frames` | `utils::array_ops::fix_frames` | – | equivalent |  |
+| `buf_to_float` | `utils::array_ops::buf_to_float` | – | equivalent with differences | Also 3-byte samples; the float type is a type parameter |
+| `valid_audio` | `utils::array_ops::valid_audio` | – | equivalent | Used on raw arrays; `AudioSamples` enforces its invariants by construction |
+| `stack` | `utils::array_ops::stack` | – | equivalent | `AudioEditing::stack` stacks audio channels |
+| `abs2`, `phasor`, `tiny` | `utils::array_ops::abs2`, `phasor`, `tiny` | – | equivalent | Complex magnitude, `Complex::from_polar` over arrays, `F::MIN_POSITIVE` |
+| `expand_to` | `utils::array_ops::expand_to` | – | equivalent with differences | Returns a view; positions out of increasing order reorder the axes |
+| `dtype_c2r`, `dtype_r2c` | – | – | with differences | Rust types give the mapping directly: `Complex<F>` and `F` |
+| `MAX_MEM_BLOCK` | `utils::array_ops::MAX_MEM_BLOCK` | – | equivalent |  |
+| `axis_sort` | `utils::array_ops::axis_sort` (`AxisSortKey`) | – | equivalent with differences | Stable sort; argmax and argmin keys |
+| `sparsify_rows` | `utils::array_ops::sparsify_rows` (`CsrMatrix`) | – | equivalent with differences | Returns the crate's compressed sparse row type |
+| `shear` | `utils::array_ops::shear` | – | equivalent | Dense in Rust; the Python binding also takes SciPy sparse matrices |
+| `cyclic_gradient`, `fill_off_diagonal`, `index_to_slice`, `count_unique`, `is_unique` | `utils::array_ops::cyclic_gradient`, `fill_off_diagonal`, `index_to_slice`, `count_unique`, `is_unique` | – | equivalent |  |
+| `interp_broadcast` | `utils::array_ops::interp_broadcast`, `interp1d` (`InterpKind`) | – | equivalent with differences | The two interpolated arrays are returned; the caller combines them. Spline orders up to 3 |
+| `is_positive_int`, `valid_int`, `valid_intervals` | `utils::array_ops::is_positive_int`, `valid_int` (`IntCast`), `valid_intervals` | – | equivalent |  |
+| `rename_kw`, `Deprecated` | – | – | not provided: plumbing | librosa's own deprecation machinery |
 | `example`, `ex` | `utils::generation::example_clip` | – | with differences | Returns audio rather than a file path. The clips are synthesised, so they are not librosa's recordings |
 | `list_examples` | `ExampleClip::ALL`, `ExampleClip::name` | – | with differences | An array of clips rather than a printed table |
-| `example_info`, `find_files`, `cite` | – | – | not provided: out of scope | File discovery and citation helpers, and details of librosa's recordings |
+| `example_info` | `ExampleClip::description` | – | with differences | One sentence on a synthesised clip |
+| `find_files` | `utils::array_ops::find_files` (`FindFilesConfig`) | – | equivalent with differences | Any letter case matches unless `case_sensitive`; directories are left out |
+| `cite` | – | – | not provided: plumbing | Citation helper of librosa itself |
 
 ### `librosa.segment` and `librosa.sequence`
 
@@ -539,10 +549,10 @@ All of these are free functions in `operations::sequence` (feature
 | `segment.cross_similarity` | `cross_similarity` (connectivity, `bool`); `cross_similarity_weighted` (distance / affinity) (`CrossSimilarityConfig`) | equivalent with differences | As `recurrence_matrix` |
 | `segment.recurrence_to_lag` | `recurrence_to_lag` | equivalent | |
 | `segment.lag_to_recurrence` | `lag_to_recurrence` | equivalent | |
-| `segment.path_enhance` | – | not provided: deferred | Needs `filters.diagonal_filter` |
-| `segment.timelag_filter` | – | not provided: out of scope | A Python decorator; compose `recurrence_to_lag`, a filter and `lag_to_recurrence` |
-| `segment.agglomerative` | – | not provided: out of scope | Wraps scikit-learn clustering |
-| `segment.subsegment` | – | not provided: out of scope | Needs `agglomerative` |
+| `segment.path_enhance` | `operations::segment::path_enhance` (`PathEnhanceConfig`, `BoundaryMode`) | equivalent | Feature `segmentation` |
+| `segment.timelag_filter` | `operations::segment::timelag_filter` | equivalent | Takes the matrix and a closure; feature `segmentation` |
+| `segment.agglomerative` | `operations::segment::agglomerative` | equivalent | Ward clustering in the crate; feature `segmentation` |
+| `segment.subsegment` | `operations::segment::subsegment` | equivalent | Feature `segmentation` |
 | `sequence.dtw` | `dtw`, `dtw_with_cost` (`DtwConfig`, `DistanceMetric`, `DtwResult`) | equivalent | Euclidean, squared Euclidean, cosine, cityblock, Chebyshev; custom steps and weights; subsequence; global band |
 | `sequence.dtw_backtracking` | `dtw_backtracking` | equivalent | |
 | `sequence.rqa` | `rqa` (`RqaConfig`, `RqaResult`) | equivalent with differences | Same scores; backtracking through the second column follows the move actually taken (librosa stores a wrong pointer there) |
@@ -553,19 +563,21 @@ All of these are free functions in `operations::sequence` (feature
 | `sequence.transition_loop` | `transition_loop` | equivalent | |
 | `sequence.transition_cycle` | `transition_cycle` | equivalent | |
 | `sequence.transition_local` | `transition_local` (`TransitionWindow`) | equivalent | |
-| `sequence.path_to_steps` | – | not provided: low value | Differences of consecutive path points |
+| `sequence.path_to_steps` | `path_to_steps` | equivalent | |
 
 ### `librosa.display`
 
-`librosa.display` is matplotlib plotting and is out of scope. The crate has
-its own plotly-based plots on the `AudioPlotting` trait (feature `plotting`).
+The Rust crate plots with plotly through the `AudioPlotting` trait (feature `plotting`),
+and `operations::plotting::matrix` draws feature matrices. The Python bindings have
+`audio_samples.mpl`.
 
-| librosa | audio_samples | status |
-|---|---|---|
-| `waveshow`, `AdaptiveWaveplot`, `wavebars`, `wavef0` | `AudioPlotting::plot_waveform` (closest) | not provided: out of scope (matplotlib) |
-| `specshow` | `AudioPlotting::plot_spectrogram` (closest) | not provided: out of scope (matplotlib) |
-| `multiplot`, `highlight`, `legend_for_axes`, `colorbar_db`, `colorbar_phase`, `infer_cmap` | – | not provided: out of scope (matplotlib) |
-| `TimeFormatter`, `NoteFormatter`, `LogHzFormatter`, `ChromaFormatter`, `ChromaFJSFormatter`, `ChromaSvaraFormatter`, `FJSFormatter`, `TonnetzFormatter`, `Transformf0` | – | not provided: out of scope (matplotlib axis formatters) |
+| librosa | Rust | Python | status |
+|---|---|---|---|
+| `specshow` | `operations::plotting::matrix::plot_matrix` | `mpl.plot_matrix` | with differences: every axis type and value scale; plotly tick labels in Rust |
+| `waveshow`, `AdaptiveWaveplot` | `AudioPlotting::plot_waveform` | `mpl.plot_waveform_adaptive`, `mpl.AdaptiveWaveform` | with differences |
+| `wavebars`, `wavef0` | `operations::plotting::matrix::plot_waveform_bars`, `plot_waveform_f0` | `mpl.plot_waveform_bars`, `mpl.plot_waveform_f0` | with differences |
+| `multiplot`, `highlight`, `legend_for_axes`, `colorbar_db`, `colorbar_phase`, `infer_cmap` | plotly's subplots, legends and colour scales | `mpl.plot_grid`, `mpl.highlight_effects`, `mpl.legend_for_axes`, `mpl.add_db_colorbar`, `mpl.add_phase_colorbar`, `mpl.infer_colormap` | with differences |
+| `TimeFormatter`, `NoteFormatter`, `LogHzFormatter`, `ChromaFormatter`, `ChromaFJSFormatter`, `ChromaSvaraFormatter`, `FJSFormatter`, `TonnetzFormatter`, `Transformf0` | tick text in `plot_matrix` | `mpl.` the same names (`mpl.F0Transform` for `Transformf0`) | equivalent |
 
 ## Differences from librosa
 

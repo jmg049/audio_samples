@@ -441,8 +441,9 @@ fn lfilter_zi(b: &[f64], a: &[f64]) -> Vec<f64> {
         for r in p + 1..n {
             let f = m[r][p] / d;
             if f != 0.0 {
-                for c in p..=n {
-                    m[r][c] -= f * m[p][c];
+                let (above, below) = m.split_at_mut(r);
+                for (x, y) in below[0][p..=n].iter_mut().zip(&above[p][p..=n]) {
+                    *x -= f * y;
                 }
             }
         }
