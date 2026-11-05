@@ -251,7 +251,7 @@ fn check_x<F: AudioFloat>(x: ArrayView2<'_, F>) -> AudioSampleResult<()> {
     if x.is_empty() {
         return invalid("x", "must not be empty");
     }
-    if x.iter().any(|v| !v.is_finite() || *v < F::zero()) {
+    if !x.fold(true, |ok, v| ok && v.is_finite() && *v >= F::zero()) {
         return invalid("x", "must be finite and non-negative");
     }
     Ok(())
