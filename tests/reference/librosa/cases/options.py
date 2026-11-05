@@ -69,6 +69,9 @@ def build(signals, sr) -> dict:
                 "f0": librosa.f0_harmonics(
                     S[:64, :32], freqs=freqs[:64], f0=f0[:32], harmonics=harmonics, kind=kind, axis=0
                 ).tolist(),
+                "salience": librosa.salience(
+                    S[:64, :32], freqs=freqs[:64], harmonics=harmonics, kind=kind, fill_value=0.0
+                ).tolist(),
             }
             for kind in ("linear", "nearest", "cubic")
         },
@@ -106,5 +109,22 @@ def build(signals, sr) -> dict:
         "freqs": np.nan_to_num(freqs_s[:64, :16]).tolist(),
         "times": np.nan_to_num(times_s[:64, :16]).tolist(),
         "mags": mags_s[:64, :16].tolist(),
+    }
+    stereo = np.stack([y, y[::-1]])
+    short = y[: y.size // 2]
+    env_y = signals["clicks120"].astype(np.float64)
+    out["forms"] = {
+        "to_mono": librosa.to_mono(stereo).tolist(),
+        "to_mono_sum": librosa.to_mono(y, short, pad=True, norm=False).tolist(),
+        "to_stereo": librosa.to_stereo(left=y, right=short, pad=True).tolist(),
+        "to_multi": librosa.to_multi(y, short, stereo, pad=False, norm=False).tolist(),
+        "resample_scale": librosa.resample(y, orig_sr=sr, target_sr=8000, scale=True).tolist(),
+        "pitch_shift_scale": librosa.effects.pitch_shift(y, sr=sr, n_steps=2.0, scale=True).tolist(),
+        "frame_axis0": librosa.util.frame(np.stack([y[:64], y[:64]], axis=1), frame_length=8, hop_length=4, axis=0).tolist(),
+        "frame_axis1": librosa.util.frame(y[:64], frame_length=8, hop_length=4, axis=-1).tolist(),
+        "duration_S": librosa.get_duration(S=np.zeros((513, 40)), sr=sr, n_fft=1024, hop_length=256),
+        "duration_S_uncentred": librosa.get_duration(S=np.zeros((513, 40)), sr=sr, n_fft=1024, hop_length=256, center=False),
+        "onset_mask": librosa.onset.onset_detect(y=env_y, sr=sr, sparse=False).astype(float).tolist(),
+        "beat_mask": librosa.beat.beat_track(y=env_y, sr=sr, sparse=False)[1].astype(float).tolist(),
     }
     return out
