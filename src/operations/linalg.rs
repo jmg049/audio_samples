@@ -41,6 +41,7 @@
 //! non-negative least squares problem*, CAIP 2005; N. Halko, P.-G. Martinsson and
 //! J. A. Tropp, *Finding structure with randomness*, SIAM Review 53, 2011.
 
+use ndarray::ShapeBuilder;
 use ndarray::linalg::general_mat_mul;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 
@@ -323,11 +324,14 @@ pub struct Svd {
 /// assert!((d.s[1] - 3.0).abs() < 1e-12);
 /// ```
 pub fn svd<F: AudioFloat>(a: ArrayView2<'_, F>) -> AudioSampleResult<Svd> {
-    let a = to_f64(a, "a")?;
+    svd_f64(&to_f64(a, "a")?)
+}
+
+fn svd_f64(a: &Array2<f64>) -> AudioSampleResult<Svd> {
     let (m, n) = a.dim();
     let k = m.min(n);
     let wide = m < n;
-    let gram = if wide { a.dot(&a.t()) } else { a.t().dot(&a) };
+    let gram = if wide { a.dot(&a.t()) } else { a.t().dot(a) };
     let (values, vectors) = eigh(gram.view())?;
     let top = values[k.saturating_sub(1)].max(0.0);
     let floor = top * 2.0 * f64::EPSILON;
@@ -368,27 +372,75 @@ pub fn svd<F: AudioFloat>(a: ArrayView2<'_, F>) -> AudioSampleResult<Svd> {
     })
 }
 
-/// Orthonormalises the columns of `q` in place by `passes` rounds of modified Gram-Schmidt.
-fn orthonormalise<F: AudioFloat>(q: &mut Array2<F>, passes: usize) {
-    let cols = q.ncols();
-    for _ in 0..passes {
-        for j in 0..cols {
-            let (done, mut rest) = q.view_mut().split_at(Axis(1), j);
-            let mut col = rest.column_mut(0);
-            for i in 0..j {
-                let prev = done.column(i);
-                let proj = prev
-                    .iter()
-                    .zip(col.iter())
-                    .fold(F::zero(), |acc, (&p, &c)| acc + p * c);
-                col.zip_mut_with(&prev, |c, &p| *c -= proj * p);
+/// Orthonormalises the columns of `q`, which is in column-major layout, in place by one
+/// round of modified Gram-Schmidt.
+fn orthonormalise<F: AudioFloat>(q: &mut Array2<F>) {
+    let rows = q.nrows();
+    let Some(data) = q.as_slice_memory_order_mut() else {
+        unreachable!("the bases are allocated contiguous");
+    };
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2.
+        unsafe { gram_schmidt_avx2(data, rows) };
+        return;
+    }
+    gram_schmidt(data, rows);
+}
+
+/// [`gram_schmidt`] compiled for AVX2. No operation is fused, so the values do not depend on
+/// the CPU.
+///
+/// # Safety
+/// The CPU must support `avx2`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn gram_schmidt_avx2<F: AudioFloat>(data: &mut [F], rows: usize) {
+    gram_schmidt(data, rows);
+}
+
+#[inline(always)]
+fn gram_schmidt<F: AudioFloat>(data: &mut [F], rows: usize) {
+    if rows == 0 {
+        return;
+    }
+    for j in 0..data.len() / rows {
+        let (done, rest) = data.split_at_mut(j * rows);
+        let column = &mut rest[..rows];
+        for previous in done.chunks_exact(rows) {
+            let projection = dot_in_lanes(previous, column);
+            for (c, &p) in column.iter_mut().zip(previous) {
+                *c -= projection * p;
             }
-            let norm = col.iter().fold(F::zero(), |acc, &c| acc + c * c).sqrt();
-            if norm > F::zero() {
-                col.mapv_inplace(|v| v / norm);
+        }
+        let norm = dot_in_lanes(column, column).sqrt();
+        if norm > F::zero() {
+            for c in column.iter_mut() {
+                *c /= norm;
             }
         }
     }
+}
+
+/// The dot product with eight running sums, which vectorise.
+#[inline(always)]
+fn dot_in_lanes<F: AudioFloat>(a: &[F], b: &[F]) -> F {
+    let (left, left_rest) = a.as_chunks::<8>();
+    let (right, right_rest) = b.as_chunks::<8>();
+    let mut lanes = [F::zero(); 8];
+    for (x, y) in left.iter().zip(right) {
+        for (lane, (&x, &y)) in lanes.iter_mut().zip(x.iter().zip(y)) {
+            *lane += x * y;
+        }
+    }
+    let mut sum = F::zero();
+    for lane in lanes {
+        sum += lane;
+    }
+    for (&x, &y) in left_rest.iter().zip(right_rest) {
+        sum += x * y;
+    }
+    sum
 }
 
 /// The leading `k` singular triplets in `a`'s float type, found by randomised range
@@ -413,22 +465,27 @@ pub(crate) fn truncated_svd<F: AudioFloat>(
     let size = (k + oversampling).min(m.min(n));
     let mut rng = SmallRng::new(seed);
     let omega = Array2::from_shape_simple_fn((n, size), || of::<F>(rng.normal()));
-    let mut q = a.dot(&omega);
+    // The bases are held by columns, which Gram-Schmidt walks.
+    let mut q = Array2::<F>::zeros((m, size).f());
+    general_mat_mul(F::one(), &a, &omega, F::zero(), &mut q);
     drop(omega);
-    orthonormalise(&mut q, 1);
+    orthonormalise(&mut q);
     // One round keeps the power iterations stable; the last result gets a second one.
-    let mut z = Array2::<F>::zeros((n, size));
+    let mut z = Array2::<F>::zeros((n, size).f());
     for _ in 0..n_iter {
         general_mat_mul(F::one(), &a.t(), &q, F::zero(), &mut z);
-        orthonormalise(&mut z, 1);
+        orthonormalise(&mut z);
         general_mat_mul(F::one(), &a, &z, F::zero(), &mut q);
-        orthonormalise(&mut q, 1);
+        orthonormalise(&mut q);
     }
     drop(z);
-    orthonormalise(&mut q, 1);
+    orthonormalise(&mut q);
     let b = q.t().dot(&a);
-    let small = svd(b.view())?;
+    // `b` is finite, as `a` and `q` are; only its double-precision form is kept.
+    let double = b.mapv(|v| v.to_f64().unwrap_or(f64::NAN));
     drop(b);
+    let small = svd_f64(&double)?;
+    drop(double);
     let u = q.dot(&small.u.slice(s![.., ..k]).mapv(of::<F>));
     let vt = small.vt.slice(s![..k, ..]).mapv(of::<F>);
     Ok((u, small.s.iter().take(k).copied().collect(), vt))

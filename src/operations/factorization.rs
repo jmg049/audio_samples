@@ -339,52 +339,137 @@ fn random_init<F: AudioFloat>(x: ArrayView2<'_, F>, k: usize, seed: u64) -> (Arr
     (w, h)
 }
 
+/// Work space of the coordinate sweeps: one factor by columns, and one gradient per row.
+struct SweepBuffers<F> {
+    columns: Vec<F>,
+    gradient: Vec<F>,
+}
+
+impl<F: AudioFloat> SweepBuffers<F> {
+    fn new(rows: usize, k: usize) -> Self {
+        Self {
+            columns: vec![F::zero(); rows * k],
+            gradient: vec![F::zero(); rows],
+        }
+    }
+}
+
 /// One sweep of coordinate descent over `w`, given `hht` and `xht`; returns the sum of
 /// the projected gradient magnitudes.
+///
+/// The rows of `w` do not interact within the update of one coordinate, so each coordinate
+/// is updated for all of them at once, on `w` held by columns.
 fn coordinate_sweep<F: AudioFloat>(
     w: &mut Array2<F>,
     hht: &Array2<F>,
     xht: &Array2<F>,
     order: &[usize],
+    buffers: &mut SweepBuffers<F>,
 ) -> F {
-    let k = w.ncols();
-    let mut violation = F::zero();
+    let (rows, k) = w.dim();
     let hht = hht.as_standard_layout();
-    let (Some(row_data), Some(hht_data), Some(xht_data)) =
+    let (Some(by_row), Some(products), Some(targets)) =
         (w.as_slice_mut(), hht.as_slice(), xht.as_slice())
     else {
         unreachable!("the coordinates and their products are in standard layout");
     };
-    for &t in order {
-        let hess = hht_data[t * k + t];
-        let row_t = &hht_data[t * k..(t + 1) * k];
-        for (wi, xi) in row_data.chunks_exact_mut(k).zip(xht_data.chunks_exact(k)) {
-            // Four running sums let the products vectorise.
-            let mut lanes = [F::zero(); 4];
-            let ((left, left_rem), (right, right_rem)) =
-                (row_t.as_chunks::<4>(), wi.as_chunks::<4>());
-            for (a, b) in left.iter().zip(right) {
-                for (lane, (x, y)) in lanes.iter_mut().zip(a.iter().zip(b)) {
-                    *lane += *x * *y;
-                }
-            }
-            let mut grad = lanes[0] + lanes[1] + lanes[2] + lanes[3] - xi[t];
-            for (a, b) in left_rem.iter().zip(right_rem) {
-                grad += *a * *b;
-            }
-            let pg = if wi[t] == F::zero() {
-                grad.min(F::zero())
-            } else {
-                grad
-            };
-            violation += pg.abs();
-            if hess != F::zero() {
-                let v = wi[t] - grad / hess;
-                wi[t] = if v > F::zero() { v } else { F::zero() };
-            }
+    let columns = &mut buffers.columns[..rows * k];
+    let gradient = &mut buffers.gradient[..rows];
+    for (c, column) in columns.chunks_exact_mut(rows).enumerate() {
+        for (slot, row) in column.iter_mut().zip(by_row.chunks_exact(k)) {
+            *slot = row[c];
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    let violation = if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2.
+        unsafe { sweep_avx2(columns, gradient, products, targets, order, k) }
+    } else {
+        sweep_columns(columns, gradient, products, targets, order, k)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let violation = sweep_columns(columns, gradient, products, targets, order, k);
+    for (c, column) in columns.chunks_exact(rows).enumerate() {
+        for (value, row) in column.iter().zip(by_row.chunks_exact_mut(k)) {
+            row[c] = *value;
         }
     }
     violation
+}
+
+/// [`sweep_columns`] compiled for AVX2. No operation is fused, so the values do not depend
+/// on the CPU.
+///
+/// # Safety
+/// The CPU must support `avx2`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn sweep_avx2<F: AudioFloat>(
+    columns: &mut [F],
+    gradient: &mut [F],
+    products: &[F],
+    targets: &[F],
+    order: &[usize],
+    k: usize,
+) -> F {
+    sweep_columns(columns, gradient, products, targets, order, k)
+}
+
+#[inline(always)]
+fn sweep_columns<F: AudioFloat>(
+    columns: &mut [F],
+    gradient: &mut [F],
+    products: &[F],
+    targets: &[F],
+    order: &[usize],
+    k: usize,
+) -> F {
+    const LANES: usize = 8;
+    let rows = gradient.len();
+    let mut violation = F::zero();
+    for &t in order {
+        let hess = products[t * k + t];
+        for (g, row) in gradient.iter_mut().zip(targets.chunks_exact(k)) {
+            *g = F::zero() - row[t];
+        }
+        for (column, &product) in columns
+            .chunks_exact(rows)
+            .zip(&products[t * k..(t + 1) * k])
+        {
+            for (g, &v) in gradient.iter_mut().zip(column) {
+                *g += product * v;
+            }
+        }
+        let column = &mut columns[t * rows..(t + 1) * rows];
+        let mut lanes = [F::zero(); LANES];
+        let (whole, rest) = gradient.as_chunks::<LANES>();
+        let (values, last) = column.as_chunks_mut::<LANES>();
+        for (g, v) in whole.iter().zip(values) {
+            for (lane, (&g, v)) in lanes.iter_mut().zip(g.iter().zip(v)) {
+                *lane += coordinate_update(g, v, hess);
+            }
+        }
+        for lane in lanes {
+            violation += lane;
+        }
+        for (&g, v) in rest.iter().zip(last) {
+            violation += coordinate_update(g, v, hess);
+        }
+    }
+    violation
+}
+
+/// Moves one coordinate along its gradient, staying non-negative, and returns the
+/// magnitude of the projected gradient.
+#[inline(always)]
+fn coordinate_update<F: AudioFloat>(g: F, value: &mut F, hess: F) -> F {
+    let v = *value;
+    let negative = if g < F::zero() { g } else { F::zero() };
+    let projected = if v == F::zero() { negative } else { g };
+    let moved = v - g / hess;
+    let kept = if moved > F::zero() { moved } else { F::zero() };
+    *value = if hess == F::zero() { v } else { kept };
+    projected.abs()
 }
 
 struct Regularisation {
@@ -413,6 +498,7 @@ fn update_coordinates<F: AudioFloat>(
     l1: f64,
     l2: f64,
     order: &[usize],
+    buffers: &mut SweepBuffers<F>,
 ) -> F {
     let mut oot = other.dot(&other.t());
     if l2 != 0.0 {
@@ -425,7 +511,7 @@ fn update_coordinates<F: AudioFloat>(
         let l1 = of::<F>(l1);
         x_other_t.mapv_inplace(|v| v - l1);
     }
-    coordinate_sweep(target, &oot, x_other_t, order)
+    coordinate_sweep(target, &oot, x_other_t, order, buffers)
 }
 
 fn shuffled(k: usize, rng: &mut SmallRng) -> Vec<usize> {
@@ -456,6 +542,7 @@ fn run_coordinate_descent<F: AudioFloat>(
     *h = Array2::zeros((0, 0));
     let mut xht = Array2::<F>::zeros((x.nrows(), k));
     let mut xtw = Array2::<F>::zeros(if update_h { (x.ncols(), k) } else { (0, 0) });
+    let mut buffers = SweepBuffers::new(x.nrows().max(if update_h { x.ncols() } else { 0 }), k);
     while iter < cfg.max_iter {
         iter += 1;
         let order_w = if cfg.shuffle {
@@ -464,7 +551,15 @@ fn run_coordinate_descent<F: AudioFloat>(
             in_order.clone()
         };
         general_mat_mul(F::one(), &x, &ht, F::zero(), &mut xht);
-        let mut violation = update_coordinates(w, ht.t(), &mut xht, reg.l1_w, reg.l2_w, &order_w);
+        let mut violation = update_coordinates(
+            w,
+            ht.t(),
+            &mut xht,
+            reg.l1_w,
+            reg.l2_w,
+            &order_w,
+            &mut buffers,
+        );
         if update_h {
             let order_h = if cfg.shuffle {
                 shuffled(k, &mut rng)
@@ -472,7 +567,15 @@ fn run_coordinate_descent<F: AudioFloat>(
                 in_order.clone()
             };
             general_mat_mul(F::one(), &x.t(), &*w, F::zero(), &mut xtw);
-            violation += update_coordinates(&mut ht, w.t(), &mut xtw, reg.l1_h, reg.l2_h, &order_h);
+            violation += update_coordinates(
+                &mut ht,
+                w.t(),
+                &mut xtw,
+                reg.l1_h,
+                reg.l2_h,
+                &order_h,
+                &mut buffers,
+            );
         }
         match first {
             None => {
