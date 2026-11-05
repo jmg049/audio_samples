@@ -716,6 +716,34 @@ pub fn wavelet_lengths_with_alpha(
     config: &WaveletConfig,
     alpha: &[f64],
 ) -> AudioSampleResult<(Vec<f64>, f64)> {
+    let mut lengths = vec![0.0; freqs.len()];
+    let cutoff = wavelet_lengths_with_alpha_into(freqs, sample_rate, config, alpha, &mut lengths)?;
+    Ok((lengths, cutoff))
+}
+
+/// [`wavelet_lengths_with_alpha`] writing the lengths into `lengths` (one per frequency) and
+/// returning the cut-off, without allocating.
+///
+/// # Errors
+/// As [`wavelet_lengths_with_alpha`], and [`ParameterError`] if `lengths` does not have one
+/// element per frequency.
+///
+/// # Examples
+/// ```rust
+/// use audio_samples::operations::constant_q::{WaveletConfig, wavelet_lengths_with_alpha_into};
+///
+/// let cfg = WaveletConfig::default();
+/// let mut lengths = [0.0; 2];
+/// wavelet_lengths_with_alpha_into(&[440.0, 880.0], 22050.0, &cfg, &[0.5, 0.5], &mut lengths).unwrap();
+/// assert!((lengths[0] - 2.0 * lengths[1]).abs() < 1e-9);
+/// ```
+pub fn wavelet_lengths_with_alpha_into(
+    freqs: &[f64],
+    sample_rate: f64,
+    config: &WaveletConfig,
+    alpha: &[f64],
+    lengths: &mut [f64],
+) -> AudioSampleResult<f64> {
     config.validate()?;
     validate_freqs(freqs)?;
     require_finite_positive("sample_rate", sample_rate)?;
@@ -729,18 +757,28 @@ pub fn wavelet_lengths_with_alpha(
             ),
         ));
     }
+    if lengths.len() != freqs.len() {
+        return Err(param_err(
+            "lengths",
+            format!(
+                "needs one element per frequency ({}), got {}",
+                freqs.len(),
+                lengths.len()
+            ),
+        ));
+    }
     for &a in alpha {
         require_finite_positive("alpha", a)?;
     }
     let window_bw = librosa_window_bandwidth(&config.window)?;
-    Ok(wavelet_lengths_impl(
-        freqs,
-        sample_rate,
-        window_bw,
-        config.filter_scale,
-        config.gamma,
-        alpha,
-    ))
+    let mut cutoff = f64::NEG_INFINITY;
+    for ((len, &f), &a) in lengths.iter_mut().zip(freqs).zip(alpha) {
+        let g = config.gamma.unwrap_or(a * 24.7 / 0.108);
+        let q = config.filter_scale / a;
+        cutoff = cutoff.max(f * (1.0 + 0.5 * window_bw / q) + 0.5 * g);
+        *len = q * sample_rate / (f + g / a);
+    }
+    Ok(cutoff)
 }
 
 /// [`wavelet`] with the relative bandwidth of each filter given.

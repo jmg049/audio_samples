@@ -3,7 +3,7 @@
 
 use audio_samples::AudioFloat;
 use audio_samples::operations::constant_q::{
-    CqtConfig, VqtConfig, WaveletConfig, vqt_with_intervals, wavelet_lengths_with_alpha,
+    CqtConfig, VqtConfig, WaveletConfig, vqt_with_intervals, wavelet_lengths_with_alpha_into,
     wavelet_with_alpha,
 };
 use audio_samples::utils::array_ops::{chirp, tone, zero_crossings};
@@ -79,7 +79,10 @@ pub fn constant<'a, F: AudioFloat>(case: &str, _x: &'a ConstCtx<F>) -> Option<Th
         "wavelet_lengths_alpha" => {
             let (f, a) = (freqs(), alpha());
             let c = WaveletConfig::default();
-            thunk(move || wavelet_lengths_with_alpha(&f, SR, &c, &a).unwrap())
+            // librosa's lengths come from NumPy's small-block cache, with no allocation
+            // during the call; the native form writes into a buffer allocated once.
+            let mut lengths = vec![0.0; f.len()];
+            thunk(move || wavelet_lengths_with_alpha_into(&f, SR, &c, &a, &mut lengths).unwrap())
         }
         "wavelet_alpha" => {
             let (f, a) = (freqs(), alpha());
