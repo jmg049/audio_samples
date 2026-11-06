@@ -503,9 +503,13 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     }
 }
 
-/// Largest input step `m` per cycle of an exact stage B evaluated four
-/// cycles at a time (see [`Interp::run_exact`]).
-const CHUNK_MAX_STEP: usize = 1024;
+/// Largest input step `m` per cycle of an exact stage B evaluated a few
+/// cycles at a time (see [`Interp::run_exact`]); the buffered stage-A output
+/// is then at most `8 m` samples.
+const CHUNK_MAX_STEP: usize = 1 << 16;
+/// Exact stage-B tables above this size (bytes) are evaluated eight cycles
+/// at a time instead of four, so that they are read half as often.
+const CHUNK_BIG_TABLE: usize = 1 << 20;
 
 /// Stage B's position: next output `j`, its input index `n0` and phase `p`.
 #[derive(Clone, Copy)]
@@ -1623,25 +1627,40 @@ impl<F: RsFloat> Interp<F> {
         // can be negative; the windows of outputs `j..` start at `s >= 0` or
         // later).
         let mut base = s - offsets[q] as i64;
-        // Whole cycles are only gathered while four of them stay small (32 KiB
-        // of `f64`).
+        // Whole cycles, in groups of four, row by row: each row is read once
+        // for every cycle of the chunk. Tables larger than the caches are
+        // worth longer chunks (more buffered stage-A output per pass).
+        let groups = if l * taps * std::mem::size_of::<F>() > CHUNK_BIG_TABLE {
+            2
+        } else {
+            1
+        };
         if q == 0 && m <= CHUNK_MAX_STEP {
-            // Whole cycles, four at a time, row by row: each row is read once
-            // for four outputs.
-            let span = (3 * m + offsets[l - 1]) as i64;
-            while j + 4 * l <= out.len() && base + span <= s_end {
+            let cycles = |g: usize| (4 * g * m + offsets[l - 1]) as i64 - m as i64;
+            loop {
+                // Whole groups of four cycles available.
+                let fit = (1..=groups)
+                    .rev()
+                    .find(|&g| j + 4 * g * l <= out.len() && base + cycles(g) <= s_end);
+                let Some(g) = fit else { break };
+                if g < groups && !last {
+                    break;
+                }
                 for (r, row) in coeffs[..l * taps].chunks_exact(taps).enumerate() {
                     let w = (base + offsets[r] as i64) as usize;
-                    let v = F::dot_rows4::<FMA>(
-                        row,
-                        [0, 1, 2, 3].map(|c| &buf[w + c * m..w + c * m + taps]),
-                    );
-                    for (c, v) in v.into_iter().enumerate() {
-                        out[j + c * l + r].write(from_f(v));
+                    for k in 0..g {
+                        let w = w + 4 * k * m;
+                        let v = F::dot_rows4::<FMA>(
+                            row,
+                            [0, 1, 2, 3].map(|c| &buf[w + c * m..w + c * m + taps]),
+                        );
+                        for (c, v) in v.into_iter().enumerate() {
+                            out[j + (4 * k + c) * l + r].write(from_f(v));
+                        }
                     }
                 }
-                j += 4 * l;
-                base += 4 * m as i64;
+                j += 4 * g * l;
+                base += (4 * g * m) as i64;
             }
             if !last {
                 // The rest waits for more of stage A's output.

@@ -478,9 +478,11 @@ enum Stage {
 /// passband).
 const STAGE_B_EXTRA_DB: f64 = 30.0;
 /// Cost of one stage-A output sample (FFT work, spectrum products and
-/// copies) in units of one stage-B multiply-add, measured with AVX2: used to
-/// choose stage A's rate.
-const STAGE_A_COST: f64 = 18.0;
+/// copies) in units of one stage-B multiply-add, measured with AVX2 with
+/// stage B evaluated a few cycles at a time (16000 -> 12699 Hz and
+/// 22050 -> 17501 Hz run faster at the input rate on both core types):
+/// used to choose stage A's rate.
+const STAGE_A_COST: f64 = 24.0;
 /// Decimation factors (powers of two) up to this run as a single FFT stage.
 const FFT_MAX_FACTOR: u64 = 64;
 /// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;
@@ -2588,7 +2590,7 @@ mod tests {
     }
 
     /// The block-wise plan gives the windowed-sinc filter evaluated directly at
-    /// every output position, to the stopband level.
+    /// every output position, to the level of the filters' ripple.
     #[test]
     fn test_block_plan_matches_single_filter() {
         for (in_sr, out_sr) in [
@@ -2617,11 +2619,14 @@ mod tests {
                 let y = resample(&audio, SampleRate::new(out_sr).unwrap(), quality).unwrap();
                 let y = y.as_mono().unwrap().to_vec();
                 assert_eq!(y.len(), direct.len());
-                let err = y
+                // The block plans' filter has a little more attenuation (and
+                // so is a little longer): away from the signal's abrupt start
+                // and end the two differ by their passband ripple.
+                let edge = 2000;
+                let err = y[edge..y.len() - edge]
                     .iter()
-                    .zip(&direct)
+                    .zip(&direct[edge..])
                     .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
-                // Twice the stopband level of the quality.
                 let tol = match quality {
                     ResamplingQuality::High => 2e-6,
                     _ => 2e-5,
