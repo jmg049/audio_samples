@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Downsampling by a ratio whose terms have no prime factor above 7 runs block by block in the
+  frequency domain** (22050 to 16000 or 8000 Hz, 44100 or 48000 to 16000 Hz, 48000 to 44100 Hz
+  and the like; decimation by a power of two keeps its own path). Each output is the
+  windowed-sinc filter evaluated at its exact position, without the second, interpolating stage;
+  the filter's response above the output Nyquist frequency is dropped instead of aliased.
+  Outputs change at the stopband level (about 1e-8 on 22050 to 8000 Hz), stopbands measure
+  equal or lower, and 10 s conversions take 40-55 % less time. `StreamingResampler` converts the
+  same blocks, so it still matches `resample`, but for these ratios it holds back up to one
+  block of input (a few thousand samples) before it returns output.
+- **`resample_scaled`** resamples float audio and multiplies each output sample by a gain as it
+  is written, the same values as multiplying afterwards without the second pass.
+
 - **`wavelet_lengths_with_alpha` and `wavelet_with_alpha` accept one frequency.** The
   bandwidths are given, so the two-frequency minimum, which exists to derive them from the
   spacing, no longer applies. `wavelet_lengths` and `wavelet` still need two.

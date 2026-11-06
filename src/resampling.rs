@@ -1432,10 +1432,51 @@ where
             _ => resample_linear_f64(audio, target_sample_rate),
         },
         KernelKind::Sinc(_) => match <T::Float as AudioSample>::SAMPLE_TYPE {
-            SampleType::F32 => resample_sinc::<T, f32>(audio, target_sample_rate, quality),
-            _ => resample_sinc::<T, f64>(audio, target_sample_rate, quality),
+            SampleType::F32 => resample_sinc::<T, f32>(audio, target_sample_rate, quality, 1.0),
+            _ => resample_sinc::<T, f64>(audio, target_sample_rate, quality, 1.0),
         },
     }
+}
+
+/// Resamples float audio as [`resample`] and multiplies every output sample
+/// `y` by `gain` as it is written, `y · gain` computed in `f64` and rounded to
+/// the sample type: the same values as multiplying the output of
+/// [`resample`] by `gain` afterwards, without a second pass over it.
+///
+/// # Errors
+/// As [`resample`].
+///
+/// # Examples
+/// ```
+/// use audio_samples::{AudioSamples, resample, resample_scaled, sample_rate};
+/// use audio_samples::operations::types::ResamplingQuality;
+/// use ndarray::Array1;
+///
+/// let x = Array1::from_iter((0..22050).map(|i| (i as f64 * 0.01).sin()));
+/// let audio = AudioSamples::new_mono(x, sample_rate!(22050)).unwrap();
+/// let gain = 1.0 / (8000.0f64 / 22050.0).sqrt();
+/// let y = resample_scaled(&audio, sample_rate!(8000), ResamplingQuality::High, gain).unwrap();
+/// let z = resample(&audio, sample_rate!(8000), ResamplingQuality::High).unwrap();
+/// let scaled: Vec<f64> = z.as_mono().unwrap().iter().map(|v| v * gain).collect();
+/// assert_eq!(y.as_mono().unwrap().to_vec(), scaled);
+/// ```
+pub fn resample_scaled<T: AudioFloat>(
+    audio: &AudioSamples<T>,
+    target_sample_rate: SampleRate,
+    quality: ResamplingQuality,
+    gain: f64,
+) -> AudioSampleResult<AudioSamples<'static, T>> {
+    let in_sr = audio.sample_rate().get();
+    let out_sr = target_sample_rate.get();
+    if in_sr != out_sr && matches!(kernel_kind(quality, in_sr, out_sr), KernelKind::Sinc(_)) {
+        return match T::SAMPLE_TYPE {
+            SampleType::F32 => resample_sinc::<T, f32>(audio, target_sample_rate, quality, gain),
+            _ => resample_sinc::<T, f64>(audio, target_sample_rate, quality, gain),
+        };
+    }
+    let mut y = resample(audio, target_sample_rate, quality)?;
+    y.apply(|v| T::of(v.as_f64() * gain));
+    Ok(y)
 }
 
 /// Number of output samples for `n` input samples: `ceil(n · out / in)`.
@@ -1445,10 +1486,13 @@ fn output_len(in_sr: u32, out_sr: u32, n: usize) -> usize {
 
 /// Windowed-sinc resampling in `F` (the sample type's float): the cached
 /// engine for the plan writes every channel straight into the output buffer.
+/// Each output `y` of float audio is written as `y · gain` computed in `f64`
+/// (the callers pass 1 for other sample types).
 fn resample_sinc<T, F>(
     audio: &AudioSamples<T>,
     target_sample_rate: SampleRate,
     quality: ResamplingQuality,
+    gain: f64,
 ) -> AudioSampleResult<AudioSamples<'static, T>>
 where
     T: StandardSample,
@@ -1457,7 +1501,11 @@ where
     let in_sr = audio.sample_rate().get();
     let out_sr = target_sample_rate.get();
     let Some(engine) = engine::cached_engine::<F>(in_sr, out_sr, quality)? else {
-        return resample_direct(audio, target_sample_rate, quality);
+        let mut y = resample_direct(audio, target_sample_rate, quality)?;
+        if gain != 1.0 {
+            y.apply(|v| T::from_float(<T::Float as AudioFloat>::of(v.to_float().as_f64() * gain)));
+        }
+        return Ok(y);
     };
     let n_out = output_len(in_sr, out_sr, audio.samples_per_channel().get());
     let channels = audio.num_channels().get() as usize;
@@ -1479,8 +1527,9 @@ where
                     ),
                 )
             };
-            engine.run_native(x, out);
+            engine.run_native(x, out, gain);
         } else {
+            debug_assert!(gain == 1.0);
             engine.run(x, out, &to_f, &from_f);
         }
     };
@@ -1626,7 +1675,7 @@ fn resample_rows_in<T: AudioFloat, F: engine::RsFloat>(
                     ),
                 )
             };
-            engine.run_native(x, out);
+            engine.run_native(x, out, 1.0);
         } else {
             engine.run(&row, dst, &to_f, &from_f);
         }
@@ -2480,6 +2529,48 @@ mod tests {
                         "{in_sr} -> {out_sr} {quality:?} n={n}: {err:e}"
                     );
                 }
+            }
+        }
+    }
+
+    /// `resample_scaled` gives `resample`'s output times the gain (in `f64`,
+    /// rounded to the sample type), bit for bit, for every kind of plan and
+    /// both float types.
+    #[test]
+    fn test_resample_scaled_is_resample_times_gain() {
+        fn check<T: AudioFloat>(in_sr: u32, out_sr: u32, quality: ResamplingQuality) {
+            let x: Vec<T> = (0..9001)
+                .map(|i| T::of((f64::from(i) * 0.13).sin() * 0.6))
+                .collect();
+            let audio =
+                AudioSamples::new_mono(Array1::from(x), SampleRate::new(in_sr).unwrap()).unwrap();
+            let rate = SampleRate::new(out_sr).unwrap();
+            let gain = 1.0 / (f64::from(out_sr) / f64::from(in_sr)).sqrt();
+            let y = resample_scaled(&audio, rate, quality, gain).unwrap();
+            let z = resample(&audio, rate, quality).unwrap();
+            let want: Vec<T> = z
+                .as_mono()
+                .unwrap()
+                .iter()
+                .map(|&v| T::of(v.as_f64() * gain))
+                .collect();
+            assert_eq!(
+                y.as_mono().unwrap().to_vec(),
+                want,
+                "{in_sr} -> {out_sr} {quality:?}"
+            );
+        }
+        for (in_sr, out_sr) in [
+            (22050, 8000),
+            (16000, 8000),
+            (22050, 44100),
+            (16000, 22050),
+            (44100, 300),
+            (22050, 22050),
+        ] {
+            for quality in [ResamplingQuality::Fast, ResamplingQuality::High] {
+                check::<f32>(in_sr, out_sr, quality);
+                check::<f64>(in_sr, out_sr, quality);
             }
         }
     }
