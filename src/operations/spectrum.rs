@@ -1,20 +1,20 @@
-//! librosa-compatible spectral analysis: STFT / ISTFT, dB scaling, mel
-//! spectrograms, MFCCs and frame-wise feature utilities.
+//! Spectral analysis: STFT / ISTFT, dB scaling, mel spectrograms, MFCCs and
+//! frame-wise feature utilities.
 //!
 //! ## What
 //!
 //! This module provides the [`AudioSpectrum`] trait and the free functions it is
-//! built from. Together they reproduce librosa 1.0's core spectral pipeline:
+//! built from:
 //!
-//! | librosa | here |
+//! | Operation | Items |
 //! |---|---|
-//! | `librosa.stft` / `librosa.istft` | [`AudioSpectrum::stft_matrix`] / [`AudioSpectrum::istft_matrix`] ([`stft`], [`istft`]) |
-//! | `numpy.abs(librosa.stft(y)) ** power` | [`AudioSpectrum::spectrogram_matrix`] |
-//! | `librosa.feature.melspectrogram` | [`AudioSpectrum::melspectrogram`] ([`melspectrogram_from_spectrogram`]) |
-//! | `librosa.feature.mfcc` | [`AudioSpectrum::mfcc_frames`] ([`mfcc_from_mel_db`]) |
-//! | `librosa.power_to_db` / `amplitude_to_db` / `db_to_power` / `db_to_amplitude` | [`power_to_db`], [`amplitude_to_db`], [`db_to_power`], [`db_to_amplitude`] |
-//! | `librosa.feature.delta` / `stack_memory` | [`delta`], [`stack_memory`] |
-//! | `librosa.util.frame` | [`frame`] |
+//! | Complex STFT and its inverse | [`AudioSpectrum::stft_matrix`] / [`AudioSpectrum::istft_matrix`] ([`stft`], [`istft`]) |
+//! | Magnitude spectrogram raised to a power | [`AudioSpectrum::spectrogram_matrix`] |
+//! | Mel spectrogram | [`AudioSpectrum::melspectrogram`] ([`melspectrogram_from_spectrogram`]) |
+//! | MFCC | [`AudioSpectrum::mfcc_frames`] ([`mfcc_from_mel_db`]) |
+//! | Power and amplitude to dB and back | [`power_to_db`], [`amplitude_to_db`], [`db_to_power`], [`db_to_amplitude`] |
+//! | Derivatives and time-delay stacking | [`delta`], [`stack_memory`] |
+//! | Overlapping frames of a signal | [`frame`] |
 //!
 //! Windows and mel filterbanks live in [`crate::operations::filterbanks`];
 //! unit conversions (mel scales, frames/samples/time) in
@@ -23,12 +23,13 @@
 //! ## Why
 //!
 //! The spectrogram methods of [`AudioTransforms`](crate::AudioTransforms) delegate
-//! to the `spectrograms` crate, whose conventions differ from librosa's
-//! (symmetric windows, an absolute dB floor, an unnormalised DCT, mono only).
-//! Code ported from Python, and results compared with published librosa
-//! features, need librosa's exact conventions. Every config struct here
-//! defaults to librosa's defaults, so `X::default()` gives librosa-equivalent
-//! output (to floating-point round-off).
+//! to the `spectrograms` crate, whose conventions differ (symmetric windows, an
+//! absolute dB floor, an unnormalised DCT, mono only). This module uses periodic
+//! windows, dB relative to a configurable reference with an optional `top_db`
+//! floor, an orthonormal DCT, and any number of channels. Every config struct
+//! has a `librosa()` constructor ([`DbConfig`] has `librosa_power()` and
+//! `librosa_amplitude()`); only the [`MfccConfig`] and [`DbConfig`] defaults
+//! differ from them, in having no 80 dB floor.
 //!
 //! ## How
 //!
@@ -58,18 +59,18 @@
 //!
 //! let audio = sine_wave::<f32>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //!
-//! // librosa.stft(y): (1, 1025, 22) complex. f32 audio gives Complex<f32>.
+//! // (channels, bins, frames) complex. f32 audio gives Complex<f32>.
 //! let stft = audio.stft_matrix(&StftConfig::default()).unwrap();
 //! assert_eq!(stft.dim(), (1, 1025, 22));
 //! let _: &ndarray::Array3<num_complex::Complex<f32>> = &stft;
 //!
-//! // librosa.istft(D, length=len(y)) reconstructs the signal.
+//! // The inverse with the original length reconstructs the signal.
 //! let n = audio.samples_per_channel();
 //! let y = AudioSamples::<f32>::istft_matrix(&stft, &StftConfig::default(), sample_rate!(22050), Some(n))
 //!     .unwrap();
 //! assert_eq!(y.samples_per_channel(), n);
 //!
-//! // librosa.feature.mfcc(y=y, sr=22050): (1, 20, 22).
+//! // 20 coefficients per frame: (1, 20, 22).
 //! let mfcc = audio.mfcc_frames(&MfccConfig::default()).unwrap();
 //! assert_eq!(mfcc.dim(), (1, 20, 22));
 //! ```
@@ -119,8 +120,7 @@ fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
 // STFT configuration
 // =============================================================================
 
-/// How the signal is extended at both ends when frames are centred
-/// (librosa's `pad_mode`, applied with `numpy.pad`).
+/// How the signal is extended at both ends when frames are centred.
 ///
 /// # Examples
 ///
@@ -131,19 +131,18 @@ fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StftPadMode {
-    /// Zero padding (`numpy.pad(mode="constant")`). librosa 1.0's default.
+    /// Zero padding. The default.
     #[default]
     Constant,
-    /// Mirror without repeating the edge sample: `d c b | a b c d | c b a`
-    /// (`mode="reflect"`, librosa's default before 0.10).
+    /// Mirror without repeating the edge sample: `d c b | a b c d | c b a`.
     Reflect,
-    /// Repeat the edge sample: `a a a | a b c d | d d d` (`mode="edge"`).
+    /// Repeat the edge sample: `a a a | a b c d | d d d`.
     Edge,
-    /// Mirror including the edge sample: `c b a | a b c d | d c b` (`mode="symmetric"`).
+    /// Mirror including the edge sample: `c b a | a b c d | d c b`.
     Symmetric,
 }
 
-/// Configuration of a short-time Fourier transform, mirroring `librosa.stft`.
+/// Configuration of a short-time Fourier transform.
 ///
 /// ## Purpose
 ///
@@ -155,7 +154,7 @@ pub enum StftPadMode {
 ///
 /// Pass to [`AudioSpectrum::stft_matrix`], [`AudioSpectrum::istft_matrix`],
 /// [`AudioSpectrum::spectrogram_matrix`], or embed in a
-/// [`MelSpectrogramConfig`]. `Default` reproduces librosa's defaults:
+/// [`MelSpectrogramConfig`]. `Default` is
 /// `n_fft = 2048`, `hop_length = win_length / 4`, `win_length = n_fft`, a
 /// periodic Hann window, centred frames and zero padding.
 ///
@@ -184,25 +183,24 @@ pub enum StftPadMode {
 pub struct StftConfig {
     /// FFT length in samples (frame length after zero-padding the window). Sets the
     /// frequency resolution: `n_fft / 2 + 1` bins spaced `sample_rate / n_fft` Hz apart.
-    /// librosa default: 2048.
+    /// Default: 2048.
     pub n_fft: NonZeroUsize,
     /// Samples between the starts of successive frames. `None` means
-    /// `win_length / 4` (librosa's default; 512 for the default `n_fft`). Smaller
+    /// `win_length / 4` (the default; 512 for the default `n_fft`). Smaller
     /// hops give more frames (finer time resolution) at a higher cost.
     pub hop_length: Option<NonZeroUsize>,
     /// Length of the window in samples, `<= n_fft`. `None` means `n_fft`. A shorter
-    /// window is zero-padded symmetrically to `n_fft` (librosa's `pad_center`),
-    /// trading frequency resolution for time resolution.
+    /// window is zero-padded symmetrically to `n_fft`, trading frequency
+    /// resolution for time resolution.
     pub win_length: Option<NonZeroUsize>,
-    /// Analysis window, computed in its periodic form (SciPy `fftbins=True`) as
-    /// librosa does. librosa default: Hann.
+    /// Analysis window, computed in its periodic form. Default: Hann.
     pub window: Window,
-    /// If `true` (librosa's default) the signal is padded by `n_fft / 2` samples at
+    /// If `true` (the default) the signal is padded by `n_fft / 2` samples at
     /// both ends so that frame `t` is centred on sample `t * hop_length`. If
     /// `false`, frame `t` starts at sample `t * hop_length` and the signal must be
     /// at least `n_fft` samples long.
     pub center: bool,
-    /// How the signal is extended when `center` is `true`. librosa 1.0 default:
+    /// How the signal is extended when `center` is `true`. Default:
     /// [`StftPadMode::Constant`] (zeros).
     pub pad_mode: StftPadMode,
 }
@@ -221,15 +219,13 @@ impl Default for StftConfig {
 }
 
 impl StftConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's defaults. Currently the same as [`Default`]; use this
-    /// constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -332,7 +328,8 @@ impl StftConfig {
 // =============================================================================
 
 /// Source index into a signal of length `len` for padded position `i` (may be
-/// negative or `>= len`), following `numpy.pad` semantics for each mode.
+/// negative or `>= len`). The mirror modes repeat periodically, so padding longer
+/// than the signal keeps reflecting.
 /// Returns `None` for constant (zero) padding outside the signal.
 fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
     let n = len as isize;
@@ -374,8 +371,7 @@ pub(crate) fn pad_signal<F: AudioFloat>(x: &[F], pad: usize, mode: StftPadMode) 
     out
 }
 
-/// Computes the STFT of every row of `signal` (shape `(channels, samples)`),
-/// equivalent to `librosa.stft`.
+/// Computes the STFT of every row of `signal` (shape `(channels, samples)`).
 ///
 /// This is the array-level function behind [`AudioSpectrum::stft_matrix`]; use it
 /// when the signal is not held in an [`AudioSamples`].
@@ -417,7 +413,7 @@ pub(crate) fn pad_signal<F: AudioFloat>(x: &[F], pad: usize, mode: StftPadMode) 
 /// # References
 ///
 /// J. B. Allen, "Short term spectral analysis, synthesis, and modification by
-/// discrete Fourier transform," *IEEE Trans. ASSP* 25(3), 1977; librosa `core.stft`.
+/// discrete Fourier transform," *IEEE Trans. ASSP* 25(3), 1977.
 pub fn stft<F: AudioFloat>(
     signal: ArrayView2<'_, F>,
     config: &StftConfig,
@@ -522,7 +518,7 @@ pub fn stft_into<F: AudioFloat>(
 
 /// Fills `frame` with the windowed padded frame that starts at signal index
 /// `start` (negative or running past the end where the frame overlaps the
-/// padding), with the padding of `mode` (`numpy.pad` semantics).
+/// padding), with the padding of `mode`.
 #[inline]
 pub(crate) fn padded_frame_into<F: AudioFloat>(
     x: &[F],
@@ -555,10 +551,8 @@ pub(crate) fn padded_frame_into<F: AudioFloat>(
 
 /// The sum of squares of every frame of a padded signal: for frame `t`,
 /// `sum_{k < frame_length} xp[t * hop + k]^2` where `xp` is `x` padded by
-/// `pad` samples at both ends with `mode` (`numpy.pad` semantics), summed in
-/// order of increasing `k` starting from zero (NumPy's order when it
-/// reduces the frame axis of `librosa.util.frame`, and the order of a
-/// sequential sum).
+/// `pad` samples at both ends with `mode`, summed in order of increasing `k`
+/// starting from zero (the order of a sequential sum).
 ///
 /// Frames are processed in tiles. The squared samples of a tile are written
 /// once into a small `(hop, width)` buffer whose row `r` holds the samples
@@ -764,14 +758,14 @@ impl<F: AudioFloat> StftFrames<F> {
     }
 }
 
-/// Reconstructs signals from an STFT matrix, equivalent to `librosa.istft`.
+/// Reconstructs signals from an STFT matrix.
 ///
 /// Each frame is inverse-FFT'd, windowed with the same (periodic, zero-padded)
 /// window and overlap-added; the sum is divided by the window's sum-squared envelope
 /// ([`window_sumsquare`](crate::operations::filterbanks::window_sumsquare)) wherever
-/// that envelope exceeds the smallest positive normal value of `F` (librosa's
-/// `tiny`). The computation runs in the element type `F` of `stft_matrix`. With centred frames the
-/// `n_fft / 2` padding is trimmed. This is the least-squares inverse of [`stft`]
+/// that envelope exceeds the smallest positive normal value of `F`. The
+/// computation runs in the element type `F` of `stft_matrix`. With centred frames
+/// the `n_fft / 2` padding is trimmed. This is the least-squares inverse of [`stft`]
 /// (Griffin and Lim), so `istft(stft(x)) == x` up to round-off.
 ///
 /// # Arguments
@@ -794,11 +788,8 @@ impl<F: AudioFloat> StftFrames<F> {
 /// `n_fft`, there are no frames, the resulting length is 0, or the output would
 /// exceed 2^31 samples.
 ///
-/// # Differences from librosa
-///
-/// librosa infers `n_fft` from the bin count when not given; here `config.n_fft` is
-/// authoritative and a mismatch is an error. `length = Some(0)` is rejected (librosa
-/// treats `length=0` like `None`).
+/// `config.n_fft` is authoritative: it is not inferred from the bin count, and a
+/// mismatch is an error. `length = Some(0)` is rejected.
 ///
 /// # Examples
 ///
@@ -817,7 +808,7 @@ impl<F: AudioFloat> StftFrames<F> {
 /// # References
 ///
 /// D. W. Griffin and J. S. Lim, "Signal estimation from modified short-time Fourier
-/// transform," *IEEE Trans. ASSP* 32(2), 1984; librosa `core.istft`.
+/// transform," *IEEE Trans. ASSP* 32(2), 1984.
 pub fn istft<F: AudioFloat>(
     stft_matrix: ArrayView3<'_, Complex<F>>,
     config: &StftConfig,
@@ -903,7 +894,8 @@ pub fn istft<F: AudioFloat>(
             for (dst, src) in spec.iter_mut().zip(chan.column(t)) {
                 *dst = *src;
             }
-            // numpy's irfft ignores the imaginary parts of the DC and Nyquist bins.
+            // The imaginary parts of the DC and (for even n_fft) Nyquist bins are
+            // ignored, as a real inverse FFT requires.
             spec[0].im = F::zero();
             if n_fft.is_multiple_of(2) {
                 spec[n_bins - 1].im = F::zero();
@@ -936,8 +928,7 @@ pub fn istft<F: AudioFloat>(
     Ok(out)
 }
 
-/// Splits a 1-D signal into overlapping frames, equivalent to
-/// `librosa.util.frame(x, frame_length=frame_length, hop_length=hop_length)`.
+/// Splits a 1-D signal into overlapping frames.
 ///
 /// # Arguments
 ///
@@ -1180,8 +1171,8 @@ unsafe fn frame_copy_avx_f64(x: &[f64], fl: usize, hop: usize, n: usize, out: *m
 ///
 /// The same frames as [`frame`] (a `(frame_length, n_frames)` matrix whose
 /// column `t` is `x[t * hop_length .. t * hop_length + frame_length]`), as a
-/// read-only view into `x` with strides `(1, hop_length)`, like the view
-/// `librosa.util.frame` returns. Use [`frame`] for an owned copy.
+/// read-only view into `x` with strides `(1, hop_length)`. Use [`frame`] for an
+/// owned copy.
 ///
 /// # Arguments
 ///
@@ -1231,31 +1222,31 @@ pub fn frame_view<T>(
 // dB scaling
 // =============================================================================
 
-/// Reference value that dB conversions are relative to (librosa's `ref`).
+/// Reference value that dB conversions are relative to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DbReference {
-    /// A fixed reference; its absolute value is used (librosa `ref=<float>`).
-    /// librosa's default is `Value(1.0)`, i.e. absolute dB.
+    /// A fixed reference; its absolute value is used. The default configurations
+    /// use `Value(1.0)`, i.e. absolute dB.
     Value(f64),
-    /// The maximum of the input over the reduction axes (librosa `ref=numpy.max`),
-    /// so the loudest element maps to 0 dB.
+    /// The maximum of the input over the reduction axes, so the loudest element
+    /// maps to 0 dB.
     Max,
 }
 
-/// Which elements share a reference maximum and a `top_db` floor (librosa's `axes`).
+/// Which elements share a reference maximum and a `top_db` floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DbAxes {
-    /// librosa's `axes="auto"` (the default): the last two axes for arrays with two or
+    /// The default: the last two axes for arrays with two or
     /// more dimensions, so each channel of a `(channels, features, frames)` array is
     /// referenced and floored independently; the whole array otherwise.
     #[default]
     Auto,
-    /// The whole array (librosa `axes=None`).
+    /// The whole array.
     All,
 }
 
-/// Configuration of a power/amplitude-to-dB conversion, mirroring librosa's
-/// `power_to_db` / `amplitude_to_db` arguments.
+/// Configuration of a power/amplitude-to-dB conversion ([`power_to_db`],
+/// [`amplitude_to_db`]).
 ///
 /// ## Purpose
 ///
@@ -1268,9 +1259,8 @@ pub enum DbAxes {
 /// with no dynamic-range floor; use [`DbConfig::amplitude`] for amplitudes (its
 /// `amin` is `1e-5`). Neither clips the output: set `top_db` to request a floor.
 ///
-/// librosa's `power_to_db` and `amplitude_to_db` floor the output at 80 dB below
-/// the maximum by default. [`DbConfig::librosa_power`] and
-/// [`DbConfig::librosa_amplitude`] reproduce those defaults exactly.
+/// [`DbConfig::librosa_power`] and [`DbConfig::librosa_amplitude`] floor the
+/// output at 80 dB below the maximum.
 ///
 /// ## Invariants
 ///
@@ -1288,17 +1278,18 @@ pub enum DbAxes {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct DbConfig {
-    /// The 0 dB reference. librosa default: `Value(1.0)`.
+    /// The 0 dB reference. Default: `Value(1.0)`.
     pub reference: DbReference,
     /// Values (and the reference) are clamped below at `amin` before the logarithm,
-    /// avoiding `log(0)`. In the units of the input: `1e-10` for power (librosa
-    /// `power_to_db`), `1e-5` for amplitude (`amplitude_to_db`). Must be positive.
+    /// avoiding `log(0)`. In the units of the input: `1e-10` for power
+    /// ([`DbConfig::power`]), `1e-5` for amplitude ([`DbConfig::amplitude`]). Must be
+    /// positive.
     pub amin: f64,
     /// If `Some(t)`, the output is floored at `max - t` dB, where `max` is taken over
     /// the same axes as the reference ([`DbAxes`]). `None` (the default) applies no
-    /// floor, so values below `max - t` are kept. librosa's default is `Some(80.0)`.
+    /// floor, so values below `max - t` are kept.
     pub top_db: Option<f64>,
-    /// Reduction axes for [`DbReference::Max`] and `top_db`. librosa default: `Auto`.
+    /// Reduction axes for [`DbReference::Max`] and `top_db`. Default: `Auto`.
     pub axes: DbAxes,
 }
 
@@ -1330,8 +1321,8 @@ impl DbConfig {
         }
     }
 
-    /// librosa `power_to_db` defaults: `ref=1.0`, `amin=1e-10`, `top_db=80`,
-    /// `axes="auto"`. The output is floored at 80 dB below the maximum.
+    /// Settings matching librosa 1.0's `power_to_db` defaults: [`DbConfig::power`]
+    /// with `top_db = Some(80.0)`.
     #[must_use]
     pub fn librosa_power() -> Self {
         Self {
@@ -1340,8 +1331,8 @@ impl DbConfig {
         }
     }
 
-    /// librosa `amplitude_to_db` defaults: `ref=1.0`, `amin=1e-5`, `top_db=80`,
-    /// `axes="auto"`. The output is floored at 80 dB below the maximum.
+    /// Settings matching librosa 1.0's `amplitude_to_db` defaults:
+    /// [`DbConfig::amplitude`] with `top_db = Some(80.0)`.
     #[must_use]
     pub fn librosa_amplitude() -> Self {
         Self {
@@ -1516,8 +1507,7 @@ fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
     acc.iter().copied().fold(m, F::max)
 }
 
-/// Converts a power spectrogram (or any power-like array) to decibels, equivalent to
-/// `librosa.power_to_db`.
+/// Converts a power spectrogram (or any power-like array) to decibels.
 ///
 /// Computes `10 log10(max(amin, S)) - 10 log10(max(amin, |ref|))`, then, if
 /// `top_db` is set, floors the result at `max - top_db` where the maximum is taken
@@ -1527,9 +1517,9 @@ fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
 /// # Arguments
 ///
 /// * `s` - Non-negative power values, any dimensionality (negative values are clamped
-///   to `amin`, as in librosa).
-/// * `config` - Reference, `amin`, `top_db` and axes. Use [`DbConfig::default`] for
-///   librosa's defaults.
+///   to `amin`).
+/// * `config` - Reference, `amin`, `top_db` and axes; [`DbConfig::default`] has no
+///   floor.
 ///
 /// # Returns
 ///
@@ -1551,7 +1541,7 @@ fn block_max<F: AudioFloat>(chunk: &[F]) -> F {
 /// let db = power_to_db(&s, &DbConfig::default()).unwrap();
 /// assert_eq!(db, array![[0.0, -10.0], [-20.0, -100.0]]);
 ///
-/// // librosa's default floors the output at max - 80 dB.
+/// // Floor the output at max - 80 dB.
 /// let floored = power_to_db(&s, &DbConfig::librosa_power()).unwrap();
 /// assert_eq!(floored, array![[0.0, -10.0], [-20.0, -80.0]]);
 ///
@@ -1590,8 +1580,7 @@ fn power_to_db_owned<F: AudioFloat, D: Dimension>(
     ))
 }
 
-/// Converts an amplitude (magnitude) spectrogram to decibels, equivalent to
-/// `librosa.amplitude_to_db`.
+/// Converts an amplitude (magnitude) spectrogram to decibels.
 ///
 /// Equal to [`power_to_db`] applied to `|S|^2` with reference `ref^2` and
 /// `amin^2`, i.e. `20 log10(max(amin, |S|) / max(amin, |ref|))` with the same
@@ -1601,7 +1590,7 @@ fn power_to_db_owned<F: AudioFloat, D: Dimension>(
 ///
 /// * `s` - Amplitudes (absolute values are taken), any dimensionality. For complex
 ///   STFT values pass `stft.mapv(|z| z.norm())`.
-/// * `config` - Use [`DbConfig::amplitude`] for librosa's defaults (`amin = 1e-5`);
+/// * `config` - Use [`DbConfig::amplitude`] for the amplitude default `amin = 1e-5`;
 ///   [`DbConfig::default`] has the *power* default `amin = 1e-10`.
 ///
 /// # Returns
@@ -1649,8 +1638,7 @@ where
     ))
 }
 
-/// Converts decibels back to power, equivalent to `librosa.db_to_power(S_db, ref=reference)`:
-/// `reference * 10^(S_db / 10)`.
+/// Converts decibels back to power: `reference * 10^(S_db / 10)`.
 ///
 /// This inverts [`power_to_db`] for values above the `amin` / `top_db` floors.
 /// The result has the element type `F` of `s_db`; `reference` is rounded to `F`.
@@ -1694,8 +1682,7 @@ where
     out
 }
 
-/// Converts decibels back to amplitude, equivalent to
-/// `librosa.db_to_amplitude(S_db, ref=reference)`: `sqrt(reference^2 * 10^(S_db / 10))`.
+/// Converts decibels back to amplitude: `sqrt(reference^2 * 10^(S_db / 10))`.
 /// The result has the element type `F` of `s_db`; `reference^2` is rounded to `F`.
 ///
 /// # Examples
@@ -1736,7 +1723,7 @@ where
 // Mel spectrogram and MFCC configuration
 // =============================================================================
 
-/// Configuration of a mel spectrogram, mirroring `librosa.feature.melspectrogram`.
+/// Configuration of a mel spectrogram.
 ///
 /// ## Purpose
 ///
@@ -1746,8 +1733,8 @@ where
 /// ## Intended usage
 ///
 /// Pass to [`AudioSpectrum::melspectrogram`] or embed in an [`MfccConfig`].
-/// `Default` reproduces librosa's defaults: `n_fft = 2048`, `hop_length = 512`
-/// (librosa's melspectrogram fixes 512 rather than `win_length / 4`), periodic
+/// `Default` is `n_fft = 2048`, `hop_length = 512` (fixed, rather than
+/// `win_length / 4`), periodic
 /// Hann window, centred with zero padding, 128 Slaney-scale bands from 0 Hz to
 /// Nyquist with Slaney normalisation, `power = 2` (a power spectrogram).
 ///
@@ -1768,12 +1755,12 @@ where
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct MelSpectrogramConfig {
-    /// STFT parameters. librosa defaults, with `hop_length = Some(512)`.
+    /// STFT parameters. Default: [`StftConfig::default`] with `hop_length = Some(512)`.
     pub stft: StftConfig,
-    /// Mel filterbank parameters. librosa defaults.
+    /// Mel filterbank parameters. Default: [`MelFilterbankConfig::default`].
     pub mel: MelFilterbankConfig,
     /// Exponent applied to the STFT magnitude before the mel projection: `2.0` for
-    /// power (librosa's default), `1.0` for magnitude. Must be finite and positive.
+    /// power (the default), `1.0` for magnitude. Must be finite and positive.
     pub power: f64,
 }
 
@@ -1788,15 +1775,13 @@ impl Default for MelSpectrogramConfig {
 }
 
 impl MelSpectrogramConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's defaults. Currently the same as [`Default`]; use this
-    /// constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -1850,30 +1835,30 @@ fn validate_power(power: f64) -> AudioSampleResult<()> {
     }
 }
 
-/// The DCT type used to compute cepstral coefficients (SciPy `scipy.fft.dct` `type`).
+/// The DCT type used to compute cepstral coefficients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DctType {
     /// DCT-I (requires at least 2 mel bands).
     One,
-    /// DCT-II, the standard MFCC transform (librosa default).
+    /// DCT-II, the standard MFCC transform (the default).
     #[default]
     Two,
     /// DCT-III (the inverse of an unnormalised DCT-II up to scale).
     Three,
 }
 
-/// Normalisation of the DCT (SciPy `scipy.fft.dct` `norm`).
+/// Normalisation of the DCT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DctNorm {
-    /// No normalisation (SciPy `norm=None` / `"backward"`). DCT-II coefficients are then
+    /// No normalisation. DCT-II coefficients are then
     /// `2 sum_n x[n] cos(pi k (2n + 1) / (2N))`.
     Unnormalized,
-    /// Orthonormal DCT (SciPy / librosa `norm="ortho"`, the default).
+    /// Orthonormal DCT (the default).
     #[default]
     Ortho,
 }
 
-/// Configuration of MFCC extraction, mirroring `librosa.feature.mfcc`.
+/// Configuration of MFCC extraction.
 ///
 /// ## Purpose
 ///
@@ -1884,10 +1869,10 @@ pub enum DctNorm {
 /// ## Intended usage
 ///
 /// Pass to [`AudioSpectrum::mfcc_frames`] (from audio) or [`mfcc_from_mel_db`]
-/// (from a precomputed log-mel spectrogram, like librosa's `mfcc(S=...)`).
-/// `Default` reproduces librosa's defaults: 20 coefficients from a 128-band
-/// Slaney mel power spectrogram (librosa `mel_norm="slaney"`), `power_to_db`
-/// with `ref=1`, `amin=1e-10`, `top_db=80`, orthonormal DCT-II, no liftering.
+/// (from a precomputed log-mel spectrogram).
+/// `Default` is 20 coefficients from a 128-band Slaney mel power spectrogram
+/// with Slaney-normalised filters, [`power_to_db`] with `reference = 1`,
+/// `amin = 1e-10` and no floor, orthonormal DCT-II, no liftering.
 ///
 /// ## Invariants
 ///
@@ -1909,23 +1894,23 @@ pub enum DctNorm {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct MfccConfig {
-    /// Mel spectrogram parameters (librosa's `**kwargs` and `mel_norm`). librosa defaults.
+    /// Mel spectrogram parameters. Default: [`MelSpectrogramConfig::default`].
     pub mel_spectrogram: MelSpectrogramConfig,
     /// Conversion of the mel power spectrogram to dB. Default: [`DbConfig::power`]
-    /// (no dynamic-range floor). librosa applies `power_to_db`'s defaults, which
-    /// floor the mel spectrogram at 80 dB below its maximum
-    /// ([`DbConfig::librosa_power`], used by [`MfccConfig::librosa`]).
+    /// (no dynamic-range floor). [`DbConfig::librosa_power`], used by
+    /// [`MfccConfig::librosa`], floors the mel spectrogram at 80 dB below its
+    /// maximum.
     pub db: DbConfig,
     /// Number of cepstral coefficients kept (the first `n_mfcc` DCT outputs).
-    /// librosa default: 20. Must not exceed the number of mel bands.
+    /// Default: 20. Must not exceed the number of mel bands.
     pub n_mfcc: NonZeroUsize,
-    /// DCT type. librosa default: [`DctType::Two`].
+    /// DCT type. Default: [`DctType::Two`].
     pub dct_type: DctType,
-    /// DCT normalisation. librosa default: [`DctNorm::Ortho`].
+    /// DCT normalisation. Default: [`DctNorm::Ortho`].
     pub dct_norm: DctNorm,
     /// Cepstral liftering coefficient `L`: if positive, coefficient `k` (0-based) is
     /// scaled by `1 + (L / 2) sin(pi (k + 1) / L)`, de-emphasising high quefrencies
-    /// less than the low ones. `0` disables liftering (librosa default).
+    /// less than the low ones. `0` disables liftering (the default).
     pub lifter: f64,
 }
 
@@ -1944,13 +1929,13 @@ impl Default for MfccConfig {
 
 impl MfccConfig {
     /// Returns the default configuration (same as [`Default`]). It differs from
-    /// librosa only in `db`, which applies no dynamic-range floor.
+    /// [`MfccConfig::librosa`] only in `db`, which applies no dynamic-range floor.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.mfcc` defaults, including the 80 dB floor of the
+    /// Settings matching librosa 1.0's defaults, including the 80 dB floor of the
     /// mel spectrogram (`db = DbConfig::librosa_power()`).
     #[must_use]
     pub fn librosa() -> Self {
@@ -2049,7 +2034,8 @@ fn cos_pi_ratio(m: usize, denom: usize) -> f64 {
     (std::f64::consts::PI * m as f64 / denom as f64).cos()
 }
 
-/// The first `n_out` rows of the `n_in`-point DCT matrix (SciPy conventions).
+/// The first `n_out` rows of the `n_in`-point DCT matrix, scaled as [`DctNorm`]
+/// describes.
 fn dct_matrix(n_out: usize, n_in: usize, dct_type: DctType, norm: DctNorm) -> Array2<f64> {
     let nf = n_in as f64;
     let ortho = norm == DctNorm::Ortho;
@@ -2107,8 +2093,7 @@ fn dct_matrix(n_out: usize, n_in: usize, dct_type: DctType, norm: DctNorm) -> Ar
     })
 }
 
-/// Computes MFCCs from a log-power (dB) mel spectrogram, equivalent to
-/// `librosa.feature.mfcc(S=mel_db, n_mfcc=..., dct_type=..., norm=..., lifter=...)`.
+/// Computes MFCCs from a log-power (dB) mel spectrogram.
 ///
 /// Applies the DCT along the second-to-last axis (the mel axis), keeps the first
 /// `n_mfcc` coefficients and applies the lifter. Only the `n_mfcc`, `dct_type`,
@@ -2130,12 +2115,8 @@ fn dct_matrix(n_out: usize, n_in: usize, dct_type: DctType, norm: DctNorm) -> Ar
 /// # Errors
 ///
 /// [`ParameterError`] if `mel_db` has fewer than two dimensions, an empty mel axis, or
-/// the DCT/lifter parameters are invalid for its number of bands.
-///
-/// # Differences from librosa
-///
-/// librosa silently returns fewer than `n_mfcc` rows when `n_mfcc > n_mels`; this is an
-/// error here.
+/// the DCT/lifter parameters are invalid for its number of bands (including `n_mfcc`
+/// greater than the number of mel bands).
 ///
 /// # Examples
 ///
@@ -2156,7 +2137,7 @@ fn dct_matrix(n_out: usize, n_in: usize, dct_type: DctType, norm: DctNorm) -> Ar
 ///
 /// S. Davis and P. Mermelstein, "Comparison of parametric representations for
 /// monosyllabic word recognition in continuously spoken sentences," *IEEE Trans. ASSP*
-/// 28(4), 1980; librosa `feature.mfcc`.
+/// 28(4), 1980.
 pub fn mfcc_from_mel_db<F, S, D>(
     mel_db: &ArrayBase<S, D>,
     config: &MfccConfig,
@@ -2269,8 +2250,7 @@ fn mfcc_blocks<F: AudioFloat>(
     });
 }
 
-/// Projects a (power or magnitude) spectrogram onto mel bands, equivalent to
-/// `librosa.feature.melspectrogram(S=spectrogram, sr=sample_rate, n_fft=n_fft, ...)`.
+/// Projects a (power or magnitude) spectrogram onto mel bands.
 ///
 /// # Arguments
 ///
@@ -2283,8 +2263,7 @@ fn mfcc_blocks<F: AudioFloat>(
 /// # Returns
 ///
 /// A `(channels, n_mels, n_frames)` mel spectrogram in the element type `F` of
-/// `spectrogram`. The filterbank is computed in `f64` and rounded to `F` once
-/// (for `f32` this matches librosa's default `float32` filterbank closely).
+/// `spectrogram`. The filterbank is computed in `f64` and rounded to `F` once.
 ///
 /// # Errors
 ///
@@ -2418,8 +2397,8 @@ pub(crate) fn banded_dot_into<F: AudioFloat>(
 
 /// `|z|^power`.
 ///
-/// Computed from `re² + im²` rather than numpy's `hypot`-based `abs(z)`
-/// (the libm `hypot` call dominated spectrogram computation); the two agree to
+/// Computed from `re² + im²` rather than a `hypot`-based `abs(z)` (the libm
+/// `hypot` call dominated spectrogram computation); the two agree to
 /// within about one ulp. STFT values are far from the range where the squares
 /// could overflow or underflow.
 fn magnitude_power<F: AudioFloat>(z: Complex<F>, power: f64) -> F {
@@ -2437,16 +2416,16 @@ fn magnitude_power<F: AudioFloat>(z: Complex<F>, power: f64) -> F {
 // delta / stack_memory
 // =============================================================================
 
-/// How [`delta`] handles the edges of the data (SciPy `savgol_filter` `mode`).
+/// How [`delta`] handles the edges of the data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DeltaMode {
     /// Fit a polynomial to the first and last `width` samples and differentiate it
-    /// at the edge points (librosa default). Requires `width <= ` the axis length.
+    /// at the edge points (the default). Requires `width <= ` the axis length.
     #[default]
     Interp,
     /// Repeat the edge sample.
     Nearest,
-    /// Mirror without repeating the edge sample (SciPy `"mirror"`).
+    /// Mirror without repeating the edge sample.
     Mirror,
     /// Pad with zeros.
     Constant,
@@ -2454,7 +2433,7 @@ pub enum DeltaMode {
     Wrap,
 }
 
-/// Configuration of [`delta`], mirroring `librosa.feature.delta`.
+/// Configuration of [`delta`].
 ///
 /// ## Purpose
 ///
@@ -2463,7 +2442,7 @@ pub enum DeltaMode {
 ///
 /// ## Intended usage
 ///
-/// `Default` is librosa's default: `width = 9`, first derivative, along the last
+/// `Default` is `width = 9`, first derivative, along the last
 /// axis (frames), `Interp` edges. For delta-deltas use `order = 2`.
 ///
 /// ## Invariants
@@ -2483,15 +2462,15 @@ pub enum DeltaMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeltaConfig {
     /// Number of frames in the local fit (odd, >= 3). Wider windows smooth more.
-    /// librosa default: 9.
+    /// Default: 9.
     pub width: usize,
     /// Derivative order (1 = delta, 2 = delta-delta). Also the fitted polynomial
-    /// order, as in librosa. librosa default: 1.
+    /// order. Default: 1.
     pub order: usize,
     /// Axis along which to differentiate; negative values count from the end.
-    /// librosa default: -1 (frames).
+    /// Default: -1 (frames).
     pub axis: isize,
-    /// Edge handling. librosa default: [`DeltaMode::Interp`].
+    /// Edge handling. Default: [`DeltaMode::Interp`].
     pub mode: DeltaMode,
 }
 
@@ -2507,15 +2486,13 @@ impl Default for DeltaConfig {
 }
 
 impl DeltaConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's defaults. Currently the same as [`Default`]; use this
-    /// constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2635,7 +2612,7 @@ struct SavGol<F> {
     order: usize,
     /// `(order + 1) x width` pseudo-inverse: polynomial coefficients `a = pinv * x`.
     pinv: Vec<Vec<F>>,
-    /// Centre derivative weights (SciPy `savgol_coeffs(..., use="dot")`).
+    /// Centre derivative weights, applied as a dot product with the window.
     centre: Vec<F>,
 }
 
@@ -2643,7 +2620,7 @@ impl<F: AudioFloat> SavGol<F> {
     fn new(width: usize, order: usize) -> Self {
         let half = width / 2;
         let h = half as f64;
-        let p = order; // polyorder == deriv, as in librosa.feature.delta
+        let p = order; // polynomial order equals the derivative order
         let u: Vec<f64> = (0..width).map(|j| (j as f64 - h) / h).collect();
         let pow = |x: f64, q: usize| x.powi(q as i32);
         let gram: Vec<Vec<f64>> = (0..=p)
@@ -2710,9 +2687,8 @@ fn delta_source_index(i: isize, len: usize, mode: DeltaMode) -> Option<usize> {
     }
 }
 
-/// Estimates local derivatives of a feature sequence with a Savitzky-Golay filter,
-/// equivalent to `librosa.feature.delta` (`scipy.signal.savgol_filter(data, width,
-/// deriv=order, polyorder=order, mode=mode)`).
+/// Estimates local derivatives of a feature sequence with a Savitzky-Golay filter
+/// of length `width` whose polynomial order and derivative order are both `order`.
 ///
 /// # Arguments
 ///
@@ -2745,8 +2721,7 @@ fn delta_source_index(i: isize, len: usize, mode: DeltaMode) -> Option<usize> {
 /// # References
 ///
 /// A. Savitzky and M. J. E. Golay, "Smoothing and differentiation of data by
-/// simplified least squares procedures," *Analytical Chemistry* 36(8), 1964;
-/// librosa `feature.delta`.
+/// simplified least squares procedures," *Analytical Chemistry* 36(8), 1964.
 pub fn delta<F, S, D>(
     data: &ArrayBase<S, D>,
     config: &DeltaConfig,
@@ -2807,8 +2782,7 @@ where
     Ok(out)
 }
 
-/// Stacks time-delayed copies of a feature array, equivalent to
-/// `librosa.feature.stack_memory(data, n_steps=n_steps, delay=delay)` (zero padding).
+/// Stacks time-delayed copies of a feature array, padding with zeros.
 ///
 /// Block `k` (rows `k * d .. (k + 1) * d` of the second-to-last axis, where `d` is its
 /// original length) holds the data delayed by `k * delay` frames along the last axis:
@@ -2819,8 +2793,8 @@ where
 ///
 /// * `data` - At least 2-D array `(..., features, frames)`. Reshape 1-D input to
 ///   `(1, frames)` first.
-/// * `n_steps` - Number of copies (librosa default 2).
-/// * `delay` - Frame delay between copies (librosa default 1). Must not be 0.
+/// * `n_steps` - Number of copies (commonly 2).
+/// * `delay` - Frame delay between copies (commonly 1). Must not be 0.
 ///
 /// # Returns
 ///
@@ -2903,15 +2877,15 @@ where
 // The AudioSpectrum trait
 // =============================================================================
 
-/// librosa-compatible spectral analysis on [`AudioSamples`].
+/// Spectral analysis on [`AudioSamples`].
 ///
 /// Every method works on all channels: outputs are shaped
 /// `(channels, n_features, n_frames)` (mono gives one channel). Outputs have the
 /// element type [`Float`](Self::Float) (or `Complex<Self::Float>`): `f32` for
 /// `u8`, `i16`, `I24` and `f32` audio, `f64` for `i32` and `f64` audio (see
 /// [`AudioSample::Float`](crate::AudioSample::Float)). The computation runs in
-/// that type. Each config's `Default` reproduces librosa 1.0's defaults. See the
-/// [module documentation](self) for the librosa correspondence.
+/// that type. See the [module documentation](self) for the operations and their
+/// free-function counterparts.
 ///
 /// The existing [`AudioTransforms`](crate::AudioTransforms) spectrogram methods are
 /// unchanged; they follow the `spectrograms` crate's conventions instead.
@@ -2924,11 +2898,11 @@ pub trait AudioSpectrum {
     /// returns audio of this type.
     type Sample: StandardSample;
 
-    /// Computes the complex STFT of every channel, equivalent to `librosa.stft`.
+    /// Computes the complex STFT of every channel.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT parameters ([`StftConfig::default`] = librosa defaults).
+    /// * `config` - STFT parameters (see [`StftConfig::default`]).
     ///
     /// # Returns
     ///
@@ -2936,8 +2910,7 @@ pub trait AudioSpectrum {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid, or `center` is `false` and the
     /// signal is shorter than `n_fft`.
@@ -2974,7 +2947,7 @@ pub trait AudioSpectrum {
         out: ndarray::ArrayViewMut3<'_, Complex<Self::Float>>,
     ) -> AudioSampleResult<()>;
 
-    /// Inverts an STFT matrix to audio, equivalent to `librosa.istft`.
+    /// Inverts an STFT matrix to audio.
     ///
     /// The inverse transform runs in [`Float`](Self::Float), and the result is
     /// converted to the sample type [`Sample`](Self::Sample) with the crate's
@@ -3021,8 +2994,7 @@ pub trait AudioSpectrum {
     where
         Self: Sized;
 
-    /// Computes `|STFT|^power` for every channel, equivalent to
-    /// `numpy.abs(librosa.stft(y, ...)) ** power`.
+    /// Computes `|STFT|^power` for every channel.
     ///
     /// # Arguments
     ///
@@ -3035,8 +3007,7 @@ pub trait AudioSpectrum {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if `power` is not finite and positive, or as for
     /// [`stft_matrix`](Self::stft_matrix).
@@ -3059,12 +3030,12 @@ pub trait AudioSpectrum {
         power: f64,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes a mel spectrogram, equivalent to `librosa.feature.melspectrogram`.
+    /// Computes a mel spectrogram.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT, filterbank and exponent ([`MelSpectrogramConfig::default`] =
-    ///   librosa defaults: power 2, 128 Slaney bands, hop 512).
+    /// * `config` - STFT, filterbank and exponent ([`MelSpectrogramConfig::default`]:
+    ///   power 2, 128 Slaney bands, hop 512).
     ///
     /// # Returns
     ///
@@ -3072,17 +3043,13 @@ pub trait AudioSpectrum {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid for the signal's sample rate.
     ///
-    /// # Differences from librosa
+    /// # Precision
     ///
     /// The filterbank is computed in `f64` and rounded to [`Float`](Self::Float).
-    /// librosa's default builds it in `float32`; for `f64` output the two differ by
-    /// about 1e-7 relative (pass `dtype=numpy.float64` to librosa for round-off
-    /// agreement).
     ///
     /// # Examples
     ///
@@ -3100,15 +3067,15 @@ pub trait AudioSpectrum {
         config: &MelSpectrogramConfig,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes MFCCs, equivalent to `librosa.feature.mfcc(y=..., sr=...)`.
+    /// Computes MFCCs.
     ///
     /// The pipeline is [`melspectrogram`](Self::melspectrogram), then [`power_to_db`]
-    /// with `config.db` (per channel, as librosa's `axes="auto"`), then
+    /// with `config.db` (per channel with the default [`DbAxes::Auto`]), then
     /// [`mfcc_from_mel_db`].
     ///
     /// # Arguments
     ///
-    /// * `config` - MFCC parameters ([`MfccConfig::default`] = librosa defaults).
+    /// * `config` - MFCC parameters (see [`MfccConfig::default`]).
     ///
     /// # Returns
     ///
@@ -3116,12 +3083,11 @@ pub trait AudioSpectrum {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid for the signal's sample rate.
     ///
-    /// # Differences from librosa
+    /// # Precision
     ///
     /// As for [`melspectrogram`](Self::melspectrogram) (the mel basis). This is a
     /// different method from [`AudioTransforms::mfcc`](crate::AudioTransforms::mfcc),
@@ -3551,12 +3517,12 @@ mod tests {
             pad_signal(&x, 4, StftPadMode::Edge),
             vec![1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0]
         );
-        // numpy.pad([1, 2, 3], 4, mode="reflect") = [1 2 3 2 1 2 3 2 1 2 3]
+        // Padding longer than the signal keeps reflecting, without the edge sample.
         assert_eq!(
             pad_signal(&x, 4, StftPadMode::Reflect),
             vec![1.0, 2.0, 3.0, 2.0, 1.0, 2.0, 3.0, 2.0, 1.0, 2.0, 3.0]
         );
-        // numpy.pad([1, 2, 3], 4, mode="symmetric") = [3 3 2 1 1 2 3 3 2 1 1]
+        // Padding longer than the signal keeps reflecting, with the edge sample.
         assert_eq!(
             pad_signal(&x, 4, StftPadMode::Symmetric),
             vec![3.0, 3.0, 2.0, 1.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0, 1.0]
