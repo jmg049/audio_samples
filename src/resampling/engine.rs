@@ -39,12 +39,12 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
     /// width (8 `f32`, 4 `f64`). `FMA`: AVX2 + FMA code, only used from
     /// [`run_avx2_fma`].
     fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self;
-    /// Whether stage B computes four outputs per step with
-    /// [`RsFloat::dot4`] (faster for `f32`; for `f64` the single products are).
-    const BATCH4: bool;
     /// Four [`RsFloat::dot`] products at once, each with the same result as
     /// `dot` (the same operations in the same order).
     fn dot4<const FMA: bool>(a: [&[Self]; 4], b: [&[Self]; 4]) -> [Self; 4];
+    /// [`RsFloat::dot`] of one row `a` with four windows, each with the same
+    /// result as `dot`.
+    fn dot_rows4<const FMA: bool>(a: &[Self], b: [&[Self]; 4]) -> [Self; 4];
     /// `(1 - frac) · (a · w) + frac · (b · w)` in one pass over `w`.
     fn interp<const FMA: bool>(a: &[Self], b: &[Self], w: &[Self], frac: Self) -> Self;
     /// The 2 : 1 polyphase spectrum (see [`FftStage::pair_down2`]):
@@ -54,17 +54,11 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
         w: &mut [Complex<Self>],
         za: &[Complex<Self>],
         zb: &[Complex<Self>],
-        p: &[Complex<Self>],
-        q: &[Complex<Self>],
+        t: &Bins<Self>,
     );
     /// [`RsFloat::down2_bins`] with `Zb = 0`: `w = Z · P + conj(Z[-k]) · Q`
     /// (see [`FftStage::pair_fir2`]).
-    fn fir2_bins(
-        w: &mut [Complex<Self>],
-        z: &[Complex<Self>],
-        p: &[Complex<Self>],
-        q: &[Complex<Self>],
-    );
+    fn fir2_bins(w: &mut [Complex<Self>], z: &[Complex<Self>], t: &Bins<Self>);
     /// Complex products `dst[i] = a[i] · b[i]` (`ACC`: `dst[i] += ...`).
     fn cmul<const ACC: bool>(dst: &mut [Complex<Self>], a: &[Complex<Self>], b: &[Complex<Self>]);
     /// Runs `f` with this thread's complex FFT planner for this type.
@@ -85,10 +79,8 @@ thread_local! {
 }
 
 macro_rules! rs_float {
-    ($t:ty, $batch4:literal, $dot:ident, $dot4:ident, $interp:ident, $cmul:ident, $down2:ident, $planner:ident, $engines:ident) => {
+    ($t:ty, $dot:ident, $dot4:ident, $rows4:ident, $interp:ident, $cmul:ident, $down2:ident, $planner:ident, $engines:ident) => {
         impl RsFloat for $t {
-            const BATCH4: bool = $batch4;
-
             #[inline(always)]
             fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self {
                 #[cfg(target_arch = "x86_64")]
@@ -111,6 +103,16 @@ macro_rules! rs_float {
             }
 
             #[inline(always)]
+            fn dot_rows4<const FMA: bool>(a: &[Self], b: [&[Self]; 4]) -> [Self; 4] {
+                #[cfg(target_arch = "x86_64")]
+                if FMA {
+                    // SAFETY: as in `dot`.
+                    return unsafe { simd::$rows4(a, b) };
+                }
+                [0, 1, 2, 3].map(|t| dot_portable(a, b[t]))
+            }
+
+            #[inline(always)]
             fn interp<const FMA: bool>(a: &[Self], b: &[Self], w: &[Self], frac: Self) -> Self {
                 #[cfg(target_arch = "x86_64")]
                 if FMA {
@@ -125,32 +127,26 @@ macro_rules! rs_float {
                 w: &mut [Complex<Self>],
                 za: &[Complex<Self>],
                 zb: &[Complex<Self>],
-                p: &[Complex<Self>],
-                q: &[Complex<Self>],
+                t: &Bins<Self>,
             ) {
                 #[cfg(target_arch = "x86_64")]
                 if super::has_avx2_fma_cached() {
                     // SAFETY: AVX2 and FMA support was checked just above.
-                    unsafe { simd::$down2::<true>(w, za, zb, p, q) };
+                    unsafe { simd::$down2::<true>(w, za, zb, t) };
                     return;
                 }
-                down2_bins_portable::<_, true>(w, za, zb, p, q, 0, w.len());
+                down2_bins_portable::<_, true>(w, za, zb, t, 0, w.len());
             }
 
             #[inline(always)]
-            fn fir2_bins(
-                w: &mut [Complex<Self>],
-                z: &[Complex<Self>],
-                p: &[Complex<Self>],
-                q: &[Complex<Self>],
-            ) {
+            fn fir2_bins(w: &mut [Complex<Self>], z: &[Complex<Self>], t: &Bins<Self>) {
                 #[cfg(target_arch = "x86_64")]
                 if super::has_avx2_fma_cached() {
                     // SAFETY: AVX2 and FMA support was checked just above.
-                    unsafe { simd::$down2::<false>(w, z, z, p, q) };
+                    unsafe { simd::$down2::<false>(w, z, z, t) };
                     return;
                 }
-                down2_bins_portable::<_, false>(w, z, z, p, q, 0, w.len());
+                down2_bins_portable::<_, false>(w, z, z, t, 0, w.len());
             }
 
             #[inline(always)]
@@ -181,9 +177,9 @@ macro_rules! rs_float {
 
 rs_float!(
     f32,
-    true,
     dot_f32,
     dot4_f32,
+    rows4_f32,
     interp_f32,
     cmul_f32,
     down2_f32,
@@ -192,9 +188,9 @@ rs_float!(
 );
 rs_float!(
     f64,
-    false,
     dot_f64,
     dot4_f64,
+    rows4_f64,
     interp_f64,
     cmul_f64,
     down2_f64,
@@ -275,6 +271,10 @@ impl<F: RsFloat> Engine<F> {
 
     fn size_bytes(&self) -> usize {
         self.a.spec.len() * std::mem::size_of::<Complex<F>>()
+            + [&self.a.down2, &self.a.fir2]
+                .iter()
+                .map(|t| t.as_ref().map_or(0, Bins::size_bytes))
+                .sum::<usize>()
             + self
                 .b
                 .as_ref()
@@ -411,8 +411,8 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
             out,
             from_f,
             st,
-            step_int,
-            step_frac,
+            (step_int, step_frac),
+            k0 >= k_hi,
         );
         let drop = ((st.n0 - half_b + 1 - buf_start).max(0) as usize).min(end);
         buf.copy_within(drop..end, 0);
@@ -425,6 +425,10 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
         o.write(from_f(F::zero()));
     }
 }
+
+/// Largest input step `m` per cycle of an exact stage B evaluated four
+/// cycles at a time (see [`Interp::run_exact`]).
+const CHUNK_MAX_STEP: usize = 1024;
 
 /// Stage B's position: next output `j`, its input index `n0` and phase `p`.
 #[derive(Clone, Copy)]
@@ -446,14 +450,14 @@ fn run_b<T, F: RsFloat, const FMA: bool>(
     out: &mut [MaybeUninit<T>],
     from_f: &impl Fn(F) -> T,
     st: BState,
-    step_int: i64,
-    step_frac: u64,
+    step: (i64, u64),
+    last: bool,
 ) -> BState {
     macro_rules! go {
         ($exact:literal, $($n:literal)*) => {
             match b.taps {
-                $($n => b.run::<T, FMA, $exact, $n>(buf, buf_start, out, from_f, st, step_int, step_frac),)*
-                _ => b.run::<T, FMA, $exact, 0>(buf, buf_start, out, from_f, st, step_int, step_frac),
+                $($n => b.run::<T, FMA, $exact, $n>(buf, buf_start, out, from_f, st, step, last),)*
+                _ => b.run::<T, FMA, $exact, 0>(buf, buf_start, out, from_f, st, step, last),
             }
         };
     }
@@ -497,8 +501,35 @@ struct FftStage<F> {
     fir2: Option<Down2<F>>,
 }
 
-/// The `P` and `Q` spectra of the polyphase 2 : 1 stage.
-type Down2<F> = (Vec<Complex<F>>, Vec<Complex<F>>);
+/// The `P` and `Q` spectra of a polyphase stage, split for multiply-adds:
+/// bin `k` of `pr` is `(P.re, P.re)`, of `pi` `(-P.im, P.im)`, and likewise
+/// `qr`, `qi` for `Q`, so that `a · P = a ⊙ pr + swap(a) ⊙ pi` elementwise
+/// (`swap` exchanges the real and imaginary parts).
+pub(super) struct Bins<F> {
+    pr: Vec<Complex<F>>,
+    pi: Vec<Complex<F>>,
+    qr: Vec<Complex<F>>,
+    qi: Vec<Complex<F>>,
+}
+
+impl<F: RsFloat> Bins<F> {
+    fn new(p: &[Complex<F>], q: &[Complex<F>]) -> Self {
+        let re = |v: &[Complex<F>]| v.iter().map(|c| Complex::new(c.re, c.re)).collect();
+        let im = |v: &[Complex<F>]| v.iter().map(|c| Complex::new(-c.im, c.im)).collect();
+        Self {
+            pr: re(p),
+            pi: im(p),
+            qr: re(q),
+            qi: im(q),
+        }
+    }
+
+    fn size_bytes(&self) -> usize {
+        4 * self.pr.len() * std::mem::size_of::<Complex<F>>()
+    }
+}
+
+type Down2<F> = Bins<F>;
 
 /// FFT size for a filter spanning `[-g, g]`: minimises a cost model (FFT
 /// work and spectrum products per valid output; sizes above 2048 are
@@ -583,7 +614,7 @@ impl<F: RsFloat> FftStage<F> {
                 spec: Vec::new(),
                 fwd,
                 inv,
-                down2: Some(pq),
+                down2: Some(Bins::new(&pq.0, &pq.1)),
                 fir2: None,
             };
         }
@@ -638,7 +669,7 @@ impl<F: RsFloat> FftStage<F> {
                 fwd,
                 inv,
                 down2: None,
-                fir2: Some(pq),
+                fir2: Some(Bins::new(&pq.0, &pq.1)),
             };
         }
         let plan = f64::with_planner(|p| p.plan_fft_forward(n));
@@ -674,12 +705,12 @@ impl<F: RsFloat> FftStage<F> {
         ya: &mut [F],
         yb: &mut [F],
     ) {
-        if let Some((p, q)) = &self.down2 {
-            self.pair_down2(x, to_f, m0, bufs, p, q, ya, yb);
+        if let Some(t) = &self.down2 {
+            self.pair_down2(x, to_f, m0, bufs, t, ya, yb);
             return;
         }
-        if let Some((p, q)) = &self.fir2 {
-            self.pair_fir2(x, to_f, m0, bufs, p, q, ya, yb);
+        if let Some(t) = &self.fir2 {
+            self.pair_fir2(x, to_f, m0, bufs, t, ya, yb);
             return;
         }
         let up = self.up as i64;
@@ -728,8 +759,7 @@ impl<F: RsFloat> FftStage<F> {
         to_f: &impl Fn(T) -> F,
         m0: i64,
         bufs: &mut PairBufs<F>,
-        p: &[Complex<F>],
-        q: &[Complex<F>],
+        t: &Bins<F>,
         ya: &mut [F],
         yb: &mut [F],
     ) {
@@ -744,7 +774,7 @@ impl<F: RsFloat> FftStage<F> {
         self.fwd
             .process_outofplace_with_scratch(zb, fb, bufs.scratch);
         let w = &mut bufs.w[..half_n];
-        F::down2_bins(w, fa, fb, p, q);
+        F::down2_bins(w, fa, fb, t);
         let y = &mut bufs.y[..half_n];
         self.inv.process_outofplace_with_scratch(w, y, bufs.scratch);
         split_re_im(&y[self.g / 2..], ya, yb);
@@ -763,8 +793,7 @@ impl<F: RsFloat> FftStage<F> {
         to_f: &impl Fn(T) -> F,
         m0: i64,
         bufs: &mut PairBufs<F>,
-        p: &[Complex<F>],
-        q: &[Complex<F>],
+        t: &Bins<F>,
         ya: &mut [F],
         yb: &mut [F],
     ) {
@@ -782,7 +811,7 @@ impl<F: RsFloat> FftStage<F> {
             self.fwd
                 .process_outofplace_with_scratch(z, zf, bufs.scratch);
             let w = &mut bufs.w[..half_n];
-            F::fir2_bins(w, zf, p, q);
+            F::fir2_bins(w, zf, t);
             let y = &mut bufs.y[..half_n];
             self.inv.process_outofplace_with_scratch(w, y, bufs.scratch);
             // Even and odd outputs are the real and imaginary parts.
@@ -927,8 +956,7 @@ fn down2_bins_portable<F: RsFloat, const TWO: bool>(
     w: &mut [Complex<F>],
     za: &[Complex<F>],
     zb: &[Complex<F>],
-    p: &[Complex<F>],
-    q: &[Complex<F>],
+    t: &Bins<F>,
     from: usize,
     to: usize,
 ) {
@@ -940,10 +968,11 @@ fn down2_bins_portable<F: RsFloat, const TWO: bool>(
         let (ar, br) = (za[kr], if TWO { zb[kr] } else { zero });
         let av = Complex::new(a.re - b.im, a.im + b.re);
         let bv = Complex::new(ar.re + br.im, br.re - ar.im);
-        let (pk, qk) = (p[k], q[k]);
+        let (pr, pi, qr, qi) = (t.pr[k], t.pi[k], t.qr[k], t.qi[k]);
+        // The order of the AVX2 kernel's multiply-adds.
         w[k] = Complex::new(
-            av.re * pk.re - av.im * pk.im + bv.re * qk.re - bv.im * qk.im,
-            av.re * pk.im + av.im * pk.re + bv.re * qk.im + bv.im * qk.re,
+            av.re * pr.re + av.im * pi.re + bv.re * qr.re + bv.im * qi.re,
+            av.im * pr.im + av.re * pi.im + bv.im * qr.im + bv.re * qi.im,
         );
     }
 }
@@ -1040,7 +1069,13 @@ struct Interp<F> {
     phases: usize,
     /// `phases / l`: row position per unit of phase.
     pos_scale: f64,
+    /// Exact tables: rows in visiting order, followed by copies of the first
+    /// three (so that four consecutive outputs read consecutive rows).
     coeffs: Vec<F>,
+    /// Exact tables: window start of output `q` of a cycle of `l` outputs
+    /// relative to the cycle's first, `q · m / l` rounded down, for
+    /// `q < l + 3`.
+    offsets: Vec<usize>,
 }
 
 impl<F: RsFloat> Interp<F> {
@@ -1053,15 +1088,19 @@ impl<F: RsFloat> Interp<F> {
             coeffs.extend(row.iter().map(|&c| F::of(c)));
             coeffs.resize(coeffs.len() + taps - kernel.taps, F::zero());
         };
+        let mut offsets = Vec::new();
         if kernel.exact {
             // Output k uses phase (k · m) mod l: store the rows in that order,
             // so that consecutive outputs read consecutive rows.
             let mut p = 0u64;
-            for _ in 0..rows {
+            for _ in 0..rows + 3 {
                 let r = p as usize * kernel.taps;
                 push(&kernel.coeffs[r..r + kernel.taps]);
                 p = (p + kernel.m) % kernel.l;
             }
+            offsets = (0..kernel.l + 3)
+                .map(|q| (u128::from(q) * u128::from(kernel.m) / u128::from(kernel.l)) as usize)
+                .collect();
         } else {
             kernel.coeffs.chunks_exact(kernel.taps).for_each(&mut push);
         }
@@ -1074,6 +1113,7 @@ impl<F: RsFloat> Interp<F> {
             phases: kernel.phases,
             pos_scale: kernel.phases as f64 / kernel.l as f64,
             coeffs,
+            offsets,
         }
     }
 
@@ -1090,78 +1130,36 @@ impl<F: RsFloat> Interp<F> {
         out: &mut [MaybeUninit<T>],
         from_f: &impl Fn(F) -> T,
         st: BState,
-        step_int: i64,
-        step_frac: u64,
+        (step_int, step_frac): (i64, u64),
+        last: bool,
     ) -> BState {
         let BState { mut j, n0, mut p } = st;
         let taps = if TAPS > 0 { TAPS } else { self.taps };
         debug_assert_eq!(taps, self.taps);
+        // Window start of output j, relative to `buf`.
+        let mut s = n0 - self.half as i64 + 1 - buf_start;
+        let s_end = buf.len() as i64 - taps as i64;
+        if EXACT {
+            return self.run_exact::<T, FMA, TAPS>(buf, buf_start, out, from_f, j, s, last);
+        }
         let l = self.l;
         let last_row = self.phases as i64 - 1;
         let pos_scale = self.pos_scale;
         let coeffs = &self.coeffs[..];
-        let rows = l as usize;
-        let mut q = if EXACT { (j as u64 % l) as usize } else { 0 };
-        // Window start of output j, relative to `buf`.
-        let mut s = n0 - self.half as i64 + 1 - buf_start;
-        let s_end = buf.len() as i64 - taps as i64;
-        if EXACT && F::BATCH4 {
-            // Four outputs at a time while all four windows lie in `buf`.
-            while j + 4 <= out.len() {
-                let (mut s4, mut p4, mut q4) = (s, p, q);
-                let mut at = [(0i64, 0usize); 4];
-                for slot in &mut at {
-                    *slot = (s4, q4 * taps);
-                    q4 += 1;
-                    if q4 == rows {
-                        q4 = 0;
-                    }
-                    p4 += step_frac;
-                    let wrap = u64::from(p4 >= l);
-                    p4 -= wrap * l;
-                    s4 += step_int + wrap as i64;
-                }
-                // The window starts increase, so the last is the furthest.
-                if at[3].0 > s_end {
-                    break;
-                }
-                let v = F::dot4::<FMA>(
-                    at.map(|(_, r)| &coeffs[r..r + taps]),
-                    at.map(|(w, _)| &buf[w as usize..w as usize + taps]),
-                );
-                for (o, v) in out[j..j + 4].iter_mut().zip(v) {
-                    o.write(from_f(v));
-                }
-                j += 4;
-                (s, p, q) = (s4, p4, q4);
-            }
-        }
         while j < out.len() && s <= s_end {
             let window = &buf[s as usize..s as usize + taps];
-            let v = if EXACT {
-                // Rows are in visiting order: output j uses row j mod l.
-                let r = q * taps;
-                F::dot::<FMA>(&coeffs[r..r + taps], window)
-            } else {
-                let pos = p as f64 * pos_scale;
-                let i = (pos as i64).min(last_row);
-                let frac = F::of(pos - i as f64);
-                let r = i as usize * taps;
-                F::interp::<FMA>(
-                    &coeffs[r..r + taps],
-                    &coeffs[r + taps..r + 2 * taps],
-                    window,
-                    frac,
-                )
-            };
+            let pos = p as f64 * pos_scale;
+            let i = (pos as i64).min(last_row);
+            let frac = F::of(pos - i as f64);
+            let r = i as usize * taps;
+            let v = F::interp::<FMA>(
+                &coeffs[r..r + taps],
+                &coeffs[r + taps..r + 2 * taps],
+                window,
+                frac,
+            );
             out[j].write(from_f(v));
             j += 1;
-            if EXACT {
-                q += 1;
-                if q == rows {
-                    q = 0;
-                }
-            }
             // Branch-free phase step (the wrap pattern is irregular).
             p += step_frac;
             let wrap = u64::from(p >= l);
@@ -1172,6 +1170,102 @@ impl<F: RsFloat> Interp<F> {
             j,
             n0: s + buf_start + self.half as i64 - 1,
             p,
+        }
+    }
+
+    /// [`Interp::run`] for an exact table: output `j` uses row `j mod l` and
+    /// the window at `j · m / l` (rounded down), so the positions within a
+    /// cycle of `l` outputs come from [`Interp::offsets`]. `s` is output `j`'s
+    /// window start relative to `buf`, `s_end` the last start that fits.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn run_exact<T, const FMA: bool, const TAPS: usize>(
+        &self,
+        buf: &[F],
+        buf_start: i64,
+        out: &mut [MaybeUninit<T>],
+        from_f: &impl Fn(F) -> T,
+        mut j: usize,
+        s: i64,
+        last: bool,
+    ) -> BState {
+        let taps = if TAPS > 0 { TAPS } else { self.taps };
+        let s_end = buf.len() as i64 - taps as i64;
+        let (l, m) = (self.l as usize, self.m as usize);
+        let coeffs = &self.coeffs[..(l + 3) * taps];
+        let offsets = &self.offsets[..l + 3];
+        let mut q = (j as u64 % self.l) as usize;
+        // Window start of the cycle's first output, relative to `buf` (it
+        // can be negative; the windows of outputs `j..` start at `s >= 0` or
+        // later).
+        let mut base = s - offsets[q] as i64;
+        // Whole cycles are only gathered while four of them stay small (32 KiB
+        // of `f64`).
+        if q == 0 && m <= CHUNK_MAX_STEP {
+            // Whole cycles, four at a time, row by row: each row is read once
+            // for four outputs.
+            let span = (3 * m + offsets[l - 1]) as i64;
+            while j + 4 * l <= out.len() && base + span <= s_end {
+                for (r, row) in coeffs[..l * taps].chunks_exact(taps).enumerate() {
+                    let w = (base + offsets[r] as i64) as usize;
+                    let v = F::dot_rows4::<FMA>(
+                        row,
+                        [0, 1, 2, 3].map(|c| &buf[w + c * m..w + c * m + taps]),
+                    );
+                    for (c, v) in v.into_iter().enumerate() {
+                        out[j + c * l + r].write(from_f(v));
+                    }
+                }
+                j += 4 * l;
+                base += 4 * m as i64;
+            }
+            if !last {
+                // The rest waits for more of stage A's output.
+                return BState {
+                    j,
+                    n0: base + buf_start + self.half as i64 - 1,
+                    p: 0,
+                };
+            }
+        }
+        // Four outputs at a time while all four windows lie in `buf`.
+        while j + 4 <= out.len() && base + offsets[q + 3] as i64 <= s_end {
+            let at = [0, 1, 2, 3].map(|i| (base + offsets[q + i] as i64) as usize);
+            let v = F::dot4::<FMA>(
+                [0, 1, 2, 3].map(|i| &coeffs[(q + i) * taps..(q + i + 1) * taps]),
+                at.map(|a| &buf[a..a + taps]),
+            );
+            for (o, v) in out[j..j + 4].iter_mut().zip(v) {
+                o.write(from_f(v));
+            }
+            j += 4;
+            q += 4;
+            if q >= l {
+                base += (q / l * m) as i64;
+                q %= l;
+            }
+        }
+        loop {
+            let s = base + offsets[q] as i64;
+            if j >= out.len() || s > s_end {
+                break;
+            }
+            let s = s as usize;
+            out[j].write(from_f(F::dot::<FMA>(
+                &coeffs[q * taps..(q + 1) * taps],
+                &buf[s..s + taps],
+            )));
+            j += 1;
+            q += 1;
+            if q == l {
+                q = 0;
+                base += m as i64;
+            }
+        }
+        BState {
+            j,
+            n0: base + offsets[q] as i64 + buf_start + self.half as i64 - 1,
+            p: (q as u64 * self.m) % self.l,
         }
     }
 }
@@ -1293,6 +1387,70 @@ mod simd {
         hsum_pd(_mm256_add_pd(acc0, acc1))
     }
 
+    /// [`dot_f32`] of `a` with each of `b`.
+    ///
+    /// # Safety
+    /// As [`dot_f32`], for each pair.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn rows4_f32(a: &[f32], b: [&[f32]; 4]) -> [f32; 4] {
+        let n = a.len();
+        debug_assert!(n.is_multiple_of(8) && b.iter().all(|s| s.len() == n));
+        let pa = a.as_ptr();
+        let pb = b.map(<[f32]>::as_ptr);
+        let mut acc = [_mm256_setzero_ps(); 4];
+        let mut i = 0;
+        while i < n {
+            // SAFETY: i + 8 <= n for every slice.
+            unsafe {
+                let c = _mm256_loadu_ps(pa.add(i));
+                for t in 0..4 {
+                    acc[t] = _mm256_fmadd_ps(c, _mm256_loadu_ps(pb[t].add(i)), acc[t]);
+                }
+            }
+            i += 8;
+        }
+        acc.map(|v| hsum_ps(v))
+    }
+
+    /// [`dot_f64`] of `a` with each of `b`.
+    ///
+    /// # Safety
+    /// As [`dot_f64`], for each pair.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn rows4_f64(a: &[f64], b: [&[f64]; 4]) -> [f64; 4] {
+        let n = a.len();
+        debug_assert!(n.is_multiple_of(4) && b.iter().all(|s| s.len() == n));
+        let pa = a.as_ptr();
+        let pb = b.map(<[f64]>::as_ptr);
+        let mut acc0 = [_mm256_setzero_pd(); 4];
+        let mut acc1 = [_mm256_setzero_pd(); 4];
+        let mut i = 0;
+        while i + 8 <= n {
+            // SAFETY: i + 8 <= n for every slice.
+            unsafe {
+                let c0 = _mm256_loadu_pd(pa.add(i));
+                let c1 = _mm256_loadu_pd(pa.add(i + 4));
+                for t in 0..4 {
+                    acc0[t] = _mm256_fmadd_pd(c0, _mm256_loadu_pd(pb[t].add(i)), acc0[t]);
+                    acc1[t] = _mm256_fmadd_pd(c1, _mm256_loadu_pd(pb[t].add(i + 4)), acc1[t]);
+                }
+            }
+            i += 8;
+        }
+        if i < n {
+            // SAFETY: i + 4 <= n (the lengths are multiples of 4).
+            unsafe {
+                let c0 = _mm256_loadu_pd(pa.add(i));
+                for t in 0..4 {
+                    acc0[t] = _mm256_fmadd_pd(c0, _mm256_loadu_pd(pb[t].add(i)), acc0[t]);
+                }
+            }
+        }
+        sum4_pd([0, 1, 2, 3].map(|t| _mm256_add_pd(acc0[t], acc1[t])))
+    }
+
     /// Four [`dot_f32`] products.
     ///
     /// # Safety
@@ -1311,8 +1469,65 @@ mod simd {
     #[inline]
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn dot4_f64(a: [&[f64]; 4], b: [&[f64]; 4]) -> [f64; 4] {
-        // SAFETY: forwarded.
-        [0, 1, 2, 3].map(|t| unsafe { dot_f64(a[t], b[t]) })
+        let n = a[0].len();
+        debug_assert!(n.is_multiple_of(4) && a.iter().chain(&b).all(|s| s.len() == n));
+        let pa = a.map(<[f64]>::as_ptr);
+        let pb = b.map(<[f64]>::as_ptr);
+        // Two accumulators per product (even and odd groups of four), as in
+        // `dot_f64`, so that the sums are the same.
+        let mut acc0 = [_mm256_setzero_pd(); 4];
+        let mut acc1 = [_mm256_setzero_pd(); 4];
+        let mut i = 0;
+        while i + 8 <= n {
+            for t in 0..4 {
+                // SAFETY: i + 8 <= n for every slice.
+                unsafe {
+                    acc0[t] = _mm256_fmadd_pd(
+                        _mm256_loadu_pd(pa[t].add(i)),
+                        _mm256_loadu_pd(pb[t].add(i)),
+                        acc0[t],
+                    );
+                    acc1[t] = _mm256_fmadd_pd(
+                        _mm256_loadu_pd(pa[t].add(i + 4)),
+                        _mm256_loadu_pd(pb[t].add(i + 4)),
+                        acc1[t],
+                    );
+                }
+            }
+            i += 8;
+        }
+        if i < n {
+            for t in 0..4 {
+                // SAFETY: i + 4 <= n (the lengths are multiples of 4).
+                unsafe {
+                    acc0[t] = _mm256_fmadd_pd(
+                        _mm256_loadu_pd(pa[t].add(i)),
+                        _mm256_loadu_pd(pb[t].add(i)),
+                        acc0[t],
+                    );
+                }
+            }
+        }
+        sum4_pd([0, 1, 2, 3].map(|t| _mm256_add_pd(acc0[t], acc1[t])))
+    }
+
+    /// The lane sums of four vectors, each as [`hsum_pd`] adds them.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn sum4_pd(v: [__m256d; 4]) -> [f64; 4] {
+        // Lanes (0 + 2) + (1 + 3) of each, as `hsum_pd` adds them.
+        let half = |x: __m256d, y: __m256d| {
+            _mm256_add_pd(
+                _mm256_permute2f128_pd::<0x20>(x, y),
+                _mm256_permute2f128_pd::<0x31>(x, y),
+            )
+        };
+        // (s0, s2, s1, s3)
+        let s = _mm256_hadd_pd(half(v[0], v[1]), half(v[2], v[3]));
+        let mut r = [0.0; 4];
+        // SAFETY: `r` holds four f64.
+        unsafe { _mm256_storeu_pd(r.as_mut_ptr(), _mm256_permute4x64_pd::<0b11_01_10_00>(s)) };
+        r
     }
 
     /// # Safety
@@ -1338,28 +1553,6 @@ mod simd {
         hsum_pd(_mm256_fmadd_pd(_mm256_set1_pd(frac), d, acc_a))
     }
 
-    /// Complex product of interleaved (re, im) pairs: `a · b`.
-    #[inline]
-    #[target_feature(enable = "avx2,fma")]
-    fn cmul_pd(a: __m256d, b: __m256d) -> __m256d {
-        let br = _mm256_movedup_pd(b);
-        let bi = _mm256_permute_pd::<0b1111>(b);
-        _mm256_fmaddsub_pd(a, br, _mm256_mul_pd(_mm256_permute_pd::<0b0101>(a), bi))
-    }
-
-    /// Complex product of interleaved (re, im) pairs: `a · b`.
-    #[inline]
-    #[target_feature(enable = "avx2,fma")]
-    fn cmul_ps(a: __m256, b: __m256) -> __m256 {
-        let br = _mm256_moveldup_ps(b);
-        let bi = _mm256_movehdup_ps(b);
-        _mm256_fmaddsub_ps(
-            a,
-            br,
-            _mm256_mul_ps(_mm256_permute_ps::<0b1011_0001>(a), bi),
-        )
-    }
-
     /// `super::RsFloat::down2_bins` for `f64`, two bins per vector.
     ///
     /// # Safety
@@ -1369,18 +1562,18 @@ mod simd {
         w: &mut [Complex<f64>],
         za: &[Complex<f64>],
         zb: &[Complex<f64>],
-        p: &[Complex<f64>],
-        q: &[Complex<f64>],
+        t: &super::Bins<f64>,
     ) {
         let n = w.len();
-        assert!(za.len() == n && zb.len() == n && p.len() == n && q.len() == n);
-        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, 0, 1.min(n));
+        assert!(za.len() == n && zb.len() == n);
+        assert!(t.pr.len() == n && t.pi.len() == n && t.qr.len() == n && t.qi.len() == n);
+        super::down2_bins_portable::<_, TWO>(w, za, zb, t, 0, 1.min(n));
         let (pw, pa, pb) = (
             w.as_mut_ptr().cast::<f64>(),
             za.as_ptr().cast::<f64>(),
             zb.as_ptr().cast::<f64>(),
         );
-        let (pp, pq) = (p.as_ptr().cast::<f64>(), q.as_ptr().cast::<f64>());
+        let tab = [&t.pr, &t.pi, &t.qr, &t.qi].map(|v| v.as_ptr().cast::<f64>());
         // Imaginary parts negated: conj.
         let conj = _mm256_set_pd(-0.0, 0.0, -0.0, 0.0);
         let mut k = 1;
@@ -1408,18 +1601,27 @@ mod simd {
                     _mm256_setzero_pd()
                 };
                 // A = a + i b = (a.re - b.im, a.im + b.re).
-                let av = _mm256_addsub_pd(a, _mm256_permute_pd::<0b0101>(b));
+                let av = if TWO {
+                    _mm256_addsub_pd(a, _mm256_permute_pd::<0b0101>(b))
+                } else {
+                    a
+                };
                 // B = conj(ar) + i conj(br) = (ar.re + br.im, br.re - ar.im).
-                let bv = _mm256_add_pd(_mm256_xor_pd(ar, conj), _mm256_permute_pd::<0b0101>(br));
-                let r = _mm256_add_pd(
-                    cmul_pd(av, _mm256_loadu_pd(pp.add(2 * k))),
-                    cmul_pd(bv, _mm256_loadu_pd(pq.add(2 * k))),
-                );
+                let bv = if TWO {
+                    _mm256_add_pd(_mm256_xor_pd(ar, conj), _mm256_permute_pd::<0b0101>(br))
+                } else {
+                    _mm256_xor_pd(ar, conj)
+                };
+                let at = |i: usize| _mm256_loadu_pd(tab[i].add(2 * k));
+                let mut r = _mm256_mul_pd(av, at(0));
+                r = _mm256_fmadd_pd(_mm256_permute_pd::<0b0101>(av), at(1), r);
+                r = _mm256_fmadd_pd(bv, at(2), r);
+                r = _mm256_fmadd_pd(_mm256_permute_pd::<0b0101>(bv), at(3), r);
                 _mm256_storeu_pd(pw.add(2 * k), r);
             }
             k += 2;
         }
-        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, k, n);
+        super::down2_bins_portable::<_, TWO>(w, za, zb, t, k, n);
     }
 
     /// `super::RsFloat::down2_bins` for `f32`, four bins per vector.
@@ -1431,18 +1633,18 @@ mod simd {
         w: &mut [Complex<f32>],
         za: &[Complex<f32>],
         zb: &[Complex<f32>],
-        p: &[Complex<f32>],
-        q: &[Complex<f32>],
+        t: &super::Bins<f32>,
     ) {
         let n = w.len();
-        assert!(za.len() == n && zb.len() == n && p.len() == n && q.len() == n);
-        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, 0, 1.min(n));
+        assert!(za.len() == n && zb.len() == n);
+        assert!(t.pr.len() == n && t.pi.len() == n && t.qr.len() == n && t.qi.len() == n);
+        super::down2_bins_portable::<_, TWO>(w, za, zb, t, 0, 1.min(n));
         let (pw, pa, pb) = (
             w.as_mut_ptr().cast::<f32>(),
             za.as_ptr().cast::<f32>(),
             zb.as_ptr().cast::<f32>(),
         );
-        let (pp, pq) = (p.as_ptr().cast::<f32>(), q.as_ptr().cast::<f32>());
+        let tab = [&t.pr, &t.pi, &t.qr, &t.qi].map(|v| v.as_ptr().cast::<f32>());
         let conj = _mm256_set_ps(-0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0);
         // Reverses the order of the four complex values in a vector.
         let rev = _mm256_set_epi32(1, 0, 3, 2, 5, 4, 7, 6);
@@ -1463,20 +1665,29 @@ mod simd {
                 } else {
                     _mm256_setzero_ps()
                 };
-                let av = _mm256_addsub_ps(a, _mm256_permute_ps::<0b1011_0001>(b));
-                let bv = _mm256_add_ps(
-                    _mm256_xor_ps(ar, conj),
-                    _mm256_permute_ps::<0b1011_0001>(br),
-                );
-                let r = _mm256_add_ps(
-                    cmul_ps(av, _mm256_loadu_ps(pp.add(2 * k))),
-                    cmul_ps(bv, _mm256_loadu_ps(pq.add(2 * k))),
-                );
+                let av = if TWO {
+                    _mm256_addsub_ps(a, _mm256_permute_ps::<0b1011_0001>(b))
+                } else {
+                    a
+                };
+                let bv = if TWO {
+                    _mm256_add_ps(
+                        _mm256_xor_ps(ar, conj),
+                        _mm256_permute_ps::<0b1011_0001>(br),
+                    )
+                } else {
+                    _mm256_xor_ps(ar, conj)
+                };
+                let at = |i: usize| _mm256_loadu_ps(tab[i].add(2 * k));
+                let mut r = _mm256_mul_ps(av, at(0));
+                r = _mm256_fmadd_ps(_mm256_permute_ps::<0b1011_0001>(av), at(1), r);
+                r = _mm256_fmadd_ps(bv, at(2), r);
+                r = _mm256_fmadd_ps(_mm256_permute_ps::<0b1011_0001>(bv), at(3), r);
                 _mm256_storeu_ps(pw.add(2 * k), r);
             }
             k += 4;
         }
-        super::down2_bins_portable::<_, TWO>(w, za, zb, p, q, k, n);
+        super::down2_bins_portable::<_, TWO>(w, za, zb, t, k, n);
     }
 
     /// `dst[i] (+)= a[i] · b[i]` over the common length.
