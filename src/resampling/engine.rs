@@ -367,12 +367,15 @@ pub(super) fn cached_engine<F: RsFloat>(
     in_sr: u32,
     out_sr: u32,
     quality: crate::operations::types::ResamplingQuality,
+    n_in: u64,
 ) -> crate::AudioSampleResult<Option<Arc<Engine<F>>>> {
+    // Two-stage plans choose stage A's rate by input length: the key holds
+    // the choice.
     let key = super::KernelKey {
         in_sr,
         out_sr,
         quality,
-        stage: super::Stage::Single,
+        stage: super::Stage::A(super::two_stage_up(in_sr, out_sr, quality, n_in)),
     };
     if let Some(hit) = F::with_engines(|cache| {
         let pos = cache.iter().position(|(k, _)| *k == key)?;
@@ -384,7 +387,7 @@ pub(super) fn cached_engine<F: RsFloat>(
         return Ok(hit);
     }
     // Built outside the cache borrow (plan building uses other thread-locals).
-    let engine = Engine::new(&super::plan(in_sr, out_sr, quality)?).map(Arc::new);
+    let engine = Engine::new(&super::plan_for(in_sr, out_sr, quality, n_in)?).map(Arc::new);
     F::with_engines(|cache| {
         cache.insert(0, (key, engine.clone()));
         let mut total = 0;
@@ -629,8 +632,8 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
 /// cycles at a time (see [`Interp::run_exact`]); the buffered stage-A output
 /// is then at most `8 m` samples.
 const CHUNK_MAX_STEP: usize = 1 << 16;
-/// Exact stage-B tables above this size (bytes) are evaluated eight cycles
-/// at a time instead of four, so that they are read half as often.
+/// Exact stage-B tables above this size (bytes) are evaluated up to eight
+/// cycles at a time instead of four, so that they are read half as often.
 const CHUNK_BIG_TABLE: usize = 1 << 20;
 
 /// Stage B's position: next output `j`, its input index `n0` and phase `p`.
@@ -665,9 +668,9 @@ fn run_b<T, F: RsFloat, const FMA: bool>(
         };
     }
     if b.exact {
-        go!(true, 12 16 20 24 28 32 36 40 44 48)
+        go!(true, 12 16 20 24 28 32 36 40 44 48 52)
     } else {
-        go!(false, 12 16 20 24 28 32 36 40 44 48)
+        go!(false, 12 16 20 24 28 32 36 40 44 48 52)
     }
 }
 
@@ -1986,40 +1989,49 @@ impl<F: RsFloat> Interp<F> {
         // can be negative; the windows of outputs `j..` start at `s >= 0` or
         // later).
         let mut base = s - offsets[q] as i64;
-        // Whole cycles, in groups of four, row by row: each row is read once
-        // for every cycle of the chunk. Tables larger than the caches are
-        // worth longer chunks (more buffered stage-A output per pass).
-        let groups = if l * taps * std::mem::size_of::<F>() > CHUNK_BIG_TABLE {
-            2
+        // Whole cycles, up to `most` at a time, row by row: each row is read
+        // once for every cycle of the chunk. Tables larger than the caches are
+        // worth longer chunks (more buffered stage-A output per pass). At the
+        // end, the remaining whole cycles form one shorter chunk.
+        let most = if l * taps * std::mem::size_of::<F>() > CHUNK_BIG_TABLE {
+            8
         } else {
-            1
+            4
         };
-        if q == 0 && m <= CHUNK_MAX_STEP {
-            let cycles = |g: usize| (4 * g * m + offsets[l - 1]) as i64 - m as i64;
+        // Signals shorter than four cycles run in output order (in chunks,
+        // all of stage A's output would wait for the end).
+        if q == 0 && m <= CHUNK_MAX_STEP && out.len() >= 4 * l {
+            // Window start of the last output of `c` cycles, from `base`.
+            let span = |c: usize| (c * m + offsets[l - 1]) as i64 - m as i64;
             loop {
-                // Whole groups of four cycles available.
-                let fit = (1..=groups)
-                    .rev()
-                    .find(|&g| j + 4 * g * l <= out.len() && base + cycles(g) <= s_end);
-                let Some(g) = fit else { break };
-                if g < groups && !last {
+                let whole = ((out.len() - j) / l).min(most);
+                let Some(c) = (1..=whole).rev().find(|&c| base + span(c) <= s_end) else {
+                    break;
+                };
+                if c < most && !last {
                     break;
                 }
                 for (r, row) in coeffs[..l * taps].chunks_exact(taps).enumerate() {
                     let w = (base + offsets[r] as i64) as usize;
-                    for k in 0..g {
-                        let w = w + 4 * k * m;
+                    let mut k = 0;
+                    while k + 4 <= c {
+                        let w = w + k * m;
                         let v = F::dot_rows4::<FMA>(
                             row,
-                            [0, 1, 2, 3].map(|c| &buf[w + c * m..w + c * m + taps]),
+                            [0, 1, 2, 3].map(|i| &buf[w + i * m..w + i * m + taps]),
                         );
-                        for (c, v) in v.into_iter().enumerate() {
-                            out[j + (4 * k + c) * l + r].write(from_f(v));
+                        for (i, v) in v.into_iter().enumerate() {
+                            out[j + (k + i) * l + r].write(from_f(v));
                         }
+                        k += 4;
+                    }
+                    for k in k..c {
+                        let w = w + k * m;
+                        out[j + k * l + r].write(from_f(F::dot::<FMA>(row, &buf[w..w + taps])));
                     }
                 }
-                j += 4 * g * l;
-                base += (4 * g * m) as i64;
+                j += c * l;
+                base += (c * m) as i64;
             }
             if !last {
                 // The rest waits for more of stage A's output.

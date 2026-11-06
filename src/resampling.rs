@@ -466,10 +466,12 @@ impl Kernel {
 enum Stage {
     /// The whole conversion in one polyphase filter.
     Single,
-    /// Stage A of a two-stage conversion (the low-pass at `up · in_rate`).
-    A,
-    /// Stage B of a two-stage conversion (the interpolator to `out_rate`).
-    B,
+    /// Stage A of a two-stage conversion (the low-pass at `up · in_rate`,
+    /// `up` given).
+    A(u64),
+    /// Stage B of a two-stage conversion (the interpolator from
+    /// `up · in_rate` to `out_rate`).
+    B(u64),
 }
 
 /// Stage B's stopband attenuation above the quality tier's. Stage B's
@@ -481,6 +483,14 @@ const STAGE_B_EXTRA_DB: f64 = 30.0;
 /// copies) in units of one stage-B multiply-add, measured with AVX2: used to
 /// choose stage A's rate.
 const STAGE_A_COST: f64 = 18.0;
+/// [`STAGE_A_COST`] for inputs of at least [`LONG_CYCLES`] cycles of the
+/// ratio at the input rate: stage B then reads its table once per chunk of
+/// cycles rather than once per cycle (see `engine::Interp::run_exact`), so a
+/// stage-B multiply-add costs less against stage A.
+const STAGE_A_COST_LONG: f64 = 24.0;
+/// Input length, in cycles of `in_rate / gcd(in_rate, out_rate)` samples,
+/// from which [`STAGE_A_COST_LONG`] applies.
+const LONG_CYCLES: u64 = 4;
 /// Decimation factors (powers of two) up to this run as a single FFT stage.
 const FFT_MAX_FACTOR: u64 = 64;
 /// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;
@@ -677,20 +687,61 @@ fn stage_b_exact(l: u64, taps: usize) -> bool {
     l <= STAGE_B_MAX_EXACT_PHASES && l.saturating_mul(taps as u64) <= STAGE_B_MAX_EXACT_ENTRIES
 }
 
-/// Stage A's rate factor for a two-stage conversion: 2 when upsampling;
-/// when downsampling, 1 or 2, whichever the cost model prefers (close to
-/// 1 : 1, stage B at the input rate needs many taps).
-fn stage_a_up(in_sr: u32, out_sr: u32, spec: FilterSpec) -> u64 {
+/// Stage A's rate factor for a two-stage conversion of `n_in` input
+/// samples: 2 when upsampling; when downsampling, 1 or 2, whichever the cost
+/// model prefers (close to 1 : 1, stage B at the input rate needs many taps).
+fn stage_a_up(in_sr: u32, out_sr: u32, spec: FilterSpec, n_in: u64) -> u64 {
     if out_sr > in_sr {
         return 2;
     }
     let ratio = f64::from(out_sr) / f64::from(in_sr);
+    let cycle = u64::from(in_sr) / gcd(u64::from(in_sr), u64::from(out_sr));
+    let a_cost = if n_in >= LONG_CYCLES.saturating_mul(cycle) {
+        STAGE_A_COST_LONG
+    } else {
+        STAGE_A_COST
+    };
     let cost = |up: u64| {
         let (l, _, half, _, _) = stage_b_shape(in_sr, out_sr, spec, up);
         let rows = if stage_b_exact(l, 2 * half) { 1.0 } else { 2.0 };
-        up as f64 * STAGE_A_COST + ratio * (2 * half) as f64 * rows
+        up as f64 * a_cost + ratio * (2 * half) as f64 * rows
     };
     if cost(2) < cost(1) { 2 } else { 1 }
+}
+
+/// The part of [`plan_for`]'s choice that depends on the input length: 0
+/// when it does not, else the stage-A rate factor for `n_in` samples.
+fn two_stage_up(in_sr: u32, out_sr: u32, quality: ResamplingQuality, n_in: u64) -> u64 {
+    let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
+        return 0;
+    };
+    let g = gcd(u64::from(in_sr), u64::from(out_sr));
+    let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
+    let smooth_ratio = smooth(l as usize) && smooth(m as usize);
+    let up = stage_a_up(in_sr, out_sr, spec, n_in);
+    if smooth_ratio || up == stage_a_up(in_sr, out_sr, spec, 0) {
+        0
+    } else {
+        up
+    }
+}
+
+/// Stopband attenuation of stage A at the input rate (`up = 1`) above the
+/// quality tier's: there the filter's response above the input Nyquist
+/// frequency aliases into the passband (at `up = 2` stage B removes it), and
+/// 5 dB more keeps the passband error at the single filter's level.
+const STAGE_A_ALIAS_DB: f64 = 5.0;
+
+/// Stage A's filter specification at rate factor `up`.
+fn stage_a_spec(spec: FilterSpec, up: u64) -> FilterSpec {
+    if up == 1 {
+        FilterSpec {
+            attenuation_db: spec.attenuation_db + STAGE_A_ALIAS_DB,
+            ..spec
+        }
+    } else {
+        spec
+    }
 }
 
 /// Half-width (input samples, a multiple of 8) of the single-stage filter
@@ -701,11 +752,27 @@ fn stage_a_half(spec: FilterSpec, l: u64, m: u64) -> f64 {
     (half / 8.0).ceil() * 8.0
 }
 
-/// Chooses how to evaluate `in_sr -> out_sr` at `quality`.
+/// Chooses how to evaluate `in_sr -> out_sr` at `quality` for input of any
+/// length (the streaming path).
 ///
 /// # Errors
 /// See [`Kernel::new`].
 fn plan(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> AudioSampleResult<Plan> {
+    plan_for(in_sr, out_sr, quality, 0)
+}
+
+/// Chooses how to evaluate `in_sr -> out_sr` at `quality` for `n_in` input
+/// samples per channel (only the two-stage plans' stage-A rate depends on
+/// it, see [`stage_a_up`]).
+///
+/// # Errors
+/// See [`Kernel::new`].
+fn plan_for(
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResamplingQuality,
+    n_in: u64,
+) -> AudioSampleResult<Plan> {
     let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
         return Ok(Plan::Direct(cached_kernel(in_sr, out_sr, quality)?));
     };
@@ -727,14 +794,15 @@ fn plan(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> AudioSampleResul
         }
         return Ok(Plan::Direct(kernel));
     }
-    if stage_a_half(spec, l, m) * stage_a_up(in_sr, out_sr, spec) as f64 > FFT_MAX_HALF as f64 {
+    let up = stage_a_up(in_sr, out_sr, spec, n_in);
+    if stage_a_half(stage_a_spec(spec, up), l, m) * up as f64 > FFT_MAX_HALF as f64 {
         return Ok(Plan::Direct(cached_kernel(in_sr, out_sr, quality)?));
     }
     if let Some(dft) = dft_plan(in_sr, out_sr, spec) {
         return Ok(dft);
     }
-    let a = cached_stage_kernel(in_sr, out_sr, quality, Stage::A)?;
-    let b = cached_stage_kernel(in_sr, out_sr, quality, Stage::B)?;
+    let a = cached_stage_kernel(in_sr, out_sr, quality, Stage::A(up))?;
+    let b = cached_stage_kernel(in_sr, out_sr, quality, Stage::B(up))?;
     Ok(Plan::TwoStage {
         up: a.l as usize,
         a,
@@ -746,11 +814,11 @@ impl Kernel {
     /// Stage A of `in_sr -> out_sr`: the quality's low-pass for the lower of
     /// the two rates, with `up` exact rows (`l = up`, `m = 1`). For
     /// upsampling this is the single-stage kernel of `in_sr -> 2 in_sr`.
-    fn stage_a(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> Self {
+    fn stage_a(in_sr: u32, out_sr: u32, quality: ResamplingQuality, up: u64) -> Self {
         let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
             unreachable!("two-stage plans are only made for windowed-sinc kernels")
         };
-        let up = stage_a_up(in_sr, out_sr, spec);
+        let spec = stage_a_spec(spec, up);
         let g = gcd(u64::from(in_sr), u64::from(out_sr));
         let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
         let lower = (l as f64 / m as f64).min(1.0);
@@ -787,12 +855,12 @@ impl Kernel {
         in_sr: u32,
         out_sr: u32,
         quality: ResamplingQuality,
+        up: u64,
         shared: &dyn Fn(TableKey) -> Option<Arc<[f64]>>,
     ) -> Self {
         let KernelKind::Sinc(spec) = kernel_kind(quality, in_sr, out_sr) else {
             unreachable!("two-stage plans are only made for windowed-sinc kernels")
         };
-        let up = stage_a_up(in_sr, out_sr, spec);
         let (l, m, half, transition, cutoff) = stage_b_shape(in_sr, out_sr, spec, up);
         // The rounded-up length allows more attenuation for the same
         // transition band: use all of it (Kaiser's estimate solved for A).
@@ -807,7 +875,7 @@ impl Kernel {
         };
         let table_key = (!exact).then_some(TableKey {
             quality,
-            stage: Stage::B,
+            stage: Stage::B(up),
             param_bits: transition.to_bits(),
             half,
             phases,
@@ -1002,8 +1070,8 @@ fn cached_stage_kernel(
         };
         let kernel = Arc::new(match stage {
             Stage::Single => Kernel::new(in_sr, out_sr, quality, &shared)?,
-            Stage::A => Kernel::stage_a(in_sr, out_sr, quality),
-            Stage::B => Kernel::stage_b(in_sr, out_sr, quality, &shared),
+            Stage::A(up) => Kernel::stage_a(in_sr, out_sr, quality, up),
+            Stage::B(up) => Kernel::stage_b(in_sr, out_sr, quality, up, &shared),
         });
         cache.insert(0, (key, Arc::clone(&kernel)));
         let mut total = 0;
@@ -1512,7 +1580,8 @@ where
 {
     let in_sr = audio.sample_rate().get();
     let out_sr = target_sample_rate.get();
-    let Some(engine) = engine::cached_engine::<F>(in_sr, out_sr, quality)? else {
+    let n_in = audio.samples_per_channel().get() as u64;
+    let Some(engine) = engine::cached_engine::<F>(in_sr, out_sr, quality, n_in)? else {
         let mut y = resample_direct(audio, target_sample_rate, quality)?;
         if gain != 1.0 {
             y.apply(|v| T::from_float(<T::Float as AudioFloat>::of(v.to_float().as_f64() * gain)));
@@ -1646,7 +1715,7 @@ fn resample_rows_in<T: AudioFloat, F: engine::RsFloat>(
         if in_sr == out_sr || matches!(kernel_kind(quality, in_sr, out_sr), KernelKind::Linear) {
             None
         } else {
-            engine::cached_engine::<F>(in_sr, out_sr, quality)?
+            engine::cached_engine::<F>(in_sr, out_sr, quality, rows.ncols() as u64)?
         };
     let Some(engine) = engine else {
         // Identity, linear interpolation and direct plans: through `resample`.
@@ -1960,7 +2029,14 @@ fn upsample_by<const N: usize, T: Copy, F: AudioFloat>(
 /// [`resample`]: the output is time-aligned with the input (no delay), and
 /// after [`finish`](Self::finish) the concatenated output equals
 /// `resample(whole_input, ...)` up to floating-point rounding, with exactly
-/// `ceil(n · out_rate / in_rate)` samples in total.
+/// `ceil(n · out_rate / in_rate)` samples in total. One exception: when
+/// downsampling by a ratio whose terms in lowest terms have a prime factor
+/// above 7 (pitch-shift ratios such as 22050 Hz to 17501 Hz), [`resample`]
+/// filters inputs of at least four cycles of the ratio (`4 · in_rate /
+/// gcd(in_rate, out_rate)` samples) at the input rate rather than at twice
+/// it, which is faster for long inputs. Both meet the quality tier's
+/// passband and stopband; the two outputs differ in the transition band and
+/// by the passband ripple.
 ///
 /// [`reset`](Self::reset) clears all state - call it after a seek, since the
 /// buffered input no longer corresponds to a contiguous position in the stream.
@@ -2897,6 +2973,46 @@ mod tests {
             })
             .collect::<Vec<f32>>();
         AudioSamples::new_mono(Array1::from_vec(samples), sample_rate).unwrap()
+    }
+
+    /// Long inputs of a pitch-shift ratio run stage A at the input rate,
+    /// short ones at twice it; a passband tone comes out the same from both
+    /// (to the passband ripple).
+    #[test]
+    fn test_long_input_stage_a_at_input_rate() {
+        let up = |n: u64| match plan_for(22050, 17501, ResamplingQuality::High, n).unwrap() {
+            Plan::TwoStage { up, .. } => up,
+            p => panic!("{p:?}"),
+        };
+        assert_eq!(up(22050), 2);
+        assert_eq!(up(4 * 22050), 1);
+        let x = sine(5 * 22050, 1000.0, 22050.0, 0.5);
+        let long = resample(
+            &mono(x.clone(), sample_rate!(22050)),
+            sample_rate!(17501),
+            ResamplingQuality::High,
+        )
+        .unwrap();
+        let mut stream = StreamingResampler::<f64>::new(
+            sample_rate!(22050),
+            sample_rate!(17501),
+            channels!(1),
+            ResamplingQuality::High,
+        )
+        .unwrap();
+        let mut short: Vec<f64> = stream
+            .process_chunk(&mono(x, sample_rate!(22050)))
+            .unwrap()
+            .map(|o| o.as_mono().unwrap().to_vec())
+            .unwrap_or_default();
+        short.extend(stream.finish().unwrap().unwrap().as_mono().unwrap().iter());
+        let long = long.as_mono().unwrap().to_vec();
+        assert_eq!(long.len(), short.len());
+        let err = long[1000..long.len() - 1000]
+            .iter()
+            .zip(&short[1000..])
+            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(err < 1e-6, "{err:e}");
     }
 
     /// The streaming path uses the same kernel and positions as the offline
