@@ -926,8 +926,8 @@ mod tests {
         variance.sqrt()
     }
 
-    /// Regression: `set_min_peak_separation_ms` panicked when the separation
-    /// rounded to zero frames; it now clamps to one frame.
+    /// `set_min_peak_separation_ms` clamps a separation that rounds to zero frames
+    /// to one frame instead of panicking.
     #[test]
     fn min_peak_separation_ms_clamps_instead_of_panicking() {
         use crate::operations::types::PeakPickingConfig;

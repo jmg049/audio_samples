@@ -2740,8 +2740,8 @@ mod tests {
         assert_eq!(p32.voiced_flag, p64.voiced_flag);
     }
 
-    /// Regression: a tiny `resolution` sized the dense pYIN transition matrix
-    /// at (2 * n_bins)^2 entries (2.9 TB for 1e-4) and aborted on allocation.
+    /// A tiny `resolution` would size the dense pYIN transition matrix at
+    /// (2 * n_bins)^2 entries (2.9 TB for 1e-4); it is rejected instead.
     #[test]
     fn pyin_rejects_resolution_needing_a_huge_matrix() {
         let audio =

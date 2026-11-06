@@ -610,11 +610,9 @@ where
             )));
         }
 
-        // Validate the per-frame detector parameters ONCE up front. Previously
-        // these were re-checked inside the per-frame `detect_pitch_*` calls; the
-        // first frame would surface any error via `?`. Since the parameters are
-        // constant across frames, hoisting the validation preserves the exact
-        // same error behaviour while letting the loop call the low-level
+        // Validate the per-frame detector parameters once, up front. They are
+        // constant across frames, so this gives the same errors as checking them
+        // in every `detect_pitch_*` call and lets the loop call the low-level
         // detectors directly.
         match method {
             PitchDetectionMethod::Yin => {
@@ -671,7 +669,7 @@ where
             // Call the low-level detector directly on the window sub-slice. The
             // tau bounds and the `max_tau >= window_len / 2` early-out replicate
             // exactly what `detect_pitch_yin` / `detect_pitch_autocorr` compute
-            // per frame, so results are bit-identical to the previous path.
+            // per frame, so results are bit-identical to calling them.
             let window_len = window.len();
             let frequency: Option<f64> = match method {
                 PitchDetectionMethod::Yin => {
@@ -1392,9 +1390,9 @@ mod tests {
         }
     }
 
-    /// The period is refined by parabolic interpolation, so it is no longer an
-    /// integer number of samples: 440 Hz at 22.05 kHz used to come out as exactly
-    /// 441 Hz (+3.9 cents), and 987.77 Hz at 44.1 kHz as 980 Hz (-13.7 cents).
+    /// The period is refined by parabolic interpolation, so it is not an integer
+    /// number of samples: an integer period would give exactly 441 Hz (+3.9 cents)
+    /// for 440 Hz at 22.05 kHz, and 980 Hz (-13.7 cents) for 987.77 Hz at 44.1 kHz.
     #[test]
     fn yin_parabolic_interpolation_gives_fractional_period() {
         for (sr, f0) in [(22_050u32, 440.0), (44_100, 987.77)] {
@@ -1421,12 +1419,11 @@ mod tests {
         );
     }
 
-    /// The cumulative mean in the CMND runs over ALL lags from 1. The old code
-    /// only filled the difference function from `min_tau` (derived from
-    /// `max_frequency`) and summed zeros below it, which shrank the denominator
-    /// and inflated the CMND whenever `max_frequency` was low. On this noisy
-    /// 110 Hz tone the CMND minimum is below the
-    /// 0.2 threshold, so `max_frequency = 300` returned `None`.
+    /// The cumulative mean in the CMND runs over ALL lags from 1. Summing zeros
+    /// below `min_tau` (derived from `max_frequency`) would shrink the denominator
+    /// and inflate the CMND whenever `max_frequency` is low. On this noisy 110 Hz
+    /// tone the CMND minimum is below the 0.2 threshold, so `max_frequency = 300`
+    /// must find the pitch.
     #[test]
     fn yin_cmnd_does_not_depend_on_max_frequency() {
         let sr = 44_100u32;
@@ -1504,9 +1501,9 @@ mod tests {
     }
 
     /// `calculate_correlation(chroma, profile, t)` must be 1 when the chroma IS the
-    /// profile transposed to tonic `t`. The old rotation `profile[(i + t) % 12]`
-    /// transposed by `-t` instead, so every key other than C was reported as its
-    /// mirror image (D major as A# major, E major as G# major).
+    /// profile transposed to tonic `t`. The rotation `profile[(i + t) % 12]` would
+    /// transpose by `-t` instead and report every key other than C as its mirror
+    /// image (D major as A# major, E major as G# major).
     #[test]
     fn key_profile_rotation_puts_tonic_at_chroma_index() {
         let major = [
@@ -1559,7 +1556,7 @@ mod tests {
         }
     }
 
-    /// Regression test for BUG 5: `track_pitch` must reject unsupported pitch
+    /// `track_pitch` must reject unsupported pitch
     /// detection methods with a single up-front `Err`, and must NOT print to
     /// stderr per-frame nor enter the analysis loop.
     #[test]

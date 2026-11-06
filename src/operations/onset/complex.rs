@@ -255,9 +255,8 @@ pub fn combine_complex_odf(
     // Accumulate bin by bin into per-frame sums. Each bin is a row of the
     // `(bins, frames)` arrays, so this walks the data in memory order for the
     // standard layout and never needs a contiguous column (a column of a
-    // row-major array is strided, which is why the old column-slice code hit an
-    // `unreachable!` as soon as there was more than one frame). Works for any
-    // layout without copying.
+    // row-major array is strided, so slicing columns would fail as soon as there
+    // is more than one frame). Works for any layout without copying.
     let mut mag_sum = vec![0.0_f64; frames];
     let mut phase_sum = vec![0.0_f64; frames];
     for (mag_row, phase_row) in mag_diff.rows().into_iter().zip(phase_dev.rows()) {
@@ -292,15 +291,14 @@ pub fn combine_complex_odf(
 mod tests {
     use super::*;
 
-    /// Regression test for BUG 1: in the non-rectified combine path the magnitude
+    /// In the non-rectified combine path the magnitude
     /// contribution must come from `mag_diff`, not from `phase_dev`.
     ///
     /// We use `ComplexOnsetConfig::speech()` (`phase_rectify: false`), force the
     /// output to depend only on the magnitude term (magnitude_weight = 1,
     /// phase_weight = 0, no log compression), and feed magnitude and phase arrays
-    /// with deliberately different values. Before the fix, `m_slice` was bound to
-    /// the phase view, so the result reflected the phase data and this assertion
-    /// failed.
+    /// with deliberately different values, so a result taken from the phase data
+    /// fails the assertion.
     #[test]
     fn bug1_nonrectified_magnitude_comes_from_magnitude() {
         let mut config = ComplexOnsetConfig::speech();
@@ -331,8 +329,7 @@ mod tests {
     }
 
     /// `combine_complex_odf` must work for any number of frames and any memory
-    /// layout (it used to require contiguous columns and panicked for more than
-    /// one frame in standard layout).
+    /// layout, without requiring contiguous columns.
     #[test]
     fn combine_handles_many_frames_and_any_layout() {
         use ndarray::ShapeBuilder;
@@ -379,10 +376,10 @@ mod tests {
         }
     }
 
-    /// Regression test for BUG 2: for a bin whose true phase advances by exactly
-    /// `expected = 2π·f·hop/sr` each hop, the phase deviation must be ~0 even when
-    /// `expected > π` (high-frequency bins). The buggy version wrapped the raw
-    /// phase difference BEFORE subtracting `expected`, leaving a large residual.
+    /// For a bin whose true phase advances by exactly `expected = 2π·f·hop/sr` each
+    /// hop, the phase deviation must be ~0 even when `expected > π` (high-frequency
+    /// bins). Wrapping the raw phase difference before subtracting `expected` would
+    /// leave a large residual.
     #[test]
     fn bug2_phase_deviation_zero_for_expected_advance() {
         let config = ComplexOnsetConfig::speech();

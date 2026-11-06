@@ -1426,10 +1426,9 @@ mod cqt_dedup_tests {
     use crate::sample_rate;
     use ndarray::Array1;
 
-    /// Computing the CQT once (the optimized combined path)
-    /// must produce a bit-identical ODF to the previous composition that
-    /// computed the CQT twice (once per matrix). The CQT is deterministic, so
-    /// `combine_complex_odf` over the standalone matrices is the reference.
+    /// Computing the CQT once (the combined path) must produce a bit-identical ODF to the
+    /// composition that computes the CQT twice (once per matrix). The CQT is deterministic,
+    /// so `combine_complex_odf` over the standalone matrices is the reference.
     #[test]
     fn test_complex_odf_single_cqt_bit_identical() {
         // A multi-tone signal long enough to yield several CQT frames.
@@ -1466,11 +1465,9 @@ mod cqt_dedup_tests {
         }
     }
 
-    /// Regression: `combine_complex_odf` sliced a column of the row-major
-    /// `(bins, frames)` arrays and expected it to be contiguous, so
-    /// `complex_onset_detection` hit `unreachable!` for every preset as soon as
-    /// the CQT produced more than one frame (any signal longer than ~0.37 s at
-    /// 44.1 kHz).
+    /// `complex_onset_detection` must work for every preset when the CQT produces
+    /// more than one frame (any signal longer than ~0.37 s at 44.1 kHz), where the
+    /// columns of the row-major `(bins, frames)` arrays are not contiguous.
     #[test]
     fn complex_onset_detection_does_not_panic_on_long_signals() {
         let sr = 22050usize;
@@ -1505,10 +1502,8 @@ mod cqt_dedup_tests {
         }
     }
 
-    /// Regression: with the old `PeakPickingConfig::default()` (1024-frame delta
-    /// window, 3-point median filter, 512-frame separation) `detect_onsets` found
-    /// 1 of the 10 notes of this sequence. The new defaults find all of them,
-    /// each within 50 ms, without spurious detections.
+    /// With `PeakPickingConfig::default()`, `detect_onsets` finds all 10 notes of
+    /// this sequence, each within 50 ms, without spurious detections.
     #[test]
     fn detect_onsets_default_finds_every_note() {
         let sr: f64 = 22050.0;

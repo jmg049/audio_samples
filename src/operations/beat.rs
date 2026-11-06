@@ -649,8 +649,8 @@ mod tests {
                 .any(|t| (t * sr / hop.get() as f64).round() as usize == peak_idx));
         }
 
-        /// Regression: beat times used to come back in detection order (global
-        /// peak, forward beats, then backward beats in reverse).
+        /// Beat times come back in chronological order without duplicates, not in
+        /// detection order (global peak, forward beats, then backward beats).
         #[test]
         fn beat_times_are_sorted_and_unique(
             len in 256usize..4096,
@@ -674,10 +674,10 @@ mod tests {
             }
         }
 
-        /// Regression test for BUG 6: `track_beats_core` must never panic when the
-        /// tolerance window clamps to an empty or inverted `[lo, hi)` range. We
-        /// hammer it with tiny signals, extreme tolerances (huge and ~0), and large
-        /// hops so the `peak_index(&onset[lo..hi])` slicing is exercised at the edges.
+        /// `track_beats_core` must never panic when the tolerance window clamps to an empty
+        /// or inverted `[lo, hi)` range. The test drives it with tiny signals, extreme
+        /// tolerances (huge and ~0), and large hops so the `peak_index(&onset[lo..hi])`
+        /// slicing is exercised at the edges.
         #[test]
         fn bug6_edge_windows_do_not_panic(
             len in 1usize..32,
@@ -693,9 +693,8 @@ mod tests {
         }
     }
 
-    /// Regression test for BUG 6 (deterministic): a single-frame onset with a
-    /// huge tolerance forces `hi` to clamp to `len`, which previously could leave
-    /// an empty/inverted slice handed to `peak_index`. Must not panic.
+    /// A single-frame onset with a huge tolerance forces `hi` to clamp to `len`,
+    /// which must not hand an empty or inverted slice to `peak_index` or panic.
     #[test]
     fn bug6_single_frame_huge_tolerance_no_panic() {
         let onset = NonEmptyVec::new(vec![1.0f64]).unwrap();
@@ -710,9 +709,9 @@ mod tests {
     /// recover the fundamental tempo within ~5%. Octave errors are NOT accepted
     /// here - the autocorrelation peak in the 40-240 BPM window is asserted to be
     /// the fundamental (120 BPM).
-    /// Regression: `detect_beats` returned the beats in detection order (global
-    /// peak first, then forward, then backward beats in reverse). They are now
-    /// chronological; `tempo_bpm` is the requested tempo.
+    /// `detect_beats` returns the beats in chronological order, not in detection
+    /// order (global peak first, then forward, then backward beats); `tempo_bpm` is
+    /// the requested tempo.
     #[test]
     fn detect_beats_returns_sorted_times() {
         use crate::{AudioSamples, sample_rate};

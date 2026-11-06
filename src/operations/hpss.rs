@@ -540,10 +540,8 @@ fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
     let half_kernel = kernel_size / 2;
     let mut filtered = Vec::with_capacity(len);
 
-    // Hoist a single reusable scratch window outside the per-sample loop.
-    // Cleared and refilled each step before sorting, this avoids the previous
-    // per-sample `Vec::with_capacity(kernel_size)` allocation while leaving the
-    // selection, reflection padding, and even/odd handling unchanged.
+    // One reusable scratch window outside the per-sample loop, cleared and
+    // refilled each step before sorting, so no window is allocated per sample.
     let mut window = Vec::with_capacity(kernel_size);
 
     for i in 0..len {
@@ -840,9 +838,8 @@ mod tests {
         assert!(config.validate(sample_rate).is_err());
     }
 
-    /// Regression test for BUG 4: the n_fft upper-bound check and its error
-    /// message must agree on the same number. The check rejects
-    /// `n_fft > 163_840`, so the message must mention 163840, not 16384.
+    /// The n_fft upper-bound check and its error message must agree on the same number. The
+    /// check rejects `n_fft > 163_840`, so the message must mention 163840, not 16384.
     #[test]
     fn test_nfft_bound_message_matches_bound() {
         // 262_144 == 2^18, a power of two strictly greater than 163_840 so the
