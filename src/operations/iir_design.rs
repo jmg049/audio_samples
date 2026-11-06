@@ -1,13 +1,13 @@
 //! IIR filter design core: analog prototypes, frequency transforms, the
 //! bilinear transform and zero-pole-gain → second-order-sections conversion.
 //!
-//! This module is a faithful port of the SciPy `scipy.signal` design pipeline
-//! (`iirfilter` → `buttap`/`cheb1ap`/`cheb2ap`/`besselap`/`ellipap` →
-//! `lp2{lp,hp,bp,bs}_zpk` → `bilinear_zpk` → `zpk2sos`). It deliberately follows
-//! the same algorithms, the same internal frequency normalisation (`fs = 2`)
-//! and the same section pairing/ordering rules so that designed coefficients
-//! agree with SciPy to within a few ULPs. That agreement is enforced by the
-//! golden-fixture tests in `tests/filter_reference.rs`.
+//! A design starts from an analog low-pass prototype (`buttap`, `cheb1ap`,
+//! `cheb2ap`, `besselap`, `ellipap`); `iirfilter_sos` applies the frequency
+//! transform (`lp2{lp,hp,bp,bs}_zpk`) and `bilinear_zpk`, and `zpk2sos` turns
+//! the result into second-order sections. Frequencies are normalised internally
+//! to `fs = 2` (Nyquist 1), and the sections are paired and ordered by the
+//! nearest-pole rule, so the designed coefficients are reproducible to within a
+//! few ULPs. The golden-fixture tests in `tests/filter_reference.rs` check them.
 //!
 //! Everything here works on `f64` and is private to the crate; the public
 //! entry points are [`crate::operations::iir_filtering::SosFilter`] and the
@@ -22,14 +22,14 @@ use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 
 type C64 = Complex<f64>;
 
-/// One second-order section in SciPy layout: `[b0, b1, b2, a0, a1, a2]`.
+/// One second-order section: `[b0, b1, b2, a0, a1, a2]`.
 pub(crate) type Sos = [f64; 6];
 
 /// Highest supported filter order.
 ///
 /// The SOS pipeline is numerically sound well beyond this, but the Bessel
-/// root finder and the elliptic special functions are only verified against
-/// SciPy up to this order (see the reference fixtures).
+/// root finder and the elliptic special functions are only verified up to this
+/// order (see the reference fixtures).
 pub(crate) const MAX_IIR_ORDER: usize = 24;
 
 /// Analog or digital zero-pole-gain description.
@@ -42,13 +42,13 @@ pub(crate) struct Zpk {
 
 // Gains are ratios of root products. `num_complex`'s `/` divides by
 // `norm_sqr`, which overflows once |den| > ~1e154 (e.g. edges within 1e-5 of
-// Nyquist); `fdiv` scales first, like numpy's complex division.
+// Nyquist); `fdiv` scales both operands first.
 
 fn prod_neg(roots: &[C64]) -> C64 {
     roots.iter().fold(C64::new(1.0, 0.0), |acc, &r| acc * (-r))
 }
 
-/// SciPy `m = arange(-N+1, N, 2)`.
+/// The `N` symmetric odd indices `-N+1, -N+3, ..., N-1`.
 fn symmetric_indices(n: usize) -> impl Iterator<Item = f64> {
     let n = n as i64;
     (0..n).map(move |i| (-n + 1 + 2 * i) as f64)
@@ -58,7 +58,7 @@ fn symmetric_indices(n: usize) -> impl Iterator<Item = f64> {
 // Analog low-pass prototypes (cutoff 1 rad/s)
 // ============================================================================
 
-/// `scipy.signal.buttap`.
+/// Analog Butterworth low-pass prototype of order `n` (cutoff 1 rad/s).
 pub(crate) fn buttap(n: usize) -> Zpk {
     let nf = n as f64;
     let poles = symmetric_indices(n)
@@ -71,7 +71,8 @@ pub(crate) fn buttap(n: usize) -> Zpk {
     }
 }
 
-/// `scipy.signal.cheb1ap`.
+/// Analog Chebyshev type I low-pass prototype of order `n` with `rp` dB of
+/// passband ripple.
 pub(crate) fn cheb1ap(n: usize, rp: f64) -> Zpk {
     let nf = n as f64;
     let eps = (10f64.powf(0.1 * rp) - 1.0).sqrt();
@@ -93,7 +94,8 @@ pub(crate) fn cheb1ap(n: usize, rp: f64) -> Zpk {
     }
 }
 
-/// `scipy.signal.cheb2ap`.
+/// Analog Chebyshev type II low-pass prototype of order `n` with `rs` dB of
+/// stopband attenuation.
 pub(crate) fn cheb2ap(n: usize, rs: f64) -> Zpk {
     let nf = n as f64;
     let de = 1.0 / (10f64.powf(0.1 * rs) - 1.0).sqrt();
@@ -137,10 +139,10 @@ fn reverse_bessel_coeffs(n: usize) -> Vec<f64> {
 //
 // The zeros of the ordinary Bessel polynomial y_N are badly conditioned with
 // respect to plain floating-point evaluation (the recurrence cancels by ~1e12
-// near the zeros at N = 24). Following SciPy's `_bessel_zeros`, we start from
-// Campos & Calderón's asymptotic approximations and refine with Aberth-Ehrlich
-// iterations, but evaluate y_N in double-double arithmetic (~32 significant
-// digits) so the refined zeros are accurate to f64 precision.
+// near the zeros at N = 24). We start from Campos & Calderón's asymptotic
+// approximations and refine with Aberth-Ehrlich iterations, evaluating y_N in
+// double-double arithmetic (~32 significant digits) so the refined zeros are
+// accurate to f64 precision.
 
 /// Double-double number `hi + lo`.
 #[derive(Clone, Copy)]
@@ -251,8 +253,7 @@ fn bessel_poly_eval(n: usize, x: C64) -> (C64, C64) {
     (y.to_c64(), d)
 }
 
-/// Campos & Calderón (2011) starting points for the zeros of `y_N`
-/// (SciPy `_campos_zeros`).
+/// Campos & Calderón (2011) starting points for the zeros of `y_N`.
 fn campos_zeros(n: usize) -> Vec<C64> {
     if n == 1 {
         return vec![C64::new(-1.0, 0.0)];
@@ -277,7 +278,7 @@ fn campos_zeros(n: usize) -> Vec<C64> {
         .collect()
 }
 
-/// Zeros of the ordinary Bessel polynomial `y_N` (SciPy `_bessel_zeros`).
+/// Zeros of the ordinary Bessel polynomial `y_N`.
 fn bessel_zeros(n: usize) -> Vec<C64> {
     let one = C64::new(1.0, 0.0);
     let mut x = campos_zeros(n);
@@ -359,7 +360,7 @@ fn enforce_conjugate_symmetry(roots: Vec<C64>) -> Vec<C64> {
     out
 }
 
-/// `scipy.signal.besselap`.
+/// Analog Bessel low-pass prototype of order `n`, normalised by `norm`.
 pub(crate) fn besselap(n: usize, norm: BesselNorm) -> Zpk {
     let coeffs = reverse_bessel_coeffs(n);
     // Poles normalised for unit group delay at DC.
@@ -409,7 +410,7 @@ pub(crate) fn besselap(n: usize, norm: BesselNorm) -> Zpk {
 }
 
 // ---------------------------------------------------------------------------
-// Elliptic special functions (ports of the Cephes routines SciPy uses)
+// Elliptic special functions (after the Cephes routines)
 // ---------------------------------------------------------------------------
 
 /// Arithmetic-geometric mean.
@@ -425,7 +426,7 @@ fn agm(mut a: f64, mut b: f64) -> f64 {
     0.5 * (a + b)
 }
 
-/// Complete elliptic integral of the first kind, parameter `m` (SciPy `ellipk`).
+/// Complete elliptic integral of the first kind, parameter `m`.
 fn ellipk(m: f64) -> f64 {
     if m >= 1.0 {
         return f64::INFINITY;
@@ -433,7 +434,7 @@ fn ellipk(m: f64) -> f64 {
     PI / (2.0 * agm(1.0, (1.0 - m).sqrt()))
 }
 
-/// `K(1 - p)` evaluated without cancellation (SciPy `ellipkm1`).
+/// `K(1 - p)` evaluated without cancellation.
 fn ellipkm1(p: f64) -> f64 {
     if p <= 0.0 {
         return f64::INFINITY;
@@ -441,7 +442,7 @@ fn ellipkm1(p: f64) -> f64 {
     PI / (2.0 * agm(1.0, p.sqrt()))
 }
 
-/// Jacobi elliptic functions `(sn, cn, dn)` (Cephes `ellpj`, as used by SciPy).
+/// Jacobi elliptic functions `(sn, cn, dn)` (Cephes `ellpj`).
 fn ellipj(u: f64, m: f64) -> (f64, f64, f64) {
     const MACHEP: f64 = 1.110_223_024_625_156_5e-16;
     if m < 1.0e-9 {
@@ -498,7 +499,7 @@ fn ellipj(u: f64, m: f64) -> (f64, f64, f64) {
     (sn, cn, dn)
 }
 
-/// Solve the degree equation for the elliptic modulus (SciPy `_ellipdeg`).
+/// Solve the degree equation for the elliptic modulus.
 fn ellipdeg(n: usize, m1: f64) -> f64 {
     const MMAX: i32 = 7;
     let k1 = ellipk(m1);
@@ -515,7 +516,7 @@ fn complex_asin(z: C64) -> C64 {
     -i * (i * z + (C64::new(1.0, 0.0) - z * z).sqrt()).ln()
 }
 
-/// Inverse Jacobian elliptic `sn` for complex argument (SciPy `_arc_jac_sn`).
+/// Inverse Jacobian elliptic `sn` for complex argument.
 fn arc_jac_sn(w: C64, m: f64) -> C64 {
     let complement = |kx: C64| ((C64::new(1.0, 0.0) - kx) * (C64::new(1.0, 0.0) + kx)).sqrt();
     let k = m.sqrt();
@@ -543,12 +544,13 @@ fn arc_jac_sc1(w: f64, m: f64) -> f64 {
     arc_jac_sn(C64::new(0.0, w), m).im
 }
 
-/// `10^x - 1` without cancellation for small `x` (SciPy `_pow10m1`).
+/// `10^x - 1` without cancellation for small `x`.
 fn pow10m1(x: f64) -> f64 {
     (x * std::f64::consts::LN_10).exp_m1()
 }
 
-/// `scipy.signal.ellipap`.
+/// Analog elliptic (Cauer) low-pass prototype of order `n` with `rp` dB of
+/// passband ripple and `rs` dB of stopband attenuation.
 pub(crate) fn ellipap(n: usize, rp: f64, rs: f64) -> AudioSampleResult<Zpk> {
     const EPSILON: f64 = 2e-16;
     if n == 1 {
@@ -619,7 +621,7 @@ fn relative_degree(z: &Zpk) -> usize {
     z.poles.len().saturating_sub(z.zeros.len())
 }
 
-/// `scipy.signal.lp2lp_zpk`.
+/// Low-pass prototype to low-pass with cutoff `wo` rad/s.
 pub(crate) fn lp2lp_zpk(z: &Zpk, wo: f64) -> Zpk {
     let degree = relative_degree(z) as i32;
     Zpk {
@@ -629,7 +631,7 @@ pub(crate) fn lp2lp_zpk(z: &Zpk, wo: f64) -> Zpk {
     }
 }
 
-/// `scipy.signal.lp2hp_zpk`.
+/// Low-pass prototype to high-pass with cutoff `wo` rad/s.
 pub(crate) fn lp2hp_zpk(z: &Zpk, wo: f64) -> Zpk {
     let degree = relative_degree(z);
     let mut zeros: Vec<C64> = z.zeros.iter().map(|&r| wo / r).collect();
@@ -648,7 +650,7 @@ fn split_band(roots: &[C64], wo: f64) -> Vec<C64> {
     out
 }
 
-/// `scipy.signal.lp2bp_zpk`.
+/// Low-pass prototype to band-pass with centre `wo` and bandwidth `bw` rad/s.
 pub(crate) fn lp2bp_zpk(z: &Zpk, wo: f64, bw: f64) -> Zpk {
     let degree = relative_degree(z) as i32;
     let z_lp: Vec<C64> = z.zeros.iter().map(|&r| r * (bw / 2.0)).collect();
@@ -662,7 +664,7 @@ pub(crate) fn lp2bp_zpk(z: &Zpk, wo: f64, bw: f64) -> Zpk {
     }
 }
 
-/// `scipy.signal.lp2bs_zpk`.
+/// Low-pass prototype to band-stop with centre `wo` and bandwidth `bw` rad/s.
 pub(crate) fn lp2bs_zpk(z: &Zpk, wo: f64, bw: f64) -> Zpk {
     let degree = relative_degree(z);
     let z_hp: Vec<C64> = z.zeros.iter().map(|&r| (bw / 2.0) / r).collect();
@@ -677,7 +679,7 @@ pub(crate) fn lp2bs_zpk(z: &Zpk, wo: f64, bw: f64) -> Zpk {
     }
 }
 
-/// `scipy.signal.bilinear_zpk`.
+/// Bilinear transform of an analog zero-pole-gain filter at sample rate `fs`.
 pub(crate) fn bilinear_zpk(z: &Zpk, fs: f64) -> Zpk {
     let degree = relative_degree(z);
     let fs2 = 2.0 * fs;
@@ -700,11 +702,11 @@ pub(crate) fn bilinear_zpk(z: &Zpk, fs: f64) -> Zpk {
 }
 
 // ============================================================================
-// zpk2sos (SciPy pairing = 'nearest')
+// zpk2sos (nearest-pole pairing)
 // ============================================================================
 
 /// Split roots into conjugate-pair representatives (positive imaginary part)
-/// and purely real roots, as SciPy's `_cplxreal`.
+/// and purely real roots.
 fn cplxreal(roots: &[C64]) -> AudioSampleResult<(Vec<C64>, Vec<f64>)> {
     if roots.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -764,7 +766,7 @@ fn is_real(r: &C64) -> bool {
 }
 
 /// Index of the root in `fro` nearest to `to`, restricted to real / complex /
-/// any roots (SciPy `_nearest_real_complex_idx`). Ties resolve to the lowest
+/// any roots. Ties resolve to the lowest
 /// index, as a stable `argsort` would.
 fn nearest_idx(fro: &[C64], to: C64, which: Which) -> usize {
     let wanted = |r: &C64| match which {
@@ -782,8 +784,8 @@ fn nearest_idx(fro: &[C64], to: C64, which: Which) -> usize {
             best = Some((i, d));
         }
     }
-    // SciPy would raise if no root of the requested kind exists; fall back to
-    // the nearest root of any kind (cannot happen for valid designs).
+    // If no root of the requested kind exists, fall back to the nearest root
+    // of any kind (cannot happen for valid designs).
     best.map_or_else(|| nearest_idx(fro, to, Which::Any), |(i, _)| i)
 }
 
@@ -795,7 +797,7 @@ enum Which {
 }
 
 /// Coefficients (highest degree first, real part) of the monic polynomial
-/// with the given (at most two) roots, as `numpy.poly`; returns the
+/// with the given (at most two) roots; returns the
 /// coefficient array and its length.
 fn poly2(roots: &[C64]) -> ([f64; 3], usize) {
     match roots {
@@ -815,7 +817,8 @@ fn single_zpksos(z: &[C64], p: &[C64]) -> Sos {
     sos
 }
 
-/// `scipy.signal.zpk2sos(z, p, k, pairing='nearest')` for digital filters.
+/// Converts a digital zero-pole-gain filter to second-order sections, pairing
+/// each pole with its nearest zeros.
 pub(crate) fn zpk2sos(zpk: &Zpk) -> AudioSampleResult<Vec<Sos>> {
     let finite = |r: &C64| r.re.is_finite() && r.im.is_finite();
     if !zpk.gain.is_finite() || !zpk.zeros.iter().all(finite) || !zpk.poles.iter().all(finite) {
@@ -917,7 +920,7 @@ pub(crate) fn zpk2sos(zpk: &Zpk) -> AudioSampleResult<Vec<Sos>> {
 }
 
 // ============================================================================
-// Top-level design (SciPy `iirfilter(..., output='sos', fs=fs)`)
+// Top-level design
 // ============================================================================
 
 /// Critical frequencies, in Hz.
@@ -927,15 +930,15 @@ pub(crate) enum Wn {
     Band(f64, f64),
 }
 
-/// Design a digital IIR filter as SOS, exactly like
-/// `scipy.signal.iirfilter(N, Wn, btype, ftype, output='sos', fs=fs)`.
+/// Design a digital IIR filter as second-order sections from the analog
+/// prototype `proto`, with critical frequencies `wn` in Hz at `sample_rate`.
 pub(crate) fn iirfilter_sos(
     proto: &Zpk,
     response: FilterResponse,
     wn: Wn,
     sample_rate: f64,
 ) -> AudioSampleResult<Vec<Sos>> {
-    // SciPy normalises to Nyquist = 1 and then designs with fs = 2.
+    // Normalise to Nyquist = 1, then design with fs = 2.
     const FS: f64 = 2.0;
     let warp = |f_hz: f64| {
         let w = 2.0 * f_hz / sample_rate;
@@ -1178,8 +1181,7 @@ pub(crate) fn design_sos(
 // Analysis helpers
 // ============================================================================
 
-/// Complex frequency response of an SOS cascade at `freqs_hz`
-/// (SciPy `sosfreqz(sos, worN=freqs, fs=fs)`).
+/// Complex frequency response of an SOS cascade at `freqs_hz`.
 pub(crate) fn sosfreqz(sos: &[Sos], freqs_hz: &[f64], sample_rate: f64) -> Vec<C64> {
     freqs_hz
         .iter()
@@ -1197,7 +1199,7 @@ pub(crate) fn sosfreqz(sos: &[Sos], freqs_hz: &[f64], sample_rate: f64) -> Vec<C
 }
 
 /// Steady-state initial conditions for a unit step, per section, for the
-/// transposed direct form II (SciPy `sosfilt_zi`). Coefficients must be
+/// transposed direct form II. Coefficients must be
 /// normalised so that `a0 == 1`.
 pub(crate) fn sosfilt_zi(sos: &[Sos]) -> Vec<[f64; 2]> {
     let mut scale = 1.0;
@@ -1231,7 +1233,7 @@ mod tests {
 
     #[test]
     fn butter4_lowpass_matches_scipy_coefficients() {
-        // scipy.signal.butter(4, 1000, fs=48000, output='sos')
+        // Reference SOS of the 4th-order Butterworth low-pass at 1 kHz, fs 48 kHz.
         let expected: [Sos; 2] = [
             [
                 1.555_172_178_089_176e-5,

@@ -6,7 +6,7 @@
 //!
 //! Sample-rate conversion is needed whenever audio from different sources is
 //! combined, or when an analysis expects a fixed rate (e.g. 16 kHz speech
-//! models, librosa's 22.05 kHz default). Done naively it either aliases
+//! models, 22.05 kHz music analysis). Done naively it either aliases
 //! (dropping samples) or shifts the signal in time (a filter delay that is not
 //! compensated); both corrupt any later sample-accurate comparison.
 //!
@@ -29,7 +29,7 @@
 //! | `Fast` (downsampling) | 0.80 · Nyquist | 70 dB from Nyquist | cheap anti-aliased decimation |
 //! | `Fast` (upsampling) | linear interpolation | none | cheapest; images are not suppressed |
 //! | `Medium` | 0.90 · Nyquist | 100 dB from Nyquist | general use |
-//! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis; close to `librosa.resample` (`soxr_hq`) |
+//! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis |
 //!
 //! (Nyquist of the lower of the two rates.) The filter runs in two stages:
 //! the low-pass with the passband, transition band and attenuation above at
@@ -46,17 +46,12 @@
 //! more than 2^25 coefficients (decimation by more than ~10^5 : 1) are
 //! rejected with an error.
 //!
-//! # Differences from librosa
+//! # Output length and rates
 //!
-//! `librosa.resample` (default `res_type="soxr_hq"`) delegates to the soxr C
-//! library, a different filter design; `High` follows soxr-hq's passband
-//! (91.3 % of Nyquist) and attenuation, so the two agree closely on band-limited
-//! content (see `tests/librosa_reference/resample.rs` for measured agreement)
-//! but are not bit-identical. librosa computes the output length as
-//! `ceil(n * target_sr / orig_sr)` in floating point, which can exceed the exact
-//! value by one sample (e.g. 96001 instead of 96000 for 88200 samples from
-//! 44100 Hz to 48000 Hz); this module uses exact integer arithmetic. librosa
-//! accepts fractional sample rates and a `scale` option; this module does not.
+//! The output length `ceil(n * out_rate / in_rate)` is computed in exact integer
+//! arithmetic (96000 samples for 88200 samples from 44100 Hz to 48000 Hz, where
+//! a floating-point ceiling can give 96001). Sample rates are integers, and the
+//! output amplitude is not rescaled by the rate ratio.
 //!
 //! ```
 //! use audio_samples::{AudioSamples, resample, sample_rate};
@@ -1184,8 +1179,8 @@ impl StreamState {
 /// assert_eq!(resampled.samples_per_channel().get(), 5); // ceil(4 * 48000 / 44100)
 /// ```
 ///
-/// # Differences from librosa
-/// See the [module documentation](self#differences-from-librosa).
+/// # Output length
+/// See the [module documentation](self#output-length-and-rates).
 #[inline]
 pub fn resample<T>(
     audio: &AudioSamples<T>,
@@ -1298,8 +1293,8 @@ fn resample_direct<T: StandardSample>(
 /// Resamples `(channels, samples)` float rows from `in_sr` to `out_sr`
 /// without wrapping them in [`AudioSamples`] and without converting them:
 /// the same result as [`resample`] on audio of sample type `F`, truncated or
-/// zero-padded to `n_out` samples per row when given
-/// (`librosa.util.fix_length`), computing only the samples kept.
+/// zero-padded to `n_out` samples per row when given, computing only the
+/// samples kept.
 ///
 /// # Errors
 /// See [`resample`]; also if a rate is zero or `rows` is empty.
@@ -1905,7 +1900,7 @@ mod tests {
                 assert_eq!(got, expected, "{quality:?} 44100 -> {out_sr}");
             }
         }
-        // Exact integer length (librosa's float ceil gives 96001 here).
+        // Exact integer length (a floating-point ceiling gives 96001 here).
         let audio = mono(vec![0.1; 88200], sample_rate!(44100));
         let y = resample(&audio, sample_rate!(48000), ResamplingQuality::High).unwrap();
         assert_eq!(y.samples_per_channel().get(), 96000);

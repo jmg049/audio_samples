@@ -5,10 +5,9 @@
 //! This module provides:
 //!
 //! - [`IirFilter`] - a stateful direct-form filter for arbitrary `(b, a)`
-//!   coefficients (the equivalent of `scipy.signal.lfilter`).
+//!   coefficients.
 //! - [`SosFilter`] - a stateful cascade of second-order sections, the
-//!   numerically robust representation used for every designed filter
-//!   (the equivalent of `scipy.signal.sosfilt`).
+//!   numerically robust representation used for every designed filter.
 //! - The [`AudioIirFiltering`] implementation for [`AudioSamples`], which
 //!   designs and applies Butterworth, Chebyshev Type I, Chebyshev Type II,
 //!   Bessel and elliptic filters in low-pass, high-pass, band-pass and
@@ -22,23 +21,20 @@
 //!
 //! ## How
 //!
-//! Designs follow the classic analog-prototype pipeline exactly as SciPy
-//! implements it: normalised analog prototype → analog frequency transform →
-//! bilinear transform (with frequency pre-warping) → pairing into second-order
-//! sections. The coefficients produced for a given [`IirFilterDesign`] agree
-//! with `scipy.signal.iirfilter(..., output='sos', fs=fs)` to within a few
-//! ULPs, and filtering agrees with `scipy.signal.sosfilt` / `sosfiltfilt`.
-//! This is verified by the golden-fixture tests in `tests/filter_reference.rs`,
-//! which also cross-check against independent C/C++ implementations
-//! (DSPFilters, liquid-dsp).
+//! Designs follow the classic analog-prototype pipeline: normalised analog
+//! prototype → analog frequency transform → bilinear transform (with frequency
+//! pre-warping) → pairing into second-order sections, each pole pair with its
+//! nearest zeros. The golden-fixture tests in `tests/filter_reference.rs` check
+//! the coefficients and the filtered output against reference designs and
+//! against independent C/C++ implementations (DSPFilters, liquid-dsp).
 //!
-//! | `IirFilterDesign` | SciPy equivalent |
+//! | `IirFilterDesign` | Filter |
 //! |---|---|
-//! | `butterworth_lowpass(N, fc)` | `butter(N, fc, 'lowpass', fs=fs, output='sos')` |
-//! | `chebyshev_i(resp, N, fc, rp)` | `cheby1(N, rp, fc, resp, fs=fs, output='sos')` |
-//! | `chebyshev_ii(resp, N, fc, rs)` | `cheby2(N, rs, fc, resp, fs=fs, output='sos')` |
-//! | `elliptic(resp, N, fc, rp, rs)` | `ellip(N, rp, rs, fc, resp, fs=fs, output='sos')` |
-//! | `bessel(resp, N, fc)` | `bessel(N, fc, resp, norm='mag', fs=fs, output='sos')` |
+//! | `butterworth_lowpass(N, fc)` | Order-`N` Butterworth low-pass, -3 dB at `fc` |
+//! | `chebyshev_i(resp, N, fc, rp)` | Order-`N` Chebyshev type I, `rp` dB passband ripple, `-rp` dB at `fc` |
+//! | `chebyshev_ii(resp, N, fc, rs)` | Order-`N` Chebyshev type II, `rs` dB stopband attenuation from `fc` |
+//! | `elliptic(resp, N, fc, rp, rs)` | Order-`N` elliptic, `rp` dB ripple and `rs` dB attenuation |
+//! | `bessel(resp, N, fc)` | Order-`N` Bessel, magnitude-normalised: -3 dB at `fc` |
 //!
 //! Integer sample types are converted to `f64` for filtering and converted
 //! back afterwards; results that exceed full scale are clamped.
@@ -340,13 +336,12 @@ impl IirFilter {
 }
 
 // ============================================================================
-// Transposed direct form II biquad (the `scipy.signal.sosfilt` kernel)
+// Transposed direct form II biquad
 // ============================================================================
 
 /// Second-order section in transposed direct form II with `a0 == 1`.
 ///
-/// The recurrence is SciPy's `sosfilt` inner loop (with the first state
-/// update re-associated for speed):
+/// The recurrence (with the first state update re-associated for speed):
 /// ```text
 ///   y    = b0·x + s0
 ///   s0'  = (b1·x + s1) - a1·y
@@ -380,10 +375,10 @@ impl Biquad {
     #[inline(always)]
     fn process(&mut self, x: f64) -> f64 {
         let y = self.b0 * x + self.s0;
-        // `(b1·x + s1) - a1·y` rather than SciPy's `b1·x - a1·y + s1`: the
-        // terms not depending on `y` are summed first, which takes one
-        // addition off the recursive y → y dependency chain (≈25 % faster).
-        // The result differs from SciPy by at most an ulp per operation.
+        // `(b1·x + s1) - a1·y` rather than `b1·x - a1·y + s1`: the terms not
+        // depending on `y` are summed first, which takes one addition off the
+        // recursive y → y dependency chain (≈25 % faster). The two orders differ
+        // by at most an ulp per operation.
         self.s0 = (self.b1 * x + self.s1) - self.a1 * y;
         self.s1 = self.b2 * x - self.a2 * y;
         y
@@ -492,8 +487,7 @@ fn biquads(sos: &[Sos]) -> Vec<Biquad> {
     sos.iter().map(Biquad::from_sos).collect()
 }
 
-/// Zero-phase forward-backward filtering of `signal` in place, matching
-/// `scipy.signal.sosfiltfilt(sos, x, padtype='odd')`.
+/// Zero-phase forward-backward filtering of `signal` in place.
 ///
 /// - The signal is extended at both ends by odd reflection of
 ///   `padlen = 3 · (2·n_sections + 1 - min(#b2==0, #a2==0))` samples.
@@ -501,8 +495,8 @@ fn biquads(sos: &[Sos]) -> Vec<Biquad> {
 ///   ([`iir_design::sosfilt_zi`]) scaled by the first sample of the data it
 ///   filters, which suppresses the start-up transient.
 ///
-/// SciPy rejects signals with `len ≤ padlen`; here the padding is reduced to
-/// `len - 1` instead so short signals are still filtered.
+/// For signals with `len ≤ padlen` the padding is reduced to `len - 1`, so
+/// short signals are still filtered.
 pub(crate) fn sosfiltfilt_slice(sos: &[Sos], signal: &mut [f64]) {
     let len = signal.len();
     if len == 0 || sos.is_empty() {
@@ -636,8 +630,8 @@ fn filter_df1(st: &mut [Df1], signal: &mut [f64]) {
 /// Represents an IIR filter as a cascade of second-order (biquad) sections.
 /// This architecture is numerically stable for high-order filters, where
 /// direct-form implementations suffer from coefficient quantisation and
-/// floating-point errors. It is the representation used by SciPy
-/// (`output='sos'`), MATLAB and most professional DSP tools.
+/// floating-point errors. It is the representation used by most professional
+/// DSP tools.
 ///
 /// Each section is an [`IirFilter`] that processes the output of the previous
 /// section, and keeps its own delay-line state between calls, so an
@@ -645,7 +639,7 @@ fn filter_df1(st: &mut [Df1], signal: &mut [f64]) {
 ///
 /// Use [`SosFilter::from_design`] to design a filter, or
 /// [`SosFilter::from_sos_coefficients`] to load coefficients produced
-/// elsewhere (for example `scipy.signal.butter(..., output='sos')`).
+/// elsewhere.
 ///
 /// # Invariants
 /// - `sections` must not be empty.
@@ -696,11 +690,10 @@ impl SosFilter {
         Self { sections }
     }
 
-    /// Build a filter from second-order-section coefficients in SciPy layout.
+    /// Build a filter from second-order-section coefficients.
     ///
-    /// Each row is `[b0, b1, b2, a0, a1, a2]`, exactly the layout of the array
-    /// returned by `scipy.signal.butter(..., output='sos')` and friends, and of
-    /// MATLAB's `sos` matrices. Rows are normalised so that `a0 == 1`.
+    /// Each row is `[b0, b1, b2, a0, a1, a2]`, the usual `sos` matrix layout.
+    /// Rows are normalised so that `a0 == 1`.
     ///
     /// # Arguments
     /// - `sos` - One row per section; must not be empty.
@@ -716,7 +709,7 @@ impl SosFilter {
     /// ```
     /// use audio_samples::operations::iir_filtering::SosFilter;
     ///
-    /// // scipy.signal.butter(2, 1000, fs=48000, output='sos')
+    /// // Second-order Butterworth low-pass at 1 kHz, fs 48 kHz.
     /// let sos = SosFilter::from_sos_coefficients(&[[
     ///     0.00391612666054737, 0.00783225332109474, 0.00391612666054737,
     ///     1.0, -1.815341082704568, 0.8310055893467575,
@@ -749,8 +742,8 @@ impl SosFilter {
 
     /// Return the coefficients as rows of `[b0, b1, b2, a0, a1, a2]`.
     ///
-    /// This is the SciPy / MATLAB `sos` layout, suitable for
-    /// `scipy.signal.sosfilt` or `sosfreqz`. Sections with fewer than three
+    /// This is the usual `sos` matrix layout, the one
+    /// [`SosFilter::from_sos_coefficients`] reads. Sections with fewer than three
     /// coefficients are zero-padded.
     ///
     /// # Errors
@@ -922,8 +915,8 @@ impl SosFilter {
     /// state across calls. This lets real-time / block processing avoid
     /// redesigning the filter for every block.
     ///
-    /// The coefficients equal those of the matching SciPy design (see the
-    /// [module documentation](self)).
+    /// The coefficients are those of [`IirFilterDesign::sos_coefficients`] (see
+    /// the [module documentation](self)).
     ///
     /// # Arguments
     /// - `design` - Filter specification (type, order, frequencies, ripple).
@@ -985,13 +978,14 @@ impl SosFilter {
 
     /// Zero-phase forward-backward filtering of a whole signal, in place.
     ///
-    /// Equivalent to `scipy.signal.sosfiltfilt(sos, x)` (odd padding,
-    /// steady-state initial conditions). The magnitude response is squared and
+    /// The signal is padded by odd reflection at both ends and each pass starts
+    /// from steady-state initial conditions. The magnitude response is squared and
     /// the phase response cancels. The filter's own streaming state is neither
     /// used nor modified.
     ///
-    /// Signals no longer than SciPy's default pad length are padded with
-    /// `len - 1` samples instead of raising an error.
+    /// Signals no longer than the pad length
+    /// `3 · (2·n_sections + 1 - min(#b2==0, #a2==0))` are padded with `len - 1`
+    /// samples instead of raising an error.
     ///
     /// # Arguments
     /// - `signal` - The whole signal; replaced by the filtered result.
@@ -1100,11 +1094,10 @@ impl IirFilterDesign {
         SosFilter::from_design(self, sample_rate)
     }
 
-    /// Design this filter and return its SOS coefficients in SciPy layout.
+    /// Design this filter and return its SOS coefficients.
     ///
-    /// Each row is `[b0, b1, b2, a0, a1, a2]` with `a0 == 1`; the array is
-    /// what `scipy.signal.iirfilter(..., output='sos', fs=sample_rate)` returns
-    /// for the same specification.
+    /// Each row is `[b0, b1, b2, a0, a1, a2]` with `a0 == 1`, one row per
+    /// second-order section in the order they are applied.
     ///
     /// # Errors
     /// - [crate::AudioSampleError::Parameter] - if the design is invalid.
@@ -1114,8 +1107,8 @@ impl IirFilterDesign {
     /// use audio_samples::operations::types::IirFilterDesign;
     /// use std::num::NonZeroUsize;
     ///
-    /// // Same as scipy.signal.butter(3, 1000, fs=48000, output='sos'):
-    /// // a third-order filter has one second-order and one first-order section.
+    /// // Third-order Butterworth low-pass at 1 kHz, fs 48 kHz: one second-order
+    /// // and one first-order section.
     /// let rows = IirFilterDesign::butterworth_lowpass(NonZeroUsize::new(3).unwrap(), 1000.0)
     ///     .sos_coefficients(48000.0)
     ///     .unwrap();
@@ -1133,7 +1126,7 @@ impl IirFilterDesign {
     ///
     /// # Returns
     /// `(magnitudes, phases)`: linear magnitude and phase in radians wrapped
-    /// to `(-π, π]`, one entry per frequency (SciPy `sosfreqz`).
+    /// to `(-π, π]`, one entry per frequency.
     ///
     /// # Errors
     /// - [crate::AudioSampleError::Parameter] - if the design is invalid.
@@ -1200,7 +1193,7 @@ where
 
 /// Filter every channel of `audio` with `sos` (zero initial state per channel).
 ///
-/// Equivalent to `scipy.signal.sosfilt(sos, x, axis=-1)` per channel. Samples
+/// Each channel is filtered independently along time. Samples
 /// are converted to `f64`, filtered, and converted back (clamped to full scale
 /// for integer types) in a single pass without intermediate buffers.
 pub(crate) fn apply_sos_to_audio<T: StandardSample>(audio: &mut AudioSamples<'_, T>, sos: &[Sos]) {
@@ -1248,8 +1241,8 @@ where
     ///
     /// Designs a filter from `design` (using the audio's own sample
     /// rate), then applies it to every channel independently, each starting
-    /// from zero state. Equivalent to `scipy.signal.sosfilt(sos, x)` with the
-    /// SOS coefficients SciPy would design for the same specification.
+    /// from zero state, with the coefficients of
+    /// [`IirFilterDesign::sos_coefficients`].
     ///
     /// # Arguments
     /// - `design` - Filter specification (type, order, frequencies, ripple).
@@ -1295,9 +1288,8 @@ where
     /// Apply a Butterworth low-pass filter.
     ///
     /// Convenience wrapper that constructs an [`IirFilterDesign`] and
-    /// delegates to [`Self::apply_iir_filter_in_place`]. Equivalent to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(order, cutoff, 'lowpass',
-    /// fs=fs, output='sos'), x)`.
+    /// delegates to [`Self::apply_iir_filter_in_place`]: an `order`-pole
+    /// Butterworth low-pass, -3 dB at `cutoff_frequency`, from zero state.
     ///
     /// # Arguments
     /// - `order` - Filter order (number of poles).
@@ -1340,9 +1332,8 @@ where
     /// Apply a Butterworth high-pass filter.
     ///
     /// Convenience wrapper that constructs an [`IirFilterDesign`] and
-    /// delegates to [`Self::apply_iir_filter_in_place`]. Equivalent to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(order, cutoff, 'highpass',
-    /// fs=fs, output='sos'), x)`.
+    /// delegates to [`Self::apply_iir_filter_in_place`]: an `order`-pole
+    /// Butterworth high-pass, -3 dB at `cutoff_frequency`, from zero state.
     ///
     /// # Arguments
     /// - `order` - Filter order (number of poles).
@@ -1388,8 +1379,7 @@ where
     /// delegates to [`Self::apply_iir_filter_in_place`]. The band-pass is
     /// derived from an `order`-pole low-pass prototype by the analog
     /// low-pass→band-pass transform, so the digital filter has `2 × order`
-    /// poles. Equivalent to `scipy.signal.butter(order, [low, high],
-    /// 'bandpass', fs=fs, output='sos')`.
+    /// poles.
     ///
     /// # Arguments
     /// - `order` - Order of the low-pass prototype.
@@ -1436,8 +1426,6 @@ where
     /// filters of the same order at the cost of passband ripple. The passband
     /// ripples between 0 dB and `-passband_ripple` dB; at
     /// `cutoff_frequency` the response is exactly `-passband_ripple` dB.
-    /// Equivalent to `scipy.signal.cheby1(order, passband_ripple, cutoff,
-    /// response, fs=fs, output='sos')`.
     ///
     /// For band-pass / band-stop use [`IirFilterDesign::chebyshev_i_band`]
     /// with [`Self::apply_iir_filter_in_place`].
