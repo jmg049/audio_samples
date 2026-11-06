@@ -9,11 +9,11 @@
 //! | [`AudioStatistics`] | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |
 //! | [`AudioProcessing`] | `processing` | Normalize, filter, resample, μ-law, … |
 //! | [`AudioTransforms`] | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |
-//! | [`AudioSpectrum`] | `transforms` | librosa-compatible STFT/ISTFT, mel spectrogram, MFCC |
-//! | [`AudioTonal`] | `feature-extraction` | librosa-compatible chroma_stft, piptrack, tuning estimation |
-//! | [`AudioFeatures`] | `feature-extraction` | librosa-compatible frame-wise spectral features, RMS, ZCR |
-//! | `AudioEffects` | `effects` | librosa-compatible time stretch, pitch shift, emphasis, dB trim/split, HPSS |
-//! | [`AudioConstantQ`] | `transforms` + `resampling` | librosa-compatible CQT/VQT/iCQT, chroma_cqt/cens/vqt, tonnetz |
+//! | [`AudioSpectrum`] | `transforms` | Multichannel STFT/ISTFT, mel spectrogram, MFCC |
+//! | [`AudioTonal`] | `feature-extraction` | STFT chroma, pitch tracking by parabolic peaks, tuning estimation |
+//! | [`AudioFeatures`] | `feature-extraction` | Frame-wise spectral features, RMS, ZCR |
+//! | `AudioEffects` | `effects` | Time stretch, pitch shift, emphasis, dB trim/split, HPSS |
+//! | [`AudioConstantQ`] | `transforms` + `resampling` | CQT/VQT/iCQT, CQT, CENS and VQT chroma, tonnetz |
 //! | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |
 //! | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |
 //! | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |
@@ -21,12 +21,12 @@
 //! | [`AudioIirFiltering`] | `iir-filtering` | Butterworth, Chebyshev IIR filters |
 //! | [`AudioParametricEq`] | `parametric-eq` | Multi-band parametric EQ |
 //! | [`AudioPitchAnalysis`] | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |
-//! | [`AudioPitchTracking`] | `pitch-analysis` | librosa-compatible frame-wise YIN and pYIN |
+//! | [`AudioPitchTracking`] | `pitch-analysis` | Frame-wise YIN and pYIN |
 //! | [`AudioVoiceActivityDetection`] | `vad` | Frame-based speech / silence classification |
 //! | [`AudioDecomposition`] | `decomposition` | Harmonic-percussive source separation (HPSS) |
 //! | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |
 //! | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |
-//! | [`AudioRhythm`] | `beat-tracking` | librosa-compatible onset strength/detection, tempogram, tempo, beat tracking, PLP |
+//! | [`AudioRhythm`] | `beat-tracking` | Onset strength/detection, tempogram, tempo, beat tracking, PLP |
 //! | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
 //!
 //! Grouping operations into separate traits means only the code for the enabled
@@ -415,18 +415,12 @@ where
     /// channels), so a stereo signal with two identical channels has the same
     /// rate as either channel alone.
     ///
-    /// Note: librosa's `zero_crossing_rate` returns a per-frame fraction
-    /// (crossings / frame length). For a mono signal, divide this value by the
-    /// sample rate to get the equivalent whole-signal fraction of samples.
+    /// For a mono signal, divide this value by the sample rate to get the
+    /// fraction of samples at which the sign changes. For a per-frame fraction
+    /// see [`AudioFeatures::zero_crossing_rate_frames`].
     ///
     /// # Returns
     /// The number of zero crossings per second as `f64`, averaged over channels.
-    ///
-    /// # Differences from librosa
-    ///
-    /// `librosa.feature.zero_crossing_rate` returns, per channel and per frame,
-    /// the fraction of samples at which the sign changes (centred frames of 2048
-    /// samples, hop 512). This method is a single whole-signal rate in Hz.
     ///
     /// # Examples
     /// ```
@@ -499,9 +493,9 @@ where
     /// `f_k = k·fs/N` Hz. It serves as a measure of spectral brightness: higher
     /// values indicate energy concentrated at higher frequencies.
     ///
-    /// Note: librosa's `spectral_centroid` is computed per STFT frame and weighted
-    /// by magnitude `|X|`, so its values are generally higher than this
-    /// power-weighted value and are not directly comparable.
+    /// For a magnitude-weighted centroid per STFT frame see
+    /// [`AudioFeatures::spectral_centroid_frames`]; its values are generally higher
+    /// than this power-weighted value and are not directly comparable.
     ///
     /// Reference: [Spectral centroid - Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
     ///
@@ -550,9 +544,8 @@ where
     ///
     /// For multi-channel audio only the first channel is used.
     ///
-    /// Note: unlike the biased estimator `(1/N) Σ …` (e.g.
-    /// `numpy.correlate(x, x, "full")[N-1:] / N`), each lag is divided by its own
-    /// overlap count `N − k`.
+    /// Note: unlike the biased estimator `(1/N) Σ …`, each lag is divided by its
+    /// own overlap count `N − k`.
     ///
     /// Reference: [Autocorrelation - Wikipedia](https://en.wikipedia.org/wiki/Autocorrelation)
     ///
@@ -591,8 +584,8 @@ where
     /// between bins, so the result is a multiple of `fs/N`. It is commonly used to
     /// distinguish harmonic signals from noise-like signals.
     ///
-    /// Note: librosa's `spectral_rolloff` accumulates magnitude `|X|` per STFT
-    /// frame, so its values differ from this whole-signal, power-based rolloff.
+    /// [`AudioFeatures::spectral_rolloff_frames`] accumulates magnitude `|X|` per
+    /// STFT frame, so its values differ from this whole-signal, power-based rolloff.
     ///
     /// # Arguments
     /// - `rolloff_percent` - the energy proportion threshold. Must lie in the
@@ -643,8 +636,9 @@ where
     /// indicate energy spread across a wider frequency range; a single on-bin pure
     /// tone yields a value near zero.
     ///
-    /// Note: this is librosa's `spectral_bandwidth` formula (`p = 2`, magnitude
-    /// weights) applied to one whole-signal FFT rather than to each STFT frame.
+    /// Note: this is the formula of
+    /// [`AudioFeatures::spectral_bandwidth_frames`] (`p = 2`, magnitude weights)
+    /// applied to one whole-signal FFT rather than to each STFT frame.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -675,8 +669,8 @@ where
     /// clamped to `[0, 1]`: values near `1` indicate noise-like (flat) spectra,
     /// while values near `0` indicate tonal spectra dominated by a few peaks.
     ///
-    /// Note: librosa's `spectral_flatness` (default `power=2.0`) uses the same
-    /// ratio per STFT frame, with `max(P_k, amin)` instead of `P_k + ε`.
+    /// Note: [`AudioFeatures::spectral_flatness_frames`] uses the same ratio per
+    /// STFT frame, with `max(P_k, amin)` instead of `P_k + ε`.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -754,8 +748,7 @@ where
         reduction: crate::operations::types::ChannelReduction,
     ) -> AudioSampleResult<f64>;
 
-    /// Computes spectral contrast across logarithmically spaced sub-bands (after
-    /// librosa).
+    /// Computes spectral contrast across logarithmically spaced sub-bands.
     ///
     /// The Hann-windowed magnitude spectrum `M_k` of the whole (channel-reduced)
     /// signal has `B = ⌊N/2⌋ + 1` bins. Bin 0 (DC) is excluded and the bins
@@ -767,11 +760,11 @@ where
     /// bottom 2 % (rounded, at least one bin each). High contrast indicates clear
     /// tonal/harmonic structure; low contrast indicates noise-like content.
     ///
-    /// Note: like librosa, this applies `10·log10` to **magnitudes**, so each value
-    /// is half the level difference in dB (multiply by 2 for a `20·log10`
-    /// difference). Unlike librosa, the band edges are fixed in bins from bin 1 to
-    /// Nyquist (librosa uses octaves above 200 Hz), and one value per band is
-    /// returned for the whole signal rather than per frame.
+    /// Note: this applies `10·log10` to **magnitudes**, so each value is half the
+    /// level difference in dB (multiply by 2 for a `20·log10` difference). The
+    /// band edges are fixed in bins from bin 1 to Nyquist, and one value per band
+    /// is returned for the whole signal. For octave bands above a frequency
+    /// floor, per frame, see [`AudioFeatures::spectral_contrast_frames`].
     ///
     /// # Arguments
     /// - `n_bands` - the number of log-spaced sub-bands.
@@ -1268,9 +1261,7 @@ where
     ///
     /// Computes the fully-overlapping ("valid") part of the convolution of each
     /// channel with `filter_coeffs`, i.e. `y[i] = Σ_j h[j] · x[i + M - 1 - j]`
-    /// for a filter of length `M` - identical to
-    /// `numpy.convolve(x, h, mode='valid')`, and to
-    /// `scipy.signal.lfilter(h, 1, x)[M-1:]`. The resulting audio is shorter
+    /// for a filter of length `M`. The resulting audio is shorter
     /// than the original by `filter_coeffs.len() - 1` samples. Long filters
     /// (≥ 160 taps, with the `transforms` feature) use FFT convolution.
     ///
@@ -1370,7 +1361,7 @@ where
     ///
     /// Same convolution as [`apply_filter_in_place`](Self::apply_filter_in_place):
     /// the valid part `y[i] = Σ_j h[j] · x[i + M - 1 - j]`, of length
-    /// `N − M + 1` (`numpy.convolve(x, h, mode='valid')`), using FFT
+    /// `N − M + 1`, using FFT
     /// convolution for 160 taps or more when the `transforms` feature is
     /// enabled. The taps are `f64` for every sample type, so integer audio can
     /// use taps of any magnitude at full precision. Samples are converted to
@@ -1461,10 +1452,8 @@ where
     /// Compresses the dynamic range of the signal using the μ-law transfer
     /// function `y = sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, applied to samples on
     /// the normalised `[-1, 1]` scale (integer samples are converted, companded
-    /// and converted back). This equals `librosa.mu_compress(x, mu,
-    /// quantize=False)`; for librosa's default integer codes
-    /// (`quantize=True`) use [`crate::mu_law_encode`]. Higher `mu` values
-    /// produce stronger compression.
+    /// and converted back). The output is continuous; for integer codes use
+    /// [`crate::mu_law_encode`]. Higher `mu` values produce stronger compression.
     ///
     /// # Arguments
     /// - `mu` - Compression parameter (typically 255 for standard μ-law). Its
@@ -1536,9 +1525,9 @@ where
     ///
     /// Applies `x = sign(y) · ((1 + μ)^|y| - 1) / μ` on the normalised
     /// `[-1, 1]` scale: the exact inverse of
-    /// [`mu_compress`](Self::mu_compress), equal to `librosa.mu_expand(y, mu,
-    /// quantize=False)` (for integer codes use [`crate::mu_law_decode`]). The
-    /// `mu` parameter must match the value used during compression.
+    /// [`mu_compress`](Self::mu_compress) (for integer codes use
+    /// [`crate::mu_law_decode`]). The `mu` parameter must match the value used
+    /// during compression.
     ///
     /// # Arguments
     /// - `mu` - Expansion parameter. Must match the value used for compression.
@@ -1612,9 +1601,7 @@ where
     /// The filter is a first-order Butterworth low-pass designed with the
     /// bilinear transform: -3 dB at `cutoff_hz`, unity gain at DC, a zero at
     /// Nyquist and a 6 dB/octave roll-off. It is applied to each channel
-    /// independently from zero initial state, and is identical to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(1, cutoff_hz, fs=fs,
-    /// output='sos'), x)`. For steeper slopes use
+    /// independently from zero initial state. For steeper slopes use
     /// [`AudioIirFiltering::butterworth_lowpass`].
     ///
     /// # Arguments
@@ -1644,7 +1631,7 @@ where
     /// leaving `self` unchanged.
     ///
     /// Non-mutating twin of [`low_pass_filter_in_place`](Self::low_pass_filter_in_place)
-    /// (first-order Butterworth, identical to `scipy.signal.butter(1, cutoff_hz)`).
+    /// (first-order Butterworth).
     ///
     /// # Arguments
     /// - `cutoff_hz` - Cutoff (-3 dB) frequency in Hz, in `(0, Nyquist)`.
@@ -1683,9 +1670,7 @@ where
     /// The filter is a first-order Butterworth high-pass designed with the
     /// bilinear transform: -3 dB at `cutoff_hz`, a zero at DC, unity gain at
     /// Nyquist and a 6 dB/octave slope. It is applied to each channel
-    /// independently from zero initial state, and is identical to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(1, cutoff_hz, 'highpass',
-    /// fs=fs, output='sos'), x)`. For steeper slopes use
+    /// independently from zero initial state. For steeper slopes use
     /// [`AudioIirFiltering::butterworth_highpass`].
     ///
     /// # Arguments
@@ -1715,7 +1700,7 @@ where
     /// leaving `self` unchanged.
     ///
     /// Non-mutating twin of [`high_pass_filter_in_place`](Self::high_pass_filter_in_place)
-    /// (first-order Butterworth, identical to `scipy.signal.butter(1, cutoff_hz, 'highpass')`).
+    /// (first-order Butterworth).
     ///
     /// # Arguments
     /// - `cutoff_hz` - Cutoff (-3 dB) frequency in Hz, in `(0, Nyquist)`.
@@ -1754,9 +1739,8 @@ where
     /// The filter is the band-pass transform of a first-order Butterworth
     /// prototype (a single second-order section): unity gain at the geometric
     /// centre of the (pre-warped) band, -3 dB at both edges, and 6 dB/octave
-    /// slopes outside the band. It is identical to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(1, [low, high], 'bandpass',
-    /// fs=fs, output='sos'), x)`. For steeper slopes use
+    /// slopes outside the band. It is applied to each channel independently from
+    /// zero initial state. For steeper slopes use
     /// [`AudioIirFiltering::butterworth_bandpass`].
     ///
     /// # Arguments
@@ -1788,7 +1772,7 @@ where
     /// `self` unchanged.
     ///
     /// Non-mutating twin of [`band_pass_filter_in_place`](Self::band_pass_filter_in_place)
-    /// (identical to `scipy.signal.butter(1, [low, high], 'bandpass')`).
+    /// (first-order Butterworth band-pass).
     ///
     /// # Arguments
     /// - `low_cutoff_hz` - Lower -3 dB edge in Hz.
@@ -2079,13 +2063,12 @@ where
 ///
 /// Forward transforms are unnormalised one-sided DFTs,
 /// X\[k\] = Σ_n x\[n\]·e^{−j2πkn/N}, with bin k at k·f_s/N Hz. `WindowType::Hanning`
-/// is the **symmetric** Hann window (librosa/SciPy default to the periodic one).
+/// is the **symmetric** Hann window, not the periodic one.
 /// Spectrogram dB values are 10·log10(max(power, 10^(floor_db/10))) re 1 (an
 /// absolute floor, no `top_db`). Mel bands use the Slaney mel scale applied to
 /// power, without filter normalisation by default; MFCCs use an unnormalised
 /// DCT-II and an HTK lifter (L = 22) by default. The
-/// [`crate::operations::transforms`] module docs give every formula and the
-/// differences from librosa.
+/// [`crate::operations::transforms`] module docs give every formula.
 ///
 /// # Invariants
 ///
@@ -2103,7 +2086,7 @@ where
     /// non-negative-frequency half of the unnormalised DFT,
     /// X\[k\] = Σ_n x\[n\]·e^{−j2πkn/N} for k = 0 … ⌊N/2⌋ (N = `n_fft`); bin k is at
     /// k·f_s/N Hz (see [`crate::utils::audio_math::fft_frequencies`]). No window
-    /// is applied. Like `numpy.fft.rfft`, there is no 1/N scaling.
+    /// is applied. There is no 1/N scaling.
     ///
     /// # Arguments
     /// - `n_fft` - FFT length in samples. If longer than the signal the input
@@ -2161,8 +2144,8 @@ where
     /// Equivalent to [`fft`] followed by taking the absolute value of each complex bin,
     /// |X\[k\]| for k = 0 … ⌊N/2⌋. Each channel is transformed independently.
     ///
-    /// Note: unlike `numpy.fft.rfft`, this returns real magnitudes |X\[k\]|, not the
-    /// complex one-sided spectrum; use [`fft`] for the complex values.
+    /// Note: this returns real magnitudes |X\[k\]|, not the complex one-sided
+    /// spectrum; use [`fft`] for the complex values.
     ///
     /// # Arguments
     ///
@@ -2198,16 +2181,14 @@ where
 
     /// Computes the Short-Time Fourier Transform (STFT) of a mono signal.
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::stft_matrix`].
+    /// For a periodic window and multichannel output see [`AudioSpectrum::stft_matrix`].
     ///
     /// Computes X\[k, m\] = Σ_n x_p\[n + mH\]·w\[n\]·e^{−j2πkn/N} (N = `n_fft`,
     /// H = `hop_size`), an unnormalised one-sided DFT of each windowed frame
     /// (⌊N/2⌋ + 1 bins × frames). `WindowType::Hanning` is the **symmetric** Hann
-    /// window 0.5 − 0.5·cos(2πn/(N − 1)), not the periodic Hann used by default in
-    /// librosa and SciPy. With `centre = true` the signal is zero-padded by ⌊N/2⌋
-    /// samples on both sides, so frame m is centred on sample mH. The result equals
-    /// `librosa.stft(x, n_fft=N, hop_length=H, window=scipy.signal.get_window('hann',
-    /// N, fftbins=False), pad_mode='constant')`. See the
+    /// window 0.5 − 0.5·cos(2πn/(N − 1)), not the periodic Hann. With
+    /// `centre = true` the signal is zero-padded by ⌊N/2⌋ samples on both sides,
+    /// so frame m is centred on sample mH. See the
     /// [`crate::operations::transforms`] module docs for the frame count. The
     /// returned [`StftResult`] carries both the complex matrix and the parameters
     /// required by [`istft`] for reconstruction.
@@ -2241,7 +2222,7 @@ where
 
     /// Reconstructs a time-domain signal from an [`StftResult`].
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::istft_matrix`].
+    /// For a periodic window and multichannel input see [`AudioSpectrum::istft_matrix`].
     ///
     /// Synthesis is windowed overlap-add normalised by Σ_m w²[n − mH] (the
     /// least-squares inverse STFT), using the window and hop stored in the
@@ -2529,14 +2510,14 @@ where
 
     /// Computes a mel-scaled spectrogram.
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::melspectrogram`].
+    /// For a periodic window and multichannel output see [`AudioSpectrum::melspectrogram`].
     ///
     /// The mel scale approximates human pitch perception by compressing
     /// high frequencies relative to low ones. Bands use the **Slaney** mel scale
-    /// (`librosa.hz_to_mel(htk=False)`) with triangular filters in Hz, applied to the
-    /// **power** spectrogram |X|². `MelParams::new` applies no filter normalisation
-    /// (librosa's default is `norm='slaney'`; use `MelParams::with_norm(..,
-    /// MelNorm::Slaney)` to match it). The `Magnitude` output is the square root of
+    /// with triangular filters in Hz, applied to the **power** spectrogram |X|².
+    /// `MelParams::new` applies no filter normalisation (use
+    /// `MelParams::with_norm(.., MelNorm::Slaney)` for area-normalised filters).
+    /// The `Magnitude` output is the square root of
     /// mel power, not a mel-weighted sum of magnitudes; `Decibels` is
     /// 10·log10(max(mel power, 10^(floor_db/10))) re 1. See the
     /// [`crate::operations::transforms`] module docs for the formulas.
@@ -2678,7 +2659,7 @@ where
 
     /// Computes Mel-Frequency Cepstral Coefficients (MFCCs).
     ///
-    /// For librosa-compatible results (periodic window, multichannel) see [`AudioSpectrum::mfcc_frames`].
+    /// For a periodic window and multichannel output see [`AudioSpectrum::mfcc_frames`].
     ///
     /// MFCCs are a compact spectral representation widely used in speech
     /// recognition and audio classification. The pipeline is: power mel
@@ -2689,9 +2670,9 @@ where
     /// **L = 22 by default** (`MfccParams::with_lifter(0)` disables it).
     /// `with_c0(false)` drops c0 and returns `n_mfcc − 1` coefficients.
     ///
-    /// Note: values therefore differ from `librosa.feature.mfcc` (orthonormal DCT,
-    /// no lifter, `top_db = 80`) by a factor √(`n_mels`/2) for q ≥ 1 (√`n_mels` for
-    /// c0) and by the lifter weights.
+    /// Note: values therefore differ from those of an orthonormal DCT without a
+    /// lifter (as in [`AudioSpectrum::mfcc_frames`]) by a factor √(`n_mels`/2) for
+    /// q ≥ 1 (√`n_mels` for c0) and by the lifter weights.
     ///
     /// # Arguments
     /// - `stft_params` - STFT configuration used for the underlying
@@ -2781,11 +2762,9 @@ where
     /// P[k] = c_k · mean_s |X_s[k]|² / (f_s · Σ_n w[n]²),   c_k = 1 at DC and Nyquist, 2 otherwise
     /// ```
     ///
-    /// in units² per Hz (units of full scale), at f_k = k·f_s/N. This matches
-    /// `scipy.signal.welch(x, fs, window=scipy.signal.windows.hann(N, sym=True),
-    /// nperseg=N, noverlap=N − H, detrend=False, scaling='density')`, and
-    /// Σ_k P\[k\]·f_s/N ≈ the mean square of the signal (Parseval). Note: SciPy's
-    /// defaults differ (periodic Hann, `detrend='constant'`).
+    /// in units² per Hz (units of full scale), at f_k = k·f_s/N. The window is the
+    /// symmetric Hann window, segments are not detrended, and
+    /// Σ_k P\[k\]·f_s/N ≈ the mean square of the signal (Parseval).
     ///
     /// # Arguments
     /// - `window_size` - segment length N in samples. Must be at least 2 and must
@@ -3230,9 +3209,8 @@ where
 /// and the relation between the lag range and the frequency range, are given
 /// in the [`pitch_analysis`](crate::operations::pitch_analysis) module docs.
 ///
-/// For librosa-compatible frame-wise pitch tracks (`librosa.yin`, `librosa.pyin`:
-/// centred frames, multichannel, voicing probabilities) see
-/// [`AudioPitchTracking`].
+/// For frame-wise YIN and pYIN pitch tracks (centred frames, multichannel,
+/// voicing probabilities) see [`AudioPitchTracking`].
 #[cfg(feature = "pitch-analysis")]
 pub trait AudioPitchAnalysis: AudioTypeConversion
 where
@@ -3608,8 +3586,7 @@ where
     ///
     /// Designs a filter from `design` (using the audio's own sample
     /// rate), then applies it to every channel independently, each starting
-    /// from zero state. Equivalent to `scipy.signal.sosfilt(sos, x)` with the
-    /// SOS coefficients SciPy would design for the same specification.
+    /// from zero state, as a cascade of second-order sections.
     ///
     /// # Arguments
     /// - `design` - Filter specification (type, order, frequencies, ripple).
@@ -3654,16 +3631,14 @@ where
     /// Designs the filter from `design`, then filters each channel forward,
     /// reverses, filters again, and reverses back. The two passes cancel the
     /// phase response (giving exactly **zero phase delay**) and **square** the
-    /// magnitude response relative to a single pass. This is the SciPy
-    /// `filtfilt` algorithm.
+    /// magnitude response relative to a single pass.
     ///
-    /// Matches `scipy.signal.sosfiltfilt(sos, x)` exactly: each channel is
-    /// extended at both ends by odd (point-)reflection of
+    /// Each channel is extended at both ends by odd (point-)reflection of
     /// `3 · (2·n_sections + 1)` samples (fewer when sections are first
     /// order), and each pass starts from the filter's steady-state initial
     /// conditions scaled by the first sample, which suppresses start-up
     /// transients at the edges. The padding is stripped afterwards. Signals
-    /// shorter than the pad length (which SciPy rejects) are padded with
+    /// shorter than the pad length are padded with
     /// `len - 1` samples instead. Integer sample types are processed through
     /// an `f64` intermediate.
     ///
@@ -3715,9 +3690,7 @@ where
     /// Apply a Butterworth low-pass filter.
     ///
     /// Convenience wrapper that constructs an [`IirFilterDesign`] and
-    /// delegates to [`Self::apply_iir_filter_in_place`]. Equivalent to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(order, cutoff, 'lowpass',
-    /// fs=fs, output='sos'), x)`.
+    /// delegates to [`Self::apply_iir_filter_in_place`].
     ///
     /// # Arguments
     /// - `order` - Filter order (number of poles).
@@ -3773,9 +3746,7 @@ where
     /// Apply a Butterworth high-pass filter.
     ///
     /// Convenience wrapper that constructs an [`IirFilterDesign`] and
-    /// delegates to [`Self::apply_iir_filter_in_place`]. Equivalent to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(order, cutoff, 'highpass',
-    /// fs=fs, output='sos'), x)`.
+    /// delegates to [`Self::apply_iir_filter_in_place`].
     ///
     /// # Arguments
     /// - `order` - Filter order (number of poles).
@@ -3834,8 +3805,7 @@ where
     /// delegates to [`Self::apply_iir_filter_in_place`]. The band-pass is
     /// derived from an `order`-pole low-pass prototype by the analog
     /// low-pass→band-pass transform, so the digital filter has `2 × order`
-    /// poles. Equivalent to `scipy.signal.butter(order, [low, high],
-    /// 'bandpass', fs=fs, output='sos')`.
+    /// poles.
     ///
     /// # Arguments
     /// - `order` - Order of the low-pass prototype.
@@ -3896,8 +3866,6 @@ where
     /// filters of the same order at the cost of passband ripple. The passband
     /// ripples between 0 dB and `-passband_ripple` dB; at
     /// `cutoff_frequency` the response is exactly `-passband_ripple` dB.
-    /// Equivalent to `scipy.signal.cheby1(order, passband_ripple, cutoff,
-    /// response, fs=fs, output='sos')`.
     ///
     /// For band-pass / band-stop use [`IirFilterDesign::chebyshev_i_band`]
     /// with [`Self::apply_iir_filter_in_place`].
@@ -6277,10 +6245,9 @@ where
     /// M_P = s·P/(H + P) + (1 − s)·\[P > H\]. Both masks multiply the original complex
     /// STFT, and each masked STFT is inverted with the ISTFT.
     ///
-    /// Note: librosa's `decompose.hpss` uses a soft mask on *powers* (H²/(H² + P²))
-    /// and `scipy.ndimage.median_filter` with `reflect` edges; this implementation
-    /// uses exponent 1 on magnitudes and mirror edges (d c b | a b c d), so results
-    /// differ slightly from librosa.
+    /// Note: the soft mask uses exponent 1 on magnitudes and the median filters use
+    /// mirror edges (d c b | a b c d). For a soft mask on powers (H²/(H² + P²))
+    /// see `AudioEffects::harmonic_percussive`.
     ///
     /// Reference:
     /// Fitzgerald, D. (2010). "Harmonic/percussive separation using median filtering".
@@ -6329,8 +6296,8 @@ where
 
 /// Onset detection and spectral analysis operations.
 ///
-/// For librosa-compatible onset strength / `onset_detect` see `AudioRhythm`
-/// (`operations::rhythm`, feature `beat-tracking`).
+/// For onset strength envelopes and onset picking on centred STFT frames see
+/// `AudioRhythm` (`operations::rhythm`, feature `beat-tracking`).
 ///
 /// # Purpose
 ///
@@ -6573,7 +6540,7 @@ where
 
 /// Beat tracking operations for audio signals.
 ///
-/// For librosa-compatible tempo estimation and dynamic-programming beat tracking see
+/// For tempo estimation from a tempogram and dynamic-programming beat tracking see
 /// [`AudioRhythm`].
 ///
 /// This trait provides tempo-aware beat detection via

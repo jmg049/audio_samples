@@ -20,18 +20,18 @@
 //! - **Mel scale (HTK).** [`hz_to_mel`], [`mel_to_hz`], [`mel_scale`] and
 //!   [`mel_frequencies`] use the HTK / O'Shaughnessy (1987) formula
 //!   m = 2595·log10(1 + f/700), with f in Hz and m in mel (1000 Hz ≈ 1000 mel).
-//!   This is `librosa.hz_to_mel(f, htk=True)`. **It is not the mel scale used by
-//!   the spectrogram path:** `AudioTransforms::mel_spectrogram` and
-//!   `AudioTransforms::mfcc` (via the `spectrograms` crate) use the Slaney scale
-//!   (librosa's default, `htk=False`: linear at 200/3 Hz per mel below 1 kHz,
-//!   logarithmic above; 1000 Hz = 15 mel). Do not use these helpers to label the
-//!   bands of a mel spectrogram.
+//!   **It is not the mel scale used by the spectrogram path:**
+//!   `AudioTransforms::mel_spectrogram` and `AudioTransforms::mfcc` (via the
+//!   `spectrograms` crate) use the Slaney scale (linear at 200/3 Hz per mel below
+//!   1 kHz, logarithmic above; 1000 Hz = 15 mel). Do not use these helpers to label
+//!   the bands of a mel spectrogram; [`hz_to_mel_with_scale`] and
+//!   [`mel_frequencies_with_scale`] take the scale as an argument.
 //! - **Decibels.** [`amplitude_to_db`] uses 20·log10(a) and [`power_to_db`] uses
 //!   10·log10(p), both with reference 1 and no `top_db`. Non-positive inputs return
 //!   the sentinel −80 dB, but positive inputs are **not** clamped, so results below
-//!   −80 dB occur (e.g. `amplitude_to_db(1e-10) = -200`). librosa's
-//!   `amplitude_to_db`/`power_to_db` instead clamp at `amin` (default 1e-5 / 1e-10)
-//!   and, by default, limit the range to `top_db = 80` below the peak.
+//!   −80 dB occur (e.g. `amplitude_to_db(1e-10) = -200`). For a lower clamp, a
+//!   reference value and a `top_db` floor see `operations::spectrum::amplitude_to_db`
+//!   and `operations::spectrum::power_to_db`.
 //! - **MIDI and notes.** A4 = MIDI 69 = 440 Hz, f = 440·2^((m − 69)/12); C4 = MIDI 60.
 //!
 //! # Usage
@@ -66,10 +66,9 @@ use std::num::NonZeroUsize;
 
 /// Converts a frequency expressed in Hertz into the mel perceptual scale.
 ///
-/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
-/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
-/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`hz_to_mel_with_scale`] with
-/// [`MelScale::Slaney`] for librosa-compatible results.
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`). The Slaney scale gives
+/// very different values (1 kHz is ~1000 HTK mels but 15 Slaney mels); use
+/// [`hz_to_mel_with_scale`] with [`MelScale::Slaney`] for the Slaney scale.
 ///
 /// This function is intended for situations where linear frequency values need to be mapped
 /// into a perceptual representation, such as when constructing mel filter banks, analysing
@@ -77,10 +76,10 @@ use std::num::NonZeroUsize;
 /// that better reflects human sensitivity.
 ///
 /// Uses the HTK (O'Shaughnessy 1987) formula m = 2595·log10(1 + f/700), with `f` in Hz
-/// and `m` in mel. This equals `librosa.hz_to_mel(f, htk=True)`.
+/// and `m` in mel.
 ///
 /// Note: `AudioTransforms::mel_spectrogram` and `AudioTransforms::mfcc` use the Slaney
-/// mel scale (librosa's default, `htk=False`), so this function does not give the mel
+/// mel scale, so this function does not give the mel
 /// coordinates of their bands (at 1000 Hz, HTK gives ≈ 1000 mel and Slaney gives 15).
 ///
 /// The conversion is deterministic, monotonic for positive frequencies, and reversible via
@@ -123,18 +122,17 @@ pub fn hz_to_mel(freq_hz: f64) -> f64 {
 
 /// Converts a value expressed on the mel perceptual scale back into Hertz.
 ///
-/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
-/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
-/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`mel_to_hz_with_scale`] with
-/// [`MelScale::Slaney`] for librosa-compatible results.
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`). The Slaney scale gives
+/// very different values (1 kHz is ~1000 HTK mels but 15 Slaney mels); use
+/// [`mel_to_hz_with_scale`] with [`MelScale::Slaney`] for the Slaney scale.
 ///
 /// This function performs the inverse mapping of [`hz_to_mel`]. It is intended for cases
 /// where perceptual-domain representations need to be projected back into physical
 /// frequency space, such as when constructing frequency bins, interpreting mel-domain
 /// features, or synthesising frequency-aligned outputs.
 ///
-/// Uses the inverse HTK formula f = 700·(10^(m/2595) − 1), with `m` in mel and `f` in Hz
-/// (`librosa.mel_to_hz(m, htk=True)`); see [`hz_to_mel`] for the Slaney-scale caveat.
+/// Uses the inverse HTK formula f = 700·(10^(m/2595) − 1), with `m` in mel and `f` in Hz;
+/// see [`hz_to_mel`] for the Slaney-scale caveat.
 ///
 /// The conversion is deterministic, monotonic for non-negative inputs, and reversible via
 /// [`hz_to_mel`] within normal floating-point precision limits.
@@ -178,10 +176,9 @@ pub fn mel_to_hz(mel: f64) -> f64 {
 
 /// Generates a sequence of frequencies whose spacing is uniform in the mel domain.
 ///
-/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
-/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
-/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`mel_frequencies_with_scale`] with
-/// [`MelScale::Slaney`] for librosa-compatible results.
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`). The Slaney scale gives
+/// very different values (1 kHz is ~1000 HTK mels but 15 Slaney mels); use
+/// [`mel_frequencies_with_scale`] with [`MelScale::Slaney`] for the Slaney scale.
 ///
 /// This function is identical to [`mel_frequencies`].
 ///
@@ -193,10 +190,8 @@ pub fn mel_to_hz(mel: f64) -> f64 {
 /// The sequence includes both endpoints and preserves ordering from low to high
 /// frequency when `fmin <= fmax`.
 ///
-/// Spacing is uniform on the HTK mel scale (see [`hz_to_mel`]), so the result equals
-/// `librosa.mel_frequencies(n_mels, fmin=fmin, fmax=fmax, htk=True)`. It does **not**
-/// give the band centres of `AudioTransforms::mel_spectrogram`, which uses the Slaney
-/// mel scale.
+/// Spacing is uniform on the HTK mel scale (see [`hz_to_mel`]). It does **not** give the
+/// band centres of `AudioTransforms::mel_spectrogram`, which uses the Slaney mel scale.
 ///
 /// # Arguments
 ///
@@ -364,8 +359,8 @@ pub fn midi_to_hz(midi_note: f64) -> f64 {
 /// **not** a floor: positive inputs are not clamped, so very small amplitudes give values
 /// below −80 dB (e.g. `amplitude_to_db(1e-10) = -200`).
 ///
-/// Note: unlike `librosa.amplitude_to_db`, there is no `amin` clamp, no `ref` argument
-/// and no `top_db` limit.
+/// Note: there is no lower clamp, no reference argument and no `top_db` limit; see
+/// `operations::spectrum::amplitude_to_db` for those.
 ///
 /// # Arguments
 ///
@@ -464,8 +459,8 @@ pub fn db_to_amplitude(db: f64) -> f64 {
 /// of the public contract. It is **not** a floor: positive inputs are not clamped, so very
 /// small powers give values below −80 dB (e.g. `power_to_db(1e-12) = -120`).
 ///
-/// Note: unlike `librosa.power_to_db`, there is no `amin` clamp, no `ref` argument and no
-/// `top_db` limit.
+/// Note: there is no lower clamp, no reference argument and no `top_db` limit; see
+/// `operations::spectrum::power_to_db` for those.
 ///
 /// # Arguments
 ///
@@ -634,14 +629,13 @@ pub fn frames_to_time(frames: usize, sample_rate: f64, hop_size: usize) -> f64 {
 ///   a time value close to the original input, subject to rounding.
 /// * Rounding is performed to the nearest integer frame index rather than truncation.
 ///
-/// # Differences from librosa
+/// # Rounding
 ///
-/// `librosa.time_to_frames` truncates the time to a sample index and then *floors* to a
-/// frame ("which frame contains this time?"), keeps negative values, and accepts an
-/// `n_fft` offset. This function rounds to the *nearest* frame (so it round-trips
-/// [`frames_to_time`] robustly) and saturates negative times to 0; about half of all
-/// times differ from librosa by one frame. Use [`time_to_frames_floor`] for
-/// librosa-compatible results.
+/// This function rounds to the *nearest* frame (so it round-trips [`frames_to_time`]
+/// robustly) and saturates negative times to 0. [`time_to_frames_floor`] instead
+/// truncates the time to a sample index and then *floors* to a frame ("which frame
+/// contains this time?"), keeps negative values, and accepts an `n_fft` offset; about
+/// half of all times give results one frame apart.
 ///
 /// # Examples
 ///
@@ -731,9 +725,9 @@ pub fn samples_to_time(samples: usize, sample_rate: f64) -> f64 {
 /// # Rounding
 ///
 /// This function **rounds** to the nearest sample. The similarly named
-/// [`crate::utils::seconds_to_samples`] **truncates** toward zero (as does librosa's
-/// `time_to_samples`, available as [`time_to_samples`]); for times that are not an exact
-/// multiple of the sample period the two can differ by one sample.
+/// [`crate::utils::seconds_to_samples`] **truncates** toward zero (as does
+/// [`time_to_samples`]); for times that are not an exact multiple of the sample period
+/// the two can differ by one sample.
 ///
 /// # Examples
 ///
@@ -777,10 +771,10 @@ pub fn ms_to_samples(ms: f64, sample_rate: f64) -> usize {
 }
 
 // =============================================================================
-// LIBROSA-COMPATIBLE FRAME / SAMPLE / TIME CONVERSIONS
+// SIGNED FRAME / SAMPLE / TIME CONVERSIONS
 // =============================================================================
 //
-// These follow librosa's conventions exactly: times are truncated to samples,
+// Times are truncated to samples,
 // samples are floor-divided into frames, values may be negative, and an
 // optional `n_fft` shifts frame positions by `n_fft / 2` samples (the frame
 // centre of an un-centred STFT).
@@ -791,11 +785,10 @@ fn n_fft_offset(n_fft: Option<usize>) -> i64 {
     n_fft.map_or(0, |n| (n / 2) as i64)
 }
 
-/// Converts a time in seconds to a sample index the way librosa does (truncation toward zero).
+/// Converts a time in seconds to a sample index, truncating toward zero.
 ///
-/// Equivalent to `librosa.time_to_samples(time_seconds, sr=sample_rate)`, i.e.
-/// `int(time_seconds * sample_rate)`. Unlike [`seconds_to_samples`] (which rounds to the
-/// nearest sample and saturates negatives to 0) this truncates and keeps the sign.
+/// Computes `trunc(time_seconds * sample_rate)`. Unlike [`seconds_to_samples`] (which rounds
+/// to the nearest sample and saturates negatives to 0) this truncates and keeps the sign.
 ///
 /// # Arguments
 ///
@@ -823,12 +816,11 @@ pub fn time_to_samples(time_seconds: f64, sample_rate: f64) -> i64 {
     (time_seconds * sample_rate) as i64
 }
 
-/// Converts a sample index to a frame index with floor division, as librosa does.
+/// Converts a sample index to a frame index with floor division.
 ///
-/// Equivalent to `librosa.samples_to_frames(samples, hop_length=hop_length, n_fft=n_fft)`:
-/// `floor((samples - n_fft / 2) / hop_length)`, where the `n_fft / 2` offset applies only
-/// when `n_fft` is `Some`. Use the offset when frames were computed without centring
-/// (`center=False`), so that a frame is identified by the sample at its centre.
+/// Computes `floor((samples - n_fft / 2) / hop_length)`, where the `n_fft / 2` offset
+/// applies only when `n_fft` is `Some`. Use the offset when frames were computed without
+/// centring (`centre = false`), so that a frame is identified by the sample at its centre.
 ///
 /// # Arguments
 ///
@@ -860,8 +852,8 @@ pub fn samples_to_frames(samples: i64, hop_length: NonZeroUsize, n_fft: Option<u
 
 /// Converts a frame index to the sample index where the frame starts (or is centred).
 ///
-/// Equivalent to `librosa.frames_to_samples(frames, hop_length=hop_length, n_fft=n_fft)`:
-/// `frames * hop_length + n_fft / 2`, where the offset applies only when `n_fft` is `Some`.
+/// Computes `frames * hop_length + n_fft / 2`, where the offset applies only when
+/// `n_fft` is `Some`.
 ///
 /// # Arguments
 ///
@@ -992,10 +984,9 @@ pub fn blocks_scale_into(blocks: &[i64], scale: i64, out: &mut [i64]) {
     }
 }
 
-/// Converts a time in seconds to a frame index with librosa's floor semantics.
+/// Converts a time in seconds to a frame index, flooring to the frame that contains it.
 ///
-/// Equivalent to `librosa.time_to_frames(time_seconds, sr=sample_rate,
-/// hop_length=hop_length, n_fft=n_fft)`: the time is truncated to a sample index
+/// The time is truncated to a sample index
 /// ([`time_to_samples`]) and then floor-divided into frames ([`samples_to_frames`]).
 /// This answers "which frame contains this time?".
 ///
@@ -1020,7 +1011,7 @@ pub fn blocks_scale_into(blocks: &[i64], scale: i64, out: &mut [i64]) {
 /// use audio_samples::nzu;
 /// use audio_samples::utils::audio_math::time_to_frames_floor;
 ///
-/// // librosa's documented example: times 0, 0.1, ..., 0.9 s at 22050 Hz, hop 512.
+/// // Times 0, 0.1, ..., 0.9 s at 22050 Hz, hop 512.
 /// let frames: Vec<i64> = (0..10)
 ///     .map(|i| time_to_frames_floor(i as f64 * 0.1, 22050.0, nzu!(512), None))
 ///     .collect();
@@ -1044,9 +1035,9 @@ pub fn time_to_frames_floor(
 
 /// Converts a (possibly negative) frame index to seconds, with an optional `n_fft` offset.
 ///
-/// Equivalent to `librosa.frames_to_time(frames, sr=sample_rate, hop_length=hop_length,
-/// n_fft=n_fft)`. With `n_fft = None` it agrees with [`frames_to_time`]; `Some(n)` reports
-/// the time of the frame centre for an un-centred STFT (`n / 2` samples later).
+/// Computes `(frames * hop_length + n_fft / 2) / sample_rate`, the offset applying only
+/// when `n_fft` is `Some`. With `n_fft = None` it agrees with [`frames_to_time`]; `Some(n)`
+/// reports the time of the frame centre for an un-centred STFT (`n / 2` samples later).
 ///
 /// # Arguments
 ///
@@ -1083,7 +1074,7 @@ pub fn frames_to_time_with_offset(
 
 /// Applies [`time_to_samples`] to every element of `times`.
 ///
-/// Vectorised form of `librosa.time_to_samples`.
+/// Vectorised form of [`time_to_samples`].
 ///
 /// # Examples
 ///
@@ -1099,7 +1090,7 @@ pub fn time_to_samples_slice(times: &[f64], sample_rate: f64) -> Vec<i64> {
 
 /// Applies [`samples_to_frames`] to every element of `samples`.
 ///
-/// Vectorised form of `librosa.samples_to_frames`.
+/// Vectorised form of [`samples_to_frames`].
 ///
 /// # Examples
 ///
@@ -1131,7 +1122,7 @@ pub fn samples_to_frames_slice(
 
 /// Applies [`frames_to_samples`] to every element of `frames`.
 ///
-/// Vectorised form of `librosa.frames_to_samples`.
+/// Vectorised form of [`frames_to_samples`].
 ///
 /// # Examples
 ///
@@ -1155,7 +1146,7 @@ pub fn frames_to_samples_slice(
 
 /// Applies [`time_to_frames_floor`] to every element of `times`.
 ///
-/// Vectorised form of `librosa.time_to_frames`.
+/// Vectorised form of [`time_to_frames_floor`].
 ///
 /// # Examples
 ///
@@ -1303,7 +1294,7 @@ impl FloorDiv {
 
 /// Applies [`frames_to_time_with_offset`] to every element of `frames`.
 ///
-/// Vectorised form of `librosa.frames_to_time`.
+/// Vectorised form of [`frames_to_time_with_offset`].
 ///
 /// # Examples
 ///
@@ -1329,9 +1320,7 @@ pub fn frames_to_time_with_offset_slice(
 
 /// Returns the time (in seconds) of each of `n_frames` consecutive frames.
 ///
-/// Equivalent to `librosa.times_like(n_frames, sr=sample_rate, hop_length=hop_length,
-/// n_fft=n_fft)` when given an integer frame count: the time axis for a frame-wise
-/// feature matrix with `n_frames` columns.
+/// This is the time axis for a frame-wise feature matrix with `n_frames` columns.
 ///
 /// # Examples
 ///
@@ -1356,8 +1345,7 @@ pub fn times_like(
 
 /// Returns the sample index of each of `n_frames` consecutive frames.
 ///
-/// Equivalent to `librosa.samples_like(n_frames, hop_length=hop_length, n_fft=n_fft)`
-/// when given an integer frame count.
+/// This is the sample axis for a frame-wise feature matrix with `n_frames` columns.
 ///
 /// # Examples
 ///
@@ -1392,7 +1380,7 @@ const fn letter_semitone(letter: char) -> Option<i64> {
     }
 }
 
-/// Semitone offset of an accidental symbol (the set accepted by `librosa.note_to_midi`).
+/// Semitone offset of an accidental symbol (the set accepted by [`note_to_midi`]).
 const fn accidental_semitones(symbol: char) -> Option<i64> {
     match symbol {
         '#' | '\u{266F}' => Some(1),        // # and ♯
@@ -1440,7 +1428,7 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 /// This function converts human-readable musical notation
 /// (e.g. `"A4"`, `"C#3"`, `"Bb2"`) to numeric MIDI pitch indices. It is intended for
 /// configuration, annotation, testing, and tooling scenarios rather than high-throughput
-/// parsing. The grammar follows `librosa.note_to_midi`.
+/// parsing.
 ///
 /// # Arguments
 ///
@@ -1451,7 +1439,7 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 ///   * any number of accidentals: `#` or `♯` (+1), `b`, `!` or `♭` (-1), `𝄪` (+2),
 ///     `𝄫` (-2), `♮` (0). Accidentals add up (`"C##4"` is D4) and may cross an
 ///     octave boundary without changing the octave number (`"B#3"` is C4 = 60,
-///     `"Cb4"` is B3 = 59), as in librosa;
+///     `"Cb4"` is B3 = 59);
 ///   * an octave number, optionally signed (`"C-1"` is MIDI 0);
 ///   * optionally a signed cents offset (`"A4+50"`, `"C4-20"`).
 ///
@@ -1461,8 +1449,7 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 /// # Returns
 ///
 /// The corresponding MIDI note number in the inclusive range `0..=127`. A cents
-/// offset is added and the result is rounded to the nearest integer, ties to
-/// even (`numpy.round`), as librosa does with `round_midi=True`.
+/// offset is added and the result is rounded to the nearest integer, ties to even.
 ///
 /// # Errors
 ///
@@ -1478,12 +1465,11 @@ const MIDI_TO_NOTE_MAP: [&str; 12] = [
 /// * Valid enharmonic spellings resolve to the same MIDI value.
 /// * [`midi_to_note`] output always parses back to the same MIDI value.
 ///
-/// # Differences from librosa
+/// # Limits
 ///
-/// * The octave is required; librosa treats a missing octave as octave 0.
-/// * The result is a `u8` limited to `0..=127`; librosa returns any integer.
-/// * librosa's regular expression also admits `n` as an accidental but then
-///   fails on it; it is rejected here.
+/// * The octave is required.
+/// * The result is a `u8` limited to `0..=127`.
+/// * `n` is not an accidental and is rejected.
 ///
 /// # Examples
 ///
@@ -1566,7 +1552,7 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
         }
     };
 
-    // MIDI value, rounded like numpy.round (ties to even). Integer arithmetic is
+    // MIDI value, rounded with ties to even. Integer arithmetic is
     // exact; i64 saturating ops keep absurd octave numbers from overflowing.
     let semitones = octave
         .saturating_add(1)
@@ -1619,12 +1605,11 @@ pub fn note_to_midi(note_name: &str) -> AudioSampleResult<u8> {
 ///   original MIDI value. MIDI 0–11 are rendered in octave −1 (`"C-1"` … `"B-1"`), which
 ///   [`note_to_midi`] does not accept.
 ///
-/// # Differences from librosa
+/// # Limits
 ///
-/// `librosa.midi_to_note` uses Unicode accidentals by default (`"C♯4"`); this function
-/// always writes ASCII `#` (`"C#4"`), which is what librosa returns with
-/// `unicode=False`. The names are otherwise identical for `0..=127`. Fractional MIDI
-/// values, cents output and `octave=False` are not supported.
+/// This function always writes ASCII `#` (`"C#4"`), never Unicode accidentals
+/// (`"C♯4"`). Fractional MIDI values, cents output and names without an octave are
+/// not supported.
 ///
 /// # Examples
 ///
@@ -1881,11 +1866,11 @@ pub fn note_to_frequency(note_name: &str) -> AudioSampleResult<f64> {
 /// * Applying [`note_to_frequency`] to the returned `note_name` yields a frequency close
 ///   to the nearest semitone of the original input, not necessarily the original value.
 ///
-/// # Differences from librosa
+/// # Limits
 ///
-/// `librosa.hz_to_note` names any frequency, with negative octaves below C-1
-/// (`"C-2"` for 4 Hz) and octaves above 9; here those frequencies are an error. librosa
-/// also writes Unicode accidentals by default and returns the cents inside the string.
+/// Frequencies outside MIDI `0..=127` (octaves below C-1 or above 9) are an error. The
+/// name uses ASCII accidentals and the cents are returned separately, not inside the
+/// string.
 ///
 /// # Examples
 ///
@@ -2077,10 +2062,9 @@ pub fn fft_frequencies(n_fft: usize, sample_rate: f64) -> Vec<f64> {
 
 /// Generates frequencies whose spacing is uniform in the mel perceptual domain.
 ///
-/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`, librosa `htk=True`).
-/// librosa's default is the Slaney scale (`htk=False`), which gives very different values
-/// (1 kHz is ~1000 HTK mels but 15 Slaney mels); use [`mel_frequencies_with_scale`] with
-/// [`MelScale::Slaney`] for librosa-compatible results.
+/// **This uses the HTK mel scale** (`2595 * log10(1 + f / 700)`). The Slaney scale gives
+/// very different values (1 kHz is ~1000 HTK mels but 15 Slaney mels); use
+/// [`mel_frequencies_with_scale`] with [`MelScale::Slaney`] for the Slaney scale.
 ///
 /// This function samples the interval `[fmin, fmax]` evenly in the mel scale and converts
 /// the resulting points back into Hertz. It is typically used when constructing mel-aligned
@@ -2149,9 +2133,9 @@ pub fn mel_frequencies(n_mels: usize, fmin: f64, fmax: f64) -> Vec<f64> {
 ///
 /// - [`MelScale::Slaney`] is the scale of Malcolm Slaney's Auditory Toolbox: linear
 ///   (`f / (200/3)`) below 1 kHz and logarithmic (step `ln(6.4) / 27` per mel)
-///   above it. It is librosa's default (`htk=False`) and the default here.
-/// - [`MelScale::Htk`] is the HTK formula `2595 * log10(1 + f / 700)` (librosa
-///   `htk=True`). The older unparameterised helpers [`hz_to_mel`], [`mel_to_hz`],
+///   above it. It is the default.
+/// - [`MelScale::Htk`] is the HTK formula `2595 * log10(1 + f / 700)`. The older
+///   unparameterised helpers [`hz_to_mel`], [`mel_to_hz`],
 ///   [`mel_scale`] and [`mel_frequencies`] always use this scale.
 ///
 /// # Examples
@@ -2167,10 +2151,10 @@ pub fn mel_frequencies(n_mels: usize, fmin: f64, fmax: f64) -> Vec<f64> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MelScale {
     /// Slaney (Auditory Toolbox) scale: linear below 1 kHz, logarithmic above.
-    /// librosa's default (`htk=False`).
+    /// The default.
     #[default]
     Slaney,
-    /// HTK scale: `2595 * log10(1 + f / 700)` (librosa `htk=True`).
+    /// HTK scale: `2595 * log10(1 + f / 700)`.
     Htk,
 }
 
@@ -2193,15 +2177,14 @@ fn slaney_logstep() -> f64 {
 
 /// Converts a frequency in Hertz to mels on the chosen mel scale.
 ///
-/// This is the scale-aware counterpart of [`hz_to_mel`] (which is HTK only) and
-/// is equivalent to `librosa.hz_to_mel(freq_hz, htk=...)`.
+/// This is the scale-aware counterpart of [`hz_to_mel`] (which is HTK only).
 ///
 /// # Arguments
 ///
 /// * `freq_hz` - Frequency in Hz. Non-negative values are meaningful; negative
 ///   values follow the linear branch of the Slaney formula (or produce `NaN`
-///   below -700 Hz on the HTK scale), exactly as librosa does.
-/// * `scale` - The mel scale to use. Pass [`MelScale::Slaney`] for librosa's default.
+///   below -700 Hz on the HTK scale).
+/// * `scale` - The mel scale to use ([`MelScale::Slaney`] is the default).
 ///
 /// # Returns
 ///
@@ -2228,7 +2211,7 @@ fn slaney_logstep() -> f64 {
 /// # References
 ///
 /// M. Slaney, *Auditory Toolbox*, Technical Report 1998-010, Interval Research Corporation, 1998;
-/// S. Young et al., *The HTK Book*; librosa `core.convert.hz_to_mel`.
+/// S. Young et al., *The HTK Book*.
 #[inline]
 #[must_use]
 pub fn hz_to_mel_with_scale(freq_hz: f64, scale: MelScale) -> f64 {
@@ -2246,13 +2229,12 @@ pub fn hz_to_mel_with_scale(freq_hz: f64, scale: MelScale) -> f64 {
 
 /// Converts a mel value back to Hertz on the chosen mel scale.
 ///
-/// The inverse of [`hz_to_mel_with_scale`]; equivalent to
-/// `librosa.mel_to_hz(mel, htk=...)`.
+/// The inverse of [`hz_to_mel_with_scale`].
 ///
 /// # Arguments
 ///
 /// * `mel` - Mel value. Non-negative values are meaningful.
-/// * `scale` - The mel scale to use. Pass [`MelScale::Slaney`] for librosa's default.
+/// * `scale` - The mel scale to use ([`MelScale::Slaney`] is the default).
 ///
 /// # Returns
 ///
@@ -2286,17 +2268,16 @@ pub fn mel_to_hz_with_scale(mel: f64, scale: MelScale) -> f64 {
 
 /// Generates `n_mels` frequencies evenly spaced on the chosen mel scale.
 ///
-/// The scale-aware counterpart of [`mel_frequencies`] (HTK only), equivalent to
-/// `librosa.mel_frequencies(n_mels, fmin=fmin, fmax=fmax, htk=...)`. With
+/// The scale-aware counterpart of [`mel_frequencies`] (HTK only). With
 /// `n_mels + 2` points these are the band edges / centres used by a mel
 /// filterbank built on the same scale.
 ///
 /// # Arguments
 ///
 /// * `n_mels` - Number of points. `0` gives an empty vector, `1` gives `[fmin]`.
-/// * `fmin` - Lowest frequency in Hz (librosa default `0.0`).
-/// * `fmax` - Highest frequency in Hz (librosa default `11025.0`).
-/// * `scale` - The mel scale to use. Pass [`MelScale::Slaney`] for librosa's default.
+/// * `fmin` - Lowest frequency in Hz.
+/// * `fmax` - Highest frequency in Hz.
+/// * `scale` - The mel scale to use ([`MelScale::Slaney`] is the default).
 ///
 /// # Returns
 ///
@@ -2329,8 +2310,8 @@ pub fn mel_frequencies_with_scale(
         .collect()
 }
 
-/// `numpy.linspace(start, stop, num)` with numpy's exact rounding: element `i`
-/// is `i * step + start` (no fused multiply-add) and the last element is `stop`.
+/// `num` evenly spaced values from `start` to `stop` inclusive: element `i` is
+/// `i * step + start` (no fused multiply-add) and the last element is `stop`.
 pub(crate) fn numpy_linspace(start: f64, stop: f64, num: usize) -> Vec<f64> {
     match num {
         0 => Vec::new(),
@@ -2381,7 +2362,7 @@ pub fn linspace(start: f64, end: f64, num: usize) -> Vec<f64> {
 }
 
 // =============================================================================
-// TUNING, OCTAVES, CONSTANT-Q FREQUENCIES AND KEY SPELLING (librosa)
+// TUNING, OCTAVES, CONSTANT-Q FREQUENCIES AND KEY SPELLING
 // =============================================================================
 
 /// Reference frequency of A4 for a tuning offset, `440 * 2^(tuning / bins_per_octave)`.
@@ -2390,20 +2371,19 @@ fn tuned_a440(tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
     440.0 * 2.0f64.powf(tuning / bins_per_octave.get() as f64)
 }
 
-/// Converts a frequency in Hz to (fractional) octaves above C0-ish, librosa style.
+/// Converts a frequency in Hz to (fractional) octaves above A0.
 ///
 /// Octave 0 is placed at `A4 / 16` (A0 = 27.5 Hz for standard tuning), so
 /// 440 Hz is octave 4 and every doubling of the frequency adds 1. A non-zero
 /// `tuning` moves the reference: the A4 frequency becomes
 /// `440 * 2^(tuning / bins_per_octave)`.
 ///
-/// This is `librosa.hz_to_octs(frequency, tuning=..., bins_per_octave=...)`.
 /// It is used by the chroma filterbank and by tuning estimation.
 ///
 /// # Arguments
 ///
 /// * `freq_hz` - Frequency in Hz. Must be positive for a finite result: 0 Hz
-///   gives `-inf` and negative values give `NaN` (as in librosa).
+///   gives `-inf` and negative values give `NaN`.
 /// * `tuning` - Tuning deviation from A440 in fractions of a bin (for example
 ///   `0.25` is a quarter of a semitone sharp when `bins_per_octave` is 12).
 /// * `bins_per_octave` - Number of bins per octave that `tuning` is measured in.
@@ -2424,10 +2404,6 @@ fn tuned_a440(tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
 /// assert!((hz_to_octs(440.0 * 2f64.powf(1.0 / 12.0), 1.0, nzu!(12)) - 4.0).abs() < 1e-12);
 /// assert!((octs_to_hz(hz_to_octs(1000.0, 0.3, nzu!(12)), 0.3, nzu!(12)) - 1000.0).abs() < 1e-9);
 /// ```
-///
-/// # References
-///
-/// librosa `core.convert.hz_to_octs`.
 #[inline]
 #[must_use]
 pub fn hz_to_octs(freq_hz: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
@@ -2435,8 +2411,6 @@ pub fn hz_to_octs(freq_hz: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f
 }
 
 /// Converts (fractional) octave numbers to frequencies in Hz; the inverse of [`hz_to_octs`].
-///
-/// This is `librosa.octs_to_hz(octs, tuning=..., bins_per_octave=...)`.
 ///
 /// # Arguments
 ///
@@ -2457,10 +2431,6 @@ pub fn hz_to_octs(freq_hz: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f
 /// assert_eq!(octs_to_hz(4.0, 0.0, nzu!(12)), 440.0);
 /// assert_eq!(octs_to_hz(0.0, 0.0, nzu!(12)), 27.5);
 /// ```
-///
-/// # References
-///
-/// librosa `core.convert.octs_to_hz`.
 #[inline]
 #[must_use]
 pub fn octs_to_hz(octs: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
@@ -2469,8 +2439,7 @@ pub fn octs_to_hz(octs: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f64 
 
 /// Converts an A4 reference frequency to a tuning deviation in fractional bins.
 ///
-/// This is `librosa.A4_to_tuning(A4, bins_per_octave=...)`:
-/// `bins_per_octave * (log2(a4_hz) - log2(440))`. Use it to turn a concert pitch
+/// Computes `bins_per_octave * (log2(a4_hz) - log2(440))`. Use it to turn a concert pitch
 /// such as 432 Hz or 443 Hz into the `tuning` argument that chroma, constant-Q
 /// and octave helpers expect.
 ///
@@ -2494,18 +2463,13 @@ pub fn octs_to_hz(octs: f64, tuning: f64, bins_per_octave: NonZeroUsize) -> f64 
 /// let t = a4_to_tuning(432.0, nzu!(12)); // about -0.32 semitones
 /// assert!((tuning_to_a4(t, nzu!(12)) - 432.0).abs() < 1e-9);
 /// ```
-///
-/// # References
-///
-/// librosa `core.convert.A4_to_tuning`.
 #[inline]
 #[must_use]
 pub fn a4_to_tuning(a4_hz: f64, bins_per_octave: NonZeroUsize) -> f64 {
     bins_per_octave.get() as f64 * (a4_hz.log2() - 440.0f64.log2())
 }
 
-/// Applies [`hz_to_midi`] to every element of `freqs` (vectorised form of
-/// `librosa.hz_to_midi`).
+/// Applies [`hz_to_midi`] to every element of `freqs`.
 ///
 /// The logarithms are evaluated with a vectorised kernel within 1 ulp of
 /// the exact value (the scalar function calls the C library's `log2`), so a
@@ -2552,8 +2516,7 @@ fn mul_add_in_place_fma(v: &mut [f64], a: f64, b: f64) {
     v.iter_mut().for_each(|x| *x = a.mul_add(*x, b));
 }
 
-/// Applies [`hz_to_octs`] to every element of `freqs` (vectorised form of
-/// `librosa.hz_to_octs`).
+/// Applies [`hz_to_octs`] to every element of `freqs`.
 ///
 /// The logarithms are evaluated with a vectorised kernel within 1 ulp of
 /// the exact value (the scalar function calls the C library's `log2`), so a
@@ -2579,8 +2542,7 @@ pub fn hz_to_octs_slice(freqs: &[f64], tuning: f64, bins_per_octave: NonZeroUsiz
     out
 }
 
-/// Applies [`a4_to_tuning`] to every element of `a4_hz` (vectorised form of
-/// `librosa.A4_to_tuning`).
+/// Applies [`a4_to_tuning`] to every element of `a4_hz`.
 ///
 /// The logarithms are evaluated with a vectorised kernel within 1 ulp of
 /// the exact value (the scalar function calls the C library's `log2`), so a
@@ -2610,8 +2572,7 @@ pub fn a4_to_tuning_slice(a4_hz: &[f64], bins_per_octave: NonZeroUsize) -> Vec<f
 
 /// Converts a tuning deviation in fractional bins to the A4 reference frequency.
 ///
-/// This is `librosa.tuning_to_A4(tuning, bins_per_octave=...)`:
-/// `440 * 2^(tuning / bins_per_octave)`; the inverse of [`a4_to_tuning`].
+/// Computes `440 * 2^(tuning / bins_per_octave)`; the inverse of [`a4_to_tuning`].
 ///
 /// # Arguments
 ///
@@ -2631,10 +2592,6 @@ pub fn a4_to_tuning_slice(a4_hz: &[f64], bins_per_octave: NonZeroUsize) -> Vec<f
 /// assert_eq!(tuning_to_a4(0.0, nzu!(12)), 440.0);
 /// assert_eq!(tuning_to_a4(-12.0, nzu!(12)), 220.0);
 /// ```
-///
-/// # References
-///
-/// librosa `core.convert.tuning_to_A4`.
 #[inline]
 #[must_use]
 pub fn tuning_to_a4(tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
@@ -2643,14 +2600,13 @@ pub fn tuning_to_a4(tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
 
 /// Centre frequencies of a constant-Q (geometrically spaced) filterbank.
 ///
-/// This is `librosa.cqt_frequencies(n_bins, fmin=..., bins_per_octave=..., tuning=...)`:
-/// bin `k` has frequency `2^(tuning / bins_per_octave) * fmin * 2^(k / bins_per_octave)`.
+/// Bin `k` has frequency `2^(tuning / bins_per_octave) * fmin * 2^(k / bins_per_octave)`.
 ///
 /// # Arguments
 ///
 /// * `n_bins` - Number of frequencies to generate (0 gives an empty vector).
-/// * `fmin` - Frequency of bin 0 before the tuning correction, in Hz (librosa's
-///   CQT default is C1, about 32.70 Hz).
+/// * `fmin` - Frequency of bin 0 before the tuning correction, in Hz (the CQT
+///   default is C1, about 32.70 Hz).
 /// * `bins_per_octave` - Number of bins per octave (12 for semitones).
 /// * `tuning` - Tuning deviation from A440 in fractions of a bin; all
 ///   frequencies are multiplied by `2^(tuning / bins_per_octave)`.
@@ -2671,10 +2627,6 @@ pub fn tuning_to_a4(tuning: f64, bins_per_octave: NonZeroUsize) -> f64 {
 /// assert_eq!(f[12], 220.0);
 /// assert_eq!(f[24], 440.0);
 /// ```
-///
-/// # References
-///
-/// librosa `core.convert.cqt_frequencies`.
 #[must_use]
 pub fn cqt_frequencies(
     n_bins: usize,
@@ -2709,7 +2661,7 @@ pub fn cqt_frequencies_into(
 ) {
     let bpo = bins_per_octave.get() as f64;
     let correction = 2.0f64.powf(tuning / bpo);
-    // Same evaluation order as librosa: (correction * fmin) * 2^(k / bpo).
+    // Evaluation order: (correction * fmin) * 2^(k / bpo).
     for (k, o) in out.iter_mut().enumerate() {
         *o = correction * fmin * 2.0f64.powf(k as f64 / bpo);
     }
@@ -2729,7 +2681,7 @@ fn letter_pitch_class(letter: char) -> Option<i32> {
     }
 }
 
-/// Semitone offset of one accidental symbol (librosa's `ACC_MAP`).
+/// Semitone offset of one accidental symbol.
 fn accidental_offset(c: char) -> Option<i32> {
     match c {
         '#' | '\u{266F}' => Some(1),
@@ -2746,11 +2698,11 @@ fn accidental_offset(c: char) -> Option<i32> {
 enum KeyKind {
     Major,
     Minor,
-    /// Church mode, as librosa's 3-letter code index (ion=0 .. loc=6).
+    /// Church mode, as the index of its 3-letter code (ion=0 .. loc=6).
     Mode(usize),
 }
 
-/// A key signature parsed with librosa's `KEY_RE` grammar.
+/// A key signature parsed by [`parse_key`].
 struct ParsedKey {
     /// Upper-case tonic letter.
     letter: char,
@@ -2768,7 +2720,7 @@ impl ParsedKey {
     }
 }
 
-/// Parses `TONIC[accidentals]:scale-or-mode` exactly as librosa's `KEY_RE`.
+/// Parses `TONIC[accidentals]:scale-or-mode`.
 fn parse_key(key: &str) -> AudioSampleResult<ParsedKey> {
     let bad = || {
         AudioSampleError::Parameter(ParameterError::invalid_value(
@@ -2816,7 +2768,7 @@ fn note_name_degree(note: &str) -> i32 {
     (letter + acc).rem_euclid(12)
 }
 
-/// librosa `__simplify_note`: cancel accidentals and spell the net offset with
+/// Cancels accidentals and spells the net offset with
 /// (double) sharps or flats, Unicode symbols.
 fn simplify_note(note: &str) -> String {
     let mut chars = note.chars();
@@ -2838,7 +2790,7 @@ fn simplify_note(note: &str) -> String {
     out
 }
 
-/// Maps Unicode accidentals to librosa's ASCII forms.
+/// Maps Unicode accidentals to their ASCII forms.
 fn ascii_accidentals(note: &str) -> String {
     let mut out = String::with_capacity(note.len());
     for c in note.chars() {
@@ -2854,7 +2806,7 @@ fn ascii_accidentals(note: &str) -> String {
     out
 }
 
-/// librosa `__mode_to_key`: the relative major key of a mode (Unicode spelling).
+/// The relative major key of a mode (Unicode spelling).
 fn mode_to_major(letter: char, accidentals: &str, mode: usize) -> String {
     // MAJOR_DICT[mode][letter], indexed by mode (ion..loc) and letter (C D E F G A B).
     const MAJOR: [[&str; 7]; 7] = [
@@ -2889,9 +2841,8 @@ fn mode_to_major(letter: char, accidentals: &str, mode: usize) -> String {
 
 /// Lists the 12 chromatic note names (C first) as spelled in a given key or mode.
 ///
-/// This is `librosa.key_to_notes(key, unicode=..., natural=...)`. It resolves
-/// enharmonic spellings (C♯ vs D♭) for human-readable output such as plot
-/// labels: a tonic with an accidental fixes sharps or flats, otherwise the
+/// It resolves enharmonic spellings (C♯ vs D♭) for human-readable output such as
+/// plot labels: a tonic with an accidental fixes sharps or flats, otherwise the
 /// spelling minimises accidentals on the scale degrees (sharps win ties);
 /// keys with six or more sharps or flats use E♯, B♯, C♭, F♭ and double
 /// accidentals where needed.
@@ -2930,10 +2881,6 @@ fn mode_to_major(letter: char, accidentals: &str, mode: usize) -> String {
 /// assert_eq!(key_to_notes("G#:maj", false, false).unwrap()[7], "F##");
 /// assert!(key_to_notes("H:maj", true, false).is_err());
 /// ```
-///
-/// # References
-///
-/// librosa `core.notation.key_to_notes`.
 pub fn key_to_notes(key: &str, unicode: bool, natural: bool) -> AudioSampleResult<Vec<String>> {
     let parsed = parse_key(key)?;
     let scale_is_major = match parsed.kind {
@@ -3126,9 +3073,9 @@ pub fn key_to_notes_static(
 
 /// The seven diatonic scale degrees of a key or mode, as pitch classes (0 = C).
 ///
-/// This is `librosa.key_to_degrees(key)`: the pitch classes of the scale
-/// starting from the tonic. Major keys use the steps 0 2 4 5 7 9 11, minor
-/// keys 0 2 3 5 7 8 10, and modes rotate the relative major scale.
+/// These are the pitch classes of the scale starting from the tonic. Major keys
+/// use the steps 0 2 4 5 7 9 11, minor keys 0 2 3 5 7 8 10, and modes rotate the
+/// relative major scale.
 ///
 /// # Arguments
 ///
@@ -3153,10 +3100,6 @@ pub fn key_to_notes_static(
 /// assert_eq!(key_to_degrees("A:min").unwrap(), [9, 11, 0, 2, 4, 5, 7]);
 /// assert_eq!(key_to_degrees("D:dorian").unwrap(), [2, 4, 5, 7, 9, 11, 0]);
 /// ```
-///
-/// # References
-///
-/// librosa `core.notation.key_to_degrees`.
 pub fn key_to_degrees(key: &str) -> AudioSampleResult<[u8; 7]> {
     const MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
     const MINOR: [i32; 7] = [0, 2, 3, 5, 7, 8, 10];
@@ -3197,11 +3140,11 @@ mod tests {
         // Test sharp/flat equivalence
         assert_eq!(note_to_midi("C#4").unwrap(), note_to_midi("Db4").unwrap());
 
-        // Lowercase letters are accepted, as in librosa.
+        // Lowercase letters are accepted.
         assert_eq!(note_to_midi("a4").unwrap(), 69);
     }
 
-    /// The parser follows `librosa.note_to_midi`: case-insensitive letters, stacked
+    /// The parser accepts case-insensitive letters, stacked
     /// ASCII/Unicode accidentals that may cross the octave boundary, signed
     /// octaves and an optional cents suffix (rounded half to even).
     #[test]
