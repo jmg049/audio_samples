@@ -1,26 +1,25 @@
-//! librosa-compatible frame-wise audio features: spectral shape descriptors, RMS,
-//! zero-crossing rate, PCEN, frequency weighting curves and the reassigned
-//! spectrogram.
+//! Frame-wise audio features: spectral shape descriptors, RMS, zero-crossing
+//! rate, PCEN, frequency weighting curves and the reassigned spectrogram.
 //!
 //! ## What
 //!
 //! This module provides the [`AudioFeatures`] trait and the free functions it is
-//! built from. Together they reproduce librosa 1.0's per-frame feature extractors:
+//! built from:
 //!
-//! | librosa | here (on audio) | here (on a precomputed spectrogram / array) |
+//! | Feature | On audio | On a precomputed spectrogram / array |
 //! |---|---|---|
-//! | `feature.spectral_centroid` | [`AudioFeatures::spectral_centroid_frames`] | [`spectral_centroid_from_spectrogram`] |
-//! | `feature.spectral_bandwidth` | [`AudioFeatures::spectral_bandwidth_frames`] | [`spectral_bandwidth_from_spectrogram`] |
-//! | `feature.spectral_rolloff` | [`AudioFeatures::spectral_rolloff_frames`] | [`spectral_rolloff_from_spectrogram`] |
-//! | `feature.spectral_flatness` | [`AudioFeatures::spectral_flatness_frames`] | [`spectral_flatness_from_spectrogram`] |
-//! | `feature.spectral_contrast` | [`AudioFeatures::spectral_contrast_frames`] | [`spectral_contrast_from_spectrogram`] |
-//! | `feature.poly_features` | [`AudioFeatures::poly_features`] | [`poly_features_from_spectrogram`] |
-//! | `feature.rms` | [`AudioFeatures::rms_frames`] | [`rms_from_spectrogram`] |
-//! | `feature.zero_crossing_rate` | [`AudioFeatures::zero_crossing_rate_frames`] | – |
-//! | `reassigned_spectrogram` | [`AudioFeatures::reassigned_spectrogram`] | – |
-//! | `pcen` | – | [`pcen`], [`pcen_with_state`] |
-//! | `A_weighting` … `Z_weighting`, `frequency_weighting`, `multi_frequency_weighting` | – | [`a_weighting`] … [`z_weighting`], [`frequency_weighting`], [`multi_frequency_weighting`] |
-//! | `perceptual_weighting` | – | [`perceptual_weighting`] |
+//! | Spectral centroid | [`AudioFeatures::spectral_centroid_frames`] | [`spectral_centroid_from_spectrogram`] |
+//! | Spectral bandwidth | [`AudioFeatures::spectral_bandwidth_frames`] | [`spectral_bandwidth_from_spectrogram`] |
+//! | Spectral rolloff | [`AudioFeatures::spectral_rolloff_frames`] | [`spectral_rolloff_from_spectrogram`] |
+//! | Spectral flatness | [`AudioFeatures::spectral_flatness_frames`] | [`spectral_flatness_from_spectrogram`] |
+//! | Spectral contrast | [`AudioFeatures::spectral_contrast_frames`] | [`spectral_contrast_from_spectrogram`] |
+//! | Polynomial fit per frame | [`AudioFeatures::poly_features`] | [`poly_features_from_spectrogram`] |
+//! | RMS energy | [`AudioFeatures::rms_frames`] | [`rms_from_spectrogram`] |
+//! | Zero-crossing rate | [`AudioFeatures::zero_crossing_rate_frames`] | – |
+//! | Reassigned spectrogram | [`AudioFeatures::reassigned_spectrogram`] | – |
+//! | Per-channel energy normalisation | – | [`pcen`], [`pcen_with_state`] |
+//! | A, B, C, D and Z weighting curves | – | [`a_weighting`] … [`z_weighting`], [`frequency_weighting`], [`multi_frequency_weighting`] |
+//! | Perceptual weighting of a power spectrogram | – | [`perceptual_weighting`] |
 //!
 //! The frequency-weighting curves live here (rather than in
 //! [`crate::utils::audio_math`]) because their main consumer,
@@ -31,24 +30,21 @@
 //!
 //! The scalar spectral descriptors of [`AudioStatistics`](crate::AudioStatistics)
 //! summarise a whole signal with one number (and use their own weighting
-//! conventions), and [`AudioEnvelopes`](crate::operations::traits::AudioEnvelopes) frames signals
-//! differently from librosa. Machine-learning pipelines and code ported from
-//! Python need librosa's per-frame features with its exact framing, centring and
-//! formulas. Every config has a `librosa()` constructor that returns librosa
-//! 1.0's defaults, so `X::librosa()` gives librosa-equivalent output (to
-//! floating-point round-off). `Default` currently equals `librosa()` for every
+//! conventions), and [`AudioEnvelopes`](crate::operations::traits::AudioEnvelopes)
+//! frames signals differently. Machine-learning pipelines need per-frame features
+//! on centred STFT frames, which this module computes. Every config has a
+//! `librosa()` constructor. `Default` currently equals `librosa()` for every
 //! config except [`PcenConfig`], which has no default: its hop length must equal
 //! the analysed spectrogram's ([`PcenConfig::new`]).
 //!
 //! ## How
 //!
 //! Bring [`AudioFeatures`] into scope and call it on any [`AudioSamples`]. Outputs
-//! are arrays shaped `(channels, n_features, n_frames)` exactly like librosa's
-//! `(..., n, t)`; per-frame scalars have `n_features == 1`. When several
+//! are arrays shaped `(channels, n_features, n_frames)`; per-frame scalars have
+//! `n_features == 1`. When several
 //! features share one STFT, compute the magnitude spectrogram once with
 //! [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix)
-//! and call the `*_from_spectrogram`
-//! functions (librosa's `S=` argument).
+//! and call the `*_from_spectrogram` functions.
 //!
 //! The output precision follows the input: the element type is the sample
 //! type's [`AudioSample::Float`](crate::AudioSample::Float). `u8`, `i16`, `I24`
@@ -71,14 +67,13 @@
 //!
 //! let audio = sine_wave::<f32>(1000.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
 //!
-//! // librosa.feature.spectral_centroid(y=y, sr=22050): (1, 1, 44). f32 audio
-//! // gives f32 output.
+//! // One centroid per frame: (1, 1, 44). f32 audio gives f32 output.
 //! let centroid = audio.spectral_centroid_frames(&SpectralCentroidConfig::default()).unwrap();
 //! let _: &ndarray::Array3<f32> = &centroid;
 //! assert_eq!(centroid.dim(), (1, 1, 44));
 //! assert!((centroid[[0, 0, 20]] - 1000.0).abs() < 20.0);
 //!
-//! // Reuse one magnitude spectrogram for several features (librosa's `S=`).
+//! // Reuse one magnitude spectrogram for several features.
 //! let s = audio.spectrogram_matrix(&StftConfig::default(), 1.0).unwrap();
 //! let freqs = fft_frequencies(2048, 22050.0);
 //! let rolloff = spectral_rolloff_from_spectrogram(
@@ -121,8 +116,8 @@ fn range_err(parameter: &str, value: f64, min: &str, max: &str, reason: &str) ->
     ))
 }
 
-/// `numpy.fft.rfftfreq(n_fft, 1 / sr)`, rounded exactly as numpy does
-/// (`k * (1 / (n_fft * (1 / sr)))`), i.e. librosa's `fft_frequencies`.
+/// The `n_fft / 2 + 1` bin frequencies `k * (1 / (n_fft * (1 / sr)))`, evaluated in
+/// that order.
 fn rfft_frequencies(n_fft: usize, sample_rate: f64) -> Vec<f64> {
     let val = 1.0 / (n_fft as f64 * (1.0 / sample_rate));
     (0..=n_fft / 2).map(|k| k as f64 * val).collect()
@@ -142,8 +137,7 @@ fn validate_sample_rate(sample_rate: f64) -> AudioSampleResult<()> {
     }
 }
 
-/// librosa rejects negative (and, through `util.normalize`, non-finite) spectra in
-/// the spectral shape descriptors.
+/// The spectral shape descriptors reject empty, negative and non-finite spectra.
 fn check_spectrogram<F: AudioFloat>(what: &str, s: &ArrayView3<'_, F>) -> AudioSampleResult<()> {
     let (c, b, t) = s.dim();
     if c == 0 || b == 0 || t == 0 {
@@ -225,7 +219,7 @@ fn check_freq(what: &str, freq: &[f64], n_bins: usize) -> AudioSampleResult<()> 
     Ok(())
 }
 
-/// `x^p` with numpy's exact fast paths for the common exponents.
+/// `x^p`, computed exactly as `x`, `x * x` and `sqrt(x)` for `p` = 1, 2 and 0.5.
 fn pow_np<F: AudioFloat>(x: F, p: f64) -> F {
     if p == 1.0 {
         x
@@ -238,8 +232,8 @@ fn pow_np<F: AudioFloat>(x: F, p: f64) -> F {
     }
 }
 
-/// Source index into a signal of length `len` for padded position `i`, following
-/// `numpy.pad` semantics (`None` = constant zero).
+/// Source index into a signal of length `len` for padded position `i` (`None` =
+/// constant zero). The mirror modes repeat periodically.
 fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
     let n = len as isize;
     if (0..n).contains(&i) {
@@ -264,7 +258,7 @@ fn pad_source_index(i: isize, len: usize, mode: StftPadMode) -> Option<usize> {
     }
 }
 
-/// Number of frames `librosa.util.frame` produces, or an error if the (padded)
+/// Number of whole frames in a signal of length `len`, or an error if the (padded)
 /// signal is shorter than one frame.
 fn frame_count(len: usize, frame_length: usize, hop: usize) -> AudioSampleResult<usize> {
     if len < frame_length {
@@ -280,8 +274,7 @@ fn frame_count(len: usize, frame_length: usize, hop: usize) -> AudioSampleResult
 // Spectral shape descriptors: configs
 // =============================================================================
 
-/// Configuration of the frame-wise spectral centroid, mirroring
-/// `librosa.feature.spectral_centroid`.
+/// Configuration of the frame-wise spectral centroid.
 ///
 /// ## Purpose
 ///
@@ -290,8 +283,8 @@ fn frame_count(len: usize, frame_length: usize, hop: usize) -> AudioSampleResult
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::spectral_centroid_frames`]. [`Default`] is librosa's
-/// default (`n_fft=2048`, hop 512, periodic Hann, centred, zero padding).
+/// Pass to [`AudioFeatures::spectral_centroid_frames`]. [`Default`] is
+/// `n_fft=2048`, hop 512, periodic Hann, centred, zero padding.
 ///
 /// ## Invariants
 ///
@@ -309,20 +302,18 @@ fn frame_count(len: usize, frame_length: usize, hop: usize) -> AudioSampleResult
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpectralCentroidConfig {
-    /// STFT of the magnitude spectrogram (`|stft|`, power 1, as librosa).
+    /// STFT of the magnitude spectrogram (`|stft|`, power 1).
     pub stft: StftConfig,
 }
 
 impl SpectralCentroidConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.spectral_centroid` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -347,8 +338,7 @@ impl SpectralCentroidConfig {
     }
 }
 
-/// Configuration of the frame-wise spectral bandwidth, mirroring
-/// `librosa.feature.spectral_bandwidth`.
+/// Configuration of the frame-wise spectral bandwidth.
 ///
 /// ## Purpose
 ///
@@ -358,9 +348,9 @@ impl SpectralCentroidConfig {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::spectral_bandwidth_frames`]. [`Default`] is librosa's
-/// default (`p = 2`, `norm = true`). To supply a precomputed centroid (librosa's
-/// `centroid=`), use [`spectral_bandwidth_from_spectrogram`].
+/// Pass to [`AudioFeatures::spectral_bandwidth_frames`]. [`Default`] is
+/// `p = 2`, `norm = true`. To supply a precomputed centroid, use
+/// [`spectral_bandwidth_from_spectrogram`].
 ///
 /// ## Invariants
 ///
@@ -380,10 +370,10 @@ impl SpectralCentroidConfig {
 pub struct SpectralBandwidthConfig {
     /// STFT of the magnitude spectrogram.
     pub stft: StftConfig,
-    /// Order of the deviation. `2` (librosa default) gives a standard-deviation-like
+    /// Order of the deviation. `2` (the default) gives a standard-deviation-like
     /// spread in Hz; `1` the mean absolute deviation. Finite and non-zero.
     pub p: f64,
-    /// Normalise each frame to unit sum before weighting (librosa default `true`).
+    /// Normalise each frame to unit sum before weighting (default `true`).
     /// Without normalisation the result scales with the signal level.
     pub norm: bool,
 }
@@ -399,15 +389,13 @@ impl Default for SpectralBandwidthConfig {
 }
 
 impl SpectralBandwidthConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.spectral_bandwidth` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -451,8 +439,7 @@ impl SpectralBandwidthConfig {
     }
 }
 
-/// Configuration of the frame-wise spectral rolloff, mirroring
-/// `librosa.feature.spectral_rolloff`.
+/// Configuration of the frame-wise spectral rolloff.
 ///
 /// ## Purpose
 ///
@@ -461,8 +448,8 @@ impl SpectralBandwidthConfig {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::spectral_rolloff_frames`]. [`Default`] is librosa's
-/// default (`roll_percent = 0.85`). Values near 1 approximate the maximum
+/// Pass to [`AudioFeatures::spectral_rolloff_frames`]. [`Default`] is
+/// `roll_percent = 0.85`. Values near 1 approximate the maximum
 /// frequency, values near 0 the minimum.
 ///
 /// ## Invariants
@@ -495,15 +482,13 @@ impl Default for SpectralRolloffConfig {
 }
 
 impl SpectralRolloffConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.spectral_rolloff` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -546,8 +531,7 @@ impl SpectralRolloffConfig {
     }
 }
 
-/// Configuration of the frame-wise spectral flatness, mirroring
-/// `librosa.feature.spectral_flatness`.
+/// Configuration of the frame-wise spectral flatness.
 ///
 /// ## Purpose
 ///
@@ -556,8 +540,8 @@ impl SpectralRolloffConfig {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::spectral_flatness_frames`]. [`Default`] is librosa's
-/// default (`amin = 1e-10`, `power = 2`, i.e. on the power spectrum).
+/// Pass to [`AudioFeatures::spectral_flatness_frames`]. [`Default`] is
+/// `amin = 1e-10`, `power = 2`, i.e. on the power spectrum.
 ///
 /// ## Invariants
 ///
@@ -595,15 +579,13 @@ impl Default for SpectralFlatnessConfig {
 }
 
 impl SpectralFlatnessConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.spectral_flatness` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -662,8 +644,7 @@ impl SpectralFlatnessConfig {
     }
 }
 
-/// Configuration of the frame-wise spectral contrast, mirroring
-/// `librosa.feature.spectral_contrast`.
+/// Configuration of the frame-wise spectral contrast.
 ///
 /// ## Purpose
 ///
@@ -675,8 +656,8 @@ impl SpectralFlatnessConfig {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::spectral_contrast_frames`]. [`Default`] is librosa's
-/// default (`fmin = 200`, `n_bands = 6`, `quantile = 0.02`, dB contrast).
+/// Pass to [`AudioFeatures::spectral_contrast_frames`]. [`Default`] is
+/// `fmin = 200`, `n_bands = 6`, `quantile = 0.02`, dB contrast.
 ///
 /// ## Invariants
 ///
@@ -724,15 +705,13 @@ impl Default for SpectralContrastConfig {
 }
 
 impl SpectralContrastConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.spectral_contrast` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -824,18 +803,17 @@ impl SpectralContrastConfig {
     }
 }
 
-/// Configuration of the per-frame polynomial fit, mirroring
-/// `librosa.feature.poly_features`.
+/// Configuration of the per-frame polynomial fit.
 ///
 /// ## Purpose
 ///
 /// Fits a polynomial of degree `order` to each magnitude-spectrum frame as a
-/// function of frequency (least squares, like `numpy.polyfit`).
+/// function of frequency (least squares).
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::poly_features`]. [`Default`] is librosa's default
-/// (`order = 1`: slope and intercept).
+/// Pass to [`AudioFeatures::poly_features`]. [`Default`] is `order = 1` (slope and
+/// intercept).
 ///
 /// ## Invariants
 ///
@@ -867,15 +845,13 @@ impl Default for PolyFeaturesConfig {
 }
 
 impl PolyFeaturesConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.poly_features` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -925,13 +901,12 @@ impl PolyFeaturesConfig {
 // Spectral shape descriptors: functions on a spectrogram
 // =============================================================================
 
-/// Computes the spectral centroid of every frame of a magnitude spectrogram,
-/// equivalent to `librosa.feature.spectral_centroid(S=s, freq=freq)`.
+/// Computes the spectral centroid of every frame of a magnitude spectrogram.
 ///
 /// Each frame is normalised to unit sum and the centroid is
 /// `sum_k f[k] * S[k] / sum_k S[k]`. Frames whose sum is below the smallest
-/// positive normal value of the element type are left unnormalised (librosa
-/// `util.normalize`), so silent frames give 0.
+/// positive normal value of the element type are left unnormalised, so silent
+/// frames give 0.
 ///
 /// # Arguments
 ///
@@ -968,8 +943,7 @@ impl PolyFeaturesConfig {
 ///
 /// # References
 ///
-/// Klapuri and Davy, *Signal Processing Methods for Music Transcription*, 2007;
-/// librosa `feature.spectral_centroid`.
+/// Klapuri and Davy, *Signal Processing Methods for Music Transcription*, 2007.
 pub fn spectral_centroid_from_spectrogram<F: AudioFloat>(
     s: ArrayView3<'_, F>,
     freq: &[f64],
@@ -1024,15 +998,14 @@ fn centroid_unchecked<F: AudioFloat>(s: &ArrayView3<'_, F>, freq: &[f64]) -> Arr
 }
 
 /// [`spectral_centroid_from_spectrogram`] with a frequency for every bin of every
-/// frame, equivalent to `librosa.feature.spectral_centroid(S=s, freq=freq)` with a
-/// time-varying `freq` (reassigned frequencies, for example).
+/// frame, for a time-varying `freq` (reassigned frequencies, for example).
 ///
 /// # Arguments
 ///
 /// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram of element type
 ///   `F` (`f32` or `f64`).
 /// * `freq` - Frequencies in Hz, `(channels, bins, frames)` or `(1, bins, frames)` for
-///   one set shared by all channels. A NaN gives a NaN centroid, as in librosa.
+///   one set shared by all channels. A NaN gives a NaN centroid.
 ///
 /// # Returns
 ///
@@ -1118,8 +1091,7 @@ fn centroid_varying<F: AudioFloat>(s: &ArrayView3<'_, F>, freq: &ArrayView3<'_, 
     out
 }
 
-/// Computes the order-`p` spectral bandwidth of every frame, equivalent to
-/// `librosa.feature.spectral_bandwidth(S=s, freq=freq, centroid=centroid, p=p, norm=norm)`.
+/// Computes the order-`p` spectral bandwidth of every frame.
 ///
 /// `bandwidth = (sum_k S[k] |f[k] - centroid|^p)^(1/p)`, with `S` normalised to unit
 /// sum per frame when `config.norm` is set.
@@ -1239,8 +1211,7 @@ pub fn spectral_bandwidth_from_spectrogram<F: AudioFloat>(
 }
 
 /// [`spectral_bandwidth_from_spectrogram`] with a frequency for every bin of every
-/// frame, equivalent to `librosa.feature.spectral_bandwidth(S=s, freq=freq, ...)` with
-/// a time-varying `freq`.
+/// frame, for a time-varying `freq`.
 ///
 /// # Arguments
 ///
@@ -1360,8 +1331,7 @@ pub fn spectral_bandwidth_from_spectrogram_with_freqs<F: AudioFloat>(
     Ok(out)
 }
 
-/// Computes the spectral rolloff frequency of every frame, equivalent to
-/// `librosa.feature.spectral_rolloff(S=s, freq=freq, roll_percent=...)`.
+/// Computes the spectral rolloff frequency of every frame.
 ///
 /// The rolloff is the smallest `freq[k]` among bins whose cumulative magnitude
 /// `sum_{j<=k} S[j]` reaches `roll_percent` of the frame total. Silent frames give
@@ -1460,12 +1430,10 @@ pub fn spectral_rolloff_from_spectrogram<F: AudioFloat>(
 }
 
 /// [`spectral_rolloff_from_spectrogram`] with a frequency for every bin of every frame,
-/// equivalent to `librosa.feature.spectral_rolloff(S=s, freq=freq, roll_percent=...)`
-/// with a time-varying `freq`.
+/// for a time-varying `freq`.
 ///
 /// The rolloff is the smallest frequency among bins whose cumulative magnitude reaches
-/// `roll_percent` of the frame total; NaN frequencies are skipped, as `numpy.nanmin`
-/// skips them.
+/// `roll_percent` of the frame total; NaN frequencies are skipped.
 ///
 /// # Arguments
 ///
@@ -1557,8 +1525,7 @@ pub fn spectral_rolloff_from_spectrogram_with_freqs<F: AudioFloat>(
     Ok(out)
 }
 
-/// Computes the spectral flatness of every frame, equivalent to
-/// `librosa.feature.spectral_flatness(S=s, amin=..., power=...)`.
+/// Computes the spectral flatness of every frame.
 ///
 /// With `P = max(amin, S^power)`, flatness is `exp(mean(ln P)) / mean(P)` per frame.
 ///
@@ -1709,13 +1676,12 @@ fn lockstep_sums<F: AudioFloat>(p: &[F], n: usize, g: usize, acc: &mut [F; 8]) {
     acc[..g].copy_from_slice(&a[..g]);
 }
 
-/// Computes the spectral contrast of every frame, equivalent to
-/// `librosa.feature.spectral_contrast(S=s, sr=sample_rate, freq=freq, ...)`.
+/// Computes the spectral contrast of every frame.
 ///
 /// Band `0` covers `[0, fmin]` and band `k >= 1` covers `[fmin 2^(k-1), fmin 2^k]`
 /// (inclusive), each also taking the bin just below its lower edge; the top band
-/// extends to the last bin, and every other band drops its highest selected bin
-/// (librosa's band rules, reproduced exactly). In each band the bins are sorted
+/// extends to the last bin, and every other band drops its highest selected bin.
+/// In each band the bins are sorted
 /// per frame; the valley is the mean of the lowest `max(1, rint(quantile * n))`
 /// values and the peak the mean of the highest as many, where `n` is the number of
 /// selected bins before the highest is dropped.
@@ -1732,8 +1698,8 @@ fn lockstep_sums<F: AudioFloat>(p: &[F], n: usize, g: usize, acc: &mut [F; 8]) {
 /// # Returns
 ///
 /// A `(channels, n_bands + 1, frames)` array of element type `F`: `peak - valley` if `linear`, else
-/// `power_to_db(peak) - power_to_db(valley)` with librosa's default dB settings
-/// (`ref = 1`, `amin = 1e-10`, `top_db = 80` per channel).
+/// `power_to_db(peak) - power_to_db(valley)` with [`DbConfig::librosa_power`]
+/// (`reference = 1`, `amin = 1e-10`, `top_db = 80` per channel).
 ///
 /// # Errors
 ///
@@ -1741,10 +1707,7 @@ fn lockstep_sums<F: AudioFloat>(p: &[F], n: usize, g: usize, acc: &mut [F; 8]) {
 /// [`SpectralContrastConfig::validate`]), the spectrogram is invalid, `freq` has the
 /// wrong length, or a band contains no frequency bin.
 ///
-/// # Differences from librosa
-///
-/// A band without any bin (too short an `n_fft` for `fmin`) is an error here;
-/// librosa raises `IndexError` or returns `NaN` with a warning, depending on the band.
+/// A band without any bin (too short an `n_fft` for `fmin`) is an error.
 ///
 /// # Examples
 ///
@@ -1795,7 +1758,8 @@ pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
         let first = band.iter().position(|&b| b);
         let last = band.iter().rposition(|&b| b);
         if k > 0 {
-            // librosa: current_band[idx[0] - 1] = True (Python negative indexing).
+            // The bin below the first one also belongs to the band; below bin 0 this
+            // wraps to the last bin.
             let i = first.ok_or_else(|| empty_band(k, f_low, f_high))?;
             band[(i + n_bins - 1) % n_bins] = true;
         }
@@ -1841,8 +1805,8 @@ pub fn spectral_contrast_from_spectrogram<F: AudioFloat>(
     if config.linear {
         Ok(peak - valley)
     } else {
-        // librosa's spectral_contrast converts peak and valley with power_to_db's
-        // defaults (80 dB floor); the floor is part of the feature's definition.
+        // Peak and valley are converted with an 80 dB floor; the floor is part of
+        // the feature's definition.
         let db = DbConfig::librosa_power();
         Ok(power_to_db(&peak, &db)? - power_to_db(&valley, &db)?)
     }
@@ -1910,12 +1874,10 @@ fn empty_band(k: usize, f_low: f64, f_high: f64) -> AudioSampleError {
     )
 }
 
-/// Fits a degree-`order` polynomial to every spectrogram frame, equivalent to
-/// `librosa.feature.poly_features(S=s, freq=freq, order=order)` (`numpy.polyfit`
-/// per frame).
+/// Fits a degree-`order` polynomial to every spectrogram frame by least squares.
 ///
-/// The Vandermonde matrix of `freq` (columns scaled to unit norm, as `numpy.polyfit`
-/// does) is factorised once with Householder QR and every frame is solved in the
+/// The Vandermonde matrix of `freq` (columns scaled to unit norm) is factorised
+/// once with Householder QR and every frame is solved in the
 /// least-squares sense. The factorisation depends only on `freq` and is computed
 /// in `f64`; it is rounded to the element type `F` once, and the per-frame solves
 /// run in `F`.
@@ -1937,12 +1899,6 @@ fn empty_band(k: usize, f_low: f64, f_high: f64) -> AudioSampleError {
 ///
 /// [`ParameterError`] if `freq` has the wrong length, `s` is empty or non-finite, or
 /// the fit is rank-deficient (fewer distinct frequencies than coefficients).
-///
-/// # Differences from librosa
-///
-/// `numpy.polyfit` solves with an SVD and returns a minimum-norm solution with a
-/// `RankWarning` for rank-deficient fits; this function returns an error instead.
-/// For full-rank fits the solutions agree to round-off.
 ///
 /// # Examples
 ///
@@ -1991,8 +1947,7 @@ pub fn poly_features_from_spectrogram<F: AudioFloat>(
 }
 
 /// [`poly_features_from_spectrogram`] with a frequency for every bin of every frame,
-/// equivalent to `librosa.feature.poly_features(S=s, freq=freq, order=...)` with a
-/// time-varying `freq`. Each frame has its own fit.
+/// for a time-varying `freq`. Each frame has its own fit.
 ///
 /// # Arguments
 ///
@@ -2155,7 +2110,7 @@ impl PolyWork {
             }
             self.betas[j] = beta;
         }
-        // Rank check with numpy.polyfit's default rcond = len(x) * eps.
+        // Rank check with the relative tolerance rcond = len(x) * eps.
         let rmax = (0..m).map(|j| a[j * n + j].abs()).fold(0.0, f64::max);
         let rcond = n as f64 * f64::EPSILON;
         if (0..m).any(|j| a[j * n + j].abs() <= rcond * rmax) {
@@ -2207,8 +2162,8 @@ struct PolyFit<F> {
 impl<F: AudioFloat> PolyFit<F> {
     fn new(freq: &[f64], m: usize) -> AudioSampleResult<Self> {
         let n_bins = freq.len();
-        // Vandermonde matrix (numpy.vander: column j holds x^(order - j), powers by
-        // repeated multiplication), columns scaled to unit Euclidean norm.
+        // Vandermonde matrix (column j holds x^(order - j), powers by repeated
+        // multiplication), columns scaled to unit Euclidean norm.
         let mut a = Array2::<f64>::zeros((n_bins, m));
         for (i, &x) in freq.iter().enumerate() {
             let mut v = 1.0;
@@ -2257,7 +2212,7 @@ impl<F: AudioFloat> PolyFit<F> {
             vs.push(v);
             betas.push(beta);
         }
-        // Rank check with numpy.polyfit's default rcond = len(x) * eps.
+        // Rank check with the relative tolerance rcond = len(x) * eps.
         let rmax = (0..m).map(|j| a[[j, j]].abs()).fold(0.0, f64::max);
         let rcond = n_bins as f64 * f64::EPSILON;
         if (0..m).any(|j| a[[j, j]].abs() <= rcond * rmax) {
@@ -2311,7 +2266,7 @@ fn rank_deficient() -> AudioSampleError {
 // RMS and zero-crossing rate
 // =============================================================================
 
-/// Configuration of the frame-wise RMS energy, mirroring `librosa.feature.rms`.
+/// Configuration of the frame-wise RMS energy.
 ///
 /// ## Purpose
 ///
@@ -2319,8 +2274,8 @@ fn rank_deficient() -> AudioSampleError {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::rms_frames`]. [`Default`] is librosa 1.0's default
-/// (`frame_length = 2048`, `hop_length = 512`, centred, zero padding), so frames
+/// Pass to [`AudioFeatures::rms_frames`]. [`Default`] is `frame_length = 2048`,
+/// `hop_length = 512`, centred, zero padding, so frames
 /// line up with those of the default STFT.
 ///
 /// ## Invariants
@@ -2345,7 +2300,7 @@ pub struct RmsConfig {
     /// If `true` (default), pad `frame_length / 2` samples at both ends so frame `t`
     /// is centred on sample `t * hop_length`.
     pub center: bool,
-    /// Padding used when `center` is set (librosa 1.0 default: zeros).
+    /// Padding used when `center` is set (default: zeros).
     pub pad_mode: StftPadMode,
 }
 
@@ -2361,15 +2316,13 @@ impl Default for RmsConfig {
 }
 
 impl RmsConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.rms` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2441,8 +2394,7 @@ fn rms_rows<F: AudioFloat>(
     Ok(out)
 }
 
-/// Computes frame-wise RMS from a spectrogram, equivalent to
-/// `librosa.feature.rms(S=s, frame_length=frame_length)`.
+/// Computes frame-wise RMS from a spectrogram.
 ///
 /// By Parseval's theorem, `rms = sqrt(2 sum_k w_k |S[k]|^2 / frame_length^2)` with
 /// `w_k = 1/2` for the DC bin and (for even `frame_length`) the Nyquist bin and 1
@@ -2569,21 +2521,20 @@ pub fn rms_from_spectrogram<F: AudioFloat>(
     Ok(out)
 }
 
-/// Scaling of the zero-crossing threshold (librosa's `ref_magnitude`).
+/// Scaling of the zero-crossing threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ZeroCrossingReference {
-    /// The threshold is absolute (librosa `ref_magnitude=None`, the default).
+    /// The threshold is absolute (the default).
     #[default]
     None,
     /// The threshold is multiplied by this value.
     Value(f64),
     /// The threshold is multiplied by the largest absolute sample value of the
-    /// framed signal over all channels (librosa `ref_magnitude=numpy.max`).
+    /// framed signal over all channels.
     Max,
 }
 
-/// Configuration of the frame-wise zero-crossing rate, mirroring
-/// `librosa.feature.zero_crossing_rate`.
+/// Configuration of the frame-wise zero-crossing rate.
 ///
 /// ## Purpose
 ///
@@ -2592,10 +2543,9 @@ pub enum ZeroCrossingReference {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::zero_crossing_rate_frames`]. [`Default`] is librosa's
-/// default: `frame_length = 2048`, `hop_length = 512`, centred with **edge**
-/// padding (librosa always edge-pads here), `threshold = 1e-10`, no reference,
-/// `pad = false`, `zero_pos = true`.
+/// Pass to [`AudioFeatures::zero_crossing_rate_frames`]. [`Default`] is
+/// `frame_length = 2048`, `hop_length = 512`, centred with **edge** padding,
+/// `threshold = 1e-10`, no reference, `pad = false`, `zero_pos = true`.
 ///
 /// ## Invariants
 ///
@@ -2621,10 +2571,10 @@ pub struct ZeroCrossingRateConfig {
     pub center: bool,
     /// Samples with `|x| <= threshold * reference` are treated as zero. Non-negative.
     pub threshold: f64,
-    /// Scaling of `threshold` (librosa `ref_magnitude`).
+    /// Scaling of `threshold`.
     pub ref_magnitude: ZeroCrossingReference,
-    /// If `true`, the first sample of every frame counts as a crossing (librosa's
-    /// `pad` keyword; `false` in `zero_crossing_rate`).
+    /// If `true`, the first sample of every frame counts as a crossing. Default:
+    /// `false`.
     pub pad: bool,
     /// If `true` (default), zero counts as positive (sign bit comparison); if
     /// `false`, zero is its own sign, so moving to or from zero is a crossing.
@@ -2646,16 +2596,13 @@ impl Default for ZeroCrossingRateConfig {
 }
 
 impl ZeroCrossingRateConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.zero_crossing_rate` defaults. Currently the same
-    /// as [`Default`]; use this constructor where agreement with librosa is the
-    /// requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2735,7 +2682,7 @@ impl ZeroCrossingRateConfig {
     }
 }
 
-/// numpy's `sign` (NaN propagates).
+/// The sign of `x`: -1, 0 or 1, with NaN propagated.
 fn np_sign<F: AudioFloat>(x: F) -> F {
     if x > F::zero() {
         F::one()
@@ -2843,7 +2790,7 @@ fn zcr_rows<F: AudioFloat>(
 // PCEN
 // =============================================================================
 
-/// Configuration of per-channel energy normalisation, mirroring `librosa.pcen`.
+/// Configuration of per-channel energy normalisation.
 ///
 /// ## Purpose
 ///
@@ -2858,11 +2805,11 @@ fn zcr_rows<F: AudioFloat>(
 /// Pass to [`pcen`] / [`pcen_with_state`] with the sample rate of the analysed
 /// audio. There is no `Default`: [`PcenConfig::new`] takes the hop length,
 /// which must be the hop of the spectrogram being normalised (it converts
-/// `time_constant` from seconds to frames). The other parameters take librosa's
-/// defaults (`gain = 0.98`, `bias = 2`, `power = 0.5`, `time_constant = 0.4` s,
-/// `eps = 1e-6`, `max_size = 1`). [`PcenConfig::librosa`] also sets librosa's
-/// default `hop_length = 512`. librosa recommends scaling integer-PCM-range
-/// input, e.g. `S * 2^31` for a mel spectrogram of `[-1, 1]` audio.
+/// `time_constant` from seconds to frames). The other parameters default to
+/// `gain = 0.98`, `bias = 2`, `power = 0.5`, `time_constant = 0.4` s,
+/// `eps = 1e-6`, `max_size = 1`. [`PcenConfig::librosa`] also sets
+/// `hop_length = 512`. These defaults suit input on the integer PCM scale, e.g.
+/// `S * 2^31` for a mel spectrogram of `[-1, 1]` audio.
 ///
 /// ## Invariants
 ///
@@ -2885,8 +2832,7 @@ fn zcr_rows<F: AudioFloat>(
 #[derive(Debug, Clone, PartialEq)]
 pub struct PcenConfig {
     /// Hop length of the spectrogram in samples; with the sample rate it converts
-    /// `time_constant` to frames. Required ([`PcenConfig::new`]); librosa's
-    /// default is 512.
+    /// `time_constant` to frames. Required ([`PcenConfig::new`]).
     pub hop_length: NonZeroUsize,
     /// Gain-normalisation exponent `alpha` (typically 0.7 to 1). Non-negative.
     pub gain: f64,
@@ -2902,13 +2848,13 @@ pub struct PcenConfig {
     /// `time_constant` (see [`PcenConfig::smoothing_coefficient`]).
     pub b: Option<f64>,
     /// Width (in frequency bins) of a maximum filter applied to `S` before
-    /// smoothing (`1` disables it), as in librosa's `max_size`.
+    /// smoothing (`1` disables it).
     pub max_size: NonZeroUsize,
 }
 
 impl PcenConfig {
-    /// PCEN for a spectrogram with hop length `hop_length`, with librosa's
-    /// defaults for the other parameters (`gain = 0.98`, `bias = 2`,
+    /// PCEN for a spectrogram with hop length `hop_length`, with the default
+    /// values of the other parameters (`gain = 0.98`, `bias = 2`,
     /// `power = 0.5`, `time_constant = 0.4` s, `eps = 1e-6`, `b` derived from
     /// the time constant, `max_size = 1`).
     #[must_use]
@@ -2925,8 +2871,7 @@ impl PcenConfig {
         }
     }
 
-    /// librosa 1.0's `pcen` defaults, including `hop_length = 512` (the hop of
-    /// librosa's default STFT).
+    /// Settings matching librosa 1.0's defaults, including `hop_length = 512`.
     #[must_use]
     pub fn librosa() -> Self {
         Self::new(crate::nzu!(512))
@@ -2990,8 +2935,8 @@ impl PcenConfig {
 
     /// The smoothing coefficient `b` used for a spectrogram at `sample_rate` Hz:
     /// the explicit `b`, or `(sqrt(1 + 4 T^2) - 1) / (2 T^2)` with
-    /// `T = time_constant * sample_rate / hop_length` frames (librosa's choice, which
-    /// approximates the filter's full width at half maximum). Also validates the
+    /// `T = time_constant * sample_rate / hop_length` frames (which approximates the
+    /// filter's full width at half maximum). Also validates the
     /// configuration.
     ///
     /// # Errors
@@ -3049,8 +2994,8 @@ impl PcenConfig {
     }
 }
 
-/// Applies per-channel energy normalisation to a spectrogram, equivalent to
-/// `librosa.pcen(S, sr=sample_rate, hop_length=..., ...)` with time on the last axis.
+/// Applies per-channel energy normalisation to a spectrogram, with time on the last
+/// axis.
 ///
 /// See [`pcen_with_state`] for the algorithm, a custom reference and streaming.
 ///
@@ -3096,15 +3041,13 @@ pub fn pcen<F: AudioFloat>(
     pcen_with_state(s, sample_rate, config, None, None).map(|(out, _)| out)
 }
 
-/// Applies PCEN with an optional reference spectrogram and filter state, equivalent
-/// to `librosa.pcen(S, ..., ref=reference, zi=zi, return_zf=True)` (time on the
-/// last axis, maximum filter over frequency).
+/// Applies PCEN with an optional reference spectrogram and filter state, returning
+/// the final filter state (time on the last axis, maximum filter over frequency).
 ///
-/// 1. `ref = reference`, or `S` maximum-filtered over `max_size` bins (SciPy
-///    `maximum_filter1d`, mode `reflect`), or `S` itself when `max_size == 1`.
-/// 2. `M[t] = b ref[t] + (1 - b) M[t - 1]` (SciPy `lfilter([b], [1, b - 1])`); the
-///    initial state defaults to `lfilter_zi`, i.e. the steady state for a unit input
-///    (`M[-1] = 1`, not scaled by the first frame, as librosa).
+/// 1. `ref = reference`, or `S` maximum-filtered over `max_size` bins (edges
+///    mirrored with the edge bin repeated), or `S` itself when `max_size == 1`.
+/// 2. `M[t] = b ref[t] + (1 - b) M[t - 1]`; the initial state defaults to the
+///    steady state for a unit input (`M[-1] = 1`, not scaled by the first frame).
 /// 3. `G = exp(-gain (ln eps + ln1p(M / eps)))` = `(eps + M)^-gain`.
 /// 4. `power == 0`: `ln1p(S G)`; `bias == 0`: `exp(power (ln S + ln G))`;
 ///    otherwise `bias^power expm1(power ln1p(S G / bias))`.
@@ -3118,10 +3061,10 @@ pub fn pcen<F: AudioFloat>(
 /// * `s` - `(channels, bins, frames)` spectrogram.
 /// * `sample_rate` - Sample rate of the analysed audio in Hz.
 /// * `config` - PCEN parameters.
-/// * `reference` - Optional `(channels, bins, frames)` array to smooth instead of `s`
-///   (librosa `ref`); overrides `max_size`.
-/// * `zi` - Optional `(channels, bins)` initial filter state (librosa `zi`, e.g. the
-///   `zf` of the previous block when streaming).
+/// * `reference` - Optional `(channels, bins, frames)` array to smooth instead of `s`;
+///   overrides `max_size`.
+/// * `zi` - Optional `(channels, bins)` initial filter state (e.g. the final state
+///   of the previous block when streaming).
 ///
 /// # Returns
 ///
@@ -3187,8 +3130,8 @@ pub fn pcen_with_state<F: AudioFloat>(
             z.to_owned()
         }
         None => {
-            // scipy.signal.lfilter_zi([b], [1, b - 1]) evaluated as SciPy does
-            // (in f64, as SciPy does for the float64 coefficients).
+            // Steady-state initial condition of the one-pole filter [b] / [1, b - 1]
+            // for a unit input, evaluated in f64.
             let a1 = b64 - 1.0;
             let y_inf = b64 / (1.0 + a1);
             Array2::from_elem((n_ch, n_bins), F::of(0.0 - y_inf * a1))
@@ -3211,7 +3154,7 @@ pub fn pcen_with_state<F: AudioFloat>(
         let rc = rc.as_slice().expect("standard layout");
         let mut oc = out.index_axis_mut(Axis(0), c);
         let oc = oc.as_slice_mut().expect("a fresh standard-layout array");
-        // Direct-form II transposed, as scipy.signal.lfilter: out = M. Four
+        // Direct-form II transposed: out = M. Four
         // bins at a time, so that their recurrences overlap.
         let mut k = 0;
         while k < n_bins {
@@ -3281,8 +3224,8 @@ fn contiguous_or_copy<'a, F: AudioFloat>(
     }
 }
 
-/// `scipy.ndimage.maximum_filter1d(S, size, axis=bins)` with mode `reflect`
-/// (numpy `symmetric`): output bin `i` is the maximum over bins
+/// Maximum filter of length `size` along the bin axis, with edges mirrored and
+/// the edge bin repeated: output bin `i` is the maximum over bins
 /// `i - size / 2 ..= i + (size - 1) / 2`.
 fn maximum_filter_bins<F: AudioFloat>(s: &ArrayView3<'_, F>, size: usize) -> Array3<F> {
     let (n_ch, n_bins, n_frames) = s.dim();
@@ -3318,7 +3261,7 @@ fn maximum_filter_bins<F: AudioFloat>(s: &ArrayView3<'_, F>, size: usize) -> Arr
 /// An acoustic frequency-weighting curve (IEC 61672 A/B/C, IEC 537 D, or flat Z).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FrequencyWeighting {
-    /// A-weighting: approximates the ear's sensitivity at low levels (librosa default).
+    /// A-weighting: approximates the ear's sensitivity at low levels (the default).
     #[default]
     A,
     /// B-weighting (medium levels; obsolete in standards).
@@ -3374,14 +3317,13 @@ fn weighting_by_logs<const K: usize>(
 
 fn apply_min_db(w: f64, min_db: Option<f64>) -> f64 {
     match min_db {
-        // numpy.maximum propagates NaN.
+        // NaN propagates.
         Some(m) if !w.is_nan() => w.max(m),
         _ => w,
     }
 }
 
-/// Computes the A-weighting of a set of frequencies, equivalent to
-/// `librosa.A_weighting(frequencies, min_db=min_db)`.
+/// Computes the A-weighting of a set of frequencies.
 ///
 /// `A(f) = 2.0 + 20 log10(12194.217^2 f^4 / ((f^2 + 20.598997^2)
 /// (f^2 + 12194.217^2) sqrt(f^2 + 107.65265^2) sqrt(f^2 + 737.86223^2)))`.
@@ -3389,7 +3331,7 @@ fn apply_min_db(w: f64, min_db: Option<f64>) -> f64 {
 /// # Arguments
 ///
 /// * `frequencies` - Frequencies in Hz.
-/// * `min_db` - Lower clip in dB (librosa default `Some(-80.0)`); `None` leaves
+/// * `min_db` - Lower clip in dB (typically `Some(-80.0)`); `None` leaves
 ///   `-inf` at 0 Hz.
 ///
 /// # Returns
@@ -3408,7 +3350,7 @@ fn apply_min_db(w: f64, min_db: Option<f64>) -> f64 {
 ///
 /// # References
 ///
-/// IEC 61672-1:2013, *Electroacoustics - Sound level meters*; librosa `A_weighting`.
+/// IEC 61672-1:2013, *Electroacoustics - Sound level meters*.
 #[must_use]
 pub fn a_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     let c = [
@@ -3426,13 +3368,12 @@ pub fn a_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     )
 }
 
-/// Computes the B-weighting of a set of frequencies, equivalent to
-/// `librosa.B_weighting(frequencies, min_db=min_db)`.
+/// Computes the B-weighting of a set of frequencies.
 ///
 /// # Arguments
 ///
 /// * `frequencies` - Frequencies in Hz.
-/// * `min_db` - Lower clip in dB (librosa default `Some(-80.0)`).
+/// * `min_db` - Lower clip in dB (typically `Some(-80.0)`).
 ///
 /// # Returns
 ///
@@ -3448,7 +3389,7 @@ pub fn a_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
 ///
 /// # References
 ///
-/// IEC 60651 (B curve); librosa `B_weighting`.
+/// IEC 60651 (B curve).
 #[must_use]
 pub fn b_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     let c = [
@@ -3465,13 +3406,12 @@ pub fn b_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     )
 }
 
-/// Computes the C-weighting of a set of frequencies, equivalent to
-/// `librosa.C_weighting(frequencies, min_db=min_db)`.
+/// Computes the C-weighting of a set of frequencies.
 ///
 /// # Arguments
 ///
 /// * `frequencies` - Frequencies in Hz.
-/// * `min_db` - Lower clip in dB (librosa default `Some(-80.0)`).
+/// * `min_db` - Lower clip in dB (typically `Some(-80.0)`).
 ///
 /// # Returns
 ///
@@ -3487,7 +3427,7 @@ pub fn b_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
 ///
 /// # References
 ///
-/// IEC 61672-1:2013; librosa `C_weighting`.
+/// IEC 61672-1:2013.
 #[must_use]
 pub fn c_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     let c = [12194.217f64 * 12194.217, 20.598997 * 20.598997];
@@ -3500,13 +3440,12 @@ pub fn c_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     )
 }
 
-/// Computes the D-weighting of a set of frequencies, equivalent to
-/// `librosa.D_weighting(frequencies, min_db=min_db)`.
+/// Computes the D-weighting of a set of frequencies.
 ///
 /// # Arguments
 ///
 /// * `frequencies` - Frequencies in Hz.
-/// * `min_db` - Lower clip in dB (librosa default `Some(-80.0)`).
+/// * `min_db` - Lower clip in dB (typically `Some(-80.0)`).
 ///
 /// # Returns
 ///
@@ -3522,7 +3461,7 @@ pub fn c_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
 ///
 /// # References
 ///
-/// IEC 537:1976; librosa `D_weighting`.
+/// IEC 537:1976.
 #[must_use]
 pub fn d_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     let sq = |x: f64| x * x;
@@ -3552,8 +3491,7 @@ pub fn d_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     )
 }
 
-/// The flat Z-weighting (0 dB everywhere, raised to `min_db` if that is positive),
-/// equivalent to `librosa.Z_weighting(frequencies, min_db=min_db)`.
+/// The flat Z-weighting (0 dB everywhere, raised to `min_db` if that is positive).
 ///
 /// # Examples
 ///
@@ -3567,15 +3505,14 @@ pub fn z_weighting(frequencies: &[f64], min_db: Option<f64>) -> Vec<f64> {
     vec![apply_min_db(0.0, min_db); frequencies.len()]
 }
 
-/// Computes a frequency-weighting curve, equivalent to
-/// `librosa.frequency_weighting(frequencies, kind=kind, min_db=min_db)`.
+/// Computes a frequency-weighting curve.
 ///
 /// # Arguments
 ///
 /// * `frequencies` - Frequencies in Hz.
 /// * `kind` - The weighting curve.
-/// * `min_db` - Lower clip in dB. librosa's defaults are `Some(-80.0)` for A-D and
-///   `None` for Z (equivalent for Z, which is 0 dB).
+/// * `min_db` - Lower clip in dB, typically `Some(-80.0)` (for Z, which is 0 dB,
+///   `None` gives the same curve).
 ///
 /// # Returns
 ///
@@ -3604,13 +3541,12 @@ pub fn frequency_weighting(
     }
 }
 
-/// Computes several weighting curves at once, equivalent to
-/// `librosa.multi_frequency_weighting(frequencies, kinds=kinds, min_db=min_db)`.
+/// Computes several weighting curves at once.
 ///
 /// # Arguments
 ///
 /// * `frequencies` - Frequencies in Hz.
-/// * `kinds` - The curves, one output row each (librosa default `[Z, A, C]`).
+/// * `kinds` - The curves, one output row each (for example `[Z, A, C]`).
 /// * `min_db` - Lower clip in dB applied to every curve.
 ///
 /// # Returns
@@ -3646,11 +3582,10 @@ pub fn multi_frequency_weighting(
     out
 }
 
-/// Converts a power spectrogram to perceptually weighted dB, equivalent to
-/// `librosa.perceptual_weighting(S, frequencies, kind=kind, **db_kwargs)`.
+/// Converts a power spectrogram to perceptually weighted dB.
 ///
 /// The result is `frequency_weighting(f, kind)[k] + power_to_db(S, db)[k, t]`, with
-/// the weighting clipped at librosa's default `-80` dB and the `top_db` floor applied
+/// the weighting clipped at `-80` dB and the `top_db` floor applied
 /// by `power_to_db` before the weighting is added.
 ///
 /// # Arguments
@@ -3658,9 +3593,9 @@ pub fn multi_frequency_weighting(
 /// * `s` - `(channels, bins, frames)` power spectrogram (e.g. `|STFT|^2`, a CQT
 ///   power, ...) of element type `F` (`f32` or `f64`).
 /// * `frequencies` - Centre frequency of each bin in Hz (length `bins`).
-/// * `kind` - Weighting curve (librosa default A).
-/// * `db` - dB conversion settings. [`DbConfig::librosa_power`] gives librosa's
-///   `power_to_db` defaults (`ref = 1`, `amin = 1e-10`, `top_db = 80`);
+/// * `kind` - Weighting curve (usually A, the default of [`FrequencyWeighting`]).
+/// * `db` - dB conversion settings. [`DbConfig::librosa_power`] gives
+///   `reference = 1`, `amin = 1e-10`, `top_db = 80`;
 ///   [`DbConfig::default`] applies no `top_db` floor.
 ///
 /// # Returns
@@ -3707,19 +3642,16 @@ pub fn perceptual_weighting<F: AudioFloat>(
 // Reassigned spectrogram
 // =============================================================================
 
-/// Power threshold below which reassigned estimates are discarded (librosa's
-/// `ref_power`).
+/// Power threshold below which reassigned estimates are discarded.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReassignRefPower {
-    /// A fixed power threshold (librosa default `1e-6`); `0` disables thresholding.
+    /// A fixed power threshold (default `1e-6`); `0` disables thresholding.
     Value(f64),
-    /// The maximum power `|S|^2` over the whole spectrogram (librosa
-    /// `ref_power=numpy.max`).
+    /// The maximum power `|S|^2` over the whole spectrogram.
     Max,
 }
 
-/// Configuration of the time-frequency reassigned spectrogram, mirroring
-/// `librosa.reassigned_spectrogram`.
+/// Configuration of the time-frequency reassigned spectrogram.
 ///
 /// ## Purpose
 ///
@@ -3728,8 +3660,8 @@ pub enum ReassignRefPower {
 ///
 /// ## Intended usage
 ///
-/// Pass to [`AudioFeatures::reassigned_spectrogram`]. [`Default`] is librosa's
-/// default: the default STFT (`n_fft = 2048`, hop `win_length / 4`, periodic Hann,
+/// Pass to [`AudioFeatures::reassigned_spectrogram`]. [`Default`] is the default
+/// STFT (`n_fft = 2048`, hop `win_length / 4`, periodic Hann,
 /// centred, zero padding), both reassignments, `ref_power = 1e-6`,
 /// `fill_nan = false`, `clip = true`.
 ///
@@ -3779,16 +3711,13 @@ impl Default for ReassignedSpectrogramConfig {
 }
 
 impl ReassignedSpectrogramConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `reassigned_spectrogram` defaults. Currently the same as
-    /// [`Default`]; use this constructor where agreement with librosa is the
-    /// requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -3882,8 +3811,8 @@ pub struct ReassignedSpectrogram<F = f64> {
     pub mags: Array3<F>,
 }
 
-/// Complex division with numpy's algorithm (Smith's method, and numpy's handling of
-/// a zero divisor), so `0 / 0` and `x / 0` give the same NaN / inf as librosa.
+/// Complex division by Smith's method. A zero divisor divides each part by zero,
+/// so `0 / 0` gives NaN and `x / 0` gives infinities.
 fn np_cdiv<F: AudioFloat>(a: Complex<F>, b: Complex<F>) -> Complex<F> {
     let (ar, ai, br, bi) = (a.re, a.im, b.re, b.im);
     let abs_br = br.abs();
@@ -4018,14 +3947,13 @@ fn reassigned_rows<F: AudioFloat>(
 // The AudioFeatures trait
 // =============================================================================
 
-/// librosa-compatible frame-wise features on [`AudioSamples`].
+/// Frame-wise features on [`AudioSamples`].
 ///
 /// Every method works on all channels: outputs are shaped
 /// `(channels, n_features, n_frames)` (mono gives one channel). Outputs have the
 /// element type [`Float`](Self::Float): `f32` for `u8`, `i16`, `I24` and `f32`
 /// audio, `f64` for `i32` and `f64` audio. The computation runs in that type.
-/// Each config's `librosa()` constructor reproduces librosa 1.0's defaults. See
-/// the [module documentation](self) for the librosa correspondence and the
+/// See the [module documentation](self) for the list of features and the
 /// `*_from_spectrogram` forms that reuse a precomputed spectrogram.
 ///
 /// The whole-signal scalar descriptors of [`AudioStatistics`](crate::AudioStatistics)
@@ -4036,12 +3964,11 @@ pub trait AudioFeatures {
     /// [`AudioSample::Float`](crate::AudioSample::Float).
     type Float: AudioFloat;
 
-    /// Computes the spectral centroid of every frame, equivalent to
-    /// `librosa.feature.spectral_centroid(y=y, sr=sr, ...)`.
+    /// Computes the spectral centroid of every frame.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT parameters ([`SpectralCentroidConfig::default`] = librosa).
+    /// * `config` - STFT parameters (see [`SpectralCentroidConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4050,8 +3977,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid or the signal is too short
     /// for an uncentred STFT.
@@ -4073,13 +3999,12 @@ pub trait AudioFeatures {
         config: &SpectralCentroidConfig,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the order-`p` spectral bandwidth of every frame, equivalent to
-    /// `librosa.feature.spectral_bandwidth(y=y, sr=sr, p=p, norm=norm, ...)`.
+    /// Computes the order-`p` spectral bandwidth of every frame.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT, `p` and `norm` ([`SpectralBandwidthConfig::default`] =
-    ///   librosa).
+    /// * `config` - STFT, `p` and `norm` (see
+    ///   [`SpectralBandwidthConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4088,8 +4013,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -4109,13 +4033,12 @@ pub trait AudioFeatures {
         config: &SpectralBandwidthConfig,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the spectral rolloff of every frame, equivalent to
-    /// `librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=..., ...)`.
+    /// Computes the spectral rolloff of every frame.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT and `roll_percent` ([`SpectralRolloffConfig::default`] =
-    ///   librosa).
+    /// * `config` - STFT and `roll_percent` (see
+    ///   [`SpectralRolloffConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4124,8 +4047,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -4145,13 +4067,12 @@ pub trait AudioFeatures {
         config: &SpectralRolloffConfig,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the spectral flatness of every frame, equivalent to
-    /// `librosa.feature.spectral_flatness(y=y, amin=..., power=..., ...)`.
+    /// Computes the spectral flatness of every frame.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT, `amin` and `power` ([`SpectralFlatnessConfig::default`] =
-    ///   librosa).
+    /// * `config` - STFT, `amin` and `power` (see
+    ///   [`SpectralFlatnessConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4160,8 +4081,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -4181,13 +4101,12 @@ pub trait AudioFeatures {
         config: &SpectralFlatnessConfig,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the spectral contrast of every frame, equivalent to
-    /// `librosa.feature.spectral_contrast(y=y, sr=sr, ...)`.
+    /// Computes the spectral contrast of every frame.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT and band parameters ([`SpectralContrastConfig::default`] =
-    ///   librosa).
+    /// * `config` - STFT and band parameters (see
+    ///   [`SpectralContrastConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4196,8 +4115,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid for the sample rate or a
     /// band contains no bins.
@@ -4218,12 +4136,11 @@ pub trait AudioFeatures {
         config: &SpectralContrastConfig,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Fits a polynomial to every magnitude-spectrum frame, equivalent to
-    /// `librosa.feature.poly_features(y=y, sr=sr, order=..., ...)`.
+    /// Fits a polynomial to every magnitude-spectrum frame.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT and `order` ([`PolyFeaturesConfig::default`] = librosa).
+    /// * `config` - STFT and `order` (see [`PolyFeaturesConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4232,8 +4149,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -4250,12 +4166,11 @@ pub trait AudioFeatures {
     /// ```
     fn poly_features(&self, config: &PolyFeaturesConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the RMS of every frame, equivalent to
-    /// `librosa.feature.rms(y=y, frame_length=..., hop_length=..., center=..., pad_mode=...)`.
+    /// Computes the RMS of every frame.
     ///
     /// # Arguments
     ///
-    /// * `config` - Framing ([`RmsConfig::default`] = librosa 1.0).
+    /// * `config` - Framing (see [`RmsConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4265,18 +4180,14 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the (padded) signal is shorter than `frame_length`.
     ///
-    /// # Differences from librosa
+    /// # Precision
     ///
-    /// librosa computes the mean square in `float32` by default
-    /// (`dtype=np.float32`) and returns `float32`, whatever the input type. Here
-    /// the computation runs in [`Float`](Self::Float): `f32` audio matches
-    /// librosa's default to `f32` round-off, and `f64` audio matches librosa with
-    /// `dtype=np.float64`.
+    /// The mean square is computed in [`Float`](Self::Float), so `f64` audio gives
+    /// an `f64` result throughout.
     ///
     /// # Examples
     ///
@@ -4292,16 +4203,15 @@ pub trait AudioFeatures {
     /// ```
     fn rms_frames(&self, config: &RmsConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the zero-crossing rate of every frame, equivalent to
-    /// `librosa.feature.zero_crossing_rate(y, frame_length=..., hop_length=..., center=..., ...)`.
+    /// Computes the zero-crossing rate of every frame.
     ///
     /// Each frame's rate is the number of sign changes between consecutive samples
     /// (plus one if `pad`) divided by `frame_length`.
     ///
     /// # Arguments
     ///
-    /// * `config` - Framing and crossing rules ([`ZeroCrossingRateConfig::default`] =
-    ///   librosa).
+    /// * `config` - Framing and crossing rules (see
+    ///   [`ZeroCrossingRateConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4309,8 +4219,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid or the (padded) signal is
     /// shorter than `frame_length`.
@@ -4332,8 +4241,7 @@ pub trait AudioFeatures {
         config: &ZeroCrossingRateConfig,
     ) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the time-frequency reassigned spectrogram, equivalent to
-    /// `librosa.reassigned_spectrogram(y=y, sr=sr, ...)`.
+    /// Computes the time-frequency reassigned spectrogram.
     ///
     /// Frequencies are corrected with an STFT using the window derivative
     /// (`f = f_k - Im(S_dh / S_h) sr / (2 pi)`), times with an STFT using the
@@ -4343,7 +4251,7 @@ pub trait AudioFeatures {
     /// # Arguments
     ///
     /// * `config` - STFT and reassignment options
-    ///   ([`ReassignedSpectrogramConfig::default`] = librosa).
+    ///   (see [`ReassignedSpectrogramConfig::default`]).
     ///
     /// # Returns
     ///
@@ -4352,8 +4260,7 @@ pub trait AudioFeatures {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -4374,7 +4281,7 @@ pub trait AudioFeatures {
     ///
     /// P. Flandrin, F. Auger and E. Chassande-Mottin, "Time-frequency reassignment:
     /// from principles to algorithms," in *Applications in Time-Frequency Signal
-    /// Processing*, CRC Press, 2002; librosa `reassigned_spectrogram`.
+    /// Processing*, CRC Press, 2002.
     fn reassigned_spectrogram(
         &self,
         config: &ReassignedSpectrogramConfig,
@@ -4476,7 +4383,7 @@ mod tests {
     use crate::sample_rate;
     use ndarray::{Array1, array, s};
 
-    /// librosa's zero_crossing_rate computed literally: edge-pad, frame,
+    /// The zero-crossing rate computed literally: edge-pad, frame,
     /// count the crossings of every frame.
     fn zcr_reference(x: &[f64], cfg: &ZeroCrossingRateConfig) -> Vec<f64> {
         let fl = cfg.frame_length.get();
@@ -4647,7 +4554,8 @@ mod tests {
 
     #[test]
     fn zero_crossing_rules() {
-        // librosa zero_crossings examples: [1, 1e-12, -1e-12, 1e-12, -1] has one crossing.
+        // Values within the threshold count as zero: [1, 1e-12, -1e-12, 1e-12, -1] has
+        // one crossing.
         let x = vec![1.0, 1e-12, -1e-12, 1e-12, -1.0];
         let cfg = ZeroCrossingRateConfig::new()
             .with_frame_length(nzu!(5))
@@ -4710,7 +4618,7 @@ mod tests {
             m.spectral_contrast_frames(&SpectralContrastConfig::new().with_n_bands(nzu!(7)))
                 .is_err()
         );
-        // n_fft too small: band 0 has a single bin, which librosa turns into NaN.
+        // n_fft too small: band 0 has a single bin.
         let tiny = SpectralContrastConfig::new().with_stft(StftConfig::new().with_n_fft(nzu!(64)));
         assert!(m.spectral_contrast_frames(&tiny).is_err());
         assert!(
@@ -4844,7 +4752,7 @@ mod tests {
 
     #[test]
     fn maximum_filter_matches_scipy() {
-        // scipy.ndimage.maximum_filter1d([5, 1, 2, 9, 3, 0, 4, 7], size) (checked in SciPy 1.18).
+        // Maximum filter of [5, 1, 2, 9, 3, 0, 4, 7] with mirrored edges, edge bin repeated.
         let x = Array3::from_shape_vec((1, 8, 1), vec![5.0, 1.0, 2.0, 9.0, 3.0, 0.0, 4.0, 7.0])
             .unwrap();
         let expect = [
