@@ -237,11 +237,32 @@ fn same_type_array<F: 'static, T: 'static>(rows: Array2<F>) -> Result<Array2<T>,
 /// vectorises.
 fn all_finite<F: AudioFloat>(x: ArrayView2<'_, F>) -> bool {
     match x.as_slice_memory_order() {
-        Some(s) => s
-            .chunks(512)
-            .all(|c| c.iter().fold(true, |ok, v| ok & v.is_finite())),
+        Some(s) => slice_finite(s),
         None => x.iter().all(|v| v.is_finite()),
     }
+}
+
+/// Whether every value of `s` is finite, compiled for AVX2 where the CPU has
+/// it.
+fn slice_finite<F: AudioFloat>(s: &[F]) -> bool {
+    #[inline(always)]
+    fn body<F: AudioFloat>(s: &[F]) -> bool {
+        s.chunks(512)
+            .all(|c| c.iter().fold(true, |ok, v| ok & v.is_finite()))
+    }
+    /// # Safety
+    /// The CPU must support AVX2.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2<F: AudioFloat>(s: &[F]) -> bool {
+        body(s)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2 (checked just above).
+        return unsafe { avx2(s) };
+    }
+    body(s)
 }
 
 /// The audio as a `(channels, samples)` array of its analysis float type,

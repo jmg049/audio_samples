@@ -1383,10 +1383,35 @@ pub fn spectral_rolloff_from_spectrogram<F: AudioFloat>(
         ));
     }
     check_spectrogram("spectral_rolloff", &s)?;
-    let (n_ch, n_bins, n_frames) = s.dim();
+    let n_bins = s.dim().1;
     check_freq("spectral_rolloff", freq, n_bins)?;
     let freq = freq_as::<F>(freq);
     let rp = F::of(rp);
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2 (checked just above).
+        return Ok(unsafe { rolloff_avx2(s, &freq, rp) });
+    }
+    Ok(rolloff_body(s, &freq, rp))
+}
+
+/// [`rolloff_body`] compiled for AVX2 (the same operations, so the same
+/// results).
+///
+/// # Safety
+/// The CPU must support AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn rolloff_avx2<F: AudioFloat>(s: ArrayView3<'_, F>, freq: &[F], rp: F) -> Array3<F> {
+    rolloff_body(s, freq, rp)
+}
+
+/// The roll-off frequencies of a checked spectrogram, `rp` the roll-off
+/// fraction and `freq` the bin frequencies.
+#[inline(always)]
+fn rolloff_body<F: AudioFloat>(s: ArrayView3<'_, F>, freq: &[F], rp: F) -> Array3<F> {
+    let (n_ch, _, n_frames) = s.dim();
+    let n_bins = freq.len();
     let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
     let mut acc = vec![F::zero(); n_frames];
     let mut threshold = vec![F::zero(); n_frames];
@@ -1426,7 +1451,7 @@ pub fn spectral_rolloff_from_spectrogram<F: AudioFloat>(
             }
         });
     }
-    Ok(out)
+    out
 }
 
 /// [`spectral_rolloff_from_spectrogram`] with a frequency for every bin of every frame,

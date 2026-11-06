@@ -385,10 +385,19 @@ where
         match method {
             StereoConversionMethod::Duplicate => match self.data() {
                 AudioData::Mono(mono_data) => {
-                    let stereo_data =
-                        ndarray::stack(Axis(0), &[mono_data.view(), mono_data.view()]).map_err(
-                            |e| AudioSampleError::Layout(LayoutError::shape_error("to_stereo", e)),
-                        )?;
+                    let stereo_data = match mono_data.as_slice() {
+                        // Two copies of a contiguous channel: plain memory copies.
+                        Some(x) => {
+                            let mut flat = Vec::with_capacity(2 * x.len());
+                            flat.extend_from_slice(x);
+                            flat.extend_from_slice(x);
+                            Array2::from_shape_vec((2, x.len()), flat)
+                        }
+                        None => ndarray::stack(Axis(0), &[mono_data.view(), mono_data.view()]),
+                    }
+                    .map_err(|e| {
+                        AudioSampleError::Layout(LayoutError::shape_error("to_stereo", e))
+                    })?;
 
                     let stereo_data = AudioData::try_from(stereo_data)?;
 

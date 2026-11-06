@@ -564,8 +564,49 @@ pub(crate) fn padded_frame_into<F: AudioFloat>(
 ///
 /// `n_frames` frames are returned; every frame must lie within the padded
 /// signal (`(n_frames - 1) * hop + frame_length <= x.len() + 2 * pad`).
+///
+/// On x86-64 CPUs with AVX2 the loops are compiled for it (the same
+/// operations in the same order, so the same results).
 #[cfg(any(feature = "feature-extraction", feature = "effects", test))]
 pub(crate) fn frame_square_sums<F: AudioFloat>(
+    x: &[F],
+    frame_length: usize,
+    hop: usize,
+    pad: usize,
+    mode: StftPadMode,
+    n_frames: usize,
+) -> Vec<F> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2 (checked just above).
+        return unsafe { frame_square_sums_avx2(x, frame_length, hop, pad, mode, n_frames) };
+    }
+    frame_square_sums_body(x, frame_length, hop, pad, mode, n_frames)
+}
+
+/// [`frame_square_sums`] compiled for AVX2.
+///
+/// # Safety
+/// The CPU must support AVX2.
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "feature-extraction", feature = "effects", test)
+))]
+#[target_feature(enable = "avx2")]
+unsafe fn frame_square_sums_avx2<F: AudioFloat>(
+    x: &[F],
+    frame_length: usize,
+    hop: usize,
+    pad: usize,
+    mode: StftPadMode,
+    n_frames: usize,
+) -> Vec<F> {
+    frame_square_sums_body(x, frame_length, hop, pad, mode, n_frames)
+}
+
+#[cfg(any(feature = "feature-extraction", feature = "effects", test))]
+#[inline(always)]
+fn frame_square_sums_body<F: AudioFloat>(
     x: &[F],
     frame_length: usize,
     hop: usize,

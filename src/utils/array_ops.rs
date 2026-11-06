@@ -89,6 +89,19 @@ where
     D: Dimension + RemoveAxis,
 {
     check_axis("axis", axis, x.ndim())?;
+    // Contiguous lanes (the last axis of a standard-layout array): slices.
+    if let Some(xs) = x.as_slice().filter(|_| axis.index() + 1 == x.ndim()) {
+        let n = x.len_of(axis);
+        let mut out = vec![false; xs.len()];
+        if n > 0 {
+            for (o, lane) in out.chunks_exact_mut(n).zip(xs.chunks_exact(n)) {
+                lane_extrema(o, lane, &strict, &loose);
+            }
+        }
+        return Array::from_shape_vec(x.raw_dim(), out).map_err(|e| {
+            crate::AudioSampleError::Layout(crate::LayoutError::shape_error("local_extrema", e))
+        });
+    }
     let mut out = Array::from_elem(x.raw_dim(), false);
     Zip::from(out.lanes_mut(axis))
         .and(x.lanes(axis))
@@ -103,6 +116,23 @@ where
             o[n - 1] = strict(&lane[n - 1], &lane[n - 2]);
         });
     Ok(out)
+}
+
+/// [`local_extrema`] for one contiguous lane, without branches per element.
+fn lane_extrema<A>(
+    o: &mut [bool],
+    lane: &[A],
+    strict: &impl Fn(&A, &A) -> bool,
+    loose: &impl Fn(&A, &A) -> bool,
+) {
+    let n = lane.len();
+    if n < 2 {
+        return;
+    }
+    for (o, w) in o[1..n - 1].iter_mut().zip(lane.windows(3)) {
+        *o = strict(&w[1], &w[0]) & loose(&w[1], &w[2]);
+    }
+    o[n - 1] = strict(&lane[n - 1], &lane[n - 2]);
 }
 
 /// Marks the local maxima of an array along one axis.
@@ -1324,6 +1354,11 @@ pub fn fill_off_diagonal<A: Clone>(
         // Columns at or below the diagonal `-lower`, and at or above the diagonal `upper`.
         let lo_end = (i - lower + 1).clamp(0, ny as i64) as usize;
         let hi_start = (i + upper).clamp(0, ny as i64) as usize;
+        if let Some(row) = row.as_slice_mut() {
+            row[..lo_end].fill(value.clone());
+            row[hi_start.max(lo_end)..].fill(value.clone());
+            continue;
+        }
         for v in row.iter_mut().take(lo_end) {
             *v = value.clone();
         }
