@@ -432,6 +432,14 @@ The librosa-compatible API is unreleased, so these are changes to the
 - `PeakPickingConfig::set_min_peak_separation_ms` no longer panics when the separation rounds to zero
   frames (or is NaN / negative); it clamps to one frame.
 - `resample_by_ratio` rejects ratios whose target rate exceeds `u32::MAX` Hz, and non-finite ratios.
+- **`resample` and `resample_by_ratio` with `ResamplingQuality::Fast` upsampling
+  interpolate `i32` and `f64` audio in `f64`**, as every other resampling path
+  does; they converted to `f32` first, so output was only accurate to about
+  1.2e-7 of full scale. `i32` and `f64` output changes by up to that amount;
+  `u8`, `i16`, `I24` and `f32` output is unchanged. Fast upsampling now reads
+  the input in place and writes the output directly: 10 s at 22.05 -> 44.1 kHz
+  or 16 -> 48 kHz takes 0.06-0.19 ms for `f32` (was 0.48-2.6 ms), 0.16-0.37 ms
+  for `f64` (was 0.6-3.9 ms) and 0.46-0.93 ms for `i32` (was 0.6-2.9 ms).
 
 - Size-driven building blocks return `ParameterError` instead of aborting on a failed allocation (or
   panicking with "capacity overflow"): `get_window`, `window_bandwidth`, `window_sumsquare`,

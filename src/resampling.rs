@@ -1197,8 +1197,11 @@ where
     let in_sr = audio.sample_rate().get();
     let out_sr = target_sample_rate.get();
     match kernel_kind(quality, in_sr, out_sr) {
-        // Linear interpolation: dedicated (SIMD) loops, f32.
-        KernelKind::Linear => resample_linear(&audio.as_f32(), target_sample_rate),
+        // Linear interpolation: dedicated (SIMD) loops in the sample type's float.
+        KernelKind::Linear => match <T::Float as AudioSample>::SAMPLE_TYPE {
+            SampleType::F32 => resample_linear(audio, target_sample_rate),
+            _ => resample_linear_f64(audio, target_sample_rate),
+        },
         KernelKind::Sinc(_) => match <T::Float as AudioSample>::SAMPLE_TYPE {
             SampleType::F32 => resample_sinc::<T, f32>(audio, target_sample_rate, quality),
             _ => resample_sinc::<T, f64>(audio, target_sample_rate, quality),
@@ -1384,76 +1387,239 @@ fn resample_rows_in<T: AudioFloat, F: engine::RsFloat>(
 // triangle kernel does not suppress images, which is acceptable for the Fast
 // preset; downsampling always goes through the anti-aliased sinc kernel.
 
-fn resample_linear<T>(
-    audio: &AudioSamples<f32>,
+/// Linear-interpolation upsampling in `f32`, for sample types whose float is
+/// `f32` (`u8`, `i16`, `I24`, `f32`). `f32` audio is read in place and the
+/// output written straight into the result; other types go through one
+/// reused `f32` buffer per direction.
+fn resample_linear<T: StandardSample>(
+    audio: &AudioSamples<T>,
     target_sample_rate: SampleRate,
-) -> AudioSampleResult<AudioSamples<'static, T>>
-where
-    T: StandardSample,
-{
+) -> AudioSampleResult<AudioSamples<'static, T>> {
     let in_sr = audio.sample_rate().get();
     let out_sr = target_sample_rate.get();
-    let in_frames = audio.samples_per_channel().get();
-    let out_frames = (in_frames as u64 * out_sr as u64).div_ceil(in_sr as u64) as usize;
-
-    let process_channel = |src: &[f32], dst: &mut [f32]| {
-        if out_sr.is_multiple_of(in_sr) {
-            // Integer upsampling by N.
-            let n = (out_sr / in_sr) as usize;
-
-            // n=2 hot path: SSE2 interleave + midpoint average, 8 output
-            // samples per instruction pair.
-            #[cfg(target_arch = "x86_64")]
-            if n == 2 {
-                // SAFETY: SSE2 is mandated by the x86_64 ABI.
-                unsafe {
-                    upsample_by_2_simd(src, dst);
-                }
-                return;
+    let mut src_buf: Vec<f32> = Vec::new();
+    let mut dst_buf: Vec<f32> = Vec::new();
+    linear_into(audio, target_sample_rate, |x: &[T], dst: &mut [T]| {
+        let src = match f32_slice(x) {
+            Some(src) => src,
+            None => {
+                src_buf.clear();
+                src_buf.extend(x.iter().map(|&s| ConvertTo::<f32>::convert_to(s)));
+                &src_buf
             }
-
-            // General N: linear interpolation across N-wide output chunks.
-            let step_f32 = 1.0f32 / n as f32;
-            let safe_in = src.len().saturating_sub(1);
-            let safe_out = safe_in * n;
-            let split = safe_out.min(dst.len());
-            let (main, tail) = dst.split_at_mut(split);
-
-            for (in_i, out_chunk) in main.chunks_exact_mut(n).enumerate() {
-                let s0 = src[in_i];
-                let s1 = src[in_i + 1]; // always valid: in_i < safe_in
-                let diff = s1 - s0;
-                for (k, out_s) in out_chunk.iter_mut().enumerate() {
-                    *out_s = s0 + k as f32 * step_f32 * diff;
+        };
+        match f32_slice_mut(dst) {
+            Some(dst) => linear_channel_f32(src, dst, in_sr, out_sr),
+            None => {
+                dst_buf.resize(dst.len(), 0.0);
+                linear_channel_f32(src, &mut dst_buf, in_sr, out_sr);
+                for (o, &v) in dst.iter_mut().zip(&dst_buf) {
+                    *o = T::convert_from(v);
                 }
-            }
-            let last_s = src.last().copied().unwrap_or(0.0);
-            tail.fill(last_s);
-        } else {
-            // General fractional ratio.
-            let step = in_sr as f64 / out_sr as f64;
-            let last = src.len() - 1;
-            for (out_i, out_s) in dst.iter_mut().enumerate() {
-                let pos = out_i as f64 * step;
-                let i0 = pos as usize;
-                let i1 = (i0 + 1).min(last);
-                let frac = (pos - i0 as f64) as f32;
-                *out_s = src[i0] + frac * (src[i1] - src[i0]);
             }
         }
+    })
+}
+
+/// `x` as `&[f32]` when `T` is `f32`.
+fn f32_slice<T: StandardSample>(x: &[T]) -> Option<&[f32]> {
+    // SAFETY: `T` is `f32` (the only sample type reporting `SampleType::F32`),
+    // so the cast keeps size, alignment and validity.
+    (T::SAMPLE_TYPE == SampleType::F32)
+        .then(|| unsafe { std::slice::from_raw_parts(x.as_ptr().cast::<f32>(), x.len()) })
+}
+
+/// `x` as `&mut [f32]` when `T` is `f32`.
+fn f32_slice_mut<T: StandardSample>(x: &mut [T]) -> Option<&mut [f32]> {
+    // SAFETY: as in `f32_slice`.
+    (T::SAMPLE_TYPE == SampleType::F32)
+        .then(|| unsafe { std::slice::from_raw_parts_mut(x.as_mut_ptr().cast::<f32>(), x.len()) })
+}
+
+/// Linear interpolation of one channel from `in_sr` to `out_sr` in `f32`:
+/// output sample `k` is the input at position `k · in_sr / out_sr`, holding
+/// the last sample past the end. Integer ratios are special-cased so the inner
+/// loop vectorises.
+fn linear_channel_f32(src: &[f32], dst: &mut [f32], in_sr: u32, out_sr: u32) {
+    if out_sr.is_multiple_of(in_sr) {
+        // Integer upsampling by N.
+        let n = (out_sr / in_sr) as usize;
+
+        // n=2 hot path: SSE2 interleave + midpoint average, 8 output
+        // samples per instruction pair.
+        #[cfg(target_arch = "x86_64")]
+        if n == 2 {
+            // SAFETY: SSE2 is mandated by the x86_64 ABI.
+            unsafe {
+                upsample_by_2_simd(src, dst);
+            }
+            return;
+        }
+
+        // General N: linear interpolation across N-wide output chunks.
+        let step_f32 = 1.0f32 / n as f32;
+        let safe_in = src.len().saturating_sub(1);
+        let safe_out = safe_in * n;
+        let split = safe_out.min(dst.len());
+        let (main, tail) = dst.split_at_mut(split);
+        let last_s = src.last().copied().unwrap_or(0.0);
+        let id = |v: f32| v;
+        match n {
+            3 => upsample_by::<3, f32, f32>(src, main, id, id),
+            4 => upsample_by::<4, f32, f32>(src, main, id, id),
+            _ => {
+                for (in_i, out_chunk) in main.chunks_exact_mut(n).enumerate() {
+                    let s0 = src[in_i];
+                    let s1 = src[in_i + 1]; // always valid: in_i < safe_in
+                    let diff = s1 - s0;
+                    for (k, out_s) in out_chunk.iter_mut().enumerate() {
+                        *out_s = s0 + k as f32 * step_f32 * diff;
+                    }
+                }
+            }
+        }
+        tail.fill(last_s);
+    } else {
+        // General fractional ratio.
+        let step = in_sr as f64 / out_sr as f64;
+        let last = src.len() - 1;
+        for (out_i, out_s) in dst.iter_mut().enumerate() {
+            let pos = out_i as f64 * step;
+            let i0 = pos as usize;
+            let i1 = (i0 + 1).min(last);
+            let frac = (pos - i0 as f64) as f32;
+            *out_s = src[i0] + frac * (src[i1] - src[i0]);
+        }
+    }
+}
+
+/// Linear-interpolation upsampling in `f64`, for sample types whose float is
+/// `f64` (`i32`, `f64`): reads each channel in place and writes the output
+/// samples straight into the result, with the same interpolation as
+/// [`linear_channel_f32`].
+fn resample_linear_f64<T: StandardSample>(
+    audio: &AudioSamples<T>,
+    target_sample_rate: SampleRate,
+) -> AudioSampleResult<AudioSamples<'static, T>> {
+    let in_sr = audio.sample_rate().get();
+    let out_sr = target_sample_rate.get();
+    linear_into(audio, target_sample_rate, |x: &[T], dst: &mut [T]| {
+        linear_channel_f64(x, dst, in_sr, out_sr);
+    })
+}
+
+/// Runs `run(input, output)` on every channel of `audio`, reading the input in
+/// place where it is contiguous, with the output channel's slice of the
+/// result at `target_sample_rate`.
+fn linear_into<T: StandardSample>(
+    audio: &AudioSamples<T>,
+    target_sample_rate: SampleRate,
+    mut run: impl FnMut(&[T], &mut [T]),
+) -> AudioSampleResult<AudioSamples<'static, T>> {
+    let n_out = output_len(
+        audio.sample_rate().get(),
+        target_sample_rate.get(),
+        audio.samples_per_channel().get(),
+    );
+    let channels = audio.num_channels().get() as usize;
+    let zero = T::from_float(<T::Float as AudioFloat>::of(0.0));
+    let mut flat: Vec<T> = vec![zero; channels * n_out];
+    if let Some(mono) = audio.as_mono() {
+        match mono.as_slice() {
+            Some(x) => run(x, &mut flat),
+            None => run(&mono.to_vec(), &mut flat),
+        }
+    } else {
+        let multi = audio.as_multi_channel().ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::invalid_value(
+                "audio_format",
+                "Failed to get multi-channel data",
+            ))
+        })?;
+        for (c, dst) in flat.chunks_exact_mut(n_out).enumerate() {
+            let row = multi.row(c);
+            match row.as_slice() {
+                Some(x) => run(x, dst),
+                None => run(&row.to_vec(), dst),
+            }
+        }
+    }
+    if channels == 1 {
+        AudioSamples::new_mono(ndarray::Array1::from_vec(flat), target_sample_rate)
+    } else {
+        let data = ndarray::Array2::from_shape_vec((channels, n_out), flat).map_err(|e| {
+            AudioSampleError::Parameter(ParameterError::invalid_value("audio", e.to_string()))
+        })?;
+        AudioSamples::new_multi_channel(data, target_sample_rate)
+    }
+}
+
+/// Linear interpolation of one channel from `in_sr` to `out_sr` in `f64`:
+/// output sample `k` is the input at position `k · in_sr / out_sr`, holding
+/// the last sample past the end.
+fn linear_channel_f64<T: StandardSample>(src: &[T], dst: &mut [T], in_sr: u32, out_sr: u32) {
+    let to_f = |s: T| s.to_float().as_f64();
+    let from_f = |v: f64| T::from_float(<T::Float as AudioFloat>::of(v));
+    let Some(&last) = src.last() else {
+        return;
     };
+    if out_sr.is_multiple_of(in_sr) {
+        let n = (out_sr / in_sr) as usize;
+        let split = ((src.len() - 1) * n).min(dst.len());
+        let (main, tail) = dst.split_at_mut(split);
+        match n {
+            2 => upsample_by::<2, T, f64>(src, main, to_f, from_f),
+            3 => upsample_by::<3, T, f64>(src, main, to_f, from_f),
+            4 => upsample_by::<4, T, f64>(src, main, to_f, from_f),
+            _ => {
+                let step = 1.0 / n as f64;
+                let mut s0 = to_f(src[0]);
+                for (out, &next) in main.chunks_exact_mut(n).zip(&src[1..]) {
+                    let s1 = to_f(next);
+                    let diff = s1 - s0;
+                    for (k, o) in out.iter_mut().enumerate() {
+                        *o = from_f(s0 + k as f64 * step * diff);
+                    }
+                    s0 = s1;
+                }
+            }
+        }
+        tail.fill(last);
+    } else {
+        let step = f64::from(in_sr) / f64::from(out_sr);
+        let end = src.len() - 1;
+        for (out_i, o) in dst.iter_mut().enumerate() {
+            let pos = out_i as f64 * step;
+            let i0 = pos as usize;
+            let i1 = (i0 + 1).min(end);
+            let s0 = to_f(src[i0]);
+            *o = from_f(s0 + (pos - i0 as f64) * (to_f(src[i1]) - s0));
+        }
+    }
+}
 
-    let input = extract_channel_data(audio)?;
-    let output: Vec<Vec<f32>> = input
-        .iter()
-        .map(|src| {
-            let mut dst = vec![0.0f32; out_frames];
-            process_channel(src, &mut dst);
-            dst
-        })
-        .collect();
-
-    assemble_output(output, out_frames, audio.num_channels(), target_sample_rate)
+/// Integer upsampling by `N` in `F` with a fixed-width inner loop, so it
+/// vectorises: output `N·i + k` of the segment from `s0` to `s1` is
+/// `s0 + k · (1/N) · (s1 - s0)`.
+#[inline]
+fn upsample_by<const N: usize, T: Copy, F: AudioFloat>(
+    src: &[T],
+    main: &mut [T],
+    to_f: impl Fn(T) -> F,
+    from_f: impl Fn(F) -> T,
+) {
+    let step = F::one() / F::of_usize(N);
+    // Each input sample is converted once (it ends one segment and starts
+    // the next).
+    let mut s0 = to_f(src[0]);
+    for (out, &next) in main.as_chunks_mut::<N>().0.iter_mut().zip(&src[1..]) {
+        let s1 = to_f(next);
+        let diff = s1 - s0;
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = from_f(s0 + F::of_usize(k) * step * diff);
+        }
+        s0 = s1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2106,6 +2272,67 @@ mod tests {
 
     /// The per-thread kernel cache stays bounded however many distinct ratios
     /// are used, and keeps recently used kernels.
+    /// Fast upsampling of `f64` (and `i32`) audio interpolates in `f64`: the
+    /// midpoints and quarter points of samples that differ below `f32`
+    /// precision are exact.
+    #[test]
+    fn test_fast_upsampling_keeps_f64_precision() {
+        let tiny = 2f64.powi(-40);
+        let x = vec![1.0, 1.0 + tiny, 1.0 - tiny, 0.25 + tiny];
+        for (in_sr, out_sr, n) in [(22050, 44100, 2), (11025, 44100, 4), (8000, 64000, 8)] {
+            let audio = mono(x.clone(), SampleRate::new(in_sr).unwrap());
+            let y = resample(
+                &audio,
+                SampleRate::new(out_sr).unwrap(),
+                ResamplingQuality::Fast,
+            )
+            .unwrap();
+            let y = y.as_mono().unwrap().to_vec();
+            assert_eq!(y.len(), x.len() * n);
+            for (i, pair) in x.windows(2).enumerate() {
+                for k in 0..n {
+                    let t = k as f64 / n as f64;
+                    let expected = pair[0] + t * (pair[1] - pair[0]);
+                    assert_eq!(
+                        y[i * n + k],
+                        expected,
+                        "{in_sr} -> {out_sr} at {}",
+                        i * n + k
+                    );
+                }
+            }
+            assert!(y[x.len() * n - n..].iter().all(|&v| v == x[3]));
+        }
+
+        // A non-integer ratio: output 1 of 2 -> 3 lies 2/3 of the way from
+        // x[0] to x[1].
+        let audio = mono(x, sample_rate!(2));
+        let y = resample(&audio, sample_rate!(3), ResamplingQuality::Fast).unwrap();
+        let y = y.as_mono().unwrap().to_vec();
+        assert!((y[1] - (1.0 + tiny * 2.0 / 3.0)).abs() < 1e-15);
+        assert!(y[1] > 1.0);
+
+        // i32 audio also computes in f64: one-LSB steps are interpolated
+        // rather than lost.
+        let ints = AudioSamples::new_mono(
+            array![i32::MAX - 4, i32::MAX, i32::MAX - 8],
+            sample_rate!(22050),
+        )
+        .unwrap();
+        let y = resample(&ints, sample_rate!(44100), ResamplingQuality::Fast).unwrap();
+        let y = y.as_mono().unwrap().to_vec();
+        assert_eq!(
+            y[..5],
+            [
+                i32::MAX - 4,
+                i32::MAX - 2,
+                i32::MAX,
+                i32::MAX - 4,
+                i32::MAX - 8
+            ]
+        );
+    }
+
     #[test]
     fn test_kernel_cache_is_bounded_lru() {
         let len = || KERNEL_CACHE.with(|c| c.borrow().len());
@@ -2302,12 +2529,7 @@ mod tests {
                 let offline = resample(&audio, out_sr, quality).unwrap();
                 let offline = offline.as_mono().unwrap().to_vec();
                 assert_eq!(streamed.len(), offline.len(), "{quality:?} -> {out_sr}");
-                // Fast upsampling offline runs in f32.
-                let tol = if quality == ResamplingQuality::Fast {
-                    1e-6
-                } else {
-                    1e-12
-                };
+                let tol = 1e-12;
                 for (i, (a, b)) in streamed.iter().zip(&offline).enumerate() {
                     assert!(
                         (a - b).abs() < tol,
