@@ -61,10 +61,9 @@
 //! zero, so integer → float → integer is the identity. `u8` is offset binary
 //! (`128` ↔ `0.0`) with divisors 128 (below) and 127 (above).
 //!
-//! Note: libsndfile / `soundfile`, librosa and torchaudio divide by `2^(B−1)`
-//! on both sides (32768 for `i16`), so positive samples converted here differ
-//! from `soundfile.read()` by up to about 3·10⁻⁵ (a relative gain difference
-//! of 1/32767).
+//! Because non-negative values are divided by `2^(B−1) − 1`, a positive `i16`
+//! sample maps to a value up to about 3·10⁻⁵ larger (a relative gain of
+//! 32768/32767) than under a mapping that divides both sides by `2^(B−1)`.
 //!
 //! Integer → integer conversions shift the bit pattern: widening is an exact
 //! left shift (`i16::MAX` → `0x7FFF_0000` as `i32`, not `i32::MAX`), and

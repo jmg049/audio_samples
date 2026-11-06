@@ -252,8 +252,8 @@ pub(crate) fn audio_float_rows<T: StandardSample>(audio: &AudioSamples<'_, T>) -
 }
 
 /// The audio as `(channels, samples)` rows of its analysis float type,
-/// rejecting NaN and infinite samples (librosa's `util.valid_audio`). Integer
-/// sample types cannot hold non-finite values.
+/// rejecting NaN and infinite samples. Integer sample types cannot hold
+/// non-finite values.
 ///
 /// Audio of type `f32` or `f64` (`T == T::Float`) is borrowed, not copied;
 /// other sample types are converted with the crate's audio-aware conversion.

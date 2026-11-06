@@ -9,10 +9,10 @@
 //! - [`statistics`] - Statistical analysis operations
 //! - [`processing`] - Signal processing operations
 //! - [`transforms`] - FFT / spectral analysis
-//! - [`spectrum`] - librosa-compatible STFT, mel spectrogram, MFCC, dB, delta
-//! - `effects` - librosa-compatible time stretch, pitch shift, emphasis, dB trim/split, HPSS (feature `effects`)
-//! - [`constant_q`] - librosa-compatible CQT / VQT / iCQT, CQT chroma and tonnetz
-//! - [`filterbanks`] - window functions and mel filterbanks (librosa / SciPy semantics)
+//! - [`spectrum`] - STFT, mel spectrogram, MFCC, dB, delta
+//! - `effects` - time stretch, pitch shift, emphasis, dB trim/split, HPSS (feature `effects`)
+//! - [`constant_q`] - CQT / VQT / iCQT, CQT chroma and tonnetz
+//! - [`filterbanks`] - window functions and mel filterbanks
 //! - [`editing`] - Time-domain editing operations
 //! - [`channels`] - Channel manipulation operations
 //! - [`types`] - Supporting types and enums

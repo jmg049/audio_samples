@@ -1135,8 +1135,7 @@ pub enum ResamplingQuality {
     /// 100 dB stopband.
     Medium,
     /// Highest quality but slower resampling: windowed sinc, passband
-    /// 0.913 · Nyquist, 125 dB stopband (close to librosa's default
-    /// `soxr_hq`).
+    /// 0.913 · Nyquist, 125 dB stopband.
     High,
 }
 
@@ -1406,8 +1405,7 @@ pub enum IirFilterType {
     /// Exhibits a maximally flat group delay (approximately linear phase) in
     /// the passband, preserving wave shape at the cost of a gentle, monotonic
     /// magnitude roll-off. The analog prototype is normalised so that the
-    /// magnitude response is -3 dB at ω = 1 rad/s (matching
-    /// `scipy.signal.bessel(..., norm='mag')`).
+    /// magnitude response is -3 dB at ω = 1 rad/s.
     Bessel,
 }
 
@@ -1546,22 +1544,19 @@ impl TryFrom<&str> for FilterResponse {
 }
 
 /// Frequency normalisation of the Bessel (Bessel-Thomson) analog prototype.
-///
-/// Mirrors the `norm` argument of `scipy.signal.bessel`.
 #[cfg(feature = "iir-filtering")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum BesselNorm {
-    /// The magnitude response is -3 dB at the cutoff frequency
-    /// (SciPy `norm='mag'`). This is the crate default.
+    /// The magnitude response is -3 dB at the cutoff frequency. This is the
+    /// crate default.
     #[default]
     Magnitude,
     /// The phase response is half its asymptotic value at the cutoff
     /// frequency, so the high-frequency asymptote matches a Butterworth filter
-    /// of the same order (SciPy `norm='phase'`, SciPy's default).
+    /// of the same order.
     Phase,
-    /// The group delay in the passband is `1 / (2π·cutoff)` seconds
-    /// (SciPy `norm='delay'`).
+    /// The group delay in the passband is `1 / (2π·cutoff)` seconds.
     Delay,
 }
 
@@ -1675,7 +1670,8 @@ pub struct IirFilterDesign {
     /// Normalisation of the Bessel prototype (ignored by other families).
     ///
     /// Defaults to [`BesselNorm::Magnitude`] (-3 dB at the cutoff). Use
-    /// [`BesselNorm::Phase`] to reproduce SciPy's `bessel()` default.
+    /// [`BesselNorm::Phase`] for a high-frequency asymptote matching a
+    /// Butterworth filter of the same order.
     pub bessel_norm: BesselNorm,
 }
 
@@ -2108,7 +2104,7 @@ impl IirFilterDesign {
     /// use audio_samples::operations::types::{BesselNorm, FilterResponse, IirFilterDesign};
     /// use std::num::NonZeroUsize;
     ///
-    /// // Equivalent to scipy.signal.bessel(4, 1000, fs=fs) (norm='phase').
+    /// // Fourth-order Bessel low-pass at 1 kHz with phase normalisation.
     /// let design = IirFilterDesign::bessel(FilterResponse::LowPass, NonZeroUsize::new(4).unwrap(), 1000.0)
     ///     .with_bessel_norm(BesselNorm::Phase);
     /// assert_eq!(design.bessel_norm, BesselNorm::Phase);
@@ -4200,7 +4196,7 @@ pub enum AdaptiveThresholdMethod {
     /// Percentile-based adaptive threshold.
     ///
     /// `thr[i]` = the `percentile` quantile of `window_i` (linear
-    /// interpolation between order statistics, like `numpy.quantile`).
+    /// interpolation between order statistics).
     /// More robust to outliers, slower to adapt.
     #[default]
     Percentile,

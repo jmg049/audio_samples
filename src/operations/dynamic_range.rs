@@ -2013,7 +2013,7 @@ mod tests {
         );
     }
 
-    // ---- Ring-buffer parity (item 1) -------------------------------------
+    // ---- Ring-buffer parity ---------------------------------------------
     //
     // These reference implementations reproduce the ORIGINAL O(N)-`Vec`
     // algorithm exactly (two-pass: compute all gains into a Vec, then apply

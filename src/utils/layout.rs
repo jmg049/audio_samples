@@ -4,8 +4,8 @@
 //! frame. They are written against tiles of consecutive frames whose rows (or
 //! columns) are contiguous slices, so that the inner loops are unit-stride for
 //! either memory order: a C-order input is passed through unchanged, and any
-//! other layout (for example the Fortran-order arrays that librosa's `stft`
-//! returns) is copied one tile at a time into a small buffer. The tiles keep
+//! other layout (for example a Fortran-order array) is copied one tile at a
+//! time into a small buffer. The tiles keep
 //! the logical element order, so a kernel computes the same values, in the
 //! same order of operations, for every layout.
 
@@ -204,7 +204,8 @@ mod tests {
 }
 
 /// The elements an [`ndarray::Slice`] selects on an axis of length `n`, with
-/// out-of-range bounds clipped as NumPy clips them (ndarray itself panics).
+/// negative bounds counted from the end and out-of-range bounds clipped to
+/// `0..=n` (ndarray itself panics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(any(feature = "beat-tracking", feature = "sequence")),

@@ -113,11 +113,9 @@ pub use generation::*;
 ///
 /// # Rounding
 ///
-/// This function **truncates** toward zero, which matches librosa's `time_to_samples`
-/// for non-negative times. The similarly named
-/// [`audio_math::seconds_to_samples`]
-/// **rounds** to the nearest sample instead, so the two can differ by one sample. For
-/// librosa-compatible conversion of possibly negative times, use
+/// This function **truncates** toward zero. The similarly named
+/// [`audio_math::seconds_to_samples`] **rounds** to the nearest sample instead, so the
+/// two can differ by one sample. For conversion of possibly negative times, use
 /// [`audio_math::time_to_samples`].
 ///
 /// # Examples

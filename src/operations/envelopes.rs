@@ -24,8 +24,7 @@
 //! - Moving-average envelope: `m[k] = (1/W_k) Σ |x[m]|` over frame `k`.
 //! - Analytic envelope: `|x[n] + j·H{x}[n]|`, where `H{x}` is the discrete
 //!   Hilbert transform computed with the FFT (bins `1 … ⌈N/2⌉−1` doubled,
-//!   negative frequencies zeroed, DC and, for even `N`, Nyquist kept). This
-//!   matches `numpy.abs(scipy.signal.hilbert(x))`.
+//!   negative frequencies zeroed, DC and, for even `N`, Nyquist kept).
 //! - Attack/decay envelopes: the one-pole follower `e[n]` of
 //!   [`EnvelopeFollower`] (time constants as described in
 //!   [`crate::operations::dynamic_range`]), split into its rising and falling

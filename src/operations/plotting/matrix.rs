@@ -131,7 +131,7 @@ impl MatrixPlotParams {
         }
     }
 
-    /// librosa's display defaults for the given axes; currently equal to [`new`](Self::new).
+    /// Settings matching librosa's display defaults; currently equal to [`new`](Self::new).
     #[must_use]
     pub fn librosa(x_axis: AxisKind, y_axis: AxisKind) -> Self {
         Self::new(x_axis, y_axis)

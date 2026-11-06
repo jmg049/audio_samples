@@ -1209,7 +1209,7 @@ fn with_mel_axis(
 /// Centre frequencies (Hz) of the Slaney-scale triangular mel filters for `mel_params`.
 #[cfg(feature = "transforms")]
 fn slaney_mel_band_centres(mel_params: &MelParams) -> Vec<f64> {
-    // Slaney (librosa htk=False) mel scale: linear below 1 kHz, logarithmic above.
+    // Slaney mel scale: linear below 1 kHz, logarithmic above.
     const F_SP: f64 = 200.0 / 3.0;
     const MIN_LOG_HZ: f64 = 1000.0;
     const MIN_LOG_MEL: f64 = MIN_LOG_HZ / F_SP;
@@ -1494,9 +1494,8 @@ mod mel_axis_tests {
     use crate::utils::generation::sine_wave;
     use std::time::Duration;
 
-    /// The mel axis must follow `MelParams::f_min/f_max`. Reference values:
-    /// `librosa.mel_frequencies(42, fmin=300, fmax=6000, htk=False)[1:-1]`
-    /// (librosa 1.0.0).
+    /// The mel axis must follow `MelParams::f_min/f_max`. Reference values: the
+    /// interior 40 of 42 Slaney mel frequencies from 300 Hz to 6000 Hz.
     #[test]
     fn mel_axis_matches_librosa_band_centres() {
         let mel = MelParams::new(crate::nzu!(40), 300.0, 6000.0).unwrap();
@@ -1507,7 +1506,7 @@ mod mel_axis_tests {
             (centres[19], 1_655.790_596_642_2),
             (centres[39], 5_643.197_605_868_3),
         ] {
-            assert!((got - want).abs() < 1e-6, "got {got}, librosa {want}");
+            assert!((got - want).abs() < 1e-6, "got {got}, expected {want}");
         }
     }
 

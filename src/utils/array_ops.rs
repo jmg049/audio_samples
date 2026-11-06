@@ -2359,7 +2359,7 @@ impl FindFilesConfig {
         }
     }
 
-    /// librosa's defaults; currently equal to [`new`](Self::new).
+    /// Settings matching librosa's defaults; currently equal to [`new`](Self::new).
     #[must_use]
     pub fn librosa() -> Self {
         Self::new()
