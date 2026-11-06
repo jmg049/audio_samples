@@ -57,6 +57,9 @@ def arrays(r):
         if hasattr(r, attr):
             return [np.asarray(getattr(r, a)) for a in
                     ("f0", "voiced_flag", "voiced_prob", "tempo", "beats", "path", "cost", "states") if hasattr(r, a)]
+    # A colormap's repr holds its address; its name and colours identify it.
+    if hasattr(r, "name") and hasattr(r, "N") and callable(r):
+        return [np.asarray(r.name), np.asarray(r(np.linspace(0.0, 1.0, r.N)))]
     return [np.asarray(repr(r))]
 
 
