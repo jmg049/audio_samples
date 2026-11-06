@@ -697,7 +697,7 @@ pub fn agglomerative<F: AudioFloat>(
 /// # Arguments
 /// - `data`: `(features, frames)`.
 /// - `frames`: the segment boundaries; they are normalised with
-///   [`fix_frames`](crate::utils::array_ops::fix_frames) to include the ends.
+///   [`crate::utils::array_ops::fix_frames`] to include the ends.
 /// - `n_segments`: the most subsegments per interval.
 ///
 /// # Returns
