@@ -58,8 +58,8 @@ magnitude $|X_m[k]|$, and decibels
 $$P_{\mathrm{dB}} = 10 \log_{10} \max\!\left(P, \; 10^{\,\mathrm{floor}/10}\right)$$
 
 in dB **re 1** (an absolute reference), where floor is the `LogParams` value in
-dB. `LogParams::new(-80.0)` clamps at power $10^{-8}$; it is **not** librosa's
-`top_db` (80 dB below the peak), and a loud bin can be far above 0 dB. A
+dB. `LogParams::new(-80.0)` clamps at power $10^{-8}$; it is **not** a floor
+relative to the peak (80 dB below it), and a loud bin can be far above 0 dB. A
 log-frequency spectrogram resamples the bins onto log-spaced frequencies; a
 mel spectrogram sums power through triangular filters on the Slaney mel scale
 (chapter 10).
@@ -274,9 +274,7 @@ println!("{doc}");
    explainer.
 3. A signal is 0.5 s of a full-scale 1 kHz sine followed by 0.5 s of silence.
    With `LogParams::new(-100.0)`, what value do the bins of the last frame
-   take, and how far below the spectrogram's peak is that? (librosa's
-   `power_to_db(S, ref=np.max, top_db=None)` reports this distance; with its
-   default `top_db=80` it would clip it to $-80$ dB.)
+   take, and how far below the spectrogram's peak is that?
 
 ## Answers
 
@@ -315,9 +313,7 @@ let lobe = |n: usize| {
 };
 assert!(lobe(1024) > 20.0 && lobe(2048) <= 20.0);
 
-// 3. -100 dB re 1, which is 100 + 42.13 = 142.13 dB below the peak. (librosa
-//    gets the same with top_db=None because its default amin = 1e-10 is the
-//    same -100 dB floor.)
+// 3. -100 dB re 1, which is 100 + 42.13 = 142.13 dB below the peak.
 let mut v = sine_wave::<f64>(1000.0, Duration::from_millis(500), sample_rate!(16000), 1.0)
     .as_slice().unwrap().to_vec();
 v.extend(std::iter::repeat_n(0.0, 8000));
@@ -333,13 +329,10 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
 
 ## Common pitfalls
 
-* Centring pads with **zeros**, as librosa has done by default since 0.10
-  (`pad_mode='constant'`). Older librosa (< 0.10) and `torch.stft` default to
-  reflection, so their first and last frames differ.
-* The window is the **symmetric** Hann; librosa and SciPy use the periodic
-  one. Compared with current librosa, this, not the padding, is the remaining
-  difference: values differ slightly unless librosa is given the symmetric
-  window.
+* Centring pads with **zeros**. `torch.stft` defaults to reflection, so its
+  first and last frames differ.
+* The window is the **symmetric** Hann; SciPy uses the periodic one by
+  default. Values differ slightly unless both use the same window.
 * dB values are **re 1** with an absolute floor; there is no `top_db`.
   Subtract the maximum to get "dB below peak".
 * Power is $|X|^2$ with no $1/N$ or window normalisation: a full-scale sine

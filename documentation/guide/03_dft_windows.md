@@ -50,7 +50,7 @@ This crate's `WindowType::Hanning` is the **symmetric** Hann window
 $$w[n] = 0.5 - 0.5\cos\!\left(\frac{2\pi n}{N-1}\right)$$
 
 (denominator $N-1$, so $w[0] = w[N-1] = 0$), not the periodic one (denominator
-$N$) that librosa and SciPy use by default for spectra.
+$N$) that SciPy uses by default for spectra.
 
 **Zero padding** (appending zeros before the DFT) samples the same spectrum on
 a finer grid. It does **not** narrow the main lobe; only a longer stretch of
@@ -310,8 +310,8 @@ assert_eq!(count(1024), 1);
 * `n_fft` must be **at least** the signal length (shorter signals are
   zero-padded; longer ones are an error, not truncated).
 * `WindowType::Hanning` is the **symmetric** Hann; SciPy's
-  `get_window('hann', N)` and librosa use the periodic one. Values differ by a
-  fraction of a percent; use `WindowType::Custom` to match them exactly.
+  `get_window('hann', N)` uses the periodic one. Values differ by a fraction
+  of a percent; use `WindowType::Custom` to match it exactly.
 * Zero padding interpolates the spectrum onto a finer grid; it does not improve
   resolution.
 * The Kaiser window in `spectrograms` 2.1.3 is wrong for $\beta > 3.75$; avoid

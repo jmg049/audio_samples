@@ -24,7 +24,7 @@ scale) is therefore
 $$\Delta = 2^{1-b} \;\; \text{(below zero)}, \qquad \Delta_+ = \frac{1}{2^{b-1} - 1} \;\; \text{(above zero)}$$
 
 For $b = 16$: $\Delta = 1/32768$ and $\Delta_+ = 1/32767$, a difference of
-0.003 %. (libsndfile, soundfile and librosa divide by $2^{b-1}$ on both sides.)
+0.003 %. (libsndfile and soundfile divide by $2^{b-1}$ on both sides.)
 
 **Quantisation noise.** If the signal is large and varied compared with one
 step, the rounding error
@@ -316,9 +316,9 @@ assert!((penalty - 10.0 * 3f64.log10()).abs() < 0.2);
 ## Common pitfalls
 
 * The crate maps integers to floats **asymmetrically** (divide by
-  $2^{b-1}$ below zero, by $2^{b-1}-1$ above). soundfile/libsndfile, librosa
-  and torchaudio divide by $2^{b-1}$ on both sides, so positive samples differ
-  by up to about $3\times10^{-5}$.
+  $2^{b-1}$ below zero, by $2^{b-1}-1$ above). soundfile/libsndfile and
+  torchaudio divide by $2^{b-1}$ on both sides, so positive samples differ by
+  up to about $3\times10^{-5}$.
 * Signed integer-to-integer narrowing (for example `i32` to `i16`) *shifts
   bits*: it truncates towards $-\infty$ (a $-\tfrac12$ LSB bias) rather than
   rounding. Conversions to `u8` are the exception: they rescale and round to
