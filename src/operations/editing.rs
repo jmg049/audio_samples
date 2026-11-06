@@ -1449,16 +1449,14 @@ where
     #[cfg(all(feature = "random-generation", feature = "iir-filtering"))]
     fn perturb_in_place(&mut self, config: &PerturbationConfig) -> AudioSampleResult<()> {
         config.validate(f64::from(self.sample_rate().get()))?;
-        // Apply perturbation based on seed or use thread-local randomness
-        if let Some(seed) = config.seed {
-            use rand::{SeedableRng, rngs::StdRng};
-
-            let mut rng = StdRng::seed_from_u64(seed);
-            apply_perturbation_with_rng(self, &config.method, &mut rng)
-        } else {
-            let mut rng = rand::rng();
-            apply_perturbation_with_rng(self, &config.method, &mut rng)
-        }
+        use rand::{SeedableRng, rngs::StdRng};
+        // A generator from the seed, or seeded from thread-local randomness: one
+        // generator type, so the perturbations are compiled once.
+        let mut rng = match config.seed {
+            Some(seed) => StdRng::seed_from_u64(seed),
+            None => StdRng::from_rng(&mut rand::rng()),
+        };
+        apply_perturbation_with_rng(self, &config.method, &mut rng)
     }
 
     /// Removes all silence regions throughout the signal.
