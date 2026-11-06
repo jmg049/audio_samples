@@ -17,6 +17,16 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      # Every warning is an error. The two feature sets cover the library with
+      # and without plotting, the learning guide and every test, bench and
+      # example.
+      - id: cargo-clippy
+        name: cargo clippy (every warning is an error)
+        entry: bash -c 'cargo clippy --all-targets --features educational,full_no_plotting -- -D warnings && cargo clippy --all-targets --features full -- -D warnings'
+        language: system
+        pass_filenames: false
+        files: ^(src/.*\.rs|tests/.*\.rs|benches/.*\.rs|examples/.*\.rs|build\.rs|build_support/.*\.rs|Cargo\.(toml|lock))$
+
       - id: filter-reference-tests
         name: filter reference tests (SciPy / FFmpeg / DSPFilters / liquid-dsp fixtures)
         entry: tests/reference/hooks/check_filters.sh
