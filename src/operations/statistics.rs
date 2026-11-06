@@ -52,8 +52,8 @@
 //!   with `duration_s = samples_per_channel / sample_rate`. A sine at `f` Hz
 //!   gives about `2f`. For multi-channel audio the count is summed over channels
 //!   while the duration is per channel, so the rate scales with the channel
-//!   count. Note: librosa's `zero_crossing_rate` is a per-frame **fraction of
-//!   samples** (crossings / frame length), not a rate in Hz.
+//!   count. The frame-wise `AudioFeatures::zero_crossing_rate_frames` gives a
+//!   per-frame **fraction of samples** (crossings / frame length) instead.
 //! - Autocorrelation (first channel): the unbiased estimate
 //!   `r[k] = (1/(N−k)) Σ_{n=0}^{N−1−k} x[n]·x[n+k]`, with no mean removal and no
 //!   division by `r[0]`. `r[0]` is the mean square (`A²/2` for a sine). For
@@ -61,8 +61,8 @@
 //!   `k` (few overlapping samples) the estimate is noisy and may exceed `r[0]`.
 //!   Divide by `r[0]` for the normalised autocorrelation `ρ[k] ∈ [−1, 1]`
 //!   (approximately; the unbiased estimator is not bounded exactly). Note: the
-//!   *biased* estimator `(1/N) Σ …` used by many textbooks and
-//!   `numpy.correlate(x, x, "full")/N` is smaller by the factor `(N−k)/N`.
+//!   *biased* estimator `(1/N) Σ …` used by many textbooks is smaller by the
+//!   factor `(N−k)/N`.
 //! - Cross-correlation (first channels): `r_xy[l] = (1/C_l) Σ_{i<C_l} x[i]·y[i+l]`
 //!   for `l = 0..=max_lag`, with `C_l = min(N_x, N_y − l)`, `x = self`,
 //!   `y = other`. A peak at `l = D` means `other` is `self` delayed by `D`
@@ -92,12 +92,12 @@
 //! - Slope: ordinary least-squares slope of `M_k` against `f_k` (magnitude per
 //!   Hz; depends on the signal length because the spectrum is unnormalised).
 //! - Contrast: see [`spectral_contrast`](AudioStatistics::spectral_contrast);
-//!   values are `10·log10` of **magnitudes** (librosa's convention).
+//!   values are `10·log10` of **magnitudes**.
 //!
-//! Note: librosa computes these features per STFT frame (Hann window,
-//! `n_fft = 2048`) and weights centroid/bandwidth by **magnitude**
-//! (`S = |X|`), so its centroid and rolloff are not directly comparable with
-//! the power-weighted, whole-signal values here.
+//! Note: the frame-wise features of `AudioFeatures` (`*_frames`) are computed
+//! per STFT frame (Hann window, `n_fft = 2048`) and weight centroid and
+//! bandwidth by **magnitude** (`S = |X|`), so their centroid and rolloff are
+//! not directly comparable with the power-weighted, whole-signal values here.
 //!
 //! ## Example: Time-domain analysis
 //!
@@ -904,18 +904,13 @@ where
     /// from [`zero_crossings`](Self::zero_crossings) divided by the number of
     /// channels), so a stereo signal with two identical channels has the same
     /// rate as either channel alone.
-    /// Note: librosa's `zero_crossing_rate` returns a per-frame fraction
-    /// (crossings / frame length). For a mono signal, divide this value by the
-    /// sample rate to get the equivalent whole-signal fraction of samples.
+    /// This method is a single whole-signal rate in Hz. For a mono signal, divide
+    /// it by the sample rate to get the whole-signal fraction of samples; the
+    /// frame-wise `AudioFeatures::zero_crossing_rate_frames` gives that fraction
+    /// per channel and per frame (centred frames of 2048 samples, hop 512).
     ///
     /// # Returns
     /// The number of zero crossings per second as `f64`, averaged over channels.
-    ///
-    /// # Differences from librosa
-    ///
-    /// `librosa.feature.zero_crossing_rate` returns, per channel and per frame,
-    /// the fraction of samples at which the sign changes (centred frames of 2048
-    /// samples, hop 512). This method is a single whole-signal rate in Hz.
     ///
     /// # Examples
     /// ```
@@ -949,9 +944,8 @@ where
     ///
     /// For multi-channel audio only the first channel is used.
     ///
-    /// Note: unlike the biased estimator `(1/N) Σ …` (e.g.
-    /// `numpy.correlate(x, x, "full")[N-1:] / N`), each lag is divided by its own
-    /// overlap count `N − k`.
+    /// Note: unlike the biased estimator `(1/N) Σ …`, each lag is divided by its
+    /// own overlap count `N − k`.
     ///
     /// Reference: [Autocorrelation - Wikipedia](https://en.wikipedia.org/wiki/Autocorrelation)
     ///
@@ -962,13 +956,8 @@ where
     /// # Returns
     /// A [`NonEmptyVec`] of correlation values for lags `0` through
     /// `min(max_lag, signal_length - 1)`, or `None` if the FFT computation
-    /// fails.
-    ///
-    /// # Differences from librosa
-    ///
-    /// `librosa.autocorrelate` (like `numpy.correlate(x, x, "full")[n-1:]`)
-    /// returns the raw sums `Σ x[j] · x[j+k]`; multiply `r[k]` by `n - k` to
-    /// obtain them. librosa also autocorrelates every channel.
+    /// fails. Multiply `r[k]` by `n - k` to obtain the raw sums
+    /// `Σ x[j] · x[j+k]`.
     ///
     /// # Examples
     /// ```
@@ -1152,9 +1141,9 @@ where
     /// `f_k = k·fs/N` Hz. It serves as a measure of spectral brightness: higher
     /// values indicate energy concentrated at higher frequencies.
     ///
-    /// Note: librosa's `spectral_centroid` is computed per STFT frame and weighted
-    /// by magnitude `|X|`, so its values are generally higher than this
-    /// power-weighted value and are not directly comparable.
+    /// Note: `AudioFeatures::spectral_centroid_frames` is computed per STFT frame
+    /// and weighted by magnitude `|X|`, so its values are generally higher than
+    /// this power-weighted value and are not directly comparable.
     ///
     /// Reference: [Spectral centroid - Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
     ///
@@ -1240,8 +1229,9 @@ where
     /// between bins, so the result is a multiple of `fs/N`. It is commonly used to
     /// distinguish harmonic signals from noise-like signals.
     ///
-    /// Note: librosa's `spectral_rolloff` accumulates magnitude `|X|` per STFT
-    /// frame, so its values differ from this whole-signal, power-based rolloff.
+    /// Note: `AudioFeatures::spectral_rolloff_frames` accumulates magnitude `|X|`
+    /// per STFT frame, so its values differ from this whole-signal, power-based
+    /// rolloff.
     ///
     /// # Arguments
     /// - `rolloff_percent` - the energy proportion threshold. Must lie in the
@@ -1354,8 +1344,9 @@ where
     /// indicate energy spread across a wider frequency range; a single on-bin pure
     /// tone yields a value near zero.
     ///
-    /// Note: this is librosa's `spectral_bandwidth` formula (`p = 2`, magnitude
-    /// weights) applied to one whole-signal FFT rather than to each STFT frame.
+    /// Note: this is the formula of `AudioFeatures::spectral_bandwidth_frames`
+    /// (`p = 2`, magnitude weights) applied to one whole-signal FFT rather than to
+    /// each STFT frame.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -1417,8 +1408,8 @@ where
     /// clamped to `[0, 1]`: values near `1` indicate noise-like (flat) spectra,
     /// while values near `0` indicate tonal spectra dominated by a few peaks.
     ///
-    /// Note: librosa's `spectral_flatness` (default `power=2.0`) uses the same
-    /// ratio per STFT frame, with `max(P_k, amin)` instead of `P_k + ε`.
+    /// Note: `AudioFeatures::spectral_flatness_frames` uses the same ratio per
+    /// STFT frame, with `max(P_k, amin)` instead of `P_k + ε`.
     ///
     /// # Arguments
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
@@ -1575,8 +1566,7 @@ where
         Ok(num / den)
     }
 
-    /// Computes spectral contrast across logarithmically spaced sub-bands (after
-    /// librosa).
+    /// Computes spectral contrast across logarithmically spaced sub-bands.
     ///
     /// The Hann-windowed magnitude spectrum `M_k` of the whole (channel-reduced)
     /// signal has `B = ⌊N/2⌋ + 1` bins. Bin 0 (DC) is excluded and the bins
@@ -1588,11 +1578,11 @@ where
     /// bottom 2 % (rounded, at least one bin each). High contrast indicates clear
     /// tonal/harmonic structure; low contrast indicates noise-like content.
     ///
-    /// Note: like librosa, this applies `10·log10` to **magnitudes**, so each value
-    /// is half the level difference in dB (multiply by 2 for a `20·log10`
-    /// difference). Unlike librosa, the band edges are fixed in bins from bin 1 to
-    /// Nyquist (librosa uses octaves above 200 Hz), and one value per band is
-    /// returned for the whole signal rather than per frame.
+    /// Note: this applies `10·log10` to **magnitudes**, so each value is half the
+    /// level difference in dB (multiply by 2 for a `20·log10` difference). The band
+    /// edges are fixed in bins from bin 1 to Nyquist, and one value per band is
+    /// returned for the whole signal; `AudioFeatures::spectral_contrast_frames`
+    /// uses octaves above 200 Hz and gives one value per band and frame.
     ///
     /// # Arguments
     /// - `n_bands` - the number of log-spaced sub-bands.
@@ -1623,7 +1613,7 @@ where
         // has at least one element and is a valid NonEmptyVec.
         let input: NonEmptyVec<f64> = unsafe { NonEmptyVec::new_unchecked(working_vec) };
         // Hann window before the FFT: reduces spectral leakage so a tonal band's
-        // peak/valley gap is not flattened by sidelobes (librosa windows too).
+        // peak/valley gap is not flattened by sidelobes.
         let mag = with_fft_planner(|planner| {
             planner.magnitude_spectrum(
                 input.as_non_empty_slice(),
@@ -1645,7 +1635,7 @@ where
         let span = (hi_bin as f64 / lo_bin as f64).max(1.0);
         let ratio = span.powf(1.0 / n_bands as f64);
 
-        // Quantile fraction for peak/valley pooling (librosa default 0.02).
+        // Quantile fraction for peak/valley pooling.
         const QUANTILE: f64 = 0.02;
         // dB floor so log10 of an empty bin stays finite.
         const EPS: f64 = 1e-10;
@@ -1684,9 +1674,8 @@ where
 
 /// Spacing in Hz between the bins of an `n_fft`-point DFT: `sample_rate / n_fft`.
 ///
-/// Bin `k` lies at `k * sample_rate / n_fft` for even and odd `n_fft` alike
-/// (`numpy.fft.rfftfreq`, `librosa.fft_frequencies`). The spectral scalars once
-/// used `nyquist / (bins - 1)`, which is only equal for even `n_fft`.
+/// Bin `k` lies at `k * sample_rate / n_fft` for even and odd `n_fft` alike.
+/// `nyquist / (bins - 1)` is only equal for even `n_fft`.
 #[cfg(feature = "transforms")]
 fn bin_spacing_hz(sample_rate: f64, n_fft: usize) -> f64 {
     sample_rate / n_fft as f64
@@ -2012,7 +2001,7 @@ mod tests {
     /// Regression: the values were divided by the zero-padded FFT size twice (the
     /// planner's inverse FFT already normalises), so they were too small by a
     /// factor of 2048 for n = 1000 and 8192 for n = 4096. `r[k] * (n - k)` must
-    /// equal the direct sum of products (`numpy.correlate`, `librosa.autocorrelate`).
+    /// equal the direct sum of products.
     #[test]
     #[cfg(feature = "transforms")]
     fn autocorrelation_matches_direct_sum() {

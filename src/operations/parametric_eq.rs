@@ -442,7 +442,7 @@ where
     }
 }
 
-/// RBJ biquad for `band` as a SciPy-layout SOS row `[b0, b1, b2, 1, a1, a2]`.
+/// RBJ biquad for `band` as an SOS row `[b0, b1, b2, 1, a1, a2]`.
 fn eq_band_sos(band: &EqBand, sample_rate: f64) -> [f64; 6] {
     let (b, a) = design_eq_band_filter(band, sample_rate);
     [b[0], b[1], b[2], a[0], a[1], a[2]]

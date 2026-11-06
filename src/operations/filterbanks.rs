@@ -1,35 +1,31 @@
-//! Window functions and mel filterbanks with librosa / SciPy semantics.
+//! Window functions and mel filterbanks.
 //!
 //! ## What
 //!
-//! This module holds the building blocks of the librosa-compatible spectral
-//! pipeline in [`crate::operations::spectrum`]:
+//! This module holds the building blocks of the spectral pipeline in
+//! [`crate::operations::spectrum`]:
 //!
-//! - [`Window`] and [`get_window`]: analysis windows computed exactly as
-//!   `scipy.signal.get_window`, in either the *periodic* form (`fftbins=True`,
-//!   librosa's default, the right choice for spectral analysis) or the
-//!   *symmetric* form (`fftbins=False`, used for filter design).
+//! - [`Window`] and [`get_window`]: analysis windows in either the *periodic*
+//!   form (the default for spectral analysis) or the *symmetric* form (used
+//!   for filter design).
 //! - [`window_sumsquare`] and [`window_bandwidth`]: the squared-window overlap
 //!   envelope used to normalise an inverse STFT, and the equivalent noise
-//!   bandwidth of a window (`librosa.filters.window_sumsquare` /
-//!   `librosa.filters.window_bandwidth`).
+//!   bandwidth of a window.
 //! - [`mel_filterbank`] with [`MelFilterbankConfig`]: the triangular mel
-//!   filterbank of `librosa.filters.mel`, on either the Slaney or the HTK mel
-//!   scale ([`MelScale`]) and with any of librosa's normalisations
-//!   ([`MelFilterNorm`]).
+//!   filterbank, on either the Slaney or the HTK mel scale ([`MelScale`]) and
+//!   with any of the normalisations of [`MelFilterNorm`].
 //!
 //! ## Why
 //!
 //! The spectrogram helpers on [`AudioTransforms`](crate::AudioTransforms) use
 //! the `spectrograms` crate, whose windows are symmetric and whose mel
-//! filterbank is fixed to the Slaney scale and is not exposed. librosa (and
-//! therefore most published feature pipelines) uses periodic windows, a
-//! Slaney-normalised filterbank and optionally the HTK scale. These functions
-//! reproduce those conventions so that results match librosa to round-off.
+//! filterbank is fixed to the Slaney scale and is not exposed. Most published
+//! feature pipelines use periodic windows, a Slaney-normalised filterbank and
+//! optionally the HTK scale; these functions provide those conventions.
 //!
 //! ## How
 //!
-//! Every function is a pure free function. All defaults follow librosa 1.0.
+//! Every function is a pure free function.
 //!
 //! ```rust
 //! use audio_samples::nzu;
@@ -37,12 +33,12 @@
 //!     MelFilterbankConfig, Window, get_window, mel_filterbank,
 //! };
 //!
-//! // A periodic Hann window, as used by librosa.stft.
+//! // A periodic Hann window, as used by the STFT.
 //! let w = get_window(&Window::Hann, 8, true).unwrap();
 //! assert_eq!(w[0], 0.0);
 //! assert!((w[4] - 1.0).abs() < 1e-15);
 //!
-//! // librosa.filters.mel(sr=22050, n_fft=2048): 128 Slaney bands, Slaney norm.
+//! // Default filterbank at 22050 Hz, n_fft 2048: 128 Slaney bands, Slaney norm.
 //! let mel = mel_filterbank(22050.0, nzu!(2048), &MelFilterbankConfig::default()).unwrap();
 //! assert_eq!(mel.dim(), (128, 1025));
 //! ```
@@ -60,19 +56,19 @@ use crate::{AudioFloat, AudioSampleError, AudioSampleResult, ParameterError};
 // Windows
 // =============================================================================
 
-/// An analysis window, computed as `scipy.signal.get_window` computes it.
+/// An analysis window.
 ///
 /// ## Purpose
 ///
 /// Selects the taper applied to each frame before the FFT (STFT, ISTFT and
-/// everything built on them). Each named variant corresponds to a SciPy window
-/// name; parameterised windows carry their parameter.
+/// everything built on them). Each named variant is a standard window;
+/// parameterised windows carry their parameter.
 ///
 /// ## Intended usage
 ///
 /// Pass a `Window` to [`get_window`] (or put it in an
 /// [`StftConfig`](crate::operations::spectrum::StftConfig)). The default is
-/// [`Window::Hann`], librosa's default.
+/// [`Window::Hann`].
 ///
 /// ## Invariants
 ///
@@ -92,41 +88,40 @@ use crate::{AudioFloat, AudioSampleError, AudioSampleResult, ParameterError};
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Window {
-    /// Rectangular window (all ones). SciPy `"boxcar"`.
+    /// Rectangular window (all ones), also called boxcar.
     Rectangular,
-    /// Hann (raised cosine) window, `0.5 - 0.5 cos`. SciPy `"hann"`; librosa's default.
+    /// Hann (raised cosine) window, `0.5 - 0.5 cos`. The default.
     #[default]
     Hann,
-    /// Hamming window, `0.54 - 0.46 cos`. SciPy `"hamming"`.
+    /// Hamming window, `0.54 - 0.46 cos`.
     Hamming,
-    /// Classic Blackman window (coefficients 0.42, 0.5, 0.08). SciPy `"blackman"`.
+    /// Classic Blackman window (coefficients 0.42, 0.5, 0.08).
     Blackman,
-    /// 4-term Blackman-Harris window. SciPy `"blackmanharris"`.
+    /// 4-term Blackman-Harris window.
     BlackmanHarris,
-    /// Bartlett window: triangular with zero end points. SciPy `"bartlett"`.
+    /// Bartlett window: triangular with zero end points.
     Bartlett,
-    /// Triangular window with non-zero end points. SciPy `"triang"` (differs from
+    /// Triangular window with non-zero end points (differs from
     /// [`Window::Bartlett`]).
     Triangular,
     /// Kaiser window with shape parameter `beta` (finite; larger means a wider main
-    /// lobe and lower side lobes, e.g. 8.6 is close to Blackman). SciPy `("kaiser", beta)`.
+    /// lobe and lower side lobes, e.g. 8.6 is close to Blackman).
     Kaiser {
         /// Shape parameter. Must be finite.
         beta: f64,
     },
     /// Gaussian window with standard deviation `std` in samples (finite, > 0).
-    /// SciPy `("gaussian", std)`.
     Gaussian {
         /// Standard deviation in samples. Must be finite and positive.
         std: f64,
     },
     /// Explicit window coefficients. The length must equal the requested window
-    /// length; the `periodic` flag of [`get_window`] does not apply (as in librosa,
-    /// where an array window is used as given).
+    /// length; the `periodic` flag of [`get_window`] does not apply (the
+    /// coefficients are used as given).
     Custom(Vec<f64>),
 }
 
-/// Coefficients of the generalised cosine windows (SciPy `general_cosine`).
+/// Coefficients of the generalised cosine windows.
 fn cosine_coefficients(window: &Window) -> Option<&'static [f64]> {
     match window {
         Window::Hann => Some(&[0.5, 0.5]),
@@ -137,17 +132,15 @@ fn cosine_coefficients(window: &Window) -> Option<&'static [f64]> {
     }
 }
 
-/// Computes an analysis window of length `n`, exactly as `scipy.signal.get_window`.
-///
-/// This is librosa's `librosa.filters.get_window(window, n, fftbins=periodic)`.
+/// Computes an analysis window of length `n`.
 ///
 /// # Arguments
 ///
 /// * `window` - The window type and its parameters.
 /// * `n` - Window length in samples. `0` gives an empty array and `1` gives `[1.0]`
-///   (as SciPy does) for every named window.
-/// * `periodic` - `true` for the periodic ("DFT-even", SciPy `fftbins=True`) window
-///   used for spectral analysis, which is librosa's default; `false` for the
+///   for every named window.
+/// * `periodic` - `true` for the periodic ("DFT-even") window used for spectral
+///   analysis, the usual choice; `false` for the
 ///   symmetric window used for filter design. A periodic window of length `n` is the
 ///   symmetric window of length `n + 1` with its last sample dropped. Ignored for
 ///   [`Window::Custom`].
@@ -176,7 +169,7 @@ fn cosine_coefficients(window: &Window) -> Option<&'static [f64]> {
 /// # References
 ///
 /// F. J. Harris, "On the use of windows for harmonic analysis with the discrete
-/// Fourier transform," *Proc. IEEE* 66(1), 1978; SciPy `scipy.signal.get_window`.
+/// Fourier transform," *Proc. IEEE* 66(1), 1978.
 pub fn get_window(window: &Window, n: usize, periodic: bool) -> AudioSampleResult<Array1<f64>> {
     validate_window(window)?;
     check_derived_len("n", "a window", n as f64, MAX_SIGNAL_ELEMENTS)?;
@@ -195,7 +188,7 @@ pub fn get_window(window: &Window, n: usize, periodic: bool) -> AudioSampleResul
     if n <= 1 {
         return Ok(Array1::ones(n));
     }
-    // SciPy: a periodic window is a symmetric window of length n + 1, truncated.
+    // A periodic window is a symmetric window of length n + 1, truncated.
     let m = if periodic { n + 1 } else { n };
     let mut w = symmetric_window(window, m);
     w.truncate(n);
@@ -225,11 +218,11 @@ fn validate_window(window: &Window) -> AudioSampleResult<()> {
 }
 
 /// The symmetric window of length `m >= 2` for a named (non-custom) window,
-/// following SciPy's formulas operation by operation.
+/// evaluated in a fixed order of operations.
 fn symmetric_window(window: &Window, m: usize) -> Vec<f64> {
     let mf = m as f64;
     if let Some(a) = cosine_coefficients(window) {
-        // fac = numpy.linspace(-pi, pi, m); w = sum_k a[k] cos(k * fac)
+        // fac = m points evenly spaced over [-pi, pi]; w = sum_k a[k] cos(k * fac)
         let step = (std::f64::consts::PI - (-std::f64::consts::PI)) / (mf - 1.0);
         return (0..m)
             .map(|i| {
@@ -307,7 +300,7 @@ fn symmetric_window(window: &Window, m: usize) -> Vec<f64> {
     }
 }
 
-/// Chebyshev coefficients for I0 on `[0, 8]` (Cephes `i0`, as used by NumPy/SciPy).
+/// Chebyshev coefficients for I0 on `[0, 8]` (Cephes `i0`).
 #[allow(clippy::excessive_precision)] // Cephes coefficients, kept verbatim
 const I0_A: [f64; 30] = [
     -4.415_341_646_479_339_379_50E-18,
@@ -385,8 +378,7 @@ fn chbevl(x: f64, coeffs: &[f64]) -> f64 {
     0.5 * (b0 - b2)
 }
 
-/// Modified Bessel function of the first kind, order 0 (Cephes algorithm, matching
-/// `numpy.i0` / `scipy.special.i0` to round-off).
+/// Modified Bessel function of the first kind, order 0 (Cephes algorithm).
 fn bessel_i0(x: f64) -> f64 {
     let x = x.abs();
     if x <= 8.0 {
@@ -396,8 +388,8 @@ fn bessel_i0(x: f64) -> f64 {
     }
 }
 
-/// Zero-pads `data` on both sides to `size` samples, centred as `librosa.util.pad_center`
-/// (left pad `(size - n) / 2`, the extra sample of an odd difference goes to the right).
+/// Zero-pads `data` on both sides to `size` samples, centred (left pad
+/// `(size - n) / 2`, the extra sample of an odd difference goes to the right).
 ///
 /// Callers guarantee `data.len() <= size`.
 pub(crate) fn pad_center(data: &[f64], size: usize) -> Vec<f64> {
@@ -409,9 +401,7 @@ pub(crate) fn pad_center(data: &[f64], size: usize) -> Vec<f64> {
 
 /// Computes the sum-squared envelope of a window over `n_frames` overlapping frames.
 ///
-/// Equivalent to `librosa.filters.window_sumsquare(window=window, n_frames=n_frames,
-/// hop_length=hop_length, win_length=win_length, n_fft=n_fft, dtype=numpy.float64)`.
-/// The window (periodic, as librosa's `get_window` default) is squared, zero-padded to
+/// The periodic window is squared, zero-padded to
 /// `n_fft` and overlap-added at multiples of `hop_length`. Dividing an overlap-add
 /// resynthesis by this envelope is what makes the inverse STFT exact.
 ///
@@ -432,10 +422,8 @@ pub(crate) fn pad_center(data: &[f64], size: usize) -> Vec<f64> {
 /// [`ParameterError`] if `n_frames` is 0, `win_length > n_fft`, the window is invalid,
 /// or the envelope (or `n_fft`) would exceed 2^31 samples.
 ///
-/// # Differences from librosa
-///
-/// librosa's `norm` argument (normalising the window before squaring) is not supported,
-/// and the output is always `f64` (librosa defaults to `float32`).
+/// The window is not normalised before squaring, and the output is always `f64`
+/// ([`window_sumsquare_as`] gives other float types).
 ///
 /// # Examples
 ///
@@ -458,13 +446,11 @@ pub fn window_sumsquare(
     window_sumsquare_as::<f64>(window, n_frames, hop_length, win_length, n_fft)
 }
 
-/// [`window_sumsquare`] with the envelope in the element type `F`,
-/// equivalent to `librosa.filters.window_sumsquare(..., dtype=F)` (librosa's
-/// default `dtype` is `float32`).
+/// [`window_sumsquare`] with the envelope in the element type `F`.
 ///
 /// The squared window is computed in `f64`; each overlap-add step adds an
-/// `f64` window value to the `F` envelope in `f64` and rounds the sum to `F`,
-/// as librosa's fill loop does for a `float32` output. For `F = f64` this is
+/// `f64` window value to the `F` envelope in `f64` and rounds the sum to `F`.
+/// For `F = f64` this is
 /// [`window_sumsquare`].
 ///
 /// # Errors
@@ -515,8 +501,8 @@ pub fn window_sumsquare_as<F: AudioFloat>(
     Ok(Array1::from(x))
 }
 
-/// Overlap-adds an already squared, `n_fft`-long window (librosa `__window_ss_fill`)
-/// in the window's float type.
+/// Overlap-adds an already squared, `n_fft`-long window in the window's float
+/// type.
 pub(crate) fn window_sumsquare_from_squared<F: AudioFloat>(
     win_sq: &[F],
     n_frames: usize,
@@ -536,7 +522,7 @@ pub(crate) fn window_sumsquare_from_squared<F: AudioFloat>(
 }
 
 /// The periodic `win_length` window zero-padded (centred) to `n_fft`, as used by
-/// librosa's STFT and ISTFT.
+/// the STFT and ISTFT.
 pub(crate) fn padded_window(
     window: &Window,
     win_length: Option<NonZeroUsize>,
@@ -562,14 +548,13 @@ pub(crate) fn padded_window(
 
 /// Computes the equivalent noise bandwidth of a window, in FFT bins.
 ///
-/// Equivalent to `librosa.filters.window_bandwidth(window, n)`:
 /// `n * sum(w^2) / sum(w)^2` for the periodic window of length `n`. A rectangular
 /// window has bandwidth 1; a Hann window 1.5.
 ///
 /// # Arguments
 ///
 /// * `window` - The window. A [`Window::Custom`] must have exactly `n` coefficients.
-/// * `n` - The window length to evaluate (librosa's default is 1000).
+/// * `n` - The window length to evaluate (1000 is a common choice).
 ///
 /// # Returns
 ///
@@ -579,12 +564,8 @@ pub(crate) fn padded_window(
 ///
 /// [`ParameterError`] if the window is invalid for length `n`.
 ///
-/// # Differences from librosa
-///
-/// For named windows librosa returns a value from a hard-coded table
-/// (`librosa.filters.WINDOW_BANDWIDTHS`) and ignores `n`; those table values differ
-/// from the formula at `n = 1000` by up to ~1e-4 relative (e.g. Blackman 1.72697 vs
-/// 1.72676). This function always evaluates the formula.
+/// The formula is always evaluated, for named windows too; it depends on `n`
+/// (e.g. Blackman 1.72676 at `n = 1000`).
 ///
 /// # Examples
 ///
@@ -597,7 +578,7 @@ pub(crate) fn padded_window(
 /// ```
 pub fn window_bandwidth(window: &Window, n: NonZeroUsize) -> AudioSampleResult<f64> {
     // The value depends only on (window, n): remember the last few per
-    // thread (as librosa keeps a table), except for explicit coefficients.
+    // thread, except for explicit coefficients.
     thread_local! {
         static CACHE: std::cell::RefCell<Vec<(Window, usize, f64)>> =
             const { std::cell::RefCell::new(Vec::new()) };
@@ -638,7 +619,7 @@ fn window_bandwidth_uncached(window: &Window, n: NonZeroUsize) -> AudioSampleRes
 // Mel filterbank
 // =============================================================================
 
-/// Normalisation applied to each mel filter (librosa's `norm` argument).
+/// Normalisation applied to each mel filter.
 ///
 /// # Examples
 ///
@@ -651,20 +632,20 @@ fn window_bandwidth_uncached(window: &Window, n: NonZeroUsize) -> AudioSampleRes
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum MelFilterNorm {
-    /// No normalisation: triangles with unit peak (librosa `norm=None`).
+    /// No normalisation: triangles with unit peak.
     None,
     /// Divide each triangle by half its bandwidth in Hz, so each band has
-    /// approximately constant energy (librosa `norm='slaney'`, the default).
+    /// approximately constant energy (the default).
     #[default]
     Slaney,
-    /// Divide each filter by its `p`-norm (librosa `norm=p`, via `librosa.util.normalize`).
+    /// Divide each filter by its `p`-norm.
     /// `p` may be any positive number, `f64::INFINITY` (maximum absolute value),
     /// `f64::NEG_INFINITY` (minimum absolute value) or `0.0` (number of non-zero
     /// weights). A filter whose norm is zero is left unscaled.
     Lp(f64),
 }
 
-/// Configuration of a mel filterbank, mirroring `librosa.filters.mel`.
+/// Configuration of a mel filterbank.
 ///
 /// ## Purpose
 ///
@@ -676,14 +657,13 @@ pub enum MelFilterNorm {
 ///
 /// Pass to [`mel_filterbank`], or embed in a
 /// [`MelSpectrogramConfig`](crate::operations::spectrum::MelSpectrogramConfig).
-/// `Default` reproduces librosa's defaults: 128 bands, 0 Hz to Nyquist, Slaney
-/// scale (`htk=False`), Slaney normalisation.
+/// `Default`: 128 bands, 0 Hz to Nyquist, Slaney scale, Slaney normalisation.
 ///
 /// ## Invariants
 ///
 /// Checked by [`MelFilterbankConfig::validate`]: `fmin >= 0`, the resolved
 /// `fmax` is finite and greater than `fmin`, and an `Lp` norm has a valid `p`.
-/// `fmax` above the Nyquist frequency is allowed (as in librosa), but the bands
+/// `fmax` above the Nyquist frequency is allowed, but the bands
 /// above Nyquist are then empty.
 ///
 /// # Examples
@@ -703,16 +683,16 @@ pub enum MelFilterNorm {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MelFilterbankConfig {
     /// Number of mel bands (rows of the filterbank). More bands give finer
-    /// frequency resolution but narrower, noisier bands. librosa default: 128.
+    /// frequency resolution but narrower, noisier bands. Default: 128.
     pub n_mels: NonZeroUsize,
-    /// Lower edge of the lowest band, in Hz. Must be `>= 0`. librosa default: 0.
+    /// Lower edge of the lowest band, in Hz. Must be `>= 0`. Default: 0.
     pub fmin: f64,
-    /// Upper edge of the highest band, in Hz; `None` means the Nyquist frequency
-    /// (`sample_rate / 2`, librosa's default). Must exceed `fmin`.
+    /// Upper edge of the highest band, in Hz; `None` (the default) means the
+    /// Nyquist frequency (`sample_rate / 2`). Must exceed `fmin`.
     pub fmax: Option<f64>,
-    /// Mel scale used to space the band edges. librosa default: Slaney (`htk=False`).
+    /// Mel scale used to space the band edges. Default: Slaney.
     pub scale: MelScale,
-    /// Per-filter normalisation. librosa default: Slaney.
+    /// Per-filter normalisation. Default: Slaney.
     pub norm: MelFilterNorm,
 }
 
@@ -729,15 +709,13 @@ impl Default for MelFilterbankConfig {
 }
 
 impl MelFilterbankConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `filters.mel` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -832,7 +810,7 @@ impl MelFilterbankConfig {
     }
 }
 
-/// Builds a mel filterbank matrix, equivalent to `librosa.filters.mel`.
+/// Builds a mel filterbank matrix.
 ///
 /// Each row is a triangular filter over the FFT bins: band `i` rises from mel edge
 /// `i` to edge `i + 1` and falls to edge `i + 2`, where the `n_mels + 2` edges are
@@ -855,12 +833,8 @@ impl MelFilterbankConfig {
 /// [`ParameterError`] from [`MelFilterbankConfig::validate`], or if the
 /// `n_mels x (1 + n_fft / 2)` matrix would exceed 2^28 elements.
 ///
-/// # Differences from librosa
-///
-/// The weights are computed and returned in `f64`; librosa's default
-/// `dtype=numpy.float32` rounds them to single precision (relative differences
-/// around 1e-7). librosa warns about empty filters (too many bands for the
-/// frequency resolution); this function returns them silently as all-zero rows.
+/// The weights are computed and returned in `f64`. Empty filters (too many bands
+/// for the frequency resolution) are returned silently as all-zero rows.
 ///
 /// # Examples
 ///
@@ -876,8 +850,7 @@ impl MelFilterbankConfig {
 ///
 /// # References
 ///
-/// M. Slaney, *Auditory Toolbox*, Interval Research Corporation, 1998;
-/// librosa `filters.mel`.
+/// M. Slaney, *Auditory Toolbox*, Interval Research Corporation, 1998.
 pub fn mel_filterbank(
     sample_rate: f64,
     n_fft: NonZeroUsize,
@@ -956,7 +929,7 @@ impl<'a> MelRows<'a> {
     fn new(sample_rate: f64, n_fft: usize, n_mels: usize, config: &'a MelFilterbankConfig) -> Self {
         let n_bins = 1 + n_fft / 2;
         let fmax = config.resolved_fmax(sample_rate);
-        // numpy.fft.rfftfreq(n_fft, d=1/sr): k * (1 / (n_fft * d)).
+        // Bin centre frequencies: k * (1 / (n_fft * d)) with d = 1 / sr.
         let d = 1.0 / sample_rate;
         let val = 1.0 / (n_fft as f64 * d);
         let fftfreqs: Vec<f64> = (0..n_bins).map(|k| k as f64 * val).collect();
@@ -988,7 +961,7 @@ impl<'a> MelRows<'a> {
             }
             MelFilterNorm::Lp(p) => {
                 let length = lp_norm(row.iter().copied(), p);
-                // librosa.util.normalize(fill=None): rows below `tiny` are left as is.
+                // Rows whose norm is below the smallest normal number are left as is.
                 let length = if length < f64::MIN_POSITIVE {
                     1.0
                 } else {
@@ -1002,7 +975,7 @@ impl<'a> MelRows<'a> {
     }
 }
 
-/// The `librosa.util.normalize` "length" of a vector for norm `p`.
+/// The "length" of a vector for norm `p`, by which it is normalised.
 fn lp_norm(values: impl Iterator<Item = f64>, p: f64) -> f64 {
     let mags = values.map(f64::abs);
     if p == f64::INFINITY {
@@ -1085,7 +1058,7 @@ mod tests {
 
     #[test]
     fn triangular_windows_match_scipy_definitions() {
-        // scipy.signal.windows.triang(4) = [0.25, 0.75, 0.75, 0.25]; triang(5) = [1/3, 2/3, 1, 2/3, 1/3]
+        // triang(4) = [0.25, 0.75, 0.75, 0.25]; triang(5) = [1/3, 2/3, 1, 2/3, 1/3]
         let t4 = get_window(&Window::Triangular, 4, false).unwrap();
         assert_eq!(t4.to_vec(), vec![0.25, 0.75, 0.75, 0.25]);
         let t5 = get_window(&Window::Triangular, 5, false).unwrap();
@@ -1191,7 +1164,7 @@ mod tests {
         assert!(fb(MelFilterbankConfig::new().with_fmax(Some(f64::INFINITY))).is_err());
         assert!(fb(MelFilterbankConfig::new().with_norm(MelFilterNorm::Lp(-2.0))).is_err());
         assert!(mel_filterbank(0.0, nzu!(512), &MelFilterbankConfig::new()).is_err());
-        // fmax above Nyquist is allowed, as in librosa.
+        // fmax above Nyquist is allowed.
         assert!(fb(MelFilterbankConfig::new().with_fmax(Some(12000.0))).is_ok());
     }
 }

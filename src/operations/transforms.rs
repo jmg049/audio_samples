@@ -13,8 +13,9 @@
 //! Frequency-domain analysis is central to audio processing: spectrograms,
 //! MFCCs, chromagrams and pitch detection all begin with a transform into the
 //! spectral domain. The conventions below are stated precisely because they
-//! differ in several places from librosa/SciPy defaults, and values computed
-//! here are only comparable with other tools when those conventions match.
+//! differ in several places from those of [`crate::operations::spectrum`] and
+//! of other common tools, and values computed here are only comparable when
+//! those conventions match.
 //!
 //! ## How
 //!
@@ -33,8 +34,8 @@
 //! X[k] = Σ_{n=0}^{N-1} x[n] · e^{-j 2π k n / N},     k = 0 … ⌊N/2⌋
 //! ```
 //!
-//! with a **negative exponent and no normalisation** (no 1/N or 1/√N; same as
-//! `numpy.fft.rfft`). Only the ⌊N/2⌋ + 1 non-negative-frequency bins of the real
+//! with a **negative exponent and no normalisation** (no 1/N or 1/√N). Only the
+//! ⌊N/2⌋ + 1 non-negative-frequency bins of the real
 //! signal's spectrum are returned. Bin k is at frequency f_k = k·f_s/N Hz
 //! (f_s = sample rate), so the bin spacing is f_s/N and the last bin is the
 //! Nyquist frequency f_s/2 when N is even. Signals shorter than N are
@@ -51,12 +52,12 @@
 //!
 //! - **Window.** `WindowType::Hanning` is the Hann window in its **symmetric**
 //!   form, w\[n\] = 0.5 − 0.5·cos(2πn/(N − 1)); Hamming and Blackman are symmetric
-//!   too. librosa and `scipy.signal.stft/spectrogram/welch` default to the
-//!   **periodic** Hann (denominator N), so STFT values differ from theirs by
+//!   too. [`crate::operations::spectrum`] and most analysis tools default to
+//!   the **periodic** Hann (denominator N), so STFT values differ from theirs by
 //!   about 0.3 % at N = 512 unless the same window is used.
 //! - **Centring.** With `centre = true`, x_p is x zero-padded by ⌊N/2⌋ samples
-//!   on both sides (librosa `center=True, pad_mode='constant'`, not `'reflect'`),
-//!   so frame m is centred on sample mH. With `centre = false`, x_p = x and frame
+//!   on both sides (zeros, not a reflection of the signal), so frame m is
+//!   centred on sample mH. With `centre = false`, x_p = x and frame
 //!   m starts at sample mH.
 //! - **Frames.** The number of frames is 1 + ⌊(L + 2⌊N/2⌋ − N)/H⌋ with centring
 //!   and 1 + ⌊(L − N)/H⌋ without (L = signal length). The reported frame time is
@@ -77,13 +78,14 @@
 //!
 //! i.e. dB re 1 (an absolute reference, not the peak). `LogParams::new(-80.0)`
 //! therefore means a_min = 10⁻⁸ in power, **not** "80 dB below the maximum":
-//! there is no `top_db`, and loud bins can exceed 0 dB. librosa's
-//! `power_to_db(S, ref=np.max, top_db=80)` instead measures relative to the peak;
-//! subtract the maximum yourself to reproduce it.
+//! there is no `top_db`, and loud bins can exceed 0 dB. To measure relative to
+//! the peak, subtract the maximum yourself, or use
+//! [`power_to_db`](crate::operations::spectrum::power_to_db) with a `Max`
+//! reference.
 //!
 //! ### Mel spectrogram
 //!
-//! Mel bands use the **Slaney** mel scale (librosa's default, `htk=False`):
+//! Mel bands use the **Slaney** mel scale:
 //!
 //! ```text
 //! m(f) = 3f / 200                              for f < 1000 Hz
@@ -95,7 +97,7 @@
 //! falling to 0 at point b + 2. The filterbank W is applied to the **power**
 //! spectrogram, M[b, m] = Σ_k W[b, k]·P[k, m]. `MelParams::new` applies **no**
 //! filter normalisation; `MelParams::with_norm(.., MelNorm::Slaney)` gives
-//! librosa's default area normalisation. The `Magnitude` mel spectrogram is
+//! Slaney area normalisation. The `Magnitude` mel spectrogram is
 //! √M (not Σ_k W[b, k]·|X[k, m]|), and the `Decibels` one is 10·log10(max(M, a_min)).
 //! Note: `crate::utils::audio_math::hz_to_mel` and `mel_frequencies` use the
 //! HTK formula 2595·log10(1 + f/700), a different mel scale; do not use them to
@@ -114,9 +116,9 @@
 //!    **L = 22 by default** (`MfccParams::with_lifter(0)` disables it);
 //! 5. if `with_c0(false)`, c\[0\] is dropped, leaving `n_mfcc − 1` rows.
 //!
-//! librosa's `feature.mfcc` uses an orthonormal DCT (`norm='ortho'`), no lifter
-//! and `power_to_db(..., top_db=80)`, so its values differ by a factor of
-//! √(B/2) for q ≥ 1 (√B for c0) and by the lifter weights.
+//! `AudioSpectrum::mfcc_frames` in [`crate::operations::spectrum`] uses an
+//! orthonormal DCT and no lifter, so its values differ by a factor of √(B/2)
+//! for q ≥ 1 (√B for c0) and by the lifter weights.
 //!
 //! ### Other representations
 //!
@@ -285,7 +287,7 @@ where
     /// non-negative-frequency half of the unnormalised DFT,
     /// X\[k\] = Σ_n x\[n\]·e^{−j2πkn/N} for k = 0 … ⌊N/2⌋ (N = `n_fft`); bin k is at
     /// k·f_s/N Hz (see [`crate::utils::audio_math::fft_frequencies`]). No window
-    /// is applied. Like `numpy.fft.rfft`, there is no 1/N scaling.
+    /// is applied. There is no 1/N scaling.
     ///
     /// # Arguments
     /// - `n_fft` - FFT length in samples. If longer than the signal the input
@@ -342,11 +344,9 @@ where
     /// H = `hop_size`), an unnormalised one-sided DFT of each windowed frame
     /// (⌊N/2⌋ + 1 bins × frames). `WindowType::Hanning` is the **symmetric** Hann
     /// window 0.5 − 0.5·cos(2πn/(N − 1)), not the periodic Hann used by default in
-    /// librosa and SciPy. With `centre = true` the signal is zero-padded by ⌊N/2⌋
-    /// samples on both sides, so frame m is centred on sample mH. The result equals
-    /// `librosa.stft(x, n_fft=N, hop_length=H, window=scipy.signal.get_window('hann',
-    /// N, fftbins=False), pad_mode='constant')`. See the module docs for the frame
-    /// count. The returned [`StftResult`] carries both the complex matrix and the
+    /// [`crate::operations::spectrum`]. With `centre = true` the signal is
+    /// zero-padded by ⌊N/2⌋ samples on both sides, so frame m is centred on sample
+    /// mH. See the module docs for the frame count. The returned [`StftResult`] carries both the complex matrix and the
     /// parameters required by [`istft`] for reconstruction.
     ///
     /// # Arguments
@@ -571,10 +571,10 @@ where
     ///
     /// The mel scale approximates human pitch perception by compressing
     /// high frequencies relative to low ones. Bands use the **Slaney** mel scale
-    /// (`librosa.hz_to_mel(htk=False)`) with triangular filters in Hz, applied to the
-    /// **power** spectrogram |X|². `MelParams::new` applies no filter normalisation
-    /// (librosa's default is `norm='slaney'`; use `MelParams::with_norm(..,
-    /// MelNorm::Slaney)` to match it). The `Magnitude` output is the square root of
+    /// with triangular filters in Hz, applied to the **power** spectrogram |X|².
+    /// `MelParams::new` applies no filter normalisation (use
+    /// `MelParams::with_norm(.., MelNorm::Slaney)` for Slaney area normalisation).
+    /// The `Magnitude` output is the square root of
     /// mel power, not a mel-weighted sum of magnitudes; `Decibels` is
     /// 10·log10(max(mel power, 10^(floor_db/10))) re 1. See the module docs for the
     /// formulas.
@@ -656,9 +656,9 @@ where
     /// **L = 22 by default** (`MfccParams::with_lifter(0)` disables it).
     /// `with_c0(false)` drops c0 and returns `n_mfcc − 1` coefficients.
     ///
-    /// Note: values therefore differ from `librosa.feature.mfcc` (orthonormal DCT,
-    /// no lifter, `top_db = 80`) by a factor √(`n_mels`/2) for q ≥ 1 (√`n_mels` for
-    /// c0) and by the lifter weights.
+    /// Note: values therefore differ from `AudioSpectrum::mfcc_frames` (orthonormal
+    /// DCT, no lifter) by a factor √(`n_mels`/2) for q ≥ 1 (√`n_mels` for c0) and by
+    /// the lifter weights.
     ///
     /// # Arguments
     /// - `stft_params` - STFT configuration used for the underlying
@@ -1004,11 +1004,10 @@ where
     /// P[k] = c_k · mean_s |X_s[k]|² / (f_s · Σ_n w[n]²),   c_k = 1 at DC and Nyquist, 2 otherwise
     /// ```
     ///
-    /// in units² per Hz (units of full scale), at f_k = k·f_s/N. This matches
-    /// `scipy.signal.welch(x, fs, window=scipy.signal.windows.hann(N, sym=True),
-    /// nperseg=N, noverlap=N − H, detrend=False, scaling='density')`, and
-    /// Σ_k P\[k\]·f_s/N ≈ the mean square of the signal (Parseval). Note: SciPy's
-    /// defaults differ (periodic Hann, `detrend='constant'`).
+    /// in units² per Hz (units of full scale), at f_k = k·f_s/N: Welch's method
+    /// with a symmetric Hann window of N samples, an overlap of N − H samples, no
+    /// detrending and density scaling, so Σ_k P\[k\]·f_s/N ≈ the mean square of the
+    /// signal (Parseval).
     ///
     /// # Arguments
     /// - `window_size` - segment length N in samples. Must be at least 2 and must
@@ -1114,8 +1113,8 @@ where
             Ok(())
         })?;
 
-        // Average the periodograms, then apply density scaling (SciPy
-        // `welch(scaling='density')`): divide by fs·Σw², and double every bin
+        // Average the periodograms, then apply density scaling: divide by
+        // fs·Σw², and double every bin
         // except DC and (for even `win`) Nyquist to fold in negative frequencies.
         let count = segment_count as f64;
         let window = spectrograms::make_window::<f64>(WindowType::Hanning, window_size);
@@ -1583,11 +1582,10 @@ where
     }
 }
 
-/// Splits a complex spectrogram into magnitude and phase, equivalent to
-/// `librosa.magphase(D, power=power)`.
+/// Splits a complex spectrogram into magnitude and phase.
 ///
 /// This is [`AudioTransforms::magphase`] on a view, so callers holding a
-/// borrowed or Fortran-order matrix (a numpy array, for example) need no copy.
+/// borrowed or Fortran-order matrix need no copy.
 /// Both outputs have the memory layout of the input when it is contiguous.
 ///
 /// # Arguments
@@ -1623,7 +1621,7 @@ pub fn magphase<F: num_traits::Float>(
     // loop vectorises) wherever re² + im² is a normal finite number; the rare
     // other elements (overflow, or so small that the squares underflow) are
     // redone with `hypot` afterwards. The phase is `D / m + 0` for `m != 0`
-    // and `D / 1 + 1` for `m == 0` (librosa's `zeros_to_ones` trick), where
+    // and `D / 1 + 1` for `m == 0` (so a zero bin has phase 1), where
     // `x + 0.0` turns `-0.0` into `+0.0`.
     use ndarray::ShapeBuilder;
     let dim = complex_spect.dim();
@@ -1673,8 +1671,7 @@ pub fn magphase<F: num_traits::Float>(
     (mag, phase)
 }
 
-/// [`magphase`] with any exponent, equivalent to `librosa.magphase(D, power=power)`
-/// for a fractional or negative `power`.
+/// [`magphase`] with any exponent, including a fractional or negative `power`.
 ///
 /// # Arguments
 ///
@@ -1849,7 +1846,7 @@ mod magphase_tests {
     use num_complex::Complex;
 
     /// The fused pass agrees with `hypot` to 1 ulp, takes the `hypot` path
-    /// for squares that overflow or underflow, follows librosa at zero, and
+    /// for squares that overflow or underflow, gives phase 1 at zero, and
     /// gives the same result for either memory order.
     #[test]
     fn magphase_edge_cases_and_layouts() {

@@ -43,8 +43,7 @@
 //! `N − M + 1` outputs for which all `M` taps fall inside the input; this is
 //! what [`AudioProcessing::apply_filter`] returns, so its output is shorter
 //! than its input. Valid output index `i` corresponds to `n = i + M − 1` in
-//! the formula above. The two agree with `numpy.convolve(x, h, 'full')` and
-//! `numpy.convolve(x, h, 'valid')` respectively. Above 160 taps
+//! the formula above. Above 160 taps
 //! `apply_filter` switches from direct summation (O(N·M)) to FFT convolution
 //! (O(N log N)); both give the same result up to rounding.
 //!
@@ -58,7 +57,7 @@
 //! let h = [1.0f64, 0.5];
 //! let y = x.apply_filter(NonEmptySlice::new(&h).unwrap()).unwrap();
 //! assert_eq!(y.samples_per_channel().get(), 4);
-//! // y[0] = h[0]·x[1] + h[1]·x[0] = 2 + 0.5 (numpy.convolve(x, h, 'valid'))
+//! // y[0] = h[0]·x[1] + h[1]·x[0] = 2 + 0.5
 //! assert_eq!(y[0], 2.5);
 //! ```
 //!
@@ -76,8 +75,9 @@
 //! [`low_pass_filter`](AudioProcessing::low_pass_filter),
 //! [`high_pass_filter`](AudioProcessing::high_pass_filter) and
 //! [`band_pass_filter`](AudioProcessing::band_pass_filter) are first-order
-//! Butterworth designs made with the bilinear transform (identical to
-//! `scipy.signal.butter(1, …)`). They are not ideal "brick-wall" filters,
+//! Butterworth designs made with the bilinear transform (the order-1 case of
+//! the Butterworth filters of `AudioIirFiltering`). They are not ideal
+//! "brick-wall" filters,
 //! which are not realisable. With `fs` the sample rate, `f` the frequency in
 //! Hz and `Ω = tan(π f / fs)` the pre-warped frequency, the magnitude
 //! responses are
@@ -140,8 +140,8 @@ use non_empty_slice::NonEmptySlice;
 /// Valid-region FIR convolution over flat slices, matching [`AudioProcessing::apply_filter`]'s
 /// convention: `output[i] = Σ_{j=0}^{M-1} coeffs[j] · input[i + M - 1 - j]` for
 /// `i in 0..output_len`, with `M = coeffs.len()` (true convolution, the "valid"
-/// part of `numpy.convolve(input, coeffs)`; the taps are reversed, so this is not
-/// the correlation `Σ_j input[i + j] · coeffs[j]`).
+/// part; the taps are reversed, so this is not the correlation
+/// `Σ_j input[i + j] · coeffs[j]`).
 ///
 /// Working on contiguous `&[T]` slices (rather than enum-dispatched element
 /// indexing) lets the compiler autovectorize the inner dot product.
@@ -152,8 +152,8 @@ fn fir_valid_convolve<T>(input: &[T], coeffs: &[f64], output_len: usize) -> Vec<
 where
     T: StandardSample,
 {
-    // True convolution, `y[i] = Σ_j h[j] · x[i + M - 1 - j]` (the "valid" part
-    // of `numpy.convolve(x, h)`): dot each window with the reversed taps.
+    // True convolution, `y[i] = Σ_j h[j] · x[i + M - 1 - j]` (the "valid"
+    // part): dot each window with the reversed taps.
     // Accumulates in f64 using the audio-aware sample conversion, so integer
     // samples are interpreted on the normalised [-1, 1] scale and cannot
     // overflow; the result is converted back with rounding and saturation.
@@ -246,7 +246,7 @@ where
 }
 
 /// Valid-region FIR convolution via FFT, matching the direct path:
-/// `output[i] = Σ_j coeffs[j] · input[i + M - 1 - j]` (`numpy.convolve(x, h, 'valid')`).
+/// `output[i] = Σ_j coeffs[j] · input[i + M - 1 - j]` (the "valid" part).
 ///
 /// Computation is in `f64` for headroom; results match the direct loop to
 /// floating-point tolerance.
@@ -821,8 +821,8 @@ where
     /// Applies μ-law compression to the audio samples.
     ///
     /// Each sample `x` (on the normalised `[-1, 1]` scale) is mapped to the
-    /// continuous μ-law curve `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, which is
-    /// `librosa.mu_compress(x, mu=mu, quantize=False)`. Higher `mu` values
+    /// continuous μ-law curve `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, without
+    /// quantisation (see [`mu_law_encode`] for integer codes). Higher `mu` values
     /// produce stronger compression. No quantisation is done (ITU-T G.711 uses
     /// an 8-segment piecewise-linear approximation of this curve plus 8-bit
     /// coding); for the quantised (integer code) variant see [`mu_law_encode`].
@@ -899,8 +899,7 @@ where
     ///
     /// Each sample `y` (on the normalised `[-1, 1]` scale) is mapped to
     /// `sign(y) · ((1 + μ)^|y| - 1) / μ`, the exact inverse of
-    /// [`mu_compress`](AudioProcessing::mu_compress) and equal to
-    /// `librosa.mu_expand(y, mu=mu, quantize=False)`. For integer codes see
+    /// [`mu_compress`](AudioProcessing::mu_compress). For integer codes see
     /// [`mu_law_decode`].
     ///
     /// # Arguments
@@ -945,10 +944,9 @@ where
     /// The filter is a first-order Butterworth low-pass designed with the
     /// bilinear transform: -3 dB at `cutoff_hz`, unity gain at DC, a zero at
     /// Nyquist and a 6 dB/octave roll-off. It is applied to each channel
-    /// independently from zero initial state, and is identical to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(1, cutoff_hz, fs=fs,
-    /// output='sos'), x)`. For steeper slopes use
-    /// [`AudioIirFiltering::butterworth_lowpass`].
+    /// independently from zero initial state; it is the order-1 case of
+    /// [`AudioIirFiltering::butterworth_lowpass`], which gives steeper slopes at
+    /// higher orders.
     ///
     /// # Arguments
     /// - `cutoff_hz` - Cutoff (-3 dB) frequency in Hz, in `(0, Nyquist)`.
@@ -982,10 +980,9 @@ where
     /// The filter is a first-order Butterworth high-pass designed with the
     /// bilinear transform: -3 dB at `cutoff_hz`, a zero at DC, unity gain at
     /// Nyquist and a 6 dB/octave slope. It is applied to each channel
-    /// independently from zero initial state, and is identical to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(1, cutoff_hz, 'highpass',
-    /// fs=fs, output='sos'), x)`. For steeper slopes use
-    /// [`AudioIirFiltering::butterworth_highpass`].
+    /// independently from zero initial state; it is the order-1 case of
+    /// [`AudioIirFiltering::butterworth_highpass`], which gives steeper slopes at
+    /// higher orders.
     ///
     /// # Arguments
     /// - `cutoff_hz` - Cutoff (-3 dB) frequency in Hz, in `(0, Nyquist)`.
@@ -1019,10 +1016,9 @@ where
     /// The filter is the band-pass transform of a first-order Butterworth
     /// prototype (a single second-order section): unity gain at the geometric
     /// centre of the (pre-warped) band, -3 dB at both edges, and 6 dB/octave
-    /// slopes outside the band. It is identical to
-    /// `scipy.signal.sosfilt(scipy.signal.butter(1, [low, high], 'bandpass',
-    /// fs=fs, output='sos'), x)`. For steeper slopes use
-    /// [`AudioIirFiltering::butterworth_bandpass`].
+    /// slopes outside the band. It is applied from zero initial state and is the
+    /// order-1 case of [`AudioIirFiltering::butterworth_bandpass`], which gives
+    /// steeper slopes at higher orders.
     ///
     /// # Arguments
     /// - `low_cutoff_hz` - Lower -3 dB edge in Hz.
@@ -1181,8 +1177,8 @@ fn validate_mu(mu: f64, operation: &str) -> AudioSampleResult<()> {
     }
 }
 
-/// `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, evaluated as librosa does
-/// (`np.sign(x) * np.log1p(mu * np.abs(x)) / np.log1p(mu)`).
+/// `sign(x) · ln(1 + μ|x|) / ln(1 + μ)`, evaluated as
+/// `sign(x) * log1p(mu * |x|) / log1p(mu)`.
 #[cfg(test)]
 fn mu_law_compress_value(x: f64, mu: f64) -> f64 {
     MuLaw::new(mu).compress(x)
@@ -1227,8 +1223,7 @@ impl MuLaw {
         sign * (self.mu * x.abs()).ln_1p() / self.den
     }
 
-    /// `sign(y) / μ · ((1 + μ)^|y| - 1)`, as librosa evaluates it
-    /// (`np.sign(x) / mu * (np.power(1 + mu, np.abs(x)) - 1)`), with the
+    /// `sign(y) / μ · ((1 + μ)^|y| - 1)`, evaluated in that order, with the
     /// power as `exp2` when `1 + μ` is a power of two.
     #[inline]
     fn expand(&self, y: f64) -> f64 {
@@ -1381,14 +1376,13 @@ fn mu_law_compress_f64_fast(x: f64, mu: f64, inv_den: f64) -> f64 {
     sign * l * inv_den
 }
 
-/// Quantises samples to integer μ-law codes, as `librosa.mu_compress(x, mu,
-/// quantize=True)` (librosa's default).
+/// Quantises samples to integer μ-law codes.
 ///
 /// Each sample is first companded with `c = sign(x) · ln(1 + μ|x|) / ln(1 + μ)`
 /// (see [`AudioProcessing::mu_compress`]) and then assigned to one of
 /// `⌊1 + μ⌋` uniform bins on `[-1, 1]`: with bin edges
-/// `e = linspace(-1, 1, ⌊1 + μ⌋)` the code is `#{j : e[j] < c} - ⌊(1 + μ) / 2⌋`
-/// (`np.digitize(c, e, right=True) - (mu + 1) // 2`). For `μ = 255` the codes
+/// `e = linspace(-1, 1, ⌊1 + μ⌋)` the code is `#{j : e[j] < c} - ⌊(1 + μ) / 2⌋`.
+/// For `μ = 255` the codes
 /// are the 256 integers in `[-128, 127]`; `0.0` maps to `0`, `1.0` to `127` and
 /// `-1.0` to `-128`.
 ///
@@ -1400,7 +1394,7 @@ fn mu_law_compress_f64_fast(x: f64, mu: f64, inv_den: f64) -> f64 {
 /// - `x` - Samples on the normalised `[-1, 1]` scale (e.g. the output of
 ///   `audio.as_f64()`, one channel at a time).
 /// - `mu` - Compression parameter (typically 255). Need not be an integer;
-///   the number of codes is `⌊1 + μ⌋`, as in librosa.
+///   the number of codes is `⌊1 + μ⌋`.
 ///
 /// # Returns
 /// One `i64` code per input sample, in `[-⌊(1 + μ) / 2⌋, ⌊1 + μ⌋ - ⌊(1 + μ) / 2⌋ - 1]`.
@@ -1418,13 +1412,11 @@ fn mu_law_compress_f64_fast(x: f64, mu: f64, inv_den: f64) -> f64 {
 /// ```
 ///
 /// # References
-/// - librosa `mu_compress` (`librosa/core/audio.py`).
 /// - ITU-T Recommendation G.711.
 #[inline]
 pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
     validate_mu(mu, "mu_law_encode")?;
-    // Beyond 2^53 neither `1 + mu` nor the codes are exactly representable
-    // (librosa would try to allocate that many bin edges).
+    // Beyond 2^53 neither `1 + mu` nor the codes are exactly representable.
     if mu > 9_007_199_254_740_992.0 {
         return Err(AudioSampleError::Parameter(ParameterError::out_of_range(
             "mu",
@@ -1434,10 +1426,10 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
             "mu_law_encode: the number of codes must be exactly representable",
         )));
     }
-    // Bin edges `np.linspace(-1, 1, num=int(1 + mu), endpoint=True)`, evaluated
-    // on demand exactly as numpy computes them (`i * step + start`, last edge
-    // pinned to `stop`) so that samples landing on an edge get the same code as
-    // librosa, without materialising `1 + mu` edges.
+    // Bin edges: `int(1 + mu)` points evenly spaced over [-1, 1], evaluated on
+    // demand as `i * step + start` with the last edge pinned to `stop`, so that
+    // samples landing on an edge get a reproducible code, without materialising
+    // `1 + mu` edges.
     let num = (1.0 + mu).trunc() as usize;
     let step = if num > 1 { 2.0 / (num - 1) as f64 } else { 0.0 };
     let edge = |i: usize| -> f64 {
@@ -1449,7 +1441,7 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
             i as f64 * step + -1.0
         }
     };
-    // np.digitize(c, edges, right=True) == number of edges strictly below c.
+    // The bin index is the number of edges strictly below c.
     // Start from the analytic estimate and correct for rounding.
     let count_below = |c: f64| -> usize {
         let mut k = if num > 1 {
@@ -1484,12 +1476,11 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
         .collect()
 }
 
-/// Maps integer μ-law codes back to amplitudes, as `librosa.mu_expand(codes,
-/// mu, quantize=True)` (librosa's default).
+/// Maps integer μ-law codes back to amplitudes.
 ///
 /// Each code `k` is rescaled to `y = 2k / (1 + μ)` and expanded with
 /// `sign(y) / μ · ((1 + μ)^|y| - 1)` (see [`AudioProcessing::mu_expand`]).
-/// Like librosa, this is not the exact inverse of [`mu_law_encode`]: codes
+/// This is not the exact inverse of [`mu_law_encode`]: codes
 /// are bin indices, so a round trip carries quantisation error (at most about
 /// 0.043 for `μ = 255`, and biased towards `-1`, e.g. code `127` decodes to
 /// `0.9574`).
@@ -1521,7 +1512,7 @@ pub fn mu_law_encode(x: &[f64], mu: f64) -> AudioSampleResult<Vec<i64>> {
 /// ```
 ///
 /// # References
-/// - librosa `mu_expand` (`librosa/core/audio.py`).
+/// - ITU-T Recommendation G.711.
 #[inline]
 pub fn mu_law_decode(codes: &[i64], mu: f64) -> AudioSampleResult<Vec<f64>> {
     validate_mu(mu, "mu_law_decode")?;
@@ -2005,7 +1996,7 @@ mod tests {
         let x = array![-1.0f64, -0.5, 0.0, 0.5, 1.0];
         let audio = AudioSamples::new_mono(x, sample_rate!(8000)).unwrap();
         let y = audio.mu_compress(255.0).unwrap();
-        // librosa.mu_compress([-1, -0.5, 0, 0.5, 1], quantize=False)
+        // Continuous μ-law curve (μ = 255) at [-1, -0.5, 0, 0.5, 1].
         let expected = [-1.0, -0.875_703_07, 0.0, 0.875_703_07, 1.0];
         for (i, e) in expected.iter().enumerate() {
             assert!((y[i] - e).abs() < 1e-8, "sample {i}: {} vs {e}", y[i]);
@@ -2076,12 +2067,12 @@ mod tests {
     #[test]
     fn mu_law_encode_matches_librosa_codes() {
         let x: Vec<f64> = (0..11).map(|i| -1.0 + f64::from(i) * 0.2).collect();
-        // librosa.mu_compress(np.linspace(-1, 1, 11)) (quantize=True, mu=255)
+        // Codes of 11 points evenly spaced over [-1, 1], mu = 255.
         assert_eq!(
             mu_law_encode(&x, 255.0).unwrap(),
             vec![-128, -122, -116, -107, -91, 0, 91, 107, 116, 122, 127]
         );
-        // librosa.mu_compress(np.linspace(-1, 1, 11), mu=15)
+        // The same points, mu = 15.
         assert_eq!(
             mu_law_encode(&x, 15.0).unwrap(),
             vec![-8, -7, -6, -5, -4, 0, 4, 5, 6, 7, 7]
@@ -2093,7 +2084,7 @@ mod tests {
     /// Regression: the encoder materialised `1 + mu` bin edges, so a huge `mu`
     /// panicked ("capacity overflow", mu = 1e19) or tried multi-GB allocations
     /// (mu ~ 1e9 - 1e18). Codes are now computed per sample; they must equal
-    /// the explicit `np.digitize(c, linspace(-1, 1, int(1 + mu)), right=True)`.
+    /// the count of explicit edges `linspace(-1, 1, int(1 + mu))` below `c`.
     #[test]
     fn mu_law_encode_is_allocation_free_and_exact() {
         let reference = |x: &[f64], mu: f64| -> Vec<i64> {
@@ -2141,7 +2132,7 @@ mod tests {
 
     #[test]
     fn mu_law_decode_matches_librosa() {
-        // librosa.mu_expand([-128, -122, -116, 0, 116, 127]) (quantize=True)
+        // Decoded values of codes [-128, -122, -116, 0, 116, 127], mu = 255.
         let y = mu_law_decode(&[-128, -122, -116, 0, 116, 127], 255.0).unwrap();
         let expected = [
             -1.0,

@@ -129,7 +129,7 @@ impl NmfConfig {
         }
     }
 
-    /// The defaults of the factorisation librosa uses; currently equal to
+    /// Settings matching librosa 1.0's defaults; currently equal to
     /// [`new`](Self::new).
     #[must_use]
     pub const fn librosa(n_components: usize) -> Self {

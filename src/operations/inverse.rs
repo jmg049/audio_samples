@@ -85,7 +85,7 @@ impl MelInversionConfig {
         }
     }
 
-    /// librosa's defaults, including its sample rate of 22050 Hz.
+    /// Settings matching librosa 1.0's defaults, including a sample rate of 22050 Hz.
     #[must_use]
     pub fn librosa() -> Self {
         Self::new(22050.0)
@@ -282,7 +282,7 @@ impl MfccInversionConfig {
         }
     }
 
-    /// librosa's defaults; currently equal to [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; currently equal to [`new`](Self::new).
     #[must_use]
     pub fn librosa() -> Self {
         Self::new()
