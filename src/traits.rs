@@ -829,28 +829,6 @@ macro_rules! impl_float_to_int {
     };
 }
 
-// Used for i32, where i32::MAX = 2147483647 rounds up to 2147483648.0 in f32
-// (not exactly representable). Same asymmetric scaling and rounding as
-// `impl_float_to_int`, followed by a saturating cast.
-macro_rules! impl_float_to_large_int {
-    ($from:ty, $to:ty) => {
-        impl ConvertFrom<$from> for $to {
-            #[inline]
-            fn convert_from(source: $from) -> Self {
-                let v = source.max(-1.0).min(1.0);
-                let scale = if v < 0.0 {
-                    -(<$to>::MIN as $from)
-                } else {
-                    <$to>::MAX as $from
-                };
-                // Saturating `as` handles values that round past MAX
-                // (e.g. i32::MAX as f32 == 2147483648.0).
-                (v * scale).round() as $to
-            }
-        }
-    };
-}
-
 // Float -> I24 (clamp + scale + round + saturating)
 macro_rules! impl_float_to_i24 {
     ($from:ty) => {
@@ -1180,7 +1158,28 @@ impl_i24_to_float!(f64);
 impl_float_to_int!(f32, i16);
 impl_float_to_int!(f64, i16);
 
-impl_float_to_large_int!(f64, i32);
+// f64 -> i32: the same asymmetric scaling as `impl_float_to_int`, rounding
+// half away from zero exactly as `f64::round` does but without its libm call,
+// so conversion loops vectorise: adding the largest double below 0.5 (with
+// the sign of the value) and truncating gives `round` for every input, ties
+// included.
+impl ConvertFrom<f64> for i32 {
+    #[inline]
+    // max/min rather than clamp: NaN maps to -1.0 (see `impl_float_to_int`).
+    #[allow(clippy::manual_clamp)]
+    fn convert_from(source: f64) -> Self {
+        let v = source.max(-1.0).min(1.0);
+        let scale = if v < 0.0 {
+            2_147_483_648.0
+        } else {
+            2_147_483_647.0
+        };
+        let rounded = v * scale + 0.499_999_999_999_999_94_f64.copysign(v);
+        // SAFETY: v is finite and in [-1, 1], so -2^31 - 0.5 < rounded < 2^31
+        // and the truncation fits in i32.
+        unsafe { rounded.to_int_unchecked() }
+    }
+}
 
 // f32 -> i32: in f32 both `-(i32::MIN)` and `i32::MAX` round to 2^31, and
 // every |x| ≥ 2^23 is already an integer, so rounding is only applied below
@@ -2031,6 +2030,64 @@ mod conversion_tests {
 
         // let half_min_i16_to_i32: i32 = half_min_i16.convert_to();
         // assert_eq!(half_min_i16_to_i32, 0xC0010000); // i16::MIN/2 == -16384
+    }
+
+    /// f64 -> i32 equals clamping, scaling by -MIN / MAX and `f64::round`
+    /// (half away from zero) for random values, exact ties, the doubles
+    /// either side of every tie tried, the range ends and NaN.
+    #[test]
+    fn f64_to_i32_matches_round() {
+        let reference = |x: f64| -> i32 {
+            let v = if x.is_nan() { -1.0 } else { x.clamp(-1.0, 1.0) };
+            let scale = if v < 0.0 {
+                2_147_483_648.0
+            } else {
+                2_147_483_647.0
+            };
+            (v * scale).round() as i32
+        };
+        let mut values = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            1.5,
+            -1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..200_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let x = (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+            values.push(x);
+            // A tie in the scaled domain, and its neighbouring doubles.
+            let n = (state >> 33) as i64 - (1 << 30);
+            for scaled in [n as f64 + 0.5, n as f64 - 0.5] {
+                for t in [scaled.next_down(), scaled, scaled.next_up()] {
+                    let scale = if t < 0.0 {
+                        2_147_483_648.0
+                    } else {
+                        2_147_483_647.0
+                    };
+                    values.push(t / scale);
+                }
+            }
+        }
+        for small in [0.5f64, 1.5, 2.5] {
+            for t in [small.next_down(), small, small.next_up()] {
+                values.push(t / 2_147_483_647.0);
+                values.push(-t / 2_147_483_648.0);
+            }
+        }
+        for x in values {
+            assert_eq!(i32::convert_from(x), reference(x), "{x:e}");
+        }
     }
 
     // Edge cases for i32 conversions
