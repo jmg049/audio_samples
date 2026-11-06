@@ -334,7 +334,9 @@ impl<F: RsFloat> Engine<F> {
     /// [`Engine::run`] for samples of type `F`, each output `y` written as
     /// `y · gain` computed in `f64` (1 leaves it unchanged).
     pub(super) fn run_native(&self, x: &[F], out: &mut [MaybeUninit<F>], gain: f64) {
-        self.run_with(x, Some(x), out, &|v| v, &|v| F::of(v.as_f64() * gain));
+        let unit = gain == 1.0;
+        let put = |v: F| if unit { v } else { F::of(v.as_f64() * gain) };
+        self.run_with(x, Some(x), out, &|v| v, &put);
     }
 
     /// Resamples one channel `x` into `out`, whose length is the number of
