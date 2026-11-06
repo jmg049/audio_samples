@@ -16,11 +16,13 @@ Modes:
   extension) and one call under ``memray`` (every ``malloc``/``mmap`` in the
   process, numpy and Rust alike): peak heap bytes and allocation count.
   ``--processes N`` measures each case and configuration in N fresh processes
-  instead, each of which first warms up both libraries' calls (``--warm-both``),
-  and records the median peak. A call that allocates many small Python objects
-  (plotting) can need a new 1 MiB pymalloc arena or fit in the free space of the
-  arenas already mapped; which happens varies between processes (hash seeds,
-  address layout) and moves the peak by about 1 MiB, for either library.
+  instead, each of which first warms up both libraries' calls (``--warm-both``)
+  and has memray record Python's own small-object allocations one by one
+  (``--trace-python-allocators``), and records the median peak. Without that, a
+  call that allocates many small Python objects (plotting) can need a new 1 MiB
+  pymalloc arena or fit in the free space of the arenas already mapped; which
+  happens varies between processes (hash seeds, address layout) and moved the
+  peak by about 1 MiB, for either library.
 * ``pair``: librosa and audio_samples in one process, timed in alternating
   rounds (``--rounds``, the order swapped every round), for rows whose two
   separate ``time`` runs are within a few percent: both see the same clock
@@ -71,6 +73,8 @@ ap.add_argument("--tsv", action="store_true", help="with --list: `case config` l
 ap.add_argument("--min-time", type=float, default=None)
 ap.add_argument("--warm-both", action="store_true",
                 help="with --mode mem: warm up both libraries' calls before measuring")
+ap.add_argument("--trace-python-allocators", action="store_true",
+                help="with --mode mem: memray records each pymalloc allocation, not whole arenas")
 ap.add_argument("--processes", type=int, default=1,
                 help="with --mode mem: median over this many fresh processes per row")
 args = ap.parse_args()
@@ -257,7 +261,7 @@ def measure_mem(f):
     os.close(fd)
     os.unlink(path)
     try:
-        with memray.Tracker(path, native_traces=False):
+        with memray.Tracker(path, native_traces=False, trace_python_allocators=args.trace_python_allocators):
             r = f()
             del r
         md = memray.FileReader(path).metadata
@@ -276,7 +280,7 @@ def measure_mem_processes(case, cfg):
     recs = []
     for _ in range(args.processes):
         cmd = [sys.executable, os.path.abspath(__file__), "--lib", args.lib, "--mode", "mem",
-               "--warm-both", "--signals", args.signals, "--threads", args.threads,
+               "--warm-both", "--trace-python-allocators", "--signals", args.signals, "--threads", args.threads,
                "--cases", case.name, "--configs", cfg.id]
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         recs += [json.loads(line) for line in res.stdout.splitlines() if line.startswith("{")]
@@ -286,7 +290,8 @@ def measure_mem_processes(case, cfg):
     return {"tm_peak": statistics.median_low([r["tm_peak"] for r in recs]),
             "mr_peak": statistics.median_low([r["mr_peak"] for r in recs]),
             "mr_allocs": statistics.median_low([r["mr_allocs"] for r in recs]),
-            "process_mr_peaks": [r["mr_peak"] for r in recs], "warm_both": True}
+            "process_mr_peaks": [r["mr_peak"] for r in recs], "warm_both": True,
+            "trace_python_allocators": True}
 
 
 def measure_rss(case, cfg, build, ctx):

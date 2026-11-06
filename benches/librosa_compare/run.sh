@@ -25,7 +25,8 @@
 #             five more processes, median kept; RSS rows above librosa:
 #             ten more processes per library; memray rows above librosa:
 #             nine fresh processes per library, each warming up both
-#             libraries first, median kept (needs a report stage first)
+#             libraries first and tracing Python's small-object
+#             allocations one by one, median kept (needs a report stage first)
 #   report    tables (report.py)
 #
 # Not part of the default list (file reading, start-up and install costs; see

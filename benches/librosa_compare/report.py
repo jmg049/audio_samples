@@ -256,7 +256,8 @@ INTRO = (
     "one call (numpy and Rust allocations alike) for the two Python paths, and the counting "
     "allocator's peak live bytes for the native call. Where ours was above librosa, the Python "
     "peak is the median over nine fresh processes per library, each warming up both libraries' "
-    "calls first. Allocation counts: memray (librosa, ours "
+    "calls first, with memray counting Python's small-object allocations one by one rather "
+    "than in 1 MiB arenas. Allocation counts: memray (librosa, ours "
     "through Python) and the counting allocator (rust). Bold: audio_samples slower or larger by "
     "more than 5%.\n\n"
 )
