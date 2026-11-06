@@ -1023,6 +1023,101 @@ fn centroid_unchecked<F: AudioFloat>(s: &ArrayView3<'_, F>, freq: &[f64]) -> Arr
     out
 }
 
+/// [`spectral_centroid_from_spectrogram`] with a frequency for every bin of every
+/// frame, equivalent to `librosa.feature.spectral_centroid(S=s, freq=freq)` with a
+/// time-varying `freq` (reassigned frequencies, for example).
+///
+/// # Arguments
+///
+/// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram of element type
+///   `F` (`f32` or `f64`).
+/// * `freq` - Frequencies in Hz, `(channels, bins, frames)` or `(1, bins, frames)` for
+///   one set shared by all channels. A NaN gives a NaN centroid, as in librosa.
+///
+/// # Returns
+///
+/// A `(channels, 1, frames)` array of centroids in Hz, of element type `F`.
+///
+/// # Errors
+///
+/// [`ParameterError`] if the spectrogram is invalid or `freq` has another shape.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::features::spectral_centroid_from_spectrogram_with_freqs;
+/// use ndarray::Array3;
+///
+/// let s = Array3::<f64>::ones((1, 2, 2));
+/// let f = Array3::from_shape_vec((1, 2, 2), vec![100.0, 200.0, 300.0, 400.0]).unwrap();
+/// let c = spectral_centroid_from_spectrogram_with_freqs(s.view(), f.view()).unwrap();
+/// assert_eq!(c[[0, 0, 0]], 200.0);
+/// assert_eq!(c[[0, 0, 1]], 300.0);
+/// ```
+pub fn spectral_centroid_from_spectrogram_with_freqs<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
+    freq: ArrayView3<'_, F>,
+) -> AudioSampleResult<Array3<F>> {
+    check_spectrogram("spectral_centroid", &s)?;
+    check_freq_matrix("spectral_centroid", &freq, &s)?;
+    Ok(centroid_varying(&s, &freq))
+}
+
+fn check_freq_matrix<F: AudioFloat>(
+    what: &str,
+    freq: &ArrayView3<'_, F>,
+    s: &ArrayView3<'_, F>,
+) -> AudioSampleResult<()> {
+    let (n_ch, n_bins, n_frames) = s.dim();
+    if freq.dim() != (n_ch, n_bins, n_frames) && freq.dim() != (1, n_bins, n_frames) {
+        return Err(config_err(
+            what,
+            format!(
+                "freq has shape {:?}, expected ({n_ch}, {n_bins}, {n_frames}) or (1, {n_bins}, {n_frames})",
+                freq.dim()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The frequencies of channel `c` in bin `k` for frames `t0..t0 + len`, in a
+/// standard-layout `freq`.
+fn freq_row<'a, F: AudioFloat>(
+    freq: &'a ndarray::ArrayBase<ndarray::CowRepr<'_, F>, ndarray::Ix3>,
+    c: usize,
+    k: usize,
+    t0: usize,
+    len: usize,
+) -> &'a [F] {
+    let (n_ch, n_bins, n_frames) = freq.dim();
+    let start = (if n_ch == 1 { 0 } else { c } * n_bins + k) * n_frames + t0;
+    &freq.as_slice().expect("standard layout")[start..start + len]
+}
+
+fn centroid_varying<F: AudioFloat>(s: &ArrayView3<'_, F>, freq: &ArrayView3<'_, F>) -> Array3<F> {
+    let freq = freq.as_standard_layout();
+    let (n_ch, n_bins, n_frames) = s.dim();
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let mut len = vec![F::zero(); n_frames];
+    for c in 0..n_ch {
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let len = &mut len[..w];
+            l1_lengths_tile(&tile, len);
+            let o = &mut o[t0..t0 + w];
+            for k in 0..n_bins {
+                let fk = freq_row(&freq, c, k, t0, w);
+                for (((o, &v), &l), &f) in o.iter_mut().zip(row(&tile, k)).zip(len.iter()).zip(fk) {
+                    *o += f * (v / l);
+                }
+            }
+        });
+    }
+    out
+}
+
 /// Computes the order-`p` spectral bandwidth of every frame, equivalent to
 /// `librosa.feature.spectral_bandwidth(S=s, freq=freq, centroid=centroid, p=p, norm=norm)`.
 ///
@@ -1143,6 +1238,128 @@ pub fn spectral_bandwidth_from_spectrogram<F: AudioFloat>(
     Ok(out)
 }
 
+/// [`spectral_bandwidth_from_spectrogram`] with a frequency for every bin of every
+/// frame, equivalent to `librosa.feature.spectral_bandwidth(S=s, freq=freq, ...)` with
+/// a time-varying `freq`.
+///
+/// # Arguments
+///
+/// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram of element type
+///   `F` (`f32` or `f64`).
+/// * `freq` - Frequencies in Hz, `(channels, bins, frames)` or `(1, bins, frames)`.
+/// * `centroid` - Optional precomputed `(channels, 1, frames)` centroid; `None`
+///   computes it with [`spectral_centroid_from_spectrogram_with_freqs`].
+/// * `config` - Only `p` and `norm` are used.
+///
+/// # Returns
+///
+/// A `(channels, 1, frames)` array in Hz, of element type `F`.
+///
+/// # Errors
+///
+/// [`ParameterError`] if the spectrogram is invalid, `freq` or `centroid` has the wrong
+/// shape, or `p` is zero or not finite.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::features::{
+///     SpectralBandwidthConfig, spectral_bandwidth_from_spectrogram_with_freqs,
+/// };
+/// use ndarray::Array3;
+///
+/// let s = Array3::<f64>::ones((1, 2, 1));
+/// let f = Array3::from_shape_vec((1, 2, 1), vec![0.0, 100.0]).unwrap();
+/// let bw = spectral_bandwidth_from_spectrogram_with_freqs(
+///     s.view(), f.view(), None, &SpectralBandwidthConfig::default(),
+/// ).unwrap();
+/// assert!((bw[[0, 0, 0]] - 50.0).abs() < 1e-12);
+/// ```
+pub fn spectral_bandwidth_from_spectrogram_with_freqs<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
+    freq: ArrayView3<'_, F>,
+    centroid: Option<ArrayView3<'_, F>>,
+    config: &SpectralBandwidthConfig,
+) -> AudioSampleResult<Array3<F>> {
+    if !(config.p.is_finite() && config.p != 0.0) {
+        return Err(param_err("p", "p must be finite and non-zero"));
+    }
+    check_spectrogram("spectral_bandwidth", &s)?;
+    let (n_ch, n_bins, n_frames) = s.dim();
+    check_freq_matrix("spectral_bandwidth", &freq, &s)?;
+    let computed;
+    let centroid = match centroid {
+        Some(c) => {
+            if c.dim() != (n_ch, 1, n_frames) {
+                return Err(config_err(
+                    "spectral_bandwidth",
+                    format!(
+                        "centroid has shape {:?}, expected ({n_ch}, 1, {n_frames})",
+                        c.dim()
+                    ),
+                ));
+            }
+            c
+        }
+        None => {
+            computed = centroid_varying(&s, &freq);
+            computed.view()
+        }
+    };
+    let p = config.p;
+    let freq = freq.as_standard_layout();
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let mut len = vec![F::one(); n_frames];
+    let mut cent = vec![F::zero(); n_frames];
+    for c in 0..n_ch {
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let len = &mut len[..w];
+            if config.norm {
+                l1_lengths_tile(&tile, len);
+            }
+            let cent = &mut cent[..w];
+            for (j, ce) in cent.iter_mut().enumerate() {
+                *ce = centroid[[c, 0, t0 + j]];
+            }
+            let o = &mut o[t0..t0 + w];
+            for k in 0..n_bins {
+                let fk = freq_row(&freq, c, k, t0, w);
+                let terms = o
+                    .iter_mut()
+                    .zip(row(&tile, k))
+                    .zip(cent.iter())
+                    .zip(len.iter())
+                    .zip(fk);
+                // The same operations as `w * pow_np(|centroid - f|, p)`, with
+                // the exponent's case chosen once per row.
+                macro_rules! acc {
+                    ($pow:expr) => {
+                        for ((((o, &v), &ce), &l), &f) in terms {
+                            let dev = (f - ce).abs();
+                            let wv = if config.norm { v / l } else { v };
+                            *o += wv * $pow(dev);
+                        }
+                    };
+                }
+                if p == 1.0 {
+                    acc!(|d: F| d)
+                } else if p == 2.0 {
+                    acc!(|d: F| d * d)
+                } else if p == 0.5 {
+                    acc!(|d: F| d.sqrt())
+                } else {
+                    acc!(|d: F| d.powf(F::of(p)))
+                }
+            }
+        });
+    }
+    let inv = 1.0 / p;
+    out.mapv_inplace(|v| pow_np(v, inv));
+    Ok(out)
+}
+
 /// Computes the spectral rolloff frequency of every frame, equivalent to
 /// `librosa.feature.spectral_rolloff(S=s, freq=freq, roll_percent=...)`.
 ///
@@ -1234,6 +1451,104 @@ pub fn spectral_rolloff_from_spectrogram<F: AudioFloat>(
                     *a += v;
                     if *a >= th {
                         *o = o.min(fk);
+                    }
+                }
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// [`spectral_rolloff_from_spectrogram`] with a frequency for every bin of every frame,
+/// equivalent to `librosa.feature.spectral_rolloff(S=s, freq=freq, roll_percent=...)`
+/// with a time-varying `freq`.
+///
+/// The rolloff is the smallest frequency among bins whose cumulative magnitude reaches
+/// `roll_percent` of the frame total; NaN frequencies are skipped, as `numpy.nanmin`
+/// skips them.
+///
+/// # Arguments
+///
+/// * `s` - `(channels, bins, frames)` finite, non-negative spectrogram of element type
+///   `F` (`f32` or `f64`).
+/// * `freq` - Frequencies in Hz, `(channels, bins, frames)` or `(1, bins, frames)`.
+/// * `config` - Only `roll_percent` is used.
+///
+/// # Returns
+///
+/// A `(channels, 1, frames)` array in Hz, of element type `F`.
+///
+/// # Errors
+///
+/// [`ParameterError`] if `roll_percent` is not in `(0, 1)`, the spectrogram is invalid,
+/// or `freq` has another shape.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::features::{
+///     SpectralRolloffConfig, spectral_rolloff_from_spectrogram_with_freqs,
+/// };
+/// use ndarray::Array3;
+///
+/// let s = Array3::from_shape_vec((1, 4, 1), vec![1.0, 1.0, 1.0, 1.0]).unwrap();
+/// let f = Array3::from_shape_vec((1, 4, 1), vec![0.0, 15.0, 20.0, 30.0]).unwrap();
+/// let r = spectral_rolloff_from_spectrogram_with_freqs(
+///     s.view(), f.view(), &SpectralRolloffConfig::new().with_roll_percent(0.5),
+/// ).unwrap();
+/// assert_eq!(r[[0, 0, 0]], 15.0);
+/// ```
+pub fn spectral_rolloff_from_spectrogram_with_freqs<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
+    freq: ArrayView3<'_, F>,
+    config: &SpectralRolloffConfig,
+) -> AudioSampleResult<Array3<F>> {
+    let rp = config.roll_percent;
+    if !(rp > 0.0 && rp < 1.0) {
+        return Err(range_err(
+            "roll_percent",
+            rp,
+            "0 (exclusive)",
+            "1 (exclusive)",
+            "roll_percent must lie in the range (0, 1)",
+        ));
+    }
+    check_spectrogram("spectral_rolloff", &s)?;
+    let (n_ch, n_bins, n_frames) = s.dim();
+    check_freq_matrix("spectral_rolloff", &freq, &s)?;
+    let freq = freq.as_standard_layout();
+    let rp = F::of(rp);
+    let mut out = Array3::<F>::zeros((n_ch, 1, n_frames));
+    let mut acc = vec![F::zero(); n_frames];
+    let mut threshold = vec![F::zero(); n_frames];
+    for c in 0..n_ch {
+        let o = out_row(&mut out, c);
+        for_each_row_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            let w = tile.ncols();
+            let (acc, threshold) = (&mut acc[..w], &mut threshold[..w]);
+            acc.fill(F::zero());
+            for k in 0..n_bins {
+                for (a, &v) in acc.iter_mut().zip(row(&tile, k)) {
+                    *a += v;
+                }
+            }
+            for (th, &a) in threshold.iter_mut().zip(acc.iter()) {
+                *th = rp * a;
+            }
+            acc.fill(F::zero());
+            let o = &mut o[t0..t0 + w];
+            o.fill(F::nan());
+            for k in 0..n_bins {
+                let fk = freq_row(&freq, c, k, t0, w);
+                for (((a, o), &v), (&th, &f)) in acc
+                    .iter_mut()
+                    .zip(o.iter_mut())
+                    .zip(row(&tile, k))
+                    .zip(threshold.iter().zip(fk))
+                {
+                    *a += v;
+                    if *a >= th {
+                        *o = o.min(f);
                     }
                 }
             }
@@ -1660,110 +1975,220 @@ pub fn poly_features_from_spectrogram<F: AudioFloat>(
             "poly_features needs finite spectrogram values and frequencies",
         ));
     }
-    let m = config.order + 1;
-    if m > n_bins {
-        return Err(config_err(
-            "poly_features",
-            format!(
-                "order {} needs at least {m} frequency bins, got {n_bins}",
-                config.order
-            ),
-        ));
-    }
-
-    // Vandermonde matrix (numpy.vander: column j holds x^(order - j), powers by
-    // repeated multiplication), columns scaled to unit Euclidean norm.
-    let mut a = Array2::<f64>::zeros((n_bins, m));
-    for (i, &x) in freq.iter().enumerate() {
-        let mut v = 1.0;
-        for j in (0..m).rev() {
-            a[[i, j]] = v;
-            v *= x;
-        }
-    }
-    let mut scale = vec![0.0; m];
-    for i in 0..n_bins {
-        for (j, sc) in scale.iter_mut().enumerate() {
-            *sc += a[[i, j]] * a[[i, j]];
-        }
-    }
-    for sc in &mut scale {
-        *sc = sc.sqrt();
-        if *sc == 0.0 {
-            return Err(rank_deficient());
-        }
-    }
-    for i in 0..n_bins {
-        for j in 0..m {
-            a[[i, j]] /= scale[j];
-        }
-    }
-
-    // Householder QR of `a`: reflectors stored in `vs`, R in the upper triangle.
-    let mut vs: Vec<Vec<f64>> = Vec::with_capacity(m);
-    let mut betas = Vec::with_capacity(m);
-    for j in 0..m {
-        let norm = (j..n_bins)
-            .map(|i| a[[i, j]] * a[[i, j]])
-            .sum::<f64>()
-            .sqrt();
-        let alpha = if a[[j, j]] > 0.0 { -norm } else { norm };
-        let mut v: Vec<f64> = (j..n_bins).map(|i| a[[i, j]]).collect();
-        v[0] -= alpha;
-        let vtv: f64 = v.iter().map(|x| x * x).sum();
-        let beta = if vtv > 0.0 { 2.0 / vtv } else { 0.0 };
-        for col in j..m {
-            let dot: f64 = (j..n_bins).map(|i| v[i - j] * a[[i, col]]).sum();
-            for i in j..n_bins {
-                a[[i, col]] -= beta * dot * v[i - j];
-            }
-        }
-        vs.push(v);
-        betas.push(beta);
-    }
-    // Rank check with numpy.polyfit's default rcond = len(x) * eps.
-    let rmax = (0..m).map(|j| a[[j, j]].abs()).fold(0.0, f64::max);
-    let rcond = n_bins as f64 * f64::EPSILON;
-    if (0..m).any(|j| a[[j, j]].abs() <= rcond * rmax) {
-        return Err(rank_deficient());
-    }
-
-    // The factorisation, rounded to F once.
-    let vs: Vec<Vec<F>> = vs
-        .iter()
-        .map(|v| v.iter().map(|&x| F::of(x)).collect())
-        .collect();
-    let betas: Vec<F> = betas.iter().map(|&b| F::of(b)).collect();
-    let a = a.mapv(F::of);
-    let scale: Vec<F> = scale.iter().map(|&x| F::of(x)).collect();
+    let m = poly_terms(config.order, n_bins)?;
+    let fit = PolyFit::<F>::new(freq, m)?;
     let mut out = Array3::<F>::zeros((n_ch, m, n_frames));
     let mut y = vec![F::zero(); n_bins];
     for c in 0..n_ch {
         for_each_col_tile(s.index_axis(Axis(0), c), |t0, tile| {
             for tt in 0..tile.ncols() {
-                let t = t0 + tt;
                 y.copy_from_slice(col(&tile, tt));
-                for (j, (v, &beta)) in vs.iter().zip(&betas).enumerate() {
-                    let dot: F = v.iter().zip(&y[j..]).map(|(&a, &b)| a * b).sum();
-                    for (yi, &vi) in y[j..].iter_mut().zip(v) {
-                        *yi -= beta * dot * vi;
-                    }
-                }
-                // Back substitution R x = (Q^T y)[..m].
-                for j in (0..m).rev() {
-                    let mut acc = y[j];
-                    for l in j + 1..m {
-                        acc -= a[[j, l]] * out[[c, l, t]];
-                    }
-                    out[[c, j, t]] = acc / a[[j, j]];
-                }
-                for j in 0..m {
-                    out[[c, j, t]] /= scale[j];
-                }
+                fit.solve(&mut y, &mut out, c, t0 + tt);
             }
         });
     }
     Ok(out)
+}
+
+/// [`poly_features_from_spectrogram`] with a frequency for every bin of every frame,
+/// equivalent to `librosa.feature.poly_features(S=s, freq=freq, order=...)` with a
+/// time-varying `freq`. Each frame has its own fit.
+///
+/// # Arguments
+///
+/// * `s` - `(channels, bins, frames)` spectrogram (any finite values) of element type
+///   `F` (`f32` or `f64`).
+/// * `freq` - Frequencies in Hz, `(channels, bins, frames)` or `(1, bins, frames)`.
+/// * `config` - Only `order` is used.
+///
+/// # Returns
+///
+/// A `(channels, order + 1, frames)` array of coefficients of element type `F`, highest
+/// degree first.
+///
+/// # Errors
+///
+/// [`ParameterError`] if `freq` has another shape, `s` or `freq` is empty or not
+/// finite, or the fit of a frame is rank-deficient.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::features::{
+///     PolyFeaturesConfig, poly_features_from_spectrogram_with_freqs,
+/// };
+/// use ndarray::Array3;
+///
+/// let s = Array3::from_shape_vec((1, 3, 2), vec![1.0_f64, 1.0, 3.0, 2.0, 5.0, 3.0]).unwrap();
+/// let f = Array3::from_shape_vec((1, 3, 2), vec![0.0, 0.0, 1.0, 10.0, 2.0, 20.0]).unwrap();
+/// let p = poly_features_from_spectrogram_with_freqs(s.view(), f.view(), &PolyFeaturesConfig::default()).unwrap();
+/// assert!((p[[0, 0, 0]] - 2.0).abs() < 1e-12); // frame 0: slope 2
+/// assert!((p[[0, 0, 1]] - 0.1).abs() < 1e-12); // frame 1: slope 0.1
+/// ```
+pub fn poly_features_from_spectrogram_with_freqs<F: AudioFloat>(
+    s: ArrayView3<'_, F>,
+    freq: ArrayView3<'_, F>,
+    config: &PolyFeaturesConfig,
+) -> AudioSampleResult<Array3<F>> {
+    let (n_ch, n_bins, n_frames) = s.dim();
+    if n_ch == 0 || n_bins == 0 || n_frames == 0 {
+        return Err(config_err(
+            "poly_features",
+            "the spectrogram must be non-empty",
+        ));
+    }
+    check_freq_matrix("poly_features", &freq, &s)?;
+    if !all_finite(&s) || !all_finite(&freq) {
+        return Err(param_err(
+            "spectrogram",
+            "poly_features needs finite spectrogram values and frequencies",
+        ));
+    }
+    let m = poly_terms(config.order, n_bins)?;
+    let mut out = Array3::<F>::zeros((n_ch, m, n_frames));
+    let mut y = vec![F::zero(); n_bins];
+    let mut x = vec![0.0; n_bins];
+    let shared = freq.dim().0 == 1;
+    let mut failure = Ok(());
+    for c in 0..n_ch {
+        let fc = freq.index_axis(Axis(0), if shared { 0 } else { c });
+        for_each_col_tile(s.index_axis(Axis(0), c), |t0, tile| {
+            for tt in 0..tile.ncols() {
+                if failure.is_err() {
+                    return;
+                }
+                let t = t0 + tt;
+                for (xi, f) in x.iter_mut().zip(fc.column(t)) {
+                    *xi = f.as_f64();
+                }
+                match PolyFit::<F>::new(&x, m) {
+                    Ok(fit) => {
+                        y.copy_from_slice(col(&tile, tt));
+                        fit.solve(&mut y, &mut out, c, t);
+                    }
+                    Err(e) => failure = Err(e),
+                }
+            }
+        });
+    }
+    failure.map(|()| out)
+}
+
+/// The number of polynomial coefficients for `order`, at most `n_bins`.
+fn poly_terms(order: usize, n_bins: usize) -> AudioSampleResult<usize> {
+    let m = order + 1;
+    if m > n_bins {
+        return Err(config_err(
+            "poly_features",
+            format!("order {order} needs at least {m} frequency bins, got {n_bins}"),
+        ));
+    }
+    Ok(m)
+}
+
+/// The Householder QR factorisation of the Vandermonde matrix of the frequencies,
+/// computed in `f64` and rounded to `F` once.
+struct PolyFit<F> {
+    vs: Vec<Vec<F>>,
+    betas: Vec<F>,
+    a: Array2<F>,
+    scale: Vec<F>,
+}
+
+impl<F: AudioFloat> PolyFit<F> {
+    fn new(freq: &[f64], m: usize) -> AudioSampleResult<Self> {
+        let n_bins = freq.len();
+        // Vandermonde matrix (numpy.vander: column j holds x^(order - j), powers by
+        // repeated multiplication), columns scaled to unit Euclidean norm.
+        let mut a = Array2::<f64>::zeros((n_bins, m));
+        for (i, &x) in freq.iter().enumerate() {
+            let mut v = 1.0;
+            for j in (0..m).rev() {
+                a[[i, j]] = v;
+                v *= x;
+            }
+        }
+        let mut scale = vec![0.0; m];
+        for i in 0..n_bins {
+            for (j, sc) in scale.iter_mut().enumerate() {
+                *sc += a[[i, j]] * a[[i, j]];
+            }
+        }
+        for sc in &mut scale {
+            *sc = sc.sqrt();
+            if *sc == 0.0 {
+                return Err(rank_deficient());
+            }
+        }
+        for i in 0..n_bins {
+            for j in 0..m {
+                a[[i, j]] /= scale[j];
+            }
+        }
+
+        // Householder QR of `a`: reflectors stored in `vs`, R in the upper triangle.
+        let mut vs: Vec<Vec<f64>> = Vec::with_capacity(m);
+        let mut betas = Vec::with_capacity(m);
+        for j in 0..m {
+            let norm = (j..n_bins)
+                .map(|i| a[[i, j]] * a[[i, j]])
+                .sum::<f64>()
+                .sqrt();
+            let alpha = if a[[j, j]] > 0.0 { -norm } else { norm };
+            let mut v: Vec<f64> = (j..n_bins).map(|i| a[[i, j]]).collect();
+            v[0] -= alpha;
+            let vtv: f64 = v.iter().map(|x| x * x).sum();
+            let beta = if vtv > 0.0 { 2.0 / vtv } else { 0.0 };
+            for col in j..m {
+                let dot: f64 = (j..n_bins).map(|i| v[i - j] * a[[i, col]]).sum();
+                for i in j..n_bins {
+                    a[[i, col]] -= beta * dot * v[i - j];
+                }
+            }
+            vs.push(v);
+            betas.push(beta);
+        }
+        // Rank check with numpy.polyfit's default rcond = len(x) * eps.
+        let rmax = (0..m).map(|j| a[[j, j]].abs()).fold(0.0, f64::max);
+        let rcond = n_bins as f64 * f64::EPSILON;
+        if (0..m).any(|j| a[[j, j]].abs() <= rcond * rmax) {
+            return Err(rank_deficient());
+        }
+
+        // The factorisation, rounded to F once.
+        Ok(Self {
+            vs: vs
+                .iter()
+                .map(|v| v.iter().map(|&x| F::of(x)).collect())
+                .collect(),
+            betas: betas.iter().map(|&b| F::of(b)).collect(),
+            a: a.mapv(F::of),
+            scale: scale.iter().map(|&x| F::of(x)).collect(),
+        })
+    }
+
+    /// Writes the coefficients of the frame `y` (overwritten) to `out[[c, .., t]]`.
+    #[inline]
+    fn solve(&self, y: &mut [F], out: &mut Array3<F>, c: usize, t: usize) {
+        let m = self.scale.len();
+        for (j, (v, &beta)) in self.vs.iter().zip(&self.betas).enumerate() {
+            let dot: F = v.iter().zip(&y[j..]).map(|(&a, &b)| a * b).sum();
+            for (yi, &vi) in y[j..].iter_mut().zip(v) {
+                *yi -= beta * dot * vi;
+            }
+        }
+        // Back substitution R x = (Q^T y)[..m].
+        for j in (0..m).rev() {
+            let mut acc = y[j];
+            for l in j + 1..m {
+                acc -= self.a[[j, l]] * out[[c, l, t]];
+            }
+            out[[c, j, t]] = acc / self.a[[j, j]];
+        }
+        for j in 0..m {
+            out[[c, j, t]] /= self.scale[j];
+        }
+    }
 }
 
 fn rank_deficient() -> AudioSampleError {

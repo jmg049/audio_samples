@@ -9,7 +9,7 @@
 //! the logical element order, so a kernel computes the same values, in the
 //! same order of operations, for every layout.
 
-use ndarray::{ArrayView2, ShapeBuilder};
+use ndarray::{ArrayView2, ShapeBuilder, Slice};
 
 /// Target size in bytes of one copied tile (inside L2).
 const TILE_BYTES: usize = 256 * 1024;
@@ -200,5 +200,78 @@ mod tests {
             check_row_tiles(rev);
             check_col_tiles(rev);
         }
+    }
+}
+
+/// The elements an [`ndarray::Slice`] selects on an axis of length `n`, with
+/// out-of-range bounds clipped as NumPy clips them (ndarray itself panics).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(feature = "beat-tracking", feature = "sequence")),
+    allow(dead_code)
+)]
+pub(crate) struct SliceBins {
+    /// The first element selected.
+    pub(crate) first: usize,
+    /// The number of elements selected.
+    pub(crate) count: usize,
+    /// The distance between consecutive elements (never zero).
+    pub(crate) step: isize,
+}
+
+#[cfg_attr(
+    not(any(feature = "beat-tracking", feature = "sequence")),
+    allow(dead_code)
+)]
+impl SliceBins {
+    /// `None` if the step is zero.
+    pub(crate) fn new(slice: Slice, n: usize) -> Option<Self> {
+        if slice.step == 0 {
+            return None;
+        }
+        let len = n as isize;
+        let resolve = |i: isize| (if i < 0 { i + len } else { i }).clamp(0, len) as usize;
+        let lo = resolve(slice.start);
+        let hi = resolve(slice.end.unwrap_or(len));
+        let step = slice.step;
+        if hi <= lo {
+            return Some(Self {
+                first: 0,
+                count: 0,
+                step,
+            });
+        }
+        Some(Self {
+            first: if step > 0 { lo } else { hi - 1 },
+            count: (hi - lo - 1) / step.unsigned_abs() + 1,
+            step,
+        })
+    }
+
+    /// The range `lo..hi`, for bins next to each other in ascending order.
+    pub(crate) fn range(first: usize, end: usize) -> Self {
+        Self {
+            first,
+            count: end - first,
+            step: 1,
+        }
+    }
+
+    /// The selected elements, in order.
+    pub(crate) fn iter(self) -> impl Iterator<Item = usize> {
+        (0..self.count as isize).map(move |i| (self.first as isize + i * self.step) as usize)
+    }
+
+    /// The equivalent in-range [`Slice`].
+    pub(crate) fn as_slice(self) -> Slice {
+        if self.count == 0 {
+            return Slice::new(0, Some(0), 1);
+        }
+        let last = self.first as isize + (self.count as isize - 1) * self.step;
+        Slice::new(
+            last.min(self.first as isize),
+            Some(last.max(self.first as isize) + 1),
+            self.step,
+        )
     }
 }

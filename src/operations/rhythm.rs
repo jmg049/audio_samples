@@ -91,7 +91,7 @@
 
 use std::num::NonZeroUsize;
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis};
+use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, Axis, Slice};
 use num_complex::Complex;
 
 use crate::audio_float::finite_float_rows;
@@ -100,6 +100,7 @@ use crate::operations::spectrum::{
     DbConfig, MelSpectrogramConfig, StftConfig, StftPadMode, istft, melspectrogram_rows,
     power_to_db, stft,
 };
+use crate::utils::layout::SliceBins;
 use crate::{
     AudioFloat, AudioSampleError, AudioSampleResult, AudioSamples, ChannelRequirement, LayoutError,
     ParameterError, ProcessingError, StandardSample,
@@ -360,6 +361,9 @@ impl Aggregate {
                 }
             }
             Self::Median => {
+                if values.is_empty() {
+                    return F::nan();
+                }
                 scratch.clear();
                 scratch.extend_from_slice(values);
                 median_in_place(scratch)
@@ -656,6 +660,94 @@ pub fn onset_strength_multi_from_db<F: AudioFloat>(
     config: &OnsetStrengthConfig,
     channels: Option<&[usize]>,
 ) -> AudioSampleResult<Array3<F>> {
+    let n_bins = s_db.dim().1;
+    let bands: Vec<SliceBins> = match channels {
+        None => vec![SliceBins::range(0, n_bins)],
+        Some(b) if n_bins > 0 => band_ranges(b, n_bins)?
+            .into_iter()
+            .map(|(lo, hi)| SliceBins::range(lo, hi))
+            .collect(),
+        Some(_) => Vec::new(),
+    };
+    onset_multi_bands(s_db, reference, config, &bands)
+}
+
+/// [`onset_strength_multi_from_db`] with the sub-bands given as slices of the bins,
+/// equivalent to `librosa.onset.onset_strength_multi(S=s_db, channels=[slice, ...])`.
+///
+/// # Arguments
+///
+/// * `s_db` - `(channels, n_bins, n_frames)` log-power spectrogram.
+/// * `reference` - Optional reference spectrogram of the same shape.
+/// * `config` - As for [`onset_strength_multi_from_db`].
+/// * `channels` - One slice of the bins per band, in any order, overlapping or not.
+///   Bounds out of range are clipped, as in NumPy. An empty slice gives NaN for the
+///   mean and the median and 0 for the sum.
+///
+/// # Returns
+///
+/// `(channels, n_bands, n_frames_out)`, with one band per slice. With
+/// `aggregate = None` the middle axis has one row per bin and `channels` is ignored.
+/// The element type is the element type `F` of `s_db`.
+///
+/// # Errors
+///
+/// [`ParameterError`] if the input is empty, `reference` has a different shape, a
+/// slice has step 0, or a slice is empty with [`Aggregate::Max`] or [`Aggregate::Min`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::rhythm::{
+///     OnsetStrengthConfig, onset_strength_multi_from_db_slices,
+/// };
+/// use ndarray::{Array3, Slice};
+///
+/// let s = Array3::from_shape_fn((1, 8, 10), |(_, b, t)| if t >= 5 { b as f64 } else { 0.0 });
+/// let bands = [Slice::new(0, Some(4), 1), Slice::new(4, None, 2)];
+/// let env = onset_strength_multi_from_db_slices(s.view(), None, &OnsetStrengthConfig::default(), &bands)
+///     .unwrap();
+/// assert_eq!(env.dim(), (1, 2, 10));
+/// assert_eq!(env[[0, 1, 7]], 5.0); // the mean of bins 4 and 6
+/// ```
+pub fn onset_strength_multi_from_db_slices<F: AudioFloat>(
+    s_db: ArrayView3<'_, F>,
+    reference: Option<ArrayView3<'_, F>>,
+    config: &OnsetStrengthConfig,
+    channels: &[Slice],
+) -> AudioSampleResult<Array3<F>> {
+    let bands = slice_bands(channels, s_db.dim().1, config.aggregate)?;
+    onset_multi_bands(s_db, reference, config, &bands)
+}
+
+/// The bands of `channels` on `n_bins` bins.
+fn slice_bands(
+    channels: &[Slice],
+    n_bins: usize,
+    aggregate: Option<Aggregate>,
+) -> AudioSampleResult<Vec<SliceBins>> {
+    channels
+        .iter()
+        .map(|&slice| {
+            let band = SliceBins::new(slice, n_bins)
+                .ok_or_else(|| param_err("channels", "a slice step must not be zero"))?;
+            if band.count == 0 && matches!(aggregate, Some(Aggregate::Max | Aggregate::Min)) {
+                return Err(param_err(
+                    "channels",
+                    "an empty slice has no maximum or minimum",
+                ));
+            }
+            Ok(band)
+        })
+        .collect()
+}
+
+fn onset_multi_bands<F: AudioFloat>(
+    s_db: ArrayView3<'_, F>,
+    reference: Option<ArrayView3<'_, F>>,
+    config: &OnsetStrengthConfig,
+    bands: &[SliceBins],
+) -> AudioSampleResult<Array3<F>> {
     let (n_ch, n_bins, n_t) = s_db.dim();
     if n_ch == 0 || n_bins == 0 || n_t == 0 {
         return Err(param_err("S", "the spectrogram must not be empty"));
@@ -676,10 +768,6 @@ pub fn onset_strength_multi_from_db<F: AudioFloat>(
     let max_size = config.max_size.get();
     let n_fft = config.mel.stft.n_fft.get();
     let hop = config.hop_length()?.get();
-    let bands = match channels {
-        None => vec![(0, n_bins)],
-        Some(b) => band_ranges(b, n_bins)?,
-    };
     let n_diff = n_t.saturating_sub(lag);
     let pad = lag + if config.center { n_fft / (2 * hop) } else { 0 };
     let full_len = n_diff + pad;
@@ -696,6 +784,7 @@ pub fn onset_strength_multi_from_db<F: AudioFloat>(
     let mut out = Array3::<F>::zeros((n_ch, n_rows, out_len));
     let mut diff = vec![F::zero(); n_bins];
     let mut scratch = Vec::with_capacity(n_bins);
+    let mut gathered = Vec::new();
     for c in 0..n_ch {
         let sc = s_db.index_axis(Axis(0), c);
         let filtered: Array2<F>;
@@ -721,10 +810,10 @@ pub fn onset_strength_multi_from_db<F: AudioFloat>(
             let len = n_diff.min(out_len.saturating_sub(pad));
             // (Nothing to write when the spectrogram is no longer than the
             // lag or the padding fills the output.)
-            for (i, &(lo, hi)) in bands.iter().enumerate().filter(|_| len > 0) {
+            for (i, band) in bands.iter().enumerate().filter(|_| len > 0) {
                 let mut orow = oc.row_mut(i);
                 let acc = &mut orow.as_slice_mut().expect("standard layout")[pad..pad + len];
-                for b in lo..hi {
+                for b in band.iter() {
                     let (sr, rr) = (&srows[b][lag..lag + len], &rrows[b][..len]);
                     for ((a, &x), &y) in acc.iter_mut().zip(sr).zip(rr) {
                         let v = x - y;
@@ -733,7 +822,7 @@ pub fn onset_strength_multi_from_db<F: AudioFloat>(
                     }
                 }
                 if config.aggregate == Some(Aggregate::Mean) {
-                    let n = F::of_usize(hi - lo);
+                    let n = F::of_usize(band.count);
                     acc.iter_mut().for_each(|a| *a /= n);
                 }
             }
@@ -750,8 +839,15 @@ pub fn onset_strength_multi_from_db<F: AudioFloat>(
                 }
                 match config.aggregate {
                     Some(agg) => {
-                        for (i, &(lo, hi)) in bands.iter().enumerate() {
-                            oc[[i, o]] = agg.reduce(&diff[lo..hi], &mut scratch, false);
+                        for (i, band) in bands.iter().enumerate() {
+                            let values = if band.step == 1 {
+                                &diff[band.first..band.first + band.count]
+                            } else {
+                                gathered.clear();
+                                gathered.extend(band.iter().map(|b| diff[b]));
+                                &gathered[..]
+                            };
+                            oc[[i, o]] = agg.reduce(values, &mut scratch, false);
                         }
                     }
                     None => {
@@ -3530,9 +3626,7 @@ pub fn hybrid_tempogram_from_envelope<F: AudioFloat>(
 /// [`ParameterError`] if `freqs` does not match the tempogram or has fewer than two
 /// values, or `factors` is empty.
 ///
-/// # Differences from librosa
-///
-/// librosa's `aggregate=None` (returning the 4-D per-bin product) is not offered.
+/// librosa's `aggregate=None` is [`metrogram_per_bin`].
 ///
 /// # Examples
 ///
@@ -3557,34 +3651,8 @@ pub fn metrogram<F: AudioFloat>(
     let default_factors = [1.0 / 3.0, 1.0 / 4.0, 1.0 / 5.0, 1.0 / 7.0];
     let factors = factors.unwrap_or(&default_factors);
     let (n_ch, n_f, n_t) = tempogram.dim();
-    if freqs.len() != n_f || n_f < 2 {
-        return Err(param_err(
-            "freqs",
-            format!(
-                "freqs must have one value per tempogram bin ({n_f}, at least 2), got {}",
-                freqs.len()
-            ),
-        ));
-    }
-    if factors.is_empty() {
-        return Err(param_err("factors", "factors must not be empty"));
-    }
-    let order = argsort_stable(freqs);
-    let xs: Vec<f64> = order.iter().map(|&k| freqs[k]).collect();
+    let points = metrogram_points::<F>(n_f, freqs, factors)?;
     let fill = F::of(fill_value);
-    // The interpolation points `factor * freqs[f]` do not depend on the
-    // channel or the frame, so each one's bracketing bins and weights are
-    // found once. The values are then computed with the operations of
-    // `interp_linear` (identical results), whole rows at a time.
-    let points: Vec<Vec<Bracket<F>>> = factors
-        .iter()
-        .map(|&factor| {
-            freqs
-                .iter()
-                .map(|&f| Bracket::new(&xs, &order, factor * f))
-                .collect()
-        })
-        .collect();
     let mut out = Array3::<F>::zeros((n_ch, factors.len(), n_t));
     if n_t == 0 {
         return Ok(out);
@@ -3612,22 +3680,7 @@ pub fn metrogram<F: AudioFloat>(
                 products.resize(n_f * n_t, F::zero());
             }
             for (f, b) in pts.iter().enumerate() {
-                let tgf = rows[f];
-                // prod[t] = interp(t) * tg[f, t]
-                match *b {
-                    Bracket::Fill => {
-                        for (p, &v) in prod.iter_mut().zip(tgf) {
-                            *p = fill * v;
-                        }
-                    }
-                    Bracket::Inside { lo, hi, den, off } => {
-                        let (ylo, yhi) = (rows[lo], rows[hi]);
-                        for (((p, &v), &a), &b2) in prod.iter_mut().zip(tgf).zip(ylo).zip(yhi) {
-                            let slope = (b2 - a) / den;
-                            *p = (slope * off + a) * v;
-                        }
-                    }
-                }
+                metrogram_product(b, &rows, f, fill, &mut prod);
                 if sum {
                     // Sequential sum over the bins (as `reduce` without
                     // pairwise summation).
@@ -3656,6 +3709,130 @@ pub fn metrogram<F: AudioFloat>(
         }
     }
     Ok(out)
+}
+
+/// The per-bin metrogram, equivalent to `librosa.feature.metrogram(tg=..., freqs=...,
+/// factors=..., aggregate=None)`: the product of each tempogram bin with the tempogram
+/// interpolated at each subharmonic of that bin's tempo, before any reduction over
+/// the tempo axis.
+///
+/// # Arguments
+///
+/// * `tempogram`, `freqs`, `factors`, `fill_value` - As [`metrogram`].
+///
+/// # Returns
+///
+/// `(channels, n_factors, n_freqs, n_frames)`, of the element type `F` of `tempogram`.
+///
+/// # Errors
+///
+/// As [`metrogram`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::rhythm::metrogram_per_bin;
+/// use ndarray::Array3;
+///
+/// let freqs: Vec<f64> = (1..=60).map(|k| 5.0 * k as f64).collect();
+/// let tg = Array3::from_shape_fn((1, 60, 4), |(_, k, _)| if k == 23 || k == 5 { 1.0 } else { 0.0 });
+/// let m = metrogram_per_bin(tg.view(), &freqs, None, 0.0).unwrap();
+/// assert_eq!(m.dim(), (1, 4, 60, 4));
+/// // 120 BPM (bin 23) has its quarter, 30 BPM (bin 5), in the tempogram.
+/// assert_eq!(m[[0, 1, 23, 0]], 1.0);
+/// ```
+pub fn metrogram_per_bin<F: AudioFloat>(
+    tempogram: ArrayView3<'_, F>,
+    freqs: &[f64],
+    factors: Option<&[f64]>,
+    fill_value: f64,
+) -> AudioSampleResult<Array4<F>> {
+    let default_factors = [1.0 / 3.0, 1.0 / 4.0, 1.0 / 5.0, 1.0 / 7.0];
+    let factors = factors.unwrap_or(&default_factors);
+    let (n_ch, n_f, n_t) = tempogram.dim();
+    let points = metrogram_points::<F>(n_f, freqs, factors)?;
+    let fill = F::of(fill_value);
+    let mut out = Array4::<F>::zeros((n_ch, factors.len(), n_f, n_t));
+    if n_t == 0 {
+        return Ok(out);
+    }
+    for c in 0..n_ch {
+        let chan = tempogram.index_axis(Axis(0), c);
+        let chan = chan.as_standard_layout();
+        let rows: Vec<&[F]> = chan
+            .as_slice()
+            .expect("standard layout")
+            .chunks_exact(n_t)
+            .collect();
+        for (h, pts) in points.iter().enumerate() {
+            let mut plane = out.slice_mut(ndarray::s![c, h, .., ..]);
+            let plane = plane.as_slice_mut().expect("standard layout");
+            for ((f, b), prod) in pts.iter().enumerate().zip(plane.chunks_exact_mut(n_t)) {
+                metrogram_product(b, &rows, f, fill, prod);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The bracket of each `factor * freqs[f]`, per factor. The interpolation points do
+/// not depend on the channel or the frame, so each one's bracketing bins and weights
+/// are found once. The values are then computed with the operations of
+/// `interp_linear` (identical results), whole rows at a time.
+fn metrogram_points<F: AudioFloat>(
+    n_f: usize,
+    freqs: &[f64],
+    factors: &[f64],
+) -> AudioSampleResult<Vec<Vec<Bracket<F>>>> {
+    if freqs.len() != n_f || n_f < 2 {
+        return Err(param_err(
+            "freqs",
+            format!(
+                "freqs must have one value per tempogram bin ({n_f}, at least 2), got {}",
+                freqs.len()
+            ),
+        ));
+    }
+    if factors.is_empty() {
+        return Err(param_err("factors", "factors must not be empty"));
+    }
+    let order = argsort_stable(freqs);
+    let xs: Vec<f64> = order.iter().map(|&k| freqs[k]).collect();
+    Ok(factors
+        .iter()
+        .map(|&factor| {
+            freqs
+                .iter()
+                .map(|&f| Bracket::new(&xs, &order, factor * f))
+                .collect()
+        })
+        .collect())
+}
+
+/// `prod[t] = interp(t) * tg[f, t]` for the bracket `b` of bin `f`.
+#[inline]
+fn metrogram_product<F: AudioFloat>(
+    b: &Bracket<F>,
+    rows: &[&[F]],
+    f: usize,
+    fill: F,
+    prod: &mut [F],
+) {
+    let tgf = rows[f];
+    match *b {
+        Bracket::Fill => {
+            for (p, &v) in prod.iter_mut().zip(tgf) {
+                *p = fill * v;
+            }
+        }
+        Bracket::Inside { lo, hi, den, off } => {
+            let (ylo, yhi) = (rows[lo], rows[hi]);
+            for (((p, &v), &a), &b2) in prod.iter_mut().zip(tgf).zip(ylo).zip(yhi) {
+                let slope = (b2 - a) / den;
+                *p = (slope * off + a) * v;
+            }
+        }
+    }
 }
 
 /// Where `xq` falls on the sorted grid `xs` for [`interp_linear`]: outside
@@ -4081,6 +4258,49 @@ fn onset_multi_of<T: StandardSample>(
     let mel = melspectrogram_rows(finite_float_rows(audio)?.view(), sr, &config.mel)?;
     let s_db = power_to_db(&mel, &config.db)?;
     onset_strength_multi_from_db(s_db.view(), None, config, channels)
+}
+
+/// Multi-band onset strength of `audio` with the sub-bands given as slices of the mel
+/// bands, equivalent to `librosa.onset.onset_strength_multi(y=y, sr=sr, channels=[slice, ...])`.
+///
+/// # Arguments
+///
+/// * `audio` - The signal.
+/// * `config` - As [`AudioRhythm::onset_strength_multi`].
+/// * `channels` - As [`onset_strength_multi_from_db_slices`].
+///
+/// # Returns
+///
+/// `(channels, n_bands, n_frames)` in `T::Float`.
+///
+/// # Errors
+///
+/// As [`AudioRhythm::onset_strength_multi`] and
+/// [`onset_strength_multi_from_db_slices`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::rhythm::{OnsetStrengthConfig, onset_strength_multi_slices};
+/// use audio_samples::{sample_rate, sine_wave};
+/// use ndarray::Slice;
+/// use std::time::Duration;
+///
+/// let audio = sine_wave::<f64>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
+/// let bands = [Slice::new(0, Some(40), 1), Slice::new(40, None, 1)];
+/// let env = onset_strength_multi_slices(&audio, &OnsetStrengthConfig::default(), &bands).unwrap();
+/// assert_eq!(env.dim(), (1, 2, 44));
+/// ```
+pub fn onset_strength_multi_slices<T: StandardSample>(
+    audio: &AudioSamples<'_, T>,
+    config: &OnsetStrengthConfig,
+    channels: &[Slice],
+) -> AudioSampleResult<Array3<T::Float>> {
+    let sr = audio.sample_rate_hz();
+    config.validate(sr)?;
+    let mel = melspectrogram_rows(finite_float_rows(audio)?.view(), sr, &config.mel)?;
+    let s_db = power_to_db(&mel, &config.db)?;
+    onset_strength_multi_from_db_slices(s_db.view(), None, config, channels)
 }
 
 /// The `(channels, n_frames)` onset strength envelope of `audio`, computed in

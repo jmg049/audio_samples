@@ -335,7 +335,7 @@ function under `audio_samples::`.
 |---|---|---|---|---|
 | `stft` | `AudioSpectrum::stft_matrix`, `operations::spectrum::stft` | `transforms` | equivalent | All `pad_mode`s, `win_length`, any `Window`. `AudioSpectrum::spectrogram_matrix` gives `abs(stft) ** power` |
 | `istft` | `AudioSpectrum::istft_matrix`, `operations::spectrum::istft` | `transforms` | equivalent with differences | `n_fft` comes from the config, and a bin-count mismatch is an error; `length = 0` is rejected |
-| `magphase` | `AudioTransforms::magphase` (`f64`), `operations::transforms::magphase` (`f32` or `f64`, on a view) | `transforms` | equivalent with differences | 2-D input only; `power` is an integer (librosa accepts any float) |
+| `magphase` | `AudioTransforms::magphase` (`f64`), `operations::transforms::magphase` (`f32` or `f64`, on a view) | `transforms` | equivalent with differences | 2-D input only; `operations::transforms::magphase_powf` for a fractional or negative `power` |
 | `reassigned_spectrogram` | `AudioFeatures::reassigned_spectrogram` (`ReassignedSpectrogramConfig`) | `feature-extraction` | equivalent | |
 | `phase_vocoder` | `operations::effects::phase_vocoder`, `operations::effects::phase_vocoder_at` (`t_out`) | `effects` | equivalent with differences | The deprecated `hop_length` / `n_fft` arguments are not accepted |
 | `griffinlim` | `operations::effects::griffinlim`, `AudioEffects::griffinlim_audio` (`GriffinLimConfig`) | `effects` | equivalent with differences | `GriffinLimInit::ZeroPhase` matches `init=None`. Random phases come from this crate's RNG; the default seed is 0 (librosa: unseeded) |
@@ -364,7 +364,7 @@ function under `audio_samples::`.
 | `pseudo_cqt` | `AudioConstantQ::pseudo_cqt` | `transforms` + `resampling` | equivalent | No resampling involved |
 | `hybrid_cqt` | `AudioConstantQ::hybrid_cqt` | `transforms` + `resampling` | equivalent with differences | Low octaves as `cqt` |
 | `icqt` | `AudioConstantQ::icqt` | `transforms` + `resampling` | equivalent with differences | Upsampling uses the crate's resampler |
-| `griffinlim_cqt` | `AudioConstantQ::griffinlim_cqt` | `transforms` + `resampling` | equivalent with differences | Only the deterministic `init=None` start |
+| `griffinlim_cqt` | `AudioConstantQ::griffinlim_cqt`, `operations::constant_q::griffinlim_cqt_random` | `transforms` + `resampling` (+ `random-generation` for random phases) | equivalent with differences | `griffinlim_cqt` is `init=None`; `griffinlim_cqt_random` is `init="random"` with this crate's RNG |
 
 ### `librosa` core: pitch, tuning and harmonics
 
@@ -427,12 +427,12 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `mfcc` | `AudioSpectrum::mfcc_frames` (`MfccConfig`), `operations::spectrum::mfcc_from_mel_db` | `transforms` | equivalent with differences | As `melspectrogram`; no 80 dB floor by default (`MfccConfig::librosa()` has it); `n_mfcc > n_mels` is an error |
 | `delta` | `operations::spectrum::delta` (`DeltaConfig`, `DeltaMode`) | `transforms` | equivalent | |
 | `stack_memory` | `operations::spectrum::stack_memory` | `transforms` | equivalent | |
-| `spectral_centroid` | `AudioFeatures::spectral_centroid_frames`, `operations::features::spectral_centroid_from_spectrogram` | `feature-extraction` | equivalent | |
-| `spectral_bandwidth` | `AudioFeatures::spectral_bandwidth_frames`, `operations::features::spectral_bandwidth_from_spectrogram` | `feature-extraction` | equivalent | |
+| `spectral_centroid` | `AudioFeatures::spectral_centroid_frames`, `operations::features::spectral_centroid_from_spectrogram`, `spectral_centroid_from_spectrogram_with_freqs` (time-varying `freq`) | `feature-extraction` | equivalent | |
+| `spectral_bandwidth` | `AudioFeatures::spectral_bandwidth_frames`, `operations::features::spectral_bandwidth_from_spectrogram`, `spectral_bandwidth_from_spectrogram_with_freqs` (time-varying `freq`) | `feature-extraction` | equivalent | |
 | `spectral_contrast` | `AudioFeatures::spectral_contrast_frames`, `operations::features::spectral_contrast_from_spectrogram` | `feature-extraction` | equivalent with differences | A band with no FFT bin is an error |
 | `spectral_flatness` | `AudioFeatures::spectral_flatness_frames`, `operations::features::spectral_flatness_from_spectrogram` | `feature-extraction` | equivalent | |
-| `spectral_rolloff` | `AudioFeatures::spectral_rolloff_frames`, `operations::features::spectral_rolloff_from_spectrogram` | `feature-extraction` | equivalent | |
-| `poly_features` | `AudioFeatures::poly_features`, `operations::features::poly_features_from_spectrogram` | `feature-extraction` | equivalent with differences | Rank-deficient fits are an error (NumPy warns and returns a minimum-norm solution) |
+| `spectral_rolloff` | `AudioFeatures::spectral_rolloff_frames`, `operations::features::spectral_rolloff_from_spectrogram`, `spectral_rolloff_from_spectrogram_with_freqs` (time-varying `freq`) | `feature-extraction` | equivalent | |
+| `poly_features` | `AudioFeatures::poly_features`, `operations::features::poly_features_from_spectrogram`, `poly_features_from_spectrogram_with_freqs` (time-varying `freq`) | `feature-extraction` | equivalent with differences | Rank-deficient fits are an error (NumPy warns and returns a minimum-norm solution) |
 | `rms` | `AudioFeatures::rms_frames`, `operations::features::rms_from_spectrogram` | `feature-extraction` | equivalent with differences | Computed in `T::Float`; librosa computes the mean square in `float32` even for `float64` input (~1e-7 relative for `f64` output) |
 | `zero_crossing_rate` | `AudioFeatures::zero_crossing_rate_frames` | `feature-extraction` | equivalent | |
 | `chroma_stft` | `AudioTonal::chroma_stft`, `operations::tonal::chroma_stft_from_spectrogram` | `feature-extraction` | equivalent with differences | Chroma basis computed in `f64`; `tuning` defaults to `0.0` (librosa: estimated); with odd `n_fft` the configured `n_fft` is used for tuning |
@@ -445,7 +445,7 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `tempo` | `AudioRhythm::tempo`, `operations::rhythm::tempo_from_envelope`, `operations::rhythm::tempo_from_tempogram` | `beat-tracking` | equivalent | Returns `(channels, 1)`, or `(channels, n_frames)` when time-varying |
 | `tempogram_ratio` | `AudioRhythm::tempogram_ratio`, `operations::rhythm::tempogram_ratio_from_tempogram` | `beat-tracking` | equivalent | |
 | `hybrid_tempogram` | `AudioRhythm::hybrid_tempogram`, `operations::rhythm::hybrid_tempogram_from_envelope` | `beat-tracking` | equivalent | |
-| `metrogram` | `operations::rhythm::metrogram` | `beat-tracking` | equivalent with differences | `aggregate=None` (the 4-D per-bin product) is not offered |
+| `metrogram` | `operations::rhythm::metrogram`, `operations::rhythm::metrogram_per_bin` (`aggregate=None`) | `beat-tracking` | equivalent | |
 | `inverse.mel_to_stft`, `inverse.mel_to_audio` | `operations::inverse::mel_to_stft`, `mel_to_audio`, `mel_to_audio_samples` (`MelInversionConfig`) | `feature-inversion` | with differences | Coordinate descent from the same start reaches a better fit than the early-stopped L-BFGS-B |
 | `inverse.mfcc_to_mel`, `inverse.mfcc_to_audio` | `operations::inverse::mfcc_to_mel`, `mfcc_to_audio` (`MfccInversionConfig`) | `feature-inversion` | equivalent, with differences for `mfcc_to_audio` as above | |
 
@@ -461,7 +461,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `preemphasis` | `AudioEffects::preemphasis`, `operations::effects::preemphasis_with_state` (`zi`, returns `zf`) | equivalent | |
 | `deemphasis` | `AudioEffects::deemphasis`, `operations::effects::deemphasis_with_state` | equivalent | |
 | `trim` | `AudioEffects::trim_db` (`SilenceConfig`) | equivalent with differences | Returns `(trimmed, (start, end))`. `SilenceConfig::new(top_db)` takes the threshold (`SilenceConfig::librosa()` is 60 dB). For `f64` input the frame RMS is `f64` (librosa: `float32`), so a frame within ~1e-6 dB of the threshold can be classified differently |
-| `split` | `AudioEffects::split_db`, `operations::effects::nonsilent_frames` | equivalent with differences | As `trim` |
+| `split` | `AudioEffects::split_db`, `operations::effects::nonsilent_frames` | equivalent with differences | As `trim`. A custom `ref` or `aggregate` is a closure of `trim_db_with`, `split_db_with`, `nonsilent_frames_with` |
 | `remix` | `AudioEffects::remix` | equivalent | |
 | `hpss` | `AudioEffects::harmonic_percussive` (`HarmonicPercussiveConfig`) | equivalent with differences | `config.stft.window` is used (librosa accepts `window` but always uses Hann) |
 | `harmonic` | `AudioEffects::harmonic` | equivalent with differences | As `hpss` |
@@ -472,7 +472,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
 | `onset.onset_strength` | `AudioRhythm::onset_strength` (`OnsetStrengthConfig`), `operations::rhythm::onset_strength_from_db` | `beat-tracking` | equivalent | Mel basis computed in `f64`; keeps librosa's 80 dB floor |
-| `onset.onset_strength_multi` | `AudioRhythm::onset_strength_multi`, `operations::rhythm::onset_strength_multi_from_db` | `beat-tracking` | equivalent | |
+| `onset.onset_strength_multi` | `AudioRhythm::onset_strength_multi`, `operations::rhythm::onset_strength_multi_from_db`; `onset_strength_multi_slices`, `onset_strength_multi_from_db_slices` (`channels` as slices) | `beat-tracking` | equivalent | |
 | `onset.onset_detect` | `AudioRhythm::onset_detect` (`OnsetDetectConfig`), `operations::rhythm::onset_detect_from_envelope` | `beat-tracking` | equivalent with differences | Mono audio only. Returns `FrameEvents` (frames, plus `samples()` and `times()` for librosa's `units=`) |
 | `onset.onset_backtrack` | `operations::rhythm::onset_backtrack`, or `OnsetDetectConfig::backtrack` | `beat-tracking` | equivalent with differences | An empty event list returns an empty vector (librosa raises) |
 | `beat.beat_track` | `AudioRhythm::beat_track` (`BeatTrackConfig`, `BeatTrack`), `operations::rhythm::beat_track_from_envelope`, `operations::rhythm::beat_track_with_bpm` | `beat-tracking` | equivalent with differences | Mono audio only. `beat_track_with_bpm` takes a fixed or time-varying tempo |
@@ -484,7 +484,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 |---|---|---|---|---|
 | `decompose` | `operations::factorization::decompose`, `nmf`, `nmf_from`, `nmf_transform` (`NmfConfig`, `NmfInit`, `NmfSolver`) | `factorization` | with differences | Implemented in the crate: coordinate descent and multiplicative updates with any β-divergence; another generator in the SVD start |
 | `hpss` | `operations::effects::hpss_spectrogram`, `operations::effects::hpss_magnitude`, `operations::effects::hpss_masks` (`HpssMaskConfig`) | `effects` | equivalent | Kernel sizes, power, margins, `mask=True` |
-| `nn_filter` | `operations::effects::nn_filter`, `operations::effects::nn_filter_recurrence` (`NnAggregate`) | `effects` | equivalent | |
+| `nn_filter` | `operations::effects::nn_filter`, `operations::effects::nn_filter_recurrence` (`NnAggregate`); `nn_filter_sparse` (`SparseRecurrence`); `nn_filter_with`, `nn_filter_sparse_with`, `nn_filter_recurrence_with` (any aggregate) | `effects` | equivalent | |
 
 ### `librosa.filters`
 
@@ -509,7 +509,7 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 | `frame` | `operations::spectrum::frame` (a copy), `operations::spectrum::frame_view` (read-only strided view, as librosa's) | `transforms` | equivalent with differences | 1-D input, last-axis framing. `AudioSampleIterators::windows` pads trailing frames; `windows_ref` / `PaddingMode::Skip` gives librosa's count |
 | `normalize` | `operations::tonal::normalize_array` (`NormalizeConfig`) | `feature-extraction` | equivalent | inf / -inf / 0 / p norms, `axis`, `threshold`, `fill` |
 | `peak_pick` | `operations::rhythm::peak_pick` (`PeakPickConfig`, `PeakPickMethod`) | `beat-tracking` | equivalent | |
-| `sync` | `operations::sequence::sync`, `operations::sequence::sync_with` (`SyncAggregate`) | `sequence` | equivalent with differences | Frame indices only (no slices); an empty index list with `pad = true` gives one segment |
+| `sync` | `operations::sequence::sync`, `operations::sequence::sync_with` (`SyncAggregate`) | `sequence` | equivalent with differences | `sync_slices`, `sync_slices_with` take slices; an empty index list with `pad = true` gives one segment |
 | `softmask` | `operations::effects::softmask` | `effects` | equivalent | |
 | `fix_length` | `AudioEditing::pad_samples_right` | `editing` | equivalent with differences | Pads only; it does not truncate a longer signal |
 | `localmax`, `localmin` | `utils::array_ops::localmax`, `utils::array_ops::localmin` | – | equivalent | Any ordered element type; any dimension |
@@ -721,19 +721,18 @@ librosa's defaults.
   `Random(Some(0))`, which is reproducible; `GriffinLimConfig::librosa()` uses
   `Random(None)` (a fresh seed per call). `GriffinLimInit::ZeroPhase` is
   deterministic and matches `init=None` to round-off.
-- `griffinlim_cqt` offers only the deterministic `init=None` start.
+- `griffinlim_cqt_random` draws its phases in the same way; `griffinlim_cqt` is
+  the deterministic `init=None` start.
 
 ### Options that are not supported
 
-- `vqt`: custom `intervals` (just intonation). Only equal temperament is supported.
-- `filters.cq_to_chroma`: the smoothing `window`.
 - `filters.window_sumsquare`: `norm`.
 - `filters.wavelet_lengths`: the public single-frequency-with-explicit-`alpha` form.
-- `feature.metrogram`: `aggregate=None`.
 - `phase_vocoder`: the deprecated `hop_length` / `n_fft` (ignored by librosa 1.0).
 - `clicks`: multichannel custom clicks.
-- `util.sync`: slice indices (frame indices only).
-- `magphase`: a fractional `power`.
+- `effects.harmonic` / `percussive` with `mask=True`: librosa documents that this
+  returns the masks, but it returns the inverse STFT of the mask taken as a
+  spectrogram. The masks are `hpss_masks`.
 
 ### Deliberate behavioural differences
 

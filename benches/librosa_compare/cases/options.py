@@ -10,7 +10,7 @@ import tempfile
 import librosa
 import numpy as np
 
-from audio_samples import AudioSamples, arrays, features, forms, io, notation, sequence
+from audio_samples import AudioSamples, arrays, effects, features, forms, io, notation, rhythm, sequence
 
 from . import Case, lcg_matrix, partial, register, vec_values
 
@@ -134,4 +134,96 @@ register(
     pair("cross_similarity_sparse", "const", lambda c: partial(librosa.segment.cross_similarity, _mat(), _mat()[:, ::2], k=5, sparse=True), lambda c: partial(sequence.cross_similarity, _mat(), _mat()[:, ::2], k=5, sparse=True), "segment.cross_similarity"),
     pair("load_segment", "const", lambda c: partial(librosa.load, _wav(), sr=None, offset=1.0, duration=1.0), lambda c: partial(forms.read_segment, _wav(), offset=1.0, duration=1.0), "load", "reads the whole file: the reader has no seek"),
     pair("stream_blocks", "const", lambda c: (lambda: list(librosa.stream(_wav(), block_length=8, frame_length=2048, hop_length=512))), lambda c: (lambda: list(forms.stream_blocks(_wav(), block_length=8, frame_length=2048, hop_length=512))), "stream", "reads the whole file: the reader has no seek"),
+)
+
+
+# Option values: fractional powers, random CQT phases, time-varying frequencies, slices,
+# the per-bin metrogram, sparse and custom nn_filter, callables, NumPy generators and
+# file objects.
+
+SLICES = [slice(0, 32), slice(32, 96, 2), slice(96, None)]
+
+
+def _reassigned(c):
+    def make():
+        freqs, _, mags = librosa.reassigned_spectrogram(c.y, sr=c.sr, fill_nan=True)
+        return np.abs(mags), np.asarray(freqs)
+
+    return c.cached("opt_reassigned", make)
+
+
+def _ftg(c):
+    def make():
+        tg = np.abs(librosa.feature.fourier_tempogram(onset_envelope=c.onset_env, sr=c.sr))[..., :-1]
+        return tg, librosa.fourier_tempo_frequencies(sr=c.sr)
+
+    return c.cached("opt_ftg", make)
+
+
+def _sync_slices(c):
+    n = c.mfcc.shape[1]
+    return [slice(i, i + 42, 2) for i in range(0, n, 21)]
+
+
+def _sparse_rec(c):
+    return c.cached("opt_sparse_rec", lambda: librosa.segment.recurrence_matrix(c.chroma, mode="affinity", sparse=True))
+
+
+def _bytes(fmt):
+    key = "bytes_" + fmt
+    if key not in _BYTES:
+        path = _wav()
+        if fmt == "flac":
+            flac = path[:-4] + ".flac"
+            io.save(flac, io.read(path, as_type=_I16()))
+            path = flac
+        with open(path, "rb") as f:
+            _BYTES[key] = f.read()
+    return _BYTES[key]
+
+
+_BYTES: dict = {}
+
+
+def _I16():
+    from audio_samples import SampleType
+
+    return SampleType.I16
+
+
+def _F32():
+    from audio_samples import SampleType
+
+    return SampleType.F32
+
+
+def _p75(x, axis):
+    return np.percentile(x, 75, axis=axis)
+
+
+def _from_file(read, fmt):
+    import io as _io
+
+    data = _bytes(fmt)
+    return lambda: read(_io.BytesIO(data))
+
+
+register(
+    pair("magphase_power", "short_mono", lambda c: partial(librosa.magphase, _Sc(c), power=1.5), lambda c: partial(AudioSamples.magphase, _Sc(c), power=1.5), "magphase"),
+    pair("griffinlim_cqt_random", "short_mono", lambda c: partial(librosa.griffinlim_cqt, np.abs(c.C), sr=c.sr, length=c.n, init="random", rng=0), lambda c: partial(AudioSamples.griffinlim_cqt, np.abs(c.C), sample_rate=c.sr, length=c.n, init="random", rng=0), "griffinlim_cqt"),
+    pair("griffinlim_rng_generator", "short_mono", lambda c: (lambda: librosa.griffinlim(_S(c), rng=np.random.default_rng(0))), lambda c: (lambda: effects.griffinlim(_S(c), rng=np.random.default_rng(0))), "griffinlim", "rng is a fresh numpy.random.Generator on each call"),
+    pair("centroid_freq2d", "short_mono", lambda c: partial(librosa.feature.spectral_centroid, S=_reassigned(c)[0], freq=_reassigned(c)[1]), lambda c: partial(features.spectral_centroid_from_spectrogram, _reassigned(c)[0], sr=c.sr, freq=_reassigned(c)[1]), "feature.spectral_centroid", "freq: reassigned frequencies"),
+    pair("bandwidth_freq2d", "short_mono", lambda c: partial(librosa.feature.spectral_bandwidth, S=_reassigned(c)[0], freq=_reassigned(c)[1]), lambda c: partial(features.spectral_bandwidth_from_spectrogram, _reassigned(c)[0], sr=c.sr, freq=_reassigned(c)[1]), "feature.spectral_bandwidth", "freq: reassigned frequencies"),
+    pair("rolloff_freq2d", "short_mono", lambda c: partial(librosa.feature.spectral_rolloff, S=_reassigned(c)[0], freq=_reassigned(c)[1]), lambda c: partial(features.spectral_rolloff_from_spectrogram, _reassigned(c)[0], sr=c.sr, freq=_reassigned(c)[1]), "feature.spectral_rolloff", "freq: reassigned frequencies"),
+    pair("poly_freq2d", "short_mono", lambda c: partial(librosa.feature.poly_features, S=_reassigned(c)[0], freq=_reassigned(c)[1]), lambda c: partial(features.poly_features_from_spectrogram, _reassigned(c)[0], sr=c.sr, freq=_reassigned(c)[1]), "feature.poly_features", "freq: reassigned frequencies"),
+    pair("onset_multi_slices", "short_mono", lambda c: partial(librosa.onset.onset_strength_multi, y=c.y, sr=c.sr, channels=SLICES), lambda c: partial(AudioSamples.new_mono(c.y, c.sr).onset_strength_multi, channels=SLICES), "onset.onset_strength_multi"),
+    pair("metrogram_none", "derived", lambda c: partial(librosa.feature.metrogram, tg=_ftg(c)[0], freqs=_ftg(c)[1], aggregate=None), lambda c: partial(rhythm.metrogram, tg=_ftg(c)[0], freqs=_ftg(c)[1], aggregate=None), "feature.metrogram"),
+    pair("sync_slices", "derived", lambda c: partial(librosa.util.sync, c.mfcc, _sync_slices(c)), lambda c: partial(sequence.sync, c.mfcc, _sync_slices(c)), "util.sync", "mfcc, slice(i, i + 42, 2) every 21 frames"),
+    pair("nn_filter_sparse", "derived", lambda c: partial(librosa.decompose.nn_filter, c.chroma, rec=_sparse_rec(c), aggregate=np.average), lambda c: partial(effects.nn_filter, c.chroma, rec=_sparse_rec(c), aggregate=np.average), "decompose.nn_filter", "rec: sparse affinity recurrence of the chroma"),
+    pair("nn_filter_max", "derived", lambda c: partial(librosa.decompose.nn_filter, c.chroma, aggregate=np.max), lambda c: partial(effects.nn_filter, c.chroma, aggregate=np.max), "decompose.nn_filter"),
+    pair("nn_filter_callable", "derived", lambda c: partial(librosa.decompose.nn_filter, c.chroma, aggregate=_p75), lambda c: partial(effects.nn_filter, c.chroma, aggregate=_p75), "decompose.nn_filter", "a Python callable (75th percentile)"),
+    pair("trim_ref_callable", "short", lambda c: partial(librosa.effects.trim, c.y, top_db=30, ref=np.median), lambda c: partial(c.a.trim_db, top_db=30, ref=np.median), "effects.trim"),
+    pair("split_aggregate_callable", "short", lambda c: partial(librosa.effects.split, c.y, top_db=30, aggregate=np.median), lambda c: partial(c.a.split_db, top_db=30, aggregate=np.median), "effects.split"),
+    pair("read_fileobj_wav", "const", lambda c: _from_file(lambda f: librosa.load(f, sr=None), "wav"), lambda c: _from_file(lambda f: io.read(f, as_type=_F32()), "wav"), "load", "10 s mono float32 WAV in a BytesIO"),
+    pair("read_fileobj_flac", "const", lambda c: _from_file(lambda f: librosa.load(f, sr=None), "flac"), lambda c: _from_file(lambda f: io.read(f, as_type=_F32()), "flac"), "load", "10 s mono 16-bit FLAC in a BytesIO"),
 )

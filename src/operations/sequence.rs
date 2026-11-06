@@ -85,6 +85,7 @@ use ndarray::{
     RemoveAxis, Slice, Zip,
 };
 
+use crate::utils::layout::SliceBins;
 use crate::{AudioFloat, AudioSampleResult, ParameterError};
 
 /// `numpy.finfo(dtype).tiny` (the smallest positive normal value of `F`), the
@@ -3669,6 +3670,9 @@ impl SyncAggregate {
             Self::Max => x.iter().copied().fold(F::neg_infinity(), F::max),
             Self::Min => x.iter().copied().fold(F::infinity(), F::min),
             Self::Median => {
+                if x.is_empty() {
+                    return F::nan();
+                }
                 let mut v = x.to_vec();
                 v.sort_unstable_by(|a, b| total_cmp(*a, *b));
                 let n = v.len();
@@ -3742,8 +3746,7 @@ fn sync_boundaries(idx: &[usize], n: usize, pad: bool) -> Vec<usize> {
 ///
 /// With an empty `idx` and `pad = true` the output has one column (the
 /// segment `[0, n_frames)`); librosa treats an empty list as a list of zero
-/// slices and returns zero columns. Only frame indices are accepted (librosa
-/// also takes a list of slices).
+/// slices and returns zero columns. A list of slices is [`sync_slices`].
 pub fn sync<F, D>(
     data: ArrayView<F, D>,
     idx: &[usize],
@@ -3845,6 +3848,112 @@ where
                 .for_each(|o, lane| *o = aggregate(lane));
             a = b;
         }
+    }
+    Ok(out)
+}
+
+/// Aggregates a feature array over given slices of its last axis, equivalent to
+/// `librosa.util.sync(data, slices, aggregate=...)`.
+///
+/// # Arguments
+///
+/// - `data` - Array of any dimension `>= 1`, frames on the last axis.
+/// - `slices` - One slice per output column, in any order, overlapping or not. As
+///   in NumPy, bounds out of range are clipped; a negative `start` or `end` counts
+///   from the end. A negative step reverses the `start..end` range, as
+///   [`ndarray::Slice`] defines it.
+/// - `aggregate` - Reduction applied to each slice. An empty slice gives NaN for the
+///   mean and the median and 0 for the sum, as NumPy does.
+///
+/// # Returns
+///
+/// `data` with the last axis replaced by one entry per slice, in the element type
+/// `F` of `data` (`f32` or `f64`).
+///
+/// # Errors
+///
+/// [`ParameterError`] if `data` is zero-dimensional, a slice has step 0, or a slice
+/// is empty with [`SyncAggregate::Max`] or [`SyncAggregate::Min`] (which have no
+/// value for no elements).
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::operations::sequence::{sync_slices, SyncAggregate};
+/// use ndarray::{Slice, array};
+///
+/// let chroma = array![[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]];
+/// let slices = [Slice::new(0, Some(2), 1), Slice::new(1, None, 2)];
+/// let synced = sync_slices(chroma.view(), &slices, SyncAggregate::Mean).unwrap();
+/// assert_eq!(synced, array![[1.5, 4.0]]);
+/// ```
+pub fn sync_slices<F, D>(
+    data: ArrayView<F, D>,
+    slices: &[Slice],
+    aggregate: SyncAggregate,
+) -> AudioSampleResult<Array<F, D>>
+where
+    F: AudioFloat,
+    D: Dimension + RemoveAxis,
+{
+    if matches!(aggregate, SyncAggregate::Max | SyncAggregate::Min) {
+        let n = data.shape().last().copied().unwrap_or(0);
+        let empty = slices
+            .iter()
+            .any(|&s| SliceBins::new(s, n).is_some_and(|b| b.count == 0));
+        if empty {
+            return err("slices", "an empty slice has no maximum or minimum");
+        }
+    }
+    sync_slices_with(data, slices, |x| aggregate.apply(x))
+}
+
+/// [`sync_slices`] with a custom aggregation function.
+///
+/// `aggregate` receives the frames of one slice for one feature, and is also called
+/// for an empty slice.
+///
+/// # Errors
+///
+/// [`ParameterError`] if `data` is zero-dimensional or a slice has step 0.
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::operations::sequence::sync_slices_with;
+/// use ndarray::{Slice, array};
+///
+/// let x = array![[1.0, -2.0, 3.0, -4.0]];
+/// let first = sync_slices_with(x.view(), &[Slice::new(0, None, -1)], |s| s[0]).unwrap();
+/// assert_eq!(first, array![[-4.0]]);
+/// ```
+pub fn sync_slices_with<F, D, A>(
+    data: ArrayView<F, D>,
+    slices: &[Slice],
+    mut aggregate: A,
+) -> AudioSampleResult<Array<F, D>>
+where
+    F: AudioFloat,
+    D: Dimension + RemoveAxis,
+    A: FnMut(ArrayView1<F>) -> F,
+{
+    if data.ndim() == 0 {
+        return err("data", "must have at least one dimension (frames last)");
+    }
+    let axis = Axis(data.ndim() - 1);
+    let n = data.len_of(axis);
+    let mut shape = data.raw_dim();
+    shape[axis.index()] = slices.len();
+    let mut out = Array::<F, D>::zeros(shape);
+    for (s, &slice) in slices.iter().enumerate() {
+        let Some(bins) = SliceBins::new(slice, n) else {
+            return err("slices", "a slice step must not be zero");
+        };
+        let seg = data.slice_axis(axis, bins.as_slice());
+        let out_s = out.index_axis_mut(axis, s);
+        Zip::from(out_s)
+            .and(seg.lanes(axis))
+            .for_each(|o, lane| *o = aggregate(lane));
     }
     Ok(out)
 }

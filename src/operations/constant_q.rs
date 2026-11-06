@@ -2821,6 +2821,140 @@ fn apply_threshold<F: AudioFloat>(x: &mut Array3<F>, threshold: Option<f64>) {
 // Trait
 // =============================================================================
 
+/// The iterations of [`AudioConstantQ::griffinlim_cqt`] from the unit phases `angles`.
+fn griffinlim_cqt_from<T: StandardSample>(
+    magnitude: &Array3<T::Float>,
+    mut angles: Array3<Complex<T::Float>>,
+    config: &CqtConfig,
+    sample_rate: SampleRate,
+    n_iter: usize,
+    momentum: f64,
+    length: Option<NonZeroUsize>,
+) -> AudioSampleResult<AudioSamples<'static, T>> {
+    if !(momentum.is_finite() && momentum >= 0.0) {
+        return Err(param_err(
+            "momentum",
+            format!("momentum={momentum} must be finite and non-negative"),
+        ));
+    }
+    let tuning = config.tuning.ok_or_else(|| {
+        param_err(
+            "tuning",
+            "griffinlim_cqt needs an explicit tuning (not None)",
+        )
+    })?;
+    let sr = f64::from(sample_rate.get());
+    let len = length.map(NonZeroUsize::get);
+    let n_bins = NonZeroUsize::new(magnitude.dim().1)
+        .ok_or_else(|| param_err("magnitude", "the magnitude has no bins"))?;
+    let fwd = config.clone().with_n_bins(Some(n_bins));
+    let mut rebuilt: Option<Array3<Complex<T::Float>>> = None;
+    let with_phase = |angles: &Array3<Complex<T::Float>>| {
+        ndarray::Zip::from(magnitude)
+            .and(angles)
+            .map_collect(|&m, &a| a * m)
+    };
+    for _ in 0..n_iter {
+        let inverse = icqt_rows(with_phase(&angles).view(), sr, config, len)?;
+        let next = vqt_rows(CowArray::from(inverse), sr, &fwd, tuning, Some(0.0))?;
+        if next.dim() != magnitude.dim() {
+            return Err(config_err(
+                "griffinlim_cqt",
+                format!(
+                    "the CQT of the reconstruction has shape {:?}, the magnitude {:?}; pass the original length",
+                    next.dim(),
+                    magnitude.dim()
+                ),
+            ));
+        }
+        let k = T::Float::of(momentum / (1.0 + momentum));
+        match &rebuilt {
+            Some(prev) => ndarray::Zip::from(&mut angles)
+                .and(&next)
+                .and(prev)
+                .for_each(|a, &r, &p| *a = r - p * k),
+            None => angles.assign(&next),
+        }
+        angles.mapv_inplace(|a| {
+            a / (a.norm() + <T::Float as num_traits::Float>::min_positive_value())
+        });
+        rebuilt = Some(next);
+    }
+    let y = icqt_rows(with_phase(&angles).view(), sr, config, len)?;
+    float_rows_to_audio::<T>(y, sample_rate, "griffinlim_cqt")
+}
+
+/// Griffin-Lim phase retrieval from a constant-Q magnitude with random initial phases,
+/// equivalent to `librosa.griffinlim_cqt(C, init="random")`.
+///
+/// # Arguments
+///
+/// * `magnitude` - `(channels, n_bins, frames)` non-negative CQT magnitude.
+/// * `config` - The forward parameters (`tuning` must be `Some`).
+/// * `sample_rate` - Sample rate of the signal.
+/// * `n_iter` - Number of iterations (librosa default 32).
+/// * `momentum` - Momentum (librosa default 0.99; must be non-negative).
+/// * `length` - Output length per channel, if known.
+/// * `seed` - `Some(seed)` makes the result reproducible; `None` draws a fresh seed
+///   on every call.
+///
+/// # Returns
+///
+/// The reconstructed audio, of sample type `T`. The iterations run in `T::Float`.
+///
+/// # Errors
+///
+/// As [`AudioConstantQ::griffinlim_cqt`].
+///
+/// # Differences from librosa
+///
+/// The phases come from this crate's RNG, not NumPy's, so the result differs from
+/// librosa's for the same seed, as [`griffinlim`](crate::operations::effects::griffinlim)
+/// does with random phases.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::operations::constant_q::{AudioConstantQ, CqtConfig, griffinlim_cqt_random};
+/// use audio_samples::{sample_rate, sine_wave};
+/// use std::time::Duration;
+///
+/// let audio = sine_wave::<f64>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
+/// let cfg = CqtConfig::default();
+/// let mag = audio.cqt(&cfg).unwrap().mapv(|z| z.norm());
+/// let y = griffinlim_cqt_random::<f64>(&mag, &cfg, sample_rate!(22050), 4, 0.99, Some(nzu!(11025)), Some(0))
+///     .unwrap();
+/// assert_eq!(y.samples_per_channel().get(), 11025);
+/// ```
+#[cfg(feature = "random-generation")]
+pub fn griffinlim_cqt_random<T: StandardSample>(
+    magnitude: &Array3<T::Float>,
+    config: &CqtConfig,
+    sample_rate: SampleRate,
+    n_iter: usize,
+    momentum: f64,
+    length: Option<NonZeroUsize>,
+    seed: Option<u64>,
+) -> AudioSampleResult<AudioSamples<'static, T>> {
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or_else(rand::random::<u64>));
+    let angles = Array3::from_shape_simple_fn(magnitude.dim(), || {
+        let phi = 2.0 * std::f64::consts::PI * rng.random::<f64>();
+        Complex::new(T::Float::of(phi.cos()), T::Float::of(phi.sin()))
+    });
+    griffinlim_cqt_from::<T>(
+        magnitude,
+        angles,
+        config,
+        sample_rate,
+        n_iter,
+        momentum,
+        length,
+    )
+}
+
 /// librosa-compatible constant-Q analysis of [`AudioSamples`]: CQT, VQT, pseudo and
 /// hybrid CQT, inverse CQT, and the chroma / tonnetz features built on the CQT.
 ///
@@ -3097,8 +3231,8 @@ pub trait AudioConstantQ {
     ///
     /// # Differences from librosa
     ///
-    /// Only the deterministic `init=None` start is provided (librosa's default is a
-    /// random phase from NumPy's generator, which cannot be reproduced).
+    /// This is the deterministic `init=None` start; librosa's default,
+    /// `init="random"`, is [`griffinlim_cqt_random`].
     ///
     /// # Examples
     ///
@@ -3390,61 +3524,19 @@ where
         momentum: f64,
         length: Option<NonZeroUsize>,
     ) -> AudioSampleResult<AudioSamples<'static, T>> {
-        if !(momentum.is_finite() && momentum >= 0.0) {
-            return Err(param_err(
-                "momentum",
-                format!("momentum={momentum} must be finite and non-negative"),
-            ));
-        }
-        let tuning = config.tuning.ok_or_else(|| {
-            param_err(
-                "tuning",
-                "griffinlim_cqt needs an explicit tuning (not None)",
-            )
-        })?;
-        let sr = f64::from(sample_rate.get());
-        let len = length.map(NonZeroUsize::get);
-        let n_bins = NonZeroUsize::new(magnitude.dim().1)
-            .ok_or_else(|| param_err("magnitude", "the magnitude has no bins"))?;
-        let fwd = config.clone().with_n_bins(Some(n_bins));
-        let mut angles = Array3::<Complex<T::Float>>::from_elem(
+        let angles = Array3::<Complex<T::Float>>::from_elem(
             magnitude.dim(),
             Complex::new(T::Float::of(1.0), T::Float::of(0.0)),
         );
-        let mut rebuilt: Option<Array3<Complex<T::Float>>> = None;
-        let with_phase = |angles: &Array3<Complex<T::Float>>| {
-            ndarray::Zip::from(magnitude)
-                .and(angles)
-                .map_collect(|&m, &a| a * m)
-        };
-        for _ in 0..n_iter {
-            let inverse = icqt_rows(with_phase(&angles).view(), sr, config, len)?;
-            let next = vqt_rows(CowArray::from(inverse), sr, &fwd, tuning, Some(0.0))?;
-            if next.dim() != magnitude.dim() {
-                return Err(config_err(
-                    "griffinlim_cqt",
-                    format!(
-                        "the CQT of the reconstruction has shape {:?}, the magnitude {:?}; pass the original length",
-                        next.dim(),
-                        magnitude.dim()
-                    ),
-                ));
-            }
-            let k = T::Float::of(momentum / (1.0 + momentum));
-            match &rebuilt {
-                Some(prev) => ndarray::Zip::from(&mut angles)
-                    .and(&next)
-                    .and(prev)
-                    .for_each(|a, &r, &p| *a = r - p * k),
-                None => angles.assign(&next),
-            }
-            angles.mapv_inplace(|a| {
-                a / (a.norm() + <T::Float as num_traits::Float>::min_positive_value())
-            });
-            rebuilt = Some(next);
-        }
-        let y = icqt_rows(with_phase(&angles).view(), sr, config, len)?;
-        float_rows_to_audio::<T>(y, sample_rate, "griffinlim_cqt")
+        griffinlim_cqt_from::<T>(
+            magnitude,
+            angles,
+            config,
+            sample_rate,
+            n_iter,
+            momentum,
+            length,
+        )
     }
 
     #[cfg(feature = "feature-extraction")]

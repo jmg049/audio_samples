@@ -26,6 +26,7 @@ mod linalg;
 mod mellin;
 mod non_finite;
 mod notation;
+mod option_values;
 mod options;
 mod pitch;
 mod pitch_filterbank;

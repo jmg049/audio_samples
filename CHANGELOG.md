@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **More of librosa's option values.** `operations::transforms::magphase_powf` takes any
+  `power`. `constant_q::griffinlim_cqt_random` starts Griffin-Lim from random phases
+  (`init="random"`, this crate's RNG). `spectral_{centroid,bandwidth,rolloff}_from_spectrogram_with_freqs`
+  and `poly_features_from_spectrogram_with_freqs` take a frequency for every bin of every frame.
+  `rhythm::onset_strength_multi_slices` / `onset_strength_multi_from_db_slices` and
+  `sequence::sync_slices` / `sync_slices_with` take `ndarray::Slice`s. `rhythm::metrogram_per_bin`
+  is `metrogram(aggregate=None)`. `effects::nn_filter_sparse` takes a compressed sparse column
+  matrix (`SparseRecurrence`, with SciPy's `i32` or `i64` indices), and `nn_filter_with`,
+  `nn_filter_sparse_with` and `nn_filter_recurrence_with` any aggregate. `effects::trim_db_with`,
+  `split_db_with` and `nonsilent_frames_with` take closures for the reference level and the
+  channel combination. Each is checked against librosa 1.0.0 golden fixtures.
 - **Minimum supported Rust version is now 1.95**, the version the `non-empty-slice`,
   `non-empty-iter` and `non-zero-size` dependencies require.
 - **Everything else librosa 1.0 computes.** New modules: `operations::linalg` (feature `linalg`:

@@ -1110,21 +1110,8 @@ pub fn nonsilent_frames<F: AudioFloat>(
     if len == 0 || n_channels == 0 {
         return Err(AudioSampleError::empty_data("nonsilent_frames"));
     }
-    let fl = config.frame_length.get();
-    let hop = config.hop_length.get();
-    let pad = fl / 2;
-    let n_frames = 1 + (len + 2 * pad - fl) / hop;
-    let mut rms = Array2::<F>::zeros((n_channels, n_frames));
-    let fl_f = F::of_usize(fl);
-    let signal = signal.as_standard_layout();
-    for (c, row) in signal.outer_iter().enumerate() {
-        let x = row.to_slice().expect("rows of a standard-layout array");
-        // Zero padding: the padded zeros add exact zeros to the sums.
-        let sums = frame_square_sums(x, fl, hop, pad, StftPadMode::Constant, n_frames);
-        for (r, &sum) in rms.row_mut(c).iter_mut().zip(&sums) {
-            *r = (sum / fl_f).sqrt();
-        }
-    }
+    let rms = silence_frame_rms(signal, config);
+    let n_frames = rms.ncols();
     let db_cfg = DbConfig::amplitude()
         .with_reference(config.reference)
         .with_top_db(None)
@@ -1143,6 +1130,221 @@ pub fn nonsilent_frames<F: AudioFloat>(
             v > threshold
         })
         .collect())
+}
+
+/// The `(channels, frames)` centred, zero-padded frame RMS of a non-empty `signal`.
+fn silence_frame_rms<F: AudioFloat>(
+    signal: ArrayView2<'_, F>,
+    config: &SilenceConfig,
+) -> Array2<F> {
+    let (n_channels, len) = signal.dim();
+    let fl = config.frame_length.get();
+    let hop = config.hop_length.get();
+    let pad = fl / 2;
+    let n_frames = 1 + (len + 2 * pad - fl) / hop;
+    let mut rms = Array2::<F>::zeros((n_channels, n_frames));
+    let fl_f = F::of_usize(fl);
+    let signal = signal.as_standard_layout();
+    for (c, row) in signal.outer_iter().enumerate() {
+        let x = row.to_slice().expect("rows of a standard-layout array");
+        // Zero padding: the padded zeros add exact zeros to the sums.
+        let sums = frame_square_sums(x, fl, hop, pad, StftPadMode::Constant, n_frames);
+        for (r, &sum) in rms.row_mut(c).iter_mut().zip(&sums) {
+            *r = (sum / fl_f).sqrt();
+        }
+    }
+    rms
+}
+
+/// [`nonsilent_frames`] with a custom reference and channel combination, equivalent to
+/// librosa's `_signal_to_frame_nonsilent` with callables for `ref` and `aggregate`.
+/// `config.reference` and `config.aggregate` are not used.
+///
+/// # Arguments
+///
+/// * `signal` - `(channels, samples)` array (`f32` or `f64`) with at least one sample.
+/// * `config` - Threshold and framing.
+/// * `reference` - Receives the `(channels, frames)` frame RMS and returns the level
+///   that is 0 dB (its absolute value is used, as for a [`DbReference::Value`]).
+/// * `aggregate` - Receives the `(channels, frames)` levels in dB and returns one level
+///   per frame.
+///
+/// # Returns
+///
+/// One flag per frame.
+///
+/// # Errors
+///
+/// [`ParameterError`] if the configuration is invalid, the signal is empty or
+/// `aggregate` returns another number of frames. Errors of the closures are returned.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::operations::effects::{SilenceConfig, nonsilent_frames_with};
+/// use ndarray::{Array2, Axis};
+///
+/// let x = Array2::from_shape_fn((1, 4096), |(_, n)| if n >= 2048 { 0.5_f64 } else { 0.0 });
+/// let cfg = SilenceConfig::librosa().with_frame_length(nzu!(512)).with_hop_length(nzu!(256));
+/// let flags = nonsilent_frames_with(
+///     x.view(),
+///     &cfg,
+///     |_rms| Ok(1.0),
+///     |db| Ok(db.mean_axis(Axis(0)).unwrap()),
+/// )
+/// .unwrap();
+/// assert!(!flags[0] && flags[16]);
+/// ```
+pub fn nonsilent_frames_with<F, R, A>(
+    signal: ArrayView2<'_, F>,
+    config: &SilenceConfig,
+    reference: R,
+    aggregate: A,
+) -> AudioSampleResult<Vec<bool>>
+where
+    F: AudioFloat,
+    R: FnOnce(ArrayView2<'_, F>) -> AudioSampleResult<f64>,
+    A: FnOnce(ArrayView2<'_, F>) -> AudioSampleResult<Array1<F>>,
+{
+    config.validate()?;
+    let (n_channels, len) = signal.dim();
+    if len == 0 || n_channels == 0 {
+        return Err(AudioSampleError::empty_data("nonsilent_frames"));
+    }
+    let rms = silence_frame_rms(signal, config);
+    let db_cfg = DbConfig::amplitude()
+        .with_reference(DbReference::Value(reference(rms.view())?))
+        .with_top_db(None)
+        .with_axes(DbAxes::All);
+    let db = amplitude_to_db(&rms, &db_cfg)?;
+    let levels = aggregate(db.view())?;
+    if levels.len() != rms.ncols() {
+        return Err(config_err(
+            "nonsilent_frames",
+            format!(
+                "aggregate returned {} levels for {} frames",
+                levels.len(),
+                rms.ncols()
+            ),
+        ));
+    }
+    let threshold = F::of(-config.top_db);
+    Ok(levels.iter().map(|&v| v > threshold).collect())
+}
+
+/// [`AudioEffects::trim_db`] with a custom reference and channel combination, as
+/// [`nonsilent_frames_with`].
+///
+/// # Arguments
+///
+/// * `audio` - The signal.
+/// * `config`, `reference`, `aggregate` - As [`nonsilent_frames_with`].
+///
+/// # Returns
+///
+/// The trimmed audio and its `(start, end)` sample range in `audio`.
+///
+/// # Errors
+///
+/// As [`nonsilent_frames_with`] and [`AudioEffects::trim_db`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::effects::{SilenceConfig, trim_db_with};
+/// use audio_samples::{sample_rate, sine_wave};
+/// use ndarray::Axis;
+/// use std::time::Duration;
+///
+/// let audio = sine_wave::<f64>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
+/// let (kept, range) = trim_db_with(
+///     &audio,
+///     &SilenceConfig::librosa(),
+///     |_rms| Ok(1.0),
+///     |db| Ok(db.mean_axis(Axis(0)).unwrap()),
+/// )
+/// .unwrap();
+/// assert_eq!(range.0, 0);
+/// assert_eq!(kept.samples_per_channel().get(), range.1);
+/// ```
+#[allow(clippy::type_complexity)]
+pub fn trim_db_with<T, R, A>(
+    audio: &AudioSamples<'_, T>,
+    config: &SilenceConfig,
+    reference: R,
+    aggregate: A,
+) -> AudioSampleResult<(AudioSamples<'static, T>, (usize, usize))>
+where
+    T: StandardSample,
+    R: FnOnce(ArrayView2<'_, T::Float>) -> AudioSampleResult<f64>,
+    A: FnOnce(ArrayView2<'_, T::Float>) -> AudioSampleResult<Array1<T::Float>>,
+{
+    let rows = finite_float_rows(audio)?;
+    let flags = nonsilent_frames_with(rows.view(), config, reference, aggregate)?;
+    let (start, end) = trim_bounds(&flags, config.hop_length.get(), rows.ncols());
+    if start >= end {
+        return Err(AudioSampleError::empty_data("trim_db"));
+    }
+    let kept = rows.slice(ndarray::s![.., start..end]).to_owned();
+    Ok((
+        float_rows_to_audio(kept, audio.sample_rate(), "trim_db")?,
+        (start, end),
+    ))
+}
+
+/// [`AudioEffects::split_db`] with a custom reference and channel combination, as
+/// [`nonsilent_frames_with`].
+///
+/// # Arguments
+///
+/// * `audio` - The signal.
+/// * `config`, `reference`, `aggregate` - As [`nonsilent_frames_with`].
+///
+/// # Returns
+///
+/// `[start, end)` sample ranges of the non-silent intervals.
+///
+/// # Errors
+///
+/// As [`nonsilent_frames_with`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::effects::{SilenceConfig, split_db_with};
+/// use audio_samples::{sample_rate, sine_wave};
+/// use ndarray::Axis;
+/// use std::time::Duration;
+///
+/// let audio = sine_wave::<f64>(440.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
+/// let intervals = split_db_with(
+///     &audio,
+///     &SilenceConfig::librosa(),
+///     |_rms| Ok(1.0),
+///     |db| Ok(db.mean_axis(Axis(0)).unwrap()),
+/// )
+/// .unwrap();
+/// assert_eq!(intervals, vec![(0, 22050)]);
+/// ```
+pub fn split_db_with<T, R, A>(
+    audio: &AudioSamples<'_, T>,
+    config: &SilenceConfig,
+    reference: R,
+    aggregate: A,
+) -> AudioSampleResult<Vec<(usize, usize)>>
+where
+    T: StandardSample,
+    R: FnOnce(ArrayView2<'_, T::Float>) -> AudioSampleResult<f64>,
+    A: FnOnce(ArrayView2<'_, T::Float>) -> AudioSampleResult<Array1<T::Float>>,
+{
+    let rows = finite_float_rows(audio)?;
+    let flags = nonsilent_frames_with(rows.view(), config, reference, aggregate)?;
+    Ok(split_intervals(
+        &flags,
+        config.hop_length.get(),
+        rows.ncols(),
+    ))
 }
 
 /// `librosa.effects.trim` bounds: `(start, end)` sample indices (`start == end`
@@ -2255,6 +2457,354 @@ pub fn nn_filter<F: AudioFloat>(
             }
         }
         nn_filter_frame(data, &mut out, i, aggregate, &mut scratch)?;
+    }
+    Ok(out)
+}
+
+/// A recurrence matrix in compressed sparse column form, as `scipy.sparse.csc_array`
+/// holds it: the neighbours of frame `i` are `indices[indptr[i]..indptr[i + 1]]`.
+///
+/// The index type is `usize` for arrays of this crate; SciPy's are `i32` or `i64`, and
+/// can be used without a copy.
+#[derive(Debug, Clone, Copy)]
+pub struct SparseRecurrence<'a, F, I = usize> {
+    /// `n_frames + 1` offsets into `indices`, not decreasing.
+    pub indptr: &'a [I],
+    /// The neighbours of all frames.
+    pub indices: &'a [I],
+    /// The recurrence value of each neighbour. [`NnAggregate::WeightedAverage`] needs
+    /// them; the other aggregates do not read them.
+    pub values: Option<&'a [F]>,
+}
+
+impl<'a, F, I: Copy + num_traits::ToPrimitive> SparseRecurrence<'a, F, I> {
+    /// Checks the structure against `n_frames`.
+    fn check(&self, n_frames: usize, weighted: bool) -> AudioSampleResult<()> {
+        let at = |i: &I| i.to_usize();
+        if self.indptr.len() != n_frames + 1 {
+            return Err(config_err(
+                "nn_filter",
+                format!(
+                    "invalid self-similarity matrix: indptr has {} entries for {n_frames} frames",
+                    self.indptr.len()
+                ),
+            ));
+        }
+        let mut previous = 0;
+        for p in self.indptr {
+            match at(p) {
+                Some(p) if p >= previous && p <= self.indices.len() => previous = p,
+                _ => return Err(param_err("rec", "indptr is not a valid list of offsets")),
+            }
+        }
+        if self
+            .indices
+            .iter()
+            .any(|j| at(j).is_none_or(|j| j >= n_frames))
+        {
+            return Err(param_err("rec", "a neighbour lies outside the frames"));
+        }
+        if weighted && self.values.is_none_or(|v| v.len() != self.indices.len()) {
+            return Err(param_err(
+                "rec",
+                "the weighted average needs one recurrence value per neighbour",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The positions in `indices` of the neighbours of frame `i` (checked offsets).
+    fn range(&self, i: usize) -> std::ops::Range<usize> {
+        let at = |p: I| p.to_usize().unwrap_or(0);
+        at(self.indptr[i])..at(self.indptr[i + 1])
+    }
+}
+
+/// [`nn_filter`] on a sparse recurrence matrix, equivalent to
+/// `librosa.decompose.nn_filter(S, rec=rec, aggregate=...)` with a `scipy.sparse` `rec`.
+///
+/// Every stored entry is a neighbour, an explicit zero included, as in librosa.
+///
+/// # Arguments
+///
+/// * `data` - `(n_features, n_frames)` features, `f32` or `f64`.
+/// * `rec` - The recurrence matrix.
+/// * `aggregate` - Mean, median or recurrence-weighted average.
+///
+/// # Returns
+///
+/// The filtered `(n_features, n_frames)` array, computed in the element type of `data`.
+///
+/// # Errors
+///
+/// [`ParameterError`] if the structure of `rec` is invalid or does not match `data`,
+/// [`NnAggregate::WeightedAverage`] has no values, or the weights of a frame sum to zero.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::effects::{NnAggregate, SparseRecurrence, nn_filter_sparse};
+/// use ndarray::array;
+///
+/// let data = array![[1.0, 2.0, 3.0]];
+/// // Frame 0 takes frames 1 and 2, frame 1 frame 0, frame 2 no one.
+/// let rec = SparseRecurrence::<f64> { indptr: &[0, 2, 3, 3], indices: &[1, 2, 0], values: None };
+/// let out = nn_filter_sparse(data.view(), &rec, NnAggregate::Mean).unwrap();
+/// assert_eq!(out, array![[2.5, 1.0, 3.0]]);
+/// ```
+pub fn nn_filter_sparse<F, I>(
+    data: ArrayView2<'_, F>,
+    rec: &SparseRecurrence<'_, F, I>,
+    aggregate: NnAggregate,
+) -> AudioSampleResult<Array2<F>>
+where
+    F: AudioFloat,
+    I: Copy + num_traits::ToPrimitive,
+{
+    let weighted = aggregate == NnAggregate::WeightedAverage;
+    rec.check(data.ncols(), weighted)?;
+    let mut out = data.to_owned();
+    let mut scratch = NnScratch::default();
+    for i in 0..data.ncols() {
+        let r = rec.range(i);
+        scratch.targets.clear();
+        scratch.weights.clear();
+        scratch
+            .targets
+            .extend(rec.indices[r.clone()].iter().filter_map(|j| j.to_usize()));
+        if weighted {
+            scratch
+                .weights
+                .extend_from_slice(&rec.values.expect("checked")[r]);
+        }
+        nn_filter_frame(data, &mut out, i, aggregate, &mut scratch)?;
+    }
+    Ok(out)
+}
+
+/// Writes frame `i` of the output with a custom aggregate: `aggregate` receives the
+/// `(n_neighbours, n_features)` neighbours and fills the `n_features` output.
+fn nn_filter_frame_with<F, A>(
+    data: ArrayView2<'_, F>,
+    out: &mut Array2<F>,
+    i: usize,
+    targets: impl ExactSizeIterator<Item = usize>,
+    buffers: &mut (Vec<F>, Vec<F>),
+    aggregate: &mut A,
+) where
+    F: AudioFloat,
+    A: FnMut(ArrayView2<'_, F>, &mut [F]),
+{
+    let n_targets = targets.len();
+    if n_targets == 0 {
+        return;
+    }
+    let n_features = data.nrows();
+    let (neighbours, frame) = buffers;
+    neighbours.clear();
+    neighbours.resize(n_targets * n_features, F::zero());
+    for (chunk, j) in neighbours.chunks_exact_mut(n_features.max(1)).zip(targets) {
+        for (v, &x) in chunk.iter_mut().zip(data.column(j).iter()) {
+            *v = x;
+        }
+    }
+    frame.clear();
+    frame.resize(n_features, F::zero());
+    let view = ArrayView2::from_shape((n_targets, n_features), &neighbours[..])
+        .expect("buffer holds neighbours x features values");
+    aggregate(view, frame);
+    out.column_mut(i).assign(&ndarray::aview1(frame));
+}
+
+/// [`nn_filter`] with a custom aggregate, equivalent to
+/// `librosa.decompose.nn_filter(S, rec=rec, aggregate=f)`.
+///
+/// # Arguments
+///
+/// * `data` - `(n_features, n_frames)` features, `f32` or `f64`.
+/// * `rec` - `(n_frames, n_frames)` recurrence matrix of the same element type.
+/// * `aggregate` - Receives the `(n_neighbours, n_features)` neighbours of a frame and
+///   fills its `n_features` output. It is not called for a frame without neighbours,
+///   which is copied.
+///
+/// # Returns
+///
+/// The filtered `(n_features, n_frames)` array, in the element type of `data`.
+///
+/// # Errors
+///
+/// [`ParameterError`] if `rec` is not `(n_frames, n_frames)`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::effects::nn_filter_with;
+/// use ndarray::array;
+///
+/// let data = array![[1.0, 2.0, 3.0]];
+/// let rec = array![[0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]];
+/// let out = nn_filter_with(data.view(), rec.view(), |neighbours, frame: &mut [f64]| {
+///     for (o, col) in frame.iter_mut().zip(neighbours.columns()) {
+///         *o = col.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+///     }
+/// })
+/// .unwrap();
+/// assert_eq!(out, array![[3.0, 3.0, 2.0]]);
+/// ```
+pub fn nn_filter_with<F, A>(
+    data: ArrayView2<'_, F>,
+    rec: ArrayView2<'_, F>,
+    mut aggregate: A,
+) -> AudioSampleResult<Array2<F>>
+where
+    F: AudioFloat,
+    A: FnMut(ArrayView2<'_, F>, &mut [F]),
+{
+    let n_frames = data.ncols();
+    if rec.dim() != (n_frames, n_frames) {
+        return Err(config_err(
+            "nn_filter",
+            format!(
+                "invalid self-similarity matrix shape {:?} for data shape {:?}",
+                rec.dim(),
+                data.dim()
+            ),
+        ));
+    }
+    let mut out = data.to_owned();
+    let mut buffers = (Vec::new(), Vec::new());
+    let mut targets = Vec::new();
+    for i in 0..n_frames {
+        targets.clear();
+        targets.extend((0..n_frames).filter(|&j| rec[[j, i]] != F::zero()));
+        nn_filter_frame_with(
+            data,
+            &mut out,
+            i,
+            targets.iter().copied(),
+            &mut buffers,
+            &mut aggregate,
+        );
+    }
+    Ok(out)
+}
+
+/// [`nn_filter_sparse`] with a custom aggregate, as [`nn_filter_with`].
+///
+/// # Arguments
+///
+/// * `data` - `(n_features, n_frames)` features, `f32` or `f64`.
+/// * `rec` - The recurrence matrix; its values are not read.
+/// * `aggregate` - As [`nn_filter_with`].
+///
+/// # Returns
+///
+/// The filtered `(n_features, n_frames)` array, in the element type of `data`.
+///
+/// # Errors
+///
+/// [`ParameterError`] if the structure of `rec` is invalid or does not match `data`.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::effects::{SparseRecurrence, nn_filter_sparse_with};
+/// use ndarray::array;
+///
+/// let data = array![[1.0, 2.0, 3.0]];
+/// let rec = SparseRecurrence::<f64> { indptr: &[0, 2, 3, 3], indices: &[1, 2, 0], values: None };
+/// let out = nn_filter_sparse_with(data.view(), &rec, |neighbours, frame: &mut [f64]| {
+///     frame[0] = neighbours[[0, 0]];
+/// })
+/// .unwrap();
+/// assert_eq!(out, array![[2.0, 1.0, 3.0]]);
+/// ```
+pub fn nn_filter_sparse_with<F, I, A>(
+    data: ArrayView2<'_, F>,
+    rec: &SparseRecurrence<'_, F, I>,
+    mut aggregate: A,
+) -> AudioSampleResult<Array2<F>>
+where
+    F: AudioFloat,
+    I: Copy + num_traits::ToPrimitive,
+    A: FnMut(ArrayView2<'_, F>, &mut [F]),
+{
+    rec.check(data.ncols(), false)?;
+    let mut out = data.to_owned();
+    let mut buffers = (Vec::new(), Vec::new());
+    for i in 0..data.ncols() {
+        let targets = rec.indices[rec.range(i)]
+            .iter()
+            .map(|j| j.to_usize().unwrap_or(0));
+        nn_filter_frame_with(data, &mut out, i, targets, &mut buffers, &mut aggregate);
+    }
+    Ok(out)
+}
+
+/// [`nn_filter_recurrence`] with a custom aggregate, as [`nn_filter_with`].
+///
+/// # Arguments
+///
+/// * `data` - `(n_features, n_frames)` features, `f32` or `f64`.
+/// * `recurrence` - Neighbourhood parameters.
+/// * `aggregate` - As [`nn_filter_with`].
+///
+/// # Returns
+///
+/// The filtered `(n_features, n_frames)` array, in the element type of `data`.
+///
+/// # Errors
+///
+/// As [`recurrence_matrix_weighted`] and [`nn_filter_with`].
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::effects::nn_filter_recurrence_with;
+/// use audio_samples::operations::sequence::RecurrenceConfig;
+/// use ndarray::Array2;
+///
+/// let data = Array2::from_shape_fn((3, 40), |(f, t)| ((t % 8) as f64 + f as f64).sin());
+/// let y = nn_filter_recurrence_with(data.view(), &RecurrenceConfig::default(), |n, frame: &mut [f64]| {
+///     frame.copy_from_slice(n.row(0).as_slice().unwrap());
+/// })
+/// .unwrap();
+/// assert_eq!(y.dim(), (3, 40));
+/// ```
+pub fn nn_filter_recurrence_with<F, A>(
+    data: ArrayView2<'_, F>,
+    recurrence: &RecurrenceConfig,
+    mut aggregate: A,
+) -> AudioSampleResult<Array2<F>>
+where
+    F: AudioFloat,
+    A: FnMut(ArrayView2<'_, F>, &mut [F]),
+{
+    let Some(links) = recurrence_links(data, recurrence)? else {
+        let rec = recurrence_matrix_weighted(data, recurrence)?;
+        return nn_filter_with(data, rec.view(), aggregate);
+    };
+    let mut out = data.to_owned();
+    let mut buffers = (Vec::new(), Vec::new());
+    let mut targets = Vec::new();
+    for i in 0..links.n_frames() {
+        let (cols, vals) = links.row(i);
+        targets.clear();
+        // An affinity that underflowed to zero is no link.
+        targets.extend(
+            cols.iter()
+                .zip(vals)
+                .filter(|&(_, &w)| w != F::zero())
+                .map(|(&j, _)| j),
+        );
+        nn_filter_frame_with(
+            data,
+            &mut out,
+            i,
+            targets.iter().copied(),
+            &mut buffers,
+            &mut aggregate,
+        );
     }
     Ok(out)
 }

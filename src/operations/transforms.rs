@@ -1673,6 +1673,46 @@ pub fn magphase<F: num_traits::Float>(
     (mag, phase)
 }
 
+/// [`magphase`] with any exponent, equivalent to `librosa.magphase(D, power=power)`
+/// for a fractional or negative `power`.
+///
+/// # Arguments
+///
+/// * `complex_spect` - Complex spectrogram.
+/// * `power` - Exponent of the magnitude.
+///
+/// # Returns
+///
+/// `(magnitude ** power, phase)` with `phase = D / |D|`, and `1 + 0i` where
+/// `|D| == 0`. A zero magnitude with a negative `power` gives infinity.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::operations::transforms::magphase_powf;
+/// use ndarray::array;
+/// use num_complex::Complex;
+///
+/// let d = array![[Complex::new(3.0, 4.0), Complex::new(0.0, 0.0)]];
+/// let (mag, phase) = magphase_powf(d.view(), 0.5);
+/// assert_eq!(mag, array![[5.0_f64.sqrt(), 0.0]]);
+/// assert_eq!(phase, array![[Complex::new(0.6, 0.8), Complex::new(1.0, 0.0)]]);
+/// ```
+#[must_use]
+pub fn magphase_powf<F: num_traits::Float>(
+    complex_spect: ArrayView2<'_, Complex<F>>,
+    power: F,
+) -> (Array2<F>, Array2<Complex<F>>) {
+    let (mut mag, phase) = magphase(complex_spect, None);
+    let half = F::from(0.5).unwrap_or_else(F::nan);
+    if power == half {
+        mag.mapv_inplace(F::sqrt);
+    } else if power != F::one() {
+        mag.mapv_inplace(|x| x.powf(power));
+    }
+    (mag, phase)
+}
+
 /// Extracts the single mono channel of `audio` as an owned `Vec<f64>`, erroring
 /// on multi-channel input.
 fn mono_f64<T: StandardSample>(audio: &AudioSamples<'_, T>) -> AudioSampleResult<Vec<f64>> {
