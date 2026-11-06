@@ -1,6 +1,6 @@
 # `audio_samples` Style Guide
 
-This document defines the **coding and documentation standards** for the `audio_samples` codebase. It is intended to be used as a *systematic audit checklist* when reviewing or refactoring the project, not as informal guidance or a suggestion.
+This document defines the **coding and documentation standards** for the `audio_samples` codebase. It is a checklist to apply when writing or refactoring code in the project, not informal guidance or a suggestion.
 
 The guide applies to all Rust code in the repository, with stricter requirements for public APIs.
 
@@ -199,7 +199,7 @@ Panics are not forbidden, but they are **never implicit**.
 
 * Any panic condition must be documented
 * Panics must indicate programmer error, not recoverable failure
-* Any panic is scrutinised in review.
+* Any panic must be justified where it is written.
 
 ---
 

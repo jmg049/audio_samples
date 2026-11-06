@@ -222,11 +222,10 @@ Some operations (for example envelope followers) produce an array whose dimensio
 
 Provides supporting functionality organized by purpose:
 
-- `generation.rs`: Signal generation. Beyond the classic oscillators (`sine_wave`, `cosine_wave`, `square_wave`, `triangle_wave`, `sawtooth_wave`, `chirp`, `impulse`, `silence`, `compound_tone`, `am_signal`), this now includes exponential/log chirps (`exponential_chirp`), band-limited oscillators (`square_wave_bandlimited`, `sawtooth_wave_bandlimited`, `triangle_wave_bandlimited`), FM signals (`fm_signal`), and the noise sources `white_noise`/`pink_noise`/`brown_noise` (under `random-generation`).
+- `generation.rs`: Signal generation. Beyond the classic oscillators (`sine_wave`, `cosine_wave`, `square_wave`, `triangle_wave`, `sawtooth_wave`, `chirp`, `impulse`, `silence`, `compound_tone`, `am_signal`), this includes exponential/log chirps (`exponential_chirp`), band-limited oscillators (`square_wave_bandlimited`, `sawtooth_wave_bandlimited`, `triangle_wave_bandlimited`), FM signals (`fm_signal`), and the noise sources `white_noise`/`pink_noise`/`brown_noise` (under `random-generation`).
 - `detection.rs`: Feature detection algorithms
 - `comparison.rs`: Audio comparison and similarity metrics - `correlation`, `mse`, `snr`, `psnr`, `segmental_snr`, `log_spectral_distance`, plus per-channel variants of the first three (`correlation_per_channel`, `mse_per_channel`, `snr_per_channel`).
 - `audio_math.rs`: Audio-domain mathematical utilities and canonical unit conversions, including the librosa-compatible mel scales, frame/sample/time conversions and tuning helpers.
-In future, this may become a more general ``algorithms`` module.
 
 **Design Patterns:**
 
@@ -584,33 +583,33 @@ let resampled = audio.resample(sample_rate!(48000), ResamplingQuality::High)?;
 
 - `Fast`: anti-aliased downsampling; linear-interpolation upsampling
 - `Medium`: Kaiser-windowed sinc, balanced quality and performance
-- `High`: Kaiser-windowed sinc following soxr_hq's passband and attenuation (librosa's default resampler)
+- `High`: Kaiser-windowed sinc with its pass band to 0.913 of the lower Nyquist frequency and 125 dB of stop-band attenuation
 
 ### librosa-compatible analysis
 
-A second family of traits reproduces librosa 1.0 so that librosa pipelines can be ported one-to-one and their results compared numerically. They sit next to the older traits, which keep their own conventions (for example `AudioTransforms::mfcc` and the scalar `AudioStatistics::spectral_centroid` are not librosa's). [LIBROSA_MIGRATION.md](LIBROSA_MIGRATION.md) maps every librosa function to its counterpart and lists every difference; it is also rendered on docs.rs as the `librosa_migration` module.
+A second family of traits reproduces librosa 1.0 so that librosa pipelines can be ported one-to-one and their results compared numerically. They sit next to the older traits, which keep their own conventions (for example `AudioTransforms::mfcc` and the scalar `AudioStatistics::spectral_centroid` give different values from their librosa-compatible counterparts). [LIBROSA_MIGRATION.md](LIBROSA_MIGRATION.md) maps every librosa function to its counterpart and lists every difference; it is also rendered on docs.rs as the `librosa_migration` module.
 
 **Shared conventions**:
 
-- Every operation takes a config struct with chainable `with_<field>` builders and a `validate()` that the operation calls; invalid input is a typed error, never a panic. `X::librosa()` reproduces librosa's keyword defaults. `Default` is the crate's default, which differs from librosa only where librosa's default changes the data without being asked (dB floor, tuning estimation, beat trimming, unseeded Griffin-Lim); configs whose value must come from the caller (`YinConfig`, `PyinConfig`, `PcenConfig`, `SilenceConfig`, `PeakPickConfig`) have no `Default`.
+- Every operation takes a config struct with chainable `with_<field>` builders and a `validate()` that the operation calls; invalid input is a typed error, never a panic. `X::librosa()` is the librosa preset. `Default` is the crate's default, which differs from the preset only where the preset would change the data without being asked (dB floor, tuning estimation, beat trimming, unseeded Griffin-Lim); configs whose value must come from the caller (`YinConfig`, `PyinConfig`, `PcenConfig`, `SilenceConfig`, `PeakPickConfig`) have no `Default`.
 - Analysis runs in, and returns, `T::Float` (`AudioSample::Float`): `f32` for `u8`, `i16`, `I24` and `f32` audio, `f64` for `i32` and `f64` audio. Generic code uses the single bound `F: AudioFloat` (`src/audio_float.rs`), a sealed trait for `f32` and `f64` that includes `num_traits::Float`, `ndarray` scalar support, `Sum` and `rustfft::FftNum`, with `F::of(x)` for constants. Filter tables are computed in `f64` and rounded once. Audio-to-audio operations return the input's sample type.
 - Frame-wise outputs are `Array3` shaped `(channels, n_features, n_frames)` (mono gives one channel; per-frame scalars have `n_features == 1`). Envelopes and pitch tracks are `(channels, n_frames)`. Event detectors (`onset_detect`, `beat_track`) require mono audio and return frame indices (`FrameEvents`).
 - Audio-to-audio operations (`time_stretch`, `pitch_shift`, `preemphasis`, `trim_db`, `harmonic`, ...) have the `op` / `op_in_place` pair; analysis methods do not.
-- Pure helpers (filterbanks, windows, dB conversion on arrays, `delta`, `pcen`, `dtw`, ...) are free functions in the module that owns them, and most trait methods have a `*_from_spectrogram` / `*_from_envelope` form that takes a precomputed input, like librosa's `S=` / `onset_envelope=` arguments.
+- Pure helpers (filterbanks, windows, dB conversion on arrays, `delta`, `pcen`, `dtw`, ...) are free functions in the module that owns them, and most trait methods have a `*_from_spectrogram` / `*_from_envelope` form that takes a precomputed input.
 - A new trait is defined in its own module file with its implementation and is re-exported from `operations/traits.rs`, `operations/mod.rs` and the crate root.
 
 **Modules**:
 
-- `spectrum.rs` (`AudioSpectrum`, `transforms`): periodic-window STFT/ISTFT with every librosa `pad_mode` and `win_length`, `power_to_db` / `amplitude_to_db` with `ref` / `amin` / `top_db`, mel spectrogram, MFCC (DCT types I-III, ortho, lifter), `delta`, `stack_memory`, `frame`. It uses `realfft` directly with a thread-local planner, not the `spectrograms` crate (whose windows are symmetric).
+- `spectrum.rs` (`AudioSpectrum`, `transforms`): periodic-window STFT/ISTFT with every padding mode and `win_length`, `power_to_db` / `amplitude_to_db` with `ref` / `amin` / `top_db`, mel spectrogram, MFCC (DCT types I-III, ortho, lifter), `delta`, `stack_memory`, `frame`. It uses `realfft` directly with a thread-local planner, not the `spectrograms` crate (whose windows are symmetric).
 - `filterbanks.rs` (`transforms`): SciPy windows (`Window`, `get_window`, periodic or symmetric), `window_sumsquare`, `window_bandwidth`, and the Slaney/HTK mel filterbank (`mel_filterbank`).
 - `features.rs` (`AudioFeatures`, `feature-extraction`): spectral centroid, bandwidth, contrast, flatness, rolloff, polynomial features, RMS, zero-crossing rate (all `*_frames`), the reassigned spectrogram, PCEN, and the A/B/C/D/Z frequency weightings and perceptual weighting.
-- `tonal.rs` (`AudioTonal`, `feature-extraction`): `chroma_stft`, the chroma filterbank, `piptrack`, tuning estimation (`estimate_tuning`, `pitch_tuning`) and `normalize_array` (librosa `util.normalize`).
-- `constant_q.rs` (`AudioConstantQ`, `transforms` + `resampling`): the recursive per-octave CQT and VQT, pseudo- and hybrid CQT, iCQT, `griffinlim_cqt`, CQT/VQT chroma, CENS and tonnetz, plus `wavelet` / `wavelet_lengths` / `cq_to_chroma`. The octave decimation uses the crate's resampler (librosa uses soxr).
-- `rhythm.rs` (`AudioRhythm`, `beat-tracking`): onset strength (single and multi-band), librosa's `peak_pick`, `onset_detect` / `onset_backtrack`, autocorrelation and Fourier tempograms, `tempo`, Ellis dynamic-programming `beat_track`, `plp`, `tempogram_ratio`, `hybrid_tempogram`, `metrogram`.
-- `effects.rs` (`AudioEffects`, `effects`): librosa 1.0 phase vocoder, `time_stretch`, `pitch_shift`, pre-/de-emphasis with filter state, dB-based `trim_db` / `split_db`, `remix`, median-filter HPSS (`hpss_spectrogram`, `softmask`), Griffin-Lim, `nn_filter`, Burg LPC and `clicks`.
+- `tonal.rs` (`AudioTonal`, `feature-extraction`): `chroma_stft`, the chroma filterbank, `piptrack`, tuning estimation (`estimate_tuning`, `pitch_tuning`) and `normalize_array`.
+- `constant_q.rs` (`AudioConstantQ`, `transforms` + `resampling`): the recursive per-octave CQT and VQT, pseudo- and hybrid CQT, iCQT, `griffinlim_cqt`, CQT/VQT chroma, CENS and tonnetz, plus `wavelet` / `wavelet_lengths` / `cq_to_chroma`. The octave decimation uses the crate's resampler.
+- `rhythm.rs` (`AudioRhythm`, `beat-tracking`): onset strength (single and multi-band), `peak_pick`, `onset_detect` / `onset_backtrack`, autocorrelation and Fourier tempograms, `tempo`, Ellis dynamic-programming `beat_track`, `plp`, `tempogram_ratio`, `hybrid_tempogram`, `metrogram`.
+- `effects.rs` (`AudioEffects`, `effects`): phase vocoder, `time_stretch`, `pitch_shift`, pre-/de-emphasis with filter state, dB-based `trim_db` / `split_db`, `remix`, median-filter HPSS (`hpss_spectrogram`, `softmask`), Griffin-Lim, `nn_filter`, Burg LPC and `clicks`.
 - `pitch_tracking.rs` (`AudioPitchTracking`, `pitch-analysis`): frame-wise `yin` and `pyin` (HMM decoding through `sequence`), `salience`, `interp_harmonics`, `f0_harmonics`.
 - `sequence.rs` (`sequence`, free functions on `(n_features, n_frames)` matrices): DTW, Viterbi (plain, discriminative, binary) and transition-matrix builders, RQA, recurrence and cross-similarity matrices, lag conversions and `sync`.
-- `utils/audio_math.rs` (always on): Slaney and HTK mel scales (`MelScale`, `*_with_scale`), librosa frame/sample/time conversions with the `n_fft` offset (`frames_to_time_with_offset`, `time_to_frames_floor`, `times_like`, ...), octave and tuning helpers, `cqt_frequencies`, `key_to_notes` / `key_to_degrees`.
+- `utils/audio_math.rs` (always on): Slaney and HTK mel scales (`MelScale`, `*_with_scale`), frame/sample/time conversions with the `n_fft` offset (`frames_to_time_with_offset`, `time_to_frames_floor`, `times_like`, ...), octave and tuning helpers, `cqt_frequencies`, `key_to_notes` / `key_to_degrees`.
 
 ### Reference test suites
 
