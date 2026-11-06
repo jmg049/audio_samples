@@ -31,12 +31,21 @@
 //! | `Medium` | 0.90 · Nyquist | 100 dB from Nyquist | general use |
 //! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis |
 //!
-//! (Nyquist of the lower of the two rates.) The filter runs in two stages:
-//! the low-pass with the passband, transition band and attenuation above at
-//! the input rate or twice it, evaluated by FFT, then a short interpolator
-//! (12-48 taps, 30 dB more attenuation) from that rate to the exact output
-//! positions. 1 : 2 upsampling and decimation by a power of two up to 64 are
-//! the first stage alone. The interpolator has one exact filter phase per
+//! (Nyquist of the lower of the two rates.) Downsampling by a ratio `L / M`
+//! (in lowest terms) whose terms have no prime factor above 7, such as
+//! 22050 Hz to 16000 or 8000 Hz or 48000 Hz to 44100 Hz, runs block by block
+//! in the frequency domain: each block of input is transformed, its bins
+//! below the output Nyquist frequency are multiplied by the filter's
+//! response and transformed back with `L / M` times as many points, which
+//! gives the filtered signal at the exact output positions. That is the
+//! filter evaluated directly, except that its response above the output
+//! Nyquist frequency (below the stopband attenuation) is dropped rather than
+//! aliased into the band. Other ratios run in two stages: the low-pass with
+//! the passband, transition band and attenuation above at the input rate or
+//! twice it, evaluated by FFT, then a short interpolator (12-48 taps, 30 dB
+//! more attenuation) from that rate to the exact output positions. 1 : 2
+//! upsampling and decimation by a power of two up to 64 are the first stage
+//! alone. The interpolator has one exact filter phase per
 //! output phase when the ratio `L / M` (in lowest terms) has at most 2^15
 //! output phases, otherwise a table of 4096 phases per sample, linearly
 //! interpolated. Ratios whose low-pass is longer than 2^14 taps (decimation by
@@ -496,6 +505,114 @@ enum Plan {
         up: usize,
         b: Arc<Kernel>,
     },
+    /// Downsampling by `l / m` in blocks by FFT: each block's spectrum is
+    /// filtered and transformed back at the output rate (see [`DftSpec`]).
+    Dft(Arc<DftSpec>),
+}
+
+/// Downsampling by `l / m` (in lowest terms, `l < m`) evaluated block by
+/// block in the frequency domain.
+///
+/// Block `b` reads the `n1 = a · m` input samples from `b · hop - half` on
+/// (`hop` a multiple of `m`), transforms them, multiplies the bins below the
+/// output Nyquist frequency by the spectrum of the low-pass `h` (sampled at
+/// whole input samples) and transforms those bins back with `n2 = a · l`
+/// points: that is the filtered block, band-limited to the output Nyquist
+/// frequency, sampled at the output rate. Its first `hop · l / m` samples are
+/// outputs `b · hop · l / m ..`, whose filter windows lie inside the block.
+///
+/// Every output is the windowed-sinc filter evaluated at its exact position
+/// (as [`Plan::Direct`] computes it), except that the filter's own response
+/// above the output Nyquist frequency, below the stopband attenuation, is
+/// left out instead of aliased into the band, and a part at that level
+/// depends on the rest of the block. [`StreamingResampler`] converts the
+/// same blocks, so it holds back up to one block of input.
+#[derive(Debug)]
+struct DftSpec {
+    l: usize,
+    m: usize,
+    /// Block length factor: `n1 = a · m`, `n2 = a · l` (both even).
+    a: usize,
+    /// The filter spans `[-half, half]` input samples.
+    half: usize,
+    /// `h(d)` for `d = -half ..= half`.
+    taps: Vec<f64>,
+}
+
+/// Largest forward transform (complex points, `n1 / 2`) of a [`Plan::Dft`].
+const DFT_MAX_POINTS: usize = 1 << 15;
+
+/// Whether `n` has no prime factor above 7 (fast mixed-radix transforms).
+fn smooth(mut n: usize) -> bool {
+    for p in [2, 3, 5, 7] {
+        while n.is_multiple_of(p) {
+            n /= p;
+        }
+    }
+    n == 1
+}
+
+/// The block length factor `a` of a [`Plan::Dft`] for `l / m` and a filter
+/// spanning `[-half, half]`: the even, 7-smooth `a` with the least modelled
+/// cost per input sample (two transforms, one pass over the output bins and
+/// a fixed cost per block), or `None` when no block fits.
+fn dft_block(l: usize, m: usize, half: usize) -> Option<usize> {
+    // Transform cost: n log n, more per point for radix 3, 5 and 7 passes
+    // and for transforms that outgrow the L1 cache.
+    let fft = |n: usize| {
+        let lg = (n as f64).log2();
+        let mut radix = 1.0;
+        let mut r = n;
+        for (p, extra) in [(3, 0.06), (5, 0.04), (7, 0.1)] {
+            while r.is_multiple_of(p) {
+                r /= p;
+                radix += extra;
+            }
+        }
+        n as f64 * lg * radix * (1.0 + 0.25 * (lg - 10.0).max(0.0))
+    };
+    (2..)
+        .step_by(2)
+        .take_while(|&a| a * m / 2 <= DFT_MAX_POINTS)
+        .filter(|&a| smooth(a))
+        .filter_map(|a| {
+            let n1 = a * m;
+            let hop = n1.checked_sub(2 * half)? / m * m;
+            (hop > 0).then(|| {
+                let cost =
+                    (fft(n1 / 2) + fft(a * l / 2) + 8.0 * (a * l / 2) as f64 + 1e4) / hop as f64;
+                (a, cost)
+            })
+        })
+        .min_by(|x, y| x.1.total_cmp(&y.1))
+        .map(|t| t.0)
+}
+
+/// The [`Plan::Dft`] for downsampling `in_sr -> out_sr`, when the ratio in
+/// lowest terms has 7-smooth terms and a block fits.
+fn dft_plan(in_sr: u32, out_sr: u32, spec: FilterSpec) -> Option<Plan> {
+    let g = gcd(u64::from(in_sr), u64::from(out_sr));
+    let (l, m) = (
+        (u64::from(out_sr) / g) as usize,
+        (u64::from(in_sr) / g) as usize,
+    );
+    if l >= m || !smooth(l) || !smooth(m) {
+        return None;
+    }
+    let lower = l as f64 / m as f64;
+    let (half_lower, h) = sinc_kernel(spec, lower);
+    let half = (half_lower / lower).ceil() as usize;
+    let a = dft_block(l, m, half)?;
+    let taps = (-(half as i64)..=half as i64)
+        .map(|d| h(d as f64))
+        .collect();
+    Some(Plan::Dft(Arc::new(DftSpec {
+        l,
+        m,
+        a,
+        half,
+        taps,
+    })))
 }
 
 /// Shape of stage B when stage A runs at `up · in_sr`: `(l, m, half,
@@ -600,6 +717,9 @@ fn plan(in_sr: u32, out_sr: u32, quality: ResamplingQuality) -> AudioSampleResul
     }
     if stage_a_half(spec, l, m) * stage_a_up(in_sr, out_sr, spec) as f64 > FFT_MAX_HALF as f64 {
         return Ok(Plan::Direct(cached_kernel(in_sr, out_sr, quality)?));
+    }
+    if let Some(dft) = dft_plan(in_sr, out_sr, spec) {
+        return Ok(dft);
     }
     let a = cached_stage_kernel(in_sr, out_sr, quality, Stage::A)?;
     let b = cached_stage_kernel(in_sr, out_sr, quality, Stage::B)?;
@@ -1100,11 +1220,116 @@ impl ChainState {
     }
 }
 
+/// Streaming evaluation of a [`Plan::Dft`]: the input is buffered until a
+/// whole block is available, and each block is converted exactly as
+/// [`resample`] converts it (so the output equals it, block for block).
+struct DftState {
+    stage: engine::DftStage<f64>,
+    bufs: engine::DftBufs<f64>,
+    /// Per channel, the input from the next block's start on (zeros before
+    /// the signal).
+    pending: Vec<Vec<f64>>,
+    /// Input samples received per channel.
+    received: u64,
+    /// Outputs produced per channel.
+    produced: u64,
+    l: u64,
+    m: u64,
+}
+
+impl std::fmt::Debug for DftState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DftState")
+            .field("received", &self.received)
+            .field("produced", &self.produced)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DftState {
+    fn new(spec: &DftSpec, channels: usize) -> Self {
+        let stage = engine::DftStage::new(spec);
+        let bufs = engine::DftBufs::new(&stage);
+        let mut state = Self {
+            stage,
+            bufs,
+            pending: vec![Vec::new(); channels],
+            received: 0,
+            produced: 0,
+            l: spec.l as u64,
+            m: spec.m as u64,
+        };
+        state.reset();
+        state
+    }
+
+    fn reset(&mut self) {
+        let half = self.stage.half();
+        for p in &mut self.pending {
+            p.clear();
+            p.resize(half, 0.0);
+        }
+        self.received = 0;
+        self.produced = 0;
+    }
+
+    /// Converts every whole block in `pending`, at most `limit` outputs in
+    /// total.
+    fn blocks(&mut self, limit: u64) -> Vec<Vec<f64>> {
+        let (n1, hop, hop_out) = (
+            self.stage.block_len(),
+            self.stage.hop(),
+            self.stage.hop_out(),
+        );
+        let mut out: Vec<Vec<f64>> = vec![Vec::new(); self.pending.len()];
+        let mut done = 0;
+        while self.pending[0].len() - done >= n1 && self.produced < limit {
+            let n = (limit - self.produced).min(hop_out as u64) as usize;
+            for (p, o) in self.pending.iter().zip(out.iter_mut()) {
+                let at = o.len();
+                o.resize(at + n, 0.0);
+                self.stage
+                    .block(&p[done..done + n1], &mut self.bufs, &mut o[at..]);
+            }
+            self.produced += n as u64;
+            done += hop;
+        }
+        for p in &mut self.pending {
+            p.drain(..done);
+        }
+        out
+    }
+
+    fn process(&mut self, input: &[&[f64]]) -> Vec<Vec<f64>> {
+        for (p, x) in self.pending.iter_mut().zip(input) {
+            p.extend_from_slice(x);
+        }
+        self.received += input.first().map_or(0, |x| x.len()) as u64;
+        self.blocks(u64::MAX)
+    }
+
+    /// Converts the rest, the input extended with zeros: `ceil(n · l / m)`
+    /// outputs in total.
+    fn finish(&mut self) -> Vec<Vec<f64>> {
+        let total =
+            (u128::from(self.received) * u128::from(self.l)).div_ceil(u128::from(self.m)) as u64;
+        let blocks = (total - self.produced).div_ceil(self.stage.hop_out() as u64) as usize;
+        let need = blocks.saturating_sub(1) * self.stage.hop() + self.stage.block_len();
+        for p in &mut self.pending {
+            if p.len() < need {
+                p.resize(need, 0.0);
+            }
+        }
+        self.blocks(total)
+    }
+}
+
 /// Streaming state for any [`Plan`].
 #[derive(Debug)]
 enum StreamState {
     Single(PolyphaseState),
     Chain(ChainState),
+    Dft(Box<DftState>),
 }
 
 impl StreamState {
@@ -1118,6 +1343,7 @@ impl StreamState {
                 let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
                 Self::Chain(ChainState::new(a, b, channels, l, m))
             }
+            Plan::Dft(spec) => Self::Dft(Box::new(DftState::new(&spec, channels))),
         }
     }
 
@@ -1125,6 +1351,7 @@ impl StreamState {
         match self {
             Self::Single(s) => s.process(input),
             Self::Chain(c) => c.process(input),
+            Self::Dft(d) => d.process(input),
         }
     }
 
@@ -1132,6 +1359,7 @@ impl StreamState {
         match self {
             Self::Single(s) => s.finish(),
             Self::Chain(c) => c.finish(),
+            Self::Dft(d) => d.finish(),
         }
     }
 
@@ -1139,6 +1367,7 @@ impl StreamState {
         match self {
             Self::Single(s) => s.reset(),
             Self::Chain(c) => c.reset(),
+            Self::Dft(d) => d.reset(),
         }
     }
 }
@@ -1238,7 +1467,22 @@ where
     let from_f = |v: F| T::from_float(<T::Float as AudioFloat>::of(v.as_f64()));
     let spare = &mut flat.spare_capacity_mut()[..channels * n_out];
     let mut run = |c: usize, x: &[T]| {
-        engine.run(x, &mut spare[c * n_out..(c + 1) * n_out], &to_f, &from_f);
+        let out = &mut spare[c * n_out..(c + 1) * n_out];
+        if T::SAMPLE_TYPE == <F as AudioSample>::SAMPLE_TYPE {
+            // SAFETY: `T` is `F` (each sample type has its own `SAMPLE_TYPE`).
+            let (x, out) = unsafe {
+                (
+                    std::slice::from_raw_parts(x.as_ptr().cast::<F>(), x.len()),
+                    std::slice::from_raw_parts_mut(
+                        out.as_mut_ptr().cast::<std::mem::MaybeUninit<F>>(),
+                        out.len(),
+                    ),
+                )
+            };
+            engine.run_native(x, out);
+        } else {
+            engine.run(x, out, &to_f, &from_f);
+        }
     };
     if let Some(mono) = audio.as_mono() {
         match mono.as_slice() {
@@ -1368,9 +1612,23 @@ fn resample_rows_in<T: AudioFloat, F: engine::RsFloat>(
         let dst = unsafe {
             &mut *(std::ptr::from_mut(&mut dst[..keep]) as *mut [std::mem::MaybeUninit<T>])
         };
-        match row.as_slice() {
-            Some(x) => engine.run(x, dst, &to_f, &from_f),
-            None => engine.run(&row.to_vec(), dst, &to_f, &from_f),
+        let row = row
+            .as_slice()
+            .map_or_else(|| row.to_vec().into(), std::borrow::Cow::Borrowed);
+        if T::SAMPLE_TYPE == <F as AudioSample>::SAMPLE_TYPE {
+            // SAFETY: `T` is `F` (each sample type has its own `SAMPLE_TYPE`).
+            let (x, out) = unsafe {
+                (
+                    std::slice::from_raw_parts(row.as_ptr().cast::<F>(), row.len()),
+                    std::slice::from_raw_parts_mut(
+                        dst.as_mut_ptr().cast::<std::mem::MaybeUninit<F>>(),
+                        dst.len(),
+                    ),
+                )
+            };
+            engine.run_native(x, out);
+        } else {
+            engine.run(&row, dst, &to_f, &from_f);
         }
     }
     Ok(out)
@@ -1709,7 +1967,9 @@ impl<T: StandardSample> StreamingResampler<T> {
 
     /// Feed the next chunk of input audio (must have the channel count this
     /// resampler was constructed with). Returns `Ok(None)` if no output sample
-    /// could be completed yet (the filter's look-ahead is not yet filled).
+    /// could be completed yet (the filter's look-ahead is not yet filled; for
+    /// ratios converted block by block, see the [module documentation](self),
+    /// until a whole block of input has arrived).
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Parameter`] if the chunk's channel count
@@ -2220,6 +2480,42 @@ mod tests {
                         "{in_sr} -> {out_sr} {quality:?} n={n}: {err:e}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The block-wise plan gives the windowed-sinc filter evaluated directly at
+    /// every output position, to well below the stopband level.
+    #[test]
+    fn test_block_plan_matches_single_filter() {
+        for (in_sr, out_sr) in [
+            (22050, 8000),
+            (48000, 16000),
+            (44100, 32000),
+            (48000, 44100),
+        ] {
+            for quality in [ResamplingQuality::Medium, ResamplingQuality::High] {
+                assert!(matches!(
+                    plan(in_sr, out_sr, quality).unwrap(),
+                    Plan::Dft(_)
+                ));
+                let n = 40009;
+                let x: Vec<f64> = (0..n)
+                    .map(|i| (i as f64 * 0.21).sin() * 0.7 + 0.3 * (i as f64 * 0.0123).cos())
+                    .collect();
+                let kernel = cached_kernel(in_sr, out_sr, quality).unwrap();
+                let mut state = PolyphaseState::new(kernel, 1);
+                let mut direct = state.process(&[&x]).remove(0);
+                direct.extend(state.finish().remove(0));
+                let audio = mono(x, SampleRate::new(in_sr).unwrap());
+                let y = resample(&audio, SampleRate::new(out_sr).unwrap(), quality).unwrap();
+                let y = y.as_mono().unwrap().to_vec();
+                assert_eq!(y.len(), direct.len());
+                let err = y
+                    .iter()
+                    .zip(&direct)
+                    .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+                assert!(err < 1e-6, "{in_sr} -> {out_sr} {quality:?}: {err:e}");
             }
         }
     }

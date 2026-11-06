@@ -59,6 +59,18 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
     /// [`RsFloat::down2_bins`] with `Zb = 0`: `w = Z · P + conj(Z[-k]) · Q`
     /// (see [`FftStage::pair_fir2`]).
     fn fir2_bins(w: &mut [Complex<Self>], z: &[Complex<Self>], t: &Bins<Self>);
+    /// The bins of a block-wise conversion (see [`DftStage`]):
+    /// `w[k] = C1 Z[k] + C2 conj(Z[-k]) + C3 conj(Z[M2 - k]) + C4 Z[M - M2 + k]`
+    /// for `k < w.len() = M2`, `Z` of length `M`, with the coefficients in
+    /// split form in `tab0` (bin 0) and `tab` (see [`DftStage::tab`]).
+    /// `simd`: AVX2 + FMA code (only when the CPU has them).
+    fn dft_bins(
+        w: &mut [Complex<Self>],
+        z: &[Complex<Self>],
+        tab0: &[Complex<Self>; 8],
+        tab: &[Complex<Self>],
+        simd: bool,
+    );
     /// Complex products `dst[i] = a[i] · b[i]` (`ACC`: `dst[i] += ...`).
     fn cmul<const ACC: bool>(dst: &mut [Complex<Self>], a: &[Complex<Self>], b: &[Complex<Self>]);
     /// Runs `f` with this thread's complex FFT planner for this type.
@@ -79,7 +91,7 @@ thread_local! {
 }
 
 macro_rules! rs_float {
-    ($t:ty, $dot:ident, $dot4:ident, $rows4:ident, $interp:ident, $cmul:ident, $down2:ident, $planner:ident, $engines:ident) => {
+    ($t:ty, $dot:ident, $dot4:ident, $rows4:ident, $interp:ident, $cmul:ident, $down2:ident, $dft:ident, $planner:ident, $engines:ident) => {
         impl RsFloat for $t {
             #[inline(always)]
             fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self {
@@ -150,6 +162,24 @@ macro_rules! rs_float {
             }
 
             #[inline(always)]
+            fn dft_bins(
+                w: &mut [Complex<Self>],
+                z: &[Complex<Self>],
+                tab0: &[Complex<Self>; 8],
+                tab: &[Complex<Self>],
+                simd: bool,
+            ) {
+                #[cfg(target_arch = "x86_64")]
+                if simd {
+                    // SAFETY: `simd` is only set on CPUs with AVX2 and FMA.
+                    unsafe { simd::$dft(w, z, tab0, tab) };
+                    return;
+                }
+                let _ = simd;
+                dft_bins_portable(w, z, tab0, tab, 0, w.len());
+            }
+
+            #[inline(always)]
             fn cmul<const ACC: bool>(
                 dst: &mut [Complex<Self>],
                 a: &[Complex<Self>],
@@ -183,6 +213,7 @@ rs_float!(
     interp_f32,
     cmul_f32,
     down2_f32,
+    dft_f32,
     PLANNER_F32,
     ENGINES_F32
 );
@@ -194,6 +225,7 @@ rs_float!(
     interp_f64,
     cmul_f64,
     down2_f64,
+    dft_f64,
     PLANNER_F64,
     ENGINES_F64
 );
@@ -249,36 +281,59 @@ pub(super) fn cached_engine<F: RsFloat>(
 
 /// A plan prepared for evaluation in `F`.
 pub(super) struct Engine<F> {
-    a: FftStage<F>,
-    b: Option<Interp<F>>,
+    stages: Stages<F>,
     avx2_fma: bool,
+}
+
+/// The evaluation of a plan: FFT stage A and the optional stage B, or the
+/// block-wise frequency-domain conversion.
+enum Stages<F> {
+    Fft {
+        a: Box<FftStage<F>>,
+        b: Option<Interp<F>>,
+    },
+    Dft(DftStage<F>),
 }
 
 impl<F: RsFloat> Engine<F> {
     /// `None` for a [`Plan::Direct`].
     fn new(plan: &Plan) -> Option<Self> {
-        let (a, b) = match plan {
+        let stages = match plan {
             Plan::Direct(_) => return None,
-            Plan::Fft { kernel, up, down } => (FftStage::new(kernel, *up, *down), None),
-            Plan::TwoStage { a, up, b } => (FftStage::new(a, *up, 1), Some(Interp::new(b))),
+            Plan::Fft { kernel, up, down } => Stages::Fft {
+                a: Box::new(FftStage::new(kernel, *up, *down)),
+                b: None,
+            },
+            Plan::TwoStage { a, up, b } => Stages::Fft {
+                a: Box::new(FftStage::new(a, *up, 1)),
+                b: Some(Interp::new(b)),
+            },
+            Plan::Dft(spec) => Stages::Dft(DftStage::new(spec)),
         };
         Some(Self {
-            a,
-            b,
+            stages,
             avx2_fma: super::has_avx2_fma_cached(),
         })
     }
 
     fn size_bytes(&self) -> usize {
-        self.a.spec.len() * std::mem::size_of::<Complex<F>>()
-            + [&self.a.down2, &self.a.fir2]
-                .iter()
-                .map(|t| t.as_ref().map_or(0, Bins::size_bytes))
-                .sum::<usize>()
-            + self
-                .b
-                .as_ref()
-                .map_or(0, |b| b.coeffs.len() * std::mem::size_of::<F>())
+        match &self.stages {
+            Stages::Fft { a, b } => {
+                a.spec.len() * std::mem::size_of::<Complex<F>>()
+                    + [&a.down2, &a.fir2]
+                        .iter()
+                        .map(|t| t.as_ref().map_or(0, Bins::size_bytes))
+                        .sum::<usize>()
+                    + b.as_ref()
+                        .map_or(0, |b| b.coeffs.len() * std::mem::size_of::<F>())
+            }
+            Stages::Dft(d) => d.tab.len() * std::mem::size_of::<Complex<F>>(),
+        }
+    }
+
+    /// [`Engine::run`] for samples of type `F`.
+    pub(super) fn run_native(&self, x: &[F], out: &mut [MaybeUninit<F>]) {
+        self.run_with(x, Some(x), out, &|v| v, &|v| v);
     }
 
     /// Resamples one channel `x` into `out`, whose length is the number of
@@ -291,11 +346,28 @@ impl<F: RsFloat> Engine<F> {
         to_f: &impl Fn(T) -> F,
         from_f: &impl Fn(F) -> T,
     ) {
+        self.run_with(x, None, out, to_f, from_f);
+    }
+
+    /// [`Engine::run`]; `native` is `x` itself when `T` is `F` (blocks inside
+    /// it are then transformed in place instead of copied).
+    fn run_with<T: Copy>(
+        &self,
+        x: &[T],
+        native: Option<&[F]>,
+        out: &mut [MaybeUninit<T>],
+        to_f: &impl Fn(T) -> F,
+        from_f: &impl Fn(F) -> T,
+    ) {
+        if let Stages::Dft(d) = &self.stages {
+            d.run(x, native, out, to_f, from_f, self.avx2_fma);
+            return;
+        }
         #[cfg(target_arch = "x86_64")]
         {
             if self.avx2_fma {
                 // SAFETY: `avx2_fma` is only true when the CPU supports AVX2 and FMA.
-                unsafe { run_avx2_fma(self, x, out, to_f, from_f) };
+                unsafe { run_avx2_fma(self, x, native, out, to_f, from_f) };
                 return;
             }
             // x86-64 CPUs without AVX2 run one portable body per float type, on a
@@ -309,7 +381,7 @@ impl<F: RsFloat> Engine<F> {
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
-        run_impl::<T, F, false>(self, x, out, to_f, from_f);
+        run_impl::<T, F, false>(self, x, native, out, to_f, from_f);
     }
 }
 
@@ -317,7 +389,7 @@ impl<F: RsFloat> Engine<F> {
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn run_portable<F: RsFloat>(e: &Engine<F>, x: &[F], out: &mut [MaybeUninit<F>]) {
-    run_impl::<F, F, false>(e, x, out, &|v| v, &|v| v);
+    run_impl::<F, F, false>(e, x, Some(x), out, &|v| v, &|v| v);
 }
 
 /// [`run_impl`] compiled for AVX2 + FMA.
@@ -329,46 +401,37 @@ fn run_portable<F: RsFloat>(e: &Engine<F>, x: &[F], out: &mut [MaybeUninit<F>]) 
 unsafe fn run_avx2_fma<T: Copy, F: RsFloat>(
     e: &Engine<F>,
     x: &[T],
+    native: Option<&[F]>,
     out: &mut [MaybeUninit<T>],
     to_f: &impl Fn(T) -> F,
     from_f: &impl Fn(F) -> T,
 ) {
-    run_impl::<T, F, true>(e, x, out, to_f, from_f);
+    run_impl::<T, F, true>(e, x, native, out, to_f, from_f);
 }
 
 #[inline(always)]
 fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     e: &Engine<F>,
     x: &[T],
+    native: Option<&[F]>,
     out: &mut [MaybeUninit<T>],
     to_f: &impl Fn(T) -> F,
     from_f: &impl Fn(F) -> T,
 ) {
-    let a = &e.a;
+    let Stages::Fft { a, b } = &e.stages else {
+        unreachable!("block-wise plans run in `DftStage::run`")
+    };
     let mut arena = PairArena::new(a);
     let mut bufs = arena.bufs();
     // Stage-A outputs per block.
     let blk = a.hop / a.down;
     let n_out = out.len() as i64;
-    let Some(b) = &e.b else {
-        // Stage A is the whole conversion: write its blocks out.
-        let (mut ya, mut yb) = (vec![F::zero(); blk], vec![F::zero(); blk]);
-        let mut k0 = 0i64;
-        while k0 < n_out {
-            a.pair(x, to_f, k0 * a.down as i64, &mut bufs, &mut ya, &mut yb);
-            let start = k0 as usize;
-            let n_a = (n_out - k0).min(blk as i64) as usize;
-            for (o, &v) in out[start..start + n_a].iter_mut().zip(&ya) {
-                o.write(from_f(v));
-            }
-            if k0 + (blk as i64) < n_out {
-                let start = start + blk;
-                let n_b = (n_out - k0 - blk as i64).min(blk as i64) as usize;
-                for (o, &v) in out[start..start + n_b].iter_mut().zip(&yb) {
-                    o.write(from_f(v));
-                }
-            }
-            k0 += 2 * blk as i64;
+    let Some(b) = b else {
+        // Stage A is the whole conversion: its blocks go straight to `out`.
+        for (k0, pair) in out.chunks_mut(2 * blk).enumerate() {
+            let (ya, yb) = pair.split_at_mut(blk.min(pair.len()));
+            let m0 = (k0 * 2 * blk * a.down) as i64;
+            a.pair(x, native, to_f, m0, &mut bufs, ya, yb, from_f);
         }
         return;
     };
@@ -401,8 +464,12 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
         if end > buf.len() {
             buf.resize(end, F::zero());
         }
-        let (ya, yb) = buf[filled..end].split_at_mut(n_a);
-        a.pair(x, to_f, k0, &mut bufs, ya, yb);
+        // SAFETY: `MaybeUninit<F>` has the layout of `F`, and only values
+        // are written through it.
+        let fresh =
+            unsafe { &mut *(std::ptr::from_mut(&mut buf[filled..end]) as *mut [MaybeUninit<F>]) };
+        let (ya, yb) = fresh.split_at_mut(n_a);
+        a.pair(x, native, to_f, k0, &mut bufs, ya, yb, &|v| v);
         k0 += 2 * blk as i64;
         st = run_b::<T, F, FMA>(
             b,
@@ -696,21 +763,24 @@ impl<F: RsFloat> FftStage<F> {
     /// into `bufs.ya` and `bufs.yb`. `m0` must be a multiple of
     /// `max(up, down)`.
     #[inline(always)]
-    fn pair<T: Copy>(
+    #[allow(clippy::too_many_arguments)]
+    fn pair<T: Copy, U>(
         &self,
         x: &[T],
+        native: Option<&[F]>,
         to_f: &impl Fn(T) -> F,
         m0: i64,
         bufs: &mut PairBufs<F>,
-        ya: &mut [F],
-        yb: &mut [F],
+        ya: &mut [MaybeUninit<U>],
+        yb: &mut [MaybeUninit<U>],
+        put: &impl Fn(F) -> U,
     ) {
         if let Some(t) = &self.down2 {
-            self.pair_down2(x, to_f, m0, bufs, t, ya, yb);
+            self.pair_down2(x, native, to_f, m0, bufs, t, ya, yb, put);
             return;
         }
         if let Some(t) = &self.fir2 {
-            self.pair_fir2(x, to_f, m0, bufs, t, ya, yb);
+            self.pair_fir2(x, to_f, m0, bufs, t, ya, yb, put);
             return;
         }
         let up = self.up as i64;
@@ -741,7 +811,7 @@ impl<F: RsFloat> FftStage<F> {
             }
         }
         self.inv.process_outofplace_with_scratch(w, y, scratch);
-        split_re_im(&y[self.g / self.down..], ya, yb);
+        split_re_im(&y[self.g / self.down..], ya, yb, put);
     }
 }
 
@@ -753,31 +823,42 @@ impl<F: RsFloat> FftStage<F> {
     /// `Z · P + Z* · Q`. Two blocks share the inverse transform as real and
     /// imaginary parts.
     #[inline(always)]
-    fn pair_down2<T: Copy>(
+    #[allow(clippy::too_many_arguments)]
+    fn pair_down2<T: Copy, U>(
         &self,
         x: &[T],
+        native: Option<&[F]>,
         to_f: &impl Fn(T) -> F,
         m0: i64,
         bufs: &mut PairBufs<F>,
         t: &Bins<F>,
-        ya: &mut [F],
-        yb: &mut [F],
+        ya: &mut [MaybeUninit<U>],
+        yb: &mut [MaybeUninit<U>],
+        put: &impl Fn(F) -> U,
     ) {
         let half_n = self.n / 2;
         let start = m0 - self.g as i64;
         let (za, zb) = bufs.z.split_at_mut(half_n);
-        load_even_odd(x, to_f, start, za);
-        load_even_odd(x, to_f, start + self.hop as i64, zb);
         let (fa, fb) = bufs.zf.split_at_mut(half_n);
-        self.fwd
-            .process_outofplace_with_scratch(za, fa, bufs.scratch);
-        self.fwd
-            .process_outofplace_with_scratch(zb, fb, bufs.scratch);
+        for (from, z, f) in [
+            (start, &mut *za, &mut *fa),
+            (start + self.hop as i64, &mut *zb, &mut *fb),
+        ] {
+            match in_place(native, from, half_n) {
+                Some(seg) => self
+                    .fwd
+                    .process_immutable_with_scratch(seg, f, bufs.scratch),
+                None => {
+                    load_even_odd(x, to_f, from, z);
+                    self.fwd.process_immutable_with_scratch(z, f, bufs.scratch);
+                }
+            }
+        }
         let w = &mut bufs.w[..half_n];
         F::down2_bins(w, fa, fb, t);
         let y = &mut bufs.y[..half_n];
         self.inv.process_outofplace_with_scratch(w, y, bufs.scratch);
-        split_re_im(&y[self.g / 2..], ya, yb);
+        split_re_im(&y[self.g / 2..], ya, yb, put);
     }
 }
 
@@ -787,15 +868,17 @@ impl<F: RsFloat> FftStage<F> {
     /// odd outputs come out of one half-size inverse transform as real and
     /// imaginary parts, i.e. interleaved in memory.
     #[inline(always)]
-    fn pair_fir2<T: Copy>(
+    #[allow(clippy::too_many_arguments)]
+    fn pair_fir2<T: Copy, U>(
         &self,
         x: &[T],
         to_f: &impl Fn(T) -> F,
         m0: i64,
         bufs: &mut PairBufs<F>,
         t: &Bins<F>,
-        ya: &mut [F],
-        yb: &mut [F],
+        ya: &mut [MaybeUninit<U>],
+        yb: &mut [MaybeUninit<U>],
+        put: &impl Fn(F) -> U,
     ) {
         let half_n = self.n / 2;
         let first = self.g / 2;
@@ -817,33 +900,48 @@ impl<F: RsFloat> FftStage<F> {
             // Even and odd outputs are the real and imaginary parts.
             let (pairs, rest) = dst.as_chunks_mut::<2>();
             for (d, v) in pairs.iter_mut().zip(&y[first..]) {
-                d[0] = v.re;
-                d[1] = v.im;
+                d[0].write(put(v.re));
+                d[1].write(put(v.im));
             }
             if let [d] = rest {
-                *d = y[first + dst_len / 2].re;
+                d.write(put(y[first + dst_len / 2].re));
             }
         }
     }
 }
 
 /// Writes the real parts of `y` into `a` and the imaginary parts into `b`
-/// (as many as each holds).
+/// (as many as each holds), through `put`.
 #[inline(always)]
-fn split_re_im<F: RsFloat>(y: &[Complex<F>], a: &mut [F], b: &mut [F]) {
+fn split_re_im<F: RsFloat, U>(
+    y: &[Complex<F>],
+    a: &mut [MaybeUninit<U>],
+    b: &mut [MaybeUninit<U>],
+    put: &impl Fn(F) -> U,
+) {
     if a.len() == b.len() {
         for ((a, b), v) in a.iter_mut().zip(b.iter_mut()).zip(y) {
-            *a = v.re;
-            *b = v.im;
+            a.write(put(v.re));
+            b.write(put(v.im));
         }
     } else {
         for (a, v) in a.iter_mut().zip(y) {
-            *a = v.re;
+            a.write(put(v.re));
         }
         for (b, v) in b.iter_mut().zip(y) {
-            *b = v.im;
+            b.write(put(v.im));
         }
     }
+}
+
+/// `native[start..start + 2 n]` as `n` complex values, when `native` is
+/// given and holds that range.
+#[inline(always)]
+fn in_place<F: RsFloat>(native: Option<&[F]>, start: i64, n: usize) -> Option<&[Complex<F>]> {
+    let seg = native?.get(usize::try_from(start).ok()?..)?.get(..2 * n)?;
+    // SAFETY: `Complex<F>` is `repr(C)` with two `F` fields, so `2 n` values
+    // of `F` read as `n` complex values (with the alignment of `F`).
+    Some(unsafe { std::slice::from_raw_parts(seg.as_ptr().cast::<Complex<F>>(), n) })
 }
 
 /// Fills `z[k]` with `(x[start + 2k], x[start + 2k + 1])`, zero outside `x`.
@@ -903,6 +1001,7 @@ impl<F: RsFloat> PairArena<F> {
         let scratch = a
             .fwd
             .get_outofplace_scratch_len()
+            .max(a.fwd.get_immutable_scratch_len())
             .max(a.inv.get_outofplace_scratch_len());
         // The polyphase FIR runs every transform at half size.
         let lens = if a.fir2.is_some() {
@@ -969,10 +1068,10 @@ fn down2_bins_portable<F: RsFloat, const TWO: bool>(
         let av = Complex::new(a.re - b.im, a.im + b.re);
         let bv = Complex::new(ar.re + br.im, br.re - ar.im);
         let (pr, pi, qr, qi) = (t.pr[k], t.pi[k], t.qr[k], t.qi[k]);
-        // The order of the AVX2 kernel's multiply-adds.
+        // The order of the AVX2 kernel's products and sums.
         w[k] = Complex::new(
-            av.re * pr.re + av.im * pi.re + bv.re * qr.re + bv.im * qi.re,
-            av.im * pr.im + av.re * pi.im + bv.im * qr.im + bv.re * qi.im,
+            (av.re * pr.re + av.im * pi.re) + (bv.re * qr.re + bv.im * qi.re),
+            (av.im * pr.im + av.re * pi.im) + (bv.im * qr.im + bv.re * qi.im),
         );
     }
 }
@@ -1049,6 +1148,272 @@ fn load_lane<T: Copy, F: RsFloat, const IM: bool>(
     }
     for c in &mut z[hi..] {
         set(c, F::zero());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Block-wise conversion in the frequency domain
+// ---------------------------------------------------------------------------
+
+/// A [`Plan::Dft`] prepared for evaluation in `F`.
+///
+/// Block `b`'s `n1` input samples (from `b · hop - half` on) are read as
+/// `n1 / 2` complex values `z[t] = x[2t] + i x[2t + 1]` and transformed:
+/// `Z`, `M = n1 / 2` points. The real spectrum is
+/// `X[k] = (Z[k] + conj(Z[-k])) / 2 + e^(-2πik/n1) (Z[k] - conj(Z[-k])) / 2i`,
+/// the filtered one `Y[k] = X[k] G[k]` (`G`: the filter's spectrum, shifted
+/// by `half` samples so that the block's first output comes first), and the
+/// `n2` output-rate samples come from one inverse transform of `M2 = n2 / 2`
+/// points of `W[k] = (1 + i e^(2πik/n2)) Y[k] + (1 - i e^(2πik/n2)) conj(Y[M2 - k])`,
+/// as `y[2u] + i y[2u + 1]`. All of it folds into four products per bin
+/// with fixed coefficients ([`RsFloat::dft_bins`]).
+pub(super) struct DftStage<F> {
+    /// Input samples per block (`a · m`).
+    n1: usize,
+    /// Outputs per inverse transform (`a · l`).
+    n2: usize,
+    /// The filter spans `[-half, half]` input samples.
+    half: usize,
+    /// Input samples per block step (a multiple of `m`).
+    hop: usize,
+    /// Outputs per block (`hop · l / m`).
+    hop_out: usize,
+    /// Forward transform, `n1 / 2` points.
+    fwd: Arc<dyn Fft<F>>,
+    /// Inverse transform, `n2 / 2` points.
+    inv: Arc<dyn Fft<F>>,
+    /// Bin 0's coefficients in split form (see [`DftStage::tab`]).
+    tab0: [Complex<F>; 8],
+    /// Bins `1..M2` in groups of `G` bins (one SIMD register: 2 `f64` or 4
+    /// `f32` complex values): for group `g`, eight runs of `G` values, the
+    /// split forms `(c.re, c.re)`, `(-c.im, c.im)` of `C1` and `C4` and
+    /// `(c.re, -c.re)`, `(c.im, c.im)` of `C2` and `C3`, in the order
+    /// `C1, C1, C2, C2, C3, C3, C4, C4`. Each multiplies one of `v`, `swap(v)`
+    /// elementwise (`swap` exchanges the real and imaginary parts), which
+    /// gives `c · v` or `c · conj(v)`.
+    tab: Vec<Complex<F>>,
+    simd: bool,
+}
+
+/// Complex values per SIMD register of `F` (bins per group of
+/// [`DftStage::tab`]).
+const fn dft_group<F>() -> usize {
+    16 / std::mem::size_of::<F>()
+}
+
+impl<F: RsFloat> DftStage<F> {
+    pub(super) fn new(spec: &super::DftSpec) -> Self {
+        let (l, m, a, half) = (spec.l, spec.m, spec.a, spec.half);
+        let (n1, n2) = (a * m, a * l);
+        let (big_m, m2) = (n1 / 2, n2 / 2);
+        let hop = (n1 - 2 * half) / m * m;
+        let zero = Complex::new(0.0f64, 0.0);
+        let mut g = vec![zero; n1];
+        for (i, &t) in spec.taps.iter().enumerate() {
+            let d = i as i64 - half as i64;
+            g[d.rem_euclid(n1 as i64) as usize] = Complex::new(t, 0.0);
+        }
+        f64::with_planner(|p| p.plan_fft_forward(n1)).process(&mut g);
+        let tau = std::f64::consts::TAU;
+        // e^(2πi num / den), with the angle reduced exactly first.
+        let turn = |num: usize, den: usize| {
+            Complex::from_polar(1.0, tau * (num % den) as f64 / den as f64)
+        };
+        let i = Complex::new(0.0, 1.0);
+        // A[k], B[k]: Y[k] = A[k] Z[k] + B[k] conj(Z[-k]), for k = 0..=M2.
+        let (ak, bk): (Vec<_>, Vec<_>) = (0..=m2)
+            .map(|k| {
+                let gk = g[k] * turn(k * half, n1) / n1 as f64;
+                let w1 = turn(n1 - k % n1, n1);
+                (gk * (1.0 - i * w1) * 0.5, gk * (1.0 + i * w1) * 0.5)
+            })
+            .unzip();
+        let coeffs = |k: usize| {
+            let v = turn(k, n2);
+            let (p, q) = (1.0 + i * v, 1.0 - i * v);
+            [
+                p * ak[k],
+                p * bk[k],
+                q * ak[m2 - k].conj(),
+                q * bk[m2 - k].conj(),
+            ]
+        };
+        let to_f = |re: f64, im: f64| Complex::new(F::of(re), F::of(im));
+        let split = |c: [Complex<f64>; 4]| {
+            [
+                to_f(c[0].re, c[0].re),
+                to_f(-c[0].im, c[0].im),
+                to_f(c[1].re, -c[1].re),
+                to_f(c[1].im, c[1].im),
+                to_f(c[2].re, -c[2].re),
+                to_f(c[2].im, c[2].im),
+                to_f(c[3].re, c[3].re),
+                to_f(-c[3].im, c[3].im),
+            ]
+        };
+        let tab0 = split(coeffs(0));
+        let group = dft_group::<F>();
+        let groups = (m2 - 1).div_ceil(group);
+        let mut tab = vec![Complex::new(F::zero(), F::zero()); groups * 8 * group];
+        for k in 1..m2 {
+            let (gi, lane) = ((k - 1) / group, (k - 1) % group);
+            for (r, v) in split(coeffs(k)).into_iter().enumerate() {
+                tab[(gi * 8 + r) * group + lane] = v;
+            }
+        }
+        debug_assert!(big_m > m2);
+        let (fwd, inv) = F::with_planner(|p| (p.plan_fft_forward(big_m), p.plan_fft_inverse(m2)));
+        Self {
+            n1,
+            n2,
+            half,
+            hop,
+            hop_out: hop / m * l,
+            fwd,
+            inv,
+            tab0,
+            tab,
+            simd: super::has_avx2_fma_cached(),
+        }
+    }
+
+    /// Input samples per block.
+    pub(super) fn block_len(&self) -> usize {
+        self.n1
+    }
+
+    /// Input samples from one block's start to the next.
+    pub(super) fn hop(&self) -> usize {
+        self.hop
+    }
+
+    /// Outputs per block.
+    pub(super) fn hop_out(&self) -> usize {
+        self.hop_out
+    }
+
+    /// Input samples of the first block before the signal start.
+    pub(super) fn half(&self) -> usize {
+        self.half
+    }
+
+    /// Converts the block `z` (`n1` samples as `n1 / 2` pairs); its outputs
+    /// are then `bufs.y[u] = (y[2u], y[2u + 1])` for `2u < hop_out`.
+    fn transform(&self, z: &[Complex<F>], bufs: &mut DftBufs<F>, simd: bool) {
+        self.fwd
+            .process_immutable_with_scratch(z, &mut bufs.zf, &mut bufs.scratch);
+        F::dft_bins(&mut bufs.w, &bufs.zf, &self.tab0, &self.tab, simd);
+        self.inv
+            .process_outofplace_with_scratch(&mut bufs.w, &mut bufs.y, &mut bufs.scratch);
+    }
+
+    /// Converts the block `seg` (`n1` samples) into `out` (at most
+    /// `hop_out` samples).
+    pub(super) fn block(&self, seg: &[F], bufs: &mut DftBufs<F>, out: &mut [F]) {
+        debug_assert_eq!(seg.len(), self.n1);
+        let mut z = std::mem::take(&mut bufs.z);
+        load_even_odd(seg, &|v| v, 0, &mut z);
+        self.transform(&z, bufs, self.simd);
+        bufs.z = z;
+        for (d, v) in out.as_chunks_mut::<2>().0.iter_mut().zip(&bufs.y) {
+            *d = [v.re, v.im];
+        }
+        if out.len() % 2 == 1 {
+            out[out.len() - 1] = bufs.y[out.len() / 2].re;
+        }
+    }
+
+    /// Resamples one channel `x` into `out` (its length is the number of
+    /// outputs to produce, at most the full output length), block by block.
+    /// `native`: `x` itself when `T` is `F`; blocks inside it are then
+    /// transformed in place instead of copied.
+    fn run<T: Copy>(
+        &self,
+        x: &[T],
+        native: Option<&[F]>,
+        out: &mut [MaybeUninit<T>],
+        to_f: &impl Fn(T) -> F,
+        from_f: &impl Fn(F) -> T,
+        simd: bool,
+    ) {
+        let mut bufs = DftBufs::new(self);
+        let mut z = std::mem::take(&mut bufs.z);
+        for (b, dst) in out.chunks_mut(self.hop_out).enumerate() {
+            let start = (b * self.hop) as i64 - self.half as i64;
+            match in_place(native, start, self.n1 / 2) {
+                Some(seg) => self.transform(seg, &mut bufs, simd && self.simd),
+                None => {
+                    load_even_odd(x, to_f, start, &mut z);
+                    self.transform(&z, &mut bufs, simd && self.simd);
+                }
+            }
+            let (pairs, rest) = dst.as_chunks_mut::<2>();
+            for (d, v) in pairs.iter_mut().zip(&bufs.y) {
+                d[0].write(from_f(v.re));
+                d[1].write(from_f(v.im));
+            }
+            if let [d] = rest {
+                d.write(from_f(bufs.y[pairs.len()].re));
+            }
+        }
+    }
+}
+
+/// Work buffers of [`DftStage`].
+pub(super) struct DftBufs<F> {
+    z: Vec<Complex<F>>,
+    zf: Vec<Complex<F>>,
+    w: Vec<Complex<F>>,
+    y: Vec<Complex<F>>,
+    scratch: Vec<Complex<F>>,
+}
+
+impl<F: RsFloat> DftBufs<F> {
+    pub(super) fn new(d: &DftStage<F>) -> Self {
+        let zero = Complex::new(F::zero(), F::zero());
+        let scratch = d
+            .fwd
+            .get_immutable_scratch_len()
+            .max(d.inv.get_outofplace_scratch_len());
+        Self {
+            z: vec![zero; d.n1 / 2],
+            zf: vec![zero; d.n1 / 2],
+            w: vec![zero; d.n2 / 2],
+            y: vec![zero; d.n2 / 2],
+            scratch: vec![zero; scratch],
+        }
+    }
+}
+
+/// [`RsFloat::dft_bins`] for bins `from..to`, portable (the products and
+/// sums in the order of the AVX2 kernels).
+#[inline(always)]
+fn dft_bins_portable<F: RsFloat>(
+    w: &mut [Complex<F>],
+    z: &[Complex<F>],
+    tab0: &[Complex<F>; 8],
+    tab: &[Complex<F>],
+    from: usize,
+    to: usize,
+) {
+    let (big_m, m2) = (z.len(), w.len());
+    let group = dft_group::<F>();
+    let swap = |c: Complex<F>| Complex::new(c.im, c.re);
+    for k in from..to {
+        let v = [z[k], z[(big_m - k) % big_m], z[m2 - k], z[big_m - m2 + k]];
+        let t = |r: usize| {
+            if k == 0 {
+                tab0[r]
+            } else {
+                tab[(((k - 1) / group) * 8 + r) * group + (k - 1) % group]
+            }
+        };
+        // c_j · v_j for each j, then summed pairwise.
+        let p = [0, 1, 2, 3].map(|j| {
+            let (a, b, s) = (t(2 * j), t(2 * j + 1), swap(v[j]));
+            Complex::new(v[j].re * a.re + s.re * b.re, v[j].im * a.im + s.im * b.im)
+        });
+        w[k] = (p[0] + p[1]) + (p[2] + p[3]);
     }
 }
 
@@ -1587,16 +1952,11 @@ mod simd {
                 } else {
                     _mm256_setzero_pd()
                 };
-                // Mirrors: load bins n - k - 1, n - k and swap the halves.
-                let ar = _mm256_permute2f128_pd::<1>(
-                    _mm256_loadu_pd(pa.add(2 * (n - k - 1))),
-                    _mm256_loadu_pd(pa.add(2 * (n - k - 1))),
-                );
+                // Mirrors: bins n - k, n - k - 1 as two 128-bit loads (no
+                // lane-crossing shuffle).
+                let ar = _mm256_loadu2_m128d(pa.add(2 * (n - k - 1)), pa.add(2 * (n - k)));
                 let br = if TWO {
-                    _mm256_permute2f128_pd::<1>(
-                        _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
-                        _mm256_loadu_pd(pb.add(2 * (n - k - 1))),
-                    )
+                    _mm256_loadu2_m128d(pb.add(2 * (n - k - 1)), pb.add(2 * (n - k)))
                 } else {
                     _mm256_setzero_pd()
                 };
@@ -1613,11 +1973,17 @@ mod simd {
                     _mm256_xor_pd(ar, conj)
                 };
                 let at = |i: usize| _mm256_loadu_pd(tab[i].add(2 * k));
-                let mut r = _mm256_mul_pd(av, at(0));
-                r = _mm256_fmadd_pd(_mm256_permute_pd::<0b0101>(av), at(1), r);
-                r = _mm256_fmadd_pd(bv, at(2), r);
-                r = _mm256_fmadd_pd(_mm256_permute_pd::<0b0101>(bv), at(3), r);
-                _mm256_storeu_pd(pw.add(2 * k), r);
+                let ra = _mm256_fmadd_pd(
+                    _mm256_permute_pd::<0b0101>(av),
+                    at(1),
+                    _mm256_mul_pd(av, at(0)),
+                );
+                let rb = _mm256_fmadd_pd(
+                    _mm256_permute_pd::<0b0101>(bv),
+                    at(3),
+                    _mm256_mul_pd(bv, at(2)),
+                );
+                _mm256_storeu_pd(pw.add(2 * k), _mm256_add_pd(ra, rb));
             }
             k += 2;
         }
@@ -1646,8 +2012,13 @@ mod simd {
         );
         let tab = [&t.pr, &t.pi, &t.qr, &t.qi].map(|v| v.as_ptr().cast::<f32>());
         let conj = _mm256_set_ps(-0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0);
-        // Reverses the order of the four complex values in a vector.
-        let rev = _mm256_set_epi32(1, 0, 3, 2, 5, 4, 7, 6);
+        // Bins j, j - 1, j - 2, j - 3: two 128-bit loads, each pair swapped
+        // within its lane (no lane-crossing shuffle).
+        let mirror = |p: *const f32| {
+            // SAFETY: the caller passes bins j - 3 ..= j in bounds.
+            let v = unsafe { _mm256_loadu2_m128(p.sub(6), p.sub(2)) };
+            _mm256_permute_ps::<0b0100_1110>(v)
+        };
         let mut k = 1;
         while k + 4 <= n {
             // SAFETY: bins k .. k + 4 and their mirrors n - k - 3 ..= n - k are
@@ -1659,9 +2030,9 @@ mod simd {
                 } else {
                     _mm256_setzero_ps()
                 };
-                let ar = _mm256_permutevar8x32_ps(_mm256_loadu_ps(pa.add(2 * (n - k - 3))), rev);
+                let ar = mirror(pa.add(2 * (n - k)));
                 let br = if TWO {
-                    _mm256_permutevar8x32_ps(_mm256_loadu_ps(pb.add(2 * (n - k - 3))), rev)
+                    mirror(pb.add(2 * (n - k)))
                 } else {
                     _mm256_setzero_ps()
                 };
@@ -1679,15 +2050,123 @@ mod simd {
                     _mm256_xor_ps(ar, conj)
                 };
                 let at = |i: usize| _mm256_loadu_ps(tab[i].add(2 * k));
-                let mut r = _mm256_mul_ps(av, at(0));
-                r = _mm256_fmadd_ps(_mm256_permute_ps::<0b1011_0001>(av), at(1), r);
-                r = _mm256_fmadd_ps(bv, at(2), r);
-                r = _mm256_fmadd_ps(_mm256_permute_ps::<0b1011_0001>(bv), at(3), r);
-                _mm256_storeu_ps(pw.add(2 * k), r);
+                let ra = _mm256_fmadd_ps(
+                    _mm256_permute_ps::<0b1011_0001>(av),
+                    at(1),
+                    _mm256_mul_ps(av, at(0)),
+                );
+                let rb = _mm256_fmadd_ps(
+                    _mm256_permute_ps::<0b1011_0001>(bv),
+                    at(3),
+                    _mm256_mul_ps(bv, at(2)),
+                );
+                _mm256_storeu_ps(pw.add(2 * k), _mm256_add_ps(ra, rb));
             }
             k += 4;
         }
         super::down2_bins_portable::<_, TWO>(w, za, zb, t, k, n);
+    }
+
+    /// `super::RsFloat::dft_bins` for `f64`, two bins per vector.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA; `tab` holds the groups of bins
+    /// `1..w.len()` and `w.len() < z.len()`.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn dft_f64(
+        w: &mut [Complex<f64>],
+        z: &[Complex<f64>],
+        tab0: &[Complex<f64>; 8],
+        tab: &[Complex<f64>],
+    ) {
+        let (big_m, m2) = (z.len(), w.len());
+        assert!(m2 < big_m && tab.len() >= (m2.max(1) - 1).div_ceil(2) * 16);
+        super::dft_bins_portable(w, z, tab0, tab, 0, 1.min(m2));
+        let (pw, pz, pt) = (
+            w.as_mut_ptr().cast::<f64>(),
+            z.as_ptr().cast::<f64>(),
+            tab.as_ptr().cast::<f64>(),
+        );
+        let swap = |v: __m256d| _mm256_permute_pd::<0b0101>(v);
+        // Bins j, j - 1 (two 128-bit loads: no lane-crossing shuffle).
+        let mirror = |p: *const f64| {
+            // SAFETY: the caller passes bins j - 1 and j in bounds.
+            unsafe { _mm256_loadu2_m128d(p.sub(2), p) }
+        };
+        let mut k = 1;
+        while k + 2 <= m2 {
+            // SAFETY: bins k, k + 1 < m2 < big_m, their mirrors big_m - k - 1 ..=
+            // big_m - k and m2 - k - 1 ..= m2 - k, and big_m - m2 + k + 1 < big_m
+            // are in bounds of `z`; group (k - 1) / 2 of `tab` is (asserted).
+            unsafe {
+                let t = pt.add((k - 1) / 2 * 32);
+                let at = |r: usize| _mm256_loadu_pd(t.add(4 * r));
+                let v = [
+                    _mm256_loadu_pd(pz.add(2 * k)),
+                    mirror(pz.add(2 * (big_m - k))),
+                    mirror(pz.add(2 * (m2 - k))),
+                    _mm256_loadu_pd(pz.add(2 * (big_m - m2 + k))),
+                ];
+                // Four independent products, then a tree of sums.
+                let r = [0, 1, 2, 3].map(|j| {
+                    _mm256_fmadd_pd(swap(v[j]), at(2 * j + 1), _mm256_mul_pd(v[j], at(2 * j)))
+                });
+                let r = _mm256_add_pd(_mm256_add_pd(r[0], r[1]), _mm256_add_pd(r[2], r[3]));
+                _mm256_storeu_pd(pw.add(2 * k), r);
+            }
+            k += 2;
+        }
+        super::dft_bins_portable(w, z, tab0, tab, k, m2);
+    }
+
+    /// `super::RsFloat::dft_bins` for `f32`, four bins per vector.
+    ///
+    /// # Safety
+    /// As [`dft_f64`].
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn dft_f32(
+        w: &mut [Complex<f32>],
+        z: &[Complex<f32>],
+        tab0: &[Complex<f32>; 8],
+        tab: &[Complex<f32>],
+    ) {
+        let (big_m, m2) = (z.len(), w.len());
+        assert!(m2 < big_m && tab.len() >= (m2.max(1) - 1).div_ceil(4) * 32);
+        super::dft_bins_portable(w, z, tab0, tab, 0, 1.min(m2));
+        let (pw, pz, pt) = (
+            w.as_mut_ptr().cast::<f32>(),
+            z.as_ptr().cast::<f32>(),
+            tab.as_ptr().cast::<f32>(),
+        );
+        let swap = |v: __m256| _mm256_permute_ps::<0b1011_0001>(v);
+        // Bins j, j - 1, j - 2, j - 3: two 128-bit loads, each pair swapped
+        // within its lane (no lane-crossing shuffle).
+        let mirror = |p: *const f32| {
+            // SAFETY: the caller passes bins j - 3 ..= j in bounds.
+            let v = unsafe { _mm256_loadu2_m128(p.sub(6), p.sub(2)) };
+            _mm256_permute_ps::<0b0100_1110>(v)
+        };
+        let mut k = 1;
+        while k + 4 <= m2 {
+            // SAFETY: as in `dft_f64`, for bins k .. k + 4.
+            unsafe {
+                let t = pt.add((k - 1) / 4 * 64);
+                let at = |r: usize| _mm256_loadu_ps(t.add(8 * r));
+                let v = [
+                    _mm256_loadu_ps(pz.add(2 * k)),
+                    mirror(pz.add(2 * (big_m - k))),
+                    mirror(pz.add(2 * (m2 - k))),
+                    _mm256_loadu_ps(pz.add(2 * (big_m - m2 + k))),
+                ];
+                let r = [0, 1, 2, 3].map(|j| {
+                    _mm256_fmadd_ps(swap(v[j]), at(2 * j + 1), _mm256_mul_ps(v[j], at(2 * j)))
+                });
+                let r = _mm256_add_ps(_mm256_add_ps(r[0], r[1]), _mm256_add_ps(r[2], r[3]));
+                _mm256_storeu_ps(pw.add(2 * k), r);
+            }
+            k += 4;
+        }
+        super::dft_bins_portable(w, z, tab0, tab, k, m2);
     }
 
     /// `dst[i] (+)= a[i] · b[i]` over the common length.
@@ -1763,6 +2242,50 @@ mod tests {
     use super::*;
     use crate::operations::types::ResamplingQuality;
 
+    /// The block-wise plan's portable bins give the AVX2 result up to
+    /// rounding, in both float types.
+    #[test]
+    fn block_plan_portable_matches_avx2() {
+        if !super::super::has_avx2_fma_cached() {
+            return;
+        }
+        let plan = super::super::plan(22050, 8000, ResamplingQuality::High).unwrap();
+        assert!(matches!(plan, Plan::Dft(_)));
+        let x: Vec<f64> = (0..30011)
+            .map(|i| (f64::from(i) * 0.07).sin() * 0.8 + (f64::from(i) * 0.9).cos() * 0.1)
+            .collect();
+        let n = 30011 * 8000 / 22050;
+        fn run<F: RsFloat>(plan: &Plan, x: &[f64], n: usize, simd: bool) -> Vec<f64> {
+            let mut e = Engine::<F>::new(plan).unwrap();
+            e.avx2_fma = simd;
+            let mut out = vec![MaybeUninit::<f64>::uninit(); n];
+            e.run(x, &mut out, &|v| F::of(v), &|v: F| v.as_f64());
+            // SAFETY: `run` writes every element.
+            out.into_iter()
+                .map(|v| unsafe { v.assume_init() })
+                .collect()
+        }
+        for (a, b, tol) in [
+            (
+                run::<f64>(&plan, &x, n, true),
+                run::<f64>(&plan, &x, n, false),
+                1e-13,
+            ),
+            (
+                run::<f32>(&plan, &x, n, true),
+                run::<f32>(&plan, &x, n, false),
+                1e-5,
+            ),
+        ] {
+            assert!(a.iter().any(|v| v.abs() > 0.5));
+            let err = a
+                .iter()
+                .zip(&b)
+                .fold(0.0f64, |m, (u, v)| m.max((u - v).abs()));
+            assert!(err < tol, "{err:e}");
+        }
+    }
+
     /// The portable body (CPUs without AVX2) gives the AVX2 result up to rounding,
     /// for integer and float input.
     #[test]
@@ -1770,14 +2293,14 @@ mod tests {
         if !super::super::has_avx2_fma_cached() {
             return;
         }
-        let plan = super::super::plan(22050, 8000, ResamplingQuality::High).unwrap();
+        let plan = super::super::plan(16000, 22050, ResamplingQuality::High).unwrap();
         let fast = Engine::<f32>::new(&plan).unwrap();
         let mut slow = Engine::<f32>::new(&plan).unwrap();
         slow.avx2_fma = false;
         let x: Vec<i16> = (0..5000)
             .map(|i| ((f64::from(i) * 0.07).sin() * 20000.0) as i16)
             .collect();
-        let n = 5000 * 8000 / 22050;
+        let n = 5000 * 22050 / 16000;
         let to_f = |s: i16| f32::from(s) / 32768.0;
         let from_f = |v: f32| (v * 32768.0).round() as i16;
         let run = |e: &Engine<f32>| {
