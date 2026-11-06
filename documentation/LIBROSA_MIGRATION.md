@@ -371,13 +371,13 @@ function under `audio_samples::`.
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
 | `yin` | `AudioPitchTracking::yin`, `operations::pitch_tracking::yin` (`YinConfig`) | `pitch-analysis` | equivalent | `fmin`/`fmax` are required, as in librosa: `YinConfig::new(fmin, fmax)` |
-| `pyin` | `AudioPitchTracking::pyin`, `operations::pitch_tracking::pyin` (`PyinConfig`, `PyinResult`) | `pitch-analysis` | equivalent | `UnvoicedFill` is librosa's `fill_na` |
+| `pyin` | `AudioPitchTracking::pyin`, `operations::pitch_tracking::pyin` (`PyinConfig`, `PyinResult`) | `pitch-analysis` | equivalent | `UnvoicedFill` is librosa's `fill_na` (`Nan` = `np.nan`, `BestGuess` = `None`, `Value(v)` = a float) |
 | `piptrack` | `AudioTonal::piptrack`, `operations::tonal::piptrack_from_spectrogram` | `feature-extraction` | equivalent | |
 | `estimate_tuning` | `AudioTonal::estimate_tuning`, `operations::tonal::estimate_tuning_from_signal`, `operations::tonal::estimate_tuning_from_spectrogram` | `feature-extraction` | equivalent | Pools all channels, as librosa does |
 | `pitch_tuning` | `operations::tonal::pitch_tuning` | `feature-extraction` | equivalent | |
 | `salience` | `operations::pitch_tracking::salience` (`SalienceConfig`) | `pitch-analysis` | equivalent | |
-| `interp_harmonics` | `operations::pitch_tracking::interp_harmonics` (`FrequencyGrid`) | `pitch-analysis` | equivalent | |
-| `f0_harmonics` | `operations::pitch_tracking::f0_harmonics` | `pitch-analysis` | equivalent | |
+| `interp_harmonics` | `operations::pitch_tracking::interp_harmonics` (`FrequencyGrid`) | `pitch-analysis` | equivalent | `fill_value` is a required argument (librosa defaults to 0) |
+| `f0_harmonics` | `operations::pitch_tracking::f0_harmonics` | `pitch-analysis` | equivalent | `fill_value` is a required argument (librosa defaults to 0) |
 
 ### `librosa` core: unit conversions (`librosa.convert`)
 
@@ -443,9 +443,9 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | `tempogram` | `AudioRhythm::tempogram`, `operations::rhythm::tempogram_from_envelope` | `beat-tracking` | equivalent | |
 | `fourier_tempogram` | `AudioRhythm::fourier_tempogram`, `operations::rhythm::fourier_tempogram_from_envelope` | `beat-tracking` | equivalent | |
 | `tempo` | `AudioRhythm::tempo`, `operations::rhythm::tempo_from_envelope`, `operations::rhythm::tempo_from_tempogram` | `beat-tracking` | equivalent | Returns `(channels, 1)`, or `(channels, n_frames)` when time-varying |
-| `tempogram_ratio` | `AudioRhythm::tempogram_ratio`, `operations::rhythm::tempogram_ratio_from_tempogram` | `beat-tracking` | equivalent | |
+| `tempogram_ratio` | `AudioRhythm::tempogram_ratio`, `operations::rhythm::tempogram_ratio_from_tempogram` | `beat-tracking` | equivalent | With `aggregate` set the output keeps the time axis with length 1 (librosa drops it) |
 | `hybrid_tempogram` | `AudioRhythm::hybrid_tempogram`, `operations::rhythm::hybrid_tempogram_from_envelope` | `beat-tracking` | equivalent | |
-| `metrogram` | `operations::rhythm::metrogram`, `operations::rhythm::metrogram_per_bin` (`aggregate=None`) | `beat-tracking` | equivalent | |
+| `metrogram` | `operations::rhythm::metrogram`, `operations::rhythm::metrogram_per_bin` (`aggregate=None`) | `beat-tracking` | equivalent | `aggregate` and `fill_value` are required arguments (librosa defaults: `np.sum`, 0); `aggregate=None` is `metrogram_per_bin` |
 | `inverse.mel_to_stft`, `inverse.mel_to_audio` | `operations::inverse::mel_to_stft`, `mel_to_audio`, `mel_to_audio_samples` (`MelInversionConfig`) | `feature-inversion` | with differences | Coordinate descent from the same start reaches a better fit than the early-stopped L-BFGS-B |
 | `inverse.mfcc_to_mel`, `inverse.mfcc_to_audio` | `operations::inverse::mfcc_to_mel`, `mfcc_to_audio` (`MfccInversionConfig`) | `feature-inversion` | equivalent, with differences for `mfcc_to_audio` as above | |
 
@@ -490,8 +490,8 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 
 | librosa | audio_samples | feature | status | notes |
 |---|---|---|---|---|
-| `get_window` | `operations::filterbanks::get_window` (`Window`) | `transforms` | equivalent | Periodic (`fftbins=True`) or symmetric |
-| `mel` | `operations::filterbanks::mel_filterbank` (`MelFilterbankConfig`, `MelFilterNorm`, `MelScale`) | `transforms` | equivalent with differences | `f64` weights (librosa: `float32`), rounded to the spectrogram's type when applied; empty filters are returned silently as zero rows (librosa warns) |
+| `get_window` | `operations::filterbanks::get_window` (`Window`) | `transforms` | equivalent | Periodic (`fftbins=True`) or symmetric. Window names: `boxcar` is `Window::Rectangular`, `triang` is `Window::Triangular` (non-zero ends, unlike `Window::Bartlett`), `("kaiser", beta)` is `Window::Kaiser { beta }`, `("gaussian", std)` is `Window::Gaussian { std }`; an array window is `Window::Custom` and is used as given |
+| `mel` | `operations::filterbanks::mel_filterbank` (`MelFilterbankConfig`, `MelFilterNorm`, `MelScale`) | `transforms` | equivalent with differences | `f64` weights (librosa: `float32`), rounded to the spectrogram's type when applied; empty filters are returned silently as zero rows (librosa warns). `norm=None` / `'slaney'` / `p` are `MelFilterNorm::None` / `Slaney` / `Lp(p)`; `htk=True` is `MelScale::Htk` |
 | `chroma` | `operations::tonal::chroma_filterbank` (`ChromaFilterbankConfig`) | `feature-extraction` | equivalent with differences | `f64` weights (librosa: `float32`) |
 | `cq_to_chroma` | `operations::constant_q::cq_to_chroma` | `transforms` + `resampling` | equivalent with differences | `operations::constant_q::smooth_chroma_map` applies a smoothing `window`; `f64` tables |
 | `wavelet` | `operations::constant_q::wavelet` (`WaveletConfig`) | `transforms` + `resampling` | equivalent with differences | `Complex<f64>` filters (librosa: `complex64`); `wavelet_with_alpha` for explicit bandwidths |
@@ -508,8 +508,8 @@ All of these are `AudioEffects` methods (feature `effects`), each with an
 |---|---|---|---|---|
 | `frame` | `operations::spectrum::frame` (a copy), `operations::spectrum::frame_view` (read-only strided view, as librosa's) | `transforms` | equivalent with differences | 1-D input, last-axis framing. `AudioSampleIterators::windows` pads trailing frames; `windows_ref` / `PaddingMode::Skip` gives librosa's count |
 | `normalize` | `operations::tonal::normalize_array` (`NormalizeConfig`) | `feature-extraction` | equivalent | inf / -inf / 0 / p norms, `axis`, `threshold`, `fill` |
-| `peak_pick` | `operations::rhythm::peak_pick` (`PeakPickConfig`, `PeakPickMethod`) | `beat-tracking` | equivalent | |
-| `sync` | `operations::sequence::sync`, `operations::sequence::sync_with` (`SyncAggregate`) | `sequence` | equivalent with differences | `sync_slices`, `sync_slices_with` take slices; an empty index list with `pad = true` gives one segment |
+| `peak_pick` | `operations::rhythm::peak_pick` (`PeakPickConfig`, `PeakPickMethod`) | `beat-tracking` | equivalent | `PeakPickMethod::Greedy` / `DpCount` / `DpValue` = `method="greedy"` / `"dp_count"` / `"dp_value"` |
+| `sync` | `operations::sequence::sync`, `operations::sequence::sync_with` (`SyncAggregate`) | `sequence` | equivalent with differences | `pad` is a required argument (librosa defaults to `True`). `sync_slices`, `sync_slices_with` take slices; an empty index list with `pad = true` gives one segment |
 | `softmask` | `operations::effects::softmask` | `effects` | equivalent | |
 | `fix_length` | `AudioEditing::pad_samples_right` | `editing` | equivalent with differences | Pads only; it does not truncate a longer signal |
 | `localmax`, `localmin` | `utils::array_ops::localmax`, `utils::array_ops::localmin` | – | equivalent | Any ordered element type; any dimension |
@@ -545,9 +545,9 @@ All of these are free functions in `operations::sequence` (feature
 
 | librosa | audio_samples | status | notes |
 |---|---|---|---|
-| `segment.recurrence_matrix` | `recurrence_matrix` (connectivity, `bool`); `recurrence_matrix_weighted` (distance / affinity) (`RecurrenceConfig`, `RecurrenceMode`, `Bandwidth`) | equivalent with differences | Dense; `utils::array_ops::sparsify_rows` gives compressed rows, and the frames are on the last axis (in Python, `sparse=` and `axis=`) |
+| `segment.recurrence_matrix` | `recurrence_matrix` (connectivity, `bool`); `recurrence_matrix_weighted` (distance / affinity) (`RecurrenceConfig`, `RecurrenceMode`, `Bandwidth`) | equivalent with differences | Dense; `utils::array_ops::sparsify_rows` gives compressed rows, and the frames are on the last axis (in Python, `sparse=` and `axis=`). `Bandwidth` variants: `MedKScalar` = `None` / `'med_k_scalar'`, `MeanK` = `'mean_k'`, `GmeanK` = `'gmean_k'`, `MeanKAvg` = `'mean_k_avg'`, `GmeanKAvg` = `'gmean_k_avg'`, `MeanKAvgAndPair` = `'mean_k_avg_and_pair'`, `Scalar` / `Matrix` = a number or array; `self_links` is `self` |
 | `segment.cross_similarity` | `cross_similarity` (connectivity, `bool`); `cross_similarity_weighted` (distance / affinity) (`CrossSimilarityConfig`) | equivalent with differences | As `recurrence_matrix` |
-| `segment.recurrence_to_lag` | `recurrence_to_lag` | equivalent | |
+| `segment.recurrence_to_lag` | `recurrence_to_lag` | equivalent | `pad` is a required argument (librosa defaults to `True`) |
 | `segment.lag_to_recurrence` | `lag_to_recurrence` | equivalent | |
 | `segment.path_enhance` | `operations::segment::path_enhance` (`PathEnhanceConfig`, `BoundaryMode`) | equivalent | Feature `segmentation` |
 | `segment.timelag_filter` | `operations::segment::timelag_filter` | equivalent | Takes the matrix and a closure; feature `segmentation` |
@@ -562,7 +562,7 @@ All of these are free functions in `operations::sequence` (feature
 | `sequence.transition_uniform` | `transition_uniform` | equivalent | |
 | `sequence.transition_loop` | `transition_loop` | equivalent | |
 | `sequence.transition_cycle` | `transition_cycle` | equivalent | |
-| `sequence.transition_local` | `transition_local` (`TransitionWindow`) | equivalent | |
+| `sequence.transition_local` | `transition_local` (`TransitionWindow`) | equivalent | `TransitionWindow::Triangle` (the default) is `'triangle'` (`scipy.signal.windows.triang`) |
 | `sequence.path_to_steps` | `path_to_steps` | equivalent | |
 
 ### `librosa.display`
@@ -727,7 +727,11 @@ librosa's defaults.
 ### Options that are not supported
 
 - `filters.window_sumsquare`: `norm`.
-- `filters.wavelet_lengths`: the public single-frequency-with-explicit-`alpha` form.
+- `filters.wavelet_lengths` / `filters.wavelet` with a single frequency and an explicit
+  `alpha`: `wavelet_lengths_with_alpha` and `wavelet_with_alpha` take explicit
+  bandwidths but need two or more frequencies.
+- `feature.chroma_vqt`: only `intervals="equal"`; `operations::constant_q::vqt_with_intervals`
+  gives a VQT over other frequency ratios.
 - `phase_vocoder`: the deprecated `hop_length` / `n_fft` (ignored by librosa 1.0).
 - `clicks`: multichannel custom clicks.
 - `effects.harmonic` / `percussive` with `mask=True`: librosa documents that this
@@ -770,6 +774,7 @@ instead.
 | `AudioDecomposition::hpss` | Its own mask blend (`mask_softness`) and window conventions | `AudioEffects::harmonic_percussive`, `operations::effects::hpss_spectrogram` |
 | `AudioEditing::trim_silence` | Thresholds individual samples in absolute dBFS (librosa: frame RMS relative to the maximum) | `AudioEffects::trim_db` |
 | `AudioEditing::split` | Fixed-length chunking | `AudioEffects::split_db` |
+| `lpc_analysis`, `codecs::opus::lpc` (`opus-codec`) | Hamming window, autocorrelation method and a 1e-5 diagonal loading (librosa: Burg's method on the raw frame) | `AudioEffects::lpc` |
 | `AudioPitchAnalysis::detect_pitch_yin`, `track_pitch`, `operations::pitch_analysis::yin_pitch_detection` | One estimate per buffer or uncentred frames; the difference function sums the `n - tau` overlapping products; no global-minimum fallback (returns `None`) | `AudioPitchTracking::yin`, `pyin` |
 | `utils::audio_math::hz_to_mel`, `mel_to_hz`, `mel_scale`, `mel_frequencies` | HTK scale (librosa's default is Slaney) | `hz_to_mel_with_scale`, `mel_frequencies_with_scale` |
 | `utils::audio_math::time_to_frames` | Rounds to the nearest frame and saturates negative times at 0 (librosa floors; about half of all times differ by one frame) | `time_to_frames_floor` |
