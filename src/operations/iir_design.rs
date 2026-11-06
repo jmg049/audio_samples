@@ -854,7 +854,7 @@ pub(crate) fn zpk2sos(zpk: &Zpk) -> AudioSampleResult<Vec<Sos>> {
     let mut p = to_vec(cplxreal(&p)?);
 
     // Index of the root closest to the unit circle (optionally real only);
-    // ties resolve to the lowest index, like `np.argmin`.
+    // ties resolve to the lowest index.
     let idx_worst = |v: &[C64], real_only: bool| -> usize {
         let mut best = usize::MAX;
         let mut best_val = f64::INFINITY;

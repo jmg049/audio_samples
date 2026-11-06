@@ -6879,10 +6879,9 @@ mod tests {
         assert_eq!(audio.sample_rate(), original_rate);
     }
 
-    // Regression: BUG 1 - from_interleaved_slice must actually de-interleave.
-    // The old code called new_multi_channel_from_slice, which reshaped the flat
-    // interleaved slice as PLANAR (channels, samples_per_channel) - splitting
-    // L/R across the wrong rows. Build interleaved [L0,R0,L1,R1,L2,R2] and
+    // from_interleaved_slice must de-interleave, not reshape the flat
+    // interleaved slice as planar (channels, samples_per_channel), which would
+    // split L/R across the wrong rows. Build interleaved [L0,R0,L1,R1,L2,R2] and
     // assert channel 0 == [L0,L1,L2] and channel 1 == [R0,R1,R2].
     #[test]
     fn test_from_interleaved_slice_deinterleaves() {
@@ -6902,7 +6901,7 @@ mod tests {
         assert_eq!(multi.row(1).to_vec(), vec![4.0, 5.0, 6.0]);
     }
 
-    // Regression: BUG 2 - new_multi_channel_from_slice must return the structured
+    // new_multi_channel_from_slice must return the structured
     // InvalidNumberOfSamples error (matching the owned variant) when the total
     // sample count is not divisible by the channel count, rather than surfacing a
     // generic ndarray ShapeError.

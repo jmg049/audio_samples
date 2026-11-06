@@ -549,7 +549,7 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
         let y = raw_values(after);
         format!(
             "{}`low_pass_filter` is a first-order Butterworth low-pass designed with the bilinear \
-             transform (identical to scipy.signal.butter(1, f_c, fs=f_s)), not an ideal brick wall: \
+             transform, not an ideal brick wall: \
              an ideal filter that passes everything below f_c and nothing above is not realisable. \
              Here f_c is the cutoff, f_s the sample rate and \u{03a9}_c = tan(\u{03c0}f_c/f_s). The gain is \
              1 at 0 Hz, exactly \u{2212}3 dB (|H|\u{00b2} = 1/2) at f_c and 0 at the Nyquist frequency \
@@ -576,8 +576,7 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
         let y = raw_values(after);
         format!(
             "{}`high_pass_filter` is a first-order Butterworth high-pass designed with the bilinear \
-             transform (identical to scipy.signal.butter(1, f_c, 'highpass', fs=f_s)), not an ideal \
-             brick wall. With \u{03a9}_c = tan(\u{03c0}f_c/f_s) the gain is 0 at 0 Hz (a zero at z = 1), \
+             transform, not an ideal brick wall. With \u{03a9}_c = tan(\u{03c0}f_c/f_s) the gain is 0 at 0 Hz (a zero at z = 1), \
              exactly \u{2212}3 dB at the cutoff f_c and 1 at the Nyquist frequency; below f_c it falls \
              by about 6 dB per octave. With p = (1 \u{2212} \u{03a9}_c)/(1 + \u{03a9}_c) the filter is \
              y[n] = p\u{00b7}y[n\u{2212}1] + (1+p)/2\u{00b7}(x[n] \u{2212} x[n\u{2212}1]), run on each \
@@ -601,8 +600,7 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
         let y = raw_values(after);
         format!(
             "{}`band_pass_filter` is the band-pass transform of a first-order Butterworth prototype \
-             (one second-order section, identical to scipy.signal.butter(1, [f_l, f_h], 'bandpass', \
-             fs=f_s)), with \u{03a9}_l = tan(\u{03c0}f_l/f_s) and \u{03a9}_h = tan(\u{03c0}f_h/f_s). The gain is \
+             (one second-order section), with \u{03a9}_l = tan(\u{03c0}f_l/f_s) and \u{03a9}_h = tan(\u{03c0}f_h/f_s). The gain is \
              1 at the centre frequency where \u{03a9}\u{00b2} = \u{03a9}_l\u{03a9}_h (the geometric centre of the \
              pre-warped band), exactly \u{2212}3 dB at both edges f_l and f_h, and 0 at 0 Hz and at \
              Nyquist. Outside the band the response falls by only about 6 dB per octave, so a lot of \

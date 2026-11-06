@@ -1876,10 +1876,10 @@ mod tests {
         assert!(audio.apply_limiter_in_place(&broadcast_config).is_ok());
     }
 
-    /// Regression test for BUG 3: the MONO expander branch set
-    /// `gain_change_db = 1.0` for signals ABOVE threshold (instead of `0.0`),
-    /// causing ~1 dB attenuation everywhere above threshold via
-    /// `db_to_linear(-1.0) ~= 0.891`. Loud signal should pass through unchanged.
+    /// The mono expander branch must set `gain_change_db = 0.0` for signals
+    /// above threshold; `1.0` would attenuate everything above threshold by
+    /// ~1 dB (`db_to_linear(-1.0) ~= 0.891`). Loud signal should pass through
+    /// unchanged.
     #[test]
     fn test_expander_above_threshold_mono_unchanged() {
         // Constant loud signal, well above a low threshold. RMS envelope settles
@@ -1907,10 +1907,10 @@ mod tests {
         }
     }
 
-    /// Regression test for BUG 4: a `ratio` of `0.0` caused a division by zero
-    /// in the gate gain formula `(ratio - 1.0) / ratio`. Both `apply_gate` and
-    /// `apply_expander` must now reject `ratio <= 0.0` with an `Err`. The
-    /// rejection is now done in `GateConfig::validate` / `ExpanderConfig::validate`.
+    /// A `ratio` of `0.0` would divide by zero in the gate gain formula
+    /// `(ratio - 1.0) / ratio`. Both `apply_gate` and `apply_expander` must
+    /// reject `ratio <= 0.0` with an `Err`; the rejection is done in
+    /// `GateConfig::validate` / `ExpanderConfig::validate`.
     #[test]
     fn test_gate_and_expander_reject_zero_ratio() {
         let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);

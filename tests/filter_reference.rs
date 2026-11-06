@@ -661,8 +661,8 @@ fn simple_filters_match_first_order_butterworth() {
 
 #[test]
 fn simple_filters_work_on_integer_samples() {
-    // Regression: the high-pass used to compute in the sample type, so for
-    // i16 audio its coefficient truncated to 0 and the output was silence.
+    // The high-pass computes in floating point: in the sample type its
+    // coefficient would truncate to 0 for i16 audio and the output be silence.
     let fixtures = load("misc_filters.json");
     let mix = f64s(&fixtures["signals"]["mix"]);
     let case = fixtures["simple_filters"]
@@ -739,8 +739,8 @@ fn sos_coefficients_round_trip_through_scipy_layout() {
 #[test]
 fn i16_audio_through_unity_filter_is_bit_identical() {
     // A 0 dB peaking band has identical numerator and denominator, so it must
-    // be transparent. Regression: float -> i16 used to truncate with a
-    // symmetric scale, shifting every negative sample by one LSB.
+    // be transparent. Truncating float -> i16 with a symmetric scale would
+    // shift every negative sample by one LSB.
     let x: Vec<i16> = (0..4096)
         .map(|i| ((i as f64 * 0.731).sin() * 30000.0) as i16)
         .chain([i16::MIN, i16::MAX, -1, 0, 1])

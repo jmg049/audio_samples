@@ -1109,9 +1109,9 @@ where
         let hop_size = hop_size.get();
 
         // Count only complete windows. When the window is larger than the
-        // signal, no complete window fits, so yield 0. `saturating_sub` mirrors
-        // the underflow fix in `WindowIterator` (BUG 3) so `window > len` is
-        // safe in both debug and release builds.
+        // signal, no complete window fits, so yield 0. `saturating_sub`, as in
+        // `WindowIterator`, keeps `window > len` safe in both debug and release
+        // builds.
         let total_windows = if total_samples < window_size {
             0
         } else {
@@ -1911,10 +1911,10 @@ mod tests {
         assert_eq!(audio1.as_mono().unwrap(), audio2.as_mono().unwrap());
     }
 
-    // Regression: BUG 3 - WindowIterator window-count underflow in Skip mode.
-    // With window (8) > total (5), the old `1 + (total - window) / hop`
-    // underflowed (debug panic / release wrap) and NonZeroUsize could not even
-    // represent 0 windows. Skip mode must yield 0 windows without panicking.
+    // WindowIterator window count in Skip mode with window (8) > total (5):
+    // `1 + (total - window) / hop` would underflow (debug panic / release wrap)
+    // and NonZeroUsize cannot represent 0 windows. Skip mode must yield 0
+    // windows without panicking.
     #[cfg(feature = "editing")]
     #[test]
     fn test_window_iterator_skip_window_larger_than_signal_yields_zero() {
@@ -1931,9 +1931,7 @@ mod tests {
         assert_eq!(iter.count(), 0);
     }
 
-    // Regression: BUG 3 - Skip mode still counts complete windows correctly
-    // when the window fits, confirming the saturating_sub change didn't regress
-    // the normal path.
+    // Skip mode counts complete windows correctly when the window fits.
     #[cfg(feature = "editing")]
     #[test]
     fn test_window_iterator_skip_counts_complete_windows() {
@@ -1951,9 +1949,9 @@ mod tests {
         assert_eq!(windows[1].as_mono().unwrap().to_vec(), vec![3.0, 4.0, 5.0]);
     }
 
-    // Regression: BUG 4 - apply_to_windows infinite loop on hop_size == 0.
-    // The old code only guarded window_size == 0, so `pos += 0` looped forever.
-    // Must return immediately without invoking the callback.
+    // apply_to_windows with hop_size == 0: guarding only window_size == 0 would
+    // loop forever on `pos += 0`. Must return immediately without invoking the
+    // callback.
     #[cfg(feature = "editing")]
     #[test]
     fn test_apply_to_windows_zero_hop_returns_without_hanging() {
@@ -2081,7 +2079,7 @@ mod tests {
         assert_eq!(iter.count(), 0);
     }
 
-    // Regression: BUG 5 - ChannelIterator::next must extract exactly one channel
+    // ChannelIterator::next must extract exactly one channel
     // per step (no O(N^2) deep clone, no eprintln!), advance current_channel
     // correctly, and keep len() consistent with what next() yields.
     #[test]

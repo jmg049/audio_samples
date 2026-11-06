@@ -35,7 +35,7 @@ fn rel_err(a: f64, b: f64) -> f64 {
 
 // ── Welch PSD density scaling ─────────────────────────────────────────
 
-/// Reference values generated with SciPy 1.18.1 (educational venv):
+/// Reference values generated with SciPy 1.18.1:
 ///
 /// ```python
 /// x = lcg_noise(8192)  # same generator as above
@@ -206,8 +206,8 @@ fn levinson_durbin_recovers_exact_ar2() {
     );
 
     // Order 3 on an exact AR(2) autocorrelation: third coefficient ≈ 0 and the
-    // first two still match (previously the returned vector was the order-2
-    // solution padded with 0, and at order 2 it was [k1, 0]).
+    // first two still match (not the order-2 solution padded with 0, nor
+    // [k1, 0] at order 2).
     let rho3 = phi1.mul_add(rho2, phi2 * rho1);
     let lpc3 = levinson_durbin(&[1.0, rho1, rho2, rho3], 3).unwrap();
     assert!(

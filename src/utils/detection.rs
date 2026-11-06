@@ -964,10 +964,10 @@ mod tests {
         assert!(dynamic_range > 0.0);
     }
 
-    // Regression test for BUG 3: detect_dynamic_range computed
-    // sqrt(mean(x)) instead of sqrt(mean(x^2)). For zero-mean audio that is
-    // ~0 (giving a wrong/infinite dynamic range) and NaN when the sample sum
-    // is negative. A sine of amplitude A has RMS = A/sqrt(2).
+    // detect_dynamic_range must use sqrt(mean(x^2)), not sqrt(mean(x)). For
+    // zero-mean audio the latter is ~0 (giving a wrong/infinite dynamic range)
+    // and NaN when the sample sum is negative. A sine of amplitude A has
+    // RMS = A/sqrt(2).
     #[test]
     fn test_detect_dynamic_range_rms_correct_and_finite() {
         let sr = 44100u32;

@@ -3219,10 +3219,10 @@ mod tests {
         }
     }
 
-    /// Below about 7.9 Hz the nearest MIDI note is negative. The old code cast it
-    /// with a saturating `as u8`, labelling e.g. 4 Hz and 1 Hz as "C-1" with cents
-    /// measured against a different note. It is now a range error, like
-    /// frequencies above G9.
+    /// Below about 7.9 Hz the nearest MIDI note is negative. It is a range error,
+    /// like frequencies above G9, rather than a saturating `as u8` cast that
+    /// would label e.g. 4 Hz and 1 Hz as "C-1" with cents measured against a
+    /// different note.
     #[test]
     fn frequency_to_note_rejects_notes_outside_midi_range() {
         for f in [1.0, 4.0, 7.9, 13_000.0, 20_000.0] {

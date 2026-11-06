@@ -554,7 +554,7 @@ fn wavelet_impl(
     let width = width as usize;
     let mut out = Array2::<Complex<f64>>::zeros((freqs.len(), width.max(1)));
     for ((&ilen, &freq), mut row) in lengths.iter().zip(freqs).zip(out.outer_iter_mut()) {
-        // np.arange(-ilen // 2, ilen // 2): floor(-L/2) .. floor(L/2) (exclusive).
+        // Sample offsets floor(-L/2) .. floor(L/2) (exclusive).
         let start = (-ilen / 2.0).floor();
         let stop = (ilen / 2.0).floor();
         let n = (stop - start).max(0.0) as usize;

@@ -1273,8 +1273,8 @@ mod tests {
 
     #[test]
     fn test_swap_channels_actually_swaps() {
-        // Regression: swap_channels previously used swap_axes (a transpose),
-        // corrupting the (channels x samples) shape instead of exchanging rows.
+        // swap_channels must exchange rows; swap_axes (a transpose) would
+        // corrupt the (channels x samples) shape.
         let mut data = ndarray::Array2::zeros((2, 3));
         data[[0, 0]] = 1.0f32;
         data[[0, 1]] = 2.0;

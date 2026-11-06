@@ -2525,10 +2525,10 @@ mod tests {
         }
     }
 
-    /// Regression test for BUG 2: multichannel silence detection compared the
-    /// SIGNED sample value to a positive linear threshold instead of its
-    /// magnitude. Large negative samples were therefore misclassified as
-    /// silence (since e.g. `-0.9 <= threshold_lin` is true) and trimmed away.
+    /// Multichannel silence detection must compare the sample magnitude, not the
+    /// signed value, with the positive linear threshold. Otherwise large negative
+    /// samples are misclassified as silence (e.g. `-0.9 <= threshold_lin` is
+    /// true) and trimmed away.
     #[test]
     fn test_trim_silence_multichannel_negative_not_silent() {
         use ndarray::Array2;
@@ -2557,7 +2557,7 @@ mod tests {
         assert_eq!(trimmed2.samples_per_channel().get(), 100);
     }
 
-    /// Regression test for BUG 2 in `trim_all_silence`'s multichannel path.
+    /// The same check for `trim_all_silence`'s multichannel path.
     #[test]
     fn test_trim_all_silence_multichannel_negative_not_silent() {
         use ndarray::Array2;

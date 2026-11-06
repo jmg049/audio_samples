@@ -1877,8 +1877,8 @@ mod tests {
         assert!(resample_by_ratio(&audio, f64::INFINITY, ResamplingQuality::Fast).is_err());
     }
 
-    /// Output length is exactly `ceil(n * out / in)` for every quality (this
-    /// test used to allow 200 samples of slack, which hid the lost tail).
+    /// Output length is exactly `ceil(n * out / in)` for every quality, with no
+    /// slack that could hide a lost tail.
     #[test]
     fn test_resample_correct_length_long_signal() {
         let samples = (0..220500)

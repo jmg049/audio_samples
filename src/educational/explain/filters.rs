@@ -181,7 +181,7 @@ impl Explain for IirFilterDesign {
         }
         doc.add_formula(
             r"s = K \frac{1 - z^{-1}}{1 + z^{-1}}, \quad \Omega_c = K \tan\left(\frac{\pi f_c}{f_s}\right)",
-            "Bilinear transform with pre-warping, so the digital filter has its critical frequency exactly at f_c (the code uses SciPy's normalisation K = 4; any K gives the same H(z))",
+            "Bilinear transform with pre-warping, so the digital filter has its critical frequency exactly at f_c (the code designs at f_s = 2, so K = 4; any K gives the same H(z))",
         );
         match self.response {
             FilterResponse::HighPass => {

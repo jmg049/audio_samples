@@ -2004,7 +2004,7 @@ mod tests {
         let result = audio.chebyshev_i_in_place(
             NonZeroUsize::new(4).unwrap(),
             1000.0,
-            10.0, // Large but valid (SciPy accepts any positive ripple)
+            10.0, // Large but valid (any positive ripple is accepted)
             FilterResponse::LowPass,
         );
         assert!(result.is_ok(), "Large ripple is valid: {result:?}");
@@ -2564,7 +2564,7 @@ mod tests {
 
     #[test]
     fn test_butterworth_bandstop_dispatcher_wired() {
-        // Butterworth band-stop now supported (was previously unsupported).
+        // Butterworth band-stop through the dispatcher.
         let samples = NonEmptyVec::new(vec![1.0f32; 256]).unwrap();
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));

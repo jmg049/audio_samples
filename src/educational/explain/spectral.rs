@@ -287,8 +287,8 @@ impl Explain for StftParams {
         let w = coefficients(&window, self.n_fft());
         let m = window_metrics(&w);
         let ola = overlap_check(&w, hop);
-        // SciPy's `sym=False` construction: the periodic (DFT-even) form of a symmetric
-        // window is the symmetric window of length N + 1 with its last sample dropped.
+        // The periodic (DFT-even) form of a symmetric window is the symmetric window of
+        // length N + 1 with its last sample dropped.
         let periodic_ripple = (m.symmetric && n > 1).then(|| {
             let mut wp = coefficients(&window, NonZeroUsize::new(n + 1).unwrap_or(self.n_fft()));
             wp.truncate(n);
@@ -1001,7 +1001,7 @@ mod tests {
         let hd = hann.explain();
         let ripple = hd.quantity("Overlap-add ripple").unwrap().value;
         assert!(ripple > 1e-6 && ripple < 0.05, "{ripple}");
-        // numpy: symmetric Hann, N = 256, hop 128 -> 0.6146 % ripple; periodic -> 0.
+        // Symmetric Hann, N = 256, hop 128: 0.6146 % ripple; periodic: 0.
         assert!((ripple - 0.006_145_54).abs() < 1e-6, "{ripple}");
         let pr = hd
             .quantity("Overlap-add ripple of the periodic form")

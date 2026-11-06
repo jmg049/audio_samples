@@ -1965,11 +1965,10 @@ mod tests {
         assert!(max_val > min_val);
     }
 
-    // Regression test for BUG 1: operator-precedence bug in compound_tone made
-    // `.sin()` bind only to `t`, producing amplitude*2pi*f*sin(t) instead of a
-    // tone at `comp.frequency`. A single 1000 Hz component over 1 s should cross
-    // zero ~2*f times. The buggy expression produces a ramped sin(t) (near DC),
-    // crossing zero only ~2 times over a second.
+    // compound_tone must produce a tone at `comp.frequency`: if `.sin()` bound
+    // only to `t`, the result would be amplitude*2pi*f*sin(t). A single 1000 Hz
+    // component over 1 s should cross zero ~2*f times; the mis-bound expression
+    // gives a ramped sin(t) (near DC), crossing zero only ~2 times over a second.
     #[test]
     fn test_compound_tone_frequency_zero_crossings() {
         let freq = 1000.0;
@@ -2001,9 +2000,8 @@ mod tests {
         );
     }
 
-    // Regression test for BUG 2: the seeded branch of brown_noise had no
-    // generation loop and pushed exactly one sample. It must now return a full
-    // buffer, be deterministic for a fixed seed, and differ across seeds.
+    // The seeded branch of brown_noise must return a full buffer (not a single
+    // sample), be deterministic for a fixed seed, and differ across seeds.
     #[test]
     #[cfg(feature = "random-generation")]
     fn test_brown_noise_seeded_length_and_determinism() {

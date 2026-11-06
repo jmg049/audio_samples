@@ -240,7 +240,7 @@ fn envelope_smoothing_independent_of_cqt_window() {
             env[i]
         );
     }
-    // And it is not flattened (the old code averaged over ±4096 frames).
+    // And it is not flattened (as averaging over ±4096 frames would do).
     let max = env.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let min = env.iter().cloned().fold(f64::INFINITY, f64::min);
     assert!(max - min > 1e-3, "envelope is flat: {min}..{max}");

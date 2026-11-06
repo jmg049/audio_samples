@@ -649,11 +649,10 @@ mod tests {
 
     #[test]
     fn test_apply_eq_band_multichannel_matches_per_channel_mono() {
-        // Regression: the multi-channel apply_eq_band branch previously
-        // filtered a flattened all-channels buffer and indexed out of bounds
-        // (panic) for genuine multi-channel input. It must now filter each
-        // channel independently, identically to applying the band to that
-        // channel on its own.
+        // The multi-channel apply_eq_band branch must filter each channel
+        // independently, identically to applying the band to that channel on
+        // its own (filtering a flattened all-channels buffer indexes out of
+        // bounds).
         let sr = 44100.0;
         let n = 256usize;
         let ch0: Vec<f32> = (0..n)
@@ -900,9 +899,8 @@ mod tests {
         assert!((linear_to_db(0.1_f64) - (-20.0)).abs() < 1e-10);
     }
 
-    /// Regression test for BUG 1: `design_peak_filter` used a base of `10.04`
-    /// instead of `10.0` when computing the intermediate gain `A = 10^(g/40)`.
-    /// Verify the recovered `A` matches the correct base. We recover `A` from
+    /// `design_peak_filter` must use base `10.0` for the intermediate gain
+    /// `A = 10^(g/40)`. Verify the recovered `A` matches that base. We recover `A` from
     /// the un-normalised RBJ coefficients:
     ///   b0 = 1 + alpha*A,  a0 = 1 + alpha/A
     /// Re-deriving alpha and A from the *normalised* returned coefficients is
