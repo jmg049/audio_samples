@@ -29,7 +29,7 @@ it from [`AudioTransforms::fft`](crate::AudioTransforms::fft) ourselves.
   [`hz_to_mel`](crate::utils::audio_math::hz_to_mel),
   [`mel_to_hz`](crate::utils::audio_math::mel_to_hz) and
   [`mel_frequencies`](crate::utils::audio_math::mel_frequencies).
-- Slaney (Auditory Toolbox, librosa's default): $m = 3f/200$ for
+- Slaney (Auditory Toolbox): $m = 3f/200$ for
   $f < 1000$ Hz and $m = 15 + 27 \ln(f/1000) / \ln 6.4$ above. Used by the mel
   spectrogram and therefore by MFCCs.
 
@@ -53,10 +53,9 @@ $$L_i = 10 \log_{10} \max(P_i, 10^{-8}), \qquad c_k = \sum_{i=0}^{M-1} L_i \cos\
 where $L_i$ is the log mel energy in dB with an absolute floor of -80 dB,
 $c_k$ the **unnormalised** DCT-II ($k = 0, \dots, K-1$, $K$ = `n_mfcc`) and
 $\tilde{c}_k$ the liftered coefficient with lifter parameter $D = 22$ by
-default (0 disables it). librosa's MFCC uses the orthonormal DCT,
-$c_0/\sqrt{M}$ and $c_k \sqrt{2/M}$, and no lifter, so with the lifter off this
-library's values are larger by $\sqrt{M}$ for $c_0$ and $\sqrt{M/2}$ for
-$k \ge 1$.
+default (0 disables it). The orthonormal DCT-II gives $c_0/\sqrt{M}$ and
+$c_k \sqrt{2/M}$, so with the lifter off this library's values are larger than
+the orthonormal ones by $\sqrt{M}$ for $c_0$ and $\sqrt{M/2}$ for $k \ge 1$.
 
 ## With the library
 
@@ -239,7 +238,7 @@ for t in 0..mel.data().ncols() {
     for k in 0..13 {
         let lifter = 1.0 + 11.0 * (PI * k as f64 / 22.0).sin();
         worst = worst.max((dct(&l, k) * lifter - lib.data[[k, t]]).abs());
-        // librosa-style orthonormal DCT, no lifter.
+        // Orthonormal DCT-II, no lifter.
         let ortho = dct(&l, k) * if k == 0 { (1.0 / m as f64).sqrt() } else { (2.0 / m as f64).sqrt() };
         let factor = if k == 0 { (m as f64).sqrt() } else { (m as f64 / 2.0).sqrt() };
         assert!((lib_plain.data[[k, t]] - factor * ortho).abs() < 1e-9 * lib_plain.data[[k, t]].abs().max(1.0));
@@ -253,9 +252,7 @@ assert!(worst < 1e-8, "{worst}");
 ```
 
 So with 40 bands and the lifter off, this crate's $c_0$ is $\sqrt{40} = 6.32$
-times librosa's and $c_k$ ($k \ge 1$) $\sqrt{20} = 4.47$ times, before any
-other differences (librosa's mel filters are Slaney-normalised by default and
-its log uses `top_db = 80` relative to the peak).
+times the orthonormal value and $c_k$ ($k \ge 1$) $\sqrt{20} = 4.47$ times.
 
 <!-- figure: ch10-mfcc -->
 
@@ -310,9 +307,9 @@ assert!(cdoc.has_warning_containing("no stand-alone cepstrum"));
 2. **Units.** Predict `hz_to_mel(700.0)` and the Slaney mel value of 700 Hz.
 3. **Empty bands.** For 128 mel bands at 16 kHz, what is the smallest
    power-of-two `n_fft` with no empty filter?
-4. **Comparing with librosa.** With 40 mel bands and the default lifter,
-   by what total factor does this crate's $c_3$ exceed librosa's (same log
-   mel input)?
+4. **Comparing with the orthonormal DCT.** With 40 mel bands and the default
+   lifter, by what total factor does this crate's $c_3$ exceed the orthonormal,
+   unliftered $c_3$ (same log mel input)?
 
 ## Answers
 
@@ -386,15 +383,15 @@ assert!((factor - 24.91).abs() < 0.005);
   are HTK; the mel spectrogram and MFCCs are Slaney. Do not label mel
   spectrogram bands with `mel_frequencies`.
 - **No filter normalisation by default.** `MelParams::new` uses
-  `MelNorm::None` (peak 1 per triangle); librosa defaults to `norm='slaney'`
-  (equal area). `MelParams::with_norm` selects another.
+  `MelNorm::None` (peak 1 per triangle), not Slaney's equal-area
+  normalisation. `MelParams::with_norm` selects another.
 - **Unnormalised DCT and lifter 22** (with $k$ counted from 0): MFCC values are
-  much larger than librosa's. Use `with_lifter(0)` and divide by $\sqrt{M}$ /
-  $\sqrt{M/2}$ to compare.
+  much larger than orthonormal-DCT values. Use `with_lifter(0)` and divide by
+  $\sqrt{M}$ / $\sqrt{M/2}$ to compare.
 - **Absolute log floor.** The dB step clamps at $10^{-8}$ (-80 dB re 1), not
   80 dB below the frame's peak, so a quiet signal's MFCCs depend on its level.
-- **Symmetric Hann.** `WindowType::Hanning` is the symmetric window; librosa
-  and SciPy use the periodic one, so spectra differ slightly.
+- **Symmetric Hann.** `WindowType::Hanning` is the symmetric window; SciPy
+  uses the periodic one by default, so spectra differ slightly.
 - **Empty mel bands** appear when bands are narrower than the FFT bin spacing:
   ask `MelParams::explain_with` with the FFT size before choosing `n_mels`.
 - **Cepstral pitch needs several periods in the frame** and fails on breathy

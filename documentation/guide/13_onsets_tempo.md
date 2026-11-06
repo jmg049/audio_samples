@@ -394,9 +394,12 @@ assert!((fine - 1.38).abs() < 0.005);
   estimate against $2\times$ and $\tfrac{1}{2}\times$ (and $3\times$) before
   trusting it. `BeatTrackingConfig::tempo_bpm` is ignored by
   `estimate_tempo`.
-- **librosa differs**: `librosa.onset.onset_strength` uses a mel spectrogram
-  in dB with a one-frame lag and `peak_pick` uses separate pre/post windows
-  in frames; numbers will not match this crate.
+- **A second onset pipeline**:
+  [`AudioRhythm::onset_strength`](crate::AudioRhythm::onset_strength) uses a
+  mel spectrogram in dB with a one-frame lag, and
+  [`AudioRhythm::onset_detect`](crate::AudioRhythm::onset_detect) picks peaks
+  with separate pre/post windows in frames; their numbers will not match the
+  functions in this chapter.
 
 ## References
 

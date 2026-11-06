@@ -341,9 +341,10 @@ assert_eq!(active(VadMethod::Combined), 0);
 
 - **Units of ZCR.** The VAD uses crossings per sample (per frame);
   [`zero_crossing_rate`](crate::AudioStatistics::zero_crossing_rate) returns
-  crossings per **second** for the whole signal; librosa's
-  `zero_crossing_rate` returns a per-frame fraction (crossings / frame length,
-  centred frames). Divide by $f_s$ to compare.
+  crossings per **second** for the whole signal;
+  [`zero_crossing_rate_frames`](crate::AudioFeatures::zero_crossing_rate_frames)
+  returns a per-frame fraction (crossings / frame length, centred frames).
+  Divide by $f_s$ to compare.
 - **dBFS conventions.** Here a full-scale sine is $-3.01$ dBFS (RMS
   convention). AES17 would call it 0 dBFS.
 - **Default frames are long.** `VadConfig::default()` uses 1024 / 512

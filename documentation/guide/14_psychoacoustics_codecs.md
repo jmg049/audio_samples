@@ -111,7 +111,7 @@ units; the very first code of segment 0 covers magnitude 0 alone, a step of 1). 
 levels, with 8 bits instead of 14.
 
 The library's [`mu_compress`](crate::AudioProcessing::mu_compress) implements
-this curve (it equals `librosa.mu_compress(quantize=False)`, and maps 0 to 0),
+this curve without quantising (it maps 0 to 0),
 and [`mu_expand`](crate::AudioProcessing::mu_expand) inverts it. This chapter
 also writes the curve out by hand and checks both against it.
 
@@ -434,7 +434,7 @@ assert!((spl - 82.0).abs() < 1e-12);
   $-3.01$ dBFS.
 - **"Mel" is ambiguous.** HTK (`2595 log10(1 + f/700)`) and Slaney
   (linear below 1 kHz, logarithmic above) differ; `audio_math` uses HTK, the
-  mel spectrogram uses Slaney, librosa defaults to Slaney.
+  mel spectrogram uses Slaney.
 - **`hz_to_erb` returns a bandwidth**, not an ERB-number; uniformly spaced
   ERB *bandwidths* are uniformly spaced in Hz.
 - **Masking direction.** Masking spreads *upwards* in frequency. The library's
@@ -442,9 +442,8 @@ assert!((spl - 82.0).abs() < 1e-12);
   `aggressive` preset names are also the reverse of their effect; set the
   fields yourself if you need a faithful model.
 - **`mu_compress` is the continuous curve, not G.711.** It applies $F(x)$
-  without quantising (like `librosa.mu_compress(quantize=False)`); the 8-bit
-  segmented codes of G.711 are a different, piecewise-linear approximation.
-  For librosa's quantised μ-law use
+  without quantising; the 8-bit segmented codes of G.711 are a different,
+  piecewise-linear approximation. For integer μ-law codes use
   [`mu_law_encode`](crate::mu_law_encode) / [`mu_law_decode`](crate::mu_law_decode).
 - **Not Opus.** `codecs::opus` is a teaching codec; it cannot read or write
   `.opus` files.

@@ -238,7 +238,7 @@ fn main() {
     );
     assert!(worst < 1e-8);
 
-    // Relation to librosa's orthonormal DCT (no lifter).
+    // Relation to the orthonormal DCT-II (no lifter).
     let plain = audio
         .mfcc(
             &stft,
