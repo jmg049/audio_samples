@@ -163,15 +163,13 @@ fn main() -> AudioSampleResult<()> {
         );
         measured.push((y, g1, rej));
     }
-    // Every tier keeps the pass band (better than 0.001 dB) and rejects the
-    // alias; the resampler computes in f64, so the levels are set by the
-    // filters (0.1 dB tolerance).
-    for (_, g1, _) in &measured {
-        assert!(g1.abs() < 1e-3);
+    // Every tier keeps the pass band (better than 0.001 dB) and removes the
+    // alias: for this 1 : 3 ratio the resampler drops everything above the
+    // new Nyquist frequency in the frequency domain, so what is left is f64
+    // round-off.
+    for (_, g1, rej) in &measured {
+        assert!(g1.abs() < 1e-3 && *rej < -180.0);
     }
-    assert!((measured[0].2 + 90.8).abs() < 0.1); // Fast: short 70 dB design filter
-    assert!((measured[1].2 + 116.7).abs() < 0.1); // Medium
-    assert!((measured[2].2 + 145.5).abs() < 0.1); // High
     println!();
 
     // ---------------------------------------------------------------- 3
@@ -218,7 +216,8 @@ fn main() -> AudioSampleResult<()> {
         "     {} taps, Blackman window, cutoff 7.6 kHz: 1 kHz gain {g1:+.4} dB, alias {rej:+.1} dB",
         h.len()
     );
-    // 107.5 dB: between the library's Fast (90.8) and Medium (116.7).
+    // 107.5 dB: this filter's stopband, folded back; the library drops that
+    // part of the spectrum for this ratio.
     assert!(g1.abs() < 1e-3 && (rej + 107.5).abs() < 0.1);
     // Both this decimator and the library are centred (zero delay), so they
     // can be compared with the ideal sine and with each other directly.
@@ -269,10 +268,9 @@ fn main() -> AudioSampleResult<()> {
                 assert!((g10 - db(tri(10_000.0).abs())).abs() < 1e-6);
                 assert!((g6 + 3.77).abs() < 0.01 && (g10 + 11.8).abs() < 0.05);
             }
-            // The sinc tiers pass 6 kHz unchanged and attenuate the image to -114.8 dB
-            // (Medium) and -146.0 dB (High).
-            ResamplingQuality::Medium => assert!(g6.abs() < 1e-4 && (g10 + 114.8).abs() < 0.1),
-            _ => assert!(g6.abs() < 1e-4 && (g10 + 146.0).abs() < 0.1),
+            // The sinc tiers pass 6 kHz unchanged and remove the image: every
+            // bin above 8 kHz is zero before the inverse transform.
+            _ => assert!(g6.abs() < 1e-4 && g10 < -180.0),
         }
     }
     println!("\nAll checks passed.");

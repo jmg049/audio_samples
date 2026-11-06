@@ -65,18 +65,22 @@ fn tier_responses(figs: &mut Figures) -> Result {
             curves[i].push((f, level.max(-200.0)));
         }
     }
-    // The chapter's 10 kHz rejection, measured here on a lone 10 kHz tone.
+    // The chapter's 10 kHz rejection, measured here on a lone 10 kHz tone:
+    // round-off (the plot's floor is -200 dB).
     let at_10k = |c: &[(f64, f64)]| c.iter().find(|p| p.0 == 10_000.0).map_or(f64::NAN, |p| p.1);
-    for (c, want) in curves.iter().zip([-90.8, -116.7, -145.5]) {
-        assert_close("rejection of a 10 kHz tone (dB)", at_10k(c), want, 0.1);
+    for c in &curves {
+        check(
+            "rejection of a 10 kHz tone below -180 dB",
+            at_10k(c) < -180.0,
+        );
     }
 
     figs.svg(
         "ch07-tier-responses",
         "Level after converting a 48 kHz tone to 16 kHz with resample, measured at the \
          frequency at which it appears, for each ResamplingQuality. Below 8 kHz this is the pass \
-         band (Fast rolls off first); above 8 kHz it is the residue of the alias, 90.8, 116.7 \
-         and 145.5 dB down at 10 kHz.",
+         band (Fast rolls off first); above 8 kHz it is the residue of the alias, more than \
+         180 dB down (round-off): for 1 : 3 the resampler drops everything above 8 kHz.",
         (720, 440),
         |area| {
             let mut c = Chart::new(
@@ -146,7 +150,7 @@ fn alias_spectra(figs: &mut Figures) -> Result {
     );
 
     let mut tier_specs = Vec::new();
-    for ((q, name, _), want) in TIERS.iter().zip([-90.8, -116.7, -145.5]) {
+    for (q, name, _) in TIERS.iter() {
         let y = resample(&input, sample_rate!(16000), *q)?;
         assert_eq!(y.samples_per_channel().get(), 4_000, "ceil(12000 / 3)");
         let y = y.as_slice().ok_or("mono slice")?;
@@ -158,10 +162,11 @@ fn alias_spectra(figs: &mut Figures) -> Result {
             format!("{name} passes 1 kHz unchanged"),
             pass_db.abs() < 1e-3,
         );
-        assert_close(&format!("{name} alias rejection (dB)"), alias_db, want, 0.1);
+        check(format!("{name} alias below -180 dB"), alias_db < -180.0);
         check(format!("{name} adds no delay"), shift.abs() < 1e-9);
         let spec = spectrum(seg)?;
-        assert_close("alias in the rfft bin (dB)", spec[600].1, alias_db, 1e-6);
+        // Both round-off: the rfft bin and the direct sum agree that far down.
+        check("alias in the rfft bin below -180 dB", spec[600].1 < -180.0);
         tier_specs.push(spec);
     }
 
@@ -169,8 +174,8 @@ fn alias_spectra(figs: &mut Figures) -> Result {
         "ch07-alias-suppression",
         "A 1 kHz plus 10 kHz mix converted from 48 kHz to 16 kHz, spectra of the middle \
          100 ms. Keeping every third sample (top) moves the 10 kHz tone to 6 kHz at full \
-         level; every tier of resample (bottom) removes it, leaving 90.8 dB (Fast), 116.7 dB \
-         (Medium) and 145.5 dB (High) below the input.",
+         level; every tier of resample (bottom) removes it, leaving round-off more than 180 dB \
+         below the input.",
         (720, 600),
         |area| {
             let p = rows(area, 2);
@@ -194,13 +199,13 @@ fn alias_spectra(figs: &mut Figures) -> Result {
             .title("resample, three quality tiers")
             .x_format(khz)
             .legend(LegendPos::UpperRight);
-            for (((_, name, color), s), want) in
-                TIERS.iter().zip(&tier_specs).zip([-90.8, -116.7, -145.5])
+            for (((_, name, color), s), y) in
+                TIERS.iter().zip(&tier_specs).zip([-120.0, -135.0, -150.0])
             {
                 c = c.add(Series::line(name, s.clone(), *color)).note(
                     6_150.0,
-                    want + 8.0,
-                    &format!("{name}: {want} dB"),
+                    y,
+                    &format!("{name}: alias below -180 dB"),
                     *color,
                 );
             }
@@ -245,20 +250,15 @@ fn upsampling_images(figs: &mut Figures) -> Result {
     assert_close("G(10 kHz) (dB)", g(10_000.0), -11.8, 0.05);
     let y2 = up(2_000.0, ResamplingQuality::Fast)?;
     assert_close("Fast droop at 2 kHz (dB)", level(&y2, 2_000.0), -0.40, 0.01);
-    for (q, image_db) in [
-        (ResamplingQuality::Medium, -114.8),
-        (ResamplingQuality::High, -146.0),
-    ] {
+    for q in [ResamplingQuality::Medium, ResamplingQuality::High] {
         let y = up(6_000.0, q)?;
         check(
             "sinc tier passes 6 kHz unchanged",
             level(&y, 6_000.0).abs() < 1e-4,
         );
-        assert_close(
-            "sinc tier, 10 kHz image (dB)",
-            level(&y, 10_000.0),
-            image_db,
-            0.1,
+        check(
+            "sinc tier, 10 kHz image below -180 dB",
+            level(&y, 10_000.0) < -180.0,
         );
     }
 
@@ -286,7 +286,7 @@ fn upsampling_images(figs: &mut Figures) -> Result {
         "ch07-upsampling-images",
         "Upsampling a tone from 16 kHz to 48 kHz. Fast (linear interpolation) follows the \
          chapter's G(f) (line): the tone droops (dots below 8 kHz) and its image at 16 kHz \
-         minus f is only partly removed. Medium and High remove the image to below -116 dB.",
+         minus f is only partly removed. Medium and High remove the image to round-off.",
         (720, 440),
         |area| {
             let mut c = Chart::new(

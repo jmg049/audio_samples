@@ -147,10 +147,10 @@ for q in [ResamplingQuality::Fast, ResamplingQuality::Medium, ResamplingQuality:
 }
 // Every tier passes 1 kHz unchanged (better than 0.001 dB) ...
 assert!(results.iter().all(|(p, _, _)| p.abs() < 1e-3));
-// ... rejects the alias: Fast by about 90.8 dB, Medium 116.7 dB, High 145.5 dB ...
-assert!((results[0].1 + 90.8).abs() < 0.1);
-assert!((results[1].1 + 116.7).abs() < 0.1);
-assert!((results[2].1 + 145.5).abs() < 0.1);
+// ... removes the alias: for this 1 : 3 ratio the resampler drops everything
+// above the new Nyquist frequency in the frequency domain, so what is left is
+// f64 round-off, more than 180 dB down ...
+assert!(results.iter().all(|&(_, a, _)| a < -180.0));
 // ... and adds no delay: the shift is zero to rounding error.
 assert!(results.iter().all(|(_, _, s)| s.abs() < 1e-9));
 ```
@@ -221,8 +221,9 @@ for (m, &v) in y.iter().enumerate() {
 **A windowed-sinc decimator, written out.** Low-pass with a 193-tap
 Blackman-windowed sinc whose cutoff is $0.95 \times 8$ kHz $= 7.6$ kHz, then
 keep every third sample. The filter is centred (no delay), so the 1 kHz output
-matches the ideal 16 kHz sine, and the 6 kHz alias is 107.5 dB down, between
-the library's `Fast` (90.8 dB) and `Medium` (116.7 dB) tiers. Since the library
+matches the ideal 16 kHz sine, and the 6 kHz alias is 107.5 dB down: the
+filter's stopband, folded back. The library drops that part of the spectrum
+for this ratio, so its tiers leave only round-off. Since the library
 adds no delay either, its `High` output and this one agree sample by sample.
 
 ```rust
@@ -313,8 +314,9 @@ assert!((level(10_000.0) - g(10_000.0)).abs() < 1e-6);
 assert!((g(6_000.0) + 3.77).abs() < 0.01 && (g(10_000.0) + 11.8).abs() < 0.05);
 ```
 
-The sinc tiers pass the 6 kHz tone unchanged (to 0.0001 dB) and attenuate the
-image to $-114.8$ dB for `Medium` and $-146.0$ dB for `High`:
+The sinc tiers pass the 6 kHz tone unchanged (to 0.0001 dB) and remove the
+image: for 1 : 3 they set every bin above 8 kHz to zero before the inverse
+transform, so it is f64 round-off, more than 180 dB down:
 
 ```rust
 use audio_samples::operations::types::ResamplingQuality;
@@ -323,7 +325,7 @@ use std::f64::consts::PI;
 use std::time::Duration;
 
 let x = sine_wave::<f64>(6_000.0, Duration::from_millis(250), sample_rate!(16000), 0.5);
-for (q, image_db) in [(ResamplingQuality::Medium, -114.8), (ResamplingQuality::High, -146.0)] {
+for q in [ResamplingQuality::Medium, ResamplingQuality::High] {
     let y = resample(&x, sample_rate!(48000), q).unwrap();
     let y = &y.as_slice().unwrap()[3_600..8_400];
     let level = |f: f64| {
@@ -334,7 +336,7 @@ for (q, image_db) in [(ResamplingQuality::Medium, -114.8), (ResamplingQuality::H
         20.0 * (2.0 * (re * re + im * im).sqrt() / y.len() as f64 / 0.5).log10()
     };
     assert!(level(6_000.0).abs() < 1e-4);
-    assert!((level(10_000.0) - image_db).abs() < 0.1);
+    assert!(level(10_000.0) < -180.0);
 }
 ```
 
@@ -376,7 +378,7 @@ assert!(!topics::resampling(16_000.0, 48_000.0).has_warning_containing("Downsamp
 
 1. $|13\,000 - 16\,000| = 3\,000$ Hz, at full level after naive decimation.
    Every tier removes it: measured over the middle 50 ms, `Fast` leaves
-   $-85.5$ dB, `Medium` $-122.8$ dB and `High` $-151.3$ dB. Over the whole
+   $-156$ dB and `Medium` and `High` less than $-230$ dB (round-off). Over the whole
    100 ms all three read about $-74$ dB, set by the clicks at the ends of the
    tone (chapter 01).
 
@@ -401,14 +403,14 @@ assert_eq!(naive.len(), 1_600); // 300 whole periods of 3 kHz
 assert!((amp(&naive) - 0.5).abs() < 1e-9);
 
 for (q, mid_db) in [
-    (ResamplingQuality::Fast, -85.5),
-    (ResamplingQuality::Medium, -122.8),
-    (ResamplingQuality::High, -151.3),
+    (ResamplingQuality::Fast, -150.0),
+    (ResamplingQuality::Medium, -220.0),
+    (ResamplingQuality::High, -220.0),
 ] {
     let y = resample(&x, sample_rate!(16000), q).unwrap();
     let y = y.as_slice().unwrap();
     let db = |a: f64| 20.0 * (a / 0.5).log10();
-    assert!((db(amp(&y[400..1_200])) - mid_db).abs() < 0.1); // middle 50 ms: 150 periods
+    assert!(db(amp(&y[400..1_200])) < mid_db); // middle 50 ms: 150 periods
     assert!((db(amp(y)) + 74.0).abs() < 0.5); // whole signal: the edge clicks
 }
 ```

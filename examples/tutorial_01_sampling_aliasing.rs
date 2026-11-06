@@ -124,18 +124,15 @@ fn main() {
     // Nyquist frequency before decimating. Rejection is measured in the
     // steady state: the middle 100 ms (samples 1200..2800) holds exactly 500
     // periods of 5 kHz, so a single DFT bin gives the residual amplitude there.
-    // Expected (dB re the 0.5 the naive decimator delivers): Fast -83.9,
-    // Medium -130.2, High -144.8. The resampler computes in f64, so these are
-    // set by the filters; 0.1 dB tolerance.
-    let expected_steady = [-83.9, -130.2, -144.8];
-    for (q, want) in [
+    // For this 1 : 3 ratio the resampler works block by block in the
+    // frequency domain and drops everything above the new Nyquist frequency
+    // instead of folding the filter's stopband back: what is left is f64
+    // round-off, more than 180 dB below the 0.5 the naive decimator delivers.
+    for q in [
         ResamplingQuality::Fast,
         ResamplingQuality::Medium,
         ResamplingQuality::High,
-    ]
-    .into_iter()
-    .zip(expected_steady)
-    {
+    ] {
         let y = resample(&hi, sample_rate!(16000), q).expect("resample");
         assert_eq!(y.samples_per_channel().get(), 4_000);
         let ys = y.as_slice().expect("contiguous");
@@ -143,7 +140,7 @@ fn main() {
         println!(
             "   {q:>6} tier, steady state (middle 100 ms): 5 kHz residue at {steady_db:.1} dB"
         );
-        assert!((steady_db - want).abs() < 0.1, "{q}: {steady_db}");
+        assert!(steady_db < -180.0, "{q}: {steady_db}");
     }
 
     // Over the whole 250 ms, the abrupt start and end of the tone are broadband
@@ -163,7 +160,7 @@ fn main() {
     // (0.913 x 8 kHz = 7304 Hz) and the new Nyquist frequency.
     assert_eq!(top_hz, 7_652.0);
     assert!(top_hz > 0.913 * 8_000.0 && top_hz < 8_000.0);
-    assert!((largest_db - 74.6).abs() < 0.1);
+    assert!((largest_db - 74.5).abs() < 0.1);
     let high_s = high.as_slice().expect("contiguous");
     let max_abs = |x: &[f64]| x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let (edge, middle) = (max_abs(&high_s[..50]), max_abs(&high_s[1_200..2_800]));

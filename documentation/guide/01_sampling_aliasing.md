@@ -114,18 +114,18 @@ for q in [ResamplingQuality::Fast, ResamplingQuality::Medium, ResamplingQuality:
     steady_db.push(db(amplitude(&y.as_slice().unwrap()[1_200..2_800], 5_000.0) / 0.5));
 }
 println!("steady-state alias, Fast/Medium/High: {steady_db:.1?} dB");
-// About 84, 130 and 145 dB down (the resampler computes in f64, so these are
-// set by the filters, not by rounding).
-assert!((steady_db[0] + 83.9).abs() < 0.1);
-assert!((steady_db[1] + 130.2).abs() < 0.1);
-assert!((steady_db[2] + 144.8).abs() < 0.1);
+// Gone: for this 1 : 3 ratio the resampler works block by block in the
+// frequency domain and drops everything above the new Nyquist frequency
+// instead of folding the filter's stopband back, so what is left is f64
+// round-off, more than 180 dB down.
+assert!(steady_db.iter().all(|&d| d < -180.0));
 
 // Over the whole 250 ms the residue is larger, and not because of aliasing:
 // the tone starts and stops abruptly, and those edges are broadband clicks
 // that the filter passes below 8 kHz. For High, the 5 kHz bin of the full
 // output is 78.4 dB below the naive alias, and the largest bin anywhere
 // (7652 Hz, in the filter's transition band between 0.913 x 8 kHz = 7304 Hz
-// and 8 kHz) only 74.6 dB below it.
+// and 8 kHz) only 74.5 dB below it.
 let high = resample(&hi, sample_rate!(16000), ResamplingQuality::High).unwrap();
 let high_spec = high.rfft(nzu!(4000)).unwrap();
 let hrow = high_spec.row(0);
@@ -136,7 +136,7 @@ println!("5 kHz bin {bin_5k_db:.1} dB, largest bin {largest_db:.1} dB at {} Hz",
 assert!((bin_5k_db - 78.4).abs() < 0.1);
 assert_eq!(top * 4, 7_652);
 assert!(top * 4 > 7_304 && top * 4 < 8_000);
-assert!((largest_db - 74.6).abs() < 0.1);
+assert!((largest_db - 74.5).abs() < 0.1);
 // The click is visible in the samples: the first 50 output samples reach 0.12,
 // while the middle of the output is below 1e-7.
 let hs = high.as_slice().unwrap();
@@ -148,10 +148,11 @@ assert!(max_abs(&hs[1_200..2_800]) < 1e-7);
 The naive version did not remove the tone; it *moved* it to 5 kHz at full
 strength, where it is indistinguishable from a genuine 5 kHz component. Every
 tier of the resampler removes it instead: in the steady state the residue is
-84 dB down for `Fast` (a short filter designed for 70 dB of stop-band
-attenuation), 130 dB for `Medium` and 145 dB for `High`. Measure over the whole
-signal and `High`'s figure drops to 78.4 dB at 5 kHz (74.6 dB for the largest
-bin, at 7652 Hz): the residue there is the broadband click of a tone switched
+more than 180 dB down, floating-point round-off, for every tier (for this
+1 : 3 ratio the resampler drops everything above the new Nyquist frequency in
+the frequency domain, so its filter's stopband does not fold back). Measure
+over the whole signal and `High`'s figure drops to 78.4 dB at 5 kHz (74.5 dB
+for the largest bin, at 7652 Hz): the residue there is the broadband click of a tone switched
 on and off abruptly, not aliasing. Always measure rejection away from the ends
 of a test signal, as chapter 07 does.
 
