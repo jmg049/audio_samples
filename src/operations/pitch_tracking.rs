@@ -1596,6 +1596,26 @@ enum HarmonicCell<F> {
 }
 
 impl<F: AudioFloat> HarmonicCell<F> {
+    /// `o[t] += v[t] * w` for every frame `t` of a tile, `v` as
+    /// [`HarmonicCell::eval_row`] gives it (the same products and sums).
+    #[inline]
+    fn add_row(&self, tile: &ArrayView2<'_, F>, fill: F, w: F, o: &mut [F]) {
+        match *self {
+            Self::Fill => {
+                let v = fill * w;
+                for o in o.iter_mut() {
+                    *o += v;
+                }
+            }
+            Self::Lin { lo, hi, a, b } => {
+                let (rl, rh) = (row(tile, lo), row(tile, hi));
+                for ((o, &yl), &yh) in o.iter_mut().zip(rl).zip(rh) {
+                    *o += (a * yh + b * yl) * w;
+                }
+            }
+        }
+    }
+
     /// `o[t]` for every frame `t` of a tile (rows contiguous).
     #[inline]
     fn eval_row(&self, tile: &ArrayView2<'_, F>, fill: F, o: &mut [F]) {
@@ -2090,16 +2110,12 @@ fn salience_fixed<F: AudioFloat>(
                     o.fill(fill_value);
                     continue;
                 }
-                for h in 0..n_h {
-                    plan.cells[h * n_bins + k].eval_row(&tile, zero, &mut harm[h * w..(h + 1) * w]);
-                }
                 match config.aggregate {
+                    // Each harmonic's row is added as it is interpolated.
                     SalienceAggregate::Average => {
                         o.fill(F::zero());
                         for (h, &wh) in weights.iter().enumerate() {
-                            for (a, &v) in o.iter_mut().zip(&harm[h * w..(h + 1) * w]) {
-                                *a += v * wh;
-                            }
+                            plan.cells[h * n_bins + k].add_row(&tile, zero, wh, o);
                         }
                         for a in o.iter_mut() {
                             *a /= scl;
@@ -2108,12 +2124,21 @@ fn salience_fixed<F: AudioFloat>(
                     SalienceAggregate::Sum => {
                         o.fill(F::zero());
                         for h in 0..n_h {
-                            for (a, &v) in o.iter_mut().zip(&harm[h * w..(h + 1) * w]) {
+                            let v = &mut harm[..w];
+                            plan.cells[h * n_bins + k].eval_row(&tile, zero, v);
+                            for (a, &v) in o.iter_mut().zip(&*v) {
                                 *a += v;
                             }
                         }
                     }
                     agg => {
+                        for h in 0..n_h {
+                            plan.cells[h * n_bins + k].eval_row(
+                                &tile,
+                                zero,
+                                &mut harm[h * w..(h + 1) * w],
+                            );
+                        }
                         for (j, o) in o.iter_mut().enumerate() {
                             for (h, b) in buf.iter_mut().enumerate() {
                                 *b = harm[h * w + j];

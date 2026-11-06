@@ -3438,11 +3438,16 @@ fn shear<T: Copy>(src: ArrayView2<T>, rows: usize) -> Array2<T> {
         for cb in (0..cols).step_by(B) {
             let ce = (cb + B).min(cols);
             for i in 0..rows {
+                // Source row (i - j) mod n, with i < n and j < n: i - j for
+                // j <= i, i + n - j after (two loops, no branch per element).
+                let split = (i + 1).clamp(cb, ce);
                 let orow = &mut o[i * cols + cb..i * cols + ce];
-                for (dst, j) in orow.iter_mut().zip(cb..ce) {
-                    // Source row (i - j) mod n, with i < n and j < n.
-                    let r = if i >= j { i - j } else { i + n - j };
-                    *dst = std::mem::MaybeUninit::new(s[r * cols + j]);
+                let (low, high) = orow.split_at_mut(split - cb);
+                for (dst, j) in low.iter_mut().zip(cb..split) {
+                    *dst = std::mem::MaybeUninit::new(s[(i - j) * cols + j]);
+                }
+                for (dst, j) in high.iter_mut().zip(split..ce) {
+                    *dst = std::mem::MaybeUninit::new(s[(i + n - j) * cols + j]);
                 }
             }
         }
@@ -3497,16 +3502,18 @@ pub fn recurrence_to_lag<T: Copy + Default>(
     // diagonal writes of consecutive rows hit the same cache lines.
     const B: usize = 64;
     let mut out = vec![T::default(); n * c];
-    let dst = |row: usize, col: usize| {
-        let d = if row >= col { row - col } else { row + n - col };
-        d * c + col
-    };
+    // Destination row (row - col) mod n: row - col for col <= row,
+    // row + n - col after (two loops, no branch per element).
     if let Some(src) = rec.as_slice() {
         for cb in (0..c).step_by(B) {
             let ce = (cb + B).min(c);
             for row in 0..r {
-                for col in cb..ce {
-                    out[dst(row, col)] = src[row * c + col];
+                let split = (row + 1).clamp(cb, ce);
+                for col in cb..split {
+                    out[(row - col) * c + col] = src[row * c + col];
+                }
+                for col in split..ce {
+                    out[(row + n - col) * c + col] = src[row * c + col];
                 }
             }
         }
@@ -3516,8 +3523,12 @@ pub fn recurrence_to_lag<T: Copy + Default>(
         for cb in (0..c).step_by(B) {
             let ce = (cb + B).min(c);
             for row in 0..r {
-                for col in cb..ce {
-                    out[dst(row, col)] = src[col * r + row];
+                let split = (row + 1).clamp(cb, ce);
+                for col in cb..split {
+                    out[(row - col) * c + col] = src[col * r + row];
+                }
+                for col in split..ce {
+                    out[(row + n - col) * c + col] = src[col * r + row];
                 }
             }
         }
@@ -3527,8 +3538,12 @@ pub fn recurrence_to_lag<T: Copy + Default>(
         for cb in (0..c).step_by(B) {
             let ce = (cb + B).min(c);
             for row in 0..r {
-                for col in cb..ce {
-                    out[dst(row, col)] = src[row * c + col];
+                let split = (row + 1).clamp(cb, ce);
+                for col in cb..split {
+                    out[(row - col) * c + col] = src[row * c + col];
+                }
+                for col in split..ce {
+                    out[(row + n - col) * c + col] = src[row * c + col];
                 }
             }
         }
