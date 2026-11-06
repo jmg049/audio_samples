@@ -23,7 +23,9 @@
 #   ties      rows within 3 % in time (py): both libraries again in one
 #             process, alternating rounds; native rows at 0.97 or above:
 #             five more processes, median kept; RSS rows above librosa:
-#             ten more processes per library (needs a report stage first)
+#             ten more processes per library; memray rows above librosa:
+#             nine fresh processes per library, each warming up both
+#             libraries first, median kept (needs a report stage first)
 #   report    tables (report.py)
 #
 # Not part of the default list (file reading, start-up and install costs; see
@@ -163,6 +165,20 @@ print(','.join(sorted({r['case'] for r in rows if r.get('ours_rss_kb') is not No
           "$PY" "$HERE/rss_probe.py" --signals "$SIG" --jobs "$JOBS" --repeats 10 \
           --shim "$REPO/target/librosa_bench/rss_shim.so" --cases "$cases" --out "$OUT/rss.jsonl"
       fi
+      # Python memray rows where ours is above librosa: nine fresh processes
+      # per library, both libraries warmed up in each, median peak kept (the
+      # record is appended, so it replaces the single-process one).
+      "$PY" -c "
+import json
+for r in json.load(open('$OUT/merged.json')):
+    if r.get('ours_peak') is not None and r.get('librosa_peak') is not None and r['ours_peak'] > r['librosa_peak']:
+        print(r['case'], r['config'])
+" | while read -r case cfg; do
+        for lib in librosa ours; do
+          "${ONE[@]}" "$PY" "$HERE/bench_py.py" --lib "$lib" --signals "$SIG" --threads 1 --mode mem \
+            --processes 9 --cases "$case" --configs "$cfg" --out "$OUT/${lib}_mem.jsonl"
+        done
+      done
       ;;
     report)
       "$PY" "$HERE/report.py" "$OUT"

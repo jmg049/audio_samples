@@ -254,7 +254,9 @@ INTRO = (
     "Ratio = audio_samples / librosa; the first is through the Python bindings (like for like), "
     "the one in brackets is the native Rust call. Peak memory is memray's peak heap growth during "
     "one call (numpy and Rust allocations alike) for the two Python paths, and the counting "
-    "allocator's peak live bytes for the native call. Allocation counts: memray (librosa, ours "
+    "allocator's peak live bytes for the native call. Where ours was above librosa, the Python "
+    "peak is the median over nine fresh processes per library, each warming up both libraries' "
+    "calls first. Allocation counts: memray (librosa, ours "
     "through Python) and the counting allocator (rust). Bold: audio_samples slower or larger by "
     "more than 5%.\n\n"
 )
