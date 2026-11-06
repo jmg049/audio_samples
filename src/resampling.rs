@@ -478,11 +478,9 @@ enum Stage {
 /// passband).
 const STAGE_B_EXTRA_DB: f64 = 30.0;
 /// Cost of one stage-A output sample (FFT work, spectrum products and
-/// copies) in units of one stage-B multiply-add, measured with AVX2 with
-/// stage B evaluated a few cycles at a time (16000 -> 12699 Hz and
-/// 22050 -> 17501 Hz run faster at the input rate on both core types):
-/// used to choose stage A's rate.
-const STAGE_A_COST: f64 = 24.0;
+/// copies) in units of one stage-B multiply-add, measured with AVX2: used to
+/// choose stage A's rate.
+const STAGE_A_COST: f64 = 18.0;
 /// Decimation factors (powers of two) up to this run as a single FFT stage.
 const FFT_MAX_FACTOR: u64 = 64;
 /// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;

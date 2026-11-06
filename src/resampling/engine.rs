@@ -1211,6 +1211,9 @@ pub(super) struct DftStage<F> {
     /// zero-extended to `M2` bins as `W[k] = p[k] Y[k] + q[k] conj(Y[M2 - k])`,
     /// both by [`RsFloat::fir2_bins`]; `tab0` and `tab` are then unused.
     up: Option<(Bins<F>, Bins<F>)>,
+    /// Upsampling by 2 or more (`n2 >= 2 n1`): `up` holds instead the
+    /// products giving `W[..M]` and `W[M2 - M..]` from `Z` directly.
+    split_up: bool,
     simd: bool,
 }
 
@@ -1260,6 +1263,41 @@ impl<F: RsFloat> DftStage<F> {
         };
         let to_f = |re: f64, im: f64| Complex::new(F::of(re), F::of(im));
         let (fwd, inv) = F::with_planner(|p| (p.plan_fft_forward(big_m), p.plan_fft_inverse(m2)));
+        if m2 >= 2 * big_m {
+            // The two halves of `W` do not overlap: `W[k] = p Y[k]` for
+            // `k < M` and `W[M2 - M + j] = q conj(Y[M - j])` for `0 < j < M`,
+            // each two products on `Z` (zero between them and at `j = 0`).
+            let cf = |c: Complex<f64>| to_f(c.re, c.im);
+            let (lo_p, lo_q): (Vec<_>, Vec<_>) = (0..big_m)
+                .map(|k| {
+                    let p = 1.0 + i * turn(k, n2);
+                    (cf(p * ak[k]), cf(p * bk[k]))
+                })
+                .unzip();
+            let (hi_p, hi_q): (Vec<_>, Vec<_>) = (0..big_m)
+                .map(|j| {
+                    if j == 0 {
+                        return (cf(Complex::new(0.0, 0.0)), cf(Complex::new(0.0, 0.0)));
+                    }
+                    let q = 1.0 - i * turn(m2 - big_m + j, n2);
+                    (cf(q * bk[big_m - j].conj()), cf(q * ak[big_m - j].conj()))
+                })
+                .unzip();
+            return Self {
+                n1,
+                n2,
+                half,
+                hop,
+                hop_out: hop / m * l,
+                fwd,
+                inv,
+                tab0: [Complex::new(F::zero(), F::zero()); 8],
+                tab: Vec::new(),
+                up: Some((Bins::new(&lo_p, &lo_q), Bins::new(&hi_p, &hi_q))),
+                split_up: true,
+                simd: super::has_avx2_fma_cached(),
+            };
+        }
         if m2 > big_m {
             let cf = |c: Complex<f64>| to_f(c.re, c.im);
             let (a, b): (Vec<_>, Vec<_>) = (0..big_m).map(|k| (cf(ak[k]), cf(bk[k]))).unzip();
@@ -1286,6 +1324,7 @@ impl<F: RsFloat> DftStage<F> {
                 tab0: [Complex::new(F::zero(), F::zero()); 8],
                 tab: Vec::new(),
                 up: Some((Bins::new(&a, &b), Bins::new(&p, &q))),
+                split_up: false,
                 simd: super::has_avx2_fma_cached(),
             };
         }
@@ -1322,6 +1361,7 @@ impl<F: RsFloat> DftStage<F> {
             tab0,
             tab,
             up: None,
+            split_up: false,
             simd: super::has_avx2_fma_cached(),
         }
     }
@@ -1351,7 +1391,12 @@ impl<F: RsFloat> DftStage<F> {
     fn transform(&self, z: &[Complex<F>], bufs: &mut DftBufs<F>, simd: bool) {
         self.fwd
             .process_immutable_with_scratch(z, &mut bufs.zf, &mut bufs.scratch);
-        if let Some((a, b)) = &self.up {
+        if let (Some((lo, hi)), true) = (&self.up, self.split_up) {
+            let (m, m2) = (bufs.zf.len(), bufs.w.len());
+            F::fir2_bins(&mut bufs.w[..m], &bufs.zf, lo);
+            bufs.w[m..m2 - m].fill(Complex::new(F::zero(), F::zero()));
+            F::fir2_bins(&mut bufs.w[m2 - m..], &bufs.zf, hi);
+        } else if let Some((a, b)) = &self.up {
             // `bufs.band[M..]` stays zero.
             let m = bufs.zf.len();
             F::fir2_bins(&mut bufs.band[..m], &bufs.zf, a);
@@ -1436,7 +1481,7 @@ impl<F: RsFloat> DftBufs<F> {
         Self {
             z: vec![zero; d.n1 / 2],
             zf: vec![zero; d.n1 / 2],
-            band: if d.up.is_some() {
+            band: if d.up.is_some() && !d.split_up {
                 vec![zero; d.n2 / 2]
             } else {
                 Vec::new()
