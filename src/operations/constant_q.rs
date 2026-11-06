@@ -1,5 +1,5 @@
-//! librosa-compatible constant-Q and variable-Q transforms, their inverse, and the
-//! chroma / tonnetz features built on them.
+//! Constant-Q and variable-Q transforms, their inverse, and the chroma /
+//! tonnetz features built on them.
 //!
 //! ## What
 //!
@@ -12,27 +12,27 @@
 //! offset `gamma` (in Hz) for better time resolution there.
 //!
 //! This module provides the [`AudioConstantQ`] trait and the free functions it is
-//! built from. Together they reproduce librosa 1.0:
+//! built from:
 //!
-//! | librosa | here |
+//! | Operation | Items |
 //! |---|---|
-//! | `librosa.cqt` / `librosa.vqt` | [`AudioConstantQ::cqt`] / [`AudioConstantQ::vqt`] |
-//! | `librosa.pseudo_cqt` / `librosa.hybrid_cqt` | [`AudioConstantQ::pseudo_cqt`] / [`AudioConstantQ::hybrid_cqt`] |
-//! | `librosa.icqt` / `librosa.griffinlim_cqt` | [`AudioConstantQ::icqt`] / [`AudioConstantQ::griffinlim_cqt`] |
-//! | `librosa.feature.chroma_cqt` / `chroma_cens` / `chroma_vqt` | [`AudioConstantQ::chroma_cqt`] / [`AudioConstantQ::chroma_cens`] / [`AudioConstantQ::chroma_vqt`] |
-//! | `librosa.feature.tonnetz` | [`AudioConstantQ::tonnetz`] ([`tonnetz_from_chroma`]) |
-//! | `librosa.filters.cq_to_chroma` | [`cq_to_chroma`] |
-//! | `librosa.filters.wavelet` / `wavelet_lengths` | [`wavelet`] / [`wavelet_lengths`] |
+//! | Constant-Q and variable-Q transforms | [`AudioConstantQ::cqt`] / [`AudioConstantQ::vqt`] |
+//! | Pseudo and hybrid CQT | [`AudioConstantQ::pseudo_cqt`] / [`AudioConstantQ::hybrid_cqt`] |
+//! | Inverse CQT and Griffin-Lim reconstruction | [`AudioConstantQ::icqt`] / [`AudioConstantQ::griffinlim_cqt`] |
+//! | Constant-Q chroma, CENS and variable-Q chroma | [`AudioConstantQ::chroma_cqt`] / [`AudioConstantQ::chroma_cens`] / [`AudioConstantQ::chroma_vqt`] |
+//! | Tonal centroids | [`AudioConstantQ::tonnetz`] ([`tonnetz_from_chroma`]) |
+//! | Constant-Q to chroma mapping | [`cq_to_chroma`] |
+//! | Wavelet filters and their lengths | [`wavelet`] / [`wavelet_lengths`] |
 //!
 //! ## Why
 //!
 //! [`AudioTransforms::constant_q_transform`](crate::AudioTransforms::constant_q_transform)
 //! delegates to the `spectrograms` crate, whose CQT uses a different kernel design,
-//! normalisation and time alignment (it differs from librosa by several percent and
-//! returns fewer frames). Code ported from Python, and chroma or tonnetz features
-//! compared with published librosa results, need librosa's exact transform. Every
-//! config struct has a `librosa()` constructor that returns librosa 1.0's
-//! defaults. `Default` is the same except for [`ChromaCqtConfig`] (and the
+//! normalisation and time alignment (its values differ from this module's by
+//! several percent and it returns fewer frames). This module implements the
+//! recursive, per-octave CQT with wavelet filters, the form chroma and tonnetz
+//! features are usually computed from. Every config struct has a `librosa()`
+//! preset. `Default` is the same except for [`ChromaCqtConfig`] (and the
 //! [`ChromaCensConfig`] and [`TonnetzConfig`] built on it), whose default fixes
 //! the tuning at A440 instead of estimating it from the signal.
 //!
@@ -61,7 +61,7 @@
 //!
 //! let audio = sine_wave::<f64>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //!
-//! // librosa.cqt(y, sr=22050): 84 bins from C1, 22 frames of 512 samples.
+//! // Default CQT: 84 bins from C1, 22 frames of 512 samples.
 //! let c = audio.cqt(&CqtConfig::default()).unwrap();
 //! assert_eq!(c.dim(), (1, 84, 22));
 //! // The strongest bin is A4 (MIDI 69, bin 69 - 24 = 45 above C1).
@@ -69,24 +69,21 @@
 //! let peak = mags.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
 //! assert_eq!(peak, 45);
 //!
-//! // librosa.feature.chroma_cqt(y=y, sr=22050, tuning=0.0): pitch class A (index 9).
+//! // Chroma at A440 tuning: pitch class A (index 9).
 //! let chroma = audio.chroma_cqt(&ChromaCqtConfig::default().with_tuning(Some(0.0))).unwrap();
 //! assert_eq!(chroma.dim(), (1, 12, 22));
 //! assert!((chroma[[0, 9, 10]] - 1.0).abs() < 1e-12);
 //! ```
 //!
-//! ## Differences from librosa
+//! ## Resampling between octaves
 //!
-//! The recursive (per-octave) algorithm halves the sample rate between octaves.
-//! librosa uses the soxr library (`res_type="soxr_hq"`) for this; this module uses
-//! the crate's own windowed-sinc resampler ([`crate::resample`]) at the quality
-//! selected by [`CqtConfig::resampling_quality`] (default `High`, designed after
-//! soxr-hq). The top octave (computed at the input rate) agrees with librosa to
-//! about 1e-7 of the peak magnitude (librosa builds its filters in single precision);
-//! lower octaves agree to about 1e-4 of the peak, the difference between the two
-//! resamplers (librosa's own `soxr_hq` and `soxr_vhq` differ by as much). See
-//! `tests/librosa_reference/constant_q.rs` for measured figures. Custom
-//! `intervals` (just intonation) for the VQT are not supported.
+//! The recursive (per-octave) algorithm halves the sample rate between octaves
+//! with the crate's own windowed-sinc resampler ([`crate::resample`]) at the
+//! quality selected by [`CqtConfig::resampling_quality`] (default `High`). The
+//! top octave is computed at the input rate; the decimated octaves carry the
+//! resampler's error, about 1e-4 of the peak magnitude. Frequencies other than
+//! equal-tempered bins (just intonation, for example) are taken by
+//! [`vqt_with_intervals`].
 
 use std::num::NonZeroUsize;
 
@@ -118,17 +115,17 @@ fn config_err(operation: &str, reason: impl ToString) -> AudioSampleError {
     AudioSampleError::Parameter(ParameterError::invalid_configuration(operation, reason))
 }
 
-/// The frequency of C1 in Hz (`librosa.note_to_hz("C1")`), librosa's default `fmin`.
+/// The frequency of C1 in Hz, the default `fmin`.
 fn c1_hz() -> f64 {
     440.0 * 2.0f64.powf((24.0 - 69.0) / 12.0)
 }
 
-/// `librosa.hz_to_midi` (same evaluation order).
+/// MIDI note number of `f` Hz, evaluated as `12 (log2 f - log2 440) + 69`.
 fn hz_to_midi_librosa(f: f64) -> f64 {
     12.0 * (f.log2() - 440.0f64.log2()) + 69.0
 }
 
-/// `librosa.interval_frequencies(n_bins, fmin=fmin, intervals="equal", bins_per_octave=bpo)`.
+/// `n_bins` equal-tempered frequencies from `fmin`, `bpo` per octave.
 fn equal_interval_freqs(n_bins: usize, fmin: f64, bpo: usize) -> Vec<f64> {
     (0..n_bins)
         .map(|k| {
@@ -139,14 +136,14 @@ fn equal_interval_freqs(n_bins: usize, fmin: f64, bpo: usize) -> Vec<f64> {
         .collect()
 }
 
-/// librosa's equal-temperament relative bandwidth for a single bin.
+/// Equal-temperament relative bandwidth for a single bin.
 fn et_relative_bw(bpo: usize) -> f64 {
     let r = 2.0f64.powf(1.0 / bpo as f64);
     (r * r - 1.0) / (r * r + 1.0)
 }
 
-/// `librosa.filters._relative_bandwidth`: per-bin relative bandwidth `alpha` from the
-/// local spacing of (at least two, ascending) frequencies.
+/// Per-bin relative bandwidth `alpha` from the local spacing of (at least two,
+/// ascending) frequencies.
 fn relative_bandwidth(freqs: &[f64]) -> Vec<f64> {
     let n = freqs.len();
     let logf: Vec<f64> = freqs.iter().map(|f| f.log2()).collect();
@@ -164,7 +161,7 @@ fn relative_bandwidth(freqs: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// `alpha` as librosa's transforms compute it (single bins use the equal-tempered value).
+/// `alpha` as the transforms use it (single bins use the equal-tempered value).
 fn transform_alpha(freqs: &[f64], bpo: usize) -> Vec<f64> {
     if freqs.len() == 1 {
         vec![et_relative_bw(bpo)]
@@ -173,7 +170,7 @@ fn transform_alpha(freqs: &[f64], bpo: usize) -> Vec<f64> {
     }
 }
 
-/// `librosa.filters.window_bandwidth`: librosa returns a hard-coded table value for
+/// Equivalent noise bandwidth used for the wavelet filters: a fixed table value for
 /// named windows; parameterised windows use the formula at `n = 1000`.
 fn librosa_window_bandwidth(window: &Window) -> AudioSampleResult<f64> {
     Ok(match window {
@@ -204,8 +201,8 @@ fn gamma_values(alpha: &[f64], gamma: Option<f64>) -> Vec<f64> {
     }
 }
 
-/// librosa's `util.normalize` of a vector by `norm` (no-op below the smallest
-/// positive normal number).
+/// The `norm`-length of a vector, by which it is normalised (no-op below the
+/// smallest positive normal number).
 fn norm_length(mags: impl Iterator<Item = f64> + Clone, norm: f64) -> f64 {
     if norm == f64::INFINITY {
         mags.fold(0.0, f64::max)
@@ -240,11 +237,10 @@ fn require_finite_positive(parameter: &str, v: f64) -> AudioSampleResult<()> {
 }
 
 // =============================================================================
-// Wavelet filters (librosa.filters.wavelet / wavelet_lengths)
+// Wavelet filters
 // =============================================================================
 
-/// Shape of the wavelet filters of a constant-Q / variable-Q filterbank
-/// (the keyword arguments of `librosa.filters.wavelet`).
+/// Shape of the wavelet filters of a constant-Q / variable-Q filterbank.
 ///
 /// ## Purpose
 ///
@@ -257,7 +253,8 @@ fn require_finite_positive(parameter: &str, v: f64) -> AudioSampleResult<()> {
 ///
 /// Pass it to [`wavelet_lengths`] or [`wavelet`] to inspect or reuse the filters
 /// that [`AudioConstantQ::cqt`] / [`AudioConstantQ::vqt`] use internally.
-/// `WaveletConfig::default()` reproduces librosa's defaults.
+/// `WaveletConfig::default()` is a Hann window, filter scale 1, constant Q,
+/// L1 normalisation and power-of-two padding.
 ///
 /// ## Invariants
 ///
@@ -274,22 +271,22 @@ fn require_finite_positive(parameter: &str, v: f64) -> AudioSampleResult<()> {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaveletConfig {
-    /// Window applied to each complex exponential. librosa default: Hann. Must be a
+    /// Window applied to each complex exponential. Default: Hann. Must be a
     /// named window ([`Window::Custom`] is rejected: the filters have different
     /// lengths).
     pub window: Window,
     /// Scales every filter length. Values below 1 give shorter filters (better time
-    /// resolution, wider bandwidth). Finite and positive; librosa default 1.
+    /// resolution, wider bandwidth). Finite and positive; default 1.
     pub filter_scale: f64,
     /// Bandwidth offset in Hz added to every filter (variable-Q). `Some(0.0)` gives
-    /// constant Q (librosa's default here); `None` uses the ERB-derived offset
+    /// constant Q (the default); `None` uses the ERB-derived offset
     /// `24.7 * alpha / 0.108`. Finite and non-negative.
     pub gamma: Option<f64>,
-    /// Normalisation of each filter (`librosa.util.normalize`): `Some(p)` divides by
-    /// the `p`-norm (`p > 0`, `inf` = maximum, `-inf` = minimum, `0` = number of
-    /// non-zeros); `None` leaves the filters unnormalised. librosa default `Some(1.0)`.
+    /// Normalisation of each filter: `Some(p)` divides by the `p`-norm (`p > 0`,
+    /// `inf` = maximum, `-inf` = minimum, `0` = number of non-zeros); `None` leaves
+    /// the filters unnormalised. Default `Some(1.0)`.
     pub norm: Option<f64>,
-    /// If `true` (librosa's default) all filters are centred in a buffer whose
+    /// If `true` (the default) all filters are centred in a buffer whose
     /// length is the next power of two of the longest filter; otherwise in a buffer
     /// of `ceil(max length)` samples.
     pub pad_fft: bool,
@@ -308,15 +305,13 @@ impl Default for WaveletConfig {
 }
 
 impl WaveletConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `filters.wavelet` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -419,7 +414,7 @@ fn wavelet_lengths_impl(
 }
 
 /// Computes the length of each wavelet filter of a constant-Q / variable-Q
-/// filterbank, equivalent to `librosa.filters.wavelet_lengths`.
+/// filterbank.
 ///
 /// A filter centred at `f` with relative bandwidth `alpha` (from the spacing of the
 /// frequencies) has quality factor `Q = filter_scale / alpha` and length
@@ -444,11 +439,6 @@ fn wavelet_lengths_impl(
 /// they are not ascending, the sample rate is not positive, or the configuration is
 /// invalid.
 ///
-/// # Differences from librosa
-///
-/// librosa also accepts a single frequency together with an explicit `alpha`; that
-/// form is internal here.
-///
 /// # Examples
 ///
 /// ```rust
@@ -466,7 +456,7 @@ fn wavelet_lengths_impl(
 /// # References
 ///
 /// C. Schörkhuber and A. Klapuri, "Constant-Q transform toolbox for music
-/// processing," SMC 2010; librosa `filters.wavelet_lengths`.
+/// processing," SMC 2010.
 pub fn wavelet_lengths(
     freqs: &[f64],
     sample_rate: f64,
@@ -592,8 +582,7 @@ fn wavelet_impl(
     Ok(out)
 }
 
-/// Builds the wavelet filters of a constant-Q / variable-Q filterbank, equivalent
-/// to `librosa.filters.wavelet`.
+/// Builds the wavelet filters of a constant-Q / variable-Q filterbank.
 ///
 /// Filter `k` is a complex exponential at `freqs[k]` Hz, of the length given by
 /// [`wavelet_lengths`], multiplied by the (periodic) window, normalised by
@@ -616,9 +605,7 @@ fn wavelet_impl(
 /// As for [`wavelet_lengths`]; also a [`ParameterError`] if the filter basis would
 /// exceed 2^31 elements (an extreme `sample_rate` makes the filters that long).
 ///
-/// # Differences from librosa
-///
-/// The filters are `Complex<f64>`; librosa's default `dtype` is `complex64`.
+/// The filters are `Complex<f64>`.
 ///
 /// # Examples
 ///
@@ -819,7 +806,7 @@ pub fn wavelet_with_alpha(
 }
 
 // =============================================================================
-// Sparse FFT basis (librosa's __vqt_filter_fft + util.sparsify_rows)
+// Sparse FFT basis
 // =============================================================================
 
 /// One sparse row of a frequency-domain basis with `Complex<F>` values.
@@ -879,7 +866,7 @@ impl FftBasis<f64> {
     }
 }
 
-/// `librosa.util.sparsify_rows` of one row: keeps the largest magnitudes holding
+/// Sparsifies one row: keeps the largest magnitudes holding
 /// `1 - quantile` of the row's L1 mass.
 fn sparsify_row(x: &[Complex<f64>], quantile: f64) -> SparseRow<f64> {
     let mags: Vec<f64> = x.iter().map(|z| z.norm()).collect();
@@ -913,7 +900,7 @@ fn sparsify_row(x: &[Complex<f64>], quantile: f64) -> SparseRow<f64> {
     row
 }
 
-/// librosa's `__vqt_filter_fft`: wavelets scaled by `length / n_fft`, FFT'd,
+/// Frequency-domain filter basis: wavelets scaled by `length / n_fft`, FFT'd,
 /// truncated to the non-negative frequencies and sparsified. `min_hop` enlarges
 /// `n_fft` to at least `2^(1 + ceil(log2(hop)))` (pseudo-CQT). The basis is a
 /// filter table and is computed in `f64` for every analysis type.
@@ -960,7 +947,8 @@ fn vqt_filter_fft(
 }
 
 /// Calls `f(channel, frame, spectrum)` for every centred frame of every channel,
-/// with `window` (`None` = rectangular) and librosa's padding.
+/// with `window` (`None` = rectangular) and `n_fft / 2` samples of `pad_mode`
+/// padding at both ends.
 fn for_each_frame<F: AudioFloat>(
     y: ArrayView2<'_, F>,
     n_fft: usize,
@@ -1043,7 +1031,7 @@ fn resample_rows<F: AudioFloat>(
 // Configuration
 // =============================================================================
 
-/// Parameters of a constant-Q transform, mirroring `librosa.cqt`.
+/// Parameters of a constant-Q transform.
 ///
 /// ## Purpose
 ///
@@ -1055,9 +1043,8 @@ fn resample_rows<F: AudioFloat>(
 ///
 /// ## Intended usage
 ///
-/// `CqtConfig::default()` reproduces `librosa.cqt(y, sr=sr)`: 84 bins (7 octaves)
-/// from C1 (32.70 Hz), 12 bins per octave, hop 512. Adjust fields with the `with_*`
-/// builders.
+/// `CqtConfig::default()` gives 84 bins (7 octaves) from C1 (32.70 Hz), 12 bins
+/// per octave, hop 512. Adjust fields with the `with_*` builders.
 ///
 /// ## Invariants
 ///
@@ -1086,44 +1073,43 @@ fn resample_rows<F: AudioFloat>(
 #[derive(Debug, Clone, PartialEq)]
 pub struct CqtConfig {
     /// Samples between successive frames; frame `t` is centred on sample
-    /// `t * hop_length`. librosa default 512.
+    /// `t * hop_length`. Default 512.
     pub hop_length: NonZeroUsize,
-    /// Centre frequency of the lowest bin in Hz (before tuning). `None` means C1
-    /// (32.70 Hz), librosa's default. Must be finite, positive and below the Nyquist
+    /// Centre frequency of the lowest bin in Hz (before tuning). `None` (the
+    /// default) means C1 (32.70 Hz). Must be finite, positive and below the Nyquist
     /// frequency.
     pub fmin: Option<f64>,
     /// Number of bins. `None` uses as many bins as fit below the Nyquist frequency.
-    /// librosa default `Some(84)` (7 octaves of 12 bins).
+    /// Default `Some(84)` (7 octaves of 12 bins).
     pub n_bins: Option<NonZeroUsize>,
     /// Bins per octave: the frequency resolution. 12 gives semitones, 36 thirds of a
-    /// semitone. librosa default 12.
+    /// semitone. Default 12.
     pub bins_per_octave: NonZeroUsize,
     /// Tuning offset in fractions of a bin: every centre frequency is multiplied by
-    /// `2^(tuning / bins_per_octave)`. `None` estimates it from the signal (librosa's
-    /// `tuning=None`). librosa default for the transforms `Some(0.0)`.
+    /// `2^(tuning / bins_per_octave)`. `None` estimates it from the signal. Default
+    /// `Some(0.0)`.
     pub tuning: Option<f64>,
     /// Scales every filter length; below 1 shortens the filters (better time
-    /// resolution, wider bins). Finite and positive. librosa default 1.
+    /// resolution, wider bins). Finite and positive. Default 1.
     pub filter_scale: f64,
     /// Normalisation of each filter before the transform (see [`WaveletConfig::norm`]).
-    /// librosa default `Some(1.0)` (L1).
+    /// Default `Some(1.0)` (L1).
     pub norm: Option<f64>,
     /// Fraction of each frequency-domain filter's L1 mass that may be discarded to
-    /// make the basis sparse (faster). In `[0, 1)`; 0 keeps every coefficient. librosa
-    /// default 0.01.
+    /// make the basis sparse (faster). In `[0, 1)`; 0 keeps every coefficient.
+    /// Default 0.01.
     pub sparsity: f64,
-    /// Window of the wavelet filters. librosa default Hann. Must be a named window.
+    /// Window of the wavelet filters. Default Hann. Must be a named window.
     pub window: Window,
-    /// If `true` (librosa's default), each bin is divided by the square root of its
+    /// If `true` (the default), each bin is divided by the square root of its
     /// filter length (an orthonormal-like scaling: a full-scale sinusoid gives a
     /// magnitude near `sqrt(L) / 2`). If `false`, the raw filter response.
     pub scale: bool,
-    /// How the signal is extended at both ends for centred frames. librosa default
+    /// How the signal is extended at both ends for centred frames. Default
     /// [`StftPadMode::Constant`] (zeros).
     pub pad_mode: StftPadMode,
-    /// Resampler quality for the per-octave decimation (librosa: `res_type`,
-    /// default `"soxr_hq"`). Default [`ResamplingQuality::High`], which is designed
-    /// after soxr-hq.
+    /// Resampler quality for the per-octave decimation. Default
+    /// [`ResamplingQuality::High`].
     pub resampling_quality: ResamplingQuality,
 }
 
@@ -1147,15 +1133,13 @@ impl Default for CqtConfig {
 }
 
 impl CqtConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `cqt` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -1281,7 +1265,7 @@ impl CqtConfig {
     }
 }
 
-/// Parameters of a variable-Q transform, mirroring `librosa.vqt`.
+/// Parameters of a variable-Q transform.
 ///
 /// ## Purpose
 ///
@@ -1290,9 +1274,9 @@ impl CqtConfig {
 ///
 /// ## Intended usage
 ///
-/// `VqtConfig::default()` reproduces `librosa.vqt(y, sr=sr)`, whose default
-/// `gamma=None` derives `gamma` from the equivalent rectangular bandwidth (ERB) of
-/// auditory filters. `gamma = Some(0.0)` gives the CQT.
+/// `VqtConfig::default()` is the default [`CqtConfig`] with `gamma = None`, which
+/// derives `gamma` from the equivalent rectangular bandwidth (ERB) of auditory
+/// filters. `gamma = Some(0.0)` gives the CQT.
 ///
 /// ## Invariants
 ///
@@ -1309,23 +1293,21 @@ impl CqtConfig {
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VqtConfig {
-    /// Filterbank and framing parameters (librosa's `cqt` arguments).
+    /// Filterbank and framing parameters.
     pub cqt: CqtConfig,
-    /// Bandwidth offset in Hz. `None` (librosa's default) uses the ERB-derived
+    /// Bandwidth offset in Hz. `None` (the default) uses the ERB-derived
     /// `24.7 * alpha / 0.108`; `Some(0.0)` is the constant-Q transform.
     pub gamma: Option<f64>,
 }
 
 impl VqtConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `vqt` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -1382,15 +1364,15 @@ struct Filterbank {
 
 #[derive(Clone, Copy, PartialEq)]
 enum FreqLayout<'a> {
-    /// `interval_frequencies(intervals="equal")` (vqt / cqt).
+    /// Equal-tempered frequencies from `fmin` (vqt / cqt).
     Interval,
-    /// `cqt_frequencies` (pseudo / hybrid / icqt).
+    /// Constant-Q bin frequencies (pseudo / hybrid / icqt).
     Cqt,
     /// The sorted octaves of these ratios to `fmin`, in ascending order.
     Ratios(&'a [f64]),
 }
 
-/// librosa's `__clip_freqs`: drops the bins whose filters would exceed Nyquist.
+/// Drops the bins whose filters would exceed Nyquist.
 fn clip_freqs(
     freqs: Vec<f64>,
     window_bw: f64,
@@ -1504,7 +1486,7 @@ fn num_two_factors(mut x: usize) -> usize {
     n
 }
 
-/// librosa's `__trim_stack`: stacks per-octave responses (top octave first) into
+/// Stacks per-octave responses (top octave first) into
 /// `n_bins` rows, trimmed to the shortest frame count.
 fn trim_stack<A: Clone + num_traits::Zero>(resp: &[Array3<A>], n_bins: usize) -> Array3<A> {
     let channels = resp[0].dim().0;
@@ -1526,7 +1508,7 @@ fn trim_stack<A: Clone + num_traits::Zero>(resp: &[Array3<A>], n_bins: usize) ->
     out
 }
 
-/// librosa's `__cqt_response` (complex): rectangular-window centred STFT, then the
+/// Complex filter response: rectangular-window centred STFT, then the
 /// sparse basis product.
 fn cqt_response<F: AudioFloat>(
     y: ArrayView2<'_, F>,
@@ -1544,8 +1526,8 @@ fn cqt_response<F: AudioFloat>(
     Ok(out)
 }
 
-/// The variable-Q transform of `(channels, samples)` rows (librosa `vqt` with
-/// resolved tuning), computed in `F`.
+/// The variable-Q transform of `(channels, samples)` rows (with the tuning
+/// resolved), computed in `F`.
 fn vqt_rows<F: AudioFloat>(
     y: CowArray<'_, F, Ix2>,
     sr: f64,
@@ -1576,7 +1558,8 @@ fn vqt_rows_in<F: AudioFloat>(
     let n_filters = bpo.min(n_bins);
     let quality = cfg.resampling_quality;
 
-    // Early downsampling (librosa __early_downsample).
+    // Early downsampling: halve the rate first while the highest cut-off and the
+    // hop allow it.
     let nyquist = sr / 2.0;
     let count1 = (((nyquist / fb.cutoff).log2().ceil() as i64) - 1 - 1).max(0) as usize;
     let count2 =
@@ -1727,7 +1710,7 @@ pub fn vqt_with_intervals<T: StandardSample>(
     )
 }
 
-/// librosa `pseudo_cqt` on rows (resolved tuning), computed in `F`.
+/// Pseudo-CQT of rows (tuning resolved), computed in `F`.
 fn pseudo_cqt_rows<F: AudioFloat>(
     y: ArrayView2<'_, F>,
     sr: f64,
@@ -1800,7 +1783,7 @@ fn pseudo_cqt_rows<F: AudioFloat>(
     Ok(out)
 }
 
-/// librosa `hybrid_cqt` on rows (resolved tuning), computed in `F`.
+/// Hybrid CQT of rows (tuning resolved), computed in `F`.
 fn hybrid_cqt_rows<F: AudioFloat>(
     y: CowArray<'_, F, Ix2>,
     sr: f64,
@@ -1853,7 +1836,7 @@ fn hybrid_cqt_rows<F: AudioFloat>(
     Ok(trim_stack(&resp, n_bins))
 }
 
-/// librosa `icqt` on a `(channels, n_bins, frames)` matrix, computed in `F`.
+/// Inverse CQT of a `(channels, n_bins, frames)` matrix, computed in `F`.
 fn icqt_rows<F: AudioFloat>(
     c: ArrayView3<'_, Complex<F>>,
     sr: f64,
@@ -1978,8 +1961,7 @@ fn icqt_rows<F: AudioFloat>(
 // Chroma
 // =============================================================================
 
-/// Builds the matrix that folds constant-Q bins into chroma (pitch-class) bins,
-/// equivalent to `librosa.filters.cq_to_chroma`.
+/// Builds the matrix that folds constant-Q bins into chroma (pitch-class) bins.
 ///
 /// Each group of `bins_per_octave / n_chroma` adjacent CQT bins (centred on a pitch
 /// class) is summed into one chroma bin, in every octave; the rows are rotated so
@@ -1993,7 +1975,7 @@ fn icqt_rows<F: AudioFloat>(
 /// * `n_chroma` - Number of chroma bins (usually 12).
 /// * `fmin` - Centre frequency of the first CQT bin in Hz (before tuning); `None`
 ///   means C1.
-/// * `base_c` - If `true` (librosa's default) chroma row 0 is C, otherwise A.
+/// * `base_c` - If `true` (the usual choice) chroma row 0 is C, otherwise A.
 ///
 /// # Returns
 ///
@@ -2004,11 +1986,8 @@ fn icqt_rows<F: AudioFloat>(
 /// [`ParameterError`] if `bins_per_octave` is not a multiple of `n_chroma`,
 /// `fmin` is not finite and positive, or the matrix would exceed 2^28 elements.
 ///
-/// # Differences from librosa
-///
-/// librosa's optional `window` (a smoothing kernel convolved with the matrix) is
-/// not supported; the matrix is `f64` (librosa's default `dtype` is `float32`, which
-/// holds the same zeros and ones).
+/// The matrix is `f64`. [`smooth_chroma_map`] convolves it with a smoothing
+/// window.
 ///
 /// # Examples
 ///
@@ -2062,7 +2041,8 @@ pub fn cq_to_chroma(
     Ok(out)
 }
 
-/// librosa `util.normalize(S, norm, axis=-2)` on a `(channels, features, frames)` array.
+/// Normalises every frame of a `(channels, features, frames)` array along the
+/// feature axis.
 #[cfg(feature = "feature-extraction")]
 fn normalize_features<F: AudioFloat>(
     x: &mut Array3<F>,
@@ -2104,14 +2084,14 @@ fn project<F: AudioFloat>(m: &Array2<f64>, x: &Array3<F>) -> Array3<F> {
 #[cfg(feature = "feature-extraction")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CqtMode {
-    /// The full recursive CQT ([`AudioConstantQ::cqt`]); librosa's default `"full"`.
+    /// The full recursive CQT ([`AudioConstantQ::cqt`]); the default.
     #[default]
     Full,
-    /// The hybrid CQT ([`AudioConstantQ::hybrid_cqt`]); librosa's `"hybrid"`.
+    /// The hybrid CQT ([`AudioConstantQ::hybrid_cqt`]).
     Hybrid,
 }
 
-/// Parameters of a constant-Q chromagram, mirroring `librosa.feature.chroma_cqt`.
+/// Parameters of a constant-Q chromagram.
 ///
 /// ## Purpose
 ///
@@ -2123,9 +2103,8 @@ pub enum CqtMode {
 ///
 /// `ChromaCqtConfig::default()`: 12 chroma bins from a 7-octave CQT with 36 bins
 /// per octave, each frame scaled to a maximum of 1, and A440 tuning
-/// (`tuning = Some(0.0)`). [`ChromaCqtConfig::librosa`] reproduces
-/// `librosa.feature.chroma_cqt(y=y, sr=sr)`, which differs only in estimating the
-/// tuning from the signal (`tuning = None`).
+/// (`tuning = Some(0.0)`). [`ChromaCqtConfig::librosa`] differs only in
+/// estimating the tuning from the signal (`tuning = None`).
 ///
 /// ## Invariants
 ///
@@ -2143,28 +2122,28 @@ pub enum CqtMode {
 #[cfg(feature = "feature-extraction")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromaCqtConfig {
-    /// Samples between frames. librosa default 512.
+    /// Samples between frames. Default 512.
     pub hop_length: NonZeroUsize,
     /// Lowest CQT frequency in Hz (before tuning); `None` = C1. Also fixes which
     /// CQT bins map to which pitch class.
     pub fmin: Option<f64>,
     /// Per-frame normalisation of the chroma vector (see [`WaveletConfig::norm`] for
-    /// the values). librosa default `Some(inf)` (maximum = 1).
+    /// the values). Default `Some(inf)` (maximum = 1).
     pub norm: Option<f64>,
     /// Chroma values below this are set to 0 before normalisation; `None` disables
-    /// it. librosa default `Some(0.0)`.
+    /// it. Default `Some(0.0)`.
     pub threshold: Option<f64>,
     /// Tuning offset in fractions of a CQT bin. Default `Some(0.0)` (A440).
-    /// `None` estimates it from the signal, as librosa's default does.
+    /// `None` estimates it from the signal ([`ChromaCqtConfig::librosa`]).
     pub tuning: Option<f64>,
-    /// Number of chroma bins. librosa default 12.
+    /// Number of chroma bins. Default 12.
     pub n_chroma: NonZeroUsize,
-    /// Number of CQT octaves analysed. librosa default 7.
+    /// Number of CQT octaves analysed. Default 7.
     pub n_octaves: NonZeroUsize,
     /// CQT bins per octave; `None` = `n_chroma`. Must be a multiple of `n_chroma`.
-    /// librosa default `Some(36)`.
+    /// Default `Some(36)`.
     pub bins_per_octave: Option<NonZeroUsize>,
-    /// Full or hybrid CQT. librosa default [`CqtMode::Full`].
+    /// Full or hybrid CQT. Default [`CqtMode::Full`].
     pub cqt_mode: CqtMode,
 }
 
@@ -2193,8 +2172,8 @@ impl ChromaCqtConfig {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.chroma_cqt` defaults: as [`Default`], but with
-    /// `tuning = None` (the tuning is estimated from the signal).
+    /// Settings matching librosa 1.0's defaults: [`Default`] with `tuning = None`
+    /// (the tuning is estimated from the signal).
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -2298,7 +2277,7 @@ impl ChromaCqtConfig {
         self.cqt_config().validate()
     }
 
-    /// The CQT configuration chroma_cqt uses (librosa's cqt defaults otherwise).
+    /// The CQT configuration chroma_cqt uses ([`CqtConfig::default`] otherwise).
     fn cqt_config(&self) -> CqtConfig {
         CqtConfig::default()
             .with_hop_length(self.hop_length)
@@ -2309,8 +2288,7 @@ impl ChromaCqtConfig {
     }
 }
 
-/// Parameters of chroma energy normalised statistics (CENS), mirroring
-/// `librosa.feature.chroma_cens`.
+/// Parameters of chroma energy normalised statistics (CENS).
 ///
 /// ## Purpose
 ///
@@ -2319,11 +2297,11 @@ impl ChromaCqtConfig {
 ///
 /// ## Intended usage
 ///
-/// [`ChromaCensConfig::librosa`] reproduces `librosa.feature.chroma_cens(y=y, sr=sr)`;
-/// `ChromaCensConfig::default()` differs only in the A440 tuning of its
-/// [`ChromaCqtConfig::default`]. The chroma is computed from `chroma` (its `norm` and `threshold` are not used:
-/// CENS starts from the unnormalised chroma, as librosa does), L1-normalised,
-/// quantised, smoothed over time and normalised by `norm`.
+/// `ChromaCensConfig::default()` and [`ChromaCensConfig::librosa`] differ only in
+/// the A440 tuning of [`ChromaCqtConfig::default`]. The chroma is computed from
+/// `chroma` (its `norm` and `threshold` are not used: CENS starts from the
+/// unnormalised chroma), L1-normalised, quantised, smoothed over time and
+/// normalised by `norm`.
 ///
 /// ## Invariants
 ///
@@ -2343,14 +2321,14 @@ impl ChromaCqtConfig {
 pub struct ChromaCensConfig {
     /// The chroma (CQT) parameters; `norm` and `threshold` are ignored.
     pub chroma: ChromaCqtConfig,
-    /// Final per-frame normalisation. librosa default `Some(2.0)` (unit Euclidean
+    /// Final per-frame normalisation. Default `Some(2.0)` (unit Euclidean
     /// norm).
     pub norm: Option<f64>,
     /// Length of the temporal smoothing window in frames (the window has
     /// `win_len_smooth + 2` points whose end points are zero). `None` disables the
-    /// smoothing. librosa default `Some(41)`.
+    /// smoothing. Default `Some(41)`.
     pub win_len_smooth: Option<NonZeroUsize>,
-    /// Shape of the smoothing window (computed symmetric). librosa default Hann.
+    /// Shape of the smoothing window (computed symmetric). Default Hann.
     pub smoothing_window: Window,
 }
 
@@ -2374,7 +2352,7 @@ impl ChromaCensConfig {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.chroma_cens` defaults: as [`Default`], with
+    /// Settings matching librosa 1.0's defaults: [`Default`] with
     /// [`ChromaCqtConfig::librosa`] (the tuning is estimated from the signal).
     #[must_use]
     pub fn librosa() -> Self {
@@ -2428,8 +2406,7 @@ impl ChromaCensConfig {
     }
 }
 
-/// Parameters of a variable-Q chromagram, mirroring
-/// `librosa.feature.chroma_vqt(intervals="equal")`.
+/// Parameters of a variable-Q chromagram over equal-tempered bins.
 ///
 /// ## Purpose
 ///
@@ -2438,9 +2415,9 @@ impl ChromaCensConfig {
 ///
 /// ## Intended usage
 ///
-/// `ChromaVqtConfig::default()` reproduces
-/// `librosa.feature.chroma_vqt(y=y, sr=sr, intervals="equal")` (note librosa's
-/// default `gamma=0`, i.e. a CQT).
+/// `ChromaVqtConfig::default()`: 12 bins per octave over 7 octaves from C1, hop
+/// 512, each frame scaled to a maximum of 1, and `gamma = Some(0.0)` (so the
+/// underlying transform is a CQT).
 ///
 /// ## Invariants
 ///
@@ -2457,21 +2434,21 @@ impl ChromaCensConfig {
 #[cfg(feature = "feature-extraction")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromaVqtConfig {
-    /// Samples between frames. librosa default 512.
+    /// Samples between frames. Default 512.
     pub hop_length: NonZeroUsize,
     /// Lowest VQT frequency in Hz; `None` = C1.
     pub fmin: Option<f64>,
-    /// Per-frame normalisation (see [`WaveletConfig::norm`]). librosa default
+    /// Per-frame normalisation (see [`WaveletConfig::norm`]). Default
     /// `Some(inf)`.
     pub norm: Option<f64>,
     /// Values below this are set to 0 before normalisation; `None` disables it.
-    /// librosa default `Some(0.0)`.
+    /// Default `Some(0.0)`.
     pub threshold: Option<f64>,
-    /// Number of VQT octaves. librosa default 7.
+    /// Number of VQT octaves. Default 7.
     pub n_octaves: NonZeroUsize,
-    /// VQT bins per octave (and chroma bins). librosa default 12.
+    /// VQT bins per octave (and chroma bins). Default 12.
     pub bins_per_octave: NonZeroUsize,
-    /// VQT bandwidth offset in Hz (`None` = ERB-derived). librosa default `Some(0.0)`.
+    /// VQT bandwidth offset in Hz (`None` = ERB-derived). Default `Some(0.0)`.
     pub gamma: Option<f64>,
 }
 
@@ -2492,15 +2469,13 @@ impl Default for ChromaVqtConfig {
 
 #[cfg(feature = "feature-extraction")]
 impl ChromaVqtConfig {
-    /// Returns the default configuration (same as [`Default`], which equals
-    /// librosa 1.0's defaults).
+    /// Returns the default configuration (same as [`Default`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.chroma_vqt` defaults. Currently the same as [`Default`];
-    /// use this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2586,7 +2561,7 @@ impl ChromaVqtConfig {
     }
 }
 
-/// Parameters of the tonal centroid features, mirroring `librosa.feature.tonnetz`.
+/// Parameters of the tonal centroid features.
 ///
 /// ## Purpose
 ///
@@ -2595,10 +2570,10 @@ impl ChromaVqtConfig {
 ///
 /// ## Intended usage
 ///
-/// [`TonnetzConfig::librosa`] reproduces `librosa.feature.tonnetz(y=y, sr=sr)`, which
-/// computes the chroma with `chroma_cqt` defaults; `TonnetzConfig::default()`
-/// uses [`ChromaCqtConfig::default`] (A440 tuning). To use another chromagram (e.g.
-/// an STFT chroma), call [`tonnetz_from_chroma`] directly.
+/// `TonnetzConfig::default()` computes the chroma with [`ChromaCqtConfig::default`]
+/// (A440 tuning); [`TonnetzConfig::librosa`] with [`ChromaCqtConfig::librosa`]
+/// (estimated tuning). To use another chromagram (e.g. an STFT chroma), call
+/// [`tonnetz_from_chroma`] directly.
 ///
 /// ## Invariants
 ///
@@ -2615,8 +2590,7 @@ impl ChromaVqtConfig {
 #[cfg(feature = "feature-extraction")]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TonnetzConfig {
-    /// The chromagram parameters (librosa passes `tonnetz`'s keyword arguments to
-    /// `chroma_cqt`).
+    /// The chromagram parameters.
     pub chroma: ChromaCqtConfig,
 }
 
@@ -2628,7 +2602,7 @@ impl TonnetzConfig {
         Self::default()
     }
 
-    /// librosa 1.0's `feature.tonnetz` defaults: the chroma uses
+    /// Settings matching librosa 1.0's defaults: the chroma uses
     /// [`ChromaCqtConfig::librosa`] (the tuning is estimated from the signal).
     #[must_use]
     pub fn librosa() -> Self {
@@ -2654,8 +2628,7 @@ impl TonnetzConfig {
     }
 }
 
-/// Computes chroma energy normalised statistics from an unnormalised chromagram,
-/// the post-processing of `librosa.feature.chroma_cens`.
+/// Computes chroma energy normalised statistics from an unnormalised chromagram.
 ///
 /// Each frame is L1-normalised and quantised (each of the thresholds 0.4, 0.2, 0.1
 /// and 0.05 that a value exceeds adds 0.25), the result is smoothed over time with
@@ -2695,7 +2668,7 @@ impl TonnetzConfig {
 /// # References
 ///
 /// M. Müller, F. Kurth and M. Clausen, "Audio matching via chroma-based statistical
-/// features," ISMIR 2005; librosa `feature.chroma_cens`.
+/// features," ISMIR 2005.
 #[cfg(feature = "feature-extraction")]
 pub fn chroma_cens_from_chroma<F: AudioFloat, S: ndarray::Data<Elem = F>>(
     chroma: &ndarray::ArrayBase<S, ndarray::Ix3>,
@@ -2740,8 +2713,7 @@ pub fn chroma_cens_from_chroma<F: AudioFloat, S: ndarray::Data<Elem = F>>(
     Ok(x)
 }
 
-/// Computes the tonal centroid features (tonnetz) of a chromagram, equivalent to
-/// `librosa.feature.tonnetz(chroma=chroma)`.
+/// Computes the tonal centroid features (tonnetz) of a chromagram.
 ///
 /// Each frame's chroma vector is L1-normalised and projected onto the circle of
 /// fifths (rows 0-1), the circle of minor thirds (rows 2-3) and the circle of major
@@ -2778,7 +2750,7 @@ pub fn chroma_cens_from_chroma<F: AudioFloat, S: ndarray::Data<Elem = F>>(
 /// # References
 ///
 /// C. Harte, M. Sandler and M. Gasser, "Detecting harmonic change in musical
-/// audio," ACM AMCMM 2006; librosa `feature.tonnetz`.
+/// audio," ACM AMCMM 2006.
 #[cfg(feature = "feature-extraction")]
 pub fn tonnetz_from_chroma<F: AudioFloat, S: ndarray::Data<Elem = F>>(
     chroma: &ndarray::ArrayBase<S, ndarray::Ix3>,
@@ -2884,16 +2856,15 @@ fn griffinlim_cqt_from<T: StandardSample>(
     float_rows_to_audio::<T>(y, sample_rate, "griffinlim_cqt")
 }
 
-/// Griffin-Lim phase retrieval from a constant-Q magnitude with random initial phases,
-/// equivalent to `librosa.griffinlim_cqt(C, init="random")`.
+/// Griffin-Lim phase retrieval from a constant-Q magnitude with random initial phases.
 ///
 /// # Arguments
 ///
 /// * `magnitude` - `(channels, n_bins, frames)` non-negative CQT magnitude.
 /// * `config` - The forward parameters (`tuning` must be `Some`).
 /// * `sample_rate` - Sample rate of the signal.
-/// * `n_iter` - Number of iterations (librosa default 32).
-/// * `momentum` - Momentum (librosa default 0.99; must be non-negative).
+/// * `n_iter` - Number of iterations (typically 32).
+/// * `momentum` - Momentum (typically 0.99; must be non-negative).
 /// * `length` - Output length per channel, if known.
 /// * `seed` - `Some(seed)` makes the result reproducible; `None` draws a fresh seed
 ///   on every call.
@@ -2906,11 +2877,8 @@ fn griffinlim_cqt_from<T: StandardSample>(
 ///
 /// As [`AudioConstantQ::griffinlim_cqt`].
 ///
-/// # Differences from librosa
-///
-/// The phases come from this crate's RNG, not NumPy's, so the result differs from
-/// librosa's for the same seed, as [`griffinlim`](crate::operations::effects::griffinlim)
-/// does with random phases.
+/// The phases come from this crate's RNG, as for
+/// [`griffinlim`](crate::operations::effects::griffinlim) with random phases.
 ///
 /// # Examples
 ///
@@ -2955,7 +2923,7 @@ pub fn griffinlim_cqt_random<T: StandardSample>(
     )
 }
 
-/// librosa-compatible constant-Q analysis of [`AudioSamples`]: CQT, VQT, pseudo and
+/// Constant-Q analysis of [`AudioSamples`]: CQT, VQT, pseudo and
 /// hybrid CQT, inverse CQT, and the chroma / tonnetz features built on the CQT.
 ///
 /// All analysis outputs are shaped `(channels, n_bins, n_frames)` with
@@ -2975,7 +2943,7 @@ pub trait AudioConstantQ {
     /// [`griffinlim_cqt`](Self::griffinlim_cqt) return audio of this type.
     type Sample: StandardSample;
 
-    /// Computes the constant-Q transform, equivalent to `librosa.cqt`.
+    /// Computes the constant-Q transform.
     ///
     /// Bin `k` is centred at `fmin * 2^((k + tuning) / bins_per_octave)` Hz and
     /// filters the signal with a windowed complex exponential of `Q * sr / f_k`
@@ -2986,7 +2954,7 @@ pub trait AudioConstantQ {
     ///
     /// # Arguments
     ///
-    /// * `config` - Transform parameters ([`CqtConfig::default`] = librosa defaults).
+    /// * `config` - Transform parameters (usually [`CqtConfig::default`]).
     ///
     /// # Returns
     ///
@@ -2994,21 +2962,18 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// - [`ParameterError`] if the configuration is invalid, `fmin` (after tuning)
     ///   is not below the Nyquist frequency, the highest filter's cut-off exceeds
     ///   the Nyquist frequency (reduce `n_bins`), or the signal is too short.
     /// - With `config.tuning = None` the tuning is estimated as
-    ///   [`estimate_tuning`](crate::operations::tonal::estimate_tuning_from_signal) does
-    ///   (librosa `estimate_tuning`); that needs the `feature-extraction` feature, and
-    ///   without it `None` is a [`ParameterError`]. Errors of the estimate propagate.
+    ///   [`estimate_tuning`](crate::operations::tonal::estimate_tuning_from_signal)
+    ///   does; that needs the `feature-extraction` feature, and without it `None`
+    ///   is a [`ParameterError`]. Errors of the estimate propagate.
     ///
-    /// # Differences from librosa
-    ///
-    /// The per-octave decimation uses the crate's resampler instead of soxr (see
-    /// the [module documentation](self#differences-from-librosa)).
+    /// The per-octave decimation uses the crate's resampler (see the
+    /// [module documentation](self#resampling-between-octaves)).
     ///
     /// # Examples
     ///
@@ -3028,18 +2993,17 @@ pub trait AudioConstantQ {
     /// # References
     ///
     /// C. Schörkhuber and A. Klapuri, "Constant-Q transform toolbox for music
-    /// processing," SMC 2010; librosa `core.cqt`.
+    /// processing," SMC 2010.
     fn cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Complex<Self::Float>>>;
 
-    /// Computes the variable-Q transform, equivalent to `librosa.vqt`
-    /// (`intervals="equal"`).
+    /// Computes the variable-Q transform over equal-tempered bins.
     ///
     /// As [`cqt`](Self::cqt), but filter `k` has bandwidth `alpha * f_k + gamma`
     /// (shorter low-frequency filters). `gamma = Some(0.0)` is the CQT.
     ///
     /// # Arguments
     ///
-    /// * `config` - Transform parameters ([`VqtConfig::default`] = librosa defaults,
+    /// * `config` - Transform parameters ([`VqtConfig::default`] uses an
     ///   ERB-derived `gamma`).
     ///
     /// # Returns
@@ -3048,15 +3012,12 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`cqt`](Self::cqt), and [`ParameterError`] for an invalid `gamma`.
     ///
-    /// # Differences from librosa
-    ///
-    /// Only equal-tempered `intervals` are supported. Resampling as in
-    /// [`cqt`](Self::cqt).
+    /// The bins are equal-tempered; [`vqt_with_intervals`] takes other frequency
+    /// ratios. Resampling as in [`cqt`](Self::cqt).
     ///
     /// # Examples
     ///
@@ -3074,11 +3035,10 @@ pub trait AudioConstantQ {
     ///
     /// V. Lostanlen, S. Sridhar et al., "Time-frequency scattering accurately models
     /// auditory similarities between instrumental playing techniques," EURASIP JASMP
-    /// 2021 (the ERB-based `gamma`); librosa `core.vqt`.
+    /// 2021 (the ERB-based `gamma`).
     fn vqt(&self, config: &VqtConfig) -> AudioSampleResult<Array3<Complex<Self::Float>>>;
 
-    /// Computes the pseudo constant-Q transform (magnitudes), equivalent to
-    /// `librosa.pseudo_cqt`.
+    /// Computes the pseudo constant-Q transform (magnitudes).
     ///
     /// A single Hann-window STFT whose magnitude is multiplied by the magnitudes of
     /// the CQT filters' spectra: no octave recursion and no resampling. It is a
@@ -3095,8 +3055,7 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`cqt`](Self::cqt).
     ///
@@ -3115,8 +3074,7 @@ pub trait AudioConstantQ {
     /// ```
     fn pseudo_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the hybrid constant-Q transform (magnitudes), equivalent to
-    /// `librosa.hybrid_cqt`.
+    /// Computes the hybrid constant-Q transform (magnitudes).
     ///
     /// Bins whose filters (rounded up to a power of two) are shorter than twice the
     /// hop use the [`pseudo_cqt`](Self::pseudo_cqt); the remaining (low) bins use
@@ -3132,8 +3090,7 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`cqt`](Self::cqt).
     ///
@@ -3150,7 +3107,7 @@ pub trait AudioConstantQ {
     /// ```
     fn hybrid_cqt(&self, config: &CqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Reconstructs audio from a constant-Q transform, equivalent to `librosa.icqt`.
+    /// Reconstructs audio from a constant-Q transform.
     ///
     /// Each octave's bins are mapped back to an STFT through the conjugate
     /// transpose of its filter basis (weighted by the inverse filter energy),
@@ -3178,9 +3135,7 @@ pub trait AudioConstantQ {
     /// [`ParameterError`] if the configuration is invalid, `tuning` is `None`, or
     /// `c` is empty.
     ///
-    /// # Differences from librosa
-    ///
-    /// Upsampling uses the crate's resampler instead of soxr.
+    /// Upsampling uses the crate's resampler.
     ///
     /// # Examples
     ///
@@ -3204,7 +3159,7 @@ pub trait AudioConstantQ {
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
     /// Reconstructs audio from a constant-Q magnitude by Griffin-Lim phase
-    /// retrieval, equivalent to `librosa.griffinlim_cqt` with `init=None`.
+    /// retrieval.
     ///
     /// Starting from zero phase, alternates [`icqt`](Self::icqt) and
     /// [`cqt`](Self::cqt), keeping the given magnitude and the new phase, with the
@@ -3215,8 +3170,8 @@ pub trait AudioConstantQ {
     /// * `magnitude` - `(channels, n_bins, frames)` non-negative CQT magnitude.
     /// * `config` - The forward parameters (`tuning` must be `Some`).
     /// * `sample_rate` - Sample rate of the signal.
-    /// * `n_iter` - Number of iterations (librosa default 32).
-    /// * `momentum` - Momentum (librosa default 0.99; must be non-negative).
+    /// * `n_iter` - Number of iterations (typically 32).
+    /// * `momentum` - Momentum (typically 0.99; must be non-negative).
     /// * `length` - Output length per channel, if known.
     ///
     /// # Returns
@@ -3229,10 +3184,8 @@ pub trait AudioConstantQ {
     /// As [`icqt`](Self::icqt) and [`cqt`](Self::cqt); [`ParameterError`] if
     /// `momentum` is negative or not finite.
     ///
-    /// # Differences from librosa
-    ///
-    /// This is the deterministic `init=None` start; librosa's default,
-    /// `init="random"`, is [`griffinlim_cqt_random`].
+    /// This is the deterministic zero-phase start; [`griffinlim_cqt_random`] starts
+    /// from random phases.
     ///
     /// # Examples
     ///
@@ -3253,7 +3206,7 @@ pub trait AudioConstantQ {
     /// # References
     ///
     /// N. Perraudin, P. Balazs and P. L. Søndergaard, "A fast Griffin-Lim
-    /// algorithm," WASPAA 2013; librosa `core.griffinlim_cqt`.
+    /// algorithm," WASPAA 2013.
     fn griffinlim_cqt(
         magnitude: &Array3<Self::Float>,
         config: &CqtConfig,
@@ -3263,7 +3216,7 @@ pub trait AudioConstantQ {
         length: Option<NonZeroUsize>,
     ) -> AudioSampleResult<AudioSamples<'static, Self::Sample>>;
 
-    /// Computes a constant-Q chromagram, equivalent to `librosa.feature.chroma_cqt`.
+    /// Computes a constant-Q chromagram.
     ///
     /// The CQT magnitude (`n_octaves * bins_per_octave` bins from `fmin`) is folded
     /// onto `n_chroma` pitch classes with [`cq_to_chroma`], values below `threshold`
@@ -3272,8 +3225,7 @@ pub trait AudioConstantQ {
     /// # Arguments
     ///
     /// * `config` - Parameters ([`ChromaCqtConfig::default`], or
-    ///   [`ChromaCqtConfig::librosa`] for librosa's defaults, which estimate the
-    ///   tuning).
+    ///   [`ChromaCqtConfig::librosa`], which estimates the tuning).
     ///
     /// # Returns
     ///
@@ -3281,8 +3233,7 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`cqt`](Self::cqt), and [`ParameterError`] if `bins_per_octave` is not a
     /// multiple of `n_chroma`.
@@ -3302,15 +3253,14 @@ pub trait AudioConstantQ {
     #[cfg(feature = "feature-extraction")]
     fn chroma_cqt(&self, config: &ChromaCqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes chroma energy normalised statistics (CENS), equivalent to
-    /// `librosa.feature.chroma_cens`.
+    /// Computes chroma energy normalised statistics (CENS).
     ///
     /// See [`chroma_cens_from_chroma`] for the post-processing.
     ///
     /// # Arguments
     ///
     /// * `config` - Parameters ([`ChromaCensConfig::default`], or
-    ///   [`ChromaCensConfig::librosa`] for librosa's defaults).
+    ///   [`ChromaCensConfig::librosa`], which estimates the tuning).
     ///
     /// # Returns
     ///
@@ -3318,8 +3268,7 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`chroma_cqt`](Self::chroma_cqt).
     ///
@@ -3338,12 +3287,11 @@ pub trait AudioConstantQ {
     #[cfg(feature = "feature-extraction")]
     fn chroma_cens(&self, config: &ChromaCensConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes a variable-Q chromagram, equivalent to
-    /// `librosa.feature.chroma_vqt(intervals="equal")`.
+    /// Computes a variable-Q chromagram over equal-tempered bins.
     ///
     /// # Arguments
     ///
-    /// * `config` - Parameters ([`ChromaVqtConfig::default`] = librosa defaults).
+    /// * `config` - Parameters (usually [`ChromaVqtConfig::default`]).
     ///
     /// # Returns
     ///
@@ -3351,8 +3299,7 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`vqt`](Self::vqt).
     ///
@@ -3370,7 +3317,7 @@ pub trait AudioConstantQ {
     #[cfg(feature = "feature-extraction")]
     fn chroma_vqt(&self, config: &ChromaVqtConfig) -> AudioSampleResult<Array3<Self::Float>>;
 
-    /// Computes the tonal centroid features, equivalent to `librosa.feature.tonnetz`.
+    /// Computes the tonal centroid features.
     ///
     /// The chromagram is computed with [`chroma_cqt`](Self::chroma_cqt) and projected
     /// with [`tonnetz_from_chroma`].
@@ -3378,7 +3325,7 @@ pub trait AudioConstantQ {
     /// # Arguments
     ///
     /// * `config` - Parameters ([`TonnetzConfig::default`], or
-    ///   [`TonnetzConfig::librosa`] for librosa's defaults).
+    ///   [`TonnetzConfig::librosa`], which estimates the tuning).
     ///
     /// # Returns
     ///
@@ -3386,8 +3333,7 @@ pub trait AudioConstantQ {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`chroma_cqt`](Self::chroma_cqt).
     ///
@@ -3407,7 +3353,7 @@ pub trait AudioConstantQ {
     fn tonnetz(&self, config: &TonnetzConfig) -> AudioSampleResult<Array3<Self::Float>>;
 }
 
-/// Resolves `tuning = None` with librosa's `estimate_tuning` (feature
+/// Resolves `tuning = None` with the tuning estimate of `operations::tonal` (feature
 /// `feature-extraction`; without it `None` is an error).
 fn resolve_tuning<F: AudioFloat>(
     y: ArrayView2<'_, F>,
@@ -3449,7 +3395,7 @@ fn cqt_magnitude<T: StandardSample>(
     }
 }
 
-/// librosa `chroma_cqt` with an explicit `norm` / `threshold` override (CENS).
+/// Constant-Q chroma with an explicit `norm` / `threshold` override (CENS).
 #[cfg(feature = "feature-extraction")]
 fn chroma_cqt_impl<T: StandardSample>(
     audio: &AudioSamples<'_, T>,
@@ -3684,7 +3630,7 @@ mod tests {
         let a = tone(440.0, 4096);
         let c = a.cqt(&CqtConfig::default().with_n_bins(None)).unwrap();
         // ceil(12 * log2(22050 / C1)) = 113 candidate bins; the filters of bins
-        // 101.. would reach past 11025 Hz (librosa returns the same 101).
+        // 101.. would reach past 11025 Hz.
         assert_eq!(c.dim().1, 101);
     }
 
@@ -3704,8 +3650,8 @@ mod tests {
             sig += x[i] * x[i];
         }
         let snr = 10.0 * (sig / err).log10();
-        // librosa's icqt is not an exact inverse (sparse, non-tight basis): on this
-        // signal librosa.icqt(librosa.cqt(x)) gives 7.65 dB (gain 1.084) too.
+        // The inverse CQT is not exact (sparse, non-tight basis): on this signal
+        // the round trip gives 7.65 dB (gain 1.084).
         assert!((snr - 7.65).abs() < 0.1, "icqt round-trip SNR {snr:.2} dB");
     }
 

@@ -1,43 +1,41 @@
-//! librosa-compatible audio effects: time stretching, pitch shifting,
+//! Audio effects: time stretching, pitch shifting,
 //! pre-/de-emphasis, dB-based trimming and splitting, remixing, median-filter
 //! harmonic/percussive separation, Griffin-Lim phase reconstruction,
 //! nearest-neighbour filtering, LPC and click tracks.
 //!
 //! ## What
 //!
-//! The [`AudioEffects`] trait and the free functions it is built from reproduce
-//! librosa 1.0's `effects` module and a few related helpers:
+//! The [`AudioEffects`] trait and the free functions it is built from:
 //!
-//! | librosa | here |
+//! | Operation | Items |
 //! |---|---|
-//! | `librosa.phase_vocoder(D, rate=...)` / `(D, t_out=...)` | [`phase_vocoder`] / [`phase_vocoder_at`] |
-//! | `librosa.effects.time_stretch` | [`AudioEffects::time_stretch`] |
-//! | `librosa.effects.pitch_shift` | [`AudioEffects::pitch_shift`] |
-//! | `librosa.effects.preemphasis` / `deemphasis` | [`AudioEffects::preemphasis`] / [`AudioEffects::deemphasis`] ([`preemphasis_with_state`], [`deemphasis_with_state`] for `zi` / `zf`) |
-//! | `librosa.effects.trim` / `split` | [`AudioEffects::trim_db`] / [`AudioEffects::split_db`] ([`nonsilent_frames`]) |
-//! | `librosa.effects.remix` | [`AudioEffects::remix`] |
-//! | `librosa.decompose.hpss` | [`hpss_spectrogram`], [`hpss_magnitude`], [`hpss_masks`] |
-//! | `librosa.effects.hpss` / `harmonic` / `percussive` | [`AudioEffects::harmonic_percussive`] / [`AudioEffects::harmonic`] / [`AudioEffects::percussive`] |
-//! | `librosa.util.softmask` | [`softmask`] |
-//! | `librosa.griffinlim` | [`griffinlim`], [`AudioEffects::griffinlim_audio`] |
-//! | `librosa.decompose.nn_filter` | [`nn_filter`], [`nn_filter_recurrence`] |
-//! | `librosa.lpc` | [`lpc`], [`AudioEffects::lpc`] |
-//! | `librosa.clicks` | [`clicks`] |
+//! | Phase vocoder at a rate or at given frame positions | [`phase_vocoder`] / [`phase_vocoder_at`] |
+//! | Time stretching | [`AudioEffects::time_stretch`] |
+//! | Pitch shifting | [`AudioEffects::pitch_shift`] |
+//! | Pre- and de-emphasis | [`AudioEffects::preemphasis`] / [`AudioEffects::deemphasis`] ([`preemphasis_with_state`], [`deemphasis_with_state`] for `zi` / `zf`) |
+//! | Trimming and splitting at a dB threshold | [`AudioEffects::trim_db`] / [`AudioEffects::split_db`] ([`nonsilent_frames`]) |
+//! | Remixing intervals | [`AudioEffects::remix`] |
+//! | Median-filter HPSS of a spectrogram | [`hpss_spectrogram`], [`hpss_magnitude`], [`hpss_masks`] |
+//! | HPSS of audio | [`AudioEffects::harmonic_percussive`] / [`AudioEffects::harmonic`] / [`AudioEffects::percussive`] |
+//! | Soft masks | [`softmask`] |
+//! | Griffin-Lim phase reconstruction | [`griffinlim`], [`AudioEffects::griffinlim_audio`] |
+//! | Nearest-neighbour filtering | [`nn_filter`], [`nn_filter_recurrence`] |
+//! | Linear prediction coefficients | [`lpc`], [`AudioEffects::lpc`] |
+//! | Click tracks | [`clicks`] |
 //!
 //! ## Why
 //!
-//! These are the standard building blocks of librosa-based pipelines (data
-//! augmentation with stretch/shift, speech front-ends with pre-emphasis and
-//! silence trimming, source separation with HPSS and soft masks). Every config
-//! struct has a `librosa()` constructor with librosa 1.0's defaults. `Default`
-//! equals it except where noted: [`SilenceConfig`] has no `Default` (the
-//! threshold is required), and [`GriffinLimConfig::default`] seeds its random
-//! initial phase. The spectral steps reuse the librosa-compatible STFT of
-//! [`crate::operations::spectrum`].
+//! These are standard building blocks of audio pipelines (data augmentation
+//! with stretch/shift, speech front-ends with pre-emphasis and silence
+//! trimming, source separation with HPSS and soft masks). Every config struct
+//! has a `librosa()` preset. `Default` equals it except where noted:
+//! [`SilenceConfig`] has no `Default` (the threshold is required), and
+//! [`GriffinLimConfig::default`] seeds its random initial phase. The spectral
+//! steps reuse the STFT of [`crate::operations::spectrum`].
 //!
 //! The older [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss) and
 //! [`AudioEditing::trim_silence`](crate::AudioEditing::trim_silence) keep their own
-//! (different) semantics; the methods here are the librosa-compatible variants.
+//! (different) semantics.
 //!
 //! ## How
 //!
@@ -70,15 +68,15 @@
 //! let audio = sine_wave::<f32>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //! let n = audio.samples_per_channel().get();
 //!
-//! // librosa.effects.time_stretch(y, rate=2.0): half the length.
+//! // Twice as fast: half the length.
 //! let fast = audio.time_stretch(2.0, &StftConfig::default()).unwrap();
 //! assert_eq!(fast.samples_per_channel().get(), n / 2);
 //!
-//! // librosa.effects.pitch_shift(y, sr=sr, n_steps=2): same length, higher pitch.
+//! // Two semitones up: same length, higher pitch.
 //! let up = audio.pitch_shift(2.0, &PitchShiftConfig::default()).unwrap();
 //! assert_eq!(up.samples_per_channel().get(), n);
 //!
-//! // librosa.effects.split(y): one non-silent interval.
+//! // Split at 60 dB below the peak: one non-silent interval.
 //! let intervals = audio.split_db(&SilenceConfig::librosa()).unwrap();
 //! assert_eq!(intervals.len(), 1);
 //!
@@ -142,8 +140,7 @@ fn total_cmp<F: AudioFloat>(a: &F, b: &F) -> std::cmp::Ordering {
 // Phase vocoder and time stretching
 // =============================================================================
 
-/// Time-stretches an STFT matrix by `rate`, equivalent to
-/// `librosa.phase_vocoder(D, rate=rate)` (librosa 1.0 algorithm).
+/// Time-stretches an STFT matrix by `rate` with a phase vocoder.
 ///
 /// Output frames are taken at the (fractional) analysis positions
 /// `t = 0, rate, 2 rate, ... < n_frames`; see [`phase_vocoder_at`] for the
@@ -165,11 +162,6 @@ fn total_cmp<F: AudioFloat>(a: &F, b: &F) -> std::cmp::Ordering {
 /// [`ParameterError`] if `rate` is not finite and positive, or the matrix has no
 /// frames, bins or channels.
 ///
-/// # Differences from librosa
-///
-/// librosa 1.0 deprecated (and ignores) the `hop_length` and `n_fft` arguments;
-/// they are not accepted here.
-///
 /// # Examples
 ///
 /// ```rust
@@ -185,7 +177,7 @@ fn total_cmp<F: AudioFloat>(a: &F, b: &F) -> std::cmp::Ordering {
 /// # References
 ///
 /// J. L. Flanagan and R. M. Golden, "Phase vocoder," *Bell System Technical
-/// Journal* 45(9), 1966; librosa `core.phase_vocoder`.
+/// Journal* 45(9), 1966.
 pub fn phase_vocoder<F: AudioFloat>(
     stft_matrix: ArrayView3<'_, Complex<F>>,
     rate: f64,
@@ -200,30 +192,28 @@ pub fn phase_vocoder<F: AudioFloat>(
         )));
     }
     let n_frames = stft_matrix.dim().2;
-    // numpy.arange(0.0, n_frames, rate): ceil(n / rate) values i * rate.
+    // Positions 0, rate, 2 rate, ... < n_frames: ceil(n / rate) values i * rate.
     let n_out = (n_frames as f64 / rate).ceil() as usize;
     let t_out: Vec<f64> = (0..n_out).map(|i| i as f64 * rate).collect();
     phase_vocoder_at(stft_matrix, &t_out)
 }
 
-/// Evaluates the phase vocoder at arbitrary (fractional) frame positions,
-/// equivalent to `librosa.phase_vocoder(D, t_out=t_out)` (librosa 1.0).
+/// Evaluates the phase vocoder at arbitrary (fractional) frame positions.
 ///
 /// For output frame `j` at position `t_j`, with `i0 = floor(t_j)` and
 /// `i1 = min(i0 + 1, n_frames - 1)`:
 ///
 /// * the magnitude is `|D|` linearly interpolated at `t_j` (extrapolated from the
-///   last two frames when `t_j > n_frames - 1`, as SciPy's
-///   `interp1d(fill_value="extrapolate")`);
+///   last two frames when `t_j > n_frames - 1`);
 /// * the phase starts at `angle(D[:, i0_0])` and accumulates the raw frame-to-frame
 ///   phase differences `angle(D[:, i1]) - angle(D[:, i0])` of the previous output
-///   positions (no unwrapping or bin de-trending, exactly as librosa 1.0).
+///   positions (no unwrapping or bin de-trending).
 ///
 /// # Arguments
 ///
 /// * `stft_matrix` - `(channels, n_bins, n_frames)` complex STFT.
 /// * `t_out` - Output positions in frames, each in `[0, n_frames)`. Non-monotone
-///   positions are allowed (librosa warns that phase estimation may be unstable).
+///   positions are allowed, though the phase estimate may then be unstable.
 ///   The positions are `f64`; each interpolation weight is rounded to the element
 ///   type once.
 ///
@@ -231,7 +221,7 @@ pub fn phase_vocoder<F: AudioFloat>(
 ///
 /// A `(channels, n_bins, t_out.len())` complex array of the input's element
 /// type. The magnitudes, phases and the phase accumulator are computed in that
-/// type, as librosa does for `complex64` input.
+/// type.
 ///
 /// # Errors
 ///
@@ -279,7 +269,7 @@ pub fn phase_vocoder_at<F: AudioFloat>(
     let n_out = t_out.len();
     let i0: Vec<usize> = t_out.iter().map(|&t| t.floor() as usize).collect();
     let i1: Vec<usize> = i0.iter().map(|&i| (i + 1).min(n_frames - 1)).collect();
-    // scipy interp1d (kind="linear"): segment lo = clip(searchsorted_left(x, t), 1, n - 1) - 1.
+    // Linear interpolation segment: lo = clip(searchsorted_left(x, t), 1, n - 1) - 1.
     let seg: Vec<(usize, usize)> = t_out
         .iter()
         .map(|&t| {
@@ -298,9 +288,8 @@ pub fn phase_vocoder_at<F: AudioFloat>(
 
     let mut out = Array3::<Complex<F>>::zeros((n_channels, n_bins, n_out));
     if std::mem::size_of::<F>() != 8 {
-        // f32: angles as librosa's float32 path computes them (the phasor
-        // products below would round differently from librosa float32 by
-        // more than f32 round-off over many frames).
+        // f32: phases carried as angles (the phasor products below would
+        // accumulate more than f32 round-off over many frames).
         vocoder_by_angle(stft_matrix, t_out, &i0, &i1, &seg, &mut out);
         return Ok(out);
     }
@@ -394,8 +383,8 @@ const VOCODER_BIN_BLOCK: usize = 16;
 /// `(a_row[t], b_row[t]) = f(D[channel, bin, t])` over all frames.
 ///
 /// The values are computed in blocks of [`VOCODER_BIN_BLOCK`] bins, reading the
-/// input in its memory order: for a Fortran-order STFT (librosa's layout, bins
-/// contiguous within a frame) each frame's run of block bins is contiguous,
+/// input in its memory order: for a Fortran-order STFT (bins contiguous within
+/// a frame) each frame's run of block bins is contiguous,
 /// for a C-order one each bin's row. The scratch is two `16 × n_frames`
 /// arrays.
 fn for_bin_blocks<F: AudioFloat, A: Copy + Default, B: Copy + Default>(
@@ -456,13 +445,11 @@ fn unit_and_norm<F: AudioFloat>(z: Complex<F>) -> (Complex<F>, F) {
     }
 }
 
-/// `librosa.effects.time_stretch` on `(channels, samples)` rows of `f64`,
-/// computed in `F`.
+/// Time stretch of `(channels, samples)` rows of `f64`, computed in `F`.
 ///
 /// The analysis STFT is computed in `f64` from the `f64` samples and rounded
 /// once to `Complex<F>`; the phase vocoder and the inverse STFT run in `F`.
-/// librosa's `float32` path does the same (its `float64` window promotes the
-/// frames, so its FFT runs in `float64`). The phase vocoder sums the frame-to-frame
+/// The phase vocoder sums the frame-to-frame
 /// phase differences of every bin, including bins whose value is at the
 /// round-off level of the transform, and their phases decide the output where a
 /// signal later reaches them: an `f32` FFT would put those bins at about 1e-7
@@ -507,8 +494,8 @@ fn time_stretch_rows<F: AudioFloat>(
 }
 
 /// Resamples rows by an arbitrary positive ratio `out_rate / in_rate` with the
-/// crate's windowed-sinc resampler, fixing the length to `n_out` samples when
-/// given (`librosa.util.fix_length`).
+/// crate's windowed-sinc resampler, cutting or zero-padding the output to
+/// `n_out` samples when given.
 ///
 /// The resampler works with integer rates, so the ratio is represented by two
 /// integers near 2^31 (relative ratio error below 1e-9). It filters in the
@@ -533,8 +520,7 @@ fn resample_rows_by_ratio<F: AudioFloat>(
     crate::resampling::resample_float_rows(rows, in_sr.get(), out_sr.get(), quality, n_out)
 }
 
-/// Configuration of [`AudioEffects::pitch_shift`], mirroring the keyword
-/// arguments of `librosa.effects.pitch_shift`.
+/// Configuration of [`AudioEffects::pitch_shift`].
 ///
 /// ## Purpose
 ///
@@ -543,10 +529,8 @@ fn resample_rows_by_ratio<F: AudioFloat>(
 ///
 /// ## Intended usage
 ///
-/// `Default` (and [`PitchShiftConfig::librosa`]) uses librosa's defaults (12 bins
-/// per octave, n_fft 2048, hop 512, periodic Hann) with
-/// [`ResamplingQuality::High`], this crate's closest match to librosa's default
-/// `res_type="soxr_hq"`.
+/// `Default` (and [`PitchShiftConfig::librosa`]) uses 12 bins per octave,
+/// n_fft 2048, hop 512, a periodic Hann window and [`ResamplingQuality::High`].
 ///
 /// ## Invariants
 ///
@@ -565,14 +549,13 @@ fn resample_rows_by_ratio<F: AudioFloat>(
 #[derive(Debug, Clone, PartialEq)]
 pub struct PitchShiftConfig {
     /// Steps per octave: `n_steps` is measured in `1 / bins_per_octave` octaves.
-    /// Default: 12 (semitones), as librosa.
+    /// Default: 12 (semitones).
     pub bins_per_octave: NonZeroUsize,
     /// Quality of the final resampling step. Default:
-    /// [`ResamplingQuality::High`]. librosa uses soxr (`soxr_hq`), which this
-    /// crate does not include.
+    /// [`ResamplingQuality::High`].
     pub quality: ResamplingQuality,
     /// STFT used by the phase-vocoder time stretch. Default:
-    /// [`StftConfig::default`], librosa's STFT defaults.
+    /// [`StftConfig::default`].
     pub stft: StftConfig,
 }
 
@@ -593,9 +576,7 @@ impl PitchShiftConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults, with [`ResamplingQuality::High`] in place of
-    /// librosa's `soxr_hq` resampler. Currently the same as [`Default`]; use this
-    /// constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -636,7 +617,7 @@ impl PitchShiftConfig {
     }
 }
 
-/// `librosa.effects.pitch_shift` on `(channels, samples)` rows.
+/// Pitch shift of `(channels, samples)` rows.
 fn pitch_shift_rows<F: AudioFloat>(
     rows: ArrayView2<'_, f64>,
     n_steps: f64,
@@ -649,7 +630,7 @@ fn pitch_shift_rows<F: AudioFloat>(
     let n = rows.ncols();
     let rate = 2.0f64.powf(-n_steps / config.bins_per_octave.get() as f64);
     let stretched = time_stretch_rows::<F>(rows, rate, &config.stft)?;
-    // librosa: resample(orig_sr = sr / rate, target_sr = sr), i.e. by the ratio `rate`.
+    // Resample from `sr / rate` to `sr`, i.e. by the ratio `rate`.
     resample_rows_by_ratio(stretched.view(), rate, config.quality, Some(n))
 }
 
@@ -666,10 +647,9 @@ fn check_coef(coef: f64) -> AudioSampleResult<()> {
 }
 
 /// Pre-emphasis filter `y[n] = x[n] - coef * x[n - 1]` with an explicit filter
-/// state, equivalent to `librosa.effects.preemphasis(x, coef=coef, zi=zi,
-/// return_zf=True)`.
+/// state.
 ///
-/// The filter is `scipy.signal.lfilter([1, -coef], [1], x, zi=[zi])`, so the first
+/// The filter is the FIR `[1, -coef]` with initial state `zi`, so the first
 /// output is `y[0] = x[0] + zi`. Passing the returned final state as `zi` of the
 /// next block filters a long signal block by block with the same result as one
 /// pass.
@@ -677,10 +657,10 @@ fn check_coef(coef: f64) -> AudioSampleResult<()> {
 /// # Arguments
 ///
 /// * `x` - Input samples (`f32` or `f64`).
-/// * `coef` - Pre-emphasis coefficient (librosa default 0.97). Any finite value;
+/// * `coef` - Pre-emphasis coefficient (typically 0.97). Any finite value;
 ///   `0` is the identity (apart from `zi`), `1` a first difference. It is rounded
 ///   to the element type of `x` once.
-/// * `zi` - Initial filter state. `None` uses librosa's default `2 x[0] - x[1]`.
+/// * `zi` - Initial filter state. `None` uses `2 x[0] - x[1]`.
 ///
 /// # Returns
 ///
@@ -748,11 +728,10 @@ fn preemphasis_into<F: AudioFloat>(
 }
 
 /// De-emphasis filter `y[n] = x[n] + coef * y[n - 1]` (the inverse of
-/// [`preemphasis_with_state`]), equivalent to `librosa.effects.deemphasis(x,
-/// coef=coef, zi=zi, return_zf=True)`.
+/// [`preemphasis_with_state`]).
 ///
-/// With an explicit `zi` this is `scipy.signal.lfilter([1], [1, -coef], x,
-/// zi=[zi])`, so `y[0] = x[0] + zi`. With `zi = None` (librosa's default) the
+/// With an explicit `zi` this is the one-pole IIR `1 / (1 - coef z^-1)` with
+/// initial state `zi`, so `y[0] = x[0] + zi`. With `zi = None` the
 /// filter starts from a zero state and then subtracts
 /// `((2 - coef) x[0] - x[1]) / (3 - coef) * coef^n`, which exactly inverts
 /// pre-emphasis with its default initial state.
@@ -760,17 +739,16 @@ fn preemphasis_into<F: AudioFloat>(
 /// # Arguments
 ///
 /// * `x` - Input samples (`f32` or `f64`).
-/// * `coef` - Coefficient (librosa default 0.97); any finite value (`coef = 3` is
+/// * `coef` - Coefficient (typically 0.97); any finite value (`coef = 3` is
 ///   only allowed with an explicit `zi`). It is rounded to the element type of
 ///   `x` once.
-/// * `zi` - Initial filter state, or `None` for librosa's default.
+/// * `zi` - Initial filter state, or `None` for the default correction above.
 ///
 /// # Returns
 ///
 /// `(y, zf)`: the filtered samples and the final filter state `coef * y'[n - 1]`,
-/// where `y'` is the output *before* the default-state correction (as librosa
-/// returns it). Both are in the element type of `x`; the filter runs in that
-/// type.
+/// where `y'` is the output *before* the default-state correction. Both are in
+/// the element type of `x`; the filter runs in that type.
 ///
 /// # Errors
 ///
@@ -836,7 +814,7 @@ fn deemphasis_into<F: AudioFloat>(
             if coef == 3.0 {
                 return Err(param_err(
                     "coef",
-                    "coef = 3 makes librosa's default initial state undefined; pass zi explicitly",
+                    "coef = 3 makes the default initial state undefined; pass zi explicitly",
                 ));
             }
             (
@@ -915,23 +893,21 @@ fn filter_rows<F: AudioFloat>(
 // dB-based silence detection: trim / split
 // =============================================================================
 
-/// How per-channel frame levels are combined into one decision per frame
-/// (librosa's `aggregate` callable).
+/// How per-channel frame levels are combined into one decision per frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ChannelAggregate {
-    /// Loudest channel (`numpy.max`, librosa's default): a frame is non-silent if
+    /// Loudest channel (the default): a frame is non-silent if
     /// any channel is.
     #[default]
     Max,
-    /// Quietest channel (`numpy.min`): a frame is non-silent only if every channel is.
+    /// Quietest channel: a frame is non-silent only if every channel is.
     Min,
-    /// Mean of the channels' dB levels (`numpy.mean`).
+    /// Mean of the channels' dB levels.
     Mean,
 }
 
 /// Configuration of dB-based silence detection ([`AudioEffects::trim_db`],
-/// [`AudioEffects::split_db`], [`nonsilent_frames`]), mirroring the arguments of
-/// `librosa.effects.trim` / `split`.
+/// [`AudioEffects::split_db`], [`nonsilent_frames`]).
 ///
 /// ## Purpose
 ///
@@ -942,9 +918,9 @@ pub enum ChannelAggregate {
 ///
 /// The threshold depends on the material (speech, music, noise floor of the
 /// recording), so there is no `Default`: [`SilenceConfig::new`] takes `top_db`
-/// and sets the other fields to librosa's defaults (reference = the loudest frame,
-/// `ref=numpy.max`; 2048-sample frames; 512-sample hop; `numpy.max` over
-/// channels). [`SilenceConfig::librosa`] is librosa's full default, `top_db = 60`.
+/// and sets the other fields to their defaults (reference = the loudest frame;
+/// 2048-sample frames; 512-sample hop; the loudest channel decides).
+/// [`SilenceConfig::librosa`] is the same with `top_db = 60`.
 ///
 /// ## Invariants
 ///
@@ -964,26 +940,26 @@ pub enum ChannelAggregate {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SilenceConfig {
     /// Threshold in dB below the reference under which a frame is silent.
-    /// Required ([`SilenceConfig::new`]); librosa's default is 60.
+    /// Required ([`SilenceConfig::new`]); [`SilenceConfig::librosa`] sets 60.
     pub top_db: f64,
-    /// Reference level (0 dB). [`DbReference::Max`] (set by [`SilenceConfig::new`],
-    /// librosa's default) uses the loudest frame over all channels; `Value(r)` an
+    /// Reference level (0 dB). [`DbReference::Max`] (set by [`SilenceConfig::new`])
+    /// uses the loudest frame over all channels; `Value(r)` an
     /// absolute RMS amplitude.
     pub reference: DbReference,
     /// Samples per RMS frame (frames are centred, zero padded). Set to 2048 by
-    /// [`SilenceConfig::new`], as librosa.
+    /// [`SilenceConfig::new`].
     pub frame_length: NonZeroUsize,
     /// Samples between frames; also the resolution of the returned sample
-    /// indices. Set to 512 by [`SilenceConfig::new`], as librosa.
+    /// indices. Set to 512 by [`SilenceConfig::new`].
     pub hop_length: NonZeroUsize,
     /// Combination of the channels' dB levels. Set to `Max` by
-    /// [`SilenceConfig::new`], as librosa.
+    /// [`SilenceConfig::new`].
     pub aggregate: ChannelAggregate,
 }
 
 impl SilenceConfig {
     /// A configuration with threshold `top_db` (dB below the reference) and
-    /// librosa's defaults for the other fields: reference = loudest frame, frame
+    /// the defaults for the other fields: reference = loudest frame, frame
     /// length 2048, hop 512, `Max` over channels.
     #[must_use]
     pub fn new(top_db: f64) -> Self {
@@ -996,8 +972,7 @@ impl SilenceConfig {
         }
     }
 
-    /// librosa 1.0's defaults for `effects.trim` / `effects.split`: `top_db = 60`
-    /// and the defaults of [`SilenceConfig::new`].
+    /// Settings matching librosa 1.0's defaults: [`SilenceConfig::new`] with `top_db = 60`.
     #[must_use]
     pub fn librosa() -> Self {
         Self::new(60.0)
@@ -1056,14 +1031,13 @@ impl SilenceConfig {
     }
 }
 
-/// Classifies frames as non-silent, equivalent to librosa's internal
-/// `_signal_to_frame_nonsilent` (used by `effects.trim` and `effects.split`).
+/// Classifies frames as non-silent (the decision behind
+/// [`AudioEffects::trim_db`] and [`AudioEffects::split_db`]).
 ///
-/// Computes the centred, zero-padded frame RMS of every channel
-/// (`librosa.feature.rms`), converts it to dB with `amplitude_to_db(ref=...,
-/// top_db=None)` (the `Max` reference is the maximum over all channels and
-/// frames), combines channels with `config.aggregate` and compares with
-/// `-top_db`.
+/// Computes the centred, zero-padded frame RMS of every channel, converts it to
+/// dB with [`amplitude_to_db`] relative to `config.reference` and without a
+/// floor (the `Max` reference is the maximum over all channels and frames),
+/// combines channels with `config.aggregate` and compares with `-top_db`.
 ///
 /// # Arguments
 ///
@@ -1075,17 +1049,13 @@ impl SilenceConfig {
 ///
 /// One flag per frame (`1 + len / hop` frames); frame `t` covers samples centred
 /// on `t * hop`. The RMS and dB levels are computed in the element type of
-/// `signal`; `top_db` and a `Value` reference are rounded to it once.
+/// `signal`; `top_db` and a `Value` reference are rounded to it once. The
+/// squared samples of a frame are summed sequentially; a frame whose level lies
+/// within round-off of the threshold depends on that summation order.
 ///
 /// # Errors
 ///
 /// [`ParameterError`] if the configuration is invalid or the signal is empty.
-///
-/// # Differences from librosa
-///
-/// librosa sums the squared samples of a frame in NumPy's order (`numpy.mean`),
-/// this function sequentially, so a frame whose level lies within round-off of
-/// the threshold can be classified differently.
 ///
 /// # Examples
 ///
@@ -1185,9 +1155,8 @@ fn silence_frame_rms<F: AudioFloat>(
     rms
 }
 
-/// [`nonsilent_frames`] with a custom reference and channel combination, equivalent to
-/// librosa's `_signal_to_frame_nonsilent` with callables for `ref` and `aggregate`.
-/// `config.reference` and `config.aggregate` are not used.
+/// [`nonsilent_frames`] with a custom reference and channel combination given as
+/// closures. `config.reference` and `config.aggregate` are not used.
 ///
 /// # Arguments
 ///
@@ -1376,8 +1345,8 @@ where
     ))
 }
 
-/// `librosa.effects.trim` bounds: `(start, end)` sample indices (`start == end`
-/// when everything is silent).
+/// Trim bounds: `(start, end)` sample indices (`start == end` when everything
+/// is silent).
 fn trim_bounds(flags: &[bool], hop: usize, len: usize) -> (usize, usize) {
     let first = flags.iter().position(|&f| f);
     let last = flags.iter().rposition(|&f| f);
@@ -1387,7 +1356,7 @@ fn trim_bounds(flags: &[bool], hop: usize, len: usize) -> (usize, usize) {
     }
 }
 
-/// `librosa.effects.split` intervals in samples.
+/// Non-silent intervals in samples.
 fn split_intervals(flags: &[bool], hop: usize, len: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
     if flags.first() == Some(&true) {
@@ -1413,8 +1382,8 @@ fn split_intervals(flags: &[bool], hop: usize, len: usize) -> Vec<(usize, usize)
 // Remix
 // =============================================================================
 
-/// Indices `i` where `librosa.zero_crossings(y, threshold=1e-10, zero_pos=True,
-/// pad=True)` is true (index 0 always included), followed by `len`.
+/// Indices `i` where the sign of `y` changes, with values within `1e-10` of zero
+/// counted as positive (index 0 always included), followed by `len`.
 fn zero_crossing_positions<F: AudioFloat>(y: &[F]) -> Vec<usize> {
     let threshold = F::of(1e-10);
     let clip = |v: F| {
@@ -1434,8 +1403,8 @@ fn zero_crossing_positions<F: AudioFloat>(y: &[F]) -> Vec<usize> {
     out
 }
 
-/// Index into `sorted_to` of the event nearest `v`, with librosa's
-/// `util.match_events` tie-breaking (left/right both allowed).
+/// Index into `sorted_to` of the event nearest `v`, with the tie-breaking of
+/// `utils::array_ops::match_events` (left/right both allowed).
 fn match_event(v: usize, sorted_to: &[usize]) -> usize {
     let n = sorted_to.len();
     let mut middle = sorted_to.partition_point(|&x| x < v);
@@ -1461,7 +1430,7 @@ fn match_event(v: usize, sorted_to: &[usize]) -> usize {
     middle
 }
 
-/// `librosa.effects.remix` on `(channels, samples)` rows.
+/// Remix of `(channels, samples)` rows.
 fn remix_rows<F: AudioFloat>(
     rows: ArrayView2<'_, F>,
     intervals: &[(usize, usize)],
@@ -1489,7 +1458,7 @@ fn remix_rows<F: AudioFloat>(
             Some(z) => (z[match_event(a, z)], z[match_event(b, z)]),
             None => (a, b),
         };
-        // numpy slicing semantics: clipped to the signal, empty when a >= b.
+        // Slice bounds clipped to the signal, empty when a >= b.
         let (a, b) = (a.min(len), b.min(len));
         if a < b {
             pieces.push(rows.slice(ndarray::s![.., a..b]));
@@ -1506,7 +1475,7 @@ fn remix_rows<F: AudioFloat>(
 // Soft masks and median-filtering HPSS
 // =============================================================================
 
-/// `x^p` with numpy's exact fast paths for the common exponents.
+/// `x^p` with exact fast paths for the common exponents.
 #[inline]
 fn pow_fast<F: AudioFloat>(x: F, p: f64, p_f: F) -> F {
     if p == 1.0 {
@@ -1520,14 +1489,13 @@ fn pow_fast<F: AudioFloat>(x: F, p: f64, p_f: F) -> F {
     }
 }
 
-/// Soft (Wiener-like) mask of `x` against `x_ref`, equivalent to
-/// `librosa.util.softmask(X, X_ref, power=power, split_zeros=split_zeros)`.
+/// Soft (Wiener-like) mask of `x` against `x_ref`.
 ///
 /// With `Z = max(X, X_ref)` the mask is
 /// `(X / Z)^p / ((X / Z)^p + (X_ref / Z)^p)`, i.e. `X^p / (X^p + X_ref^p)`
 /// computed without overflow. Where both inputs are (numerically) zero, that is
-/// `Z` below the smallest positive normal value of the element type (librosa's
-/// `tiny`), the mask is `0.5` if `split_zeros`, else `0`. With
+/// `Z` below the smallest positive normal value of the element type, the mask
+/// is `0.5` if `split_zeros`, else `0`. With
 /// `power = f64::INFINITY` the mask is binary: `1` where `X > X_ref` (ties give
 /// `0`).
 ///
@@ -1580,7 +1548,7 @@ where
             format!("shape mismatch: {:?} != {:?}", x.shape(), x_ref.shape()),
         ));
     }
-    // Read each input in its memory order (NumPy spectrograms are often
+    // Read each input in its memory order (spectrograms are often
     // Fortran-order).
     let bad = |a: ndarray::ArrayView<'_, F, D>| -> bool {
         let neg = |v: &F| v.is_nan() || *v < F::zero();
@@ -1628,10 +1596,10 @@ where
 }
 
 /// Median filter of every channel of `s` along `axis` (1 = frequency,
-/// 2 = time) with kernel `k`, equivalent to `scipy.ndimage.median_filter` with
-/// `mode="reflect"` (half-sample symmetric: `d c b a | a b c d | d c b a`) and
-/// size 1 on the other axes. Even kernels select the upper median (SciPy's rank
-/// `k / 2`), centred as SciPy does (`k / 2` samples before, `k / 2 - 1` after).
+/// 2 = time) with kernel `k`, with half-sample symmetric boundaries
+/// (`d c b a | a b c d | d c b a`) and size 1 on the other axes. Even kernels
+/// select the upper median (rank `k / 2`), with `k / 2` samples before the centre
+/// and `k / 2 - 1` after.
 fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize) -> Array3<F> {
     let mut out = Array3::<F>::zeros(s.raw_dim());
     let n = s.len_of(Axis(axis));
@@ -1692,7 +1660,7 @@ fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize
 }
 
 /// Configuration of median-filtering harmonic/percussive separation on a
-/// spectrogram, mirroring `librosa.decompose.hpss`'s arguments.
+/// spectrogram.
 ///
 /// ## Purpose
 ///
@@ -1703,7 +1671,7 @@ fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize
 ///
 /// Pass to [`hpss_spectrogram`] / [`hpss_magnitude`] / [`hpss_masks`], or embed in a
 /// [`HarmonicPercussiveConfig`]. `Default` (and [`HpssMaskConfig::librosa`]) uses
-/// librosa's defaults: kernel size 31 for both filters, power 2, margin 1.
+/// kernel size 31 for both filters, power 2 and margin 1.
 ///
 /// ## Invariants
 ///
@@ -1723,19 +1691,19 @@ fn median_filter_axis<F: AudioFloat>(s: ArrayView3<'_, F>, axis: usize, k: usize
 #[derive(Debug, Clone, PartialEq)]
 pub struct HpssMaskConfig {
     /// Length (in frames) of the median filter along time that estimates the
-    /// harmonic component. Default: 31, as librosa.
+    /// harmonic component. Default: 31.
     pub kernel_harmonic: NonZeroUsize,
     /// Length (in bins) of the median filter along frequency that estimates the
-    /// percussive component. Default: 31, as librosa.
+    /// percussive component. Default: 31.
     pub kernel_percussive: NonZeroUsize,
     /// Mask exponent ([`softmask`]); `f64::INFINITY` gives binary masks.
-    /// Default: 2, as librosa.
+    /// Default: 2.
     pub power: f64,
     /// Harmonic margin: the harmonic mask is `softmask(H, margin * P)`. Values above 1
-    /// make the separation stricter and leave a residual. Default: 1, as librosa.
+    /// make the separation stricter and leave a residual. Default: 1.
     pub margin_harmonic: f64,
     /// Percussive margin (as `margin_harmonic`, for `softmask(P, margin * H)`).
-    /// Default: 1, as librosa.
+    /// Default: 1.
     pub margin_percussive: f64,
 }
 
@@ -1758,9 +1726,7 @@ impl HpssMaskConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults of `decompose.hpss`. Currently the same as
-    /// [`Default`]; use this constructor where agreement with librosa is the
-    /// requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -1772,7 +1738,7 @@ impl HpssMaskConfig {
         }
     }
 
-    /// Sets both median-filter sizes (librosa's scalar `kernel_size`).
+    /// Sets both median-filter sizes.
     #[must_use]
     pub fn with_kernel_size(mut self, kernel_size: NonZeroUsize) -> Self {
         self.kernel_harmonic = kernel_size;
@@ -1780,7 +1746,7 @@ impl HpssMaskConfig {
         self
     }
 
-    /// Sets the harmonic and percussive filter sizes (librosa's tuple `kernel_size`).
+    /// Sets the harmonic and percussive filter sizes separately.
     #[must_use]
     pub fn with_kernel_sizes(mut self, harmonic: NonZeroUsize, percussive: NonZeroUsize) -> Self {
         self.kernel_harmonic = harmonic;
@@ -1795,7 +1761,7 @@ impl HpssMaskConfig {
         self
     }
 
-    /// Sets both margins (librosa's scalar `margin`).
+    /// Sets both margins.
     #[must_use]
     pub fn with_margin(mut self, margin: f64) -> Self {
         self.margin_harmonic = margin;
@@ -1803,7 +1769,7 @@ impl HpssMaskConfig {
         self
     }
 
-    /// Sets the harmonic and percussive margins (librosa's tuple `margin`).
+    /// Sets the harmonic and percussive margins separately.
     #[must_use]
     pub fn with_margins(mut self, harmonic: f64, percussive: f64) -> Self {
         self.margin_harmonic = harmonic;
@@ -1838,11 +1804,11 @@ impl HpssMaskConfig {
     }
 }
 
-/// Harmonic and percussive masks of a magnitude spectrogram, equivalent to
-/// `librosa.decompose.hpss(S, ..., mask=True)` for a real `S`.
+/// Harmonic and percussive masks of a magnitude spectrogram.
 ///
 /// `H` is `S` median-filtered along time (`kernel_harmonic` frames), `P` along
-/// frequency (`kernel_percussive` bins), both with SciPy's `reflect` boundary;
+/// frequency (`kernel_percussive` bins), both with half-sample symmetric
+/// boundaries;
 /// the masks are `softmask(H, margin_h * P)` and `softmask(P, margin_p * H)`, with
 /// `split_zeros` only when both margins are 1.
 ///
@@ -1916,7 +1882,7 @@ pub fn hpss_masks<F: AudioFloat>(
 }
 
 /// Separates a magnitude (or power) spectrogram into harmonic and percussive
-/// parts, equivalent to `librosa.decompose.hpss(S)` for a real `S`.
+/// parts.
 ///
 /// # Arguments
 ///
@@ -1951,8 +1917,7 @@ pub fn hpss_magnitude<F: AudioFloat>(
     Ok((&magnitude * &mh, &magnitude * &mp))
 }
 
-/// Separates a complex STFT into harmonic and percussive STFTs, equivalent to
-/// `librosa.decompose.hpss(D)` for a complex `D`.
+/// Separates a complex STFT into harmonic and percussive STFTs.
 ///
 /// The masks of [`hpss_masks`] are computed on `|D|` and applied to the magnitude;
 /// the phase of `D` is kept (`(|D| * mask) * D / |D|`, with phase 1 where `D` is 0).
@@ -2000,7 +1965,7 @@ pub fn hpss_spectrogram<F: AudioFloat>(
             .and(&mag)
             .and(mask)
             .for_each(|o, d, &s, &m| {
-                // librosa.magphase: phase = D / |D|, or 1 where |D| == 0.
+                // Phase = D / |D|, or 1 where |D| == 0.
                 let phase = if s == F::zero() {
                     Complex::new(F::one(), d.im)
                 } else {
@@ -2016,7 +1981,7 @@ pub fn hpss_spectrogram<F: AudioFloat>(
 
 /// Configuration of the audio-level harmonic/percussive separation
 /// ([`AudioEffects::harmonic`], [`AudioEffects::percussive`],
-/// [`AudioEffects::harmonic_percussive`]), mirroring `librosa.effects.hpss`.
+/// [`AudioEffects::harmonic_percussive`]).
 ///
 /// ## Purpose
 ///
@@ -2024,8 +1989,8 @@ pub fn hpss_spectrogram<F: AudioFloat>(
 ///
 /// ## Intended usage
 ///
-/// `Default` (and [`HarmonicPercussiveConfig::librosa`]) reproduces
-/// `librosa.effects.hpss(y)`.
+/// `Default` (and [`HarmonicPercussiveConfig::librosa`]) uses the default STFT
+/// and [`HpssMaskConfig::default`].
 ///
 /// ## Invariants
 ///
@@ -2041,11 +2006,9 @@ pub fn hpss_spectrogram<F: AudioFloat>(
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HarmonicPercussiveConfig {
-    /// STFT for analysis and resynthesis. Default: [`StftConfig::default`],
-    /// librosa's STFT defaults.
+    /// STFT for analysis and resynthesis. Default: [`StftConfig::default`].
     pub stft: StftConfig,
-    /// Median-filter and mask parameters. Default: [`HpssMaskConfig::default`],
-    /// librosa's defaults.
+    /// Median-filter and mask parameters. Default: [`HpssMaskConfig::default`].
     pub hpss: HpssMaskConfig,
 }
 
@@ -2056,9 +2019,7 @@ impl HarmonicPercussiveConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults of `effects.hpss`. Currently the same as
-    /// [`Default`]; use this constructor where agreement with librosa is the
-    /// requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -2099,7 +2060,7 @@ enum HpssPart {
     Percussive,
 }
 
-/// `librosa.effects.harmonic` / `percussive` on rows.
+/// Harmonic or percussive component of rows.
 fn hpss_rows<F: AudioFloat>(
     rows: ArrayView2<'_, F>,
     config: &HarmonicPercussiveConfig,
@@ -2125,17 +2086,17 @@ fn hpss_rows<F: AudioFloat>(
 // Griffin-Lim
 // =============================================================================
 
-/// Initial phase estimate of [`griffinlim`] (librosa's `init`).
+/// Initial phase estimate of [`griffinlim`].
 ///
 /// The default is `Random(Some(0))`: random phases from a fixed seed, so the same
-/// input gives the same output on every run. librosa's default draws a fresh
-/// seed (`Random(None)`, used by [`GriffinLimConfig::librosa`]).
+/// input gives the same output on every run. [`GriffinLimConfig::librosa`] uses
+/// `Random(None)`, a fresh seed per call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GriffinLimInit {
-    /// Uniformly random phases (librosa `init="random"`). `Some(seed)` makes the
+    /// Uniformly random phases. `Some(seed)` makes the
     /// result reproducible; `None` draws a fresh seed on every call.
     Random(Option<u64>),
-    /// All phases zero (librosa `init=None`): fully deterministic.
+    /// All phases zero: fully deterministic.
     ZeroPhase,
 }
 
@@ -2145,7 +2106,7 @@ impl Default for GriffinLimInit {
     }
 }
 
-/// Configuration of Griffin-Lim phase reconstruction, mirroring `librosa.griffinlim`.
+/// Configuration of Griffin-Lim phase reconstruction.
 ///
 /// ## Purpose
 ///
@@ -2154,11 +2115,11 @@ impl Default for GriffinLimInit {
 ///
 /// ## Intended usage
 ///
-/// `Default` uses librosa's values (32 iterations, momentum 0.99, default STFT)
-/// with a seeded random initial phase (`GriffinLimInit::Random(Some(0))`), so
-/// results are reproducible. [`GriffinLimConfig::librosa`] draws a fresh seed on
-/// every call, as librosa does. `stft.n_fft` must match the spectrogram
-/// (`n_bins = n_fft / 2 + 1`); librosa infers it from the bin count.
+/// `Default` uses 32 iterations, momentum 0.99 and the default STFT, with a
+/// seeded random initial phase (`GriffinLimInit::Random(Some(0))`), so results
+/// are reproducible. [`GriffinLimConfig::librosa`] draws a fresh seed on every
+/// call. `stft.n_fft` must match the spectrogram (`n_bins = n_fft / 2 + 1`); it
+/// is not inferred from the bin count.
 ///
 /// ## Invariants
 ///
@@ -2175,16 +2136,16 @@ impl Default for GriffinLimInit {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct GriffinLimConfig {
-    /// Number of iterations. Default: 32, as librosa.
+    /// Number of iterations. Default: 32.
     pub n_iter: usize,
     /// Momentum of the fast Griffin-Lim update (0 gives the original algorithm).
-    /// Values above 1 can be unstable. Default: 0.99, as librosa.
+    /// Values above 1 can be unstable. Default: 0.99.
     pub momentum: f64,
-    /// Initial phase. Default: `Random(Some(0))` (seeded); librosa:
-    /// `Random(None)` (a fresh seed per call).
+    /// Initial phase. Default: `Random(Some(0))` (seeded);
+    /// [`GriffinLimConfig::librosa`]: `Random(None)` (a fresh seed per call).
     pub init: GriffinLimInit,
     /// STFT parameters of the magnitude spectrogram. Default:
-    /// [`StftConfig::default`], librosa's STFT defaults.
+    /// [`StftConfig::default`].
     pub stft: StftConfig,
     /// Exact output length in samples (`None`: as the inverse STFT gives).
     pub length: Option<usize>,
@@ -2209,7 +2170,7 @@ impl GriffinLimConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults of `griffinlim`: as [`Default`], but with
+    /// Settings matching librosa 1.0's defaults: [`Default`] with
     /// `init = GriffinLimInit::Random(None)`, so every call draws a fresh seed.
     #[must_use]
     pub fn librosa() -> Self {
@@ -2281,7 +2242,7 @@ impl GriffinLimConfig {
 }
 
 /// Reconstructs a signal from a magnitude spectrogram with the fast Griffin-Lim
-/// algorithm, equivalent to `librosa.griffinlim`.
+/// algorithm.
 ///
 /// Starting from `S * exp(i phi0)`, each iteration inverts the current estimate
 /// ([`istft`]), re-analyses it ([`stft`]), applies the momentum step
@@ -2305,13 +2266,10 @@ impl GriffinLimConfig {
 /// [`ParameterError`] if the configuration is invalid, the bin count does not match
 /// `config.stft.n_fft`, or the spectrogram has no frames.
 ///
-/// # Differences from librosa
-///
-/// With [`GriffinLimInit::Random`] the random phases come from this crate's RNG,
-/// not NumPy's, so results differ from librosa's for the same seed (both are
-/// valid reconstructions). [`GriffinLimInit::ZeroPhase`] is deterministic and
-/// matches librosa's `init=None` to round-off. librosa warns for momentum > 1;
-/// this function accepts it silently.
+/// With [`GriffinLimInit::Random`] the random phases come from this crate's RNG;
+/// different random starts give different, equally valid reconstructions.
+/// [`GriffinLimInit::ZeroPhase`] is deterministic. A momentum above 1 is accepted
+/// silently.
 ///
 /// # Examples
 ///
@@ -2400,25 +2358,24 @@ pub fn griffinlim<F: AudioFloat>(
 // Nearest-neighbour filtering
 // =============================================================================
 
-/// How [`nn_filter`] combines a frame's neighbours (librosa's `aggregate`).
+/// How [`nn_filter`] combines a frame's neighbours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum NnAggregate {
-    /// Mean of the neighbours (`numpy.mean`, librosa's default).
+    /// Mean of the neighbours (the default).
     #[default]
     Mean,
-    /// Element-wise median of the neighbours (`numpy.median`).
+    /// Element-wise median of the neighbours.
     Median,
-    /// Average weighted by the recurrence values (`numpy.average(weights=...)`);
+    /// Average weighted by the recurrence values;
     /// use with an affinity recurrence matrix.
     WeightedAverage,
 }
 
-/// Replaces every frame of `data` by an aggregate of its nearest neighbours,
-/// equivalent to `librosa.decompose.nn_filter(S, rec=rec, aggregate=...)`.
+/// Replaces every frame of `data` by an aggregate of its nearest neighbours.
 ///
 /// For output frame `i` the neighbours are the frames `j` with `rec[j, i] != 0`
-/// (librosa's orientation, as produced by
-/// [`recurrence_matrix_weighted`]); a frame with no neighbours is copied unchanged.
+/// (the orientation produced by [`recurrence_matrix_weighted`]); a frame with no
+/// neighbours is copied unchanged.
 ///
 /// # Arguments
 ///
@@ -2490,10 +2447,10 @@ pub fn nn_filter<F: AudioFloat>(
     Ok(out)
 }
 
-/// A recurrence matrix in compressed sparse column form, as `scipy.sparse.csc_array`
-/// holds it: the neighbours of frame `i` are `indices[indptr[i]..indptr[i + 1]]`.
+/// A recurrence matrix in compressed sparse column (CSC) form: the neighbours of
+/// frame `i` are `indices[indptr[i]..indptr[i + 1]]`.
 ///
-/// The index type is `usize` for arrays of this crate; SciPy's are `i32` or `i64`, and
+/// The index type is `usize` for arrays of this crate; `i32` or `i64` index arrays
 /// can be used without a copy.
 #[derive(Debug, Clone, Copy)]
 pub struct SparseRecurrence<'a, V, I = usize> {
@@ -2550,10 +2507,9 @@ impl<'a, V, I: Copy + num_traits::ToPrimitive> SparseRecurrence<'a, V, I> {
     }
 }
 
-/// [`nn_filter`] on a sparse recurrence matrix, equivalent to
-/// `librosa.decompose.nn_filter(S, rec=rec, aggregate=...)` with a `scipy.sparse` `rec`.
+/// [`nn_filter`] on a sparse recurrence matrix.
 ///
-/// Every stored entry is a neighbour, an explicit zero included, as in librosa.
+/// Every stored entry is a neighbour, an explicit zero included.
 ///
 /// # Arguments
 ///
@@ -2649,8 +2605,7 @@ fn nn_filter_frame_with<F, A>(
     out.column_mut(i).assign(&ndarray::aview1(frame));
 }
 
-/// [`nn_filter`] with a custom aggregate, equivalent to
-/// `librosa.decompose.nn_filter(S, rec=rec, aggregate=f)`.
+/// [`nn_filter`] with a custom aggregate.
 ///
 /// # Arguments
 ///
@@ -2905,15 +2860,14 @@ fn nn_filter_frame<F: AudioFloat>(
     Ok(())
 }
 
-/// [`nn_filter`] with the recurrence matrix computed from `data` itself,
-/// equivalent to `librosa.decompose.nn_filter(S, aggregate=..., **kwargs)` with
-/// `rec=None` (`kwargs` are the [`RecurrenceConfig`] fields).
+/// [`nn_filter`] with the recurrence matrix computed from `data` itself with the
+/// given [`RecurrenceConfig`].
 ///
 /// # Arguments
 ///
 /// * `data` - `(n_features, n_frames)` features, `f32` or `f64`.
 /// * `recurrence` - Neighbourhood parameters; [`RecurrenceConfig::default`] is
-///   librosa's default (connectivity, `k = 2 ceil(sqrt(t - 2 width + 1))`, width 1).
+///   connectivity mode with `k = 2 ceil(sqrt(t - 2 width + 1))` and width 1.
 /// * `aggregate` - Mean, median or weighted average (use an affinity mode for
 ///   meaningful weights).
 ///
@@ -2921,8 +2875,8 @@ fn nn_filter_frame<F: AudioFloat>(
 ///
 /// The filtered `(n_features, n_frames)` array in the element type of `data`.
 /// The recurrence links and the filtering are computed in that type. The links
-/// are kept as per-frame neighbour lists (memory proportional to `t k`, like
-/// librosa's sparse matrix); only `full` distance or affinity mode, which links
+/// are kept as per-frame neighbour lists (memory proportional to `t k`); only
+/// `full` distance or affinity mode, which links
 /// every pair, builds the dense `(t, t)` matrix.
 ///
 /// # Errors
@@ -2973,8 +2927,7 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
 // LPC (Burg)
 // =============================================================================
 
-/// Linear-prediction coefficients by Burg's method, equivalent to
-/// `librosa.lpc(y, order=order)`.
+/// Linear-prediction coefficients by Burg's method.
 ///
 /// # Arguments
 ///
@@ -2985,22 +2938,16 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
 ///
 /// `order + 1` coefficients `[1, a_1, ..., a_order]` of the prediction-error
 /// filter `A(z) = 1 + a_1 z^-1 + ... + a_order z^-order`, in the element type of
-/// `y`. The recursion runs in `f64` (see below).
+/// `y`. The recursion runs in `f64`: `f32` input is widened (exactly) and the
+/// coefficients are rounded to `f32` once, at the cost of one `f64` copy of the
+/// signal. A Burg recursion in `f32` is unstable on tonal input at high orders:
+/// on a test signal of three tones and a chirp its coefficients differ from the
+/// `f64` ones by 1.3e-3 (relative to the largest coefficient) at order 4, 0.14
+/// at order 8 and by more than 100 % from order 10 on.
 ///
 /// # Errors
 ///
 /// [`ParameterError`] if `y` has a non-finite value or no more than `order` samples.
-///
-/// # Differences from librosa
-///
-/// The recursion always runs in `f64`; `f32` input is widened (exactly) and the
-/// coefficients are rounded to `f32` once, at the cost of one `f64` copy of the
-/// signal. librosa runs the recursion in the input's dtype, and its `float32`
-/// Burg recursion is unstable on tonal input at high orders: on a test signal
-/// of three tones and a chirp its `float32` coefficients differ from its
-/// `float64` ones by 1.3e-3 (relative to the largest coefficient) at order 4,
-/// 0.14 at order 8 and by more than 100 % from order 10 on. For such input this
-/// function deliberately does not reproduce librosa's `float32` result.
 ///
 /// # Examples
 ///
@@ -3019,8 +2966,7 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
 ///
 /// # References
 ///
-/// J. P. Burg, "Maximum entropy spectral analysis," PhD thesis, Stanford, 1975;
-/// librosa `core.lpc`.
+/// J. P. Burg, "Maximum entropy spectral analysis," PhD thesis, Stanford, 1975.
 pub fn lpc<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec<F>> {
     Ok(lpc_f64(y, order)?.into_iter().map(F::of).collect())
 }
@@ -3119,19 +3065,19 @@ fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
 /// Where [`clicks`] places its clicks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClickPositions<'a> {
-    /// Times in seconds (librosa `times=`); sample index `floor(t * sr)`.
+    /// Times in seconds; sample index `floor(t * sr)`.
     Times(&'a [f64]),
-    /// Frame indices (librosa `frames=`); sample index `frame * hop_length`.
+    /// Frame indices; sample index `frame * hop_length`.
     Frames {
         /// The frame indices.
         frames: &'a [usize],
         /// Samples per frame: the hop of the analysis that produced `frames`
-        /// (librosa's `hop_length`, default 512).
+        /// (512 for the default STFT hop).
         hop_length: NonZeroUsize,
     },
 }
 
-/// Configuration of [`clicks`], mirroring `librosa.clicks`'s keyword arguments.
+/// Configuration of [`clicks`].
 ///
 /// ## Purpose
 ///
@@ -3141,8 +3087,8 @@ pub enum ClickPositions<'a> {
 ///
 /// ## Intended usage
 ///
-/// `Default` (and [`ClicksConfig::librosa`]) uses librosa's defaults: a 1 kHz,
-/// 100 ms click, length up to the end of the last click.
+/// `Default` (and [`ClicksConfig::librosa`]) uses a 1 kHz, 100 ms click and a
+/// length up to the end of the last click.
 ///
 /// ## Invariants
 ///
@@ -3160,9 +3106,9 @@ pub enum ClickPositions<'a> {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClicksConfig {
-    /// Frequency (Hz) of the default click. Default: 1000, as librosa.
+    /// Frequency (Hz) of the default click. Default: 1000.
     pub click_freq: f64,
-    /// Duration (s) of the default click. Default: 0.1, as librosa.
+    /// Duration (s) of the default click. Default: 0.1.
     pub click_duration: f64,
     /// Custom click waveform used instead of the default one. It is rounded to
     /// the output's float type once.
@@ -3190,8 +3136,7 @@ impl ClicksConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults of `clicks`. Currently the same as [`Default`]; use
-    /// this constructor where agreement with librosa is the requirement.
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -3265,7 +3210,7 @@ impl ClicksConfig {
     }
 }
 
-/// Synthesises a click track, equivalent to `librosa.clicks`.
+/// Synthesises a click track.
 ///
 /// The default click is `2^(-10 u) sin(2 pi f n / sr)` for `n = 0 ..
 /// floor(sr * duration)` with `u` going linearly from 0 to 1 (a sine burst decaying
@@ -3292,12 +3237,7 @@ impl ClicksConfig {
 /// [`ParameterError`] if the configuration is invalid, a time is negative or not
 /// finite, or `positions` is empty while `length` is `None`, or the track or the
 /// click would exceed 2^31 samples; an empty-data error if the default click
-/// would have no samples.
-///
-/// # Differences from librosa
-///
-/// librosa returns `float32` by default (`dtype=numpy.float32`); `clicks::<f32>`
-/// is the equivalent here. Multichannel custom clicks are not supported.
+/// would have no samples. Multichannel custom clicks are not supported.
 ///
 /// # Examples
 ///
@@ -3371,7 +3311,7 @@ pub fn clicks<T: StandardSample>(
                 return Err(AudioSampleError::empty_data("clicks"));
             }
             let w = 2.0 * std::f64::consts::PI * config.click_freq / sr;
-            // numpy.logspace(0, -10, n, base=2): 2 ** linspace(0, -10, n).
+            // Envelope 2 ** linspace(0, -10, n).
             let step = if n > 1 { -10.0 / (n - 1) as f64 } else { 0.0 };
             (0..n)
                 .map(|i| {
@@ -3424,7 +3364,7 @@ pub fn clicks<T: StandardSample>(
 // The AudioEffects trait
 // =============================================================================
 
-/// librosa-compatible audio effects on [`AudioSamples`].
+/// Audio effects on [`AudioSamples`].
 ///
 /// All methods process every channel (mono gives one channel) in the sample
 /// type's float type [`Float`](Self::Float) (`f32` for `u8`, `i16`, `I24` and
@@ -3432,7 +3372,7 @@ pub fn clicks<T: StandardSample>(
 /// sample type and sample rate, converted with the crate's audio-aware conversion
 /// (integer types round and saturate). Each audio-to-audio method has an
 /// `_in_place` variant that replaces the audio (its length may change). See the
-/// [module documentation](self) for the librosa correspondence.
+/// [module documentation](self) for an overview.
 pub trait AudioEffects {
     /// The float type of the computation and of the array outputs
     /// ([`lpc`](Self::lpc)): the sample type's
@@ -3443,8 +3383,7 @@ pub trait AudioEffects {
     /// [`griffinlim_audio`](Self::griffinlim_audio) return audio of this type.
     type Sample: StandardSample;
 
-    /// Changes the speed without changing the pitch, equivalent to
-    /// `librosa.effects.time_stretch(y, rate=rate)`.
+    /// Changes the speed without changing the pitch.
     ///
     /// The audio is analysed with `stft`, re-timed with [`phase_vocoder`] and
     /// resynthesised to exactly `round(n / rate)` samples (ties to even, as Python's
@@ -3454,7 +3393,7 @@ pub trait AudioEffects {
     ///
     /// * `rate` - Speed-up factor: `2.0` is twice as fast (half the length), `0.5`
     ///   half as fast. Finite and positive.
-    /// * `stft` - STFT parameters ([`StftConfig::default`] = librosa's).
+    /// * `stft` - STFT parameters (usually [`StftConfig::default`]).
     ///
     /// # Returns
     ///
@@ -3462,33 +3401,26 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if `rate` is not finite and positive, the result would be
     /// empty or exceed 2^31 samples, or the STFT configuration is invalid.
     ///
-    /// # Differences from librosa
-    ///
-    /// Same algorithm; on ordinary signals the output matches librosa to
-    /// floating-point round-off. Where the input contains exact digital silence
-    /// (e.g. a zero lead-in), STFT bins of ~0 magnitude have ill-conditioned
-    /// phases that the phase vocoder accumulates, so round-off is amplified:
-    /// agreement drops to ~30 dB SNR there. librosa against itself with a
-    /// 1e-15 relative STFT perturbation differs by the same amount (~27 dB).
-    ///
     /// # Precision and memory
+    ///
+    /// Where the input contains exact digital silence (e.g. a zero lead-in), STFT
+    /// bins of ~0 magnitude have ill-conditioned phases that the phase vocoder
+    /// accumulates, so round-off is amplified there: a 1e-15 relative perturbation
+    /// of the STFT changes the output by as much as ~27 dB SNR.
     ///
     /// For `f32` computation (`u8`, `i16`, `I24`, `f32` audio) the analysis STFT
     /// is computed in `f64` from the samples converted to `f64` and rounded once
     /// to `Complex<f32>`; the phase vocoder and the inverse STFT run in `f32`.
-    /// librosa's `float32` path also computes its STFT in `float64`. An `f32`
-    /// STFT would put the bins that a signal reaches only later (a chirp, an
-    /// onset) at the `f32` round-off level, and the phase vocoder carries their
-    /// phase into the output. On the reference chirp-and-tones signal the `f32`
-    /// result agrees with librosa's `float32` result to 1.9e-7 of the peak and
-    /// with this crate's `f64` result to 2.1e-6; `i16` output is within 1 LSB of
-    /// the `f64` result re-quantised.
+    /// An `f32` STFT would put the bins that a signal reaches only later (a
+    /// chirp, an onset) at the `f32` round-off level, and the phase vocoder
+    /// carries their phase into the output. On the reference chirp-and-tones
+    /// signal the `f32` result agrees with the `f64` result to 2.1e-6 of the
+    /// peak; `i16` output is within 1 LSB of the `f64` result re-quantised.
     ///
     /// The cost: while the STFT is computed, an `f64` copy of the samples and the
     /// `f64` complex STFT (twice the size of the `f32` one) are held; the `f64`
@@ -3516,8 +3448,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`time_stretch`](Self::time_stretch); the audio is unchanged on error.
     ///
@@ -3535,13 +3466,11 @@ pub trait AudioEffects {
     /// ```
     fn time_stretch_in_place(&mut self, rate: f64, stft: &StftConfig) -> AudioSampleResult<()>;
 
-    /// Shifts the pitch by `n_steps` without changing the duration, equivalent to
-    /// `librosa.effects.pitch_shift(y, sr=sr, n_steps=n_steps)`.
+    /// Shifts the pitch by `n_steps` without changing the duration.
     ///
     /// With `rate = 2^(-n_steps / bins_per_octave)` the audio is
     /// [time-stretched](Self::time_stretch) by `rate`, resampled by the factor `rate`
-    /// (librosa: from `sr / rate` to `sr`) and cut or zero-padded to the original
-    /// length.
+    /// (from `sr / rate` to `sr`) and cut or zero-padded to the original length.
     ///
     /// # Arguments
     ///
@@ -3555,22 +3484,14 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if `n_steps` is not finite, the configuration is invalid,
     /// or the shift is so large that the stretched signal is empty.
     ///
-    /// # Differences from librosa
-    ///
-    /// librosa resamples with soxr (`res_type="soxr_hq"`); this method uses the
-    /// crate's windowed-sinc resampler ([`ResamplingQuality::High`] by default),
-    /// which approximates the arbitrary ratio `rate` by a ratio of two integers near
-    /// 2^31. The time-stretch stage matches librosa to round-off (amplified on
-    /// input containing exact digital silence, see
-    /// [`time_stretch`](Self::time_stretch), including the `f32` case); the final
-    /// signal agrees within the resampler difference (about 68 dB SNR on the
-    /// reference test signal, see `tests/librosa_reference/effects.rs`).
+    /// The resampling stage uses the crate's windowed-sinc resampler
+    /// ([`ResamplingQuality::High`] by default), which approximates the arbitrary
+    /// ratio `rate` by a ratio of two integers near 2^31.
     ///
     /// # Precision and memory
     ///
@@ -3602,8 +3523,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`pitch_shift`](Self::pitch_shift); the audio is unchanged on error.
     ///
@@ -3625,13 +3545,12 @@ pub trait AudioEffects {
     ) -> AudioSampleResult<()>;
 
     /// Applies a pre-emphasis filter `y[n] = x[n] - coef * x[n - 1]` to every
-    /// channel, equivalent to `librosa.effects.preemphasis(y, coef=coef)` (initial
-    /// state `2 x[0] - x[1]`). Use [`preemphasis_with_state`] for explicit
+    /// channel, with initial state `2 x[0] - x[1]`. Use [`preemphasis_with_state`] for explicit
     /// `zi` / `zf`.
     ///
     /// # Arguments
     ///
-    /// * `coef` - Coefficient (librosa default 0.97), finite.
+    /// * `coef` - Coefficient (typically 0.97), finite.
     ///
     /// # Returns
     ///
@@ -3639,8 +3558,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if `coef` is not finite or a channel has fewer than two
     /// samples.
@@ -3668,8 +3586,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`preemphasis`](Self::preemphasis).
     ///
@@ -3687,13 +3604,12 @@ pub trait AudioEffects {
     fn preemphasis_in_place(&mut self, coef: f64) -> AudioSampleResult<()>;
 
     /// Applies the de-emphasis filter `y[n] = x[n] + coef * y[n - 1]` (the inverse
-    /// of [`preemphasis`](Self::preemphasis)) to every channel, equivalent to
-    /// `librosa.effects.deemphasis(y, coef=coef)`. Use [`deemphasis_with_state`] for
-    /// explicit `zi` / `zf`.
+    /// of [`preemphasis`](Self::preemphasis)) to every channel. Use
+    /// [`deemphasis_with_state`] for explicit `zi` / `zf`.
     ///
     /// # Arguments
     ///
-    /// * `coef` - Coefficient (librosa default 0.97), finite and not 3.
+    /// * `coef` - Coefficient (typically 0.97), finite and not 3.
     ///
     /// # Returns
     ///
@@ -3701,8 +3617,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if `coef` is not finite or 3, or a channel has fewer than
     /// two samples.
@@ -3725,8 +3640,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`deemphasis`](Self::deemphasis).
     ///
@@ -3744,7 +3658,7 @@ pub trait AudioEffects {
     /// ```
     fn deemphasis_in_place(&mut self, coef: f64) -> AudioSampleResult<()>;
 
-    /// Trims leading and trailing silence, equivalent to `librosa.effects.trim(y)`.
+    /// Trims leading and trailing silence.
     ///
     /// Frames are classified with [`nonsilent_frames`]; the kept region runs from the
     /// first non-silent frame's start `first * hop` to `min(n, (last + 1) * hop)`.
@@ -3752,7 +3666,7 @@ pub trait AudioEffects {
     /// # Arguments
     ///
     /// * `config` - Threshold, reference, framing and channel aggregation
-    ///   ([`SilenceConfig::librosa`] = librosa's defaults).
+    ///   ([`SilenceConfig::librosa`] uses a 60 dB threshold).
     ///
     /// # Returns
     ///
@@ -3761,14 +3675,11 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid; an empty-data error if
-    /// every frame is silent (librosa returns an empty array and `[0, 0]`; use
-    /// [`split_db`](Self::split_db), which returns no intervals, to test for that).
-    ///
-    /// # Differences from librosa
+    /// every frame is silent (use [`split_db`](Self::split_db), which returns no
+    /// intervals, to test for that).
     ///
     /// Not to be confused with
     /// [`AudioEditing::trim_silence`](crate::AudioEditing::trim_silence), which
@@ -3802,8 +3713,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`trim_db`](Self::trim_db); the audio is unchanged on error.
     ///
@@ -3822,8 +3732,7 @@ pub trait AudioEffects {
     /// ```
     fn trim_db_in_place(&mut self, config: &SilenceConfig) -> AudioSampleResult<(usize, usize)>;
 
-    /// Splits the audio into non-silent intervals, equivalent to
-    /// `librosa.effects.split(y)`.
+    /// Splits the audio into non-silent intervals.
     ///
     /// # Arguments
     ///
@@ -3836,8 +3745,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
@@ -3857,8 +3765,7 @@ pub trait AudioEffects {
     /// ```
     fn split_db(&self, config: &SilenceConfig) -> AudioSampleResult<Vec<(usize, usize)>>;
 
-    /// Concatenates the given sample intervals, equivalent to
-    /// `librosa.effects.remix(y, intervals, align_zeros=align_zeros)`.
+    /// Concatenates the given sample intervals.
     ///
     /// With `align_zeros`, every interval boundary is moved to the nearest zero
     /// crossing of the (mono downmix of the) signal, where sample 0 and the end of
@@ -3868,7 +3775,7 @@ pub trait AudioEffects {
     ///
     /// * `intervals` - `(start, end)` sample ranges, in output order (may repeat or
     ///   be reordered). Ranges are clipped to the signal; empty ranges are skipped.
-    /// * `align_zeros` - Snap boundaries to zero crossings (librosa default `true`).
+    /// * `align_zeros` - Snap boundaries to zero crossings (usually `true`).
     ///
     /// # Returns
     ///
@@ -3876,8 +3783,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if `intervals` is empty; an empty-data error if every
     /// interval is empty.
@@ -3904,8 +3810,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`remix`](Self::remix); the audio is unchanged on error.
     ///
@@ -3926,14 +3831,14 @@ pub trait AudioEffects {
         align_zeros: bool,
     ) -> AudioSampleResult<()>;
 
-    /// Extracts the harmonic component, equivalent to `librosa.effects.harmonic(y)`.
+    /// Extracts the harmonic component.
     ///
     /// STFT, [`hpss_spectrogram`], inverse STFT trimmed to the input length.
     ///
     /// # Arguments
     ///
-    /// * `config` - STFT and mask parameters ([`HarmonicPercussiveConfig::default`]
-    ///   = librosa's).
+    /// * `config` - STFT and mask parameters (usually
+    ///   [`HarmonicPercussiveConfig::default`]).
     ///
     /// # Returns
     ///
@@ -3941,16 +3846,11 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
-    /// # Differences from librosa
-    ///
-    /// librosa's `effects.hpss`/`harmonic`/`percussive` accept a `window` argument
-    /// but do not pass it on (they always use Hann); here `config.stft.window` is
-    /// used. This is a different method from
+    /// The STFT uses `config.stft.window`. This is a different method from
     /// [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss), which keeps its
     /// own mask and window conventions.
     ///
@@ -3974,8 +3874,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`harmonic`](Self::harmonic).
     ///
@@ -3992,8 +3891,7 @@ pub trait AudioEffects {
     /// ```
     fn harmonic_in_place(&mut self, config: &HarmonicPercussiveConfig) -> AudioSampleResult<()>;
 
-    /// Extracts the percussive component, equivalent to
-    /// `librosa.effects.percussive(y)`.
+    /// Extracts the percussive component.
     ///
     /// # Arguments
     ///
@@ -4005,14 +3903,11 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
-    /// # Differences from librosa
-    ///
-    /// As [`harmonic`](Self::harmonic).
+    /// The STFT uses `config.stft.window`, as for [`harmonic`](Self::harmonic).
     ///
     /// # Examples
     ///
@@ -4036,8 +3931,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// As [`percussive`](Self::percussive).
     ///
@@ -4054,8 +3948,7 @@ pub trait AudioEffects {
     /// ```
     fn percussive_in_place(&mut self, config: &HarmonicPercussiveConfig) -> AudioSampleResult<()>;
 
-    /// Separates harmonic and percussive components, equivalent to
-    /// `librosa.effects.hpss(y)`.
+    /// Separates harmonic and percussive components.
     ///
     /// # Arguments
     ///
@@ -4068,14 +3961,11 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if the configuration is invalid.
     ///
-    /// # Differences from librosa
-    ///
-    /// As [`harmonic`](Self::harmonic).
+    /// The STFT uses `config.stft.window`, as for [`harmonic`](Self::harmonic).
     ///
     /// # Examples
     ///
@@ -4098,8 +3988,7 @@ pub trait AudioEffects {
         AudioSamples<'static, Self::Sample>,
     )>;
 
-    /// LPC coefficients of every channel by Burg's method, equivalent to
-    /// `librosa.lpc(y, order=order)`; see [`lpc`].
+    /// LPC coefficients of every channel by Burg's method; see [`lpc`].
     ///
     /// # Arguments
     ///
@@ -4113,8 +4002,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// [`ParameterError`] if the audio contains a NaN or infinite sample (as
-    /// librosa's "Audio buffer is not finite everywhere").
+    /// [`ParameterError`] if the audio contains a NaN or infinite sample.
     ///
     /// [`ParameterError`] if a channel is too short or not finite.
     ///
@@ -4135,8 +4023,8 @@ pub trait AudioEffects {
     /// ```
     fn lpc(&self, order: NonZeroUsize) -> AudioSampleResult<Array2<Self::Float>>;
 
-    /// Reconstructs audio from a magnitude spectrogram with Griffin-Lim, equivalent
-    /// to `librosa.griffinlim(S)`; see [`griffinlim`].
+    /// Reconstructs audio from a magnitude spectrogram with Griffin-Lim; see
+    /// [`griffinlim`].
     ///
     /// # Arguments
     ///
@@ -4156,11 +4044,7 @@ pub trait AudioEffects {
     ///
     /// # Errors
     ///
-    /// As [`griffinlim`].
-    ///
-    /// # Differences from librosa
-    ///
-    /// As [`griffinlim`] (random initial phases use this crate's RNG).
+    /// As [`griffinlim`]. Random initial phases use this crate's RNG.
     ///
     /// # Examples
     ///
@@ -4534,7 +4418,7 @@ mod tests {
         assert!(phase_vocoder_at(d.view(), &[4.0]).is_err());
         assert!(phase_vocoder_at(d.view(), &[-0.1]).is_err());
         assert!(phase_vocoder_at(d.view(), &[]).is_err());
-        // A single frame is handled (librosa's interp1d cannot).
+        // A single frame is handled.
         let one = Array3::from_elem((1, 3, 1), Complex::new(0.0_f64, 2.0));
         let y = phase_vocoder(one.view(), 0.5).unwrap();
         assert_eq!(y.dim(), (1, 3, 2));
@@ -4604,7 +4488,7 @@ mod tests {
 
     #[test]
     fn preemphasis_state_matches_lfilter() {
-        // Values from scipy / librosa (see the module tests in the reference suite).
+        // Reference values (see also the module tests in the reference suite).
         let (y, zf) = preemphasis_with_state(&[1.0_f64, 3.0, 0.5], 0.97, None).unwrap();
         assert_eq!(y[0], 0.0);
         assert!((y[1] - 2.03).abs() < 1e-15);
@@ -4710,7 +4594,7 @@ mod tests {
 
     #[test]
     fn median_filter_matches_scipy_reflect() {
-        // scipy.ndimage.median_filter([5,1,2,3,4,9,0], size=k, mode="reflect").
+        // Median filter of [5,1,2,3,4,9,0] with size k and half-sample symmetric edges.
         let x = Array3::from_shape_vec((1, 1, 7), vec![5.0, 1.0, 2.0, 3.0, 4.0, 9.0, 0.0]).unwrap();
         let f = |k| {
             median_filter_axis(x.view(), 2, k)
@@ -5104,12 +4988,11 @@ mod tests {
             assert!(lsb <= bound, "i16 {name}: {lsb} LSB > {bound}");
         }
         // A chirp sweeps into bins whose STFT values are at the round-off level
-        // before it arrives, and the phase vocoder (librosa 1.0's algorithm)
-        // carries the phase of those bins forward. The vocoder operations
-        // therefore analyse the exact f64 samples with an f64 STFT and round it
-        // to f32 once (as librosa's float32 path does); an f32 STFT of the f32
-        // samples gave 139 LSB here. Measured: 1 LSB for time_stretch (rates 1.5
-        // and 0.75), pitch_shift (+2, -3) and harmonic. Bound: 1 LSB.
+        // before it arrives, and the phase vocoder carries the phase of those
+        // bins forward. The vocoder operations therefore analyse the exact f64
+        // samples with an f64 STFT and round it to f32 once; an f32 STFT of the
+        // f32 samples gave 139 LSB here. Measured: 1 LSB for time_stretch (rates
+        // 1.5 and 0.75), pitch_shift (+2, -3) and harmonic. Bound: 1 LSB.
         let chirp = AudioSamples::new_mono(
             Array1::from_shape_fn(22050, |n| {
                 let t = n as f64 / 22050.0;
