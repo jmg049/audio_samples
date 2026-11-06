@@ -18,7 +18,8 @@ cmd="${1:-build}"
 
 figures_out="$here/src/figures"
 figures_crate="$here/figures"
-bin_dir="$figures_crate/target/release"
+# Cargo puts the binaries under CARGO_TARGET_DIR when it is set.
+bin_dir="${CARGO_TARGET_DIR:-$figures_crate/target}/release"
 
 if [ "$cmd" = clean ]; then
     rm -rf "$figures_out" "$here/book"
