@@ -13,7 +13,6 @@
 //! [`ConvertTo`] conversions (clamp + asymmetric scale + round half away from
 //! zero for float → int, and the inverse asymmetric scaling for int → float,
 //! so int → float → int is lossless).
-#![allow(unused)]
 
 use std::num::NonZeroU32;
 
@@ -52,7 +51,7 @@ pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSample
     // Parity with the scalar `impl_float_to_int` (`traits.rs`): the scalar path
     // is `v = source.max(-1).min(1); scaled = v * (v < 0 ? 32768 : 32767);
     // trunc(v * (32767.5 - h) + h)` with `h = copysign(0.5, v)`. Here `h` is
-    // selected with `blend` on `v < 0` (identical except for v = -0.0, where
+    // selected with `select` on `v < 0` (identical except for v = -0.0, where
     // both paths truncate to 0), and `trunc_int` truncates toward zero like
     // `to_int_unchecked`. The result lies in [-32768, 32767], so the
     // `i32 -> i16` narrow is lossless.
@@ -65,7 +64,7 @@ pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSample
         let clamped = f32_vec.max(f32x8::splat(-1.0)).min(f32x8::splat(1.0));
         let half = clamped
             .simd_lt(zero)
-            .blend(f32x8::splat(-0.5), f32x8::splat(0.5));
+            .select(f32x8::splat(-0.5), f32x8::splat(0.5));
         let scaled = clamped * (f32x8::splat(32767.5) - half);
         let ints = (scaled + half).trunc_int().to_array();
         for (j, &v) in ints.iter().enumerate() {
@@ -104,12 +103,12 @@ pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSample
 
     let chunks = input.len() / 8;
 
-    // Genuine vector path: asymmetric scaling with a branchless blend.
+    // Genuine vector path: asymmetric scaling with a branchless select.
     //
     // Parity with the scalar `impl_int_to_float` (`traits.rs`):
     // `if v < 0 { (v as f32) / 32768.0 } else { (v as f32) / 32767.0 }`.
     // We compute both quotients per-lane (IEEE division is bit-identical to the
-    // scalar division) and select with the same `v < 0` predicate via `blend`,
+    // scalar division) and select with the same `v < 0` predicate via `select`,
     // so the result is bit-for-bit identical to scalar (verified across the full
     // input range, including negative / zero / i16::MIN / i16::MAX).
     let neg_div = f32x8::splat(-(i16::MIN as f32)); // 32768.0
@@ -131,7 +130,7 @@ pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSample
         let neg = f32_values / neg_div;
         let pos = f32_values / pos_div;
         let mask = f32_values.simd_lt(f32x8::splat(0.0));
-        let result = mask.blend(neg, pos).to_array();
+        let result = mask.select(neg, pos).to_array();
         output[start_idx..start_idx + 8].copy_from_slice(&result);
     }
 
@@ -182,9 +181,9 @@ pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSample
         let scaled = clamped * f32x8::splat(2_147_483_648.0);
         let half = clamped
             .simd_lt(zero)
-            .blend(f32x8::splat(-0.5), f32x8::splat(0.5));
+            .select(f32x8::splat(-0.5), f32x8::splat(0.5));
         let small = scaled.abs().simd_lt(f32x8::splat(8_388_608.0));
-        let rounded = small.blend(scaled + half, scaled);
+        let rounded = small.select(scaled + half, scaled);
         let ints = rounded.trunc_int().to_array();
         output[start_idx..start_idx + 8].copy_from_slice(&ints);
     }
@@ -220,8 +219,10 @@ where
 
     // Dispatch to optimized conversions for common types
     if TypeId::of::<T>() == TypeId::of::<f32>() && TypeId::of::<U>() == TypeId::of::<i16>() {
+        // SAFETY: `T` is `f32`, so the slice is reinterpreted as its own type.
         let input =
             unsafe { std::slice::from_raw_parts(input.as_ptr() as *const f32, input.len()) };
+        // SAFETY: `U` is `i16`; the exclusive borrow of `output` covers the new slice.
         let output = unsafe {
             std::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut i16, output.len())
         };
@@ -229,8 +230,10 @@ where
     }
 
     if TypeId::of::<T>() == TypeId::of::<i16>() && TypeId::of::<U>() == TypeId::of::<f32>() {
+        // SAFETY: `T` is `i16`, so the slice is reinterpreted as its own type.
         let input =
             unsafe { std::slice::from_raw_parts(input.as_ptr() as *const i16, input.len()) };
+        // SAFETY: `U` is `f32`; the exclusive borrow of `output` covers the new slice.
         let output = unsafe {
             std::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut f32, output.len())
         };
@@ -238,8 +241,10 @@ where
     }
 
     if TypeId::of::<T>() == TypeId::of::<f32>() && TypeId::of::<U>() == TypeId::of::<i32>() {
+        // SAFETY: `T` is `f32`, so the slice is reinterpreted as its own type.
         let input =
             unsafe { std::slice::from_raw_parts(input.as_ptr() as *const f32, input.len()) };
+        // SAFETY: `U` is `i32`; the exclusive borrow of `output` covers the new slice.
         let output = unsafe {
             std::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut i32, output.len())
         };
@@ -370,7 +375,8 @@ pub fn deinterleave_stereo<T: AudioSample>(
 
     #[cfg(feature = "simd")]
     {
-        Ok(deinterleave_stereo_simd(interleaved, output))
+        deinterleave_stereo_simd(interleaved, output);
+        Ok(())
     }
 
     #[cfg(not(feature = "simd"))]
@@ -538,7 +544,8 @@ pub fn interleave_stereo<T: AudioSample>(planar: &[T], output: &mut [T]) -> Audi
 
     #[cfg(feature = "simd")]
     {
-        Ok(interleave_stereo_simd(planar, output))
+        interleave_stereo_simd(planar, output);
+        Ok(())
     }
 
     #[cfg(not(feature = "simd"))]
@@ -763,8 +770,6 @@ pub fn interleave_multi_vec<T: AudioSample>(
 
 #[cfg(test)]
 mod tests {
-    use non_empty_iter::TryIntoNonEmptyIterator;
-
     use super::*;
 
     #[test]
@@ -896,7 +901,7 @@ mod tests {
         let interleaved = non_empty_vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut output = non_empty_vec![0.0f32; crate::nzu!(6)];
 
-        deinterleave_multi(&interleaved, &mut output, NonZeroU32::new(3).unwrap());
+        deinterleave_multi(&interleaved, &mut output, NonZeroU32::new(3).unwrap()).unwrap();
 
         // Planar: [ch0_f0, ch0_f1, ch1_f0, ch1_f1, ch2_f0, ch2_f1]
         assert_eq!(output[0], 1.0); // ch0_f0
@@ -1092,15 +1097,24 @@ mod simd_parity_tests {
     use super::*;
 
     /// Inline scalar reference for f32 -> i16 (mirrors `impl_float_to_int`).
+    #[allow(
+        clippy::manual_clamp,
+        reason = "max/min maps NaN to -1.0 like the scalar conversion; clamp keeps NaN"
+    )]
     fn scalar_f32_to_i16(source: f32) -> i16 {
         let v = source.max(-1.0).min(1.0);
         let h = 0.5f32.copysign(v);
         let rounded = v * (32767.5 - h) + h;
+        // SAFETY: `rounded` is finite and within [-32768.5, 32767.5], inside `i32`.
         let as_i32: i32 = unsafe { rounded.to_int_unchecked() };
         as_i32 as i16
     }
 
     /// Inline scalar reference for f32 -> i32 (mirrors `ConvertFrom<f32> for i32`).
+    #[allow(
+        clippy::manual_clamp,
+        reason = "max/min maps NaN to -1.0 like the scalar conversion; clamp keeps NaN"
+    )]
     fn scalar_f32_to_i32(source: f32) -> i32 {
         let v = source.max(-1.0).min(1.0);
         let scaled = v * 2_147_483_648.0f32;
@@ -1196,7 +1210,7 @@ mod simd_parity_tests {
         let mut simd_out = vec![0.0f32; input.len()];
         convert_i16_to_f32_simd(&input, &mut simd_out).unwrap();
         for (i, &x) in input.iter().enumerate() {
-            // Bit-for-bit (not approx): the vector blend must match the scalar
+            // Bit-for-bit (not approx): the vector select must match the scalar
             // branch exactly.
             assert_eq!(
                 simd_out[i].to_bits(),

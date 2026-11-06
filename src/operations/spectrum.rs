@@ -564,6 +564,7 @@ pub(crate) fn padded_frame_into<F: AudioFloat>(
 ///
 /// `n_frames` frames are returned; every frame must lie within the padded
 /// signal (`(n_frames - 1) * hop + frame_length <= x.len() + 2 * pad`).
+#[cfg(any(feature = "feature-extraction", feature = "effects", test))]
 pub(crate) fn frame_square_sums<F: AudioFloat>(
     x: &[F],
     frame_length: usize,

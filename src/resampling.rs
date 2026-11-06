@@ -1298,6 +1298,7 @@ fn resample_direct<T: StandardSample>(
 ///
 /// # Errors
 /// See [`resample`]; also if a rate is zero or `rows` is empty.
+#[cfg(feature = "transforms")]
 pub(crate) fn resample_float_rows<F: AudioFloat>(
     rows: ndarray::ArrayView2<'_, F>,
     in_sr: u32,
@@ -1311,6 +1312,7 @@ pub(crate) fn resample_float_rows<F: AudioFloat>(
     }
 }
 
+#[cfg(feature = "transforms")]
 fn resample_rows_in<T: AudioFloat, F: engine::RsFloat>(
     rows: ndarray::ArrayView2<'_, T>,
     in_sr: u32,
