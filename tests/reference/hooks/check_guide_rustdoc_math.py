@@ -22,6 +22,7 @@ first. Exits 1 on any mismatch.
 from __future__ import annotations
 
 import html.parser
+import os
 import re
 import subprocess
 import sys
@@ -125,7 +126,8 @@ class TopDoc(html.parser.HTMLParser):
 def chapter_pages(root: Path) -> list[tuple[Path, Path]]:
     """(source .md, rustdoc page) pairs, read from src/guide.rs."""
     guide_rs = (root / "src" / "guide.rs").read_text(encoding="utf-8")
-    doc = root / "target" / "doc" / "audio_samples" / "guide"
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or root / "target")
+    doc = (root / target) / "doc" / "audio_samples" / "guide"
     pairs = [(root / "documentation/guide/README.md", doc / "index.html")]
     for md, module in re.findall(r'"/guide/([^"]+\.md)"\)\)\]\s*pub mod (\w+)', guide_rs):
         pairs.append((root / "documentation/guide" / md, doc / module / "index.html"))
