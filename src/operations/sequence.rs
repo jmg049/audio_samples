@@ -3858,7 +3858,8 @@ where
 /// # Arguments
 ///
 /// - `data` - Array of any dimension `>= 1`, frames on the last axis.
-/// - `slices` - One slice per output column, in any order, overlapping or not. As
+/// - `slices` - One slice per output column (a slice of [`Slice`]s with `.iter().copied()`,
+///   or any iterator that can be cloned), in any order, overlapping or not. As
 ///   in NumPy, bounds out of range are clipped; a negative `start` or `end` counts
 ///   from the end. A negative step reverses the `start..end` range, as
 ///   [`ndarray::Slice`] defines it.
@@ -3884,23 +3885,26 @@ where
 ///
 /// let chroma = array![[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]];
 /// let slices = [Slice::new(0, Some(2), 1), Slice::new(1, None, 2)];
-/// let synced = sync_slices(chroma.view(), &slices, SyncAggregate::Mean).unwrap();
+/// let synced = sync_slices(chroma.view(), slices.iter().copied(), SyncAggregate::Mean).unwrap();
 /// assert_eq!(synced, array![[1.5, 4.0]]);
 /// ```
-pub fn sync_slices<F, D>(
+pub fn sync_slices<F, D, S>(
     data: ArrayView<F, D>,
-    slices: &[Slice],
+    slices: S,
     aggregate: SyncAggregate,
 ) -> AudioSampleResult<Array<F, D>>
 where
     F: AudioFloat,
     D: Dimension + RemoveAxis,
+    S: IntoIterator<Item = Slice>,
+    S::IntoIter: ExactSizeIterator + Clone,
 {
+    let slices = slices.into_iter();
     if matches!(aggregate, SyncAggregate::Max | SyncAggregate::Min) {
         let n = data.shape().last().copied().unwrap_or(0);
         let empty = slices
-            .iter()
-            .any(|&s| SliceBins::new(s, n).is_some_and(|b| b.count == 0));
+            .clone()
+            .any(|s| SliceBins::new(s, n).is_some_and(|b| b.count == 0));
         if empty {
             return err("slices", "an empty slice has no maximum or minimum");
         }
@@ -3924,19 +3928,22 @@ where
 /// use ndarray::{Slice, array};
 ///
 /// let x = array![[1.0, -2.0, 3.0, -4.0]];
-/// let first = sync_slices_with(x.view(), &[Slice::new(0, None, -1)], |s| s[0]).unwrap();
+/// let first = sync_slices_with(x.view(), [Slice::new(0, None, -1)], |s| s[0]).unwrap();
 /// assert_eq!(first, array![[-4.0]]);
 /// ```
-pub fn sync_slices_with<F, D, A>(
+pub fn sync_slices_with<F, D, S, A>(
     data: ArrayView<F, D>,
-    slices: &[Slice],
+    slices: S,
     mut aggregate: A,
 ) -> AudioSampleResult<Array<F, D>>
 where
     F: AudioFloat,
     D: Dimension + RemoveAxis,
+    S: IntoIterator<Item = Slice>,
+    S::IntoIter: ExactSizeIterator,
     A: FnMut(ArrayView1<F>) -> F,
 {
+    let slices = slices.into_iter();
     if data.ndim() == 0 {
         return err("data", "must have at least one dimension (frames last)");
     }
@@ -3945,7 +3952,7 @@ where
     let mut shape = data.raw_dim();
     shape[axis.index()] = slices.len();
     let mut out = Array::<F, D>::zeros(shape);
-    for (s, &slice) in slices.iter().enumerate() {
+    for (s, slice) in slices.enumerate() {
         let Some(bins) = SliceBins::new(slice, n) else {
             return err("slices", "a slice step must not be zero");
         };

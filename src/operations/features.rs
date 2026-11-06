@@ -1998,13 +1998,14 @@ pub fn poly_features_from_spectrogram<F: AudioFloat>(
 ///
 /// * `s` - `(channels, bins, frames)` spectrogram (any finite values) of element type
 ///   `F` (`f32` or `f64`).
-/// * `freq` - Frequencies in Hz, `(channels, bins, frames)` or `(1, bins, frames)`.
+/// * `freq` - Frequencies in Hz, `(channels, bins, frames)` or `(1, bins, frames)`, of
+///   either float type.
 /// * `config` - Only `order` is used.
 ///
 /// # Returns
 ///
 /// A `(channels, order + 1, frames)` array of coefficients of element type `F`, highest
-/// degree first.
+/// degree first. Each fit is computed in `f64` and rounded to `F`.
 ///
 /// # Errors
 ///
@@ -2025,9 +2026,9 @@ pub fn poly_features_from_spectrogram<F: AudioFloat>(
 /// assert!((p[[0, 0, 0]] - 2.0).abs() < 1e-12); // frame 0: slope 2
 /// assert!((p[[0, 0, 1]] - 0.1).abs() < 1e-12); // frame 1: slope 0.1
 /// ```
-pub fn poly_features_from_spectrogram_with_freqs<F: AudioFloat>(
+pub fn poly_features_from_spectrogram_with_freqs<F: AudioFloat, G: AudioFloat>(
     s: ArrayView3<'_, F>,
-    freq: ArrayView3<'_, F>,
+    freq: ArrayView3<'_, G>,
     config: &PolyFeaturesConfig,
 ) -> AudioSampleResult<Array3<F>> {
     let (n_ch, n_bins, n_frames) = s.dim();
@@ -2037,7 +2038,15 @@ pub fn poly_features_from_spectrogram_with_freqs<F: AudioFloat>(
             "the spectrogram must be non-empty",
         ));
     }
-    check_freq_matrix("poly_features", &freq, &s)?;
+    if freq.dim() != (n_ch, n_bins, n_frames) && freq.dim() != (1, n_bins, n_frames) {
+        return Err(config_err(
+            "poly_features",
+            format!(
+                "freq has shape {:?}, expected ({n_ch}, {n_bins}, {n_frames}) or (1, {n_bins}, {n_frames})",
+                freq.dim()
+            ),
+        ));
+    }
     if !all_finite(&s) || !all_finite(&freq) {
         return Err(param_err(
             "spectrogram",
@@ -2046,32 +2055,132 @@ pub fn poly_features_from_spectrogram_with_freqs<F: AudioFloat>(
     }
     let m = poly_terms(config.order, n_bins)?;
     let mut out = Array3::<F>::zeros((n_ch, m, n_frames));
-    let mut y = vec![F::zero(); n_bins];
-    let mut x = vec![0.0; n_bins];
+    let mut work = PolyWork::new(n_bins, m);
     let shared = freq.dim().0 == 1;
-    let mut failure = Ok(());
     for c in 0..n_ch {
         let fc = freq.index_axis(Axis(0), if shared { 0 } else { c });
-        for_each_col_tile(s.index_axis(Axis(0), c), |t0, tile| {
-            for tt in 0..tile.ncols() {
-                if failure.is_err() {
-                    return;
-                }
-                let t = t0 + tt;
-                for (xi, f) in x.iter_mut().zip(fc.column(t)) {
-                    *xi = f.as_f64();
-                }
-                match PolyFit::<F>::new(&x, m) {
-                    Ok(fit) => {
-                        y.copy_from_slice(col(&tile, tt));
-                        fit.solve(&mut y, &mut out, c, t);
-                    }
-                    Err(e) => failure = Err(e),
+        let sc = s.index_axis(Axis(0), c);
+        for t in 0..n_frames {
+            let coef = work.fit(
+                fc.column(t).iter().map(|f| f.as_f64()),
+                sc.column(t).iter().map(|v| v.as_f64()),
+            )?;
+            for (j, &v) in coef.iter().enumerate() {
+                out[[c, j, t]] = F::of(v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The least-squares polynomial fit of one frame, with the operations of [`PolyFit`]
+/// in `f64` throughout and buffers kept from frame to frame.
+struct PolyWork {
+    n: usize,
+    m: usize,
+    /// The scaled Vandermonde matrix by columns, then R in its upper triangle.
+    a: Vec<f64>,
+    /// The Householder reflector of column `j` at `v[j * n..]` (`n - j` values).
+    v: Vec<f64>,
+    betas: Vec<f64>,
+    scale: Vec<f64>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    coef: Vec<f64>,
+}
+
+impl PolyWork {
+    fn new(n: usize, m: usize) -> Self {
+        Self {
+            n,
+            m,
+            a: vec![0.0; n * m],
+            v: vec![0.0; n * m],
+            betas: vec![0.0; m],
+            scale: vec![0.0; m],
+            x: vec![0.0; n],
+            y: vec![0.0; n],
+            coef: vec![0.0; m],
+        }
+    }
+
+    /// The coefficients, highest power first, of the fit of `y` at `x`.
+    fn fit(
+        &mut self,
+        x: impl Iterator<Item = f64>,
+        y: impl Iterator<Item = f64>,
+    ) -> AudioSampleResult<&[f64]> {
+        let (n, m) = (self.n, self.m);
+        for (d, v) in self.x.iter_mut().zip(x) {
+            *d = v;
+        }
+        for (d, v) in self.y.iter_mut().zip(y) {
+            *d = v;
+        }
+        let a = &mut self.a;
+        for (i, &xi) in self.x.iter().enumerate() {
+            let mut v = 1.0;
+            for j in (0..m).rev() {
+                a[j * n + i] = v;
+                v *= xi;
+            }
+        }
+        for j in 0..m {
+            let col = &mut a[j * n..(j + 1) * n];
+            let sc = col.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if sc == 0.0 {
+                return Err(rank_deficient());
+            }
+            col.iter_mut().for_each(|v| *v /= sc);
+            self.scale[j] = sc;
+        }
+        for j in 0..m {
+            let norm = a[j * n + j..(j + 1) * n]
+                .iter()
+                .map(|v| v * v)
+                .sum::<f64>()
+                .sqrt();
+            let alpha = if a[j * n + j] > 0.0 { -norm } else { norm };
+            let v = &mut self.v[j * n..j * n + (n - j)];
+            v.copy_from_slice(&a[j * n + j..(j + 1) * n]);
+            v[0] -= alpha;
+            let vtv: f64 = v.iter().map(|x| x * x).sum();
+            let beta = if vtv > 0.0 { 2.0 / vtv } else { 0.0 };
+            for col in j..m {
+                let column = &mut a[col * n + j..(col + 1) * n];
+                let dot: f64 = v.iter().zip(column.iter()).map(|(p, q)| p * q).sum();
+                for (q, &p) in column.iter_mut().zip(v.iter()) {
+                    *q -= beta * dot * p;
                 }
             }
-        });
+            self.betas[j] = beta;
+        }
+        // Rank check with numpy.polyfit's default rcond = len(x) * eps.
+        let rmax = (0..m).map(|j| a[j * n + j].abs()).fold(0.0, f64::max);
+        let rcond = n as f64 * f64::EPSILON;
+        if (0..m).any(|j| a[j * n + j].abs() <= rcond * rmax) {
+            return Err(rank_deficient());
+        }
+        for j in 0..m {
+            let v = &self.v[j * n..j * n + (n - j)];
+            let dot: f64 = v.iter().zip(&self.y[j..]).map(|(p, q)| p * q).sum();
+            for (yi, &vi) in self.y[j..].iter_mut().zip(v) {
+                *yi -= self.betas[j] * dot * vi;
+            }
+        }
+        // Back substitution R x = (Q^T y)[..m].
+        for j in (0..m).rev() {
+            let mut acc = self.y[j];
+            for l in j + 1..m {
+                acc -= a[l * n + j] * self.coef[l];
+            }
+            self.coef[j] = acc / a[j * n + j];
+        }
+        for (c, &sc) in self.coef.iter_mut().zip(&self.scale) {
+            *c /= sc;
+        }
+        Ok(&self.coef)
     }
-    failure.map(|()| out)
 }
 
 /// The number of polynomial coefficients for `order`, at most `n_bins`.

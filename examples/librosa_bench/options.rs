@@ -155,7 +155,9 @@ pub fn audio<'a, F: AudioFloat>(case: &str, x: &'a AudioCtx<F>) -> Option<Thunk<
                 .step_by(21)
                 .map(|i| Slice::new(i, Some(i + 42), 2))
                 .collect();
-            thunk(move || sync_slices(m.view(), &slices, SyncAggregate::Mean).unwrap())
+            thunk(move || {
+                sync_slices(m.view(), slices.iter().copied(), SyncAggregate::Mean).unwrap()
+            })
         }
         "nn_filter_sparse" => {
             // The affinity recurrence as compressed sparse columns.

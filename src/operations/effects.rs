@@ -1145,8 +1145,37 @@ fn silence_frame_rms<F: AudioFloat>(
     let mut rms = Array2::<F>::zeros((n_channels, n_frames));
     let fl_f = F::of_usize(fl);
     let signal = signal.as_standard_layout();
+    // When frames and padding are whole hops, a frame's sum is the sum of the sums of
+    // its hop-long blocks, each square summed once.
+    let blocks = fl.is_multiple_of(hop) && pad.is_multiple_of(hop);
+    let mut block_sums = Vec::new();
     for (c, row) in signal.outer_iter().enumerate() {
         let x = row.to_slice().expect("rows of a standard-layout array");
+        if blocks {
+            let (lead, per_frame) = (pad / hop, fl / hop);
+            block_sums.clear();
+            block_sums.resize(lead, F::zero());
+            block_sums.extend(x.chunks(hop).map(|b| {
+                let mut acc = [F::zero(); 4];
+                let (quads, rest) = b.as_chunks::<4>();
+                for q in quads {
+                    for (a, &v) in acc.iter_mut().zip(q) {
+                        *a += v * v;
+                    }
+                }
+                let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+                for &v in rest {
+                    s += v * v;
+                }
+                s
+            }));
+            block_sums.resize(n_frames + per_frame, F::zero());
+            for (t, r) in rms.row_mut(c).iter_mut().enumerate() {
+                let sum: F = block_sums[t..t + per_frame].iter().copied().sum();
+                *r = (sum / fl_f).sqrt();
+            }
+            continue;
+        }
         // Zero padding: the padded zeros add exact zeros to the sums.
         let sums = frame_square_sums(x, fl, hop, pad, StftPadMode::Constant, n_frames);
         for (r, &sum) in rms.row_mut(c).iter_mut().zip(&sums) {
@@ -2467,17 +2496,18 @@ pub fn nn_filter<F: AudioFloat>(
 /// The index type is `usize` for arrays of this crate; SciPy's are `i32` or `i64`, and
 /// can be used without a copy.
 #[derive(Debug, Clone, Copy)]
-pub struct SparseRecurrence<'a, F, I = usize> {
+pub struct SparseRecurrence<'a, V, I = usize> {
     /// `n_frames + 1` offsets into `indices`, not decreasing.
     pub indptr: &'a [I],
     /// The neighbours of all frames.
     pub indices: &'a [I],
-    /// The recurrence value of each neighbour. [`NnAggregate::WeightedAverage`] needs
-    /// them; the other aggregates do not read them.
-    pub values: Option<&'a [F]>,
+    /// The recurrence value of each neighbour, of either float type (it need not be
+    /// the type of the data). [`NnAggregate::WeightedAverage`] needs them; the other
+    /// aggregates do not read them.
+    pub values: Option<&'a [V]>,
 }
 
-impl<'a, F, I: Copy + num_traits::ToPrimitive> SparseRecurrence<'a, F, I> {
+impl<'a, V, I: Copy + num_traits::ToPrimitive> SparseRecurrence<'a, V, I> {
     /// Checks the structure against `n_frames`.
     fn check(&self, n_frames: usize, weighted: bool) -> AudioSampleResult<()> {
         let at = |i: &I| i.to_usize();
@@ -2552,13 +2582,14 @@ impl<'a, F, I: Copy + num_traits::ToPrimitive> SparseRecurrence<'a, F, I> {
 /// let out = nn_filter_sparse(data.view(), &rec, NnAggregate::Mean).unwrap();
 /// assert_eq!(out, array![[2.5, 1.0, 3.0]]);
 /// ```
-pub fn nn_filter_sparse<F, I>(
+pub fn nn_filter_sparse<F, V, I>(
     data: ArrayView2<'_, F>,
-    rec: &SparseRecurrence<'_, F, I>,
+    rec: &SparseRecurrence<'_, V, I>,
     aggregate: NnAggregate,
 ) -> AudioSampleResult<Array2<F>>
 where
     F: AudioFloat,
+    V: AudioFloat,
     I: Copy + num_traits::ToPrimitive,
 {
     let weighted = aggregate == NnAggregate::WeightedAverage;
@@ -2573,9 +2604,11 @@ where
             .targets
             .extend(rec.indices[r.clone()].iter().filter_map(|j| j.to_usize()));
         if weighted {
-            scratch
-                .weights
-                .extend_from_slice(&rec.values.expect("checked")[r]);
+            scratch.weights.extend(
+                rec.values.expect("checked")[r]
+                    .iter()
+                    .map(|&w| F::of(w.as_f64())),
+            );
         }
         nn_filter_frame(data, &mut out, i, aggregate, &mut scratch)?;
     }
@@ -2719,9 +2752,9 @@ where
 /// .unwrap();
 /// assert_eq!(out, array![[2.0, 1.0, 3.0]]);
 /// ```
-pub fn nn_filter_sparse_with<F, I, A>(
+pub fn nn_filter_sparse_with<F, V, I, A>(
     data: ArrayView2<'_, F>,
-    rec: &SparseRecurrence<'_, F, I>,
+    rec: &SparseRecurrence<'_, V, I>,
     mut aggregate: A,
 ) -> AudioSampleResult<Array2<F>>
 where

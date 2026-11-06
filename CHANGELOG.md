@@ -15,6 +15,9 @@ All notable changes to this project are documented here.
   `nn_filter_sparse_with` and `nn_filter_recurrence_with` any aggregate. `effects::trim_db_with`,
   `split_db_with` and `nonsilent_frames_with` take closures for the reference level and the
   channel combination. Each is checked against librosa 1.0.0 golden fixtures.
+- **`trim_db`, `split_db` and `nonsilent_frames` sum each frame from hop-long blocks** when the
+  frame length and padding are whole hops (the defaults), so every square is summed once. A frame
+  whose level lies within round-off of the threshold can be classified differently than before.
 - **Minimum supported Rust version is now 1.95**, the version the `non-empty-slice`,
   `non-empty-iter` and `non-zero-size` dependencies require.
 - **Everything else librosa 1.0 computes.** New modules: `operations::linalg` (feature `linalg`:

@@ -222,20 +222,20 @@ fn sync_with_slices() {
         ("sync_median", SyncAggregate::Median),
         ("sync_max", SyncAggregate::Max),
     ] {
-        let out = sync_slices(s.view(), &slices, agg).unwrap();
+        let out = sync_slices(s.view(), slices.iter().copied(), agg).unwrap();
         close(name, out.view(), arr2(&f[name]).view(), 1e-12);
     }
     // Out-of-range bounds are clipped; nothing is left of this one.
     let empty = [Slice::new(1_000_000, None, 1)];
-    assert!(sync_slices(s.view(), &empty, SyncAggregate::Max).is_err());
-    let nan = sync_slices(s.view(), &empty, SyncAggregate::Median).unwrap();
+    assert!(sync_slices(s.view(), empty, SyncAggregate::Max).is_err());
+    let nan = sync_slices(s.view(), empty, SyncAggregate::Median).unwrap();
     assert!(nan[[0, 0]].is_nan());
-    let zero = sync_slices(s.view(), &empty, SyncAggregate::Sum).unwrap();
+    let zero = sync_slices(s.view(), empty, SyncAggregate::Sum).unwrap();
     assert_eq!(zero[[0, 0]], 0.0);
     assert!(
         sync_slices(
             s.view(),
-            &[Slice {
+            [Slice {
                 start: 0,
                 end: None,
                 step: 0
