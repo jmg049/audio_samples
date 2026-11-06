@@ -292,13 +292,32 @@ impl<F: RsFloat> Engine<F> {
         from_f: &impl Fn(F) -> T,
     ) {
         #[cfg(target_arch = "x86_64")]
-        if self.avx2_fma {
-            // SAFETY: `avx2_fma` is only true when the CPU supports AVX2 and FMA.
-            unsafe { run_avx2_fma(self, x, out, to_f, from_f) };
-            return;
+        {
+            if self.avx2_fma {
+                // SAFETY: `avx2_fma` is only true when the CPU supports AVX2 and FMA.
+                unsafe { run_avx2_fma(self, x, out, to_f, from_f) };
+                return;
+            }
+            // x86-64 CPUs without AVX2 run one portable body per float type, on a
+            // converted copy of the channel (the same values as converting on the fly).
+            let xf: Vec<F> = x.iter().map(|&s| to_f(s)).collect();
+            let mut of = vec![MaybeUninit::<F>::uninit(); out.len()];
+            run_portable(self, &xf, &mut of);
+            for (o, v) in out.iter_mut().zip(of) {
+                // SAFETY: `run_portable` wrote every element.
+                o.write(from_f(unsafe { v.assume_init() }));
+            }
         }
+        #[cfg(not(target_arch = "x86_64"))]
         run_impl::<T, F, false>(self, x, out, to_f, from_f);
     }
+}
+
+/// [`run_impl`] without AVX2 on float input and output, once per float type.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+fn run_portable<F: RsFloat>(e: &Engine<F>, x: &[F], out: &mut [MaybeUninit<F>]) {
+    run_impl::<F, F, false>(e, x, out, &|v| v, &|v| v);
 }
 
 /// [`run_impl`] compiled for AVX2 + FMA.
@@ -1525,5 +1544,43 @@ mod simd {
             i += 4;
         }
         super::cmul_portable::<f32, ACC>(&mut dst[i..n], &a[i..n], &b[i..n]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operations::types::ResamplingQuality;
+
+    /// The portable body (CPUs without AVX2) gives the AVX2 result up to rounding,
+    /// for integer and float input.
+    #[test]
+    fn portable_matches_avx2() {
+        if !super::super::has_avx2_fma_cached() {
+            return;
+        }
+        let plan = super::super::plan(22050, 8000, ResamplingQuality::High).unwrap();
+        let fast = Engine::<f32>::new(&plan).unwrap();
+        let mut slow = Engine::<f32>::new(&plan).unwrap();
+        slow.avx2_fma = false;
+        let x: Vec<i16> = (0..5000)
+            .map(|i| ((f64::from(i) * 0.07).sin() * 20000.0) as i16)
+            .collect();
+        let n = 5000 * 8000 / 22050;
+        let to_f = |s: i16| f32::from(s) / 32768.0;
+        let from_f = |v: f32| (v * 32768.0).round() as i16;
+        let run = |e: &Engine<f32>| {
+            let mut out = vec![MaybeUninit::<i16>::uninit(); n];
+            e.run(&x, &mut out, &to_f, &from_f);
+            // SAFETY: `run` writes every element.
+            out.into_iter()
+                .map(|v| i32::from(unsafe { v.assume_init() }))
+                .collect::<Vec<_>>()
+        };
+        let (a, b) = (run(&fast), run(&slow));
+        assert!(a.iter().any(|v| v.abs() > 10000));
+        for (u, v) in a.iter().zip(&b) {
+            assert!((u - v).abs() <= 1, "{u} vs {v}");
+        }
     }
 }
