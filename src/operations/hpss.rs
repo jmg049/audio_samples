@@ -12,11 +12,11 @@
 //! 4. Generate binary or soft masks based on the filtered spectrograms
 //! 5. Apply masks to the original complex STFT and reconstruct time-domain signals
 //!
-//! For librosa-compatible separation (`librosa.effects.hpss` / `decompose.hpss`:
-//! kernel 31, power-2 soft masks, margins, SciPy `reflect` median boundaries,
-//! multichannel, output trimmed to the input length) see
-//! `operations::effects` (feature `effects`): `AudioEffects::harmonic_percussive`,
-//! `hpss_spectrogram` and `softmask`. This module keeps its own conventions.
+//! For separation with kernel 31, power-2 soft masks, margins, `reflect` median
+//! boundaries (d c b a | a b c d), multichannel input and output trimmed to the input
+//! length, see `operations::effects` (feature `effects`):
+//! `AudioEffects::harmonic_percussive`, `hpss_spectrogram` and `softmask`. This module
+//! keeps its own conventions.
 //!
 //! ## Definitions
 //!
@@ -33,10 +33,7 @@
 //! Median-filter edges are padded by mirror reflection that excludes the edge sample
 //! (d c b | a b c d …). An even kernel takes the mean of the two middle values.
 //!
-//! Note: librosa's `decompose.hpss` differs in three ways: its soft mask uses powers
-//! (H²/(H² + P²), Fitzgerald's Wiener-style mask), its median filter
-//! (`scipy.ndimage.median_filter`) uses `reflect` edges (d c b a | a b c d), and its
-//! default STFT window is the periodic Hann rather than the symmetric Hann used here.
+//! The default STFT window here is the symmetric Hann.
 //!
 //! ## Example
 //!

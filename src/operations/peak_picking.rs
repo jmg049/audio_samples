@@ -343,7 +343,7 @@ pub fn apply_pre_emphasis(
 /// `i − ⌊L/2⌋ ..= i + ⌊L/2⌋` (L = `filter_length`), truncated at the signal
 /// edges (no padding or edge replication). Near the edges the truncated window
 /// may have an even number of elements; then the upper of the two middle
-/// values is used (numpy would average them). A `filter_length` of `1`
+/// values is used, not their mean. A `filter_length` of `1`
 /// returns the signal unchanged.
 ///
 /// # Arguments

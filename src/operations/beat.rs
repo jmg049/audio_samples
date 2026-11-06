@@ -242,7 +242,7 @@ where
     ///    maps into `[MIN_BPM, MAX_BPM] = [40, 240]`.
     /// 4. Weight each lag's autocorrelation by a log-normal tempo prior centred
     ///    on `PRIOR_BPM = 120` with a standard deviation of one octave (in
-    ///    log2-BPM space, librosa-style). A periodic envelope correlates almost
+    ///    log2-BPM space). A periodic envelope correlates almost
     ///    as strongly at twice/half the true period; the prior only biases the
     ///    choice toward tempi near 120 BPM and cannot guarantee the right
     ///    octave: ×2, ×½ (and ×⅓) errors remain possible, e.g. for click
@@ -255,7 +255,7 @@ where
     fn estimate_tempo(&self, config: &BeatTrackingConfig) -> AudioSampleResult<f64> {
         const MIN_BPM: f64 = 40.0;
         const MAX_BPM: f64 = 240.0;
-        // Log-normal tempo prior (librosa default): centre and spread in log2-BPM.
+        // Log-normal tempo prior: centre and spread in log2-BPM.
         const PRIOR_BPM: f64 = 120.0;
         const PRIOR_STD_OCTAVES: f64 = 1.0;
 

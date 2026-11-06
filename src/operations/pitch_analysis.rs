@@ -68,36 +68,30 @@
 //!    τ̂ = τ + ½·(d′(τ−1) − d′(τ+1)) / (d′(τ−1) − 2·d′(τ) + d′(τ+1))
 //!    ```
 //!
-//!    giving a fractional period; f₀ = f_s/τ̂ Hz. As in librosa, there is no
-//!    shift when τ is at either end of [τ_min, τ_max] or when the vertex lies
-//!    more than one lag away from τ.
+//!    giving a fractional period; f₀ = f_s/τ̂ Hz. There is no shift when τ is at either
+//!    end of [τ_min, τ_max] or when the vertex lies more than one lag away from τ.
 //!
 //! Departures from the paper: (a) the paper's step 5 interpolates the **raw**
-//! difference function d(τ) around the selected lag (interpolating d′ is
-//! slightly biased), whereas this code fits the parabola to d′, as librosa
-//! does; (b) the paper's step 6 ("best local estimate") is not implemented, and
-//! when no lag dips below the threshold the paper takes the global minimum of
-//! d′ rather than declaring the frame unvoiced; (c) the paper (and librosa)
-//! sum d(τ) over a fixed integration window W starting at the beginning of the
-//! frame, whereas this code sums over all N − τ overlapping pairs. A fixed
-//! window measures the pitch of the frame's early part, which biases the
-//! estimate when the pitch moves within the frame (about 9 cents on a
-//! 1.5 octave/s glide with 2048-sample frames at 22.05 kHz); the full overlap
-//! keeps the analysed span centred on the frame.
+//! difference function d(τ) around the selected lag (interpolating d′ is slightly
+//! biased), whereas this code fits the parabola to d′; (b) the paper's step 6 ("best
+//! local estimate") is not implemented, and when no lag dips below the threshold the
+//! paper takes the global minimum of d′ rather than declaring the frame unvoiced; (c)
+//! the paper sums d(τ) over a fixed integration window W starting at the beginning of
+//! the frame, whereas this code sums over all N − τ overlapping pairs. A fixed window
+//! measures the pitch of the frame's early part, which biases the estimate when the
+//! pitch moves within the frame (about 9 cents on a 1.5 octave/s glide with 2048-sample
+//! frames at 22.05 kHz); the full overlap keeps the analysed span centred on the frame.
 //!
-//! Note: unlike `librosa.yin`, which always works frame by frame
-//! (W = `frame_length`/2) and falls back to the global minimum of d′ when
-//! nothing crosses the threshold, [`AudioPitchAnalysis::detect_pitch_yin`]
-//! analyses the whole signal as one frame (all N − τ overlapping pairs) and returns
-//! `None` for unvoiced input. Use [`AudioPitchAnalysis::track_pitch`] for a
-//! framewise contour.
+//! [`AudioPitchAnalysis::detect_pitch_yin`] analyses the whole signal as one frame (all
+//! N − τ overlapping pairs) and returns `None` for unvoiced input. Use
+//! [`AudioPitchAnalysis::track_pitch`] for a framewise contour.
 //!
 //! The harmonic analysis, HNR and key estimation methods use the
 //! `spectrograms` crate for their FFTs. All methods operate on mono signals
 //! only.
 //!
-//! For librosa-compatible frame-wise YIN / pYIN (centred frames, multichannel,
-//! voicing probabilities) see [`crate::operations::pitch_tracking`].
+//! For frame-wise YIN / pYIN with centred frames, multichannel input and voicing
+//! probabilities, see [`crate::operations::pitch_tracking`].
 //!
 //! # Example
 //!
@@ -1154,16 +1148,11 @@ fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
 /// [`AudioPitchAnalysis::track_pitch`] with [`PitchDetectionMethod::Yin`].
 ///
 /// Reference: A. de Cheveigné and H. Kawahara, "YIN, a fundamental frequency
-/// estimator for speech and music", JASA 111(4), 2002 (steps 2 to 5), and
-/// `librosa.yin`.
+/// estimator for speech and music", JASA 111(4), 2002 (steps 2 to 5).
 ///
-/// # Differences from librosa
-///
-/// - The difference function sums the `n - τ` overlapping products of the
-///   whole slice (the paper's eq. 6); `librosa.yin` uses a zero-padded sum over
-///   a fixed frame. The two differ slightly in the tail of the frame.
-/// - When no lag falls below `threshold` this returns `None`; `librosa.yin`
-///   falls back to the global minimum of the CMND.
+/// The difference function sums the `n - τ` overlapping products of the whole
+/// slice (the paper's eq. 6). When no lag falls below `threshold` this returns
+/// `None`.
 ///
 /// # Arguments
 ///
@@ -1258,8 +1247,8 @@ pub fn yin_pitch_detection(
         tau += 1;
     }
 
-    // Step 4: parabolic interpolation of the trough (librosa's rule: no shift at the
-    // ends of the search range, and none when the vertex lies more than one lag away).
+    // Step 4: parabolic interpolation of the trough (no shift at the ends of the
+    // search range, and none when the vertex lies more than one lag away).
     let shift = if tau > min_tau && tau < max_tau {
         let (prev, mid, next) = (cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]);
         let a = next + prev - 2.0 * mid;
@@ -1468,9 +1457,8 @@ mod tests {
     }
 
     /// End-to-end: `track_pitch` with YIN on an exponential 110 -> 880 Hz glide
-    /// (3 harmonics). Before the fixes the frame errors were median 8.6 / max 32
-    /// cents at 22.05 kHz and 17 / 72 cents at 44.1 kHz (full frames); librosa.yin
-    /// gives 3.2 / 8.1 and 1.8 / 7.4 on the same glide.
+    /// (3 harmonics). The median and maximum frame errors must stay within 4 / 8 cents
+    /// at 22.05 kHz and 2 / 5 cents at 44.1 kHz.
     #[test]
     fn yin_track_pitch_glide_accuracy() {
         for (sr, max_median, max_max) in [(22_050u32, 4.0, 8.0), (44_100, 2.0, 5.0)] {

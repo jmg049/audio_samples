@@ -1426,7 +1426,7 @@ mod cqt_dedup_tests {
     use crate::sample_rate;
     use ndarray::Array1;
 
-    /// Item 2 parity: computing the CQT once (the optimized combined path)
+    /// Computing the CQT once (the optimized combined path)
     /// must produce a bit-identical ODF to the previous composition that
     /// computed the CQT twice (once per matrix). The CQT is deterministic, so
     /// `combine_complex_odf` over the standalone matrices is the reference.
