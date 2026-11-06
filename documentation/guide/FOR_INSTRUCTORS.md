@@ -3,8 +3,8 @@
 This page is for lecturers and teaching assistants who are considering
 `audio_samples` for a speech and audio processing course. It says what the
 library offers a course, how the teaching material is organised and checked,
-how to verify results against SciPy and librosa, and where the library's
-conventions differ from those references.
+how to verify results against SciPy and other references, and where the
+library's conventions differ from them.
 
 ## What the library gives a course
 
@@ -70,8 +70,8 @@ matching Python notebook in the Python documentation
 Every number in the guide's prose is computed and asserted, in a doctest of
 the same chapter or in its lab. The prose of the module documentation is
 checked by doctests where it has examples; explanatory text without an example
-(for instance comparisons with librosa or citations) is reviewed by hand, not
-tested. Concretely:
+(for instance comparisons with other libraries or citations) is checked by
+hand, not tested. Concretely:
 
 - every guide code block is a doctest
   (`cargo test --doc --features educational,full_no_plotting -- guide`);
@@ -112,25 +112,30 @@ ask them to predict the explanation's numbers (Δf, Δt, frame count, gain at th
 cutoff) before running it; or give them a deliberately poor configuration and
 ask them to remove every warning.
 
-## Verifying results against SciPy and librosa
+## Verifying results against SciPy and other references
 
 The IIR filters are already checked against SciPy, FFmpeg, DSPFilters and
 liquid-dsp golden fixtures (`tests/filter_reference.rs`, generator in
 `tests/reference/`). For other topics, compare with these conventions in mind:
 
-| Topic | `audio_samples` | Reference default | To compare like with like |
+| Topic | `audio_samples` | Reference | To compare like with like |
 |---|---|---|---|
-| STFT window | symmetric Hann (`WindowType::Hanning`) | librosa and SciPy: periodic Hann | pass `scipy.signal.windows.hann(N, sym=True)` as librosa's `window=` |
-| STFT padding | `centre = true` pads ⌊N/2⌋ zeros at each end | librosa ≥ 0.10: `pad_mode="constant"` (zeros); librosa < 0.10 and `torch.stft`: reflection | same for librosa ≥ 0.10; the remaining difference is the window (row above) |
+| STFT window | symmetric Hann (`WindowType::Hanning`) | SciPy: periodic Hann | `scipy.signal.windows.hann(N, sym=True)` |
+| STFT padding | `centre = true` pads ⌊N/2⌋ zeros at each end | `torch.stft`: reflection | `pad_mode="constant"` |
 | `rfft` | magnitudes \|X\[k\]\| | numpy: complex spectrum | `np.abs(np.fft.rfft(x))` |
-| Mel spectrogram | Slaney mel scale, no filter normalisation, applied to power | librosa: `htk=False`, `norm="slaney"` | `librosa.filters.mel(..., norm=None)` |
-| Mel helpers in `utils::audio_math` | `hz_to_mel` etc.: HTK formula; `hz_to_mel_with_scale` etc. take a `MelScale` | librosa default: Slaney | `librosa.hz_to_mel(f, htk=True)`, or `MelScale::Slaney` |
-| dB | 10·log10(max(P, floor)) re 1: an absolute floor | librosa `power_to_db`: `top_db=80` relative to the maximum | `top_db=None` and the same `amin` |
-| MFCC | unnormalised DCT-II, lifter 22 | librosa: DCT-II `norm="ortho"`, lifter 0 | rescale by the DCT normalisation factors; set the lifter |
-| Zero-crossing rate | crossings per second over the whole signal | librosa: fraction of samples per frame | divide by the sample rate; frame the signal |
+| Mel spectrogram | Slaney mel scale, no filter normalisation, applied to power | – | a Slaney-scale mel filterbank without normalisation |
+| Mel helpers in `utils::audio_math` | `hz_to_mel` etc.: HTK formula; `hz_to_mel_with_scale` etc. take a `MelScale` | – | `MelScale::Slaney` for the Slaney scale |
+| dB | 10·log10(max(P, floor)) re 1: an absolute floor | – | no clipping relative to the maximum |
+| MFCC | unnormalised DCT-II, lifter 22 | – | rescale by the DCT normalisation factors; set the lifter |
+| Zero-crossing rate | crossings per second over the whole signal | – | divide by the sample rate; frame the signal |
 | Welch PSD | SciPy `welch(scaling="density")` scaling, symmetric Hann, no detrending | SciPy: periodic Hann, constant detrend | `window=hann(N, sym=True)`, `detrend=False` |
 | Integer to float | asymmetric: −1.0 ↔ −32768, +1.0 ↔ 32767 | soundfile: divide by 32768 | differs by at most one least significant bit |
-| YIN | de Cheveigné and Kawahara steps 1–4, then parabolic interpolation of the normalised difference d′ (as librosa; the paper's step 5 interpolates the raw difference d, and its step 6 is omitted), with d summed over all N − τ overlapping pairs; a frame with no dip below the threshold is unvoiced; `detect_pitch_yin` is clip-wide | `librosa.yin`: framewise, sums d over a fixed window, interpolates d′, falls back to the global minimum | compare with `track_pitch`, framewise, on clearly voiced frames |
+| YIN | de Cheveigné and Kawahara steps 1–4, then parabolic interpolation of the normalised difference d′ (the paper's step 5 interpolates the raw difference d, and its step 6 is omitted), with d summed over all N − τ overlapping pairs; a frame with no dip below the threshold is unvoiced; `detect_pitch_yin` is clip-wide | the paper: sums d over a fixed window, falls back to the global minimum | compare with `track_pitch`, framewise, on clearly voiced frames |
+
+To compare with librosa, see the
+[migration guide](https://github.com/jmg049/audio_samples/blob/main/documentation/LIBROSA_MIGRATION.md):
+it lists the crate's librosa-compatible APIs and how the older APIs used in this
+guide differ from librosa.
 
 Known limitations worth telling students about are documented in each module
 and listed under "Known issues" in the crate's `CHANGELOG.md`. For example, in

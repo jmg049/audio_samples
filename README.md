@@ -198,7 +198,7 @@ dependencies. Enable the rest as needed.
 | `decomposition`   | Harmonic/percussive source separation (requires `onset-detection`)           |
 | `feature-extraction` | librosa-compatible frame-wise spectral features, RMS, ZCR, PCEN, weightings (`AudioFeatures`) and chroma / tuning (`AudioTonal`) (requires `transforms`) |
 | `effects`         | librosa-compatible time stretch, pitch shift, pre-/de-emphasis, dB trim/split, remix, HPSS, Griffin-Lim (`AudioEffects`) (requires `transforms`, `resampling`, `editing`, `sequence`) |
-| `sequence`        | DTW, Viterbi, transition matrices, recurrence matrices, RQA, `sync` (librosa `sequence` / `segment`) |
+| `sequence`        | DTW, Viterbi, transition matrices, recurrence matrices, RQA, `sync` |
 
 ### Utility
 
@@ -262,7 +262,7 @@ The crate is also teaching material for a speech and audio processing course:
   [Python bindings](https://github.com/jmg049/audio_samples_python)
   (`docs/source/tutorials/`).
 - **For instructors**: [documentation/guide/FOR_INSTRUCTORS.md](documentation/guide/FOR_INSTRUCTORS.md)
-  covers lab sizing, conventions that differ from SciPy and librosa, and
+  covers lab sizing, conventions that differ from SciPy and other references, and
   known limitations.
 
 ---
