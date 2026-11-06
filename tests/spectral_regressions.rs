@@ -171,7 +171,7 @@ fn hpss_num_freq_bins_matches_stft_rows() {
 
 #[test]
 fn frequency_to_note_rejects_out_of_range_midi() {
-    // 5 Hz is MIDI ≈ -8.5: used to saturate to MIDI 0 ("C-1").
+    // 5 Hz is MIDI ≈ -8.5: below MIDI 0, an error rather than "C-1".
     assert!(frequency_to_note(5.0).is_err());
     // 20 kHz is MIDI ≈ 135.1: above 127.
     assert!(frequency_to_note(20_000.0).is_err());

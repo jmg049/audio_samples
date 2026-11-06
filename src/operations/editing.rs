@@ -2578,9 +2578,9 @@ mod tests {
             .collect()
     }
 
-    /// Regression: a short silent run (e.g. the near-zero samples around each
-    /// zero crossing of a sine) restarted the current segment without saving
-    /// it, so a 1 s tone came back as 24 samples.
+    /// Short silent runs (the near-zero samples around each zero crossing of
+    /// a sine) do not split or drop the surrounding audio: a 1 s tone comes
+    /// back whole.
     #[test]
     fn test_trim_all_silence_keeps_continuous_tone() {
         let x = tone(22050, 22050.0, 0.5);
@@ -2661,12 +2661,9 @@ mod tests {
         (best.0, spectrum)
     }
 
-    /// Regression for the perturbation pitch shift: the phase increment was
-    /// not de-trended by the bin's expected advance, the wrap used Rust's
-    /// sign-preserving `%`, colliding bins were summed with unrelated
-    /// phases, and multichannel input failed with a shape error. A 440 Hz
-    /// tone shifted up 2 semitones came out at 505.7 Hz with -8.8 dB
-    /// sidebands.
+    /// The perturbation pitch shift moves a 440 Hz tone up 2 semitones to
+    /// within one STFT bin of 493.88 Hz with sidebands below -30 dB, and
+    /// shifts each channel of stereo input independently.
     #[cfg(all(feature = "transforms", feature = "channels"))]
     #[test]
     fn test_pitch_shift_perturbation_frequency_and_stereo() {
@@ -2691,7 +2688,7 @@ mod tests {
             "peak {peak} Hz, expected {target}"
         );
         // Sidebands: nothing more than 1.5 bins from the target within 30 dB
-        // of the peak (the old implementation had sidebands at -8.8 dB).
+        // of the peak.
         let max_mag = spectrum.iter().map(|p| p.1).fold(0.0, f64::max);
         let side = spectrum
             .iter()

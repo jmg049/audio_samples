@@ -2298,7 +2298,8 @@ mod tests {
         }
     }
 
-    /// Regression: `resolution = 1e-9` built a 10^9-bin tuning histogram (8 GB).
+    /// A resolution that would need a 10^9-bin tuning histogram (8 GB) is an
+    /// error; an ordinary resolution is accepted.
     #[test]
     fn tuning_rejects_resolution_needing_a_huge_histogram() {
         assert!(pitch_tuning(&[440.0, 441.0], 1e-9, crate::nzu!(12)).is_err());

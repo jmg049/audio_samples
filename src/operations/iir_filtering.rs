@@ -1979,12 +1979,12 @@ mod tests {
 
     #[test]
     fn test_chebyshev_basic() {
-        // Test that Chebyshev Type I no longer errors
+        // A Chebyshev Type I design applies without error.
         let samples = NonEmptyVec::new(vec![1.0f32, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0]).unwrap();
         let mut audio: AudioSamples<'_, f32> =
             AudioSamples::from_mono_vec(samples, sample_rate!(44100));
 
-        // This should now work (not error)
+        // Low-pass, order 4, 0.5 dB ripple.
         let result = audio.chebyshev_i_in_place(
             NonZeroUsize::new(4).unwrap(),
             1000.0,

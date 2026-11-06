@@ -1989,8 +1989,8 @@ mod tests {
         );
     }
 
-    /// Regression: `mu_compress` used `ln(μ|x| + ln(1 + μ))` instead of
-    /// `ln(1 + μ|x|)`, mapping 0 to 0.309 and ±1 to ±1.003.
+    /// `mu_compress` follows the continuous μ-law curve
+    /// `sign(x) ln(1 + μ|x|) / ln(1 + μ)`: 0 maps to 0 and ±1 to ±1.
     #[test]
     fn mu_compress_matches_reference_formula() {
         let x = array![-1.0f64, -0.5, 0.0, 0.5, 1.0];
@@ -2017,8 +2017,9 @@ mod tests {
         }
     }
 
-    /// Regression: for integer sample types `mu` went through audio-aware
-    /// scaling (255i16 became 255/32768), producing garbage.
+    /// For integer sample types `mu` is the raw numeric value (255i16 means
+    /// μ = 255, not the audio-scaled 255/32768): the result matches
+    /// compressing the f64 conversion of the same audio to within 1 LSB.
     #[test]
     fn mu_law_integer_samples_use_numeric_mu() {
         let codes = array![-32768i16, -16384, 0, 8192, 16384, 32767];
@@ -2081,10 +2082,10 @@ mod tests {
         assert!(mu_law_encode(&[f64::NAN], 255.0).is_err());
     }
 
-    /// Regression: the encoder materialised `1 + mu` bin edges, so a huge `mu`
-    /// panicked ("capacity overflow", mu = 1e19) or tried multi-GB allocations
-    /// (mu ~ 1e9 - 1e18). Codes are now computed per sample; they must equal
-    /// the count of explicit edges `linspace(-1, 1, int(1 + mu))` below `c`.
+    /// The encoder computes each code per sample without materialising the
+    /// `1 + mu` bin edges: codes equal the count of explicit edges
+    /// `linspace(-1, 1, int(1 + mu))` below `c`, a huge `mu` (1e15) needs no
+    /// allocation, and `mu` above 2^53 is an error rather than a panic.
     #[test]
     fn mu_law_encode_is_allocation_free_and_exact() {
         let reference = |x: &[f64], mu: f64| -> Vec<i64> {

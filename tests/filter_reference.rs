@@ -820,8 +820,8 @@ fn degenerate_designs_error_instead_of_panicking_or_nan() {
         let mut a = mono_f64(&[0.5; 32], 48000.0);
         assert!(a.apply_iir_filter_in_place(&d).is_err());
     }
-    // Edges within 1e-5 of Nyquist used to overflow the gain computation and
-    // silently produce zero / NaN output; SciPy designs these fine.
+    // Edges within 1e-5 of Nyquist give finite designs with unit passband
+    // gain (no overflow to zero / NaN output); SciPy designs these too.
     let d = IirFilterDesign::butterworth_lowpass(nz(24), 23999.99);
     let (m, _) = d.frequency_response(&[0.0, 1000.0], 48000.0).unwrap();
     assert!((m[0] - 1.0).abs() < 1e-9 && (m[1] - 1.0).abs() < 1e-9);

@@ -1351,8 +1351,8 @@ mod tests {
         }
     }
 
-    /// Regression: the stereo average was computed in f32 for every sample
-    /// type, so f64 input lost precision ([1.0, 1e-9] averaged to 0.5).
+    /// The stereo average of f64 input is computed in f64: [1.0, 1e-9]
+    /// averages to (1 + 1e-9) / 2, not the f32 result 0.5.
     #[test]
     fn test_to_mono_average_f64_full_precision() {
         let data = ndarray::array![[1.0f64, 0.1], [1e-9, 0.2]];
@@ -1371,8 +1371,8 @@ mod tests {
         assert_eq!(mono[1], 1);
     }
 
-    /// Regression: the N-channel average summed in the sample type, which
-    /// overflows for integer samples.
+    /// The N-channel average of integer samples does not overflow: three
+    /// channels of 30000 (i16) average to 30000.
     #[test]
     fn test_to_mono_average_multichannel_integer_no_overflow() {
         let data = ndarray::array![[30000i16], [30000], [30000]];
@@ -1381,8 +1381,8 @@ mod tests {
         assert_eq!(mono[0], 30000);
     }
 
-    /// Regression: `Left` on mono returned the mono signal and `Right`
-    /// errored; the documented behaviour is [m, 0] / [0, m].
+    /// `Left` and `Right` on mono input give the documented [m, 0] and
+    /// [0, m].
     #[test]
     fn test_to_stereo_left_right_on_mono() {
         let audio =

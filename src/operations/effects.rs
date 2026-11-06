@@ -5057,8 +5057,9 @@ mod tests {
         let _: AudioSamples<'static, i16> = x.remix(&[(3000, 5000)], true).unwrap();
     }
 
-    /// Regression: extreme click times / durations and stretch rates sized
-    /// their outputs at up to 10^17 bytes and aborted on allocation.
+    /// Click times, click durations, fixed lengths and stretch rates whose
+    /// outputs would need up to 10^17 bytes are parameter errors, not
+    /// allocation aborts.
     #[test]
     fn extreme_sizes_are_parameter_errors() {
         let sr = sample_rate!(22050);

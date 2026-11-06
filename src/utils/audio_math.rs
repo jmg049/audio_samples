@@ -3347,8 +3347,8 @@ mod tests {
 
     #[test]
     fn htk_mel_round_trip_regression() {
-        // Regression for the old `mel_to_hz` formula (700 * 10^(m/2595) - 1), which was off
-        // by +699 Hz at every frequency.
+        // HTK mel_to_hz inverts hz_to_mel: 700 * (10^(m/2595) - 1), not
+        // 700 * 10^(m/2595) - 1, which is 699 Hz too high at every frequency.
         for &f in &[0.0, 50.0, 440.0, 1000.0, 8000.0, 22050.0] {
             let back = mel_to_hz(hz_to_mel(f));
             assert!((back - f).abs() <= 1e-9 * f.max(1.0), "{f} -> {back}");

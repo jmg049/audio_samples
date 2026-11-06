@@ -1,6 +1,5 @@
-//! Regression test: the short `Display` form of multi-channel audio iterated
-//! over the sample count instead of the channel count and panicked with
-//! "index < dim" for any buffer with more samples than channels.
+//! The short `Display` form of multi-channel audio iterates over the channels
+//! and does not panic for buffers with more samples than channels.
 
 use audio_samples::{AudioSamples, sample_rate};
 use ndarray::array;

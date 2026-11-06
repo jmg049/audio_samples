@@ -1888,8 +1888,8 @@ where
 
     let input_sample_rate = audio.sample_rate().get();
     let target = (f64::from(input_sample_rate) * ratio).round();
-    // Checked before the integer conversion (which used to wrap for ratios
-    // above ~97 000 at 44.1 kHz).
+    // Checked before the integer conversion, which would wrap for ratios
+    // above ~97 000 at 44.1 kHz.
     let target_sample_rate = (target <= f64::from(u32::MAX))
         .then(|| SampleRate::new(target as u32))
         .flatten()
@@ -2039,8 +2039,8 @@ mod tests {
         assert!(resample_by_ratio(&audio, -1.0, ResamplingQuality::Fast).is_err());
         assert!(resample_by_ratio(&audio, 0.0, ResamplingQuality::Fast).is_err());
         assert!(resample_by_ratio(&audio, f64::NAN, ResamplingQuality::Fast).is_err());
-        // Regression: the target rate was cast through `usize as u32` and
-        // wrapped for huge ratios (e.g. 44100 * 1e5 -> a small, wrong rate).
+        // Target rates above u32::MAX Hz (44100 * 1e5) are errors rather than
+        // wrapping to a small rate.
         assert!(resample_by_ratio(&audio, 1e5, ResamplingQuality::Fast).is_err());
         assert!(resample_by_ratio(&audio, f64::INFINITY, ResamplingQuality::Fast).is_err());
     }
@@ -2074,9 +2074,8 @@ mod tests {
         assert_eq!(y.samples_per_channel().get(), 96000);
     }
 
-    /// Regression: Medium/High output was delayed by the rubato filter delay
-    /// (64/128 input samples) and lost the tail. A band-limited tone must now
-    /// line up with the analytic tone at the output rate.
+    /// Output has no filter delay and keeps the tail: a band-limited tone
+    /// lines up with the analytic tone at the output rate.
     #[test]
     fn test_resample_is_time_aligned() {
         let cases = [
@@ -2108,8 +2107,8 @@ mod tests {
         }
     }
 
-    /// Regression: Fast downsampling was plain decimation, so content above
-    /// the new Nyquist frequency aliased at full level.
+    /// Fast downsampling is low-pass filtered: content above the new Nyquist
+    /// frequency does not alias back at full level.
     #[test]
     fn test_fast_downsampling_is_anti_aliased() {
         // 13 kHz is above the 11.025 kHz Nyquist of 22.05 kHz.
@@ -2383,11 +2382,10 @@ mod tests {
         assert!(snr > 130.0, "SNR {snr:.1} dB");
     }
 
-    /// Regression: strongly decimating awkward ratios built a 4097-row table
-    /// of ~10^5 taps (48000 -> 101 Hz: 2.9 GB, 12 s, kept in the cache;
-    /// 192000 -> 101 Hz aborted on allocation). The interpolated table now has
-    /// `ceil(4096 · L / M)` rows, oversized kernels are not cached, and
-    /// impossible sizes are an error.
+    /// Strongly decimating awkward ratios (48000 -> 101 Hz, 192000 -> 101 Hz)
+    /// build an interpolated table of `ceil(4096 · L / M)` rows rather than
+    /// 4097 rows of ~10^5 taps (2.9 GB), oversized kernels are not cached,
+    /// and impossible sizes are an error.
     #[test]
     fn test_steep_decimation_table_is_bounded() {
         for (in_sr, out_sr) in [(48000u32, 101u32), (192_000, 101), (96000, 7919)] {
@@ -2429,11 +2427,10 @@ mod tests {
         );
     }
 
-    /// Regression (pitch_shift with many distinct steps): every awkward
-    /// upsampling ratio built its own 4097-row table (~30 ms each) and the
-    /// LRU thrashed. Upsampling tables do not depend on the ratio, so they
-    /// are now shared; downsampling tables are sampled from a per-quality
-    /// prototype instead of evaluating the window per coefficient.
+    /// Awkward upsampling ratios (as in pitch shifting by many distinct
+    /// steps) share one interpolated table per quality, since the table does
+    /// not depend on the ratio, and downsampling tables sampled from the
+    /// per-quality prototype stay accurate.
     #[test]
     fn test_interpolated_tables_are_shared_and_accurate() {
         // Pitch-shift style rates (2^31 and a nearby integer).

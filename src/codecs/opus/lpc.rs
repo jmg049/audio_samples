@@ -560,10 +560,9 @@ mod tests {
         (0..order).map(|i| m[i][order] / m[i][i]).collect()
     }
 
-    /// Regression: `levinson_durbin` swapped `a`/`a_prev` at the end of every
-    /// iteration and then returned `a`, i.e. the order-(p-1) solution padded with
-    /// a stale value (all zeros for p = 1). On an AR(4) process it returned
-    /// [-1.67, 1.50, -0.56, 0.0] instead of about [-2.21, 2.93, -2.16, 0.96].
+    /// `levinson_durbin` returns the full order-p solution, not the
+    /// order-(p-1) solution padded with a stale value: on an AR(4) process the
+    /// coefficients are about [-2.21, 2.93, -2.16, 0.96].
     #[test]
     fn levinson_returns_full_order_solution() {
         // AR(4) process x[n] = -sum a_k x[n-k] + e[n], e from an LCG.

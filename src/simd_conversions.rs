@@ -1279,7 +1279,7 @@ mod simd_parity_tests {
             deinterleave_stereo_scalar(&inter_f32, &mut d_scal);
             assert_eq!(d_simd, d_scal, "deinterleave_stereo f32 frames={frames}");
 
-            // i16 (non-f32 type - used to hit the fallback path)
+            // i16 (a non-f32 type)
             let planar_i16: Vec<i16> = (0..n).map(|i| (i as i16) * 37 - 100).collect();
             let mut s16 = vec![0i16; n];
             let mut c16 = vec![0i16; n];

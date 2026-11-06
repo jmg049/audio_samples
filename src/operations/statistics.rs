@@ -1927,9 +1927,9 @@ mod tests {
         assert!((autocorr[2] + 0.5).abs() < 1e-12); // (1 * -1) / 2
     }
 
-    /// Regression: on multi-channel audio the rate summed the crossings of all
-    /// channels but divided by the single-channel duration, so two identical
-    /// channels reported twice the mono rate.
+    /// On multi-channel audio the zero-crossing rate is the mean of the
+    /// per-channel rates: two identical channels give the mono rate, while the
+    /// crossing count is the total over channels.
     #[test]
     fn zero_crossing_rate_is_averaged_over_channels() {
         let mono_data = array![1.0f32, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0];
@@ -1955,11 +1955,10 @@ mod tests {
         assert!((mixed.zero_crossing_rate() - 2.0).abs() < 1e-12); // (3 + 1) / 2
     }
 
-    /// Regression: the spectral scalars put bin k at `k * nyquist / (bins - 1)`,
-    /// which is `k * sr / n` only for even n (odd n gave sr/(n+1) in the centroid
-    /// and sr/(n-1) in rolloff, bandwidth and slope). Tones exactly on bins 100
-    /// and 200 of an odd-length (n = 2205) signal at 22.05 kHz sit at 1000 and
-    /// 2000 Hz.
+    /// The spectral scalars place bin k at `k * sr / n` for odd and even n
+    /// (`k * nyquist / (bins - 1)` equals that only for even n). Tones exactly
+    /// on bins 100 and 200 of an odd-length (n = 2205) signal at 22.05 kHz sit
+    /// at 1000 and 2000 Hz.
     #[test]
     #[cfg(feature = "transforms")]
     fn spectral_scalars_use_exact_bin_frequencies_for_odd_length() {
@@ -1998,10 +1997,9 @@ mod tests {
         }
     }
 
-    /// Regression: the values were divided by the zero-padded FFT size twice (the
-    /// planner's inverse FFT already normalises), so they were too small by a
-    /// factor of 2048 for n = 1000 and 8192 for n = 4096. `r[k] * (n - k)` must
-    /// equal the direct sum of products.
+    /// The FFT autocorrelation is normalised once (the planner's inverse FFT
+    /// already divides by the zero-padded size): `r[k] * (n - k)` equals the
+    /// direct sum of products for several lengths and lags.
     #[test]
     #[cfg(feature = "transforms")]
     fn autocorrelation_matches_direct_sum() {

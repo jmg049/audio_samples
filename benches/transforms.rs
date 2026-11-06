@@ -33,8 +33,8 @@ fn signal(seconds: u64) -> AudioSamples<'static, f64> {
 }
 
 fn bench_fft_frames(c: &mut Criterion) {
-    // Compute an FFT per frame across a 1s signal: ~repeated same-size FFTs that
-    // hammer the planner cache (the per-call-planning regression this fixed).
+    // Compute an FFT per frame across a 1s signal: repeated same-size FFTs that
+    // exercise the planner cache rather than planning per call.
     let n_fft = 2048usize;
     let hop = 512usize;
     let audio = signal(1);
