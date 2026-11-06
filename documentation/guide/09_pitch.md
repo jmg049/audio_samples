@@ -46,28 +46,26 @@ difference* (CMND). $d'$ starts at 1, stays near 1 for lags shorter than the
 period and dips towards 0 at the period. The estimate is the first lag with
 $d'(\tau) < \theta$ ($\theta$ the threshold, typically 0.1 to 0.2), moved forward
 to the bottom of that dip, and refined by fitting a parabola through
-$d'(\tau_0 - 1), d'(\tau_0), d'(\tau_0 + 1)$ (this is what the crate and
-librosa do; see the note below). With $a = d'(\tau_0+1) + d'(\tau_0-1) - 2d'(\tau_0)$
+$d'(\tau_0 - 1), d'(\tau_0), d'(\tau_0 + 1)$ (this is what the crate does; see
+the note below). With $a = d'(\tau_0+1) + d'(\tau_0-1) - 2d'(\tau_0)$
 and $b = (d'(\tau_0+1) - d'(\tau_0-1))/2$ the vertex lies at $\tau_0 - b/a$:
 
 $$\hat{\tau} = \tau_0 + \frac{1}{2} \, \frac{d'(\tau_0-1) - d'(\tau_0+1)}{d'(\tau_0-1) - 2 d'(\tau_0) + d'(\tau_0+1)}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}$$
 
 so the period is fractional and the estimate is no longer restricted to the
-integer grid. Following
-librosa, the shift is skipped (left at 0) when $\tau_0$ is at either end of the
-search range or when $|b| \ge |a|$ (the vertex would lie more than one lag
-away). If no lag dips below $\theta$ the crate declares the frame unvoiced.
+integer grid. The shift is skipped (left at 0) when $\tau_0$ is at either end
+of the search range or when $|b| \ge |a|$ (the vertex would lie more than one
+lag away). If no lag dips below $\theta$ the crate declares the frame unvoiced.
 
 *How this differs from the paper.* De Cheveigné and Kawahara's step 5
 (parabolic interpolation) fits the parabola to the **raw** difference function
 $d(\tau)$, not to $d'$, because interpolating $d'$ is slightly biased; their
 step 6 ("best local estimate") then re-runs the search around each frame's
 estimate. And when no lag dips below $\theta$, the paper takes the global
-minimum of $d'$ instead of declaring the frame unvoiced. The crate, like librosa's `yin`,
-interpolates $d'$ and has no step 6; unlike librosa it reports such frames as
-unvoiced. Finally, the paper and librosa sum $d(\tau)$ over a fixed window of
-$W$ samples starting at the beginning of the frame; the crate sums over all
-$N - \tau$ overlapping pairs. A fixed window measures the pitch of the frame's
+minimum of $d'$ instead of declaring the frame unvoiced. The crate interpolates
+$d'$, has no step 6 and reports such frames as unvoiced. Finally, the paper sums
+$d(\tau)$ over a fixed window of $W$ samples starting at the beginning of the
+frame; the crate sums over all $N - \tau$ overlapping pairs. A fixed window measures the pitch of the frame's
 early part, which matters when the pitch moves within the frame (about 9 cents
 on a 1.5 octave/s glide with 2048-sample frames at 22.05 kHz).
 
@@ -166,8 +164,8 @@ while tau < max_tau && cmnd[tau + 1] < cmnd[tau] {
     tau += 1;
 }
 assert_eq!(tau, 36); // ... but the minimum of the dip is at 36 (d' = 0.0019)
-// Step 4: parabolic interpolation, here on d' (as librosa does; the paper's
-// step 5 interpolates the raw d instead), skipped at the ends of the range or
+// Step 4: parabolic interpolation, here on d' (the paper's step 5
+// interpolates the raw d instead), skipped at the ends of the range or
 // when |b| >= |a|.
 let a = cmnd[tau + 1] + cmnd[tau - 1] - 2.0 * cmnd[tau];
 let b = (cmnd[tau + 1] - cmnd[tau - 1]) / 2.0;
@@ -384,14 +382,12 @@ assert!((f(0.019) - 200.0).abs() < 0.1);
 
 - **Frame length is set by $f_{min}$**, not by the pitch you expect: frames of
   at most $2\lfloor f_s/f_{min} \rfloor + 1$ samples always return `None`.
-- **`PitchFrame::time` is the frame start**, not its centre (librosa's
-  `pyin` reports centred frames).
-- **Not librosa's `yin`, and not exactly the paper.** Like librosa, the crate
-  interpolates $d'$ (the paper interpolates $d$) and has no "best local
-  estimate" step. Unlike librosa, a frame with no dip below $\theta$ is
-  unvoiced, while `librosa.yin` (and the paper) fall back to the global
-  minimum and always return a value. The minimum frame length rule also
-  differs.
+- **`PitchFrame::time` is the frame start**, not its centre
+  (`AudioPitchTracking::yin` and `pyin` centre their frames by default).
+- **Not exactly the paper.** The crate interpolates $d'$ (the paper
+  interpolates $d$) and has no "best local estimate" step. A frame with no dip
+  below $\theta$ is unvoiced, while the paper falls back to the global minimum
+  and always returns a value.
 - **The autocorrelation estimate is quantised** to $f_s/\tau$; use YIN (or
   interpolate the peak yourself) when you need better than $f_0^2/f_s$.
 - **Octave errors are a property of the signal**, not a bug: narrow
@@ -404,7 +400,7 @@ assert!((f(0.019) - 200.0).abs() < 0.1);
 
 - A. de Cheveigné and H. Kawahara, "YIN, a fundamental frequency estimator for speech and music", *Journal of the Acoustical Society of America* 111(4), 1917-1930, 2002.
 - L. R. Rabiner, "On the use of autocorrelation analysis for pitch detection", *IEEE Transactions on Acoustics, Speech, and Signal Processing* 25(1), 24-33, 1977.
-- M. Mauch and S. Dixon, "pYIN: a fundamental frequency estimator using probabilistic threshold distributions", *Proc. IEEE ICASSP*, 2014. The probabilistic extension used by librosa's `pyin`.
+- M. Mauch and S. Dixon, "pYIN: a fundamental frequency estimator using probabilistic threshold distributions", *Proc. IEEE ICASSP*, 2014. The probabilistic extension implemented by `AudioPitchTracking::pyin`.
 
 ## See also
 

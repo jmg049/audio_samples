@@ -53,8 +53,8 @@ fn harmonic_complex(f0: f64, harmonics: &[(u32, f64)], n: usize) -> Vec<f64> {
 }
 
 /// YIN written out (de Cheveigne and Kawahara 2002, steps 2-4, then parabolic
-/// interpolation on d' as the crate and librosa do; the paper's step 5
-/// interpolates the raw difference function d instead). Returns
+/// interpolation on d' as the crate does; the paper's step 5 interpolates
+/// the raw difference function d instead). Returns
 /// (period in samples, d' values for lags 0..=max_tau).
 fn my_yin(x: &[f64], min_tau: usize, max_tau: usize, threshold: f64) -> (Option<f64>, Vec<f64>) {
     let n = x.len();
@@ -77,8 +77,8 @@ fn my_yin(x: &[f64], min_tau: usize, max_tau: usize, threshold: f64) -> (Option<
         tau += 1;
     }
     let min_tau = min_tau.max(1);
-    // librosa's rule: no shift at the ends of the search range, and none when
-    // the parabola's vertex lies more than one lag away.
+    // No shift at the ends of the search range, and none when the parabola's
+    // vertex lies more than one lag away.
     let shift = if tau > min_tau && tau < max_tau {
         let (prev, mid, next) = (cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]);
         let a = next + prev - 2.0 * mid;

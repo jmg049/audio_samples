@@ -19,9 +19,9 @@ $1/f_0$ seconds, $f_0$ the fundamental frequency in Hz), $H(z)$ the vocal-tract
 filter, $G$ a gain, $p$ the model order and $a_k$ the (dimensionless) predictor
 coefficients. The usual choice of gain is $G = \sqrt{E_p}$, the square root of
 the order-$p$ prediction-error energy defined below, so that the model driven
-by a unit-energy excitation has the frame's residual energy. This crate writes $A(z)$ with a **plus** sign, as MATLAB and
-`librosa.lpc` do; many textbooks predict $\hat{x}[n] = \sum_k \alpha_k x[n-k]$
-instead, so $\alpha_k = -a_k$.
+by a unit-energy excitation has the frame's residual energy. This crate writes
+$A(z)$ with a **plus** sign, as MATLAB does; many textbooks predict
+$\hat{x}[n] = \sum_k \alpha_k x[n-k]$ instead, so $\alpha_k = -a_k$.
 
 **Formants as poles.** One formant at frequency $F$ (Hz) with 3 dB bandwidth $B$
 (Hz) is a pair of complex-conjugate poles at radius $r$ and angle $\theta$:
@@ -477,12 +477,12 @@ assert!((q(44_100.0) - 46.1).abs() < 1e-9);
 
 ## Common pitfalls
 
-- **Sign convention.** The crate (like MATLAB and librosa) stores $A(z)$
+- **Sign convention.** The crate (like MATLAB) stores $A(z)$
   coefficients, $e[n] = x[n] + \sum a_k x[n-k]$; the "predictor" form uses
   $-a_k$.
-- **Not librosa's algorithm.** `librosa.lpc` uses Burg's method on the raw
-  frame; `lpc_analysis` applies a Hamming window, the autocorrelation method
-  and a $10^{-5}$ diagonal loading, so the numbers differ slightly.
+- **Two LPC routines.** `lpc_analysis` applies a Hamming window, the
+  autocorrelation method and a $10^{-5}$ diagonal loading; `AudioEffects::lpc`
+  uses Burg's method on the raw frame. Their numbers differ slightly.
 - **`f32` in, `f32` out.** `lpc_analysis` takes `&[f32]` and returns `f32`
   coefficients; compare with a tolerance near $10^{-6}$ relative, not exactly.
 - **Short frames.** The order is silently lowered to `frame.len() / 2`.
