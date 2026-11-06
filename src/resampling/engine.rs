@@ -327,16 +327,23 @@ impl<F: RsFloat> Engine<F> {
                     + b.as_ref()
                         .map_or(0, |b| b.coeffs.len() * std::mem::size_of::<F>())
             }
-            Stages::Dft(d) => d.tab.len() * std::mem::size_of::<Complex<F>>(),
+            Stages::Dft(d) => {
+                d.tab.len() * std::mem::size_of::<Complex<F>>()
+                    + d.up
+                        .as_ref()
+                        .map_or(0, |(a, b)| a.size_bytes() + b.size_bytes())
+            }
         }
     }
 
     /// [`Engine::run`] for samples of type `F`, each output `y` written as
     /// `y · gain` computed in `f64` (1 leaves it unchanged).
     pub(super) fn run_native(&self, x: &[F], out: &mut [MaybeUninit<F>], gain: f64) {
-        let unit = gain == 1.0;
-        let put = |v: F| if unit { v } else { F::of(v.as_f64() * gain) };
-        self.run_with(x, Some(x), out, &|v| v, &put);
+        if gain == 1.0 {
+            self.run_with(x, Some(x), out, &|v| v, &|v| v);
+        } else {
+            self.run_with(x, Some(x), out, &|v| v, &|v| F::of(v.as_f64() * gain));
+        }
     }
 
     /// Resamples one channel `x` into `out`, whose length is the number of
@@ -1195,6 +1202,11 @@ pub(super) struct DftStage<F> {
     /// elementwise (`swap` exchanges the real and imaginary parts), which
     /// gives `c · v` or `c · conj(v)`.
     tab: Vec<Complex<F>>,
+    /// Upsampling (`n2 > n1`): `Y` (the filtered input band, `M` bins) from
+    /// `Z` as `Y[k] = A[k] Z[k] + B[k] conj(Z[-k])`, then `W` from `Y`
+    /// zero-extended to `M2` bins as `W[k] = p[k] Y[k] + q[k] conj(Y[M2 - k])`,
+    /// both by [`RsFloat::fir2_bins`]; `tab0` and `tab` are then unused.
+    up: Option<(Bins<F>, Bins<F>)>,
     simd: bool,
 }
 
@@ -1223,8 +1235,9 @@ impl<F: RsFloat> DftStage<F> {
             Complex::from_polar(1.0, tau * (num % den) as f64 / den as f64)
         };
         let i = Complex::new(0.0, 1.0);
-        // A[k], B[k]: Y[k] = A[k] Z[k] + B[k] conj(Z[-k]), for k = 0..=M2.
-        let (ak, bk): (Vec<_>, Vec<_>) = (0..=m2)
+        // A[k], B[k]: Y[k] = A[k] Z[k] + B[k] conj(Z[-k]), for k up to M2
+        // (downsampling) or below M (upsampling).
+        let (ak, bk): (Vec<_>, Vec<_>) = (0..=m2.min(big_m))
             .map(|k| {
                 let gk = g[k] * turn(k * half, n1) / n1 as f64;
                 let w1 = turn(n1 - k % n1, n1);
@@ -1242,6 +1255,36 @@ impl<F: RsFloat> DftStage<F> {
             ]
         };
         let to_f = |re: f64, im: f64| Complex::new(F::of(re), F::of(im));
+        let (fwd, inv) = F::with_planner(|p| (p.plan_fft_forward(big_m), p.plan_fft_inverse(m2)));
+        if m2 > big_m {
+            let cf = |c: Complex<f64>| to_f(c.re, c.im);
+            let (a, b): (Vec<_>, Vec<_>) = (0..big_m).map(|k| (cf(ak[k]), cf(bk[k]))).unzip();
+            // `Y[M2]`, the output Nyquist bin, is zero: `q[0]` is not needed.
+            let (p, q): (Vec<_>, Vec<_>) = (0..m2)
+                .map(|k| {
+                    let v = turn(k, n2);
+                    let q = if k == 0 {
+                        Complex::new(0.0, 0.0)
+                    } else {
+                        1.0 - i * v
+                    };
+                    (cf(1.0 + i * v), cf(q))
+                })
+                .unzip();
+            return Self {
+                n1,
+                n2,
+                half,
+                hop,
+                hop_out: hop / m * l,
+                fwd,
+                inv,
+                tab0: [Complex::new(F::zero(), F::zero()); 8],
+                tab: Vec::new(),
+                up: Some((Bins::new(&a, &b), Bins::new(&p, &q))),
+                simd: super::has_avx2_fma_cached(),
+            };
+        }
         let split = |c: [Complex<f64>; 4]| {
             [
                 to_f(c[0].re, c[0].re),
@@ -1264,8 +1307,6 @@ impl<F: RsFloat> DftStage<F> {
                 tab[(gi * 8 + r) * group + lane] = v;
             }
         }
-        debug_assert!(big_m > m2);
-        let (fwd, inv) = F::with_planner(|p| (p.plan_fft_forward(big_m), p.plan_fft_inverse(m2)));
         Self {
             n1,
             n2,
@@ -1276,6 +1317,7 @@ impl<F: RsFloat> DftStage<F> {
             inv,
             tab0,
             tab,
+            up: None,
             simd: super::has_avx2_fma_cached(),
         }
     }
@@ -1305,7 +1347,14 @@ impl<F: RsFloat> DftStage<F> {
     fn transform(&self, z: &[Complex<F>], bufs: &mut DftBufs<F>, simd: bool) {
         self.fwd
             .process_immutable_with_scratch(z, &mut bufs.zf, &mut bufs.scratch);
-        F::dft_bins(&mut bufs.w, &bufs.zf, &self.tab0, &self.tab, simd);
+        if let Some((a, b)) = &self.up {
+            // `bufs.band[M..]` stays zero.
+            let m = bufs.zf.len();
+            F::fir2_bins(&mut bufs.band[..m], &bufs.zf, a);
+            F::fir2_bins(&mut bufs.w, &bufs.band, b);
+        } else {
+            F::dft_bins(&mut bufs.w, &bufs.zf, &self.tab0, &self.tab, simd);
+        }
         self.inv
             .process_outofplace_with_scratch(&mut bufs.w, &mut bufs.y, &mut bufs.scratch);
     }
@@ -1366,6 +1415,8 @@ impl<F: RsFloat> DftStage<F> {
 pub(super) struct DftBufs<F> {
     z: Vec<Complex<F>>,
     zf: Vec<Complex<F>>,
+    /// Upsampling: the filtered input band, zero-extended to `n2 / 2` bins.
+    band: Vec<Complex<F>>,
     w: Vec<Complex<F>>,
     y: Vec<Complex<F>>,
     scratch: Vec<Complex<F>>,
@@ -1381,6 +1432,11 @@ impl<F: RsFloat> DftBufs<F> {
         Self {
             z: vec![zero; d.n1 / 2],
             zf: vec![zero; d.n1 / 2],
+            band: if d.up.is_some() {
+                vec![zero; d.n2 / 2]
+            } else {
+                Vec::new()
+            },
             w: vec![zero; d.n2 / 2],
             y: vec![zero; d.n2 / 2],
             scratch: vec![zero; scratch],

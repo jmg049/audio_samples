@@ -4,11 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-- **Downsampling by a ratio whose terms have no prime factor above 7 runs block by block in the
-  frequency domain** (22050 to 16000 or 8000 Hz, 44100 or 48000 to 16000 Hz, 48000 to 44100 Hz
-  and the like; decimation by a power of two keeps its own path). Each output is the
+- **Conversion by a ratio whose terms have no prime factor above 7 runs block by block in the
+  frequency domain** (22050 to 16000 or 8000 Hz, 44100 or 48000 to 16000 Hz, 48000 to 44100 Hz,
+  16000 to 22050 Hz, 44100 to 48000 Hz and the like; decimation by a power of two and 1 : 2
+  upsampling keep their own paths). Each output is the
   windowed-sinc filter evaluated at its exact position, without the second, interpolating stage;
-  the filter's response above the output Nyquist frequency is dropped instead of aliased.
+  the filter's response above the lower Nyquist frequency is dropped instead of aliased into the
+  band or left as images.
   Outputs change at the stopband level (about 1e-8 on 22050 to 8000 Hz), stopbands measure
   equal or lower, and 10 s conversions take 40-55 % less time. `StreamingResampler` converts the
   same blocks, so it still matches `resample`, but for these ratios it holds back up to one
