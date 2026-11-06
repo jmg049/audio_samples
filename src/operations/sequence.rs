@@ -22,15 +22,13 @@
 //!
 //! Many music-analysis tasks reduce to "find the best path through a matrix":
 //! aligning two performances, smoothing frame-wise pitch or chord estimates,
-//! or finding repeated sections. These functions reproduce
-//! `librosa.sequence`, `librosa.segment` and `librosa.util.sync`
-//! (librosa 1.0.0) so that librosa pipelines can be ported one-to-one; every
-//! config's `Default` equals librosa's defaults.
+//! or finding repeated sections. These functions provide those dynamic-programming
+//! and similarity tools over plain feature matrices.
 //!
 //! # How
 //!
 //! All functions are free functions over `ndarray` arrays. Feature matrices
-//! follow librosa's layout `(n_features, n_frames)`: one column per frame.
+//! have the layout `(n_features, n_frames)`: one column per frame.
 //! Probability matrices are `(n_states, n_steps)`. Results are reported through
 //! [`AudioSampleResult`]; invalid input yields a [`ParameterError`], never a
 //! panic.
@@ -56,29 +54,27 @@
 //!
 //! // A perfect alignment exists, so the total cost is zero.
 //! assert_eq!(result.cost[[3, 4]], 0.0);
-//! // The path runs from the end back to the start, as in librosa.
+//! // The path runs from the end back to the start.
 //! let path = result.path.unwrap();
 //! assert_eq!(path.first(), Some(&[3, 4]));
 //! assert_eq!(path.last(), Some(&[0, 0]));
 //! ```
 //!
-//! # Differences from librosa
+//! # Conventions
 //!
-//! - Only 2-D inputs are accepted (librosa also broadcasts over leading
-//!   axes); loop over channels yourself.
-//! - `recurrence_matrix` / `cross_similarity` return dense matrices only
-//!   (no `sparse=True`), and connectivity matrices are floats (`0.0`/`1.0`)
-//!   rather than `bool`. Only librosa's default `axis=-1` layout is supported.
-//! - `sync` with an empty index list and `pad = true` returns one segment
-//!   (librosa returns none).
-//! - `rqa` follows the move actually taken when backtracking through the
-//!   second column (librosa stores a wrong pointer there).
-//! - With `f32` input, the Viterbi decoders accumulate log-likelihoods in
-//!   `f32`; librosa accumulates them in `float64` for every input type.
-//!   DTW costs of `f32` features are computed in `f32`; librosa computes
-//!   them with SciPy's `float64` `cdist`.
-//! - `path_enhance`, `timelag_filter`, `agglomerative`, `subsegment` and
-//!   `path_to_steps` are not provided.
+//! - Only 2-D inputs are accepted; loop over channels yourself.
+//! - [`recurrence_matrix`] and [`cross_similarity`] return dense `bool`
+//!   connectivity matrices; [`recurrence_matrix_weighted`] and
+//!   [`cross_similarity_weighted`] return dense distance or affinity matrices.
+//!   Frames are always the columns (the last axis).
+//! - [`sync`] with an empty index list and `pad = true` returns one segment
+//!   `[0, n_frames)`.
+//! - [`rqa`] follows the move actually taken when backtracking through the
+//!   second column.
+//! - With `f32` input, the Viterbi decoders accumulate log-likelihoods in `f32`
+//!   and DTW costs of `f32` features are computed in `f32`.
+//! - `path_enhance`, `timelag_filter`, `agglomerative` and `subsegment` are in
+//!   `operations::segment` (feature `segmentation`).
 
 use ndarray::{
     Array, Array1, Array2, ArrayView, ArrayView1, ArrayView2, ArrayView3, Axis, Dimension,
@@ -88,19 +84,19 @@ use ndarray::{
 use crate::utils::layout::SliceBins;
 use crate::{AudioFloat, AudioSampleResult, ParameterError};
 
-/// `numpy.finfo(dtype).tiny` (the smallest positive normal value of `F`), the
-/// clipping constant librosa adds before logs (`util.tiny(prob)`).
+/// The smallest positive normal value of `F`, the clipping constant added to
+/// probabilities before taking logs.
 fn tiny<F: AudioFloat>() -> F {
     F::min_positive_value()
 }
 
-/// `numpy.allclose` for scalars with its default tolerances.
+/// `|a - b| <= 1e-8 + 1e-5 * |b|`: equality within an absolute and a relative tolerance.
 fn allclose(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-8 + 1e-5 * b.abs()
 }
 
 /// The sum of `x` in `f64` (for validation: rows of `f32` matrices are
-/// checked against `numpy.allclose` without `f32` summation error).
+/// checked with [`allclose`] without `f32` summation error).
 fn sum_f64<'a, F: AudioFloat>(x: impl IntoIterator<Item = &'a F>) -> f64 {
     x.into_iter().map(|v| v.as_f64()).sum()
 }
@@ -117,9 +113,7 @@ fn err<T>(parameter: &str, reason: impl ToString) -> AudioSampleResult<T> {
 ///
 /// Used by [`dtw`] to build the local cost matrix and by
 /// [`recurrence_matrix`] / [`cross_similarity`] for nearest-neighbour search.
-/// The names follow `scipy.spatial.distance` (which librosa passes them to).
-///
-/// The default is [`DistanceMetric::Euclidean`], librosa's default.
+/// The default is [`DistanceMetric::Euclidean`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DistanceMetric {
     /// `sqrt(sum((u - v)^2))`.
@@ -128,7 +122,7 @@ pub enum DistanceMetric {
     /// `sum((u - v)^2)`.
     SqEuclidean,
     /// `1 - u.v / (|u| |v|)`. Undefined (NaN) when either vector is all zeros,
-    /// which makes [`dtw`] return an error (as librosa does).
+    /// which makes [`dtw`] return an error.
     Cosine,
     /// `sum(|u - v|)` (Manhattan / L1).
     Cityblock,
@@ -197,7 +191,7 @@ impl DistanceMetric {
 }
 
 /// Distances from single feature vectors to every column of `y`, one row of
-/// a `scipy.spatial.distance.cdist` result at a time.
+/// the pairwise distance matrix at a time.
 ///
 /// Each distance is accumulated feature by feature in the same order as
 /// [`DistanceMetric::distance`] (so the results are identical), but across
@@ -275,7 +269,7 @@ impl<'a, F: AudioFloat> RowDistances<'a, F> {
 }
 
 /// Pairwise distances between the columns of `x` (rows of the result) and the
-/// columns of `y` (columns of the result), like `scipy.spatial.distance.cdist`.
+/// columns of `y` (columns of the result).
 fn pairwise<F: AudioFloat>(
     x: ArrayView2<F>,
     y: ArrayView2<F>,
@@ -307,15 +301,14 @@ fn check_finite<F: AudioFloat>(
 /// Full step list with additive and multiplicative weights.
 type ResolvedSteps = (Vec<[usize; 2]>, Vec<f64>, Vec<f64>);
 
-/// librosa's default DTW step set: diagonal, horizontal, vertical.
+/// The default DTW step set: diagonal, horizontal, vertical.
 const DEFAULT_STEPS: [[usize; 2]; 3] = [[1, 1], [0, 1], [1, 0]];
 
 /// Configuration for [`dtw`] and [`dtw_with_cost`].
 ///
-/// Mirrors the keyword arguments of `librosa.sequence.dtw`.
-/// [`DtwConfig::librosa`] gives librosa's defaults: Euclidean metric, steps
-/// `(1,1), (0,1), (1,0)` with unit weights, full (not subsequence) alignment,
-/// backtracking enabled, no global constraint. `Default` is currently the same.
+/// The defaults are the Euclidean metric, steps `(1,1), (0,1), (1,0)` with unit
+/// weights, full (not subsequence) alignment, backtracking enabled and no global
+/// constraint. [`DtwConfig::librosa`] is currently the same.
 ///
 /// The weights and `band_rad` are `f64`; [`dtw`] rounds the weights to the
 /// element type of its input once.
@@ -341,11 +334,10 @@ pub struct DtwConfig {
     /// Metric for the local cost matrix when it is computed from features
     /// ([`dtw`]). Ignored by [`dtw_with_cost`].
     pub metric: DistanceMetric,
-    /// Additional step sizes `[row_step, col_step]`. `None` uses librosa's
-    /// default steps. As in librosa, custom steps are *appended* to the
-    /// defaults, and the defaults then get infinite weights so that they are
-    /// never preferred; step indices in [`DtwResult::steps`] count the three
-    /// defaults first.
+    /// Additional step sizes `[row_step, col_step]`. `None` uses the default steps.
+    /// Custom steps are *appended* to the defaults, and the defaults then get
+    /// infinite weights so that they are never preferred; step indices in
+    /// [`DtwResult::steps`] count the three defaults first.
     pub step_sizes_sigma: Option<Vec<[usize; 2]>>,
     /// Additive weight per step (`cost = D[prev] + weights_mul * C + weights_add`).
     /// `None` means zeros. When given, its length must equal the number of
@@ -363,7 +355,7 @@ pub struct DtwConfig {
     /// diagonal get infinite cost.
     pub global_constraints: bool,
     /// Band half-width as a fraction of the shorter sequence length. Default
-    /// 0.25 (librosa's default). Only used when `global_constraints` is true.
+    /// 0.25. Only used when `global_constraints` is true.
     pub band_rad: f64,
 }
 
@@ -389,9 +381,7 @@ impl DtwConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults for `librosa.sequence.dtw`.
-    ///
-    /// Currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -464,7 +454,7 @@ impl DtwConfig {
         self.resolve().map(|_| ())
     }
 
-    /// Full step set and weights, librosa style (defaults first).
+    /// Full step set and weights (defaults first).
     fn resolve(&self) -> AudioSampleResult<ResolvedSteps> {
         if !self.band_rad.is_finite() || self.band_rad < 0.0 {
             return Err(ParameterError::out_of_range(
@@ -535,29 +525,25 @@ impl DtwConfig {
 ///
 /// `cost` and `steps` have the shape of the local cost matrix (`(N, M)` for
 /// `X` with `N` frames and `Y` with `M` frames, transposed when a subsequence
-/// alignment swapped the roles, as in librosa).
+/// alignment swapped the roles).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DtwResult<F = f64> {
-    /// Accumulated cost matrix `D` (librosa's first return value).
-    /// Unreachable cells are infinite.
+    /// Accumulated cost matrix `D`. Unreachable cells are infinite.
     pub cost: Array2<F>,
-    /// Optimal warping path as `[index_in_x, index_in_y]` pairs, **from the
-    /// end of the alignment back to its start** (librosa order). `None` when
-    /// [`DtwConfig::backtrack`] is false.
+    /// Optimal warping path as `[index_in_x, index_in_y]` pairs, **from the end of the
+    /// alignment back to its start**. `None` when [`DtwConfig::backtrack`] is false.
     pub path: Option<Vec<[usize; 2]>>,
-    /// Index of the step (into librosa's combined step list, defaults first)
-    /// that reached each cell; feed it to [`dtw_backtracking`] to extract
-    /// other paths (librosa's `return_steps=True`).
+    /// Index of the step (into the combined step list, defaults first) that reached
+    /// each cell; feed it to [`dtw_backtracking`] to extract other paths.
     pub steps: Array2<usize>,
 }
 
 /// Dynamic time warping between two feature sequences.
 ///
-/// Builds the local cost matrix `C[n, m] = metric(x[:, n], y[:, m])` and
-/// accumulates it with dynamic programming:
-/// `D[n, m] = min_k D[n - s_k0, m - s_k1] + w_mul_k * C[n, m] + w_add_k`.
-/// Equivalent to `librosa.sequence.dtw(X, Y, ...)`. The costs are computed in
-/// the element type `F` of `x` and `y` (`f32` or `f64`).
+/// Builds the local cost matrix `C[n, m] = metric(x[:, n], y[:, m])` and accumulates it
+/// with dynamic programming: `D[n, m] = min_k D[n - s_k0, m - s_k1] + w_mul_k * C[n, m]
+/// + w_add_k`. The costs are computed in the element type `F` of `x` and `y` (`f32` or
+/// `f64`).
 ///
 /// # Arguments
 ///
@@ -567,10 +553,9 @@ pub struct DtwResult<F = f64> {
 ///
 /// # Returns
 ///
-/// The accumulated cost matrix, the step matrix and (if requested) the
-/// warping path. For a subsequence alignment with `N > M`, librosa transposes
-/// the problem; `cost` is then `(M, N)` while the path is still reported as
-/// `[index_in_x, index_in_y]`.
+/// The accumulated cost matrix, the step matrix and (if requested) the warping path. A
+/// subsequence alignment with `N > M` transposes the problem; `cost` is then `(M, N)`
+/// while the path is still reported as `[index_in_x, index_in_y]`.
 ///
 /// # Errors
 ///
@@ -597,7 +582,7 @@ pub struct DtwResult<F = f64> {
 /// # References
 ///
 /// Meinard Müller, *Fundamentals of Music Processing*, Springer 2015, ch. 3.2
-/// and 7.2; `librosa.sequence.dtw`.
+/// and 7.2.
 pub fn dtw<F: AudioFloat>(
     x: ArrayView2<F>,
     y: ArrayView2<F>,
@@ -616,9 +601,8 @@ pub fn dtw<F: AudioFloat>(
     if x.ncols() == 0 || y.ncols() == 0 {
         return err("x / y", "sequences must contain at least one frame");
     }
-    // A subsequence alignment of a longer `x` runs on the transposed cost
-    // matrix (as in librosa); every metric is symmetric, so it is computed
-    // directly as the distances from `y` to `x`.
+    // A subsequence alignment of a longer `x` runs on the transposed cost matrix; every
+    // metric is symmetric, so it is computed directly as the distances from `y` to `x`.
     let transposed = cfg.subseq && x.ncols() > y.ncols();
     let c = if transposed {
         pairwise(y, x, cfg.metric)
@@ -630,9 +614,8 @@ pub fn dtw<F: AudioFloat>(
 
 /// Dynamic time warping on a precomputed local cost matrix.
 ///
-/// Equivalent to `librosa.sequence.dtw(C=c, ...)`; [`DtwConfig::metric`] is
-/// ignored. Infinite costs are allowed (they forbid cells). The accumulation
-/// runs in the element type `F` of `c`.
+/// [`DtwConfig::metric`] is ignored. Infinite costs are allowed (they forbid cells).
+/// The accumulation runs in the element type `F` of `c`.
 ///
 /// # Arguments
 ///
@@ -641,9 +624,9 @@ pub fn dtw<F: AudioFloat>(
 ///
 /// # Returns
 ///
-/// See [`DtwResult`]. Like librosa, when `subseq` is true and `c` has more rows
-/// than columns, the path columns are swapped (`[col, row]`) although `c` is
-/// not transposed; pass `c` with `N <= M` to avoid this quirk.
+/// See [`DtwResult`]. When `subseq` is true and `c` has more rows than columns, the
+/// path columns are swapped (`[col, row]`) although `c` is not transposed; pass `c`
+/// with `N <= M` to avoid this quirk.
 ///
 /// # Errors
 ///
@@ -671,7 +654,8 @@ pub fn dtw_with_cost<F: AudioFloat>(
     dtw_core(c.to_owned(), cfg, false)
 }
 
-/// librosa's `fill_off_diagonal(x, radius, value)` (Sakoe-Chiba band).
+/// Sets every cell outside a Sakoe-Chiba band of `radius` (a fraction of the shorter
+/// side) to `value`.
 fn fill_off_diagonal<F: AudioFloat>(x: &mut Array2<F>, radius: f64, value: F) {
     let (nx, ny) = x.dim();
     let r = (radius * nx.min(ny) as f64).round_ties_even() as i64;
@@ -763,16 +747,14 @@ fn dtw_core<F: AudioFloat>(
     })
 }
 
-/// librosa's `__dtw_calc_accu_cost`, in place: `d` holds the local cost
-/// matrix (`m` columns, row-major) on entry and the accumulated cost on exit;
-/// `steps` (zeros on entry) receives the index of the step taken into each
-/// cell.
+/// The DTW accumulation, in place: `d` holds the local cost matrix (`m` columns,
+/// row-major) on entry and the accumulated cost on exit; `steps` (zeros on entry)
+/// receives the index of the step taken into each cell.
 ///
-/// librosa pads the accumulated matrix with infinite rows and columns so that
-/// every step has a predecessor. A step from the padding adds to `inf` and can
-/// never improve a cell (the sum is `inf` or NaN, and the comparison is a
-/// strict `<`), so here such steps are skipped instead, which gives the same
-/// values without the padded copies.
+/// A step whose predecessor lies outside the matrix is skipped. Padding the
+/// matrix with infinite rows and columns would give the same values: a step from
+/// the padding adds to `inf` and can never improve a cell (the sum is `inf` or
+/// NaN, and the comparison is a strict `<`).
 fn accumulate<F: AudioFloat>(
     d: &mut [F],
     steps: &mut [usize],
@@ -822,8 +804,8 @@ fn accumulate<F: AudioFloat>(
         }
         return;
     }
-    // librosa's default steps: diagonal (1, 1), horizontal (0, 1), vertical
-    // (1, 0). The first row and column have fewer predecessors.
+    // The default steps: diagonal (1, 1), horizontal (0, 1), vertical (1, 0). The first
+    // row and column have fewer predecessors.
     for j in 0..m {
         generic_cell(d, steps, 0, j);
     }
@@ -867,7 +849,7 @@ fn accumulate<F: AudioFloat>(
     }
 }
 
-/// Index of the first minimum (`numpy.argmin`); NaN-free input assumed.
+/// Index of the first minimum; NaN-free input assumed.
 fn argmin_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
     let mut best = (0, F::infinity());
     let mut first = true;
@@ -880,7 +862,7 @@ fn argmin_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
     best.0
 }
 
-/// Index of the first maximum (`numpy.argmax`); NaN-free input assumed.
+/// Index of the first maximum; NaN-free input assumed.
 #[inline(always)]
 fn argmax_first<F: AudioFloat>(it: impl Iterator<Item = F>) -> usize {
     let mut best = (0, F::neg_infinity());
@@ -925,15 +907,15 @@ fn backtrack_path<S: Copy + std::fmt::Display + num_traits::ToPrimitive>(
 
 /// Backtracks a warping path from a DTW step matrix.
 ///
-/// Equivalent to `librosa.sequence.dtw_backtracking`. Useful to extract a
-/// subsequence match ending at a column other than the global optimum.
+/// Useful to extract a subsequence match ending at a column other than the global
+/// optimum.
 ///
 /// # Arguments
 ///
 /// - `steps` - Step matrix from [`DtwResult::steps`], or the same indices in
-///   any primitive integer type (for example librosa's `int32` matrix).
+///   any primitive integer type (for example an `i32` matrix).
 /// - `step_sizes_sigma` - The custom steps used for the DTW (`None` for
-///   librosa's defaults); appended to the defaults exactly as in [`dtw`].
+///   the default steps); appended to the defaults exactly as in [`dtw`].
 /// - `subseq` - Whether the DTW was a subsequence alignment.
 /// - `start` - Column of the last row to start from (subsequence only;
 ///   `None` starts at the bottom-right cell).
@@ -941,7 +923,7 @@ fn backtrack_path<S: Copy + std::fmt::Display + num_traits::ToPrimitive>(
 /// # Returns
 ///
 /// The path from `start` back to the first row (subsequence) or to `[0, 0]`,
-/// in librosa order (end first).
+/// end first.
 ///
 /// # Errors
 ///
@@ -1001,9 +983,9 @@ pub fn dtw_backtracking<S: Copy + std::fmt::Display + num_traits::ToPrimitive>(
 
 /// Configuration for [`rqa`].
 ///
-/// [`RqaConfig::librosa`] gives librosa's defaults (unit gap penalties, knight
-/// moves, backtracking); `Default` is currently the same. The penalties are
-/// `f64` and are rounded to the element type of the similarity matrix once.
+/// The defaults are unit gap penalties, knight moves and backtracking;
+/// [`RqaConfig::librosa`] is currently the same. The penalties are `f64` and are
+/// rounded to the element type of the similarity matrix once.
 ///
 /// # Examples
 ///
@@ -1016,16 +998,14 @@ pub fn dtw_backtracking<S: Copy + std::fmt::Display + num_traits::ToPrimitive>(
 #[derive(Debug, Clone, PartialEq)]
 pub struct RqaConfig {
     /// Penalty for starting a gap (a non-recurrent cell right after a
-    /// recurrent one). Finite and `>= 0`. Default 1 (librosa's default).
+    /// recurrent one). Finite and `>= 0`. Default 1.
     pub gap_onset: f64,
-    /// Penalty for extending a gap. Finite and `>= 0`. Default 1 (librosa's
-    /// default).
+    /// Penalty for extending a gap. Finite and `>= 0`. Default 1.
     pub gap_extend: f64,
     /// Allow knight moves `(1, 2)` / `(2, 1)` in addition to the diagonal,
-    /// tolerating small tempo deviations. Default `true` (librosa's default).
+    /// tolerating small tempo deviations. Default `true`.
     pub knight_moves: bool,
-    /// Compute the optimal path ([`RqaResult::path`]). Default `true`
-    /// (librosa's default).
+    /// Compute the optimal path ([`RqaResult::path`]). Default `true`.
     pub backtrack: bool,
 }
 
@@ -1047,9 +1027,7 @@ impl RqaConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults for `librosa.sequence.rqa`.
-    ///
-    /// Currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -1114,9 +1092,8 @@ pub struct RqaResult<F = f64> {
     /// Alignment score matrix, same shape and element type as the similarity
     /// matrix.
     pub score: Array2<F>,
-    /// Optimal local alignment path as `[row, col]` pairs **from start to end**
-    /// (librosa order for `rqa`). Empty if there is no recurrence. `None` when
-    /// [`RqaConfig::backtrack`] is false.
+    /// Optimal local alignment path as `[row, col]` pairs **from start to end**. Empty
+    /// if there is no recurrence. `None` when [`RqaConfig::backtrack`] is false.
     pub path: Option<Vec<[usize; 2]>>,
 }
 
@@ -1125,8 +1102,7 @@ pub struct RqaResult<F = f64> {
 ///
 /// A Smith-Waterman-like dynamic program that rewards runs of recurrent cells
 /// along diagonals (optionally with knight moves) and penalises gaps.
-/// Equivalent to `librosa.sequence.rqa`. The scores are computed in the
-/// element type `F` of `sim`.
+/// The scores are computed in the element type `F` of `sim`.
 ///
 /// # Arguments
 ///
@@ -1158,12 +1134,8 @@ pub struct RqaResult<F = f64> {
 /// assert_eq!(r.path.unwrap(), vec![[1, 2], [2, 3], [3, 4], [4, 5]]);
 /// ```
 ///
-/// # Differences from librosa
-///
-/// librosa stores the wrong back-pointer for a `(-2, -1)` move into the second
-/// column (`j == 1`), which makes its backtracking step outside the matrix.
-/// The scores are identical; the path here follows the move that was actually
-/// taken.
+/// Backtracking follows the move that was actually taken into each cell,
+/// including a `(-2, -1)` knight move into the second column (`j == 1`).
 ///
 /// # References
 ///
@@ -1399,8 +1371,7 @@ fn rqa_backtrack<F: AudioFloat>(
 pub struct ViterbiResult<F = f64> {
     /// Most likely state index per time step (`n_steps` entries).
     pub states: Vec<usize>,
-    /// Log-likelihood of `states` (librosa's `logp` with `return_logp=True`).
-    /// Unnormalised for the discriminative variant.
+    /// Log-likelihood of `states`. Unnormalised for the discriminative variant.
     pub log_prob: F,
 }
 
@@ -1522,7 +1493,7 @@ fn max_of_sums<F: AudioFloat>(a: &[F], b: &[F]) -> F {
     m
 }
 
-/// librosa's inner loop over the candidates `lo..hi`: the first index `k`
+/// The best predecessor among the candidates `lo..hi`: the first index `k`
 /// with the largest `prev[k] + lt[k]` that exceeds `-inf`, and that sum.
 #[inline(always)]
 fn best_in_range<F: AudioFloat>(prev: &[F], lt: &[F], lo: usize, hi: usize) -> (F, Option<usize>) {
@@ -1548,7 +1519,7 @@ fn best_in_range<F: AudioFloat>(prev: &[F], lt: &[F], lo: usize, hi: usize) -> (
     }
 }
 
-/// librosa's inner loop over an explicit candidate list.
+/// The best predecessor in an explicit candidate list (first maximum above `-inf`).
 #[inline]
 fn best_in_list<F: AudioFloat>(prev: &[F], lt: &[F], ks: &[usize]) -> (F, Option<usize>) {
     let mut best = F::neg_infinity();
@@ -1563,19 +1534,18 @@ fn best_in_list<F: AudioFloat>(prev: &[F], lt: &[F], ks: &[usize]) -> (F, Option
     (best, arg)
 }
 
-/// The core log-domain Viterbi recursion (librosa's `_viterbi`).
+/// The core log-domain Viterbi recursion.
 ///
 /// `fill_log_prob(t, col)` writes the `n_states` observation log-likelihoods of
 /// step `t` into `col`; `log_trans_t[j * n_states + k]` is the log-transition
 /// `k -> j` (the transposed log matrix, so that the candidates of one target
-/// state are contiguous). Ties are broken towards the lowest state index, as in
-/// librosa.
+/// state are contiguous). Ties are broken towards the lowest state index.
 ///
 /// Transitions whose log value is exactly `ln(tiny)` (zero probabilities) all
 /// add the same constant, so their best total is bounded by the best previous
 /// value among them plus that constant. They are only scanned when that bound
 /// reaches the best total of the other candidates; otherwise none of them can
-/// be the (first) maximum and skipping them gives librosa's result exactly.
+/// be the (first) maximum and skipping them gives the exact result.
 fn viterbi_core<F: AudioFloat>(
     n_states: usize,
     n_steps: usize,
@@ -1587,8 +1557,8 @@ fn viterbi_core<F: AudioFloat>(
     let n = n_states;
     let ninf = F::neg_infinity();
     let l0 = tiny::<F>().ln();
-    // Candidates of each target state (librosa's `pred_states` with a
-    // threshold, every state otherwise), split into the live ones and a flag
+    // Candidates of each target state (those at or above the threshold, every
+    // state otherwise), split into the live ones and a flag
     // for structural zeros among them.
     let mut cands: Vec<Vec<usize>> = Vec::new();
     let mut live: Vec<Live> = Vec::with_capacity(n);
@@ -1714,12 +1684,9 @@ fn log_transition_t<F: AudioFloat>(transition: ArrayView2<F>) -> Vec<F> {
 /// `prob[s, t] = P[observation t | state s]`, the transition matrix and the
 /// initial distribution, in the log domain (each probability is clipped as
 /// `ln(p + tiny)`, where `tiny` is the smallest positive normal value of `F`).
-/// Equivalent to `librosa.sequence.viterbi(prob, transition, p_init=...,
-/// return_logp=True, transition_min_prob=...)`.
 ///
-/// The recursion runs in the element type `F` of `prob` (`f32` or `f64`).
-/// librosa accumulates the path log-likelihoods in `float64` for every input
-/// type; with `f32` input this function accumulates in `f32`, so paths whose
+/// The recursion runs in the element type `F` of `prob` (`f32` or `f64`). With
+/// `f32` input the path log-likelihoods accumulate in `f32`, so paths whose
 /// log-likelihoods differ by less than the `f32` resolution of the running
 /// totals (about `1e-7` relative) may be decoded differently.
 ///
@@ -1727,8 +1694,8 @@ fn log_transition_t<F: AudioFloat>(transition: ArrayView2<F>) -> Vec<F> {
 ///
 /// - `prob` - `(n_states, n_steps)` likelihoods in `[0, 1]`.
 /// - `transition` - `(n_states, n_states)` row-stochastic matrix,
-///   `transition[i, j] = P[i -> j]`. Rows must sum to 1 (within `numpy.allclose`
-///   tolerance).
+///   `transition[i, j] = P[i -> j]`. Rows must sum to 1 (to within an absolute
+///   tolerance of `1e-8` plus a relative tolerance of `1e-5`).
 /// - `p_init` - Initial distribution (`n_states`, sums to 1); `None` = uniform.
 /// - `transition_min_prob` - If `Some(p)` with `p > 0`, only transitions with
 ///   probability `>= p` are searched (faster, approximate). `None` or `0` is
@@ -1737,7 +1704,7 @@ fn log_transition_t<F: AudioFloat>(transition: ArrayView2<F>) -> Vec<F> {
 /// # Returns
 ///
 /// The state sequence and its log-likelihood. Ties are broken towards the
-/// lowest state index, exactly as librosa's `argmax`.
+/// lowest state index.
 ///
 /// # Errors
 ///
@@ -1807,8 +1774,6 @@ pub fn viterbi<F: AudioFloat>(
 /// `prob[s, t] = P[state s | observation t]` (each column a distribution) is
 /// turned into a scaled likelihood by dividing by the marginal `p_state`,
 /// then decoded as in [`viterbi`] (in the element type `F` of `prob`).
-/// Equivalent to `librosa.sequence.viterbi_discriminative(...,
-/// return_logp=True)`.
 ///
 /// # Arguments
 ///
@@ -1893,9 +1858,8 @@ pub fn viterbi_discriminative<F: AudioFloat>(
 ///
 /// Each of the `n_states` rows of `prob` is treated as an independent
 /// two-state (off/on) HMM with `P[on | observation t] = prob[s, t]` and decoded
-/// with [`viterbi_discriminative`] (in the element type `F` of `prob`). Equivalent to
-/// `librosa.sequence.viterbi_binary(..., return_logp=True)`. Typical use:
-/// smoothing frame-wise voice-activity or note-activity probabilities.
+/// with [`viterbi_discriminative`] (in the element type `F` of `prob`). Typical
+/// use: smoothing frame-wise voice-activity or note-activity probabilities.
 ///
 /// # Arguments
 ///
@@ -1931,10 +1895,7 @@ pub fn viterbi_discriminative<F: AudioFloat>(
 /// assert_eq!(r.states.row(0).to_vec(), on);
 /// ```
 ///
-/// # Differences from librosa
-///
-/// librosa returns the states as `uint16` `0`/`1`; this function returns
-/// `bool` (one byte per entry).
+/// The states are `bool` (one byte per entry).
 pub fn viterbi_binary<F: AudioFloat>(
     prob: ArrayView2<F>,
     transition: ArrayView3<F>,
@@ -2021,9 +1982,8 @@ fn viterbi_binary_core<F: AudioFloat>(
 
 /// Uniform transition matrix: every transition has probability `1 / n_states`.
 ///
-/// Equivalent to `librosa.sequence.transition_uniform`. The entries are
-/// computed in `f64` and rounded to `F` (`f32` or `f64`, usually inferred from
-/// the decoder call) once.
+/// The entries are computed in `f64` and rounded to `F` (`f32` or `f64`, usually
+/// inferred from the decoder call) once.
 ///
 /// # Errors
 ///
@@ -2086,9 +2046,8 @@ fn per_state_probs(n_states: usize, prob: &[f64]) -> AudioSampleResult<Vec<f64>>
 /// Self-loop transition matrix: stay with probability `prob[i]`, move to any
 /// other state uniformly otherwise.
 ///
-/// Equivalent to `librosa.sequence.transition_loop`. Useful to discourage
-/// rapid switching (e.g. chord or voicing smoothing). The entries are computed
-/// in `f64` and rounded to `F` once.
+/// Useful to discourage rapid switching (e.g. chord or voicing smoothing). The entries
+/// are computed in `f64` and rounded to `F` once.
 ///
 /// # Arguments
 ///
@@ -2125,9 +2084,8 @@ pub fn transition_loop<F: AudioFloat>(
 /// Cyclic transition matrix: stay with probability `prob[i]`, otherwise move
 /// to state `(i + 1) % n_states`.
 ///
-/// Equivalent to `librosa.sequence.transition_cycle` (e.g. beat-position or
-/// metrical-cycle models). The entries are computed in `f64` and rounded to
-/// `F` once.
+/// Used for beat-position or metrical-cycle models. The entries are computed in `f64`
+/// and rounded to `F` once.
 ///
 /// # Arguments
 ///
@@ -2159,11 +2117,11 @@ pub fn transition_cycle<F: AudioFloat>(
     Ok(t)
 }
 
-/// Window shape for [`transition_local`] (symmetric, as
-/// `scipy.signal.get_window(name, width, fftbins=False)`).
+/// Window shape for [`transition_local`] (symmetric windows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransitionWindow {
-    /// `scipy.signal.windows.triang` (librosa's default `'triangle'`).
+    /// Triangular window with non-zero end points (the default): `2n / (m + 1)`
+    /// rising to 1 for odd length `m`, `(2n - 1) / m` for even `m`.
     #[default]
     Triangle,
     /// Symmetric Hann window. Widths 1 and 2 give degenerate rows (2 is all
@@ -2231,10 +2189,8 @@ impl TransitionWindow {
 /// Localised transition matrix: from state `i`, transitions are allowed only
 /// to states within `width[i] / 2` of `i`, weighted by a window.
 ///
-/// Equivalent to `librosa.sequence.transition_local(n_states, width,
-/// window=..., wrap=...)`. Typical for pitch tracking (pYIN), where the
-/// pitch may only move a few bins per frame. Each row is computed and
-/// normalised in `f64` and rounded to `F` once.
+/// Typical for pitch tracking (pYIN), where the pitch may only move a few bins per
+/// frame. Each row is computed and normalised in `f64` and rounded to `F` once.
 ///
 /// # Arguments
 ///
@@ -2336,7 +2292,8 @@ pub fn transition_local<F: AudioFloat>(
 /// How a recurrence / cross-similarity matrix encodes links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecurrenceMode {
-    /// `1.0` for a link, `0.0` otherwise (librosa default; librosa returns `bool`).
+    /// A link or no link (the default): `true` / `false` from [`recurrence_matrix`]
+    /// and [`cross_similarity`], `1.0` / `0.0` from the `_weighted` functions.
     #[default]
     Connectivity,
     /// The distance between the linked frames.
@@ -2345,32 +2302,32 @@ pub enum RecurrenceMode {
     Affinity,
 }
 
-/// Bandwidth for [`RecurrenceMode::Affinity`] (librosa's `bandwidth`).
+/// Bandwidth for [`RecurrenceMode::Affinity`].
 ///
-/// The `*K*` heuristics follow librosa's `__affinity_bandwidth`, using the
-/// distances from each frame to its `k` nearest linked neighbours.
+/// The `*K*` heuristics use the distances from each frame to its `k` nearest
+/// linked neighbours.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Bandwidth {
-    /// Median over frames of the distance to the k-th nearest neighbour
-    /// (librosa default, `None` / `'med_k_scalar'`).
+    /// Median over frames of the distance to the k-th nearest neighbour (the
+    /// default).
     #[default]
     MedKScalar,
-    /// Per link: mean of both frames' k-th-neighbour distances (`'mean_k'`).
+    /// Per link: mean of both frames' k-th-neighbour distances.
     MeanK,
-    /// Per link: geometric mean of both frames' k-th-neighbour distances (`'gmean_k'`).
+    /// Per link: geometric mean of both frames' k-th-neighbour distances.
     GmeanK,
     /// Per link: mean of both frames' average distance to their k nearest
-    /// neighbours (`'mean_k_avg'`).
+    /// neighbours.
     MeanKAvg,
-    /// Per link: geometric mean of the average k-nearest distances (`'gmean_k_avg'`).
+    /// Per link: geometric mean of the average k-nearest distances.
     GmeanKAvg,
     /// Per link: mean of both frames' average k-nearest distances and the
-    /// link's own distance (`'mean_k_avg_and_pair'`).
+    /// link's own distance.
     MeanKAvgAndPair,
     /// A fixed positive bandwidth (rounded to the element type of the data).
     Scalar(f64),
     /// A per-link bandwidth matrix, all entries `> 0`, indexed
-    /// `[query_frame, neighbour_frame]` as in librosa, i.e. the **transpose**
+    /// `[query_frame, neighbour_frame]`, i.e. the **transpose**
     /// of the output layout (`(t, t)` for a recurrence matrix, `(n, n_ref)`
     /// for a cross-similarity matrix). Entries are rounded to the element type
     /// of the data.
@@ -2379,8 +2336,10 @@ pub enum Bandwidth {
 
 /// Configuration for [`recurrence_matrix`].
 ///
-/// [`RecurrenceConfig::librosa`] gives librosa's defaults; `Default` is
-/// currently the same.
+/// The defaults are `k` from the sequence length, `width = 1`, the Euclidean
+/// metric, no symmetrisation, connectivity mode, the median k-th-neighbour
+/// bandwidth, no self links and no full linking. [`RecurrenceConfig::librosa`]
+/// is currently the same.
 ///
 /// # Examples
 ///
@@ -2395,12 +2354,11 @@ pub enum Bandwidth {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecurrenceConfig {
-    /// Number of nearest neighbours per frame. `None` = librosa's
+    /// Number of nearest neighbours per frame. `None` means
     /// `2 * ceil(sqrt(t - 2 * width + 1))`. Must be `>= 1` when given.
     pub k: Option<usize>,
     /// Frames closer than `width` in time are never linked (suppresses the
-    /// trivial near-diagonal). `1 <= width < (t - 1) / 2`. Default 1 (librosa's
-    /// default).
+    /// trivial near-diagonal). `1 <= width < (t - 1) / 2`. Default 1.
     pub width: usize,
     /// Distance between feature vectors.
     pub metric: DistanceMetric,
@@ -2410,11 +2368,11 @@ pub struct RecurrenceConfig {
     pub mode: RecurrenceMode,
     /// Bandwidth for [`RecurrenceMode::Affinity`].
     pub bandwidth: Bandwidth,
-    /// Link each frame to itself (librosa's `self`): 1 in connectivity mode,
-    /// affinity 1 in affinity mode; no effect in distance mode.
+    /// Link each frame to itself: 1 in connectivity mode, affinity 1 in affinity mode;
+    /// no effect in distance mode.
     pub self_links: bool,
     /// Link every pair (no k-NN sparsification, no width band) in distance /
-    /// affinity mode (librosa's `full`).
+    /// affinity mode.
     pub full: bool,
 }
 
@@ -2440,9 +2398,7 @@ impl RecurrenceConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults for `librosa.segment.recurrence_matrix`.
-    ///
-    /// Currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2549,8 +2505,9 @@ fn validate_bandwidth(b: &Bandwidth) -> AudioSampleResult<()> {
 
 /// Configuration for [`cross_similarity`].
 ///
-/// [`CrossSimilarityConfig::librosa`] gives librosa's defaults; `Default` is
-/// currently the same.
+/// The defaults are `k` from the reference length, the Euclidean metric,
+/// connectivity mode, the median k-th-neighbour bandwidth and no full linking.
+/// [`CrossSimilarityConfig::librosa`] is currently the same.
 ///
 /// # Examples
 ///
@@ -2562,7 +2519,7 @@ fn validate_bandwidth(b: &Bandwidth) -> AudioSampleResult<()> {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrossSimilarityConfig {
-    /// Nearest reference frames per query frame. `None` = librosa's
+    /// Nearest reference frames per query frame. `None` means
     /// `min(n_ref, 2 * ceil(sqrt(n_ref)))`. Must be `>= 1` when given.
     pub k: Option<usize>,
     /// Distance between feature vectors.
@@ -2570,11 +2527,11 @@ pub struct CrossSimilarityConfig {
     /// Output encoding.
     pub mode: RecurrenceMode,
     /// Bandwidth for [`RecurrenceMode::Affinity`]. The per-link heuristics
-    /// reproduce librosa, which indexes the per-query-frame statistics by the
-    /// *reference* frame index; they therefore require `n_ref <= n`.
+    /// index the per-query-frame statistics by the *reference* frame index, so
+    /// they require `n_ref <= n`.
     pub bandwidth: Bandwidth,
     /// In distance / affinity mode, link each query frame to its
-    /// `min(n_ref, n)` nearest reference frames (librosa's `full`).
+    /// `min(n_ref, n)` nearest reference frames.
     pub full: bool,
 }
 
@@ -2597,9 +2554,7 @@ impl CrossSimilarityConfig {
         Self::default()
     }
 
-    /// librosa 1.0's defaults for `librosa.segment.cross_similarity`.
-    ///
-    /// Currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2654,9 +2609,8 @@ impl CrossSimilarityConfig {
 }
 
 /// Writes the nearest-neighbour distances from `xi` to the columns of `y`
-/// into `row`, following sklearn's conventions (librosa delegates to
-/// `sklearn.neighbors.NearestNeighbors`): cosine distances of zero vectors
-/// are 1 and results are clipped to `[0, 2]`.
+/// into `row`. Cosine distances of zero vectors are 1 and cosine results are
+/// clipped to `[0, 2]`.
 fn knn_row<F: AudioFloat>(dist: &RowDistances<'_, F>, xi: ArrayView1<F>, row: &mut [F]) {
     dist.row(xi, row);
     if dist.metric == DistanceMetric::Cosine {
@@ -2753,8 +2707,8 @@ impl RecCell for bool {
     }
 }
 
-/// Keep the `k` smallest stored (non-zero) values of each row, ties by column
-/// (librosa's stable `argsort` over the row's links).
+/// Keep the `k` smallest stored (non-zero) values of each row; ties keep the
+/// lower column (a stable sort over the row's links).
 fn trim_rows<C: RecCell>(rec: &mut Array2<C>, k: usize) {
     let mut links: Vec<usize> = Vec::new();
     for mut row in rec.rows_mut() {
@@ -2856,8 +2810,8 @@ fn link_row_stats<F: AudioFloat>(rec: &impl LinkRows<F>, k: usize) -> (Vec<F>, V
     (dist_to_k, avg, empty)
 }
 
-/// Converts stored distances to affinities in place (`rec` in librosa's
-/// pre-transpose orientation; stored = non-zero, negative = stored zero).
+/// Converts stored distances to affinities in place (`rec` in the pre-transpose
+/// orientation, row = query frame; stored = non-zero, negative = stored zero).
 fn apply_affinity<F: AudioFloat>(
     rec: &mut impl LinkRows<F>,
     bandwidth: &Bandwidth,
@@ -2916,8 +2870,8 @@ fn apply_affinity<F: AudioFloat>(
                 let Some(&sj) = stat.get(j) else {
                     return err(
                         "bandwidth",
-                        "per-link bandwidth heuristics need n_ref <= n (librosa indexes \
-                         per-query statistics by reference frame)",
+                        "per-link bandwidth heuristics need n_ref <= n (per-query \
+                         statistics are indexed by reference frame)",
                     );
                 };
                 let si = stat[i];
@@ -2933,9 +2887,9 @@ fn apply_affinity<F: AudioFloat>(
     }
 }
 
-/// The links of a recurrence matrix in librosa's pre-transpose orientation,
-/// row by row (compressed sparse rows, columns ascending): row `i` holds the
-/// neighbours of frame `i`, which after librosa's transpose are column `i`.
+/// The links of a recurrence matrix in the pre-transpose orientation, row by
+/// row (compressed sparse rows, columns ascending): row `i` holds the
+/// neighbours of frame `i`, which after the transpose are column `i`.
 /// A stored value may be zero only after an affinity underflows; the dense
 /// matrix holds no link there.
 #[derive(Debug, Clone)]
@@ -3109,11 +3063,9 @@ fn recurrence_params<F: AudioFloat>(
 
 /// Recurrence (self-similarity) matrix of a feature sequence, as links.
 ///
-/// Frame `j` is linked to frame `i` if it is among the `k` nearest neighbours
-/// of `i` and at least `width` frames away. Equivalent to
-/// `librosa.segment.recurrence_matrix(data, ..., mode='connectivity',
-/// sparse=False)`, including its `bool` element type (one byte per entry).
-/// Distances are computed in the element type `F` of `data`. For distance or
+/// Frame `j` is linked to frame `i` if it is among the `k` nearest neighbours of `i`
+/// and at least `width` frames away. The result is a dense `bool` matrix (one byte per
+/// entry). Distances are computed in the element type `F` of `data`. For distance or
 /// affinity weights use [`recurrence_matrix_weighted`].
 ///
 /// # Arguments
@@ -3125,7 +3077,7 @@ fn recurrence_params<F: AudioFloat>(
 /// # Returns
 ///
 /// A `(t, t)` matrix `R` with `R[j, i]` true iff frame `j` is a neighbour of
-/// frame `i` (librosa's orientation).
+/// frame `i`.
 ///
 /// # Errors
 ///
@@ -3150,15 +3102,11 @@ fn recurrence_params<F: AudioFloat>(
 /// }
 /// ```
 ///
-/// # Differences from librosa
+/// # Neighbour search
 ///
-/// - Dense output only.
-/// - Brute-force exact neighbour search (librosa uses sklearn, whose
-///   brute-force Euclidean distances can differ by round-off).
-/// - Among the `k + 2 * width` nearest neighbours outside the width band,
-///   librosa keeps the `k` with the *lowest frame index* (its sort over
-///   equal link values preserves index order). This function reproduces that
-///   behaviour exactly.
+/// The search is brute force and exact. Among the `k + 2 * width` nearest
+/// neighbours outside the width band, the `k` with the *lowest frame index* are
+/// kept (all links have the same value, and the sort over them is stable).
 pub fn recurrence_matrix<F: AudioFloat>(
     data: ArrayView2<F>,
     cfg: &RecurrenceConfig,
@@ -3181,9 +3129,7 @@ pub fn recurrence_matrix<F: AudioFloat>(
 /// The same neighbourhood as [`recurrence_matrix`], but each link stores a
 /// value of type `F`: the distance ([`RecurrenceMode::Distance`]),
 /// `exp(-distance / bandwidth)` ([`RecurrenceMode::Affinity`]), or `1.0`
-/// ([`RecurrenceMode::Connectivity`]). Equivalent to
-/// `librosa.segment.recurrence_matrix(data, ..., sparse=False)` in those
-/// modes. Computed in the element type `F` of `data`.
+/// ([`RecurrenceMode::Connectivity`]). Computed in the element type `F` of `data`.
 ///
 /// # Arguments
 ///
@@ -3193,7 +3139,7 @@ pub fn recurrence_matrix<F: AudioFloat>(
 /// # Returns
 ///
 /// A `(t, t)` matrix `R` with `R[j, i] != 0` iff frame `j` is a neighbour of
-/// frame `i` (librosa's orientation).
+/// frame `i`.
 ///
 /// # Errors
 ///
@@ -3219,10 +3165,8 @@ pub fn recurrence_matrix<F: AudioFloat>(
 /// assert_eq!(rec.column(0).iter().filter(|&&v| v != 0.0).count(), 1);
 /// ```
 ///
-/// # Differences from librosa
-///
-/// As [`recurrence_matrix`]. In connectivity mode librosa returns `bool`;
-/// this function returns `1.0`/`0.0` (use [`recurrence_matrix`] for `bool`).
+/// The neighbour search is as in [`recurrence_matrix`]. In connectivity mode the
+/// entries are `1.0`/`0.0` (use [`recurrence_matrix`] for `bool`).
 pub fn recurrence_matrix_weighted<F: AudioFloat>(
     data: ArrayView2<F>,
     cfg: &RecurrenceConfig,
@@ -3250,8 +3194,8 @@ pub fn recurrence_matrix_weighted<F: AudioFloat>(
 }
 
 /// The shared part of [`recurrence_matrix`] and [`recurrence_matrix_weighted`]:
-/// the `(t, t)` link matrix in librosa's pre-transpose orientation (row =
-/// query frame) and the `k` for bandwidth estimation. `link(d)` is the entry
+/// the `(t, t)` link matrix in the pre-transpose orientation (row = query
+/// frame) and the `k` for bandwidth estimation. `link(d)` is the entry
 /// stored for a neighbour at distance `d`; `diag(v)` the diagonal entry given
 /// its current value.
 fn recurrence_core<F: AudioFloat, C: RecCell>(
@@ -3304,10 +3248,9 @@ fn recurrence_core<F: AudioFloat, C: RecCell>(
 /// Cross-similarity matrix between a query and a reference feature sequence,
 /// as links.
 ///
-/// Each query frame is linked to its `k` nearest reference frames.
-/// Equivalent to `librosa.segment.cross_similarity(data, data_ref, ...,
-/// mode='connectivity', sparse=False)`, including its `bool` element type.
-/// For distance or affinity weights use [`cross_similarity_weighted`].
+/// Each query frame is linked to its `k` nearest reference frames. The result is a
+/// dense `bool` matrix. For distance or affinity weights use
+/// [`cross_similarity_weighted`].
 ///
 /// # Arguments
 ///
@@ -3359,9 +3302,7 @@ pub fn cross_similarity<F: AudioFloat>(
 ///
 /// The same links as [`cross_similarity`], but each stores a value of type
 /// `F`: the distance, the affinity `exp(-distance / bandwidth)`, or `1.0` in
-/// connectivity mode. Equivalent to `librosa.segment.cross_similarity(data,
-/// data_ref, ..., sparse=False)` in those modes. Computed in the element type
-/// `F` of the inputs.
+/// connectivity mode. Computed in the element type `F` of the inputs.
 ///
 /// # Arguments
 ///
@@ -3419,10 +3360,9 @@ pub fn cross_similarity_weighted<F: AudioFloat>(
     Ok(out)
 }
 
-/// The shared part of [`cross_similarity`] and [`cross_similarity_weighted`]:
-/// the `(n_ref, n)` link matrix (librosa's output orientation) and the `k`
-/// for bandwidth estimation. `link(d)` is the entry stored for a neighbour
-/// at distance `d`.
+/// The shared part of [`cross_similarity`] and [`cross_similarity_weighted`]: the
+/// `(n_ref, n)` link matrix (the output orientation) and the `k` for bandwidth
+/// estimation. `link(d)` is the entry stored for a neighbour at distance `d`.
 fn cross_similarity_core<F: AudioFloat, C: RecCell>(
     data: ArrayView2<F>,
     data_ref: ArrayView2<F>,
@@ -3456,11 +3396,11 @@ fn cross_similarity_core<F: AudioFloat, C: RecCell>(
         k
     };
     let n_nb = n_ref.min(k);
-    // librosa returns the transpose of the (query, reference) matrix built
-    // here, so it is built directly in the transposed storage, one row of
-    // distances at a time (no distance matrix, no transposed copy). Each row
-    // holds at most n_nb <= k links, so librosa's trimming to the k nearest
-    // (when `full` is false) never removes any.
+    // The output is the transpose of the (query, reference) link matrix, so it
+    // is built directly in the transposed storage, one row of distances at a
+    // time (no distance matrix, no transposed copy). Each row holds at most
+    // n_nb <= k links, so trimming to the k nearest (when `full` is false)
+    // would never remove any.
     let mut out = Array2::<C>::from_elem((n_ref, n), C::zero());
     {
         let mut xsim = out.view_mut().reversed_axes();
@@ -3516,13 +3456,12 @@ fn shear<T: Copy>(src: ArrayView2<T>, rows: usize) -> Array2<T> {
 ///
 /// `lag[l, i] = rec[(i + l) mod T, i]` with `T = 2t` when `pad` is true (the
 /// recurrence matrix is zero-padded below, so negative and positive lags do
-/// not wrap onto each other) and `T = t` otherwise. Equivalent to
-/// `librosa.segment.recurrence_to_lag(rec, pad=..., axis=-1)` for dense input.
+/// not wrap onto each other) and `T = t` otherwise.
 ///
 /// # Arguments
 ///
 /// - `rec` - Square `(t, t)` recurrence matrix.
-/// - `pad` - Zero-pad to `(2t, t)` before shearing (librosa default true).
+/// - `pad` - Zero-pad to `(2t, t)` before shearing (usually `true`).
 ///
 /// # Errors
 ///
@@ -3572,7 +3511,7 @@ pub fn recurrence_to_lag<T: Copy + Default>(
             }
         }
     } else if let Some(src) = rec.t().as_slice() {
-        // Fortran order (librosa's recurrence matrices): each column is
+        // Column-major (Fortran) order: each column is
         // contiguous; read it in place instead of copying the matrix.
         for cb in (0..c).step_by(B) {
             let ce = (cb + B).min(c);
@@ -3599,8 +3538,7 @@ pub fn recurrence_to_lag<T: Copy + Default>(
 
 /// Converts a time-lag matrix back into a recurrence matrix.
 ///
-/// Inverse of [`recurrence_to_lag`] (padded or not). Equivalent to
-/// `librosa.segment.lag_to_recurrence(lag, axis=-1)` for dense input.
+/// Inverse of [`recurrence_to_lag`] (padded or not).
 ///
 /// # Arguments
 ///
@@ -3645,23 +3583,23 @@ pub fn lag_to_recurrence<T: Copy + Default>(lag: ArrayView2<T>) -> AudioSampleRe
 /// Built-in aggregation for [`sync`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SyncAggregate {
-    /// Arithmetic mean (librosa default, `np.mean`).
+    /// Arithmetic mean (the default).
     #[default]
     Mean,
-    /// Median (`np.median`; mean of the two middle values for even counts).
+    /// Median (mean of the two middle values for even counts).
     Median,
-    /// Maximum (`np.max`).
+    /// Maximum.
     Max,
-    /// Minimum (`np.min`).
+    /// Minimum.
     Min,
-    /// Sum (`np.sum`).
+    /// Sum.
     Sum,
 }
 
 impl SyncAggregate {
     fn apply<F: AudioFloat>(self, x: ArrayView1<F>) -> F {
         if x.iter().any(|v| v.is_nan()) {
-            // numpy reductions propagate NaN.
+            // Every reduction propagates NaN.
             return F::nan();
         }
         match self {
@@ -3686,8 +3624,8 @@ impl SyncAggregate {
     }
 }
 
-/// Segment boundaries as librosa's `index_to_slice(idx, idx_min=0,
-/// idx_max=n, pad=pad)`.
+/// Segment boundaries: `idx` (clipped to `n` with `pad`, otherwise indices beyond
+/// `n` dropped), plus `0` and `n` with `pad`, sorted and de-duplicated.
 fn sync_boundaries(idx: &[usize], n: usize, pad: bool) -> Vec<usize> {
     // One allocation of the final size (the two padding entries included).
     let mut b = Vec::with_capacity(idx.len() + 2);
@@ -3708,7 +3646,6 @@ fn sync_boundaries(idx: &[usize], n: usize, pad: bool) -> Vec<usize> {
 /// they are sorted and de-duplicated, and (with `pad`) `0` and `n_frames` are
 /// added and out-of-range indices clipped, so that the segments cover all
 /// frames. Each segment `[idx[i], idx[i+1])` is reduced to one column.
-/// Equivalent to `librosa.util.sync(data, idx, aggregate=..., pad=...)`.
 ///
 /// # Arguments
 ///
@@ -3717,7 +3654,7 @@ fn sync_boundaries(idx: &[usize], n: usize, pad: bool) -> Vec<usize> {
 ///   `(channels, n_features, n_frames)` stack).
 /// - `idx` - Boundary frame indices (any order, duplicates allowed).
 /// - `aggregate` - Reduction applied to each segment.
-/// - `pad` - Add `0` and `n_frames` to the boundaries (librosa default true).
+/// - `pad` - Add `0` and `n_frames` to the boundaries (usually `true`).
 ///   Without padding, indices beyond `n_frames` are dropped.
 ///
 /// # Returns
@@ -3742,11 +3679,8 @@ fn sync_boundaries(idx: &[usize], n: usize, pad: bool) -> Vec<usize> {
 /// assert_eq!(synced, array![[1.5, 3.5, 5.5]]);
 /// ```
 ///
-/// # Differences from librosa
-///
-/// With an empty `idx` and `pad = true` the output has one column (the
-/// segment `[0, n_frames)`); librosa treats an empty list as a list of zero
-/// slices and returns zero columns. A list of slices is [`sync_slices`].
+/// With an empty `idx` and `pad = true` the output has one column (the segment
+/// `[0, n_frames)`). To aggregate over a list of slices, use [`sync_slices`].
 pub fn sync<F, D>(
     data: ArrayView<F, D>,
     idx: &[usize],
@@ -3852,19 +3786,18 @@ where
     Ok(out)
 }
 
-/// Aggregates a feature array over given slices of its last axis, equivalent to
-/// `librosa.util.sync(data, slices, aggregate=...)`.
+/// Aggregates a feature array over given slices of its last axis.
 ///
 /// # Arguments
 ///
 /// - `data` - Array of any dimension `>= 1`, frames on the last axis.
 /// - `slices` - One slice per output column (a slice of [`Slice`]s with `.iter().copied()`,
-///   or any iterator that can be cloned), in any order, overlapping or not. As
-///   in NumPy, bounds out of range are clipped; a negative `start` or `end` counts
-///   from the end. A negative step reverses the `start..end` range, as
+///   or any iterator that can be cloned), in any order, overlapping or not.
+///   Bounds out of range are clipped; a negative `start` or `end` counts from the
+///   end. A negative step reverses the `start..end` range, as
 ///   [`ndarray::Slice`] defines it.
 /// - `aggregate` - Reduction applied to each slice. An empty slice gives NaN for the
-///   mean and the median and 0 for the sum, as NumPy does.
+///   mean and the median and 0 for the sum.
 ///
 /// # Returns
 ///
@@ -4245,8 +4178,8 @@ mod tests {
         assert_eq!(s3, Array3::from_elem((2, 3, 2), 2.0));
     }
 
-    /// The previous implementation, which stored every back-pointer (codes as
-    /// in `rqa_cands`), as the reference for the recomputed pointers.
+    /// An implementation that stores every back-pointer (codes as in
+    /// `rqa_cands`), as the reference for the recomputed pointers.
     fn stored_pointer_rqa_dp<F: AudioFloat>(
         sim: ArrayView2<F>,
         gap_onset: F,
@@ -4445,8 +4378,8 @@ mod tests {
         }
     }
 
-    /// The straightforward recursion (the previous implementation), as the
-    /// reference for the pruned one in `viterbi_core`.
+    /// The straightforward recursion, as the reference for the pruned one in
+    /// `viterbi_core`.
     fn reference_viterbi<F: AudioFloat>(
         log_prob: &Array2<F>,
         log_trans: &Array2<F>,
@@ -4565,8 +4498,8 @@ mod tests {
         check_viterbi_matches_reference::<f64>();
     }
 
-    /// The previous DTW implementation (padded accumulation, per-pair
-    /// distances), as the reference for `dtw_core` / `pairwise`.
+    /// A direct DTW implementation (padded accumulation, per-pair distances), as
+    /// the reference for `dtw_core` / `pairwise`.
     fn reference_dtw<F: AudioFloat>(
         x: Option<(ArrayView2<F>, ArrayView2<F>)>,
         cost: Option<ArrayView2<F>>,
