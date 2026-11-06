@@ -741,7 +741,7 @@ pub fn yin(
     let mut doc = ExplainDoc::new(Topic::Pitch, "YIN pitch estimation");
     doc.add_formula(
         r"d(\tau) = \sum_{j=0}^{N-1-\tau} \left( x[j] - x[j+\tau] \right)^2",
-        "Difference function over all N − τ overlapping pairs, for τ = 1 … τ_max (the paper and librosa use a fixed window W instead, which biases gliding pitch towards the frame's start)",
+        "Difference function over all N − τ overlapping pairs, for τ = 1 … τ_max (the paper uses a fixed window W instead, which biases gliding pitch towards the frame's start)",
     )
     .add_formula(
         r"d'(\tau) = \frac{d(\tau)}{\frac{1}{\tau} \sum_{i=1}^{\tau} d(i)}, \quad d'(0) = 1",
@@ -753,7 +753,7 @@ pub fn yin(
     )
     .add_formula(
         r"\hat{\tau} = \tau_0 + \frac{1}{2} \frac{d'(\tau_0 - 1) - d'(\tau_0 + 1)}{d'(\tau_0 - 1) - 2 d'(\tau_0) + d'(\tau_0 + 1)}, \quad \hat{f}_0 = \frac{f_s}{\hat{\tau}}",
-        "Parabolic interpolation of d' gives a fractional period. This follows librosa; de Cheveigné & Kawahara (2002, JASA 111(4)) step 5 interpolates the raw difference function d(τ) instead, and their step 6 (best local estimate) is not implemented",
+        "Parabolic interpolation of d' gives a fractional period. De Cheveigné & Kawahara (2002, JASA 111(4)) step 5 interpolates the raw difference function d(τ) instead, and their step 6 (best local estimate) is not implemented",
     );
     doc.add_symbol("x", "analysis frame (N samples)")
         .add_symbol(r"\tau", "lag in samples")
@@ -786,7 +786,7 @@ pub fn yin(
     };
     doc.set_summary(format!(
         "YIN searches lags {} to {} samples ({} Hz to {} Hz at {} Hz) for the first dip of the normalised \
-         difference function below θ = {} and refines it by parabolic interpolation of d' (as librosa does). Frames need at least {min_len} samples.",
+         difference function below θ = {} and refines it by parabolic interpolation of d'. Frames need at least {min_len} samples.",
         (fs / max_hz) as usize,
         (fs / min_hz) as usize,
         fmt_num(max_hz),

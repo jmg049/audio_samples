@@ -559,7 +559,7 @@ impl Explain for SpectrogramParams {
 }
 
 /// Slaney mel scale, as implemented by the `spectrograms` filterbank
-/// (linear below 1 kHz, logarithmic above; librosa's `htk=False`).
+/// (linear below 1 kHz, logarithmic above).
 pub(crate) fn hz_to_mel_slaney(hz: f64) -> f64 {
     let f_sp = 200.0 / 3.0;
     let log_step = 6.4f64.ln() / 27.0;
@@ -620,7 +620,7 @@ impl Explain for MelParams {
         let mut doc = ExplainDoc::new(Topic::Mel, "Mel filterbank");
         doc.add_formula(
             r"m(f) = \begin{cases} \frac{3f}{200} & f < 1000 \\ 15 + \frac{27 \ln(f/1000)}{\ln 6.4} & f \geq 1000 \end{cases}",
-            "Slaney mel scale, as implemented (linear below 1 kHz, logarithmic above; librosa's htk=False). The HTK form 2595 log10(1 + f/700) is not used",
+            "Slaney mel scale, as implemented (linear below 1 kHz, logarithmic above). The HTK form 2595 log10(1 + f/700) is not used",
         )
         .add_formula(
             r"f_i = m^{-1}\left(m(f_{min}) + i \, \frac{m(f_{max}) - m(f_{min})}{M + 1}\right), \quad i = 0, \dots, M+1",
@@ -810,12 +810,12 @@ impl Explain for MfccParams {
         )
         .add_formula(
             r"c_k = \sum_{i=0}^{M-1} L_i \cos\left(\frac{\pi k (i + \frac{1}{2})}{M}\right)",
-            "Unnormalised DCT-II, as implemented. librosa's orthonormal DCT (norm='ortho') would return c_0/sqrt(M) and c_k·sqrt(2/M) instead",
+            "Unnormalised DCT-II, as implemented. An orthonormal DCT-II would return c_0/sqrt(M) and c_k·sqrt(2/M) instead",
         );
         if lifter > 0 {
             doc.add_formula(
                 r"\tilde{c}_k = \left(1 + \frac{L}{2} \sin\left(\frac{\pi k}{L}\right)\right) c_k",
-                "Sinusoidal liftering with k counted from 0, so c_0 keeps weight 1 (librosa counts from 1)",
+                "Sinusoidal liftering with k counted from 0, so c_0 keeps weight 1",
             );
         }
         doc.add_symbol_value("K", "coefficients computed", n_mfcc.to_string(), "")
