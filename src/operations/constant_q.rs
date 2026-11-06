@@ -374,11 +374,16 @@ impl WaveletConfig {
     }
 }
 
-fn validate_freqs(freqs: &[f64]) -> AudioSampleResult<()> {
-    if freqs.len() < 2 {
+/// Checks the centre frequencies. Bandwidths derived from the spacing need two
+/// or more; given bandwidths (`alpha`) need one.
+fn validate_freqs(freqs: &[f64], alpha_given: bool) -> AudioSampleResult<()> {
+    if freqs.is_empty() {
+        return Err(param_err("freqs", "at least one frequency is required"));
+    }
+    if freqs.len() < 2 && !alpha_given {
         return Err(param_err(
             "freqs",
-            "2 or more frequencies are required to compute bandwidths",
+            "2 or more frequencies are required to compute bandwidths; give alpha for a single frequency",
         ));
     }
     if freqs.iter().any(|&f| !(f.is_finite() && f > 0.0)) {
@@ -493,7 +498,7 @@ pub fn wavelet_lengths_into(
     lengths: &mut [f64],
 ) -> AudioSampleResult<f64> {
     config.validate()?;
-    validate_freqs(freqs)?;
+    validate_freqs(freqs, false)?;
     require_finite_positive("sample_rate", sample_rate)?;
     let window_bw = librosa_window_bandwidth(&config.window)?;
     if lengths.len() != freqs.len() {
@@ -677,8 +682,11 @@ pub fn smooth_chroma_map(map: &mut Array2<f64>, window: &[f64]) {
 
 /// [`wavelet_lengths`] with the relative bandwidth of each filter given.
 ///
+/// The bandwidths do not depend on the spacing of the frequencies, so one frequency is
+/// enough.
+///
 /// # Arguments
-/// - `freqs`: centre frequencies, ascending and positive.
+/// - `freqs`: centre frequencies, one or more, ascending and positive.
 /// - `sample_rate`: in Hz.
 /// - `config`: the filter settings.
 /// - `alpha`: the relative bandwidth per frequency; finite and positive.
@@ -687,7 +695,8 @@ pub fn smooth_chroma_map(map: &mut Array2<f64>, window: &[f64]) {
 /// The lengths and the highest cut-off, as for [`wavelet_lengths`].
 ///
 /// # Errors
-/// As [`wavelet_lengths`], and [`ParameterError`] for an invalid `alpha`.
+/// As [`wavelet_lengths`] (except that one frequency is accepted), and [`ParameterError`]
+/// for an invalid `alpha` or an `alpha` without one value per frequency.
 ///
 /// # Examples
 /// ```rust
@@ -696,6 +705,9 @@ pub fn smooth_chroma_map(map: &mut Array2<f64>, window: &[f64]) {
 /// let cfg = WaveletConfig::default();
 /// let (lengths, _) = wavelet_lengths_with_alpha(&[440.0, 880.0], 22050.0, &cfg, &[0.5, 0.5]).unwrap();
 /// assert!((lengths[0] - 2.0 * lengths[1]).abs() < 1e-9);
+/// // A single frequency: Q = 1 / 0.5, length Q * 22050 / 440.
+/// let (single, _) = wavelet_lengths_with_alpha(&[440.0], 22050.0, &cfg, &[0.5]).unwrap();
+/// assert!((single[0] - 2.0 * 22050.0 / 440.0).abs() < 1e-9);
 /// ```
 pub fn wavelet_lengths_with_alpha(
     freqs: &[f64],
@@ -732,7 +744,7 @@ pub fn wavelet_lengths_with_alpha_into(
     lengths: &mut [f64],
 ) -> AudioSampleResult<f64> {
     config.validate()?;
-    validate_freqs(freqs)?;
+    validate_freqs(freqs, true)?;
     require_finite_positive("sample_rate", sample_rate)?;
     if alpha.len() != freqs.len() {
         return Err(param_err(
@@ -3691,6 +3703,25 @@ mod tests {
         let left: f64 = row.iter().take(half).map(|z| z.norm_sqr()).sum();
         let right: f64 = row.iter().skip(half).map(|z| z.norm_sqr()).sum();
         assert!((left - right).abs() / (left + right) < 0.01);
+    }
+
+    #[test]
+    fn one_frequency_needs_given_bandwidths() {
+        let cfg = WaveletConfig::default();
+        // Without alpha the bandwidth comes from the spacing, which one frequency lacks.
+        assert!(wavelet_lengths(&[440.0], 22050.0, &cfg).is_err());
+        assert!(wavelet(&[440.0], 22050.0, &cfg).is_err());
+        assert!(wavelet_lengths_with_alpha(&[], 22050.0, &cfg, &[]).is_err());
+        // With alpha a single filter is the first row of a longer bank with the same alpha.
+        let (one, len_one) = wavelet_with_alpha(&[440.0], 22050.0, &cfg, &[0.1]).unwrap();
+        let (two, len_two) =
+            wavelet_with_alpha(&[440.0, 880.0], 22050.0, &cfg, &[0.1, 0.1]).unwrap();
+        assert_eq!(len_one[0], len_two[0]);
+        assert_eq!(one.row(0), two.row(0));
+        let (lengths, cutoff) =
+            wavelet_lengths_with_alpha(&[440.0], 22050.0, &cfg, &[0.1]).unwrap();
+        assert!((lengths[0] - 10.0 * 22050.0 / 440.0).abs() < 1e-9);
+        assert!(cutoff > 440.0);
     }
 
     #[test]

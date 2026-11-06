@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`wavelet_lengths_with_alpha` and `wavelet_with_alpha` accept one frequency.** The
+  bandwidths are given, so the two-frequency minimum, which exists to derive them from the
+  spacing, no longer applies. `wavelet_lengths` and `wavelet` still need two.
 - **More of librosa's option values.** `operations::transforms::magphase_powf` takes any
   `power`. `constant_q::griffinlim_cqt_random` starts Griffin-Lim from random phases
   (`init="random"`, this crate's RNG). `spectral_{centroid,bandwidth,rolloff}_from_spectrogram_with_freqs`
