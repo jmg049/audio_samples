@@ -40,10 +40,9 @@ fn sine(f: f64, sr: u32, n: usize) -> Vec<f64> {
 // YIN (CMND from tau = 1, fixed window, parabolic interpolation)
 // ---------------------------------------------------------------------------
 
-/// Pure sines: the old integer-lag YIN gave 444.44 Hz (16 kHz), 450 Hz
-/// (44.1 kHz, `examples/pitch_analysis.rs`), 103.90 Hz and 153.85 Hz.
-/// librosa 1.0 `yin` gives 440.31 / 440.30 / 100.18 / 150.18 Hz on the same
-/// tones. Requirement: within 0.5 % of the true f0.
+/// Pure sines: the estimate must lie within 0.5 % of the true f0. An
+/// integer-lag YIN gives 444.44 Hz (16 kHz), 450 Hz (44.1 kHz), 103.90 Hz and
+/// 153.85 Hz on these tones.
 #[test]
 fn yin_pure_sines_within_half_percent() {
     let cases = [
@@ -67,9 +66,8 @@ fn yin_pure_sines_within_half_percent() {
     }
 }
 
-/// Harmonic tones: 2048-sample
-/// frames at 16 kHz, amplitudes [1, 0.6, 0.4, 0.3], search 60-800 Hz.
-/// librosa: 100.03, 155.05, 220.06, 311.39, 440.18 Hz.
+/// Harmonic tones: 2048-sample frames at 16 kHz, amplitudes [1, 0.6, 0.4, 0.3],
+/// search 60-800 Hz. The estimate must lie within 0.5 % of the true f0.
 #[test]
 fn yin_harmonic_tones_match_reference() {
     let sr = 16_000u32;

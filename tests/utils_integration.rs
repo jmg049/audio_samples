@@ -63,8 +63,8 @@ fn midi_note_round_trip() {
 
 #[test]
 fn note_parsing_is_case_insensitive() {
-    // Like librosa.note_to_midi, the note letter is case-insensitive (the
-    // accidental `b` stays lowercase, so "db4" is D-flat 4).
+    // The note letter is case-insensitive (the accidental `b` stays
+    // lowercase, so "db4" is D-flat 4).
     assert_eq!(note_to_midi("a4").unwrap(), note_to_midi("A4").unwrap());
     assert_eq!(note_to_midi("c4").unwrap(), 60);
     assert_eq!(note_to_midi("db4").unwrap(), 61);

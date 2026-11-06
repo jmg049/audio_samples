@@ -119,7 +119,7 @@ fn inspect(err: &AudioSampleError) {
 // 3. Structured taxonomy
 // ---------------------------------------------------------------------------
 
-/// Because failures now carry typed fields, callers branch on real data -
+/// Because failures carry typed fields, callers branch on real data -
 /// `ChannelRequirement` and `SampleType` - rather than scraping the message.
 fn taxonomy_demo() {
     // A mono-only operation handed stereo audio.
