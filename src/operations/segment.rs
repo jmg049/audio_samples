@@ -380,8 +380,10 @@ fn convolve_rows<F: AudioFloat>(
     let Some(target) = out.as_slice_mut() else {
         return;
     };
-    for &(dy, dx, w) in kernel {
-        for (row, chunk) in target.chunks_exact_mut(cols).enumerate() {
+    // Row by row, every kernel entry on each output row while it is in the
+    // cache (each element still adds the entries in kernel order).
+    for (row, chunk) in target.chunks_exact_mut(cols).enumerate() {
+        for &(dy, dx, w) in kernel {
             let line = boundary_index(row as isize - dy, rows as isize, mode)
                 .map(|i| &source[i * cols..(i + 1) * cols]);
             add_shifted_row(chunk, line, dx, w, mode, fill);
