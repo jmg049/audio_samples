@@ -1404,6 +1404,16 @@ impl DftState {
     }
 }
 
+/// A [`StreamingResampler`]'s state: running, or holding its input until it
+/// knows which plan [`resample`] would use (ratios whose plan depends on the
+/// input length).
+#[derive(Debug)]
+enum Stream {
+    Ready(Box<StreamState>),
+    /// The input so far, per channel.
+    Held(Vec<Vec<f64>>),
+}
+
 /// Streaming state for any [`Plan`].
 #[derive(Debug)]
 enum StreamState {
@@ -2029,14 +2039,19 @@ fn upsample_by<const N: usize, T: Copy, F: AudioFloat>(
 /// [`resample`]: the output is time-aligned with the input (no delay), and
 /// after [`finish`](Self::finish) the concatenated output equals
 /// `resample(whole_input, ...)` up to floating-point rounding, with exactly
-/// `ceil(n · out_rate / in_rate)` samples in total. One exception: when
-/// downsampling by a ratio whose terms in lowest terms have a prime factor
-/// above 7 (pitch-shift ratios such as 22050 Hz to 17501 Hz), [`resample`]
-/// filters inputs of at least four cycles of the ratio (`4 · in_rate /
-/// gcd(in_rate, out_rate)` samples) at the input rate rather than at twice
-/// it, which is faster for long inputs. Both meet the quality tier's
-/// passband and stopband; the two outputs differ in the transition band and
-/// by the passband ripple.
+/// `ceil(n · out_rate / in_rate)` samples in total, for every ratio and input
+/// length.
+///
+/// For one kind of ratio [`resample`]'s filters depend on the input length:
+/// when downsampling by a ratio whose terms in lowest terms have a prime
+/// factor above 7 (pitch-shift ratios such as 22050 Hz to 17501 Hz), inputs
+/// of at least four cycles of the ratio (`4 · in_rate / gcd(in_rate,
+/// out_rate)` samples) are filtered at the input rate, shorter ones at twice
+/// it (each is the faster for its lengths). For those ratios the stream
+/// holds its input until it has four cycles (then it uses the long-input
+/// filters and streams as usual) or until [`finish`](Self::finish), so that
+/// its output is still `resample`'s; the first output then comes up to four
+/// cycles of input later than for other ratios.
 ///
 /// [`reset`](Self::reset) clears all state - call it after a seek, since the
 /// buffered input no longer corresponds to a contiguous position in the stream.
@@ -2065,7 +2080,13 @@ fn upsample_by<const N: usize, T: Copy, F: AudioFloat>(
 /// ```
 #[derive(Debug)]
 pub struct StreamingResampler<T: StandardSample> {
-    state: StreamState,
+    state: Stream,
+    /// Input length from which [`resample`] uses the long-input plan, for
+    /// ratios whose plan depends on the input length (see [`stage_a_up`]).
+    long: Option<u64>,
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResamplingQuality,
     channels: usize,
     channel_count: ChannelCount,
     out_sample_rate: SampleRate,
@@ -2087,9 +2108,25 @@ impl<T: StandardSample> StreamingResampler<T> {
     ) -> AudioSampleResult<Self> {
         let nbr_channels = channels.get() as usize;
         let (in_sr, out_sr) = (in_sample_rate.get(), out_sample_rate.get());
-        let plan = plan(in_sr, out_sr, quality)?;
+        let long = (two_stage_up(in_sr, out_sr, quality, u64::MAX) != 0).then(|| {
+            let cycle = u64::from(in_sr) / gcd(u64::from(in_sr), u64::from(out_sr));
+            LONG_CYCLES * cycle
+        });
+        let state = match long {
+            Some(_) => Stream::Held(vec![Vec::new(); nbr_channels]),
+            None => Stream::Ready(Box::new(StreamState::new(
+                plan(in_sr, out_sr, quality)?,
+                nbr_channels,
+                in_sr,
+                out_sr,
+            ))),
+        };
         Ok(Self {
-            state: StreamState::new(plan, nbr_channels, in_sr, out_sr),
+            state,
+            long,
+            in_sr,
+            out_sr,
+            quality,
             channels: nbr_channels,
             channel_count: channels,
             out_sample_rate,
@@ -2122,9 +2159,40 @@ impl<T: StandardSample> StreamingResampler<T> {
             )));
         }
         let input = extract_channel_data(&chunk.as_f64())?;
-        let slices: Vec<&[f64]> = input.iter().map(Vec::as_slice).collect();
-        let out = self.state.process(&slices);
+        let out = match &mut self.state {
+            Stream::Ready(state) => {
+                let slices: Vec<&[f64]> = input.iter().map(Vec::as_slice).collect();
+                state.process(&slices)
+            }
+            Stream::Held(held) => {
+                for (h, x) in held.iter_mut().zip(&input) {
+                    h.extend_from_slice(x);
+                }
+                let n = held.first().map_or(0, Vec::len) as u64;
+                if self.long.is_some_and(|long| n >= long) {
+                    self.release(n)?
+                } else {
+                    Vec::new()
+                }
+            }
+        };
         self.emit(out)
+    }
+
+    /// Converts the held input of `n` samples per channel with the plan
+    /// [`resample`] uses for `n` samples, from which on the stream runs as
+    /// usual.
+    fn release(&mut self, n: u64) -> AudioSampleResult<Vec<Vec<f64>>> {
+        let plan = plan_for(self.in_sr, self.out_sr, self.quality, n)?;
+        let mut state = StreamState::new(plan, self.channels, self.in_sr, self.out_sr);
+        let Stream::Held(held) = std::mem::replace(&mut self.state, Stream::Held(Vec::new()))
+        else {
+            unreachable!("only held input is released")
+        };
+        let slices: Vec<&[f64]> = held.iter().map(Vec::as_slice).collect();
+        let out = state.process(&slices);
+        self.state = Stream::Ready(Box::new(state));
+        Ok(out)
     }
 
     /// Flush the held-back tail (the input is extended with zeros, or by holding
@@ -2136,9 +2204,27 @@ impl<T: StandardSample> StreamingResampler<T> {
     /// [`reset`](Self::reset) before reusing the resampler.
     ///
     /// # Errors
-    /// Currently infallible; the `Result` is kept for API stability.
+    /// [`crate::AudioSampleError::Parameter`] if the filters for held input
+    /// (see the type's documentation) cannot be built; not otherwise.
     pub fn finish(&mut self) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
-        let out = self.state.finish();
+        let mut out = match &self.state {
+            Stream::Held(held) => {
+                let n = held.first().map_or(0, Vec::len) as u64;
+                self.release(n)?
+            }
+            Stream::Ready(_) => Vec::new(),
+        };
+        let Stream::Ready(state) = &mut self.state else {
+            unreachable!("released above")
+        };
+        let tail = state.finish();
+        if out.is_empty() {
+            out = tail;
+        } else {
+            for (o, t) in out.iter_mut().zip(tail) {
+                o.extend(t);
+            }
+        }
         self.emit(out)
     }
 
@@ -2146,7 +2232,10 @@ impl<T: StandardSample> StreamingResampler<T> {
     /// seek - buffered state no longer corresponds to a contiguous stream
     /// position.
     pub fn reset(&mut self) {
-        self.state.reset();
+        match (&mut self.state, self.long) {
+            (Stream::Ready(state), None) => state.reset(),
+            _ => self.state = Stream::Held(vec![Vec::new(); self.channels]),
+        }
     }
 
     fn emit(&self, out: Vec<Vec<f64>>) -> AudioSampleResult<Option<AudioSamples<'static, T>>> {
@@ -2976,8 +3065,7 @@ mod tests {
     }
 
     /// Long inputs of a pitch-shift ratio run stage A at the input rate,
-    /// short ones at twice it; a passband tone comes out the same from both
-    /// (to the passband ripple).
+    /// short ones at twice it.
     #[test]
     fn test_long_input_stage_a_at_input_rate() {
         let up = |n: u64| match plan_for(22050, 17501, ResamplingQuality::High, n).unwrap() {
@@ -2986,33 +3074,48 @@ mod tests {
         };
         assert_eq!(up(22050), 2);
         assert_eq!(up(4 * 22050), 1);
-        let x = sine(5 * 22050, 1000.0, 22050.0, 0.5);
-        let long = resample(
-            &mono(x.clone(), sample_rate!(22050)),
-            sample_rate!(17501),
-            ResamplingQuality::High,
-        )
-        .unwrap();
-        let mut stream = StreamingResampler::<f64>::new(
-            sample_rate!(22050),
-            sample_rate!(17501),
-            channels!(1),
-            ResamplingQuality::High,
-        )
-        .unwrap();
-        let mut short: Vec<f64> = stream
-            .process_chunk(&mono(x, sample_rate!(22050)))
-            .unwrap()
-            .map(|o| o.as_mono().unwrap().to_vec())
-            .unwrap_or_default();
-        short.extend(stream.finish().unwrap().unwrap().as_mono().unwrap().iter());
-        let long = long.as_mono().unwrap().to_vec();
-        assert_eq!(long.len(), short.len());
-        let err = long[1000..long.len() - 1000]
-            .iter()
-            .zip(&short[1000..])
-            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
-        assert!(err < 1e-6, "{err:e}");
+    }
+
+    /// Pitch-shift ratios (whose plan depends on the input length) streamed
+    /// in chunks give `resample`'s output to rounding, for inputs shorter
+    /// than a cycle of the ratio, of a few cycles and long enough for the
+    /// long-input plan; also after `reset`.
+    #[test]
+    fn test_streaming_resampler_matches_offline_two_stage() {
+        for (in_sr, out_sr) in [(22050u32, 17501u32), (16000, 12699)] {
+            let (rin, rout) = (
+                SampleRate::new(in_sr).unwrap(),
+                SampleRate::new(out_sr).unwrap(),
+            );
+            let mut stream =
+                StreamingResampler::<f64>::new(rin, rout, channels!(1), ResamplingQuality::High)
+                    .unwrap();
+            let s = in_sr as usize;
+            for n in [s / 3, s, 5 * s / 2, 4 * s, 5 * s + 77] {
+                let x = sine(n, 1000.0, f64::from(in_sr), 0.5);
+                let offline = resample(&mono(x.clone(), rin), rout, ResamplingQuality::High)
+                    .unwrap()
+                    .as_mono()
+                    .unwrap()
+                    .to_vec();
+                let mut streamed: Vec<f64> = Vec::new();
+                for chunk in x.chunks(4099) {
+                    if let Some(out) = stream.process_chunk(&mono(chunk.to_vec(), rin)).unwrap() {
+                        streamed.extend(out.as_mono().unwrap().iter());
+                    }
+                }
+                if let Some(out) = stream.finish().unwrap() {
+                    streamed.extend(out.as_mono().unwrap().iter());
+                }
+                stream.reset();
+                assert_eq!(streamed.len(), offline.len(), "{in_sr} -> {out_sr}, {n}");
+                let err = streamed
+                    .iter()
+                    .zip(&offline)
+                    .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+                assert!(err < 1e-12, "{in_sr} -> {out_sr}, {n}: {err:e}");
+            }
+        }
     }
 
     /// The streaming path uses the same kernel and positions as the offline
