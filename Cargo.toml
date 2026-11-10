@@ -111,7 +111,6 @@ plotly_static = { version = "0.1.0", features = [
 html_view = { version = "0.2.2", optional = true }
 base64 = { version = "0.22", optional = true }
 
-rubato = { version = "3.0.0", optional = true }
 rayon = { version = "1.12.0", optional = true }
 explainable = { version = "0.1.1", optional = true }
 term-maths = { version = "1.0.0", optional = true }
@@ -121,8 +120,7 @@ rustfft = { version = "6.2", optional = true }
 realfft = { version = "3.5", optional = true }
 non-empty-slice = "0.6"
 non-empty-iter = "0.3.1"
-audioadapter = { version =  "3.0.0",  optional = true }
-audioadapter-buffers = { version = "3.0.0", optional = true }
+audioadapter = { version = "5.0.0", optional = true }
 
 [features]
 # Minimal core (no heavy dependencies)
@@ -156,7 +154,7 @@ iir-filtering = [] # IIR filtering operations
 parametric-eq = ["iir-filtering", "channels"] # Parametric equalization operations
 peak-picking = [] # Peak picking operations
 pitch-analysis = ["transforms", "sequence"] # Pitch analysis: YIN, pYIN (Viterbi from `sequence`), key estimation
-resampling = ["dep:rubato", "dep:rayon", "dep:realfft", "dep:rustfft", "audioadapter", "audioadapter-buffers"] # Resampling operations
+resampling = ["dep:rayon", "dep:realfft", "dep:rustfft", "dep:audioadapter"] # Resampling operations
 vad = [] # Voice activity detection operations
 psychoacoustic = ["transforms"] # Psychoacoustic analysis: band layouts, masking thresholds, SMR
 parallel = ["dep:rayon"] # Parallel codec encoding/decoding via rayon (works with psychoacoustic)

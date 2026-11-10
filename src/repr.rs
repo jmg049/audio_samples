@@ -89,6 +89,8 @@
 //! [`ChannelLayout`]: crate::ChannelLayout
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
+#[cfg(feature = "resampling")]
+use audioadapter::Adapter;
 use core::num::{NonZeroU32, NonZeroUsize};
 use ndarray::iter::AxisIterMut;
 use ndarray::{
@@ -97,8 +99,6 @@ use ndarray::{
 };
 use non_empty_iter::{IntoNonEmptyIterator, NonEmptyIterator};
 use non_empty_slice::{NonEmptyByteVec, NonEmptyBytes, NonEmptySlice, NonEmptyVec};
-#[cfg(feature = "resampling")]
-use rubato::audioadapter::Adapter;
 use std::any::TypeId;
 use std::num::NonZeroU8;
 use std::ops::{Bound, Deref, DerefMut, Index, IndexMut, Mul, Neg, RangeBounds};
@@ -6080,7 +6080,7 @@ where
 // `AudioSamples`, and `read_sample_unchecked` indexes `(channel, frame)` which is in
 // bounds for any `channel < channels()` and `frame < frames()`.
 #[cfg(feature = "resampling")]
-unsafe impl<'a, T> Adapter<'a, T> for AudioSamples<'a, T>
+unsafe impl<T> Adapter<T> for AudioSamples<'_, T>
 where
     T: StandardSample,
 {

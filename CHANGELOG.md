@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`StreamingResampler` equals `resample` for pitch-shift ratios too.** Downsampling by a ratio
+  whose terms have a prime factor above 7 (22050 to 17501 Hz and the like) now uses one plan for
+  every input length (the first stage at the input rate), so the stream gives `resample`'s output
+  to rounding from its first sample, holding back only the filters' look-ahead. Inputs of one to
+  three cycles of such a ratio read each row of the interpolation table once for two outputs.
+- **`AudioSamples` implements `audioadapter` 5's `Adapter`** (previously `audioadapter` 3, through
+  `rubato` 3). The `resampling` feature no longer depends on `rubato` or `audioadapter-buffers`.
 - **Conversion by a ratio whose terms have no prime factor above 7 runs block by block in the
   frequency domain** (22050 to 16000 or 8000 Hz, 44100 or 48000 to 16000 Hz, 48000 to 44100 Hz,
   16000 to 22050 Hz, 44100 to 48000 Hz and the like; decimation by a power of two and 1 : 2
