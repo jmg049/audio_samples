@@ -48,6 +48,13 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
     /// [`RsFloat::dot`] of one row `a` with four windows, each with the same
     /// result as `dot`.
     fn dot_rows4<const FMA: bool>(a: &[Self], b: [&[Self]; 4]) -> [Self; 4];
+    /// [`RsFloat::dot`] of one row `a` with two windows, each with the same
+    /// result as `dot`.
+    fn dot_rows2<const FMA: bool>(a: &[Self], b: [&[Self]; 2]) -> [Self; 2];
+    /// `a · f` and `a · reverse(r)` over the first `r.len()` entries of `a`
+    /// (`f` at least that long): a row against a window and, reversed, the
+    /// mirror output's window.
+    fn dot_mirror<const FMA: bool>(a: &[Self], f: &[Self], r: &[Self]) -> [Self; 2];
     /// `(1 - frac) · (a · w) + frac · (b · w)` in one pass over `w`.
     fn interp<const FMA: bool>(a: &[Self], b: &[Self], w: &[Self], frac: Self) -> Self;
     /// The 2 : 1 polyphase spectrum (see [`FftStage::pair_down2`]):
@@ -110,7 +117,7 @@ thread_local! {
 }
 
 macro_rules! rs_float {
-    ($t:ty, $dot:ident, $dot4:ident, $rows4:ident, $interp:ident, $cmul:ident, $down2:ident, $dft:ident, $radix:ident, $planner:ident, $engines:ident) => {
+    ($t:ty, $dot:ident, $dot4:ident, $rows4:ident, $rows2:ident, $mirror:ident, $interp:ident, $cmul:ident, $down2:ident, $dft:ident, $radix:ident, $planner:ident, $engines:ident) => {
         impl RsFloat for $t {
             #[inline(always)]
             fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self {
@@ -141,6 +148,35 @@ macro_rules! rs_float {
                     return unsafe { simd::$rows4(a, b) };
                 }
                 [0, 1, 2, 3].map(|t| dot_portable(a, b[t]))
+            }
+
+            #[inline(always)]
+            fn dot_rows2<const FMA: bool>(a: &[Self], b: [&[Self]; 2]) -> [Self; 2] {
+                #[cfg(target_arch = "x86_64")]
+                if FMA {
+                    // SAFETY: as in `dot`.
+                    return unsafe { simd::$rows2(a, b) };
+                }
+                [dot_portable(a, b[0]), dot_portable(a, b[1])]
+            }
+
+            #[inline(always)]
+            fn dot_mirror<const FMA: bool>(a: &[Self], f: &[Self], r: &[Self]) -> [Self; 2] {
+                #[cfg(target_arch = "x86_64")]
+                if FMA {
+                    // SAFETY: as in `dot`.
+                    return unsafe { simd::$mirror(a, f, r) };
+                }
+                let n = r.len();
+                let fwd = a[..n]
+                    .iter()
+                    .zip(&f[..n])
+                    .fold(0.0, |s: Self, (x, y)| s + *x * *y);
+                let rev = a[..n]
+                    .iter()
+                    .zip(r.iter().rev())
+                    .fold(0.0, |s: Self, (x, y)| s + *x * *y);
+                [fwd, rev]
             }
 
             #[inline(always)]
@@ -254,6 +290,8 @@ rs_float!(
     dot_f32,
     dot4_f32,
     rows4_f32,
+    rows2_f32,
+    mirror_f32,
     interp_f32,
     cmul_f32,
     down2_f32,
@@ -267,6 +305,8 @@ rs_float!(
     dot_f64,
     dot4_f64,
     rows4_f64,
+    rows2_f64,
+    mirror_f64,
     interp_f64,
     cmul_f64,
     down2_f64,
@@ -367,15 +407,12 @@ pub(super) fn cached_engine<F: RsFloat>(
     in_sr: u32,
     out_sr: u32,
     quality: crate::operations::types::ResamplingQuality,
-    n_in: u64,
 ) -> crate::AudioSampleResult<Option<Arc<Engine<F>>>> {
-    // Two-stage plans choose stage A's rate by input length: the key holds
-    // the choice.
     let key = super::KernelKey {
         in_sr,
         out_sr,
         quality,
-        stage: super::Stage::A(super::two_stage_up(in_sr, out_sr, quality, n_in)),
+        stage: super::Stage::Single,
     };
     if let Some(hit) = F::with_engines(|cache| {
         let pos = cache.iter().position(|(k, _)| *k == key)?;
@@ -387,7 +424,7 @@ pub(super) fn cached_engine<F: RsFloat>(
         return Ok(hit);
     }
     // Built outside the cache borrow (plan building uses other thread-locals).
-    let engine = Engine::new(&super::plan_for(in_sr, out_sr, quality, n_in)?).map(Arc::new);
+    let engine = Engine::new(&super::plan(in_sr, out_sr, quality)?).map(Arc::new);
     F::with_engines(|cache| {
         cache.insert(0, (key, engine.clone()));
         let mut total = 0;
@@ -1855,6 +1892,8 @@ struct Interp<F> {
     half: usize,
     /// Padded row length.
     taps: usize,
+    /// Row length before padding (`2 · half`).
+    kernel_taps: usize,
     exact: bool,
     phases: usize,
     /// `phases / l`: row position per unit of phase.
@@ -1899,6 +1938,7 @@ impl<F: RsFloat> Interp<F> {
             m: kernel.m,
             half: kernel.half,
             taps,
+            kernel_taps: kernel.taps,
             exact: kernel.exact,
             phases: kernel.phases,
             pos_scale: kernel.phases as f64 / kernel.l as f64,
@@ -2041,6 +2081,23 @@ impl<F: RsFloat> Interp<F> {
                     p: 0,
                 };
             }
+        } else if q == 0 && j == 0 && m <= CHUNK_MAX_STEP && out.len() >= l && out.len() < 4 * l {
+            // One to three whole cycles: once all of stage A's output is
+            // here, each row serves output `r` and, reversed, output `l - r`
+            // (the filter is even), so the table is read once for both.
+            if !last {
+                return BState {
+                    j,
+                    n0: base + buf_start + self.half as i64 - 1,
+                    p: 0,
+                };
+            }
+            let c = out.len() / l;
+            if base + ((c - 1) * m + offsets[l - 1]) as i64 <= s_end && base >= 0 {
+                self.mirrored_cycles::<T, FMA>(buf, base as usize, c, out, from_f, j);
+                j += c * l;
+                base += (c * m) as i64;
+            }
         }
         // Four outputs at a time while all four windows lie in `buf`.
         while j + 4 <= out.len() && base + offsets[q + 3] as i64 <= s_end {
@@ -2080,6 +2137,56 @@ impl<F: RsFloat> Interp<F> {
             j,
             n0: base + offsets[q] as i64 + buf_start + self.half as i64 - 1,
             p: (q as u64 * self.m) % self.l,
+        }
+    }
+}
+
+impl<F: RsFloat> Interp<F> {
+    /// Outputs `j .. j + c l` (`c` whole cycles from output `j`, `j` a
+    /// multiple of `l`) of an exact table, the first window at `base` in
+    /// `buf`: output `l - r` of a cycle uses row `r` reversed (the filter is
+    /// even), so each row is read once for both outputs.
+    #[inline(always)]
+    fn mirrored_cycles<T, const FMA: bool>(
+        &self,
+        buf: &[F],
+        base: usize,
+        c: usize,
+        out: &mut [MaybeUninit<T>],
+        from_f: &impl Fn(F) -> T,
+        j: usize,
+    ) {
+        let (l, m, taps, kt) = (
+            self.l as usize,
+            self.m as usize,
+            self.taps,
+            self.kernel_taps,
+        );
+        for r in 0..=l / 2 {
+            let row = &self.coeffs[r * taps..(r + 1) * taps];
+            let mirror = r > 0 && 2 * r != l;
+            let mut k = 0;
+            if !mirror {
+                while k + 2 <= c {
+                    let w = base + self.offsets[r] + k * m;
+                    let v =
+                        F::dot_rows2::<FMA>(row, [&buf[w..w + taps], &buf[w + m..w + m + taps]]);
+                    out[j + k * l + r].write(from_f(v[0]));
+                    out[j + (k + 1) * l + r].write(from_f(v[1]));
+                    k += 2;
+                }
+            }
+            for k in k..c {
+                let w = base + self.offsets[r] + k * m;
+                if mirror {
+                    let wm = base + self.offsets[l - r] + k * m;
+                    let v = F::dot_mirror::<FMA>(row, &buf[w..w + taps], &buf[wm..wm + kt]);
+                    out[j + k * l + r].write(from_f(v[0]));
+                    out[j + k * l + l - r].write(from_f(v[1]));
+                } else {
+                    out[j + k * l + r].write(from_f(F::dot::<FMA>(row, &buf[w..w + taps])));
+                }
+            }
         }
     }
 }
@@ -2263,6 +2370,137 @@ mod simd {
             }
         }
         sum4_pd([0, 1, 2, 3].map(|t| _mm256_add_pd(acc0[t], acc1[t])))
+    }
+
+    /// [`dot_f32`] of `a` with each of `b`.
+    ///
+    /// # Safety
+    /// As [`dot_f32`], for each pair.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn rows2_f32(a: &[f32], b: [&[f32]; 2]) -> [f32; 2] {
+        let n = a.len();
+        debug_assert!(n.is_multiple_of(8) && b.iter().all(|s| s.len() == n));
+        let pa = a.as_ptr();
+        let pb = b.map(<[f32]>::as_ptr);
+        let mut acc = [_mm256_setzero_ps(); 2];
+        let mut i = 0;
+        while i < n {
+            // SAFETY: i + 8 <= n for every slice.
+            unsafe {
+                let c = _mm256_loadu_ps(pa.add(i));
+                for t in 0..2 {
+                    acc[t] = _mm256_fmadd_ps(c, _mm256_loadu_ps(pb[t].add(i)), acc[t]);
+                }
+            }
+            i += 8;
+        }
+        [hsum_ps(acc[0]), hsum_ps(acc[1])]
+    }
+
+    /// [`dot_f64`] of `a` with each of `b`.
+    ///
+    /// # Safety
+    /// As [`dot_f64`], for each pair.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn rows2_f64(a: &[f64], b: [&[f64]; 2]) -> [f64; 2] {
+        let n = a.len();
+        debug_assert!(n.is_multiple_of(4) && b.iter().all(|s| s.len() == n));
+        let pa = a.as_ptr();
+        let pb = b.map(<[f64]>::as_ptr);
+        let mut acc0 = [_mm256_setzero_pd(); 2];
+        let mut acc1 = [_mm256_setzero_pd(); 2];
+        let mut i = 0;
+        while i + 8 <= n {
+            // SAFETY: i + 8 <= n for every slice.
+            unsafe {
+                let c0 = _mm256_loadu_pd(pa.add(i));
+                let c1 = _mm256_loadu_pd(pa.add(i + 4));
+                for t in 0..2 {
+                    acc0[t] = _mm256_fmadd_pd(c0, _mm256_loadu_pd(pb[t].add(i)), acc0[t]);
+                    acc1[t] = _mm256_fmadd_pd(c1, _mm256_loadu_pd(pb[t].add(i + 4)), acc1[t]);
+                }
+            }
+            i += 8;
+        }
+        if i < n {
+            // SAFETY: i + 4 <= n (the lengths are multiples of 4).
+            unsafe {
+                let c0 = _mm256_loadu_pd(pa.add(i));
+                for t in 0..2 {
+                    acc0[t] = _mm256_fmadd_pd(c0, _mm256_loadu_pd(pb[t].add(i)), acc0[t]);
+                }
+            }
+        }
+        [
+            hsum_pd(_mm256_add_pd(acc0[0], acc1[0])),
+            hsum_pd(_mm256_add_pd(acc0[1], acc1[1])),
+        ]
+    }
+
+    /// `super::RsFloat::dot_mirror` for `f32`.
+    ///
+    /// # Safety
+    /// CPU with AVX2 + FMA; `a` and `f` at least `r.len()` long.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn mirror_f32(a: &[f32], f: &[f32], r: &[f32]) -> [f32; 2] {
+        let n = r.len();
+        assert!(a.len() >= n && f.len() >= n);
+        let (pa, pf, pr) = (a.as_ptr(), f.as_ptr(), r.as_ptr());
+        let (mut af, mut ar) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let mut i = 0;
+        while i + 8 <= n {
+            // SAFETY: i + 8 <= n; the reversed chunk is r[n - i - 8 .. n - i].
+            unsafe {
+                let c = _mm256_loadu_ps(pa.add(i));
+                af = _mm256_fmadd_ps(c, _mm256_loadu_ps(pf.add(i)), af);
+                let q = pr.add(n - i - 8);
+                // Halves swapped, then each reversed (no lane-crossing shuffle).
+                let v = _mm256_permute_ps::<0b00_01_10_11>(_mm256_loadu2_m128(q, q.add(4)));
+                ar = _mm256_fmadd_ps(c, v, ar);
+            }
+            i += 8;
+        }
+        let (mut sf, mut sr) = (hsum_ps(af), hsum_ps(ar));
+        for i in i..n {
+            sf += a[i] * f[i];
+            sr += a[i] * r[n - 1 - i];
+        }
+        [sf, sr]
+    }
+
+    /// `super::RsFloat::dot_mirror` for `f64`.
+    ///
+    /// # Safety
+    /// CPU with AVX2 + FMA; `a` and `f` at least `r.len()` long.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn mirror_f64(a: &[f64], f: &[f64], r: &[f64]) -> [f64; 2] {
+        let n = r.len();
+        assert!(a.len() >= n && f.len() >= n);
+        let (pa, pf, pr) = (a.as_ptr(), f.as_ptr(), r.as_ptr());
+        let (mut af, mut ar) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+        let mut i = 0;
+        while i + 4 <= n {
+            // SAFETY: i + 4 <= n; the reversed chunk is r[n - i - 4 .. n - i].
+            unsafe {
+                let c = _mm256_loadu_pd(pa.add(i));
+                af = _mm256_fmadd_pd(c, _mm256_loadu_pd(pf.add(i)), af);
+                let q = pr.add(n - i - 4);
+                // Halves swapped, then each reversed (no lane-crossing shuffle).
+                let v = _mm256_permute_pd::<0b0101>(_mm256_loadu2_m128d(q, q.add(2)));
+                ar = _mm256_fmadd_pd(c, v, ar);
+            }
+            i += 4;
+        }
+        let (mut sf, mut sr) = (hsum_pd(af), hsum_pd(ar));
+        for i in i..n {
+            sf += a[i] * f[i];
+            sr += a[i] * r[n - 1 - i];
+        }
+        [sf, sr]
     }
 
     /// Four [`dot_f32`] products.
