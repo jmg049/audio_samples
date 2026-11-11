@@ -1441,12 +1441,14 @@ fn remix_rows<F: AudioFloat>(
     }
     let (n_channels, len) = rows.dim();
     let zeros = if align_zeros {
-        let mono: Vec<F> = if n_channels == 1 {
-            rows.row(0).to_vec()
-        } else {
-            rows.mean_axis(Axis(0))
-                .map(|m| m.to_vec())
-                .unwrap_or_default()
+        let mono: std::borrow::Cow<'_, [F]> = match rows.row(0).to_slice() {
+            Some(row) if n_channels == 1 => std::borrow::Cow::Borrowed(row),
+            _ if n_channels == 1 => std::borrow::Cow::Owned(rows.row(0).to_vec()),
+            _ => std::borrow::Cow::Owned(
+                rows.mean_axis(Axis(0))
+                    .map(|m| m.to_vec())
+                    .unwrap_or_default(),
+            ),
         };
         Some(zero_crossing_positions(&mono))
     } else {
