@@ -1141,6 +1141,40 @@ pub fn midi_name(
         return Ok(String::new());
     }
     let notes = crate::utils::audio_math::key_to_notes(key, unicode, false)?;
+    midi_name_in(&notes, midi, octave, cents)
+}
+
+/// [`midi_name`] with the key's twelve note names already spelled (as
+/// [`key_to_notes`](crate::utils::audio_math::key_to_notes) gives them), for
+/// naming many numbers in one key.
+///
+/// # Errors
+/// [`ParameterError`] if `cents` is set without `octave`, or `notes` does not
+/// hold twelve names.
+///
+/// # Examples
+/// ```
+/// use audio_samples::utils::audio_math::key_to_notes;
+/// use audio_samples::utils::notation::midi_name_in;
+///
+/// let notes = key_to_notes("F:maj", false, false).unwrap();
+/// assert_eq!(midi_name_in(&notes, 70.0, true, false).unwrap(), "Bb4");
+/// ```
+pub fn midi_name_in(
+    notes: &[String],
+    midi: f64,
+    octave: bool,
+    cents: bool,
+) -> AudioSampleResult<String> {
+    if cents && !octave {
+        return invalid("cents", "needs octave information");
+    }
+    if notes.len() != 12 {
+        return invalid("notes", "needs the twelve note names of a key");
+    }
+    if !midi.is_finite() {
+        return Ok(String::new());
+    }
     let number = round_half_even(midi) as i64;
     let mut out = notes[number.rem_euclid(12) as usize].clone();
     if octave {
