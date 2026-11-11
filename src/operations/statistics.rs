@@ -344,8 +344,8 @@ fn autocorrelation_sums<T: StandardSample>(x: &[T], max_lag: usize) -> Option<Ve
 /// converts to 0.0 (128 for u8), is the zero level. Written without branches and counted in a word
 /// of the width of `T`, over blocks for narrower types, so that the loop vectorises.
 ///
-/// On x86-64 CPUs with AVX2 the loop is compiled for it (twice the vector
-/// width; the count is the same).
+/// On x86-64 CPUs with AVX2 the loop for types narrower than eight bytes is
+/// compiled for it (twice the vector width; the count is the same).
 fn count_zero_crossings<T: StandardSample>(samples: &[T]) -> usize {
     /// # Safety
     /// The CPU must support AVX2.
@@ -354,8 +354,9 @@ fn count_zero_crossings<T: StandardSample>(samples: &[T]) -> usize {
     unsafe fn avx2<T: StandardSample>(samples: &[T]) -> usize {
         count_zero_crossings_body(samples)
     }
+    // Eight-byte types count in a `usize` already; their AVX2 build is slower.
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if size_of::<T>() < 8 && std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: the CPU supports AVX2 (checked just above).
         return unsafe { avx2(samples) };
     }

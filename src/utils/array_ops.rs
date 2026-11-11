@@ -1045,10 +1045,16 @@ pub fn axis_sort<A: PartialOrd + Clone>(
         }
     } else {
         for (slot, row) in keys.iter_mut().zip(s.rows()) {
-            let mut best = 0;
-            for (j, v) in row.iter().enumerate() {
-                if better(v, &row[best]) {
-                    best = j;
+            // The first of the best values wins (strict comparison), keeping
+            // the best value itself rather than indexing the row for it.
+            let mut it = row.iter().enumerate();
+            let Some((_, first)) = it.next() else {
+                continue;
+            };
+            let (mut best, mut best_value) = (0, first);
+            for (j, v) in it {
+                if better(v, best_value) {
+                    (best, best_value) = (j, v);
                 }
             }
             *slot = best as u32;
