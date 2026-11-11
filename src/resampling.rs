@@ -30,9 +30,14 @@
 //! | `Fast` (upsampling) | linear interpolation | none | cheapest; images are not suppressed |
 //! | `Medium` | 0.90 · Nyquist | 100 dB from Nyquist | general use |
 //! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis |
-//! | `VeryHigh` | 0.95 · Nyquist | 185 dB from Nyquist | masters, measurement |
+//! | `VeryHigh` | 0.95-0.996 · Nyquist (see below) | 185 dB from Nyquist | masters, measurement |
 //!
-//! (Nyquist of the lower of the two rates.) Conversion by a ratio `L / M`
+//! (Nyquist of the lower of the two rates.) `VeryHigh`'s passband reaches
+//! 0.95 · Nyquist for decimation by a power of two, 0.98 for the other
+//! ratios with terms that have no prime factor above 7 (including 1 : 2),
+//! and 0.996 for every other ratio, such as pitch shifts and 44100 Hz to
+//! 44101 Hz, where the long filter runs by FFT at little extra cost (it is
+//! flat to 2e-11 at 0.995 · Nyquist). Conversion by a ratio `L / M`
 //! (in lowest terms) whose terms have no prime factor above 7, such as
 //! 22050 Hz to 16000 or 8000 Hz, 16000 Hz to 22050 Hz or 44100 Hz to
 //! 48000 Hz, runs block by block in the frequency domain: each block of input
@@ -50,8 +55,9 @@
 //! alone. The interpolator has one exact filter phase per
 //! output phase when the ratio `L / M` (in lowest terms) has at most 2^15
 //! output phases, otherwise a table of 4096 phases per sample, linearly
-//! interpolated. Ratios whose low-pass is longer than 2^14 taps (decimation by
-//! more than ~170 : 1) run as one filter evaluated directly (exact phases for
+//! interpolated (quadratically for `VeryHigh`, whose stopband is beyond
+//! linear interpolation's error). Ratios whose low-pass is longer than 2^16
+//! taps (decimation by more than ~700 : 1 at `High`) run as one filter evaluated directly (exact phases for
 //! small `L`, otherwise the interpolated table). Filters and tables are cached
 //! per thread (a few recent ratios, bounded in size). Ratios needing a table of
 //! more than 2^25 coefficients (decimation by more than ~10^5 : 1) are
@@ -147,15 +153,55 @@ fn kernel_kind(quality: ResamplingQuality, in_sr: u32, out_sr: u32) -> KernelKin
             stopband: 1.0,
             attenuation_db: 125.0,
         }),
-        // Kaiser's estimate leaves the response at the stopband edge about
-        // 8 dB above the design attenuation at this length: 193 dB keeps the
-        // whole stopband below -185 dB.
-        ResamplingQuality::VeryHigh => KernelKind::Sinc(FilterSpec {
-            passband: 0.95,
-            stopband: 1.0,
-            attenuation_db: 193.0,
-        }),
+        ResamplingQuality::VeryHigh => KernelKind::Sinc(very_high_spec(in_sr, out_sr)),
     }
+}
+
+/// `VeryHigh` for decimation by a power of two: passband to 0.95 of the
+/// lower Nyquist frequency. Kaiser's estimate leaves the response at the
+/// stopband edge about 8 dB above the design attenuation at this length:
+/// 193 dB keeps the whole stopband below -185 dB.
+const VERY_HIGH_POW2: FilterSpec = FilterSpec {
+    passband: 0.95,
+    stopband: 1.0,
+    attenuation_db: 193.0,
+};
+/// `VeryHigh` for other ratios whose terms have no prime factor above 7
+/// (block plans and 1 : 2): passband to 0.98.
+const VERY_HIGH_SMOOTH: FilterSpec = FilterSpec {
+    passband: 0.98,
+    stopband: 1.0,
+    attenuation_db: 193.0,
+};
+/// `VeryHigh` for the remaining ratios (two-stage plans, such as pitch
+/// shifts): passband to 0.996, flat to 2e-11 at 0.995, with 215 dB design
+/// attenuation. Stage A runs by FFT, so the long filter costs little there.
+const VERY_HIGH_SHARP: FilterSpec = FilterSpec {
+    passband: 0.996,
+    stopband: 1.0,
+    attenuation_db: 215.0,
+};
+
+/// `VeryHigh`'s filter for `in_sr -> out_sr`: as sharp as the plan that runs
+/// it can afford. Ratios whose two-stage filter would be too long for the
+/// FFT path use [`VERY_HIGH_POW2`] (they run as one filter evaluated
+/// directly).
+fn very_high_spec(in_sr: u32, out_sr: u32) -> FilterSpec {
+    let g = gcd(u64::from(in_sr), u64::from(out_sr));
+    let (l, m) = (u64::from(out_sr) / g, u64::from(in_sr) / g);
+    if l == 1 && m.is_power_of_two() {
+        return VERY_HIGH_POW2;
+    }
+    let spec = if smooth(l as usize) && smooth(m as usize) {
+        VERY_HIGH_SMOOTH
+    } else {
+        VERY_HIGH_SHARP
+    };
+    let up = stage_a_up(in_sr, out_sr, spec);
+    if stage_a_half(stage_a_spec(spec, up), l, m) * up as f64 > FFT_MAX_HALF as f64 {
+        return VERY_HIGH_POW2;
+    }
+    spec
 }
 
 /// Passband edge (fraction of the lower Nyquist frequency) and stopband
@@ -227,6 +273,11 @@ struct Kernel {
     exact: bool,
     /// Rows per input sample of the interpolated table (unused when `exact`).
     phases: usize,
+    /// Interpolated tables: quadratic interpolation between rows `i`,
+    /// `i + 1` and `i + 2` (the table then has `phases + 2` rows) instead of
+    /// linear, for tiers whose attenuation is beyond linear interpolation's
+    /// error (about -165 dB at 4096 rows per sample).
+    quadratic: bool,
     /// Identity of an interpolated table (`None` for exact tables), so
     /// kernels for different ratios can share it.
     table_key: Option<TableKey>,
@@ -249,6 +300,9 @@ struct TableKey {
     /// `lower` (single-stage tables) or the transition band (stage-B
     /// tables), as `f64` bits.
     param_bits: u64,
+    /// Passband edge (single-stage tables) or cut-off (stage-B tables), as
+    /// `f64` bits.
+    cutoff_bits: u64,
     /// Half-width (stage-B tables; 0 otherwise).
     half: usize,
     phases: usize,
@@ -322,6 +376,41 @@ fn prototype_eval(g: &[f64], u: f64) -> f64 {
     g[i] + f * (g[i + 1] - g[i])
 }
 
+/// Lagrange weights of the nodes 0, 1 and 2 at `t` (quadratic
+/// interpolation between three table rows, `t` in `[0, 1)`).
+#[inline]
+fn quadratic_weights(t: f64) -> [f64; 3] {
+    [
+        0.5 * (1.0 - t) * (2.0 - t),
+        t * (2.0 - t),
+        0.5 * t * (t - 1.0),
+    ]
+}
+
+/// Attenuation (dB) above which an interpolated table is interpolated
+/// quadratically between rows: linear interpolation at 4096 rows per sample
+/// leaves an error of about -165 dB.
+const LINEAR_TABLE_MAX_DB: f64 = 150.0;
+
+/// [`prototype_eval`] with quadratic interpolation (nodes `i`, `i + 1` and
+/// `i + 2`, or `i - 1`, `i` and `i + 1` in the last interval, so that the
+/// step to zero at the edge of the support is not interpolated across).
+#[inline]
+fn prototype_eval_quadratic(g: &[f64], u: f64) -> f64 {
+    let a = u.abs() * PROTO_RES as f64;
+    let i = a as usize;
+    if i + 1 >= g.len() {
+        return 0.0;
+    }
+    let (b, t) = if i + 2 < g.len() {
+        (i, a - i as f64)
+    } else {
+        (i - 1, a - (i - 1) as f64)
+    };
+    let c = quadratic_weights(t);
+    c[0] * g[b] + c[1] * g[b + 1] + c[2] * g[b + 2]
+}
+
 impl Kernel {
     /// Builds the table for `in_sr -> out_sr`. An interpolated table is taken
     /// from `shared` when it returns one for the table's [`TableKey`].
@@ -364,10 +453,12 @@ impl Kernel {
         // spacing relative to the filter's bandwidth.
         let phases = ((INTERP_PHASES as f64 * lower).ceil() as usize).clamp(1, INTERP_PHASES);
         let exact = l <= MAX_EXACT_PHASES && l.saturating_mul(taps as u64) <= MAX_TABLE_ENTRIES;
+        let quadratic = !exact
+            && matches!(kind, KernelKind::Sinc(spec) if spec.attenuation_db > LINEAR_TABLE_MAX_DB);
         let (rows, denom) = if exact {
             (l as usize, l as f64)
         } else {
-            (phases + 1, phases as f64)
+            (phases + 1 + usize::from(quadratic), phases as f64)
         };
         let entries = (rows as u64).saturating_mul(taps as u64);
         if entries > MAX_KERNEL_ENTRIES {
@@ -383,6 +474,10 @@ impl Kernel {
             quality,
             stage: Stage::Single,
             param_bits: lower.to_bits(),
+            cutoff_bits: match kind {
+                KernelKind::Sinc(spec) => spec.passband.to_bits(),
+                KernelKind::Linear => 0,
+            },
             half: 0,
             phases,
         });
@@ -403,7 +498,11 @@ impl Kernel {
             (None, KernelKind::Sinc(spec)) if exact => build(&sinc_kernel(spec, lower).1),
             (None, KernelKind::Sinc(spec)) => {
                 let g = prototype(quality, spec);
-                build(&|tau: f64| lower * prototype_eval(g, lower * tau))
+                if quadratic {
+                    build(&|tau: f64| lower * prototype_eval_quadratic(g, lower * tau))
+                } else {
+                    build(&|tau: f64| lower * prototype_eval(g, lower * tau))
+                }
             }
         };
         Ok(Self {
@@ -413,6 +512,7 @@ impl Kernel {
             taps,
             exact,
             phases,
+            quadratic,
             table_key,
             coeffs,
             hold_last: matches!(kind, KernelKind::Linear),
@@ -439,9 +539,16 @@ impl Kernel {
             let pos = p as f64 / self.l as f64 * self.phases as f64;
             let i = (pos.floor() as usize).min(self.phases - 1);
             let frac = pos - i as f64;
-            let r0 = &self.coeffs[i * taps..(i + 1) * taps];
-            let r1 = &self.coeffs[(i + 1) * taps..(i + 2) * taps];
-            (1.0 - frac) * dot(r0, window, self.avx2_fma) + frac * dot(r1, window, self.avx2_fma)
+            let row = |k: usize| &self.coeffs[(i + k) * taps..(i + k + 1) * taps];
+            if self.quadratic {
+                let c = quadratic_weights(frac);
+                c[0] * dot(row(0), window, self.avx2_fma)
+                    + c[1] * dot(row(1), window, self.avx2_fma)
+                    + c[2] * dot(row(2), window, self.avx2_fma)
+            } else {
+                (1.0 - frac) * dot(row(0), window, self.avx2_fma)
+                    + frac * dot(row(1), window, self.avx2_fma)
+            }
         }
     }
 }
@@ -498,8 +605,8 @@ const STAGE_A_COST: f64 = 24.0;
 /// Decimation factors (powers of two) up to this run as a single FFT stage.
 const FFT_MAX_FACTOR: u64 = 64;
 /// Largest stage-A half-length (convolution-rate samples) evaluated by FFT;
-/// longer filters (decimation by more than ~170 : 1) run directly.
-const FFT_MAX_HALF: usize = 1 << 14;
+/// longer filters (decimation by more than ~700 : 1 at `High`) run directly.
+const FFT_MAX_HALF: usize = 1 << 16;
 
 /// How a conversion is evaluated.
 #[derive(Debug, Clone)]
@@ -807,6 +914,7 @@ impl Kernel {
             taps,
             exact: true,
             phases: 1,
+            quadratic: false,
             table_key: None,
             coeffs: coeffs.into(),
             hold_last: false,
@@ -835,16 +943,20 @@ impl Kernel {
         let attenuation = 2.285 * transition * (2 * half) as f64 + 7.95;
         let taps = 2 * half;
         let exact = stage_b_exact(l, taps);
+        // Stage B's error adds to the cascade's in the passband and in the
+        // image band, so it is held below the tier's attenuation.
+        let quadratic = !exact && spec.attenuation_db > LINEAR_TABLE_MAX_DB;
         let phases = INTERP_PHASES;
         let (rows, denom) = if exact {
             (l as usize, l as f64)
         } else {
-            (phases + 1, phases as f64)
+            (phases + 1 + usize::from(quadratic), phases as f64)
         };
         let table_key = (!exact).then_some(TableKey {
             quality,
             stage: Stage::B(up),
             param_bits: transition.to_bits(),
+            cutoff_bits: cutoff.to_bits(),
             half,
             phases,
         });
@@ -877,6 +989,7 @@ impl Kernel {
             taps,
             exact,
             phases,
+            quadratic,
             table_key,
             coeffs,
             hold_last: false,
@@ -2466,36 +2579,102 @@ mod tests {
         }
     }
 
-    /// `VeryHigh` keeps tones up to 0.95 of the lower Nyquist frequency to
-    /// 1e-8 and removes tones from the Nyquist frequency on to below
-    /// -185 dB, for 2 : 1, block and two-stage plans.
+    /// `VeryHigh` keeps tones up to its passband edge (0.95, 0.98 or 0.995 of
+    /// the lower Nyquist frequency, by ratio) to 1e-8 and removes tones from
+    /// the Nyquist frequency on to below -185 dB, for 2 : 1, block,
+    /// two-stage and interpolated-table plans.
     #[test]
     fn test_very_high_passband_and_stopband() {
-        for (in_sr, out_sr) in [(22050u32, 11025u32), (22050, 16000), (22050, 17501)] {
+        for (in_sr, out_sr, edge) in [
+            (22050u32, 11025u32, 0.95),
+            (22050, 16000, 0.98),
+            (16000, 22050, 0.98),
+            (22050, 17501, 0.995),
+            (44100, 44101, 0.995),
+        ] {
             let (rin, rout) = (
                 SampleRate::new(in_sr).unwrap(),
                 SampleRate::new(out_sr).unwrap(),
             );
-            let nyq = f64::from(out_sr) / 2.0;
+            let nyq = f64::from(in_sr.min(out_sr)) / 2.0;
             let run = |f: f64| {
                 let x = sine(2 * in_sr as usize, f, f64::from(in_sr), 0.5);
                 let y = resample(&mono(x, rin), rout, ResamplingQuality::VeryHigh).unwrap();
                 y.as_mono().unwrap().to_vec()
             };
             let mid = |y: &[f64]| y.len() / 4..3 * y.len() / 4;
-            let y = run(0.95 * nyq);
-            let expected = sine(y.len(), 0.95 * nyq, f64::from(out_sr), 0.5);
+            let y = run(edge * nyq);
+            let expected = sine(y.len(), edge * nyq, f64::from(out_sr), 0.5);
             let err = mid(&y).fold(0.0f64, |m, k| m.max((y[k] - expected[k]).abs()));
             assert!(err < 0.5e-8, "{in_sr} -> {out_sr}: passband error {err:e}");
-            for fr in [1.0, 1.05, 1.2] {
+            if out_sr > in_sr {
+                continue;
+            }
+            for fr in [1.0, 1.003, 1.05, 1.2] {
                 let y = run(fr * nyq);
                 let r = mid(&y);
                 let n = r.len() as f64;
                 let rms = (y[r].iter().map(|v| v * v).sum::<f64>() / n).sqrt();
-                let db = 20.0 * (rms / (0.5 * std::f64::consts::FRAC_1_SQRT_2)).log10();
+                // Relative to the input tone (amplitude 1).
+                let db = 20.0 * (rms / std::f64::consts::FRAC_1_SQRT_2).log10();
                 assert!(
-                    db < -180.0,
+                    db < -185.0,
                     "{in_sr} -> {out_sr}, {fr} x Nyquist: {db:.1} dB"
+                );
+            }
+        }
+    }
+
+    /// Repeated calls give identical output, whatever an earlier call with
+    /// another input left in the reused work buffers.
+    #[test]
+    fn test_repeated_calls_are_identical() {
+        fn run<T: StandardSample>(
+            x: &[T],
+            in_sr: u32,
+            out_sr: u32,
+            q: ResamplingQuality,
+        ) -> Vec<T> {
+            let a = AudioSamples::new_mono(
+                ndarray::Array1::from_vec(x.to_vec()),
+                SampleRate::new(in_sr).unwrap(),
+            )
+            .unwrap();
+            resample(&a, SampleRate::new(out_sr).unwrap(), q)
+                .unwrap()
+                .as_mono()
+                .unwrap()
+                .to_vec()
+        }
+        let x1 = sine(30_000, 1234.5, 22050.0, 0.3);
+        let x2: Vec<f64> = (0..7_777)
+            .map(|i| ((i * 7919) % 101) as f64 / 50.0 - 1.0)
+            .collect();
+        for (in_sr, out_sr) in [
+            (22050u32, 11025u32),
+            (22050, 44100),
+            (22050, 17501),
+            (22050, 16000),
+            (44100, 44101),
+        ] {
+            for q in [ResamplingQuality::High, ResamplingQuality::VeryHigh] {
+                let a = run(&x1, in_sr, out_sr, q);
+                run(&x2, in_sr, out_sr, q);
+                assert_eq!(
+                    a,
+                    run(&x1, in_sr, out_sr, q),
+                    "{in_sr} -> {out_sr} {q:?} f64"
+                );
+                let (y1, y2): (Vec<f32>, Vec<f32>) = (
+                    x1.iter().map(|&v| v as f32).collect(),
+                    x2.iter().map(|&v| v as f32).collect(),
+                );
+                let a = run(&y1, in_sr, out_sr, q);
+                run(&y2, in_sr, out_sr, q);
+                assert_eq!(
+                    a,
+                    run(&y1, in_sr, out_sr, q),
+                    "{in_sr} -> {out_sr} {q:?} f32"
                 );
             }
         }

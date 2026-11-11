@@ -1138,8 +1138,10 @@ pub enum ResamplingQuality {
     /// High quality: windowed sinc, passband 0.913 · Nyquist, 125 dB
     /// stopband.
     High,
-    /// Very high quality: windowed sinc, passband 0.95 · Nyquist, 185 dB
-    /// stopband (a ripple below 1e-9), at about twice `High`'s filter length.
+    /// Very high quality: windowed sinc, 185 dB stopband (a ripple below
+    /// 1e-9), passband 0.95 · Nyquist for decimation by a power of two, 0.98
+    /// for other ratios whose terms have no prime factor above 7 and 0.996
+    /// for the rest (pitch shifts and other awkward ratios).
     /// With `f32` samples the result is limited by `f32` rounding (about
     /// -140 dB) rather than by the filter.
     VeryHigh,

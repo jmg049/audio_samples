@@ -4,10 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-- **`ResamplingQuality::VeryHigh`**: windowed sinc with its passband to 0.95 of the lower Nyquist
-  frequency (ripple below 1e-9) and a 185 dB stopband from the Nyquist frequency on, about twice
-  `High`'s filter length. With `f32` samples the result is limited by `f32` rounding (about
-  -140 dB). Parsed from `"very_high"` or `"vhq"`.
+- **`ResamplingQuality::VeryHigh`**: windowed sinc with a 185 dB stopband from the Nyquist
+  frequency on (ripple below 1e-9) and its passband to 0.95 of the lower Nyquist frequency for
+  decimation by a power of two, 0.98 for other ratios whose terms have no prime factor above 7
+  (1 : 2, 22050 to 16000 Hz, 44100 to 48000 Hz) and 0.996 for the rest (pitch shifts, 44100 to
+  44101 Hz), where it is flat to 2e-11 at 0.995. Interpolated stage-two tables (ratios with more
+  than 2^15 output phases) are interpolated quadratically at this tier, so they reach its
+  stopband. With `f32` samples the result is limited by `f32` rounding (about -140 dB). Parsed
+  from `"very_high"` or `"vhq"`.
+- **Long stage-one filters run by FFT up to 2^16 taps** (was 2^14): decimation by up to about
+  700 : 1 at `High` no longer falls back to the direct filter. Such stages keep a second, smaller
+  transform for short inputs, and the transform size model now favours sizes up to 2^17 points
+  for long filters.
 - **`StreamingResampler` equals `resample` for pitch-shift ratios too.** Downsampling by a ratio
   whose terms have a prime factor above 7 (22050 to 17501 Hz and the like) now uses one plan for
   every input length (the first stage at the input rate), so the stream gives `resample`'s output

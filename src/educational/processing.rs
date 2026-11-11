@@ -895,7 +895,7 @@ pub(crate) fn explain_text_resample<T: StandardSample>(
          evaluates a Kaiser-windowed sinc low-pass, centred on the exact input position of each \
          output sample, so it interpolates and anti-aliases in one step: `Fast` (the default) \
          uses a short filter with its pass band to 0.80 of the lower Nyquist frequency and 70 dB \
-         of stop-band attenuation, `Medium` 0.90 and 100 dB, `High` 0.913 and 125 dB, `VeryHigh` 0.95 and 185 dB. `Fast` \
+         of stop-band attenuation, `Medium` 0.90 and 100 dB, `High` 0.913 and 125 dB, `VeryHigh` 0.95 to 0.996 (by ratio) and 185 dB. `Fast` \
          upsampling is linear interpolation, which attenuates high frequencies and leaves \
          spectral images. The filter is symmetric and centred, so the \
          output is time-aligned with the input (no delay) and the tail is flushed; computation \

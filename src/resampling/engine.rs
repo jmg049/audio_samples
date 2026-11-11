@@ -57,6 +57,9 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
     fn dot_mirror<const FMA: bool>(a: &[Self], f: &[Self], r: &[Self]) -> [Self; 2];
     /// `(1 - frac) · (a · w) + frac · (b · w)` in one pass over `w`.
     fn interp<const FMA: bool>(a: &[Self], b: &[Self], w: &[Self], frac: Self) -> Self;
+    /// `c[0] · (r[0] · w) + c[1] · (r[1] · w) + c[2] · (r[2] · w)` in one pass
+    /// over `w`: quadratic interpolation between three rows.
+    fn interp3<const FMA: bool>(r: [&[Self]; 3], w: &[Self], c: [Self; 3]) -> Self;
     /// The 2 : 1 polyphase spectrum (see [`FftStage::pair_down2`]):
     /// `w[k] = A[k] P[k] + B[k] Q[k]` with `A = Za + i Zb` and
     /// `B[k] = conj(Za[-k]) + i conj(Zb[-k])`, all spectra in `lay` order.
@@ -117,7 +120,7 @@ thread_local! {
 }
 
 macro_rules! rs_float {
-    ($t:ty, $dot:ident, $dot4:ident, $rows4:ident, $rows2:ident, $mirror:ident, $interp:ident, $cmul:ident, $down2:ident, $dft:ident, $radix:ident, $planner:ident, $engines:ident) => {
+    ($t:ty, $dot:ident, $dot4:ident, $rows4:ident, $rows2:ident, $mirror:ident, $interp:ident, $interp3:ident, $cmul:ident, $down2:ident, $dft:ident, $radix:ident, $planner:ident, $engines:ident) => {
         impl RsFloat for $t {
             #[inline(always)]
             fn dot<const FMA: bool>(a: &[Self], b: &[Self]) -> Self {
@@ -187,6 +190,18 @@ macro_rules! rs_float {
                     return unsafe { simd::$interp(a, b, w, frac) };
                 }
                 (1.0 - frac) * dot_portable(a, w) + frac * dot_portable(b, w)
+            }
+
+            #[inline(always)]
+            fn interp3<const FMA: bool>(r: [&[Self]; 3], w: &[Self], c: [Self; 3]) -> Self {
+                #[cfg(target_arch = "x86_64")]
+                if FMA {
+                    // SAFETY: as in `dot`.
+                    return unsafe { simd::$interp3(r, w, c) };
+                }
+                c[0] * dot_portable(r[0], w)
+                    + c[1] * dot_portable(r[1], w)
+                    + c[2] * dot_portable(r[2], w)
             }
 
             #[inline(always)]
@@ -293,6 +308,7 @@ rs_float!(
     rows2_f32,
     mirror_f32,
     interp_f32,
+    interp3_f32,
     cmul_f32,
     down2_f32,
     dft_f32,
@@ -308,6 +324,7 @@ rs_float!(
     rows2_f64,
     mirror_f64,
     interp_f64,
+    interp3_f64,
     cmul_f64,
     down2_f64,
     dft_f64,
@@ -452,6 +469,9 @@ pub(super) struct Engine<F> {
 enum Stages<F> {
     Fft {
         a: Box<FftStage<F>>,
+        /// Stage A with smaller transforms, for inputs that need fewer
+        /// blocks than one pair of `a` covers (long filters only).
+        a_short: Option<Box<FftStage<F>>>,
         b: Option<Interp<F>>,
     },
     Dft(DftStage<F>),
@@ -462,14 +482,22 @@ impl<F: RsFloat> Engine<F> {
     fn new(plan: &Plan) -> Option<Self> {
         let stages = match plan {
             Plan::Direct(_) => return None,
-            Plan::Fft { kernel, up, down } => Stages::Fft {
-                a: Box::new(FftStage::new(kernel, *up, *down)),
-                b: None,
-            },
-            Plan::TwoStage { a, up, b } => Stages::Fft {
-                a: Box::new(FftStage::new(a, *up, 1)),
-                b: Some(Interp::new(b)),
-            },
+            Plan::Fft { kernel, up, down } => {
+                let a = FftStage::new(kernel, *up, *down);
+                Stages::Fft {
+                    a_short: FftStage::short(kernel, *up, *down, a.n).map(Box::new),
+                    a: Box::new(a),
+                    b: None,
+                }
+            }
+            Plan::TwoStage { a: ka, up, b } => {
+                let a = FftStage::new(ka, *up, 1);
+                Stages::Fft {
+                    a_short: FftStage::short(ka, *up, 1, a.n).map(Box::new),
+                    a: Box::new(a),
+                    b: Some(Interp::new(b)),
+                }
+            }
             Plan::Dft(spec) => Stages::Dft(DftStage::new(spec)),
         };
         Some(Self {
@@ -480,14 +508,15 @@ impl<F: RsFloat> Engine<F> {
 
     fn size_bytes(&self) -> usize {
         match &self.stages {
-            Stages::Fft { a, b } => {
-                a.spec.len() * std::mem::size_of::<Complex<F>>()
-                    + [&a.down2, &a.fir2]
-                        .iter()
-                        .map(|t| t.as_ref().map_or(0, Bins::size_bytes))
-                        .sum::<usize>()
-                    + b.as_ref()
-                        .map_or(0, |b| b.coeffs.len() * std::mem::size_of::<F>())
+            Stages::Fft { a, a_short, b } => {
+                std::iter::once(a)
+                    .chain(a_short)
+                    .map(|a| a.size_bytes())
+                    .sum::<usize>()
+                    + b.as_ref().map_or(0, |b| {
+                        // The table and, at most, the reused stage-A buffer.
+                        (b.coeffs.len() + 2 * a.hop + b.taps + 1) * std::mem::size_of::<F>()
+                    })
             }
             Stages::Dft(d) => {
                 d.tab.len() * std::mem::size_of::<Complex<F>>()
@@ -590,8 +619,14 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     to_f: &impl Fn(T) -> F,
     from_f: &impl Fn(F) -> T,
 ) {
-    let Stages::Fft { a, b } = &e.stages else {
+    let Stages::Fft { a, a_short, b } = &e.stages else {
         unreachable!("block-wise plans run in `DftStage::run`")
+    };
+    // Convolution-rate samples the input spans, with the filter's reach.
+    let span = x.len() * a.up + 2 * a.g;
+    let a = match a_short {
+        Some(s) if s.cost(span) < a.cost(span) => s,
+        _ => a,
     };
     let mut arena = PairArena::new(a);
     let mut bufs = arena.bufs();
@@ -622,7 +657,19 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     // blocks start at multiples of `up`.
     let mut k0 = (-half_b).div_euclid(up) * up;
     // A short signal fills less than the two blocks and the window that `buf` can hold.
-    let mut buf = vec![F::zero(); (2 * blk + b.taps + 1).min((k_hi - k0).max(0) as usize)];
+    // The buffer of the last call is reused without zeroing it: every part
+    // that stage B reads is written by stage A first.
+    let len = (2 * blk + b.taps + 1).min((k_hi - k0).max(0) as usize);
+    let mut buf = b
+        .buf_pool
+        .try_lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default();
+    if buf.len() >= len {
+        buf.truncate(len);
+    } else {
+        buf.resize(len, F::zero());
+    }
     let mut filled = 0;
     let mut buf_start = k0;
     let (step_int, step_frac) = ((m / l) as i64, m % l);
@@ -657,6 +704,9 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
         buf.copy_within(drop..end, 0);
         filled = end - drop;
         buf_start += drop as i64;
+    }
+    if let Ok(mut pool) = b.buf_pool.try_lock() {
+        *pool = buf;
     }
     debug_assert_eq!(st.j, n_out);
     // Not reached, but `out` must end up initialised whatever happens.
@@ -743,6 +793,8 @@ struct FftStage<F> {
     /// [`FftStage::pair_fir2`]): `spec` is then empty and these are
     /// `P = G_e + i (G_o - G_o') / 2` and `Q = i (G_o + G_o') / 2`.
     fir2: Option<Down2<F>>,
+    /// The buffers of the last call (see [`PairArena`]).
+    pool: std::sync::Mutex<Vec<Complex<F>>>,
 }
 
 /// The `P` and `Q` spectra of a polyphase stage, split for multiply-adds:
@@ -897,36 +949,81 @@ fn four_step_for<F: RsFloat>() -> bool {
     std::mem::size_of::<F>() == 8 && super::has_avx2_fma_cached()
 }
 
+/// Modelled cost of one transform of `s` points: `s log s`, more per point
+/// for transforms that outgrow the L1 cache, and a little more again for
+/// those that outgrow the L2 cache (measured on 2^15 to 2^18 points).
+fn fft_cost(s: usize) -> f64 {
+    let lg = (s as f64).log2();
+    s as f64 * lg * (1.0 + 0.2 * (lg - 11.0).clamp(0.0, 3.0) + 0.1 * (lg - 14.0).max(0.0))
+}
+
+/// Modelled cost of one pair of blocks of an `n`-point stage (both
+/// transforms and the spectrum products).
+fn pair_cost(n: usize, up: usize, down: usize) -> f64 {
+    fft_cost(n / up) + fft_cost(n / down) + 4.0 * n as f64
+}
+
+/// Smallest FFT size worth keeping beside a stage of `n` points for short
+/// inputs (a block of `n` covers several times what they need).
+const SHORT_STAGE_MIN_N: usize = 1 << 16;
+
 /// FFT size for a filter spanning `[-g, g]`: minimises a cost model (FFT
 /// work and spectrum products per valid output; sizes above 2048 are
 /// penalised for leaving the L1 cache).
 fn fft_size(g: usize, up: usize, down: usize) -> usize {
     let unit = up.max(down);
-    let fft = |s: usize| {
-        let lg = (s as f64).log2();
-        s as f64 * lg * (1.0 + 0.2 * (lg - 11.0).max(0.0))
-    };
     (6..=20)
         .map(|e| 1usize << e)
         .filter(|&n| n >= 4 * g && n / unit >= 64)
         .map(|n| {
             let hop = (n - 2 * g) / unit * unit;
-            let cost = (fft(n / up) + fft(n / down) + 4.0 * n as f64) / hop as f64;
-            (n, cost)
+            (n, pair_cost(n, up, down) / hop as f64)
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map_or(1 << 20, |t| t.0)
 }
 
 impl<F: RsFloat> FftStage<F> {
+    /// Heap size of the filter spectra in bytes.
+    fn size_bytes(&self) -> usize {
+        (self.spec.len() + PairArena::len(self)) * std::mem::size_of::<Complex<F>>()
+            + [&self.down2, &self.fir2]
+                .iter()
+                .map(|t| t.as_ref().map_or(0, Bins::size_bytes))
+                .sum::<usize>()
+    }
+
     /// The FFT form of `kernel`, an exact table with `up` rows and `down`
     /// input samples per output (`kernel.l == up`, `kernel.m == down`).
     fn new(kernel: &Kernel, up: usize, down: usize) -> Self {
+        let unit = up.max(down);
+        let g = (up * kernel.half).next_multiple_of(unit);
+        Self::with_size(kernel, up, down, fft_size(g, up, down))
+    }
+
+    /// The stage for short inputs beside one of `n` points: `n / 4` or
+    /// more, at least three filter spans, when that is smaller than `n`
+    /// and `n` is at least [`SHORT_STAGE_MIN_N`].
+    fn short(kernel: &Kernel, up: usize, down: usize, n: usize) -> Option<Self> {
+        let unit = up.max(down);
+        let g = (up * kernel.half).next_multiple_of(unit);
+        let small = (3 * g).next_power_of_two().max(n / 4);
+        (n >= SHORT_STAGE_MIN_N && small < n && small / unit >= 64)
+            .then(|| Self::with_size(kernel, up, down, small))
+    }
+
+    /// Modelled cost of producing `span` convolution-rate samples.
+    fn cost(&self, span: usize) -> f64 {
+        span.div_ceil(2 * self.hop).max(1) as f64 * pair_cost(self.n, self.up, self.down)
+    }
+
+    /// [`FftStage::new`] with transforms of `n` points at the convolution
+    /// rate (`n > 2 g`).
+    fn with_size(kernel: &Kernel, up: usize, down: usize, n: usize) -> Self {
         debug_assert!(kernel.exact && kernel.l as usize == up && kernel.m as usize == down);
         debug_assert!(up == 1 || down == 1);
         let unit = up.max(down);
         let g = (up * kernel.half).next_multiple_of(unit);
-        let n = fft_size(g, up, down);
         let hop = (n - 2 * g) / unit * unit;
         // Output k of row p uses x[n0 - half + 1 + j] with weight row[j]: in
         // convolution-rate samples, tap j sits at d = p - up (j - half + 1).
@@ -986,6 +1083,7 @@ impl<F: RsFloat> FftStage<F> {
                     &lay.arrange(&pq.1, zero),
                 )),
                 fir2: None,
+                pool: std::sync::Mutex::new(Vec::new()),
             };
         }
         // f64 only: there the size-n transforms cost ~2.5x the size-n/2 ones
@@ -1044,6 +1142,7 @@ impl<F: RsFloat> FftStage<F> {
                     &lay.arrange(&pq.0, zero),
                     &lay.arrange(&pq.1, zero),
                 )),
+                pool: std::sync::Mutex::new(Vec::new()),
             };
         }
         let plan = f64::with_planner(|p| p.plan_fft_forward(n));
@@ -1070,6 +1169,7 @@ impl<F: RsFloat> FftStage<F> {
             inv,
             down2: None,
             fir2: None,
+            pool: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1347,18 +1447,39 @@ struct PairBufs<'a, F> {
 /// starting on a 64-byte (cache-line) boundary. With separate vectors, which start wherever
 /// the allocator puts them, the conversion runs 5-8 % slower (16 kHz to
 /// 22.05 kHz and 22.05 kHz to 16 kHz by ratio, `f64`).
-struct PairArena<F> {
+///
+/// The allocation is taken from the stage's pool when it is free and given
+/// back when the arena is dropped, so that repeated calls do not allocate
+/// and zero it again (megabytes for long filters). Every buffer is written
+/// before it is read, so what a previous call left in it does not matter.
+struct PairArena<'a, F> {
     mem: Vec<Complex<F>>,
     /// Start and length of `z`, `zf`, `w`, `y` and `scratch`.
     parts: [(usize, usize); 5],
+    pool: &'a std::sync::Mutex<Vec<Complex<F>>>,
 }
 
-impl<F: RsFloat> PairArena<F> {
-    fn new(a: &FftStage<F>) -> Self {
+impl<F> Drop for PairArena<'_, F> {
+    fn drop(&mut self) {
+        if let Ok(mut pool) = self.pool.try_lock() {
+            *pool = std::mem::take(&mut self.mem);
+        }
+    }
+}
+
+impl<'a, F: RsFloat> PairArena<'a, F> {
+    /// Elements of the arena of stage `a`.
+    fn len(a: &FftStage<F>) -> usize {
+        let line = 64 / std::mem::size_of::<Complex<F>>();
+        Self::lens(a).iter().map(|&l| l + line).sum()
+    }
+
+    /// Lengths of `z`, `zf`, `w`, `y` and `scratch` for stage `a`.
+    fn lens(a: &FftStage<F>) -> [usize; 5] {
         let scratch = a.fwd.scratch_len().max(a.inv.scratch_len());
         // The polyphase FIR runs every transform at half size; 2 : 1
         // decimation transforms two segments of `n / 2` points.
-        let lens = if a.fir2.is_some() {
+        if a.fir2.is_some() {
             let h = a.fwd.layout(a.n / 2).len();
             [a.n / 2, h, h, a.n / 2, scratch]
         } else if a.down2.is_some() {
@@ -1367,12 +1488,22 @@ impl<F: RsFloat> PairArena<F> {
         } else {
             let w = a.inv.layout(a.n / a.down).len();
             [a.n / a.up, a.fwd.layout(a.n / a.up).len(), w, w, scratch]
-        };
+        }
+    }
+
+    fn new(a: &'a FftStage<F>) -> Self {
+        let lens = Self::lens(a);
         let size = std::mem::size_of::<Complex<F>>();
         // Elements per cache line.
         let line = 64 / size;
         let total: usize = lens.iter().map(|&l| l + line).sum();
-        let mem = vec![Complex::new(F::zero(), F::zero()); total];
+        let mem = a
+            .pool
+            .try_lock()
+            .ok()
+            .map(|mut pool| std::mem::take(&mut *pool))
+            .filter(|v| v.len() == total)
+            .unwrap_or_else(|| vec![Complex::new(F::zero(), F::zero()); total]);
         // Position of `mem[0]` within its cache line, in elements.
         let base = (mem.as_ptr() as usize / size) % line;
         let mut parts = [(0, 0); 5];
@@ -1383,7 +1514,11 @@ impl<F: RsFloat> PairArena<F> {
             pos = start + len;
         }
         debug_assert!(pos <= total);
-        Self { mem, parts }
+        Self {
+            mem,
+            parts,
+            pool: &a.pool,
+        }
     }
 
     fn bufs(&mut self) -> PairBufs<'_, F> {
@@ -1896,6 +2031,9 @@ struct Interp<F> {
     kernel_taps: usize,
     exact: bool,
     phases: usize,
+    /// Interpolated tables: quadratic rather than linear interpolation
+    /// between rows (see [`Kernel`]).
+    quadratic: bool,
     /// `phases / l`: row position per unit of phase.
     pos_scale: f64,
     /// Exact tables: rows in visiting order, followed by copies of the first
@@ -1905,6 +2043,8 @@ struct Interp<F> {
     /// relative to the cycle's first, `q · m / l` rounded down, for
     /// `q < l + 3`.
     offsets: Vec<usize>,
+    /// Stage A's output buffer of the last call (see `run_impl`).
+    buf_pool: std::sync::Mutex<Vec<F>>,
 }
 
 impl<F: RsFloat> Interp<F> {
@@ -1941,9 +2081,11 @@ impl<F: RsFloat> Interp<F> {
             kernel_taps: kernel.taps,
             exact: kernel.exact,
             phases: kernel.phases,
+            quadratic: kernel.quadratic,
             pos_scale: kernel.phases as f64 / kernel.l as f64,
             coeffs,
             offsets,
+            buf_pool: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1976,6 +2118,34 @@ impl<F: RsFloat> Interp<F> {
         let last_row = self.phases as i64 - 1;
         let pos_scale = self.pos_scale;
         let coeffs = &self.coeffs[..];
+        if self.quadratic {
+            while j < out.len() && s <= s_end {
+                let window = &buf[s as usize..s as usize + taps];
+                let pos = p as f64 * pos_scale;
+                let i = (pos as i64).min(last_row);
+                let r = i as usize * taps;
+                let v = F::interp3::<FMA>(
+                    [
+                        &coeffs[r..r + taps],
+                        &coeffs[r + taps..r + 2 * taps],
+                        &coeffs[r + 2 * taps..r + 3 * taps],
+                    ],
+                    window,
+                    super::quadratic_weights(pos - i as f64).map(F::of),
+                );
+                out[j].write(from_f(v));
+                j += 1;
+                p += step_frac;
+                let wrap = u64::from(p >= l);
+                p -= wrap * l;
+                s += step_int + wrap as i64;
+            }
+            return BState {
+                j,
+                n0: s + buf_start + self.half as i64 - 1,
+                p,
+            };
+        }
         while j < out.len() && s <= s_end {
             let window = &buf[s as usize..s as usize + taps];
             let pos = p as f64 * pos_scale;
@@ -2603,6 +2773,70 @@ mod simd {
         }
         let d = _mm256_sub_pd(acc_b, acc_a);
         hsum_pd(_mm256_fmadd_pd(_mm256_set1_pd(frac), d, acc_a))
+    }
+
+    /// # Safety
+    /// CPU with AVX2 + FMA; equal lengths, a multiple of 4.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn interp3_f64(r: [&[f64]; 3], w: &[f64], c: [f64; 3]) -> f64 {
+        debug_assert!(r.iter().all(|x| x.len() == w.len()) && w.len().is_multiple_of(4));
+        let pw = w.as_ptr();
+        let pr = r.map(<[f64]>::as_ptr);
+        let mut acc = [_mm256_setzero_pd(); 3];
+        let mut i = 0;
+        while i < w.len() {
+            // SAFETY: i + 4 <= len for all four slices.
+            unsafe {
+                let v = _mm256_loadu_pd(pw.add(i));
+                for k in 0..3 {
+                    acc[k] = _mm256_fmadd_pd(_mm256_loadu_pd(pr[k].add(i)), v, acc[k]);
+                }
+            }
+            i += 4;
+        }
+        let sum = _mm256_fmadd_pd(
+            _mm256_set1_pd(c[2]),
+            acc[2],
+            _mm256_fmadd_pd(
+                _mm256_set1_pd(c[1]),
+                acc[1],
+                _mm256_mul_pd(_mm256_set1_pd(c[0]), acc[0]),
+            ),
+        );
+        hsum_pd(sum)
+    }
+
+    /// # Safety
+    /// CPU with AVX2 + FMA; equal lengths, a multiple of 8.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn interp3_f32(r: [&[f32]; 3], w: &[f32], c: [f32; 3]) -> f32 {
+        debug_assert!(r.iter().all(|x| x.len() == w.len()) && w.len().is_multiple_of(8));
+        let pw = w.as_ptr();
+        let pr = r.map(<[f32]>::as_ptr);
+        let mut acc = [_mm256_setzero_ps(); 3];
+        let mut i = 0;
+        while i < w.len() {
+            // SAFETY: i + 8 <= len for all four slices.
+            unsafe {
+                let v = _mm256_loadu_ps(pw.add(i));
+                for k in 0..3 {
+                    acc[k] = _mm256_fmadd_ps(_mm256_loadu_ps(pr[k].add(i)), v, acc[k]);
+                }
+            }
+            i += 8;
+        }
+        let sum = _mm256_fmadd_ps(
+            _mm256_set1_ps(c[2]),
+            acc[2],
+            _mm256_fmadd_ps(
+                _mm256_set1_ps(c[1]),
+                acc[1],
+                _mm256_mul_ps(_mm256_set1_ps(c[0]), acc[0]),
+            ),
+        );
+        hsum_ps(sum)
     }
 
     /// `super::RsFloat::down2_bins` for `f64`, two bins per vector.
