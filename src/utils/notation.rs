@@ -1145,7 +1145,7 @@ pub fn midi_name(
 }
 
 /// [`midi_name`] with the key's twelve note names already spelled (as
-/// [`key_to_notes`](crate::utils::audio_math::key_to_notes) gives them), for
+/// [`key_to_notes`] gives them), for
 /// naming many numbers in one key.
 ///
 /// # Errors
