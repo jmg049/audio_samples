@@ -938,6 +938,12 @@ fn piptrack_channel<F: AudioFloat>(
     let threshold = F::of(config.threshold);
     let (two, half) = (F::of(2.0), F::of(0.5));
     let (sr, n_fft_f) = (F::of(sample_rate), F::of_usize(n_fft));
+    if s.strides()[0] == 1 && n_frames > 1 {
+        // Column-major (Fortran-order) spectrogram, as `numpy.abs` of
+        // librosa's STFT is: frame by frame, each frame a contiguous column.
+        piptrack_columns(s, &in_range, n_fft, sample_rate, config, pitches, mags);
+        return;
+    }
     // Row by row (bins are rows, frames contiguous within a row when the
     // spectrogram is in standard layout): the per-frame reference first,
     // accumulated over the bins in order, then each bin against its
@@ -1030,6 +1036,75 @@ fn piptrack_channel<F: AudioFloat>(
             for (t, _) in peaks.iter().enumerate().filter(|&(_, &p)| p) {
                 (p_row[t], m_row[t]) = interp(los[t].abs(), mids[t].abs(), his[t].abs());
             }
+        }
+    }
+}
+
+/// [`piptrack_channel`] frame by frame, for a spectrogram whose frames are
+/// contiguous columns.
+fn piptrack_columns<F: AudioFloat>(
+    s: ArrayView2<'_, F>,
+    in_range: &[bool],
+    n_fft: usize,
+    sample_rate: f64,
+    config: &PiptrackConfig,
+    mut pitches: ndarray::ArrayViewMut2<'_, F>,
+    mut mags: ndarray::ArrayViewMut2<'_, F>,
+) {
+    let (n_bins, n_frames) = s.dim();
+    let threshold = F::of(config.threshold);
+    let (two, half) = (F::of(2.0), F::of(0.5));
+    let (sr, n_fft_f) = (F::of(sample_rate), F::of_usize(n_fft));
+    let mut col = vec![F::zero(); n_bins];
+    let mut thresholded = vec![F::zero(); n_bins];
+    for t in 0..n_frames {
+        for (c, &x) in col.iter_mut().zip(s.column(t)) {
+            *c = x.abs();
+        }
+        let reference = match config.reference {
+            PiptrackReference::FrameMax => {
+                threshold * col.iter().fold(F::neg_infinity(), |m, &x| m.max(x))
+            }
+            PiptrackReference::FrameMean => {
+                threshold * (col.iter().copied().sum::<F>() / F::of_usize(n_bins))
+            }
+            PiptrackReference::Value(v) => F::of(v).abs(),
+        };
+        for (th, &x) in thresholded.iter_mut().zip(&col) {
+            *th = if x > reference { x } else { F::zero() };
+        }
+        for k in 0..n_bins {
+            if !in_range[k] {
+                continue;
+            }
+            // Local maximum along frequency: x[k] > x[k-1] and x[k] >= x[k+1];
+            // the first bin is never a maximum, the last only needs x[-1] > x[-2].
+            let is_max = if k == 0 {
+                false
+            } else if k == n_bins - 1 {
+                thresholded[k] > thresholded[k - 1]
+            } else {
+                thresholded[k] > thresholded[k - 1] && thresholded[k] >= thresholded[k + 1]
+            };
+            if !is_max {
+                continue;
+            }
+            // Parabolic interpolation (0 at the edges) and the central-difference
+            // gradient (one-sided at the last bin).
+            let (shift, avg) = if k == n_bins - 1 {
+                (F::zero(), col[k] - col[k - 1])
+            } else {
+                let a = col[k + 1] + col[k - 1] - two * col[k];
+                let b = (col[k + 1] - col[k - 1]) / two;
+                let shift = if b.abs() >= a.abs() {
+                    F::zero()
+                } else {
+                    -b / a
+                };
+                (shift, (col[k + 1] - col[k - 1]) / two)
+            };
+            pitches[[k, t]] = (F::of_usize(k) + shift) * sr / n_fft_f;
+            mags[[k, t]] = col[k] + half * avg * shift;
         }
     }
 }
