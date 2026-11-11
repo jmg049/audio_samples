@@ -1650,19 +1650,23 @@ impl SplineSolver {
     fn solve(&self, c: &mut [f64]) {
         let (k, n) = (self.k, self.n);
         let width = 2 * k + 1;
+        assert!(c.len() >= n && self.band.len() >= n * width);
+        // Row r of the band holds columns r - k ..= r + k; the products are
+        // subtracted in ascending column order.
         for r in 1..n {
-            let mut s = c[r];
-            for (p, v) in c.iter().enumerate().take(r).skip(r.saturating_sub(k)) {
-                s -= self.band[r * width + p + k - r] * v;
-            }
+            let lo = r.saturating_sub(k);
+            let row = &self.band[r * width + lo + k - r..r * width + k];
+            let s = row.iter().zip(&c[lo..r]).fold(c[r], |s, (b, v)| s - b * v);
             c[r] = s;
         }
         for r in (0..n).rev() {
-            let mut s = c[r];
-            for (p, v) in c.iter().enumerate().take((r + k + 1).min(n)).skip(r + 1) {
-                s -= self.band[r * width + p + k - r] * v;
-            }
-            c[r] = s / self.band[r * width + k];
+            let hi = (r + k + 1).min(n);
+            let row = &self.band[r * width + k..r * width + k + (hi - r)];
+            let s = row[1..]
+                .iter()
+                .zip(&c[r + 1..hi])
+                .fold(c[r], |s, (b, v)| s - b * v);
+            c[r] = s / row[0];
         }
     }
 }
