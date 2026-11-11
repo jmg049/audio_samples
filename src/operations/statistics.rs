@@ -343,7 +343,27 @@ fn autocorrelation_sums<T: StandardSample>(x: &[T], max_lag: usize) -> Option<Ve
 /// Sign changes between consecutive samples, compared in the sample's own type. Mid-scale, which
 /// converts to 0.0 (128 for u8), is the zero level. Written without branches and counted in a word
 /// of the width of `T`, over blocks for narrower types, so that the loop vectorises.
+///
+/// On x86-64 CPUs with AVX2 the loop is compiled for it (twice the vector
+/// width; the count is the same).
 fn count_zero_crossings<T: StandardSample>(samples: &[T]) -> usize {
+    /// # Safety
+    /// The CPU must support AVX2.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2<T: StandardSample>(samples: &[T]) -> usize {
+        count_zero_crossings_body(samples)
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2 (checked just above).
+        return unsafe { avx2(samples) };
+    }
+    count_zero_crossings_body(samples)
+}
+
+#[inline(always)]
+fn count_zero_crossings_body<T: StandardSample>(samples: &[T]) -> usize {
     const BLOCK: usize = 1 << 16;
     let zero: T = crate::traits::ConvertTo::convert_to(0.0f64);
     if size_of::<T>() == 8 {
