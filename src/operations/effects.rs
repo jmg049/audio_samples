@@ -2978,9 +2978,12 @@ pub fn lpc<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
 /// place: at iteration `i` the forward errors are `fwd[i..i + m]` and the
 /// backward errors `bwd[..m]` (`m = n - 1 - i`), which is the same pairing as
 /// dropping the first forward and the last backward error after every
-/// update. The first update reads the samples directly, and the dot product
-/// of the next iteration is accumulated in the update loop, in the same
-/// order as a separate pass.
+/// update. The dot product of the next iteration is accumulated in the
+/// update loop, in the same order as a separate pass. The samples are
+/// widened into the buffers once and the recursion itself is one function
+/// for every sample type, so `f32` and `f64` input run the same machine code
+/// (separate copies of the loop ran at different speeds on some cores, from
+/// code placement alone).
 fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
     let order = order.get();
     if !y.iter().fold(true, |ok, v| ok & v.is_finite()) {
@@ -2995,14 +2998,9 @@ fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
             ),
         ));
     }
-    let mut ar = vec![0.0; order + 1];
-    let mut ar_prev = vec![0.0; order + 1];
-    ar[0] = 1.0;
-    ar_prev[0] = 1.0;
     let m0 = y.len() - 1;
-    let (minus_two, tiny) = (-2.0, f64::MIN_POSITIVE);
     // Initial errors: fwd = y[1..], bwd = y[..n - 1].
-    let mut den: f64 = y[1..]
+    let den: f64 = y[1..]
         .iter()
         .zip(&y[..m0])
         .map(|(&f, &b)| {
@@ -3010,7 +3008,7 @@ fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
             f * f + b * b
         })
         .sum();
-    let mut dot: f64 = y[..m0]
+    let dot: f64 = y[..m0]
         .iter()
         .zip(&y[1..])
         .map(|(&b, &f)| b.as_f64() * f.as_f64())
@@ -3020,9 +3018,50 @@ fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
     // and the loop's stores to one then alias the loads from the other in
     // the store buffer (4 KiB aliasing), at up to 1.6 times the time.
     let gap = m0.next_multiple_of(512) + 256;
-    let mut errors = vec![0.0_f64; gap + m0];
-    let (fwd, bwd) = errors.split_at_mut(gap);
-    for i in 0..order {
+    // The buffer starts on a 2 MiB boundary: where it starts otherwise
+    // depends on the allocator, and on some cores (measured on E-cores) the
+    // passes then take up to 1.7 times as long in some processes.
+    const ALIGN: usize = 2 << 20;
+    let mut errors = vec![0.0_f64; gap + m0 + ALIGN / 8];
+    let skip = (ALIGN - errors.as_ptr() as usize % ALIGN) % ALIGN / 8;
+    let (fwd, bwd) = errors[skip..].split_at_mut(gap);
+    // The first update reads the samples directly.
+    let (minus_two, tiny) = (-2.0, f64::MIN_POSITIVE);
+    let k = dot * minus_two / (den + tiny);
+    for t in 0..m0 {
+        let (f, b) = (y[t + 1].as_f64(), y[t].as_f64());
+        fwd[t] = f + k * b;
+        bwd[t] = b + k * f;
+    }
+    let mut next_dot = -0.0_f64;
+    for t in 1..m0 {
+        next_dot += bwd[t - 1] * fwd[t];
+    }
+    let (b_last, f_first) = (bwd[m0 - 1], fwd[0]);
+    let den = (1.0 - k * k) * den - b_last * b_last - f_first * f_first;
+    Ok(burg(fwd, bwd, m0, den, next_dot, order, k))
+}
+
+/// The recursion of [`lpc_f64`] from its second iteration on: the errors
+/// after the first update in `fwd[..m0]` and `bwd[..m0]`, `den` and `dot`
+/// for the second, and the first reflection coefficient `k0`.
+#[inline(never)]
+fn burg(
+    fwd: &mut [f64],
+    bwd: &mut [f64],
+    m0: usize,
+    mut den: f64,
+    mut dot: f64,
+    order: usize,
+    k0: f64,
+) -> Vec<f64> {
+    let mut ar = vec![0.0; order + 1];
+    let mut ar_prev = vec![0.0; order + 1];
+    ar[0] = 1.0;
+    ar_prev[0] = 1.0;
+    ar[1] = k0;
+    let (minus_two, tiny) = (-2.0, f64::MIN_POSITIVE);
+    for i in 1..order {
         let k = dot * minus_two / (den + tiny);
         std::mem::swap(&mut ar, &mut ar_prev);
         for j in 1..=i + 1 {
@@ -3034,33 +3073,22 @@ fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
         // Update both error sequences; accumulate the next iteration's dot
         // product sum_t bwd'[t] * fwd'[t + 1] as soon as both factors exist.
         let mut next_dot = -0.0_f64;
-        if i == 0 {
-            for t in 0..m {
-                let (f, b) = (y[t + 1].as_f64(), y[t].as_f64());
-                fw[t] = f + k * b;
-                bw[t] = b + k * f;
-            }
-            for t in 1..m {
-                next_dot += bw[t - 1] * fw[t];
-            }
-        } else {
-            let (f, b) = (fw[0], bw[0]);
-            fw[0] = f + k * b;
-            bw[0] = b + k * f;
-            for t in 1..m {
-                let (f, b) = (fw[t], bw[t]);
-                let f_new = f + k * b;
-                fw[t] = f_new;
-                bw[t] = b + k * f;
-                next_dot += bw[t - 1] * f_new;
-            }
+        let (f, b) = (fw[0], bw[0]);
+        fw[0] = f + k * b;
+        bw[0] = b + k * f;
+        for t in 1..m {
+            let (f, b) = (fw[t], bw[t]);
+            let f_new = f + k * b;
+            fw[t] = f_new;
+            bw[t] = b + k * f;
+            next_dot += bw[t - 1] * f_new;
         }
         let q = 1.0 - k * k;
         let (b_last, f_first) = (bw[m - 1], fw[0]);
         den = q * den - b_last * b_last - f_first * f_first;
         dot = next_dot;
     }
-    Ok(ar)
+    ar
 }
 
 // =============================================================================
