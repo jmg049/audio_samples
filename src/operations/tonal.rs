@@ -966,6 +966,7 @@ fn piptrack_channel<F: AudioFloat>(
         PiptrackReference::Value(v) => vec![F::of(v).abs(); n_frames],
     };
     let th = |x: F, r: F| if x > r { x } else { F::zero() };
+    let mut peaks = vec![false; n_frames];
     for (k, _) in in_range.iter().enumerate().skip(1).filter(|&(_, &r)| r) {
         let (lo, mid) = (s.row(k - 1), s.row(k));
         let mut p_row = pitches.row_mut(k);
@@ -984,14 +985,13 @@ fn piptrack_channel<F: AudioFloat>(
         }
         let hi = s.row(k + 1);
         let kf = F::of_usize(k);
-        // Every frame of the row is written (0 where there is no peak), as
-        // selects rather than branches, so that the loop vectorises.
-        for t in 0..n_frames {
-            let (a, b, c, r) = (lo[t].abs(), mid[t].abs(), hi[t].abs(), reference[t]);
+        // Local maximum along frequency: x[k] > x[k-1] and x[k] >= x[k+1].
+        let is_peak = |a: F, b: F, c: F, r: F| {
             let tb = th(b, r);
-            // Local maximum along frequency: x[k] > x[k-1] and x[k] >= x[k+1].
-            let peak = tb > th(a, r) && tb >= th(c, r);
-            // Parabolic interpolation and the central-difference gradient.
+            tb > th(a, r) && tb >= th(c, r)
+        };
+        // Parabolic interpolation and the central-difference gradient at a peak.
+        let interp = |a: F, b: F, c: F| {
             let pa = c + a - two * b;
             let pb = (c - a) / two;
             let shift = if pb.abs() >= pa.abs() {
@@ -1000,10 +1000,36 @@ fn piptrack_channel<F: AudioFloat>(
                 -pb / pa
             };
             let avg = (c - a) / two;
-            let pitch = (kf + shift) * sr / n_fft_f;
-            let mag = b + half * avg * shift;
-            p_row[t] = if peak { pitch } else { F::zero() };
-            m_row[t] = if peak { mag } else { F::zero() };
+            ((kf + shift) * sr / n_fft_f, b + half * avg * shift)
+        };
+        // The peak test for the whole row first (it vectorises), then the
+        // interpolation: one by one at the few peaks of a real spectrum, or
+        // with selects across the row when peaks are dense (noise-like
+        // spectra), which vectorises too.
+        let rows = (lo.to_slice(), mid.to_slice(), hi.to_slice());
+        let (Some(los), Some(mids), Some(his)) = rows else {
+            for t in 0..n_frames {
+                let (a, b, c) = (lo[t].abs(), mid[t].abs(), hi[t].abs());
+                if is_peak(a, b, c, reference[t]) {
+                    (p_row[t], m_row[t]) = interp(a, b, c);
+                }
+            }
+            continue;
+        };
+        for (t, p) in peaks.iter_mut().enumerate() {
+            *p = is_peak(los[t].abs(), mids[t].abs(), his[t].abs(), reference[t]);
+        }
+        let count = peaks.iter().filter(|&&p| p).count();
+        if 8 * count > n_frames {
+            for t in 0..n_frames {
+                let (pitch, mag) = interp(los[t].abs(), mids[t].abs(), his[t].abs());
+                p_row[t] = if peaks[t] { pitch } else { F::zero() };
+                m_row[t] = if peaks[t] { mag } else { F::zero() };
+            }
+        } else if count > 0 {
+            for (t, _) in peaks.iter().enumerate().filter(|&(_, &p)| p) {
+                (p_row[t], m_row[t]) = interp(los[t].abs(), mids[t].abs(), his[t].abs());
+            }
         }
     }
 }
