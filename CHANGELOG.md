@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`ResamplingQuality::VeryHigh`**: windowed sinc with its passband to 0.95 of the lower Nyquist
+  frequency (ripple below 1e-9) and a 185 dB stopband from the Nyquist frequency on, about twice
+  `High`'s filter length. With `f32` samples the result is limited by `f32` rounding (about
+  -140 dB). Parsed from `"very_high"` or `"vhq"`.
 - **`StreamingResampler` equals `resample` for pitch-shift ratios too.** Downsampling by a ratio
   whose terms have a prime factor above 7 (22050 to 17501 Hz and the like) now uses one plan for
   every input length (the first stage at the input rate), so the stream gives `resample`'s output

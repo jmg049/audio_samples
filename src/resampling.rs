@@ -30,6 +30,7 @@
 //! | `Fast` (upsampling) | linear interpolation | none | cheapest; images are not suppressed |
 //! | `Medium` | 0.90 · Nyquist | 100 dB from Nyquist | general use |
 //! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis |
+//! | `VeryHigh` | 0.95 · Nyquist | 185 dB from Nyquist | masters, measurement |
 //!
 //! (Nyquist of the lower of the two rates.) Conversion by a ratio `L / M`
 //! (in lowest terms) whose terms have no prime factor above 7, such as
@@ -145,6 +146,14 @@ fn kernel_kind(quality: ResamplingQuality, in_sr: u32, out_sr: u32) -> KernelKin
             passband: 0.913,
             stopband: 1.0,
             attenuation_db: 125.0,
+        }),
+        // Kaiser's estimate leaves the response at the stopband edge about
+        // 8 dB above the design attenuation at this length: 193 dB keeps the
+        // whole stopband below -185 dB.
+        ResamplingQuality::VeryHigh => KernelKind::Sinc(FilterSpec {
+            passband: 0.95,
+            stopband: 1.0,
+            attenuation_db: 193.0,
         }),
     }
 }
@@ -284,11 +293,12 @@ fn sinc_kernel(spec: FilterSpec, lower: f64) -> (f64, impl Fn(f64) -> f64) {
 /// the left limit, not the value 0 at the edge itself. Built once per process
 /// and quality (≈ 6 MB for `High`).
 fn prototype(quality: ResamplingQuality, spec: FilterSpec) -> &'static [f64] {
-    static TABLES: [std::sync::OnceLock<Vec<f64>>; 3] = [const { std::sync::OnceLock::new() }; 3];
+    static TABLES: [std::sync::OnceLock<Vec<f64>>; 4] = [const { std::sync::OnceLock::new() }; 4];
     let slot = match quality {
         ResamplingQuality::Fast => 0,
         ResamplingQuality::Medium => 1,
         ResamplingQuality::High => 2,
+        ResamplingQuality::VeryHigh => 3,
     };
     TABLES[slot].get_or_init(|| {
         let (half_lower, h) = sinc_kernel(spec, 1.0);
@@ -2440,6 +2450,7 @@ mod tests {
             // Ignore the edges, where the input is implicitly zero-padded.
             let interior = (out_sr as usize / 20)..(out_sr as usize * 19 / 20);
             for (quality, min_snr) in [
+                (ResamplingQuality::VeryHigh, 180.0),
                 (ResamplingQuality::High, 130.0),
                 (ResamplingQuality::Medium, 110.0),
             ] {
@@ -2450,6 +2461,41 @@ mod tests {
                 assert!(
                     snr > min_snr,
                     "{quality:?} {in_sr} -> {out_sr}, {f} Hz: SNR {snr:.1} dB"
+                );
+            }
+        }
+    }
+
+    /// `VeryHigh` keeps tones up to 0.95 of the lower Nyquist frequency to
+    /// 1e-8 and removes tones from the Nyquist frequency on to below
+    /// -185 dB, for 2 : 1, block and two-stage plans.
+    #[test]
+    fn test_very_high_passband_and_stopband() {
+        for (in_sr, out_sr) in [(22050u32, 11025u32), (22050, 16000), (22050, 17501)] {
+            let (rin, rout) = (
+                SampleRate::new(in_sr).unwrap(),
+                SampleRate::new(out_sr).unwrap(),
+            );
+            let nyq = f64::from(out_sr) / 2.0;
+            let run = |f: f64| {
+                let x = sine(2 * in_sr as usize, f, f64::from(in_sr), 0.5);
+                let y = resample(&mono(x, rin), rout, ResamplingQuality::VeryHigh).unwrap();
+                y.as_mono().unwrap().to_vec()
+            };
+            let mid = |y: &[f64]| y.len() / 4..3 * y.len() / 4;
+            let y = run(0.95 * nyq);
+            let expected = sine(y.len(), 0.95 * nyq, f64::from(out_sr), 0.5);
+            let err = mid(&y).fold(0.0f64, |m, k| m.max((y[k] - expected[k]).abs()));
+            assert!(err < 0.5e-8, "{in_sr} -> {out_sr}: passband error {err:e}");
+            for fr in [1.0, 1.05, 1.2] {
+                let y = run(fr * nyq);
+                let r = mid(&y);
+                let n = r.len() as f64;
+                let rms = (y[r].iter().map(|v| v * v).sum::<f64>() / n).sqrt();
+                let db = 20.0 * (rms / (0.5 * std::f64::consts::FRAC_1_SQRT_2)).log10();
+                assert!(
+                    db < -180.0,
+                    "{in_sr} -> {out_sr}, {fr} x Nyquist: {db:.1} dB"
                 );
             }
         }

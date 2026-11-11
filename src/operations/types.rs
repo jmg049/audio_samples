@@ -1120,7 +1120,8 @@ impl Default for VadConfig {
 ///
 /// Note: the default is `Fast`, whose downsampling filter is short (pass band
 /// to 0.80 · Nyquist, 70 dB) and whose upsampling is linear interpolation;
-/// choose `Medium` or `High` for analysis or listening.
+/// choose `Medium` or `High` for analysis or listening, `VeryHigh` for the
+/// widest passband and deepest stopband.
 #[cfg(feature = "resampling")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
@@ -1134,9 +1135,14 @@ pub enum ResamplingQuality {
     /// Balanced speed and quality: windowed sinc, passband 0.90 · Nyquist,
     /// 100 dB stopband.
     Medium,
-    /// Highest quality but slower resampling: windowed sinc, passband
-    /// 0.913 · Nyquist, 125 dB stopband.
+    /// High quality: windowed sinc, passband 0.913 · Nyquist, 125 dB
+    /// stopband.
     High,
+    /// Very high quality: windowed sinc, passband 0.95 · Nyquist, 185 dB
+    /// stopband (a ripple below 1e-9), at about twice `High`'s filter length.
+    /// With `f32` samples the result is limited by `f32` rounding (about
+    /// -140 dB) rather than by the filter.
+    VeryHigh,
 }
 
 #[cfg(feature = "resampling")]
@@ -1146,6 +1152,7 @@ impl Display for ResamplingQuality {
             Self::Fast => "fast",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::VeryHigh => "very_high",
         };
         f.write_str(s)
     }
@@ -1162,10 +1169,21 @@ impl FromStr for ResamplingQuality {
             "fast" | "low" => Ok(Self::Fast),
             "medium" | "med" | "balanced" => Ok(Self::Medium),
             "high" | "best" => Ok(Self::High),
+            "very_high" | "veryhigh" | "very-high" | "vhq" => Ok(Self::VeryHigh),
             _ => Err(EnumParseError::new(
                 "ResamplingQuality",
                 s,
-                &["fast", "low", "medium", "med", "balanced", "high", "best"],
+                &[
+                    "fast",
+                    "low",
+                    "medium",
+                    "med",
+                    "balanced",
+                    "high",
+                    "best",
+                    "very_high",
+                    "vhq",
+                ],
             )
             .into()),
         }
