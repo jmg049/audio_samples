@@ -933,6 +933,29 @@ where
         let mu: f64 = mu.cast_into();
         validate_mu(mu, "mu_expand")?;
         let law = MuLaw::new(mu);
+        // Float samples with `1 + μ` a power of two (μ = 255 and the like):
+        // the power by a branch-free `exp2` that vectorises, where the CPU
+        // has FMA.
+        if let Some(k) = law.log2_base
+            && let Some(xs) = self.as_slice_mut()
+        {
+            let id = std::any::TypeId::of::<Self::Sample>();
+            if id == std::any::TypeId::of::<f64>() {
+                // SAFETY: the sample type is f64, so the slice is a &mut [f64].
+                let xs = unsafe { &mut *(std::ptr::from_mut(xs) as *mut [f64]) };
+                if xs.iter().all(|v| k * v.abs() <= EXP2_FAST_MAX) && mu_expand_slice(xs, k, mu) {
+                    return Ok(());
+                }
+            } else if id == std::any::TypeId::of::<f32>() {
+                // SAFETY: the sample type is f32, so the slice is a &mut [f32].
+                let xs = unsafe { &mut *(std::ptr::from_mut(xs) as *mut [f32]) };
+                if xs.iter().all(|v| k * f64::from(v.abs()) <= EXP2_FAST_MAX)
+                    && mu_expand_slice(xs, k, mu)
+                {
+                    return Ok(());
+                }
+            }
+        }
         self.apply_with_error_in_place(|x: Self::Sample| {
             let y: f64 = x.convert_to();
             Ok(Self::Sample::convert_from(law.expand(y)))
@@ -1233,6 +1256,99 @@ impl MuLaw {
             None => self.base.powf(y.abs()),
         };
         sign / self.mu * (p - 1.0)
+    }
+}
+
+/// Largest argument of [`exp2_fma`] (its result stays normal and finite
+/// well inside this).
+const EXP2_FAST_MAX: f64 = 1000.0;
+
+/// `2^x` for `0 <= x <= EXP2_FAST_MAX` without branches or calls, so that
+/// loops over it vectorise: `x = n + f` with `n` the nearest integer and
+/// `|f| <= 1/2` (both exact), `2^f` by its Taylor series to `f^13`
+/// (truncation below 5e-18 relative) in Horner form with fused
+/// multiply-adds, and `2^n` put into the exponent. Measured against the C
+/// library's `exp2`: within 1 ulp. Only fast where the CPU has FMA.
+#[inline(always)]
+fn exp2_fma(x: f64) -> f64 {
+    // Adding 1.5 * 2^52 rounds to the nearest integer, which lands in the
+    // low bits of the sum.
+    const SHIFT: f64 = 6_755_399_441_055_744.0;
+    const C: [f64; 14] = {
+        let ln2 = std::f64::consts::LN_2;
+        let mut c = [1.0; 14];
+        let mut k = 1;
+        while k < 14 {
+            c[k] = c[k - 1] * ln2 / k as f64;
+            k += 1;
+        }
+        c
+    };
+    let t = x + SHIFT;
+    let n = t - SHIFT;
+    let f = x - n;
+    let mut p = C[13];
+    let mut k = 13;
+    while k > 0 {
+        k -= 1;
+        p = p.mul_add(f, C[k]);
+    }
+    let e = (t.to_bits() & 0xfff) + 1023;
+    p * f64::from_bits(e << 52)
+}
+
+/// Sample types the μ-law expansion fast path runs on.
+trait ExpandSample: Copy {
+    fn widen(self) -> f64;
+    fn narrow(v: f64) -> Self;
+}
+
+impl ExpandSample for f64 {
+    #[inline(always)]
+    fn widen(self) -> f64 {
+        self
+    }
+    #[inline(always)]
+    fn narrow(v: f64) -> Self {
+        v
+    }
+}
+
+impl ExpandSample for f32 {
+    #[inline(always)]
+    fn widen(self) -> f64 {
+        f64::from(self)
+    }
+    #[inline(always)]
+    fn narrow(v: f64) -> Self {
+        v as f32
+    }
+}
+
+/// μ-law expansion in place, `sign(y) / μ · (2^(k |y|) - 1)` evaluated in
+/// `f64` as [`MuLaw::expand`] does, with [`exp2_fma`] for the power (`k =
+/// log2(1 + μ)`, every `k |y|` at most [`EXP2_FAST_MAX`]), on CPUs with AVX2
+/// and FMA. Returns `false` (and changes nothing) on other CPUs, which use
+/// the C library's `exp2` instead (the results differ by at most an ulp of
+/// the power).
+fn mu_expand_slice<S: ExpandSample>(xs: &mut [S], k: f64, mu: f64) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+        // SAFETY: the CPU supports AVX2 and FMA.
+        unsafe { mu_expand_slice_avx2(xs, k, mu) };
+        return true;
+    }
+    let _ = (xs, k, mu);
+    false
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn mu_expand_slice_avx2<S: ExpandSample>(xs: &mut [S], k: f64, mu: f64) {
+    for v in xs {
+        let y = v.widen();
+        let sign = if y == 0.0 { 0.0 } else { y.signum() };
+        *v = S::narrow(sign / mu * (exp2_fma(k * y.abs()) - 1.0));
     }
 }
 
@@ -1927,6 +2043,47 @@ mod tests {
         mutated.clip_in_place(-1.0, 1.0).unwrap();
 
         assert_mono_eq(&borrowed, &mutated);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "fma")]
+    unsafe fn exp2_fma_checked(x: f64) -> f64 {
+        exp2_fma(x)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn fma_exp2_is_within_one_ulp_of_exp2() {
+        if !std::arch::is_x86_feature_detected!("fma") {
+            return;
+        }
+        let mut x = 0.0_f64;
+        while x <= EXP2_FAST_MAX {
+            for v in [x, x + 0.5, x + 0.499_999_999, x + 1e-9] {
+                // SAFETY: only reached on CPUs with FMA (checked above).
+                let (a, b) = (unsafe { exp2_fma_checked(v) }, v.exp2());
+                let ulp = f64::EPSILON * b;
+                assert!((a - b).abs() <= ulp, "exp2({v}): {a} vs {b}");
+            }
+            x += 0.013_7;
+        }
+    }
+
+    /// The vectorised μ-law expansion (μ = 255) matches the scalar formula to
+    /// within the rounding of the power, one ulp of `2^(k |y|)`, divided by μ
+    /// (the subtraction of 1 keeps that absolute error).
+    #[test]
+    fn mu_expand_fast_path_matches_formula() {
+        let x: Vec<f64> = (0..=4000).map(|i| -1.0 + f64::from(i) * 0.0005).collect();
+        let audio =
+            AudioSamples::new_mono(ndarray::Array1::from(x.clone()), sample_rate!(8000)).unwrap();
+        let y = audio.mu_expand(255.0).unwrap();
+        let law = MuLaw::new(255.0);
+        for (i, v) in x.iter().enumerate() {
+            let e = law.expand(*v);
+            let tol = 2.0 * f64::EPSILON * (e.abs() + 1.0 / 255.0);
+            assert!((y[i] - e).abs() <= tol, "{v}: {} vs {e}", y[i]);
+        }
     }
 
     #[test]
