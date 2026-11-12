@@ -1048,6 +1048,61 @@ fn has_avx2_fma_cached() -> bool {
     *DETECTED.get_or_init(has_avx2_fma)
 }
 
+/// Whether the calling thread runs on an efficiency core of a hybrid x86-64
+/// CPU (asked each time: threads move between cores). Only choices that do
+/// not change any value, such as prefetching, may depend on it.
+///
+/// The core is told by the processor number that `rdtscp` returns (which the
+/// operating system keeps in `TSC_AUX`), and each processor's core type
+/// (`cpuid` leaf 0x1A, slow) is asked once and kept.
+fn on_efficiency_core() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{__cpuid, __cpuid_count, __rdtscp};
+        use std::sync::atomic::{AtomicU8, Ordering};
+        const CPUS: usize = 256;
+        // 0: not known yet, 1: performance core, 2: efficiency core.
+        static TYPES: [AtomicU8; CPUS] = [const { AtomicU8::new(0) }; CPUS];
+        static HYBRID: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let hybrid = *HYBRID.get_or_init(|| {
+            __cpuid(0).eax >= 0x1a
+                && (__cpuid_count(7, 0).edx >> 15) & 1 == 1
+                && __cpuid(0x8000_0000).eax >= 0x8000_0001
+                && (__cpuid(0x8000_0001).edx >> 27) & 1 == 1
+        });
+        if !hybrid {
+            return false;
+        }
+        let cpu = || {
+            let mut aux = 0u32;
+            // SAFETY: `rdtscp` is supported (checked above: CPUID
+            // 0x8000_0001 EDX bit 27); it only reads the time-stamp counter
+            // and `TSC_AUX`.
+            unsafe { __rdtscp(&mut aux) };
+            (aux & 0xfff) as usize
+        };
+        let before = cpu();
+        if let Some(t) = TYPES.get(before).map(|t| t.load(Ordering::Relaxed))
+            && t != 0
+        {
+            return t == 2;
+        }
+        // Core type 0x20 is an efficiency core.
+        let efficiency = __cpuid_count(0x1a, 0).eax >> 24 == 0x20;
+        // Kept only if the thread did not move meanwhile.
+        if cpu() == before
+            && let Some(t) = TYPES.get(before)
+        {
+            t.store(if efficiency { 2 } else { 1 }, Ordering::Relaxed);
+        }
+        efficiency
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// Whether the AVX2 + FMA dot product can be used on this CPU.
 fn has_avx2_fma() -> bool {
     #[cfg(target_arch = "x86_64")]

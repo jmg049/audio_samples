@@ -677,7 +677,17 @@ fn run_impl<T: Copy, F: RsFloat, const FMA: bool>(
     let mut filled = 0;
     let mut buf_start = k0;
     let (step_int, step_frac) = ((m / l) as i64, m % l);
-    let mut st = BState { j: 0, n0: 0, p: 0 };
+    // Prefetching a large exact table pays on performance cores only
+    // (see `Interp::run_exact`); asked once per channel.
+    let prefetch = b.exact
+        && b.l as usize * b.taps * std::mem::size_of::<F>() > CHUNK_BIG_TABLE
+        && !super::on_efficiency_core();
+    let mut st = BState {
+        j: 0,
+        n0: 0,
+        p: 0,
+        prefetch,
+    };
     let n_out = n_out as usize;
     while st.j < n_out && k0 < k_hi {
         // Stage A writes its two blocks straight after what `buf` holds.
@@ -727,12 +737,39 @@ const CHUNK_MAX_STEP: usize = 1 << 16;
 /// cycles at a time instead of four, so that they are read half as often.
 const CHUNK_BIG_TABLE: usize = 1 << 20;
 
+/// Rows ahead of the current four that [`Interp::run_exact`] prefetches
+/// from a large exact table.
+const PREFETCH_ROWS: usize = 8;
+
+/// Asks for the cache lines of `v[start..start + len]` (positions past the
+/// end are ignored) ahead of their use.
+#[inline(always)]
+fn prefetch_lines<F>(v: &[F], start: usize, len: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+        let end = (start + len).min(v.len());
+        let base = v.as_ptr().cast::<i8>();
+        let mut off = start * std::mem::size_of::<F>();
+        while off < end * std::mem::size_of::<F>() {
+            // SAFETY: a prefetch does not access memory; the address is
+            // inside `v`.
+            unsafe { _mm_prefetch::<_MM_HINT_T0>(base.add(off)) };
+            off += 64;
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (v, start, len);
+}
+
 /// Stage B's position: next output `j`, its input index `n0` and phase `p`.
 #[derive(Clone, Copy)]
 struct BState {
     j: usize,
     n0: i64,
     p: u64,
+    /// Whether stage B fetches the rows of a large exact table ahead.
+    prefetch: bool,
 }
 
 /// Runs stage B over the buffered stage-A output (see [`Interp::run`]),
@@ -2130,14 +2167,20 @@ impl<F: RsFloat> Interp<F> {
         (step_int, step_frac): (i64, u64),
         last: bool,
     ) -> BState {
-        let BState { mut j, n0, mut p } = st;
+        let BState {
+            mut j,
+            n0,
+            mut p,
+            prefetch,
+        } = st;
         let taps = if TAPS > 0 { TAPS } else { self.taps };
         debug_assert_eq!(taps, self.taps);
         // Window start of output j, relative to `buf`.
         let mut s = n0 - self.half as i64 + 1 - buf_start;
         let s_end = buf.len() as i64 - taps as i64;
         if EXACT {
-            return self.run_exact::<T, FMA, TAPS>(buf, buf_start, out, from_f, j, s, last);
+            return self
+                .run_exact::<T, FMA, TAPS>(buf, buf_start, out, from_f, j, s, last, prefetch);
         }
         let l = self.l;
         let last_row = self.phases as i64 - 1;
@@ -2169,6 +2212,7 @@ impl<F: RsFloat> Interp<F> {
                 j,
                 n0: s + buf_start + self.half as i64 - 1,
                 p,
+                prefetch,
             };
         }
         while j < out.len() && s <= s_end {
@@ -2195,6 +2239,7 @@ impl<F: RsFloat> Interp<F> {
             j,
             n0: s + buf_start + self.half as i64 - 1,
             p,
+            prefetch,
         }
     }
 
@@ -2213,6 +2258,7 @@ impl<F: RsFloat> Interp<F> {
         mut j: usize,
         s: i64,
         last: bool,
+        prefetch: bool,
     ) -> BState {
         let taps = if TAPS > 0 { TAPS } else { self.taps };
         let s_end = buf.len() as i64 - taps as i64;
@@ -2274,6 +2320,7 @@ impl<F: RsFloat> Interp<F> {
                     j,
                     n0: base + buf_start + self.half as i64 - 1,
                     p: 0,
+                    prefetch,
                 };
             }
         } else if q == 0 && j == 0 && m <= CHUNK_MAX_STEP && out.len() >= l && out.len() < 4 * l {
@@ -2285,6 +2332,7 @@ impl<F: RsFloat> Interp<F> {
                     j,
                     n0: base + buf_start + self.half as i64 - 1,
                     p: 0,
+                    prefetch,
                 };
             }
             let c = out.len() / l;
@@ -2294,8 +2342,16 @@ impl<F: RsFloat> Interp<F> {
                 base += (c * m) as i64;
             }
         }
+        // Tables larger than the L2 cache come from further out: with
+        // `prefetch` (performance cores) their rows are fetched a few outputs
+        // ahead, as the prefetchers stop at each page boundary; efficiency
+        // cores were slower with the extra instructions.
+        let ahead = prefetch.then_some(PREFETCH_ROWS);
         // Four outputs at a time while all four windows lie in `buf`.
         while j + 4 <= out.len() && base + offsets[q + 3] as i64 <= s_end {
+            if let Some(a) = ahead {
+                prefetch_lines(coeffs, (q + a) * taps, 4 * taps);
+            }
             let at = [0, 1, 2, 3].map(|i| (base + offsets[q + i] as i64) as usize);
             let v = F::dot4::<FMA>(
                 [0, 1, 2, 3].map(|i| &coeffs[(q + i) * taps..(q + i + 1) * taps]),
@@ -2332,6 +2388,7 @@ impl<F: RsFloat> Interp<F> {
             j,
             n0: base + offsets[q] as i64 + buf_start + self.half as i64 - 1,
             p: (q as u64 * self.m) % self.l,
+            prefetch,
         }
     }
 }
