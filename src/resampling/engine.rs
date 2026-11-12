@@ -84,6 +84,7 @@ pub(super) trait RsFloat: AudioFloat + rustfft::FftNum {
         src: &[Complex<Self>],
         dst: &mut [Complex<Self>],
         tw: &[Complex<Self>],
+        split: &[Complex<Self>],
         m: usize,
         ss: usize,
         ds: usize,
@@ -249,11 +250,12 @@ macro_rules! rs_float {
                 src: &[Complex<Self>],
                 dst: &mut [Complex<Self>],
                 tw: &[Complex<Self>],
+                split: &[Complex<Self>],
                 m: usize,
                 ss: usize,
                 ds: usize,
             ) {
-                $radix(r, inv, simd, src, dst, tw, m, ss, ds);
+                $radix(r, inv, simd, src, dst, tw, split, m, ss, ds);
             }
 
             #[inline(always)]
@@ -343,6 +345,7 @@ fn radix_pass_f32(
     src: &[Complex<f32>],
     dst: &mut [Complex<f32>],
     tw: &[Complex<f32>],
+    _split: &[Complex<f32>],
     m: usize,
     ss: usize,
     ds: usize,
@@ -360,6 +363,7 @@ fn radix_pass_f64(
     src: &[Complex<f64>],
     dst: &mut [Complex<f64>],
     tw: &[Complex<f64>],
+    split: &[Complex<f64>],
     m: usize,
     ss: usize,
     ds: usize,
@@ -371,12 +375,12 @@ fn radix_pass_f64(
         // are checked by the kernel.
         unsafe {
             match (r, inv) {
-                (2, false) => pass::<2, false>(src, dst, tw, m, ss, ds),
-                (2, true) => pass::<2, true>(src, dst, tw, m, ss, ds),
-                (4, false) => pass::<4, false>(src, dst, tw, m, ss, ds),
-                (4, true) => pass::<4, true>(src, dst, tw, m, ss, ds),
-                (8, false) => pass::<8, false>(src, dst, tw, m, ss, ds),
-                (8, true) => pass::<8, true>(src, dst, tw, m, ss, ds),
+                (2, false) => pass::<2, false>(src, dst, split, m, ss, ds),
+                (2, true) => pass::<2, true>(src, dst, split, m, ss, ds),
+                (4, false) => pass::<4, false>(src, dst, split, m, ss, ds),
+                (4, true) => pass::<4, true>(src, dst, split, m, ss, ds),
+                (8, false) => pass::<8, false>(src, dst, split, m, ss, ds),
+                (8, true) => pass::<8, true>(src, dst, split, m, ss, ds),
                 _ => unreachable!("radix 2, 4 or 8"),
             }
         }
@@ -820,9 +824,34 @@ impl<F: RsFloat> Bins<F> {
         }
     }
 
+    /// The tables of 2 : 1 decimation from `p` (in layout `lay`): there
+    /// `Q[k] = conj(P[-k])` (both halves of a real filter's spectrum), so `Q`
+    /// is taken from `P` exactly, which lets a kernel that computes bins `k`
+    /// and `-k` together read `P` alone.
+    fn down2(p: &[Complex<F>], lay: Layout) -> Self {
+        let zero = Complex::new(F::zero(), F::zero());
+        let mut q = vec![zero; p.len()];
+        for k1 in 0..lay.r {
+            for k2 in 0..lay.m {
+                q[k1 * lay.stride + k2] = p[mirror_pos(lay, k1, k2)].conj();
+            }
+        }
+        Self::new(p, &q)
+    }
+
     fn size_bytes(&self) -> usize {
         4 * self.pr.len() * std::mem::size_of::<Complex<F>>()
     }
+}
+
+/// Storage position of the mirror `-k` of the bin at position `k2` of row
+/// `k1` of `lay`: position `-k2 mod m` of row 0 when `k1 = 0`, else
+/// `m - 1 - k2` of row `r - k1`.
+#[inline(always)]
+const fn mirror_pos(lay: Layout, k1: usize, k2: usize) -> usize {
+    let Layout { r, m, stride } = lay;
+    let mrow = (r - k1) % r * stride;
+    mrow + if k1 == 0 { (m - k2) % m } else { m - 1 - k2 }
 }
 
 type Down2<F> = Bins<F>;
@@ -1078,10 +1107,7 @@ impl<F: RsFloat> FftStage<F> {
                 spec: Vec::new(),
                 fwd,
                 inv,
-                down2: Some(Bins::new(
-                    &lay.arrange(&pq.0, zero),
-                    &lay.arrange(&pq.1, zero),
-                )),
+                down2: Some(Bins::down2(&lay.arrange(&pq.0, zero), lay)),
                 fir2: None,
                 pool: std::sync::Mutex::new(Vec::new()),
             };
@@ -1559,10 +1585,9 @@ fn down2_bins_portable<F: RsFloat, const TWO: bool>(
     from: usize,
     to: usize,
 ) {
-    let Layout { r, m, stride } = lay;
-    let (row, mrow) = (k1 * stride, (r - k1) % r * stride);
+    let row = k1 * lay.stride;
     for k2 in from..to {
-        let kr = mrow + if k1 == 0 { (m - k2) % m } else { m - 1 - k2 };
+        let kr = mirror_pos(lay, k1, k2);
         let k = row + k2;
         let zero = Complex::new(F::zero(), F::zero());
         let (a, b) = (za[k], if TWO { zb[k] } else { zero });
@@ -2854,9 +2879,115 @@ mod simd {
         let n = lay.len();
         assert!(w.len() == n && za.len() == n && zb.len() == n);
         assert!(t.pr.len() == n && t.pi.len() == n && t.qr.len() == n && t.qi.len() == n);
+        if TWO && (lay.r == 1 || lay.r.is_multiple_of(2)) && lay.m.is_multiple_of(4) {
+            // SAFETY: as for this function.
+            unsafe { down2_pairs_f64(w, za, zb, t, lay) };
+            return;
+        }
         for k1 in 0..lay.r {
             // SAFETY: as for this function.
             unsafe { down2_row_f64::<TWO>(w, za, zb, t, lay, k1) };
+        }
+    }
+
+    /// [`down2_f64`] for 2 : 1 decimation, computing each bin `k` together
+    /// with its mirror `-k`: they read the same four spectrum values, and
+    /// with `Q[k] = conj(P[-k])` (see `Bins::down2`) the same two table
+    /// values, so the tables `Q` are not read. Each bin gets the arithmetic
+    /// of [`down2_row_f64`]'s vector loop.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA; all slices have `lay.len()`
+    /// elements, `lay.r` is 1 or even and `lay.m` a multiple of 4.
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn down2_pairs_f64(
+        w: &mut [Complex<f64>],
+        za: &[Complex<f64>],
+        zb: &[Complex<f64>],
+        t: &super::Bins<f64>,
+        lay: super::Layout,
+    ) {
+        let super::Layout { r, m, stride } = lay;
+        let (pa, pb) = (za.as_ptr().cast::<f64>(), zb.as_ptr().cast::<f64>());
+        let (ppr, ppi) = (t.pr.as_ptr().cast::<f64>(), t.pi.as_ptr().cast::<f64>());
+        let conj = _mm256_set_pd(-0.0, 0.0, -0.0, 0.0);
+        let neg = _mm256_set1_pd(-0.0);
+        for k1 in 0..=r / 2 {
+            let row = k1 * stride;
+            let mrow = (r - k1) % r * stride;
+            // Positions `k` of row `k1` paired with mirrors `c - k` of row
+            // `r - k1`, for `k` in `[lo, hi)`.
+            // Each range has an even length (`m` is a multiple of 4). Bin
+            // `m / 2` of row 0 is its own mirror: the last pair writes it twice,
+            // with the same value.
+            let (lo, hi, c) = if k1 == 0 {
+                (1, m / 2 + 1, m)
+            } else if 2 * k1 == r {
+                (0, m / 2, m - 1)
+            } else {
+                (0, m, m - 1)
+            };
+            if k1 == 0 {
+                // Bin 0 is its own mirror; the row kernel takes it from the
+                // portable code too.
+                super::down2_bins_portable::<_, true>(w, za, zb, t, lay, 0, 0, 1);
+            }
+            let pw = w.as_mut_ptr().cast::<f64>();
+            let mut k = lo;
+            while k + 2 <= hi {
+                let (i, ir) = (row + k, mrow + c - k);
+                // SAFETY: positions k, k + 1 of row k1 and their mirrors
+                // ir - 1, ir of row r - k1 are in bounds (k + 2 <= hi <= m,
+                // ir - 1 >= mrow); the pairs overlap only at bin m / 2 of row 0.
+                unsafe {
+                    let lane2 =
+                        |p: *const f64| _mm256_loadu2_m128d(p.add(2 * (ir - 1)), p.add(2 * ir));
+                    let (a, b) = (
+                        _mm256_loadu_pd(pa.add(2 * i)),
+                        _mm256_loadu_pd(pb.add(2 * i)),
+                    );
+                    let (ar, br) = (lane2(pa), lane2(pb));
+                    let (pr, pi) = (
+                        _mm256_loadu_pd(ppr.add(2 * i)),
+                        _mm256_loadu_pd(ppi.add(2 * i)),
+                    );
+                    let (prm, pim) = (lane2(ppr), lane2(ppi));
+                    // Bins k: A = a + i b, B = conj(ar) + i conj(br); Q[k]
+                    // is (prm, -pim).
+                    let av = _mm256_addsub_pd(a, _mm256_permute_pd::<0b0101>(b));
+                    let bv =
+                        _mm256_add_pd(_mm256_xor_pd(ar, conj), _mm256_permute_pd::<0b0101>(br));
+                    let ra =
+                        _mm256_fmadd_pd(_mm256_permute_pd::<0b0101>(av), pi, _mm256_mul_pd(av, pr));
+                    let rb = _mm256_fmadd_pd(
+                        _mm256_permute_pd::<0b0101>(bv),
+                        _mm256_xor_pd(pim, neg),
+                        _mm256_mul_pd(bv, prm),
+                    );
+                    _mm256_storeu_pd(pw.add(2 * i), _mm256_add_pd(ra, rb));
+                    // Mirrors: A = ar + i br, B = conj(a) + i conj(b); Q[-k]
+                    // is (pr, -pi).
+                    let avm = _mm256_addsub_pd(ar, _mm256_permute_pd::<0b0101>(br));
+                    let bvm = _mm256_add_pd(_mm256_xor_pd(a, conj), _mm256_permute_pd::<0b0101>(b));
+                    let ram = _mm256_fmadd_pd(
+                        _mm256_permute_pd::<0b0101>(avm),
+                        pim,
+                        _mm256_mul_pd(avm, prm),
+                    );
+                    let rbm = _mm256_fmadd_pd(
+                        _mm256_permute_pd::<0b0101>(bvm),
+                        _mm256_xor_pd(pi, neg),
+                        _mm256_mul_pd(bvm, pr),
+                    );
+                    _mm256_storeu2_m128d(
+                        pw.add(2 * (ir - 1)),
+                        pw.add(2 * ir),
+                        _mm256_add_pd(ram, rbm),
+                    );
+                }
+                k += 2;
+            }
+            debug_assert_eq!(k, hi);
         }
     }
 
@@ -2867,7 +2998,7 @@ mod simd {
     /// The CPU must support AVX2 and FMA; all slices have `lay.len()` elements.
     #[inline]
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn down2_row_f64<const TWO: bool>(
+    pub(super) unsafe fn down2_row_f64<const TWO: bool>(
         w: &mut [Complex<f64>],
         za: &[Complex<f64>],
         zb: &[Complex<f64>],
@@ -3256,6 +3387,64 @@ mod tests {
                 .zip(&b)
                 .fold(0.0f64, |m, (u, v)| m.max((u - v).abs()));
             assert!(err < tol, "{err:e}");
+        }
+    }
+
+    /// The 2 : 1 products computed bin and mirror together equal the row
+    /// kernel's vector results bit for bit, and the portable ones up to
+    /// rounding, in the four-step layouts and in natural order.
+    #[test]
+    fn down2_pairs_match_rows() {
+        if !super::super::has_avx2_fma_cached() {
+            return;
+        }
+        for lay in [
+            Layout {
+                r: 8,
+                m: 128,
+                stride: 132,
+            },
+            Layout {
+                r: 4,
+                m: 128,
+                stride: 132,
+            },
+            Layout::natural(64),
+        ] {
+            let n = lay.len();
+            let mut st = 7u64;
+            let mut rnd = || {
+                st = st
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (st >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            };
+            let mut v = || {
+                (0..n)
+                    .map(|_| Complex::new(rnd(), rnd()))
+                    .collect::<Vec<_>>()
+            };
+            let (p, za, zb) = (v(), v(), v());
+            let t = Bins::down2(&p, lay);
+            let zero = Complex::new(0.0, 0.0);
+            let (mut a, mut b, mut c) = (vec![zero; n], vec![zero; n], vec![zero; n]);
+            f64::down2_bins(&mut a, &za, &zb, &t, lay);
+            for k1 in 0..lay.r {
+                // SAFETY: AVX2 and FMA were checked above; all slices are `n` long.
+                unsafe { simd::down2_row_f64::<true>(&mut b, &za, &zb, &t, lay, k1) };
+                down2_bins_portable::<_, true>(&mut c, &za, &zb, &t, lay, k1, 0, lay.m);
+            }
+            for k1 in 0..lay.r {
+                for k2 in 0..lay.m {
+                    let i = k1 * lay.stride + k2;
+                    // The row kernel takes the last bin of row 0 from the
+                    // portable code; elsewhere both use the same arithmetic.
+                    if k1 > 0 || k2 + 1 < lay.m {
+                        assert_eq!(a[i], b[i], "{lay:?} {k1} {k2}");
+                    }
+                    assert!((a[i] - c[i]).norm() < 1e-14, "{lay:?} {k1} {k2}");
+                }
+            }
         }
     }
 

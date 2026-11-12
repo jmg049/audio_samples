@@ -85,6 +85,11 @@ pub(super) struct FourStep<F> {
     layout: Layout,
     /// `e^(-2πi n2 k1 / n)` for `k1 >= 1` at [`tw_pos`]`(r, k1, n2)`.
     twiddles: Vec<Complex<F>>,
+    /// The twiddles of `n2` and `n2 + 1` as real parts `(re, re)` of both,
+    /// then imaginary parts `(im, im)`: at `2 i` and `2 i + 2` for the pair
+    /// at `i = tw_pos(r, k1, n2)` (`n2` even). The AVX2 kernels multiply by
+    /// them without shuffling the twiddles.
+    split: Vec<Complex<F>>,
     fwd: Arc<dyn Fft<F>>,
     inv: Arc<dyn Fft<F>>,
 }
@@ -106,6 +111,14 @@ impl<F: RsFloat> FourStep<F> {
                 twiddles[tw_pos(r, k1, n2)] = Complex::new(F::of(a.cos()), F::of(a.sin()));
             }
         }
+        let mut split = vec![Complex::new(F::zero(), F::zero()); 2 * (r - 1) * m];
+        for i in (0..twiddles.len()).step_by(2) {
+            let (a, b) = (twiddles[i], twiddles[i + 1]);
+            split[2 * i] = Complex::new(a.re, a.re);
+            split[2 * i + 1] = Complex::new(b.re, b.re);
+            split[2 * i + 2] = Complex::new(a.im, a.im);
+            split[2 * i + 3] = Complex::new(b.im, b.im);
+        }
         let (fwd, inv) = F::with_planner(|p| (p.plan_fft_forward(m), p.plan_fft_inverse(m)));
         Some(Self {
             layout: Layout {
@@ -114,6 +127,7 @@ impl<F: RsFloat> FourStep<F> {
                 stride: m + PAD,
             },
             twiddles,
+            split,
             fwd,
             inv,
         })
@@ -141,7 +155,18 @@ impl<F: RsFloat> FourStep<F> {
         simd: bool,
     ) {
         let Layout { r, m, stride } = self.layout;
-        F::radix_pass(r, false, simd, src, dst, &self.twiddles, m, m, stride);
+        F::radix_pass(
+            r,
+            false,
+            simd,
+            src,
+            dst,
+            &self.twiddles,
+            &self.split,
+            m,
+            m,
+            stride,
+        );
         for row in dst.chunks_exact_mut(stride) {
             self.fwd.process_with_scratch(&mut row[..m], scratch);
         }
@@ -164,7 +189,18 @@ impl<F: RsFloat> FourStep<F> {
             self.inv.process_with_scratch(&mut row[..m], scratch);
         }
         let ds = if padded { stride } else { m };
-        F::radix_pass(r, true, simd, buf, dst, &self.twiddles, m, stride, ds);
+        F::radix_pass(
+            r,
+            true,
+            simd,
+            buf,
+            dst,
+            &self.twiddles,
+            &self.split,
+            m,
+            stride,
+            ds,
+        );
     }
 }
 
@@ -224,25 +260,22 @@ pub(super) mod simd {
     use realfft::num_complex::Complex;
     use std::arch::x86_64::*;
 
-    /// `a · b` for two complex values per vector.
+    /// `a · b` for two complex values per vector, `b` given as `(re, re)`
+    /// and `(im, im)` per value.
     #[inline(always)]
-    unsafe fn mul(a: __m256d, b: __m256d) -> __m256d {
+    unsafe fn mul_split(a: __m256d, br: __m256d, bi: __m256d) -> __m256d {
         // SAFETY: arithmetic only (the caller has AVX2 and FMA).
         unsafe {
-            let br = _mm256_movedup_pd(b);
-            let bi = _mm256_permute_pd::<0b1111>(b);
             let sw = _mm256_permute_pd::<0b0101>(a);
             _mm256_fmaddsub_pd(a, br, _mm256_mul_pd(sw, bi))
         }
     }
 
-    /// `a · conj(b)`.
+    /// `a · conj(b)`, `b` as in [`mul_split`].
     #[inline(always)]
-    unsafe fn mul_conj(a: __m256d, b: __m256d) -> __m256d {
+    unsafe fn mul_conj_split(a: __m256d, br: __m256d, bi: __m256d) -> __m256d {
         // SAFETY: arithmetic only (the caller has AVX2 and FMA).
         unsafe {
-            let br = _mm256_movedup_pd(b);
-            let bi = _mm256_permute_pd::<0b1111>(b);
             let sw = _mm256_permute_pd::<0b0101>(a);
             _mm256_fmsubadd_pd(a, br, _mm256_mul_pd(sw, bi))
         }
@@ -331,7 +364,7 @@ pub(super) mod simd {
         ss: usize,
         ds: usize,
     ) {
-        assert!(m.is_multiple_of(2) && tw.len() >= (R - 1) * m);
+        assert!(m.is_multiple_of(2) && tw.len() >= 2 * (R - 1) * m);
         assert!(src.len() >= ss * (R - 1) + m && dst.len() >= ds * (R - 1) + m);
         let (ps, pd, pt) = (
             src.as_ptr().cast::<f64>(),
@@ -343,13 +376,18 @@ pub(super) mod simd {
             // SAFETY: rows j < R at n2, n2 + 1 < m are in bounds (asserted).
             unsafe {
                 let load = |j: usize| _mm256_loadu_pd(ps.add(2 * (n2 + ss * j)));
-                let twid = |k: usize| _mm256_loadu_pd(pt.add(2 * super::tw_pos(R, k, n2)));
+                // Real and imaginary parts of the twiddles (see `FourStep::split`).
+                let twid = |k: usize| {
+                    let p = pt.add(4 * super::tw_pos(R, k, n2));
+                    (_mm256_loadu_pd(p), _mm256_loadu_pd(p.add(4)))
+                };
                 if INV {
                     let a: [__m256d; R] = std::array::from_fn(|k| {
                         if k == 0 {
                             load(0)
                         } else {
-                            mul_conj(load(k), twid(k))
+                            let (re, im) = twid(k);
+                            mul_conj_split(load(k), re, im)
                         }
                     });
                     let y = dft::<R, true>(a);
@@ -359,7 +397,12 @@ pub(super) mod simd {
                 } else {
                     let y = dft::<R, false>(std::array::from_fn(load));
                     for (k, v) in y.into_iter().enumerate() {
-                        let v = if k == 0 { v } else { mul(v, twid(k)) };
+                        let v = if k == 0 {
+                            v
+                        } else {
+                            let (re, im) = twid(k);
+                            mul_split(v, re, im)
+                        };
                         _mm256_storeu_pd(pd.add(2 * (n2 + ds * k)), v);
                     }
                 }
