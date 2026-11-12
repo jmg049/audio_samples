@@ -1021,6 +1021,36 @@ pub fn axis_sort<A: PartialOrd + Clone>(
     key: AxisSortKey,
 ) -> AudioSampleResult<(Array2<A>, Vec<usize>)> {
     check_axis("axis", axis, 2)?;
+    // In code of its own, compiled for AVX2 where the CPU has it (comparisons
+    // and copies only, so the result does not depend on the CPU).
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 support was checked just above.
+        return unsafe { axis_sort_avx2(s, axis, key) };
+    }
+    axis_sort_body(s, axis, key)
+}
+
+/// [`axis_sort`] compiled for AVX2.
+///
+/// # Safety
+/// The CPU must support `avx2`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn axis_sort_avx2<A: PartialOrd + Clone>(
+    s: ArrayView2<'_, A>,
+    axis: Axis,
+    key: AxisSortKey,
+) -> AudioSampleResult<(Array2<A>, Vec<usize>)> {
+    axis_sort_body(s, axis, key)
+}
+
+#[inline(always)]
+fn axis_sort_body<A: PartialOrd + Clone>(
+    s: ArrayView2<'_, A>,
+    axis: Axis,
+    key: AxisSortKey,
+) -> AudioSampleResult<(Array2<A>, Vec<usize>)> {
     let (rows, cols) = s.dim();
     let count = s.len_of(axis);
     let better = |v: &A, b: &A| match key {
