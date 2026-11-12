@@ -2468,20 +2468,26 @@ pub fn rms_from_spectrogram<F: AudioFloat>(
                 let cols: [&[F]; G] =
                     std::array::from_fn(|j| sc.column(t + j).to_slice().expect("unit row stride"));
                 let mut a = [F::zero(); G];
-                // `k` indexes the 8 columns at once.
-                #[allow(clippy::needless_range_loop)]
-                for k in 0..n_bins {
-                    if edge(k) {
-                        for j in 0..G {
-                            let mut x = cols[j][k] * cols[j][k];
-                            x *= half;
-                            a[j] += x;
-                        }
-                    } else {
-                        for j in 0..G {
-                            a[j] += cols[j][k] * cols[j][k];
-                        }
+                let add_edge = |a: &mut [F; G], k: usize| {
+                    for j in 0..G {
+                        let mut x = cols[j][k] * cols[j][k];
+                        x *= half;
+                        a[j] += x;
                     }
+                };
+                // Bin 0 and (for even frame lengths) the last bin count half;
+                // the bins between them, in ascending order, without a test
+                // per bin. `k` indexes the 8 columns at once.
+                add_edge(&mut a, 0);
+                let inner_end = if edge(n_bins - 1) { n_bins - 1 } else { n_bins };
+                #[allow(clippy::needless_range_loop)]
+                for k in 1..inner_end {
+                    for j in 0..G {
+                        a[j] += cols[j][k] * cols[j][k];
+                    }
+                }
+                if inner_end < n_bins && n_bins > 1 {
+                    add_edge(&mut a, n_bins - 1);
                 }
                 for j in 0..G {
                     o[t + j] = finish(a[j]);
