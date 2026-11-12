@@ -646,6 +646,7 @@ impl PassiveFactor {
     }
 
     /// Adds column `t`. Returns false if it is numerically dependent on the others.
+    #[inline(always)]
     fn push(&mut self, gram: &Array2<f64>, t: usize) -> bool {
         let p = self.passive.len();
         let start = self.l.len();
@@ -670,6 +671,7 @@ impl PassiveFactor {
         true
     }
 
+    #[inline(always)]
     fn rebuild(&mut self, gram: &Array2<f64>, keep: &[usize]) {
         self.passive.clear();
         self.l.clear();
@@ -679,6 +681,7 @@ impl PassiveFactor {
     }
 
     /// Solves the normal equations for the right-hand side `rhs` of the passive set.
+    #[inline(always)]
     fn solve(&self, rhs: &mut [f64]) {
         let p = self.passive.len();
         let mut offset = 0;
@@ -702,7 +705,29 @@ impl PassiveFactor {
     }
 }
 
+/// The active-set solver, in code of its own compiled for AVX2 where the CPU
+/// has it (no operation is fused, so the values do not depend on the CPU).
 fn active_set(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 support was checked just above.
+        return unsafe { active_set_avx2(a, b) };
+    }
+    active_set_body(a, b)
+}
+
+/// [`active_set`] compiled for AVX2.
+///
+/// # Safety
+/// The CPU must support `avx2`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn active_set_avx2(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
+    active_set_body(a, b)
+}
+
+#[inline(always)]
+fn active_set_body(a: ArrayView2<'_, f64>, b: &Array1<f64>) -> Array1<f64> {
     let (m, n) = a.dim();
     let capacity = m.min(n);
     let mut x = Array1::<f64>::zeros(n);
