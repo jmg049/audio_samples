@@ -1042,6 +1042,10 @@ fn piptrack_channel<F: AudioFloat>(
 
 /// [`piptrack_channel`] frame by frame, for a spectrogram whose frames are
 /// contiguous columns.
+///
+/// Per frame: the magnitudes and the reference in one pass, then the peak
+/// test for 64 bins at a time into a bit mask (it vectorises), then the
+/// interpolation at the peaks only.
 fn piptrack_columns<F: AudioFloat>(
     s: ArrayView2<'_, F>,
     in_range: &[bool],
@@ -1055,56 +1059,81 @@ fn piptrack_columns<F: AudioFloat>(
     let threshold = F::of(config.threshold);
     let (two, half) = (F::of(2.0), F::of(0.5));
     let (sr, n_fft_f) = (F::of(sample_rate), F::of_usize(n_fft));
+    // The bins in range are consecutive (frequency grows with the bin); the
+    // first bin is never a maximum.
+    let lo = in_range.iter().position(|&r| r).unwrap_or(n_bins).max(1);
+    let hi = in_range.iter().rposition(|&r| r).map_or(0, |k| k + 1);
+    let last = n_bins - 1;
+    // Bins tested against both neighbours: `[lo, inner_hi)`.
+    let inner_hi = hi.min(last).max(lo);
     let mut col = vec![F::zero(); n_bins];
-    let mut thresholded = vec![F::zero(); n_bins];
     for t in 0..n_frames {
-        for (c, &x) in col.iter_mut().zip(s.column(t)) {
-            *c = x.abs();
-        }
+        let column = s.column(t);
+        let Some(src) = column.to_slice() else {
+            continue;
+        };
         let reference = match config.reference {
             PiptrackReference::FrameMax => {
-                threshold * col.iter().fold(F::neg_infinity(), |m, &x| m.max(x))
+                let mut m = F::neg_infinity();
+                for (c, &x) in col.iter_mut().zip(src) {
+                    *c = x.abs();
+                    m = m.max(*c);
+                }
+                threshold * m
             }
             PiptrackReference::FrameMean => {
-                threshold * (col.iter().copied().sum::<F>() / F::of_usize(n_bins))
+                let mut sum = F::zero();
+                for (c, &x) in col.iter_mut().zip(src) {
+                    *c = x.abs();
+                    sum += *c;
+                }
+                threshold * (sum / F::of_usize(n_bins))
             }
-            PiptrackReference::Value(v) => F::of(v).abs(),
+            PiptrackReference::Value(v) => {
+                for (c, &x) in col.iter_mut().zip(src) {
+                    *c = x.abs();
+                }
+                F::of(v).abs()
+            }
         };
-        for (th, &x) in thresholded.iter_mut().zip(&col) {
-            *th = if x > reference { x } else { F::zero() };
-        }
-        for k in 0..n_bins {
-            if !in_range[k] {
-                continue;
-            }
-            // Local maximum along frequency: x[k] > x[k-1] and x[k] >= x[k+1];
-            // the first bin is never a maximum, the last only needs x[-1] > x[-2].
-            let is_max = if k == 0 {
-                false
-            } else if k == n_bins - 1 {
-                thresholded[k] > thresholded[k - 1]
-            } else {
-                thresholded[k] > thresholded[k - 1] && thresholded[k] >= thresholded[k + 1]
-            };
-            if !is_max {
-                continue;
-            }
-            // Parabolic interpolation (0 at the edges) and the central-difference
-            // gradient (one-sided at the last bin).
-            let (shift, avg) = if k == n_bins - 1 {
-                (F::zero(), col[k] - col[k - 1])
-            } else {
-                let a = col[k + 1] + col[k - 1] - two * col[k];
-                let b = (col[k + 1] - col[k - 1]) / two;
-                let shift = if b.abs() >= a.abs() {
-                    F::zero()
-                } else {
-                    -b / a
-                };
-                (shift, (col[k + 1] - col[k - 1]) / two)
-            };
+        // Values not above the reference count as zero.
+        let th = |x: F| if x > reference { x } else { F::zero() };
+        let mut put = |k: usize, shift: F, avg: F| {
             pitches[[k, t]] = (F::of_usize(k) + shift) * sr / n_fft_f;
             mags[[k, t]] = col[k] + half * avg * shift;
+        };
+        // Local maximum along frequency: x[k] > x[k-1] and x[k] >= x[k+1].
+        let mut k0 = lo;
+        while k0 < inner_hi {
+            let len = (inner_hi - k0).min(64);
+            let (a, b, c) = (
+                &col[k0 - 1..k0 - 1 + len],
+                &col[k0..k0 + len],
+                &col[k0 + 1..k0 + 1 + len],
+            );
+            let mut bits = 0u64;
+            for i in 0..len {
+                let tb = th(b[i]);
+                bits |= u64::from(tb > th(a[i]) && tb >= th(c[i])) << i;
+            }
+            while bits != 0 {
+                let k = k0 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                // Parabolic interpolation and the central-difference gradient.
+                let pa = col[k + 1] + col[k - 1] - two * col[k];
+                let pb = (col[k + 1] - col[k - 1]) / two;
+                let shift = if pb.abs() >= pa.abs() {
+                    F::zero()
+                } else {
+                    -pb / pa
+                };
+                put(k, shift, (col[k + 1] - col[k - 1]) / two);
+            }
+            k0 += len;
+        }
+        // The last bin only needs x[-1] > x[-2]; no parabola, one-sided gradient.
+        if hi == n_bins && last >= lo && th(col[last]) > th(col[last - 1]) {
+            put(last, F::zero(), col[last] - col[last - 1]);
         }
     }
 }
