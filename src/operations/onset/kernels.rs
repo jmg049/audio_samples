@@ -25,14 +25,14 @@ use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ndarray::Array2;
+/// ```rust
+/// use ndarray::array;
 /// use audio_samples::operations::onset::kernels::energy_odf;
 ///
-/// let mag = Array2::from_shape_vec((128, 100), vec![0.0; 12800]).unwrap();
+/// // Two bins, four frames: bin 0 rises at frame 1, bin 1 at frame 2.
+/// let mag = array![[0.0, 1.0, 1.0, 0.5], [0.0, 0.0, 2.0, 2.0]];
 /// let odf = energy_odf(&mag);
-/// assert_eq!(odf.len().get(), 100);
-/// assert_eq!(odf[0], 0.0);
+/// assert_eq!(odf.as_slice(), &[0.0, 1.0, 2.0, 0.0]); // decreases do not count
 /// ```
 #[inline]
 #[must_use]
@@ -75,14 +75,15 @@ pub fn energy_odf(mag: &Array2<f64>) -> NonEmptyVec<f64> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use non_empty_slice::non_empty_slice;
+/// ```rust
+/// use non_empty_slice::non_empty_vec;
 /// use audio_samples::operations::onset::kernels::apply_adaptive_threshold;
 ///
-/// let mut signal = non_empty_slice![1.0, 5.0, 2.0, 8.0, 1.5].to_non_empty_vec();
-/// let median = non_empty_slice![1.5, 2.0, 2.5, 3.0, 1.8];
+/// let mut signal = non_empty_vec![1.0, 5.0, 2.0, 8.0, 1.5];
+/// let median = non_empty_vec![1.5, 2.0, 2.5, 3.0, 1.8];
 /// apply_adaptive_threshold(&mut signal, &median, 2.0);
-/// // Values below median * 2.0 are set to zero
+/// // Values below 2 × median are set to zero; the others are unchanged.
+/// assert_eq!(signal.as_slice(), &[0.0, 5.0, 0.0, 8.0, 0.0]);
 /// ```
 #[inline]
 pub fn apply_adaptive_threshold(

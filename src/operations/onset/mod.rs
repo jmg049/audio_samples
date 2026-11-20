@@ -685,10 +685,12 @@ impl SpectralFluxConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use audio_samples::operations::onset::SpectralFluxConfig;
+    /// ```rust
+    /// use audio_samples::operations::onset::{SpectralFluxConfig, SpectralFluxMethod};
     ///
     /// let config = SpectralFluxConfig::complex();
+    /// assert_eq!(config.flux_method, SpectralFluxMethod::Complex);
+    /// assert!(!config.rectify);
     /// ```
     #[inline]
     #[must_use]
@@ -788,21 +790,35 @@ pub struct ComplexOnsetConfig {
 }
 
 impl ComplexOnsetConfig {
-    /// Creates a new complex onset configuration with balanced default settings.
+    /// Creates a complex onset configuration with every parameter given explicitly.
     ///
-    /// Uses moderate weights for both magnitude (0.7) and phase (0.3) components with
-    /// rectification enabled for both. Suitable for general-purpose musical onset detection.
+    /// [`Default`] gives balanced settings (magnitude weight 0.7, phase weight 0.3, both
+    /// rectified, log compression 100, hop 512); the presets suit particular material.
     ///
     /// # Returns
     ///
-    /// A [`ComplexOnsetConfig`] instance with balanced defaults.
+    /// A [`ComplexOnsetConfig`] with the given fields.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// use audio_samples::nzu;
     /// use audio_samples::operations::onset::ComplexOnsetConfig;
+    /// use audio_samples::operations::types::PeakPickingConfig;
+    /// use spectrograms::CqtParams;
     ///
-    /// let config = ComplexOnsetConfig::new();
+    /// let config = ComplexOnsetConfig::new(
+    ///     CqtParams::onset_detection(),
+    ///     nzu!(512),
+    ///     None,
+    ///     PeakPickingConfig::default(),
+    ///     0.7,
+    ///     0.3,
+    ///     true,
+    ///     true,
+    ///     100.0,
+    /// );
+    /// assert_eq!(config, ComplexOnsetConfig::default());
     /// ```
     #[inline]
     #[must_use]

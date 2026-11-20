@@ -32,13 +32,18 @@ use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use non_empty_slice::non_empty_slice;
+/// ```rust
+/// use non_empty_slice::non_empty_vec;
+/// use audio_samples::nzu;
 /// use audio_samples::operations::onset::filters::median_filter;
 ///
-/// let signal = non_empty_slice![1.0, 5.0, 2.0, 3.0, 100.0, 4.0, 5.0];
-/// let filtered = median_filter(&signal, crate::nzu!(3))?;
-/// // The outlier 100.0 is replaced by the median of its window
+/// let signal = non_empty_vec![1.0, 5.0, 2.0, 3.0, 100.0, 4.0, 5.0];
+/// let filtered = median_filter(&signal, nzu!(3))?;
+/// // The outlier 100.0 is replaced by the median of its window [3, 100, 4].
+/// assert_eq!(filtered[4], 4.0);
+/// // An even length is an error.
+/// assert!(median_filter(&signal, nzu!(4)).is_err());
+/// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
 pub fn median_filter(
@@ -84,13 +89,13 @@ pub fn median_filter(
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use non_empty_slice::non_empty_slice;
+/// ```rust
+/// use non_empty_slice::non_empty_vec;
 /// use audio_samples::operations::onset::filters::rectify_inplace;
 ///
-/// let mut signal = non_empty_slice![1.0, -2.0, 3.0, -4.0, 5.0].to_non_empty_vec();
+/// let mut signal = non_empty_vec![1.0, -2.0, 3.0, -4.0, 5.0];
 /// rectify_inplace(&mut signal);
-/// // signal is now [1.0, 0.0, 3.0, 0.0, 5.0]
+/// assert_eq!(signal.as_slice(), &[1.0, 0.0, 3.0, 0.0, 5.0]);
 /// ```
 #[inline]
 pub fn rectify_inplace(signal: &mut NonEmptySlice<f64>) {
@@ -114,13 +119,15 @@ pub fn rectify_inplace(signal: &mut NonEmptySlice<f64>) {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use non_empty_slice::non_empty_slice;
+/// ```rust
+/// use non_empty_slice::non_empty_vec;
 /// use audio_samples::operations::onset::filters::log_compress_inplace;
 ///
-/// let mut signal = non_empty_slice![1.0, 10.0, 100.0, 1000.0].to_non_empty_vec();
+/// let mut signal = non_empty_vec![1.0, 10.0, 100.0, 1000.0];
 /// log_compress_inplace(&mut signal, 100.0);
-/// // Large peaks are compressed more than small values
+/// // ln(1 + 100·x): each tenfold step adds about ln 10 ≈ 2.3.
+/// assert!((signal[0] - 101f64.ln()).abs() < 1e-12);
+/// assert!((signal[3] - signal[2] - 10f64.ln()).abs() < 1e-3);
 /// ```
 #[inline]
 pub fn log_compress_inplace(signal: &mut NonEmptySlice<f64>, alpha: f64) {

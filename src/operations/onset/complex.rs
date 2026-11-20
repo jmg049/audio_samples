@@ -28,17 +28,18 @@ use num_complex::Complex;
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ndarray::Array2;
+/// ```rust
+/// use ndarray::array;
 /// use audio_samples::operations::onset::complex::magnitude_difference;
 ///
-/// let mag = Array2::from_shape_vec((3, 4), vec![
-///     1.0, 2.0, 3.0, 2.5,
-///     0.5, 1.5, 2.0, 1.0,
-///     2.0, 2.5, 3.5, 3.0,
-/// ]).unwrap();
+/// let mag = array![
+///     [1.0, 2.0, 3.0, 2.5],
+///     [0.5, 1.5, 2.0, 1.0],
+///     [2.0, 2.5, 3.5, 3.0],
+/// ];
 /// let diff = magnitude_difference(mag.view());
-/// // diff[freq=0, time=1] = 2.0 - 1.0 = 1.0
+/// assert_eq!(diff.row(0).to_vec(), vec![0.0, 1.0, 1.0, -0.5]);
+/// assert_eq!(diff[[1, 3]], -1.0);
 /// ```
 #[inline]
 #[must_use]
@@ -76,16 +77,7 @@ pub fn magnitude_difference(mag: ArrayView2<f64>) -> Array2<f64> {
 ///
 /// Phase difference in radians, wrapped to `(-π, π]`.
 ///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::f64::consts::PI;
-/// use audio_samples::operations::onset::complex::wrapped_phase_diff;
-///
-/// // Crossing the +π boundary: π - (-π) = 2π wraps to 0
-/// let diff = wrapped_phase_diff(PI, -PI);
-/// assert!((diff - 0.0).abs() < 1e-10);
-/// ```
+/// For example, `wrapped_phase_diff(π, −π)` is 0: the difference 2π wraps to 0.
 #[inline]
 #[allow(dead_code)] // single-wrap helper; `phase_deviation` uses `princarg`
 fn wrapped_phase_diff(a: f64, b: f64) -> f64 {
@@ -147,15 +139,23 @@ fn princarg(angle: f64) -> f64 {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use ndarray::Array2;
 /// use num_complex::Complex;
 /// use audio_samples::operations::onset::complex::phase_deviation;
 /// use audio_samples::operations::onset::ComplexOnsetConfig;
 ///
-/// let config = ComplexOnsetConfig::new();
-/// let spec = Array2::from_elem((128, 100), Complex::new(1.0, 0.0));
-/// let deviation = phase_deviation(spec.view(), &config, 44100.0);
+/// let config = ComplexOnsetConfig::default();
+/// let sr = 44_100.0;
+/// // Each bin advances by exactly its centre frequency's phase step: no deviation.
+/// let (bins, frames) = (8, 5);
+/// let spec = Array2::from_shape_fn((bins, frames), |(b, t)| {
+///     let step = std::f64::consts::TAU * config.cqt_config.bin_frequency(b)
+///         * config.hop_size.get() as f64 / sr;
+///     Complex::from_polar(1.0, step * t as f64)
+/// });
+/// let deviation = phase_deviation(spec.view(), &config, sr);
+/// assert!(deviation.iter().all(|&d| d < 1e-9));
 /// ```
 #[inline]
 #[must_use]
@@ -219,15 +219,24 @@ pub fn phase_deviation(
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ndarray::Array2;
+/// ```rust
+/// use ndarray::array;
 /// use audio_samples::operations::onset::complex::combine_complex_odf;
 /// use audio_samples::operations::onset::ComplexOnsetConfig;
 ///
-/// let mag_diff = Array2::zeros((128, 100));
-/// let phase_dev = Array2::zeros((128, 100));
-/// let config = ComplexOnsetConfig::musical(audio_samples::sample_rate!(44100));
+/// let mut config = ComplexOnsetConfig::default();
+/// config.magnitude_weight = 0.5;
+/// config.phase_weight = 0.25;
+/// config.log_compression = 0.0;
+/// config.magnitude_rectify = true;
+/// // Two bins, three frames.
+/// let mag_diff = array![[0.0, 2.0, -1.0], [0.0, 1.0, 0.0]];
+/// let phase_dev = array![[0.0, 0.4, 0.8], [0.0, 0.0, 0.4]];
 /// let odf = combine_complex_odf(&mag_diff, &phase_dev, &config);
+/// // 0.5 × (rectified magnitude sum) + 0.25 × (phase sum)
+/// for (got, want) in odf.iter().zip([0.0, 1.6, 0.3]) {
+///     assert!((got - want).abs() < 1e-12);
+/// }
 /// ```
 #[inline]
 #[must_use]

@@ -38,14 +38,13 @@ use num_complex::Complex;
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ndarray::Array2;
+/// ```rust
+/// use ndarray::array;
 /// use audio_samples::operations::onset::flux::energy_flux;
 ///
-/// let mag = Array2::from_shape_vec((128, 100), vec![0.0; 12800]).unwrap();
+/// let mag = array![[0.0, 1.0, 1.0, 0.5], [0.0, 0.0, 2.0, 2.0]];
 /// let flux = energy_flux(&mag);
-/// assert_eq!(flux.len().get(), 100);
-/// assert_eq!(flux[0], 0.0);
+/// assert_eq!(flux.as_slice(), &[0.0, 1.0, 2.0, 0.0]);
 /// ```
 #[inline]
 #[must_use]
@@ -88,13 +87,14 @@ pub fn energy_flux(mag: &Array2<f64>) -> NonEmptyVec<f64> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ndarray::Array2;
+/// ```rust
+/// use ndarray::array;
 /// use audio_samples::operations::onset::flux::magnitude_flux;
 ///
-/// let mag = Array2::from_shape_vec((128, 100), vec![0.0; 12800]).unwrap();
+/// let mag = array![[0.0, 1.0, 1.0, 0.5], [0.0, 0.0, 2.0, 2.0]];
 /// let flux = magnitude_flux(&mag);
-/// assert_eq!(flux.len().get(), 100);
+/// // Decreases count too: frame 3 has |0.5 − 1.0| = 0.5.
+/// assert_eq!(flux.as_slice(), &[0.0, 1.0, 2.0, 0.5]);
 /// ```
 #[inline]
 #[must_use]
@@ -138,14 +138,16 @@ pub fn magnitude_flux(mag: &Array2<f64>) -> NonEmptyVec<f64> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ndarray::Array2;
+/// ```rust
+/// use ndarray::array;
 /// use num_complex::Complex;
 /// use audio_samples::operations::onset::flux::complex_flux;
 ///
-/// let spec = Array2::from_elem((128, 100), Complex::new(0.0, 0.0));
+/// // One bin whose phase turns by 90° between frames at constant magnitude.
+/// let spec = array![[Complex::new(1.0, 0.0), Complex::new(0.0, 1.0)]];
 /// let flux = complex_flux(&spec);
-/// assert_eq!(flux.len().get(), 100);
+/// assert_eq!(flux[0], 0.0);
+/// assert!((flux[1] - 2f64.sqrt()).abs() < 1e-12); // |i − 1|
 /// ```
 #[inline]
 #[must_use]
@@ -185,14 +187,15 @@ pub fn complex_flux(spec: &Array2<Complex<f64>>) -> NonEmptyVec<f64> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ndarray::Array2;
+/// ```rust
+/// use ndarray::array;
 /// use num_complex::Complex;
 /// use audio_samples::operations::onset::flux::rectified_complex_flux;
 ///
-/// let spec = Array2::from_elem((128, 100), Complex::new(1.0, 0.0));
+/// // A phase change at constant magnitude does not count; a magnitude rise does.
+/// let spec = array![[Complex::new(1.0, 0.0), Complex::new(0.0, 1.0), Complex::new(0.0, 3.0)]];
 /// let flux = rectified_complex_flux(&spec);
-/// assert_eq!(flux.len().get(), 100);
+/// assert_eq!(flux.as_slice(), &[0.0, 0.0, 2.0]);
 /// ```
 #[inline]
 #[must_use]
