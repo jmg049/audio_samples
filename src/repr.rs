@@ -3368,11 +3368,27 @@ where
 
 /// Formats a human-readable summary of the audio samples.
 ///
-/// The standard format (`{}`) prints a compact one-line header:
-/// `AudioSamples<TYPE>: N ch × M samples @ R Hz (Layout)`.
+/// The standard format (`{}`) is one line with no trailing newline: the sample
+/// type, the channel count, the samples per channel, the sample rate and the
+/// duration in seconds (three decimals):
 ///
-/// The alternate format (`{:#}`) also includes the first and last 5 samples for
-/// each channel, useful for quick inspection during debugging.
+/// ```text
+/// AudioSamples<f32>: 2 ch × 48000 samples @ 48000 Hz (1.000 s)
+/// ```
+///
+/// The alternate format (`{:#}`) adds one line per channel previewing its
+/// samples: all of them when a channel has at most six, otherwise the first
+/// three and the last three around `...`. Float samples are printed with four
+/// decimals, integer samples as stored. At most eight channels are listed; a
+/// final line counts the rest. There is no trailing newline.
+///
+/// ```text
+/// AudioSamples<f32>: 2 ch × 48000 samples @ 48000 Hz (1.000 s)
+///   ch 0: [0.0000, 0.0627, 0.1253, ..., -0.1873, -0.1253, -0.0627]
+///   ch 1: [0.0000, 0.0314, 0.0627, ..., -0.0941, -0.0627, -0.0314]
+/// ```
+///
+/// `Debug` prints the full structure, including every sample.
 ///
 /// # Examples
 ///
@@ -3381,8 +3397,14 @@ where
 /// use ndarray::array;
 ///
 /// let audio = AudioSamples::new_mono(array![0.1f32, 0.2, 0.3], sample_rate!(44100)).unwrap();
-/// let s = format!("{}", audio);
-/// assert!(s.contains("44100"));
+/// assert_eq!(
+///     format!("{audio}"),
+///     "AudioSamples<f32>: 1 ch × 3 samples @ 44100 Hz (0.000 s)"
+/// );
+/// assert_eq!(
+///     format!("{audio:#}"),
+///     "AudioSamples<f32>: 1 ch × 3 samples @ 44100 Hz (0.000 s)\n  ch 0: [0.1000, 0.2000, 0.3000]"
+/// );
 /// ```
 impl<T> Display for AudioSamples<'_, T>
 where
@@ -3390,110 +3412,69 @@ where
 {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let type_name = std::any::type_name::<T>();
-        let n_channels = self.num_channels();
-        let n_samples = self.samples_per_channel();
-        let rate = self.sample_rate;
+        /// Samples shown at each end of a channel preview.
+        const EDGE: usize = 3;
+        /// Channels listed by the alternate format.
+        const MAX_CHANNELS: usize = 8;
 
-        // Compact header (always shown)
-        writeln!(
-            f,
-            "AudioSamples<{type_name}>: {n_channels} ch x {n_samples} samples @ {rate} Hz"
-        )?;
-
-        // Alternate (#) gives full details; otherwise, concise
-        if f.alternate() {
-            // Detailed alternate view
-            match &self.data {
-                AudioData::Mono(arr) => {
-                    let len = arr.len();
-                    let display_len = 5.min(len.get());
-                    write!(f, "Mono Channel\n  First {display_len} samples: [")?;
-                    for (i, val) in arr.iter().take(display_len).enumerate() {
-                        write!(f, "{val:.4}")?;
-                        if i < display_len - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-                    write!(f, "]")?;
-                    if len.get() > display_len {
-                        write!(f, "\n  Last {display_len} samples: [")?;
-                        for (i, val) in arr.iter().rev().take(display_len).rev().enumerate() {
-                            write!(f, "{val:.4}")?;
-                            if i < display_len - 1 {
-                                write!(f, ", ")?;
-                            }
-                        }
-                        write!(f, "]")?;
-                    }
+        fn preview<'s, T: StandardSample + 's>(
+            f: &mut std::fmt::Formatter<'_>,
+            ch: usize,
+            samples: impl ExactSizeIterator<Item = &'s T> + DoubleEndedIterator + Clone,
+        ) -> std::fmt::Result {
+            let len = samples.len();
+            let float = T::SAMPLE_TYPE.is_float();
+            let item = |f: &mut std::fmt::Formatter<'_>, v: &T| {
+                if float {
+                    write!(f, "{v:.4}")
+                } else {
+                    write!(f, "{v}")
                 }
-                AudioData::Multi(arr) => {
-                    let (channels, samples) = arr.dim();
-                    for ch in 0..channels.get() {
-                        let ch_data = arr.index_axis(ndarray::Axis(0), ch);
-                        let len = samples.get();
-                        let display_len = 5.min(len);
-
-                        write!(f, "\nChannel {ch}:")?;
-                        write!(f, "\n  First {display_len} samples: [")?;
-                        for (i, val) in ch_data.iter().take(display_len).enumerate() {
-                            write!(f, "{val:.4}")?;
-                            if i < display_len - 1 {
-                                write!(f, ", ")?;
-                            }
-                        }
-                        write!(f, "]")?;
-
-                        if len > display_len {
-                            write!(f, "\n  Last {display_len} samples: [")?;
-                            for (i, val) in ch_data.iter().rev().take(display_len).rev().enumerate()
-                            {
-                                write!(f, "{val:.4}")?;
-                                if i < display_len - 1 {
-                                    write!(f, ", ")?;
-                                }
-                            }
-                            write!(f, "]")?;
-                        }
+            };
+            write!(f, "\n  ch {ch}: [")?;
+            if len <= 2 * EDGE {
+                for (i, v) in samples.enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
                     }
+                    item(f, v)?;
+                }
+            } else {
+                for v in samples.clone().take(EDGE) {
+                    item(f, v)?;
+                    write!(f, ", ")?;
+                }
+                write!(f, "...")?;
+                for v in samples.skip(len - EDGE) {
+                    write!(f, ", ")?;
+                    item(f, v)?;
                 }
             }
-        } else {
-            // Compact summary
-            match &self.data {
-                AudioData::Mono(arr) => {
-                    let len = arr.len();
-                    let preview = 5.min(len.get());
-                    write!(f, "[")?;
-                    for (i, val) in arr.as_view().iter().take(preview).enumerate() {
-                        write!(f, "{val:.4}")?;
-                        if i < preview - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-                    if len.get() > preview {
-                        write!(f, ", ...")?;
-                    }
-                    write!(f, "]")?;
+            write!(f, "]")
+        }
+
+        let n_channels = self.num_channels().get() as usize;
+        write!(
+            f,
+            "AudioSamples<{}>: {n_channels} ch × {} samples @ {} Hz ({:.3} s)",
+            T::LABEL,
+            self.samples_per_channel(),
+            self.sample_rate,
+            self.duration_seconds()
+        )?;
+
+        if !f.alternate() {
+            return Ok(());
+        }
+        match &self.data {
+            AudioData::Mono(arr) => preview(f, 0, arr.as_view().iter())?,
+            AudioData::Multi(arr) => {
+                let view = arr.as_view();
+                for (ch, row) in view.outer_iter().take(MAX_CHANNELS).enumerate() {
+                    preview(f, ch, row.iter())?;
                 }
-                AudioData::Multi(arr) => {
-                    let channels = arr.nrows().get();
-                    for ch in 0..channels {
-                        let ch_data = arr.index_axis(ndarray::Axis(0), ch);
-                        let len = ch_data.len();
-                        let preview = 3.min(len);
-                        write!(f, "\nCh {ch}: [")?;
-                        for (i, val) in ch_data.iter().take(preview).enumerate() {
-                            write!(f, "{val:.4}")?;
-                            if i < preview - 1 {
-                                write!(f, ", ")?;
-                            }
-                        }
-                        if len > preview {
-                            write!(f, ", ...")?;
-                        }
-                        write!(f, "]")?;
-                    }
+                if n_channels > MAX_CHANNELS {
+                    write!(f, "\n  ... {} more channels", n_channels - MAX_CHANNELS)?;
                 }
             }
         }
@@ -6860,5 +6841,52 @@ mod tests {
             }
             other => panic!("expected InvalidNumberOfSamples, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn display_is_one_line_without_preview() {
+        let audio =
+            AudioSamples::new_mono(Array1::from_elem(22050, 0.5f32), crate::sample_rate!(44100))
+                .unwrap();
+        let s = format!("{audio}");
+        assert_eq!(
+            s,
+            "AudioSamples<f32>: 1 ch × 22050 samples @ 44100 Hz (0.500 s)"
+        );
+        assert!(!s.contains('\n'));
+    }
+
+    #[test]
+    fn display_alternate_previews_each_channel() {
+        let data = Array2::from_shape_fn((2, 10), |(c, i)| (c * 10 + i) as i16);
+        let audio = AudioSamples::new_multi_channel(data, crate::sample_rate!(8000)).unwrap();
+        assert_eq!(
+            format!("{audio:#}"),
+            "AudioSamples<i16>: 2 ch × 10 samples @ 8000 Hz (0.001 s)\n  \
+             ch 0: [0, 1, 2, ..., 7, 8, 9]\n  \
+             ch 1: [10, 11, 12, ..., 17, 18, 19]"
+        );
+        assert_eq!(
+            format!("{audio}"),
+            "AudioSamples<i16>: 2 ch × 10 samples @ 8000 Hz (0.001 s)"
+        );
+    }
+
+    #[test]
+    fn display_alternate_short_channel_and_many_channels() {
+        let audio =
+            AudioSamples::new_mono(array![0.25f64, -0.5], crate::sample_rate!(48000)).unwrap();
+        assert_eq!(
+            format!("{audio:#}"),
+            "AudioSamples<f64>: 1 ch × 2 samples @ 48000 Hz (0.000 s)\n  ch 0: [0.2500, -0.5000]"
+        );
+
+        let data = Array2::<f32>::zeros((10, 1));
+        let audio = AudioSamples::new_multi_channel(data, crate::sample_rate!(48000)).unwrap();
+        let s = format!("{audio:#}");
+        assert_eq!(s.lines().count(), 1 + 8 + 1);
+        assert!(s.ends_with("\n  ... 2 more channels"), "{s}");
+        assert!(s.contains("  ch 7: [0.0000]"));
+        assert!(!s.contains("ch 8"));
     }
 }

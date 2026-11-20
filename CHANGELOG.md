@@ -542,6 +542,13 @@ odd-length spectral bin spacing, `frequency_to_note` and
 
 ### Changed
 
+- **`AudioSamples`' `Display` output is one line, and `{:#}` previews the channels.** `{}`
+  prints `AudioSamples<f32>: 2 ch × 48000 samples @ 48000 Hz (1.000 s)` (sample type, channels,
+  samples per channel, sample rate, duration) with no trailing newline and no samples. `{:#}`
+  adds one line per channel, up to eight, with its first and last three samples (all of them
+  when there are at most six). It used to print `x` instead of `×`, end the header with a
+  newline, add a sample preview to `{}`, and lay `{:#}` out differently for mono and
+  multi-channel audio. The sample type is the crate's label (`I24`, not `i24::I24`).
 - **Setters and lookups that panicked on bad arguments return errors.**
   `HpssConfig::set_stft_params` returns `AudioSampleResult<()>` and rejects a
   `hop_size` larger than `n_fft` with `AudioSampleError::Parameter`, leaving the
