@@ -1,64 +1,34 @@
-//! Utility functions and helpers for audio processing.
+//! Helpers that complement the core type and the operation traits: test signals,
+//! unit conversions, comparison metrics and quick checks. All of them are in the
+//! default build.
 //!
-//! This module groups convenience utilities that complement the core types and operations.
-
-//! Four sub-modules expose signal generation, signal comparison, audio analysis, and
-//! mathematical building blocks respectively:
+//! - [`generation`]: test signals (sine, chirp, impulse, silence, noise, …) and
+//!   [`example_clips`], named clips of realistic music and speech.
+//! - [`audio_math`]: conversions between time, samples and frames, frequency, MIDI and
+//!   note names, mel, decibels and cents.
+//! - [`comparison`]: correlation, MSE, SNR and signal alignment.
+//! - [`detection`]: silence, clipping, dynamic range, noise floor and a quick
+//!   fundamental-frequency estimate.
+//! - [`array_ops`]: small array operations used by feature pipelines (local extrema,
+//!   event matching, interpolation, padding).
+//! - [`notation`]: tuning systems and musical notation (just intonation, the
+//!   Functional Just System, Hindustani and Carnatic names).
 //!
-//! - [`generation`]: synthesize common test signals (sine, chirp, impulse, silence, …) and
-//!   named [`example_clips`] of realistic audio
-//! - [`comparison`]: similarity metrics (correlation, MSE, SNR, signal alignment)
-//! - [`detection`]: lightweight analysis helpers (fundamental frequency, silence regions, …)
-//! - [`audio_math`]: domain-level conversions between frequency, amplitude, MIDI, mel, and time
-//!
-//! All sub-modules are re-exported at the `utils` level for convenience. Top-level helpers
-//! for sample-to-time conversion are also provided directly.
-
-//! Audio pipelines typically require many small numeric helpers - converting frequencies,
-//! detecting silence, generating test tones - that do not belong to the core sample-buffer
-//! API. This module keeps those helpers separate from the `AudioSamples` interface.
-
-//! Import individual functions by path or use the module prefix directly:
+//! The items of `generation`, `audio_math`, `comparison` and `detection` are also
+//! re-exported here, so `utils::sine_wave` and `utils::generation::sine_wave` name the
+//! same function. [`seconds_to_samples`] and [`samples_to_seconds`] are defined here.
 //!
 //! ```rust
-//! use audio_samples::utils::generation;
-//! use audio_samples::sample_rate;
+//! use audio_samples::utils::{correlation, seconds_to_samples};
+//! use audio_samples::{sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
-//! // Generate a one-second 440 Hz sine wave at 44 100 Hz sample rate.
-//! let tone = generation::sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
-//! assert_eq!(tone.sample_rate().get(), 44100);
-//! ```
+//! let a = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 1.0);
+//! assert_eq!(a.samples_per_channel().get(), seconds_to_samples(0.2, 44100u32));
 //!
-//! Some utilities are feature-gated:
-//! - `detection::detect_sample_rate` requires `feature = "transforms"`.
-//! - Noise generators (`white_noise`, `pink_noise`, `brown_noise`) require `feature = "random-generation"`.
-//!
-//! # Examples
-//!
-//! ## Compare two identical signals
-//! ```rust
-//! use audio_samples::utils::{comparison, generation};
-//! use audio_samples::sample_rate;
-//! use std::time::Duration;
-//!
-//! let sr = sample_rate!(44100);
-//! let a = generation::sine_wave::<f32>(440.0, Duration::from_secs(1), sr, 1.0);
-//! let b = generation::sine_wave::<f32>(440.0, Duration::from_secs(1), sr, 1.0);
-//! let corr: f64 = comparison::correlation(&a, &b).unwrap();
-//! assert!(corr > 0.99);
-//! ```
-//!
-//! ## Detect silence regions
-//! ```rust
-//! use audio_samples::utils::{detection, generation};
-//! use audio_samples::sample_rate;
-//! use std::time::Duration;
-//!
-//! let sr = sample_rate!(44100);
-//! let audio = generation::silence::<f32>(Duration::from_millis(200), sr);
-//! let regions = detection::detect_silence_regions(&audio, 0.001f32).unwrap();
-//! assert!(!regions.is_empty());
+//! // A signal correlates perfectly with itself.
+//! let r: f64 = correlation(&a, &a).unwrap();
+//! assert!((r - 1.0).abs() < 1e-9);
 //! ```
 
 pub mod array_ops;

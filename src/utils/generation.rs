@@ -1,39 +1,21 @@
-//! Audio signal generation utilities.
-
+//! Test-signal generators: periodic waveforms (sine, cosine, square, sawtooth,
+//! triangle, with band-limited variants), linear and exponential chirps, AM and FM
+//! signals, compound tones, impulses, silence and noise (white, pink, brown).
 //!
-
-//! Functions for synthesising deterministic and stochastic audio signals: waveforms
-//! (sine, cosine, square, sawtooth, triangle), frequency sweeps (chirp), noise (white,
-//! pink, brown), silence, impulses, compound multi-harmonic tones, and amplitude-modulated
-//! signals.
-//!
-//! Multi-channel convenience wrappers (`stereo_sine_wave`, `stereo_chirp`, etc.) are
-//! provided when the `channels` feature is enabled. A `MonoSampleBuilder` for constructing
-//! concatenated sequences through method chaining is available when `editing` is enabled.
-
-//! Generated signals are used in audio unit tests, benchmarks, and DSP prototyping.
-//! By centralising generators in this module, dependent code can produce reproducible test
-//! data without reaching for external audio files.
-
-//! All generators accept a `NonZeroU32` sample rate. Use the `sample_rate!` macro to
-//! construct one from an integer literal:
+//! The deterministic generators are re-exported at the crate root. Stereo and
+//! multi-channel wrappers (`stereo_sine_wave`, `multichannel_compound_tone`, …), the
+//! noise generators and `MonoSampleBuilder`, which joins segments by method
+//! chaining, carry their feature on their own pages. For realistic audio rather than
+//! a test signal, [`example_clip`] renders named clips of music and speech with known
+//! contents ([`example_clips`](crate::utils::example_clips)).
 //!
 //! ```rust
-//! use audio_samples::utils::generation::sine_wave;
-//! use audio_samples::sample_rate;
+//! use audio_samples::{sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
 //! let tone = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
 //! assert_eq!(tone.samples_per_channel().get(), 44100);
 //! ```
-//!
-//! Some helpers are feature-gated:
-//! - `MonoSampleBuilder` requires `feature = "editing"`.
-//! - Noise generators (`white_noise`, `pink_noise`, `brown_noise`, `exponential_bursts`) require `feature = "random-generation"`.
-//! - `stereo_*` and `multichannel_compound_tone` require `feature = "channels"`.
-//!
-//! For realistic audio rather than a test signal, [`example_clip`] renders named clips of music
-//! and speech with known contents. See [`example_clips`](crate::utils::example_clips).
 
 use std::num::NonZeroU32;
 use std::time::Duration;

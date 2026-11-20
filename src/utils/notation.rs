@@ -1,8 +1,6 @@
 //! Tuning systems and musical notation: interval generators, Functional Just System,
 //! svara, mela and thaat names.
 //!
-//! # What
-//!
 //! - Tuning: [`pythagorean_intervals`], [`plimit_intervals`], [`interval_frequencies`].
 //! - Functional Just System (FJS): [`fifths_to_note`], [`interval_to_fjs`], [`hz_to_fjs`].
 //! - Hindustani notation: [`list_thaat`], [`thaat_to_degrees`], [`midi_to_svara_h`],
@@ -10,13 +8,9 @@
 //! - Carnatic notation: [`list_mela`], [`mela_to_degrees`], [`mela_to_svara`],
 //!   [`midi_to_svara_c`], [`hz_to_svara_c`], [`note_to_svara_c`].
 //!
-//! # Why
-//!
 //! Analysis that labels pitches needs more than equal temperament and Western note
 //! names. Just intonation gives other frequency grids for a constant-Q transform, and
 //! Indian classical music names pitches relative to a chosen tonic.
-//!
-//! # How
 //!
 //! The functions work on scalars and strings; mapping over arrays is left to the caller.
 //! Names use Unicode symbols or ASCII as asked. Unknown names and out-of-range values give
@@ -30,7 +24,9 @@
 //! assert_eq!(mela_to_svara(1, true, false).unwrap()[1], "R1");
 //! ```
 //!
-//! References: W. Reinhard, *Functional Just System*, 2011 onward; J. Tenney, *John Cage
+//! ## References
+//!
+//! W. Reinhard, *Functional Just System*, 2011 onward; J. Tenney, *John Cage
 //! and the theory of harmony*, 1983 (harmonic distance); N. Sambamoorthy, *South Indian
 //! Music*, 1958 (melakarta); V. N. Bhatkhande, *Hindustani Sangeet Paddhati*, 1934 (thaat).
 

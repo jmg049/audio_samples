@@ -1,38 +1,31 @@
-//! Audio analysis and detection utilities.
-
-//! Lightweight functions for inspecting structural and perceptual properties of audio
-//! signals without building full spectrograms or running heavy DSP pipelines:
+//! Quick checks of a signal that need no spectrogram pipeline:
 //!
 //! - [`detect_silence_regions`] - time intervals where amplitude falls below a threshold
 //! - [`detect_clipping`] - intervals where the signal reaches or exceeds the sample type's full-scale value
 //! - [`detect_dynamic_range`] - peak amplitude, RMS amplitude and crest factor (peak-to-RMS ratio) in dB
-//! - [`detect_fundamental_frequency`] - autocorrelation-based fundamental frequency estimate
+//! - [`detect_fundamental_frequency`] - one autocorrelation estimate of the fundamental
+//!   frequency for the whole signal (for pitch tracks, see the
+//!   [overlap table](crate::operations#choosing-between-overlapping-apis))
 //! - [`estimate_noise_floor`] - crude noise-floor proxy in dBFS: the 10th percentile of `|x|`
 #![cfg_attr(
     feature = "transforms",
-    doc = r#" - [`detect_sample_rate`] *(requires `transforms` feature)* - spectral-cutoff heuristic for detecting original sample rate"#
+    doc = r#" - [`detect_sample_rate`] - spectral-cutoff heuristic for detecting original sample rate"#
 )]
 #![cfg_attr(
     not(feature = "transforms"),
-    doc = r#" - `detect_sample_rate` *(requires `transforms` feature)* - spectral-cutoff heuristic for detecting original sample rate"#
+    doc = r#" - `detect_sample_rate` - spectral-cutoff heuristic for detecting original sample rate"#
 )]
 #![cfg_attr(
     feature = "transforms",
-    doc = r#" - [`estimate_frequency_range`] *(requires `transforms` feature)* - lowest and highest frequency with significant energy"#
+    doc = r#" - [`estimate_frequency_range`] - lowest and highest frequency with significant energy"#
 )]
 #![cfg_attr(
     not(feature = "transforms"),
-    doc = r#" - `estimate_frequency_range` *(requires `transforms` feature)* - lowest and highest frequency with significant energy"#
+    doc = r#" - `estimate_frequency_range` - lowest and highest frequency with significant energy"#
 )]
 //!
-//! Detecting silence, clipping, and noise floor are common pre-processing steps in audio
-//! pipelines. Centralising them avoids duplication across higher-level operations and
-//! ensures consistent threshold semantics throughout the library.
-//!
-//! All detection functions accept a reference to an [`AudioSamples`] buffer. For mono
-//! signals the analysis runs directly on the single channel. For multi-channel signals,
-//! channel-averaging or per-channel inspection is applied as described in the individual
-//! function documentation.
+//! Each function takes an [`AudioSamples`]. Multi-channel input is averaged or
+//! inspected per channel, as each function's documentation says.
 //!
 //! ```rust
 //! use audio_samples::utils::detection::detect_silence_regions;

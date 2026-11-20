@@ -1,18 +1,10 @@
-//! Audio signal comparison and similarity metrics.
+//! Similarity and error metrics between two signals: correlation, MSE, SNR, PSNR,
+//! segmental SNR, log-spectral distance and alignment by cross-correlation. Correlation,
+//! MSE and SNR also come per channel.
 //!
-//! This module provides a small collection of signal-level comparison operators for
-//! analysing similarity, error, and alignment between audio signals. The exposed functions
-//! operate on [`AudioSamples`] and return scalar metrics or derived signals that are suitable
-//! for validation, evaluation, diagnostics, and simple analysis.
-//!
-//! The primary purpose of this module is to centralise common comparison semantics.
-//!
-//! # Usage
-//!
-//! Typical usage consists of passing two compatible audio signals into a metric function
-//! and interpreting the returned scalar or aligned signal. All comparison functions require
-//! matching dimensionality and compatible channel layouts unless explicitly documented
-//! otherwise.
+//! Both signals must have the same shape unless a function's documentation says
+//! otherwise. Use these to check a processing chain against a reference or to
+//! measure what a codec or effect changed.
 //!
 //! ```rust
 //! use audio_samples::utils::comparison::{correlation, mse};
