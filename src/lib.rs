@@ -615,6 +615,10 @@
 //! Contributions are welcome. Please open an issue or pull request on
 //! [GitHub](https://github.com/jmg049/audio_samples).
 
+// docs.rs builds with `--cfg docsrs` on nightly: label feature-gated items with the
+// features they need.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 /// Creates a `NonZeroUsize` from a compile-time constant with zero-check.
 ///
 /// This macro creates a `NonZeroUsize` with a compile-time assertion that the value is
