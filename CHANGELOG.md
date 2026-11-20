@@ -601,6 +601,10 @@ odd-length spectral bin spacing, `frequency_to_note` and
   `DistanceMetric::distance` returns `AudioSampleResult<F>` (vectors of
   different lengths are an error). `SampleType::from_bits` returns
   `Option<SampleType>` (`None` for a width no sample type has).
+- **`replace_with_vec` and `replace_with_vec_channels` accept one-channel multi-channel
+  audio** (from `zeros_multi` with one channel) and keep its layout; they returned an error
+  because they treated every one-channel buffer as mono. The `replace_with_vec` docs now say
+  that multi-channel samples are planar (they described them as interleaved).
 - **`AudioSamples::apply_to_channel_data` accepts any memory layout.** Channels
   of non-contiguous multi-channel storage are copied into a buffer, passed to
   the callback and written back; `try_apply_to_channel_data` still reports

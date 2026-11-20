@@ -4632,8 +4632,10 @@ where
     /// Replaces the audio data with new data from a Vec.
     ///
     /// This is a convenience method for replacing audio data with samples from a Vec.
-    /// The method infers whether to create mono or multi-channel data based on the
-    /// current AudioSamples configuration.
+    /// The buffer keeps its layout: mono audio stays mono, and multi-channel audio,
+    /// including one-channel audio made with [`zeros_multi`](Self::zeros_multi), stays
+    /// multi-channel. Multi-channel samples are planar: all of channel 0, then all of
+    /// channel 1, and so on.
     ///
     /// # Arguments
     /// * `samples` - Vector of samples to replace the current audio data
@@ -4656,13 +4658,21 @@ where
     /// mono_audio.replace_with_vec(&non_empty_vec![3.0f32, 4.0, 5.0, 6.0])?;
     /// assert_eq!(mono_audio.samples_per_channel().get(), 4);
     ///
-    /// // Replace stereo audio (interleaved samples)
+    /// // Replace stereo audio (planar samples: channel 0, then channel 1)
     /// let mut stereo_audio = AudioSamples::new_multi_channel(
     ///     array![[1.0f32, 2.0], [3.0, 4.0]], sample_rate!(44100)
     /// ).unwrap();
     /// stereo_audio.replace_with_vec(&non_empty_vec![5.0f32, 6.0, 7.0, 8.0, 9.0, 10.0])?;
     /// assert_eq!(stereo_audio.samples_per_channel().get(), 3); // 6 samples ÷ 2 channels
     /// assert_eq!(stereo_audio.num_channels().get(), 2);
+    /// assert_eq!(stereo_audio.to_interleaved_vec().as_slice(), &[5.0, 8.0, 6.0, 9.0, 7.0, 10.0]);
+    ///
+    /// // A one-channel multi-channel buffer stays multi-channel
+    /// let mut one = AudioSamples::<f32>::zeros_multi(audio_samples::channels!(1),
+    ///     audio_samples::nzu!(2), sample_rate!(44100));
+    /// one.replace_with_vec(&non_empty_vec![1.0f32, 2.0, 3.0])?;
+    /// assert!(one.is_multi_channel());
+    /// assert_eq!(one.samples_per_channel().get(), 3);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[inline]
@@ -4680,8 +4690,7 @@ where
             )));
         }
 
-        if num_channels == 1 {
-            // Mono case: create Array1 directly
+        if self.is_mono() {
             let array = Array1::from(samples.to_vec());
             self.replace_with_mono(array)
         } else {
@@ -4775,8 +4784,7 @@ where
             )));
         }
 
-        if expected_channels == channels!(1) {
-            // Mono case: create Array1 directly
+        if self.is_mono() {
             let array: Array1<T> = Array1::from_vec(samples.to_vec());
             self.replace_with_mono(array)
         } else {
@@ -6820,5 +6828,29 @@ mod tests {
         assert!(s.ends_with("\n  ... 2 more channels"), "{s}");
         assert!(s.contains("  ch 7: [0.0000]"));
         assert!(!s.contains("ch 8"));
+    }
+
+    /// A one-channel multi-channel buffer accepts new samples and keeps its layout.
+    #[test]
+    fn replace_with_vec_keeps_one_channel_multi_layout() {
+        let mut audio = AudioSamples::<f32>::zeros_multi(
+            channels!(1),
+            crate::nzu!(4),
+            crate::sample_rate!(8000),
+        );
+        audio
+            .replace_with_vec(&non_empty_slice::non_empty_vec![1.0, 2.0, 3.0])
+            .unwrap();
+        assert!(audio.is_multi_channel());
+        assert_eq!(audio.to_interleaved_vec().as_slice(), &[1.0, 2.0, 3.0]);
+
+        audio
+            .replace_with_vec_channels(
+                &non_empty_slice::non_empty_vec![4.0, 5.0, 6.0],
+                channels!(1),
+            )
+            .unwrap();
+        assert!(audio.is_multi_channel());
+        assert_eq!(audio.to_interleaved_vec().as_slice(), &[4.0, 5.0, 6.0]);
     }
 }
