@@ -1,14 +1,34 @@
-//! Educational / explainable layer for `audio_samples`.
+//! The teaching layer: explanations of what operations did and what
+//! configurations will do, computed from your signal and settings.
 //!
-//! Enabled with `--features educational`. Wraps owned [`AudioSamples`] in an
-//! explaining chain that captures a before/after snapshot for each operation
-//! and assembles the results into a self-contained HTML document with
-//! KaTeX-rendered formulae, Plotly waveform panels, and a selectable theme.
+//! It has three parts:
 //!
-//! # Quick start
+//! - **The explaining chain.** [`explaining`](crate::Explainable::explaining) wraps
+//!   an owned [`AudioSamples`] so that each processing call records the formula it
+//!   applied and a before and after snapshot. [`render_explanation_document`] turns
+//!   the records into a self-contained HTML page with rendered formulas and
+//!   waveform panels; [`open_explanation_document`] also opens it in a browser.
+//! - **The explain API** ([`explain`]). [`Explain`] and [`ExplainFor`] describe a
+//!   configuration before anything runs: the formulas the code evaluates, each
+//!   symbol with its unit, the numbers your settings produce and warnings about
+//!   suspicious ones.
+//! - **Topics** ([`topics`]). The same kind of document for concepts with no
+//!   configuration type, such as aliasing or quantisation.
 //!
-//! ```rust,no_run
-//! use audio_samples::{AudioSamples, AudioProcessingExt, Explainable, ExplainMode, NormalizationConfig, sample_rate};
+#![cfg_attr(
+    feature = "full_no_plotting",
+    doc = r#" The [`guide`](crate::guide) is the course these parts support."#
+)]
+#![cfg_attr(
+    not(feature = "full_no_plotting"),
+    doc = r#" The `guide` module is the course these parts support."#
+)]
+//!
+//! ```rust
+//! use audio_samples::{
+//!     AudioProcessingExt, AudioSamples, AudioStatistics, ExplainMode, Explainable,
+//!     NormalizationConfig, sample_rate,
+//! };
 //! use audio_samples::educational;
 //! use audio_samples::utils::generation::sine_wave;
 //! use std::time::Duration;
@@ -21,8 +41,11 @@
 //!     .normalize(NormalizationConfig::peak(1.0))
 //!     .scale(0.5)
 //!     .explain();
+//! assert!((result.peak() - 0.5).abs() < 1e-3); // peak 0.8, normalised to 1.0, halved
+//! assert_eq!(explanations.len(), 2); // one per operation
 //!
-//! educational::open_explanation_document(&explanations, "Processing walkthrough").unwrap();
+//! let html = educational::render_explanation_document(&explanations, "Processing walkthrough");
+//! assert!(html.contains("<html"));
 //! ```
 
 use explainable::{ExplainDisplay, Explainable, Explanation, RenderVisual};
