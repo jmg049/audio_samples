@@ -573,6 +573,16 @@ odd-length spectral bin spacing, `frequency_to_note` and
 
 ### Changed
 
+- **`FixedSizeAudioSamples` and `FixedSizeMultiChannelAudioSamples` keep their size.** They
+  no longer implement `DerefMut` or `AsMut` and have no `samples_mut`, through which an
+  in-place operation (trimming, padding, resampling, channel conversion) could leave a buffer
+  whose length or channel count no longer matched `N` or `C`. They still dereference to
+  `AudioSamples` for reading. Samples are written by indexing (`block[i]`,
+  `block[(channel, i)]`), `view_mut`, `as_slice_mut`, `apply`, `apply_with_index` (mono) and
+  `copy_from`; `modify` runs any in-place `AudioSamples` operation and returns an
+  `AudioSampleError::Layout` error, with the buffer reset to zeros, if it changed the size.
+  `into_inner` returns the `AudioSamples`. `FixedSizeAudioSamples::from_1d` returns an
+  error unless the slice holds exactly `N` samples (it accepted any length).
 - **Onset peak-picking presets are specified in seconds and take the sample rate.**
   `PeakPickingConfig::music`, `speech` and `drums` used lengths sized as audio samples (a
   2048-frame threshold window and a 1024-frame separation for `music`), which on an onset
