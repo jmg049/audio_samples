@@ -389,6 +389,13 @@ The librosa-compatible API is unreleased, so these are changes to the
 
 ### Fixed
 
+- **`VadMethod::Spectral` works.** It returned `AudioSampleError::Unsupported`. A frame is now
+  speech when its RMS level reaches `energy_threshold_db` and at least `spectral_ratio_threshold`
+  of its energy (Hann window, real FFT of length `frame_size`) lies between `speech_band_low_hz`
+  and `speech_band_high_hz` (defaults: 0.6 of the energy in 300-3400 Hz). It rejects loud
+  broadband noise, hum and hiss that the energy method accepts. A band above the Nyquist
+  frequency, or one with no FFT bin at the frame size, is an `AudioSampleError::Parameter`. The
+  `vad` feature now depends on `realfft`.
 - **No dead-code warnings on partial feature sets.** Building with `iir-filtering` but not
   `pitch-filterbank` warned that `bandpass_order` was never used, and building with `sequence`
   but not `effects` warned about the recurrence-link helpers. Each is now compiled only with the

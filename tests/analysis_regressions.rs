@@ -288,18 +288,171 @@ fn beat_grid_no_drift_over_120s() {
 }
 
 // ---------------------------------------------------------------------------
-// VadMethod::Spectral is not implemented and says so
+// VadMethod::Spectral: energy gate plus speech-band energy ratio
 // ---------------------------------------------------------------------------
 
+/// Uniform noise in [-1, 1) from a linear congruential generator.
+fn lcg_noise(n: usize, seed: u64) -> Vec<f64> {
+    let mut state = seed;
+    (0..n)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64 / (1u64 << 30) as f64) - 1.0
+        })
+        .collect()
+}
+
+/// A voiced-speech-like signal: f0 = 125 Hz harmonics weighted towards a
+/// 700 Hz formant, peak amplitude about 1.
+fn voiced(sr: u32, n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| {
+            let t = i as f64 / f64::from(sr);
+            (1..=24)
+                .map(|h| {
+                    let f = 125.0 * h as f64;
+                    0.3 / (1.0 + ((f - 700.0) / 200.0).powi(2)) * (2.0 * PI * f * t).sin()
+                })
+                .sum::<f64>()
+        })
+        .collect()
+}
+
+fn spectral_config() -> VadConfig {
+    VadConfig::default()
+        .with_method(VadMethod::Spectral)
+        .with_hop_size(NonZeroUsize::new(160).unwrap())
+        .unwrap()
+        .with_frame_size(NonZeroUsize::new(400).unwrap())
+        .unwrap()
+}
+
+/// A speech-like burst between two low-level noise segments is found by the
+/// spectral method, as by `Combined`.
 #[test]
-fn vad_spectral_returns_unsupported() {
-    let audio = mono(sine(440.0, 16_000, 16_000), 16_000);
-    let cfg = VadConfig::default().with_method(VadMethod::Spectral);
+fn vad_spectral_detects_speech_like_burst() {
+    let sr = 16_000u32;
+    let n = sr as usize;
+    let (on, off) = (4_000usize, 12_000usize);
+    let speech = voiced(sr, n);
+    let x: Vec<f64> = lcg_noise(n, 12345)
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            1e-3 * r
+                + if (on..off).contains(&i) {
+                    speech[i]
+                } else {
+                    0.0
+                }
+        })
+        .collect();
+    let regions = mono(x, sr).speech_regions(&spectral_config()).unwrap();
+    assert_eq!(regions.len(), 1, "regions: {regions:?}");
+    let (s, e) = regions[0];
+    assert!(s.abs_diff(on) <= 800, "start {s}");
+    assert!(e.abs_diff(off) <= 1600, "end {e}");
+}
+
+/// Loud white noise passes the energy test but has only (3400 − 300)/(f_s/2)
+/// of its energy in the speech band, below the default ratio of 0.6, so the
+/// spectral method rejects every frame; the same level of voiced signal is
+/// accepted throughout.
+#[test]
+fn vad_spectral_rejects_loud_noise_and_accepts_voiced() {
+    for sr in [16_000u32, 44_100] {
+        let n = sr as usize / 2;
+        let noise: Vec<f64> = lcg_noise(n, 7).iter().map(|r| 0.5 * r).collect();
+        let noise = mono(noise, sr);
+        let energy = noise
+            .voice_activity_mask(&spectral_config().with_method(VadMethod::Energy))
+            .unwrap();
+        assert!(
+            energy.iter().all(|&v| v),
+            "{sr} Hz: energy VAD should pass noise"
+        );
+        let spectral = noise.voice_activity_mask(&spectral_config()).unwrap();
+        assert!(
+            spectral.iter().all(|&v| !v),
+            "{sr} Hz: noise classified as speech"
+        );
+
+        let speech = mono(voiced(sr, n), sr)
+            .voice_activity_mask(&spectral_config())
+            .unwrap();
+        assert!(speech.iter().all(|&v| v), "{sr} Hz: voiced signal rejected");
+    }
+}
+
+/// Loud tones: 100 Hz hum and a 5 kHz whistle lie outside 300-3400 Hz and are
+/// rejected, a 1 kHz tone inside it is accepted.
+#[test]
+fn vad_spectral_band_decides_tones() {
+    let sr = 16_000u32;
+    let n = 8_000;
+    let mask = |f: f64| {
+        let x: Vec<f64> = sine(f, sr, n).iter().map(|v| 0.5 * v).collect();
+        mono(x, sr).voice_activity_mask(&spectral_config()).unwrap()
+    };
+    assert!(mask(100.0).iter().all(|&v| !v), "100 Hz hum accepted");
+    assert!(mask(5_000.0).iter().all(|&v| !v), "5 kHz whistle accepted");
+    assert!(mask(1_000.0).iter().all(|&v| v), "1 kHz tone rejected");
+}
+
+/// With several channels the channel policy combines the per-channel
+/// decisions: noise on one channel and speech on the other is active for
+/// `AnyChannel` and inactive for `AllChannels`.
+#[test]
+fn vad_spectral_channel_policies() {
+    use audio_samples::operations::types::VadChannelPolicy;
+    let sr = 16_000u32;
+    let n = 8_000;
+    let mut data = ndarray::Array2::<f64>::zeros((2, n));
+    for (i, v) in lcg_noise(n, 99).iter().enumerate() {
+        data[[0, i]] = 0.5 * v;
+    }
+    for (i, v) in voiced(sr, n).iter().enumerate() {
+        data[[1, i]] = *v;
+    }
+    let audio =
+        AudioSamples::new_multi_channel(data, std::num::NonZeroU32::new(sr).unwrap()).unwrap();
+    let any = audio
+        .voice_activity_mask(&spectral_config().with_channel_policy(VadChannelPolicy::AnyChannel))
+        .unwrap();
+    assert!(any.iter().all(|&v| v));
+    let all = audio
+        .voice_activity_mask(&spectral_config().with_channel_policy(VadChannelPolicy::AllChannels))
+        .unwrap();
+    assert!(all.iter().all(|&v| !v));
+    let ch1 = audio
+        .voice_activity_mask(&spectral_config().with_channel_policy(VadChannelPolicy::Channel(1)))
+        .unwrap();
+    assert!(ch1.iter().all(|&v| v));
+}
+
+/// A speech band above the Nyquist frequency, or one that contains no FFT bin
+/// at the frame size, is an error.
+#[test]
+fn vad_spectral_rejects_unusable_band() {
+    let audio = mono(sine(440.0, 8_000, 8_000), 8_000);
+    let mut cfg = spectral_config();
+    cfg.speech_band_high_hz = 4_500.0;
     let err = audio.voice_activity_mask(&cfg).unwrap_err();
-    assert!(
-        matches!(err, AudioSampleError::Unsupported { .. }),
-        "expected Unsupported, got {err:?}"
-    );
+    assert!(matches!(err, AudioSampleError::Parameter(_)), "{err:?}");
+
+    // 16-sample frames at 8 kHz have bins every 500 Hz: none in 300-400 Hz.
+    let mut cfg = VadConfig::default()
+        .with_method(VadMethod::Spectral)
+        .with_hop_size(NonZeroUsize::new(8).unwrap())
+        .unwrap()
+        .with_frame_size(NonZeroUsize::new(16).unwrap())
+        .unwrap();
+    cfg.speech_band_low_hz = 300.0;
+    cfg.speech_band_high_hz = 400.0;
+    let err = audio.voice_activity_mask(&cfg).unwrap_err();
+    assert!(matches!(err, AudioSampleError::Parameter(_)), "{err:?}");
 }
 
 /// Pitch methods that are not implemented return an error from `track_pitch`.

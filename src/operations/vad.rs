@@ -63,7 +63,16 @@
 //! - `Combined`: both conditions must hold. A pure low tone (e.g. 220 Hz at
 //!   44.1 kHz, ZCR ≈ 0.01) is therefore rejected by the default ZCR window
 //!   even when it is loud.
-//! - `Spectral`: not implemented (returns an error).
+//! - `Spectral`: speech if `level_m ≥ energy_threshold_db` and at least the
+//!   fraction `spectral_ratio_threshold` of the frame's energy lies between
+//!   `speech_band_low_hz` and `speech_band_high_hz` (defaults: 0.6 of the
+//!   energy in 300-3400 Hz). The frame is Hann-windowed and transformed with a
+//!   real FFT of length L, so the band edges are resolved to `f_s/L` Hz.
+//!   Voiced speech concentrates its energy in that band; white noise puts
+//!   `(3400 − 300)/(f_s/2)` of it there (0.39 at 16 kHz, 0.14 at 44.1 kHz),
+//!   and hum, rumble and hiss almost none. Unvoiced fricatives (s, f, sh)
+//!   have most of their energy above 3.4 kHz and are rejected, so rely on the
+//!   hangover and the minimum silence length to bridge them.
 //!
 //! **Post-processing** of the raw decisions, in this order:
 //!
@@ -183,8 +192,9 @@ where
     /// `false` and the signal is shorter than `frame_size` (no complete frame).
     /// Returns [crate::AudioSampleError::Layout] if the audio array is non-contiguous
     /// (can occur after reversing or non-standard slicing).
-    /// Returns [crate::AudioSampleError::Unsupported] if `config.method` is
-    /// `VadMethod::Spectral` (not implemented).
+    /// With `VadMethod::Spectral`, returns [crate::AudioSampleError::Parameter] if
+    /// `config.speech_band_high_hz` is above the Nyquist frequency or the band
+    /// contains no FFT bin at `config.frame_size`.
     ///
     /// # Example
     ///
@@ -213,6 +223,10 @@ where
         let total_len = self.samples_per_channel();
 
         let energy_threshold_rms = 10.0f64.powf(config.energy_threshold_db / 20.0);
+        let mut spectral = match config.method {
+            VadMethod::Spectral => Some(BandRatio::new(config, self.sample_rate_hz())?),
+            _ => None,
+        };
 
         // Raw decisions per frame.
         let mut mask = Vec::new();
@@ -227,8 +241,14 @@ where
             // safety: slice is non-empty because total_len > 0.
             let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
             for start in plan.frame_starts(total_len.get()) {
-                let decision =
-                    vad_decision_for_slice(slice, start, total_len, config, energy_threshold_rms)?;
+                let decision = vad_decision_for_slice(
+                    slice,
+                    start,
+                    total_len,
+                    config,
+                    energy_threshold_rms,
+                    spectral.as_mut(),
+                )?;
                 mask.push(decision);
             }
         } else {
@@ -263,6 +283,7 @@ where
                     start,
                     config,
                     energy_threshold_rms,
+                    spectral.as_mut(),
                 )?;
                 mask.push(decision);
             }
@@ -376,6 +397,7 @@ fn vad_decision_for_slice<T>(
     total_len: NonZeroUsize,
     config: &VadConfig,
     energy_threshold_rms: f64,
+    mut spectral: Option<&mut BandRatio>,
 ) -> AudioSampleResult<bool>
 where
     T: StandardSample,
@@ -386,8 +408,9 @@ where
         total_len,
         config.frame_size,
         config.pad_end,
+        spectral.as_deref_mut().map(BandRatio::frame_mut),
     );
-    classify(config, rms, zcr, energy_threshold_rms)
+    Ok(classify(config, rms, zcr, energy_threshold_rms, spectral))
 }
 
 fn vad_decision_for_multi<T>(
@@ -397,6 +420,7 @@ fn vad_decision_for_multi<T>(
     frame_start: usize,
     config: &VadConfig,
     energy_threshold_rms: f64,
+    mut spectral: Option<&mut BandRatio>,
 ) -> AudioSampleResult<bool>
 where
     T: StandardSample,
@@ -423,38 +447,44 @@ where
             })?;
             // safety: slice is non-empty because samples is non-zero.
             let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
-            let (rms, zcr) =
-                frame_rms_and_zcr(slice, frame_start, samples, plan_frame_size, config.pad_end);
-            classify(config, rms, zcr, energy_threshold_rms)
+            let (rms, zcr) = frame_rms_and_zcr(
+                slice,
+                frame_start,
+                samples,
+                plan_frame_size,
+                config.pad_end,
+                spectral.as_deref_mut().map(BandRatio::frame_mut),
+            );
+            Ok(classify(config, rms, zcr, energy_threshold_rms, spectral))
         }
         VadChannelPolicy::AverageToMono => {
+            let frame_out = spectral.as_deref_mut().map(BandRatio::frame_mut);
             // Fast path: contiguous ArrayView2.
-            multi.as_slice().map_or_else(
-                || {
-                    let (rms, zcr) = frame_rms_and_zcr_avg_indexed(
-                        &multi,
-                        channels,
-                        samples,
-                        frame_start,
-                        plan_frame_size,
-                        config.pad_end,
-                    );
-                    classify(config, rms, zcr, energy_threshold_rms)
-                },
-                |flat| {
+            let (rms, zcr) = match multi.as_slice() {
+                Some(flat) => {
                     // safety: flat is non-empty because channels and samples are non-zero.
                     let flat = unsafe { NonEmptySlice::new_unchecked(flat) };
-                    let (rms, zcr) = frame_rms_and_zcr_avg(
+                    frame_rms_and_zcr_avg(
                         flat,
                         channels,
                         samples,
                         frame_start,
                         plan_frame_size,
                         config.pad_end,
-                    );
-                    classify(config, rms, zcr, energy_threshold_rms)
-                },
-            )
+                        frame_out,
+                    )
+                }
+                None => frame_rms_and_zcr_avg_indexed(
+                    &multi,
+                    channels,
+                    samples,
+                    frame_start,
+                    plan_frame_size,
+                    config.pad_end,
+                    frame_out,
+                ),
+            };
+            Ok(classify(config, rms, zcr, energy_threshold_rms, spectral))
         }
         VadChannelPolicy::AnyChannel | VadChannelPolicy::AllChannels => {
             let want_any = matches!(config.channel_policy, VadChannelPolicy::AnyChannel);
@@ -463,18 +493,9 @@ where
 
             for ch in 0..channels.get() {
                 let row = multi.row(ch);
-                let (rms, zcr) = row.as_slice().map_or_else(
-                    || {
-                        frame_rms_and_zcr_indexed(
-                            &multi,
-                            ch,
-                            samples,
-                            frame_start,
-                            plan_frame_size,
-                            config.pad_end,
-                        )
-                    },
-                    |slice| {
+                let frame_out = spectral.as_deref_mut().map(BandRatio::frame_mut);
+                let (rms, zcr) = match row.as_slice() {
+                    Some(slice) => {
                         // safety: slice is non-empty because samples is non-zero.
                         let slice = unsafe { NonEmptySlice::new_unchecked(slice) };
                         frame_rms_and_zcr(
@@ -483,11 +504,27 @@ where
                             samples,
                             plan_frame_size,
                             config.pad_end,
+                            frame_out,
                         )
-                    },
-                );
+                    }
+                    None => frame_rms_and_zcr_indexed(
+                        &multi,
+                        ch,
+                        samples,
+                        frame_start,
+                        plan_frame_size,
+                        config.pad_end,
+                        frame_out,
+                    ),
+                };
 
-                let active = classify(config, rms, zcr, energy_threshold_rms)?;
+                let active = classify(
+                    config,
+                    rms,
+                    zcr,
+                    energy_threshold_rms,
+                    spectral.as_deref_mut(),
+                );
                 any_active |= active;
                 all_active &= active;
 
@@ -504,23 +541,126 @@ where
     }
 }
 
+/// The per-frame decision of [`VadMethod`]. `spectral` holds the frame's samples
+/// and is `Some` exactly when the method is `Spectral`.
 fn classify(
     config: &VadConfig,
     rms: f64,
     zcr: f64,
     energy_threshold_rms: f64,
-) -> AudioSampleResult<bool> {
+    spectral: Option<&mut BandRatio>,
+) -> bool {
+    let zcr_ok = || zcr >= config.zcr_min && zcr <= config.zcr_max;
     match config.method {
-        VadMethod::Energy => Ok(rms >= energy_threshold_rms),
-        VadMethod::ZeroCrossing => Ok(zcr >= config.zcr_min && zcr <= config.zcr_max),
-        VadMethod::Combined => {
-            let zcr_ok = zcr >= config.zcr_min && zcr <= config.zcr_max;
-            Ok(rms >= energy_threshold_rms && zcr_ok)
+        VadMethod::ZeroCrossing => zcr_ok(),
+        VadMethod::Combined => rms >= energy_threshold_rms && zcr_ok(),
+        VadMethod::Spectral => {
+            rms >= energy_threshold_rms
+                && spectral.is_some_and(|band| band.ratio() >= config.spectral_ratio_threshold)
         }
-        VadMethod::Spectral => Err(AudioSampleError::unsupported(
-            "voice_activity_mask",
-            "VadMethod::Spectral is not implemented yet; use Energy, ZeroCrossing or Combined",
-        )),
+        VadMethod::Energy => rms >= energy_threshold_rms,
+    }
+}
+
+/// Speech-band energy ratio of one frame, for [`VadMethod::Spectral`].
+///
+/// The frame (zero-padded to `frame_size` when it runs past the end of the
+/// signal) is multiplied by a periodic Hann window `w[n] = sin²(πn/L)` and
+/// transformed with a real FFT of length `L = frame_size`. With
+/// `P_k = |X_k|²` and bin frequencies `f_k = k·f_s/L`, `k = 0 … ⌊L/2⌋`, the
+/// ratio is
+///
+/// ```text
+/// ratio = Σ_{low ≤ f_k ≤ high} c_k·P_k / Σ_k c_k·P_k
+/// ```
+///
+/// where `c_k = 1` for the DC and Nyquist bins and `2` otherwise, so the
+/// denominator is the energy of the windowed frame (Parseval). A frame with no
+/// energy has ratio 0.
+struct BandRatio {
+    fft: std::sync::Arc<dyn realfft::RealToComplex<f64>>,
+    window: Vec<f64>,
+    frame: Vec<f64>,
+    spectrum: Vec<num_complex::Complex<f64>>,
+    scratch: Vec<num_complex::Complex<f64>>,
+    band: std::ops::RangeInclusive<usize>,
+}
+
+impl BandRatio {
+    fn new(config: &VadConfig, sample_rate: f64) -> AudioSampleResult<Self> {
+        let len = config.frame_size.get();
+        let nyquist = sample_rate / 2.0;
+        if config.speech_band_high_hz > nyquist {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "speech_band_high_hz",
+                format!(
+                    "the speech band ends at {} Hz, above the Nyquist frequency {nyquist} Hz",
+                    config.speech_band_high_hz
+                ),
+            )));
+        }
+        let bin_hz = sample_rate / len as f64;
+        let lo = (config.speech_band_low_hz / bin_hz).ceil() as usize;
+        let hi = ((config.speech_band_high_hz / bin_hz).floor() as usize).min(len / 2);
+        if lo > hi {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "frame_size",
+                format!(
+                    "the speech band {}..{} Hz contains no FFT bin at frame_size = {len} \
+                     ({bin_hz} Hz per bin); use a longer frame or a wider band",
+                    config.speech_band_low_hz, config.speech_band_high_hz
+                ),
+            )));
+        }
+        let fft = realfft::RealFftPlanner::<f64>::new().plan_fft_forward(len);
+        let window = (0..len)
+            .map(|n| (std::f64::consts::PI * n as f64 / len as f64).sin().powi(2))
+            .collect();
+        Ok(Self {
+            spectrum: fft.make_output_vec(),
+            scratch: fft.make_scratch_vec(),
+            fft,
+            window,
+            frame: vec![0.0; len],
+            band: lo..=hi,
+        })
+    }
+
+    /// The buffer the next frame's samples are written to.
+    fn frame_mut(&mut self) -> &mut [f64] {
+        &mut self.frame
+    }
+
+    /// Speech-band fraction of the energy of the frame in [`Self::frame_mut`].
+    fn ratio(&mut self) -> f64 {
+        for (x, w) in self.frame.iter_mut().zip(&self.window) {
+            *x *= w;
+        }
+        if self
+            .fft
+            .process_with_scratch(&mut self.frame, &mut self.spectrum, &mut self.scratch)
+            .is_err()
+        {
+            // The buffers come from the plan, so their lengths always match.
+            return 0.0;
+        }
+        let len = self.frame.len();
+        let weight = |k: usize| {
+            if k == 0 || (len.is_multiple_of(2) && k == len / 2) {
+                1.0
+            } else {
+                2.0
+            }
+        };
+        let (mut band, mut total) = (0.0, 0.0);
+        for (k, c) in self.spectrum.iter().enumerate() {
+            let p = weight(k) * c.norm_sqr();
+            total += p;
+            if self.band.contains(&k) {
+                band += p;
+            }
+        }
+        if total > 0.0 { band / total } else { 0.0 }
     }
 }
 
@@ -530,16 +670,24 @@ fn frame_rms_and_zcr<T>(
     total_len: NonZeroUsize,
     frame_size: NonZeroUsize,
     pad_end: bool,
+    mut frame_out: Option<&mut [f64]>,
 ) -> (f64, f64)
 where
     T: StandardSample,
 {
     let available = total_len.get().saturating_sub(frame_start);
     if available == 0 {
+        if let Some(out) = frame_out {
+            out.fill(0.0);
+        }
         return (0.0, 0.0);
     }
 
     let frame_len = available.min(frame_size.get());
+    if let Some(out) = frame_out.as_deref_mut() {
+        // Zero padding past the end of the signal.
+        out[frame_len..].fill(0.0);
+    }
     let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
     let mut sum_sq: f64 = 0.0;
@@ -549,6 +697,9 @@ where
 
     for i in 0..frame_len {
         let x: f64 = samples[frame_start + i].convert_to();
+        if let Some(out) = frame_out.as_deref_mut() {
+            out[i] = x;
+        }
         sum_sq += x * x;
 
         let sign = if x > 0.0 {
@@ -585,16 +736,24 @@ fn frame_rms_and_zcr_avg<T>(
     frame_start: usize,
     frame_size: NonZeroUsize,
     pad_end: bool,
+    mut frame_out: Option<&mut [f64]>,
 ) -> (f64, f64)
 where
     T: StandardSample,
 {
     let available = samples.get().saturating_sub(frame_start);
     if available == 0 {
+        if let Some(out) = frame_out {
+            out.fill(0.0);
+        }
         return (0.0, 0.0);
     }
 
     let frame_len = available.min(frame_size.get());
+    if let Some(out) = frame_out.as_deref_mut() {
+        // Zero padding past the end of the signal.
+        out[frame_len..].fill(0.0);
+    }
     let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
     let mut sum_sq = 0.0;
@@ -610,6 +769,9 @@ where
             acc += v;
         }
         let x = acc / channels.get() as f64;
+        if let Some(out) = frame_out.as_deref_mut() {
+            out[i] = x;
+        }
         sum_sq += x * x;
 
         let sign = if x > 0.0 {
@@ -645,16 +807,24 @@ fn frame_rms_and_zcr_avg_indexed<T>(
     frame_start: usize,
     frame_size: NonZeroUsize,
     pad_end: bool,
+    mut frame_out: Option<&mut [f64]>,
 ) -> (f64, f64)
 where
     T: StandardSample,
 {
     let available = samples.get().saturating_sub(frame_start);
     if available == 0 {
+        if let Some(out) = frame_out {
+            out.fill(0.0);
+        }
         return (0.0, 0.0);
     }
 
     let frame_len = available.min(frame_size.get());
+    if let Some(out) = frame_out.as_deref_mut() {
+        // Zero padding past the end of the signal.
+        out[frame_len..].fill(0.0);
+    }
     let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
     let mut sum_sq = 0.0;
@@ -669,6 +839,9 @@ where
             acc += v;
         }
         let x = acc / channels.get() as f64;
+        if let Some(out) = frame_out.as_deref_mut() {
+            out[i] = x;
+        }
         sum_sq += x * x;
 
         let sign = if x > 0.0 {
@@ -704,16 +877,24 @@ fn frame_rms_and_zcr_indexed<T>(
     frame_start: usize,
     frame_size: NonZeroUsize,
     pad_end: bool,
+    mut frame_out: Option<&mut [f64]>,
 ) -> (f64, f64)
 where
     T: StandardSample,
 {
     let available = samples.get().saturating_sub(frame_start);
     if available == 0 {
+        if let Some(out) = frame_out {
+            out.fill(0.0);
+        }
         return (0.0, 0.0);
     }
 
     let frame_len = available.min(frame_size.get());
+    if let Some(out) = frame_out.as_deref_mut() {
+        // Zero padding past the end of the signal.
+        out[frame_len..].fill(0.0);
+    }
     let denom_len = if pad_end { frame_size.get() } else { frame_len };
 
     let mut sum_sq = 0.0;
@@ -723,6 +904,9 @@ where
     for i in 0..frame_len {
         let col = frame_start + i;
         let x: f64 = multi[(ch, col)].convert_to();
+        if let Some(out) = frame_out.as_deref_mut() {
+            out[i] = x;
+        }
         sum_sq += x * x;
 
         let sign = if x > 0.0 {
@@ -899,5 +1083,29 @@ mod tests {
         for w in regions.windows(2) {
             assert!(w[0].1 <= w[1].0);
         }
+    }
+
+    /// The band ratio is the in-band share of the windowed frame's energy: a tone
+    /// on a bin inside the band gives 1, one far outside gives 0, and an equal
+    /// mix of the two gives 1/2.
+    #[test]
+    fn band_ratio_is_the_in_band_energy_share() {
+        let sr = 16_000.0;
+        let config = VadConfig::default().with_method(VadMethod::Spectral);
+        let mut band = BandRatio::new(&config, sr).unwrap();
+        let len = config.frame_size.get();
+        // Bin-centred tones (15.625 Hz bins): 1000 Hz inside, 6000 Hz outside.
+        let tone = |f: f64, n: usize| (std::f64::consts::TAU * f * n as f64 / sr).sin();
+        let mut ratio = |signal: &dyn Fn(usize) -> f64| {
+            for (n, x) in band.frame_mut().iter_mut().enumerate() {
+                *x = signal(n);
+            }
+            band.ratio()
+        };
+        assert!((ratio(&|n| tone(1000.0, n)) - 1.0).abs() < 1e-12);
+        assert!(ratio(&|n| tone(6000.0, n)) < 1e-12);
+        assert!((ratio(&|n| tone(1000.0, n) + tone(6000.0, n)) - 0.5).abs() < 1e-9);
+        assert_eq!(ratio(&|_| 0.0), 0.0);
+        assert_eq!(band.frame_mut().len(), len);
     }
 }

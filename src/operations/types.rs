@@ -579,13 +579,15 @@ pub enum VadMethod {
     /// default `zcr_min = 0.02`).
     Combined,
 
-    /// Spectral speech-band energy ratio detection. **Not implemented.**
+    /// Energy threshold and speech-band energy ratio detection.
     ///
-    /// Intended to compare the fraction of spectral energy within
-    /// `speech_band_low_hz..speech_band_high_hz` with
-    /// [`VadConfig::spectral_ratio_threshold`]. Selecting it currently makes
-    /// [`voice_activity_mask`](crate::operations::traits::AudioVoiceActivityDetection::voice_activity_mask)
-    /// return [`AudioSampleError::Unsupported`].
+    /// A frame is classified as speech when its RMS level is at least
+    /// [`VadConfig::energy_threshold_db`] and at least the fraction
+    /// [`VadConfig::spectral_ratio_threshold`] of its energy (Hann window, real
+    /// FFT of length `frame_size`) lies between
+    /// [`VadConfig::speech_band_low_hz`] and [`VadConfig::speech_band_high_hz`].
+    /// Rejects loud broadband noise, hum and hiss that pass the energy test,
+    /// and unvoiced fricatives, whose energy lies mostly above the band.
     Spectral,
 }
 
@@ -720,14 +722,15 @@ pub struct VadConfig {
     /// Majority-vote smoothing window in frames (1 = no smoothing).
     pub smooth_frames: NonZeroUsize,
 
-    /// Lower bound of the speech band in Hz (reserved for `VadMethod::Spectral`,
-    /// which is not implemented; currently unused).
+    /// Lower edge of the speech band in Hz, used by [`VadMethod::Spectral`].
+    /// FFT bins at or above it count towards the band.
     pub speech_band_low_hz: f64,
-    /// Upper bound of the speech band in Hz (reserved for `VadMethod::Spectral`,
-    /// which is not implemented; currently unused).
+    /// Upper edge of the speech band in Hz, used by [`VadMethod::Spectral`].
+    /// FFT bins at or below it count towards the band; it must not exceed the
+    /// Nyquist frequency of the audio.
     pub speech_band_high_hz: f64,
-    /// Threshold on speech-band energy ratio (reserved for `VadMethod::Spectral`,
-    /// which is not implemented; currently unused).
+    /// Minimum fraction, in `[0, 1]`, of a frame's energy inside the speech
+    /// band for [`VadMethod::Spectral`] to classify it as speech.
     pub spectral_ratio_threshold: f64,
 }
 
@@ -753,10 +756,11 @@ impl VadConfig {
     /// - `min_silence_frames` - minimum consecutive silence frames to close a region.\
     /// - `hangover_frames` - frames to remain "active" after energy drops below threshold.\
     /// - `smooth_frames` - majority-vote window size; `1` disables smoothing.\
-    /// - `speech_band_low_hz` - lower boundary of the speech band (reserved for the
-    ///   unimplemented Spectral method).\
-    /// - `speech_band_high_hz` - upper boundary of the speech band (reserved).\
-    /// - `spectral_ratio_threshold` - minimum in-band energy fraction; in `[0.0, 1.0]` (reserved).
+    /// - `speech_band_low_hz` - lower edge of the speech band in Hz (`Spectral` method).\
+    /// - `speech_band_high_hz` - upper edge of the speech band in Hz; at most the Nyquist
+    ///   frequency of the audio (`Spectral` method).\
+    /// - `spectral_ratio_threshold` - minimum in-band energy fraction; in `[0.0, 1.0]`
+    ///   (`Spectral` method).
     ///
     /// # Returns
     ///

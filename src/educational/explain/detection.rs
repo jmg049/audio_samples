@@ -137,6 +137,26 @@ mod vad {
                     "Hz",
                     r"z_{max} f_s / 2",
                 );
+                if self.method == VadMethod::Spectral {
+                    doc.add_quantity(
+                        "Spectral resolution",
+                        r"f_s / F",
+                        fs / f as f64,
+                        "Hz",
+                        r"f_s / F",
+                    );
+                    if self.speech_band_high_hz > fs / 2.0 {
+                        doc.add_warning(
+                            WarningLevel::Problem,
+                            format!(
+                                "The speech band ends at {} Hz, above the Nyquist frequency {} Hz, so voice_activity_mask returns an error.",
+                                fmt_num(self.speech_band_high_hz),
+                                fmt_num(fs / 2.0)
+                            ),
+                            "Lower speech_band_high_hz.",
+                        );
+                    }
+                }
                 let frame_ms = 1000.0 * f as f64 / fs;
                 if frame_ms > 50.0 {
                     doc.add_warning(
@@ -176,7 +196,13 @@ mod vad {
                     VadMethod::Energy => format!("its RMS level (≥ {} dBFS)", fmt_num(self.energy_threshold_db)),
                     VadMethod::ZeroCrossing => "its zero-crossing rate".to_string(),
                     VadMethod::Combined => "both RMS level and zero-crossing rate".to_string(),
-                    _ => "the speech-band energy ratio".to_string(),
+                    VadMethod::Spectral => format!(
+                        "its RMS level (≥ {} dBFS) and the share of its energy between {} and {} Hz (≥ {})",
+                        fmt_num(self.energy_threshold_db),
+                        fmt_num(self.speech_band_low_hz),
+                        fmt_num(self.speech_band_high_hz),
+                        fmt_num(self.spectral_ratio_threshold)
+                    ),
                 },
                 self.smooth_frames.get(),
                 self.hangover_frames.get(),
@@ -185,13 +211,6 @@ mod vad {
             ));
             doc.add_trade_off("A lower threshold detects quieter speech but also classifies more background noise as speech.")
                 .add_trade_off("Smoothing, hangover and minimum-run rules remove rapid switching between speech and silence but delay and stretch region boundaries by a few frames.");
-            if self.method == VadMethod::Spectral {
-                doc.add_warning(
-                    WarningLevel::Problem,
-                    "VadMethod::Spectral (Python: VadMethod.spectral) is not implemented: voice_activity_mask returns an error.",
-                    "Use the Energy or Combined method.",
-                );
-            }
             if let Err(e) = self.validate() {
                 doc.add_warning(
                     WarningLevel::Problem,
@@ -482,7 +501,17 @@ mod tests {
         );
         let spectral =
             VadConfig::default().with_method(crate::operations::types::VadMethod::Spectral);
-        assert!(spectral.explain().has_warning(WarningLevel::Problem));
+        let doc = spectral.explain_with(&ExplainContext::new().with_sample_rate(16_000.0));
+        assert!(!doc.has_warning(WarningLevel::Problem));
+        assert_eq!(doc.quantity("Spectral resolution").unwrap().value, 15.625);
+        // 8 kHz audio cannot have a band up to 4.5 kHz.
+        let mut above = spectral;
+        above.speech_band_high_hz = 4_500.0;
+        assert!(
+            above
+                .explain_with(&ExplainContext::new().with_sample_rate(8_000.0))
+                .has_warning(WarningLevel::Problem)
+        );
     }
 
     #[cfg(feature = "onset-detection")]
