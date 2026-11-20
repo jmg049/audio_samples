@@ -115,12 +115,11 @@
 //!   has settled on a steady level. Transients shorter than a few `τ_A`, and the
 //!   peaks of low-frequency waveforms when `τ_A` is long compared with the
 //!   period, can exceed the ceiling.
-//! - [`LimiterConfig::isp_limiting`] is not implemented and currently has no
-//!   effect: only sample peaks are detected, not inter-sample (true) peaks.
-//! - The side-chain filter fields of [`SideChainConfig`]
-//!   (`high_pass_freq`, `low_pass_freq`, `pre_emphasis_db`, `external_mix`) are
-//!   validated but not applied. The side-chain signal drives the detector
-//!   unfiltered, and side-chain processing is mono only.
+//! - [`LimiterConfig::isp_limiting`] detects true peaks from a 4× oversampled
+//!   detector signal, which can still read a peak up to 0.7 dB low near the
+//!   Nyquist frequency.
+//! - The side-chain filters of [`SideChainConfig`] shape only the detector
+//!   input; the signal path is not filtered.
 //!
 //! [`SideChainConfig`]: crate::operations::types::SideChainConfig
 //!
@@ -137,12 +136,15 @@
 //! audio.apply_compressor_in_place(&config).unwrap();
 //! ```
 
-use ndarray::{ArrayView1, ArrayViewMut1, s};
+use ndarray::{ArrayView1, ArrayViewMut1, Axis, s};
 use non_empty_slice::NonEmptySlice;
 
+use crate::operations::iir_design::{Sos, design_sos};
+use crate::operations::iir_filtering::sosfilt_in_place;
 use crate::operations::traits::AudioDynamicRange;
 use crate::operations::types::{
-    CompressorConfig, DynamicRangeMethod, ExpanderConfig, GateConfig, KneeType, LimiterConfig,
+    CompressorConfig, DynamicRangeMethod, ExpanderConfig, GateConfig, IirFilterDesign, KneeType,
+    LimiterConfig, SideChainConfig,
 };
 use crate::repr::AudioData;
 use crate::traits::StandardSample;
@@ -295,8 +297,17 @@ impl EnvelopeFollower {
     /// ```
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
+        self.process_with_peak(input, input.abs())
+    }
+
+    /// [`process`](Self::process) with the peak level given separately: `peak`
+    /// replaces `|input|` as the peak detector value (`Peak`, and the peak half of
+    /// `Hybrid`), while the RMS window still sees `input`. The limiter passes the
+    /// true (inter-sample) peak here.
+    #[inline]
+    fn process_with_peak(&mut self, input: f64, peak: f64) -> f64 {
         let detector_value = match self.detection_method {
-            DynamicRangeMethod::Peak => input.abs(),
+            DynamicRangeMethod::Peak => peak,
             DynamicRangeMethod::Rms => {
                 // Add new sample to RMS window
                 let sample_squared: f64 = input * input;
@@ -319,8 +330,6 @@ impl EnvelopeFollower {
             }
             DynamicRangeMethod::Hybrid => {
                 // Hybrid: max of peak and RMS
-                let peak = input.abs();
-
                 // RMS calculation
                 let sample_squared = input * input;
                 self.rms_window.push_back(sample_squared);
@@ -459,8 +468,10 @@ impl GainMaxHold {
 
 /// Runs a feed-forward, lookahead gain stage over one channel in place.
 ///
-/// The detector (envelope follower) sees the undelayed control signal: the
-/// channel itself, or `sidechain` when given. The static gain computer
+/// The detector (envelope follower) sees the undelayed control signal:
+/// `detector` when given (the side-chain signal), otherwise the channel itself.
+/// `peaks`, when given, replaces the magnitude of the control signal as the
+/// peak detector value (true-peak limiting). The static gain computer
 /// `reduction_db` maps the envelope level in dBFS to a gain reduction in dB.
 /// Output sample `y[n] = x[n] · 10^{−r_held[n]/20} · output_gain`, where
 /// `r_held[n] = max(r[n], …, r[n + L])` and `L = lookahead` samples. Beyond the
@@ -469,7 +480,8 @@ impl GainMaxHold {
 /// with input index `n`.
 fn process_lookahead_channel<T, F>(
     mut channel: ArrayViewMut1<'_, T>,
-    sidechain: Option<ArrayView1<'_, T>>,
+    detector: Option<&[f64]>,
+    peaks: Option<&[f64]>,
     mut follower: EnvelopeFollower,
     lookahead: usize,
     reduction_db: F,
@@ -484,13 +496,16 @@ fn process_lookahead_channel<T, F>(
 
     for i in 0..n + lookahead {
         let x: f64 = if i < n { channel[i].convert_to() } else { 0.0 };
-        let detector_input: f64 = match sidechain {
-            Some(sc) if i < n => sc[i].convert_to(),
+        let detector_input: f64 = match detector {
+            Some(d) if i < n => d[i],
             Some(_) => 0.0,
             None => x,
         };
 
-        let envelope = follower.process(detector_input);
+        let envelope = match peaks {
+            Some(p) => follower.process_with_peak(detector_input, p.get(i).copied().unwrap_or(0.0)),
+            None => follower.process(detector_input),
+        };
         let held_db = hold.push(reduction_db(linear_to_db(envelope)));
 
         let delayed = match delay.as_mut() {
@@ -503,6 +518,286 @@ fn process_lookahead_channel<T, F>(
             channel[i - lookahead] = output.convert_to();
         }
     }
+}
+
+/// Second-order sections that condition the detector input of a compressor or
+/// limiter when `side_chain.enabled`: a 2nd-order Butterworth high-pass at
+/// `high_pass_freq`, a 2nd-order Butterworth low-pass at `low_pass_freq` and
+/// the pre-emphasis shelf, each only when set. Empty when the side chain is
+/// disabled or sets no filter.
+fn side_chain_sections(
+    side_chain: &SideChainConfig,
+    sample_rate: f64,
+) -> AudioSampleResult<Vec<Sos>> {
+    let mut sections = Vec::new();
+    if !side_chain.enabled {
+        return Ok(sections);
+    }
+    if let Some(f) = side_chain.high_pass_freq {
+        sections.extend(design_sos(
+            &IirFilterDesign::butterworth_highpass(crate::nzu!(2), f),
+            sample_rate,
+        )?);
+    }
+    if let Some(f) = side_chain.low_pass_freq {
+        sections.extend(design_sos(
+            &IirFilterDesign::butterworth_lowpass(crate::nzu!(2), f),
+            sample_rate,
+        )?);
+    }
+    if side_chain.pre_emphasis_db != 0.0 {
+        sections.push(pre_emphasis_shelf(side_chain.pre_emphasis_db, sample_rate));
+    }
+    Ok(sections)
+}
+
+/// Midpoint of the side-chain pre-emphasis shelf, in Hz (a quarter of the
+/// sample rate when that is lower).
+pub(crate) const PRE_EMPHASIS_MIDPOINT_HZ: f64 = 2_000.0;
+
+/// First-order high shelf with gain 1 at DC and `gain_db` at the Nyquist
+/// frequency, and half the gain in dB at its midpoint
+/// `f_m = min(PRE_EMPHASIS_MIDPOINT_HZ, f_s/4)`.
+///
+/// It is the bilinear transform, prewarped at `f_m`, of
+/// `H(s) = (g·s/ω_p + 1)/(s/ω_p + 1)` with `g = 10^{gain_db/20}` and
+/// `ω_p = ω_m·√g`, for which `|H(jω_m)| = √g`.
+fn pre_emphasis_shelf(gain_db: f64, sample_rate: f64) -> Sos {
+    let g = db_to_linear(gain_db);
+    let midpoint = PRE_EMPHASIS_MIDPOINT_HZ.min(sample_rate / 4.0);
+    let k = (std::f64::consts::PI * midpoint / sample_rate).tan();
+    let a = 1.0 / (k * g.sqrt());
+    let norm = a + 1.0;
+    [
+        (g * a + 1.0) / norm,
+        (1.0 - g * a) / norm,
+        0.0,
+        1.0,
+        (1.0 - a) / norm,
+        0.0,
+    ]
+}
+
+/// The signal that drives the detector for one channel when it differs from
+/// the channel: `(1 − m)·x + m·e` for an external side-chain signal `e` with
+/// mix `m`, then filtered causally by `sections`. `None` when there is neither
+/// an external signal nor a filter, and the detector sees the channel itself.
+fn detector_signal<T: StandardSample>(
+    channel: ArrayView1<'_, T>,
+    external: Option<(ArrayView1<'_, T>, f64)>,
+    sections: &[Sos],
+) -> Option<Vec<f64>> {
+    if external.is_none() && sections.is_empty() {
+        return None;
+    }
+    let mut signal: Vec<f64> = match external {
+        Some((ext, mix)) => channel
+            .iter()
+            .zip(ext.iter())
+            .map(|(&x, &e)| {
+                let (x, e): (f64, f64) = (x.convert_to(), e.convert_to());
+                (1.0 - mix).mul_add(x, mix * e)
+            })
+            .collect(),
+        None => channel.iter().map(|&x| x.convert_to()).collect(),
+    };
+    if !sections.is_empty() {
+        sosfilt_in_place(sections, &mut signal);
+    }
+    Some(signal)
+}
+
+/// Oversampling factor of the true-peak detector.
+const TRUE_PEAK_OVERSAMPLING: usize = 4;
+/// Half-length, in input samples, of the true-peak interpolation filter
+/// (12 taps per phase, as in ITU-R BS.1770).
+const TRUE_PEAK_HALF_TAPS: usize = 6;
+/// Kaiser window parameter of the true-peak interpolation filter.
+const TRUE_PEAK_KAISER_BETA: f64 = 5.0;
+
+/// Modified Bessel function of the first kind, order zero (power series).
+fn bessel_i0(x: f64) -> f64 {
+    let q = 0.25 * x * x;
+    let (mut term, mut sum) = (1.0, 1.0);
+    for k in 1..64 {
+        term *= q / (k * k) as f64;
+        sum += term;
+        if term < sum * 1e-17 {
+            break;
+        }
+    }
+    sum
+}
+
+/// Taps `h_μ[j]`, `j = −5 … 6`, of the fractional-delay filter for offset
+/// `μ = k/4`, `k = 1 … 3`: a Kaiser-windowed (β = 5) sinc, normalised to unit
+/// DC gain. `x̂(n + μ) = Σ_j h_μ[j]·x[n + j]`.
+fn true_peak_taps() -> [[f64; 2 * TRUE_PEAK_HALF_TAPS]; TRUE_PEAK_OVERSAMPLING - 1] {
+    let half = TRUE_PEAK_HALF_TAPS as f64;
+    let mut taps = [[0.0; 2 * TRUE_PEAK_HALF_TAPS]; TRUE_PEAK_OVERSAMPLING - 1];
+    for (k, phase) in taps.iter_mut().enumerate() {
+        let mu = (k + 1) as f64 / TRUE_PEAK_OVERSAMPLING as f64;
+        for (idx, h) in phase.iter_mut().enumerate() {
+            let t = idx as f64 - (half - 1.0) - mu;
+            let sinc = if t == 0.0 {
+                1.0
+            } else {
+                (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t)
+            };
+            let r = (1.0 - (t / half).powi(2)).max(0.0);
+            *h = sinc * bessel_i0(TRUE_PEAK_KAISER_BETA * r.sqrt())
+                / bessel_i0(TRUE_PEAK_KAISER_BETA);
+        }
+        let sum: f64 = phase.iter().sum();
+        phase.iter_mut().for_each(|h| *h /= sum);
+    }
+    taps
+}
+
+/// True-peak magnitude around each sample of `signal`.
+///
+/// The signal (zero outside its ends) is interpolated at the three points
+/// `n + k/4` between each pair of samples by [`true_peak_taps`] (4×
+/// oversampling). `peaks[n]` is the largest magnitude among `x[n]` and the
+/// interpolated points in `(n − 1, n + 1)`, so the gain applied to the samples
+/// on either side of an inter-sample peak accounts for it.
+fn true_peaks(signal: &[f64]) -> Vec<f64> {
+    let n = signal.len();
+    let half = TRUE_PEAK_HALF_TAPS;
+    let taps = true_peak_taps();
+    // Zero padding so every tap of every interval reads inside the buffer.
+    let mut padded = vec![0.0; n + 2 * half + 1];
+    padded[half..half + n].copy_from_slice(signal);
+    // interval[m + 1]: largest interpolated magnitude in (m, m + 1), m = −1 … n − 1.
+    let interval: Vec<f64> = (0..=n)
+        .map(|m| {
+            // Taps of interval m − 1 start at sample m − 1 − (half − 1) = m − half.
+            let window = &padded[m..m + 2 * half];
+            taps.iter()
+                .map(|h| h.iter().zip(window).map(|(a, b)| a * b).sum::<f64>().abs())
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    (0..n)
+        .map(|i| signal[i].abs().max(interval[i]).max(interval[i + 1]))
+        .collect()
+}
+
+/// One channel of a compressor or limiter: the detector signal (side-chain
+/// blend and filters), its true peaks when `true_peak`, then the gain stage.
+#[allow(clippy::too_many_arguments)]
+fn process_channel<T, F>(
+    channel: ArrayViewMut1<'_, T>,
+    external: Option<(ArrayView1<'_, T>, f64)>,
+    sections: &[Sos],
+    true_peak: bool,
+    follower: EnvelopeFollower,
+    lookahead: usize,
+    reduction_db: F,
+    output_gain: f64,
+) where
+    T: StandardSample,
+    F: Fn(f64) -> f64,
+{
+    let detector = detector_signal(channel.view(), external, sections);
+    let peaks = true_peak.then(|| match &detector {
+        Some(d) => true_peaks(d),
+        None => true_peaks(
+            &channel
+                .iter()
+                .map(|&x| x.convert_to())
+                .collect::<Vec<f64>>(),
+        ),
+    });
+    process_lookahead_channel(
+        channel,
+        detector.as_deref(),
+        peaks.as_deref(),
+        follower,
+        lookahead,
+        reduction_db,
+        output_gain,
+    );
+}
+
+/// Runs `process_channel` over every channel of `main`, driven by the
+/// external side-chain signal `external` (mixed in by `mix`) when given.
+///
+/// A mono side-chain signal drives every channel; a multi-channel one must
+/// have as many channels as `main`, and channel `c` drives channel `c`.
+#[allow(clippy::too_many_arguments)]
+fn process_all_channels<T, F>(
+    main: &mut AudioData<'_, T>,
+    external: Option<(&AudioData<'_, T>, f64)>,
+    sections: &[Sos],
+    true_peak: bool,
+    new_follower: impl Fn() -> EnvelopeFollower,
+    lookahead: usize,
+    reduction_db: F,
+    output_gain: f64,
+) -> AudioSampleResult<()>
+where
+    T: StandardSample,
+    F: Fn(f64) -> f64 + Copy,
+{
+    if let Some((ext, _)) = external {
+        if ext.samples_per_channel() != main.samples_per_channel() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "signal_lengths",
+                "Main signal and sidechain signal must have the same length",
+            )));
+        }
+        if matches!(ext, AudioData::Multi(_)) && ext.num_channels() != main.num_channels() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "sidechain_signal",
+                format!(
+                    "a multi-channel side-chain signal must have as many channels as the main \
+                     signal ({} vs {}); pass a mono side-chain signal to drive every channel",
+                    ext.num_channels(),
+                    main.num_channels()
+                ),
+            )));
+        }
+    }
+    // The side-chain row that drives channel `c` of the main signal.
+    let external_row = |c: usize| {
+        external.map(|(ext, mix)| {
+            let row = match ext {
+                AudioData::Mono(m) => m.as_view(),
+                AudioData::Multi(m) => m.as_view().index_axis_move(Axis(0), c),
+            };
+            (row, mix)
+        })
+    };
+    match main {
+        AudioData::Mono(samples) => {
+            process_channel(
+                samples.slice_mut(s![..]),
+                external_row(0),
+                sections,
+                true_peak,
+                new_follower(),
+                lookahead,
+                reduction_db,
+                output_gain,
+            );
+        }
+        AudioData::Multi(samples) => {
+            for c in 0..samples.nrows().get() {
+                process_channel(
+                    samples.row_mut(c),
+                    external_row(c),
+                    sections,
+                    true_peak,
+                    new_follower(),
+                    lookahead,
+                    reduction_db,
+                    output_gain,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A circular delay buffer that enables lookahead processing in limiters and compressors.
@@ -802,6 +1097,64 @@ pub fn calculate_limiting_gain(
     quadratic_knee_reduction(input_level_db - ceiling_db, 1.0, knee_type, knee_width_db)
 }
 
+/// The envelope follower of a compressor.
+fn compressor_follower(config: &CompressorConfig, sample_rate: f64) -> EnvelopeFollower {
+    EnvelopeFollower::new(
+        config.attack_ms,
+        config.release_ms,
+        sample_rate,
+        config.detection_method,
+    )
+}
+
+/// The envelope follower of a limiter.
+fn limiter_follower(config: &LimiterConfig, sample_rate: f64) -> EnvelopeFollower {
+    EnvelopeFollower::new(
+        config.attack_ms,
+        config.release_ms,
+        sample_rate,
+        config.detection_method,
+    )
+}
+
+/// The static gain computer of a compressor: envelope level in dBFS to gain
+/// reduction in dB.
+fn compressor_reduction(config: &CompressorConfig) -> impl Fn(f64) -> f64 + Copy + '_ {
+    move |envelope_db| {
+        calculate_compression_gain(
+            envelope_db,
+            config.threshold_db,
+            config.ratio,
+            config.knee_type,
+            config.knee_width_db,
+        )
+    }
+}
+
+/// The static gain computer of a limiter.
+fn limiter_reduction(config: &LimiterConfig) -> impl Fn(f64) -> f64 + Copy + '_ {
+    move |envelope_db| {
+        calculate_limiting_gain(
+            envelope_db,
+            config.ceiling_db,
+            config.knee_type,
+            config.knee_width_db,
+        )
+    }
+}
+
+/// The `*_sidechain` methods need `side_chain.enabled`.
+fn require_side_chain(side_chain: &SideChainConfig) -> AudioSampleResult<()> {
+    if side_chain.enabled {
+        Ok(())
+    } else {
+        Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "side_chain_config",
+            "Side-chain is not enabled in configuration",
+        )))
+    }
+}
+
 impl<T> AudioDynamicRange for AudioSamples<'_, T>
 where
     T: StandardSample,
@@ -816,6 +1169,8 @@ where
     /// `lookahead_ms > 0` gain reduction starts up to `lookahead_ms` before a peak; the
     /// delay is compensated, so the output stays time-aligned with the input.
     /// Multi-channel audio is compressed independently per channel (no stereo linking).
+    /// With `side_chain.enabled` the detector input passes through the side-chain filters
+    /// of [`SideChainConfig`](crate::operations::types::SideChainConfig).
     /// The formulas are in the [`dynamic_range`](crate::operations::dynamic_range)
     /// module documentation.
     ///
@@ -849,56 +1204,18 @@ where
     /// ```
     fn apply_compressor_in_place(&mut self, config: &CompressorConfig) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
-        // Validate configuration
         config.validate(sample_rate)?;
-
-        let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-        let makeup_gain = db_to_linear(config.makeup_gain_db);
-        let reduction = |envelope_db: f64| {
-            calculate_compression_gain(
-                envelope_db,
-                config.threshold_db,
-                config.ratio,
-                config.knee_type,
-                config.knee_width_db,
-            )
-        };
-        let new_follower = || {
-            EnvelopeFollower::new(
-                config.attack_ms,
-                config.release_ms,
-                sample_rate,
-                config.detection_method,
-            )
-        };
-
-        match self.data_mut() {
-            AudioData::Mono(samples) => {
-                process_lookahead_channel(
-                    samples.slice_mut(s![..]),
-                    None,
-                    new_follower(),
-                    lookahead_samples,
-                    reduction,
-                    makeup_gain,
-                );
-            }
-            AudioData::Multi(samples) => {
-                // Each channel is compressed independently.
-                for channel in 0..samples.nrows().get() {
-                    process_lookahead_channel(
-                        samples.row_mut(channel),
-                        None,
-                        new_follower(),
-                        lookahead_samples,
-                        reduction,
-                        makeup_gain,
-                    );
-                }
-            }
-        }
-
-        Ok(())
+        let sections = side_chain_sections(&config.side_chain, sample_rate)?;
+        process_all_channels(
+            self.data_mut(),
+            None,
+            &sections,
+            false,
+            || compressor_follower(config, sample_rate),
+            ms_to_samples(config.lookahead_ms, sample_rate),
+            compressor_reduction(config),
+            db_to_linear(config.makeup_gain_db),
+        )
     }
 
     /// Prevents the signal from exceeding a specified ceiling level.
@@ -909,7 +1226,9 @@ where
     /// applied, so gain reduction begins before peaks arrive; the delay is compensated.
     /// This is not a brick-wall limiter: the ceiling is exact only once the envelope has
     /// settled, and transients shorter than a few attack time constants can exceed it.
-    /// Only sample peaks are detected (`isp_limiting` currently has no effect).
+    /// With `isp_limiting` the peak detector reads true (inter-sample) peaks of a 4×
+    /// oversampled copy of the detector signal instead of sample peaks. With
+    /// `side_chain.enabled` the detector input passes through the side-chain filters.
     /// Multi-channel audio is limited independently per channel. See the
     /// [`dynamic_range`](crate::operations::dynamic_range) module documentation.
     ///
@@ -943,54 +1262,18 @@ where
     /// ```
     fn apply_limiter_in_place(&mut self, config: &LimiterConfig) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
-        // Validate configuration
         let config = config.validate(sample_rate)?;
-
-        let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-        let reduction = |envelope_db: f64| {
-            calculate_limiting_gain(
-                envelope_db,
-                config.ceiling_db,
-                config.knee_type,
-                config.knee_width_db,
-            )
-        };
-        let new_follower = || {
-            EnvelopeFollower::new(
-                config.attack_ms,
-                config.release_ms,
-                sample_rate,
-                config.detection_method,
-            )
-        };
-
-        match self.data_mut() {
-            AudioData::Mono(samples) => {
-                process_lookahead_channel(
-                    samples.slice_mut(s![..]),
-                    None,
-                    new_follower(),
-                    lookahead_samples,
-                    reduction,
-                    1.0,
-                );
-            }
-            AudioData::Multi(samples) => {
-                // Each channel is limited independently.
-                for channel in 0..samples.nrows().get() {
-                    process_lookahead_channel(
-                        samples.row_mut(channel),
-                        None,
-                        new_follower(),
-                        lookahead_samples,
-                        reduction,
-                        1.0,
-                    );
-                }
-            }
-        }
-
-        Ok(())
+        let sections = side_chain_sections(&config.side_chain, sample_rate)?;
+        process_all_channels(
+            self.data_mut(),
+            None,
+            &sections,
+            config.isp_limiting,
+            || limiter_follower(&config, sample_rate),
+            ms_to_samples(config.lookahead_ms, sample_rate),
+            limiter_reduction(&config),
+            1.0,
+        )
     }
 
     /// Applies compression driven by an external sidechain signal.
@@ -999,12 +1282,15 @@ where
     /// the main audio, allowing one signal to control the dynamics of another. A common
     /// use case is ducking: a voice track causes background music to decrease in level
     /// whenever speech is present. Lookahead and latency compensation work as in
-    /// [`apply_compressor_in_place`](Self::apply_compressor_in_place). The filter
-    /// settings in `config.side_chain` are not applied: the side-chain signal drives the
-    /// detector unfiltered.
+    /// [`apply_compressor_in_place`](Self::apply_compressor_in_place).
     ///
-    /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
-    /// combinations return an error.
+    /// The detector input is `(1 − m)·x + m·s`, the main signal `x` and the side-chain
+    /// signal `s` mixed by `m = config.side_chain.external_mix` (1 by default: the
+    /// side-chain signal alone), then passed through the side-chain filters
+    /// (`high_pass_freq`, `low_pass_freq`, `pre_emphasis_db`; see
+    /// [`SideChainConfig`](crate::operations::types::SideChainConfig)). A mono
+    /// side-chain signal drives every channel of the main signal; a multi-channel one
+    /// must have as many channels, and drives them channel by channel.
     ///
     /// # Arguments
     ///
@@ -1020,10 +1306,10 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if `config` fails validation.
     /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
-    ///   different lengths.
-    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
-    ///   supported).
+    ///   different lengths, or the sidechain signal is multi-channel with a different
+    ///   channel count.
     ///
     /// # Example
     ///
@@ -1050,75 +1336,31 @@ where
         sidechain_signal: &Self,
     ) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
-        // Validate configuration
         config.validate(sample_rate)?;
-
-        if !config.side_chain.enabled {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "side_chain_config",
-                "Side-chain is not enabled in configuration",
-            )));
-        }
-
-        // The side-chain signal drives the detector and the gain reduction is
-        // applied to the main signal. The side-chain filter settings are not
-        // applied (see the module documentation).
-
-        match (self.data_mut(), sidechain_signal.data()) {
-            (AudioData::Mono(main_samples), AudioData::Mono(sc_samples)) => {
-                if main_samples.len() != sc_samples.len() {
-                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "signal_lengths",
-                        "Main signal and sidechain signal must have the same length",
-                    )));
-                }
-
-                let envelope_follower = EnvelopeFollower::new(
-                    config.attack_ms,
-                    config.release_ms,
-                    sample_rate,
-                    config.detection_method,
-                );
-                let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-
-                process_lookahead_channel(
-                    main_samples.slice_mut(s![..]),
-                    Some(sc_samples.as_view()),
-                    envelope_follower,
-                    lookahead_samples,
-                    |envelope_db| {
-                        calculate_compression_gain(
-                            envelope_db,
-                            config.threshold_db,
-                            config.ratio,
-                            config.knee_type,
-                            config.knee_width_db,
-                        )
-                    },
-                    db_to_linear(config.makeup_gain_db),
-                );
-            }
-            _ => {
-                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                    "audio_format",
-                    "Side-chain processing with multi-channel audio not yet implemented",
-                )));
-            }
-        }
-
-        Ok(())
+        require_side_chain(&config.side_chain)?;
+        let sections = side_chain_sections(&config.side_chain, sample_rate)?;
+        process_all_channels(
+            self.data_mut(),
+            Some((sidechain_signal.data(), config.side_chain.external_mix)),
+            &sections,
+            false,
+            || compressor_follower(config, sample_rate),
+            ms_to_samples(config.lookahead_ms, sample_rate),
+            compressor_reduction(config),
+            db_to_linear(config.makeup_gain_db),
+        )
     }
 
     /// Applies limiting driven by an external sidechain signal.
     ///
     /// The gain reduction ceiling is enforced based on the level of `sidechain_signal`
-    /// rather than the main audio. Useful for frequency-selective limiting where a
-    /// filtered copy of the signal (filtered by the caller) controls gain reduction.
-    /// Lookahead works as in [`apply_limiter_in_place`](Self::apply_limiter_in_place).
-    /// The filter settings in `config.side_chain` are not applied.
-    ///
-    /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
-    /// combinations return an error.
+    /// rather than the main audio. Useful for frequency-selective limiting, where a
+    /// filtered copy of the signal controls gain reduction.
+    /// Lookahead and `isp_limiting` work as in
+    /// [`apply_limiter_in_place`](Self::apply_limiter_in_place). The detector input is
+    /// mixed and filtered as in
+    /// [`apply_compressor_sidechain_in_place`](Self::apply_compressor_sidechain_in_place),
+    /// and the same channel combinations are accepted.
     ///
     /// # Arguments
     ///
@@ -1134,10 +1376,10 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if `config` fails validation.
     /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
-    ///   different lengths.
-    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
-    ///   supported).
+    ///   different lengths, or the sidechain signal is multi-channel with a different
+    ///   channel count.
     ///
     /// # Example
     ///
@@ -1164,58 +1406,19 @@ where
         sidechain_signal: &Self,
     ) -> AudioSampleResult<()> {
         let sample_rate = self.sample_rate_hz();
-        // Validate configuration
-        config.validate(sample_rate)?;
-        if !config.side_chain.enabled {
-            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                "side_chain_config",
-                "Side-chain is not enabled in configuration",
-            )));
-        }
-
-        // Similar to compressor sidechain but with limiting gain calculation
-        match (self.data_mut(), sidechain_signal.data()) {
-            (AudioData::Mono(main_samples), AudioData::Mono(sc_samples)) => {
-                if main_samples.len() != sc_samples.len() {
-                    return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                        "signal_lengths",
-                        "Main signal and sidechain signal must have the same length",
-                    )));
-                }
-
-                let envelope_follower = EnvelopeFollower::new(
-                    config.attack_ms,
-                    config.release_ms,
-                    sample_rate,
-                    config.detection_method,
-                );
-                let lookahead_samples = ms_to_samples(config.lookahead_ms, sample_rate);
-
-                process_lookahead_channel(
-                    main_samples.slice_mut(s![..]),
-                    Some(sc_samples.as_view()),
-                    envelope_follower,
-                    lookahead_samples,
-                    |envelope_db| {
-                        calculate_limiting_gain(
-                            envelope_db,
-                            config.ceiling_db,
-                            config.knee_type,
-                            config.knee_width_db,
-                        )
-                    },
-                    1.0,
-                );
-            }
-            _ => {
-                return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
-                    "audio_format",
-                    "Side-chain processing with multi-channel audio not yet implemented",
-                )));
-            }
-        }
-
-        Ok(())
+        let config = config.validate(sample_rate)?;
+        require_side_chain(&config.side_chain)?;
+        let sections = side_chain_sections(&config.side_chain, sample_rate)?;
+        process_all_channels(
+            self.data_mut(),
+            Some((sidechain_signal.data(), config.side_chain.external_mix)),
+            &sections,
+            config.isp_limiting,
+            || limiter_follower(&config, sample_rate),
+            ms_to_samples(config.lookahead_ms, sample_rate),
+            limiter_reduction(&config),
+            1.0,
+        )
     }
 
     /// Computes the static compression input-output curve for given input levels.
@@ -1285,7 +1488,9 @@ where
     ///
     /// Passes the audio through the envelope follower and compression gain calculation,
     /// collecting the gain reduction (in dB) at every sample without modifying the
-    /// signal. For multi-channel audio, only the first channel is analysed.
+    /// signal. For multi-channel audio, only the first channel is analysed. With
+    /// `config.side_chain.enabled` the detector input passes through the side-chain
+    /// filters, as in `apply_compressor`.
     ///
     /// Useful for metering, visualising, and analysing compressor activity.
     ///
@@ -1301,6 +1506,10 @@ where
     /// The values come from the detector and static curve only:
     /// `config.lookahead_ms` is ignored here, so they show the gain reduction
     /// without the lookahead max-hold that `apply_compressor` applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::AudioSampleError::Parameter] if `config` fails validation.
     ///
     /// # Example
     ///
@@ -1318,67 +1527,20 @@ where
     /// ```
     fn get_gain_reduction(&self, config: &CompressorConfig) -> AudioSampleResult<Vec<f64>> {
         let sample_rate = self.sample_rate_hz();
-
-        match self.data() {
-            AudioData::Mono(samples) => {
-                let mut envelope_follower = EnvelopeFollower::new(
-                    config.attack_ms,
-                    config.release_ms,
-                    sample_rate,
-                    config.detection_method,
-                );
-
-                let mut gain_reductions = Vec::with_capacity(samples.len().get());
-
-                for &sample in samples {
-                    let sample_f: f64 = sample.convert_to();
-                    let envelope = envelope_follower.process(sample_f);
-                    let envelope_db = linear_to_db(envelope);
-
-                    let gain_reduction_db = calculate_compression_gain(
-                        envelope_db,
-                        config.threshold_db,
-                        config.ratio,
-                        config.knee_type,
-                        config.knee_width_db,
-                    );
-
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                Ok(gain_reductions)
-            }
-            AudioData::Multi(samples) => {
-                // For multi-channel, return gain reduction for first channel
-                let num_samples = samples.ncols().get();
-                let mut envelope_follower = EnvelopeFollower::new(
-                    config.attack_ms,
-                    config.release_ms,
-                    sample_rate,
-                    config.detection_method,
-                );
-
-                let mut gain_reductions = Vec::with_capacity(num_samples);
-
-                for sample_idx in 0..num_samples {
-                    let sample_f: f64 = samples[[0, sample_idx]].convert_to();
-                    let envelope = envelope_follower.process(sample_f);
-                    let envelope_db = linear_to_db(envelope);
-
-                    let gain_reduction_db = calculate_compression_gain(
-                        envelope_db,
-                        config.threshold_db,
-                        config.ratio,
-                        config.knee_type,
-                        config.knee_width_db,
-                    );
-
-                    gain_reductions.push(gain_reduction_db);
-                }
-
-                Ok(gain_reductions)
-            }
-        }
+        config.validate(sample_rate)?;
+        let sections = side_chain_sections(&config.side_chain, sample_rate)?;
+        let first = match self.data() {
+            AudioData::Mono(samples) => samples.as_view(),
+            AudioData::Multi(samples) => samples.as_view().index_axis_move(Axis(0), 0),
+        };
+        let detector = detector_signal(first, None, &sections)
+            .unwrap_or_else(|| first.iter().map(|&x| x.convert_to()).collect());
+        let mut follower = compressor_follower(config, sample_rate);
+        let reduction = compressor_reduction(config);
+        Ok(detector
+            .iter()
+            .map(|&x| reduction(linear_to_db(follower.process(x))))
+            .collect())
     }
 
     /// Attenuates the signal when it falls below a threshold (noise gate).
@@ -2224,5 +2386,82 @@ mod tests {
         let out = audio.as_slice().unwrap();
         assert_bit_identical(&out[0..n], &exp0, "limiter multi ch0");
         assert_bit_identical(&out[n..2 * n], &exp1, "limiter multi ch1");
+    }
+
+    /// A full-scale sine at f_s/4 sampled 45° off its peaks has sample peaks of
+    /// 1/√2 (−3 dBFS); the true-peak detector reads its amplitude, 1.0, within
+    /// the accuracy of the interpolator. A slow sine reads its sample peak.
+    #[test]
+    fn true_peaks_recover_inter_sample_peaks() {
+        let quarter: Vec<f64> = (0..400)
+            .map(|n| (std::f64::consts::FRAC_PI_2 * n as f64 + std::f64::consts::FRAC_PI_4).sin())
+            .collect();
+        assert!((peak_of(&quarter) - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        let tp = true_peaks(&quarter);
+        for &v in &tp[20..380] {
+            assert!((20.0 * v.log10()).abs() < 0.05, "true peak {v}");
+        }
+        let slow: Vec<f64> = (0..4800)
+            .map(|n| 0.5 * (std::f64::consts::TAU * 100.0 * n as f64 / 48_000.0).sin())
+            .collect();
+        let tp = true_peaks(&slow);
+        let max = tp[100..4700].iter().copied().fold(0.0, f64::max);
+        assert!((max - 0.5).abs() < 1e-4, "slow sine true peak {max}");
+        assert!(tp.iter().zip(&slow).all(|(t, x)| *t >= x.abs()));
+    }
+
+    fn peak_of(x: &[f64]) -> f64 {
+        x.iter().fold(0.0, |m, v| m.max(v.abs()))
+    }
+
+    /// The interpolation phases have unit DC gain and the half-sample phase is
+    /// symmetric.
+    #[test]
+    fn true_peak_taps_are_normalised() {
+        let taps = true_peak_taps();
+        for phase in &taps {
+            assert!((phase.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        }
+        let half = &taps[1];
+        for j in 0..half.len() {
+            assert!((half[j] - half[half.len() - 1 - j]).abs() < 1e-15);
+        }
+    }
+
+    /// The pre-emphasis shelf has unity gain at DC, the full gain at the Nyquist
+    /// frequency and half the gain in dB at its midpoint.
+    #[test]
+    fn pre_emphasis_shelf_response() {
+        for (gain_db, fs) in [(12.0, 48_000.0), (-6.0, 44_100.0), (6.0, 6_000.0)] {
+            let shelf = pre_emphasis_shelf(gain_db, fs);
+            let midpoint = PRE_EMPHASIS_MIDPOINT_HZ.min(fs / 4.0);
+            let h =
+                crate::operations::iir_design::sosfreqz(&[shelf], &[0.0, midpoint, fs / 2.0], fs);
+            let db = |c: num_complex::Complex<f64>| 20.0 * c.norm().log10();
+            assert!(
+                db(h[0]).abs() < 1e-9,
+                "{gain_db} dB at {fs}: DC {}",
+                db(h[0])
+            );
+            assert!(
+                (db(h[1]) - gain_db / 2.0).abs() < 1e-9,
+                "midpoint {}",
+                db(h[1])
+            );
+            assert!((db(h[2]) - gain_db).abs() < 1e-9, "Nyquist {}", db(h[2]));
+        }
+    }
+
+    /// The side-chain filters are designed only when the side chain is enabled.
+    #[test]
+    fn side_chain_sections_follow_the_config() {
+        let mut sc = SideChainConfig::disabled();
+        sc.set_high_pass(100.0);
+        assert!(side_chain_sections(&sc, 48_000.0).unwrap().is_empty());
+        sc.enable();
+        assert_eq!(side_chain_sections(&sc, 48_000.0).unwrap().len(), 1);
+        sc.set_low_pass(5_000.0);
+        sc.pre_emphasis_db = 6.0;
+        assert_eq!(side_chain_sections(&sc, 48_000.0).unwrap().len(), 3);
     }
 }

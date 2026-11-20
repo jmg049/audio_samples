@@ -3143,11 +3143,21 @@ impl TryFrom<&str> for DynamicRangeMethod {
 /// by an external control signal, and describes optional frequency shaping of the
 /// control path.
 ///
-/// Note: only `enabled` is currently used, and only by the `*_sidechain` methods
-/// of [`AudioDynamicRange`](crate::AudioDynamicRange), which return an error when
-/// it is `false`. The filter fields (`high_pass_freq`, `low_pass_freq`),
-/// `pre_emphasis_db` and `external_mix` are validated but not applied: the
-/// side-chain signal drives the detector unfiltered and unmixed.
+/// When `enabled`, the compressor and limiter of
+/// [`AudioDynamicRange`](crate::AudioDynamicRange) build their detector input as
+/// follows, and leave the signal path untouched:
+///
+/// 1. The `*_sidechain` methods mix the main signal `x` and the external
+///    side-chain signal `s` as `(1 − external_mix)·x + external_mix·s`; the
+///    other methods have no external signal and use `x`.
+/// 2. A 2nd-order Butterworth high-pass at `high_pass_freq` (12 dB/octave),
+///    designed like [`IirFilterDesign::butterworth_highpass`].
+/// 3. A 2nd-order Butterworth low-pass at `low_pass_freq`.
+/// 4. A first-order high shelf of `pre_emphasis_db` (see the field).
+///
+/// The filters are causal and start from rest; each step is skipped when its
+/// field is unset (or `pre_emphasis_db` is 0). When `enabled` is false all of
+/// this is skipped and the `*_sidechain` methods return an error.
 ///
 /// ## Intended Usage
 ///
@@ -3169,8 +3179,9 @@ impl TryFrom<&str> for DynamicRangeMethod {
 pub struct SideChainConfig {
     /// Whether side-chain processing is active.
     ///
-    /// The `*_sidechain` methods require `true`. The non-side-chain methods
-    /// ignore this flag and always detect on their own (feed-forward) input.
+    /// The `*_sidechain` methods require `true`. In the other compressor and
+    /// limiter methods it turns on the side-chain filters for the detector, which
+    /// then sees the filtered main signal.
     pub enabled: bool,
 
     /// Optional high-pass filter on the side-chain signal, in Hz.
@@ -3185,15 +3196,21 @@ pub struct SideChainConfig {
     /// Must be in `(0, nyquist)` and greater than `high_pass_freq` if both are `Some`.
     pub low_pass_freq: Option<f64>,
 
-    /// Pre-emphasis gain applied to the side-chain signal in dB.
+    /// High-frequency gain of the side-chain pre-emphasis shelf, in dB.
     ///
-    /// Positive values make specific frequencies trigger gain reduction more
-    /// easily. `0.0` disables pre-emphasis.
+    /// A first-order high shelf with unity gain at DC, `pre_emphasis_db` at the
+    /// Nyquist frequency and half of it (in dB) at 2 kHz, or at a quarter of
+    /// the sample rate when that is lower. Positive values make high frequencies
+    /// (sibilance, cymbals) trigger gain reduction more easily, as in a de-esser;
+    /// negative values make them trigger it less. `0.0` disables pre-emphasis.
+    /// Must be finite and within `[-40, 40]` dB.
     pub pre_emphasis_db: f64,
 
-    /// Mix between the internal signal (`0.0`) and external side-chain (`1.0`).
+    /// Mix between the main signal (`0.0`) and the external side-chain signal
+    /// (`1.0`) in the detector input of the `*_sidechain` methods.
     ///
-    /// Must be in `[0.0, 1.0]`. Values between 0 and 1 blend both sources.
+    /// Must be in `[0.0, 1.0]`. Values between 0 and 1 blend both sources. The
+    /// other methods have no external signal and do not read it.
     pub external_mix: f64,
 }
 
@@ -3205,7 +3222,9 @@ impl SideChainConfig {
     ///
     /// # Returns
     ///
-    /// A [`SideChainConfig`] with `enabled = false` and no filter frequencies.
+    /// A [`SideChainConfig`] with `enabled = false`, no filters and
+    /// `external_mix = 1.0`, so that [`enable`](Self::enable) gives a side chain
+    /// driven by the external signal alone.
     #[inline]
     #[must_use]
     pub const fn disabled() -> Self {
@@ -3214,7 +3233,7 @@ impl SideChainConfig {
             high_pass_freq: None,
             low_pass_freq: None,
             pre_emphasis_db: 0.0,
-            external_mix: 0.0,
+            external_mix: 1.0,
         }
     }
 
@@ -3284,12 +3303,13 @@ impl SideChainConfig {
     /// # Errors
     ///
     /// Returns [crate::AudioSampleError::Parameter][crate::AudioSampleError] if any frequency
-    /// is outside `(0, nyquist)`, if `high_pass_freq ≥ low_pass_freq`, or if
-    /// `external_mix` is outside `[0.0, 1.0]`.
+    /// is outside `(0, nyquist)` or NaN, if `high_pass_freq ≥ low_pass_freq`, if
+    /// `external_mix` is outside `[0.0, 1.0]`, or if `pre_emphasis_db` is not a finite
+    /// value in `[-40, 40]`.
     #[inline]
     pub fn validate(self, sample_rate: f64) -> AudioSampleResult<Self> {
         if let Some(hp_freq) = self.high_pass_freq
-            && (hp_freq <= 0.0 || hp_freq >= sample_rate / 2.0)
+            && !(hp_freq > 0.0 && hp_freq < sample_rate / 2.0)
         {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "high_pass_freq",
@@ -3298,7 +3318,7 @@ impl SideChainConfig {
         }
 
         if let Some(lp_freq) = self.low_pass_freq
-            && (lp_freq <= 0.0 || lp_freq >= sample_rate / 2.0)
+            && !(lp_freq > 0.0 && lp_freq < sample_rate / 2.0)
         {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "low_pass_freq",
@@ -3315,10 +3335,17 @@ impl SideChainConfig {
             )));
         }
 
-        if self.external_mix < 0.0 || self.external_mix > 1.0 {
+        if !(0.0..=1.0).contains(&self.external_mix) {
             return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
                 "external_mix",
-                "External mix must be between0.0 and1.0",
+                "External mix must be between 0.0 and 1.0",
+            )));
+        }
+
+        if !(-40.0..=40.0).contains(&self.pre_emphasis_db) {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "pre_emphasis_db",
+                "Pre-emphasis must be a finite gain between -40 and 40 dB",
             )));
         }
 
@@ -3681,11 +3708,21 @@ pub struct LimiterConfig {
     /// compensates it. Valid range: `[0.0, 20.0]` ms.
     pub lookahead_ms: f64,
 
-    /// Reserved flag for inter-sample peak (ISP, true-peak) limiting.
+    /// Inter-sample peak (true-peak) detection.
     ///
-    /// Inter-sample peak limiting is not implemented and this flag currently has
-    /// no effect: the limiter measures sample peaks only. True-peak measurement
-    /// (e.g. 4× oversampling as in ITU-R BS.1770) is not performed.
+    /// When `true`, the peak detector reads the true peak of the detector signal
+    /// instead of its sample peaks: the signal is interpolated at the three
+    /// points between each pair of samples (4× oversampling, 12-tap
+    /// Kaiser-windowed sinc phases, as in ITU-R BS.1770), and sample `n` is
+    /// detected at the largest magnitude within one sample of it. A full-scale
+    /// sine at `f_s/4` sampled 45° off its peaks reads 0 dBTP instead of
+    /// −3 dBFS. The estimate is within about 0.1 dB of an ideal 4× reading up to
+    /// 0.45·`f_s`; 4× oversampling itself can read a peak up to 0.7 dB low near
+    /// the Nyquist frequency. RMS detection is unaffected; `Hybrid` uses the true
+    /// peak for its peak half. The interpolation reads six samples on either
+    /// side of each point, which offline processing of the whole buffer has, so
+    /// it adds no latency. Like the rest of the limiter, this is not a
+    /// brick-wall guarantee (see the type documentation).
     pub isp_limiting: bool,
 }
 
@@ -3702,7 +3739,7 @@ impl LimiterConfig {
     /// - `knee_width_db` - soft-knee width in dB; in `[0.0, 10.0]`.\
     /// - `detection_method` - level estimation algorithm.\
     /// - `lookahead_ms` - lookahead delay in milliseconds; in `[0.0, 20.0]`.\
-    /// - `isp_filtering` - stored as `isp_limiting`; currently has no effect.
+    /// - `isp_filtering` - stored as `isp_limiting`: true-peak detection.
     ///
     /// # Returns
     ///
@@ -3742,7 +3779,7 @@ impl LimiterConfig {
     ///
     /// A [`LimiterConfig`] with ceiling -0.1 dBFS, attack 0.1 ms, release 100 ms,
     /// 5 ms lookahead, soft knee 2 dB, peak detection, and `isp_limiting = true`
-    /// (currently no effect).
+    /// (true-peak detection).
     #[inline]
     #[must_use]
     pub const fn transparent() -> Self {
@@ -3768,7 +3805,7 @@ impl LimiterConfig {
     ///
     /// A [`LimiterConfig`] with ceiling -0.3 dBFS, attack 1 ms, release 200 ms,
     /// 10 ms lookahead, soft knee 3 dB, hybrid detection, and
-    /// `isp_limiting = true` (currently no effect).
+    /// `isp_limiting = true` (true-peak detection).
     #[inline]
     #[must_use]
     pub const fn mastering() -> Self {
@@ -3795,8 +3832,8 @@ impl LimiterConfig {
     /// # Returns
     ///
     /// A [`LimiterConfig`] with ceiling -1.0 dBFS, attack 0.5 ms, release 50 ms,
-    /// 2 ms lookahead, peak detection, and `isp_limiting = true` (currently no
-    /// effect).
+    /// 2 ms lookahead, peak detection, and `isp_limiting = true` (true-peak
+    /// detection).
     #[inline]
     #[must_use]
     pub const fn broadcast() -> Self {

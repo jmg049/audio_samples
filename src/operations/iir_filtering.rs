@@ -486,6 +486,12 @@ fn biquads(sos: &[Sos]) -> Vec<Biquad> {
     sos.iter().map(Biquad::from_sos).collect()
 }
 
+/// Causal filtering of `signal` in place by the cascade `sos`, from zero state.
+#[cfg(feature = "dynamic-range")]
+pub(crate) fn sosfilt_in_place(sos: &[Sos], signal: &mut [f64]) {
+    sosfilt_slice(&mut biquads(sos), signal);
+}
+
 /// Zero-phase forward-backward filtering of `signal` in place.
 ///
 /// - The signal is extended at both ends by odd reflection of

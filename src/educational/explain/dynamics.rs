@@ -347,8 +347,8 @@ impl Explain for LimiterConfig {
         if self.isp_limiting {
             doc.add_warning(
                 WarningLevel::Info,
-                "isp_limiting is set, but apply_limiter does not read it: no oversampled (inter-sample) peak detection is performed.",
-                "Leave headroom (e.g. a ceiling of -1 dBFS) if the output will be resampled or encoded.",
+                "isp_limiting detects true (inter-sample) peaks from a 4x oversampled detector signal, which can read a peak up to 0.7 dB low near the Nyquist frequency.",
+                "Leave some headroom below 0 dBTP if the output will be encoded.",
             );
         }
         if let Some(fs) = ctx.valid_sample_rate() {

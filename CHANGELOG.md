@@ -389,6 +389,29 @@ The librosa-compatible API is unreleased, so these are changes to the
 
 ### Fixed
 
+- **`LimiterConfig::isp_limiting` detects true peaks.** The flag was accepted but ignored. When
+  set, the limiter's peak detector reads the true (inter-sample) peak of its detector signal,
+  interpolated at 4× (12-tap Kaiser-windowed sinc phases, as in ITU-R BS.1770), instead of the
+  sample peaks: a full-scale sine at `f_s/4` sampled 45° off its peaks now reads 0 dBTP, not
+  −3 dBFS. `LimiterConfig::default()` and the `transparent`, `mastering` and `broadcast` presets
+  set it, so their output changes for material whose true peak exceeds its sample peak (high
+  frequencies, sharp edges); set `isp_limiting = false` for sample-peak detection.
+- **The `SideChainConfig` filters, pre-emphasis and mix are applied.** They were validated but
+  ignored. When `side_chain.enabled`, the compressor and limiter detector input is
+  `(1 − external_mix)·x + external_mix·s` in the `*_sidechain` methods (the main signal `x`
+  alone in the others), then a 2nd-order Butterworth high-pass at `high_pass_freq`, a
+  2nd-order Butterworth low-pass at `low_pass_freq` and a first-order high shelf of
+  `pre_emphasis_db` (unity at DC, half the gain at 2 kHz). Only the detector is filtered. Plain
+  `apply_compressor`, `apply_limiter` and `get_gain_reduction` now apply the filters when the
+  side chain is enabled. `SideChainConfig::disabled()` (the default) now sets
+  `external_mix = 1.0`, so `config.side_chain.enable()` still drives the detector from the
+  side-chain signal alone. `validate` rejects NaN filter frequencies and mixes, and a
+  pre-emphasis that is not finite or outside ±40 dB. `get_gain_reduction` validates its
+  configuration. The `dynamic-range` feature now enables `iir-filtering`.
+- **Side-chain compression and limiting accept multi-channel audio.** A mono side-chain signal
+  drives every channel of the main signal; a multi-channel one with the same channel count
+  drives them channel by channel. Other combinations are an `AudioSampleError::Parameter`
+  (multi-channel input always was).
 - **`VadMethod::Spectral` works.** It returned `AudioSampleError::Unsupported`. A frame is now
   speech when its RMS level reaches `energy_threshold_db` and at least `spectral_ratio_threshold`
   of its energy (Hann window, real FFT of length `frame_size`) lies between `speech_band_low_hz`

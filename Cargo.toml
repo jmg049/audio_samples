@@ -148,7 +148,7 @@ onset-detection = [
 decomposition = [
     "onset-detection", 
 ] # Audio decomposition operations
-dynamic-range = [] # Dynamic range compression/expansion operations
+dynamic-range = ["iir-filtering"] # Dynamic range compression/expansion operations (side-chain filters use the IIR design)
 channels = [] # Channel operations: interleave/deinterleave
 iir-filtering = [] # IIR filtering operations
 parametric-eq = ["iir-filtering", "channels"] # Parametric equalization operations

@@ -338,8 +338,9 @@ assert!(overshoot(323) >= 0.01);
 - **Threshold reference.** Thresholds are in dBFS of the *envelope*, not of individual
   samples or of loudness (LUFS).
 - **A limiter without lookahead is not a brick wall.** The start of every
-  transient passes; even with lookahead a small overshoot remains, and only
-  sample peaks are detected (`isp_limiting` is not implemented).
+  transient passes, and even with lookahead a small overshoot remains.
+  `isp_limiting` makes the detector read true (inter-sample) peaks rather
+  than sample peaks.
 - **Stereo is not linked.** Multi-channel audio is compressed per channel,
   which can shift the stereo image.
 - `get_gain_reduction` reports the detector-and-curve reduction without

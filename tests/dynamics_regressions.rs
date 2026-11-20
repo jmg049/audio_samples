@@ -168,7 +168,10 @@ fn limiter_steady_peak_db(cfg: &LimiterConfig, x: Vec<f64>, skip: usize) -> f64 
 /// settles exactly at the ceiling: 20·log10(g·1) = C.
 #[test]
 fn limiter_settles_at_ceiling_for_constant_level() {
-    let cfg = LimiterConfig::broadcast(); // hard knee, C = -1 dBFS
+    let mut cfg = LimiterConfig::broadcast(); // hard knee, C = -1 dBFS
+    // Sample-peak detection: the square's band-limited reconstruction
+    // overshoots its samples, so a true-peak detector reads more than 1.
+    cfg.isp_limiting = false;
     let square: Vec<f64> = (0..48_000)
         .map(|i| if (i / 24) % 2 == 0 { 1.0 } else { -1.0 })
         .collect();
@@ -299,4 +302,274 @@ fn attack_decay_rms_method_uses_rms_window() {
         (last - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01,
         "RMS envelope {last}, expected 0.7071"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Side chain and true-peak detection
+// ---------------------------------------------------------------------------
+
+fn rms(x: &[f64]) -> f64 {
+    (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).sqrt()
+}
+
+fn samples(a: &AudioSamples<'static, f64>) -> Vec<f64> {
+    a.as_slice().unwrap().to_vec()
+}
+
+/// A compressor with a fast attack and release, so steady tones settle within
+/// a few milliseconds, and a hard knee at −20 dBFS, ratio 10.
+fn steady_compressor() -> CompressorConfig {
+    let mut c = CompressorConfig::new();
+    c.threshold_db = -20.0;
+    c.ratio = 10.0;
+    c.attack_ms = 1.0;
+    c.release_ms = 5.0;
+    c.knee_type = KneeType::Hard;
+    c.knee_width_db = 0.0;
+    c.makeup_gain_db = 0.0;
+    c.lookahead_ms = 0.0;
+    c.detection_method = DynamicRangeMethod::Peak;
+    c
+}
+
+/// Output level in dB relative to the input over the second half of a tone.
+fn gain_db(input: &[f64], output: &[f64]) -> f64 {
+    let half = input.len() / 2;
+    db(rms(&output[half..]) / rms(&input[half..]))
+}
+
+/// The high-pass stops low frequencies from triggering gain reduction: a loud
+/// 50 Hz tone is compressed with an unfiltered side chain and passes almost
+/// unchanged with a 1 kHz high-pass (2nd order, about −52 dB at 50 Hz). A tone
+/// in the pass band is compressed either way.
+#[test]
+fn side_chain_high_pass_keeps_bass_from_triggering() {
+    let run = |freq: f64, hp: Option<f64>| {
+        let x = sine(freq, 24_000, 0.5); // −6 dBFS, 14 dB over the threshold
+        let mut cfg = steady_compressor();
+        cfg.side_chain.enable();
+        if let Some(f) = hp {
+            cfg.side_chain.set_high_pass(f);
+        }
+        let y = mono(x.clone()).apply_compressor(&cfg).unwrap();
+        gain_db(&x, &samples(&y))
+    };
+    assert!(run(50.0, None) < -10.0, "unfiltered: {}", run(50.0, None));
+    assert!(
+        run(50.0, Some(1_000.0)) > -0.1,
+        "high-passed: {}",
+        run(50.0, Some(1_000.0))
+    );
+    assert!(run(5_000.0, Some(1_000.0)) < -10.0);
+}
+
+/// The low-pass stops high frequencies from triggering gain reduction.
+#[test]
+fn side_chain_low_pass_keeps_treble_from_triggering() {
+    let run = |freq: f64, lp: Option<f64>| {
+        let x = sine(freq, 24_000, 0.5);
+        let mut cfg = steady_compressor();
+        cfg.side_chain.enable();
+        if let Some(f) = lp {
+            cfg.side_chain.set_low_pass(f);
+        }
+        let y = mono(x.clone()).apply_compressor(&cfg).unwrap();
+        gain_db(&x, &samples(&y))
+    };
+    assert!(run(10_000.0, None) < -10.0);
+    assert!(
+        run(10_000.0, Some(300.0)) > -0.1,
+        "low-passed: {}",
+        run(10_000.0, Some(300.0))
+    );
+    assert!(run(100.0, Some(300.0)) < -10.0);
+}
+
+/// Pre-emphasis raises the detector level of high frequencies by up to
+/// `pre_emphasis_db` and leaves low frequencies alone. The shelf gives about
+/// +11.6 dB at 15 kHz for +12 dB, so a 15 kHz tone at −24 dBFS (under the
+/// −20 dBFS threshold) is reduced about as much as one at −12 dBFS without
+/// pre-emphasis; a 100 Hz tone at −24 dBFS is not reduced; and −12 dB of
+/// pre-emphasis takes the −12 dBFS tone under the threshold.
+#[test]
+fn side_chain_pre_emphasis_weights_high_frequencies() {
+    let run = |freq: f64, amp_db: f64, pre: f64| {
+        let x = sine(freq, 24_000, 10f64.powf(amp_db / 20.0));
+        let mut cfg = steady_compressor();
+        cfg.side_chain.enable();
+        cfg.side_chain.pre_emphasis_db = pre;
+        let y = mono(x.clone()).apply_compressor(&cfg).unwrap();
+        gain_db(&x, &samples(&y))
+    };
+    assert_eq!(run(15_000.0, -24.0, 0.0), 0.0);
+    let loud = run(15_000.0, -12.0, 0.0);
+    assert!(loud < -4.5, "no pre-emphasis at -12 dBFS: {loud}");
+    let boosted = run(15_000.0, -24.0, 12.0);
+    assert!(
+        (boosted - loud).abs() < 0.5,
+        "boosted {boosted}, loud {loud}"
+    );
+    assert_eq!(run(100.0, -24.0, 12.0), 0.0);
+    assert_eq!(run(15_000.0, -12.0, -12.0), 0.0);
+}
+
+/// `external_mix` blends the main and the side-chain signal in the detector:
+/// 1 ducks a quiet main signal under a loud side-chain signal, 0 detects on
+/// the main signal alone (the same as the plain compressor), and 0.5 reduces
+/// less than 1.
+#[test]
+fn side_chain_external_mix_blends_detector_sources() {
+    let main = sine(440.0, 24_000, 0.05); // −26 dBFS, under the threshold
+    let key = sine(1_000.0, 24_000, 0.9); // loud key signal
+    let run = |mix: f64| {
+        let mut cfg = steady_compressor();
+        cfg.side_chain.enable();
+        cfg.side_chain.external_mix = mix;
+        let y = mono(main.clone())
+            .apply_compressor_sidechain(&cfg, &mono(key.clone()))
+            .unwrap();
+        gain_db(&main, &samples(&y))
+    };
+    let full = run(1.0);
+    let half = run(0.5);
+    assert!(full < -10.0, "mix 1: {full}");
+    assert!(half < -3.0 && half > full, "mix 0.5: {half}, mix 1: {full}");
+    assert_eq!(run(0.0), 0.0);
+    // Mix 0 is the plain compressor with the side chain's filters.
+    let mut cfg = steady_compressor();
+    cfg.side_chain.enable();
+    cfg.side_chain.external_mix = 0.0;
+    let loud = sine(440.0, 24_000, 0.5);
+    let a = mono(loud.clone())
+        .apply_compressor_sidechain(&cfg, &mono(key.clone()))
+        .unwrap();
+    let b = mono(loud).apply_compressor(&cfg).unwrap();
+    assert_eq!(samples(&a), samples(&b));
+    // The default mix of an enabled side chain is the external signal alone.
+    assert_eq!(CompressorConfig::new().side_chain.external_mix, 1.0);
+}
+
+/// A mono side-chain signal ducks every channel of a stereo signal; a stereo
+/// one drives the channels one by one; other channel counts are an error.
+#[test]
+fn side_chain_channel_combinations() {
+    let n = 24_000;
+    let quiet = sine(440.0, n, 0.05);
+    let key = sine(1_000.0, n, 0.9);
+    let mut stereo = ndarray::Array2::<f64>::zeros((2, n));
+    for (i, v) in quiet.iter().enumerate() {
+        stereo[[0, i]] = *v;
+        stereo[[1, i]] = *v;
+    }
+    let main = AudioSamples::new_multi_channel(stereo.clone(), sample_rate!(48000)).unwrap();
+    let mut cfg = steady_compressor();
+    cfg.side_chain.enable();
+
+    let out = main
+        .apply_compressor_sidechain(&cfg, &mono(key.clone()))
+        .unwrap();
+    for c in 0..2 {
+        let row: Vec<f64> = out.as_multi_channel().unwrap().as_view().row(c).to_vec();
+        assert!(gain_db(&quiet, &row) < -10.0, "channel {c}");
+    }
+
+    // Key on the left only: the left channel is ducked, the right is not.
+    let mut keys = ndarray::Array2::<f64>::zeros((2, n));
+    for (i, v) in key.iter().enumerate() {
+        keys[[0, i]] = *v;
+    }
+    let keys = AudioSamples::new_multi_channel(keys, sample_rate!(48000)).unwrap();
+    let out = main.apply_compressor_sidechain(&cfg, &keys).unwrap();
+    let rows = out.as_multi_channel().unwrap().as_view();
+    assert!(gain_db(&quiet, &rows.row(0).to_vec()) < -10.0);
+    assert_eq!(gain_db(&quiet, &rows.row(1).to_vec()), 0.0);
+
+    let three =
+        AudioSamples::new_multi_channel(ndarray::Array2::<f64>::zeros((3, n)), sample_rate!(48000))
+            .unwrap();
+    assert!(main.apply_compressor_sidechain(&cfg, &three).is_err());
+    assert!(mono(quiet).apply_compressor_sidechain(&cfg, &keys).is_err());
+}
+
+/// True-peak limiting: a full-scale sine at f_s/4 sampled 45° off its peaks has
+/// sample peaks at −3.01 dBFS but a true peak of 0 dBTP. With a −1 dB ceiling,
+/// sample-peak detection leaves it unchanged; true-peak detection brings the
+/// true peak down to the ceiling (the samples to about −4 dBFS).
+#[test]
+fn isp_limiting_limits_inter_sample_peaks() {
+    let n = 24_000;
+    let x: Vec<f64> = (0..n)
+        .map(|i| (PI / 2.0 * i as f64 + PI / 4.0).sin())
+        .collect();
+    let mut cfg = LimiterConfig::default();
+    cfg.ceiling_db = -1.0;
+    cfg.knee_type = KneeType::Hard;
+    cfg.knee_width_db = 0.0;
+    cfg.attack_ms = 0.1;
+    cfg.release_ms = 50.0;
+    cfg.lookahead_ms = 2.0;
+    cfg.detection_method = DynamicRangeMethod::Peak;
+
+    cfg.isp_limiting = false;
+    let sample_peak = samples(&mono(x.clone()).apply_limiter(&cfg).unwrap());
+    assert_eq!(sample_peak, x);
+
+    cfg.isp_limiting = true;
+    let y = samples(&mono(x).apply_limiter(&cfg).unwrap());
+    let steady = &y[n / 2..];
+    // An f_s/4 sine's true peak is √2 times its sample peak.
+    let true_peak_db = db(peak(steady) * std::f64::consts::SQRT_2);
+    assert!(
+        (true_peak_db - cfg.ceiling_db).abs() < 0.1,
+        "true peak {true_peak_db} dBTP, ceiling {}",
+        cfg.ceiling_db
+    );
+}
+
+/// With true-peak detection the side-chain limiter reads the true peaks of the
+/// side-chain signal.
+#[test]
+fn isp_limiting_reads_the_side_chain_signal() {
+    let n = 24_000;
+    let key: Vec<f64> = (0..n)
+        .map(|i| (PI / 2.0 * i as f64 + PI / 4.0).sin())
+        .collect();
+    let main = sine(440.0, n, 0.5);
+    let mut cfg = LimiterConfig::default();
+    cfg.ceiling_db = -2.0;
+    cfg.knee_type = KneeType::Hard;
+    cfg.knee_width_db = 0.0;
+    cfg.side_chain.enable();
+    cfg.isp_limiting = false;
+    // Key sample peaks at −3 dBFS: under the ceiling, no reduction.
+    let a = mono(main.clone())
+        .apply_limiter_sidechain(&cfg, &mono(key.clone()))
+        .unwrap();
+    assert_eq!(samples(&a), main);
+    cfg.isp_limiting = true;
+    // Key true peak 0 dBTP: 2 dB over the ceiling.
+    let b = mono(main.clone())
+        .apply_limiter_sidechain(&cfg, &mono(key))
+        .unwrap();
+    let g = gain_db(&main, &samples(&b));
+    assert!((g + 2.0).abs() < 0.1, "gain {g} dB");
+}
+
+/// Side-chain parameters are validated: NaN frequencies and mixes, and
+/// pre-emphasis outside ±40 dB, are rejected.
+#[test]
+fn side_chain_validation() {
+    let x = mono(sine(440.0, 4_800, 0.5));
+    let bad = |edit: &dyn Fn(&mut CompressorConfig)| {
+        let mut cfg = steady_compressor();
+        cfg.side_chain.enable();
+        edit(&mut cfg);
+        x.apply_compressor(&cfg).is_err()
+    };
+    assert!(bad(&|c| c.side_chain.high_pass_freq = Some(f64::NAN)));
+    assert!(bad(&|c| c.side_chain.low_pass_freq = Some(24_000.0)));
+    assert!(bad(&|c| c.side_chain.external_mix = f64::NAN));
+    assert!(bad(&|c| c.side_chain.pre_emphasis_db = 41.0));
+    assert!(bad(&|c| c.side_chain.pre_emphasis_db = f64::INFINITY));
+    assert!(!bad(&|c| c.side_chain.pre_emphasis_db = -40.0));
 }

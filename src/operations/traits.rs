@@ -1054,8 +1054,9 @@ where
     /// (e.g. `hop_size > frame_size` or invalid ZCR bounds), or if `pad_end` is
     /// `false` and the signal is shorter than `frame_size` (no complete frame).
     /// Returns [crate::AudioSampleError::Layout] if the audio array is non-contiguous.
-    /// Returns [crate::AudioSampleError::Unsupported] if `config.method` is
-    /// `VadMethod::Spectral` (not yet implemented).
+    /// With `VadMethod::Spectral`, returns [crate::AudioSampleError::Parameter] if
+    /// `config.speech_band_high_hz` is above the Nyquist frequency or the band
+    /// contains no FFT bin at `config.frame_size`.
     ///
     /// # Example
     ///
@@ -4623,6 +4624,8 @@ where
     /// `lookahead_ms > 0` gain reduction starts up to `lookahead_ms` before a peak; the
     /// delay is compensated, so the output stays time-aligned with the input.
     /// Multi-channel audio is compressed independently per channel (no stereo linking).
+    /// With `side_chain.enabled` the detector input passes through the side-chain filters
+    /// of [`SideChainConfig`](crate::operations::types::SideChainConfig).
     /// The formulas are in the [`dynamic_range`](crate::operations::dynamic_range)
     /// module documentation.
     ///
@@ -4677,7 +4680,9 @@ where
     /// applied, so gain reduction begins before peaks arrive; the delay is compensated.
     /// This is not a brick-wall limiter: the ceiling is exact only once the envelope has
     /// settled, and transients shorter than a few attack time constants can exceed it.
-    /// Only sample peaks are detected (`isp_limiting` currently has no effect).
+    /// With `isp_limiting` the peak detector reads true (inter-sample) peaks of a 4×
+    /// oversampled copy of the detector signal instead of sample peaks. With
+    /// `side_chain.enabled` the detector input passes through the side-chain filters.
     /// Multi-channel audio is limited independently per channel. See the
     /// [`dynamic_range`](crate::operations::dynamic_range) module documentation.
     ///
@@ -4730,12 +4735,15 @@ where
     /// the main audio, allowing one signal to control the dynamics of another. A common
     /// use case is ducking: a voice track causes background music to decrease in level
     /// whenever speech is present. Lookahead and latency compensation work as in
-    /// [`apply_compressor_in_place`](Self::apply_compressor_in_place). The filter
-    /// settings in `config.side_chain` are not applied: the side-chain signal drives the
-    /// detector unfiltered.
+    /// [`apply_compressor_in_place`](Self::apply_compressor_in_place).
     ///
-    /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
-    /// combinations return an error.
+    /// The detector input is `(1 − m)·x + m·s`, the main signal `x` and the side-chain
+    /// signal `s` mixed by `m = config.side_chain.external_mix` (1 by default: the
+    /// side-chain signal alone), then passed through the side-chain filters
+    /// (`high_pass_freq`, `low_pass_freq`, `pre_emphasis_db`; see
+    /// [`SideChainConfig`](crate::operations::types::SideChainConfig)). A mono
+    /// side-chain signal drives every channel of the main signal; a multi-channel one
+    /// must have as many channels, and drives them channel by channel.
     ///
     /// # Arguments
     ///
@@ -4751,10 +4759,10 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if `config` fails validation.
     /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
-    ///   different lengths.
-    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
-    ///   supported).
+    ///   different lengths, or the sidechain signal is multi-channel with a different
+    ///   channel count.
     ///
     /// # Example
     ///
@@ -4802,13 +4810,13 @@ where
     /// Applies limiting driven by an external sidechain signal.
     ///
     /// The gain reduction ceiling is enforced based on the level of `sidechain_signal`
-    /// rather than the main audio. Useful for frequency-selective limiting where a
-    /// filtered copy of the signal (filtered by the caller) controls gain reduction.
-    /// Lookahead works as in [`apply_limiter_in_place`](Self::apply_limiter_in_place).
-    /// The filter settings in `config.side_chain` are not applied.
-    ///
-    /// Only mono-to-mono sidechain processing is currently supported. Multi-channel
-    /// combinations return an error.
+    /// rather than the main audio. Useful for frequency-selective limiting, where a
+    /// filtered copy of the signal controls gain reduction.
+    /// Lookahead and `isp_limiting` work as in
+    /// [`apply_limiter_in_place`](Self::apply_limiter_in_place). The detector input is
+    /// mixed and filtered as in
+    /// [`apply_compressor_sidechain_in_place`](Self::apply_compressor_sidechain_in_place),
+    /// and the same channel combinations are accepted.
     ///
     /// # Arguments
     ///
@@ -4824,10 +4832,10 @@ where
     /// # Errors
     ///
     /// - [crate::AudioSampleError::Parameter] if sidechain is not enabled in `config`.
+    /// - [crate::AudioSampleError::Parameter] if `config` fails validation.
     /// - [crate::AudioSampleError::Parameter] if the main and sidechain signals have
-    ///   different lengths.
-    /// - [crate::AudioSampleError::Parameter] if either signal is multi-channel (not yet
-    ///   supported).
+    ///   different lengths, or the sidechain signal is multi-channel with a different
+    ///   channel count.
     ///
     /// # Example
     ///
@@ -4927,7 +4935,9 @@ where
     ///
     /// Passes the audio through the envelope follower and compression gain calculation,
     /// collecting the gain reduction (in dB) at every sample without modifying the
-    /// signal. For multi-channel audio, only the first channel is analysed.
+    /// signal. For multi-channel audio, only the first channel is analysed. With
+    /// `config.side_chain.enabled` the detector input passes through the side-chain
+    /// filters, as in `apply_compressor`.
     ///
     /// Useful for metering, visualising, and analysing compressor activity.
     ///

@@ -833,8 +833,9 @@ pub(crate) fn explain_text_limiter<T: StandardSample>(
          low-frequency waveforms can exceed it, so this is not a brick-wall limiter and \
          |y[n]| \u{2264} c is not guaranteed. `lookahead_ms` works as in the compressor (the gain \
          reduction is max-held over the lookahead window, with the delay compensated offline), which \
-         reduces but does not remove overshoot. `isp_limiting` is not implemented and has no \
-         effect.\n\
+         reduces but does not remove overshoot. With `isp_limiting` the detector reads true \
+         (inter-sample) peaks from a 4\u{00d7} oversampled copy of the signal instead of sample \
+         peaks.\n\
          \n\
          Peak amplitude:  {peak_before:.4}  \u{2192}  {peak_after:.4}  ({peak_db} after)",
         header("Limiter", latex)
