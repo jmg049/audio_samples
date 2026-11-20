@@ -4,3 +4,10 @@ rustc-wrapper = ""
 # Lint levels live in the portable `[lints]` table in Cargo.toml (edition 2024),
 # not here: rustflags only apply to local builds in this checkout and would also
 # leak `clippy::` lint names to plain `rustc` as noise.
+
+# `cargo docs` builds and opens the documentation with every feature that builds
+# from the local registry cache. Plain `cargo doc` documents only the default
+# features. `--all-features` (the docs.rs set) also needs `static-plots` and
+# `html_view`, whose dependencies are not always cached.
+[alias]
+docs = "doc --no-deps --open --features full,educational,simd,python"
