@@ -186,8 +186,6 @@ pub fn detect_fundamental_frequency<T>(audio: &AudioSamples<T>) -> AudioSampleRe
 where
     T: StandardSample,
 {
-    // error if audio is empty
-    // if audio is empty, you are doing something wrong
     let audio_f64 = audio.as_f64();
 
     // Use the first channel for analysis
@@ -964,10 +962,8 @@ mod tests {
         assert!(dynamic_range > 0.0);
     }
 
-    // detect_dynamic_range must use sqrt(mean(x^2)), not sqrt(mean(x)). For
-    // zero-mean audio the latter is ~0 (giving a wrong/infinite dynamic range)
-    // and NaN when the sample sum is negative. A sine of amplitude A has
-    // RMS = A/sqrt(2).
+    // detect_dynamic_range computes the RMS as sqrt(mean(x^2)). A sine of
+    // amplitude A has RMS = A/sqrt(2).
     #[test]
     fn test_detect_dynamic_range_rms_correct_and_finite() {
         let sr = 44100u32;
@@ -997,9 +993,8 @@ mod tests {
         assert!(dynamic_range > 0.0);
     }
 
-    // The buggy fold(acc + x) summed raw samples; for a signal whose sample
-    // sum is negative, sqrt of a negative number is NaN. The mean-of-squares
-    // form is always non-negative, so the result must be finite.
+    // The mean of squares is non-negative, so the RMS stays finite for a
+    // signal whose sample sum is negative.
     #[test]
     fn test_detect_dynamic_range_negative_sum_not_nan() {
         // Sample sum is clearly negative.

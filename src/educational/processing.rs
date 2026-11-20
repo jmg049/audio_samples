@@ -452,9 +452,8 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
             "{}FIR (finite impulse response) filtering convolves each channel with the M coefficients \
              h[0], ..., h[M\u{2212}1]: every output sample is a weighted sum of M consecutive input \
              samples. Only the fully overlapping (\"valid\") part of the convolution is returned, so an \
-             N-sample input gives N\u{2212}M+1 output samples, the same as numpy.convolve(x, h, \
-             mode='valid'). Output index i corresponds to input time i+M\u{2212}1; the result is not \
-             delay-compensated. Long filters (160 taps or more, with the `transforms` feature) are \
+             N-sample input gives N\u{2212}M+1 output samples. Output index i corresponds to input \
+             time i+M\u{2212}1; the result is not delay-compensated. Long filters (160 taps or more, with the `transforms` feature) are \
              computed by FFT convolution with the same result.\n\
              \n\
              FIR filters have no feedback, so they are always stable. Their phase is linear (a constant \
@@ -492,8 +491,8 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
                 "\n\nImplementation note: the formula above is the intended definition, but this \
                  build's `mu_compress` does not match it exactly. With \u{03bc} = 255 it maps 0 to \
                  {c0:.4} (the formula gives 0) and 0.5 to {c_half:.4} (the formula gives {:.4}); the \
-                 largest deviation on a probe of [0, 1] is {dev:.4}. This is a known bug that is being \
-                 fixed upstream. Until then, do not compare its output numerically with the formula.",
+                 largest deviation on a probe of [0, 1] is {dev:.4}. This is a known bug: do not compare \
+                 its output numerically with the formula.",
                 mu_law_standard(0.5, 255.0)
             ),
             _ => String::new(),
@@ -523,9 +522,9 @@ impl<T: StandardSample> AudioProcessingExplainText for AudioSamples<'static, T> 
         let caveat = match mu_law_probe() {
             Some((_, _, dev, round_trip)) if dev > 1e-9 => format!(
                 "\n\nImplementation note: `mu_expand` implements this formula, but this build's \
-                 `mu_compress` deviates from the standard compression curve (a known bug being fixed \
-                 upstream), so expanding a signal compressed by this library does not give back the \
-                 original: with \u{03bc} = 255, 0.5 comes back as {round_trip:.4}."
+                 `mu_compress` deviates from the standard compression curve (a known bug), so \
+                 expanding a signal compressed by this library does not give back the original: \
+                 with \u{03bc} = 255, 0.5 comes back as {round_trip:.4}."
             ),
             _ => String::new(),
         };
@@ -834,8 +833,8 @@ pub(crate) fn explain_text_limiter<T: StandardSample>(
          low-frequency waveforms can exceed it, so this is not a brick-wall limiter and \
          |y[n]| \u{2264} c is not guaranteed. `lookahead_ms` works as in the compressor (the gain \
          reduction is max-held over the lookahead window, with the delay compensated offline), which \
-         reduces but does not remove overshoot. `isp_limiting` is not implemented and currently has \
-         no effect.\n\
+         reduces but does not remove overshoot. `isp_limiting` is not implemented and has no \
+         effect.\n\
          \n\
          Peak amplitude:  {peak_before:.4}  \u{2192}  {peak_after:.4}  ({peak_db} after)",
         header("Limiter", latex)

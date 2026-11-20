@@ -333,11 +333,6 @@
 //! Contributions are welcome. Please open an issue or pull request on
 //! [GitHub](https://github.com/jmg049/audio_samples).
 
-// General todos in audio_samples:
-// - Define / decide on a policy for parallel processing
-// - Improve the error system, it has breadth currently, but not depth or aethetics. Rust set a new standard for error handling (i.e. nice errors that tell you exactly what went wrong, where and how to possible fix things.) which other libraries in other languages have tried to emulate.
-// - Better constants and better use of them -- e.g. the LEFT, RIGHT and SUPPORTED_DTYPES are rarely used
-
 /// Creates a `NonZeroUsize` from a compile-time constant with zero-check.
 ///
 /// This macro creates a `NonZeroUsize` with a compile-time assertion that the value is

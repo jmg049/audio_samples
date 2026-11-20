@@ -1453,12 +1453,12 @@ impl ProcessingError {
 
     /// Creates a [`ProcessingError::ExternalDependency`] error.
     ///
-    /// Use this when an external backend (e.g. the `rubato` resampler) reports a
-    /// failure. The originating error's message is captured in `reason`.
+    /// Use this when an external library the crate calls (for example an FFT
+    /// backend) reports a failure. The originating error's message is captured in `reason`.
     ///
     /// # Arguments
     ///
-    /// - `dependency` - The external dependency that failed (e.g. `"rubato"`).
+    /// - `dependency` - The external dependency that failed (e.g. `"rustfft"`).
     /// - `operation` - The operation that required the dependency.
     /// - `reason` - The failure detail (often the foreign error's message).
     ///

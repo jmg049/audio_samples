@@ -2986,8 +2986,6 @@ mod tests {
         }
     }
 
-    /// The per-thread kernel cache stays bounded however many distinct ratios
-    /// are used, and keeps recently used kernels.
     /// Fast upsampling of `f64` (and `i32`) audio interpolates in `f64`: the
     /// midpoints and quarter points of samples that differ below `f32`
     /// precision are exact.
@@ -3049,6 +3047,8 @@ mod tests {
         );
     }
 
+    /// The per-thread kernel cache stays bounded however many distinct ratios
+    /// are used, and keeps recently used kernels.
     #[test]
     fn test_kernel_cache_is_bounded_lru() {
         let len = || KERNEL_CACHE.with(|c| c.borrow().len());

@@ -3,7 +3,7 @@
 //! ## What
 //!
 //! Implements one encode/decode cycle for a single Opus CELT audio frame.
-//! Each frame runs the full existing perceptual codec pipeline from
+//! Each frame runs the full perceptual codec pipeline from
 //! [`crate::codecs::perceptual`]:
 //!
 //! 1. MDCT analysis (window size = frame length).

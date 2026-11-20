@@ -1017,7 +1017,7 @@ fn four_step_for<F: RsFloat>() -> bool {
 
 /// Modelled cost of one transform of `s` points: `s log s`, more per point
 /// for transforms that outgrow the L1 cache, and a little more again for
-/// those that outgrow the L2 cache (measured on 2^15 to 2^18 points).
+/// those that outgrow the L2 cache.
 fn fft_cost(s: usize) -> f64 {
     let lg = (s as f64).log2();
     s as f64 * lg * (1.0 + 0.2 * (lg - 11.0).clamp(0.0, 3.0) + 0.1 * (lg - 14.0).max(0.0))
@@ -1149,9 +1149,9 @@ impl<F: RsFloat> FftStage<F> {
                 pool: std::sync::Mutex::new(Vec::new()),
             };
         }
-        // f64 only: there the size-n transforms cost ~2.5x the size-n/2 ones
-        // (L1 cache), so two half-size transforms per block win; in f32 the
-        // ratio is ~2.2 and the extra spectrum pass eats the gain.
+        // f64 only: a size-n transform that leaves the L1 cache costs well
+        // over twice a size-n/2 one, so two half-size transforms per block
+        // win; in f32 the extra spectrum pass outweighs the gain.
         if up == 1 && down == 1 && std::mem::size_of::<F>() == 8 {
             // Polyphase FIR: with x_e[k] = x[2k], x_o[k] = x[2k + 1],
             // g_e[e] = g[2e], g_o[e] = g[2e + 1], g_o'[e] = g[2e - 1]:
@@ -1507,9 +1507,9 @@ struct PairBufs<'a, F> {
 }
 
 /// One allocation holding the complex buffers of [`PairBufs`], each
-/// starting on a 64-byte (cache-line) boundary. With separate vectors, which start wherever
-/// the allocator puts them, the conversion runs 5-8 % slower (16 kHz to
-/// 22.05 kHz and 22.05 kHz to 16 kHz by ratio, `f64`).
+/// starting on a 64-byte (cache-line) boundary. Separate vectors start
+/// wherever the allocator puts them, often part-way into a cache line, so
+/// that many of the transforms' 32-byte loads and stores straddle two lines.
 ///
 /// The allocation is taken from the stage's pool when it is free and given
 /// back when the arena is dropped, so that repeated calls do not allocate
@@ -2027,9 +2027,9 @@ impl<F: RsFloat> DftStage<F> {
 
 /// Work buffers of [`DftStage`]: one allocation holding `z`, `zf`, `band`,
 /// `w`, `y` and `scratch`, each starting on a 64-byte (cache-line)
-/// boundary. With separate vectors, which start wherever the allocator puts
-/// them, a third of the transforms' 32-byte loads and stores can straddle
-/// two cache lines, and 22.05 kHz to 8 kHz in `f64` runs up to 25 % slower.
+/// boundary. Separate vectors start wherever the allocator puts them, and
+/// then up to a third of the transforms' 32-byte loads and stores straddle
+/// two cache lines.
 ///
 /// Every buffer is written before it is read, except `band` above its
 /// first `n1 / 2` bins, which nothing writes: it stays zero when the
@@ -2071,8 +2071,8 @@ impl<F: RsFloat> DftBufs<F> {
         let size = std::mem::size_of::<Complex<F>>();
         // Elements per cache line.
         let line = 64 / size;
-        // Two cache lines between buffers: with none, 16 kHz to 22.05 kHz in
-        // `f64` runs 2 % slower on efficiency cores.
+        // Each buffer gets up to one line of alignment padding plus two spare
+        // cache lines before the next one starts.
         let total: usize = lens.iter().map(|&l| l + 3 * line).sum();
         let mem = if mem.len() == total {
             mem
@@ -2417,8 +2417,8 @@ impl<F: RsFloat> Interp<F> {
         }
         // Tables larger than the L2 cache come from further out: with
         // `prefetch` (performance cores) their rows are fetched a few outputs
-        // ahead, as the prefetchers stop at each page boundary; efficiency
-        // cores were slower with the extra instructions.
+        // ahead, as the prefetchers stop at each page boundary; on efficiency
+        // cores the extra instructions cost more than they save.
         let ahead = prefetch.then_some(PREFETCH_ROWS);
         // Four outputs at a time while all four windows lie in `buf`.
         while j + 4 <= out.len() && base + offsets[q + 3] as i64 <= s_end {

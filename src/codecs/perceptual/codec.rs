@@ -158,7 +158,7 @@ pub struct PerceptualCodec {
     pub band_layout: BandLayout,
     /// Psychoacoustic masking model configuration.
     pub config: PsychoacousticConfig,
-    /// Requested MDCT window. Currently ignored: the MDCT always uses the sine
+    /// Requested MDCT window. Ignored: the MDCT always uses the sine
     /// (Princen-Bradley) window so that reconstruction is exact.
     pub window: WindowType,
     /// Total bit budget to distribute across all bands per encode call.

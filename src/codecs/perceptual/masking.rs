@@ -303,9 +303,7 @@ pub fn compute_band_metrics(
             let weight = weights[i];
             let importance = weight * smr.max(0.0);
             // The masking threshold IS the quantisation-noise budget: noise kept
-            // at or below it is inaudible. (The previous
-            // `masking_threshold - max(SMR, 0)` expanded to `2·threshold -
-            // energy`, which is dimensionally inconsistent.)
+            // at or below it is inaudible.
             let allowed_noise = masking_threshold;
             BandMetric::new(
                 bands[i].clone(),

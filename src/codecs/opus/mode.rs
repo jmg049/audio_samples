@@ -39,7 +39,7 @@ pub enum OpusMode {
     /// CELT wideband audio codec: MDCT with psychoacoustic bit allocation.
     ///
     /// Best suited for fullband music, mixed content, and signals that resist
-    /// LP prediction (e.g. white noise). Reuses the existing
+    /// LP prediction (e.g. white noise). Uses the
     /// [`crate::codecs::perceptual`] pipeline.
     Celt,
 

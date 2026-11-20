@@ -23,10 +23,10 @@
 //!
 //! ## Design
 //!
-//! - **CELT** reuses the existing [`crate::codecs::perceptual`] pipeline:
+//! - **CELT** uses the [`crate::codecs::perceptual`] pipeline:
 //!   MDCT → psychoacoustic masking → bit allocation → scalar quantisation.
 //!
-//! - **SILK** uses new LPC primitives in [`lpc`](crate::codecs::opus::lpc) with cross-frame state and a
+//! - **SILK** uses the LPC primitives in [`lpc`](crate::codecs::opus::lpc) with cross-frame state and a
 //!   single-tap long-term predictor (LTP).
 //!
 //! - **Hybrid** splits the signal at 8 kHz via a first-order IIR crossover

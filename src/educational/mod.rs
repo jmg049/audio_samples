@@ -358,7 +358,7 @@ fn parse_explanation_text(text: &str) -> (Option<String>, String, String) {
             String::new()
         }
     } else {
-        // Fallback: old format - unicode art before the first blank line.
+        // Fallback: a formula given as plain text art before the first blank line.
         if let Some(sep) = remaining.find("\n\n") {
             let art = html_escape(&remaining[..sep]);
             remaining = &remaining[sep + 2..];
@@ -987,7 +987,7 @@ mod tests {
         .expect("valid mono buffer")
     }
 
-    // ── Each new explanation is non-empty and mentions its key concept ─────────
+    // ── Each dispatched explanation is non-empty and mentions its key concept ──
 
     #[test]
     fn compressor_explanation_mentions_threshold_and_ratio() {
@@ -1037,10 +1037,10 @@ mod tests {
         assert!(explain_text_for_op("Nonexistent", &a, &a).is_none());
     }
 
-    // ── Newly wired ops resolve to their specific method, not the fallback ─────
+    // ── Dispatched ops resolve to their specific method, not the fallback ──────
 
     #[test]
-    fn newly_wired_ops_do_not_fall_back_to_generic_operation() {
+    fn dispatched_ops_do_not_fall_back_to_generic_operation() {
         for (name, method) in [
             ("Compressor", "apply_compressor"),
             ("Limiter", "apply_limiter"),
@@ -1290,10 +1290,7 @@ mod tests {
         assert!(rs.contains("70 dB"), "{rs}");
         assert!(rs.contains("no delay"), "{rs}");
         assert!(rs.contains("time-aligned"), "{rs}");
-        assert!(
-            !rs.contains("rubato") && !rs.contains("no anti-aliasing"),
-            "{rs}"
-        );
+        assert!(!rs.contains("no anti-aliasing"), "{rs}");
         assert!(!rs.contains("linear interpolation) is fast but rolls off"));
         let b = a.clip(-0.5, 0.5).unwrap();
         let clip = Edu::explain_text_clip(&a, &b);

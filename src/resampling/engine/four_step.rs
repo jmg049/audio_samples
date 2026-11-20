@@ -15,9 +15,9 @@
 //! fall into the same cache sets when `m` is a multiple of 256.
 //!
 //! The `m`-point transforms are small enough to stay in the L1 cache with
-//! their scratch, which the single `n`-point transform is not: on the
-//! efficiency cores of a hybrid x86-64 CPU, `f64` transforms of 1024 to 4096
-//! points take 10-20 % less time this way.
+//! their scratch, which the single `n`-point transform is not. That matters
+//! most for `f64` transforms of 1024 to 4096 points on cores with small
+//! caches, such as the efficiency cores of hybrid x86-64 CPUs.
 
 use super::RsFloat;
 use realfft::num_complex::Complex;

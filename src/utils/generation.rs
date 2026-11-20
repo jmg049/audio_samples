@@ -736,7 +736,7 @@ where
     for i in 0..num_samples {
         let t = i as f64 / sr_f;
         let arg = two_pi * freq * t;
-        // sawtooth: 2 * ((t / (2*pi) - 1) % 1) - 1 for width=1.0
+        // Rising ramp: 2 * frac(f t) - 1, from -1 at the start of each period to +1.
         let phase = arg / two_pi;
         let frac = (phase - 1.0) % 1.0;
         // Handle negative modulo
@@ -1965,10 +1965,8 @@ mod tests {
         assert!(max_val > min_val);
     }
 
-    // compound_tone must produce a tone at `comp.frequency`: if `.sin()` bound
-    // only to `t`, the result would be amplitude*2pi*f*sin(t). A single 1000 Hz
-    // component over 1 s should cross zero ~2*f times; the mis-bound expression
-    // gives a ramped sin(t) (near DC), crossing zero only ~2 times over a second.
+    // compound_tone must produce a tone at `comp.frequency`: a single 1000 Hz
+    // component over 1 s crosses zero about 2 * f times.
     #[test]
     fn test_compound_tone_frequency_zero_crossings() {
         let freq = 1000.0;
@@ -2000,8 +1998,8 @@ mod tests {
         );
     }
 
-    // The seeded branch of brown_noise must return a full buffer (not a single
-    // sample), be deterministic for a fixed seed, and differ across seeds.
+    // The seeded branch of brown_noise must return one sample per sample period
+    // of the duration, be deterministic for a fixed seed, and differ across seeds.
     #[test]
     #[cfg(feature = "random-generation")]
     fn test_brown_noise_seeded_length_and_determinism() {
@@ -2013,7 +2011,7 @@ mod tests {
         let b = brown_noise::<f64>(dur, sr, 0.02, 0.5, Some(42));
         let c = brown_noise::<f64>(dur, sr, 0.02, 0.5, Some(7));
 
-        // Correct length (not a 1-sample buffer).
+        // Full length.
         assert_eq!(a.samples_per_channel().get(), num_samples);
 
         let av: Vec<f64> = a.as_mono().unwrap().iter().cloned().collect();

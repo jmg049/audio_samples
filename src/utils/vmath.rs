@@ -1204,10 +1204,11 @@ mod tests {
             }
             worst = worst.max(ulps64(got, want));
         }
-        // glibc's log10 is within about 2 ulp of the exact value just around
-        // x = 1 and within 1 ulp elsewhere; every result above that differs
-        // from it was checked against 50-digit decimal arithmetic to be the
-        // correctly rounded value.
+        // The C library's log10 is within about 2 ulp of the exact value near
+        // x = 1 and within 1 ulp elsewhere, so the correctly rounded result can
+        // differ from it by up to 2 ulp. With AUDIO_SAMPLES_DUMP_LOG10 set to a
+        // path, the inputs whose results differ are written there for checking
+        // against high-precision arithmetic.
         assert!(worst <= 2, "{worst} ulp");
         for k in -22..=22 {
             let x = 10f64.powi(k);

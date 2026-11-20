@@ -404,7 +404,7 @@ impl PsychoacousticConfig {
     /// Warning: the slopes are the reverse of the psychoacoustic asymmetry (real
     /// masking spreads further upward: upper slope ≈ 10 dB/Bark, lower ≈ 25 dB/Bark),
     /// so this preset under-estimates upward masking and over-estimates downward
-    /// masking. The values are kept for compatibility.
+    /// masking.
     ///
     /// # Arguments
     /// - `perceptual_weights` - Per-band importance weights. Length must match the
@@ -422,7 +422,7 @@ impl PsychoacousticConfig {
     /// Warning: despite its name, compared with [`PsychoacousticConfig::mpeg1`] these
     /// smaller offsets and shallower slopes put the masking thresholds *higher* and
     /// spread them further, so *more* quantisation noise is allowed (lower quality,
-    /// fewer bits). The name and values are kept for compatibility.
+    /// fewer bits).
     ///
     /// # Arguments
     /// - `perceptual_weights` - Per-band importance weights.
@@ -438,7 +438,6 @@ impl PsychoacousticConfig {
     /// Warning: despite its name, compared with [`PsychoacousticConfig::mpeg1`] these
     /// larger offsets and steeper slopes put the masking thresholds *lower* and spread
     /// them less, so *less* quantisation noise is allowed (higher quality, more bits).
-    /// The name and values are kept for compatibility.
     ///
     /// # Arguments
     /// - `perceptual_weights` - Per-band importance weights.
@@ -555,9 +554,8 @@ impl PerceptualAnalysisResult {
 ///
 /// # Arguments
 /// - `signal` - The audio signal to analyse. Must be mono.
-/// - `window` - Currently **ignored**: the MDCT always uses the sine
-///   (Princen-Bradley) window so that time-domain aliasing cancels exactly. The
-///   argument is kept for API compatibility.
+/// - `window` - **Ignored**: the MDCT always uses the sine (Princen-Bradley)
+///   window so that time-domain aliasing cancels exactly.
 /// - `band_layout` - Perceptual band partitioning (see [`BandLayout::bark`],
 ///   [`BandLayout::mel`]).
 /// - `config` - Psychoacoustic model configuration. The number of perceptual

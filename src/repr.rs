@@ -2687,7 +2687,7 @@ where
                     }
                 }
 
-                // REPLACE THE VARIANT (don’t try to mutate inner binding)
+                // Replace the whole variant with an owned array.
                 m.0 = MonoRepr::Owned(ndarray::Array1::from(result));
                 Ok(())
             }
@@ -2738,7 +2738,7 @@ where
                     }
                 }
 
-                // REPLACE THE VARIANT
+                // Replace the whole variant with an owned array.
                 m.0 = MultiRepr::Owned(out);
                 Ok(())
             }
@@ -3355,7 +3355,6 @@ where
     data: AudioData<'a, T>,
     /// Sample rate in Hz (guaranteed non-zero).
     sample_rate: SampleRate,
-    // pub layout: ChannelLayout,
 }
 
 /// Formats a human-readable summary of the audio samples.
@@ -4171,7 +4170,7 @@ where
     }
 
     // ========================
-    // Sample and channel slicing methods for Python bindings compatibility
+    // Sample and channel slicing
     // ========================
 
     /// Slice audio by sample range, keeping all channels.
@@ -4484,78 +4483,6 @@ where
             )
         }
     }
-
-    // Convert audio samples to bytes in the specified endianness.
-    //
-    // Returns a vector of bytes representing the audio data in the requested
-    // byte order. For cross-platform compatibility and when working with
-    // audio file formats that specify endianness.
-    //
-    // # Feature Gate
-    // This method requires the `serialization` feature.
-    //
-    // # Examples
-    // ```
-    // # #[cfg(feature = "serialization")]
-    // # {
-    // use audio_samples::{AudioSamples, operations::Endianness};
-    // use ndarray::array;
-    //
-    // let audio = AudioSamples::new_mono(array![1000i16, 2000, 3000], 44100).unwrap();
-    //
-    // let native_bytes = audio.as_bytes_with_endianness(Endianness::Native);
-    // let big_endian_bytes = audio.as_bytes_with_endianness(Endianness::Big);
-    // let little_endian_bytes = audio.as_bytes_with_endianness(Endianness::Little);
-    //
-    // assert_eq!(native_bytes.len(), 6); // 3 samples × 2 bytes per i16
-    // # }
-    // ```
-    // #[cfg(feature = "serialization")]
-    //
-    // pub fn as_bytes_with_endianness(
-    //     &self,
-    //     endianness: crate::operations::Endianness,
-    // ) -> AudioSampleResult<NonEmptyByteVec> {
-    //     use crate::operations::Endianness;
-
-    //     match endianness {
-    //         Endianness::Native => self.into_bytes(),
-    //         Endianness::Big => {
-    //             let mut result = Vec::with_capacity(self.total_byte_size().get());
-
-    //             match &self.data {
-    //                 AudioData::Mono(m) => {
-    //                     for sample in m.iter() {
-    //                         result.extend_from_slice(sample.to_be_bytes().as_ref());
-    //                     }
-    //                 }
-    //                 AudioData::Multi(m) => {
-    //                     for sample in m.iter() {
-    //                         result.extend_from_slice(sample.to_be_bytes().as_ref());
-    //                     }
-    //                 }
-    //             }
-
-    //             NonEmptyByteVec::new(result).map_err(|_| AudioSampleError::EmptyData)
-    //         }
-    //         Endianness::Little => {
-    //             let mut result = Vec::with_capacity(self.total_byte_size().get());
-    //             match &self.data {
-    //                 AudioData::Mono(m) => {
-    //                     for sample in m.iter() {
-    //                         result.extend_from_slice(sample.to_le_bytes().as_ref());
-    //                     }
-    //                 }
-    //                 AudioData::Multi(m) => {
-    //                     for sample in m.iter() {
-    //                         result.extend_from_slice(sample.to_le_bytes().as_ref());
-    //                     }
-    //                 }
-    //             }
-    //             NonEmptyByteVec::new(result).map_err(|_| AudioSampleError::EmptyData)
-    //         }
-    //     }
-    // }
 
     /// Apply a windowed processing function to the audio data.
     ///
@@ -6156,7 +6083,7 @@ where
             )));
         }
 
-        // From now on we have guaranteed that the stereo_data does in fact have 2 channels;
+        // `stereo_data` has exactly 2 channels (checked above).
         Ok(Self(AudioSamples::new(stereo_data, sample_rate)))
     }
 

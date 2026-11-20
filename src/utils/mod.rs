@@ -95,9 +95,6 @@ pub use comparison::*;
 pub use detection::*;
 pub use generation::*;
 
-// Re-export utility modules (not individual functions)
-// Modules are already public above, no need for additional re-exports
-
 /// Converts a duration expressed in seconds into a sample count.
 ///
 /// # Arguments

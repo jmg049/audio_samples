@@ -487,9 +487,9 @@ where
             AudioData::Multi(arr) => {
                 let (channels, samples_per_channel) = arr.dim();
 
-                // Hoist a single reusable frame buffer outside the loop; clear and
-                // refill it each iteration so the callback sees identical contents
-                // to the previous per-iteration `Vec::with_capacity` allocation.
+                // One frame buffer, cleared and refilled for each frame, so the
+                // callback sees exactly the frame's samples without a per-frame
+                // allocation.
                 let mut frame = Vec::with_capacity(channels.get());
                 for frame_idx in 0..samples_per_channel.get() {
                     frame.clear();
@@ -728,11 +728,9 @@ where
                 let mut pos = 0;
                 let mut window_idx = 0;
 
-                // Hoist a single reusable interleaved window buffer outside the
-                // loop. It is fully overwritten each iteration (every element is
-                // assigned before the callback runs), so the callback sees the
-                // same contents as the previous per-iteration `vec![T::zero(); ..]`
-                // allocation.
+                // One interleaved window buffer for all windows. Every element is
+                // assigned before the callback runs, so no window sees values
+                // left from the one before.
                 let mut window_data = vec![T::zero(); window_size * rows];
 
                 while pos + window_size <= samples_per_channel.get() {
@@ -2066,7 +2064,7 @@ mod tests {
     }
 
     // window_size > signal length must yield zero windows without panicking,
-    // mirroring the WindowIterator Skip-mode underflow fix.
+    // as `WindowIterator` does in Skip mode.
     #[cfg(feature = "editing")]
     #[test]
     fn test_windows_ref_window_larger_than_signal_yields_zero() {

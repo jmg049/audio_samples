@@ -45,10 +45,10 @@ pub fn convert_f32_to_i16_simd(input: &[f32], output: &mut [i16]) -> AudioSample
 
     let chunks = input.len() / 8;
 
-    // Genuine vector path: clamp, asymmetric scale, round half away from
-    // zero, narrow.
+    // Vector path: clamp, asymmetric scale, round half away from zero,
+    // narrow.
     //
-    // Parity with the scalar `impl_float_to_int` (`traits.rs`): the scalar path
+    // Same arithmetic as the scalar `impl_float_to_int` (`traits.rs`): the scalar path
     // is `v = source.max(-1).min(1); scaled = v * (v < 0 ? 32768 : 32767);
     // trunc(v * (32767.5 - h) + h)` with `h = copysign(0.5, v)`. Here `h` is
     // selected with `select` on `v < 0` (identical except for v = -0.0, where
@@ -103,14 +103,14 @@ pub fn convert_i16_to_f32_simd(input: &[i16], output: &mut [f32]) -> AudioSample
 
     let chunks = input.len() / 8;
 
-    // Genuine vector path: asymmetric scaling with a branchless select.
+    // Vector path: asymmetric scaling with a branchless select.
     //
-    // Parity with the scalar `impl_int_to_float` (`traits.rs`):
+    // Same arithmetic as the scalar `impl_int_to_float` (`traits.rs`):
     // `if v < 0 { (v as f32) / 32768.0 } else { (v as f32) / 32767.0 }`.
-    // We compute both quotients per-lane (IEEE division is bit-identical to the
-    // scalar division) and select with the same `v < 0` predicate via `select`,
-    // so the result is bit-for-bit identical to scalar (verified across the full
-    // input range, including negative / zero / i16::MIN / i16::MAX).
+    // Both quotients are computed per lane (IEEE division gives the same bits
+    // as the scalar division) and selected with the same `v < 0` predicate, so
+    // the result equals the scalar one bit for bit over the whole input range
+    // (the tests below cover negative values, zero, i16::MIN and i16::MAX).
     let neg_div = f32x8::splat(-(i16::MIN as f32)); // 32768.0
     let pos_div = f32x8::splat(i16::MAX as f32); // 32767.0
     for i in 0..chunks {
@@ -165,7 +165,7 @@ pub fn convert_f32_to_i32_simd(input: &[f32], output: &mut [i32]) -> AudioSample
 
     let chunks = input.len() / 8;
 
-    // Genuine vector path, identical to the scalar `ConvertFrom<f32> for i32`
+    // Vector path, the same arithmetic as the scalar `ConvertFrom<f32> for i32`
     // (`traits.rs`): clamp, scale by 2^31 (both i32 endpoints round to 2^31 in
     // f32), add ±0.5 (sign of the input) only where |x| < 2^23 (larger values
     // are already integers), then truncate. `wide`'s `trunc_int` is the SATURATING
@@ -428,12 +428,8 @@ fn deinterleave_stereo_scalar<T: AudioSample>(interleaved: &[T], output: &mut [T
 ///
 /// Deinterleaving is pure data movement with no arithmetic, so there is no
 /// vector-math win here: the `wide` crate exposes no shuffle/unpack intrinsic
-/// that beats LLVM's own auto-vectorisation of the contiguous scalar copies.
-/// The previous "SIMD" code loaded a vector only to immediately `.to_array()`
-/// and scatter element-by-element - pure overhead. We therefore route to the
-/// proven scalar implementation, which is bit-identical by construction and at
-/// least as fast (DECISION RULE: route to scalar when there is no genuine
-/// vector win).
+/// that beats LLVM's own auto-vectorisation of the contiguous scalar copies,
+/// so this calls the scalar implementation, which gives the same result.
 #[cfg(feature = "simd")]
 #[inline]
 fn deinterleave_stereo_simd<T: AudioSample>(interleaved: &[T], output: &mut [T]) {
@@ -596,10 +592,8 @@ fn interleave_stereo_scalar<T: AudioSample>(planar: &[T], output: &mut [T]) {
 /// Stereo interleave under the `simd` feature.
 ///
 /// Like deinterleave, this is pure data movement; `wide` offers no interleave
-/// shuffle that beats the auto-vectorised scalar copy, and the old vector
-/// round-trip (`from([...]).to_array()` then scalar scatter) was pure overhead.
-/// Route to the proven scalar implementation - bit-identical and no slower
-/// (DECISION RULE: route to scalar when there is no genuine vector win).
+/// shuffle that beats the auto-vectorised scalar copy, so this calls the
+/// scalar implementation.
 #[cfg(feature = "simd")]
 #[inline]
 fn interleave_stereo_simd<T: AudioSample>(planar: &[T], output: &mut [T]) {
@@ -1083,7 +1077,7 @@ mod tests {
 }
 
 // =============================================================================
-// SIMD <-> SCALAR PARITY (bit-identical) TESTS
+// SIMD AGAINST SCALAR (bit-for-bit) TESTS
 // =============================================================================
 //
 // These tests assert that, with `feature = "simd"` enabled, every affected
@@ -1093,7 +1087,7 @@ mod tests {
 // differently than they TRUNCATE (e.g. x where x*MAX has fractional part
 // >= 0.5), since the conversions round half away from zero.
 #[cfg(all(test, feature = "simd"))]
-mod simd_parity_tests {
+mod simd_matches_scalar_tests {
     use super::*;
 
     /// Inline scalar reference for f32 -> i16 (mirrors `impl_float_to_int`).
@@ -1169,7 +1163,7 @@ mod simd_parity_tests {
     }
 
     #[test]
-    fn parity_f32_to_i16() {
+    fn simd_matches_scalar_f32_to_i16() {
         let input = f32_probe_inputs();
         let mut simd_out = vec![0i16; input.len()];
         convert_f32_to_i16_simd(&input, &mut simd_out).unwrap();
@@ -1187,7 +1181,7 @@ mod simd_parity_tests {
     }
 
     #[test]
-    fn parity_f32_to_i32() {
+    fn simd_matches_scalar_f32_to_i32() {
         let input = f32_probe_inputs();
         let mut simd_out = vec![0i32; input.len()];
         convert_f32_to_i32_simd(&input, &mut simd_out).unwrap();
@@ -1204,7 +1198,7 @@ mod simd_parity_tests {
     }
 
     #[test]
-    fn parity_i16_to_f32() {
+    fn simd_matches_scalar_i16_to_f32() {
         // Exhaustive over the entire i16 domain.
         let input: Vec<i16> = (i16::MIN..=i16::MAX).collect();
         let mut simd_out = vec![0.0f32; input.len()];
@@ -1227,7 +1221,7 @@ mod simd_parity_tests {
     }
 
     #[test]
-    fn parity_convert_dispatch() {
+    fn simd_matches_scalar_convert_dispatch() {
         // The high-level `convert` entry point (which dispatches to simd) must
         // match the scalar-unrolled path for the supported type pairs.
         let f32_in: Vec<f32> = f32_probe_inputs();
@@ -1259,7 +1253,7 @@ mod simd_parity_tests {
     }
 
     #[test]
-    fn parity_interleave_deinterleave_stereo() {
+    fn simd_matches_scalar_interleave_deinterleave_stereo() {
         // Lengths chosen to exercise the SIMD chunk boundary and remainder.
         for &frames in &[1usize, 3, 4, 5, 8, 9, 17, 33] {
             let n = frames * 2;
@@ -1290,7 +1284,7 @@ mod simd_parity_tests {
     }
 
     #[test]
-    fn parity_interleave_channels_entrypoint() {
+    fn simd_matches_scalar_interleave_channels_entrypoint() {
         use crate::AudioSamples;
         use crate::operations::traits::AudioChannelOps;
         use crate::sample_rate;

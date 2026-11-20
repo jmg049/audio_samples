@@ -2134,7 +2134,7 @@ pub fn mel_frequencies(n_mels: usize, fmin: f64, fmax: f64) -> Vec<f64> {
 /// - [`MelScale::Slaney`] is the scale of Malcolm Slaney's Auditory Toolbox: linear
 ///   (`f / (200/3)`) below 1 kHz and logarithmic (step `ln(6.4) / 27` per mel)
 ///   above it. It is the default.
-/// - [`MelScale::Htk`] is the HTK formula `2595 * log10(1 + f / 700)`. The older
+/// - [`MelScale::Htk`] is the HTK formula `2595 * log10(1 + f / 700)`. The
 ///   unparameterised helpers [`hz_to_mel`], [`mel_to_hz`],
 ///   [`mel_scale`] and [`mel_frequencies`] always use this scale.
 ///
@@ -2304,7 +2304,7 @@ pub fn mel_frequencies_with_scale(
 ) -> Vec<f64> {
     let min_mel = hz_to_mel_with_scale(fmin, scale);
     let max_mel = hz_to_mel_with_scale(fmax, scale);
-    numpy_linspace(min_mel, max_mel, n_mels)
+    linspace_end_exact(min_mel, max_mel, n_mels)
         .into_iter()
         .map(|m| mel_to_hz_with_scale(m, scale))
         .collect()
@@ -2312,7 +2312,7 @@ pub fn mel_frequencies_with_scale(
 
 /// `num` evenly spaced values from `start` to `stop` inclusive: element `i` is
 /// `i * step + start` (no fused multiply-add) and the last element is `stop`.
-pub(crate) fn numpy_linspace(start: f64, stop: f64, num: usize) -> Vec<f64> {
+pub(crate) fn linspace_end_exact(start: f64, stop: f64, num: usize) -> Vec<f64> {
     match num {
         0 => Vec::new(),
         1 => vec![start],
@@ -3148,7 +3148,7 @@ mod tests {
     /// ASCII/Unicode accidentals that may cross the octave boundary, signed
     /// octaves and an optional cents suffix (rounded half to even).
     #[test]
-    fn note_to_midi_accepts_librosa_grammar() {
+    fn note_to_midi_accepts_full_note_grammar() {
         let cases: &[(&str, u8)] = &[
             ("C4", 60),
             ("c4", 60),
@@ -3220,9 +3220,8 @@ mod tests {
     }
 
     /// Below about 7.9 Hz the nearest MIDI note is negative. It is a range error,
-    /// like frequencies above G9, rather than a saturating `as u8` cast that
-    /// would label e.g. 4 Hz and 1 Hz as "C-1" with cents measured against a
-    /// different note.
+    /// like frequencies above G9, so 4 Hz and 1 Hz are not labelled "C-1" with
+    /// cents measured against a different note.
     #[test]
     fn frequency_to_note_rejects_notes_outside_midi_range() {
         for f in [1.0, 4.0, 7.9, 13_000.0, 20_000.0] {
@@ -3346,9 +3345,9 @@ mod tests {
     }
 
     #[test]
-    fn htk_mel_round_trip_regression() {
-        // HTK mel_to_hz inverts hz_to_mel: 700 * (10^(m/2595) - 1), not
-        // 700 * 10^(m/2595) - 1, which is 699 Hz too high at every frequency.
+    fn htk_mel_to_hz_inverts_hz_to_mel() {
+        // HTK mel_to_hz is 700 * (10^(m/2595) - 1), the exact inverse of
+        // hz_to_mel.
         for &f in &[0.0, 50.0, 440.0, 1000.0, 8000.0, 22050.0] {
             let back = mel_to_hz(hz_to_mel(f));
             assert!((back - f).abs() <= 1e-9 * f.max(1.0), "{f} -> {back}");
@@ -3393,17 +3392,17 @@ mod tests {
     }
 
     #[test]
-    fn numpy_linspace_matches_numpy_rounding() {
-        let v = numpy_linspace(0.0, 1.0, 11);
+    fn linspace_end_exact_rounding() {
+        let v = linspace_end_exact(0.0, 1.0, 11);
         assert_eq!(v.len(), 11);
         assert_eq!(v[3], 3.0 * 0.1); // i * step, not fused
         assert_eq!(v[10], 1.0);
-        assert_eq!(numpy_linspace(2.0, 5.0, 1), vec![2.0]);
-        assert!(numpy_linspace(2.0, 5.0, 0).is_empty());
+        assert_eq!(linspace_end_exact(2.0, 5.0, 1), vec![2.0]);
+        assert!(linspace_end_exact(2.0, 5.0, 0).is_empty());
     }
 
     #[test]
-    fn librosa_frame_conversions() {
+    fn frame_and_sample_conversion_edge_cases() {
         let hop = NonZeroUsize::new(512).unwrap();
         // Floor division, including negatives.
         assert_eq!(samples_to_frames(-1, hop, None), -1);

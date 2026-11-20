@@ -789,7 +789,7 @@ where
     let ref_f = reference.as_f64();
     let sig_f = signal.as_f64();
 
-    // For simplicity, we'll work with the first channel for mono or the average for multi-channel
+    // Mono uses its single channel; multi-channel input uses the channel average.
     let (ref_data, sig_data) = match (ref_f.as_mono(), sig_f.as_mono()) {
         (Some(ref_mono), Some(sig_mono)) => (ref_mono.to_vec(), sig_mono.to_vec()),
         (None, None) => {
