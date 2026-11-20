@@ -1063,13 +1063,9 @@ fn axis_sort_body<A: PartialOrd + Clone>(
         if let Some(first) = s.rows().into_iter().next() {
             let mut best: Vec<A> = first.to_vec();
             for (r, row) in s.rows().into_iter().enumerate().skip(1) {
-                for ((key_slot, best_value), v) in
-                    keys.iter_mut().zip(best.iter_mut()).zip(row.iter())
-                {
-                    if better(v, best_value) {
-                        *best_value = v.clone();
-                        *key_slot = r as u32;
-                    }
+                match row.as_slice() {
+                    Some(row) => track_best(&mut keys, &mut best, row.iter(), r as u32, &better),
+                    None => track_best(&mut keys, &mut best, row.iter(), r as u32, &better),
                 }
             }
         }
@@ -1097,7 +1093,15 @@ fn axis_sort_body<A: PartialOrd + Clone>(
     if axis.index() == 1 {
         for row in s.rows() {
             if let Some(slice) = row.as_slice() {
-                flat.extend(idx.iter().map(|&i| slice[i as usize].clone()));
+                // Written in place: with `push` (a capacity check per value) or
+                // `extend` (not inlined here) this loop takes up to twice as long.
+                let spare = &mut flat.spare_capacity_mut()[..idx.len()];
+                for (dst, &i) in spare.iter_mut().zip(&idx) {
+                    dst.write(slice[i as usize].clone());
+                }
+                // SAFETY: `flat` has room for the whole matrix, and the `idx.len()`
+                // values after its length were all written just above.
+                unsafe { flat.set_len(flat.len() + idx.len()) };
             } else {
                 flat.extend(idx.iter().map(|&i| row[i as usize].clone()));
             }
@@ -1110,6 +1114,24 @@ fn axis_sort_body<A: PartialOrd + Clone>(
     let sorted =
         Array2::from_shape_vec((rows, cols), flat).or_else(|e| invalid("s", e.to_string()))?;
     Ok((sorted, idx.into_iter().map(|i| i as usize).collect()))
+}
+
+/// For each column `j` of `row` (row `r` of the matrix), when `better(v, best[j])`
+/// for its value `v`: `best[j] = v` and `keys[j] = r`. Written as selects, so
+/// that the loop vectorises for numeric types.
+#[inline(always)]
+fn track_best<'a, A: PartialOrd + Clone + 'a>(
+    keys: &mut [u32],
+    best: &mut [A],
+    row: impl Iterator<Item = &'a A>,
+    r: u32,
+    better: &impl Fn(&A, &A) -> bool,
+) {
+    for ((key, best), v) in keys.iter_mut().zip(best.iter_mut()).zip(row) {
+        let take = better(v, best);
+        *key = if take { r } else { *key };
+        *best = if take { v.clone() } else { best.clone() };
+    }
 }
 
 /// Circularly shifts each column of a matrix by `factor` times its index.
