@@ -127,10 +127,10 @@ threshold window of 1024, a separation of 512) shows the effect of each: the
 length-3 median deletes every one-frame peak (0 onsets); a 1024-frame threshold window, clipped to the signal length,
 makes the threshold the global maximum minus $\delta$ (1 onset); a 512-frame
 separation, reduced to a quarter of the signal (91 frames, 1.06 s), keeps only
-3. Switching pre-emphasis off changes nothing on this signal (8). The fields
-`threshold`, `min_onset_interval_secs` and `pre_emphasis` on
-[`OnsetDetectionConfig`](crate::operations::onset::OnsetDetectionConfig)
-itself are not read by `detect_onsets` (the explanation below says so).
+3. Switching pre-emphasis off changes nothing on this signal (8). The threshold,
+the minimum spacing and the pre-emphasis all live in `peak_picking`;
+[`OnsetDetectionConfig`](crate::operations::onset::OnsetDetectionConfig) itself
+holds the CQT, the hop and the median-based zeroing of the ODF.
 
 ## How it works
 
@@ -314,12 +314,10 @@ assert!((doc.quantity("Time resolution").unwrap().value - 11.61).abs() < 0.005);
 assert!((doc.quantity("Minimum peak separation").unwrap().value - 34.83).abs() < 0.005);
 assert_eq!(doc.quantity("CQT bins").unwrap().value, 144.0);
 assert!(doc.has_warning_containing("counts onset-function frames"));
-assert!(doc.has_warning_containing("not read by detect_onsets"));
 ```
 
-The explanation converts every frame count into milliseconds, flags the
-frames-versus-samples confusion of `min_peak_separation`, and lists the
-configuration fields that `detect_onsets` ignores.
+The explanation converts every frame count into milliseconds and flags the
+frames-versus-samples confusion of `min_peak_separation`.
 
 ## Exercises
 

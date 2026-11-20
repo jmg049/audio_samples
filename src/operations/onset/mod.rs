@@ -162,9 +162,12 @@ use crate::{
 /// # Invariants
 ///
 /// - `hop_size` must be positive (enforced by NonZeroUsize)
-/// - `threshold` and `min_onset_interval_secs` should be positive for meaningful detection
-/// - `pre_emphasis` is typically in range [0.0, 1.0] but not strictly enforced
-/// - `median_filter_length` must be odd for symmetric filtering (not enforced, but recommended)
+/// - `median_filter_length` must be odd when `adaptive_threshold` is set
+///
+/// The global threshold, the minimum spacing between onsets and the pre-emphasis of the
+/// detection function are set in [`peak_picking`](Self::peak_picking)
+/// ([`PeakPickingConfig::adaptive_threshold`], [`PeakPickingConfig::min_peak_separation`],
+/// [`PeakPickingConfig::pre_emphasis`]).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct OnsetDetectionConfig {
@@ -176,15 +179,6 @@ pub struct OnsetDetectionConfig {
     /// Window size in samples for CQT analysis. If `None`, auto-calculated based on the lowest
     /// frequency (4 periods for good resolution).
     pub window_size: Option<NonZeroUsize>,
-    /// Global threshold for the onset detection function. **Currently unused**: thresholding
-    /// is done by `adaptive_threshold*` and [`PeakPickingConfig::adaptive_threshold`].
-    pub threshold: f64,
-    /// Minimum time interval in seconds between consecutive onsets. **Currently unused**: the
-    /// minimum spacing is [`PeakPickingConfig::min_peak_separation`] (in frames).
-    pub min_onset_interval_secs: f64,
-    /// Pre-emphasis factor. **Currently unused**: pre-emphasis of the onset function is set by
-    /// [`PeakPickingConfig::pre_emphasis`] / `pre_emphasis_coeff`.
-    pub pre_emphasis: f64,
     /// If `true`, ODF values below `adaptive_threshold_multiplier × running median` are set to
     /// zero before peak picking (values above it are left unchanged).
     pub adaptive_threshold: bool,
@@ -212,9 +206,6 @@ impl OnsetDetectionConfig {
     /// * `cqt_params` - CQT configuration (frequency range, bins, window type)
     /// * `hop_size` - Hop size in samples between analysis frames
     /// * `window_size` - Optional window size (None = auto-calculate from lowest frequency)
-    /// * `threshold` - Global detection threshold (typical: 0.2-0.8)
-    /// * `min_onset_interval_secs` - Minimum time between onsets in seconds
-    /// * `pre_emphasis` - Pre-emphasis factor for transient highlighting (0.0-0.5)
     /// * `adaptive_threshold` - Enable adaptive thresholding via median filtering
     /// * `median_filter_length` - Median filter kernel length (odd values recommended)
     /// * `adaptive_threshold_multiplier` - Multiplier for adaptive threshold (1.0-2.0)
@@ -229,9 +220,6 @@ impl OnsetDetectionConfig {
         cqt_params: CqtParams,
         hop_size: NonZeroUsize,
         window_size: Option<NonZeroUsize>,
-        threshold: f64,
-        min_onset_interval_secs: f64,
-        pre_emphasis: f64,
         adaptive_threshold: bool,
         median_filter_length: NonZeroUsize,
         adaptive_threshold_multiplier: f64,
@@ -241,9 +229,6 @@ impl OnsetDetectionConfig {
             cqt_params,
             hop_size,
             window_size,
-            threshold,
-            min_onset_interval_secs,
-            pre_emphasis,
             adaptive_threshold,
             median_filter_length,
             adaptive_threshold_multiplier,
@@ -293,16 +278,13 @@ impl OnsetDetectionConfig {
     /// Creates a configuration optimised for percussive onset detection.
     ///
     /// Optimised for detecting drum hits, percussion, and other sharp transient events.
-    /// Uses higher threshold, shorter minimum interval, and pre-emphasis to highlight transients.
     ///
     /// # Configuration Details
     ///
     /// - CQT: Percussive preset (higher frequency resolution)
     /// - Hop size: 256 samples
-    /// - Threshold: 0.5 (high, for clean detection)
-    /// - Min interval: 30ms (short, for rapid percussion)
-    /// - Pre-emphasis: 0.3 (moderate, to highlight transients)
-    /// - Adaptive threshold: Enabled (multiplier: 2.0)
+    /// - Adaptive threshold: Enabled (3-frame median, multiplier 2.0)
+    /// - Peak picking: [`PeakPickingConfig::drums`] (minimum spacing 30 ms)
     ///
     /// # Arguments
     ///
@@ -328,9 +310,6 @@ impl OnsetDetectionConfig {
         let cqt_config = CqtParams::percussive();
         let hop_size = crate::nzu!(256);
         let window = None;
-        let threshold = 0.5;
-        let min_onset_interval = 0.03; // 30ms
-        let pre_emphasis = 0.3;
         let adaptive_threshold = true;
         let median_filter_length = crate::nzu!(3);
         let adaptive_threshold_multiplier = 2.0;
@@ -339,9 +318,6 @@ impl OnsetDetectionConfig {
             cqt_config,
             hop_size,
             window,
-            threshold,
-            min_onset_interval,
-            pre_emphasis,
             adaptive_threshold,
             median_filter_length,
             adaptive_threshold_multiplier,
@@ -352,17 +328,13 @@ impl OnsetDetectionConfig {
     /// Creates a configuration optimised for musical onset detection.
     ///
     /// Optimised for detecting note onsets in tonal musical instruments (piano, guitar, strings).
-    /// Uses moderate threshold, longer minimum interval for typical musical phrasing, and less
-    /// pre-emphasis to preserve tonal content.
     ///
     /// # Configuration Details
     ///
     /// - CQT: Musical preset (balanced frequency coverage)
     /// - Hop size: 512 samples
-    /// - Threshold: 0.25 (moderate, for sensitivity)
-    /// - Min interval: 100ms (longer, for musical phrasing)
-    /// - Pre-emphasis: 0.1 (low, to preserve tonal content)
-    /// - Adaptive threshold: Enabled (multiplier: 1.2)
+    /// - Adaptive threshold: Enabled (7-frame median, multiplier 1.2)
+    /// - Peak picking: [`PeakPickingConfig::music`] (minimum spacing 100 ms)
     ///
     /// # Arguments
     ///
@@ -388,9 +360,6 @@ impl OnsetDetectionConfig {
         let cqt_config = CqtParams::musical();
         let hop_size = crate::nzu!(512);
         let window = None;
-        let threshold = 0.25;
-        let min_onset_interval = 0.1; // 100ms
-        let pre_emphasis = 0.1;
         let adaptive_threshold = true;
         let median_filter_length = crate::nzu!(7);
         let adaptive_threshold_multiplier = 1.2;
@@ -399,9 +368,6 @@ impl OnsetDetectionConfig {
             cqt_config,
             hop_size,
             window,
-            threshold,
-            min_onset_interval,
-            pre_emphasis,
             adaptive_threshold,
             median_filter_length,
             adaptive_threshold_multiplier,
@@ -411,18 +377,14 @@ impl OnsetDetectionConfig {
 
     /// Creates a configuration optimised for speech onset detection.
     ///
-    /// Optimised for detecting word and syllable onsets in speech. Uses lower threshold to
-    /// capture subtle speech dynamics, moderate minimum interval for typical speech rate, and
-    /// minimal pre-emphasis to preserve speech clarity.
+    /// Optimised for detecting word and syllable onsets in speech.
     ///
     /// # Configuration Details
     ///
     /// - CQT: Onset detection preset (balanced frequency coverage)
     /// - Hop size: 256 samples
-    /// - Threshold: 0.2 (low, for speech dynamics)
-    /// - Min interval: 80ms (moderate, for speech rate)
-    /// - Pre-emphasis: 0.05 (minimal, for speech clarity)
-    /// - Adaptive threshold: Enabled (multiplier: 1.1)
+    /// - Adaptive threshold: Enabled (9-frame median, multiplier 1.1)
+    /// - Peak picking: [`PeakPickingConfig::speech`] (minimum spacing 80 ms)
     ///
     /// # Arguments
     ///
@@ -448,9 +410,6 @@ impl OnsetDetectionConfig {
         let cqt_config = CqtParams::onset_detection();
         let hop_size = crate::nzu!(256);
         let window = None;
-        let threshold = 0.2;
-        let min_onset_interval = 0.08; // 80ms
-        let pre_emphasis = 0.05;
         let adaptive_threshold = true;
         let median_filter_length = crate::nzu!(9);
         let adaptive_threshold_multiplier = 1.1;
@@ -459,9 +418,6 @@ impl OnsetDetectionConfig {
             cqt_config,
             hop_size,
             window,
-            threshold,
-            min_onset_interval,
-            pre_emphasis,
             adaptive_threshold,
             median_filter_length,
             adaptive_threshold_multiplier,
@@ -477,9 +433,6 @@ impl Default for OnsetDetectionConfig {
             CqtParams::onset_detection(),
             crate::nzu!(512),
             None,
-            0.3,
-            0.1,
-            0.1,
             true,
             crate::nzu!(5),
             1.5,

@@ -573,6 +573,13 @@ odd-length spectral bin spacing, `frequency_to_note` and
 
 ### Changed
 
+- **`OnsetDetectionConfig` no longer has `threshold`, `min_onset_interval_secs` or
+  `pre_emphasis`**, and `OnsetDetectionConfig::new` no longer takes them. No detector read
+  them. Each duplicated a `PeakPickingConfig` setting that the detectors do read: the threshold
+  floor (`adaptive_threshold.min_threshold`), the minimum spacing between onsets
+  (`min_peak_separation`, which the presets set from seconds) and the pre-emphasis of the
+  detection function (`pre_emphasis`, `pre_emphasis_coeff`). The explanation of an
+  `OnsetDetectionConfig` no longer lists them as ignored.
 - **`NdResult::into_array1_unchecked` and `into_array2_unchecked` are removed.** They were
   `unsafe` but could not cause undefined behaviour (they panicked on the other variant).
   Use `into_array1` / `into_array2`, which return `None` for the other variant, or match on

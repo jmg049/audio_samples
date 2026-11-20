@@ -433,16 +433,6 @@ mod onset {
                     "Use an odd length.",
                 );
             }
-            doc.add_warning(
-                WarningLevel::Info,
-                format!(
-                    "threshold ({}), min_onset_interval_secs ({}) and pre_emphasis ({}) are not read by detect_onsets; thresholding and spacing come from adaptive_threshold and peak_picking.",
-                    fmt_num(self.threshold),
-                    fmt_num(self.min_onset_interval_secs),
-                    fmt_num(self.pre_emphasis)
-                ),
-                "",
-            );
             doc.add_see_also(
                 "Detect",
                 "audio_samples::AudioOnsetDetection::detect_onsets",
@@ -527,7 +517,6 @@ mod tests {
         let sep_ms = d.quantity("Minimum peak separation").unwrap().value;
         let expected = 1000.0 * c.peak_picking.min_peak_separation.get() as f64 * 256.0 / 44_100.0;
         assert!((sep_ms - expected).abs() < 1e-9);
-        assert!(d.has_warning_containing("not read by detect_onsets"));
     }
 
     #[cfg(feature = "onset-detection")]

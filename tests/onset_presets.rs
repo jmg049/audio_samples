@@ -273,3 +273,68 @@ fn noise(seed: &mut u64) -> f64 {
     *seed ^= *seed << 17;
     (*seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
 }
+
+/// Noise clicks starting at `times` (seconds), with peak amplitudes `heights`.
+fn clicks(fs: u32, secs: f64, times: &[f64], heights: &[f64]) -> AudioSamples<'static, f64> {
+    let n = (secs * f64::from(fs)) as usize;
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut x = vec![0.0; n];
+    for (&t, &h) in times.iter().zip(heights) {
+        let start = (t * f64::from(fs)) as usize;
+        for k in 0..256.min(n - start) {
+            x[start + k] = h * (-(k as f64) / 24.0).exp() * noise(&mut seed);
+        }
+    }
+    AudioSamples::new_mono(Array1::from_vec(x), NonZeroU32::new(fs).unwrap()).unwrap()
+}
+
+/// The global threshold, the minimum spacing and the pre-emphasis of
+/// `detect_onsets` are the `peak_picking` settings, and each changes the result.
+#[test]
+fn peak_picking_sets_threshold_spacing_and_pre_emphasis() {
+    use audio_samples::operations::peak_picking::pick_peaks;
+    use non_empty_slice::NonEmptyVec;
+
+    let base = || {
+        let mut c = OnsetDetectionConfig::default();
+        c.peak_picking.median_filter = false;
+        c.peak_picking.pre_emphasis = false;
+        c.peak_picking.adaptive_threshold.window_size = 11;
+        c.peak_picking.min_peak_separation = NonZeroUsize::new(5).unwrap();
+        c
+    };
+    let times = [0.25, 0.75, 1.25, 1.75];
+
+    // Spacing: clicks 0.5 s apart are four onsets with a 5-frame (58 ms) minimum
+    // spacing and two with a 50-frame (0.58 s) one.
+    let even = clicks(44_100, 2.0, &times, &[0.9; 4]);
+    assert_eq!(even.detect_onsets(&base()).unwrap().len(), 4);
+    let mut spaced = base();
+    spaced.peak_picking.min_peak_separation = NonZeroUsize::new(50).unwrap();
+    assert_eq!(even.detect_onsets(&spaced).unwrap().len(), 2);
+
+    // Threshold: a click at 2 % of the others' level falls below the default
+    // floor (0.1 of the normalised strength) and is found with a floor of 0.005.
+    let weak = clicks(44_100, 2.0, &times, &[0.9, 0.9, 0.018, 0.9]);
+    assert_eq!(weak.detect_onsets(&base()).unwrap().len(), 3);
+    let mut low_floor = base();
+    low_floor.peak_picking.adaptive_threshold.min_threshold = 0.005;
+    assert_eq!(weak.detect_onsets(&low_floor).unwrap().len(), 4);
+
+    // Pre-emphasis: a slow rise and fall peaking at 1.0, and a one-frame spike of
+    // 0.08. Without it the spike is below the floor; pre-emphasis
+    // (y[n] = x[n] - 0.97 x[n-1]) flattens the slow slopes, so the spike becomes
+    // the strongest peak and both are found.
+    let mut odf = vec![0.0; 160];
+    for k in 0..50 {
+        odf[10 + k] = (k + 1) as f64 / 50.0;
+        odf[60 + k] = (49 - k) as f64 / 50.0;
+    }
+    odf[140] = 0.08;
+    let odf = NonEmptyVec::new(odf).unwrap();
+    let mut picker = base().peak_picking;
+    assert_eq!(pick_peaks(&odf, &picker).unwrap(), vec![59]);
+    picker.pre_emphasis = true;
+    picker.pre_emphasis_coeff = 0.97;
+    assert_eq!(pick_peaks(&odf, &picker).unwrap(), vec![59, 140]);
+}
