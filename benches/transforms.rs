@@ -1,7 +1,7 @@
 //! FFT / spectral-transform throughput benchmarks.
 //!
-//! These exercise the thread-local FFT-planner cache added in the 2.0 work:
-//! `spectrograms::FftPlanner` memoizes plans (twiddles, scratch) by size, and
+//! These exercise the thread-local FFT-planner cache:
+//! `spectrograms::FftPlanner` memoises plans (twiddles, scratch) by size, and
 //! the cache is reused across calls within a thread. A single call would not
 //! show plan reuse, so each case below performs MANY same-size transforms per
 //! iteration (per-frame FFTs or N repeated op calls) so the benefit of reusing

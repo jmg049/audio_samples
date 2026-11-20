@@ -218,8 +218,8 @@ fn main() -> AudioSampleResult<()> {
     // A frame that is mostly noise floor has a noise-like ZCR, so the combined
     // rule starts one or two hops later than the energy rule.
     assert!(cs >= s && cs.abs_diff(on) <= FRAME);
-    // The region now ends near the vowel's end (11200), not the fricative's
-    // (14400): within one frame plus the hangover.
+    // With the combined rule the region ends near the vowel's end (11200),
+    // not the fricative's (14400): within one frame plus the hangover.
     assert!(ce.abs_diff(v_end) <= FRAME + 2 * HOP);
     println!(
         "     speech {:.3}-{:.3} s (vowel {:.3}-{:.3} s)\n",

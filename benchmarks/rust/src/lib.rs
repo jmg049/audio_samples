@@ -8,17 +8,14 @@ use std::time::Instant;
 
 /// Call once at the start of every benchmark binary's `main()`.
 ///
-/// On Linux, disables glibc's heap-trim mechanism (`M_TRIM_THRESHOLD`).
-/// Without this, freeing a buffer larger than the default 128 KB trim
-/// threshold causes glibc to return physical pages to the OS; the next
-/// allocation of the same buffer re-faults every page (~1292 page faults
-/// for a 5.3 MB buffer, ≈ 1000 µs overhead per iteration).
-///
-/// This makes the 30-second benchmark tier appear ~6× slower than 10 s
-/// and 60 s: 30 × 44100 × 4 B = 5.3 MB hits the zone while adjacent
-/// sizes are served differently by the allocator.  Setting the threshold
-/// to `i32::MAX` keeps the heap expanded for the life of the process and
-/// eliminates the anomaly entirely.
+/// On Linux, disables glibc's mmap threshold and heap trimming. Without
+/// this, freeing a buffer larger than the default 128 KB threshold returns
+/// its physical pages to the OS, and the next allocation of the same buffer
+/// page-faults on every page. Whether a buffer is served this way depends on
+/// its size and on what the allocator did before, so one signal length can
+/// time several times slower than its neighbours for reasons unrelated to
+/// the code under test. Setting both thresholds to `i32::MAX` keeps the heap
+/// expanded for the life of the process.
 pub fn bench_init() {
     #[cfg(target_os = "linux")]
     // SAFETY: mallopt is a safe libc function; no invariants to uphold.

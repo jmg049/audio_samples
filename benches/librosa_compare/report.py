@@ -36,7 +36,7 @@ sys.path.insert(0, HERE)
 ap = argparse.ArgumentParser()
 ap.add_argument("out")
 ap.add_argument("--canonical", default="22050_10s_mono_f32")
-ap.add_argument("--baseline", default=None, help="an earlier run's directory (with merged.json): adds before/after tables")
+ap.add_argument("--baseline", default=None, help="another run's directory (with merged.json) to compare with: adds before/after tables")
 args = ap.parse_args()
 
 BAND = 0.05

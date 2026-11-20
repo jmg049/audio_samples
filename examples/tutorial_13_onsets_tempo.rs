@@ -9,8 +9,8 @@
 //!    `detect_onsets` with the default configuration (five of the eight
 //!    bursts: the 0.1 threshold floor drops the three weakest) and with the
 //!    floor lowered to 0.01 (all eight).
-//! 2. Switches peak-picking lengths sized as if they counted audio samples
-//!    (as in earlier releases) on one at a time, to show which setting loses
+//! 2. Switches on, one at a time, peak-picking lengths sized as if they
+//!    counted audio samples rather than frames, to show which setting loses
 //!    which onsets.
 //! 3. Re-derives the onset detection function from the CQT magnitude and the
 //!    peak picking from its definition, and converts frames to seconds.

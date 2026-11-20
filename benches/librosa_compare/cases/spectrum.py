@@ -3,9 +3,9 @@ spectrogram, phase vocoder, Griffin-Lim, PCEN, dB conversions, frequency
 weightings), the mel spectrogram and the `librosa.filters` window and mel
 functions.
 
-Not timed (no audio_samples counterpart, "not provided" in
-LIBROSA_MIGRATION.md): ``iirt``, ``fmt``, ``filters.diagonal_filter``,
-``filters.mr_frequencies``, ``filters.semitone_filterbank``.
+Covered elsewhere: ``iirt``, ``fmt``, ``filters.mr_frequencies`` and
+``filters.semitone_filterbank`` (pitch_filterbank group) and
+``filters.diagonal_filter`` (segment group).
 """
 
 import librosa

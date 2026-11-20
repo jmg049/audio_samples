@@ -6,7 +6,7 @@
 //! What it teaches:
 //! 1. the DFT definition and sign convention (a naive DFT loop agrees with
 //!    `fft`, and a sine at bin k gives `X[k] = -j A N / 2`);
-//! 2. that `rfft` returns magnitudes `|X[k]|`, not complex values (unlike numpy);
+//! 2. that `rfft` returns magnitudes `|X[k]|`, not complex values;
 //! 3. bin frequencies `f_k = k f_s / N`;
 //! 4. leakage and scalloping of an off-bin tone, with and without a window;
 //! 5. window figures (coherent gain, ENBW, scalloping loss, peak side-lobe

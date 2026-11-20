@@ -29,7 +29,7 @@ use std::num::NonZeroU32;
 
 use crate::{AudioCtx, ConstCtx, SeqCtx, Thunk, VecCtx, thunk};
 
-/// The Python half's settings (the previous benchmark's).
+/// Settings shared with the Python half.
 const STRETCH_RATE: f64 = 1.25;
 const PITCH_STEPS: f64 = 4.0;
 const LPC_ORDER: usize = 16;

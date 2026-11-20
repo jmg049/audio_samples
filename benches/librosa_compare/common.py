@@ -1,7 +1,7 @@
 """Shared pieces of the librosa comparison benchmark: input configurations,
 test signals and the timing rule.
 
-The Rust half (`examples/librosa_bench.rs`) reads the signals this module
+The Rust half (`examples/librosa_bench/`) reads the signals this module
 writes, so both languages time the same samples.
 """
 

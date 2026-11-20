@@ -19,7 +19,7 @@ from . import Case, partial, register
 
 G = "effects"
 
-# The previous benchmark's settings.
+# Settings shared with the native half.
 STRETCH_RATE = 1.25
 PITCH_STEPS = 4.0
 # The pitch-shift resampling ratio for n_steps = 4: 2^(-4/12).

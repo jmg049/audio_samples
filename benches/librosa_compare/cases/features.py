@@ -2,13 +2,10 @@
 zero-crossing rate, from audio and (``_S`` cases) from a spectrogram.
 
 Covered elsewhere: ``melspectrogram`` (spectrum group), ``chroma_stft``
-(tonal group), the constant-Q chroma / tonnetz (constant_q group) and the
-rhythm features (rhythm group).
-
-Not timed (no audio_samples counterpart, "not provided" in
-LIBROSA_MIGRATION.md): ``inverse.mel_to_stft``, ``inverse.mel_to_audio``,
-``inverse.mfcc_to_mel``, ``inverse.mfcc_to_audio``. ``zero_crossing_rate``
-has no ``S=`` form in librosa, so it has no ``_S`` case.
+(tonal group), the constant-Q chroma / tonnetz (constant_q group), the
+rhythm features (rhythm group) and ``feature.inverse`` (inverse group).
+``zero_crossing_rate`` has no ``S=`` form in librosa, so it has no ``_S``
+case.
 """
 
 import librosa

@@ -38,7 +38,6 @@ fn main() -> audio_samples::AudioSampleResult<()> {
     println!("Computing RMS envelope...");
     let window_size = audio_samples::nzu!(2048); // ~46ms at 44.1kHz
     let hop_size = audio_samples::nzu!(512); // ~12ms hop
-    // let (rms_times, rms_values) = compute_rms_envelope(&audio, window_size, hop_size, 44100);
     let rms_envelope = audio.rms_envelope(window_size, hop_size);
     let envelope: Array1<f32> = rms_envelope.into_array1().expect("We know audio is 1D");
 

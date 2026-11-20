@@ -1,7 +1,7 @@
 //! Type-conversion throughput benchmarks for the SIMD-sensitive paths.
 //!
 //! Covers the audio-aware sample-type conversions (`to_type`/`as_f32`) and the
-//! channel interleave/deinterleave paths that the 2.0 SIMD work touched.
+//! channel interleave/deinterleave paths, all of which have SIMD forms.
 //!
 //! NOTE: the SIMD code path is selected at compile time by `--features simd`.
 //! To compare the scalar fallback against the SIMD path, run this bench BOTH
@@ -95,7 +95,7 @@ fn bench_round_trip(c: &mut Criterion) {
         )
     });
 
-    // i16 -> f32 (the decode-to-float direction the SIMD work targeted)
+    // i16 -> f32 (the decode-to-float direction)
     g.bench_function("i16_to_f32", |b| {
         b.iter_batched(
             || base_i16.clone(),
