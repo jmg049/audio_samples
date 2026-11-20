@@ -1,82 +1,25 @@
-//! Frame-wise audio features: spectral shape descriptors, RMS, zero-crossing
-//! rate, PCEN, frequency weighting curves and the reassigned spectrogram.
-//!
-//! ## What
-//!
-//! This module provides the [`AudioFeatures`] trait and the free functions it is
-//! built from:
-//!
-//! | Feature | On audio | On a precomputed spectrogram / array |
-//! |---|---|---|
-//! | Spectral centroid | [`AudioFeatures::spectral_centroid_frames`] | [`spectral_centroid_from_spectrogram`] |
-//! | Spectral bandwidth | [`AudioFeatures::spectral_bandwidth_frames`] | [`spectral_bandwidth_from_spectrogram`] |
-//! | Spectral rolloff | [`AudioFeatures::spectral_rolloff_frames`] | [`spectral_rolloff_from_spectrogram`] |
-//! | Spectral flatness | [`AudioFeatures::spectral_flatness_frames`] | [`spectral_flatness_from_spectrogram`] |
-//! | Spectral contrast | [`AudioFeatures::spectral_contrast_frames`] | [`spectral_contrast_from_spectrogram`] |
-//! | Polynomial fit per frame | [`AudioFeatures::poly_features`] | [`poly_features_from_spectrogram`] |
-//! | RMS energy | [`AudioFeatures::rms_frames`] | [`rms_from_spectrogram`] |
-//! | Zero-crossing rate | [`AudioFeatures::zero_crossing_rate_frames`] | – |
-//! | Reassigned spectrogram | [`AudioFeatures::reassigned_spectrogram`] | – |
-//! | Per-channel energy normalisation | – | [`pcen`], [`pcen_with_state`] |
-//! | A, B, C, D and Z weighting curves | – | [`a_weighting`] … [`z_weighting`], [`frequency_weighting`], [`multi_frequency_weighting`] |
-//! | Perceptual weighting of a power spectrogram | – | [`perceptual_weighting`] |
-//!
-//! The frequency-weighting curves live here (rather than in
-//! [`crate::utils::audio_math`]) because their main consumer,
-//! [`perceptual_weighting`], needs the dB conversion of
-//! [`crate::operations::spectrum`]; they are plain functions of frequency.
-//!
-//! ## Why
-//!
+//! Frame-wise audio features: spectral shape descriptors, RMS, zero-crossing rate,
+//! PCEN, frequency weighting curves and the reassigned spectrogram. The
+//! [`AudioFeatures`] trait computes them from audio; the free functions compute
+//! them from a precomputed spectrogram or array, so one STFT can feed several
+//! features.
 #![cfg_attr(
     feature = "statistics",
-    doc = r#" The scalar spectral descriptors of [`AudioStatistics`](crate::AudioStatistics)"#
+    doc = r#" For one value per signal rather than per frame, see [`AudioStatistics`](crate::AudioStatistics)"#
 )]
 #![cfg_attr(
     not(feature = "statistics"),
-    doc = r#" The scalar spectral descriptors of `AudioStatistics` (with the `statistics` feature)"#
+    doc = r#" For one value per signal rather than per frame, see `AudioStatistics`"#
 )]
-//! summarise a whole signal with one number (and use their own weighting
-#![cfg_attr(
-    feature = "envelopes",
-    doc = r#" conventions), and [`AudioEnvelopes`](crate::operations::traits::AudioEnvelopes)"#
-)]
-#![cfg_attr(
-    not(feature = "envelopes"),
-    doc = r#" conventions), and `AudioEnvelopes` (with the `envelopes` feature)"#
-)]
-//! frames signals differently. Machine-learning pipelines need per-frame features
-//! on centred STFT frames, which this module computes. Every config has a
-//! `librosa()` constructor. `Default` currently equals `librosa()` for every
-//! config except [`PcenConfig`], which has no default: its hop length must equal
-//! the analysed spectrogram's ([`PcenConfig::new`]).
-//!
-//! ## How
-//!
-//! Bring [`AudioFeatures`] into scope and call it on any [`AudioSamples`]. Outputs
-//! are arrays shaped `(channels, n_features, n_frames)`; per-frame scalars have
-//! `n_features == 1`. When several
-//! features share one STFT, compute the magnitude spectrogram once with
-//! [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix)
-//! and call the `*_from_spectrogram` functions.
-//!
-//! The output precision follows the input: the element type is the sample
-//! type's [`AudioSample::Float`](crate::AudioSample::Float). `u8`, `i16`, `I24`
-//! and `f32` audio gives `f32` arrays; `i32` and `f64` audio gives `f64`. The
-//! whole computation runs in that type. The free functions on arrays are
-//! generic over the element type ([`AudioFloat`]: `f32` or `f64`); their
-//! frequency arguments and config parameters stay `f64` and are rounded to the
-//! element type once. The frequency-weighting curves ([`a_weighting`], ...) are
-//! tables of frequency and return `f64`.
+//! and [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
 //!
 //! ```rust
-//! use audio_samples::operations::features::{
-//!     AudioFeatures, SpectralCentroidConfig, SpectralRolloffConfig,
-//!     spectral_rolloff_from_spectrogram,
-//! };
-//! use audio_samples::operations::spectrum::{AudioSpectrum, StftConfig};
+//! use audio_samples::operations::features::spectral_rolloff_from_spectrogram;
 //! use audio_samples::utils::audio_math::fft_frequencies;
-//! use audio_samples::{sample_rate, sine_wave};
+//! use audio_samples::{
+//!     AudioFeatures, AudioSpectrum, SpectralCentroidConfig, SpectralRolloffConfig, StftConfig,
+//!     sample_rate, sine_wave,
+//! };
 //! use std::time::Duration;
 //!
 //! let audio = sine_wave::<f32>(1000.0, Duration::from_secs(1), sample_rate!(22050), 0.5);
@@ -95,6 +38,34 @@
 //! ).unwrap();
 //! assert_eq!(rolloff.dim(), (1, 1, 44));
 //! ```
+//!
+//! | Feature | On audio | On a spectrogram or array |
+//! |---|---|---|
+//! | Spectral centroid | [`AudioFeatures::spectral_centroid_frames`] | [`spectral_centroid_from_spectrogram`] |
+//! | Spectral bandwidth | [`AudioFeatures::spectral_bandwidth_frames`] | [`spectral_bandwidth_from_spectrogram`] |
+//! | Spectral rolloff | [`AudioFeatures::spectral_rolloff_frames`] | [`spectral_rolloff_from_spectrogram`] |
+//! | Spectral flatness | [`AudioFeatures::spectral_flatness_frames`] | [`spectral_flatness_from_spectrogram`] |
+//! | Spectral contrast | [`AudioFeatures::spectral_contrast_frames`] | [`spectral_contrast_from_spectrogram`] |
+//! | Polynomial fit per frame | [`AudioFeatures::poly_features`] | [`poly_features_from_spectrogram`] |
+//! | RMS energy | [`AudioFeatures::rms_frames`] | [`rms_from_spectrogram`] |
+//! | Zero-crossing rate | [`AudioFeatures::zero_crossing_rate_frames`] | – |
+//! | Reassigned spectrogram | [`AudioFeatures::reassigned_spectrogram`] | – |
+//! | Per-channel energy normalisation | – | [`pcen`], [`pcen_with_state`] |
+//! | A, B, C, D and Z weighting curves | – | [`a_weighting`] … [`z_weighting`], [`frequency_weighting`], [`multi_frequency_weighting`] |
+//! | Perceptual weighting of a power spectrogram | – | [`perceptual_weighting`] |
+//!
+//! ## Conventions
+//!
+//! - Outputs follow the crate's [array layout](crate#array-layout) and
+//!   [precision rule](crate#precision); per-frame scalars have one feature row.
+//!   The free functions are generic over the element type ([`AudioFloat`]: `f32`
+//!   or `f64`); their frequency arguments and config parameters stay `f64` and are
+//!   rounded to the element type once.
+//! - The weighting curves ([`a_weighting`], ...) are functions of frequency and
+//!   return `f64`.
+//! - Every config's `Default` equals its `librosa()`, except [`PcenConfig`], which
+//!   has no `Default`: its hop length must equal the analysed spectrogram's, so
+//!   [`PcenConfig::new`] takes it.
 
 use std::num::NonZeroUsize;
 
@@ -327,7 +298,7 @@ impl SpectralCentroidConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -409,7 +380,7 @@ impl SpectralBandwidthConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -502,7 +473,7 @@ impl SpectralRolloffConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -599,7 +570,7 @@ impl SpectralFlatnessConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -725,7 +696,7 @@ impl SpectralContrastConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -865,7 +836,7 @@ impl PolyFeaturesConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -2344,7 +2315,7 @@ impl RmsConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2382,7 +2353,7 @@ impl RmsConfig {
     ///
     /// # Errors
     ///
-    /// None currently.
+    /// Never fails; the method exists so that every config can be validated the same way.
     pub fn validate(&self) -> AudioSampleResult<()> {
         Ok(())
     }
@@ -2630,7 +2601,7 @@ impl ZeroCrossingRateConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -3745,7 +3716,7 @@ impl ReassignedSpectrogramConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {

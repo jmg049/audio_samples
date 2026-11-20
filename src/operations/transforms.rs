@@ -1,30 +1,60 @@
-//! Spectral analysis and frequency-domain transformations for [`AudioSamples`].
+//! Fourier analysis of mono audio through the [`spectrograms`] crate: the
+//! [`AudioTransforms`] trait. It provides the DFT, the STFT and its inverse,
+//! spectrograms on linear, log-frequency, mel, gammatone and constant-Q axes,
+//! MFCCs, chroma, a Welch power spectral density and magnitude/phase splitting.
+//! For multi-channel feature pipelines, [`AudioSpectrum`](crate::operations::spectrum::AudioSpectrum)
+//! is usually the better fit; see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
 //!
-//! ## What
+//! ```rust
+//! use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate};
+//! use ndarray::array;
 //!
-//! This module implements the [`AudioTransforms`] trait: the DFT, the short-time
-//! Fourier transform (STFT) and its inverse, spectrograms on linear, log-Hz, mel,
-//! gammatone and constant-Q axes, MFCCs, chroma, a Welch power spectral density
-//! estimate, FFT convolution, and magnitude/phase decomposition. The numerics
-//! (FFT, windows, filterbanks) come from the [`spectrograms`] crate (2.1.x).
+//! // x = [1, 0, -1, 0] is a cosine at f_s/4: all its energy is in bin k = 1.
+//! let audio = AudioSamples::new_mono(array![1.0f32, 0.0, -1.0, 0.0], sample_rate!(44100)).unwrap();
 //!
-//! ## Why
+//! let spectrum = audio.fft(nzu!(4)).unwrap();
+//! assert_eq!(spectrum.shape(), &[1, 3]); // one channel, N/2 + 1 bins
+//! assert!((spectrum[[0, 1]].re - 2.0).abs() < 1e-12); // unnormalised: X[1] = N/2
+//! assert!(spectrum[[0, 0]].norm() < 1e-12 && spectrum[[0, 2]].norm() < 1e-12);
+//! ```
 //!
-//! Frequency-domain analysis is central to audio processing: spectrograms,
-//! MFCCs, chromagrams and pitch detection all begin with a transform into the
-//! spectral domain. The conventions below are stated precisely because they
-//! differ in several places from those of [`crate::operations::spectrum`] and
-//! of other common tools, and values computed here are only comparable when
-//! those conventions match.
+//! ## Conventions
 //!
-//! ## How
+//! These differ from [`operations::spectrum`](crate::operations::spectrum) in
+//! several places, and values from the two are only comparable when the
+//! conventions match. The [Definitions](#definitions) below state them exactly.
 //!
-//! All methods are available on any [`AudioSamples<T>`] (`u8`, `i16`, `I24`,
-//! `i32`, `f32`, `f64`). Samples are first converted to `f64` with the
-//! audio-aware conversion (integers scaled to [-1, 1], `u8` offset-binary
-//! 128 ↦ 0), so the values below are in units of full scale. Most methods
-//! require mono input; [`fft`](AudioTransforms::fft) transforms every channel
-//! independently.
+//! - Samples are converted to `f64` in units of full scale and every method
+//!   computes in `f64`, whatever the sample type.
+//! - [`fft`](AudioTransforms::fft) transforms every channel; every other method
+//!   needs mono input and returns a
+//!   [`LayoutError::ChannelCountUnsupported`]
+//!   error otherwise.
+//! - The DFT is unnormalised, with a negative exponent. Bin `k` is at
+//!   `k × f_s / n_fft` Hz ([`fft_frequencies`](crate::utils::audio_math::fft_frequencies)).
+//! - Windows are symmetric (`WindowType::Hanning` divides by `N − 1`). Centred
+//!   frames are zero-padded, and frame `m` is at `m × hop / f_s` seconds.
+//! - The decibel scale is absolute (dB re 1, floor set by `LogParams`), with no
+//!   `top_db`: loud bins can exceed 0 dB.
+//! - Mel bands use the Slaney scale with no filter normalisation unless
+//!   `MelNorm::Slaney` is asked for. MFCCs use an unnormalised DCT-II and the HTK
+//!   lifter, `L = 22` by default.
+//!
+//! ## Limitations
+//!
+//! - `WindowType::Kaiser { beta }` is wrong for `beta > 3.75` (the modified Bessel
+//!   function I₀ is evaluated incorrectly).
+//! - `MelSpectrogram::frequencies()` assumes the mel range runs from 0 Hz to the
+//!   Nyquist frequency and ignores `MelParams::f_min` and `f_max`, so its axis is
+//!   wrong for any other range.
+//! - With the default `ErbSpacing::Linear`, the gammatone centre frequencies are
+//!   spaced uniformly in ERB bandwidth, 24.7·(4.37 f/1000 + 1), which is linear in
+//!   Hz, not uniform on the ERB-number scale.
+//! - A window of length 1 (`n_fft = 1`) gives NaN for Hann, Hamming and Blackman;
+//!   use `n_fft ≥ 2`.
+//!
+//! ## Definitions
 //!
 //! ### Discrete Fourier transform
 //!
@@ -34,13 +64,12 @@
 //! X[k] = Σ_{n=0}^{N-1} x[n] · e^{-j 2π k n / N},     k = 0 … ⌊N/2⌋
 //! ```
 //!
-//! with a **negative exponent and no normalisation** (no 1/N or 1/√N). Only the
-//! ⌊N/2⌋ + 1 non-negative-frequency bins of the real
-//! signal's spectrum are returned. Bin k is at frequency f_k = k·f_s/N Hz
-//! (f_s = sample rate), so the bin spacing is f_s/N and the last bin is the
-//! Nyquist frequency f_s/2 when N is even. Signals shorter than N are
-//! zero-padded; longer signals are rejected. A sinusoid of amplitude A on a bin
-//! centre gives |X\[k\]| = A·Σw/2 (A·N/2 with no window, ≈ A·N/4 with Hann).
+//! with no normalisation (no 1/N or 1/√N). Only the ⌊N/2⌋ + 1
+//! non-negative-frequency bins are returned. Bin k is at f_k = k·f_s/N Hz, so the
+//! bin spacing is f_s/N and the last bin is the Nyquist frequency f_s/2 when N is
+//! even. Signals shorter than N are zero-padded; longer signals are rejected. A
+//! sinusoid of amplitude A on a bin centre gives |X\[k\]| = A·Σw/2 (A·N/2 with no
+//! window, ≈ A·N/4 with Hann).
 //!
 //! ### Short-time Fourier transform
 //!
@@ -50,58 +79,54 @@
 //! X[k, m] = Σ_{n=0}^{N-1} x_p[n + mH] · w[n] · e^{-j 2π k n / N}
 //! ```
 //!
-//! - **Window.** `WindowType::Hanning` is the Hann window in its **symmetric**
-//!   form, w\[n\] = 0.5 − 0.5·cos(2πn/(N − 1)); Hamming and Blackman are symmetric
-//!   too. [`crate::operations::spectrum`] and most analysis tools default to
-//!   the **periodic** Hann (denominator N), so STFT values differ from theirs by
-//!   about 0.3 % at N = 512 unless the same window is used.
-//! - **Centring.** With `centre = true`, x_p is x zero-padded by ⌊N/2⌋ samples
-//!   on both sides (zeros, not a reflection of the signal), so frame m is
-//!   centred on sample mH. With `centre = false`, x_p = x and frame
-//!   m starts at sample mH.
-//! - **Frames.** The number of frames is 1 + ⌊(L + 2⌊N/2⌋ − N)/H⌋ with centring
-//!   and 1 + ⌊(L − N)/H⌋ without (L = signal length). The reported frame time is
+//! - **Window.** `WindowType::Hanning` is the symmetric Hann window,
+//!   w\[n\] = 0.5 − 0.5·cos(2πn/(N − 1)); Hamming and Blackman are symmetric too.
+//!   The periodic Hann (denominator N) of
+//!   [`operations::spectrum`](crate::operations::spectrum) gives STFT values that
+//!   differ by about 0.3 % at N = 512.
+//! - **Centring.** With `centre = true`, x_p is x zero-padded by ⌊N/2⌋ samples on
+//!   both sides, so frame m is centred on sample mH. With `centre = false`, x_p = x
+//!   and frame m starts at sample mH.
+//! - **Frames.** There are 1 + ⌊(L + 2⌊N/2⌋ − N)/H⌋ frames with centring and
+//!   1 + ⌊(L − N)/H⌋ without (L = signal length). The reported frame time is
 //!   t_m = mH/f_s seconds in both cases.
 //! - **Inverse.** [`istft`](AudioTransforms::istft) uses windowed overlap-add
-//!   normalised by Σ_m w²[n − mH] (the least-squares inverse), which reconstructs
-//!   x exactly wherever that sum is non-zero.
+//!   normalised by Σ_m w²[n − mH] (the least-squares inverse), which reconstructs x
+//!   exactly wherever that sum is non-zero.
 //!
 //! ### Spectrogram amplitude scales
 //!
-//! From the STFT, the `Power` scale is P[k, m] = |X[k, m]|² (units of full
-//! scale², no division by N), the `Magnitude` scale is √P = |X[k, m]|, and the
-//! `Decibels` scale is
+//! The `Power` scale is P[k, m] = |X[k, m]|² (units of full scale², no division by
+//! N), the `Magnitude` scale is √P = |X[k, m]|, and the `Decibels` scale is
 //!
 //! ```text
 //! P_dB = 10 · log10( max(P, a_min) ),    a_min = 10^(floor_db / 10)
 //! ```
 //!
-//! i.e. dB re 1 (an absolute reference, not the peak). `LogParams::new(-80.0)`
-//! therefore means a_min = 10⁻⁸ in power, **not** "80 dB below the maximum":
-//! there is no `top_db`, and loud bins can exceed 0 dB. To measure relative to
-//! the peak, subtract the maximum yourself, or use
-//! [`power_to_db`](crate::operations::spectrum::power_to_db) with a `Max`
+//! that is, dB re 1. `LogParams::new(-80.0)` means a_min = 10⁻⁸ in power, not "80
+//! dB below the maximum". To measure relative to the peak, subtract the maximum,
+//! or use [`power_to_db`](crate::operations::spectrum::power_to_db) with a `Max`
 //! reference.
 //!
 //! ### Mel spectrogram
 //!
-//! Mel bands use the **Slaney** mel scale:
+//! Mel bands use the Slaney mel scale:
 //!
 //! ```text
 //! m(f) = 3f / 200                              for f < 1000 Hz
 //! m(f) = 15 + 27 · ln(f / 1000) / ln(6.4)      for f ≥ 1000 Hz
 //! ```
 //!
-//! `n_mels + 2` points are spaced uniformly in m between `f_min` and `f_max`;
-//! band b is a triangle in Hz rising from point b to 1 at point b + 1 and
-//! falling to 0 at point b + 2. The filterbank W is applied to the **power**
-//! spectrogram, M[b, m] = Σ_k W[b, k]·P[k, m]. `MelParams::new` applies **no**
-//! filter normalisation; `MelParams::with_norm(.., MelNorm::Slaney)` gives
-//! Slaney area normalisation. The `Magnitude` mel spectrogram is
-//! √M (not Σ_k W[b, k]·|X[k, m]|), and the `Decibels` one is 10·log10(max(M, a_min)).
-//! Note: `crate::utils::audio_math::hz_to_mel` and `mel_frequencies` use the
-//! HTK formula 2595·log10(1 + f/700), a different mel scale; do not use them to
-//! label these bands.
+//! `n_mels + 2` points are spaced uniformly in m between `f_min` and `f_max`; band
+//! b is a triangle in Hz rising from point b to 1 at point b + 1 and falling to 0
+//! at point b + 2. The filterbank W is applied to the power spectrogram,
+//! M[b, m] = Σ_k W[b, k]·P[k, m]. `MelParams::new` applies no filter
+//! normalisation; `MelParams::with_norm(.., MelNorm::Slaney)` gives Slaney area
+//! normalisation. The `Magnitude` mel spectrogram is √M (not
+//! Σ_k W[b, k]·|X[k, m]|), and the `Decibels` one is 10·log10(max(M, a_min)).
+//! [`hz_to_mel`](crate::utils::audio_math::hz_to_mel) and
+//! [`mel_frequencies`](crate::utils::audio_math::mel_frequencies) use the HTK
+//! scale, so they do not label these bands.
 //!
 //! ### MFCC
 //!
@@ -110,88 +135,27 @@
 //! 1. the power mel spectrogram M\[b\] with `n_mels` bands from 0 Hz to f_s/2
 //!    (Slaney scale, no filter normalisation; the range is fixed);
 //! 2. L\[b\] = 10·log10(max(M\[b\], 10⁻⁸)) (dB, floor −80 dB);
-//! 3. an **unnormalised** DCT-II, c\[q\] = Σ_{b=0}^{B-1} L\[b\]·cos(π q (b + ½)/B),
+//! 3. an unnormalised DCT-II, c\[q\] = Σ_{b=0}^{B-1} L\[b\]·cos(π q (b + ½)/B),
 //!    B = `n_mels`, keeping q = 0 … `n_mfcc` − 1;
 //! 4. the HTK sinusoidal lifter c\[q\] ← c\[q\]·(1 + (L/2)·sin(π q / L)) with
-//!    **L = 22 by default** (`MfccParams::with_lifter(0)` disables it);
+//!    L = 22 by default (`MfccParams::with_lifter(0)` disables it);
 //! 5. if `with_c0(false)`, c\[0\] is dropped, leaving `n_mfcc − 1` rows.
 //!
-//! `AudioSpectrum::mfcc_frames` in [`crate::operations::spectrum`] uses an
-//! orthonormal DCT and no lifter, so its values differ by a factor of √(B/2)
-//! for q ≥ 1 (√B for c0) and by the lifter weights.
+//! [`AudioSpectrum::mfcc_frames`](crate::operations::spectrum::AudioSpectrum::mfcc_frames)
+//! uses an orthonormal DCT and no lifter, so its values differ by a factor of
+//! √(B/2) for q ≥ 1 (√B for c0) and by the lifter weights.
 //!
 //! ### Other representations
 //!
-//! - **Log-Hz:** `n_bins` log-spaced frequencies; each output bin linearly
+//! - **Log-frequency:** `n_bins` log-spaced frequencies; each output bin linearly
 //!   interpolates the two nearest STFT bins.
-//! - **Gammatone:** with the default `ErbSpacing::Linear`, `spectrograms` 2.1.3
-//!   spaces the centre frequencies uniformly in ERB **bandwidth**
-//!   24.7·(4.37 f/1000 + 1), which is linear in Hz, not on the ERB-number (Cam)
-//!   scale (an upstream bug; see [`gammatone_spectrogram`](AudioTransforms::gammatone_spectrogram)).
-//! - **CQT:** bin k has centre f_k = f_min·2^{k/b} (b bins per octave) and
-//!   constant quality factor Q = f_k/Δf_k = 1/(2^{1/b} − 1) ≈ 16.8 for b = 12.
+//! - **Gammatone:** see [Limitations](#limitations) and
+//!   [`gammatone_spectrogram`](AudioTransforms::gammatone_spectrogram).
+//! - **CQT:** bin k has centre f_k = f_min·2^{k/b} (b bins per octave) and constant
+//!   quality factor Q = f_k/Δf_k = 1/(2^{1/b} − 1) ≈ 16.8 for b = 12.
 //! - **PSD:** Welch's method with density scaling, see
 //!   [`power_spectral_density`](AudioTransforms::power_spectral_density).
-//!
-//! ### Known limitations of `spectrograms` 2.1.3
-//!
-//! - `WindowType::Kaiser { beta }` is wrong for `beta > 3.75` (an error in the
-//!   modified Bessel function I₀); do not use it in teaching material.
-//! - `MelSpectrogram::frequencies()` assumes the mel range is 0 Hz to Nyquist and
-//!   ignores `MelParams::f_min`/`f_max`, so the axis is wrong for any other range
-//!   (the crate's plotting code rebuilds the correct axis).
-//! - A window of length 1 (`n_fft = 1`) gives NaN for Hann, Hamming and Blackman;
-//!   use `n_fft ≥ 2`.
-//!
-//! ### Available operations
-//!
-//! | Method | Description | Multi-channel? |
-//! |--------|-------------|:--------------:|
-//! | [`fft`](AudioTransforms::fft) | Full-signal one-sided DFT | Yes |
-//! | [`stft`](AudioTransforms::stft) / [`istft`](AudioTransforms::istft) | Forward / inverse STFT | No |
-//! | [`linear_spectrogram`](AudioTransforms::linear_spectrogram) | Linearly-spaced spectrogram | No |
-//! | [`log_frequency_spectrogram`](AudioTransforms::log_frequency_spectrogram) | Log-Hz spectrogram | No |
-//! | [`mel_spectrogram`](AudioTransforms::mel_spectrogram) | Mel-scaled spectrogram | No |
-//! | [`mfcc`](AudioTransforms::mfcc) | Mel-Frequency Cepstral Coefficients | No |
-//! | [`chromagram`](AudioTransforms::chromagram) | Chroma (pitch-class) features | No |
-//! | [`gammatone_spectrogram`](AudioTransforms::gammatone_spectrogram) | Gammatone (auditory) spectrogram | No |
-//! | [`constant_q_transform`](AudioTransforms::constant_q_transform) | Constant-Q Transform | No |
-//! | [`cqt_spectrogram`](AudioTransforms::cqt_spectrogram) | CQT spectrogram | No |
-//! | [`power_spectral_density`](AudioTransforms::power_spectral_density) | Welch PSD estimate | No |
-//! | [`magphase`](AudioTransforms::magphase) | Magnitude / phase decomposition | - |
-//!
-//! ## Example
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, AudioTransforms, sample_rate};
-//! use ndarray::array;
-//! use std::num::NonZeroUsize;
-//!
-//! // x = [1, 0, -1, 0] is a cosine at f_s/4: all its energy is in bin k = 1.
-//! let data  = array![1.0f32, 0.0, -1.0, 0.0];
-//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-//!
-//! let spectrum = audio.fft(NonZeroUsize::new(4).unwrap()).unwrap();
-//! assert_eq!(spectrum.shape(), &[1, 3]); // one channel, N/2 + 1 bins
-//! assert!((spectrum[[0, 1]].re - 2.0).abs() < 1e-12); // unnormalised: X[1] = N/2
-//! assert!(spectrum[[0, 0]].norm() < 1e-12 && spectrum[[0, 2]].norm() < 1e-12);
-//! ```
-//!
-//! ## Error Handling
-//!
-//! All operations return [`crate::AudioSampleResult`]. Mono-only methods
-//! return [`crate::AudioSampleError::Layout`]
-//! ([`LayoutError::ChannelCountUnsupported`])
-//! when given multi-channel input. Failures originating inside [`spectrograms`]
-//! are propagated as [`crate::AudioSampleError::Spectrogram`].
-//!
-//! ## See Also
-//!
-//! - [`AudioSamples`]: The core audio data type.
-//! - [`AudioTransforms`]: The trait defining all spectral operations.
-//! - [`crate::utils::audio_math::fft_frequencies`]: the bin frequencies k·f_s/N.
-//!
-//! [`AudioTransforms`]: crate::operations::traits::AudioTransforms
+
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use crate::operations::traits::AudioTransforms;
@@ -579,7 +543,7 @@ where
     /// 10·log10(max(mel power, 10^(floor_db/10))) re 1. See the module docs for the
     /// formulas.
     ///
-    /// Note: in `spectrograms` 2.1.3 the result's `frequencies()` axis is only
+    /// Note: the result's `frequencies()` axis is only
     /// correct when `f_min = 0` and `f_max` = Nyquist; for other ranges compute the
     /// band centres yourself (the inner `n_mels` of `n_mels + 2` points equally
     /// spaced on the Slaney mel scale between `f_min` and `f_max`).
@@ -782,10 +746,10 @@ where
     /// Computes a gammatone-filtered spectrogram.
     ///
     /// Gammatone filters model the bandpass response of the human
-    /// cochlea. Note: with the default `ErbSpacing::Linear`, `spectrograms` 2.1.3
+    /// cochlea. Note: with the default `ErbSpacing::Linear`, the `spectrograms` crate
     /// spaces the centre frequencies uniformly in ERB **bandwidth**
     /// 24.7·(4.37 f/1000 + 1), which is linear in Hz, **not** on the ERB-number
-    /// (Cam) scale 21.4·log10(1 + 0.00437 f) (an upstream bug). For auditory
+    /// (Cam) scale 21.4·log10(1 + 0.00437 f). For auditory
     /// (ERB-rate) spacing use
     /// `GammatoneParams::new(..)?.with_spacing(ErbSpacing::AppleTr35)` (Slaney /
     /// Patterson spacing, uniform in ln(f + 228.7), equivalent to the
@@ -863,7 +827,7 @@ where
     /// analysis. The kernel for bin k is about Q·f_s/f_k samples long, so low
     /// bins have long kernels (good frequency, poor time resolution).
     ///
-    /// Note (`spectrograms` 2.1.3): frames are `min(signal_len, 16384)` samples
+    /// Note: frames are `min(signal_len, 16384)` samples
     /// long and are not centred, so a signal shorter than 16384 samples yields a
     /// single frame whatever `hop_size` is; kernels longer than the frame are
     /// truncated, which lowers the effective Q at low frequencies.

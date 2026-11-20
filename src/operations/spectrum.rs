@@ -1,65 +1,16 @@
-//! Spectral analysis: STFT / ISTFT, dB scaling, mel spectrograms, MFCCs and
-//! frame-wise feature utilities.
-//!
-//! ## What
-//!
-//! This module provides the [`AudioSpectrum`] trait and the free functions it is
-//! built from:
-//!
-//! | Operation | Items |
-//! |---|---|
-//! | Complex STFT and its inverse | [`AudioSpectrum::stft_matrix`] / [`AudioSpectrum::istft_matrix`] ([`stft`], [`istft`]) |
-//! | Magnitude spectrogram raised to a power | [`AudioSpectrum::spectrogram_matrix`] |
-//! | Mel spectrogram | [`AudioSpectrum::melspectrogram`] ([`melspectrogram_from_spectrogram`]) |
-//! | MFCC | [`AudioSpectrum::mfcc_frames`] ([`mfcc_from_mel_db`]) |
-//! | Power and amplitude to dB and back | [`power_to_db`], [`amplitude_to_db`], [`db_to_power`], [`db_to_amplitude`] |
-//! | Derivatives and time-delay stacking | [`delta`], [`stack_memory`] |
-//! | Overlapping frames of a signal | [`frame`] |
-//!
-//! Windows and mel filterbanks live in [`crate::operations::filterbanks`];
-//! unit conversions (mel scales, frames/samples/time) in
-//! [`crate::utils::audio_math`].
-//!
-//! ## Why
-//!
-//! The spectrogram methods of [`AudioTransforms`](crate::AudioTransforms) delegate
-//! to the `spectrograms` crate, whose conventions differ (symmetric windows, an
-//! absolute dB floor, an unnormalised DCT, mono only). This module uses periodic
-//! windows, dB relative to a configurable reference with an optional `top_db`
-//! floor, an orthonormal DCT, and any number of channels. Every config struct
-//! has a `librosa()` constructor ([`DbConfig`] has `librosa_power()` and
-//! `librosa_amplitude()`); only the [`MfccConfig`] and [`DbConfig`] defaults
-//! differ from them, in having no 80 dB floor.
-//!
-//! ## How
-//!
-//! Bring [`AudioSpectrum`] into scope and call it on any [`AudioSamples`].
-//! Outputs are arrays shaped `(channels, n_features, n_frames)`; mono input gives
-//! one channel.
-//!
-//! The output precision follows the input: the element type is the sample
-//! type's [`AudioSample::Float`](crate::AudioSample::Float), the smallest float
-//! type that holds every input sample exactly. `u8`, `i16`, `I24` and `f32`
-//! audio gives `f32` (or `Complex<f32>`); `i32` and `f64` audio gives `f64`.
-//! Samples are converted with the crate's audio-aware conversion and the whole
-//! computation runs in that type, so `f32` analysis uses half the memory of
-//! `f64`. Parameters in the config structs stay `f64` and are rounded to the
-//! output type once; filter tables (windows, mel bases, DCT matrices) are
-//! computed in `f64` and rounded once. [`AudioSpectrum::istft_matrix`] returns
-//! audio of the receiver's sample type.
-//!
-//! The free functions on bare arrays ([`stft`], [`power_to_db`], [`delta`],
-//! ...) are generic over the element type ([`AudioFloat`]: `f32` or `f64`) and
-//! return arrays of the same type.
+//! Spectral analysis of audio with any number of channels: the [`AudioSpectrum`]
+//! trait (STFT and its inverse, magnitude spectrograms, mel spectrograms, MFCCs)
+//! and the free functions it is built from. Use it for feature pipelines; the
+//! [`AudioTransforms`](crate::AudioTransforms) methods follow other conventions
+//! (see [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)).
 //!
 //! ```rust
-//! use audio_samples::operations::spectrum::{AudioSpectrum, MfccConfig, StftConfig};
-//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
+//! use audio_samples::{AudioSamples, AudioSpectrum, MfccConfig, StftConfig, sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
 //! let audio = sine_wave::<f32>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //!
-//! // (channels, bins, frames) complex. f32 audio gives Complex<f32>.
+//! // (channels, bins, frames), complex. f32 audio gives Complex<f32>.
 //! let stft = audio.stft_matrix(&StftConfig::default()).unwrap();
 //! assert_eq!(stft.dim(), (1, 1025, 22));
 //! let _: &ndarray::Array3<num_complex::Complex<f32>> = &stft;
@@ -70,10 +21,40 @@
 //!     .unwrap();
 //! assert_eq!(y.samples_per_channel(), n);
 //!
-//! // 20 coefficients per frame: (1, 20, 22).
+//! // 20 coefficients per frame.
 //! let mfcc = audio.mfcc_frames(&MfccConfig::default()).unwrap();
 //! assert_eq!(mfcc.dim(), (1, 20, 22));
 //! ```
+//!
+//! | Operation | On audio | On arrays |
+//! |---|---|---|
+//! | Complex STFT and its inverse | [`AudioSpectrum::stft_matrix`], [`AudioSpectrum::istft_matrix`] | [`stft`], [`istft`] |
+//! | Magnitude spectrogram raised to a power | [`AudioSpectrum::spectrogram_matrix`] | – |
+//! | Mel spectrogram | [`AudioSpectrum::melspectrogram`] | [`melspectrogram_from_spectrogram`] |
+//! | MFCC | [`AudioSpectrum::mfcc_frames`] | [`mfcc_from_mel_db`] |
+//! | Power and amplitude to dB and back | – | [`power_to_db`], [`amplitude_to_db`], [`db_to_power`], [`db_to_amplitude`] |
+//! | Derivatives and time-delay stacking | – | [`delta`], [`stack_memory`] |
+//! | Overlapping frames of a signal | – | [`frame`] |
+//!
+//! Windows and mel filterbanks are in [`operations::filterbanks`](crate::operations::filterbanks);
+//! unit conversions (mel scales, frames, samples and time) in
+//! [`utils::audio_math`](crate::utils::audio_math).
+//!
+//! ## Conventions
+//!
+//! - Outputs follow the crate's [array layout](crate#array-layout) and
+//!   [precision rule](crate#precision). Config parameters stay `f64` and are
+//!   rounded to the output type once; windows, mel bases and DCT matrices are
+//!   computed in `f64` and rounded once.
+//!   [`AudioSpectrum::istft_matrix`] returns audio of the receiver's sample type.
+//! - The free functions are generic over the element type ([`AudioFloat`]: `f32`
+//!   or `f64`) and return arrays of that type.
+//! - Windows are periodic, padding is set by [`StftPadMode`] (zeros by default),
+//!   and decibels are relative to a configurable reference, with an optional
+//!   `top_db` floor.
+//! - `Default` equals `librosa()` for every config except [`MfccConfig`] and
+//!   [`DbConfig`], whose defaults have no 80 dB floor. [`DbConfig`] has
+//!   `librosa_power()` and `librosa_amplitude()` in place of `librosa()`.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -225,7 +206,7 @@ impl StftConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -1823,7 +1804,7 @@ impl MelSpectrogramConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2533,7 +2514,7 @@ impl DeltaConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()

@@ -1,54 +1,13 @@
-//! Tonal analysis: chroma features, tuning estimation and spectral pitch
-//! tracking.
-//!
-//! ## What
-//!
-//! This module provides the [`AudioTonal`] trait and the free functions it is
-//! built from, an STFT-based tonal pipeline:
-//!
-//! | Operation | Items |
-//! |---|---|
-//! | Chroma from a power spectrogram | [`AudioTonal::chroma_stft`] ([`chroma_stft_from_spectrogram`]) |
-//! | Chroma filterbank | [`chroma_filterbank`] |
-//! | Pitch tracking by parabolic peak interpolation | [`AudioTonal::piptrack`] ([`piptrack_from_spectrogram`]) |
-//! | Tuning estimation | [`AudioTonal::estimate_tuning`] ([`estimate_tuning_from_signal`], [`estimate_tuning_from_spectrogram`]) |
-//! | Tuning of a set of frequencies | [`pitch_tuning`] |
-//! | Normalisation along an axis | [`normalize_array`] |
-//!
-//! Tuning and pitch-notation helpers that do not need a spectrogram
-//! (`hz_to_octs`, `A4_to_tuning`, `cqt_frequencies`, `key_to_notes`, ...) live
-//! in [`crate::utils::audio_math`].
-//!
-//! ## Why
-//!
-//! [`AudioTransforms::chromagram`](crate::AudioTransforms::chromagram) delegates
-//! to the `spectrograms` crate, whose chroma uses a different filterbank, a
-//! magnitude spectrogram, L2 normalisation and no tuning estimation, so its
-//! profiles are much flatter. The chroma here uses a power spectrogram, a
-//! Gaussian filterbank with octave weighting, and max-norm frames, which key
-//! detection, chord recognition and cover-song features expect. Every config
-//! struct has a `librosa()` constructor. `Default` is the same except for
-//! [`ChromaStftConfig`], whose default fixes the tuning at A440 instead of
-//! estimating it.
-//!
-//! ## How
-//!
-//! Bring [`AudioTonal`] into scope and call it on any [`AudioSamples`]. Frame-wise
-//! outputs are arrays shaped `(channels, n_features, n_frames)`; mono input
-//! gives one channel. Tuning estimates pool all channels.
-//!
-//! The output precision follows the input: the element type is the sample
-//! type's [`AudioSample::Float`](crate::AudioSample::Float). `u8`, `i16`, `I24`
-//! and `f32` audio gives `f32` arrays; `i32` and `f64` audio gives `f64`. The
-//! whole computation runs in that type. The chroma filterbank is computed in
-//! `f64` and rounded to the output type once. Tuning estimates are `f64`
-//! scalars. The free functions on arrays ([`normalize_array`],
-//! [`chroma_stft_from_spectrogram`], [`piptrack_from_spectrogram`], ...) are
-//! generic over the element type ([`AudioFloat`]: `f32` or `f64`).
+//! Tonal analysis from the STFT: chroma features, tuning estimation and pitch
+//! tracking by spectral peaks. The [`AudioTonal`] trait works on audio; the free
+//! functions take a precomputed spectrogram. Chroma from a constant-Q transform is
+//! in [`operations::constant_q`](crate::operations::constant_q), and
+//! [`AudioTransforms::chromagram`](crate::AudioTransforms::chromagram) follows
+//! other conventions (see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)).
 //!
 //! ```rust
-//! use audio_samples::operations::tonal::{AudioTonal, ChromaStftConfig, TuningConfig};
-//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
+//! use audio_samples::{AudioTonal, ChromaStftConfig, TuningConfig, sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
 //! // A4 (440 Hz): the chroma peak is pitch class 9 (A, counting from C).
@@ -61,6 +20,28 @@
 //! let tuning = audio.estimate_tuning(&TuningConfig::default()).unwrap();
 //! assert!(tuning.abs() < 0.02);
 //! ```
+//!
+//! | Operation | On audio | On a spectrogram or values |
+//! |---|---|---|
+//! | Chroma | [`AudioTonal::chroma_stft`] | [`chroma_stft_from_spectrogram`], [`chroma_filterbank`] |
+//! | Pitch by parabolic peak interpolation | [`AudioTonal::piptrack`] | [`piptrack_from_spectrogram`] |
+//! | Tuning estimation | [`AudioTonal::estimate_tuning`] | [`estimate_tuning_from_signal`], [`estimate_tuning_from_spectrogram`], [`pitch_tuning`] |
+//! | Normalisation along an axis | – | [`normalize_array`] |
+//!
+//! Tuning and pitch-notation helpers that need no spectrogram (`hz_to_octs`,
+//! `A4_to_tuning`, `cqt_frequencies`, `key_to_notes`, ...) are in
+//! [`utils::audio_math`](crate::utils::audio_math).
+//!
+//! ## Conventions
+//!
+//! - Chroma uses a power spectrogram, a Gaussian filterbank with octave weighting
+//!   and max-normalised frames.
+//! - Frame-wise outputs follow the crate's [array layout](crate#array-layout) and
+//!   [precision rule](crate#precision); the chroma filterbank is computed in `f64`
+//!   and rounded once. Tuning estimates pool all channels and are `f64` values.
+//!   The free functions are generic over the element type ([`AudioFloat`]).
+//! - `Default` equals `librosa()` for every config except [`ChromaStftConfig`],
+//!   whose default fixes the tuning at A440 instead of estimating it.
 
 use std::num::NonZeroUsize;
 
@@ -179,7 +160,7 @@ impl NormalizeConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -543,7 +524,7 @@ impl ChromaFilterbankConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -837,7 +818,7 @@ impl PiptrackConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -1408,7 +1389,7 @@ impl TuningConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {

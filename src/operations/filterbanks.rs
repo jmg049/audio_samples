@@ -1,31 +1,6 @@
-//! Window functions and mel filterbanks.
-//!
-//! ## What
-//!
-//! This module holds the building blocks of the spectral pipeline in
-//! [`crate::operations::spectrum`]:
-//!
-//! - [`Window`] and [`get_window`]: analysis windows in either the *periodic*
-//!   form (the default for spectral analysis) or the *symmetric* form (used
-//!   for filter design).
-//! - [`window_sumsquare`] and [`window_bandwidth`]: the squared-window overlap
-//!   envelope used to normalise an inverse STFT, and the equivalent noise
-//!   bandwidth of a window.
-//! - [`mel_filterbank`] with [`MelFilterbankConfig`]: the triangular mel
-//!   filterbank, on either the Slaney or the HTK mel scale ([`MelScale`]) and
-//!   with any of the normalisations of [`MelFilterNorm`].
-//!
-//! ## Why
-//!
-//! The spectrogram helpers on [`AudioTransforms`](crate::AudioTransforms) use
-//! the `spectrograms` crate, whose windows are symmetric and whose mel
-//! filterbank is fixed to the Slaney scale and is not exposed. Most published
-//! feature pipelines use periodic windows, a Slaney-normalised filterbank and
-//! optionally the HTK scale; these functions provide those conventions.
-//!
-//! ## How
-//!
-//! Every function is a pure free function.
+//! Window functions and mel filterbanks, the building blocks of
+//! [`operations::spectrum`](crate::operations::spectrum). All are plain free
+//! functions.
 //!
 //! ```rust
 //! use audio_samples::nzu;
@@ -33,7 +8,7 @@
 //!     MelFilterbankConfig, Window, get_window, mel_filterbank,
 //! };
 //!
-//! // A periodic Hann window, as used by the STFT.
+//! // A periodic Hann window, as the STFT uses.
 //! let w = get_window(&Window::Hann, 8, true).unwrap();
 //! assert_eq!(w[0], 0.0);
 //! assert!((w[4] - 1.0).abs() < 1e-15);
@@ -42,6 +17,18 @@
 //! let mel = mel_filterbank(22050.0, nzu!(2048), &MelFilterbankConfig::default()).unwrap();
 //! assert_eq!(mel.dim(), (128, 1025));
 //! ```
+//!
+//! - [`Window`] and [`get_window`] give analysis windows in the periodic form (the
+//!   default for spectral analysis) or the symmetric form (for filter design).
+//! - [`window_sumsquare`] is the squared-window overlap envelope that normalises an
+//!   inverse STFT; [`window_bandwidth`] is a window's equivalent noise bandwidth.
+//! - [`mel_filterbank`] with [`MelFilterbankConfig`] builds the triangular mel
+//!   filterbank on the Slaney or HTK scale ([`MelScale`]), with
+//!   any normalisation of [`MelFilterNorm`].
+//!
+//! The spectrograms of [`AudioTransforms`](crate::AudioTransforms) use the
+//! `spectrograms` crate's own symmetric windows and fixed Slaney filterbank; see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
 
 use std::num::NonZeroUsize;
 
@@ -715,7 +702,7 @@ impl MelFilterbankConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
