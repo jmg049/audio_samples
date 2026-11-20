@@ -1,22 +1,30 @@
-//! Voice Activity Detection (VAD) operations.
+//! Voice activity detection: per-frame speech or silence decisions from frame
+//! energy and zero-crossing rate, for finding the speech in clean recordings
+//! before heavier analysis (speech recognition, diarisation, noise suppression).
 //!
-//! # What
+//! [`AudioVoiceActivityDetection::voice_activity_mask`] is the primary entry
+//! point; [`AudioVoiceActivityDetection::speech_regions`] converts the frame
+//! mask into `(start_sample, end_sample)` pairs (a region starts at the first
+//! active frame's start and ends at the end of the first inactive frame
+//! after it, so regions extend by up to one frame).
 //!
-//! Frame-based VAD that classifies each audio frame as speech (`true`) or
-//! silence (`false`), returning per-frame boolean masks and contiguous speech
-//! regions as sample-index pairs.
+//! ```
+//! use audio_samples::operations::types::VadConfig;
+//! use audio_samples::{AudioVoiceActivityDetection, sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! # Why
+//! let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+//! let config = VadConfig::energy_only();
+//! let mask = audio.voice_activity_mask(&config).unwrap();
+//! assert!(mask.iter().any(|&v| v), "440 Hz sine should be detected as active");
+//! ```
 //!
-//! Many audio processing pipelines (ASR pre-processing, noise suppression,
-//! speaker diarisation) need to locate voiced segments before running more
-//! expensive analysis. Two short-time features computed per frame already
-//! separate speech from silence in clean recordings: the frame *energy*
-//! (speech is louder than the background) and the *zero-crossing rate*
-//! (voiced speech has a moderate ZCR; low-frequency hum has a very low ZCR;
-//! broadband noise and fricatives have a high ZCR).
+//! ## How it works
 //!
-//! # How
+//! Two short-time features separate speech from silence in clean recordings: the
+//! frame energy (speech is louder than the background) and the zero-crossing rate
+//! (voiced speech has a moderate rate, low-frequency hum a very low one, broadband
+//! noise and fricatives a high one).
 //!
 //! The signal x\[n\] (samples scaled to `[-1, 1]`) is cut into frames of
 //! L = `frame_size` samples starting every H = `hop_size` samples
@@ -52,7 +60,7 @@
 )]
 #![cfg_attr(
     not(feature = "statistics"),
-    doc = r#" rate, unlike `AudioStatistics::zero_crossing_rate` (with the `statistics` feature),"#
+    doc = r#" rate, unlike `AudioStatistics::zero_crossing_rate`,"#
 )]
 //! which returns crossings per second.
 //!
@@ -74,26 +82,6 @@
 //!    closures; minimum 1, so it cannot be disabled).
 //! 3. Speech runs shorter than `min_speech_frames` frames become silence.
 //! 4. Silence runs shorter than `min_silence_frames` frames become speech.
-//!
-//! [`AudioVoiceActivityDetection::voice_activity_mask`] is the primary entry
-//! point; [`AudioVoiceActivityDetection::speech_regions`] converts the frame
-//! mask into `(start_sample, end_sample)` pairs (a region starts at the first
-//! active frame's start and ends at the end of the first inactive frame
-//! after it, so regions extend by up to one frame).
-//!
-//! # Example
-//!
-//! ```
-//! use audio_samples::operations::traits::AudioVoiceActivityDetection;
-//! use audio_samples::operations::types::VadConfig;
-//! use audio_samples::{sample_rate, sine_wave};
-//! use std::time::Duration;
-//!
-//! let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
-//! let config = VadConfig::energy_only();
-//! let mask = audio.voice_activity_mask(&config).unwrap();
-//! assert!(mask.iter().any(|&v| v), "440 Hz sine should be detected as active");
-//! ```
 
 use std::num::NonZeroUsize;
 

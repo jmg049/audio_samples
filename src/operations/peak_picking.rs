@@ -1,14 +1,43 @@
-//! Peak picking and signal enhancement utilities for onset detection.
+//! Peak picking for onset strength curves: adaptive thresholding, local-maximum
+//! detection with a minimum separation, and the pre-processing steps
+//! (pre-emphasis, median filtering, normalisation, smoothing) that let one
+//! threshold work across quiet and loud passages.
+#![cfg_attr(
+    feature = "onset-detection",
+    doc = r#" [`AudioOnsetDetection`](crate::AudioOnsetDetection) uses it;"#
+)]
+#![cfg_attr(
+    not(feature = "onset-detection"),
+    doc = r#" `AudioOnsetDetection` uses it;"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" [`AudioRhythm::onset_detect`](crate::AudioRhythm::onset_detect) has its own picker."#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" `AudioRhythm::onset_detect` has its own picker."#
+)]
 //!
-//! This module provides the core signal analysis building blocks used by onset
-//! detection: adaptive thresholding, peak picking with temporal constraints, and
-//! signal pre-processing (pre-emphasis, median filtering, normalisation, smoothing).
+//! ```
+//! use audio_samples::operations::peak_picking::pick_peaks;
+//! use audio_samples::operations::types::PeakPickingConfig;
+//! use non_empty_slice::NonEmptySlice;
 //!
-//! Raw onset strength functions are noisy and have varying amplitude across signals
-//! and recording conditions. A fixed detection threshold fails in quiet sections and
-//! produces false positives in loud ones. This module handles signal conditioning and
-//! peak selection so that onset detectors can focus on their specific spectral or
-//! temporal features.
+//! let data = [0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
+//! let onset_strength = NonEmptySlice::from_slice(&data).unwrap();
+//! // Disable pre-processing steps that can suppress peaks on short signals.
+//! let mut config = PeakPickingConfig::default();
+//! config.pre_emphasis = false;
+//! config.median_filter = false;
+//! config.normalize_onset_strength = false;
+//! config.adaptive_threshold.window_size = 3;
+//! let peaks = pick_peaks(onset_strength, &config).unwrap();
+//! assert!(!peaks.is_empty());
+//! assert!(peaks.iter().all(|&i| i < data.len()));
+//! ```
+//!
+//! ## How it works
 //!
 //! The primary entry point is [`pick_peaks`], which applies a configurable pipeline
 //! to an onset strength sequence o\[i\] (one value per analysis frame):
@@ -28,26 +57,7 @@
 //! All lengths are in elements of the sequence (frames for onset detection;
 //! convert to seconds with `frame · hop_size / sample_rate`). Each step is also
 //! available as a standalone function for use in custom pipelines.
-//!
-//! # Example
-//!
-//! ```
-//! use audio_samples::operations::peak_picking::pick_peaks;
-//! use audio_samples::operations::types::PeakPickingConfig;
-//! use non_empty_slice::NonEmptySlice;
-//!
-//! let data = [0.1f64, 0.3, 0.8, 0.2, 0.4, 0.9, 0.1];
-//! let onset_strength = NonEmptySlice::from_slice(&data).unwrap();
-//! // Disable pre-processing steps that can suppress peaks on short signals.
-//! let mut config = PeakPickingConfig::default();
-//! config.pre_emphasis = false;
-//! config.median_filter = false;
-//! config.normalize_onset_strength = false;
-//! config.adaptive_threshold.window_size = 3;
-//! let peaks = pick_peaks(onset_strength, &config).unwrap();
-//! assert!(!peaks.is_empty());
-//! assert!(peaks.iter().all(|&i| i < data.len()));
-//! ```
+
 use std::num::NonZeroUsize;
 
 use non_empty_iter::{IntoNonEmptyIterator, NonEmptyIterator};

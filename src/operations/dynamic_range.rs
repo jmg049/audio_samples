@@ -1,19 +1,23 @@
-//! Dynamic range processing for audio signals.
+//! Dynamic range processors: compressor, limiter, noise gate and expander, as the
+//! methods of [`AudioDynamicRange`], configured by [`CompressorConfig`],
+//! [`LimiterConfig`], [`GateConfig`] and [`ExpanderConfig`] (each with presets).
+//! The building blocks, an [`EnvelopeFollower`] for level detection and a
+//! [`LookaheadBuffer`], are public for use in other processors.
 //!
-//! This module implements dynamic range control processors: compressors, limiters,
-//! noise gates, and expanders. Supporting utilities include an [`EnvelopeFollower`]
-//! for level detection and a [`LookaheadBuffer`] for anticipatory gain reduction.
+//! ```
+//! use audio_samples::{AudioDynamicRange, CompressorConfig, sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! Raw audio signals often have wide dynamic ranges that are impractical for
-//! playback, broadcast, or mixing. Dynamic range processors reduce or expand these
-//! differences to achieve consistent loudness, protect against clipping, or enhance
-//! perceived punch and clarity.
+//! // A loud tone through the vocal preset: -18 dBFS threshold, 3:1, +3 dB makeup.
+//! let loud = sine_wave::<f32>(440.0, Duration::from_millis(500), sample_rate!(44100), 0.9);
+//! let squashed = loud.apply_compressor(&CompressorConfig::vocal()).unwrap();
 //!
-//! All processors are accessed through the [`AudioDynamicRange`] trait. Behaviour is
-//! controlled by [`CompressorConfig`], [`LimiterConfig`], [`GateConfig`] and
-//! [`ExpanderConfig`], which provide preset constructors for common use cases.
+//! let peak = |a: &[f32]| a.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+//! let tail = &squashed.as_slice().unwrap()[11_025..]; // after the attack settles
+//! assert!(peak(tail) < 0.6);
+//! ```
 //!
-//! # How the processors work
+//! ## How it works
 //!
 //! Every processor is a feed-forward design with three stages, run per sample `n`
 //! and per channel:
@@ -28,7 +32,7 @@
 //! The gain is computed in the level domain: the envelope is smoothed first and
 //! the static curve is applied to the smoothed level.
 //!
-//! ## Detector
+//! ### Detector
 //!
 //! The detector value `d[n]` depends on [`DynamicRangeMethod`]:
 //!
@@ -39,7 +43,7 @@
 //!
 //! The detector choice therefore shifts the effective threshold.
 //!
-//! ## Attack and release ballistics
+//! ### Attack and release ballistics
 //!
 //! The envelope is a one-pole smoother with two coefficients:
 //!
@@ -57,7 +61,7 @@
 //! conventions (some 10–90 %, some to 63 %), so the numbers are not directly
 //! comparable between products.
 //!
-//! ## Static gain computer
+//! ### Static gain computer
 //!
 //! With input level `L` (dBFS), threshold `T` (dBFS), ratio `R` (≥ 1) and knee
 //! width `W` (dB), the compressor output level `Y = L − r` is
@@ -88,7 +92,7 @@
 //! `R = 10` attenuates a signal 20 dB under the threshold by 180 dB.
 //! Ratios below 1 produce upward expansion (a boost below the threshold).
 //!
-//! ## Lookahead and latency
+//! ### Lookahead and latency
 //!
 //! The compressor and limiter accept `lookahead_ms`, converted to
 //! `N_L = round(lookahead_ms · 10⁻³ · f_s)` samples. The detector sees the
@@ -123,19 +127,6 @@
 //!   unfiltered, and side-chain processing is mono only.
 //!
 //! [`SideChainConfig`]: crate::operations::types::SideChainConfig
-//!
-//! # Example
-//!
-//! ```
-//! use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
-//! use audio_samples::operations::types::CompressorConfig;
-//! use ndarray::Array1;
-//!
-//! let data = Array1::from_vec(vec![0.1f32, 0.8, 0.2, 0.9, 0.1]);
-//! let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-//! let config = CompressorConfig::vocal();
-//! audio.apply_compressor_in_place(&config).unwrap();
-//! ```
 
 use ndarray::{ArrayView1, ArrayViewMut1, s};
 use non_empty_slice::NonEmptySlice;
