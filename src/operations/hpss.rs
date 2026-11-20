@@ -223,17 +223,41 @@ impl HpssConfig {
     /// * `n_fft` - FFT size in samples (should be power of 2)
     /// * `hop_size` - Hop size in samples
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `hop_size` is larger than `n_fft`, which the STFT parameter
-    /// builder rejects.
+    /// Returns [`AudioSampleError::Parameter`] if `hop_size` is larger than `n_fft`,
+    /// and leaves the configuration unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::nzu;
+    /// use audio_samples::operations::hpss::HpssConfig;
+    ///
+    /// let mut config = HpssConfig::default();
+    /// config.set_stft_params(nzu!(1024), nzu!(256)).unwrap();
+    /// assert_eq!(config.stft_params.n_fft(), nzu!(1024));
+    ///
+    /// assert!(config.set_stft_params(nzu!(256), nzu!(1024)).is_err());
+    /// assert_eq!(config.stft_params.n_fft(), nzu!(1024));
+    /// ```
     #[inline]
-    pub fn set_stft_params(&mut self, n_fft: NonZeroUsize, hop_size: NonZeroUsize) {
+    pub fn set_stft_params(
+        &mut self,
+        n_fft: NonZeroUsize,
+        hop_size: NonZeroUsize,
+    ) -> AudioSampleResult<()> {
+        if hop_size > n_fft {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "hop_size",
+                format!("hop_size ({hop_size}) must not be larger than n_fft ({n_fft})"),
+            )));
+        }
         self.stft_params = StftParamsBuilder::default()
             .n_fft(n_fft)
             .hop_size(hop_size)
-            .build()
-            .expect("All parameters are set and valid according to the builder");
+            .build()?;
+        Ok(())
     }
 
     /// Set median filter sizes.
@@ -789,6 +813,23 @@ mod tests {
         );
         assert_eq!(harmonic.sample_rate(), sine_audio.sample_rate());
         assert_eq!(percussive.sample_rate(), sine_audio.sample_rate());
+    }
+
+    #[test]
+    fn set_stft_params_rejects_hop_larger_than_n_fft() {
+        let mut config = HpssConfig::default();
+        let before = config.clone();
+        let err = config
+            .set_stft_params(crate::nzu!(256), crate::nzu!(512))
+            .unwrap_err();
+        assert!(matches!(err, AudioSampleError::Parameter(_)));
+        assert_eq!(config, before);
+
+        config
+            .set_stft_params(crate::nzu!(512), crate::nzu!(512))
+            .unwrap();
+        assert_eq!(config.stft_params.n_fft(), crate::nzu!(512));
+        assert_eq!(config.stft_params.hop_size(), crate::nzu!(512));
     }
 
     #[test]
