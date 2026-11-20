@@ -538,6 +538,23 @@ odd-length spectral bin spacing, `frequency_to_note` and
 
 ### Changed
 
+- **Setters and lookups that panicked on bad arguments return errors.**
+  `HpssConfig::set_stft_params` returns `AudioSampleResult<()>` and rejects a
+  `hop_size` larger than `n_fft` with `AudioSampleError::Parameter`, leaving the
+  configuration unchanged. `PitchClass::from_index` returns
+  `AudioSampleResult<PitchClass>` (an index above 11 is an error);
+  `PitchClass::ALL` lists the twelve classes in order.
+  `DistanceMetric::distance` returns `AudioSampleResult<F>` (vectors of
+  different lengths are an error). `SampleType::from_bits` returns
+  `Option<SampleType>` (`None` for a width no sample type has).
+- **`AudioSamples::apply_to_channel_data` accepts any memory layout.** Channels
+  of non-contiguous multi-channel storage are copied into a buffer, passed to
+  the callback and written back; `try_apply_to_channel_data` still reports
+  such storage as an error.
+- **Waveform and spectrogram plots with `ChannelManagementStrategy::Separate`
+  (the default) reject audio with more than `MAX_SEPARATE_CHANNELS` (8)
+  channels** with `AudioSampleError::Parameter`; they panicked.
+
 - **`f64` decimal logarithms are correctly rounded.** `power_to_db`,
   `amplitude_to_db`, `perceptual_weighting`, the `A`/`B`/`C`/`D` frequency
   weightings (`frequency_weighting`, `multi_frequency_weighting`) and the
