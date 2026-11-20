@@ -1,37 +1,31 @@
-//! Mid/Side stereo encoding for Opus: [`OpusStereoCodec`] and helpers.
+//! [`OpusStereoCodec`]: two channels coded as mid, `(L + R) / 2`, and side,
+//! `(L − R) / 2`, each by its own [`OpusCodec`] with its own bit budget, as
+//! [`perceptual::stereo`](crate::codecs::perceptual::stereo) does for the perceptual
+//! codec. The side signal of a correlated recording is weak and takes a lower bit
+//! rate.
 //!
-//! ## What
-//!
-//! Extends the mono [`OpusCodec`] to two-channel audio using the same
-//! Mid/Side (M/S) matrix coding that [`crate::codecs::perceptual::stereo`]
-//! applies to the perceptual codec:
-//!
-//! - **Mid** = `(L + R) / 2` - the common (mono-compatible) content.
-//! - **Side** = `(L - R) / 2` - the stereo difference signal.
-//!
-//! Each channel is then compressed independently with its own [`OpusCodec`],
-//! allowing separate bit budgets. The side channel is typically less energetic
-//! and can receive fewer bits with minimal perceptual harm.
-//!
-//! ## Why
-//!
-//! Stereo audio is often highly correlated. M/S decorrelates the two channels,
-//! concentrating the signal energy in the mid channel and leaving a low-energy
-//! side channel. The side channel can then be coded at a lower bitrate.
-//!
-//! ## How
-//!
-//! ```rust,ignore
-//! use audio_samples::codecs::{encode, decode};
-//! use audio_samples::codecs::opus::{OpusStereoCodec, OpusConfig, OpusMode};
+//! ```rust
+//! use audio_samples::codecs::opus::{OpusConfig, OpusMode, OpusStereoCodec};
+//! use audio_samples::codecs::{decode, encode};
+//! use audio_samples::{AudioSamples, sample_rate};
+//! use ndarray::Array2;
 //! use spectrograms::WindowType;
 //!
-//! let mid_config  = OpusConfig::with_mode(OpusMode::Celt, 96_000);
-//! let side_config = OpusConfig::with_mode(OpusMode::Celt, 32_000);
-//! let codec = OpusStereoCodec::new(mid_config, side_config, WindowType::Hanning);
+//! let stereo = AudioSamples::new_multi_channel(
+//!     Array2::from_shape_fn((2, 4800), |(c, i)| {
+//!         let x = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48000.0).sin();
+//!         if c == 0 { 0.5 * x } else { 0.4 * x }
+//!     }),
+//!     sample_rate!(48000),
+//! )
+//! .unwrap();
 //!
-//! let encoded   = encode(&stereo_audio, codec)?;
-//! let recovered = decode::<OpusStereoCodec, f32>(encoded)?;
+//! let mid = OpusConfig::with_mode(OpusMode::Celt, 96_000);
+//! let side = OpusConfig::with_mode(OpusMode::Celt, 32_000);
+//! let codec = OpusStereoCodec::new(mid, side, WindowType::Hanning);
+//! let encoded = encode(&stereo, codec).unwrap();
+//! let decoded = decode::<OpusStereoCodec, f32>(encoded).unwrap();
+//! assert_eq!(decoded.num_channels().get(), 2);
 //! ```
 
 use std::num::NonZeroU32;

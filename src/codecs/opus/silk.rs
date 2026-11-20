@@ -1,36 +1,27 @@
-//! SILK-style speech mode: LPC-based frame encode/decode (Opus-inspired, not bitstream compatible).
+//! SILK-style speech mode: one frame through LPC analysis and residual
+//! quantisation, and back.
 //!
-//! ## What
+//! The encoder computes an LPC predictor ([`lpc`](super::lpc)), takes the
+//! prediction residual, normalises it by its peak and quantises it to 16 bits; the
+//! decoder dequantises, rescales and runs the LPC synthesis filter.
+//! [`silk_encode_frame_stateful`] also carries the LPC filter memory across frames
+//! ([`SilkState`]) and applies a single-tap long-term predictor; this is the path
+//! [`OpusCodec`](super::OpusCodec) uses. [`silk_encode_frame`] codes a frame on its
+//! own, from zero filter state.
 //!
-//! Implements one encode/decode cycle for a single SILK-style audio frame using
-//! the primitives from [`crate::codecs::opus::lpc`]:
+//! The LPC predictor removes the spectral envelope of voiced speech, leaving a
+//! residual with far less energy than the signal. Quantised at 16 bits per sample
+//! (256 kbit/s at 16 kHz), it gives a high SNR but not a low bit rate. Real SILK
+//! (RFC 6716) reaches 6 to 40 kbit/s with noise-shaped quantisation, LSF coding of
+//! the coefficients and range coding, none of which this mode has. For music and
+//! noise the LPC gains little; [`detect_mode`](super::mode::detect_mode) chooses
+//! CELT for those.
 //!
-//! 1. **Encode** - LPC analysis → prediction residual → gain normalisation →
-//!    16-bit residual quantisation.
-//! 2. **Decode** - 16-bit dequantisation → scale by gain → LPC synthesis.
+//! ## Limitations
 //!
-//! ## Why
-//!
-//! SILK exploits the predictability of voiced speech: the LPC predictor removes
-//! the spectral envelope, leaving a spectrally flat residual that is far smaller
-//! in energy than the original. This sketch quantises the residual at high
-//! resolution (16 bits per sample, i.e. 256 kbit/s at 16 kHz), which gives very
-//! high SNR but is not a low bitrate. Real SILK (RFC 6716) reaches 6-40 kbit/s
-//! with noise-shaped quantisation, LSF coding and range (entropy) coding, none of
-//! which are implemented here.
-//!
-//! For generic audio (music, noise) the LPC provides little prediction gain and
-//! [`crate::codecs::opus::celt`] should be preferred via the auto-detection in
-//! [`crate::codecs::opus::mode::detect_mode`].
-//!
-//! ## Sketch limitations
-//!
-//! - Each frame is encoded independently with **zero initial LPC state**.
-//!   A complete implementation would carry the LPC filter state across frames to
-//!   prevent boundary artifacts.
-//! - LPC coefficients are stored as `f32` values. Real SILK transmits Line
-//!   Spectral Frequency (LSF) parameters quantised to a codebook; the IO layer
-//!   (`audio_samples_io`) is responsible for that packing.
+//! - LPC coefficients are stored as `f32` values, not as quantised line spectral
+//!   frequencies.
+//! - The LTP state does not carry across frames.
 
 use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 

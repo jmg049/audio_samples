@@ -1,26 +1,12 @@
-//! Opus hybrid mode: SILK for the low band (0-8 kHz), CELT for the high band.
+//! Hybrid mode: SILK for the band below 8 kHz, CELT for the band above.
 //!
-//! ## What
-//!
-//! Mirrors the `Hybrid` operating mode of Opus (RFC 6716 §2) in this crate's
-//! Opus-inspired teaching codec (not bitstream compatible with Opus).
-//! The signal is split at a crossover frequency (8 kHz) using a first-order
-//! IIR filter; the low band is encoded with SILK (LPC speech codec) and the
-//! high band with CELT (perceptual MDCT codec).
-//!
-//! ## Why
-//!
-//! Hybrid mode is designed for super-wideband speech: the vocal-tract model
-//! (SILK) is appropriate for the low band where the speech formants lie, while
-//! CELT handles the high-frequency breath and sibilance that SILK cannot model
-//! efficiently.
-//!
-//! ## Reconstruction
-//!
-//! The first-order IIR crossover has the **perfect reconstruction** property:
-//! `LP[n] + HP[n] = x[n]` exactly. The decoder therefore reconstructs the
-//! original signal by summing the SILK-decoded low band and the CELT-decoded
-//! high band; the only error is the independent quantisation noise from each codec.
+//! The signal is split at [`HYBRID_CROSSOVER_HZ`] by a
+//! first-order IIR crossover, the low band is coded with SILK and the high band with
+//! CELT, and the decoder sums the two. The crossover reconstructs perfectly,
+//! `LP[n] + HP[n] = x[n]`, so the only error is the quantisation noise of each
+//! codec. The mode suits super-wideband speech: the vocal-tract model of SILK fits
+//! the band that holds the formants, and CELT codes the breath and sibilance above
+//! it.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 

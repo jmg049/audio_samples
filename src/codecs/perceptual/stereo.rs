@@ -1,41 +1,39 @@
 //! Mid/Side stereo encoding and the [`StereoPerceptualCodec`].
 //!
-//! ## What
+//! [`StereoPerceptualCodec`] extends the mono [`PerceptualCodec`] to two channels
+//! by mid/side coding. Mid = (L + R) / 2 carries the common content and
+//! Side = (L − R) / 2 the difference. Each is coded by its own perceptual codec with
+//! its own bit budget. Stereo recordings are usually highly correlated, so the side
+//! signal is weak and can be quantised coarsely with little audible effect.
+//! [`mid_side_encode`] and [`mid_side_decode`] are the matrix on its own.
 //!
-//! This module extends the mono [`PerceptualCodec`] to stereo audio using
-//! Mid/Side (M/S) matrix coding. Rather than coding left and right channels
-//! independently, M/S coding decorrelates them:
-//!
-//! - **Mid** = (L + R) / 2 - the common content (mono mix).
-//! - **Side** = (L - R) / 2 - the stereo difference signal.
-//!
-//! Each channel is then compressed with its own perceptual codec instance,
-//! allowing independent bit allocation. The side channel is typically less
-//! energetic and receives fewer bits, improving overall efficiency.
-//!
-//! ## Why
-//!
-//! Stereo signals are often highly correlated (especially classical or pop music).
-//! M/S coding exploits this: the side channel can be heavily quantized with
-//! minimal perceptual harm when it carries little energy. Codecs like MP3 and
-//! AAC use M/S stereo for this reason.
-//!
-//! ## How
-//!
-//! ```rust,ignore
-//! use audio_samples::codecs::{encode, decode, StereoPerceptualCodec};
-//! use audio_samples::{BandLayout, PsychoacousticConfig};
+//! ```rust
+//! use audio_samples::codecs::{StereoPerceptualCodec, decode, encode};
+//! use audio_samples::{AudioSamples, BandLayout, PsychoacousticConfig, sample_rate};
+//! use ndarray::Array2;
 //! use spectrograms::WindowType;
 //! use std::num::NonZeroUsize;
 //!
-//! let n_bands = NonZeroUsize::new(24).unwrap();
-//! let layout  = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
-//! let weights = PsychoacousticConfig::uniform_weights(n_bands);
-//! let config  = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+//! // 0.1 s of a 440 Hz tone, slightly quieter on the right.
+//! let stereo = AudioSamples::new_multi_channel(
+//!     Array2::from_shape_fn((2, 4410), |(c, i)| {
+//!         let x = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin();
+//!         if c == 0 { 0.5 * x } else { 0.4 * x }
+//!     }),
+//!     sample_rate!(44100),
+//! )
+//! .unwrap();
 //!
+//! let n_bands = NonZeroUsize::new(24).unwrap();
+//! let layout = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
+//! let weights = PsychoacousticConfig::uniform_weights(n_bands);
+//! let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+//!
+//! // 128 kbit for mid, 64 kbit for side.
 //! let codec = StereoPerceptualCodec::new(layout, config, WindowType::Hanning, 128_000, 64_000, 1);
-//! let encoded   = encode(&stereo_audio, codec)?;
-//! let recovered = decode::<StereoPerceptualCodec, f32>(encoded)?;
+//! let encoded = encode(&stereo, codec).unwrap();
+//! let decoded = decode::<StereoPerceptualCodec, f32>(encoded).unwrap();
+//! assert_eq!(decoded.num_channels().get(), 2);
 //! ```
 
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -120,7 +118,12 @@ pub struct StereoPerceptualEncodedAudio {
 ///
 /// ## Intended Usage
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use audio_samples::{AudioSamples, sample_rate};
+/// # let stereo_audio = AudioSamples::new_multi_channel(
+/// #     ndarray::Array2::from_shape_fn((2, 4410), |(c, i)| (i as f32 * 0.06).sin() * (0.5 - 0.1 * c as f32)),
+/// #     sample_rate!(44100),
+/// # ).unwrap();
 /// use audio_samples::{BandLayout, PsychoacousticConfig};
 /// use audio_samples::codecs::{encode, decode, StereoPerceptualCodec};
 /// use spectrograms::WindowType;
@@ -139,6 +142,8 @@ pub struct StereoPerceptualEncodedAudio {
 /// );
 /// let encoded   = encode(&stereo_audio, codec)?;
 /// let recovered = decode::<StereoPerceptualCodec, f32>(encoded)?;
+/// assert_eq!(recovered.num_channels().get(), 2);
+/// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 ///
 /// ## Invariants

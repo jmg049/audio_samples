@@ -1,24 +1,20 @@
-//! Perceptual band layout constructors and frequency-scale helpers.
+//! Perceptual band layouts and the frequency-scale conversions behind them.
 //!
-//! This module provides preset [`BandLayout`] constructors that partition the
-//! audible spectrum into perceptually-motivated bands, along with the
-//! conversion helpers that underpin them.
+//! A [`BandLayout`] partitions the bins of a spectrum (MDCT or FFT, whichever
+//! length is passed as `n_bins`) into bands that follow the ear's frequency
+//! resolution:
 //!
-//! Two scales are supported:
-//!
-//! - **Bark** - 24 critical bands derived from the Traunmüller (1990) formula.
-//!   Closely models the ear's frequency resolution and is the foundation for
-//!   most MPEG psychoacoustic models.
-//! - **Mel** - linearly-spaced on the Mel scale (O'Shaughnessy formula).
-//!   Commonly used for speech and music feature extraction.
+//! - [`BandLayout::bark`]: bands of equal width on the Bark scale (Traunmüller,
+//!   1990), the basis of most MPEG psychoacoustic models.
+//! - [`BandLayout::mel`]: bands of equal width on the HTK (O'Shaughnessy) mel scale.
+//! - [`BandLayout::erb`]: bands of equal width on the ERB-number scale.
+//! - [`BandLayout::celt`]: the fixed band edges of the CELT codec.
 //!
 //! Each [`Band`] produced by these constructors stores:
 //! - `start_bin` / `end_bin` - indices into the caller's frequency-bin array
 //!   (MDCT or FFT, whichever was passed as `n_bins`).
 //! - `centre_frequency` - centre frequency in Hz.
 //! - `perceptual_position` - normalised position in [0, 1] on the respective scale.
-//!
-//! ## Example
 //!
 //! ```rust
 //! # #[cfg(feature = "psychoacoustic")] {

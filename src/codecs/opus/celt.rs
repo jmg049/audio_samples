@@ -1,35 +1,18 @@
-//! CELT-style music mode: MDCT + psychoacoustic bit allocation (Opus-inspired, not bitstream compatible).
+//! CELT-style music mode: one frame through the perceptual codec pipeline.
 //!
-//! ## What
+//! [`celt_encode_frame`] runs an MDCT whose window equals the frame length,
+//! psychoacoustic masking, bit allocation in proportion to perceptual importance
+//! and scalar quantisation per band; [`celt_decode_frame`] dequantises and runs the
+//! inverse MDCT with overlap-add. It is one segment of
+//! [`PerceptualCodec`](crate::PerceptualCodec) scoped to a frame, and
+//! [`CeltEncodedFrame`] mirrors
+//! [`EncodedSegment`](crate::codecs::perceptual::codec::EncodedSegment) plus the
+//! frame's sample count.
 //!
-//! Implements one encode/decode cycle for a single Opus CELT audio frame.
-//! Each frame runs the full perceptual codec pipeline from
-//! [`crate::codecs::perceptual`]:
-//!
-//! 1. MDCT analysis (window size = frame length).
-//! 2. Psychoacoustic masking → per-band importance and allowed noise.
-//! 3. Bit allocation: distribute the bit budget across bands proportional to
-//!    perceptual importance.
-//! 4. Scalar quantisation of MDCT coefficients per band.
-//!
-//! Decoding runs the inverse: dequantise → IMDCT with overlap-add.
-//!
-//! ## Why
-//!
-//! Real CELT is the wideband, low-latency half of Opus; it codes per-band energies
-//! explicitly and the normalised band shapes with pyramid vector quantisation (PVQ),
-//! using a range coder. This module is only *inspired* by it: it is a generic
-//! perceptual MDCT codec that codes the whole spectrum in one MDCT block matching
-//! the frame length, with scalar quantisation. Like CELT, it makes no
+//! Real CELT codes per-band energies explicitly and the normalised band shapes with
+//! pyramid vector quantisation and a range coder. This mode codes the whole
+//! spectrum with scalar quantisation instead. Like CELT, it makes no
 //! speech-specific assumptions, which suits music and generic audio.
-//!
-//! ## Relationship to `PerceptualCodec`
-//!
-//! [`celt_encode_frame`] is essentially one call to the internal
-//! `encode_segment` helper from `PerceptualCodec`, scoped to a single Opus
-//! frame. The [`CeltEncodedFrame`] type mirrors
-//! [`crate::codecs::perceptual::codec::EncodedSegment`] with the addition of
-//! the per-frame sample count.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 

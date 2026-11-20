@@ -1,42 +1,43 @@
-//! Bit allocation and uniform scalar quantization for perceptual audio codecs.
+//! Bit allocation and uniform scalar quantisation for perceptual audio codecs.
 //!
-//! ## What
+//! Bit allocation turns the band metrics of a psychoacoustic analysis into a bit
+//! budget per band: [`allocate_bits`] weights bands by energy and perceptual
+//! importance, and [`refine_step_sizes`] turns each budget into a quantiser step,
+//! so the total budget controls the reconstruction quality. A band's
+//! `allowed_noise` seeds its initial step. [`quantize`] maps MDCT coefficients to
+//! integer indices and [`dequantize`] maps them back.
 //!
-//! Provides the quantization half of the perceptual codec pipeline:
-//! - **Bit allocation** - distribute a fixed bit budget across frequency bands
-//!   in proportion to each band's perceptual importance.
-//! - **Quantization** - map `f32` MDCT coefficients to integer indices with a
-//!   step size derived from the psychoacoustic masking threshold.
-//! - **Dequantization** - recover `f32` coefficients from integer indices.
+//! ```rust
+//! use audio_samples::codecs::perceptual::analyse_signal;
+//! use audio_samples::{
+//!     BandLayout, PsychoacousticConfig, allocate_bits, dequantize, quantize, sample_rate,
+//!     sine_wave,
+//! };
+//! use spectrograms::WindowType;
+//! use std::num::NonZeroUsize;
+//! use std::time::Duration;
 //!
-//! ## Why
+//! let audio = sine_wave::<f32>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.5);
+//! let n_bands = NonZeroUsize::new(24).unwrap();
+//! let layout = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
+//! let weights = PsychoacousticConfig::uniform_weights(n_bands);
+//! let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+//! let result = analyse_signal(&audio, WindowType::Hanning, &layout, &config).unwrap();
 //!
-//! Psychoacoustic analysis ([`super::analyse_signal`]) produces per-band
-//! `energy`, `importance`, and `allowed_noise` scores. This module bridges
-//! analysis and coding: [`allocate_bits`] distributes the bit budget across
-//! bands (weighted by energy and perceptual importance), and
-//! [`refine_step_sizes`] turns that budget into per-band quantiser step sizes
-//! via optimal bit allocation, so the bit budget genuinely controls
-//! reconstruction quality. `allowed_noise` seeds the initial perceptual step.
-//!
-//! ## How
-//!
-//! ```rust,ignore
-//! // After running analyse_signal:
 //! let allocation = allocate_bits(&result.band_metrics, 128_000, 1);
-//! let quantized  = quantize(
+//! let indices = quantize(
 //!     result.coefficients.as_non_empty_slice(),
 //!     result.n_coefficients,
 //!     result.n_frames,
 //!     &allocation,
 //! );
-//! // … transmit or store `quantized` …
-//! let recovered  = dequantize(
-//!     quantized.as_non_empty_slice(),
+//! let recovered = dequantize(
+//!     indices.as_non_empty_slice(),
 //!     result.n_coefficients,
 //!     result.n_frames,
 //!     &allocation,
 //! );
+//! assert_eq!(recovered.len(), result.coefficients.len());
 //! ```
 
 use std::num::NonZeroUsize;
@@ -45,7 +46,7 @@ use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 
 use super::BandMetrics;
 
-/// Bit allocation and quantization step size for a single frequency band.
+/// Bit allocation and quantisation step size for a single frequency band.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BandAllocation {
     /// First spectral bin index (inclusive) from the source [`Band`](super::Band).
@@ -64,7 +65,7 @@ pub struct BandAllocation {
     /// overwrites it with the rate-distortion word length it actually used to set
     /// `step_size`, keeping the clamp consistent with the chosen resolution.
     pub word_length: u32,
-    /// Uniform quantization step size in linear amplitude.
+    /// Uniform quantisation step size in linear amplitude.
     ///
     /// Initialised from the psychoacoustic masking threshold
     /// (`10^(allowed_noise_db / 20) × √12`) and then refined by
@@ -81,9 +82,9 @@ pub struct BitAllocationResult {
     pub allocations: NonEmptyVec<BandAllocation>,
 }
 
-/// Computes the quantization step size for a band from its allowed-noise budget.
+/// Computes the quantisation step size for a band from its allowed-noise budget.
 ///
-/// Uses the relation between uniform quantization noise and step size:
+/// Uses the relation between uniform quantisation noise and step size:
 /// `noise_rms = step_size / sqrt(12)`. Setting `noise_rms` equal to the linear
 /// amplitude corresponding to `allowed_noise_db` gives:
 ///
@@ -94,7 +95,7 @@ pub struct BitAllocationResult {
 ///
 /// # Returns
 /// Step size in linear amplitude, clamped to a minimum of `1e-6` to prevent
-/// divide-by-zero in quantization.
+/// divide-by-zero in quantisation.
 ///
 /// [`BandMetric::allowed_noise`]: super::BandMetric::allowed_noise
 #[inline]
@@ -111,7 +112,7 @@ pub fn step_size_from_allowed_noise(allowed_noise_db: f32) -> f32 {
 /// 1. Reserve `min_bits_per_band` bits for every band.
 /// 2. Distribute the remaining budget proportionally to `band.importance`
 ///    (clamped to ≥ 0). Bands with zero importance receive no extra bits.
-/// 3. Derive a quantization step size for each band from
+/// 3. Derive a quantisation step size for each band from
 ///    [`step_size_from_allowed_noise`].
 ///
 /// # Arguments
@@ -196,7 +197,7 @@ pub fn max_index_for_word_length(bits: u32) -> i32 {
     }
 }
 
-/// Uniformly quantizes a slice of `f32` MDCT coefficients to `i32` indices,
+/// Uniformly quantises a slice of `f32` MDCT coefficients to `i32` indices,
 /// clamping each index to the band's per-coefficient word length.
 ///
 /// `q[i] = clamp(round(c[i] / step_size), ±(2^(bits_per_coeff-1) - 1))`
@@ -207,7 +208,7 @@ pub fn max_index_for_word_length(bits: u32) -> i32 {
 ///
 /// # Arguments
 /// - `coefficients` - Float coefficients for a single band.
-/// - `step_size` - Quantization step size (from [`BandAllocation::step_size`]).
+/// - `step_size` - Quantisation step size (from [`BandAllocation::step_size`]).
 /// - `bits_per_coeff` - Word length per coefficient; the index is clamped to
 ///   `±(2^(bits_per_coeff-1) - 1)`. Pass `0` to force every index to `0`, or a
 ///   large value (≥ 31) to disable clamping.
@@ -224,13 +225,13 @@ pub fn quantize_band(coefficients: &[f32], step_size: f32, bits_per_coeff: u32) 
         .collect()
 }
 
-/// Dequantizes `i32` indices back to `f32` coefficients.
+/// Dequantises `i32` indices back to `f32` coefficients.
 ///
 /// `c[i] = q[i] × step_size`
 ///
 /// # Arguments
 /// - `quantized` - Integer indices from [`quantize_band`].
-/// - `step_size` - The same step size used during quantization.
+/// - `step_size` - The same step size used during quantisation.
 #[inline]
 #[must_use]
 pub fn dequantize_band(quantized: &[i32], step_size: f32) -> Vec<f32> {
@@ -240,7 +241,7 @@ pub fn dequantize_band(quantized: &[i32], step_size: f32) -> Vec<f32> {
 /// Quantizes all MDCT coefficients using the given band allocation.
 ///
 /// Iterates over every band in `allocation` and applies uniform scalar
-/// quantization to the corresponding coefficient bins across all frames.
+/// quantisation to the corresponding coefficient bins across all frames.
 /// Bins that fall outside any band allocation are set to 0.
 ///
 /// Coefficients are expected in row-major layout: index `k * n_frames + f`
@@ -296,7 +297,7 @@ pub fn quantize(
     unsafe { NonEmptyVec::new_unchecked(out) }
 }
 
-/// Dequantizes all MDCT coefficient bands using the given allocation.
+/// Dequantises all MDCT coefficient bands using the given allocation.
 ///
 /// Inverse of [`quantize`]: reconstructs `f32` coefficients from integer
 /// indices. Bins outside any band in `allocation` are reconstructed as 0.

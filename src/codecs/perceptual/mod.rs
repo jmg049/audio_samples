@@ -1,54 +1,32 @@
-//! Psychoacoustic analysis types and the core analysis pipeline.
+//! Psychoacoustic analysis: how loud sounds mask quieter ones, measured per band.
 //!
-//! ## What
-//!
-//! This module provides the data types and entry-point function for the
-//! psychoacoustic analysis pipeline used by perceptual audio codecs. It models
-//! how the human auditory system masks quieter sounds with louder ones, allowing
-//! a codec to allocate more bits where they are perceptually important and fewer
-//! where the ear cannot detect the difference.
-//!
-//! ## Why
-//!
-//! Perceptual codecs (MP3, AAC, Vorbis, Opus) achieve high compression by
-//! quantizing spectral coefficients below the masking threshold more coarsely.
-//! This module exposes the analysis layer - computing masking thresholds and
-//! signal-to-mask ratios - independently of any specific bit-allocation or
-//! entropy-coding scheme.
-//!
-//! ## How
-//!
-//! Use [`BandLayout::bark`] or [`BandLayout::mel`] to build a perceptual band
-//! partition, construct a [`PsychoacousticConfig`] with masking parameters, then
-//! call [`analyse_signal`] (or the [`AudioPerceptualAnalysis`] trait method) on
-//! an [`AudioSamples`] value:
+//! The analysis computes an MDCT, groups its bins into perceptual bands
+//! ([`BandLayout`]), and for each band the masking threshold and the
+//! signal-to-mask ratio ([`BandMetric`]). A codec can then spend bits where the ear
+//! would hear the quantisation noise and save them where masking hides it. The
+//! analysis is independent of any bit allocation or entropy coding:
+//! [`quantization`] and [`codec`] build a codec on it, and [`masking`] holds the
+//! masking model. Call [`analyse_signal`] or the
+//! [`AudioPerceptualAnalysis`] method on an [`AudioSamples`]:
 //!
 //! ```rust
-//! # #[cfg(feature = "psychoacoustic")] {
 //! use audio_samples::{
-//!     AudioPerceptualAnalysis, BandLayout, PsychoacousticConfig,
-//!     sine_wave, sample_rate,
+//!     AudioPerceptualAnalysis, BandLayout, PsychoacousticConfig, sample_rate, sine_wave,
 //! };
 //! use spectrograms::WindowType;
-//! use non_empty_slice::NonEmptySlice;
 //! use std::num::NonZeroUsize;
 //! use std::time::Duration;
 //!
 //! let signal = sine_wave::<f32>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.5);
-//! let n_bins = NonZeroUsize::new(1024).unwrap();
-//! let layout = BandLayout::bark(NonZeroUsize::new(24).unwrap(), 44100.0, n_bins);
-//!
-//! let weights = vec![1.0f32; 24];
-//! let weights_slice = NonEmptySlice::from_slice(&weights).unwrap();
-//! let config = PsychoacousticConfig::new(
-//!     -60.0, 14.5, 5.5, 25.0, 6.0, weights_slice, 1e-10,
-//! );
+//! let n_bands = NonZeroUsize::new(24).unwrap();
+//! let layout = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
+//! let weights = PsychoacousticConfig::uniform_weights(n_bands);
+//! let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
 //!
 //! let result = signal
 //!     .analyse_psychoacoustic(WindowType::Hanning, &layout, &config)
 //!     .unwrap();
 //! assert_eq!(result.band_metrics.len().get(), 24);
-//! # }
 //! ```
 
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -201,7 +179,7 @@ impl BandLayout {
 /// Per-band psychoacoustic metrics computed by [`analyse_signal`].
 ///
 /// Stores the energy, masking threshold, signal-to-mask ratio, importance, and
-/// allowed quantization noise for a single frequency band. Used by codec bit
+/// allowed quantisation noise for a single frequency band. Used by codec bit
 /// allocators to decide how finely to quantize each band's MDCT coefficients.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BandMetric {
@@ -216,7 +194,7 @@ pub struct BandMetric {
     /// Perceptual importance: `weight × max(SMR, 0)`. Higher values warrant
     /// more bits.
     pub importance: f32,
-    /// Quantization noise budget in dB: equal to the `masking_threshold` - noise
+    /// Quantisation noise budget in dB: equal to the `masking_threshold` - noise
     /// kept at or below the masking threshold is perceptually inaudible.
     pub allowed_noise: f32,
 }
@@ -738,7 +716,7 @@ where
     ))
 }
 
-/// Reconstructs an audio signal from (possibly quantized) MDCT coefficients.
+/// Reconstructs an audio signal from (possibly quantised) MDCT coefficients.
 ///
 /// This is the inverse path of [`analyse_signal`]: given coefficients in the
 /// same layout as [`PerceptualAnalysisResult::coefficients`], it runs the IMDCT

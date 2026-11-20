@@ -11,13 +11,8 @@
 //! | `CELT` | MDCT codec for fullband music and generic audio (CELT/Xiph). |
 //! | `Hybrid` | SILK for 0-8 kHz, CELT extension for 8-20 kHz. |
 //!
-//! The mode may be forced via [`OpusConfig::mode`] or set to `None` to trigger
-//! automatic per-frame detection via [`detect_mode`].
-//!
-//! ## Sketch note
-//!
-//! Hybrid mode is implemented in [`crate::codecs::opus::hybrid`]: the low band is
-//! coded with the SILK-style path and the high band with the CELT-style path.
+//! [`OpusConfig::mode`] forces a mode; `None` selects one per frame with
+//! [`detect_mode`].
 
 // ── OpusMode ──────────────────────────────────────────────────────────────────
 

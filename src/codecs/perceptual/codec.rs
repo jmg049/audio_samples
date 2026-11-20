@@ -1,4 +1,6 @@
-//! [`AudioCodec`] trait, [`PerceptualCodec`], and encoded-audio types.
+//! The [`AudioCodec`] contract and the mono [`PerceptualCodec`]: MDCT,
+//! psychoacoustic analysis, bit allocation and uniform quantisation per band, and
+//! the inverse on decode.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -22,15 +24,26 @@ use super::{
 /// driver. Both `encode` and `decode` are generic over the sample type, so the
 /// caller decides the input and output representations independently:
 ///
-/// ```rust,ignore
-/// use audio_samples::codecs::{encode, decode, PerceptualCodec};
+/// ```rust
+/// # use audio_samples::{BandLayout, PerceptualCodec, PsychoacousticConfig, sample_rate, sine_wave};
+/// # use spectrograms::WindowType;
+/// # use std::num::NonZeroUsize;
+/// # let audio = sine_wave::<f32>(440.0, std::time::Duration::from_millis(100), sample_rate!(44100), 0.5);
+/// # let n_bands = NonZeroUsize::new(24).unwrap();
+/// # let layout = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
+/// # let weights = PsychoacousticConfig::uniform_weights(n_bands);
+/// # let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+/// # let window = WindowType::Hanning;
+/// use audio_samples::codecs::{decode, encode};
 ///
 /// // Encode from f32 audio.
-/// let codec = PerceptualCodec::new(band_layout, config, WindowType::Hanning, 128_000, 1);
-/// let encoded = encode(&audio_f32, codec)?;
+/// let codec = PerceptualCodec::new(layout, config, WindowType::Hanning, 128_000, 1);
+/// let encoded = encode(&audio, codec)?;
 ///
 /// // Decode to i16 (audio-aware scaling applied automatically).
 /// let recovered = decode::<PerceptualCodec, i16>(encoded)?;
+/// assert_eq!(recovered.samples_per_channel(), audio.samples_per_channel());
+/// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 pub trait AudioCodec: Sized {
     /// The in-memory encoded representation produced by [`encode`](AudioCodec::encode).
@@ -96,7 +109,7 @@ pub struct EncodedSegment {
 /// appear when transient frames are re-encoded with a shorter window.
 ///
 /// Everything needed to reconstruct the original signal is embedded here:
-/// MDCT parameters, quantization step sizes, and the original signal length.
+/// MDCT parameters, quantisation step sizes, and the original signal length.
 #[derive(Debug, Clone)]
 pub struct PerceptualEncodedAudio {
     /// Encoded segments in temporal order.
@@ -114,8 +127,8 @@ pub struct PerceptualEncodedAudio {
 /// `PerceptualCodec` implements the full perceptual codec pipeline:
 /// analysis (MDCT → band energies → masking thresholds), bit allocation
 /// (distribute `bit_budget` bits proportional to band importance), and
-/// quantization (uniform scalar quantization per band). Decoding runs the
-/// inverse: dequantization followed by IMDCT with overlap-add.
+/// quantisation (uniform scalar quantisation per band). Decoding runs the
+/// inverse: dequantisation followed by IMDCT with overlap-add.
 ///
 /// When `short_window_size` is set, the codec performs **window switching**:
 /// transient frames are re-encoded with the shorter window for better time
@@ -124,9 +137,11 @@ pub struct PerceptualEncodedAudio {
 ///
 /// ## Intended Usage
 ///
-/// ```rust,ignore
-/// use audio_samples::{BandLayout, PsychoacousticConfig};
-/// use audio_samples::codecs::{encode, decode, PerceptualCodec};
+/// ```rust
+/// # use audio_samples::{sample_rate, sine_wave};
+/// # let audio = sine_wave::<f32>(440.0, std::time::Duration::from_millis(100), sample_rate!(44100), 0.5);
+/// use audio_samples::codecs::{decode, encode};
+/// use audio_samples::{BandLayout, PerceptualCodec, PsychoacousticConfig};
 /// use spectrograms::WindowType;
 /// use std::num::NonZeroUsize;
 ///
@@ -147,6 +162,8 @@ pub struct PerceptualEncodedAudio {
 ///     layout, config, WindowType::Hanning, 128_000, 1,
 ///     NonZeroUsize::new(2048).unwrap(), short_win, 8.0,
 /// );
+/// assert_eq!(recovered.samples_per_channel(), audio.samples_per_channel());
+/// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 ///
 /// ## Invariants
@@ -571,10 +588,20 @@ impl AudioCodec for PerceptualCodec {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use audio_samples::codecs::{encode, PerceptualCodec};
+/// ```rust
+/// # use audio_samples::{BandLayout, PerceptualCodec, PsychoacousticConfig, sample_rate, sine_wave};
+/// # use spectrograms::WindowType;
+/// # use std::num::NonZeroUsize;
+/// # let audio = sine_wave::<f32>(440.0, std::time::Duration::from_millis(100), sample_rate!(44100), 0.5);
+/// # let n_bands = NonZeroUsize::new(24).unwrap();
+/// # let layout = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
+/// # let weights = PsychoacousticConfig::uniform_weights(n_bands);
+/// # let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+/// # let window = WindowType::Hanning;
+/// use audio_samples::codecs::encode;
 ///
 /// let encoded = encode(&audio, PerceptualCodec::new(layout, config, window, 128_000, 1))?;
+/// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
 pub fn encode<C: AudioCodec, T: StandardSample>(
@@ -593,11 +620,25 @@ pub fn encode<C: AudioCodec, T: StandardSample>(
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use audio_samples::codecs::{decode, PerceptualCodec};
+/// ```rust
+/// # use audio_samples::{BandLayout, PerceptualCodec, PsychoacousticConfig, sample_rate, sine_wave};
+/// # use spectrograms::WindowType;
+/// # use std::num::NonZeroUsize;
+/// # let audio = sine_wave::<f32>(440.0, std::time::Duration::from_millis(100), sample_rate!(44100), 0.5);
+/// # let n_bands = NonZeroUsize::new(24).unwrap();
+/// # let layout = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
+/// # let weights = PsychoacousticConfig::uniform_weights(n_bands);
+/// # let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+/// # let window = WindowType::Hanning;
+/// # use audio_samples::codecs::encode;
+/// # let encoded_a = encode(&audio, PerceptualCodec::new(layout.clone(), config.clone(), window.clone(), 128_000, 1))?;
+/// # let encoded_b = encode(&audio, PerceptualCodec::new(layout, config, window, 128_000, 1))?;
+/// use audio_samples::codecs::decode;
 ///
 /// let recovered_f32 = decode::<PerceptualCodec, f32>(encoded_a)?;
 /// let recovered_i16 = decode::<PerceptualCodec, i16>(encoded_b)?;
+/// assert_eq!(recovered_f32.samples_per_channel(), recovered_i16.samples_per_channel());
+/// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
 pub fn decode<C: AudioCodec, U: StandardSample>(
