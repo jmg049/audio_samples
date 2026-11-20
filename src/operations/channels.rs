@@ -1,23 +1,9 @@
-//! Channel manipulation operations for [`AudioSamples`].
-//!
-//! This module implements the [`AudioChannelOps`] trait, which provides
-//! mono/stereo conversions, channel extraction, panning, balancing,
-//! interleaving, and per-channel transforms on [`AudioSamples`] of any
-//! supported sample type.
-//!
-//! Multi-channel audio is the norm in production audio.  A single trait
-//! with a uniform interface lets callers convert between layouts, isolate
-//! individual channels, and apply channel-aware effects without needing
-//! to know whether the underlying storage is mono, stereo, or surround.
-//!
-//! Bring [`AudioChannelOps`] into scope and call methods on any
-//! [`AudioSamples`] value.  Conversion methods that produce new audio
-//! (e.g. `to_mono`) return owned `AudioSamples<'static, T>`; in-place
-//! methods (e.g. `pan_in_place`) mutate through `&mut self`.
+//! Channel operations: mono and stereo conversion, duplicating, extracting,
+//! borrowing and swapping channels, panning, balance, per-channel processing,
+//! and interleaving, as the methods of [`AudioChannelOps`].
 //!
 //! ```
-//! use audio_samples::{AudioSamples, sample_rate};
-//! use audio_samples::operations::traits::AudioChannelOps;
+//! use audio_samples::{AudioChannelOps, AudioSamples, sample_rate};
 //! use non_empty_slice::NonEmptyVec;
 //!
 //! let samples = NonEmptyVec::new(vec![1.0f32, 0.5, -0.5, -1.0]).unwrap();
