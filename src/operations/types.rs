@@ -1,42 +1,27 @@
 #![allow(unused_imports)]
-//! Configuration types and support enumerations for audio processing operations.
+//! Configuration structs and option enums for the operation traits, gathered in
+//! one module: normalisation, fades and padding, channel conversion, resampling
+//! quality, IIR and EQ design, dynamics, voice activity detection, peak picking
+//! and more. Most are re-exported at the crate root.
 //!
-//! This module defines every configuration struct, option enum, and helper type
-//! used by the audio processing traits. Types are grouped by the feature gate that
-//! enables them: editing, processing, channels, VAD, resampling, transforms, pitch
-//! analysis, IIR filtering, parametric EQ, dynamic range, and peak picking.
-//!
-//! Centralising configuration types in one place ensures consistent naming, shared
-//! validation logic, and a single source of truth for parameter constraints. Callers
-//! construct a typed configuration value and pass it to the relevant processing
-//! method, rather than threading raw primitive arguments through call chains.
-//!
-//! Each struct that accepts numeric bounds exposes a `validate` method that checks
-//! invariants before the value is submitted to a processing call. Using preset
-//! constructors (e.g.
-#![cfg_attr(feature = "dynamic-range", doc = r#" [`CompressorConfig::vocal`],"#)]
+//! Structs with numeric bounds have a `validate` method that checks them, and many
+//! have presets for common cases, such as
+#![cfg_attr(feature = "dynamic-range", doc = r#" [`CompressorConfig::vocal`] and"#)]
 #![cfg_attr(
     not(feature = "dynamic-range"),
-    doc = r#" `CompressorConfig::vocal` with the `dynamic-range` feature,"#
+    doc = r#" `CompressorConfig::vocal` and"#
 )]
-#![cfg_attr(feature = "vad", doc = r#" [`VadConfig::energy_only`])"#)]
-#![cfg_attr(
-    not(feature = "vad"),
-    doc = r#" `VadConfig::energy_only` with the `vad` feature)"#
-)]
-//! is the quickest path to a sensible default.
-//!
-//! Import the types you need from [`audio_samples::operations::types`](crate::operations::types) or via the
-//! crate-level re-export. Construct a configuration using one of the provided
-//! constructors or preset methods, optionally adjust fields, then pass it to the
-//! corresponding processing function.
+#![cfg_attr(feature = "vad", doc = r#" [`VadConfig::energy_only`]."#)]
+#![cfg_attr(not(feature = "vad"), doc = r#" `VadConfig::energy_only`."#)]
+//! [Configuration](crate#configuration) in the crate root describes the `Default`
+//! and `librosa()` conventions.
 //!
 //! ```
 //! # #[cfg(feature = "processing")]
 //! # {
 //! use audio_samples::operations::types::NormalizationConfig;
 //!
-//! // Use a preset - peak normalise to 1.0
+//! // A preset: peak normalisation to 1.0.
 //! let config = NormalizationConfig::<f64>::peak_normalized();
 //! assert_eq!(config.target, Some(1.0));
 //! # }
