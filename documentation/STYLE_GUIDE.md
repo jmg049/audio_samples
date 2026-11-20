@@ -32,33 +32,46 @@ These have **different goals** and **different expectations**.
 
 ## Module-Level Documentation
 
-Module-level documentation is **conceptual and user-facing**. Its purpose is to explain *what this part of the library represents*, not how it is implemented.
+Module-level documentation is **conceptual and user-facing**. It tells a reader what this part of the library is for, when to use it, and what they need to know to use it correctly.
 
-Every public module **must** include module-level documentation that answers all of the following.
+Every public module **must** have module-level documentation in this order, omitting any section that would be empty:
 
-### Required Content
+```text
+//! <One sentence: what this module provides, in user terms.> <One sentence: when to
+//! use it and, if a sibling API overlaps, which one to prefer (with a link).>
+//!
+//! ```rust
+//! // 5-15 lines, tested, realistic input (sine_wave / example_clip), asserts the point.
+//! ```
+//!
+//! ## Concepts        terms a newcomer needs to use the API, 2-6 sentences; link the guide for depth
+//! ## How it works    the design decision and why, briefly; not step lists
+//! ## Conventions     units, shapes, centring, scaling, precision exceptions; only what differs
+//!                    from the crate-wide rules
+//! ## Limitations     behaviour a user could trip on; no bug reports, no dependency versions
+//! ## Definitions     short formulas the results are defined by; longer ones go on the items
+//! ## References      papers and books
+```
 
-**What is this module?**
-A high-level conceptual description written in clear prose. This should introduce the abstraction, not the mechanics.
+### Rules
 
-**Why does this module exist?**
-The design motivation. What role does this module play in the wider library? What problem does it solve or isolate?
-
-**How should it be used?**
-Guidance on correct usage patterns, including examples and best practices. This should focus on *intended usage*, not edge cases.
-
-At least one example should be provided for public modules unless there is a documented reason not to. Where possible, examples should be written as executable `rustdoc` tests.
-
----
+* The first two sentences carry the *what*; "How it works" carries the *why*. Do not use literal "What", "Why" or "How" headings.
+* Put a short example directly after the summary. It runs as a doctest; gate it on features with hidden `# #[cfg(feature = "...")] {` lines rather than `ignore`. Import re-exported items from the crate root and assert the point of the example.
+* Crate-wide rules live in one place, the crate root: precision, planar layout and non-emptiness, `op` / `op_in_place`, config `Default` and `librosa()`, array shapes and frame centring. Modules link there (`crate#precision`, `crate#array-layout`, `crate#configuration`) and state only their own exceptions.
+* Where two APIs overlap, the module gets one sentence and a link to the table in `operations` ("Choosing between overlapping APIs"), not its own comparison.
+* No "Errors" or "Feature flags" sections unless they say something specific to the module: error types are documented on `AudioSampleError`, and features by the `doc_cfg` badges.
+* No tables that list the module's own items unless they add a column the sidebar cannot show (for example "on audio" against "on a spectrogram").
+* Use `##` headings in sentence case.
 
 ### Explicit Exclusions
 
 Module documentation **must not**:
 
 * Describe internal data layouts
-* Outline algorithmic steps in detail
-* Promise performance characteristics unless they affect correctness
+* Outline algorithmic steps in detail (put derivations on the items they define)
 * Document private implementation details
+
+Performance belongs in module documentation only where it affects how the API is used (for example, reuse one spectrogram for several features). The crate root may state the library's performance design briefly.
 
 If such information is required for users, the abstraction boundary is wrong.
 
