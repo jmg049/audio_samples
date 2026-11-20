@@ -971,6 +971,7 @@ pub(crate) fn iirfilter_sos(
 /// band. The order is the prototype's: the band-pass filter has twice as many poles. The
 /// order formulas follow from the standard selectivity and discrimination factors
 /// (A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., 2010).
+#[cfg(feature = "pitch-filterbank")]
 pub(crate) fn bandpass_order(
     filter_type: IirFilterType,
     pass: (f64, f64),

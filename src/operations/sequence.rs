@@ -2905,6 +2905,7 @@ fn apply_affinity<F: AudioFloat>(
 /// neighbours of frame `i`, which after the transpose are column `i`.
 /// A stored value may be zero only after an affinity underflows; the dense
 /// matrix holds no link there.
+#[cfg(feature = "effects")]
 #[derive(Debug, Clone)]
 pub(crate) struct RecurrenceLinks<F> {
     ptr: Vec<usize>,
@@ -2912,6 +2913,7 @@ pub(crate) struct RecurrenceLinks<F> {
     vals: Vec<F>,
 }
 
+#[cfg(feature = "effects")]
 impl<F: AudioFloat> RecurrenceLinks<F> {
     /// Number of frames.
     pub(crate) fn n_frames(&self) -> usize {
@@ -2930,6 +2932,7 @@ impl<F: AudioFloat> RecurrenceLinks<F> {
     }
 }
 
+#[cfg(feature = "effects")]
 impl<F: AudioFloat> LinkRows<F> for RecurrenceLinks<F> {
     fn shape(&self) -> (usize, usize) {
         (self.n_frames(), self.n_frames())
@@ -2960,6 +2963,7 @@ impl<F: AudioFloat> LinkRows<F> for RecurrenceLinks<F> {
 ///
 /// Returns `None` in `full` distance / affinity mode, where every pair is
 /// linked and the dense matrix is the smaller representation.
+#[cfg(feature = "effects")]
 pub(crate) fn recurrence_links<F: AudioFloat>(
     data: ArrayView2<F>,
     cfg: &RecurrenceConfig,
