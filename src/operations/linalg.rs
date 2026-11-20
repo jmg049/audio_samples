@@ -1,28 +1,9 @@
 //! Dense linear algebra for the analysis modules: the symmetric eigenproblem,
 //! singular value decomposition, the pseudo-inverse and non-negative least squares.
+//! Mel inversion and spectrogram factorisation need these, and the crate does not
+//! depend on a linear algebra library.
 //!
-//! # What
-//!
-//! - [`eigh`]: eigenvalues and eigenvectors of a symmetric matrix.
-//! - [`svd`] and [`randomized_svd`]: the thin and the truncated singular value
-//!   decomposition.
-//! - [`pinv`]: the Moore-Penrose pseudo-inverse.
-//! - [`nnls`]: the exact non-negative least squares solution for one right-hand side.
-//! - [`nnls_matrix`]: non-negative least squares for many right-hand sides that share
-//!   a matrix, starting from the projected pseudo-inverse solution.
-//!
-//! # Why
-//!
-//! Inverting a mel spectrogram and factorising a spectrogram need these operations,
-//! and the crate does not depend on a linear algebra library.
-//!
-//! # How
-//!
-//! Functions take `ndarray` views and return owned arrays. Decompositions are computed
-//! in `f64` and rounded once to the input's float type. Non-finite input is rejected
-//! with a [`ParameterError`].
-//!
-//! ```
+//! ```rust
 //! use audio_samples::operations::linalg::{nnls, pinv};
 //! use ndarray::array;
 //!
@@ -34,12 +15,30 @@
 //! assert!((p[[1, 1]] - 0.5).abs() < 1e-12);
 //! ```
 //!
-//! References: G. H. Golub and C. F. Van Loan, *Matrix Computations*, 4th ed., 2013
-//! (Householder tridiagonalisation and implicit QL); C. L. Lawson and R. J. Hanson,
-//! *Solving Least Squares Problems*, 1974 (active-set non-negative least squares);
-//! V. Franc, V. Hlaváč and M. Navara, *Sequential coordinate-wise algorithm for the
-//! non-negative least squares problem*, CAIP 2005; N. Halko, P.-G. Martinsson and
-//! J. A. Tropp, *Finding structure with randomness*, SIAM Review 53, 2011.
+//! - [`eigh`]: eigenvalues and eigenvectors of a symmetric matrix.
+//! - [`svd`] and [`randomized_svd`]: the thin and the truncated singular value
+//!   decomposition.
+//! - [`pinv`]: the Moore-Penrose pseudo-inverse.
+//! - [`nnls`]: the exact non-negative least squares solution for one right-hand side.
+//! - [`nnls_matrix`]: non-negative least squares for many right-hand sides that share
+//!   a matrix, starting from the projected pseudo-inverse solution.
+//!
+//! ## Conventions
+//!
+//! Functions take `ndarray` views and return owned arrays. Decompositions are
+//! computed in `f64` and rounded once to the input's float type. Non-finite input
+//! is rejected with a [`ParameterError`].
+//!
+//! ## References
+//!
+//! - G. H. Golub and C. F. Van Loan, *Matrix Computations*, 4th ed., 2013
+//!   (Householder tridiagonalisation and implicit QL).
+//! - C. L. Lawson and R. J. Hanson, *Solving Least Squares Problems*, 1974
+//!   (active-set non-negative least squares).
+//! - V. Franc, V. Hlaváč and M. Navara, *Sequential coordinate-wise algorithm for
+//!   the non-negative least squares problem*, CAIP 2005.
+//! - N. Halko, P.-G. Martinsson and J. A. Tropp, *Finding structure with
+//!   randomness*, SIAM Review 53, 2011.
 
 use ndarray::ShapeBuilder;
 use ndarray::linalg::general_mat_mul;
@@ -891,7 +890,7 @@ impl NnlsConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults; currently equal to
+    /// Settings matching librosa 1.0's defaults; equal to
     /// [`new`](Self::new).
     #[must_use]
     pub const fn librosa() -> Self {

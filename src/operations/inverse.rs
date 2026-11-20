@@ -1,26 +1,9 @@
-//! Inversion of mel spectrograms and MFCCs to spectrograms and audio.
+//! Inversion of mel spectrograms and MFCCs to spectrograms and audio. A mel
+//! spectrogram or MFCC discards phase and most of the frequency resolution, so the
+//! results are estimates: useful for hearing what a feature retains, and as
+//! vocoder baselines.
 //!
-//! # What
-//!
-//! - [`mel_to_stft`] estimates an STFT magnitude from a mel spectrogram by non-negative
-//!   least squares.
-//! - [`mel_to_audio`] continues to audio with fast Griffin-Lim.
-//! - [`mfcc_to_mel`] inverts the DCT, the liftering and the decibel scale of MFCCs.
-//! - [`mfcc_to_audio`] chains the two.
-//!
-//! # Why
-//!
-//! A mel spectrogram or MFCC discards phase and most of the frequency resolution, so
-//! these are estimates. They are useful for listening to what a feature retains, and
-//! for vocoder baselines.
-//!
-//! # How
-//!
-//! Inputs have shape `(channels, bands, frames)`. Output precision follows the input.
-//! The configs hold every parameter; [`MelInversionConfig::new`] needs the sample rate
-//! because the filterbank depends on it.
-//!
-//! ```
+//! ```rust
 //! use audio_samples::nzu;
 //! use audio_samples::operations::inverse::{MelInversionConfig, mel_to_stft};
 //! use ndarray::Array3;
@@ -31,9 +14,24 @@
 //! assert_eq!(s.dim(), (1, 257, 3));
 //! ```
 //!
-//! References: D. Griffin and J. Lim, *Signal estimation from modified short-time
-//! Fourier transform*, IEEE TASSP 32, 1984; N. Perraudin, P. Balazs and P. L.
-//! Søndergaard, *A fast Griffin-Lim algorithm*, WASPAA 2013.
+//! - [`mel_to_stft`] estimates an STFT magnitude from a mel spectrogram by
+//!   non-negative least squares.
+//! - [`mel_to_audio`] continues to audio with fast Griffin-Lim.
+//! - [`mfcc_to_mel`] inverts the DCT, the liftering and the decibel scale of MFCCs.
+//! - [`mfcc_to_audio`] chains the two.
+//!
+//! ## Conventions
+//!
+//! Inputs are `(channels, bands, frames)` arrays, and the output has their element
+//! type. [`MelInversionConfig::new`] takes the sample rate, because the filterbank
+//! depends on it.
+//!
+//! ## References
+//!
+//! - D. Griffin and J. Lim, *Signal estimation from modified short-time Fourier
+//!   transform*, IEEE TASSP 32, 1984.
+//! - N. Perraudin, P. Balazs and P. L. Søndergaard, *A fast Griffin-Lim
+//!   algorithm*, WASPAA 2013.
 
 use std::num::NonZeroUsize;
 
@@ -282,7 +280,7 @@ impl MfccInversionConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults; currently equal to [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; equal to [`new`](Self::new).
     #[must_use]
     pub fn librosa() -> Self {
         Self::new()

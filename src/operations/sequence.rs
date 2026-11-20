@@ -1,53 +1,14 @@
-//! Sequence alignment, decoding and self-similarity over feature matrices.
+//! Alignment, decoding and self-similarity over sequences of feature vectors
+//! (chroma, MFCCs, onset envelopes, class probabilities) rather than over audio.
+//! Many music-analysis tasks reduce to finding the best path through a matrix:
+//! aligning two performances, smoothing frame-wise pitch or chord estimates, or
+//! finding repeated sections.
 //!
-//! # What
-//!
-//! This module collects the dynamic-programming and structure-analysis tools
-//! that operate on *sequences of feature vectors* (chroma, MFCC, onset
-//! envelopes, class probabilities, ...) rather than on audio directly:
-//!
-//! - **Alignment**: [`dtw`] / [`dtw_with_cost`] (dynamic time warping) and
-//!   [`dtw_backtracking`], plus [`rqa`] (recurrence quantification analysis,
-//!   local alignment on a similarity matrix).
-//! - **Decoding**: [`viterbi`], [`viterbi_discriminative`] and
-//!   [`viterbi_binary`] (hidden Markov model decoding), with the transition
-//!   matrix builders [`transition_uniform`], [`transition_loop`],
-//!   [`transition_cycle`] and [`transition_local`].
-//! - **Self-similarity**: [`recurrence_matrix`], [`cross_similarity`],
-//!   [`recurrence_to_lag`] and [`lag_to_recurrence`].
-//! - **Aggregation**: [`sync`] / [`sync_with`] (e.g. beat-synchronous
-//!   features).
-//!
-//! # Why
-//!
-//! Many music-analysis tasks reduce to "find the best path through a matrix":
-//! aligning two performances, smoothing frame-wise pitch or chord estimates,
-//! or finding repeated sections. These functions provide those dynamic-programming
-//! and similarity tools over plain feature matrices.
-//!
-//! # How
-//!
-//! All functions are free functions over `ndarray` arrays. Feature matrices
-//! have the layout `(n_features, n_frames)`: one column per frame.
-//! Probability matrices are `(n_states, n_steps)`. Results are reported through
-//! [`AudioSampleResult`]; invalid input yields a [`ParameterError`], never a
-//! panic.
-//!
-//! The functions are generic over the element type ([`AudioFloat`]: `f32` or
-//! `f64`). The computation runs in the element type of the input matrices and
-//! the float outputs (costs, scores, log-likelihoods, similarity matrices) have
-//! that type, so `f32` features (for example from `f32` or `i16` audio) are
-//! processed without conversion. Index outputs (paths, state sequences, step
-//! matrices) are `usize`. Parameters in the config structs stay `f64` and are
-//! rounded to the element type once. The transition-matrix builders
-//! ([`transition_loop`], ...) compute in `f64` and round each entry to the
-//! requested type once.
-//!
-//! ```
-//! use audio_samples::operations::sequence::{dtw, DtwConfig};
+//! ```rust
+//! use audio_samples::operations::sequence::{DtwConfig, dtw};
 //! use ndarray::array;
 //!
-//! // Two 1-D feature sequences (1 feature x n frames); `y` repeats a frame.
+//! // Two 1-D feature sequences (1 feature × n frames); `y` repeats a frame.
 //! let x = array![[0.0, 1.0, 2.0, 3.0]];
 //! let y = array![[0.0, 1.0, 1.0, 2.0, 3.0]];
 //! let result = dtw(x.view(), y.view(), &DtwConfig::default()).unwrap();
@@ -60,21 +21,44 @@
 //! assert_eq!(path.last(), Some(&[0, 0]));
 //! ```
 //!
-//! # Conventions
+//! - **Alignment**: [`dtw`], [`dtw_with_cost`] and [`dtw_backtracking`] (dynamic
+//!   time warping), and [`rqa`] (recurrence quantification analysis, local
+//!   alignment on a similarity matrix).
+//! - **Decoding**: [`viterbi`], [`viterbi_discriminative`] and [`viterbi_binary`]
+//!   (hidden Markov model decoding), with the transition matrices
+//!   [`transition_uniform`], [`transition_loop`], [`transition_cycle`] and
+//!   [`transition_local`].
+//! - **Self-similarity**: [`recurrence_matrix`], [`cross_similarity`],
+//!   [`recurrence_to_lag`] and [`lag_to_recurrence`].
+//! - **Aggregation**: [`sync`] and [`sync_with`], for example beat-synchronous
+//!   features.
+#![cfg_attr(
+    feature = "segmentation",
+    doc = r#" - **Structure**: path enhancement and segmentation are in [`operations::segment`](crate::operations::segment)."#
+)]
+#![cfg_attr(
+    not(feature = "segmentation"),
+    doc = r#" - **Structure**: path enhancement and segmentation are in `operations::segment`."#
+)]
 //!
-//! - Only 2-D inputs are accepted; loop over channels yourself.
+//! ## Conventions
+//!
+//! - Feature matrices are `(features, frames)`, one column per frame; probability
+//!   matrices are `(states, steps)`. Only 2-D inputs are accepted: loop over
+//!   channels yourself.
+//! - The functions are generic over the element type ([`AudioFloat`]) and compute
+//!   in it, so `f32` features are processed without conversion; costs, scores,
+//!   log-likelihoods and similarity matrices have that type, and index outputs
+//!   (paths, state sequences, step matrices) are `usize`. Config parameters stay
+//!   `f64` and are rounded once; the transition-matrix builders compute in `f64`
+//!   and round each entry once.
 //! - [`recurrence_matrix`] and [`cross_similarity`] return dense `bool`
 //!   connectivity matrices; [`recurrence_matrix_weighted`] and
 //!   [`cross_similarity_weighted`] return dense distance or affinity matrices.
-//!   Frames are always the columns (the last axis).
 //! - [`sync`] with an empty index list and `pad = true` returns one segment
-//!   `[0, n_frames)`.
-//! - [`rqa`] follows the move actually taken when backtracking through the
-//!   second column.
-//! - With `f32` input, the Viterbi decoders accumulate log-likelihoods in `f32`
-//!   and DTW costs of `f32` features are computed in `f32`.
-//! - `path_enhance`, `timelag_filter`, `agglomerative` and `subsegment` are in
-//!   `operations::segment` (feature `segmentation`).
+//!   `[0, frames)`.
+//! - [`rqa`] follows the move actually taken when backtracking through the second
+//!   column.
 
 use ndarray::{
     Array, Array1, Array2, ArrayView, ArrayView1, ArrayView2, ArrayView3, Axis, Dimension,
@@ -321,7 +305,7 @@ const DEFAULT_STEPS: [[usize; 2]; 3] = [[1, 1], [0, 1], [1, 0]];
 ///
 /// The defaults are the Euclidean metric, steps `(1,1), (0,1), (1,0)` with unit
 /// weights, full (not subsequence) alignment, backtracking enabled and no global
-/// constraint. [`DtwConfig::librosa`] is currently the same.
+/// constraint. [`DtwConfig::librosa`] is the same.
 ///
 /// The weights and `band_rad` are `f64`; [`dtw`] rounds the weights to the
 /// element type of its input once.
@@ -394,7 +378,7 @@ impl DtwConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -997,7 +981,7 @@ pub fn dtw_backtracking<S: Copy + std::fmt::Display + num_traits::ToPrimitive>(
 /// Configuration for [`rqa`].
 ///
 /// The defaults are unit gap penalties, knight moves and backtracking;
-/// [`RqaConfig::librosa`] is currently the same. The penalties are `f64` and are
+/// [`RqaConfig::librosa`] is the same. The penalties are `f64` and are
 /// rounded to the element type of the similarity matrix once.
 ///
 /// # Examples
@@ -1040,7 +1024,7 @@ impl RqaConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2352,7 +2336,7 @@ pub enum Bandwidth {
 /// The defaults are `k` from the sequence length, `width = 1`, the Euclidean
 /// metric, no symmetrisation, connectivity mode, the median k-th-neighbour
 /// bandwidth, no self links and no full linking. [`RecurrenceConfig::librosa`]
-/// is currently the same.
+/// is the same.
 ///
 /// # Examples
 ///
@@ -2411,7 +2395,7 @@ impl RecurrenceConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -2520,7 +2504,7 @@ fn validate_bandwidth(b: &Bandwidth) -> AudioSampleResult<()> {
 ///
 /// The defaults are `k` from the reference length, the Euclidean metric,
 /// connectivity mode, the median k-th-neighbour bandwidth and no full linking.
-/// [`CrossSimilarityConfig::librosa`] is currently the same.
+/// [`CrossSimilarityConfig::librosa`] is the same.
 ///
 /// # Examples
 ///
@@ -2567,7 +2551,7 @@ impl CrossSimilarityConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()

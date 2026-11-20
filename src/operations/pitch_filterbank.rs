@@ -1,46 +1,43 @@
-//! Multirate semitone filterbank and the IIR time-frequency representation.
+//! A multirate semitone filterbank and the IIR time-frequency representation built
+//! on it: a pitch spectrogram with the same window length in every band. An
+//! FFT-based constant-Q analysis trades time resolution at low frequencies for
+//! frequency resolution; narrow IIR filters at a low sample rate avoid that
+//! trade-off, which suits chord recognition and music synchronisation.
 //!
-//! # What
-//!
-//! - [`mr_frequencies`]: the centre frequency and sample rate of each semitone from MIDI
-//!   24 to 108.
-//! - [`semitone_filterbank`]: one band-pass filter per semitone, of minimum order for a
-//!   specified ripple and attenuation.
-//! - [`iirt`] and [`AudioPitchFilterbank::iirt`]: the energy of each band per frame.
-//!
-//! # Why
-//!
-//! A constant-Q analysis with FFTs trades time resolution at low frequencies for
-//! frequency resolution. Running narrow IIR filters at a low sample rate gives a pitch
-//! spectrogram with the same window length for every band, which suits chord recognition
-//! and music synchronisation.
-//!
-//! # How
-//!
-//! Low bands run on a version of the signal resampled to a low rate, where the filter
-//! poles are far enough from the unit circle to be stable. Each band is filtered forwards
-//! and backwards, and its squared output is summed over each frame and scaled back to the
-//! original rate. Filters are second-order sections unless asked for otherwise. Filtering
-//! runs in `f64`; the output has the audio's float type.
-//!
-//! ```
+//! ```rust
 //! use audio_samples::operations::pitch_filterbank::{AudioPitchFilterbank, IirtConfig};
-//! use audio_samples::sample_rate;
-//! use audio_samples::utils::generation::sine_wave;
+//! use audio_samples::{sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
 //! let audio = sine_wave::<f32>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //! let power = audio.iirt(&IirtConfig::new()).unwrap();
 //! assert_eq!(power.dim().1, 85);
-//! // MIDI 69 is band 45.
+//! // MIDI 69 (A4) is band 45.
 //! let band = (0..85)
 //!     .max_by(|&a, &b| power[[0, a, 5]].partial_cmp(&power[[0, b, 5]]).unwrap())
 //!     .unwrap();
 //! assert_eq!(band, 45);
 //! ```
 //!
-//! Reference: M. Müller, *Information Retrieval for Music and Motion*, Springer, 2007,
-//! chapter 3.
+//! - [`mr_frequencies`]: the centre frequency and sample rate of each semitone from
+//!   MIDI 24 to 108.
+//! - [`semitone_filterbank`]: one band-pass filter per semitone, of minimum order
+//!   for a given ripple and attenuation.
+//! - [`iirt`] and [`AudioPitchFilterbank::iirt`]: the energy of each band per frame.
+//!
+//! ## How it works
+//!
+//! Low bands run on a version of the signal resampled to a low rate, where the
+//! filter poles are far enough from the unit circle to be stable. Each band is
+//! filtered forwards and backwards, and its squared output is summed over each
+//! frame and scaled back to the original rate. Filters are second-order sections
+//! unless asked for otherwise. Filtering runs in `f64`; the output has the
+//! [analysis float](crate#precision) of the audio.
+//!
+//! ## References
+//!
+//! - M. Müller, *Information Retrieval for Music and Motion*, Springer, 2007,
+//!   chapter 3.
 
 use std::num::NonZeroUsize;
 
@@ -149,7 +146,7 @@ impl MultirateFilterConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; the same as [`new`](Self::new).
     #[must_use]
     pub const fn librosa() -> Self {
         Self::new()
@@ -316,7 +313,7 @@ impl IirtConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; the same as [`new`](Self::new).
     #[must_use]
     pub fn librosa() -> Self {
         Self::new()

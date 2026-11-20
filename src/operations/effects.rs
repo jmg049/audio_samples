@@ -1,75 +1,24 @@
-//! Audio effects: time stretching, pitch shifting,
-//! pre-/de-emphasis, dB-based trimming and splitting, remixing, median-filter
-//! harmonic/percussive separation, Griffin-Lim phase reconstruction,
-//! nearest-neighbour filtering, LPC and click tracks.
-//!
-//! ## What
-//!
-//! The [`AudioEffects`] trait and the free functions it is built from:
-//!
-//! | Operation | Items |
-//! |---|---|
-//! | Phase vocoder at a rate or at given frame positions | [`phase_vocoder`] / [`phase_vocoder_at`] |
-//! | Time stretching | [`AudioEffects::time_stretch`] |
-//! | Pitch shifting | [`AudioEffects::pitch_shift`] |
-//! | Pre- and de-emphasis | [`AudioEffects::preemphasis`] / [`AudioEffects::deemphasis`] ([`preemphasis_with_state`], [`deemphasis_with_state`] for `zi` / `zf`) |
-//! | Trimming and splitting at a dB threshold | [`AudioEffects::trim_db`] / [`AudioEffects::split_db`] ([`nonsilent_frames`]) |
-//! | Remixing intervals | [`AudioEffects::remix`] |
-//! | Median-filter HPSS of a spectrogram | [`hpss_spectrogram`], [`hpss_magnitude`], [`hpss_masks`] |
-//! | HPSS of audio | [`AudioEffects::harmonic_percussive`] / [`AudioEffects::harmonic`] / [`AudioEffects::percussive`] |
-//! | Soft masks | [`softmask`] |
-//! | Griffin-Lim phase reconstruction | [`griffinlim`], [`AudioEffects::griffinlim_audio`] |
-//! | Nearest-neighbour filtering | [`nn_filter`], [`nn_filter_recurrence`] |
-//! | Linear prediction coefficients | [`lpc`], [`AudioEffects::lpc`] |
-//! | Click tracks | [`clicks`] |
-//!
-//! ## Why
-//!
-//! These are standard building blocks of audio pipelines (data augmentation
-//! with stretch/shift, speech front-ends with pre-emphasis and silence
-//! trimming, source separation with HPSS and soft masks). Every config struct
-//! has a `librosa()` preset. `Default` equals it except where noted:
-//! [`SilenceConfig`] has no `Default` (the threshold is required), and
-//! [`GriffinLimConfig::default`] seeds its random initial phase. The spectral
-//! steps reuse the STFT of [`crate::operations::spectrum`].
-//!
+//! Effects and spectral building blocks for audio pipelines: time stretching,
+//! pitch shifting, emphasis, silence trimming and splitting, harmonic-percussive
+//! separation, phase reconstruction and more, through the [`AudioEffects`] trait
+//! and the free functions it is built from.
 #![cfg_attr(
     feature = "decomposition",
     doc = r#" [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss) and"#
 )]
 #![cfg_attr(
     not(feature = "decomposition"),
-    doc = r#" `AudioDecomposition::hpss` (with the `decomposition` feature) and"#
+    doc = r#" `AudioDecomposition::hpss` and"#
 )]
 //! [`AudioEditing::trim_silence`](crate::AudioEditing::trim_silence) are separate
-//! operations with their own (different) semantics.
-//!
-//! ## How
-//!
-//! Bring [`AudioEffects`] into scope and call it on any [`AudioSamples`]. Audio is
-//! processed in the sample type's float type
-//! ([`AudioSample::Float`](crate::AudioSample::Float): `f32` for `u8`, `i16`,
-//! `I24` and `f32` audio, `f64` for `i32` and `f64` audio) and returned in the
-//! input's sample type, converted with the crate's audio-aware conversion
-//! (integer types round and saturate). Every audio-to-audio operation has an
-//! `_in_place` variant. Spectrogram-level helpers take
-//! `(channels, n_bins, n_frames)` arrays as produced by
-//! [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix)
-//! and are generic over the element type ([`AudioFloat`]: `f32` or `f64`); they
-//! compute in and return that type. Parameters in the config structs stay `f64`
-//! and are rounded to the element type once.
-//!
-//! Two steps run in `f64` for every sample type and round their result to the
-//! float type once: the analysis STFT of [`AudioEffects::time_stretch`] and
-//! [`AudioEffects::pitch_shift`] (the phase vocoder amplifies the round-off of
-//! an `f32` STFT), and Burg's recursion in [`lpc`] (unstable in `f32` on tonal
-//! signals). Each holds transient `f64` copies of its input and output. The
-//! resampling stage of `pitch_shift` runs in the float type.
+//! operations with other semantics; see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
 //!
 //! ```rust
-//! use audio_samples::operations::effects::{AudioEffects, PitchShiftConfig, SilenceConfig};
-//! use audio_samples::operations::spectrum::StftConfig;
-//! use audio_samples::{sample_rate, sine_wave};
+//! use audio_samples::{
+//!     AudioEffects, AudioSamples, PitchShiftConfig, SilenceConfig, StftConfig, sample_rate,
+//!     sine_wave,
+//! };
 //! use std::time::Duration;
 //!
 //! let audio = sine_wave::<f32>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
@@ -89,10 +38,43 @@
 //!
 //! // 16-bit audio is processed in f32 and returned as i16.
 //! let pcm = sine_wave::<i16>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
-//! let fast: audio_samples::AudioSamples<'static, i16> =
-//!     pcm.time_stretch(2.0, &StftConfig::default()).unwrap();
+//! let fast: AudioSamples<'static, i16> = pcm.time_stretch(2.0, &StftConfig::default()).unwrap();
 //! assert_eq!(fast.samples_per_channel().get(), n / 2);
 //! ```
+//!
+//! | Operation | Items |
+//! |---|---|
+//! | Phase vocoder at a rate or at given frame positions | [`phase_vocoder`], [`phase_vocoder_at`] |
+//! | Time stretching and pitch shifting | [`AudioEffects::time_stretch`], [`AudioEffects::pitch_shift`] |
+//! | Pre- and de-emphasis | [`AudioEffects::preemphasis`], [`AudioEffects::deemphasis`] ([`preemphasis_with_state`], [`deemphasis_with_state`] carry the filter state) |
+//! | Trimming and splitting at a dB threshold | [`AudioEffects::trim_db`], [`AudioEffects::split_db`] ([`nonsilent_frames`]) |
+//! | Remixing intervals | [`AudioEffects::remix`] |
+//! | HPSS of audio | [`AudioEffects::harmonic_percussive`], [`AudioEffects::harmonic`], [`AudioEffects::percussive`] |
+//! | HPSS of a spectrogram, soft masks | [`hpss_spectrogram`], [`hpss_magnitude`], [`hpss_masks`], [`softmask`] |
+//! | Griffin-Lim phase reconstruction | [`griffinlim`], [`AudioEffects::griffinlim_audio`] |
+//! | Nearest-neighbour filtering | [`nn_filter`], [`nn_filter_recurrence`] |
+//! | Linear prediction coefficients | [`lpc`], [`AudioEffects::lpc`] |
+//! | Click tracks | [`clicks`] |
+//!
+//! ## Conventions
+//!
+//! - Audio is processed in the [analysis float](crate#precision) and returned in
+//!   the input's sample type; integer types round and saturate. Every
+//!   audio-to-audio operation has an `_in_place` variant.
+//! - Spectrogram-level helpers take `(channels, bins, frames)` arrays as produced
+//!   by [`AudioSpectrum::stft_matrix`](crate::operations::spectrum::AudioSpectrum::stft_matrix),
+//!   are generic over the element type ([`AudioFloat`]) and compute in it. Config
+//!   parameters stay `f64` and are rounded to the element type once.
+//! - Two steps run in `f64` for every sample type and round their result to the
+//!   float type once: the analysis STFT of [`AudioEffects::time_stretch`] and
+//!   [`AudioEffects::pitch_shift`] (the phase vocoder amplifies the round-off of an
+//!   `f32` STFT), and Burg's recursion in [`lpc`] (unstable in `f32` on tonal
+//!   signals). Each holds transient `f64` copies of its input and output. The
+//!   resampling stage of `pitch_shift` runs in the float type.
+//! - `Default` equals `librosa()` except that [`SilenceConfig`] has no `Default`
+//!   (the threshold depends on the material, so [`SilenceConfig::new`] takes it),
+//!   and [`GriffinLimConfig::default`] seeds its random initial phase, so repeated
+//!   runs give the same output.
 
 use crate::utils::{MAX_SIGNAL_ELEMENTS, check_derived_len};
 use std::num::NonZeroUsize;
@@ -583,7 +565,7 @@ impl PitchShiftConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -1735,7 +1717,7 @@ impl HpssMaskConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -2028,7 +2010,7 @@ impl HarmonicPercussiveConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -3175,7 +3157,7 @@ impl ClicksConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {

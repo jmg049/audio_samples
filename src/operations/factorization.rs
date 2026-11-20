@@ -1,29 +1,13 @@
-//! Non-negative matrix factorisation of spectrograms.
+//! Non-negative matrix factorisation of spectrograms. Non-negative factors of a
+//! magnitude spectrogram read as parts: a spectral template per note or drum, with
+//! its gain over time. This is the usual starting point for source separation and
+//! transcription.
 //!
-//! # What
-//!
-//! [`nmf`] approximates a non-negative matrix `X` by `W H` with both factors
-//! non-negative, by cyclic coordinate descent or multiplicative updates.
-//! [`nmf_transform`] finds `W` for fixed `H`. [`decompose`] applies this to a spectrogram
-//! and returns spectral templates and their activations over time.
-//!
-//! # Why
-//!
-//! Non-negative factors of a magnitude spectrogram read as parts: a template per note or
-//! drum, with its gain over time. This is the usual starting point for source separation
-//! and transcription.
-//!
-//! # How
-//!
-//! `X` has one row per sample and one column per feature. For a `(bins, frames)`
-//! spectrogram, [`decompose`] uses frames as samples, so `W` is the activations and `H`
-//! holds the templates. The computation runs in the input's float type, except the
-//! initial singular value decomposition, which is computed in `f64` and rounded once.
-//!
-//! ```
+//! ```rust
 //! use audio_samples::operations::factorization::{NmfConfig, decompose};
 //! use ndarray::Array2;
 //!
+//! // Two patterns that alternate frame by frame.
 //! let s = Array2::from_shape_fn((16, 8), |(f, t)| {
 //!     if f < 8 { (t % 2) as f64 + 0.1 } else { ((t + 1) % 2) as f64 + 0.1 }
 //! });
@@ -32,13 +16,29 @@
 //! assert_eq!(d.activations.dim(), (2, 8));
 //! ```
 //!
-//! References: D. D. Lee and H. S. Seung, *Algorithms for non-negative matrix
-//! factorization*, NeurIPS 2001; C.-J. Hsieh and I. S. Dhillon, *Fast coordinate descent
-//! methods with variable selection for non-negative matrix factorization*, KDD 2011;
-//! C. Févotte and J. Idier, *Algorithms for nonnegative matrix factorization with the
-//! β-divergence*, Neural Computation 23, 2011; C. Boutsidis and E. Gallopoulos, *SVD
-//! based initialization: a head start for nonnegative matrix factorization*, Pattern
-//! Recognition 41, 2008.
+//! [`nmf`] approximates a non-negative matrix `X` by `W H` with both factors
+//! non-negative, by cyclic coordinate descent or multiplicative updates.
+//! [`nmf_transform`] finds `W` for a fixed `H`. [`decompose`] applies this to a
+//! spectrogram and returns spectral templates and their activations over time.
+//!
+//! ## Conventions
+//!
+//! `X` has one row per sample and one column per feature. For a `(bins, frames)`
+//! spectrogram, [`decompose`] uses frames as samples, so `W` holds the activations
+//! and `H` the templates. The computation runs in the input's float type, except
+//! the initial singular value decomposition, which is computed in `f64` and
+//! rounded once.
+//!
+//! ## References
+//!
+//! - D. D. Lee and H. S. Seung, *Algorithms for non-negative matrix
+//!   factorization*, NeurIPS 2001.
+//! - C.-J. Hsieh and I. S. Dhillon, *Fast coordinate descent methods with variable
+//!   selection for non-negative matrix factorization*, KDD 2011.
+//! - C. Févotte and J. Idier, *Algorithms for nonnegative matrix factorization
+//!   with the β-divergence*, Neural Computation 23, 2011.
+//! - C. Boutsidis and E. Gallopoulos, *SVD based initialization: a head start for
+//!   nonnegative matrix factorization*, Pattern Recognition 41, 2008.
 
 use ndarray::{Array1, Array2, ArrayView2, Axis, Zip};
 
@@ -129,7 +129,7 @@ impl NmfConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults; currently equal to
+    /// Settings matching librosa 1.0's defaults; equal to
     /// [`new`](Self::new).
     #[must_use]
     pub const fn librosa(n_components: usize) -> Self {
