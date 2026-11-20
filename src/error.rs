@@ -1,81 +1,5 @@
-//! Hierarchical error types and result utilities for audio sample operations.
-
-//! This module defines [`AudioSampleError`], the root error type for the entire
-//! crate, together with five specialised sub-error enums that each cover a
-//! distinct failure domain:
-//!
-//! - [`ConversionError`] - type conversion and casting failures
-//! - [`ParameterError`] - invalid parameters and configuration values
-//! - [`LayoutError`] - memory layout and array-structure issues
-//! - [`ProcessingError`] - DSP algorithm and arithmetic failures
-//! - [`FeatureError`] - optional cargo features that are missing or misconfigured
-//!
-//! ```text
-//! AudioSampleError
-//! ├── Conversion(ConversionError)     - type conversion and casting failures
-//! ├── Parameter(ParameterError)       - invalid parameters and configuration
-//! ├── Layout(LayoutError)             - memory layout and array structure issues
-//! ├── Processing(ProcessingError)     - audio processing operation failures
-//! └── Feature(FeatureError)           - missing feature dependencies
-//! ```
-
-//! Grouping errors by domain makes it possible to handle broad categories with a
-//! single match arm while still allowing callers to inspect specific failure
-//! causes when needed. The sub-enum design keeps `AudioSampleError` `#[non_exhaustive]`
-//! so that new variants can be added in future minor versions without breaking
-//! downstream code.
-
-//! # Diagnostics
-//!
-//! Every error type implements [`miette::Diagnostic`] in addition to
-//! [`std::error::Error`]. Each variant carries a stable, namespaced **code**
-//! (`audio_samples::<domain>::<variant>`) for programmatic matching and an
-//! actionable **help** hint telling the caller how to recover. Text-parsing
-//! failures additionally carry a [`SourceSpan`](miette::SourceSpan) pointing a
-//! caret at the offending character (see [`NoteParseError`] and
-//! [`EnumParseError`]).
-//!
-//! The caret-underline rendering is provided by miette's `fancy` renderer,
-//! gated behind this crate's `fancy` feature so library consumers are not forced
-//! to pull in graphical dependencies. Library users get plain [`Display`] output
-//! unless they opt in; the `examples/` and the `educational` module enable
-//! `fancy`, so their errors use the graphical rendering by default.
-
-//! Import the root type and any sub-types you intend to match on, then propagate
-//! with `?` or inspect with a `match` expression:
-//!
-//! ```rust
-//! use audio_samples::{
-//!     AudioSampleError, AudioSampleResult, ConversionError, LayoutError, ParameterError,
-//! };
-//!
-//! let audio_result: AudioSampleResult<()> = Err(AudioSampleError::Parameter(
-//!     ParameterError::invalid_value("cutoff_hz", "must be > 0"),
-//! ));
-//!
-//! match audio_result {
-//!     Err(AudioSampleError::Conversion(ConversionError::AudioConversion {
-//!         from,
-//!         to,
-//!         reason,
-//!         ..
-//!     })) => {
-//!         eprintln!("Failed to convert {from} → {to}: {reason}");
-//!     }
-//!     Err(AudioSampleError::Parameter(ParameterError::InvalidValue { parameter, reason })) => {
-//!         eprintln!("Invalid parameter '{parameter}': {reason}");
-//!     }
-//!     Err(AudioSampleError::Layout(LayoutError::NonContiguous { operation, .. })) => {
-//!         eprintln!("Operation '{operation}' requires contiguous audio");
-//!     }
-//!     Ok(()) => {
-//!         // success
-//!     }
-//!     Err(other) => {
-//!         eprintln!("{other}");
-//!     }
-//! }
-//! ```
+//! The error types: [`AudioSampleError`] and its sub-errors. This module is
+//! private; the error model is documented on [`AudioSampleError`].
 
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
@@ -89,30 +13,59 @@ use crate::repr::SampleType;
 /// directly.
 pub type AudioSampleResult<T> = Result<T, AudioSampleError>;
 
-/// Root error type for all audio sample operations.
+/// The error type of every fallible operation in the crate.
 ///
-/// # Purpose
+/// Each variant wraps a sub-error for one domain, so a single match arm can
+/// handle a whole category while the inner type keeps the detail:
 ///
-/// `AudioSampleError` is the single error type returned by every fallible
-/// public API in this crate. It groups failures into five sub-domains so that
-/// callers can handle broad categories with a single match arm while retaining
-/// the ability to inspect specific variants when required.
+/// ```text
+/// AudioSampleError
+/// ├── Conversion(ConversionError)     type conversion and casting
+/// ├── Parameter(ParameterError)       invalid parameters and configuration
+/// ├── Layout(LayoutError)             channel counts, shapes, contiguity
+/// ├── Processing(ProcessingError)     failures inside an algorithm
+/// ├── Feature(FeatureError)           a required cargo feature is not enabled
+/// ├── NoteParse(NoteParseError)       a note name that does not parse
+/// ├── EnumParse(EnumParseError)       an enum name that does not parse
+/// ├── Spectrogram(SpectrogramError)   errors from the `spectrograms` crate (`transforms`)
+/// └── Fmt(std::fmt::Error)            formatting failures
+/// ```
 ///
-/// # Intended Usage
+/// # Diagnostics
 ///
-/// Prefer matching on the inner sub-type rather than the outer variant wherever
-/// the specific failure domain matters. Propagate errors out of functions using
-/// the `?` operator together with the [`AudioSampleResult`] return type.
+/// Every error type implements [`miette::Diagnostic`] as well as
+/// [`std::error::Error`]. Each variant has a stable code of the form
+/// `audio_samples::<domain>::<variant>` for programmatic matching, and a help
+/// message that says how to recover. Errors from parsing text (note names,
+/// enum names) also carry a [`SourceSpan`](miette::SourceSpan) that points at
+/// the offending character ([`NoteParseError`], [`EnumParseError`]).
 ///
-/// # Invariants
+/// Without the `fancy` feature, errors print through [`Display`](std::fmt::Display)
+/// as plain text. With it, miette's graphical renderer adds colour and carets.
 ///
-/// The enum is `#[non_exhaustive]`, meaning new variants may be added in future
-/// minor versions. Always include a catch-all arm when matching exhaustively.
+/// The enum is `#[non_exhaustive]`: a `match` needs a catch-all arm.
 ///
-/// # Feature-gated variants
+/// # Examples
 ///
-/// The `Spectrogram` variant is only present when the `transforms` feature is
-/// enabled. It wraps errors originating from the `spectrograms` crate.
+/// ```rust
+/// use audio_samples::{AudioSampleError, AudioSampleResult, LayoutError, ParameterError};
+///
+/// let result: AudioSampleResult<()> = Err(AudioSampleError::Parameter(
+///     ParameterError::invalid_value("cutoff_hz", "must be > 0"),
+/// ));
+///
+/// match result {
+///     Err(AudioSampleError::Parameter(ParameterError::InvalidValue { parameter, reason })) => {
+///         assert_eq!(parameter, "cutoff_hz");
+///         eprintln!("invalid parameter '{parameter}': {reason}");
+///     }
+///     Err(AudioSampleError::Layout(LayoutError::NonContiguous { operation, .. })) => {
+///         eprintln!("'{operation}' needs contiguous audio");
+///     }
+///     Err(other) => eprintln!("{other}"),
+///     Ok(()) => {}
+/// }
+/// ```
 #[derive(Error, Debug, Clone, Diagnostic)]
 #[non_exhaustive]
 pub enum AudioSampleError {

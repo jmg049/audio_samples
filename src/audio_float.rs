@@ -1,44 +1,5 @@
-//! The floating-point types used for analysis output.
-//!
-//! Analysis operations (spectrograms, mel spectrograms, MFCCs, chroma, CQT,
-//! onset envelopes, spectral features, pitch tracks) compute in a floating-point
-//! type chosen from the input sample type: the smallest float type that
-//! represents every input sample exactly.
-//!
-//! | Sample type `T` | `T::Float` |
-//! |---|---|
-//! | `u8`, `i16`, [`I24`](crate::I24), `f32` | `f32` |
-//! | `i32`, `f64` | `f64` |
-//!
-//! [`AudioSample::Float`] names that type, and [`AudioFloat`] is the trait that
-//! both float types implement. `AudioFloat` collects every capability the
-//! analysis code needs (`num_traits::Float`, `ndarray` scalar operations,
-//! `Sum`, FFT support, ...), so generic code needs the single bound
-//! `F: AudioFloat` and no further `num_traits` bounds.
-//!
-//! Computing in `f32` halves the memory of every intermediate array and of the
-//! output. Audio of type `i32` or `f64` is analysed in `f64`, because `f32`
-//! cannot hold every `i32` sample value exactly.
-//!
-//! ## Example
-//!
-//! ```
-//! use audio_samples::{AudioFloat, AudioSample};
-//!
-//! // The analysis float type of 16-bit audio is f32.
-//! fn float_label<T: AudioSample>() -> &'static str {
-//!     <T::Float as AudioSample>::LABEL
-//! }
-//! assert_eq!(float_label::<i16>(), "f32");
-//! assert_eq!(float_label::<i32>(), "f64");
-//!
-//! // Generic float code reads like ordinary float code.
-//! fn rms<F: AudioFloat>(x: &[F]) -> F {
-//!     let sum: F = x.iter().map(|&v| v * v).sum();
-//!     (sum / F::of_usize(x.len())).sqrt()
-//! }
-//! assert!((rms(&[3.0_f32, 4.0]) - 12.5_f32.sqrt()).abs() < 1e-6);
-//! ```
+//! [`AudioFloat`], the float types analysis computes in. This module is private;
+//! the precision rule is documented on [`AudioFloat`] and in the crate root.
 
 use std::any::{Any, TypeId};
 use std::iter::{Product, Sum};
@@ -73,27 +34,47 @@ impl<T> MaybeFftNum for T {}
 
 /// A floating-point type that analysis code computes in: `f32` or `f64`.
 ///
-/// # Purpose
+/// Frame-wise analysis computes in [`AudioSample::Float`], the smallest float
+/// type that holds every sample of the input type exactly: `f32` for `u8`,
+/// `i16`, [`I24`](crate::I24) and `f32` audio, `f64` for `i32` and `f64` audio
+/// (see [Precision](crate#precision)). `AudioFloat` is the trait both types
+/// implement, and the one bound generic analysis code needs.
 ///
-/// `AudioFloat` is the one bound generic analysis code needs. It includes
-/// `num_traits::Float` and `FloatConst` (through `ndarray::NdFloat`), the
-/// compound assignment operators, `Sum` and `Product`, `ndarray` scalar and
-/// matrix-product support, `Send`, `Sync`, `Debug` and `Display`, and (with the
-/// `transforms` feature) `rustfft::FftNum`. It is also a [`StandardSample`], so
-/// audio of type `f32` or `f64` can be built directly from analysis output.
-///
-/// The trait is sealed: only `f32` and `f64` implement it.
-///
-/// # Constants and conversions
+/// It includes `num_traits::Float` and `FloatConst` (through
+/// `ndarray::NdFloat`), the compound assignment operators, `Sum` and `Product`,
+/// `ndarray` scalar and matrix-product support, `Send`, `Sync`, `Debug` and
+/// `Display`, and (with the `transforms` feature) `rustfft::FftNum`. It is also a
+/// [`StandardSample`], so audio of type `f32` or `f64` can be built directly from
+/// analysis output. The trait is sealed: only `f32` and `f64` implement it.
 ///
 /// Write literals and conversions with [`of`](Self::of) and
 /// [`as_f64`](Self::as_f64): `F::of(0.5) * x`. Constants derived from `f64`
 /// (filter tables, window coefficients) can be computed in `f64` once and cast
 /// with `F::of`.
 ///
-/// Note that `F::MAX` and `F::MIN` are the [`AudioSample`] full-scale constants
-/// (`1.0` and `-1.0`), not the largest finite values. Use
-/// `F::max_value()` / `F::min_value()` for those.
+/// `F::MAX` and `F::MIN` are the [`AudioSample`] full-scale constants (`1.0`
+/// and `-1.0`), not the largest finite values. Use `F::max_value()` and
+/// `F::min_value()` for those.
+///
+/// # Examples
+///
+/// ```
+/// use audio_samples::{AudioFloat, AudioSample};
+///
+/// // The analysis float type of 16-bit audio is f32, of 32-bit audio f64.
+/// fn float_label<T: AudioSample>() -> &'static str {
+///     <T::Float as AudioSample>::LABEL
+/// }
+/// assert_eq!(float_label::<i16>(), "f32");
+/// assert_eq!(float_label::<i32>(), "f64");
+///
+/// // Generic float code reads like ordinary float code.
+/// fn rms<F: AudioFloat>(x: &[F]) -> F {
+///     let sum: F = x.iter().map(|&v| v * v).sum();
+///     (sum / F::of_usize(x.len())).sqrt()
+/// }
+/// assert!((rms(&[3.0_f32, 4.0]) - 12.5_f32.sqrt()).abs() < 1e-6);
+/// ```
 pub trait AudioFloat:
     sealed::Sealed
     + StandardSample

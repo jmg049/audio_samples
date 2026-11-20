@@ -1,92 +1,6 @@
-//! Core audio sample representation and data structures.
-//!
-//! This module defines the foundational data types used throughout the `audio_samples`
-//! library: the storage primitives [`MonoData`] / [`MultiData`], the channel-agnostic
-//! enum [`AudioData`], and the primary user-facing container [`AudioSamples`].
-//!
-//! [`AudioSamples<T>`] pairs raw PCM data (backed by `ndarray`) with essential metadata -
-//! sample rate, channel count, and memory layout - so that all downstream operations have
-//! access to the full audio context without passing it separately.
-//!
-//! Separating the storage layer from the processing API keeps the representation stable
-//! and independently testable. Internal storage types (`MonoData`, `MultiData`) can
-//! borrow or own their ndarray buffers without exposing that detail to callers; the
-//! promote-on-write pattern means read-only paths are always zero-copy.
-//!
-//! Construct audio via the `AudioSamples` constructors (`new_mono`, `new_multi_channel`,
-//! `from_mono_vec`, …) or via the signal generators in [`utils::generation`](crate::utils::generation).
-//! Then use the trait methods from the `operations` module for processing.
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, sample_rate};
-//! use ndarray::array;
-//!
-//! // Mono audio from a 1-D array
-//! let mono = AudioSamples::new_mono(array![0.1f32, 0.2, 0.3, 0.4, 0.5], sample_rate!(44100)).unwrap();
-//!
-//! assert_eq!(mono.num_channels().get(), 1);
-//! assert_eq!(mono.samples_per_channel().get(), 5);
-//! assert_eq!(mono.sample_rate(), sample_rate!(44100));
-//!
-//! // Stereo audio from a 2-D array (channels × samples)
-//! let stereo = AudioSamples::new_multi_channel(
-//!     array![[0.1f32, 0.2, 0.3], [0.4f32, 0.5, 0.6]],
-//!     sample_rate!(48000),
-//! ).unwrap();
-//!
-//! assert_eq!(stereo.num_channels().get(), 2);
-//! assert_eq!(stereo.samples_per_channel().get(), 3);
-//! ```
-//!
-//! ## Supported sample types
-//!
-//! All six concrete types that implement [`AudioSample`] are supported:
-//! `u8`, `i16`, [`I24`](i24::I24), `i32`, `f32`, and `f64`.
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, sample_rate};
-//! use ndarray::array;
-//!
-//! // 8-bit unsigned (mid-scale 128 = silence)
-//! let u8_audio  = AudioSamples::new_mono(array![128u8, 160, 96], sample_rate!(8000)).unwrap();
-//! // 16-bit signed (CD quality)
-//! let i16_audio = AudioSamples::new_mono(array![1000i16, 2000, 3000], sample_rate!(44100)).unwrap();
-//! // 64-bit float (high-precision processing)
-//! let f64_audio = AudioSamples::new_mono(array![0.1f64, 0.2, 0.3], sample_rate!(96000)).unwrap();
-//! ```
-//!
-//! ## Sample-wise transformations
-//!
-//! [`AudioSamples`] provides in-place and mapping methods for sample-wise operations:
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, sample_rate};
-//! use ndarray::array;
-//!
-//! let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
-//!
-//! // Apply a uniform gain
-//! audio.apply(|s| s * 0.5);
-//!
-//! // Apply a position-dependent fade-out
-//! audio.apply_with_index(|i, s| s * (1.0 - i as f32 * 0.1));
-//! ```
-//!
-//! ## Memory layout
-//!
-//! | Variant | Storage | Shape |
-//! |---|---|---|
-//! | [`AudioData::Mono`] | `Array1<T>` | `[samples]` |
-//! | [`AudioData::Multi`] | `Array2<T>` | `[channels, samples_per_channel]` |
-//!
-//! Multi-channel audio is stored in planar layout (each channel is a contiguous row).
-//! The [`ChannelLayout`] field on [`AudioSamples`] records the *intended* layout for
-//! serialisation purposes (e.g. when converting to an interleaved `Vec<T>`), but does
-//! not affect how the internal array is laid out.
-//!
-//! [`AudioSample`]: crate::AudioSample
-//! [`I24`](i24::I24): crate::I24
-//! [`ChannelLayout`]: crate::ChannelLayout
+//! The audio representation: the storage types `MonoData`, `MultiData` and
+//! [`AudioData`], and [`AudioSamples`]. This module is private; the user-facing
+//! description of the representation is the documentation of [`AudioSamples`].
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
 #[cfg(feature = "resampling")]
@@ -3320,40 +3234,58 @@ where
     }
 }
 
-/// Represents homogeneous audio samples with associated metadata.
+/// Audio samples of one sample type, with their sample rate.
 ///
-/// Primary container for audio data combining raw sample values with essential
-/// metadata including sample rate, and type information.
-/// Supports both mono and multi-channel audio with unified interface.
+/// `T` is the stored sample format (`u8`, `i16`, [`I24`](crate::I24), `i32`,
+/// `f32` or `f64`). Operations come from the traits in
+/// [`operations`](crate::operations) and read the sample rate and channel
+/// layout from the value.
 ///
-/// # Fields
-/// - `data`: Audio sample data in mono or multi-channel format
-/// - `sample_rate`: Sampling frequency in Hz
+/// # Invariants
+///
+/// - The sample rate is non-zero ([`NonZeroU32`]).
+/// - There is at least one channel and at least one sample per channel.
+///   Constructors return an error for empty data, so lengths are returned as
+///   [`NonZeroUsize`].
+/// - Multi-channel audio is stored planar: a `(channels, samples_per_channel)`
+///   array in which each channel is a contiguous row. Mono audio is a 1-D array.
+///   Use [`from_interleaved_vec`](Self::from_interleaved_vec) and
+///   [`to_interleaved_vec`](Self::to_interleaved_vec) to convert from and to
+///   interleaved buffers.
+///
+/// # Borrowed and owned audio
+///
+/// The lifetime `'a` lets a value borrow its samples. Constructors such as
+/// [`new_mono_from_slice`](Self::new_mono_from_slice) wrap an existing buffer
+/// without copying it, and read-only operations work on the borrowed data.
+/// Operations that produce new audio return `AudioSamples<'static, T>`, and
+/// [`into_owned`](Self::into_owned) copies borrowed samples into an owned value.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use audio_samples::{AudioSamples, sample_rate, channels};
+/// use audio_samples::{AudioSamples, channels, sample_rate};
 /// use ndarray::array;
 ///
 /// let mono = AudioSamples::new_mono(array![0.1f32, 0.2, 0.3], sample_rate!(44100)).unwrap();
 /// assert_eq!(mono.num_channels(), channels!(1));
+/// assert_eq!(mono.samples_per_channel().get(), 3);
 ///
+/// // Stereo: one row per channel.
 /// let stereo = AudioSamples::new_multi_channel(
 ///     array![[0.1f32, 0.2], [0.3f32, 0.4]],
 ///     sample_rate!(48000),
 /// ).unwrap();
 /// assert_eq!(stereo.num_channels(), channels!(2));
+///
+/// // Empty data is an error, not an empty value.
+/// assert!(AudioSamples::<f32>::new_mono(array![], sample_rate!(44100)).is_err());
+///
+/// // Sample-wise changes in place.
+/// let mut gain = mono.clone();
+/// gain.apply(|s| s * 0.5);
+/// assert_eq!(gain[2], 0.15);
 /// ```
-///
-/// # Invariants
-///
-/// The following properties are guaranteed by construction:
-/// - `sample_rate` is always > 0 (stored as [`NonZeroU32`])
-/// - `num_channels()` is always ≥ 1
-/// - `samples_per_channel()` is always ≥ 1 (empty audio is not allowed)
-///
-/// These invariants eliminate the need for runtime null-checks in downstream code.
 #[derive(Debug, PartialEq)]
 #[allow(clippy::exhaustive_structs)] // `AudioSamples` will likely not change from this 
 pub struct AudioSamples<'a, T>
