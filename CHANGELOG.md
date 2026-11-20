@@ -540,7 +540,7 @@ odd-length spectral bin spacing, `frequency_to_note` and
   Giannoulis/Massberg/Reiss quadratic knee); the soft limiter overshot its
   ceiling statically; gate ratio now means a 1:R downward expander;
   `set_detection_method` resizes the RMS window. `LimiterConfig::isp_limiting`
-  is documented as having no effect yet.
+  and the `SideChainConfig` filters are applied (see *Fixed* above).
 - **Statistics:** `mean`/`variance`/`cross_correlation` wrapped or panicked
   on integer audio (also breaking `remove_dc_offset`); multi-channel
   `variance` now pools all samples; u8 zero crossings are counted about 128;
@@ -560,8 +560,8 @@ odd-length spectral bin spacing, `frequency_to_note` and
 - **Rhythm:** the beat grid drifted; onset envelope smoothing used a sample
   count as frames; `pick_peaks` ignored the adjusted threshold window.
 - **VAD:** a signal shorter than one frame with `pad_end = false` returns an
-  error (was undefined behaviour); `VadMethod::Spectral` returns
-  `Unsupported` (it is not implemented).
+  error (was undefined behaviour); `VadMethod::Spectral` is implemented (see
+  *Fixed* above).
 - **Documentation:** about 150 formulas and claims corrected so that the docs
   state what the code computes (conventions, normalisation, units, dB
   references), with the conventions that vary between references stated
