@@ -42,7 +42,7 @@ use crate::traits::raw_f64_to_sample;
 /// Multiplies one sample by a channel gain (pan, balance).
 ///
 /// Float sample types are multiplied in `f64` on their raw values and cast
-/// back, as in 2.0. Integer sample types are taken to the normalised
+/// back. Integer sample types are taken to the normalised
 /// `[-1, 1]` scale with the audio-aware conversion, multiplied in `f64`, and
 /// converted back (rounded to nearest and saturated); for `u8` this scales
 /// around the mid-scale value 128.
@@ -348,7 +348,7 @@ where
     ///   normalised `[-1, 1]` scale and the result is rounded and saturated.
     /// - `Left` - routes mono input to the left channel and fills the
     ///   right with silence (`[m, 0]`). For multi-channel input, extracts
-    ///   channel 0 as a mono signal (as in 2.0; prefer
+    ///   channel 0 as a mono signal (prefer
     ///   [`extract_channel`](AudioChannelOps::extract_channel) for that).
     /// - `Right` - routes mono input to the right channel and fills the
     ///   left with silence (`[0, m]`). For multi-channel input, extracts
@@ -455,8 +455,7 @@ where
                         self.sample_rate(),
                     ))
                 }
-                // Multi-channel input: extract channel 0 / 1 as a mono
-                // signal (the behaviour of 2.0, kept for compatibility).
+                // Multi-channel input: extract channel 0 / 1 as a mono signal.
                 AudioData::Multi(_) => {
                     let channel = usize::from(matches!(method, StereoConversionMethod::Right));
                     self.extract_channel(channel)
@@ -1043,15 +1042,10 @@ where
 
 /// Channel interleave under the `simd` feature.
 ///
-/// Interleaving is pure data movement with no arithmetic. The previous
-/// per-type "SIMD" implementations loaded each channel into a `wide` vector
-/// only to immediately `.to_array()` and push element-by-element - i.e. zero
-/// vectorisation plus the cost of the load/store round-trip and several
-/// `transmute`s for type dispatch. `wide` exposes no interleave shuffle that
-/// would beat LLVM's auto-vectorisation of the contiguous scalar copies in
-/// `interleave_channels_base`. We therefore route straight to the proven
-/// scalar base implementation: bit-identical by construction and no slower
-/// (DECISION RULE: route to scalar when there is no genuine vector win).
+/// Interleaving is pure data movement with no arithmetic, and `wide` has no
+/// interleave shuffle that would beat LLVM's auto-vectorisation of the
+/// contiguous scalar copies in `interleave_channels_base`, so this uses that
+/// implementation directly.
 #[cfg(feature = "simd")]
 #[inline]
 fn interleave_channels_simd<'b, T>(
@@ -1406,9 +1400,7 @@ mod tests {
         assert_eq!(r.row(1).to_vec(), vec![0.5, -0.25]);
     }
 
-    /// Multi-channel input keeps the 2.0 behaviour: `Left` / `Right` extract
-    /// channel 0 / 1 as mono (an intermediate change returned the input
-    /// unchanged, which silently broke existing callers).
+    /// On multi-channel input `Left` / `Right` extract channel 0 / 1 as mono.
     #[test]
     fn test_to_stereo_left_right_on_multichannel_extracts_channel() {
         let stereo = AudioSamples::new_multi_channel(
@@ -1422,7 +1414,7 @@ mod tests {
         let right = stereo.to_stereo(StereoConversionMethod::Right).unwrap();
         assert!(right.is_mono());
         assert_eq!(right.as_mono().unwrap().to_vec(), vec![3.0, 4.0]);
-        // Duplicate still returns multi-channel input unchanged.
+        // Duplicate returns multi-channel input unchanged.
         let same = stereo.to_stereo(StereoConversionMethod::Duplicate).unwrap();
         assert_eq!(same.num_channels().get(), 2);
     }

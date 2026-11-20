@@ -2420,7 +2420,7 @@ pub(crate) fn banded_dot_into<F: AudioFloat>(
     out.fill(F::zero());
     // Row tiles of `s` (C-order input in place, other layouts copied one
     // tile at a time); each output value is accumulated over its filter's
-    // bins in ascending order, as before.
+    // bins in ascending order.
     crate::utils::layout::for_each_row_tile(s, |t0, tile| {
         let w = tile.ncols();
         for ((lo, weights), mut out_row) in basis.iter().zip(out.outer_iter_mut()) {
@@ -2439,10 +2439,9 @@ pub(crate) fn banded_dot_into<F: AudioFloat>(
 
 /// `|z|^power`.
 ///
-/// Computed from `re² + im²` rather than a `hypot`-based `abs(z)` (the libm
-/// `hypot` call dominated spectrogram computation); the two agree to
-/// within about one ulp. STFT values are far from the range where the squares
-/// could overflow or underflow.
+/// Computed from `re² + im²` rather than with `hypot`, which is much slower;
+/// the two agree to within about one ulp. STFT values are far from the range
+/// where the squares could overflow or underflow.
 fn magnitude_power<F: AudioFloat>(z: Complex<F>, power: f64) -> F {
     let sq = z.norm_sqr();
     if power == 2.0 {
@@ -2929,8 +2928,8 @@ where
 /// that type. See the [module documentation](self) for the operations and their
 /// free-function counterparts.
 ///
-/// The existing [`AudioTransforms`](crate::AudioTransforms) spectrogram methods are
-/// unchanged; they follow the `spectrograms` crate's conventions instead.
+/// The [`AudioTransforms`](crate::AudioTransforms) spectrogram methods are separate
+/// and follow the `spectrograms` crate's conventions.
 pub trait AudioSpectrum {
     /// The float type of the outputs and of the computation: the sample type's
     /// [`AudioSample::Float`](crate::AudioSample::Float).
@@ -3412,7 +3411,7 @@ mod tests {
     }
 
     #[test]
-    fn stft_frame_counts_match_librosa_formula() {
+    fn stft_frame_counts_follow_the_formula() {
         for &len in &[1usize, 100, 2047, 2048, 2049, 5000] {
             let x = Array2::from_shape_vec((1, len), noise(len, 1)).unwrap();
             let s = stft(x.view(), &StftConfig::default()).unwrap();
@@ -3549,7 +3548,7 @@ mod tests {
     }
 
     #[test]
-    fn pad_modes_match_numpy() {
+    fn pad_modes_extend_the_signal_as_documented() {
         let x = [1.0, 2.0, 3.0];
         assert_eq!(
             pad_signal(&x, 4, StftPadMode::Constant),
@@ -3707,7 +3706,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_matches_librosa_count() {
+    fn frame_count_follows_the_formula() {
         let x: Vec<f64> = (0..5000).map(f64::from).collect();
         let f = frame(&x, nzu!(2048), nzu!(512)).unwrap();
         assert_eq!(f.dim(), (2048, 1 + (5000 - 2048) / 512));

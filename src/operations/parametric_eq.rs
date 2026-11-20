@@ -651,7 +651,7 @@ mod tests {
     fn test_apply_eq_band_multichannel_matches_per_channel_mono() {
         // The multi-channel apply_eq_band branch must filter each channel
         // independently, identically to applying the band to that channel on
-        // its own (filtering a flattened all-channels buffer indexes out of
+        // its own (a flattened all-channels buffer would index out of
         // bounds).
         let sr = 44100.0;
         let n = 256usize;
@@ -914,11 +914,12 @@ mod tests {
         let sample_rate = 48000.0_f64;
 
         let expected_a = 10.0_f64.powf(gain_db / 40.0);
-        // The buggy base would have produced this distinctly different value.
-        let buggy_a = 10.04_f64.powf(gain_db / 40.0);
+        // A nearby base gives a measurably different A, so the check below can
+        // tell the two apart.
+        let near_a = 10.04_f64.powf(gain_db / 40.0);
         assert!(
-            (expected_a - buggy_a).abs() > 1e-4,
-            "test premise: correct and buggy A must differ measurably"
+            (expected_a - near_a).abs() > 1e-4,
+            "test premise: bases 10 and 10.04 must give measurably different A"
         );
 
         let (b, a) = design_peak_filter(frequency, gain_db, q_factor, sample_rate);

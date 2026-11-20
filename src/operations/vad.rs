@@ -177,7 +177,7 @@ where
     /// Returns [crate::AudioSampleError::Layout] if the audio array is non-contiguous
     /// (can occur after reversing or non-standard slicing).
     /// Returns [crate::AudioSampleError::Unsupported] if `config.method` is
-    /// `VadMethod::Spectral` (not yet implemented).
+    /// `VadMethod::Spectral` (not implemented).
     ///
     /// # Example
     ///

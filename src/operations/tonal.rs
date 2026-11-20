@@ -939,8 +939,8 @@ fn piptrack_channel<F: AudioFloat>(
     let (two, half) = (F::of(2.0), F::of(0.5));
     let (sr, n_fft_f) = (F::of(sample_rate), F::of_usize(n_fft));
     if s.strides()[0] == 1 && n_frames > 1 {
-        // Column-major (Fortran-order) spectrogram, as `numpy.abs` of
-        // librosa's STFT is: frame by frame, each frame a contiguous column.
+        // Column-major (Fortran-order) spectrogram: frame by frame, each frame
+        // a contiguous column.
         piptrack_columns(s, &in_range, n_fft, sample_rate, config, pitches, mags);
         return;
     }
@@ -2017,7 +2017,7 @@ where
 #[cfg(test)]
 mod tests {
 
-    /// The previous pitch_tuning loop (hz_to_octs, sign-of-divisor remainder,
+    /// A direct pitch_tuning loop (hz_to_octs, sign-of-divisor remainder,
     /// search over the edges), the reference for the optimised one.
     fn pitch_tuning_reference(frequencies: &[f64], resolution: f64) -> f64 {
         let n_hist = ((1.0 / resolution).ceil() + 1.0) as usize - 1;
@@ -2418,7 +2418,7 @@ mod tests {
     }
 
     #[test]
-    fn key_spelling_matches_librosa_examples() {
+    fn key_spelling_examples() {
         let n = |k: &str| key_to_notes(k, true, false).unwrap().join(" ");
         assert_eq!(n("C:maj"), "C C♯ D D♯ E F F♯ G G♯ A A♯ B");
         assert_eq!(n("A:min"), "C C♯ D D♯ E F F♯ G G♯ A A♯ B");

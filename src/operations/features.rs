@@ -220,7 +220,7 @@ fn check_freq(what: &str, freq: &[f64], n_bins: usize) -> AudioSampleResult<()> 
 }
 
 /// `x^p`, computed exactly as `x`, `x * x` and `sqrt(x)` for `p` = 1, 2 and 0.5.
-fn pow_np<F: AudioFloat>(x: F, p: f64) -> F {
+fn pow_exact<F: AudioFloat>(x: F, p: f64) -> F {
     if p == 1.0 {
         x
     } else if p == 2.0 {
@@ -953,8 +953,8 @@ pub fn spectral_centroid_from_spectrogram<F: AudioFloat>(
     Ok(centroid_unchecked(&s, freq))
 }
 
-/// `sum(S, axis=bins)` of a tile (rows contiguous, see [`for_each_row_tile`])
-/// with `util.normalize`'s rule: sums below the smallest positive float are
+/// The sum over the bins of each frame of a tile (rows contiguous, see
+/// [`for_each_row_tile`]), with sums below the smallest positive normal float
 /// replaced by 1. Each frame is summed over the bins in ascending order.
 fn l1_lengths_tile<F: AudioFloat>(tile: &ArrayView2<'_, F>, len: &mut [F]) {
     len.fill(F::zero());
@@ -1182,7 +1182,7 @@ pub fn spectral_bandwidth_from_spectrogram<F: AudioFloat>(
             for (k, &fk) in freq.iter().enumerate() {
                 let r = row(&tile, k);
                 let terms = o.iter_mut().zip(r).zip(cent.iter()).zip(len.iter());
-                // The same operations as `w * pow_np(|centroid - f|, p)`, with
+                // The same operations as `w * pow_exact(|centroid - f|, p)`, with
                 // the exponent's case chosen once per row.
                 macro_rules! acc {
                     ($pow:expr) => {
@@ -1206,7 +1206,7 @@ pub fn spectral_bandwidth_from_spectrogram<F: AudioFloat>(
         });
     }
     let inv = 1.0 / p;
-    out.mapv_inplace(|v| pow_np(v, inv));
+    out.mapv_inplace(|v| pow_exact(v, inv));
     Ok(out)
 }
 
@@ -1303,7 +1303,7 @@ pub fn spectral_bandwidth_from_spectrogram_with_freqs<F: AudioFloat>(
                     .zip(cent.iter())
                     .zip(len.iter())
                     .zip(fk);
-                // The same operations as `w * pow_np(|centroid - f|, p)`, with
+                // The same operations as `w * pow_exact(|centroid - f|, p)`, with
                 // the exponent's case chosen once per row.
                 macro_rules! acc {
                     ($pow:expr) => {
@@ -1327,7 +1327,7 @@ pub fn spectral_bandwidth_from_spectrogram_with_freqs<F: AudioFloat>(
         });
     }
     let inv = 1.0 / p;
-    out.mapv_inplace(|v| pow_np(v, inv));
+    out.mapv_inplace(|v| pow_exact(v, inv));
     Ok(out)
 }
 
@@ -1608,7 +1608,7 @@ pub fn spectral_flatness_from_spectrogram<F: AudioFloat>(
                     }
                 } else {
                     for (p, &v) in p_row.iter_mut().zip(r) {
-                        *p = amin.max(pow_np(v, power));
+                        *p = amin.max(pow_exact(v, power));
                     }
                 }
                 for (su, &p) in sum.iter_mut().zip(p_row.iter()) {
@@ -1649,7 +1649,7 @@ fn flatness_columns<F: AudioFloat>(sc: ArrayView2<'_, F>, o: &mut [F], amin: F, 
                 }
             } else {
                 for (p, &v) in pj.iter_mut().zip(column) {
-                    *p = amin.max(pow_np(v, power));
+                    *p = amin.max(pow_exact(v, power));
                 }
             }
         }
@@ -2697,7 +2697,7 @@ impl ZeroCrossingRateConfig {
 }
 
 /// The sign of `x`: -1, 0 or 1, with NaN propagated.
-fn np_sign<F: AudioFloat>(x: F) -> F {
+fn sign_nan<F: AudioFloat>(x: F) -> F {
     if x > F::zero() {
         F::one()
     } else if x < F::zero() {
@@ -2754,7 +2754,7 @@ fn zcr_rows<F: AudioFloat>(
         if zero_pos {
             x0.is_sign_negative() != x1.is_sign_negative()
         } else {
-            np_sign(x0) != np_sign(x1)
+            sign_nan(x0) != sign_nan(x1)
         }
     };
     // Frame t covers the pairs (xp[i - 1], xp[i]) for i in t*hop + 1 ..
@@ -3827,7 +3827,7 @@ pub struct ReassignedSpectrogram<F = f64> {
 
 /// Complex division by Smith's method. A zero divisor divides each part by zero,
 /// so `0 / 0` gives NaN and `x / 0` gives infinities.
-fn np_cdiv<F: AudioFloat>(a: Complex<F>, b: Complex<F>) -> Complex<F> {
+fn complex_div_smith<F: AudioFloat>(a: Complex<F>, b: Complex<F>) -> Complex<F> {
     let (ar, ai, br, bi) = (a.re, a.im, b.re, b.im);
     let abs_br = br.abs();
     let abs_bi = bi.abs();
@@ -3897,7 +3897,7 @@ fn reassigned_rows<F: AudioFloat>(
             .and(&s_h)
             .and(&mags)
             .for_each(|(_, k, _), v, &dh, &h, &m| {
-                let correction = -np_cdiv(dh, h).im;
+                let correction = -complex_div_smith(dh, h).im;
                 let mut x = bin_freqs[k] + correction * scale;
                 if ref_p > F::zero() && m < thresh {
                     x = F::nan();
@@ -3936,7 +3936,7 @@ fn reassigned_rows<F: AudioFloat>(
             .and(&s_h)
             .and(&mags)
             .for_each(|(_, _, t), v, &th, &h, &m| {
-                let correction = np_cdiv(th, h).re;
+                let correction = complex_div_smith(th, h).re;
                 let mut x = frame_times[t] + correction / sr;
                 if ref_p > F::zero() && m < thresh {
                     x = F::nan();
@@ -3971,7 +3971,7 @@ fn reassigned_rows<F: AudioFloat>(
 /// `*_from_spectrogram` forms that reuse a precomputed spectrogram.
 ///
 /// The whole-signal scalar descriptors of [`AudioStatistics`](crate::AudioStatistics)
-/// (`spectral_centroid`, `zero_crossing_rate`, ...) are unchanged; they summarise a
+/// (`spectral_centroid`, `zero_crossing_rate`, ...) are separate: they summarise a
 /// signal with one number and are different features.
 pub trait AudioFeatures {
     /// The float type of the outputs and of the computation: the sample type's
@@ -4426,7 +4426,7 @@ mod tests {
                     n += usize::from(if cfg.zero_pos {
                         a.is_sign_negative() != b.is_sign_negative()
                     } else {
-                        np_sign(a) != np_sign(b)
+                        sign_nan(a) != sign_nan(b)
                     });
                 }
                 n as f64 / fl as f64
@@ -4765,7 +4765,7 @@ mod tests {
     }
 
     #[test]
-    fn maximum_filter_matches_scipy() {
+    fn maximum_filter_mirrors_the_edge_bins() {
         // Maximum filter of [5, 1, 2, 9, 3, 0, 4, 7] with mirrored edges, edge bin repeated.
         let x = Array3::from_shape_vec((1, 8, 1), vec![5.0, 1.0, 2.0, 9.0, 3.0, 0.0, 4.0, 7.0])
             .unwrap();

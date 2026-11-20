@@ -776,7 +776,7 @@ fn cmnd_frame<F: AudioFloat>(
 ) -> Vec<F> {
     let zero = F::zero();
     let n_pad = fft.n_pad;
-    // Autocorrelation via the power spectrum (audio.autocorrelate, real input).
+    // Autocorrelation of the real frame via its power spectrum.
     work.clear();
     work.extend_from_slice(frame);
     work.resize(n_pad, zero);
@@ -1073,7 +1073,7 @@ fn boltzmann_pmf(k: usize, lambda: f64, n: usize) -> f64 {
 
 /// Pairwise summation: blocks of up to 128 values are summed with eight
 /// interleaved accumulators, longer slices are split in two (at a multiple of 8).
-fn np_sum<F: AudioFloat>(a: &[F]) -> F {
+fn pairwise_sum<F: AudioFloat>(a: &[F]) -> F {
     fn pairwise<F: AudioFloat>(a: &[F]) -> F {
         let n = a.len();
         if n < 8 {
@@ -1150,7 +1150,7 @@ fn pyin_frame_candidates<F: AudioFloat>(
     }
     let gmin = argmin_first(&heights);
     let n_not_below = below[gmin].iter().filter(|&&b| !b).count();
-    probs[gmin] += no_trough_prob * np_sum(&beta_probs[..n_not_below]);
+    probs[gmin] += no_trough_prob * pairwise_sum(&beta_probs[..n_not_below]);
     idx.into_iter()
         .zip(probs)
         .filter(|&(_, p)| p != F::zero())
@@ -1515,7 +1515,7 @@ fn stable_argsort<F: AudioFloat>(x: &[F]) -> Vec<usize> {
 /// `y(j)`: `fill` outside `[x[0], x[n - 1]]`, NaN for a NaN `v`, `y[j]` at an
 /// exact knot, otherwise `slope * (v - x[j]) + y[j]` (retried from the right knot
 /// if that is NaN).
-fn interp_np<F: AudioFloat>(x: &[F], y: impl Fn(usize) -> F, v: F, fill: F) -> F {
+fn interp_slope<F: AudioFloat>(x: &[F], y: impl Fn(usize) -> F, v: F, fill: F) -> F {
     let n = x.len();
     if v.is_nan() {
         return v;
@@ -1558,16 +1558,16 @@ impl<F: AudioFloat> Interp1d<F> {
         v < self.x[0] || v > self.x[self.x.len() - 1]
     }
 
-    /// Slope form, see [`interp_np`].
-    fn eval_np(&self, v: F, fill: F) -> F {
+    /// Slope form, see [`interp_slope`].
+    fn eval_slope(&self, v: F, fill: F) -> F {
         let y = &self.y;
-        interp_np(&self.x, |j| y[j], v, fill)
+        interp_slope(&self.x, |j| y[j], v, fill)
     }
 
     /// Weight form: `((v - x[lo]) / (x[hi] - x[lo])) * y[hi] + ((x[hi] - v) /
     /// (x[hi] - x[lo])) * y[lo]`, with `hi` the first knot `>= v` clipped to
     /// `[1, n - 1]`; `fill` outside the knots.
-    fn eval_scipy(&self, v: F, fill: F) -> F {
+    fn eval_weights(&self, v: F, fill: F) -> F {
         let (x, y) = (&self.x, &self.y);
         let n = x.len();
         if self.out_of_bounds(v) {
@@ -1587,8 +1587,8 @@ impl<F: AudioFloat> Interp1d<F> {
 }
 
 /// One output bin of a harmonic interpolation on a fixed frequency grid (weight form,
-/// see [`Interp1d::eval_scipy`]): either the fill value, or `a * S[hi] + b * S[lo]`
-/// with the weights precomputed exactly as `eval_scipy` computes them.
+/// see [`Interp1d::eval_weights`]): either the fill value, or `a * S[hi] + b * S[lo]`
+/// with the weights precomputed exactly as `eval_weights` computes them.
 #[derive(Debug, Clone, Copy)]
 enum HarmonicCell<F> {
     Fill,
@@ -1648,7 +1648,7 @@ impl<F: AudioFloat> HarmonicPlan<F> {
         for &h in harmonics {
             for &f in grid {
                 let v = h * f;
-                // The operations of `Interp1d::eval_scipy`.
+                // The operations of `Interp1d::eval_weights`.
                 if v < x[0] || v > x[n - 1] {
                     cells.push(HarmonicCell::Fill);
                     continue;
@@ -1765,9 +1765,9 @@ pub fn interp_harmonics<F: AudioFloat>(
                     let target = h * f;
                     out[[c, hi, k, t]] = match freqs {
                         // A fixed grid uses the weight form.
-                        FrequencyGrid::Fixed(_) => interp.eval_scipy(target, fill_value),
+                        FrequencyGrid::Fixed(_) => interp.eval_weights(target, fill_value),
                         // A per-frame grid uses the slope form.
-                        FrequencyGrid::TimeVarying(_) => interp.eval_np(target, fill_value),
+                        FrequencyGrid::TimeVarying(_) => interp.eval_slope(target, fill_value),
                     };
                 }
             }
@@ -2257,7 +2257,7 @@ pub fn f0_harmonics<F: AudioFloat>(
                 for t in 0..n_frames {
                     let col = x.slice(ndarray::s![c, .., t]);
                     for (hi, &h) in harmonics.iter().enumerate() {
-                        let v = interp_np(&xs, |j| col[order[j]], h * f0[[c, t]], fill_value);
+                        let v = interp_slope(&xs, |j| col[order[j]], h * f0[[c, t]], fill_value);
                         out[[c, hi, t]] = clamp(v);
                     }
                 }
@@ -2283,7 +2283,7 @@ pub fn f0_harmonics<F: AudioFloat>(
             }
             let interp = Interp1d::new(&gx, &gy);
             for (hi, &h) in harmonics.iter().enumerate() {
-                let v = interp.eval_np(h * f0[[c, t]], fill_value);
+                let v = interp.eval_slope(h * f0[[c, t]], fill_value);
                 out[[c, hi, t]] = if v.is_nan() {
                     fill_value
                 } else if v == F::infinity() {
@@ -2446,7 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn next_fast_len_matches_scipy() {
+    fn next_fast_len_values() {
         // The smallest 5-smooth integer >= n.
         for (n, e) in [
             (1, 1),
@@ -2503,11 +2503,11 @@ mod tests {
     }
 
     #[test]
-    fn np_sum_matches_sequential_for_short_and_is_accurate_for_long() {
+    fn pairwise_sum_exact_for_short_accurate_for_long() {
         let a: Vec<f64> = (0..5).map(f64::from).collect();
-        assert_eq!(np_sum(&a), 10.0);
+        assert_eq!(pairwise_sum(&a), 10.0);
         let b: Vec<f64> = (0..300).map(|i| 0.1 * f64::from(i)).collect();
-        assert!((np_sum(&b) - 4485.0).abs() < 1e-10);
+        assert!((pairwise_sum(&b) - 4485.0).abs() < 1e-10);
     }
 
     #[test]

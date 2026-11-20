@@ -4053,7 +4053,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_off_diagonal_matches_librosa_square() {
+    fn fill_off_diagonal_square_radius_one_keeps_diagonal() {
         let mut x = Array2::<f64>::zeros((4, 4));
         fill_off_diagonal(&mut x, 0.25, 1.0);
         // radius = round(1.0) = 1: only the main diagonal survives.
@@ -4128,7 +4128,7 @@ mod tests {
     }
 
     #[test]
-    fn triangle_window_matches_scipy() {
+    fn triangle_window_values() {
         assert_eq!(TransitionWindow::Triangle.values(1), vec![1.0]);
         assert_eq!(TransitionWindow::Triangle.values(3), vec![0.5, 1.0, 0.5]);
         assert_eq!(

@@ -32,11 +32,6 @@
 //! # }
 //! ```
 
-// General todos in types.rs
-// - Serialisation + Deserialisation for types
-// - Better derives -- more consistency
-// - More "helper" trait implementations like From/Into et al.
-
 #[cfg(feature = "processing")]
 use crate::traits::StandardSample;
 
@@ -76,13 +71,12 @@ impl FromStr for PadSide {
 /// Policy for reducing a multi-channel signal to a single channel for
 /// analysis operations that produce one scalar result.
 ///
-/// Category-2 analysis operations (e.g. [`spectral_centroid`] and
-/// [`spectral_rolloff`]) historically disagreed on multi-channel handling:
-/// some errored, others silently used channel 0. This enum unifies that
-/// behaviour behind an explicit, caller-chosen policy.
+/// Analysis operations that reduce a signal to one value (e.g.
+/// [`spectral_centroid`] and [`spectral_rolloff`]) take this policy, so the
+/// caller decides explicitly how a multi-channel signal is handled.
 ///
-/// The default is [`Error`][ChannelReduction::Error], which preserves the
-/// strictest historical behaviour by refusing to silently collapse channels.
+/// The default is [`Error`][ChannelReduction::Error], which refuses to
+/// collapse channels silently.
 ///
 /// [`spectral_centroid`]: crate::AudioStatistics::spectral_centroid
 /// [`spectral_rolloff`]: crate::AudioStatistics::spectral_rolloff
@@ -2446,8 +2440,8 @@ impl EqBand {
     /// - `frequency` - centre frequency in Hz.\
     /// - `q_factor` - centre frequency divided by the -3 dB bandwidth of the
     ///   analog prototype. After the bilinear transform this holds closely only
-    ///   for centre frequencies well below `fs/2` (at 48 kHz, `Q = 2` gives a
-    ///   measured `f₀/BW` of 2.01 at 1 kHz but 2.76 at 10 kHz).
+    ///   for centre frequencies well below `fs/2` (at 48 kHz, `Q = 2` gives
+    ///   `f₀/BW` = 2.01 at 1 kHz but 2.76 at 10 kHz).
     ///
     /// # Returns
     ///
@@ -2474,8 +2468,8 @@ impl EqBand {
     /// - `frequency` - notch frequency in Hz.\
     /// - `q_factor` - centre frequency divided by the -3 dB bandwidth of the
     ///   analog prototype. After the bilinear transform this holds closely only
-    ///   for centre frequencies well below `fs/2` (at 48 kHz, `Q = 2` gives a
-    ///   measured `f₀/BW` of 2.01 at 1 kHz but 2.76 at 10 kHz).
+    ///   for centre frequencies well below `fs/2` (at 48 kHz, `Q = 2` gives
+    ///   `f₀/BW` = 2.01 at 1 kHz but 2.76 at 10 kHz).
     ///
     /// # Returns
     ///
@@ -4558,8 +4552,8 @@ impl Default for AdaptiveThresholdConfig {
 /// i.e. **frames** in onset detection, not audio samples. The default is
 /// sized in frames (a 9-frame delta threshold with delta 0.07 and a floor of
 /// 0.1, a 3-frame separation, no median filter: about 104 ms and 35 ms at hop
-/// 512 / 44.1 kHz). The `music`, `speech` and `drums` presets were sized as if
-/// in audio samples, so on onset functions they act over many seconds.
+/// 512 / 44.1 kHz). The `music`, `speech` and `drums` presets use lengths sized
+/// as if in audio samples, so on onset functions they act over many seconds.
 ///
 /// ## Intended Usage
 ///
@@ -4782,8 +4776,7 @@ impl PeakPickingConfig {
     ///
     /// The separation is `floor(ms * sample_rate / 1000)` frames, at least 1: a
     /// separation shorter than one frame (including zero, negative or NaN
-    /// input) means consecutive frames may both be peaks. (Before 2.1 this
-    /// panicked when the result rounded to zero.)
+    /// input) means consecutive frames may both be peaks.
     #[inline]
     pub fn set_min_peak_separation_ms(&mut self, ms: f64, sample_rate: f64) {
         // `as usize` saturates (NaN -> 0); clamp to the smallest valid value.
@@ -4858,10 +4851,10 @@ impl PeakPickingConfig {
 /// - minimum separation of 3 frames;
 /// - pre-emphasis 0.97, no median filter, peak normalisation.
 ///
-/// These values replace earlier defaults (1024-frame threshold window, 3-point
-/// median filter, 512-frame separation) that suppressed almost every onset: the
-/// median filter erased single-frame peaks, the threshold window spanned the
-/// whole signal, and the separation was about 12 s at hop 512.
+/// There is no median filter because it erases single-frame peaks, and the
+/// threshold window and separation stay a few frames long: at hop 512, a few
+/// hundred frames already span several seconds and would suppress almost every
+/// onset.
 #[cfg(feature = "peak-picking")]
 impl Default for PeakPickingConfig {
     fn default() -> Self {

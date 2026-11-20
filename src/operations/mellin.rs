@@ -72,7 +72,7 @@ impl MellinConfig {
         }
     }
 
-    /// librosa's defaults; currently equal to [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; currently equal to [`new`](Self::new).
     #[must_use]
     pub const fn librosa() -> Self {
         Self::new()

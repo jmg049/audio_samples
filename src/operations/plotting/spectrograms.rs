@@ -69,7 +69,6 @@ impl PlotUtils for SpectrogramPlot {
     fn save<P: AsRef<Path>>(&self, path: P) -> crate::AudioSampleResult<()> {
         let path = path.as_ref();
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("html");
-        // TODO! Make above configurable
         match extension.to_lowercase().as_str() {
             "html" => {
                 let html = self.html()?;
@@ -1497,7 +1496,7 @@ mod mel_axis_tests {
     /// The mel axis must follow `MelParams::f_min/f_max`. Reference values: the
     /// interior 40 of 42 Slaney mel frequencies from 300 Hz to 6000 Hz.
     #[test]
-    fn mel_axis_matches_librosa_band_centres() {
+    fn mel_axis_band_centres() {
         let mel = MelParams::new(crate::nzu!(40), 300.0, 6000.0).unwrap();
         let centres = slaney_mel_band_centres(&mel);
         assert_eq!(centres.len(), 40);

@@ -25,8 +25,7 @@
 //! prototype → analog frequency transform → bilinear transform (with frequency
 //! pre-warping) → pairing into second-order sections, each pole pair with its
 //! nearest zeros. The golden-fixture tests in `tests/filter_reference.rs` check
-//! the coefficients and the filtered output against reference designs and
-//! against independent C/C++ implementations (DSPFilters, liquid-dsp).
+//! the coefficients and the filtered output against reference designs.
 //!
 //! | `IirFilterDesign` | Filter |
 //! |---|---|
@@ -377,8 +376,8 @@ impl Biquad {
         let y = self.b0 * x + self.s0;
         // `(b1·x + s1) - a1·y` rather than `b1·x - a1·y + s1`: the terms not
         // depending on `y` are summed first, which takes one addition off the
-        // recursive y → y dependency chain (≈25 % faster). The two orders differ
-        // by at most an ulp per operation.
+        // recursive y → y dependency chain. The two orders differ by at most an
+        // ulp per operation.
         self.s0 = (self.b1 * x + self.s1) - self.a1 * y;
         self.s1 = self.b2 * x - self.a2 * y;
         y
@@ -1511,7 +1510,7 @@ where
 mod tests {
     use crate::operations::types::IirFilterType;
 
-    // ---- test helpers bridging the old prototype-level API -----------------
+    // ---- test helpers for the prototype-level API ---------------------------
     use crate::operations::iir_design::{self, Zpk};
     use crate::operations::types::BesselNorm;
 
@@ -2116,13 +2115,11 @@ mod tests {
             1.0,
             FilterResponse::BandPass,
         );
-        // Note: This uses the design.cutoff_frequency field, but bandpass needs low/high
-        // The current API design has a limitation here - we'd need to use IirFilterDesign::chebyshev_i_bandpass
-        // For now, this will error because cutoff_frequency is used instead of low/high_frequency
-        // This is a known API limitation, not a bug in our implementation
+        // A band response needs two edge frequencies, which `chebyshev_i_in_place`
+        // does not take: band designs go through `IirFilterDesign::chebyshev_i_band`.
         assert!(
             result.is_err(),
-            "Current API doesn't support Chebyshev bandpass via chebyshev_i method"
+            "chebyshev_i_in_place must reject a band response"
         );
     }
 
@@ -2165,12 +2162,11 @@ mod tests {
     }
 
     // ========================================================================
-    // Validated frequency-response tests for the new designs
+    // Frequency-response tests for the Chebyshev and Butterworth band designs
     //
-    // Reference dB values cross-checked against SciPy:
-    //   signal.cheby2 / signal.butter / signal.cheby1 with output='sos',
-    //   evaluated via signal.sosfreqz at fs = 44100. Concrete checkpoints are
-    //   noted inline next to each assertion.
+    // The dB checkpoints noted next to each assertion are the magnitude
+    // responses of the reference designs (second-order sections) at
+    // fs = 44100.
     // ========================================================================
 
     const FS: f64 = 44100.0;
@@ -2190,7 +2186,7 @@ mod tests {
     #[test]
     fn test_cheby2_lowpass_response() {
         // order 4, stopband edge 2000 Hz, As = 40 dB.
-        // SciPy reference: 0 Hz ~ 0 dB, 2000 Hz = -40 dB, >=2000 Hz <= -40 dB,
+        // Reference: 0 Hz ~ 0 dB, 2000 Hz = -40 dB, >=2000 Hz <= -40 dB,
         // 1000 Hz ~ -3.04 dB.
         let proto = chebyshev2_prototype(4, 40.0);
         let sos = design_from_prototype(
@@ -2233,7 +2229,7 @@ mod tests {
             mag_db(&sos, 4000.0)
         );
 
-        // Transition: 1000 Hz ~ -3 dB (SciPy: -3.04). Within 1 dB.
+        // Transition: 1000 Hz ~ -3 dB (reference: -3.04). Within 1 dB.
         assert!(
             (mag_db(&sos, 1000.0) - (-3.04)).abs() < 1.0,
             "1000Hz transition: {}",
@@ -2244,7 +2240,7 @@ mod tests {
     #[test]
     fn test_cheby2_lowpass_odd_order() {
         // Odd order drops one zero to infinity. order 3, edge 2000, As 40.
-        // SciPy reference: DC ~0 dB, 2000 Hz = -40 dB, 4000 Hz ~ -40 dB.
+        // Reference: DC ~0 dB, 2000 Hz = -40 dB, 4000 Hz ~ -40 dB.
         let proto = chebyshev2_prototype(3, 40.0);
         let sos = design_from_prototype(
             &proto,
@@ -2272,7 +2268,7 @@ mod tests {
     #[test]
     fn test_cheby2_highpass_response() {
         // order 4, stopband edge 2000 Hz, As = 40 dB.
-        // SciPy reference: 2000 Hz = -40 dB, 100 Hz = -40.2 dB (stopband),
+        // Reference: 2000 Hz = -40 dB, 100 Hz = -40.2 dB (stopband),
         // 10000 Hz ~ 0 dB.
         let proto = chebyshev2_prototype(4, 40.0);
         let sos = design_from_prototype(
@@ -2314,12 +2310,12 @@ mod tests {
         );
     }
 
-    // ---- Butterworth band-pass (proper analog LP->BP transform) ------------
+    // ---- Butterworth band-pass (analog LP->BP transform) -------------------
 
     #[test]
     fn test_butterworth_bandpass_response() {
         // order 4, band [500, 2000] Hz. Geometric centre = 1000 Hz.
-        // SciPy reference: centre 0 dB, edges -3.01 dB, 100 Hz -65 dB,
+        // Reference: centre 0 dB, edges -3.01 dB, 100 Hz -65 dB,
         // 8000 Hz -61 dB.
         let proto = butterworth_prototype(4);
         let sos = design_from_prototype(
@@ -2369,7 +2365,7 @@ mod tests {
     #[test]
     fn test_butterworth_bandstop_response() {
         // order 4, band [500, 2000] Hz, notch centred at 1000 Hz.
-        // SciPy reference: 1000 Hz extremely deep (< -200 dB), edges -3 dB,
+        // Reference: 1000 Hz extremely deep (< -200 dB), edges -3 dB,
         // DC and 15 kHz ~ 0 dB.
         let proto = butterworth_prototype(4);
         let sos = design_from_prototype(
@@ -2414,12 +2410,12 @@ mod tests {
         );
     }
 
-    // ---- Chebyshev I band-pass (proper analog LP->BP transform) ------------
+    // ---- Chebyshev I band-pass (analog LP->BP transform) -------------------
 
     #[test]
     fn test_cheby1_bandpass_response() {
         // order 4, band [500, 2000] Hz, rp = 0.5 dB. Centre 1000 Hz.
-        // SciPy reference: passband sits within [-0.5, 0] dB across [500,2000],
+        // Reference: passband sits within [-0.5, 0] dB across [500,2000],
         // 100 Hz -74 dB, 5000 Hz -49 dB.
         let proto = chebyshev1_prototype(4, 0.5);
         let sos = design_from_prototype(
@@ -2489,7 +2485,7 @@ mod tests {
     #[test]
     fn test_cheby2_bandstop_response() {
         // order 4, band [500, 2000] Hz, As = 40 dB. Notch at 1000 Hz.
-        // SciPy reference: across [500,2000] attenuation = -40 dB, DC and
+        // Reference: across [500,2000] attenuation = -40 dB, DC and
         // 15 kHz ~ 0 dB.
         let proto = chebyshev2_prototype(4, 40.0);
         let sos = design_from_prototype(
@@ -2577,17 +2573,16 @@ mod tests {
     // ========================================================================
     // Bessel filter tests
     //
-    // Reference dB values cross-checked against
-    //   scipy.signal.bessel(N, Wn, btype, output='sos', fs=44100, norm='mag')
-    // evaluated with signal.sosfreqz. Checkpoints noted inline.
+    // The dB checkpoints noted next to each assertion are the magnitude
+    // responses of the magnitude-normalised reference designs at fs = 44100.
     // ========================================================================
 
-    /// The analog Bessel prototype poles must match scipy's `norm='mag'`
-    /// prototype (-3 dB at ω = 1) to high precision for orders 2,4,6,8.
+    /// The analog Bessel prototype poles must match the magnitude-normalised
+    /// reference prototype (-3 dB at ω = 1) to high precision for orders 2,4,6,8.
     #[test]
-    fn test_bessel_prototype_poles_match_scipy() {
-        // scipy.signal.bessel(N, 1, analog=True, output='zpk', norm='mag')
-        // poles, sorted by (imag, real).
+    fn test_bessel_prototype_poles_match_reference() {
+        // Reference poles of the magnitude-normalised analog prototype,
+        // sorted by (imag, real).
         let order4 = [
             Complex::new(-0.995208764350272, -1.257105739454664),
             Complex::new(-1.370067830551442, -0.410249717493752),
@@ -2622,7 +2617,7 @@ mod tests {
 
     #[test]
     fn test_bessel_lowpass_response() {
-        // order 4, cutoff 1000 Hz. SciPy: 0 Hz 0 dB, 100 -0.028, 500 -0.703,
+        // order 4, cutoff 1000 Hz. Reference: 0 Hz 0 dB, 100 -0.028, 500 -0.703,
         // 1000 -3.01, 2000 -13.53, 4000 -35.30. Monotonic, no ripple.
         let proto = bessel_prototype(4);
         let sos = design_from_prototype(
@@ -2700,7 +2695,8 @@ mod tests {
             gds.push(-(unwrapped[i] - unwrapped[i - 1]) / dw);
         }
         let mean: f64 = gds.iter().sum::<f64>() / gds.len() as f64;
-        // scipy group delay is ~14.8 samples and very flat across passband.
+        // The reference group delay is ~14.8 samples and very flat across the
+        // passband.
         for &g in &gds {
             assert!(
                 (g - mean).abs() / mean < 0.05,
@@ -2715,7 +2711,7 @@ mod tests {
 
     #[test]
     fn test_bessel_highpass_response() {
-        // order 4, cutoff 1000 Hz. SciPy: Nyquist 0 dB, 5000 -0.10,
+        // order 4, cutoff 1000 Hz. Reference: Nyquist 0 dB, 5000 -0.10,
         // 2000 -0.70, 1000 -3.01, 500 -13.44, 100 -65.7.
         let proto = bessel_prototype(4);
         let sos = design_from_prototype(
@@ -2750,7 +2746,7 @@ mod tests {
 
     #[test]
     fn test_bessel_bandpass_response() {
-        // order 4, band [500,2000], centre 1000 Hz. SciPy: centre ~0 dB,
+        // order 4, band [500,2000], centre 1000 Hz. Reference: centre ~0 dB,
         // 100 -51 dB, 8000 -47 dB, 250 -19.5 dB.
         let proto = bessel_prototype(4);
         let sos = design_from_prototype(
@@ -2781,7 +2777,7 @@ mod tests {
 
     #[test]
     fn test_bessel_bandstop_response() {
-        // order 4, band [500,2000], notch at 1000 Hz. SciPy: notch very deep,
+        // order 4, band [500,2000], notch at 1000 Hz. Reference: notch very deep,
         // DC/15 kHz ~0 dB.
         let proto = bessel_prototype(4);
         let sos = design_from_prototype(
@@ -2837,16 +2833,15 @@ mod tests {
     // ========================================================================
     // Elliptic (Cauer) filter tests
     //
-    // Reference dB values cross-checked against
-    //   scipy.signal.ellip(N, rp, rs, Wn, btype, output='sos', fs=44100)
-    // evaluated with signal.sosfreqz. Checkpoints noted inline.
+    // The dB checkpoints noted next to each assertion are the magnitude
+    // responses of the reference designs at fs = 44100.
     // ========================================================================
 
-    /// The analog elliptic prototype zeros/poles/gain must match SciPy's
-    /// `ellipap` to ≈1e-9 for both even and odd orders.
+    /// The analog elliptic prototype zeros/poles/gain must match the reference
+    /// prototype to ≈1e-9 for both even and odd orders.
     #[test]
-    fn test_elliptic_prototype_matches_scipy() {
-        // scipy.signal.ellip(4, 1, 40, 1, analog=True, output='zpk').
+    fn test_elliptic_prototype_matches_reference() {
+        // Reference prototype: order 4, rp = 1 dB, rs = 40 dB, cutoff 1 rad/s.
         let poles_ref = [
             Complex::new(-0.1052812646, -0.9937108112),
             Complex::new(-0.3642905959, -0.4786027676),
@@ -2898,7 +2893,7 @@ mod tests {
 
     #[test]
     fn test_elliptic_lowpass_response() {
-        // order 4, cutoff 2000 Hz, rp=1, rs=40. SciPy: DC -1.0, 500 -0.435,
+        // order 4, cutoff 2000 Hz, rp=1, rs=40. Reference: DC -1.0, 500 -0.435,
         // 1000 -0.085, 1500 -0.998, 1900 -0.013, 2000 -1.0, 2500 -18.82,
         // 4000 -40.03, 8000 -49.2.
         let proto = elliptic_prototype(4, 1.0, 40.0);
@@ -2951,7 +2946,7 @@ mod tests {
             "8000Hz: {}",
             mag_db(&sos, 8000.0)
         );
-        // Cross-check exact SciPy transition value.
+        // Cross-check the exact reference transition value.
         assert!(
             (mag_db(&sos, 2500.0) - (-18.819)).abs() < 0.5,
             "2500Hz: {}",
@@ -2961,7 +2956,7 @@ mod tests {
 
     #[test]
     fn test_elliptic_highpass_response() {
-        // order 4, cutoff 2000 Hz, rp=1, rs=40. SciPy: Nyquist -1.0,
+        // order 4, cutoff 2000 Hz, rp=1, rs=40. Reference: Nyquist -1.0,
         // 4000 -0.066, 2000 -1.0, 1500 -24.6, 1000 -40.0, 500 -53.6.
         let proto = elliptic_prototype(4, 1.0, 40.0);
         let sos = design_from_prototype_with_gain(
@@ -2996,7 +2991,7 @@ mod tests {
 
     #[test]
     fn test_elliptic_bandpass_response() {
-        // order 4, band [500,2000], rp=1, rs=40. SciPy: band edges and centre
+        // order 4, band [500,2000], rp=1, rs=40. Reference: band edges and centre
         // within ripple bound; 100 -43, 8000 -44, 250 -43 dB.
         let proto = elliptic_prototype(4, 1.0, 40.0);
         let sos = design_from_prototype_with_gain(
@@ -3027,7 +3022,7 @@ mod tests {
 
     #[test]
     fn test_elliptic_bandstop_response() {
-        // order 4, band [500,2000], rp=1, rs=40. SciPy: notch band ≥40 dB,
+        // order 4, band [500,2000], rp=1, rs=40. Reference: notch band ≥40 dB,
         // DC/15 kHz within ripple bound.
         let proto = elliptic_prototype(4, 1.0, 40.0);
         let sos = design_from_prototype_with_gain(

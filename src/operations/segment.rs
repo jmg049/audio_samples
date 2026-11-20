@@ -270,7 +270,7 @@ impl PathEnhanceConfig {
         }
     }
 
-    /// librosa's defaults; currently equal to [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; currently the same as [`new`](Self::new).
     #[must_use]
     pub fn librosa() -> Self {
         Self::new()

@@ -187,7 +187,7 @@ impl PlotUtils for MagnitudeSpectrumPlot {
                     "webp" => ImageFormat::WEBP,
                     _ => ImageFormat::PNG,
                 };
-                // TODO! Make width/height/scale configurable
+                // Images are rendered at a fixed 1920 × 1080.
                 let width = 1920;
                 let height = 1080;
                 let scale = 1.0;

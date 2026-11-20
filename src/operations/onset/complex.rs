@@ -97,7 +97,7 @@ pub fn magnitude_difference(mag: ArrayView2<f64>) -> Array2<f64> {
 /// assert!((diff - 0.0).abs() < 1e-10);
 /// ```
 #[inline]
-#[allow(dead_code)] // retained utility; superseded by `princarg` in `phase_deviation`
+#[allow(dead_code)] // single-wrap helper; `phase_deviation` uses `princarg`
 fn wrapped_phase_diff(a: f64, b: f64) -> f64 {
     let mut d = a - b;
 
@@ -294,13 +294,13 @@ mod tests {
     /// In the non-rectified combine path the magnitude
     /// contribution must come from `mag_diff`, not from `phase_dev`.
     ///
-    /// We use `ComplexOnsetConfig::speech()` (`phase_rectify: false`), force the
+    /// The test uses `ComplexOnsetConfig::speech()` (`phase_rectify: false`), forces the
     /// output to depend only on the magnitude term (magnitude_weight = 1,
-    /// phase_weight = 0, no log compression), and feed magnitude and phase arrays
+    /// phase_weight = 0, no log compression), and feeds magnitude and phase arrays
     /// with deliberately different values, so a result taken from the phase data
     /// fails the assertion.
     #[test]
-    fn bug1_nonrectified_magnitude_comes_from_magnitude() {
+    fn nonrectified_magnitude_comes_from_magnitude() {
         let mut config = ComplexOnsetConfig::speech();
         assert!(!config.phase_rectify, "test relies on non-rectified phase");
         config.magnitude_weight = 1.0;
@@ -381,14 +381,14 @@ mod tests {
     /// bins). Wrapping the raw phase difference before subtracting `expected` would
     /// leave a large residual.
     #[test]
-    fn bug2_phase_deviation_zero_for_expected_advance() {
+    fn phase_deviation_zero_for_expected_advance() {
         let config = ComplexOnsetConfig::speech();
         let sample_rate = 44100.0;
         let hop = config.hop_size.get() as f64;
         let tau = std::f64::consts::TAU;
 
-        // Find a high bin whose expected per-hop advance exceeds π, which is what
-        // makes the bug observable (single-wrap is insufficient there).
+        // Find a high bin whose expected per-hop advance exceeds π, where a single
+        // wrap is not enough.
         let bins = 64usize;
         let frames = 6usize;
         let mut high_bin = 0usize;

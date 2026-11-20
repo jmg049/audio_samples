@@ -1057,8 +1057,8 @@ mod tests {
     }
 
     #[test]
-    fn triangular_windows_match_scipy_definitions() {
-        // triang(4) = [0.25, 0.75, 0.75, 0.25]; triang(5) = [1/3, 2/3, 1, 2/3, 1/3]
+    fn triangular_and_bartlett_windows_have_known_values() {
+        // Triangular, n = 4: [0.25, 0.75, 0.75, 0.25]; n = 5: [1/3, 2/3, 1, 2/3, 1/3]
         let t4 = get_window(&Window::Triangular, 4, false).unwrap();
         assert_eq!(t4.to_vec(), vec![0.25, 0.75, 0.75, 0.25]);
         let t5 = get_window(&Window::Triangular, 5, false).unwrap();
@@ -1068,7 +1068,7 @@ mod tests {
         {
             assert!((a - b).abs() < 1e-15);
         }
-        // bartlett(5) = [0, 0.5, 1, 0.5, 0]
+        // Bartlett, n = 5: [0, 0.5, 1, 0.5, 0]
         let b5 = get_window(&Window::Bartlett, 5, false).unwrap();
         assert_eq!(b5.to_vec(), vec![0.0, 0.5, 1.0, 0.5, 0.0]);
     }

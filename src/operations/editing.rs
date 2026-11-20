@@ -2089,9 +2089,8 @@ where
             audio.replace_with_vec(&non_empty_vec)?;
         }
         AudioData::Multi(arr) => {
-            // Planar (channels x samples) data: replace directly. (Building an
-            // interleaved vector and reshaping it as planar scrambled the
-            // channels and failed whenever the length changed.)
+            // Planar (channels x samples) data: replace directly, which keeps
+            // the channel order and allows the length to change.
             audio.replace_with_multi(arr.as_view().to_owned())?;
         }
     }
@@ -2460,8 +2459,8 @@ mod tests {
 
     #[test]
     fn test_pad_dual_variant_equivalence() {
-        // ADD-twin op: pad is the non-mutating primitive, pad_in_place is the
-        // provided default twin.
+        // pad is the non-mutating primitive, pad_in_place the provided
+        // default twin.
         let samples = Array1::from(vec![1.0f32; 1000]);
         let original = AudioSamples::new_mono(samples, sample_rate!(44100)).unwrap();
 
@@ -2719,8 +2718,8 @@ mod tests {
         }
     }
 
-    /// `pad_samples_right` must produce exactly the requested length (it used
-    /// to go samples -> seconds -> samples with truncation twice).
+    /// `pad_samples_right` must produce exactly the requested length (a round
+    /// trip through seconds would truncate twice and can come out short).
     #[test]
     fn test_pad_samples_right_exact_length() {
         for sr in [22050u32, 44100, 48000, 16000, 11025] {
@@ -2948,7 +2947,6 @@ mod tests {
 
     #[cfg(all(feature = "transforms", feature = "channels"))]
     #[test]
-    #[ignore] // TODO: Fix multi-channel pitch shift - shape error in channel processing
     fn test_pitch_shift_multi_channel() {
         use crate::sine_wave;
         use non_empty_slice::NonEmptyVec;

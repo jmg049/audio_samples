@@ -33,9 +33,9 @@
 //! [`GriffinLimConfig::default`] seeds its random initial phase. The spectral
 //! steps reuse the STFT of [`crate::operations::spectrum`].
 //!
-//! The older [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss) and
-//! [`AudioEditing::trim_silence`](crate::AudioEditing::trim_silence) keep their own
-//! (different) semantics.
+//! [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss) and
+//! [`AudioEditing::trim_silence`](crate::AudioEditing::trim_silence) are separate
+//! operations with their own (different) semantics.
 //!
 //! ## How
 //!
@@ -473,7 +473,7 @@ fn time_stretch_rows<F: AudioFloat>(
         )));
     }
     let n = rows.ncols();
-    // Python's round() rounds half to even.
+    // The stretched length rounds half to even.
     let len_stretch = (n as f64 / rate).round_ties_even();
     if len_stretch < 1.0 {
         return Err(param_err(
@@ -2943,9 +2943,8 @@ pub fn nn_filter_recurrence<F: AudioFloat>(
 /// `y`. The recursion runs in `f64`: `f32` input is widened (exactly) and the
 /// coefficients are rounded to `f32` once, at the cost of one `f64` copy of the
 /// signal. A Burg recursion in `f32` is unstable on tonal input at high orders:
-/// on a test signal of three tones and a chirp its coefficients differ from the
-/// `f64` ones by 1.3e-3 (relative to the largest coefficient) at order 4, 0.14
-/// at order 8 and by more than 100 % from order 10 on.
+/// on a mixture of tones its coefficients drift away from the `f64` ones as the
+/// order grows and lose all accuracy by order 10.
 ///
 /// # Errors
 ///
@@ -2984,8 +2983,7 @@ pub fn lpc<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
 /// update loop, in the same order as a separate pass. The samples are
 /// widened into the buffers once and the recursion itself is one function
 /// for every sample type, so `f32` and `f64` input run the same machine code
-/// (separate copies of the loop ran at different speeds on some cores, from
-/// code placement alone).
+/// and the speed does not depend on where each copy of the loop is placed.
 fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec<f64>> {
     let order = order.get();
     if !y.iter().fold(true, |ok, v| ok & v.is_finite()) {
@@ -3018,11 +3016,10 @@ fn lpc_f64<F: AudioFloat>(y: &[F], order: NonZeroUsize) -> AudioSampleResult<Vec
     // Both error sequences in one buffer, `bwd` half a page (mod 4 KiB) after
     // `fwd`: with separate allocations both can start on a page boundary,
     // and the loop's stores to one then alias the loads from the other in
-    // the store buffer (4 KiB aliasing), at up to 1.6 times the time.
+    // the store buffer (4 KiB aliasing), which slows the loop down.
     let gap = m0.next_multiple_of(512) + 256;
-    // The buffer starts on a 2 MiB boundary: where it starts otherwise
-    // depends on the allocator, and on some cores (measured on E-cores) the
-    // passes then take up to 1.7 times as long in some processes.
+    // The buffer starts on a 2 MiB boundary, so the speed of the passes does
+    // not depend on where the allocator happens to place it.
     const ALIGN: usize = 2 << 20;
     let mut errors = vec![0.0_f64; gap + m0 + ALIGN / 8];
     let skip = (ALIGN - errors.as_ptr() as usize % ALIGN) % ALIGN / 8;
@@ -3346,7 +3343,7 @@ pub fn clicks<T: StandardSample>(
                 return Err(AudioSampleError::empty_data("clicks"));
             }
             let w = 2.0 * std::f64::consts::PI * config.click_freq / sr;
-            // Envelope 2 ** linspace(0, -10, n).
+            // Envelope 2^(-10 u), u going linearly from 0 to 1 over n samples.
             let step = if n > 1 { -10.0 / (n - 1) as f64 } else { 0.0 };
             (0..n)
                 .map(|i| {
@@ -3421,8 +3418,7 @@ pub trait AudioEffects {
     /// Changes the speed without changing the pitch.
     ///
     /// The audio is analysed with `stft`, re-timed with [`phase_vocoder`] and
-    /// resynthesised to exactly `round(n / rate)` samples (ties to even, as Python's
-    /// `round`).
+    /// resynthesised to exactly `round(n / rate)` samples (ties to even).
     ///
     /// # Arguments
     ///
@@ -3453,7 +3449,7 @@ pub trait AudioEffects {
     /// to `Complex<f32>`; the phase vocoder and the inverse STFT run in `f32`.
     /// An `f32` STFT would put the bins that a signal reaches only later (a
     /// chirp, an onset) at the `f32` round-off level, and the phase vocoder
-    /// carries their phase into the output. On the reference chirp-and-tones
+    /// carries their phase into the output. On a chirp-and-tones test
     /// signal the `f32` result agrees with the `f64` result to 2.1e-6 of the
     /// peak; `i16` output is within 1 LSB of the `f64` result re-quantised.
     ///
@@ -3535,7 +3531,7 @@ pub trait AudioEffects {
     /// [`time_stretch`](Self::time_stretch). The resampling stage filters the
     /// time-stretched rows in the float type and writes the output (already cut
     /// or padded to the input length) directly. `i16` output is within 1 LSB of
-    /// the `f64` result re-quantised on the reference test signals.
+    /// the `f64` result re-quantised on the test signals.
     ///
     /// # Examples
     ///
@@ -4522,8 +4518,8 @@ mod tests {
     }
 
     #[test]
-    fn preemphasis_state_matches_lfilter() {
-        // Reference values (see also the module tests in the reference suite).
+    fn preemphasis_state_known_values() {
+        // Values worked out by hand from the difference equations.
         let (y, zf) = preemphasis_with_state(&[1.0_f64, 3.0, 0.5], 0.97, None).unwrap();
         assert_eq!(y[0], 0.0);
         assert!((y[1] - 2.03).abs() < 1e-15);
@@ -4602,7 +4598,7 @@ mod tests {
     #[test]
     fn zero_crossings_and_matching() {
         let y = [0.5, -0.5, 1e-12, 0.3, -0.2];
-        // 1e-12 counts as +0 (not a sign change from -0.5? signbit(-0.5)=1, signbit(0)=0: yes).
+        // 1e-12 counts as +0, so -0.5 -> 1e-12 is a sign change at index 2.
         assert_eq!(zero_crossing_positions(&y), vec![0, 1, 2, 4, 5]);
         let z = [0, 10, 20, 30];
         assert_eq!(match_event(14, &z), 1);
@@ -4628,7 +4624,7 @@ mod tests {
     }
 
     #[test]
-    fn median_filter_matches_scipy_reflect() {
+    fn median_filter_half_sample_symmetric_edges() {
         // Median filter of [5,1,2,3,4,9,0] with size k and half-sample symmetric edges.
         let x = Array3::from_shape_vec((1, 1, 7), vec![5.0, 1.0, 2.0, 3.0, 4.0, 9.0, 0.0]).unwrap();
         let f = |k| {
@@ -4967,10 +4963,9 @@ mod tests {
         let stft = StftConfig::default();
         let ps = PitchShiftConfig::default();
         let hp = HarmonicPercussiveConfig::default();
-        // Measured: 1 LSB for every operation except trim_db (0: it copies
-        // samples). The f32 and f64 results differ by round-off well below one
-        // LSB (3.1e-5); a 1-LSB difference appears where the two values fall on
-        // opposite sides of a rounding boundary.
+        // The f32 and f64 results differ by round-off well below one LSB; a
+        // 1-LSB difference appears where the two values fall on opposite sides
+        // of a rounding boundary. trim_db copies samples, so its bound is 0.
         let cases: [(&str, i32, i32); 5] = [
             (
                 "time_stretch",
@@ -5025,9 +5020,8 @@ mod tests {
         // A chirp sweeps into bins whose STFT values are at the round-off level
         // before it arrives, and the phase vocoder carries the phase of those
         // bins forward. The vocoder operations therefore analyse the exact f64
-        // samples with an f64 STFT and round it to f32 once; an f32 STFT of the
-        // f32 samples gave 139 LSB here. Measured: 1 LSB for time_stretch (rates
-        // 1.5 and 0.75), pitch_shift (+2, -3) and harmonic. Bound: 1 LSB.
+        // samples with an f64 STFT and round it to f32 once. Bound: 1 LSB for
+        // time_stretch (rates 1.5 and 0.75), pitch_shift (+2, -3) and harmonic.
         let chirp = AudioSamples::new_mono(
             Array1::from_shape_fn(22050, |n| {
                 let t = n as f64 / 22050.0;

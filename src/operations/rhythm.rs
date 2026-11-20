@@ -23,7 +23,7 @@
 //!
 //! ## Why
 //!
-//! The older [`AudioOnsetDetection`](crate::AudioOnsetDetection) and
+//! The [`AudioOnsetDetection`](crate::AudioOnsetDetection) and
 //! [`AudioBeatTracking`](crate::operations::AudioBeatTracking) traits use their own detection
 //! functions, peak picker and a fixed-tempo beat grid. This module computes onset
 //! strength from a log-power mel spectrogram, tempo from an autocorrelation tempogram
@@ -935,7 +935,7 @@ pub enum PeakPickMethod {
 /// `delta = 0.07`), or with a struct literal. There is no `Default`: the window sizes
 /// are in frames, so they depend on the sample rate and hop length. Unrelated to
 /// [`PeakPickingConfig`](crate::operations::types::PeakPickingConfig), which drives the
-/// older peak picker.
+/// peak picker of [`AudioOnsetDetection`](crate::AudioOnsetDetection).
 ///
 /// ## Invariants
 ///

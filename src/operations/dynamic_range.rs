@@ -1060,10 +1060,9 @@ where
             )));
         }
 
-        // For now, implement basic side-chain by using the sidechain signal for detection
-        // but applying gain reduction to the main signal
-        // This is a simplified implementation - a full implementation would include
-        // filtering of the sidechain signal according to the configuration
+        // The side-chain signal drives the detector and the gain reduction is
+        // applied to the main signal. The side-chain filter settings are not
+        // applied (see the module documentation).
 
         match (self.data_mut(), sidechain_signal.data()) {
             (AudioData::Mono(main_samples), AudioData::Mono(sc_samples)) => {
@@ -1876,10 +1875,9 @@ mod tests {
         assert!(audio.apply_limiter_in_place(&broadcast_config).is_ok());
     }
 
-    /// The mono expander branch must set `gain_change_db = 0.0` for signals
-    /// above threshold; `1.0` would attenuate everything above threshold by
-    /// ~1 dB (`db_to_linear(-1.0) ~= 0.891`). Loud signal should pass through
-    /// unchanged.
+    /// The mono expander applies no gain change (`gain_change_db = 0.0`) to
+    /// signals above the threshold: a loud signal passes through at unity gain,
+    /// not attenuated by ~1 dB (`db_to_linear(-1.0) ~= 0.891`).
     #[test]
     fn test_expander_above_threshold_mono_unchanged() {
         // Constant loud signal, well above a low threshold. RMS envelope settles
@@ -2013,13 +2011,13 @@ mod tests {
         );
     }
 
-    // ---- Ring-buffer parity ---------------------------------------------
+    // ---- Ring buffer against a two-pass reference -----------------------
     //
-    // These reference implementations reproduce the ORIGINAL O(N)-`Vec`
-    // algorithm exactly (two-pass: compute all gains into a Vec, then apply
-    // with the `gain_reductions[i - lookahead]` delay plus the trailing
-    // flush). The current implementation uses a fixed-capacity ring instead;
-    // its output must be bit-for-bit identical to these references.
+    // These reference implementations work in two passes: they compute all
+    // gains into a Vec, then apply them with the
+    // `gain_reductions[i - lookahead]` delay plus the trailing flush. The
+    // fixed-capacity ring buffer of the processors must give output that is
+    // bit-for-bit identical to these references.
 
     /// Brute-force reference for the lookahead gain stage: the detector runs
     /// over the zero-padded signal (length `n + L`), and sample `j` receives
@@ -2153,7 +2151,7 @@ mod tests {
     #[test]
     fn test_compressor_ring_buffer_short_input_no_lookahead_reached() {
         // Input SHORTER than the lookahead: every sample must still be
-        // processed (an earlier version returned such inputs unchanged).
+        // processed, not returned unchanged.
         let sr = 44100.0;
         let input: Vec<f64> = vec![0.3, -0.6, 0.2, 0.9, -0.1];
         let mut config = CompressorConfig::new();

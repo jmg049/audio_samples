@@ -121,7 +121,7 @@ fn c1_hz() -> f64 {
 }
 
 /// MIDI note number of `f` Hz, evaluated as `12 (log2 f - log2 440) + 69`.
-fn hz_to_midi_librosa(f: f64) -> f64 {
+fn hz_to_midi_log2(f: f64) -> f64 {
     12.0 * (f.log2() - 440.0f64.log2()) + 69.0
 }
 
@@ -172,7 +172,7 @@ fn transform_alpha(freqs: &[f64], bpo: usize) -> Vec<f64> {
 
 /// Equivalent noise bandwidth used for the wavelet filters: a fixed table value for
 /// named windows; parameterised windows use the formula at `n = 1000`.
-fn librosa_window_bandwidth(window: &Window) -> AudioSampleResult<f64> {
+fn wavelet_window_bandwidth(window: &Window) -> AudioSampleResult<f64> {
     Ok(match window {
         Window::Rectangular => 1.0,
         Window::Hann => 1.500_183_105_468_75,
@@ -370,7 +370,7 @@ impl WaveletConfig {
             ));
         }
         validate_norm("norm", self.norm)?;
-        librosa_window_bandwidth(&self.window).map(|_| ())
+        wavelet_window_bandwidth(&self.window).map(|_| ())
     }
 }
 
@@ -500,7 +500,7 @@ pub fn wavelet_lengths_into(
     config.validate()?;
     validate_freqs(freqs, false)?;
     require_finite_positive("sample_rate", sample_rate)?;
-    let window_bw = librosa_window_bandwidth(&config.window)?;
+    let window_bw = wavelet_window_bandwidth(&config.window)?;
     if lengths.len() != freqs.len() {
         return Err(param_err(
             "lengths",
@@ -769,7 +769,7 @@ pub fn wavelet_lengths_with_alpha_into(
     for &a in alpha {
         require_finite_positive("alpha", a)?;
     }
-    let window_bw = librosa_window_bandwidth(&config.window)?;
+    let window_bw = wavelet_window_bandwidth(&config.window)?;
     let mut cutoff = f64::NEG_INFINITY;
     for ((len, &f), &a) in lengths.iter_mut().zip(freqs).zip(alpha) {
         let g = config.gamma.unwrap_or(a * 24.7 / 0.108);
@@ -1269,7 +1269,7 @@ impl CqtConfig {
             )));
         }
         validate_norm("norm", self.norm)?;
-        librosa_window_bandwidth(&self.window).map(|_| ())
+        wavelet_window_bandwidth(&self.window).map(|_| ())
     }
 
     fn fmin_or_c1(&self) -> f64 {
@@ -1444,7 +1444,7 @@ fn filterbank(
             ),
         ));
     }
-    let window_bw = librosa_window_bandwidth(&cfg.window)?;
+    let window_bw = wavelet_window_bandwidth(&cfg.window)?;
     let (n_bins, auto) = match cfg.n_bins {
         Some(n) => (n.get(), false),
         None => (
@@ -1871,7 +1871,7 @@ fn icqt_rows<F: AudioFloat>(
     let n_octaves = n_bins.div_ceil(bpo);
     let freqs = cqt_frequencies(n_bins, fmin, cfg.bins_per_octave, 0.0);
     let alpha = transform_alpha(&freqs, bpo);
-    let window_bw = librosa_window_bandwidth(&cfg.window)?;
+    let window_bw = wavelet_window_bandwidth(&cfg.window)?;
     let (lengths, _) =
         wavelet_lengths_impl(&freqs, sr, window_bw, cfg.filter_scale, Some(0.0), &alpha);
     let hop = cfg.hop_length.get();
@@ -1940,7 +1940,7 @@ fn icqt_rows<F: AudioFloat>(
                     *coef = v * w;
                 }
                 // Frame by frame along each bin's row of `d` (each bin's sum
-                // still adds the filters in order).
+                // adds the filters in order).
                 for (&j, &v) in row.idx.iter().zip(&row.val) {
                     let v = v.conj();
                     for (dst, &coef) in d.slice_mut(s![ch, j, ..]).iter_mut().zip(&coefs) {
@@ -2045,7 +2045,7 @@ pub fn cq_to_chroma(
     )?;
     let n_merge = bpo / nc;
     let shift = n_merge / 2;
-    let midi_0 = hz_to_midi_librosa(fmin).rem_euclid(12.0);
+    let midi_0 = hz_to_midi_log2(fmin).rem_euclid(12.0);
     let roll = if base_c { midi_0 } else { midi_0 - 9.0 };
     let roll = (roll * (nc as f64 / 12.0)).round_ties_even() as i64;
     let mut out = Array2::<f64>::zeros((nc, n_input));

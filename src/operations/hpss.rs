@@ -120,7 +120,7 @@ impl HpssConfig {
     ///
     /// # Panics
     ///
-    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid according to the builder. The chosen parameters are common for musical separation and should not cause any issues.
+    /// Does not panic: the fixed STFT parameters always pass the builder's checks.
     #[inline]
     #[must_use]
     pub fn musical() -> Self {
@@ -146,7 +146,7 @@ impl HpssConfig {
     ///
     /// # Panics
     ///
-    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid. The chosen parameters are common for percussive separation and should not cause any issues.
+    /// Does not panic: the fixed STFT parameters always pass the builder's checks.
     #[inline]
     #[must_use]
     pub fn percussive() -> Self {
@@ -172,7 +172,7 @@ impl HpssConfig {
     ///
     /// # Panics
     ///
-    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid. The chosen parameters are common for harmonic separation and should not cause any issues.
+    /// Does not panic: the fixed STFT parameters always pass the builder's checks.
     #[inline]
     #[must_use]
     pub fn harmonic() -> Self {
@@ -199,7 +199,7 @@ impl HpssConfig {
     ///
     /// # Panics
     ///
-    /// Theoretically, this will not panic as the parameters are set through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set and valid. The chosen parameters are common for real-time processing and should not cause any issues.
+    /// Does not panic: the fixed STFT parameters always pass the builder's checks.
     #[inline]
     #[must_use]
     pub fn realtime() -> Self {
@@ -225,7 +225,8 @@ impl HpssConfig {
     ///
     /// # Panics
     ///
-    /// Theorectically, will not panic as we set the parameters through the builder and the reason for the `build()` call is to check that `n_fft` and `hop_size` are set.
+    /// Panics if `hop_size` is larger than `n_fft`, which the STFT parameter
+    /// builder rejects.
     #[inline]
     pub fn set_stft_params(&mut self, n_fft: NonZeroUsize, hop_size: NonZeroUsize) {
         self.stft_params = StftParamsBuilder::default()
@@ -478,11 +479,9 @@ fn median_filter_time_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Arr
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
-    // Reusable scratch window shared across rows; the inner kernel buffer is
-    // hoisted out of the per-sample loop inside `median_filter_1d_view`.
+    // One scratch window shared by every row and sample.
     let mut window = Vec::with_capacity(kernel_size);
-    // Process each frequency bin independently. Index the (contiguous) row view
-    // directly instead of allocating a `Vec` per row via `.to_vec()`.
+    // Each frequency bin is filtered independently, straight from its row view.
     for freq_idx in 0..n_freq_bins {
         let freq_row = spectrogram.slice(s![freq_idx, ..]);
         median_filter_1d_view(&freq_row, kernel_size, &mut window, |time_idx, val| {
@@ -501,12 +500,10 @@ fn median_filter_freq_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Arr
     let (n_freq_bins, n_time_frames) = spectrogram.dim();
     let mut filtered = Array2::zeros((n_freq_bins, n_time_frames));
 
-    // Reusable scratch window shared across columns; the inner kernel buffer is
-    // hoisted out of the per-sample loop inside `median_filter_1d_view`.
+    // One scratch window shared by every column and sample.
     let mut window = Vec::with_capacity(kernel_size);
-    // Process each time frame independently. The column view is strided (not
-    // contiguous), but indexing it directly still avoids the per-column
-    // `.to_vec()` allocation.
+    // Each time frame is filtered independently, straight from its (strided)
+    // column view.
     for time_idx in 0..n_time_frames {
         let time_col = spectrogram.slice(s![.., time_idx]);
         median_filter_1d_view(&time_col, kernel_size, &mut window, |freq_idx, val| {
@@ -517,12 +514,8 @@ fn median_filter_freq_axis(spectrogram: &Array2<f64>, kernel_size: usize) -> Arr
     filtered
 }
 
-// TODO: Change to NonEmptySlices and NonZeroUsize
-/// Simple 1D median filter implementation.
-///
-/// Uses a sliding window approach with border handling via reflection. This
-/// slice-based reference implementation is retained as the behavioural oracle
-/// for [`median_filter_1d_view`]; the hot path uses the view-based variant.
+/// Straightforward 1-D median filter with reflected borders, the test oracle for
+/// [`median_filter_1d_view`].
 #[cfg(test)]
 fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
     if kernel_size == 0 {
@@ -540,8 +533,7 @@ fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
     let half_kernel = kernel_size / 2;
     let mut filtered = Vec::with_capacity(len);
 
-    // One reusable scratch window outside the per-sample loop, cleared and
-    // refilled each step before sorting, so no window is allocated per sample.
+    // One scratch window, cleared and refilled for each sample.
     let mut window = Vec::with_capacity(kernel_size);
 
     for i in 0..len {
@@ -580,11 +572,10 @@ fn median_filter_1d(signal: &[f64], kernel_size: usize) -> Vec<f64> {
 /// Median-filters a 1-D ndarray view in place into a caller-supplied sink,
 /// reusing a caller-supplied scratch `window` buffer.
 ///
-/// This is the allocation-hoisted core used by the time- and frequency-axis
-/// filters. It produces results identical to [`median_filter_1d`] - same
-/// reflection padding, same even/odd median selection, same handling of the
-/// `kernel_size <= 1` and empty-input cases - but avoids a per-row/column
-/// `.to_vec()` and a per-sample kernel allocation. The `sink` closure receives
+/// Used by the time- and frequency-axis filters. Borders are reflected without
+/// repeating the edge sample, an even kernel takes the mean of the two middle
+/// values, and a kernel of 0 or 1 or an empty signal copies the input through.
+/// Nothing is allocated per row, column or sample. The `sink` closure receives
 /// `(index, value)` for each output position, in increasing index order.
 fn median_filter_1d_view<F>(
     signal: &ndarray::ArrayView1<'_, f64>,
@@ -596,8 +587,7 @@ fn median_filter_1d_view<F>(
 {
     let len = signal.len();
 
-    // Mirror `median_filter_1d`'s short-circuits: a kernel of 0 or 1, or an
-    // empty signal, copies the input through unchanged.
+    // A kernel of 0 or 1, or an empty signal, copies the input through unchanged.
     if kernel_size == 0 || kernel_size == 1 {
         for i in 0..len {
             sink(i, signal[i]);
@@ -723,8 +713,8 @@ mod tests {
     use super::*;
     use crate::utils::generation::sine_wave;
 
-    /// The allocation-hoisted `median_filter_1d_view` must produce output
-    /// bit-identical to the slice-based `median_filter_1d` oracle, both for
+    /// `median_filter_1d_view` must give exactly the output of the slice-based
+    /// `median_filter_1d` oracle, both for
     /// contiguous (row) and strided (column) ndarray views, and across odd and
     /// even kernel sizes plus the `kernel_size <= 1` short-circuits.
     #[test]
@@ -861,10 +851,10 @@ mod tests {
             msg.contains("163840"),
             "error message must mention the actual bound (163840), got: {msg}"
         );
-        // The stale bound from the bug must not appear.
+        // A message quoting 16384 would contradict the check.
         assert!(
             !msg.contains("16384 "),
-            "error message must not mention the stale 16384 bound, got: {msg}"
+            "error message must not quote 16384, got: {msg}"
         );
     }
 

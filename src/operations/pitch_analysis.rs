@@ -401,7 +401,7 @@ where
         let samples = self.to_format::<f64>();
         let samples_slice = samples
             .as_slice()
-            .expect("Same to unwrap since mono samples always return a contiguous slice of memory");
+            .expect("mono samples are always a contiguous slice");
         let sample_rate_f = self.sample_rate_hz();
 
         // Calculate tau (lag) limits based on frequency constraints
@@ -483,7 +483,7 @@ where
         let samples = self.to_format::<f64>();
         let samples_slice = samples
             .as_slice()
-            .expect("Same to unwrap since mono samples always return a contiguous slice of memory");
+            .expect("mono samples are always a contiguous slice");
 
         let sample_rate = self.sample_rate_hz();
 
@@ -598,8 +598,7 @@ where
             )));
         }
 
-        // Reject unsupported methods up front. A library must not print to stderr
-        // per-frame, so validate the method once before entering the analysis loop.
+        // Unsupported methods are rejected once, before the analysis loop.
         if !matches!(
             method,
             PitchDetectionMethod::Yin | PitchDetectionMethod::Autocorrelation
@@ -643,14 +642,12 @@ where
 
         let window_size = window_size.get();
         let hop_size = hop_size.get();
-        // Convert the signal to an owned f64 buffer ONCE, instead of rebuilding
-        // an owned `AudioSamples` (and re-running multi-channel validation +
-        // f64 conversion) for every frame. The low-level detectors are then
-        // called directly on sub-slices of this buffer.
+        // The signal is converted to f64 once; the low-level detectors run on
+        // sub-slices of that buffer.
         let samples = self.as_f64();
         let samples_slice = samples
             .as_slice()
-            .expect("Same to unwrap since mono samples always return a contiguous slice of memory");
+            .expect("mono samples are always a contiguous slice");
 
         let sample_rate = self.sample_rate_hz();
         let total_results = (0..samples_slice.len()).step_by(hop_size).count();
@@ -666,10 +663,10 @@ where
             let window = &samples_slice[start..end];
             let time_seconds = start as f64 / sample_rate;
 
-            // Call the low-level detector directly on the window sub-slice. The
-            // tau bounds and the `max_tau >= window_len / 2` early-out replicate
-            // exactly what `detect_pitch_yin` / `detect_pitch_autocorr` compute
-            // per frame, so results are bit-identical to calling them.
+            // The low-level detector runs on the window sub-slice with the tau
+            // bounds and the `max_tau >= window_len / 2` early-out of
+            // `detect_pitch_yin` / `detect_pitch_autocorr`, so each frame gives
+            // exactly the result of calling them on it.
             let window_len = window.len();
             let frequency: Option<f64> = match method {
                 PitchDetectionMethod::Yin => {
@@ -795,7 +792,7 @@ where
         let samples = self.as_f64();
         let samples_slice = samples
             .as_slice()
-            .expect("Same to unwrap since mono samples always return a contiguous slice of memory");
+            .expect("mono samples are always a contiguous slice");
         // safety: samples is guaranteed non-empty by construction
         let samples_slice = unsafe { NonEmptySlice::new_unchecked(samples_slice) };
         let planner = SpectrogramPlanner::new();
@@ -807,7 +804,6 @@ where
             n_fft,
             window_type.unwrap_or_default(),
         )?;
-        // frequency resolution should be retrievable from ``spectrograms`` crate
         let freq_resolution = sample_rate / n_fft.get() as f64;
 
         // Calculate harmonic and noise power
@@ -918,7 +914,7 @@ where
         let samples = self.as_f64();
         let samples_slice = samples
             .as_slice()
-            .expect("Same to unwrap since mono samples always return a contiguous slice of memory");
+            .expect("mono samples are always a contiguous slice");
 
         // safety: samples is guaranteed non-empty by construction
         let samples_slice = unsafe { NonEmptySlice::new_unchecked(samples_slice) };
@@ -932,7 +928,6 @@ where
             n_fft,
             window_type.unwrap_or_default(),
         )?;
-        // frequency resolution should be retrievable from ``spectrograms`` crate
         let freq_resolution = sample_rate / n_fft.get() as f64;
 
         let mut harmonic_magnitudes = vec![0.0; num_harmonics.get()];
@@ -1017,7 +1012,7 @@ where
 
         let samples_slice = samples
             .as_slice()
-            .expect("Same to unwrap since mono samples always return a contiguous slice of memory");
+            .expect("mono samples are always a contiguous slice");
         // safety: samples is guaranteed non-empty by construction
         let samples_slice = unsafe { NonEmptySlice::new_unchecked(samples_slice) };
         let sample_rate_f = self.sample_rate_hz();
@@ -1371,11 +1366,10 @@ mod tests {
         .unwrap()
     }
 
-    /// YIN must follow the first sub-threshold dip down to its local minimum. The
-    /// old code took the arg-min over a +-5-lag window around the first
-    /// sub-threshold lag, which for low pitches stops on the dip's flank: 82.41 Hz
-    /// at 22.05 kHz came out as 84.16 Hz (+36 cents) and at 44.1 kHz as 84.97 Hz
-    /// (+53 cents).
+    /// YIN must follow the first sub-threshold dip down to its local minimum. An
+    /// arg-min over a +-5-lag window around the first sub-threshold lag stops on
+    /// the dip's flank for low pitches: 82.41 Hz at 22.05 kHz comes out as
+    /// 84.16 Hz (+36 cents) and at 44.1 kHz as 84.97 Hz (+53 cents).
     #[test]
     fn yin_follows_dip_to_local_minimum() {
         for sr in [22_050u32, 44_100] {
@@ -1556,11 +1550,10 @@ mod tests {
         }
     }
 
-    /// `track_pitch` must reject unsupported pitch
-    /// detection methods with a single up-front `Err`, and must NOT print to
-    /// stderr per-frame nor enter the analysis loop.
+    /// `track_pitch` rejects unsupported pitch detection methods with a single
+    /// up-front `Err`, before the analysis loop.
     #[test]
-    fn bug5_track_pitch_unsupported_method_errors_up_front() {
+    fn track_pitch_unsupported_method_errors_up_front() {
         let sample_rate = 44100;
         let samples: Vec<f64> = (0..8192)
             .map(|i| (2.0 * PI * 220.0 * i as f64 / sample_rate as f64).sin())
@@ -1582,7 +1575,7 @@ mod tests {
             "unsupported method must return Err, got {result:?}"
         );
 
-        // Also confirm a supported method still works.
+        // A supported method succeeds on the same input.
         let ok = audio.track_pitch(
             std::num::NonZeroUsize::new(2048).unwrap(),
             std::num::NonZeroUsize::new(512).unwrap(),
@@ -1591,7 +1584,7 @@ mod tests {
             80.0,
             1000.0,
         );
-        assert!(ok.is_ok(), "supported method must still succeed");
+        assert!(ok.is_ok(), "supported method must succeed");
     }
 
     #[test]
@@ -1854,7 +1847,7 @@ mod tests {
         assert_eq!(PitchClass::CSharp.to_string(), "C#");
         assert_eq!(PitchClass::B.to_string(), "B");
 
-        // Old usize encoding: pc = idx % 12, mode = Major if idx < 12 else Minor.
+        // A combined key index: pc = idx % 12, mode = Major if idx < 12 else Minor.
         let major_idx = 4usize; // E major
         assert_eq!(
             PitchClass::from_index((major_idx % 12) as u8),

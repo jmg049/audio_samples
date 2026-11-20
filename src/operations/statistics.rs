@@ -50,9 +50,9 @@
 //!   the non-positive side). Summed over channels.
 //! - Zero-crossing rate: **crossings per second**, `zero_crossings / duration_s`
 //!   with `duration_s = samples_per_channel / sample_rate`. A sine at `f` Hz
-//!   gives about `2f`. For multi-channel audio the count is summed over channels
-//!   while the duration is per channel, so the rate scales with the channel
-//!   count. The frame-wise `AudioFeatures::zero_crossing_rate_frames` gives a
+//!   gives about `2f`. For multi-channel audio it is the mean of the
+//!   per-channel rates (the count summed over channels, divided by the
+//!   channel count). The frame-wise `AudioFeatures::zero_crossing_rate_frames` gives a
 //!   per-frame **fraction of samples** (crossings / frame length) instead.
 //! - Autocorrelation (first channel): the unbiased estimate
 //!   `r[k] = (1/(N−k)) Σ_{n=0}^{N−1−k} x[n]·x[n+k]`, with no mean removal and no
@@ -187,8 +187,8 @@ use std::cell::RefCell;
 thread_local! {
     /// Thread-local [`FftPlanner`] reused across all FFT-based statistics in
     /// this module. `spectrograms::FftPlanner` wraps a real-FFT planner that
-    /// memoizes plans by size internally, so reconstructing it per call
-    /// discarded that cache. One planner per thread lets repeated same-size
+    /// memoizes plans by size internally, so building one per call would
+    /// discard that cache. One planner per thread lets repeated same-size
     /// transforms reuse cached plans. The planner is `!Sync`, so `thread_local`
     /// is the correct scope.
     static FFT_PLANNER: RefCell<FftPlanner> = RefCell::new(FftPlanner::new());
@@ -916,8 +916,6 @@ where
     /// `ZCR = zero_crossings / duration_s` with
     /// `duration_s = samples_per_channel / sample_rate`. The unit is crossings per
     /// second (Hz), not a fraction of samples: a sine at `f` Hz gives about `2f`.
-    /// For multi-channel audio the crossings of all channels are summed while the
-    /// duration is per channel, so the rate scales with the channel count.
     ///
     /// This normalises the zero crossing count by the signal duration, providing
     /// a frequency-like measure that is independent of signal length. For
@@ -1259,8 +1257,8 @@ where
     ///   open interval `(0.0, 1.0)`. A typical value is `0.85`.
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
     ///   policy applied to multi-channel input. Pass
-    ///   [`First`](crate::operations::types::ChannelReduction::First) to reproduce the
-    ///   historical channel-0 behaviour.
+    ///   [`First`](crate::operations::types::ChannelReduction::First) to analyse
+    ///   channel 0 only.
     ///
     /// # Returns
     /// The rolloff frequency in Hz. Returns `0.0` when the signal is silence
@@ -1852,11 +1850,10 @@ mod tests {
     }
 
     #[test]
-    fn test_peak_min_max_existing_methods() {
+    fn test_peak_min_max() {
         let data = array![-3.0f32, -1.0, 0.0, 2.0, 4.0];
         let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 
-        // These should use the existing native implementations
         assert_eq!(audio.peak(), 4.0);
         assert_eq!(audio.min_sample(), -3.0);
         assert_eq!(audio.max_sample(), 4.0);
@@ -2250,9 +2247,8 @@ mod tests {
     }
 
     /// Sanity check that the thread-local cached [`FftPlanner`] yields
-    /// bit-identical results across repeated calls of the same size - i.e.
-    /// reusing the planner did not corrupt or mutate its cached state in a way
-    /// that changes the numeric output.
+    /// bit-identical results across repeated calls of the same size: reusing
+    /// the planner does not change the numeric output.
     #[test]
     #[cfg(feature = "transforms")]
     fn test_cached_fft_planner_repeatable() {
@@ -2283,7 +2279,7 @@ mod tests {
         );
     }
 
-    // ---- New spectral feature validation ----
+    // ---- Spectral flatness, crest, bandwidth, slope and contrast ----
 
     /// White noise should have flatness near 1; a pure sine near 0 with high crest.
     #[test]
@@ -2398,7 +2394,7 @@ mod tests {
         );
     }
 
-    /// ChannelReduction policies on a stereo signal for the new features.
+    /// ChannelReduction policies on a stereo signal for these features.
     #[test]
     #[cfg(feature = "transforms")]
     fn test_new_features_channel_reduction() {

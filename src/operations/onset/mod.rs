@@ -1349,10 +1349,9 @@ where
         &self,
         onset_config: &ComplexOnsetConfig,
     ) -> AudioSampleResult<NonEmptyVec<f64>> {
-        // Compute the CQT once and share it between the magnitude-difference
-        // and phase-deviation computations. `magnitude_difference_matrix` and
-        // `phase_deviation_matrix` each compute their own CQT when called
-        // standalone; here we avoid that duplicated transform.
+        // One CQT serves both the magnitude-difference and the phase-deviation
+        // terms (`magnitude_difference_matrix` and `phase_deviation_matrix`
+        // each compute their own when called on their own).
         let cqt_result =
             self.constant_q_transform(&onset_config.cqt_config, onset_config.hop_size)?;
         let sample_rate = self.sample_rate_hz();

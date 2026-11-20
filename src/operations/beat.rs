@@ -679,7 +679,7 @@ mod tests {
         /// tolerances (huge and ~0), and large hops so the `peak_index(&onset[lo..hi])`
         /// slicing is exercised at the edges.
         #[test]
-        fn bug6_edge_windows_do_not_panic(
+        fn edge_windows_do_not_panic(
             len in 1usize..32,
             tempo in 40.0f64..240.0,
             sr in 8_000.0f64..96_000.0,
@@ -696,7 +696,7 @@ mod tests {
     /// A single-frame onset with a huge tolerance forces `hi` to clamp to `len`,
     /// which must not hand an empty or inverted slice to `peak_index` or panic.
     #[test]
-    fn bug6_single_frame_huge_tolerance_no_panic() {
+    fn single_frame_huge_tolerance_no_panic() {
         let onset = NonEmptyVec::new(vec![1.0f64]).unwrap();
         let hop = NonZeroUsize::new(512).unwrap();
         // Huge tolerance dwarfs the 1-frame signal.

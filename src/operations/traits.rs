@@ -138,7 +138,8 @@ use crate::operations::{
 };
 #[cfg(any(feature = "transforms", feature = "onset-detection"))]
 use num_complex::Complex;
-// "Unused" imports below are required pretty much as soon as any of the traits are implemented, this is cleaner than a huge cfg(any(...)) block.
+// Most feature combinations use these imports; allowing them to be unused is
+// simpler than a large cfg(any(...)) block.
 #[allow(unused_imports)]
 use crate::{AudioSampleResult, AudioSamples, AudioTypeConversion, StandardSample};
 #[allow(unused_imports)]
@@ -592,8 +593,8 @@ where
     ///   open interval `(0.0, 1.0)`. A typical value is `0.85`.
     /// - `reduction` - the [`ChannelReduction`](crate::operations::types::ChannelReduction)
     ///   policy applied to multi-channel input. Pass
-    ///   [`First`](crate::operations::types::ChannelReduction::First) to reproduce the
-    ///   historical channel-0 behaviour.
+    ///   [`First`](crate::operations::types::ChannelReduction::First) to analyse
+    ///   channel 0 only.
     ///
     /// # Returns
     /// The rolloff frequency in Hz. Returns `0.0` when the signal is silence
@@ -923,7 +924,7 @@ where
 /// to normalise a recording before feature extraction, to remove DC bias before
 /// spectral analysis, or to resample to a target rate before model inference.
 ///
-/// Every transforming operation comes in two variants per the 2.0 convention:
+/// Every transforming operation comes in two variants:
 /// an in-place primitive (`op_in_place(&mut self, …)`) that mutates the buffer
 /// with no extra allocation, and a non-mutating default (`op(&self, …)`) that
 /// clones, applies the in-place variant, and returns the new copy. The unmarked
@@ -1116,9 +1117,9 @@ where
     /// window has the sample type and the product is computed in the sample
     /// type, so for integer types the only usable coefficients are `0` and
     /// `1`: a fractional coefficient cannot be represented, and a window
-    /// scaled to the integer range overflows. For `f32` and `f64` audio the
-    /// behaviour is unchanged from 2.0, and `apply_window_f64_in_place` with
-    /// the same coefficients gives the same result.
+    /// scaled to the integer range overflows. For `f32` and `f64` audio,
+    /// `apply_window_f64_in_place` with the same coefficients gives the same
+    /// result.
     ///
     /// # Arguments
     /// - `window` - Window coefficients. Length must equal the number of
@@ -1188,9 +1189,8 @@ where
     /// - [`crate::AudioSampleError::Layout`] if the window length does not
     ///   match the audio length.
     /// - [`crate::AudioSampleError::Unsupported`] from the default
-    ///   implementation, which exists only so that implementors outside this
-    ///   crate keep compiling; [`AudioSamples`] overrides
-    ///   it.
+    ///   implementation, which spares implementors outside this crate from
+    ///   providing the method; [`AudioSamples`] overrides it.
     ///
     /// # Examples
     /// ```
@@ -1379,9 +1379,8 @@ where
     /// - [`crate::AudioSampleError::Parameter`] if the audio is shorter than
     ///   the filter.
     /// - [`crate::AudioSampleError::Unsupported`] from the default
-    ///   implementation, which exists only so that implementors outside this
-    ///   crate keep compiling; [`AudioSamples`] overrides
-    ///   it.
+    ///   implementation, which spares implementors outside this crate from
+    ///   providing the method; [`AudioSamples`] overrides it.
     ///
     /// # Examples
     /// ```
@@ -5724,7 +5723,7 @@ where
     ///   normalised `[-1, 1]` scale and the result is rounded and saturated.
     /// - `Left` - routes mono input to the left channel and fills the
     ///   right with silence (`[m, 0]`). For multi-channel input, extracts
-    ///   channel 0 as a mono signal (as in 2.0; prefer
+    ///   channel 0 as a mono signal (prefer
     ///   [`extract_channel`](AudioChannelOps::extract_channel) for that).
     /// - `Right` - routes mono input to the right channel and fills the
     ///   left with silence (`[0, m]`). For multi-channel input, extracts

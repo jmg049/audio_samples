@@ -891,8 +891,8 @@ impl NnlsConfig {
         }
     }
 
-    /// Settings used where results are compared with librosa 1.0; currently
-    /// equal to [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; currently equal to
+    /// [`new`](Self::new).
     #[must_use]
     pub const fn librosa() -> Self {
         Self::new()

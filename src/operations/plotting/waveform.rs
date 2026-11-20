@@ -70,7 +70,6 @@ impl PlotUtils for WaveformPlot {
         let path = path.as_ref();
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("html");
 
-        // TODO! Make above configurable
         match extension.to_lowercase().as_str() {
             "html" => {
                 let html = self.html()?;

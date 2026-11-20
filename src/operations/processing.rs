@@ -201,11 +201,10 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     acc.iter().sum::<f64>() + tail
 }
 
-/// Tap count at or above which FFT convolution beats direct convolution for
-/// (measured crossover ≈ 150 taps on a 1 s, 44.1 kHz signal)
-/// whole-signal FIR filtering. Below this the O(N·M) direct loop wins because
-/// the FFT's constant overhead dominates; above it the O(N·log N) FFT path pulls
-/// far ahead (e.g. ~120x at 4096 taps on a 1 s signal).
+/// Tap count at or above which whole-signal FIR filtering uses FFT convolution
+/// instead of direct convolution. Below it the O(N·M) direct loop is faster
+/// because the FFT's constant overhead dominates; above it the O(N·log N) FFT
+/// path pulls far ahead as the filter grows.
 #[cfg(feature = "transforms")]
 pub(crate) const FIR_FFT_MIN_TAPS: usize = 160;
 
@@ -320,10 +319,9 @@ where
 
             let output_len = arr.len().get() - filter_len + 1;
 
-            // Operate on a flat contiguous slice. The previous version indexed
-            // `arr[i + j]`, which dispatched through the `MonoData` enum on every
-            // single sample access; a raw slice lets the inner dot product
-            // autovectorize and removes that per-element overhead entirely.
+            // Operate on a flat contiguous slice: indexing `arr[i + j]` would
+            // dispatch through the `MonoData` enum on every sample access, while
+            // a raw slice lets the inner dot product autovectorise.
             let owned_fallback;
             let input: &[T] = match arr.as_slice() {
                 Some(s) => s,
@@ -718,7 +716,7 @@ where
     /// between 0 and 1. Use
     /// [`apply_window_f64_in_place`](AudioProcessing::apply_window_f64_in_place).
     /// The product is computed in the sample type, so for integer types it can
-    /// overflow; for float types the result is unchanged from 2.0.
+    /// overflow.
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the window length does not
@@ -1496,8 +1494,8 @@ fn mu_law_compress_f64_fast(x: f64, mu: f64, inv_den: f64) -> f64 {
 ///
 /// Each sample is first companded with `c = sign(x) · ln(1 + μ|x|) / ln(1 + μ)`
 /// (see [`AudioProcessing::mu_compress`]) and then assigned to one of
-/// `⌊1 + μ⌋` uniform bins on `[-1, 1]`: with bin edges
-/// `e = linspace(-1, 1, ⌊1 + μ⌋)` the code is `#{j : e[j] < c} - ⌊(1 + μ) / 2⌋`.
+/// `⌊1 + μ⌋` uniform bins on `[-1, 1]`: with `⌊1 + μ⌋` bin edges `e[j]` evenly
+/// spaced from `-1` to `1`, the code is `#{j : e[j] < c} - ⌊(1 + μ) / 2⌋`.
 /// For `μ = 255` the codes
 /// are the 256 integers in `[-128, 127]`; `0.0` maps to `0`, `1.0` to `127` and
 /// `-1.0` to `-128`.
@@ -1869,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)] // checks that the deprecated sample-typed window keeps its float behaviour
+    #[allow(deprecated)] // checks the float behaviour of the deprecated sample-typed window
     fn test_apply_window() {
         let data = array![1.0f32, 1.0, 1.0, 1.0];
         let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
@@ -2223,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn mu_law_encode_matches_librosa_codes() {
+    fn mu_law_encode_known_codes() {
         let x: Vec<f64> = (0..11).map(|i| -1.0 + f64::from(i) * 0.2).collect();
         // Codes of 11 points evenly spaced over [-1, 1], mu = 255.
         assert_eq!(
@@ -2240,8 +2238,8 @@ mod tests {
     }
 
     /// The encoder computes each code per sample without materialising the
-    /// `1 + mu` bin edges: codes equal the count of explicit edges
-    /// `linspace(-1, 1, int(1 + mu))` below `c`, a huge `mu` (1e15) needs no
+    /// `1 + mu` bin edges: codes equal the count of explicit edges (`int(1 + mu)`
+    /// points evenly spaced from -1 to 1) below `c`, a huge `mu` (1e15) needs no
     /// allocation, and `mu` above 2^53 is an error rather than a panic.
     #[test]
     fn mu_law_encode_is_allocation_free_and_exact() {
@@ -2289,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn mu_law_decode_matches_librosa() {
+    fn mu_law_decode_known_values() {
         // Decoded values of codes [-128, -122, -116, 0, 116, 127], mu = 255.
         let y = mu_law_decode(&[-128, -122, -116, 0, 116, 127], 255.0).unwrap();
         let expected = [

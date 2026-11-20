@@ -101,7 +101,7 @@ pub(crate) fn cheb2ap(n: usize, rs: f64) -> Zpk {
     let de = 1.0 / (10f64.powf(0.1 * rs) - 1.0).sqrt();
     let mu = (1.0 / de).asinh() / nf;
 
-    // Zeros: m = arange(-N+1, N, 2) with the centre (m = 0) removed for odd N.
+    // Zeros: m = -N+1, -N+3, ..., N-1 with the centre (m = 0) removed for odd N.
     let zeros: Vec<C64> = symmetric_indices(n)
         .filter(|&m| m != 0.0)
         .map(|m| -(C64::new(0.0, 1.0) / (m * PI / (2.0 * nf)).sin()).conj())
@@ -713,7 +713,7 @@ fn cplxreal(roots: &[C64]) -> AudioSampleResult<(Vec<C64>, Vec<f64>)> {
     }
     let tol = 100.0 * f64::EPSILON;
     let mut z: Vec<C64> = roots.to_vec();
-    // lexsort((abs(imag), real)): primary key real, secondary |imag|.
+    // Sort by real part, then by |imag|.
     z.sort_by(|a, b| {
         a.re.total_cmp(&b.re)
             .then_with(|| a.im.abs().total_cmp(&b.im.abs()))
@@ -766,8 +766,7 @@ fn is_real(r: &C64) -> bool {
 }
 
 /// Index of the root in `fro` nearest to `to`, restricted to real / complex /
-/// any roots. Ties resolve to the lowest
-/// index, as a stable `argsort` would.
+/// any roots. Ties resolve to the lowest index.
 fn nearest_idx(fro: &[C64], to: C64, which: Which) -> usize {
     let wanted = |r: &C64| match which {
         Which::Any => true,
@@ -1212,9 +1211,9 @@ pub(crate) fn sosfilt_zi(sos: &[Sos]) -> Vec<[f64; 2]> {
                 s[4] / s[3],
                 s[5] / s[3],
             );
-            // lfilter_zi for a biquad: solve (I - A^T) zi = B with
-            // A the companion matrix of a, B = b[1:] - a[1:] * b0.
-            //   zi0 = (B0 + B1 - ... ) closed form below.
+            // Steady-state step initial state of a biquad: solve
+            // (I - A^T) zi = B with A the companion matrix of a and
+            // B = b[1:] - a[1:] * b0, in the closed form below.
             let bb1 = b1 - a1 * b0;
             let bb2 = b2 - a2 * b0;
             let det = 1.0 + a1 + a2;
@@ -1232,8 +1231,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn butter4_lowpass_matches_scipy_coefficients() {
-        // Reference SOS of the 4th-order Butterworth low-pass at 1 kHz, fs 48 kHz.
+    fn butter4_lowpass_known_coefficients() {
+        // SOS of the 4th-order Butterworth low-pass at 1 kHz, fs 48 kHz.
         let expected: [Sos; 2] = [
             [
                 1.555_172_178_089_176e-5,

@@ -216,9 +216,9 @@ use std::cell::RefCell;
 thread_local! {
     /// Thread-local [`FftPlanner`] reused across all FFT-based transforms in
     /// this module. `spectrograms::FftPlanner` wraps a real-FFT planner that
-    /// memoizes plans (twiddles, scratch) by size internally, so reconstructing
-    /// it per call discarded that cache. Keeping one planner per thread lets
-    /// repeated same-size transforms reuse cached plans. The planner is `!Sync`
+    /// memoises plans (twiddles, scratch) by size internally. Keeping one
+    /// planner per thread lets repeated same-size transforms reuse those
+    /// cached plans instead of building them on every call. The planner is `!Sync`
     /// (it owns a real-FFT planner), so `thread_local` is the correct scope.
     static FFT_PLANNER: RefCell<FftPlanner> = RefCell::new(FftPlanner::new());
 }
