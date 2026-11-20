@@ -182,14 +182,15 @@ impl<T: StandardSample> Explainable for AudioSamples<'static, T> {}
 /// operation with a KaTeX formula, educational prose, and before/after waveforms.
 ///
 /// # Example
-/// ```rust,no_run
+/// ```rust
 /// # use explainable::Explanation;
 /// # let explanations: Vec<Explanation> = vec![];
 /// let html = audio_samples::educational::render_explanation_document(
 ///     &explanations,
-///     "Normalization walkthrough",
+///     "Normalisation walkthrough",
 /// );
-/// std::fs::write("explanation.html", &html).unwrap();
+/// assert!(html.contains("Normalisation walkthrough"));
+/// // Write `html` to a file and open it in a browser to read it.
 /// ```
 pub fn render_explanation_document(explanations: &[Explanation], title: &str) -> String {
     let chain = render_chain_block(explanations);

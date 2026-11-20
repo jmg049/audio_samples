@@ -812,7 +812,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
     /// use std::num::NonZeroUsize;
     /// use audio_samples::operations::traits::AudioPitchAnalysis;
     /// use audio_samples::{sample_rate, sawtooth_wave};
@@ -939,7 +939,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
     /// use std::num::NonZeroUsize;
     /// use audio_samples::operations::traits::AudioPitchAnalysis;
     /// use audio_samples::{sample_rate, sine_wave};

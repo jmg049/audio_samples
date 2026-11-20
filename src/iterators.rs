@@ -173,11 +173,6 @@ where
     /// ## Examples
     ///
     /// See [`AudioSamples::windows`] for a runnable usage example.
-    ///
-    /// ```ignore
-    /// // Conceptual usage via the trait interface (usize arguments):
-    /// let windows: Vec<_> = audio.windows(3_usize, 3_usize).collect();
-    /// ```
     fn windows<'iter>(
         &'iter self,
         window_size: usize,

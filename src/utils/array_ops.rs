@@ -2494,12 +2494,23 @@ fn normalise_path(path: &Path) -> PathBuf {
 /// absolute.
 ///
 /// # Examples
-/// ```no_run
+/// ```
 /// use audio_samples::utils::array_ops::{FindFilesConfig, find_files};
 ///
-/// let wavs = find_files("~/Music", &FindFilesConfig::new()).unwrap();
-/// println!("{} files", wavs.len());
+/// // A directory with two audio files (one in a subdirectory) and a text file.
+/// let dir = std::env::temp_dir().join(format!("audio_samples_find_files_{}", std::process::id()));
+/// std::fs::create_dir_all(dir.join("sub"))?;
+/// for name in ["a.wav", "sub/b.FLAC", "notes.txt"] {
+///     std::fs::write(dir.join(name), b"")?;
+/// }
+///
+/// let found = find_files(&dir, &FindFilesConfig::new()).unwrap();
+/// assert_eq!(found.len(), 2); // any letter case, subdirectories searched
+/// std::fs::remove_dir_all(&dir)?;
+/// # Ok::<(), std::io::Error>(())
 /// ```
+///
+/// A leading `~` stands for the home directory, as in `find_files("~/Music", ...)`.
 pub fn find_files(
     directory: impl AsRef<Path>,
     config: &FindFilesConfig,
@@ -2527,12 +2538,20 @@ struct FoundFile {
 /// As for [`find_files`].
 ///
 /// # Examples
-/// ```no_run
+/// ```
 /// use audio_samples::utils::array_ops::{FindFilesConfig, find_files_each};
 ///
+/// let dir = std::env::temp_dir().join(format!("audio_samples_find_files_each_{}", std::process::id()));
+/// std::fs::create_dir_all(&dir)?;
+/// for name in ["a.wav", "b.mp3", "c.txt"] {
+///     std::fs::write(dir.join(name), b"")?;
+/// }
+///
 /// let mut n = 0;
-/// find_files_each("~/Music", &FindFilesConfig::new(), |_| n += 1).unwrap();
-/// println!("{n} files");
+/// find_files_each(&dir, &FindFilesConfig::new(), |_| n += 1).unwrap();
+/// assert_eq!(n, 2);
+/// std::fs::remove_dir_all(&dir)?;
+/// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn find_files_each(
     directory: impl AsRef<Path>,

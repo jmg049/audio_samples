@@ -1663,20 +1663,33 @@ where
     /// This is a helper method for operations that can fail.
     ///
     /// # Examples
-    /// ```rust,ignore
-    /// // Apply a conversion that might fail
-    /// audio.apply_with_error_in_place(|sample| {
-    ///     if sample > max_value {
-    ///         Err(AudioSampleError::Parameter(/* error */))
-    ///     } else {
-    ///         Ok(sample * 2.0)
+    /// ```rust
+    /// use audio_samples::{AudioSampleError, AudioSamples, ParameterError, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let double_below = |limit: f32| {
+    ///     move |sample: f32| {
+    ///         if sample > limit {
+    ///             Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+    ///                 "sample",
+    ///                 "too loud to double",
+    ///             )))
+    ///         } else {
+    ///             Ok(sample * 2.0)
+    ///         }
     ///     }
-    /// })?;
+    /// };
+    /// let mut audio = AudioSamples::new_mono(array![0.1f32, 0.2, 0.3], sample_rate!(44100)).unwrap();
+    /// audio.apply_with_error_in_place(double_below(0.5))?;
+    /// assert_eq!(audio.as_slice().unwrap(), &[0.2, 0.4, 0.6]);
+    /// assert!(audio.apply_with_error_in_place(double_below(0.5)).is_err());
+    /// # Ok::<(), AudioSampleError>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// - if the provided function errors for some reason
+    /// Returns the first error `f` returns. The samples before the failing one have
+    /// then already been replaced.
     #[inline]
     pub fn apply_with_error_in_place<F>(&mut self, f: F) -> AudioSampleResult<()>
     where
@@ -1700,22 +1713,29 @@ where
     /// Applies a fallible function that uses an accumulator pattern.
     /// Useful for operations that need to maintain state across samples.
     ///
+    /// `f` receives the accumulator and each sample in storage order and returns the
+    /// replacement sample; the final accumulator is returned.
+    ///
     /// # Examples
-    /// ```rust,ignore
-    /// let mut state = 0.0;
-    /// audio.try_fold(|acc, sample| {
-    ///     *acc += sample.abs();
-    ///     if *acc > threshold {
-    ///         Err(AudioSampleError::Parameter(/* error */))
-    ///     } else {
-    ///         Ok(sample)
-    ///     }
+    /// ```rust
+    /// use audio_samples::{AudioSampleError, AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// // Replace each sample with the running sum, and return the total.
+    /// let mut audio = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
+    /// let total = audio.try_fold(0.0f32, |acc, sample| {
+    ///     *acc += sample;
+    ///     Ok(*acc)
     /// })?;
+    /// assert_eq!(total, 6.0);
+    /// assert_eq!(audio.as_slice().unwrap(), &[1.0, 3.0, 6.0]);
+    /// # Ok::<(), AudioSampleError>(())
     /// ```
     ///
-    ///  # Errors
+    /// # Errors
     ///
-    /// - if the provided function errors for some reason
+    /// Returns the first error `f` returns. The samples before the failing one have
+    /// then already been replaced.
     #[inline]
     pub fn try_fold<Acc, F>(&mut self, mut acc: Acc, mut f: F) -> AudioSampleResult<Acc>
     where

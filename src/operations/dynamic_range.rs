@@ -1304,7 +1304,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
     /// use audio_samples::operations::types::CompressorConfig;
     /// use ndarray::Array1;
@@ -1320,6 +1320,7 @@ where
     /// let mut config = CompressorConfig::new();
     /// config.side_chain.enable();
     /// audio.apply_compressor_sidechain_in_place(&config, &sidechain).unwrap();
+    /// assert_eq!(audio.samples_per_channel().get(), 5);
     /// ```
     fn apply_compressor_sidechain_in_place(
         &mut self,
@@ -1374,7 +1375,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
     /// use audio_samples::operations::types::LimiterConfig;
     /// use ndarray::Array1;
@@ -1390,6 +1391,7 @@ where
     /// let mut config = LimiterConfig::default();
     /// config.side_chain.enable();
     /// audio.apply_limiter_sidechain_in_place(&config, &sidechain).unwrap();
+    /// assert_eq!(audio.samples_per_channel().get(), 5);
     /// ```
     fn apply_limiter_sidechain_in_place(
         &mut self,

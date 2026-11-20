@@ -3496,7 +3496,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
     /// use std::num::NonZeroUsize;
     /// use audio_samples::operations::traits::AudioPitchAnalysis;
     /// use audio_samples::{sample_rate, sawtooth_wave};
@@ -3547,7 +3547,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
     /// use std::num::NonZeroUsize;
     /// use audio_samples::operations::traits::AudioPitchAnalysis;
     /// use audio_samples::{sample_rate, sine_wave};
@@ -4580,7 +4580,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
     /// use audio_samples::operations::types::CompressorConfig;
     /// use ndarray::Array1;
@@ -4596,6 +4596,7 @@ where
     /// let mut config = CompressorConfig::new();
     /// config.side_chain.enable();
     /// audio.apply_compressor_sidechain_in_place(&config, &sidechain).unwrap();
+    /// assert_eq!(audio.samples_per_channel().get(), 5);
     /// ```
     fn apply_compressor_sidechain_in_place(
         &mut self,
@@ -4653,7 +4654,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```
     /// use audio_samples::{AudioSamples, AudioDynamicRange, sample_rate};
     /// use audio_samples::operations::types::LimiterConfig;
     /// use ndarray::Array1;
@@ -4669,6 +4670,7 @@ where
     /// let mut config = LimiterConfig::default();
     /// config.side_chain.enable();
     /// audio.apply_limiter_sidechain_in_place(&config, &sidechain).unwrap();
+    /// assert_eq!(audio.samples_per_channel().get(), 5);
     /// ```
     fn apply_limiter_sidechain_in_place(
         &mut self,
@@ -6319,7 +6321,7 @@ where
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use audio_samples::{AudioSamples, sample_rate, sine_wave};
     /// use audio_samples::operations::hpss::HpssConfig;
     /// use audio_samples::operations::traits::AudioDecomposition;
@@ -6626,18 +6628,28 @@ where
     ///   the hop size.
     ///
     /// # Examples
-    /// ```no_run
+    /// ```
     /// use audio_samples::{AudioSamples, sample_rate};
-    /// use audio_samples::operations::beat::{BeatTrackingConfig, BeatTrackingData};
+    /// use audio_samples::operations::beat::BeatTrackingConfig;
+    /// use audio_samples::operations::onset::OnsetDetectionConfig;
     /// use audio_samples::operations::traits::AudioBeatTracking;
+    /// use ndarray::Array1;
     ///
-    /// # fn example(audio: AudioSamples<'_, f32>, config: BeatTrackingConfig) {
-    /// let result = audio.detect_beats(&config).unwrap();
-    /// println!("Tempo: {:.1} BPM", result.tempo_bpm);
-    /// for &t in &result.beat_times {
-    ///     println!("  beat at {:.3} s", t);
+    /// // Clicks every 0.5 s (120 BPM) for 4 s.
+    /// let sr = 22_050;
+    /// let mut x = vec![0.0f32; 4 * sr];
+    /// for k in 0..8 {
+    ///     for i in 0..256 {
+    ///         x[k * sr / 2 + i] = 0.9 * (-(i as f32) / 32.0).exp() * (0.43 * i as f32).sin();
+    ///     }
     /// }
-    /// # }
+    /// let audio = AudioSamples::new_mono(Array1::from_vec(x), sample_rate!(22050)).unwrap();
+    ///
+    /// let config = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
+    /// let result = audio.detect_beats(&config).unwrap();
+    /// assert_eq!(result.tempo_bpm, 120.0); // the requested tempo
+    /// assert!(!result.beat_times.is_empty());
+    /// assert!(result.beat_times.windows(2).all(|w| w[0] < w[1]));
     /// ```
     fn detect_beats(&self, config: &BeatTrackingConfig) -> AudioSampleResult<BeatTrackingData>;
 

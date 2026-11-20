@@ -382,7 +382,7 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::brown_noise;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
@@ -458,7 +458,7 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::white_noise;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
@@ -556,7 +556,7 @@ impl KellettPinkFilter {
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::pink_noise;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
@@ -1536,7 +1536,7 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::exponential_bursts;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
@@ -1653,7 +1653,7 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::stereo_sine_wave;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
@@ -1696,7 +1696,7 @@ where
 /// If ndarray cannot stack the channels for some reason
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::stereo_chirp;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
@@ -1738,7 +1738,7 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::stereo_silence;
 /// use audio_samples::sample_rate;
 /// use std::time::Duration;
@@ -1780,7 +1780,7 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::utils::generation::{multichannel_compound_tone, ToneComponent};
 /// use audio_samples::sample_rate;
 /// use non_empty_slice::NonEmptySlice;

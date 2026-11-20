@@ -3994,12 +3994,16 @@ where
     /// Nothing. This method is infallible.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let mut audio = AudioSamples::new_mono(array![0.4f32, -1.0, 2.0], sample_rate!(44100)).unwrap();
     /// // Halve the amplitude of all samples
     /// audio.apply(|sample| sample * 0.5);
-    ///
     /// // Apply a simple distortion
     /// audio.apply(|sample| sample.clamp(-0.8, 0.8));
+    /// assert_eq!(audio.as_slice().unwrap(), &[0.2, -0.5, 0.8]);
     /// ```
     #[inline]
     pub fn apply<F>(&mut self, f: F)
@@ -4030,12 +4034,17 @@ where
     /// A new AudioSamples instance with the transformed samples
     ///
     /// # Example
-    /// ```rust,ignore
-    /// // Create a new audio instance with halved amplitude
-    /// let quieter_audio = audio.map(|sample| sample * 0.5);
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::array;
     ///
-    /// // Create a new audio instance with clipped samples
+    /// let audio = AudioSamples::new_mono(array![0.4f32, -1.0, 2.0], sample_rate!(44100)).unwrap();
+    /// // A new audio instance with halved amplitude
+    /// let quieter_audio = audio.map(|sample| sample * 0.5);
+    /// assert_eq!(quieter_audio.as_slice().unwrap(), &[0.2, -0.5, 1.0]);
+    /// // A new audio instance with clipped samples; `audio` is unchanged
     /// let clipped_audio = audio.map(|sample| sample.clamp(-0.8, 0.8));
+    /// assert_eq!(clipped_audio.as_slice().unwrap(), &[0.4, -0.8, 0.8]);
     /// ```
     #[inline]
     pub fn map<F>(&self, f: F) -> AudioSamples<'static, T>
@@ -4071,10 +4080,14 @@ where
     /// Nothing. This method is infallible.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// // Apply a fade-in effect
+    /// ```rust
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use ndarray::Array1;
+    ///
+    /// let mut audio = AudioSamples::new_mono(Array1::from_elem(8, 1.0f32), sample_rate!(8)).unwrap();
+    /// // A linear fade-in over the first 4 samples (0.5 s at 8 Hz)
     /// audio.apply_with_index(|index, sample| {
-    ///     let fade_samples = 44100; // 1 second fade at 44.1kHz
+    ///     let fade_samples = 4;
     ///     let gain = if index < fade_samples {
     ///         index as f32 / fade_samples as f32
     ///     } else {
@@ -4082,6 +4095,7 @@ where
     ///     };
     ///     sample * gain
     /// });
+    /// assert_eq!(audio.as_slice().unwrap(), &[0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0]);
     /// ```
     #[inline]
     pub fn apply_with_index<F>(&mut self, f: F)

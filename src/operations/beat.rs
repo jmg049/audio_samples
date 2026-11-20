@@ -196,18 +196,28 @@ where
     ///   the hop size.
     ///
     /// # Examples
-    /// ```no_run
+    /// ```
     /// use audio_samples::{AudioSamples, sample_rate};
-    /// use audio_samples::operations::beat::{BeatTrackingConfig, BeatTrackingData};
+    /// use audio_samples::operations::beat::BeatTrackingConfig;
+    /// use audio_samples::operations::onset::OnsetDetectionConfig;
     /// use audio_samples::operations::traits::AudioBeatTracking;
+    /// use ndarray::Array1;
     ///
-    /// # fn example(audio: AudioSamples<'_, f32>, config: BeatTrackingConfig) {
-    /// let result = audio.detect_beats(&config).unwrap();
-    /// println!("Tempo: {:.1} BPM", result.tempo_bpm);
-    /// for &t in &result.beat_times {
-    ///     println!("  beat at {:.3} s", t);
+    /// // Clicks every 0.5 s (120 BPM) for 4 s.
+    /// let sr = 22_050;
+    /// let mut x = vec![0.0f32; 4 * sr];
+    /// for k in 0..8 {
+    ///     for i in 0..256 {
+    ///         x[k * sr / 2 + i] = 0.9 * (-(i as f32) / 32.0).exp() * (0.43 * i as f32).sin();
+    ///     }
     /// }
-    /// # }
+    /// let audio = AudioSamples::new_mono(Array1::from_vec(x), sample_rate!(22050)).unwrap();
+    ///
+    /// let config = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
+    /// let result = audio.detect_beats(&config).unwrap();
+    /// assert_eq!(result.tempo_bpm, 120.0); // the requested tempo
+    /// assert!(!result.beat_times.is_empty());
+    /// assert!(result.beat_times.windows(2).all(|w| w[0] < w[1]));
     /// ```
     fn detect_beats(&self, config: &BeatTrackingConfig) -> AudioSampleResult<BeatTrackingData> {
         let sr = self.sample_rate_hz();
