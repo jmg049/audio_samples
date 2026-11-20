@@ -1012,7 +1012,9 @@ impl WaveformPlotParamsBuilder {
 /// # Errors
 ///
 /// Returns [`AudioSampleError`] if channel extraction fails (e.g. invalid channel
-/// index in multi-channel audio when using `First`/`Last` strategies).
+/// index in multi-channel audio when using `First`/`Last` strategies), or if the
+/// strategy is `Separate` and the audio has more than
+/// [`MAX_SEPARATE_CHANNELS`](super::MAX_SEPARATE_CHANNELS) channels.
 ///
 /// # Examples
 ///
@@ -1039,6 +1041,7 @@ where
     let audio_f64 = audio.as_f64();
 
     let strategy = params.ch_mgmt_strategy.unwrap_or_default();
+    super::check_separate_channels(strategy, audio.num_channels().get() as usize)?;
 
     let rows = if audio.is_multi_channel() {
         match strategy {
@@ -1294,7 +1297,7 @@ fn assign_x_axis(layout: plotly::Layout, index: usize, axis: Axis) -> plotly::La
         5 => layout.x_axis6(axis),
         6 => layout.x_axis7(axis),
         7 => layout.x_axis8(axis),
-        _ => panic!("Waveform plot supports up to eight subplot x-axes"),
+        _ => unreachable!("waveform plots check the channel count against MAX_SEPARATE_CHANNELS"),
     }
 }
 
@@ -1308,7 +1311,7 @@ fn assign_y_axis(layout: plotly::Layout, index: usize, axis: Axis) -> plotly::La
         5 => layout.y_axis6(axis),
         6 => layout.y_axis7(axis),
         7 => layout.y_axis8(axis),
-        _ => panic!("Waveform plot supports up to eight subplot y-axes"),
+        _ => unreachable!("waveform plots check the channel count against MAX_SEPARATE_CHANNELS"),
     }
 }
 
@@ -1342,9 +1345,32 @@ fn plot_mono_waveform(
     plot.add_trace(trace);
 }
 
+#[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn separate_rejects_more_channels_than_subplots() {
+        use crate::operations::plotting::MAX_SEPARATE_CHANNELS;
+        let data = ndarray::Array2::<f64>::zeros((MAX_SEPARATE_CHANNELS + 1, 64));
+        let audio = AudioSamples::new_multi_channel(data, crate::sample_rate!(8000)).unwrap();
+        let params = WaveformPlotParams::default();
+        assert!(matches!(
+            create_waveform_plot(&audio, &params),
+            Err(crate::AudioSampleError::Parameter(_))
+        ));
+
+        let overlap = WaveformPlotParams {
+            ch_mgmt_strategy: Some(ChannelManagementStrategy::Overlap),
+            ..WaveformPlotParams::default()
+        };
+        assert!(create_waveform_plot(&audio, &overlap).is_ok());
+
+        let data = ndarray::Array2::<f64>::zeros((MAX_SEPARATE_CHANNELS, 64));
+        let audio = AudioSamples::new_multi_channel(data, crate::sample_rate!(8000)).unwrap();
+        assert!(create_waveform_plot(&audio, &params).is_ok());
+    }
     #[test]
     fn test_create_waveform_plot() {
         use super::create_waveform_plot;

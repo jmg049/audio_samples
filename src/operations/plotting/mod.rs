@@ -558,6 +558,9 @@ pub enum ChannelManagementStrategy {
     /// Average all channels into a single mono trace.
     Average,
     /// Display each channel in a separate subplot using the specified layout.
+    ///
+    /// Waveform and spectrogram plots draw at most [`MAX_SEPARATE_CHANNELS`]
+    /// subplots; audio with more channels is rejected with an error.
     Separate(Layout),
     /// Display only the first channel.
     First,
@@ -565,6 +568,33 @@ pub enum ChannelManagementStrategy {
     Last,
     /// Overlay all channels on the same axes with distinct colors.
     Overlap,
+}
+
+/// The most channels a waveform or spectrogram plot draws as separate subplots
+/// ([`ChannelManagementStrategy::Separate`]); each subplot has its own pair of axes.
+pub const MAX_SEPARATE_CHANNELS: usize = 8;
+
+/// Rejects [`ChannelManagementStrategy::Separate`] for audio with more than
+/// [`MAX_SEPARATE_CHANNELS`] channels.
+pub(crate) fn check_separate_channels(
+    strategy: ChannelManagementStrategy,
+    num_channels: usize,
+) -> crate::AudioSampleResult<()> {
+    if matches!(strategy, ChannelManagementStrategy::Separate(_))
+        && num_channels > MAX_SEPARATE_CHANNELS
+    {
+        return Err(crate::AudioSampleError::Parameter(
+            crate::ParameterError::invalid_value(
+                "ch_mgmt_strategy",
+                format!(
+                    "Separate draws at most {MAX_SEPARATE_CHANNELS} subplots, but the audio has \
+                     {num_channels} channels; use Average, First, Last or Overlap, or select \
+                     channels first"
+                ),
+            ),
+        ));
+    }
+    Ok(())
 }
 
 impl Default for ChannelManagementStrategy {

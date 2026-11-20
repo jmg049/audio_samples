@@ -734,6 +734,8 @@ impl Default for SpectrogramPlotParams {
 /// - The spectrogram computation fails (e.g., invalid STFT parameters, insufficient samples).
 /// - The channel management strategy is [`ChannelManagementStrategy::Overlap`], which is not
 ///   supported for spectrograms.
+/// - The strategy is [`ChannelManagementStrategy::Separate`] and the audio has more than
+///   [`MAX_SEPARATE_CHANNELS`](super::MAX_SEPARATE_CHANNELS) channels.
 ///
 /// # Example
 /// ```rust,no_run
@@ -757,6 +759,7 @@ where
 {
     let audio_f64 = audio.as_f64();
     let strategy = params.ch_mgmt_strategy.unwrap_or_default();
+    super::check_separate_channels(strategy, audio.num_channels().get() as usize)?;
 
     // Determine grid layout based on channel management strategy
     let (rows, cols) = if audio.is_multi_channel() {
@@ -1467,7 +1470,9 @@ fn assign_x_axis(layout: plotly::Layout, index: usize, axis: Axis) -> plotly::La
         5 => layout.x_axis6(axis),
         6 => layout.x_axis7(axis),
         7 => layout.x_axis8(axis),
-        _ => panic!("Spectrogram plot supports up to eight subplot x-axes"),
+        _ => {
+            unreachable!("spectrogram plots check the channel count against MAX_SEPARATE_CHANNELS")
+        }
     }
 }
 
@@ -1481,7 +1486,9 @@ fn assign_y_axis(layout: plotly::Layout, index: usize, axis: Axis) -> plotly::La
         5 => layout.y_axis6(axis),
         6 => layout.y_axis7(axis),
         7 => layout.y_axis8(axis),
-        _ => panic!("Spectrogram plot supports up to eight subplot y-axes"),
+        _ => {
+            unreachable!("spectrogram plots check the channel count against MAX_SEPARATE_CHANNELS")
+        }
     }
 }
 
