@@ -654,7 +654,7 @@ impl WaveformPlot {
     /// use audio_samples::operations::AudioOnsetDetection;
     /// use audio_samples::operations::onset::OnsetDetectionConfig;
     ///
-    /// let onsets = audio.detect_onsets(&OnsetDetectionConfig::percussive())?;
+    /// let onsets = audio.detect_onsets(&OnsetDetectionConfig::percussive(audio.sample_rate()))?;
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_onset_markers(onsets, Some("red"), false);
     /// ```

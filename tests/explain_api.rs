@@ -44,7 +44,7 @@ fn all_docs() -> Vec<ExplainDoc> {
         audio.explain(&CompressorConfig::vocal()),
         audio.explain(&LimiterConfig::mastering()),
         audio.explain(&VadConfig::default()),
-        audio.explain(&OnsetDetectionConfig::percussive()),
+        audio.explain(&OnsetDetectionConfig::percussive(audio.sample_rate())),
     ]
 }
 

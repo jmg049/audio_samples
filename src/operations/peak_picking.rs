@@ -904,9 +904,9 @@ mod tests {
         // Test different presets
         let configs = vec![
             PeakPickingConfig::default(),
-            PeakPickingConfig::music(),
-            PeakPickingConfig::speech(),
-            PeakPickingConfig::drums(),
+            PeakPickingConfig::music(crate::sample_rate!(44100), crate::nzu!(512)),
+            PeakPickingConfig::speech(crate::sample_rate!(16000), crate::nzu!(160)),
+            PeakPickingConfig::drums(crate::sample_rate!(48000), crate::nzu!(256)),
         ];
 
         for config in configs {

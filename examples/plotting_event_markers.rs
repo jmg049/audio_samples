@@ -128,7 +128,7 @@ fn main() -> audio_samples::AudioSampleResult<()> {
 
     // Example 1: Onset Detection with markers
     println!("\n--- Onset Detection ---");
-    let onset_config = OnsetDetectionConfig::percussive();
+    let onset_config = OnsetDetectionConfig::percussive(audio.sample_rate());
     let onsets = audio.detect_onsets(&onset_config)?;
 
     println!("Detected {} onsets:", onsets.len());

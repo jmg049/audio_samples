@@ -542,6 +542,18 @@ odd-length spectral bin spacing, `frequency_to_note` and
 
 ### Changed
 
+- **Onset peak-picking presets are specified in seconds and take the sample rate.**
+  `PeakPickingConfig::music`, `speech` and `drums` used lengths sized as audio samples (a
+  2048-frame threshold window and a 1024-frame separation for `music`), which on an onset
+  strength function span many seconds, so they found almost nothing. They now take
+  `(sample_rate, hop_size)` and convert fixed durations to frames: threshold windows of 0.2 s
+  (`music`, `speech`) and 0.1 s (`drums`), minimum separations of 0.1 s, 80 ms and 30 ms. Like
+  the default, each floors the threshold at 0.1 of the normalised strength and uses no median
+  filter. The onset presets that use them take the sample rate and build the peak picker for
+  their own hop: `OnsetDetectionConfig::{percussive, musical, speech}(sample_rate)`,
+  `SpectralFluxConfig::{percussive, musical}(sample_rate)` and
+  `ComplexOnsetConfig::{percussive, musical, speech}(sample_rate)`. Pass the rate of the audio
+  the configuration is used on, e.g. `OnsetDetectionConfig::percussive(audio.sample_rate())`.
 - **`AudioSamples`' `Display` output is one line, and `{:#}` previews the channels.** `{}`
   prints `AudioSamples<f32>: 2 ch × 48000 samples @ 48000 Hz (1.000 s)` (sample type, channels,
   samples per channel, sample rate, duration) with no trailing newline and no samples. `{:#}`
@@ -585,7 +597,7 @@ odd-length spectral bin spacing, `frequency_to_note` and
   with the output gain folded in.
 - `AudioIirFiltering::frequency_response` is deprecated: it never had a filter
   to describe and always returned a flat response.
-- `PeakPickingConfig::default()` (used by `OnsetDetectionConfig::default()`, `ComplexOnsetConfig::default()` and `SpectralFluxConfig::complex()`) now uses a 9-frame delta threshold (delta 0.07) with an absolute floor of 0.1, a 3-frame minimum separation and no median filter. The old defaults (1024-frame threshold window, 3-point median filter, 512-frame separation) found about 10% of onsets; `detect_onsets` with the default config now finds all 10 notes of a test sequence (was 1). The `music`/`speech`/`drums` presets are unchanged.
+- `PeakPickingConfig::default()` (used by `OnsetDetectionConfig::default()`, `ComplexOnsetConfig::default()` and `SpectralFluxConfig::complex()`) now uses a 9-frame delta threshold (delta 0.07) with an absolute floor of 0.1, a 3-frame minimum separation and no median filter. The old defaults (1024-frame threshold window, 3-point median filter, 512-frame separation) found about 10% of onsets; `detect_onsets` with the default config now finds all 10 notes of a test sequence (was 1).
 - `note_to_midi` (and so `note_to_frequency`) accepts a wider note grammar: lowercase letters, any run of `#` `♯` `b` `!` `♭` `𝄪` `𝄫` `♮` accidentals (B#3 = 60, Cb4 = 59, double accidentals), signed octaves (`C-1` = 0) and a cents suffix rounded half to even (`A4+50` = 70). The octave remains required and the result remains a `u8` in `0..=127`.
 - `BeatTrackingData::beat_times` / `track_beats_core` are now sorted chronologically and de-duplicated (they were in detection order). `BeatTrackingData::tempo_bpm` is documented as the requested tempo (it is not estimated); its `Display` prints "Tempo:".
 - `resampling` feature: Medium/High/Fast downsampling take 2-3x longer than before for the same ratio, because their anti-aliasing filters are longer and now correct.

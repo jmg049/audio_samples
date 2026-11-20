@@ -341,7 +341,7 @@ use audio_samples::operations::onset::OnsetDetectionConfig;
 use std::num::NonZeroUsize;
 let frames = (0.05f64 * 44_100.0 / 256.0).ceil() as usize;
 assert_eq!(frames, 9);
-let mut c = OnsetDetectionConfig::percussive(); // hop 256
+let mut c = OnsetDetectionConfig::percussive(audio_samples::sample_rate!(44100)); // hop 256
 assert_eq!(c.hop_size.get(), 256);
 c.peak_picking.min_peak_separation = NonZeroUsize::new(frames).unwrap();
 let ms = c.explain_with(&ExplainContext::new().with_sample_rate(44_100.0))

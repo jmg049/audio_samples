@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn onset_window_and_separation() {
         use crate::operations::onset::OnsetDetectionConfig;
-        let c = OnsetDetectionConfig::percussive();
+        let c = OnsetDetectionConfig::percussive(crate::sample_rate!(44100));
         let d = c.explain_with(&ExplainContext::new().with_sample_rate(44_100.0));
         assert_eq!(
             d.quantity("Window size").unwrap().value as usize,
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn onset_cqt_top_frequency_q_and_truncation_match_parameters() {
         use crate::operations::onset::OnsetDetectionConfig;
-        let c = OnsetDetectionConfig::percussive();
+        let c = OnsetDetectionConfig::percussive(crate::sample_rate!(16000));
         let fs = 16_000.0;
         let d = c.explain_with(&ExplainContext::new().with_sample_rate(fs));
         // Top centre is the last element of the spectrograms crate's own bin list.

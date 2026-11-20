@@ -56,7 +56,7 @@ fn main() {
             audio.explain(&EqBand::peak(1_000.0, 6.0, 1.0)),
             audio.explain(&LimiterConfig::mastering()),
             audio.explain(&VadConfig::default()),
-            audio.explain(&OnsetDetectionConfig::percussive()),
+            audio.explain(&OnsetDetectionConfig::percussive(audio.sample_rate())),
         ]);
     }
 

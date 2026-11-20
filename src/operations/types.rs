@@ -4583,8 +4583,9 @@ impl Default for AdaptiveThresholdConfig {
 /// i.e. **frames** in onset detection, not audio samples. The default is
 /// sized in frames (a 9-frame delta threshold with delta 0.07 and a floor of
 /// 0.1, a 3-frame separation, no median filter: about 104 ms and 35 ms at hop
-/// 512 / 44.1 kHz). The `music`, `speech` and `drums` presets use lengths sized
-/// as if in audio samples, so on onset functions they act over many seconds.
+/// 512 / 44.1 kHz). The `music`, `speech` and `drums` presets are specified in
+/// seconds and take the sample rate and hop size, so their frame counts span the
+/// same time at any rate and hop.
 ///
 /// ## Intended Usage
 ///
@@ -4702,85 +4703,138 @@ impl PeakPickingConfig {
         }
     }
 
-    /// A preset optimised for musical onset detection.
+    /// A preset for note onsets in music.
     ///
-    /// Combined adaptive thresholding, long minimum separation, strong
-    /// pre-emphasis, and median filtering for robustness on typical music.
+    /// Combined adaptive thresholding over a 0.2 s window (delta 0.03,
+    /// percentile 0.85, floor 0.1 of the normalised strength), a minimum
+    /// separation of 0.1 s, pre-emphasis 0.95, no median filter and peak
+    /// normalisation.
     ///
-    /// # Returns
+    /// The durations are converted to frames of the onset strength function at
+    /// `sample_rate / hop_size` frames per second: the separation to the nearest
+    /// frame and the threshold window to the nearest odd number of frames, at
+    /// least one. Pass the sample rate and hop size of the onset function the
+    /// configuration will be applied to.
     ///
-    /// A [`PeakPickingConfig`] with combined thresholding (delta 0.03, percentile 0.85,
-    /// window 2048 frames), min separation 1024 frames, pre-emphasis 0.95, and median filter 5.
+    /// Like the default, every preset floors the threshold at 0.1 of the
+    /// normalised strength, which rejects the low-level ripple between onsets,
+    /// and none uses the median filter: its output has flat tops, which the
+    /// strict local-maximum test rejects, and it deletes peaks narrower than
+    /// half its length.
     ///
-    /// # Panics
+    /// # Arguments
     ///
-    /// Never panics; hardcoded nonzero values are used.
+    /// - `sample_rate` - sample rate of the audio, in Hz.\
+    /// - `hop_size` - hop between onset-function frames, in audio samples.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use audio_samples::{nzu, sample_rate};
+    /// use audio_samples::operations::types::PeakPickingConfig;
+    ///
+    /// // 44.1 kHz, hop 512: 86.1 frames per second.
+    /// let config = PeakPickingConfig::music(sample_rate!(44100), nzu!(512));
+    /// assert_eq!(config.min_peak_separation.get(), 9); // 0.1 s
+    /// assert_eq!(config.adaptive_threshold.window_size, 17); // 0.2 s
+    /// ```
     #[inline]
     #[must_use]
-    pub const fn music() -> Self {
+    pub fn music(sample_rate: crate::repr::SampleRate, hop_size: NonZeroUsize) -> Self {
+        let frames = FrameRate::new(sample_rate, hop_size);
+        let mut adaptive_threshold =
+            AdaptiveThresholdConfig::combined(0.03, 0.85, frames.odd(0.2).get());
+        adaptive_threshold.min_threshold = 0.1;
         Self {
-            adaptive_threshold: AdaptiveThresholdConfig::combined(0.03, 0.85, 2048),
-            min_peak_separation: NonZeroUsize::new(1024).expect("Must be non-zero"),
+            adaptive_threshold,
+            min_peak_separation: frames.nearest(0.1),
             pre_emphasis: true,
             pre_emphasis_coeff: 0.95,
-            median_filter: true,
-            median_filter_length: NonZeroUsize::new(5).expect("Must be non-zero"),
+            median_filter: false,
+            median_filter_length: crate::nzu!(3),
             normalize_onset_strength: true,
             normalization_method: NormalizationMethod::Peak,
         }
     }
 
-    /// A preset optimised for speech onset detection.
+    /// A preset for syllable and word onsets in speech.
     ///
-    /// Delta-based thresholding with short minimum separation and a small
-    /// median filter to preserve rapid speech transitions.
+    /// Delta thresholding over a 0.2 s window (delta 0.07, floor 0.1), a minimum separation
+    /// of 80 ms, pre-emphasis 0.98, no median filter and peak normalisation.
+    /// Durations are converted to frames as in [`music`](Self::music).
     ///
-    /// # Returns
+    /// # Arguments
     ///
-    /// A [`PeakPickingConfig`] with delta thresholding (delta 0.07, window 1024 frames),
-    /// min separation 256 frames, pre-emphasis 0.98, and median filter 3.
+    /// - `sample_rate` - sample rate of the audio, in Hz.\
+    /// - `hop_size` - hop between onset-function frames, in audio samples.
     ///
-    /// # Panics
+    /// # Examples
     ///
-    /// Never panics; hardcoded nonzero values are used.
+    /// ```
+    /// use audio_samples::{nzu, sample_rate};
+    /// use audio_samples::operations::types::PeakPickingConfig;
+    ///
+    /// // 16 kHz, hop 160 (10 ms frames).
+    /// let config = PeakPickingConfig::speech(sample_rate!(16000), nzu!(160));
+    /// assert_eq!(config.min_peak_separation.get(), 8); // 80 ms
+    /// assert_eq!(config.adaptive_threshold.window_size, 21); // 0.2 s
+    /// ```
     #[inline]
     #[must_use]
-    pub const fn speech() -> Self {
+    pub fn speech(sample_rate: crate::repr::SampleRate, hop_size: NonZeroUsize) -> Self {
+        let frames = FrameRate::new(sample_rate, hop_size);
+        let mut adaptive_threshold = AdaptiveThresholdConfig::delta(0.07, frames.odd(0.2).get());
+        adaptive_threshold.min_threshold = 0.1;
         Self {
-            adaptive_threshold: AdaptiveThresholdConfig::delta(0.07, 1024),
-            min_peak_separation: NonZeroUsize::new(256).expect("Must be non-zero"),
+            adaptive_threshold,
+            min_peak_separation: frames.nearest(0.08),
             pre_emphasis: true,
             pre_emphasis_coeff: 0.98,
-            median_filter: true,
-            median_filter_length: NonZeroUsize::new(3).expect("Must be non-zero"),
+            median_filter: false,
+            median_filter_length: crate::nzu!(3),
             normalize_onset_strength: true,
             normalization_method: NormalizationMethod::Peak,
         }
     }
 
-    /// A preset optimised for drum and percussive onset detection.
+    /// A preset for drum and other percussive onsets.
     ///
-    /// Percentile-based thresholding with very short minimum separation and
-    /// no median filtering to preserve sharp transient edges.
+    /// Percentile thresholding over a 0.1 s window (percentile 0.95, floor 0.1), a minimum
+    /// separation of 30 ms, pre-emphasis 0.93, no median filter and peak
+    /// normalisation. Durations are converted to frames as in
+    /// [`music`](Self::music).
     ///
-    /// # Returns
+    /// # Arguments
     ///
-    /// A [`PeakPickingConfig`] with percentile thresholding (0.95, window 512 frames),
-    /// min separation 128 frames, pre-emphasis 0.93, and median filter disabled.
+    /// - `sample_rate` - sample rate of the audio, in Hz.\
+    /// - `hop_size` - hop between onset-function frames, in audio samples.
     ///
-    /// # Panics
+    /// # Examples
     ///
-    /// Never panics; hardcoded nonzero values are used.
+    /// ```
+    /// use audio_samples::{nzu, sample_rate};
+    /// use audio_samples::operations::types::PeakPickingConfig;
+    ///
+    /// // 48 kHz, hop 256: 187.5 frames per second.
+    /// let config = PeakPickingConfig::drums(sample_rate!(48000), nzu!(256));
+    /// assert_eq!(config.min_peak_separation.get(), 6); // 30 ms
+    /// assert_eq!(config.adaptive_threshold.window_size, 19); // 0.1 s
+    /// assert!(!config.median_filter);
+    /// ```
     #[inline]
     #[must_use]
-    pub const fn drums() -> Self {
+    pub fn drums(sample_rate: crate::repr::SampleRate, hop_size: NonZeroUsize) -> Self {
+        let frames = FrameRate::new(sample_rate, hop_size);
+        let mut adaptive_threshold =
+            AdaptiveThresholdConfig::percentile(0.95, frames.odd(0.1).get());
+        adaptive_threshold.min_threshold = 0.1;
         Self {
-            adaptive_threshold: AdaptiveThresholdConfig::percentile(0.95, 512),
-            min_peak_separation: NonZeroUsize::new(128).expect("Must be non-zero"),
+            adaptive_threshold,
+            min_peak_separation: frames.nearest(0.03),
             pre_emphasis: true,
             pre_emphasis_coeff: 0.93,
             median_filter: false,
-            median_filter_length: NonZeroUsize::new(3).expect("Must be non-zero"),
+            median_filter_length: crate::nzu!(3),
             normalize_onset_strength: true,
             normalization_method: NormalizationMethod::Peak,
         }
@@ -4886,6 +4940,33 @@ impl PeakPickingConfig {
 /// threshold window and separation stay a few frames long: at hop 512, a few
 /// hundred frames already span several seconds and would suppress almost every
 /// onset.
+/// Converts durations to frame counts of an onset strength function computed
+/// every `hop_size` samples at `sample_rate`.
+#[cfg(feature = "peak-picking")]
+#[derive(Debug, Clone, Copy)]
+struct FrameRate(f64);
+
+#[cfg(feature = "peak-picking")]
+impl FrameRate {
+    fn new(sample_rate: crate::repr::SampleRate, hop_size: NonZeroUsize) -> Self {
+        Self(f64::from(sample_rate.get()) / hop_size.get() as f64)
+    }
+
+    /// `seconds` in frames, rounded to the nearest frame, at least one.
+    fn nearest(self, seconds: f64) -> NonZeroUsize {
+        // `as usize` saturates; the rate and durations here are finite and positive.
+        NonZeroUsize::new((seconds * self.0).round() as usize).unwrap_or(NonZeroUsize::MIN)
+    }
+
+    /// `seconds` in frames, rounded to the nearest odd count (at least one), for
+    /// centred windows.
+    fn odd(self, seconds: f64) -> NonZeroUsize {
+        // The nearest odd count, `2·round((x − 1)/2) + 1`, at least one.
+        let half = ((seconds * self.0 - 1.0) / 2.0).round().max(0.0) as usize;
+        NonZeroUsize::new(2 * half + 1).unwrap_or(NonZeroUsize::MIN)
+    }
+}
+
 #[cfg(feature = "peak-picking")]
 impl Default for PeakPickingConfig {
     fn default() -> Self {

@@ -60,9 +60,7 @@
 //!   clean click track, but its threshold never drops below 0.1 of the
 //!   strongest (normalised) ODF peak, so much weaker onsets in the same clip
 //!   are missed; lower `adaptive_threshold.min_threshold` for material with a
-//!   wide dynamic range. The `music`, `speech` and `drums` presets still use
-//!   lengths sized as if they were audio samples (hundreds to thousands of
-//!   frames); on an ODF those span seconds.
+//!   wide dynamic range.
 //! - The CQT response of the external `spectrograms` crate to identical clicks
 //!   varies strongly from click to click (up to ~100×, alternating), so
 //!   weaker clicks can fall below any threshold and tempo estimates built on
@@ -130,6 +128,8 @@ pub mod flux;
 pub mod kernels;
 
 use std::{num::NonZeroUsize, str::FromStr};
+
+use crate::repr::SampleRate;
 
 use ndarray::Array2;
 use non_empty_slice::{NonEmptyVec, non_empty_vec};
@@ -311,20 +311,27 @@ impl OnsetDetectionConfig {
     /// - Pre-emphasis: 0.3 (moderate, to highlight transients)
     /// - Adaptive threshold: Enabled (multiplier: 2.0)
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::drums`]).
+    ///
     /// # Returns
     ///
     /// A [`OnsetDetectionConfig`] instance optimized for percussive content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::OnsetDetectionConfig;
     ///
-    /// let config = OnsetDetectionConfig::percussive();
+    /// let config = OnsetDetectionConfig::percussive(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn percussive() -> Self {
+    pub fn percussive(sample_rate: SampleRate) -> Self {
         let cqt_config = CqtParams::percussive();
         let hop_size = crate::nzu!(256);
         let window = None;
@@ -334,7 +341,7 @@ impl OnsetDetectionConfig {
         let adaptive_threshold = true;
         let median_filter_length = crate::nzu!(3);
         let adaptive_threshold_multiplier = 2.0;
-        let peak_picking = PeakPickingConfig::drums();
+        let peak_picking = PeakPickingConfig::drums(sample_rate, hop_size);
         Self::new(
             cqt_config,
             hop_size,
@@ -364,20 +371,27 @@ impl OnsetDetectionConfig {
     /// - Pre-emphasis: 0.1 (low, to preserve tonal content)
     /// - Adaptive threshold: Enabled (multiplier: 1.2)
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::music`]).
+    ///
     /// # Returns
     ///
     /// A [`OnsetDetectionConfig`] instance optimized for musical content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::OnsetDetectionConfig;
     ///
-    /// let config = OnsetDetectionConfig::musical();
+    /// let config = OnsetDetectionConfig::musical(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn musical() -> Self {
+    pub fn musical(sample_rate: SampleRate) -> Self {
         let cqt_config = CqtParams::musical();
         let hop_size = crate::nzu!(512);
         let window = None;
@@ -387,7 +401,7 @@ impl OnsetDetectionConfig {
         let adaptive_threshold = true;
         let median_filter_length = crate::nzu!(7);
         let adaptive_threshold_multiplier = 1.2;
-        let peak_picking = PeakPickingConfig::music();
+        let peak_picking = PeakPickingConfig::music(sample_rate, hop_size);
         Self::new(
             cqt_config,
             hop_size,
@@ -417,20 +431,27 @@ impl OnsetDetectionConfig {
     /// - Pre-emphasis: 0.05 (minimal, for speech clarity)
     /// - Adaptive threshold: Enabled (multiplier: 1.1)
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::speech`]).
+    ///
     /// # Returns
     ///
     /// A [`OnsetDetectionConfig`] instance optimized for speech content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::OnsetDetectionConfig;
     ///
-    /// let config = OnsetDetectionConfig::speech();
+    /// let config = OnsetDetectionConfig::speech(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn speech() -> Self {
+    pub fn speech(sample_rate: SampleRate) -> Self {
         let cqt_config = CqtParams::onset_detection();
         let hop_size = crate::nzu!(256);
         let window = None;
@@ -440,7 +461,7 @@ impl OnsetDetectionConfig {
         let adaptive_threshold = true;
         let median_filter_length = crate::nzu!(9);
         let adaptive_threshold_multiplier = 1.1;
-        let peak_picking = PeakPickingConfig::speech();
+        let peak_picking = PeakPickingConfig::speech(sample_rate, hop_size);
         Self::new(
             cqt_config,
             hop_size,
@@ -636,26 +657,34 @@ impl SpectralFluxConfig {
     /// Uses energy-based flux with high compression for detecting drum hits and other sharp
     /// transient events. Rectification is enabled to focus on energy increases.
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::drums`]).
+    ///
     /// # Returns
     ///
     /// A [`SpectralFluxConfig`] instance optimized for percussive content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::SpectralFluxConfig;
     ///
-    /// let config = SpectralFluxConfig::percussive();
+    /// let config = SpectralFluxConfig::percussive(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn percussive() -> Self {
+    pub fn percussive(sample_rate: SampleRate) -> Self {
+        let hop_size = crate::nzu!(256);
         Self {
             cqt_params: CqtParams::percussive(),
-            hop_size: crate::nzu!(256),
+            hop_size,
             window_size: None,
             flux_method: SpectralFluxMethod::Energy,
-            peak_picking: PeakPickingConfig::drums(),
+            peak_picking: PeakPickingConfig::drums(sample_rate, hop_size),
             rectify: true,
             log_compression: 1000.0,
         }
@@ -666,26 +695,34 @@ impl SpectralFluxConfig {
     /// Uses magnitude-based flux with moderate compression for detecting note onsets in tonal
     /// instruments. Provides good sensitivity to subtle attacks while maintaining robustness.
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::music`]).
+    ///
     /// # Returns
     ///
     /// A [`SpectralFluxConfig`] instance optimized for musical content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::SpectralFluxConfig;
     ///
-    /// let config = SpectralFluxConfig::musical();
+    /// let config = SpectralFluxConfig::musical(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn musical() -> Self {
+    pub fn musical(sample_rate: SampleRate) -> Self {
+        let hop_size = crate::nzu!(512);
         Self {
             cqt_params: CqtParams::onset_detection(),
-            hop_size: crate::nzu!(512),
+            hop_size,
             window_size: None,
             flux_method: SpectralFluxMethod::Magnitude,
-            peak_picking: PeakPickingConfig::music(),
+            peak_picking: PeakPickingConfig::music(sample_rate, hop_size),
             rectify: true,
             log_compression: 100.0,
         }
@@ -852,25 +889,33 @@ impl ComplexOnsetConfig {
     /// Emphasizes magnitude changes (0.8) over phase (0.2) for detecting sharp transients like
     /// drum hits. Uses high compression and shorter hop size for temporal precision.
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::drums`]).
+    ///
     /// # Returns
     ///
     /// A [`ComplexOnsetConfig`] instance optimized for percussive content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::ComplexOnsetConfig;
     ///
-    /// let config = ComplexOnsetConfig::percussive();
+    /// let config = ComplexOnsetConfig::percussive(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn percussive() -> Self {
+    pub fn percussive(sample_rate: SampleRate) -> Self {
+        let hop_size = crate::nzu!(256);
         Self {
             cqt_config: CqtParams::onset_detection(),
-            hop_size: crate::nzu!(256),
+            hop_size,
             window_size: None,
-            peak_picking: PeakPickingConfig::drums(),
+            peak_picking: PeakPickingConfig::drums(sample_rate, hop_size),
             magnitude_weight: 0.8,
             phase_weight: 0.2,
             magnitude_rectify: true,
@@ -884,25 +929,33 @@ impl ComplexOnsetConfig {
     /// Balances magnitude (0.6) and phase (0.4) contributions for detecting note onsets in tonal
     /// instruments. Phase information helps capture subtle attacks and pitch changes.
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::music`]).
+    ///
     /// # Returns
     ///
     /// A [`ComplexOnsetConfig`] instance optimized for musical content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::ComplexOnsetConfig;
     ///
-    /// let config = ComplexOnsetConfig::musical();
+    /// let config = ComplexOnsetConfig::musical(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn musical() -> Self {
+    pub fn musical(sample_rate: SampleRate) -> Self {
+        let hop_size = crate::nzu!(512);
         Self {
             cqt_config: CqtParams::onset_detection(),
-            hop_size: crate::nzu!(512),
+            hop_size,
             window_size: None,
-            peak_picking: PeakPickingConfig::music(),
+            peak_picking: PeakPickingConfig::music(sample_rate, hop_size),
             magnitude_weight: 0.6,
             phase_weight: 0.4,
             magnitude_rectify: true,
@@ -916,25 +969,33 @@ impl ComplexOnsetConfig {
     /// Uses equal weights for magnitude and phase (0.5 each) to capture both energy changes and
     /// formant transitions. `phase_rectify` is `false` (which has no effect, see the field docs).
     ///
+    /// # Arguments
+    ///
+    /// * `sample_rate` - Sample rate of the audio the configuration will be applied to. The
+    ///   peak picker's durations are converted to frames at `sample_rate / hop_size`
+    ///   (see [`PeakPickingConfig::speech`]).
+    ///
     /// # Returns
     ///
     /// A [`ComplexOnsetConfig`] instance optimized for speech content.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use audio_samples::sample_rate;
     /// use audio_samples::operations::onset::ComplexOnsetConfig;
     ///
-    /// let config = ComplexOnsetConfig::speech();
+    /// let config = ComplexOnsetConfig::speech(sample_rate!(44100));
     /// ```
     #[inline]
     #[must_use]
-    pub fn speech() -> Self {
+    pub fn speech(sample_rate: SampleRate) -> Self {
+        let hop_size = crate::nzu!(256);
         Self {
             cqt_config: CqtParams::onset_detection(),
-            hop_size: crate::nzu!(256),
+            hop_size,
             window_size: None,
-            peak_picking: PeakPickingConfig::speech(),
+            peak_picking: PeakPickingConfig::speech(sample_rate, hop_size),
             magnitude_weight: 0.5,
             phase_weight: 0.5,
             magnitude_rectify: true,
@@ -1489,9 +1550,9 @@ mod cqt_dedup_tests {
         let audio = AudioSamples::new_mono(Array1::from_vec(data), sample_rate!(22050)).unwrap();
         for config in [
             ComplexOnsetConfig::default(),
-            ComplexOnsetConfig::percussive(),
-            ComplexOnsetConfig::musical(),
-            ComplexOnsetConfig::speech(),
+            ComplexOnsetConfig::percussive(crate::sample_rate!(22050)),
+            ComplexOnsetConfig::musical(crate::sample_rate!(22050)),
+            ComplexOnsetConfig::speech(crate::sample_rate!(22050)),
         ] {
             let odf = audio.onset_detection_function_complex(&config).unwrap();
             assert!(odf.len().get() > 1, "expected several frames");

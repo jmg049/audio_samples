@@ -236,7 +236,7 @@ pub fn phase_deviation(
 ///
 /// let mag_diff = Array2::zeros((128, 100));
 /// let phase_dev = Array2::zeros((128, 100));
-/// let config = ComplexOnsetConfig::musical();
+/// let config = ComplexOnsetConfig::musical(audio_samples::sample_rate!(44100));
 /// let odf = combine_complex_odf(&mag_diff, &phase_dev, &config);
 /// ```
 #[inline]
@@ -294,14 +294,14 @@ mod tests {
     /// In the non-rectified combine path the magnitude
     /// contribution must come from `mag_diff`, not from `phase_dev`.
     ///
-    /// The test uses `ComplexOnsetConfig::speech()` (`phase_rectify: false`), forces the
+    /// The test uses `ComplexOnsetConfig::speech(..)` (`phase_rectify: false`), forces the
     /// output to depend only on the magnitude term (magnitude_weight = 1,
     /// phase_weight = 0, no log compression), and feeds magnitude and phase arrays
     /// with deliberately different values, so a result taken from the phase data
     /// fails the assertion.
     #[test]
     fn nonrectified_magnitude_comes_from_magnitude() {
-        let mut config = ComplexOnsetConfig::speech();
+        let mut config = ComplexOnsetConfig::speech(crate::sample_rate!(44100));
         assert!(!config.phase_rectify, "test relies on non-rectified phase");
         config.magnitude_weight = 1.0;
         config.phase_weight = 0.0;
@@ -338,7 +338,10 @@ mod tests {
         let mag =
             Array2::from_shape_fn((bins, frames), |(b, t)| (b as f64 - 3.0) * (t as f64 + 0.5));
         let phase = Array2::from_shape_fn((bins, frames), |(b, t)| ((b * 3 + t) % 5) as f64 - 1.5);
-        for mut config in [ComplexOnsetConfig::musical(), ComplexOnsetConfig::speech()] {
+        for mut config in [
+            ComplexOnsetConfig::musical(crate::sample_rate!(44100)),
+            ComplexOnsetConfig::speech(crate::sample_rate!(44100)),
+        ] {
             config.log_compression = 0.0;
             let expected: Vec<f64> = (0..frames)
                 .map(|t| {
@@ -382,7 +385,7 @@ mod tests {
     /// leave a large residual.
     #[test]
     fn phase_deviation_zero_for_expected_advance() {
-        let config = ComplexOnsetConfig::speech();
+        let config = ComplexOnsetConfig::speech(crate::sample_rate!(44100));
         let sample_rate = 44100.0;
         let hop = config.hop_size.get() as f64;
         let tau = std::f64::consts::TAU;
