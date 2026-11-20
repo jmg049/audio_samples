@@ -420,7 +420,7 @@ const ENGINE_CACHE_ENTRIES: usize = 16;
 const ENGINE_CACHE_BYTES: usize = 32 << 20;
 
 /// Returns the (per-thread cached) engine for a conversion, or `None` when
-/// the plan is a direct single-stage one.
+/// the resampling plan is a direct single-stage one.
 ///
 /// # Errors
 /// See [`super::plan`].

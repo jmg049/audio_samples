@@ -260,7 +260,7 @@ where
                 mask.push(decision);
             }
         }
-        // With `pad_end = false` and a signal shorter than one frame the plan
+        // With `pad_end = false` and a signal shorter than one frame, framing
         // yields no frames; report that instead of building an empty NonEmptyVec.
         let mask = NonEmptyVec::new(mask).map_err(|_| {
             AudioSampleError::Parameter(ParameterError::invalid_value(

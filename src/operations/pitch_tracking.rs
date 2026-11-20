@@ -782,13 +782,13 @@ fn cmnd_frame<F: AudioFloat>(
     work.resize(n_pad, zero);
     fft.forward
         .process(work, spec)
-        .expect("buffer lengths match the plan");
+        .expect("buffer lengths match the FFT plan");
     for z in spec.iter_mut() {
         *z = realfft::num_complex::Complex::new(z.re * z.re + z.im * z.im, zero);
     }
     fft.inverse
         .process(spec, work)
-        .expect("buffer lengths match the plan");
+        .expect("buffer lengths match the FFT plan");
     let scale = F::one() / F::of_usize(n_pad);
     let acf = |k: usize| work[k] * scale;
 

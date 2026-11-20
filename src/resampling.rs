@@ -182,7 +182,7 @@ const VERY_HIGH_SHARP: FilterSpec = FilterSpec {
     attenuation_db: 215.0,
 };
 
-/// `VeryHigh`'s filter for `in_sr -> out_sr`: as sharp as the plan that runs
+/// `VeryHigh`'s filter for `in_sr -> out_sr`: as sharp as the resampling plan that runs
 /// it can afford. Ratios whose two-stage filter would be too long for the
 /// FFT path use [`VERY_HIGH_POW2`] (they run as one filter evaluated
 /// directly).
@@ -801,7 +801,7 @@ fn stage_b_exact(l: u64, taps: usize) -> bool {
 /// Stage A's rate factor for a two-stage conversion: 2 when upsampling;
 /// when downsampling, 1 or 2, whichever the cost model prefers (close to
 /// 1 : 1, stage B at the input rate needs many taps). It depends on the
-/// ratio only, so that [`StreamingResampler`] uses the plan [`resample`]
+/// ratio only, so that [`StreamingResampler`] uses the resampling plan [`resample`]
 /// uses, whatever the input length.
 fn stage_a_up(in_sr: u32, out_sr: u32, spec: FilterSpec) -> u64 {
     if out_sr > in_sr {
@@ -1701,7 +1701,7 @@ fn output_len(in_sr: u32, out_sr: u32, n: usize) -> usize {
 }
 
 /// Windowed-sinc resampling in `F` (the sample type's float): the cached
-/// engine for the plan writes every channel straight into the output buffer.
+/// engine for the resampling plan writes every channel straight into the output buffer.
 /// Each output `y` of float audio is written as `y · gain` computed in `f64`
 /// (the callers pass 1 for other sample types).
 fn resample_sinc<T, F>(
