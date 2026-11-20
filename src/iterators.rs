@@ -591,8 +591,8 @@ where
     /// Applies a mutable function to each channel's contiguous sample slice.
     ///
     /// This is the infallible counterpart to [`AudioSamples::try_apply_to_channel_data`].
-    /// It panics if the underlying storage is not contiguous; prefer the fallible
-    /// variant when working with audio that may have non-standard memory layouts.
+    /// Where the multi-channel storage is not contiguous in memory, each channel is
+    /// copied into a buffer, passed to the callback and written back.
     ///
     /// The callback receives the channel index and a mutable slice of all samples
     /// for that channel.
@@ -609,9 +609,7 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the underlying storage is not contiguous in memory. Use
-    /// [`AudioSamples::try_apply_to_channel_data`] to handle non-contiguous inputs
-    /// without panicking.
+    /// Does not panic.
     ///
     /// ## Examples
     ///
@@ -636,8 +634,28 @@ where
     where
         F: FnMut(usize, &mut [T]), // (channel_index, channel_samples)
     {
-        self.try_apply_to_channel_data(|ch, data| f(ch, data))
-            .expect("apply_to_channel_data requires contiguous storage; use try_apply_to_channel_data to handle non-contiguous inputs");
+        match self.data_mut() {
+            AudioData::Mono(arr) => f(0, arr.as_slice_mut()),
+            AudioData::Multi(arr) => {
+                let (channels, samples_per_channel) = arr.dim();
+                let (channels, samples_per_channel) = (channels.get(), samples_per_channel.get());
+                if let Some(slice) = arr.as_slice_mut() {
+                    for (ch, channel) in slice.chunks_exact_mut(samples_per_channel).enumerate() {
+                        f(ch, channel);
+                    }
+                } else {
+                    let mut buf = Vec::with_capacity(samples_per_channel);
+                    for ch in 0..channels {
+                        buf.clear();
+                        buf.extend((0..samples_per_channel).map(|i| arr[[ch, i]]));
+                        f(ch, &mut buf);
+                        for (i, &s) in buf.iter().enumerate() {
+                            arr[[ch, i]] = s;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Applies a mutable function to each temporal window of audio data.
@@ -1807,6 +1825,28 @@ mod tests {
         });
 
         assert_eq!(audio.as_multi_channel().unwrap(), &expected);
+    }
+
+    #[test]
+    fn apply_to_channel_data_handles_column_major_storage() {
+        use ndarray::{Array2, ShapeBuilder};
+        let data =
+            Array2::from_shape_vec((2, 3).f(), vec![1.0f32, 4.0, 2.0, 5.0, 3.0, 6.0]).unwrap();
+        let mut audio = AudioSamples::new_multi_channel(data, sample_rate!(44100)).unwrap();
+        assert!(audio.try_apply_to_channel_data(|_, _| {}).is_err());
+
+        audio.apply_to_channel_data(|ch, channel_data| {
+            assert_eq!(channel_data.len(), 3);
+            let gain = if ch == 0 { 0.5 } else { 2.0 };
+            for sample in channel_data {
+                *sample *= gain;
+            }
+        });
+
+        assert_eq!(
+            audio.as_multi_channel().unwrap(),
+            &array![[0.5f32, 1.0, 1.5], [8.0, 10.0, 12.0]]
+        );
     }
 
     #[test]
