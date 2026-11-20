@@ -1,121 +1,148 @@
-//! Audio processing operations and transformations.
+//! The audio operations: one trait per area, implemented for
+//! [`AudioSamples`](crate::AudioSamples), with the modules that implement them and
+//! their configuration types.
 //!
-//! This module provides the audio processing operations, organized into
-//! composable traits. Each trait covers one area of audio processing.
+//! The crate root explains the conventions every module follows (the
+//! [precision rule](crate#precision), the [array layout](crate#array-layout) and
+//! [configuration](crate#configuration)) and has a
+//! [task table](crate#where-to-find-things). This page adds the table below, for
+//! tasks that more than one API can do. Bring a trait into scope, from here, from
+//! [`traits`] or from the crate root, and call its methods:
 //!
-//! ## Module Organization
+//! ```rust
+//! # #[cfg(all(feature = "statistics", feature = "processing"))] {
+//! use audio_samples::operations::types::NormalizationConfig;
+//! use audio_samples::operations::{AudioProcessing, AudioStatistics};
+//! use audio_samples::{sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! - [`traits`] - Core trait definitions
-#![cfg_attr(
-    feature = "statistics",
-    doc = r#" - [`statistics`] - Statistical analysis operations"#
-)]
-#![cfg_attr(
-    not(feature = "statistics"),
-    doc = r#" - `statistics` - Statistical analysis operations (requires the `statistics` feature)"#
-)]
-#![cfg_attr(
-    feature = "processing",
-    doc = r#" - [`processing`] - Signal processing operations"#
-)]
-#![cfg_attr(
-    not(feature = "processing"),
-    doc = r#" - `processing` - Signal processing operations (requires the `processing` feature)"#
-)]
+//! let audio = sine_wave::<f32>(440.0, Duration::from_millis(100), sample_rate!(8000), 0.25);
+//! let louder = audio.normalize(NormalizationConfig::peak(1.0)).unwrap();
+//! assert!((louder.peak() - 1.0).abs() < 1e-6);
+//! assert!((audio.peak() - 0.25).abs() < 1e-6); // the original is unchanged
+//! # }
+//! ```
+//!
+//! ## Choosing between overlapping APIs
+//!
+//! Some tasks have two or more APIs. They follow different conventions, so their
+//! results differ in detail; pick by the conventions you need, and do not mix
+//! results from both in one pipeline.
+//!
+//! | Task | Use | Alternative | How they differ |
+//! |---|---|---|---|
 #![cfg_attr(
     feature = "transforms",
-    doc = r#" - [`transforms`] - FFT / spectral analysis"#
+    doc = r#" | STFT, mel spectrogram, MFCC | [`AudioSpectrum`] | [`AudioTransforms`] | `AudioSpectrum` takes any number of channels, uses a periodic window and configurable padding, gives dB relative to a reference with an optional floor (`top_db`) and an orthonormal DCT, and computes in the [analysis float](crate#precision). `AudioTransforms` is mono, returns the [`spectrograms`] crate's types, uses a symmetric window, zero padding, an absolute dB floor and an unnormalised DCT-II with a lifter, and computes in `f64`. It also has log-frequency and gammatone spectrograms and a Welch PSD. |"#
 )]
 #![cfg_attr(
     not(feature = "transforms"),
-    doc = r#" - `transforms` - FFT / spectral analysis (requires the `transforms` feature)"#
-)]
-#![cfg_attr(
-    feature = "transforms",
-    doc = r#" - [`spectrum`] - STFT, mel spectrogram, MFCC, dB, delta"#
-)]
-#![cfg_attr(
-    not(feature = "transforms"),
-    doc = r#" - `spectrum` - STFT, mel spectrogram, MFCC, dB, delta (requires the `transforms` feature)"#
-)]
-#![cfg_attr(
-    feature = "effects",
-    doc = r#" - [`effects`] - time stretch, pitch shift, emphasis, dB trim/split, HPSS"#
-)]
-#![cfg_attr(
-    not(feature = "effects"),
-    doc = r#" - `effects` - time stretch, pitch shift, emphasis, dB trim/split, HPSS (requires the `effects` feature)"#
+    doc = r#" | STFT, mel spectrogram, MFCC | `AudioSpectrum` | `AudioTransforms` | `AudioSpectrum` takes any number of channels, uses a periodic window and configurable padding, gives dB relative to a reference with an optional floor (`top_db`) and an orthonormal DCT, and computes in the analysis float. `AudioTransforms` is mono, returns the `spectrograms` crate's types, uses a symmetric window, zero padding, an absolute dB floor and an unnormalised DCT-II with a lifter, and computes in `f64`. It also has log-frequency and gammatone spectrograms and a Welch PSD. |"#
 )]
 #![cfg_attr(
     all(feature = "transforms", feature = "resampling"),
-    doc = r#" - [`constant_q`] - CQT / VQT / iCQT, CQT chroma and tonnetz"#
+    doc = r#" | Constant-Q transform | [`AudioConstantQ::cqt`] | [`AudioTransforms::constant_q_transform`] | `cqt` is the recursive per-octave transform with wavelet filters that the chroma and tonnetz features use. The alternative uses the `spectrograms` crate's kernel; its values differ by several percent and it returns fewer frames. |"#
 )]
 #![cfg_attr(
     not(all(feature = "transforms", feature = "resampling")),
-    doc = r#" - `constant_q` - CQT / VQT / iCQT, CQT chroma and tonnetz (requires the `transforms` and `resampling` features)"#
+    doc = r#" | Constant-Q transform | `AudioConstantQ::cqt` | `AudioTransforms::constant_q_transform` | `cqt` is the recursive per-octave transform with wavelet filters that the chroma and tonnetz features use. The alternative uses the `spectrograms` crate's kernel; its values differ by several percent and it returns fewer frames. |"#
+)]
+#![cfg_attr(
+    all(feature = "feature-extraction", feature = "resampling"),
+    doc = r#" | Chroma | [`AudioTonal::chroma_stft`], [`AudioConstantQ::chroma_cqt`] | [`AudioTransforms::chromagram`] | The first two use a power spectrogram, an octave-weighted Gaussian filterbank, max-normalised frames and tuning estimation. `chromagram` uses a magnitude spectrogram, L2 normalisation and no tuning estimation, and gives flatter profiles. |"#
+)]
+#![cfg_attr(
+    not(all(feature = "feature-extraction", feature = "resampling")),
+    doc = r#" | Chroma | `AudioTonal::chroma_stft`, `AudioConstantQ::chroma_cqt` | `AudioTransforms::chromagram` | The first two use a power spectrogram, an octave-weighted Gaussian filterbank, max-normalised frames and tuning estimation. `chromagram` uses a magnitude spectrogram, L2 normalisation and no tuning estimation, and gives flatter profiles. |"#
+)]
+#![cfg_attr(
+    all(feature = "feature-extraction", feature = "statistics"),
+    doc = r#" | Spectral centroid, rolloff, flatness | [`AudioFeatures`] | [`AudioStatistics`] | `AudioFeatures` gives one value per frame (`*_frames`); `AudioStatistics` one value for the whole signal. |"#
+)]
+#![cfg_attr(
+    not(all(feature = "feature-extraction", feature = "statistics")),
+    doc = r#" | Spectral centroid, rolloff, flatness | `AudioFeatures` | `AudioStatistics` | `AudioFeatures` gives one value per frame (`*_frames`); `AudioStatistics` one value for the whole signal. |"#
+)]
+#![cfg_attr(
+    all(
+        feature = "feature-extraction",
+        feature = "statistics",
+        feature = "envelopes"
+    ),
+    doc = r#" | RMS | [`AudioFeatures::rms_frames`] | [`AudioStatistics::rms`], [`AudioEnvelopes::rms_envelope`] | `rms_frames` is per centred frame, in units of full scale. `rms` is one value for the signal and `rms_envelope` uses frames that start at `k × hop`; both use the raw stored values. |"#
+)]
+#![cfg_attr(
+    not(all(
+        feature = "feature-extraction",
+        feature = "statistics",
+        feature = "envelopes"
+    )),
+    doc = r#" | RMS | `AudioFeatures::rms_frames` | `AudioStatistics::rms`, `AudioEnvelopes::rms_envelope` | `rms_frames` is per centred frame, in units of full scale. `rms` is one value for the signal and `rms_envelope` uses frames that start at `k × hop`; both use the raw stored values. |"#
+)]
+#![cfg_attr(
+    all(feature = "pitch-analysis", feature = "feature-extraction"),
+    doc = r#" | Pitch | [`AudioPitchTracking::yin`], [`AudioPitchTracking::pyin`] | [`AudioPitchAnalysis`], [`AudioTonal::piptrack`], [`detect_fundamental_frequency`](crate::utils::detection::detect_fundamental_frequency) | `AudioPitchTracking` returns one estimate per centred frame and channel, and pYIN adds voicing. `AudioPitchAnalysis` estimates one pitch per buffer, or a mono contour whose frames start at sample 0 with unvoiced frames as `None`. `piptrack` gives candidate pitches per frequency bin; `detect_fundamental_frequency` one autocorrelation estimate for the whole signal. |"#
+)]
+#![cfg_attr(
+    not(all(feature = "pitch-analysis", feature = "feature-extraction")),
+    doc = r#" | Pitch | `AudioPitchTracking::yin`, `AudioPitchTracking::pyin` | `AudioPitchAnalysis`, `AudioTonal::piptrack`, `detect_fundamental_frequency` | `AudioPitchTracking` returns one estimate per centred frame and channel, and pYIN adds voicing. `AudioPitchAnalysis` estimates one pitch per buffer, or a mono contour whose frames start at sample 0 with unvoiced frames as `None`. `piptrack` gives candidate pitches per frequency bin; `detect_fundamental_frequency` one autocorrelation estimate for the whole signal. |"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" | Onsets | [`AudioRhythm::onset_detect`] | [`AudioOnsetDetection`](crate::AudioOnsetDetection) | `onset_detect` peak-picks a spectral-flux onset strength computed from a log-power mel spectrogram and returns frame indices ([`FrameEvents`](rhythm::FrameEvents)). `AudioOnsetDetection` uses constant-Q detection functions and returns times in seconds. |"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" | Onsets | `AudioRhythm::onset_detect` | `AudioOnsetDetection` | `onset_detect` peak-picks a spectral-flux onset strength computed from a log-power mel spectrogram and returns frame indices (`FrameEvents`). `AudioOnsetDetection` uses constant-Q detection functions and returns times in seconds. |"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" | Tempo and beats | [`AudioRhythm::tempo`], [`AudioRhythm::beat_track`] | [`AudioBeatTracking`] | `AudioRhythm` estimates tempo from an autocorrelation tempogram with a log-normal prior and places beats by dynamic programming, following the onsets. `AudioBeatTracking` places a rigid grid at one tempo, anchored at the strongest onset. |"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" | Tempo and beats | `AudioRhythm::tempo`, `AudioRhythm::beat_track` | `AudioBeatTracking` | `AudioRhythm` estimates tempo from an autocorrelation tempogram with a log-normal prior and places beats by dynamic programming, following the onsets. `AudioBeatTracking` places a rigid grid at one tempo, anchored at the strongest onset. |"#
+)]
+#![cfg_attr(
+    all(feature = "effects", feature = "decomposition"),
+    doc = r#" | Harmonic-percussive separation | [`AudioEffects::harmonic_percussive`] | [`AudioDecomposition::hpss`] | `harmonic_percussive` takes any number of channels and uses soft masks with margins and reflect padding, and returns audio of the input's length. `hpss` is mono, with its own masks (`mask_softness`) and a symmetric window. |"#
+)]
+#![cfg_attr(
+    not(all(feature = "effects", feature = "decomposition")),
+    doc = r#" | Harmonic-percussive separation | `AudioEffects::harmonic_percussive` | `AudioDecomposition::hpss` | `harmonic_percussive` takes any number of channels and uses soft masks with margins and reflect padding, and returns audio of the input's length. `hpss` is mono, with its own masks (`mask_softness`) and a symmetric window. |"#
+)]
+#![cfg_attr(
+    feature = "effects",
+    doc = r#" | Silence trimming | [`AudioEffects::trim_db`], [`AudioEffects::split_db`] | [`AudioEditing::trim_silence`] | `trim_db` compares frame RMS with the loudest frame (`top_db` below it). `trim_silence` compares each sample with an absolute threshold in dB re full scale. |"#
+)]
+#![cfg_attr(
+    not(feature = "effects"),
+    doc = r#" | Silence trimming | `AudioEffects::trim_db`, `AudioEffects::split_db` | `AudioEditing::trim_silence` | `trim_db` compares frame RMS with the loudest frame (`top_db` below it). `trim_silence` compares each sample with an absolute threshold in dB re full scale. |"#
 )]
 #![cfg_attr(
     feature = "transforms",
-    doc = r#" - [`filterbanks`] - window functions and mel filterbanks"#
+    doc = r#" | Mel frequencies | [`hz_to_mel_with_scale`](crate::utils::audio_math::hz_to_mel_with_scale), [`mel_frequencies_with_scale`](crate::utils::audio_math::mel_frequencies_with_scale) | [`hz_to_mel`](crate::utils::audio_math::hz_to_mel), [`mel_frequencies`](crate::utils::audio_math::mel_frequencies) | The mel spectrograms use the Slaney scale by default ([`MelScale`](crate::MelScale)). `hz_to_mel` and `mel_frequencies` use the HTK formula only, so they do not label those bands. |"#
 )]
 #![cfg_attr(
     not(feature = "transforms"),
-    doc = r#" - `filterbanks` - window functions and mel filterbanks (requires the `transforms` feature)"#
+    doc = r#" | Mel frequencies | `hz_to_mel_with_scale`, `mel_frequencies_with_scale` | `hz_to_mel`, `mel_frequencies` | The mel spectrograms use the Slaney scale by default (`MelScale`). `hz_to_mel` and `mel_frequencies` use the HTK formula only, so they do not label those bands. |"#
 )]
 #![cfg_attr(
-    feature = "editing",
-    doc = r#" - [`editing`] - Time-domain editing operations"#
+    feature = "transforms",
+    doc = r#" | Decibels | [`spectrum::amplitude_to_db`], [`spectrum::power_to_db`] | [`utils::audio_math::amplitude_to_db`](crate::utils::audio_math::amplitude_to_db), [`utils::audio_math::power_to_db`](crate::utils::audio_math::power_to_db) | The `spectrum` functions convert arrays with a reference, a lower clamp and an optional `top_db`. The `utils` functions convert one value with reference 1 and return −80 dB only for non-positive input. `utils` re-exports them under the same names. |"#
 )]
 #![cfg_attr(
-    not(feature = "editing"),
-    doc = r#" - `editing` - Time-domain editing operations (requires the `editing` feature)"#
+    not(feature = "transforms"),
+    doc = r#" | Decibels | `spectrum::amplitude_to_db`, `spectrum::power_to_db` | `utils::audio_math::amplitude_to_db`, `utils::audio_math::power_to_db` | The `spectrum` functions convert arrays with a reference, a lower clamp and an optional `top_db`. The `utils` functions convert one value with reference 1 and return −80 dB only for non-positive input. `utils` re-exports them under the same names. |"#
 )]
 #![cfg_attr(
-    feature = "channels",
-    doc = r#" - [`channels`] - Channel manipulation operations"#
+    all(feature = "resampling", feature = "processing"),
+    doc = r#" | Resampling | [`resample`](crate::resample), [`AudioProcessing::resample`] | [`StreamingResampler`](crate::StreamingResampler) | `resample` converts a whole buffer in the analysis float. `StreamingResampler` converts a stream chunk by chunk, in `f64`. |"#
 )]
 #![cfg_attr(
-    not(feature = "channels"),
-    doc = r#" - `channels` - Channel manipulation operations (requires the `channels` feature)"#
+    not(all(feature = "resampling", feature = "processing")),
+    doc = r#" | Resampling | `resample`, `AudioProcessing::resample` | `StreamingResampler` | `resample` converts a whole buffer in the analysis float. `StreamingResampler` converts a stream chunk by chunk, in `f64`. |"#
 )]
-//! - [`types`] - Supporting types and enums
-//!
-#![cfg_attr(
-    feature = "plotting",
-    doc = r#" Additional submodules are feature-gated, e.g. [`plotting`] (requires `plotting`) and"#
-)]
-#![cfg_attr(
-    not(feature = "plotting"),
-    doc = r#" Additional submodules are feature-gated, e.g. `plotting` (requires `plotting`) and"#
-)]
-#![cfg_attr(feature = "vad", doc = r#" [`vad`] (requires `vad`)."#)]
-#![cfg_attr(not(feature = "vad"), doc = r#" `vad` (requires `vad`)."#)]
-//!
-//! ## Quick Start
-//!
-//! ```rust,ignore
-//! // Full example requires the `statistics` and `processing` features.
-//! use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
-//! use audio_samples::operations::types::{NormalizationConfig, NormalizationMethod};
-//! use audio_samples::operations::traits::{AudioProcessing, AudioStatistics};
-//! use ndarray::array;
-//!
-//! let data = array![1.0f32, 2.0, 3.0, 4.0, 5.0];
-//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-//!
-//! // Statistical analysis (requires `statistics` feature)
-//! let peak = audio.peak();
-//! let rms = audio.rms();
-//! let _ = (peak, rms);
-//!
-//! // Signal processing (requires `processing` feature)
-//! let config = NormalizationConfig::min_max(-1.0, 1.0);
-//! let normalized = audio.normalize(config).unwrap();
-//!
-//! // Type conversion (always available)
-//! let audio_i16 = normalized.to_type::<i16>();
-//! let _ = audio_i16;
-//! ```
 pub mod traits;
 pub mod types;
 
