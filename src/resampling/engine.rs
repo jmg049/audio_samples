@@ -1765,6 +1765,9 @@ pub(super) struct DftStage<F> {
     /// products giving `W[..M]` and `W[M2 - M..]` from `Z` directly.
     split_up: bool,
     simd: bool,
+    /// The buffers of the last call (see [`DftBufs`]), taken when free, so
+    /// that repeated calls do not allocate and zero them again.
+    pool: std::sync::Mutex<Vec<Complex<F>>>,
 }
 
 /// Complex values per SIMD register of `F` (bins per group of
@@ -1846,6 +1849,7 @@ impl<F: RsFloat> DftStage<F> {
                 up: Some((Bins::new(&lo_p, &lo_q), Bins::new(&hi_p, &hi_q))),
                 split_up: true,
                 simd: super::has_avx2_fma_cached(),
+                pool: std::sync::Mutex::new(Vec::new()),
             };
         }
         if m2 > big_m {
@@ -1876,6 +1880,7 @@ impl<F: RsFloat> DftStage<F> {
                 up: Some((Bins::new(&a, &b), Bins::new(&p, &q))),
                 split_up: false,
                 simd: super::has_avx2_fma_cached(),
+                pool: std::sync::Mutex::new(Vec::new()),
             };
         }
         let split = |c: [Complex<f64>; 4]| {
@@ -1913,6 +1918,7 @@ impl<F: RsFloat> DftStage<F> {
             up: None,
             split_up: false,
             simd: super::has_avx2_fma_cached(),
+            pool: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1938,40 +1944,39 @@ impl<F: RsFloat> DftStage<F> {
 
     /// Converts the block `z` (`n1` samples as `n1 / 2` pairs); its outputs
     /// are then `bufs.y[u] = (y[2u], y[2u + 1])` for `2u < hop_out`.
-    fn transform(&self, z: &[Complex<F>], bufs: &mut DftBufs<F>, simd: bool) {
+    fn transform(&self, z: &[Complex<F>], bufs: &mut DftWork<'_, F>, simd: bool) {
         self.fwd
-            .process_immutable_with_scratch(z, &mut bufs.zf, &mut bufs.scratch);
+            .process_immutable_with_scratch(z, bufs.zf, bufs.scratch);
         if let (Some((lo, hi)), true) = (&self.up, self.split_up) {
             let (m, m2) = (bufs.zf.len(), bufs.w.len());
-            F::fir2_bins(&mut bufs.w[..m], &bufs.zf, lo, Layout::natural(m));
+            F::fir2_bins(&mut bufs.w[..m], bufs.zf, lo, Layout::natural(m));
             bufs.w[m..m2 - m].fill(Complex::new(F::zero(), F::zero()));
-            F::fir2_bins(&mut bufs.w[m2 - m..], &bufs.zf, hi, Layout::natural(m));
+            F::fir2_bins(&mut bufs.w[m2 - m..], bufs.zf, hi, Layout::natural(m));
         } else if let Some((a, b)) = &self.up {
             // `bufs.band[M..]` stays zero.
             let m = bufs.zf.len();
-            F::fir2_bins(&mut bufs.band[..m], &bufs.zf, a, Layout::natural(m));
+            F::fir2_bins(&mut bufs.band[..m], bufs.zf, a, Layout::natural(m));
             let lay = Layout::natural(bufs.w.len());
-            F::fir2_bins(&mut bufs.w, &bufs.band, b, lay);
+            F::fir2_bins(bufs.w, bufs.band, b, lay);
         } else {
-            F::dft_bins(&mut bufs.w, &bufs.zf, &self.tab0, &self.tab, simd);
+            F::dft_bins(bufs.w, bufs.zf, &self.tab0, &self.tab, simd);
         }
         self.inv
-            .process_outofplace_with_scratch(&mut bufs.w, &mut bufs.y, &mut bufs.scratch);
+            .process_outofplace_with_scratch(bufs.w, bufs.y, bufs.scratch);
     }
 
     /// Converts the block `seg` (`n1` samples) into `out` (at most
     /// `hop_out` samples).
     pub(super) fn block(&self, seg: &[F], bufs: &mut DftBufs<F>, out: &mut [F]) {
         debug_assert_eq!(seg.len(), self.n1);
-        let mut z = std::mem::take(&mut bufs.z);
-        load_even_odd(seg, &|v| v, 0, &mut z);
-        self.transform(&z, bufs, self.simd);
-        bufs.z = z;
-        for (d, v) in out.as_chunks_mut::<2>().0.iter_mut().zip(&bufs.y) {
+        let (z, mut work) = bufs.split();
+        load_even_odd(seg, &|v| v, 0, z);
+        self.transform(z, &mut work, self.simd);
+        for (d, v) in out.as_chunks_mut::<2>().0.iter_mut().zip(work.y.iter()) {
             *d = [v.re, v.im];
         }
         if out.len() % 2 == 1 {
-            out[out.len() - 1] = bufs.y[out.len() / 2].re;
+            out[out.len() - 1] = work.y[out.len() / 2].re;
         }
     }
 
@@ -1988,59 +1993,127 @@ impl<F: RsFloat> DftStage<F> {
         from_f: &impl Fn(F) -> T,
         simd: bool,
     ) {
-        let mut bufs = DftBufs::new(self);
-        let mut z = std::mem::take(&mut bufs.z);
+        let mem = self
+            .pool
+            .try_lock()
+            .ok()
+            .map(|mut pool| std::mem::take(&mut *pool))
+            .unwrap_or_default();
+        let mut bufs = DftBufs::in_mem(self, mem);
+        let (z, mut work) = bufs.split();
         for (b, dst) in out.chunks_mut(self.hop_out).enumerate() {
             let start = (b * self.hop) as i64 - self.half as i64;
             match in_place(native, start, self.n1 / 2) {
-                Some(seg) => self.transform(seg, &mut bufs, simd && self.simd),
+                Some(seg) => self.transform(seg, &mut work, simd && self.simd),
                 None => {
-                    load_even_odd(x, to_f, start, &mut z);
-                    self.transform(&z, &mut bufs, simd && self.simd);
+                    load_even_odd(x, to_f, start, z);
+                    self.transform(z, &mut work, simd && self.simd);
                 }
             }
             let (pairs, rest) = dst.as_chunks_mut::<2>();
-            for (d, v) in pairs.iter_mut().zip(&bufs.y) {
+            for (d, v) in pairs.iter_mut().zip(work.y.iter()) {
                 d[0].write(from_f(v.re));
                 d[1].write(from_f(v.im));
             }
             if let [d] = rest {
-                d.write(from_f(bufs.y[pairs.len()].re));
+                d.write(from_f(work.y[pairs.len()].re));
             }
+        }
+        if let Ok(mut pool) = self.pool.try_lock() {
+            *pool = bufs.mem;
         }
     }
 }
 
-/// Work buffers of [`DftStage`].
+/// Work buffers of [`DftStage`]: one allocation holding `z`, `zf`, `band`,
+/// `w`, `y` and `scratch`, each starting on a 64-byte (cache-line)
+/// boundary. With separate vectors, which start wherever the allocator puts
+/// them, a third of the transforms' 32-byte loads and stores can straddle
+/// two cache lines, and 22.05 kHz to 8 kHz in `f64` runs up to 25 % slower.
+///
+/// Every buffer is written before it is read, except `band` above its
+/// first `n1 / 2` bins, which nothing writes: it stays zero when the
+/// allocation is used again for the same stage (see [`DftStage::pool`]).
 pub(super) struct DftBufs<F> {
-    z: Vec<Complex<F>>,
-    zf: Vec<Complex<F>>,
+    mem: Vec<Complex<F>>,
+    /// Start and length of `z`, `zf`, `band`, `w`, `y` and `scratch`.
+    parts: [(usize, usize); 6],
+}
+
+/// The buffers of [`DftBufs`] other than `z`.
+pub(super) struct DftWork<'a, F> {
+    zf: &'a mut [Complex<F>],
     /// Upsampling: the filtered input band, zero-extended to `n2 / 2` bins.
-    band: Vec<Complex<F>>,
-    w: Vec<Complex<F>>,
-    y: Vec<Complex<F>>,
-    scratch: Vec<Complex<F>>,
+    band: &'a mut [Complex<F>],
+    w: &'a mut [Complex<F>],
+    y: &'a mut [Complex<F>],
+    scratch: &'a mut [Complex<F>],
 }
 
 impl<F: RsFloat> DftBufs<F> {
     pub(super) fn new(d: &DftStage<F>) -> Self {
-        let zero = Complex::new(F::zero(), F::zero());
+        Self::in_mem(d, Vec::new())
+    }
+
+    /// The buffers of `d` in `mem` when it has the right length (its values
+    /// then come from an earlier use for `d`), else in a new allocation.
+    fn in_mem(d: &DftStage<F>, mem: Vec<Complex<F>>) -> Self {
         let scratch = d
             .fwd
             .get_immutable_scratch_len()
             .max(d.inv.get_outofplace_scratch_len());
-        Self {
-            z: vec![zero; d.n1 / 2],
-            zf: vec![zero; d.n1 / 2],
-            band: if d.up.is_some() && !d.split_up {
-                vec![zero; d.n2 / 2]
-            } else {
-                Vec::new()
-            },
-            w: vec![zero; d.n2 / 2],
-            y: vec![zero; d.n2 / 2],
-            scratch: vec![zero; scratch],
+        let band = if d.up.is_some() && !d.split_up {
+            d.n2 / 2
+        } else {
+            0
+        };
+        let lens = [d.n1 / 2, d.n1 / 2, band, d.n2 / 2, d.n2 / 2, scratch];
+        let size = std::mem::size_of::<Complex<F>>();
+        // Elements per cache line.
+        let line = 64 / size;
+        // Two cache lines between buffers: with none, 16 kHz to 22.05 kHz in
+        // `f64` runs 2 % slower on efficiency cores.
+        let total: usize = lens.iter().map(|&l| l + 3 * line).sum();
+        let mem = if mem.len() == total {
+            mem
+        } else {
+            vec![Complex::new(F::zero(), F::zero()); total]
+        };
+        // Position of `mem[0]` within its cache line, in elements.
+        let base = (mem.as_ptr() as usize / size) % line;
+        let mut parts = [(0, 0); 6];
+        let mut pos = 0usize;
+        for (part, &len) in parts.iter_mut().zip(&lens) {
+            let start = (base + pos).div_ceil(line) * line - base + 2 * line;
+            *part = (start, len);
+            pos = start + len;
         }
+        debug_assert!(pos <= total);
+        Self { mem, parts }
+    }
+
+    /// `z` and the other buffers.
+    fn split(&mut self) -> (&mut [Complex<F>], DftWork<'_, F>) {
+        let mut rest: &mut [Complex<F>] = &mut self.mem;
+        let mut done = 0;
+        let mut take = |(start, len): (usize, usize)| {
+            let r = std::mem::take(&mut rest);
+            let (_, r) = r.split_at_mut(start - done);
+            let (part, r) = r.split_at_mut(len);
+            rest = r;
+            done = start + len;
+            part
+        };
+        let [pz, pzf, pband, pw, py, ps] = self.parts;
+        let z = take(pz);
+        let work = DftWork {
+            zf: take(pzf),
+            band: take(pband),
+            w: take(pw),
+            y: take(py),
+            scratch: take(ps),
+        };
+        (z, work)
     }
 }
 
