@@ -77,10 +77,23 @@ jobs:
           fi
 
   doc:
-    name: doc
+    name: doc (${{ matrix.features }})
     runs-on: ubuntu-24.04
-    # Docs must build warning-free: any rustdoc warning (broken intra-doc link,
-    # redundant link target, bare URL, …) fails the build.
+    # Docs must build warning-free on every feature set: any rustdoc warning
+    # (broken intra-doc link, redundant link target, bare URL, …) fails the
+    # build. Links to feature-gated items are conditional, so the default build
+    # and partial feature sets are checked as well as the full ones.
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""                       # bare-bones (default)
+          - "full_no_plotting"
+          - "full"
+          - "full educational"
+          - "psychoacoustic random-generation"
+          - "opus-codec random-generation"
+          - "simd full_no_plotting"
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
@@ -92,8 +105,28 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
           rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo doc --no-deps --features full_no_plotting
-      - run: cargo doc --no-deps --features full
+      - name: doc
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: cargo doc --no-deps --features "$FEATURES"
+
+  docs-rs:
+    name: doc (docs.rs, all features)
+    runs-on: ubuntu-24.04
+    # Mirrors [package.metadata.docs.rs]: nightly rustdoc, all features, and
+    # `--cfg docsrs` for the feature badges.
+    env:
+      RUSTDOCFLAGS: --cfg docsrs --html-in-header documentation/katex-header.html -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install nightly --profile minimal --no-self-update
+          rustup default nightly
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo doc --no-deps --all-features
 
   msrv:
     name: msrv (1.95)
