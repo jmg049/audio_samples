@@ -1351,7 +1351,14 @@ where
 }
 /// A component of a compound tone, specifying frequency and relative amplitude.
 ///
-/// Used as input to [`compound_tone`] and [`multichannel_compound_tone`] to define a
+#[cfg_attr(
+    feature = "channels",
+    doc = r#" Used as input to [`compound_tone`] and [`multichannel_compound_tone`] to define a"#
+)]
+#[cfg_attr(
+    not(feature = "channels"),
+    doc = r#" Used as input to [`compound_tone`] and `multichannel_compound_tone` (requires the `channels` feature) to define a"#
+)]
 /// harmonic series or an arbitrary set of simultaneous sinusoids.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]

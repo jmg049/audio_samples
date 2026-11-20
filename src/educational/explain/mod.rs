@@ -2,8 +2,13 @@
 //!
 //! ## What
 //!
-//! This module turns a configuration value (an [`StftParams`], an
-//! [`IirFilterDesign`], a [`CompressorConfig`], …) or a bare concept
+//! This module turns a configuration value (an
+#![cfg_attr(feature = "transforms", doc = r#" [`StftParams`],"#)]
+#![cfg_attr(not(feature = "transforms"), doc = r#" `StftParams`,"#)]
+//! an [`IirFilterDesign`], a
+#![cfg_attr(feature = "dynamic-range", doc = r#" [`CompressorConfig`],"#)]
+#![cfg_attr(not(feature = "dynamic-range"), doc = r#" `CompressorConfig`,"#)]
+//! …) or a bare concept
 //! ("what happens to a 7 kHz tone sampled at 8 kHz?") into an
 //! [`ExplainDoc`]: a short summary, the formulas the code
 //! evaluates, the symbols in those formulas with their values, numbers derived
@@ -57,9 +62,15 @@
 //! # }
 //! ```
 //!
-//! [`StftParams`]: spectrograms::StftParams
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" [`StftParams`]: spectrograms::StftParams"#
+)]
 //! [`IirFilterDesign`]: crate::operations::types::IirFilterDesign
-//! [`CompressorConfig`]: crate::CompressorConfig
+#![cfg_attr(
+    feature = "dynamic-range",
+    doc = r#" [`CompressorConfig`]: crate::CompressorConfig"#
+)]
 
 mod doc;
 mod numeric;
@@ -89,7 +100,14 @@ use crate::traits::StandardSample;
 ///
 /// ## Purpose
 /// Configuration types rarely carry everything needed to explain them: an
-/// [`StftParams`](spectrograms::StftParams) has no sample rate, a mel
+#[cfg_attr(
+    feature = "transforms",
+    doc = r#" [`StftParams`](spectrograms::StftParams) has no sample rate, a mel"#
+)]
+#[cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" `StftParams` has no sample rate, a mel"#
+)]
 /// filterbank does not know the FFT size. The context supplies those facts.
 ///
 /// ## Intended Usage

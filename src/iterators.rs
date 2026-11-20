@@ -10,7 +10,14 @@
 //! - **Channels** - the full temporal sequence for one channel
 //!   ([`ChannelIterator`])
 //! - **Windows** - fixed-size, optionally overlapping temporal blocks
-//!   ([`WindowIterator`], requires the `editing` feature)
+#![cfg_attr(
+    feature = "editing",
+    doc = r#"   ([`WindowIterator`], requires the `editing` feature)"#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#"   (`WindowIterator`, requires the `editing` feature)"#
+)]
 //!
 //! Audio algorithms frequently need to traverse data in ways that reflect its
 //! *structure* rather than its *storage layout*. Centralising iteration logic here
@@ -671,7 +678,14 @@ where
     ///
     /// Use this method for in-place windowed processing, such as applying window
     /// functions or block-wise gain changes, when the read-only
-    /// [`AudioSamples::windows`] iterator is not sufficient.
+    #[cfg_attr(
+        feature = "editing",
+        doc = r#" [`AudioSamples::windows`] iterator is not sufficient."#
+    )]
+    #[cfg_attr(
+        not(feature = "editing"),
+        doc = r#" `AudioSamples::windows` iterator (requires the `editing` feature) is not sufficient."#
+    )]
     ///
     /// # Arguments
     ///

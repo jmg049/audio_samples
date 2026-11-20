@@ -8,7 +8,14 @@
 //! together with the [`PerceptualCodec`] and [`StereoPerceptualCodec`] implementations
 //! that use psychoacoustic masking to drive perceptual quantization.
 //!
-//! An Opus-inspired codec ([`crate::codecs::opus::OpusCodec`]) is also available under the
+#![cfg_attr(
+    feature = "opus-codec",
+    doc = r#" An Opus-inspired codec ([`crate::codecs::opus::OpusCodec`]) is also available under the"#
+)]
+#![cfg_attr(
+    not(feature = "opus-codec"),
+    doc = r#" An Opus-inspired codec (`OpusCodec`) is also available under the"#
+)]
 //! `opus-codec` feature. It supports SILK (speech) and CELT (music) modes.
 //!
 //! ## Why

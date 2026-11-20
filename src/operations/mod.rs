@@ -6,19 +6,90 @@
 //! ## Module Organization
 //!
 //! - [`traits`] - Core trait definitions
-//! - [`statistics`] - Statistical analysis operations
-//! - [`processing`] - Signal processing operations
-//! - [`transforms`] - FFT / spectral analysis
-//! - [`spectrum`] - STFT, mel spectrogram, MFCC, dB, delta
-//! - `effects` - time stretch, pitch shift, emphasis, dB trim/split, HPSS (feature `effects`)
-//! - [`constant_q`] - CQT / VQT / iCQT, CQT chroma and tonnetz
-//! - [`filterbanks`] - window functions and mel filterbanks
-//! - [`editing`] - Time-domain editing operations
-//! - [`channels`] - Channel manipulation operations
+#![cfg_attr(
+    feature = "statistics",
+    doc = r#" - [`statistics`] - Statistical analysis operations"#
+)]
+#![cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" - `statistics` - Statistical analysis operations (requires the `statistics` feature)"#
+)]
+#![cfg_attr(
+    feature = "processing",
+    doc = r#" - [`processing`] - Signal processing operations"#
+)]
+#![cfg_attr(
+    not(feature = "processing"),
+    doc = r#" - `processing` - Signal processing operations (requires the `processing` feature)"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" - [`transforms`] - FFT / spectral analysis"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" - `transforms` - FFT / spectral analysis (requires the `transforms` feature)"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" - [`spectrum`] - STFT, mel spectrogram, MFCC, dB, delta"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" - `spectrum` - STFT, mel spectrogram, MFCC, dB, delta (requires the `transforms` feature)"#
+)]
+#![cfg_attr(
+    feature = "effects",
+    doc = r#" - [`effects`] - time stretch, pitch shift, emphasis, dB trim/split, HPSS"#
+)]
+#![cfg_attr(
+    not(feature = "effects"),
+    doc = r#" - `effects` - time stretch, pitch shift, emphasis, dB trim/split, HPSS (requires the `effects` feature)"#
+)]
+#![cfg_attr(
+    all(feature = "transforms", feature = "resampling"),
+    doc = r#" - [`constant_q`] - CQT / VQT / iCQT, CQT chroma and tonnetz"#
+)]
+#![cfg_attr(
+    not(all(feature = "transforms", feature = "resampling")),
+    doc = r#" - `constant_q` - CQT / VQT / iCQT, CQT chroma and tonnetz (requires the `transforms` and `resampling` features)"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" - [`filterbanks`] - window functions and mel filterbanks"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" - `filterbanks` - window functions and mel filterbanks (requires the `transforms` feature)"#
+)]
+#![cfg_attr(
+    feature = "editing",
+    doc = r#" - [`editing`] - Time-domain editing operations"#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#" - `editing` - Time-domain editing operations (requires the `editing` feature)"#
+)]
+#![cfg_attr(
+    feature = "channels",
+    doc = r#" - [`channels`] - Channel manipulation operations"#
+)]
+#![cfg_attr(
+    not(feature = "channels"),
+    doc = r#" - `channels` - Channel manipulation operations (requires the `channels` feature)"#
+)]
 //! - [`types`] - Supporting types and enums
 //!
-//! Additional submodules are feature-gated, e.g. `plotting` (requires `plotting`) and
-//! `serialization` (requires `serialization`).
+#![cfg_attr(
+    feature = "plotting",
+    doc = r#" Additional submodules are feature-gated, e.g. [`plotting`] (requires `plotting`) and"#
+)]
+#![cfg_attr(
+    not(feature = "plotting"),
+    doc = r#" Additional submodules are feature-gated, e.g. `plotting` (requires `plotting`) and"#
+)]
+#![cfg_attr(feature = "vad", doc = r#" [`vad`] (requires `vad`)."#)]
+#![cfg_attr(not(feature = "vad"), doc = r#" `vad` (requires `vad`)."#)]
 //!
 //! ## Quick Start
 //!

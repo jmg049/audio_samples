@@ -245,7 +245,8 @@ pub trait AudioSample:
     }
     /// Clamps `self` to the closed interval `[min, max]`.
     ///
-    /// This is a per-type hook used internally by [`clip`][crate::AudioProcessing::clip]
+    #[cfg_attr(feature = "processing", doc = r#" This is a per-type hook used internally by [`clip`][crate::AudioProcessing::clip]"#)]
+    #[cfg_attr(not(feature = "processing"), doc = r#" This is a per-type hook used internally by `AudioProcessing::clip` (with the `processing` feature)"#)]
     /// to select the most efficient clamping implementation.  Integer types
     /// use [`Ord::clamp`]; floating-point types use their inherent `.clamp()`
     /// method which the compiler maps to `VMAXPS`/`VMINPS` in vectorised

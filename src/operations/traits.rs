@@ -6,28 +6,182 @@
 //!
 //! | Trait | Feature | Responsibility |
 //! |---|---|---|
-//! | [`AudioStatistics`] | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |
-//! | [`AudioProcessing`] | `processing` | Normalize, filter, resample, μ-law, … |
-//! | [`AudioTransforms`] | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |
-//! | [`AudioSpectrum`] | `transforms` | Multichannel STFT/ISTFT, mel spectrogram, MFCC |
-//! | [`AudioTonal`] | `feature-extraction` | STFT chroma, pitch tracking by parabolic peaks, tuning estimation |
-//! | [`AudioFeatures`] | `feature-extraction` | Frame-wise spectral features, RMS, ZCR |
-//! | `AudioEffects` | `effects` | Time stretch, pitch shift, emphasis, dB trim/split, HPSS |
-//! | [`AudioConstantQ`] | `transforms` + `resampling` | CQT/VQT/iCQT, CQT, CENS and VQT chroma, tonnetz |
-//! | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |
-//! | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |
-//! | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |
-//! | [`AudioDynamicRange`] | `dynamic-range` | Compressor, limiter, gate, expander |
-//! | [`AudioIirFiltering`] | `iir-filtering` | Butterworth, Chebyshev IIR filters |
-//! | [`AudioParametricEq`] | `parametric-eq` | Multi-band parametric EQ |
-//! | [`AudioPitchAnalysis`] | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |
-//! | [`AudioPitchTracking`] | `pitch-analysis` | Frame-wise YIN and pYIN |
-//! | [`AudioVoiceActivityDetection`] | `vad` | Frame-based speech / silence classification |
-//! | [`AudioDecomposition`] | `decomposition` | Harmonic-percussive source separation (HPSS) |
-//! | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |
-//! | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |
-//! | [`AudioRhythm`] | `beat-tracking` | Onset strength/detection, tempogram, tempo, beat tracking, PLP |
-//! | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |
+#![cfg_attr(
+    feature = "statistics",
+    doc = r#" | [`AudioStatistics`] | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |"#
+)]
+#![cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" | `AudioStatistics` | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |"#
+)]
+#![cfg_attr(
+    feature = "processing",
+    doc = r#" | [`AudioProcessing`] | `processing` | Normalize, filter, resample, μ-law, … |"#
+)]
+#![cfg_attr(
+    not(feature = "processing"),
+    doc = r#" | `AudioProcessing` | `processing` | Normalize, filter, resample, μ-law, … |"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" | [`AudioTransforms`] | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" | `AudioTransforms` | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" | [`AudioSpectrum`] | `transforms` | Multichannel STFT/ISTFT, mel spectrogram, MFCC |"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" | `AudioSpectrum` | `transforms` | Multichannel STFT/ISTFT, mel spectrogram, MFCC |"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | [`AudioTonal`] | `feature-extraction` | STFT chroma, pitch tracking by parabolic peaks, tuning estimation |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | `AudioTonal` | `feature-extraction` | STFT chroma, pitch tracking by parabolic peaks, tuning estimation |"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | [`AudioFeatures`] | `feature-extraction` | Frame-wise spectral features, RMS, ZCR |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | `AudioFeatures` | `feature-extraction` | Frame-wise spectral features, RMS, ZCR |"#
+)]
+#![cfg_attr(
+    feature = "effects",
+    doc = r#" | [`AudioEffects`] | `effects` | Time stretch, pitch shift, emphasis, dB trim/split, HPSS |"#
+)]
+#![cfg_attr(
+    not(feature = "effects"),
+    doc = r#" | `AudioEffects` | `effects` | Time stretch, pitch shift, emphasis, dB trim/split, HPSS |"#
+)]
+#![cfg_attr(
+    all(feature = "transforms", feature = "resampling"),
+    doc = r#" | [`AudioConstantQ`] | `transforms` + `resampling` | CQT/VQT/iCQT, CQT, CENS and VQT chroma, tonnetz |"#
+)]
+#![cfg_attr(
+    not(all(feature = "transforms", feature = "resampling")),
+    doc = r#" | `AudioConstantQ` | `transforms` + `resampling` | CQT/VQT/iCQT, CQT, CENS and VQT chroma, tonnetz |"#
+)]
+#![cfg_attr(
+    feature = "editing",
+    doc = r#" | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |"#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#" | `AudioEditing` | `editing` | Trim, pad, fade, concatenate, mix, … |"#
+)]
+#![cfg_attr(
+    feature = "channels",
+    doc = r#" | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |"#
+)]
+#![cfg_attr(
+    not(feature = "channels"),
+    doc = r#" | `AudioChannelOps` | `channels` | Mono/stereo conversion, panning, interleave, … |"#
+)]
+#![cfg_attr(
+    feature = "envelopes",
+    doc = r#" | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |"#
+)]
+#![cfg_attr(
+    not(feature = "envelopes"),
+    doc = r#" | `AudioEnvelopes` | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |"#
+)]
+#![cfg_attr(
+    feature = "dynamic-range",
+    doc = r#" | [`AudioDynamicRange`] | `dynamic-range` | Compressor, limiter, gate, expander |"#
+)]
+#![cfg_attr(
+    not(feature = "dynamic-range"),
+    doc = r#" | `AudioDynamicRange` | `dynamic-range` | Compressor, limiter, gate, expander |"#
+)]
+#![cfg_attr(
+    feature = "iir-filtering",
+    doc = r#" | [`AudioIirFiltering`] | `iir-filtering` | Butterworth, Chebyshev IIR filters |"#
+)]
+#![cfg_attr(
+    not(feature = "iir-filtering"),
+    doc = r#" | `AudioIirFiltering` | `iir-filtering` | Butterworth, Chebyshev IIR filters |"#
+)]
+#![cfg_attr(
+    feature = "parametric-eq",
+    doc = r#" | [`AudioParametricEq`] | `parametric-eq` | Multi-band parametric EQ |"#
+)]
+#![cfg_attr(
+    not(feature = "parametric-eq"),
+    doc = r#" | `AudioParametricEq` | `parametric-eq` | Multi-band parametric EQ |"#
+)]
+#![cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" | [`AudioPitchAnalysis`] | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" | `AudioPitchAnalysis` | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |"#
+)]
+#![cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" | [`AudioPitchTracking`] | `pitch-analysis` | Frame-wise YIN and pYIN |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" | `AudioPitchTracking` | `pitch-analysis` | Frame-wise YIN and pYIN |"#
+)]
+#![cfg_attr(
+    feature = "vad",
+    doc = r#" | [`AudioVoiceActivityDetection`] | `vad` | Frame-based speech / silence classification |"#
+)]
+#![cfg_attr(
+    not(feature = "vad"),
+    doc = r#" | `AudioVoiceActivityDetection` | `vad` | Frame-based speech / silence classification |"#
+)]
+#![cfg_attr(
+    feature = "decomposition",
+    doc = r#" | [`AudioDecomposition`] | `decomposition` | Harmonic-percussive source separation (HPSS) |"#
+)]
+#![cfg_attr(
+    not(feature = "decomposition"),
+    doc = r#" | `AudioDecomposition` | `decomposition` | Harmonic-percussive source separation (HPSS) |"#
+)]
+#![cfg_attr(
+    feature = "onset-detection",
+    doc = r#" | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |"#
+)]
+#![cfg_attr(
+    not(feature = "onset-detection"),
+    doc = r#" | `AudioOnsetDetection` | `onset-detection` | Onset times, spectral flux, complex ODF |"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" | `AudioBeatTracking` | `beat-tracking` | Tempo-aware beat detection |"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" | [`AudioRhythm`] | `beat-tracking` | Onset strength/detection, tempogram, tempo, beat tracking, PLP |"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" | `AudioRhythm` | `beat-tracking` | Onset strength/detection, tempogram, tempo, beat tracking, PLP |"#
+)]
+#![cfg_attr(
+    feature = "plotting",
+    doc = r#" | [`AudioPlotting`] | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |"#
+)]
+#![cfg_attr(
+    not(feature = "plotting"),
+    doc = r#" | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |"#
+)]
 //!
 //! Grouping operations into separate traits means only the code for the enabled
 //! features is compiled, and new capabilities can be added as new traits. Each trait
@@ -418,7 +572,14 @@ where
     ///
     /// For a mono signal, divide this value by the sample rate to get the
     /// fraction of samples at which the sign changes. For a per-frame fraction
-    /// see [`AudioFeatures::zero_crossing_rate_frames`].
+    #[cfg_attr(
+        feature = "feature-extraction",
+        doc = r#" see [`AudioFeatures::zero_crossing_rate_frames`]."#
+    )]
+    #[cfg_attr(
+        not(feature = "feature-extraction"),
+        doc = r#" see `AudioFeatures::zero_crossing_rate_frames` (requires the `feature-extraction` feature)."#
+    )]
     ///
     /// # Returns
     /// The number of zero crossings per second as `f64`, averaged over channels.
@@ -445,7 +606,14 @@ where
     /// removal, accumulated in `f64`. A peak at `l = D` means `other` is `self`
     /// delayed by `D` samples. Negative lags are not computed: to detect `other`
     /// leading `self`, swap the arguments or use
-    /// [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag).
+    #[cfg_attr(
+        feature = "transforms",
+        doc = r#" [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag)."#
+    )]
+    #[cfg_attr(
+        not(feature = "transforms"),
+        doc = r#" `fft_alignment_lag` (requires the `transforms` feature)."#
+    )]
     ///
     /// For multi-channel audio only the first channels of both signals are
     /// correlated.
@@ -495,7 +663,14 @@ where
     /// values indicate energy concentrated at higher frequencies.
     ///
     /// For a magnitude-weighted centroid per STFT frame see
-    /// [`AudioFeatures::spectral_centroid_frames`]; its values are generally higher
+    #[cfg_attr(
+        feature = "feature-extraction",
+        doc = r#" [`AudioFeatures::spectral_centroid_frames`]; its values are generally higher"#
+    )]
+    #[cfg_attr(
+        not(feature = "feature-extraction"),
+        doc = r#" `AudioFeatures::spectral_centroid_frames` (requires the `feature-extraction` feature); its values are generally higher"#
+    )]
     /// than this power-weighted value and are not directly comparable.
     ///
     /// Reference: [Spectral centroid - Wikipedia](https://en.wikipedia.org/wiki/Spectral_centroid)
@@ -585,7 +760,14 @@ where
     /// between bins, so the result is a multiple of `fs/N`. It is commonly used to
     /// distinguish harmonic signals from noise-like signals.
     ///
-    /// [`AudioFeatures::spectral_rolloff_frames`] accumulates magnitude `|X|` per
+    #[cfg_attr(
+        feature = "feature-extraction",
+        doc = r#" [`AudioFeatures::spectral_rolloff_frames`] accumulates magnitude `|X|` per"#
+    )]
+    #[cfg_attr(
+        not(feature = "feature-extraction"),
+        doc = r#" `AudioFeatures::spectral_rolloff_frames` (requires the `feature-extraction` feature) accumulates magnitude `|X|` per"#
+    )]
     /// STFT frame, so its values differ from this whole-signal, power-based rolloff.
     ///
     /// # Arguments
@@ -638,7 +820,14 @@ where
     /// tone yields a value near zero.
     ///
     /// Note: this is the formula of
-    /// [`AudioFeatures::spectral_bandwidth_frames`] (`p = 2`, magnitude weights)
+    #[cfg_attr(
+        feature = "feature-extraction",
+        doc = r#" [`AudioFeatures::spectral_bandwidth_frames`] (`p = 2`, magnitude weights)"#
+    )]
+    #[cfg_attr(
+        not(feature = "feature-extraction"),
+        doc = r#" `AudioFeatures::spectral_bandwidth_frames` (requires the `feature-extraction` feature) (`p = 2`, magnitude weights)"#
+    )]
     /// applied to one whole-signal FFT rather than to each STFT frame.
     ///
     /// # Arguments
@@ -670,7 +859,14 @@ where
     /// clamped to `[0, 1]`: values near `1` indicate noise-like (flat) spectra,
     /// while values near `0` indicate tonal spectra dominated by a few peaks.
     ///
-    /// Note: [`AudioFeatures::spectral_flatness_frames`] uses the same ratio per
+    #[cfg_attr(
+        feature = "feature-extraction",
+        doc = r#" Note: [`AudioFeatures::spectral_flatness_frames`] uses the same ratio per"#
+    )]
+    #[cfg_attr(
+        not(feature = "feature-extraction"),
+        doc = r#" Note: `AudioFeatures::spectral_flatness_frames` (requires the `feature-extraction` feature) uses the same ratio per"#
+    )]
     /// STFT frame, with `max(P_k, amin)` instead of `P_k + ε`.
     ///
     /// # Arguments
@@ -765,7 +961,14 @@ where
     /// level difference in dB (multiply by 2 for a `20·log10` difference). The
     /// band edges are fixed in bins from bin 1 to Nyquist, and one value per band
     /// is returned for the whole signal. For octave bands above a frequency
-    /// floor, per frame, see [`AudioFeatures::spectral_contrast_frames`].
+    #[cfg_attr(
+        feature = "feature-extraction",
+        doc = r#" floor, per frame, see [`AudioFeatures::spectral_contrast_frames`]."#
+    )]
+    #[cfg_attr(
+        not(feature = "feature-extraction"),
+        doc = r#" floor, per frame, see `AudioFeatures::spectral_contrast_frames` (requires the `feature-extraction` feature)."#
+    )]
     ///
     /// # Arguments
     /// - `n_bands` - the number of log-spaced sub-bands.
@@ -3202,7 +3405,14 @@ where
 /// # Invariants
 ///
 /// All methods require mono audio.  Multi-channel signals must be reduced to
-/// mono (e.g. with [`AudioChannelOps::to_mono`]) before use; passing a
+#[cfg_attr(
+    feature = "channels",
+    doc = r#" mono (e.g. with [`AudioChannelOps::to_mono`]) before use; passing a"#
+)]
+#[cfg_attr(
+    not(feature = "channels"),
+    doc = r#" mono (e.g. with `AudioChannelOps::to_mono`, which requires the `channels` feature) before use; passing a"#
+)]
 /// multi-channel signal to the pitch and harmonic methods returns
 /// [crate::AudioSampleError::Layout]. The YIN and autocorrelation formulas,
 /// and the relation between the lag range and the frequency range, are given
@@ -3555,7 +3765,11 @@ where
 ///
 /// Use this trait when steeper roll-off or lower latency is more important than
 /// linear phase response.  For a gentler, linear-phase roll-off prefer the FIR
-/// helpers in [`AudioProcessing`].
+#[cfg_attr(feature = "processing", doc = r#" helpers in [`AudioProcessing`]."#)]
+#[cfg_attr(
+    not(feature = "processing"),
+    doc = r#" helpers in `AudioProcessing` (requires the `processing` feature)."#
+)]
 ///
 /// ```rust
 /// use audio_samples::{AudioSamples, sample_rate};
@@ -4854,7 +5068,14 @@ where
 ///
 /// Provides structural manipulation of audio buffers: reversing, trimming,
 /// padding, splitting, concatenating, mixing, fading, repeating, and silence
-/// removal.  Also includes data-augmentation via [`perturb`].
+#[cfg_attr(
+    all(feature = "random-generation", feature = "iir-filtering"),
+    doc = r#" removal.  Also includes data-augmentation via [`perturb`]."#
+)]
+#[cfg_attr(
+    not(all(feature = "random-generation", feature = "iir-filtering")),
+    doc = r#" removal.  Also includes data-augmentation via `perturb` (requires the `random-generation` and `iir-filtering` features)."#
+)]
 ///
 /// # Intended Usage
 ///
@@ -4870,7 +5091,10 @@ where
 /// sample rates and channel counts match before proceeding; mismatches return
 /// [crate::AudioSampleError::Parameter].
 ///
-/// [`perturb`]: AudioEditing::perturb
+#[cfg_attr(
+    all(feature = "random-generation", feature = "iir-filtering"),
+    doc = r#" [`perturb`]: AudioEditing::perturb"#
+)]
 #[cfg(feature = "editing")]
 pub trait AudioEditing: AudioTypeConversion
 where

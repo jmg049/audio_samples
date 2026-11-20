@@ -43,8 +43,22 @@
 //! suite) take a [`ChannelReduction`] policy that selects how channels are folded
 //! down to a single value (`Error`, `First`, `Average`, or `Channel(i)`). Several
 //! analysis operations return structured results rather than bare tuples - for
-//! example `power_spectral_density` yields a [`Psd`], `track_pitch` a
-//! [`PitchContour`], and `estimate_key` a [`Key`].
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" example `power_spectral_density` yields a [`Psd`],"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" example `power_spectral_density` yields a `Psd` (requires the `transforms` feature),"#
+)]
+#![cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" `track_pitch` a [`PitchContour`], and `estimate_key` a [`Key`]."#
+)]
+#![cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" `track_pitch` a `PitchContour`, and `estimate_key` a `Key` (both require the `pitch-analysis` feature)."#
+)]
 //!
 //! ## Installation
 //!

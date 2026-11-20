@@ -28,9 +28,23 @@
 //!
 //! ## Why
 //!
-//! The scalar spectral descriptors of [`AudioStatistics`](crate::AudioStatistics)
+#![cfg_attr(
+    feature = "statistics",
+    doc = r#" The scalar spectral descriptors of [`AudioStatistics`](crate::AudioStatistics)"#
+)]
+#![cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" The scalar spectral descriptors of `AudioStatistics` (with the `statistics` feature)"#
+)]
 //! summarise a whole signal with one number (and use their own weighting
-//! conventions), and [`AudioEnvelopes`](crate::operations::traits::AudioEnvelopes)
+#![cfg_attr(
+    feature = "envelopes",
+    doc = r#" conventions), and [`AudioEnvelopes`](crate::operations::traits::AudioEnvelopes)"#
+)]
+#![cfg_attr(
+    not(feature = "envelopes"),
+    doc = r#" conventions), and `AudioEnvelopes` (with the `envelopes` feature)"#
+)]
 //! frames signals differently. Machine-learning pipelines need per-frame features
 //! on centred STFT frames, which this module computes. Every config has a
 //! `librosa()` constructor. `Default` currently equals `librosa()` for every
@@ -3970,7 +3984,14 @@ fn reassigned_rows<F: AudioFloat>(
 /// See the [module documentation](self) for the list of features and the
 /// `*_from_spectrogram` forms that reuse a precomputed spectrogram.
 ///
-/// The whole-signal scalar descriptors of [`AudioStatistics`](crate::AudioStatistics)
+#[cfg_attr(
+    feature = "statistics",
+    doc = r#" The whole-signal scalar descriptors of [`AudioStatistics`](crate::AudioStatistics)"#
+)]
+#[cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" The whole-signal scalar descriptors of `AudioStatistics` (with the `statistics` feature)"#
+)]
 /// (`spectral_centroid`, `zero_crossing_rate`, ...) are separate: they summarise a
 /// signal with one number and are different features.
 pub trait AudioFeatures {

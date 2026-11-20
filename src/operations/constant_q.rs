@@ -19,8 +19,22 @@
 //! | Constant-Q and variable-Q transforms | [`AudioConstantQ::cqt`] / [`AudioConstantQ::vqt`] |
 //! | Pseudo and hybrid CQT | [`AudioConstantQ::pseudo_cqt`] / [`AudioConstantQ::hybrid_cqt`] |
 //! | Inverse CQT and Griffin-Lim reconstruction | [`AudioConstantQ::icqt`] / [`AudioConstantQ::griffinlim_cqt`] |
-//! | Constant-Q chroma, CENS and variable-Q chroma | [`AudioConstantQ::chroma_cqt`] / [`AudioConstantQ::chroma_cens`] / [`AudioConstantQ::chroma_vqt`] |
-//! | Tonal centroids | [`AudioConstantQ::tonnetz`] ([`tonnetz_from_chroma`]) |
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | Constant-Q chroma, CENS and variable-Q chroma | [`AudioConstantQ::chroma_cqt`] / [`AudioConstantQ::chroma_cens`] / [`AudioConstantQ::chroma_vqt`] |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | Constant-Q chroma, CENS and variable-Q chroma (requires the `feature-extraction` feature) | `AudioConstantQ::chroma_cqt` / `AudioConstantQ::chroma_cens` / `AudioConstantQ::chroma_vqt` |"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | Tonal centroids | [`AudioConstantQ::tonnetz`] ([`tonnetz_from_chroma`]) |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | Tonal centroids (requires the `feature-extraction` feature) | `AudioConstantQ::tonnetz` (`tonnetz_from_chroma`) |"#
+)]
 //! | Constant-Q to chroma mapping | [`cq_to_chroma`] |
 //! | Wavelet filters and their lengths | [`wavelet`] / [`wavelet_lengths`] |
 //!
@@ -32,8 +46,22 @@
 //! several percent and it returns fewer frames). This module implements the
 //! recursive, per-octave CQT with wavelet filters, the form chroma and tonnetz
 //! features are usually computed from. Every config struct has a `librosa()`
-//! preset. `Default` is the same except for [`ChromaCqtConfig`] (and the
-//! [`ChromaCensConfig`] and [`TonnetzConfig`] built on it), whose default fixes
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" preset. `Default` is the same except for [`ChromaCqtConfig`] (and the"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" preset. `Default` is the same except for `ChromaCqtConfig` (and the"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" [`ChromaCensConfig`] and [`TonnetzConfig`] built on it), whose default fixes"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" `ChromaCensConfig` and `TonnetzConfig` built on it, all with the `feature-extraction` feature), whose default fixes"#
+)]
 //! the tuning at A440 instead of estimating it from the signal.
 //!
 //! ## How
@@ -2896,7 +2924,14 @@ fn griffinlim_cqt_from<T: StandardSample>(
 /// As [`AudioConstantQ::griffinlim_cqt`].
 ///
 /// The phases come from this crate's RNG, as for
-/// [`griffinlim`](crate::operations::effects::griffinlim) with random phases.
+#[cfg_attr(
+    feature = "effects",
+    doc = r#" [`griffinlim`](crate::operations::effects::griffinlim) with random phases."#
+)]
+#[cfg_attr(
+    not(feature = "effects"),
+    doc = r#" `griffinlim` (with the `effects` feature) with random phases."#
+)]
 ///
 /// # Examples
 ///
@@ -2986,7 +3021,11 @@ pub trait AudioConstantQ {
     ///   is not below the Nyquist frequency, the highest filter's cut-off exceeds
     ///   the Nyquist frequency (reduce `n_bins`), or the signal is too short.
     /// - With `config.tuning = None` the tuning is estimated as
-    ///   [`estimate_tuning`](crate::operations::tonal::estimate_tuning_from_signal)
+    #[cfg_attr(
+        feature = "feature-extraction",
+        doc = r#"   [`estimate_tuning`](crate::operations::tonal::estimate_tuning_from_signal)"#
+    )]
+    #[cfg_attr(not(feature = "feature-extraction"), doc = r#"   `estimate_tuning`"#)]
     ///   does; that needs the `feature-extraction` feature, and without it `None`
     ///   is a [`ParameterError`]. Errors of the estimate propagate.
     ///
@@ -3202,7 +3241,14 @@ pub trait AudioConstantQ {
     /// As [`icqt`](Self::icqt) and [`cqt`](Self::cqt); [`ParameterError`] if
     /// `momentum` is negative or not finite.
     ///
-    /// This is the deterministic zero-phase start; [`griffinlim_cqt_random`] starts
+    #[cfg_attr(
+        feature = "random-generation",
+        doc = r#" This is the deterministic zero-phase start; [`griffinlim_cqt_random`] starts"#
+    )]
+    #[cfg_attr(
+        not(feature = "random-generation"),
+        doc = r#" This is the deterministic zero-phase start; `griffinlim_cqt_random` (requires the `random-generation` feature) starts"#
+    )]
     /// from random phases.
     ///
     /// # Examples

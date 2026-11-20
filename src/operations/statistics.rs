@@ -6,7 +6,14 @@
 //! (peak, mean, RMS, variance), temporal descriptors (zero crossings,
 //! auto- and cross-correlation) and whole-signal spectral descriptors
 //! (centroid, rolloff, bandwidth, flatness, crest, slope, contrast). It also
-//! provides the free function [`fft_alignment_lag`] for delay estimation.
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" provides the free function [`fft_alignment_lag`] for delay estimation."#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" provides the free function `fft_alignment_lag` (requires the `transforms` feature) for delay estimation."#
+)]
 //!
 //! ## Why
 //!
@@ -67,7 +74,14 @@
 //!   for `l = 0..=max_lag`, with `C_l = min(N_x, N_y − l)`, `x = self`,
 //!   `y = other`. A peak at `l = D` means `other` is `self` delayed by `D`
 //!   samples. Negative lags are not produced: swap the arguments to detect the
-//!   opposite delay, or use [`fft_alignment_lag`].
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#"   opposite delay, or use [`fft_alignment_lag`]."#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#"   opposite delay, or use `fft_alignment_lag` (requires the `transforms` feature)."#
+)]
 //!
 //! ### Spectral definitions
 //!
@@ -84,14 +98,28 @@
 //!   cumulative sum, no interpolation between bins).
 //! - Bandwidth (**magnitude**-weighted): `sqrt(Σ (f_k − c_M)²·M_k / Σ M_k)` with
 //!   its own magnitude-weighted centroid `c_M = Σ f_k·M_k / Σ M_k`. It is
-//!   therefore not centred on [`spectral_centroid`](AudioStatistics::spectral_centroid)
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#"   therefore not centred on [`spectral_centroid`](AudioStatistics::spectral_centroid)"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#"   therefore not centred on `spectral_centroid`"#
+)]
 //!   (which is power-weighted).
 //! - Flatness (Wiener entropy): `exp(mean(ln(P_k + ε))) / mean(P_k)`, `ε = 1e-10`,
 //!   clamped to `[0, 1]`.
 //! - Crest: `max(M_k) / mean(M_k)`.
 //! - Slope: ordinary least-squares slope of `M_k` against `f_k` (magnitude per
 //!   Hz; depends on the signal length because the spectrum is unnormalised).
-//! - Contrast: see [`spectral_contrast`](AudioStatistics::spectral_contrast);
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" - Contrast: see [`spectral_contrast`](AudioStatistics::spectral_contrast);"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" - Contrast: see `spectral_contrast`;"#
+)]
 //!   values are `10·log10` of **magnitudes**.
 //!
 //! Note: the frame-wise features of `AudioFeatures` (`*_frames`) are computed
@@ -147,7 +175,14 @@
 //!
 //! - `statistics`: enables this module and the time-domain methods.
 //! - `transforms`: additionally enables `autocorrelation`, the spectral
-//!   methods and [`fft_alignment_lag`] via the [`spectrograms`] crate.
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#"   methods and [`fft_alignment_lag`] via the [`spectrograms`] crate."#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#"   methods and `fft_alignment_lag` via the `spectrograms` crate."#
+)]
 //!
 //! ## See Also
 //!
@@ -1030,7 +1065,14 @@ where
     /// removal, accumulated in `f64`. A peak at `l = D` means `other` is `self`
     /// delayed by `D` samples. Negative lags are not computed: to detect `other`
     /// leading `self`, swap the arguments or use
-    /// [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag).
+    #[cfg_attr(
+        feature = "transforms",
+        doc = r#" [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag)."#
+    )]
+    #[cfg_attr(
+        not(feature = "transforms"),
+        doc = r#" `fft_alignment_lag` (requires the `transforms` feature)."#
+    )]
     ///
     /// For multi-channel audio only the first channels of both signals are
     /// correlated.

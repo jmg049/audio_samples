@@ -13,8 +13,18 @@
 //!
 //! Each struct that accepts numeric bounds exposes a `validate` method that checks
 //! invariants before the value is submitted to a processing call. Using preset
-//! constructors (e.g. [`CompressorConfig::vocal`], [`VadConfig::energy_only`]) is
-//! the quickest path to a sensible default.
+//! constructors (e.g.
+#![cfg_attr(feature = "dynamic-range", doc = r#" [`CompressorConfig::vocal`],"#)]
+#![cfg_attr(
+    not(feature = "dynamic-range"),
+    doc = r#" `CompressorConfig::vocal` with the `dynamic-range` feature,"#
+)]
+#![cfg_attr(feature = "vad", doc = r#" [`VadConfig::energy_only`])"#)]
+#![cfg_attr(
+    not(feature = "vad"),
+    doc = r#" `VadConfig::energy_only` with the `vad` feature)"#
+)]
+//! is the quickest path to a sensible default.
 //!
 //! Import the types you need from [`audio_samples::operations::types`](crate::operations::types) or via the
 //! crate-level re-export. Construct a configuration using one of the provided
@@ -72,14 +82,27 @@ impl FromStr for PadSide {
 /// analysis operations that produce one scalar result.
 ///
 /// Analysis operations that reduce a signal to one value (e.g.
-/// [`spectral_centroid`] and [`spectral_rolloff`]) take this policy, so the
+#[cfg_attr(
+    all(feature = "statistics", feature = "transforms"),
+    doc = r#" [`spectral_centroid`] and [`spectral_rolloff`]) take this policy, so the"#
+)]
+#[cfg_attr(
+    not(all(feature = "statistics", feature = "transforms")),
+    doc = r#" `spectral_centroid` and `spectral_rolloff`) take this policy, so the"#
+)]
 /// caller decides explicitly how a multi-channel signal is handled.
 ///
 /// The default is [`Error`][ChannelReduction::Error], which refuses to
 /// collapse channels silently.
 ///
-/// [`spectral_centroid`]: crate::AudioStatistics::spectral_centroid
-/// [`spectral_rolloff`]: crate::AudioStatistics::spectral_rolloff
+#[cfg_attr(
+    all(feature = "statistics", feature = "transforms"),
+    doc = r#" [`spectral_centroid`]: crate::AudioStatistics::spectral_centroid"#
+)]
+#[cfg_attr(
+    all(feature = "statistics", feature = "transforms"),
+    doc = r#" [`spectral_rolloff`]: crate::AudioStatistics::spectral_rolloff"#
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ChannelReduction {
@@ -109,7 +132,11 @@ pub enum NormalizationMethod {
     ///
     /// Good for general level adjustment and ensuring samples stay within a
     /// target amplitude bound. Requires a valid `min` and `max` in the accompanying
-    /// [`NormalizationConfig`].
+    #[cfg_attr(feature = "processing", doc = r#" [`NormalizationConfig`]."#)]
+    #[cfg_attr(
+        not(feature = "processing"),
+        doc = r#" `NormalizationConfig` (requires the `processing` feature)."#
+    )]
     #[default]
     MinMax,
 
@@ -119,7 +146,11 @@ pub enum NormalizationMethod {
     ///
     /// Preserves the dynamic shape of the signal while bringing the loudest sample
     /// to a specified level. Requires a valid `target` in the accompanying
-    /// [`NormalizationConfig`].
+    #[cfg_attr(feature = "processing", doc = r#" [`NormalizationConfig`]."#)]
+    #[cfg_attr(
+        not(feature = "processing"),
+        doc = r#" `NormalizationConfig` (requires the `processing` feature)."#
+    )]
     Peak,
 
     /// Mean normalisation - subtracts the mean so the output is centred at zero.

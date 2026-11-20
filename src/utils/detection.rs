@@ -8,8 +8,22 @@
 //! - [`detect_dynamic_range`] - peak amplitude, RMS amplitude and crest factor (peak-to-RMS ratio) in dB
 //! - [`detect_fundamental_frequency`] - autocorrelation-based fundamental frequency estimate
 //! - [`estimate_noise_floor`] - crude noise-floor proxy in dBFS: the 10th percentile of `|x|`
-//! - [`detect_sample_rate`] *(requires `transforms` feature)* - spectral-cutoff heuristic for detecting original sample rate
-//! - [`estimate_frequency_range`] *(requires `transforms` feature)* - lowest and highest frequency with significant energy
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" - [`detect_sample_rate`] *(requires `transforms` feature)* - spectral-cutoff heuristic for detecting original sample rate"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" - `detect_sample_rate` *(requires `transforms` feature)* - spectral-cutoff heuristic for detecting original sample rate"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" - [`estimate_frequency_range`] *(requires `transforms` feature)* - lowest and highest frequency with significant energy"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" - `estimate_frequency_range` *(requires `transforms` feature)* - lowest and highest frequency with significant energy"#
+)]
 //!
 //! Detecting silence, clipping, and noise floor are common pre-processing steps in audio
 //! pipelines. Centralising them avoids duplication across higher-level operations and
@@ -151,7 +165,14 @@ where
 ///
 /// For multi-channel signals, only the first channel is analysed. This function is a
 /// lightweight pitch estimator; for production pitch tracking consider the methods on
-/// [`AudioPitchAnalysis`](crate::operations::traits::AudioPitchAnalysis).
+#[cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" [`AudioPitchAnalysis`](crate::operations::traits::AudioPitchAnalysis)."#
+)]
+#[cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" `AudioPitchAnalysis` (requires the `pitch-analysis` feature)."#
+)]
 ///
 /// # Arguments
 ///

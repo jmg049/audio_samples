@@ -690,12 +690,26 @@ where
 /// * Only non-negative offsets are considered: the signal can only be delayed, so a
 ///   `signal` that lags `reference` cannot be corrected (the offset is then near 0).
 ///   Swap the arguments, or use
-///   [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag) for a signed
+#[cfg_attr(
+    all(feature = "statistics", feature = "transforms"),
+    doc = r#"   [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag) for a signed"#
+)]
+#[cfg_attr(
+    not(all(feature = "statistics", feature = "transforms")),
+    doc = r#"   `fft_alignment_lag` (requires the `statistics` and `transforms` features) for a signed"#
+)]
 ///   estimate.
 /// * Offsets `0..len/2` are searched, where `len` is the shorter signal length.
 /// * For each candidate offset, the Pearson correlation (mean-removed, normalised to
 ///   `[-1, 1]`) is computed over the overlapping region only. The cost is
-///   `O(len²)`; use [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag)
+#[cfg_attr(
+    all(feature = "statistics", feature = "transforms"),
+    doc = r#"   `O(len²)`; use [`fft_alignment_lag`](crate::operations::statistics::fft_alignment_lag)"#
+)]
+#[cfg_attr(
+    not(all(feature = "statistics", feature = "transforms")),
+    doc = r#"   `O(len²)`; use `fft_alignment_lag` (requires the `statistics` and `transforms` features)"#
+)]
 ///   for long signals.
 ///
 /// These limits are part of the public contract and constrain the class of alignments that

@@ -33,7 +33,14 @@
 //! [`GriffinLimConfig::default`] seeds its random initial phase. The spectral
 //! steps reuse the STFT of [`crate::operations::spectrum`].
 //!
-//! [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss) and
+#![cfg_attr(
+    feature = "decomposition",
+    doc = r#" [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss) and"#
+)]
+#![cfg_attr(
+    not(feature = "decomposition"),
+    doc = r#" `AudioDecomposition::hpss` (with the `decomposition` feature) and"#
+)]
 //! [`AudioEditing::trim_silence`](crate::AudioEditing::trim_silence) are separate
 //! operations with their own (different) semantics.
 //!
@@ -3882,7 +3889,14 @@ pub trait AudioEffects {
     /// [`ParameterError`] if the configuration is invalid.
     ///
     /// The STFT uses `config.stft.window`. This is a different method from
-    /// [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss), which keeps its
+    #[cfg_attr(
+        feature = "decomposition",
+        doc = r#" [`AudioDecomposition::hpss`](crate::AudioDecomposition::hpss), which keeps its"#
+    )]
+    #[cfg_attr(
+        not(feature = "decomposition"),
+        doc = r#" `AudioDecomposition::hpss` (with the `decomposition` feature), which keeps its"#
+    )]
     /// own mask and window conventions.
     ///
     /// # Examples

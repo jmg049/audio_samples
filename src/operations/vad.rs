@@ -46,7 +46,14 @@
 //! `[zcr_min, zcr_max]` corresponds to dominant frequencies between
 //! `zcr_min·f_s/2` and `zcr_max·f_s/2` Hz (the defaults 0.02-0.3 at 16 kHz
 //! are 160-2400 Hz; at 44.1 kHz, 441-6615 Hz). Note: this is a per-sample
-//! rate, unlike [`AudioStatistics::zero_crossing_rate`](crate::AudioStatistics::zero_crossing_rate),
+#![cfg_attr(
+    feature = "statistics",
+    doc = r#" rate, unlike [`AudioStatistics::zero_crossing_rate`](crate::AudioStatistics::zero_crossing_rate),"#
+)]
+#![cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" rate, unlike `AudioStatistics::zero_crossing_rate` (with the `statistics` feature),"#
+)]
 //! which returns crossings per second.
 //!
 //! **Decision** per frame ([`VadMethod`]):
