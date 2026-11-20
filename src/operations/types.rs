@@ -3616,18 +3616,19 @@ impl Default for CompressorConfig {
     }
 }
 
-/// Configuration for a sample-peak limiter.
+/// Configuration for a peak limiter.
 ///
 /// ## Purpose
 ///
 /// Specifies all parameters controlling the limiter's ceiling enforcement:
 /// the maximum output level, envelope times, knee shape, detection method,
-/// side-chain routing, lookahead, and a reserved inter-sample peak (ISP) flag.
+/// side-chain routing, lookahead, and true-peak detection.
 ///
 /// The limiter works on the smoothed detector envelope, so it is not a
 /// brick-wall limiter: the ceiling holds once the envelope has settled, and
-/// transients shorter than a few attack time constants can exceed it. Only
-/// sample peaks are measured; true (inter-sample) peaks are not.
+/// transients shorter than a few attack time constants can exceed it. With
+/// [`isp_limiting`][LimiterConfig::isp_limiting] the detector reads true
+/// (inter-sample) peaks; without it, sample peaks.
 ///
 /// ## Intended Usage
 ///
@@ -3809,7 +3810,7 @@ impl LimiterConfig {
 
     /// A preset for broadcast-style peak limiting.
     ///
-    /// Hard knee and fast attack targeting a -1.0 dBFS sample-peak ceiling. With
+    /// Hard knee and fast attack targeting a -1.0 dB true-peak ceiling. With
     /// a 0.5 ms attack the envelope sags between the peaks of low-frequency
     /// waveforms (a 1 kHz full-scale sine at 48 kHz comes out about 0.3 dB over
     /// the ceiling), so this is not a compliance-grade true-peak limiter.
