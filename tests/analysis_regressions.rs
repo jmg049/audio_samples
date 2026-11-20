@@ -139,8 +139,9 @@ fn yin_silence_is_none() {
 // ---------------------------------------------------------------------------
 
 /// A D major chord (D, F#, A plus the other D-major scale tones weighted by
-/// the Krumhansl major profile) must be estimated as D major. The old
-/// rotation `profile[(i + tonic) % 12]` mirrored keys about C (D -> A#).
+/// the Krumhansl major profile) must be estimated as D major. Rotating the
+/// profile the wrong way (`profile[(i + tonic) % 12]`) mirrors keys about C
+/// (D -> A#).
 #[test]
 fn key_d_major() {
     let sr = 22_050u32;

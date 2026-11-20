@@ -9,12 +9,12 @@
 ///   it uses a time-domain LPC analysis/synthesis that doesn't suffer from
 ///   spectral reconstruction artefacts.
 ///
-/// - **CELT** delegates to the existing [`PerceptualCodec`] pipeline (MDCT +
+/// - **CELT** delegates to the [`PerceptualCodec`] pipeline (MDCT +
 ///   psychoacoustic masking). The quality is limited by the same MDCT boundary
 ///   effect that affects [`PerceptualCodec`]: the Hanning-windowed MDCT produces
 ///   near-zero samples at the beginning and end of each frame, which caps the
-///   achievable SNR at approximately 2-3 dB for typical signals. This matches
-///   the behaviour observed in the existing `codec_quality` integration tests.
+///   achievable SNR at approximately 2-3 dB for typical signals. The
+///   `codec_quality` integration tests show the same limit.
 ///
 ///   The thresholds below therefore represent the floor that the **sketch**
 ///   implementation is expected to meet consistently, not the target for a
@@ -159,8 +159,8 @@ fn silk_white_noise() {
 // Opus frame is encoded as a single MDCT window, so the first and last ~hop
 // samples of every frame are windowed to near-zero.  This is the same
 // limitation as `PerceptualCodec` (see codec_quality.rs).  Thresholds are
-// set to 1.5 dB below the minimum actually observed during development to
-// provide a stable regression floor.
+// set 1.5 dB below the lowest measured SNR, so they catch a loss of quality
+// without failing on small numerical differences.
 
 #[test]
 fn celt_sine_440_64k() {

@@ -17,10 +17,10 @@ fn fixture() -> Value {
 }
 
 /// `AudioStatistics::autocorrelation` returns the unbiased estimate
-/// `r[k] = (1/(n-k)) sum x[j] x[j+k]`; `r[k] * (n - k)` must equal
-/// `librosa.autocorrelate`. Both are exact FFT correlations of the same data,
-/// differing only in FFT size (librosa: scipy `next_fast_len`, here a power of
-/// two) and so in round-off, measured at 7e-16 of the lag-0 value; bound 1e-12.
+/// `r[k] = (1/(n-k)) sum x[j] x[j+k]`; `r[k] * (n - k)` must equal the
+/// reference's raw sums. Both are exact FFT correlations of the same data,
+/// differing only in FFT size (a fast composite length in the reference, a
+/// power of two here) and so in round-off, measured at 7e-16 of the lag-0 value; bound 1e-12.
 #[test]
 fn autocorrelate_mix() {
     let fx = fixture();
@@ -42,12 +42,12 @@ fn autocorrelate_mix() {
 /// YIN period agreement on the confident frames of the `notes` sequence.
 ///
 /// audio_samples' `track_pitch` frames start at `512 i` (no centring), so frame
-/// `i` covers the same samples as librosa frame `i + 2`. The two also differ
+/// `i` covers the same samples as reference frame `i + 2`. The two also differ
 /// in the difference function (here the `n - tau` overlapping terms of YIN's
-/// eq. 6, librosa a zero-padded full-frame sum), which shifts the trough by a
-/// fraction of a lag. Measured: 12 frames, max difference 0.20 cents; the bound
-/// is 1 cent (5x margin for platform round-off in the interpolation), far below
-/// the 4-50 cent errors the fixed bugs produced on these notes.
+/// eq. 6, in the reference a zero-padded full-frame sum), which shifts the
+/// trough by a fraction of a lag. Measured: 12 frames, max difference 0.20
+/// cents; the bound is 1 cent (5x margin for platform round-off in the
+/// interpolation), tight enough to catch a period error of a fraction of a lag.
 #[test]
 fn yin_notes_confident_frames() {
     let fx = fixture();
@@ -75,15 +75,15 @@ fn yin_notes_confident_frames() {
         .unwrap();
     assert!(!frames.is_empty());
     let mut worst = 0.0f64;
-    for (&t, &f_lr) in frames.iter().zip(&expected) {
+    for (&t, &f_ref) in frames.iter().zip(&expected) {
         let ours = track.frames()[t - shift]
             .frequency
             .unwrap_or_else(|| panic!("frame {} unvoiced", t - shift));
-        let cents = 1200.0 * (ours / f_lr).log2();
+        let cents = 1200.0 * (ours / f_ref).log2();
         worst = worst.max(cents.abs());
         assert!(
             cents.abs() < 1.0,
-            "librosa frame {t}: ours {ours:.3} Hz vs librosa {f_lr:.3} Hz ({cents:+.2} cents)"
+            "reference frame {t}: ours {ours:.3} Hz vs reference {f_ref:.3} Hz ({cents:+.2} cents)"
         );
     }
     eprintln!(
@@ -92,7 +92,8 @@ fn yin_notes_confident_frames() {
     );
 }
 
-/// `note_to_midi` follows `librosa.note_to_midi` (rounded) exactly.
+/// `note_to_midi` agrees exactly with the reference parser (rounded to the
+/// nearest MIDI number).
 #[test]
 fn note_to_midi_names() {
     let fx = fixture();

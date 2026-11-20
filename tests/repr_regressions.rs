@@ -55,8 +55,8 @@ fn mono<T: audio_samples::StandardSample + 'static>(samples: Vec<T>) -> AudioSam
     AudioSamples::new_mono(ndarray::Array1::from_vec(samples), sample_rate!(8000)).unwrap()
 }
 
-/// Integer arithmetic saturated in neither build profile: it overflowed the sample type, which
-/// panics in a debug build and wraps in a release build.
+/// Integer arithmetic saturates in both build profiles instead of overflowing the sample
+/// type (which would panic in a debug build and wrap in a release build).
 #[test]
 fn integer_arithmetic_saturates() {
     let a = mono(vec![30000i16, -30000, 100]);

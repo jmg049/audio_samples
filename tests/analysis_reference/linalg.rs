@@ -1,7 +1,7 @@
 //! Golden-reference checks for `operations::linalg`.
 //!
 //! A vector right-hand side has a unique solution, so `nnls` is held to 1e-9 of the peak
-//! against SciPy's active-set solver. On a matrix right-hand side the reference stops
+//! against the reference active-set solver. On a matrix right-hand side the reference stops
 //! L-BFGS-B early on a problem with many solutions, so the check is that the objective
 //! is not above the reference's. Eigenvalues and singular values agree at round-off;
 //! the Gram route loses half the digits for the smallest singular vectors, whose

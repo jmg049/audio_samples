@@ -4,8 +4,7 @@
 librosa (pinned in ``pyproject.toml`` next to this file) is run on a small set of
 deterministic test signals, and its outputs are written to
 ``tests/fixtures/analysis/*.json``. The Rust tests in ``tests/analysis_reference/``
-and the Python binding tests (``audio_samples_python/tests/test_librosa_*.py``)
-compare audio_samples against them.
+and the Python bindings' tests compare audio_samples against them.
 
 Layout
 ------
@@ -47,9 +46,9 @@ from pathlib import Path
 
 # BLAS splits a matrix product into one block per thread, and the rounding of a
 # float32 product depends on those blocks. With OpenBLAS's default of one thread
-# per available CPU, the fixtures changed by up to 2e-7 relative with the CPU
-# affinity of the process (24 CPUs against 8). These must be set before NumPy
-# loads, and the child processes below inherit them.
+# per available CPU, the fixtures would depend (by up to about 2e-7 relative) on
+# how many CPUs the process may use. These must be set before NumPy loads, and
+# the child processes below inherit them.
 for _variable in (
     "OPENBLAS_NUM_THREADS",
     "OMP_NUM_THREADS",
@@ -246,8 +245,8 @@ def main() -> int:
         print(f"building {name} ...", file=sys.stderr)
         # Each case module runs in a fresh interpreter: librosa / numba /
         # scipy.fft keep process-wide caches, and building one module first
-        # was measured to perturb another (icqt) by ~2e-7, which made the
-        # fixtures depend on generation order.
+        # can perturb another (icqt) by ~2e-7, which would make the fixtures
+        # depend on generation order.
         child = subprocess.run(
             [sys.executable, str(Path(__file__).resolve()), "--emit-module", mod_name],
             capture_output=True,

@@ -46,7 +46,7 @@ fn snr_db(estimate: &[f64], reference: &[f64]) -> f64 {
     10.0 * (signal / error).log10()
 }
 
-/// 64-bit FNV-1a, which the Python test suite computes too.
+/// 64-bit FNV-1a, which the Python bindings' test suite computes too.
 fn fnv1a(bytes: impl Iterator<Item = u8>) -> u64 {
     bytes.fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -65,7 +65,7 @@ fn pcm16_digest(clip: ExampleClip) -> u64 {
 }
 
 /// Digests of 2 s of 16-bit PCM at 22050 Hz. A change here changes every user's clips, so it
-/// needs a reason, and it must also be made in the Python test suite.
+/// needs a reason, and it must also be made in the Python bindings' test suite.
 const PCM16_DIGESTS: [(ExampleClip, u64); 5] = [
     (ExampleClip::Chords, 0x4007_76df_e116_b59f),
     (ExampleClip::DrumLoop, 0x29b7_d1a7_ccad_0015),

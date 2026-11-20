@@ -1,4 +1,4 @@
-//! Shared helpers for the librosa reference tests: fixture loading, array
+//! Shared helpers for the analysis reference tests: fixture loading, array
 //! parsing and tolerance assertions with informative failure messages.
 
 use std::path::PathBuf;

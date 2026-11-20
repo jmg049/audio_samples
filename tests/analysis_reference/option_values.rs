@@ -198,7 +198,7 @@ fn onset_strength_with_slices() {
             1e-12,
         );
     }
-    // No maximum of nothing; NaN for the mean, as numpy.
+    // An empty slice has no maximum (an error) and a NaN mean.
     let empty = [Slice::new(5, Some(5), 1)];
     let cfg = onset_config(Aggregate::Max);
     assert!(onset_strength_multi_from_db_slices(s.view(), None, &cfg, &empty).is_err());

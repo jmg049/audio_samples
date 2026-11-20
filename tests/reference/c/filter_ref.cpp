@@ -459,7 +459,7 @@ void run_liquid(const Case& c, const std::vector<double>& in, Result& r) {
   //    cos(2 pi f0) = cos(pi (f1+f2)/fs) / cos(pi (f2-f1)/fs)
   //    and a prototype prewarp computed from (fc, f0) that equals
   //    tan(pi (f2-f1)/fs) (bandpass) / cot(...) (bandstop) when fc is either
-  //    band edge. We pass fc = f2/fs.
+  //    band edge. The harness passes fc = f2/fs.
   double fc, f0 = 0.0;
   if (bt == LIQUID_IIRDES_LOWPASS || bt == LIQUID_IIRDES_HIGHPASS) {
     fc = f1 / c.fs;
@@ -486,7 +486,7 @@ void run_liquid(const Case& c, const std::vector<double>& in, Result& r) {
   //    for small e (large As for cheby2); mathematically tm = 1/tp.
   //  * ellip_azpkf: float Landen recursions (ellipkf/ellipdegf/ellip_cdf)
   //    lose precision for small k1 = ep/es and for selectivity k close to 1.
-  // We call liquid's own *_azpkf with exactly the float inputs that
+  // The harness calls liquid's own *_azpkf with exactly the float inputs that
   // liquid_iirdes() uses and compare against the same prototype computed in
   // double precision; if the relative pole/zero error exceeds kTol the case
   // is flagged exact_convention=false.

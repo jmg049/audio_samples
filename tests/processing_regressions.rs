@@ -154,7 +154,7 @@ fn mu_law_i16_matches_f64() {
         .to_format::<i16>();
     let want: Vec<i32> = to_vec(&want_f).iter().map(|&v| i32::from(v)).collect();
     assert_close_i16(&got, &want, 1);
-    // Sign is preserved (it once gave -32768 for positive inputs).
+    // Sign is preserved: positive inputs stay positive (never -32768).
     assert!(
         got[0] > 0 && got[1] > 0 && got[2] < 0 && got[3] < 0,
         "{got:?}"
@@ -368,8 +368,7 @@ fn sine_matches_analytic_after_resampling() {
         assert_eq!(best_lag, 0, "{quality:?}: best lag {best_lag}");
         // Fractional residual delay from the quadrature correlation:
         // y ≈ sin(ω m − φ), delay = φ/ω output samples. The delay removed is
-        // a whole number of frames, so up to half a sample remains (before
-        // the delay fix it was ~69 / ~139 samples).
+        // a whole number of frames, so up to half a sample remains.
         let w = 2.0 * std::f64::consts::PI * f / 48000.0;
         let (mut s_acc, mut c_acc) = (0.0, 0.0);
         for (m, &ym) in y.iter().enumerate().take(hi).skip(lo) {

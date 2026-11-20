@@ -1,8 +1,7 @@
-//! librosa rejects audio containing NaN or infinity ("Audio buffer is not
-//! finite everywhere", `librosa.util.valid_audio`). The audio-level
-//! librosa-compatible operations do the same: one shared entry check returns a
-//! `ParameterError` instead of silently producing garbage (e.g. a tempo of
-//! 129.2 BPM or a trim of `(1536, 4096)` from a single NaN sample).
+//! The audio-level analysis operations reject audio containing NaN or
+//! infinity: one shared entry check returns a `ParameterError`, so a single
+//! NaN sample cannot produce a plausible-looking result (such as a tempo of
+//! 129.2 BPM or a trim of `(1536, 4096)`).
 
 use audio_samples::operations::constant_q::{ChromaCqtConfig, CqtConfig, TonnetzConfig};
 use audio_samples::operations::effects::{

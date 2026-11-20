@@ -134,7 +134,7 @@ and non-finite values are written as `null`.
   `rho = k_target · sqrtf((2N-1) ln 2)`.
 * RBJ biquads are not provided by liquid-dsp, so these cases return `ok: false`.
 
-## Known third-party defects (found while building this)
+## Known third-party defects
 
 * **DSPFilters `BiquadBase::setOnePole`.** It writes the first-order numerator
   as `-z0 + z^-1` instead of `1 - z0 z^-1`. For the zero at z = +1 of an

@@ -255,10 +255,9 @@ fn dynamic_range_known_small_vector() {
 
 #[test]
 fn detect_fundamental_on_known_tone() {
-    // detect_fundamental_frequency uses autocorrelation, which on a pure sine
-    // can lock onto a subharmonic (the crate's own tests accept this), so we
-    // assert it finds *something* and that it's the fundamental or a low-order
-    // subharmonic of 440 Hz.
+    // detect_fundamental_frequency uses autocorrelation, which on a short pure
+    // sine can lock onto a subharmonic, so this accepts the fundamental or a
+    // low-order subharmonic of 440 Hz.
     let audio = sine_f64(440.0, 1000, 1.0);
     let detected = detect_fundamental_frequency(&audio).unwrap();
     assert!(detected.is_some(), "no fundamental found for 440 Hz tone");

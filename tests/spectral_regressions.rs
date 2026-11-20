@@ -16,7 +16,7 @@ use spectrograms::{SpectrogramParams, StftParams, WindowType};
 
 /// Deterministic uniform noise in [-1, 1): 64-bit LCG (Knuth MMIX constants),
 /// top 53 bits of the state. Reproduced bit-for-bit in Python to generate the
-/// SciPy reference values below.
+/// reference values below.
 fn lcg_noise(n: usize) -> Vec<f64> {
     let mut state: u64 = 0x2545_F491_4F6C_DD1D;
     (0..n)
@@ -45,11 +45,11 @@ fn rel_err(a: f64, b: f64) -> f64 {
 ///
 /// for N = 256 (noverlap 128) and N = 255 (hop floor(0.5·255) = 127, noverlap 128).
 #[test]
-fn psd_matches_scipy_welch_density() {
+fn psd_matches_welch_density_reference() {
     let x = lcg_noise(8192);
     let audio = AudioSamples::new_mono(Array1::from(x), sample_rate!(1000)).unwrap();
 
-    // (window_size, [(bin, scipy density)], scipy ∫P df)
+    // (window_size, [(bin, reference density)], reference ∫P df)
     type Case = (usize, [(usize, f64); 4], f64);
     let cases: [Case; 2] = [
         (
@@ -83,14 +83,14 @@ fn psd_matches_scipy_welch_density() {
             let got = psd.density()[k];
             assert!(
                 rel_err(got, want) < 1e-9,
-                "N={n} bin {k}: got {got:e}, scipy {want:e}"
+                "N={n} bin {k}: got {got:e}, reference {want:e}"
             );
         }
         let df = 1000.0 / n as f64;
         let got_integral: f64 = psd.density().iter().sum::<f64>() * df;
         assert!(
             rel_err(got_integral, integral) < 1e-9,
-            "N={n}: integral {got_integral} vs scipy {integral}"
+            "N={n}: integral {got_integral} vs reference {integral}"
         );
     }
 }
@@ -119,10 +119,10 @@ fn psd_rejects_single_sample_window() {
 
 // ── Integer input: spectrogram methods use audio-aware scaling like `stft` ────
 
-/// `linear_power_spectrogram` (and the other spectrogram methods) used a raw numeric
-/// cast, so an `i16` signal gave values 32768² times larger than `stft` of the same
-/// signal (and `u8` input gained a huge DC component). All spectral methods now use
-/// the same audio-aware conversion to [-1, 1].
+/// `linear_power_spectrogram` and the other spectrogram methods convert integer samples
+/// to [-1, 1] with the same audio-aware conversion as `stft`. A raw numeric cast would
+/// make an `i16` signal 32768² times larger than `stft` of the same signal, and give
+/// `u8` input a large DC component.
 #[test]
 fn integer_input_spectrogram_matches_stft_power() {
     let x: Vec<i16> = lcg_noise(4096)

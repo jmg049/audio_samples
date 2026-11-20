@@ -38,7 +38,7 @@ fn noise(n: usize, seed: u64) -> Vec<f64> {
         .collect()
 }
 
-// the autocorrelation was divided by the FFT size twice.
+// The autocorrelation is normalised once, by the number of overlapping terms.
 #[test]
 fn autocorrelation_is_unbiased_estimate() {
     let audio = AudioSamples::new_mono(array![1.0f64, 2.0, 3.0, 4.0], sample_rate!(8000)).unwrap();
@@ -59,7 +59,7 @@ fn autocorrelation_is_unbiased_estimate() {
     );
 }
 
-// cross-correlation accumulated in the sample type (i16 overflow).
+// Cross-correlation accumulates in f64, so i16 input cannot overflow.
 #[test]
 fn cross_correlation_i16_accumulates_in_f64() {
     let x: Vec<i16> = sine(440.0, 16000.0, 16000, 0.5 * 32767.0)
@@ -88,7 +88,7 @@ fn cross_correlation_i16_accumulates_in_f64() {
     assert_eq!(argmax, 7);
 }
 
-// mean/variance summed in the sample type (overflow, panic).
+// Mean and variance accumulate in f64, so integer input cannot overflow.
 #[test]
 fn mean_and_variance_do_not_overflow_integer_types() {
     let audio =
@@ -104,7 +104,7 @@ fn mean_and_variance_do_not_overflow_integer_types() {
     assert_eq!(audio.mean(), 30000.0);
 }
 
-// DC removal on i16 used the overflowed mean.
+// DC removal on i16 subtracts the exact mean of a constant signal.
 #[test]
 fn remove_dc_offset_i16_constant_gives_zero() {
     let mut audio =
@@ -115,7 +115,8 @@ fn remove_dc_offset_i16_constant_gives_zero() {
     }
 }
 
-// multi-channel variance was the inter-channel spread (0 for L = R).
+// Multi-channel variance is taken over all samples, not across channels
+// (which would give 0 for L = R).
 #[test]
 fn variance_multichannel_is_population_variance_of_all_samples() {
     let x = sine(440.0, 16000.0, 16000, 0.5);
@@ -144,7 +145,7 @@ fn zero_crossings_u8_counted_about_mid_scale() {
     assert!((audio.zero_crossing_rate() - zc as f64).abs() < 1e-9);
 }
 
-// pin the documented sign convention of fft_alignment_lag.
+// The documented sign convention of fft_alignment_lag.
 #[test]
 fn fft_alignment_lag_sign_convention() {
     let reference = noise(1000, 3);
@@ -158,7 +159,7 @@ fn fft_alignment_lag_sign_convention() {
     assert_eq!(fft_alignment_lag(&q, &r, 100), Some(25));
 }
 
-// bin frequency must be k * fs / N, also for odd N.
+// Bin frequency is k * fs / N, also for odd N.
 #[test]
 fn spectral_frequencies_exact_for_odd_length() {
     for &n in &[9usize, 15, 101] {
@@ -179,7 +180,7 @@ fn spectral_frequencies_exact_for_odd_length() {
     }
 }
 
-// align_signals never applied a lag between the two signals.
+// align_signals finds and applies the delay between the two signals.
 #[test]
 fn align_signals_finds_delay() {
     let signal = noise(2000, 11);
@@ -194,7 +195,8 @@ fn align_signals_finds_delay() {
     }
 }
 
-// sub-harmonic picks and amplitude-dependent `None`.
+// Pure sines are estimated within 1 % of their frequency (not a sub-harmonic)
+// at low and high amplitude.
 #[test]
 fn fundamental_frequency_sines_within_one_percent() {
     for &f in &[440.0, 220.0] {
@@ -212,7 +214,7 @@ fn fundamental_frequency_sines_within_one_percent() {
     }
 }
 
-// candidate Nyquist frequencies were mapped to half their bin.
+// Candidate Nyquist frequencies map to the bin at that frequency.
 #[test]
 fn spectrum_cutoff_maps_frequency_to_correct_bin() {
     let len = 4097; // n_fft = 8192, nyquist 8 kHz (fs = 16 kHz)
@@ -235,8 +237,7 @@ fn spectrum_cutoff_maps_frequency_to_correct_bin() {
     assert_eq!(r, None);
 }
 
-// detect_sample_rate documented Ok(None) when nothing is found but
-// returned Err.
+// detect_sample_rate returns Ok(None), as documented, when it finds no cutoff.
 #[test]
 fn detect_sample_rate_returns_none_without_cutoff() {
     let x = noise(8192, 5);

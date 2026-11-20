@@ -1,20 +1,20 @@
 //! Golden-reference tests for the filter implementations.
 //!
 //! The fixtures in `tests/fixtures/filters/` are produced by
-//! `tests/reference/generate_filter_fixtures.py` from long-standing reference
-//! implementations - SciPy `scipy.signal`, FFmpeg `af_biquads`, and (when the
-//! C/C++ harness is built) DSPFilters and liquid-dsp - and are cross-checked
-//! against each other before being written. These tests require audio_samples
-//! to reproduce them:
+//! `tests/reference/generate_filter_fixtures.py` from several independent
+//! reference implementations (listed in `tests/reference/README.md`), which are
+//! cross-checked against each other before being written. These tests require
+//! audio_samples to reproduce them:
 //!
-//! - IIR designs: SOS coefficients equal SciPy's (same section pairing and
-//!   ordering) and the complex frequency response matches; magnitude responses
-//!   also match the independent C/C++ designs where those use the same
-//!   parameter conventions.
-//! - Filtering: `apply_iir_filter` ≡ `sosfilt`, `filtfilt` ≡ `sosfiltfilt`,
-//!   streaming `SosFilter` ≡ `sosfilt`.
-//! - Parametric EQ: RBJ cookbook coefficients and `lfilter` output (which FFmpeg
-//!   reproduces to < 1e-9).
+//! - IIR designs: SOS coefficients equal the reference's (same section pairing
+//!   and ordering) and the complex frequency response agrees; magnitude
+//!   responses also agree with the independent C/C++ designs where those use
+//!   the same parameter conventions.
+//! - Filtering: `apply_iir_filter` and streaming `SosFilter` equal the
+//!   reference cascade of second-order sections, and `filtfilt` its zero-phase
+//!   forward-backward version.
+//! - Parametric EQ: RBJ cookbook coefficients and the filtered output (which a
+//!   second implementation reproduces to < 1e-9).
 //! - Simple first-order filters, FIR convolution and short-signal `filtfilt`.
 //!
 //! Regenerate the fixtures with
@@ -180,8 +180,8 @@ fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
 
 /// Coefficient tolerance relative to the largest coefficient of the row.
 ///
-/// The design pipeline mirrors SciPy's operation order (including the
-/// `zpk2sos` pairing), so coefficients agree to a few ULPs.
+/// The design pipeline follows the reference's operation order (including the
+/// pole-zero pairing into sections), so coefficients agree to a few ULPs.
 fn coeff_tol(_case: &Value) -> f64 {
     // Observed worst case is ~4e-12 (order-24 elliptic); allow headroom for
     // libm differences between platforms.
@@ -189,7 +189,7 @@ fn coeff_tol(_case: &Value) -> f64 {
 }
 
 #[test]
-fn iir_designs_match_scipy() {
+fn iir_designs_match_reference() {
     let fixtures = load("iir_designs.json");
     let cases = fixtures["cases"].as_array().unwrap();
     assert!(cases.len() > 500, "fixture unexpectedly small");
@@ -214,7 +214,7 @@ fn iir_designs_match_scipy() {
         // 1. Coefficients (section count, order and values).
         if got.len() != expected.len() {
             failures.push(format!(
-                "{id}: {} sections, SciPy has {}",
+                "{id}: {} sections, reference has {}",
                 got.len(),
                 expected.len()
             ));
@@ -230,7 +230,7 @@ fn iir_designs_match_scipy() {
                 }
                 if rel > tol {
                     failures.push(format!(
-                        "{id}: section {si} coeff {k}: {} vs SciPy {} (rel {rel:.2e} > {tol:.0e})",
+                        "{id}: section {si} coeff {k}: {} vs reference {} (rel {rel:.2e} > {tol:.0e})",
                         g[k], e[k]
                     ));
                 }
@@ -255,7 +255,7 @@ fn iir_designs_match_scipy() {
             }
             if err > 1e-9 {
                 failures.push(format!(
-                    "{id}: H({} Hz) = {hk} vs SciPy {e} (err {err:.2e})",
+                    "{id}: H({} Hz) = {hk} vs reference {e} (err {err:.2e})",
                     freqs[k]
                 ));
             }
@@ -265,8 +265,8 @@ fn iir_designs_match_scipy() {
         if let Some(refs) = case.get("cross_refs").and_then(Value::as_object) {
             for (lib, r) in refs {
                 // Tolerances recorded by the generator from each library's
-                // precision (DSPFilters: double; liquid-dsp: float32), plus a
-                // small margin for audio_samples' own (~1e-12) deviation.
+                // precision (double or float32), plus a small margin for
+                // audio_samples' own (~1e-12) deviation.
                 let tol_db = r["tol_db"].as_f64().unwrap() + 1e-9;
                 let floor_db = r["floor_db"].as_f64().unwrap();
                 n_cross += 1;
@@ -353,7 +353,7 @@ fn iir_family_shapes_match_textbook() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn iir_filtering_matches_sosfilt_and_sosfiltfilt() {
+fn iir_filtering_matches_reference() {
     let fixtures = load("iir_time_domain.json");
     let mix_full = f64s(&fixtures["signals"]["mix"]);
     let impulse_full = f64s(&fixtures["signals"]["impulse"]);
@@ -384,29 +384,29 @@ fn iir_filtering_matches_sosfilt_and_sosfiltfilt() {
         let imp = &impulse_full[..want_imp.len()];
         let scale = want_mix.iter().fold(1.0f64, |m, v| m.max(v.abs()));
 
-        // apply_iir_filter == sosfilt
+        // apply_iir_filter equals the reference cascade.
         let mut a = mono_f64(mix, fs);
         a.apply_iir_filter_in_place(&design).unwrap();
         let e = max_abs_diff(a.as_slice().unwrap(), &want_mix) / scale;
         note(0, e, id);
         if e > 2e-10 {
-            failures.push(format!("{id}: apply_iir_filter vs sosfilt: {e:.2e}"));
+            failures.push(format!("{id}: apply_iir_filter vs reference: {e:.2e}"));
         }
         let mut a = mono_f64(imp, fs);
         a.apply_iir_filter_in_place(&design).unwrap();
         let e = max_abs_diff(a.as_slice().unwrap(), &want_imp);
         if e > 2e-10 {
-            failures.push(format!("{id}: impulse response vs sosfilt: {e:.2e}"));
+            failures.push(format!("{id}: impulse response vs reference: {e:.2e}"));
         }
 
-        // filtfilt == sosfiltfilt
+        // filtfilt equals the reference forward-backward filter.
         let mut a = mono_f64(mix, fs);
         a.filtfilt_in_place(&design).unwrap();
         let ff_scale = want_ff.iter().fold(1.0f64, |m, v| m.max(v.abs()));
         let e = max_abs_diff(a.as_slice().unwrap(), &want_ff) / ff_scale;
         note(1, e, id);
         if e > 1e-9 {
-            failures.push(format!("{id}: filtfilt vs sosfiltfilt: {e:.2e}"));
+            failures.push(format!("{id}: filtfilt vs reference: {e:.2e}"));
         }
 
         // Streaming SosFilter (direct form I sections), fed in uneven blocks.
@@ -418,7 +418,7 @@ fn iir_filtering_matches_sosfilt_and_sosfiltfilt() {
         let e = max_abs_diff(&buf, &want_mix) / scale;
         note(2, e, id);
         if e > 1e-9 {
-            failures.push(format!("{id}: streaming SosFilter vs sosfilt: {e:.2e}"));
+            failures.push(format!("{id}: streaming SosFilter vs reference: {e:.2e}"));
         }
 
         // f32 audio path: same filter, single-precision samples.
@@ -440,11 +440,11 @@ fn iir_filtering_matches_sosfilt_and_sosfiltfilt() {
         // Input quantisation to f32 (~6e-8) amplified by the filter's noise
         // gain; narrow / near-DC designs have large gain, hence the margin.
         if e > 5e-4 {
-            failures.push(format!("{id}: f32 path vs sosfilt: {e:.2e}"));
+            failures.push(format!("{id}: f32 path vs reference: {e:.2e}"));
         }
     }
     println!(
-        "time domain: sosfilt {:.2e} ({}); sosfiltfilt {:.2e} ({}); streaming {:.2e} ({}); f32 {:.2e} ({})",
+        "time domain: single pass {:.2e} ({}); forward-backward {:.2e} ({}); streaming {:.2e} ({}); f32 {:.2e} ({})",
         worst[0].0,
         worst[0].1,
         worst[1].0,
@@ -510,7 +510,7 @@ fn eq_band(case: &Value) -> EqBand {
 }
 
 #[test]
-fn parametric_eq_matches_rbj_cookbook_and_ffmpeg() {
+fn parametric_eq_matches_rbj_cookbook_reference() {
     let fixtures = load("rbj_biquads.json");
     let mix = f64s(&fixtures["signals"]["mix"]);
     let cases = fixtures["cases"].as_array().unwrap();
@@ -530,7 +530,7 @@ fn parametric_eq_matches_rbj_cookbook_and_ffmpeg() {
                 .unwrap()
                 .iter()
                 .any(|r| r == "ffmpeg"),
-            "{id}: fixture lacks FFmpeg confirmation"
+            "{id}: fixture lacks confirmation from a second implementation"
         );
 
         // Frequency response vs the cookbook coefficients.
@@ -558,7 +558,8 @@ fn parametric_eq_matches_rbj_cookbook_and_ffmpeg() {
             }
         }
 
-        // Time domain vs scipy.lfilter (== FFmpeg to < 1e-9).
+        // Time domain vs the reference output (confirmed by a second
+        // implementation to < 1e-9).
         if let Some(want_y) = case.get("lfilter_mix") {
             let want_y = f64s(want_y);
             let mut a = mono_f64(&mix[..want_y.len()], fs);
@@ -568,7 +569,7 @@ fn parametric_eq_matches_rbj_cookbook_and_ffmpeg() {
             worst_td = worst_td.max(e);
             checked_td += 1;
             if e > 1e-11 {
-                failures.push(format!("{id}: apply_eq_band vs lfilter: {e:.2e}"));
+                failures.push(format!("{id}: apply_eq_band vs reference: {e:.2e}"));
             }
         }
     }
@@ -688,7 +689,7 @@ fn simple_filters_work_on_integer_samples() {
 }
 
 #[test]
-fn fir_apply_filter_is_numpy_convolve_valid() {
+fn fir_apply_filter_is_valid_mode_convolution() {
     let fixtures = load("misc_filters.json");
     let mix = f64s(&fixtures["signals"]["mix"]);
     for case in fixtures["fir"].as_array().unwrap() {
@@ -704,7 +705,7 @@ fn fir_apply_filter_is_numpy_convolve_valid() {
 }
 
 #[test]
-fn filtfilt_short_signals_match_sosfiltfilt_with_clamped_padlen() {
+fn filtfilt_short_signals_match_reference_with_clamped_padlen() {
     let fixtures = load("misc_filters.json");
     let mix = f64s(&fixtures["signals"]["mix"]);
     let design = IirFilterDesign::butterworth_lowpass(nz(4), 1000.0);
@@ -719,7 +720,7 @@ fn filtfilt_short_signals_match_sosfiltfilt_with_clamped_padlen() {
 }
 
 #[test]
-fn sos_coefficients_round_trip_through_scipy_layout() {
+fn sos_coefficients_round_trip_through_six_column_layout() {
     let design = IirFilterDesign::elliptic(FilterResponse::BandPass, nz(1), 1.0, 1.0, 40.0);
     // A band design given through the single-edge constructor is rejected.
     assert!(design.sos_coefficients(48000.0).is_err());
@@ -764,7 +765,7 @@ fn i16_filtering_matches_f64_reference_without_bias() {
         .map(|&v| (v * 0.9 * 32767.0).round() as i16)
         .collect();
     // f64 reference on the dequantised input (the f64 path is checked against
-    // scipy elsewhere), then requantised by the documented rule.
+    // the fixtures above), then requantised by the documented rule.
     let xf: Vec<f64> = x
         .iter()
         .map(|&v| {
@@ -821,7 +822,7 @@ fn degenerate_designs_error_instead_of_panicking_or_nan() {
         assert!(a.apply_iir_filter_in_place(&d).is_err());
     }
     // Edges within 1e-5 of Nyquist give finite designs with unit passband
-    // gain (no overflow to zero / NaN output); SciPy designs these too.
+    // gain (no overflow to zero / NaN output).
     let d = IirFilterDesign::butterworth_lowpass(nz(24), 23999.99);
     let (m, _) = d.frequency_response(&[0.0, 1000.0], 48000.0).unwrap();
     assert!((m[0] - 1.0).abs() < 1e-9 && (m[1] - 1.0).abs() < 1e-9);

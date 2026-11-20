@@ -182,7 +182,7 @@ fn limiter_settles_at_ceiling_for_constant_level() {
 
 /// A 0 dBFS, 1 kHz sine through the `transparent` and `mastering` presets
 /// comes out at or below the ceiling after the attack transient (sample
-/// peaks). An earlier follower bug made all presets output 0.00 dBFS.
+/// peaks), and not pinned at 0.00 dBFS by a stuck envelope follower.
 #[test]
 fn limiter_presets_hold_ceiling_for_full_scale_sine() {
     for (name, cfg) in [

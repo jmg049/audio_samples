@@ -2,16 +2,16 @@
 //!
 //! Every operation that returns audio gives back the input's sample type. For
 //! integer types the work is done in `f64` and the result is converted back
-//! with rounding and saturation. These tests check, for each operation fixed
-//! for this rule, that the `i16` (and where relevant `I24`, `i32`, `u8`)
-//! result
+//! with rounding and saturation. These tests check, for each such operation,
+//! that the `i16` (and where relevant `I24`, `i32`, `u8`) result
 //!
 //! - has the input's sample type,
 //! - matches the same operation run on the `f64` version of the audio and
 //!   re-quantised with `to_format::<i16>()` to within 1 LSB, and
 //! - rounds to nearest instead of truncating (exact values on small inputs).
 //!
-//! Float results are checked against the 2.0 formulas bit for bit.
+//! Float results are checked bit for bit against the operation's `f64` formula
+//! cast to the sample type.
 //!
 //! Run with:
 //! ```bash
@@ -109,7 +109,7 @@ macro_rules! assert_close_all_int_types {
 }
 
 // ---------------------------------------------------------------------------
-// B1: apply_window_f64
+// apply_window_f64
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -157,13 +157,13 @@ fn apply_window_f64_equals_deprecated_window_for_floats() {
     let w32: Vec<f32> = (0..128).map(|i| (i as f32 / 127.0).sqrt()).collect();
     let w64: Vec<f64> = w32.iter().map(|&w| f64::from(w)).collect();
     let audio = AudioSamples::new_mono(x, sample_rate!(8000)).unwrap();
-    let old = audio
+    let typed = audio
         .apply_window(NonEmptySlice::new(&w32).unwrap())
         .unwrap();
-    let new = audio
+    let wide = audio
         .apply_window_f64(NonEmptySlice::new(&w64).unwrap())
         .unwrap();
-    assert_eq!(old.as_vec(), new.as_vec());
+    assert_eq!(typed.as_vec(), wide.as_vec());
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn apply_window_f64_rejects_wrong_length() {
 }
 
 // ---------------------------------------------------------------------------
-// B2: apply_filter_f64
+// apply_filter_f64
 // ---------------------------------------------------------------------------
 
 fn lowpass_taps(m: usize) -> Vec<f64> {
@@ -230,24 +230,24 @@ fn apply_filter_f64_equals_apply_filter_for_floats() {
     for m in [7usize, 200] {
         let h32: Vec<f32> = lowpass_taps(m).iter().map(|&c| c as f32).collect();
         let h64: Vec<f64> = h32.iter().map(|&c| f64::from(c)).collect();
-        let old = audio
+        let typed = audio
             .apply_filter(NonEmptySlice::new(&h32).unwrap())
             .unwrap();
-        let new = audio
+        let wide = audio
             .apply_filter_f64(NonEmptySlice::new(&h64).unwrap())
             .unwrap();
-        assert_eq!(old.as_vec(), new.as_vec(), "{m} taps");
+        assert_eq!(typed.as_vec(), wide.as_vec(), "{m} taps");
     }
 }
 
 // ---------------------------------------------------------------------------
-// B3: normalize Mean / Median / ZScore, remove_dc_offset
+// normalize Mean / Median / ZScore, remove_dc_offset
 // ---------------------------------------------------------------------------
 
 #[test]
 fn normalize_mean_rounds_integer_results() {
     let a = AudioSamples::new_mono(array![1i16, 2, 4], sample_rate!(8000)).unwrap();
-    // mean 7/3: diffs -1.33, -0.33, 1.67 (2.0 truncated the last to 1)
+    // mean 7/3: diffs -1.33, -0.33, 1.67 (truncation would give 1 for the last)
     assert_eq!(
         a.normalize(NormalizationConfig::mean()).unwrap().as_vec(),
         vec![-1, 0, 2]
@@ -258,7 +258,7 @@ fn normalize_mean_rounds_integer_results() {
 fn normalize_median_rounds_integer_results() {
     let a = AudioSamples::new_mono(array![1i16, 2, 5, 8], sample_rate!(8000)).unwrap();
     // median 3.5: diffs -2.5, -1.5, 1.5, 4.5, rounded half away from zero
-    // (2.0 truncated them to -2, -1, 1, 4)
+    // (truncation would give -2, -1, 1, 4)
     assert_eq!(
         a.normalize(NormalizationConfig::median()).unwrap().as_vec(),
         vec![-3, -2, 2, 5]
@@ -334,7 +334,7 @@ fn normalize_zscore_rejects_integer_types() {
 }
 
 #[test]
-fn normalize_float_results_unchanged() {
+fn normalize_float_results_are_exact_f64_formula() {
     let x = test_signal_f32(97);
     let a = AudioSamples::new_mono(x.clone(), sample_rate!(8000)).unwrap();
     let mean = x.iter().map(|&v| f64::from(v)).sum::<f64>() / x.len() as f64;
@@ -347,25 +347,25 @@ fn normalize_float_results_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
-// B4: channel operations
+// channel operations
 // ---------------------------------------------------------------------------
 
 #[test]
-fn to_mono_rounds_and_weighted_center_are_not_zero() {
+fn to_mono_average_center_and_weighted_round_to_nearest() {
     let st = AudioSamples::new_multi_channel(
         array![[1i16, 16384, -3, 1001], [2, 16384, -4, 1002]],
         sample_rate!(8000),
     )
     .unwrap();
-    // (1+2)/2 = 1.5 -> 2, (-3-4)/2 = -3.5 -> -4 (2.0 truncated to 1 and -3)
+    // (1+2)/2 = 1.5 -> 2, (-3-4)/2 = -3.5 -> -4 (truncation would give 1 and -3)
     let avg = st.to_mono(MonoConversionMethod::Average).unwrap().as_vec();
     assert_eq!(avg, vec![2, 16384, -4, 1002]);
-    // Center of a stereo pair is the average (2.0 returned all zeros here).
+    // Center of a stereo pair is the average.
     assert_eq!(
         st.to_mono(MonoConversionMethod::Center).unwrap().as_vec(),
         avg
     );
-    // Weighted with [0.5, 0.5] is the average (2.0 returned all zeros here).
+    // Weighted with [0.5, 0.5] is the average.
     let weighted = st
         .to_mono(MonoConversionMethod::Weighted(vec![0.5, 0.5]))
         .unwrap()
@@ -427,7 +427,7 @@ fn pan_and_balance_round_and_saturate() {
     )
     .unwrap();
     // pan(0.7): left gain 0.3, right gain 1.7.
-    // 1003·0.3 = 300.9 -> 301 (2.0: 300); 1003·1.7 = 1705.1 -> 1705;
+    // 1003·0.3 = 300.9 -> 301 (not truncated to 300); 1003·1.7 = 1705.1 -> 1705;
     // 20000·1.7 and −32768·1.7 saturate.
     let p = st.pan(0.7).unwrap();
     assert_eq!(p.as_vec(), vec![301, 9830, -9830, 1705, 32767, -32768]);
@@ -441,7 +441,7 @@ fn balance_i24_saturates_instead_of_wrapping() {
         sample_rate!(8000),
     )
     .unwrap();
-    // Right gain 2: 2.0 wrapped to I24::MIN.
+    // Right gain 2: saturates at I24::MAX rather than wrapping to I24::MIN.
     let out = st.balance(1.0).unwrap().as_vec();
     assert_eq!(
         out,
@@ -460,7 +460,7 @@ fn balance_u8_scales_around_mid_scale() {
         .unwrap();
     // Left gain 0.5: 200 is +72 from 128 -> +36 = 164; 128 stays 128.
     // Right gain 1.5: +72 -> +108 = 236; 60 is −68 -> −102 = 26.
-    // (2.0 scaled the raw codes: 100, 64, 255, 90.)
+    // (Scaling the raw codes would give 100, 64, 255, 90.)
     assert_eq!(st.balance(0.5).unwrap().as_vec(), vec![164, 128, 236, 26]);
 }
 
@@ -476,7 +476,7 @@ fn pan_matches_f64_path() {
 #[test]
 fn to_stereo_pan_rounds() {
     let m = AudioSamples::new_mono(array![7i16, 10000, -10000], sample_rate!(8000)).unwrap();
-    // gain cos(π/4) = 0.70711: 7 -> 4.95 -> 5 (2.0: 4)
+    // gain cos(π/4) = 0.70711: 7 -> 4.95 -> 5 (not truncated to 4)
     let out = m
         .to_stereo(StereoConversionMethod::Pan(0.0))
         .unwrap()
@@ -491,7 +491,7 @@ fn to_stereo_pan_rounds() {
 }
 
 #[test]
-fn channel_ops_float_results_unchanged() {
+fn channel_ops_float_results_are_exact_f64_formula() {
     let x = test_signal_f32(64);
     let y = test_signal_f32(65).slice(ndarray::s![1..]).to_owned();
     let mut m = Array2::<f32>::zeros((2, 64));

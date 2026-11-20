@@ -1,7 +1,7 @@
 [project]
 name = "audio-samples-librosa-reference"
 version = "0.1.0"
-description = "Golden-fixture generator for the audio_samples librosa-parity test suite"
+description = "Golden-fixture generator for the audio_samples analysis test suite"
 requires-python = ">=3.12"
 # Exact pins: `*.lock` is gitignored in this repository, so the versions that
 # produced the committed fixtures are pinned here.
